@@ -30,6 +30,7 @@ func provisionTestRepo(t *testing.T) string {
 	gitT(t, work, "add", "README.md")
 	gitT(t, work, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-m", "initial")
 	gitT(t, work, "push", "origin", "main")
+	provision.AllowLocalCloneFixture(t, bare)
 	return bare
 }
 

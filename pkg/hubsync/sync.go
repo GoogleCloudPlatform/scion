@@ -332,7 +332,7 @@ func notConfiguredError(projectPath string, isGlobal bool) error {
 func ProjectLinkedSetting(projectPath string, isGlobal bool) *bool {
 	var linked *bool
 	for _, dir := range projectSettingsDirs(projectPath, isGlobal) {
-		own, err := config.LoadSettingsFromDir(dir)
+		own, err := loadOwnSettings(dir, isGlobal)
 		if err != nil || own == nil || own.Hub == nil || own.Hub.Linked == nil {
 			continue
 		}
@@ -805,7 +805,7 @@ func projectSettingsDirs(projectPath string, isGlobal bool) []string {
 func StaleModeKeys(projectPath string, isGlobal bool) []string {
 	var enabled, localOnly *bool
 	for _, dir := range projectSettingsDirs(projectPath, isGlobal) {
-		own, err := config.LoadSettingsFromDir(dir)
+		own, err := loadOwnSettings(dir, isGlobal)
 		if err != nil || own == nil || own.Hub == nil {
 			continue
 		}
@@ -2321,4 +2321,14 @@ func resolveHubGlobalProjectID(ctx context.Context, client hubclient.Client, end
 			"Ask a hub admin to create it or grant access, or pass --project <slug|id> to target another hub project", hubGlobalProjectSlug, config.RedactURL(endpoint))
 	}
 	return resp.Projects[0].ID, nil
+}
+
+// loadOwnSettings loads one of projectSettingsDirs' directories: the global
+// directory as the user's own (links allowed), a project directory as a
+// project settings layer (config.LoadProjectSettingsFromDir).
+func loadOwnSettings(dir string, isGlobal bool) (*config.Settings, error) {
+	if isGlobal {
+		return config.LoadSettingsFromDir(dir)
+	}
+	return config.LoadProjectSettingsFromDir(dir)
 }

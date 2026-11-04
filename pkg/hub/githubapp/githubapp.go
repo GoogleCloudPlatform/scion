@@ -331,6 +331,16 @@ func (c *Client) MintInstallationToken(ctx context.Context, installationID int64
 		permMap["actions"] = perms.Actions
 	}
 
+	// A request without permissions gets every permission the installation
+	// has. Callers always name the permissions they need; refuse rather
+	// than send an empty set.
+	if len(permMap) == 0 {
+		return nil, &TokenMintError{
+			ErrorCode: ErrCodeTokenMintFailed,
+			Message:   "refusing to request an installation token without explicit permissions",
+		}
+	}
+
 	reqBody := accessTokenRequest{
 		Repositories: repos,
 		Permissions:  permMap,

@@ -152,6 +152,64 @@ type GitHubAppTokenMinter interface {
 	// Returns the token, expiry (ISO 8601 string), and any error.
 	// If the project has no installation or the app is not configured, returns ("", "", nil).
 	MintGitHubAppTokenForProject(ctx context.Context, project *store.Project) (token string, expiry string, err error)
+
+	// AuthorizeGitHubTokenSourceProject decides whether agent may receive a
+	// token minted with sourceProject's installation (the
+	// scion.dev/github-token-source-project label). It returns nil only when
+	// the agent's authoritative source user may create agents in
+	// sourceProject, i.e. could already get that token by starting an agent
+	// there directly. Any error refuses.
+	AuthorizeGitHubTokenSourceProject(ctx context.Context, agent *store.Agent, sourceProject *store.Project) error
+}
+
+// githubTokenSourceProjectLabel names another project whose GitHub App
+// installation an agent's token is minted from when its own project has
+// none (e.g. template-sync agents loading from an external repo).
+const githubTokenSourceProjectLabel = "scion.dev/github-token-source-project"
+
+// resolveGitHubMintProject returns the project whose GitHub App
+// installation mints agent's token: the agent's own project when it has an
+// installation; otherwise the project named by githubTokenSourceProjectLabel,
+// but only when minter authorizes that source for this agent. It returns nil
+// when there is nothing to mint with. The label is free-form agent input, so
+// an unauthorized source is ignored (fail closed) and logged. Whichever
+// project is returned, MintGitHubAppTokenForProject still re-verifies that
+// project's own installation association before minting.
+//
+// Every token delivery leg that starts from an agent resolves its source
+// here: agent create, the start/restart token step, and the
+// agent token-refresh endpoint. A refresh therefore names exactly the
+// project a create would, and never more.
+func resolveGitHubMintProject(ctx context.Context, st store.Store, minter GitHubAppTokenMinter, log *slog.Logger, agent *store.Agent, project *store.Project) *store.Project {
+	if agent == nil || project == nil || minter == nil {
+		return nil
+	}
+	if project.GitHubInstallationID != nil {
+		return project
+	}
+	sourceProjectID := agent.Labels[githubTokenSourceProjectLabel]
+	if sourceProjectID == "" {
+		return nil
+	}
+	source, err := st.GetProject(ctx, sourceProjectID)
+	if err != nil || source == nil || source.GitHubInstallationID == nil {
+		return nil
+	}
+	if err := minter.AuthorizeGitHubTokenSourceProject(ctx, agent, source); err != nil {
+		log.Warn("ignoring GitHub token source project label: agent's source user may not start agents in that project",
+			"agent_id", agent.ID, "project_id", agent.ProjectID, "source_project_id", sourceProjectID, "error", err)
+		return nil
+	}
+	log.Debug("using source project for GitHub App token",
+		"agent_id", agent.ID, "source_project_id", sourceProjectID,
+		"installation_id", *source.GitHubInstallationID)
+	return source
+}
+
+// githubMintProject is resolveGitHubMintProject with the dispatcher's store,
+// minter and logger.
+func (d *HTTPAgentDispatcher) githubMintProject(ctx context.Context, agent *store.Agent, project *store.Project) *store.Project {
+	return resolveGitHubMintProject(ctx, d.store, d.githubAppMinter, d.log, agent, project)
 }
 
 // HTTPAgentDispatcher dispatches agent operations to remote runtime brokers via HTTP.
@@ -1179,10 +1237,11 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 	if d.githubAppMinter != nil && agent.ProjectID != "" {
 		project, projectErr := d.store.GetProject(ctx, agent.ProjectID)
 		if projectErr == nil {
-			// The token is minted only for the agent's own project: no label
-			// or other agent-supplied value selects a different project.
-			mintProject := project
-			if mintProject.GitHubInstallationID != nil {
+			// Determine which project to use for GitHub App token minting:
+			// the agent's own project, or a token-source project named by
+			// label only when resolveGitHubMintProject authorizes it.
+			mintProject := d.githubMintProject(ctx, agent, project)
+			if mintProject != nil {
 				if req.ResolvedEnv != nil && req.ResolvedEnv["GITHUB_TOKEN"] != "" {
 					// User already has a GITHUB_TOKEN from secrets/env.
 					// Respect it: skip overwriting with the GitHub App token.
@@ -1213,7 +1272,12 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 						// A test pins this ordering dependency.
 						req.ResolvedEnv["GITHUB_TOKEN"] = token
 						classifyEnv(&req.EnvClassifications, "GITHUB_TOKEN", api.EnvKindSecretInjected)
-						req.githubAppToken = token
+						// Only a token minted for the agent's own project counts
+						// as project-bound (gitTokenProjectBound); a token-source
+						// project's token is bound to that other project.
+						if mintProject.ID == project.ID {
+							req.githubAppToken = token
+						}
 						req.ResolvedEnv["SCION_GITHUB_APP_ENABLED"] = "true"
 						classifyEnv(&req.EnvClassifications, "SCION_GITHUB_APP_ENABLED", api.EnvKindPlain)
 						req.ResolvedEnv["SCION_GITHUB_TOKEN_EXPIRY"] = expiry
@@ -3141,10 +3205,8 @@ func (d *HTTPAgentDispatcher) injectLifecycleGitHubToken(
 	if err != nil {
 		return ""
 	}
-	// The token is minted only for the agent's own project: no label or
-	// other agent-supplied value selects a different project.
-	mintProject := project
-	if mintProject.GitHubInstallationID == nil {
+	mintProject := d.githubMintProject(ctx, agent, project)
+	if mintProject == nil {
 		return ""
 	}
 
@@ -3177,6 +3239,12 @@ func (d *HTTPAgentDispatcher) injectLifecycleGitHubToken(
 	classifyEnv(envClassifications, "SCION_GITHUB_TOKEN_EXPIRY", api.EnvKindPlain)
 	resolvedEnv["SCION_GITHUB_TOKEN_PATH"] = "/tmp/.github-token"
 	classifyEnv(envClassifications, "SCION_GITHUB_TOKEN_PATH", api.EnvKindPlain)
+	// ownAppToken is only a token minted for the agent's own project; a
+	// token-source project's token is not project-bound for this agent
+	// (gitTokenProjectBound).
+	if mintProject.ID != project.ID {
+		return ""
+	}
 	return token
 }
 
@@ -3215,6 +3283,15 @@ type startEnvResult struct {
 	// experiments is the dispatch experiment set read for this start; the
 	// caller sends it to the broker so both see the same set.
 	experiments []string
+	// skippedSecrets are the secrets the secret store could not return
+	// (selectDeliverySecrets); the start goes on without them.
+	// skippedSecretWarning is their warning for this request's audience
+	// (formatSkippedSecretWarning), "" when none was skipped. purpose is
+	// the selection purpose the WARN line names. The caller reports them
+	// with reportSkippedSecrets once it has sent the start.
+	skippedSecrets       []skippedSecret
+	skippedSecretWarning string
+	purpose              MaterialPurpose
 }
 
 // buildStartEnv assembles the full resolved environment used to start or
@@ -3322,7 +3399,7 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 	// lookup and before any agent or transport token is minted below, so
 	// nothing reaches the broker and there is nothing to revoke. Absence is
 	// not an error: an agent with no secrets resolves to an empty list.
-	resolvedSecrets, err := d.selectDeliverySecrets(ctx, sel, agent)
+	resolvedSecrets, skippedSecrets, err := d.selectDeliverySecrets(ctx, sel, agent)
 	if err != nil {
 		d.log.WarnContext(ctx, caller+": failed to resolve secrets; agent not "+startedVerb,
 			"agent_id", agent.ID, "error", err)
@@ -3527,7 +3604,38 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 		workspace:       wsSpec,
 		tokenGrant:      tokenGrant,
 		experiments:     experiments,
+		// The warning's audience is this request's: the agent's owner
+		// sees user-scope names, everyone else a count.
+		skippedSecrets:       skippedSecrets,
+		skippedSecretWarning: formatSkippedSecretWarning(skippedSecrets, startedVerb, skippedSecretAudienceIsOwner(ctx, agent)),
+		purpose:              purpose,
 	}, nil
+}
+
+// reportSkippedSecrets reports the secrets a start or restart went without
+// (startEnv.skippedSecrets). sendErr is the error of the start or restart
+// send (nil for an accepted asynchronous launch, including one whose
+// outcome is unknown).
+//
+//   - The server log gets one WARN line whenever this node sent the
+//     request, failed or not: the skip happened either way.
+//   - The request's dispatch-warnings collector gets the warning only when
+//     the send succeeded, so a failed start never says the agent was
+//     started without them.
+//   - A send the client deferred to another hub node reports nothing here:
+//     the owner node selects and sends again, reports its own skips, and its
+//     warning reaches this request through the dispatch row
+//     (LifecycleDispatchResult.Warnings). A dispatch so logs one WARN line,
+//     on the node that sent it, and its response carries the owner's
+//     warning only.
+func (d *HTTPAgentDispatcher) reportSkippedSecrets(ctx context.Context, agent *store.Agent, startEnv startEnvResult, sendErr error) {
+	if len(startEnv.skippedSecrets) == 0 || errors.Is(sendErr, ErrLifecycleDeferred) {
+		return
+	}
+	logSkippedSecrets(ctx, d.log, agent.ID, startEnv.purpose, startEnv.skippedSecrets)
+	if sendErr == nil {
+		addDispatchWarnings(ctx, startEnv.skippedSecretWarning)
+	}
 }
 
 // DispatchAgentStart starts an agent on the runtime broker. When resume is
@@ -3838,8 +3946,10 @@ func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *sto
 			// launch for the reaper to fail.
 			d.endLaunchNotLaunched(ctx, agent, launchID)
 		}
+		d.reportSkippedSecrets(ctx, agent, startEnv, err)
 	default:
 		resp, err = send(ctx, nil)
+		d.reportSkippedSecrets(ctx, agent, startEnv, err)
 	}
 	if accepted != nil {
 		// The broker accepted the start as an asynchronous launch (or its
@@ -4062,6 +4172,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 	extras.EnvClassifications = envClassifications
 
 	resp, err := d.client.RestartAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, resolvedEnv, extras)
+	d.reportSkippedSecrets(ctx, agent, startEnv, err)
 	if errors.Is(err, ErrLifecycleDeferred) {
 		// The owning node mints and records its own run ID.
 		d.revertRun(ctx, agent, runID, previousRunID)

@@ -984,7 +984,16 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 					if provenance.Template != "" {
 						tplName = provenance.Template
 					}
-				case finalScionCfg != nil && finalScionCfg.Info != nil && finalScionCfg.Info.Template != "":
+				case finalScionCfg != nil && finalScionCfg.Info != nil && config.IsTemplateSlug(finalScionCfg.Info.Template):
+					// agent-info.json's template (agent-writable) is used
+					// only when it is a template slug: a live, fail-closed
+					// check for the harness-config choice. GetAgent
+					// (provision.go) is the primary control for the
+					// template chain and already replaces a non-slug
+					// agent-info template before finalScionCfg reaches
+					// here; this check keeps a Start path that builds its
+					// config without GetAgent from choosing an
+					// agent-written path.
 					tplName = finalScionCfg.Info.Template
 				}
 			}
@@ -1064,7 +1073,10 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 				// The carry-over is logged in summary form: the number of
 				// skills copied, or a fixed warning with the failed step
 				// and the error class.
-				if copied, cpErr := carryOverSkillsDir(agentHome, prevSkillsDir, h.SkillsDir()); cpErr != nil {
+				// An invalid skills_dir was refused by harness.Resolve;
+				// harnessSkillsDir checks it again, and "" copies nothing.
+				newSkillsDir, _ := harnessSkillsDir(h)
+				if copied, cpErr := carryOverSkillsDir(agentHome, prevSkillsDir, newSkillsDir); cpErr != nil {
 					stage, class := carryOverFailureSummary(cpErr)
 					slog.WarnContext(ctx, "Start: skills carry-over after the harness-config switch failed")
 					slog.DebugContext(ctx, "Start: skills carry-over failure", "stage", stage, "class", class)
@@ -1698,7 +1710,7 @@ authDone:
 			return nil, fmt.Errorf("failed to marshal agent config: %w", marshalErr)
 		}
 		configPath := filepath.Join(agentDir, "scion-agent.json")
-		if writeErr := os.WriteFile(configPath, cfgData, 0644); writeErr != nil {
+		if writeErr := WriteAgentConfigFile(agentDir, cfgData); writeErr != nil {
 			return nil, fmt.Errorf("failed to write agent config %s: %w", configPath, writeErr)
 		}
 	} else if finalScionCfg != nil && harness.IsHarnessImplementationName(finalScionCfg.AuthSelectedType) {
@@ -1709,7 +1721,7 @@ authDone:
 			return nil, fmt.Errorf("failed to marshal repaired agent config: %w", marshalErr)
 		}
 		configPath := filepath.Join(agentDir, "scion-agent.json")
-		if writeErr := os.WriteFile(configPath, cfgData, 0644); writeErr != nil {
+		if writeErr := WriteAgentConfigFile(agentDir, cfgData); writeErr != nil {
 			return nil, fmt.Errorf("failed to write agent config %s: %w", configPath, writeErr)
 		}
 	}
@@ -1985,8 +1997,10 @@ authDone:
 
 	// Validate that the workspace directory exists before attempting to mount
 	// it (checkStartWorkspaceExists; skipped for a Kubernetes start through
-	// the nfs workspace backend).
-	if err := checkStartWorkspaceExists(m.Runtime.Name(), effectiveWorkspace, settings, opts, emptyPerAgent); err != nil {
+	// the nfs workspace backend, and for an agent-scoped workspace on the
+	// share of a local container runtime start, which the NFS leaf helpers
+	// create below).
+	if err := checkStartWorkspaceExists(m.Runtime.Name(), projectDir, effectiveWorkspace, settings, opts, emptyPerAgent); err != nil {
 		return nil, err
 	}
 
@@ -2064,6 +2078,15 @@ authDone:
 			}
 			sdLayout, sdSplit = l, split
 		}
+	}
+	// On the local layout, a shared-dir name that fails
+	// api.ValidateSharedDirs is skipped (logged, no directory) here, before
+	// resolveSharedDirs, so RunConfig.SharedDirs carries only valid names
+	// too: a runtime that creates directories from those names (the Cloud
+	// Run sandbox's /scion/shared/<name>) never sees an invalid one. On a
+	// shared backend, resolveSharedDirs refuses the start instead (design G5).
+	if usesLocalSharedDirLayout(sdLayout, sdSplit, m.Runtime.Name()) {
+		effectiveSharedDirs = validLocalSharedDirs(effectiveSharedDirs)
 	}
 	// A shared-backend Layout keys its tree on hubDispatchedProjectID,
 	// snapshotted above at Start entry — NOT the general projectID variable
@@ -2155,7 +2178,7 @@ authDone:
 		// dispatched in clone-per-agent mode on Kubernetes, with a
 		// workspace the agent container clones into. Paths are still
 		// resolved from the project's workspace path (shared-plain).
-		emptyAgentDirName, agentDirName, agentBranch, selErr := nfsOwnAgentDirSelection(m.Runtime.Name(), settings.Server.EffectiveWorkspaceStorage(), emptyPerAgent, opts.Env, opts.GitClone, opts.Name)
+		emptyAgentDirName, agentDirName, agentBranch, selErr := nfsOwnAgentDirSelection(m.Runtime.Name(), projectDir, settings.Server.EffectiveWorkspaceStorage(), emptyPerAgent, opts.Env, opts.GitClone, opts.Name)
 		if selErr != nil {
 			return nil, selErr
 		}
@@ -2221,7 +2244,12 @@ authDone:
 			// dirs are created by resolveSharedDirs above, on the shared-dir
 			// Layout, never here, so no shared-dir names are passed to the
 			// workspace leaf helpers.
-			if agentDirName != "" && podShare.Mountable() {
+			// Kubernetes only: this keeps the pre-#3998 Kubernetes layout.
+			// A local container runtime's agent whose workspace is not its
+			// directory on the share is refused below instead
+			// (checkLocalRuntimeAgentWorkspace), whichever tree its work is
+			// in.
+			if isKubernetesRuntime(m.Runtime.Name()) && agentDirName != "" && podShare.Mountable() {
 				if keep, reason := nfsKeepSharedCheckout(opts.FreshProvision, agentDir, resolvedWorkspace, agentDirName); keep {
 					// The agent keeps the layout and mode it had before
 					// ptone/scion#3998, so its work stays where it is.
@@ -2250,20 +2278,36 @@ authDone:
 			// helper): a forced move's start marks it as the move's only
 			// then (markMoveExportAgentDir).
 			ownDirName, ownDirCreated := "", false
+			// A local container runtime bind-mounts the agent's own
+			// directory from the broker's mount of the share, with no pod
+			// share; before anything is created there, the workspace Start
+			// validated must be that directory's workspace, and an agent
+			// whose work is still in its broker-local workspace is refused
+			// (checkLocalRuntimeAgentWorkspace).
+			localOwnDir := isLocalContainerRuntime(m.Runtime.Name()) && (emptyAgentDirName != "" || agentDirName != "")
+			if localOwnDir {
+				name := agentDirName
+				if emptyAgentDirName != "" {
+					name = emptyAgentDirName
+				}
+				if err := checkLocalRuntimeAgentWorkspace(opts.Name, effectiveWorkspace, agentDir, resolvedWorkspace, name); err != nil {
+					return nil, err
+				}
+			}
 			if emptyAgentDirName != "" {
 				// Empty-per-agent: only the agent's own directory is ever
 				// mounted, never the project's workspace path resolved
 				// above. When the pod cannot mount the share (no claim and
 				// no inline server and export), stop instead of falling
 				// back to the project's path.
-				if !podShare.Mountable() {
+				if !localOwnDir && !podShare.Mountable() {
 					return nil, errEmptyPerAgentNFSNoClaim
 				}
 				nfsWorkspacePreCreated, ownDirCreated, err = ensureNFSAgentWorkspaceLeafClaim(m.Runtime.Name(), projectID, resolvedWorkspace, podShare, nil, emptyAgentDirName)
 				ownDirName = emptyAgentDirName
 				nfsAgentDirName = emptyAgentDirName
 				nfsAgentDirEmpty = true
-			} else if agentDirName != "" && podShare.Mountable() {
+			} else if agentDirName != "" && (localOwnDir || podShare.Mountable()) {
 				nfsWorkspacePreCreated, ownDirCreated, err = ensureNFSAgentWorkspaceLeafClaim(m.Runtime.Name(), projectID, resolvedWorkspace, podShare, nil, agentDirName)
 				ownDirName = agentDirName
 				nfsAgentDirName = agentDirName
@@ -2304,8 +2348,13 @@ authDone:
 			// source (on a shared Layout, its directory on the share,
 			// sharedLayoutAgentWorkspace; otherwise its private node-local
 			// path): mount.HostPath is the project's shared workspace,
-			// which this agent must never see.
-			if mount.HostPath != "" && !nfsAgentDirEmpty {
+			// which this agent must never see. A clone-per-agent agent of a
+			// local container runtime keeps its own workspace too: the
+			// runtime bind-mounts it (the agent's directory on the share,
+			// checked by checkLocalRuntimeAgentWorkspace), where Kubernetes
+			// derives the agent's mounts from the project's path and
+			// NFSAgentDirName.
+			if mount.HostPath != "" && !nfsAgentDirEmpty && !localOwnDir {
 				effectiveWorkspace = mount.HostPath
 			}
 			if mount.Target != "" {
@@ -2505,6 +2554,7 @@ authDone:
 	// (k8sSharedRepoShapeRefusal). clone-per-agent and empty-per-agent have no
 	// shared .git to protect.
 	privateGitConfigSource := ""
+	startNotice := ""
 	switch m.Runtime.Name() {
 	case "docker", "podman", "container", "apple-container":
 		if repoRoot != "" {
@@ -2518,11 +2568,21 @@ authDone:
 				if seedBranch == "" {
 					seedBranch = api.Slugify(opts.Name)
 				}
-				src, seedErr := seedCheckedPrivateGitConfig(ctx, repoRoot, effectiveWorkspace, agentDir, seedBranch)
+				// Keys that name a command or a hook location are left out of
+				// the private copy only where the runtime binds that copy over
+				// .git/config (docker, podman); the Apple runtime reads the
+				// repository config directly, so there they are refused.
+				stripNeverCarry := bindsPrivateGitConfig(m.Runtime.Name())
+				src, neverCarried, seedErr := seedCheckedPrivateGitConfigStrip(ctx, repoRoot, effectiveWorkspace, agentDir, seedBranch, stripNeverCarry)
 				if seedErr != nil {
 					return nil, fmt.Errorf("seed private git config for agent %q: %w", opts.Name, seedErr)
 				}
 				privateGitConfigSource = src
+				if notice := util.NeverCarriedNotice(neverCarried); notice != "" {
+					startNotice = notice
+					warnings = append(warnings, notice)
+					relayedWarnings = append(relayedWarnings, notice)
+				}
 			}
 		}
 	}
@@ -2909,6 +2969,7 @@ authDone:
 				a.Warnings = warnings
 				a.HubOnlyEnvWarnings = hubOnlyEnvWarnings
 				a.RelayedWarnings = relayedWarnings
+				a.StartNotice = startNotice
 				a.Phase = successPhase
 				a.HarnessConfig = harnessConfigName
 				a.HarnessConfigRevision = harnessConfigRevision
@@ -2939,6 +3000,7 @@ authDone:
 		Warnings:              warnings,
 		HubOnlyEnvWarnings:    hubOnlyEnvWarnings,
 		RelayedWarnings:       relayedWarnings,
+		StartNotice:           startNotice,
 		HarnessConfig:         harnessConfigName,
 		HarnessConfigRevision: harnessConfigRevision,
 		HarnessConfigSource:   harnessConfigSource,

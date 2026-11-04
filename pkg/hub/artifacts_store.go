@@ -147,6 +147,12 @@ const artifactReapBatch = 500
 // uploads and expired artifacts and reclaims unreferenced blobs.
 func (s *Server) startArtifactReaper(ctx context.Context) {
 	go func() {
+		// The sponsor backfill runs once at start, so artifacts of agents
+		// that are live at upgrade time get their delegating user recorded
+		// before an agent can be purged; each pass retries it until done.
+		if st := s.ArtifactStore(); st != nil {
+			s.backfillArtifactSponsors(ctx, st)
+		}
 		ticker := time.NewTicker(artifactReapInterval)
 		defer ticker.Stop()
 		for {
@@ -160,14 +166,39 @@ func (s *Server) startArtifactReaper(ctx context.Context) {
 	}()
 }
 
+// artifactSponsorBatch is how many agents one page of the sponsor
+// backfill resolves.
+const artifactSponsorBatch = 200
+
+// backfillArtifactSponsors runs the sponsor backfill (ptone/scion#6028)
+// unless the artifact ledger records it as done: the delegating user of
+// every live agent that owns project artifacts with none recorded is
+// recorded on them, resolved by artifactHost.DelegatingUser. A lookup
+// fault stops the pass without recording it done, and the next pass
+// retries; agents that resolve to no one keep nothing recorded. After it
+// is done each call is one ledger read.
+func (s *Server) backfillArtifactSponsors(ctx context.Context, st artifacts.Store) {
+	res, err := artifacts.BackfillSponsors(ctx, st, newArtifactHost(s).DelegatingUser, artifactSponsorBatch, time.Now())
+	if err != nil {
+		slog.WarnContext(ctx, "artifacts: sponsor backfill stopped; it will be retried", "error", err,
+			"agents", res.Agents, "resolved", res.Resolved, "artifacts", res.Artifacts)
+		return
+	}
+	if res.Done {
+		slog.InfoContext(ctx, "artifacts: sponsor backfill done",
+			"agents", res.Agents, "resolved", res.Resolved, "artifacts", res.Artifacts)
+	}
+}
+
 // reapArtifactVersions runs one maintenance pass, in the order the blob
 // sweep relies on: abandoned pending versions are reaped and expired
 // artifacts deleted first, so their files stop counting as references,
 // then one blob sweep pass runs. Between the reap and the expiry sweep,
+// the sponsor backfill runs until it is done (backfillArtifactSponsors),
 // the owner liveness reconciler marks the artifacts of deleted agents and
 // users (and clears the mark of restored ones), and unsent uploads and the
-// attachments of messages that are gone are retired; a failure in either is
-// logged once and does not stop the rest of the pass.
+// attachments of messages that are gone are retired; a failure in any of
+// them is logged once and does not stop the rest of the pass.
 func (s *Server) reapArtifactVersions(ctx context.Context) {
 	// Attachment retention (scratchpad projections, legacy blobs) does not
 	// depend on the artifact store; it paces itself to once an hour.
@@ -185,6 +216,7 @@ func (s *Server) reapArtifactVersions(ctx context.Context) {
 	if n > 0 {
 		slog.InfoContext(ctx, "artifacts: reaped abandoned pending versions", "count", n)
 	}
+	s.backfillArtifactSponsors(ctx, st)
 	s.reconcileArtifactOwners(ctx, st, now)
 	s.retireArtifactAttachments(ctx, st, now)
 	s.sweepDeliveryRedemptions(ctx)

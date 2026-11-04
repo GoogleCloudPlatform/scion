@@ -142,7 +142,7 @@ func (s *ChatRetentionStore) SelectChatRetentionCandidates(ctx context.Context, 
 	if limit <= 0 {
 		return nil, nil
 	}
-	query := `SELECT id, created, project_id, conversation_id FROM messages WHERE created < ?`
+	query := `SELECT id, created, project_id, conversation_id, thread_id FROM messages WHERE created < ?`
 	args := []any{cutoff.UTC()}
 	if !after.IsStart() {
 		c := after.Created.UTC()
@@ -155,7 +155,8 @@ func (s *ChatRetentionStore) SelectChatRetentionCandidates(ctx context.Context, 
 }
 
 // selectCandidates runs a candidate selection (id, created, project_id,
-// conversation_id) and scans its rows. what names the selection in errors.
+// conversation_id, thread_id) and scans its rows. what names the selection
+// in errors.
 func (s *ChatRetentionStore) selectCandidates(ctx context.Context, what, query string, args []any, limit int) ([]store.ChatRetentionCandidate, error) {
 	rows, err := s.db.QueryContext(ctx, s.rebind(query), args...)
 	if err != nil {
@@ -165,12 +166,13 @@ func (s *ChatRetentionStore) selectCandidates(ctx context.Context, what, query s
 	out := make([]store.ChatRetentionCandidate, 0, limit)
 	for rows.Next() {
 		var c store.ChatRetentionCandidate
-		var conv sql.NullString
-		if err := rows.Scan(&c.ID, &c.Created, &c.ProjectID, &conv); err != nil {
+		var conv, thread sql.NullString
+		if err := rows.Scan(&c.ID, &c.Created, &c.ProjectID, &conv, &thread); err != nil {
 			return nil, fmt.Errorf("chat retention: scan %s: %w", what, err)
 		}
 		c.Created = c.Created.UTC()
 		c.ConversationID = conv.String
+		c.ThreadID = thread.String
 		out = append(out, c)
 	}
 	if err := rows.Err(); err != nil {
@@ -552,6 +554,41 @@ func (s *ChatRetentionStore) SelectChatRetentionConversationMessages(ctx context
 	return out, nil
 }
 
+// SelectChatRetentionConversationPage implements
+// store.ChatRetentionStore. The conversation_id and thread_id indexes
+// narrow the rows to one conversation; the (created, id) order is sorted
+// within it, so a page costs the conversation's rows after the position.
+// Only the preview, which cannot delete as it goes, pages this way; the
+// purge reads the first rows of what is left.
+func (s *ChatRetentionStore) SelectChatRetentionConversationPage(ctx context.Context, conversationID, threadID string, after store.ChatRetentionPosition, limit int) ([]store.ChatRetentionCandidate, error) {
+	if err := s.requireDB(); err != nil {
+		return nil, err
+	}
+	if (conversationID == "") == (threadID == "") {
+		return nil, errors.New("chat retention: a conversation page needs exactly one of a conversation and a thread")
+	}
+	if limit <= 0 {
+		return nil, nil
+	}
+	query := `SELECT id, created, project_id, conversation_id, thread_id FROM messages WHERE `
+	var args []any
+	if conversationID != "" {
+		query += `conversation_id = ?`
+		args = append(args, conversationID)
+	} else {
+		query += `thread_id = ? AND conversation_id IS NULL`
+		args = append(args, threadID)
+	}
+	if !after.IsStart() {
+		c := after.Created.UTC()
+		query += ` AND created >= ? AND (created > ? OR id > ?)`
+		args = append(args, c, c, after.ID)
+	}
+	query += ` AND dispatch_state NOT IN ('pending', 'deferred') ORDER BY created, id LIMIT ?`
+	args = append(args, limit)
+	return s.selectCandidates(ctx, "conversation page", query, args, limit)
+}
+
 // selectMessagesWhere returns up to limit messages matching where (one
 // bind argument, arg) that are not pending or deferred.
 func (s *ChatRetentionStore) selectMessagesWhere(ctx context.Context, where string, arg any, limit int) ([]store.ChatRetentionCandidate, error) {
@@ -702,6 +739,37 @@ func (s *ChatRetentionStore) LatestChatRetentionRun(ctx context.Context, trigger
 	return chatRetentionRunFromEnt(row)
 }
 
+// chatRetentionRunListMax caps ListChatRetentionRuns.
+const chatRetentionRunListMax = 500
+
+// ListChatRetentionRuns implements store.ChatRetentionStore.
+func (s *ChatRetentionStore) ListChatRetentionRuns(ctx context.Context, filter store.ChatRetentionRunFilter) ([]store.ChatRetentionRun, error) {
+	q := s.client.ChatRetentionRun.Query()
+	if filter.Trigger != "" {
+		q = q.Where(chatretentionrun.TriggerEQ(chatretentionrun.Trigger(filter.Trigger)))
+	}
+	if !filter.FinishedAfter.IsZero() {
+		q = q.Where(chatretentionrun.FinishedAtGT(filter.FinishedAfter.UTC()))
+	}
+	limit := filter.Limit
+	if limit <= 0 || limit > chatRetentionRunListMax {
+		limit = chatRetentionRunListMax
+	}
+	rows, err := q.Order(ent.Desc(chatretentionrun.FieldStartedAt)).Limit(limit).All(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("chat retention: list runs: %w", err)
+	}
+	out := make([]store.ChatRetentionRun, 0, len(rows))
+	for _, row := range rows {
+		r, err := chatRetentionRunFromEnt(row)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *r)
+	}
+	return out, nil
+}
+
 func chatRetentionRunFromEnt(row *ent.ChatRetentionRun) (*store.ChatRetentionRun, error) {
 	r := &store.ChatRetentionRun{
 		ID:        row.ID.String(),
@@ -803,6 +871,31 @@ func (s *ChatRetentionStore) SaveChatRetentionRun(ctx context.Context, run *stor
 		return fmt.Errorf("chat retention: update run: %w", err)
 	}
 	return nil
+}
+
+// FailRunningChatRetentionRuns implements store.ChatRetentionStore.
+func (s *ChatRetentionStore) FailRunningChatRetentionRuns(ctx context.Context, triggers []string, before time.Time, errMsg string, finishedAt time.Time) (int, error) {
+	if len(triggers) == 0 {
+		return 0, nil
+	}
+	ts := make([]chatretentionrun.Trigger, len(triggers))
+	for i, t := range triggers {
+		ts[i] = chatretentionrun.Trigger(t)
+	}
+	n, err := s.client.ChatRetentionRun.Update().
+		Where(
+			chatretentionrun.StatusEQ(chatretentionrun.StatusRunning),
+			chatretentionrun.TriggerIn(ts...),
+			chatretentionrun.StartedAtLT(before.UTC()),
+		).
+		SetStatus(chatretentionrun.StatusFailed).
+		SetError(errMsg).
+		SetFinishedAt(finishedAt.UTC()).
+		Save(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("chat retention: fail interrupted runs: %w", err)
+	}
+	return n, nil
 }
 
 // PruneChatRetentionRuns implements store.ChatRetentionStore.

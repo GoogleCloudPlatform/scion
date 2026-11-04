@@ -1035,27 +1035,23 @@ func pullTemplateFromHubMatch(hubCtx *HubContext, match *TemplateMatch, toPath s
 	template := match.HubTemplate
 	name := template.Name
 
-	// Determine destination path
-	destPath := toPath
-	if destPath == "" {
-		// Default to project templates directory
+	// Determine the destination: --to, or the template's name below the
+	// project templates directory. It is opened (and created) before
+	// anything is fetched; files are written through this os.Root so they
+	// stay inside it.
+	var parentDir string
+	if toPath == "" {
 		projectTemplatesDir, err := config.GetProjectTemplatesDir()
 		if err != nil {
 			return fmt.Errorf("failed to get templates directory: %w", err)
 		}
-		destPath = filepath.Join(projectTemplatesDir, name)
-	} else {
-		var err error
-		destPath, err = filepath.Abs(toPath)
-		if err != nil {
-			return fmt.Errorf("failed to resolve path: %w", err)
-		}
+		parentDir = projectTemplatesDir
 	}
-
-	// Create destination directory
-	if err := os.MkdirAll(destPath, 0755); err != nil {
-		return fmt.Errorf("failed to create destination directory: %w", err)
+	root, destPath, err := openPullDestination(toPath, parentDir, name)
+	if err != nil {
+		return err
 	}
+	defer func() { _ = root.Close() }()
 
 	// Request download URLs
 	fmt.Printf("Requesting download URLs for template '%s'...\n", name)
@@ -1068,13 +1064,6 @@ func pullTemplateFromHubMatch(hubCtx *HubContext, match *TemplateMatch, toPath s
 	if err := validateDownloadEntries(downloadResp.Files); err != nil {
 		return err
 	}
-
-	// Files are written through an os.Root so they stay inside destPath.
-	root, err := os.OpenRoot(destPath)
-	if err != nil {
-		return fmt.Errorf("failed to open destination directory: %w", err)
-	}
-	defer func() { _ = root.Close() }()
 
 	// Download files
 	fmt.Printf("Downloading %d files to %s...\n", len(downloadResp.Files), destPath)

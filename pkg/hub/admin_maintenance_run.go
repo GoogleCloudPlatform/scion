@@ -20,9 +20,11 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"sync"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/maintenance"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
@@ -35,6 +37,50 @@ var operationParamAllowlist = map[string][]string{
 	"rebuild-server": {"branch"},
 	// The star reconciliation takes no parameters.
 	entadapter.ChatStarReconcileKey: {},
+	// The chat retention preview takes an optional window; the manual run
+	// takes nothing.
+	entadapter.ChatRetentionPreviewKey: {chatRetentionParamDays},
+	entadapter.ChatRetentionRunKey:     {},
+}
+
+// stringParamOperations lists the operations whose parameters must be JSON
+// strings: parseMigrationParams drops any other value, which would run the
+// operation as if the parameter were absent.
+var stringParamOperations = map[string]bool{
+	entadapter.ChatRetentionPreviewKey: true,
+}
+
+// checkStringParams refuses a run request whose "params" holds a value that
+// is not a string.
+func checkStringParams(body map[string]interface{}) error {
+	m, _ := body["params"].(map[string]interface{})
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if _, ok := m[k].(string); !ok {
+			return &maintenance.RequestError{Code: maintenance.CodeInvalidParam,
+				Message: fmt.Sprintf("parameter %s must be a string", k)}
+		}
+	}
+	return nil
+}
+
+// maintenanceOperationExperiments maps the operations that exist only while
+// an experiment is on to that experiment. While it is off the operation is
+// not listed and its routes answer 404.
+var maintenanceOperationExperiments = map[string]string{
+	entadapter.ChatRetentionPreviewKey: experiments.ChatRetention,
+	entadapter.ChatRetentionRunKey:     experiments.ChatRetention,
+}
+
+// maintenanceOperationAvailable reports whether operation key exists on
+// this hub now (its experiment, if any, is on).
+func (s *Server) maintenanceOperationAvailable(key string) bool {
+	name, gated := maintenanceOperationExperiments[key]
+	return !gated || s.experimentEnabled(name)
 }
 
 // rawRequestParams returns the keys of a run request's "params" object,
@@ -224,6 +270,10 @@ var maintenanceRunTimeouts = map[string]time.Duration{
 	// Each batch of the star reconciliation is bounded too; this bounds
 	// the sweeps together.
 	entadapter.ChatStarReconcileKey: messageStarReconcileTimeout,
+	// A preview or manual chat retention run stops its walk early enough
+	// to record what it did before this.
+	entadapter.ChatRetentionPreviewKey: chatRetentionOpMaxDuration,
+	entadapter.ChatRetentionRunKey:     chatRetentionOpMaxDuration,
 }
 
 // maintenanceRunContext returns the context a run of key executes under.

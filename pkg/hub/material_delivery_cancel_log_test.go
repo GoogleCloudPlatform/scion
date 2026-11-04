@@ -50,7 +50,7 @@ func TestDispatchDelivery_WithheldWarnsQuietAfterRequestEnds(t *testing.T) {
 	const summaryMsg = "launch material withheld: items not authorized for delivery"
 
 	// Live request: both Warns.
-	_, err := m.d.selectDeliverySecrets(context.Background(), newDeliverySelector(m.d.authzService, m.agent, PurposeRestart), m.agent)
+	_, _, err := m.d.selectDeliverySecrets(context.Background(), newDeliverySelector(m.d.authzService, m.agent, PurposeRestart), m.agent)
 	require.NoError(t, err)
 	require.NotEmpty(t, warnRecords(t, buf.Bytes(), itemMsg), "a live request logs the withheld item; log: %s", buf.String())
 	require.Len(t, warnRecords(t, buf.Bytes(), summaryMsg), 1)
@@ -59,7 +59,7 @@ func TestDispatchDelivery_WithheldWarnsQuietAfterRequestEnds(t *testing.T) {
 	buf.Reset()
 	ended := endedCtx{context.Background()}
 	sel := newDeliverySelector(m.d.authzService, m.agent, PurposeRestart)
-	_, err = m.d.selectDeliverySecrets(ended, sel, m.agent)
+	_, _, err = m.d.selectDeliverySecrets(ended, sel, m.agent)
 	require.NoError(t, err, "the selection reaches its summary point")
 	assert.Positive(t, sel.denied, "the item was denied; only the Warns are suppressed")
 	assert.Empty(t, warnRecords(t, buf.Bytes(), itemMsg), "no per-item Warn after the request ended")

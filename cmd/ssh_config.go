@@ -371,9 +371,14 @@ func (h *sshHubConn) resolveSSHTarget(ctx context.Context, ref string, dflt hubO
 		projectID, projectSlug, err := h.resolveSSHProjectID(ctx, project)
 		if err != nil {
 			// resolveSSHProjectID exits with ExitAgentNotFound only when
-			// the hub has no such project.
+			// the hub has no such project. Under a user access token the
+			// scoped-token hint is kept (ptone/scion#5294).
 			if !hasProject && tunnelclient.CodeOf(err) == tunnelclient.ExitAgentNotFound {
-				return sshAgentEntry{}, dflt.notFoundError(h.endpoint)
+				nf := dflt.notFoundError(h.endpoint)
+				if h.uat {
+					return sshAgentEntry{}, tunnelclient.Errorf(tunnelclient.ExitAgentNotFound, "%v; %s", nf, sshScopedTokenHint)
+				}
+				return sshAgentEntry{}, nf
 			}
 			return sshAgentEntry{}, err
 		}

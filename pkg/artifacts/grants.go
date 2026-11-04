@@ -525,8 +525,8 @@ func (s *Service) reviewGrantCaller(ctx context.Context, a *Artifact) bool {
 func (s *Service) reviewGrantAuthorized(ctx context.Context, a *Artifact) bool {
 	clause := reviewClauseUnnamed
 	if clauser, ok := s.host.(ReviewGrantClauser); ok {
-		clause = clauser.ReviewGrantClause(ctx, a.OwnerRef, a.ScopeRef)
-	} else if authority, ok := s.host.(ReviewGrantAuthority); !ok || !authority.MayGrantReview(ctx, a.OwnerRef, a.ScopeRef) {
+		clause = clauser.ReviewGrantClause(ctx, a.OwnerRef, a.ScopeRef, a.SponsorRef)
+	} else if authority, ok := s.host.(ReviewGrantAuthority); !ok || !authority.MayGrantReview(ctx, a.OwnerRef, a.ScopeRef, a.SponsorRef) {
 		clause = ""
 	}
 	if note, ok := ctx.Value(reviewClauseNote{}).(*string); ok {

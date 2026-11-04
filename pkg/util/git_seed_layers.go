@@ -50,21 +50,34 @@ const (
 //
 // <commonDir>/config is checked again here with the seed rules and the
 // isDroppedKey exemption, exactly as PrepareSeededGitConfig checks it, so no
-// include directive in it is followed by the git call below. Then the parsed
+// include directive in it is followed by the git call below. With
+// stripNeverCarry (the runtime binds the agent's private copy of .git/config),
+// a key that names a command or a hook location is not refused in
+// <commonDir>/config: the copy leaves it out. It is still refused in both
+// config.worktree layers, which are bound raw. Such a key in the real file
+// runs nothing here: the only git calls the seed makes are config --list and
+// ls-files --stage, with no work tree, output read through a pipe (never a
+// TTY), and no remote. The HostGitArgs pins also turn off hooksPath, fsmonitor
+// and pager; the other keys (editors, aliases, filters, diff drivers, ssh and
+// proxy commands) are inert only because those two commands never reach them. Then the parsed
 // entries of all files are cross-checked against git's own listing
 // (crossCheckAgainstGit), run with GIT_DIR and GIT_COMMON_DIR set explicitly so
 // git never resolves a work-tree gitfile, and with no global or system config.
 //
-// It returns a *RepoConfigRefusedError (Layer names the file) for the first
-// refused key, and an error for anything it cannot read or parse (fail closed).
-func CheckSeedRepoConfigLayers(ctx context.Context, commonDir, adminName string) error {
-	return checkSeedRepoConfigLayers(ctx, commonDir, adminName, readSeedConfigLayer)
+// Every layer is checked before any refusal is returned, so one error names
+// every refused key in every layer: a *RepoConfigRefusedError (Layer names the
+// file) for one, a *RepoConfigRefusals for more. The cross-check runs only
+// when no key is refused, because git must not run on a refused config; a
+// cross-check refusal therefore comes alone. Anything it cannot read or parse
+// is an error (fail closed).
+func CheckSeedRepoConfigLayers(ctx context.Context, commonDir, adminName string, stripNeverCarry bool) error {
+	return checkSeedRepoConfigLayers(ctx, commonDir, adminName, stripNeverCarry, readSeedConfigLayer)
 }
 
 // checkSeedRepoConfigLayers is CheckSeedRepoConfigLayers with the layer reader
 // passed in, so a test can make the parsed set differ from what git reads and
 // see the cross-check refuse.
-func checkSeedRepoConfigLayers(ctx context.Context, commonDir, adminName string, read func(path, label string) ([]gitConfigVar, error)) error {
+func checkSeedRepoConfigLayers(ctx context.Context, commonDir, adminName string, stripNeverCarry bool, read func(path, label string) ([]gitConfigVar, error)) error {
 	if err := refuseRootCommonDirRedirect(filepath.Dir(commonDir), true, AudienceRemote); err != nil {
 		return err
 	}
@@ -72,26 +85,32 @@ func checkSeedRepoConfigLayers(ctx context.Context, commonDir, adminName string,
 		path   string
 		label  string
 		exempt func(gitConfigVar) bool
+		strip  bool
 	}
 	layers := []layer{
-		{filepath.Join(commonDir, "config"), "", isDroppedKey},
-		{filepath.Join(commonDir, "config.worktree"), seedLayerCommonWorktree, nil},
+		{filepath.Join(commonDir, "config"), "", isDroppedKey, stripNeverCarry},
+		{filepath.Join(commonDir, "config.worktree"), seedLayerCommonWorktree, nil, false},
 	}
 	gitDir := commonDir
 	if adminName != "" {
 		gitDir = filepath.Join(commonDir, "worktrees", adminName)
-		layers = append(layers, layer{filepath.Join(gitDir, "config.worktree"), seedLayerOwnWorktree, nil})
+		layers = append(layers, layer{filepath.Join(gitDir, "config.worktree"), seedLayerOwnWorktree, nil, false})
 	}
 	var parsed []gitConfigVar
+	var refusals []*RepoConfigRefusedError
 	for _, l := range layers {
 		vars, err := read(l.path, l.label)
 		if err != nil {
 			return err
 		}
-		if err := checkRepoConfigVars("", l.label, vars, RepoPolicyLinked, repoConfigAllowOptions{seed: true}, l.exempt); err != nil {
-			return err
-		}
+		r, _ := collectSeedRefusals(l.label, vars, RepoPolicyLinked, l.exempt, l.strip)
+		refusals = append(refusals, r...)
 		parsed = append(parsed, vars...)
+	}
+	// git must not run on a config with a refused key (an include among them),
+	// so the cross-check runs only when every layer passes.
+	if err := joinSeedRefusals(refusals, true); err != nil {
+		return err
 	}
 	return crossCheckAgainstGit(ctx, commonDir, seedGitEnv(gitDir, commonDir), parsed, seedLayerCombined, true, AudienceRemote)
 }

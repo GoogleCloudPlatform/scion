@@ -227,6 +227,9 @@ type hubUsersInviteOptions struct {
 	Note     string
 	Projects []string
 	JSON     bool
+	// UAT reports that the client sends a user access token
+	// (authSourceIsUserAccessToken), for the --project lookups.
+	UAT bool
 }
 
 // inviteProjectSpec is one parsed --project flag.
@@ -236,13 +239,14 @@ type inviteProjectSpec struct {
 }
 
 func runHubUsersInvite(cmd *cobra.Command, args []string) error {
-	_, client, err := loadHubClient()
+	_, client, uat, err := loadHubClientUAT()
 	if err != nil {
 		return err
 	}
 	ctx, cancel := context.WithTimeout(cmd.Context(), 90*time.Second)
 	defer cancel()
 	return inviteHubUsers(ctx, cmd.OutOrStdout(), client, hubUsersInviteOptions{
+		UAT:      uat,
 		Args:     args,
 		File:     hubUsersInviteFile,
 		Stdin:    cmd.InOrStdin(),
@@ -378,7 +382,7 @@ func inviteHubUsers(ctx context.Context, out io.Writer, client hubclient.Client,
 		if err != nil {
 			return err
 		}
-		project, err := resolveProjectNameOrID(ctx, client, spec.Arg)
+		project, err := resolveProjectNameOrID(ctx, client, spec.Arg, opts.UAT)
 		if err != nil {
 			return fmt.Errorf("project %s: %w", spec.Arg, err)
 		}

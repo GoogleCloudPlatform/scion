@@ -39,6 +39,12 @@ func EnsureSharedLeafOwned(hostBase, rel string, owner shareddirs.Owner) (fd int
 	return -1, false, fmt.Errorf("create shared leaf: %w on this platform", errors.ErrUnsupported)
 }
 
+// EnsureSharedLeafExpecting always fails with errors.ErrUnsupported on this
+// platform.
+func EnsureSharedLeafExpecting(hostBase, rel string, expected shareddirs.Owner) (fd int, existed bool, err error) {
+	return -1, false, fmt.Errorf("create shared leaf: %w on this platform", errors.ErrUnsupported)
+}
+
 // EnsureLeaf always fails with errors.ErrUnsupported on this platform.
 func (r Resolved) EnsureLeaf() (existed bool, err error) {
 	return false, fmt.Errorf("create directory: %w on this platform", errors.ErrUnsupported)

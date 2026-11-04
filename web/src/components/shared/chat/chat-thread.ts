@@ -161,6 +161,12 @@ const HISTORY_MAX_PAGE_SIZE = 200;
 /** How many around targets a deep starred-only refresh tries before the newest window. */
 const FILTER_AROUND_TRIES = 5;
 
+/** The code of the history around jump's 404 for a message that cannot be shown. */
+const MESSAGE_UNAVAILABLE_CODE = 'message_unavailable';
+
+/** The toast of a jump to a message that is no longer available. */
+export const MESSAGE_UNAVAILABLE_TOAST = 'That message is no longer available.';
+
 /**
  * Detail of `chat-message-filter-change`: the thread asks the page to show
  * the conversation under `filter`. `messageId`, when set, is the message a
@@ -1511,7 +1517,7 @@ export class ScionChatThread extends LitElement {
         padding: 0.625rem 1rem calc(0.625rem + env(safe-area-inset-bottom, 0px));
         font-size: var(--chat-fs-base);
         border-top: 1px solid var(--scion-border, #e2e8f0);
-        background: var(--scion-surface-2, #f8fafc);
+        background: var(--scion-bg, #f8fafc);
       }
 
       .star-filter-banner > sl-icon {
@@ -1533,6 +1539,20 @@ export class ScionChatThread extends LitElement {
 
       .star-filter-show-all {
         flex-shrink: 0;
+      }
+
+      /* The theme maps Shoelace's neutral scale to the same slate values in
+         both themes, so a default button's label (neutral-700) would sit
+         on a neutral-800 button in the dark theme. Theme tokens keep the
+         label, border and fill readable in both. */
+      .star-filter-show-all::part(base) {
+        background: var(--scion-surface, #ffffff);
+        border-color: var(--scion-border-hover, #cbd5e1);
+        color: var(--scion-text, #1e293b);
+      }
+
+      .star-filter-show-all::part(base):hover {
+        color: var(--scion-primary-hover, #2563eb);
       }
 
       /* A 44 px touch target on a phone or tablet; Shoelace centres the
@@ -4611,7 +4631,7 @@ export class ScionChatThread extends LitElement {
     // the thread shows a spinner, not the scroll container.
     let msgEl = this.shadowRoot?.getElementById(`msg-${messageId}`) ?? null;
     if (!msgEl) {
-      await this.fetchAroundMessage(messageId, isCurrent);
+      await this.fetchAroundMessage(messageId, isCurrent, true);
       await this.updateComplete;
       if (!isCurrent()) return;
       msgEl = this.shadowRoot?.getElementById(`msg-${messageId}`) ?? null;
@@ -4892,10 +4912,15 @@ export class ScionChatThread extends LitElement {
    * `isCurrent`, when given, is re-checked once the response arrives: a
    * caller superseded in the meantime (a restore overtaken by a jump) must
    * not replace the window that the newer request loaded.
+   *
+   * With `notifyUnavailable`, a 404 with code message_unavailable (the
+   * message was removed, for example by the hub's retention policy) shows
+   * the toast "That message is no longer available."
    */
   private async fetchAroundMessage(
     messageId: string,
-    isCurrent: () => boolean = () => true
+    isCurrent: () => boolean = () => true,
+    notifyUnavailable = false
   ): Promise<void> {
     if (!this.conversationKey) return;
 
@@ -4908,7 +4933,22 @@ export class ScionChatThread extends LitElement {
 
     try {
       const res = await apiFetch(this.historyUrl(params));
-      if (currentId !== this.fetchId || !res.ok || !isCurrent()) return;
+      if (currentId !== this.fetchId || !isCurrent()) return;
+      if (!res.ok) {
+        if (notifyUnavailable && res.status === 404) {
+          const body = (await res.json().catch(() => null)) as {
+            error?: { code?: string };
+          } | null;
+          if (
+            body?.error?.code === MESSAGE_UNAVAILABLE_CODE &&
+            currentId === this.fetchId &&
+            isCurrent()
+          ) {
+            showToast(MESSAGE_UNAVAILABLE_TOAST, 'warning');
+          }
+        }
+        return;
+      }
 
       const data = (await res.json()) as HistoryWindow;
       if (currentId !== this.fetchId || !isCurrent()) return;

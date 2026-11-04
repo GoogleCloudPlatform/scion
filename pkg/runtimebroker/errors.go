@@ -31,6 +31,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/templatecache"
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -479,6 +480,26 @@ func notFoundResourceText(err error, templateSlug string) string {
 		return fmt.Sprintf("harness-config %q not found", hcErr.Name)
 	}
 	return config.ErrHarnessConfigNotFound.Error()
+}
+
+// writeGitConfigRefusal answers a create, start or restart whose start was
+// refused because the repository's git config sets keys agents may not be
+// given, and reports whether err was one. The body is 422
+// git_config_refused with the refusal's own text (util.StartRefusalText):
+// every refused key and its remedy, never a value or a host path.
+func writeGitConfigRefusal(w http.ResponseWriter, err error, details map[string]interface{}) bool {
+	text, ok := util.StartRefusalText(err)
+	if !ok {
+		return false
+	}
+	writeGitConfigRefusalText(w, text, details)
+	return true
+}
+
+// writeGitConfigRefusalText writes the 422 git_config_refused answer for a
+// refusal text already found by util.StartRefusalText.
+func writeGitConfigRefusalText(w http.ResponseWriter, text string, details map[string]interface{}) {
+	writeError(w, http.StatusUnprocessableEntity, api.BrokerErrCodeGitConfigRefused, text, details)
 }
 
 // opCreateAgent is the runtimeOpError op for a create's Manager.Start

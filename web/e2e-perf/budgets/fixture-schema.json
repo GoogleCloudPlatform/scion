@@ -43,6 +43,7 @@
         "experiments.hub.user_delete_force_cascade:boolean",
         "experiments.web.agent_badges:boolean",
         "experiments.web.agent_edit:boolean",
+        "experiments.web.artifact_manage_access:boolean",
         "experiments.web.artifact_review_editor:boolean",
         "experiments.web.chat_scheduled_send:boolean",
         "experiments.web.chat_starred_messages:boolean",

@@ -38,6 +38,8 @@ The config file drives the role. Fields that point at content — `agent_instruc
 - A value with a line break is always inline text and is never looked up as a file.
 - A content file must be a plain regular file of at most 4 MiB inside the template directory, reached without following a symbolic link. A symbolic link at the file or at any directory on its path, a non-directory path component, a hard link, directory or device, a file larger than 4 MiB, or an unreadable file (permission denied) is refused with an error; replace a link with the file or directory itself, or use multi-line inline text.
 - The same rules apply when Scion checks for `agents.md` or `system-prompt.md` by convention (`TemplateHasContentFile`); a file that would be refused is not picked up.
+- A system prompt file that is empty or holds only the default template's `# Placeholder` counts as no system prompt, and the harness keeps its own prompt. Because the `default` template is layered under every template, a template without its own `system-prompt.md` inherits this placeholder and gets no system prompt.
+- `scion-agent.yaml` (or `.yml`, `.json`) itself must be a regular file of at most 4 MiB, reached without a symbolic link; a linked config file is refused with an error.
 
 ```yaml
 schema_version: "1"
@@ -137,6 +139,8 @@ scion start coord --type gh://scion-frontiers/agent-team/templates/coordinator
 # Run from a locally cloned checkout
 scion start coord --type ./templates/coordinator
 ```
+
+The CLI resolves a path or URI on your own machine and uploads the template to the Hub. What reaches the Hub, and from there a Runtime Broker, is always a template name or ID: an agent create request, a scheduled `dispatch_agent` event or schedule, a project default template and a hub default template must name a template, not a directory or a remote source. A Runtime Broker loads a template directory by absolute path only from its own template cache or, when it runs with a Hub that stores files locally, from that Hub's template storage. A remote `default_template` in the broker's settings is still fetched.
 
 ### Which harness-config is used
 
@@ -254,6 +258,8 @@ When you reference a template by bare name, Scion searches in this order and use
 2. **Absolute path** to a template directory.
 3. **Project** templates (`.scion/templates/`).
 4. **Global** templates (`~/.scion/templates/`).
+
+A template name (anything that is not a remote URI or an absolute path) is a single path component, with no `/`, `\`, `..`, leading `:` or `://`. A name in another form (for example `team/reviewer`) is refused rather than looked up. The same rule applies to harness-config names. The Hub refuses such a name when a template or harness-config is created, renamed or cloned, and when an agent create request names a harness-config. `scion templates pull` and `scion harness-config pull` without `--to` build the destination directory only from a name in that form.
 
 When connected to a Hub, templates resolve from the Hub across three scopes. If a name matches in several locations, the CLI prompts you to choose; the `--local`, `--hub`, and `--global` flags narrow the search.
 

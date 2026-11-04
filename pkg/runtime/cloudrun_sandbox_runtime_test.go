@@ -828,14 +828,7 @@ func TestCloudRunSandboxRuntime_Run_AppliesResolvedAuth(t *testing.T) {
 		rootDir:      rootDir,
 		watchCancels: make(map[string]context.CancelFunc),
 	}
-
-	t.Cleanup(func() {
-		rt.watchMu.Lock()
-		for _, cancel := range rt.watchCancels {
-			cancel()
-		}
-		rt.watchMu.Unlock()
-	})
+	stopWatchersOnCleanup(t, stateFile, rt)
 
 	cfg := RunConfig{
 		Name:      "auth-agent",
@@ -1866,17 +1859,7 @@ func TestCloudRunSandboxRuntime_Run_BuildsCommand(t *testing.T) {
 		rootDir:      rootDir,
 		watchCancels: make(map[string]context.CancelFunc),
 	}
-
-	// Cancel the background watchSandbox goroutine on test exit so it cannot
-	// write to the state file after t.TempDir() cleanup begins, which would
-	// cause a "directory not empty" failure.
-	t.Cleanup(func() {
-		rt.watchMu.Lock()
-		for _, cancel := range rt.watchCancels {
-			cancel()
-		}
-		rt.watchMu.Unlock()
-	})
+	stopWatchersOnCleanup(t, stateFile, rt)
 
 	cfg := RunConfig{
 		Name:      "test-agent",
@@ -1899,15 +1882,6 @@ func TestCloudRunSandboxRuntime_Run_BuildsCommand(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
-	// Cancel the watch/tailer goroutines so temp files are released.
-	t.Cleanup(func() {
-		rt.watchMu.Lock()
-		if cancel, ok := rt.watchCancels[id]; ok {
-			cancel()
-		}
-		rt.watchMu.Unlock()
-		time.Sleep(100 * time.Millisecond) // let goroutines exit
-	})
 	if id != "test-agent" {
 		t.Errorf("Run() returned id = %q, want %q", id, "test-agent")
 	}

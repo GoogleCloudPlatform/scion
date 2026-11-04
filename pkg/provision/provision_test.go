@@ -38,8 +38,19 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// initBareGitRepo creates a bare git repo at a temporary path for cloning from.
+// initBareGitRepo creates a bare git repo at a temporary path for cloning
+// from, registered as a local clone fixture (AllowLocalCloneFixture) so
+// ProvisionShared clones it.
 func initBareGitRepo(t *testing.T) string {
+	t.Helper()
+	bareDir := newBareGitRepo(t)
+	AllowLocalCloneFixture(t, bareDir)
+	return bareDir
+}
+
+// newBareGitRepo creates a bare git repo at a temporary path, not
+// registered as a clone fixture: ProvisionShared refuses it.
+func newBareGitRepo(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	bareDir := filepath.Join(dir, "bare.git")

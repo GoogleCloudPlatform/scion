@@ -63,6 +63,16 @@ func isLocalCloneFixture(url string) bool {
 	return localCloneFixtures.urls[url] > 0
 }
 
+// hostCloneHardened reports whether the clone of in runs with the hardened
+// host-clone settings (HostCloneGitArgs, GIT_ALLOW_PROTOCOL): when the input
+// asks for it, except for a URL a running test registered with
+// AllowLocalCloneFixture, whose local path the hardened settings refuse.
+// Outside a test binary it is exactly in.HostGitHardened (isLocalCloneFixture
+// is false there).
+func hostCloneHardened(in ProvisionInput) bool {
+	return in.HostGitHardened && !isLocalCloneFixture(in.GitClone.URL)
+}
+
 // checkProvisionCloneURL is the clone-URL check every ProvisionShared call
 // passes: a git-backed input's URL must pass CheckHostCloneURL (https,
 // ssh or git only), whichever caller provisions and whether or not this

@@ -79,8 +79,8 @@ or register this machine's Runtime Broker: `harness-config install`, `sync`, `pu
 Runtime Broker, or the server run outside a project without `--global` or `--project`:
 `scion use`, `scion hub status`, `scion hub add`, `scion hub list`, `scion hub rename`,
 `scion hub remove`, the `scion hub auth` commands,
-`scion runtime-broker register`, `deregister`, `start`, `stop`, `restart`, `status`, `hubs` and
-`join`, and the `server`, `admin` and `project` commands. Outside a project, the `scion hub`
+`scion runtime-broker register`, `deregister`, `start`, `stop`, `restart`, `status`, `hubs`,
+`join` and `convert`, and the `server`, `admin` and `project` commands. Outside a project, the `scion hub`
 connection commands read and write the global settings, as with `--global`. The hub list
 commands (`add`, `list`, `rename`, `remove`) act on `~/.scion/context.yaml`.
 `scion runtime-broker provide` and `withdraw` act on a project and still need one.
@@ -565,8 +565,8 @@ Conversations are referenced using one of three forms:
 **Usage:** `scion conversation [command] [flags]`
 
 - **Commands:**
-    - `list` (default): List conversations you participate in. The NAME column shows `DM:<name>` for a direct conversation (the other participant), otherwise the conversation's display name or thread name.
-    - `get <conversation-ref>`: Show conversation details.
+    - `list` (default): List conversations you participate in. The NAME column shows `DM:<name>` for a direct conversation (the other participant), otherwise the conversation's display name or thread name. Conversation IDs and default-agent IDs are printed in full (never truncated), so any listed ID can be passed directly as `conv:<id>`.
+    - `get <conversation-ref>`: Show conversation details (prints full conversation and default-agent IDs).
     - `get-message <conversation-ref> <message-id>`: Retrieve a single message by its ID from a conversation. Authorization is participant-based — only participants of the conversation can retrieve its messages.
     - `messages <conversation-ref>`: View messages in a conversation.
     - `create <name>`: Create a new group conversation. The group appears as a thread in the project's web chat space. Names must start with a letter or digit, contain only letters, digits, spaces, `_`, or `-`, and be at most 100 characters (returns `400 Bad Request` otherwise). A name already used in the project returns `409` (name conflict).
@@ -1228,6 +1228,7 @@ Manages connection to and interaction with a Scion Hub. Authentication lives und
         - **Hub URL.** Taken from, in order: the root `--hub` flag (a hub nickname or URL), the `SCION_HUB_ENDPOINT` environment variable, then `SCION_HUB_URL`, then the directory's link entry, then the current Hub. This is the order every Hub command uses (see [Hub resolution order](#global-flags)). `--hub-url` is a hidden, deprecated alias of `--hub` that wins over it; it prints a deprecation notice.
         - **Hub list.** A hub URL given with `--hub` or `--hub-url` that is not in the hub list yet is added to it after a successful login, with a nickname derived from its host. When no Hub is current, the Hub logged in to becomes the current Hub after a successful login (`Hub '<name>' (<url>) is now the current hub.`): one given with `--hub` or `--hub-url` (a URL or a nickname), or the directory's link entry Hub, but never one taken from an environment variable. A login never switches a Hub that is already current; when the Hub is not the current Hub, the command prints how to select it (`scion use --hub <name>`).
         - **Settings are never written.** When the Hub came from the current context or from the directory's link entry, the command prints `Logged in to <url> (current hub, selected with 'scion use').` or `Logged in to <url> (the hub this directory is linked to).` A Hub taken from an environment variable is not added to the hub list.
+        - **Hubs behind Identity-Aware Proxy (IAP).** Interactive browser and device-code login cannot traverse an IAP-protected Hub. When `login` detects an IAP challenge, it fails with instructions to set `SCION_TRANSPORT_MODE=iap` and `SCION_TRANSPORT_TOKEN` (or `SCION_TRANSPORT_TOKEN_FILE`) along with a user access token in `SCION_HUB_TOKEN`; see [Workstation CLI access (a person)](/scion/hosted/ha/auth-proxy-iap/#workstation-cli-access-a-person).
     - `logout`: Clear stored credentials. Uses the same Hub URL order. The hub list is not changed.
     - `federation-token`: Obtain a short-lived user access credential that names you to a peer hub, signed with the Hub's OIDC key, and print it. Requires the `federation.project_visitors` [experiment](/scion/reference/experiments/) on the Hub (the Hub answers 404 while it is off or while its OIDC provider is not enabled). Human mode only. A user access token used for this command needs the `federation_token:mint` scope on a hub boundary.
         - Flags:
@@ -1236,13 +1237,14 @@ Manages connection to and interaction with a Scion Hub. Authentication lives und
 - `scion hub token`: Manage user access tokens (scoped, revocable bearer tokens for CI/CD and automation).
     - `create`: Create a new token.
         - Flags:
-            - `--project <string>`: Project ID or name to scope the token to (required).
+            - `--project <string>`: Project ID or name to scope the token to (required unless `--boundary hub`).
+            - `--boundary <project|hub>`: Token boundary (`project` by default, or `hub` for a hub-bound token; cannot be combined with `--project` when `hub`).
             - `--name <string>`: Token name/label (required).
             - `--scopes <scopes>`: Scopes to grant (required). This flag is **repeatable** and also accepts a **comma-separated list** of scopes (e.g., `--scopes agent:read,agent:create --scopes agent:lifecycle`). Strict empty-value validation is enforced.
             - `--expires <duration>`: Expiry: a positive duration in minutes (90m), hours (2h), days (30d) or years (1y, always 365 days), or an RFC 3339 date (2026-12-31T00:00:00Z) (default: 90d). `m` means minutes; there is no month unit (use 30d or 1y for longer).
             - `--purpose <text>`: Optional bounded description of what the token is for (≤128 bytes, single line, no control characters). Immutable after issuance — there is no update command.
             - `--label <key=value>`: Optional bounded label (repeatable). Keys are lowercase `[a-z][a-z0-9_.-]*` (≤32 bytes); values are ≤64 bytes from a restricted charset. A set of attribution-shaped keys (e.g. `user_id`, `agent`, `actor_binding`) are reserved and rejected. Immutable after issuance.
-    - `scopes`: List every scope accepted by `create --scopes`. With `--project <string>`, also report which scopes you may currently select for a token scoped to that project and, for each one you cannot, why. Supports `--json`.
+    - `scopes`: List every scope accepted by `create --scopes`. With `--project <string>` (project boundary) or `--boundary hub` (no `--project`), also report which scopes you may currently select for that boundary and, for each one you cannot, why. Supports `--json`.
     - `list`: List your access tokens.
     - `revoke <token-id>`: Revoke a token (remains visible in listings as revoked).
     - `delete <token-id>`: Permanently delete a token.
@@ -1576,6 +1578,13 @@ Manages the local host as a Runtime Broker. The old name `scion broker` still wo
     - `--broker <name|id>`, `--hub <name>`: Operate on another broker or Hub connection.
     - Confirmation: `provide` asks before adding the provider. Without a terminal on stdin (a script, `ssh` without a TTY, a systemd unit), or at end of input, it fails with a message to re-run with `--yes` instead of waiting for an answer.
 - `scion runtime-broker withdraw`: Remove this broker as a provider from a project.
+- `scion runtime-broker convert --plan` (experimental): Plan a move from this host's legacy, profile-based Runtime Broker to [flat Runtime Broker](/scion/hosted/ha/multi-broker/#flat-runtime-brokers-experimental) instances. It is read-only: it writes no file (it does not even migrate legacy settings keys or the legacy `~/.scion` layout, as other commands do), registers nothing, and sends only `GET` requests to the Hub. It prints five sections: the proposed `server.broker.instances` entries as YAML to paste into the global `settings.yaml` (keys and names are proposals you may edit); the profile -> instance map, with `(no mapping: <code>)` for a profile a blocking finding leaves out; the conversion findings, blocking and notice; the proposed per-instance `maxAgents` split of the legacy Runtime Broker's limit, or the decision it needs; and the agents and projects on the Hub still bound to this Runtime Broker. Agents cannot be moved onto a flat Runtime Broker: finish or recreate them before the host switches. The Hub sections use your Hub login and this host's registered Runtime Broker ID; a section you cannot read is noted, not an error. **Values in the output.** Harness env values are redacted: shown as `<redacted>` in the human output and omitted from the JSON output, which lists their keys only. The human output's settings block otherwise keeps the values you need to paste (image registries, contexts and namespaces). The JSON output carries the proposed instances only in their publishable form, the shape a Runtime Broker reports to the Hub: no env value, kubeconfig path, context or secret target. Findings are printed from their code, settings key path and profiles with a fixed text, never with a settings value. Exit status: `0` when the plan has no blocking finding and needs no decision, `3` when it has a blocking finding or needs an operator decision, `1` on an error (including a host that already declares `server.broker.instances`, or is registered as a flat Runtime Broker). A capacity plan the Hub could not supply (no Hub, or the Runtime Broker's settings not visible to you) does not change the exit status; the summary says so. Available in human mode on Linux and macOS; not inside agents and not on Windows.
+    - `--plan`: Required. Prints the plan without changing anything.
+    - `--profiles <a,b>`: Limit the conversion to these profiles. Default: all profiles in the effective global settings, including those from the built-in defaults.
+    - `--choices <file>`: A YAML or JSON list of reviewed operator choices, each with `target_group` and either `split` (profiles kept on their own instance) or `field` and `chosen_profile` (consolidate a differing field on one profile's value, or `template:<name>` to leave it unset). A choice that cannot be applied is a blocking finding at `choices[<i>]`, not an error.
+    - `--skip-hub`: Plan from the local settings only, with no Hub requests. Also the behaviour when no Hub is configured.
+    - `--show-env-values`: Print harness env values in the human output. The output then contains secrets and must not be shared. Refused with `--format json`.
+    - `--format json`: One JSON object with `schemaVersion: 1`. Its `instances` use the publishable presentation shape (camelCase, with its own `schemaVersion`).
 
 ### `scion server`
 
@@ -1682,8 +1691,10 @@ available inside agent containers.
   the linked project, and checks of this machine's settings (NFS mounts, Kubernetes profiles,
   `flat-placement-preflight` for existing agents pinned to flat Kubernetes Runtime Brokers in
   `server.broker.instances` whose stored pod placement disagrees with their instance's
-  `runtime_target`, the deprecated server hub endpoint source on hosts configured as a server,
-  telemetry, container images, broker credentials).
+  `runtime_target`, `legacy-placement-preflight` on hosts without flat instances for `runtimes`
+  and `profiles` placement settings and existing agents whose stored pod placement disagrees
+  with the resolved operator policy, the deprecated server hub endpoint source on hosts
+  configured as a server, telemetry, container images, broker credentials).
 - **Platform Health**: The Hub's health summary (`GET /api/v1/admin/health/summary`), the same
   data as the [health dashboard](/scion/workstation/dashboard/). It shows the overall status, then
   every "Needs attention" item in the Hub's order (critical items as failures, warnings as

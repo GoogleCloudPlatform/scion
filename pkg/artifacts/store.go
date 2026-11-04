@@ -167,6 +167,18 @@ type Artifact struct {
 	// OrphanedAt is when the owner liveness reconciler found the owner
 	// gone, or nil while the owner is live (or was never checked).
 	OrphanedAt *time.Time
+	// SponsorRef is, for an artifact owned by an agent in a project scope,
+	// the id of the user at the root of the agent's recorded delegation
+	// chain when the artifact was created (ptone/scion#6028): the agent's
+	// delegating user, as SponsorRecorder answered at creation or the
+	// sponsor backfill recorded later for an older artifact. It is ""
+	// when nothing was recorded: a user-owned artifact, an attachment, an
+	// artifact created before sponsors were recorded and not backfilled,
+	// or one whose delegating user could not be resolved. The creation-time
+	// value stands: nothing updates a recorded value. It never gives
+	// access by itself; the steward and review clauses check the user
+	// again on every request.
+	SponsorRef string
 	// MessageProjectID is, for an attachment bound to a message, the project
 	// of that message as the hub derived it at bind time (ptone/scion#4596):
 	// nil while unknown (an unbound upload, or a row bound before migration
@@ -512,6 +524,27 @@ type Store interface {
 	// those it changed, each with its home scope; fewer than limit means none
 	// is left.
 	SetOwnerOrphaned(ctx context.Context, owner Owner, orphaned bool, now time.Time, limit int) ([]ArtifactRef, error)
+
+	// SponsorBackfillDone reports whether the sponsor backfill
+	// (BackfillSponsors) has completed on this database: its ledger name,
+	// migrationSponsorBackfill, is recorded in artifact_migrations.
+	SponsorBackfillDone(ctx context.Context) (bool, error)
+
+	// ListUnsponsoredAgents returns up to limit distinct agent ids, in
+	// order and strictly greater than after ("" = from the start), that
+	// own a live artifact in a project scope with no recorded sponsor
+	// (sponsor_ref NULL).
+	ListUnsponsoredAgents(ctx context.Context, after string, limit int) ([]string, error)
+
+	// SetAgentSponsor records userID as the sponsor of every artifact of
+	// agent agentID in a project scope that has none recorded, and returns
+	// how many it changed. It never changes a recorded sponsor, and never
+	// touches a deleted artifact.
+	SetAgentSponsor(ctx context.Context, agentID, userID string) (int, error)
+
+	// MarkSponsorBackfillDone records migrationSponsorBackfill in
+	// artifact_migrations at now. Recording it again is not an error.
+	MarkSponsorBackfillDone(ctx context.Context, now time.Time) error
 
 	// ListEvents returns the artifact_event rows of an artifact, oldest
 	// first.

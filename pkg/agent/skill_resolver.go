@@ -16,7 +16,6 @@ package agent
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -30,7 +29,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/agentplugin"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
@@ -1417,48 +1415,6 @@ func isLocalhost(host string) bool {
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
-}
-
-// writeResolutionRecord writes the resolution record to disk.
-func writeResolutionRecord(path string, record *SkillResolutionRecord) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return err
-	}
-	data, err := json.MarshalIndent(record, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, data, 0644)
-}
-
-// enumerateLocalSkills lists skills already present in the skills directory
-// (from template's local skills/ dir) and returns them as resolution entries
-// with source "local".
-func enumerateLocalSkills(agentHome, skillsDir string) []SkillResolutionEntry {
-	skillsPath := filepath.Join(agentHome, skillsDir)
-	entries, err := os.ReadDir(skillsPath)
-	if err != nil {
-		return nil
-	}
-
-	var result []SkillResolutionEntry
-	for _, e := range entries {
-		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
-			continue
-		}
-		// An Agent Plugins bundle installed in the skills dir (claude) is
-		// not a skill; the harness loads it as a plugin.
-		if fi, err := os.Lstat(filepath.Join(skillsPath, e.Name(), agentplugin.ManifestFile)); err == nil && fi.Mode().IsRegular() {
-			continue
-		}
-		entry := SkillResolutionEntry{
-			Name:          e.Name(),
-			InstalledPath: filepath.ToSlash(filepath.Join(skillsDir, e.Name())),
-			Source:        "local",
-		}
-		result = append(result, entry)
-	}
-	return result
 }
 
 // collectRequiredSkillURIs returns URIs of non-optional skill references.

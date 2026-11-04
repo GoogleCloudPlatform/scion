@@ -16,6 +16,7 @@ package config
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -110,7 +111,20 @@ func sameDirForComparison(a, b string) bool {
 // the v1 shape first, and a v1 file's hub.project_id is carried to
 // Hub.ProjectID (ptone/scion#5427). No environment variable is read.
 func LoadSettingsFromDir(dir string) (*Settings, error) {
-	s, err := loadSingleDirSettingsView(dir)
+	return loadSettingsFromDirTier(dir, false)
+}
+
+// LoadProjectSettingsFromDir is LoadSettingsFromDir for a PROJECT settings
+// directory (a project's .scion directory or its external project config
+// directory): a settings file that is a symbolic link is refused with an
+// error wrapping ErrSettingsFileRefused. Use LoadSettingsFromDir for the
+// global directory and the server's --config directory.
+func LoadProjectSettingsFromDir(dir string) (*Settings, error) {
+	return loadSettingsFromDirTier(dir, true)
+}
+
+func loadSettingsFromDirTier(dir string, projectTier bool) (*Settings, error) {
+	s, err := loadSingleDirSettingsView(dir, projectTier)
 	if err != nil {
 		return nil, err
 	}
@@ -118,7 +132,7 @@ func LoadSettingsFromDir(dir string) (*Settings, error) {
 	// warning: a file the legacy probe cannot decode gets none, and the
 	// load does not fail for it.
 	raw := koanf.New(".")
-	if _, err := loadSettingsFile(raw, dir); err == nil {
+	if _, err := loadSettingsFileConverting(raw, dir, nil, projectTier); err == nil {
 		if settingsUnused, err := decodeCollectingUnused(raw, settingsProbeStruct(false)); err == nil {
 			warnSettingsUnusedKeys(raw, settingsUnused, func() bool {
 				hasVersioned, _ := detectDirSettingsFormat(dir)
@@ -178,7 +192,7 @@ func loadVersionedSettingsFileOnly(dir string) (*VersionedSettings, []string, er
 		_ = k.Load(rawbytes.Provider(defaultData), yaml.Parser())
 	}
 	legacy := &legacyLayerState{}
-	if _, err := loadSettingsFileConverting(k, dir, legacy); err != nil {
+	if _, err := loadSettingsFileConverting(k, dir, legacy, false); err != nil {
 		return nil, nil, err
 	}
 	warnings := legacy.warnings
@@ -210,7 +224,13 @@ func loadVersionedSettingsFileOnly(dir string) (*VersionedSettings, []string, er
 // loadSettingsFileConverting instead, which also converts a legacy-format
 // file to the v1 shape.
 func loadSettingsFile(k *koanf.Koanf, dir string) (migratedHubProjectID bool, err error) {
-	return loadSettingsFileConverting(k, dir, nil)
+	return loadSettingsFileConverting(k, dir, nil, false)
+}
+
+// loadProjectSettingsFile is loadSettingsFile for a PROJECT settings layer:
+// the settings file must not be a symbolic link (checkSettingsFileNoFollow).
+func loadProjectSettingsFile(k *koanf.Koanf, dir string) (migratedHubProjectID bool, err error) {
+	return loadSettingsFileConverting(k, dir, nil, true)
 }
 
 // loadSettingsFileConverting is loadSettingsFile for the settings loaders.
@@ -218,12 +238,23 @@ func loadSettingsFile(k *koanf.Koanf, dir string) (migratedHubProjectID bool, er
 // v1 shape at its own layer (loadLegacySettingsLayer) before it is merged,
 // and legacy records what the conversion found. A versioned file is loaded
 // as written.
-func loadSettingsFileConverting(k *koanf.Koanf, dir string, legacy *legacyLayerState) (migratedHubProjectID bool, err error) {
+//
+// projectTier is true only for a PROJECT settings layer (a settings file
+// under a project's .scion directory, which can be workspace content): its
+// settings file must not be a symbolic link (checkSettingsFileNoFollow). The
+// global layer and the server's --config layer are the user's or operator's
+// own and are loaded normally, links included.
+func loadSettingsFileConverting(k *koanf.Koanf, dir string, legacy *legacyLayerState, projectTier bool) (migratedHubProjectID bool, err error) {
 	yamlPath := filepath.Join(dir, "settings.yaml")
 	ymlPath := filepath.Join(dir, "settings.yml")
 	jsonPath := filepath.Join(dir, "settings.json")
 
 	load := func(path string, parser koanf.Parser, isYAML bool) (bool, error) {
+		if projectTier {
+			if err := checkSettingsFileNoFollow(path); err != nil {
+				return false, err
+			}
+		}
 		var migrated bool
 		var override string
 		if isYAML {
@@ -284,6 +315,31 @@ func loadSettingsFileConverting(k *koanf.Koanf, dir string, legacy *legacyLayerS
 		return load(jsonPath, json.Parser(), false)
 	}
 	return false, nil
+}
+
+// ErrSettingsFileRefused is wrapped by the error of a settings load that
+// finds the settings file to be a symbolic link or not a regular file. The
+// message never contains a host path.
+var ErrSettingsFileRefused = errors.New("settings file refused")
+
+// checkSettingsFileNoFollow is the entry gate of loadSettingsFileConverting
+// for a project settings layer (projectTier):
+// the settings file at path must be a regular file itself, not a symbolic
+// link (os.Lstat), before any of the loader's reads. It narrows, but does
+// not close, the window in which the file could be swapped for a link
+// between this check and the loader's own path-based reads.
+func checkSettingsFileNoFollow(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("%w: the settings file cannot be inspected", ErrSettingsFileRefused)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%w: the settings file is a symbolic link; replace it with the file itself", ErrSettingsFileRefused)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("%w: the settings file is not a regular file", ErrSettingsFileRefused)
+	}
+	return nil
 }
 
 // unreachableHubGroveIDValue parses path's own content on its own (so YAML
@@ -417,21 +473,65 @@ func GetSettingsPath(dir string) string {
 	return ""
 }
 
-// GetScionAgentConfigPath returns the path to the scion-agent config file,
-// preferring YAML over JSON. Returns empty string if no config file exists.
-func GetScionAgentConfigPath(dir string) string {
-	yamlPath := filepath.Join(dir, "scion-agent.yaml")
-	ymlPath := filepath.Join(dir, "scion-agent.yml")
-	jsonPath := filepath.Join(dir, "scion-agent.json")
+// AgentConfigEntry is what AgentConfigEntryState found for a directory's
+// scion-agent config file.
+type AgentConfigEntry int
 
-	if _, err := os.Stat(yamlPath); err == nil {
-		return yamlPath
+const (
+	// AgentConfigAbsent: no scion-agent.yaml, .yml or .json entry at all.
+	AgentConfigAbsent AgentConfigEntry = iota
+	// AgentConfigRegular: the first entry is a plain regular file with a
+	// single link, the only form Template.LoadConfig reads.
+	AgentConfigRegular
+	// AgentConfigRefused: the first entry exists but is not a plain
+	// single-link regular file (a symbolic link, dangling or not, a hard
+	// link, a directory or a device). Callers must treat it as present and
+	// fail closed: never write, remove, re-provision or purge because of it.
+	AgentConfigRefused
+)
+
+// AgentConfigEntryState reports the state of dir's scion-agent config file:
+// the first of scion-agent.yaml, .yml and .json that has an entry decides
+// (the order Template.LoadConfig reads), examined with os.Lstat so a
+// symbolic link is never followed.
+func AgentConfigEntryState(dir string) AgentConfigEntry {
+	for _, name := range agentConfigFileNames {
+		info, err := os.Lstat(filepath.Join(dir, name))
+		if err != nil {
+			continue
+		}
+		if info.Mode().IsRegular() && agentConfigSingleLink(info) {
+			return AgentConfigRegular
+		}
+		return AgentConfigRefused
 	}
-	if _, err := os.Stat(ymlPath); err == nil {
-		return ymlPath
-	}
-	if _, err := os.Stat(jsonPath); err == nil {
-		return jsonPath
+	return AgentConfigAbsent
+}
+
+// AgentConfigEntryExists reports whether dir has a scion-agent config entry
+// of any kind (AgentConfigEntryState is not AgentConfigAbsent). Decisions
+// that treat "no config" as a reason to write, re-provision or purge use it,
+// so a refused entry is never mistaken for an absent one.
+func AgentConfigEntryExists(dir string) bool {
+	return AgentConfigEntryState(dir) != AgentConfigAbsent
+}
+
+// GetScionAgentConfigPath returns the path to the scion-agent config file,
+// preferring YAML over JSON. Returns empty string if no config file exists,
+// or if the first entry is not a plain single-link regular file (which
+// Template.LoadConfig refuses), so this probe agrees with what is read. Use
+// AgentConfigEntryExists where a refused entry must not count as absent.
+func GetScionAgentConfigPath(dir string) string {
+	for _, name := range agentConfigFileNames {
+		p := filepath.Join(dir, name)
+		info, err := os.Lstat(p)
+		if err != nil {
+			continue
+		}
+		if info.Mode().IsRegular() && agentConfigSingleLink(info) {
+			return p
+		}
+		return ""
 	}
 	return ""
 }
@@ -665,7 +765,7 @@ func warnIfInRepoHasGlobalKeys(inRepoPath, effectivePath string) {
 	}
 
 	probe := koanf.New(".")
-	if _, err := loadSettingsFile(probe, inRepoPath); err != nil {
+	if _, err := loadProjectSettingsFile(probe, inRepoPath); err != nil {
 		return
 	}
 	var keys []string

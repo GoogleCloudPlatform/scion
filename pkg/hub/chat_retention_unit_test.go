@@ -99,6 +99,8 @@ type fakeChatRetentionStore struct {
 	// or topic IDs.
 	conversationSelects    int
 	conversationSelectFail map[string]bool
+	// topicListErr, when set, fails ListChatRetentionDeletedTopics.
+	topicListErr error
 }
 
 // addConv adds a message of a conversation and/or thread.
@@ -150,6 +152,9 @@ func (f *fakeChatRetentionStore) ListChatRetentionDeletedConversations(ctx conte
 }
 
 func (f *fakeChatRetentionStore) ListChatRetentionDeletedTopics(ctx context.Context, cutoff time.Time, after string, limit int) ([]store.ChatRetentionDeletedTopic, error) {
+	if f.topicListErr != nil {
+		return nil, f.topicListErr
+	}
 	var out []store.ChatRetentionDeletedTopic
 	for _, t := range f.topics {
 		if !t.deleted.IsZero() && t.deleted.Before(cutoff) && t.id > after {
@@ -178,6 +183,46 @@ func (f *fakeChatRetentionStore) SelectChatRetentionConversationMessages(ctx con
 			continue
 		}
 		out = append(out, store.ChatRetentionCandidate{ID: m.id, Created: m.created, ProjectID: m.project, ConversationID: m.conv})
+	}
+	return out, nil
+}
+
+func (f *fakeChatRetentionStore) SelectChatRetentionConversationPage(ctx context.Context, conversationID, threadID string, after store.ChatRetentionPosition, limit int) ([]store.ChatRetentionCandidate, error) {
+	f.conversationSelects++
+	if (conversationID == "") == (threadID == "") {
+		return nil, errors.New("exactly one of a conversation and a thread")
+	}
+	var out []store.ChatRetentionCandidate
+	for _, m := range f.msgs { // sorted by (created, id)
+		if len(out) == limit {
+			break
+		}
+		match := (conversationID != "" && m.conv == conversationID) || (threadID != "" && m.conv == "" && m.thread == threadID)
+		if !match || m.state == "pending" || m.state == "deferred" {
+			continue
+		}
+		if !after.IsStart() && (m.created.Before(after.Created) || (m.created.Equal(after.Created) && m.id <= after.ID)) {
+			continue
+		}
+		out = append(out, store.ChatRetentionCandidate{ID: m.id, Created: m.created, ProjectID: m.project, ConversationID: m.conv, ThreadID: m.thread})
+	}
+	return out, nil
+}
+
+func (f *fakeChatRetentionStore) ListChatRetentionRuns(ctx context.Context, filter store.ChatRetentionRunFilter) ([]store.ChatRetentionRun, error) {
+	var out []store.ChatRetentionRun
+	for _, r := range f.runs {
+		if filter.Trigger != "" && r.Trigger != filter.Trigger {
+			continue
+		}
+		if !filter.FinishedAfter.IsZero() && (r.FinishedAt == nil || !r.FinishedAt.After(filter.FinishedAfter)) {
+			continue
+		}
+		out = append(out, *r)
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].StartedAt.After(out[j].StartedAt) })
+	if filter.Limit > 0 && len(out) > filter.Limit {
+		out = out[:filter.Limit]
 	}
 	return out, nil
 }
@@ -219,7 +264,7 @@ func (f *fakeChatRetentionStore) SelectChatRetentionCandidates(ctx context.Conte
 		if m.state == "pending" || m.state == "deferred" {
 			continue
 		}
-		out = append(out, store.ChatRetentionCandidate{ID: m.id, Created: m.created, ProjectID: m.project})
+		out = append(out, store.ChatRetentionCandidate{ID: m.id, Created: m.created, ProjectID: m.project, ConversationID: m.conv, ThreadID: m.thread})
 		if len(out) == limit {
 			break
 		}
@@ -398,6 +443,21 @@ func (f *fakeChatRetentionStore) SaveChatRetentionRun(ctx context.Context, run *
 		}
 	}
 	return errors.New("no such run")
+}
+
+func (f *fakeChatRetentionStore) FailRunningChatRetentionRuns(ctx context.Context, triggers []string, before time.Time, errMsg string, finishedAt time.Time) (int, error) {
+	n := 0
+	for _, r := range f.runs {
+		for _, t := range triggers {
+			if r.Trigger == t && r.Status == store.ChatRetentionStatusRunning && r.StartedAt.Before(before) {
+				r.Status, r.Error = store.ChatRetentionStatusFailed, errMsg
+				fin := finishedAt
+				r.FinishedAt = &fin
+				n++
+			}
+		}
+	}
+	return n, nil
 }
 
 func (f *fakeChatRetentionStore) PruneChatRetentionRuns(ctx context.Context, before time.Time) (int, error) {

@@ -1760,13 +1760,19 @@ func (s *Server) handleAgentGitHubTokenRefresh(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	if project.GitHubInstallationID == nil {
+	// Resolve the token source exactly as agent create does: the agent's
+	// own project, or a token-source project label only when the agent's
+	// source user is authorized for it. The mint below re-verifies the
+	// resolved project's installation association, so a refresh can never
+	// reach an installation a create would not.
+	mintProject := resolveGitHubMintProject(ctx, s.store, s, s.projectsLogger(), agent, project)
+	if mintProject == nil {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
 			"project has no GitHub App installation", nil)
 		return
 	}
 
-	token, expiry, err := s.MintGitHubAppTokenForProject(ctx, project)
+	token, expiry, err := s.MintGitHubAppTokenForProject(ctx, mintProject)
 	if err != nil {
 		// Classify the error to return an appropriate status code.
 		// Configuration errors (bad key, wrong app_id) are 502 (upstream auth failed),

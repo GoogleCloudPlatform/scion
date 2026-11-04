@@ -52,6 +52,15 @@ func EnsureSharedLeafOwned(hostBase, rel string, owner shareddirs.Owner) (fd int
 	return shareddirs.EnsureLeafOwned(hostBase, rel, owner)
 }
 
+// EnsureSharedLeafExpecting is EnsureSharedLeaf for a caller that knows the
+// share's configured nfs uid and gid (expected) but gives new leaves no owner
+// (shareddirs.EnsureLeafExpecting): an existing upper directory with the
+// expected shared layout is not warned about. Nothing is chowned; the zero
+// Owner makes it EnsureSharedLeaf.
+func EnsureSharedLeafExpecting(hostBase, rel string, expected shareddirs.Owner) (fd int, existed bool, err error) {
+	return shareddirs.EnsureLeafExpecting(hostBase, rel, expected)
+}
+
 // EnsureLeaf creates the directory r if it is missing and reports whether it
 // already existed. On a shared backend it is EnsureSharedLeafOwned below r's
 // resolved host base with r's owner (Resolved.Owner), as Open creates it. On the local backend it is the directory created as

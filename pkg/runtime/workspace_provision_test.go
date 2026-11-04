@@ -25,6 +25,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -65,6 +66,7 @@ func initBareGitRepo(t *testing.T) string {
 		"commit", "-m", "initial")
 	runIn(t, workDir, "git", "push", "origin", "main")
 
+	provision.AllowLocalCloneFixture(t, bareDir)
 	return bareDir
 }
 

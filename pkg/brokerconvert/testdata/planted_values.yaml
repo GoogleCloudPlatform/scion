@@ -1,0 +1,25 @@
+schema_version: "1"
+runtimes:
+  cluster:
+    type: kubernetes
+    context: PLANTED-CONTEXT-c41
+    namespace: agents
+    env:
+      KUBECONFIG: /home/operator/PLANTED-KUBECONFIG-c42
+profiles:
+  alpha:
+    runtime: cluster
+    image_registry: reg.example/PLANTED-REGISTRY-A
+    harness_overrides:
+      claude:
+        env:
+          API_TOKEN: PLANTED-ENV-TOKEN-A-c43
+    env:
+      OLD_TOKEN: PLANTED-PROFILE-ENV-c44
+  beta:
+    runtime: cluster
+    image_registry: reg.example/PLANTED-REGISTRY-B
+    harness_overrides:
+      claude:
+        env:
+          API_TOKEN: PLANTED-ENV-TOKEN-B-c45

@@ -250,8 +250,6 @@ func setupFinalizeEnvTest(t *testing.T, ctx context.Context, memStore store.Stor
 	}
 }
 
-func intPtr(i int) *int { return &i }
-
 func (m *mockKeysBrokerClient) ExecuteKeys(ctx context.Context, brokerID, brokerEndpoint, agentSlug string, req agentkeys.BrokerRequest) (agentkeys.BrokerResult, error) {
 	m.calls++
 	m.lastBrokerID = brokerID

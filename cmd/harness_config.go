@@ -843,24 +843,21 @@ func pullHarnessConfigFromHub(hubCtx *HubContext, hc *hubclient.HarnessConfig, t
 
 	name := hc.Name
 
-	destPath := toPath
-	if destPath == "" {
+	var parentDir string
+	if toPath == "" {
 		globalDir, err := config.GetGlobalDir()
 		if err != nil {
 			return fmt.Errorf("failed to get global directory: %w", err)
 		}
-		destPath = filepath.Join(globalDir, "harness-configs", name)
-	} else {
-		var err error
-		destPath, err = filepath.Abs(toPath)
-		if err != nil {
-			return fmt.Errorf("failed to resolve path: %w", err)
-		}
+		parentDir = filepath.Join(globalDir, "harness-configs")
 	}
-
-	if err := os.MkdirAll(destPath, 0755); err != nil {
-		return fmt.Errorf("failed to create destination directory: %w", err)
+	// The destination is opened (and created) before anything is fetched;
+	// files are written through this os.Root so they stay inside it.
+	root, destPath, err := openPullDestination(toPath, parentDir, name)
+	if err != nil {
+		return err
 	}
+	defer func() { _ = root.Close() }()
 
 	fmt.Printf("Requesting download URLs for harness-config '%s'...\n", name)
 	downloadResp, err := hubCtx.Client.HarnessConfigs().RequestDownloadURLs(ctx, hc.ID)
@@ -894,12 +891,6 @@ func pullHarnessConfigFromHub(hubCtx *HubContext, hc *hubclient.HarnessConfig, t
 		pending = append(pending, pendingFile{content: content, relPath: fileInfo.Path, mode: fileInfo.Mode})
 	}
 
-	// Files are written through an os.Root so they stay inside destPath.
-	root, err := os.OpenRoot(destPath)
-	if err != nil {
-		return fmt.Errorf("failed to open destination directory: %w", err)
-	}
-	defer func() { _ = root.Close() }()
 	for _, f := range pending {
 		if err := writeHarnessConfigFile(root, f.relPath, f.content, f.mode); err != nil {
 			return err

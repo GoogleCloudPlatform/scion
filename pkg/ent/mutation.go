@@ -14020,6 +14020,7 @@ type AgentDelegationGrantMutation struct {
 	addagent_generation           *int
 	agent_state_version           *int64
 	addagent_state_version        *int64
+	issued_run_id                 *string
 	issuer_user_id                *string
 	boundary_kind                 *string
 	boundary_project_id           *string
@@ -14335,6 +14336,42 @@ func (m *AgentDelegationGrantMutation) AddedAgentStateVersion() (r int64, exists
 func (m *AgentDelegationGrantMutation) ResetAgentStateVersion() {
 	m.agent_state_version = nil
 	m.addagent_state_version = nil
+}
+
+// SetIssuedRunID sets the "issued_run_id" field.
+func (m *AgentDelegationGrantMutation) SetIssuedRunID(s string) {
+	m.issued_run_id = &s
+}
+
+// IssuedRunID returns the value of the "issued_run_id" field in the mutation.
+func (m *AgentDelegationGrantMutation) IssuedRunID() (r string, exists bool) {
+	v := m.issued_run_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldIssuedRunID returns the old "issued_run_id" field's value of the AgentDelegationGrant entity.
+// If the AgentDelegationGrant object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentDelegationGrantMutation) OldIssuedRunID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldIssuedRunID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldIssuedRunID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldIssuedRunID: %w", err)
+	}
+	return oldValue.IssuedRunID, nil
+}
+
+// ResetIssuedRunID resets all changes to the "issued_run_id" field.
+func (m *AgentDelegationGrantMutation) ResetIssuedRunID() {
+	m.issued_run_id = nil
 }
 
 // SetIssuerUserID sets the "issuer_user_id" field.
@@ -15268,7 +15305,7 @@ func (m *AgentDelegationGrantMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *AgentDelegationGrantMutation) Fields() []string {
-	fields := make([]string, 0, 24)
+	fields := make([]string, 0, 25)
 	if m.agent_id != nil {
 		fields = append(fields, agentdelegationgrant.FieldAgentID)
 	}
@@ -15280,6 +15317,9 @@ func (m *AgentDelegationGrantMutation) Fields() []string {
 	}
 	if m.agent_state_version != nil {
 		fields = append(fields, agentdelegationgrant.FieldAgentStateVersion)
+	}
+	if m.issued_run_id != nil {
+		fields = append(fields, agentdelegationgrant.FieldIssuedRunID)
 	}
 	if m.issuer_user_id != nil {
 		fields = append(fields, agentdelegationgrant.FieldIssuerUserID)
@@ -15357,6 +15397,8 @@ func (m *AgentDelegationGrantMutation) Field(name string) (ent.Value, bool) {
 		return m.AgentGeneration()
 	case agentdelegationgrant.FieldAgentStateVersion:
 		return m.AgentStateVersion()
+	case agentdelegationgrant.FieldIssuedRunID:
+		return m.IssuedRunID()
 	case agentdelegationgrant.FieldIssuerUserID:
 		return m.IssuerUserID()
 	case agentdelegationgrant.FieldBoundaryKind:
@@ -15414,6 +15456,8 @@ func (m *AgentDelegationGrantMutation) OldField(ctx context.Context, name string
 		return m.OldAgentGeneration(ctx)
 	case agentdelegationgrant.FieldAgentStateVersion:
 		return m.OldAgentStateVersion(ctx)
+	case agentdelegationgrant.FieldIssuedRunID:
+		return m.OldIssuedRunID(ctx)
 	case agentdelegationgrant.FieldIssuerUserID:
 		return m.OldIssuerUserID(ctx)
 	case agentdelegationgrant.FieldBoundaryKind:
@@ -15490,6 +15534,13 @@ func (m *AgentDelegationGrantMutation) SetField(name string, value ent.Value) er
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetAgentStateVersion(v)
+		return nil
+	case agentdelegationgrant.FieldIssuedRunID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetIssuedRunID(v)
 		return nil
 	case agentdelegationgrant.FieldIssuerUserID:
 		v, ok := value.(string)
@@ -15811,6 +15862,9 @@ func (m *AgentDelegationGrantMutation) ResetField(name string) error {
 		return nil
 	case agentdelegationgrant.FieldAgentStateVersion:
 		m.ResetAgentStateVersion()
+		return nil
+	case agentdelegationgrant.FieldIssuedRunID:
+		m.ResetIssuedRunID()
 		return nil
 	case agentdelegationgrant.FieldIssuerUserID:
 		m.ResetIssuerUserID()
@@ -66952,6 +67006,9 @@ type NotificationMutation struct {
 	dispatch_outcome     *string
 	dispatch_reason      *string
 	next_attempt_at      *time.Time
+	kind                 *string
+	resource_type        *string
+	resource_id          *string
 	created              *time.Time
 	clearedFields        map[string]struct{}
 	done                 bool
@@ -67564,6 +67621,114 @@ func (m *NotificationMutation) ResetNextAttemptAt() {
 	delete(m.clearedFields, notification.FieldNextAttemptAt)
 }
 
+// SetKind sets the "kind" field.
+func (m *NotificationMutation) SetKind(s string) {
+	m.kind = &s
+}
+
+// Kind returns the value of the "kind" field in the mutation.
+func (m *NotificationMutation) Kind() (r string, exists bool) {
+	v := m.kind
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldKind returns the old "kind" field's value of the Notification entity.
+// If the Notification object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *NotificationMutation) OldKind(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldKind is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldKind requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldKind: %w", err)
+	}
+	return oldValue.Kind, nil
+}
+
+// ResetKind resets all changes to the "kind" field.
+func (m *NotificationMutation) ResetKind() {
+	m.kind = nil
+}
+
+// SetResourceType sets the "resource_type" field.
+func (m *NotificationMutation) SetResourceType(s string) {
+	m.resource_type = &s
+}
+
+// ResourceType returns the value of the "resource_type" field in the mutation.
+func (m *NotificationMutation) ResourceType() (r string, exists bool) {
+	v := m.resource_type
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldResourceType returns the old "resource_type" field's value of the Notification entity.
+// If the Notification object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *NotificationMutation) OldResourceType(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldResourceType is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldResourceType requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldResourceType: %w", err)
+	}
+	return oldValue.ResourceType, nil
+}
+
+// ResetResourceType resets all changes to the "resource_type" field.
+func (m *NotificationMutation) ResetResourceType() {
+	m.resource_type = nil
+}
+
+// SetResourceID sets the "resource_id" field.
+func (m *NotificationMutation) SetResourceID(s string) {
+	m.resource_id = &s
+}
+
+// ResourceID returns the value of the "resource_id" field in the mutation.
+func (m *NotificationMutation) ResourceID() (r string, exists bool) {
+	v := m.resource_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldResourceID returns the old "resource_id" field's value of the Notification entity.
+// If the Notification object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *NotificationMutation) OldResourceID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldResourceID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldResourceID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldResourceID: %w", err)
+	}
+	return oldValue.ResourceID, nil
+}
+
+// ResetResourceID resets all changes to the "resource_id" field.
+func (m *NotificationMutation) ResetResourceID() {
+	m.resource_id = nil
+}
+
 // SetCreated sets the "created" field.
 func (m *NotificationMutation) SetCreated(t time.Time) {
 	m.created = &t
@@ -67634,7 +67799,7 @@ func (m *NotificationMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *NotificationMutation) Fields() []string {
-	fields := make([]string, 0, 14)
+	fields := make([]string, 0, 17)
 	if m.subscription_id != nil {
 		fields = append(fields, notification.FieldSubscriptionID)
 	}
@@ -67674,6 +67839,15 @@ func (m *NotificationMutation) Fields() []string {
 	if m.next_attempt_at != nil {
 		fields = append(fields, notification.FieldNextAttemptAt)
 	}
+	if m.kind != nil {
+		fields = append(fields, notification.FieldKind)
+	}
+	if m.resource_type != nil {
+		fields = append(fields, notification.FieldResourceType)
+	}
+	if m.resource_id != nil {
+		fields = append(fields, notification.FieldResourceID)
+	}
 	if m.created != nil {
 		fields = append(fields, notification.FieldCreated)
 	}
@@ -67711,6 +67885,12 @@ func (m *NotificationMutation) Field(name string) (ent.Value, bool) {
 		return m.DispatchReason()
 	case notification.FieldNextAttemptAt:
 		return m.NextAttemptAt()
+	case notification.FieldKind:
+		return m.Kind()
+	case notification.FieldResourceType:
+		return m.ResourceType()
+	case notification.FieldResourceID:
+		return m.ResourceID()
 	case notification.FieldCreated:
 		return m.Created()
 	}
@@ -67748,6 +67928,12 @@ func (m *NotificationMutation) OldField(ctx context.Context, name string) (ent.V
 		return m.OldDispatchReason(ctx)
 	case notification.FieldNextAttemptAt:
 		return m.OldNextAttemptAt(ctx)
+	case notification.FieldKind:
+		return m.OldKind(ctx)
+	case notification.FieldResourceType:
+		return m.OldResourceType(ctx)
+	case notification.FieldResourceID:
+		return m.OldResourceID(ctx)
 	case notification.FieldCreated:
 		return m.OldCreated(ctx)
 	}
@@ -67849,6 +68035,27 @@ func (m *NotificationMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetNextAttemptAt(v)
+		return nil
+	case notification.FieldKind:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetKind(v)
+		return nil
+	case notification.FieldResourceType:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetResourceType(v)
+		return nil
+	case notification.FieldResourceID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetResourceID(v)
 		return nil
 	case notification.FieldCreated:
 		v, ok := value.(time.Time)
@@ -67968,6 +68175,15 @@ func (m *NotificationMutation) ResetField(name string) error {
 		return nil
 	case notification.FieldNextAttemptAt:
 		m.ResetNextAttemptAt()
+		return nil
+	case notification.FieldKind:
+		m.ResetKind()
+		return nil
+	case notification.FieldResourceType:
+		m.ResetResourceType()
+		return nil
+	case notification.FieldResourceID:
+		m.ResetResourceID()
 		return nil
 	case notification.FieldCreated:
 		m.ResetCreated()
@@ -78109,56 +78325,59 @@ func (m *RoleDefinitionMutation) ResetEdge(name string) error {
 // RuntimeBrokerMutation represents an operation that mutates the RuntimeBroker nodes in the graph.
 type RuntimeBrokerMutation struct {
 	config
-	op                               Op
-	typ                              string
-	id                               *uuid.UUID
-	name                             *string
-	slug                             *string
-	mode                             *string
-	version                          *string
-	lock_version                     *int64
-	addlock_version                  *int64
-	status                           *string
-	connection_state                 *string
-	last_heartbeat                   *time.Time
-	capabilities                     *string
-	supported_harnesses              *string
-	resources                        *string
-	runtimes                         *string
-	default_profile                  *string
-	workspace_storage                *string
-	health                           *string
-	labels                           *map[string]string
-	annotations                      *map[string]string
-	endpoint                         *string
-	created_by                       *string
-	auto_provide                     *bool
-	gcp_host_service_account_email   *string
-	gcp_host_project_id              *string
-	gcp_host_source                  *string
-	host_identity_observed_email     *string
-	host_identity_observation        *string
-	host_identity_observed_at        *time.Time
-	connected_hub_id                 *string
-	connected_session_id             *string
-	connected_at                     *time.Time
-	runtime_target_id                *string
-	runtime_target_type              *string
-	runtime_target_display_name      *string
-	runtime_target_presentation      *string
-	runtime_target_presentation_hash *string
-	presentation_epoch               *int64
-	addpresentation_epoch            *int64
-	presentation_seq                 *int64
-	addpresentation_seq              *int64
-	presentation_fenced_at           *time.Time
-	presentation_observed_at         *time.Time
-	created                          *time.Time
-	updated                          *time.Time
-	clearedFields                    map[string]struct{}
-	done                             bool
-	oldValue                         func(context.Context) (*RuntimeBroker, error)
-	predicates                       []predicate.RuntimeBroker
+	op                                Op
+	typ                               string
+	id                                *uuid.UUID
+	name                              *string
+	slug                              *string
+	mode                              *string
+	version                           *string
+	lock_version                      *int64
+	addlock_version                   *int64
+	status                            *string
+	connection_state                  *string
+	last_heartbeat                    *time.Time
+	capabilities                      *string
+	supported_harnesses               *string
+	resources                         *string
+	runtimes                          *string
+	default_profile                   *string
+	workspace_storage                 *string
+	health                            *string
+	labels                            *map[string]string
+	annotations                       *map[string]string
+	endpoint                          *string
+	created_by                        *string
+	auto_provide                      *bool
+	gcp_host_service_account_email    *string
+	gcp_host_project_id               *string
+	gcp_host_source                   *string
+	host_identity_observed_email      *string
+	host_identity_observation         *string
+	host_identity_observed_at         *time.Time
+	connected_hub_id                  *string
+	connected_session_id              *string
+	connected_at                      *time.Time
+	runtime_target_id                 *string
+	runtime_target_type               *string
+	runtime_target_display_name       *string
+	runtime_target_presentation       *string
+	runtime_target_presentation_hash  *string
+	presentation_epoch                *int64
+	addpresentation_epoch             *int64
+	presentation_seq                  *int64
+	addpresentation_seq               *int64
+	presentation_fenced_at            *time.Time
+	presentation_observed_at          *time.Time
+	conversion_plan_presentation      *string
+	conversion_plan_presentation_hash *string
+	conversion_plan_observed_at       *time.Time
+	created                           *time.Time
+	updated                           *time.Time
+	clearedFields                     map[string]struct{}
+	done                              bool
+	oldValue                          func(context.Context) (*RuntimeBroker, error)
+	predicates                        []predicate.RuntimeBroker
 }
 
 var _ ent.Mutation = (*RuntimeBrokerMutation)(nil)
@@ -80098,6 +80317,153 @@ func (m *RuntimeBrokerMutation) ResetPresentationObservedAt() {
 	delete(m.clearedFields, runtimebroker.FieldPresentationObservedAt)
 }
 
+// SetConversionPlanPresentation sets the "conversion_plan_presentation" field.
+func (m *RuntimeBrokerMutation) SetConversionPlanPresentation(s string) {
+	m.conversion_plan_presentation = &s
+}
+
+// ConversionPlanPresentation returns the value of the "conversion_plan_presentation" field in the mutation.
+func (m *RuntimeBrokerMutation) ConversionPlanPresentation() (r string, exists bool) {
+	v := m.conversion_plan_presentation
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldConversionPlanPresentation returns the old "conversion_plan_presentation" field's value of the RuntimeBroker entity.
+// If the RuntimeBroker object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RuntimeBrokerMutation) OldConversionPlanPresentation(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldConversionPlanPresentation is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldConversionPlanPresentation requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldConversionPlanPresentation: %w", err)
+	}
+	return oldValue.ConversionPlanPresentation, nil
+}
+
+// ClearConversionPlanPresentation clears the value of the "conversion_plan_presentation" field.
+func (m *RuntimeBrokerMutation) ClearConversionPlanPresentation() {
+	m.conversion_plan_presentation = nil
+	m.clearedFields[runtimebroker.FieldConversionPlanPresentation] = struct{}{}
+}
+
+// ConversionPlanPresentationCleared returns if the "conversion_plan_presentation" field was cleared in this mutation.
+func (m *RuntimeBrokerMutation) ConversionPlanPresentationCleared() bool {
+	_, ok := m.clearedFields[runtimebroker.FieldConversionPlanPresentation]
+	return ok
+}
+
+// ResetConversionPlanPresentation resets all changes to the "conversion_plan_presentation" field.
+func (m *RuntimeBrokerMutation) ResetConversionPlanPresentation() {
+	m.conversion_plan_presentation = nil
+	delete(m.clearedFields, runtimebroker.FieldConversionPlanPresentation)
+}
+
+// SetConversionPlanPresentationHash sets the "conversion_plan_presentation_hash" field.
+func (m *RuntimeBrokerMutation) SetConversionPlanPresentationHash(s string) {
+	m.conversion_plan_presentation_hash = &s
+}
+
+// ConversionPlanPresentationHash returns the value of the "conversion_plan_presentation_hash" field in the mutation.
+func (m *RuntimeBrokerMutation) ConversionPlanPresentationHash() (r string, exists bool) {
+	v := m.conversion_plan_presentation_hash
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldConversionPlanPresentationHash returns the old "conversion_plan_presentation_hash" field's value of the RuntimeBroker entity.
+// If the RuntimeBroker object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RuntimeBrokerMutation) OldConversionPlanPresentationHash(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldConversionPlanPresentationHash is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldConversionPlanPresentationHash requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldConversionPlanPresentationHash: %w", err)
+	}
+	return oldValue.ConversionPlanPresentationHash, nil
+}
+
+// ClearConversionPlanPresentationHash clears the value of the "conversion_plan_presentation_hash" field.
+func (m *RuntimeBrokerMutation) ClearConversionPlanPresentationHash() {
+	m.conversion_plan_presentation_hash = nil
+	m.clearedFields[runtimebroker.FieldConversionPlanPresentationHash] = struct{}{}
+}
+
+// ConversionPlanPresentationHashCleared returns if the "conversion_plan_presentation_hash" field was cleared in this mutation.
+func (m *RuntimeBrokerMutation) ConversionPlanPresentationHashCleared() bool {
+	_, ok := m.clearedFields[runtimebroker.FieldConversionPlanPresentationHash]
+	return ok
+}
+
+// ResetConversionPlanPresentationHash resets all changes to the "conversion_plan_presentation_hash" field.
+func (m *RuntimeBrokerMutation) ResetConversionPlanPresentationHash() {
+	m.conversion_plan_presentation_hash = nil
+	delete(m.clearedFields, runtimebroker.FieldConversionPlanPresentationHash)
+}
+
+// SetConversionPlanObservedAt sets the "conversion_plan_observed_at" field.
+func (m *RuntimeBrokerMutation) SetConversionPlanObservedAt(t time.Time) {
+	m.conversion_plan_observed_at = &t
+}
+
+// ConversionPlanObservedAt returns the value of the "conversion_plan_observed_at" field in the mutation.
+func (m *RuntimeBrokerMutation) ConversionPlanObservedAt() (r time.Time, exists bool) {
+	v := m.conversion_plan_observed_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldConversionPlanObservedAt returns the old "conversion_plan_observed_at" field's value of the RuntimeBroker entity.
+// If the RuntimeBroker object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RuntimeBrokerMutation) OldConversionPlanObservedAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldConversionPlanObservedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldConversionPlanObservedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldConversionPlanObservedAt: %w", err)
+	}
+	return oldValue.ConversionPlanObservedAt, nil
+}
+
+// ClearConversionPlanObservedAt clears the value of the "conversion_plan_observed_at" field.
+func (m *RuntimeBrokerMutation) ClearConversionPlanObservedAt() {
+	m.conversion_plan_observed_at = nil
+	m.clearedFields[runtimebroker.FieldConversionPlanObservedAt] = struct{}{}
+}
+
+// ConversionPlanObservedAtCleared returns if the "conversion_plan_observed_at" field was cleared in this mutation.
+func (m *RuntimeBrokerMutation) ConversionPlanObservedAtCleared() bool {
+	_, ok := m.clearedFields[runtimebroker.FieldConversionPlanObservedAt]
+	return ok
+}
+
+// ResetConversionPlanObservedAt resets all changes to the "conversion_plan_observed_at" field.
+func (m *RuntimeBrokerMutation) ResetConversionPlanObservedAt() {
+	m.conversion_plan_observed_at = nil
+	delete(m.clearedFields, runtimebroker.FieldConversionPlanObservedAt)
+}
+
 // SetCreated sets the "created" field.
 func (m *RuntimeBrokerMutation) SetCreated(t time.Time) {
 	m.created = &t
@@ -80204,7 +80570,7 @@ func (m *RuntimeBrokerMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *RuntimeBrokerMutation) Fields() []string {
-	fields := make([]string, 0, 40)
+	fields := make([]string, 0, 43)
 	if m.name != nil {
 		fields = append(fields, runtimebroker.FieldName)
 	}
@@ -80319,6 +80685,15 @@ func (m *RuntimeBrokerMutation) Fields() []string {
 	if m.presentation_observed_at != nil {
 		fields = append(fields, runtimebroker.FieldPresentationObservedAt)
 	}
+	if m.conversion_plan_presentation != nil {
+		fields = append(fields, runtimebroker.FieldConversionPlanPresentation)
+	}
+	if m.conversion_plan_presentation_hash != nil {
+		fields = append(fields, runtimebroker.FieldConversionPlanPresentationHash)
+	}
+	if m.conversion_plan_observed_at != nil {
+		fields = append(fields, runtimebroker.FieldConversionPlanObservedAt)
+	}
 	if m.created != nil {
 		fields = append(fields, runtimebroker.FieldCreated)
 	}
@@ -80409,6 +80784,12 @@ func (m *RuntimeBrokerMutation) Field(name string) (ent.Value, bool) {
 		return m.PresentationFencedAt()
 	case runtimebroker.FieldPresentationObservedAt:
 		return m.PresentationObservedAt()
+	case runtimebroker.FieldConversionPlanPresentation:
+		return m.ConversionPlanPresentation()
+	case runtimebroker.FieldConversionPlanPresentationHash:
+		return m.ConversionPlanPresentationHash()
+	case runtimebroker.FieldConversionPlanObservedAt:
+		return m.ConversionPlanObservedAt()
 	case runtimebroker.FieldCreated:
 		return m.Created()
 	case runtimebroker.FieldUpdated:
@@ -80498,6 +80879,12 @@ func (m *RuntimeBrokerMutation) OldField(ctx context.Context, name string) (ent.
 		return m.OldPresentationFencedAt(ctx)
 	case runtimebroker.FieldPresentationObservedAt:
 		return m.OldPresentationObservedAt(ctx)
+	case runtimebroker.FieldConversionPlanPresentation:
+		return m.OldConversionPlanPresentation(ctx)
+	case runtimebroker.FieldConversionPlanPresentationHash:
+		return m.OldConversionPlanPresentationHash(ctx)
+	case runtimebroker.FieldConversionPlanObservedAt:
+		return m.OldConversionPlanObservedAt(ctx)
 	case runtimebroker.FieldCreated:
 		return m.OldCreated(ctx)
 	case runtimebroker.FieldUpdated:
@@ -80777,6 +81164,27 @@ func (m *RuntimeBrokerMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetPresentationObservedAt(v)
 		return nil
+	case runtimebroker.FieldConversionPlanPresentation:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetConversionPlanPresentation(v)
+		return nil
+	case runtimebroker.FieldConversionPlanPresentationHash:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetConversionPlanPresentationHash(v)
+		return nil
+	case runtimebroker.FieldConversionPlanObservedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetConversionPlanObservedAt(v)
+		return nil
 	case runtimebroker.FieldCreated:
 		v, ok := value.(time.Time)
 		if !ok {
@@ -80953,6 +81361,15 @@ func (m *RuntimeBrokerMutation) ClearedFields() []string {
 	if m.FieldCleared(runtimebroker.FieldPresentationObservedAt) {
 		fields = append(fields, runtimebroker.FieldPresentationObservedAt)
 	}
+	if m.FieldCleared(runtimebroker.FieldConversionPlanPresentation) {
+		fields = append(fields, runtimebroker.FieldConversionPlanPresentation)
+	}
+	if m.FieldCleared(runtimebroker.FieldConversionPlanPresentationHash) {
+		fields = append(fields, runtimebroker.FieldConversionPlanPresentationHash)
+	}
+	if m.FieldCleared(runtimebroker.FieldConversionPlanObservedAt) {
+		fields = append(fields, runtimebroker.FieldConversionPlanObservedAt)
+	}
 	return fields
 }
 
@@ -81059,6 +81476,15 @@ func (m *RuntimeBrokerMutation) ClearField(name string) error {
 		return nil
 	case runtimebroker.FieldPresentationObservedAt:
 		m.ClearPresentationObservedAt()
+		return nil
+	case runtimebroker.FieldConversionPlanPresentation:
+		m.ClearConversionPlanPresentation()
+		return nil
+	case runtimebroker.FieldConversionPlanPresentationHash:
+		m.ClearConversionPlanPresentationHash()
+		return nil
+	case runtimebroker.FieldConversionPlanObservedAt:
+		m.ClearConversionPlanObservedAt()
 		return nil
 	}
 	return fmt.Errorf("unknown RuntimeBroker nullable field %s", name)
@@ -81181,6 +81607,15 @@ func (m *RuntimeBrokerMutation) ResetField(name string) error {
 		return nil
 	case runtimebroker.FieldPresentationObservedAt:
 		m.ResetPresentationObservedAt()
+		return nil
+	case runtimebroker.FieldConversionPlanPresentation:
+		m.ResetConversionPlanPresentation()
+		return nil
+	case runtimebroker.FieldConversionPlanPresentationHash:
+		m.ResetConversionPlanPresentationHash()
+		return nil
+	case runtimebroker.FieldConversionPlanObservedAt:
+		m.ResetConversionPlanObservedAt()
 		return nil
 	case runtimebroker.FieldCreated:
 		m.ResetCreated()

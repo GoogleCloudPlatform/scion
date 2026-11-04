@@ -66,6 +66,12 @@ func (s *Server) handleAdminMaintenanceOps(w http.ResponseWriter, r *http.Reques
 	parts := strings.SplitN(subPath, "/", 3)
 	key := parts[0]
 
+	// An operation of an experiment that is off does not exist.
+	if !s.maintenanceOperationAvailable(key) {
+		writeError(w, http.StatusNotFound, ErrCodeNotFound, "Operation not found", nil)
+		return
+	}
+
 	if len(parts) == 1 {
 		if r.Method != http.MethodGet {
 			MethodNotAllowed(w, http.MethodGet)
@@ -359,6 +365,10 @@ func (s *Server) resolveMaintenanceExecutor(key string) (MaintenanceExecutor, er
 		return &ProjectStorageMigrateExecutor{srv: s}, nil
 	case entadapter.ChatStarReconcileKey:
 		return &ChatStarReconcileExecutor{srv: s}, nil
+	case entadapter.ChatRetentionPreviewKey:
+		return &ChatRetentionPreviewExecutor{srv: s}, nil
+	case entadapter.ChatRetentionRunKey:
+		return &ChatRetentionRunExecutor{srv: s}, nil
 	case "pull-images":
 		log.Debug("Resolved pull-images executor",
 			"runtime_bin", mc.RuntimeBin, "registry", config.RedactImageRegistry(s.maintenanceImageRegistry()),
@@ -499,6 +509,12 @@ func (s *Server) executeOperation(w http.ResponseWriter, r *http.Request, key st
 			return
 		}
 	}
+	if stringParamOperations[key] {
+		if err := checkStringParams(body); err != nil {
+			writeMaintenanceRequestError(w, err)
+			return
+		}
+	}
 
 	// Resolve the executor.
 	executor, err := s.resolveMaintenanceExecutor(key)
@@ -514,6 +530,11 @@ func (s *Server) executeOperation(w http.ResponseWriter, r *http.Request, key st
 			writeMaintenanceRequestError(w, err)
 			return
 		}
+	}
+
+	// Executors that record who started them get the caller's user ID.
+	if a, ok := executor.(maintenanceActorSetter); ok {
+		a.setMaintenanceActor(user.ID())
 	}
 
 	// Checks that need a release lookup (cross-channel order, the floor of
@@ -636,6 +657,9 @@ func (s *Server) listMaintenanceOperations(w http.ResponseWriter, r *http.Reques
 	devBinaries := os.Getenv("SCION_DEV_BINARIES") != ""
 	for _, op := range ops {
 		if op.Key == "rebuild-container-binaries" && !devBinaries {
+			continue
+		}
+		if !s.maintenanceOperationAvailable(op.Key) {
 			continue
 		}
 		if op.Category == store.MaintenanceCategoryMigration {

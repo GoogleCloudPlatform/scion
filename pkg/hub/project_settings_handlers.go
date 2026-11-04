@@ -1001,8 +1001,10 @@ func applyProjectDefaults(ac *store.AgentAppliedConfig, project *store.Project) 
 
 	settings := projectSettingsFromAnnotations(project)
 
-	// Apply default harness config (only if not already set)
-	if ac.HarnessConfig == "" && settings.DefaultHarnessConfig != "" {
+	// Apply default harness config (only if not already set, and only a
+	// harness-config name: deriveAgentConfig drops any other value with a
+	// warning before this runs, and this fill must not put it back).
+	if ac.HarnessConfig == "" && settings.DefaultHarnessConfig != "" && harnessConfigNameAllowed(settings.DefaultHarnessConfig) {
 		ac.HarnessConfig = settings.DefaultHarnessConfig
 	}
 

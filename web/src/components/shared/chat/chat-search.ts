@@ -194,7 +194,7 @@ export class ScionChatSearch extends LitElement {
       gap: 0.125rem;
       padding: 0.625rem 0.75rem;
       cursor: pointer;
-      border-bottom: 1px solid var(--scion-border-subtle, #f1f5f9);
+      border-bottom: 1px solid var(--scion-bg-subtle, #f1f5f9);
       transition: background 0.1s;
     }
 

@@ -109,7 +109,9 @@ func TestPromoteLegacyMarker_SharedPlain(t *testing.T) {
 	// The next start: no clone (the URL does not exist) and no chown.
 	clones := countGitClones(t)
 	paths := recordLchown(t, nil)
-	require.NoError(t, ProvisionShared(stateDirInput(ws, stateDir, filepath.Join(t.TempDir(), "missing.git"), store.SharingModeSharedPlain)))
+	missing := filepath.Join(t.TempDir(), "missing.git")
+	AllowLocalCloneFixture(t, missing)
+	require.NoError(t, ProvisionShared(stateDirInput(ws, stateDir, missing, store.SharingModeSharedPlain)))
 	assert.Equal(t, 0, clones())
 	assert.Empty(t, *paths, "a promoted workspace is not chowned again")
 
@@ -136,7 +138,9 @@ func TestPromoteLegacyMarker_WorktreePerAgentLiveWorktrees(t *testing.T) {
 
 	clones := countGitClones(t)
 	paths := recordLchown(t, nil)
-	require.NoError(t, ProvisionShared(mountedWorktreeInput(ws, filepath.Join(t.TempDir(), "missing.git"), "agent-1", "agent-one")))
+	missing := filepath.Join(t.TempDir(), "missing.git")
+	AllowLocalCloneFixture(t, missing)
+	require.NoError(t, ProvisionShared(mountedWorktreeInput(ws, missing, "agent-1", "agent-one")))
 	assert.Equal(t, 0, clones())
 	for _, p := range *paths {
 		assert.NotEqual(t, filepath.Join(ws, "README.md"), p, "the shared checkout was chowned again")

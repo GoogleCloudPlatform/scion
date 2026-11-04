@@ -41,10 +41,12 @@ func brokerAgentDir(projectPath, agentName string, sharedWorkspace bool, hubProj
 }
 
 // IsProvisioned reports whether agentName has been provisioned on this
-// broker: its broker-side agent dir holds a scion-agent config.
+// broker: its broker-side agent dir holds a scion-agent config entry. A
+// refused entry (a link, a hard link, not a regular file) counts as
+// provisioned, so it never leads to provisioning over it.
 func IsProvisioned(projectPath, agentName string, sharedWorkspace bool, hubProjectID string) bool {
 	agentDir, ok := brokerAgentDir(projectPath, agentName, sharedWorkspace, hubProjectID)
-	return ok && config.ScionAgentConfigExists(agentDir)
+	return ok && config.AgentConfigEntryExists(agentDir)
 }
 
 // PersistedHarnessConfig returns the harness-config name recorded in

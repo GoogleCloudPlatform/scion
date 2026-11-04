@@ -222,3 +222,42 @@ func TestSharedDirHostPath(t *testing.T) {
 		})
 	}
 }
+
+// EnsureSharedDirs checks every name with api.ValidateSharedDirs before it
+// creates anything: an invalid name (alone or among valid ones) returns an
+// error and leaves the tree exactly as it was (ptone/scion#6881).
+func TestEnsureSharedDirs_RefusesInvalidNames(t *testing.T) {
+	list := func(root string) []string {
+		var out []string
+		require.NoError(t, filepath.WalkDir(root, func(p string, _ os.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			rel, err := filepath.Rel(root, p)
+			if err != nil {
+				return err
+			}
+			out = append(out, rel)
+			return nil
+		}))
+		return out
+	}
+	for _, bad := range []string{"..", "../escape", "../../outside", "a/b", "/abs", "", "Upper", "-x"} {
+		t.Run(bad, func(t *testing.T) {
+			for _, dirs := range [][]api.SharedDir{
+				{{Name: bad}},
+				{{Name: "build-cache"}, {Name: bad}},
+			} {
+				tmpDir := t.TempDir()
+				projectDir := filepath.Join(tmpDir, "project-configs", "test__abc12345", ".scion")
+				require.NoError(t, os.MkdirAll(projectDir, 0755))
+				before := list(tmpDir)
+
+				err := EnsureSharedDirs(projectDir, dirs)
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "shared dirs:")
+				assert.Equal(t, before, list(tmpDir), "nothing is created, not even the valid name")
+			}
+		})
+	}
+}

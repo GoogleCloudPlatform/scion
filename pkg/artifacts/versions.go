@@ -144,6 +144,10 @@ func (s *Service) handleCreate(w http.ResponseWriter, r *http.Request) {
 		OwnerKind: kind, OwnerRef: ref, Key: key, Title: title, CreatedAt: now, UpdatedAt: now,
 		ExpiresAt: retentionExpiry(b.currentLimits(ctx), now),
 	}
+	// The delegating user of an agent creating the artifact, resolved by
+	// the host from the agent's delegation chain (ptone/scion#6028); never
+	// from the request.
+	a.SponsorRef = s.sponsorFor(ctx, kind, ref, a.ScopeKind)
 	v, files := pendingVersion(a.ID, req, kind, ref, now, nil)
 	v.Seq = 1
 	g := Grant{

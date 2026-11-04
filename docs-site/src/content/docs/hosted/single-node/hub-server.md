@@ -222,6 +222,7 @@ Administrators can trigger critical infrastructure operations directly from the 
 - **Rebuild Web (`rebuild-web`)**: Recompiles the web frontend assets.
 - **Pull Images (`pull-images`)**: Triggers the Docker/Podman executor to pull the latest agent container images.
 - **Starred Messages Reconciliation (`chat-star-reconcile`)**: Checks every stored star until nothing is left to update or remove. Run it before enabling starred messages again after a downgrade; see [Starred messages rollout](#starred-messages-rollout).
+- **Chat Retention Preview (`chat-retention-preview`)** and **Chat Retention Run (`chat-retention-run`)**: Count what the chat retention sweep would delete without deleting anything, and run the sweep once now. Listed only while the `hub.chat_retention` experiment is on; see [Chat Retention](/scion/reference/admin-settings/#chat-retention).
 - **Restart Hub**: Initiates a fire-and-forget server restart (`POST /api/v1/admin/maintenance/restart`) via systemd, restricted to administrators. A modal confirmation dialog prevents accidental triggers of restarts. It is refused with `409 Conflict` while an **Update Binary** or **Rebuild Server** run is running, and once accepted it holds back new update and rebuild runs (also `409 Conflict`) until the Hub is back, for at most 2 minutes. An update that is already waiting for its own restart does not block it.
 
 ### Migrations

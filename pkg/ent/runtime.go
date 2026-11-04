@@ -439,40 +439,44 @@ func init() {
 	agentdelegationgrantDescAgentStateVersion := agentdelegationgrantFields[4].Descriptor()
 	// agentdelegationgrant.DefaultAgentStateVersion holds the default value on creation for the agent_state_version field.
 	agentdelegationgrant.DefaultAgentStateVersion = agentdelegationgrantDescAgentStateVersion.Default.(int64)
+	// agentdelegationgrantDescIssuedRunID is the schema descriptor for issued_run_id field.
+	agentdelegationgrantDescIssuedRunID := agentdelegationgrantFields[5].Descriptor()
+	// agentdelegationgrant.DefaultIssuedRunID holds the default value on creation for the issued_run_id field.
+	agentdelegationgrant.DefaultIssuedRunID = agentdelegationgrantDescIssuedRunID.Default.(string)
 	// agentdelegationgrantDescIssuerUserID is the schema descriptor for issuer_user_id field.
-	agentdelegationgrantDescIssuerUserID := agentdelegationgrantFields[5].Descriptor()
+	agentdelegationgrantDescIssuerUserID := agentdelegationgrantFields[6].Descriptor()
 	// agentdelegationgrant.IssuerUserIDValidator is a validator for the "issuer_user_id" field. It is called by the builders before save.
 	agentdelegationgrant.IssuerUserIDValidator = agentdelegationgrantDescIssuerUserID.Validators[0].(func(string) error)
 	// agentdelegationgrantDescBoundaryKind is the schema descriptor for boundary_kind field.
-	agentdelegationgrantDescBoundaryKind := agentdelegationgrantFields[6].Descriptor()
+	agentdelegationgrantDescBoundaryKind := agentdelegationgrantFields[7].Descriptor()
 	// agentdelegationgrant.BoundaryKindValidator is a validator for the "boundary_kind" field. It is called by the builders before save.
 	agentdelegationgrant.BoundaryKindValidator = agentdelegationgrantDescBoundaryKind.Validators[0].(func(string) error)
 	// agentdelegationgrantDescCeilingPermissionIds is the schema descriptor for ceiling_permission_ids field.
-	agentdelegationgrantDescCeilingPermissionIds := agentdelegationgrantFields[9].Descriptor()
+	agentdelegationgrantDescCeilingPermissionIds := agentdelegationgrantFields[10].Descriptor()
 	// agentdelegationgrant.CeilingPermissionIdsValidator is a validator for the "ceiling_permission_ids" field. It is called by the builders before save.
 	agentdelegationgrant.CeilingPermissionIdsValidator = agentdelegationgrantDescCeilingPermissionIds.Validators[0].(func(string) error)
 	// agentdelegationgrantDescName is the schema descriptor for name field.
-	agentdelegationgrantDescName := agentdelegationgrantFields[10].Descriptor()
+	agentdelegationgrantDescName := agentdelegationgrantFields[11].Descriptor()
 	// agentdelegationgrant.NameValidator is a validator for the "name" field. It is called by the builders before save.
 	agentdelegationgrant.NameValidator = agentdelegationgrantDescName.Validators[0].(func(string) error)
 	// agentdelegationgrantDescAllowSubdelegation is the schema descriptor for allow_subdelegation field.
-	agentdelegationgrantDescAllowSubdelegation := agentdelegationgrantFields[13].Descriptor()
+	agentdelegationgrantDescAllowSubdelegation := agentdelegationgrantFields[14].Descriptor()
 	// agentdelegationgrant.DefaultAllowSubdelegation holds the default value on creation for the allow_subdelegation field.
 	agentdelegationgrant.DefaultAllowSubdelegation = agentdelegationgrantDescAllowSubdelegation.Default.(bool)
 	// agentdelegationgrantDescDepth is the schema descriptor for depth field.
-	agentdelegationgrantDescDepth := agentdelegationgrantFields[15].Descriptor()
+	agentdelegationgrantDescDepth := agentdelegationgrantFields[16].Descriptor()
 	// agentdelegationgrant.DefaultDepth holds the default value on creation for the depth field.
 	agentdelegationgrant.DefaultDepth = agentdelegationgrantDescDepth.Default.(int)
 	// agentdelegationgrantDescMaxCredentialTTLSeconds is the schema descriptor for max_credential_ttl_seconds field.
-	agentdelegationgrantDescMaxCredentialTTLSeconds := agentdelegationgrantFields[16].Descriptor()
+	agentdelegationgrantDescMaxCredentialTTLSeconds := agentdelegationgrantFields[17].Descriptor()
 	// agentdelegationgrant.MaxCredentialTTLSecondsValidator is a validator for the "max_credential_ttl_seconds" field. It is called by the builders before save.
 	agentdelegationgrant.MaxCredentialTTLSecondsValidator = agentdelegationgrantDescMaxCredentialTTLSeconds.Validators[0].(func(int) error)
 	// agentdelegationgrantDescCreated is the schema descriptor for created field.
-	agentdelegationgrantDescCreated := agentdelegationgrantFields[18].Descriptor()
+	agentdelegationgrantDescCreated := agentdelegationgrantFields[19].Descriptor()
 	// agentdelegationgrant.DefaultCreated holds the default value on creation for the created field.
 	agentdelegationgrant.DefaultCreated = agentdelegationgrantDescCreated.Default.(func() time.Time)
 	// agentdelegationgrantDescIssuanceAuditID is the schema descriptor for issuance_audit_id field.
-	agentdelegationgrantDescIssuanceAuditID := agentdelegationgrantFields[23].Descriptor()
+	agentdelegationgrantDescIssuanceAuditID := agentdelegationgrantFields[24].Descriptor()
 	// agentdelegationgrant.IssuanceAuditIDValidator is a validator for the "issuance_audit_id" field. It is called by the builders before save.
 	agentdelegationgrant.IssuanceAuditIDValidator = agentdelegationgrantDescIssuanceAuditID.Validators[0].(func(string) error)
 	// agentdelegationgrantDescID is the schema descriptor for id field.
@@ -2091,8 +2095,20 @@ func init() {
 	notificationDescDispatchReason := notificationFields[12].Descriptor()
 	// notification.DefaultDispatchReason holds the default value on creation for the dispatch_reason field.
 	notification.DefaultDispatchReason = notificationDescDispatchReason.Default.(string)
+	// notificationDescKind is the schema descriptor for kind field.
+	notificationDescKind := notificationFields[14].Descriptor()
+	// notification.DefaultKind holds the default value on creation for the kind field.
+	notification.DefaultKind = notificationDescKind.Default.(string)
+	// notificationDescResourceType is the schema descriptor for resource_type field.
+	notificationDescResourceType := notificationFields[15].Descriptor()
+	// notification.DefaultResourceType holds the default value on creation for the resource_type field.
+	notification.DefaultResourceType = notificationDescResourceType.Default.(string)
+	// notificationDescResourceID is the schema descriptor for resource_id field.
+	notificationDescResourceID := notificationFields[16].Descriptor()
+	// notification.DefaultResourceID holds the default value on creation for the resource_id field.
+	notification.DefaultResourceID = notificationDescResourceID.Default.(string)
 	// notificationDescCreated is the schema descriptor for created field.
-	notificationDescCreated := notificationFields[14].Descriptor()
+	notificationDescCreated := notificationFields[17].Descriptor()
 	// notification.DefaultCreated holds the default value on creation for the created field.
 	notification.DefaultCreated = notificationDescCreated.Default.(func() time.Time)
 	// notificationDescID is the schema descriptor for id field.
@@ -2374,11 +2390,11 @@ func init() {
 	// runtimebroker.DefaultRuntimeTargetDisplayName holds the default value on creation for the runtime_target_display_name field.
 	runtimebroker.DefaultRuntimeTargetDisplayName = runtimebrokerDescRuntimeTargetDisplayName.Default.(string)
 	// runtimebrokerDescCreated is the schema descriptor for created field.
-	runtimebrokerDescCreated := runtimebrokerFields[39].Descriptor()
+	runtimebrokerDescCreated := runtimebrokerFields[42].Descriptor()
 	// runtimebroker.DefaultCreated holds the default value on creation for the created field.
 	runtimebroker.DefaultCreated = runtimebrokerDescCreated.Default.(func() time.Time)
 	// runtimebrokerDescUpdated is the schema descriptor for updated field.
-	runtimebrokerDescUpdated := runtimebrokerFields[40].Descriptor()
+	runtimebrokerDescUpdated := runtimebrokerFields[43].Descriptor()
 	// runtimebroker.DefaultUpdated holds the default value on creation for the updated field.
 	runtimebroker.DefaultUpdated = runtimebrokerDescUpdated.Default.(func() time.Time)
 	// runtimebroker.UpdateDefaultUpdated holds the default value on update for the updated field.

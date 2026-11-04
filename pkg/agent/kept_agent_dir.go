@@ -192,7 +192,10 @@ func keptAgentDirExpired(agentDir string, retention time.Duration, now time.Time
 	if retention <= 0 {
 		return keptAgentDirRecord{}, false
 	}
-	if config.GetScionAgentConfigPath(agentDir) != "" {
+	// Any config entry, including a refused one (a link, a hard link, not a
+	// regular file), means the dir is not expired: it is never purged
+	// because of a config file that is not plainly absent.
+	if config.AgentConfigEntryExists(agentDir) {
 		return keptAgentDirRecord{}, false
 	}
 	rec, ok := readKeptAgentDirRecord(agentDir)

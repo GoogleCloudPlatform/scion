@@ -97,20 +97,22 @@ func ResolveContentInChain(chain []*Template, field string) ([]byte, error) {
 	return resolveContentInTemplates(chain, field)
 }
 
+// LoadConfig loads the template's (or agent directory's) scion-agent config
+// file: scion-agent.yaml, then .yml, then .json. The directory is opened
+// without following a symbolic link (from the trusted directory the
+// template was found from, or below its parent), and the file is read
+// without following one either: a config file that is a link, sits below
+// one, is not a plain single-link regular file or is larger than 4 MiB is
+// refused with an error wrapping ErrAgentConfigRefused, never read and never
+// treated as "no config". A missing directory or file is an empty config.
 func (t *Template) LoadConfig() (*api.ScionConfig, error) {
-	// Try YAML first, then JSON
-	configPath := GetScionAgentConfigPath(t.Path)
+	configPath, data, err := t.readAgentConfigFile()
+	if err != nil {
+		return nil, err
+	}
 	if configPath == "" {
 		// No config file found, return empty config
 		return &api.ScionConfig{}, nil
-	}
-
-	data, err := os.ReadFile(configPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return &api.ScionConfig{}, nil
-		}
-		return nil, err
 	}
 
 	var cfg api.ScionConfig
@@ -232,6 +234,12 @@ func FindTemplateWithContext(ctx context.Context, name string) (*Template, error
 		return TemplateFromDir(name)
 	}
 
+	// Any other name is a template name: one path component, joined under
+	// a templates directory.
+	if err := checkLookupName(name); err != nil {
+		return nil, err
+	}
+
 	// 2. Check project-local templates
 	projectTemplatesDir, err := GetProjectTemplatesDir()
 	if err == nil {
@@ -259,8 +267,12 @@ func FindTemplateWithContext(ctx context.Context, name string) (*Template, error
 }
 
 // FindTemplateInScope finds a template by name in a specific scope only.
-// Scope must be "global" or "project". Returns nil if not found in that scope.
+// Scope must be "global" or "project". Returns nil if not found in that scope,
+// or when name is not a single path component (checkLookupName).
 func FindTemplateInScope(name, scope string) *Template {
+	if checkLookupName(name) != nil {
+		return nil
+	}
 	var dir string
 	var err error
 
@@ -454,15 +466,20 @@ func FindTemplateInProjectPath(name, projectPath string) (*Template, error) {
 		return FindTemplate(name)
 	}
 
-	// Remote URIs and absolute paths bypass project resolution
+	// A project-scoped lookup runs on a Runtime Broker for a template value
+	// that came with a request (or from an agent's records). It never fetches
+	// a remote source (those come only from operator settings, through
+	// FindOperatorTemplateInProjectPath), and accepts an absolute directory
+	// only below a registered hydration root: a directory the broker wrote
+	// itself.
 	if IsRemoteURI(name) {
-		return FindTemplateWithContext(context.Background(), name)
+		return nil, templateRefNotAllowed("a remote template source is not accepted from a request")
 	}
 	if filepath.IsAbs(name) {
-		if info, err := os.Stat(name); err == nil && info.IsDir() {
-			return &Template{Name: templateNameFromDir(name), Path: name}, nil
-		}
-		return nil, NewTemplateNotFoundError(name, fmt.Sprintf("template path %s not found or not a directory", name))
+		return hydratedTemplateDir(name)
+	}
+	if err := checkLookupName(name); err != nil {
+		return nil, err
 	}
 
 	// Check project-specific templates directory (in-repo .scion/templates/ for git projects)
@@ -483,6 +500,17 @@ func FindTemplateInProjectPath(name, projectPath string) (*Template, error) {
 	}
 
 	return nil, NewTemplateNotFoundError(name, fmt.Sprintf("template %s not found", name))
+}
+
+// FindOperatorTemplateInProjectPath is FindTemplateInProjectPath for a
+// template reference from operator configuration (a settings
+// default_template): a remote source is fetched as FindTemplateWithContext
+// does. Every other reference resolves as FindTemplateInProjectPath.
+func FindOperatorTemplateInProjectPath(name, projectPath string) (*Template, error) {
+	if projectPath != "" && IsRemoteURI(name) {
+		return FindTemplateWithContext(context.Background(), name)
+	}
+	return FindTemplateInProjectPath(name, projectPath)
 }
 
 // projectTemplatesRoot returns the directory whose templates/ subdirectory
@@ -645,6 +673,18 @@ func findOrHydrateDefaultTemplate(projectPath string) (*Template, error) {
 // For non-default templates, the default template is automatically prepended
 // to the chain so that common home files and config are inherited.
 func GetTemplateChainInProject(name, projectPath string) ([]*Template, error) {
+	return templateChainInProject(name, projectPath, FindTemplateInProjectPath)
+}
+
+// GetOperatorTemplateChainInProject is GetTemplateChainInProject for a
+// template reference from operator configuration (a settings
+// default_template), which may be a remote source
+// (FindOperatorTemplateInProjectPath).
+func GetOperatorTemplateChainInProject(name, projectPath string) ([]*Template, error) {
+	return templateChainInProject(name, projectPath, FindOperatorTemplateInProjectPath)
+}
+
+func templateChainInProject(name, projectPath string, find func(name, projectPath string) (*Template, error)) ([]*Template, error) {
 	if name == "default" {
 		tpl, err := findOrHydrateDefaultTemplate(projectPath)
 		if err != nil {
@@ -664,7 +704,7 @@ func GetTemplateChainInProject(name, projectPath string) ([]*Template, error) {
 	}
 	// If the default template cannot be resolved, proceed without it
 
-	tpl, err := FindTemplateInProjectPath(name, projectPath)
+	tpl, err := find(name, projectPath)
 	if err != nil {
 		return nil, err
 	}

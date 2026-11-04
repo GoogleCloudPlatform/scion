@@ -20,7 +20,7 @@ GOLANGCI_LINT         ?= $(GOLANGCI_LINT_PATCHED)
 
 .DEFAULT_GOAL := help
 
-.PHONY: all build build-a2a-bridge test-a2a-integration install test test-fast test-hub-sqlite test-sqlite-nonhub test-cmd-sqlite test-fast-ci test-launch-store-postgres test-store-postgres test-store-postgres-others test-store-postgres-env-check test-store-postgres-integrationtest test-store-postgres-entadapter test-store-postgres-tail testpart-selftest hubshard-skip-summary-selftest test-hub-postgres test-hub-postgres-env-check test-hub-postgres-default test-hub-postgres-integration hub-postgres-integration-shards test-webchat-postgres test-conduit-authz-postgres test-artifacts-postgres test-fixture-coverage hubshard-parity build-hub-shard test-hub-shard test-hub-shards vet-hub-shard vet lint lint-ci vet-integration vet-integration-ci vet-integration-extras compat-literals check-annotation-prefix check-authz-guards check-conversation-upsert-guard check-hub-store-reassign check-store-delete-callers check-scan-coverage check-security-marker-gates check-agent-mutators cli-time-zones time-literals check-setenv-guard check-harness-coverage check-image-go-dirs check-authorization-catalog check-route-authz-manifest check-method-not-allowed check-debug-defaults check-sqlite-coverage sqlite-ci-pkgs check-extras-go-images check-custom golangci-lint golangci-lint-build golangci-lint-split-selftest web web-budget web-typecheck web-lint web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check ent-check tidy-check check-entsql-driver-assert
+.PHONY: all build build-a2a-bridge test-a2a-integration install test test-fast test-hub-sqlite test-sqlite-nonhub test-cmd-sqlite test-fast-ci test-launch-store-postgres test-store-postgres test-store-postgres-others test-store-postgres-env-check test-store-postgres-integrationtest test-store-postgres-entadapter test-store-postgres-tail testpart-selftest hubshard-skip-summary-selftest test-hub-postgres test-hub-postgres-env-check test-hub-postgres-default test-hub-postgres-integration hub-postgres-integration-shards test-webchat-postgres test-conduit-authz-postgres test-artifacts-postgres test-fixture-coverage hubshard-parity hub-dupcheck build-hub-shard test-hub-shard test-hub-shards vet-hub-shard vet lint lint-ci vet-integration vet-integration-ci vet-integration-extras compat-literals check-annotation-prefix check-authz-guards check-conversation-upsert-guard check-hub-store-reassign check-store-delete-callers check-scan-coverage check-security-marker-gates check-agent-mutators cli-time-zones time-literals check-setenv-guard check-harness-coverage check-image-go-dirs check-authorization-catalog check-route-authz-manifest check-method-not-allowed check-debug-defaults check-sqlite-coverage sqlite-ci-pkgs check-extras-go-images check-custom golangci-lint golangci-lint-build golangci-lint-split-selftest web web-budget web-typecheck web-lint web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check ent-check tidy-check check-entsql-driver-assert
 
 ## all: Build the web frontend and compile the Go binary (run 'make install' separately to install)
 all: web build
@@ -193,6 +193,16 @@ test-cmd-sqlite:
 # runs it (as go run would). See hack/hubshard/README.md.
 hubshard-parity:
 	@./hack/hubshard/hubshard.sh -parity
+
+## hub-dupcheck: Fail on a duplicate top-level declaration in pkg/hub plus its test files under any CI tag set (parse only)
+# The shards compile apart, so two test files in different shards can each
+# declare the same helper: every shard builds, and every whole-package build
+# (go vet ./pkg/hub/) fails. HUB_DUPCHECK_TAGS are the tag sets CI compiles
+# pkg/hub with: shard tests (default, no_sqlite; race-detection adds race),
+# shard vets and the integration Postgres jobs. See hack/dupdecl/main.go.
+HUB_DUPCHECK_TAGS := "" no_sqlite no_sqlite,race integration integration,tzcontract
+hub-dupcheck:
+	@go run ./hack/dupdecl $(foreach t,$(HUB_DUPCHECK_TAGS),-tags $(t)) ./pkg/hub
 
 ## testpart-selftest: Test hack/testpart.sh, which splits the T1 entadapter Postgres tests over CI jobs (bash only)
 testpart-selftest:
@@ -636,7 +646,12 @@ HUB_INTEGRATION_POSTGRES_TESTS := TestProjectDeletionService_LockOrderNoDeadlock
 	TestHubInternal_ReplayAcrossHubReplicas \
 	TestChatRetention_Postgres_CascadeAndReplicaRace \
 	TestChatRetention_Postgres_DeletedConversationsAndAttachments \
-	TestProjectQuota_TwoHubReplicasPostgres_OneAdmission
+	TestProjectQuota_TwoHubReplicasPostgres_OneAdmission \
+	TestEncryptionScan_ClassifiesByAuthenticatingKey \
+	TestEncryptionScan_PagesCoverEveryRow \
+	TestEncryptionAudit_CountsAuthenticatedKeysOnly \
+	TestVerifyEncryption_PolicyAllowedSet \
+	TestVerifyEncryption_AllV2Passes
 
 ## test-hub-postgres: Run the pkg/hub Postgres tests of shard SHARD=K (SHARD=all: every shard holding one)
 # Requires SCION_TEST_POSTGRES_URL (integration tests) and
@@ -944,7 +959,7 @@ check-extras-go-images:
 	@./hack/check-extras-go-images.sh
 
 ## check-custom: Run all custom CI lint checks (see hack/LINT-CONVENTIONS.md)
-check-custom: hubshard-parity hubshard-skip-summary-selftest testpart-selftest compat-literals check-annotation-prefix check-authz-guards check-setenv-guard check-conversation-upsert-guard check-hub-store-reassign check-store-delete-callers check-scan-coverage check-security-marker-gates check-image-go-dirs check-authorization-catalog check-route-authz-manifest cli-time-zones time-literals check-method-not-allowed check-entsql-driver-assert check-debug-defaults check-sqlite-coverage check-extras-go-images
+check-custom: hubshard-parity hub-dupcheck hubshard-skip-summary-selftest testpart-selftest compat-literals check-annotation-prefix check-authz-guards check-setenv-guard check-conversation-upsert-guard check-hub-store-reassign check-store-delete-callers check-scan-coverage check-security-marker-gates check-image-go-dirs check-authorization-catalog check-route-authz-manifest cli-time-zones time-literals check-method-not-allowed check-entsql-driver-assert check-debug-defaults check-sqlite-coverage check-extras-go-images
 	@echo "All custom checks passed."
 
 ## golangci-lint-build: Build the patched golangci-lint CI uses into ./build/tools/ (skipped when up to date)
