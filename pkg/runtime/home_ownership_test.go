@@ -5,11 +5,9 @@
 package runtime
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -740,14 +738,6 @@ func TestAdvertisedHostOwnerIDs_MatchesRunArgs(t *testing.T) {
 		assertEnvInArgs(t, args, fmt.Sprintf("SCION_HOST_UID=%d", uid), "advertised uid")
 		assertEnvInArgs(t, args, fmt.Sprintf("SCION_HOST_GID=%d", gid), "advertised gid")
 	}
-}
-
-// captureRuntimeLog sends runtime log lines to a buffer for the rest of the test.
-func captureRuntimeLog(t *testing.T) *bytes.Buffer {
-	t.Helper()
-	var logs bytes.Buffer
-	setRuntimeLogHandler(t, slog.NewTextHandler(&logs, nil))
-	return &logs
 }
 
 // The leftover sweep is cleanup only: when listing fails, an id is not a
