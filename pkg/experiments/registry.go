@@ -129,6 +129,18 @@ const K8sNFSHome = "hub.k8s_nfs_home"
 // their own configuration).
 const FlatRuntimeBrokers = "hub.flat_runtime_brokers"
 
+// FlatCloudRunTarget gates the flat Cloud Run runtime target (runtime target
+// type "cloudrun") on top of FlatRuntimeBrokers: with it off, the hub
+// refuses a new flat registration whose target type is cloudrun and agent
+// create on a flat Runtime Broker whose stored target type is cloudrun
+// (.design/flat-runtime-brokers/p5-cloudrun-amendment.md, CR5). An existing
+// cloudrun row still re-registers, so turning it off stops new agents
+// without stranding the row. It is enforced in hub server code and is not
+// dispatched to agents. It may not leave alpha or become default-on until
+// agent secrets are delivered by a means other than plain Cloud Run
+// instance environment variables (ptone/scion#7309).
+const FlatCloudRunTarget = "hub.flat_cloudrun_target"
+
 // Artifacts gates the artifact service (pkg/artifacts): the hub's
 // /api/v1/artifacts routes answer 404 while it is off, and the web UI hides
 // every artifact surface.
@@ -465,6 +477,17 @@ var compiled = []Experiment{
 		Issue:    "ptone/scion#2926",
 		Owner:    "runtime-broker",
 		ReviewBy: "2027-03-31",
+	},
+	{
+		Name:        FlatCloudRunTarget,
+		Title:       "Flat Cloud Run runtime target",
+		Description: "Lets a flat Runtime Broker serve a Cloud Run runtime target (target type cloudrun). Requires hub.flat_runtime_brokers. With it off, the hub refuses a new flat registration whose target type is cloudrun, and agent create on a flat Runtime Broker whose target type is cloudrun, with experiment_disabled; an existing cloudrun Runtime Broker still re-registers, so its agents are not stranded. Docker and Kubernetes targets do not need it. GA gate: it stays alpha and off by default until agent secrets are delivered by a means other than plain Cloud Run instance environment variables (ptone/scion#7309).",
+		Default:     false,
+		Layers:      []Layer{LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#7308",
+		Owner:       "runtime-broker",
+		ReviewBy:    "2027-03-31",
 	},
 	{
 		Name:        PortView,
