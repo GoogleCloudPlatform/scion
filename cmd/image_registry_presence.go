@@ -59,13 +59,20 @@ func maintenanceOnlyRegistrySet() bool {
 
 // brokerRegistryMissingError is the error of a broker start with no image
 // registry. It is used by the standalone broker and by hosted servers, which
-// have no setup wizard, so it does not mention one.
+// have no setup wizard, so it does not mention one. It names both the
+// setting and the env var, and how to set each for a server run as a
+// service, where an export in an interactive shell has no effect
+// (ptone/scion#7183).
 func brokerRegistryMissingError() error {
 	msg := "image_registry is not configured, but the runtime broker requires it.\n\n" +
 		"The runtime broker pulls container images to run agents. Without a registry,\n" +
-		"image pulls will fail. To fix this:\n\n" +
-		"  Option 1: scion config set --global image_registry <your-registry>\n" +
-		"  Option 2: export SCION_IMAGE_REGISTRY=<your-registry>\n\n"
+		"image pulls will fail. To fix this, set one of:\n\n" +
+		"  Option 1: image_registry in settings.yaml, for example with\n" +
+		"            scion config set --global image_registry <your-registry>\n" +
+		"  Option 2: the " + config.EnvImageRegistry + " environment variable, for example\n" +
+		"            " + config.EnvImageRegistry + "=<your-registry> in the environment file of the\n" +
+		"            service that runs the server (such as hub.env)\n\n" +
+		"For images built on this host, use localhost/scion. Then restart the server.\n\n"
 	if maintenanceOnlyRegistrySet() {
 		msg += maintenanceRegistryOnlyNote + ".\n\n"
 	}

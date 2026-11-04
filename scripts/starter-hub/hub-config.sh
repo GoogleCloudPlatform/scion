@@ -61,6 +61,14 @@ HUB_ENV_FILE="${HUB_ENV_FILE:-.scratch/hub-${HUB_NAME}.env}"
 REPO_DIR="${REPO_DIR:-/home/scion/scion}"
 SCION_BIN="${SCION_BIN:-/usr/local/bin/scion}"
 
+# --- Agent images ---
+# IMAGE_REGISTRY is the image_registry gce-start-hub.sh --full writes to the
+# Hub's settings.yaml. The Hub's runtime broker refuses to start without one.
+# The default, localhost/scion, names images built on the VM itself, as the
+# single-node VM deploy script does. SCION_IMAGE_REGISTRY in hub.env, or a
+# registry saved in the Hub, takes precedence over this value.
+IMAGE_REGISTRY="${IMAGE_REGISTRY:-localhost/scion}"
+
 # DNS_ZONE_DESCRIPTION is the description gce-certs.sh sets on a new zone.
 DNS_ZONE_DESCRIPTION="${DNS_ZONE_DESCRIPTION:-Scion Hub zone for ${CERT_DOMAIN}}"
 

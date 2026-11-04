@@ -153,7 +153,6 @@ else
         SCION_HUB_STORAGE_BUCKET
         SCION_SERVER_SESSION_SECRET
         SCION_SERVER_BASE_URL
-        SCION_IMAGE_REGISTRY
     )
 
     OAUTH_VARS=(
@@ -204,6 +203,18 @@ else
     done
 
     # Optional vars — warn if missing
+    # Without SCION_IMAGE_REGISTRY, gce-start-hub.sh --full writes
+    # image_registry (IMAGE_REGISTRY, default localhost/scion) to settings.yaml.
+    val=$(get_env_value SCION_IMAGE_REGISTRY "${HUB_ENV_FILE}")
+    if [[ -z "$val" ]]; then
+        check_pass "SCION_IMAGE_REGISTRY not set; settings.yaml uses image_registry ${IMAGE_REGISTRY}"
+    elif is_placeholder "$val"; then
+        check_fail "SCION_IMAGE_REGISTRY is still a placeholder" \
+            "Set it to your registry in ${HUB_ENV_FILE}, or remove it to use image_registry ${IMAGE_REGISTRY}"
+    else
+        check_pass "SCION_IMAGE_REGISTRY"
+    fi
+
     val=$(get_env_value SCION_SERVER_HUB_ENDPOINT "${HUB_ENV_FILE}")
     if [[ -z "$val" ]]; then
         check_warn "SCION_SERVER_HUB_ENDPOINT is not set (optional — see hub.env.sample)"

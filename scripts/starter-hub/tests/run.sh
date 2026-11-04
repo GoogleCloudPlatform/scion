@@ -84,7 +84,7 @@ run_script() {
     OUT="$(cd "${REPO_ROOT}" && env \
         -u CERT_EMAIL -u SKIP_TLS -u HEALTH_CHECK_INSECURE -u HUB_BASE_URL \
         -u DNS_ZONE_DESCRIPTION -u PROJECT_ID -u HUB_NAME -u BASE_DOMAIN \
-        -u HUB_DOMAIN -u CERT_DOMAIN -u ENABLE_GKE \
+        -u HUB_DOMAIN -u CERT_DOMAIN -u ENABLE_GKE -u IMAGE_REGISTRY \
         PATH="${TESTS_DIR}/lib:${PATH}" \
         HUB_ENV_FILE="${STATE_DIR}/no-such-hub.env" \
         "${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"}" \
@@ -244,6 +244,35 @@ test_full_unit_renders_values_verbatim() {
     assert_contains "$unit" $'\nExecStart=/opt/scion/bin/scion --global server start ' "custom SCION_BIN"
     assert_not_contains "$unit" "@" "no placeholder left"
     assert_not_contains "$unit" "##" "template notes dropped"
+}
+
+# --- gce-start-hub.sh --full image_registry (ptone/scion#7183) ---
+
+test_full_settings_default_image_registry() {
+    fresh_state
+    EXTRA_ENV=("CURL_STUB_BODY=${HEALTHY}")
+    run_script gce-start-hub.sh --full
+    assert_eq 0 "$RC" "full deploy passes"
+    assert_contains "$(cat "${STUB_SCP_DIR}/scion-settings.yaml")" \
+        $'\nimage_registry: "localhost/scion"\n' "default image_registry is localhost/scion"
+}
+
+test_full_settings_image_registry_override() {
+    fresh_state
+    EXTRA_ENV=("CURL_STUB_BODY=${HEALTHY}" IMAGE_REGISTRY=us-docker.pkg.dev/example/scion)
+    run_script gce-start-hub.sh --full
+    assert_eq 0 "$RC" "full deploy with IMAGE_REGISTRY passes"
+    assert_contains "$(cat "${STUB_SCP_DIR}/scion-settings.yaml")" \
+        $'\nimage_registry: "us-docker.pkg.dev/example/scion"\n' "IMAGE_REGISTRY is written"
+}
+
+test_full_rejects_unsafe_image_registry() {
+    fresh_state
+    EXTRA_ENV=("CURL_STUB_BODY=${HEALTHY}" 'IMAGE_REGISTRY=bad"registry')
+    run_script gce-start-hub.sh --full
+    assert_eq 1 "$RC" "unsafe IMAGE_REGISTRY fails"
+    assert_contains "$OUT" "is not a registry path" "names the problem"
+    assert_not_contains "$CALLS" "compute scp" "stops before uploading"
 }
 
 test_full_no_tls_needs_https_base_url() {

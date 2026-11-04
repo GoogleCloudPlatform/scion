@@ -67,6 +67,8 @@ Run these one at a time instead of `gce-demo-deploy.sh` when you need to skip or
 
 The `settings.yaml` that step 5 writes turns on telemetry export and sets `telemetry.cloud.gcp_project_id` to the deployment project (`PROJECT_ID`), so the metrics dashboard in the web UI queries Cloud Monitoring in that project. Step 1 grants the VM's service account `roles/monitoring.viewer` so the Hub can read those metrics. A Hub deployed before this setting existed picks it up at the next `gce-start-hub.sh --full`; re-run `gce-demo-provision.sh` first so the VM's service account has `roles/monitoring.viewer`. See [Metrics & OpenTelemetry](/scion/hosted/single-node/metrics/) for the `telemetry` settings.
 
+The same `settings.yaml` sets `image_registry`, the registry the Hub's runtime broker pulls agent images from. Without a registry the broker refuses to start, and so does the Hub. The value is `localhost/scion` (images built on the VM, as in the [single-node VM deploy script](https://github.com/GoogleCloudPlatform/scion/blob/main/scripts/single-node-vm/deploy.sh)), or `IMAGE_REGISTRY` if you set it when running `gce-start-hub.sh --full`. To pull from a registry instead, set `SCION_IMAGE_REGISTRY` in `hub.env`: it takes precedence over `settings.yaml`.
+
 :::note[Internal or private deployments]
 If your VM has no external IP, or TLS is terminated upstream by a load balancer, reverse proxy, or similar appliance, skip step 4 and see [Internal Deployments (BYO TLS)](#internal-deployments-byo-tls) below.
 :::

@@ -19,7 +19,10 @@
 #            [--branch <branch>] [--insecure-health-check]
 #
 #   Default (fast): pull → build → restart → health check
-#   --full:         Also uploads config files, installs Caddy, updates systemd/Caddy
+#   --full:         Also uploads config files, installs Caddy, updates systemd/Caddy.
+#                   The settings.yaml it writes sets image_registry to
+#                   IMAGE_REGISTRY (default localhost/scion, see hub-config.sh);
+#                   SCION_IMAGE_REGISTRY in hub.env takes precedence.
 #   --no-tls:       Skip the Caddy/TLS step, for a hub behind an upstream TLS
 #                   terminator (env: SKIP_TLS=true). The base URL that takes
 #                   effect (SCION_SERVER_BASE_URL in hub.env if it sets one,
@@ -145,6 +148,13 @@ if [[ -z "$PROJECT_ID" ]]; then
     exit 1
 fi
 
+# IMAGE_REGISTRY (hub-config.sh) is written into settings.yaml (--full) as a
+# quoted YAML string, so it must be a plain registry path.
+if $FULL_DEPLOY && [[ ! "${IMAGE_REGISTRY}" =~ ^[A-Za-z0-9._:/-]+$ ]]; then
+    echo "Error: IMAGE_REGISTRY '${IMAGE_REGISTRY}' is not a registry path (for example localhost/scion or us-docker.pkg.dev/<project>/<repo>)."
+    exit 1
+fi
+
 # Compute total steps based on mode
 if $FULL_DEPLOY; then
     TOTAL_STEPS=3  # upload, remote-session, remote-health
@@ -180,6 +190,9 @@ if $FULL_DEPLOY; then
     cat <<SETTINGS_EOF > "$UPLOAD_DIR/scion-settings.yaml"
 schema_version: "1"
 active_profile: ${ACTIVE_PROFILE}
+# Registry the runtime broker pulls agent images from; the Hub does not start
+# its broker without one. SCION_IMAGE_REGISTRY in hub.env takes precedence.
+image_registry: "${IMAGE_REGISTRY}"
 server:
   mode: production
 telemetry:
