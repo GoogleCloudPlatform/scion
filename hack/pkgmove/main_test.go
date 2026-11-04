@@ -1406,6 +1406,16 @@ func Deferred(f func()) {
 
 func handle() { _ = recover() }
 
+// GitStub and StubGit mirror hubtestutil's GitLsRemoteStub and
+// StubGitLsRemote: the alias file aliases the type, and the wrapper's
+// signature uses that alias.
+type GitStub struct{ Output string }
+
+func StubGit(t *testing.T) *GitStub {
+	t.Helper()
+	return &GitStub{}
+}
+
 // FarCaller reaches a stack inspection in another file of the package,
 // which imports runtime under another name.
 func FarCaller(t *testing.T) string {
@@ -1631,6 +1641,15 @@ import (
 
 var envKeys = hubtestutil.EnvKeys
 
+// gitStub is referenced only by the signature of the wrapper stubGit, so
+// -rewrite-aliases may remove it only together with stubGit.
+type gitStub = hubtestutil.GitStub
+
+func stubGit(t *testing.T) *gitStub {
+	t.Helper()
+	return hubtestutil.StubGit(t)
+}
+
 func seed(tb testing.TB, n int) {
 	tb.Helper()
 	hubtestutil.Seed(tb, n)
@@ -1831,6 +1850,13 @@ func TestChat(t *testing.T) {
 	now := time.Now().UTC()
 	requireUTCInstant(t, now, now)
 }
+`,
+	// A staying user of stubGit (the move subtests never move it).
+	"hub/stub_test.go": `package hub
+
+import "testing"
+
+func TestStub(t *testing.T) { _ = stubGit(t) }
 `,
 	"hub/seed_test.go": `package hub
 
@@ -2069,11 +2095,15 @@ func TestExtractAliasWrappers(t *testing.T) {
 			"hub/integ_test.go": "//go:build integration\n\npackage hub\n\nimport \"testing\"\n\nfunc TestInteg(t *testing.T) { _ = rawText(t, nil, \"q\") }\n",
 		})
 		wantAll(t, out,
-			"Alias references resolved to their targets (9):",
+			"Alias references resolved to their targets (10):",
 			"hub/chat_test.go:11: getTopicConvID -> hubtestutil.GetTopicConvID",
 			"hub/seed_test.go:5: seed -> hubtestutil.Seed",
 			"hub/safe_test.go:6: safeGo -> hubtestutil.SafeGo",
-			"Alias entries removed (8):",
+			"hub/stub_test.go:5: stubGit -> hubtestutil.StubGit",
+			"Alias entries removed (10):",
+			// An entry used only by another removed entry goes too.
+			"type gitStub = example.com/fx/hubtestutil.GitStub",
+			"func stubGit = example.com/fx/hubtestutil.StubGit",
 			"const conversationsTableDDL = example.com/fx/hubtestutil.ConversationsTableDDL",
 			"func getTopicConvID = example.com/fx/hubtestutil.GetTopicConvID",
 			"func requirePostgresDSN = example.com/fx/hubtestutil.RequirePostgresDSN",
@@ -2100,8 +2130,9 @@ func TestExtractAliasWrappers(t *testing.T) {
 	t.Run("rewrite-delete", func(t *testing.T) {
 		dir, out := rewrite(t, nil)
 		wantAll(t, out,
-			"Alias entries removed (9):",
+			"Alias entries removed (11):",
 			"func rawText = example.com/fx/hubtestutil.RawText",
+			"type gitStub = example.com/fx/hubtestutil.GitStub",
 			"Files deleted (1):\n  hub/zz_alias_hubtestutil_chatdb_test.go",
 		)
 		if _, err := os.Stat(filepath.Join(dir, "hub", "zz_alias_hubtestutil_chatdb_test.go")); !os.IsNotExist(err) {
@@ -2111,7 +2142,7 @@ func TestExtractAliasWrappers(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, gone := range []string{"func seed(", "func safeGo(", "func pingW(", "func deferredW("} {
+		for _, gone := range []string{"func seed(", "func safeGo(", "func pingW(", "func deferredW(", "func stubGit(", "type gitStub ="} {
 			if strings.Contains(string(b), gone) {
 				t.Errorf("more alias file still has the resolved entry %q:\n%s", gone, b)
 			}
