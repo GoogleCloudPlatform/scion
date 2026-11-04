@@ -63,6 +63,8 @@ type IAPExecConnector struct {
 	credsMu sync.Mutex
 	creds   tokenSource
 
+	// instancesClient is created on first use and kept for the connector's
+	// lifetime; see Close.
 	clientMu        sync.Mutex
 	instancesClient InstancesAPI
 
@@ -636,6 +638,9 @@ func (c *IAPExecConnector) instancesAPI(ctx context.Context) (InstancesAPI, erro
 }
 
 // Close releases the connector's Instances API client, if one was created.
+// The cached client lives as long as the connector, which for the Cloud Run
+// runtime is the lifetime of the process. Close exists for callers that own a
+// shorter-lived connector.
 func (c *IAPExecConnector) Close() error {
 	c.clientMu.Lock()
 	defer c.clientMu.Unlock()
