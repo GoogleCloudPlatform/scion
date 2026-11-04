@@ -22,7 +22,7 @@
 // import, keeps no dependency on pkg/provision or pkg/store.
 //
 // It builds on every platform: on a non-unix one the leaf primitives it
-// calls (projectfs.EnsureSharedLeaf, Resolved.EnsureLeaf) and
+// calls (projectfs.EnsureSharedLeafExpecting, Resolved.EnsureLeaf) and
 // provision.PrepareStateDir fail with errors.ErrUnsupported, so every
 // method fails with it too (the hub and the brokers are unix-only).
 package provisioner
@@ -64,8 +64,11 @@ func (p Provisioner) EnsureLeaf(r projectfs.Resolved) (existed bool, err error) 
 
 // OpenStateDir opens a project's provisioning state directory on a shared
 // backend, <ProjectRoot>/provision: created with the leaf contract when
-// missing, checked to be a real directory (provision.PrepareStateDir, its
-// ownership left as it is), and swept of aged lock litter
+// missing (projectfs.EnsureSharedLeafExpecting with the Layout's nfs uid and
+// gid as the expected owner: existing upper directories with the share's
+// layout are not warned about, and nothing is chowned), checked to be a
+// real directory (provision.PrepareStateDir, its ownership left as it is),
+// and swept of aged lock litter
 // (provision.GarbageCollectStateDir, ptone/scion#5836: every open sweeps,
 // never a live lock). It returns the directory's path below the resolved
 // host base.
@@ -78,7 +81,8 @@ func (p Provisioner) OpenStateDir(projectID string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	fd, _, err := projectfs.EnsureSharedLeaf(base, r.RelPath)
+	uid, gid := provision.DefaultOwnerID(p.Layout.UID), provision.DefaultOwnerID(p.Layout.GID)
+	fd, _, err := projectfs.EnsureSharedLeafExpecting(base, r.RelPath, shareddirs.Owner{UID: uid, GID: gid})
 	if err != nil {
 		return "", fmt.Errorf("create the provisioning state directory: %w", err)
 	}
@@ -86,7 +90,7 @@ func (p Provisioner) OpenStateDir(projectID string) (string, error) {
 		return "", err
 	}
 	dir := filepath.Join(base, r.RelPath)
-	if err := provision.PrepareStateDir(dir, provision.DefaultOwnerID(p.Layout.UID), provision.DefaultOwnerID(p.Layout.GID), false); err != nil {
+	if err := provision.PrepareStateDir(dir, uid, gid, false); err != nil {
 		return "", err
 	}
 	provision.GarbageCollectStateDir(dir)
