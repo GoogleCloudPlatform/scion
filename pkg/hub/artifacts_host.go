@@ -74,13 +74,24 @@ func (h *artifactHost) Principal(ctx context.Context) (kind, ref, homeScope stri
 		}
 		return artifacts.PrincipalKindUser, id.ID(), "", true
 	case *agentIdentityWrapper:
-		if id.ID() == "" || id.TokenID() == "" || !agentHasAnyScope(id, []string{string(ScopeProjectArtifactRead)}) {
+		if !artifactsServeAgent(id) {
 			return "", "", "", false
 		}
 		return artifacts.PrincipalKindAgent, id.ID(), id.ProjectID(), true
 	default:
 		return "", "", "", false
 	}
+}
+
+// artifactsServeAgent reports whether the artifact service serves the agent
+// identity id: it is token-backed (a validated agent token carries a token
+// id) and its token carries project:artifact:read. It is the agent predicate
+// of both Principal and the hub's attachment write gate
+// (attachmentWriterKind), so the hub never admits an agent upload the
+// artifact service would then refuse (ptone/scion#7362).
+func artifactsServeAgent(id *agentIdentityWrapper) bool {
+	return id != nil && id.ID() != "" && id.TokenID() != "" &&
+		agentHasAnyScope(id, []string{string(ScopeProjectArtifactRead)})
 }
 
 // Permits reports whether the caller's credential allows permission on

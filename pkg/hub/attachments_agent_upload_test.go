@@ -246,6 +246,12 @@ func TestAttachmentProbe_AnswersPerCredential(t *testing.T) {
 // delegatorID) to agent a, as the hub records it when it creates a.
 func delegate(t *testing.T, s store.Store, delegatorType, delegatorID string, a *store.Agent) {
 	t.Helper()
+	delegateWithCeiling(t, s, delegatorType, delegatorID, a, store.EffectCeiling{Kind: store.EffectCeilingPrincipal})
+}
+
+// delegateWithCeiling is delegate with the edge's effect ceiling given.
+func delegateWithCeiling(t *testing.T, s store.Store, delegatorType, delegatorID string, a *store.Agent, ceiling store.EffectCeiling) {
+	t.Helper()
 	require.NoError(t, s.CreateDelegationEdge(context.Background(), &store.DelegationEdge{
 		DelegatorType: delegatorType, DelegatorID: delegatorID,
 		DelegateType: store.DelegationPrincipalAgent, DelegateID: a.ID,
@@ -256,7 +262,7 @@ func delegate(t *testing.T, s store.Store, delegatorType, delegatorID string, a 
 			SourcePrincipalKind: delegatorType, SourcePrincipalID: delegatorID,
 			SourceCredentialKind: store.SourceCredentialSession,
 		},
-		EffectCeiling: store.EffectCeiling{Kind: store.EffectCeilingPrincipal},
+		EffectCeiling: ceiling,
 	}))
 }
 
@@ -293,4 +299,121 @@ func TestAgentMaySend_NilRecordRefused(t *testing.T) {
 	a, ok := f.srv.agentMaySend(ctx)
 	require.False(t, ok)
 	require.Nil(t, a)
+}
+
+// ceilingAgentToken stores a baseline-role agent of project A rooted at
+// user ua, delegated by ua under ceiling and given a run, and returns it
+// with a token minted the way a dispatcher mints one (AuthorizeAgentToken),
+// so the chain ceiling filters the token's scopes. Tokens minted with no
+// ceiling always carry project:artifact:read, which hid ptone/scion#7362.
+func (f *refFixture) ceilingAgentToken(t *testing.T, name string, ceiling store.EffectCeiling) (*store.Agent, string) {
+	t.Helper()
+	ctx := context.Background()
+	a := &store.Agent{ID: uuid.NewString(), ProjectID: f.projA.ID, Name: name, Slug: name,
+		Phase: "running", OwnerID: f.ua.ID, CreatedBy: f.ua.ID, Ancestry: []string{f.ua.ID},
+		AppliedConfig: &store.AgentAppliedConfig{AgentRole: string(AgentRoleBaseline)}}
+	require.NoError(t, f.st.CreateAgent(ctx, a))
+	delegateWithCeiling(t, f.st, store.DelegationPrincipalUser, f.ua.ID, a, ceiling)
+	_, err := f.st.SetAgentRunID(ctx, a.ID, uuid.NewString(), nil)
+	require.NoError(t, err)
+	stored, err := f.st.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	token, err := f.srv.issueAgentTokenForTest(ctx, stored)
+	require.NoError(t, err)
+	return stored, token
+}
+
+// agentTokenRequest serves req through the hub's full handler with the agent
+// token token.
+func (f *refFixture) agentTokenRequest(t *testing.T, token string, req *http.Request) *httptest.ResponseRecorder {
+	t.Helper()
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	f.srv.Handler().ServeHTTP(rec, req)
+	return rec
+}
+
+// agentTokenContext is the request context the auth middleware builds for
+// the agent token token.
+func (f *refFixture) agentTokenContext(t *testing.T, token string) context.Context {
+	t.Helper()
+	claims, err := f.srv.GetAgentTokenService().ValidateAgentToken(token)
+	require.NoError(t, err)
+	id := &agentIdentityWrapper{claims}
+	ctx := contextWithCredentialContext(contextWithIdentity(context.Background(), id), credentialContextForIdentity(id))
+	return withStandingMemo(ctx)
+}
+
+// TestAgentUpload_CeilingWithoutArtifactRead_Unavailable (ptone/scion#7362):
+// an agent in good standing whose chain ceiling (here unrecorded) withheld
+// project:artifact:read gets the designed 404
+// attachment_artifacts_unavailable on upload, not a 500; nothing is
+// stored, and the probe answers "legacy".
+func TestAgentUpload_CeilingWithoutArtifactRead_Unavailable(t *testing.T) {
+	f := newRefFixture(t)
+	st := enableAttachmentArtifacts(t, f)
+	a, token := f.ceilingAgentToken(t, "legacy-chain", store.EffectCeiling{Kind: store.EffectCeilingUnrecorded})
+	ctx := f.agentTokenContext(t, token)
+	agent, _ := GetIdentityFromContext(ctx).(*agentIdentityWrapper)
+	require.NotNil(t, agent)
+	require.False(t, agent.HasScope(ScopeProjectArtifactRead), "precondition: the mint withheld project:artifact:read")
+	_, ok := f.srv.agentMaySend(ctx)
+	require.True(t, ok, "precondition: the agent may send")
+
+	rec := f.agentTokenRequest(t, token, attachmentUploadRequest(t, "", "report.txt", "agent bytes"))
+	require.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), codeAttachmentArtifactsUnavailable)
+	requireNoUploads(t, st, artifacts.PrincipalKindAgent, a.ID)
+
+	probe := f.agentTokenRequest(t, token, httptest.NewRequest(http.MethodGet, chatAttachmentsPath, nil))
+	require.Equal(t, "legacy", probeAnswer(t, probe))
+}
+
+// TestAgentUpload_CeilingWithArtifactRead_Uploads: an agent whose token is
+// minted under a chain ceiling that allows artifact reads uploads (201),
+// and the upload is owned by the agent in its own upload scope.
+func TestAgentUpload_CeilingWithArtifactRead_Uploads(t *testing.T) {
+	f := newRefFixture(t)
+	st := enableAttachmentArtifacts(t, f)
+	a, token := f.ceilingAgentToken(t, "principal-chain", store.EffectCeiling{Kind: store.EffectCeilingPrincipal})
+	probe := f.agentTokenRequest(t, token, httptest.NewRequest(http.MethodGet, chatAttachmentsPath, nil))
+	require.Equal(t, "artifact", probeAnswer(t, probe))
+
+	id := uploadedAttachmentID(t, f.agentTokenRequest(t, token, attachmentUploadRequest(t, "", "report.txt", "agent bytes")), "report.txt")
+	got, err := st.GetAttachment(context.Background(), id)
+	require.NoError(t, err)
+	require.Equal(t, artifacts.ScopeKindUpload, got.ScopeKind)
+	require.Equal(t, artifacts.PrincipalRef(artifacts.PrincipalKindAgent, a.ID), got.ScopeRef)
+	require.Equal(t, artifacts.PrincipalKindAgent, got.OwnerKind)
+	require.Equal(t, a.ID, got.OwnerRef)
+}
+
+// TestAttachmentWriterKind_AgreesWithPrincipal (ptone/scion#7362): for an
+// agent token, the hub admits an upload exactly when the artifact service
+// serves the caller, so an admitted upload cannot fail with "no
+// authenticated caller".
+func TestAttachmentWriterKind_AgreesWithPrincipal(t *testing.T) {
+	f := newRefFixture(t)
+	enableAttachmentArtifacts(t, f)
+	host := newArtifactHost(f.srv)
+	for _, tc := range []struct {
+		name    string
+		ceiling store.EffectCeiling
+		served  bool
+	}{
+		{"unrecorded", store.EffectCeiling{Kind: store.EffectCeilingUnrecorded}, false},
+		{"principal", store.EffectCeiling{Kind: store.EffectCeilingPrincipal}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, token := f.ceilingAgentToken(t, "agree-"+tc.name, tc.ceiling)
+			ctx := f.agentTokenContext(t, token)
+			_, _, _, served := host.Principal(ctx)
+			require.Equal(t, tc.served, served, "Principal")
+			want := ""
+			if tc.served {
+				want = artifacts.PrincipalKindAgent
+			}
+			require.Equal(t, want, f.srv.attachmentWriterKind(ctx), "attachmentWriterKind")
+		})
+	}
 }
