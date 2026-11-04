@@ -3299,7 +3299,7 @@ func (s *Server) buildProjectFilterForHub(hubEndpoint string) func(string) bool 
 				continue
 			}
 
-			projectSettings, err := config.LoadSettingsFromDir(resolveProjectSettingsDir(ag.ProjectPath))
+			projectSettings, err := config.LoadProjectSettingsFromDir(resolveProjectSettingsDir(ag.ProjectPath))
 			if err != nil {
 				continue
 			}

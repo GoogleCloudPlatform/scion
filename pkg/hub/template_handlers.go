@@ -368,6 +368,9 @@ func (s *Server) createTemplateV2(w http.ResponseWriter, r *http.Request) {
 		ValidationError(w, "name is required", nil)
 		return
 	}
+	if refuseNonComponentResourceName(w, req.Name) {
+		return
+	}
 	if !isValidTemplateScope(req.Scope) {
 		ValidationError(w, fmt.Sprintf("invalid scope %q: must be \"global\", \"project\" or \"user\"", req.Scope), nil)
 		return
@@ -624,6 +627,9 @@ func (s *Server) updateTemplateV2(w http.ResponseWriter, r *http.Request, id str
 		return
 	}
 	if refuseTemplateConfigFields(w, req.Config, req.Image) {
+		return
+	}
+	if refuseNonComponentResourceName(w, req.Name) {
 		return
 	}
 
@@ -1042,6 +1048,9 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 
 	if req.Name == "" {
 		ValidationError(w, "name is required", nil)
+		return
+	}
+	if refuseNonComponentResourceName(w, req.Name) {
 		return
 	}
 	if !isValidTemplateScope(req.Scope) {

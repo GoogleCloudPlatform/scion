@@ -52,6 +52,8 @@ Scion resolves settings through a single loader in the following order (highest 
 4.  **Global Settings**: `~/.scion/settings.yaml` (User level).
 5.  **Defaults**: System built-ins.
 
+A project's settings file must be a regular file: a project `settings.yaml` (or `.yml`, `.json`) that is a symbolic link is refused with an error. The global `~/.scion/settings.yaml` and the server's `--config` settings file may be symbolic links, for example into a dotfiles repository or a mounted Secret.
+
 Whole-file rewrites of `settings.yaml` (such as `scion config set`, `scion config unset`, `scion config migrate`, and Hub link updates) take the settings-directory lock (an exclusive lock on `.settings.lock` in that directory, waited for up to 10 seconds) and replace the file atomically via a temporary file in the same directory, preserving existing file permissions.
 
 ## Unrecognized Key Warnings

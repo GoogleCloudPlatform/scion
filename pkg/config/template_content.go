@@ -182,3 +182,65 @@ func TemplateHasContentFile(t *Template, name string) bool {
 	_, found, err := readTemplateContent(t, name)
 	return found && err == nil
 }
+
+// ErrAgentConfigRefused is wrapped by the error of a scion-agent config read
+// (Template.LoadConfig) that is refused: the file or a directory on its path
+// is a symbolic link, or the file is not a plain single-link regular file or
+// is too large. The messages never contain a host path.
+var ErrAgentConfigRefused = errors.New("scion-agent config file refused")
+
+// maxAgentConfigBytes bounds a scion-agent config file read.
+const maxAgentConfigBytes = 4 << 20
+
+// agentConfigFileNames are the scion-agent config file names, in the order
+// they are preferred (GetScionAgentConfigPath's order).
+var agentConfigFileNames = []string{"scion-agent.yaml", "scion-agent.yml", "scion-agent.json"}
+
+// readAgentConfigFile reads t's scion-agent config file through t.openDir,
+// without following a link. It returns the file's path (for messages) and
+// content, or "" and nil data when the directory or every config file is
+// missing. A file that exists but is refused is an error wrapping
+// ErrAgentConfigRefused; the next name is not tried.
+func (t *Template) readAgentConfigFile() (string, []byte, error) {
+	home, err := t.openDir()
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return "", nil, nil
+		}
+		return "", nil, refusedAgentConfig(err)
+	}
+	defer func() { _ = home.Close() }()
+	for _, name := range agentConfigFileNames {
+		data, err := home.ReadFile(name, maxAgentConfigBytes)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return "", nil, refusedAgentConfig(err)
+		}
+		return filepath.Join(t.Path, name), data, nil
+	}
+	return "", nil, nil
+}
+
+// refusedAgentConfig maps an error from opening the directory or reading
+// the scion-agent config file to the reported error: a fixed reason
+// wrapping ErrAgentConfigRefused, never a host path.
+func refusedAgentConfig(err error) error {
+	reason := "the scion-agent config file cannot be read as a plain regular file inside its directory"
+	switch {
+	case errors.Is(err, agenthome.ErrLinkComponent):
+		reason = "a directory on the path to the scion-agent config file is a symbolic link"
+	case errors.Is(err, agenthome.ErrNotDirectory):
+		reason = "a component of the scion-agent config file path is not a directory"
+	case errors.Is(err, syscall.ELOOP):
+		reason = "the scion-agent config file is a symbolic link; replace it with the file itself"
+	case errors.Is(err, dirfd.ErrTooLarge):
+		reason = "the scion-agent config file is larger than 4 MiB"
+	case errors.Is(err, dirfd.ErrNotSingleLinkRegular):
+		reason = "the scion-agent config file is not a plain regular file (a symbolic link, hard link, directory or device)"
+	case errors.Is(err, fs.ErrPermission):
+		reason = "the scion-agent config file or its directory cannot be read (permission denied)"
+	}
+	return fmt.Errorf("%w: %s", ErrAgentConfigRefused, reason)
+}

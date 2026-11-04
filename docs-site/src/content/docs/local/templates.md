@@ -38,6 +38,7 @@ The config file drives the role. Fields that point at content — `agent_instruc
 - A value with a line break is always inline text and is never looked up as a file.
 - A content file must be a plain regular file of at most 4 MiB inside the template directory, reached without following a symbolic link. A symbolic link at the file or at any directory on its path, a non-directory path component, a hard link, directory or device, a file larger than 4 MiB, or an unreadable file (permission denied) is refused with an error; replace a link with the file or directory itself, or use multi-line inline text.
 - The same rules apply when Scion checks for `agents.md` or `system-prompt.md` by convention (`TemplateHasContentFile`); a file that would be refused is not picked up.
+- `scion-agent.yaml` (or `.yml`, `.json`) itself must be a regular file of at most 4 MiB, reached without a symbolic link; a linked config file is refused with an error.
 
 ```yaml
 schema_version: "1"
@@ -256,6 +257,8 @@ When you reference a template by bare name, Scion searches in this order and use
 2. **Absolute path** to a template directory.
 3. **Project** templates (`.scion/templates/`).
 4. **Global** templates (`~/.scion/templates/`).
+
+A template name (anything that is not a remote URI or an absolute path) is a single path component, with no `/`, `\`, `..`, leading `:` or `://`. A name in another form (for example `team/reviewer`) is refused rather than looked up. The same rule applies to harness-config names. The Hub refuses such a name when a template or harness-config is created, renamed or cloned, and when an agent create request names a harness-config. `scion templates pull` and `scion harness-config pull` without `--to` build the destination directory only from a name in that form.
 
 When connected to a Hub, templates resolve from the Hub across three scopes. If a name matches in several locations, the CLI prompts you to choose; the `--local`, `--hub`, and `--global` flags narrow the search.
 
