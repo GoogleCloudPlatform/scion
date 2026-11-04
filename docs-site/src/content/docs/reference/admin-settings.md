@@ -281,6 +281,8 @@ While a break-glass is active, a save from the maintenance page updates the stor
 
 `admin_mode: true` in `settings.yaml` can only be cleared by editing the file: the admin API stores maintenance in the database, not in `settings.yaml`.
 
+The **Maintenance** page shows the message blocked users see (`message` in `GET /api/v1/admin/maintenance`; the Hub's default, *System offline for maintenance*, while none is saved) and lets you edit it whether or not maintenance mode is on. **Save message** sends only `message`, so the mode is unchanged. **Use the default message** sends `"message": ""`, which clears the saved message.
+
 ## Profiling
 
 The `profiling` section holds operational switches for in-app profiling. It is stored only in the Hub database: it has no `settings.yaml` key and no environment variable, and it is not seeded. A change applies to every replica through the usual settings propagation.
@@ -418,6 +420,8 @@ Furthermore, these database-backed settings are wired directly into the runtime 
 #### Navigation Updates
 
 - **Message Broker Integration**: The Message Broker configuration has been consolidated and moved from the General tab to the **Hub Server** tab, grouping external integrations and network-bound transports in one logical place.
+- **Agent Start**: The **Hub Server** tab's lifecycle card has one field each for the agent start timing (`server.hub.start_claim_lease_ttl`, `start_max_duration`, `start_unconfirmed_hold`, `start_create_unconfirmed_hold`). An empty field uses the default (90s, 12m, 17m and 16m); the hints give each allowed range. They save with the lifecycle section. The Hub refuses an unparseable or out-of-range value with `422 validation_error` naming the key, in database and `settings.yaml` modes alike; a save that sends none of the four keys is not checked against a stored value.
+- **Hub name** (`server.hub.hub_name`) has no field on the page. Set it in `settings.yaml` (or `SCION_SERVER_HUB_HUBNAME`), or through `PUT /api/v1/admin/server-config` on a database-backed Hub. A saved change applies live: it relabels the Hub's own log records and new Secret Manager secrets (`scion-hub-name`), and the agent log views search Cloud Logging under the new name. Logs written under the old name stop appearing in the agent log views, and agents keep the old name (`SCION_HUB_NAME`) until the Hub restarts (ptone/scion#7098), so restart the Hub after a rename. All nodes of a Hub should share one name.
 - **Hub Observability Export**: The **Hub Server** tab has one switch each for the Hub's own metrics and trace export (`server.hub.observability.*`). Both apply after a restart. An unset switch shows the state in effect and keeps the earlier rule; **Use default** clears a switch that is set. The section also shows each exporter's state at startup and, read-only, the export project with its source (`env`, `file` or `metadata`). Only a Hub admin in an interactive session can change the switches; a user access token is refused. See [Observability export](/scion/reference/server-config/#observability-export-serverhubobservability).
 
 ### Visual Indicators

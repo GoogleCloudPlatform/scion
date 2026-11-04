@@ -4841,6 +4841,10 @@ describe('scion-page-admin-server-config', () => {
             soft_delete_retain_files: true,
             auto_suspend_stalled: true,
             stalled_threshold: '10m',
+            start_claim_lease_ttl: '2m',
+            start_max_duration: '15m',
+            start_unconfirmed_hold: '18m',
+            start_create_unconfirmed_hold: '17m',
             gcp_iam_check_mode: 'enforce',
             gcp_iam_deny_unknown_policy: 'fail-closed',
             observability: { metrics_enabled: true, tracing_enabled: false },
@@ -4977,6 +4981,23 @@ describe('scion-page-admin-server-config', () => {
       },
       'server.hub.stalled_threshold': {
         clear: (el) => (el.hubStalledThreshold = ''),
+        expected: '',
+      },
+      'server.hub.start_claim_lease_ttl': {
+        clear: (el) => (el.hubStartTimings = { ...el.hubStartTimings, start_claim_lease_ttl: '' }),
+        expected: '',
+      },
+      'server.hub.start_max_duration': {
+        clear: (el) => (el.hubStartTimings = { ...el.hubStartTimings, start_max_duration: '' }),
+        expected: '',
+      },
+      'server.hub.start_unconfirmed_hold': {
+        clear: (el) => (el.hubStartTimings = { ...el.hubStartTimings, start_unconfirmed_hold: '' }),
+        expected: '',
+      },
+      'server.hub.start_create_unconfirmed_hold': {
+        clear: (el) =>
+          (el.hubStartTimings = { ...el.hubStartTimings, start_create_unconfirmed_hold: '' }),
         expected: '',
       },
       // gcp_iam: selects with no empty option; "cleared" is the default.
