@@ -952,8 +952,10 @@ func TestRewriteOutRefs(t *testing.T) {
 			t.Errorf("missing INFO %q:\n%s", w, dry)
 		}
 	}
-	if got := strings.Count(dry, "; rewritten to "); got != 16 {
-		t.Errorf("got %d rewritten INFO lines, want 16:\n%s", got, dry)
+	// Identical findings print once: the first catalog entry's File and
+	// Scope literals share one INFO line.
+	if got := strings.Count(dry, "; rewritten to "); got != 15 {
+		t.Errorf("got %d rewritten INFO lines, want 15:\n%s", got, dry)
 	}
 	// Function fields that may go stale and are not rewritten: HIGH.
 	const fnCat = "Function field next to a rewritten File field not rewritten (-rewrite-outrefs)"
@@ -996,7 +998,8 @@ func TestRewriteOutRefs(t *testing.T) {
 	}
 	got := readTree(t, dir)
 	want := map[string]string{
-		"pkg/hub/stay.go": strings.Replace(before["pkg/hub/stay.go"], `"pkg/hub/authorize.go"`, `"`+newPath+`"`, 1),
+		// The move renames g.check (exported method); -rewrite-outrefs the literal.
+		"pkg/hub/stay.go": strings.Replace(strings.Replace(before["pkg/hub/stay.go"], `"pkg/hub/authorize.go"`, `"`+newPath+`"`, 1), "g.check()", "g.Check()", 1),
 		"pkg/hub/permissions/registry.go": "package permissions\n\n" +
 			"var Enforcement = []string{\n" +
 			"\t\"" + newPath + ":AuthorizeAgentCreate\",\n" +
@@ -1067,9 +1070,10 @@ func TestRewriteOutRefsOffByDefault(t *testing.T) {
 			t.Errorf("unexpected %q without -rewrite-outrefs:\n%s", w, out)
 		}
 	}
-	// 10 HIGH in the dry-run list, plus the 15 rewritable path references.
-	if got := strings.Count(out, "after the move it no longer matches the file"); got != 25 {
-		t.Errorf("got %d HIGH outside references, want 25:\n%s", got, out)
+	// 10 HIGH in the dry-run list, plus the 14 lines of rewritable path
+	// references (the first catalog entry's two literals print once).
+	if got := strings.Count(out, "after the move it no longer matches the file"); got != 24 {
+		t.Errorf("got %d HIGH outside references, want 24:\n%s", got, out)
 	}
 	for _, w := range []string{
 		`hack/hub-store-reassign-baseline.txt:4: line "pkg/hub/authorize.go | 2" names moved pkg/hub/authorize.go by its repo path: after the move it no longer matches the file - update it to pkg/hub/authorize/authorize.go, or accept it with a pkgmove:ref-ok <reason> comment on the line above` + "\n",
