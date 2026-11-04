@@ -342,9 +342,14 @@ func TestEmailHeaderValue(t *testing.T) {
 		in, want string
 	}{
 		{"plain", "plain"},
-		{"a\r\nb", "ab"},
-		{"a\rb\nc", "abc"},
+		{"a\r\nb", "a b"},
+		{"a\rb", "a b"},           // a lone CR
+		{"a\nb", "a b"},           // a lone LF
+		{"a\r\n\r\n\n\rb", "a b"}, // a run of CR and LF is one space
+		{"a\rb\nc", "a b c"},
+		{"\r\nedge\r\n", "edge"}, // a run at either end is dropped
 		{"\r\n\r\n", ""},
+		{"two  spaces", "two  spaces"}, // other whitespace is kept
 		{"", ""},
 	}
 	for _, tc := range tests {
@@ -365,9 +370,9 @@ func TestEmailChannel_HeaderValuesStripCRLF(t *testing.T) {
 
 	lines := strings.Split(head, "\r\n")
 	assert.Equal(t, []string{
-		"From: a@b.comCc: z@example.com",
+		"From: a@b.com Cc: z@example.com",
 		"To: c@d.com, e@f.com",
-		"Subject: [Scion] state-changeBcc: x@example.com from agent:aReply-To: y@example.com",
+		"Subject: [Scion] state-change Bcc: x@example.com from agent:a Reply-To: y@example.com",
 		"Content-Type: text/plain; charset=UTF-8",
 	}, lines)
 	for _, l := range lines {

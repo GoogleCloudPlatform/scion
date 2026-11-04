@@ -105,7 +105,7 @@ func buildEmailMessage(from string, recipients []string, msg *messages.Structure
 
 	return []byte(fmt.Sprintf("From: %s\r\nTo: %s\r\nSubject: %s\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n%s\r\n\r\nSender: %s\r\nRecipient: %s\r\nType: %s\r\nTimestamp: %s",
 		emailHeaderValue(from),
-		emailHeaderValue(strings.Join(recipients, ", ")),
+		emailHeaderList(recipients),
 		emailHeaderValue(subject),
 		msg.Msg,
 		msg.Sender,
@@ -115,8 +115,19 @@ func buildEmailMessage(from string, recipients []string, msg *messages.Structure
 	))
 }
 
-// emailHeaderValue removes CR and LF from s so it can be placed in a single
-// mail header line.
+// emailHeaderValue replaces each run of CR and LF in s with one space, and
+// drops a run at either end, so s fits on a single mail header line and
+// keeps its word boundaries.
 func emailHeaderValue(s string) string {
-	return strings.NewReplacer("\r", "", "\n", "").Replace(s)
+	return strings.Join(strings.FieldsFunc(s, func(r rune) bool { return r == '\r' || r == '\n' }), " ")
+}
+
+// emailHeaderList joins values with ", " after passing each one through
+// emailHeaderValue.
+func emailHeaderList(values []string) string {
+	out := make([]string, len(values))
+	for i, v := range values {
+		out[i] = emailHeaderValue(v)
+	}
+	return strings.Join(out, ", ")
 }
