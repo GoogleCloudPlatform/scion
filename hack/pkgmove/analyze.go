@@ -75,7 +75,7 @@ type analysis struct {
 	hazards map[*types.Func]string
 	// targetDecls caches, per import path of another module package, its
 	// package-level funcs parsed from source (targetPkgDecls).
-	targetDecls map[string]*pkgDecls
+	targetDecls map[string]*targetPkgSrc
 	// assets are non-Go files or directories (base names) moved verbatim.
 	assets []string
 	// imp serves export data (and the dependency lists) of the source's imports.

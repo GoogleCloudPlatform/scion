@@ -432,9 +432,9 @@ type targetDecl struct {
 	file *ast.File
 }
 
-// pkgDecls are the funcs (by name) and methods (by method name, any
+// targetPkgSrc are the funcs (by name) and methods (by method name, any
 // receiver) of a module package, parsed from source.
-type pkgDecls struct {
+type targetPkgSrc struct {
 	funcs   map[string]targetDecl
 	methods map[string][]targetDecl
 }
@@ -457,7 +457,7 @@ func (a *analysis) targetFuncDecl(fn *types.Func) (*ast.FuncDecl, error) {
 
 // targetPkgDecls parses (once) the funcs and methods of the module package
 // path, as targetFuncDecl describes.
-func (a *analysis) targetPkgDecls(path string) (*pkgDecls, error) {
+func (a *analysis) targetPkgDecls(path string) (*targetPkgSrc, error) {
 	if pd, ok := a.targetDecls[path]; ok {
 		return pd, nil
 	}
@@ -465,7 +465,7 @@ func (a *analysis) targetPkgDecls(path string) (*pkgDecls, error) {
 	if err != nil {
 		return nil, err
 	}
-	pd := &pkgDecls{funcs: map[string]targetDecl{}, methods: map[string][]targetDecl{}}
+	pd := &targetPkgSrc{funcs: map[string]targetDecl{}, methods: map[string][]targetDecl{}}
 	fset := token.NewFileSet()
 	for _, p := range pkgs {
 		if p.ImportPath != path {
@@ -490,7 +490,7 @@ func (a *analysis) targetPkgDecls(path string) (*pkgDecls, error) {
 		}
 	}
 	if a.targetDecls == nil {
-		a.targetDecls = map[string]*pkgDecls{}
+		a.targetDecls = map[string]*targetPkgSrc{}
 	}
 	a.targetDecls[path] = pd
 	return pd, nil
