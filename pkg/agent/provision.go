@@ -5160,6 +5160,13 @@ func injectPromptFiles(h api.Harness, agentHome string, chain []*config.Template
 				if err != nil {
 					return false, fmt.Errorf("failed to resolve system_prompt: %w", err)
 				}
+				// The default template, first in every chain, ships a
+				// placeholder; it is no system prompt. Inline content is
+				// staged as given.
+				if config.IsPlaceholderSystemPrompt(content) {
+					util.Debugf("ProvisionAgent: system_prompt resolved to placeholder content, not injecting")
+					content = nil
+				}
 			}
 			if content != nil {
 				util.Debugf("ProvisionAgent: injecting system prompt (%d bytes) into %s", len(content), agentHome)
