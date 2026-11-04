@@ -515,6 +515,7 @@ func runDoctor() error {
 				srv = gs.Server
 			}
 			opts.SharedDirStorageClass, opts.SharedDirStorageShared = doctorSharedDirStorage(vs, srv, profile)
+			opts.Server = srv
 		}
 	}
 	r.runtimeSection(rt.Name(), diag, opts)

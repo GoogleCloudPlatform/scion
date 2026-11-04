@@ -523,6 +523,16 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// the harness. This must happen before telemetry pipeline initialization
 	// because the GCP credentials file (pointed to by SCION_OTEL_GCP_CREDENTIALS)
 	// must exist on disk when the telemetry pipeline starts.
+	//
+	// The in-memory harness directories, when the runtime names them, are
+	// created for the workload user first (a no-op unless init runs as
+	// root), so staged harness secrets and the harness outputs never fall
+	// back to the home.
+	if err := prepareHarnessMemDirs(); err != nil {
+		log.Error("Failed to prepare the in-memory harness directories: %v", err)
+		reportInitFailure(agentHome, err)
+		return 1
+	}
 	if encoded := os.Getenv(stagedsecrets.EnvVar); encoded != "" {
 		// Only this pass may set the staged-token marker; one inherited
 		// from the environment is dropped before anything is staged.
@@ -562,9 +572,22 @@ func RunInit(args []string, opts InitRunOptions) int {
 				log.Warn("Could not mark the hub credential file as staged; it will not be removed at exit: %v", err)
 			}
 		}
+		// A runtime whose instance home is on shared storage (Cloud Run)
+		// stages the harness bundle's secrets in the blob. They are written
+		// only into the in-memory directory SCION_HARNESS_SECRETS_DIR names,
+		// never into the home; with no such directory the start fails.
+		// Errors name the step and file names only.
+		harnessSecretCount := len(staged.HarnessSecrets)
+		if err := stagedsecrets.WriteHarnessSecrets(hooks.DefaultHarnessDirsRoot, os.Getenv(hooks.HarnessSecretsDirEnv), staged.HarnessSecrets); err != nil {
+			staged.HarnessSecrets = nil
+			log.Error("Failed to write the staged harness secrets: %v", err)
+			reportInitFailure(agentHome, fmt.Errorf("failed to write the staged harness secrets: %w", err))
+			return 1
+		}
+		staged.HarnessSecrets = nil
 		_ = os.Unsetenv(stagedsecrets.EnvVar)
-		log.Info("Staged %d file secret(s) and %d variable secret(s)",
-			len(staged.FileSecrets), len(staged.VariableSecrets))
+		log.Info("Staged %d file secret(s), %d variable secret(s) and %d harness secret(s)",
+			len(staged.FileSecrets), len(staged.VariableSecrets), harnessSecretCount)
 
 		// Re-exec to purge SCION_STAGED_SECRETS from /proc/1/environ.
 		//

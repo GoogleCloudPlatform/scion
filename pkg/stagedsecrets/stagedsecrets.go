@@ -54,13 +54,27 @@ type Staged struct {
 	// cannot choose where it is written: sciontool init writes it to the
 	// canonical token file. Write ignores it.
 	HubToken string `json:"hub_token,omitempty"`
+	// HarnessSecrets are the files of the harness bundle's staged secrets
+	// directory, set only by runtimes whose instance home is on shared
+	// storage (Cloud Run), where they must not be written. sciontool init
+	// writes them into the in-memory directory SCION_HARNESS_SECRETS_DIR
+	// names (WriteHarnessSecrets); Write ignores them.
+	HarnessSecrets []HarnessSecret `json:"harness_secrets,omitempty"`
+}
+
+// HarnessSecret is one file of the harness bundle's staged secrets. Name is
+// a plain file name (ValidHarnessSecretName); Value is the base64-encoded
+// file content.
+type HarnessSecret struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
 }
 
 // String withholds every value, so formatting a Staged never prints a
 // secret or the hub credential.
 func (s Staged) String() string {
-	return fmt.Sprintf("stagedsecrets.Staged{files:%d variables:%d hub_token:%t}",
-		len(s.FileSecrets), len(s.VariableSecrets), s.HubToken != "")
+	return fmt.Sprintf("stagedsecrets.Staged{files:%d variables:%d hub_token:%t harness_secrets:%d}",
+		len(s.FileSecrets), len(s.VariableSecrets), s.HubToken != "", len(s.HarnessSecrets))
 }
 
 // GoString is String, for %#v.
@@ -115,7 +129,13 @@ func Decode(encoded string) (*Staged, error) {
 // through ordinary system aliases still works while a workload-plantable
 // redirection still fails closed.
 func Write(homeDir string, staged *Staged) error {
-	var uid, gid int
+	uid, gid := workloadIDs()
+	return writeAs(homeDir, staged, uid, gid)
+}
+
+// workloadIDs returns the workload uid and gid from SCION_HOST_UID and
+// SCION_HOST_GID when init runs as root, and 0, 0 (no chown) otherwise.
+func workloadIDs() (uid, gid int) {
 	if os.Getuid() == 0 {
 		if uidStr := os.Getenv("SCION_HOST_UID"); uidStr != "" {
 			if id, err := rootexec.ValidWorkloadID(uidStr, true); err == nil {
@@ -128,7 +148,7 @@ func Write(homeDir string, staged *Staged) error {
 			}
 		}
 	}
-	return writeAs(homeDir, staged, uid, gid)
+	return uid, gid
 }
 
 // writeAs is Write with its resolved workload uid/gid as parameters, so a

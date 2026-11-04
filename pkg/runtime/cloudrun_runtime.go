@@ -252,7 +252,7 @@ var cloudRunEnvLimit = envSizeLimit{maxBytes: cloudRunMaxEnvValueBytes}
 
 // cloudRunRuntimeEnvKeys are set by buildCloudRunInstance after cfg.Env, so
 // an env-type secret must not also supply them (no duplicate EnvVar names).
-var cloudRunRuntimeEnvKeys = []string{"SCION_HOST_UID", "SCION_HOST_GID", startuplistener.EnvPort}
+var cloudRunRuntimeEnvKeys = []string{"SCION_HOST_UID", "SCION_HOST_GID", startuplistener.EnvPort, harnessSecretsDirEnvVar, harnessOutputsDirEnvVar}
 
 // cloudRunOwnerIDs returns the uid and gid the Cloud Run instance runs
 // as and owns its NFS workspace with: the broker's own ids for a
@@ -301,11 +301,29 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 		runtimeLog().Warn("Cloud Run start: the agent's hub credential is not staged",
 			"agent_id", cfg.Labels["agent_id"], "condition", hubTokenCond)
 	}
+	// The harness bundle's staged secrets are never copied onto the share
+	// (cloudRunHomeExcludes): they travel in the staged blob
+	// (Staged.HarnessSecrets) and sciontool init writes them into the
+	// in-memory volume (cloudRunMemVolume).
+	harnessSecrets, err := readCloudRunHarnessSecrets(cfg.HomeDir, cfg.Labels["agent_id"])
+	if err != nil {
+		return "", err
+	}
 	// Deliver resolved secrets through the instance env: env-type secrets as
-	// plain variables, file/variable secrets (and the hub credential) as the
-	// staged blob that sciontool init writes out. Done before any
-	// provisioning so an oversized secret fails fast.
-	if _, err := applyStagedSecretsToEnv(&cfg, cloudRunEnvLimit, hubToken, cloudRunRuntimeEnvKeys...); err != nil {
+	// plain variables, file/variable secrets, the hub credential and the
+	// harness secrets as the staged blob that sciontool init writes out.
+	// Done before any provisioning so an oversized blob fails fast; its
+	// error names only the largest field class. The blob's sizes (never
+	// names or values) are logged at every start.
+	_, sizes, err := applyStagedSecretsToEnvExtras(&cfg, cloudRunEnvLimit, stagedExtras{
+		HubToken:         hubToken,
+		HarnessSecrets:   harnessSecrets,
+		FieldClassErrors: true,
+	}, cloudRunRuntimeEnvKeys...)
+	runtimeLog().Info("Cloud Run start: staged secrets size",
+		"agent_id", cfg.Labels["agent_id"], "total_bytes", sizes.Total, "limit_bytes", cloudRunMaxEnvValueBytes,
+		"hub_credential_bytes", sizes.HubToken, "file_secrets_bytes", sizes.FileSecrets, "harness_secrets_bytes", sizes.HarnessSecrets)
+	if err != nil {
 		return "", fmt.Errorf("cloudrun: %w", err)
 	}
 	if err := r.resolveConfig(ctx); err != nil {
@@ -335,6 +353,21 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 	nfsPaths, err := provision(ctx, cfg, agentID, uid, gid)
 	if err != nil {
 		return "", err
+	}
+	// The instance's home is the agent's home leaf on the share in every
+	// homes mode, so the provisioned home is copied onto it at every start
+	// (provisionCloudRunHome). It runs only once this start owns the
+	// instance: before the create, or before starting this run's own
+	// existing instance, never when another run holds the instance ID, so a
+	// conflicting or racing start never rewrites a live instance's home.
+	// provisionCloudRunNFS always returns the leaf's host path; only a test
+	// provisioning stub may leave it empty.
+	deliverHome := func() error {
+		if cfg.HomeDir == "" || nfsPaths == nil || nfsPaths.homeHostPath == "" {
+			return nil
+		}
+		hooks.progress(api.LaunchStepHomeSync)
+		return provisionCloudRunHome(cfg, nfsPaths, uid, gid)
 	}
 
 	c, err := r.client(ctx)
@@ -380,6 +413,11 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 		if err := hooks.checkpoint(ctx, CheckpointStepInstanceStart); err != nil {
 			return "", err
 		}
+		// This run's own instance (or a legacy one with no run label): the
+		// home is provisioned before it is started.
+		if err := deliverHome(); err != nil {
+			return "", err
+		}
 		// Only this run's own instance is reported: a legacy instance with
 		// no run label is not this launch's to clean up (DeleteResource
 		// would skip it anyway).
@@ -393,6 +431,10 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 		// sciontool init keeps it (its iat rule) over the creation-time one.
 		if hubToken != "" {
 			runtimeLog().Warn("Cloud Run start: reusing the existing instance; it keeps its creation-time staged secrets, including the hub credential",
+				"instance", instanceID, "agent_id", agentID)
+		}
+		if len(harnessSecrets) > 0 {
+			runtimeLog().Warn("Cloud Run start: reusing the existing instance; it keeps its creation-time staged secrets and volumes, including the harness secrets",
 				"instance", instanceID, "agent_id", agentID)
 		}
 		startReq := &runpb.StartInstanceRequest{
@@ -412,7 +454,13 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 		return "", fmt.Errorf("failed to get instance %s: %w", instanceID, err)
 	}
 
-	// Instance doesn't exist, proceed to create.
+	// Instance doesn't exist, proceed to create. The home is provisioned
+	// first; a failure removes the agent directories this start created
+	// (only empty ones).
+	if err := deliverHome(); err != nil {
+		nfsPaths.rollbackCreated(err)
+		return "", err
+	}
 	inst := r.buildCloudRunInstance(cfg, uid, gid, nfsPaths)
 	inst.Containers[0].Resources = resources
 	logCloudRunResources(instanceID, resources, cfg.Resources)
@@ -469,6 +517,10 @@ func (r *CloudRunRuntime) buildCloudRunInstance(cfg RunConfig, uid, gid int, nfs
 	var envVars []*runpb.EnvVar
 	for _, e := range cfg.Env {
 		parts := strings.SplitN(e, "=", 2)
+		if nfsPaths != nil && (parts[0] == harnessSecretsDirEnvVar || parts[0] == harnessOutputsDirEnvVar) {
+			// Set below, pointing into the in-memory volume.
+			continue
+		}
 		if len(parts) == 2 {
 			envVars = append(envVars, &runpb.EnvVar{
 				Name:   parts[0],
@@ -485,6 +537,14 @@ func (r *CloudRunRuntime) buildCloudRunInstance(cfg RunConfig, uid, gid int, nfs
 		Name:   "SCION_HOST_GID",
 		Values: &runpb.EnvVar_Value{Value: fmt.Sprintf("%d", gid)},
 	})
+	// The harness secrets and outputs directories on the in-memory volume
+	// (cloudRunMemVolume), mounted with the NFS volumes below.
+	if nfsPaths != nil {
+		envVars = append(envVars,
+			&runpb.EnvVar{Name: harnessSecretsDirEnvVar, Values: &runpb.EnvVar_Value{Value: k8sHarnessSecretsDir}},
+			&runpb.EnvVar{Name: harnessOutputsDirEnvVar, Values: &runpb.EnvVar_Value{Value: k8sHarnessOutputsDir}},
+		)
+	}
 	// sciontool init opens the startup listener on this port, which the
 	// container's startup probe below checks.
 	envVars = append(envVars, &runpb.EnvVar{
@@ -559,6 +619,24 @@ func (r *CloudRunRuntime) buildCloudRunInstance(cfg RunConfig, uid, gid int, nfs
 		volumeMounts = append(volumeMounts, &runpb.VolumeMount{
 			Name:      "secrets",
 			MountPath: "/home/" + r.ExecUser() + "/.scion/secrets",
+		})
+
+		// The harness secrets and outputs never live on the share: both
+		// directories are on an in-memory volume, as in Kubernetes NFS-home
+		// pods (k8sMemDir). sciontool init writes the staged harness
+		// secrets there.
+		volumes = append(volumes, &runpb.Volume{
+			Name: cloudRunMemVolume,
+			VolumeType: &runpb.Volume_EmptyDir{
+				EmptyDir: &runpb.EmptyDirVolumeSource{
+					Medium:    runpb.EmptyDirVolumeSource_MEMORY,
+					SizeLimit: cloudRunMemVolumeSizeLimit,
+				},
+			},
+		})
+		volumeMounts = append(volumeMounts, &runpb.VolumeMount{
+			Name:      cloudRunMemVolume,
+			MountPath: k8sMemDir,
 		})
 	}
 
@@ -694,6 +772,9 @@ type cloudRunNFSProvisionPaths struct {
 	workspaceHostPath   string
 	homeHostPath        string
 	secretsHostPath     string
+	// homeRel is the home leaf's path relative to hostBase (and to the
+	// export root), from the layout authority (cloudRunAgentLeaves).
+	homeRel string
 	// created lists the agent directories this provision created (the
 	// agent directory agents/<slug> and the home, secrets and own
 	// workspace below it), parents first. A start whose instance was never
@@ -801,6 +882,7 @@ func (r *CloudRunRuntime) provisionCloudRunNFS(ctx context.Context, cfg RunConfi
 	paths.workspaceHostPath = hostPaths.workspaceHostPath
 	paths.homeHostPath = hostPaths.homeHostPath
 	paths.secretsHostPath = hostPaths.secretsHostPath
+	paths.homeRel = hostPaths.homeRel
 
 	// A clone-per-agent agent mounts its own workspace on the share,
 	// <subpath_root>/<project>/agents/<slug>/workspace (the Kubernetes
@@ -978,6 +1060,8 @@ type cloudRunNFSHostProvisionPaths struct {
 	workspaceHostPath  string
 	homeHostPath       string
 	secretsHostPath    string
+	// homeRel is the home leaf relative to hostBase.
+	homeRel string
 }
 
 // cloudRunNFSHostPaths derives the Hub-mounted host paths of an agent from
@@ -1029,6 +1113,7 @@ func cloudRunNFSHostPaths(workspaceHostPath, subPathRoot, projectID, slug, agent
 		workspaceHostPath:  workspaceHostPath,
 		homeHostPath:       filepath.Join(hostBase, home),
 		secretsHostPath:    filepath.Join(hostBase, secrets),
+		homeRel:            home,
 	}, nil
 }
 
