@@ -206,6 +206,32 @@ const maxRefusalsTextBytes = 480
 // run git were skipped.
 const refusalsGitChecksNote = " The git-based checks (the cross-check and the submodule check) run once these are fixed and can report more."
 
+// NeverCarriedNotice is the agent status text naming the repository config
+// keys a start left out of the agent's private copy of .git/config because
+// they name a command or a hook location. names are already redacted
+// (refusalKeyName). It is "" for no names, and is shortened with "and N more"
+// to fit maxRefusalsTextBytes.
+func NeverCarriedNotice(names []string) string {
+	if len(names) == 0 {
+		return ""
+	}
+	render := func(listed int) string {
+		t := "agent git config: left out " + strings.Join(names[:listed], ", ")
+		if rest := len(names) - listed; rest > 0 {
+			t += fmt.Sprintf(" and %d more", rest)
+		}
+		return t + " from the agent's copy of .git/config; settings that name a command or a hook location are never given to agents"
+	}
+	for listed := len(names); listed >= 1; listed-- {
+		if t := render(listed); len(t) <= maxRefusalsTextBytes {
+			return t
+		}
+	}
+	first := names[0]
+	over := len(render(1)) - maxRefusalsTextBytes
+	return strings.Replace(render(1), first, shortenKey(first, len(first)-over), 1)
+}
+
 // RepoConfigRefusals reports every key an agent-start (seed) check refused in
 // the config files it read as data, so one start names them all rather than
 // one per attempt. It holds two or more seeded refusals; one refusal is
@@ -593,6 +619,17 @@ func allowVar(policy RepoConfigPolicy, v gitConfigVar, opts repoConfigAllowOptio
 				return true, ""
 			case "uploadpack", "receivepack", "proxy", "vcs":
 				return false, "a remote command or proxy override"
+			case "promisor":
+				// Partial clone: lazy fetches go to the remote's own url.
+				if isGitBool(v.Value) {
+					return true, ""
+				}
+				return false, "a remote promisor setting that is not a boolean"
+			case "partialclonefilter":
+				if validFilterSpec(v.Value) {
+					return true, ""
+				}
+				return false, "a partial-clone filter outside the accepted filter forms"
 			}
 		}
 	case "branch":
@@ -600,10 +637,23 @@ func allowVar(policy RepoConfigPolicy, v gitConfigVar, opts repoConfigAllowOptio
 			switch name {
 			case "description", "pushremote", "mergeoptions", "autosetuprebase":
 				return true, ""
+			case "vscode-merge-base":
+				// Editor metadata: the branch a feature branch merges into.
+				if validRefName(v.Value) {
+					return true, ""
+				}
+				return false, "an editor merge-base setting that is not a valid ref name"
 			}
 		}
 		if topLevel && name == "autosetuprebase" {
 			return true, ""
+		}
+	case "grep":
+		if topLevel && name == "threads" {
+			if validGrepThreads(v.Value) {
+				return true, ""
+			}
+			return false, "a grep.threads that is not a non-negative integer"
 		}
 	case "pull":
 		if topLevel && (name == "rebase" || name == "ff" || name == "octopus" || name == "twohead") {
@@ -863,25 +913,41 @@ func checkRepoConfigVars(dir, layer string, vars []gitConfigVar, policy RepoConf
 // collectSeedRefusals applies the seed rules of checkRepoConfigVars to every
 // variable and returns a refusal for each one refused, in order, rather than
 // stopping at the first. It reads no file and runs no git.
-func collectSeedRefusals(layer string, vars []gitConfigVar, policy RepoConfigPolicy, exempt func(gitConfigVar) bool) []*RepoConfigRefusedError {
+//
+// With strip set (the agent's private copy of .git/config, on a runtime that
+// binds that copy), a variable refused only because it names a command or a
+// hook location (seedNeverCarry) is returned in stripped instead: it is left
+// out of the copy and the start goes on. Everything else is refused as
+// without strip.
+func collectSeedRefusals(layer string, vars []gitConfigVar, policy RepoConfigPolicy, exempt func(gitConfigVar) bool, strip bool) (refusals []*RepoConfigRefusedError, stripped []gitConfigVar) {
 	opts := repoConfigAllowOptions{seed: true}
-	var out []*RepoConfigRefusedError
 	for _, v := range vars {
-		if reason, refused := refuseConfigVar(v, policy, opts, exempt); refused {
-			out = append(out, newRepoConfigRefusedError("", layer, v.Key(), v.Value, reason, true, AudienceRemote))
+		reason, refused := refuseConfigVar(v, policy, opts, exempt)
+		if !refused {
+			continue
 		}
+		if strip && reason == neverCarryReason {
+			stripped = append(stripped, v)
+			continue
+		}
+		refusals = append(refusals, newRepoConfigRefusedError("", layer, v.Key(), v.Value, reason, true, AudienceRemote))
 	}
-	return out
+	return refusals, stripped
 }
 
+// neverCarryReason is the refusal reason for a seedNeverCarry key.
+const neverCarryReason = "a command or hook-location setting, never given to agents"
+
 // refuseConfigVar is the per-variable decision checkRepoConfigVars and
-// collectSeedRefusals share, in the order checkRepoConfigVars documents.
+// collectSeedRefusals share, in the order checkRepoConfigVars documents, with
+// one seed-only step after seedUnpinnedRefuse: a seedNeverCarry key is
+// refused with neverCarryReason (collectSeedRefusals may strip it instead).
 func refuseConfigVar(v gitConfigVar, policy RepoConfigPolicy, opts repoConfigAllowOptions, exempt func(gitConfigVar) bool) (string, bool) {
 	if v.Section == "include" || v.Section == "includeif" {
 		return "an include directive", true
 	}
-	if opts.seed && seedKeyMatchesAny(seedUnpinnedRefuse, v) {
-		return "a setting that runs a command in the agent's git", true
+	if opts.seed && (seedKeyMatchesAny(seedUnpinnedRefuse, v) || seedNeverCarry(v)) {
+		return neverCarryReason, true
 	}
 	if exempt != nil && exempt(v) {
 		return "", false
@@ -890,6 +956,48 @@ func refuseConfigVar(v gitConfigVar, policy RepoConfigPolicy, opts repoConfigAll
 		return reason, true
 	}
 	return "", false
+}
+
+// seedNeverCarry reports whether v names a command or a hook location: keys
+// an agent's git must never get from the repository config. The seed strips
+// them from the agent's private copy of .git/config (where the runtime binds
+// that copy) and refuses them in every layer bound raw. The keys in
+// seedUnpinnedRefuse are treated the same way. The exact standard git-lfs
+// filter is not a never-carry key (allowVar allows it).
+func seedNeverCarry(v gitConfigVar) bool {
+	top, sub := !v.HasSubsection, v.HasSubsection
+	if v.Name == "program" { // gpg.program, gpg.<format>.program, any *.program
+		return true
+	}
+	switch v.Section {
+	case "core":
+		switch v.Name {
+		case "editor", "hookspath", "fsmonitor", "pager", "sshcommand", "askpass", "gitproxy":
+			return top
+		}
+	case "sequence":
+		return top && v.Name == "editor"
+	case "pager", "alias": // pager.<cmd>; alias.<name> ("!" runs a shell command)
+		return top
+	case "diff":
+		return (sub && (v.Name == "textconv" || v.Name == "command")) || (top && v.Name == "external")
+	case "merge":
+		return sub && v.Name == "driver"
+	case "filter":
+		if !sub {
+			return false
+		}
+		switch v.Name {
+		case "clean", "smudge", "process":
+			want, std := standardLFSFilter[v.Name]
+			return v.Subsection != "lfs" || !std || v.Value != want
+		}
+	case "remote":
+		return sub && (v.Name == "uploadpack" || v.Name == "receivepack" || v.Name == "vcs")
+	case "uploadpack":
+		return top && v.Name == "packobjectshook"
+	}
+	return false
 }
 
 // seedKeyRule names one config key exactly: section and variable name
@@ -961,6 +1069,9 @@ var seedUnpinnedSafe = []seedKeyRule{
 //     for more);
 //   - removes credential-bearing material (redactGitConfigVars, as
 //     RedactGitConfigSecrets does);
+//   - with stripNeverCarry, leaves out every key that names a command or a hook
+//     location (seedNeverCarry) instead of refusing it, and returns those keys'
+//     redacted names in neverCarried; without it such keys are refused;
 //   - removes every variable for which strip returns true (strip may be nil);
 //     section and name are lower-cased, subsection keeps its case;
 //   - serializes what survives.
@@ -969,20 +1080,31 @@ var seedUnpinnedSafe = []seedKeyRule{
 // checked variables, never copied from raw. stripped lists the redacted names of
 // the keys the redaction changed or dropped. A parse error is returned so the
 // caller can fail closed.
-func PrepareSeededGitConfig(raw []byte, policy RepoConfigPolicy, strip func(section, subsection string, hasSubsection bool, name string) bool) (out []byte, stripped []string, err error) {
-	return prepareSeededGitConfig(raw, parseGitConfigFile, policy, strip)
+func PrepareSeededGitConfig(raw []byte, policy RepoConfigPolicy, strip func(section, subsection string, hasSubsection bool, name string) bool, stripNeverCarry bool) (out []byte, stripped, neverCarried []string, err error) {
+	return prepareSeededGitConfig(raw, parseGitConfigFile, policy, strip, stripNeverCarry)
 }
 
 // prepareSeededGitConfig is PrepareSeededGitConfig with the parser passed in,
 // so a test can observe that raw is parsed exactly once and that the written
 // bytes come from the variables that parse returned.
-func prepareSeededGitConfig(raw []byte, parse func([]byte) ([]gitConfigVar, error), policy RepoConfigPolicy, strip func(section, subsection string, hasSubsection bool, name string) bool) ([]byte, []string, error) {
+func prepareSeededGitConfig(raw []byte, parse func([]byte) ([]gitConfigVar, error), policy RepoConfigPolicy, strip func(section, subsection string, hasSubsection bool, name string) bool, stripNeverCarry bool) (out []byte, stripped, neverCarried []string, err error) {
 	vars, err := parse(raw)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	if err := joinSeedRefusals(collectSeedRefusals("", vars, policy, isDroppedKey), false); err != nil {
-		return nil, nil, err
+	refusals, never := collectSeedRefusals("", vars, policy, isDroppedKey, stripNeverCarry)
+	if err := joinSeedRefusals(refusals, false); err != nil {
+		return nil, nil, nil, err
+	}
+	for _, v := range never {
+		if n := refusalKeyName(v.Key()); !slices.Contains(neverCarried, n) {
+			neverCarried = append(neverCarried, n)
+		}
+	}
+	if len(never) > 0 {
+		vars = slices.DeleteFunc(vars, func(v gitConfigVar) bool {
+			return seedNeverCarry(v) || seedKeyMatchesAny(seedUnpinnedRefuse, v)
+		})
 	}
 	kept, stripped := redactGitConfigVars(vars)
 	if strip != nil {
@@ -995,7 +1117,7 @@ func prepareSeededGitConfig(raw []byte, parse func([]byte) ([]gitConfigVar, erro
 		}
 		kept = filtered
 	}
-	return serializeGitConfig(kept), stripped, nil
+	return serializeGitConfig(kept), stripped, neverCarried, nil
 }
 
 // refuseRootCommonDirRedirect refuses a host-side git command or, when seeded

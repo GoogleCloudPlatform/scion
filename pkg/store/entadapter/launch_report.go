@@ -446,6 +446,15 @@ func (s *AgentStore) applyLaunchReportPreRunning(ctx context.Context, ltx *launc
 			SetLaunchLastReportAt(now).
 			SetStateVersion(current.StateVersion + 1)
 		applySucceededAgentInfo(upd, current, r)
+		// A succeeded report's message is a notice about the start (for
+		// example the repository git config keys left out of the agent's
+		// private copy); it becomes the agent's status message. Only here,
+		// on the first running write: a succeeded report that arrives once
+		// the agent already reports its own status (running or
+		// running_observed) leaves that message alone.
+		if r.Message != "" && r.Message != current.Message {
+			upd.SetMessage(r.Message)
+		}
 		withStartEndClearsMemory(upd, current)
 		if ownerToSet != "" {
 			upd.SetLaunchOwner(ownerToSet)

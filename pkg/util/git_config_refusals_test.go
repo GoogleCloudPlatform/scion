@@ -27,9 +27,9 @@ import (
 // order, each once, with the remedy; it never prints a value.
 func TestPrepareSeededGitConfig_ReportsAllRefusedKeys(t *testing.T) {
 	raw := "[core]\n\teditor = vi-valmarker-a1\n\tpager = less-valmarker-a2\n" +
-		"[grep]\n\tthreads = 8\n\tthreads = 9\n" +
+		"[mytool]\n\tsetting = 8\n\tsetting = 9\n" +
 		"[user]\n\tname = ok\n"
-	_, _, err := PrepareSeededGitConfig([]byte(raw), RepoPolicyLinked, nil)
+	_, _, _, err := PrepareSeededGitConfig([]byte(raw), RepoPolicyLinked, nil, false)
 	var many *RepoConfigRefusals
 	if !errors.As(err, &many) {
 		t.Fatalf("error = %v, want *RepoConfigRefusals", err)
@@ -38,13 +38,13 @@ func TestPrepareSeededGitConfig_ReportsAllRefusedKeys(t *testing.T) {
 	for _, r := range many.Refusals {
 		keys = append(keys, r.Key)
 	}
-	if got, want := strings.Join(keys, ","), "core.editor,core.pager,grep.threads"; got != want {
+	if got, want := strings.Join(keys, ","), "core.editor,core.pager,mytool.setting"; got != want {
 		t.Fatalf("refused keys = %s, want %s (in order, each once)", got, want)
 	}
 	want := "agent git config refused: repository config sets 3 keys that are not allowed: " +
-		"core.editor (not on the linked-checkout allow-list), " +
-		"core.pager (a setting that runs a command in the agent's git), " +
-		"grep.threads (not on the linked-checkout allow-list): remove each from the repository's .git/config."
+		"core.editor (a command or hook-location setting, never given to agents), " +
+		"core.pager (a command or hook-location setting, never given to agents), " +
+		"mytool.setting (not on the linked-checkout allow-list): remove each from the repository's .git/config."
 	if got := err.Error(); got != want {
 		t.Errorf("text =\n  %q\nwant\n  %q", got, want)
 	}
@@ -60,12 +60,12 @@ func TestPrepareSeededGitConfig_ReportsAllRefusedKeys(t *testing.T) {
 
 // One refused key keeps exactly the single-refusal type and text.
 func TestPrepareSeededGitConfig_OneRefusalKeepsLegacyText(t *testing.T) {
-	_, _, err := PrepareSeededGitConfig([]byte("[core]\n\teditor = vi\n"), RepoPolicyLinked, nil)
+	_, _, _, err := PrepareSeededGitConfig([]byte("[mytool]\n\tsetting = 1\n"), RepoPolicyLinked, nil, false)
 	var many *RepoConfigRefusals
 	if errors.As(err, &many) {
 		t.Fatalf("one refusal returned as a list: %v", err)
 	}
-	want := "agent git config refused: repository config sets core.editor, which is not on the linked-checkout allow-list; remove it from the repository's .git/config"
+	want := "agent git config refused: repository config sets mytool.setting, which is not on the linked-checkout allow-list; remove it from the repository's .git/config"
 	if err == nil || err.Error() != want {
 		t.Errorf("text = %v, want %q", err, want)
 	}

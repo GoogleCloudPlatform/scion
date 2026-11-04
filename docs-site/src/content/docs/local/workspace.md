@@ -303,6 +303,10 @@ the agent start or workspace pull rather than being ignored.
   `status.*`, `maintenance.*`, sparse-checkout toggles, `init.defaultBranch`, inert git-lfs data
   keys, `gpg.format` and `user.signingKey` (signing data only), and `submodule.<name>.update` **only**
   as `none`/`checkout`/`rebase`/`merge`, `submodule.<name>.url` **only** for an `https`/`ssh` remote.
+  Four more keys are allowed only with a strictly valid value: `grep.threads` (a non-negative
+  integer), `branch.<name>.vscode-merge-base` (a valid ref name), `remote.<name>.promisor` (a
+  boolean) and `remote.<name>.partialclonefilter` (`blob:none`, `blob:limit=<n>`, `tree:<depth>`,
+  `object:type=<type>`, `sparse:oid=<object id>`, or a `combine:` of those; `sparse:path` is refused).
   A few keys that would run a command are allowed here only because a fixed command-line setting
   overrides them on every call (`core.hooksPath`, `core.fsmonitor`, `core.pager`,
   `submodule.recurse`), so such a repository value never runs a command.
@@ -312,9 +316,11 @@ the agent start or workspace pull rather than being ignored.
   command or textconv drivers, non-standard `filter.*` drivers, and any key not on the list. If a
   command is refused, the error names the key; remove it from the repository's `.git/config` (or
   `config.worktree`).
-- **Partial clones and sparse-index checkouts are refused:** `extensions.partialClone` and
-  `index.sparse` are not on the allow-list, so host-side git in such a repository is refused and an
-  agent cannot start there. This is a deliberate, fail-closed limitation; it may be lifted later.
+- **Partial clones:** a partial clone made by current git (`git clone --filter=...`, which records
+  `remote.<name>.promisor` and `remote.<name>.partialclonefilter`) is allowed; git then fetches
+  missing objects from that remote's own URL. `extensions.partialClone` (written by older git) and
+  `index.sparse` (sparse-index checkouts) are not on the allow-list, so host-side git in such a
+  repository is refused and an agent cannot start there.
 - As defence in depth these commands also run with `LC_ALL=C` (dropping any inherited `LC_ALL`), with hooks, the file-system monitor and the pager
   off, signing off (`commit.gpgsign`/`tag.gpgsign`/`merge.verifySignatures` false), the `ext::`
   transport disabled and the `file://` transport allowed only for a top-level operation the user
@@ -388,11 +394,22 @@ metadata into agents so that an agent cannot change what git does for you or for
   `container` runtime, Scion checks `.git/config`, the worktree config layers the agent can reach
   (`.git/config.worktree` and `.git/worktrees/<name>/config.worktree`), and every reachable submodule
   admin directory (`.git/modules/` and `.git/worktrees/<name>/modules/`) and index gitlink against the
-  linked-checkout allow-list above. Because the agent's git inside the container reads these layers
-  without the host-side `-c` command-line pins, **`core.hooksPath`, `core.fsmonitor`, and `core.pager`
-  are refused at agent start too** (along with `core.sshCommand`, `core.editor`, `credential.*`,
-  `url.*.insteadOf`, `http.*`, `gpg.*` program/signing-file keys, `*.program`, `alias.*`,
-  non-standard `filter.*` drivers, and `include`/`includeIf`). A root-level `.git/commondir` or
+  linked-checkout allow-list above. The agent's git inside the container reads these layers without
+  the host-side `-c` command-line pins, so settings that name a command or a hook location
+  (`core.editor`, `core.hooksPath`, `core.fsmonitor`, `core.pager`, `core.sshCommand`, `core.askpass`,
+  `core.gitProxy`, `sequence.editor`, `*.program`, `alias.*`, `pager.*`, diff and merge driver
+  commands, non-standard `filter.*` drivers, a remote's `uploadpack`/`receivepack`/`vcs`, and
+  `uploadpack.packObjectsHook`) are **never given to agents**:
+  - On Docker and Podman, the agent reads a private copy of `.git/config`. Such settings in
+    `.git/config` are **left out of that copy**, the agent starts, and its status message names the
+    keys left out (`agent git config: left out core.editor, ... from the agent's copy of .git/config`).
+  - The same settings in a `config.worktree` layer or a submodule config, which the agent reads as
+    they are, **refuse the start**, as they do on the Apple `container` runtime, where the agent reads
+    `.git/config` directly.
+  - Every other key outside the allow-list (`credential.*` in a raw layer, `url.*.insteadOf`,
+    `http.*`, `gpg.*` signing-file keys, and so on), and `include`/`includeIf`, refuse the start
+    everywhere. A refusal names every refused key in one message, with the file to edit for each.
+  A root-level `.git/commondir` or
   `.git/gitdir` file in any git layout, or an unsafe submodule directory or gitlink (a symlinked
   module directory, a `.git` directory inside a submodule work tree, or a gitfile pointing outside
   `modules/`), also refuses the start. The refusal (`agent git config refused: ...`) names the key

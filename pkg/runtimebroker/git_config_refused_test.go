@@ -40,7 +40,7 @@ const gitConfigRefusedTestDir = "/var/lib/scion/agents/dirmarker-g7"
 // two keys, wrapped as the agent start wraps it.
 func gitConfigRefusedErr(t *testing.T) (string, error) {
 	t.Helper()
-	_, _, refusal := util.PrepareSeededGitConfig([]byte("[core]\n\teditor = vi-valmarker-g8\n[grep]\n\tthreads = 8\n"), util.RepoPolicyLinked, nil)
+	_, _, _, refusal := util.PrepareSeededGitConfig([]byte("[core]\n\teditor = vi-valmarker-g8\n[mytool]\n\tsetting = 8\n"), util.RepoPolicyLinked, nil, false)
 	if refusal == nil {
 		t.Fatal("fixture: the config was not refused")
 	}
@@ -52,7 +52,7 @@ func checkGitConfigRefusedText(t *testing.T, got, want string) {
 	if got != want {
 		t.Errorf("message = %q, want the refusal text %q", got, want)
 	}
-	if !strings.Contains(got, "core.editor") || !strings.Contains(got, "grep.threads") {
+	if !strings.Contains(got, "core.editor") || !strings.Contains(got, "mytool.setting") {
 		t.Errorf("message does not name every refused key: %q", got)
 	}
 	if strings.Contains(got, "dirmarker-g7") || strings.Contains(got, "valmarker-g8") || strings.Contains(got, "Failed to") {

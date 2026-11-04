@@ -524,8 +524,14 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 	// Journalled before it is sent (design wave 3 §1 C-a write 3): a
 	// restarted broker resends it unchanged and never turns it into a
 	// failure.
-	rec.journal.terminal(journalTerminal{Succeeded: true, AgentInfo: info})
-	result, err := sender.SendTerminal(terminalCtx, true, "", "", "", "", info)
+	// The start's notice (for example the repository git config keys left
+	// out of the agent's private copy) becomes the agent's status message.
+	notice := ""
+	if sr.info != nil {
+		notice = sr.info.StartNotice
+	}
+	rec.journal.terminal(journalTerminal{Succeeded: true, Message: notice, AgentInfo: info})
+	result, err := sender.SendTerminal(terminalCtx, true, "", "", notice, "", info)
 	if err != nil {
 		// No definitive answer by the TTL: no cleanup (same rule as a
 		// failed report, design §3.8.2 step 7); the journal record is kept so
