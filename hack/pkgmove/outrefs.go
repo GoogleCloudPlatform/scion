@@ -111,7 +111,8 @@ type outFileEdits struct {
 // the root Makefile and .github/workflows/*.yml. Directories named .design, docs-site,
 // node_modules or vendor, and other dot directories, are skipped, and so are
 // Markdown files; testdata directories are scanned (a fixture that names a
-// moved path is reported). In Go files only string literals count (go/ast BasicLit),
+// moved path is reported), except hack/**/*.txt under testdata (golden
+// text, which cannot carry a ref-ok marker). In Go files only string literals count (go/ast BasicLit),
 // so comments do not: a literal that contains a moved file's repo path, a
 // call whose consecutive string arguments are the trailing elements of that
 // path (filepath.Join("pkg", "hub", "x.go"); at least the directory and the

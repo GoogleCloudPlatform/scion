@@ -600,7 +600,8 @@ pkgmove scans the module for each moved file (and each moved file asset):
 - **Skipped:** directories named `.design`, `docs-site`, `node_modules` or
   `vendor`, other dot directories except `.github`, and Markdown files.
   `testdata` directories are scanned: a fixture that names a moved path is
-  reported (accept it with `pkgmove:ref-ok` if it is meant to stay).
+  reported (accept it with `pkgmove:ref-ok` if it is meant to stay), except
+  `hack/**/*.txt` under `testdata`, which is skipped (see Text files).
 
 Each reference is a HIGH, an ERROR under `-strict`, naming the file:line, the
 form and the matched text. Fix it in the move's prep (or in the move PR):
@@ -651,6 +652,12 @@ passed before. The identifier is not rewritten, and the HIGH says why, when it
 is ambiguous in that file (renamed for one object, kept or renamed differently
 for another), when the move renames that name only in other files, or when the
 named file was not type-checked and the move renames the name somewhere.
+One case is not caught here: a symbol that is no object of the file, is
+renamed nowhere, and occurs in the file only inside a longer identifier the
+move renames (`authorize` inside `authorizeAgentCreate`). Its path is
+rewritten, and the substring check then fails in the registry test in CI.
+No current registry entry has this shape: each names a whole identifier of
+its file.
 
 **`Function` next to `File`** (the authzop catalog, keyed by file and
 enclosing function): when `-rewrite-outrefs` rewrites the `File` field of a
