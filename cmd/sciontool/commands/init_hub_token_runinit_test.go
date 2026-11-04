@@ -27,6 +27,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/stagedsecrets"
+	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 )
 
 // captureSciontoolLog points the sciontool log file at a fresh path for the
@@ -105,10 +106,13 @@ func (f runInitStagedFixture) runWithStopForwarding(t *testing.T, script string)
 		InitRunOptions{DisableReExec: true})
 }
 
-func (f runInitStagedFixture) run(t *testing.T, script string) int {
+func (f runInitStagedFixture) run(t *testing.T, script string, extra ...string) int {
 	t.Helper()
-	return RunInit([]string{"sh", "-c", script, "sh", f.tokenPath},
-		InitRunOptions{DisableTermSignalForwarding: true, DisableReExec: true})
+	// The script gets the token path as $1 and any extra paths after it.
+	// Credential values never go on the command line (init logs it); a
+	// script that needs one reads it from a file.
+	args := append([]string{"sh", "-c", script, "sh", f.tokenPath}, extra...)
+	return RunInit(args, InitRunOptions{DisableTermSignalForwarding: true, DisableReExec: true})
 }
 
 // Children in these tests sleep 0.5s so they outlive RunInit's 100ms
@@ -158,25 +162,42 @@ func TestRunInit_StagedHubToken_CrashKeepsRefreshedTokenForRestart(t *testing.T)
 	t.Setenv(stagedsecrets.EnvVar, stagedBlob(t, createTime))
 
 	// The harness stands in for the refresh loop, writing a newer
-	// credential, then crashes.
-	script := `printf '%s' '` + refreshed + `' > "$1.tmp" && mv "$1.tmp" "$1"; sleep 0.5; exit 3`
-	if got := f.run(t, script); got == 0 {
+	// credential (copied from a file, so no credential value is on the
+	// command line or in the log), then crashes.
+	refreshedFile := filepath.Join(t.TempDir(), "refreshed")
+	if err := os.WriteFile(refreshedFile, []byte(refreshed), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	script := `cp "$2" "$1.tmp" && mv "$1.tmp" "$1"; sleep 0.5; exit 3`
+	if got := f.run(t, script, refreshedFile); got == 0 {
 		t.Fatalf("RunInit() = 0, want a crash exit")
 	}
 	if got := readFileString(t, f.tokenPath); got != refreshed {
 		t.Fatal("the refreshed token file was not kept after a crash exit")
 	}
-	if !strings.Contains(f.readLog(), "Kept the staged hub credential file for a restart") {
+	out := f.readLog()
+	if !strings.Contains(out, "Kept the staged hub credential file for a restart") {
 		t.Error("log lacks the kept-for-restart line")
+	}
+	if strings.Contains(out, refreshed) || strings.Contains(out, createTime) {
+		t.Error("log carries a credential value")
 	}
 
 	// The container restarts with the same payload.
 	t.Setenv(stagedsecrets.EnvVar, stagedBlob(t, createTime))
-	if got := f.run(t, `test "$(cat "$1")" = '`+refreshed+`' || exit 7; sleep 0.5`); got != 0 {
+	if got := f.run(t, `cmp -s "$1" "$2" || exit 7; sleep 0.5`, refreshedFile); got != 0 {
 		t.Fatalf("restart RunInit() = %d, want 0 (the harness must see the refreshed credential)", got)
 	}
 	if _, err := os.Lstat(f.tokenPath); !os.IsNotExist(err) {
 		t.Errorf("token file not removed after the restart's clean exit (err %v)", err)
+	}
+	out = f.readLog()
+	// Control: the restart's own removal line is in the same log.
+	if !strings.Contains(out, "Removed the staged hub credential file") {
+		t.Error("log lacks the restart's removal line")
+	}
+	if strings.Contains(out, refreshed) || strings.Contains(out, createTime) {
+		t.Error("log carries a credential value after the restart")
 	}
 }
 
@@ -328,5 +349,72 @@ func TestLogHubOperatingMode(t *testing.T) {
 	}
 	if strings.Contains(out, initHubTokenCanary) {
 		t.Error("log carries the credential")
+	}
+}
+
+// Only the staging pass arms the staged-token marker: a pass that takes
+// the transport-token re-exec path (no staged payload) clears an inherited
+// marker, so a broker-provided token file is not removed at a clean exit.
+func TestRunInit_TransportReexecPathClearsInheritedMarker(t *testing.T) {
+	f := newRunInitStagedFixture(t)
+	if err := os.MkdirAll(filepath.Dir(f.tokenPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f.tokenPath, []byte(initHubTokenCanary), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(envHubTokenStaged, "1")
+	t.Setenv(transportauth.EnvTransportToken, "fake-transport-token-canary-7239")
+	t.Setenv(transportauth.EnvTransportTokenFile, "")
+	if got := f.run(t, "sleep 0.5"); got != 0 {
+		t.Fatalf("RunInit() = %d, want 0", got)
+	}
+	if got := readFileString(t, f.tokenPath); got != initHubTokenCanary {
+		t.Error("a broker-provided token file was removed on the transport re-exec path")
+	}
+	if strings.Contains(f.readLog(), "Removed the staged hub credential file") {
+		t.Error("init treated an inherited marker as its own")
+	}
+}
+
+// Only the staging pass arms the staged-token marker: a staged payload
+// without a hub credential (file secrets only) clears an inherited marker,
+// so a broker-provided token file is not removed at a clean exit.
+func TestRunInit_StagedSecretsWithoutHubTokenClearsInheritedMarker(t *testing.T) {
+	f := newRunInitStagedFixture(t)
+	if err := os.MkdirAll(filepath.Dir(f.tokenPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f.tokenPath, []byte(initHubTokenCanary), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	secretPath := filepath.Join(f.agentHome, ".config", "kit-example", "secret.txt")
+	data, err := json.Marshal(stagedsecrets.Staged{FileSecrets: []stagedsecrets.FileSecret{{
+		Name:   "example",
+		Target: secretPath,
+		Value:  base64.StdEncoding.EncodeToString([]byte("example-file-content")),
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(stagedsecrets.EnvVar, base64.StdEncoding.EncodeToString(data))
+	t.Setenv(envHubTokenStaged, "1")
+	t.Setenv(transportauth.EnvTransportToken, "")
+	t.Setenv(transportauth.EnvTransportTokenFile, "")
+	if got := f.run(t, "sleep 0.5"); got != 0 {
+		t.Fatalf("RunInit() = %d, want 0", got)
+	}
+	// Control: this pass took the staging path.
+	if got := readFileString(t, secretPath); got != "example-file-content" {
+		t.Fatal("the staged file secret was not written")
+	}
+	if os.Getenv(envHubTokenStaged) != "" {
+		t.Error("the inherited staged-token marker was not cleared")
+	}
+	if got := readFileString(t, f.tokenPath); got != initHubTokenCanary {
+		t.Error("a broker-provided token file was removed after a staged payload without a hub credential")
+	}
+	if strings.Contains(f.readLog(), "Removed the staged hub credential file") {
+		t.Error("init treated an inherited marker as its own")
 	}
 }

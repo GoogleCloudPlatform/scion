@@ -398,8 +398,8 @@ func TestReservedSecretEnvTarget_HubTokenStagedMarker(t *testing.T) {
 	if !sawOrdinary {
 		t.Error("control: an ordinary environment secret was not emitted")
 	}
-	if !reservedSecretEnvTarget(stagedsecrets.HubTokenStagedEnvVar) || reservedSecretEnvTarget("EXAMPLE_API_KEY") {
-		t.Error("reservedSecretEnvTarget does not single out the marker")
+	if !reservedAgentEnvName(stagedsecrets.HubTokenStagedEnvVar) || reservedAgentEnvName("EXAMPLE_API_KEY") {
+		t.Error("reservedAgentEnvName does not single out the marker")
 	}
 }
 

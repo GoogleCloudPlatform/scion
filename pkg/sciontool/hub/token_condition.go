@@ -98,7 +98,7 @@ func wellFormedTokenText(token string) bool {
 // the agent's own credentials, never to trust one.
 func TokenIssuedAt(token string) (iat time.Time, ok bool) {
 	parts := strings.Split(strings.TrimSpace(token), ".")
-	if len(parts) != 3 || parts[0] == "" || parts[2] == "" {
+	if len(parts) != 3 || parts[0] == "" || parts[1] == "" || parts[2] == "" {
 		return time.Time{}, false
 	}
 	payload, err := decodeSegment(parts[1])
