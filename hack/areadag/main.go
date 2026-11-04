@@ -28,7 +28,10 @@
 // behind a tag such as integration, tzcontract or windows), so areadag also
 // walks the module root, skipping what go skips (names starting with . or _,
 // testdata, vendor, directories with their own go.mod), and parses every Go
-// file of each directory go list did not list. The union covers every build
+// file of each directory go list did not list. A symlinked directory is not
+// followed (rule 7 covers imports through one). go/build compiles a symlinked
+// .go file, so one in a walked directory makes the input unusable (exit 2);
+// the repository has none today. The union covers every build
 // tag set and platform: a file counts whatever its constraint.
 //
 // The testsupport class comes only from dag.txt: a package is testsupport
@@ -62,10 +65,10 @@
 //     The go command skips symlinked, ., _, testdata and vendor directories
 //     only when matching ./...; an import still resolves to them by path. Such
 //     a package would be invisible to rules 1-6, so importing one makes the
-//     input unusable (exit 2: the check fails closed). This
-//     assumes the main module requires no nested module under its own path
-//     (true today: the nested modules under extras/ and cr-ci/ are not
-//     required by the main module).
+//     input unusable (exit 2: the check fails closed). This assumes the main
+//     module requires no nested module under its own path (true today: the
+//     nested modules under extras/ and cr-ci/ are not required by the main
+//     module).
 //
 // Undeclared pkg/hub subpackages are not checked under rules 1-3 (feature
 // packages carry no DAG obligation); they are still subject to rules 4 and 6,
@@ -77,7 +80,8 @@
 // //go:build ignore generator next to library files), or when any input count
 // is zero: no module packages, no pkg/hub packages, no declarations, no
 // testsupport declarations, no alias files, no import edges examined, or no
-// package main; and when a module import is unresolved (rule 7).
+// package main; when a module import is unresolved (rule 7); and when a
+// walked directory holds a symlinked .go file.
 //
 // Usage:
 //
@@ -86,7 +90,9 @@
 // -root defaults to the directory of the list file.
 //
 // Exit codes: 0 clean, 1 violations, 2 usage error, unreadable or malformed
-// input, or an input count of zero.
+// input, an input count of zero, a stale declaration, a testsupport package
+// main, an unresolved module import (rule 7), or a symlinked .go file in a
+// walked directory.
 package main
 
 import (
@@ -362,7 +368,7 @@ func check(dagFile, listFile, root, hub string) ([]string, string, error) {
 					continue
 				}
 				if _, ok := all[imp]; !ok {
-					return nil, "", fmt.Errorf("import of module path %s that go list and the walk did not see (%s imports it in %s code; a symlinked, ., _, testdata or vendor directory?): the rules cannot check it, so move the package to an ordinary directory", imp, path, side.name)
+					return nil, "", fmt.Errorf("import of module path %s that go list and the walk did not see (%s imports it in %s code; a symlinked, ., _, testdata or vendor directory, or symlinked files?): the rules cannot check it, so move the package to an ordinary directory", imp, path, side.name)
 				}
 			}
 		}
@@ -447,7 +453,9 @@ func supportReach(start string, all map[string]*pkgInfo, isSupport func(string) 
 // walkUnlisted parses every directory under root that holds Go files but is
 // not a listed package directory, skipping what the go command skips for
 // ./...: names starting with . or _, testdata, vendor, and directories with
-// their own go.mod. Symlinked directories are not followed (go ignores them).
+// their own go.mod. Symlinked directories are not followed (go ignores them);
+// a symlinked .go file is an error (fail closed), because go/build compiles
+// it.
 func walkUnlisted(root, modPath string, listed map[string]bool) ([]*pkgInfo, error) {
 	var out []*pkgInfo
 	err := filepath.WalkDir(root, func(dir string, de fs.DirEntry, err error) error {
@@ -485,7 +493,15 @@ func walkUnlisted(root, modPath string, listed map[string]bool) ([]*pkgInfo, err
 		files := 0
 		for _, e := range entries {
 			name := e.Name()
-			if !e.Type().IsRegular() || !strings.HasSuffix(name, ".go") || strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_") {
+			if !strings.HasSuffix(name, ".go") || strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_") {
+				continue
+			}
+			if e.Type()&fs.ModeSymlink != 0 {
+				// go/build compiles a symlink to a regular file as a source
+				// file; fail closed rather than vouch for its target.
+				return fmt.Errorf("symlinked .go file %s in a walked directory: areadag cannot vouch for it", filepath.Join(dir, name))
+			}
+			if !e.Type().IsRegular() {
 				continue
 			}
 			files++

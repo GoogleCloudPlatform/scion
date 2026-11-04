@@ -30,8 +30,8 @@
 #
 # SEVERITY: guard-grade. A zero input count (no packages, no declarations, no
 # testsupport declaration, no alias file, no edge, no package main), a stale
-# declaration, a testsupport package main or an unresolved module import fails
-# the run.
+# declaration, a testsupport package main, an unresolved module import or a
+# symlinked .go file in a walked directory fails the run.
 #
 # EXIT CODES
 #   0  analysed, no violations

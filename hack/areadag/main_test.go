@@ -162,6 +162,8 @@ func TestUnusableInputs(t *testing.T) {
 		// An import of a _ directory: go list ./... and the walk skip it, so
 		// the check fails closed.
 		{"hiddenimport", "import of module path example.com/m/pkg/hub/_shim that go list and the walk did not see (example.com/m/pkg/hub imports it in non-test code"},
+		// An import of the bare module path, which holds no package.
+		{"rootimport", "import of module path example.com/m that go list and the walk did not see (example.com/m/pkg/hub imports it in non-test code"},
 		{"hiddentestimport", "import of module path example.com/m/pkg/hub/_shim that go list and the walk did not see (example.com/m/pkg/hub/b imports it in test code"},
 		{"emptylist", "no packages"},
 		{"nohub", "example.com/m/pkg/hub is not in the list"},
@@ -269,6 +271,43 @@ func TestWalkSkips(t *testing.T) {
 	m := okLine.FindStringSubmatch(stdout)
 	if m == nil || m[3] != "1" {
 		t.Fatalf("stdout %q: want the OK line with 1 tag-only directory parsed", stdout)
+	}
+}
+
+// TestSymlinkedGoFile: go/build compiles a symlinked .go file, so one in a
+// walked (tag-only) directory makes the run fail closed instead of being
+// skipped unseen. The symlinks are made in temp copies of ok; the targets sit
+// in a _ directory, which the walk skips.
+func TestSymlinkedGoFile(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		regular string // a regular file in the same directory, or ""
+		link    string // the symlinked .go file
+		target  string // its content
+	}{
+		{"mixed tag-only dir", "pkg/z/z_linux.go", "pkg/z/w_linux.go", "package z\n\nimport _ \"example.com/m/pkg/hub/ts\"\n"},
+		{"all-symlink tag-only main", "", "cmd/winsvc/main_windows.go", "package main\n\nimport _ \"example.com/m/pkg/hub/ts\"\n\nfunc main() {}\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := copyFixture(t, "ok")
+			if tc.regular != "" {
+				writeFile(t, filepath.Join(dir, filepath.FromSlash(tc.regular)), "package z\n")
+			}
+			target := filepath.Join(dir, "_src", "target.go.txt")
+			writeFile(t, target, tc.target)
+			link := filepath.Join(dir, filepath.FromSlash(tc.link))
+			if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, link); err != nil {
+				t.Skipf("cannot create a symlink here: %v", err)
+			}
+			code, stdout, stderr := runDir(dir)
+			want := "symlinked .go file " + link + " in a walked directory: areadag cannot vouch for it"
+			if code != 2 || !strings.Contains(stderr, want) {
+				t.Fatalf("exit %d, want 2 and %q\nstdout:\n%s\nstderr:\n%s", code, want, stdout, stderr)
+			}
+		})
 	}
 }
 
