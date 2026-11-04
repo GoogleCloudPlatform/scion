@@ -106,6 +106,9 @@ type analysis struct {
 	deletes []*srcFile // files removed by the run
 
 	edits map[*srcFile]*fileEdits
+	// outEdits holds the -rewrite-outrefs edits of files outside the source
+	// package, by absolute path (staying source files use edits).
+	outEdits map[string]*outFileEdits
 }
 
 type identUse struct {
