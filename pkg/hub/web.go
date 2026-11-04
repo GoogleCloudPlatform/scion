@@ -4579,9 +4579,11 @@ func (ws *WebServer) buildHandler() http.Handler {
 	// Security headers
 	handler = ws.securityHeadersMiddleware(handler)
 
-	// Request logging
+	// Request logging. A request the mounted hub handler's own
+	// request logger has logged gets no second, web line (ptone/scion#7367);
+	// a request the web chain answers itself is still logged here.
 	if ws.requestLogger != nil {
-		handler = logging.RequestLogMiddleware(ws.requestLogger, "web", nil, ws.config.SlowRequestThreshold)(handler)
+		handler = logging.RequestLogMiddleware(ws.requestLogger, "web", nil, ws.config.SlowRequestThreshold, logging.DeferToNestedRequestLog())(handler)
 	} else {
 		handler = ws.loggingMiddleware(handler)
 	}
