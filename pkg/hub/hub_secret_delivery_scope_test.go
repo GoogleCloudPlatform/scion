@@ -141,3 +141,29 @@ func TestHubSecretDeliveryScope_AsNeededPassExcludesHub(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, map[string]string{"HSD_NEED_project": "v-project"}, got)
 }
+
+// TestHubSecretDeliveryScope_AuthPreflightCountsDeliverableOnly: the auth
+// credential preflight (hasAnyKey) counts a hub-scope secret only when it
+// would be delivered, both for a stored agent and at create time, so a
+// harness credential stored as a hub-scope secret that is never delivered
+// does not satisfy it.
+func TestHubSecretDeliveryScope_AuthPreflightCountsDeliverableOnly(t *testing.T) {
+	ctx := context.Background()
+	m := newLDFixture(t, "hsd-preflight", ldOptions{})
+	seedHubScopeDeliveryMix(t, m)
+	s := &Server{store: m.store, authzService: m.authz, hubID: m.hubID}
+	unstored := *m.agent
+	unstored.ID = tid("hsd-preflight-unstored")
+	for name, agent := range map[string]*store.Agent{"stored": m.agent, "create-time": &unstored} {
+		for _, key := range []string{"HSD_HUB_ENV_AS_NEEDED", "HSD_HUB_VARIABLE", "HSD_HUB_FILE", "HSD_HUB_INTERNAL"} {
+			found, err := s.hasAnyKey(ctx, agent, []string{key})
+			require.NoError(t, err)
+			assert.False(t, found, "%s: %s counted although it is never delivered", name, key)
+		}
+		for _, key := range []string{"HSD_HUB_ENV_ALWAYS", hsdTelemetryName, "HSD_PROJECT_ENV"} {
+			found, err := s.hasAnyKey(ctx, agent, []string{key})
+			require.NoError(t, err)
+			assert.True(t, found, "%s: %s not counted", name, key)
+		}
+	}
+}

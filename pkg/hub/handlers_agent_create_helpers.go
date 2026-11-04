@@ -32,6 +32,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs/provisioner"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -2795,6 +2796,8 @@ func (s *Server) projectHasVerifiedGCPSA(ctx context.Context, projectID string) 
 // An owner's secret shared with progeny, and an ancestor's progeny secret,
 // count only when start delivers them too (ownerChainCheck.allowsSecretRow
 // and sharedChainWithheld).
+// A hub-scope secret counts only if secret.HubSecretDeliverable admits it,
+// at either time, since no other hub-scope secret is ever delivered.
 func (s *Server) hasAnyKey(ctx context.Context, agent *store.Agent, keys []string) (bool, error) {
 	var sel *deliverySelector
 	selReady := false
@@ -2857,6 +2860,13 @@ func (s *Server) hasAnyKey(ctx context.Context, agent *store.Agent, keys []strin
 			sec, err := s.store.GetSecret(ctx, key, sc.scope, sc.scopeID)
 			if err != nil && !errors.Is(err, store.ErrNotFound) {
 				return false, err
+			}
+			if sec != nil && sc.scope == store.ScopeHub {
+				meta := secretMetaFromStore(sec)
+				meta.Scope = store.ScopeHub
+				if !secret.HubSecretDeliverable(*meta) {
+					sec = nil
+				}
 			}
 			if sec != nil {
 				ok, err := probe(MaterialKindSecret, materialRecordSecret, sec.ID, sec.Key, sc.scope, sc.scopeID)
