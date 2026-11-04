@@ -50,6 +50,16 @@ whose precondition failed is recorded as `not run` with the reason.
 - Smoke (R1-01): if the owner's publish is refused (401/403), the run
   stops. It records a `FINDING` and marks every later row `not run`. There
   is no scope or role workaround.
+- R1-11 is its own test after R1-A. It switches on
+  `web.artifact_manage_access` through the admin experiments API (it must
+  be off with no stored override before), and the cleanup resets it. The
+  owner opens **Manage access**, creates a link, sees it once, and revokes
+  it; member, padmin and the grantee see no Manage access button and no
+  Create link, and their `POST /links` answers `403 forbidden`. The created
+  link's value is never recorded: only whether it has the share-link form.
+  Stewards (agent-owned artifacts, which need a broker) are covered by the
+  dialog's component tests. On a local hub every R1-11 row must pass; on a
+  remote target without the experiment toggle the rows are `not run`.
 - R1-06x is an observation and is not graded. It records whether the
   Share dialog's people search offers a user who shares no project with
   the owner.

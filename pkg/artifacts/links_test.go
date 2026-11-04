@@ -133,6 +133,20 @@ func TestLinkTokenShape(t *testing.T) {
 	}
 }
 
+// TestLinkCreateHeaders: the create response carries the link's token,
+// so it tells the browser not to send the page's URL onwards
+// (Referrer-Policy: no-referrer), as every shared-route answer does.
+func TestLinkCreateHeaders(t *testing.T) {
+	f, id := newLinkFixture(t)
+	rec, _ := f.mintLink(userU, id, "")
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("mint: %d %s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Referrer-Policy"); got != "no-referrer" {
+		t.Errorf("create Referrer-Policy = %q, want no-referrer", got)
+	}
+}
+
 // TestLinkMintAndShare: the owner creates a link; an anonymous request
 // with it is sent to the view route, which serves the entry with the view
 // policy; the database holds the token's hash and never the token.

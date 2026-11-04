@@ -60,8 +60,12 @@ export interface AccessOptions {
   stewardCreateLink: boolean;
 }
 
-/** Whether a steward is offered Create link. Off until phase 2. */
-export const STEWARD_CREATE_LINK = false;
+/**
+ * Whether a steward is offered Create link. On since phase 2: the hub
+ * already lets a steward create links (POST /links), so the dialog shows
+ * them the same link controls as a manager.
+ */
+export const STEWARD_CREATE_LINK = true;
 
 /** The capability flags of an artifact GET; absent flags are false. */
 export function capabilitiesFrom(r: ArtifactResponse | null | undefined): AccessCapabilities {
