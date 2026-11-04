@@ -30,7 +30,10 @@ The default mode is **`project`**, which preserves pre-mode behavior: any
 project member with the `agent.message` permission can message any agent.
 No tightening occurs until someone explicitly sets a non-default mode. A
 soft-deleted agent (`deletedAt` set) cannot receive messages in any mode and
-returns the same `404` as an unknown target.
+returns the same `404` as an unknown target. A suspended (held) agent also
+refuses every message send in any mode (`409 agent_not_running`) before any wake,
+store write, or Runtime Broker dispatch; see
+[Agent Suspension](/scion/reference/agent-suspension/#seeing-suspended-agents).
 
 ### Key principles
 

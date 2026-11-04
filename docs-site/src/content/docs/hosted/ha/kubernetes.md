@@ -30,6 +30,14 @@ runtimes:
     gke: false                     # enable GKE-specific features
     list_all_namespaces: false     # list agents across all namespaces
     priority_class_name: scion-agent-priority  # default PriorityClass for agent pods (optional)
+    # node_selector:               # operator-owned pod nodeSelector (optional)
+    #   scion.dev/pool: agents
+    # tolerations:                 # operator-owned pod tolerations (optional)
+    #   - key: scion.dev/pool
+    #     operator: Equal
+    #     value: agents
+    #     effect: NoSchedule
+    # runtime_class_name: gvisor   # operator-owned RuntimeClass (optional)
     # shared_dir_storage_class: standard-rwx  # RWX class for shared-dir PVCs (see below)
     # shared_dir_size: 10Gi                    # size per shared-dir PVC
     kubernetes_service_account_mappings:  # GCP identity mode "assign" — see below
@@ -38,6 +46,9 @@ runtimes:
 profiles:
   default:
     runtime: k8s
+    # node_selector, tolerations, and runtime_class_name can also be set per
+    # profile (at the profile level, not under resources) to layer over the
+    # runtime entry's placement.
     # kubernetes_service_account_mappings can also be set per profile, to
     # override the runtime-level mapping above for a given GSA email.
 ```
@@ -84,7 +95,13 @@ kubernetes:
       nvidia.com/gpu: "1"
 ```
 
-On a flat Kubernetes Runtime Broker instance (`server.broker.instances`), pod placement (`nodeSelector`, `tolerations`, and `runtimeClassName`) is owned by the instance's `runtime_target` rather than the agent: an agent's `kubernetes.nodeSelector`, `tolerations`, or `runtimeClassName` is refused before any pod or volume is touched unless it matches the instance's value, or the instance leaves that placement field unset and enables `allow_agent_node_selector`, `allow_agent_tolerations`, or `allow_agent_runtime_class_name`. See [Flat instance placement](/scion/reference/server-config/#flat-instance-placement).
+Pod placement (`node_selector`, `tolerations`, and `runtime_class_name`) is owned by the operator rather than the agent—both on a flat Kubernetes Runtime Broker instance (`server.broker.instances[].runtime_target`) and on a regular Kubernetes Runtime Broker (`runtimes.<name>` and `profiles.<name>`, where `profiles.<name>` layers over `runtimes.<name>` and all Kubernetes runtime entries targeting the same cluster and namespace must agree). Even when the operator leaves placement unset, the empty policy is still operator-owned:
+
+- An agent's `kubernetes.nodeSelector` may add keys the operator policy does not set, but cannot change the value of any key the operator sets (including `scion.dev/pool`).
+- Each of an agent's `kubernetes.tolerations` must match one of the operator policy's tolerations (`key`, `operator` with empty treated as `Equal`, `value`, `effect`), and an empty-key `Exists` toleration on an agent is always refused while placement is enforced. When the operator policy sets no tolerations, any agent toleration is refused.
+- An agent's `kubernetes.runtimeClassName` must be empty or equal to the operator policy's `runtime_class_name`.
+
+Any mismatch is refused with HTTP `400 validation_error` before any pod, volume, or running workload is touched; running pods keep their current placement until their next start or restart. On a regular Kubernetes Runtime Broker, a restart that arrives without a project path (so project settings cannot be checked) is also refused before stopping the pod. Before upgrading, run [`scion doctor`](/scion/reference/cli/#scion-doctor) (`legacy-placement-preflight` on a regular Runtime Broker host, `flat-placement-preflight` on a flat instance host) and check `placement_preflight` on `GET /api/v1/admin/server-config`. See [Flat instance placement](/scion/reference/server-config/#flat-instance-placement) and [Legacy host placement check](/scion/reference/server-config/#legacy-host-placement-check).
 
 ### Shared Directory PVCs
 
@@ -943,7 +960,7 @@ With [`server.project_storage.homes: nfs`](/scion/reference/server-config/#proje
 - **Images**: the image's sciontool must support NFS homes (`sciontool version --features` lists `home-v1`); older images fail with a message saying so.
 - **One pod at a time**: pods with an NFS home are never force-deleted. Stop and delete use the pod's grace period (`stop_grace_seconds`, default 30) and return at once. A start waits for the previous pod to stop, for at most the grace period plus `termination_wait_seconds` (default 15). It is refused with the retryable `previous_pod_unconfirmed` when the previous pod cannot be read, its node is unreachable, or the bound runs out. The previous pod's secrets are removed only once it has stopped. The pod name is unique per agent and a start waits for the previous pod's confirmed termination, so two pods do not write to the same home; a per-agent advisory lock is also taken when the Runtime Broker is given a store locker. Keep `stop_grace_seconds` plus `termination_wait_seconds` below the hub's 90 second start window; the server warns at startup when it is not.
 - **Sync**: `scion sync to|from <agent>` copies the agent workspace only; the home stays on the export.
-- **Delete**: deleting an agent does not remove its home from the export in this version.
+- **Delete**: deleting an agent removes its `home-<agent-id>` and `secrets-<agent-id>` from the export (and `agents/<slug>` once empty) when the delete removes the agent's files or when a soft-deleted agent's retained files are purged; see [Cleanup on project delete](/scion/reference/server-config/#cleanup-on-project-delete).
 - **Credentials at rest**: the agent's hub token and environment files (`.scion/scion-token`, `.scion/scion-env`), credentials that harness scripts copy into native home files (for example API-key auth files), and harness OAuth tokens are stored on the export while the home exists.
 
 ### Secret Modes
