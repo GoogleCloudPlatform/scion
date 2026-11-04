@@ -1,0 +1,13 @@
+# P1-7 wave 2 (ptone/scion#4361), step 1 of 2: gather generic pkg/hub test
+# helpers into basic_helpers_test.go, so step 2 (hubtestutil-wave2.txt) can export them
+# to pkg/hub/internal/hubtestutil.
+#
+#   extract move -dir pkg/hub -family hack/hubshard/extract/families/hubtestutil-wave2-move-basic.txt
+dest basic_helpers_test.go
+testDevToken
+strPtr
+intPtr
+itoa
+alwaysAuthorized
+require_NoError
+waitClosed
