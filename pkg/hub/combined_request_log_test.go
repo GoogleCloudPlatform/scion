@@ -31,7 +31,8 @@ import (
 // request logger and then the hub chain's. It is logged once, by the hub
 // logger, with the auth type the hub's auth set, and the response's
 // X-Request-ID names that line. A request the hub rejects is logged once
-// too.
+// too, and a request the web chain answers itself is logged once, by the
+// web logger.
 func TestCombinedServer_RequestLoggedOnce(t *testing.T) {
 	srv, s := testServer(t)
 	projectID, ownerID := setupUATProjectAndOwner(t, s, "reqlog-combined")
@@ -47,18 +48,27 @@ func TestCombinedServer_RequestLoggedOnce(t *testing.T) {
 	ws.MountHubAPI(srv.Handler(), func(context.Context) error { return nil })
 
 	for _, tc := range []struct {
-		name         string
-		bearer       string
-		wantStatus   int
-		wantAuthType string
+		name          string
+		path          string
+		bearer        string
+		wantStatus    int
+		wantComponent string
+		wantProjectID string
+		wantAuthType  string
 	}{
-		{name: "authenticated", bearer: uatKey, wantStatus: http.StatusOK, wantAuthType: "uat"},
-		{name: "rejected", bearer: "scion_pat_definitely-not-a-real-token", wantStatus: http.StatusUnauthorized},
+		{name: "authenticated", path: "/api/v1/projects/" + projectID, bearer: uatKey,
+			wantStatus: http.StatusOK, wantComponent: "hub", wantProjectID: projectID, wantAuthType: "uat"},
+		{name: "rejected", path: "/api/v1/projects/" + projectID, bearer: "scion_pat_definitely-not-a-real-token",
+			wantStatus: http.StatusUnauthorized, wantComponent: "hub", wantProjectID: projectID},
+		{name: "web answered", path: "/healthz",
+			wantStatus: http.StatusOK, wantComponent: "web"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			before := len(capture.all())
-			req := httptest.NewRequest(http.MethodGet, "/api/v1/projects/"+projectID, nil)
-			req.Header.Set("Authorization", "Bearer "+tc.bearer)
+			req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+			if tc.bearer != "" {
+				req.Header.Set("Authorization", "Bearer "+tc.bearer)
+			}
 			rec := httptest.NewRecorder()
 			ws.Handler().ServeHTTP(rec, req)
 			require.Equal(t, tc.wantStatus, rec.Code, rec.Body.String())
@@ -66,8 +76,8 @@ func TestCombinedServer_RequestLoggedOnce(t *testing.T) {
 			records := capture.all()[before:]
 			require.Len(t, records, 1, "want exactly one request-log line")
 			line := recordAttrs(records[0])
-			require.Equal(t, "hub", line["component"])
-			require.Equal(t, projectID, line["project_id"])
+			require.Equal(t, tc.wantComponent, line["component"])
+			require.Equal(t, tc.wantProjectID, line["project_id"])
 			require.EqualValues(t, tc.wantStatus, line["httpRequest.status"])
 			if tc.wantAuthType != "" {
 				require.Equal(t, tc.wantAuthType, line["auth_type"])

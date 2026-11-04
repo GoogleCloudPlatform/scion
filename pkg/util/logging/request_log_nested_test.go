@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -229,4 +230,38 @@ func TestRequestLogMiddleware_DeferToNested_SingleLayerUnchanged(t *testing.T) {
 			assert.Equal(t, rec.Header().Get("X-Request-ID"), lines[0]["request_id"])
 		})
 	}
+}
+
+// TestRequestLogMiddleware_DeferToNested_OneSlowRequestLine: the
+// slow-request line follows the request line. A deferring logger whose
+// nested logger has logged the request writes no slow-request line of its
+// own; the nested logger writes the only one. The outer chain strips a
+// path prefix, so the two loggers would report different paths.
+func TestRequestLogMiddleware_DeferToNested_OneSlowRequestLine(t *testing.T) {
+	var slowBuf bytes.Buffer
+	orig := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(orig) })
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&slowBuf, nil)))
+
+	logger, _ := newNestedTestLogger()
+	inner := RequestLogMiddleware(logger, "hub", nil, time.Nanosecond)(
+		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			time.Sleep(time.Millisecond)
+			w.WriteHeader(http.StatusOK)
+		}),
+	)
+	outer := RequestLogMiddleware(logger, "web", nil, time.Nanosecond, DeferToNestedRequestLog())(
+		http.StripPrefix("/web", inner),
+	)
+
+	outer.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/web/api/v1/slow", nil))
+
+	var slow []map[string]any
+	for _, line := range requestLogLines(t, &slowBuf) {
+		if line["msg"] == "Slow request" {
+			slow = append(slow, line)
+		}
+	}
+	require.Len(t, slow, 1, "want exactly one slow-request line: %s", slowBuf.String())
+	assert.Equal(t, "/api/v1/slow", slow[0]["path"], "the slow-request line must be the nested logger's")
 }
