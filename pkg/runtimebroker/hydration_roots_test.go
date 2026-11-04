@@ -15,6 +15,7 @@
 package runtimebroker
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -68,7 +69,7 @@ func TestTemplateHydrationRootsAreBrokerCaches(t *testing.T) {
 		t.Fatalf("roots %v do not include the template cache %s", roots, cache.Dir())
 	}
 	for _, dir := range []string{agentHome, filepath.Join(projectDir, "templates")} {
-		if _, err := config.FindTemplateInProjectPath(dir, projectDir); !errors.Is(err, config.ErrTemplateRefNotAllowed) {
+		if _, err := config.FindTemplateInProjectPath(context.Background(), dir, projectDir); !errors.Is(err, config.ErrTemplateRefNotAllowed) {
 			t.Errorf("FindTemplateInProjectPath(%s) error = %v, want ErrTemplateRefNotAllowed", dir, err)
 		}
 	}
@@ -113,7 +114,7 @@ func TestColocatedStorageHydrationRootsAreTemplateDirs(t *testing.T) {
 
 	projectDir := filepath.Join(t.TempDir(), config.DotScion)
 	for _, d := range templates {
-		if tpl, err := config.FindTemplateInProjectPath(d, projectDir); err != nil || tpl.Path != d {
+		if tpl, err := config.FindTemplateInProjectPath(context.Background(), d, projectDir); err != nil || tpl.Path != d {
 			t.Errorf("stored template %s: %+v, %v", d, tpl, err)
 		}
 	}
@@ -123,7 +124,7 @@ func TestColocatedStorageHydrationRootsAreTemplateDirs(t *testing.T) {
 				t.Errorf("workspace %s lies under hydration root %s", d, r)
 			}
 		}
-		if _, err := config.FindTemplateInProjectPath(d, projectDir); !errors.Is(err, config.ErrTemplateRefNotAllowed) {
+		if _, err := config.FindTemplateInProjectPath(context.Background(), d, projectDir); !errors.Is(err, config.ErrTemplateRefNotAllowed) {
 			t.Errorf("FindTemplateInProjectPath(workspace %s) error = %v, want ErrTemplateRefNotAllowed", d, err)
 		}
 	}

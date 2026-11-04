@@ -15,6 +15,7 @@
 package config
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -31,7 +32,7 @@ func TestTemplateNotFoundError_FromLookup(t *testing.T) {
 	projectPath := t.TempDir()
 
 	t.Run("plain name", func(t *testing.T) {
-		_, err := FindTemplateInProjectPath("missing-tpl", projectPath)
+		_, err := FindTemplateInProjectPath(context.Background(), "missing-tpl", projectPath)
 		var tplErr *TemplateNotFoundError
 		if !errors.As(err, &tplErr) {
 			t.Fatalf("error %v (%T) is not a *TemplateNotFoundError", err, err)
@@ -51,7 +52,7 @@ func TestTemplateNotFoundError_FromLookup(t *testing.T) {
 		root := t.TempDir()
 		withHydrationRoots(t, root)
 		abs := filepath.Join(root, "broker-only", "secret-tpl")
-		_, err := FindTemplateInProjectPath(abs, projectPath)
+		_, err := FindTemplateInProjectPath(context.Background(), abs, projectPath)
 		var tplErr *TemplateNotFoundError
 		if !errors.As(err, &tplErr) || !errors.Is(err, ErrTemplateNotFound) {
 			t.Fatalf("error %v does not match the typed error and the sentinel", err)
@@ -77,7 +78,7 @@ func TestTemplateNotFoundError_FromLookup(t *testing.T) {
 		cache := filepath.Join(t.TempDir(), "cache")
 		withHydrationRoots(t, cache)
 		abs := filepath.Join(cache, hash)
-		_, err := FindTemplateInProjectPath(abs, projectPath)
+		_, err := FindTemplateInProjectPath(context.Background(), abs, projectPath)
 		var tplErr *TemplateNotFoundError
 		if !errors.As(err, &tplErr) {
 			t.Fatalf("error %v is not a *TemplateNotFoundError", err)
@@ -88,7 +89,7 @@ func TestTemplateNotFoundError_FromLookup(t *testing.T) {
 	})
 
 	t.Run("wrapped", func(t *testing.T) {
-		_, inner := FindTemplateInProjectPath("missing-tpl", projectPath)
+		_, inner := FindTemplateInProjectPath(context.Background(), "missing-tpl", projectPath)
 		err := fmt.Errorf("failed to load template: %w", inner)
 		var tplErr *TemplateNotFoundError
 		if !errors.As(err, &tplErr) || !errors.Is(err, ErrTemplateNotFound) || tplErr.Name != "missing-tpl" {

@@ -18,6 +18,7 @@ package config
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -56,7 +57,7 @@ func newContentFixture(t *testing.T) *contentFixture {
 // projectTemplate finds the fixture's template the way provisioning does.
 func (f *contentFixture) projectTemplate(t *testing.T) *Template {
 	t.Helper()
-	tpl, err := FindTemplateInProjectPath("tpl", f.scionDir)
+	tpl, err := FindTemplateInProjectPath(context.Background(), "tpl", f.scionDir)
 	if err != nil {
 		t.Fatalf("FindTemplateInProjectPath: %v", err)
 	}
@@ -126,7 +127,7 @@ func TestTemplateContentRefusesLinkedDirectories(t *testing.T) {
 		if err := os.Symlink(f.outside, tplLink); err != nil {
 			t.Fatal(err)
 		}
-		tpl, err := FindTemplateInProjectPath("linked", f.scionDir)
+		tpl, err := FindTemplateInProjectPath(context.Background(), "linked", f.scionDir)
 		if err != nil {
 			t.Fatalf("FindTemplateInProjectPath: %v", err)
 		}

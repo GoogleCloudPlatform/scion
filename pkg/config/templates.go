@@ -460,10 +460,10 @@ func GetTemplateChain(name string) ([]*Template, error) {
 
 // FindTemplateInProjectPath finds a template by name, using a specific project path
 // for project-scoped template resolution instead of relying on CWD.
-// When projectPath is empty, it falls back to FindTemplate (CWD-based resolution).
-func FindTemplateInProjectPath(name, projectPath string) (*Template, error) {
+// When projectPath is empty, it falls back to FindTemplateWithContext (CWD-based resolution).
+func FindTemplateInProjectPath(ctx context.Context, name, projectPath string) (*Template, error) {
 	if projectPath == "" {
-		return FindTemplate(name)
+		return FindTemplateWithContext(ctx, name)
 	}
 
 	// A project-scoped lookup runs on a Runtime Broker for a template value
@@ -506,11 +506,11 @@ func FindTemplateInProjectPath(name, projectPath string) (*Template, error) {
 // template reference from operator configuration (a settings
 // default_template): a remote source is fetched as FindTemplateWithContext
 // does. Every other reference resolves as FindTemplateInProjectPath.
-func FindOperatorTemplateInProjectPath(name, projectPath string) (*Template, error) {
+func FindOperatorTemplateInProjectPath(ctx context.Context, name, projectPath string) (*Template, error) {
 	if projectPath != "" && IsRemoteURI(name) {
-		return FindTemplateWithContext(context.Background(), name)
+		return FindTemplateWithContext(ctx, name)
 	}
-	return FindTemplateInProjectPath(name, projectPath)
+	return FindTemplateInProjectPath(ctx, name, projectPath)
 }
 
 // projectTemplatesRoot returns the directory whose templates/ subdirectory
@@ -613,8 +613,8 @@ func LegacyProjectTemplatesWarning(projectPath string) string {
 // directory plus rename covers cross-process races.
 var defaultHydrationMu sync.Mutex
 
-func findOrHydrateDefaultTemplate(projectPath string) (*Template, error) {
-	tpl, err := FindTemplateInProjectPath("default", projectPath)
+func findOrHydrateDefaultTemplate(ctx context.Context, projectPath string) (*Template, error) {
+	tpl, err := FindTemplateInProjectPath(ctx, "default", projectPath)
 	if err == nil {
 		return tpl, nil
 	}
@@ -628,7 +628,7 @@ func findOrHydrateDefaultTemplate(projectPath string) (*Template, error) {
 	defer defaultHydrationMu.Unlock()
 
 	// Another goroutine may have hydrated while we waited.
-	if tpl, rErr := FindTemplateInProjectPath("default", projectPath); rErr == nil {
+	if tpl, rErr := FindTemplateInProjectPath(ctx, "default", projectPath); rErr == nil {
 		return tpl, nil
 	}
 
@@ -665,28 +665,28 @@ func findOrHydrateDefaultTemplate(projectPath string) (*Template, error) {
 		util.Debugf("failed to publish hydrated default template: %v", rErr)
 	}
 
-	return FindTemplateInProjectPath("default", projectPath)
+	return FindTemplateInProjectPath(ctx, "default", projectPath)
 }
 
 // GetTemplateChainInProject returns a list of templates in inheritance order,
 // using a specific project path for template resolution instead of CWD.
 // For non-default templates, the default template is automatically prepended
 // to the chain so that common home files and config are inherited.
-func GetTemplateChainInProject(name, projectPath string) ([]*Template, error) {
-	return templateChainInProject(name, projectPath, FindTemplateInProjectPath)
+func GetTemplateChainInProject(ctx context.Context, name, projectPath string) ([]*Template, error) {
+	return templateChainInProject(ctx, name, projectPath, FindTemplateInProjectPath)
 }
 
 // GetOperatorTemplateChainInProject is GetTemplateChainInProject for a
 // template reference from operator configuration (a settings
 // default_template), which may be a remote source
 // (FindOperatorTemplateInProjectPath).
-func GetOperatorTemplateChainInProject(name, projectPath string) ([]*Template, error) {
-	return templateChainInProject(name, projectPath, FindOperatorTemplateInProjectPath)
+func GetOperatorTemplateChainInProject(ctx context.Context, name, projectPath string) ([]*Template, error) {
+	return templateChainInProject(ctx, name, projectPath, FindOperatorTemplateInProjectPath)
 }
 
-func templateChainInProject(name, projectPath string, find func(name, projectPath string) (*Template, error)) ([]*Template, error) {
+func templateChainInProject(ctx context.Context, name, projectPath string, find func(ctx context.Context, name, projectPath string) (*Template, error)) ([]*Template, error) {
 	if name == "default" {
-		tpl, err := findOrHydrateDefaultTemplate(projectPath)
+		tpl, err := findOrHydrateDefaultTemplate(ctx, projectPath)
 		if err != nil {
 			// When the default template cannot be resolved, proceed without it
 			// (e.g. hub-dispatched agents on brokers with no local templates)
@@ -698,13 +698,13 @@ func templateChainInProject(name, projectPath string, find func(name, projectPat
 	var chain []*Template
 
 	// For non-default templates, prepend the default template as a base layer
-	defaultTpl, err := findOrHydrateDefaultTemplate(projectPath)
+	defaultTpl, err := findOrHydrateDefaultTemplate(ctx, projectPath)
 	if err == nil {
 		chain = append(chain, defaultTpl)
 	}
 	// If the default template cannot be resolved, proceed without it
 
-	tpl, err := find(name, projectPath)
+	tpl, err := find(ctx, name, projectPath)
 	if err != nil {
 		return nil, err
 	}

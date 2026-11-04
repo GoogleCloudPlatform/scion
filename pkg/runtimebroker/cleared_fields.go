@@ -154,9 +154,9 @@ func (s *Server) clearedFieldsInheritance(ctx context.Context, projectPath, proj
 	var chain []*config.Template
 	var err error
 	if operatorDefault != "" && templateRef == operatorDefault {
-		chain, err = config.GetOperatorTemplateChainInProject(templateRef, projectPath)
+		chain, err = config.GetOperatorTemplateChainInProject(ctx, templateRef, projectPath)
 	} else {
-		chain, err = config.GetTemplateChainInProject(templateRef, projectPath)
+		chain, err = config.GetTemplateChainInProject(ctx, templateRef, projectPath)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("resolve template chain: %w", err)
