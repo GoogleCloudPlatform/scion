@@ -205,12 +205,29 @@ else
     # Optional vars — warn if missing
     # Without SCION_IMAGE_REGISTRY, gce-start-hub.sh --full writes
     # image_registry (IMAGE_REGISTRY, default localhost/scion) to settings.yaml.
+    # The starter scripts do not build agent images (see hub-config.sh). With
+    # ENABLE_GKE=true the registry that takes effect must not be loopback:
+    # GKE nodes cannot pull from the VM's local store.
     val=$(get_env_value SCION_IMAGE_REGISTRY "${HUB_ENV_FILE}")
     if [[ -z "$val" ]]; then
-        check_pass "SCION_IMAGE_REGISTRY not set; settings.yaml uses image_registry ${IMAGE_REGISTRY}"
+        if ! registry_is_valid "${IMAGE_REGISTRY}"; then
+            check_fail "IMAGE_REGISTRY '${IMAGE_REGISTRY}' is not a registry path" \
+                "Use letters, digits and . _ : / - only, for example us-docker.pkg.dev/<project>/<repo>"
+        elif [[ "${ENABLE_GKE}" == "true" ]] && registry_is_loopback "${IMAGE_REGISTRY}"; then
+            check_fail "ENABLE_GKE=true, but the image registry ${IMAGE_REGISTRY} is a loopback address GKE nodes cannot pull from" \
+                "Set SCION_IMAGE_REGISTRY in ${HUB_ENV_FILE} (or IMAGE_REGISTRY) to a registry the cluster can pull from"
+        else
+            check_pass "SCION_IMAGE_REGISTRY not set; settings.yaml uses image_registry ${IMAGE_REGISTRY}"
+            if registry_is_loopback "${IMAGE_REGISTRY}"; then
+                check_warn "The starter scripts do not build agent images: build them on the VM (image-build/README.md) or set SCION_IMAGE_REGISTRY"
+            fi
+        fi
     elif is_placeholder "$val"; then
         check_fail "SCION_IMAGE_REGISTRY is still a placeholder" \
             "Set it to your registry in ${HUB_ENV_FILE}, or remove it to use image_registry ${IMAGE_REGISTRY}"
+    elif [[ "${ENABLE_GKE}" == "true" ]] && registry_is_loopback "$val"; then
+        check_fail "ENABLE_GKE=true, but SCION_IMAGE_REGISTRY ${val} is a loopback address GKE nodes cannot pull from" \
+            "Set SCION_IMAGE_REGISTRY in ${HUB_ENV_FILE} to a registry the cluster can pull from"
     else
         check_pass "SCION_IMAGE_REGISTRY"
     fi
