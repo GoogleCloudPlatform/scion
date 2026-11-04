@@ -79,7 +79,7 @@ func TestBuildPod_PlainPodGolden(t *testing.T) {
 			if err != nil {
 				t.Fatalf("buildPod: %v", err)
 			}
-			normalizeHostIDs(pod)
+			normalizeHostIDs(pod, tc.cfg)
 			got, err := json.MarshalIndent(pod, "", "  ")
 			if err != nil {
 				t.Fatalf("marshal: %v", err)
@@ -103,10 +103,17 @@ func TestBuildPod_PlainPodGolden(t *testing.T) {
 	}
 }
 
+// hostGIDForGolden returns the gid normalizeHostIDs treats as the test
+// process's gid. A test may replace it to stand in a host gid without
+// changing the process gid.
+var hostGIDForGolden = os.Getgid
+
 // normalizeHostIDs replaces the values buildPod takes from the uid and gid
 // of the test process, so the testdata does not depend on the machine.
-func normalizeHostIDs(pod *corev1.Pod) {
-	hostGID := int64(os.Getgid())
+// The FSGroup of an NFS-backed pod is the configured NFS gid, not a host
+// value, so it is kept even when it equals the host gid.
+func normalizeHostIDs(pod *corev1.Pod, cfg RunConfig) {
+	hostGID := int64(hostGIDForGolden())
 	for i := range pod.Spec.Containers {
 		for j, e := range pod.Spec.Containers[i].Env {
 			switch e.Name {
@@ -116,6 +123,9 @@ func normalizeHostIDs(pod *corev1.Pod) {
 				pod.Spec.Containers[i].Env[j].Value = "HOST_GID"
 			}
 		}
+	}
+	if cfg.WorkspaceBackendName == "nfs" {
+		return
 	}
 	if sc := pod.Spec.SecurityContext; sc != nil && sc.FSGroup != nil && *sc.FSGroup == hostGID {
 		placeholder := int64(-1)
