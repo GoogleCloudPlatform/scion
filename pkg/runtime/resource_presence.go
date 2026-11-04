@@ -20,6 +20,9 @@ import (
 	"fmt"
 	"strings"
 
+	"cloud.google.com/go/run/apiv2/runpb"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -58,11 +61,23 @@ type OwnedResourceLister interface {
 	ListOwnedResources(ctx context.Context, runtimeBrokerID string) ([]OwnedResource, error)
 }
 
+// ListedObjectHandler is implemented by a runtime whose launch records its
+// main object under a handle that a listed api.AgentInfo does not spell out
+// on its own (the generic handle is the object's name and container or pod
+// ID). ListedObjectHandle returns the handle the launch recorded for the
+// listed object o, built by the same runtime function, so an ownership
+// record reconstructed from a listing equals the launched one.
+type ListedObjectHandler interface {
+	ListedObjectHandle(o api.AgentInfo) api.ResourceHandle
+}
+
 var (
 	_ ResourceAbsenceChecker = (*KubernetesRuntime)(nil)
 	_ ResourceAbsenceChecker = (*DockerRuntime)(nil)
 	_ ResourceAbsenceChecker = (*PodmanRuntime)(nil)
+	_ ResourceAbsenceChecker = (*CloudRunRuntime)(nil)
 	_ OwnedResourceLister    = (*KubernetesRuntime)(nil)
+	_ ListedObjectHandler    = (*CloudRunRuntime)(nil)
 )
 
 // exactNotFound reports whether err is a not-found for the named object
@@ -219,4 +234,61 @@ func (r *DockerRuntime) ResourceAbsent(ctx context.Context, h api.ResourceHandle
 // ResourceAbsent checks a container by its ID.
 func (r *PodmanRuntime) ResourceAbsent(ctx context.Context, h api.ResourceHandle) (bool, error) {
 	return containerAbsent(ctx, r.Command, h)
+}
+
+// ResourceAbsent checks the Cloud Run instance a launch recorded
+// (api.ResourceKindCloudRunInstance: Namespace is the runtime's parent,
+// Name the instance ID, UID the run ID). The run ID label decides, never the
+// name alone:
+//   - an exact NotFound is absent;
+//   - an instance whose stored run ID label differs from h.UID (or is
+//     missing) is absent: the name is held by a different object;
+//   - an instance with the same run ID is present, a soft-deleted one
+//     (delete_time set) included, until it is NotFound;
+//   - any other failure is an error, never absence.
+//
+// A handle of another kind, without a UID, name or parent, or in another
+// parent than this runtime's, is refused before any call.
+func (r *CloudRunRuntime) ResourceAbsent(ctx context.Context, h api.ResourceHandle) (bool, error) {
+	if h.Kind != api.ResourceKindCloudRunInstance {
+		return false, fmt.Errorf("presence check: unsupported resource kind %q for the cloudrun runtime", h.Kind)
+	}
+	if h.UID == "" || h.Namespace == "" || h.Name == "" {
+		return false, fmt.Errorf("presence check of %s %s/%s: parent, name and run ID are required", h.Kind, h.Namespace, h.Name)
+	}
+	if err := r.resolveConfig(ctx); err != nil {
+		return false, fmt.Errorf("presence check of instance %s: failed to resolve Cloud Run config: %w", h.Name, err)
+	}
+	if parent := r.parent(); h.Namespace != parent {
+		return false, fmt.Errorf("presence check of instance %s: it is in %q, not this runtime's %q", h.Name, h.Namespace, parent)
+	}
+	c, err := r.client(ctx)
+	if err != nil {
+		return false, fmt.Errorf("presence check of instance %s: failed to create client: %w", h.Name, err)
+	}
+	defer func() { _ = c.Close() }()
+	inst, err := c.GetInstance(ctx, &runpb.GetInstanceRequest{Name: h.Namespace + "/instances/" + h.Name}, defaultCallOpts...)
+	switch {
+	case err == nil && inst == nil:
+		return false, fmt.Errorf("presence check of instance %s: GetInstance returned no instance", h.Name)
+	case err == nil:
+		// The stored label is the sanitized run ID, so the handle's UID is
+		// compared in the same form, as Run's own run check does. Two run IDs
+		// that differ only by sanitization would read as present, which keeps
+		// the record (the safe side); minted run IDs are lower-case UUIDs, for
+		// which this is exact.
+		return inst.GetLabels()[r.storedLabelKey(api.LabelRunID)] != sanitizeGCPLabelValue(h.UID), nil
+	case status.Code(err) == codes.NotFound:
+		return true, nil
+	default:
+		return false, fmt.Errorf("presence check of instance %s: %w", h.Name, err)
+	}
+}
+
+// ListedObjectHandle is the handle Run recorded for the listed instance o:
+// kind cloudrun_instance in this runtime's parent, named by its instance ID
+// and identified by its stored run ID label.
+func (r *CloudRunRuntime) ListedObjectHandle(o api.AgentInfo) api.ResourceHandle {
+	return api.ResourceHandle{Kind: api.ResourceKindCloudRunInstance, Namespace: r.parent(),
+		Name: cloudRunShortInstanceID(o.ContainerID), UID: o.Labels[r.storedLabelKey(api.LabelRunID)]}
 }

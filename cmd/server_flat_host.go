@@ -536,16 +536,20 @@ func flatOwnershipPreflight(ctx context.Context, c brokerhost.Candidate) error {
 		return err
 	}
 	records := runtimebroker.NewOwnershipStore(dir, c.Identity.RuntimeBrokerID)
+	// Labels are read under the keys the runtime stores them under (Cloud
+	// Run rewrites label keys), so an owned object is never read as
+	// unlabeled.
+	label := func(o api.AgentInfo, key string) string { return o.Labels[runtime.LabelKey(c.Runtime, key)] }
 	var unresolved []string
 	for _, o := range objects {
-		switch owner := o.Labels[api.LabelRuntimeBrokerID]; owner {
+		switch owner := label(o, api.LabelRuntimeBrokerID); owner {
 		case "":
 			// below: unattributable
 		case c.Identity.RuntimeBrokerID:
 			// This instance's object: make sure its record exists
 			// (reconstruction needs the complete project, agent, run and
 			// object identity; anything less is unresolved).
-			if err := records.Reconstruct(o); err != nil {
+			if err := records.Reconstruct(o, c.Runtime); err != nil {
 				unresolved = append(unresolved, fmt.Sprintf("%s (%v)", o.Name, err))
 			}
 			continue
@@ -553,7 +557,7 @@ func flatOwnershipPreflight(ctx context.Context, c brokerhost.Candidate) error {
 			continue // another instance's object
 		}
 		name := o.Name
-		if p := o.Labels["scion.project_id"]; p != "" {
+		if p := label(o, "scion.project_id"); p != "" {
 			name = p + "/" + name
 		}
 		unresolved = append(unresolved, name)

@@ -93,9 +93,18 @@ const CloudRunHomesWarning = "project_storage.homes does not apply to the cloudr
 
 // CloudRunHomesWarningFor returns CloudRunHomesWarning when runtimeName is
 // the cloudrun runtime and srv sets the homes storage setting (directly or
-// through a legacy block), and "" otherwise.
+// through a legacy block), and "" otherwise. A flat cloudrun instance in
+// srv (server.broker.instances) requires project_storage.homes: nfs, so the
+// setting applies there and no warning is given: the broker never logs it
+// and scion doctor never advises removing the setting. The skip is
+// settings-wide on purpose: the project storage layout is process-wide, so
+// while any flat cloudrun instance is configured the setting applies to the
+// whole host, and the warning (with its advice to remove the setting) would
+// be wrong for a legacy cloudrun runtime entry too. The warning is only ever
+// given for the cloudrun runtime, so no docker or kubernetes caller is
+// affected.
 func CloudRunHomesWarningFor(runtimeName string, srv *config.V1ServerConfig) string {
-	if runtimeName != "cloudrun" || srv == nil {
+	if runtimeName != "cloudrun" || srv == nil || hasFlatCloudRunInstance(srv) {
 		return ""
 	}
 	ps, _, err := config.ResolveProjectStorage(srv)
@@ -103,6 +112,20 @@ func CloudRunHomesWarningFor(runtimeName string, srv *config.V1ServerConfig) str
 		return ""
 	}
 	return CloudRunHomesWarning
+}
+
+// hasFlatCloudRunInstance reports whether srv declares a flat Runtime
+// Broker instance whose runtime target type is cloudrun.
+func hasFlatCloudRunInstance(srv *config.V1ServerConfig) bool {
+	if srv == nil || srv.Broker == nil {
+		return false
+	}
+	for _, inst := range srv.Broker.Instances {
+		if inst.RuntimeTarget != nil && inst.RuntimeTarget.Type == config.RuntimeTargetTypeCloudRun {
+			return true
+		}
+	}
+	return false
 }
 
 // cloudRunHomeExcludes returns what the Cloud Run home copy leaves out,

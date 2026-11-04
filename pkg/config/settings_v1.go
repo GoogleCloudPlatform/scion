@@ -1897,8 +1897,10 @@ type V1BrokerConfig struct {
 	StateDir string `json:"state_dir,omitempty" yaml:"state_dir,omitempty" koanf:"state_dir"`
 	// Instances declares the flat (single-target) Runtime Broker instances
 	// this process hosts (.design/flat-runtime-brokers-contract.md section 2).
-	// Empty or absent means legacy hosting. P1 accepts exactly one entry and
-	// requires the Hub in the same process (CheckRuntimeBrokerInstanceHosting).
+	// Empty or absent means legacy hosting. Each key must be unique; there is
+	// no limit on the number of entries. Without the Hub in the same process
+	// the host needs a validated remote activation
+	// (CheckRuntimeBrokerInstanceHosting).
 	// Read only through LoadGlobalConfig / LoadRuntimeBrokerInstances; project
 	// settings never configure instances.
 	Instances []V1RuntimeBrokerInstanceConfig `json:"instances,omitempty" yaml:"instances,omitempty" koanf:"instances"`
@@ -1996,6 +1998,21 @@ type V1RuntimeTargetConfig struct {
 	SharedDirStorageBackends map[string]string `json:"shared_dir_storage_backends,omitempty" yaml:"shared_dir_storage_backends,omitempty" koanf:"shared_dir_storage_backends"`
 	HomeStorageBackend       string            `json:"home_storage_backend,omitempty" yaml:"home_storage_backend,omitempty" koanf:"home_storage_backend"`
 	HomeStorageLeaf          string            `json:"home_storage_leaf,omitempty" yaml:"home_storage_leaf,omitempty" koanf:"home_storage_leaf"`
+	// ProjectID, Region, ServiceAccount, Network, Subnetwork and
+	// CredentialsFile are a Cloud Run instance's target (contract amendment
+	// P5-CR, CR1). ProjectID selects the GCP project, whose probed project
+	// number plus Region is the target's identity. ServiceAccount (the
+	// identity agent instances run as), Network and Subnetwork (the VPC
+	// agents reach the NFS share over) are local operator policy.
+	// CredentialsFile is the absolute path of this instance's own GCP
+	// credentials file, its only credential source. None of them is sent to
+	// the Hub. Cloud Run only.
+	ProjectID       string `json:"project_id,omitempty" yaml:"project_id,omitempty" koanf:"project_id"`
+	Region          string `json:"region,omitempty" yaml:"region,omitempty" koanf:"region"`
+	ServiceAccount  string `json:"service_account,omitempty" yaml:"service_account,omitempty" koanf:"service_account"`
+	Network         string `json:"network,omitempty" yaml:"network,omitempty" koanf:"network"`
+	Subnetwork      string `json:"subnetwork,omitempty" yaml:"subnetwork,omitempty" koanf:"subnetwork"`
+	CredentialsFile string `json:"credentials_file,omitempty" yaml:"credentials_file,omitempty" koanf:"credentials_file"`
 }
 
 // KubernetesRuntimeConfig returns the runtime entry form of a Kubernetes

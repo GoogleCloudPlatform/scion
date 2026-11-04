@@ -358,7 +358,7 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 	if err := r.resolveConfig(ctx); err != nil {
 		return "", fmt.Errorf("failed to resolve Cloud Run config: %w", err)
 	}
-	parent := fmt.Sprintf("projects/%s/locations/%s", r.config.ProjectID, r.config.Location)
+	parent := r.parent()
 	agentID := cfg.Labels["agent_id"]
 	if agentID == "" {
 		return "", fmt.Errorf("agent_id label is required")
@@ -688,10 +688,7 @@ func (r *CloudRunRuntime) buildCloudRunInstance(cfg RunConfig, uid, gid int, nfs
 		})
 	}
 
-	labels := make(map[string]string)
-	for k, v := range cfg.Labels {
-		labels[sanitizeGCPLabelKey(k)] = sanitizeGCPLabelValue(v)
-	}
+	labels := CloudRunStoredLabels(cfg.Labels)
 
 	// Build the container command. Cloud Run Instances have no TTY, so the
 	// harness is wrapped in tmux (which allocates a PTY) following the same
@@ -1419,7 +1416,7 @@ func (r *CloudRunRuntime) List(ctx context.Context, labelFilter map[string]strin
 	}
 	defer func() { _ = c.Close() }()
 
-	parent := fmt.Sprintf("projects/%s/locations/%s", r.config.ProjectID, r.config.Location)
+	parent := r.parent()
 	req := &runpb.ListInstancesRequest{
 		Parent: parent,
 	}
