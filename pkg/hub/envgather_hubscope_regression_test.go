@@ -29,8 +29,9 @@ import (
 // When a broker reports a needed key and the Hub has a hub-scope secret that
 // is delivered to agents (environment type, injection mode "always") for that
 // key, buildEnvGatherResponse emits a warning naming the key at hub scope. A
-// hub-scope secret that is never delivered (here an as-needed one) is not
-// named: its name is not disclosed through this response.
+// hub-scope secret agents may not see (here an as-needed one, and the
+// telemetry credential file, which is delivered but hidden from agents) is
+// not named: its name is not disclosed through this response.
 func TestBuildEnvGatherResponse_HubScopeSecretWarning(t *testing.T) {
 	srv, st := testServer(t)
 	ctx := context.Background()
@@ -38,10 +39,14 @@ func TestBuildEnvGatherResponse_HubScopeSecretWarning(t *testing.T) {
 	for _, sec := range []*store.Secret{
 		{ID: tid("sec-hubscope-gemini"), Key: "GEMINI_API_KEY", InjectionMode: store.InjectionModeAsNeeded},
 		{ID: tid("sec-hubscope-always"), Key: "ALWAYS_HUB_KEY", InjectionMode: store.InjectionModeAlways},
+		{ID: tid("sec-hubscope-telemetry"), Key: "scion-telemetry-gcp-credentials", InjectionMode: store.InjectionModeAlways,
+			SecretType: store.SecretTypeFile, Target: "~/.scion/telemetry-gcp-credentials.json"},
 	} {
 		sec.EncryptedValue = "encrypted-" + sec.Key
-		sec.SecretType = store.SecretTypeEnvironment
-		sec.Target = sec.Key
+		if sec.SecretType == "" {
+			sec.SecretType = store.SecretTypeEnvironment
+			sec.Target = sec.Key
+		}
 		sec.Scope = store.ScopeHub
 		sec.ScopeID = "test-hub-id" // matches testServer's hub ID
 		if err := st.CreateSecret(ctx, sec); err != nil {
@@ -62,17 +67,17 @@ func TestBuildEnvGatherResponse_HubScopeSecretWarning(t *testing.T) {
 
 	brokerReqs := &RemoteEnvRequirementsResponse{
 		AgentID:  agent.ID,
-		Required: []string{"GEMINI_API_KEY", "ALWAYS_HUB_KEY"},
+		Required: []string{"GEMINI_API_KEY", "ALWAYS_HUB_KEY", "scion-telemetry-gcp-credentials"},
 		HubHas:   []string{},
-		Needs:    []string{"GEMINI_API_KEY", "ALWAYS_HUB_KEY"},
+		Needs:    []string{"GEMINI_API_KEY", "ALWAYS_HUB_KEY", "scion-telemetry-gcp-credentials"},
 	}
 
 	resp := srv.buildEnvGatherResponse(ctx, agent, brokerReqs)
 
 	found := false
 	for _, w := range resp.HubWarnings {
-		if strings.Contains(w, "GEMINI_API_KEY") {
-			t.Errorf("warning names a hub-scope secret that is never delivered: %q", w)
+		if strings.Contains(w, "GEMINI_API_KEY") || strings.Contains(w, "scion-telemetry-gcp-credentials") {
+			t.Errorf("warning names a hub-scope secret hidden from agents: %q", w)
 		}
 		if strings.Contains(w, "ALWAYS_HUB_KEY") && strings.Contains(w, "hub scope") {
 			found = true

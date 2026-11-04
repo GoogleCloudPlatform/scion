@@ -1827,7 +1827,7 @@ func (s *Server) handleScopedEnvVarByKey(w http.ResponseWriter, r *http.Request,
 		if err != nil {
 			if errors.Is(err, store.ErrNotFound) && s.secretBackend != nil {
 				meta, metaErr := s.secretBackend.GetMeta(ctx, key, scope, scopeID)
-				if metaErr == nil && meta.SecretType == "environment" && !agentHiddenHubSecret(ctx, scope, *meta) {
+				if metaErr == nil && meta.SecretType == "environment" {
 					ev := secretMetaToEnvVar(*meta)
 					writeJSON(w, http.StatusOK, &ev)
 					return

@@ -3418,15 +3418,14 @@ func (s *Server) buildEnvGatherResponse(ctx context.Context, agent *store.Agent,
 					continue
 				}
 			}
-			// Check hub-scope secrets. Only a hub-scope secret that is
-			// delivered to agents (secret.HubSecretDeliverable) is named:
-			// any other hub-scope secret is never dispatched, and its name
-			// is not disclosed here.
+			// Check hub-scope secrets. Only a hub-scope secret agents may
+			// see (secret.HubSecretAgentVisible) is named: no other
+			// hub-scope secret's name is disclosed here.
 			if hubID := s.HubID(); hubID != "" {
 				metas, err := s.secretBackend.List(ctx, secret.Filter{Scope: "hub", ScopeID: hubID, Name: key})
 				if err == nil && slices.ContainsFunc(metas, func(m secret.SecretMeta) bool {
 					m.Scope = store.ScopeHub
-					return secret.HubSecretDeliverable(m)
+					return secret.HubSecretAgentVisible(m)
 				}) {
 					resp.HubWarnings = append(resp.HubWarnings,
 						fmt.Sprintf("%s is stored in Hub secrets (hub scope) but was not included in the dispatch — this may indicate a resolution issue", key))
