@@ -324,6 +324,19 @@ func TestTakeResolvedAuthEnv_NonceMismatch(t *testing.T) {
 	if err := WriteResolvedAuthEnv(root, secretsDir, "", map[string]string{"EXAMPLE_API_KEY": "x"}); err == nil {
 		t.Error("a carry file was written without a nonce")
 	}
+	// A carry file with no nonce field, or an empty one, is a mismatch for
+	// any non-empty marker, and it is removed.
+	_, _ = TakeResolvedAuthEnv(root, testNonce) // consume the file written above
+	for _, body := range []string{`{"env":{"EXAMPLE_API_KEY":"x"}}`, `{"nonce":"","env":{"EXAMPLE_API_KEY":"x"}}`} {
+		if err := os.WriteFile(filepath.Join(root, ResolvedAuthEnvFile), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		got, err := TakeResolvedAuthEnv(root, testNonce)
+		if !errors.Is(err, ErrResolvedAuthEnvNonceMismatch) || got != nil {
+			t.Errorf("carry file without a nonce: %d entries, err %v; want none, ErrResolvedAuthEnvNonceMismatch", len(got), err)
+		}
+		carryAbsent(t, root, "after a carry file without a nonce")
+	}
 	a, err1 := NewResolvedAuthNonce()
 	b, err2 := NewResolvedAuthNonce()
 	if err1 != nil || err2 != nil || len(a) != 64 || a == b {
