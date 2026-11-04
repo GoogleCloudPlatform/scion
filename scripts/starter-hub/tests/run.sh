@@ -383,6 +383,15 @@ test_preflight_registry_invalid_image_registry_fails() {
     preflight_registry $'SCION_LOG_LEVEL=info\n' 'IMAGE_REGISTRY=bad registry'
     assert_eq 1 "$RC" "an invalid IMAGE_REGISTRY fails the preflight"
     assert_contains "$PLAIN" "[FAIL] IMAGE_REGISTRY 'bad registry' is not a registry path" "names the bad value"
+    assert_not_contains "$PLAIN" "SCION_IMAGE_REGISTRY not set" "invalid IMAGE_REGISTRY is reported once (no pass line)"
+
+    # With GKE, an invalid IMAGE_REGISTRY that looks like loopback gives only the
+    # path failure, not a second (loopback) failure.
+    preflight_registry $'SCION_LOG_LEVEL=info\n' ENABLE_GKE=true 'IMAGE_REGISTRY=localhost/bad reg'
+    assert_eq 1 "$RC" "an invalid IMAGE_REGISTRY fails the preflight with GKE"
+    assert_contains "$PLAIN" "[FAIL] IMAGE_REGISTRY 'localhost/bad reg' is not a registry path" "names the bad value with GKE"
+    assert_not_contains "$PLAIN" "is a loopback address" "invalid IMAGE_REGISTRY is reported once (no loopback failure)"
+    assert_not_contains "$PLAIN" "SCION_IMAGE_REGISTRY not set" "invalid IMAGE_REGISTRY is reported once with GKE (no pass line)"
 }
 
 test_preflight_registry_gke_refuses_loopback() {

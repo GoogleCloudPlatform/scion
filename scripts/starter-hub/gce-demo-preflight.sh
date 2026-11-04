@@ -220,7 +220,7 @@ else
     fi
     val=$(hub_env_value SCION_IMAGE_REGISTRY)
     if [[ -z "$val" ]]; then
-        # An invalid IMAGE_REGISTRY is reported once, above; then nothing more is said about it.
+        # An invalid IMAGE_REGISTRY was reported above; say nothing more about it.
         if [[ "$reg_ok" == true && "${ENABLE_GKE}" == "true" ]] && registry_is_loopback "${IMAGE_REGISTRY}"; then
             check_fail "ENABLE_GKE=true, but the image registry ${IMAGE_REGISTRY} is a loopback address GKE nodes cannot pull from" \
                 "Set SCION_IMAGE_REGISTRY in ${HUB_ENV_FILE} (or IMAGE_REGISTRY) to a registry the cluster can pull from"
