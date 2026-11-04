@@ -553,6 +553,26 @@ jobs:
           fi
           exit "$rc"
 
+      - name: Check pkg/hub Package DAG
+        run: |
+          set +e
+          ./hack/check-areadag.sh --self-test
+          rc=$?
+          if [ "$rc" -ne 0 ]; then
+            set -e
+            echo "::error title=pkg/hub package DAG NOT checked::check-areadag --self-test failed (exit $rc) — the guard itself is broken or could not run, so nothing was analysed."
+            exit "$rc"
+          fi
+          ./hack/check-areadag.sh
+          rc=$?
+          set -e
+          if [ "$rc" -eq 1 ]; then
+            echo "::error title=pkg/hub package DAG::A declared pkg/hub package imports outside its hack/areadag/dag.txt line, a production file imports a testsupport package, or a pkg/hub alias file imports an undeclared package. Fix the import, or declare a deliberate new edge in hack/areadag/dag.txt. Details are in the step log."
+          elif [ "$rc" -ne 0 ]; then
+            echo "::error title=pkg/hub package DAG NOT checked::check-areadag could not run (exit $rc) — nothing was analysed."
+          fi
+          exit "$rc"
+
       - name: Check Harness Coverage in Cloud Build Configs
         run: |
           # Invoked directly rather than via a Makefile target, for the same

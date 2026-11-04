@@ -1,0 +1,27 @@
+# The pkg/hub package DAG, checked in CI by hack/check-areadag.sh
+# (hack/areadag). Format and kinds: hack/areadag/dag/dag.go.
+#
+#   <kind> <package relative to pkg/hub> [<area it may import>...]
+#
+# leaf         imports other leaves only (plus listed areas that import no
+#              pkg/hub package themselves); never pkg/hub.
+# area         imports leaves, plus only the areas listed on its line; never
+#              pkg/hub.
+# testsupport  non-test code imported only by _test.go files, anywhere in the
+#              module.
+#
+# Leaves are always allowed, so a line lists areas only. A package move adds
+# its new package here in the same PR (its zz_alias_*.go file in pkg/hub must
+# import only declared packages). Undeclared pkg/hub subpackages are not
+# checked, but a declared package may not import one.
+
+leaf        apierr
+leaf        internal/keymaterial
+leaf        internal/principal      # imports permissions
+leaf        permissions             # imported by internal/principal
+leaf        unitdrift               # imported by maintenance
+
+area        maintenance
+area        oidckeys
+
+testsupport internal/hubtestutil
