@@ -155,6 +155,36 @@ func TestReservedAgentEnvName_DroppedFromNonSecretEnvOnEveryRuntime(t *testing.T
 		assertReservedDropped(t, "cloudrun", crInstanceEnv(t, fake))
 	})
 
+	// Resolved auth is merged after cfg.Env and the runtime keys: its
+	// discovery names as plain env, every other entry in the staged blob.
+	// The marker reaches neither; a discovery name and an ordinary entry
+	// are the plain and staged controls.
+	t.Run("cloudrun-resolved-auth", func(t *testing.T) {
+		fake := &fakeInstancesClient{getErr: notFoundErr()}
+		rt := newFakeCloudRunRuntime(t, fake)
+		cfg := runConfigForTest()
+		probe := reservedEnvProbeMap()
+		probe["GOOGLE_CLOUD_PROJECT"] = "keep"
+		cfg.ResolvedAuth = &api.ResolvedAuth{EnvVars: probe}
+		if _, err := rt.Run(context.Background(), cfg); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		plain := crInstanceEnv(t, fake)
+		staged := crStagedResolvedAuth(t, plain)
+		if _, ok := plain[stagedsecrets.HubTokenStagedEnvVar]; ok {
+			t.Error("cloudrun: the reserved marker reached the instance environment")
+		}
+		if _, ok := staged[stagedsecrets.HubTokenStagedEnvVar]; ok {
+			t.Error("cloudrun: the reserved marker reached the staged resolved-auth entries")
+		}
+		if plain["GOOGLE_CLOUD_PROJECT"] != "keep" {
+			t.Error("cloudrun: control: a resolved-auth discovery name did not reach the instance environment")
+		}
+		if staged["ORDINARY_CONTROL"] != "keep" {
+			t.Error("cloudrun: control: an ordinary resolved-auth entry did not reach the staged resolved-auth entries")
+		}
+	})
+
 	t.Run("cloudrun-sandbox", func(t *testing.T) {
 		h := newSandboxSecretsHarness(t)
 		h.cfg.Env = append([]string(nil), reservedEnvProbe...)

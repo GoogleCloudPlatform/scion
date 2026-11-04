@@ -60,6 +60,12 @@ type Staged struct {
 	// writes them into the in-memory directory SCION_HARNESS_SECRETS_DIR
 	// names (WriteHarnessSecrets); Write ignores them.
 	HarnessSecrets []HarnessSecret `json:"harness_secrets,omitempty"`
+	// ResolvedAuthEnv are resolved-auth environment entries, set only by
+	// runtimes that deliver the instance environment in plain form (Cloud
+	// Run), for the entries that are not discovery settings. sciontool
+	// init hands them to the harness process environment only
+	// (WriteResolvedAuthEnv, TakeResolvedAuthEnv); Write ignores them.
+	ResolvedAuthEnv map[string]string `json:"resolved_auth_env,omitempty"`
 }
 
 // HarnessSecret is one file of the harness bundle's staged secrets. Name is
@@ -73,8 +79,8 @@ type HarnessSecret struct {
 // String withholds every value, so formatting a Staged never prints a
 // secret or the hub credential.
 func (s Staged) String() string {
-	return fmt.Sprintf("stagedsecrets.Staged{files:%d variables:%d hub_token:%t harness_secrets:%d}",
-		len(s.FileSecrets), len(s.VariableSecrets), s.HubToken != "", len(s.HarnessSecrets))
+	return fmt.Sprintf("stagedsecrets.Staged{files:%d variables:%d hub_token:%t harness_secrets:%d resolved_auth_env:%d}",
+		len(s.FileSecrets), len(s.VariableSecrets), s.HubToken != "", len(s.HarnessSecrets), len(s.ResolvedAuthEnv))
 }
 
 // GoString is String, for %#v.

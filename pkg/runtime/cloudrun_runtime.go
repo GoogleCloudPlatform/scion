@@ -254,6 +254,27 @@ var cloudRunEnvLimit = envSizeLimit{maxBytes: cloudRunMaxEnvValueBytes}
 // an env-type secret must not also supply them (no duplicate EnvVar names).
 var cloudRunRuntimeEnvKeys = []string{"SCION_HOST_UID", "SCION_HOST_GID", startuplistener.EnvPort, harnessSecretsDirEnvVar, harnessOutputsDirEnvVar}
 
+// cloudRunResolvedAuthTaken reports the names that win over a resolved-auth
+// entry on a Cloud Run instance, before env-type secrets are folded into
+// cfg.Env: a cfg.Env name, an env-type secret's target and the runtime
+// keys (cloudRunRuntimeEnvKeys), as on Docker.
+func cloudRunResolvedAuthTaken(cfg RunConfig) func(name string) bool {
+	taken := make(map[string]bool, len(cfg.Env)+len(cfg.ResolvedSecrets)+len(cloudRunRuntimeEnvKeys))
+	for _, e := range cfg.Env {
+		k, _, _ := strings.Cut(e, "=")
+		taken[k] = true
+	}
+	for _, s := range cfg.ResolvedSecrets {
+		if s.Type == "environment" || s.Type == "" {
+			taken[s.Target] = true
+		}
+	}
+	for _, k := range cloudRunRuntimeEnvKeys {
+		taken[k] = true
+	}
+	return func(name string) bool { return taken[name] }
+}
+
 // cloudRunOwnerIDs returns the uid and gid the Cloud Run instance runs
 // as and owns its NFS workspace with: the broker's own ids for a
 // non-NFS backend, otherwise the configured NFS ids with 0 (unset)
@@ -309,20 +330,28 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 	if err != nil {
 		return "", err
 	}
+	// Resolved-auth entries that are not discovery settings travel in the
+	// staged blob (splitResolvedAuthEnv), with the Docker rules: cfg.Env, an
+	// env-type secret and the runtime keys win over resolved auth. The
+	// discovery settings are emitted as plain env by buildCloudRunInstance.
+	_, resolvedAuthStaged := splitResolvedAuthEnv(cfg.ResolvedAuth, cloudRunResolvedAuthTaken(cfg))
 	// Deliver resolved secrets through the instance env: env-type secrets as
-	// plain variables, file/variable secrets, the hub credential and the
-	// harness secrets as the staged blob that sciontool init writes out.
+	// plain variables, file/variable secrets, the hub credential, the
+	// harness secrets and the staged resolved-auth entries as the staged
+	// blob that sciontool init writes out.
 	// Done before any provisioning so an oversized blob fails fast; its
 	// error names only the largest field class. The blob's sizes (never
 	// names or values) are logged at every start.
 	_, sizes, err := applyStagedSecretsToEnvExtras(&cfg, cloudRunEnvLimit, stagedExtras{
 		HubToken:         hubToken,
 		HarnessSecrets:   harnessSecrets,
+		ResolvedAuthEnv:  resolvedAuthStaged,
 		FieldClassErrors: true,
 	}, cloudRunRuntimeEnvKeys...)
 	runtimeLog().Info("Cloud Run start: staged secrets size",
 		"agent_id", cfg.Labels["agent_id"], "total_bytes", sizes.Total, "limit_bytes", cloudRunMaxEnvValueBytes,
-		"hub_credential_bytes", sizes.HubToken, "file_secrets_bytes", sizes.FileSecrets, "harness_secrets_bytes", sizes.HarnessSecrets)
+		"hub_credential_bytes", sizes.HubToken, "file_secrets_bytes", sizes.FileSecrets, "harness_secrets_bytes", sizes.HarnessSecrets,
+		"resolved_auth_bytes", sizes.ResolvedAuthEnv)
 	if err != nil {
 		return "", fmt.Errorf("cloudrun: %w", err)
 	}
@@ -552,13 +581,32 @@ func (r *CloudRunRuntime) buildCloudRunInstance(cfg RunConfig, uid, gid int, nfs
 		Values: &runpb.EnvVar_Value{Value: strconv.Itoa(startuplistener.Port)},
 	})
 
-	// The template env fallback (ptone/scion#4524) is the LAST env step:
-	// only names no source above set (env-type secrets are already folded
-	// into cfg.Env), never a suppressed key.
 	emitted := make(map[string]bool, len(envVars))
 	for _, ev := range envVars {
 		emitted[ev.GetName()] = true
 	}
+
+	// Resolved-auth discovery settings (for example the claude vertex-ai
+	// variables) as plain env, with the Docker rules: cfg.Env, the env-type
+	// secrets folded into it and the runtime keys above win, and an empty
+	// value is skipped. Without this the harness's env overlay supplies
+	// those names instead, with unexpanded ${VAR} placeholder text. The
+	// other resolved-auth entries are in the staged blob (Run); they count
+	// as set for the template fallback below, as on Docker, without being
+	// emitted here.
+	plainAuth, stagedAuth := splitResolvedAuthEnv(cfg.ResolvedAuth, func(name string) bool { return emitted[name] })
+	for _, e := range plainAuth {
+		k, v, _ := strings.Cut(e, "=")
+		envVars = append(envVars, &runpb.EnvVar{Name: k, Values: &runpb.EnvVar_Value{Value: v}})
+		emitted[k] = true
+	}
+	for k := range stagedAuth {
+		emitted[k] = true
+	}
+
+	// The template env fallback (ptone/scion#4524) is the LAST env step:
+	// only names no source above set (env-type secrets are already folded
+	// into cfg.Env), never a suppressed key.
 	for _, e := range FallbackEnvEntries(cfg.FallbackEnv, cfg.SuppressedFallbackKeys, emitted) {
 		k, v, _ := strings.Cut(e, "=")
 		envVars = append(envVars, &runpb.EnvVar{Name: k, Values: &runpb.EnvVar_Value{Value: v}})
