@@ -247,7 +247,9 @@ func (s *sqlStore) CreatePending(ctx context.Context, a *Artifact, v *Version, f
 
 // createArtifact writes an artifact, its first version, the version's
 // files and the grants in one transaction. The artifact's current version
-// is the version when it is ready, and none otherwise.
+// is the version when it is ready, and none otherwise. A grant created by
+// SponsorReviewCreator gets its grant_created event in the same
+// transaction.
 func (s *sqlStore) createArtifact(ctx context.Context, a *Artifact, v *Version, files []File, grants []Grant) error {
 	if a == nil || v == nil {
 		return errors.New("artifacts: creating an artifact needs an artifact and a version")
@@ -285,6 +287,19 @@ func (s *sqlStore) createArtifact(ctx context.Context, a *Artifact, v *Version, 
 			g.ID, g.ArtifactID, g.SubjectKind, g.SubjectRef, g.Permission, s.nullTimeArg(g.ExpiresAt),
 			nullString(g.CreatedByRef), s.timeArg(g.CreatedAt)); err != nil {
 			return fmt.Errorf("artifacts: insert grant: %w", err)
+		}
+		// The automatic review grant (ptone/scion#7134) is the hub's own
+		// act, recorded with its event in this transaction; the home grant
+		// is implicit and records none.
+		if g.CreatedByRef == SponsorReviewCreator {
+			if !validSponsorReviewGrant(&g) {
+				return errors.New("artifacts: an automatic review grant must be a review grant to a user")
+			}
+			if err := s.insertEvent(ctx, tx, a.ID, EventGrantCreated, &sponsorReviewActor, g.CreatedAt, map[string]any{
+				"grantId": g.ID, "subjectKind": g.SubjectKind, "subjectRef": g.SubjectRef, "permission": g.Permission,
+			}); err != nil {
+				return err
+			}
 		}
 	}
 	if err := tx.Commit(); err != nil {

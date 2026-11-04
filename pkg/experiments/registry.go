@@ -342,6 +342,15 @@ const ArtifactReviewEditor = "web.artifact_review_editor"
 // same way whether or not it is on.
 const ArtifactManageAccess = "web.artifact_manage_access"
 
+// ArtifactSponsorReviewGrant gates the automatic review grant for the
+// delegating user (ptone/scion#7134): when an agent with a recorded
+// delegating user creates a new artifact in a project, the hub gives that
+// user review access to it, provided the user holds a role that reads in
+// the artifact's home project. The hub checks it at creation
+// (artifactHost.SponsorReviewGrant). Turning it off stops new grants;
+// grants already made stay until removed.
+const ArtifactSponsorReviewGrant = "hub.artifact_sponsor_review_grant"
+
 // UserDeleteForceCascade gates the forced user delete (ptone/scion#2143):
 // DELETE /api/v1/users/{id}?force=true, which revokes the user's authority,
 // records a deletion tombstone and stops the user's agents, the GET
@@ -597,6 +606,17 @@ var compiled = []Experiment{
 		Layers:      []Layer{LayerWeb},
 		Stage:       StageAlpha,
 		Issue:       "ptone/scion#7107",
+		Owner:       "artifacts",
+		ReviewBy:    "2027-02-01",
+	},
+	{
+		Name:        ArtifactSponsorReviewGrant,
+		Title:       "Automatic review access for the delegating user",
+		Description: "When an agent creates a new artifact in a project, gives the user who delegated to the agent review access to it, if that user holds a role that reads in the artifact's home project. The grant counts only while they keep that role, until someone changes its level, and can be removed like any grant. Existing artifacts get nothing. Needs hub.artifacts.",
+		Default:     false,
+		Layers:      []Layer{LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#7134",
 		Owner:       "artifacts",
 		ReviewBy:    "2027-02-01",
 	},

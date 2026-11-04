@@ -401,6 +401,96 @@ func (h *artifactHost) recordedDelegator(ctx context.Context, userID, sponsorRef
 	return true
 }
 
+var _ artifacts.SponsorReviewPolicy = (*artifactHost)(nil)
+
+// SponsorReviewGrant implements artifacts.SponsorReviewPolicy
+// (ptone/scion#7134): a new artifact homed in project scopeRef gets a
+// review grant for its recorded delegating user sponsorUserID only while
+// experiment hub.artifact_sponsor_review_grant is on and the user reads in
+// scopeRef through a role now (sponsorReadsHomeThroughRole). The check is
+// made against the artifact's own home, never the agent's project. Any
+// failure answers no grant.
+func (h *artifactHost) SponsorReviewGrant(ctx context.Context, scopeRef, sponsorUserID string) error {
+	if h.server == nil || !h.server.experimentEnabled(experiments.ArtifactSponsorReviewGrant) {
+		return artifacts.ErrSponsorReviewOff
+	}
+	ok, err := h.sponsorReadsHomeThroughRole(ctx, sponsorUserID, scopeRef)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return &artifacts.SponsorReviewRoleError{Scope: scopeRef, Permission: artifacts.PermissionRead}
+	}
+	return nil
+}
+
+// sponsorReadsHomeThroughRole reports whether user userID, a NAMED user and
+// not the caller of ctx, reads artifacts in project homeScope through a
+// role now: the project exists; the user exists and is active; a test
+// identity that can no longer sign in, and the local development user while
+// local-development authority is off, are refused; then
+// AuthzService.CheckAccess for artifact.read on homeScope with that user as
+// the subject, decided from role bindings (an artifact's grants never feed
+// it), under maskAllAuthzMemo so nothing memoized for the caller's request
+// is visible. It is CHECK-ONLY: the identity built from the user's record is
+// the subject of that one CheckAccess and never enters a context
+// (TestSponsorReviewIdentityOnlyASubject). It answers (false, nil) for a
+// refusal and an error for a failed lookup, including a decision CheckAccess
+// marks indeterminate (a role-binding or principal resolution fault).
+//
+// The subject carries the user's global role, and CheckAccess counts
+// system-scope bindings too, so a user whose system role carries
+// artifact.read (a super-admin) passes for any existing home project. That
+// is intended: it is the same home-project read decision as the steward
+// clause's role read and the automatic form's read-time check
+// (grantAllows), and such a user already reads the artifact.
+func (h *artifactHost) sponsorReadsHomeThroughRole(ctx context.Context, userID, homeScope string) (bool, error) {
+	if h.server == nil || h.server.authzService == nil || h.server.authzService.store == nil || userID == "" || homeScope == "" {
+		return false, errors.New("artifacts: automatic review grant: authorization not available")
+	}
+	authz := h.server.authzService
+	perm, ok := artifactPermission(artifacts.PermissionRead)
+	if !ok {
+		return false, errors.New("artifacts: automatic review grant: read permission not registered")
+	}
+	// A deleted home project's id can still be admitted through a system
+	// role, so its existence is checked first.
+	if project, err := authz.store.GetProject(ctx, homeScope); err != nil || project == nil {
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return false, err
+		}
+		return false, nil
+	}
+	user, err := authz.store.GetUser(ctx, userID)
+	if errors.Is(err, store.ErrNotFound) || (err == nil && user == nil) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if user.Status != store.UserStatusActive {
+		return false, nil
+	}
+	if testFixtureRejection(user, h.server.testIdentities.enabled, h.server.testIdentities.clock()) != "" {
+		return false, nil
+	}
+	if user.ID == DevUserID && !authz.devLocalAuthorityEnabled() {
+		return false, nil
+	}
+	identity := NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "")
+	decision := authz.CheckAccess(maskAllAuthzMemo(ctx), identity, Resource{
+		Type:       permissions.ResourceArtifact,
+		ParentType: permissions.ResourceProject,
+		ParentID:   homeScope,
+	}, Action(perm.Action))
+	if decision.IsIndeterminate() {
+		// A store or resolution fault, not a policy answer: reported as a
+		// lookup failure (still no grant).
+		return false, errors.New("artifacts: automatic review grant: role lookup failed")
+	}
+	return decision.Allowed, nil
+}
+
 var _ artifacts.SponsorRecorder = (*artifactHost)(nil)
 
 // DelegatingUser implements artifacts.SponsorRecorder (ptone/scion#6028):
