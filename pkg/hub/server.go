@@ -2443,6 +2443,14 @@ type Server struct {
 	// asyncStartGate caches whether every live hub instance advertises
 	// async_start_v1 (async_start_gate.go). The zero value reads false.
 	asyncStartGate asyncStartGate
+	// asyncStartGateRefresherStop stops the gate's refresh loop; set by
+	// startAsyncStartGateRefresher, taken (and cleared) by
+	// stopAsyncStartGateRefresher. Guarded by mu.
+	asyncStartGateRefresherStop *asyncStartGateRefresherStop
+	// asyncStartGateRefresherStopped is set by stopAsyncStartGateRefresher;
+	// a later startAsyncStartGateRefresher then starts nothing (cleanup
+	// racing startup). Guarded by mu.
+	asyncStartGateRefresherStopped bool
 
 	// onListening runs once Start has bound the hub API listener
 	// (SetOnListening; guarded by mu).
@@ -7109,6 +7117,14 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	// CleanupResources uses it to join the loop and mark the row stopped.
 	_ = s.startHubInstanceRegistry(registryCtx)
 
+	// Keep the async start gate's answer fresh while hub.async_agent_start
+	// is on (ptone/scion#7250); it reads nothing while the experiment is
+	// off. Started after the registry, so this replica's own row usually
+	// exists for its first read. It runs on its own child context;
+	// CleanupBackgroundResources cancels and joins it
+	// (stopAsyncStartGateRefresher) before the registry row is stopped.
+	s.startAsyncStartGateRefresher(registryCtx)
+
 	// Start the lifecycle outbox drainer, only when it has work.
 	s.startLifecycleEvents(ctx)
 }
@@ -7268,6 +7284,12 @@ func (s *Server) CleanupBackgroundResources(ctx context.Context) error {
 		// server context are still up: the relay row goes draining, every
 		// session gets GoAway and the relay deletes its rows (bounded by ctx).
 		s.shutdownConduitRelay(ctx)
+
+		// Stop and join the async start gate's refresh loop first (bounded:
+		// at most one registry read), so no gate tick reads the registry
+		// once this instance's row is marked stopped below (a lone replica
+		// would see no live row and log "async start disabled").
+		s.stopAsyncStartGateRefresher()
 
 		// Stop the hub-instance registry loop, join it, then mark this
 		// instance's row stopped (bounded by hubInstanceStopBudget), so the

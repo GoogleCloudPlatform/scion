@@ -505,7 +505,7 @@ func TestAsyncAgentLaunchExperimentRegistered(t *testing.T) {
 
 // TestAsyncAgentStartExperimentRegistered pins hub.async_agent_start
 // (ptone/scion#4669): it gates hub behaviour only, so it is server-layer
-// only, and it ships off.
+// only, and it ships on (ptone/scion#7250).
 func TestAsyncAgentStartExperimentRegistered(t *testing.T) {
 	e, ok := Default().Lookup(AsyncAgentStart)
 	if !ok {
@@ -514,8 +514,8 @@ func TestAsyncAgentStartExperimentRegistered(t *testing.T) {
 	if AsyncAgentStart != "hub.async_agent_start" {
 		t.Fatalf("frozen name changed: %q", AsyncAgentStart)
 	}
-	if e.Default {
-		t.Fatal("async agent start must default to off")
+	if !e.Default {
+		t.Fatal("async agent start must default to on")
 	}
 	if !e.HasLayer(LayerServer) || e.HasLayer(LayerWeb) {
 		t.Fatalf("must be a server-layer (only) experiment, got %v", e.Layers)

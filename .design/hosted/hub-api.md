@@ -950,9 +950,9 @@ asynchronous create, or an asynchronous start or restart of an existing
 agent. Only meaningful for an agent whose create, start or restart request
 opted in via `acceptAsyncLaunch` while the experiments allowed it
 (`hub.async_agent_launch`, on by default, and for a start
-`hub.async_agent_start`); with them off and no earlier launch left (no
-agent has a launch), every authorized, well-formed call ends in a 404 or
-409 below.
+`hub.async_agent_start`, also on by default); with them off and no
+earlier launch left (no agent has a launch), every authorized,
+well-formed call ends in a 404 or 409 below.
 
 Only the broker itself may call this endpoint (HMAC broker identity must
 match `{brokerId}`); a non-broker caller, or a broker identity that does not
