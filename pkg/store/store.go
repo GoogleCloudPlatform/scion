@@ -2518,7 +2518,9 @@ type SecretStore interface {
 	// callers that only need to repoint the ref (such as GCP SM
 	// name-migration tooling) never clobber a concurrent metadata edit the
 	// way a GetSecret-then-UpdateSecret read-modify-write would
-	// (ptone/scion#2152 round-2 review finding 11).
+	// (ptone/scion#2152 round-2 review finding 11). The write is fenced
+	// (see SecretEncryptionStore): under a policy, clearing the ref of a
+	// row with an empty value returns ErrEncryptionPolicyMismatch.
 	UpdateSecretRefIfMatches(ctx context.Context, key, scope, scopeID, expectedRef string, expectedVersion int, newRef string) (applied bool, err error)
 
 	// UpdateSecretValueIfVersion conditionally replaces only the
@@ -2606,7 +2608,14 @@ const MaxSecretPayloadScan = 500
 // UpdateSecretValueIfVersion, ReplaceSecretCiphertext) accepts only an
 // enc:v2: value under one of AllowedWriteKIDs, or an empty value with a
 // non-empty SecretRef, and otherwise returns ErrEncryptionPolicyMismatch
-// without writing. Metadata-only writes and deletes are not fenced.
+// without writing. Under a policy no write (UpdateSecretRefIfMatches and
+// unchanged-value writes included) may leave a row with neither a value
+// nor a SecretRef. Metadata-only writes and deletes are not fenced.
+//
+// Transitions (UpdateEncryptionPolicy, CreateEncryptionMigration,
+// UpdateEncryptionMigration) inside a WithTx transaction that has already
+// run a fenced write return ErrPolicyTransitionAfterFencedWrite: run them
+// in their own short transaction, or before any fenced write.
 type SecretEncryptionStore interface {
 	// GetEncryptionPolicy returns the policy, or ErrNotFound when no
 	// policy exists (the fence is off).
