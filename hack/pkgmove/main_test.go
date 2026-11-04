@@ -788,6 +788,10 @@ func outRefTree() map[string]string {
 			"var authorizeFile = \"pkg/hub/authorize.go\"\n\n" + // line 7: staying source file
 			"func extra() bool { return extraCheck() }\n",
 		"pkg/hub/authorize_extra.go": "package hub\n\nfunc extraCheck() bool { return true }\n",
+		// A moved file asset (not Go).
+		"pkg/hub/authorize_rules.json": "{}\n",
+		// An outside Go file whose alignment depends on the literal's length.
+		"pkg/other/table.go": "package other\n\nvar (\n\ta  = \"pkg/hub/authorize.go\" // moved\n\tbb = \"x\"                    // kept\n)\n",
 		// A moved file outside the type-checked unit (an external test).
 		"pkg/hub/authorize_ext_test.go": "package hub_test\n\n// extraCheckFor is only text here.\nfunc neverFn() bool { return true }\n",
 		// The permissions registry shape: "path" and "path:symbol".
@@ -800,6 +804,8 @@ func outRefTree() map[string]string {
 			"\t\"pkg/hub/authorize.go:check\",\n" + // line 8: ambiguous (method renamed, func kept)
 			"\t\"pkg/hub/authorize.go:extraCheck\",\n" + // line 9: renamed only in authorize_extra.go
 			"\t\"pkg/hub/authorize_ext_test.go:extraCheck\",\n" + // line 10: named file not type-checked
+			"\t\"pkg/hub/authorize_ext_test.go:neverFn\",\n" + // line 11: not type-checked, renamed nowhere: kept
+			"\t\"pkg/hub/authorize.go:extraCheckFor\",\n" + // line 12: not used in the file, renamed nowhere: kept
 			"}\n",
 		// The authzop catalog shape: File and Scope are repo paths; Function
 		// names a function of File, rewritten only when the move renames it there.
@@ -813,6 +819,7 @@ func outRefTree() map[string]string {
 			"\t{File: \"pkg/hub/authorize.go\", Function: \"extraCheck\", Symbol: \"CreateX\"},\n" + // line 11: renamed in another file
 			"\t{File: \"pkg/hub/authorize.go\", Function: \"check\", Symbol: \"CreateX\"},\n" + // line 12: ambiguous
 			"\t{File: \"pkg/hub/authorize_ext_test.go\", Function: \"neverFn\", Symbol: \"CreateX\"},\n" + // line 13: not type-checked
+			"\t{File: \"pkg/hub/authorize_rules.json\", Function: \"authorizeAgentCreate\", Symbol: \"CreateX\"},\n" + // line 14: File is a moved asset
 			"}\n",
 		// Negatives in Go: base name, path elements, a longer literal, a
 		// second colon, a ref-ok'd literal.
@@ -850,7 +857,7 @@ func outRefTree() map[string]string {
 }
 
 // outRefFiles are the files TestRewriteOutRefs moves.
-var outRefFiles = []string{"authorize.go", "authorize_extra.go", "authorize_ext_test.go"}
+var outRefFiles = []string{"authorize.go", "authorize_extra.go", "authorize_ext_test.go", "authorize_rules.json"}
 
 // enforcementOK mirrors assertEnforcementReferenceExists in
 // pkg/hub/permission_registry_test.go: the file part of each entry must
@@ -931,10 +938,14 @@ func TestRewriteOutRefs(t *testing.T) {
 		`hack/winsec-unprotected.txt:4: "pkg/hub/authorize.go" -> "` + newPath + `"`,
 		`hack/store-delete-callers-allowlist.txt:2: "pkg/hub/authorize.go | authorizeHelper | 1" -> "` + newPath + ` | authorizeHelper | 1"`,
 		`pkg/hub/authzop/catalog.go:13: "pkg/hub/authorize_ext_test.go" -> "pkg/hub/authorize/authorize_ext_test.go"`,
+		`pkg/hub/authzop/catalog.go:14: "pkg/hub/authorize_rules.json" -> "pkg/hub/authorize/authorize_rules.json"`,
+		`pkg/hub/permissions/registry.go:11: "pkg/hub/authorize_ext_test.go:neverFn" -> "pkg/hub/authorize/authorize_ext_test.go:neverFn"`,
+		`pkg/hub/permissions/registry.go:12: "pkg/hub/authorize.go:extraCheckFor" -> "` + newPath + `:extraCheckFor"`,
+		`pkg/other/table.go:4: "pkg/hub/authorize.go" -> "` + newPath + `"`,
 	}
-	// The first catalog entry has two path literals, so 19 rewrites in all.
-	if !strings.Contains(dry, "\nOutside references to moved files rewritten (-rewrite-outrefs) (19):\n") {
-		t.Errorf("want 19 rewrites in the plan:\n%s", dry)
+	// The first catalog entry has two path literals, so 23 rewrites in all.
+	if !strings.Contains(dry, "\nOutside references to moved files rewritten (-rewrite-outrefs) (23):\n") {
+		t.Errorf("want 23 rewrites in the plan:\n%s", dry)
 	}
 	for _, w := range rewritten {
 		if !strings.Contains(dry, "  "+w+"\n") {
@@ -976,8 +987,8 @@ func TestRewriteOutRefs(t *testing.T) {
 	}
 	// Identical findings print once: the first catalog entry's File and
 	// Scope literals share one INFO line.
-	if got := strings.Count(dry, "; rewritten to "); got != 18 {
-		t.Errorf("got %d rewritten INFO lines, want 18:\n%s", got, dry)
+	if got := strings.Count(dry, "; rewritten to "); got != 22 {
+		t.Errorf("got %d rewritten INFO lines, want 22:\n%s", got, dry)
 	}
 	if strings.Contains(dry, "testdata/case/want/report.txt") {
 		t.Errorf("a .txt file under testdata is scanned:\n%s", dry)
@@ -1000,6 +1011,11 @@ func TestRewriteOutRefs(t *testing.T) {
 	}
 	if strings.Contains(dry, `Function "authorizeHelper"`) {
 		t.Errorf("a Function the move does not rename is reported:\n%s", dry)
+	}
+	// Next to a File naming a moved asset (no Go declarations), Function is
+	// neither rewritten nor reported.
+	if strings.Contains(dry, "catalog.go:14: Function") {
+		t.Errorf("the Function next to a moved asset is reported or rewritten:\n%s", dry)
 	}
 
 	// Under -strict the rewritten references are no errors; the rest are.
@@ -1035,8 +1051,10 @@ func TestRewriteOutRefs(t *testing.T) {
 			"\t\"pkg/hub/authorize.go:check\",\n" +
 			"\t\"pkg/hub/authorize.go:extraCheck\",\n" +
 			"\t\"pkg/hub/authorize_ext_test.go:extraCheck\",\n" +
+			"\t\"pkg/hub/authorize/authorize_ext_test.go:neverFn\",\n" +
+			"\t\"" + newPath + ":extraCheckFor\",\n" +
 			"}\n",
-		"pkg/hub/authzop/catalog.go": strings.NewReplacer(`"pkg/hub/authorize.go"`, `"`+newPath+`"`, `"pkg/hub/authorize_ext_test.go"`, `"pkg/hub/authorize/authorize_ext_test.go"`,
+		"pkg/hub/authzop/catalog.go": strings.NewReplacer(`"pkg/hub/authorize.go"`, `"`+newPath+`"`, `"pkg/hub/authorize_ext_test.go"`, `"pkg/hub/authorize/authorize_ext_test.go"`, `"pkg/hub/authorize_rules.json"`, `"pkg/hub/authorize/authorize_rules.json"`,
 			"Function: `authorizeAgentCreate`", "Function: `AuthorizeAgentCreate`").Replace(before["pkg/hub/authzop/catalog.go"]),
 		"hack/hub-store-reassign-baseline.txt": strings.Replace(before["hack/hub-store-reassign-baseline.txt"], "pkg/hub/authorize.go | 2", newPath+" | 2", 1),
 		"hack/winsec-unprotected.txt": newPath + " unprotected\r\n" +
@@ -1044,6 +1062,8 @@ func TestRewriteOutRefs(t *testing.T) {
 			newPath + "\n" +
 			newPath + "\r\n",
 		"hack/store-delete-callers-allowlist.txt": "pkg/hub/authorize.go | authorizeAgentCreate | 1\n" + newPath + " | authorizeHelper | 1\n",
+		// gofmt realigns the comments to the longer literal.
+		"pkg/other/table.go": "package other\n\nvar (\n\ta  = \"" + newPath + "\" // moved\n\tbb = \"x\"                              // kept\n)\n",
 	}
 	for name, w := range want {
 		if got[name] != w {
@@ -1101,10 +1121,10 @@ func TestRewriteOutRefsOffByDefault(t *testing.T) {
 			t.Errorf("unexpected %q without -rewrite-outrefs:\n%s", w, out)
 		}
 	}
-	// 13 HIGH in the dry-run list, plus the 17 lines of rewritable path
+	// 13 HIGH in the dry-run list, plus the 21 lines of rewritable path
 	// references (the first catalog entry's two literals print once).
-	if got := strings.Count(out, "after the move it no longer matches the file"); got != 30 {
-		t.Errorf("got %d HIGH outside references, want 30:\n%s", got, out)
+	if got := strings.Count(out, "after the move it no longer matches the file"); got != 34 {
+		t.Errorf("got %d HIGH outside references, want 34:\n%s", got, out)
 	}
 	for _, w := range []string{
 		`hack/hub-store-reassign-baseline.txt:4: line "pkg/hub/authorize.go | 2" names moved pkg/hub/authorize.go by its repo path: after the move it no longer matches the file - update it to pkg/hub/authorize/authorize.go, or accept it with a pkgmove:ref-ok <reason> comment on the line above` + "\n",
@@ -1116,8 +1136,8 @@ func TestRewriteOutRefsOffByDefault(t *testing.T) {
 	}
 	// The registry entries now point at a missing file: -rewrite-outrefs is
 	// what keeps the check passing.
-	if bad := enforcementOK(t, dir); len(bad) != 7 {
-		t.Errorf("registry check after a move without -rewrite-outrefs: %d failing entries %v, want 7", len(bad), bad)
+	if bad := enforcementOK(t, dir); len(bad) != 9 {
+		t.Errorf("registry check after a move without -rewrite-outrefs: %d failing entries %v, want 9", len(bad), bad)
 	}
 
 	// -rewrite-outrefs does not combine with -rewrite-aliases.
@@ -1163,7 +1183,7 @@ func TestRewriteOutRefsRollback(t *testing.T) {
 				t.Fatalf("want a rolled-back failure, got %v\n%s", err, buf.String())
 			}
 			// The edits were planned (so the rollback had outside files to restore).
-			if !strings.Contains(buf.String(), "Outside references to moved files rewritten (-rewrite-outrefs) (19):") {
+			if !strings.Contains(buf.String(), "Outside references to moved files rewritten (-rewrite-outrefs) (23):") {
 				t.Fatalf("no outside rewrites planned:\n%s", buf.String())
 			}
 			compareTrees(t, readTree(t, dir), before)

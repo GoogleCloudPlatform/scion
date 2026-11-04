@@ -646,7 +646,7 @@ used from, the named file (type information). When the move renames them
 too: `"pkg/hub/x.go:authorizeAgentCreate"` becomes
 `"pkg/hub/area/x.go:AuthorizeAgentCreate"`. The reference then names the same
 file and the same symbol as before, so a check that reads the file and looks
-for the symbol as a whole identifier (`assertEnforcementReferenceExists`:
+for the symbol as a substring (`assertEnforcementReferenceExists`:
 `../../<path>` and `strings.Contains(symbol)`) passes after the move when it
 passed before. The identifier is not rewritten, and the HIGH says why, when it
 is ambiguous in that file (renamed for one object, kept or renamed differently

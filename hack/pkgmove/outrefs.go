@@ -545,12 +545,11 @@ func (a *analysis) rewriteFunctionField(r outsideRef) {
 		high("the value is not a string literal")
 		return
 	}
-	if !token.IsIdentifier(fn.value) {
-		return // not a function name; nothing the move renames
-	}
+	// r.moved names a moved file: a Go file of the source directory, or a
+	// moved file asset, which declares no function.
 	f := a.byPath[filepath.Join(a.cfg.SrcDir, r.moved.base)]
-	if f == nil || !f.Moved {
-		return // a moved asset, not a Go file
+	if f == nil {
+		return
 	}
 	news := map[string]bool{}
 	unknown := false
