@@ -71,6 +71,10 @@ type fakeHost struct {
 	// other question (a host that would make anyone a steward).
 	stewards   map[string]string
 	stewardAll string
+	// sponsorArgs records the sponsorRef argument of every StewardClause,
+	// ReviewGrantClause and MayGrantReview question, as
+	// "<method> <ownerAgentID> <sponsorRef>".
+	sponsorArgs []string
 }
 
 // ReviewSubjectAuthorize answers from the same table as Authorize, for
@@ -126,7 +130,14 @@ func (h *fakeHost) revokeReview(u principal, agent, scope string) {
 	delete(h.reviewers, PrincipalRef(u.kind, u.ref)+" "+agent+" "+scope)
 }
 
-func (h *fakeHost) MayGrantReview(ctx context.Context, ownerAgentID, homeScope string) bool {
+func (h *fakeHost) MayGrantReview(ctx context.Context, ownerAgentID, homeScope, sponsorRef string) bool {
+	h.mu.Lock()
+	h.sponsorArgs = append(h.sponsorArgs, "review "+ownerAgentID+" "+sponsorRef)
+	h.mu.Unlock()
+	return h.mayGrantReview(ctx, ownerAgentID, homeScope)
+}
+
+func (h *fakeHost) mayGrantReview(ctx context.Context, ownerAgentID, homeScope string) bool {
 	kind, ref, _, ok := h.Principal(ctx)
 	if !ok {
 		return false
@@ -140,8 +151,11 @@ func (h *fakeHost) MayGrantReview(ctx context.Context, ownerAgentID, homeScope s
 // ReviewGrantClause answers as MayGrantReview, naming project_admin when the
 // caller is also an admin of homeScope (allowAdmin) and delegating_user
 // otherwise.
-func (h *fakeHost) ReviewGrantClause(ctx context.Context, ownerAgentID, homeScope string) string {
-	if !h.MayGrantReview(ctx, ownerAgentID, homeScope) {
+func (h *fakeHost) ReviewGrantClause(ctx context.Context, ownerAgentID, homeScope, sponsorRef string) string {
+	h.mu.Lock()
+	h.sponsorArgs = append(h.sponsorArgs, "clause "+ownerAgentID+" "+sponsorRef)
+	h.mu.Unlock()
+	if !h.mayGrantReview(ctx, ownerAgentID, homeScope) {
 		return ""
 	}
 	kind, ref, _, _ := h.Principal(ctx)
@@ -395,13 +409,14 @@ func (h *fakeHost) allowSteward(u principal, agent, scope, clause string) {
 }
 
 // StewardClause implements Stewardship from the stewards table.
-func (h *fakeHost) StewardClause(ctx context.Context, ownerAgentID, homeScope, _ string, _ bool) string {
+func (h *fakeHost) StewardClause(ctx context.Context, ownerAgentID, homeScope, sponsorRef string, _ bool) string {
 	kind, ref, _, ok := h.Principal(ctx)
 	if !ok {
 		return ""
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	h.sponsorArgs = append(h.sponsorArgs, "steward "+ownerAgentID+" "+sponsorRef)
 	h.calls = append(h.calls, "steward "+ownerAgentID+" "+homeScope)
 	if c, ok := h.stewards[PrincipalRef(kind, ref)+" "+ownerAgentID+" "+homeScope]; ok {
 		return c

@@ -196,6 +196,10 @@ func (s *Service) handlePublish(w http.ResponseWriter, r *http.Request) {
 		OwnerKind: kind, OwnerRef: ref, Title: title, CurrentSeq: 1,
 		CreatedAt: now, UpdatedAt: now, ExpiresAt: retentionExpiry(b.currentLimits(ctx), now),
 	}
+	// The delegating user of an agent creating the artifact, resolved by
+	// the host from the agent's delegation chain (ptone/scion#6028); never
+	// from the request.
+	a.SponsorRef = s.sponsorFor(ctx, kind, ref, a.ScopeKind)
 	v := &Version{
 		ID: versionID, ArtifactID: a.ID, Seq: 1, Kind: VersionKindPublish, EntryPath: name,
 		TotalBytes: totalBytes, FileCount: len(files), CreatedByKind: kind, CreatedByRef: ref,
