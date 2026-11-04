@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import shutil
@@ -28,7 +29,7 @@ import stat
 import subprocess
 import tempfile
 import unittest
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stderr
 from typing import Any
 from unittest import mock
 
@@ -544,10 +545,11 @@ class VertexAuthSelectionTest(unittest.TestCase):
         self.assertEqual(env["CLAUDE_CODE_USE_VERTEX"], "1")
 
     def test_location_wins_and_unset_values_are_left_out(self) -> None:
-        # All keys are candidates with no staged secret and no process-env
-        # value: the LOCATION key is chosen (ptone/scion#4719) and neither
-        # value key is written. The overlay is applied literally, so a
-        # ${VAR} placeholder would reach Claude as text (ptone/scion#7290).
+        # PROJECT, REGION and LOCATION are candidates with no staged secret
+        # and no process-env value: the LOCATION key is chosen
+        # (ptone/scion#4719) and neither value key is written. The overlay is
+        # applied literally, so a ${VAR} placeholder would reach Claude as
+        # text (ptone/scion#7290).
         with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp), env_vars(**_vertex_env()):
             ctx, resolved = _select_with_candidates(tmp, {
                 "explicit_type": "vertex-ai",
@@ -755,7 +757,11 @@ class CredentialEnvFallbackTest(unittest.TestCase):
             with self.subTest(method=method), tempfile.TemporaryDirectory() as tmp, \
                     temporary_home(tmp), env_vars(**self._env(key)):
                 ctx, _ = _select_with_candidates(tmp, self._candidates(method, key))
-                provision.provision(ctx)
+                del ctx.info  # restore the real info() so its stderr output is checked too
+                buf = io.StringIO()
+                with redirect_stderr(buf):
+                    provision.provision(ctx)
+                self.assertFalse(self.CANARY in buf.getvalue(), f"{method}: canary in stderr")
                 self.assertTrue(os.path.isfile(os.path.join(tmp, ".scion", "harness", "outputs", "env.json")))
                 found = []
                 for root, _, files in os.walk(tmp):
