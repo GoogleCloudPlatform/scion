@@ -39,7 +39,9 @@
 //     code, so a leaf can never reach the rest of pkg/hub through it.
 //  4. (C2) Over EVERY package of the module, a testsupport package appears only
 //     in test imports, never in non-test imports. The only exception is a
-//     testsupport importer: it is itself only reachable from tests.
+//     testsupport importer: it is itself only reachable from tests. The
+//     testsupport class comes only from dag.txt; no name or directory
+//     convention makes a package testsupport.
 //  5. Every pkg/hub subpackage imported by an alias file (zz_alias_*.go,
 //     test or not) in the pkg/hub directory is declared, so a package move
 //     cannot skip the DAG. pkgmove and hubshard extract both write alias files
