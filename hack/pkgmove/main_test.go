@@ -1361,6 +1361,68 @@ func Cond(t *testing.T, ok bool) {
 		t.Helper()
 	}
 }
+
+// T and TB have the names of the testing types but are not them.
+type T struct{}
+
+func (*T) Helper() {}
+
+func FakeT(t *T) { t.Helper() }
+
+type TB struct{}
+
+func (TB) Helper() {}
+
+func FakeTBValue(tb TB) { tb.Helper() }
+
+func Unnamed(*testing.T) {}
+
+func Marked(t *testing.T) { t.Helper() }
+
+// SafeGo calls recover() only inside a func literal, which a wrapper does
+// not affect.
+func SafeGo(f func()) {
+	func() {
+		defer func() { _ = recover() }()
+		f()
+	}()
+}
+`,
+	// Targets a wrapper frame would change (recover, call-stack inspection).
+	"hubtestutil/hazard.go": `package hubtestutil
+
+import (
+	"log"
+	"runtime"
+	"testing"
+)
+
+func Recover(t *testing.T) {
+	t.Helper()
+	if r := recover(); r != nil {
+		t.Log(r)
+	}
+}
+
+func Caller(t *testing.T) string {
+	t.Helper()
+	_, file, _, _ := runtime.Caller(1)
+	return file
+}
+
+func Transitive(t *testing.T) string {
+	t.Helper()
+	return where()
+}
+
+func where() string {
+	_, file, _, _ := runtime.Caller(2)
+	return file
+}
+
+func LogOut() { _ = log.Output(2, "x") }
+
+func LoggerOut(l *log.Logger) { _ = l.Output(2, "x") }
 `,
 	"hub/hub.go":     "package hub\n",
 	"hub/sub/sub.go": "package sub\n",
@@ -1404,6 +1466,7 @@ func requireUTCInstant(t *testing.T, got, want time.Time) {
 	"hub/zz_alias_hubtestutil_more_test.go": `package hub
 
 import (
+	"log"
 	"testing"
 
 	"example.com/fx/hubtestutil"
@@ -1461,6 +1524,52 @@ func seedFirst(tb testing.TB, n int) {
 	_ = n
 	hubtestutil.Seed(tb, n)
 }
+
+func fakeT(t *hubtestutil.T) {
+	t.Helper()
+	hubtestutil.FakeT(t)
+}
+
+func fakeTB(tb hubtestutil.TB) {
+	tb.Helper()
+	hubtestutil.FakeTBValue(tb)
+}
+
+func unnamed(t *testing.T) {
+	t.Helper()
+	hubtestutil.Unnamed(t)
+}
+
+func recoverW(t *testing.T) {
+	t.Helper()
+	hubtestutil.Recover(t)
+}
+
+func callerW(t *testing.T) string {
+	t.Helper()
+	return hubtestutil.Caller(t)
+}
+
+func transitiveW(t *testing.T) string {
+	t.Helper()
+	return hubtestutil.Transitive(t)
+}
+
+func logOut() {
+	hubtestutil.LogOut()
+}
+
+func loggerOut(l *log.Logger) {
+	hubtestutil.LoggerOut(l)
+}
+
+func marked(t *testing.T) {
+	hubtestutil.Marked(t)
+}
+
+func safeGo(f func()) {
+	hubtestutil.SafeGo(f)
+}
 `,
 	// Not generated: the marker is only quoted in a string literal.
 	"hub/zz_alias_quoted_test.go": `package hub
@@ -1514,9 +1623,16 @@ import "testing"
 
 func TestSeed(t *testing.T) { seed(t, 1) }
 `,
+	"hub/safe_test.go": `package hub
+
+import "testing"
+
+func TestSafe(t *testing.T) { safeGo(func() {}) }
+`,
 	"hub/neg_test.go": `package hub
 
 import (
+	"log"
 	"testing"
 
 	"example.com/fx/hubtestutil"
@@ -1534,6 +1650,15 @@ func TestNeg(t *testing.T) {
 	_ = quoted(t)
 	_ = quotedMarker
 	handSeed(t, 1)
+	fakeT(&hubtestutil.T{})
+	fakeTB(hubtestutil.TB{})
+	unnamed(t)
+	recoverW(t)
+	_ = callerW(t)
+	_ = transitiveW(t)
+	logOut()
+	loggerOut(log.Default())
+	marked(t)
 }
 
 func BenchmarkNeg(b *testing.B) { bench(b) }
@@ -1587,21 +1712,23 @@ func TestExtractAliasWrappers(t *testing.T) {
 	}
 
 	t.Run("resolved", func(t *testing.T) {
-		out, err := move(t, "chat_test.go", "seed_test.go")
+		out, err := move(t, "chat_test.go", "seed_test.go", "safe_test.go")
 		if err != nil {
 			t.Fatalf("run: %v\n%s", err, out)
 		}
 		// All 5 declarations of the chatdb alias file (1 const, 4 Helper
-		// wrappers, 3 return and 1 statement shape), and a testing.TB
-		// wrapper.
+		// wrappers, 3 return and 1 statement shape), a testing.TB wrapper,
+		// and a plain wrapper whose target calls recover() only in a func
+		// literal.
 		wantAll(t, out,
-			"Alias references resolved to their targets (6):",
+			"Alias references resolved to their targets (7):",
 			"hub/chat_test.go:9: requirePostgresDSN -> hubtestutil.RequirePostgresDSN",
 			"hub/chat_test.go:10: conversationsTableDDL -> hubtestutil.ConversationsTableDDL",
 			"hub/chat_test.go:11: getTopicConvID -> hubtestutil.GetTopicConvID",
 			"hub/chat_test.go:12: rawText -> hubtestutil.RawText",
 			"hub/chat_test.go:14: requireUTCInstant -> hubtestutil.RequireUTCInstant",
 			"hub/seed_test.go:5: seed -> hubtestutil.Seed",
+			"hub/safe_test.go:5: safeGo -> hubtestutil.SafeGo",
 		)
 	})
 
@@ -1637,13 +1764,32 @@ func TestExtractAliasWrappers(t *testing.T) {
 			// A hand-written Helper wrapper.
 			uses("func", "handSeed", "handwritten_test.go"),
 			"func handSeed forwards to example.com/fx/hubtestutil.Seed but is not in a generated alias file (pkgmove or hubshard extract) (a hand-written wrapper is not resolved",
+			// Helper on look-alikes of testing.T and testing.TB from another package.
+			uses("func", "fakeT", more),
+			uses("func", "fakeTB", more),
+			// The target's parameter that receives p is unnamed.
+			uses("func", "unnamed", more),
+			"func unnamed calls Helper() on a parameter before forwarding to example.com/fx/hubtestutil.Unnamed, but the target's parameter that receives it is unnamed",
+			// Targets a wrapper frame would change.
+			uses("func", "recoverW", more),
+			"func recoverW (a hubshard extract wrapper) forwards to example.com/fx/hubtestutil.Recover, but the target calls recover() directly",
+			uses("func", "callerW", more),
+			"func callerW (a hubshard extract wrapper) forwards to example.com/fx/hubtestutil.Caller, but the target inspects its call stack (runtime.Caller;",
+			uses("func", "transitiveW", more),
+			"func transitiveW (a hubshard extract wrapper) forwards to example.com/fx/hubtestutil.Transitive, but the target calls where, which inspects its call stack (runtime.Caller;",
+			uses("func", "logOut", more),
+			"func logOut (a hubshard extract wrapper) forwards to example.com/fx/hubtestutil.LogOut, but the target uses log.Output call depth",
+			uses("func", "loggerOut", more),
+			"func loggerOut (a hubshard extract wrapper) forwards to example.com/fx/hubtestutil.LoggerOut, but the target may call (*log.Logger).Output",
+			uses("func", "marked", more),
+			"func marked (a hubshard extract wrapper) forwards to example.com/fx/hubtestutil.Marked, but the target calls Helper() but the wrapper does not",
 		)
 		if strings.Contains(out, "Alias references resolved") {
 			t.Errorf("no reference should resolve:\n%s", out)
 		}
 		// These are not alias-shaped at all, so they get no reason.
 		for _, line := range strings.Split(out, "\n") {
-			for _, name := range []string{"extraStmt", "envKeys", "fake", "bench", "seedFirst"} {
+			for _, name := range []string{"extraStmt", "envKeys", "fake", "bench", "seedFirst", "fakeT", "fakeTB"} {
 				if strings.Contains(line, "uses func "+name+" ") || strings.Contains(line, "uses var "+name+" ") {
 					if strings.Contains(line, "not resolved as an alias") {
 						t.Errorf("%s is not alias-shaped, so it needs no reason: %s", name, line)
@@ -1667,15 +1813,17 @@ func TestExtractAliasWrappers(t *testing.T) {
 			"hub/integ_test.go": "//go:build integration\n\npackage hub\n\nimport \"testing\"\n\nfunc TestInteg(t *testing.T) { _ = rawText(t, nil, \"q\") }\n",
 		})
 		wantAll(t, out,
-			"Alias references resolved to their targets (6):",
+			"Alias references resolved to their targets (7):",
 			"hub/chat_test.go:11: getTopicConvID -> hubtestutil.GetTopicConvID",
 			"hub/seed_test.go:5: seed -> hubtestutil.Seed",
-			"Alias entries removed (5):",
+			"hub/safe_test.go:5: safeGo -> hubtestutil.SafeGo",
+			"Alias entries removed (6):",
 			"const conversationsTableDDL = example.com/fx/hubtestutil.ConversationsTableDDL",
 			"func getTopicConvID = example.com/fx/hubtestutil.GetTopicConvID",
 			"func requirePostgresDSN = example.com/fx/hubtestutil.RequirePostgresDSN",
 			"func requireUTCInstant = example.com/fx/hubtestutil.RequireUTCInstant",
 			"func seed = example.com/fx/hubtestutil.Seed",
+			"func safeGo = example.com/fx/hubtestutil.SafeGo",
 			"their entries are kept): rawText",
 		)
 		if strings.Contains(out, "func rawText = ") || strings.Contains(out, "Files deleted") {
@@ -1694,7 +1842,7 @@ func TestExtractAliasWrappers(t *testing.T) {
 	t.Run("rewrite-delete", func(t *testing.T) {
 		dir, out := rewrite(t, nil)
 		wantAll(t, out,
-			"Alias entries removed (6):",
+			"Alias entries removed (7):",
 			"func rawText = example.com/fx/hubtestutil.RawText",
 			"Files deleted (1):\n  hub/zz_alias_hubtestutil_chatdb_test.go",
 		)
@@ -1705,8 +1853,8 @@ func TestExtractAliasWrappers(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if strings.Contains(string(b), "func seed(") || !strings.Contains(string(b), "func noHelperTarget(") {
-			t.Errorf("more alias file should lose only its resolved entry seed:\n%s", b)
+		if strings.Contains(string(b), "func seed(") || strings.Contains(string(b), "func safeGo(") || !strings.Contains(string(b), "func noHelperTarget(") || !strings.Contains(string(b), "func recoverW(") {
+			t.Errorf("more alias file should lose only its resolved entries seed and safeGo:\n%s", b)
 		}
 	})
 }

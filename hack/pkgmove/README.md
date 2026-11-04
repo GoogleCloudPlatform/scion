@@ -259,7 +259,7 @@ plan lists every rewrite under "Alias references resolved to their targets".
 | `type x = pkg.Y`, `type x[P any] = pkg.Y[P]` (type parameters forwarded in order) | any file | an alias is the same type |
 | `const x = pkg.Y` (one name, no type, one value) | any file | the same constant |
 | `var x = pkg.F` for a non-generic func `F` | generated alias files only, and only if nothing assigns `x`, increments it, ranges into it or takes its address: in the package (by type), in its tag-excluded files and external tests (by name), and, for exported names, in every importer in the module | the var holds `F` itself, so calls and values are identical |
-| `func x(p0 T) R { return pkg.F(p0) }` (parameters forwarded in order, generic ones explicitly instantiated with their own type parameters, signature identical to `F`'s) | generated alias files only | the generators never wrap a function that calls `recover()` directly or inspects its call stack (pkgmove gives those var aliases; extract export refuses them), so dropping the wrapper frame changes nothing |
+| `func x(p0 T) R { return pkg.F(p0) }` (parameters forwarded in order, generic ones explicitly instantiated with their own type parameters, signature identical to `F`'s) | generated alias files only; for a hubshard extract file, only if the target passes the hazard check below | pkgmove's generator never wraps a function that calls `recover()` directly or inspects its call stack (it gives those var aliases), so dropping the wrapper frame changes nothing. hack/hubshard/extract export does **not** refuse them (it only WARNs on `runtime.Stack`, `runtime.Caller`, `runtime.FuncForPC`, `debug.Stack`, `pprof.Lookup` and `reflect.TypeOf`), so pkgmove checks each extract wrapper's target itself |
 | the same wrapper with a leading `p.Helper();` (`func x(t *testing.T, s string) R { t.Helper(); return pkg.F(t, s) }`, or without `return`), where `p` is a forwarded `testing.TB` or `*testing.T` parameter | generated alias files only, and only if `F`'s body calls `Helper()` as a top-level statement (anywhere in its top-level statement list) on its parameter at the same index as `p`, and never assigns that parameter (`F`'s source is read from its package directory, under the analysis build tags) | extract export writes the `Helper()` line only when the original calls `Helper()` on the same parameter as a top-level statement. A helper-marked wrapper calling a helper-marked `F` attributes a failure to the wrapper's caller, and so does that caller calling `F` directly |
 
 A generated alias file is a `zz_alias_*.go` file with either generator's
@@ -271,7 +271,19 @@ or inspect its call stack, or the var might be a hook. A var aliasing a var
 (`var ambientGCPProjectEnvKeys = hubtestutil.AmbientGCPProjectEnvKeys`) is
 never resolved: it holds a copy, not the target. Any other statement in a
 wrapper (a second statement, `Helper()` on a parameter other than the one `F`
-calls it on, or on a non-testing parameter) leaves it unresolved. When a moved
+calls it on, or on a non-testing parameter) leaves it unresolved.
+
+**Extract wrapper hazard check.** A wrapper in a hubshard extract file is
+resolved only if its target (read from source, as above) does none of what
+pkgmove's generator refuses to wrap. The check is syntactic, so it errs on
+the side of leaving a wrapper unresolved:
+- the target calls `recover()` directly (outside func literals);
+- it calls `runtime.Caller` or `runtime.Callers`, or `log.Output` (through
+  the file's import names), or any `.Output(...)` method in a file that
+  imports `log` (`(*log.Logger).Output`);
+- it calls, by bare name, a function of its own package that does one of the
+  stack inspections above, transitively (method calls are not followed);
+- it calls `Helper()` but the wrapper does not. When a moved
 file uses an unresolved forwarding declaration, the back-reference error says
 why it was not resolved. Being generated also means such a file cannot be
 moved, and [`-rewrite-aliases`](#-rewrite-aliases-shrinking-alias-files)
