@@ -188,6 +188,10 @@ interface V1ServerHubConfig {
   soft_delete_retain_files?: boolean;
   auto_suspend_stalled?: boolean;
   stalled_threshold?: string;
+  start_claim_lease_ttl?: string;
+  start_max_duration?: string;
+  start_unconfirmed_hold?: string;
+  start_create_unconfirmed_hold?: string;
   gcp_iam_check_mode?: string;
   gcp_iam_deny_unknown_policy?: string;
   observability?: V1ServerHubObservabilityConfig;
@@ -666,6 +670,10 @@ const KOANF_KEY_LABELS: Record<string, string> = {
   // lifecycle section
   'server.hub.auto_suspend_stalled': 'Auto-Suspend Stalled Agents',
   'server.hub.stalled_threshold': 'Stalled Threshold',
+  'server.hub.start_claim_lease_ttl': 'Start Claim Lease',
+  'server.hub.start_max_duration': 'Start Deadline',
+  'server.hub.start_unconfirmed_hold': 'Unconfirmed Start Hold',
+  'server.hub.start_create_unconfirmed_hold': 'Unconfirmed Create Hold',
   'server.hub.soft_delete_retention': 'Soft Delete Retention',
   'server.hub.soft_delete_retain_files': 'Retain Files on Soft Delete',
   // gcp iam section
@@ -738,6 +746,59 @@ const KEYS_REJECTED_CODES = new Set([
 
 /** Why a field is read-only: hosted Layer-0, env-pinned, workstation flag-managed, pinned, or read only at startup (DB-backed hubs). */
 type ReadOnlyReason = 'bootstrap' | 'env' | 'flag' | 'pinned' | 'startup';
+
+/** The agent start timing keys under server.hub (lifecycle section). */
+type StartTimingKey =
+  | 'start_claim_lease_ttl'
+  | 'start_max_duration'
+  | 'start_unconfirmed_hold'
+  | 'start_create_unconfirmed_hold';
+
+/**
+ * The agent start timing fields, in display order, with the coded default
+ * and the allowed range from the settings schema (ptone/scion#3925).
+ */
+export const START_TIMINGS: ReadonlyArray<{
+  key: StartTimingKey;
+  defaultValue: string;
+  hint: string;
+}> = [
+  {
+    key: 'start_claim_lease_ttl',
+    defaultValue: '90s',
+    hint: 'Lease of the claim each agent start holds; renewed every third of it. 30s to 5m.',
+  },
+  {
+    key: 'start_max_duration',
+    defaultValue: '12m',
+    hint: 'Hard deadline on any agent start, including a wait for another hub node. At least 11m.',
+  },
+  {
+    key: 'start_unconfirmed_hold',
+    defaultValue: '17m',
+    hint: 'Longest time a start with an unknown outcome blocks other starts of the agent. At least 16m.',
+  },
+  {
+    key: 'start_create_unconfirmed_hold',
+    defaultValue: '16m',
+    hint: "The same hold for a new agent's create-and-start. 16m up to the unconfirmed start hold.",
+  },
+];
+
+function emptyStartTimings(): Record<StartTimingKey, string> {
+  return {
+    start_claim_lease_ttl: '',
+    start_max_duration: '',
+    start_unconfirmed_hold: '',
+    start_create_unconfirmed_hold: '',
+  };
+}
+
+function startTimingsFrom(hub: V1ServerHubConfig): Record<StartTimingKey, string> {
+  const out = emptyStartTimings();
+  for (const t of START_TIMINGS) out[t.key] = hub[t.key] || '';
+  return out;
+}
 
 /**
  * What wins over an environment value that is not in effect, for a field's
@@ -1003,6 +1064,12 @@ export class ScionPageAdminServerConfig extends LitElement {
   @state() private hubSoftDeleteRetainFiles = false;
   @state() private hubAutoSuspendStalled = false;
   @state() private hubStalledThreshold = '';
+  // Agent start timing (server.hub.start_*, lifecycle section;
+  // ptone/scion#3925). "" is unset: the hub's coded default applies.
+  @state() private hubStartTimings: Record<StartTimingKey, string> = emptyStartTimings();
+  // The start timings as loaded: the settings.yaml save sends only the
+  // ones that differ (buildFilePayload).
+  private loadedStartTimings: Record<StartTimingKey, string> = emptyStartTimings();
   @state() private hubGcpIamCheckMode = 'off';
   @state() private hubGcpIamDenyUnknownPolicy = 'fail-open';
   /** The GCP permission-check values as loaded, so a save sends only a changed key. */
@@ -1370,6 +1437,17 @@ export class ScionPageAdminServerConfig extends LitElement {
       display: flex;
       flex-direction: column;
       gap: 0.125rem;
+    }
+
+    .start-timings {
+      margin-top: 1.25rem;
+    }
+
+    .start-timings .subsection-label {
+      display: block;
+      font-size: 0.875rem;
+      font-weight: 600;
+      color: var(--scion-text, #1e293b);
     }
 
     .version-label {
@@ -2156,6 +2234,8 @@ export class ScionPageAdminServerConfig extends LitElement {
     this.hubSoftDeleteRetainFiles = hubBlock.soft_delete_retain_files || false;
     this.hubAutoSuspendStalled = hubBlock.auto_suspend_stalled || false;
     this.hubStalledThreshold = hubBlock.stalled_threshold || '';
+    this.hubStartTimings = startTimingsFrom(hubBlock);
+    this.loadedStartTimings = { ...this.hubStartTimings };
     this.hubGcpIamCheckMode = hubBlock.gcp_iam_check_mode || 'off';
     this.hubGcpIamDenyUnknownPolicy = hubBlock.gcp_iam_deny_unknown_policy || 'fail-open';
     this.loadedGcpIamCheckMode = this.hubGcpIamCheckMode;
@@ -2796,6 +2876,9 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (ok('server.hub.auto_suspend_stalled'))
       hub.auto_suspend_stalled = this.hubAutoSuspendStalled;
     if (ok('server.hub.stalled_threshold')) hub.stalled_threshold = this.hubStalledThreshold;
+    for (const t of START_TIMINGS) {
+      if (ok(`server.hub.${t.key}`)) hub[t.key] = this.hubStartTimings[t.key];
+    }
     // The GCP permission-check keys are sent only when changed: each change
     // is checked and recorded by the server.
     if (
@@ -3205,6 +3288,14 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (ok('server.hub.auto_suspend_stalled'))
       hub.auto_suspend_stalled = this.hubAutoSuspendStalled;
     if (ok('server.hub.stalled_threshold')) hub.stalled_threshold = this.hubStalledThreshold;
+    // Only a start timing the user changed is sent: a settings.yaml save
+    // that sends any start key is range-checked on the merged values, so
+    // sending them all would let a stored out-of-range value block an
+    // unrelated save (ptone/scion#3925).
+    for (const t of START_TIMINGS) {
+      const v = this.hubStartTimings[t.key];
+      if (ok(`server.hub.${t.key}`) && v !== this.loadedStartTimings[t.key]) hub[t.key] = v;
+    }
     if (ok('server.hub.gcp_iam_check_mode')) hub.gcp_iam_check_mode = this.hubGcpIamCheckMode;
     if (ok('server.hub.gcp_iam_deny_unknown_policy'))
       hub.gcp_iam_deny_unknown_policy = this.hubGcpIamDenyUnknownPolicy;
@@ -5322,12 +5413,52 @@ export class ScionPageAdminServerConfig extends LitElement {
             )}
           </div>
         </div>
+        ${this.renderStartTimings()}
       </div>
 
       ${this.renderHubObservabilitySection()} ${this.renderNativeChatSection()}
       ${this.renderMessageBrokerSection()} ${this.renderCrossProjectMessagingSection()}
       <scion-admin-chat-retention></scion-admin-chat-retention>
     `;
+  }
+
+  /**
+   * Agent start timing (server.hub.start_*, ptone/scion#3925): the start
+   * claim lease, the start deadline and the holds for a start whose outcome
+   * is unknown. Empty means the hub's coded default; the hub validates the
+   * ranges on save.
+   */
+  private renderStartTimings(): ReturnType<typeof html> {
+    return html`<div class="start-timings">
+      <label class="subsection-label">Agent Start</label>
+      <span class="hint"
+        >Timing of agent starts across hub nodes. Leave a field empty to use the default.</span
+      >
+      <div class="form-grid">
+        ${START_TIMINGS.map((t) => {
+          const key = `server.hub.${t.key}`;
+          const value = this.hubStartTimings[t.key];
+          return html`<div class="form-field" data-start-timing=${t.key}>
+            <label>${KOANF_KEY_LABELS[key]}</label>
+            <span class="hint">${t.hint}</span>
+            ${this.renderFieldValue(
+              key,
+              value || `${t.defaultValue} (default)`,
+              html`${this.renderEnvBadge(key)}<sl-input
+                  value=${value}
+                  placeholder=${t.defaultValue}
+                  @sl-input=${(e: Event): void => {
+                    this.hubStartTimings = {
+                      ...this.hubStartTimings,
+                      [t.key]: (e.target as HTMLInputElement).value,
+                    };
+                  }}
+                ></sl-input>`
+            )}
+          </div>`;
+        })}
+      </div>
+    </div>`;
   }
 
   /**

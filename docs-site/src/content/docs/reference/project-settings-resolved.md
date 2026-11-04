@@ -134,3 +134,7 @@ statement the third state exists to prevent.
 
 Settings with no hub-level counterpart at all — the hub simply has no such field
 — report `absent`, which is a measured structural fact rather than a guess.
+
+## How the project settings page uses it
+
+The project settings page shows a `present` hub value as a fallback, never as the value in effect: the placeholder reads *Hub fallback: …*, a select offers *Use hub fallback (…)*, and the building icon's tooltip adds that a template or harness config can set its own value, which wins over it. For `unknown`, the icon's tooltip says that the hub could not report its fallback and may still have one. It names no value and does not say that no hub value exists. `absent` shows no icon.

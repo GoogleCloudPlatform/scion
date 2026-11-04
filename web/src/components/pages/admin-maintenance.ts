@@ -336,6 +336,8 @@ export async function hubErrorEnvelope(
 interface MaintenanceStateResponse {
   enabled: boolean;
   break_glass?: boolean;
+  /** The message blocked users see; the hub's default when none is saved. */
+  message?: string;
 }
 
 /**
@@ -562,6 +564,20 @@ export class ScionPageAdminMaintenance extends LitElement {
   @state()
   private maintenanceBreakGlass = false;
 
+  /**
+   * The maintenance message blocked users see, as the hub last reported it
+   * (its default when none is saved), and the edit in progress
+   * (ptone/scion#3925).
+   */
+  @state()
+  private maintenanceMessage = '';
+
+  @state()
+  private maintenanceMessageDraft = '';
+
+  @state()
+  private maintenanceMessageSaving = false;
+
   /** Run detail currently being viewed. */
   @state()
   private viewingRun: MaintenanceRun | null = null;
@@ -721,6 +737,17 @@ export class ScionPageAdminMaintenance extends LitElement {
     }
 
     /* -- Maintenance mode toggle ------------------------------------------ */
+
+    .maintenance-message {
+      margin-top: 1rem;
+      max-width: 40rem;
+    }
+
+    .maintenance-message-actions {
+      display: flex;
+      gap: 0.5rem;
+      margin-top: 0.5rem;
+    }
 
     .maintenance-mode-toggle {
       display: flex;
@@ -1280,11 +1307,54 @@ export class ScionPageAdminMaintenance extends LitElement {
       const res = await apiFetch('/api/v1/admin/maintenance');
       if (res.ok) {
         const data = (await res.json()) as MaintenanceStateResponse;
-        this.maintenanceEnabled = data.enabled;
-        this.maintenanceBreakGlass = data.break_glass === true;
+        this.applyMaintenanceState(data);
       }
     } catch {
       // Silently ignore — toggle will default to off.
+    }
+  }
+
+  /**
+   * Applies a maintenance state response. The message draft follows the
+   * reported message unless the admin is editing it.
+   */
+  private applyMaintenanceState(data: MaintenanceStateResponse): void {
+    this.maintenanceEnabled = data.enabled;
+    this.maintenanceBreakGlass = data.break_glass === true;
+    if (typeof data.message === 'string') {
+      const editing = this.maintenanceMessageDraft !== this.maintenanceMessage;
+      this.maintenanceMessage = data.message;
+      if (!editing) this.maintenanceMessageDraft = data.message;
+    }
+  }
+
+  /**
+   * Saves the maintenance message only: the body omits enabled, so the
+   * mode is unchanged. An empty message ("") returns to the hub's default.
+   */
+  private async saveMaintenanceMessage(message: string): Promise<void> {
+    this.maintenanceMessageSaving = true;
+    try {
+      const res = await apiFetch('/api/v1/admin/maintenance', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message }),
+      });
+      if (!res.ok) {
+        throw new Error(await extractApiError(res, `HTTP ${res.status}`));
+      }
+      const data = (await res.json()) as MaintenanceStateResponse;
+      // The saved message replaces the draft.
+      this.maintenanceMessageDraft = typeof data.message === 'string' ? data.message : message;
+      this.applyMaintenanceState(data);
+      showToast(
+        message === '' ? 'Maintenance message reset to the default.' : 'Maintenance message saved.',
+        'success'
+      );
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Failed to save the maintenance message');
+    } finally {
+      this.maintenanceMessageSaving = false;
     }
   }
 
@@ -1300,8 +1370,7 @@ export class ScionPageAdminMaintenance extends LitElement {
         throw new Error(await extractApiError(res, `HTTP ${res.status}`));
       }
       const data = (await res.json()) as MaintenanceStateResponse;
-      this.maintenanceEnabled = data.enabled;
-      this.maintenanceBreakGlass = data.break_glass === true;
+      this.applyMaintenanceState(data);
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Failed to update maintenance mode');
       // The toggle renders from maintenanceEnabled, which is set only from a
@@ -2817,6 +2886,7 @@ export class ScionPageAdminMaintenance extends LitElement {
           </button>
           <span class="toggle-label"> ${this.maintenanceEnabled ? 'Enabled' : 'Disabled'} </span>
         </div>
+        ${this.renderMaintenanceMessage()}
         ${this.maintenanceBreakGlass
           ? html`<p class="section-description break-glass-notice">
               Maintenance mode is forced on by the server's startup configuration
@@ -2825,6 +2895,51 @@ export class ScionPageAdminMaintenance extends LitElement {
               <code>admin_mode</code> in settings.yaml can only be cleared by editing the file.
             </p>`
           : nothing}
+      </div>
+    `;
+  }
+
+  /**
+   * The message blocked users see while maintenance mode is on: shown and
+   * editable whether or not the mode is on, so it can be set in advance.
+   */
+  private renderMaintenanceMessage(): TemplateResult {
+    const draft = this.maintenanceMessageDraft;
+    const unchanged = draft === this.maintenanceMessage;
+    return html`
+      <div class="maintenance-message">
+        <sl-textarea
+          label="Message shown to blocked users"
+          rows="2"
+          resize="auto"
+          .value=${draft}
+          ?disabled=${this.maintenanceMessageSaving}
+          @sl-input=${(e: Event): void => {
+            this.maintenanceMessageDraft = (e.target as HTMLTextAreaElement).value;
+          }}
+        ></sl-textarea>
+        <div class="maintenance-message-actions">
+          <sl-button
+            size="small"
+            variant="primary"
+            class="save-maintenance-message"
+            ?disabled=${unchanged || draft.trim() === ''}
+            ?loading=${this.maintenanceMessageSaving}
+            @click=${(): void => {
+              void this.saveMaintenanceMessage(draft);
+            }}
+            >Save message</sl-button
+          >
+          <sl-button
+            size="small"
+            class="reset-maintenance-message"
+            ?disabled=${this.maintenanceMessageSaving}
+            @click=${(): void => {
+              void this.saveMaintenanceMessage('');
+            }}
+            >Use the default message</sl-button
+          >
+        </div>
       </div>
     `;
   }

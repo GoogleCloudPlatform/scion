@@ -776,6 +776,19 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Start-claim timing (server.hub.start_*): the same check, ranges and 422
+	// as the DB-mode handler (validateStartClaimSettingStrings, against the
+	// startup value), on the merged settings.yaml values, whenever the save
+	// sends any of the keys. Without it an out-of-range value would be
+	// written and listed as applied while the hub keeps the default
+	// (ptone/scion#3925).
+	if startClaimKeysSent(rawBody) {
+		if err := validateStartClaimSettingStrings(s.config.StartClaim, fileStartClaimLifecycle(raw)); err != nil {
+			writeSettingsFieldError(w, startClaimErrorField(err), err.Error())
+			return
+		}
+	}
+
 	// Validate the effective hub default GCP identity: the merged result, so
 	// a PUT that changes only one of the pair is checked against the other's
 	// stored value, with each key the environment sets taken from the
