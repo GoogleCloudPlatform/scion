@@ -79,9 +79,10 @@ func TestCombinedServer_RequestLoggedOnce(t *testing.T) {
 			require.Equal(t, tc.wantComponent, line["component"])
 			require.Equal(t, tc.wantProjectID, line["project_id"])
 			require.EqualValues(t, tc.wantStatus, line["httpRequest.status"])
-			if tc.wantAuthType != "" {
-				require.Equal(t, tc.wantAuthType, line["auth_type"])
-			}
+			// Unconditional: the rejected and web-answered rows pin an
+			// empty auth_type (a rejection is logged separately, at the
+			// point of rejection, and never sets the request's auth).
+			require.Equal(t, tc.wantAuthType, line["auth_type"])
 			require.NotEmpty(t, rec.Header().Get("X-Request-ID"))
 			require.Equal(t, rec.Header().Get("X-Request-ID"), line["request_id"])
 		})
