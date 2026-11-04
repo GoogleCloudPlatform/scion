@@ -194,8 +194,8 @@ func LoadHarnessConfigDir(dirPath string) (*HarnessConfigDir, error) {
 // LoadHarnessConfigFromFiles is LoadHarnessConfigDir for a harness-config
 // directory whose files the caller reads: read returns the content of a file
 // of the directory by its name (config.yaml, AgentPluginsSidecarFile,
-// NoAuthEnvSidecarFile), and an
-// error wrapping fs.ErrNotExist when the file is absent. dirName is the
+// NoAuthEnvSidecarFile), and an error wrapping fs.ErrNotExist when the file
+// is absent. dirName is the
 // directory's base name (the Name fallback) and where locates the directory
 // in messages; it is also the returned Path. The validation, the sidecar
 // handling and the name rules are LoadHarnessConfigDir's. It reads nothing

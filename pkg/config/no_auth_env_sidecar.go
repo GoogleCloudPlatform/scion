@@ -59,7 +59,7 @@ func applyNoAuthEnvSidecar(entry *HarnessConfigEntry, read func(name string) ([]
 				return
 			}
 			if entry.NoAuthConfig == nil {
-				slog.Warn("ignoring harness-config no-auth-env.yaml: config.yaml has no no_auth block", "path", where)
+				warnNoAuthEnvSidecar(where, errors.New("config.yaml has no no_auth block"))
 				return
 			}
 			nac := *entry.NoAuthConfig
@@ -68,6 +68,14 @@ func applyNoAuthEnvSidecar(entry *HarnessConfigEntry, read func(name string) ([]
 			return
 		}
 	}
-	slog.Warn("ignoring invalid harness-config no-auth-env.yaml; no no-auth env is added",
-		"path", where, "error", fmt.Errorf("invalid %s: %w", NoAuthEnvSidecarFile, err))
+	warnNoAuthEnvSidecar(where, fmt.Errorf("invalid %s: %w", NoAuthEnvSidecarFile, err))
+}
+
+// warnNoAuthEnvSidecar logs, once per path and error, that a bundle's
+// no-auth-env.yaml is ignored (see invalidSidecarWarned).
+func warnNoAuthEnvSidecar(where string, err error) {
+	if _, seen := invalidSidecarWarned.LoadOrStore(where+"\x00"+err.Error(), true); !seen {
+		slog.Warn("ignoring harness-config no-auth-env.yaml; no no-auth env is added",
+			"path", where, "error", err)
+	}
 }

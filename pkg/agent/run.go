@@ -2516,8 +2516,9 @@ authDone:
 	// value any merged layer added is removed (see dispatchWorkspaceGit).
 	agentEnv = enforceWorkspaceGitEnv(agentEnv, dispatchWorkspaceGit, dispatchWorkspaceGitSet)
 
-	// In no-auth mode the harness config's no_auth.env joins the container
-	// env; api-key and auth-file starts never carry it.
+	// In no-auth mode the harness-config's no-auth env (its bundle's
+	// no-auth-env.yaml) joins the container env; api-key and auth-file
+	// starts never carry it.
 	noAuthActive := noAuthModeActive(opts.NoAuth, noAuthConfig)
 	var noAuthEnvWarnings []string
 	agentEnv, noAuthEnvWarnings = applyNoAuthEnv(agentEnv, noAuthConfig, noAuthActive, opts.Name)

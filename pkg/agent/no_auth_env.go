@@ -26,15 +26,15 @@ import (
 // noAuthModeActive reports whether an agent launches in no-auth mode: no-auth
 // was requested (or selected) and the harness config declares a no_auth
 // behavior that runs without credentials. It is the condition for
-// RunConfig.NoAuth and for applying no_auth.env.
+// RunConfig.NoAuth and for applying the no-auth env.
 func noAuthModeActive(noAuth bool, cfg *config.HarnessNoAuthConfig) bool {
 	return noAuth && cfg != nil && (cfg.Behavior == "drop-to-shell" || cfg.Behavior == "allow")
 }
 
-// applyNoAuthEnv adds the harness config's no_auth.env entries to the
-// container env when the agent launches in no-auth mode (active). Outside
-// no-auth mode env is returned unchanged, so api-key and auth-file starts
-// never see these entries.
+// applyNoAuthEnv adds the harness-config's no-auth env (cfg.Env, read from
+// the bundle's no-auth-env.yaml) to the container env when the agent launches
+// in no-auth mode (active). Outside no-auth mode env is returned unchanged, so
+// api-key and auth-file starts never see these entries.
 //
 // An entry never replaces a key env already sets: settings, agent and hub env
 // win. A key reserved for scion itself (the SCION_* and GCE_METADATA_*
@@ -58,11 +58,11 @@ func applyNoAuthEnv(env []string, cfg *config.HarnessNoAuthConfig, active bool, 
 		case k == "" || strings.Contains(k, "="):
 			continue
 		case secret.IsReservedEnvTarget(k) || config.IsHubOnlyEnvKey(k):
-			warnings = append(warnings, fmt.Sprintf("Warning: harness no_auth.env %s is reserved for scion; ignored", k))
+			warnings = append(warnings, fmt.Sprintf("Warning: harness-config no-auth-env.yaml sets %s, which is reserved for scion; ignored", k))
 		case v == "":
-			warnings = append(warnings, fmt.Sprintf("Warning: harness no_auth.env %s has an empty value; ignored", k))
+			warnings = append(warnings, fmt.Sprintf("Warning: harness-config no-auth-env.yaml sets %s to an empty value; ignored", k))
 		case present[k]:
-			util.Debugf("no_auth.env: %s already set for agent %s; kept", k, agentName)
+			util.Debugf("no-auth env: %s already set for agent %s; kept", k, agentName)
 		default:
 			env = append(env, k+"="+v)
 			present[k] = true
