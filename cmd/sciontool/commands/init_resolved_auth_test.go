@@ -17,12 +17,17 @@
 package commands
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/stagedsecrets"
+	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 )
 
 // Placeholder value only; not a real credential.
@@ -76,5 +81,55 @@ func TestTakeResolvedAuthEnv_NothingStaged(t *testing.T) {
 	got, err = takeResolvedAuthEnv(filepath.Join(root, "not-mounted"))
 	if err != nil || got != nil {
 		t.Errorf("takeResolvedAuthEnv with no in-memory volume = %d entries, err %v; want none", len(got), err)
+	}
+}
+
+// End to end through RunInit (embedded, no re-exec): a staged
+// resolved-auth entry reaches the harness child's environment and not
+// init's own; a reserved name in the same staged data reaches neither;
+// the carry file is gone after the run; no value is logged.
+func TestRunInit_StagedResolvedAuthEnvReachesHarnessOnly(t *testing.T) {
+	f := newRunInitStagedFixture(t)
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	prevRoot := resolvedAuthEnvRoot
+	resolvedAuthEnvRoot = root
+	t.Cleanup(func() { resolvedAuthEnvRoot = prevRoot })
+	t.Cleanup(hooks.SetHarnessDirsRootForTest(root))
+	t.Setenv(hooks.HarnessSecretsDirEnv, filepath.Join(root, "harness", "secrets"))
+	t.Setenv("EXAMPLE_RESOLVED_AUTH", "")
+	_ = os.Unsetenv("EXAMPLE_RESOLVED_AUTH")
+
+	data, err := json.Marshal(stagedsecrets.Staged{ResolvedAuthEnv: map[string]string{
+		"EXAMPLE_RESOLVED_AUTH":            resolvedAuthCanary,
+		stagedsecrets.HubTokenStagedEnvVar: "1",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(stagedsecrets.EnvVar, base64.StdEncoding.EncodeToString(data))
+	t.Setenv(transportauth.EnvTransportToken, "")
+	t.Setenv(transportauth.EnvTransportTokenFile, "")
+
+	out := filepath.Join(t.TempDir(), "child-env")
+	script := `printf '%s|%s' "${EXAMPLE_RESOLVED_AUTH:-absent}" "${SCION_HUB_TOKEN_STAGED:-absent}" > "$2"; sleep 0.5`
+	if got := f.run(t, script, out); got != 0 {
+		t.Fatalf("RunInit() = %d, want 0", got)
+	}
+	got := readFileString(t, out)
+	if got != resolvedAuthCanary+"|absent" {
+		t.Errorf("harness child: resolved-auth entry present %v, reserved marker absent %v; want true, true",
+			strings.HasPrefix(got, resolvedAuthCanary+"|"), strings.HasSuffix(got, "|absent"))
+	}
+	if os.Getenv("EXAMPLE_RESOLVED_AUTH") != "" {
+		t.Error("the resolved-auth entry is in init's own environment")
+	}
+	if _, err := os.Lstat(filepath.Join(root, stagedsecrets.ResolvedAuthEnvFile)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("carry file still present after RunInit (lstat err=%v)", err)
+	}
+	if strings.Contains(f.readLog(), resolvedAuthCanary) {
+		t.Error("the sciontool log carries the resolved-auth value")
 	}
 }
