@@ -90,17 +90,17 @@ Values stored under a reserved name before this check existed are not deleted, b
 
 `SCION_METADATA_MODE` is always set by the Hub. It comes from the agent's GCP identity configuration and defaults to `block`. A Runtime Broker only accepts an elevated mode (anything other than `block`) when the Hub's dispatch includes its source marker. Otherwise the Runtime Broker downgrades it, so a stored value or an older Hub cannot turn on metadata access.
 
----
 ### Hub-Scoped Secrets
 
 The Hub delivers a Hub-scoped secret to agents only when its type is `environment` and its injection mode is `always`. Hub-scoped secrets of type `file` or `variable`, and Hub-scoped `environment` secrets with the `as_needed` mode, are not delivered to any agent at create, start, restart or `as_needed` resolution. They are left out before scope precedence, so a Runtime Broker-scoped secret with the same name applies instead.
 
-One Hub-scoped `file` secret is delivered: the telemetry credential file, when its name is `scion-telemetry-gcp-credentials` and its target is `~/.scion/telemetry-gcp-credentials.json` (see [Well-Known Secrets](#well-known-secrets)). A Hub-scoped file secret with any other name or target is not delivered.
+One Hub-scoped `file` secret is delivered: the telemetry credential file, when its name is `scion-telemetry-gcp-credentials` and its target is a path whose last two parts are `.scion/telemetry-gcp-credentials.json`, such as `~/.scion/telemetry-gcp-credentials.json` (see [Well-Known Secrets](#well-known-secrets)). A Hub-scoped file secret with any other name or target is not delivered.
 
 This applies to Hub-scoped secrets only. Hub-scoped environment variables (`scion hub env set`), and secrets at User, Project and Runtime Broker scope, are not affected. To deliver a credential that has to be a file or a variable, or that should be injected only on request, store it at Project or User scope.
 
 An agent reading Hub-scoped secrets (`GET /api/v1/secrets?scope=hub`, `GET /api/v1/env?scope=hub` and their single-key routes) sees only the `environment` secrets with the `always` mode. Every other Hub-scoped secret, including the telemetry credential file, is left out of those lists, and a request for it by name answers as for a key that does not exist. Hub administrators see every Hub-scoped secret.
 
+---
 ## Injection Modes
 
 Both environment variables and secrets support **Injection Modes**, which control how they are delivered to the agent container:
@@ -258,7 +258,7 @@ scion hub secret set \
   scion-telemetry-gcp-credentials @/path/to/sa-key.json
 ```
 
-At Hub scope, the secret is delivered only with exactly this name, type and target, and it is not listed to agents (see [Hub-Scoped Secrets](#hub-scoped-secrets)). Once set, every agent that starts will have the credential file mounted at `~/.scion/telemetry-gcp-credentials.json` and GCP-native telemetry will be enabled automatically — no additional environment variable configuration required. See [Metrics & OpenTelemetry](/scion/hosted/single-node/metrics/#4-gcp-credentials-for-agent-containers-non-adc-environments) for the full setup guide.
+At Hub scope, the secret is delivered only with exactly this name and type and a target path ending in `.scion/telemetry-gcp-credentials.json`, and it is not listed to agents (see [Hub-Scoped Secrets](#hub-scoped-secrets)). Once set, every agent that starts will have the credential file mounted at `~/.scion/telemetry-gcp-credentials.json` and GCP-native telemetry will be enabled automatically — no additional environment variable configuration required. See [Metrics & OpenTelemetry](/scion/hosted/single-node/metrics/#4-gcp-credentials-for-agent-containers-non-adc-environments) for the full setup guide.
 
 ---
 
