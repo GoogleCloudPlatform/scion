@@ -273,18 +273,26 @@ never resolved: it holds a copy, not the target. Any other statement in a
 wrapper (a second statement, `Helper()` on a parameter other than the one `F`
 calls it on, or on a non-testing parameter) leaves it unresolved.
 
-**Extract wrapper hazard check.** A wrapper in a hubshard extract file is
+**Extract wrapper hazard check.** A wrapper in a hubshard extract file (or a
+`Helper()` wrapper in a pkgmove alias file, which pkgmove never generates) is
 resolved only if its target (read from source, as above) does none of what
 pkgmove's generator refuses to wrap. The check is syntactic, so it errs on
 the side of leaving a wrapper unresolved:
-- the target calls `recover()` directly (outside func literals);
-- it calls `runtime.Caller` or `runtime.Callers`, or `log.Output` (through
-  the file's import names), or any `.Output(...)` method in a file that
-  imports `log` (`(*log.Logger).Output`);
-- it calls, by bare name, a function of its own package that does one of the
-  stack inspections above, transitively (method calls are not followed);
-- it calls `Helper()` but the wrapper does not. When a moved
-file uses an unresolved forwarding declaration, the back-reference error says
+- the target calls `recover()` directly (outside func literals; a `recover()`
+  in a callee does not count, since it only works in the deferred function
+  itself);
+- it refers to `runtime.Caller`, `runtime.Callers` or `log.Output` through
+  the file's import names (calls or func values, func literals included);
+- it refers to any `.Output` selector not qualified by another imported
+  package (`(*log.Logger).Output`, whether or not the file imports `log`);
+- its file dot-imports `runtime` or `log`;
+- it reaches one of the stack inspections above through its own package,
+  transitively: through any identifier naming a func of the package, or any
+  selector naming a method of the package (every method of that name,
+  whatever its receiver);
+- it calls `Helper()` but the wrapper does not.
+
+When a moved file uses an unresolved forwarding declaration, the back-reference error says
 why it was not resolved. Being generated also means such a file cannot be
 moved, and [`-rewrite-aliases`](#-rewrite-aliases-shrinking-alias-files)
 removes its unexported entries once nothing references them.

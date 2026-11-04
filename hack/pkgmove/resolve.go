@@ -240,9 +240,15 @@ func (a *analysis) collectAliases() {
 						continue
 					}
 				}
-				if kind == "extract" {
+				// pkgmove's generator never writes Helper wrappers, so one in a
+				// pkgmove alias file was edited by hand: check it the same way.
+				if kind == "extract" || helper >= 0 {
 					if why := a.extractHazardWhy(fn, helper >= 0); why != "" {
-						a.unresolvedWhy[obj] = "func " + obj.Name() + " (a hubshard extract wrapper) forwards to " + al.target() + ", but the target " + why
+						label := "a hubshard extract wrapper"
+						if kind != "extract" {
+							label = "a Helper wrapper in a pkgmove alias file"
+						}
+						a.unresolvedWhy[obj] = "func " + obj.Name() + " (" + label + ") forwards to " + al.target() + ", but the target " + why
 						continue
 					}
 				}
@@ -419,11 +425,18 @@ func (a *analysis) helperTargetWhy(fn *types.Func, param int) string {
 	return ""
 }
 
-// targetDecl is a package-level func of another module package, with the
-// file that declares it (for its imports).
+// targetDecl is a func or method of another module package, with the file
+// that declares it (for its imports).
 type targetDecl struct {
 	fd   *ast.FuncDecl
 	file *ast.File
+}
+
+// pkgDecls are the funcs (by name) and methods (by method name, any
+// receiver) of a module package, parsed from source.
+type pkgDecls struct {
+	funcs   map[string]targetDecl
+	methods map[string][]targetDecl
 }
 
 // targetFuncDecl returns the declaration of the package-level func fn of
@@ -432,27 +445,27 @@ type targetDecl struct {
 // target is "not found"), or nil when the module has no such package or
 // declaration.
 func (a *analysis) targetFuncDecl(fn *types.Func) (*ast.FuncDecl, error) {
-	decls, err := a.targetPkgDecls(fn.Pkg().Path())
+	pd, err := a.targetPkgDecls(fn.Pkg().Path())
 	if err != nil {
 		return nil, err
 	}
-	if d, ok := decls[fn.Name()]; ok {
+	if d, ok := pd.funcs[fn.Name()]; ok {
 		return d.fd, nil
 	}
 	return nil, nil
 }
 
-// targetPkgDecls parses (once) the package-level funcs of the module package
+// targetPkgDecls parses (once) the funcs and methods of the module package
 // path, as targetFuncDecl describes.
-func (a *analysis) targetPkgDecls(path string) (map[string]targetDecl, error) {
-	if decls, ok := a.targetDecls[path]; ok {
-		return decls, nil
+func (a *analysis) targetPkgDecls(path string) (*pkgDecls, error) {
+	if pd, ok := a.targetDecls[path]; ok {
+		return pd, nil
 	}
 	pkgs, err := a.modulePackages()
 	if err != nil {
 		return nil, err
 	}
-	decls := map[string]targetDecl{}
+	pd := &pkgDecls{funcs: map[string]targetDecl{}, methods: map[string][]targetDecl{}}
 	fset := token.NewFileSet()
 	for _, p := range pkgs {
 		if p.ImportPath != path {
@@ -464,41 +477,52 @@ func (a *analysis) targetPkgDecls(path string) (map[string]targetDecl, error) {
 				return nil, err
 			}
 			for _, d := range f.Decls {
-				if fd, ok := d.(*ast.FuncDecl); ok && fd.Recv == nil {
-					decls[fd.Name.Name] = targetDecl{fd: fd, file: f}
+				fd, ok := d.(*ast.FuncDecl)
+				if !ok {
+					continue
+				}
+				if fd.Recv == nil {
+					pd.funcs[fd.Name.Name] = targetDecl{fd: fd, file: f}
+				} else {
+					pd.methods[fd.Name.Name] = append(pd.methods[fd.Name.Name], targetDecl{fd: fd, file: f})
 				}
 			}
 		}
 	}
 	if a.targetDecls == nil {
-		a.targetDecls = map[string]map[string]targetDecl{}
+		a.targetDecls = map[string]*pkgDecls{}
 	}
-	a.targetDecls[path] = decls
-	return decls, nil
+	a.targetDecls[path] = pd
+	return pd, nil
 }
 
 // extractHazardWhy checks the target fn of a wrapper in a hubshard extract
 // alias file for what pkgmove's own generator refuses to wrap (see
 // wrapperHazard), since extract export does not refuse it. It returns why
 // calling fn directly instead of through the wrapper could change behaviour,
-// or "". From fn's syntax (its package is not type-checked here), so names
-// are matched conservatively:
+// or "". It works from fn's syntax (its package is not type-checked here),
+// so names are matched conservatively, erring towards leaving the wrapper
+// unresolved:
 //   - fn calls recover() directly (outside func literals): under defer, a
 //     direct call makes it effective where through the wrapper it returned nil;
-//   - fn inspects its call stack: runtime.Caller/Callers or log.Output through
-//     the file's import names, or any .Output(...) method call in a file that
-//     imports log ((*log.Logger).Output); the wrapper frame is part of the
-//     stack it sees;
-//   - fn calls, by bare name, a func of its own package that inspects its call
-//     stack (transitively; method calls are not followed);
+//   - fn inspects its call stack: it refers to runtime.Caller, runtime.Callers
+//     or log.Output through the file's import names (calls and func values,
+//     func literals included), refers to any .Output selector not qualified
+//     by another imported package ((*log.Logger).Output, whatever the file
+//     imports), or dot-imports runtime or log (whose calls cannot be told
+//     apart from syntax); the wrapper frame is part of the stack it sees;
+//   - fn reaches such a stack inspection through its own package: through any
+//     identifier naming a func of the package, or any selector naming a
+//     method of the package (every method of that name, whatever the
+//     receiver), transitively;
 //   - fn calls Helper() but the wrapper does not: the wrapper frame would no
 //     longer be reported as the failure site.
 func (a *analysis) extractHazardWhy(fn *types.Func, wrapperHelper bool) string {
-	decls, err := a.targetPkgDecls(fn.Pkg().Path())
+	pd, err := a.targetPkgDecls(fn.Pkg().Path())
 	if err != nil {
 		return "could not be read: " + err.Error()
 	}
-	d, ok := decls[fn.Name()]
+	d, ok := pd.funcs[fn.Name()]
 	if !ok || d.fd.Body == nil {
 		return "was not found with a body in the module"
 	}
@@ -508,26 +532,36 @@ func (a *analysis) extractHazardWhy(fn *types.Func, wrapperHelper bool) string {
 	if !wrapperHelper && callsHelper(d.fd) {
 		return "calls Helper() but the wrapper does not (the wrapper frame would no longer be reported as the failure site)"
 	}
-	// Stack inspection through same-package callees (recover does not
-	// propagate: it only matters in the deferred function itself).
-	seen := map[string]bool{fn.Name(): true}
-	queue := []string{fn.Name()}
+	// Stack inspection through same-package funcs and methods (recover does
+	// not propagate: it only matters in the deferred function itself).
+	seen := map[*ast.FuncDecl]bool{d.fd: true}
+	queue := []targetDecl{d}
 	for len(queue) > 0 {
 		cur := queue[0]
 		queue = queue[1:]
-		for _, callee := range bareCallees(decls[cur].fd) {
-			cd, ok := decls[callee]
-			if !ok || seen[callee] {
+		funcs, methods := references(cur.fd)
+		var next []targetDecl
+		for _, name := range funcs {
+			if nd, ok := pd.funcs[name]; ok {
+				next = append(next, nd)
+			}
+		}
+		for _, name := range methods {
+			next = append(next, pd.methods[name]...)
+		}
+		for _, nd := range next {
+			if seen[nd.fd] || nd.fd.Body == nil {
 				continue
 			}
-			seen[callee] = true
-			if cd.fd.Body == nil {
-				continue
+			seen[nd.fd] = true
+			if why := directHazard(nd, false); why != "" {
+				what := nd.fd.Name.Name
+				if nd.fd.Recv != nil {
+					what = "method " + what
+				}
+				return "reaches " + what + ", which " + why
 			}
-			if why := directHazard(cd, false); why != "" {
-				return "calls " + callee + ", which " + why
-			}
-			queue = append(queue, callee)
+			queue = append(queue, nd)
 		}
 	}
 	return ""
@@ -537,7 +571,6 @@ func (a *analysis) extractHazardWhy(fn *types.Func, wrapperHelper bool) string {
 // inspection in d's body, from syntax.
 func directHazard(d targetDecl, withRecover bool) string {
 	imports := map[string]string{} // local name -> import path
-	importsLog := false
 	for _, spec := range d.file.Imports {
 		path, err := strconv.Unquote(spec.Path.Value)
 		if err != nil {
@@ -547,10 +580,10 @@ func directHazard(d targetDecl, withRecover bool) string {
 		if spec.Name != nil {
 			name = spec.Name.Name
 		}
-		imports[name] = path
-		if path == "log" {
-			importsLog = true
+		if name == "." && (path == "runtime" || path == "log") {
+			return "is in a file that dot-imports " + path + " (its calls cannot be told apart from syntax)"
 		}
+		imports[name] = path
 	}
 	why := ""
 	if withRecover {
@@ -570,21 +603,24 @@ func directHazard(d targetDecl, withRecover bool) string {
 		}
 	}
 	ast.Inspect(d.fd.Body, func(n ast.Node) bool {
-		call, ok := n.(*ast.CallExpr)
-		if !ok || why != "" {
-			return why == ""
+		if why != "" {
+			return false
 		}
-		sel, ok := ast.Unparen(call.Fun).(*ast.SelectorExpr)
+		sel, ok := n.(*ast.SelectorExpr)
 		if !ok {
 			return true
 		}
 		x, _ := sel.X.(*ast.Ident)
+		qual := ""
+		if x != nil {
+			qual = imports[x.Name]
+		}
 		switch {
-		case x != nil && imports[x.Name] == "runtime" && (sel.Sel.Name == "Caller" || sel.Sel.Name == "Callers"):
+		case qual == "runtime" && (sel.Sel.Name == "Caller" || sel.Sel.Name == "Callers"):
 			why = "inspects its call stack (runtime." + sel.Sel.Name + "; the wrapper frame is part of it)"
-		case x != nil && imports[x.Name] == "log" && sel.Sel.Name == "Output":
+		case qual == "log" && sel.Sel.Name == "Output":
 			why = "uses log.Output call depth (the wrapper frame is part of it)"
-		case importsLog && sel.Sel.Name == "Output" && (x == nil || imports[x.Name] == ""):
+		case qual == "" && sel.Sel.Name == "Output":
 			why = "may call (*log.Logger).Output (call depth; the wrapper frame is part of it)"
 		}
 		return why == ""
@@ -606,22 +642,29 @@ func callsHelper(fd *ast.FuncDecl) bool {
 	return found
 }
 
-// bareCallees lists the names fd's body calls as plain identifiers (calls of
-// same-package funcs, from syntax), in order of appearance.
-func bareCallees(fd *ast.FuncDecl) []string {
+// references lists, from fd's body, the names of identifiers that are not
+// selector members (candidate same-package funcs, called or used as values)
+// and the selector member names (candidate same-package methods), in order
+// of appearance.
+func references(fd *ast.FuncDecl) (funcs, methods []string) {
 	if fd == nil || fd.Body == nil {
-		return nil
+		return nil, nil
 	}
-	var out []string
+	members := map[*ast.Ident]bool{}
 	ast.Inspect(fd.Body, func(n ast.Node) bool {
-		if call, ok := n.(*ast.CallExpr); ok {
-			if id, ok := ast.Unparen(call.Fun).(*ast.Ident); ok {
-				out = append(out, id.Name)
-			}
+		if sel, ok := n.(*ast.SelectorExpr); ok {
+			members[sel.Sel] = true
+			methods = append(methods, sel.Sel.Name)
 		}
 		return true
 	})
-	return out
+	ast.Inspect(fd.Body, func(n ast.Node) bool {
+		if id, ok := n.(*ast.Ident); ok && !members[id] {
+			funcs = append(funcs, id.Name)
+		}
+		return true
+	})
+	return funcs, methods
 }
 
 // assignedVars returns, for each of objs, the first position where it is

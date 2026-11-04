@@ -1387,6 +1387,24 @@ func SafeGo(f func()) {
 		f()
 	}()
 }
+
+// Ping and pong recurse into each other with no hazard behind them.
+func Ping(n int) int {
+	if n <= 0 {
+		return 0
+	}
+	return pong(n - 1)
+}
+
+func pong(n int) int { return Ping(n) }
+
+// Deferred recovers only through a callee, which a wrapper does not affect.
+func Deferred(f func()) {
+	defer handle()
+	f()
+}
+
+func handle() { _ = recover() }
 `,
 	// Targets a wrapper frame would change (recover, call-stack inspection).
 	"hubtestutil/hazard.go": `package hubtestutil
@@ -1423,6 +1441,106 @@ func where() string {
 func LogOut() { _ = log.Output(2, "x") }
 
 func LoggerOut(l *log.Logger) { _ = l.Output(2, "x") }
+
+func InLit(t *testing.T) {
+	t.Helper()
+	func() { _, _, _, _ = runtime.Caller(1) }()
+}
+
+func DefaultOut() { _ = log.Default().Output(2, "x") }
+
+func CallerValue() int {
+	f := runtime.Callers
+	return f(0, nil)
+}
+
+func Deep(t *testing.T) int {
+	t.Helper()
+	return deep1()
+}
+
+func deep1() int { return deep2() }
+
+func deep2() int {
+	pc := make([]uintptr, 4)
+	return runtime.Callers(1, pc)
+}
+
+func Cyc(t *testing.T) {
+	t.Helper()
+	cycA(2)
+}
+
+func cycA(n int) {
+	if n > 0 {
+		cycB(n - 1)
+	}
+}
+
+func cycB(n int) {
+	cycA(n)
+	cycC()
+}
+
+func cycC() { _, _, _, _ = runtime.Caller(0) }
+
+type rec struct{}
+
+func (rec) locate() string {
+	_, file, _, _ := runtime.Caller(2)
+	return file
+}
+
+func ViaMethod(t *testing.T) string {
+	t.Helper()
+	var r rec
+	return r.locate()
+}
+
+func ViaValue(t *testing.T) {
+	t.Helper()
+	apply(where)
+}
+
+func apply(f func() string) { _ = f() }
+`,
+	"hubtestutil/aliased.go": `package hubtestutil
+
+import (
+	rt "runtime"
+	"testing"
+)
+
+func Aliased(t *testing.T) string {
+	t.Helper()
+	_, file, _, _ := rt.Caller(1)
+	return file
+}
+`,
+	"hubtestutil/dot.go": `package hubtestutil
+
+import . "log"
+
+func DotLog() { _ = Output(2, "x") }
+`,
+	// A hand-edited Helper wrapper in a pkgmove alias file (pkgmove never
+	// generates one): checked like an extract wrapper.
+	"hub/zz_alias_pm_test.go": `package hub
+
+// Aliases for symbols moved to
+// example.com/fx/hubtestutil
+// by hack/pkgmove, so existing references in package hub keep compiling.
+
+import (
+	"testing"
+
+	"example.com/fx/hubtestutil"
+)
+
+func pmCaller(t *testing.T) string {
+	t.Helper()
+	return hubtestutil.Caller(t)
+}
 `,
 	"hub/hub.go":     "package hub\n",
 	"hub/sub/sub.go": "package sub\n",
@@ -1570,6 +1688,56 @@ func marked(t *testing.T) {
 func safeGo(f func()) {
 	hubtestutil.SafeGo(f)
 }
+
+func pingW(n int) int {
+	return hubtestutil.Ping(n)
+}
+
+func deferredW(f func()) {
+	hubtestutil.Deferred(f)
+}
+
+func aliasedW(t *testing.T) string {
+	t.Helper()
+	return hubtestutil.Aliased(t)
+}
+
+func deepW(t *testing.T) int {
+	t.Helper()
+	return hubtestutil.Deep(t)
+}
+
+func cycW(t *testing.T) {
+	t.Helper()
+	hubtestutil.Cyc(t)
+}
+
+func viaMethodW(t *testing.T) string {
+	t.Helper()
+	return hubtestutil.ViaMethod(t)
+}
+
+func viaValueW(t *testing.T) {
+	t.Helper()
+	hubtestutil.ViaValue(t)
+}
+
+func inLitW(t *testing.T) {
+	t.Helper()
+	hubtestutil.InLit(t)
+}
+
+func defaultOutW() {
+	hubtestutil.DefaultOut()
+}
+
+func callerValueW() int {
+	return hubtestutil.CallerValue()
+}
+
+func dotLogW() {
+	hubtestutil.DotLog()
+}
 `,
 	// Not generated: the marker is only quoted in a string literal.
 	"hub/zz_alias_quoted_test.go": `package hub
@@ -1627,7 +1795,11 @@ func TestSeed(t *testing.T) { seed(t, 1) }
 
 import "testing"
 
-func TestSafe(t *testing.T) { safeGo(func() {}) }
+func TestSafe(t *testing.T) {
+	safeGo(func() {})
+	_ = pingW(3)
+	deferredW(func() {})
+}
 `,
 	"hub/neg_test.go": `package hub
 
@@ -1659,6 +1831,16 @@ func TestNeg(t *testing.T) {
 	logOut()
 	loggerOut(log.Default())
 	marked(t)
+	_ = aliasedW(t)
+	_ = deepW(t)
+	cycW(t)
+	_ = viaMethodW(t)
+	viaValueW(t)
+	inLitW(t)
+	defaultOutW()
+	_ = callerValueW()
+	dotLogW()
+	_ = pmCaller(t)
 }
 
 func BenchmarkNeg(b *testing.B) { bench(b) }
@@ -1718,17 +1900,19 @@ func TestExtractAliasWrappers(t *testing.T) {
 		}
 		// All 5 declarations of the chatdb alias file (1 const, 4 Helper
 		// wrappers, 3 return and 1 statement shape), a testing.TB wrapper,
-		// and a plain wrapper whose target calls recover() only in a func
-		// literal.
+		// and plain wrappers whose targets recover only in a func literal
+		// or only through a callee, or recurse with no hazard behind them.
 		wantAll(t, out,
-			"Alias references resolved to their targets (7):",
+			"Alias references resolved to their targets (9):",
 			"hub/chat_test.go:9: requirePostgresDSN -> hubtestutil.RequirePostgresDSN",
 			"hub/chat_test.go:10: conversationsTableDDL -> hubtestutil.ConversationsTableDDL",
 			"hub/chat_test.go:11: getTopicConvID -> hubtestutil.GetTopicConvID",
 			"hub/chat_test.go:12: rawText -> hubtestutil.RawText",
 			"hub/chat_test.go:14: requireUTCInstant -> hubtestutil.RequireUTCInstant",
 			"hub/seed_test.go:5: seed -> hubtestutil.Seed",
-			"hub/safe_test.go:5: safeGo -> hubtestutil.SafeGo",
+			"hub/safe_test.go:6: safeGo -> hubtestutil.SafeGo",
+			"hub/safe_test.go:7: pingW -> hubtestutil.Ping",
+			"hub/safe_test.go:8: deferredW -> hubtestutil.Deferred",
 		)
 	})
 
@@ -1776,13 +1960,29 @@ func TestExtractAliasWrappers(t *testing.T) {
 			uses("func", "callerW", more),
 			"func callerW (a hubshard extract wrapper) forwards to example.com/fx/hubtestutil.Caller, but the target inspects its call stack (runtime.Caller;",
 			uses("func", "transitiveW", more),
-			"func transitiveW (a hubshard extract wrapper) forwards to example.com/fx/hubtestutil.Transitive, but the target calls where, which inspects its call stack (runtime.Caller;",
+			"func transitiveW (a hubshard extract wrapper) forwards to example.com/fx/hubtestutil.Transitive, but the target reaches where, which inspects its call stack (runtime.Caller;",
 			uses("func", "logOut", more),
 			"func logOut (a hubshard extract wrapper) forwards to example.com/fx/hubtestutil.LogOut, but the target uses log.Output call depth",
 			uses("func", "loggerOut", more),
 			"func loggerOut (a hubshard extract wrapper) forwards to example.com/fx/hubtestutil.LoggerOut, but the target may call (*log.Logger).Output",
 			uses("func", "marked", more),
 			"func marked (a hubshard extract wrapper) forwards to example.com/fx/hubtestutil.Marked, but the target calls Helper() but the wrapper does not",
+			// An aliased runtime import, a chain of depth 2 (runtime.Callers),
+			// a cycle with a hazard behind it, a method, a func value, a func
+			// literal, a Logger from a call, a runtime.Callers value, a
+			// dot-import of log.
+			"func aliasedW (a hubshard extract wrapper) forwards to example.com/fx/hubtestutil.Aliased, but the target inspects its call stack (runtime.Caller;",
+			"func deepW (a hubshard extract wrapper) forwards to example.com/fx/hubtestutil.Deep, but the target reaches deep2, which inspects its call stack (runtime.Callers;",
+			"func cycW (a hubshard extract wrapper) forwards to example.com/fx/hubtestutil.Cyc, but the target reaches cycC, which inspects its call stack (runtime.Caller;",
+			"func viaMethodW (a hubshard extract wrapper) forwards to example.com/fx/hubtestutil.ViaMethod, but the target reaches method locate, which inspects its call stack (runtime.Caller;",
+			"func viaValueW (a hubshard extract wrapper) forwards to example.com/fx/hubtestutil.ViaValue, but the target reaches where, which inspects its call stack (runtime.Caller;",
+			"func inLitW (a hubshard extract wrapper) forwards to example.com/fx/hubtestutil.InLit, but the target inspects its call stack (runtime.Caller;",
+			"func defaultOutW (a hubshard extract wrapper) forwards to example.com/fx/hubtestutil.DefaultOut, but the target may call (*log.Logger).Output",
+			"func callerValueW (a hubshard extract wrapper) forwards to example.com/fx/hubtestutil.CallerValue, but the target inspects its call stack (runtime.Callers;",
+			"func dotLogW (a hubshard extract wrapper) forwards to example.com/fx/hubtestutil.DotLog, but the target is in a file that dot-imports log",
+			// A hand-edited Helper wrapper in a pkgmove alias file.
+			uses("func", "pmCaller", "zz_alias_pm_test.go"),
+			"func pmCaller (a Helper wrapper in a pkgmove alias file) forwards to example.com/fx/hubtestutil.Caller, but the target inspects its call stack (runtime.Caller;",
 		)
 		if strings.Contains(out, "Alias references resolved") {
 			t.Errorf("no reference should resolve:\n%s", out)
@@ -1813,17 +2013,19 @@ func TestExtractAliasWrappers(t *testing.T) {
 			"hub/integ_test.go": "//go:build integration\n\npackage hub\n\nimport \"testing\"\n\nfunc TestInteg(t *testing.T) { _ = rawText(t, nil, \"q\") }\n",
 		})
 		wantAll(t, out,
-			"Alias references resolved to their targets (7):",
+			"Alias references resolved to their targets (9):",
 			"hub/chat_test.go:11: getTopicConvID -> hubtestutil.GetTopicConvID",
 			"hub/seed_test.go:5: seed -> hubtestutil.Seed",
-			"hub/safe_test.go:5: safeGo -> hubtestutil.SafeGo",
-			"Alias entries removed (6):",
+			"hub/safe_test.go:6: safeGo -> hubtestutil.SafeGo",
+			"Alias entries removed (8):",
 			"const conversationsTableDDL = example.com/fx/hubtestutil.ConversationsTableDDL",
 			"func getTopicConvID = example.com/fx/hubtestutil.GetTopicConvID",
 			"func requirePostgresDSN = example.com/fx/hubtestutil.RequirePostgresDSN",
 			"func requireUTCInstant = example.com/fx/hubtestutil.RequireUTCInstant",
 			"func seed = example.com/fx/hubtestutil.Seed",
 			"func safeGo = example.com/fx/hubtestutil.SafeGo",
+			"func pingW = example.com/fx/hubtestutil.Ping",
+			"func deferredW = example.com/fx/hubtestutil.Deferred",
 			"their entries are kept): rawText",
 		)
 		if strings.Contains(out, "func rawText = ") || strings.Contains(out, "Files deleted") {
@@ -1842,7 +2044,7 @@ func TestExtractAliasWrappers(t *testing.T) {
 	t.Run("rewrite-delete", func(t *testing.T) {
 		dir, out := rewrite(t, nil)
 		wantAll(t, out,
-			"Alias entries removed (7):",
+			"Alias entries removed (9):",
 			"func rawText = example.com/fx/hubtestutil.RawText",
 			"Files deleted (1):\n  hub/zz_alias_hubtestutil_chatdb_test.go",
 		)
@@ -1853,8 +2055,15 @@ func TestExtractAliasWrappers(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if strings.Contains(string(b), "func seed(") || strings.Contains(string(b), "func safeGo(") || !strings.Contains(string(b), "func noHelperTarget(") || !strings.Contains(string(b), "func recoverW(") {
-			t.Errorf("more alias file should lose only its resolved entries seed and safeGo:\n%s", b)
+		for _, gone := range []string{"func seed(", "func safeGo(", "func pingW(", "func deferredW("} {
+			if strings.Contains(string(b), gone) {
+				t.Errorf("more alias file still has the resolved entry %q:\n%s", gone, b)
+			}
+		}
+		for _, kept := range []string{"func noHelperTarget(", "func recoverW(", "func cycW("} {
+			if !strings.Contains(string(b), kept) {
+				t.Errorf("more alias file lost the unresolved entry %q:\n%s", kept, b)
+			}
 		}
 	})
 }
