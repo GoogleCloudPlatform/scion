@@ -2451,8 +2451,6 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	// $(VAR) reference in a retained entry resolves to the same value as
 	// before de-duplication.
 	envVars = dedupeEnvVars(envVars)
-	// A reserved name never reaches the container, whatever its source.
-	envVars = slices.DeleteFunc(envVars, func(ev corev1.EnvVar) bool { return reservedAgentEnvName(ev.Name) })
 
 	// Security context: run agent pods as the image's non-root scion user.
 	// FSGroup is branched by workspace backend (N2-4):
@@ -2485,10 +2483,13 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	// here; the variable only drives the umask.
 	envVars = withSupplementalGIDsEnv(envVars, sharedDirGroups(config))
 
-	// The template env fallback (ptone/scion#4524) is the LAST env step:
-	// only names no source above set (plain or secret-backed), never a
-	// suppressed key.
+	// The template env fallback (ptone/scion#4524) is the last env step that
+	// adds entries: only names no source above set (plain or secret-backed),
+	// never a suppressed key.
 	envVars = appendK8sFallbackEnv(envVars, config.FallbackEnv, config.SuppressedFallbackKeys)
+	// A reserved name never reaches the container, whatever its source: the
+	// drop runs after every step that adds entries.
+	envVars = slices.DeleteFunc(envVars, func(ev corev1.EnvVar) bool { return reservedAgentEnvName(ev.Name) })
 
 	// Determine image pull policy
 	pullPolicy := corev1.PullIfNotPresent

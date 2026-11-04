@@ -54,7 +54,9 @@ func TestReservedAgentEnvName_DroppedFromNonSecretEnvOnEveryRuntime(t *testing.T
 			Name:         "test-agent",
 			UnixUsername: "scion",
 			Image:        "scion-agent:latest",
-			Env:          append([]string(nil), reservedEnvProbe...),
+			// The bare name (no "=") makes the container CLI copy the value
+			// from the broker's own environment.
+			Env: append(append([]string(nil), reservedEnvProbe...), stagedsecrets.HubTokenStagedEnvVar),
 		})
 		if err != nil {
 			t.Fatalf("buildCommonRunArgs: %v", err)
@@ -62,6 +64,8 @@ func TestReservedAgentEnvName_DroppedFromNonSecretEnvOnEveryRuntime(t *testing.T
 		env := map[string]string{}
 		for i := 0; i+1 < len(args); i++ {
 			if args[i] == "-e" {
+				// A bare "-e NAME" records NAME with an empty value, so its
+				// presence is checked too.
 				k, v, _ := strings.Cut(args[i+1], "=")
 				env[k] = v
 			}
