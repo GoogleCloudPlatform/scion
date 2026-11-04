@@ -1545,6 +1545,14 @@ type AgentStatusUpdate struct {
 	// last-seen and updated timestamps are written. Internal to the hub —
 	// json:"-".
 	ReportRunID string `json:"-"`
+	// ReportAgentToken marks a self-report sent with an agent token (the
+	// agent's own identity), as opposed to a user or service with update
+	// access, whose reports carry no run either. With ReportRunID empty it
+	// is a run-less agent token, and on a row that has a minted run
+	// (RunIDUpdatedAt set) its status fields are dropped: a label-less or
+	// pre-run agent cannot move the phase of a run it does not belong to.
+	// Set only by the agent status handler, never from a body (json:"-").
+	ReportAgentToken bool `json:"-"`
 	// Restore marks a hub write that puts back a phase saved before a
 	// failed start (the start dispatch's rollback). It is the only write
 	// that may store phase halted directly; any other update carrying
