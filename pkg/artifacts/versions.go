@@ -144,13 +144,23 @@ func (s *Service) handleCreate(w http.ResponseWriter, r *http.Request) {
 		OwnerKind: kind, OwnerRef: ref, Key: key, Title: title, CreatedAt: now, UpdatedAt: now,
 		ExpiresAt: retentionExpiry(b.currentLimits(ctx), now),
 	}
+	// The delegating user of an agent creating the artifact, resolved by
+	// the host from the agent's delegation chain (ptone/scion#6028); never
+	// from the request.
+	a.SponsorRef = s.sponsorFor(ctx, kind, ref, a.ScopeKind)
 	v, files := pendingVersion(a.ID, req, kind, ref, now, nil)
 	v.Seq = 1
 	g := Grant{
 		ID: uuid.NewString(), ArtifactID: a.ID, SubjectKind: SubjectScope, SubjectRef: scope,
 		Permission: GrantRead, CreatedByRef: PrincipalRef(kind, ref), CreatedAt: now,
 	}
-	err := b.store.CreatePending(ctx, a, v, files, []Grant{g})
+	grants := []Grant{g}
+	// The automatic review grant for the delegating user commits with the
+	// artifact, or not at all (ptone/scion#7134).
+	if sg, ok := s.sponsorReviewGrant(r, a, now); ok {
+		grants = append(grants, sg)
+	}
+	err := b.store.CreatePending(ctx, a, v, files, grants)
 	if errors.Is(err, ErrConflict) {
 		// Another publish took the key first: append to its artifact.
 		existing, lookErr := b.store.GetArtifactByKey(ctx, ScopeKindProject, scope, kind, ref, key)
@@ -167,6 +177,7 @@ func (s *Service) handleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.logAllowed(r, logEntry{action: logActionCreated, artifact: a, seq: v.Seq, authority: logAuthorityOwner})
+	s.logSponsorReviewGrants(r, a, grants)
 	writePending(w, a, v, files)
 }
 

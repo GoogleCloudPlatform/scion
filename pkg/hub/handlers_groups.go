@@ -1464,6 +1464,8 @@ func (s *Server) isConstraintBearingGroup(ctx context.Context, groupID string) (
 // resource check to be given a token selector or a bearer target. Every
 // other credential kind gets the session-only refusal with the GOV_PENDING
 // reason (session_only_gate.go) before the access_constraint.admin decision.
+// The session-only check must stay a separate step ahead of that decision;
+// do not move it after the decision or fold it into the decision.
 func (s *Server) requireConstraintAdminForGroup(w http.ResponseWriter, r *http.Request, groupID string) bool {
 	ctx := r.Context()
 	isCB, err := s.isConstraintBearingGroup(ctx, groupID)

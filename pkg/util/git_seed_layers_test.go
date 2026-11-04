@@ -85,7 +85,7 @@ func TestCheckSeedRepoConfigLayers_CleanPasses(t *testing.T) {
 	}
 	writeLayer(t, filepath.Join(commonDir, "config.worktree"), "[core]\n\tsparseCheckout = true\n")
 	for _, admin := range []string{"", name} {
-		if err := CheckSeedRepoConfigLayers(context.Background(), commonDir, admin); err != nil {
+		if err := CheckSeedRepoConfigLayers(context.Background(), commonDir, admin, false); err != nil {
 			t.Errorf("admin %q: clean layers refused: %v", admin, err)
 		}
 	}
@@ -112,7 +112,7 @@ func TestCheckSeedRepoConfigLayers_LayerKeysRefuse(t *testing.T) {
 				path, layer = filepath.Join(commonDir, "worktrees", name, "config.worktree"), seedLayerOwnWorktree
 			}
 			writeLayer(t, path, tc.line)
-			err := CheckSeedRepoConfigLayers(context.Background(), commonDir, name)
+			err := CheckSeedRepoConfigLayers(context.Background(), commonDir, name, false)
 			var refused *RepoConfigRefusedError
 			if !errors.As(err, &refused) {
 				t.Fatalf("error = %v, want *RepoConfigRefusedError", err)
@@ -146,7 +146,7 @@ func TestCheckSeedRepoConfigLayers_IncludeInConfigRefusesFirst(t *testing.T) {
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
-	err = CheckSeedRepoConfigLayers(context.Background(), commonDir, name)
+	err = CheckSeedRepoConfigLayers(context.Background(), commonDir, name, false)
 	var refused *RepoConfigRefusedError
 	if !errors.As(err, &refused) || refused.Reason != "an include directive" || refused.Layer != "" {
 		t.Fatalf("error = %v, want an include refusal in .git/config", err)
@@ -164,7 +164,7 @@ func TestCheckSeedRepoConfigLayers_NonRegularLayerFailsClosed(t *testing.T) {
 	if err := os.Symlink(target, filepath.Join(commonDir, "worktrees", name, "config.worktree")); err != nil {
 		t.Fatal(err)
 	}
-	if err := CheckSeedRepoConfigLayers(context.Background(), commonDir, name); err == nil {
+	if err := CheckSeedRepoConfigLayers(context.Background(), commonDir, name, false); err == nil {
 		t.Fatal("a symlinked config.worktree was accepted")
 	}
 }
@@ -176,7 +176,7 @@ func TestCheckSeedRepoConfigLayers_RootRedirectFileRefuses(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			commonDir, _, adminName := seedLayersRepo(t)
 			writeLayer(t, filepath.Join(commonDir, name), "../elsewhere\n")
-			err := CheckSeedRepoConfigLayers(context.Background(), commonDir, adminName)
+			err := CheckSeedRepoConfigLayers(context.Background(), commonDir, adminName, false)
 			var refused *RepoConfigRefusedError
 			if !errors.As(err, &refused) {
 				t.Fatalf("error = %v, want *RepoConfigRefusedError", err)
@@ -214,7 +214,7 @@ func TestCheckSeedRepoConfigLayers_ParserDifferentialRefuses(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The real reader passes.
-	if err := CheckSeedRepoConfigLayers(context.Background(), commonDir, ""); err != nil {
+	if err := CheckSeedRepoConfigLayers(context.Background(), commonDir, "", false); err != nil {
 		t.Fatalf("baseline refused: %v", err)
 	}
 	dropping := func(path, label string) ([]gitConfigVar, error) {
@@ -230,7 +230,7 @@ func TestCheckSeedRepoConfigLayers_ParserDifferentialRefuses(t *testing.T) {
 		}
 		return kept, err
 	}
-	err = checkSeedRepoConfigLayers(context.Background(), commonDir, "", dropping)
+	err = checkSeedRepoConfigLayers(context.Background(), commonDir, "", false, dropping)
 	var refused *RepoConfigRefusedError
 	if !errors.As(err, &refused) || !strings.Contains(refused.Reason, "read differently") || refused.Key != "core.sparsecheckout" || !refused.Seeded {
 		t.Fatalf("error = %v, want a seeded cross-check refusal for core.sparsecheckout", err)
@@ -240,4 +240,49 @@ func TestCheckSeedRepoConfigLayers_ParserDifferentialRefuses(t *testing.T) {
 		t.Errorf("cross-check refusal lacks the combined-layer remedy: %s", msg)
 	}
 	_ = name
+}
+
+// Refused keys in different layers are reported together, and git is not run
+// while any key is refused: a reader that also makes the parsed set differ
+// from git (which the cross-check would refuse) still yields the key list,
+// with the note that the git checks are still to run.
+func TestCheckSeedRepoConfigLayers_JoinsLayersWithoutRunningGit(t *testing.T) {
+	commonDir, _, name := seedLayersRepo(t)
+	f, err := os.OpenFile(filepath.Join(commonDir, "config"), os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("[core]\n\teditor = vi-layermarker-j1\n\tsparseCheckout = true\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	writeLayer(t, filepath.Join(commonDir, "worktrees", name, "config.worktree"), "[core]\n\tpager = less-layermarker-j2\n")
+	dropping := func(path, label string) ([]gitConfigVar, error) {
+		vars, err := readSeedConfigLayer(path, label)
+		var kept []gitConfigVar
+		for _, v := range vars {
+			if v.Key() != "core.sparsecheckout" {
+				kept = append(kept, v)
+			}
+		}
+		return kept, err
+	}
+	err = checkSeedRepoConfigLayers(context.Background(), commonDir, name, false, dropping)
+	var many *RepoConfigRefusals
+	if !errors.As(err, &many) {
+		t.Fatalf("error = %v, want *RepoConfigRefusals (no cross-check while keys are refused)", err)
+	}
+	if len(many.Refusals) != 2 || many.Refusals[0].Key != "core.editor" || many.Refusals[0].Layer != "" ||
+		many.Refusals[1].Key != "core.pager" || many.Refusals[1].Layer != seedLayerOwnWorktree || !many.GitChecksPending {
+		t.Fatalf("refusals = %+v, want core.editor in .git/config then core.pager in the own config.worktree, git checks pending", many.Refusals)
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "layermarker-j") || strings.Contains(msg, "read differently") {
+		t.Errorf("text leaks a value or reports the cross-check: %s", msg)
+	}
+	if !strings.Contains(msg, "core.pager (a command or hook-location setting, never given to agents): remove each from the git config file that sets it, in "+seedLayerOwnWorktree+".") || !strings.HasSuffix(msg, refusalsGitChecksNote) {
+		t.Errorf("text lacks the per-layer remedy or the note: %s", msg)
+	}
 }

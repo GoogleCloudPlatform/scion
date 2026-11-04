@@ -48,6 +48,7 @@ const (
 	placementLegacyGlobalCause     = "the agent runtime's global settings use the legacy format and mention Kubernetes placement keys; set schema_version: \"1\" so Kubernetes placement can be determined"
 	placementBuiltFromCause        = "the runtime entry this agent's runtime was built from no longer matches its cluster and namespace; restart the agent runtime, fix the entry, or align the settings file's entry with the stored one"
 	placementAgentConfigCause      = "the agent's config could not be read to check it against the agent runtime's Kubernetes placement"
+	placementOverlayInvalidCause   = "the Kubernetes placement in the runtimes and profiles stored in the Hub is not valid; fix them in the Hub settings (the server config's placement report names the sections; the Hub log names the paths)"
 )
 
 // placementDefaultsOnlyCause is the fixed cause for a profile with placement
@@ -93,9 +94,19 @@ func (r runtimeResolution) forExistingAgent(agentName string) runtimeResolution 
 // placementForStart is resolvePlacement with the project's settings (the
 // project-merged view, for the ignored-values warning) loaded from
 // projectPath; a load failure leaves them out.
+//
+// Every start leg resolves through here. On a legacy Runtime Broker, a
+// start on the Kubernetes runtime gets operator-owned placement
+// (api.ResolvedPlacement.OperatorOwned), even when the runtime entries and
+// profiles set none: the agent's own fields are then checked with the
+// operator rules (config.CheckAgentPlacement) before the start's side
+// effects, so tolerations or a runtime class the operator does not set
+// are refused.
 func (s *Server) placementForStart(ctx context.Context, res runtimeResolution, projectPath string) (*api.ResolvedPlacement, error) {
 	var projectVS *config.VersionedSettings
-	if res.Runtime != nil && res.Runtime.Name() == "kubernetes" && res.How != resolutionFlat && !s.isFlat() {
+	legacyKubernetes := res.Runtime != nil && res.Runtime.Name() == "kubernetes" && res.How != resolutionFlat &&
+		res.How != resolutionErrorRuntime && !s.isFlat()
+	if legacyKubernetes {
 		// Without a resolved project directory the loader would fall back to
 		// the working directory's project; skip the warning input instead.
 		if projectDir, err := config.GetResolvedProjectDir(projectPath); err == nil {
@@ -104,7 +115,31 @@ func (s *Server) placementForStart(ctx context.Context, res runtimeResolution, p
 			}
 		}
 	}
-	return s.resolvePlacement(ctx, res, projectVS)
+	rp, err := s.resolvePlacement(ctx, res, projectVS)
+	if err != nil || !legacyKubernetes {
+		return rp, err
+	}
+	return operatorOwnedPlacement(rp), nil
+}
+
+// testHookPlacementAfterGlobalLoad, when set (tests only), runs in
+// resolvePlacement right after the global settings (with the Hub overlay)
+// are loaded.
+var testHookPlacementAfterGlobalLoad func()
+
+// operatorOwnedPlacement returns legacy placement rp (nil: none) as
+// operator-owned placement, a fresh value that leaves rp unchanged.
+func operatorOwnedPlacement(rp *api.ResolvedPlacement) *api.ResolvedPlacement {
+	out := &api.ResolvedPlacement{Sources: map[string][]string{}, OperatorOwned: true}
+	if rp != nil {
+		out.NodeSelector = config.MergeNodeSelector(rp.NodeSelector, nil)
+		out.Tolerations = config.MergeTolerations(rp.Tolerations, nil)
+		out.RuntimeClassName = rp.RuntimeClassName
+		for k, v := range rp.Sources {
+			out.Sources[k] = append([]string(nil), v...)
+		}
+	}
+	return out
 }
 
 // resolvePlacement resolves the Kubernetes placement for one start on the
@@ -130,6 +165,9 @@ func (s *Server) resolvePlacement(ctx context.Context, res runtimeResolution, pr
 
 	// Step 2: the global settings, failing closed.
 	gvs, _, err := config.LoadGlobalSettingsWithOverlayFor(ctx)
+	if testHookPlacementAfterGlobalLoad != nil {
+		testHookPlacementAfterGlobalLoad()
+	}
 	if err != nil {
 		s.agentLifecycleLog.Warn("Kubernetes placement: global settings could not be read", "agent", res.Agent, "error", err)
 		return nil, placementRefusal(placementGlobalUnreadableCause)
@@ -146,6 +184,15 @@ func (s *Server) resolvePlacement(ctx context.Context, res runtimeResolution, pr
 	}
 	if gvs == nil {
 		gvs = &config.VersionedSettings{}
+	}
+	// Malformed or invalid placement in the Hub's stored runtimes and
+	// profiles fails every Kubernetes start closed: it is never read as no
+	// placement. The findings come with the runtimes and profiles gvs was
+	// built from (one overlay snapshot), so a concurrent settings save can
+	// never pair new findings with old entries or old findings with new.
+	if paths := gvs.PlacementErrors(); len(paths) > 0 {
+		s.agentLifecycleLog.Warn("Kubernetes placement: the stored runtimes and profiles have invalid placement", "agent", res.Agent, "paths", paths)
+		return nil, placementRefusal(placementOverlayInvalidCause)
 	}
 	s.warnProjectPlacement(res.Agent, gvs, projectVS)
 
@@ -307,6 +354,11 @@ const (
 	// instance whose project path is empty after every recovery (the
 	// request's path or slug, the matched container's recorded path).
 	placementFlatRestartNoProjectCause = "cannot check the agent's stored config before restart: no project path; restart the agent from its project"
+	// placementLegacyRestartNoProjectCause is the same refusal on a legacy
+	// Runtime Broker, whose Kubernetes starts use operator-owned placement:
+	// such a restart comes from an older Hub, or for an agent whose project
+	// is gone.
+	placementLegacyRestartNoProjectCause = "cannot check the agent's stored config before restart: no project path; restart the agent from its project, or upgrade the Hub"
 )
 
 // resolveFlatPlacement resolves the placement of a start on this flat
@@ -370,11 +422,10 @@ func (s *Server) resolveFlatPlacement(rt scionrt.Runtime, agentName string) (*ap
 }
 
 // checkFlatCreatePlacement checks, for a create on a flat instance, the
-// request's own kubernetes blocks (its inline config, which provisioning
-// writes into the agent's config, and its create config) against the
-// instance's operator-owned placement (config.CheckAgentPlacement), before
-// the create has any side effect. Nil on a legacy Runtime Broker, whose
-// create relies on Manager.Start's check.
+// request's own kubernetes blocks against the instance's operator-owned
+// placement (checkCreatePlacement), before the dispatch attempt. Nil on a
+// legacy Runtime Broker, whose create is checked once its runtime's
+// placement is resolved.
 func (s *Server) checkFlatCreatePlacement(req CreateAgentRequest) error {
 	if !s.isFlat() {
 		return nil
@@ -382,6 +433,18 @@ func (s *Server) checkFlatCreatePlacement(req CreateAgentRequest) error {
 	rp, err := s.resolveFlatPlacement(nil, req.Name)
 	if err != nil || rp == nil {
 		return err
+	}
+	return s.checkCreatePlacement(req, rp)
+}
+
+// checkCreatePlacement checks a create request's own kubernetes blocks
+// (its inline config, which provisioning writes into the agent's config,
+// and its create config) against operator-owned placement rp
+// (config.CheckAgentPlacement), before the agent is provisioned or
+// started. Nil when rp is nil or not operator-owned.
+func (s *Server) checkCreatePlacement(req CreateAgentRequest, rp *api.ResolvedPlacement) error {
+	if rp == nil || !rp.OperatorOwned {
+		return nil
 	}
 	var blocks []*api.KubernetesConfig
 	if req.InlineConfig != nil {
@@ -392,7 +455,7 @@ func (s *Server) checkFlatCreatePlacement(req CreateAgentRequest) error {
 	}
 	for _, block := range blocks {
 		if err := config.CheckAgentPlacement(block, rp, config.AgentPlacementLayerRequest); err != nil {
-			s.agentLifecycleLog.Warn("Kubernetes placement: the request's kubernetes block conflicts with the instance's placement", "agent", req.Name, "error", err)
+			s.agentLifecycleLog.Warn("Kubernetes placement: the request's kubernetes block conflicts with the operator's placement", "agent", req.Name, "error", err)
 			return placementRefusal(err.Error())
 		}
 	}
@@ -575,6 +638,16 @@ func (s *Server) checkStartLegacyPlacement(agentName, projectPath string, inline
 // checkRestartLegacyPlacement checks, before the restart endpoint's stop,
 // the agent's persisted kubernetes block against the placement in effect. A
 // config that cannot be read fails closed.
+//
+// On a legacy Runtime Broker every Kubernetes start is operator-owned
+// (placementForStart). An agent with no stored config yet has nothing to
+// check before the stop: Manager.Start checks the config it provisions
+// with the same operator rules (config.ApplyPlacement), as
+// checkStartOperatorPlacement leaves it on start. A restart request
+// carries no kubernetes block, so that later check cannot refuse anything
+// the restart itself brings. A stored config that exists but cannot be
+// read or parsed still fails closed, and so does a restart with no project
+// path.
 func (s *Server) checkRestartLegacyPlacement(agentName, projectPath string, sharedWorkspace bool, rp *api.ResolvedPlacement) error {
 	if rp != nil && rp.OperatorOwned {
 		if projectPath == "" {
@@ -583,6 +656,9 @@ func (s *Server) checkRestartLegacyPlacement(agentName, projectPath string, shar
 			// checked before it (the request names no project, and no
 			// container of the project recorded one).
 			s.agentLifecycleLog.Warn("Kubernetes placement: refusing a restart whose stored config cannot be checked before the stop", "agent", agentName)
+			if !s.isFlat() {
+				return placementRefusal(placementLegacyRestartNoProjectCause)
+			}
 			return placementRefusal(placementFlatRestartNoProjectCause)
 		}
 		return s.checkRestartOperatorPlacement(agentName, projectPath, sharedWorkspace, rp)
@@ -652,6 +728,9 @@ func (s *Server) checkStartOperatorPlacement(agentName, projectPath string, inli
 // config that cannot be read fails closed.
 func (s *Server) checkRestartOperatorPlacement(agentName, projectPath string, sharedWorkspace bool, rp *api.ResolvedPlacement) error {
 	loaded, err := readAgentScionConfig(agentName, projectPath, sharedWorkspace)
+	if err != nil && !s.isFlat() && loaded.stage == "read" && errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
 	if err != nil {
 		s.agentLifecycleLog.Warn("Kubernetes placement: the agent's config could not be read", "agent", agentName, "stage", loaded.stage, "error", err)
 		return placementRefusal(placementAgentConfigCause)

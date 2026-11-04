@@ -17,6 +17,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
@@ -25,6 +26,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 )
 
@@ -270,30 +272,65 @@ func runNotificationsList(cmd *cobra.Command, args []string) error {
 	}
 
 	if len(notifs) == 0 {
-		fmt.Println("No notifications")
+		_, _ = fmt.Fprintln(cmd.OutOrStdout(), "No notifications")
 		return nil
 	}
 
-	fmt.Printf("%-12s  %-14s  %-20s  %-22s  %s\n", "ID", "AGENT", "STATUS", "TIME", "MESSAGE")
-	fmt.Printf("%-12s  %-14s  %-20s  %-22s  %s\n", "------------", "--------------", "--------------------", "----------------------", "-------")
+	writeNotificationsTable(cmd.OutOrStdout(), notifs)
+	return nil
+}
+
+// notificationMessageWidth is the width, in runes, at which the table cuts
+// the message of a notification that has no Kind.
+const notificationMessageWidth = 60
+
+// writeNotificationsTable writes notifs as the table runNotificationsList
+// prints. Message and status text can come from other principals (a user's
+// display name in an artifact grant notice), so both go through safeText.
+// The message of a notification with a Kind is printed whole, and one about
+// an artifact gets a second line with its scion://artifact/ reference,
+// built from ResourceID, so the reference is never cut off. Other messages
+// are cut at notificationMessageWidth runes. The AGENT column shows "-"
+// for a notification that names no agent (the nil UUID).
+func writeNotificationsTable(w io.Writer, notifs []hubclient.Notification) {
+	_, _ = fmt.Fprintf(w, "%-12s  %-14s  %-20s  %-22s  %s\n", "ID", "AGENT", "STATUS", "TIME", "MESSAGE")
+	_, _ = fmt.Fprintf(w, "%-12s  %-14s  %-20s  %-22s  %s\n", "------------", "--------------", "--------------------", "----------------------", "-------")
 	for _, n := range notifs {
 		shortID := n.ID
 		if len(shortID) > 12 {
 			shortID = shortID[:12]
 		}
 		agentDisplay := n.AgentID
-		if len(agentDisplay) > 14 {
+		if agentDisplay == "" || agentDisplay == uuid.Nil.String() {
+			agentDisplay = "-"
+		} else if len(agentDisplay) > 14 {
 			agentDisplay = agentDisplay[:11] + "..."
 		}
 		timeStr := clitime.Format(n.CreatedAt, clitime.Minute)
-		msg := n.Message
-		if len(msg) > 60 {
-			msg = msg[:57] + "..."
+		msg := safeText(n.Message)
+		if n.Kind == "" {
+			msg = truncateRunes(msg, notificationMessageWidth, true)
 		}
-		fmt.Printf("%-12s  %-14s  %-20s  %-22s  %s\n", shortID, agentDisplay, truncate(n.Status, 20), timeStr, msg)
+		status := truncateRunes(safeText(n.Status), 20, true)
+		_, _ = fmt.Fprintf(w, "%-12s  %-14s  %-20s  %-22s  %s\n", shortID, agentDisplay, status, timeStr, msg)
+		if ref := notificationArtifactRef(n); ref != "" {
+			_, _ = fmt.Fprintf(w, "%-12s  %-14s  %-20s  %-22s  %s\n", "", "", "", "", ref)
+		}
 	}
+}
 
-	return nil
+// notificationArtifactRef returns the scion://artifact/ reference of a
+// notification about an artifact whose ResourceID is a canonical UUID, or
+// "" for any other notification.
+func notificationArtifactRef(n hubclient.Notification) string {
+	if n.Kind == "" || n.ResourceType != store.NotificationResourceArtifact {
+		return ""
+	}
+	id, err := uuid.Parse(n.ResourceID)
+	if err != nil || id.String() != n.ResourceID {
+		return ""
+	}
+	return "scion://artifact/" + n.ResourceID
 }
 
 func runNotificationsAck(cmd *cobra.Command, args []string) error {

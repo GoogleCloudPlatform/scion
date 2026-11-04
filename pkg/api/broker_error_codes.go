@@ -44,6 +44,11 @@ const (
 	// LocalPath) holds no .scion directory or marker (409). The operator must
 	// initialize the path as a project (ptone/scion#6647).
 	BrokerErrCodeProjectPathNotInitialized = "project_path_not_initialized"
+	// BrokerErrCodeGitConfigRefused marks an agent create, start or restart
+	// the broker refuses (422) because the repository's git config sets keys
+	// agents may not be given. The message names every refused key and how
+	// to remove it, never a value or a host path (ptone/scion#6835).
+	BrokerErrCodeGitConfigRefused = LaunchCodeGitConfigRefused
 
 	// BrokerErrCodeStorageMigrationRequired marks an agent start the broker
 	// refuses (422) because its storage would be placed differently than

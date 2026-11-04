@@ -34,6 +34,7 @@ import {
   type ScionArtifactShareDialog,
 } from './artifact-share-dialog.js';
 import { requestUrl } from '../../client/__fixtures__/request-url.js';
+import type { AccessCapabilities } from './artifact-access-sections.js';
 
 const ID = '00000000-0000-4000-8000-000000000001';
 const BASE = `/api/v1/artifacts/${ID}`;
@@ -216,6 +217,7 @@ function mockServer(init: Partial<Server> = {}): Server {
       if (url === '/api/v1/users/user-priya') return json({ displayName: 'Priya Shah' });
       if (url === '/api/v1/projects/proj-1') return json({ name: 'web-frontend' });
       if (url === '/api/v1/projects/proj-2') return json({ name: 'platform' });
+      if (url === '/api/v1/agents/agent-1') return json({ name: 'report-bot' });
       return json({ error: { code: 'not_found', message: 'not found' } }, 404);
     })
   );
@@ -916,5 +918,221 @@ describe('share dialog, retention mode (Retention and access)', () => {
     await settle(el);
     expect($(el, 'sl-alert[variant="danger"]')!.textContent).toContain('no longer allowed');
     expect(el.open).toBe(true);
+  });
+});
+
+describe('share dialog, manage mode (Manage access, ptone/scion#7107)', () => {
+  beforeAll(async () => {
+    await import('./artifact-share-dialog.js');
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+    resetPrincipalNames();
+  });
+
+  const caps = (c: Partial<AccessCapabilities>): AccessCapabilities => ({
+    canManage: false,
+    canShare: false,
+    canGrantReview: false,
+    shareAuthority: '',
+    ...c,
+  });
+  const MANAGER = caps({ canManage: true, canShare: true });
+  const STEWARD_OWNER = caps({
+    canShare: true,
+    canGrantReview: true,
+    shareAuthority: 'project_owner',
+  });
+  const STEWARD_DELEGATOR = caps({
+    canShare: true,
+    canGrantReview: true,
+    shareAuthority: 'delegator',
+  });
+  const REVIEW_ONLY = caps({ canGrantReview: true });
+
+  const agentOwned = (extra: Partial<Artifact> = {}): Artifact =>
+    artifact({ ownerKind: 'agent', ownerRef: 'agent-1', ...extra });
+
+  async function mountManage(
+    capabilities: AccessCapabilities | null,
+    a: Artifact = agentOwned()
+  ): Promise<ScionArtifactShareDialog> {
+    const el = document.createElement('scion-artifact-share-dialog') as ScionArtifactShareDialog;
+    el.artifact = a;
+    el.currentUserId = 'user-me';
+    el.mode = 'manage';
+    el.capabilities = capabilities;
+    document.body.appendChild(el);
+    el.open = true;
+    await settle(el);
+    return el;
+  }
+
+  async function searchFor(el: ScionArtifactShareDialog, q: string): Promise<void> {
+    vi.useFakeTimers();
+    const input = $(el, '.picker sl-input') as HTMLElement & { value: string };
+    input.value = q;
+    input.dispatchEvent(new Event('sl-input'));
+    await vi.advanceTimersByTimeAsync(300);
+    vi.useRealTimers();
+    await settle(el);
+  }
+
+  const text = (el: ScionArtifactShareDialog): string =>
+    el.shadowRoot!.textContent!.replace(/\s+/g, ' ');
+  const headings = (el: ScionArtifactShareDialog): string[] =>
+    $$(el, 'h3').map((h) => h.textContent!.trim());
+  const accessGets = (s: Server): string[] =>
+    s.calls
+      .filter(
+        (c) => c.method === 'GET' && (c.url === `${BASE}/links` || c.url === `${BASE}/grants`)
+      )
+      .map((c) => c.url);
+
+  it('R1/R2 manager: every section editable, Can manage offered, Create link present', async () => {
+    const s = mockServer({ links: [link('l-1', 7), link('l-2', 2)], grants: [HOME, PRIYA] });
+    const el = await mountManage(MANAGER, artifact());
+    expect($(el, 'sl-dialog')!.getAttribute('label')).toBe('Manage access: “Q3 rollout plan”');
+    expect(headings(el)).toEqual(['People and access', 'Link sharing', 'Retention']);
+    expect($(el, '.authority')).toBeNull();
+    expect(button(el, 'Create link')).toBeTruthy();
+    expect($(el, '#ttl')).not.toBeNull();
+    // The full people section: the add row offers Can manage.
+    const addSelect = $(el, '.row sl-select[aria-label="Permission"]')!;
+    expect(optionValues(addSelect)).toContain('admin');
+    expect($$(el, '.grant sl-select').length).toBeGreaterThan(0);
+    expect($(el, '#retention')).not.toBeNull();
+    expect(text(el)).toContain(
+      'Anyone with the link can view the current version without signing in. Links always expire.'
+    );
+    expect(text(el)).toContain('2 active links; the latest expires');
+    expect(accessGets(s).sort()).toEqual([`${BASE}/grants`, `${BASE}/links`]);
+    expect(button(el, 'Done')).toBeTruthy();
+  });
+
+  it('R3 steward (project owner): the clause note, review add row, grant list with Remove, no Create link', async () => {
+    mockServer({ links: [link('l-1', 7)], grants: [HOME, PRIYA] });
+    const el = await mountManage(STEWARD_OWNER);
+    expect(headings(el)).toEqual(['People and access', 'Link sharing', 'Retention']);
+    expect($(el, '.authority')!.textContent!.replace(/\s+/g, ' ').trim()).toBe(
+      "You can manage access because you are an owner of web-frontend, the home project of this agent's artifact. You cannot give Can manage or move it."
+    );
+    expect(text(el)).toContain(
+      "You can give review access here and remove anyone's access. To give Can view or Can edit, use scion artifact grants for now."
+    );
+    // Review add row: the permission is fixed to review; no permission menu.
+    expect(text(el)).toContain('Permission: Can review');
+    expect($$(el, 'sl-select[aria-label="Permission"]')).toHaveLength(0);
+    // The grant list: the home grant shown and not removable; others removable.
+    const grants = $$(el, '.grant');
+    expect(grants).toHaveLength(2);
+    expect(grants[0]!.textContent).toContain('(home project)');
+    expect(grants[0]!.querySelector('sl-button')).toBeNull();
+    expect(grants[1]!.querySelector('sl-button')!.textContent!.trim()).toBe('Remove');
+    // Links: Revoke only, with the CLI hint.
+    expect(() => button(el, 'Create link')).toThrow();
+    expect($(el, '#ttl')).toBeNull();
+    expect(button(el, 'Revoke')).toBeTruthy();
+    expect(text(el)).toContain(
+      'You can revoke links here. Create links with scion artifact share.'
+    );
+    expect(text(el)).toContain('1 active link; the latest expires');
+    // Retention editable.
+    expect($(el, '#retention')).not.toBeNull();
+  });
+
+  it('R4 steward (delegator): the delegator clause note', async () => {
+    mockServer({ grants: [HOME] });
+    const el = await mountManage(STEWARD_DELEGATOR);
+    expect($(el, '.authority')!.textContent!.replace(/\s+/g, ' ').trim()).toBe(
+      'You can manage access because you delegated to report-bot, the agent that owns this artifact. You cannot give Can manage or move it.'
+    );
+    expect(text(el)).toContain('No active links.');
+    expect(() => button(el, 'Create link')).toThrow();
+  });
+
+  it('a steward who gives review access sees the grant list reload with the new grant', async () => {
+    const s = mockServer({ grants: [HOME] });
+    const el = await mountManage(STEWARD_OWNER);
+    expect($$(el, '.grant')).toHaveLength(1);
+    const before = accessGets(s).filter((u) => u === `${BASE}/grants`).length;
+    s.grants = [
+      HOME,
+      {
+        id: 'g-new',
+        subjectKind: 'principal',
+        subjectRef: 'user:user-alex',
+        permission: 'review',
+        createdAt: '2026-10-08T12:00:00Z',
+      },
+    ];
+    await searchFor(el, 're');
+    expect(s.calls.some((c) => c.url.startsWith('/api/v1/projects?search='))).toBe(false);
+    $$(el, '.suggestions button')[0]!.click();
+    await settle(el);
+    button(el, 'Add').click();
+    await settle(el);
+    const posts = s.calls.filter((c) => c.method === 'POST' && c.url === `${BASE}/grants`);
+    expect(posts.map((c) => c.body)).toEqual([
+      { subjectKind: 'principal', subjectRef: 'user:user-alex', permission: 'review' },
+    ]);
+    expect(accessGets(s).filter((u) => u === `${BASE}/grants`).length).toBe(before + 1);
+    const grants = $$(el, '.grant');
+    expect(grants).toHaveLength(2);
+    expect(grants[1]!.textContent).toContain('Can review');
+    expect($$(el, '.granted')).toHaveLength(1);
+  });
+
+  it('R5/R6 review only: review add row, read-only retention, and no request for links or grants', async () => {
+    const expiresAt = new Date(Date.now() + 30 * DAY).toISOString();
+    const s = mockServer({ links: [link('l-1', 7)], grants: [HOME, PRIYA] });
+    const el = await mountManage(REVIEW_ONLY, agentOwned({ expiresAt, title: 'Draft plan' }));
+    expect(accessGets(s)).toEqual([]);
+    expect(s.calls.filter((c) => c.url.startsWith(BASE))).toEqual([]);
+    expect(headings(el)).toEqual(['People and access', 'Retention']);
+    expect($(el, '.authority')).toBeNull();
+    expect(text(el)).toContain(
+      'Give a person who can already read “Draft plan” review access. They can then publish reviews of it, and nothing else. The list of who has access is shown only to the owner, managers and stewards.'
+    );
+    expect(text(el)).toContain('Permission: Can review');
+    expect($$(el, '.grant')).toEqual([]);
+    expect($(el, '#links-heading')).toBeNull();
+    expect($(el, '#retention')).toBeNull();
+    expect($(el, '.expires')!.textContent!.replace(/\s+/g, ' ').trim()).toMatch(/^Expires .+\.$/);
+    expect(text(el)).toContain('Only the owner, a manager or a steward can change this.');
+    expect(showsToken(el)).toBe(false);
+    expect(button(el, 'Done')).toBeTruthy();
+  });
+
+  it('R5 review only: an artifact kept until deleted says so', async () => {
+    mockServer();
+    const el = await mountManage(REVIEW_ONLY);
+    expect($(el, '.expires')!.textContent!.trim()).toBe('Kept until deleted.');
+  });
+
+  it('R5 review only: gives review access with POST /grants and nothing else', async () => {
+    const s = mockServer({ cross: true });
+    const el = await mountManage(REVIEW_ONLY);
+    await searchFor(el, 're');
+    $$(el, '.suggestions button')[0]!.click();
+    await settle(el);
+    button(el, 'Add').click();
+    await settle(el);
+    expect(s.calls.filter((c) => c.url.startsWith(BASE)).map((c) => c.method)).toEqual(['POST']);
+    expect($$(el, '.granted').map((g) => g.textContent!.replace(/\s+/g, ' ').trim())).toEqual([
+      'Alex Reviewer can now review.',
+    ]);
+  });
+
+  it('no capabilities: an empty dialog that requests nothing', async () => {
+    const s = mockServer({ links: [link('l-1', 7)] });
+    const el = await mountManage(null);
+    expect(headings(el)).toEqual([]);
+    expect($(el, '.authority')).toBeNull();
+    expect($(el, '.picker')).toBeNull();
+    expect(s.calls.filter((c) => c.url.startsWith(BASE))).toEqual([]);
   });
 });

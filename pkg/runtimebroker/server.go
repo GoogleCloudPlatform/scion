@@ -280,6 +280,11 @@ type ServerConfig struct {
 	// disk instead of hydrating over HTTP. Leave nil for remote-only brokers or
 	// when the co-located Hub uses a non-local backend.
 	ColocatedStorage storage.Storage
+
+	// ColocatedHubID is the co-located Hub's instance ID, which namespaces
+	// its storage paths. It selects the template directories of
+	// ColocatedStorage that are accepted as template hydration roots.
+	ColocatedHubID string
 }
 
 // DefaultWriteTimeout is the broker HTTP server's default write timeout. A
@@ -595,6 +600,10 @@ type Server struct {
 	// (the start time) and a rebuilt service is never fenced out by its own
 	// earlier reports.
 	presentationSeq atomic.Int64
+
+	// conversionPlan caches a legacy server's publishable conversion plan
+	// (conversion_plan.go), recomputed only when its settings change.
+	conversionPlan conversionPlanCache
 
 	// NFS mount reconciler (nil when backend != "nfs")
 	nfsMountReconciler *NFSMountReconciler
@@ -969,6 +978,9 @@ func (s *Server) initHubIntegration() error {
 		return err
 	}
 	s.cache, s.hcCache, s.skCache = fc.templates, fc.harnessConfigs, fc.skills
+	// Hydrated templates are written below the template cache directory;
+	// a template lookup accepts an absolute template directory only there.
+	config.AddTemplateHydrationRoot(cacheDir)
 	// The GitHub resolution cache holds resolution metadata, not file
 	// content; nil is safe (resolution then runs uncached).
 	s.ghResolutionCache = openGitHubResolutionCache()
@@ -1006,6 +1018,7 @@ func (s *Server) initHubConnections() error {
 			// the cache like any other broker.
 			if stor := s.config.ColocatedStorage; stor != nil && stor.Provider() == storage.ProviderLocal {
 				conn.LocalStorage = stor
+				s.registerColocatedTemplateRoots(stor)
 			}
 
 			s.hubMu.Lock()
@@ -1113,6 +1126,21 @@ func (s *Server) initHubConnections() error {
 	)
 
 	return nil
+}
+
+// registerColocatedTemplateRoots registers, as template hydration roots, the
+// template directories of a co-located local storage backend, from which
+// resolveLocalResource reads templates. Only the template subtrees are
+// registered: the backend also holds agent workspace uploads, which must
+// never be accepted as an absolute template directory.
+func (s *Server) registerColocatedTemplateRoots(stor storage.Storage) {
+	fsr, ok := stor.(localObjectResolver)
+	if !ok {
+		return
+	}
+	for _, p := range storage.ResourceRootPaths(s.config.ColocatedHubID, storage.ResourceKindTemplate) {
+		config.AddTemplateHydrationRoot(fsr.ObjectFSPath(p))
+	}
 }
 
 // createHubConnection creates a HubConnection from credentials.
@@ -1517,6 +1545,11 @@ func (s *Server) SetHubClient(client hubclient.Client) {
 // This is useful for testing or when the cache is configured externally.
 func (s *Server) SetTemplateCache(cache *templatecache.Cache) {
 	s.cache = cache
+	if cache != nil {
+		// Templates hydrated into this cache are accepted as absolute
+		// template directories (config.AddTemplateHydrationRoot).
+		config.AddTemplateHydrationRoot(cache.Dir())
+	}
 	s.hubMu.Lock()
 	defer s.hubMu.Unlock()
 	for _, conn := range s.hubConnections {
@@ -3270,7 +3303,7 @@ func (s *Server) buildProjectFilterForHub(hubEndpoint string) func(string) bool 
 				continue
 			}
 
-			projectSettings, err := config.LoadSettingsFromDir(resolveProjectSettingsDir(ag.ProjectPath))
+			projectSettings, err := config.LoadProjectSettingsFromDir(resolveProjectSettingsDir(ag.ProjectPath))
 			if err != nil {
 				continue
 			}

@@ -91,7 +91,7 @@ exit 0`, env.state, env.copy, env.mark, env.release, env.pid, env.log, orZero(sc
 }
 
 // newStartingRuntime returns a runtime on a fresh state file whose binary
-// runs sc, and its paths. Its exit watchers are cancelled at the end.
+// runs sc, and its paths. Its exit watchers are joined at the end.
 func newStartingRuntime(t *testing.T, sc startScripts) (*CloudRunSandboxRuntime, startEnv) {
 	t.Helper()
 	dir := t.TempDir()
@@ -110,7 +110,7 @@ func newStartingRuntime(t *testing.T, sc startScripts) (*CloudRunSandboxRuntime,
 		rootDir:      t.TempDir(),
 		watchCancels: make(map[string]context.CancelFunc),
 	}
-	cancelWatchersOnCleanup(t, rt)
+	stopWatchersOnCleanup(t, rt.state.path, rt)
 	return rt, env
 }
 

@@ -20,6 +20,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
+	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 )
 
 // nfsBackend resolves workspace and shared-dir paths onto an NFS-backed
@@ -77,6 +78,8 @@ func (b *nfsBackend) Resolve(in ResolveInput) (ResolvedWorkspace, error) {
 		HostBase:           ws.HostBase,
 		Backend:            "nfs",
 		SharedDirs:         make(map[string]ResolvedSharedDir, len(in.SharedDirNames)),
+		OwnerUID:           provision.DefaultOwnerID(ws.OwnerUID),
+		OwnerGID:           provision.DefaultOwnerID(ws.OwnerGID),
 	}
 
 	// Shared dirs: <SubPathRoot>/<projectID>/shared-dirs/<name>.

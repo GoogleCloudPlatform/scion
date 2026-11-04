@@ -14,6 +14,8 @@
 
 package runtime
 
+import "github.com/GoogleCloudPlatform/scion/pkg/config"
+
 // CheckResult represents the outcome of a single diagnostic check.
 type CheckResult struct {
 	Name        string `json:"name"`
@@ -37,4 +39,19 @@ type Diagnosable interface {
 type DiagnosticOpts struct {
 	Namespace string // namespace to validate access for
 	GKEMode   bool   // whether GKE-specific checks should run
+
+	// SharedDirStorageClass is the settings-level shared_dir_storage_class
+	// for the active profile (VersionedSettings.ResolveSharedDirDefaults);
+	// empty means not set. A template's or agent's kubernetes block can
+	// still override it per agent.
+	SharedDirStorageClass string
+	// SharedDirStorageShared is true when shared dirs are served from the
+	// project storage share (server.project_storage backend nfs, or a
+	// shared server.shared_dir_storage backend), so no per-dir claim and no
+	// shared_dir_storage_class is used.
+	SharedDirStorageShared bool
+
+	// Server is the global server settings (server.*), or nil when they
+	// could not be read. The cloudrun runtime reads its homes setting.
+	Server *config.V1ServerConfig
 }

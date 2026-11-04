@@ -15,6 +15,7 @@
 package oidckeys
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
@@ -575,19 +576,24 @@ func (m *OIDCKeyManager) backupKeyToStore(ctx context.Context, keyName, pemValue
 	if err := keymaterial.GuardOverwrite(ctx, m.store, m.cipher, m.flagged, keyName, store.ScopeHub, hubID); err != nil {
 		return err
 	}
+	existing, err := m.store.GetSecret(ctx, keyName, store.ScopeHub, hubID)
+	if err != nil && err != store.ErrNotFound {
+		return fmt.Errorf("checking existing OIDC key record: %w", err)
+	}
+	// A record the active writer already seals over the same key is left
+	// as it is (no UpdateSecret, no Version bump on restart).
+	if err == nil && keymaterial.BackupIsCurrent(m.cipher, existing.EncryptedValue, pemValue, decodePEMKeyBlock) {
+		return nil
+	}
 	// Encrypt with the shared cipher, consistent with LocalBackend.Set().
-	valueToStore, err := m.cipher.Encrypt(pemValue)
-	if err != nil {
-		return fmt.Errorf("encrypting OIDC key backup: %w", err)
+	valueToStore, encErr := m.cipher.Encrypt(pemValue)
+	if encErr != nil {
+		return fmt.Errorf("encrypting OIDC key backup: %w", encErr)
 	}
 
-	existing, err := m.store.GetSecret(ctx, keyName, store.ScopeHub, hubID)
 	if err == nil {
 		existing.EncryptedValue = valueToStore
 		return m.store.UpdateSecret(ctx, existing)
-	}
-	if err != store.ErrNotFound {
-		return fmt.Errorf("checking existing OIDC key record: %w", err)
 	}
 	sec := &store.Secret{
 		ID:             oidcSigningKeySecretID(hubID),
@@ -600,6 +606,16 @@ func (m *OIDCKeyManager) backupKeyToStore(ctx context.Context, keyName, pemValue
 	}
 	_, err = m.store.UpsertSecret(ctx, sec)
 	return err
+}
+
+// decodePEMKeyBlock returns the DER bytes of the single PEM block in an
+// OIDC key backup plaintext; false for anything else.
+func decodePEMKeyBlock(v string) ([]byte, bool) {
+	block, rest := pem.Decode([]byte(v))
+	if block == nil || len(bytes.TrimSpace(rest)) != 0 {
+		return nil, false
+	}
+	return block.Bytes, true
 }
 
 // syncKeyToBackend syncs a PEM-encoded key to the secret backend.

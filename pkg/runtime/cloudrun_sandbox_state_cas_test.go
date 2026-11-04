@@ -97,21 +97,8 @@ func siblingRuntime(t *testing.T, rt *CloudRunSandboxRuntime, bin string) *Cloud
 		rootDir:      t.TempDir(),
 		watchCancels: make(map[string]context.CancelFunc),
 	}
-	cancelWatchersOnCleanup(t, sib)
+	stopWatchersOnCleanup(t, sib.state.path, sib)
 	return sib
-}
-
-// cancelWatchersOnCleanup cancels rt's exit watchers when the test ends.
-func cancelWatchersOnCleanup(t *testing.T, rt *CloudRunSandboxRuntime) {
-	t.Helper()
-	t.Cleanup(func() {
-		rt.watchMu.Lock()
-		defer rt.watchMu.Unlock()
-		for name, cancel := range rt.watchCancels {
-			cancel()
-			delete(rt.watchCancels, name)
-		}
-	})
 }
 
 // readStateForTest reads the state file at path.
@@ -233,7 +220,7 @@ if [ "$1" = run ]; then
 fi
 exit 0`, log, release))
 	rt := newWorkaroundTestRuntime(t, bin)
-	cancelWatchersOnCleanup(t, rt)
+	stopWatchersOnCleanup(t, rt.state.path, rt)
 
 	runDone := make(chan error, 1)
 	var runReturned time.Time
@@ -747,7 +734,7 @@ func newArgsLogSandboxRuntime(t *testing.T) (*CloudRunSandboxRuntime, string) {
 echo "$*" >> %q
 exit 0`, log))
 	rt := newWorkaroundTestRuntime(t, bin)
-	cancelWatchersOnCleanup(t, rt)
+	stopWatchersOnCleanup(t, rt.state.path, rt)
 	return rt, log
 }
 

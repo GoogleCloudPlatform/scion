@@ -106,7 +106,7 @@ var projectHubLinkSettings = func(projectDir string) projectHubLink {
 			}
 			continue
 		}
-		s, err := LoadSettingsFromDir(dir)
+		s, err := LoadProjectSettingsFromDir(dir)
 		if err != nil || s == nil {
 			continue
 		}

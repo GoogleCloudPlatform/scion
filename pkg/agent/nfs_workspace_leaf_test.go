@@ -112,7 +112,7 @@ func TestEnsureNFSWorkspaceLeaf_MatchesSharedDirLeafModeAndOwnership(t *testing.
 
 	wsLeaf := statMode(t, res.HostPath)
 	sdLeaf := statMode(t, filepath.Join(otherBase, sdRel))
-	assert.Equal(t, uint32(0o2775), wsLeaf.Mode&0o7777, "workspace leaf mode")
+	assert.Equal(t, uint32(0o2775), uint32(wsLeaf.Mode)&0o7777, "workspace leaf mode")
 	assert.Equal(t, sdLeaf.Mode&0o7777, wsLeaf.Mode&0o7777, "workspace leaf mode must match a shared-dir leaf")
 	assert.Equal(t, sdLeaf.Uid, wsLeaf.Uid, "owner must match a shared-dir leaf")
 	assert.Equal(t, sdLeaf.Gid, wsLeaf.Gid, "group must match a shared-dir leaf")
@@ -121,7 +121,7 @@ func TestEnsureNFSWorkspaceLeaf_MatchesSharedDirLeafModeAndOwnership(t *testing.
 
 	wsParent := statMode(t, filepath.Dir(res.HostPath))
 	sdProject := statMode(t, filepath.Join(otherBase, "projects", testNFSWorkspaceProjectID))
-	assert.Equal(t, uint32(0o2755), wsParent.Mode&0o7777, "project directory mode")
+	assert.Equal(t, uint32(0o2755), uint32(wsParent.Mode)&0o7777, "project directory mode")
 	assert.Equal(t, sdProject.Mode&0o7777, wsParent.Mode&0o7777, "project directory mode must match the shared-dir chain")
 }
 
@@ -150,7 +150,7 @@ func TestEnsureNFSWorkspaceLeaf_LeavesExistingDirectoryAlone(t *testing.T) {
 			marker := filepath.Join(res.HostPath, "README.md")
 			require.NoError(t, os.WriteFile(marker, []byte("keep me"), 0o640))
 			before := statMode(t, res.HostPath)
-			require.Equal(t, uint32(tc.mode.Perm())|uint32(setgidBit(tc.mode)), before.Mode&0o7777, "fixture mode")
+			require.Equal(t, uint32(tc.mode.Perm())|uint32(setgidBit(tc.mode)), uint32(before.Mode)&0o7777, "fixture mode")
 
 			for i := 0; i < 2; i++ { // idempotent: a second call is also a no-op
 				prepared, err := ensureNFSWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, res, runtime.NFSPodShare{ClaimName: "ws-pv"}, nil)
@@ -266,10 +266,10 @@ func TestEnsureNFSWorkspaceLeaf_CreatesClaimSharedDirs(t *testing.T) {
 	projectDir := filepath.Join(mountRoot, "share-1", "projects", testNFSWorkspaceProjectID)
 	for _, name := range []string{"scratchpad", "cache"} {
 		st := statMode(t, filepath.Join(projectDir, "shared-dirs", name))
-		assert.Equal(t, uint32(0o2775), st.Mode&0o7777, "shared dir %s mode", name)
+		assert.Equal(t, uint32(0o2775), uint32(st.Mode)&0o7777, "shared dir %s mode", name)
 	}
-	assert.Equal(t, uint32(0o2755), statMode(t, filepath.Join(projectDir, "shared-dirs")).Mode&0o7777)
-	assert.Equal(t, uint32(0o2775), statMode(t, res.HostPath).Mode&0o7777)
+	assert.Equal(t, uint32(0o2755), uint32(statMode(t, filepath.Join(projectDir, "shared-dirs")).Mode)&0o7777)
+	assert.Equal(t, uint32(0o2775), uint32(statMode(t, res.HostPath).Mode)&0o7777)
 }
 
 // An existing claim shared dir without setgid and group write keeps the
@@ -283,8 +283,8 @@ func TestEnsureNFSWorkspaceLeaf_ExistingUnpreparedSharedDirStaysStrict(t *testin
 	prepared, err := ensureNFSWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, res, runtime.NFSPodShare{ClaimName: "ws-pv"}, []string{"scratchpad"})
 	require.NoError(t, err)
 	assert.False(t, prepared)
-	assert.Equal(t, uint32(0o2775), statMode(t, res.HostPath).Mode&0o7777, "the workspace is still created")
-	assert.Equal(t, uint32(0o755), statMode(t, sdPath).Mode&0o7777, "the existing shared dir is left alone")
+	assert.Equal(t, uint32(0o2775), uint32(statMode(t, res.HostPath).Mode)&0o7777, "the workspace is still created")
+	assert.Equal(t, uint32(0o755), uint32(statMode(t, sdPath).Mode)&0o7777, "the existing shared dir is left alone")
 }
 
 // An existing workspace directory that is not prepared does not stop the
@@ -298,9 +298,9 @@ func TestEnsureNFSWorkspaceLeaf_UnpreparedWorkspaceStillCreatesSharedDirs(t *tes
 	prepared, err := ensureNFSWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, res, runtime.NFSPodShare{ClaimName: "ws-pv"}, []string{"scratchpad"})
 	require.NoError(t, err)
 	assert.False(t, prepared)
-	assert.Equal(t, uint32(0o755), statMode(t, res.HostPath).Mode&0o7777, "the existing workspace is left alone")
+	assert.Equal(t, uint32(0o755), uint32(statMode(t, res.HostPath).Mode)&0o7777, "the existing workspace is left alone")
 	sdPath := filepath.Join(filepath.Dir(res.HostPath), "shared-dirs", "scratchpad")
-	assert.Equal(t, uint32(0o2775), statMode(t, sdPath).Mode&0o7777, "the missing shared dir is created")
+	assert.Equal(t, uint32(0o2775), uint32(statMode(t, sdPath).Mode)&0o7777, "the missing shared dir is created")
 }
 
 // The shared-dir directories created here must be the ones the workspace
@@ -465,7 +465,7 @@ func TestEnsureNFSWorkspaceLeaf_PermissionDeniedLeavesDirectoryToNode(t *testing
 		assert.False(t, prepared)
 		_, statErr := os.Stat(res.HostPath)
 		assert.True(t, os.IsNotExist(statErr))
-		assert.Equal(t, uint32(0o2775), statMode(t, filepath.Join(sdRoot, "scratchpad")).Mode&0o7777,
+		assert.Equal(t, uint32(0o2775), uint32(statMode(t, filepath.Join(sdRoot, "scratchpad")).Mode)&0o7777,
 			"the shared dir is still created")
 		require.Len(t, warnings(), 2, "workspace and provisioning state directory")
 	})
@@ -482,7 +482,7 @@ func TestEnsureNFSWorkspaceLeaf_PermissionDeniedLeavesDirectoryToNode(t *testing
 		prepared, err := ensureNFSWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, res, runtime.NFSPodShare{ClaimName: "ws-pv"}, []string{"scratchpad"})
 		require.NoError(t, err)
 		assert.False(t, prepared)
-		assert.Equal(t, uint32(0o2775), statMode(t, res.HostPath).Mode&0o7777, "the workspace is still created")
+		assert.Equal(t, uint32(0o2775), uint32(statMode(t, res.HostPath).Mode)&0o7777, "the workspace is still created")
 		_, statErr := os.Stat(filepath.Join(sdRoot, "scratchpad"))
 		assert.True(t, os.IsNotExist(statErr))
 		require.Len(t, warnings(), 1)
@@ -659,7 +659,7 @@ func TestStartNFSWorkspace_PreCreatesClaimSharedDirs(t *testing.T) {
 	require.Equal(t, 1, ranCount)
 	assert.True(t, cfg.NFSWorkspacePreCreated)
 	sdPath := filepath.Join(mountRoot, "share-1", "projects", testNFSWorkspaceProjectID, "shared-dirs", "scratchpad")
-	assert.Equal(t, uint32(0o2775), statMode(t, sdPath).Mode&0o7777)
+	assert.Equal(t, uint32(0o2775), uint32(statMode(t, sdPath).Mode)&0o7777)
 }
 
 // A workspace_storage nfs block and a shared_dir_storage nfs block that
@@ -896,4 +896,184 @@ func TestEnsureNFSWorktreeLeaf_InlinePermissionDeniedRefused(t *testing.T) {
 		require.NoError(t, err, "with a claim the node still creates it")
 		assert.False(t, ok)
 	})
+}
+
+// TestEnsureNFSWorkspaceLeaf_ConfiguredShareOwnerReachesWalk: the nfs uid
+// and gid configured for the share reach the leaf walk through the nfs
+// backend's resolution, so an existing upper directory with the expected
+// shared layout (setgid, the configured gid, not other-writable) is not
+// warned about. The same tree with another configured gid keeps the
+// warning, and the leaf is created as before either way.
+func TestEnsureNFSWorkspaceLeaf_ConfiguredShareOwnerReachesWalk(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		gidDelta int
+		wantWarn bool
+	}{
+		{name: "configured gid matches"},
+		{name: "configured gid differs", gidDelta: 1, wantWarn: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mountRoot := t.TempDir()
+			projects := filepath.Join(mountRoot, "share-1", "projects")
+			require.NoError(t, os.MkdirAll(projects, 0o755))
+			if unix.Geteuid() == 0 {
+				require.NoError(t, os.Chown(projects, 4243, 4242))
+			}
+			require.NoError(t, unix.Chmod(projects, 0o2775))
+			st := statMode(t, projects)
+			if st.Uid == 0 || st.Gid == 0 || st.Mode&0o7777 != 0o2775 {
+				t.Skip("needs a setgid directory with a non-zero owner and group")
+			}
+
+			backend := runtime.NewNFSBackend(&config.V1NFSConfig{
+				MountRoot: mountRoot,
+				Shares:    []config.V1NFSShare{{ID: "share-1", PVName: "ws-pv"}},
+				UID:       int(st.Uid),
+				GID:       int(st.Gid) + tc.gidDelta,
+			})
+			res, err := backend.Resolve(runtime.ResolveInput{ProjectID: testNFSWorkspaceProjectID})
+			require.NoError(t, err)
+			assert.Equal(t, int(st.Uid), res.OwnerUID, "the configured nfs uid is resolved")
+			assert.Equal(t, int(st.Gid)+tc.gidDelta, res.OwnerGID, "the configured nfs gid is resolved")
+
+			shareddirs.ResetWalkWarningsForTest()
+			t.Cleanup(shareddirs.ResetWalkWarningsForTest)
+			records := captureSlog(t)
+
+			preCreated, err := ensureNFSWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, res, runtime.NFSPodShare{ClaimName: "ws-pv"}, nil)
+			require.NoError(t, err)
+			assert.True(t, preCreated)
+
+			var walkWarns int
+			for _, r := range *records {
+				if r.Level == slog.LevelWarn && strings.HasPrefix(r.Message, "NFS directory walk: an existing upper directory is group/other-writable") {
+					walkWarns++
+				}
+			}
+			if tc.wantWarn {
+				assert.Equal(t, 1, walkWarns, "another gid keeps the warning")
+			} else {
+				assert.Zero(t, walkWarns, "the expected shared layout is not warned about")
+			}
+			assert.Equal(t, uint32(0o2775), uint32(statMode(t, res.HostPath).Mode)&0o7777, "the workspace leaf is created as before")
+		})
+	}
+}
+
+// sharedLayoutDirs gives each dir the expected shared layout: mode 2775 and
+// a non-zero owner and group (4243:4242 when the test runs as root, else
+// this process's own ids). It returns that uid and gid, and skips the test
+// when the directories cannot have that layout here.
+func sharedLayoutDirs(t *testing.T, dirs ...string) (uid, gid int) {
+	t.Helper()
+	for _, d := range dirs {
+		if unix.Geteuid() == 0 {
+			require.NoError(t, os.Chown(d, 4243, 4242))
+		}
+		require.NoError(t, unix.Chmod(d, 0o2775))
+		st := statMode(t, d)
+		if st.Uid == 0 || st.Gid == 0 || st.Mode&0o7777 != 0o2775 {
+			t.Skip("needs setgid directories with a non-zero owner and group")
+		}
+		uid, gid = int(st.Uid), int(st.Gid)
+	}
+	return uid, gid
+}
+
+// walkWarnings counts the walk's upper-directory warnings among records.
+func walkWarnings(records []slog.Record) int {
+	n := 0
+	for _, r := range records {
+		if r.Level == slog.LevelWarn && strings.HasPrefix(r.Message, "NFS directory walk: an existing upper directory is group/other-writable") {
+			n++
+		}
+	}
+	return n
+}
+
+// TestEnsureNFSWorktreeLeaf_ConfiguredShareOwnerReachesWalk: the configured
+// nfs uid and gid reach the worktree leaf's walk as they reach the workspace
+// leaf's, so existing upper directories with the expected shared layout are
+// not warned about; another configured gid keeps the warning.
+func TestEnsureNFSWorktreeLeaf_ConfiguredShareOwnerReachesWalk(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		gidDelta int
+		wantWarn bool
+	}{
+		{name: "configured gid matches"},
+		{name: "configured gid differs", gidDelta: 1, wantWarn: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mountRoot := t.TempDir()
+			ws := nfsTestWorkspaceDir(mountRoot)
+			stateDir := provision.ProjectStateDir(ws)
+			require.NoError(t, os.MkdirAll(ws, 0o755))
+			require.NoError(t, os.MkdirAll(stateDir, 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(stateDir, provision.ProvisionSentinelFile), []byte("x"), 0o644))
+			projects := filepath.Join(mountRoot, "share-1", "projects")
+			uid, gid := sharedLayoutDirs(t, projects, filepath.Dir(ws), ws)
+
+			res, err := runtime.NewNFSBackend(&config.V1NFSConfig{
+				MountRoot: mountRoot,
+				Shares:    []config.V1NFSShare{{ID: "share-1", PVName: "ws-pv"}},
+				UID:       uid,
+				GID:       gid + tc.gidDelta,
+			}).Resolve(runtime.ResolveInput{ProjectID: testNFSWorkspaceProjectID})
+			require.NoError(t, err)
+
+			shareddirs.ResetWalkWarningsForTest()
+			t.Cleanup(shareddirs.ResetWalkWarningsForTest)
+			records := captureSlog(t)
+
+			ok, err := ensureNFSWorktreeLeaf("kubernetes", res, runtime.NFSPodShare{ClaimName: "ws-pv"}, "agent-1")
+			require.NoError(t, err)
+			assert.True(t, ok)
+			assert.DirExists(t, filepath.Join(ws, "worktrees", "agent-1"))
+			if tc.wantWarn {
+				assert.Equal(t, 1, walkWarnings(*records), "another gid keeps the warning")
+			} else {
+				assert.Zero(t, walkWarnings(*records), "the expected shared layout is not warned about")
+			}
+		})
+	}
+}
+
+// TestRemoveNFSWorktree_ConfiguredShareOwnerReachesWalk: the delete path's
+// walk to the provisioning state directory gets the configured nfs uid and
+// gid from the settings, so existing upper directories with the expected
+// shared layout are not warned about; another configured gid keeps the
+// warning.
+func TestRemoveNFSWorktree_ConfiguredShareOwnerReachesWalk(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		gidDelta int
+		wantWarn bool
+	}{
+		{name: "configured gid matches"},
+		{name: "configured gid differs", gidDelta: 1, wantWarn: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, ws := setupNFSWorktreeRemoval(t)
+			runPurgeInline(t)
+			mountRoot := filepath.Dir(filepath.Dir(filepath.Dir(filepath.Dir(ws))))
+			require.NoError(t, os.RemoveAll(provision.ProjectStateDir(ws)))
+			uid, gid := sharedLayoutDirs(t, filepath.Join(mountRoot, "share-1", "projects"), filepath.Dir(ws))
+			f.writeGlobalSettings(t, fmt.Sprintf(nfsWorkspaceStartYAML, mountRoot)+fmt.Sprintf("      uid: %d\n      gid: %d\n", uid, gid+tc.gidDelta))
+
+			shareddirs.ResetWalkWarningsForTest()
+			t.Cleanup(shareddirs.ResetWalkWarningsForTest)
+			records := captureSlog(t)
+
+			path, err := kubernetesTestManager("kubernetes").RemoveNFSWorktree(context.Background(), f.projectScionDir, testNFSWorkspaceProjectID, "test-agent")
+			require.NoError(t, err)
+			assert.NoDirExists(t, path)
+			if tc.wantWarn {
+				assert.Equal(t, 1, walkWarnings(*records), "another gid keeps the warning")
+			} else {
+				assert.Zero(t, walkWarnings(*records), "the expected shared layout is not warned about")
+			}
+		})
+	}
 }

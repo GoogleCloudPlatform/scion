@@ -40,6 +40,12 @@ const (
 	FieldDispatchReason = "dispatch_reason"
 	// FieldNextAttemptAt holds the string denoting the next_attempt_at field in the database.
 	FieldNextAttemptAt = "next_attempt_at"
+	// FieldKind holds the string denoting the kind field in the database.
+	FieldKind = "kind"
+	// FieldResourceType holds the string denoting the resource_type field in the database.
+	FieldResourceType = "resource_type"
+	// FieldResourceID holds the string denoting the resource_id field in the database.
+	FieldResourceID = "resource_id"
 	// FieldCreated holds the string denoting the created field in the database.
 	FieldCreated = "created"
 	// Table holds the table name of the notification in the database.
@@ -62,6 +68,9 @@ var Columns = []string{
 	FieldDispatchOutcome,
 	FieldDispatchReason,
 	FieldNextAttemptAt,
+	FieldKind,
+	FieldResourceType,
+	FieldResourceID,
 	FieldCreated,
 }
 
@@ -96,6 +105,12 @@ var (
 	DefaultDispatchOutcome string
 	// DefaultDispatchReason holds the default value on creation for the "dispatch_reason" field.
 	DefaultDispatchReason string
+	// DefaultKind holds the default value on creation for the "kind" field.
+	DefaultKind string
+	// DefaultResourceType holds the default value on creation for the "resource_type" field.
+	DefaultResourceType string
+	// DefaultResourceID holds the default value on creation for the "resource_id" field.
+	DefaultResourceID string
 	// DefaultCreated holds the default value on creation for the "created" field.
 	DefaultCreated func() time.Time
 	// DefaultID holds the default value on creation for the "id" field.
@@ -173,6 +188,21 @@ func ByDispatchReason(opts ...sql.OrderTermOption) OrderOption {
 // ByNextAttemptAt orders the results by the next_attempt_at field.
 func ByNextAttemptAt(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldNextAttemptAt, opts...).ToFunc()
+}
+
+// ByKind orders the results by the kind field.
+func ByKind(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldKind, opts...).ToFunc()
+}
+
+// ByResourceType orders the results by the resource_type field.
+func ByResourceType(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldResourceType, opts...).ToFunc()
+}
+
+// ByResourceID orders the results by the resource_id field.
+func ByResourceID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldResourceID, opts...).ToFunc()
 }
 
 // ByCreated orders the results by the created field.

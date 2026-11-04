@@ -335,3 +335,45 @@ func TestParseExpiry_90Days(t *testing.T) {
 		t.Errorf("expected time close to %v, got %v (diff: %v)", expected, result, diff)
 	}
 }
+
+// TestHubTokenHelp_BoundaryAndLiveAccess pins the boundary-related help:
+// the live-access paragraph, the hub-token project-name note, and the
+// list and scopes flags and their text.
+func TestHubTokenHelp_BoundaryAndLiveAccess(t *testing.T) {
+	for _, want := range []string{
+		"checked against your current access",
+		"Hub tokens and project names",
+		"project:list (only a hub-wide role",
+		"run inside a linked checkout",
+		"scion hub token scopes --boundary hub",
+		"restore",
+		"service-accounts list",
+	} {
+		if !strings.Contains(hubTokenCmd.Long, want) {
+			t.Errorf("hub token help missing %q", want)
+		}
+	}
+	if !strings.Contains(hubTokenCreateCmd.Long, `"--boundary hub"`) {
+		t.Error("hub token create help must point to the hub eligibility listing")
+	}
+	for _, want := range []string{"BOUNDARY", "--wide", "PURPOSE", "--boundary project|hub", "matches hub tokens"} {
+		if !strings.Contains(hubTokenListCmd.Long, want) {
+			t.Errorf("hub token list help missing %q", want)
+		}
+	}
+	for _, want := range []string{"--boundary hub", "Boundary (--boundary):"} {
+		if !strings.Contains(hubTokenScopesCmd.Long, want) {
+			t.Errorf("hub token scopes help missing %q", want)
+		}
+	}
+	for _, f := range []string{"boundary", "wide", "project", "json"} {
+		if hubTokenListCmd.Flags().Lookup(f) == nil {
+			t.Errorf("hub token list must register --%s", f)
+		}
+	}
+	for _, f := range []string{"boundary", "project", "json"} {
+		if hubTokenScopesCmd.Flags().Lookup(f) == nil {
+			t.Errorf("hub token scopes must register --%s", f)
+		}
+	}
+}

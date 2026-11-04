@@ -192,6 +192,26 @@ func (RuntimeBroker) Fields() []ent.Field {
 		field.Time("presentation_observed_at").
 			Optional().
 			Nillable(),
+		// --- Legacy Runtime Broker conversion plan (store.RuntimeBroker.ConversionPlanPresentation) ---
+		// The three conversion plan columns are written only by
+		// SetRuntimeBrokerConversionPlan (one conditional update bound to a
+		// legacy row) and removed only by deleting the row; no full-row
+		// writer writes them.
+		//
+		// conversion_plan_presentation is the JSON-encoded
+		// api.ConversionPlanPresentation; empty means never reported.
+		field.String("conversion_plan_presentation").
+			Optional(),
+		// conversion_plan_presentation_hash is the Hub-computed hash of the
+		// stored conversion plan.
+		field.String("conversion_plan_presentation_hash").
+			Optional(),
+		// conversion_plan_observed_at is the Hub time the stored conversion
+		// plan was last written or confirmed, refreshed at most every
+		// store.PresentationObservedRefresh on an unchanged plan.
+		field.Time("conversion_plan_observed_at").
+			Optional().
+			Nillable(),
 		field.Time("created").
 			Default(time.Now).
 			Immutable(),

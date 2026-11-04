@@ -341,7 +341,7 @@ func ConfiguredRuntimeNames() (names map[string]bool, ok bool) {
 		return names, true
 	}
 	k := koanf.New(".")
-	if _, err := loadSettingsFileConverting(k, globalDir, &legacyLayerState{}); err != nil {
+	if _, err := loadSettingsFileConverting(k, globalDir, &legacyLayerState{}, false); err != nil {
 		return names, false
 	}
 	// The file layer's runtimes section, by the exact top-level key

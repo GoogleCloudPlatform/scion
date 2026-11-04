@@ -33,6 +33,11 @@ var brokerOperations = []OperationSpec{
 			// The projects a broker serves, filtered to the projects the
 			// caller can read.
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/runtime-brokers/{id}/projects", Method: "GET"},
+			// A legacy broker's conversion plan (behind
+			// hub.flat_runtime_brokers; 404 while it is off), dispatched
+			// inside handleRuntimeBrokerRoutes; its agents and projects are
+			// filtered to the ones the caller can read.
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/runtime-brokers/{id}/conversion-plan", Method: "GET"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},

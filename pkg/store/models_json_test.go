@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"sort"
 	"testing"
+	"time"
 )
 
 // legacyGroveKeys are grove-named JSON keys that no store model may emit or
@@ -546,4 +547,40 @@ func TestAgentSessionMetrics_JSON_CanonicalKeysOnly(t *testing.T) {
 	if decoded.ProjectID != "" {
 		t.Errorf("ProjectID = %q, want empty (legacy groveId must not be honored)", decoded.ProjectID)
 	}
+}
+
+// TestNotification_JSON_ResourceFields pins the kind and resource keys
+// (ptone/scion#5145): an existing-shape notification serialises byte for
+// byte as before they existed (they are omitempty), and one that sets them
+// carries all three.
+func TestNotification_JSON_ResourceFields(t *testing.T) {
+	n := Notification{
+		ID: "n-1", SubscriptionID: "sub-1", AgentID: "agent-1", ProjectID: "p-1",
+		SubscriberType: "user", SubscriberID: "u-1", Status: "COMPLETED",
+		Message: "hi", Dispatched: true, CreatedAt: time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC),
+		DispatchAttempts: 1, DispatchOutcome: NotificationOutcomeDelivered,
+	}
+	data, err := json.Marshal(n)
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+	want := `{"id":"n-1","subscriptionId":"sub-1","agentId":"agent-1","projectId":"p-1","subscriberType":"user",` +
+		`"subscriberId":"u-1","status":"COMPLETED","message":"hi","dispatched":true,"acknowledged":false,` +
+		`"createdAt":"2026-03-01T12:00:00Z","dispatchAttempts":1,"dispatchOutcome":"delivered"}`
+	if string(data) != want {
+		t.Errorf("existing-shape JSON changed:\n got %s\nwant %s", data, want)
+	}
+
+	n.Kind = NotificationKindArtifactGrant
+	n.ResourceType = NotificationResourceArtifact
+	n.ResourceID = "art-1"
+	data, err = json.Marshal(n)
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+	assertExactKeySet(t, "Notification", data, []string{
+		"id", "subscriptionId", "agentId", "projectId", "subscriberType",
+		"subscriberId", "status", "message", "dispatched", "acknowledged", "createdAt",
+		"dispatchAttempts", "dispatchOutcome", "kind", "resourceType", "resourceId",
+	})
 }

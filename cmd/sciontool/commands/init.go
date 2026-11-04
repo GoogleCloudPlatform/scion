@@ -456,16 +456,9 @@ func RunInit(args []string, opts InitRunOptions) int {
 	log.Info("Child command: %v", childArgs)
 	log.Info("Grace period: %s", gracePeriod)
 
-	// Log operating mode for diagnostics
-	mode := hub.OperatingMode()
-	switch mode {
-	case hub.ModeLocal:
-		log.Info("Operating mode: local (no hub configured)")
-	case hub.ModeHubConnected:
-		log.Info("Operating mode: hub-connected (endpoint: %s)", os.Getenv(hub.EnvHubEndpoint))
-	case hub.ModeHosted:
-		log.Info("Operating mode: hosted (endpoint: %s)", os.Getenv(hub.EnvHubEndpoint))
-	}
+	// The operating mode is logged once the hub client is built (see
+	// logHubOperatingMode), so a hub endpoint without a usable client is
+	// reported as such rather than as hub-connected.
 
 	// nfs shared-dir writers: clear the umask's group bits (022 -> 002) when
 	// the runtime granted shared-dir groups (SCION_SUPPLEMENTAL_GIDS checked
@@ -530,7 +523,25 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// the harness. This must happen before telemetry pipeline initialization
 	// because the GCP credentials file (pointed to by SCION_OTEL_GCP_CREDENTIALS)
 	// must exist on disk when the telemetry pipeline starts.
+	//
+	// The in-memory harness directories, when the runtime names them, are
+	// created for the workload user first (a no-op unless init runs as
+	// root), so staged harness secrets and the harness outputs never fall
+	// back to the home.
+	if err := prepareHarnessMemDirs(); err != nil {
+		log.Error("Failed to prepare the in-memory harness directories: %v", err)
+		reportInitFailure(agentHome, err)
+		return 1
+	}
+	// resolvedAuthNonceThisPass is the nonce of the resolved-auth carry
+	// file this pass wrote, for the path without a re-exec.
+	resolvedAuthNonceThisPass := ""
 	if encoded := os.Getenv(stagedsecrets.EnvVar); encoded != "" {
+		// Only this pass may set the staged-token and resolved-auth
+		// markers; ones inherited from the environment are dropped before
+		// anything is staged.
+		_ = os.Unsetenv(envHubTokenStaged)
+		_ = os.Unsetenv(envResolvedAuthStaged)
 		staged, err := stagedsecrets.Decode(encoded)
 		if err != nil {
 			log.Error("Failed to decode staged secrets: %v", err)
@@ -544,9 +555,71 @@ func RunInit(args []string, opts InitRunOptions) int {
 			reportInitFailure(agentHome, fmt.Errorf("failed to write staged secrets: %w", err))
 			return 1
 		}
+		// A runtime whose instance cannot see the broker-written token file
+		// (Cloud Run) stages the hub-issued credential instead. It is
+		// written to the canonical token file, and a marker (not the
+		// credential) survives the re-exec below so this init removes the
+		// file again at exit. The errors name the step and path only.
+		if staged.HubToken != "" {
+			kept, err := stageHubToken(staged.HubToken, targetUID, targetGID)
+			staged.HubToken = ""
+			if err != nil {
+				log.Error("Failed to write the staged hub credential: %v", err)
+				reportInitFailure(agentHome, fmt.Errorf("failed to write the staged hub credential: %w", err))
+				return 1
+			}
+			if kept {
+				log.Info("Kept the existing hub credential file: it was issued after the staged one")
+			} else {
+				log.Info("Wrote the staged hub credential to the agent token file")
+			}
+			if err := os.Setenv(envHubTokenStaged, "1"); err != nil {
+				log.Warn("Could not mark the hub credential file as staged; it will not be removed at exit: %v", err)
+			}
+		}
+		// A runtime whose instance home is on shared storage (Cloud Run)
+		// stages the harness bundle's secrets in the blob. They are written
+		// only into the in-memory directory SCION_HARNESS_SECRETS_DIR names,
+		// never into the home; with no such directory the start fails.
+		// Errors name the step and file names only.
+		harnessSecretCount := len(staged.HarnessSecrets)
+		if err := stagedsecrets.WriteHarnessSecrets(hooks.DefaultHarnessDirsRoot, os.Getenv(hooks.HarnessSecretsDirEnv), staged.HarnessSecrets); err != nil {
+			staged.HarnessSecrets = nil
+			log.Error("Failed to write the staged harness secrets: %v", err)
+			reportInitFailure(agentHome, fmt.Errorf("failed to write the staged harness secrets: %w", err))
+			return 1
+		}
+		staged.HarnessSecrets = nil
+		// A runtime that delivers the instance environment in plain form
+		// (Cloud Run) stages its resolved-auth entries that are not
+		// discovery settings. They reach the harness launch below only
+		// through a file on the in-memory volume (never this process's
+		// environment, the home or shared storage); with no in-memory
+		// harness directory the start fails. Counts only are logged.
+		// The marker carries this pass's nonce (never a credential), which
+		// the carry file also holds; it survives the re-exec below, so the
+		// next pass reads this carry file and no other.
+		resolvedAuthCount := len(staged.ResolvedAuthEnv)
+		if resolvedAuthCount > 0 {
+			nonce, err := stagedsecrets.NewResolvedAuthNonce()
+			if err == nil {
+				err = stagedsecrets.WriteResolvedAuthEnv(resolvedAuthEnvRoot, os.Getenv(hooks.HarnessSecretsDirEnv), nonce, staged.ResolvedAuthEnv)
+			}
+			if err == nil {
+				err = os.Setenv(envResolvedAuthStaged, nonce)
+			}
+			if err != nil {
+				staged.ResolvedAuthEnv = nil
+				log.Error("Failed to stage the resolved-auth environment entries: %v", err)
+				reportInitFailure(agentHome, fmt.Errorf("failed to stage the resolved-auth environment entries: %w", err))
+				return 1
+			}
+			resolvedAuthNonceThisPass = nonce
+		}
+		staged.ResolvedAuthEnv = nil
 		_ = os.Unsetenv(stagedsecrets.EnvVar)
-		log.Info("Staged %d file secret(s) and %d variable secret(s)",
-			len(staged.FileSecrets), len(staged.VariableSecrets))
+		log.Info("Staged %d file secret(s), %d variable secret(s), %d harness secret(s) and %d resolved-auth env entr(ies)",
+			len(staged.FileSecrets), len(staged.VariableSecrets), harnessSecretCount, resolvedAuthCount)
 
 		// Re-exec to purge SCION_STAGED_SECRETS from /proc/1/environ.
 		//
@@ -578,6 +651,10 @@ func RunInit(args []string, opts InitRunOptions) int {
 			log.Info("RunInit embedded: skipping environ-purge re-exec")
 		}
 	} else if transportCleared {
+		// Only the staging pass above arms the staged-token and
+		// resolved-auth markers; this re-exec carries neither.
+		_ = os.Unsetenv(envHubTokenStaged)
+		_ = os.Unsetenv(envResolvedAuthStaged)
 		// Restart init with the cleaned environment, as above. On the
 		// second pass the env var is absent and the file already exists,
 		// so this branch is not taken again. Skipped for an embedded
@@ -589,6 +666,39 @@ func RunInit(args []string, opts InitRunOptions) int {
 		} else {
 			log.Info("RunInit embedded: skipping environ-purge re-exec")
 		}
+	}
+
+	// The resolved-auth entries the staging pass carried across the re-exec
+	// are read and their file removed now, before anything else runs; they
+	// go to the harness child's environment only (supervisor AuthEnv). A
+	// carry file without the marker was not written by this init and is
+	// removed unread.
+	resolvedAuthNonce := resolvedAuthNonceThisPass
+	if resolvedAuthNonce == "" {
+		resolvedAuthNonce = os.Getenv(envResolvedAuthStaged)
+	}
+	_ = os.Unsetenv(envResolvedAuthStaged)
+	resolvedAuthEnv, err := takeResolvedAuthEnv(resolvedAuthEnvRoot, resolvedAuthNonce)
+	if err != nil {
+		log.Error("Failed to read the staged resolved-auth environment entries: %v", err)
+		reportInitFailure(agentHome, fmt.Errorf("failed to read the staged resolved-auth environment entries: %w", err))
+		return 1
+	}
+
+	// The token file this init staged from the runtime's payload is removed
+	// as init returns, after the final hub reports (deferred calls run after
+	// every return path below), but only when the agent's final outcome is
+	// clean (stagedTokenCleanExit, set once the exit is classified, or when
+	// the child exits 0 within the immediate-exit check). After a
+	// crash, a limits stop or an init failure the platform restarts the
+	// container with the same payload, so the file, which the refresh loop
+	// keeps current, is kept for stageHubToken's iat rule. A file the broker
+	// bind-mounted or copied in (docker, Kubernetes) is never staged and
+	// stays as before.
+	stagedTokenCleanExit := false
+	if os.Getenv(envHubTokenStaged) == "1" {
+		_ = os.Unsetenv(envHubTokenStaged)
+		defer func() { finishStagedHubToken(stagedTokenCleanExit) }()
 	}
 
 	// Open the startup listener when the runtime asked for one (only the
@@ -905,6 +1015,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// Initialize hubClient early so the metadata server's fetch callbacks
 	// can use it without data races or startup race conditions.
 	hubClient := hub.NewClient()
+	logHubOperatingMode(hubClient)
 
 	// Publish what this process knows about its own agent credential for
 	// sciontool doctor. The first write happens here, before the child
@@ -1022,6 +1133,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 
 	// Create supervisor with configuration
 	config := harnessSupervisorConfig(opts, gracePeriod, targetUID, targetGID, rootless, harnessEnvOverlay, nativeTelemetryPolicy, secretOverrides)
+	config.AuthEnv = resolvedAuthEnv
 	sup := supervisor.New(config)
 
 	// Create a cancellable context for graceful shutdown
@@ -1117,6 +1229,9 @@ func RunInit(args []string, opts InitRunOptions) int {
 			return 1
 		}
 		log.Info("Child exited immediately with code %d (uid=%d, gid=%d)", result.code, os.Geteuid(), os.Getegid())
+		// An immediate exit 0 is as clean as one after the wait loop, so a
+		// token file this init staged is removed on both paths alike.
+		stagedTokenCleanExit = result.code == 0
 		return result.code
 	case <-time.After(100 * time.Millisecond):
 		// Process appears to be running, execute post-start hooks
@@ -1552,6 +1667,13 @@ waitLoop:
 
 	outcome := classifyExit(result.code, result.err, harnessCode, limitsExceeded, requestedShutdown.Load())
 	finalCode := outcome.exitCode
+	// Clean for the staged token file also requires that this process exits
+	// 0 (the supervised child's own code, which RunInit returns below) or
+	// that a stop was requested: when the harness exit-code file says 0 but
+	// the child exits non-zero, the container exits non-zero and is
+	// restarted with the same payload, so the file is kept.
+	stagedTokenCleanExit = finalCode == 0 && !outcome.isCrash && !outcome.limitsExceeded && result.err == nil &&
+		(result.code == 0 || outcome.signaled)
 	limitsExceeded = outcome.limitsExceeded
 
 	// Report a session whose session-end hook has not run (the agent is

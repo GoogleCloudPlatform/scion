@@ -37,7 +37,8 @@ import (
 //
 //	0  the command did its job; for status, a report was produced, NOT
 //	   READY included (readiness is report content, not a failure)
-//	1  the operation failed (database open or read, decrypt or audit error)
+//	1  the operation failed (database open or read, decrypt or audit error;
+//	   for verify, also any stored payload that fails verification)
 //	2  invalid configuration or an unmet precondition; nothing was done
 const (
 	keysExitFailure = 1
@@ -76,14 +77,15 @@ var serverKeysCmd = &cobra.Command{
 
 They read the server configuration and keyring file on this host and never
 start services or print key material. They are available in human mode
-only. The read-only commands (status, check) do not require the
+only. The read-only commands (status, check, verify) do not require the
 server.secret_rotation experiment: it is a hub database setting, and they
 change nothing.
 
 Exit codes: 0 the command did its job (status: a report was produced,
-including a NOT READY one; check: the configuration is valid); 1 the
-operation failed (for example the database could not be opened or read);
-2 invalid configuration or an unmet precondition.`,
+including a NOT READY one; check: the configuration is valid; verify: every
+stored payload passed); 1 the operation failed (for example the database
+could not be opened or read; verify: a stored payload failed); 2 invalid
+configuration or an unmet precondition.`,
 }
 
 func init() {

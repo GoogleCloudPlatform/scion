@@ -76,7 +76,7 @@ func (c *client) ProjectPreStartHooks(projectID string) ProjectPreStartHookServi
 }
 
 func (s *projectPreStartHookService) basePath() string {
-	return fmt.Sprintf("/api/v1/projects/%s/pre-start-hooks", s.projectID)
+	return fmt.Sprintf("/api/v1/projects/%s/pre-start-hooks", url.PathEscape(s.projectID))
 }
 
 func (s *projectPreStartHookService) List(ctx context.Context) (*ListProjectPreStartHooksResponse, error) {

@@ -771,6 +771,9 @@ func (s *Server) newHeartbeatService(client hubclient.RuntimeBrokerService, brok
 	hb.startsInFlight = s.startsInFlightSnapshot
 	hb.defaultProfile = s.defaultProfile
 	hb.flat = s.isFlat()
+	if !hb.flat {
+		hb.SetConversionPlanSource(s.heartbeatConversionPlan)
+	}
 	if fi := s.flatInstance(); fi != nil {
 		// The instance publishes its FC4-a presentation, built only by
 		// config.PresentInstance, on every heartbeat

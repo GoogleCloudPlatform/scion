@@ -154,14 +154,14 @@ type agentService struct {
 
 func (s *agentService) agentPath(agentID string) string {
 	if s.projectID != "" {
-		return "/api/v1/projects/" + s.projectID + "/agents/" + agentID
+		return "/api/v1/projects/" + url.PathEscape(s.projectID) + "/agents/" + url.PathEscape(agentID)
 	}
-	return "/api/v1/agents/" + agentID
+	return "/api/v1/agents/" + url.PathEscape(agentID)
 }
 
 func (s *agentService) agentsPath() string {
 	if s.projectID != "" {
-		return "/api/v1/projects/" + s.projectID + "/agents"
+		return "/api/v1/projects/" + url.PathEscape(s.projectID) + "/agents"
 	}
 	return "/api/v1/agents"
 }
@@ -1135,7 +1135,7 @@ func (s *agentService) BroadcastMessage(ctx context.Context, msg *messages.Struc
 		StructuredMessage: msg,
 		Interrupt:         interrupt,
 	}
-	resp, err := s.c.post(ctx, "/api/v1/projects/"+s.projectID+"/broadcast", body, nil)
+	resp, err := s.c.post(ctx, "/api/v1/projects/"+url.PathEscape(s.projectID)+"/broadcast", body, nil)
 	if err != nil {
 		return nil, err
 	}

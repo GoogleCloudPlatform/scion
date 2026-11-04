@@ -397,7 +397,7 @@ func TestHubUAT_MemberReachesOnlyProjectsWithAccess(t *testing.T) {
 // TestCreateToken_HubBoundaryRequiresLiveAuthority pins that a hub
 // boundary is not authority: a hub-admin whose roles do not carry
 // agent.delete cannot mint a hub token carrying agent:delete, and the
-// denial is the uniform forbidden error.
+// denial is a scope violation naming the selector and authority_required.
 func TestCreateToken_HubBoundaryRequiresLiveAuthority(t *testing.T) {
 	srv, s := testServer(t)
 	adminID := tid("hubuat-hubadmin-minter")
@@ -407,7 +407,11 @@ func TestCreateToken_HubBoundaryRequiresLiveAuthority(t *testing.T) {
 		UserID: adminID, Name: "hubuat-hubadmin-minter", Boundary: TokenBoundary{Kind: BoundaryKindHub}, Scopes: []string{"agent:delete"},
 	})
 	require.Error(t, err)
-	assert.ErrorIs(t, err, ErrUATProjectForbidden)
+	assert.NotErrorIs(t, err, ErrUATProjectForbidden)
+	var violation *UATScopeViolationError
+	require.ErrorAs(t, err, &violation)
+	assert.Equal(t, "agent:delete", violation.Selector)
+	assert.Equal(t, MintDenialAuthorityRequired, violation.Reason)
 }
 
 // TestCreateToken_HubBoundaryPersistsKindWithoutProject pins the stored

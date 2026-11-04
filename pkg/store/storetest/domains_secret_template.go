@@ -74,16 +74,18 @@ func TemplateDomain() Domain[store.Template] {
 			assert.Equal(t, want.Scope, got.Scope)
 			assert.False(t, got.Created.IsZero(), "Created timestamp should be set")
 		},
+		// UpdateTemplate writes metadata only; Status and SourceURL are
+		// written by UpdateTemplateContent (ptone/scion#4967).
 		Mutate: func(e *store.Template) {
 			e.Name = "Renamed " + e.Name
-			e.Status = store.TemplateStatusArchived
+			e.Description = "changed"
 		},
 		Update: func(ctx context.Context, s store.Store, e *store.Template) error {
 			return s.UpdateTemplate(ctx, e)
 		},
 		VerifyMutated: func(t *testing.T, got *store.Template) {
 			assert.Contains(t, got.Name, "Renamed ")
-			assert.Equal(t, store.TemplateStatusArchived, got.Status)
+			assert.Equal(t, "changed", got.Description)
 		},
 		Delete: func(ctx context.Context, s store.Store, id string) error {
 			return s.DeleteTemplate(ctx, id)

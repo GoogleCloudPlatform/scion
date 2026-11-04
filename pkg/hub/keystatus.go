@@ -49,8 +49,11 @@ import (
 // record identifiers.
 
 // KeyStatusReportVersion is the report_version of KeyStatusReport. A
-// consumer refuses a version it does not know.
-const KeyStatusReportVersion = 1
+// consumer refuses a version it does not know. Version 2: audit.by_format
+// and audit.by_kid count readable payloads by the key that authenticated
+// them (version 1 counted every payload by its envelope label, unreadable
+// ones included, with an "invalid" format), and audit.empty_no_ref is new.
+const KeyStatusReportVersion = 2
 
 // KeyStatusInstanceSource values: who built the report.
 const (
@@ -193,8 +196,15 @@ type KeyStatusAudit struct {
 	ReferenceOnly int        `json:"reference_only"`
 	Readable      int        `json:"readable"`
 	Unreadable    int        `json:"unreadable"`
-	// ByFormat counts payloads by envelope format (plaintext, v1, v2,
-	// invalid); ByKID counts v2 payloads by envelope key ID.
+	// EmptyNoRef counts rows with an empty value and no backend reference.
+	// They are not reference-only, so they are read as plaintext (a
+	// managed keyring-file instance counts them unreadable,
+	// plaintext_not_admitted). They are included in the other counts too.
+	EmptyNoRef int `json:"empty_no_ref"`
+	// ByFormat counts READABLE payloads by the format they authenticated
+	// in (plaintext, v1, v2); ByKID counts readable v2 payloads by the key
+	// ID that authenticated them, never by the envelope label alone.
+	// Unreadable payloads appear only in UnreadableByKind.
 	ByFormat map[string]int `json:"by_format"`
 	ByKID    map[string]int `json:"by_kid"`
 	// UnreadableByKind counts unreadable records by failure kind.
@@ -331,6 +341,7 @@ func keyStatusAudit(a EncryptionAudit, scope string) KeyStatusAudit {
 		ReferenceOnly:    a.ReferenceOnly,
 		Readable:         a.Readable,
 		Unreadable:       len(a.Unreadable),
+		EmptyNoRef:       a.EmptyNoRef,
 		ByFormat:         map[string]int{},
 		ByKID:            map[string]int{},
 		UnreadableByKind: map[string]int{},
@@ -384,8 +395,10 @@ func keyStatusPolicy(ctx context.Context, st store.SecretEncryptionStore) (*KeyS
 }
 
 // signingIssuanceReason is the /readyz signing reason of a keyring file's
-// signing ring at now (Server.signingNotReadyReason, without its log
-// line): "" while the active generation can issue.
+// signing ring at now, shared by Server.signingNotReadyReason (which adds
+// its log line) and the key status report: "" while the active generation
+// can issue, signing_issuance_closed at or after its sign_until, and
+// signing_no_active_generation for any other failure.
 func signingIssuanceReason(r *keyring.SigningRing, now time.Time) string {
 	_, err := r.Active(keyStatusIDPurpose, now)
 	switch {
@@ -452,21 +465,14 @@ func LocalKeyStatus(ctx context.Context, k *keyring.Keyring, c *secret.ValueCiph
 }
 
 // CheckKeyringFile applies the keyring-file checks a starting Hub applies
-// to a loaded file beyond the loader's own validation: the "legacy" signing
-// entry, this release's limits (keyringReleaseCheck) and, with emit
-// "legacy", the active generation as a legacy reader. Errors name no key
-// material.
+// to a loaded file beyond the loader's own validation (validateKeyringFile,
+// the same implementation validateKeyringConfig uses). Errors name no
+// key material.
 func CheckKeyringFile(k *keyring.Keyring) error {
 	if k == nil || k.Source() != keyring.SourceFile {
 		return errors.New("keyring file: not loaded from a keyring file")
 	}
-	if _, ok := k.Signing().LegacySecret(); !ok {
-		return errors.New("keyring mode: the signing ring has no \"legacy\" entry; every purpose that does not use the ring yet still needs it")
-	}
-	if err := keyringReleaseCheck(k); err != nil {
-		return err
-	}
-	return checkLegacyEmitActiveReader(k.Signing())
+	return validateKeyringFile(k)
 }
 
 // handleAdminKeyStatus serves GET /api/v1/admin/keys/status. The route

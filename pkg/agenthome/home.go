@@ -170,6 +170,51 @@ func copyMode(src fs.FileMode) fs.FileMode {
 	return 0o644
 }
 
+// SkipCopyName reports whether a tree copy skips the entry name: a
+// __pycache__ directory or a .pyc file (Python bytecode, rebuilt on use).
+// It is the one rule InstallTreeFrom, InstallTreeFS, OverlayTreeFrom and
+// the agent's skills directory carry-over share.
+func SkipCopyName(name string, isDir bool) bool {
+	if isDir {
+		return name == "__pycache__"
+	}
+	return strings.HasSuffix(name, ".pyc")
+}
+
+// homeFileMode is the mode InstallTreeFrom, InstallTreeFS and
+// OverlayTreeFrom give a copied regular file. A file nobody but its owner
+// can read stays owner-only (0600, or 0700 when any execute bit is set);
+// any other file gets 0644, or 0755 when any execute bit is set. setuid,
+// setgid, sticky and group or other write bits are never copied.
+func homeFileMode(src fs.FileMode) fs.FileMode {
+	p := src.Perm()
+	exec := p&0o111 != 0
+	if p&0o044 == 0 {
+		if exec {
+			return 0o700
+		}
+		return 0o600
+	}
+	if exec {
+		return 0o755
+	}
+	return 0o644
+}
+
+// CopyFileMode is the mode the tree copies give a regular file whose
+// source mode is src (homeFileMode), for a caller that copies a single
+// file into a home with Home.WriteFile under the same rule.
+func CopyFileMode(src fs.FileMode) fs.FileMode { return homeFileMode(src) }
+
+// homeDirMode is the mode those copies give a directory they create: 0700
+// when the source directory has no group or other bits, otherwise 0755.
+func homeDirMode(src fs.FileMode) fs.FileMode {
+	if src.Perm()&0o077 == 0 {
+		return 0o700
+	}
+	return 0o755
+}
+
 // treeBudget tracks InstallTree's Limits.
 type treeBudget struct {
 	lim     Limits
@@ -230,3 +275,55 @@ func readDirSorted(src *os.Root, rel string) ([]fs.DirEntry, error) {
 	slices.SortFunc(entries, func(a, b fs.DirEntry) int { return strings.Compare(a.Name(), b.Name()) })
 	return entries, err
 }
+
+// SeedOptions configures Home.SeedTree.
+type SeedOptions struct {
+	// Exclude reports whether the source entry rel (slash-separated,
+	// relative to the source root) is left out. An excluded directory is
+	// not descended into. Nil excludes nothing.
+	Exclude func(rel string) bool
+	// UID and GID own every directory SeedTree creates and every file it
+	// writes (fchown on the new entry's own descriptor). A failed chown
+	// fails the copy.
+	UID, GID int
+	// Limits bounds the copy; exceeding one fails with a *LimitError.
+	Limits Limits
+}
+
+// SeedResult counts what Home.SeedTree did. Skipped lists, by path
+// relative to the source root, the links, special files and hard-linked
+// files it skipped; Replaced lists the home entries that were links and
+// were replaced.
+type SeedResult struct {
+	Dirs     int
+	Files    int
+	Bytes    int64
+	Skipped  []string
+	Replaced []string
+}
+
+// SeedConflictError reports that the home has a symbolic link or an entry
+// of the wrong type where SeedTree would put a directory or a file. Rel is
+// the entry's path relative to the home; it holds no host path.
+type SeedConflictError struct {
+	Rel    string
+	Reason string
+}
+
+func (e *SeedConflictError) Error() string {
+	return "agenthome: " + e.Rel + ": " + e.Reason
+}
+
+// seedFileMode is the mode SeedTree gives a copied file: the source's
+// permission bits capped at 0755 when any execute bit is set and at 0644
+// otherwise. Setuid, setgid and sticky never survive (Perm drops them).
+func seedFileMode(src fs.FileMode) fs.FileMode {
+	perm := src.Perm()
+	if perm&0o111 != 0 {
+		return perm & 0o755
+	}
+	return perm & 0o644
+}
+
+// seedDirMode is the mode of a directory SeedTree creates.
+const seedDirMode fs.FileMode = 0o700

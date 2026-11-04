@@ -126,6 +126,8 @@ var agentAllowed = map[string]bool{
 	// (add, mint, verify, remove) and list stay out (ptone, ptone/scion#4018).
 	"project.service-accounts":      true,
 	"project.service-accounts.show": true,
+	"project.settings":              true, // reading the agent's own project settings (the Hub admits project:read, project-isolated)
+	"project.settings.get":          true, // set and unset stay out; the Hub refuses agents there
 	"set-message-mode":              true,
 	"conversation":                  true,
 	"conversation.list":             true,
@@ -144,6 +146,7 @@ var agentAllowed = map[string]bool{
 	"artifact.versions":             true,
 	"artifact.list":                 true,
 	"artifact.view":                 true,
+	"artifact.comments":             true,
 	// artifact share, artifact grants and artifact delete are human-only
 	// and deliberately absent (ptone/scion#4529, ptone/scion#4579): agents
 	// may not share or delete artifacts, or manage their grants.

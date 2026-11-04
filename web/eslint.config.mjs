@@ -176,6 +176,7 @@ export default defineConfig([
       'e2e/harness/*.ts',
       'e2e/roles/*.ts',
       'e2e/terminal-coordinator/*.ts',
+      'e2e/tokens/*.ts',
     ],
     './e2e/tsconfig.eslint.json'
   ),

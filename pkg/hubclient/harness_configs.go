@@ -223,7 +223,7 @@ func (s *harnessConfigService) List(ctx context.Context, opts *ListHarnessConfig
 
 // Get returns a single harness config by ID.
 func (s *harnessConfigService) Get(ctx context.Context, id string) (*HarnessConfig, error) {
-	resp, err := s.c.get(ctx, "/api/v1/harness-configs/"+id, nil)
+	resp, err := s.c.get(ctx, "/api/v1/harness-configs/"+url.PathEscape(id), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -241,7 +241,7 @@ func (s *harnessConfigService) Create(ctx context.Context, req *CreateHarnessCon
 
 // Update updates a harness config.
 func (s *harnessConfigService) Update(ctx context.Context, id string, req *UpdateHarnessConfigRequest) (*HarnessConfig, error) {
-	resp, err := s.c.patch(ctx, "/api/v1/harness-configs/"+id, req, nil)
+	resp, err := s.c.patch(ctx, "/api/v1/harness-configs/"+url.PathEscape(id), req, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -250,7 +250,7 @@ func (s *harnessConfigService) Update(ctx context.Context, id string, req *Updat
 
 // Delete removes a harness config.
 func (s *harnessConfigService) Delete(ctx context.Context, id string) error {
-	resp, err := s.c.delete(ctx, "/api/v1/harness-configs/"+id, nil)
+	resp, err := s.c.delete(ctx, "/api/v1/harness-configs/"+url.PathEscape(id), nil)
 	if err != nil {
 		return err
 	}
@@ -264,7 +264,7 @@ func (s *harnessConfigService) RequestUploadURLs(ctx context.Context, id string,
 	}{
 		Files: files,
 	}
-	resp, err := s.c.post(ctx, "/api/v1/harness-configs/"+id+"/upload", req, nil)
+	resp, err := s.c.post(ctx, "/api/v1/harness-configs/"+url.PathEscape(id)+"/upload", req, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -278,7 +278,7 @@ func (s *harnessConfigService) Finalize(ctx context.Context, id string, manifest
 		SourceURL: sourceURL,
 		UploadID:  uploadID,
 	}
-	resp, err := s.c.post(ctx, "/api/v1/harness-configs/"+id+"/finalize", req, nil)
+	resp, err := s.c.post(ctx, "/api/v1/harness-configs/"+url.PathEscape(id)+"/finalize", req, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -287,7 +287,7 @@ func (s *harnessConfigService) Finalize(ctx context.Context, id string, manifest
 
 // RequestDownloadURLs requests signed URLs for downloading harness config files.
 func (s *harnessConfigService) RequestDownloadURLs(ctx context.Context, id string) (*DownloadResponse, error) {
-	resp, err := s.c.get(ctx, "/api/v1/harness-configs/"+id+"/download", nil)
+	resp, err := s.c.get(ctx, "/api/v1/harness-configs/"+url.PathEscape(id)+"/download", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -316,7 +316,7 @@ func (s *harnessConfigService) UploadFilesMultipart(ctx context.Context, id stri
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		s.c.transport.BaseURL+"/api/v1/harness-configs/"+id+"/files", body)
+		s.c.transport.BaseURL+"/api/v1/harness-configs/"+url.PathEscape(id)+"/files", body)
 	if err != nil {
 		return fmt.Errorf("create multipart upload request: %w", err)
 	}
@@ -331,7 +331,7 @@ func (s *harnessConfigService) UploadFilesMultipart(ctx context.Context, id stri
 
 // ReadFile reads a harness config file through the Hub API.
 func (s *harnessConfigService) ReadFile(ctx context.Context, id, filePath string) ([]byte, error) {
-	endpoint := "/api/v1/harness-configs/" + id + "/files/" + escapePathSegments(filePath)
+	endpoint := "/api/v1/harness-configs/" + url.PathEscape(id) + "/files/" + escapePathSegments(filePath)
 	resp, err := s.c.get(ctx, endpoint, nil)
 	if err != nil {
 		return nil, err
@@ -347,7 +347,7 @@ func (s *harnessConfigService) ReadFile(ctx context.Context, id, filePath string
 // Reimport re-imports a harness config from its stored source URL or an override.
 func (s *harnessConfigService) Reimport(ctx context.Context, id string, sourceURL string) (*ReimportHarnessConfigResponse, error) {
 	req := ReimportHarnessConfigRequest{SourceURL: sourceURL}
-	resp, err := s.c.post(ctx, "/api/v1/harness-configs/"+id+"/reimport", req, nil)
+	resp, err := s.c.post(ctx, "/api/v1/harness-configs/"+url.PathEscape(id)+"/reimport", req, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -356,7 +356,7 @@ func (s *harnessConfigService) Reimport(ctx context.Context, id string, sourceUR
 
 // Validate checks storage consistency for a harness config.
 func (s *harnessConfigService) Validate(ctx context.Context, id string) (*ValidationReport, error) {
-	resp, err := s.c.get(ctx, "/api/v1/harness-configs/"+id+"/validate", nil)
+	resp, err := s.c.get(ctx, "/api/v1/harness-configs/"+url.PathEscape(id)+"/validate", nil)
 	if err != nil {
 		return nil, err
 	}

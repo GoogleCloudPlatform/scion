@@ -1214,6 +1214,11 @@ type VersionedSettings struct {
 	// settings overlay; nil elsewhere. It is not serialized; see
 	// ImageRegistryLayers.
 	imageRegistryHub *ImageRegistryHubInputs
+	// placementErrors are the Kubernetes placement findings of the Hub's
+	// stored runtimes and profiles, copied by the settings overlay's Apply
+	// together with the maps it applied (one lock, one snapshot); nil
+	// elsewhere. It is not serialized; see PlacementErrors.
+	placementErrors []string
 
 	// Default agent limits (applied when no explicit value is set)
 	DefaultMaxTurns      int               `json:"default_max_turns,omitempty" yaml:"default_max_turns,omitempty" koanf:"default_max_turns"`
@@ -3556,7 +3561,9 @@ func loadVersionedLayers(projectPath string, opts versionedLoadOptions) (*versio
 	// coming from label and the file's path.
 	fileLayer := func(label, dir string) (bool, error) {
 		touched = touched[:0]
-		migrated, err := loadSettingsFileConverting(k, dir, legacy)
+		// Only the project layer gates its settings file against a
+		// symbolic link (loadSettingsFileConverting's projectTier).
+		migrated, err := loadSettingsFileConverting(k, dir, legacy, label == "project")
 		if err == nil {
 			setSource(label+" "+GetSettingsPath(dir), touched)
 		}
@@ -5461,6 +5468,18 @@ func LoadGlobalSettings() (*VersionedSettings, []string, error) {
 		return nil, nil, fmt.Errorf("resolving global settings directory: %w", err)
 	}
 	return loadGlobalSettingsOnly(globalDir)
+}
+
+// PlacementErrors returns a copy of the settings paths whose Kubernetes
+// placement is malformed or invalid in the Hub-stored runtimes and profiles
+// these settings were built from (SettingsOverlay.Apply): the findings
+// always belong to the same applied maps. Nil when there are none or no
+// overlay was applied.
+func (vs *VersionedSettings) PlacementErrors() []string {
+	if vs == nil {
+		return nil
+	}
+	return slices.Clone(vs.placementErrors)
 }
 
 // LoadGlobalSettingsWithOverlay is LoadGlobalSettings plus the

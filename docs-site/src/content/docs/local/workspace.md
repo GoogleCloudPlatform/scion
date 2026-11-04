@@ -158,7 +158,7 @@ By default, git projects use a shallow clone with `depth=1` for fast startup.
 
 Authentication is handled via the `GITHUB_TOKEN` environment variable, injected from the project's secrets, a GitHub App installation, or your personal environment through the env-gather flow. The clone uses the token only when the clone URL is HTTPS and names the project's git remote (the same host and owner/repository as `SCION_GIT_TOKEN_REMOTE`). A personal token (a user-scoped `GITHUB_TOKEN`, an agent or storage environment variable, a token collected through env-gather, or a broker/hub-scoped secret) is offered only when the project's recorded remote is on the GitHub host (`github.com`, or the host of `github_app.api_base_url` for GitHub Enterprise), whereas a project-bound credential (the project's GitHub App installation token or a project-scoped `GITHUB_TOKEN` secret) applies to the project's recorded remote on any host. A clone URL that names another host or repository, for example through a `scion.dev/clone-url` label, is cloned without the token, and no credential helper is configured for it. On every start of an existing clone-per-agent workspace, `sciontool init` reconciles `~/.gitconfig` to remove any unscoped `credential.helper` and any stale host-scoped helper when no token is offered, and agent-start clones run without host credential helpers, extra HTTP headers, or askpass. The same rule applies to the Kubernetes workspace-provisioning init container.
 
-The clone URL must use `https`, `ssh` (including the `git@host:path` form) or `git`. A local path, a `file://` or `http://` URL, a `<transport>::<address>` form, or a URL starting with `-` is refused: the agent is not started. A create request answers HTTP 422, and a start fails with the same fixed message; neither repeats the URL.
+The clone URL must use `https`, `ssh` (including the `git@host:path` form) or `git`. Every project repository clone path (on the Runtime Broker host, in `sciontool init` inside the container, in the Cloud Run runtime, and in the Kubernetes workspace-provisioning init container, including `worktree-per-agent` starts) checks the URL before any clone or filesystem work and refuses a local path, a `file://` or `http://` URL, a `<transport>::<address>` remote-helper form, or a URL starting with `-` (`the repository URL must use https, ssh or git; local paths and other URL schemes are not cloned`): the agent is not started. A create request answers HTTP 422, and a start fails with the same fixed message; neither repeats the URL. Clones run with `GIT_ALLOW_PROTOCOL=https:ssh:git`, `protocol.file.allow=never`, and `http.followRedirects=false`.
 
 ### Linked git projects
 
@@ -303,6 +303,10 @@ the agent start or workspace pull rather than being ignored.
   `status.*`, `maintenance.*`, sparse-checkout toggles, `init.defaultBranch`, inert git-lfs data
   keys, `gpg.format` and `user.signingKey` (signing data only), and `submodule.<name>.update` **only**
   as `none`/`checkout`/`rebase`/`merge`, `submodule.<name>.url` **only** for an `https`/`ssh` remote.
+  Four more keys are allowed only with a strictly valid value: `grep.threads` (a non-negative
+  integer), `branch.<name>.vscode-merge-base` (a valid ref name), `remote.<name>.promisor` (a
+  boolean) and `remote.<name>.partialclonefilter` (`blob:none`, `blob:limit=<n>`, `tree:<depth>`,
+  `object:type=<type>`, `sparse:oid=<object id>`, or a `combine:` of those; `sparse:path` is refused).
   A few keys that would run a command are allowed here only because a fixed command-line setting
   overrides them on every call (`core.hooksPath`, `core.fsmonitor`, `core.pager`,
   `submodule.recurse`), so such a repository value never runs a command.
@@ -312,9 +316,11 @@ the agent start or workspace pull rather than being ignored.
   command or textconv drivers, non-standard `filter.*` drivers, and any key not on the list. If a
   command is refused, the error names the key; remove it from the repository's `.git/config` (or
   `config.worktree`).
-- **Partial clones and sparse-index checkouts are refused:** `extensions.partialClone` and
-  `index.sparse` are not on the allow-list, so host-side git in such a repository is refused and an
-  agent cannot start there. This is a deliberate, fail-closed limitation; it may be lifted later.
+- **Partial clones:** a partial clone made by current git (`git clone --filter=...`, which records
+  `remote.<name>.promisor` and `remote.<name>.partialclonefilter`) is allowed; git then fetches
+  missing objects from that remote's own URL. `extensions.partialClone` (written by older git) and
+  `index.sparse` (sparse-index checkouts) are not on the allow-list, so host-side git in such a
+  repository is refused and an agent cannot start there.
 - As defence in depth these commands also run with `LC_ALL=C` (dropping any inherited `LC_ALL`), with hooks, the file-system monitor and the pager
   off, signing off (`commit.gpgsign`/`tag.gpgsign`/`merge.verifySignatures` false), the `ext::`
   transport disabled and the `file://` transport allowed only for a top-level operation the user
@@ -388,15 +394,25 @@ metadata into agents so that an agent cannot change what git does for you or for
   `container` runtime, Scion checks `.git/config`, the worktree config layers the agent can reach
   (`.git/config.worktree` and `.git/worktrees/<name>/config.worktree`), and every reachable submodule
   admin directory (`.git/modules/` and `.git/worktrees/<name>/modules/`) and index gitlink against the
-  linked-checkout allow-list above. Because the agent's git inside the container reads these layers
-  without the host-side `-c` command-line pins, **`core.hooksPath`, `core.fsmonitor`, and `core.pager`
-  are refused at agent start too** (along with `core.sshCommand`, `core.editor`, `credential.*`,
-  `url.*.insteadOf`, `http.*`, `gpg.*` program/signing-file keys, `*.program`, `alias.*`,
-  non-standard `filter.*` drivers, and `include`/`includeIf`). A root-level `.git/commondir` or
+  linked-checkout allow-list above. The agent's git inside the container reads these layers without
+  the host-side `-c` command-line pins, so settings that name a command or a hook location
+  (`core.editor`, `core.hooksPath`, `core.fsmonitor`, `core.pager`, `core.sshCommand`, `core.askpass`,
+  `core.gitProxy`, `sequence.editor`, `*.program`, `alias.*`, `pager.*`, diff and merge driver
+  commands, non-standard `filter.*` drivers, a remote's `uploadpack`/`receivepack`/`vcs`, and
+  `uploadpack.packObjectsHook`) are **never given to agents**:
+  - On Docker and Podman, the agent reads a private copy of `.git/config`. Such settings in
+    `.git/config` are **left out of that copy**, the agent starts, and its status message names the
+    keys left out (`agent git config: left out core.editor, ... from the agent's copy of .git/config`).
+  - The same settings in a `config.worktree` layer or a submodule config, which the agent reads as
+    they are, **refuse the start**, as they do on the Apple `container` runtime, where the agent reads
+    `.git/config` directly.
+  - Every other key outside the allow-list (`credential.*` in a raw layer, `url.*.insteadOf`,
+    `http.*`, `gpg.*` signing-file keys, and so on), and `include`/`includeIf`, refuse the start
+    everywhere. A refusal names every refused key in one message, with the file to edit for each.
+  A root-level `.git/commondir` or
   `.git/gitdir` file in any git layout, or an unsafe submodule directory or gitlink (a symlinked
   module directory, a `.git` directory inside a submodule work tree, or a gitfile pointing outside
-  `modules/`), also refuses the start. The refusal (`agent git config refused: ...`) names the key
-  (never its value or host path) and the config file to edit (`.git/config`, `config.worktree`,
+  `modules/`), also refuses the start. The refusal (`agent git config refused: ...`, with error code `git_config_refused`, HTTP `422` on synchronous create, start, and restart and on the asynchronous launch phase message) names every refused key (never its value or host path) and the config file to edit (`.git/config`, `config.worktree`,
   `the worktree's config.worktree`, or `modules/<name>/config` / `config.worktree`), or tells you to
   remove `.git/commondir` / `.git/gitdir` or remove/repair the submodule directory or git link. Put
   personal git preferences (`core.editor`, hooks, pager, SSH command, aliases) and credential helpers

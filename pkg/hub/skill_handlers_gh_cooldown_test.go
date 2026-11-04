@@ -281,9 +281,7 @@ func TestResolveGitHubSkill_InstallationCooldownIsAuthenticated(t *testing.T) {
 				AppID:          1,
 				Status:         store.GitHubInstallationStatusActive,
 			}))
-			id := instID
-			project.GitHubInstallationID = &id
-			require.NoError(t, s.UpdateProject(ctx, project))
+			bindProjectForTest(t, srv, s, project, instID, "acme", "skills")
 
 			// Start the installation's cooldown with a 429 for one ref.
 			limitedMux := http.NewServeMux()

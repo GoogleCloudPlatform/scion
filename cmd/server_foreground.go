@@ -55,6 +55,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hostlimits"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/maintenance"
+	"github.com/GoogleCloudPlatform/scion/pkg/keyring"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dbmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dispatchmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/hubexport"
@@ -620,6 +621,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 				obs.Metrics = obs.Metrics.Failed(mpErr)
 			} else {
 				exit.addFlush(mp.Shutdown)
+				lifecycleMeterProvider = mp
 
 				hubDBRec = wireHubCoreMetrics(hubSrv, mp)
 				attachTxDiagRecorder(entClient, hubDBRec)
@@ -652,6 +654,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		}
 		log.Print(obs.Metrics.LogLine())
 		hubSrv.SetObservabilityExportStatus(obs)
+		wireLifecycleEventsSink(hubSrv, cfg, devAuthToken != "")
 
 		// Wire command bus for cross-node dispatch (B2-4).
 		cmdBus, err := newCommandBus(ctx, cfg, hubSrv)
@@ -830,6 +833,9 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 						ChatRetention() store.ChatRetentionStore
 					}); ok {
 						hubSrv.SetChatRetentionStore(crp.ChatRetention())
+						// Preview and manual runs a restart interrupted
+						// would otherwise stay "running" forever.
+						hubSrv.ReconcileInterruptedChatRetentionRuns(context.Background())
 					}
 
 					// W7: Initialize local-disk attachment store.
@@ -1305,6 +1311,7 @@ func initServerLogging(cmd *cobra.Command) (cleanups []func(), requestLogger, me
 				ch, logging.ResilientCloudHandlerConfig{},
 			)
 			cloudHandler = resilientHandler
+			lifecycleCloudHandler = resilientHandler
 			cleanups = append(cleanups, cloudLogCleanup)
 			cleanups = append(cleanups, resilientCleanup)
 			log.Printf("Cloud Logging enabled with circuit breaker (logId=%s, project=%s)", logging.FormatLogID(), logging.FormatProjectID())
@@ -1635,6 +1642,11 @@ func validateHostedBasic(cfg *config.GlobalConfig) {
 	if !hostedMode || cfg == nil || (!enableHub && !enableWeb) {
 		return
 	}
+	// A keyring file supplies durable keys to every replica: no session
+	// secret is expected.
+	if serverKeyringFromFile() != nil {
+		return
+	}
 	if strings.TrimSpace(resolveSessionSecret()) == "" {
 		log.Println("Warning: no session secret set; sessions will not survive restarts. Set --session-secret or SCION_SERVER_SESSION_SECRET for durable sessions.")
 	}
@@ -1671,8 +1683,8 @@ func validateHostedHAPreflight(cfg *config.GlobalConfig) error {
 		return fmt.Errorf("hosted HA deployment requires server.storage.provider=gcs and server.storage.bucket; local storage is not HA-safe")
 	}
 
-	if strings.TrimSpace(resolveSessionSecret()) == "" {
-		return fmt.Errorf("hosted HA deployment requires a durable session/signing secret; set --session-secret or SCION_SERVER_SESSION_SECRET")
+	if err := hostedHASigningKeyPresent(); err != nil {
+		return err
 	}
 
 	// --- IAP-specific validation (proxy mode only) ---
@@ -1765,7 +1777,7 @@ func validateServerPreflight(cfg *config.GlobalConfig) error {
 	if err := cfg.Relay.Validate(); err != nil {
 		return err
 	}
-	if err := validateConduitPeerSecret(cfg.Hub.Conduit, false, sessionSecretValue()); err != nil {
+	if err := validateConduitPeerSecret(cfg.Hub.Conduit, false, sessionSecretValue(), serverSigningRingFromFile()); err != nil {
 		return err
 	}
 	if _, err := hub.ParseAgentRunScope(cfg.Auth.AgentRunScope, cfg.Auth.AgentRunScopeLegacyUntil); err != nil {
@@ -2628,12 +2640,12 @@ func resolveHubNameFromEnv() string {
 // at startup, then to the SCION_SERVER_SESSION_SECRET env var (then the
 // deprecated SESSION_SECRET). The same value backs both the web session cookie
 // store and the hub JWT signing keys so that all replicas behind the load
-// balancer agree. With a keyring file it is the keyring's "legacy" signing
-// entry, which every purpose not yet on the signing ring still uses
-// (ptone/scion#1530); the legacy inputs are then refused at startup.
+// balancer agree. With a keyring file it is "": every purpose takes its keys
+// from the keyring's signing ring (ptone/scion#1530), and the legacy inputs
+// are refused at startup.
 func resolveSessionSecret() string {
-	if legacy, ok := keyringLegacySecret(); ok {
-		return legacy
+	if serverKeyringFromFile() != nil {
+		return ""
 	}
 	secret := webSessionSecret
 	if secret == "" {
@@ -2650,12 +2662,12 @@ func resolveSessionSecret() string {
 
 // sessionSecretValue is the configured session secret, or "": the
 // --session-secret flag, else the value scrubServerSecretEnv read at
-// startup, else SCION_SERVER_SESSION_SECRET, then SESSION_SECRET. It only
-// reads: no deprecation or hosted-mode warning (resolveSessionSecret adds
-// the hosted-mode one).
+// startup, else SCION_SERVER_SESSION_SECRET, then SESSION_SECRET; "" with a
+// keyring file (resolveSessionSecret). It only reads: no deprecation or
+// hosted-mode warning (resolveSessionSecret adds the hosted-mode one).
 func sessionSecretValue() string {
-	if legacy, ok := keyringLegacySecret(); ok {
-		return legacy
+	if serverKeyringFromFile() != nil {
+		return ""
 	}
 	if webSessionSecret != "" {
 		return webSessionSecret
@@ -2667,6 +2679,37 @@ func sessionSecretValue() string {
 		return s
 	}
 	return os.Getenv(legacySessionSecretEnv)
+}
+
+// hostedHALegacySecret reads the legacy session secret for the hosted HA
+// present-key check (legacy mode only). A variable so tests can prove the
+// keyring-mode path never reads it.
+var hostedHALegacySecret = hostedHALegacySessionSecret
+
+// hostedHALegacySessionSecret is the legacy session secret
+// (resolveSessionSecret).
+func hostedHALegacySessionSecret() string { return resolveSessionSecret() }
+
+// hostedHAPresentKeyPurpose derives nothing; hostedHASigningKeyPresent uses
+// it only to ask the ring for its active generation.
+var hostedHAPresentKeyPurpose = keyring.NewPurpose("hosted_ha_present_key", func([]byte) []byte { return nil })
+
+// hostedHASigningKeyPresent is the hosted HA present-key assertion: every
+// replica must start with a durable signing key, never a keyless default.
+// With a keyring file the key comes from its signing ring, which must have
+// a usable active generation; the legacy session secret is not read. In
+// legacy mode the session secret must be set. Errors name no key material.
+func hostedHASigningKeyPresent() error {
+	if k := serverKeyringFromFile(); k != nil {
+		if _, err := k.Signing().Active(hostedHAPresentKeyPurpose, time.Time{}); err != nil {
+			return fmt.Errorf("hosted HA deployment requires a durable signing key; the keyring file's signing ring has no usable active generation")
+		}
+		return nil
+	}
+	if strings.TrimSpace(hostedHALegacySecret()) == "" {
+		return fmt.Errorf("hosted HA deployment requires a durable session/signing secret; set --session-secret or SCION_SERVER_SESSION_SECRET")
+	}
+	return nil
 }
 
 // hubObservabilityExport decides at startup whether the hub's own metrics
@@ -3043,6 +3086,9 @@ func wireHubCoreMetrics(hubSrv *hub.Server, mp metric.MeterProvider) dbmetrics.R
 	if err := hubSrv.RegisterBrokerPresenceMetrics(mp); err != nil {
 		log.Printf("WARNING: hub broker presence metrics disabled: %v", err)
 	}
+	if err := hubSrv.RegisterConversionPlanMetrics(mp); err != nil {
+		log.Printf("WARNING: hub conversion plan metrics disabled: %v", err)
+	}
 
 	if drainRec, err := hub.NewOTelConduitIngressDrainMetrics(mp); err != nil {
 		log.Printf("WARNING: hub conduit ingress drain metrics disabled: %v", err)
@@ -3157,13 +3203,14 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 	hubCfg := buildHubServerConfig(cfg, endpoints.Operator, devAuthToken, adminEmailList, adminMode, maintenanceMessage, secretBackend)
 	hubCfg.HubEndpoints = &endpoints
 	hubCfg.MaintenanceConfig.Installer = detectUpdateInstaller(ctx, hubCfg.MaintenanceConfig)
+	hubCfg.HubIDSource = resolveHubIDSource(hubCfg.HubIDPinned, hubCfg.HubID)
 	warnNonConformingHubName(cfg.Hub.HubName)
 
 	// In hosted mode every replica must share the same session secret for
 	// cookies and JWT signing keys to work across the load balancer. Running
 	// without one means each replica generates its own ephemeral key, which
 	// breaks session persistence and causes login loops.
-	if hostedMode && hubCfg.SharedSigningSecret == "" {
+	if hostedMode && hubCfg.Keyring == nil && hubCfg.SharedSigningSecret == "" {
 		log.Println("WARNING: hosted mode is enabled but no session secret is configured. " +
 			"Set --session-secret or SCION_SERVER_SESSION_SECRET to avoid cross-replica session failures.")
 	}
@@ -4440,6 +4487,9 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		if warning := brokerWorkspaceStorageWarning(globalVS); warning != "" {
 			log.Printf("WARNING: %s", warning)
 		}
+		if warning := runtime.CloudRunHomesWarningFor(rtName, globalVS.Server); warning != "" {
+			log.Printf("WARNING: %s", warning)
+		}
 		_ = reportRemovedStorageOverridesIn(log.Printf, config.GlobalSettingsSource, globalVS)
 	}
 	if warning := brokerInotifyWarning(hostedMode, rt != nil && brokerAgentsShareHostUser(nil, rt.Name()), hostlimits.DefaultReader()); warning != "" {
@@ -4499,6 +4549,7 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 	// hydrated over HTTP. A non-local backend is left for cache-based hydration.
 	if inMemoryCreds != nil && hubSrv != nil {
 		rhCfg.ColocatedStorage = hubSrv.GetStorage()
+		rhCfg.ColocatedHubID = hubSrv.HubID()
 	}
 
 	// In co-located mode on any DB-backed Hub, install the global settings

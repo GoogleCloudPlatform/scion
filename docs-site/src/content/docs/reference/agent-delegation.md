@@ -182,7 +182,7 @@ delegated credential yet: they answer `403 credential_not_admitted`.
   24 hours after they expire.
 - **Lifecycle changes revoke grants automatically:**
   - **Transactional:** deleting, restoring or reincarnating an agent, and deleting its project.
-  - **Best effort:** suspending the agent (both manual suspension and idle auto-suspension, before releasing its start claim), and suspending or deleting the issuer.
+  - **Best effort:** suspending the agent (both manual suspension and idle auto-suspension, before releasing its start claim), and suspending or deleting the issuer. If the agent is resumed before a suspend's revocation runs, the grants issued to the resumed run are kept.
 - **Unsuspending an issuer** makes their unrevoked, unexpired grants work again, as for access
   tokens. To end grants, use revoke-all.
 

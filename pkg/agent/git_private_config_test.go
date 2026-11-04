@@ -26,7 +26,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
@@ -389,6 +391,50 @@ func TestSeedPrivateGitConfig_RefusesSymlinkedBase(t *testing.T) {
 	}
 }
 
+// A dangling symlink at the base .git/config path is refused like any other
+// symlink, not read as a missing file (which would seed an empty base).
+func TestReadBaseGitConfig_RefusesDanglingSymlink(t *testing.T) {
+	dir := t.TempDir()
+	base := filepath.Join(dir, "config")
+	if err := os.Symlink(filepath.Join(dir, "absent"), base); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if data, err := readBaseGitConfig(base); err == nil {
+		t.Fatalf("readBaseGitConfig(dangling symlink) = %q, nil; want error", data)
+	}
+}
+
+// A base .git/config that is not a regular file is refused. For a FIFO with no
+// writer the open must also return at once (O_NONBLOCK) rather than block.
+func TestReadBaseGitConfig_RefusesNonRegular(t *testing.T) {
+	dir := t.TempDir()
+	if data, err := readBaseGitConfig(dir); err == nil {
+		t.Fatalf("readBaseGitConfig(directory) = %q, nil; want error", data)
+	}
+
+	fifo := filepath.Join(dir, "config")
+	if err := syscall.Mkfifo(fifo, 0o644); err != nil {
+		t.Skipf("mkfifo unavailable: %v", err)
+	}
+	type result struct {
+		data []byte
+		err  error
+	}
+	done := make(chan result, 1)
+	go func() {
+		data, err := readBaseGitConfig(fifo)
+		done <- result{data, err}
+	}()
+	select {
+	case r := <-done:
+		if r.err == nil {
+			t.Fatalf("readBaseGitConfig(fifo) = %q, nil; want error", r.data)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("readBaseGitConfig(fifo) blocked; the open must not wait for a writer")
+	}
+}
+
 // TestSeedPrivateGitConfig_CloseErrorFailsClosed injects a close error on the
 // written temp config and confirms the write path fails closed: an error is
 // returned, no config file is created, and the temp file is removed.
@@ -534,7 +580,7 @@ func TestSeedPrivateGitConfig_WritesPreparedBytes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	prepared, _, err := util.PrepareSeededGitConfig(raw, util.RepoPolicyLinked, staleUpstreamKey("agent-x"))
+	prepared, _, _, err := util.PrepareSeededGitConfig(raw, util.RepoPolicyLinked, staleUpstreamKey("agent-x"), false)
 	if err != nil {
 		t.Fatal(err)
 	}

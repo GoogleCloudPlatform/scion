@@ -23,6 +23,11 @@
  * experiment is off. A save names the revision it was made against
  * (expected_revision), like the cross-project messaging switch; a 409
  * reloads the current values.
+ *
+ * The panel also shows the recent retention runs and the last preview
+ * (the chat-retention-preview maintenance operation, which it can start).
+ * A save that enables the sweep or shortens the window first shows the
+ * last preview and asks for confirmation; it never counts messages itself.
  */
 
 import { LitElement, html, css, nothing } from 'lit';
@@ -34,9 +39,15 @@ import {
   isFeatureEnabled,
 } from '../../utils/feature-flags.js';
 import { formatInstantWithZone } from '../../utils/time.js';
+import { formatNumber } from '../../utils/format-number.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 
 const API_PATH = '/api/v1/admin/chat-retention';
+const PREVIEW_OP = 'chat-retention-preview';
+const PREVIEW_RUN_PATH = `/api/v1/admin/maintenance/operations/${PREVIEW_OP}/run`;
+/** How often a started preview is checked, and for how long at most. */
+const PREVIEW_POLL_MS = 2000;
+const PREVIEW_POLL_MAX = 900;
 
 /** Sweep tuning, as pkg/hub/admin_chat_retention.go sends it. */
 export interface ChatRetentionSweep {
@@ -51,14 +62,44 @@ export interface ChatRetentionSettings {
   enabled: boolean;
   /** null = no window: messages are kept forever. */
   messages_retention_days: number | null;
+  /** Days after a conversation or topic is deleted until its messages are purged. */
+  deleted_conversation_grace_days: number;
   sweep: ChatRetentionSweep;
   last_applied_cutoff: string | null;
   revision: number;
+  /** The most recent retention runs, newest first. */
+  runs?: ChatRetentionRun[] | undefined;
+  /** The most recent preview, or null when none was run. */
+  last_preview?: ChatRetentionRun | null | undefined;
+  /** Messages the sweep and manual runs deleted since the last preview started. */
+  purged_since_preview?: number | undefined;
+}
+
+/** One chat_retention_runs row, as pkg/hub/admin_chat_retention.go sends it. */
+export interface ChatRetentionRun {
+  id: string;
+  /** "sweep", "manual" or "preview"; any other value is shown as sent. */
+  trigger: string;
+  dry_run: boolean;
+  started_at: string;
+  finished_at: string | null;
+  /** "running", "ok", "partial" or "failed"; any other value is shown as sent. */
+  status: string;
+  actor?: string;
+  error?: string;
+  /** Messages deleted (a preview: that would be deleted). */
+  messages: number;
+  /** Projects with at least one such message. */
+  projects: number;
+  messages_retention_days: number;
+  deleted_conversation_grace_days: number;
 }
 
 /** Bounds of the settings, as pkg/config/opsettings/chat_retention.go sets them. */
 export const RETENTION_MIN_DAYS = 7;
 export const RETENTION_MAX_DAYS = 36500;
+export const RETENTION_MIN_GRACE_DAYS = 1;
+export const RETENTION_DEFAULT_GRACE_DAYS = 30;
 
 type SweepKey = keyof ChatRetentionSweep;
 
@@ -103,6 +144,7 @@ const SWEEP_FIELDS: ReadonlyArray<{
 interface RetentionForm {
   enabled: boolean;
   days: string;
+  graceDays: string;
   sweep: Record<SweepKey, string>;
 }
 
@@ -113,6 +155,7 @@ export type RetentionPutBody =
       body: {
         enabled: boolean;
         messages_retention_days: number | null;
+        deleted_conversation_grace_days: number;
         sweep: ChatRetentionSweep;
         expected_revision: number;
       };
@@ -131,7 +174,7 @@ function parseWholeNumber(value: string): number | null {
  * form was loaded at.
  */
 export function buildRetentionPutBody(
-  form: { enabled: boolean; days: string; sweep: Record<SweepKey, string> },
+  form: { enabled: boolean; days: string; graceDays: string; sweep: Record<SweepKey, string> },
   revision: number
 ): RetentionPutBody {
   const errors: string[] = [];
@@ -143,6 +186,16 @@ export function buildRetentionPutBody(
         `Retention window must be a whole number of days from ${RETENTION_MIN_DAYS} to ${RETENTION_MAX_DAYS}, or empty to keep messages forever.`
       );
     }
+  }
+  const graceDays = parseWholeNumber(form.graceDays);
+  if (
+    graceDays === null ||
+    graceDays < RETENTION_MIN_GRACE_DAYS ||
+    graceDays > RETENTION_MAX_DAYS
+  ) {
+    errors.push(
+      `Deleted conversation grace must be a whole number of days from ${RETENTION_MIN_GRACE_DAYS} to ${RETENTION_MAX_DAYS}.`
+    );
   }
   const sweep = {} as ChatRetentionSweep;
   for (const f of SWEEP_FIELDS) {
@@ -159,6 +212,7 @@ export function buildRetentionPutBody(
     body: {
       enabled: form.enabled,
       messages_retention_days: days,
+      deleted_conversation_grace_days: graceDays as number,
       sweep,
       expected_revision: revision,
     },
@@ -189,10 +243,131 @@ export function retentionSaveErrors(body: unknown, fallback: string): string[] {
   return [apiErrorMessageFromBody(body) ?? fallback];
 }
 
+/**
+ * The warning shown while the sweep is enabled: what it deletes, with the
+ * window (null when none is set, 'invalid' while the field holds a value
+ * that is not a valid window, which then goes unmentioned: the save shows
+ * the validation error) and the deleted-conversation grace (null while the
+ * field is not a valid grace).
+ */
+export function retentionWarning(
+  days: number | null | 'invalid',
+  graceDays: number | null
+): string {
+  const parts: string[] = [];
+  if (days === null) {
+    parts.push(
+      'No retention window is set: only the messages of deleted conversations and topics are purged.'
+    );
+  } else if (days !== 'invalid') {
+    parts.push(
+      `While enabled, messages older than ${days} days are permanently deleted from this hub.`
+    );
+  }
+  if (graceDays !== null) {
+    const unit = graceDays === 1 ? 'day' : 'days';
+    parts.push(
+      `Messages of conversations and topics deleted more than ${graceDays} ${unit} ago are permanently deleted.`
+    );
+  }
+  return parts.join(' ');
+}
+
+function plural(n: number, one: string, many: string): string {
+  return `${formatNumber(n)} ${n === 1 ? one : many}`;
+}
+
+function formatWhen(iso: string | null): string {
+  if (!iso) return '';
+  return formatInstantWithZone(iso) || iso;
+}
+
+/**
+ * The one-line summary of a preview: "Last preview: N messages in M
+ * projects, <time>", with the window it previewed.
+ */
+export function lastPreviewSummary(run: ChatRetentionRun | null | undefined): string {
+  if (!run) return 'No preview has been run yet.';
+  if (run.status === 'running')
+    return `A preview is running (started ${formatWhen(run.started_at)}).`;
+  if (run.status === 'failed') {
+    return `The last preview failed (${formatWhen(run.started_at)})${run.error ? `: ${run.error}` : '.'}`;
+  }
+  const window =
+    run.messages_retention_days > 0
+      ? `a ${run.messages_retention_days}-day window`
+      : 'no retention window';
+  return (
+    `Last preview: ${plural(run.messages, 'message', 'messages')} in ` +
+    `${plural(run.projects, 'project', 'projects')}, ` +
+    `${formatWhen(run.finished_at ?? run.started_at)} (${window}).`
+  );
+}
+
+/**
+ * The "backlog draining" estimate: the last preview's messages minus the
+ * messages purged since it started, never below zero. null without a
+ * finished preview.
+ */
+export function backlogEstimate(
+  preview: ChatRetentionRun | null | undefined,
+  purgedSince: number | undefined
+): number | null {
+  if (!preview || preview.status !== 'ok') return null;
+  return Math.max(0, preview.messages - (purgedSince ?? 0));
+}
+
+/**
+ * Whether a preview was of the saved settings: the same window (none = 0)
+ * and the same deleted-conversation grace. Only such a preview can anchor
+ * the backlog estimate, which subtracts what the saved settings purged.
+ */
+export function previewMatchesSaved(
+  preview: Pick<ChatRetentionRun, 'messages_retention_days' | 'deleted_conversation_grace_days'>,
+  saved: Pick<ChatRetentionSettings, 'messages_retention_days' | 'deleted_conversation_grace_days'>
+): boolean {
+  return (
+    preview.messages_retention_days === (saved.messages_retention_days ?? 0) &&
+    preview.deleted_conversation_grace_days === saved.deleted_conversation_grace_days
+  );
+}
+
+/**
+ * Whether saving body deletes more than the saved settings do: it enables
+ * the sweep, or, while enabled, sets a window where none was or shortens
+ * it. Such a save asks for confirmation first.
+ */
+export function needsPurgeConfirmation(
+  saved: Pick<ChatRetentionSettings, 'enabled' | 'messages_retention_days'>,
+  next: { enabled: boolean; messages_retention_days: number | null }
+): boolean {
+  if (!next.enabled) return false;
+  if (!saved.enabled) return true;
+  if (next.messages_retention_days === null) return false;
+  return (
+    saved.messages_retention_days === null ||
+    next.messages_retention_days < saved.messages_retention_days
+  );
+}
+
+const TRIGGER_LABELS: Record<string, string> = {
+  sweep: 'Sweep',
+  manual: 'Manual run',
+  preview: 'Preview',
+};
+
+const STATUS_LABELS: Record<string, string> = {
+  running: 'Running',
+  ok: 'Complete',
+  partial: 'In progress',
+  failed: 'Failed',
+};
+
 function formFrom(s: ChatRetentionSettings): RetentionForm {
   return {
     enabled: s.enabled,
     days: s.messages_retention_days === null ? '' : String(s.messages_retention_days),
+    graceDays: String(s.deleted_conversation_grace_days ?? RETENTION_DEFAULT_GRACE_DAYS),
     sweep: {
       chunk_size: String(s.sweep.chunk_size),
       pause_ms: String(s.sweep.pause_ms),
@@ -214,8 +389,15 @@ export class ScionAdminChatRetention extends LitElement {
   @state() private success: string | null = null;
   @state() private settings: ChatRetentionSettings | null = null;
   @state() private form: RetentionForm | null = null;
+  /** The validated PUT body waiting for the purge confirmation. */
+  @state() private pendingSave: Extract<RetentionPutBody, { ok: true }>['body'] | null = null;
+  @state() private previewStarting = false;
+  /** A preview this panel started is still running. */
+  @state() private previewRunning = false;
+  @state() private previewError: string | null = null;
 
   private loadRequested = false;
+  private previewPoll: ReturnType<typeof setTimeout> | null = null;
   /** Re-renders the last applied cutoff when the display zone changes. */
   readonly _zone = new DisplayZoneController(this);
 
@@ -326,6 +508,41 @@ export class ScionAdminChatRetention extends LitElement {
       font-size: 0.6875rem;
       color: var(--scion-text-muted, #64748b);
     }
+    .history {
+      margin-top: 1.5rem;
+      border-top: 1px solid var(--scion-border, #e2e8f0);
+      padding-top: 1rem;
+    }
+    .subsection-title {
+      font-size: 0.875rem;
+      font-weight: 600;
+      color: var(--scion-text, #1e293b);
+      margin: 0 0 0.5rem 0;
+    }
+    .last-preview,
+    .backlog {
+      font-size: 0.8125rem;
+      color: var(--scion-text, #1e293b);
+      margin: 0 0 0.5rem 0;
+    }
+    table.runs {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 1rem;
+      font-size: 0.8125rem;
+    }
+    table.runs th {
+      text-align: left;
+      font-weight: 600;
+      color: var(--scion-text-muted, #64748b);
+      border-bottom: 1px solid var(--scion-border, #e2e8f0);
+      padding: 0.375rem 0.5rem;
+    }
+    table.runs td {
+      border-bottom: 1px solid var(--scion-border, #e2e8f0);
+      padding: 0.375rem 0.5rem;
+      color: var(--scion-text, #1e293b);
+    }
   `;
 
   override connectedCallback(): void {
@@ -336,7 +553,15 @@ export class ScionAdminChatRetention extends LitElement {
 
   override disconnectedCallback(): void {
     window.removeEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.onFlagsChanged);
+    this.stopPreviewPoll();
     super.disconnectedCallback();
+  }
+
+  private stopPreviewPoll(): void {
+    if (this.previewPoll !== null) {
+      clearTimeout(this.previewPoll);
+      this.previewPoll = null;
+    }
   }
 
   private applySettings(s: ChatRetentionSettings): void {
@@ -379,12 +604,26 @@ export class ScionAdminChatRetention extends LitElement {
       this.saveErrors = built.errors;
       return;
     }
+    if (needsPurgeConfirmation(this.settings, built.body)) {
+      this.pendingSave = built.body;
+      return;
+    }
+    await this.put(built.body);
+  }
+
+  private async confirmSave(): Promise<void> {
+    const body = this.pendingSave;
+    this.pendingSave = null;
+    if (body) await this.put(body);
+  }
+
+  private async put(body: Extract<RetentionPutBody, { ok: true }>['body']): Promise<void> {
     this.saving = true;
     try {
       const res = await apiFetch(API_PATH, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(built.body),
+        body: JSON.stringify(body),
       });
       if (res.status === 409) {
         this.saveErrors = [
@@ -409,6 +648,93 @@ export class ScionAdminChatRetention extends LitElement {
     }
   }
 
+  /** Reload the run history and the last preview, keeping the form. */
+  private async loadHistory(): Promise<void> {
+    try {
+      const res = await apiFetch(API_PATH);
+      if (!res.ok || !this.settings) return;
+      const s = (await res.json()) as ChatRetentionSettings;
+      this.settings = {
+        ...this.settings,
+        last_applied_cutoff: s.last_applied_cutoff,
+        runs: s.runs,
+        last_preview: s.last_preview,
+        purged_since_preview: s.purged_since_preview,
+      };
+    } catch {
+      // The history stays as it was; the next load refreshes it.
+    }
+  }
+
+  /**
+   * Start a preview: of the window in the form when it holds one, else
+   * (empty field) of the saved settings. An invalid window is reported and
+   * no preview starts, so the result is never mistaken for the typed value.
+   * The hub runs it in the background; the panel checks it until it ends,
+   * then reloads the history.
+   */
+  private async startPreview(): Promise<void> {
+    if (!this.form) return;
+    this.previewError = null;
+    const params: Record<string, string> = {};
+    if (this.form.days.trim() !== '') {
+      const days = parseWholeNumber(this.form.days);
+      if (days === null || days < RETENTION_MIN_DAYS || days > RETENTION_MAX_DAYS) {
+        this.previewError = `The retention window must be a whole number of days from ${RETENTION_MIN_DAYS} to ${RETENTION_MAX_DAYS}.`;
+        return;
+      }
+      params.messages_retention_days = String(days);
+    }
+    this.previewStarting = true;
+    try {
+      const res = await apiFetch(PREVIEW_RUN_PATH, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ params }),
+      });
+      const body = (await res.json().catch(() => null)) as { runId?: string } | null;
+      if (!res.ok || !body?.runId) {
+        this.previewError = retentionSaveErrors(body, 'Failed to start the preview').join(' ');
+        return;
+      }
+      this.previewRunning = true;
+      await this.loadHistory();
+      this.pollPreview(body.runId, 0);
+    } catch {
+      this.previewError = 'Failed to start the preview';
+    } finally {
+      this.previewStarting = false;
+    }
+  }
+
+  private pollPreview(runId: string, attempt: number): void {
+    this.stopPreviewPoll();
+    this.previewPoll = setTimeout(() => {
+      this.previewPoll = null;
+      void (async () => {
+        let running = attempt + 1 < PREVIEW_POLL_MAX;
+        try {
+          const res = await apiFetch(
+            `/api/v1/admin/maintenance/operations/${PREVIEW_OP}/runs/${encodeURIComponent(runId)}`
+          );
+          if (res.ok) {
+            const run = (await res.json()) as { status?: string };
+            running = running && run.status === 'running';
+          }
+        } catch {
+          // Try again on the next check.
+        }
+        if (!this.isConnected) return;
+        if (running) {
+          this.pollPreview(runId, attempt + 1);
+          return;
+        }
+        this.previewRunning = false;
+        await this.loadHistory();
+      })();
+    }, PREVIEW_POLL_MS);
+  }
+
   private updateForm(patch: Partial<RetentionForm>): void {
     if (!this.form) return;
     this.form = { ...this.form, ...patch };
@@ -426,9 +752,11 @@ export class ScionAdminChatRetention extends LitElement {
       <div class="section chat-retention">
         <h3 class="section-title">Chat retention</h3>
         <ul class="intro">
-          <li>
-            Nothing is deleted until the sweep is enabled <strong>and</strong> a retention window is
-            set.
+          <li>Nothing is deleted while the sweep is disabled.</li>
+          <li class="grace-explanation">
+            With the sweep enabled and no retention window, only the messages of deleted
+            conversations and topics are purged, once the grace period after their deletion has
+            passed.
           </li>
           <li>Deletes are permanent: removed messages cannot be restored.</li>
           <li>Take a database backup before enabling.</li>
@@ -453,7 +781,19 @@ export class ScionAdminChatRetention extends LitElement {
     }
     const form = this.form;
     const days = parseWholeNumber(form.days);
-    const deleting = form.enabled && form.days.trim() !== '' && days !== null;
+    const windowSet = form.days.trim() !== '';
+    const windowValid = days !== null && days >= RETENTION_MIN_DAYS && days <= RETENTION_MAX_DAYS;
+    const grace = parseWholeNumber(form.graceDays);
+    const graceDays =
+      grace !== null && grace >= RETENTION_MIN_GRACE_DAYS && grace <= RETENTION_MAX_DAYS
+        ? grace
+        : null;
+    const warning = form.enabled
+      ? retentionWarning(!windowSet ? null : windowValid ? days : 'invalid', graceDays)
+      : '';
+    // With the sweep enabled and neither field valid there is nothing to
+    // warn about: say plainly that the form cannot be saved.
+    const unsaveable = form.enabled && windowSet && !windowValid && graceDays === null;
     const cutoff = this.settings.last_applied_cutoff;
     return html`
       <div class="form-grid">
@@ -490,6 +830,25 @@ export class ScionAdminChatRetention extends LitElement {
           >
         </div>
         <div class="form-field">
+          <label for="retention-grace-days">Deleted conversation grace (days)</label>
+          <sl-input
+            id="retention-grace-days"
+            class="retention-grace-days"
+            type="number"
+            min=${RETENTION_MIN_GRACE_DAYS}
+            max=${RETENTION_MAX_DAYS}
+            .value=${form.graceDays}
+            ?disabled=${this.saving}
+            @sl-input=${(e: Event) =>
+              this.updateForm({ graceDays: (e.target as HTMLInputElement).value })}
+          ></sl-input>
+          <span class="hint"
+            >The messages of a deleted conversation or topic are purged this many days after the
+            deletion, even when the retention window is longer or empty (default
+            ${RETENTION_DEFAULT_GRACE_DAYS}).</span
+          >
+        </div>
+        <div class="form-field">
           <label>Last applied cutoff</label>
           <span class="last-applied-cutoff"
             >${cutoff ? formatInstantWithZone(cutoff) || cutoff : 'None yet'}</span
@@ -522,9 +881,13 @@ export class ScionAdminChatRetention extends LitElement {
           )}
         </div>
       </details>
-      ${deleting
-        ? html`<div class="status-message warning delete-warning">
-            While enabled, messages older than ${days} days are permanently deleted from this hub.
+      ${warning
+        ? html`<div class="status-message warning delete-warning">${warning}</div>`
+        : nothing}
+      ${unsaveable
+        ? html`<div class="status-message error invalid-form" role="alert">
+            Neither the retention window nor the deleted conversation grace is valid. Fix both
+            before saving; nothing is saved until then.
           </div>`
         : nothing}
       ${this.saveErrors.length > 0
@@ -543,12 +906,147 @@ export class ScionAdminChatRetention extends LitElement {
           variant="primary"
           size="small"
           ?loading=${this.saving}
-          ?disabled=${this.saving}
+          ?disabled=${this.saving || unsaveable}
           @click=${() => void this.save()}
           >Save</sl-button
         >
         <span class="meta">Revision: ${this.settings.revision}</span>
       </div>
+      ${this.renderHistory(windowValid ? days : null)} ${this.renderConfirmDialog()}
+    `;
+  }
+
+  private renderHistory(formDays: number | null) {
+    const s = this.settings;
+    if (!s) return nothing;
+    const runs = s.runs ?? [];
+    const preview = s.last_preview;
+    const previewDone = s.enabled && preview?.status === 'ok';
+    const matches = previewDone && preview ? previewMatchesSaved(preview, s) : false;
+    const backlog = matches ? backlogEstimate(preview, s.purged_since_preview) : null;
+    const busy = this.previewStarting || this.previewRunning;
+    return html`
+      <div class="history">
+        <h4 class="subsection-title">Preview and run history</h4>
+        <p class="last-preview">${lastPreviewSummary(s.last_preview)}</p>
+        ${backlog !== null
+          ? html`<p class="backlog">
+              Backlog draining: about ${plural(backlog, 'message', 'messages')} left to delete (the
+              last preview minus ${plural(s.purged_since_preview ?? 0, 'message', 'messages')}
+              deleted since).
+            </p>`
+          : previewDone
+            ? html`<p class="hint backlog-mismatch">
+                The last preview was for a different window or grace than the saved settings; run a
+                preview of the saved settings to estimate the backlog.
+              </p>`
+            : nothing}
+        <div class="actions">
+          <sl-button
+            class="run-preview"
+            size="small"
+            ?loading=${busy}
+            ?disabled=${busy}
+            @click=${() => void this.startPreview()}
+            >Run preview</sl-button
+          >
+          <span class="hint"
+            >${formDays !== null
+              ? `Counts what a ${formDays}-day window would delete, without deleting anything.`
+              : 'Counts what the saved settings would delete, without deleting anything.'}</span
+          >
+        </div>
+        ${this.previewError
+          ? html`<div class="status-message error preview-error" role="alert">
+              ${this.previewError}
+            </div>`
+          : nothing}
+        ${runs.length === 0
+          ? html`<p class="hint no-runs">No retention runs yet.</p>`
+          : html`<table class="runs">
+              <thead>
+                <tr>
+                  <th>Started</th>
+                  <th>Run</th>
+                  <th>Status</th>
+                  <th>Finished</th>
+                  <th>Messages</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${runs.map(
+                  (r) => html`
+                    <tr class="run" data-trigger=${r.trigger}>
+                      <td>${formatWhen(r.started_at)}</td>
+                      <td>
+                        ${TRIGGER_LABELS[r.trigger] ?? r.trigger}${r.dry_run ? ' (dry run)' : ''}
+                      </td>
+                      <td class="run-status" title=${r.error ?? ''}>
+                        ${STATUS_LABELS[r.status] ?? r.status}
+                      </td>
+                      <td>${r.finished_at ? formatWhen(r.finished_at) : '—'}</td>
+                      <td class="run-messages">
+                        ${r.dry_run ? 'would delete ' : ''}${plural(
+                          r.messages,
+                          'message',
+                          'messages'
+                        )}
+                        in ${plural(r.projects, 'project', 'projects')}
+                      </td>
+                    </tr>
+                  `
+                )}
+              </tbody>
+            </table>`}
+      </div>
+    `;
+  }
+
+  private renderConfirmDialog() {
+    const body = this.pendingSave;
+    const s = this.settings;
+    const enabling = body !== null && s !== null && !s.enabled;
+    return html`
+      <sl-dialog
+        class="confirm-dialog"
+        label="Delete messages permanently?"
+        ?open=${body !== null}
+        @sl-request-close=${() => {
+          this.pendingSave = null;
+        }}
+      >
+        <p class="confirm-change">
+          ${enabling
+            ? 'Enabling the retention sweep permanently deletes the messages it selects.'
+            : `Shortening the retention window to ${body?.messages_retention_days ?? ''} days permanently deletes the older messages.`}
+          Deleted messages cannot be restored; take a database backup first.
+        </p>
+        <p class="confirm-preview">${lastPreviewSummary(s?.last_preview)}</p>
+        ${s?.last_preview &&
+        s.last_preview.status === 'ok' &&
+        body &&
+        s.last_preview.messages_retention_days !== (body.messages_retention_days ?? 0)
+          ? html`<p class="hint confirm-mismatch">
+              The last preview was for a different window; run a preview of this window to see what
+              it deletes.
+            </p>`
+          : nothing}
+        <sl-button
+          slot="footer"
+          class="confirm-cancel"
+          @click=${() => {
+            this.pendingSave = null;
+          }}
+          >Cancel</sl-button
+        >
+        <sl-button
+          slot="footer"
+          class="confirm-save"
+          variant="danger"
+          @click=${() => void this.confirmSave()}
+          >Save and delete</sl-button
+        >
+      </sl-dialog>
     `;
   }
 }

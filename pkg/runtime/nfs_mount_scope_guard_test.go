@@ -118,6 +118,111 @@ func TestNewNFSBindScope(t *testing.T) {
 	}
 }
 
+// The starting agent's own workspace on the share (NFSAgentDirName set,
+// ptone/scion#7224) is admitted, with the share root as the host base, so
+// every other bind is checked exactly as for the project workspace. Every
+// other shape is refused: another agent's leaf, a mismatched, empty or
+// invalid name, agents/ or the agent directory itself, nested paths, "..",
+// relative paths, a missing leaf, and a link anywhere below the share.
+func TestNewNFSBindScope_AgentWorkspace(t *testing.T) {
+	base, _ := nfsBindScopeFixture(t, "a")
+	at := func(elems ...string) string {
+		return filepath.Join(base, filepath.FromSlash(scopeRel(elems...)))
+	}
+	own := at("agents", scopeAgent, "workspace")
+	other := at("agents", "other", "workspace")
+	mkdirs(t, own)
+	mkdirs(t, other)
+	mkdirs(t, filepath.Join(own, "sub"))
+	mkdirs(t, at("agents", scopeAgent, "x", "workspace"))
+	agentCfg := func(name, ws string) RunConfig {
+		return RunConfig{WorkspaceBackendName: "nfs", ProjectID: scopeProjectID, NFSAgentDirName: name, Workspace: ws}
+	}
+
+	s, err := newNFSBindScope(agentCfg(scopeAgent, own))
+	if err != nil {
+		t.Fatalf("own agent workspace: %v", err)
+	}
+	if want := layoutRealPath(t, base); s.hostBase != want {
+		t.Fatalf("hostBase = %q, want the share root %q", s.hostBase, want)
+	}
+	for _, allowed := range []string{own, at("agents", scopeAgent, "home-"+scopeAgentID), at("shared-dirs", "scratch")} {
+		mkdirs(t, allowed)
+		if err := s.check(allowed); err != nil {
+			t.Errorf("check(%s) = %v, want nil", allowed, err)
+		}
+	}
+	for _, refused := range []string{at(), at(".scion"), at("agents"), base} {
+		if err := s.check(refused); !errors.Is(err, errNFSMountScope) {
+			t.Errorf("check(%s) = %v, want a refusal", refused, err)
+		}
+	}
+
+	for name, cfg := range map[string]RunConfig{
+		"another agent's leaf":              agentCfg(scopeAgent, other),
+		"own leaf without a name":           {WorkspaceBackendName: "nfs", ProjectID: scopeProjectID, Workspace: own},
+		"mismatched name":                   agentCfg("dev2", own),
+		"upper-case name":                   agentCfg("Dev", own),
+		"name with a slash":                 agentCfg("a/b", own),
+		"dot-dot name":                      agentCfg("..", own),
+		"dotted name":                       agentCfg("a.b", own),
+		"the agent directory":               agentCfg(scopeAgent, at("agents", scopeAgent)),
+		"agents/":                           agentCfg(scopeAgent, at("agents")),
+		"below the leaf":                    agentCfg(scopeAgent, filepath.Join(own, "sub")),
+		"nested workspace":                  agentCfg(scopeAgent, at("agents", scopeAgent, "x", "workspace")),
+		"the project workspace":             agentCfg(scopeAgent, at("workspace")),
+		"dot-dot component":                 agentCfg(scopeAgent, at("agents", "other")+string(filepath.Separator)+".."+string(filepath.Separator)+filepath.Join(scopeAgent, "workspace")),
+		"relative path":                     agentCfg(scopeAgent, filepath.FromSlash("rel/"+scopeRel("agents", scopeAgent, "workspace"))),
+		"missing leaf":                      agentCfg("ghost", at("agents", "ghost", "workspace")),
+		"doubled separator":                 agentCfg(scopeAgent, at("agents")+string(filepath.Separator)+string(filepath.Separator)+filepath.Join(scopeAgent, "workspace")),
+		"dot component":                     agentCfg(scopeAgent, at("agents")+string(filepath.Separator)+"."+string(filepath.Separator)+filepath.Join(scopeAgent, "workspace")),
+		"trailing separator":                agentCfg(scopeAgent, own+string(filepath.Separator)),
+		"project shape, trailing separator": {WorkspaceBackendName: "nfs", ProjectID: scopeProjectID, Workspace: at("workspace") + string(filepath.Separator)},
+		"another project with the prefix":   agentCfg(scopeAgent, filepath.Join(base, filepath.FromSlash("projects/"+scopeProjectID+"x/agents/"+scopeAgent+"/workspace"))),
+	} {
+		if _, err := newNFSBindScope(cfg); !errors.Is(err, errNFSMountScope) {
+			t.Errorf("%s: newNFSBindScope(%+v) = %v, want refusal", name, cfg, err)
+		}
+	}
+
+	// Links below the share: the agent directory, or its workspace,
+	// pointing at another agent's directory or leaf.
+	if err := os.Symlink(at("agents", "other"), at("agents", "lnk1")); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+	mkdirs(t, at("agents", "lnk2"))
+	if err := os.Symlink(other, at("agents", "lnk2", "workspace")); err != nil {
+		t.Fatal(err)
+	}
+	for name, cfg := range map[string]RunConfig{
+		"linked agent directory": agentCfg("lnk1", at("agents", "lnk1", "workspace")),
+		"linked workspace leaf":  agentCfg("lnk2", at("agents", "lnk2", "workspace")),
+	} {
+		if _, err := newNFSBindScope(cfg); !errors.Is(err, errNFSMountScope) {
+			t.Errorf("%s: newNFSBindScope = %v, want refusal", name, err)
+		}
+	}
+}
+
+// The project workspace must resolve to the project's own leaf too: a link
+// at <project>/workspace, here to an agent's workspace, is refused, while a
+// link above the share (TestNFSBindScope_ShareBaseThroughLink) is not.
+func TestNewNFSBindScope_LinkedProjectWorkspaceRefused(t *testing.T) {
+	base := filepath.Join(t.TempDir(), "l", "share1")
+	at := func(elems ...string) string {
+		return filepath.Join(base, filepath.FromSlash(scopeRel(elems...)))
+	}
+	target := at("agents", scopeAgent, "workspace")
+	mkdirs(t, target)
+	if err := os.Symlink(target, at("workspace")); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+	_, err := newNFSBindScope(RunConfig{WorkspaceBackendName: "nfs", ProjectID: scopeProjectID, Workspace: at("workspace")})
+	if !errors.Is(err, errNFSMountScope) {
+		t.Fatalf("newNFSBindScope(linked project workspace) = %v, want refusal", err)
+	}
+}
+
 // buildPod refuses a workspace-share mount of the export root, the project
 // root or the project configuration directory, with a claim (no NFS home,
 // so no other check applies) and inline.

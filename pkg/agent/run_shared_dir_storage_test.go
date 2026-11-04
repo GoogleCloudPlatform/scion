@@ -959,3 +959,83 @@ active_profile: local
 func sprintfServerYAML(format, mountRoot, shareID, pvName string) string {
 	return fmt.Sprintf(format, mountRoot, shareID, pvName)
 }
+
+// writeProjectSharedDirs writes the project's settings.yaml with the given
+// shared_dirs names (the in-repo settings a cloned project can carry).
+func (f sharedDirStorageRunFixture) writeProjectSharedDirs(t *testing.T, names ...string) {
+	t.Helper()
+	content := "schema_version: \"1\"\nshared_dirs:\n"
+	for _, n := range names {
+		content += fmt.Sprintf("  - name: %q\n", n)
+	}
+	require.NoError(t, os.WriteFile(filepath.Join(f.projectScionDir, "settings.yaml"), []byte(content), 0644))
+}
+
+// startCapture starts one agent on a docker mock runtime and returns the
+// RunConfig the runtime received.
+func startCapture(t *testing.T, f sharedDirStorageRunFixture, opts api.StartOptions) runtime.RunConfig {
+	t.Helper()
+	var captured runtime.RunConfig
+	ran := 0
+	mockRT := &runtime.MockRuntime{
+		NameFunc: func() string { return "docker" },
+		RunFunc: func(ctx context.Context, cfg runtime.RunConfig) (string, error) {
+			ran++
+			captured = cfg
+			return "mock-id", nil
+		},
+	}
+	_, err := NewManager(mockRT).Start(context.Background(), opts)
+	require.NoError(t, err)
+	require.Equal(t, 1, ran)
+	return captured
+}
+
+// assertOnlyValidSharedDir checks that the start kept exactly the valid
+// shared dir: RunConfig.SharedDirs, the volumes and the disk all name only it,
+// and the escaping name created nothing outside the shared-dirs directory.
+func assertOnlyValidSharedDir(t *testing.T, f sharedDirStorageRunFixture, cfg runtime.RunConfig, valid, escaping string) {
+	t.Helper()
+	assert.Equal(t, []api.SharedDir{{Name: valid}}, cfg.SharedDirs, "RunConfig carries only the valid shared dir")
+	basePath, err := config.GetSharedDirsBasePath(f.projectScionDir)
+	require.NoError(t, err)
+	var targets []string
+	for _, v := range cfg.Volumes {
+		if filepath.Dir(v.Target) == "/scion-volumes" {
+			targets = append(targets, v.Target)
+			assert.Equal(t, filepath.Join(basePath, valid), v.Source)
+		}
+	}
+	assert.Equal(t, []string{"/scion-volumes/" + valid}, targets)
+	info, err := os.Stat(filepath.Join(basePath, valid))
+	require.NoError(t, err)
+	assert.True(t, info.IsDir())
+	_, err = os.Lstat(filepath.Join(basePath, escaping))
+	assert.ErrorIs(t, err, os.ErrNotExist, "no directory for the invalid name")
+}
+
+// A project setting with an invalid shared-dir name creates no directory at
+// start on the local layout, and the valid name still works (ptone/scion#6881).
+func TestStartSharedDirs_LocalLayout_InvalidSettingsNameSkipped(t *testing.T) {
+	f := newSharedDirStorageRunFixture(t)
+	f.writeGlobalSettings(t, "")
+	f.writeProjectSharedDirs(t, "data", "../escape")
+	cfg := startCapture(t, f, api.StartOptions{
+		Name: "test-agent", ProjectPath: f.projectScionDir, NoAuth: true,
+		Env: map[string]string{"SCION_AGENT_ID": "agent-6881", "SCION_PROJECT_ID": "pid-6881"},
+	})
+	assertOnlyValidSharedDir(t, f, cfg, "data", "../escape")
+}
+
+// The same holds for names in a hub-dispatched start request.
+func TestStartSharedDirs_LocalLayout_InvalidRequestNameSkipped(t *testing.T) {
+	f := newSharedDirStorageRunFixture(t)
+	f.writeGlobalSettings(t, "")
+	f.writeProjectSettings(t, "")
+	cfg := startCapture(t, f, api.StartOptions{
+		Name: "test-agent", ProjectPath: f.projectScionDir, NoAuth: true,
+		Env:        map[string]string{"SCION_AGENT_ID": "agent-6881r", "SCION_PROJECT_ID": "pid-6881"},
+		SharedDirs: []api.SharedDir{{Name: "data"}, {Name: "../../outside"}},
+	})
+	assertOnlyValidSharedDir(t, f, cfg, "data", "../../outside")
+}

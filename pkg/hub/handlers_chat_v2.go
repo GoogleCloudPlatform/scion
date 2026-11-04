@@ -1755,6 +1755,8 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 	var artifactWarning string
 	msg.Metadata, artifactRefs, artifactWarning = s.admitMessageArtifacts(ctx, msg.Metadata, directAgentRecipient(primaryAgent, ""))
 	msg.ArtifactRefsAdmitted = len(artifactRefs) > 0
+	// The sender's profile time zone travels with the message.
+	msg.Metadata = s.stampSenderTimezone(ctx, msg.Metadata, msg.Sender, msg.SenderID)
 
 	// Phase gate (nc-delivery-unreachable): a primary that is soft-deleted or
 	// in a lifecycle phase where the container cannot accept a buffered
@@ -2185,6 +2187,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 			// already stripped above, so this is a defence-in-depth no-op
 			// today, not a load-bearing second strip.
 			mentionMsg.Metadata = messaging.StripReservedMetadata(mentionMsg.Metadata)
+			mentionMsg.Metadata = s.stampSenderTimezone(ctx, mentionMsg.Metadata, mentionMsg.Sender, mentionMsg.SenderID)
 
 			// Migration gate (design agent-reincarnate §3.7, F2 p2a-r2
 			// review): a mentioned (secondary) agent is a recipient in its
@@ -2946,6 +2949,16 @@ func hasAgentReplyAfter(ctx context.Context, s store.Store, threadID string, aft
 // Message History
 // ---------------------------------------------------------------------------
 
+// errCodeMessageUnavailable is the code of the history around jump's 404
+// for an anchor message that cannot be shown.
+const errCodeMessageUnavailable = "message_unavailable"
+
+// writeAroundMessageUnavailable writes the history around jump's 404: the
+// usual "Message not found" with code message_unavailable.
+func writeAroundMessageUnavailable(w http.ResponseWriter) {
+	writeError(w, http.StatusNotFound, errCodeMessageUnavailable, "Message not found", nil)
+}
+
 // handleConversationHistory handles GET /api/v1/chat/conversations/{key}/messages.
 //
 // Query params:
@@ -3057,14 +3070,19 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 
 	var result *store.ListResult[store.Message]
 	if aroundID := q.Get("around"); aroundID != "" {
+		// Every anchor that cannot be shown here (no such message, one
+		// purged by chat retention or deleted, one in another
+		// conversation) gets the same not-found response, with code
+		// message_unavailable so the web can say so (design chat message
+		// retention §8.3); the response does not tell them apart.
 		if _, err := uuid.Parse(aroundID); err != nil {
-			NotFound(w, "Message")
+			writeAroundMessageUnavailable(w)
 			return
 		}
 		anchor, err := s.store.GetMessage(ctx, aroundID)
 		if err != nil {
 			if errors.Is(err, store.ErrNotFound) {
-				NotFound(w, "Message")
+				writeAroundMessageUnavailable(w)
 			} else {
 				writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to fetch message", nil)
 			}
@@ -3073,7 +3091,7 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 		if (filter.Channel != "" && anchor.Channel != filter.Channel) ||
 			(filter.ConversationID != "" && anchor.ConversationID != filter.ConversationID) ||
 			(filter.ThreadID != "" && anchor.ThreadID != filter.ThreadID) {
-			NotFound(w, "Message")
+			writeAroundMessageUnavailable(w)
 			return
 		}
 

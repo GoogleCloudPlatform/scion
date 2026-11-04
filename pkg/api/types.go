@@ -693,6 +693,17 @@ type AgentInfo struct {
 	// Start always sets it, so empty means an older broker (ptone/scion#620).
 	HarnessConfigSource string `json:"harnessConfigSource,omitempty"`
 	HarnessAuth         string `json:"harnessAuth,omitempty"` // Resolved harness auth method (api-key, oauth-token, auth-file, vertex-ai)
+	// Harness and Model are what Start resolved: the harness name and the
+	// effective model (resolveEffectiveModel), set only by Start. The hub
+	// records them as the run's effective configuration (WP1 slice 3).
+	Harness string `json:"harness,omitempty"`
+	Model   string `json:"model,omitempty"`
+	// ConfigResolved marks an AgentInfo returned by one of Start's return
+	// paths that resolved the agent's configuration (WP1 slice 3 addendum
+	// v14 section 5). Never on the wire: the broker reads it in-process to
+	// decide whether to echo its build. False on the already-running
+	// return and on every listing.
+	ConfigResolved bool `json:"-"`
 
 	// Project association
 	Project string `json:"project"` // Project name (standard field)
@@ -752,6 +763,11 @@ type AgentInfo struct {
 	// metadata mode that is not enforced under the agent's network mode. They
 	// are also included in Warnings.
 	RelayedWarnings []string `json:"relayedWarnings,omitempty"`
+	// StartNotice is a fact about this start for the agent's status
+	// message, for example the repository git config keys left out of the
+	// agent's private copy. The broker reports it with a successful launch.
+	// It is also in Warnings and RelayedWarnings.
+	StartNotice string `json:"startNotice,omitempty"`
 
 	// ExplicitImage and ExplicitImagePullPolicy record the image /
 	// kubernetes.imagePullPolicy that the INLINE config (--config), not a

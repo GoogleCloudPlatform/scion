@@ -69,6 +69,7 @@ export const LAUNCH_CODE_LABELS: Readonly<Record<string, string>> = {
   agent_state_conflict: "the agent's state on the broker cannot be used",
   project_path_not_initialized:
     'the project path on the runtime broker is not initialized as a project',
+  git_config_refused: "the repository's git config sets keys agents may not be given",
   skill_resolution_failed: 'a required skill could not be resolved',
   storage_migration_required: "the agent's storage settings must be migrated first",
   image_pull_failed: 'the agent image could not be pulled',

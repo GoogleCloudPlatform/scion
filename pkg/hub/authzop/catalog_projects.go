@@ -1143,7 +1143,7 @@ var projectOperations = []OperationSpec{
 		BasePermission:        "artifact.manage",
 		Effects:               []SecurityEffect{EffectGrantAuthority},
 		DelegationKind:        DelegationNonAmplification,
-		DelegationDescription: "A manager (the owner or an admin grantee) grants at most admin, the level it holds, and admin is never given to the home project's grant; a steward grants at most write (no stored admin grant can outlive its computed authority), decided from roles and the delegation chain (StewardClause), never from grants the caller holds; the review path gives only the review level, which allows review versions and no read of its own, decided by the host's review-grant authority (MayGrantReview) rather than by grants the caller holds",
+		DelegationDescription: "A manager (the owner or an admin grantee) grants at most admin, the level it holds, and admin is never given to the home project's grant; a steward grants at most write (no stored admin grant can outlive its computed authority), decided from roles, the delegating user recorded on the artifact and, when none is recorded, the delegation chain (StewardClause), never from grants the caller holds; the review path gives only the review level, which allows review versions and no read of its own, decided by the host's review-grant authority (MayGrantReview) rather than by grants the caller holds",
 		AuthorityEval:         AuthorityEvalNone,
 		// grant_created and grant_changed are written in the same
 		// transaction as the grant (pkg/artifacts/store_grants.go).
@@ -1956,11 +1956,41 @@ var projectOperations = []OperationSpec{
 		Bearer:           AdmitOn(BearerTargetProjectPath, BearerBoundaryProject, BearerBoundaryHub),
 	},
 	{
+		ID:          "project.github.installation.bind",
+		Domain:      "project",
+		Description: "Bind a GitHub App installation to a project (admin only: also requires hub.github_app.update)",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/github-installation", Method: "PUT"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		ResourceResolver: "project-from-url",
+		BasePermission:   "project.update",
+		Effects:          []SecurityEffect{EffectUpdateResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		AuditObligation: &AuditObligation{
+			EventType:     "project.github.installation.bind",
+			ContextFields: []string{"actor_id", "project_id"},
+			BeforeFields:  []string{"setting"},
+			Atomic:        true,
+		},
+		DenialCodes: []DenialCode{DenialForbidden},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestBearerDispositionMatrix_CatalogEntryPoints"},
+			{Package: "pkg/hub", Function: "TestGitHubInstallationBind_RequiresHubGitHubAppUpdate"},
+			{Package: "pkg/hub", Function: "TestGitHubInstallationBind_HubBearerBoundaryOnly"},
+		},
+		// Hub boundary only: the bind also requires hub.github_app.update,
+		// a hub-level permission no project token can carry, and an agent
+		// credential never reaches it.
+		Bearer: AdmitOn(BearerTargetProjectPath, BearerBoundaryHub),
+	},
+	{
 		ID:          "project.github.write",
 		Domain:      "project",
 		Description: "Change a project's GitHub installation, status check, GitHub permissions and git identity",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/github-installation", Method: "PUT"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/github-installation", Method: "DELETE"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/github-status", Method: "POST"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/github-permissions", Method: "PUT"},

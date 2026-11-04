@@ -505,7 +505,7 @@ func TestAsyncAgentLaunchExperimentRegistered(t *testing.T) {
 
 // TestAsyncAgentStartExperimentRegistered pins hub.async_agent_start
 // (ptone/scion#4669): it gates hub behaviour only, so it is server-layer
-// only, and it ships off.
+// only, and it ships on (ptone/scion#7250).
 func TestAsyncAgentStartExperimentRegistered(t *testing.T) {
 	e, ok := Default().Lookup(AsyncAgentStart)
 	if !ok {
@@ -514,8 +514,8 @@ func TestAsyncAgentStartExperimentRegistered(t *testing.T) {
 	if AsyncAgentStart != "hub.async_agent_start" {
 		t.Fatalf("frozen name changed: %q", AsyncAgentStart)
 	}
-	if e.Default {
-		t.Fatal("async agent start must default to off")
+	if !e.Default {
+		t.Fatal("async agent start must default to on")
 	}
 	if !e.HasLayer(LayerServer) || e.HasLayer(LayerWeb) {
 		t.Fatalf("must be a server-layer (only) experiment, got %v", e.Layers)
@@ -566,6 +566,28 @@ func TestSecretRotationExperimentRegistered(t *testing.T) {
 		t.Fatalf("must be a server-layer (only) experiment, got %v", e.Layers)
 	}
 	if e.Issue != "ptone/scion#1530" || e.Stage != StageAlpha {
+		t.Fatalf("unexpected registration: %+v", e)
+	}
+}
+
+// TestLifecycleEventsExperimentRegistered pins hub.lifecycle_events (WP1
+// slice 2): it gates hub behaviour only, so it is server-layer only, and
+// it ships off.
+func TestLifecycleEventsExperimentRegistered(t *testing.T) {
+	e, ok := Default().Lookup(LifecycleEvents)
+	if !ok {
+		t.Fatalf("%s is not registered", LifecycleEvents)
+	}
+	if LifecycleEvents != "hub.lifecycle_events" {
+		t.Fatalf("frozen name changed: %q", LifecycleEvents)
+	}
+	if e.Default {
+		t.Fatal("lifecycle events must default to off")
+	}
+	if !e.HasLayer(LayerServer) || e.HasLayer(LayerWeb) {
+		t.Fatalf("must be a server-layer (only) experiment, got %v", e.Layers)
+	}
+	if e.Issue != "ptone/scion#5900" || e.Stage != StageAlpha || e.Owner != "telemetry" {
 		t.Fatalf("unexpected registration: %+v", e)
 	}
 }

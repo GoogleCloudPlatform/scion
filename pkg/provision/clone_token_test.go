@@ -55,7 +55,9 @@ func privateGitServer(t *testing.T, bareRepo string) string {
 		files.ServeHTTP(w, r)
 	}))
 	t.Cleanup(srv.Close)
-	return srv.URL + "/org/" + filepath.Base(bareRepo)
+	cloneURL := srv.URL + "/org/" + filepath.Base(bareRepo)
+	AllowLocalCloneFixture(t, cloneURL)
+	return cloneURL
 }
 
 // isolateGitConfig points git's global config at a file of the test's own

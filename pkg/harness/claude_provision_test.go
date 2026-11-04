@@ -480,9 +480,13 @@ func TestClaudeProvisionScript_Integration_APIKeyApproval(t *testing.T) {
 	}
 }
 
-// TestClaudeProvisionScript_Integration_VertexAI verifies the script produces
-// the correct env overlay for Vertex AI auth.
-func TestClaudeProvisionScript_Integration_VertexAI(t *testing.T) {
+// runClaudeVertexProvision runs provision.py with vertex-ai selected and
+// GOOGLE_CLOUD_PROJECT / GOOGLE_CLOUD_REGION as candidates, nothing staged.
+// The subprocess env is an allow-list: PATH, HOME (the test home), TMPDIR (a
+// fresh temp dir) and vertexEnv (KEY=VALUE entries). Nothing else from the
+// process env reaches provision.py. Returns the env.json overlay.
+func runClaudeVertexProvision(t *testing.T, vertexEnv ...string) map[string]any {
+	t.Helper()
 	pyPath, err := exec.LookPath("python3")
 	if err != nil {
 		t.Skip("python3 not available; skipping script integration test")
@@ -550,7 +554,13 @@ func TestClaudeProvisionScript_Integration_VertexAI(t *testing.T) {
 	}
 
 	cmd := exec.Command(pyPath, scriptPath, "--manifest", manifestPath)
-	cmd.Env = append(os.Environ(), "HOME="+home, "PYTHONDONTWRITEBYTECODE=1")
+	env := []string{
+		"PATH=" + os.Getenv("PATH"),
+		"HOME=" + home,
+		"TMPDIR=" + t.TempDir(),
+		"PYTHONDONTWRITEBYTECODE=1",
+	}
+	cmd.Env = append(env, vertexEnv...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("provision script failed: %v\noutput: %s", err, out)
@@ -569,7 +579,7 @@ func TestClaudeProvisionScript_Integration_VertexAI(t *testing.T) {
 		t.Errorf("method=%v want vertex-ai", resolved["method"])
 	}
 
-	// Verify env.json has vertex-ai env vars.
+	// Read the env.json overlay.
 	envBytes, err := os.ReadFile(filepath.Join(bundle, "outputs", "env.json"))
 	if err != nil {
 		t.Fatalf("env.json missing: %v", err)
@@ -581,11 +591,35 @@ func TestClaudeProvisionScript_Integration_VertexAI(t *testing.T) {
 	if envOverlay["CLAUDE_CODE_USE_VERTEX"] != "1" {
 		t.Errorf("CLAUDE_CODE_USE_VERTEX=%v want 1", envOverlay["CLAUDE_CODE_USE_VERTEX"])
 	}
-	if envOverlay["ANTHROPIC_VERTEX_PROJECT_ID"] != "${GOOGLE_CLOUD_PROJECT}" {
-		t.Errorf("ANTHROPIC_VERTEX_PROJECT_ID=%v want ${GOOGLE_CLOUD_PROJECT}", envOverlay["ANTHROPIC_VERTEX_PROJECT_ID"])
+	return envOverlay
+}
+
+// TestClaudeProvisionScript_Integration_VertexAI: with no staged secret, the
+// process-env values are written to env.json as real values (ptone/scion#7290).
+func TestClaudeProvisionScript_Integration_VertexAI(t *testing.T) {
+	envOverlay := runClaudeVertexProvision(t, "GOOGLE_CLOUD_PROJECT=proj-it", "GOOGLE_CLOUD_REGION=us-east5")
+	if envOverlay["ANTHROPIC_VERTEX_PROJECT_ID"] != "proj-it" {
+		t.Errorf("ANTHROPIC_VERTEX_PROJECT_ID is not the process-env value")
 	}
-	if envOverlay["CLOUD_ML_REGION"] != "${GOOGLE_CLOUD_REGION}" {
-		t.Errorf("CLOUD_ML_REGION=%v want ${GOOGLE_CLOUD_REGION}", envOverlay["CLOUD_ML_REGION"])
+	if envOverlay["CLOUD_ML_REGION"] != "us-east5" {
+		t.Errorf("CLOUD_ML_REGION is not the process-env value")
+	}
+}
+
+// TestClaudeProvisionScript_Integration_VertexAI_Unset: with neither a staged
+// secret nor a process-env value, the keys are left out of env.json and no
+// value carries a ${VAR} placeholder (ptone/scion#7290).
+func TestClaudeProvisionScript_Integration_VertexAI_Unset(t *testing.T) {
+	envOverlay := runClaudeVertexProvision(t)
+	for _, key := range []string{"ANTHROPIC_VERTEX_PROJECT_ID", "CLOUD_ML_REGION"} {
+		if _, ok := envOverlay[key]; ok {
+			t.Errorf("%s is present, want absent", key)
+		}
+	}
+	for key, v := range envOverlay {
+		if s, ok := v.(string); ok && strings.Contains(s, "${") {
+			t.Errorf("%s carries a placeholder", key)
+		}
 	}
 }
 

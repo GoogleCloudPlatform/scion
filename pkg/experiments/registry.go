@@ -246,11 +246,15 @@ const AsyncAgentLaunch = "hub.async_agent_launch"
 
 // AsyncAgentStart gates asynchronous start, resume and restart of existing
 // agents (ptone/scion#4669). It applies only while hub.async_agent_launch is
-// on too. Turn it on only after every hub node runs a version that
-// advertises async_start_v1 in the hub-instance registry; to roll back,
-// turn it off and wait launch_timeout plus 15 seconds before downgrading
-// any node. While any live hub instance lacks async_start_v1, starts stay
-// synchronous whatever its value.
+// on too. It is on by default (ptone/scion#7250); an admin override turns it
+// off. While any live hub instance in the hub-instance registry lacks
+// async_start_v1, starts stay synchronous whatever its value. The check sees
+// only nodes that write the registry: a node on a version from before the
+// registry (GoogleCloudPlatform/scion#3078) writes no row and is not counted, so an
+// operator upgrading a multi-node hub from such a version turns this off
+// until every node is upgraded. To roll back, turn it off with an admin
+// override and wait launch_timeout plus 15 seconds before downgrading any
+// node.
 const AsyncAgentStart = "hub.async_agent_start"
 
 // AgentBadges gates the agent badges (ptone/scion#5503): a harness vendor
@@ -292,6 +296,15 @@ const SecretRotation = "server.secret_rotation"
 // ptone/scion#5995 makes it the default and removes the gate.
 const ContentHashV2 = "hub.content_hash_v2"
 
+// LifecycleEvents gates the agent lifecycle event pipeline (WP1): with it
+// on, every authoritative agent-row write records versioned
+// agent.lifecycle events in a transactional outbox, which the hub delivers
+// to the Cloud Logging log scion-analytics. It takes effect only with a
+// pinned hub ID and a configured sink; the state is exported as
+// lifecycle_observer_state. Turning it off stops new events; pending rows
+// are still delivered.
+const LifecycleEvents = "hub.lifecycle_events"
+
 // SkillContentHashV2 gates the skill content hash v2 transition
 // (ptone/scion#5935). Skill hash v2 is transfer.ComputeContentHashV2 over a
 // skill's files (paths, normalised modes and per-file hashes); v1
@@ -323,6 +336,21 @@ const SkillContentHashV2 = "hub.skill_content_hash_v2"
 // whether or not it is on.
 const ArtifactReviewEditor = "web.artifact_review_editor"
 
+// ArtifactManageAccess gates the Manage access button and dialog on the
+// artifact page (ptone/scion#7107). It is web-only: the dialog calls the
+// existing grant, link and expiry routes, which decide every change the
+// same way whether or not it is on.
+const ArtifactManageAccess = "web.artifact_manage_access"
+
+// ArtifactSponsorReviewGrant gates the automatic review grant for the
+// delegating user (ptone/scion#7134): when an agent with a recorded
+// delegating user creates a new artifact in a project, the hub gives that
+// user review access to it, provided the user holds a role that reads in
+// the artifact's home project. The hub checks it at creation
+// (artifactHost.SponsorReviewGrant). Turning it off stops new grants;
+// grants already made stay until removed.
+const ArtifactSponsorReviewGrant = "hub.artifact_sponsor_review_grant"
+
 // UserDeleteForceCascade gates the forced user delete (ptone/scion#2143):
 // DELETE /api/v1/users/{id}?force=true, which revokes the user's authority,
 // records a deletion tombstone and stops the user's agents, the GET
@@ -337,10 +365,21 @@ const UserDeleteForceCascade = "hub.user_delete_force_cascade"
 // the Registry instance it was given (ptone/scion#2217).
 var compiled = []Experiment{
 	{
+		Name:        LifecycleEvents,
+		Title:       "Agent lifecycle events",
+		Description: "Records a versioned agent.lifecycle event for every authoritative agent transition (create, launch, start, stop, delete and the rest) in the transaction that commits it, and delivers them to the Cloud Logging log scion-analytics. Takes effect only with a pinned hub ID (server.hub.hub_id) and server Cloud Logging enabled; lifecycle_observer_state reports why it is not in effect. Enable it on every replica together. Turning it off stops new events; events already recorded are still delivered.",
+		Default:     false,
+		Layers:      []Layer{LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#5900",
+		Owner:       "telemetry",
+		ReviewBy:    "2027-03-31",
+	},
+	{
 		Name:        AsyncAgentStart,
 		Title:       "Asynchronous agent start",
-		Description: "Lets the hub answer a start, resume or restart of an existing agent as soon as the Runtime Broker accepts it, like an asynchronous create; it applies only while hub.async_agent_launch is also on. Turn it on only after every hub node runs a version that supports it (each advertises async_start_v1). While any live hub instance lacks async_start_v1, starts stay synchronous. To roll back, turn it off and wait launch_timeout plus 15 seconds before downgrading any node.",
-		Default:     false,
+		Description: "Lets the hub answer a start, resume or restart of an existing agent as soon as the Runtime Broker accepts it, like an asynchronous create; it applies only while hub.async_agent_launch is also on. On by default. While any live hub instance in the hub-instance registry lacks async_start_v1, starts stay synchronous; nodes on a version from before the registry are not seen, so turn it off while upgrading a multi-node hub from such a version, until every node is upgraded. To roll back, turn it off and wait launch_timeout plus 15 seconds before downgrading any node.",
+		Default:     true,
 		Layers:      []Layer{LayerServer},
 		Stage:       StageAlpha,
 		Issue:       "ptone/scion#4669",
@@ -558,6 +597,28 @@ var compiled = []Experiment{
 		Issue:       "ptone/scion#5913",
 		Owner:       "artifacts",
 		ReviewBy:    "2027-01-21",
+	},
+	{
+		Name:        ArtifactManageAccess,
+		Title:       "Manage access dialog",
+		Description: "Replaces Share, Grant review access and Retention… on the artifact page with one Manage access button and dialog for review access, link sharing and retention. Needs hub.artifacts. Web only; the hub decides every change the same way whether or not it is on.",
+		Default:     false,
+		Layers:      []Layer{LayerWeb},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#7107",
+		Owner:       "artifacts",
+		ReviewBy:    "2027-02-01",
+	},
+	{
+		Name:        ArtifactSponsorReviewGrant,
+		Title:       "Automatic review access for the delegating user",
+		Description: "When an agent creates a new artifact in a project, gives the user who delegated to the agent review access to it, if that user holds a role that reads in the artifact's home project. The grant counts only while they keep that role, until someone changes its level, and can be removed like any grant. Existing artifacts get nothing. Needs hub.artifacts.",
+		Default:     false,
+		Layers:      []Layer{LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#7134",
+		Owner:       "artifacts",
+		ReviewBy:    "2027-02-01",
 	},
 	{
 		Name:        UserDeleteForceCascade,

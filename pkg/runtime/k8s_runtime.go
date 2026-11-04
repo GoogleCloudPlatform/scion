@@ -27,6 +27,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -1982,21 +1983,31 @@ func (r *KubernetesRuntime) createSharedDirPVCs(ctx context.Context, namespace s
 // warning makes that visible, with the phase when the claim is still Pending
 // (for example because its class cannot provision ReadWriteMany volumes).
 func warnOnStorageClassMismatch(pvc *corev1.PersistentVolumeClaim, requested string) {
-	if pvc == nil || requested == "" {
-		return
-	}
-	existing := ""
-	if pvc.Spec.StorageClassName != nil {
-		existing = *pvc.Spec.StorageClassName
-	}
-	if existing == requested {
+	existing, pending, differs := storageClassMismatch(pvc, requested)
+	if !differs {
 		return
 	}
 	args := []any{"pvc", pvc.Name, "existing_storage_class", existing, "requested_storage_class", requested}
-	if pvc.Status.Phase == corev1.ClaimPending {
-		args = append(args, "phase", string(pvc.Status.Phase))
+	if pending {
+		args = append(args, "phase", string(corev1.ClaimPending))
 	}
 	runtimeLog().Warn("Reusing existing shared-dir PVC whose storage class differs from the requested class; existing claims are not changed", args...)
+}
+
+// storageClassMismatch reports whether claim pvc's storage class differs
+// from the requested (non-empty) class, with the claim's class (empty when
+// it names none) and whether the claim is still Pending. A nil claim or an
+// empty requested class never differs. It is the comparison both the
+// start-time warning (warnOnStorageClassMismatch) and the doctor's
+// shared-dir-claim-classes check use.
+func storageClassMismatch(pvc *corev1.PersistentVolumeClaim, requested string) (existing string, pending, differs bool) {
+	if pvc == nil || requested == "" {
+		return "", false, false
+	}
+	if pvc.Spec.StorageClassName != nil {
+		existing = *pvc.Spec.StorageClassName
+	}
+	return existing, pvc.Status.Phase == corev1.ClaimPending, existing != requested
 }
 
 // ensureProjectRWXClaim is the idempotent get-or-create core for project-scoped
@@ -2280,7 +2291,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 
 			for _, s := range config.ResolvedSecrets {
 				if s.Type == "environment" {
-					if _, collides := envVarNames[s.Target]; collides {
+					if _, collides := envVarNames[s.Target]; collides || reservedAgentEnvName(s.Target) {
 						continue
 					}
 					envVars = append(envVars, corev1.EnvVar{
@@ -2307,7 +2318,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 			// volume projects only the file keys, not the env values.
 			for _, s := range config.ResolvedSecrets {
 				if s.Type == "environment" {
-					if _, collides := envVarNames[s.Target]; collides {
+					if _, collides := envVarNames[s.Target]; collides || reservedAgentEnvName(s.Target) {
 						continue
 					}
 					envVars = append(envVars, corev1.EnvVar{
@@ -2472,10 +2483,13 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	// here; the variable only drives the umask.
 	envVars = withSupplementalGIDsEnv(envVars, sharedDirGroups(config))
 
-	// The template env fallback (ptone/scion#4524) is the LAST env step:
-	// only names no source above set (plain or secret-backed), never a
-	// suppressed key.
+	// The template env fallback (ptone/scion#4524) is the last env step that
+	// adds entries: only names no source above set (plain or secret-backed),
+	// never a suppressed key.
 	envVars = appendK8sFallbackEnv(envVars, config.FallbackEnv, config.SuppressedFallbackKeys)
+	// A reserved name never reaches the container, whatever its source: the
+	// drop runs after every step that adds entries.
+	envVars = slices.DeleteFunc(envVars, func(ev corev1.EnvVar) bool { return reservedAgentEnvName(ev.Name) })
 
 	// Determine image pull policy
 	pullPolicy := corev1.PullIfNotPresent

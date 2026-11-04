@@ -381,9 +381,10 @@ func (s *Server) handleCreateAgentDelegation(w http.ResponseWriter, r *http.Requ
 		if result.OK {
 			continue
 		}
-		if result.Reason == MintDenialProjectAccessRequired {
-			// The uniform answer UAT mint gives, so the response does not
-			// confirm whether the project exists.
+		if uniformMintRefusal(boundary, result.Reason) {
+			// For a project boundary, the uniform answer token mint gives,
+			// so the response does not confirm whether the project exists.
+			// A hub-boundary denial names the selector and its reason.
 			refuse(http.StatusForbidden, ErrCodeForbidden, "forbidden", nil)
 			return
 		}
@@ -457,8 +458,8 @@ func (s *Server) handleCreateAgentDelegation(w http.ResponseWriter, r *http.Requ
 // when a reincarnation is in flight or the row changed since agent was
 // read (state version, generation, deletion), counts the active grants
 // under the agent row lock and the issuer lock (errAgentDelegationGrantLimit
-// past either cap), then writes grant and its mutation audit, attributed
-// to actor. An audit write failure wraps errAgentDelegationAuditFailed.
+// past either cap), keys grant to the locked row's run, then writes grant
+// and its mutation audit, attributed to actor. An audit write failure wraps errAgentDelegationAuditFailed.
 // Because the agent row stays locked until the transaction ends, an
 // issuance and a reincarnation claim serialize: a claim that commits first
 // makes the re-read refuse, and a claim that commits after the issuance
@@ -491,6 +492,11 @@ func writeAgentDelegationGrantTx(ctx context.Context, tx store.Store, agent *sto
 	if perAgent >= agentDelegationMaxActiveGrantsPerAgent || perIssuer >= agentDelegationMaxActiveGrantsPerIssuer {
 		return errAgentDelegationGrantLimit
 	}
+	// The run is read from the locked row: a new run ID changes neither
+	// the state version nor the generation checked above, so agent may
+	// hold an older one. A suspend reads it under the same lock
+	// (revokeSuspendedRunDelegationGrantsBestEffort).
+	grant.IssuedRunID = locked.RunID
 	if err := tx.CreateAgentDelegationGrant(ctx, grant); err != nil {
 		return fmt.Errorf("create grant: %w", err)
 	}

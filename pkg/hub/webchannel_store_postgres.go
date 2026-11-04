@@ -143,6 +143,10 @@ CREATE TABLE IF NOT EXISTS webchat_topic (
 CREATE INDEX IF NOT EXISTS idx_webchat_topic_project_activity
     ON webchat_topic (project_id, deleted_at, last_activity_at);
 
+-- Soft-deleted topics, for the chat retention grace purge.
+CREATE INDEX IF NOT EXISTS idx_webchat_topic_deleted
+    ON webchat_topic (deleted_at) WHERE deleted_at IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS webchat_read_state (
     user_id          TEXT NOT NULL,
     conversation_key TEXT NOT NULL,
@@ -2453,28 +2457,4 @@ SELECT DISTINCT wm.conversation_key
 		out[key] = true
 	}
 	return out, rows.Err()
-}
-
-// PurgeOrphanMentions deletes mention rows whose message row is gone.
-// message_id is a hub-minted UUID, so the cast lets the lookup use the
-// messages primary key. The cast sits inside a CASE so it only runs on
-// UUID-shaped values (Postgres does not promise OR evaluation order). A
-// non-UUID message_id maps to NULL, matches no message, and is deleted as
-// an orphan instead of failing the whole sweep.
-func (s *pgWebChatStore) PurgeOrphanMentions(ctx context.Context) (int, error) {
-	messagesTable, err := s.table(ctx, "messages")
-	if err != nil {
-		return 0, err
-	}
-	res, err := s.db.ExecContext(ctx, `
-DELETE FROM webchat_mention wm
- WHERE NOT EXISTS (SELECT 1 FROM `+messagesTable+` m WHERE m.id = (CASE
-        WHEN wm.message_id ~* `+pgUUIDShapeRegex+`
-        THEN wm.message_id::uuid END))
-`)
-	if err != nil {
-		return 0, fmt.Errorf("webchat store: purge orphan mentions: %w", err)
-	}
-	n, _ := res.RowsAffected()
-	return int(n), nil
 }

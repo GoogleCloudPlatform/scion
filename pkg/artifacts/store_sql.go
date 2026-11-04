@@ -247,7 +247,9 @@ func (s *sqlStore) CreatePending(ctx context.Context, a *Artifact, v *Version, f
 
 // createArtifact writes an artifact, its first version, the version's
 // files and the grants in one transaction. The artifact's current version
-// is the version when it is ready, and none otherwise.
+// is the version when it is ready, and none otherwise. A grant created by
+// SponsorReviewCreator gets its grant_created event in the same
+// transaction.
 func (s *sqlStore) createArtifact(ctx context.Context, a *Artifact, v *Version, files []File, grants []Grant) error {
 	if a == nil || v == nil {
 		return errors.New("artifacts: creating an artifact needs an artifact and a version")
@@ -266,10 +268,10 @@ func (s *sqlStore) createArtifact(ctx context.Context, a *Artifact, v *Version, 
 		current = v.Seq
 	}
 	if _, err := tx.ExecContext(ctx, s.rebind(`INSERT INTO artifact
-		(id, scope_kind, scope_ref, owner_kind, owner_ref, "key", title, current_seq, expires_at, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+		(id, scope_kind, scope_ref, owner_kind, owner_ref, "key", title, current_seq, expires_at, created_at, updated_at, sponsor_ref)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
 		a.ID, a.ScopeKind, a.ScopeRef, a.OwnerKind, a.OwnerRef, nullString(a.Key), a.Title, nullInt(current),
-		s.nullTimeArg(a.ExpiresAt), s.timeArg(a.CreatedAt), s.timeArg(a.UpdatedAt)); err != nil {
+		s.nullTimeArg(a.ExpiresAt), s.timeArg(a.CreatedAt), s.timeArg(a.UpdatedAt), nullString(a.SponsorRef)); err != nil {
 		return fmt.Errorf("artifacts: insert artifact: %w", err)
 	}
 	if err := s.insertVersion(ctx, tx, v, files); err != nil {
@@ -285,6 +287,19 @@ func (s *sqlStore) createArtifact(ctx context.Context, a *Artifact, v *Version, 
 			g.ID, g.ArtifactID, g.SubjectKind, g.SubjectRef, g.Permission, s.nullTimeArg(g.ExpiresAt),
 			nullString(g.CreatedByRef), s.timeArg(g.CreatedAt)); err != nil {
 			return fmt.Errorf("artifacts: insert grant: %w", err)
+		}
+		// The automatic review grant (ptone/scion#7134) is the hub's own
+		// act, recorded with its event in this transaction; the home grant
+		// is implicit and records none.
+		if g.CreatedByRef == SponsorReviewCreator {
+			if !validSponsorReviewGrant(&g) {
+				return errors.New("artifacts: an automatic review grant must be a review grant to a user")
+			}
+			if err := s.insertEvent(ctx, tx, a.ID, EventGrantCreated, &sponsorReviewActor, g.CreatedAt, map[string]any{
+				"grantId": g.ID, "subjectKind": g.SubjectKind, "subjectRef": g.SubjectRef, "permission": g.Permission,
+			}); err != nil {
+				return err
+			}
 		}
 	}
 	if err := tx.Commit(); err != nil {
@@ -700,13 +715,14 @@ func (s *sqlStore) getArtifact(ctx context.Context, where string, args ...any) (
 		updated, deletedTime dbTime
 		orphaned             dbTime
 		messageProject       sql.NullString
+		sponsor              sql.NullString
 	)
 	err := s.db.QueryRowContext(ctx, s.rebind(`SELECT
 		id, scope_kind, scope_ref, owner_kind, owner_ref, "key", title, current_seq, expires_at, created_at, updated_at, deleted_at,
-		orphaned_at, message_project_id
+		orphaned_at, message_project_id, sponsor_ref
 		FROM artifact WHERE `+where+` AND deleted_at IS NULL`), args...).Scan(
 		&a.ID, &a.ScopeKind, &a.ScopeRef, &a.OwnerKind, &a.OwnerRef, &key, &a.Title, &seq,
-		&expires, &created, &updated, &deletedTime, &orphaned, &messageProject)
+		&expires, &created, &updated, &deletedTime, &orphaned, &messageProject, &sponsor)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -721,6 +737,7 @@ func (s *sqlStore) getArtifact(ctx context.Context, where string, args ...any) (
 	a.DeletedAt = deletedTime.ptr()
 	a.OrphanedAt = orphaned.ptr()
 	a.MessageProjectID = nullStringPtr(messageProject)
+	a.SponsorRef = sponsor.String
 	return &a, nil
 }
 
@@ -898,13 +915,13 @@ func (s *sqlStore) ListCandidates(ctx context.Context, q CandidateQuery) ([]Cand
 	for rows.Next() {
 		var (
 			c                         Candidate
-			key, kind                 sql.NullString
+			key, kind, sponsor        sql.NullString
 			seq                       sql.NullInt64
 			expires, created, updated dbTime
 			orphaned                  dbTime
 		)
 		if err := rows.Scan(&c.ID, &c.ScopeKind, &c.ScopeRef, &c.OwnerKind, &c.OwnerRef, &key, &c.Title,
-			&seq, &expires, &created, &updated, &orphaned, &kind); err != nil {
+			&seq, &expires, &created, &updated, &orphaned, &sponsor, &kind); err != nil {
 			return nil, fmt.Errorf("artifacts: scan candidate: %w", err)
 		}
 		c.Key = key.String
@@ -913,6 +930,7 @@ func (s *sqlStore) ListCandidates(ctx context.Context, q CandidateQuery) ([]Cand
 		c.CreatedAt = created.Time
 		c.UpdatedAt = updated.Time
 		c.OrphanedAt = orphaned.ptr()
+		c.SponsorRef = sponsor.String
 		c.CurrentKind = kind.String
 		out = append(out, c)
 	}
@@ -977,7 +995,7 @@ func (s *sqlStore) candidateQuery(q CandidateQuery) (string, []any) {
 // candidateColumns is the column list every arm of the candidate query
 // selects; the union and its outer ORDER BY rely on the names.
 const candidateColumns = `a.id, a.scope_kind, a.scope_ref, a.owner_kind, a.owner_ref, a."key", a.title,
-		a.current_seq, a.expires_at, a.created_at, a.updated_at, a.orphaned_at, v.kind AS current_kind`
+		a.current_seq, a.expires_at, a.created_at, a.updated_at, a.orphaned_at, a.sponsor_ref, v.kind AS current_kind`
 
 // writeCandidateFilters appends the conditions every candidate arm shares:
 // live, not expired, the search, the review filter, the home scope and the

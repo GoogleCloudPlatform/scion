@@ -26,6 +26,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/stretchr/testify/assert"
@@ -72,9 +73,10 @@ func TestRemoveNFSAgentFiles_CloudRunRemovesAgentWorkspace(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, path, "worktree removal is a no-op on Cloud Run")
 
-	paths, err := m.RemoveNFSAgentFiles(context.Background(), f.projectScionDir, testNFSWorkspaceProjectID, "test-agent")
+	ds, err := m.RemoveNFSAgentFiles(context.Background(), f.projectScionDir, testNFSWorkspaceProjectID, "test-agent")
 	require.NoError(t, err)
-	assert.Equal(t, []string{agentDir}, paths)
+	assert.Equal(t, []string{filepath.Join(agentDir, provision.AgentWorkspaceDir)}, deletionPaths(ds))
+	assert.Equal(t, projectfs.OutcomeDeleted, ds[0].Outcome)
 	assert.NoDirExists(t, filepath.Join(agentDir, provision.AgentWorkspaceDir), "the agent's workspace is removed")
 	assert.DirExists(t, filepath.Join(agentDir, cloudRunTestHomeLeaf), "the agent's home is the hub's to remove")
 	assert.FileExists(t, filepath.Join(otherDir, provision.AgentWorkspaceDir, "README.md"), "other agents are untouched")
@@ -82,9 +84,9 @@ func TestRemoveNFSAgentFiles_CloudRunRemovesAgentWorkspace(t *testing.T) {
 
 	// Control: on a runtime outside the gate nothing is removed.
 	readme := filepath.Join(otherDir, provision.AgentWorkspaceDir, "README.md")
-	paths, err = kubernetesTestManager("docker").RemoveNFSAgentFiles(context.Background(), f.projectScionDir, testNFSWorkspaceProjectID, "other-agent")
+	ds, err = kubernetesTestManager("docker").RemoveNFSAgentFiles(context.Background(), f.projectScionDir, testNFSWorkspaceProjectID, "other-agent")
 	require.NoError(t, err)
-	assert.Empty(t, paths)
+	assert.Empty(t, ds)
 	assert.FileExists(t, readme)
 }
 

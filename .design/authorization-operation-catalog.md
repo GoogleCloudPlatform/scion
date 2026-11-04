@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 370
+**Operations:** 376
 
 ## Table of Contents
 
@@ -111,6 +111,7 @@
 - [project.workspace.read](#projectworkspaceread) — Read a project's workspace: archive and file reads
 - [project.workspace.write](#projectworkspacewrite) — Change a project's workspace: file upload, write and delete, and git pull
 - [project.github.read](#projectgithubread) — Read a project's GitHub status, GitHub permissions and git identity
+- [project.github.installation.bind](#projectgithubinstallationbind) — Bind a GitHub App installation to a project (admin only: also requires hub.github_app.update)
 - [project.github.write](#projectgithubwrite) — Change a project's GitHub installation, status check, GitHub permissions and git identity
 - [project.members.assignableroles](#projectmembersassignableroles) — List the roles the caller may assign in a project
 - [agent.message.send](#agentmessagesend) — Send a message to an agent
@@ -243,7 +244,7 @@
 - [hub.audit.explain](#hubauditexplain) — Explain another principal's authorization, or compare two principals' effective permissions. A token needs hub_audit:read on a hub boundary; grant details of the other principal are redacted
 - [user.self.explain](#userselfexplain) — Explain the caller's own authorization. A token's decisions apply its ceiling and boundary, and its effective permission list holds only the permissions it may use; a project-boundary token explains only targets in its boundary project, while its holder is a current member of that project
 - [user.self.profile](#userselfprofile) — Read the caller's own profile and preferences. Any token reads its holder's own profile. A visitor reads its own federated account; an unlinked federated user is refused
-- [user.self.scopes](#userselfscopes) — List the token selectors and, for a requested boundary, the caller's own mint eligibility for each. Any token reads it
+- [user.self.scopes](#userselfscopes) — List the token selectors and, for a requested boundary, the caller's own mint eligibility for each. Any token reads the selector list. Eligibility needs an interactive session: a token request naming a boundary or project is refused
 - [user.self.adminstatus](#userselfadminstatus) — Read the caller's own admin status and system-scope permissions. For a token the permission list holds only the permissions its ceiling allows that are eligible for its boundary kind
 - [user.self.groups](#userselfgroups) — List the caller's own effective groups. A project-boundary token lists groups that belong to no project and the groups of its boundary project, the latter only while its holder is a current member of that project
 - [user.invite.redeem](#userinviteredeem) — Redeem an invitation code for the caller's identity. Session-only: a token does not bind an invitation to its holder
@@ -287,6 +288,11 @@
 - [quota.brokersettings.update](#quotabrokersettingsupdate) — Replace a runtime broker's settings document. Requires broker.read on the broker and quota.update on the hub-scoped quota target for every write, including one that changes no key, and each changed key's declared permission (maxAgents declares quota.update)
 - [quota.delete](#quotadelete) — Delete limit definitions and entitlement bindings. The route guard checks quota.read, so a token needs quota:read and quota:delete
 - [quota.usage.self.read](#quotausageselfread) — Read the caller's own quota usage: each limit's effective value and active count for the caller only
+- [hub.experiments.read](#hubexperimentsread) — Read the resolved experiment flags. Any signed-in identity (user, agent or broker) reads them, and any user access token reads them
+- [hub.profiling.read](#hubprofilingread) — Read the client profiling switch. Any signed-in identity (user, agent or broker) reads it, and any user access token reads it
+- [hub.injectedskills.read](#hubinjectedskillsread) — Read the hub injected skill references. Any signed-in identity reads them, and any token reads them
+- [hub.conduitgrantkeys.read](#hubconduitgrantkeysread) — Read the conduit grant verification keys (public halves only). Any signed-in identity reads them, and any token reads them; 404 while the hub.conduit experiment is off
+- [hub.prestarthooks.read](#hubprestarthooksread) — Read hub pre-start hooks. Any signed-in user reads them; the script body is returned only to a holder of hub.lifecycle_hooks.read on an interactive session or dev credential; every other credential, a user access token included, gets it redacted
 - [hub.policies.removed](#hubpoliciesremoved) — Removed policy API; every method and sub-path answers 410 Gone and points callers to role bindings
 - [skill.list](#skilllist) — List skills; each row is filtered by skill read. A user access token needs skill:list on either boundary; its page, total and cursor count only the rows it may read
 - [skill.read](#skillread) — Read a skill, its versions, its download URLs, its resolved version and its files. A record the caller may not read answers as not found
@@ -3225,7 +3231,7 @@
 ### Delegation
 
 - **Kind:** `non_amplification`
-- A manager (the owner or an admin grantee) grants at most admin, the level it holds, and admin is never given to the home project's grant; a steward grants at most write (no stored admin grant can outlive its computed authority), decided from roles and the delegation chain (StewardClause), never from grants the caller holds; the review path gives only the review level, which allows review versions and no read of its own, decided by the host's review-grant authority (MayGrantReview) rather than by grants the caller holds
+- A manager (the owner or an admin grantee) grants at most admin, the level it holds, and admin is never given to the home project's grant; a steward grants at most write (no stored admin grant can outlive its computed authority), decided from roles, the delegating user recorded on the artifact and, when none is recorded, the delegation chain (StewardClause), never from grants the caller holds; the review path gives only the review level, which allows review versions and no read of its own, decided by the host's review-grant authority (MayGrantReview) rather than by grants the caller holds
 
 ### Audit
 
@@ -4506,6 +4512,47 @@
 
 ---
 
+## project.github.installation.bind
+
+**Domain:** project
+
+**Description:** Bind a GitHub App installation to a project (admin only: also requires hub.github_app.update)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PUT | `/api/v1/projects/{id}/github-installation` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `project_path`; boundaries `hub`)
+
+**Base Permission:** `project.update`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `update-resource`
+
+### Audit
+
+- **Event Type:** `project.github.installation.bind`
+- **Context Fields:** actor_id, project_id
+- **Before Fields:** setting
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+- `pkg/hub:TestGitHubInstallationBind_RequiresHubGitHubAppUpdate`
+- `pkg/hub:TestGitHubInstallationBind_HubBearerBoundaryOnly`
+
+---
+
 ## project.github.write
 
 **Domain:** project
@@ -4516,7 +4563,6 @@
 
 | Kind | Method | Pattern |
 |------|--------|---------|
-| http_route | PUT | `/api/v1/projects/{id}/github-installation` |
 | http_route | DELETE | `/api/v1/projects/{id}/github-installation` |
 | http_route | POST | `/api/v1/projects/{id}/github-status` |
 | http_route | PUT | `/api/v1/projects/{id}/github-permissions` |
@@ -4597,7 +4643,9 @@
 
 **Principals:** `user`, `agent`, `broker`
 
-**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`, `broker_token`
+**Credentials:** `session_jwt`, `agent_jwt`, `broker_token`
+
+**Bearer:** `non_user`
 
 **Base Permission:** `agent.message`
 
@@ -9231,7 +9279,7 @@
 
 **Domain:** user
 
-**Description:** List the token selectors and, for a requested boundary, the caller's own mint eligibility for each. Any token reads it
+**Description:** List the token selectors and, for a requested boundary, the caller's own mint eligibility for each. Any token reads the selector list. Eligibility needs an interactive session: a token request naming a boundary or project is refused
 
 ### Entry Points
 
@@ -9254,6 +9302,7 @@
 ### Tests
 
 - `pkg/hub:TestSelfIdentityReadsToken_AnyTokenReads`
+- `pkg/hub:TestAuthScopes_TokenCannotRequestBoundaryEligibility`
 
 ### Exemptions
 
@@ -10771,6 +10820,183 @@
 
 ---
 
+## hub.experiments.read
+
+**Domain:** hub
+
+**Description:** Read the resolved experiment flags. Any signed-in identity (user, agent or broker) reads them, and any user access token reads them
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/experiments` |
+
+**Principals:** `user`, `agent`, `broker`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`, `broker_token`
+
+**Bearer:** `admit_self` (self filter `none`; pinned by `TestExperimentsRead_AnyTokenReads`)
+
+**Resource Resolver:** none
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestExperimentsRead_AnyTokenReads`
+- `pkg/hub:TestAuthenticatedReads_AgentTokenReads`
+- `pkg/hub:TestAuthenticatedReads_BrokerReads`
+
+### Exemptions
+
+- **authentication_only:** Resolved web-layer experiment flags; carries no authority and no other user's records (scope: resolved experiment flags) — waives: `base_permission`
+
+---
+
+## hub.profiling.read
+
+**Domain:** hub
+
+**Description:** Read the client profiling switch. Any signed-in identity (user, agent or broker) reads it, and any user access token reads it
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/profiling` |
+
+**Principals:** `user`, `agent`, `broker`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`, `broker_token`
+
+**Bearer:** `admit_self` (self filter `none`; pinned by `TestProfilingRead_AnyTokenReads`)
+
+**Resource Resolver:** none
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestProfilingRead_AnyTokenReads`
+- `pkg/hub:TestAuthenticatedReads_AgentTokenReads`
+- `pkg/hub:TestAuthenticatedReads_BrokerReads`
+
+### Exemptions
+
+- **authentication_only:** One client profiling boolean; carries no authority and no other user's records (scope: client profiling switch) — waives: `base_permission`
+
+---
+
+## hub.injectedskills.read
+
+**Domain:** hub
+
+**Description:** Read the hub injected skill references. Any signed-in identity reads them, and any token reads them
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/hub/settings/injected-skills` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit_self` (self filter `none`; pinned by `TestHubInjectedSkillsRead_AnyTokenReads`)
+
+**Resource Resolver:** none
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestHubInjectedSkillsRead_AnyTokenReads`
+
+### Exemptions
+
+- **authentication_only:** Hub skill references every user and agent reads at provision time; carries no authority (scope: hub injected skill references) — waives: `base_permission`
+
+---
+
+## hub.conduitgrantkeys.read
+
+**Domain:** hub
+
+**Description:** Read the conduit grant verification keys (public halves only). Any signed-in identity reads them, and any token reads them; 404 while the hub.conduit experiment is off
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/conduit/grant-keys` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit_self` (self filter `none`; pinned by `TestConduitGrantKeysRead_AnyTokenReads`)
+
+**Resource Resolver:** none
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestConduitGrantKeysRead_AnyTokenReads`
+- `pkg/hub:TestConduitGrantKeysEndpoint`
+
+### Exemptions
+
+- **authentication_only:** Public verification key halves only; carries no authority (scope: conduit grant public keys) — waives: `base_permission`
+
+---
+
+## hub.prestarthooks.read
+
+**Domain:** hub
+
+**Description:** Read hub pre-start hooks. Any signed-in user reads them; the script body is returned only to a holder of hub.lifecycle_hooks.read on an interactive session or dev credential; every other credential, a user access token included, gets it redacted
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/pre-start-hooks` |
+| http_route | GET | `/api/v1/pre-start-hooks/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit_self` (self filter `none`; pinned by `TestHubPreStartHookRead_MemberAndProjectTokensRead`)
+
+**Resource Resolver:** none
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestHubPreStartHookRead_TokenGetsRedactedScript`
+- `pkg/hub:TestHubPreStartHookRead_MemberAndProjectTokensRead`
+
+### Exemptions
+
+- **authentication_only:** Hook metadata for the inherited-hook banner; the script is redacted for every token and non-admin (scope: hub pre-start hook metadata) — waives: `base_permission`
+
+---
+
 ## hub.policies.removed
 
 **Domain:** hub
@@ -12160,6 +12386,7 @@
 | http_route | GET | `/api/v1/runtime-brokers/{id}` |
 | http_route | GET | `/api/v1/runtime-brokers/{id}/settings` |
 | http_route | GET | `/api/v1/runtime-brokers/{id}/projects` |
+| http_route | GET | `/api/v1/runtime-brokers/{id}/conversion-plan` |
 
 **Principals:** `user`
 
@@ -12684,6 +12911,8 @@
 **Principals:** `agent`
 
 **Credentials:** `agent_jwt`
+
+**Bearer:** `non_user`
 
 **Base Permission:** `gcp_service_account.use`
 

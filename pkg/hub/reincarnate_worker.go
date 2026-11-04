@@ -269,7 +269,15 @@ func writeReincarnationStep(ctx context.Context, st store.Store, agentID string,
 	} else if upd.clearMessageIfEquals != "" && agent.Message == upd.clearMessageIfEquals {
 		agent.Message = ""
 	}
-	if err := st.UpdateAgent(ctx, agent); err != nil {
+	// WP1: a write that applies a configuration (the reprovision) is a
+	// config-resolution write for the lifecycle observer. st is s.store, or
+	// the transaction's store under txWork: the observer then records in that
+	// same transaction, so a rollback leaves no event.
+	wctx := ctx
+	if upd.appliedConfig != nil {
+		wctx = lifecycleConfigResolution(ctx)
+	}
+	if err := st.UpdateAgent(wctx, agent); err != nil {
 		return nil, err
 	}
 	return agent, nil
