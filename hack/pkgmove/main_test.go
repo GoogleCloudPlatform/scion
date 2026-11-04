@@ -788,8 +788,8 @@ func outRefTree() map[string]string {
 			"var authorizeFile = \"pkg/hub/authorize.go\"\n\n" + // line 7: staying source file
 			"func extra() bool { return extraCheck() }\n",
 		"pkg/hub/authorize_extra.go": "package hub\n\nfunc extraCheck() bool { return true }\n",
-		// A moved file the analysis does not type-check (excluded by build tags).
-		"pkg/hub/authorize_never.go": "//go:build never\n\npackage hub\n\nfunc neverFn() bool { return true }\n",
+		// A moved file outside the type-checked unit (an external test).
+		"pkg/hub/authorize_ext_test.go": "package hub_test\n\nfunc neverFn() bool { return true }\n",
 		// The permissions registry shape: "path" and "path:symbol".
 		"pkg/hub/permissions/registry.go": "package permissions\n\n" +
 			"var Enforcement = []string{\n" +
@@ -811,7 +811,7 @@ func outRefTree() map[string]string {
 			"\t{File: \"pkg/hub/authorize.go\", Function: otherName, Symbol: \"CreateX\"},\n" + // line 10: not a literal
 			"\t{File: \"pkg/hub/authorize.go\", Function: \"extraCheck\", Symbol: \"CreateX\"},\n" + // line 11: renamed in another file
 			"\t{File: \"pkg/hub/authorize.go\", Function: \"check\", Symbol: \"CreateX\"},\n" + // line 12: ambiguous
-			"\t{File: \"pkg/hub/authorize_never.go\", Function: \"neverFn\", Symbol: \"CreateX\"},\n" + // line 13: not type-checked
+			"\t{File: \"pkg/hub/authorize_ext_test.go\", Function: \"neverFn\", Symbol: \"CreateX\"},\n" + // line 13: not type-checked
 			"}\n",
 		// Negatives in Go: base name, path elements, a longer literal, a
 		// second colon, a ref-ok'd literal.
@@ -848,7 +848,7 @@ func outRefTree() map[string]string {
 }
 
 // outRefFiles are the files TestRewriteOutRefs moves.
-var outRefFiles = []string{"authorize.go", "authorize_extra.go", "authorize_never.go"}
+var outRefFiles = []string{"authorize.go", "authorize_extra.go", "authorize_ext_test.go"}
 
 // enforcementOK mirrors assertEnforcementReferenceExists in
 // pkg/hub/permission_registry_test.go: the file part of each entry must
@@ -928,7 +928,7 @@ func TestRewriteOutRefs(t *testing.T) {
 		`hack/winsec-unprotected.txt:3: "pkg/hub/authorize.go" -> "` + newPath + `"`,
 		`hack/winsec-unprotected.txt:4: "pkg/hub/authorize.go" -> "` + newPath + `"`,
 		`hack/store-delete-callers-allowlist.txt:2: "pkg/hub/authorize.go | authorizeHelper | 1" -> "` + newPath + ` | authorizeHelper | 1"`,
-		`pkg/hub/authzop/catalog.go:13: "pkg/hub/authorize_never.go" -> "pkg/hub/authorize/authorize_never.go"`,
+		`pkg/hub/authzop/catalog.go:13: "pkg/hub/authorize_ext_test.go" -> "pkg/hub/authorize/authorize_ext_test.go"`,
 	}
 	// The first catalog entry has two path literals, so 19 rewrites in all.
 	if !strings.Contains(dry, "\nOutside references to moved files rewritten (-rewrite-outrefs) (19):\n") {
@@ -985,7 +985,7 @@ func TestRewriteOutRefs(t *testing.T) {
 		`pkg/hub/authzop/catalog.go:10: Function otherName of the entry whose File names moved pkg/hub/authorize.go: the value is not a string literal; check it by hand`,
 		`pkg/hub/authzop/catalog.go:11: Function "extraCheck" of the entry whose File names moved pkg/hub/authorize.go: extraCheck is not declared in pkg/hub/authorize.go; the move renames it in pkg/hub/authorize_extra.go; check it by hand`,
 		`pkg/hub/authzop/catalog.go:12: Function "check" of the entry whose File names moved pkg/hub/authorize.go: check is ambiguous after the move, it becomes Check or check; check it by hand`,
-		`pkg/hub/authzop/catalog.go:13: Function "neverFn" of the entry whose File names moved pkg/hub/authorize_never.go: neverFn in pkg/hub/authorize_never.go was not type-checked (build tags or an external test), so its rename is unknown; check it by hand`,
+		`pkg/hub/authzop/catalog.go:13: Function "neverFn" of the entry whose File names moved pkg/hub/authorize_ext_test.go: neverFn in pkg/hub/authorize_ext_test.go was not type-checked (build tags or an external test), so its rename is unknown; check it by hand`,
 	}
 	for _, w := range append(fnHigh, "\n== HIGH: "+fnCat+" ==\n", `pkg/hub/authzop/catalog.go:9: Function "authorizeAgentCreate" of the entry whose File names moved pkg/hub/authorize.go; rewritten to "AuthorizeAgentCreate" (renamed by the move)`) {
 		if !strings.Contains(dry, w) {
@@ -1032,7 +1032,7 @@ func TestRewriteOutRefs(t *testing.T) {
 			"\t\"pkg/hub/authorize.go:check\",\n" +
 			"\t\"pkg/hub/authorize.go:extraCheck\",\n" +
 			"}\n",
-		"pkg/hub/authzop/catalog.go": strings.NewReplacer(`"pkg/hub/authorize.go"`, `"`+newPath+`"`, `"pkg/hub/authorize_never.go"`, `"pkg/hub/authorize/authorize_never.go"`,
+		"pkg/hub/authzop/catalog.go": strings.NewReplacer(`"pkg/hub/authorize.go"`, `"`+newPath+`"`, `"pkg/hub/authorize_ext_test.go"`, `"pkg/hub/authorize/authorize_ext_test.go"`,
 			`Function: "authorizeAgentCreate"`, `Function: "AuthorizeAgentCreate"`).Replace(before["pkg/hub/authzop/catalog.go"]),
 		"hack/hub-store-reassign-baseline.txt": strings.Replace(before["hack/hub-store-reassign-baseline.txt"], "pkg/hub/authorize.go | 2", newPath+" | 2", 1),
 		"hack/winsec-unprotected.txt": newPath + " unprotected\r\n" +
