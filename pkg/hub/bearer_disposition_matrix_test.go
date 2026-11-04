@@ -479,6 +479,10 @@ func bearerMatrixGuardSelector(ep authzop.EntryPoint) string {
 // checks project:read or agent:read on a target the record names, or
 // broker:read on the broker whose settings it writes.
 var bearerMatrixCompanionSelectors = map[authzop.OperationID][]string{
+	// Binding a GitHub App installation is admin-only: besides project
+	// update it requires the hub GitHub App update permission
+	// (githubInstallationBindPermission), as its catalog entry states.
+	"project.github.installation.bind":       {"hub_github_app:update"},
 	"inbox.conversation.create":              {"project:read"},
 	"inbox.conversation.direct.read":         {"agent:read"},
 	"inbox.conversation.defaultagent.set":    {"project:read"},

@@ -942,16 +942,17 @@ var getCallerPattern = regexp.MustCompile(`\b(?:secretBackend|sb|Backend)\.Get\(
 // in one of these files, requires a deliberate update here so the change is
 // surfaced rather than silently inherited.
 var hubInternalGetCallers = map[string]int{
-	filepath.Join("pkg", "hub", "server.go"):                      2, // hub signing keys (current + legacy)
-	filepath.Join("pkg", "hub", "oidckeys", "oidckeys.go"):        1, // OIDC signing key material
-	filepath.Join("pkg", "hub", "handlers_chat_secrets.go"):       1, // hub-scoped chat integration secret
-	filepath.Join("pkg", "hub", "handlers_github_app.go"):         1, // hub-scoped GitHub App credential
-	filepath.Join("pkg", "hub", "handlers_projects_core.go"):      2, // resolveCloneToken: hub-side git clone credential, never delivered
-	filepath.Join("pkg", "hub", "resource_import.go"):             1, // resource import: hub-side git clone credential, never delivered
-	filepath.Join("pkg", "hub", "material_runtime.go"):            1, // pending FetchValues migration: agent runtime material read (fetchAuthorizedValue)
-	filepath.Join("pkg", "hub", "httpdispatcher.go"):              2, // pending FetchValues migration: NoAuth GITHUB_TOKEN (own and owner scope)
-	filepath.Join("pkg", "secretmigration", "secretmigration.go"): 1, // hub secret migration helper
-	filepath.Join("cmd", "server_foreground.go"):                  3, // hub startup: signing keys + telemetry credentials
+	filepath.Join("pkg", "hub", "server.go"):                       2, // hub signing keys (current + legacy)
+	filepath.Join("pkg", "hub", "oidckeys", "oidckeys.go"):         1, // OIDC signing key material
+	filepath.Join("pkg", "hub", "handlers_chat_secrets.go"):        1, // hub-scoped chat integration secret
+	filepath.Join("pkg", "hub", "handlers_github_app.go"):          1, // hub-scoped GitHub App credential
+	filepath.Join("pkg", "hub", "github_app_association_authz.go"): 1, // project creator's own user-scope GITHUB_TOKEN, used only as proof to GitHub for the association check; never delivered or logged
+	filepath.Join("pkg", "hub", "handlers_projects_core.go"):       2, // resolveCloneToken: hub-side git clone credential, never delivered
+	filepath.Join("pkg", "hub", "resource_import.go"):              1, // resource import: hub-side git clone credential, never delivered
+	filepath.Join("pkg", "hub", "material_runtime.go"):             1, // pending FetchValues migration: agent runtime material read (fetchAuthorizedValue)
+	filepath.Join("pkg", "hub", "httpdispatcher.go"):               2, // pending FetchValues migration: NoAuth GITHUB_TOKEN (own and owner scope)
+	filepath.Join("pkg", "secretmigration", "secretmigration.go"):  1, // hub secret migration helper
+	filepath.Join("cmd", "server_foreground.go"):                   3, // hub startup: signing keys + telemetry credentials
 }
 
 // repoRootFromWD walks up from the current working directory (the package

@@ -2473,6 +2473,16 @@ type Server struct {
 	// Cached rate limit info from the most recent GitHub App API call
 	githubAppRateLimit *githubapp.RateLimitInfo
 
+	// githubAccessCache caches GitHub-side repository access checks made
+	// with a project creator's own token (github_app_association_authz.go).
+	githubAccessCache githubRepoAccessCache
+	// githubAssociationReportCache bounds the admin association report
+	// (github_app_association_authz.go).
+	githubAssociationReportCache githubAssociationReportCache
+	// githubRepoAccessCheck performs that check; nil selects
+	// githubapp.CheckUserRepoAccess. Tests replace it at the GitHub boundary.
+	githubRepoAccessCheck func(ctx context.Context, apiBaseURL, userToken, owner, repo string) (githubapp.RepoAccess, error)
+
 	// Shared HTTP client for federation proxy calls (no redirect following).
 	federationClient *http.Client
 

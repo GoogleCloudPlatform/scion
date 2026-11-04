@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 375
+**Operations:** 376
 
 ## Table of Contents
 
@@ -111,6 +111,7 @@
 - [project.workspace.read](#projectworkspaceread) — Read a project's workspace: archive and file reads
 - [project.workspace.write](#projectworkspacewrite) — Change a project's workspace: file upload, write and delete, and git pull
 - [project.github.read](#projectgithubread) — Read a project's GitHub status, GitHub permissions and git identity
+- [project.github.installation.bind](#projectgithubinstallationbind) — Bind a GitHub App installation to a project (admin only: also requires hub.github_app.update)
 - [project.github.write](#projectgithubwrite) — Change a project's GitHub installation, status check, GitHub permissions and git identity
 - [project.members.assignableroles](#projectmembersassignableroles) — List the roles the caller may assign in a project
 - [agent.message.send](#agentmessagesend) — Send a message to an agent
@@ -4511,6 +4512,47 @@
 
 ---
 
+## project.github.installation.bind
+
+**Domain:** project
+
+**Description:** Bind a GitHub App installation to a project (admin only: also requires hub.github_app.update)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PUT | `/api/v1/projects/{id}/github-installation` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `project_path`; boundaries `hub`)
+
+**Base Permission:** `project.update`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `update-resource`
+
+### Audit
+
+- **Event Type:** `project.github.installation.bind`
+- **Context Fields:** actor_id, project_id
+- **Before Fields:** setting
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+- `pkg/hub:TestGitHubInstallationBind_RequiresHubGitHubAppUpdate`
+- `pkg/hub:TestGitHubInstallationBind_HubBearerBoundaryOnly`
+
+---
+
 ## project.github.write
 
 **Domain:** project
@@ -4521,7 +4563,6 @@
 
 | Kind | Method | Pattern |
 |------|--------|---------|
-| http_route | PUT | `/api/v1/projects/{id}/github-installation` |
 | http_route | DELETE | `/api/v1/projects/{id}/github-installation` |
 | http_route | POST | `/api/v1/projects/{id}/github-status` |
 | http_route | PUT | `/api/v1/projects/{id}/github-permissions` |
