@@ -25,6 +25,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	goruntime "runtime"
 	"strings"
@@ -33,6 +34,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agenthome"
 	"github.com/GoogleCloudPlatform/scion/pkg/agentinfolock"
 	"github.com/GoogleCloudPlatform/scion/pkg/agentplugin"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -2612,7 +2614,10 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	}
 	h := resolved.Harness
 	util.Debugf("ProvisionAgent: harness implementation=%s for harness=%q", resolved.Implementation, finalScionCfg.Harness)
-	skillsDir := h.SkillsDir()
+	skillsDir, err := harnessSkillsDir(h)
+	if err != nil {
+		return "", "", nil, err
+	}
 	// templateSkillNames records which skill directory names the current
 	// template chain provides, independent of what may already be on disk
 	// from a previous provisioning of this same agent home. Platform-skill
@@ -2622,27 +2627,11 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	// platform skill without clobbering a template's intentional override.
 	templateSkillNames := make(map[string]bool)
 	if skillsDir != "" {
-		skillsDest := filepath.Join(agentHome, skillsDir)
-
-		// Copy skills from each template in the chain (overlay behavior)
-		for _, tpl := range chain {
-			tplSkills := filepath.Join(tpl.Path, "skills")
-			if entries, err := os.ReadDir(tplSkills); err == nil {
-				for _, e := range entries {
-					if e.IsDir() {
-						templateSkillNames[e.Name()] = true
-					}
-				}
-			}
-			if info, err := os.Stat(tplSkills); err == nil && info.IsDir() {
-				if err := os.MkdirAll(skillsDest, 0755); err != nil {
-					return "", "", nil, fmt.Errorf("failed to create skills dir: %w", err)
-				}
-				if err := util.CopyDir(tplSkills, skillsDest); err != nil {
-					return "", "", nil, fmt.Errorf("failed to copy template skills %s: %w", templateRef(tpl), err)
-				}
-			}
+		names, err := installTemplateSkills(agentHome, chain, skillsDir)
+		if err != nil {
+			return "", "", nil, err
 		}
+		templateSkillNames = names
 	}
 	util.Debugf("provision: home/skills copy completed in %s", time.Since(homeCopyStart))
 
@@ -3217,6 +3206,11 @@ func injectPlatformSkills(
 	if err != nil {
 		return fmt.Errorf("failed to read platform skills FS: %w", err)
 	}
+	home, err := agenthome.Open(agentHome)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = home.Close() }()
 
 	for _, entry := range entries {
 		if !entry.IsDir() {
@@ -3236,8 +3230,6 @@ func injectPlatformSkills(
 			continue
 		}
 
-		skillDest := filepath.Join(agentHome, skillsDir, skillName)
-
 		// Template skills take precedence, regardless of ForceOverwrite: a
 		// template's intentional override must never be clobbered by the
 		// platform default.
@@ -3246,48 +3238,29 @@ func injectPlatformSkills(
 			continue
 		}
 
+		rel := skillRel(skillsDir, skillName)
 		if !injCtx.ForceOverwrite {
-			if _, err := os.Stat(skillDest); err == nil {
+			// Any entry there, a link included (never followed), counts
+			// as present: idempotent restart/resume.
+			_, err := home.Lstat(rel)
+			if err == nil {
 				util.Debugf("provision: platform skill %q skipped (already present)", skillName)
 				continue
 			}
-		} else {
-			// A plain overlay copy only adds/updates files; it
-			// never removes one the new platform-skill version dropped, so a
-			// stale file from an earlier generation would linger forever
-			// under ForceOverwrite. Safe to RemoveAll: skillDest is
-			// platform-owned at this point (the TemplateSkillNames check
-			// above already exempted anything template-owned), so there is
-			// nothing here that isn't about to be fully replaced anyway.
-			if err := os.RemoveAll(skillDest); err != nil {
-				return fmt.Errorf("failed to clear stale platform skill %q before overwrite: %w", skillName, err)
+			if !errors.Is(err, fs.ErrNotExist) {
+				return homeSkillError(skillName, err)
 			}
 		}
 
-		// Walk the embedded skill directory and copy all files
-		skillRoot := skillName
-		if err := fs.WalkDir(skillsFS, skillRoot, func(path string, d fs.DirEntry, err error) error {
-			if err != nil {
-				return err
-			}
-			rel, err := filepath.Rel(skillRoot, path)
-			if err != nil {
-				return err
-			}
-			target := filepath.Join(skillDest, rel)
-
-			if d.IsDir() {
-				return os.MkdirAll(target, 0755)
-			}
-			data, err := fs.ReadFile(skillsFS, path)
-			if err != nil {
-				return err
-			}
-			return os.WriteFile(target, data, 0644)
-		}); err != nil {
-			return fmt.Errorf("failed to copy platform skill %s: %w", skillName, err)
+		// InstallTreeFS replaces whatever is at rel as a whole (a link
+		// there is removed, never followed), so a refreshed platform skill
+		// keeps no stale file from an earlier generation. rel is
+		// platform-owned at this point: the TemplateSkillNames check above
+		// already exempted anything template-owned.
+		if err := home.InstallTreeFS(skillsFS, skillName, rel, skillTreeLimits); err != nil {
+			return fmt.Errorf("failed to copy platform skill %s: %w", skillName, homeSkillError(skillName, err))
 		}
-		util.Debugf("provision: injected platform skill %q into %s", skillName, skillDest)
+		util.Debugf("provision: injected platform skill %q into %s", skillName, rel)
 	}
 
 	return nil
@@ -5203,18 +5176,111 @@ func injectPromptFiles(h api.Harness, agentHome string, chain []*config.Template
 	return systemPromptRendered, nil
 }
 
-// resolveAndInstallSkills resolves the skill references skills with the
-// context's skill resolver, installs them into agentHome's skills directory
-// for h, and writes the resolution record (S4), staging it for a
-// container-script harness: Step 3b of ProvisionAgent, shared with the
-// start-time re-render (rerenderProvisionedFiles). Required skills fail
-// closed. It returns the record, nil when nothing was installed.
+// resolveAndInstallSkills is Step 3b of ProvisionAgent: it resolves and
+// installs the skill references skills (installSkillsIntoHome), then
+// writes the resolution record (S4) into the agent home and stages it for
+// a container-script harness, both confined to the home. It returns the
+// record, nil when nothing was installed.
 func resolveAndInstallSkills(ctx context.Context, agentName, projectDir string, h api.Harness, agentHome string, skills []api.SkillReference) (*SkillResolutionRecord, error) {
-	skillsDir := h.SkillsDir()
+	record, err := installSkillsIntoHome(ctx, agentName, projectDir, h, agentHome, skills)
+	if err != nil || record == nil {
+		return nil, err
+	}
+	data, err := json.MarshalIndent(record, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	if err := writeHomeFile(agentHome, path.Join(".scion", resolvedSkillsInputName), data, 0o644); err != nil {
+		util.Debugf("provision: failed to write resolution record: %v", err)
+	}
+	// Stage resolved-skills.json for container-script harnesses.
+	if _, isContainerScript := h.(*harness.ContainerScriptHarness); isContainerScript {
+		if err := writeHomeFile(agentHome, path.Join(".scion", "harness", "inputs", resolvedSkillsInputName), data, 0o644); err != nil {
+			util.Debugf("provision: failed to stage resolution record: %v", err)
+		}
+	}
+	return record, nil
+}
+
+// skillScratchDir creates the broker-owned scratch directory skills are
+// resolved, downloaded and verified in before they are installed into an
+// agent home; a variable so tests can observe its removal.
+var skillScratchDir = func() (string, error) { return os.MkdirTemp("", "scion-skills-") }
+
+// installSkillsIntoHome resolves the skill references skills with the
+// context's skill resolver into a new broker-owned scratch directory
+// (outside every container mount; removed again on every return), then
+// installs each resolved skill into agentHome's skills directory for h
+// with agenthome.InstallTreeFrom, so nothing is staged in, read from or
+// written through a link in the home. The record lists the skills
+// already in the home's skills directory as local. Required skills fail
+// closed. It returns the record, nil when nothing was installed. It is
+// shared by ProvisionAgent and the start-time re-render.
+func installSkillsIntoHome(ctx context.Context, agentName, projectDir string, h api.Harness, agentHome string, skills []api.SkillReference) (*SkillResolutionRecord, error) {
+	skillsDir, err := harnessSkillsDir(h)
+	if err != nil {
+		return nil, err
+	}
 	// Optional scion-platform:// entries are display-only: Step 3a2 installs
 	// those skills, so they are left out of resolution rather than logged as
 	// skipped on every start (ptone/scion#5431).
 	skills = resolvableSkillRefs(skills)
+	if len(skills) == 0 {
+		return nil, nil
+	}
+	scratch, err := skillScratchDir()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create skill scratch directory: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(scratch) }()
+	record, err := resolveSkillsToScratch(ctx, agentName, projectDir, skillsDir, scratch, skills)
+	if err != nil || record == nil {
+		return nil, err
+	}
+	if err := installStagedSkills(agentHome, scratch, skillsDir, record); err != nil {
+		return nil, err
+	}
+	return record, nil
+}
+
+// installStagedSkills installs each skill of record from scratch into the
+// agent home and prepends the skills already in the home to record as
+// local.
+func installStagedSkills(agentHome, scratch, skillsDir string, record *SkillResolutionRecord) error {
+	home, err := agenthome.Open(agentHome)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = home.Close() }()
+	src, err := agenthome.Open(scratch)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = src.Close() }()
+	resolved := map[string]bool{}
+	for _, e := range record.Skills {
+		name := path.Base(e.InstalledPath)
+		if name == "." || name == "/" || name == ".." || strings.ContainsAny(name, "/\\") {
+			return fmt.Errorf("invalid installed skill name %q", name)
+		}
+		resolved[name] = true
+		rel := skillRel(skillsDir, name)
+		if err := home.InstallTreeFrom(src, rel, rel, skillTreeLimits); err != nil {
+			return fmt.Errorf("install skill %s: %w", name, homeSkillError(name, err))
+		}
+	}
+	local, err := homeLocalSkills(home, skillsDir, resolved)
+	if err != nil {
+		return err
+	}
+	record.Skills = append(local, record.Skills...)
+	return nil
+}
+
+// resolveSkillsToScratch resolves skills with the context's skill
+// resolver and installs them under scratch/skillsDir. Required skills
+// fail closed. It returns the record, nil when nothing was installed.
+func resolveSkillsToScratch(ctx context.Context, agentName, projectDir, skillsDir, scratch string, skills []api.SkillReference) (*SkillResolutionRecord, error) {
 	var resolvedSkillsRecord *SkillResolutionRecord
 	if len(skills) > 0 {
 		resolver := SkillResolverFromContext(ctx)
@@ -5293,17 +5359,11 @@ func resolveAndInstallSkills(ctx context.Context, agentName, projectDir string, 
 				}
 			}
 
-			// Capture local skills before installing registry skills (M2: avoid duplication)
-			var localSkills []SkillResolutionEntry
-			if skillsDir != "" {
-				localSkills = enumerateLocalSkills(agentHome, skillsDir)
-			}
-
 			if len(result.Resolved) > 0 {
 				if skillsDir == "" {
 					return nil, fmt.Errorf("harness does not support skills (no skills directory configured)")
 				}
-				skillsDest := filepath.Join(agentHome, skillsDir)
+				skillsDest := filepath.Join(scratch, filepath.FromSlash(skillsDir))
 				// The requested ref is authoritative for Optional: a resolver
 				// that does not copy it must not make an optional skill's
 				// install failure fail the create (#5020).
@@ -5312,7 +5372,7 @@ func resolveAndInstallSkills(ctx context.Context, agentName, projectDir string, 
 				}
 				// Skipped optional skills are logged as warnings by
 				// installResolvedSkills.
-				record, _, err := installResolvedSkills(ctx, result.Resolved, skillsDest, agentHome)
+				record, _, err := installResolvedSkills(ctx, result.Resolved, skillsDest, scratch)
 				if err != nil {
 					// A required skill's install failure is already a
 					// *SkillResolutionError naming the skill; return it as
@@ -5325,25 +5385,7 @@ func resolveAndInstallSkills(ctx context.Context, agentName, projectDir string, 
 					return nil, fmt.Errorf("skill installation failed: %w", err)
 				}
 				record.Resolver = resolverName(resolver)
-				record.Skills = append(localSkills, record.Skills...)
 				resolvedSkillsRecord = record
-			}
-		}
-	}
-
-	// Write resolution record (S4)
-	if resolvedSkillsRecord != nil {
-		recordPath := filepath.Join(agentHome, ".scion", "resolved-skills.json")
-		if err := writeResolutionRecord(recordPath, resolvedSkillsRecord); err != nil {
-			util.Debugf("provision: failed to write resolution record: %v", err)
-		}
-
-		// Stage resolved-skills.json for container-script harnesses
-		if _, isContainerScript := h.(*harness.ContainerScriptHarness); isContainerScript {
-			recordData, _ := json.MarshalIndent(resolvedSkillsRecord, "", "  ")
-			inputPath := filepath.Join(agentHome, ".scion", "harness", "inputs", "resolved-skills.json")
-			if err := os.MkdirAll(filepath.Dir(inputPath), 0755); err == nil {
-				_ = os.WriteFile(inputPath, recordData, 0644)
 			}
 		}
 	}

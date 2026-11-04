@@ -170,6 +170,51 @@ func copyMode(src fs.FileMode) fs.FileMode {
 	return 0o644
 }
 
+// SkipCopyName reports whether a tree copy skips the entry name: a
+// __pycache__ directory or a .pyc file (Python bytecode, rebuilt on use).
+// It is the one rule InstallTreeFrom, InstallTreeFS, OverlayTreeFrom and
+// the agent's skills directory carry-over share.
+func SkipCopyName(name string, isDir bool) bool {
+	if isDir {
+		return name == "__pycache__"
+	}
+	return strings.HasSuffix(name, ".pyc")
+}
+
+// homeFileMode is the mode InstallTreeFrom, InstallTreeFS and
+// OverlayTreeFrom give a copied regular file. A file nobody but its owner
+// can read stays owner-only (0600, or 0700 when any execute bit is set);
+// any other file gets 0644, or 0755 when any execute bit is set. setuid,
+// setgid, sticky and group or other write bits are never copied.
+func homeFileMode(src fs.FileMode) fs.FileMode {
+	p := src.Perm()
+	exec := p&0o111 != 0
+	if p&0o044 == 0 {
+		if exec {
+			return 0o700
+		}
+		return 0o600
+	}
+	if exec {
+		return 0o755
+	}
+	return 0o644
+}
+
+// CopyFileMode is the mode the tree copies give a regular file whose
+// source mode is src (homeFileMode), for a caller that copies a single
+// file into a home with Home.WriteFile under the same rule.
+func CopyFileMode(src fs.FileMode) fs.FileMode { return homeFileMode(src) }
+
+// homeDirMode is the mode those copies give a directory they create: 0700
+// when the source directory has no group or other bits, otherwise 0755.
+func homeDirMode(src fs.FileMode) fs.FileMode {
+	if src.Perm()&0o077 == 0 {
+		return 0o700
+	}
+	return 0o755
+}
+
 // treeBudget tracks InstallTree's Limits.
 type treeBudget struct {
 	lim     Limits

@@ -31,6 +31,7 @@ pkg/agent/rerender.go not protected on Windows: gated (agent re-render record; a
 pkg/agent/shared_dir_storage.go not protected on Windows: gated (shared-dir storage; agent provisioning)
 pkg/agent/task_file.go not protected on Windows: gated (agent task file; agent provisioning)
 pkg/agenthome/home_other.go not protected on Windows: gated (agent home writes; agent provisioning and start)
+pkg/agenthome/tree_other.go not protected on Windows: gated (agent home writes; agent provisioning and start)
 pkg/agentplugin/copy.go not protected on Windows: gated (plugin copy; agent provisioning)
 pkg/brokercredentials/multistore.go not protected on Windows: gated (broker HMAC credentials)
 pkg/brokeridentity/identity.go not protected on Windows: gated (broker identity; lock is ErrUnsupported)
