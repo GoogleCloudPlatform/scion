@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
 	"golang.org/x/sys/unix"
 )
 
@@ -30,7 +31,8 @@ import (
 // order as the provisioning init containers. The path is derived the same
 // way as the runtime's mount (runtime.NFSProvisionStateSubPath) and the
 // directory is created like before a pod starts (ensureNFSLeaf, no symlink
-// following).
+// following). expected is the share's configured nfs uid and gid, for
+// checking existing upper directories only (ensureNFSLeaf).
 //
 // When the broker is not allowed to create, open or write in the directory
 // (a permission error, or no write and search access to an existing one),
@@ -43,13 +45,13 @@ import (
 // TODO(ptone/scion#2974): when the legacy lock is dropped, this fallback
 // must go: the state-directory lock is then the only lock, and a removal
 // that cannot take it must fail.
-func nfsRemovalStateDir(hostBase, rel, projectID string) (string, error) {
+func nfsRemovalStateDir(hostBase, rel, projectID string, expected shareddirs.Owner) (string, error) {
 	stateRel, err := runtime.NFSProvisionStateSubPath(rel, projectID)
 	if err != nil {
 		return "", fmt.Errorf("workspace_storage nfs: %w; left in place", err)
 	}
 	stateDir := filepath.Join(hostBase, stateRel)
-	_, err = ensureNFSLeaf(hostBase, stateRel)
+	_, err = ensureNFSLeaf(hostBase, stateRel, expected)
 	if err == nil {
 		err = unix.Access(stateDir, unix.W_OK|unix.X_OK)
 	}

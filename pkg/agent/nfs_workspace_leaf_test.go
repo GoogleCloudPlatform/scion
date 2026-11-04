@@ -897,3 +897,66 @@ func TestEnsureNFSWorktreeLeaf_InlinePermissionDeniedRefused(t *testing.T) {
 		assert.False(t, ok)
 	})
 }
+
+// TestEnsureNFSWorkspaceLeaf_ConfiguredShareOwnerReachesWalk: the nfs uid
+// and gid configured for the share reach the leaf walk through the nfs
+// backend's resolution, so an existing upper directory with the expected
+// shared layout (setgid, the configured gid, not other-writable) is not
+// warned about. The same tree with another configured gid keeps the
+// warning, and the leaf is created as before either way.
+func TestEnsureNFSWorkspaceLeaf_ConfiguredShareOwnerReachesWalk(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		gidDelta int
+		wantWarn bool
+	}{
+		{name: "configured gid matches"},
+		{name: "configured gid differs", gidDelta: 1, wantWarn: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mountRoot := t.TempDir()
+			projects := filepath.Join(mountRoot, "share-1", "projects")
+			require.NoError(t, os.MkdirAll(projects, 0o755))
+			if unix.Geteuid() == 0 {
+				require.NoError(t, os.Chown(projects, 4243, 4242))
+			}
+			require.NoError(t, unix.Chmod(projects, 0o2775))
+			st := statMode(t, projects)
+			if st.Uid == 0 || st.Gid == 0 || st.Mode&0o7777 != 0o2775 {
+				t.Skip("needs a setgid directory with a non-zero owner and group")
+			}
+
+			backend := runtime.NewNFSBackend(&config.V1NFSConfig{
+				MountRoot: mountRoot,
+				Shares:    []config.V1NFSShare{{ID: "share-1", PVName: "ws-pv"}},
+				UID:       int(st.Uid),
+				GID:       int(st.Gid) + tc.gidDelta,
+			})
+			res, err := backend.Resolve(runtime.ResolveInput{ProjectID: testNFSWorkspaceProjectID})
+			require.NoError(t, err)
+			assert.Equal(t, int(st.Uid), res.OwnerUID, "the configured nfs uid is resolved")
+			assert.Equal(t, int(st.Gid)+tc.gidDelta, res.OwnerGID, "the configured nfs gid is resolved")
+
+			shareddirs.ResetWalkWarningsForTest()
+			t.Cleanup(shareddirs.ResetWalkWarningsForTest)
+			records := captureSlog(t)
+
+			preCreated, err := ensureNFSWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, res, runtime.NFSPodShare{ClaimName: "ws-pv"}, nil)
+			require.NoError(t, err)
+			assert.True(t, preCreated)
+
+			var walkWarns int
+			for _, r := range *records {
+				if r.Level == slog.LevelWarn && strings.HasPrefix(r.Message, "NFS directory walk: an existing upper directory is group/other-writable") {
+					walkWarns++
+				}
+			}
+			if tc.wantWarn {
+				assert.Equal(t, 1, walkWarns, "another gid keeps the warning")
+			} else {
+				assert.Zero(t, walkWarns, "the expected shared layout is not warned about")
+			}
+			assert.Equal(t, uint32(0o2775), statMode(t, res.HostPath).Mode&0o7777, "the workspace leaf is created as before")
+		})
+	}
+}

@@ -18,9 +18,11 @@ package agent
 
 import (
 	"errors"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
 )
 
 // nfsRemovalStateDir is unsupported on this platform; see nfs_removal_state_unix.go.
-func nfsRemovalStateDir(hostBase, rel, projectID string) (string, error) {
+func nfsRemovalStateDir(hostBase, rel, projectID string, expected shareddirs.Owner) (string, error) {
 	return "", errors.ErrUnsupported
 }
