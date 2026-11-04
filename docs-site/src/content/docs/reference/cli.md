@@ -164,7 +164,7 @@ the initial agent create request and any env-gather submission with a 4-minute
 client timeout instead of the standard 30-second client timeout so synchronous
 creates can complete). Each dispatch attempt is bounded at
 180 seconds, so a slow cold start (for example on Kubernetes) can still fail on
-a synchronous launch; [asynchronous agent create](/scion/reference/server-config/#asynchronous-agent-create), on by default, avoids that limit. While waiting, each launch step is printed to stderr with a readable label, for example
+a synchronous launch; [asynchronous agent create](/scion/reference/server-config/#asynchronous-agent-create) and [asynchronous agent start](/scion/reference/server-config/#asynchronous-agent-start) (`hub.async_agent_launch` and `hub.async_agent_start`, both on by default) avoid that limit on Runtime Brokers that advertise `asyncLaunch` and `asyncStart` (`scion start` and `scion resume` send `"async": true` on starts of existing agents and wait for the launch). While waiting, each launch step is printed to stderr with a readable label, for example
 `my-agent: provisioning (waiting to be scheduled)` (nothing extra under `--format json`). If the
 launch fails, the error gives the failure code (with its label, unless the message already says
 it), the step and the message, for example `agent 'my-agent' create did not complete
@@ -278,13 +278,13 @@ failed start.
     - `<agent-name>`: Unique name for the agent instance.
     - `[task]`: (Optional) The task, written to `prompt.md` for when the agent starts.
 - **Flags:**
-    - `-t, --type <string>`: Template to use.
+    - `-t, --type <string>`: Template to use (a single path component, or a template ID).
     - `-i, --image <string>`: Override container image.
     - `-b, --branch <string>`: Git branch to use for the agent workspace.
     - `-w, --workspace <string>`: Host path or project-relative subdirectory to mount as `/workspace`.
     - `--config <path>`: Path to inline agent config file (YAML/JSON), or `-` for stdin.
     - `--task-file <path>`: Read the task from a file, or `-` for stdin, up to 96 KiB. See [Long tasks and task files](#long-tasks-and-task-files).
-    - `--harness-config <string>` (alias `--harness`): Named harness configuration to use.
+    - `--harness-config <string>` (alias `--harness`): Named harness configuration to use (a single path component).
     - `--model <model>`: Model to use, as with `scion start`: a size alias (`small`, `medium`, `large`, `extra-large`, or `S` / `M` / `L` / `XL`) or an explicit model ID. It beats the model in a `--config` file, the project default, the template and the Hub default.
     - `--thinking-level <value>`: Thinking level, as with `scion start`: an integer from 0 to 100, or a case-insensitive shorthand: `low` (25), `medium` (50), `high` (75), `max` (100). It beats the thinking level in a `--config` file, the project default, the template and the Hub default. An invalid or empty value fails before contacting the Hub.
     - `--harness-auth <string>`: Override auth method for the harness (`api-key`, `oauth-token`, `auth-file`, `vertex-ai`).
@@ -784,17 +784,17 @@ migration's patch flags. A migration that had not started yet fails within about
 carried forward for recovery; run reincarnate again". None of its patch flags are applied. A
 migration that had started fails after 30 minutes without progress. The Hub restores the previous
 configuration unless the new generation had already been provisioned.
-Until the migration fails, a new request for the agent is refused with `409`.
+Until the migration fails, a new request for the agent is refused with `409` (`already pending`; if a start or launch is in progress instead, the CLI reports `cannot reincarnate '<agent>' now: a start is in progress for this agent`).
 
 Reincarnation works for agents in clone-per-agent, shared-workspace (shared-plain), and
 Hub-managed workspaces. For a shared-workspace agent, the agent record, identity, and shared
 checkout are preserved, and sibling agents sharing the checkout are not restarted. Agents in
 worktree-per-agent projects are not yet supported; the Hub rejects the request with
 `400 Bad Request`. An agent in an empty-per-agent project can be reincarnated on its current
-Runtime Broker when it runs on a local-disk runtime (Docker, Podman, or Apple `container`): the new
+Runtime Broker when it runs on a local-disk runtime (Docker, Podman, or Apple `container`) or when the project uses shared (`nfs`) workspace storage on Kubernetes or a local container runtime: the new
 generation reuses the agent's private workspace directory in place, with its content. Reincarnation
-never creates or recreates that directory; if it is missing, or is not a real directory, the
-Runtime Broker refuses the reprovision, the reincarnation fails, and the agent stays stopped. On Kubernetes or any other runtime the Hub rejects the
+never creates or recreates that directory on an in-place reincarnation; if it is missing, or is not a real directory, the
+Runtime Broker refuses the reprovision, the reincarnation fails, and the agent stays stopped. On Kubernetes without shared (`nfs`) workspace storage, or on any other runtime without a persistent workspace directory, the Hub rejects the
 request with `400 Bad Request`, and a Runtime Broker too old to reuse the workspace gets
 `412 Precondition Failed`; in both cases the agent is not stopped, and `--dry-run` reports the same
 answer. Reincarnating another agent requires the `agent.lifecycle` permission (the same
@@ -1234,8 +1234,8 @@ Manages connection to and interaction with a Scion Hub. Authentication lives und
         - Flags:
             - `--audience <url>`: Issuer URL of the peer hub the credential is for (required). It must be listed in the Hub's `server.oidc.user_token_audiences` setting; the credential expires after `server.oidc.user_token_lifetime` (15 minutes by default). See [Server Configuration](/scion/reference/server-config/).
             - `--json`: Print the credential and its expiry as JSON instead of the credential alone.
-- `scion hub token`: Manage user access tokens (scoped, revocable bearer tokens for CI/CD and automation).
-    - `create`: Create a new token.
+- `scion hub token`: Manage user access tokens (scoped, revocable bearer tokens for CI/CD and automation). When a CLI command looks up a project by name, slug, or git remote with a user access token in `SCION_HUB_TOKEN` and finds no match, the error adds a hint naming the scopes those lookups need (`project:read` on a token scoped to that project, or `project:list` on a hub-bound token; `project:manage` includes neither) or passing `--project <project-id>`.
+    - `create`: Create a new token. Sends an explicit `boundary` (`project` with `projectId`, or `hub`) in the request body.
         - Flags:
             - `--project <string>`: Project ID or name to scope the token to (required unless `--boundary hub`).
             - `--boundary <project|hub>`: Token boundary (`project` by default, or `hub` for a hub-bound token; cannot be combined with `--project` when `hub`).
@@ -1244,8 +1244,10 @@ Manages connection to and interaction with a Scion Hub. Authentication lives und
             - `--expires <duration>`: Expiry: a positive duration in minutes (90m), hours (2h), days (30d) or years (1y, always 365 days), or an RFC 3339 date (2026-12-31T00:00:00Z) (default: 90d). `m` means minutes; there is no month unit (use 30d or 1y for longer).
             - `--purpose <text>`: Optional bounded description of what the token is for (≤128 bytes, single line, no control characters). Immutable after issuance — there is no update command.
             - `--label <key=value>`: Optional bounded label (repeatable). Keys are lowercase `[a-z][a-z0-9_.-]*` (≤32 bytes); values are ≤64 bytes from a restricted charset. A set of attribution-shaped keys (e.g. `user_id`, `agent`, `actor_binding`) are reserved and rejected. Immutable after issuance.
+            - `--json`: Print the created token response as JSON.
     - `scopes`: List every scope accepted by `create --scopes`. With `--project <string>` (project boundary) or `--boundary hub` (no `--project`), also report which scopes you may currently select for that boundary and, for each one you cannot, why. Supports `--json`.
-    - `list`: List your access tokens.
+    - `list`: List your access tokens. Columns: `ID`, `NAME`, `PREFIX`, `BOUNDARY` (`hub`, `project:<project-id>`, `project` when the project ID is absent, or `unknown` when no boundary is reported), `SCOPES`, `STATUS`, `EXPIRES`, `LAST USED` (`--wide` adds `PURPOSE`).
+        - Flags: `--boundary <project|hub>` (filter by boundary; cannot be combined with `--project` when `hub`), `--project <string>` (filter to tokens scoped to that project), `--wide`, `--json`.
     - `revoke <token-id>`: Revoke a token (remains visible in listings as revoked).
     - `delete <token-id>`: Permanently delete a token.
 - `scion hub status`: Show the current Hub connection status: the Hub's nickname from the hub list (`-` when it has none), the endpoint and where it comes from (the same labels as `scion use`, for example `current context` or `directory link`), the project (the current project when the context supplied it), whether it answers, authentication and where the bearer comes from (`Source`: `OAuth`, `agent-token`, `env`, `dev`, `transport` or `none`; `bearerSource` in `--json`), whether it is the local workstation hub (`Local workstation: yes/no`), and the project's link state (linked, never linked, or unlinked). When a settings file still sets the deprecated `hub.enabled` or `hub.local_only` keys, it prints a note that they are ignored. With a hub profile selected it shows the profile instead: endpoint, bearer source (`profile:issuer` or `profile:<alias>`), the identity (email, kind, tier, expiry) and the transport principal and audience, all decoded locally (no token is printed). It probes the target with the profile credential and exits non-zero when the request sent did not carry the profile's bearer (or carried another credential), when the transport principal is not the profile's IAP service account, or when the target refuses the credential. In agent mode it runs only with a target-hub profile.
@@ -1628,6 +1630,8 @@ Manages Scion server components (Hub and Broker).
     - Flags: `--config <path>` (server settings file), `--keyring-file <path>`, `--keyring-file-allow-world-readable`, `--db <dsn>`, `--no-store` (report the keyring only; do not open the database), `--format json`.
 - `scion server keys check`: Validate the keyring file and configuration (`server.keyring_file`) without starting services or opening the database. Exits `0` when valid and `2` (`keysExitInvalid`) when invalid.
     - Flags: `--config <path>`, `--keyring-file <path>`, `--keyring-file-allow-world-readable`.
+- `scion server keys verify`: Read-only verification of the keyring file, the database encryption policy, and every locally stored secret and Hub-scoped infrastructure backup (or of a saved `reencrypt` report file with `--report-file <path>`). Requires keyring mode (`server.keyring_file`). Checks that every encrypted payload authenticates in `enc:v2` under an allowed writer key ID (`active_id` or `accept_write_ids`), that no plaintext or `enc:v1` payload or unreadable row remains, and that every Hub-scoped infrastructure backup validates structurally after decryption. Classification (`audit.by_format` and `audit.by_kid`) attributes each value to the key that actually authenticated it. Exits `0` when all checks pass, `1` (`keysExitFailure`) when any check fails or a record is unreadable, and `2` (`keysExitInvalid`) on invalid configuration or flags.
+    - Flags: `--config <path>`, `--keyring-file <path>`, `--keyring-file-allow-world-readable`, `--db <dsn>`, `--report-file <path>`, `--format json`.
 
 ## Administration
 
@@ -1713,7 +1717,11 @@ available inside agent containers.
     (database unreachable from this hub instance)" and the list-based checks run.
 - **Runtime**: The active container runtime: the Docker or Podman daemon, the Apple container CLI,
   or for Kubernetes and Cloud Run the runtime's own diagnostics (cluster connectivity, namespace
-  access, RBAC permissions, CSI drivers).
+  access, RBAC permissions, CSI drivers, the `shared_dir_storage_class` StorageClass and existing
+  shared-dir PersistentVolumeClaims in the namespace on Kubernetes, and on Cloud Run the
+  `Cloud Run Instance Service Account (actAs)` check testing `iam.serviceAccounts.actAs` on
+  `cloudrun.service_account` plus a warning when `project_storage.homes` is not `shared` on the
+  Cloud Run profile).
 
 **Exit status:** doctor reports check results and does not turn them into an exit status. It
 exits zero whenever it ran, including when the Hub is unreachable or `/healthz` reports it

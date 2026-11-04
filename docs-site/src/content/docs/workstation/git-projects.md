@@ -50,7 +50,7 @@ A `scion.dev/clone-url` label must use `https`, `ssh` or `git`. Agents of a proj
 
 ### Option A: GitHub App Integration
 
-When creating a project, Scion automatically associates it with the corresponding GitHub App installation. The system maintains a background refresh loop for installation tokens, and the `sciontool` credential helper provides fresh tokens to `git` on-demand inside the agent container. No manual setup is required.
+When creating a project, Scion associates it with a matching GitHub App installation when the association is authorized: the project's git remote must be on the configured GitHub host (`github.com`, or the host of `github_app.api_base_url` for GitHub Enterprise), the installation must be active and its account must match the remote's owner, and either a Hub admin binds the installation to the project (`PUT /api/v1/projects/{id}/github-installation`) or your user-scope `GITHUB_TOKEN` secret has at least `pull` access to that repository on GitHub (`pull`-only proof yields a read-only installation token; `push` access is required for write permissions). This authorization is checked both when the association is recorded and at every token mint. The system maintains a background refresh loop for installation tokens, and the `sciontool` credential helper provides fresh tokens to `git` on-demand inside the agent container.
 
 ### Option B: Personal Access Tokens
 

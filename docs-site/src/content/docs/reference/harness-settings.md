@@ -56,8 +56,7 @@ install, refresh, publish, and delete. Manage them with the `scion harness-confi
 ### The `name` field
 
 A harness-config's identifier defaults to its **directory name** (e.g. `claude`,
-`gemini-experimental`). A `config.yaml` may set an explicit `name:` field to override this; path
-separators (`.`, `..`, `/`, `\`) are rejected. On the Hub, each config also has a URL-safe
+`gemini-experimental`). A `config.yaml` may set an explicit `name:` field to override this. Every harness-config name must be a single path component — non-empty, not `.` or `..`, and containing no `/`, `\`, leading `:`, or `://`. A name in any other form is refused on local disk lookup, on `scion harness-config pull` without `--to`, on every Hub and store write (`CreateHarnessConfig`, `UpdateHarnessConfig`, create, rename, clone, or import) with `name must be a single path component`, and on agent create requests (`harness config must be a harness-config name`). A project default, template default, Hub default, or recorded harness-config in another form is ignored with a dispatch warning (`the <tier> harness config was ignored: it is not a harness-config name`). On the Hub, each config also has a URL-safe
 `slug`, and lookups match either the name or the slug.
 
 ### Installing from a source
