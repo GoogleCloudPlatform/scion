@@ -16,8 +16,8 @@
 
 /**
  * The section states of the Manage access dialog (ptone/scion#7107, design
- * section 4.1, phase 1 column), from the capability flags of the artifact
- * GET.
+ * section 4.1, phase 1 and phase 2 columns), from the capability flags of
+ * the artifact GET.
  */
 
 import { describe, expect, it } from 'vitest';
@@ -70,8 +70,8 @@ const BOOLS = [false, true] as const;
 const AUTHORITIES = ['', 'project_owner'] as const;
 
 describe('artifact access sections', () => {
-  it('phase 1 does not offer stewards Create link', () => {
-    expect(STEWARD_CREATE_LINK).toBe(false);
+  it('phase 2 offers stewards Create link in the dialog', () => {
+    expect(STEWARD_CREATE_LINK).toBe(true);
   });
 
   describe('sectionStates over every flag combination', () => {
@@ -135,18 +135,38 @@ describe('artifact access sections', () => {
     expect(sectionStates(none, p1)).toEqual(NO_SECTIONS);
   });
 
-  it('phase 2 offers stewards Create link', () => {
+  it('matches the design matrix for each role (phase 2, the dialog option)', () => {
+    const p2 = { stewardCreateLink: STEWARD_CREATE_LINK };
+    // R1, R2 manager: unchanged.
     expect(
       sectionStates(
-        {
-          canManage: false,
-          canShare: true,
-          canGrantReview: true,
-          shareAuthority: 'delegator',
-        },
-        { stewardCreateLink: true }
-      ).links
-    ).toBe('edit');
+        { canManage: true, canShare: true, canGrantReview: false, shareAuthority: '' },
+        p2
+      )
+    ).toEqual({ people: 'edit', links: 'edit', retention: 'edit' });
+    // R3, R4 steward: Create link added; people stay bounded.
+    for (const shareAuthority of ['project_owner', 'delegator'] as const) {
+      expect(
+        sectionStates(
+          { canManage: false, canShare: true, canGrantReview: true, shareAuthority },
+          p2
+        )
+      ).toEqual({ people: 'bounded', links: 'edit', retention: 'edit' });
+    }
+    // R5, R6 review only: still no links, so no Create link and no link list.
+    expect(
+      sectionStates(
+        { canManage: false, canShare: false, canGrantReview: true, shareAuthority: '' },
+        p2
+      )
+    ).toEqual({ people: 'review-only', links: 'hidden', retention: 'read-only' });
+    // R5u, R7, R8: nothing.
+    expect(
+      sectionStates(
+        { canManage: false, canShare: false, canGrantReview: false, shareAuthority: '' },
+        p2
+      )
+    ).toEqual(NO_SECTIONS);
   });
 
   describe('capabilitiesFrom', () => {

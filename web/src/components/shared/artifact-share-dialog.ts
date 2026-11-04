@@ -751,10 +751,18 @@ export class ScionArtifactShareDialog extends LitElement {
   /** Manage mode's summary of who a link reaches and the active links. */
   private renderLinkSummary(): TemplateResult {
     const n = this.links.length;
-    let latest = '';
-    for (const l of this.links) {
-      if (!latest || new Date(l.expiresAt).getTime() > new Date(latest).getTime()) {
+    // The latest expiry, kept as a number and seeded from the first link.
+    // A later link replaces it when it is strictly later, or when the kept
+    // expiry is empty. An unparsable expiry (NaN) never compares later, so
+    // it never replaces a valid one, and a non-empty unparsable first one
+    // stays.
+    let latest = this.links[0]?.expiresAt ?? '';
+    let latestMs = Date.parse(latest);
+    for (const l of this.links.slice(1)) {
+      const ms = Date.parse(l.expiresAt);
+      if (!latest || ms > latestMs) {
         latest = l.expiresAt;
+        latestMs = ms;
       }
     }
     return html`<p class="hint summary">
