@@ -220,16 +220,22 @@ jobs:
     runs-on: ubuntu-latest
     # Sized from data (ptone/scion#3183): over the 267 successful upstream
     # runs of this job on 2026-10-04/05, the job took p50 13.4m / p95 14.4m /
-    # max 14.5m (Run Tests: p50 4.7m / max 5.1m). 30m is ~2x the slowest
-    # success; worst case under the Run Tests watchdog below is ~26m (9.8m
-    # max pre-test steps + 15m deadline + 1m grace + Build Binary). Without a
-    # limit the job inherits GitHub's 360m default: two stalled Run Tests on
-    # 2026-10-05 ran 41m and 83m (78m silent) until cancelled by hand.
+    # max 14.5m (Run Tests: p50 4.7m / max 5.1m). Without a limit the job
+    # inherits GitHub's 360m default: two stalled Run Tests on 2026-10-05
+    # ran 41m and 83m (78m silent) until cancelled by hand.
+    # Resized (ptone/scion#7279): over the 34 completed upstream main-push
+    # runs of 2026-11-03, successful runs took up to 29.6m and the steps
+    # before Run Tests up to 21.0m (all steps ~1.3x slower on slow runners);
+    # three runs hit the 30m limit, two inside Run Tests and one in Save Go
+    # cache after the tests passed. Worst case under the Run Tests watchdog
+    # below is ~37m (21.0m max pre-test steps + 15m deadline + 1m grace +
+    # Build Binary).
     # Budget: the watchdog's diagnostics end ~16.1m into Run Tests, so this
     # timeout cuts them off if the steps before Run Tests take more than
-    # ~13.9m (max 9.8m today). Keep timeout > pre-test max + ~17m: raise it
-    # if steps are added before Run Tests or they grow.
-    timeout-minutes: 30
+    # ~28.9m (max 21.0m on 2026-11-03). Keep timeout > pre-test max + ~17m
+    # (21.0m + ~17m = ~38m < 45m on 2026-11-03): raise it if steps are added
+    # before Run Tests or they grow.
+    timeout-minutes: 45
     # needs: changes gates the web checks below (typecheck, e2e-perf
     # lint/test, Vitest) on changes.outputs.web_checks (ptone/scion#4256):
     # true when a PR touches web/, harnesses/, any pkg/**/testdata/ or this
