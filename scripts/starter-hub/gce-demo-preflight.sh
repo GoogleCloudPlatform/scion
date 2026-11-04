@@ -212,18 +212,19 @@ else
     # assignment wins, spaces around "=" and a trailing CR allowed), so this
     # check predicts --full. IMAGE_REGISTRY is checked on every run, because
     # --full always writes it to settings.yaml.
+    reg_ok=true
     if ! registry_is_valid "${IMAGE_REGISTRY}"; then
+        reg_ok=false
         check_fail "IMAGE_REGISTRY '${IMAGE_REGISTRY}' is not a registry path" \
             "Use letters, digits and . _ : / - only, for example us-docker.pkg.dev/<project>/<repo>"
     fi
     val=$(hub_env_value SCION_IMAGE_REGISTRY)
     if [[ -z "$val" ]]; then
-        if ! registry_is_valid "${IMAGE_REGISTRY}"; then
-            : # reported above
-        elif [[ "${ENABLE_GKE}" == "true" ]] && registry_is_loopback "${IMAGE_REGISTRY}"; then
+        # An invalid IMAGE_REGISTRY is reported once, above; then nothing more is said about it.
+        if [[ "$reg_ok" == true && "${ENABLE_GKE}" == "true" ]] && registry_is_loopback "${IMAGE_REGISTRY}"; then
             check_fail "ENABLE_GKE=true, but the image registry ${IMAGE_REGISTRY} is a loopback address GKE nodes cannot pull from" \
                 "Set SCION_IMAGE_REGISTRY in ${HUB_ENV_FILE} (or IMAGE_REGISTRY) to a registry the cluster can pull from"
-        else
+        elif [[ "$reg_ok" == true ]]; then
             check_pass "SCION_IMAGE_REGISTRY not set; settings.yaml uses image_registry ${IMAGE_REGISTRY}"
             if registry_is_loopback "${IMAGE_REGISTRY}"; then
                 check_warn "The starter scripts do not build agent images: build them on the VM (image-build/README.md) or set SCION_IMAGE_REGISTRY"
