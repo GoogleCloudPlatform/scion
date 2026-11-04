@@ -204,7 +204,7 @@ func TestHarnessConfigPolicy_StagedBundleFromResolvedProjectDir(t *testing.T) {
 func TestHarnessConfigPolicy_DefaultTemplateBundledConfig(t *testing.T) {
 	e := newPolicyTestEnv(t)
 	e.projectHC(t, "hc", policyTestDecl)
-	chain, err := config.GetTemplateChainInProject("default", e.scion)
+	chain, err := config.GetTemplateChainInProject(context.Background(), "default", e.scion)
 	if err != nil || len(chain) == 0 {
 		t.Fatalf("default template chain: %v", err)
 	}

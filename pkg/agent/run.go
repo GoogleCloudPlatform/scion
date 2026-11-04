@@ -506,7 +506,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	var templatePaths []string
 	var templateChain []*config.Template
 	if templateName != "" {
-		if chain, err := config.GetTemplateChainInProject(templateName, opts.ProjectPath); err == nil {
+		if chain, err := config.GetTemplateChainInProject(ctx, templateName, opts.ProjectPath); err == nil {
 			templateChain = chain
 			for _, tpl := range chain {
 				templatePaths = append(templatePaths, tpl.Path)
@@ -747,7 +747,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// opts.TemplateEnvSource for the template env only.
 	envChain := templateChain
 	if envChain == nil && opts.TemplateEnvSource != "" {
-		if chain, err := config.GetTemplateChainInProject(opts.TemplateEnvSource, opts.ProjectPath); err == nil {
+		if chain, err := config.GetTemplateChainInProject(ctx, opts.TemplateEnvSource, opts.ProjectPath); err == nil {
 			envChain = chain
 		} else {
 			util.Debugf("template env: source %q could not be resolved: %v", opts.TemplateEnvSource, err)
@@ -997,7 +997,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 					tplName = finalScionCfg.Info.Template
 				}
 			}
-			if chain, err := config.GetTemplateChainInProject(tplName, opts.ProjectPath); err == nil {
+			if chain, err := config.GetTemplateChainInProject(ctx, tplName, opts.ProjectPath); err == nil {
 				for _, tpl := range chain {
 					resolveTemplatePaths = append(resolveTemplatePaths, tpl.Path)
 				}

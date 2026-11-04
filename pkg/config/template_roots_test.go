@@ -15,6 +15,7 @@
 package config
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -79,7 +80,7 @@ func TestFindTemplateInProjectPathRefusesRequestAbsoluteAndURI(t *testing.T) {
 		"http source":          srv.URL + "/x.tar.gz",
 		"https source":         strings.Replace(srv.URL, "http://", "https://", 1) + "/x.tgz",
 	} {
-		_, err := FindTemplateInProjectPath(ref, project)
+		_, err := FindTemplateInProjectPath(context.Background(), ref, project)
 		if !errors.Is(err, ErrTemplateRefNotAllowed) {
 			t.Errorf("%s: error = %v, want ErrTemplateRefNotAllowed", name, err)
 			continue
@@ -92,14 +93,14 @@ func TestFindTemplateInProjectPathRefusesRequestAbsoluteAndURI(t *testing.T) {
 		t.Errorf("remote source fetched %d times from a project-scoped lookup", n)
 	}
 
-	tpl, err := FindTemplateInProjectPath(hydrated, project)
+	tpl, err := FindTemplateInProjectPath(context.Background(), hydrated, project)
 	if err != nil || tpl.Path != hydrated {
 		t.Fatalf("hydrated dir: %+v, %v", tpl, err)
 	}
-	if tpl, err := FindTemplateInProjectPath("claude", project); err != nil || filepath.Base(tpl.Path) != "claude" {
+	if tpl, err := FindTemplateInProjectPath(context.Background(), "claude", project); err != nil || filepath.Base(tpl.Path) != "claude" {
 		t.Fatalf("template name: %+v, %v", tpl, err)
 	}
-	if tpl, err := FindTemplateInProjectPath(outside, ""); err != nil || tpl.Path != outside {
+	if tpl, err := FindTemplateInProjectPath(context.Background(), outside, ""); err != nil || tpl.Path != outside {
 		t.Fatalf("CLI form with an absolute dir: %+v, %v", tpl, err)
 	}
 }
@@ -111,7 +112,7 @@ func TestFindTemplateInProjectPathNoRootsRefusesAbsolute(t *testing.T) {
 	withHydrationRoots(t)
 	dir := filepath.Join(t.TempDir(), "tpl")
 	mkTemplateDir(t, dir)
-	if _, err := FindTemplateInProjectPath(dir, filepath.Join(t.TempDir(), DotScion)); !errors.Is(err, ErrTemplateRefNotAllowed) {
+	if _, err := FindTemplateInProjectPath(context.Background(), dir, filepath.Join(t.TempDir(), DotScion)); !errors.Is(err, ErrTemplateRefNotAllowed) {
 		t.Fatalf("error = %v, want ErrTemplateRefNotAllowed", err)
 	}
 }
@@ -127,13 +128,13 @@ func TestOperatorDefaultTemplateMayBeRemote(t *testing.T) {
 	}))
 	defer srv.Close()
 	ref := srv.URL + "/t.tar.gz"
-	if _, err := FindOperatorTemplateInProjectPath(ref, project); errors.Is(err, ErrTemplateRefNotAllowed) {
+	if _, err := FindOperatorTemplateInProjectPath(context.Background(), ref, project); errors.Is(err, ErrTemplateRefNotAllowed) {
 		t.Fatalf("operator remote default refused as a request reference: %v", err)
 	}
-	if _, err := GetOperatorTemplateChainInProject(ref, project); errors.Is(err, ErrTemplateRefNotAllowed) {
+	if _, err := GetOperatorTemplateChainInProject(context.Background(), ref, project); errors.Is(err, ErrTemplateRefNotAllowed) {
 		t.Fatalf("operator chain refused the remote default: %v", err)
 	}
-	if _, err := GetTemplateChainInProject(ref, project); !errors.Is(err, ErrTemplateRefNotAllowed) {
+	if _, err := GetTemplateChainInProject(context.Background(), ref, project); !errors.Is(err, ErrTemplateRefNotAllowed) {
 		t.Fatalf("request chain error = %v, want ErrTemplateRefNotAllowed", err)
 	}
 }

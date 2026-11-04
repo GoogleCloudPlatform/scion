@@ -15,6 +15,7 @@
 package config
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -148,7 +149,7 @@ func TestFindTemplateRefusesNonComponentName(t *testing.T) {
 				t.Errorf("FindTemplateInScope(%q, %s) = %+v; want nil", name, scope, tpl)
 			}
 		}
-		if tpl, err := FindTemplateInProjectPath(name, projectPath); !errors.Is(err, ErrInvalidResourceName) {
+		if tpl, err := FindTemplateInProjectPath(context.Background(), name, projectPath); !errors.Is(err, ErrInvalidResourceName) {
 			t.Errorf("FindTemplateInProjectPath(%q) = %v, %v; want ErrInvalidResourceName", name, tpl, err)
 		}
 	}
@@ -164,7 +165,7 @@ func TestFindTemplateSlugStillResolves(t *testing.T) {
 	if tpl := FindTemplateInScope("my-tpl", "global"); tpl == nil {
 		t.Error("FindTemplateInScope(my-tpl, global) = nil")
 	}
-	tpl, err = FindTemplateInProjectPath("my-tpl", projectPath)
+	tpl, err = FindTemplateInProjectPath(context.Background(), "my-tpl", projectPath)
 	if err != nil || tpl.Path != filepath.Join(projectPath, "templates", "my-tpl") {
 		t.Errorf("FindTemplateInProjectPath(my-tpl) = %+v, %v", tpl, err)
 	}
@@ -186,14 +187,14 @@ func TestEmptyNameLookupsKeepTheirMeaning(t *testing.T) {
 	// directory itself, unchanged from before the name checks. A public LOW
 	// follow-up proposes resolving it to the default template instead; a
 	// change here must be deliberate and come with that follow-up.
-	tpl, err := FindTemplateInProjectPath("", projectPath)
+	tpl, err := FindTemplateInProjectPath(context.Background(), "", projectPath)
 	if err != nil || tpl == nil || tpl.Path != filepath.Join(projectPath, "templates") {
 		t.Errorf("FindTemplateInProjectPath(\"\") = %+v, %v; want the project templates directory (unchanged behaviour)", tpl, err)
 	}
 	if _, err := FindTemplate(""); errors.Is(err, ErrInvalidResourceName) {
 		t.Errorf("FindTemplate(\"\") err = %v; the empty name must not be refused", err)
 	}
-	if _, err := GetTemplateChainInProject("", projectPath); errors.Is(err, ErrInvalidResourceName) {
+	if _, err := GetTemplateChainInProject(context.Background(), "", projectPath); errors.Is(err, ErrInvalidResourceName) {
 		t.Errorf("GetTemplateChainInProject(\"\") err = %v; the empty name must not be refused", err)
 	}
 

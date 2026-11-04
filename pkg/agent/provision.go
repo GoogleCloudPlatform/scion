@@ -1511,7 +1511,7 @@ type resolvedTemplate struct {
 // dir for provisioning, launch (Start's harness.Resolve) and the runtime
 // broker's policy gate.
 func resolveTemplateAndHarnessConfig(ctx context.Context, templateName, harnessConfig, projectPath, projectDir, profileName string, settings *config.VersionedSettings, inlineCfg *api.ScionConfig) (*resolvedTemplate, error) {
-	chain, err := templateChainFor(templateName, projectPath, settings)
+	chain, err := templateChainFor(ctx, templateName, projectPath, settings)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load template: %w", err)
 	}
@@ -1632,11 +1632,11 @@ func PreflightResolve(ctx context.Context, opts api.StartOptions) error {
 // (from a request or an agent's records) resolves through
 // config.GetTemplateChainInProject, which never fetches a remote source and
 // accepts an absolute directory only from the broker's own template cache.
-func templateChainFor(name, projectPath string, settings *config.VersionedSettings) ([]*config.Template, error) {
+func templateChainFor(ctx context.Context, name, projectPath string, settings *config.VersionedSettings) ([]*config.Template, error) {
 	if settings != nil && settings.DefaultTemplate != "" && name == settings.DefaultTemplate {
-		return config.GetOperatorTemplateChainInProject(name, projectPath)
+		return config.GetOperatorTemplateChainInProject(ctx, name, projectPath)
 	}
-	return config.GetTemplateChainInProject(name, projectPath)
+	return config.GetTemplateChainInProject(ctx, name, projectPath)
 }
 
 // plainProjectWorkspaceSource is the directory a plain non-git project's
@@ -4815,7 +4815,7 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 	if hydratedTemplate {
 		err = config.NewTemplateNotFoundError(effectiveTemplate, fmt.Sprintf("template %q was loaded from a content-addressed cache (%s)", effectiveTemplate, templateRecord.TemplateHash))
 	} else {
-		chain, err = templateChainFor(effectiveTemplate, projectPath, vs)
+		chain, err = templateChainFor(ctx, effectiveTemplate, projectPath, vs)
 	}
 	if err != nil {
 		util.Debugf("GetAgent: template chain for %q not found: %v, returning agentCfg only (harness=%q image=%q)",

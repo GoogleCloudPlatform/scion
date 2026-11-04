@@ -6583,7 +6583,7 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedTemplate
 		if templateForChain == "" && req.Config != nil {
 			templateForChain = req.Config.Template
 		}
-		harnessConfigTemplatePaths := templateChainPaths(templateForChain, harnessConfigSearchPath)
+		harnessConfigTemplatePaths := templateChainPaths(context.Background(), templateForChain, harnessConfigSearchPath)
 		// Resolve through the shared resolver launch uses
 		// (config.ResolveHarnessConfigDir, via resolveHarnessConfigDir in
 		// pkg/agent/provision.go and harness.Resolve): a hydrated hub-managed
@@ -6684,7 +6684,7 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedTemplate
 		// the same template launch uses: the hydrated copy for a hub
 		// template, never a local template of the same slug
 		// (ptone/scion#4218, P6).
-		if tmpl := envGatherTemplate(req, hydratedTemplatePath); tmpl != nil {
+		if tmpl := envGatherTemplate(context.Background(), req, hydratedTemplatePath); tmpl != nil {
 			if cfg, err := tmpl.LoadConfig(); err == nil && cfg != nil && cfg.AuthSelectedType != "" {
 				authType = cfg.AuthSelectedType
 			}
@@ -6974,7 +6974,7 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedTemplate
 	// Also load the template's own config. For a hub template this is the
 	// hydrated copy launch uses: the broker's local project may have no
 	// template of that slug, or a different one (ptone/scion#4218, P6).
-	if tmpl := envGatherTemplate(req, hydratedTemplatePath); tmpl != nil {
+	if tmpl := envGatherTemplate(context.Background(), req, hydratedTemplatePath); tmpl != nil {
 		if cfg, err := tmpl.LoadConfig(); err == nil && cfg != nil {
 			for _, sec := range cfg.Secrets {
 				required[sec.Key] = struct{}{}
@@ -9809,14 +9809,14 @@ func preResolvedHubEndpoint(conn *HubConnection, advertised string) string {
 // path. In each of those cases buildStartContext also leaves opts.Template
 // as the slug and provisioning resolves it locally. A hydration error fails
 // the create before this point.
-func envGatherTemplate(req CreateAgentRequest, hydratedTemplatePath string) *config.Template {
+func envGatherTemplate(ctx context.Context, req CreateAgentRequest, hydratedTemplatePath string) *config.Template {
 	if hydratedTemplatePath != "" {
 		return &config.Template{Name: filepath.Base(hydratedTemplatePath), Path: hydratedTemplatePath}
 	}
 	if req.Config == nil || req.Config.Template == "" || req.ProjectPath == "" {
 		return nil
 	}
-	tmpl, err := config.FindTemplateInProjectPath(req.Config.Template, req.ProjectPath)
+	tmpl, err := config.FindTemplateInProjectPath(ctx, req.Config.Template, req.ProjectPath)
 	if err != nil {
 		return nil
 	}
