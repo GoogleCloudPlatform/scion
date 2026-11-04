@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"reflect"
@@ -649,6 +650,9 @@ func runProjectSettingsGet(ctx context.Context, svc hubclient.ProjectService, pr
 		if err != nil {
 			return reportSettingsError(out, errw, format, err, settingsScopeHint{Scope: projSettingsReadScope})
 		}
+		if res == nil {
+			return errors.New("the Hub returned no resolved project settings")
+		}
 		printResolvedProjectSettings(out, res)
 		return nil
 	}
@@ -662,6 +666,9 @@ func runProjectSettingsGet(ctx context.Context, svc hubclient.ProjectService, pr
 	cur, err := svc.GetSettings(ctx, projectID)
 	if err != nil {
 		return reportSettingsError(out, errw, format, err, settingsScopeHint{Scope: projSettingsReadScope})
+	}
+	if cur == nil {
+		return errors.New("the Hub returned no project settings")
 	}
 	values, err := projectSettingsValues(cur)
 	if err != nil {
@@ -773,6 +780,11 @@ func runProjectSettingsWrite(ctx context.Context, svc hubclient.ProjectService, 
 		if cur, err = svc.GetSettings(ctx, projectID); err != nil {
 			return reportSettingsError(out, errw, format, err, settingsScopeHint{Scope: projSettingsReadScope})
 		}
+		// A part of defaultResources is saved with the rest of the current
+		// value; without it, the other parts would be dropped.
+		if cur == nil {
+			return errors.New("the Hub returned no project settings; nothing was changed")
+		}
 	}
 	body, err := buildProjectSettingsBody(cur, changes)
 	if err != nil {
@@ -781,6 +793,9 @@ func runProjectSettingsWrite(ctx context.Context, svc hubclient.ProjectService, 
 	res, err := svc.UpdateSettingsFields(ctx, projectID, body)
 	if err != nil {
 		return reportSettingsError(out, errw, format, err, settingsScopeHint{Scope: projSettingsWriteScope})
+	}
+	if res == nil {
+		return errors.New("the change was saved, but the Hub returned no project settings; run scion project settings get to see them")
 	}
 	if format != "" {
 		return writeStructured(out, format, res)

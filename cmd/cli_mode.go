@@ -126,8 +126,6 @@ var agentAllowed = map[string]bool{
 	// (add, mint, verify, remove) and list stay out (ptone, ptone/scion#4018).
 	"project.service-accounts":      true,
 	"project.service-accounts.show": true,
-	"project.settings":              true, // reading the agent's own project settings (the Hub admits project:read, project-isolated)
-	"project.settings.get":          true, // set and unset stay out; the Hub refuses agents there
 	"set-message-mode":              true,
 	"conversation":                  true,
 	"conversation.list":             true,
