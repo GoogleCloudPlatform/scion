@@ -81,6 +81,60 @@ $ scion artifact versions scion://artifact/5f1c2d3e-6b1a-4c55-9f3e-0d6e7a1b2c3d
   scion://artifact/5f1c2d3e-6b1a-4c55-9f3e-0d6e7a1b2c3d@1  publish  2026-10-06 17:02 UTC  agent:<id>     1      3.9 KiB
 ```
 
+### `scion artifact comments <ref>`
+
+Lists the comments, suggested changes and highlights of a review as entries, so a script or an agent can read them without parsing CriticMarkup. A bare reference lists the newest review of the artifact (the CLI prints `Using <ref>@<seq> (review)` on stderr); a reference with `@<seq>` must name a review version, and any other kind is an error. It reads through the same routes as `get`, so the same access rules apply, and every text file of the version is checked against its recorded digest before it is read.
+
+Each entry has a kind: `comment` (`{>>note<<}`), `suggestion` (`{++insert++}`, `{--delete--}` or `{~~old~>new~~}`, with `change` set to `insert`, `delete` or `replace`), or `highlight` (`{==text==}`). A comment written directly after a highlight, with no text between them, is a comment on the highlighted text (its `anchor`); one written directly after a suggestion is that suggestion's `comment`. CriticMarkup records no author in the marks, so every entry carries the review version's publisher and time. The review's `--note` is shown first.
+
+```text
+$ scion artifact comments scion://artifact/5f1c2d3e-6b1a-4c55-9f3e-0d6e7a1b2c3d
+Using scion://artifact/5f1c2d3e-6b1a-4c55-9f3e-0d6e7a1b2c3d@2 (review)
+scion://artifact/5f1c2d3e-6b1a-4c55-9f3e-0d6e7a1b2c3d@2  review by user:<id>, 2026-11-02 09:30 UTC
+Note: Two questions.
+
+plan.md:3:4  suggestion (replace)
+  "ship" -> "launch"
+
+plan.md:4:9  comment
+  on "docs"
+  which team?
+
+1 comment, 1 suggestion, 0 highlights
+```
+
+With `--format json` the output is one object. `schemaVersion` is `1`; it changes only when a field is removed or changes meaning, and fields may be added within a version.
+
+```json
+{
+  "schemaVersion": 1,
+  "artifact": "scion://artifact/<id>",
+  "ref": "scion://artifact/<id>@2",
+  "seq": 2,
+  "author": { "kind": "user", "ref": "<id>" },
+  "createdAt": "2026-11-02T09:30:00Z",
+  "note": "Two questions.",
+  "entries": [
+    {
+      "kind": "suggestion",
+      "change": "replace",
+      "file": "plan.md",
+      "line": 3,
+      "column": 4,
+      "start": 11,
+      "end": 29,
+      "anchor": "ship",
+      "comment": "",
+      "suggestion": "launch",
+      "author": { "kind": "user", "ref": "<id>" },
+      "createdAt": "2026-11-02T09:30:00Z"
+    }
+  ]
+}
+```
+
+`file` is the file's path in the version (the entry file first, then the other text files). `line` and `column` are 1-based and locate the entry's first mark; `column` counts characters. `start` and `end` are byte offsets of the entry's marks in the file, tokens and an attached comment included. `anchor`, `comment` and `suggestion` are always present, empty when they do not apply; `change` is present for suggestions only. `entries` is `[]` when the review has no marks.
+
 ### `scion artifact share <ref>`
 
 Creates a share link for the artifact and prints it, with its expiry and the command that revokes it. Anyone holding the link can open the artifact's current version in a browser without signing in, until the link expires or is revoked. The link is shown only once; it cannot be printed again. Only the artifact's owner or a user with an admin grant on it can share it; agents cannot, and the command is available in human mode only. See [Share links](#share-links).
@@ -155,7 +209,7 @@ Apply or answer the marks, then publish the result as the next version: scion ar
 
 The message comes from the hub and carries the reference in its text only; whether the owner may read the version is decided when it runs `get`. The *Review pending* badge in the artifacts list stays until a version of kind `publish` is current again.
 
-**Reading a review.** `scion artifact get <ref> --clean` returns the base text, `--accept` the text with every suggestion applied, and `--kind publish` the newest published version. Over the API, add `?resolve=clean` or `?resolve=accept` to a file route.
+**Reading a review.** `scion artifact get <ref> --clean` returns the base text, `--accept` the text with every suggestion applied, and `--kind publish` the newest published version. `scion artifact comments <ref>` lists the review's comments, suggestions and highlights as entries, with `--format json` for scripts. Over the API, add `?resolve=clean` or `?resolve=accept` to a file route.
 
 ## Images in Markdown artifacts
 

@@ -73,6 +73,7 @@ Commands:
   scion artifact publish <file|dir> --review <ref> [--note]
   scion artifact get <ref> [--out <path>] [--clean|--accept] [--kind publish]
   scion artifact versions <ref>                List an artifact's versions
+  scion artifact comments <ref>                List a review's comments as entries
   scion artifact list [--mine] [--all]         List the artifacts you can read
   scion artifact view <ref> [--check] [--show-link]
   scion artifact share <ref> [--ttl 7d]        Create a share link (users only)
