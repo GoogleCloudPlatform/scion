@@ -1211,6 +1211,7 @@ func mkdirNFSAgentDir(dir string, uid, gid int) error {
 // the stop is run-checked (see runScopedInstanceOp) and an instance of
 // another run is left running with ErrRunMismatch (ptone/scion#2550).
 func (r *CloudRunRuntime) Stop(ctx context.Context, ref RunRef) error {
+	defer r.forgetExecKey(ref.ID)
 	return r.instanceOp(ctx, ref, "stop", false, func(c cloudrun.InstancesAPI, name, etag string) (cloudrun.InstanceOperation, error) {
 		return c.StopInstance(ctx, &runpb.StopInstanceRequest{Name: name, Etag: etag}, defaultCallOpts...)
 	})
@@ -1222,9 +1223,32 @@ func (r *CloudRunRuntime) Stop(ctx context.Context, ref RunRef) error {
 // does not enforce the etag a delete carries (a made-up etag was
 // accepted, ptone/scion#4760).
 func (r *CloudRunRuntime) Delete(ctx context.Context, ref RunRef) error {
+	defer r.forgetExecKey(ref.ID)
 	return r.instanceOp(ctx, ref, "delete", false, func(c cloudrun.InstancesAPI, name, etag string) (cloudrun.InstanceOperation, error) {
 		return c.DeleteInstance(ctx, &runpb.DeleteInstanceRequest{Name: name, Etag: etag}, defaultCallOpts...)
 	})
+}
+
+// execKeyForgetter is implemented by exec connectors that cache SSH keys per
+// instance.
+type execKeyForgetter interface {
+	Forget(project, location, instanceName string)
+}
+
+// forgetExecKey drops any SSH key the exec connector cached for instance id.
+// It does nothing until the config has been resolved, since no key can have
+// been cached before then.
+func (r *CloudRunRuntime) forgetExecKey(id string) {
+	f, ok := r.exec.(execKeyForgetter)
+	if !ok {
+		return
+	}
+	r.resolveMu.Lock()
+	resolved, project, location := r.resolved, r.config.ProjectID, r.config.Location
+	r.resolveMu.Unlock()
+	if resolved {
+		f.Forget(project, location, id)
+	}
 }
 
 // cloudRunRunCheckAttempts bounds how often a run-checked stop or delete
