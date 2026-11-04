@@ -389,9 +389,18 @@ type NotificationCreatedEvent struct {
 // UserNotificationEvent is the payload for a non-chat notification addressed
 // to a single user (PublishUserNotification). SubscriberID is the client's
 // second gate; the subject already scopes delivery.
+//
+// Kind, ResourceType and ResourceID are fields of this event only, never of
+// the embedded NotificationCreatedEvent: that struct is also the payload of
+// the broadcast notification.created and project.<id>.notification
+// subjects, which reach other sessions. They are empty, and omitted, for a
+// notification that does not set them.
 type UserNotificationEvent struct {
 	NotificationCreatedEvent
 	SubscriberID string `json:"subscriberId"`
+	Kind         string `json:"kind,omitempty"`
+	ResourceType string `json:"resourceType,omitempty"`
+	ResourceID   string `json:"resourceId,omitempty"`
 }
 
 // AllowListChangedEvent is published when the allow list is modified.
@@ -818,6 +827,9 @@ func (p *eventBuilder) PublishUserNotification(_ context.Context, notif *store.N
 			CreatedAt: notif.CreatedAt.UTC().Format("2006-01-02T15:04:05.000Z"),
 		},
 		SubscriberID: notif.SubscriberID,
+		Kind:         notif.Kind,
+		ResourceType: notif.ResourceType,
+		ResourceID:   notif.ResourceID,
 	}
 	p.sink("user."+notif.SubscriberID+".notification", evt)
 }

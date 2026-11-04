@@ -339,6 +339,23 @@ describe('notificationFromEvent', () => {
     expect(notificationFromEvent({ ...noSubscriber, acknowledged: false }, 'u1')).not.toBeNull();
   });
 
+  it('accepts a payload with kind and resource fields and no agent', () => {
+    const payload = {
+      ...userEventPayload('n2'),
+      agentId: '00000000-0000-0000-0000-000000000000',
+      status: 'ARTIFACT_REVIEW_REQUESTED',
+      kind: 'artifact_grant',
+      resourceType: 'artifact',
+      resourceId: '5f1c2d3e-0000-4000-8000-000000000001',
+    };
+    expect(notificationFromEvent(payload, 'u1')).toMatchObject({
+      id: 'n2',
+      agentId: '00000000-0000-0000-0000-000000000000',
+      status: 'ARTIFACT_REVIEW_REQUESTED',
+      subscriberId: 'u1',
+    });
+  });
+
   it('rejects anything it cannot render or that is not for this user', () => {
     const ok = userEventPayload('n1');
     expect(notificationFromEvent(undefined, 'u1')).toBeNull();

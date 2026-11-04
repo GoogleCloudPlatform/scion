@@ -44,6 +44,12 @@ type Notification struct {
 	DispatchReason string `json:"dispatch_reason,omitempty"`
 	// NextAttemptAt holds the value of the "next_attempt_at" field.
 	NextAttemptAt *time.Time `json:"next_attempt_at,omitempty"`
+	// Kind holds the value of the "kind" field.
+	Kind string `json:"kind,omitempty"`
+	// ResourceType holds the value of the "resource_type" field.
+	ResourceType string `json:"resource_type,omitempty"`
+	// ResourceID holds the value of the "resource_id" field.
+	ResourceID string `json:"resource_id,omitempty"`
 	// Created holds the value of the "created" field.
 	Created      time.Time `json:"created,omitempty"`
 	selectValues sql.SelectValues
@@ -58,7 +64,7 @@ func (*Notification) scanValues(columns []string) ([]any, error) {
 			values[i] = new(sql.NullBool)
 		case notification.FieldDispatchAttempts:
 			values[i] = new(sql.NullInt64)
-		case notification.FieldSubscriberType, notification.FieldSubscriberID, notification.FieldStatus, notification.FieldMessage, notification.FieldDispatchOutcome, notification.FieldDispatchReason:
+		case notification.FieldSubscriberType, notification.FieldSubscriberID, notification.FieldStatus, notification.FieldMessage, notification.FieldDispatchOutcome, notification.FieldDispatchReason, notification.FieldKind, notification.FieldResourceType, notification.FieldResourceID:
 			values[i] = new(sql.NullString)
 		case notification.FieldNextAttemptAt, notification.FieldCreated:
 			values[i] = new(sql.NullTime)
@@ -164,6 +170,24 @@ func (_m *Notification) assignValues(columns []string, values []any) error {
 				_m.NextAttemptAt = new(time.Time)
 				*_m.NextAttemptAt = value.Time
 			}
+		case notification.FieldKind:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field kind", values[i])
+			} else if value.Valid {
+				_m.Kind = value.String
+			}
+		case notification.FieldResourceType:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field resource_type", values[i])
+			} else if value.Valid {
+				_m.ResourceType = value.String
+			}
+		case notification.FieldResourceID:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field resource_id", values[i])
+			} else if value.Valid {
+				_m.ResourceID = value.String
+			}
 		case notification.FieldCreated:
 			if value, ok := values[i].(*sql.NullTime); !ok {
 				return fmt.Errorf("unexpected type %T for field created", values[i])
@@ -246,6 +270,15 @@ func (_m *Notification) String() string {
 		builder.WriteString("next_attempt_at=")
 		builder.WriteString(v.Format(time.ANSIC))
 	}
+	builder.WriteString(", ")
+	builder.WriteString("kind=")
+	builder.WriteString(_m.Kind)
+	builder.WriteString(", ")
+	builder.WriteString("resource_type=")
+	builder.WriteString(_m.ResourceType)
+	builder.WriteString(", ")
+	builder.WriteString("resource_id=")
+	builder.WriteString(_m.ResourceID)
 	builder.WriteString(", ")
 	builder.WriteString("created=")
 	builder.WriteString(_m.Created.Format(time.ANSIC))

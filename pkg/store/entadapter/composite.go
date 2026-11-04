@@ -374,10 +374,28 @@ func (c *CompositeStore) DeleteAgent(ctx context.Context, id string) error {
 	return c.deleteAgentDependents(ctx, id)
 }
 
+// refuseNilAgentIDs returns store.ErrInvalidInput when ids holds the nil
+// UUID. The agent cascades delete notifications by agent_id, and
+// notifications that are not about an agent (a notification with a Kind,
+// some older rows) carry the nil UUID there, so a cascade keyed on it would
+// delete them. No agent has the nil UUID as its id; this is defence in
+// depth.
+func refuseNilAgentIDs(ids ...uuid.UUID) error {
+	for _, id := range ids {
+		if id == uuid.Nil {
+			return fmt.Errorf("%w: the nil UUID is not an agent id", store.ErrInvalidInput)
+		}
+	}
+	return nil
+}
+
 // deleteAgentDependents removes the records DeleteAgent cascades to.
 func (c *CompositeStore) deleteAgentDependents(ctx context.Context, id string) error {
 	uid, err := parseUUID(id)
 	if err != nil {
+		return err
+	}
+	if err := refuseNilAgentIDs(uid); err != nil {
 		return err
 	}
 	if _, err := c.client.Notification.Delete().
@@ -458,6 +476,9 @@ func (c *CompositeStore) DeleteProject(ctx context.Context, id string) error {
 	}
 	agentIDs, err := lockProjectAgentIDs(ctx, c.client, uid)
 	if err != nil {
+		return err
+	}
+	if err := refuseNilAgentIDs(agentIDs...); err != nil {
 		return err
 	}
 	obs := c.lifecycle.load()

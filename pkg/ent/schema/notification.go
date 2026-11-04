@@ -81,6 +81,22 @@ func (Notification) Fields() []ent.Field {
 		field.Time("next_attempt_at").
 			Optional().
 			Nillable(),
+		// kind says what produced the notification (a
+		// store.NotificationKind* constant). Empty means not classified:
+		// every row written before the column existed, and every row from
+		// writers that do not set it. Empty does not mean "agent-scoped":
+		// a GC must select rows by agent_id or subscriber_type, never by
+		// kind.
+		field.String("kind").
+			Default(""),
+		// resource_type and resource_id name the thing the notification
+		// is about (for example store.NotificationResourceArtifact and an
+		// artifact id). Both are empty when the notification is not about
+		// a resource.
+		field.String("resource_type").
+			Default(""),
+		field.String("resource_id").
+			Default(""),
 		field.Time("created").
 			Default(time.Now).
 			Immutable(),
