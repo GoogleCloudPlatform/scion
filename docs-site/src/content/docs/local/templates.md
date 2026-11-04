@@ -209,7 +209,7 @@ When the template chain is provisioned, Scion collects the skills from each temp
 | Claude | `.claude/skills/` |
 | Gemini | `.gemini/skills/` |
 
-When multiple templates are chained, skills from later templates overlay earlier ones. Each skill directory (template-mounted, Skill Bank, or platform skill) is installed as a whole into the harness's `skills_dir` (which must be a relative path inside the agent home: `harness skills_dir must be a relative path inside the agent home`) without following symbolic links in either the source or the agent home, within a per-skill limit of `4096` entries, `64 MiB`, and `32` directory levels. Symbolic links, special files, and regular files with more than one hard link in a skill's source are skipped (still counting toward the entry limit), and a symbolic link or non-directory on the skill's path in the agent home or the skill's source refuses the install.
+When multiple templates are chained, skills from later templates overlay earlier ones. Each skill directory (template-mounted, Skill Bank, or platform skill) is installed as a whole into the harness's `skills_dir` (which must be a relative path inside the Agent home: `harness skills_dir must be a relative path inside the agent home`) without following symbolic links in either the source or the Agent home, within a per-skill limit of `4096` entries, `64 MiB`, and `32` directory levels. Symbolic links, special files, and regular files with more than one hard link in a skill's source are skipped (still counting toward the entry limit), and a symbolic link or non-directory on the skill's path in the Agent home or the skill's source refuses the install.
 
 ### 2. Skill Bank references
 
