@@ -45,8 +45,8 @@ func sharedTreeDir(t *testing.T, dir string, mode uint32) (uid, gid int) {
 	if st.Gid == 0 || st.Uid == 0 {
 		t.Skip("needs a directory with a non-zero owner and group")
 	}
-	if st.Mode&0o7777 != mode {
-		t.Skipf("the kernel kept mode %#o, not %#o", st.Mode&0o7777, mode)
+	if uint32(st.Mode)&0o7777 != mode {
+		t.Skipf("the kernel kept mode %#o, not %#o", uint32(st.Mode)&0o7777, mode)
 	}
 	return int(st.Uid), int(st.Gid)
 }
