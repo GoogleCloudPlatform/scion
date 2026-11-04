@@ -1897,8 +1897,9 @@ func (s *Server) restoreAgent(w http.ResponseWriter, r *http.Request, id string)
 
 	// Answer with the same enriched shape as GET /agents/{id}, so the
 	// restored agent carries its deletion view (null) and project/broker
-	// names like every other agent response.
-	s.writeAgentGetResponse(w, r, agent)
+	// names like every other agent response. The restore has committed, so a
+	// TZ read error omits the timezone fields rather than answering 503.
+	s.writeAgentResponseAfterWrite(w, r, agent)
 }
 
 // MessageRequest is the request body for sending a message to an agent.

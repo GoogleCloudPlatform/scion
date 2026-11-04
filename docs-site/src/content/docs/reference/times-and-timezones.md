@@ -70,6 +70,8 @@ For an agent dispatched by a Hub, the Hub is the only source of `TZ`. On create,
 | 4 | The Hub default timezone, `agent_defaults.default_timezone`. | `hub-default` |
 | 5 | Nothing. No `TZ` is sent, and the container uses the image default (UTC). | `none` |
 
+If the Hub cannot read the environment-variable store for steps 2 or 3, it does not move on to a later step. Create, start and restart fail with `503` and the agent is not changed. Provision sends no `TZ` (or the placeholder `UTC`, with source `none`, when an older Runtime Broker asks for one), and the next start reads the store again. The agent `GET` and `PATCH` responses, which report the resolved zone, return `503` with the message `environment settings unavailable`, and the `PATCH` writes nothing. A restore, which has already completed when it answers, returns the agent without `resolvedTimezone` and `timezoneSource`. The env-gather response leaves out the `TZ` source label. Retry once the store is reachable.
+
 ### Hub default timezone
 
 Admins set it in the web dashboard under **Admin → Server Config**, in the **Agent Defaults** card (field **Default Timezone**), or through `PUT /api/v1/admin/server-config` with the top-level field `default_timezone` (stored as the Layer-1 key `agent_defaults.default_timezone`).

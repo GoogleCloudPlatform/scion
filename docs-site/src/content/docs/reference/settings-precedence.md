@@ -339,11 +339,10 @@ runtime_broker  <  hub  <  project  <  user
 ```
 
 The order is stated in one place in the code, the `envScopePrecedence` list, and **every consumer**
-derives its order from it: the resolver (`resolveEnvFromStorage`), the provenance reporter that
-tells `scion hub env list` where a value came from (`buildEnvSources`), the startup shadow warning
-(`WarnOutrankedBrokerEnvKeys`), and the env-gather provenance reporter
-(`Server.buildEnvGatherResponse`). Changing the list is the only edit needed to change the
-**resolution** order and both provenance labels.
+derives its order from it: the resolver (`resolveEnvFromStorage`), the storage step of the agent
+`TZ` chain (`resolveStorageTZ`), the startup shadow warning (`WarnOutrankedBrokerEnvKeys`), and the
+env-gather provenance reporter (`Server.buildEnvGatherResponse`). Changing the list is the only edit
+needed to change the **resolution** order and the provenance label.
 
 The env-gather reporter labels each key the Hub supplied with the source whose value won the
 dispatch merge:

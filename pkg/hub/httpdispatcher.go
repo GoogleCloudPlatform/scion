@@ -1030,11 +1030,6 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 		classifyEnv(&req.EnvClassifications, "SCION_THINKING_LEVEL", api.EnvKindPlain)
 	}
 
-	// TZ comes only from the agent TZ resolver (pin > storage env > hub
-	// default > none). Any other TZ in the env built so far is dropped; the
-	// writers below (storage merge, env secrets) skip the key.
-	setResolvedAgentTZ(req.ResolvedEnv, &req.EnvClassifications, d.resolveAgentTZ(ctx, agent, false))
-
 	// Inject hub name so agents can label their Cloud Logging entries with the
 	// hub identity, matching the hub-scoped log query filter (labels.hub).
 	if d.hubName != "" {
@@ -1081,6 +1076,30 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 			}
 		}
 	}
+
+	// TZ comes only from the agent TZ resolver (pin > storage env > hub
+	// default > none). Any other TZ in the env built so far is dropped; the
+	// storage merge above and the env secrets below skip the key. It runs after
+	// the stored env settings read, so when the whole store is down that
+	// read's error is the one reported.
+	//
+	// A storage read error never lets a lower rung stand in: create,
+	// create-with-gather and finalize-env fail like the stored env settings
+	// read error above; provision and reprovision send no TZ (they do not
+	// start the container, and the start resolves TZ again and fails closed).
+	tz, err := d.resolveAgentTZ(ctx, agent, false)
+	if err != nil && secrets == failOnSecretResolutionError {
+		d.log.WarnContext(ctx, callerName+": failed to read stored TZ settings; agent not created",
+			"agent_id", agent.ID, "scope", tzReadScope(err))
+		return nil, &secretResolutionError{Verb: "created", Source: resolutionSourceEnvSettings, Err: err}
+	}
+	if err != nil {
+		// continueOnSecretResolutionError (provision, reprovision).
+		d.log.WarnContext(ctx, callerName+": failed to read stored TZ settings; provisioning without TZ",
+			"agent_id", agent.ID, "scope", tzReadScope(err))
+		tz = agentTZ{Source: TZSourceNone}
+	}
+	setResolvedAgentTZ(req.ResolvedEnv, &req.EnvClassifications, tz)
 
 	// Include the template's secret declarations for broker env-gather,
 	// from the template's job config (its stripped AgentConfig snapshot,
@@ -2106,9 +2125,6 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 	req.MoveReincarnationID = moveReincarnationID
 	req.GatherEnv = true
 
-	// Track which scope provided each key
-	req.EnvSources = d.buildEnvSources(ctx, agent, req.ResolvedEnv)
-
 	// First pass: use CreateAgentWithGather so the broker can report which
 	// env vars are still needed (returned as a 202 with env requirements).
 	//
@@ -2162,9 +2178,18 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 			}
 			d.restrictCreateRequestTokenRemote(req)
 			if tzNeeded {
-				setResolvedAgentTZ(req.ResolvedEnv, &req.EnvClassifications, d.resolveAgentTZ(ctx, agent, true))
+				tz, tzErr := d.resolveAgentTZ(ctx, agent, true)
+				if tzErr != nil {
+					// Provision continues without stored settings (it does
+					// not start the container; the start resolves TZ again
+					// and fails closed): answer the need with the no-TZ
+					// placeholder, never a lower rung.
+					d.log.WarnContext(ctx, callerName+": failed to read stored TZ settings; answering the TZ need without them",
+						"agent_id", agent.ID, "scope", tzReadScope(tzErr))
+					tz = agentTZ{TZ: gatherAnswerTZ, Source: TZSourceNone}
+				}
+				setResolvedAgentTZ(req.ResolvedEnv, &req.EnvClassifications, tz)
 			}
-			req.EnvSources = d.buildEnvSources(ctx, agent, req.ResolvedEnv)
 			// Design §3.4 Amendment A2.3: a fresh RequestID for the replay. Reusing the first
 			// pass's ID would let the broker's attempt cache (keyed by
 			// RequestID) replay the stored 202 instead of reprocessing with
@@ -2307,9 +2332,6 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreateWithGather(ctx context.Context,
 	req.RunID = runID
 	req.AgentToken = token
 	issued = token != ""
-
-	// Track which scope provided each key
-	req.EnvSources = d.buildEnvSources(ctx, agent, req.ResolvedEnv)
 
 	d.log.Info("Dispatcher: request built, sending to broker",
 		"agent_id", agent.ID, "agent", agent.Name,
@@ -2518,10 +2540,12 @@ func (d *HTTPAgentDispatcher) finalizeEnv(ctx context.Context, agent *store.Agen
 	// again on the merged env.
 	d.restrictCreateRequestTokenRemote(req)
 	if answerTZ {
-		setResolvedAgentTZ(req.ResolvedEnv, &req.EnvClassifications, d.resolveAgentTZ(ctx, agent, true))
+		tz, tzErr := d.resolveAgentTZ(ctx, agent, true)
+		if tzErr != nil {
+			return nil, d.finalizeEnvTZError(ctx, agent, tzErr)
+		}
+		setResolvedAgentTZ(req.ResolvedEnv, &req.EnvClassifications, tz)
 	}
-
-	req.EnvSources = d.buildEnvSources(ctx, agent, req.ResolvedEnv)
 
 	send := func(ctx context.Context, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
 		resp, envReqs, err := d.client.CreateAgentWithGather(ctx, agent.RuntimeBrokerID, endpoint, req)
@@ -2564,7 +2588,11 @@ func (d *HTTPAgentDispatcher) finalizeEnv(ctx context.Context, agent *store.Agen
 			classifyEnvKeys(&req.EnvClassifications, asNeededEnv, api.EnvKindSecretFetchable)
 			d.restrictCreateRequestTokenRemote(req)
 			if tzNeeded {
-				setResolvedAgentTZ(req.ResolvedEnv, &req.EnvClassifications, d.resolveAgentTZ(ctx, agent, true))
+				tz, tzErr := d.resolveAgentTZ(ctx, agent, true)
+				if tzErr != nil {
+					return nil, d.finalizeEnvTZError(ctx, agent, tzErr)
+				}
+				setResolvedAgentTZ(req.ResolvedEnv, &req.EnvClassifications, tz)
 			}
 			// A fresh RequestID for the replay: reusing the first send's ID
 			// would let the broker's attempt cache replay the stored 202
@@ -2656,8 +2684,8 @@ func (d *HTTPAgentDispatcher) deferredFinalizeEnv(ctx context.Context, agent *st
 // storage.
 //
 // Every consumer derives its order from this list: the resolver
-// (resolveEnvFromStorage), the provenance reporter that tells the CLI where a
-// value came from (buildEnvSources), the startup shadow warning
+// (resolveEnvFromStorage), the TZ chain's storage rung (resolveStorageTZ), the
+// startup shadow warning
 // (WarnOutrankedBrokerEnvKeys), and the env-gather provenance reporter
 // (Server.buildEnvGatherResponse in handlers_agents_core.go, through
 // envScopeFilters). Changing the order here is the only edit required, and it
@@ -3140,56 +3168,6 @@ func (d *HTTPAgentDispatcher) resolveAsNeededForKeys(
 	return result, nil
 }
 
-// buildEnvSources creates a map of env key -> scope for reporting to the CLI.
-//
-// It walks the same scopes in the same order as resolveEnvFromStorage, from the
-// same envScopePrecedence list, so the source it reports is always the scope
-// whose value actually won and the two functions cannot drift apart. Agent
-// config is applied last because it outranks every storage scope.
-func (d *HTTPAgentDispatcher) buildEnvSources(ctx context.Context, agent *store.Agent, resolvedEnv map[string]string) map[string]string {
-	sources := make(map[string]string)
-	if agent == nil {
-		return sources
-	}
-
-	for _, filter := range d.envScopesForDispatch(ctx, agent) {
-		vars, err := d.store.ListEnvVars(ctx, filter)
-		if err != nil {
-			if d.debug {
-				d.log.Warn("Failed to list env vars for source reporting", "scope", filter.Scope, "scope_id", filter.ScopeID, "error", err)
-			}
-			continue
-		}
-		label := envScopeSourceLabel(filter.Scope)
-		for _, v := range vars {
-			if v.InjectionMode == store.InjectionModeAsNeeded {
-				continue
-			}
-			if _, inResolved := resolvedEnv[v.Key]; inResolved {
-				sources[v.Key] = label
-			}
-		}
-	}
-
-	// Check config scope (outranks every storage scope)
-	if agent.AppliedConfig != nil {
-		for k := range agent.AppliedConfig.Env {
-			if _, inResolved := resolvedEnv[k]; inResolved {
-				sources[k] = "config"
-			}
-		}
-	}
-
-	// TZ is labelled with the rung of the agent TZ chain that supplied it,
-	// whatever storage or config entries share the key.
-	delete(sources, agentTZEnvKey)
-	if _, inResolved := resolvedEnv[agentTZEnvKey]; inResolved {
-		sources[agentTZEnvKey] = d.resolveAgentTZ(ctx, agent, false).Source
-	}
-
-	return sources
-}
-
 func (d *HTTPAgentDispatcher) injectLifecycleGitHubToken(
 	ctx context.Context,
 	agent *store.Agent,
@@ -3417,7 +3395,15 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 
 	// TZ comes only from the agent TZ resolver, read live on every start
 	// and restart so a storage or hub-default edit reaches unpinned agents.
-	setResolvedAgentTZ(resolvedEnv, &envClassifications, d.resolveAgentTZ(ctx, agent, false))
+	// A storage read error fails the start/restart like a stored env
+	// settings read error above; no lower rung stands in.
+	tz, err := d.resolveAgentTZ(ctx, agent, false)
+	if err != nil {
+		d.log.WarnContext(ctx, caller+": failed to read stored TZ settings; agent not "+startedVerb,
+			"agent_id", agent.ID, "scope", tzReadScope(err))
+		return startEnvResult{}, &secretResolutionError{Verb: startedVerb, Source: resolutionSourceEnvSettings, Err: err}
+	}
+	setResolvedAgentTZ(resolvedEnv, &envClassifications, tz)
 
 	// Include agent identity and hub connectivity so the container can
 	// report status to the Hub. The createAgent path sets these via the

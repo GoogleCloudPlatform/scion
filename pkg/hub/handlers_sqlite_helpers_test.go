@@ -683,7 +683,18 @@ func waitForReincarnationSettled(t *testing.T, s store.Store, agentID string) *s
 // reprovision capability, and wires the given dispatcher.
 func setupReincarnateTestServer(t *testing.T, disp AgentDispatcher) (*Server, store.Store, *store.Project, *store.RuntimeBroker) {
 	t.Helper()
+	return setupReincarnateTestServerWith(t, disp, nil)
+}
+
+// setupReincarnateTestServerWith is setupReincarnateTestServer with a hook
+// that runs right after the server is constructed, before any setup: the
+// place to call installStoreFault (see store_fault_helpers_test.go).
+func setupReincarnateTestServerWith(t *testing.T, disp AgentDispatcher, afterNew func(srv *Server)) (*Server, store.Store, *store.Project, *store.RuntimeBroker) {
+	t.Helper()
 	srv, s := testServer(t)
+	if afterNew != nil {
+		afterNew(srv)
+	}
 	ctx := context.Background()
 
 	project := &store.Project{

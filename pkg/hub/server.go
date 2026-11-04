@@ -1567,10 +1567,6 @@ type RemoteCreateAgentRequest struct {
 	// denies broker identities) and resolves only what is not covered here.
 	PreResolvedSkills *ResolveSkillsResponse `json:"preResolvedSkills,omitempty"`
 
-	// EnvSources tracks which scope provided each env var key (for reporting to CLI).
-	// Only populated when GatherEnv is true.
-	EnvSources map[string]string `json:"envSources,omitempty"`
-
 	// ProjectSlug is the project slug for hub-native projects.
 	// When set, the broker creates the workspace at ~/.scion/projects/<slug>/
 	// instead of the default worktree-based path.

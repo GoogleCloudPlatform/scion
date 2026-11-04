@@ -3347,8 +3347,17 @@ func (s *Server) buildEnvGatherResponse(ctx context.Context, agent *store.Agent,
 	// Label each key the Hub provided with the source whose value won.
 	for _, key := range brokerReqs.HubHas {
 		if key == agentTZEnvKey {
-			// TZ is labelled with the rung of the agent TZ chain.
-			resp.HubHas = append(resp.HubHas, EnvSource{Key: key, Scope: s.agentTZ(ctx, agent).Source})
+			// TZ is labelled with the rung of the agent TZ chain. The
+			// label is advisory, like envGatherStoredScope: a failed
+			// storage read omits the entry rather than reporting a
+			// lower rung.
+			tz, err := s.agentTZ(ctx, agent)
+			if err != nil {
+				slog.WarnContext(ctx, "env-gather provenance: reading stored TZ settings failed; omitting the TZ label",
+					"agent_id", agent.ID, "scope", tzReadScope(err))
+				continue
+			}
+			resp.HubHas = append(resp.HubHas, EnvSource{Key: key, Scope: tz.Source})
 			continue
 		}
 		resp.HubHas = append(resp.HubHas, EnvSource{Key: key, Scope: s.envGatherSourceLabel(ctx, agent, envFilters, key)})
@@ -4166,7 +4175,28 @@ func (s *Server) authorizeSingleAgentRead(w http.ResponseWriter, r *http.Request
 // every route that returns a single agent. It performs no authorization --
 // callers must gate before calling this (see getAgent and getProjectAgent
 // above, which apply the same rule).
+//
+// It is for read-only routes: a stored TZ settings read error answers 503
+// with EnvSettingsUnavailableText (nothing was written, so a retry is safe).
+// A route that has already committed a write uses
+// writeAgentResponseAfterWrite instead.
 func (s *Server) writeAgentGetResponse(w http.ResponseWriter, r *http.Request, agent *store.Agent) {
+	s.writeAgentResponse(w, r, agent, true)
+}
+
+// writeAgentResponseAfterWrite is writeAgentGetResponse for a route that has
+// already committed a write (the restore). A 503 there would report a
+// committed change as failed and invite a retry of a write that already
+// happened, so a stored TZ settings read error instead omits
+// resolvedTimezone and timezoneSource, as for a caller without env view;
+// no lower-precedence zone is reported.
+func (s *Server) writeAgentResponseAfterWrite(w http.ResponseWriter, r *http.Request, agent *store.Agent) {
+	s.writeAgentResponse(w, r, agent, false)
+}
+
+// writeAgentResponse implements writeAgentGetResponse (unavailableOnTZError
+// true) and writeAgentResponseAfterWrite (false).
+func (s *Server) writeAgentResponse(w http.ResponseWriter, r *http.Request, agent *store.Agent, unavailableOnTZError bool) {
 	ctx := r.Context()
 
 	// Show a TZ that an older hub persisted in the env records as the legacy
@@ -4208,9 +4238,19 @@ func (s *Server) writeAgentGetResponse(w http.ResponseWriter, r *http.Request, a
 	// may view the agent's env: the zone can come from a user, project, hub
 	// or broker TZ env var (ptone/scion#2767). Others get neither field.
 	if s.envViewAllowed(ctx, GetIdentityFromContext(ctx), agent, resp.Cap) {
-		tz := s.agentTZ(ctx, agent)
-		resp.ResolvedTimezone = &tz.TZ
-		resp.TimezoneSource = &tz.Source
+		tz, err := s.agentTZ(ctx, agent)
+		switch {
+		case err != nil && unavailableOnTZError:
+			slog.WarnContext(ctx, "agent detail: reading stored TZ settings failed", "agent_id", agent.ID, "scope", tzReadScope(err))
+			writeEnvSettingsUnavailable(w)
+			return
+		case err != nil:
+			slog.WarnContext(ctx, "agent response after a committed write: reading stored TZ settings failed; omitting the resolved timezone",
+				"agent_id", agent.ID, "scope", tzReadScope(err))
+		default:
+			resp.ResolvedTimezone = &tz.TZ
+			resp.TimezoneSource = &tz.Source
+		}
 	}
 
 	resp.AppliedConfig, resp.PendingConfig = s.redactAgentConfigsForResponse(resp.AppliedConfig, resp.PendingConfig, s.envViewAllowed(ctx, GetIdentityFromContext(ctx), agent, resp.Cap))
@@ -4676,7 +4716,13 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		live := phaseHasLiveContainer(agent.Phase)
 		var zoneBefore string
 		if live {
-			zoneBefore = s.agentTZ(ctx, agent).TZ
+			tzBefore, err := s.agentTZ(ctx, agent)
+			if err != nil {
+				slog.WarnContext(ctx, "agent update: reading stored TZ settings failed; nothing written", "agent_id", agent.ID, "scope", tzReadScope(err))
+				writeEnvSettingsUnavailable(w)
+				return
+			}
+			zoneBefore = tzBefore.TZ
 		}
 		changed, err := applyExplicitTimezoneEdit(agent.AppliedConfig, *updates.ExplicitTimezone)
 		if err != nil {
@@ -4684,9 +4730,28 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 			return
 		}
 		timezoneChanged = changed
-		if live && changed && s.agentTZ(ctx, agent).TZ != zoneBefore {
-			warnings = append(warnings, explicitTimezoneNextStartWarning)
+		if live && changed {
+			tzAfter, err := s.agentTZ(ctx, agent)
+			if err != nil {
+				slog.WarnContext(ctx, "agent update: reading stored TZ settings failed; nothing written", "agent_id", agent.ID, "scope", tzReadScope(err))
+				writeEnvSettingsUnavailable(w)
+				return
+			}
+			if tzAfter.TZ != zoneBefore {
+				warnings = append(warnings, explicitTimezoneNextStartWarning)
+			}
 		}
+	}
+
+	// The resolved TZ for the response, read before anything is written:
+	// a stored settings read error answers 503 with nothing committed, and
+	// never a lower-precedence zone. The writes below do not change any
+	// input of the TZ chain beyond the in-memory agent already updated.
+	tz, tzErr := s.agentTZ(ctx, agent)
+	if tzErr != nil {
+		slog.WarnContext(ctx, "agent update: reading stored TZ settings failed; nothing written", "agent_id", agent.ID, "scope", tzReadScope(tzErr))
+		writeEnvSettingsUnavailable(w)
+		return
 	}
 
 	if updates.Name != "" {
@@ -4749,7 +4814,6 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		s.auditPendingConfig(ctx, agent.ID, mutationTypeAgentPendingConfigDiscarded, pendingExperimentOff, pendingDiscardTriggerExperimentOff)
 	}
 
-	tz := s.agentTZ(ctx, agent)
 	disposition := agentUpdateDisposition(before, agent, configApplied, configHeldForReincarnate, timezoneChanged, saWrite != nil && saWrite.Assignment != nil)
 	if len(configHeld) > 0 {
 		disposition.Held = configHeld
