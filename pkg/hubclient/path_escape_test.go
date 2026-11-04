@@ -279,6 +279,14 @@ func TestPathEscape_Projects(t *testing.T) {
 			}},
 		{"GetResolvedSettings", "/api/v1/projects/{id}/settings/resolved",
 			func(ctx context.Context, c Client, id string) { _, _ = p(c).GetResolvedSettings(ctx, id) }},
+		{"GetSettingsBody", "/api/v1/projects/{id}/settings",
+			func(ctx context.Context, c Client, id string) { _, _ = p(c).GetSettingsBody(ctx, id) }},
+		{"GetResolvedSettingsBody", "/api/v1/projects/{id}/settings/resolved",
+			func(ctx context.Context, c Client, id string) { _, _ = p(c).GetResolvedSettingsBody(ctx, id) }},
+		{"UpdateSettingsFields", "/api/v1/projects/{id}/settings",
+			func(ctx context.Context, c Client, id string) {
+				_, _ = p(c).UpdateSettingsFields(ctx, id, map[string]interface{}{"defaultModel": "m"})
+			}},
 		{"UpdateGCPIdentityDefaults", "/api/v1/projects/{id}/settings",
 			func(ctx context.Context, c Client, id string) {
 				_, _ = p(c).UpdateGCPIdentityDefaults(ctx, id, &ProjectGCPIdentityDefaultsUpdate{})
