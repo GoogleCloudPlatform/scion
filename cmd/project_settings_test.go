@@ -19,10 +19,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -371,10 +373,11 @@ func TestSettingsSetCommands_ArgumentCount(t *testing.T) {
 }
 
 func TestProjectSettingsCommands_ModeAndPlatformGates(t *testing.T) {
-	assert.True(t, agentAllowed["project.settings"])
-	assert.True(t, agentAllowed["project.settings.get"], "an agent reads its own project's settings")
-	assert.False(t, agentAllowed["project.settings.set"], "the Hub refuses agents on PUT")
-	assert.False(t, agentAllowed["project.settings.unset"])
+	// No project settings command is available in agent mode: an agent
+	// reads its project's settings with an access token against the Hub API.
+	for _, p := range []string{"project.settings", "project.settings.get", "project.settings.set", "project.settings.unset"} {
+		assert.False(t, agentAllowed[p], "%s must not be available in agent mode", p)
+	}
 	for _, p := range []string{"project.settings", "project.settings.get", "project.settings.set", "project.settings.unset"} {
 		assert.True(t, windowsAllowed[p], "%s must be listed for Windows", p)
 	}
@@ -385,8 +388,7 @@ func TestProjectSettingsCommands_ModeAndPlatformGates(t *testing.T) {
 // the Hub returns: a value the Hub masks stays masked in every output form,
 // the JSON and YAML forms are the Hub's response body as received (no member
 // added, dropped, reordered or changed), and get makes no request beyond the
-// one settings read (no client-side unmasking or extra lookups). get is the
-// agent-mode command.
+// one settings read (no client-side unmasking or extra lookups).
 func TestProjectSettingsGet_PrintsHubResponseUnchanged(t *testing.T) {
 	f, c := newFakeProjectSettingsHub(t)
 	// Not in field order, with a member the typed decode does not know
@@ -571,4 +573,101 @@ func TestBuildProjectSettingsBody_ResourceKeysMatchAnyCase(t *testing.T) {
 	require.NoError(t, err)
 	b, _ := json.Marshal(body)
 	assert.JSONEq(t, `{"defaultResources":{"limits":{"cpu":"2"}}}`, string(b))
+}
+
+// TestProjectSettings_NilSettingsIsAnError pins the guards for Hub
+// responses that carry no value and no error. A settings read that returns
+// none stops get with an error instead of panicking, and stops a change to
+// part of defaultResources before any save, since the save would otherwise
+// drop the value's other parts (idDefNilProjects embeds a nil
+// ProjectService, so a save would panic). A missing resolved report stops
+// get --resolved with an error, and a save that returns no settings reports
+// that the change was saved. None of them prints anything.
+func TestProjectSettings_NilSettingsIsAnError(t *testing.T) {
+	withTextOutput(t)
+	var out, errw bytes.Buffer
+	reset := func() { out.Reset(); errw.Reset() }
+	quiet := func(what string) {
+		t.Helper()
+		assert.Empty(t, out.String(), "%s: nothing on stdout", what)
+		assert.Empty(t, errw.String(), "%s: nothing on stderr", what)
+	}
+	for _, key := range []string{"", "defaultGCPIdentity", "defaultResources.limits.cpu", "defaultTemplate"} {
+		reset()
+		err := runProjectSettingsGet(context.Background(), idDefNilProjects{}, "proj-1", &out, &errw, key, false)
+		require.Error(t, err, "get %q", key)
+		assert.Contains(t, err.Error(), "returned no project settings", "get %q", key)
+		quiet("get " + key)
+	}
+	for _, ch := range []settingsChange{
+		{Key: "defaultResources.limits.cpu", Value: "2"},
+		{Key: "defaultResources.limits.cpu", Unset: true},
+	} {
+		reset()
+		err := runProjectSettingsWrite(context.Background(), idDefNilProjects{}, "proj-1", &out, &errw, []settingsChange{ch})
+		require.Error(t, err, "%+v", ch)
+		assert.Contains(t, err.Error(), "returned no project settings", "%+v", ch)
+		assert.Contains(t, err.Error(), "nothing was changed", "%+v", ch)
+		quiet(fmt.Sprintf("%+v", ch))
+	}
+
+	// The resolved report is refused; a save that returns no settings reports that it saved.
+	reset()
+	err := runProjectSettingsGet(context.Background(), nilResponseProjects{}, "proj-1", &out, &errw, "", true)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "returned no resolved project settings")
+	quiet("get --resolved")
+
+	reset()
+	err = runProjectSettingsWrite(context.Background(), nilResponseProjects{}, "proj-1", &out, &errw,
+		[]settingsChange{{Key: "defaultTemplate", Value: "gemini"}})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "the change was saved", "a save that returns no settings still says it saved")
+	quiet("set defaultTemplate")
+}
+
+// nilResponseProjects returns (nil, nil) from the resolved settings read and
+// from the settings save.
+type nilResponseProjects struct{ idDefNilProjects }
+
+func (nilResponseProjects) GetResolvedSettings(context.Context, string) (*hubclient.ResolvedProjectSettings, error) {
+	return nil, nil
+}
+
+func (nilResponseProjects) UpdateSettingsFields(context.Context, string, map[string]interface{}) (*hubclient.ProjectSettingsSaveResult, error) {
+	return nil, nil
+}
+
+// TestProjectSettingsCommands_AgentModeTree applies the mode restrictions to
+// a command tree shaped like scion project: in agent mode no project
+// settings command remains while project skills list still does; in human
+// mode all of them remain. It guards the allow-list decision above against a
+// change in how the restrictions match commands.
+func TestProjectSettingsCommands_AgentModeTree(t *testing.T) {
+	for _, name := range []string{"get", "set", "unset"} {
+		_, _, err := rootCmd.Find([]string{"project", "settings", name})
+		require.NoError(t, err, "project settings %s is registered", name)
+	}
+	build := func() *cobra.Command {
+		root := &cobra.Command{Use: "scion"}
+		proj := &cobra.Command{Use: "project"}
+		settings := &cobra.Command{Use: "settings"}
+		for _, v := range []string{"get", "set", "unset"} {
+			settings.AddCommand(&cobra.Command{Use: v})
+		}
+		skills := &cobra.Command{Use: "skills"}
+		skills.AddCommand(&cobra.Command{Use: "list"})
+		proj.AddCommand(settings, skills)
+		root.AddCommand(proj)
+		return root
+	}
+	for mode, wantSettings := range map[CLIMode]bool{ModeHuman: true, ModeAgent: false} {
+		root := build()
+		applyModeRestrictions(root, mode)
+		names := collectCommandNames(root)
+		for _, n := range []string{"project.settings", "project.settings.get", "project.settings.set", "project.settings.unset"} {
+			assert.Equal(t, wantSettings, slices.Contains(names, n), "%s in %s mode", n, mode)
+		}
+		assert.Contains(t, names, "project.skills.list", "the project parent keeps its other subcommands in %s mode", mode)
+	}
 }

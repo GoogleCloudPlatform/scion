@@ -76,7 +76,8 @@ Scopes common CLI flows need:
   scion delete                   project:read, agent:delete
   scion service-accounts list,   project:read (a project's accounts)
     project service-accounts list
-
+` + projectSettingsScopeLines() + `
+` + hubSettingsScopeTable() + `
 Hub tokens and project names: an ordinary user's hub token cannot select
 project:list (only a hub-wide role that grants it can), so the CLI cannot
 find a project by name, slug or git remote under it. Pass project IDs
@@ -121,6 +122,103 @@ Examples:
   # Use the token in CI
   export SCION_HUB_TOKEN=scion_pat_...
   scion start ci-tests --project my-project --type default "Run tests"`,
+}
+
+// projectSettingsScopeLines renders the scion project settings rows of the
+// "Scopes common CLI flows need" table from the scopes the commands'
+// refusal hints name (on a project or hub boundary).
+func projectSettingsScopeLines() string {
+	var b strings.Builder
+	for _, row := range []scopeRow{
+		{[]string{"scion project settings get"}, []string{projSettingsReadScope}},
+		{[]string{"scion project settings set,", "  unset"}, []string{projSettingsReadScope, projSettingsWriteScope}},
+	} {
+		b.WriteString(renderScopeRow(row))
+	}
+	return b.String()
+}
+
+// scopeRow is one row of a scopes table in the hub token help: the
+// commands and the scopes their calls need.
+type scopeRow struct {
+	commands []string // one entry per printed line
+	scopes   []string
+}
+
+// hubSettingsScopeRows lists the scopes of the hub settings commands, from
+// the same constants their refusal hints name. A command that reads the
+// current value before saving (set, unset) needs the read scope too; a
+// section reset (unset --section NAME --reset) does not read first.
+func hubSettingsScopeRows() []scopeRow {
+	return []scopeRow{
+		{[]string{"scion hub settings get,", "  schema"}, []string{srvcfgReadScope}},
+		{[]string{"scion hub settings set, unset"}, []string{srvcfgReadScope, srvcfgWriteScope}},
+		{[]string{"scion hub settings unset", "  --section NAME --reset"}, []string{srvcfgWriteScope}},
+		{[]string{"scion hub project-defaults", "  get"}, []string{projDefaultsReadScope}},
+		{[]string{"scion hub project-defaults", "  set, unset"}, []string{projDefaultsReadScope, projDefaultsWriteScope}},
+		{[]string{"scion hub experiments list,", "  enable, disable, reset"}, []string{experimentsScope}},
+	}
+}
+
+// hubSettingsScopeTable renders hubSettingsScopeRows in the layout of the
+// "Scopes common CLI flows need" table: commands in a 31-column field, and
+// scopes wrapped so that no line is wider than hubTokenHelpWidth.
+func hubSettingsScopeTable() string {
+	var b strings.Builder
+	b.WriteString("Hub settings commands need a hub-boundary token (--boundary hub):\n\n")
+	for _, row := range hubSettingsScopeRows() {
+		b.WriteString(renderScopeRow(row))
+	}
+	return b.String()
+}
+
+// renderScopeRow renders one row: commands in a 31-column field, scopes
+// wrapped so that no line is wider than hubTokenHelpWidth.
+func renderScopeRow(row scopeRow) string {
+	var b strings.Builder
+	scopeLines := wrapScopes(row.scopes, hubTokenHelpWidth-2-31)
+	n := len(row.commands)
+	if len(scopeLines) > n {
+		n = len(scopeLines)
+	}
+	for i := 0; i < n; i++ {
+		label, scopes := "", ""
+		if i < len(row.commands) {
+			label = row.commands[i]
+		}
+		if i < len(scopeLines) {
+			scopes = scopeLines[i]
+		}
+		b.WriteString(strings.TrimRight(fmt.Sprintf("  %-31s%s", label, scopes), " "))
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+// hubTokenHelpWidth is the widest line the hub settings table prints.
+const hubTokenHelpWidth = 72
+
+// wrapScopes joins scopes with ", " into lines of at most width characters
+// (a single longer scope gets its own line); every line but the last ends
+// with a comma.
+func wrapScopes(scopes []string, width int) []string {
+	var lines []string
+	cur := ""
+	for _, sc := range scopes {
+		switch {
+		case cur == "":
+			cur = sc
+		case len(cur)+2+len(sc)+1 <= width:
+			cur += ", " + sc
+		default:
+			lines = append(lines, cur+",")
+			cur = sc
+		}
+	}
+	if cur != "" {
+		lines = append(lines, cur)
+	}
+	return lines
 }
 
 var hubTokenCreateCmd = &cobra.Command{

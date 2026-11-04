@@ -27,6 +27,14 @@ import (
 // or plaintext). It is never followed by an unencrypted fallback write.
 var ErrEncryptionPolicyMismatch = errors.New("encryption_policy_mismatch")
 
+// ErrPolicyTransitionAfterFencedWrite refuses an encryption policy or
+// migration transition inside a caller-supplied transaction that has
+// already performed a fenced secret write. The write was checked against
+// the policy the transition replaces, and the transition's own lock does
+// not wait for a write in its own transaction, so both would commit
+// together. Run the transition in its own short transaction instead.
+var ErrPolicyTransitionAfterFencedWrite = errors.New("encryption policy transition after a fenced write in the same transaction")
+
 // EncryptionPolicyState is the state of the database encryption policy.
 type EncryptionPolicyState string
 
@@ -121,6 +129,15 @@ func (p *EncryptionPolicy) AllowsWrite(value, secretRef string) bool {
 		}
 	}
 	return false
+}
+
+// AllowsRowPayload reports whether a write that leaves value and secretRef
+// on a row keeps a payload under the policy: a non-empty value or a
+// non-empty SecretRef. It applies even when the value itself is unchanged
+// (a reference cleared on an empty-value row would leave no payload). A
+// nil policy allows every row.
+func (p *EncryptionPolicy) AllowsRowPayload(value, secretRef string) bool {
+	return p == nil || value != "" || secretRef != ""
 }
 
 // SecretPayload is one row of ScanSecretPayloads: identity, logical
