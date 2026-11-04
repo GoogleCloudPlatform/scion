@@ -80,7 +80,7 @@ func TestApplyNoAuthEnv_ReservedNamesDropped(t *testing.T) {
 		if v, ok := envValue(env, k); ok {
 			t.Errorf("reserved key %s reached the env with %q", k, v)
 		}
-		if !slices.ContainsFunc(warnings, func(w string) bool { return strings.Contains(w, " "+k+" ") }) {
+		if !slices.ContainsFunc(warnings, func(w string) bool { return strings.Contains(w, " sets "+k+", ") }) {
 			t.Errorf("no warning names reserved key %s; warnings: %v", k, warnings)
 		}
 	}
@@ -116,7 +116,7 @@ func TestApplyNoAuthEnv(t *testing.T) {
 		if _, ok := envValue(env, "EMPTY"); ok {
 			t.Error("EMPTY reached the env")
 		}
-		if !slices.ContainsFunc(warnings, func(w string) bool { return strings.Contains(w, " EMPTY ") }) {
+		if !slices.ContainsFunc(warnings, func(w string) bool { return strings.Contains(w, " sets EMPTY to ") }) {
 			t.Errorf("no warning for EMPTY: %v", warnings)
 		}
 	})
