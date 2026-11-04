@@ -173,8 +173,8 @@ func TestAgentCascades_RefuseNilAgentID(t *testing.T) {
 }
 
 // TestDeleteProject_RefusesNilAgentID pins the DeleteProject half of the
-// nil-UUID guard (K23b): a project holding an agent whose id is the nil
-// UUID is not deleted, because its notification cascade would match every
+// nil-UUID guard: a project holding an agent whose id is the nil UUID is
+// not deleted, because its notification cascade would match every
 // notification that is not about an agent. Everything survives, since the
 // guard runs before any delete in the transaction.
 func TestDeleteProject_RefusesNilAgentID(t *testing.T) {
@@ -198,6 +198,50 @@ func TestDeleteProject_RefusesNilAgentID(t *testing.T) {
 	assert.NoError(t, err, "the project survives")
 	_, err = cs.GetAgent(ctx, uuid.Nil.String())
 	assert.NoError(t, err, "the agent survives")
+	_, err = cs.GetNotification(ctx, n.ID)
+	assert.NoError(t, err, "the nil-agent notification survives")
+}
+
+// TestDeleteProject_RefusesNilAgentIDWithObserver is
+// TestDeleteProject_RefusesNilAgentID with a lifecycle observer installed:
+// the refusal comes before the observer is consulted, so it observes
+// nothing, no lifecycle cursor changes, the outbox row count stays the
+// same, and nothing is deleted.
+func TestDeleteProject_RefusesNilAgentIDWithObserver(t *testing.T) {
+	ctx := context.Background()
+	f := newLifecycleFixture(t)
+	cs := f.cs
+
+	// A live agent created through the lifecycle observer, so the project
+	// has a cursor row that an observed project delete would remove.
+	live := f.create("live-agent")
+	require.True(t, cursorExists(t, cs, live.ID))
+
+	// The nil-ID agent is created with no observer installed.
+	cs.SetAgentWriteObserver(nil)
+	nilAgent := &store.Agent{
+		ID: uuid.Nil.String(), Slug: "nil-agent", Name: "nil agent", Template: "default",
+		ProjectID: f.projectID, Phase: "running",
+	}
+	require.NoError(t, cs.CreateAgent(ctx, nilAgent))
+	n := newResourceNotification("user-1")
+	require.NoError(t, cs.CreateNotification(ctx, n))
+
+	rec := &recordingObserver{}
+	cs.SetAgentWriteObserver(rec)
+	before := lifecycleSnapshot(t, cs)
+
+	err := cs.DeleteProject(ctx, f.projectID)
+	require.ErrorIs(t, err, store.ErrInvalidInput)
+
+	assert.Empty(t, rec.ops(), "the observer is not called")
+	assert.Equal(t, before, lifecycleSnapshot(t, cs), "no lifecycle cursor changes and the outbox row count stays the same")
+	_, err = cs.GetProject(ctx, f.projectID)
+	assert.NoError(t, err, "the project survives")
+	_, err = cs.GetAgent(ctx, uuid.Nil.String())
+	assert.NoError(t, err, "the nil-ID agent survives")
+	_, err = cs.GetAgent(ctx, live.ID)
+	assert.NoError(t, err, "the live agent survives")
 	_, err = cs.GetNotification(ctx, n.ID)
 	assert.NoError(t, err, "the nil-agent notification survives")
 }
