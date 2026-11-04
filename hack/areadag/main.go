@@ -57,15 +57,27 @@
 //     package main of the module. With rule 4 this is implied; it is checked
 //     on its own so that a production package mislabelled testsupport in
 //     dag.txt still fails once any binary links it.
+//  7. Every import of a path in this module (the module path or below it),
+//     test or not, names a package that go list listed or the walk parsed.
+//     The go command skips symlinked, ., _, testdata and vendor directories
+//     only when matching ./...; an import still resolves to them by path. Such
+//     a package would be invisible to rules 1-6, so importing one makes the
+//     input unusable (exit 2: the check fails closed). This
+//     assumes the main module requires no nested module under its own path
+//     (true today: the nested modules under extras/ and cr-ci/ are not
+//     required by the main module).
 //
 // Undeclared pkg/hub subpackages are not checked under rules 1-3 (feature
 // packages carry no DAG obligation); they are still subject to rules 4 and 6,
 // and importing one from a declared package violates rule 1.
 //
 // The run fails as unusable (exit 2), not clean, when a declared package does
-// not exist, when a testsupport package is a package main, or when any input
-// count is zero: no module packages, no pkg/hub packages, no declarations, no
-// testsupport declarations, no alias files, or no import edges examined.
+// not exist, when a testsupport package is a package main (a walked directory
+// counts as one when any non-test file in it declares package main, such as a
+// //go:build ignore generator next to library files), or when any input count
+// is zero: no module packages, no pkg/hub packages, no declarations, no
+// testsupport declarations, no alias files, no import edges examined, or no
+// package main; and when a module import is unresolved (rule 7).
 //
 // Usage:
 //
@@ -338,6 +350,24 @@ func check(dagFile, listFile, root, hub string) ([]string, string, error) {
 		}
 	}
 
+	// Rule 7: every import of a module path resolves to a package seen above.
+	for _, path := range sortedKeys(all) {
+		pi := all[path]
+		for _, side := range []struct {
+			name string
+			imps map[string]bool
+		}{{"non-test", pi.nonTest}, {"test", pi.test}} {
+			for _, imp := range sortedKeys(side.imps) {
+				if imp != modPath && !strings.HasPrefix(imp, modPath+"/") {
+					continue
+				}
+				if _, ok := all[imp]; !ok {
+					return nil, "", fmt.Errorf("import of module path %s that go list and the walk did not see (%s imports it in %s code; a symlinked, ., _, testdata or vendor directory?): the rules cannot check it, so move the package to an ordinary directory", imp, path, side.name)
+				}
+			}
+		}
+	}
+
 	// Rule 5: alias files import only declared packages.
 	aliases, err := filepath.Glob(filepath.Join(hubDir, "zz_alias_*.go"))
 	if err != nil {
@@ -366,6 +396,9 @@ func check(dagFile, listFile, root, hub string) ([]string, string, error) {
 
 	if edges == 0 {
 		return nil, "", errors.New("no pkg/hub import edges examined, so nothing was checked")
+	}
+	if mains == 0 {
+		return nil, "", errors.New("no package main in the module, so the binary closure rule would check nothing")
 	}
 	sort.Strings(violations)
 	summary := fmt.Sprintf("%d module packages (%d from go list, %d tag-only directories parsed), %d pkg/hub packages, %d declared (%d leaf, %d area, %d testsupport), %d alias files, %d pkg/hub edges checked, %d package main closures checked",

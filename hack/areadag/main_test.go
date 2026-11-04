@@ -16,6 +16,7 @@ package main
 
 import (
 	"bytes"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -103,6 +104,12 @@ func TestFailingFixtures(t *testing.T) {
 		}},
 		// Everything at or under a testsupport path is testsupport.
 		{"tssubpkg", []string{"example.com/m/pkg/x imports testsupport ts/fakes in non-test code (x.go)"}},
+		// Rule 6 through walked packages: a tag-only package main (its directory
+		// mixes package names) reaches ts through a tag-only library.
+		{"walkedmain", []string{
+			"example.com/m/pkg/y imports testsupport ts in non-test code (y_linux.go)",
+			"package main example.com/m/cmd/tagged reaches testsupport ts through non-test imports (example.com/m/cmd/tagged -> example.com/m/pkg/y -> example.com/m/pkg/hub/ts)",
+		}},
 		// A production package mislabelled testsupport fails once a binary links it.
 		{"mainclosure", []string{
 			"example.com/m/pkg/lib imports testsupport mislabelled in non-test code (lib.go)",
@@ -151,6 +158,11 @@ func TestUnusableInputs(t *testing.T) {
 		{"stale", "declared area gone is not a package of the module"},
 		{"emptydag", "no declarations"},
 		{"tsmain", "testsupport ts is a package main"},
+		{"nomain", "no package main in the module"},
+		// An import of a _ directory: go list ./... and the walk skip it, so
+		// the check fails closed.
+		{"hiddenimport", "import of module path example.com/m/pkg/hub/_shim that go list and the walk did not see (example.com/m/pkg/hub imports it in non-test code"},
+		{"hiddentestimport", "import of module path example.com/m/pkg/hub/_shim that go list and the walk did not see (example.com/m/pkg/hub/b imports it in test code"},
 		{"emptylist", "no packages"},
 		{"nohub", "example.com/m/pkg/hub is not in the list"},
 		{"noedges", "no pkg/hub import edges examined"},
@@ -164,6 +176,99 @@ func TestUnusableInputs(t *testing.T) {
 				t.Fatalf("stderr %q does not contain %q", stderr, tc.want)
 			}
 		})
+	}
+}
+
+// copyFixture copies testdata/<name> into a temp directory and returns it.
+func copyFixture(t *testing.T, name string) string {
+	t.Helper()
+	src := filepath.Join("testdata", name)
+	dst := t.TempDir()
+	err := filepath.WalkDir(src, func(p string, de fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, p)
+		if err != nil {
+			return err
+		}
+		if de.IsDir() {
+			return os.MkdirAll(filepath.Join(dst, rel), 0o755)
+		}
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(filepath.Join(dst, rel), b, 0o644)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dst
+}
+
+func runDir(dir string) (int, string, string) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"-dag", filepath.Join(dir, "dag.txt"),
+		"-list", filepath.Join(dir, "list.json"),
+		"-hub", fixtureHub,
+	}, &stdout, &stderr)
+	return code, stdout.String(), stderr.String()
+}
+
+func writeFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestSymlinkImport: pkg/hub/htu is a symlink to the testsupport directory
+// ts, and pkg/hub imports pkg/hub/htu. The walk does not follow the symlink
+// (as go ./... does not), and isSupport does not match htu, so only the
+// fail-closed unresolved-import check stops it. The symlink is made in a temp
+// copy, so the repository carries none.
+func TestSymlinkImport(t *testing.T) {
+	dir := copyFixture(t, "symlinkimport")
+	if err := os.Symlink("ts", filepath.Join(dir, "pkg", "hub", "htu")); err != nil {
+		t.Skipf("cannot create a symlink here: %v", err)
+	}
+	code, stdout, stderr := runDir(dir)
+	want := "import of module path example.com/m/pkg/hub/htu that go list and the walk did not see"
+	if code != 2 || !strings.Contains(stderr, want) {
+		t.Fatalf("exit %d, want 2 and %q\nstdout:\n%s\nstderr:\n%s", code, want, stdout, stderr)
+	}
+}
+
+// TestWalkSkips: directories the go command skips for ./... (testdata, names
+// starting with _ or ., vendor, and a nested module) are not walked, so their
+// non-test imports of testsupport do not fail the ok fixture, which still
+// reports exactly its one tag-only directory. Built in a temp copy so the
+// repository carries no nested go.mod or vendor directory.
+func TestWalkSkips(t *testing.T) {
+	dir := copyFixture(t, "ok")
+	imp := "package x\n\nimport _ \"example.com/m/pkg/hub/ts\"\n"
+	for _, f := range []string{
+		"pkg/hub/testdata/x.go",
+		"pkg/_x/x.go",
+		"pkg/.x/x.go",
+		"vendor/example.com/v/x.go",
+		"nested/x.go",
+	} {
+		writeFile(t, filepath.Join(dir, filepath.FromSlash(f)), imp)
+	}
+	writeFile(t, filepath.Join(dir, "nested", "go.mod"), "module example.com/m/nested\n")
+	code, stdout, stderr := runDir(dir)
+	if code != 0 {
+		t.Fatalf("exit %d, want 0\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	m := okLine.FindStringSubmatch(stdout)
+	if m == nil || m[3] != "1" {
+		t.Fatalf("stdout %q: want the OK line with 1 tag-only directory parsed", stdout)
 	}
 }
 

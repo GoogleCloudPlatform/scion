@@ -15,6 +15,8 @@
 #     under a dag.txt testsupport path is testsupport;
 #   - any package main reaches a testsupport package through non-test imports;
 #   - a pkg/hub zz_alias_*.go file imports an undeclared pkg/hub subpackage.
+# It fails closed when an import of a module path names a package neither
+# go list nor the walk saw (a symlinked, ., _, testdata or vendor directory).
 # Files of every build tag set and platform count: go list IgnoredGoFiles are
 # parsed, and the module root is walked for directories go list does not list
 # (every file tagged). Undeclared pkg/hub subpackages are not checked
@@ -27,8 +29,9 @@
 # clean fixtures that must pass, and vacuous inputs that must not pass).
 #
 # SEVERITY: guard-grade. A zero input count (no packages, no declarations, no
-# testsupport declaration, no alias file, no edge), a stale declaration or a
-# testsupport package main fails the run.
+# testsupport declaration, no alias file, no edge, no package main), a stale
+# declaration, a testsupport package main or an unresolved module import fails
+# the run.
 #
 # EXIT CODES
 #   0  analysed, no violations
