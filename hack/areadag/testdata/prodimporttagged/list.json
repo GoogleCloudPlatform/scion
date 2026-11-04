@@ -1,0 +1,8 @@
+{"ImportPath":"example.com/m/pkg/hub","Dir":"pkg/hub","GoFiles":["zz_alias_a.go"],"Imports":["example.com/m/pkg/hub/a","example.com/m/pkg/hub/b","example.com/m/pkg/hub/l"]}
+{"ImportPath":"example.com/m/pkg/hub/a","Dir":"pkg/hub/a","Imports":["example.com/m/pkg/hub/l"],"TestImports":["example.com/m/pkg/hub/ts"]}
+{"ImportPath":"example.com/m/pkg/hub/b","Dir":"pkg/hub/b","Imports":["example.com/m/pkg/hub/a","example.com/m/pkg/hub/l"],"XTestImports":["example.com/m/pkg/hub/b","example.com/m/pkg/hub/ts"]}
+{"ImportPath":"example.com/m/pkg/hub/l","Dir":"pkg/hub/l","Imports":["strings"]}
+{"ImportPath":"example.com/m/pkg/hub/ts","Dir":"pkg/hub/ts","Imports":["example.com/m/pkg/hub/l","testing"]}
+{"ImportPath":"example.com/m/pkg/hub/feature","Dir":"pkg/hub/feature","TestImports":["example.com/m/pkg/hub"]}
+{"ImportPath":"example.com/m/cmd/app","Dir":"cmd/app","Name":"main","Imports":["example.com/m/pkg/hub/l"],"TestImports":["example.com/m/pkg/hub/ts"]}
+{"ImportPath":"example.com/m/pkg/x","Dir":"pkg/x","GoFiles":["x.go"],"IgnoredGoFiles":["x_integration.go"],"Imports":["strings"]}
