@@ -108,6 +108,7 @@ func runMain(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&cfg.TestMainSupport, "testmain-support", "", "import path of a test-support package with RunTestMain(m *testing.M) int; generates a TestMain in the target when moved tests leave a package that has one")
 	fs.StringVar(&cfg.ReportPath, "report", "", "safety report path (default: <from>/zz_alias_<area>_safety.txt)")
 	fs.Var(renames, "rename", "old=New: export old as New instead of upper-casing its first letter (e.g. httpStatus=HTTPStatus); repeatable; applies to package-level names and members, and must match a name the move exports")
+	fs.BoolVar(&cfg.RewriteOutRefs, "rewrite-outrefs", false, "rewrite outside references that name a moved file by its exact repo path (a Go string literal \"pkg/hub/x.go\" or \"pkg/hub/x.go:name\", or a hack/**/*.txt line starting with the path) to the new path, and name to its new name when the move renames it; other forms stay report-only")
 	fs.BoolVar(&cfg.RewriteAliases, "rewrite-aliases", false, "move nothing: rewrite references to aliases in the source package (and its external tests) into direct references to their targets, and remove unexported alias entries left unused; with -to, only aliases of that package")
 	fs.Usage = func() {
 		printf(stderr, "usage: pkgmove -from <dir> -to <dir> [flags] file.go [file_test.go ...]\n")
@@ -141,6 +142,9 @@ func runMain(args []string, stdout, stderr io.Writer) int {
 func run(cfg *Config) error {
 	if cfg.RewriteAliases && len(cfg.RenameOverrides) > 0 {
 		return fmt.Errorf("-rename does not apply to -rewrite-aliases (nothing is renamed)")
+	}
+	if cfg.RewriteAliases && cfg.RewriteOutRefs {
+		return fmt.Errorf("-rewrite-outrefs does not apply to -rewrite-aliases (no file moves)")
 	}
 	var err error
 	if cfg.SrcDir, err = filepath.Abs(cfg.SrcDir); err != nil {
@@ -245,6 +249,25 @@ func (a *analysis) execute() (err error) {
 		}
 		writes = append(writes, write{f, path, content})
 	}
+	// Outside files edited by -rewrite-outrefs (never moved).
+	type outWrite struct {
+		path          string
+		orig, content []byte
+	}
+	var outWrites []outWrite
+	var outPaths []string
+	for path := range a.outEdits {
+		outPaths = append(outPaths, path)
+	}
+	sort.Strings(outPaths)
+	for _, path := range outPaths {
+		oe := a.outEdits[path]
+		content, err := applyOutEdits(path, oe)
+		if err != nil {
+			return err
+		}
+		outWrites = append(outWrites, outWrite{path, oe.src, content})
+	}
 	var moves []string
 	for _, f := range a.files {
 		if f.Moved {
@@ -275,6 +298,9 @@ func (a *analysis) execute() (err error) {
 		for _, f := range a.deletes {
 			paths = append(paths, f.Path)
 		}
+		for _, w := range outWrites {
+			paths = append(paths, w.path)
+		}
 		if len(paths) > 0 {
 			if err := a.git(append([]string{"diff", "--cached", "--quiet", "--"}, paths...)...); err != nil {
 				return fmt.Errorf("files touched by the move have staged changes; commit or unstage them first")
@@ -292,6 +318,7 @@ func (a *analysis) execute() (err error) {
 	var rewritten []*srcFile
 	var aliases []string
 	var deleted []*srcFile
+	var outDone []outWrite
 	staged := false
 	defer func() {
 		if err == nil {
@@ -313,6 +340,12 @@ func (a *analysis) execute() (err error) {
 			note(os.WriteFile(f.Path, f.Src, 0o644))
 			if staged && !a.cfg.NoGit {
 				note(a.git("reset", "-q", "--", f.Path))
+			}
+		}
+		for _, w := range outDone {
+			note(os.WriteFile(w.path, w.orig, 0o644))
+			if staged {
+				note(a.git("reset", "-q", "--", w.path))
 			}
 		}
 		for _, f := range rewritten {
@@ -365,6 +398,13 @@ func (a *analysis) execute() (err error) {
 	var stage []string
 	for _, w := range writes {
 		rewritten = append(rewritten, w.f)
+		if err := os.WriteFile(w.path, w.content, 0o644); err != nil {
+			return err
+		}
+		stage = append(stage, w.path)
+	}
+	for _, w := range outWrites {
+		outDone = append(outDone, w)
 		if err := os.WriteFile(w.path, w.content, 0o644); err != nil {
 			return err
 		}

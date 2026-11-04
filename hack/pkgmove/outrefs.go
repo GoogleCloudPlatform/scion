@@ -16,6 +16,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -64,7 +65,24 @@ type outsideRef struct {
 	text   string // the matched literal or line, trimmed
 	ok     string // ref-ok reason, "" when not accepted
 	noWhy  string // file:line of a ref-ok marker without a reason
-	isText bool   // matched by text (shell, Makefile, YAML, unparsable Go)
+	isText bool   // matched by text (shell, Makefile, YAML, hack/**/*.txt, unparsable Go)
+
+	// For -rewrite-outrefs: the file, and the byte range and value of the
+	// matched Go string literal (quote is its opening quote) or text line
+	// (line ending excluded). Unset for path-element references.
+	path  string
+	src   []byte
+	start int
+	end   int
+	value string
+	quote byte
+}
+
+// outFileEdits are the -rewrite-outrefs edits of a file outside the source
+// package.
+type outFileEdits struct {
+	src   []byte
+	edits []edit
 }
 
 // outsideRefFindings reports references to the moved files from outside
@@ -74,8 +92,8 @@ type outsideRef struct {
 // silently stops matching after the move, or fails only later in CI.
 //
 // Scope: every .go file of the module tree except the moved ones (the
-// source package's staying files included), hack/**/*.sh, the root Makefile
-// and .github/workflows/*.yml. Directories named .design, docs-site,
+// source package's staying files included), hack/**/*.sh, hack/**/*.txt,
+// the root Makefile and .github/workflows/*.yml. Directories named .design, docs-site,
 // node_modules or vendor, and other dot directories, are skipped, and so are
 // Markdown files; testdata directories are scanned (a fixture that names a
 // moved path is reported). In Go files only string literals count (go/ast BasicLit),
@@ -88,7 +106,9 @@ type outsideRef struct {
 // same forms on any line.
 //
 // Each reference is HIGH (an error under -strict) unless the line above it
-// is a "pkgmove:ref-ok <reason>" comment, which lists it as INFO.
+// is a "pkgmove:ref-ok <reason>" comment, which lists it as INFO. With
+// -rewrite-outrefs, the exact repo-path forms are rewritten instead (see
+// outRefRewrite) and listed as INFO.
 func (a *analysis) outsideRefFindings() {
 	var moved []*movedRef
 	skip := map[string]bool{}
@@ -136,7 +156,7 @@ func (a *analysis) outsideRefFindings() {
 		var text bool
 		switch {
 		case strings.HasSuffix(rel, ".go"):
-		case strings.HasPrefix(rel, "hack/") && strings.HasSuffix(rel, ".sh"),
+		case strings.HasPrefix(rel, "hack/") && (strings.HasSuffix(rel, ".sh") || strings.HasSuffix(rel, ".txt")),
 			rel == "Makefile",
 			path.Dir(rel) == ".github/workflows" && (strings.HasSuffix(rel, ".yml") || strings.HasSuffix(rel, ".yaml")):
 			text = true
@@ -156,13 +176,17 @@ func (a *analysis) outsideRefFindings() {
 		if len(cand) == 0 {
 			return nil
 		}
+		found, ok := []outsideRef(nil), false
 		if !text {
-			if found, ok := a.goOutsideRefs(rel, src, cand); ok {
-				refs = append(refs, found...)
-				return nil
-			}
+			found, ok = a.goOutsideRefs(rel, src, cand)
 		}
-		refs = append(refs, textOutsideRefs(rel, src, cand, strings.HasSuffix(rel, ".go"))...)
+		if !ok {
+			found = textOutsideRefs(rel, src, cand, strings.HasSuffix(rel, ".go"))
+		}
+		for i := range found {
+			found[i].path, found[i].src = p, src
+		}
+		refs = append(refs, found...)
 		return nil
 	})
 
@@ -187,8 +211,19 @@ func (a *analysis) outsideRefFindings() {
 			continue
 		}
 		note := ""
+		if a.cfg.RewriteOutRefs {
+			text, shown, why := a.outRefRewrite(r)
+			if text != "" {
+				a.addOutRefEdit(r, text)
+				a.plan.OutRefRewrites = append(a.plan.OutRefRewrites, varRewrite{Pos: r.pos, Old: r.text, New: shown})
+				a.plan.add(levelInfo, "outside reference to a moved file rewritten (-rewrite-outrefs)", r.pos,
+					"%s %s names moved %s by its %s; rewritten to %s", how, r.text, r.moved.repo, r.form, shown)
+				continue
+			}
+			note = why
+		}
 		if r.noWhy != "" {
-			note = " (the pkgmove:ref-ok marker at " + r.noWhy + " has no reason, so it accepts nothing)"
+			note += " (the pkgmove:ref-ok marker at " + r.noWhy + " has no reason, so it accepts nothing)"
 		}
 		a.plan.add(levelHigh, "outside reference to a moved file", r.pos,
 			"%s %s names moved %s by its %s: after the move it no longer matches the file - %s, or accept it with a %s comment on the line above%s",
@@ -218,6 +253,8 @@ func (a *analysis) goOutsideRefs(rel string, src []byte, cand []*movedRef) (refs
 		m    *movedRef
 		form string
 		text string
+		lit  *ast.BasicLit // the single literal (nil for path elements)
+		val  string        // its value
 	}
 	var hits []hit
 	consumed := map[*ast.BasicLit]bool{}
@@ -261,7 +298,7 @@ func (a *analysis) goOutsideRefs(rel string, src []byte, cand []*movedRef) (refs
 					consumed[call.Args[j].(*ast.BasicLit)] = true
 					parts = append(parts, call.Args[j].(*ast.BasicLit).Value)
 				}
-				hits = append(hits, hit{fset.Position(call.Args[i-k+1].Pos()).Line, m, refElems, strings.Join(parts, ", ")})
+				hits = append(hits, hit{fset.Position(call.Args[i-k+1].Pos()).Line, m, refElems, strings.Join(parts, ", "), nil, ""})
 			}
 		}
 		return true
@@ -285,12 +322,16 @@ func (a *analysis) goOutsideRefs(rel string, src []byte, cand []*movedRef) (refs
 			default:
 				continue
 			}
-			hits = append(hits, hit{fset.Position(bl.Pos()).Line, m, form, bl.Value})
+			hits = append(hits, hit{fset.Position(bl.Pos()).Line, m, form, bl.Value, bl, v})
 		}
 		return true
 	})
 	for _, h := range hits {
 		r := outsideRef{pos: rel + ":" + strconv.Itoa(h.line), moved: h.m, form: h.form, text: shortenRef(h.text)}
+		if h.lit != nil {
+			r.start, r.end = fset.Position(h.lit.Pos()).Offset, fset.Position(h.lit.End()).Offset
+			r.value, r.quote = h.val, h.lit.Value[0]
+		}
 		if reason, has := markers[h.line-1]; has {
 			if reason != "" {
 				r.ok = reason
@@ -308,7 +349,10 @@ func (a *analysis) goOutsideRefs(rel string, src []byte, cand []*movedRef) (refs
 func textOutsideRefs(rel string, src []byte, cand []*movedRef, goComments bool) []outsideRef {
 	var refs []outsideRef
 	lines := strings.Split(string(src), "\n")
+	off := 0
 	for i, line := range lines {
+		start := off
+		off += len(line) + 1
 		for _, m := range cand {
 			form := ""
 			switch {
@@ -320,6 +364,8 @@ func textOutsideRefs(rel string, src []byte, cand []*movedRef, goComments bool) 
 				continue
 			}
 			r := outsideRef{pos: rel + ":" + strconv.Itoa(i+1), moved: m, form: form, text: strconv.Quote(shortenRef(strings.TrimSpace(line))), isText: true}
+			r.value = strings.TrimSuffix(line, "\r")
+			r.start, r.end = start, start+len(r.value)
 			if i > 0 {
 				if reason, has := textRefOK(lines[i-1], goComments); has {
 					if reason != "" {
@@ -333,6 +379,170 @@ func textOutsideRefs(rel string, src []byte, cand []*movedRef, goComments bool) 
 		}
 	}
 	return refs
+}
+
+// outRefRewrite returns the -rewrite-outrefs replacement of an outside
+// reference: text replaces the bytes r.start:r.end, and shown is the new
+// literal or line for the report. Only the exact repo-path forms qualify:
+//
+//   - a Go string literal equal to the moved file's repo path,
+//     "pkg/hub/x.go", or to the path, a colon and an identifier,
+//     "pkg/hub/x.go:name";
+//   - a line of hack/**/*.txt that starts with the repo path (optionally
+//     followed by a colon and an identifier) and continues with a blank or
+//     ends there ("pkg/hub/x.go | 3", "pkg/hub/x.go unprotected").
+//
+// The path becomes the moved file's new path, and the identifier its new
+// name when the move renames it (an export), so the reference names the same
+// file and symbol as before. Anything else (base names, path elements, a
+// path inside a longer literal or line, shell, Makefile and workflow lines)
+// returns text "" and stays report-only; why explains a refusal that would
+// otherwise look like a rewritable form.
+func (a *analysis) outRefRewrite(r outsideRef) (text, shown, why string) {
+	m := r.moved
+	if r.form != refRepoPath || r.src == nil || r.end <= r.start {
+		return "", "", ""
+	}
+	rel := a.rel(r.path)
+	switch {
+	case !r.isText:
+		v := r.value
+		if v != m.repo {
+			name, ok := strings.CutPrefix(v, m.repo+":")
+			if !ok || !token.IsIdentifier(name) {
+				return "", "", ""
+			}
+			n, why := a.outRefName(name)
+			if why != "" {
+				return "", "", why
+			}
+			v = m.dst + ":" + n
+		} else {
+			v = m.dst
+		}
+		if r.quote == '`' {
+			return "`" + v + "`", "`" + v + "`", ""
+		}
+		q := strconv.Quote(v)
+		return q, q, ""
+	case strings.HasPrefix(rel, "hack/") && strings.HasSuffix(rel, ".txt"):
+		rest, ok := strings.CutPrefix(r.value, m.repo)
+		if !ok {
+			return "", "", ""
+		}
+		head := m.dst
+		if after, isSym := strings.CutPrefix(rest, ":"); isSym {
+			k := 0
+			for k < len(after) && isIdentByte(after[k]) {
+				k++
+			}
+			if !token.IsIdentifier(after[:k]) {
+				return "", "", ""
+			}
+			n, why := a.outRefName(after[:k])
+			if why != "" {
+				return "", "", why
+			}
+			head += ":" + n
+			rest = after[k:]
+		}
+		if rest != "" && rest[0] != ' ' && rest[0] != '\t' {
+			return "", "", ""
+		}
+		if containsPathElem(rest, m.repo) {
+			return "", "", " (not rewritten: the line names the path more than once)"
+		}
+		line := head + rest
+		return line, strconv.Quote(shortenRef(strings.TrimSpace(line))), ""
+	}
+	return "", "", ""
+}
+
+// outRefName returns the name an identifier of a "path:name" reference has
+// after the move: its new name when the move renames a moved package-level
+// object or member of that name, else itself. why is set (and the reference
+// is not rewritten) when the name is ambiguous: renamed to more than one new
+// name, or renamed for one object and kept for another moved package-level
+// object.
+func (a *analysis) outRefName(name string) (string, string) {
+	news := map[string]bool{}
+	for obj, n := range a.pkgRename {
+		if obj.Name() == name {
+			news[n] = true
+		}
+	}
+	for obj, n := range a.memberRename {
+		if obj.Name() == name {
+			news[n] = true
+		}
+	}
+	if len(news) == 0 {
+		return name, ""
+	}
+	if len(news) == 1 {
+		if obj := a.pkg.Scope().Lookup(name); obj != nil {
+			if f := a.home(obj); f != nil && f.Moved {
+				if _, renamed := a.pkgRename[obj]; !renamed {
+					news[name] = true
+				}
+			}
+		}
+	}
+	if len(news) > 1 {
+		var all []string
+		for n := range news {
+			all = append(all, n)
+		}
+		sort.Strings(all)
+		return "", fmt.Sprintf(" (not rewritten: %s is ambiguous after the move, it becomes %s)", name, strings.Join(all, " or "))
+	}
+	for n := range news {
+		return n, ""
+	}
+	return name, ""
+}
+
+// addOutRefEdit records a -rewrite-outrefs edit: through the file edits for
+// a staying file of the source package (which may have other edits), else in
+// outEdits.
+func (a *analysis) addOutRefEdit(r outsideRef, text string) {
+	e := edit{r.start, r.end, text}
+	if f := a.byPath[r.path]; f != nil {
+		fe := a.editsFor(f)
+		fe.edits = append(fe.edits, e)
+		return
+	}
+	if a.outEdits == nil {
+		a.outEdits = map[string]*outFileEdits{}
+	}
+	oe := a.outEdits[r.path]
+	if oe == nil {
+		oe = &outFileEdits{src: r.src}
+		a.outEdits[r.path] = oe
+	}
+	oe.edits = append(oe.edits, e)
+}
+
+// applyOutEdits returns the content of an outside file after its
+// -rewrite-outrefs edits; Go files are gofmt-ed (a longer literal can move
+// the alignment of a table).
+func applyOutEdits(path string, oe *outFileEdits) ([]byte, error) {
+	if strings.HasSuffix(path, ".go") {
+		return applyEdits(&srcFile{Path: path, Src: oe.src}, &fileEdits{edits: oe.edits})
+	}
+	edits := append([]edit(nil), oe.edits...)
+	sort.Slice(edits, func(i, j int) bool { return edits[i].start < edits[j].start })
+	var out []byte
+	pos := 0
+	for _, e := range edits {
+		if e.start < pos {
+			return nil, fmt.Errorf("%s: overlapping edits at offset %d", path, e.start)
+		}
+		out = append(out, oe.src[pos:e.start]...)
+		out = append(out, e.text...)
+		pos = e.end
+	}
+	return append(out, oe.src[pos:]...), nil
 }
 
 // refOKComment parses a "// pkgmove:ref-ok <reason>" comment.
