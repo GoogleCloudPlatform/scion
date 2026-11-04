@@ -86,6 +86,10 @@ func (s *sqlStore) putGrant(ctx context.Context, g *Grant, maxGrants int, crossS
 	if !actor.valid() {
 		return GrantPutUnchanged, errNoActor
 	}
+	// The automatic form is reserved to the creation path (ptone/scion#7134).
+	if g.CreatedByRef == SponsorReviewCreator || actor.Authority == AuthoritySponsorReview {
+		return GrantPutUnchanged, errSponsorReviewReserved
+	}
 	if stewardActor(actor) && g.Permission == GrantAdmin {
 		return GrantPutUnchanged, ErrStewardActionNotAllowed
 	}
@@ -129,10 +133,11 @@ func (s *sqlStore) putGrant(ctx context.Context, g *Grant, maxGrants int, crossS
 	var (
 		id      string
 		perm    string
+		by      sql.NullString
 		created dbTime
 	)
-	err = tx.QueryRowContext(ctx, s.rebind(`SELECT id, permission, created_at FROM artifact_grant
-		WHERE artifact_id = ? AND subject_kind = ? AND subject_ref = ?`), g.ArtifactID, g.SubjectKind, g.SubjectRef).Scan(&id, &perm, &created)
+	err = tx.QueryRowContext(ctx, s.rebind(`SELECT id, permission, created_by_ref, created_at FROM artifact_grant
+		WHERE artifact_id = ? AND subject_kind = ? AND subject_ref = ?`), g.ArtifactID, g.SubjectKind, g.SubjectRef).Scan(&id, &perm, &by, &created)
 	switch {
 	case err == nil:
 		// PutReviewGrant's grant is always a review grant, so this refuses
@@ -141,7 +146,16 @@ func (s *sqlStore) putGrant(ctx context.Context, g *Grant, maxGrants int, crossS
 			return GrantPutUnchanged, ErrReviewReplacesAccess
 		}
 		if perm != g.Permission {
-			if _, err := tx.ExecContext(ctx, s.rebind(`UPDATE artifact_grant SET permission = ? WHERE id = ?`), g.Permission, id); err != nil {
+			// A level change by a person ends an automatic grant's
+			// automatic form (ptone/scion#7134): its creator becomes that
+			// person, so it no longer depends on a role in the home
+			// project. Every other grant keeps its creator.
+			newBy := by
+			if by.String == SponsorReviewCreator {
+				newBy = sql.NullString{String: PrincipalRef(actor.Kind, actor.Ref), Valid: true}
+			}
+			if _, err := tx.ExecContext(ctx, s.rebind(`UPDATE artifact_grant SET permission = ?, created_by_ref = ? WHERE id = ?`),
+				g.Permission, newBy, id); err != nil {
 				return GrantPutUnchanged, fmt.Errorf("artifacts: update grant: %w", err)
 			}
 			if err := s.insertEvent(ctx, tx, g.ArtifactID, EventGrantChanged, actor, time.Now(), map[string]any{
@@ -183,6 +197,11 @@ func (s *sqlStore) putGrant(ctx context.Context, g *Grant, maxGrants int, crossS
 	}
 	return GrantPutCreated, nil
 }
+
+// errSponsorReviewReserved refuses a grant write, other than the creation of
+// an artifact, that carries the automatic review grant's creator or
+// authority.
+var errSponsorReviewReserved = errors.New("artifacts: the automatic review grant is written only when an artifact is created")
 
 func (s *sqlStore) insertGrant(ctx context.Context, tx *sql.Tx, g *Grant) error {
 	if _, err := tx.ExecContext(ctx, s.rebind(`INSERT INTO artifact_grant

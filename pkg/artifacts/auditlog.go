@@ -125,6 +125,10 @@ const (
 	// artifact moved or transferred since its authority was decided
 	// (ErrStewardPrecondition), and answered 404.
 	logReasonStewardPreconditionFailed = "steward_precondition_failed"
+	// logReasonSponsorNoRole: the automatic review grant of a new artifact
+	// (ptone/scion#7134) was skipped because the delegating user holds no
+	// active role that reads in the artifact's home project.
+	logReasonSponsorNoRole = "sponsor_no_role_in_home"
 )
 
 // Log authorities: why the actor was allowed. They are the artifact_event
@@ -133,7 +137,8 @@ const (
 // custodian_project_admin. A review grant given on the review-grant path
 // (design D24) is logged with the authority its event records
 // (reviewGrantAuthority). The maintenance pass logs the event authorities
-// retention and reconciler.
+// retention and reconciler. The automatic review grant of a new artifact
+// (ptone/scion#7134) is logged with authority sponsor_review.
 const (
 	logAuthorityOwner                 = AuthorityOwner
 	logAuthorityAdminGrant            = AuthorityAdminGrant

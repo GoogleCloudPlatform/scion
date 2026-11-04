@@ -103,6 +103,10 @@ type Service struct {
 	// viewIssuanceClosedWarned makes the view issuance-closed warning
 	// appear once (warnViewIssuanceClosed).
 	viewIssuanceClosedWarned atomic.Bool
+
+	// sponsorReviewSkips counts automatic review grants the policy refused
+	// or could not decide (SponsorReviewSkips; sponsor_review.go).
+	sponsorReviewSkips atomic.Int64
 }
 
 // Backend is what a request needs from the service's environment: the

@@ -35,7 +35,9 @@ import (
 //   - read: scans that copy the column into the struct, and SELECT or WHERE
 //     clauses;
 //   - pass: handing the stored value to the host's clause decisions;
-//   - ddl: the 0007_orphans column definition.
+//   - ddl: the 0007_orphans column definition;
+//   - subject: the automatic review grant's subject and conditions
+//     (ptone/scion#7134), read from the recorded value only.
 //
 // A new line, a changed line or a removed one fails TestSponsorRefWriteSites.
 // A change that adds a writer (for example clearing the value on an ownership
@@ -54,6 +56,9 @@ var sponsorRefSites = []struct{ file, line, role string }{
 	{"pkg/artifacts/sponsor_backfill.go", "WHERE owner_kind = ? AND owner_ref = ? AND scope_kind = ? AND sponsor_ref IS NULL AND deleted_at IS NULL`),", "write"},
 	{"pkg/artifacts/sponsor_backfill.go", "WHERE owner_kind = ? AND scope_kind = ? AND sponsor_ref IS NULL AND deleted_at IS NULL AND owner_ref > ?", "read"},
 	{"pkg/artifacts/sponsor_backfill.go", "r, err := s.db.ExecContext(ctx, s.rebind(`UPDATE artifact SET sponsor_ref = ?", "write"},
+	{"pkg/artifacts/sponsor_review.go", "if a.OwnerKind != PrincipalKindAgent || a.ScopeKind != ScopeKindProject || a.ScopeRef == \"\" || a.SponsorRef == \"\" {", "subject"},
+	{"pkg/artifacts/sponsor_review.go", "err := policy.SponsorReviewGrant(ctx, a.ScopeRef, a.SponsorRef)", "subject"},
+	{"pkg/artifacts/sponsor_review.go", "SubjectRef: PrincipalRef(PrincipalKindUser, a.SponsorRef), Permission: GrantReview,", "subject"},
 	{"pkg/artifacts/store.go", "SponsorRef string", "read"},
 	{"pkg/artifacts/store_sql.go", "(id, scope_kind, scope_ref, owner_kind, owner_ref, \"key\", title, current_seq, expires_at, created_at, updated_at, sponsor_ref)", "write"},
 	{"pkg/artifacts/store_sql.go", "a.SponsorRef = sponsor.String", "read"},
