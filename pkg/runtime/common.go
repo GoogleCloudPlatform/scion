@@ -2300,6 +2300,47 @@ func resolvedAuthEnvEntries(ra *api.ResolvedAuth, taken func(name string) bool) 
 	return entries
 }
 
+// resolvedAuthPlainEnvNames are the resolved-auth env names a runtime that
+// delivers the instance environment in plain form (Cloud Run) may emit as
+// plain env: discovery settings, never a credential. Every other
+// resolved-auth entry travels in the staged blob (splitResolvedAuthEnv).
+// Extended only by review.
+var resolvedAuthPlainEnvNames = map[string]bool{
+	"SCION_HARNESS_SELECTED_AUTH": true,
+	"GOOGLE_CLOUD_PROJECT":        true,
+	"GOOGLE_CLOUD_REGION":         true,
+	"GOOGLE_CLOUD_LOCATION":       true,
+	"ANTHROPIC_VERTEX_PROJECT_ID": true,
+	"CLOUD_ML_REGION":             true,
+	"CLAUDE_CODE_USE_VERTEX":      true,
+}
+
+// splitResolvedAuthEnv applies resolvedAuthEnvEntries (the Docker rules:
+// empty values and taken names skipped) to ra and splits the result:
+// plain holds the resolvedAuthPlainEnvNames entries as sorted KEY=VALUE
+// entries, staged holds every other entry for the staged blob
+// (stagedExtras.ResolvedAuthEnv). A staged entry whose name is reserved
+// (reservedAgentEnvName, stagedsecrets.ReservedResolvedAuthEnvName) is
+// dropped; sciontool init drops such names again before the harness
+// starts. staged is nil when there is nothing to stage.
+func splitResolvedAuthEnv(ra *api.ResolvedAuth, taken func(name string) bool) (plain []string, staged map[string]string) {
+	for _, e := range resolvedAuthEnvEntries(ra, taken) {
+		k, v, _ := strings.Cut(e, "=")
+		if resolvedAuthPlainEnvNames[k] {
+			plain = append(plain, e)
+			continue
+		}
+		if reservedAgentEnvName(k) || stagedsecrets.ReservedResolvedAuthEnvName(k) {
+			continue
+		}
+		if staged == nil {
+			staged = make(map[string]string)
+		}
+		staged[k] = v
+	}
+	return plain, staged
+}
+
 // copyFileIntoHome copies the host file src to rel in the agent home with
 // src's permission bits less group and other write, creating missing parent directories (0755). Every
 // write is confined to the home (pkg/agenthome): a link at rel is replaced,
@@ -2373,6 +2414,10 @@ type stagedExtras struct {
 	// HarnessSecrets are the harness bundle's staged secret files
 	// (Staged.HarnessSecrets).
 	HarnessSecrets []stagedsecrets.HarnessSecret
+	// ResolvedAuthEnv are the resolved-auth env entries a runtime delivers
+	// in the blob rather than as plain env (Staged.ResolvedAuthEnv; see
+	// splitResolvedAuthEnv).
+	ResolvedAuthEnv map[string]string
 	// FieldClassErrors makes an oversize error name only the largest
 	// field class (stagedSizes.largestClass), never a secret name, key or path.
 	FieldClassErrors bool
@@ -2380,7 +2425,7 @@ type stagedExtras struct {
 
 // empty reports whether e stages nothing.
 func (e stagedExtras) empty() bool {
-	return e.HubToken == "" && len(e.HarnessSecrets) == 0
+	return e.HubToken == "" && len(e.HarnessSecrets) == 0 && len(e.ResolvedAuthEnv) == 0
 }
 
 // prepareStagedSecretEnvExtras is prepareStagedSecretEnv for any extras.
@@ -2558,6 +2603,7 @@ const (
 	stagedClassHubToken       = "hub credential"
 	stagedClassFileSecrets    = "file and variable secrets"
 	stagedClassHarnessSecrets = "harness secrets"
+	stagedClassResolvedAuth   = "resolved auth"
 )
 
 // stagedSizes are the encoded sizes, in bytes, of a staged blob and of
@@ -2565,10 +2611,11 @@ const (
 // a blob with that class alone, so the parts do not add up exactly to the
 // total. Sizes only: no names, keys or values.
 type stagedSizes struct {
-	Total          int
-	HubToken       int
-	FileSecrets    int
-	HarnessSecrets int
+	Total           int
+	HubToken        int
+	FileSecrets     int
+	HarnessSecrets  int
+	ResolvedAuthEnv int
 }
 
 // measureStaged returns the sizes of staged.
@@ -2594,6 +2641,9 @@ func measureStaged(staged stagedsecrets.Staged) (stagedSizes, error) {
 	if s.HarnessSecrets, err = size(stagedsecrets.Staged{HarnessSecrets: staged.HarnessSecrets}); err != nil {
 		return stagedSizes{}, err
 	}
+	if s.ResolvedAuthEnv, err = size(stagedsecrets.Staged{ResolvedAuthEnv: staged.ResolvedAuthEnv}); err != nil {
+		return stagedSizes{}, err
+	}
 	return s, nil
 }
 
@@ -2602,6 +2652,9 @@ func (s stagedSizes) largestClass() string {
 	class, size := stagedClassFileSecrets, s.FileSecrets
 	if s.HarnessSecrets > size {
 		class, size = stagedClassHarnessSecrets, s.HarnessSecrets
+	}
+	if s.ResolvedAuthEnv > size {
+		class, size = stagedClassResolvedAuth, s.ResolvedAuthEnv
 	}
 	if s.HubToken > size {
 		class = stagedClassHubToken
@@ -2642,7 +2695,7 @@ func serializeStaged(containerHome string, secrets []api.ResolvedSecret, hubToke
 // buildStaged collects the file and variable secrets and the extras into
 // the staged blob's structure.
 func buildStaged(containerHome string, secrets []api.ResolvedSecret, extras stagedExtras) stagedsecrets.Staged {
-	staged := stagedsecrets.Staged{HubToken: extras.HubToken, HarnessSecrets: extras.HarnessSecrets}
+	staged := stagedsecrets.Staged{HubToken: extras.HubToken, HarnessSecrets: extras.HarnessSecrets, ResolvedAuthEnv: extras.ResolvedAuthEnv}
 
 	// Collect file secrets, deduplicating by container target path (last wins).
 	targetIndex := make(map[string]int) // target → index in FileSecrets
@@ -2695,7 +2748,7 @@ func buildStaged(containerHome string, secrets []api.ResolvedSecret, extras stag
 // stagedIsEmpty reports whether staged carries nothing, so no blob is set.
 func stagedIsEmpty(staged stagedsecrets.Staged) bool {
 	return len(staged.FileSecrets) == 0 && len(staged.VariableSecrets) == 0 &&
-		staged.HubToken == "" && len(staged.HarnessSecrets) == 0
+		staged.HubToken == "" && len(staged.HarnessSecrets) == 0 && len(staged.ResolvedAuthEnv) == 0
 }
 
 // encodeStaged serializes staged into the blob's encoded form, or "" when

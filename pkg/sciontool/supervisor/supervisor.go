@@ -80,6 +80,13 @@ type Config struct {
 	// change mergeEnvOverlay's precedence rule — it is correct for its own
 	// case. See the override reasoning in the P2d PR description.
 	SecretOverrides map[string]string
+	// AuthEnv are resolved-auth environment entries the runtime delivered
+	// in the staged blob rather than as plain env (Cloud Run only; nil
+	// elsewhere). Applied to the harness child only, at the same gate as
+	// SecretOverrides: each fills a name the runtime environment lacks
+	// (the runtime environment wins, as on Docker), before the harness
+	// env overlay is merged, so it wins over the overlay.
+	AuthEnv map[string]string
 	// WorkingDir sets the child process's working directory (exec.Cmd.Dir).
 	// Empty (the zero value) leaves cmd.Dir unset, so the child inherits
 	// this process's own current working directory — exactly today's
@@ -450,6 +457,16 @@ func childEnv(cfg Config, base []string, applySecrets, logSteps bool) ([]string,
 		env = removeEnvVar(env, "SCION_EXTRA_PATH")
 		if logSteps {
 			log.Debug("Applied SCION_EXTRA_PATH: PATH=%s", newPath)
+		}
+	}
+
+	// Resolved-auth entries from the staged blob fill names the runtime env
+	// lacks, before the overlay (harness child only).
+	if applySecrets && len(cfg.AuthEnv) > 0 {
+		before := len(env)
+		env = mergeEnvOverlay(env, cfg.AuthEnv)
+		if logSteps {
+			log.Debug("Applied resolved-auth env: %d entries (added %d)", len(cfg.AuthEnv), len(env)-before)
 		}
 	}
 

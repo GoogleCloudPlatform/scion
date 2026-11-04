@@ -585,9 +585,23 @@ func RunInit(args []string, opts InitRunOptions) int {
 			return 1
 		}
 		staged.HarnessSecrets = nil
+		// A runtime that delivers the instance environment in plain form
+		// (Cloud Run) stages its resolved-auth entries that are not
+		// discovery settings. They reach the harness launch below only
+		// through a file on the in-memory volume (never this process's
+		// environment, the home or shared storage); with no in-memory
+		// harness directory the start fails. Counts only are logged.
+		resolvedAuthCount := len(staged.ResolvedAuthEnv)
+		if err := stagedsecrets.WriteResolvedAuthEnv(resolvedAuthEnvRoot, os.Getenv(hooks.HarnessSecretsDirEnv), staged.ResolvedAuthEnv); err != nil {
+			staged.ResolvedAuthEnv = nil
+			log.Error("Failed to stage the resolved-auth environment entries: %v", err)
+			reportInitFailure(agentHome, fmt.Errorf("failed to stage the resolved-auth environment entries: %w", err))
+			return 1
+		}
+		staged.ResolvedAuthEnv = nil
 		_ = os.Unsetenv(stagedsecrets.EnvVar)
-		log.Info("Staged %d file secret(s), %d variable secret(s) and %d harness secret(s)",
-			len(staged.FileSecrets), len(staged.VariableSecrets), harnessSecretCount)
+		log.Info("Staged %d file secret(s), %d variable secret(s), %d harness secret(s) and %d resolved-auth env entr(ies)",
+			len(staged.FileSecrets), len(staged.VariableSecrets), harnessSecretCount, resolvedAuthCount)
 
 		// Re-exec to purge SCION_STAGED_SECRETS from /proc/1/environ.
 		//
@@ -633,6 +647,16 @@ func RunInit(args []string, opts InitRunOptions) int {
 		} else {
 			log.Info("RunInit embedded: skipping environ-purge re-exec")
 		}
+	}
+
+	// The resolved-auth entries the staging pass carried across the re-exec
+	// are read and their file removed now, before anything else runs; they
+	// go to the harness child's environment only (supervisor AuthEnv).
+	resolvedAuthEnv, err := takeResolvedAuthEnv(resolvedAuthEnvRoot)
+	if err != nil {
+		log.Error("Failed to read the staged resolved-auth environment entries: %v", err)
+		reportInitFailure(agentHome, fmt.Errorf("failed to read the staged resolved-auth environment entries: %w", err))
+		return 1
 	}
 
 	// The token file this init staged from the runtime's payload is removed
@@ -1083,6 +1107,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 
 	// Create supervisor with configuration
 	config := harnessSupervisorConfig(opts, gracePeriod, targetUID, targetGID, rootless, harnessEnvOverlay, nativeTelemetryPolicy, secretOverrides)
+	config.AuthEnv = resolvedAuthEnv
 	sup := supervisor.New(config)
 
 	// Create a cancellable context for graceful shutdown

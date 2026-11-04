@@ -18,6 +18,7 @@ package runtime
 
 import (
 	"context"
+	"maps"
 	"slices"
 	"strings"
 	"testing"
@@ -29,10 +30,14 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/stagedsecrets"
 )
 
-// Fixture values only; none of these name a real project or region.
+// Fixture values only; none of these name a real project, region or
+// credential.
 const (
-	authFixtureProject = "fixture-vertex-project"
-	authFixtureRegion  = "fixture-region-1"
+	authFixtureProject     = "fixture-vertex-project"
+	authFixtureRegion      = "fixture-region-1"
+	authFixtureConfigValue = "placeholder-auth-config-value"
+	authCanaryAPIKey       = "placeholder-canary-api-key-7285"
+	authCanaryOAuthToken   = "placeholder-canary-oauth-token-7285"
 )
 
 // claudeVertexAuthNames are the names the claude vertex-ai ResolveAuth sets
@@ -55,7 +60,8 @@ var claudeVertexWant = map[string]string{
 }
 
 // claudeVertexResolvedAuth runs the claude harness's ResolveAuth for
-// vertex-ai on the fixture project and region.
+// vertex-ai on the fixture project and region, with one config-driven auth
+// value (auth.EnvVars) that ResolveAuth copies into its env.
 func claudeVertexResolvedAuth(t *testing.T) *api.ResolvedAuth {
 	t.Helper()
 	h, err := harness.NewContainerScriptHarness(t.TempDir(), config.HarnessConfigEntry{
@@ -69,6 +75,7 @@ func claudeVertexResolvedAuth(t *testing.T) *api.ResolvedAuth {
 		SelectedType:       "vertex-ai",
 		GoogleCloudProject: authFixtureProject,
 		GoogleCloudRegion:  authFixtureRegion,
+		EnvVars:            map[string]string{"EXAMPLE_AUTH_CONFIG_VALUE": authFixtureConfigValue},
 	})
 	if err != nil {
 		t.Fatalf("ResolveAuth: %v", err)
@@ -77,6 +84,9 @@ func claudeVertexResolvedAuth(t *testing.T) *api.ResolvedAuth {
 		if ra.EnvVars[name] != claudeVertexWant[name] {
 			t.Fatalf("fixture: ResolveAuth did not set %s to the fixture value", name)
 		}
+	}
+	if ra.EnvVars["EXAMPLE_AUTH_CONFIG_VALUE"] != authFixtureConfigValue {
+		t.Fatal("fixture: ResolveAuth did not copy the config-driven auth value")
 	}
 	return ra
 }
@@ -120,10 +130,11 @@ func k8sEnvFor(t *testing.T, cfg RunConfig) map[string]string {
 	return env
 }
 
-// cloudRunEnvFor runs cfg's settings through CloudRunRuntime.Run against a
-// fake Instances API and returns the created instance's env (crInstanceEnv
-// fails on a duplicate name).
-func cloudRunEnvFor(t *testing.T, cfg RunConfig) map[string]string {
+// cloudRunRunFor runs cfg's settings through CloudRunRuntime.Run against a
+// fake Instances API and returns the created instance's plain env
+// (crInstanceEnv fails on a duplicate name) and the resolved-auth entries
+// of its decoded staged blob (nil when there are none).
+func cloudRunRunFor(t *testing.T, cfg RunConfig) (plain, staged map[string]string) {
 	t.Helper()
 	fake := &fakeInstancesClient{getErr: notFoundErr()}
 	rt := newFakeCloudRunRuntime(t, fake)
@@ -136,56 +147,113 @@ func cloudRunEnvFor(t *testing.T, cfg RunConfig) map[string]string {
 	if _, err := rt.Run(context.Background(), run); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	return crInstanceEnv(t, fake)
+	plain = crInstanceEnv(t, fake)
+	return plain, crStagedResolvedAuth(t, plain)
 }
 
-// The same resolved auth gives the same env on Docker, Kubernetes and
-// Cloud Run for the claude vertex-ai names. Cloud Run follows Docker's
-// rules through resolvedAuthEnvEntries, so the colliding and empty-value
-// cases are checked for those two; Kubernetes lets resolved auth win over
-// config.Env and keeps empty values, so it is checked only where no other
-// source sets the name.
+// cloudRunEnvFor is cloudRunRunFor's plain env.
+func cloudRunEnvFor(t *testing.T, cfg RunConfig) map[string]string {
+	t.Helper()
+	plain, _ := cloudRunRunFor(t, cfg)
+	return plain
+}
+
+// crStagedResolvedAuth decodes the staged blob in a Cloud Run instance env
+// and returns its resolved-auth entries (nil without a blob).
+func crStagedResolvedAuth(t *testing.T, plain map[string]string) map[string]string {
+	t.Helper()
+	blob, ok := plain[stagedsecrets.EnvVar]
+	if !ok {
+		return nil
+	}
+	staged, err := stagedsecrets.Decode(blob)
+	if err != nil {
+		t.Fatalf("decode %s: %v", stagedsecrets.EnvVar, err)
+	}
+	return staged.ResolvedAuthEnv
+}
+
+// cloudRunEffective returns the value a Cloud Run harness receives for a
+// resolved-auth name: the plain env for a discovery name, the staged
+// resolved-auth entries for every other name.
+func cloudRunEffective(plain, staged map[string]string, name string) (string, bool) {
+	if resolvedAuthPlainEnvNames[name] {
+		v, ok := plain[name]
+		return v, ok
+	}
+	v, ok := staged[name]
+	return v, ok
+}
+
+// The same resolved auth gives the same effective env on Docker,
+// Kubernetes and Cloud Run. On Cloud Run the discovery names are plain env
+// and every other entry is in the staged blob. Cloud Run follows Docker's
+// rules, so the colliding and empty-value cases are checked for those two;
+// Kubernetes lets resolved auth win over config.Env and keeps empty
+// values, so it is checked only for the vertex names, which no other
+// source sets.
 func TestResolvedAuthEnv_ParityAcrossRuntimes(t *testing.T) {
 	t.Run("claude-vertex-ai", func(t *testing.T) {
-		cfg := RunConfig{ResolvedAuth: claudeVertexResolvedAuth(t)}
-		envs := map[string]map[string]string{
-			"docker":     dockerEnvFor(t, cfg),
-			"kubernetes": k8sEnvFor(t, cfg),
-			"cloudrun":   cloudRunEnvFor(t, cfg),
-		}
-		for runtimeName, env := range envs {
+		ra := claudeVertexResolvedAuth(t)
+		cfg := RunConfig{ResolvedAuth: ra}
+		docker, k8s := dockerEnvFor(t, cfg), k8sEnvFor(t, cfg)
+		plain, staged := cloudRunRunFor(t, cfg)
+		for runtimeName, env := range map[string]map[string]string{"docker": docker, "kubernetes": k8s, "cloudrun": plain} {
 			for _, name := range claudeVertexAuthNames {
 				if got, ok := env[name]; !ok || got != claudeVertexWant[name] {
 					t.Errorf("%s: %s = %q (present %v), want the fixture value %q", runtimeName, name, got, ok, claudeVertexWant[name])
 				}
 			}
 		}
+		// Every resolved-auth entry with a value: Docker's value equals the
+		// value the Cloud Run harness receives.
+		for name, v := range ra.EnvVars {
+			if v == "" {
+				continue
+			}
+			got, ok := cloudRunEffective(plain, staged, name)
+			if docker[name] != v || !ok || got != docker[name] {
+				t.Errorf("%s: docker %q, cloudrun %q (present %v), want both %q", name, docker[name], got, ok, v)
+			}
+		}
 	})
 
 	t.Run("docker-cloudrun-config-env-and-secret-win", func(t *testing.T) {
 		cfg := RunConfig{
-			Env: []string{"GOOGLE_CLOUD_PROJECT=from-config-env"},
+			Env: []string{"GOOGLE_CLOUD_PROJECT=from-config-env", "EXAMPLE_CFG_NAME=from-config-env"},
 			ResolvedAuth: &api.ResolvedAuth{EnvVars: map[string]string{
 				"GOOGLE_CLOUD_PROJECT": "from-resolved-auth",
+				"GOOGLE_CLOUD_REGION":  "from-resolved-auth",
+				"EXAMPLE_CFG_NAME":     "from-resolved-auth",
 				"EXAMPLE_AUTH_SECRET":  "from-resolved-auth",
 				"CLOUD_ML_REGION":      authFixtureRegion,
 			}},
 			ResolvedSecrets: []api.ResolvedSecret{
 				{Name: "auth-secret", Type: "environment", Target: "EXAMPLE_AUTH_SECRET", Value: "from-secret"},
+				{Name: "region-secret", Type: "environment", Target: "GOOGLE_CLOUD_REGION", Value: "from-secret"},
 			},
 		}
 		want := map[string]string{
 			"GOOGLE_CLOUD_PROJECT": "from-config-env",
+			"GOOGLE_CLOUD_REGION":  "from-secret",
+			"EXAMPLE_CFG_NAME":     "from-config-env",
 			"EXAMPLE_AUTH_SECRET":  "from-secret",
 			"CLOUD_ML_REGION":      authFixtureRegion,
 		}
-		docker, cloudrun := dockerEnvFor(t, cfg), cloudRunEnvFor(t, cfg)
+		docker := dockerEnvFor(t, cfg)
+		plain, staged := cloudRunRunFor(t, cfg)
 		for name, w := range want {
 			if docker[name] != w {
 				t.Errorf("docker: %s = %q, want %q", name, docker[name], w)
 			}
-			if got, ok := cloudrun[name]; !ok || got != w {
+			if got, ok := plain[name]; !ok || got != w {
 				t.Errorf("cloudrun: %s = %q (present %v), want %q", name, got, ok, w)
+			}
+		}
+		// A name config.Env or an env-type secret set is not staged either.
+		for _, name := range []string{"EXAMPLE_CFG_NAME", "EXAMPLE_AUTH_SECRET"} {
+			if _, ok := staged[name]; ok {
+				t.Errorf("cloudrun: %s is in the staged resolved-auth entries although another source set it", name)
 			}
 		}
 	})
@@ -210,7 +278,7 @@ func TestResolvedAuthEnv_ParityAcrossRuntimes(t *testing.T) {
 }
 
 // A Cloud Run instance for a claude vertex-ai agent carries the resolved
-// auth names with their real values.
+// auth discovery names as plain env with their real values.
 func TestCloudRunRun_ClaudeVertexAIResolvedAuthEnv(t *testing.T) {
 	env := cloudRunEnvFor(t, RunConfig{ResolvedAuth: claudeVertexResolvedAuth(t)})
 	for _, name := range claudeVertexAuthNames {
@@ -218,7 +286,7 @@ func TestCloudRunRun_ClaudeVertexAIResolvedAuthEnv(t *testing.T) {
 			t.Errorf("%s = %q (present %v), want the fixture value %q", name, got, ok, claudeVertexWant[name])
 		}
 	}
-	for _, name := range []string{"GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_LOCATION"} {
+	for _, name := range []string{"GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_LOCATION", "SCION_HARNESS_SELECTED_AUTH"} {
 		if _, ok := env[name]; !ok {
 			t.Errorf("%s missing from the instance env", name)
 		}
@@ -236,6 +304,9 @@ func TestCloudRunRun_ResolvedAuthWinsOverPlaceholderOverlay(t *testing.T) {
 		runtimeEnv = append(runtimeEnv, k+"="+v)
 	}
 	slices.Sort(runtimeEnv)
+	// The vertex-ai entries of harnesses/claude/provision.py
+	// _build_env_overlay when no staged secret holds the project or region
+	// (its _resolve falls back to "${NAME}" text). Keep in step with it.
 	overlay := map[string]string{
 		"ANTHROPIC_VERTEX_PROJECT_ID": "${GOOGLE_CLOUD_PROJECT}",
 		"CLOUD_ML_REGION":             "${GOOGLE_CLOUD_LOCATION}",
@@ -263,37 +334,103 @@ func TestCloudRunRun_ResolvedAuthWinsOverPlaceholderOverlay(t *testing.T) {
 	}
 }
 
-// The resolved-auth path cannot put a reserved name, or a name the staged
-// secrets or an env-type secret set, into the instance env with its own
-// value.
+// Resolved-auth credential values never appear in the plain instance env:
+// they are in the staged blob's resolved-auth entries.
+func TestCloudRunRun_CredentialResolvedAuthOnlyInStagedBlob(t *testing.T) {
+	plain, staged := cloudRunRunFor(t, RunConfig{ResolvedAuth: &api.ResolvedAuth{EnvVars: map[string]string{
+		"ANTHROPIC_API_KEY":       authCanaryAPIKey,
+		"CLAUDE_CODE_OAUTH_TOKEN": authCanaryOAuthToken,
+		"CLAUDE_CODE_USE_VERTEX":  "1",
+	}}})
+	for _, name := range []string{"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"} {
+		if _, ok := plain[name]; ok {
+			t.Errorf("%s is a plain instance env entry", name)
+		}
+	}
+	for k, v := range plain {
+		if strings.Contains(v, authCanaryAPIKey) || strings.Contains(v, authCanaryOAuthToken) {
+			t.Errorf("the plain instance env entry %s carries a canary credential value", k)
+		}
+	}
+	if staged["ANTHROPIC_API_KEY"] != authCanaryAPIKey || staged["CLAUDE_CODE_OAUTH_TOKEN"] != authCanaryOAuthToken {
+		t.Error("the canary credentials are not in the staged resolved-auth entries")
+	}
+	if plain["CLAUDE_CODE_USE_VERTEX"] != "1" {
+		t.Error("control: the discovery name CLAUDE_CODE_USE_VERTEX is not plain env")
+	}
+	if _, ok := staged["CLAUDE_CODE_USE_VERTEX"]; ok {
+		t.Error("the discovery name CLAUDE_CODE_USE_VERTEX is also staged")
+	}
+}
+
+// The resolved-auth path cannot set a reserved name, replace the staged
+// blob, a runtime key or an env-type secret, in either the plain env or
+// the staged entries.
 func TestCloudRunRun_ResolvedAuthKeepsReservedAndSecretEnv(t *testing.T) {
 	cfg := RunConfig{
 		ResolvedAuth: &api.ResolvedAuth{EnvVars: map[string]string{
 			stagedsecrets.HubTokenStagedEnvVar: "1",
 			stagedsecrets.EnvVar:               "from-resolved-auth",
+			"SCION_HOST_UID":                   "0",
 			"EXAMPLE_API_KEY":                  "from-resolved-auth",
 			"ORDINARY_CONTROL":                 "keep",
 		}},
 		ResolvedSecrets: crTestResolvedSecrets(),
 		Env:             []string{"PRESET_KEY=from-env"},
 	}
-	env := cloudRunEnvFor(t, cfg)
-	if _, ok := env[stagedsecrets.HubTokenStagedEnvVar]; ok {
-		t.Errorf("the reserved marker reached the instance env through resolved auth")
+	plain, staged := cloudRunRunFor(t, cfg)
+	if _, ok := plain[stagedsecrets.HubTokenStagedEnvVar]; ok {
+		t.Error("the reserved marker reached the plain instance env through resolved auth")
 	}
-	if env[stagedsecrets.EnvVar] == "from-resolved-auth" {
+	if plain[stagedsecrets.EnvVar] == "from-resolved-auth" {
 		t.Errorf("resolved auth replaced %s", stagedsecrets.EnvVar)
 	}
-	if env["EXAMPLE_API_KEY"] != crTestEnvSecretValue {
-		t.Errorf("EXAMPLE_API_KEY does not carry the env-type secret value (resolved auth won: %v)", env["EXAMPLE_API_KEY"] == "from-resolved-auth")
+	if plain["SCION_HOST_UID"] == "0" {
+		t.Error("resolved auth replaced SCION_HOST_UID")
 	}
-	if env["ORDINARY_CONTROL"] != "keep" {
-		t.Errorf("control: ORDINARY_CONTROL = %q, want %q", env["ORDINARY_CONTROL"], "keep")
+	if plain["EXAMPLE_API_KEY"] != crTestEnvSecretValue {
+		t.Errorf("EXAMPLE_API_KEY does not carry the env-type secret value (resolved auth won: %v)", plain["EXAMPLE_API_KEY"] == "from-resolved-auth")
 	}
-	assertResolvedSecretsInEnv(t, env)
+	if _, ok := plain["ORDINARY_CONTROL"]; ok {
+		t.Error("a non-discovery resolved-auth entry is plain env")
+	}
+	for _, name := range []string{stagedsecrets.HubTokenStagedEnvVar, stagedsecrets.EnvVar, "SCION_HOST_UID", "EXAMPLE_API_KEY"} {
+		if _, ok := staged[name]; ok {
+			t.Errorf("%s is in the staged resolved-auth entries", name)
+		}
+	}
+	if staged["ORDINARY_CONTROL"] != "keep" {
+		t.Error("control: ORDINARY_CONTROL is not in the staged resolved-auth entries")
+	}
+	assertResolvedSecretsInEnv(t, plain)
 }
 
-// A resolved-auth name counts as set for the template env fallback, as on
+// The staged resolved-auth entries count against the blob's size cap, and
+// an oversize blob names their class, never a value.
+func TestCloudRunRun_ResolvedAuthCountsAgainstStagedCap(t *testing.T) {
+	fake := &fakeInstancesClient{getErr: notFoundErr()}
+	rt := newFakeCloudRunRuntime(t, fake)
+	cfg := runConfigForTest()
+	cfg.UnixUsername = "scion"
+	cfg.ResolvedAuth = &api.ResolvedAuth{EnvVars: map[string]string{
+		"EXAMPLE_LARGE_AUTH_VALUE": strings.Repeat("a", cloudRunMaxEnvValueBytes),
+	}}
+	_, err := rt.Run(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("Run accepted a staged blob over the cap")
+	}
+	if !strings.Contains(err.Error(), stagedClassResolvedAuth) {
+		t.Errorf("oversize error does not name the %q class: %v", stagedClassResolvedAuth, err)
+	}
+	if strings.Contains(err.Error(), "aaaaaaaa") || strings.Contains(err.Error(), "EXAMPLE_LARGE_AUTH_VALUE") {
+		t.Error("oversize error carries the entry's value or name")
+	}
+	if len(fake.createReqs) != 0 {
+		t.Error("an instance was created despite the oversize blob")
+	}
+}
+
+// A resolved-auth name counts as set for the template fallback, as on
 // Docker: the fallback neither overrides the applied value nor adds a
 // second copy of the name.
 func TestBuildCloudRunInstance_FallbackDoesNotOverrideResolvedAuth(t *testing.T) {
@@ -344,5 +481,47 @@ func TestResolvedAuthEnvEntries(t *testing.T) {
 	}
 	if got := resolvedAuthEnvEntries(nil, nil); got != nil {
 		t.Errorf("nil ResolvedAuth: resolvedAuthEnvEntries = %v, want nil", got)
+	}
+}
+
+// splitResolvedAuthEnv sends the discovery names to plain env and every
+// other entry to the staged entries, and drops a reserved name from the
+// staged entries even when nothing else set it (taken nil).
+func TestSplitResolvedAuthEnv(t *testing.T) {
+	env := map[string]string{
+		"GOOGLE_CLOUD_PROJECT":             authFixtureProject,
+		"CLAUDE_CODE_USE_VERTEX":           "1",
+		"ANTHROPIC_API_KEY":                authCanaryAPIKey,
+		stagedsecrets.HubTokenStagedEnvVar: "1",
+		stagedsecrets.EnvVar:               "x",
+	}
+	for _, k := range cloudRunRuntimeEnvKeys {
+		env[k] = "x"
+	}
+	plain, staged := splitResolvedAuthEnv(&api.ResolvedAuth{EnvVars: env}, nil)
+	wantPlain := []string{"CLAUDE_CODE_USE_VERTEX=1", "GOOGLE_CLOUD_PROJECT=" + authFixtureProject}
+	if !slices.Equal(plain, wantPlain) {
+		t.Errorf("plain = %v, want %v", plain, wantPlain)
+	}
+	if len(staged) != 1 || staged["ANTHROPIC_API_KEY"] != authCanaryAPIKey {
+		t.Errorf("staged keys = %v, want only ANTHROPIC_API_KEY", slices.Sorted(maps.Keys(staged)))
+	}
+	if p, s := splitResolvedAuthEnv(nil, nil); p != nil || s != nil {
+		t.Error("nil ResolvedAuth gave entries")
+	}
+}
+
+// Every name the Cloud Run runtime sets on the instance itself, and the
+// names sciontool init reads, is reserved for the staged resolved-auth
+// entries on both ends (broker and init).
+func TestReservedResolvedAuthEnvName_CoversCloudRunRuntimeKeys(t *testing.T) {
+	if len(cloudRunRuntimeEnvKeys) == 0 {
+		t.Fatal("control: cloudRunRuntimeEnvKeys is empty")
+	}
+	names := append([]string{stagedsecrets.EnvVar, stagedsecrets.HubTokenStagedEnvVar}, cloudRunRuntimeEnvKeys...)
+	for _, name := range names {
+		if !stagedsecrets.ReservedResolvedAuthEnvName(name) {
+			t.Errorf("%s is set by the runtime or read by init but not reserved for staged resolved-auth entries", name)
+		}
 	}
 }
