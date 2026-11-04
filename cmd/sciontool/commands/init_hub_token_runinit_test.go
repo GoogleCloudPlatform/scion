@@ -376,3 +376,45 @@ func TestRunInit_TransportReexecPathClearsInheritedMarker(t *testing.T) {
 		t.Error("init treated an inherited marker as its own")
 	}
 }
+
+// Only the staging pass arms the staged-token marker: a staged payload
+// without a hub credential (file secrets only) clears an inherited marker,
+// so a broker-provided token file is not removed at a clean exit.
+func TestRunInit_StagedSecretsWithoutHubTokenClearsInheritedMarker(t *testing.T) {
+	f := newRunInitStagedFixture(t)
+	if err := os.MkdirAll(filepath.Dir(f.tokenPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f.tokenPath, []byte(initHubTokenCanary), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	secretPath := filepath.Join(f.agentHome, ".config", "kit-example", "secret.txt")
+	data, err := json.Marshal(stagedsecrets.Staged{FileSecrets: []stagedsecrets.FileSecret{{
+		Name:   "example",
+		Target: secretPath,
+		Value:  base64.StdEncoding.EncodeToString([]byte("example-file-content")),
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(stagedsecrets.EnvVar, base64.StdEncoding.EncodeToString(data))
+	t.Setenv(envHubTokenStaged, "1")
+	t.Setenv(transportauth.EnvTransportToken, "")
+	t.Setenv(transportauth.EnvTransportTokenFile, "")
+	if got := f.run(t, "sleep 0.5"); got != 0 {
+		t.Fatalf("RunInit() = %d, want 0", got)
+	}
+	// Control: this pass took the staging path.
+	if got := readFileString(t, secretPath); got != "example-file-content" {
+		t.Fatal("the staged file secret was not written")
+	}
+	if os.Getenv(envHubTokenStaged) != "" {
+		t.Error("the inherited staged-token marker was not cleared")
+	}
+	if got := readFileString(t, f.tokenPath); got != initHubTokenCanary {
+		t.Error("a broker-provided token file was removed after a staged payload without a hub credential")
+	}
+	if strings.Contains(f.readLog(), "Removed the staged hub credential file") {
+		t.Error("init treated an inherited marker as its own")
+	}
+}
