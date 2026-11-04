@@ -76,7 +76,7 @@ func TestTakeResolvedAuthEnv_DropsReservedNamesAtInit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Written directly, bypassing the broker-side filter, as a left-over or
+	// Written directly, without the broker-side filter, as a left-over or
 	// faulty blob would arrive.
 	if err := stagedsecrets.WriteResolvedAuthEnv(root, filepath.Join(root, "harness", "secrets"), initTestNonce, map[string]string{
 		stagedsecrets.HubTokenStagedEnvVar: "1",
