@@ -322,13 +322,17 @@ func (h *ResilientCloudHandler) runHealthCheck() {
 // Every failed call (flush error, timeout, or a flush already in flight) is
 // counted once as writer=cloud, reason=flush_error. A Flush error usually
 // summarizes client errors already counted by the OnError hook as
-// reason=error, so the two reasons can overlap for one incident.
+// reason=error, so the two reasons can overlap for one incident. A
+// successful call ends the run of consecutive flush failures that the
+// cloud_logging health check judges.
 func (h *ResilientCloudHandler) flushWithTimeout() error {
 	err := h.flushOnce()
 	if err != nil {
 		h.writeStats().RecordFailure(CloudReasonFlushError)
+		return err
 	}
-	return err
+	h.writeStats().RecordFlushSuccess()
+	return nil
 }
 
 // flushOnce is the uncounted flush; see flushWithTimeout.

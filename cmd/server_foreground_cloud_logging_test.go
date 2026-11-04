@@ -19,6 +19,7 @@ package cmd
 import (
 	"context"
 	"sort"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -139,7 +140,7 @@ func TestWireCloudLoggingHealth_OnlyWhenConfigured(t *testing.T) {
 	require.Equal(t, "healthy", srv.GetHealthInfo(ctx).Checks["cloud_logging"])
 	open.Store(true)
 	info := srv.GetHealthInfo(ctx)
-	require.Equal(t, "degraded: circuit open", info.Checks["cloud_logging"])
+	require.True(t, strings.HasPrefix(info.Checks["cloud_logging"], "degraded: circuit open ("), info.Checks["cloud_logging"])
 	require.NotEqual(t, hub.HealthStatusUnhealthy, info.Status)
 
 	wireCloudLoggingHealth(nil, cs) // no hub: no panic
