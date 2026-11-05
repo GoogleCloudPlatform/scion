@@ -174,6 +174,10 @@ func LoadHarnessConfigDir(dirPath string) (*HarnessConfigDir, error) {
 	// An invalid sidecar degrades to "no" with a warning; it never fails the
 	// load.
 	ApplyAgentPluginsSidecarDir(&entry, absPath)
+	// The no-auth env comes only from its bundle sidecar.
+	applyNoAuthEnvSidecar(&entry, func(name string) ([]byte, error) {
+		return os.ReadFile(filepath.Join(absPath, name))
+	}, filepath.Join(absPath, NoAuthEnvSidecarFile))
 
 	name, err := harnessConfigDirName(entry, filepath.Base(absPath))
 	if err != nil {
@@ -189,8 +193,9 @@ func LoadHarnessConfigDir(dirPath string) (*HarnessConfigDir, error) {
 
 // LoadHarnessConfigFromFiles is LoadHarnessConfigDir for a harness-config
 // directory whose files the caller reads: read returns the content of a file
-// of the directory by its name (config.yaml, AgentPluginsSidecarFile), and an
-// error wrapping fs.ErrNotExist when the file is absent. dirName is the
+// of the directory by its name (config.yaml, AgentPluginsSidecarFile,
+// NoAuthEnvSidecarFile), and an error wrapping fs.ErrNotExist when the file
+// is absent. dirName is the
 // directory's base name (the Name fallback) and where locates the directory
 // in messages; it is also the returned Path. The validation, the sidecar
 // handling and the name rules are LoadHarnessConfigDir's. It reads nothing
@@ -216,6 +221,7 @@ func LoadHarnessConfigFromFiles(dirName, where string, read func(name string) ([
 	default:
 		applyAgentPluginsSidecar(&entry, sidecar, sidecarPath)
 	}
+	applyNoAuthEnvSidecar(&entry, read, filepath.Join(where, NoAuthEnvSidecarFile))
 
 	name, err := harnessConfigDirName(entry, dirName)
 	if err != nil {
@@ -536,7 +542,7 @@ func mapEmbedFileToHarnessConfigPath(targetDir, homeDir, configDir, fileName str
 }
 
 func isHarnessConfigRootSupportFile(relPath string) bool {
-	if relPath == "provision.py" || relPath == "dialect.yaml" || relPath == "capture_auth.py" || relPath == "scion_harness.py" || relPath == AgentPluginsSidecarFile {
+	if relPath == "provision.py" || relPath == "dialect.yaml" || relPath == "capture_auth.py" || relPath == "scion_harness.py" || relPath == AgentPluginsSidecarFile || relPath == NoAuthEnvSidecarFile {
 		return true
 	}
 	for _, prefix := range []string{"schema/", "schemas/", "examples/", "tests/fixtures/"} {
