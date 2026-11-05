@@ -392,9 +392,11 @@ const UserDeleteForceCascade = "hub.user_delete_force_cascade"
 // selects the tag of the bundled scion-* agent images ("version" for the
 // hub binary's own version, or a literal tag) instead of :latest. The hub
 // checks it: while it is off, image_tag is ignored and every image
-// reference is unchanged. Applying the tag to agent images, and refusing a
-// hub save of image_tag while the experiment is off, arrive with the
-// follow-up change; until then the setting has no effect.
+// reference is unchanged, a hub save that sets image_tag is refused (412
+// experiment_disabled), and a value from the environment or a settings
+// file is reported with a startup warning. While it is on, the hub applies
+// the tag to the images it sends and checks and sends it with each
+// dispatch, so the Runtime Broker applies it to the images it resolves.
 const ImageTagSetting = "hub.image_tag_setting"
 
 // compiled is the production experiment list. It is reachable only through
@@ -750,7 +752,7 @@ var compiled = []Experiment{
 	{
 		Name:        ImageTagSetting,
 		Title:       "Image tag setting",
-		Description: "Lets the image_tag setting choose the tag of the bundled scion-* agent images whose tag is latest or absent: \"version\" selects the hub binary's version (latest for a development build), any other value is a literal tag. Images with another tag, a digest, or a registry host are left alone, except exactly <image_registry>/scion-<name> (latest or untagged), the form the image_registry rewrite produces, which is retagged too. While it is off, image_tag is ignored and image references are unchanged. In this release the setting is accepted and validated but not yet applied; applying it, and refusing a hub save of image_tag while the experiment is off, arrive with the follow-up change. Agents need images built for that tag (image-build/README.md, \"Build images for a release\").",
+		Description: "Lets the image_tag setting choose the tag of the bundled scion-* agent images whose tag is latest or absent: \"version\" selects the hub binary's version (latest for a development build), any other value is a literal tag. Images with another tag, a digest, or a registry host are left alone, except exactly <image_registry>/scion-<name> (latest or untagged), the form the image_registry rewrite produces, which is retagged too. While it is off, image_tag is ignored and image references are unchanged; a hub save that sets image_tag is refused, and a settings-file or environment value is reported at startup. Maintenance builds and the system image build keep latest. Agents need images built for that tag (image-build/README.md, \"Build images for a release\").",
 		Default:     false,
 		Layers:      []Layer{LayerServer},
 		Stage:       StageAlpha,

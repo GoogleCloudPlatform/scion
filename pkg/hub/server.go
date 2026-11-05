@@ -105,6 +105,12 @@ type ServerConfig struct {
 	// dispatch, which uses the target broker's reported value
 	// (ptone/scion#3916).
 	NodeImageRegistry string
+	// NodeImageTag is this hub process's SCION_IMAGE_TAG
+	// (config.ImageTagFromEnv, read once at startup): the env layer of
+	// image_tag, which beats every setting for hub-scope reads and for
+	// every dispatch (ptone/scion#6625). A broker's environment is never a
+	// layer.
+	NodeImageTag string
 	// Host is the address to bind to (e.g., "0.0.0.0" or "127.0.0.1").
 	Host string
 	// ReadTimeout is the maximum duration for reading the entire request.
@@ -1715,6 +1721,11 @@ type RemoteHubAgentDefaults struct {
 	// (ptone/scion#4218). It is never sent inline (dispatchTelemetry,
 	// ptone/scion#4224).
 	Telemetry *api.TelemetryConfig `json:"telemetry,omitempty"`
+	// ImageTag is the hub-resolved image_tag (api.HubAgentDefaults.ImageTag),
+	// set only while hub.image_tag_setting is on and the setting is set
+	// (withDispatchImageTag). A broker that predates it ignores it and runs
+	// the images it resolves unchanged.
+	ImageTag string `json:"imageTag,omitempty"`
 }
 
 // RemoteGCPIdentityConfig holds GCP identity configuration sent from Hub to Broker.
@@ -1859,6 +1870,9 @@ type Server struct {
 	// ApplyMaintenanceFromSnapshot and holds the revision last applied, so
 	// an older snapshot never overwrites a newer one (ptone/scion#4457).
 	settingsApply settingsApplyState
+	// imageTagLog holds the image_tag state last logged (LogImageTag,
+	// logImageTagIfChanged).
+	imageTagLog imageTagLogState
 
 	config ServerConfig
 	// startupHubName is the name resolved at startup (ServerConfig.HubName,
@@ -2501,6 +2515,10 @@ type Server struct {
 
 	imageBuildActive atomic.Bool
 	imagePullActive  atomic.Bool
+	// systemImagePull pulls the harness images of POST
+	// /api/v1/system/images/pull; nil is runtime.PullImages. Tests
+	// replace it.
+	systemImagePull systemImagePuller
 
 	// demotionSafe is set to true when ReconcileSuperAdminBindings completes
 	// with a non-empty intended admin set. Zero value (false) means "do NOT
@@ -5401,6 +5419,9 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 	// It is read per dispatch, so a saved image_registry applies to the
 	// next agent (ptone/scion#3904).
 	dispatcher.SetImageRegistryProvider(s.dispatchImageRegistryFor)
+	// image_tag (ptone/scion#6625): read per dispatch, "" while
+	// hub.image_tag_setting is off.
+	dispatcher.SetImageTagProvider(s.dispatchImageTagFor)
 
 	return dispatcher
 }

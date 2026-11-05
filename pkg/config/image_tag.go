@@ -19,15 +19,19 @@ import (
 	"os"
 	"regexp"
 	"strings"
+
+	"github.com/knadh/koanf/v2"
 )
 
 // image_tag selects the tag of the bundled scion-* agent images
 // (ptone/scion#6625). It is gated by the hub.image_tag_setting experiment,
 // which the hub checks; with the experiment off, or the value unset, every
-// image reference is left exactly as it is. Only validation is in use so far
-// (ValidateImageTag, through ValidateSettingValue); nothing calls the
-// resolver or rewrite functions yet, so the setting has no effect on images
-// until the follow-up change that applies it.
+// image reference is left exactly as it is. The hub resolves the setting,
+// expands "version" with its own version (EffectiveImageTag), rewrites the
+// images it sends or checks itself (RewriteImageRef), and sends the
+// resulting tag with each dispatch (api.HubAgentDefaults.ImageTag), so the
+// Runtime Broker applies it to the template and harness-config images it
+// resolves. Maintenance builds and the system image build keep latest.
 //
 // Values:
 //
@@ -167,6 +171,38 @@ func retagBasename(image, tag string) string {
 		return image
 	}
 	return prefix + name + ":" + tag
+}
+
+// ImageTagFileTierFromKoanf reads the settings-file tier of image_tag from
+// a bootstrap koanf (top-level image_tag and profiles.<name>.image_tag), as
+// ImageRegistryFileTierFromKoanf does for image_registry. A nil koanf gives
+// an empty tier.
+func ImageTagFileTierFromKoanf(k *koanf.Koanf) ImageRegistryFileTier {
+	return fileTierFromKoanf(k, "image_tag")
+}
+
+// ImageTagSourceLabel names the layer an image_tag value came from, for
+// logs: env (the hub process's SCION_IMAGE_TAG), hub_settings_profile (a
+// saved hub profile), hub_settings (reserved: a saved hub top-level value,
+// a layer the hub does not have yet; image_tag is stored only per profile),
+// settings_file_profile, settings_file, or unset.
+func ImageTagSourceLabel(s ImageRegistrySource) string {
+	switch s {
+	case ImageRegistrySourceNodeEnv:
+		return "env"
+	case ImageRegistrySourceHubDBProfile:
+		return "hub_settings_profile"
+	case ImageRegistrySourceHubDB:
+		// Reserved for a future hub top-level layer; the hub never
+		// resolves image_tag from it today.
+		return "hub_settings"
+	case ImageRegistrySourceFileProfile:
+		return "settings_file_profile"
+	case ImageRegistrySourceFile:
+		return "settings_file"
+	default:
+		return "unset"
+	}
 }
 
 // ImageTagLayers returns the settings-file image_tag layers for profileName

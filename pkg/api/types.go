@@ -1339,6 +1339,24 @@ type HubAgentDefaults struct {
 	// settings telemetry into the stored config on create, so those
 	// fields rank as agent config here (ptone/scion#4241).
 	Telemetry *TelemetryConfig `json:"telemetry,omitempty"`
+	// ImageTag is the tag the hub's image_tag setting selects for the
+	// bundled scion-* images (ptone/scion#6625), already resolved and
+	// expanded by the hub ("version" becomes the hub's version). The hub
+	// sends it only while hub.image_tag_setting is on and the setting is
+	// set. The broker applies it with config.RewriteImageTag and
+	// config.RewriteImageRef to the image it resolves, before the
+	// image_registry rewrite; an absent value leaves the image unchanged,
+	// which is also what a broker that predates the field does.
+	ImageTag string `json:"imageTag,omitempty"`
+}
+
+// ResolvedImageTag returns the hub-resolved image tag, or "" when the hub
+// sent none. Safe on a nil receiver.
+func (d *HubAgentDefaults) ResolvedImageTag() string {
+	if d == nil {
+		return ""
+	}
+	return d.ImageTag
 }
 
 // ExperimentEnabled reports whether the hub sent name as enabled.
@@ -1371,7 +1389,7 @@ func (d *HubAgentDefaults) IsEmpty() bool {
 		return true
 	}
 	return d.MaxTurns == 0 && d.MaxModelCalls == 0 && d.MaxDuration == "" && d.Resources == nil &&
-		d.AutoExposePorts == nil && len(d.Experiments) == 0 && d.Telemetry == nil
+		d.AutoExposePorts == nil && len(d.Experiments) == 0 && d.Telemetry == nil && d.ImageTag == ""
 }
 
 // EnvAutoExposePorts is the env key that enables in-container port

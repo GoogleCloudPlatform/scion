@@ -208,8 +208,7 @@ func (s *Server) ArchiveObsoleteBundledHarnessConfigs(ctx context.Context) error
 // checkAndUpdateImageStatus resolves the image registry, checks image
 // availability, and persists the result.
 func (s *Server) checkAndUpdateImageStatus(ctx context.Context, hcID, image string) {
-	registry := s.resolveImageRegistry()
-	resolvedImage := config.RewriteImageRegistry(image, registry)
+	_, resolvedImage := s.hubScopeImageRefs(image, s.resolveImageRegistry())
 
 	result := s.imageChecker.CheckRemoteOnly(ctx, resolvedImage)
 	if result.Error != "" {

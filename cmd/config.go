@@ -186,8 +186,8 @@ instead.
 image_tag (experimental, hub.image_tag_setting) selects the tag of the bundled
 scion-* agent images: "version" for the hub binary's version, or a literal tag
 such as v0.3.0-preview.5. A value that is not a valid image tag is refused. The
-value is validated and stored but not yet applied; the hub applies it (only
-while the experiment is on) in a follow-up change.`,
+hub applies it to agent images only while the experiment is on; while it is
+off, the value is ignored and the hub warns at startup.`,
 	Args: cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		key := args[0]

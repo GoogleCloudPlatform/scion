@@ -947,7 +947,7 @@ func (s *Server) handleHarnessConfigCheckImage(w http.ResponseWriter, r *http.Re
 	}
 
 	registry := s.resolveImageRegistry()
-	resolvedImage := config.RewriteImageRegistry(image, registry)
+	image, resolvedImage := s.hubScopeImageRefs(image, registry)
 	slog.Info("checking image status", "id", hc.ID, "image", image,
 		"resolved", config.RedactImageRegistry(resolvedImage), "registry", config.RedactImageRegistry(registry))
 
@@ -1512,7 +1512,7 @@ func (s *Server) handleHarnessConfigImageStatus(w http.ResponseWriter, r *http.R
 	}
 
 	registry := s.resolveImageRegistry()
-	longImage := config.RewriteImageRegistry(image, registry)
+	image, longImage := s.hubScopeImageRefs(image, registry)
 
 	shortImage := image
 	if !imagecheck.IsBareImageName(image) {
@@ -1767,7 +1767,7 @@ func (s *Server) handleHarnessConfigPullImage(w http.ResponseWriter, r *http.Req
 	}
 
 	registry := s.resolveImageRegistry()
-	pullImage := config.RewriteImageRegistry(image, registry)
+	_, pullImage := s.hubScopeImageRefs(image, registry)
 
 	brokerID := r.URL.Query().Get("broker_id")
 	if brokerID != "" {

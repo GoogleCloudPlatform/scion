@@ -65,7 +65,7 @@
     "image_tag": {
       "type": "string",
       "pattern": "^(version|[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?$",
-      "description": "Experimental (hub.image_tag_setting). Tag of the bundled scion-* agent images whose tag is latest or absent: \"version\" selects the hub binary's version (latest for a development build), any other value is a literal tag. Unset leaves images unchanged. Accepted and validated; not yet applied (follow-up change).",
+      "description": "Experimental (hub.image_tag_setting). Tag of the bundled scion-* agent images whose tag is latest or absent: \"version\" selects the hub binary's version (latest for a development build), any other value is a literal tag. Unset leaves images unchanged. Applied by the hub only while the experiment is on.",
       "x-env-var": "SCION_IMAGE_TAG",
       "x-scope": "any",
       "x-since": "1"
@@ -1194,7 +1194,7 @@
         "image_tag": {
           "type": "string",
           "pattern": "^(version|[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?$",
-          "description": "Experimental (hub.image_tag_setting). Image tag for this profile. Overrides the top-level image_tag. Accepted and validated; not yet applied (follow-up change)."
+          "description": "Experimental (hub.image_tag_setting). Image tag for this profile. Overrides the top-level image_tag. Applied by the hub only while the experiment is on."
         },
         "volumes": {
           "type": "array",

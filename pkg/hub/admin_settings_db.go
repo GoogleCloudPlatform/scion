@@ -37,6 +37,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/hubexport"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -590,10 +591,11 @@ func (s *Server) computeSupersededKeys(ops *OperationalSettings) map[string][]Su
 				continue
 			}
 			if sec.Name == "profiles" && exists {
-				// A managed profile without image_registry inherits the
-				// file value, so the profile is compared without it unless
-				// the row holds one (ptone/scion#3916).
-				bootstrapVal = withoutInheritedImageRegistry(bootstrapVal, dbVal)
+				// A managed profile without image_registry or image_tag
+				// inherits the file value, so the profile is compared
+				// without it unless the row holds one (ptone/scion#3916,
+				// ptone/scion#6625).
+				bootstrapVal = withoutInheritedProfileKeys(bootstrapVal, dbVal)
 			}
 			if !exists || !reflect.DeepEqual(dbVal, bootstrapVal) {
 				koanfPath := opsettings.KoanfPathFromSectionKey(sec.Name, key)
@@ -622,25 +624,31 @@ func (s *Server) computeSupersededKeys(ops *OperationalSettings) map[string][]Su
 	return result
 }
 
-// withoutInheritedImageRegistry returns the bootstrap profile bootstrapVal
-// without image_registry when the stored profile dbVal has none: the stored
-// profile then inherits the file value rather than superseding it.
-func withoutInheritedImageRegistry(bootstrapVal, dbVal interface{}) interface{} {
+// withoutInheritedProfileKeys returns the bootstrap profile bootstrapVal
+// without image_registry, and without image_tag, when the stored profile
+// dbVal has none: the stored profile then inherits the file value rather
+// than superseding it.
+func withoutInheritedProfileKeys(bootstrapVal, dbVal interface{}) interface{} {
 	boot, ok := bootstrapVal.(map[string]interface{})
 	if !ok {
 		return bootstrapVal
 	}
-	if db, ok := dbVal.(map[string]interface{}); ok {
-		if v, has := db[endpointsImageRegistryKey]; has && v != "" {
-			return bootstrapVal
+	db, _ := dbVal.(map[string]interface{})
+	drop := map[string]bool{}
+	for _, key := range []string{endpointsImageRegistryKey, profilesImageTagKey} {
+		if v, has := db[key]; has && v != "" {
+			continue
+		}
+		if _, has := boot[key]; has {
+			drop[key] = true
 		}
 	}
-	if _, has := boot[endpointsImageRegistryKey]; !has {
+	if len(drop) == 0 {
 		return bootstrapVal
 	}
 	out := make(map[string]interface{}, len(boot))
 	for k, v := range boot {
-		if k != endpointsImageRegistryKey {
+		if !drop[k] {
 			out[k] = v
 		}
 	}
@@ -709,12 +717,13 @@ func (s *Server) applyRunningValuesForUnsetKeys(resp *ServerConfigResponse, snap
 		}
 	}
 	// image_registry: the managed value, else this replica's file tier,
-	// never a node env; profiles show managed values only. A save compares
-	// with exactly these values (ptone/scion#3916).
+	// never a node env; profiles show managed image_registry and image_tag
+	// values only. A save compares with exactly these values
+	// (ptone/scion#3916, ptone/scion#6625).
 	if ops := s.GetOperationalSettings(); ops != nil {
 		resp.ImageRegistry = shownImageRegistry(ops)
 		_, managed := ops.managedImageRegistries()
-		resp.Profiles = showManagedProfileImageRegistries(resp.Profiles, managed)
+		resp.Profiles = showManagedProfileImageSettings(resp.Profiles, managed, ops.managedProfileImageTags())
 	}
 }
 
@@ -1411,10 +1420,11 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 
 	// profiles replaces the section wholesale: a profile the body leaves
 	// out is deleted with its values, and a profile's omitted or ""
-	// image_registry stores none. GET shows managed profile registries
-	// only, so an echo carries no file copies. A save equal to the
-	// filtered base from one row read (that row's revision is the CAS
-	// base) writes nothing (ptone/scion#3916).
+	// image_registry or image_tag stores none. GET shows managed profile
+	// image_registry and image_tag values only, so an echo carries no file
+	// copies. A save equal to the filtered base from one row read (that
+	// row's revision is the CAS base) writes nothing (ptone/scion#3916,
+	// ptone/scion#6625).
 	if doc, ok := sectionDocs["profiles"]; ok {
 		var row *store.HubSetting
 		rev := int64(0)
@@ -1432,6 +1442,14 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		if err != nil {
 			slog.Error("PUT server-config: failed to decode profiles section", "error", err)
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to read existing settings", nil)
+			return
+		}
+		// image_tag is refused while its experiment is off: a save that
+		// sets or changes a profile's image_tag gets 412
+		// experiment_disabled (ptone/scion#6625). An echo of a stored
+		// value, or a clear, passes, so the rest of the page still saves.
+		if !s.experimentEnabled(experiments.ImageTagSetting) && profilesSaveSetsImageTag(doc, base) {
+			writeImageTagExperimentDisabled(w)
 			return
 		}
 		mergedBaseRevs["profiles"] = rev

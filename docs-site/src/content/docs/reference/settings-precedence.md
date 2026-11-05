@@ -1259,30 +1259,65 @@ exception: an image that is exactly `<image_registry>/scion-<name>`, tagged `lat
 [image registry](#image-registry-order) prefix, so with both set, `scion-claude:latest` becomes
 `<image_registry>/scion-claude:<tag>`.
 
-Its order matches the image registry order, with one difference in the environment layer:
+Its order follows the image registry order, with two differences: the environment layer is the
+Hub's own, and the Hub stores `image_tag` only per profile, so there is no Hub top-level layer:
 
 | Rank | Layer | Where it comes from |
 | :--- | :--- | :--- |
 | 1 | Hub env | `SCION_IMAGE_TAG` of the Hub process |
 | 2 | Hub profile | `profiles.<name>.image_tag` saved in the Hub's settings |
-| 3 | Hub top level | `image_tag` saved in the Hub's settings |
-| 4 | File profile | `profiles.<name>.image_tag` in the settings file |
-| 5 | File top level | `image_tag` in the settings file |
-| 6 | Default | none: images keep their tag |
+| 3 | File profile | `profiles.<name>.image_tag` in the settings file |
+| 4 | File top level | `image_tag` in the settings file |
+| 5 | Default | none: images keep their tag |
+
+An agent resolves the layers for its profile; an agent with no profile uses its Runtime Broker's
+default profile (when that profile is in the Hub's profile catalog). If the catalog holds a single
+profile, that profile is used even when the broker's default differs or is empty. An agent on a flat Runtime
+Broker, which has no profiles, uses the Hub-scope value and receives the tag with each dispatch.
+Image checks and pulls the Hub runs itself (the harness-config image status, check and pull, and
+the system image pull) use the Hub-scope value: the Hub env, then the file top level.
+
+Where the tag is applied:
+
+- The Hub applies it, then the image registry, to an image the user chose explicitly (`--image`),
+  and sends the resolved tag with every create, start, resume and restart. The Runtime Broker
+  applies it to the image it resolves from the template, harness config or settings, before its
+  local-image check (so a locally built `scion-<name>:<tag>` is used) and before the registry
+  rewrite.
+- A reincarnated agent records the tagged image. Its reincarnation plan shows the move from
+  `latest` to the tag as an image change.
+- Maintenance image builds and `POST /api/v1/system/images/build` keep `latest`.
+
+Notes:
 
 - Unlike `SCION_IMAGE_REGISTRY`, a Runtime Broker's own `SCION_IMAGE_TAG` is not a layer. The Hub
   resolves the tag, expanding `version` to its own version, and sends the result with each
-  dispatch, so the Hub alone decides which images its agents run.
-- While the experiment is off, `image_tag` is ignored everywhere. Refusing a Hub save of
-  `image_tag` while it is off, and a startup warning for a value kept in a settings file, arrive
-  with the follow-up change that applies the setting.
+  dispatch, so the Hub alone decides which images its agents run. A Runtime Broker older than
+  this setting ignores the tag it is sent: explicit images still arrive tagged by the Hub, and
+  the images it resolves itself keep their tag.
+- While the experiment is off, `image_tag` is ignored everywhere and image references are exactly
+  as without the setting. A Hub settings save that sets or changes a profile's `image_tag`, in
+  database or settings-file mode, is refused with `412 experiment_disabled` naming the experiment
+  (saving the stored value back, or clearing it, still works), and a value in the environment, a
+  settings file or a saved Hub profile is reported with a warning at startup.
+- The Hub logs the Hub-scope value and its source (`env`, `settings_file` or `unset`), the
+  experiment state and the tag applied, plus, for every profile that sets its own `image_tag`, that
+  profile's value, source (`env`, `hub_settings_profile` or `settings_file_profile`) and tag. It
+  logs once at startup (`image_tag resolved`) and again whenever any of these changes
+  (`image_tag changed`), a save of one profile's value included.
+- `SCION_IMAGE_TAG` is also a variable of `scripts/cloudrun/deploy.sh` (and the Terraform HA
+  runbook), where it selects the tag of the Hub's own image (`hub:${SCION_IMAGE_TAG:-latest}`).
+  The script does not pass it to the Hub process, so setting it there does not set the Hub's
+  `image_tag`, and the Hub's `image_tag` does not change which Hub image the script deploys. To
+  run agents on images that match the deployed Hub, set `image_tag: version`.
+- Saved Hub profiles show and keep only values saved in the Hub. As with `image_registry`, a
+  profile `image_tag` copied from the settings file is never shown in the Hub's profile settings,
+  and saving the profiles does not turn it into a saved Hub value, so a later edit of the settings
+  file still applies.
 - A flat Runtime Broker instance has no `image_tag`; converting a profile that sets one reports
   it as not converted.
 - With `version`, moving the Hub to a new version makes new agents request images with that
   version's tag. Missing images are reported by the image check; build them first.
-
-This release adds the setting, its validation and the experiment. The Hub and Runtime Broker
-apply it to agent images in a follow-up change.
 
 ---
 

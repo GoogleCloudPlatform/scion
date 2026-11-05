@@ -17,6 +17,8 @@ package runtime
 import (
 	"context"
 	"fmt"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
 
 // harnessImageMap maps each bundled harness (a harnesses/<name>/ directory
@@ -35,14 +37,18 @@ var harnessImageMap = map[string]string{
 	"pi":          "scion-pi:latest",
 }
 
-// HarnessImages returns the fully qualified image names needed for the given harness keys.
-func HarnessImages(harnesses []string, registry string) []string {
+// HarnessImages returns the fully qualified image names needed for the
+// given harness keys, with the image_tag tag applied first
+// (config.RewriteImageTag: each bundled image is scion-<name>:latest) and
+// then the registry prefix. An empty tag leaves :latest (ptone/scion#6625).
+func HarnessImages(harnesses []string, registry, tag string) []string {
 	var images []string
 	for _, h := range harnesses {
 		base, ok := harnessImageMap[h]
 		if !ok {
 			continue
 		}
+		base = config.RewriteImageTag(base, tag)
 		if registry != "" {
 			images = append(images, registry+"/"+base)
 		} else {
@@ -61,10 +67,11 @@ type PullResult struct {
 	Total  int    `json:"total"` // total number of images being pulled
 }
 
-// PullImages pulls the images for the given harnesses, streaming PullResult
-// events to the provided callback. Images are pulled sequentially.
-func PullImages(ctx context.Context, rt Runtime, harnesses []string, registry string, onEvent func(PullResult)) error {
-	images := HarnessImages(harnesses, registry)
+// PullImages pulls the images for the given harnesses (HarnessImages with
+// registry and tag), streaming PullResult events to the provided callback.
+// Images are pulled sequentially.
+func PullImages(ctx context.Context, rt Runtime, harnesses []string, registry, tag string, onEvent func(PullResult)) error {
+	images := HarnessImages(harnesses, registry, tag)
 	if len(images) == 0 {
 		return fmt.Errorf("no valid harness images to pull")
 	}
