@@ -19,6 +19,7 @@ package hub
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -125,6 +126,56 @@ func TestSystemMutatingRoutesRequireHubAdmin(t *testing.T) {
 		require.NoError(t, err)
 		require.Contains(t, string(data), "auto_inject_gcloud_adc: true")
 	})
+}
+
+// TestSystemIdentityAppliesWithoutRestart pins GoogleCloudPlatform/scion#4588:
+// the identity saved by the onboarding wizard is what dev-token requests
+// authenticate as on the very next request, not only after a restart.
+func TestSystemIdentityAppliesWithoutRestart(t *testing.T) {
+	srv, s := testWorkstationServer(t)
+	ctx := context.Background()
+	dev := map[string]string{"Authorization": "Bearer " + testDevToken}
+
+	me := func(t *testing.T) (displayName, email string) {
+		t.Helper()
+		rec := doLoopbackSystemRequest(srv, http.MethodGet, "/api/v1/auth/me", "", dev)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var body struct {
+			DisplayName string `json:"displayName"`
+			Email       string `json:"email"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+		return body.DisplayName, body.Email
+	}
+
+	seedSystemSettingsHome(t)
+	name, email := me(t)
+	require.NotEqual(t, "Desk Owner", name)
+	require.NotEqual(t, "owner@example.com", email)
+
+	rec := doLoopbackSystemRequest(srv, http.MethodPut, "/api/v1/system/identity",
+		`{"displayName":"Desk Owner","email":"owner@example.com"}`, dev)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	name, email = me(t)
+	require.Equal(t, "Desk Owner", name)
+	require.Equal(t, "owner@example.com", email)
+
+	// A partial update changes only the field it names.
+	rec = doLoopbackSystemRequest(srv, http.MethodPut, "/api/v1/system/identity",
+		`{"displayName":"Renamed Owner"}`, dev)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	name, email = me(t)
+	require.Equal(t, "Renamed Owner", name)
+	require.Equal(t, "owner@example.com", email)
+
+	// The live identity stays the trusted local dev user, and the stored
+	// record agrees with it.
+	require.True(t, isTrustedLocalDevUser(srv.authConfig.currentDevUser()))
+	stored, err := s.GetUser(ctx, DevUserID)
+	require.NoError(t, err)
+	require.Equal(t, "Renamed Owner", stored.DisplayName)
+	require.Equal(t, "owner@example.com", stored.Email)
 }
 
 func TestSystemReadRoutesStayWorkstationOnly(t *testing.T) {
