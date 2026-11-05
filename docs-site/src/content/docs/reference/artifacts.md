@@ -24,7 +24,7 @@ Each artifact has numbered **versions**. A version is an immutable snapshot of t
 
 ## `scion artifact`
 
-`publish`, `get` and `versions` are available in every CLI mode, including agent mode. `share` and `delete` are available in human mode only.
+`publish`, `get`, `versions`, `comments`, `list` and `view` are available in every CLI mode, including agent mode. `share`, `grants` and `delete` are available in human mode only.
 
 ### `scion artifact publish <file|folder>`
 
@@ -83,7 +83,7 @@ $ scion artifact versions scion://artifact/5f1c2d3e-6b1a-4c55-9f3e-0d6e7a1b2c3d
 
 ### `scion artifact comments <ref>`
 
-Lists the comments, suggested changes and highlights of a review as entries, so a script or an agent can read them without parsing CriticMarkup. A bare reference lists the newest review of the artifact (the CLI prints `Using <ref>@<seq> (review)` on stderr); a reference with `@<seq>` must name a review version, and any other kind is an error. It reads through the same routes as `get`, so the same access rules apply, and every text file of the version is checked against its recorded digest before it is read.
+Lists the comments, suggested changes and highlights of a review as entries, so a script or an agent can read them without parsing CriticMarkup. A bare `<id>` or `scion://artifact/<id>` lists the newest review of the artifact (the CLI prints `Using <ref>@<seq> (review)` on stderr); `<id>@<seq>` or `scion://artifact/<id>@<seq>` must name a review version, and any other kind is an error. It reads through the same routes as `get`, so the same access rules apply, and every text file of the version is checked against its recorded digest before it is read.
 
 Each entry has a kind: `comment` (`{>>note<<}`), `suggestion` (`{++insert++}`, `{--delete--}` or `{~~old~>new~~}`, with `change` set to `insert`, `delete` or `replace`), or `highlight` (`{==text==}`). A comment written directly after a highlight, with no text between them, is a comment on the highlighted text (its `anchor`); one written directly after a suggestion is that suggestion's `comment`. CriticMarkup records no author in the marks, so every entry carries the review version's publisher and time. The review's `--note` is shown first.
 

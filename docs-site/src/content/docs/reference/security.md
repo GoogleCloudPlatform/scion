@@ -213,7 +213,7 @@ When `gcpsm` is configured, a hybrid model is used:
 - **Secret values** are stored in GCP Secret Manager with automatic versioning.
 - GCP SM secret names follow the pattern: `scion-{scope}-{sha256(scopeID)[:12]}-{name}`.
 
-The `local` backend now encrypts secret values at rest using AES-256-GCM, with domain-separated key derivation from the hub signing secret. Legacy plaintext values are transparently readable and will be automatically re-encrypted upon the next write operation.
+The `local` backend now encrypts secret values at rest using AES-256-GCM, with domain-separated key derivation from the hub signing secret. Legacy plaintext values are transparently readable and will be automatically re-encrypted upon the next write operation. When a database encryption policy (`hub_encryption_policy`) is active, secret writes are fenced (`ErrEncryptionPolicyMismatch`): any new or changed secret value must be an `enc:v2:` envelope whose key ID is in the policy's `allowed_write_kids` (or an empty reference-only value paired with a non-empty `secret_ref`), and any write that would leave a secret row with neither an encrypted value nor a `secret_ref`—including a metadata-only `UpsertSecret` update of an older row whose stored ciphertext does not satisfy the active policy, or `UpdateSecretRefIfMatches` clearing `secret_ref` on a reference-only row—is refused.
 
 ### 4.2 Secret Scopes and Resolution
 
@@ -263,6 +263,7 @@ For headless environments (CI/CD, automation), Scion supports **user access toke
 Scion ensures that sensitive credentials (GCP Service Accounts, API keys for LLMs) are propagated into agent containers securely.
 - **Docker / Podman**: Injected via environment variables or read-only bind mounts for file-type secrets. File secrets are written to a temporary directory and mounted into the container at the target path.
 - **Kubernetes**: Propagated via Kubernetes Secrets or Secret Manager CSI drivers (e.g., GCP Secret Manager).
+- **Cloud Run (IAP SSH & OS Login)**: Each IAP SSH exec (`IAPExecConnector`) looks up the target Cloud Run instance via the Cloud Run Instances API and sets `service_account` on the OS Login `signSshPublicKey` request to the instance's own service account so the signed SSH certificate is scoped to that service account. If the instance's service account cannot be determined (either the lookup fails or the instance reports none), the exec fails and drops any cached key rather than signing an unscoped key. A cached signed key is reused only when the instance name, instance UID, and service account all match and at least 60 seconds remain before expiry, and `Stop`, `Delete`, and launch cleanup (`DeleteResource`) drop the cached key.
 - **Broker Mode Isolation**: When agents are dispatched via the Hub, the credential pipeline only uses hub-resolved secrets and environment variables. The broker operator's host environment and filesystem are never scanned, preventing credential leakage into hub-dispatched agents.
 - **Isolation**: Agent home directories and non-git project data are isolated on the host filesystem and externalized from the workspace to prevent cross-agent data leakage and unauthorized traversal.
 - **Shadow Mounts**: Scion uses `tmpfs` shadow mounts to definitively block agents from accessing `.scion` configuration data or other agents' workspaces within the same project.
