@@ -121,6 +121,14 @@ func (e Experiment) ReviewOverdue(now time.Time) bool {
 // which uses an NFS home only when it is on.
 const K8sNFSHome = "hub.k8s_nfs_home"
 
+// CloudRunNativeIdentity gates running each Cloud Run instance as the GCP
+// identity the hub resolved for its agent, instead of the runtime's one
+// configured service account. The hub resolves it at each agent dispatch
+// and sends it to the broker, which reads it only from the dispatch
+// (HubAgentDefaults). While it is off, Cloud Run instances are created
+// exactly as before.
+const CloudRunNativeIdentity = "hub.cloudrun_native_identity"
+
 // FlatRuntimeBrokers gates flat (single-target) Runtime Brokers: the hub
 // accepts single-target Runtime Broker registrations, pins new agents to
 // that target and refuses mismatched dispatches
@@ -463,6 +471,17 @@ var compiled = []Experiment{
 		Issue:       "ptone/scion#2615",
 		Owner:       "k8s-runtime",
 		ReviewBy:    "2027-01-04",
+	},
+	{
+		Name:        CloudRunNativeIdentity,
+		Title:       "Native agent identity on Cloud Run Instances",
+		Description: "Runs each Cloud Run instance as the service account the hub assigned to its agent, taken from the dispatch and checked against the Runtime Broker's cloudrun.assignable_service_accounts list, instead of the runtime's configured account. Existing instances are recreated at their next start. Other identity modes are refused on Cloud Run while it is on.",
+		Default:     false,
+		Layers:      []Layer{LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#7374",
+		Owner:       "cloudrun-runtime",
+		ReviewBy:    "2027-02-04",
 	},
 	{
 		Name:        FlatRuntimeBrokers,

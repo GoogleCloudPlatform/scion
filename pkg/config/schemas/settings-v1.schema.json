@@ -549,7 +549,12 @@
             "network": { "type": "string" },
             "subnetwork": { "type": "string" },
             "nfs_server": { "type": "string" },
-            "nfs_export": { "type": "string" }
+            "nfs_export": { "type": "string" },
+            "assignable_service_accounts": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "Global settings only. Service accounts this Runtime Broker may run a Cloud Run instance as for GCP identity mode \"assign\" while the hub.cloudrun_native_identity experiment is on. Empty or unset: assign is refused. Ignored in a project's settings.yaml."
+            }
           },
           "additionalProperties": false
         },

@@ -97,6 +97,13 @@ type startContext struct {
 	// nil when the dispatch is not one. Compared the same way as
 	// AssignSelection.
 	BlockSelection *dispatchProfileSelection
+
+	// CloudRunSelection is the profile and runtime entry a Cloud Run
+	// dispatch with the hub.cloudrun_native_identity experiment read its
+	// allow-list from, or nil when no Cloud Run identity was resolved.
+	// Compared the same way as AssignSelection
+	// (rejectCloudRunIdentityRuntimeChange).
+	CloudRunSelection *dispatchProfileSelection
 }
 
 // startContextInputs captures the handler-specific fields that vary across
@@ -579,6 +586,22 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		gcpMetadataMode = store.GCPMetadataModePassthrough
 	}
 
+	// Cloud Run Instances with the hub.cloudrun_native_identity experiment
+	// on: the instance itself runs as the identity (gcp_identity_cloudrun.go),
+	// or the dispatch is refused here, before any provisioning. "assign"
+	// uses the instance's own metadata server instead of the sciontool
+	// metadata emulator, so, as for Kubernetes Workload Identity above, the
+	// mode is rewritten to "passthrough" and the account and project are
+	// set as informational env in the passthrough arm below. The emulator
+	// and its env plumbing are unchanged for every other dispatch.
+	crIdentity, sce := s.resolveCloudRunIdentity(ctx, in, dispatchRuntimeType, gcpMetadataMode, gcpIdentityProfile)
+	if sce != nil {
+		return nil, sce
+	}
+	if crIdentity.Identity != nil && crIdentity.Identity.Mode == store.GCPMetadataModeAssign {
+		gcpMetadataMode = store.GCPMetadataModePassthrough
+	}
+
 	// --- Build merged environment ---
 	env := make(map[string]string)
 
@@ -874,6 +897,14 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 			env["SCION_METADATA_PROJECT_ID"] = assignIdentity.ProjectID
 			classifyBrokerEnv("SCION_METADATA_PROJECT_ID", api.EnvKindPlain)
 		}
+		// The same informational env for a Cloud Run "assign" dispatch that
+		// was rewritten to passthrough above.
+		if crIdentity.SAEmail != "" {
+			env["SCION_METADATA_SA_EMAIL"] = crIdentity.SAEmail
+			classifyBrokerEnv("SCION_METADATA_SA_EMAIL", api.EnvKindPlain)
+			env["SCION_METADATA_PROJECT_ID"] = crIdentity.ProjectID
+			classifyBrokerEnv("SCION_METADATA_PROJECT_ID", api.EnvKindPlain)
+		}
 	default:
 		return nil, &startContextError{
 			Status: http.StatusBadRequest,
@@ -958,6 +989,9 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// Recomputed on every dispatch and never persisted, like the field
 	// above; see api.StartOptions.KubernetesBlockIdentity.
 	opts.KubernetesBlockIdentity = blockIdentity.Identity
+	// Recomputed on every dispatch and never persisted; see
+	// api.StartOptions.CloudRunIdentity.
+	opts.CloudRunIdentity = crIdentity.Identity
 
 	if len(in.SharedDirs) > 0 {
 		opts.SharedDirs = in.SharedDirs
@@ -1420,6 +1454,10 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	if blockIdentity.Identity != nil {
 		sel := blockIdentity.Selection
 		sc.BlockSelection = &sel
+	}
+	if crIdentity.Identity != nil {
+		sel := crIdentity.Selection
+		sc.CloudRunSelection = &sel
 	}
 	return sc, nil
 }

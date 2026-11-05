@@ -2712,6 +2712,7 @@ authDone:
 			return nil
 		}(),
 		KubernetesBlockIdentity: opts.KubernetesBlockIdentity != nil,
+		CloudRunIdentity:        opts.CloudRunIdentity,
 		Kubernetes: func() *api.KubernetesConfig {
 			// Start from the template/agent config's Kubernetes settings
 			// (namespace, resources, node selector, etc.), then ALWAYS

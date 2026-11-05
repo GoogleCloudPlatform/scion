@@ -634,33 +634,8 @@ func (vs *VersionedSettings) ResolveKubernetesNamespace(runtimeEntryName string)
 // an error — this exists only to produce an operator-facing warning, not to
 // change any dispatch outcome.
 func ProjectSettingsHasKubernetesServiceAccountMappings(projectPath, runtimeEntryName, profileName string) bool {
-	// projectPath may be a project root (not yet resolved to its .scion
-	// directory) — GetResolvedProjectDir is the same first step every other
-	// caller in this codebase takes before LoadEffectiveSettings/
-	// LoadVersionedSettings (e.g. resolveDispatchProfileSelection in
-	// pkg/runtimebroker). resolveEffectiveProjectPath on its own does not do
-	// this: called with a non-empty, non-"global"/"home" path, it only
-	// applies the external-split-storage redirect (GetProjectConfigDir) on
-	// top of whatever was passed in, assuming it already points at a .scion
-	// directory.
-	resolvedProjectDir, err := GetResolvedProjectDir(projectPath)
-	if err != nil || resolvedProjectDir == "" {
-		return false
-	}
-	globalDir, _ := GetGlobalDir()
-	if resolvedProjectDir == globalDir {
-		return false
-	}
-	effectiveProjectPath := resolveEffectiveProjectPath(resolvedProjectDir)
-	if effectiveProjectPath == "" || effectiveProjectPath == globalDir {
-		return false
-	}
-	settingsPath := GetSettingsPath(effectiveProjectPath)
-	if settingsPath == "" {
-		return false
-	}
-	raw, err := os.ReadFile(settingsPath)
-	if err != nil {
+	raw, ok := readProjectOwnSettings(projectPath)
+	if !ok {
 		return false
 	}
 	var probe struct {
@@ -685,6 +660,100 @@ func ProjectSettingsHasKubernetesServiceAccountMappings(projectPath, runtimeEntr
 		}
 	}
 	return false
+}
+
+// readProjectOwnSettings returns the bytes of a project's OWN settings file,
+// never merged with the global settings, or false when projectPath is the
+// global directory or the file cannot be found or read. Best-effort, for
+// the operator warnings of ProjectSettingsHasKubernetesServiceAccountMappings
+// and ProjectSettingsHasCloudRunAssignableServiceAccounts.
+func readProjectOwnSettings(projectPath string) ([]byte, bool) {
+	// projectPath may be a project root (not yet resolved to its .scion
+	// directory) — GetResolvedProjectDir is the same first step every other
+	// caller in this codebase takes before LoadEffectiveSettings/
+	// LoadVersionedSettings (e.g. resolveDispatchProfileSelection in
+	// pkg/runtimebroker). resolveEffectiveProjectPath on its own does not do
+	// this: called with a non-empty, non-"global"/"home" path, it only
+	// applies the external-split-storage redirect (GetProjectConfigDir) on
+	// top of whatever was passed in, assuming it already points at a .scion
+	// directory.
+	resolvedProjectDir, err := GetResolvedProjectDir(projectPath)
+	if err != nil || resolvedProjectDir == "" {
+		return nil, false
+	}
+	globalDir, _ := GetGlobalDir()
+	if resolvedProjectDir == globalDir {
+		return nil, false
+	}
+	effectiveProjectPath := resolveEffectiveProjectPath(resolvedProjectDir)
+	if effectiveProjectPath == "" || effectiveProjectPath == globalDir {
+		return nil, false
+	}
+	settingsPath := GetSettingsPath(effectiveProjectPath)
+	if settingsPath == "" {
+		return nil, false
+	}
+	raw, err := os.ReadFile(settingsPath)
+	if err != nil {
+		return nil, false
+	}
+	return raw, true
+}
+
+// ProjectSettingsHasCloudRunAssignableServiceAccounts reports whether a
+// project's OWN settings.yaml sets cloudrun.assignable_service_accounts on
+// the named runtime entry. Like
+// ProjectSettingsHasKubernetesServiceAccountMappings it exists only so a
+// caller can warn that the setting has no effect there: the allow-list is
+// read only from the broker's global settings. Best-effort: an unreadable
+// file returns false.
+func ProjectSettingsHasCloudRunAssignableServiceAccounts(projectPath, runtimeEntryName string) bool {
+	if runtimeEntryName == "" {
+		return false
+	}
+	raw, ok := readProjectOwnSettings(projectPath)
+	if !ok {
+		return false
+	}
+	var probe struct {
+		Runtimes map[string]struct {
+			CloudRun *struct {
+				AssignableServiceAccounts []string `yaml:"assignable_service_accounts" json:"assignable_service_accounts"`
+			} `yaml:"cloudrun" json:"cloudrun"`
+		} `yaml:"runtimes" json:"runtimes"`
+	}
+	if err := unmarshalSettingsYAML(raw, &probe); err != nil {
+		return false
+	}
+	rt, ok := probe.Runtimes[runtimeEntryName]
+	return ok && rt.CloudRun != nil && len(rt.CloudRun.AssignableServiceAccounts) > 0
+}
+
+// CloudRunAssignableServiceAccountWarnings returns a warning for each entry
+// of runtimes.<runtimeEntryName>.cloudrun.assignable_service_accounts in vs
+// that, lower-cased and trimmed, does not match gsaEmailPattern (a Cloud
+// Run instance can only run as a service account), so a typo or a pasted
+// user email is reported where the list is read rather than only as a
+// refused dispatch. Each warning names the entry's position, never its
+// value. Entries are still compared case-insensitively and trimmed where
+// they are used.
+func CloudRunAssignableServiceAccountWarnings(vs *VersionedSettings, runtimeEntryName string) []string {
+	if vs == nil {
+		return nil
+	}
+	entry, ok := vs.Runtimes[runtimeEntryName]
+	if !ok || entry.CloudRun == nil {
+		return nil
+	}
+	var warnings []string
+	for i, listed := range entry.CloudRun.AssignableServiceAccounts {
+		if !gsaEmailPattern.MatchString(strings.ToLower(strings.TrimSpace(listed))) {
+			warnings = append(warnings, fmt.Sprintf(
+				"runtimes.%s.cloudrun.assignable_service_accounts[%d] is not a service account email; a Cloud Run instance cannot run as it",
+				runtimeEntryName, i))
+		}
+	}
+	return warnings
 }
 
 // gsaEmailPattern matches a syntactically well-formed, lowercase GCP service
@@ -2753,6 +2822,15 @@ type CloudRunConfig struct {
 	Subnetwork     string `json:"subnetwork,omitempty" yaml:"subnetwork,omitempty" koanf:"subnetwork"`
 	NFSServer      string `json:"nfs_server,omitempty" yaml:"nfs_server,omitempty" koanf:"nfs_server"`
 	NFSExport      string `json:"nfs_export,omitempty" yaml:"nfs_export,omitempty" koanf:"nfs_export"`
+
+	// AssignableServiceAccounts lists the service accounts this Runtime
+	// Broker may run a Cloud Run instance as for GCP identity mode "assign"
+	// while the hub.cloudrun_native_identity experiment is on. It is read
+	// from the broker's global settings only: the same key in a project's
+	// own settings.yaml is ignored (see
+	// ProjectSettingsHasCloudRunAssignableServiceAccounts). Empty or unset
+	// means no account is attachable, so "assign" is refused.
+	AssignableServiceAccounts []string `json:"assignable_service_accounts,omitempty" yaml:"assignable_service_accounts,omitempty" koanf:"assignable_service_accounts"`
 }
 
 // V1CloudRunInstancesConfig holds Cloud Run Instances runtime settings.
