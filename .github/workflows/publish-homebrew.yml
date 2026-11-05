@@ -193,15 +193,14 @@ jobs:
           path: scion
           persist-credentials: false
 
-      # The token is an action input, never a command-line argument. The
-      # tap checkout keeps it only so the push step below can use it.
+      # The tap is public: check it out without credentials. Only the push
+      # step below sees the token.
       - name: Checkout tap
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
         with:
           repository: homebrew-scion/homebrew-scion
-          token: ${{ secrets.HOMEBREW_SCION_TOKEN }}
           path: tap
-          persist-credentials: true
+          persist-credentials: false
 
       - name: Generate formula
         env:
@@ -214,6 +213,7 @@ jobs:
         working-directory: tap
         env:
           TAG: ${{ needs.gate.outputs.tag }}
+          HOMEBREW_SCION_TOKEN: ${{ secrets.HOMEBREW_SCION_TOKEN }}
         run: |
           if git diff --quiet -- Formula/scion.rb; then
             echo "::notice::Formula/scion.rb already matches ${TAG}; nothing to push."
@@ -225,5 +225,11 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add Formula/scion.rb
           git commit -m "scion ${TAG}"
-          git push origin "HEAD:refs/heads/${branch}"
+          # The credential helper reads the token from the environment when
+          # git runs it, so the token is never a command-line argument and is
+          # never written to disk. The single quotes keep it unexpanded here.
+          # shellcheck disable=SC2016
+          git -c credential.helper= \
+            -c 'credential.helper=!f() { echo username=x-access-token; echo "password=${HOMEBREW_SCION_TOKEN}"; }; f' \
+            push https://github.com/homebrew-scion/homebrew-scion.git "HEAD:refs/heads/${branch}"
           echo "Updated homebrew-scion/homebrew-scion Formula/scion.rb to ${TAG}" >> "$GITHUB_STEP_SUMMARY"
