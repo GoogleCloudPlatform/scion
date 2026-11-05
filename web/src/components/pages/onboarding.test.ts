@@ -39,6 +39,10 @@ interface OnboardingPage extends HTMLElement {
   gcloudADCAvailable: boolean;
   autoInjectGcloudADC: boolean;
   selectedHarnesses: Set<string>;
+  harnessConfigs: Array<{ slug: string }>;
+  harnessLoadFailed: boolean;
+  loadHarnessConfigs(): Promise<void>;
+  handleSaveRegistryAndNext(): Promise<void>;
   handleHarnessesNext(): Promise<void>;
   registryInput: string;
   brokerRestartNeeded: boolean;
@@ -302,5 +306,148 @@ describe('onboarding registry step: pre-fill', () => {
     const p = registryPrefill({ imageRegistry: 'old.example/scion' });
     expect(p.input).toBe('old.example/scion');
     expect(p.fromNodeEnv).toBe(false);
+  });
+});
+
+describe('onboarding harness step: harness config list', () => {
+  const listPath = '/api/v1/harness-configs?scope=global&status=active';
+  const configs = [
+    {
+      id: 'hc-1',
+      name: 'claude',
+      slug: 'claude',
+      harness: 'claude',
+      status: 'active',
+      scope: 'global',
+    },
+    {
+      id: 'hc-2',
+      name: 'codex',
+      slug: 'codex',
+      harness: 'codex',
+      status: 'active',
+      scope: 'global',
+    },
+  ];
+
+  function listCalls(): number {
+    return vi.mocked(apiFetch).mock.calls.filter((c) => c[0] === listPath).length;
+  }
+
+  afterEach(() => {
+    sessionStorage.clear();
+  });
+
+  it('a resume that lands on the harness step lists the harness configs', async () => {
+    // A reload after the restart the registry step asks for: onboarding was
+    // started and the status reports harnesses seeded.
+    sessionStorage.setItem('onboardingStarted', 'true');
+    sessionStorage.setItem(
+      'onboardingStatus',
+      JSON.stringify({ identitySet: true, runtimeOK: true, harnessesSeeded: true })
+    );
+    vi.mocked(apiFetch).mockImplementation((path) =>
+      Promise.resolve(
+        path === listPath ? jsonResponse({ harnessConfigs: configs }) : jsonResponse({}, 404)
+      )
+    );
+    const el = createPage();
+    document.body.appendChild(el);
+    try {
+      await vi.waitFor(() => {
+        expect(el.shadowRoot?.querySelector('.harness-list')).not.toBeNull();
+      });
+      await el.updateComplete;
+
+      expect(el.currentStep).toBe(4);
+      expect(listCalls()).toBe(1);
+      expect(el.harnessConfigs.map((hc) => hc.slug)).toEqual(['claude', 'codex']);
+      expect(el.error).toBeNull();
+      const listed = el.shadowRoot?.querySelector('.harness-list')?.textContent ?? '';
+      expect(listed).toContain('claude');
+      expect(listed).toContain('codex');
+    } finally {
+      el.remove();
+    }
+  });
+
+  it('a failed list request shows an actionable error and a retry, not an empty list', async () => {
+    vi.mocked(apiFetch).mockImplementation((path) =>
+      Promise.resolve(
+        path === listPath
+          ? jsonResponse({ error: { message: 'harness configs unavailable' } }, 500)
+          : jsonResponse({}, 404)
+      )
+    );
+    const el = createPage();
+    document.body.appendChild(el);
+    try {
+      await vi.waitFor(() => {
+        expect(el.shadowRoot?.querySelector('.loading-state')).toBeNull();
+      });
+      await el.loadHarnessConfigs();
+      el.currentStep = 4;
+      await el.updateComplete;
+
+      expect(el.harnessConfigs).toEqual([]);
+      expect(el.harnessLoadFailed).toBe(true);
+      expect(el.error).toBe(
+        'harness configs unavailable (HTTP 500). Retry, or check the server log.'
+      );
+      expect(el.shadowRoot?.querySelector('.error-banner')?.textContent).toContain(
+        'harness configs unavailable'
+      );
+      const retry = el.shadowRoot?.querySelector<HTMLElement>('.harness-load-retry');
+      expect(retry).not.toBeNull();
+
+      // The retry loads the list again; a success clears the error.
+      vi.mocked(apiFetch).mockImplementation((path) =>
+        Promise.resolve(
+          path === listPath ? jsonResponse({ harnessConfigs: configs }) : jsonResponse({}, 404)
+        )
+      );
+      retry!.click();
+      await vi.waitFor(() => {
+        expect(el.harnessConfigs.map((hc) => hc.slug)).toEqual(['claude', 'codex']);
+      });
+      expect(el.error).toBeNull();
+      expect(el.harnessLoadFailed).toBe(false);
+    } finally {
+      el.remove();
+    }
+  });
+
+  it('a failed list request without a message shows the fallback error', async () => {
+    const el = createPage();
+    respond(new Response('bad gateway', { status: 502 }));
+
+    await el.loadHarnessConfigs();
+
+    expect(el.error).toBe(
+      'Failed to load harness configurations (HTTP 502). Retry, or check the server log.'
+    );
+    expect(el.harnessLoadFailed).toBe(true);
+  });
+
+  it('saving the registry and going on loads the list once', async () => {
+    vi.mocked(apiFetch).mockImplementation((path) => {
+      if (path === listPath) return Promise.resolve(jsonResponse({ harnessConfigs: configs }));
+      if (path === '/api/v1/system/registry') return Promise.resolve(jsonResponse({ ok: true }));
+      if (path === '/api/v1/system/status') {
+        return Promise.resolve(jsonResponse({ complete: false, embeddedBrokerID: 'b-1' }));
+      }
+      return Promise.resolve(jsonResponse({}, 404));
+    });
+    const el = createPage();
+    el.currentStep = 3;
+    el.registryInput = 'ghcr.io/example';
+
+    await el.handleSaveRegistryAndNext();
+    await vi.waitFor(() => {
+      expect(el.harnessConfigs.map((hc) => hc.slug)).toEqual(['claude', 'codex']);
+    });
+
+    expect(el.currentStep).toBe(4);
+    expect(listCalls()).toBe(1);
   });
 });
