@@ -15,9 +15,13 @@
 
 
 # Determine version
-# Only set VERSION if we are exactly on a tag (semver-ish)
-if git describe --tags --exact-match >/dev/null 2>&1; then
-    VERSION=$(git describe --tags --exact-match)
+# Only set VERSION if we are exactly on a tag. Prefer v* tags: a preview or
+# stable tag shares its commit with a nightly tag, and among lightweight tags
+# git describe picks the first in refname order (nightly-* before v*).
+if VERSION=$(git describe --tags --exact-match --match 'v*' 2>/dev/null); then
+    :
+elif VERSION=$(git describe --tags --exact-match 2>/dev/null); then
+    :
 else
     VERSION=""
 fi
