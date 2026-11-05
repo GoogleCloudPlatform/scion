@@ -238,7 +238,16 @@ type Server struct {
 	idFetchMu sync.Mutex
 	idFetches map[string]chan struct{}
 
-	cancel             context.CancelFunc
+	cancel context.CancelFunc
+	// lnMu guards srv, ln and stopped. srv and ln are the HTTP server and
+	// listener currently serving (installed by Start or a health-check
+	// restart, always under lnMu); Stop shuts srv down and closes ln.
+	// stopped is set by Stop so that neither Start nor a restart installs a
+	// server afterwards. Read srv through currentSrv.
+	lnMu               sync.Mutex
+	ln                 net.Listener
+	stopped            bool
+	stopOnce           sync.Once
 	iptablesConfigured bool        // whether iptables redirect was successfully set up
 	metadataBlocked    blockMethod // which blocking method was applied (block mode only)
 
@@ -422,6 +431,12 @@ func (s *Server) buildMux() http.Handler {
 // If the port is already in use (e.g. a stale metadata server from a previous
 // init cycle), Start attempts to gracefully shut it down and retry.
 func (s *Server) Start(ctx context.Context) error {
+	// A stopped server never starts again: refuse before binding or
+	// installing any interception, so there is nothing to undo.
+	if s.isStopped() {
+		return errStartAfterStop
+	}
+
 	ctx, cancel := context.WithCancel(ctx)
 	s.cancel = cancel
 
@@ -443,9 +458,13 @@ func (s *Server) Start(ctx context.Context) error {
 		activeServerMu.Lock()
 		prev := activeServer
 		activeServerMu.Unlock()
-		if prev != nil && prev.srv != nil {
+		var prevSrv *http.Server
+		if prev != nil {
+			prevSrv = prev.currentSrv()
+		}
+		if prevSrv != nil {
 			log.Info("Forcefully closing previous metadata server instance")
-			_ = prev.srv.Close()
+			_ = prevSrv.Close()
 		} else {
 			// Fallback: try the HTTP shutdown endpoint (cross-process or
 			// the package-level reference was lost).
@@ -501,9 +520,22 @@ func (s *Server) Start(ctx context.Context) error {
 		return err
 	}
 
-	s.srv = &http.Server{
+	srv := &http.Server{
 		Addr:    addr,
 		Handler: s.buildMux(),
+	}
+	if startBeforeServeHook != nil {
+		startBeforeServeHook(s)
+	}
+	// Backstop for a Stop that lands between the entry check and here:
+	// setServing then refuses and closes ln, and Start unwinds.
+	if !s.setServing(ln, srv) {
+		s.cleanupInterception()
+		cancel()
+		if rmErr := os.Remove(s.shutdownTokenPath); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
+			log.Debug("Failed to remove metadata shutdown token file %s: %v", s.shutdownTokenPath, rmErr)
+		}
+		return errStartAfterStop
 	}
 
 	// Track this server so a future Start() can forcefully close it.
@@ -513,7 +545,7 @@ func (s *Server) Start(ctx context.Context) error {
 
 	go func() {
 		log.Info("Metadata server started on %s (mode=%s)", addr, s.config.Mode)
-		if err := s.srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			log.Error("Metadata server error: %v", err)
 		}
 	}()
@@ -530,7 +562,9 @@ func (s *Server) Start(ctx context.Context) error {
 		s.cleanupInterception()
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer shutdownCancel()
-		_ = s.srv.Shutdown(shutdownCtx)
+		if cur := s.currentSrv(); cur != nil {
+			_ = cur.Shutdown(shutdownCtx)
+		}
 	}()
 
 	return nil
@@ -619,10 +653,71 @@ func (s *Server) configureMetadataInterception(uid int) error {
 	return nil
 }
 
+// InterceptionInstalled reports whether Start installed any network-level
+// interception rule (the nat REDIRECT or the filter block). Valid after
+// Start returns; false when interception was skipped (non-root, host
+// networking) or Start failed.
+func (s *Server) InterceptionInstalled() bool {
+	return s.iptablesConfigured || s.metadataBlocked != blockNone
+}
+
 // Stop gracefully shuts down the server. It closes the listener synchronously
 // so the port is released before Stop returns. The background goroutine handles
 // iptables cleanup separately.
+//
+// Stop is idempotent: only the first call does anything, so sciontool init
+// can stop the server from a deferred call on every return path and again
+// on normal shutdown.
 func (s *Server) Stop() {
+	s.stopOnce.Do(s.stop)
+}
+
+// errStartAfterStop and errRestartAfterStop are returned by Start and by a
+// health-check restart on a server that has been stopped.
+var (
+	errStartAfterStop   = errors.New("metadata server: Start after Stop")
+	errRestartAfterStop = errors.New("metadata server stopped; not restarting")
+)
+
+// startBeforeServeHook, when non-nil, runs in Start after the listener and
+// interception are in place and just before setServing. Tests only: it
+// lets a test land a Stop exactly between Start's entry check and its
+// setServing backstop.
+var startBeforeServeHook func(*Server)
+
+// setServing installs srv and ln as what Stop must shut down. If Stop has
+// already run, it closes ln instead and returns false.
+func (s *Server) setServing(ln net.Listener, srv *http.Server) bool {
+	s.lnMu.Lock()
+	defer s.lnMu.Unlock()
+	if s.stopped {
+		_ = ln.Close()
+		return false
+	}
+	s.ln, s.srv = ln, srv
+	return true
+}
+
+// currentSrv returns the HTTP server currently installed, or nil.
+func (s *Server) currentSrv() *http.Server {
+	s.lnMu.Lock()
+	defer s.lnMu.Unlock()
+	return s.srv
+}
+
+// isStopped reports whether Stop has run.
+func (s *Server) isStopped() bool {
+	s.lnMu.Lock()
+	defer s.lnMu.Unlock()
+	return s.stopped
+}
+
+func (s *Server) stop() {
+	s.lnMu.Lock()
+	s.stopped = true
+	ln, srv := s.ln, s.srv
+	s.lnMu.Unlock()
+
 	activeServerMu.Lock()
 	if activeServer == s {
 		activeServer = nil
@@ -633,10 +728,22 @@ func (s *Server) Stop() {
 	// released before the caller proceeds. The context-cancellation goroutine
 	// still runs for iptables cleanup; http.Server.Shutdown is safe to call
 	// more than once.
-	if s.srv != nil {
+	if srv != nil {
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 2*time.Second)
-		_ = s.srv.Shutdown(shutdownCtx)
+		_ = srv.Shutdown(shutdownCtx)
 		shutdownCancel()
+	}
+	// http.Server.Shutdown closes only the listeners Serve has already
+	// registered. Start runs Serve in a goroutine, so a Stop that follows
+	// Start closely can run before Serve registers the listener; close it
+	// here so the port is always released before Stop returns. Shutdown
+	// runs first, so a Serve that starts late sees the server shutting down
+	// and returns ErrServerClosed. net.ErrClosed only means Serve already
+	// closed it.
+	if ln != nil {
+		if err := ln.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			log.Warn("Metadata server: closing listener: %v", err)
+		}
 	}
 	if s.shutdownTokenPath != "" {
 		if err := os.Remove(s.shutdownTokenPath); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -799,29 +906,41 @@ func (s *Server) restartHTTP(ctx context.Context) error {
 		return fmt.Errorf("restart limit reached")
 	}
 
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 2*time.Second)
-	_ = s.srv.Shutdown(shutdownCtx)
-	shutdownCancel()
+	if old := s.currentSrv(); old != nil {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_ = old.Shutdown(shutdownCtx)
+		shutdownCancel()
+	}
 
 	bindIP := s.resolvedBindIP
 	if bindIP == "" {
 		bindIP = "127.0.0.1"
 	}
 	addr := fmt.Sprintf("%s:%d", bindIP, s.config.Port)
+	// Check stopped, bind and install under one hold of lnMu, so a Stop
+	// either runs first (and the restart binds nothing) or runs after the
+	// new listener is installed (and closes it).
+	s.lnMu.Lock()
+	if s.stopped {
+		s.lnMu.Unlock()
+		return errRestartAfterStop
+	}
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
+		s.lnMu.Unlock()
 		return fmt.Errorf("restart listen: %w", err)
 	}
-
-	s.srv = &http.Server{
+	srv := &http.Server{
 		Addr:    addr,
 		Handler: s.buildMux(),
 	}
+	s.ln, s.srv = ln, srv
+	s.lnMu.Unlock()
 
 	go func() {
 		log.Info("Metadata server restarted on %s (attempt %d/%d)",
 			addr, s.restartCount, maxRestarts)
-		if err := s.srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			log.Error("Metadata server error after restart: %v", err)
 		}
 	}()
