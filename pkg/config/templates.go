@@ -203,13 +203,26 @@ func normalizeYAMLMappingKeys(node *yaml.Node) {
 	}
 }
 
+// templateLookupName returns the template name a lookup resolves. The empty
+// name means the default template, so no lookup joins an empty name under a
+// templates directory and resolves that directory itself as a template.
+func templateLookupName(name string) string {
+	if name == "" {
+		return "default"
+	}
+	return name
+}
+
 func FindTemplate(name string) (*Template, error) {
 	return FindTemplateWithContext(context.Background(), name)
 }
 
 // FindTemplateWithContext finds a template by name, supporting remote URIs.
 // Remote templates are fetched and cached locally before being returned.
+// The empty name resolves the default template.
 func FindTemplateWithContext(ctx context.Context, name string) (*Template, error) {
+	name = templateLookupName(name)
+
 	// 0. Check if name is a remote URI (URL or rclone connection string)
 	if IsRemoteURI(name) {
 		// Validate the URI format
@@ -268,8 +281,10 @@ func FindTemplateWithContext(ctx context.Context, name string) (*Template, error
 
 // FindTemplateInScope finds a template by name in a specific scope only.
 // Scope must be "global" or "project". Returns nil if not found in that scope,
-// or when name is not a single path component (checkLookupName).
+// or when name is not a single path component (checkLookupName). The empty
+// name resolves the default template.
 func FindTemplateInScope(name, scope string) *Template {
+	name = templateLookupName(name)
 	if checkLookupName(name) != nil {
 		return nil
 	}
@@ -434,7 +449,9 @@ func trimArchiveExt(base string) string {
 // GetTemplateChain returns a list of templates in inheritance order (base first).
 // For non-default templates, the default template is automatically prepended
 // to the chain so that common home files and config are inherited.
+// The empty name is the default template.
 func GetTemplateChain(name string) ([]*Template, error) {
+	name = templateLookupName(name)
 	var chain []*Template
 
 	// For non-default templates, prepend the default template as a base layer
@@ -461,7 +478,9 @@ func GetTemplateChain(name string) ([]*Template, error) {
 // FindTemplateInProjectPath finds a template by name, using a specific project path
 // for project-scoped template resolution instead of relying on CWD.
 // When projectPath is empty, it falls back to FindTemplateWithContext (CWD-based resolution).
+// The empty name resolves the default template.
 func FindTemplateInProjectPath(ctx context.Context, name, projectPath string) (*Template, error) {
+	name = templateLookupName(name)
 	if projectPath == "" {
 		return FindTemplateWithContext(ctx, name)
 	}
@@ -672,6 +691,8 @@ func findOrHydrateDefaultTemplate(ctx context.Context, projectPath string) (*Tem
 // using a specific project path for template resolution instead of CWD.
 // For non-default templates, the default template is automatically prepended
 // to the chain so that common home files and config are inherited.
+// The empty name is the default template: the chain holds the default
+// template only.
 func GetTemplateChainInProject(ctx context.Context, name, projectPath string) ([]*Template, error) {
 	return templateChainInProject(ctx, name, projectPath, FindTemplateInProjectPath)
 }
@@ -685,6 +706,7 @@ func GetOperatorTemplateChainInProject(ctx context.Context, name, projectPath st
 }
 
 func templateChainInProject(ctx context.Context, name, projectPath string, find func(ctx context.Context, name, projectPath string) (*Template, error)) ([]*Template, error) {
+	name = templateLookupName(name)
 	if name == "default" {
 		tpl, err := findOrHydrateDefaultTemplate(ctx, projectPath)
 		if err != nil {

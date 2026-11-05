@@ -24,7 +24,7 @@ import (
 )
 
 // nonComponentNames are non-empty names that are not exactly one local path
-// component. (The empty name keeps its earlier meaning in lookups:
+// component. (A lookup resolves the empty name as the default template:
 // TestEmptyNameLookupsKeepTheirMeaning.)
 func nonComponentNames(abs string) []string {
 	return []string{"../x", "../../x", "a/b", "..", ".", abs}
@@ -176,26 +176,69 @@ func TestFindTemplateSlugStillResolves(t *testing.T) {
 	}
 }
 
-// The empty name is not a refused name in lookups: no template is named (a
-// template lookup treats it as no name) and no harness-config tier holds it (a
-// harness-config lookup finds nothing). The CLI pulls, which build
-// a directory from a name, still refuse it (CheckResourceName).
+// The empty name is not a refused name in lookups: a template lookup resolves
+// it as the default template (or finds nothing when there is no default), and
+// never as a templates directory itself; no harness-config tier holds it (a
+// harness-config lookup finds nothing). The CLI pulls, which build a directory
+// from a name, still refuse it (CheckResourceName).
 func TestEmptyNameLookupsKeepTheirMeaning(t *testing.T) {
-	_, projectPath := templateNameFixture(t)
+	tmp, projectPath := templateNameFixture(t)
+	ctx := context.Background()
+	projectTemplates := filepath.Join(projectPath, "templates")
+	globalTemplates := filepath.Join(tmp, GlobalDir, "templates")
+	notTemplatesDir := func(what string, tpl *Template) {
+		t.Helper()
+		if tpl != nil && (tpl.Path == projectTemplates || tpl.Path == globalTemplates) {
+			t.Errorf("%s resolved the templates directory %s as a template", what, tpl.Path)
+		}
+	}
 
-	// Pinned on purpose: the empty name resolves to the project's templates
-	// directory itself, unchanged from before the name checks. A public LOW
-	// follow-up proposes resolving it to the default template instead; a
-	// change here must be deliberate and come with that follow-up.
-	tpl, err := FindTemplateInProjectPath(context.Background(), "", projectPath)
-	if err != nil || tpl == nil || tpl.Path != filepath.Join(projectPath, "templates") {
-		t.Errorf("FindTemplateInProjectPath(\"\") = %+v, %v; want the project templates directory (unchanged behaviour)", tpl, err)
+	// No default template: the empty name finds nothing.
+	tpl, err := FindTemplateInProjectPath(ctx, "", projectPath)
+	notTemplatesDir("FindTemplateInProjectPath(\"\")", tpl)
+	if tpl != nil || !errors.Is(err, ErrTemplateNotFound) {
+		t.Errorf("FindTemplateInProjectPath(\"\") = %+v, %v; want ErrTemplateNotFound with no default template", tpl, err)
 	}
-	if _, err := FindTemplate(""); errors.Is(err, ErrInvalidResourceName) {
-		t.Errorf("FindTemplate(\"\") err = %v; the empty name must not be refused", err)
+	tpl, err = FindTemplate("")
+	notTemplatesDir("FindTemplate(\"\")", tpl)
+	if tpl != nil || err == nil || errors.Is(err, ErrInvalidResourceName) {
+		t.Errorf("FindTemplate(\"\") = %+v, %v; want not found (not refused) with no default template", tpl, err)
 	}
-	if _, err := GetTemplateChainInProject(context.Background(), "", projectPath); errors.Is(err, ErrInvalidResourceName) {
-		t.Errorf("GetTemplateChainInProject(\"\") err = %v; the empty name must not be refused", err)
+	for _, scope := range []string{"global", "project"} {
+		if tpl := FindTemplateInScope("", scope); tpl != nil {
+			t.Errorf("FindTemplateInScope(\"\", %s) = %+v; want nil with no default template", scope, tpl)
+		}
+	}
+	if chain, err := GetTemplateChain(""); err != nil || len(chain) != 0 {
+		t.Errorf("GetTemplateChain(\"\") = %+v, %v; want an empty chain with no default template", chain, err)
+	}
+
+	// With default templates: the empty name resolves the default template.
+	projectDefault := filepath.Join(projectTemplates, "default")
+	globalDefault := filepath.Join(globalTemplates, "default")
+	for _, d := range []string{projectDefault, globalDefault} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if tpl, err := FindTemplateInProjectPath(ctx, "", projectPath); err != nil || tpl.Path != projectDefault {
+		t.Errorf("FindTemplateInProjectPath(\"\") = %+v, %v; want the project default template", tpl, err)
+	}
+	if tpl, err := FindTemplate(""); err != nil || tpl.Path != globalDefault {
+		t.Errorf("FindTemplate(\"\") = %+v, %v; want the global default template", tpl, err)
+	}
+	if tpl := FindTemplateInScope("", "global"); tpl == nil || tpl.Path != globalDefault {
+		t.Errorf("FindTemplateInScope(\"\", global) = %+v; want the global default template", tpl)
+	}
+	if chain, err := GetTemplateChain(""); err != nil || len(chain) != 1 || chain[0].Path != globalDefault {
+		t.Errorf("GetTemplateChain(\"\") = %+v, %v; want the global default template only", chain, err)
+	}
+	chain, err := GetTemplateChainInProject(ctx, "", projectPath)
+	if err != nil || len(chain) != 1 || chain[0].Path != projectDefault {
+		t.Errorf("GetTemplateChainInProject(\"\") = %+v, %v; want the project default template only", chain, err)
+	}
+	for _, c := range chain {
+		notTemplatesDir("GetTemplateChainInProject(\"\")", c)
 	}
 
 	hc, err := FindHarnessConfigDir("", projectPath)
