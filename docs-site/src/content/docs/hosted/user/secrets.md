@@ -24,7 +24,7 @@ Both variables and secrets can be scoped to different levels. Scion resolves the
 
 1.  **User Scope** (Highest Priority): Personal secrets or variables for a specific user. Applied to all agents owned by that user.
 2.  **Project Scope**: Project-level secrets or variables. Available to all agents running in a specific Project.
-3.  **Hub Scope**: Platform-wide settings or secrets configured by Hub administrators. Hub-scoped secrets reach agents only as `environment` secrets with the `always` injection mode; see [Hub-Scoped Secrets](#hub-scoped-secrets).
+3.  **Hub Scope**: Platform-wide settings or secrets configured by Hub administrators. Hub-scoped secrets reach agents only as `environment` secrets: `always` secrets at start, and `as_needed` secrets only through the harness's credential gathering; see [Hub-Scoped Secrets](#hub-scoped-secrets).
 4.  **Broker Scope** (Lowest Priority): Infrastructure-level secrets or variables. Available only to agents running on a specific Runtime Broker (e.g., for hardware-specific config).
 
 **Resolution Priority:** When multiple scopes define the same secret key, the more specific scope wins. The precedence order is:
@@ -39,14 +39,14 @@ A scope decides which agents receive a variable or secret, not which people can 
 
 | Scope | Agents that receive it |
 | :--- | :--- |
-| **Hub** | Every agent on the Hub, started by any user. For secrets, only `environment` secrets with the `always` injection mode (see [Hub-Scoped Secrets](#hub-scoped-secrets)). |
+| **Hub** | Every agent on the Hub, started by any user. For secrets, only `environment` secrets (see [Hub-Scoped Secrets](#hub-scoped-secrets)). |
 | **Broker** | Every agent running on that Runtime Broker, started by any user. |
 | **Project** | Every agent in that Project, whoever starts it. |
 | **User** | Only agents owned by that user. An agent started by another agent (a child agent) is owned by its parent agent, so it receives user-scoped values only if they are marked for progeny, with `--allow-progeny` or the hub-wide default (see [Propagation to Descendant Agents](#propagation-to-descendant-agents-progeny)), and (when the agent's delegation chain has recorded provenance) every hop on the chain allows `secret.use`. |
 
 Hub, Broker and Project scopes apply to child agents in the same way as to the agents users start directly.
 
-The [injection mode](#injection-modes) does not change who can receive a value. An `always` value is injected into every agent in its scope. An `as_needed` environment value is injected into any agent in its scope whose template or harness configuration requests that key. Template choice is up to the user starting the agent, so any user who can start an agent in the scope can request the key. `file` and `variable` secrets are placed in every agent in their scope, whatever their injection mode. Hub scope is different for secrets: only `environment` secrets with the `always` mode are delivered (see [Hub-Scoped Secrets](#hub-scoped-secrets)).
+The [injection mode](#injection-modes) does not change who can receive a value. An `always` value is injected into every agent in its scope. An `as_needed` environment value is injected into any agent in its scope whose template or harness configuration requests that key. Template choice is up to the user starting the agent, so any user who can start an agent in the scope can request the key. `file` and `variable` secrets are placed in every agent in their scope, whatever their injection mode. Hub scope is different for secrets: only `environment` secrets reach agents (see [Hub-Scoped Secrets](#hub-scoped-secrets)).
 
 :::caution[Hub and Broker scopes are shared]
 Hub-scoped and Broker-scoped variables and secrets are shared credentials. Every user who can start an agent on the Hub, or on that Runtime Broker, receives them in their agents. These scopes do not keep a value private to one user. Put only values there that every such user may hold.
@@ -92,11 +92,11 @@ Values stored under a reserved name before this check existed are not deleted, b
 
 ### Hub-Scoped Secrets
 
-The Hub delivers a Hub-scoped secret to agents only when its type is `environment` and its injection mode is `always`. Hub-scoped secrets of type `file` or `variable`, and Hub-scoped `environment` secrets with the `as_needed` mode, are not delivered to any agent at create, start, restart or `as_needed` resolution. They are left out before scope precedence, so a Runtime Broker-scoped secret with the same name applies instead.
+Hub-scoped secrets reach agents only when their type is `environment`, apart from the telemetry credential file (below). An `environment` secret with the `always` mode is placed in every agent's environment at start. An `environment` secret with the `as_needed` mode is not placed in the agent environment at start; it is supplied only when the agent's harness requests that key during credential gathering. Hub-scoped secrets of type `file` or `variable` are not delivered to any agent at create, start, restart or during credential gathering. They are left out before scope precedence, so a Runtime Broker-scoped secret with the same name applies instead.
 
 One Hub-scoped `file` secret is delivered: the telemetry credential file, when its name is `scion-telemetry-gcp-credentials` and its target is a path whose last two parts are `.scion/telemetry-gcp-credentials.json`, such as `~/.scion/telemetry-gcp-credentials.json` (see [Well-Known Secrets](#well-known-secrets)). A Hub-scoped file secret with any other name or target is not delivered.
 
-This applies to Hub-scoped secrets only. Hub-scoped environment variables (`scion hub env set`), and secrets at User, Project and Runtime Broker scope, are not affected. To deliver a credential that has to be a file or a variable, or that should be injected only on request, store it at Project or User scope.
+This applies to Hub-scoped secrets only. Hub-scoped environment variables (`scion hub env set`), and secrets at User, Project and Runtime Broker scope, are not affected. To deliver a credential that has to be a file or a variable, store it at Project or User scope.
 
 An agent reading Hub-scoped secrets (`GET /api/v1/secrets?scope=hub`, `GET /api/v1/env?scope=hub` and their single-key routes) sees only the `environment` secrets with the `always` mode. Every other Hub-scoped secret, including the telemetry credential file, is left out of those lists, and a request for it by name answers as for a key that does not exist. Hub administrators see every Hub-scoped secret.
 
@@ -258,7 +258,7 @@ scion hub secret set \
   scion-telemetry-gcp-credentials @/path/to/sa-key.json
 ```
 
-At Hub scope, the secret is delivered only with exactly this name and type and a target path ending in `.scion/telemetry-gcp-credentials.json`, and it is not listed to agents (see [Hub-Scoped Secrets](#hub-scoped-secrets)). Once set, every agent that starts will have the credential file mounted at `~/.scion/telemetry-gcp-credentials.json` and GCP-native telemetry will be enabled automatically — no additional environment variable configuration required. See [Metrics & OpenTelemetry](/scion/hosted/single-node/metrics/#4-gcp-credentials-for-agent-containers-non-adc-environments) for the full setup guide.
+At Hub scope, the secret is delivered only with exactly this name and type and a target path whose last two parts are `.scion/telemetry-gcp-credentials.json`, and it is not listed to agents (see [Hub-Scoped Secrets](#hub-scoped-secrets)). Once set, every agent that starts will have the credential file mounted at `~/.scion/telemetry-gcp-credentials.json` and GCP-native telemetry will be enabled automatically — no additional environment variable configuration required. See [Metrics & OpenTelemetry](/scion/hosted/single-node/metrics/#4-gcp-credentials-for-agent-containers-non-adc-environments) for the full setup guide.
 
 ---
 

@@ -22,9 +22,9 @@ Scion now requires TLS off loopback between the Hub and Runtime Brokers (`server
 
 [Read the full release notes for this week ->](/scion/release-notes/2026-10-26/)
 
-## Hub-scoped secrets reach agents only as always-mode environment secrets
+## Hub-scoped secrets reach agents only as environment secrets
 
-The Hub now delivers a Hub-scoped secret to agents only when its type is `environment` and its injection mode is `always`. **Hub-scoped `file` and `variable` secrets, and Hub-scoped `environment` secrets with the `as_needed` mode, are no longer delivered to agents** at create, start, restart or `as_needed` resolution. A Runtime Broker-scoped secret with the same name now applies in their place. The telemetry credential file (`scion-telemetry-gcp-credentials`, type `file`, with a target path ending in `.scion/telemetry-gcp-credentials.json`) is still delivered. Hub-scoped environment variables, and secrets at User, Project and Runtime Broker scope, are unchanged. Before upgrading, move any Hub-scoped secret that agents need as a file, a variable or an `as_needed` value to Project or User scope, or set an `environment` secret to `always`. See [Hub-Scoped Secrets](/scion/hosted/user/secrets/#hub-scoped-secrets).
+Hub-scoped secrets now reach agents only when their type is `environment`, apart from the telemetry credential file (see below). **Hub-scoped `file` and `variable` secrets are no longer delivered to agents** at create, start, restart or during credential gathering; a Runtime Broker-scoped secret with the same name now applies in place of those file and variable secrets. A Hub-scoped `environment` secret with the `as_needed` mode is not placed in the agent environment at start; it is supplied only when the agent's harness requests that key during credential gathering. The telemetry credential file (`scion-telemetry-gcp-credentials`, type `file`, with a target path whose last two parts are `.scion/telemetry-gcp-credentials.json`) is still delivered. Hub-scoped environment variables, and secrets at User, Project and Runtime Broker scope, are unchanged. Before upgrading, move any Hub-scoped secret that agents need as a file or a variable to Project or User scope. See [Hub-Scoped Secrets](/scion/hosted/user/secrets/#hub-scoped-secrets).
 
 ## Kubernetes agent pods no longer mount a Kubernetes API token
 
