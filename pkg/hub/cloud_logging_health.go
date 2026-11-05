@@ -29,10 +29,9 @@ const cloudLoggingDegradedUnknown = HealthStatusDegraded + ": unknown"
 // SetCloudLoggingHealth injects the provider for the cloud_logging /healthz
 // key. cmd calls it only when a Cloud Logging handler is configured, so the
 // key is absent otherwise; nil removes it. The provider must be cheap and
-// non-blocking and return a fixed string: "healthy",
-// "degraded: circuit open" or "degraded: recent write failures"
-// (logging.CloudWriteStats.HealthStatus). pkg/hub does not depend on the
-// Cloud Logging handler type.
+// non-blocking and return "healthy" or "degraded: <reason> (<counts>)",
+// with fixed labels and integers only (logging.CloudWriteStats.HealthStatus).
+// pkg/hub does not depend on the Cloud Logging handler type.
 func (s *Server) SetCloudLoggingHealth(provider func() string) {
 	if provider == nil {
 		s.cloudLoggingHealth.Store(nil)
