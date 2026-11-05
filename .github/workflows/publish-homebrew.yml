@@ -78,7 +78,8 @@ jobs:
         id: check
         env:
           TAG: ${{ inputs.tag }}
-          # Only whether the secret is set, never its value.
+          # Only whether the secret is set, never its value. One secret
+          # serves both publish jobs (the GHCR login and TAP_TOKEN below).
           HAS_TOKEN: ${{ secrets.HOMEBREW_SCION_TOKEN != '' }}
         run: |
           # The tap follows the preview channel only.
@@ -221,7 +222,9 @@ jobs:
         working-directory: tap
         env:
           TAG: ${{ needs.gate.outputs.tag }}
-          HOMEBREW_SCION_TOKEN: ${{ secrets.HOMEBREW_SCION_TOKEN }}
+          # The tap token. A separate tap-only secret would replace the
+          # secret name on this line (and in the gate check) only.
+          TAP_TOKEN: ${{ secrets.HOMEBREW_SCION_TOKEN }}
         run: |
           if git diff --quiet -- Formula/scion.rb; then
             echo "::notice::Formula/scion.rb already matches ${TAG}; nothing to push."
@@ -238,6 +241,6 @@ jobs:
           # never written to disk. The single quotes keep it unexpanded here.
           # shellcheck disable=SC2016
           git -c credential.helper= \
-            -c 'credential.helper=!f() { echo username=x-access-token; echo "password=${HOMEBREW_SCION_TOKEN}"; }; f' \
+            -c 'credential.helper=!f() { echo username=x-access-token; echo "password=${TAP_TOKEN}"; }; f' \
             push https://github.com/homebrew-scion/homebrew-scion.git "HEAD:refs/heads/${branch}"
           echo "Updated homebrew-scion/homebrew-scion Formula/scion.rb to ${TAG}" >> "$GITHUB_STEP_SUMMARY"
