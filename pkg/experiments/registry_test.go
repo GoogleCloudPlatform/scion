@@ -20,6 +20,7 @@ import (
 	"regexp"
 	"slices"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 )
@@ -370,6 +371,34 @@ func TestFlatRuntimeBrokersExperimentRegistered(t *testing.T) {
 		t.Fatalf("must be a server- and web-layer experiment, got %v", e.Layers)
 	}
 	if e.Title == "" || e.Description == "" || e.Issue != "ptone/scion#2926" || e.Owner == "" || e.Stage != StageAlpha {
+		t.Fatalf("incomplete registration: %+v", e)
+	}
+}
+
+// TestFlatCloudRunTargetExperimentRegistered pins the hub.flat_cloudrun_target
+// entry: a server-only alpha experiment that ships off, whose description
+// names its GA gate.
+func TestFlatCloudRunTargetExperimentRegistered(t *testing.T) {
+	e, ok := Default().Lookup(FlatCloudRunTarget)
+	if !ok {
+		t.Fatalf("%s is not registered", FlatCloudRunTarget)
+	}
+	if FlatCloudRunTarget != "hub.flat_cloudrun_target" {
+		t.Fatalf("frozen name changed: %q", FlatCloudRunTarget)
+	}
+	if e.Default {
+		t.Fatal("the flat Cloud Run target must default to off")
+	}
+	if e.Stage != StageAlpha {
+		t.Fatalf("must stay alpha until its GA gate is met, got %q", e.Stage)
+	}
+	if len(e.Layers) != 1 || !e.HasLayer(LayerServer) {
+		t.Fatalf("must be a server-only experiment, got %v", e.Layers)
+	}
+	if !strings.Contains(e.Description, "ptone/scion#7309") {
+		t.Fatalf("description must name the GA gate issue: %q", e.Description)
+	}
+	if e.Title == "" || e.Issue != "ptone/scion#7308" || e.Owner != "runtime-broker" {
 		t.Fatalf("incomplete registration: %+v", e)
 	}
 }

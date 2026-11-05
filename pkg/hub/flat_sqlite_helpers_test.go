@@ -20,7 +20,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -76,10 +75,19 @@ type flatHubFixture struct {
 
 func setFlatExperiment(t *testing.T, srv *Server, enabled bool) {
 	t.Helper()
+	setExperimentOverrides(t, srv, map[string]bool{experiments.FlatRuntimeBrokers: enabled})
+}
+
+// setExperimentOverrides stores exactly the given explicit experiment
+// overrides (name to on/off) as the Hub's operational settings.
+func setExperimentOverrides(t *testing.T, srv *Server, overrides map[string]bool) {
+	t.Helper()
+	raw, err := json.Marshal(map[string]map[string]bool{"overrides": overrides})
+	require.NoError(t, err)
 	fakeStore := newFakeHubSettingStore()
-	fakeStore.seed("experiments", json.RawMessage(fmt.Sprintf(`{"overrides":{%q:%t}}`, experiments.FlatRuntimeBrokers, enabled)))
+	fakeStore.seed("experiments", json.RawMessage(raw))
 	ops := NewOperationalSettings(fakeStore, emptyKoanf(), emptyKoanf())
-	_, err := ops.Refresh(context.Background())
+	_, err = ops.Refresh(context.Background())
 	require.NoError(t, err)
 	srv.SetOperationalSettings(ops)
 }
