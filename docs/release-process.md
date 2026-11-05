@@ -306,17 +306,30 @@ Scion currently pulls `:latest` unless configured otherwise; runtime image resol
 release tag (`image_tag` in the release images design, Phase 3) before Homebrew users get images
 that match their binary. The formula caveats say so.
 
-**The secret.** `HOMEBREW_SCION_TOKEN` is a repository secret of `GoogleCloudPlatform/scion`, used
-for both the tap commit and the ghcr push. GitHub Packages does not accept fine-grained tokens, so
-it is a classic personal access token with the `public_repo` and `write:packages` scopes, owned by a
-`homebrew-scion` member who can push to `homebrew-scion/homebrew-scion` and write its packages.
-`build-preview-weekly.yml` passes it to `build-release.yml`, which passes it to
-`publish-homebrew.yml`, each by name. Packages that a push creates for the first time (for example a
-new harness image) may start out private; make them public in the `homebrew-scion` organization's
-package settings.
+**The secret.** `HOMEBREW_SCION_TOKEN` is used for both the tap commit and the ghcr push. Store it
+as a secret of a GitHub environment named `homebrew` in `GoogleCloudPlatform/scion`, not as a
+repository secret; the three jobs of `publish-homebrew.yml` run in that environment. Configure the
+environment so that a run from an edited branch cannot read the secret:
 
-**Rerunning a failed publish.** Run the workflow by hand with the tag. Turn off a step that already
-succeeded:
+- **Deployment branches and tags:** selected only, with the branch `main` (scheduled weekly runs and
+  manual reruns) and the tag pattern `v*-preview.*` (tag-push builds).
+- **Tags:** limit who can create `v*` tags with a tag ruleset, because a pushed preview tag can
+  reach the environment.
+- **Required reviewers (optional):** each of the three jobs then waits for approval, including on
+  the scheduled weekly run.
+
+GitHub Packages accepts only a classic personal access token from outside the publishing
+repository, so the token is a classic token with the `public_repo` and `write:packages` scopes and an
+expiry date. A classic token cannot be limited to one repository: create it on a dedicated machine
+account that is a member of the `homebrew-scion` organization only, with write access to
+`homebrew-scion/homebrew-scion` and its packages and no access to `GoogleCloudPlatform/scion`.
+Rotate it before it expires; an expired token fails the publish jobs.
+
+Packages that a push creates for the first time (for example a new harness image) may start out
+private; make them public in the `homebrew-scion` organization's package settings.
+
+**Rerunning a failed publish.** Run the workflow by hand from `main` (the default; other branches
+cannot use the `homebrew` environment) with the tag. Turn off a step that already succeeded:
 
 ```bash
 gh workflow run publish-homebrew.yml -R GoogleCloudPlatform/scion -f tag=v0.3.0-preview.5

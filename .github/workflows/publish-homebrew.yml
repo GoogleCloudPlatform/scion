@@ -21,9 +21,10 @@
 # build-release.yml calls this after it publishes a preview release. Run it
 # by hand to retry a failed publish; see docs/release-process.md.
 #
-# Both steps authenticate with the HOMEBREW_SCION_TOKEN secret (contents
-# write on homebrew-scion/homebrew-scion, packages write on the
-# homebrew-scion org). Without it the workflow skips with a notice.
+# Both steps authenticate with the HOMEBREW_SCION_TOKEN secret of the
+# "homebrew" environment, which is limited to main and preview tags, so a
+# run from any other branch cannot read it. Without the secret the workflow
+# skips with a notice. Setup: docs/release-process.md, "Homebrew publishing".
 
 name: Publish to Homebrew
 
@@ -42,9 +43,6 @@ on:
         description: 'Commit the formula to homebrew-scion/homebrew-scion'
         type: boolean
         default: true
-    secrets:
-      HOMEBREW_SCION_TOKEN:
-        required: false
   workflow_dispatch:
     inputs:
       tag:
@@ -69,6 +67,8 @@ jobs:
     name: Check tag and token
     runs-on: ubuntu-latest
     if: github.repository == 'GoogleCloudPlatform/scion'
+    # The secret lives in this environment; a job outside it cannot see it.
+    environment: homebrew
     permissions: {}
     outputs:
       publish: ${{ steps.check.outputs.publish }}
@@ -101,6 +101,7 @@ jobs:
     if: github.repository == 'GoogleCloudPlatform/scion' && needs.gate.outputs.publish == 'true' && inputs.publish_images
     # The full image set for amd64 and arm64 (arm64 under QEMU) takes hours.
     timeout-minutes: 360
+    environment: homebrew
     concurrency:
       group: homebrew-images-${{ needs.gate.outputs.tag }}
       cancel-in-progress: false
@@ -179,6 +180,7 @@ jobs:
       && inputs.publish_formula
       && (needs.publish-homebrew-images.result == 'success' || needs.publish-homebrew-images.result == 'skipped') }}
     timeout-minutes: 10
+    environment: homebrew
     concurrency:
       group: homebrew-tap-formula
       cancel-in-progress: false
