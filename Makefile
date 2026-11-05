@@ -913,9 +913,10 @@ time-literals:
 check-harness-coverage:
 	@./image-build/scripts/check-harness-coverage.sh
 
-## test-image-scripts: Test the release image driver (image-build/scripts/build-release-images.sh) with stubs; no docker, no network
+## test-image-scripts: Test the release image driver (build-release-images.sh) and the build-images.sh guards with stubs; no docker, no network
 test-image-scripts:
 	@bash ./image-build/scripts/test-build-release-images.sh
+	@bash ./image-build/scripts/test-build-images.sh
 
 ## check-image-go-dirs: Verify every Dockerfile that builds the root Go module copies all of its top-level Go dirs (ptone/scion#5453)
 # NOTE: same caveat as check-authz-guards above -- make collapses the
