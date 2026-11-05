@@ -210,8 +210,15 @@ EOF
 
 out_dir=$(dirname -- "$out_file")
 [ -d "$out_dir" ] || die "output directory does not exist: $out_dir"
+# A relative directory gets a ./ prefix so mktemp never reads a leading "-"
+# as an option (portable; not every mktemp accepts --).
+case "$out_dir" in
+  /*) ;;
+  *) out_dir="./${out_dir}" ;;
+esac
 staged=$(mktemp "${out_dir}/.scion.rb.XXXXXX")
 cp -- "$tmp/scion.rb" "$staged"
 chmod 0644 "$staged"
 mv -f -- "$staged" "$out_file"
+staged=""
 echo "Wrote ${out_file} for ${tag}"

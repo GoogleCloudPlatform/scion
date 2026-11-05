@@ -41,9 +41,10 @@ fail() {
 }
 
 # run ARGS... — run the script; sets $status and leaves stderr in $tmp/stderr.
+# stdin is /dev/null, so a regression that reads stdin fails instead of hanging.
 run() {
   status=0
-  "$SCRIPT" "$@" >"$tmp/stdout" 2>"$tmp/stderr" || status=$?
+  "$SCRIPT" "$@" </dev/null >"$tmp/stdout" 2>"$tmp/stderr" || status=$?
 }
 
 want_status() {
@@ -211,7 +212,7 @@ run_in() {
   local dir="$1"
   shift
   status=0
-  (cd "$dir" && "$SCRIPT" "$@") >"$tmp/stdout" 2>"$tmp/stderr" || status=$?
+  (cd "$dir" && "$SCRIPT" "$@") </dev/null >"$tmp/stdout" 2>"$tmp/stderr" || status=$?
 }
 
 mkdir -p "$tmp/odd"
@@ -240,6 +241,14 @@ name="odd paths: an output file named like an awk assignment (x=y) is written"
 run_in "$tmp/odd" --sums-file "$SUMS" v0.3.0-preview.5 out=scion.rb
 want_status 0
 cmp -s "$GOLDEN" "$tmp/odd/out=scion.rb" || fail "output differs from golden"
+
+name="odd paths: an output directory whose name starts with '-' is written"
+mkdir -p "$tmp/odd/-dir"
+run_in "$tmp/odd" --sums-file "$SUMS" -- v0.3.0-preview.5 -dir/scion.rb
+want_status 0
+cmp -s "$GOLDEN" "$tmp/odd/-dir/scion.rb" || fail "output differs from golden"
+leftover=$(find "$tmp/odd/-dir" -name '.scion.rb.*' | head -1)
+[ -z "$leftover" ] || fail "temp file left behind: $leftover"
 
 name="interrupted staging: a failed copy leaves no temp file and the old formula"
 mkdir -p "$tmp/stage" "$tmp/failbin"
