@@ -124,29 +124,65 @@ func TestHubSecretDeliveryScope_CreateStartRestart(t *testing.T) {
 	})
 }
 
-// TestHubSecretDeliveryScope_AsNeededPassExcludesHub: the second env pass no
-// longer satisfies a needed key from an as-needed hub-scope secret, while an
-// as-needed project-scope secret still does.
-func TestHubSecretDeliveryScope_AsNeededPassExcludesHub(t *testing.T) {
+// TestHubSecretDeliveryScope_AsNeededHubSecretHarnessPassOnly: a hub-scope
+// environment secret in "as_needed" mode reaches an agent only through the
+// harness credential pass, never as a direct share:
+//
+//	(i)   agent create (resolveSecrets): absent from the delivered secrets, but
+//	      offered to the broker as an available as-needed key;
+//	(ii)  start and restart (selectDeliverySecrets): absent;
+//	(iii) the harness credential pass (resolveAsNeededForKeys) fills the key
+//	      when the harness asks for it;
+//	(iv)  it is not agent-visible metadata (HubSecretAgentVisible); the HTTP
+//	      read paths are pinned by TestHubSecretAgentRead_ListAndGet;
+//	(v)   a hub as-needed secret whose key the harness did not ask for is not
+//	      filled.
+func TestHubSecretDeliveryScope_AsNeededHubSecretHarnessPassOnly(t *testing.T) {
 	m := newLDFixture(t, "hsd-as-needed", ldOptions{})
 	ctx := context.Background()
-	for _, scope := range []string{store.ScopeHub, store.ScopeProject} {
-		_, _, err := m.backend.Set(ctx, &secret.SetSecretInput{
-			Name: "HSD_NEED_" + scope, Value: "v-" + scope, SecretType: store.SecretTypeEnvironment,
-			Scope: scope, ScopeID: m.scopeID(scope), InjectionMode: store.InjectionModeAsNeeded, CreatedBy: m.projectOwnerID,
+	var needed secret.SecretMeta
+	for _, name := range []string{"HSD_HARNESS_KEY", "HSD_UNNEEDED_KEY"} {
+		_, meta, err := m.backend.Set(ctx, &secret.SetSecretInput{
+			Name: name, Value: "v-" + name, SecretType: store.SecretTypeEnvironment,
+			Scope: store.ScopeHub, ScopeID: m.hubID, InjectionMode: store.InjectionModeAsNeeded, CreatedBy: m.projectOwnerID,
 		})
 		require.NoError(t, err)
+		if name == "HSD_HARNESS_KEY" {
+			needed = *meta
+		}
 	}
-	got, err := m.d.resolveAsNeededForKeys(ctx, m.agent, []string{"HSD_NEED_hub", "HSD_NEED_project"}, nil)
+
+	// (i) create: not delivered, but available to the harness credential pass.
+	created, asNeededKeys, err := m.d.resolveSecrets(ctx, m.agent)
 	require.NoError(t, err)
-	assert.Equal(t, map[string]string{"HSD_NEED_project": "v-project"}, got)
+	for _, s := range created {
+		assert.NotEqual(t, "HSD_HARNESS_KEY", s.Name, "create delivered an as-needed hub secret directly")
+	}
+	assert.Contains(t, asNeededKeys, "HSD_HARNESS_KEY")
+
+	// (ii) start and restart: not delivered.
+	started, _, err := m.d.selectDeliverySecrets(ctx, newDeliverySelector(m.authz, m.agent, PurposeRestart), m.agent)
+	require.NoError(t, err)
+	for _, s := range started {
+		assert.NotEqual(t, "HSD_HARNESS_KEY", s.Name, "start/restart delivered an as-needed hub secret directly")
+	}
+
+	// (iii) and (v): only the key the harness asks for is filled.
+	got, err := m.d.resolveAsNeededForKeys(ctx, m.agent, []string{"HSD_HARNESS_KEY"}, nil)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"HSD_HARNESS_KEY": "v-HSD_HARNESS_KEY"}, got)
+
+	// (iv) not agent-visible.
+	needed.Scope = store.ScopeHub
+	assert.True(t, secret.HubSecretDeliverable(needed))
+	assert.False(t, secret.HubSecretAgentVisible(needed))
 }
 
 // TestHubSecretDeliveryScope_AuthPreflightCountsDeliverableOnly: the auth
-// credential preflight (hasAnyKey) counts a hub-scope secret only when it
-// would be delivered, both for a stored agent and at create time, so a
-// harness credential stored as a hub-scope secret that is never delivered
-// does not satisfy it.
+// credential preflight (hasAnyKey) counts a hub-scope secret only when it can
+// reach the agent, directly or through the harness credential pass, both for
+// a stored agent and at create time. A harness credential stored as a
+// hub-scope secret that never reaches an agent does not satisfy it.
 func TestHubSecretDeliveryScope_AuthPreflightCountsDeliverableOnly(t *testing.T) {
 	ctx := context.Background()
 	m := newLDFixture(t, "hsd-preflight", ldOptions{})
@@ -155,12 +191,12 @@ func TestHubSecretDeliveryScope_AuthPreflightCountsDeliverableOnly(t *testing.T)
 	unstored := *m.agent
 	unstored.ID = tid("hsd-preflight-unstored")
 	for name, agent := range map[string]*store.Agent{"stored": m.agent, "create-time": &unstored} {
-		for _, key := range []string{"HSD_HUB_ENV_AS_NEEDED", "HSD_HUB_VARIABLE", "HSD_HUB_FILE", "HSD_HUB_INTERNAL"} {
+		for _, key := range []string{"HSD_HUB_VARIABLE", "HSD_HUB_FILE", "HSD_HUB_INTERNAL"} {
 			found, err := s.hasAnyKey(ctx, agent, []string{key})
 			require.NoError(t, err)
 			assert.False(t, found, "%s: %s counted although it is never delivered", name, key)
 		}
-		for _, key := range []string{"HSD_HUB_ENV_ALWAYS", hsdTelemetryName, "HSD_PROJECT_ENV"} {
+		for _, key := range []string{"HSD_HUB_ENV_ALWAYS", "HSD_HUB_ENV_AS_NEEDED", hsdTelemetryName, "HSD_PROJECT_ENV"} {
 			found, err := s.hasAnyKey(ctx, agent, []string{key})
 			require.NoError(t, err)
 			assert.True(t, found, "%s: %s not counted", name, key)

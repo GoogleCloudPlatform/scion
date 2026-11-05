@@ -34,7 +34,7 @@ func TestHubSecretDeliverable(t *testing.T) {
 	}{
 		{"env always", SecretMeta{Name: "K", Scope: ScopeHub, SecretType: TypeEnvironment, InjectionMode: store.InjectionModeAlways}, true, true},
 		{"untyped always", SecretMeta{Name: "K", Scope: ScopeHub, InjectionMode: store.InjectionModeAlways}, true, true},
-		{"env as_needed", SecretMeta{Name: "K", Scope: ScopeHub, SecretType: TypeEnvironment, InjectionMode: store.InjectionModeAsNeeded}, false, false},
+		{"env as_needed", SecretMeta{Name: "K", Scope: ScopeHub, SecretType: TypeEnvironment, InjectionMode: store.InjectionModeAsNeeded}, true, false},
 		{"env empty mode", SecretMeta{Name: "K", Scope: ScopeHub, SecretType: TypeEnvironment}, false, false},
 		{"variable always", SecretMeta{Name: "K", Scope: ScopeHub, SecretType: TypeVariable, InjectionMode: store.InjectionModeAlways}, false, false},
 		{"file always", SecretMeta{Name: "K", Scope: ScopeHub, SecretType: TypeFile, Target: "/etc/k", InjectionMode: store.InjectionModeAlways}, false, false},
@@ -67,10 +67,12 @@ type hubScopeResolveBackend interface {
 	Resolve(ctx context.Context, userID, projectID, brokerID string, opts *ResolveOpts) ([]SecretWithValue, error)
 }
 
-// runHubScopeResolveCases pins which hub-scope secrets Resolve delivers:
-// environment secrets in "always" mode and the telemetry credential file
-// only. Other hub-scope rows are absent, so a broker-scope row of the same
-// name is delivered, and project, user and broker scopes are unchanged.
+// runHubScopeResolveCases pins which hub-scope secrets Resolve returns:
+// environment secrets in "always" or "as_needed" mode (the latter only for the
+// harness credential pass; the direct-share paths in pkg/hub drop it) and the
+// telemetry credential file. Other hub-scope rows are absent, so a
+// broker-scope row of the same name is delivered, and project, user and broker
+// scopes are unchanged.
 func runHubScopeResolveCases(t *testing.T, newBackend func(t *testing.T) hubScopeResolveBackend) {
 	t.Helper()
 	ctx := context.Background()
@@ -107,12 +109,12 @@ func runHubScopeResolveCases(t *testing.T, newBackend func(t *testing.T) hubScop
 		got[sv.Name] = sv
 	}
 
-	for _, name := range []string{"HUB_ENV_ALWAYS", telemetryCredentialFileName} {
+	for _, name := range []string{"HUB_ENV_ALWAYS", "HUB_ENV_AS_NEEDED", telemetryCredentialFileName} {
 		if sv, ok := got[name]; !ok || sv.Scope != ScopeHub || sv.Value != "hub-"+name {
 			t.Errorf("%s: got %+v (present %v), want the hub row delivered", name, sv.SecretMeta, ok)
 		}
 	}
-	for _, name := range []string{"HUB_ENV_AS_NEEDED", "HUB_VARIABLE", "HUB_FILE", "HUB_OTHER_TELEMETRY_FILE"} {
+	for _, name := range []string{"HUB_VARIABLE", "HUB_FILE", "HUB_OTHER_TELEMETRY_FILE"} {
 		if _, ok := got[name]; ok {
 			t.Errorf("%s: delivered, want the hub row excluded", name)
 		}
@@ -131,8 +133,8 @@ func runHubScopeResolveCases(t *testing.T, newBackend func(t *testing.T) hubScop
 			t.Errorf("%s: got %+v (present %v), want the %s row unchanged", name, sv.SecretMeta, ok, scope)
 		}
 	}
-	if len(got) != 8 {
-		t.Errorf("resolved %d secrets, want 8: %v", len(got), got)
+	if len(got) != 9 {
+		t.Errorf("resolved %d secrets, want 9: %v", len(got), got)
 	}
 }
 

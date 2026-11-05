@@ -82,23 +82,38 @@ const (
 	telemetryCredentialFilePath = ".scion/telemetry-gcp-credentials.json"
 )
 
-// HubSecretDeliverable reports whether a hub-scope secret may be delivered
-// to an agent. Only environment-type secrets with injection mode "always"
-// qualify, plus the telemetry credential file (isTelemetryCredentialFile).
-// Variable, file and internal hub-scope secrets, and environment secrets in
-// any other mode, are not delivered. Callers apply it to hub-scope rows only,
-// before reading values and before merging scopes, so an excluded row is
+// HubSecretDeliverable reports whether a hub-scope secret may reach an agent.
+// Environment-type secrets qualify with injection mode "always" or
+// "as_needed", plus the telemetry credential file (isTelemetryCredentialFile).
+// Variable, file and internal hub-scope secrets, and environment secrets with
+// any other mode, never reach an agent. Callers apply it to hub-scope rows
+// only, before reading values and before merging scopes, so an excluded row is
 // absent and never shadows a lower-scope row of the same name.
+//
+// An "as_needed" environment secret is admitted only for the harness
+// credential pass: every direct-share path drops as_needed environment
+// secrets on its own (resolveSecrets and selectDeliverySecrets in pkg/hub), so
+// such a secret is supplied only when the agent's harness requests its key
+// during credential gathering (resolveAsNeededForKeys in pkg/hub).
 func HubSecretDeliverable(meta SecretMeta) bool {
-	return HubSecretAgentVisible(meta) || isTelemetryCredentialFile(meta)
+	if isHubEnvSecret(meta) && (meta.InjectionMode == store.InjectionModeAlways || meta.InjectionMode == store.InjectionModeAsNeeded) {
+		return true
+	}
+	return isTelemetryCredentialFile(meta)
 }
 
 // HubSecretAgentVisible reports whether an agent may see a hub-scope
-// secret's metadata through the agent-readable list and get paths. It is
-// HubSecretDeliverable without the telemetry credential file exception.
+// secret's metadata through the agent-readable list and get paths. Only
+// environment-type secrets with injection mode "always" qualify: as_needed
+// secrets and the telemetry credential file stay hidden.
 func HubSecretAgentVisible(meta SecretMeta) bool {
-	return (meta.SecretType == store.SecretTypeEnvironment || meta.SecretType == "") &&
-		meta.InjectionMode == store.InjectionModeAlways
+	return isHubEnvSecret(meta) && meta.InjectionMode == store.InjectionModeAlways
+}
+
+// isHubEnvSecret reports whether a secret is environment-typed (an empty type
+// means environment).
+func isHubEnvSecret(meta SecretMeta) bool {
+	return meta.SecretType == store.SecretTypeEnvironment || meta.SecretType == ""
 }
 
 // isTelemetryCredentialFile is the only exception that delivers a hub-scope
