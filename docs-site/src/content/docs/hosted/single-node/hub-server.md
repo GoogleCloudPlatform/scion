@@ -198,8 +198,8 @@ The Project Settings UI is organized into three primary tabs:
 
 - **General**: Configure the project's display name, description, and template sync settings. For git-backed projects, you can specify default branches. For hub-managed projects, you can configure external git repositories to load templates from.
 - **Limits**: Define constraints on agent execution to prevent resource exhaustion.
-  - **Hub-level Defaults**: Administrators can configure global default limits that apply to all projects.
-  - **Project-level Limits**: Overrides can be set per-project.
+  - **Hub-level Defaults**: Administrators can configure global default limits that apply to all projects. When a project setting is unset and the Hub has a fallback default configured for it (`GET /api/v1/projects/{projectId}/settings/resolved`), the Project Settings UI shows a **Hub fallback** badge next to the field (without revealing the server's value; see [Resolved Project Settings](/scion/reference/project-settings-resolved/)).
+  - **Project-level Limits**: Overrides can be set per-project (in the Web UI or via [`scion project settings`](/scion/reference/cli/#scion-project)).
   - Limits automatically pre-populate the agent creation form and restrict maximum concurrency, runtime duration, and storage.
 - **Resources**: Manage the compute and plugin environments available to the project.
   - **Runtime Brokers**: Link and manage the auxiliary runtimes (e.g., specific Kubernetes clusters or remote Docker hosts) authorized to execute agents for this project.

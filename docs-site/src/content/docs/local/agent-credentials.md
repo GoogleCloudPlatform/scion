@@ -266,7 +266,7 @@ The `gcloud-adc` secret automatically writes the ADC file to the well-known GCP 
 :::
 
 :::tip[Claude Vertex AI Translation]
-For the Claude harness, Scion automatically translates `GOOGLE_CLOUD_PROJECT` to the `ANTHROPIC_VERTEX_PROJECT_ID` environment variable during container provisioning. This ensures that Claude Code's native Vertex AI client authenticates and operates correctly with Vertex Model Garden endpoints without manual environment adjustments.
+For the Claude harness in `vertex-ai` mode, Scion sets `CLAUDE_CODE_USE_VERTEX=1` and translates `GOOGLE_CLOUD_PROJECT` to `ANTHROPIC_VERTEX_PROJECT_ID` and the resolved region (`GOOGLE_CLOUD_LOCATION`, `GOOGLE_CLOUD_REGION`, or `CLOUD_ML_REGION`) to `CLOUD_ML_REGION` during container provisioning (including on Cloud Run, where the resolved values override the harness bundle's `${GOOGLE_CLOUD_PROJECT}` and `${GOOGLE_CLOUD_LOCATION}` environment placeholders). This ensures that Claude Code's native Vertex AI client authenticates and operates against the intended project and region without manual environment adjustments.
 :::
 
 :::tip[Antigravity Vertex AI & ADC]

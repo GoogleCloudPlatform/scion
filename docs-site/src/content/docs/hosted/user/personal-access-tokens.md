@@ -498,6 +498,19 @@ common CLI flows need:
 | `scion stop`, `scion suspend`, `scion resume`, `scion restore` | `project:read`, `agent:lifecycle` |
 | `scion delete` | `project:read`, `agent:delete` |
 | `scion project service-accounts list`, `scion service-accounts list` | `project:read` (a project's accounts) |
+| `scion project settings get` | `project:read` |
+| `scion project settings set, unset` | `project:read`, `project:update` |
+
+Hub-level configuration commands require a [hub-bound token](#hub-bound-tokens) with the matching hub configuration scopes:
+
+| Flow | Scopes |
+|------|--------|
+| `scion hub settings get, schema` | `hub_config:read` |
+| `scion hub settings set, unset` | `hub_config:read`, `hub_config:update` |
+| `scion hub settings unset --section NAME --reset` | `hub_config:update` |
+| `scion hub project-defaults get` | `hub_project_defaults:read` |
+| `scion hub project-defaults set, unset` | `hub_project_defaults:read`, `hub_project_defaults:update` |
+| `scion hub experiments list, enable, disable, reset` | `hub_experiments:update` |
 
 A token without `project:read` gets `404 Not Found` on the project lookup. The CLI reports this
 as a likely missing `project:read` scope and stops. A user access token cannot register a new

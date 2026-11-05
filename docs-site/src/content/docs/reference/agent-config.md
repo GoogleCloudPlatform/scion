@@ -216,7 +216,7 @@ When an agent starts:
 ### Project settings precedence
 
 Agents created inside a hub project have one more source of values: the
-project's own defaults, set in Project Settings and stored as `scion.io/*`
+project's own defaults, set in Project Settings (or with [`scion project settings`](/scion/reference/cli/#scion-project)) and stored as `scion.io/*`
 annotations on the project. For these fields the ordering is, highest priority
 first:
 

@@ -14,7 +14,10 @@ Authorization is `ActionRead` on the project — the same as
 `GET /api/v1/projects/{projectId}/settings`. It is deliberately not admin-gated,
 because the point is to let non-admin project owners see that hub defaults
 exist. Only the presence of `agent_defaults` entries is exposed, never the
-server configuration itself. The endpoint is read-only; there is no `PUT`.
+server configuration itself. The endpoint is read-only; there is no `PUT`. From
+the CLI, [`scion project settings get --resolved`](/scion/reference/cli/#scion-project)
+reads this endpoint (`scion project settings get`, `set`, and `unset` read and
+update `/api/v1/projects/{projectId}/settings`).
 
 ## This endpoint does not resolve anything
 
