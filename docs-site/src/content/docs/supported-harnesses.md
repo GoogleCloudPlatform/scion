@@ -184,7 +184,7 @@ Copilot authenticates with a **GitHub token** (auth type `api-key`) or a saved *
 The token must be a **fine-grained Personal Access Token** with the "Copilot Requests"
 permission; classic (`ghp_...`) tokens are not supported. Scion re-exports the resolved token as
 `COPILOT_GITHUB_TOKEN` for the CLI. For `auth-file`, `~/.copilot/config.json` must contain a
-real sign-in (`logged_in_users`, `copilot_tokens`, `github_token`, or `oauth_token`), not
+real sign-in (`copilot_tokens`, `copilot_hmac_key`, or `capi_hmac_key`), not
 settings only. If neither credential is present and no-auth mode is allowed, the agent drops to
 an interactive shell with `no-auth-env.yaml` (which sets `DBUS_SESSION_BUS_ADDRESS` to
 `unix:path=/home/scion/.scion/harness/no-session-bus` so `copilot login` writes its sign-in to
