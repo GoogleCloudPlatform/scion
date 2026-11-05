@@ -147,7 +147,7 @@ SQLITE_NONHUB_PKGS := ./pkg/hub/... ./perf/bench/seed/... ./pkg/conduit/... \
 	./pkg/store/entadapter/... ./pkg/artifacts/... ./pkg/brokerownership/... \
 	./pkg/brokerregistration/... ./pkg/ent/entc/... ./pkg/secret/... \
 	./pkg/store/storetest/... ./pkg/store/relaydb ./pkg/testinfra/... \
-	./pkg/observability/txdiag
+	./pkg/observability/txdiag ./pkg/agent/tmuxdeliver
 SQLITE_NONHUB_PKGS_CMD = go list $(SQLITE_NONHUB_PKGS) | grep -vx '$(HUB_PKG)'
 
 # SQLITE_CI_PKGS are the package patterns that blocking CI jobs test with
