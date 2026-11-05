@@ -1838,8 +1838,8 @@
           "properties": {
             "type": {
               "type": "string",
-              "enum": ["docker", "kubernetes"],
-              "description": "Runtime target type: docker or kubernetes."
+              "enum": ["docker", "kubernetes", "cloudrun"],
+              "description": "Runtime target type: docker, kubernetes or cloudrun."
             },
             "display_name": { "type": "string", "description": "Non-sensitive display name shown in the UI; defaults to the type." },
             "context": { "type": "string", "description": "Kubernetes only: the context to use in the loaded kubeconfig (default: its current context)." },
@@ -1932,32 +1932,107 @@
               "type": "string",
               "enum": ["", "pod", "broker"],
               "description": "Kubernetes only. How the agent home directory is created on the export for this instance's new agents: pod (an init container) or broker (through the broker's mount of the export). Overrides server.home_storage.leaf."
+            },
+            "project_id": {
+              "type": "string",
+              "pattern": "^(|[a-z][a-z0-9-]{4,28}[a-z0-9])$",
+              "description": "Cloud Run only, required. The GCP project agent instances run in, as a project ID (domain-scoped project IDs are not supported). Its probed project number plus region is the target's identity. Never sent to the Hub."
+            },
+            "region": {
+              "type": "string",
+              "pattern": "^(|[a-z]+-[a-z]+[0-9]+)$",
+              "description": "Cloud Run only, required. The Cloud Run region of agent instances (e.g. us-central1); part of the target's identity."
+            },
+            "service_account": {
+              "type": "string",
+              "pattern": "^(|[a-z][a-z0-9-]{4,28}[a-z0-9]@[a-z][a-z0-9-]{4,28}[a-z0-9]\\.iam\\.gserviceaccount\\.com)$",
+              "not": { "pattern": "^[0-9]+-compute@developer\\.gserviceaccount\\.com$|@appspot\\.gserviceaccount\\.com$|^service-[0-9]+@|@gcp-sa-" },
+              "description": "Cloud Run only, required. The user-managed service account (<name>@<project_id>.iam.gserviceaccount.com) agent instances run as. The project default service accounts (compute and App Engine) and Google-managed service agents are not allowed, and it must differ from the instance's credential principal. Agents can obtain its token, so it should hold no permissions in the project. Local operator policy: never sent to the Hub."
+            },
+            "network": {
+              "type": "string",
+              "description": "Cloud Run only. The VPC network agent instances use; network or subnetwork is required, because agents mount the NFS share over the VPC. Local operator policy: never sent to the Hub."
+            },
+            "subnetwork": {
+              "type": "string",
+              "description": "Cloud Run only. The VPC subnetwork agent instances use; network or subnetwork is required. Local operator policy: never sent to the Hub."
+            },
+            "credentials_file": {
+              "type": "string",
+              "pattern": "^(|/[^~$:;]*[^~$:;/][^~$:;]*)$",
+              "not": { "pattern": "//|/\\.\\.?(/|$)|/$" },
+              "description": "Cloud Run only, required. Clean absolute path of this instance's own GCP credentials file (a service account key or an impersonated service account), its only credential source (no ~, environment variables or path list). The file must be a private regular file owned by the service user. Stays local; never sent to the Hub."
             }
           },
-          "if": { "properties": { "type": { "const": "docker" } } },
-          "then": {
-            "not": {
-              "anyOf": [
-                { "required": ["context"], "properties": { "context": { "minLength": 1 } } },
-                { "required": ["namespace"], "properties": { "namespace": { "minLength": 1 } } },
-                { "required": ["kubeconfig"], "properties": { "kubeconfig": { "minLength": 1 } } },
-                { "required": ["kubernetes_block_service_account"], "properties": { "kubernetes_block_service_account": { "minLength": 1 } } },
-                { "required": ["kubernetes_service_account_mappings"], "properties": { "kubernetes_service_account_mappings": { "minProperties": 1 } } },
-                { "required": ["shared_dir_storage_class"], "properties": { "shared_dir_storage_class": { "minLength": 1 } } },
-                { "required": ["shared_dir_size"], "properties": { "shared_dir_size": { "minLength": 1 } } },
-                { "required": ["gke"], "properties": { "gke": { "const": true } } },
-                { "required": ["priority_class_name"], "properties": { "priority_class_name": { "minLength": 1 } } },
-                { "required": ["safe_to_evict"], "properties": { "safe_to_evict": { "type": "boolean" } } },
-                { "required": ["node_selector"], "properties": { "node_selector": { "minProperties": 1 } } },
-                { "required": ["tolerations"], "properties": { "tolerations": { "minItems": 1 } } },
-                { "required": ["runtime_class_name"], "properties": { "runtime_class_name": { "minLength": 1 } } },
-                { "required": ["home_storage_backend"], "properties": { "home_storage_backend": { "minLength": 1 } } },
-                { "required": ["home_storage_leaf"], "properties": { "home_storage_leaf": { "minLength": 1 } } }
-              ]
+          "allOf": [
+            {
+              "if": { "properties": { "type": { "const": "docker" } } },
+              "then": { "not": { "$ref": "#/$defs/runtimeTargetKubernetesFieldsSet" } }
+            },
+            {
+              "if": { "properties": { "type": { "const": "docker" } } },
+              "then": {
+                "not": {
+                  "anyOf": [
+                    { "required": ["home_storage_backend"], "properties": { "home_storage_backend": { "minLength": 1 } } },
+                    { "required": ["home_storage_leaf"], "properties": { "home_storage_leaf": { "minLength": 1 } } }
+                  ]
+                }
+              }
+            },
+            {
+              "if": { "properties": { "type": { "enum": ["docker", "kubernetes"] } } },
+              "then": { "not": { "$ref": "#/$defs/runtimeTargetCloudRunFieldsSet" } }
+            },
+            {
+              "if": { "properties": { "type": { "const": "cloudrun" } } },
+              "then": {
+                "required": ["project_id", "region", "service_account", "credentials_file"],
+                "properties": {
+                  "project_id": { "minLength": 1 },
+                  "region": { "minLength": 1 },
+                  "service_account": { "minLength": 1 },
+                  "credentials_file": { "minLength": 1 }
+                },
+                "anyOf": [
+                  { "required": ["network"], "properties": { "network": { "minLength": 1 } } },
+                  { "required": ["subnetwork"], "properties": { "subnetwork": { "minLength": 1 } } }
+                ],
+                "not": { "$ref": "#/$defs/runtimeTargetKubernetesFieldsSet" }
+              }
             }
-          }
+          ]
         }
       }
+    },
+    "runtimeTargetKubernetesFieldsSet": {
+      "description": "Matches a runtime_target that sets any Kubernetes-only field (gke true; safe_to_evict true or false; a non-empty string, mapping or list otherwise).",
+      "anyOf": [
+        { "required": ["context"], "properties": { "context": { "minLength": 1 } } },
+        { "required": ["namespace"], "properties": { "namespace": { "minLength": 1 } } },
+        { "required": ["kubeconfig"], "properties": { "kubeconfig": { "minLength": 1 } } },
+        { "required": ["kubernetes_block_service_account"], "properties": { "kubernetes_block_service_account": { "minLength": 1 } } },
+        { "required": ["kubernetes_service_account_mappings"], "properties": { "kubernetes_service_account_mappings": { "minProperties": 1 } } },
+        { "required": ["shared_dir_storage_class"], "properties": { "shared_dir_storage_class": { "minLength": 1 } } },
+        { "required": ["shared_dir_size"], "properties": { "shared_dir_size": { "minLength": 1 } } },
+        { "required": ["gke"], "properties": { "gke": { "const": true } } },
+        { "required": ["priority_class_name"], "properties": { "priority_class_name": { "minLength": 1 } } },
+        { "required": ["safe_to_evict"], "properties": { "safe_to_evict": { "type": "boolean" } } },
+        { "required": ["node_selector"], "properties": { "node_selector": { "minProperties": 1 } } },
+        { "required": ["tolerations"], "properties": { "tolerations": { "minItems": 1 } } },
+        { "required": ["runtime_class_name"], "properties": { "runtime_class_name": { "minLength": 1 } } }
+      ]
+    },
+    "runtimeTargetCloudRunFieldsSet": {
+      "description": "Matches a runtime_target that sets any Cloud-Run-only field to a non-empty string.",
+      "anyOf": [
+        { "required": ["project_id"], "properties": { "project_id": { "minLength": 1 } } },
+        { "required": ["region"], "properties": { "region": { "minLength": 1 } } },
+        { "required": ["service_account"], "properties": { "service_account": { "minLength": 1 } } },
+        { "required": ["network"], "properties": { "network": { "minLength": 1 } } },
+        { "required": ["subnetwork"], "properties": { "subnetwork": { "minLength": 1 } } },
+        { "required": ["credentials_file"], "properties": { "credentials_file": { "minLength": 1 } } }
+      ]
     },
     "instanceAgentDefaults": {
       "type": "object",

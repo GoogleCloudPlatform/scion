@@ -1209,30 +1209,44 @@ func (s *Server) markConfirmedAbsent(ctx context.Context, projectID, agentID str
 // Reconstruct ensures the record of a runtime object that carries this
 // instance's owner label: an object whose labels give the complete project
 // ID, agent ID, slug and run ID, and which has an object identity (its
-// container or pod ID), is recorded (record and run created as needed, the
-// object added) without reviving a terminal run. Missing metadata, or a
-// record that contradicts the labels, is an error (unresolved).
-func (s *OwnershipStore) Reconstruct(o api.AgentInfo) error {
-	if o.Labels[api.LabelRuntimeBrokerID] != s.brokerID {
+// container or pod ID, or for a Cloud Run instance its instance ID and run
+// ID), is recorded (record and run created as needed, the object added)
+// without reviving a terminal run. Missing metadata, or a record that
+// contradicts the labels, is an error (unresolved).
+//
+// rt is the runtime that listed o. Every label is read under the key rt
+// stores it under (scionrt.LabelKey), and the object's handle is the one
+// its launch recorded (scionrt.ListedObjectHandler), so reconstructing a
+// launched object adds no second resource. Stored values are compared
+// exactly: a value that differs from the record in any way, by a runtime's
+// label rewrite or truncation included, is never matched loosely. For a
+// runtime that rewrites label values (scionrt.RewritesLabels), a run ID this
+// store already records under another project or agent is unresolved, so a
+// rewritten project or agent ID never starts a second record for the same
+// run.
+func (s *OwnershipStore) Reconstruct(o api.AgentInfo, rt scionrt.Runtime) error {
+	label := func(key string) string { return o.Labels[scionrt.LabelKey(rt, key)] }
+	if label(api.LabelRuntimeBrokerID) != s.brokerID {
 		return fmt.Errorf("object %s is not labelled for this instance", o.Name)
 	}
-	projectID := o.Labels["scion.project_id"]
-	agentID := o.Labels["agent_id"]
-	slug := o.Labels["scion.name"]
-	runID := o.Labels[api.LabelRunID]
-	uid := o.ContainerID
-	if uid == "" {
-		uid = o.ID
-	}
-	if reconstructedKind(o) == api.ResourceKindPod && o.Kubernetes != nil && o.Kubernetes.UID != "" {
-		uid = o.Kubernetes.UID
-	}
-	if projectID == "" || agentID == "" || slug == "" || runID == "" || uid == "" {
+	projectID := label("scion.project_id")
+	agentID := label("agent_id")
+	slug := label("scion.name")
+	runID := label(api.LabelRunID)
+	h := reconstructedHandle(o, rt)
+	if projectID == "" || agentID == "" || slug == "" || runID == "" || h.UID == "" ||
+		(h.Kind == api.ResourceKindCloudRunInstance && h.Name == "") {
 		return fmt.Errorf("labels are incomplete (project, agent, name, run and object ID are all required)")
 	}
+	uid := h.UID
 	rec, ok, err := s.Get(projectID, agentID)
 	if err != nil {
 		return err
+	}
+	if !ok && scionrt.RewritesLabels(rt) {
+		if err := s.runRecordedElsewhere(projectID, agentID, runID); err != nil {
+			return err
+		}
 	}
 	if ok {
 		if rec.AgentSlug != slug {
@@ -1254,18 +1268,39 @@ func (s *OwnershipStore) Reconstruct(o api.AgentInfo) error {
 			if rec.OwnsUID(uid) || !reconstructsHandle(o) {
 				return nil
 			}
-			return s.AddResource(projectID, agentID, runID, reconstructedHandle(o, uid))
+			return s.AddResource(projectID, agentID, runID, h)
 		}
 	}
 	if err := s.BeginRun(projectID, agentID, slug, runID); err != nil {
 		return err
 	}
 	if reconstructsHandle(o) {
-		if err := s.AddResource(projectID, agentID, runID, reconstructedHandle(o, uid)); err != nil {
+		if err := s.AddResource(projectID, agentID, runID, h); err != nil {
 			return err
 		}
 	}
 	return s.SetRunState(projectID, agentID, runID, OwnershipStateCreated)
+}
+
+// runRecordedElsewhere refuses a run ID that a record of another project or
+// agent already holds: the listed object's project or agent ID then differs
+// from the record that created it (for example rewritten or truncated by
+// the runtime's label rules), and it is never attributed to a new record.
+func (s *OwnershipStore) runRecordedElsewhere(projectID, agentID, runID string) error {
+	recs, err := s.List()
+	if err != nil {
+		return err
+	}
+	for _, r := range recs {
+		if r.ProjectID == projectID && r.AgentID == agentID {
+			continue
+		}
+		if r.Run(runID) != nil {
+			return fmt.Errorf("run %s is recorded for agent %s of project %s, but the object is labelled agent %s of project %s",
+				runID, r.AgentID, r.ProjectID, agentID, projectID)
+		}
+	}
+	return nil
 }
 
 // reconstructsHandle reports whether a listed object identifies itself well
@@ -1284,8 +1319,20 @@ func reconstructsHandle(o api.AgentInfo) bool {
 	return true
 }
 
-// reconstructedHandle is the cleanup handle of a listed object.
-func reconstructedHandle(o api.AgentInfo, uid string) api.ResourceHandle {
+// reconstructedHandle is the cleanup handle of an object rt listed: the
+// handle rt's launch recorded when rt is a ListedObjectHandler (a Cloud Run
+// instance), otherwise a container by its ID or a pod by its UID.
+func reconstructedHandle(o api.AgentInfo, rt scionrt.Runtime) api.ResourceHandle {
+	if hr, ok := rt.(scionrt.ListedObjectHandler); ok {
+		return hr.ListedObjectHandle(o)
+	}
+	uid := o.ContainerID
+	if uid == "" {
+		uid = o.ID
+	}
+	if reconstructedKind(o) == api.ResourceKindPod && o.Kubernetes != nil && o.Kubernetes.UID != "" {
+		uid = o.Kubernetes.UID
+	}
 	h := api.ResourceHandle{Kind: reconstructedKind(o), Name: o.Name, UID: uid}
 	if h.Kind == api.ResourceKindPod && o.Kubernetes != nil {
 		h.Name, h.Namespace = o.ContainerID, o.Kubernetes.Namespace
@@ -1303,9 +1350,10 @@ func reconstructedHandle(o api.AgentInfo, uid string) api.ResourceHandle {
 // absent, when set, is the runtime's exact absence check by immutable
 // identity (runtime.ResourceAbsenceChecker); warn receives check failures.
 // For every live or deleting record of this instance (not conflicting):
-//   - a recorded main object (container or pod) that a listed object
-//     matches is present (matching is deliberately loose: any of the
-//     object's IDs, by prefix, or its name). One that no listed object
+//   - a recorded main object (container, pod or Cloud Run instance) that a
+//     listed object matches is present (matching is deliberately loose: any
+//     of the object's IDs, by prefix, or its name; a Cloud Run instance
+//     matches only a listed instance of the same instance ID and run ID). One that no listed object
 //     matches is marked absent only when absent confirms it, since the
 //     listing may not cover every namespace a pod was created in; without
 //     absent the listing alone decides.
@@ -1336,7 +1384,7 @@ func (s *OwnershipStore) ReconcileAbsent(present []api.AgentInfo, absent func(ap
 				if res.State != OwnedResourceRecorded {
 					continue
 				}
-				main := res.Kind == api.ResourceKindContainer || res.Kind == api.ResourceKindPod
+				main := res.Kind == api.ResourceKindContainer || res.Kind == api.ResourceKindPod || res.Kind == api.ResourceKindCloudRunInstance
 				listed := main && objectListed(res, present)
 				if main && !listed && absent == nil {
 					// No exact check: the listing alone decides (callers
@@ -1451,7 +1499,18 @@ func (s *OwnershipStore) ReconstructChild(labels map[string]string, h api.Resour
 }
 
 // objectListed reports whether any listed object may be the recorded one.
+// A recorded Cloud Run instance is listed only by an instance of the same
+// instance ID whose run ID is the recorded one: another run holding the
+// name is a different object, which only the exact absence check decides.
 func objectListed(res OwnedResource, present []api.AgentInfo) bool {
+	if res.Kind == api.ResourceKindCloudRunInstance {
+		for _, o := range present {
+			if res.Name != "" && res.UID != "" && o.ContainerID == res.Name && o.RunID == res.UID {
+				return true
+			}
+		}
+		return false
+	}
 	sameID := func(a, b string) bool {
 		if a == "" || b == "" {
 			return false
