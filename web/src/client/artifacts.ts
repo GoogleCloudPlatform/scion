@@ -22,8 +22,7 @@
 
 import { apiFetch, extractApiError } from './api.js';
 
-/** Feature flag that gates every artifact surface in the web UI. */
-export const ARTIFACTS_FLAG = 'hub.artifacts';
+export { ARTIFACTS_FLAG } from './artifacts-flag.js';
 
 export interface ArtifactFile {
   path: string;
