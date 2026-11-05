@@ -48,11 +48,11 @@ state directory. The sentinel
 file (.scion-provisioned) and the provisioning lock are kept in the
 project's provisioning state directory, which the Kubernetes runtime mounts
 next to the workspace and names in SCION_PROVISION_STATE_DIR, so nothing of
-them is visible in the workspace. Without that variable (an older runtime)
-they are kept in the workspace directory itself, as before. A sentinel
-already in the workspace directory still counts as provisioned, and the
-lock in the workspace directory is taken before the one in the state
-directory, so older and newer images exclude each other.
+them is visible in the workspace. In the shared modes (shared-plain and
+worktree-per-agent) that variable is required: a pod without it was built
+by a runtime broker without provisioning state directory support, and
+provisioning fails until the broker is upgraded. Nothing is read, written
+or locked in the workspace root.
 
 In clone-per-agent mode (SCION_WORKSPACE_MODE=clone-per-agent, with
 SCION_AGENT_SLUG and SCION_AGENT_BRANCH), the mounted directory is the
@@ -186,29 +186,25 @@ func runProvision(ctx context.Context) error {
 	}
 
 	// Shared-plain and worktree-per-agent: keep the sentinel and the lock
-	// in the provisioning state directory when the pod mounts one. The
-	// agent-directory modes keep them in the mounted agent directory,
-	// outside the workspace already.
+	// in the provisioning state directory the pod mounts; a pod without
+	// one fails (requireProvisionStateDir). The agent-directory modes keep
+	// them in the mounted agent directory, outside the workspace already.
 	sentinelDir := provisionWorkspace
-	legacyDir := ""
 	if !agentDir {
-		stateDir, err := provisionStateDir(os.Getenv, provisionWorkspace)
+		stateDir, err := requireProvisionStateDir(os.Getenv, provisionWorkspace)
 		if err != nil {
 			return err
 		}
-		if stateDir != "" {
-			// Without the broker's preparation (no setgid and group write),
-			// the node created the directory as root: give it to the
-			// workspace owner, the same condition under which the workspace
-			// chown stays strict. 0 means the default 1000, as for the
-			// workspace.
-			uid, gid := provision.DefaultOwnerID(provisionUID), provision.DefaultOwnerID(provisionGID)
-			if err := prepareStateDir(stateDir, uid, gid, provisionRequireChownSuccess(os.Getenv)); err != nil {
-				return fmt.Errorf("provision: %w", err)
-			}
-			sentinelDir = stateDir
-			legacyDir = provisionWorkspace
+		// Without the broker's preparation (no setgid and group write),
+		// the node created the directory as root: give it to the
+		// workspace owner, the same condition under which the workspace
+		// chown stays strict. 0 means the default 1000, as for the
+		// workspace.
+		uid, gid := provision.DefaultOwnerID(provisionUID), provision.DefaultOwnerID(provisionGID)
+		if err := prepareStateDir(stateDir, uid, gid, provisionRequireChownSuccess(os.Getenv)); err != nil {
+			return fmt.Errorf("provision: %w", err)
 		}
+		sentinelDir = stateDir
 	}
 
 	in := provision.ProvisionInput{
@@ -235,7 +231,6 @@ func runProvision(ctx context.Context) error {
 		NFSUID:          provisionUID,
 		NFSGID:          provisionGID,
 		SentinelDir:     sentinelDir,
-		LegacyDir:       legacyDir,
 		// F-111: this command's entire purpose is the chown. A silent
 		// failure here would reproduce the "workspace stuck root:root" bug
 		// invisibly — the sentinel would still get written, and every future
@@ -368,9 +363,28 @@ func provisionRequireChownSuccess(getenv func(string) string) bool {
 
 // provisionStateDirEnv names the provisioning state directory the
 // Kubernetes runtime mounts into the init container (shared-plain and
-// worktree-per-agent modes). An environment variable rather than a flag, so
-// an older sciontool ignores it and keeps the sentinel in the workspace.
+// worktree-per-agent modes), required in those modes. An environment
+// variable rather than a flag.
 const provisionStateDirEnv = "SCION_PROVISION_STATE_DIR"
+
+// errNoProvisionStateDir is the shared-mode failure of a pod without a
+// provisioning state directory mount.
+var errNoProvisionStateDir = fmt.Errorf("provision: this pod has no provisioning state directory (%s is not set); "+
+	"the runtime broker must be upgraded", provisionStateDirEnv)
+
+// requireProvisionStateDir is provisionStateDir for the shared modes: an
+// unset SCION_PROVISION_STATE_DIR is errNoProvisionStateDir, before
+// anything is created, so nothing is written to the workspace root.
+func requireProvisionStateDir(getenv func(string) string, workspace string) (string, error) {
+	dir, err := provisionStateDir(getenv, workspace)
+	if err != nil {
+		return "", err
+	}
+	if dir == "" {
+		return "", errNoProvisionStateDir
+	}
+	return dir, nil
+}
 
 // provisionStateDir returns the provisioning state directory from
 // SCION_PROVISION_STATE_DIR, or "" when it is unset. It must be a clean

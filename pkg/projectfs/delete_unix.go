@@ -256,9 +256,6 @@ func removeEmptyShared(tree TreeKind, r Resolved) Deletion {
 // directory (provision/, inside no agent Mount), and its maintenance pass
 // removes the tree once that time has passed.
 
-// provisionDir is a project's state directory below its project root.
-const provisionDir = "provision"
-
 // DeleteAfterPath resolves the tombstone's directory, <ProjectRoot>/provision,
 // on a shared Layout.
 func (l Layout) DeleteAfterPath(projectID string) (Resolved, error) {

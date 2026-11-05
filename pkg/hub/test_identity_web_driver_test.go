@@ -533,6 +533,10 @@ func TestTIWebIAP_TransportIdentityInvariant(t *testing.T) {
 		// (projectfs.Layout.Resolve; workspace_layout.go), not a user or
 		// transport resolver.
 		"projectWorkspaceResolved layout",
+		// The workspace Mount of a project tree, for the one-shot
+		// provisioning state promotion (provision_promote.go), through
+		// the same layout authority; not a user or transport resolver.
+		"promoteProjectProvisionState layout",
 		"resolveAsNeededForKeys d.secretBackend",
 		"resolveNFSSharedDir layout",
 		"resolveOutboundRouting messaging",

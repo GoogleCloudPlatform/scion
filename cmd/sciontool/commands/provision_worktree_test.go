@@ -73,7 +73,10 @@ func setupProvisionCmd(t *testing.T, workspace, modeFlag, cloneURL string) {
 	t.Setenv("SCION_AGENT_SLUG", "")
 	t.Setenv("SCION_AGENT_BRANCH", "")
 	t.Setenv(provision.ChownBestEffortEnv, "")
-	t.Setenv(provisionStateDirEnv, "")
+	// The provisioning state directory beside the workspace, as the
+	// Kubernetes runtime mounts it (required in the shared modes). A test
+	// that wants another value sets the variable after this call.
+	t.Setenv(provisionStateDirEnv, testStateDir(t, workspace))
 	// Worktree mode sets GIT_CONFIG_* for its git commands; restore them.
 	for _, key := range []string{"GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0", "GIT_CONFIG_KEY_1", "GIT_CONFIG_VALUE_1"} {
 		t.Setenv(key, "")
@@ -81,6 +84,19 @@ func setupProvisionCmd(t *testing.T, workspace, modeFlag, cloneURL string) {
 			t.Fatal(err)
 		}
 	}
+}
+
+// testStateDir returns provision.ProjectStateDir(workspace), created as a
+// directory unless something already exists at that path.
+func testStateDir(t *testing.T, workspace string) string {
+	t.Helper()
+	dir := provision.ProjectStateDir(workspace)
+	if _, err := os.Lstat(dir); os.IsNotExist(err) {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
 }
 
 // setWorktreeEnv sets the env the Kubernetes runtime passes to the
@@ -129,8 +145,8 @@ func TestRunProvision_WorktreeMode_FirstStartAddsWorktree(t *testing.T) {
 		t.Fatalf("runProvision: %v", err)
 	}
 
-	if _, err := os.Stat(filepath.Join(workspace, provision.ProvisionSentinelFile)); err != nil {
-		t.Errorf("sentinel not written: %v", err)
+	if _, err := os.Stat(filepath.Join(provision.ProjectStateDir(workspace), provision.ProvisionSentinelFile)); err != nil {
+		t.Errorf("sentinel not written in the state directory: %v", err)
 	}
 	assertAgentWorktree(t, workspace, "agent-1", "agent-one")
 	if got := gitT(t, workspace, "config", "gc.auto"); got != "0" {

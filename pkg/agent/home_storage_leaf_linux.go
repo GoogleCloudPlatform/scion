@@ -23,6 +23,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
 )
 
@@ -54,7 +55,7 @@ func (osHomeLeafHost) CheckMount(hostBase string) error {
 // agent directory normally provides it already). An existing home
 // directory is left as it is. It never writes inside the home.
 func (osHomeLeafHost) EnsureHome(hostBase, agentDirRel, homeName string, gid int) error {
-	leafFd, _, err := shareddirs.EnsureLeaf(hostBase, agentDirRel)
+	leafFd, _, err := projectfs.EnsureSharedLeaf(hostBase, agentDirRel)
 	if err != nil {
 		return err
 	}

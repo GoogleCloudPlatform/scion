@@ -18,11 +18,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strings"
 )
 
@@ -168,7 +170,9 @@ func isProvisionAgentWorkspaceShape(projectDir, candidate string) bool {
 // ProvisionAgent-layout shape check (see its doc comment); pass "" for
 // callers with no such layout.
 func readMarker(base, projectDir, path string) (*sharerMarker, error) {
-	data, err := os.ReadFile(path)
+	// The marker is in the shared .git, which agents can write: it is read
+	// without following a symlink at its last component and bounded.
+	data, err := readSmallFileNoFollow(path, sharerMarkerMaxBytes)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
 	}
@@ -413,29 +417,32 @@ func ListSharersForJoin(base, branch string) ([]string, string, error) {
 // boundary's shape check — see readMarker.
 func FindBranchForAgent(base, projectDir, agentID string) (branch, worktreePath string, found bool, err error) {
 	dir := filepath.Join(base, ".git", sharerDir)
-	entries, err := os.ReadDir(dir)
+	names, truncated, err := listSharerMarkers(dir)
 	if errors.Is(err, fs.ErrNotExist) {
 		return "", "", false, nil
 	}
 	if err != nil {
 		return "", "", false, err
 	}
-	for _, e := range entries {
-		if e.IsDir() || filepath.Ext(e.Name()) != ".json" {
-			continue
-		}
-		m, err := readMarker(base, projectDir, filepath.Join(dir, e.Name()))
+	for _, name := range names {
+		m, err := readMarker(base, projectDir, filepath.Join(dir, name))
 		if err != nil {
 			// A single corrupted/unreadable marker must not block the whole
 			// scan (and thus all agent deletions). Skip it and keep looking;
 			// dir-level failures are still returned above.
 			slog.Warn("FindBranchForAgent: skipping unreadable sharer marker",
-				"file", e.Name(), "error", err)
+				"file", name, "error", err)
 			continue
 		}
 		if m != nil && slices.Contains(m.Sharers, agentID) {
 			return m.Branch, m.WorktreePath, true, nil
 		}
+	}
+	if truncated {
+		// Not found among the markers read, but the registry holds more
+		// than the scan reads: "not registered" cannot be stated, so the
+		// caller gets an error and fails closed (never a wrong match).
+		return "", "", false, fmt.Errorf("sharer registry %s: %w", dir, errSharerRegistryTooLarge)
 	}
 	return "", "", false, nil
 }
@@ -453,18 +460,15 @@ func FindBranchForAgent(base, projectDir, agentID string) (branch, worktreePath 
 // Callers MUST hold the per-project provisioning lock.
 func UnregisterSharerElsewhere(base, agentID, keep string) (rewritten []string, err error) {
 	dir := filepath.Join(base, ".git", sharerDir)
-	entries, err := os.ReadDir(dir)
+	names, truncated, err := listSharerMarkers(dir)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	for _, e := range entries {
-		if e.IsDir() || filepath.Ext(e.Name()) != ".json" {
-			continue
-		}
-		m, err := readMarker(base, "", filepath.Join(dir, e.Name()))
+	for _, name := range names {
+		m, err := readMarker(base, "", filepath.Join(dir, name))
 		if err != nil || m == nil || m.Branch == keep || !slices.Contains(m.Sharers, agentID) {
 			continue
 		}
@@ -476,5 +480,77 @@ func UnregisterSharerElsewhere(base, agentID, keep string) (rewritten []string, 
 			rewritten = append(rewritten, sharerPath(base, m.Branch))
 		}
 	}
+	if truncated {
+		// The markers read were handled; the ones beyond the scan were
+		// not, so the caller gets an error (a start fails closed, a
+		// removal logs it) instead of a silent partial unregister.
+		return rewritten, fmt.Errorf("sharer registry %s: %w", dir, errSharerRegistryTooLarge)
+	}
 	return rewritten, nil
+}
+
+// sharerMarkersMax caps the marker names one registry scan keeps, and
+// sharerScanMaxEntries the directory entries it examines. A registry holds
+// about one marker per active sharer of the project, far below both. A
+// registry of exactly a cap is read whole; only a marker or an entry beyond
+// it truncates the scan. Variables so tests can lower them.
+var (
+	sharerMarkersMax     = 4096
+	sharerScanMaxEntries = 65536
+)
+
+// errSharerRegistryTooLarge marks a sharer registry directory above the scan
+// caps. Callers wrap it with the directory, so an operator knows where to
+// remove stale marker files.
+var errSharerRegistryTooLarge = errors.New("the sharer registry holds more entries than a scan reads (more than 4096 markers or 65536 entries); remove stale marker files from it")
+
+// listSharerMarkers returns the sorted names of the marker files (regular
+// entries named *.json) in the registry directory dir, which is in the
+// agent-writable shared .git: the directory is opened without following a
+// symlink (openDirNoFollow) and read in chunks, keeping only marker names,
+// at most sharerMarkersMax of them and examining at most
+// sharerScanMaxEntries entries. truncated reports that the registry holds
+// more than a cap allows: a marker after sharerMarkersMax of them, or an
+// entry after sharerScanMaxEntries, was seen (a warning is logged). A
+// registry of exactly a cap is not truncated. A missing directory is an
+// fs.ErrNotExist error.
+func listSharerMarkers(dir string) (names []string, truncated bool, err error) {
+	f, err := openDirNoFollow(dir)
+	if err != nil {
+		return nil, false, err
+	}
+	defer func() { _ = f.Close() }()
+	scanned := 0
+	for !truncated {
+		chunk, rerr := f.ReadDir(256)
+		for _, e := range chunk {
+			if scanned == sharerScanMaxEntries {
+				// One more entry than the scan examines.
+				truncated = true
+				break
+			}
+			scanned++
+			if e.IsDir() || filepath.Ext(e.Name()) != ".json" {
+				continue
+			}
+			if len(names) == sharerMarkersMax {
+				// One more marker than the scan keeps.
+				truncated = true
+				break
+			}
+			names = append(names, e.Name())
+		}
+		if errors.Is(rerr, io.EOF) {
+			break
+		}
+		if rerr != nil {
+			return nil, false, rerr
+		}
+	}
+	if truncated {
+		slog.Warn("sharer registry above the scan caps; reading only part of it",
+			"dir", dir, "markers", len(names), "entries_examined", scanned)
+	}
+	sort.Strings(names)
+	return names, truncated, nil
 }

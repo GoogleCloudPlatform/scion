@@ -324,13 +324,10 @@ func WorkspaceHasContent(dir string) (bool, error) {
 }
 
 // readAgentBranch returns the branch recorded in path, or "" when there is
-// no record. Only a regular file is read.
+// no record. Only a regular file is read, without following a symlink and at
+// most gitPointerMaxBytes (readSmallFileNoFollow).
 func readAgentBranch(path string) string {
-	fi, err := os.Lstat(path)
-	if err != nil || !fi.Mode().IsRegular() {
-		return ""
-	}
-	data, err := os.ReadFile(path)
+	data, err := readSmallFileNoFollow(path, gitPointerMaxBytes)
 	if err != nil {
 		return ""
 	}

@@ -241,6 +241,10 @@ func AuditAll(ctx context.Context, logger *slog.Logger, deleter Deleter, project
 	}
 }
 
+// provisionDir is a project's state directory below its project root
+// (provisioning lock and sentinel, the deferred-deletion tombstone).
+const provisionDir = "provision"
+
 // DeleteAfterFile is the deferred-deletion tombstone in a project's
 // provision/ directory: an RFC 3339 UTC time.
 const DeleteAfterFile = ".scion-delete-after"

@@ -7023,6 +7023,11 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	// blocks start or readiness).
 	s.startProjectConfigIdentityEnsure(ctx)
 
+	// Promote workspace-root provisioning markers left by images from
+	// before the provisioning state directory, once per start, in the
+	// background (provision_promote.go).
+	s.startLegacyProvisionPromotion(ctx)
+
 	// Plan the project storage migration in the background so the Files
 	// tab notice is known early (never blocks start or readiness).
 	s.startStorageMigrationNoticePlan(ctx)

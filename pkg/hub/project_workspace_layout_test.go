@@ -19,7 +19,9 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"os"
 	"os/exec"
@@ -1040,6 +1042,14 @@ func TestCreateSharedWorkspaceProject_SharedBackend_SSHWithoutProjectSecretRefus
 		assert.Equal(t, http.StatusUnprocessableEntity, code, "%s: %s", tc.name, body)
 		assert.Contains(t, body, errSSHCloneURLNeedsProjectSecret.Error(), tc.name)
 		assert.Len(t, *seen, before, "%s: nothing is provisioned", tc.name)
+		// The refusal comes before any filesystem work: no project tree
+		// (<subpath_root>/<project-id>) was created on the share. The refused
+		// create returns no project ID, so the whole subpath root is checked.
+		entries, err := os.ReadDir(filepath.Join(f.shareBase, "projects"))
+		if !errors.Is(err, fs.ErrNotExist) {
+			require.NoError(t, err, tc.name)
+			assert.Empty(t, entries, "%s: no project tree is created on the share", tc.name)
+		}
 	}
 
 	f.srv.SetSecretBackend(&userTokenSecretBackend{value: "test-creator-token"})

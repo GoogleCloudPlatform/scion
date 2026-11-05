@@ -93,9 +93,9 @@ func isNFSWorktreeName(name string) bool {
 //
 // The directory is only created once the shared checkout has been
 // provisioned (its .scion-provisioned file exists). Before the first clone
-// the workspace directory must stay empty apart from the provisioning lock,
-// so the clone can run; the init container then creates the worktree
-// itself before the agent container starts.
+// the workspace directory must stay empty, so the clone can run; the init
+// container then creates the worktree itself before the agent container
+// starts.
 //
 // It has the same no-op and fallback cases as ensureNFSWorkspaceLeaf (not
 // Kubernetes, no claim, export not mounted on the broker, or a directory
@@ -142,7 +142,7 @@ func ensureNFSWorktreeLeaf(runtimeName string, resolved runtime.ResolvedWorkspac
 	if err != nil && isNFSLeafPermissionError(err) {
 		// The broker cannot look into the state directory (for example one
 		// the node created and the init container gave to the agents' user
-		// and group) and found no legacy sentinel: leave the worktree
+		// and group): leave the worktree
 		// directory to the node, as for a directory the broker may not
 		// create.
 		slog.Warn("workspace_storage nfs: the broker could not check whether the shared checkout is provisioned, so the node will create "+
@@ -182,33 +182,19 @@ func ensureNFSWorktreeLeaf(runtimeName string, resolved runtime.ResolvedWorkspac
 // nfsSharedCheckoutProvisioned reports whether the project's shared
 // checkout at rel (relative to the resolved export mount hostBase) has been
 // provisioned: its sentinel is in the project's provisioning state directory
-// (<project>/provision), or, for a workspace provisioned before that
-// directory existed, in the workspace itself. Lstat is used, so a symlink
-// named like the sentinel also counts, as before.
+// (<project>/provision), the only place it is kept. Lstat is used, so a
+// symlink named like the sentinel also counts, as before.
 //
-// A permission error on either location does not end the check: the other
-// location is still checked, and the first permission error is returned
-// (wrapped, so isNFSLeafPermissionError matches it) only when the sentinel
-// is found in neither. Any other error than "does not exist" is returned
-// straight away.
+// A permission error is returned wrapped, so isNFSLeafPermissionError
+// matches it. Any other error than "does not exist" is returned too.
 func nfsSharedCheckoutProvisioned(hostBase, rel string) (bool, error) {
-	var permErr error
-	for _, dir := range []string{provision.ProjectStateDir(rel), rel} {
-		_, err := os.Lstat(filepath.Join(hostBase, dir, provision.ProvisionSentinelFile))
-		switch {
-		case err == nil:
-			return true, nil
-		case errors.Is(err, fs.ErrNotExist):
-		case isNFSLeafPermissionError(err):
-			if permErr == nil {
-				permErr = err
-			}
-		default:
-			return false, fmt.Errorf("workspace_storage nfs: check provisioning state of %q: %w", rel, err)
-		}
-	}
-	if permErr != nil {
-		return false, fmt.Errorf("workspace_storage nfs: check provisioning state of %q: %w", rel, permErr)
+	_, err := os.Lstat(filepath.Join(hostBase, provision.ProjectStateDir(rel), provision.ProvisionSentinelFile))
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, fs.ErrNotExist):
+	default:
+		return false, fmt.Errorf("workspace_storage nfs: check provisioning state of %q: %w", rel, err)
 	}
 	return false, nil
 }

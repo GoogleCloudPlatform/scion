@@ -646,8 +646,8 @@ func TestCreateAgent_SharedPlainBackstopInput(t *testing.T) {
 	in := got[0]
 	base, _ := filepath.EvalSymlinks(f.layout.HostBase)
 	ws := filepath.Join(base, "projects", sharedRootProjectID, "workspace")
-	if in.Resolved.HostPath != ws || in.LegacyDir != ws || in.SentinelDir != filepath.Join(base, "projects", sharedRootProjectID, "provision") {
-		t.Errorf("layout: HostPath %q LegacyDir %q SentinelDir %q", in.Resolved.HostPath, in.LegacyDir, in.SentinelDir)
+	if in.Resolved.HostPath != ws || in.SentinelDir != filepath.Join(base, "projects", sharedRootProjectID, "provision") {
+		t.Errorf("layout: HostPath %q SentinelDir %q", in.Resolved.HostPath, in.SentinelDir)
 	}
 	if in.Mode != store.SharingModeSharedPlain || in.ProjectID != sharedRootProjectID || in.GitClone == nil || in.GitClone.URL != "https://github.example/org/repo.git" {
 		t.Errorf("input: %+v", in)
@@ -921,17 +921,17 @@ func TestCreateAgent_SharedBootstrapSkipsPopulatedWorkspace(t *testing.T) {
 	}
 }
 
-// An existing but empty shared workspace (only lock litter) still gets the
-// upload; content that appears between admission and the provisioning
-// locks also skips the apply.
+// An existing but empty shared workspace still gets the upload; content
+// that appears between admission and the provisioning locks also skips the
+// apply.
 func TestSharedBootstrapEmptyAndLateContent(t *testing.T) {
 	f := newSharedRootFixture(t, true)
 	ws := filepath.Join(f.root, "workspace")
-	if err := os.MkdirAll(filepath.Join(ws, ".scion-provision.lock"), 0o755); err != nil {
+	if err := os.MkdirAll(ws, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if sharedWorkspaceProvisioned(ws) {
-		t.Fatal("lock litter alone is not content")
+		t.Fatal("an empty workspace is not in use")
 	}
 	w := postSharedBootstrapCreate(t, f, func(ctx context.Context, bucket, prefix, localPath string) error {
 		return os.WriteFile(filepath.Join(localPath, "uploaded.txt"), []byte("x"), 0o644)
@@ -998,6 +998,50 @@ func TestFindAgentInSharedProject_NoProbe(t *testing.T) {
 	}
 	if _, _, err := f.srv.findAgentInSharedProject(context.Background(), "a1", sharedRootProjectID, false); !errors.Is(err, errDeleteTargetUnknown) {
 		t.Fatalf("missing share: %v, want a refusal", err)
+	}
+}
+
+// sharedWorkspaceProvisioned reads the state-directory sentinel only
+// (AC-L7/AC-L8): a sentinel or lock an older image left in the workspace
+// root is not provisioning bookkeeping but content, so a bootstrap is never
+// applied over it.
+func TestSharedWorkspaceProvisioned_StateDirOnly(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, ws string)
+		want  bool
+	}{
+		{name: "missing", setup: func(t *testing.T, ws string) { _ = os.Remove(ws) }, want: false},
+		{name: "empty", setup: func(*testing.T, string) {}, want: false},
+		{name: "state-dir sentinel", setup: func(t *testing.T, ws string) {
+			if err := provision.MarkProvisioned(provision.ProjectStateDir(ws)); err != nil {
+				t.Fatal(err)
+			}
+		}, want: true},
+		{name: "workspace-root sentinel is content", setup: func(t *testing.T, ws string) {
+			if err := os.WriteFile(filepath.Join(ws, provision.ProvisionSentinelFile), []byte("x"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}, want: true},
+		{name: "workspace-root lock is content", setup: func(t *testing.T, ws string) {
+			if err := os.Mkdir(filepath.Join(ws, ".scion-provision.lock"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}, want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			project := t.TempDir()
+			ws := filepath.Join(project, "workspace")
+			for _, d := range []string{ws, provision.ProjectStateDir(ws)} {
+				if err := os.MkdirAll(d, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			tc.setup(t, ws)
+			if got := sharedWorkspaceProvisioned(ws); got != tc.want {
+				t.Errorf("sharedWorkspaceProvisioned = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 

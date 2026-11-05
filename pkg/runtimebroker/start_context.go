@@ -1819,8 +1819,8 @@ func validateMountedWorktree(workspacePath, base string) error {
 // worktree can exist yet under the shared base.
 //
 // The sentinel is looked for in exactly the directories ProvisionShared
-// checks (in.SentinelDirs: the sentinel directory, the base's parent by
-// default, and LegacyDir when set), so the two never disagree.
+// checks (in.SentinelDirs: the sentinel directory alone, the base's parent
+// by default), so the two never disagree.
 func worktreeBaseIsProvisioned(in provision.ProvisionInput) bool {
 	if !provision.SentinelPresent(in.SentinelDirs()...) {
 		return false

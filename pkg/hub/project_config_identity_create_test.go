@@ -416,7 +416,8 @@ func TestCreateHubNativeProject_SharedBackend_ProvisioningFailureRollsBack(t *te
 	assert.NotContains(t, rec.Body.String(), "clone", "no clone wording for a hub-native workspace")
 	require.Len(t, seen, 1, "ProvisionShared was called once")
 	assert.Nil(t, seen[0].GitClone, "a hub-native workspace is never cloned")
-	assert.Empty(t, seen[0].LegacyDir, "no workspace lock for a hub-native workspace")
+	assert.Equal(t, provision.ProjectStateDir(seen[0].Resolved.HostPath), seen[0].SentinelDir,
+		"the sentinel and the lock are kept in the provisioning state directory only, never in the workspace")
 	assert.Equal(t, store.SharingModeSharedPlain, seen[0].Mode)
 
 	result, err := f.s.ListProjects(context.Background(), store.ProjectFilter{}, store.ListOptions{})

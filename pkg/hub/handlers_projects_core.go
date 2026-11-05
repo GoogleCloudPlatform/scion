@@ -36,6 +36,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/labels"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs/provisioner"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
@@ -1327,15 +1328,14 @@ func (s *Server) writeHubConnectionSettings(project *store.Project, scionDir str
 }
 
 // provisionSharedWorkspace provisions a shared-workspace git project's
-// workspace, or (with no clone and no workspace lock) a hub-native project's
-// empty workspace, on a shared backend through provision.ProvisionShared with the
-// Kubernetes init container's layout: the uuid workspace leaf
-// (Resolve(workspace)), shared-plain, the sentinel and lock in
-// <ProjectRoot>/provision (provision.ProjectStateDir), the legacy lock in
-// the workspace itself (so an older pod's lock still excludes this one),
-// uid/gid from the Layout, chown best-effort. The workspace leaf and the
-// provisioning state directory are created first through the confined
-// EnsureLeaf walk. The project's git token reaches only the clone command
+// workspace, or (with no clone) a hub-native project's empty workspace, on
+// a shared backend through the layout authority's Provisioner
+// (provisioner.Provisioner.ProvisionSharedWorkspace, the same path the
+// brokers' shared-plain backstop takes): the uuid workspace leaf and the
+// provisioning state directory created with the leaf contract, then
+// provision.ProvisionShared with the sentinel and lock in
+// <ProjectRoot>/provision only, uid/gid from the Layout, chown best-effort.
+// The project's git token reaches only the clone command
 // (ProvisionInput.CloneToken). An existing sentinel means no clone.
 //
 // Errors returned to the caller carry no host path: a storage failure
@@ -1361,6 +1361,12 @@ func writeSharedCloneSourceRefused(w http.ResponseWriter, err error) bool {
 	return true
 }
 
+// projectProvisioner returns the layout authority's Provisioner for layout, with
+// the hub's provisioning function (provisionSharedClone).
+func projectProvisioner(layout projectfs.Layout) provisioner.Provisioner {
+	return provisioner.Provisioner{Layout: layout, ProvisionShared: provisionSharedClone}
+}
+
 func (s *Server) provisionSharedWorkspace(ctx context.Context, project *store.Project) error {
 	// The clone URL is project-supplied and the clone runs on the hub host:
 	// it is checked before any filesystem work, and refused (never
@@ -1375,8 +1381,8 @@ func (s *Server) provisionSharedWorkspace(ctx context.Context, project *store.Pr
 	if err != nil {
 		return err
 	}
-	res, err := s.projectWorkspaceResolved(project)
-	if err != nil {
+	// The project must have a hub-managed workspace Mount.
+	if _, err := s.projectWorkspaceResolved(project); err != nil {
 		return err
 	}
 	storageErr := func(step string, err error) error {
@@ -1388,44 +1394,6 @@ func (s *Server) provisionSharedWorkspace(ctx context.Context, project *store.Pr
 	if err != nil {
 		return storageErr("project root", err)
 	}
-	base, err := res.ResolvedHostBase()
-	if err != nil {
-		return storageErr("host base", err)
-	}
-	// A project root this create made is removed again, with everything
-	// under it, when provisioning fails, as the local backend removes its
-	// failed clone. A root that existed before this create is left as is.
-	_, statErr := os.Lstat(filepath.Join(base, pr.RelPath))
-	createdRoot := errors.Is(statErr, fs.ErrNotExist)
-	cleanup := func() {
-		if !createdRoot {
-			return
-		}
-		if err := shareddirs.DeleteProjectRoot(base, pr.SubPathRoot, project.ID); err != nil {
-			s.projectsLogger().Warn("shared workspace provisioning: could not remove the failed project tree",
-				"project_id", project.ID, "error", sanitizedStorageError(err))
-		}
-	}
-	root, err := res.Open(true)
-	if err != nil {
-		cleanup()
-		return storageErr("workspace leaf", err)
-	}
-	_ = root.Close()
-	fd, _, err := shareddirs.EnsureLeaf(base, filepath.Join(pr.RelPath, provision.ProvisionStateDirName))
-	if err != nil {
-		cleanup()
-		return storageErr("provisioning state directory", err)
-	}
-	if err := shareddirs.CloseFd(fd); err != nil {
-		cleanup()
-		return storageErr("provisioning state directory", err)
-	}
-	stateDir := filepath.Join(pr.HostPath, provision.ProvisionStateDirName)
-	if err := provision.PrepareStateDir(stateDir, provision.DefaultOwnerID(layout.UID), provision.DefaultOwnerID(layout.GID), false); err != nil {
-		cleanup()
-		return storageErr("provisioning state directory", err)
-	}
 
 	// The project's token is bound to its own recorded remote
 	// (CloneTokenRemote, from the project record, never the clone-url
@@ -1435,14 +1403,6 @@ func (s *Server) provisionSharedWorkspace(ctx context.Context, project *store.Pr
 	if cloneCfg != nil && project.GitRemote != "" {
 		cloneToken = s.resolveCloneToken(ctx, project)
 	}
-	// The legacy lock in the workspace itself excludes an older pod that may
-	// already be provisioning a git workspace. A hub-native workspace is new
-	// (or absent) and is never cloned, so it takes only the state-directory
-	// lock and gets no lock file in its root.
-	legacyLockDir := res.HostPath
-	if project.GitRemote == "" {
-		legacyLockDir = ""
-	}
 	// With no project credential the clone runs anonymously: it is run
 	// unbound, so the hardened clone resets the hub host's own git
 	// authentication for it, on any host.
@@ -1450,37 +1410,45 @@ func (s *Server) provisionSharedWorkspace(ctx context.Context, project *store.Pr
 	if cloneToken == "" {
 		tokenRemote = ""
 	}
+	// An ssh clone URL without a project credential is refused before any
+	// filesystem work.
 	if cloneCfg != nil {
 		if err := sshCloneURLRefused(cloneCfg.URL, cloneToken != ""); err != nil {
-			cleanup()
 			return err
 		}
 	}
-	err = provisionSharedClone(provision.ProvisionInput{
+	createdRoot, err := projectProvisioner(layout).ProvisionSharedWorkspace(provisioner.SharedWorkspace{
 		Ctx:              ctx,
-		Resolved:         provision.ResolvedWorkspace{HostPath: res.HostPath},
 		ProjectID:        project.ID,
-		Mode:             store.SharingModeSharedPlain,
 		GitClone:         cloneCfg,
 		CloneToken:       cloneToken,
 		CloneTokenRemote: tokenRemote,
-		HostGitHardened:  true,
-		NFSUID:           layout.UID,
-		NFSGID:           layout.GID,
-		SentinelDir:      stateDir,
-		LegacyDir:        legacyLockDir,
 	})
-	if err != nil {
-		s.projectsLogger().Warn("shared workspace provisioning failed",
-			"project_id", project.ID, "error", sanitizedStorageError(err))
-		cleanup()
-		if cloneCfg == nil {
-			// No clone ran (a hub-native workspace): a storage failure, not a git one.
-			return fmt.Errorf("shared workspace provisioning: %w", errWorkspaceStorageUnavailable)
-		}
-		return sharedWorkspaceCloneError(err)
+	if err == nil {
+		return nil
 	}
-	return nil
+	// A project root this create made is removed again, with everything
+	// under it, when provisioning fails, as the local backend removes its
+	// failed clone. A root that existed before this create is left as is.
+	if createdRoot {
+		if base, berr := pr.ResolvedHostBase(); berr != nil {
+			s.projectsLogger().Warn("shared workspace provisioning: could not remove the failed project tree",
+				"project_id", project.ID, "error", sanitizedStorageError(berr))
+		} else if derr := shareddirs.DeleteProjectRoot(base, pr.SubPathRoot, project.ID); derr != nil {
+			s.projectsLogger().Warn("shared workspace provisioning: could not remove the failed project tree",
+				"project_id", project.ID, "error", sanitizedStorageError(derr))
+		}
+	}
+	if errors.Is(err, provisioner.ErrStorage) {
+		return storageErr("workspace", err)
+	}
+	s.projectsLogger().Warn("shared workspace provisioning failed",
+		"project_id", project.ID, "error", sanitizedStorageError(err))
+	if cloneCfg == nil {
+		// No clone ran (a hub-native workspace): a storage failure, not a git one.
+		return fmt.Errorf("shared workspace provisioning: %w", errWorkspaceStorageUnavailable)
+	}
+	return sharedWorkspaceCloneError(err)
 }
 
 // provisionHubNativeWorkspace provisions the empty workspace of a hub-native

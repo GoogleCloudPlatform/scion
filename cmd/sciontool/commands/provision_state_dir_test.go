@@ -5,6 +5,7 @@ package commands
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -158,10 +159,12 @@ func TestRunProvision_StateDir_NotADirectoryFailsClosed(t *testing.T) {
 	}
 }
 
-// A workspace provisioned before the state directory existed (sentinel in
-// the workspace root) is not provisioned again: the clone URL here does not
-// exist, and no new sentinel is written.
-func TestRunProvision_StateDir_LegacySentinelHonoured(t *testing.T) {
+// A sentinel in the workspace root (written by images from before the
+// state directory) is not read (AC-L8): the workspace counts as
+// unprovisioned, and since it has content and no .git the clone refuses it.
+// No state-directory sentinel is written, and the workspace-root file is
+// left for the hub's one-shot promotion.
+func TestRunProvision_StateDir_WorkspaceRootMarkerNotRead(t *testing.T) {
 	workspace, stateDir := newStateDirLayout(t)
 	if err := os.WriteFile(filepath.Join(workspace, provision.ProvisionSentinelFile), []byte("provisioned_at=test\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -176,11 +179,63 @@ func TestRunProvision_StateDir_LegacySentinelHonoured(t *testing.T) {
 	setupProvisionCmd(t, workspace, "shared-plain", missing)
 	t.Setenv(provisionStateDirEnv, stateDir)
 
-	if err := runProvision(context.Background()); err != nil {
-		t.Fatalf("runProvision: %v", err)
+	err := runProvision(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "not empty") {
+		t.Fatalf("runProvision = %v, want the clone to refuse the non-empty workspace", err)
 	}
 	if _, err := os.Stat(filepath.Join(stateDir, provision.ProvisionSentinelFile)); err == nil {
-		t.Error("a new sentinel was written for an already-provisioned workspace")
+		t.Error("a state-directory sentinel was written from the workspace-root marker")
+	}
+	if _, err := os.Stat(filepath.Join(workspace, provision.ProvisionSentinelFile)); err != nil {
+		t.Errorf("the workspace-root marker was changed at runtime: %v", err)
+	}
+}
+
+// AC-L1: without SCION_PROVISION_STATE_DIR (a pod built by a runtime broker
+// without state-directory support) the shared modes fail with the upgrade
+// error before anything is created: no workspace, no sentinel and no lock
+// in the workspace root.
+func TestRunProvision_NoStateDir_SharedModesFail(t *testing.T) {
+	for _, mode := range []string{"shared-plain", "worktree-per-agent"} {
+		t.Run(mode, func(t *testing.T) {
+			workspace := filepath.Join(t.TempDir(), "workspace")
+			setupProvisionCmd(t, workspace, "shared-plain", "")
+			if mode == "worktree-per-agent" {
+				setWorktreeEnv(t, "agent-1", "agent-one")
+			}
+			t.Setenv(provisionStateDirEnv, "")
+
+			err := runProvision(context.Background())
+			if !errors.Is(err, errNoProvisionStateDir) {
+				t.Fatalf("runProvision = %v, want errNoProvisionStateDir", err)
+			}
+			if !strings.Contains(err.Error(), "runtime broker must be upgraded") {
+				t.Errorf("error %q does not name the broker upgrade", err)
+			}
+			if _, statErr := os.Lstat(workspace); !os.IsNotExist(statErr) {
+				t.Errorf("workspace created (stat err %v); want nothing created", statErr)
+			}
+		})
+	}
+}
+
+func TestRequireProvisionStateDir(t *testing.T) {
+	env := func(v string) func(string) string {
+		return func(key string) string {
+			if key == provisionStateDirEnv {
+				return v
+			}
+			return ""
+		}
+	}
+	if _, err := requireProvisionStateDir(env(""), "/workspace"); !errors.Is(err, errNoProvisionStateDir) {
+		t.Errorf("unset: got %v, want errNoProvisionStateDir", err)
+	}
+	if got, err := requireProvisionStateDir(env("/scion-provision"), "/workspace"); err != nil || got != "/scion-provision" {
+		t.Errorf("set: got %q, %v", got, err)
+	}
+	if _, err := requireProvisionStateDir(env("/workspace/provision"), "/workspace"); err == nil || errors.Is(err, errNoProvisionStateDir) {
+		t.Errorf("inside the workspace: got %v, want the placement error", err)
 	}
 }
 

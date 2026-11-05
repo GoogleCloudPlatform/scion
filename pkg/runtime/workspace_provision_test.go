@@ -469,20 +469,53 @@ func TestNFSProvision_CustomSentinelDir(t *testing.T) {
 		t.Fatalf("Resolve: %v", err)
 	}
 
+	stateDir := filepath.Join(filepath.Dir(res.HostPath), "provision")
 	err = ProvisionShared(ProvisionInput{
 		Resolved:    res,
 		ProjectID:   projectID,
 		Mode:        store.SharingModeSharedPlain,
-		SentinelDir: res.HostPath, // sentinel inside workspace dir
+		SentinelDir: stateDir,
 	})
 	if err != nil {
 		t.Fatalf("Provision: %v", err)
 	}
 
-	// Sentinel should be inside the workspace dir.
-	workspaceSentinel := filepath.Join(res.HostPath, ProvisionSentinelFile)
-	if _, err := os.Stat(workspaceSentinel); err != nil {
-		t.Errorf("custom sentinel should be inside workspace dir: %v", err)
+	// Sentinel should be in the custom dir, and not in the workspace dir.
+	if _, err := os.Stat(filepath.Join(stateDir, ProvisionSentinelFile)); err != nil {
+		t.Errorf("custom sentinel should be in the custom dir: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(res.HostPath, ProvisionSentinelFile)); err == nil {
+		t.Errorf("no sentinel may be written inside the workspace dir")
+	}
+}
+
+// A sentinel directory that is the workspace itself is refused before
+// anything is written: the provisioning bookkeeping is never kept in the
+// workspace root.
+func TestNFSProvision_SentinelDirInWorkspaceRefused(t *testing.T) {
+	b, _, _ := nfsTestBackend(t)
+
+	projectID := "proj-sentinel-in-ws"
+	res, err := b.Resolve(ResolveInput{
+		ProjectID: projectID,
+		Mode:      store.SharingModeSharedPlain,
+	})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	for _, dir := range []string{res.HostPath, filepath.Join(res.HostPath, "provision")} {
+		err = ProvisionShared(ProvisionInput{
+			Resolved:    res,
+			ProjectID:   projectID,
+			Mode:        store.SharingModeSharedPlain,
+			SentinelDir: dir,
+		})
+		if err == nil || !strings.Contains(err.Error(), "outside the workspace") {
+			t.Fatalf("SentinelDir %s: got %v, want the outside-the-workspace refusal", dir, err)
+		}
+		if _, err := os.Stat(filepath.Join(dir, ProvisionSentinelFile)); err == nil {
+			t.Errorf("SentinelDir %s: sentinel written despite the refusal", dir)
+		}
 	}
 }
 
@@ -503,7 +536,7 @@ func TestNFSProvision_CustomSentinelDir_Idempotent(t *testing.T) {
 		Resolved:    res,
 		ProjectID:   projectID,
 		Mode:        store.SharingModeSharedPlain,
-		SentinelDir: res.HostPath,
+		SentinelDir: filepath.Join(filepath.Dir(res.HostPath), "provision"),
 		GitClone: &api.GitCloneConfig{
 			URL:    bareRepo,
 			Branch: "main",
@@ -519,7 +552,7 @@ func TestNFSProvision_CustomSentinelDir_Idempotent(t *testing.T) {
 	}
 
 	// Sentinel exists in the custom dir.
-	sentinel := filepath.Join(res.HostPath, ProvisionSentinelFile)
+	sentinel := filepath.Join(input.SentinelDir, ProvisionSentinelFile)
 	if _, err := os.Stat(sentinel); err != nil {
 		t.Errorf("sentinel should exist in custom dir: %v", err)
 	}

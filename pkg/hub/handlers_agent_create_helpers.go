@@ -31,6 +31,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs/provisioner"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -345,18 +346,16 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 				// later dispatches are built from this row.
 			default:
 				// On a shared backend the workspace leaf is created here
-				// if missing (the same O_NOFOLLOW EnsureLeaf the brokers
-				// use), so the co-located broker given this path finds
-				// it. The hub used to create its own copy at project
-				// create.
+				// if missing, through the layout authority's Provisioner
+				// (the same leaf contract the brokers use), so the
+				// co-located broker given this path finds it. The hub
+				// used to create its own copy at project create.
 				if resolved.Backend.Shared() {
-					root, openErr := resolved.Open(true)
-					if openErr != nil {
+					if _, leafErr := (provisioner.Provisioner{}).EnsureLeaf(resolved); leafErr != nil {
 						s.projectsLogger().Warn("failed to create the project workspace on shared storage",
-							"project_id", project.ID, "error", openErr)
+							"project_id", project.ID, "error", leafErr)
 						return fmt.Errorf("project workspace: %w", errWorkspaceStorageUnavailable)
 					}
-					_ = root.Close()
 				}
 				agent.AppliedConfig.Workspace = resolved.HostPath
 			}

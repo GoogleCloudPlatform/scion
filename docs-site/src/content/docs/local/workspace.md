@@ -527,11 +527,11 @@ Removing a shared directory deletes its data:
 Creating a shared directory and creating its backing directory on disk are separate steps:
 
 - **Local CLI (`scion shared-dir create`)** creates the backing directory immediately.
-- **Hub (Web UI or API)** only records the declaration. The backing directory is created on first use:
-  - when an agent in the project starts on a Runtime Broker. Each Runtime Broker creates the directory locally, or on the shared export or volume when `server.project_storage.backend` is `nfs`, `cloudrun-volume` or `gke-shared-volume`.
+- **Hub (Web UI or API)** creates the backing directory when the shared directory is declared, if the Hub can reach the storage it belongs in: the shared export or volume (`server.project_storage.backend` `nfs`, `cloudrun-volume` or `gke-shared-volume`), a hub-managed project's storage on the Hub host, or the project's directory on a Runtime Broker running in the same server as the Hub. Otherwise it is created on first use:
+  - when an agent in the project starts on a Runtime Broker. Each Runtime Broker creates the directory locally, or on the shared export or volume.
   - when a file is first written or uploaded to it through the Hub.
 
-Until then, listing the shared directory's files through the Hub returns an empty list, and reading a file returns not found. Listing or reading never creates the directory.
+Until the directory exists, listing the shared directory's files through the Hub returns an empty list, and reading a file returns not found. Listing or reading never creates the directory.
 
 A write through the Hub only creates the directory in storage the Hub itself can reach: the NFS export, a hub-managed project's storage on the Hub host, or the project's directory on a Runtime Broker running in the same server as the Hub. It never creates the directory on a remote Runtime Broker; that copy appears only when an agent of the project starts on that Runtime Broker. For a git project with no co-located Runtime Broker and no NFS storage, a write through the Hub is rejected and creates nothing.
 
