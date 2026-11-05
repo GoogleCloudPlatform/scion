@@ -132,7 +132,7 @@ func TestWaitForPodReady_ProgressStepSequence(t *testing.T) {
 		statusContainerCreating, statusContainerCreating, statusRunning)
 	rec := &progressRecorder{}
 
-	if err := rt.waitForPodReady(context.Background(), "default", "p", rec.hooks()); err != nil {
+	if err := rt.waitForPodReady(context.Background(), "default", "p", rec.hooks(), podMountWatch{}); err != nil {
 		t.Fatalf("waitForPodReady: %v", err)
 	}
 	assertEvents(t, rec.snapshot(), []string{
@@ -272,7 +272,7 @@ func TestWaitForPodReady_TerminalFailuresAreLaunchFailures(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			rt, clientset := fastPodReadyRuntime(false)
 			scriptPodGets(clientset, tc.status)
-			err := rt.waitForPodReady(context.Background(), "default", "p", launchHooks{})
+			err := rt.waitForPodReady(context.Background(), "default", "p", launchHooks{}, podMountWatch{})
 			if err == nil {
 				t.Fatal("waitForPodReady succeeded, want a failure")
 			}
@@ -308,7 +308,7 @@ func TestWaitForPodReady_GKEUnschedulableWaitsThenTimesOut(t *testing.T) {
 		scriptPodGets(clientset, statusUnscheduled)
 		rec := &progressRecorder{}
 
-		err := rt.waitForPodReady(context.Background(), "default", "p", rec.hooks())
+		err := rt.waitForPodReady(context.Background(), "default", "p", rec.hooks(), podMountWatch{})
 		assertEvents(t, rec.snapshot(), []string{"awaiting_capacity: waiting for node capacity"})
 		if err == nil {
 			t.Fatal("waitForPodReady succeeded, want a timeout")
@@ -333,7 +333,7 @@ func TestWaitForPodReady_GKEUnschedulableWaitsThenTimesOut(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 		defer cancel()
 
-		err := rt.waitForPodReady(ctx, "default", "p", launchHooks{})
+		err := rt.waitForPodReady(ctx, "default", "p", launchHooks{}, podMountWatch{})
 		if err == nil {
 			t.Fatal("waitForPodReady succeeded, want a timeout")
 		}
@@ -369,7 +369,7 @@ func TestWaitForPodReady_DeadlineDuringGetIsLaunchTimeout(t *testing.T) {
 		return true, nil, context.DeadlineExceeded
 	})
 
-	err := rt.waitForPodReady(context.Background(), "default", "p", launchHooks{})
+	err := rt.waitForPodReady(context.Background(), "default", "p", launchHooks{}, podMountWatch{})
 	if err == nil {
 		t.Fatal("waitForPodReady succeeded, want a timeout")
 	}
@@ -409,7 +409,7 @@ func TestWaitForPodReady_CallerCancelDuringGetStaysUntyped(t *testing.T) {
 		return true, nil, context.Canceled
 	})
 
-	err := rt.waitForPodReady(ctx, "default", "p", launchHooks{})
+	err := rt.waitForPodReady(ctx, "default", "p", launchHooks{}, podMountWatch{})
 	var lf *LaunchFailure
 	if errors.As(err, &lf) {
 		t.Errorf("caller cancel typed as %+v; want the plain error", lf)
@@ -574,7 +574,7 @@ func TestWaitForPodReady_DisruptedPodIsTyped(t *testing.T) {
 				return true, pod, nil
 			})
 
-			err := rt.waitForPodReady(context.Background(), "default", "p", launchHooks{})
+			err := rt.waitForPodReady(context.Background(), "default", "p", launchHooks{}, podMountWatch{})
 			if err == nil {
 				t.Fatal("waitForPodReady succeeded, want a failure")
 			}
@@ -608,7 +608,7 @@ func TestWaitForPodReady_DisruptedPodIsTyped(t *testing.T) {
 		rt, clientset := fastPodReadyRuntime(false)
 		marked := pending(condScheduled(corev1.ConditionTrue, ""), disruption(corev1.PodReasonPreemptionByScheduler))
 		scriptPodGets(clientset, marked, marked, statusRunning)
-		if err := rt.waitForPodReady(context.Background(), "default", "p", launchHooks{}); err != nil {
+		if err := rt.waitForPodReady(context.Background(), "default", "p", launchHooks{}, podMountWatch{}); err != nil {
 			t.Fatalf("waitForPodReady: %v, want it to keep waiting until the pod runs", err)
 		}
 	})
@@ -634,7 +634,7 @@ func TestWaitForPodReady_DisruptedPodIsTyped(t *testing.T) {
 			}
 			return true, nil, k8serrors.NewNotFound(corev1.Resource("pods"), "p")
 		})
-		err := rt.waitForPodReady(context.Background(), "default", "p", launchHooks{})
+		err := rt.waitForPodReady(context.Background(), "default", "p", launchHooks{}, podMountWatch{})
 		if err == nil || err.Error() != `pods "p" not found` || !k8serrors.IsNotFound(err) {
 			t.Fatalf("err = %v, want the Kubernetes NotFound error", err)
 		}
@@ -650,7 +650,7 @@ func TestWaitForPodReady_DisruptedPodIsTyped(t *testing.T) {
 		rt, clientset := fastPodReadyRuntime(false)
 		rt.podReadyTimeout = 50 * time.Millisecond
 		scriptPodGets(clientset, pending(condScheduled(corev1.ConditionTrue, ""), disruption(corev1.PodReasonPreemptionByScheduler)))
-		err := rt.waitForPodReady(context.Background(), "default", "p", launchHooks{})
+		err := rt.waitForPodReady(context.Background(), "default", "p", launchHooks{}, podMountWatch{})
 		if want := "timed out waiting for pod to be ready: context deadline exceeded"; err == nil || err.Error() != want {
 			t.Fatalf("err = %v, want %q", err, want)
 		}
@@ -663,7 +663,7 @@ func TestWaitForPodReady_DisruptedPodIsTyped(t *testing.T) {
 	t.Run("failed without disruption stays untyped", func(t *testing.T) {
 		rt, clientset := fastPodReadyRuntime(false)
 		scriptPodGets(clientset, corev1.PodStatus{Phase: corev1.PodFailed})
-		err := rt.waitForPodReady(context.Background(), "default", "p", launchHooks{})
+		err := rt.waitForPodReady(context.Background(), "default", "p", launchHooks{}, podMountWatch{})
 		var lf *LaunchFailure
 		if err == nil || errors.As(err, &lf) {
 			t.Errorf("err = %v (LaunchFailure %+v), want the plain terminal error", err, lf)

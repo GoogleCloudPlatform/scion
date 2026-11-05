@@ -721,7 +721,7 @@ func TestWaitForPodReady_NamesFailedInitContainer(t *testing.T) {
 		t.Fatalf("failed to create test pod: %v", err)
 	}
 
-	err := r.waitForPodReady(context.Background(), namespace, podName, launchHooks{})
+	err := r.waitForPodReady(context.Background(), namespace, podName, launchHooks{}, podMountWatch{})
 	if err == nil {
 		t.Fatal("expected waitForPodReady to fail when an init container has terminated with a non-zero exit code")
 	}
@@ -783,7 +783,7 @@ func TestWaitForPodReady_InitContainerTerminalWaitingReasons(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 
-			err := r.waitForPodReady(ctx, namespace, podName, launchHooks{})
+			err := r.waitForPodReady(ctx, namespace, podName, launchHooks{}, podMountWatch{})
 			if err == nil {
 				t.Fatalf("expected waitForPodReady to fail promptly for init container reason %s", reason)
 			}
@@ -830,7 +830,7 @@ func TestWaitForPodReady_InitContainerNonTerminalWaitingReasonKeepsWaiting(t *te
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	err := r.waitForPodReady(ctx, namespace, podName, launchHooks{})
+	err := r.waitForPodReady(ctx, namespace, podName, launchHooks{}, podMountWatch{})
 	if err == nil {
 		t.Fatal("expected waitForPodReady to time out while the init container is still PodInitializing, not succeed")
 	}
@@ -906,7 +906,7 @@ func TestWaitForPodReady_MainContainerTerminalWaitingReasons(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 
-			err := r.waitForPodReady(ctx, namespace, podName, launchHooks{})
+			err := r.waitForPodReady(ctx, namespace, podName, launchHooks{}, podMountWatch{})
 			if err == nil {
 				t.Fatalf("expected waitForPodReady to fail for main container reason %s", tc.reason)
 			}

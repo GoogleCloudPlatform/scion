@@ -58,6 +58,7 @@ func TestLaunchVocabularyValues(t *testing.T) {
 		{LaunchCodeContainerConfig, "container_config"},
 		{LaunchCodeCrashLoop, "crash_loop"},
 		{LaunchCodeInitContainerFailed, "init_container_failed"},
+		{LaunchCodeVolumeMountFailed, "volume_mount_failed"},
 		{LaunchCodeUnschedulable, "unschedulable"},
 		{LaunchCodeBrokerRestarted, "broker_restarted"},
 		{LaunchCodeDispatchFailed, "dispatch_failed"},
