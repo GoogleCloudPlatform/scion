@@ -359,6 +359,19 @@ gh workflow run publish-homebrew.yml -R GoogleCloudPlatform/scion -f tag=v0.3.0-
 The script refuses to replace a newer version already in the tap, so rerunning an older preview
 cannot move users backwards; it fails instead.
 
+**Older Linux hosts.** On Linux hosts whose glibc is older than 2.39 or libstdc++ older than
+6.0.33 (Homebrew's own build baseline, for example Debian 12, Ubuntu 22.04 or RHEL 9), Homebrew
+adds `gcc` as an implicit dependency of every formula, and `glibc` as well when glibc is older
+than 2.39, and installs them, with their dependencies, on first use. No formula setting avoids
+this, and bottles get the same dependencies. Scion is a static binary and does not use them. The
+formula caveats say so on Linux and point to the release tarball, and the installation guide
+recommends the tarball on such hosts. Caveat changes reach users only when the publish job
+regenerates the formula for the next preview.
+
+**Plugins.** The formula installs only `scion`, as the release tarballs contain nothing else. The
+chat plugins are separate Linux-only release assets (`scion-plugin-*-linux-*.tar.gz`); the plugin
+setup guides explain how to install them.
+
 **Updating the formula locally.** The script needs only `bash`, `curl` and coreutils:
 
 ```bash
