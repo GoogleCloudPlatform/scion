@@ -211,3 +211,86 @@ func TestProvisionStatusRecorder_FinishScrubs(t *testing.T) {
 		t.Errorf("short: status error = %q", msg)
 	}
 }
+
+// memOutputsFixture stages a bundle whose outputs are moved to the in-memory
+// outputs directory, as on a Kubernetes NFS-home pod, with a non-root writer
+// (the test process's own uid). The outputs directory does not exist yet.
+// The umask is fixed for the test (setProvisionUmask), so what the writer
+// creates does not depend on the caller's umask.
+func memOutputsFixture(t *testing.T, script string) (home, manifestPath, outDir string) {
+	t.Helper()
+	uid := os.Geteuid()
+	if uid == 0 {
+		t.Skip("needs a non-root test process: only a non-root writer creates the in-memory outputs directory")
+	}
+	t.Cleanup(setProvisionUmask())
+	home = t.TempDir()
+	t.Setenv("HOME", home)
+	memRoot := t.TempDir()
+	t.Cleanup(hooks.SetHarnessDirsRootForTest(memRoot))
+	t.Cleanup(hooks.SetProvisionStatusGeteuidForTest(func() int { return uid }))
+	outDir = filepath.Join(memRoot, "outputs")
+	t.Setenv("SCION_HARNESS_OUTPUTS_DIR", outDir)
+	t.Setenv("SCION_HARNESS_SECRETS_DIR", "")
+	bundle := filepath.Join(home, ".scion", "harness")
+	scriptPath := filepath.Join(bundle, "provision.sh")
+	writeTestFile(t, scriptPath, script)
+	if err := os.Chmod(scriptPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return home, writeManifest(t, bundle, baseManifest(t, home, scriptPath)), outDir
+}
+
+// On a first start with the in-memory outputs directory missing, the
+// "running" status is recorded before the provisioner runs (the script
+// creates no directory), and so is the final one.
+func TestRunHarnessProvision_FirstStartRecordsRunningInMemOutputs(t *testing.T) {
+	_, manifestPath, outDir := memOutputsFixture(t,
+		"#!/bin/sh\ngrep -q '\"state\":\"running\"' \"$SCION_HARNESS_OUTPUTS_DIR/status.json\" || exit 3\nexit 0\n")
+	if err := runHarnessProvision(context.Background(), manifestPath); err != nil {
+		t.Fatalf("runHarnessProvision: %v", err)
+	}
+	if state, _ := readStatus(t, filepath.Join(outDir, "status.json")); state != hooks.ProvisionStatusOK {
+		t.Errorf("state = %q, want %q", state, hooks.ProvisionStatusOK)
+	}
+}
+
+// A failure before the provisioner runs on a first start is recorded in the
+// in-memory outputs directory, so the pre-start error keeps its reason.
+func TestRunHarnessProvision_FirstStartEarlyFailureRecordedInMemOutputs(t *testing.T) {
+	home, _, _ := memOutputsFixture(t, "#!/bin/sh\nexit 0\n")
+	if err := runHarnessProvision(context.Background(), filepath.Join(home, "missing.json")); err == nil {
+		t.Fatal("expected a missing manifest to fail")
+	}
+	if d := hooks.HarnessProvisionFailureDetail(home); !strings.Contains(d, "read manifest") {
+		t.Errorf("failure detail = %q, want the manifest error", d)
+	}
+}
+
+// An existing in-memory outputs directory that is not private to the writer
+// is left alone: the status is not recorded, a warning says so, and the
+// provision result is unchanged.
+func TestRunHarnessProvision_UnsafeMemOutputsDirWarns(t *testing.T) {
+	_, manifestPath, outDir := memOutputsFixture(t, "#!/bin/sh\nexit 0\n")
+	if err := os.Mkdir(outDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(outDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(t.TempDir(), "agent.log")
+	setTestLogPath(t, logPath)
+	if err := runHarnessProvision(context.Background(), manifestPath); err != nil {
+		t.Fatalf("runHarnessProvision: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(outDir, "status.json")); !os.IsNotExist(err) {
+		t.Errorf("status.json written into an unsafe directory (err %v)", err)
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "[WARN] provision status not recorded: ") {
+		t.Errorf("agent.log has no status warning:\n%s", data)
+	}
+}
