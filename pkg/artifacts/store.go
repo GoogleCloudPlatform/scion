@@ -453,7 +453,17 @@ type Store interface {
 	// permission when an existing grant's permission changes (none when
 	// it already had g's permission). An actor with a steward authority
 	// may not give admin (ErrStewardActionNotAllowed).
+	// It is PutGrantNotify with notify false.
 	PutGrant(ctx context.Context, g *Grant, maxGrants int, crossScope bool, actor *Actor) (GrantPut, error)
+
+	// PutGrantNotify is PutGrant for a grant whose subject may be told
+	// (Ask for review, ptone/scion#5145). With notify, under the artifact's
+	// lock it records "notified": true in the grant_created or
+	// grant_changed event's detail when the write raised the subject's
+	// level (grantRank; a created grant counts as a raise), and reports
+	// that in GrantPutResult.Notified. Without notify, or for a change that
+	// did not raise the level, it is exactly PutGrant.
+	PutGrantNotify(ctx context.Context, g *Grant, maxGrants int, crossScope bool, actor *Actor, notify bool) (GrantPutResult, error)
 
 	// PutReviewGrant is PutGrant for a review grant (design D24): g must
 	// be a review grant to a user principal. Under the artifact's lock it
@@ -732,6 +742,13 @@ func NewStore(db *sql.DB, driverName string) Store {
 // GrantPutChanged changed anything, and only they record an event; the
 // decision log follows the same rule.
 type GrantPut int
+
+// GrantPutResult is what PutGrantNotify did: the GrantPut, and whether the
+// event it recorded says the subject is to be told.
+type GrantPutResult struct {
+	Put      GrantPut
+	Notified bool
+}
 
 const (
 	// GrantPutUnchanged: the subject already held the permission.

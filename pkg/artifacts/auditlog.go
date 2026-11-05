@@ -61,6 +61,9 @@ const (
 	logKeyOwnersChecked   = "owners_checked"
 	logKeyOrphanedCount   = "orphaned_count"
 	logKeyUnorphanedCount = "unorphaned_count"
+	// logKeyNotified is set on a grant entry whose request asked for
+	// notify (Ask for review): whether the subject was told.
+	logKeyNotified = "notified"
 )
 
 // Log outcomes.
@@ -129,6 +132,13 @@ const (
 	// (ptone/scion#7134) was skipped because the delegating user holds no
 	// active role that reads in the artifact's home project.
 	logReasonSponsorNoRole = "sponsor_no_role_in_home"
+	// Ask for review (ptone/scion#5145): why a grant's notification was not
+	// sent. The grant itself is not refused. notify_failed is logged after
+	// the grant committed, when the notice could not be written.
+	logReasonNotifyRateLimited  = "notify_rate_limited"
+	logReasonNotifyNotPermitted = "notify_not_permitted"
+	logReasonNotifyUnavailable  = "notify_unavailable"
+	logReasonNotifyFailed       = "notify_failed"
 )
 
 // Log authorities: why the actor was allowed. They are the artifact_event
@@ -187,6 +197,8 @@ type logEntry struct {
 	subjectRef  string
 	permission  string
 	count       int
+	// notified, when set, is logged as logKeyNotified.
+	notified *bool
 }
 
 // logDecision writes e for the request r, as its caller.
@@ -250,6 +262,9 @@ func writeDecision(ctx context.Context, l *slog.Logger, level slog.Level, route,
 	str(logKeyPermission, e.permission)
 	if e.count > 0 {
 		attrs = append(attrs, slog.Int(logKeyCount, e.count))
+	}
+	if e.notified != nil {
+		attrs = append(attrs, slog.Bool(logKeyNotified, *e.notified))
 	}
 	l.LogAttrs(ctx, level, "artifacts: "+e.action, attrs...)
 }
@@ -342,6 +357,12 @@ func (s *Service) adminRefusalReason(ctx context.Context, a *Artifact) string {
 // the caller of r, which acted by authority. A put that changed nothing is
 // not logged, as it records no event.
 func (s *Service) logGrantPut(r *http.Request, a *Artifact, g *Grant, put GrantPut, authority string) {
+	s.logGrantPutNotify(r, a, g, put, authority, nil)
+}
+
+// logGrantPutNotify is logGrantPut for a request that asked for notify:
+// notified, when not nil, is logged as whether the subject was told.
+func (s *Service) logGrantPutNotify(r *http.Request, a *Artifact, g *Grant, put GrantPut, authority string, notified *bool) {
 	var action string
 	switch put {
 	case GrantPutCreated:
@@ -352,7 +373,15 @@ func (s *Service) logGrantPut(r *http.Request, a *Artifact, g *Grant, put GrantP
 		return
 	}
 	s.logAllowed(r, logEntry{action: action, artifact: a, authority: authority,
-		subjectKind: g.SubjectKind, subjectRef: g.SubjectRef, permission: g.Permission})
+		subjectKind: g.SubjectKind, subjectRef: g.SubjectRef, permission: g.Permission, notified: notified})
+}
+
+// logNotifySkipped writes, at WARN, why the notification a grant request
+// asked for was not sent (a logReasonNotify* reason). It names the subject
+// and the permission, never a message or a title.
+func (s *Service) logNotifySkipped(r *http.Request, a *Artifact, reason, subjectRef, permission string) {
+	s.logDecision(r, slog.LevelWarn, logEntry{action: logActionShare, outcome: logOutcomeRefused, reason: reason,
+		artifact: a, subjectKind: SubjectPrincipal, subjectRef: subjectRef, permission: permission})
 }
 
 // grantForLog returns grant grantID of a, read before it is removed so its

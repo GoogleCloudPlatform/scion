@@ -16,11 +16,9 @@ package hub
 
 import (
 	"context"
-	"errors"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
-	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // The subject read check of a review grant (ptone/scion#4538): the hub
@@ -28,12 +26,12 @@ import (
 //
 // ReviewSubjectAuthorize answers for a NAMED user, the subject of a review
 // grant, not for the caller of ctx. It is CHECK-ONLY: the identity it
-// builds (reviewSubjectIdentity) is passed only as the subject of one
-// policy read, AuthzService.CheckAccess, the same decision Authorize asks
-// for a caller. It never enters a context, so it can never be taken for
+// builds (namedUserSubject, artifacts_subject_user.go) is passed only as
+// the subject of one policy read, AuthzService.CheckAccess, the same
+// decision Authorize asks for a caller. It never enters a context, so it can never be taken for
 // the caller: the artifact service learns its caller only from ctx
 // (artifactHost.Principal), which refuses every in-process identity.
-// TestReviewSubjectIdentityNeverEntersAContext pins that.
+// TestNamedUserSubjectNeverEntersAContext pins that.
 //
 // The shape matches the send-time recipient check of ptone/scion#4575
 // (RecipientAuthorize), so the two can later share one implementation.
@@ -55,7 +53,7 @@ func (h *artifactHost) ReviewSubjectAuthorize(ctx context.Context, kind, ref, sc
 	if !ok || scopeRef == "" || kind != artifacts.PrincipalKindUser || h.server == nil || h.server.authzService == nil {
 		return false, nil
 	}
-	identity, err := h.reviewSubjectIdentity(ctx, ref)
+	_, identity, err := h.server.namedUserSubject(ctx, ref)
 	if err != nil || identity == nil {
 		return false, err
 	}
@@ -65,32 +63,4 @@ func (h *artifactHost) ReviewSubjectAuthorize(ctx context.Context, kind, ref, sc
 		ParentID:   scopeRef,
 	}, Action(perm.Action))
 	return decision.Allowed, nil
-}
-
-// reviewSubjectIdentity builds the subject identity of a review grant from
-// the user's stored record, as the provenance and standing checks do. It
-// returns nil and no error, which the caller treats as "cannot read", for
-// a missing or inactive user or a test identity that can no longer sign
-// in, and an error only for a failed lookup.
-//
-// The result must only ever be passed as the subject of a policy read and
-// never be stored in a context (TestReviewSubjectIdentityNeverEntersAContext).
-func (h *artifactHost) reviewSubjectIdentity(ctx context.Context, userID string) (Identity, error) {
-	if h.server == nil || h.server.store == nil || userID == "" {
-		return nil, nil
-	}
-	user, err := h.server.store.GetUser(ctx, userID)
-	if errors.Is(err, store.ErrNotFound) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	if user == nil || user.Status != store.UserStatusActive {
-		return nil, nil
-	}
-	if testFixtureRejection(user, h.server.testIdentities.enabled, h.server.testIdentities.clock()) != "" {
-		return nil, nil
-	}
-	return NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, ""), nil
 }
