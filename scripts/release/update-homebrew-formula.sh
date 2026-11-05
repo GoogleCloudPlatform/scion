@@ -38,7 +38,7 @@ REPO="GoogleCloudPlatform/scion"
 RELEASE_BASE="https://github.com/${REPO}/releases/download"
 
 usage() {
-  sed -n 's/^# \{0,1\}//; 20,26p' "$0" >&2
+  sed -n 's/^# \{0,1\}//; 20,26p' < "$0" >&2
   exit 2
 }
 
@@ -77,8 +77,11 @@ tag_re='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(preview|rc)\.(0|[1
 [[ "$tag" =~ $tag_re ]] || die "not a release tag (want vX.Y.Z, vX.Y.Z-preview.N or vX.Y.Z-rc.N): '$tag'"
 version="${tag#v}"
 
+# staged is the temporary formula next to OUT_FILE; the trap removes it if a
+# failure stops the script before the final rename.
+staged=""
 tmp=$(mktemp -d)
-trap 'rm -rf "$tmp"' EXIT
+trap 'rm -rf "$tmp"; if [ -n "$staged" ]; then rm -f -- "$staged"; fi' EXIT
 
 if [ -z "$sums_file" ]; then
   sums_file="$tmp/SHA256SUMS"
@@ -90,12 +93,14 @@ fi
 
 # sha_for ASSET — print the hash on the single SHA256SUMS line for ASSET.
 # Lines are coreutils format: 64 lowercase hex, two separators ("  " or
-# " *" in binary mode), the file name.
+# " *" in binary mode), the file name. File paths reach awk and sed on
+# stdin, never as arguments: awk reads an argument like "a=b" as a variable
+# assignment, and both read a leading "-" as an option.
 sha_for() {
   local asset="$1" matches count
   matches=$(awk -v name="$asset" '
     ($2 == name || $2 == "*" name) && NF == 2 { print $1 }
-  ' "$sums_file")
+  ' < "$sums_file")
   count=$(printf '%s' "$matches" | grep -c . || true)
   [ "$count" -eq 1 ] || die "want exactly one SHA256SUMS line for ${asset}, found ${count}"
   [[ "$matches" =~ ^[0-9a-f]{64}$ ]] || die "malformed sha256 for ${asset}: '${matches}'"
@@ -129,7 +134,7 @@ version_key() {
 }
 
 if [ -f "$out_file" ] && [ "$allow_downgrade" != "true" ]; then
-  current=$(sed -n 's/^  version "\(.*\)"$/\1/p' "$out_file" | head -1)
+  current=$(sed -n 's/^  version "\(.*\)"$/\1/p' < "$out_file" | head -1)
   if [ -n "$current" ] && [ "$current" != "$version" ]; then
     current_key=$(version_key "$current") ||
       die "cannot compare with the version in ${out_file} ('${current}'); pass --allow-downgrade to overwrite"

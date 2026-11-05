@@ -205,6 +205,57 @@ name="same version: rewritten (idempotent rerun)"
 run --sums-file "$SUMS" v0.3.0-preview.5 "$tmp/tap/scion.rb"
 want_status 0
 
+# run_in DIR ARGS... — like run, but from DIR, so relative paths reach the
+# script exactly as given.
+run_in() {
+  local dir="$1"
+  shift
+  status=0
+  (cd "$dir" && "$SCRIPT" "$@") >"$tmp/stdout" 2>"$tmp/stderr" || status=$?
+}
+
+mkdir -p "$tmp/odd"
+
+name="odd paths: a sums file named like an awk assignment (x=y) is read as a file"
+cp "$SUMS" "$tmp/odd/sums=SHA256SUMS"
+run_in "$tmp/odd" --sums-file sums=SHA256SUMS v0.3.0-preview.5 eq.rb
+want_status 0
+cmp -s "$GOLDEN" "$tmp/odd/eq.rb" || fail "output differs from golden"
+
+name="odd paths: a sums file whose name starts with '-' is read as a file"
+cp "$SUMS" "$tmp/odd/-SHA256SUMS"
+run_in "$tmp/odd" --sums-file -SHA256SUMS v0.3.0-preview.5 dash-sums.rb
+want_status 0
+cmp -s "$GOLDEN" "$tmp/odd/dash-sums.rb" || fail "output differs from golden"
+
+name="odd paths: an output file whose name starts with '-' still gets the downgrade check"
+run_in "$tmp/odd" --sums-file "$SUMS" -- v0.3.0-preview.10 -scion.rb
+want_status 0
+run_in "$tmp/odd" --sums-file "$SUMS" -- v0.3.0-preview.9 -scion.rb
+want_status 1
+want_stderr "has newer version 0.3.0-preview.10"
+grep -qF 'version "0.3.0-preview.10"' "$tmp/odd/-scion.rb" || fail "refused downgrade still changed the file"
+
+name="odd paths: an output file named like an awk assignment (x=y) is written"
+run_in "$tmp/odd" --sums-file "$SUMS" v0.3.0-preview.5 out=scion.rb
+want_status 0
+cmp -s "$GOLDEN" "$tmp/odd/out=scion.rb" || fail "output differs from golden"
+
+name="interrupted staging: a failed copy leaves no temp file and the old formula"
+mkdir -p "$tmp/stage" "$tmp/failbin"
+printf 'existing\n' > "$tmp/stage/scion.rb"
+cat > "$tmp/failbin/cp" <<'EOF'
+#!/usr/bin/env bash
+# Stub cp that fails, as an interrupted or full-disk copy would.
+exit 1
+EOF
+chmod +x "$tmp/failbin/cp"
+PATH="$tmp/failbin:$PATH" run --sums-file "$SUMS" v0.3.0-preview.5 "$tmp/stage/scion.rb"
+[ "$status" -ne 0 ] || fail "exit status: got 0 with a failing cp"
+leftover=$(find "$tmp/stage" -name '.scion.rb.*' | head -1)
+[ -z "$leftover" ] || fail "temp file left behind: $leftover"
+[ "$(cat "$tmp/stage/scion.rb")" = existing ] || fail "existing file was modified"
+
 name="usage: wrong argument count exits 2"
 run v0.3.0-preview.5
 want_status 2
