@@ -470,6 +470,23 @@ jobs:
           esac
           exit "$rc"
 
+      - name: Check Authorization Guards reach every pkg/hub area
+        run: |
+          # Plants the self-test fixture in every directory of
+          # hack/area-dirs.txt and requires the scan to flag it there
+          # (ptone/scion#4275). Invoked directly for the same exit-code
+          # reason as the step above.
+          set +e
+          ./hack/check-authz-guards.sh --self-test-dirs
+          rc=$?
+          set -e
+          case "$rc" in
+            0) ;;
+            1) echo "::error title=Authorization guards miss an area::check-authz-guards --self-test-dirs: a planted guard in a hack/area-dirs.txt directory was not flagged. Details are in the step log." ;;
+            *) echo "::error title=Authorization guards area self-test NOT run::check-authz-guards --self-test-dirs could not run (exit $rc) — NOTHING WAS ANALYSED." ;;
+          esac
+          exit "$rc"
+
       - name: Check Conversation Upsert Guard
         run: ./hack/check-conversation-upsert-guard.sh
 

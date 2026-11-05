@@ -513,6 +513,10 @@ func TestTIWebIAP_TransportIdentityInvariant(t *testing.T) {
 	// transport identity before its first lookup.
 	assert.Equal(t, []string{
 		"Exchange s.resolver",
+		// slog.Value.Resolve in the test log capture helper
+		// (internal/hubtestutil, scanned through guardScanSubdirs), not a
+		// user or transport resolver.
+		"RecordAttrs a.Value",
 		"agentPTYPath rtr",
 		"authenticateExternalBearer cfg.GoogleResolver",
 		"brokerPTYPath rtr",
