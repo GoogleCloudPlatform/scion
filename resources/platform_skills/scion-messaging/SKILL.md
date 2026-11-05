@@ -147,13 +147,13 @@ backticks inside a double-quoted command argument as command substitution**, bef
 heredoc or a body file to preserve backticks and `$` characters safely:
 
 ```bash
-scion message conv:<conversation-id> - <<'EOF_MESSAGE'
+scion message "conv:<conversation-id>" - <<'EOF_MESSAGE'
 **Next step:** run `scion list` and share the result here.
 EOF_MESSAGE
 ```
 
 Or write the body to a file and use
-`scion message conv:<conversation-id> --body-file /tmp/message.md`.
+`scion message "conv:<conversation-id>" --body-file /tmp/message.md`.
 A positional `-` or `--body-file -` reads stdin. Trailing CR/LF characters are trimmed;
 other body bytes are preserved.
 
@@ -168,16 +168,16 @@ Use `scion conversation` before asking someone to repeat context:
 
 ```bash
 # Catch up on recent activity.
-scion conversation catch-up conv:<conversation-id> --since 2h --json
+scion conversation catch-up "conv:<conversation-id>" --since 2h --json
 
 # Read older messages; move the cutoff back for earlier pages.
-scion conversation messages conv:<conversation-id> --before <RFC3339-time> --limit 50 --json
+scion conversation messages "conv:<conversation-id>" --before "<RFC3339-time>" --limit 50 --json
 
 # Read a cited message.
-scion conversation get-message conv:<conversation-id> <message-id> --json
+scion conversation get-message "conv:<conversation-id>" "<message-id>" --json
 
 # Inspect conversation details and participants.
-scion conversation get conv:<conversation-id>
+scion conversation get "conv:<conversation-id>"
 ```
 
 A limited page or lookback is not the full history. Widen the window or fetch by ID
