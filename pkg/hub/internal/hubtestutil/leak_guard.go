@@ -87,13 +87,17 @@ var LeakGuardSignatures = []string{
 	// openers): the Monitor's emitter, stopped when the store's DB closes.
 	LeakGuardStoreDiagSignature,
 	// Background loops started by New() and stopped by Server.Shutdown.
-	"hub.(*chatLinkService).cleanupLoop",
-	"hub.(*PreviewService).cleanupNonces",
-	"hub.(*NonceCache).cleanup",
+	// These entries carry no package qualifier on purpose: the leading "."
+	// marks where the receiver type name starts, and an entry keeps matching
+	// when its type moves out of package hub into a subpackage.
+	".(*chatLinkService).cleanupLoop",
+	".(*PreviewService).cleanupNonces",
+	".(*NonceCache).cleanup",
 	// OIDC key cleanup/refresh loops, which run on the server-lifetime
 	// context and stop on Shutdown (ptone/scion#3641). The key manager
-	// lives in pkg/hub/oidckeys.
-	"oidckeys.(*OIDCKeyManager).Start",
+	// lives in pkg/hub/oidckeys; the entry is unqualified like the ones
+	// above, so it also keeps matching if that package is renamed or moved.
+	".(*OIDCKeyManager).Start",
 }
 
 // LeakGuardStoreSignature and LeakGuardStoreDiagSignature are the
