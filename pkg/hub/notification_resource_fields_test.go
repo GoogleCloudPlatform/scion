@@ -64,7 +64,9 @@ func receiveRaw(t *testing.T, ch <-chan Event) map[string]json.RawMessage {
 	}
 }
 
-var resourceEventKeys = []string{"kind", "resourceType", "resourceId"}
+// resourceEventKeys are the user-event-only keys: kind and resource fields
+// (ptone/scion#5145) and the excerpt (ptone/scion#6853).
+var resourceEventKeys = []string{"kind", "resourceType", "resourceId", "excerpt"}
 
 // TestNotificationCreatedEvent_HasNoResourceFields pins the struct: the
 // broadcast payload type, which UserNotificationEvent embeds, declares no

@@ -2107,8 +2107,12 @@ func init() {
 	notificationDescResourceID := notificationFields[16].Descriptor()
 	// notification.DefaultResourceID holds the default value on creation for the resource_id field.
 	notification.DefaultResourceID = notificationDescResourceID.Default.(string)
+	// notificationDescExcerpt is the schema descriptor for excerpt field.
+	notificationDescExcerpt := notificationFields[17].Descriptor()
+	// notification.DefaultExcerpt holds the default value on creation for the excerpt field.
+	notification.DefaultExcerpt = notificationDescExcerpt.Default.(string)
 	// notificationDescCreated is the schema descriptor for created field.
-	notificationDescCreated := notificationFields[17].Descriptor()
+	notificationDescCreated := notificationFields[18].Descriptor()
 	// notification.DefaultCreated holds the default value on creation for the created field.
 	notification.DefaultCreated = notificationDescCreated.Default.(func() time.Time)
 	// notificationDescID is the schema descriptor for id field.

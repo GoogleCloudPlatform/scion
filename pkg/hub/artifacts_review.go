@@ -33,16 +33,23 @@ import (
 // never as the reviewer, and it carries the reference in its body only (not
 // in the artifacts metadata key, which is admitted only under a sender's
 // credential). Whether the owner may read the version is decided when it
-// runs the command, as for every reference. A user owner has no inbound
-// channel for it; the artifact page shows the review-pending state instead.
+// runs the command, as for every reference. A user owner gets an in-app
+// notification instead, for a review by an authorized reviewer other than
+// the owner (notifyArtifactReviewSummary); the artifact page shows the
+// review-pending state as well.
 
 // artifactReviewNoticeTimeout bounds the background delivery of one notice.
 const artifactReviewNoticeTimeout = 30 * time.Second
 
-// notifyArtifactReview is the artifact service's review notifier. It
-// returns at once; delivery runs in the background so the finalize response
-// does not wait on a broker.
+// notifyArtifactReview is the artifact service's review notifier. For a
+// user owner it stores the review summary notification. For an agent owner
+// it returns at once; delivery runs in the background so the finalize
+// response does not wait on a broker.
 func (s *Server) notifyArtifactReview(ctx context.Context, n artifacts.ReviewNotice) {
+	if n.OwnerKind == artifacts.PrincipalKindUser {
+		s.notifyArtifactReviewSummary(ctx, n)
+		return
+	}
 	if n.OwnerKind != artifacts.PrincipalKindAgent || n.OwnerRef == "" {
 		return
 	}

@@ -2545,6 +2545,13 @@ const (
 	// artifact and the granter asked for the user to be told
 	// (ptone/scion#5145). ResourceType is NotificationResourceArtifact.
 	NotificationKindArtifactGrant = "artifact_grant"
+	// NotificationKindArtifactReviewSummary: a review of a user's artifact
+	// was finalized by a reviewer other than the owner whom the finalize
+	// request admitted to submit it (ptone/scion#6853). The artifact's owner is the only recipient.
+	// ResourceType is NotificationResourceArtifact, and Excerpt holds the
+	// cleaned start of the review's summary note, or is empty when the
+	// review has none.
+	NotificationKindArtifactReviewSummary = "artifact_review_summary"
 )
 
 // Notification.ResourceType values.
@@ -2562,6 +2569,11 @@ const (
 	// manage access to the artifact.
 	NotificationStatusArtifactShared = "ARTIFACT_SHARED"
 )
+
+// NotificationStatusArtifactReviewSubmitted is the Status of a
+// NotificationKindArtifactReviewSummary row: a reviewer finalized a review
+// of the user's artifact.
+const NotificationStatusArtifactReviewSubmitted = "ARTIFACT_REVIEW_SUBMITTED"
 
 // MatchesActivity returns true if the given activity matches any of the subscription's
 // trigger activities. Comparison is case-insensitive.
@@ -2623,6 +2635,12 @@ type Notification struct {
 	// are empty when it is not about a resource.
 	ResourceType string `json:"resourceType,omitempty"`
 	ResourceID   string `json:"resourceId,omitempty"`
+	// Excerpt is text another principal wrote, kept apart from Message:
+	// for NotificationKindArtifactReviewSummary, the start of the review's
+	// summary note, cleaned when the row is built. Clients show it as
+	// plain text, attributed by Message, and never derive a link or a
+	// resource from it. Empty for every other kind.
+	Excerpt string `json:"excerpt,omitempty"`
 }
 
 // Notification.DispatchOutcome values.

@@ -160,16 +160,28 @@ func NewService(host Host) *Service {
 }
 
 // ReviewNotice describes a review version that was just finalized, for the
-// host to tell the artifact's owner (design §8.2). It carries ids only; the
-// host addresses the owner as itself, never as the reviewer.
+// host to tell the artifact's owner (design §8.2). It carries ids and the
+// review's summary note; the host addresses the owner as itself, never as
+// the reviewer.
 type ReviewNotice struct {
 	ArtifactID   string
 	Seq          int
+	ScopeKind    string
 	ScopeRef     string
 	OwnerKind    string
 	OwnerRef     string
 	ReviewerKind string
 	ReviewerRef  string
+	// Note is the review version's summary note as the reviewer wrote it
+	// (at most maxNoteRunes runes). It is the reviewer's text: the host
+	// must clean it before showing it anywhere.
+	Note string
+	// SubmitAuthorized is true when the finalize request that made the
+	// review current admitted the reviewer to append a review version
+	// (writeAccess.allowsKind: a review, write or admin grant), decided by
+	// that request itself, and the reviewer is not the owner
+	// (ptone/scion#6853).
+	SubmitAuthorized bool
 }
 
 // Ref is the notice's versioned reference.
@@ -185,8 +197,9 @@ func (s *Service) SetReviewNotifier(fn func(context.Context, ReviewNotice)) {
 	s.reviewNotifier = fn
 }
 
-// notifyReview tells the review notifier about review version v of a.
-func (s *Service) notifyReview(ctx context.Context, a *Artifact, v *Version) {
+// notifyReview tells the review notifier about review version v of a,
+// finalized by a caller with access.
+func (s *Service) notifyReview(ctx context.Context, a *Artifact, v *Version, access writeAccess) {
 	s.mu.RLock()
 	fn := s.reviewNotifier
 	s.mu.RUnlock()
@@ -194,8 +207,11 @@ func (s *Service) notifyReview(ctx context.Context, a *Artifact, v *Version) {
 		return
 	}
 	fn(context.WithoutCancel(ctx), ReviewNotice{
-		ArtifactID: a.ID, Seq: v.Seq, ScopeRef: a.ScopeRef, OwnerKind: a.OwnerKind, OwnerRef: a.OwnerRef,
+		ArtifactID: a.ID, Seq: v.Seq, ScopeKind: a.ScopeKind, ScopeRef: a.ScopeRef,
+		OwnerKind: a.OwnerKind, OwnerRef: a.OwnerRef,
 		ReviewerKind: v.CreatedByKind, ReviewerRef: v.CreatedByRef,
+		Note:             v.Note,
+		SubmitAuthorized: access.allowsKind(VersionKindReview) && access != accessOwner,
 	})
 }
 

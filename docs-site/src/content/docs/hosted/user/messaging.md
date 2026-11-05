@@ -14,7 +14,7 @@ For an in-depth look at the architecture, semantic contract, and design invarian
 In the Web Dashboard, messages from your agents and other users arrive as chat conversations (see [Native Web Chat](#native-web-chat) below). There is no separate inbox:
 - **Unread Badge:** The Chat entry in the header's mode selector shows how many of your conversations have unread messages. A conversation counts once, however many unread messages it has. Only unmuted DMs and unmuted threads that you are a member of and have permission to read are counted. The browser tab title shows the same number.
 - **Popups:** New chat messages raise chat popups and browser notifications (see [Push Notifications & Presence](#push-notifications--presence)).
-- **Agent events:** The bell's notification tray carries agent events (such as an agent stalling or asking for input), not chat messages.
+- **Agent events:** The bell's notification tray carries agent events (such as an agent stalling or asking for input), not chat messages. It also tells you when someone else reviews an artifact you own, with the start of the reviewer's note (see [Reviews](/scion/reference/artifacts/#reviews)).
 
 The badge number comes from `GET /api/v1/chat/unread-count` (see the [API Reference](/scion/reference/api/)).
 

@@ -266,6 +266,20 @@ func (_u *NotificationUpdate) SetNillableResourceID(v *string) *NotificationUpda
 	return _u
 }
 
+// SetExcerpt sets the "excerpt" field.
+func (_u *NotificationUpdate) SetExcerpt(v string) *NotificationUpdate {
+	_u.mutation.SetExcerpt(v)
+	return _u
+}
+
+// SetNillableExcerpt sets the "excerpt" field if the given value is not nil.
+func (_u *NotificationUpdate) SetNillableExcerpt(v *string) *NotificationUpdate {
+	if v != nil {
+		_u.SetExcerpt(*v)
+	}
+	return _u
+}
+
 // Mutation returns the NotificationMutation object of the builder.
 func (_u *NotificationUpdate) Mutation() *NotificationMutation {
 	return _u.mutation
@@ -393,6 +407,9 @@ func (_u *NotificationUpdate) sqlSave(ctx context.Context) (_node int, err error
 	}
 	if value, ok := _u.mutation.ResourceID(); ok {
 		_spec.SetField(notification.FieldResourceID, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.Excerpt(); ok {
+		_spec.SetField(notification.FieldExcerpt, field.TypeString, value)
 	}
 	if _node, err = sqlgraph.UpdateNodes(ctx, _u.driver, _spec); err != nil {
 		if _, ok := err.(*sqlgraph.NotFoundError); ok {
@@ -651,6 +668,20 @@ func (_u *NotificationUpdateOne) SetNillableResourceID(v *string) *NotificationU
 	return _u
 }
 
+// SetExcerpt sets the "excerpt" field.
+func (_u *NotificationUpdateOne) SetExcerpt(v string) *NotificationUpdateOne {
+	_u.mutation.SetExcerpt(v)
+	return _u
+}
+
+// SetNillableExcerpt sets the "excerpt" field if the given value is not nil.
+func (_u *NotificationUpdateOne) SetNillableExcerpt(v *string) *NotificationUpdateOne {
+	if v != nil {
+		_u.SetExcerpt(*v)
+	}
+	return _u
+}
+
 // Mutation returns the NotificationMutation object of the builder.
 func (_u *NotificationUpdateOne) Mutation() *NotificationMutation {
 	return _u.mutation
@@ -808,6 +839,9 @@ func (_u *NotificationUpdateOne) sqlSave(ctx context.Context) (_node *Notificati
 	}
 	if value, ok := _u.mutation.ResourceID(); ok {
 		_spec.SetField(notification.FieldResourceID, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.Excerpt(); ok {
+		_spec.SetField(notification.FieldExcerpt, field.TypeString, value)
 	}
 	_node = &Notification{config: _u.config}
 	_spec.Assign = _node.assignValues

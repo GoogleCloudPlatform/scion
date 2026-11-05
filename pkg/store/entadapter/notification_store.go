@@ -144,6 +144,7 @@ func entNotifToStore(e *ent.Notification) *store.Notification {
 		Kind:         e.Kind,
 		ResourceType: e.ResourceType,
 		ResourceID:   e.ResourceID,
+		Excerpt:      e.Excerpt,
 	}
 }
 
@@ -423,6 +424,7 @@ func (s *NotificationStore) CreateNotification(ctx context.Context, notif *store
 		SetKind(notif.Kind).
 		SetResourceType(notif.ResourceType).
 		SetResourceID(notif.ResourceID).
+		SetExcerpt(notif.Excerpt).
 		Save(ctx)
 	if err != nil {
 		return mapError(err)
