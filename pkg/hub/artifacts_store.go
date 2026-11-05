@@ -26,6 +26,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 )
 
@@ -88,6 +89,7 @@ func (s *Server) artifactsHandler() http.Handler {
 	svc.SetBackendProvider(s.artifactBackend)
 	svc.SetReviewNotifier(s.notifyArtifactReview)
 	svc.SetLogger(s.artifactLog)
+	svc.SetArchiveEnabled(func(context.Context) bool { return s.experimentEnabled(experiments.ArtifactArchive) })
 	// Share-link reads are rate limited per client, read through the
 	// hub's trusted proxies the same way as its other pre-auth limits.
 	trusted := parseTrustedProxies(s.config.TrustedProxies)

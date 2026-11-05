@@ -994,11 +994,12 @@ var projectOperations = []OperationSpec{
 	{
 		ID:          "artifact.read",
 		Domain:      "artifact",
-		Description: "Read an artifact's metadata or file bytes (owner, home-project readers via the scope grant, or principal grants); unreadable artifacts answer 404",
+		Description: "Read an artifact's metadata or file bytes, one by one or as a zip of a version (owner, home-project readers via the scope grant, or principal grants); unreadable artifacts answer 404",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts/{id}", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts/{id}/files/{path}", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts/{id}/versions/{seq}/files/{path}", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts/{id}/versions/{seq}/archive", Method: "GET"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},

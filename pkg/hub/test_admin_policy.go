@@ -584,6 +584,7 @@ var testAdminExperimentPolicy = map[string]testAdminPolicy{
 	experiments.ArtifactSponsorReviewGrant:   testAdminPolicyDeny,
 	experiments.SkillContentHashV2:           testAdminPolicyDeny,
 	experiments.UserDeleteForceCascade:       testAdminPolicyDeny,
+	experiments.ArtifactArchive:              testAdminPolicyDeny,
 	experiments.ImageTagSetting:              testAdminPolicyDeny,
 }
 

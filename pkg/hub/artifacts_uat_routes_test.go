@@ -17,14 +17,20 @@
 package hub
 
 import (
+	"archive/zip"
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -135,13 +141,136 @@ func TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded(t *testing.T)
 	refused(http.MethodPost, vbase+"/finalize", nil, true)
 	check("artifact:create", create, http.MethodPost, vbase+"/finalize", nil, http.StatusOK)
 
-	// Version reads and the view mint need artifact:read only.
+	// The archive route answers 404 to everyone while hub.artifact_archive
+	// is off, the owner's session included.
+	check("archive, experiment off", session, http.MethodGet, base+"/versions/1/archive", nil, http.StatusNotFound)
+	enableArtifactArchiveForTest(t, srv)
+
+	// Version reads, the archive and the view mint need artifact:read
+	// only, and are refused exactly like a file read.
 	for _, r := range []struct{ method, path string }{
 		{http.MethodGet, base + "/versions"},
 		{http.MethodGet, base + "/versions/1"},
+		{http.MethodGet, base + "/versions/1/files/index.html"},
+		{http.MethodGet, base + "/versions/1/archive"},
+		{http.MethodHead, base + "/versions/1/archive"},
 		{http.MethodPost, base + "/versions/1/view"},
 	} {
 		refused(r.method, r.path, nil, false)
 		check("artifact:read", readOnly, r.method, r.path, nil, http.StatusOK)
 	}
+}
+
+// enableArtifactArchiveForTest turns hub.artifact_archive on for srv,
+// keeping every other default of its current registry (hub.artifacts
+// included, after enableArtifactsForTest).
+func enableArtifactArchiveForTest(t *testing.T, srv *Server) {
+	t.Helper()
+	var active []experiments.Experiment
+	for _, e := range srv.experimentRegistry().All() {
+		if e.Name == experiments.ArtifactArchive {
+			e.Default = true
+		}
+		active = append(active, e)
+	}
+	reg, err := experiments.NewRegistry(active, nil)
+	require.NoError(t, err)
+	srv.experiments = reg
+	require.True(t, srv.experimentEnabled(experiments.ArtifactArchive))
+	require.True(t, srv.experimentEnabled(experiments.Artifacts))
+}
+
+// TestArtifactArchiveRoute: through the real hub, the archive route of
+// ptone/scion#7106. While hub.artifact_archive is off it answers 404 and
+// the version response has no archive field; while it is on, the owner
+// downloads the version's files as a zip and the response says it is
+// available. A share link never reaches it: neither the share-link route
+// nor the view route serves an archive (404), and the link token is not a
+// credential for the archive route (the same answer as for a file read
+// with it).
+func TestArtifactArchiveRoute(t *testing.T) {
+	srv, s := testServer(t)
+	enableArtifactsForTest(t, srv)
+	p1 := artifactProject(t, s, "arch-p1")
+	createTestUserWithProjectRole(t, s, tid("arch-owner"), "arch-owner@test.com", p1.ID, store.ProjectRoleMember)
+	owner, err := s.GetUser(t.Context(), tid("arch-owner"))
+	require.NoError(t, err)
+
+	body := []byte("# Archived report\n")
+	rec := userArtifactRequest(t, srv, owner, http.MethodPost, "/api/v1/artifacts?name=report.md&title=Q3+Report&scope="+p1.ID, body)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	id := decodeArtifactID(t, rec)
+	base := "/api/v1/artifacts/" + id
+	archive := base + "/versions/1/archive"
+
+	versionResponse := func() artifacts.ArtifactResponse {
+		t.Helper()
+		rec := userArtifactRequest(t, srv, owner, http.MethodGet, base+"/versions/1", nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var resp artifacts.ArtifactResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		return resp
+	}
+
+	// Off: 404, as for a missing route, and no archive field.
+	off := userArtifactRequest(t, srv, owner, http.MethodGet, archive, nil)
+	assert.Equal(t, http.StatusNotFound, off.Code, off.Body.String())
+	assert.Equal(t, userArtifactRequest(t, srv, owner, http.MethodGet, "/api/v1/artifacts/00000000-0000-4000-8000-000000000000", nil).Body.String(),
+		off.Body.String(), "the experiment-off answer is the not-found answer")
+	assert.Nil(t, versionResponse().Archive)
+
+	enableArtifactArchiveForTest(t, srv)
+	resp := versionResponse()
+	require.NotNil(t, resp.Archive)
+	assert.True(t, resp.Archive.Available)
+
+	rec = userArtifactRequest(t, srv, owner, http.MethodGet, archive, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, "application/zip", rec.Header().Get("Content-Type"))
+	assert.Equal(t, `attachment; filename=q3-report-v1.zip`, rec.Header().Get("Content-Disposition"))
+	zr, err := zip.NewReader(bytes.NewReader(rec.Body.Bytes()), int64(rec.Body.Len()))
+	require.NoError(t, err)
+	require.Len(t, zr.File, 1)
+	assert.Equal(t, "report.md", zr.File[0].Name)
+	rc, err := zr.File[0].Open()
+	require.NoError(t, err)
+	got, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	assert.Equal(t, body, got)
+
+	// A share link of the artifact never yields an archive.
+	rec = userArtifactRequest(t, srv, owner, http.MethodPost, base+"/links", []byte(`{"ttlHours": 1}`))
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var created artifacts.CreateLinkResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &created))
+	token := strings.TrimPrefix(created.URL, artifacts.RouteShared)
+	shared := anonymous(srv, http.MethodGet, created.URL)
+	require.Equal(t, http.StatusSeeOther, shared.Code, shared.Body.String())
+	loc := shared.Header().Get("Location")
+	capability, _, ok := strings.Cut(strings.TrimPrefix(loc, artifacts.RouteView), "/")
+	require.True(t, ok, loc)
+	for _, target := range []string{
+		created.URL + "/archive",
+		created.URL + "/versions/1/archive",
+		artifacts.RouteView + capability + "/archive",
+		artifacts.RouteView + capability + "/versions/1/archive",
+	} {
+		for _, method := range []string{http.MethodGet, http.MethodHead} {
+			rec := anonymous(srv, method, target)
+			assert.Equal(t, http.StatusNotFound, rec.Code, "%s %s", method, target)
+			assert.NotEqual(t, "application/zip", rec.Header().Get("Content-Type"), "%s %s", method, target)
+		}
+	}
+	withToken := func(path string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		return rec
+	}
+	fileRead := withToken(base + "/versions/1/files/report.md")
+	archiveRead := withToken(archive)
+	assert.NotEqual(t, http.StatusOK, archiveRead.Code)
+	assert.Equal(t, fileRead.Code, archiveRead.Code, "the link token is refused on the archive route as on a file read")
+	assert.NotEqual(t, "application/zip", archiveRead.Header().Get("Content-Type"))
 }
