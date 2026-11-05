@@ -113,6 +113,9 @@ const (
 	// LaunchCodeInitContainerFailed: an init container exited non-zero or
 	// could not start.
 	LaunchCodeInitContainerFailed = "init_container_failed"
+	// LaunchCodeVolumeMountFailed: an NFS volume of the agent pod could
+	// not be mounted (Kubernetes FailedMount or FailedAttachVolume).
+	LaunchCodeVolumeMountFailed = "volume_mount_failed"
 	// LaunchCodeUnschedulable: the pod cannot be scheduled and the cluster
 	// will not add capacity for it (not GKE).
 	LaunchCodeUnschedulable = "unschedulable"

@@ -123,6 +123,17 @@ type KubernetesRuntime struct {
 	// that it cannot read claims, or events, and so checks less.
 	claimReadFallbackLogged   atomic.Bool
 	claimEventsFallbackLogged atomic.Bool
+
+	// mountFailGrace and mountEventReadInterval, when non-zero, replace
+	// the NFS mount check's 60s grace and 10s Events read interval (see
+	// k8s_mount_check.go). Tests shorten them.
+	mountFailGrace         time.Duration
+	mountEventReadInterval time.Duration
+
+	// mountEventsFallbackLogged makes the NFS mount check of
+	// waitForPodReady log only once per runtime that it cannot read
+	// events, and so waits as it would without the check.
+	mountEventsFallbackLogged atomic.Bool
 }
 
 // agentContainerName is the name of the primary scion agent container in
@@ -888,7 +899,7 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 
 	// Wait for Ready
 	runtimeLog().Info("Waiting for pod ready", "agent", config.Name, "namespace", namespace, "phase", "wait-schedule")
-	if err := r.waitForPodReady(ctx, namespace, createdPod.Name, hooks); err != nil {
+	if err := r.waitForPodReady(ctx, namespace, createdPod.Name, hooks, newPodMountWatch(pod, config)); err != nil {
 		return createdPod.Name, err
 	}
 
@@ -3425,7 +3436,10 @@ func logPodLifecycleTimings(namespace, podName string, waitMs int64, t podLifecy
 // receives a progress step (podLaunchStep) each time the step changes.
 // Terminal failures are *LaunchFailure errors; so is the end of its own time
 // budget while ctx is still live (launch_timeout, in the last step seen).
-func (r *KubernetesRuntime) waitForPodReady(ctx context.Context, namespace, podName string, hooks launchHooks) error {
+// watch is the pod's NFS volumes: a mount failure on one of them that lasts
+// fails the start with volume_mount_failed (checkMounts). A zero watch
+// reads no Events.
+func (r *KubernetesRuntime) waitForPodReady(ctx context.Context, namespace, podName string, hooks launchHooks, watch podMountWatch) error {
 	waitStart := time.Now()
 	parentCtx := ctx
 	timeout := r.podReadyTimeout
@@ -3449,6 +3463,7 @@ func (r *KubernetesRuntime) waitForPodReady(ctx context.Context, namespace, podN
 	// last pod read, so a pod that is gone by the next poll is still
 	// reported as preempted or evicted.
 	lastDisruption := ""
+	mounts := r.newMountCheck(watch)
 
 	fmt.Printf("Waiting for pod '%s' to be ready...\n", podName)
 	for {
@@ -3605,6 +3620,12 @@ func (r *KubernetesRuntime) waitForPodReady(ctx context.Context, namespace, podN
 				if lastDisruption != "" {
 					return podDisruptionStartError(podName, failStep(lastStep), lastDisruption, err)
 				}
+				return err
+			}
+
+			// A pod still waiting for its volumes: fail a lasting mount
+			// failure on an NFS volume now rather than at the timeout.
+			if err := r.checkMounts(ctx, namespace, mounts, pod); err != nil {
 				return err
 			}
 		}
