@@ -82,7 +82,8 @@ trap 'rm -rf "$tmp"' EXIT
 
 if [ -z "$sums_file" ]; then
   sums_file="$tmp/SHA256SUMS"
-  curl -fsSL --proto '=https' --retry 3 -o "$sums_file" "${RELEASE_BASE}/${tag}/SHA256SUMS" ||
+  curl -fsSL --proto '=https' --proto-redir '=https' --max-time 60 --retry 3 \
+    -o "$sums_file" "${RELEASE_BASE}/${tag}/SHA256SUMS" ||
     die "could not download SHA256SUMS for ${tag}"
 fi
 [ -f "$sums_file" ] || die "no such SHA256SUMS file: $sums_file"

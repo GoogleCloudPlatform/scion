@@ -227,7 +227,11 @@ PATH="$tmp/bin:$PATH" run v0.3.0-preview.5 "$tmp/dl.rb"
 want_status 0
 grep -qx 'https://github.com/GoogleCloudPlatform/scion/releases/download/v0.3.0-preview.5/SHA256SUMS' "$CURL_ARGS" ||
   fail "unexpected curl url: $(cat "$CURL_ARGS")"
-grep -qx -- '-f' "$CURL_ARGS" || grep -qx -- '-fsSL' "$CURL_ARGS" || fail "curl not run with -f"
+grep -qx -- '-fsSL' "$CURL_ARGS" || fail "curl not run with -fsSL"
+for flag in --proto --proto-redir; do
+  grep -A1 -x -- "$flag" "$CURL_ARGS" | grep -qx '=https' || fail "curl not run with $flag =https"
+done
+grep -qx -- --max-time "$CURL_ARGS" || fail "curl not run with --max-time"
 cmp -s "$GOLDEN" "$tmp/dl.rb" || fail "downloaded-path output differs from golden"
 
 name="download failure: fails without writing"

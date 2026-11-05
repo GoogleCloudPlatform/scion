@@ -308,14 +308,16 @@ that match their binary. The formula caveats say so.
 
 **The secret.** `HOMEBREW_SCION_TOKEN` is used for both the tap commit and the ghcr push. Store it
 as a secret of a GitHub environment named `homebrew` in `GoogleCloudPlatform/scion`, not as a
-repository secret; the three jobs of `publish-homebrew.yml` run in that environment. Configure the
-environment so that a run from an edited branch cannot read the secret:
+repository secret; the three jobs of `publish-homebrew.yml` run in that environment. A repository
+admin creates the environment once (Settings > Environments) and configures it so that a run from
+an edited branch cannot read the secret:
 
 - **Deployment branches and tags:** selected only, with the branch `main` (scheduled weekly runs and
   manual reruns) and the tag pattern `v*-preview.*` (tag-push builds).
 - **Tags:** limit who can create `v*` tags with a tag ruleset, because a pushed preview tag can
   reach the environment.
-- **Required reviewers (optional):** each of the three jobs then waits for approval, including on
+- **Required reviewers (optional):** GitHub applies them to every run that uses the environment,
+  not only to manual dispatches, so each of the three jobs then waits for approval, including on
   the scheduled weekly run.
 
 GitHub Packages accepts only a classic personal access token from outside the publishing
@@ -327,6 +329,11 @@ Rotate it before it expires; an expired token fails the publish jobs.
 
 Packages that a push creates for the first time (for example a new harness image) may start out
 private; make them public in the `homebrew-scion` organization's package settings.
+
+**A red `Publish to Homebrew` job does not mean the release failed.** It runs after the GitHub
+release, channel branch and `LATEST.json` steps, and nothing is rolled back when it fails: the
+release is published, and only the Homebrew images or formula are missing or stale. Fix the cause
+and rerun the publish as below. Rerunning the whole release workflow is not needed.
 
 **Rerunning a failed publish.** Run the workflow by hand from `main` (the default; other branches
 cannot use the `homebrew` environment) with the tag. Turn off a step that already succeeded:

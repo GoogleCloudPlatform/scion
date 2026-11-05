@@ -181,14 +181,20 @@ jobs:
       && (needs.publish-homebrew-images.result == 'success' || needs.publish-homebrew-images.result == 'skipped') }}
     timeout-minutes: 10
     environment: homebrew
+    # Per tag, so a queued run never replaces a pending run for another tag
+    # (GitHub keeps only one pending run per group). Runs for different tags
+    # that overlap are still safe: the push below is a plain push, so the
+    # later one is rejected as a non-fast-forward and fails visibly, and the
+    # generator never replaces a newer version.
     concurrency:
-      group: homebrew-tap-formula
+      group: homebrew-tap-formula-${{ needs.gate.outputs.tag }}
       cancel-in-progress: false
     permissions:
       contents: read     # Check out the formula script
     steps:
-      # The script comes from this workflow's own commit, not the release
-      # tag, so a rerun for an older tag uses the current generator.
+      # The script comes from the commit this run started from: the release
+      # tag for a tag-push build, main for the weekly preview and for manual
+      # reruns (so a rerun for an older tag uses the current generator).
       - name: Checkout code
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
         with:
