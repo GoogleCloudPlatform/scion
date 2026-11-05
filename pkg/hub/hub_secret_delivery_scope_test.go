@@ -159,6 +159,7 @@ func TestHubSecretDeliveryScope_AsNeededHubSecretHarnessPassOnly(t *testing.T) {
 		assert.NotEqual(t, "HSD_HARNESS_KEY", s.Name, "create delivered an as-needed hub secret directly")
 	}
 	assert.Contains(t, asNeededKeys, "HSD_HARNESS_KEY")
+	assert.Contains(t, asNeededKeys, "HSD_UNNEEDED_KEY", "row (v) is not vacuous: the unrequested key is available too")
 
 	// (ii) start and restart: not delivered.
 	started, _, err := m.d.selectDeliverySecrets(ctx, newDeliverySelector(m.authz, m.agent, PurposeRestart), m.agent)
