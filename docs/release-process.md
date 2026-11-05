@@ -302,9 +302,11 @@ the onboarding wizard on first start.
 Images are tagged only with the release tag, for example
 `ghcr.io/homebrew-scion/scion-claude:v0.3.0-preview.5`, plus the immutable `:<short-sha>` tag that
 `build-images.sh` always adds. Preview publishing never moves `:latest` and adds no `:preview` tag.
-Scion currently pulls `:latest` unless configured otherwise; runtime image resolution must use the
-release tag (`image_tag` in the release images design, Phase 3) before Homebrew users get images
-that match their binary. The formula caveats say so.
+Scion currently pulls `:latest` unless configured otherwise, and `:latest` in
+`ghcr.io/homebrew-scion` is an old v0.2 image (harnesses added since have no `:latest` there at all).
+Runtime image resolution must use the release tag (`image_tag` in the release images design,
+Phase 3) before Homebrew users get images that match their binary. Until then the formula caveats
+tell users to build images locally or set `image_registry` to a registry with current images.
 
 **The secret.** `HOMEBREW_SCION_TOKEN` is used for both the tap commit and the ghcr push. Store it
 as a secret of a GitHub environment named `homebrew` in `GoogleCloudPlatform/scion`, not as a
@@ -316,6 +318,11 @@ an edited branch cannot read the secret:
   manual reruns) and the tag pattern `v*-preview.*` (tag-push builds).
 - **Tags:** limit who can create `v*` tags with a tag ruleset, because a pushed preview tag can
   reach the environment.
+- **Order:** add these rules before adding the secret. A run that references an environment that
+  does not exist yet creates it without any rules.
+- **Environment secret only:** jobs in an environment also see repository secrets, so a
+  `HOMEBREW_SCION_TOKEN` repository secret would bypass the branch and tag rules. Never add it at
+  repository level.
 - **Required reviewers (optional):** GitHub applies them to every run that uses the environment,
   not only to manual dispatches, so each of the three jobs then waits for approval, including on
   the scheduled weekly run.
@@ -326,6 +333,11 @@ expiry date. A classic token cannot be limited to one repository: create it on a
 account that is a member of the `homebrew-scion` organization only, with write access to
 `homebrew-scion/homebrew-scion` and its packages and no access to `GoogleCloudPlatform/scion`.
 Rotate it before it expires; an expired token fails the publish jobs.
+
+To narrow the token later, split it in two: a fine-grained token (or GitHub App) limited to
+`contents: write` on `homebrew-scion/homebrew-scion` for the tap commit, and the classic token for
+the ghcr push only. In `publish-homebrew.yml` the formula push reads its token as `TAP_TOKEN` from a
+single `env:` line, so the change is that line plus the token check in the gate job.
 
 Packages that a push creates for the first time (for example a new harness image) may start out
 private; make them public in the `homebrew-scion` organization's package settings.
