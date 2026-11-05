@@ -218,6 +218,38 @@ func TestResolvedAuthEnv_ParityAcrossRuntimes(t *testing.T) {
 		}
 	})
 
+	// The same vertex names on Cloud Run with the claude harness itself
+	// set, so its harness env (ptone/scion#7295) is applied too: the
+	// resolved-auth values are unchanged and the harness env reaches the
+	// instance.
+	t.Run("claude-vertex-ai-cloudrun-with-harness", func(t *testing.T) {
+		h, err := harness.NewContainerScriptHarness(t.TempDir(), config.HarnessConfigEntry{
+			Harness:     "claude",
+			Provisioner: &config.HarnessProvisionerConfig{Type: "container-script"},
+		})
+		if err != nil {
+			t.Fatalf("NewContainerScriptHarness: %v", err)
+		}
+		fake := &fakeInstancesClient{getErr: notFoundErr()}
+		rt := newFakeCloudRunRuntime(t, fake)
+		run := runConfigForTest()
+		run.UnixUsername = "scion"
+		run.Harness = h
+		run.ResolvedAuth = claudeVertexResolvedAuth(t)
+		if _, err := rt.Run(context.Background(), run); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		env := crInstanceEnv(t, fake)
+		for _, name := range claudeVertexAuthNames {
+			if got, ok := env[name]; !ok || got != claudeVertexWant[name] {
+				t.Errorf("%s = %q (present %v), want the fixture value %q", name, got, ok, claudeVertexWant[name])
+			}
+		}
+		if env["SCION_AGENT_NAME"] != run.Name {
+			t.Errorf("SCION_AGENT_NAME = %q, want the harness env value %q", env["SCION_AGENT_NAME"], run.Name)
+		}
+	})
+
 	t.Run("docker-cloudrun-config-env-and-secret-win", func(t *testing.T) {
 		cfg := RunConfig{
 			Env: []string{"GOOGLE_CLOUD_PROJECT=from-config-env", "EXAMPLE_CFG_NAME=from-config-env"},

@@ -2309,6 +2309,51 @@ func resolvedAuthEnvEntries(ra *api.ResolvedAuth, taken func(name string) bool) 
 	return entries
 }
 
+// harnessEnvEntries returns the harness env an agent container receives,
+// as KEY=VALUE entries sorted by name, with the Docker rules
+// (buildCommonRunArgs):
+//   - Harness.GetEnv(cfg.Name, agentHome, cfg.UnixUsername), then, when
+//     cfg.TelemetryEnabled, Harness.GetTelemetryEnv(), which wins over
+//     GetEnv for a name both set;
+//   - an entry with an empty value is skipped (Docker's addEnv skips it),
+//     so an empty telemetry value leaves a GetEnv value in place.
+//
+// It is nil without a harness. Reserved names are not filtered here: the
+// caller emits these entries before the runtime's reserved-name drop,
+// which covers every source.
+//
+// A runtime may call it more than once per start: GetEnv and
+// GetTelemetryEnv are called twice per Cloud Run start (cloudRunHarnessEnv);
+// this assumes they are deterministic and side-effect free, as every
+// in-tree harness is.
+func harnessEnvEntries(cfg RunConfig, agentHome string) []string {
+	if cfg.Harness == nil {
+		return nil
+	}
+	env := make(map[string]string)
+	add := func(src map[string]string) {
+		for k, v := range src {
+			if v != "" {
+				env[k] = v
+			}
+		}
+	}
+	add(cfg.Harness.GetEnv(cfg.Name, agentHome, cfg.UnixUsername))
+	if cfg.TelemetryEnabled {
+		add(cfg.Harness.GetTelemetryEnv())
+	}
+	names := make([]string, 0, len(env))
+	for k := range env {
+		names = append(names, k)
+	}
+	slices.Sort(names)
+	entries := make([]string, 0, len(names))
+	for _, k := range names {
+		entries = append(entries, k+"="+env[k])
+	}
+	return entries
+}
+
 // resolvedAuthPlainEnvNames are the resolved-auth env names a runtime that
 // delivers the instance environment in plain form (Cloud Run) may emit as
 // plain env: discovery settings, never a credential. Every other
