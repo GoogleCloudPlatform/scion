@@ -102,3 +102,6 @@ jobs:
     uses: ./.github/workflows/build-release.yml
     with:
       ref: ${{ needs.select-and-tag.outputs.tag }}
+    secrets:
+      # Lets build-release.yml publish the preview to homebrew-scion.
+      HOMEBREW_SCION_TOKEN: ${{ secrets.HOMEBREW_SCION_TOKEN }}

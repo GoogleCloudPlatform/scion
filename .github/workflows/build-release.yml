@@ -27,6 +27,11 @@ on:
         description: 'Git ref (tag) to build'
         required: true
         type: string
+    secrets:
+      # Optional: preview releases are published to homebrew-scion only when
+      # it is set (publish-homebrew.yml). Callers pass it by name.
+      HOMEBREW_SCION_TOKEN:
+        required: false
 
 # Fork guard: forks (e.g. ptone/scion) mirror upstream tags, so without this every
 # upstream tag push would also run this pipeline on the fork, publishing a fork
@@ -466,3 +471,17 @@ jobs:
           if [ "${MERGED}" != "true" ]; then
             echo "::warning::Failed to merge ${PR_URL} after retries. Manual merge required."
           fi
+
+  # Preview releases only: build the homebrew-scion images and update the
+  # tap formula. Skips with a notice when HOMEBREW_SCION_TOKEN is not set.
+  publish-homebrew:
+    name: Publish to Homebrew
+    needs: release
+    if: github.repository == 'GoogleCloudPlatform/scion' && needs.release.outputs.channel == 'preview'
+    permissions:
+      contents: read     # The called jobs only check out code
+    uses: ./.github/workflows/publish-homebrew.yml
+    with:
+      tag: ${{ needs.release.outputs.tag }}
+    secrets:
+      HOMEBREW_SCION_TOKEN: ${{ secrets.HOMEBREW_SCION_TOKEN }}
