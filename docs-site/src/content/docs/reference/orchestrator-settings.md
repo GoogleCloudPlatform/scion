@@ -37,6 +37,7 @@ Files without `schema_version` are treated as legacy format. Run `scion config m
 | `default_harness_config` | string | Default harness config to use. |
 | `default_harness_auth` | string | Default authentication type for new agents (e.g., `api-key`, `vertex-ai`, `none`). |
 | `image_registry` | string | Registry prefix for all standard harness images. Rewrites the registry portion of `scion-*` images (e.g., `ghcr.io/myorg`). See [Building Custom Images](/scion/local/custom-images/). |
+| `image_tag` | string | Experimental (`hub.image_tag_setting`). Tag of the standard `scion-*` images whose tag is `latest` or absent: `version` for the Hub binary's version, or a literal tag (e.g., `v0.3.0-preview.5`). Unset leaves images unchanged. Accepted and validated; not yet applied (follow-up change). See [Image tag](/scion/reference/settings-precedence/#image-tag-experimental). |
 | `default_max_turns` | int | Default maximum number of turns an agent can take before termination. |
 | `default_max_model_calls` | int | Default maximum number of LLM model calls an agent can make. |
 | `default_max_duration` | string | Default maximum execution time (e.g., `"2h"`, `"45m"`) for an agent. |
@@ -238,6 +239,7 @@ profiles:
 | `default_template` | string | Default template for agents created under this profile. |
 | `default_harness_config` | string | Default harness config name for agents created under this profile. |
 | `image_registry` | string | Profile-level registry. Beats the top-level `image_registry` of the same source; a saved Hub top-level value and a node's `SCION_IMAGE_REGISTRY` beat a settings-file profile value. See [Image registry order](/scion/reference/settings-precedence/#image-registry-order). |
+| `image_tag` | string | Experimental. Profile-level image tag. Beats the top-level `image_tag` of the same source. Accepted and validated; not yet applied (follow-up change). See [Image tag](/scion/reference/settings-precedence/#image-tag-experimental). |
 | `volumes` | list | Volume mounts for agents created under this profile, appended after the harness config's `volumes`. Each entry has `target` (required), `source`, `read_only`, `type`, `bucket` (GCS bucket name), `prefix` (GCS object prefix), `mode` (mount options), `server` (NFS server host or IP) and `volume_name` (Cloud Run or GKE volume name). `type` is `local` (default; host bind mount, requires `source`), `gcs` (GCS FUSE mount, requires `bucket`), `nfs` (NFS mount, requires `server` and `source`), `cloudrun-volume` (Cloud Run managed volume, requires `volume_name`) or `gke-shared-volume` (GKE-provided shared volume such as a Filestore CSI PVC, requires `volume_name`). |
 | `harness_overrides` | map | Per-harness-config overrides. Keys match `harness_configs` names. |
 | `secrets` | list | Required secrets for agents created under this profile. |

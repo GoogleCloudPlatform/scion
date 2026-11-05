@@ -620,3 +620,25 @@ func TestLifecycleEventsExperimentRegistered(t *testing.T) {
 		t.Fatalf("unexpected registration: %+v", e)
 	}
 }
+
+// TestImageTagSettingExperimentRegistered pins hub.image_tag_setting
+// (ptone/scion#6625): the hub decides whether image_tag applies, so it is
+// server-layer only, and it ships off.
+func TestImageTagSettingExperimentRegistered(t *testing.T) {
+	e, ok := Default().Lookup(ImageTagSetting)
+	if !ok {
+		t.Fatalf("%s is not registered", ImageTagSetting)
+	}
+	if ImageTagSetting != "hub.image_tag_setting" {
+		t.Fatalf("frozen name changed: %q", ImageTagSetting)
+	}
+	if e.Default {
+		t.Fatal("the image tag setting must default to off")
+	}
+	if !e.HasLayer(LayerServer) || e.HasLayer(LayerWeb) {
+		t.Fatalf("must be a server-layer (only) experiment, got %v", e.Layers)
+	}
+	if e.Issue != "ptone/scion#6625" || e.Stage != StageAlpha || e.Owner != "hub" {
+		t.Fatalf("unexpected registration: %+v", e)
+	}
+}

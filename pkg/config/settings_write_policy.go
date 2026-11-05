@@ -134,6 +134,8 @@ func ValidateSettingValue(key, value string) error {
 		return nil
 	}
 	switch key {
+	case "image_tag":
+		return ValidateImageTag(value)
 	case "cli.mode":
 		switch value {
 		case "human", "agent":
