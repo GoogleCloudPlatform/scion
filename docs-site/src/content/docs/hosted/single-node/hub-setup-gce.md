@@ -67,6 +67,18 @@ Run these one at a time instead of `gce-demo-deploy.sh` when you need to skip or
 
 The `settings.yaml` that step 5 writes turns on telemetry export and sets `telemetry.cloud.gcp_project_id` to the deployment project (`PROJECT_ID`), so the metrics dashboard in the web UI queries Cloud Monitoring in that project. Step 1 grants the VM's service account `roles/monitoring.viewer` so the Hub can read those metrics. A Hub deployed before this setting existed picks it up at the next `gce-start-hub.sh --full`; re-run `gce-demo-provision.sh` first so the VM's service account has `roles/monitoring.viewer`. See [Metrics & OpenTelemetry](/scion/hosted/single-node/metrics/) for the `telemetry` settings.
 
+The same `settings.yaml` sets `image_registry`, the registry the Hub's runtime broker pulls agent images from. Without a registry the broker refuses to start, and so does the Hub. The value is `localhost/scion`, the VM's local image store (the value the [single-node VM deploy script](https://github.com/GoogleCloudPlatform/scion/blob/main/scripts/single-node-vm/deploy.sh) uses), or `IMAGE_REGISTRY` if you set it when running `gce-start-hub.sh --full`. `SCION_IMAGE_REGISTRY` in `hub.env` takes precedence over `settings.yaml`.
+
+The starter scripts do not build agent images, so agents cannot start until the images exist. Either build them on the VM, from the repository checkout (see [`image-build/README.md`](https://github.com/GoogleCloudPlatform/scion/blob/main/image-build/README.md)):
+
+```bash
+sudo bash image-build/scripts/build-images.sh --builder local-docker --registry localhost/scion --target all
+```
+
+`--target all` also builds the Hub image and every catalog harness. To build less, build `core-base`, then `scion-base`, then `harnesses` or a single harness step ID such as `scion-claude`, with the same `--builder` and `--registry` flags.
+
+or set `SCION_IMAGE_REGISTRY` in `hub.env` to a registry that already holds the images. With `ENABLE_GKE=true`, GKE nodes cannot pull from the VM's local store, so `gce-demo-preflight.sh` and `gce-start-hub.sh --full` refuse a loopback registry (`localhost`, `127.*`, `0.0.0.0` or `::1`, with or without a port). Set `SCION_IMAGE_REGISTRY` or `IMAGE_REGISTRY` to a registry the cluster can pull from.
+
 :::note[Internal or private deployments]
 If your VM has no external IP, or TLS is terminated upstream by a load balancer, reverse proxy, or similar appliance, skip step 4 and see [Internal Deployments (BYO TLS)](#internal-deployments-byo-tls) below.
 :::

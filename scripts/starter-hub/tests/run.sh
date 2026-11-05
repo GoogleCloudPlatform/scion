@@ -84,7 +84,7 @@ run_script() {
     OUT="$(cd "${REPO_ROOT}" && env \
         -u CERT_EMAIL -u SKIP_TLS -u HEALTH_CHECK_INSECURE -u HUB_BASE_URL \
         -u DNS_ZONE_DESCRIPTION -u PROJECT_ID -u HUB_NAME -u BASE_DOMAIN \
-        -u HUB_DOMAIN -u CERT_DOMAIN -u ENABLE_GKE \
+        -u HUB_DOMAIN -u CERT_DOMAIN -u ENABLE_GKE -u IMAGE_REGISTRY \
         PATH="${TESTS_DIR}/lib:${PATH}" \
         HUB_ENV_FILE="${STATE_DIR}/no-such-hub.env" \
         "${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"}" \
@@ -244,6 +244,197 @@ test_full_unit_renders_values_verbatim() {
     assert_contains "$unit" $'\nExecStart=/opt/scion/bin/scion --global server start ' "custom SCION_BIN"
     assert_not_contains "$unit" "@" "no placeholder left"
     assert_not_contains "$unit" "##" "template notes dropped"
+}
+
+# --- gce-start-hub.sh --full image_registry (ptone/scion#7183) ---
+
+test_full_settings_default_image_registry() {
+    fresh_state
+    EXTRA_ENV=("CURL_STUB_BODY=${HEALTHY}")
+    run_script gce-start-hub.sh --full
+    assert_eq 0 "$RC" "full deploy passes"
+    assert_contains "$(cat "${STUB_SCP_DIR}/scion-settings.yaml")" \
+        $'\nimage_registry: "localhost/scion"\n' "default image_registry is localhost/scion"
+}
+
+test_full_settings_image_registry_override() {
+    fresh_state
+    EXTRA_ENV=("CURL_STUB_BODY=${HEALTHY}" IMAGE_REGISTRY=us-docker.pkg.dev/example/scion)
+    run_script gce-start-hub.sh --full
+    assert_eq 0 "$RC" "full deploy with IMAGE_REGISTRY passes"
+    assert_contains "$(cat "${STUB_SCP_DIR}/scion-settings.yaml")" \
+        $'\nimage_registry: "us-docker.pkg.dev/example/scion"\n' "IMAGE_REGISTRY is written"
+}
+
+test_full_rejects_unsafe_image_registry() {
+    fresh_state
+    EXTRA_ENV=("CURL_STUB_BODY=${HEALTHY}" 'IMAGE_REGISTRY=bad"registry')
+    run_script gce-start-hub.sh --full
+    assert_eq 1 "$RC" "unsafe IMAGE_REGISTRY fails"
+    assert_contains "$OUT" "is not a registry path" "names the problem"
+    assert_not_contains "$CALLS" "compute scp" "stops before uploading"
+}
+
+# --- image_registry with ENABLE_GKE=true (ptone/scion#7183) ---
+
+test_full_gke_refuses_loopback_registry() {
+    fresh_state
+    EXTRA_ENV=("CURL_STUB_BODY=${HEALTHY}" ENABLE_GKE=true)
+    run_script gce-start-hub.sh --full
+    assert_eq 1 "$RC" "ENABLE_GKE=true with the localhost/scion default fails"
+    assert_contains "$OUT" "is a loopback address on the VM. GKE nodes cannot pull from it." "names the problem"
+    assert_not_contains "$CALLS" "compute scp" "stops before uploading"
+
+    fresh_state
+    printf 'SCION_IMAGE_REGISTRY = "127.0.0.1:5000/scion"\r\n' > "${STATE_DIR}/hub.env"
+    EXTRA_ENV=("CURL_STUB_BODY=${HEALTHY}" ENABLE_GKE=true IMAGE_REGISTRY=us-docker.pkg.dev/example/scion
+        "HUB_ENV_FILE=${STATE_DIR}/hub.env")
+    run_script gce-start-hub.sh --full
+    assert_eq 1 "$RC" "a loopback SCION_IMAGE_REGISTRY in hub.env wins over IMAGE_REGISTRY and fails"
+    assert_contains "$OUT" "'127.0.0.1:5000/scion' is a loopback address" "checks the hub.env value"
+    assert_not_contains "$CALLS" "compute scp" "stops before uploading (hub.env)"
+}
+
+test_full_gke_accepts_reachable_registry() {
+    fresh_state
+    EXTRA_ENV=("CURL_STUB_BODY=${HEALTHY}" ENABLE_GKE=true IMAGE_REGISTRY=us-docker.pkg.dev/example/scion)
+    run_script gce-start-hub.sh --full
+    assert_eq 0 "$RC" "ENABLE_GKE=true with a reachable IMAGE_REGISTRY passes"
+    assert_contains "$(cat "${STUB_SCP_DIR}/scion-settings.yaml")" \
+        $'\nimage_registry: "us-docker.pkg.dev/example/scion"\n' "IMAGE_REGISTRY is written"
+    assert_not_contains "$OUT" "This script does not build them" "no local-store note for a remote registry"
+
+    fresh_state
+    printf 'SCION_IMAGE_REGISTRY=us-docker.pkg.dev/example/scion\n' > "${STATE_DIR}/hub.env"
+    EXTRA_ENV=("CURL_STUB_BODY=${HEALTHY}" ENABLE_GKE=true "HUB_ENV_FILE=${STATE_DIR}/hub.env")
+    run_script gce-start-hub.sh --full
+    assert_eq 0 "$RC" "ENABLE_GKE=true with a reachable SCION_IMAGE_REGISTRY in hub.env passes"
+}
+
+test_full_local_registry_note() {
+    fresh_state
+    EXTRA_ENV=("CURL_STUB_BODY=${HEALTHY}")
+    run_script gce-start-hub.sh --full
+    assert_eq 0 "$RC" "full deploy passes"
+    assert_contains "$OUT" "This script does not build them" "says the starter does not build agent images"
+}
+
+# registry_is_loopback (hub-config.sh) must give the same answer as deploy.sh's
+# _hybrid_registry_is_loopback (single-node-vm/hybrid-tier.sh) for every input.
+test_registry_loopback_matches_deploy_sh() {
+    local out
+    out="$(cd "${REPO_ROOT}" && PROJECT_ID=stub PATH="${TESTS_DIR}/lib:${PATH}" STUB_LOG=/dev/null bash -c '
+        source scripts/starter-hub/hub-config.sh
+        source scripts/single-node-vm/hybrid-tier.sh
+        for r in localhost/scion localhost:5000/scion localhost 127.0.0.1/scion 127.1.2.3:80/x \
+            0.0.0.0/scion "[::1]/scion" "[::1]:5000/scion" ::1 \
+            us-docker.pkg.dev/p/r ghcr.io/org localhost.example.com/x 10.0.0.1:5000/x \
+            "[2001:db8::1]:5000/x" my-localhost/x; do
+            registry_is_loopback "$r"; a=$?
+            _hybrid_registry_is_loopback "$r"; b=$?
+            echo "$r $a $b"
+        done' 2>&1)"
+    local n=0 reg mine theirs
+    while read -r reg mine theirs; do
+        n=$((n + 1))
+        assert_eq "$theirs" "$mine" "registry_is_loopback(${reg}) agrees with _hybrid_registry_is_loopback"
+    done <<< "$out"
+    assert_eq 15 "$n" "all inputs compared"
+    assert_contains "$out" "localhost:5000/scion 0 0" "localhost with a port is loopback"
+    assert_contains "$out" "us-docker.pkg.dev/p/r 1 1" "a remote registry is not loopback"
+}
+
+# --- gce-demo-preflight.sh image registry branches (ptone/scion#7183) ---
+
+# preflight_registry ENV_FILE_CONTENT [VAR=value...] -- runs the preflight
+# with a hub env file holding ENV_FILE_CONTENT; sets PLAIN (OUT without
+# colour codes). Other preflight checks may fail under the stubs; the tests
+# judge only the image registry lines.
+preflight_registry() {
+    local content="$1"
+    shift
+    fresh_state
+    printf '%s' "$content" > "${STATE_DIR}/hub.env"
+    EXTRA_ENV=("HUB_ENV_FILE=${STATE_DIR}/hub.env" "$@")
+    run_script gce-demo-preflight.sh
+    PLAIN="$(printf '%s' "$OUT" | sed 's/\x1b\[[0-9;]*m//g')"
+}
+
+test_preflight_registry_unset_passes() {
+    preflight_registry $'SCION_LOG_LEVEL=info\n'
+    assert_contains "$PLAIN" "[PASS] SCION_IMAGE_REGISTRY not set; settings.yaml uses image_registry localhost/scion" "unset passes"
+    assert_contains "$PLAIN" "[WARN] The starter scripts do not build agent images" "warns that images are not built"
+    assert_not_contains "$PLAIN" "[FAIL] SCION_IMAGE_REGISTRY" "no registry failure"
+}
+
+test_preflight_registry_real_value_passes() {
+    preflight_registry $'SCION_IMAGE_REGISTRY=us-docker.pkg.dev/acme/scion\n'
+    assert_contains "$PLAIN" "[PASS] SCION_IMAGE_REGISTRY"$'\n' "a real value passes"
+    assert_not_contains "$PLAIN" "do not build agent images" "no build warning for a set registry"
+}
+
+test_preflight_registry_placeholder_fails() {
+    preflight_registry $'SCION_IMAGE_REGISTRY=your-registry.example.com/your-project/your-repo\n'
+    assert_eq 1 "$RC" "a placeholder fails the preflight"
+    assert_contains "$PLAIN" "[FAIL] SCION_IMAGE_REGISTRY is still a placeholder" "placeholder fails"
+}
+
+test_preflight_registry_invalid_image_registry_fails() {
+    preflight_registry $'SCION_LOG_LEVEL=info\n' 'IMAGE_REGISTRY=bad registry'
+    assert_eq 1 "$RC" "an invalid IMAGE_REGISTRY fails the preflight"
+    assert_contains "$PLAIN" "[FAIL] IMAGE_REGISTRY 'bad registry' is not a registry path" "names the bad value"
+    assert_not_contains "$PLAIN" "SCION_IMAGE_REGISTRY not set" "invalid IMAGE_REGISTRY is reported once (no pass line)"
+
+    # With GKE, an invalid IMAGE_REGISTRY that looks like loopback gives only the
+    # path failure, not a second (loopback) failure.
+    preflight_registry $'SCION_LOG_LEVEL=info\n' ENABLE_GKE=true 'IMAGE_REGISTRY=localhost/bad reg'
+    assert_eq 1 "$RC" "an invalid IMAGE_REGISTRY fails the preflight with GKE"
+    assert_contains "$PLAIN" "[FAIL] IMAGE_REGISTRY 'localhost/bad reg' is not a registry path" "names the bad value with GKE"
+    assert_not_contains "$PLAIN" "is a loopback address" "invalid IMAGE_REGISTRY is reported once (no loopback failure)"
+    assert_not_contains "$PLAIN" "SCION_IMAGE_REGISTRY not set" "invalid IMAGE_REGISTRY is reported once with GKE (no pass line)"
+}
+
+test_preflight_registry_gke_refuses_loopback() {
+    preflight_registry $'SCION_LOG_LEVEL=info\n' ENABLE_GKE=true
+    assert_eq 1 "$RC" "ENABLE_GKE=true with the default fails the preflight"
+    assert_contains "$PLAIN" "[FAIL] ENABLE_GKE=true, but the image registry localhost/scion is a loopback address" "default refused"
+
+    preflight_registry $'SCION_IMAGE_REGISTRY=localhost:5000/scion\n' ENABLE_GKE=true
+    assert_contains "$PLAIN" "[FAIL] ENABLE_GKE=true, but SCION_IMAGE_REGISTRY localhost:5000/scion is a loopback address" "hub.env loopback refused"
+
+    preflight_registry $'SCION_IMAGE_REGISTRY=us-docker.pkg.dev/acme/scion\n' ENABLE_GKE=true
+    assert_contains "$PLAIN" "[PASS] SCION_IMAGE_REGISTRY"$'\n' "hub.env reachable registry passes with GKE"
+
+    preflight_registry $'SCION_LOG_LEVEL=info\n' ENABLE_GKE=true IMAGE_REGISTRY=us-docker.pkg.dev/acme/scion
+    assert_contains "$PLAIN" "[PASS] SCION_IMAGE_REGISTRY not set; settings.yaml uses image_registry us-docker.pkg.dev/acme/scion" "reachable IMAGE_REGISTRY passes with GKE"
+}
+
+# The preflight reads hub.env as --full and systemd do (hub_env_value): a
+# spaced assignment counts and the last assignment wins, so both agree.
+test_preflight_registry_reads_hub_env_like_full() {
+    local gke=(ENABLE_GKE=true IMAGE_REGISTRY=us-docker.pkg.dev/acme/scion)
+
+    preflight_registry $'SCION_IMAGE_REGISTRY = localhost:5000/scion\n' "${gke[@]}"
+    assert_contains "$PLAIN" "[FAIL] ENABLE_GKE=true, but SCION_IMAGE_REGISTRY localhost:5000/scion is a loopback address" "spaced key is read"
+    EXTRA_ENV=("CURL_STUB_BODY=${HEALTHY}" "${gke[@]}" "HUB_ENV_FILE=${STATE_DIR}/hub.env")
+    run_script gce-start-hub.sh --full
+    assert_eq 1 "$RC" "--full also refuses the spaced key"
+
+    preflight_registry $'SCION_IMAGE_REGISTRY=us-docker.pkg.dev/acme/first\nSCION_IMAGE_REGISTRY=localhost/scion\n' "${gke[@]}"
+    assert_contains "$PLAIN" "[FAIL] ENABLE_GKE=true, but SCION_IMAGE_REGISTRY localhost/scion is a loopback address" "last assignment wins (loopback last)"
+    EXTRA_ENV=("CURL_STUB_BODY=${HEALTHY}" "${gke[@]}" "HUB_ENV_FILE=${STATE_DIR}/hub.env")
+    run_script gce-start-hub.sh --full
+    assert_eq 1 "$RC" "--full also refuses when the loopback value is last"
+
+    preflight_registry $'SCION_IMAGE_REGISTRY=localhost/scion\nSCION_IMAGE_REGISTRY=us-docker.pkg.dev/acme/last\n' "${gke[@]}"
+    assert_contains "$PLAIN" "[PASS] SCION_IMAGE_REGISTRY"$'\n' "last assignment wins (reachable last)"
+    assert_not_contains "$PLAIN" "[FAIL] ENABLE_GKE=true" "no GKE refusal when the reachable value is last"
+    EXTRA_ENV=("CURL_STUB_BODY=${HEALTHY}" "${gke[@]}" "HUB_ENV_FILE=${STATE_DIR}/hub.env")
+    run_script gce-start-hub.sh --full
+    assert_eq 0 "$RC" "--full also accepts when the reachable value is last"
+
+    preflight_registry $'SCION_IMAGE_REGISTRY=us-docker.pkg.dev/acme/scion\n' 'IMAGE_REGISTRY=bad registry'
+    assert_contains "$PLAIN" "[FAIL] IMAGE_REGISTRY 'bad registry' is not a registry path" "IMAGE_REGISTRY is checked even when hub.env sets a registry"
 }
 
 test_full_no_tls_needs_https_base_url() {
