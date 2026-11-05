@@ -1173,6 +1173,7 @@ type VersionedSettings struct {
 	Runtimes             map[string]V1RuntimeConfig    `json:"runtimes,omitempty" yaml:"runtimes,omitempty" koanf:"runtimes"`
 	Runtime              *V1RuntimeDefaultsConfig      `json:"runtime,omitempty" yaml:"runtime,omitempty" koanf:"runtime"`
 	ImageRegistry        string                        `json:"image_registry,omitempty" yaml:"image_registry,omitempty" koanf:"image_registry"`
+	ImageTag             string                        `json:"image_tag,omitempty" yaml:"image_tag,omitempty" koanf:"image_tag"`
 	WorkspacePath        string                        `json:"workspace_path,omitempty" yaml:"workspace_path,omitempty" koanf:"workspace_path"`
 	HarnessConfigs       map[string]HarnessConfigEntry `json:"harness_configs,omitempty" yaml:"harness_configs,omitempty" koanf:"harness_configs"`
 	Profiles             map[string]V1ProfileConfig    `json:"profiles,omitempty" yaml:"profiles,omitempty" koanf:"profiles"`
@@ -3460,6 +3461,7 @@ type V1ProfileConfig struct {
 	DefaultTemplate      string                       `json:"default_template,omitempty" yaml:"default_template,omitempty" koanf:"default_template"`
 	DefaultHarnessConfig string                       `json:"default_harness_config,omitempty" yaml:"default_harness_config,omitempty" koanf:"default_harness_config"`
 	ImageRegistry        string                       `json:"image_registry,omitempty" yaml:"image_registry,omitempty" koanf:"image_registry"`
+	ImageTag             string                       `json:"image_tag,omitempty" yaml:"image_tag,omitempty" koanf:"image_tag"`
 	Volumes              []api.VolumeMount            `json:"volumes,omitempty" yaml:"volumes,omitempty" koanf:"volumes"`
 	Resources            *api.ResourceSpec            `json:"resources,omitempty" yaml:"resources,omitempty" koanf:"resources"`
 	HarnessOverrides     map[string]V1HarnessOverride `json:"harness_overrides,omitempty" yaml:"harness_overrides,omitempty" koanf:"harness_overrides"`
@@ -3948,6 +3950,8 @@ func undecodableSettingsKeys(k *koanf.Koanf) []string {
 // every settings value (ptone/scion#3916). Folded into the top-level
 // image_registry it would rank below a profile value and could be written
 // back into a settings file, so it is read only by ImageRegistryFromEnv.
+// SCION_IMAGE_TAG is the env layer of image_tag, excluded for the same
+// reason and read only by ImageTagFromEnv.
 var settingsExcludedEnvVars = []string{
 	"SCION_AUTO_EXPOSE_PORTS",
 	"SCION_AUTO_EXPOSE_PORTS_LIST",
@@ -3955,6 +3959,7 @@ var settingsExcludedEnvVars = []string{
 	"SCION_HUB_PROFILE",
 	"SCION_HUB_RUN",
 	EnvImageRegistry,
+	EnvImageTag,
 }
 
 // isSettingsExcludedEnv reports whether name is in settingsExcludedEnvVars.
@@ -5733,7 +5738,6 @@ func UpdateVersionedSetting(dir string, key string, value string) error {
 // updateVersionedSettingLocked is UpdateVersionedSetting for a caller that
 // already holds the settings lock for dir.
 func updateVersionedSettingLocked(lock *SettingsLock, dir string, key string, value string) error {
-
 	settingsPath := GetSettingsPath(dir)
 	if filepath.Ext(settingsPath) == ".json" {
 		return updateVersionedSettingStruct(lock, dir, key, value)
@@ -5784,6 +5788,7 @@ var versionedSettingKeys = map[string]versionedSettingKey{
 	"default_harness_config":   {path: []string{"default_harness_config"}},
 	"workspace_path":           {path: []string{"workspace_path"}},
 	"image_registry":           {path: []string{"image_registry"}},
+	"image_tag":                {path: []string{"image_tag"}},
 	"cli.autohelp":             {path: []string{"cli", "autohelp"}, isBool: true},
 	"cli.mode":                 {path: []string{"cli", "mode"}},
 	"hub.enabled":              {path: []string{"hub", "enabled"}, isBool: true},
@@ -6135,6 +6140,8 @@ func updateVersionedSettingStruct(lock *SettingsLock, dir string, key string, va
 		vs.WorkspacePath = value
 	case "image_registry":
 		vs.ImageRegistry = value
+	case "image_tag":
+		vs.ImageTag = value
 	case "cli.autohelp":
 		if vs.CLI == nil {
 			vs.CLI = &V1CLIConfig{}
@@ -6260,6 +6267,8 @@ func GetVersionedSettingValue(vs *VersionedSettings, key string) (string, error)
 		return vs.WorkspacePath, nil
 	case "image_registry":
 		return vs.ImageRegistry, nil
+	case "image_tag":
+		return vs.ImageTag, nil
 	case "cli.autohelp":
 		if vs.CLI != nil && vs.CLI.AutoHelp != nil {
 			if *vs.CLI.AutoHelp {

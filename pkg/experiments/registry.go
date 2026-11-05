@@ -372,6 +372,15 @@ const ArtifactSponsorReviewGrant = "hub.artifact_sponsor_review_grant"
 // only mirrors it to show the force option.
 const UserDeleteForceCascade = "hub.user_delete_force_cascade"
 
+// ImageTagSetting gates the image_tag setting (ptone/scion#6625), which
+// selects the tag of the bundled scion-* agent images ("version" for the
+// hub binary's own version, or a literal tag) instead of :latest. The hub
+// checks it: while it is off, image_tag is ignored and every image
+// reference is unchanged. Applying the tag to agent images, and refusing a
+// hub save of image_tag while the experiment is off, arrive with the
+// follow-up change; until then the setting has no effect.
+const ImageTagSetting = "hub.image_tag_setting"
+
 // compiled is the production experiment list. It is reachable only through
 // Default(); there is no package-level Lookup/All, so hub code cannot bypass
 // the Registry instance it was given (ptone/scion#2217).
@@ -699,6 +708,17 @@ var compiled = []Experiment{
 		Owner:       "skills",
 		// ptone/scion#5995 makes it the default and removes the gate.
 		ReviewBy: "2027-01-24",
+	},
+	{
+		Name:        ImageTagSetting,
+		Title:       "Image tag setting",
+		Description: "Lets the image_tag setting choose the tag of the bundled scion-* agent images whose tag is latest or absent: \"version\" selects the hub binary's version (latest for a development build), any other value is a literal tag. Images with another tag, a digest, or a registry host are left alone, except exactly <image_registry>/scion-<name> (latest or untagged), the form the image_registry rewrite produces, which is retagged too. While it is off, image_tag is ignored and image references are unchanged. In this release the setting is accepted and validated but not yet applied; applying it, and refusing a hub save of image_tag while the experiment is off, arrive with the follow-up change. Agents need images built for that tag (image-build/README.md, \"Build images for a release\").",
+		Default:     false,
+		Layers:      []Layer{LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#6625",
+		Owner:       "hub",
+		ReviewBy:    "2027-02-05",
 	},
 }
 

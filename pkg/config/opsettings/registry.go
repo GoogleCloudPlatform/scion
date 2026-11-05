@@ -736,6 +736,7 @@ func compileSchemas() {
 					"default_template":       map[string]interface{}{"type": "string"},
 					"default_harness_config": map[string]interface{}{"type": "string"},
 					"image_registry":         map[string]interface{}{"type": "string"},
+					"image_tag":              map[string]interface{}{"type": "string", "pattern": config.ImageTagSettingPattern},
 					"volumes":                map[string]interface{}{"type": "array"},
 					"resources":              map[string]interface{}{"type": "object"},
 					"harness_overrides": map[string]interface{}{

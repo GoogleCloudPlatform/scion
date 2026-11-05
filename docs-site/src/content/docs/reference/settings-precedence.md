@@ -1239,6 +1239,51 @@ or else this Hub replica's settings-file value, and never an environment value. 
 shown does not pin it; change it once to pin it. A profile's field shows only a saved value, so
 typing any value into it saves that value.
 
+### Image tag (experimental)
+
+Introduced by ptone/scion#6625, behind the `hub.image_tag_setting` experiment (off by default).
+The bundled agent images are tagged `latest` by default. `image_tag` selects another tag, so
+agents can run images built for a release (see "Build images for a release" in
+`image-build/README.md`):
+
+| Value | Effect |
+| :--- | :--- |
+| unset or `""` | No change: image references are exactly as without the setting. |
+| `version` | The Hub binary's version (for example `v0.3.0-preview.5`); `latest` for a development build. |
+| any other value | That literal tag. It must be a valid image tag: letters, digits, `_`, `.` and `-`, at most 128 characters, not starting with `.` or `-`, with no surrounding spaces. `scion config set image_tag` refuses anything else and leaves the settings file unchanged. |
+
+The tag applies only to a short-form `scion-*` image (no registry host) whose tag is `latest` or
+absent. An image with another explicit tag, a digest, or a registry host is left alone, with one
+exception: an image that is exactly `<image_registry>/scion-<name>`, tagged `latest` or untagged
+(the form the image registry rewrite produces), is retagged too. The tag is applied before the
+[image registry](#image-registry-order) prefix, so with both set, `scion-claude:latest` becomes
+`<image_registry>/scion-claude:<tag>`.
+
+Its order matches the image registry order, with one difference in the environment layer:
+
+| Rank | Layer | Where it comes from |
+| :--- | :--- | :--- |
+| 1 | Hub env | `SCION_IMAGE_TAG` of the Hub process |
+| 2 | Hub profile | `profiles.<name>.image_tag` saved in the Hub's settings |
+| 3 | Hub top level | `image_tag` saved in the Hub's settings |
+| 4 | File profile | `profiles.<name>.image_tag` in the settings file |
+| 5 | File top level | `image_tag` in the settings file |
+| 6 | Default | none: images keep their tag |
+
+- Unlike `SCION_IMAGE_REGISTRY`, a Runtime Broker's own `SCION_IMAGE_TAG` is not a layer. The Hub
+  resolves the tag, expanding `version` to its own version, and sends the result with each
+  dispatch, so the Hub alone decides which images its agents run.
+- While the experiment is off, `image_tag` is ignored everywhere. Refusing a Hub save of
+  `image_tag` while it is off, and a startup warning for a value kept in a settings file, arrive
+  with the follow-up change that applies the setting.
+- A flat Runtime Broker instance has no `image_tag`; converting a profile that sets one reports
+  it as not converted.
+- With `version`, moving the Hub to a new version makes new agents request images with that
+  version's tag. Missing images are reported by the image check; build them first.
+
+This release adds the setting, its validation and the experiment. The Hub and Runtime Broker
+apply it to agent images in a follow-up change.
+
 ---
 
 ## Bucket 4 — operator/admin settings
