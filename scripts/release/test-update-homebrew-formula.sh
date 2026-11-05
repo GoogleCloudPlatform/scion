@@ -80,6 +80,8 @@ grep -qF 'bin.install "scion"' "$out" || fail "missing bin.install"
 grep -qF 'version "0.3.0-preview.5"' "$out" || fail "missing version"
 grep -qF 'license "Apache-2.0"' "$out" || fail "missing license"
 grep -qF 'shell_output("#{bin}/scion version")' "$out" || fail "missing test block"
+grep -qF 'scion server start' "$out" || fail "caveats lack the onboarding command"
+grep -qF 'ghcr.io/homebrew-scion is an old v0.2 image' "$out" || fail "caveats lack the stale :latest warning"
 for bad in post_install pre_install 'scion init' telegram plugin libexec; do
   if grep -qF -- "$bad" "$out"; then fail "unexpected '$bad'"; fi
 done

@@ -46,8 +46,10 @@ class Scion < Formula
       Container images for this release are published with the release tag,
       for example:
         ghcr.io/homebrew-scion/scion-claude:v0.3.0-preview.5
-      Until Scion resolves images by release tag, it pulls the :latest tag,
-      which may not match this version.
+      Until Scion resolves images by release tag, it pulls :latest, which in
+      ghcr.io/homebrew-scion is an old v0.2 image (newer harnesses have
+      none). To match this version, build the images locally or set
+      image_registry to a registry with current images.
     EOS
   end
 

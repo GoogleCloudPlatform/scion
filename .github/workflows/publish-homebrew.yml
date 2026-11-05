@@ -117,6 +117,10 @@ jobs:
 
       # build-images.sh stamps VERSION from `git describe --tags
       # --exact-match`; a checkout that is not on the tag would embed "dev".
+      # A weekly preview tag shares its commit with a nightly tag. The
+      # shallow checkout above fetches only the preview tag, so describe
+      # returns it; if both tags were ever present and describe picked the
+      # nightly, this check fails instead of building a mislabelled image.
       - name: Verify checkout is the release tag
         env:
           TAG: ${{ needs.gate.outputs.tag }}
@@ -147,7 +151,9 @@ jobs:
         uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
-          username: ${{ github.actor }}
+          # GHCR authenticates the token, not this name; a fixed name keeps
+          # it independent of who started the run.
+          username: x-access-token
           password: ${{ secrets.HOMEBREW_SCION_TOKEN }}
 
       # One multi-arch call for the whole chain: parents built in the same
