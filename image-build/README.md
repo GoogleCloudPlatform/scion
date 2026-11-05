@@ -70,6 +70,7 @@ All image-related scripts live under `scripts/`. GitHub Actions workflows remain
 | Script | Purpose |
 |--------|---------|
 | `scripts/build-images.sh` | Orchestrator. Build images via a pluggable backend (`--builder`). |
+| `scripts/build-release-images.sh` | Build the image set from a release tag's specs. Standalone; see [Build images for a release](#build-images-for-a-release). |
 | `scripts/builders/*.sh` | Backend adapters (local-docker, local-podman, cloud-build). |
 | `scripts/lib/targets.sh` | Target → step list resolution. Single source of truth for the build DAG. |
 | `scripts/trigger-cloudbuild.sh` | Deprecation shim. Forwards to `build-images.sh --builder cloud-build`. |
@@ -221,6 +222,133 @@ The legacy `trigger-cloudbuild.sh` script still works as a deprecation shim and 
 4. Run `scion config set image_registry ghcr.io/<your-username>`.
 
 The workflow shells out to `build-images.sh --builder local-docker`. It is also available as a reusable workflow via `workflow_call` for use in downstream repos.
+
+## Build images for a release
+
+`scripts/build-release-images.sh` builds the full image set (core-base,
+scion-base, harnesses, hub) from the image specs of a release tag. The images
+are tagged `:<version>` (plus `:<short-sha>`). For v0.3.0-preview.4 and
+later, the `scion` and `sciontool` binaries inside them also report that
+version. Older releases (v0.3.0-preview.1 to .3) build and are tagged the same
+way, but they predate version stamping, so their binaries report `dev`; the
+driver warns and records `"version_stamped": false` in the manifest.
+
+The recipe is the tag's tree. The driver clones the tag and runs **that
+tree's** `build-images.sh --target all --tag <version>`, so a driver from
+`main` can build an older release. It forwards only the flags every release's
+`build-images.sh` understands (`--target`, `--registry`, `--platform`,
+`--push`, `--builder`, `--dry-run`) and rejects the rest. The driver is
+standalone: it needs bash (3.2 or later), git, and docker or podman, and it can
+be downloaded and run as a single file. See `--help` for every option.
+
+**Maintainer: build the images for the `scion` binary you run** (local docker,
+no registry). With no version argument the driver uses the `version` field of
+`scion version --format json`, and it fails if that is `dev`:
+
+```bash
+scion version --format json | grep '"version"'   # "v0.3.0-preview.5"
+image-build/scripts/build-release-images.sh       # clones v0.3.0-preview.5, builds all, tags :v0.3.0-preview.5
+```
+
+**External user, no checkout, pushing multi-arch to their own registry:**
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/GoogleCloudPlatform/scion/main/image-build/scripts/build-release-images.sh
+docker login ghcr.io
+bash build-release-images.sh v0.3.0-preview.5 -- --registry ghcr.io/myorg --platform all --push
+```
+
+**Maintainer: rebuild an older release on Cloud Build:**
+
+```bash
+image-build/scripts/build-release-images.sh v0.3.0-preview.4 -- \
+  --builder cloud-build --registry us-central1-docker.pkg.dev/<project>/<repo>
+```
+
+Cloud Build runs asynchronously: the tag's `build-images.sh` submits the build
+(`gcloud builds submit --async`) and returns at once. The driver therefore
+records no digests: `build-manifest.json` gets `"submitted": true`,
+`"pushed": false` and empty digests, and the summary says the build was only
+submitted. `--also-tag latest` is refused with `--builder cloud-build`. Follow
+the build with `gcloud builds list` / `gcloud builds describe <id>`. Once it
+has finished, move `:latest` with
+`docker buildx imagetools create -t <registry>/<image>:latest <registry>/<image>:<version>`,
+or rebuild locally without `--builder cloud-build`.
+
+Other behaviour:
+
+- **Source.** The tag is cloned (`--depth 1`) into
+  `${XDG_CACHE_HOME:-~/.cache}/scion/image-src/<version>/`, or `--src-dir`.
+  The clone carries only the requested tag, because several tags can point at
+  one commit (a preview tag and a nightly tag, for example) and
+  `build-images.sh` stamps whichever name `git describe` prints. An existing
+  clone is reused when its HEAD is the tag's commit and `git describe` gives
+  the tag and it has no modified or untracked files (other than
+  `build-manifest.json`); any other non-empty directory is an error, and the
+  driver never deletes it. Forks pass `--repo <url>`.
+- **`--ref <branch|tag|full 40-hex sha>`** builds an arbitrary commit (short
+  SHAs are rejected). The images are tagged with its short SHA, no tag is
+  fetched, and the binaries report `dev`.
+- **Single-image targets** such as `-- --target scion-claude` need
+  v0.3.0-preview.4 or later; older releases only accept the group targets
+  (`core-base`, `scion-base`, `harnesses`, `hub`, `omni`, `common`, `all`,
+  `thick-prep`, `thick`). The driver checks the cloned tree and stops with
+  that message.
+- **Stacking on an existing base.** `-- --target common` (or `scion-base`,
+  `harnesses`, `hub`, `omni`, or a single image such as `scion-claude`) skips the
+  core-base rebuild. It is allowed only when `core-base:<version>` (for
+  `scion-base` and `common`) or `scion-base:<version>` exists locally or in
+  the registry; otherwise the driver stops before building. That avoids
+  stacking release images on a stale base. The check needs docker (with buildx
+  for registry images) or podman on PATH, also with `--builder cloud-build`;
+  a `--dry-run` only warns.
+- **Output.** A summary of image refs with registry digests (pushed images) or
+  local image IDs, and the source commit. The same record is written to
+  `<src-dir>/build-manifest.json`:
+  `{version, commit, built_at, builder, pushed, submitted, version_stamped, images: {name: {ref, digest}}}`.
+  A staged build in one `--src-dir` (core-base, then scion-base, then a
+  harness, with the same builder and push flags) merges into the manifest of
+  the same version, commit, builder and push mode, so the file ends up listing
+  every image built from that tree, and every `digest` in it is of one kind
+  (local image IDs, or registry digests when `pushed` is true; empty for a
+  submitted `--builder cloud-build` run, which has `"submitted": true` and is
+  never merged). Podman pushes record
+  the registry digest (via `skopeo` when installed, else `podman push
+  --digestfile`).
+- **`--channel-tag preview|stable`** is reserved for registry publishing and
+  is not implemented yet; passing it exits with an error.
+
+### Making agents use release images: `--also-tag latest`
+
+Agents currently run `scion-<harness>:latest`. Until a runtime setting can
+select a version tag, add `--also-tag latest` so the release images are also
+tagged `:latest`:
+
+```bash
+image-build/scripts/build-release-images.sh v0.3.0-preview.5 --also-tag latest
+```
+
+With a registry, this moves that registry's shared `:latest`, so it also
+requires `--force-latest`:
+
+```bash
+image-build/scripts/build-release-images.sh v0.3.0-preview.5 --also-tag latest --force-latest -- --registry localhost/scion
+```
+
+### Same recipe, not same bits
+
+A release build uses exactly the release's Dockerfiles, install scripts and
+scion source. Inputs that float still resolve at build time: harness CLIs
+installed at `@latest`, apt packages, base images by tag, kubectl
+`stable.txt` and similar. Two builds of the same version a week apart can
+differ. `build-manifest.json` records what a given build produced; it does not
+promise that a rebuild produces the same bits.
+
+### Nightly tags expire
+
+`nightly-YYYYMMDD` tags are deleted after 14 days. Building an expired nightly
+fails with `tag not found`. Use a preview or stable release, or `--ref` with a
+commit SHA.
 
 ## Cloud Build Configs
 
