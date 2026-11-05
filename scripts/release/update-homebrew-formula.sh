@@ -183,7 +183,7 @@ class Scion < Formula
   end
 
   def caveats
-    <<~EOS
+    text = <<~EOS
       To set up Scion, start the workstation server:
         scion server start
       On first start it opens the onboarding wizard, which checks your
@@ -200,6 +200,18 @@ class Scion < Formula
       none). To match this version, build the images locally or set
       image_registry to a registry with current images.
     EOS
+    if OS.linux?
+      text += <<~EOS
+
+        On Linux, Homebrew installs its own gcc, once for all formulae, when
+        the system glibc is older than 2.39 or libstdc++ is older than
+        6.0.33, and its own glibc as well when glibc is older than 2.39.
+        Scion is a static binary and does not use them.
+        On such hosts you can install the release tarball instead:
+          https://github.com/${REPO}/releases/tag/${tag}
+      EOS
+    end
+    text
   end
 
   test do
