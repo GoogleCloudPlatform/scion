@@ -298,7 +298,13 @@ func (c *Client) credentialStateChanged() <-chan struct{} {
 // Where the state is published. Package vars for the test seams below;
 // production code never changes them.
 var (
-	credentialStateDir  = "/run/scion"
+	// credentialStateDir is a directory only init creates (as root, 0755,
+	// below the checked /run). It is deliberately not under /run/scion:
+	// some runtimes create /run/scion themselves as the parent of a
+	// volume mount, owned by another uid with a mode the checks below
+	// refuse: every directory above the file must be root-owned and not
+	// writable by others.
+	credentialStateDir  = "/run/sciontool"
 	credentialStateBase = "/"
 	// credentialStateOwner is the uid that must own the file and every
 	// directory above it. Init publishes only when running as this uid.
