@@ -75,7 +75,7 @@ jobs:
           ref: ${{ inputs.ref || github.ref }}
           fetch-depth: 0
           # Blobless partial clone: later steps need only commits and tags
-          # (git describe --tags, git rev-parse HEAD, and the go build VCS
+          # (git rev-parse of the built tag and HEAD, and the go build VCS
           # stamp), never file contents of older commits.
           filter: blob:none
           persist-credentials: false
@@ -100,26 +100,41 @@ jobs:
 
       - name: Get version info
         id: version
+        env:
+          REF: ${{ inputs.ref || github.ref }}
         run: |
-          # Get version from git tag
-          if git describe --tags --exact-match >/dev/null 2>&1; then
-            VERSION=$(git describe --tags --exact-match)
-          else
-            VERSION=""
+          # The version is the tag being built, not `git describe`: a weekly
+          # preview or stable tag sits on the same commit as a nightly tag, and
+          # with several lightweight tags on HEAD `git describe` returns the
+          # first in refname order (nightly-* before v*), so previews were
+          # stamped with the nightly name and put on the nightly update channel.
+          #
+          # Every caller builds a tag (push of a release tag, or workflow_call
+          # with a tag name), so anything else fails here instead of publishing
+          # a release with a guessed version.
+          set -euo pipefail
+          TAG="${REF#refs/tags/}"
+          if [[ ! "$TAG" =~ ^[0-9A-Za-z][0-9A-Za-z._+-]*$ ]]; then
+            printf '::error::Release builds need a tag ref; got %q.\n' "$REF"
+            exit 1
           fi
-          
-          COMMIT=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
+          if ! TAG_COMMIT=$(git rev-parse --verify --quiet "refs/tags/${TAG}^{commit}"); then
+            printf "::error::'%s' is not a tag in this checkout (ref %q); release builds need a tag ref.\n" "$TAG" "$REF"
+            exit 1
+          fi
+          COMMIT=$(git rev-parse HEAD)
+          if [ "$TAG_COMMIT" != "$COMMIT" ]; then
+            echo "::error::Tag '${TAG}' points at ${TAG_COMMIT}, but the checkout is ${COMMIT}."
+            exit 1
+          fi
+          VERSION="$TAG"
+
           BUILD_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
           PKG="github.com/GoogleCloudPlatform/scion/pkg/version"
-          
-          # Build ldflags, only including version if available
-          LDFLAGS="-X ${PKG}.Commit=${COMMIT} -X ${PKG}.BuildTime=${BUILD_TIME}"
-          if [ -n "$VERSION" ]; then
-            LDFLAGS="${LDFLAGS} -X ${PKG}.Version=${VERSION}"
-          fi
-          
-          echo "ldflags=${LDFLAGS}" >> $GITHUB_OUTPUT
-          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          LDFLAGS="-X ${PKG}.Commit=${COMMIT} -X ${PKG}.BuildTime=${BUILD_TIME} -X ${PKG}.Version=${VERSION}"
+
+          echo "ldflags=${LDFLAGS}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Build binary
         env:
@@ -137,6 +152,22 @@ jobs:
             (cd dist && zip -q "../${OUTPUT_NAME}.zip" "${BIN}")
           else
             tar -czvf "${OUTPUT_NAME}.tar.gz" -C dist "${BIN}"
+          fi
+
+      # Only linux/amd64 can run on the runner; the other platforms get the
+      # same ldflags from the step above.
+      - name: Verify binary version
+        if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          # Run outside the checkout so no project settings are picked up.
+          OUT=$(cd "${RUNNER_TEMP:?}" && "${GITHUB_WORKSPACE:?}/dist/scion" version)
+          printf '%s\n' "$OUT"
+          if [[ "$OUT" != *"scion ${VERSION:?} (commit "* ]]; then
+            echo "::error::Built binary does not report version '${VERSION}'."
+            exit 1
           fi
 
       - name: Upload artifact
