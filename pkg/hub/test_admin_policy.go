@@ -566,6 +566,7 @@ var testAdminExperimentPolicy = map[string]testAdminPolicy{
 	experiments.FlatCloudRunTarget:           testAdminPolicyDeny,
 	experiments.Artifacts:                    testAdminPolicyDeny,
 	"hub.conduit":                            testAdminPolicyDeny,
+	experiments.ConduitDeliver:               testAdminPolicyDeny,
 	experiments.ChatScheduledSend:            testAdminPolicyDeny,
 	experiments.ChatStarredMessages:          testAdminPolicyDeny,
 	experiments.ChatRetention:                testAdminPolicyDeny,
