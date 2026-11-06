@@ -100,6 +100,14 @@ type Service struct {
 	// logFn yields the decision logger (SetLogger; auditlog.go).
 	logFn func() *slog.Logger
 
+	// archiveEnabled says whether the archive route is on
+	// (SetArchiveEnabled); archiveSlots caps concurrent archives, and
+	// archiveNow overrides the archive clock in tests (archive.go).
+	archiveEnabled func(context.Context) bool
+	archiveOnce    sync.Once
+	archiveSlots   *archiveSlots
+	archiveNow     func() time.Time
+
 	// viewIssuanceClosedWarned makes the view issuance-closed warning
 	// appear once (warnViewIssuanceClosed).
 	viewIssuanceClosedWarned atomic.Bool
@@ -354,6 +362,7 @@ func (s *Service) RegisterRoutes(mux Mux, guard Guard) {
 //	POST /api/v1/artifacts/{id}/versions/{seq}/view         a view capability for an HTML entry
 //	GET  /api/v1/artifacts/view/{capability}/{path}         a file of the version a capability names
 //	GET  /api/v1/artifacts/{id}/versions/{seq}/files/{path} a file of version seq
+//	GET  /api/v1/artifacts/{id}/versions/{seq}/archive      the files of version seq as one zip (SetArchiveEnabled)
 //	PUT  /api/v1/artifacts/{id}/versions/{seq}/files/{path} upload a file of a pending version
 //	PATCH /api/v1/artifacts/{id}                            set the expiry, move to another project
 //	DELETE /api/v1/artifacts/{id}                           delete (soft delete) the artifact
@@ -488,6 +497,12 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			s.handleFinalize(w, r, id, seq)
+		case len(segs) == 4 && segs[3] == "archive":
+			if !isRead(r.Method) {
+				writeMethodNotAllowed(w, http.MethodGet, http.MethodHead)
+				return
+			}
+			s.handleGetArchive(w, r, id, seq)
 		case len(segs) == 4 && segs[3] == "view":
 			if r.Method != http.MethodPost {
 				writeMethodNotAllowed(w, http.MethodPost)

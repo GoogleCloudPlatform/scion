@@ -531,6 +531,58 @@ describe('artifact page', () => {
     expect(summary).toContain('could not be fetched: 1');
   });
 
+  describe('Download all (.zip) on the Files tab (ptone/scion#7106)', () => {
+    const archiveButton = (el: ScionPageArtifactDetail): HTMLElement | null =>
+      Array.from(
+        el.shadowRoot!.querySelectorAll<HTMLElement>('sl-tab-panel[name="files"] sl-button')
+      ).find((b) => b.textContent!.includes('Download all (.zip)')) ?? null;
+
+    it('is hidden when the hub reports no archive', async () => {
+      mockFetch(artifact('design.md', 'text/markdown'));
+      const el = await mount(true);
+      expect(archiveButton(el)).toBeNull();
+    });
+
+    it('links to the version archive when the hub reports it available', async () => {
+      const meta = artifact('design.md', 'text/markdown');
+      meta.archive = { available: true };
+      const urls = mockFetch(meta);
+      const el = await mount(true);
+      const button = archiveButton(el)!;
+      expect(button).not.toBeNull();
+      expect(button.hasAttribute('disabled')).toBe(false);
+      expect(button.getAttribute('href')).toBe(`/api/v1/artifacts/${ID}/versions/1/archive`);
+      expect(button.hasAttribute('download')).toBe(true);
+      expect(button.getAttribute('download')).toBe('');
+      // Rendering the button fetches nothing; the browser downloads on click.
+      expect(urls.some((u) => u.includes('/archive'))).toBe(false);
+    });
+
+    it('is disabled with a reason when the version is too large', async () => {
+      const meta = artifact('design.md', 'text/markdown');
+      meta.archive = { available: false, reason: 'too_large' };
+      mockFetch(meta);
+      const el = await mount(true);
+      const button = archiveButton(el)!;
+      expect(button.hasAttribute('disabled')).toBe(true);
+      expect(button.hasAttribute('href')).toBe(false);
+      expect(
+        el.shadowRoot!.querySelector('sl-tab-panel[name="files"] .archive-note')!.textContent
+      ).toContain('Too large for one archive; download files individually');
+    });
+
+    it('is disabled with a reason when a file name cannot be stored', async () => {
+      const meta = artifact('design.md', 'text/markdown');
+      meta.archive = { available: false, reason: 'unsupported_name' };
+      mockFetch(meta);
+      const el = await mount(true);
+      expect(archiveButton(el)!.hasAttribute('disabled')).toBe(true);
+      expect(
+        el.shadowRoot!.querySelector('sl-tab-panel[name="files"] .archive-note')!.textContent
+      ).toContain('A file name cannot be stored in a zip');
+    });
+  });
+
   it('lists versions in History and offers a new version when there is only one', async () => {
     mockFetch(artifact('design.md', 'text/markdown'));
     const el = await mount(true);

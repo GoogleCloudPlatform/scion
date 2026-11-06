@@ -116,6 +116,18 @@ export interface ArtifactResponse {
    * the hub cannot tell.
    */
   scopeDeleted?: boolean;
+  /**
+   * On a GET, only while the hub's zip download is on (ptone/scion#7106):
+   * whether the version's files can be downloaded as one zip.
+   */
+  archive?: ArtifactArchive;
+}
+
+/** ArtifactResponse.archive: the hub's answer for the version's zip download. */
+export interface ArtifactArchive {
+  available: boolean;
+  /** Why the zip is not available: "too_large" or "unsupported_name". */
+  reason?: string;
 }
 
 /** GET /api/v1/artifacts/{id}/versions: ready versions, newest first, without files. */
@@ -266,6 +278,11 @@ export function artifactFileUrl(id: string, seq: number, path: string, stream = 
   const version = seq > 0 ? `/versions/${seq}` : '';
   const query = stream ? '?stream=1' : '';
   return `/api/v1/artifacts/${encodeURIComponent(id)}${version}/files/${encodedPath}${query}`;
+}
+
+/** The zip of every file of version seq (ptone/scion#7106). */
+export function artifactArchiveUrl(id: string, seq: number): string {
+  return `/api/v1/artifacts/${encodeURIComponent(id)}/versions/${seq}/archive`;
 }
 
 /**

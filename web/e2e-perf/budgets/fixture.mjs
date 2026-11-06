@@ -170,6 +170,7 @@ export function buildFixture() {
         experiments: {
           'federation.project_visitors': false,
           'hub.agent_edit_held': false,
+          'hub.artifact_archive': false,
           'hub.artifacts': false,
           'hub.attachment_artifacts': false,
           'hub.chat_retention': false,

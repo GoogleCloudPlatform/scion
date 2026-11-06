@@ -305,7 +305,7 @@ func routeTemplate(r *http.Request) string {
 		return base + "/versions"
 	case sub[0] == "versions" && len(sub) == 2:
 		return base + "/versions/{seq}"
-	case sub[0] == "versions" && len(sub) == 3 && (sub[2] == "finalize" || sub[2] == "view"):
+	case sub[0] == "versions" && len(sub) == 3 && (sub[2] == "finalize" || sub[2] == "view" || sub[2] == "archive"):
 		return base + "/versions/{seq}/" + sub[2]
 	case sub[0] == "versions" && len(sub) >= 4 && sub[2] == "files":
 		return base + "/versions/{seq}/files/{path}"
