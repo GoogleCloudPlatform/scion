@@ -647,10 +647,13 @@ func (s *Server) suspendAgent(ctx context.Context, agent *store.Agent) error {
 }
 
 // revokeSuspendedCredentials revokes every credential of a suspended agent
-// and audits it (best-effort, Phase 1H).
+// (best-effort, Phase 1H). The agent_credential_revoke mutation audit is
+// recorded only after the revoke succeeds: a failed revoke is logged and
+// leaves no record claiming the credentials were revoked (ptone/scion#2403).
 func (s *Server) revokeSuspendedCredentials(ctx context.Context, agentID string) {
 	if _, err := s.store.RevokeAgentCredentialsByAgent(ctx, agentID, "system", "agent_suspended"); err != nil {
 		slog.Warn("Failed to revoke agent credentials on suspend", "agent_id", agentID, "error", err)
+		return
 	}
 	s.emitMutationAudit(ctx, &store.MutationAuditRecord{
 		MutationType: "agent_credential_revoke",
