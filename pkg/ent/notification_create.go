@@ -192,6 +192,20 @@ func (_c *NotificationCreate) SetNillableResourceID(v *string) *NotificationCrea
 	return _c
 }
 
+// SetExcerpt sets the "excerpt" field.
+func (_c *NotificationCreate) SetExcerpt(v string) *NotificationCreate {
+	_c.mutation.SetExcerpt(v)
+	return _c
+}
+
+// SetNillableExcerpt sets the "excerpt" field if the given value is not nil.
+func (_c *NotificationCreate) SetNillableExcerpt(v *string) *NotificationCreate {
+	if v != nil {
+		_c.SetExcerpt(*v)
+	}
+	return _c
+}
+
 // SetCreated sets the "created" field.
 func (_c *NotificationCreate) SetCreated(v time.Time) *NotificationCreate {
 	_c.mutation.SetCreated(v)
@@ -287,6 +301,10 @@ func (_c *NotificationCreate) defaults() {
 		v := notification.DefaultResourceID
 		_c.mutation.SetResourceID(v)
 	}
+	if _, ok := _c.mutation.Excerpt(); !ok {
+		v := notification.DefaultExcerpt
+		_c.mutation.SetExcerpt(v)
+	}
 	if _, ok := _c.mutation.Created(); !ok {
 		v := notification.DefaultCreated()
 		_c.mutation.SetCreated(v)
@@ -368,6 +386,9 @@ func (_c *NotificationCreate) check() error {
 	}
 	if _, ok := _c.mutation.ResourceID(); !ok {
 		return &ValidationError{Name: "resource_id", err: errors.New(`ent: missing required field "Notification.resource_id"`)}
+	}
+	if _, ok := _c.mutation.Excerpt(); !ok {
+		return &ValidationError{Name: "excerpt", err: errors.New(`ent: missing required field "Notification.excerpt"`)}
 	}
 	if _, ok := _c.mutation.Created(); !ok {
 		return &ValidationError{Name: "created", err: errors.New(`ent: missing required field "Notification.created"`)}
@@ -471,6 +492,10 @@ func (_c *NotificationCreate) createSpec() (*Notification, *sqlgraph.CreateSpec)
 	if value, ok := _c.mutation.ResourceID(); ok {
 		_spec.SetField(notification.FieldResourceID, field.TypeString, value)
 		_node.ResourceID = value
+	}
+	if value, ok := _c.mutation.Excerpt(); ok {
+		_spec.SetField(notification.FieldExcerpt, field.TypeString, value)
+		_node.Excerpt = value
 	}
 	if value, ok := _c.mutation.Created(); ok {
 		_spec.SetField(notification.FieldCreated, field.TypeTime, value)
@@ -729,6 +754,18 @@ func (u *NotificationUpsert) SetResourceID(v string) *NotificationUpsert {
 // UpdateResourceID sets the "resource_id" field to the value that was provided on create.
 func (u *NotificationUpsert) UpdateResourceID() *NotificationUpsert {
 	u.SetExcluded(notification.FieldResourceID)
+	return u
+}
+
+// SetExcerpt sets the "excerpt" field.
+func (u *NotificationUpsert) SetExcerpt(v string) *NotificationUpsert {
+	u.Set(notification.FieldExcerpt, v)
+	return u
+}
+
+// UpdateExcerpt sets the "excerpt" field to the value that was provided on create.
+func (u *NotificationUpsert) UpdateExcerpt() *NotificationUpsert {
+	u.SetExcluded(notification.FieldExcerpt)
 	return u
 }
 
@@ -1018,6 +1055,20 @@ func (u *NotificationUpsertOne) SetResourceID(v string) *NotificationUpsertOne {
 func (u *NotificationUpsertOne) UpdateResourceID() *NotificationUpsertOne {
 	return u.Update(func(s *NotificationUpsert) {
 		s.UpdateResourceID()
+	})
+}
+
+// SetExcerpt sets the "excerpt" field.
+func (u *NotificationUpsertOne) SetExcerpt(v string) *NotificationUpsertOne {
+	return u.Update(func(s *NotificationUpsert) {
+		s.SetExcerpt(v)
+	})
+}
+
+// UpdateExcerpt sets the "excerpt" field to the value that was provided on create.
+func (u *NotificationUpsertOne) UpdateExcerpt() *NotificationUpsertOne {
+	return u.Update(func(s *NotificationUpsert) {
+		s.UpdateExcerpt()
 	})
 }
 
@@ -1474,6 +1525,20 @@ func (u *NotificationUpsertBulk) SetResourceID(v string) *NotificationUpsertBulk
 func (u *NotificationUpsertBulk) UpdateResourceID() *NotificationUpsertBulk {
 	return u.Update(func(s *NotificationUpsert) {
 		s.UpdateResourceID()
+	})
+}
+
+// SetExcerpt sets the "excerpt" field.
+func (u *NotificationUpsertBulk) SetExcerpt(v string) *NotificationUpsertBulk {
+	return u.Update(func(s *NotificationUpsert) {
+		s.SetExcerpt(v)
+	})
+}
+
+// UpdateExcerpt sets the "excerpt" field to the value that was provided on create.
+func (u *NotificationUpsertBulk) UpdateExcerpt() *NotificationUpsertBulk {
+	return u.Update(func(s *NotificationUpsert) {
+		s.UpdateExcerpt()
 	})
 }
 

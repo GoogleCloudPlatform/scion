@@ -50,6 +50,8 @@ type Notification struct {
 	ResourceType string `json:"resource_type,omitempty"`
 	// ResourceID holds the value of the "resource_id" field.
 	ResourceID string `json:"resource_id,omitempty"`
+	// Excerpt holds the value of the "excerpt" field.
+	Excerpt string `json:"excerpt,omitempty"`
 	// Created holds the value of the "created" field.
 	Created      time.Time `json:"created,omitempty"`
 	selectValues sql.SelectValues
@@ -64,7 +66,7 @@ func (*Notification) scanValues(columns []string) ([]any, error) {
 			values[i] = new(sql.NullBool)
 		case notification.FieldDispatchAttempts:
 			values[i] = new(sql.NullInt64)
-		case notification.FieldSubscriberType, notification.FieldSubscriberID, notification.FieldStatus, notification.FieldMessage, notification.FieldDispatchOutcome, notification.FieldDispatchReason, notification.FieldKind, notification.FieldResourceType, notification.FieldResourceID:
+		case notification.FieldSubscriberType, notification.FieldSubscriberID, notification.FieldStatus, notification.FieldMessage, notification.FieldDispatchOutcome, notification.FieldDispatchReason, notification.FieldKind, notification.FieldResourceType, notification.FieldResourceID, notification.FieldExcerpt:
 			values[i] = new(sql.NullString)
 		case notification.FieldNextAttemptAt, notification.FieldCreated:
 			values[i] = new(sql.NullTime)
@@ -188,6 +190,12 @@ func (_m *Notification) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.ResourceID = value.String
 			}
+		case notification.FieldExcerpt:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field excerpt", values[i])
+			} else if value.Valid {
+				_m.Excerpt = value.String
+			}
 		case notification.FieldCreated:
 			if value, ok := values[i].(*sql.NullTime); !ok {
 				return fmt.Errorf("unexpected type %T for field created", values[i])
@@ -279,6 +287,9 @@ func (_m *Notification) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("resource_id=")
 	builder.WriteString(_m.ResourceID)
+	builder.WriteString(", ")
+	builder.WriteString("excerpt=")
+	builder.WriteString(_m.Excerpt)
 	builder.WriteString(", ")
 	builder.WriteString("created=")
 	builder.WriteString(_m.Created.Format(time.ANSIC))

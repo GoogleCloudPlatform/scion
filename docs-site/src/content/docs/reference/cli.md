@@ -1524,6 +1524,7 @@ Manages notifications and notification subscriptions.
 
 - `scion notifications`: List your recent unacknowledged notifications.
     - Flags: `--all` (include acknowledged notifications), `--json` (format output as JSON).
+    - A notification about an artifact is followed by a line with its `scion://artifact/` reference. A review of your artifact (kind `artifact_review_summary`) also shows the start of the reviewer's note, in quotes, on its own line (see [Reviews](/scion/reference/artifacts/#reviews)).
 - `scion notifications ack [id]`: Acknowledge one or all notifications.
     - Flags: `--all` (acknowledge all unacknowledged notifications).
 - `scion notifications subscribe`: Subscribe to notifications for a specific agent or all agents in a project.

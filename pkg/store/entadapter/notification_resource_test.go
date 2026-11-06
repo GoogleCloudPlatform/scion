@@ -258,6 +258,7 @@ func assertResourceFieldsUpgraded(t *testing.T, cs *CompositeStore) {
 		assert.Empty(t, n.Kind, id)
 		assert.Empty(t, n.ResourceType, id)
 		assert.Empty(t, n.ResourceID, id)
+		assert.Empty(t, n.Excerpt, id)
 	}
 	fresh := newResourceNotification("user-1")
 	require.NoError(t, cs.CreateNotification(ctx, fresh))
@@ -267,7 +268,9 @@ func assertResourceFieldsUpgraded(t *testing.T, cs *CompositeStore) {
 	assert.Equal(t, testArtifactID, got.ResourceID)
 }
 
-var resourceColumns = []string{"kind", "resource_type", "resource_id"}
+// resourceColumns are the columns added for notification kinds: kind and
+// resource fields (ptone/scion#5145) and the excerpt (ptone/scion#6853).
+var resourceColumns = []string{"kind", "resource_type", "resource_id", "excerpt"}
 
 func TestNotificationResourceFields_UpgradeFromLegacySchema_SQLite(t *testing.T) {
 	dsn := "file:" + filepath.Join(t.TempDir(), "legacy-notifications.db")

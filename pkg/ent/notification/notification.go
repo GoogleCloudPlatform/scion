@@ -46,6 +46,8 @@ const (
 	FieldResourceType = "resource_type"
 	// FieldResourceID holds the string denoting the resource_id field in the database.
 	FieldResourceID = "resource_id"
+	// FieldExcerpt holds the string denoting the excerpt field in the database.
+	FieldExcerpt = "excerpt"
 	// FieldCreated holds the string denoting the created field in the database.
 	FieldCreated = "created"
 	// Table holds the table name of the notification in the database.
@@ -71,6 +73,7 @@ var Columns = []string{
 	FieldKind,
 	FieldResourceType,
 	FieldResourceID,
+	FieldExcerpt,
 	FieldCreated,
 }
 
@@ -111,6 +114,8 @@ var (
 	DefaultResourceType string
 	// DefaultResourceID holds the default value on creation for the "resource_id" field.
 	DefaultResourceID string
+	// DefaultExcerpt holds the default value on creation for the "excerpt" field.
+	DefaultExcerpt string
 	// DefaultCreated holds the default value on creation for the "created" field.
 	DefaultCreated func() time.Time
 	// DefaultID holds the default value on creation for the "id" field.
@@ -203,6 +208,11 @@ func ByResourceType(opts ...sql.OrderTermOption) OrderOption {
 // ByResourceID orders the results by the resource_id field.
 func ByResourceID(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldResourceID, opts...).ToFunc()
+}
+
+// ByExcerpt orders the results by the excerpt field.
+func ByExcerpt(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldExcerpt, opts...).ToFunc()
 }
 
 // ByCreated orders the results by the created field.

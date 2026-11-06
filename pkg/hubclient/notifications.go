@@ -70,6 +70,10 @@ type Notification struct {
 	// (for example "artifact" and an artifact id), or are empty.
 	ResourceType string `json:"resourceType,omitempty"`
 	ResourceID   string `json:"resourceId,omitempty"`
+	// Excerpt is text another principal wrote (for a review summary, the
+	// start of the reviewer's summary note), kept apart from Message.
+	// Show it as plain text only.
+	Excerpt string `json:"excerpt,omitempty"`
 }
 
 // List returns notifications for the current user.
