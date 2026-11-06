@@ -131,10 +131,10 @@ The **Artifacts** item in the sidebar (under *Management*) lists the artifacts y
 Opening an artifact shows its page with three tabs:
 
 - **Preview** shows the entry file. Markdown is shown formatted; text and code (including JSON, YAML and CSV) in a read-only editor; PNG, JPEG, GIF and WebP images inline. Other types, such as SVG and PDF, are offered as a download.
-- **Files** lists every file of the version. Plain text, Markdown, CSV, TSV, JSON, YAML, TOML and PNG, JPEG, GIF and WebP images open in the browser; other files, such as HTML, CSS and SVG, can only be downloaded there. An HTML entry renders in **Preview**.
+- **Files** lists every file of the version. Plain text, Markdown, CSV, TSV, JSON, YAML, TOML and PNG, JPEG, GIF and WebP images open in the browser; other files, such as HTML, CSS and SVG, can only be downloaded there. When the `hub.artifact_archive` experiment is on, **Download all (.zip)** downloads the version's files as a zip archive (see [Zip download](/scion/reference/artifacts/#zip-download)). An HTML entry renders in **Preview**.
 - **History** lists the versions. Use the **Version** menu in the header, or a version's link here, to open an earlier one.
 
-The clipboard button next to the reference in the header (**Copy reference**) copies the version's `scion://artifact/` reference, ready to paste into a message or a command. For a single-file version, **Download** in the header downloads the file; for a version with more than one file, download them from the **Files** tab.
+The clipboard button next to the reference in the header (**Copy reference**) copies the version's `scion://artifact/` reference, ready to paste into a message or a command. For a single-file version, **Download** in the header downloads the file; for a version with more than one file, download individual files or **Download all (.zip)** (when `hub.artifact_archive` is on) from the **Files** tab.
 
 ### How HTML artifacts render
 
