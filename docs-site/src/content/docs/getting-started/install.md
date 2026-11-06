@@ -33,8 +33,10 @@ brew install homebrew-scion/scion/scion
 
 This installs **`scion`**, the CLI with the embedded web UI, from the prebuilt binaries of
 the latest preview release. The [Onboarding Wizard](/scion/getting-started/onboarding/)
-suggests `ghcr.io/homebrew-scion` as the image registry, so the harness images can be pulled for
-you. Chat plugins such as Telegram and Discord are not included; their setup guides explain how
+suggests `ghcr.io/homebrew-scion` as the image registry. Images are published there for each
+preview release, tagged with that release's tag. `:latest` there is an old image, so pulling
+works only once you set `image_tag` to your release, or build the images locally (see
+[Build container images](#build-container-images)). Chat plugins such as Telegram and Discord are not included; their setup guides explain how
 to install them.
 
 :::note[Older Linux distributions]
