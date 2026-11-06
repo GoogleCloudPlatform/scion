@@ -1,0 +1,1 @@
+refused: mount source "/golden-home" is refused: it equals or contains Runtime Broker credentials on this host; mount a directory that does not contain the Scion global directory (~/.scion) or its control files

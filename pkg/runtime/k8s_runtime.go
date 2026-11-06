@@ -3000,6 +3000,12 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	for i, v := range config.Volumes {
 		switch v.Type {
 		case "gcs":
+			// The entry is a user-owned Mount: Realize gives its target and
+			// read-only flag, the GCS FUSE CSI driver its volume.
+			realized, err := realizeUserVolume(v.Bucket, v.Target, v.ReadOnly, projectfs.RuntimePod)
+			if err != nil {
+				return nil, err
+			}
 			volName := fmt.Sprintf("gcs-vol-%d", i)
 			attrs := map[string]string{
 				"bucketName": v.Bucket,
@@ -3021,8 +3027,8 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 			})
 			pod.Spec.Containers[0].VolumeMounts = append(pod.Spec.Containers[0].VolumeMounts, corev1.VolumeMount{
 				Name:      volName,
-				MountPath: v.Target,
-				ReadOnly:  v.ReadOnly,
+				MountPath: realized.Target,
+				ReadOnly:  realized.ReadOnly,
 			})
 
 			pod.Annotations = ensureAnnotations(pod.Annotations)

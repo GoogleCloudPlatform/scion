@@ -39,6 +39,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	stagedsecrets "github.com/GoogleCloudPlatform/scion/pkg/stagedsecrets"
@@ -410,8 +411,16 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 			}
 			return
 		}
+		// The entry is a user-owned Mount realized as a bind mount.
+		realized, err := realizeUserVolume(src, tgt, v.ReadOnly, projectfs.RuntimeBind)
+		if err != nil {
+			if volumeErr == nil {
+				volumeErr = err
+			}
+			return
+		}
 		// Generic volumes from config should NOT overwrite already registered mounts (like workspace)
-		registerMount(src, tgt, v.ReadOnly, false)
+		registerMount(realized.Source, realized.Target, realized.ReadOnly, false)
 	}
 
 	addArg("--name", config.Name)
