@@ -31,12 +31,21 @@ brew tap homebrew-scion/scion
 brew install homebrew-scion/scion/scion
 ```
 
-This installs:
+This installs **`scion`**, the CLI with the embedded web UI, from the prebuilt binaries of
+the latest preview release. The [Onboarding Wizard](/scion/getting-started/onboarding/)
+suggests `ghcr.io/homebrew-scion` as the image registry, so the harness images can be pulled for
+you. Chat plugins such as Telegram and Discord are not included; their setup guides explain how
+to install them.
 
-- **`scion`** — the main CLI, pre-configured to use `ghcr.io/homebrew-scion` as the default
-  image registry, so the harness images are pulled for you.
-- **`scion-plugin-telegram`** — the Telegram broker plugin, installed automatically alongside
-  the CLI. To connect it, follow [Setting Up Telegram](/scion/getting-started/telegram/).
+:::note[Older Linux distributions]
+On Linux hosts whose glibc is older than 2.39 or libstdc++ older than 6.0.33 (for example Debian
+12, Ubuntu 22.04 or RHEL 9), Homebrew installs its own `gcc` (and its own `glibc`, if glibc is
+older than 2.39), with their dependencies, the first time you install any formula. Scion is a
+static binary and does not use them. To avoid them, download `scion-linux-amd64.tar.gz` or
+`scion-linux-arm64.tar.gz` from the [GitHub
+releases](https://github.com/GoogleCloudPlatform/scion/releases), verify it against the
+release's `SHA256SUMS`, and put `scion` on your `$PATH`.
+:::
 
 To upgrade later:
 
