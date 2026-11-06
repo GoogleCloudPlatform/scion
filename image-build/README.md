@@ -152,6 +152,51 @@ Every image is tagged with both `:<tag>` (controlled by `--tag`, defaults to `la
 
 When two steps in the same run depend on each other, the orchestrator threads `BASE_IMAGE=...:<short-sha>` so chained builds are immune to concurrent overwrites of `:latest`. Standalone targets (e.g. `--target harnesses` on its own) reference the parent image as `:<tag>`.
 
+**Release tag warning.** When HEAD is exactly on a git tag (`git describe --tags --exact-match`) and `--tag` is not given, `build-images.sh` prints a warning that the images will be tagged `:latest`, not `:<git tag>`, and suggests `--tag <git tag>`. The default stays `latest`; passing `--tag latest` explicitly silences the warning.
+
+### Base guard, `--allow-stale-base` and `--strict-base`
+
+Targets that stack on a base without building it check that the base exists before anything is built:
+
+| Target | Required base |
+|---|---|
+| `scion-base`, `common` | `core-base:<tag>` (`thick-prep:<tag>` when `THICK_BUILD=true`) |
+| `harnesses`, `hub`, `omni`, single images (`scion-claude`, `scion-hub`, ...) | `scion-base:<tag>`; a single image needs its own parent (e.g. `scion-grok-build:<tag>` for `scion-omni` when `OMNI_BUILD=true`) |
+| `all`, `core-base`, `thick-prep`, `thick` | none (they build their own base) |
+
+The base counts as present when any lookup finds it. A tag-list line must equal the tag exactly, and an empty `--tag` never matches:
+
+- **Local store**, only for local (non-push) `local-docker` and `local-podman` builds: `docker image inspect` or `podman image inspect`. A `--push` build, including a multi-platform build that turns `--push` on, pulls the base from the registry, so a local copy does not count there.
+- **Registry**, when a registry is set: `docker buildx imagetools inspect` (`local-docker`), `podman manifest inspect` (`local-podman`), or for `cloud-build` first `gcloud artifacts docker tags list <registry>/<image>` (needs only Artifact Registry read; the tag must match a listed tag exactly; run with `--user-output-enabled` so `core/user_output_enabled=false` cannot hide the list) and then, if docker is on PATH, `docker buildx imagetools inspect`. `gcloud artifacts docker images describe` is not used: it also lists Container Analysis occurrences, which needs `containeranalysis.occurrences.list`.
+
+With `--builder cloud-build`, only the registry counts. The required base follows the Cloud Build configs (`scion-base` and `common` always check `core-base`), and a target whose config builds the base itself (`omni`) is not checked. This is the release driver's (`build-release-images.sh`) pre-flight mapping, made exact for each builder.
+
+**Definitely missing stops the build.** Only each tool's own "not found" answer counts: `No such image` (docker store), `image not known` (podman store), `manifest unknown` or a trailing `: not found` (imagetools, podman manifest), and `NOT_FOUND` or an exact-match miss in the tag list (gcloud). When a registry is set, the registry must answer "not found": a local miss alone proves nothing about the registry. The build then stops with an error naming the image and how to build it, instead of building on whatever base the builder happens to resolve (ptone/scion#2250).
+
+**A lookup that fails never stops a build that worked before.** Any other failure is a lookup error, not "not found": a permission or API error, no registry credentials (including docker's `executable file not found` for a configured credential helper), an old gcloud, no buildx, or the network. It prints a warning, "could not be checked (<tool>: <error>)", and the build goes ahead on whatever the builder resolves, as it did before this check existed. Lookups can fail where the build would succeed. For example, cloud-build lookups run as the submitting identity while the build runs as the Cloud Build service account, and imagetools uses client-side config while a non-push docker build pulls through the daemon.
+
+**Precedence: error markers beat not-found markers, for every backend** (gcloud, docker store and registry, podman store and registry). If a lookup's output contains any error marker, the lookup is a lookup error, even when a not-found marker also appears. The markers cover:
+
+- credentials and permissions (`denied`, `permission`, `unauthorized`, `forbidden`, a missing credential helper);
+- timeouts and network, DNS and TLS failures;
+- HTTP 429 and 5xx;
+- a crashed tool or an unreachable daemon;
+- multi-source messages such as podman's registries.conf mirror aggregation (`(Mirrors also failed: [...]): <primary>: <error>`).
+
+A mirror message is a lookup error even when every source says not found, because which source is authoritative cannot be told safely. Only output with a not-found marker and no error marker counts as definitely missing. The looked-up reference (image path and tag) is masked before the check, so a tag such as `timeout-fix` or a path such as `credentials-prod` is not taken for an error marker. The full list is `PROBE_ERROR_MARKERS` in `build-images.sh`.
+
+The gcloud lookup runs with `CLOUDSDK_CORE_SHOW_STRUCTURED_LOGS=never CLOUDSDK_CORE_CONSOLE_LOG_FORMAT=standard` and `--verbosity=error`. Structured logs, a timestamped console format or a quiet verbosity in the user's gcloud config therefore cannot hide a real `NOT_FOUND`.
+
+- `--strict-base` (opt-in, for CI that wants a hard gate) also stops on a lookup error.
+- `--allow-stale-base` skips the check entirely.
+- Under `--dry-run`, a stop is reported as a warning and the dry run continues.
+
+`build-release-images.sh` does not forward `--allow-stale-base` or `--strict-base`, because they are outside its base flag contract. That is fine: it runs its own base pre-flight, and the default here never blocks on a lookup error.
+
+### Build time and version label
+
+`BUILD_TIME` (the `BuildTime` embedded in `scion` and `sciontool`) is the commit time of HEAD (`git log -1 --format=%ct`), not the build host clock, so two builds of one commit embed the same timestamp. The same value is exported as `SOURCE_DATE_EPOCH`. With `local-docker`, buildx uses it for the image timestamps, so `docker images` shows the commit's age under CREATED, not the build time. Cloud Build does not get `SOURCE_DATE_EPOCH` (only `BUILD_TIME`), so its image timestamps are still the build clock. Podman honours it depending on the version. An explicit `SOURCE_DATE_EPOCH` in the environment takes precedence, and a non-integer value there is an error. The commit time is read with `git log -1 --no-show-signature --no-color --format=%ct`, so `log.showSignature` or `color.ui=always` in the user's git config cannot corrupt it. If git still prints something other than an integer, the script warns and falls back to the build clock. Outside a git checkout the Dockerfiles fall back to the build clock. Cloud Build gets the value as the `_BUILD_TIME` substitution.
+
 **Move `scion-base:latest` together with the harness tags.** Agents that use the `generic` harness run `scion-base:latest` itself (under your `image_registry`, if set): the built-in generic harness-config (`pkg/config/harness_config.go`) names no harness-specific image. If a deployment repoints only the harness `:latest` tags (`scion-claude:latest`, ...) after a rebuild, generic agents stay on the old base, and with it the old `sciontool`. Repoint `scion-base:latest` in the same step, or give a `generic` harness-config its own `image`.
 
 ### Build provenance and stale sciontool
@@ -162,6 +207,7 @@ To make that visible:
 
 - `sciontool version` (inside any built image) prints the embedded git commit, and, on an exact release tag, the version.
 - `docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' <image>` prints the same commit as an OCI label on `scion-base` and everything built from it, without starting the container.
+- `docker inspect --format '{{index .Config.Labels "org.opencontainers.image.version"}}' <image>` prints the release (the git tag HEAD was exactly on; empty for off-tag builds), from the same images.
 - Running `build-images.sh` with a target that needs `scion-base` but doesn't build it in the same invocation prints a warning naming the `scion-base` image it will inherit (and that image's revision label, when it can be read locally without a pull).
 
 **Upgrade note:** after pulling a `sciontool`-side fix (for example, a usage-telemetry fix), rebuild in this order: `--target scion-base` first, then `--target harnesses` (and `--target hub` if needed). Rebuilding only harnesses on top of an old `scion-base` does not pick up the fix.

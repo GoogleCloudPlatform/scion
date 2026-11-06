@@ -80,6 +80,11 @@ USER root
 # needed for the label to show up there too.
 ARG GIT_COMMIT
 LABEL org.opencontainers.image.revision="${GIT_COMMIT}"
+# The release next to the commit: the VERSION build arg, i.e. the git tag
+# HEAD is exactly on (empty off-tag, the same rule as the ldflags above).
+# Inherited by the same images as the revision label.
+ARG VERSION
+LABEL org.opencontainers.image.version="${VERSION}"
 
 # Copy scion and sciontool from builder
 COPY --from=builder /usr/local/bin/scion /usr/local/bin/scion
