@@ -104,6 +104,8 @@ type initAuthInput struct {
 	fileAge     time.Duration // now minus the file's modification time
 	lookup      lookupVerdict
 	now         time.Time
+	initPriv    initPrivilege // read only when no state is published
+	initPrivWhy string        // why initPriv is unknown, if known
 }
 
 // initAuthResult is the outcome of the init credential check.
@@ -195,7 +197,8 @@ func isRefusal(r *hub.OutcomeRecord) bool {
 // sciontool init holds. It never prints a credential value.
 //
 // Rules, in order:
-//  1. no trusted state: a WARN, nothing else.
+//  1. no trusted state: a WARN, nothing else; but no published state
+//     under a non-root init (Kubernetes) is expected, an INFO.
 //  2. what init holds and its last heartbeat, refresh and start-up check.
 //  3. whether init holds the credential file's credential.
 //  4. the verdict: expiry FAILs; else a refusal of init's current
@@ -214,6 +217,19 @@ func evaluateInitCredential(in initAuthInput) initAuthResult {
 	case hub.CredentialStateOK:
 	case hub.CredentialStateUntrusted:
 		add("[WARN] Init credential state not trusted (%s); init's credential is not checked", in.stateReason)
+		return res
+	case hub.CredentialStateUnavailable:
+		switch in.initPriv {
+		case initPrivNonRoot:
+			add("[INFO] Init credential check not applicable: init (PID 1) runs as a non-root user and does not publish its credential state")
+		case initPrivRoot:
+			add("[WARN] Init credential state unavailable: PID 1 runs with effective uid 0, so init should have published it (see the init log)")
+		default:
+			add("[WARN] Init credential state unavailable (init is not running as root, or could not publish it; see the init log)")
+			if in.initPrivWhy != "" {
+				add("[INFO] Init privilege not determined: %s", in.initPrivWhy)
+			}
+		}
 		return res
 	default:
 		add("[WARN] Init credential state unavailable (init is not running as root, or could not publish it; see the init log)")
@@ -365,6 +381,13 @@ func checkInitCredential(diag *doctorDiag) initAuthResult {
 	fmt.Println("\n--- Init Process Credential ---")
 	in := initAuthInput{lookup: diag.lookup, now: time.Now()}
 	in.state, in.stateStatus, in.stateReason = hub.ReadCredentialState()
+	if in.stateStatus == hub.CredentialStateUnavailable {
+		var err error
+		in.initPriv, err = readInitPrivilegeFn()
+		if in.initPriv == initPrivUnknown && err != nil {
+			in.initPrivWhy = err.Error()
+		}
+	}
 	if diag.file.ok {
 		in.fileOK = true
 		in.file = hub.CredentialIdentityOf(diag.file.token)
