@@ -335,7 +335,12 @@ func skillAccessScopePredicate(scope *store.SkillAccessScope) predicate.Skill {
 			entskill.ScopeIDEQ(scope.CallerID),
 		))
 	}
-	if len(scope.ProjectIDs) > 0 {
+	switch {
+	case scope.AllProjects:
+		// Every project-scoped skill, in any project: the caller decides
+		// project admission per row (store.SkillAccessScope.AllProjects).
+		terms = append(terms, entskill.ScopeEQ(store.SkillScopeProject))
+	case len(scope.ProjectIDs) > 0:
 		terms = append(terms, entskill.And(
 			entskill.ScopeEQ(store.SkillScopeProject),
 			entskill.ScopeIDIn(scope.ProjectIDs...),

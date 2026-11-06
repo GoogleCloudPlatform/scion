@@ -61,10 +61,15 @@ type CreateSkillResponse struct {
 
 // ListSkillsResponse is the response for listing skills.
 type ListSkillsResponse struct {
-	Skills       []SkillWithCapabilities `json:"skills"`
-	NextCursor   string                  `json:"nextCursor,omitempty"`
-	TotalCount   int                     `json:"totalCount"`
-	Capabilities *Capabilities           `json:"_capabilities,omitempty"`
+	Skills     []SkillWithCapabilities `json:"skills"`
+	NextCursor string                  `json:"nextCursor,omitempty"`
+	TotalCount int                     `json:"totalCount"`
+	// TotalCountApproximate marks TotalCount as a lower bound: set when a
+	// per-item list's candidate pool crossed authorizedListMaxCandidates
+	// before the count scan finished. Only the agent delegated
+	// credential's list sets it.
+	TotalCountApproximate bool          `json:"totalCountApproximate,omitempty"`
+	Capabilities          *Capabilities `json:"_capabilities,omitempty"`
 }
 
 // SkillWithCapabilities wraps a store.Skill with capability annotations.
@@ -257,6 +262,14 @@ func (s *Server) listSkills(w http.ResponseWriter, r *http.Request) {
 	}
 
 	identity := GetIdentityFromContext(ctx)
+
+	// An agent delegated credential takes its scope only from the delegated
+	// list arm; no project.list scope is resolved for it
+	// (.design/agent-delegation.md §11.8).
+	if d, ok := identity.(*DelegatedAgentIdentity); ok && d != nil {
+		s.listSkillsDelegated(w, r, d, filter)
+		return
+	}
 
 	// A user access token lists skills only when its ceiling carries
 	// skill.list and skill.list is eligible for its boundary kind. Without
