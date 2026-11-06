@@ -76,6 +76,9 @@ if [[ "$TAG" =~ $PRERELEASE_RE ]]; then
 elif [[ "$TAG" =~ $STABLE_RE ]]; then
   prev=$(sorted_before "$STABLE_RE" | tail -n 1)
   if [[ -z "$prev" ]]; then
+    # No earlier stable: start from the oldest preview. The oldest v* tag in
+    # the repository is v0.3.0-preview.1, the agreed baseline for the first
+    # stable release; every later stable starts from the previous stable.
     # sed (not head) reads all its input, so nothing upstream gets SIGPIPE
     # under pipefail.
     prev=$(sorted_before '^v[0-9]+\.[0-9]+\.[0-9]+-preview\.[0-9]+$' | sed -n 1p)

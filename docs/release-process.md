@@ -227,7 +227,9 @@ release-candidate, or nightly tag is pushed. It:
 2. Builds the Linux plugin binaries.
 3. Packages and uploads the build artifacts.
 4. Generates a `SHA256SUMS` checksums file covering every published asset.
-5. Creates a GitHub release and marks non-stable channels as pre-releases.
+5. Creates a GitHub release and marks non-stable channels as pre-releases. Preview, rc and
+   stable releases link the docs release notes page for the tag and list the pull requests
+   since the previous release in the same channel (see [Release notes](#release-notes)).
 6. Force-updates the matching `stable`, `preview`, or `nightly` channel branch.
 7. Updates the corresponding channel in `LATEST.json` on `main`.
 8. For preview tags only, calls [`publish-homebrew.yml`](../.github/workflows/publish-homebrew.yml)
@@ -387,6 +389,46 @@ The main `scion` binary is published for:
 Linux and macOS artifacts are gzip-compressed tar archives (`.tar.gz`) containing `scion`. Windows
 artifacts are zip archives (`.zip`) containing `scion.exe`. The Telegram, Discord, Slack, and Teams
 plugins are built for Linux on both amd64 and arm64; plugin builds are not published for macOS.
+
+## Release notes
+
+The body of a preview, release-candidate or stable GitHub release starts with a link to that
+release's page on the docs site, followed by the pull requests merged since the previous
+release in the same channel. The page URL is
+`https://googlecloudplatform.github.io/scion/release-notes/<slug>/`, where the slug is the tag
+with every `.` replaced by `-`: `v0.3.0-preview.6` links to `.../release-notes/v0-3-0-preview-6/`
+and `v0.3.0` to `.../release-notes/v0-3-0/`. The docs page for each tag
+(`docs-site/src/content/docs/release-notes/<slug>.md`) is written separately and lands shortly
+after the tag, so the link can briefly lead to a missing page.
+
+[`select-previous-release-tag.sh`](../scripts/release/select-previous-release-tag.sh) picks the
+previous release from the repository's tags by version order (`X.Y.Z`, then preview before rc
+before stable, then `N`, so `preview.10` follows `preview.9`):
+
+| Tag being released | Notes start from |
+|--------------------|------------------|
+| `vX.Y.Z-preview.N` or `vX.Y.Z-rc.N` | The previous `v*-preview.*` or `v*-rc.*` tag |
+| `vX.Y.Z` | The previous stable `vX.Y.Z` tag; if there is none, the first preview tag (`v0.3.0-preview.1`) |
+
+The workflow passes that tag to
+[`softprops/action-gh-release`](https://github.com/softprops/action-gh-release) as
+`previous_tag`, which has GitHub generate the notes between the two tags and adds them after
+the docs link. If there is no earlier release in the channel, or the selection script fails,
+the workflow logs a warning (a distinct one for each case) and GitHub picks the previous tag
+itself: the newest earlier tag of any kind, usually a nightly. The docs link is still added.
+A tag that does not match `vX.Y.Z[-preview.N|-rc.N]` also gets a warning, GitHub's choice of
+previous tag, and no docs link.
+
+Nightly releases keep GitHub's automatic notes and have no docs link.
+
+To check the selection locally, fetch the tags and run the script:
+
+```bash
+git fetch origin --tags
+./scripts/release/select-previous-release-tag.sh v0.3.0-preview.6
+```
+
+Its tests run with `./scripts/release/test-select-previous-release-tag.sh`.
 
 ## Checksums
 
