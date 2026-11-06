@@ -261,10 +261,13 @@ var cloudRunRuntimeEnvKeys = []string{"SCION_HOST_UID", "SCION_HOST_GID", startu
 
 // cloudRunResolvedAuthTaken reports the names that win over a resolved-auth
 // entry on a Cloud Run instance, before env-type secrets are folded into
-// cfg.Env: a cfg.Env name, an env-type secret's target and the runtime
-// keys (cloudRunRuntimeEnvKeys), as on Docker.
+// cfg.Env: a cfg.Env name, an env-type secret's target, the runtime keys
+// (cloudRunRuntimeEnvKeys) and the harness env (cloudRunHarnessEnv), as on
+// Docker. buildCloudRunInstance emits the same harness entries, so a name
+// the harness env sets is neither staged nor emitted from resolved auth.
 func cloudRunResolvedAuthTaken(cfg RunConfig) func(name string) bool {
-	taken := make(map[string]bool, len(cfg.Env)+len(cfg.ResolvedSecrets)+len(cloudRunRuntimeEnvKeys))
+	harnessEnv, _ := cloudRunHarnessEnv(cfg)
+	taken := make(map[string]bool, len(cfg.Env)+len(cfg.ResolvedSecrets)+len(cloudRunRuntimeEnvKeys)+len(harnessEnv))
 	for _, e := range cfg.Env {
 		k, _, _ := strings.Cut(e, "=")
 		taken[k] = true
@@ -277,7 +280,74 @@ func cloudRunResolvedAuthTaken(cfg RunConfig) func(name string) bool {
 	for _, k := range cloudRunRuntimeEnvKeys {
 		taken[k] = true
 	}
+	for _, e := range harnessEnv {
+		k, _, _ := strings.Cut(e, "=")
+		taken[k] = true
+	}
 	return func(name string) bool { return taken[name] }
+}
+
+// cloudRunHarnessEnvDeniedNames are the names the harness env never sets
+// on a Cloud Run instance, whatever their value: sciontool init and the
+// runtime own them (the staged blob, its markers and the telemetry
+// credential path), so harness env must never pre-empt the staged-secret
+// channel. Unlike Docker, a denied name is dropped even when no other
+// source sets it. reservedAgentEnvName names are denied too.
+var cloudRunHarnessEnvDeniedNames = map[string]bool{
+	stagedsecrets.EnvVar:               true,
+	stagedsecrets.HubTokenStagedEnvVar: true,
+	telemetryGCPCredentialsEnvVar:      true,
+}
+
+// cloudRunHarnessEnvDeniedPrefix marks the GCP metadata settings the hub
+// and broker write into cfg.Env (for example SCION_METADATA_MODE and, for
+// a native identity, SCION_METADATA_SA_EMAIL): the harness env never sets
+// one, so a value the hub did not write can never reach the instance.
+const cloudRunHarnessEnvDeniedPrefix = "SCION_METADATA_"
+
+// cloudRunHarnessEnvDenied reports whether the harness env may not set name
+// on a Cloud Run instance.
+func cloudRunHarnessEnvDenied(name string) bool {
+	return cloudRunHarnessEnvDeniedNames[name] || reservedAgentEnvName(name) || strings.HasPrefix(name, cloudRunHarnessEnvDeniedPrefix)
+}
+
+// cloudRunHarnessEnv returns the harness env entries (harnessEnvEntries) a
+// Cloud Run instance receives, sorted by name, and the sorted names it
+// denied (cloudRunHarnessEnvDenied). GetEnv gets cfg.HomeDir, the
+// broker-side host path per the {{ .AgentHome }} contract, as on Docker
+// and Kubernetes. A name cfg.Env or a runtime key (cloudRunRuntimeEnvKeys)
+// sets is left out: those win over the harness env, as on Docker.
+//
+// It runs twice per start, once for Run's staged split
+// (cloudRunResolvedAuthTaken) and once in buildCloudRunInstance, so
+// GetEnv and GetTelemetryEnv are called twice per Cloud Run start; this
+// assumes they are deterministic and side-effect free, as every in-tree
+// harness is. Otherwise the two name sets could differ.
+func cloudRunHarnessEnv(cfg RunConfig) (entries, denied []string) {
+	all := harnessEnvEntries(cfg, cfg.HomeDir)
+	if len(all) == 0 {
+		return nil, nil
+	}
+	set := make(map[string]bool, len(cfg.Env)+len(cloudRunRuntimeEnvKeys))
+	for _, e := range cfg.Env {
+		k, _, _ := strings.Cut(e, "=")
+		set[k] = true
+	}
+	for _, k := range cloudRunRuntimeEnvKeys {
+		set[k] = true
+	}
+	for _, e := range all {
+		k, _, _ := strings.Cut(e, "=")
+		if cloudRunHarnessEnvDenied(k) {
+			denied = append(denied, k)
+			continue
+		}
+		if set[k] {
+			continue
+		}
+		entries = append(entries, e)
+	}
+	return entries, denied
 }
 
 // cloudRunOwnerIDs returns the uid and gid the Cloud Run instance runs
@@ -792,6 +862,21 @@ func (r *CloudRunRuntime) deleteOwnAfterFailedWait(ctx context.Context, c cloudr
 	}
 }
 
+// buildCloudRunInstance computes the instance Run creates for cfg. Its
+// environment follows the Docker order (buildCommonRunArgs); for a name
+// set by more than one source, the later source in this list wins:
+//  1. resolved auth: the discovery names as plain env, every other entry
+//     in the staged blob (splitResolvedAuthEnv, Run);
+//  2. the harness env: Harness.GetEnv, then Harness.GetTelemetryEnv when
+//     telemetry is enabled (cloudRunHarnessEnv);
+//  3. cfg.Env, with the env-type secrets folded into it for names it does
+//     not set (applyStagedSecretsToEnvExtras, Run), and the runtime keys
+//     (cloudRunRuntimeEnvKeys).
+//
+// The template fallback then fills only names no source set. A reserved
+// name (reservedAgentEnvName) never reaches the instance from any source,
+// and the harness env never sets a name cloudRunHarnessEnvDenied reports,
+// so the GCP metadata settings in cfg.Env are always the hub's.
 func (r *CloudRunRuntime) buildCloudRunInstance(cfg RunConfig, uid, gid int, nfsPaths *cloudRunNFSProvisionPaths) *runpb.Instance {
 	var envVars []*runpb.EnvVar
 	for _, e := range cfg.Env {
@@ -830,6 +915,23 @@ func (r *CloudRunRuntime) buildCloudRunInstance(cfg RunConfig, uid, gid int, nfs
 		Name:   startuplistener.EnvPort,
 		Values: &runpb.EnvVar_Value{Value: strconv.Itoa(startuplistener.Port)},
 	})
+
+	// The harness env (GetEnv, then GetTelemetryEnv when telemetry is
+	// enabled), with the Docker rules: cfg.Env (with the env-type secrets
+	// folded into it) and the runtime keys above win, and an empty value
+	// is skipped. It wins over resolved auth and the template fallback
+	// below, which treat its names as set; Run's staged split
+	// (cloudRunResolvedAuthTaken) leaves the same names out. A denied name
+	// (cloudRunHarnessEnvDenied) is dropped and logged by name only.
+	harnessEnv, deniedHarnessEnv := cloudRunHarnessEnv(cfg)
+	for _, e := range harnessEnv {
+		k, v, _ := strings.Cut(e, "=")
+		envVars = append(envVars, &runpb.EnvVar{Name: k, Values: &runpb.EnvVar_Value{Value: v}})
+	}
+	if len(deniedHarnessEnv) > 0 {
+		runtimeLog().Warn("Cloud Run start: harness env names not applied; the runtime owns them",
+			"agent_id", cfg.Labels["agent_id"], "names", strings.Join(deniedHarnessEnv, ","))
+	}
 
 	emitted := make(map[string]bool, len(envVars))
 	for _, ev := range envVars {

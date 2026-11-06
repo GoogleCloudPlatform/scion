@@ -185,6 +185,32 @@ func TestReservedAgentEnvName_DroppedFromNonSecretEnvOnEveryRuntime(t *testing.T
 		}
 	})
 
+	// The harness env and the telemetry env (ptone/scion#7295) are merged
+	// after cfg.Env and the runtime keys; the marker reaches neither the
+	// instance nor the staged resolved-auth entries.
+	for _, source := range []string{"harness-env", "telemetry-env"} {
+		t.Run("cloudrun-"+source, func(t *testing.T) {
+			fake := &fakeInstancesClient{getErr: notFoundErr()}
+			rt := newFakeCloudRunRuntime(t, fake)
+			cfg := runConfigForTest()
+			h := &mockHarness{command: []string{"echo"}, env: reservedEnvProbeMap()}
+			if source == "telemetry-env" {
+				cfg.Harness = &crEnvHarness{mockHarness: mockHarness{command: []string{"echo"}}, telemetry: reservedEnvProbeMap()}
+			} else {
+				cfg.Harness = h
+			}
+			cfg.TelemetryEnabled = true
+			if _, err := rt.Run(context.Background(), cfg); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			plain := crInstanceEnv(t, fake)
+			assertReservedDropped(t, "cloudrun-"+source, plain)
+			if _, ok := crStagedResolvedAuth(t, plain)[stagedsecrets.HubTokenStagedEnvVar]; ok {
+				t.Errorf("cloudrun-%s: the reserved marker reached the staged resolved-auth entries", source)
+			}
+		})
+	}
+
 	t.Run("cloudrun-sandbox", func(t *testing.T) {
 		h := newSandboxSecretsHarness(t)
 		h.cfg.Env = append([]string(nil), reservedEnvProbe...)
