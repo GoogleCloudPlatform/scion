@@ -584,3 +584,25 @@ func TestNotification_JSON_ResourceFields(t *testing.T) {
 		"dispatchAttempts", "dispatchOutcome", "kind", "resourceType", "resourceId",
 	})
 }
+
+// TestNotification_JSON_Excerpt pins the excerpt key (ptone/scion#6853):
+// it is omitted when empty, so every other kind serialises as before, and
+// a review summary row carries it beside the resource keys.
+func TestNotification_JSON_Excerpt(t *testing.T) {
+	n := Notification{
+		ID: "n-1", SubscriptionID: "sub-1", AgentID: "agent-1", ProjectID: "p-1",
+		SubscriberType: "user", SubscriberID: "u-1", Status: NotificationStatusArtifactReviewSubmitted,
+		Message: "hi", CreatedAt: time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC),
+		Kind: NotificationKindArtifactReviewSummary, ResourceType: NotificationResourceArtifact, ResourceID: "art-1",
+		Excerpt: "Looks good.",
+	}
+	data, err := json.Marshal(n)
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+	assertExactKeySet(t, "Notification", data, []string{
+		"id", "subscriptionId", "agentId", "projectId", "subscriberType",
+		"subscriberId", "status", "message", "dispatched", "acknowledged", "createdAt",
+		"dispatchAttempts", "dispatchOutcome", "kind", "resourceType", "resourceId", "excerpt",
+	})
+}

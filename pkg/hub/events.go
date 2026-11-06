@@ -401,6 +401,10 @@ type UserNotificationEvent struct {
 	Kind         string `json:"kind,omitempty"`
 	ResourceType string `json:"resourceType,omitempty"`
 	ResourceID   string `json:"resourceId,omitempty"`
+	// Excerpt is the notification's text from another principal
+	// (store.Notification.Excerpt), on this event only for the same
+	// reason; empty and omitted for every kind but the review summary.
+	Excerpt string `json:"excerpt,omitempty"`
 }
 
 // AllowListChangedEvent is published when the allow list is modified.
@@ -830,6 +834,7 @@ func (p *eventBuilder) PublishUserNotification(_ context.Context, notif *store.N
 		Kind:         notif.Kind,
 		ResourceType: notif.ResourceType,
 		ResourceID:   notif.ResourceID,
+		Excerpt:      notif.Excerpt,
 	}
 	p.sink("user."+notif.SubscriberID+".notification", evt)
 }

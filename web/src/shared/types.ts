@@ -1682,6 +1682,12 @@ export interface Notification {
   resourceType?: string;
   /** The id of the thing the notification is about; absent otherwise. */
   resourceId?: string;
+  /**
+   * Text another principal wrote, kept apart from `message`: for an
+   * "artifact_review_summary" row, the start of the reviewer's summary note.
+   * Render it as plain text only; absent for other kinds.
+   */
+  excerpt?: string;
 }
 
 // ---------------------------------------------------------------------------

@@ -877,7 +877,7 @@ func (s *Service) handleFinalize(w http.ResponseWriter, r *http.Request, id stri
 		return
 	}
 	if ready.Kind == VersionKindReview {
-		s.notifyReview(ctx, updated, ready)
+		s.notifyReview(ctx, updated, ready, access)
 	}
 	writeJSON(w, http.StatusOK, ArtifactResponse{Artifact: artifactInfo(updated), Version: versionInfo(ready, files), Warnings: warnings})
 }

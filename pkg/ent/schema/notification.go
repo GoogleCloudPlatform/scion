@@ -97,6 +97,12 @@ func (Notification) Fields() []ent.Field {
 			Default(""),
 		field.String("resource_id").
 			Default(""),
+		// excerpt is text another principal wrote, kept apart from
+		// message (store.Notification.Excerpt): for
+		// store.NotificationKindArtifactReviewSummary, the cleaned start
+		// of the review's summary note. Empty for every other kind.
+		field.String("excerpt").
+			Default(""),
 		field.Time("created").
 			Default(time.Now).
 			Immutable(),

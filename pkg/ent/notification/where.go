@@ -135,6 +135,11 @@ func ResourceID(v string) predicate.Notification {
 	return predicate.Notification(sql.FieldEQ(FieldResourceID, v))
 }
 
+// Excerpt applies equality check predicate on the "excerpt" field. It's identical to ExcerptEQ.
+func Excerpt(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldEQ(FieldExcerpt, v))
+}
+
 // Created applies equality check predicate on the "created" field. It's identical to CreatedEQ.
 func Created(v time.Time) predicate.Notification {
 	return predicate.Notification(sql.FieldEQ(FieldCreated, v))
@@ -953,6 +958,71 @@ func ResourceIDEqualFold(v string) predicate.Notification {
 // ResourceIDContainsFold applies the ContainsFold predicate on the "resource_id" field.
 func ResourceIDContainsFold(v string) predicate.Notification {
 	return predicate.Notification(sql.FieldContainsFold(FieldResourceID, v))
+}
+
+// ExcerptEQ applies the EQ predicate on the "excerpt" field.
+func ExcerptEQ(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldEQ(FieldExcerpt, v))
+}
+
+// ExcerptNEQ applies the NEQ predicate on the "excerpt" field.
+func ExcerptNEQ(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldNEQ(FieldExcerpt, v))
+}
+
+// ExcerptIn applies the In predicate on the "excerpt" field.
+func ExcerptIn(vs ...string) predicate.Notification {
+	return predicate.Notification(sql.FieldIn(FieldExcerpt, vs...))
+}
+
+// ExcerptNotIn applies the NotIn predicate on the "excerpt" field.
+func ExcerptNotIn(vs ...string) predicate.Notification {
+	return predicate.Notification(sql.FieldNotIn(FieldExcerpt, vs...))
+}
+
+// ExcerptGT applies the GT predicate on the "excerpt" field.
+func ExcerptGT(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldGT(FieldExcerpt, v))
+}
+
+// ExcerptGTE applies the GTE predicate on the "excerpt" field.
+func ExcerptGTE(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldGTE(FieldExcerpt, v))
+}
+
+// ExcerptLT applies the LT predicate on the "excerpt" field.
+func ExcerptLT(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldLT(FieldExcerpt, v))
+}
+
+// ExcerptLTE applies the LTE predicate on the "excerpt" field.
+func ExcerptLTE(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldLTE(FieldExcerpt, v))
+}
+
+// ExcerptContains applies the Contains predicate on the "excerpt" field.
+func ExcerptContains(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldContains(FieldExcerpt, v))
+}
+
+// ExcerptHasPrefix applies the HasPrefix predicate on the "excerpt" field.
+func ExcerptHasPrefix(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldHasPrefix(FieldExcerpt, v))
+}
+
+// ExcerptHasSuffix applies the HasSuffix predicate on the "excerpt" field.
+func ExcerptHasSuffix(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldHasSuffix(FieldExcerpt, v))
+}
+
+// ExcerptEqualFold applies the EqualFold predicate on the "excerpt" field.
+func ExcerptEqualFold(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldEqualFold(FieldExcerpt, v))
+}
+
+// ExcerptContainsFold applies the ContainsFold predicate on the "excerpt" field.
+func ExcerptContainsFold(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldContainsFold(FieldExcerpt, v))
 }
 
 // CreatedEQ applies the EQ predicate on the "created" field.
