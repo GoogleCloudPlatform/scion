@@ -28,6 +28,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/version"
 	yamlv3 "gopkg.in/yaml.v3"
@@ -702,6 +703,15 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	if raw == nil {
 		raw = make(map[string]interface{})
+	}
+
+	// image_tag is refused while its experiment is off, as on the database
+	// path: a save that sets or changes a profile's image_tag against the
+	// stored settings.yaml gets 412 experiment_disabled (ptone/scion#6625).
+	// An echo of the stored value, or a clear, passes.
+	if req.Profiles != nil && !s.experimentEnabled(experiments.ImageTagSetting) && profileMapsSetImageTag(req.Profiles, stored.Profiles) {
+		writeImageTagExperimentDisabled(w)
+		return
 	}
 
 	// GET masks secrets and clients send the GET body back on save: restore

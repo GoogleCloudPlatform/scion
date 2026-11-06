@@ -2965,6 +2965,7 @@ func buildHubServerConfig(cfg *config.GlobalConfig, hubEndpoint, devAuthToken st
 		},
 		MaintenanceConfig:       resolveMaintenanceConfig(cfg),
 		NodeImageRegistry:       config.ImageRegistryFromEnv(),
+		NodeImageTag:            config.ImageTagFromEnv(),
 		SecretBackend:           secretBackend,
 		GCPIAMCheckMode:         cfg.Hub.GCPIAMCheckMode,
 		GCPIAMDenyUnknownPolicy: cfg.Hub.GCPIAMDenyUnknownPolicy,
@@ -3660,6 +3661,10 @@ func initOperationalSettings(ctx context.Context, cfg *config.GlobalConfig, hubS
 	// values a saved hub value now beats.
 	hubSrv.WarnMaintenanceImageRegistryDrift()
 	hubSrv.WarnShadowedImageRegistries(flatInstanceImageRegistries())
+	// image_tag (ptone/scion#6625): the resolved value and its source, once;
+	// later changes are logged as they are applied. Warns when a value is
+	// set while hub.image_tag_setting is off.
+	hubSrv.LogImageTag()
 	// A saved authorized_domains that differs from the deployment value
 	// (before ptone/scion#6000 a saved list was not enforced).
 	hubSrv.WarnAuthorizedDomainsDrift(snap)

@@ -2025,6 +2025,11 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 	if snap.FromOperationalSettings {
 		feedImageRegistryOverlay(s.GetOperationalSettings())
 	}
+	// image_tag (ptone/scion#6625): log the hub-scope value and every
+	// profile value, with their sources, when a save, an experiment toggle
+	// or another replica's change moved any of them. Nothing is logged
+	// before the startup line (LogImageTag).
+	s.logImageTagIfChanged()
 	// The placement findings are recorded with the maps under one lock,
 	// and for every DB-backed snapshot even when no map changed: a stored
 	// runtimes document that does not decode leaves the runtimes map nil

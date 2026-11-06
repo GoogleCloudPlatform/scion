@@ -263,6 +263,11 @@ type HTTPAgentDispatcher struct {
 	// clear) applies to the next agent. Nil = no rewrite.
 	imageRegistryProvider func(brokerID, profile string) string
 
+	// imageTagProvider returns the image_tag the hub applies to an agent
+	// dispatched to a broker with a profile ("" = none, always while
+	// hub.image_tag_setting is off). Read at each dispatch. Nil = none.
+	imageTagProvider func(brokerID, profile string) string
+
 	// Resource hash repair callbacks sync a resource's DB manifest from GCS
 	// when a hash mismatch is detected during dispatch. Nil = no repair.
 	harnessConfigRepairer func(ctx context.Context, ref HarnessConfigRepairRef) error
@@ -576,6 +581,22 @@ func (d *HTTPAgentDispatcher) ImageRegistryFor(brokerID, profile string) string 
 		return ""
 	}
 	return d.imageRegistryProvider(brokerID, profile)
+}
+
+// SetImageTagProvider registers the accessor for the image_tag applied to
+// an agent dispatched to a broker with a profile (ptone/scion#6625). It is
+// read at each dispatch.
+func (d *HTTPAgentDispatcher) SetImageTagProvider(fn func(brokerID, profile string) string) {
+	d.imageTagProvider = fn
+}
+
+// ImageTagFor returns the image_tag this dispatcher applies when sending an
+// agent with profile to brokerID ("" = none).
+func (d *HTTPAgentDispatcher) ImageTagFor(brokerID, profile string) string {
+	if d.imageTagProvider == nil {
+		return ""
+	}
+	return d.imageTagProvider(brokerID, profile)
 }
 
 // SetTemplateRepairer registers a callback that syncs a template's DB manifest
@@ -914,6 +935,9 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 
 	// Read once, so the broker and the agent see the same set.
 	experiments := d.dispatchExperiments()
+	// image_tag, resolved once for both the explicit image and the hub
+	// defaults (ptone/scion#6625).
+	imageTag := d.dispatchImageTag(agent)
 
 	// Telemetry for this dispatch: always the separate tiers, never inline
 	// telemetry (see dispatch_telemetry.go).
@@ -948,7 +972,7 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 		// Only the user's explicit image travels as Config.Image (the
 		// broker's top tier); a template-derived AppliedConfig.Image does
 		// not — see explicitDispatchImage (ptone/scion#1799).
-		image := d.dispatchImageForBroker(agent)
+		image := d.dispatchImageForBroker(agent, imageTag)
 		req.Config = &RemoteAgentConfig{
 			Template:                  agent.Template,
 			Image:                     image,
@@ -981,7 +1005,7 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 		// or InlineConfig.Env, both of which outrank template and
 		// harness-config env at the broker) and lands at buildAgentEnv's
 		// lowest tier.
-		req.Config.HubAgentDefaults = remoteHubAgentDefaults(d.hubAgentDefaults(), d.autoExposePortsDefault(), experiments, tel.wireTelemetry())
+		req.Config.HubAgentDefaults = withDispatchImageTag(remoteHubAgentDefaults(d.hubAgentDefaults(), d.autoExposePortsDefault(), experiments, tel.wireTelemetry()), imageTag)
 		req.Config.TelemetryPolicy = tel.telemetryPolicy()
 
 		req.ResolvedEnv = agent.AppliedConfig.Env
@@ -3841,14 +3865,17 @@ func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *sto
 	// who is dispatching this start (ptone/scion#1994), so the resolved set
 	// for a given agent is the same whether the creator, an admin, or a
 	// project owner starts it.
+	// image_tag, resolved once for both the explicit image and the hub
+	// defaults (ptone/scion#6625).
+	imageTag := d.dispatchImageTag(agent)
 	extras := StartExtras{
 		HubEndpoint:          d.effectiveAgentHubEndpoint(),
 		UserID:               agent.OwnerID,
 		ProvisionCredentials: d.resolveProvisionCredentials(ctx, agent, "DispatchAgentStart"),
 		Workspace:            startEnv.workspace,
-		HubAgentDefaults:     startHubAgentDefaults(d.hubAgentDefaults(), d.autoExposePortsDefault(), startEnv.experiments, tel.wireTelemetry()),
+		HubAgentDefaults:     withDispatchImageTag(startHubAgentDefaults(d.hubAgentDefaults(), d.autoExposePortsDefault(), startEnv.experiments, tel.wireTelemetry()), imageTag),
 		TelemetryPolicy:      tel.telemetryPolicy(),
-		Image:                d.dispatchImageForBroker(agent),
+		Image:                d.dispatchImageForBroker(agent, imageTag),
 		TemplateName:         agent.Template,
 		PreviousProjectIDs:   d.previousProjectIDs(ctx, projectInfo),
 	}
@@ -4117,14 +4144,17 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 	// sends no inline config, so it never carries inline telemetry.
 	tel := d.dispatchTelemetry(agent, projectInfo.telemetryPolicy)
 	tel.injectRequesterEnabled(resolvedEnv, &envClassifications)
+	// image_tag, resolved once for both the explicit image and the hub
+	// defaults (ptone/scion#6625).
+	imageTag := d.dispatchImageTag(agent)
 	extras := StartExtras{
 		HubEndpoint:          d.effectiveAgentHubEndpoint(),
 		UserID:               agent.OwnerID,
 		ProvisionCredentials: d.resolveProvisionCredentials(ctx, agent, "DispatchAgentRestart"),
 		Workspace:            startEnv.workspace,
-		HubAgentDefaults:     startHubAgentDefaults(d.hubAgentDefaults(), d.autoExposePortsDefault(), startEnv.experiments, tel.wireTelemetry()),
+		HubAgentDefaults:     withDispatchImageTag(startHubAgentDefaults(d.hubAgentDefaults(), d.autoExposePortsDefault(), startEnv.experiments, tel.wireTelemetry()), imageTag),
 		TelemetryPolicy:      tel.telemetryPolicy(),
-		Image:                d.dispatchImageForBroker(agent),
+		Image:                d.dispatchImageForBroker(agent, imageTag),
 		SharedWorkspace:      projectInfo.sharedWorkspace,
 		TemplateName:         agent.Template,
 		ProjectPath:          projectInfo.projectPath,
