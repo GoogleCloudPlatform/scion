@@ -365,6 +365,9 @@ type doctorScenario struct {
 
 func (s doctorScenario) setup(t *testing.T) {
 	t.Helper()
+	// Doctor's view of init's privilege never comes from the host's real
+	// PID 1 in a test.
+	stubInitPrivilege(t, initPrivUnknown)
 	home := isolateDoctorTransport(t)
 	for _, k := range []string{"SCION_HUB_URL", "SCION_AGENT_MODE", "SCION_LAUNCH_ID", "SCION_TELEMETRY_ENABLED",
 		"SCION_WORKSPACE_GIT", "SCION_HARNESS_PID", hub.EnvGitHubAppEnabled, "SCION_METADATA_PORT"} {
@@ -640,12 +643,14 @@ func TestRunDoctor_HealthyInitCredential(t *testing.T) {
 	}
 }
 
-// With no published state (init not root), doctor WARNs and does not fail.
+// With no published state under a root init, doctor WARNs and does not
+// fail.
 func TestRunDoctor_StateUnavailable(t *testing.T) {
 	c1 := agentJWT(t, "jti-c1", time.Now().Add(time.Hour))
 	srv := httptest.NewServer(&doctorHub{accept: map[string]bool{c1: true}})
 	defer srv.Close()
 	doctorScenario{hubURL: srv.URL, initTok: c1, fileTok: c1, fileAge: time.Hour}.setup(t)
+	stubInitPrivilege(t, initPrivRoot)
 	if err := os.Remove(hub.CredentialStatePath()); err != nil {
 		t.Fatal(err)
 	}
