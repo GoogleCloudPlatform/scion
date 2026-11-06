@@ -89,6 +89,25 @@ SHA="$(git -C "${OFF}" rev-parse --short HEAD)"
 ON="${TMP}/on"
 cp -R "${OFF}" "${ON}"
 git -C "${ON}" tag v9.9.9
+# v* tag first (hack/version.sh's rule): BOTH carries a nightly tag and a v*
+# tag on HEAD (lightweight, as the release workflows push them; nightly-*
+# sorts first in refname order); ANNOTATED has an annotated nightly next to a
+# lightweight v* (plain describe prefers annotated tags); NIGHTLY has only a
+# nightly tag; PAST has v9.9.9 one commit behind HEAD (off-tag).
+BOTH="${TMP}/both"
+cp -R "${OFF}" "${BOTH}"
+git -C "${BOTH}" tag nightly-20261106
+git -C "${BOTH}" tag v9.9.9
+ANNOTATED="${TMP}/annotated"
+cp -R "${OFF}" "${ANNOTATED}"
+git -C "${ANNOTATED}" tag -a -m nightly nightly-20261106
+git -C "${ANNOTATED}" tag v9.9.9
+NIGHTLY="${TMP}/nightly"
+cp -R "${OFF}" "${NIGHTLY}"
+git -C "${NIGHTLY}" tag nightly-20261106
+PAST="${TMP}/past"
+cp -R "${ON}" "${PAST}"
+GIT_AUTHOR_DATE="2023-06-01T00:00:00Z" GIT_COMMITTER_DATE="${COMMIT_DATE}" git -C "${PAST}" commit -q --allow-empty -m "after the tag"
 
 # ---------------------------------------------------------------------------
 # Stubs and toolbin
@@ -716,6 +735,32 @@ run_bi "${ON}" --dry-run --target all --tag v9.9.9
 check_not_contains "tag warning: --tag v9.9.9 silences it" "HEAD is exactly on tag" "${OUT}"
 run_bi "${OFF}" --dry-run --target all
 check_not_contains "tag warning: HEAD not on a tag: none" "HEAD is exactly on tag" "${OUT}"
+
+# ---------------------------------------------------------------------------
+# VERSION: a v* tag wins over a nightly tag on the same commit
+# ---------------------------------------------------------------------------
+
+run_bi "${BOTH}" --dry-run --target all --tag v9.9.9
+check_contains "v* first: nightly + v* on HEAD: banner names v*" "Version:  v9.9.9" "${OUT}"
+check_contains "v* first: nightly + v* on HEAD: VERSION build-arg is v*" "--build-arg VERSION=v9.9.9" "$(line_for scion-base)"
+check_not_contains "v* first: nightly + v* on HEAD: nightly not used" "nightly-20261106" "${OUT}"
+run_bi "${BOTH}" --dry-run --target all
+check_contains "v* first: nightly + v* on HEAD: warning names v*" "Warning: HEAD is exactly on tag v9.9.9, but --tag was not given," "${OUT}"
+check_contains "v* first: nightly + v* on HEAD: warning suggests --tag v*" "re-run with: --tag v9.9.9" "${OUT}"
+check_not_contains "v* first: nightly + v* on HEAD: warning does not name the nightly" "nightly-20261106" "${OUT}"
+run_bi "${BOTH}" --dry-run --target all --builder cloud-build --registry reg.example/x --tag v9.9.9
+check_contains "v* first: nightly + v* on HEAD: cloud-build gets v*" "_VERSION=v9.9.9" "${OUT}"
+run_bi "${ANNOTATED}" --dry-run --target all --tag v9.9.9
+check_contains "v* first: annotated nightly + lightweight v*: banner names v*" "Version:  v9.9.9" "${OUT}"
+run_bi "${NIGHTLY}" --dry-run --target all --tag nightly-20261106
+check_contains "v* first: only a nightly tag: banner names it" "Version:  nightly-20261106" "${OUT}"
+check_contains "v* first: only a nightly tag: VERSION build-arg is the nightly" "--build-arg VERSION=nightly-20261106" "$(line_for scion-base)"
+run_bi "${NIGHTLY}" --dry-run --target all
+check_contains "v* first: only a nightly tag: warning names it" "Warning: HEAD is exactly on tag nightly-20261106, but --tag was not given," "${OUT}"
+run_bi "${PAST}" --dry-run --target all
+check_contains "v* first: v* one commit behind HEAD: off-tag banner" "Version:  <none" "${OUT}"
+check_not_contains "v* first: v* one commit behind HEAD: no VERSION build-arg" "VERSION=" "$(line_for scion-base)"
+check_not_contains "v* first: v* one commit behind HEAD: no warning" "HEAD is exactly on tag" "${OUT}"
 
 # ---------------------------------------------------------------------------
 # BUILD_TIME / SOURCE_DATE_EPOCH from the commit time

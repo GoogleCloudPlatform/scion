@@ -245,6 +245,19 @@ if [[ "${PUSH}" != "true" ]]; then
   LOAD="true"
 fi
 
+# exact_tag_version <repo>
+#
+# Echoes the tag HEAD is exactly on, or nothing when HEAD is not on a tag.
+# Same rule as hack/version.sh: a v* tag first, then any exact tag. A
+# preview or stable tag shares its commit with a nightly tag, and among
+# lightweight tags git describe picks the first in refname order
+# (nightly-* before v*), so a plain --exact-match would name the nightly.
+exact_tag_version() {
+  git -C "$1" describe --tags --exact-match --match 'v*' 2>/dev/null \
+    || git -C "$1" describe --tags --exact-match 2>/dev/null \
+    || true
+}
+
 # Compute git metadata once. Both used directly (in build-args, substitutions)
 # and to build the :<short-sha> tag.
 SHORT_SHA=""
@@ -260,13 +273,15 @@ SOURCE_DATE_EPOCH_FROM_ENV="false"
 if git -C "${REPO_ROOT}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   SHORT_SHA="$(git -C "${REPO_ROOT}" rev-parse --short HEAD 2>/dev/null || true)"
   COMMIT_SHA="$(git -C "${REPO_ROOT}" rev-parse HEAD 2>/dev/null || true)"
-  # Same convention as hack/version.sh: VERSION is only set when HEAD is
-  # exactly on a tag, so the embedded sciontool/scion Version falls back to
-  # "dev" the same way a local `make build` off-tag does. The .git directory
-  # is not in the docker build context (VCS stamping is disabled there), so
-  # this has to be resolved on the host and threaded through as a build-arg,
-  # the same way GIT_COMMIT already is.
-  VERSION="$(git -C "${REPO_ROOT}" describe --tags --exact-match 2>/dev/null || true)"
+  # Same rule as hack/version.sh: VERSION is only set when HEAD is exactly
+  # on a tag, and a v* tag wins over any other tag on the same commit (see
+  # exact_tag_version). Off-tag, the embedded sciontool/scion Version falls
+  # back to "dev" the same way a local `make build` off-tag does. The .git
+  # directory is not in the docker build context (VCS stamping is disabled
+  # there), so this has to be resolved on the host and threaded through as a
+  # build-arg, the same way GIT_COMMIT already is. VERSION also drives the
+  # HEAD-on-tag warning below.
+  VERSION="$(exact_tag_version "${REPO_ROOT}")"
   # Build timestamps come from the commit time, not the wall clock, so two
   # builds of one commit stamp the same BuildTime. An explicit
   # SOURCE_DATE_EPOCH (reproducible-builds.org convention) wins.
