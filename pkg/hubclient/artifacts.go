@@ -119,10 +119,13 @@ type ArtifactLink struct {
 }
 
 // ArtifactLinkCreated answers CreateLink. URL is the hub-relative path of
-// the link, the only place its token appears.
+// the link; ShareURL, present only when the hub has a content host
+// (server.hub.content_url), is the absolute link on it. They are the
+// only places its token appears.
 type ArtifactLinkCreated struct {
 	Link                    ArtifactLink `json:"link"`
 	URL                     string       `json:"url"`
+	ShareURL                string       `json:"shareUrl,omitempty"`
 	ClampedToArtifactExpiry bool         `json:"clampedToArtifactExpiry,omitempty"`
 }
 

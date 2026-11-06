@@ -410,6 +410,11 @@ type ServerConfig struct {
 	// settings section (ApplySnapshot); read it through
 	// monitoringDashboardURL, not directly.
 	MonitoringDashboardURL string
+	// ContentURL is server.hub.content_url, the hub's content host, as
+	// configured at startup (settings.yaml or the environment). The value in
+	// effect is applied live from the endpoints settings section
+	// (ApplySnapshot); read it through HubEndpoints().Content, not directly.
+	ContentURL string
 	// DisableLegacyStorageFallback disables the legacy un-namespaced storage
 	// path fallback. When true, only hub-scoped paths are checked.
 	DisableLegacyStorageFallback bool
@@ -2406,6 +2411,19 @@ type Server struct {
 
 	// Dedicated artifact decision logger (nil = entries are discarded)
 	artifactDecisionLog *slog.Logger
+
+	// contentURLLive is the server.hub.content_url ApplySnapshot last
+	// applied, or nil before the first apply (ServerConfig.ContentURL then
+	// applies). It is read on every request by the content host's guard, so
+	// it is an atomic rather than a field under mu.
+	contentURLLive atomic.Pointer[string]
+	// contentURLWarned is the server.hub.content_url value whose problem
+	// (invalid, or on or beside the hub's own host) was last logged
+	// (contentURLInEffect), so each value is warned about once.
+	contentURLWarned atomic.Value
+	// contentURLAgentWarned is the content URL value last logged as
+	// ignored for being on the agent endpoint's host name.
+	contentURLAgentWarned atomic.Value
 
 	// missingAgents and lifecycleOps back the heartbeat missing-container
 	// reconcile (broker_heartbeat_reconcile.go). Zero values are ready to use.
@@ -8030,6 +8048,13 @@ func (s *Server) applyMiddleware(h http.Handler) http.Handler {
 	// tokens, artifact view capabilities) are not traced, so the path
 	// never reaches a span attribute.
 	h = otelhttp.NewHandler(h, "hub", otelhttp.WithFilter(traceableRequest))
+
+	// Outermost of all: the content host's guard (ptone/scion#7107 phase
+	// A). On a request whose Host is server.hub.content_url it serves only
+	// the content route families and removes every credential header,
+	// before any other middleware, authentication included, sees the
+	// request. It must stay the last wrap here.
+	h = s.ContentHostGuard(h)
 
 	return h
 }

@@ -2972,6 +2972,10 @@ func buildHubServerConfig(cfg *config.GlobalConfig, hubEndpoint, devAuthToken st
 		// Startup value for a hub without OperationalSettings; with them,
 		// ApplySnapshot replaces it from the endpoints section.
 		MonitoringDashboardURL: config.MonitoringDashboardURLOrEmpty(cfg.Hub.MonitoringDashboardURL),
+		// Likewise the content host (server.hub.content_url); the hub
+		// ignores, with a warning, a value that is invalid or on its own
+		// host name (contentURLInEffect).
+		ContentURL: cfg.Hub.ContentURL,
 		// Derive the agent/user JWT signing keys from the same shared session
 		// secret the web cookie store uses, so every replica behind the load
 		// balancer agrees on the signing key regardless of its host-derived

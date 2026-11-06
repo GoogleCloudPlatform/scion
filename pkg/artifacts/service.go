@@ -143,6 +143,14 @@ type Limits struct {
 	// that sets a limits getter must fill them in: incomplete or invalid
 	// values turn remote images off.
 	RemoteImages RemoteImageLimits
+	// ContentURL is the hub's content host for share links
+	// (server.hub.content_url, normalized scheme://host[:port]), or "" for
+	// none. When set, a created link also carries ShareURL on it.
+	ContentURL string
+	// PublicOrigin is the hub's configured public URL. The view CSP names
+	// its host on every request that is not on ContentURL; the request's
+	// own Host is never used.
+	PublicOrigin string
 }
 
 // Default limits, used when no limits getter is set or it yields a

@@ -148,6 +148,7 @@ var koanfPathToJSONField = map[string]map[string]string{
 	"endpoints": {
 		"server.hub.public_url":               "public_url",
 		"server.hub.hub_name":                 "hub_name",
+		"server.hub.content_url":              "content_url",
 		"image_registry":                      "image_registry",
 		"server.hub.monitoring_dashboard_url": "monitoring_dashboard_url",
 	},
@@ -212,6 +213,7 @@ var jsonFieldToKoanfPaths = map[string]map[string]string{
 	"endpoints": {
 		"public_url":               "server.hub.public_url",
 		"hub_name":                 "server.hub.hub_name",
+		"content_url":              "server.hub.content_url",
 		"image_registry":           "image_registry",
 		"monitoring_dashboard_url": "server.hub.monitoring_dashboard_url",
 	},

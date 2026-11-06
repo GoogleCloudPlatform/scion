@@ -1636,6 +1636,11 @@ type V1ServerHubConfig struct {
 	HubID     string `json:"hub_id,omitempty" yaml:"hub_id,omitempty" koanf:"hub_id"`
 	HubName   string `json:"hub_name,omitempty" yaml:"hub_name,omitempty" koanf:"hub_name"`
 	PublicURL string `json:"public_url,omitempty" yaml:"public_url,omitempty" koanf:"public_url"`
+	// ContentURL is server.hub.content_url (ContentURLKey), the hub's content
+	// host: a second public origin, apart from PublicURL, on which shared
+	// artifacts are served. Empty, the default, serves them on PublicURL.
+	// See ValidateContentURL.
+	ContentURL string `json:"content_url,omitempty" yaml:"content_url,omitempty" koanf:"content_url"`
 	// HubClass is server.hub.class (see HubServerConfig.HubClass). It is
 	// file/env only: the server-config API refuses it in every mode.
 	HubClass string `json:"class,omitempty" yaml:"class,omitempty" koanf:"class"`
@@ -4228,6 +4233,9 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		if v1.Hub.PublicURL != "" {
 			gc.Hub.Endpoint = v1.Hub.PublicURL
 		}
+		if v1.Hub.ContentURL != "" {
+			gc.Hub.ContentURL = v1.Hub.ContentURL
+		}
 		if v1.Hub.AgentEndpoint != "" {
 			gc.Hub.AgentEndpoint = v1.Hub.AgentEndpoint
 		}
@@ -4711,6 +4719,7 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 		HubID:                  gc.Hub.HubID,
 		HubName:                gc.Hub.HubName,
 		PublicURL:              gc.Hub.Endpoint,
+		ContentURL:             gc.Hub.ContentURL,
 		AgentEndpoint:          gc.Hub.AgentEndpoint,
 		MonitoringDashboardURL: gc.Hub.MonitoringDashboardURL,
 		HubClass:               gc.Hub.HubClass,

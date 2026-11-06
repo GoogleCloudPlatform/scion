@@ -59,6 +59,7 @@ func (s *Server) artifactsConfig() opsettings.ArtifactsConfig {
 // every write, so a limit change applies without a restart.
 func (s *Server) artifactLimits(context.Context) artifacts.Limits {
 	c := s.artifactsConfig()
+	e := s.HubEndpoints()
 	return artifacts.Limits{
 		MaxFileBytes: c.MaxFileBytes, MaxBundleBytes: c.MaxBundleBytes, MaxFiles: c.MaxFiles,
 		LinkDefaultTTL:   time.Duration(c.LinkDefaultTTLHours) * time.Hour,
@@ -71,6 +72,8 @@ func (s *Server) artifactLimits(context.Context) artifacts.Limits {
 			FetchTimeout: time.Duration(c.RemoteImageFetchTimeoutS) * time.Second,
 			TotalBudget:  time.Duration(c.RemoteImageTotalBudgetS) * time.Second,
 		},
+		ContentURL:   e.Content,
+		PublicOrigin: e.Public,
 	}
 }
 

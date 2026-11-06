@@ -112,6 +112,11 @@ type HubServerConfig struct {
 	// through the settings API in any mode.
 	TestIdentities *TestIdentitiesConfig `json:"testIdentities,omitempty" yaml:"testIdentities,omitempty" koanf:"testIdentities"`
 
+	// ContentURL is server.hub.content_url (ContentURLKey): the hub's content
+	// host, a second public origin on which shared artifacts are served.
+	// Empty serves them on the hub endpoint. See ValidateContentURL.
+	ContentURL string `json:"contentUrl,omitempty" yaml:"contentUrl,omitempty" koanf:"contentUrl"`
+
 	// MonitoringDashboardURL is an optional absolute http(s) URL of an
 	// external monitoring dashboard for this hub. The Health page links to
 	// it when set. See ValidateMonitoringDashboardURL.

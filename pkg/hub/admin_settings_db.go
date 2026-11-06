@@ -348,6 +348,7 @@ func applySnapshotToResponse(resp *ServerConfigResponse, snap Layer1Snapshot) {
 
 	// Endpoints
 	resp.Server.Hub.PublicURL = snap.PublicURL
+	resp.Server.Hub.ContentURL = snap.ContentURL
 	resp.Server.Hub.MonitoringDashboardURL = snap.MonitoringDashboardURL
 
 	// Hub observability export switches: the saved (or bootstrap) value;
@@ -904,8 +905,8 @@ func dropEchoedHubName(keys []string, req *ServerConfigUpdateRequest, effective 
 
 // overlayEndpointsRequest applies the endpoints fields the request sets
 // onto d, which buildSingleSectionDoc then encodes as the request doc:
-//   - public_url, monitoring_dashboard_url and image_registry: their
-//     request values.
+//   - public_url, content_url, monitoring_dashboard_url and
+//     image_registry: their request values.
 //   - hub_name: set when hubNameChanged (see dropEchoedHubName, which drops
 //     an echo of the configured value).
 //
@@ -925,6 +926,11 @@ func overlayEndpointsRequest(d *opsettings.EndpointsSettings, req *ServerConfigU
 			d.MonitoringDashboardURL = req.Server.Hub.MonitoringDashboardURL
 		} else if hubFP.has("monitoring_dashboard_url") {
 			d.MonitoringDashboardURL = "" // explicitly cleared
+		}
+		if req.Server.Hub.ContentURL != "" {
+			d.ContentURL = req.Server.Hub.ContentURL
+		} else if hubFP.has("content_url") {
+			d.ContentURL = "" // explicitly cleared
 		}
 		if hubNameChanged {
 			d.HubName = req.Server.Hub.HubName
@@ -948,7 +954,8 @@ func accessNoRowBase(ops *OperationalSettings) map[string]json.RawMessage {
 }
 
 // endpointsNoRowBase is the endpoints base when no endpoints row exists:
-// the effective monitoring_dashboard_url. hub_name is left out: the
+// the effective monitoring_dashboard_url and content_url. hub_name is left
+// out: the
 // bootstrap value applies without being written
 // (bootstrapAppliesWhenAbsent). public_url and image_registry are left out
 // too: each is stored only when an admin sets it, so a bootstrap value
@@ -958,6 +965,7 @@ func endpointsNoRowBase(ops *OperationalSettings) map[string]json.RawMessage {
 	snap := ops.Snapshot()
 	return structToRawMap(opsettings.EndpointsSettings{
 		MonitoringDashboardURL: snap.MonitoringDashboardURL,
+		ContentURL:             snap.ContentURL,
 	})
 }
 
@@ -1138,6 +1146,14 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	// A public URL saved in the database must pass the stricter rule the
 	// hub applies to it at startup (ptone/scion#3905).
 	if !validatePublicURLRequest(w, &req.ServerConfigUpdateRequest, ops.Snapshot().PublicURL) {
+		return
+	}
+	// The content host must be an origin, and not on the hub's own host name
+	// or the agent endpoint's (ptone/scion#7107 phase A). A workstation
+	// writes a sent agent_endpoint to settings.yaml, so a save that sends one
+	// is checked against it, as file mode does.
+	dbRequestAgentEndpoint := requestAgentEndpoint(&req.ServerConfigUpdateRequest)
+	if !validateContentURLRequest(w, &req.ServerConfigUpdateRequest, s.HubEndpoints().Public, s.config.AgentEndpoint, dbRequestAgentEndpoint) {
 		return
 	}
 	if rejectInvalidThinkingLevel(w, req.DefaultThinkingLevel) {
@@ -1968,8 +1984,25 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		if secName == "endpoints" {
 			publicURLBefore, publicURLAfter = storedManagedPublicURL(ops), publicURLFromSectionDoc(doc)
 			if publicURLChange = publicURLBefore != publicURLAfter; publicURLChange {
-				if err := s.auditPublicURLChange(r.Context(), gcpIAMSurfaceSave, publicURLBefore, publicURLAfter); err != nil {
+				if err := s.auditEndpointURLChange(r.Context(), config.PublicURLKey, gcpIAMSurfaceSave, publicURLBefore, publicURLAfter); err != nil {
 					slog.Error("PUT server-config: failed to record public URL change", "error", err)
+					fileTxn.abort()
+					writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+						fmt.Sprintf("Failed to update section %q", secName), map[string]interface{}{"applied": applied})
+					return
+				}
+			}
+		}
+
+		// So is a change to the content host in effect (ptone/scion#7107
+		// phase A).
+		contentURLBefore, contentURLAfter := "", ""
+		contentURLChange := false
+		if secName == "endpoints" {
+			contentURLBefore, contentURLAfter = ops.Snapshot().ContentURL, contentURLInEffectWith(ops, doc)
+			if contentURLChange = contentURLBefore != contentURLAfter; contentURLChange {
+				if err := s.auditEndpointURLChange(r.Context(), config.ContentURLKey, gcpIAMSurfaceSave, contentURLBefore, contentURLAfter); err != nil {
+					slog.Error("PUT server-config: failed to record content URL change", "error", err)
 					fileTxn.abort()
 					writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 						fmt.Sprintf("Failed to update section %q", secName), map[string]interface{}{"applied": applied})
@@ -1980,7 +2013,10 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 
 		newRev, inEffect, err := ops.update(r.Context(), secName, doc, updatedBy, expectedRev, "managed")
 		if publicURLChange && err != nil {
-			s.auditPublicURLNotApplied(r.Context(), gcpIAMSurfaceSave, publicURLBefore, publicURLAfter, err)
+			s.auditEndpointURLNotApplied(r.Context(), config.PublicURLKey, gcpIAMSurfaceSave, publicURLBefore, publicURLAfter, err)
+		}
+		if contentURLChange && err != nil {
+			s.auditEndpointURLNotApplied(r.Context(), config.ContentURLKey, gcpIAMSurfaceSave, contentURLBefore, contentURLAfter, err)
 		}
 		if secName == gcpIAMSection {
 			// The approval covers only this write's own self-apply.
@@ -2399,6 +2435,9 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 			}
 			if hub.MonitoringDashboardURL != "" {
 				keys = append(keys, config.MonitoringDashboardURLKey)
+			}
+			if hub.ContentURL != "" {
+				keys = append(keys, config.ContentURLKey)
 			}
 			if o := hub.Observability; o != nil {
 				if o.MetricsEnabled != nil {
@@ -3441,6 +3480,7 @@ var serverConfigTokenKeys = map[string]settingsTokenClass{
 	"default_timezone":                        settingsTokenConfiguration,
 	// endpoints
 	"server.hub.public_url": settingsTokenRefused, // the origin users and agents reach the hub on
+	config.ContentURLKey:    settingsTokenRefused, // the origin users open shared artifacts on
 	"image_registry":        settingsTokenRefused, // the registry agent images come from
 	"server.hub.hub_name":   settingsTokenConfiguration,
 	// the link operators follow from the Health page

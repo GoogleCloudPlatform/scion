@@ -298,3 +298,40 @@ To facilitate local development, Scion provides a **Development Authentication**
 - **Agent Containers and Dispatched Agents**: Hub-dispatched agents authenticate only with the token the Hub issues for their run (`~/.scion/scion-token` and `SCION_AUTH_TOKEN` / `SCION_HUB_TOKEN`). The Runtime Broker never passes its own `SCION_DEV_TOKEN` or `SCION_AUTH_TOKEN` values into an agent's environment (even when co-located with a loopback Hub under dev auth), strips any `SCION_AUTH_TOKEN` set in agent or harness-config environment settings with a warning, and fails any Hub-dispatched start or restart that lacks a Hub-issued token (`the hub issued no agent token for this start; check the hub's agent token service`).
 - **Constraints & Safeguards**: Dev mode is disabled by default. Startup validation strictly prohibits binding the `devAuthMiddleware` to non-loopback interfaces (e.g., `0.0.0.0`). Because this middleware automatically logs in every cookieless request as an admin, refusing it on public interfaces prevents the accidental exposure of an unauthenticated admin UI.
 - **Warning**: The server logs clear warnings when operating in Dev Mode.
+
+## 6. Content Host
+
+Artifacts can hold HTML that an agent wrote, and share links let anyone who holds one open it. By default the Hub serves that content on its own origin with best-effort sandboxing: every view response carries a `Content-Security-Policy` whose `sandbox` directive runs the page in an opaque origin, with no network access from script, no forms and no popups (see [HTML artifacts](/scion/reference/artifacts/#html-artifacts)). Nothing else is required, and every feature works this way.
+
+A Hub administrator can go further and set a **content host**: a separate public host name that routes back to the same Hub, kept apart from the address users sign in on. It is the [`server.hub.content_url`](/scion/reference/admin-settings/#serverhubcontent_url-the-content-host) setting. Shared artifact links are then offered on it. It is one Hub-wide address, and it serves shared artifacts only. It is an operator best practice; it blocks no feature.
+
+**Setting up the content host:**
+
+- **Use a separate host name, not behind an identity-aware proxy.** The content host serves links that carry their own capability, so a proxy that authenticates every request (such as Google IAP) would break them. The Hub's main origin (`server.hub.public_url`) may stay behind such a proxy; the content host must not.
+- **Keep the session cookie away from it.** Isolation holds only while the Hub's session cookie is host-only (it carries no `Domain` attribute, as the Hub sets it), or the content host is on a separate registrable domain. Prefer a separate registrable domain: for a Hub at `hub.example.com`, use a domain such as `example-content.net`, not `content.example.com`. A content host under the same site as the Hub gives little isolation: the browser treats requests between the two as same-site, and a cookie scoped to the shared parent domain would reach both. Do not add a `Domain` attribute to the Hub's cookies in a proxy. The Hub accepts a same-site value but logs a warning. A value on the Hub's own host name is refused, whatever its scheme or port: a second port on the same host gives no cookie isolation, since cookies are not separated by port.
+- **Route only the content routes.** Send only `/api/v1/artifacts/shared/` and `/api/v1/artifacts/view/` from the content host to the Hub.
+- **Terminate TLS for it.** `content_url` must be `https` (plain `http` is accepted only for a loopback host, for local testing).
+- **Preserve `Host`.** The proxy must pass the request's `Host` header for the content host through to the Hub unchanged. The Hub recognizes a content-host request only by the `Host` it receives; it never reads `X-Forwarded-Host` or `Forwarded`, which a requester can set. If the proxy rewrites `Host` to the Hub's own, the Hub cannot tell the origins apart, and the confinement and credential removal below silently stop applying.
+
+**Required check after setup.** Before you hand out links on the content host, verify from outside that the Hub recognizes it:
+
+```bash
+curl -sI https://<content-host>/ | head -1
+curl -sI https://<content-host>/api/v1/agents | head -1
+```
+
+Both must answer `404`. Any other answer (the web app, a login redirect, a `401`) means the Hub does not see the content host's `Host`: the proxy rewrites it, or the host is routed somewhere else. Then the whole web app and API are served on that host. Fix the proxy and check again. Repeat the check after any change to the proxy.
+
+**What the Hub enforces on the content host.** A request is a content-host request when its `Host` names the `content_url` host (case-insensitively) and port (exactly; the scheme's default port is implied). On such a request the Hub, before any other handling:
+
+- serves only the route families in its content table, the reads of `/api/v1/artifacts/shared/` and `/api/v1/artifacts/view/`, and answers `404` to everything else, the web app, sign-in and every other API route included, so it does not rely on the proxy's routing alone;
+- removes every ambient credential before authentication: the `Cookie` and `Authorization` headers, every `X-Scion-*` header (agent, federation and Runtime Broker credentials among them), the `X-Forwarded-User-*` headers and the front proxy's identity assertions. The capability in the link is the only credential, so a mis-scoped cookie can never authenticate there;
+- sends `Referrer-Policy: no-referrer`, `Cache-Control: no-store` and `Access-Control-Allow-Origin: *` (never the requester's origin, and never `Access-Control-Allow-Credentials`) on every response, the share link's redirect and the `404` included;
+- builds the view `Content-Security-Policy` from configuration: its sources name the `content_url` host. Every other view response names the Hub's configured public URL. A request's `Host` is never copied into a header;
+- logs refused requests with any capability in the path redacted, as it does for every artifact request.
+
+The Hub does not refuse share links on its own origin when `content_url` is set: links created earlier keep working.
+
+**Changing the content host.** A change applies without a restart. When `content_url` changes from one host to another, or is cleared, the previous host is no longer confined: the Hub serves it like any other host name that reaches it. Remove the previous host's DNS record or proxy route when you change the setting. The Hub's cookies stay host-only, so no credential reaches that host.
+
+**Who can set it.** `content_url` decides where users open shared content, so only a Hub administrator can set it, through the [server-config API](/scion/reference/admin-settings/#serverhubcontent_url-the-content-host); user access tokens cannot write it or reset its section. Every change is recorded in the mutation audit with its old and new value. A value on the Hub's own host name or on the host name of `server.hub.agent_endpoint` (at any scheme or port), or one with a path, query, fragment or user info, is refused: on the agent endpoint's host, the confinement would answer `404` to every agent. A stored value that is invalid, or on either host name, is ignored the same way, with a logged warning, and links stay on the Hub origin.
