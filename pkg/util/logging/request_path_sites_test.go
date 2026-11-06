@@ -21,9 +21,12 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/hack/areadirs"
 )
 
 // Request path uses in the hub, the artifact service and this package are
@@ -562,11 +565,44 @@ func goFiles(t *testing.T, dirs ...string) []string {
 	return out
 }
 
+// requestPathScanDirs returns the directories TestRequestPathSites scans
+// under pkgDir (the module's pkg directory): pkg/hub, each pkg/hub area
+// directory listed in hack/area-dirs.txt (entries), and pkg/artifacts. A
+// move that lists its directory there is scanned here without a change to
+// this file (ptone/scion#4275).
+func requestPathScanDirs(pkgDir string, entries []areadirs.Entry) []string {
+	dirs := []string{filepath.Join(pkgDir, "hub")}
+	for _, e := range entries {
+		dirs = append(dirs, filepath.Join(pkgDir, "hub", filepath.FromSlash(e.Dir)))
+	}
+	return append(dirs, filepath.Join(pkgDir, "artifacts"))
+}
+
+// loadAreaDirs reads hack/area-dirs.txt from the module root, three levels
+// above this package.
+func loadAreaDirs(t *testing.T) []areadirs.Entry {
+	t.Helper()
+	entries, err := areadirs.Load(filepath.Join("..", "..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return entries
+}
+
+// requestPathSitesDirs returns every directory TestRequestPathSites scans:
+// this package, then requestPathScanDirs over the module's pkg directory and
+// the hack/area-dirs.txt entries. TestRequestPathSites scans exactly this
+// list, and TestRequestPathSitesCoversAreaDirs checks it.
+func requestPathSitesDirs(t *testing.T) []string {
+	t.Helper()
+	return append([]string{"."}, requestPathScanDirs(filepath.Join("..", ".."), loadAreaDirs(t))...)
+}
+
 // TestRequestPathSites: every request path use in the hub and this package
 // is classified, and no log call receives a request path except through
 // RequestPath.
 func TestRequestPathSites(t *testing.T) {
-	files := goFiles(t, ".", "../../hub", "../../hub/maintenance", "../../artifacts")
+	files := goFiles(t, requestPathSitesDirs(t)...)
 	if len(files) < 50 {
 		t.Fatalf("scanned only %d files; is the hub package where this test expects it?", len(files))
 	}
@@ -621,6 +657,46 @@ func TestRequestPathSites(t *testing.T) {
 	for k, s := range allowed {
 		if scan.uses[k] == 0 {
 			t.Errorf("stale requestPathSites entry %s %s %s", s.file, s.fn, s.kind)
+		}
+	}
+}
+
+// TestRequestPathSitesCoversAreaDirs: the directories TestRequestPathSites
+// scans (requestPathSitesDirs) include this package, pkg/hub, pkg/artifacts
+// and every hack/area-dirs.txt directory, and a raw request path use planted
+// in each area directory of a temporary tree is reported.
+func TestRequestPathSitesCoversAreaDirs(t *testing.T) {
+	entries := loadAreaDirs(t)
+	dirs := requestPathSitesDirs(t)
+	if !slices.Contains(dirs, ".") {
+		t.Errorf("scanned directories %v do not include this package", dirs)
+	}
+	for _, want := range []string{"hub", "artifacts"} {
+		if !slices.Contains(dirs, filepath.Join("..", "..", filepath.FromSlash(want))) {
+			t.Errorf("scanned directories %v do not include pkg/%s", dirs, want)
+		}
+	}
+	for _, e := range entries {
+		if want := filepath.Join("..", "..", "hub", filepath.FromSlash(e.Dir)); !slices.Contains(dirs, want) {
+			t.Errorf("scanned directories %v do not include %s area %s", dirs, e.Kind, e.Dir)
+		}
+	}
+
+	pkgDir := filepath.Join(t.TempDir(), "pkg")
+	for i, e := range entries {
+		dir := filepath.Join(pkgDir, "hub", filepath.FromSlash(e.Dir))
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		src := fmt.Sprintf("package planted\n\nimport \"net/http\"\n\nfunc zzPlanted%d(r *http.Request) string { return r.URL.Path }\n", i)
+		if err := os.WriteFile(filepath.Join(dir, "zz_planted.go"), []byte(src), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	scan := scanSources(t, goFiles(t, requestPathScanDirs(pkgDir, entries)...))
+	for i, e := range entries {
+		if k := fmt.Sprintf("zz_planted.go\tzzPlanted%d\tURL.Path", i); scan.uses[k] != 1 {
+			t.Errorf("%s %s: planted raw r.URL.Path use not reported (uses %v)", e.Kind, e.Dir, scan.uses)
 		}
 	}
 }

@@ -28,6 +28,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/hack/areadirs"
 )
 
 // moduleRoot is the repository root, two levels above pkg/secret.
@@ -57,7 +59,13 @@ func selectorCallSites(t *testing.T, name string) []string {
 // walk of the module, keyed by name.
 func selectorCallSitesByName(t *testing.T, names ...string) map[string][]string {
 	t.Helper()
-	root := moduleRoot(t)
+	return selectorCallSitesByNameAt(t, moduleRoot(t), names...)
+}
+
+// selectorCallSitesByNameAt is selectorCallSitesByName over the tree at
+// root instead of the module; the planted-site tests pass a temporary root.
+func selectorCallSitesByNameAt(t *testing.T, root string, names ...string) map[string][]string {
+	t.Helper()
 	sites := map[string][]string{}
 	fset := token.NewFileSet()
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
@@ -600,5 +608,38 @@ func TestRingModeLegacyEntryReadersInConsumerMap(t *testing.T) {
 		if sec.class == consumerRingLegacyEntry && none != (len(want) == 0) {
 			t.Errorf("consumer map section %q: %q line present = %v, census list empty = %v", sec.heading, consumerMapNone, none, len(want) == 0)
 		}
+	}
+}
+
+// TestSelectorCallSitesReachAreaDirs: the module walk reports a signing-key
+// call planted in every pkg/hub area directory listed in hack/area-dirs.txt,
+// as a direct call and as a method call (ptone/scion#4275).
+func TestSelectorCallSitesReachAreaDirs(t *testing.T) {
+	entries, err := areadirs.Load(moduleRoot(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	for _, e := range entries {
+		dir := filepath.Join(root, "pkg", "hub", filepath.FromSlash(e.Dir))
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		src := "package planted\n\nfunc zzPlantedDirect() { ensureSigningKey(nil) }\n\nfunc zzPlantedMethod(s *server) { s.ensureSigningKey(nil) }\n"
+		if err := os.WriteFile(filepath.Join(dir, "zz_planted.go"), []byte(src), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sites := selectorCallSitesByNameAt(t, root, "ensureSigningKey")["ensureSigningKey"]
+	for _, e := range entries {
+		file := "pkg/hub/" + e.Dir + "/zz_planted.go"
+		for _, want := range []string{file + ":zzPlantedDirect", file + ":zzPlantedMethod"} {
+			if !slices.Contains(sites, want) {
+				t.Errorf("%s %s: planted ensureSigningKey call %s not reported (sites %v)", e.Kind, e.Dir, want, sites)
+			}
+		}
+	}
+	if want := 2 * len(entries); len(sites) != want {
+		t.Errorf("got %d sites, want %d (2 per listed directory): %v", len(sites), want, sites)
 	}
 }

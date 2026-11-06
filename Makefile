@@ -850,13 +850,15 @@ vet-integration-extras:
 compat-literals:
 	@./hack/check-project-compat-literals.sh
 
-## check-authz-guards: Verify no authorization-bypass patterns exist in handler code
+## check-authz-guards: Verify no authorization-bypass patterns exist in handler code, and that the scan reaches every hack/area-dirs.txt directory
 # NOTE: make reports its own failure code (2) rather than the recipe's, so the
-# script's exit 1 (violations found) and exit 2 (nothing was analysed — skipped,
-# not clean) are indistinguishable to anything reading this target's exit status.
-# The messages still differ on stderr. Any caller that needs to tell those two
-# apart must invoke ./hack/check-authz-guards.sh directly, as CI does.
+# script's exit 1 (violations found, or the --self-test-dirs self-test failed)
+# and exit 3, 4 or 5 (nothing was analysed —
+# skipped, not clean) are indistinguishable to anything reading this target's
+# exit status. The messages still differ on stderr. Any caller that needs to
+# tell them apart must invoke ./hack/check-authz-guards.sh directly, as CI does.
 check-authz-guards:
+	@./hack/check-authz-guards.sh --self-test-dirs
 	@./hack/check-authz-guards.sh
 
 ## check-annotation-prefix: Flag new scion.io/ annotation keys (migration to scion.dev/)
