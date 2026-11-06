@@ -30,6 +30,7 @@ import { apiFetch, extractApiError } from '../../client/api.js';
 import { invalidatePublicSettings } from '../../client/server-feature-flags.js';
 import { KNOWN_HARNESS_NAMES, harnessDisplayName } from '../../shared/harness-utils.js';
 import { normalizeModelAlias } from '../../shared/model-utils.js';
+import { isKubernetesRuntimeType } from '../../shared/runtime-kind.js';
 import type { RuntimeBroker, GCPServiceAccount } from '../../shared/types.js';
 import { formatInstantWithZone, isValidTimeZone } from '../../utils/time.js';
 import { isHttpUrl } from '../../utils/http-url.js';
@@ -893,11 +894,14 @@ const REMOVED_STORAGE_OVERRIDE_KEYS = [
   'home_storage_leaf',
 ];
 
-// Container and Kubernetes runtime fields, cleared when a runtime switches
-// to Cloud Run.
-const CONTAINER_RUNTIME_KEYS = [
-  'host',
-  'context',
+// Runtime fields docker, podman and Kubernetes share; a switch between them
+// keeps them.
+const CONTAINER_HOST_KEYS = ['host', 'context'] as const;
+
+// Kubernetes-only runtime fields, cleared when a runtime switches to a
+// non-Kubernetes container type (docker, podman) or to Cloud Run, and hidden
+// on the card of a non-Kubernetes container type.
+const KUBERNETES_ONLY_RUNTIME_KEYS = [
   'namespace',
   'gke',
   'list_all_namespaces',
@@ -912,14 +916,38 @@ const CONTAINER_RUNTIME_KEYS = [
   'shared_dir_size',
 ] as const;
 
+// Container and Kubernetes runtime fields, cleared when a runtime switches
+// to Cloud Run.
+const CONTAINER_RUNTIME_KEYS = [...CONTAINER_HOST_KEYS, ...KUBERNETES_ONLY_RUNTIME_KEYS];
+
+/**
+ * Whether a runtime type is a container type that is not Kubernetes (docker,
+ * podman): set, not a Cloud Run type and not a Kubernetes type. An empty type
+ * is not one, since an untyped entry can be Kubernetes by its name.
+ */
+function isNonKubernetesContainerType(type: string): boolean {
+  return (
+    type !== '' &&
+    type !== 'cloudrun' &&
+    type !== 'cloudrun-instances' &&
+    !isKubernetesRuntimeType(type)
+  );
+}
+
 /**
  * The runtime entry keys a switch to type clears: the container and
  * Kubernetes fields and the other Cloud Run block when switching to a Cloud
- * Run type, both Cloud Run blocks otherwise.
+ * Run type; the Kubernetes-only fields and both Cloud Run blocks when
+ * switching to a non-Kubernetes container type (docker, podman), which keeps
+ * host and context; both Cloud Run blocks otherwise (a Kubernetes type or no
+ * type).
  */
 export function runtimeTypeSwitchKeys(type: string): string[] {
   if (type === 'cloudrun') return [...CONTAINER_RUNTIME_KEYS, 'cloudrun_instances'];
   if (type === 'cloudrun-instances') return [...CONTAINER_RUNTIME_KEYS, 'cloudrun'];
+  if (isNonKubernetesContainerType(type)) {
+    return [...KUBERNETES_ONLY_RUNTIME_KEYS, 'cloudrun', 'cloudrun_instances'];
+  }
   return ['cloudrun', 'cloudrun_instances'];
 }
 
@@ -5663,6 +5691,9 @@ export class ScionPageAdminServerConfig extends LitElement {
     const rt = this.runtimes[name];
     if (!rt) return nothing;
     const isCloudRun = rt.type === 'cloudrun' || rt.type === 'cloudrun-instances';
+    // Docker and podman cards leave out the Kubernetes-only fields, the ones a
+    // switch to that type clears (ptone/scion#2649).
+    const hideK8sFields = isNonKubernetesContainerType(rt.type || '');
     return html`
       <sl-card class="runtime-card">
         <div slot="header" style="display:flex;align-items:center;justify-content:space-between;">
@@ -5732,57 +5763,65 @@ export class ScionPageAdminServerConfig extends LitElement {
                     }}
                   ></sl-input>
                 </div>
-                <div class="form-field">
-                  <label>Namespace</label>
-                  <sl-input
-                    value=${rt.namespace || ''}
-                    ?disabled=${readOnly}
-                    @sl-input=${(e: Event) => {
-                      this.updateRuntimeField(
-                        name,
-                        'namespace',
-                        (e.target as HTMLInputElement).value
-                      );
-                    }}
-                  ></sl-input>
-                </div>
-                <div class="form-field">
-                  <sl-switch
-                    ?checked=${rt.gke || false}
-                    ?disabled=${readOnly}
-                    @sl-change=${(e: Event) => {
-                      this.updateRuntimeBool(name, 'gke', (e.target as HTMLInputElement).checked);
-                    }}
-                    >GKE cluster</sl-switch
-                  >
-                  <span class="hint">Enable GKE-specific features</span>
-                </div>
-                <div class="form-field">
-                  <sl-switch
-                    ?checked=${rt.list_all_namespaces || false}
-                    ?disabled=${readOnly}
-                    @sl-change=${(e: Event) => {
-                      this.updateRuntimeBool(
-                        name,
-                        'list_all_namespaces',
-                        (e.target as HTMLInputElement).checked
-                      );
-                    }}
-                    >List all namespaces</sl-switch
-                  >
-                  <span class="hint">List agents across all namespaces</span>
-                </div>
-                <div class="form-field">
-                  <label>Safe to Evict</label>
-                  <span class="hint"
-                    >Kubernetes only. false adds the cluster-autoscaler safe-to-evict: "false"
-                    annotation to agent pods; true adds nothing. A profile's value wins.</span
-                  >
-                  ${this.renderSafeToEvictSelect(rt.safe_to_evict, readOnly, (v) =>
-                    this.updateRuntimeSafeToEvict(name, v)
-                  )}
-                  ${this.renderSafeToEvictIgnored(this.isKubernetesRuntime(name))}
-                </div>
+                ${hideK8sFields
+                  ? nothing
+                  : html`
+                      <div class="form-field">
+                        <label>Namespace</label>
+                        <sl-input
+                          value=${rt.namespace || ''}
+                          ?disabled=${readOnly}
+                          @sl-input=${(e: Event) => {
+                            this.updateRuntimeField(
+                              name,
+                              'namespace',
+                              (e.target as HTMLInputElement).value
+                            );
+                          }}
+                        ></sl-input>
+                      </div>
+                      <div class="form-field">
+                        <sl-switch
+                          ?checked=${rt.gke || false}
+                          ?disabled=${readOnly}
+                          @sl-change=${(e: Event) => {
+                            this.updateRuntimeBool(
+                              name,
+                              'gke',
+                              (e.target as HTMLInputElement).checked
+                            );
+                          }}
+                          >GKE cluster</sl-switch
+                        >
+                        <span class="hint">Enable GKE-specific features</span>
+                      </div>
+                      <div class="form-field">
+                        <sl-switch
+                          ?checked=${rt.list_all_namespaces || false}
+                          ?disabled=${readOnly}
+                          @sl-change=${(e: Event) => {
+                            this.updateRuntimeBool(
+                              name,
+                              'list_all_namespaces',
+                              (e.target as HTMLInputElement).checked
+                            );
+                          }}
+                          >List all namespaces</sl-switch
+                        >
+                        <span class="hint">List agents across all namespaces</span>
+                      </div>
+                      <div class="form-field">
+                        <label>Safe to Evict</label>
+                        <span class="hint"
+                          >Kubernetes only. false adds the cluster-autoscaler safe-to-evict: "false"
+                          annotation to agent pods; true adds nothing. A profile's value wins.</span
+                        >
+                        ${this.renderSafeToEvictSelect(rt.safe_to_evict, readOnly, (v) =>
+                          this.updateRuntimeSafeToEvict(name, v)
+                        )}
+                        ${this.renderSafeToEvictIgnored(this.isKubernetesRuntime(name))}
+                      </div>
+                    `}
               `
             : html`
                 <div class="form-field">
@@ -6192,6 +6231,9 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (field === 'type') {
       for (const key of runtimeTypeSwitchKeys(value)) {
         delete (rt as Record<string, unknown>)[key];
+        // Drop the rows being edited for a cleared map field, so a switch
+        // back starts from the entry's (now empty) map.
+        this.k8sRows.delete(`${name}\u0000${key}`);
       }
     }
     updated[name] = rt;
@@ -6231,8 +6273,7 @@ export class ScionPageAdminServerConfig extends LitElement {
    */
   private isKubernetesRuntime(name: string): boolean {
     const rt = this.runtimes[name];
-    const t = rt?.type || name;
-    return t === 'kubernetes' || t === 'k8s' || t === 'remote';
+    return isKubernetesRuntimeType(rt?.type || name);
   }
 
   /** Label shown under the safe_to_evict select when it would be ignored. */

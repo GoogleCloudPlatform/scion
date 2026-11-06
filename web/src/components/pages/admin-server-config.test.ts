@@ -2900,6 +2900,7 @@ describe('scion-page-admin-server-config', () => {
               k8s: { type: 'kubernetes' },
               docker: { type: 'docker', safe_to_evict: false },
               remote: {},
+              plain: {},
             },
             profiles: {
               gke: { runtime: 'k8s' },
@@ -2910,7 +2911,20 @@ describe('scion-page-admin-server-config', () => {
         )
       );
       await (element as any).updateComplete;
-      // the docker runtime card and the profile that uses it
+      const card = (name: string) =>
+        queryAll(element!, '.runtime-card').find(
+          (c) => c.querySelector('strong')?.textContent?.trim() === name
+        ) as HTMLElement;
+      // The untyped runtime with a non-Kubernetes name shows the select,
+      // labelled ignored; so does the profile that uses the docker runtime.
+      expect(card('plain').querySelector('.safe-to-evict-ignored')).not.toBeNull();
+      expect(card('local').querySelector('.safe-to-evict-ignored')).not.toBeNull();
+      // The docker runtime card leaves out the Kubernetes-only fields
+      // (ptone/scion#2649); the Kubernetes runtimes show no ignored label.
+      expect(card('docker').querySelector('sl-select.safe-to-evict')).toBeNull();
+      for (const name of ['k8s', 'remote', 'docker']) {
+        expect(card(name).querySelector('.safe-to-evict-ignored')).toBeNull();
+      }
       expect(queryAll(element, '.safe-to-evict-ignored').length).toBe(2);
     });
 
@@ -3907,6 +3921,290 @@ describe('scion-page-admin-server-config', () => {
         expect(JSON.stringify(captured!.runtimes.gke)).not.toContain(value);
       });
     }
+  });
+
+  describe('switching a runtime to docker or podman (ptone/scion#2649)', () => {
+    const K8S_ONLY = [
+      'namespace',
+      'gke',
+      'list_all_namespaces',
+      'safe_to_evict',
+      'node_selector',
+      'tolerations',
+      'runtime_class_name',
+      'kubernetes_service_account_mappings',
+      'kubernetes_block_service_account',
+      'priority_class_name',
+      'shared_dir_storage_class',
+      'shared_dir_size',
+    ];
+    // A Kubernetes entry with the shared fields and every Kubernetes-only
+    // field set.
+    const fullK8s = {
+      type: 'kubernetes',
+      host: 'ssh://builder',
+      context: 'build-ctx',
+      sync: 'mutagen',
+      env: { FOO: 'bar' },
+      namespace: 'agents',
+      gke: true,
+      list_all_namespaces: true,
+      safe_to_evict: false,
+      node_selector: { 'scion.dev/pool': 'agents' },
+      tolerations: [
+        { key: 'scion.dev/pool', operator: 'Equal', value: 'agents', effect: 'NoSchedule' },
+      ],
+      runtime_class_name: 'gvisor',
+      kubernetes_service_account_mappings: { 'gsa-ref': 'agent-ksa' },
+      kubernetes_block_service_account: 'default',
+      priority_class_name: 'agents-low',
+      shared_dir_storage_class: 'rwx-class',
+      shared_dir_size: '10Gi',
+    };
+
+    function typeSelectOf(el: HTMLElement): HTMLElement & { value: string } {
+      const sel = queryAll(el, 'sl-select').find((s) =>
+        s.querySelector('sl-option[value="cloudrun-instances"]')
+      );
+      return sel as HTMLElement & { value: string };
+    }
+
+    async function switchType(el: HTMLElement, to: string): Promise<void> {
+      const sel = typeSelectOf(el);
+      sel.value = to;
+      sel.dispatchEvent(new Event('sl-change'));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await (el as any).updateComplete;
+    }
+
+    async function save(el: HTMLElement): Promise<void> {
+      await (el as any).updateComplete;
+      withoutSectionFilter(el);
+      const btn = queryAll(el, 'sl-button[variant="primary"]').find(
+        (b) => b.textContent?.trim() === 'Save & Reload'
+      ) as HTMLElement;
+      btn.click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    }
+
+    function load(
+      runtimes: Record<string, unknown>,
+      onPut?: (b: Record<string, any>) => void,
+      tier: Record<string, unknown> = {}
+    ) {
+      return createComponent(
+        createFetchHandler(makeBaseConfig({ ...tier, runtimes }), {
+          schemaResponse: {
+            sections: {
+              ...SCHEMA_RESPONSE.sections,
+              runtimes: { koanf_paths: ['runtimes'] },
+            },
+          },
+          putHandler: (body) => {
+            if ('runtimes' in body && onPut) onPut(body as Record<string, any>);
+            return { status: 200, body: { reload: { applied: [] } } };
+          },
+        })
+      );
+    }
+
+    // The Kubernetes-only controls a runtime card renders, by label.
+    function k8sControls(el: HTMLElement): string[] {
+      const found: string[] = [];
+      const card = query(el, '.runtime-card') as HTMLElement;
+      const labels = Array.from(card.querySelectorAll('.form-field > label')).map((l) =>
+        l.textContent?.trim()
+      );
+      const switches = Array.from(card.querySelectorAll('sl-switch')).map((s) =>
+        s.textContent?.trim()
+      );
+      if (labels.includes('Namespace')) found.push('Namespace');
+      if (switches.includes('GKE cluster')) found.push('GKE cluster');
+      if (switches.includes('List all namespaces')) found.push('List all namespaces');
+      if (card.querySelector('sl-select.safe-to-evict')) found.push('Safe to Evict');
+      if (card.querySelector('details.k8s-placement')) found.push('placement');
+      return found;
+    }
+
+    function hostAndContextShown(el: HTMLElement): boolean {
+      const card = query(el, '.runtime-card') as HTMLElement;
+      const labels = Array.from(card.querySelectorAll('.form-field > label')).map((l) =>
+        l.textContent?.trim()
+      );
+      return labels.includes('Host') && labels.includes('Context');
+    }
+
+    for (const to of ['docker', 'podman']) {
+      // Fails without the fix: the base returns only the two Cloud Run blocks.
+      it(`switch keys for ${to}: every Kubernetes-only key, not host or context`, async () => {
+        const { runtimeTypeSwitchKeys } = await import('./admin-server-config.js');
+        const keys = runtimeTypeSwitchKeys(to);
+        for (const k of [...K8S_ONLY, 'cloudrun', 'cloudrun_instances']) {
+          expect(keys).toContain(k);
+        }
+        for (const k of ['host', 'context', 'sync', 'env', 'type']) {
+          expect(keys).not.toContain(k);
+        }
+      });
+    }
+
+    // Guard: passes on the base too. Kubernetes types and no type clear only
+    // the Cloud Run blocks; the Cloud Run switches still clear host and context.
+    it('switch keys keep the Kubernetes, empty-type and Cloud Run branches', async () => {
+      const { runtimeTypeSwitchKeys } = await import('./admin-server-config.js');
+      for (const t of ['kubernetes', 'k8s', 'remote', '']) {
+        expect(runtimeTypeSwitchKeys(t)).toEqual(['cloudrun', 'cloudrun_instances']);
+      }
+      for (const t of ['cloudrun', 'cloudrun-instances']) {
+        const keys = runtimeTypeSwitchKeys(t);
+        for (const k of ['host', 'context', ...K8S_ONLY]) expect(keys).toContain(k);
+      }
+    });
+
+    // Fails without the fix: the base returns [] for a switch to docker.
+    it('runtimeTypeSwitchClears names the Kubernetes-only keys holding a value', async () => {
+      const { runtimeTypeSwitchClears } = await import('./admin-server-config.js');
+      expect([...runtimeTypeSwitchClears(fullK8s, 'docker')].sort()).toEqual([...K8S_ONLY].sort());
+    });
+
+    for (const to of ['docker', 'podman']) {
+      for (const [mode, tier] of [
+        ['file', {}],
+        ['db', { settings_tier: 'db' }],
+      ] as const) {
+        // Fails without the fix: the base asks nothing and sends every
+        // Kubernetes-only key back. The host, context, sync and env checks
+        // are guards that pass on the base too.
+        it(`${mode} mode: kubernetes -> ${to} clears K8s-only keys, keeps host`, async () => {
+          let captured: Record<string, any> | null = null;
+          element = await load({ gke: fullK8s }, (b) => (captured = b), tier);
+          vi.mocked(showConfirm).mockClear();
+          await switchType(element, to);
+          expect(showConfirm).toHaveBeenCalledTimes(1);
+          const msg = vi.mocked(showConfirm).mock.calls[0][0] as string;
+          for (const k of [
+            'namespace',
+            'node_selector',
+            'tolerations',
+            'kubernetes_service_account_mappings',
+            'shared_dir_storage_class',
+          ]) {
+            expect(msg).toContain(k);
+          }
+          expect(msg).not.toContain('host');
+          expect(msg).not.toContain('context');
+          await save(element);
+          expect(captured).not.toBeNull();
+          const sent = captured!.runtimes.gke;
+          expect(sent.type).toBe(to);
+          expect(sent.host).toBe('ssh://builder');
+          expect(sent.context).toBe('build-ctx');
+          expect(sent.sync).toBe('mutagen');
+          expect(sent.env).toEqual({ FOO: 'bar' });
+          for (const k of K8S_ONLY) {
+            expect(sent).toHaveProperty(k, null);
+          }
+          const json = JSON.stringify(sent);
+          for (const stale of ['agents', 'gvisor', 'agent-ksa', 'rwx-class', '10Gi']) {
+            expect(json).not.toContain(stale);
+          }
+        });
+      }
+    }
+
+    // Fails without the fix: the base never asks, so showConfirm is not called.
+    it('cancelling a switch to docker keeps the Kubernetes runtime as it was', async () => {
+      let captured: Record<string, any> | null = null;
+      element = await load({ gke: fullK8s }, (b) => (captured = b));
+      vi.mocked(showConfirm).mockClear();
+      vi.mocked(showConfirm).mockResolvedValueOnce(false);
+      await switchType(element, 'docker');
+      expect(showConfirm).toHaveBeenCalledTimes(1);
+      expect(typeSelectOf(element).value).toBe('kubernetes');
+      await save(element);
+      const sent = captured!.runtimes.gke;
+      expect(sent.type).toBe('kubernetes');
+      expect(sent.namespace).toBe('agents');
+      expect(sent.node_selector).toEqual({ 'scion.dev/pool': 'agents' });
+      expect(sent.shared_dir_size).toBe('10Gi');
+    });
+
+    // Fails on the base (the key is never cleared) and with a fix that does
+    // not drop the cached map rows (the stale rows render again).
+    it('kubernetes -> docker -> kubernetes shows no stale node selector rows', async () => {
+      let captured: Record<string, any> | null = null;
+      element = await load({ gke: fullK8s }, (b) => (captured = b));
+      await (element as any).updateComplete;
+      const before = queryAll(element, '[data-k8s-field="node_selector"] sl-input.k8s-key');
+      expect(before.map((k) => k.getAttribute('value'))).toEqual(['scion.dev/pool']);
+      await switchType(element, 'docker');
+      await switchType(element, 'kubernetes');
+      const after = queryAll(element, '[data-k8s-field="node_selector"] sl-input.k8s-key');
+      expect(after.map((k) => k.getAttribute('value')).filter((v) => v)).toEqual([]);
+      await save(element);
+      expect(captured!.runtimes.gke.type).toBe('kubernetes');
+      expect(captured!.runtimes.gke).toHaveProperty('node_selector', null);
+    });
+
+    // Guard (passes on the base too): docker -> kubernetes asks nothing and
+    // keeps host and context.
+    it('docker -> kubernetes keeps host and context', async () => {
+      let captured: Record<string, any> | null = null;
+      element = await load(
+        { d: { type: 'docker', host: 'ssh://builder', context: 'build-ctx' } },
+        (b) => (captured = b)
+      );
+      vi.mocked(showConfirm).mockClear();
+      await switchType(element, 'kubernetes');
+      expect(showConfirm).not.toHaveBeenCalled();
+      await save(element);
+      expect(captured!.runtimes.d.type).toBe('kubernetes');
+      expect(captured!.runtimes.d.host).toBe('ssh://builder');
+      expect(captured!.runtimes.d.context).toBe('build-ctx');
+    });
+
+    for (const t of ['docker', 'podman']) {
+      // Fails without the change: the base renders Namespace, GKE, List all
+      // namespaces and Safe to Evict on every non-Cloud-Run card.
+      it(`a ${t} card leaves out the Kubernetes-only controls`, async () => {
+        element = await load({ c: { type: t } });
+        await (element as any).updateComplete;
+        expect(k8sControls(element)).toEqual([]);
+        expect(hostAndContextShown(element)).toBe(true);
+      });
+    }
+
+    // Fails without the change for the docker step (the base still renders
+    // the fields after the switch); the kubernetes card is a guard.
+    it('a kubernetes card shows them, and a switch to docker hides them', async () => {
+      element = await load({ gke: fullK8s });
+      await (element as any).updateComplete;
+      expect(k8sControls(element)).toEqual([
+        'Namespace',
+        'GKE cluster',
+        'List all namespaces',
+        'Safe to Evict',
+        'placement',
+      ]);
+      await switchType(element, 'docker');
+      expect(k8sControls(element)).toEqual([]);
+      expect(hostAndContextShown(element)).toBe(true);
+    });
+
+    // Guard: an untyped entry (Kubernetes by its name, or not) keeps today's
+    // rendering of the container fields.
+    it('an untyped entry keeps the container fields', async () => {
+      element = await load({ local: {} });
+      await (element as any).updateComplete;
+      expect(k8sControls(element)).toEqual([
+        'Namespace',
+        'GKE cluster',
+        'List all namespaces',
+        'Safe to Evict',
+      ]);
+      // Not Kubernetes by its name, so the select is labelled ignored.
+      expect(query(element, '.runtime-card .safe-to-evict-ignored')).not.toBeNull();
+    });
   });
 
   describe('Regression ptone/scion#1871 — masked secrets are not sent back', () => {
