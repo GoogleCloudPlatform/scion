@@ -104,8 +104,10 @@ const (
 	// LaunchCodeInvalidImage: the image reference is not valid
 	// (Kubernetes InvalidImageName).
 	LaunchCodeInvalidImage = "invalid_image"
-	// LaunchCodeContainerConfig: the container could not be configured,
-	// e.g. a missing secret or volume (Kubernetes CreateContainerConfigError).
+	// LaunchCodeContainerConfig: the runtime refused the agent container's
+	// configuration, e.g. a missing secret or volume (Kubernetes
+	// CreateContainerConfigError), or CPU and memory limits outside what
+	// Cloud Run offers (runtime.ResourceLimitsError).
 	LaunchCodeContainerConfig = "container_config"
 	// LaunchCodeCrashLoop: the main container keeps crashing on start
 	// (Kubernetes CrashLoopBackOff).

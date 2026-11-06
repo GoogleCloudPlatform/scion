@@ -16,6 +16,8 @@ package runtime
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -281,10 +283,72 @@ func TestCloudRunRun_InvalidResourcesFailBeforeAnyCall(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "2 vCPU") {
 		t.Fatalf("Run error = %v, want the Cloud Run vCPU/memory error", err)
 	}
+	// The broker answers the typed error as a validation error, also when
+	// a caller wraps it (ptone/scion#7103).
+	var rle *ResourceLimitsError
+	if !errors.As(fmt.Errorf("starting agent: %w", err), &rle) {
+		t.Fatalf("Run error %v (wrapped) is not a *ResourceLimitsError", err)
+	}
 	if provisionCalls != 0 || clientCalls != 0 {
 		t.Errorf("provision calls = %d, client calls = %d; want 0 and 0", provisionCalls, clientCalls)
 	}
 	if n := len(fake.getReqs) + len(fake.createReqs); n != 0 {
 		t.Errorf("Instances API called %d times, want 0", n)
+	}
+}
+
+// TestCloudRunContainerResources_ErrorsAreResourceLimitsErrors checks that
+// every refusal is a *ResourceLimitsError whose PublicMessage names only
+// the field, the caller's quoted value and the platform rule
+// (ptone/scion#7103).
+func TestCloudRunContainerResources_ErrorsAreResourceLimitsErrors(t *testing.T) {
+	tests := []struct {
+		name    string
+		limits  api.ResourceList
+		wantMsg string
+	}{
+		{"unparseable cpu", api.ResourceList{CPU: "lots"}, `cloudrun: invalid resources.limits.cpu resource value "lots": `},
+		{"unsupported cpu", api.ResourceList{CPU: "3"}, `cloudrun: resources.limits.cpu "3": a Cloud Run instance takes 1, 2, 4, 6 or 8 vCPU`},
+		{"unparseable memory", api.ResourceList{CPU: "1", Memory: "big"}, `cloudrun: invalid resources.limits.memory resource value "big": `},
+		{"memory above max", api.ResourceList{CPU: "8", Memory: "64Gi"}, `cloudrun: resources.limits.memory "64Gi": memory above the Cloud Run maximum of 32768Mi`},
+		{"memory outside band", api.ResourceList{CPU: "4", Memory: "1Gi"}, `cloudrun: 4 vCPU (from resolved resources.limits.cpu) allows memory 2048Mi to 16384Mi, got 1024Mi (from resources.limits.memory); set resources.limits.cpu or resources.limits.memory`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := cloudRunContainerResources(&api.ResourceSpec{Limits: tc.limits})
+			var rle *ResourceLimitsError
+			if !errors.As(err, &rle) {
+				t.Fatalf("error %v is not a *ResourceLimitsError", err)
+			}
+			if !strings.HasPrefix(rle.PublicMessage(), tc.wantMsg) {
+				t.Errorf("PublicMessage = %q, want prefix %q", rle.PublicMessage(), tc.wantMsg)
+			}
+			if rle.Error() != rle.PublicMessage() {
+				t.Errorf("Error() = %q, PublicMessage() = %q; want the same text", rle.Error(), rle.PublicMessage())
+			}
+		})
+	}
+}
+
+// TestCloudRunContainerResources_EchoedValueIsQuotedAndCapped checks that a
+// caller's value is repeated quoted (control characters escaped) and cut
+// to maxEchoedResourceValue characters.
+func TestCloudRunContainerResources_EchoedValueIsQuotedAndCapped(t *testing.T) {
+	long := strings.Repeat("9", 200) + "x"
+	_, err := cloudRunContainerResources(&api.ResourceSpec{Limits: api.ResourceList{CPU: long}})
+	if err == nil {
+		t.Fatal("no error for an oversized cpu value")
+	}
+	want := `"` + strings.Repeat("9", maxEchoedResourceValue) + `..."`
+	if !strings.Contains(err.Error(), want) {
+		t.Errorf("error %q does not contain the capped value %q", err, want)
+	}
+	if strings.Contains(err.Error(), strings.Repeat("9", maxEchoedResourceValue+1)) {
+		t.Errorf("error %q repeats more than %d characters of the value", err, maxEchoedResourceValue)
+	}
+
+	_, err = cloudRunContainerResources(&api.ResourceSpec{Limits: api.ResourceList{CPU: "1", Memory: "1\nGi"}})
+	if err == nil || strings.Contains(err.Error(), "\n") {
+		t.Errorf("error %q, want the newline escaped", err)
 	}
 }
