@@ -240,7 +240,7 @@ server:
 
 - **Restarts.** The runtime does not set a restart policy on the Instance, so the platform's default restart behavior applies: an agent that exits with code 0 may not be restarted. Start it again with `scion start`.
 - **Launch timeout.** Set `launch_timeout` to at least `"120s"`; the default (`"5m"`) is above this. The figure comes from measurements on the live Instances API: an Instance whose image was already cached was ready about 8 seconds after the create was accepted (worst of the cached runs), and the single start measured with an image not yet pulled took about 46 seconds. The broker waits for the create to finish and stops the launch 20 seconds before its deadline, so an uncached start needs a deadline of about 66 seconds. Allowing about 54 seconds more, close to double, for the work the broker does before the create and for larger images and slower pulls than the single uncached start measured, gives 120 seconds. Raise it further for large agent images.
-- **Resources.** The agent's resolved `resources` set the Instance container's CPU and memory limits. Cloud Run has limits only, so each takes `limits`, or `requests` when no limit is set; with neither, the platform default applies (1 vCPU, 512Mi). Unless `runtime.enforce_resource_defaults` is false, `limits.cpu` always has a value, because the built-in default `limits.cpu: "2"` applies here as on other runtimes, so `requests.cpu` takes effect only when it is above 2 (it then raises the limit to match); with the defaults off, `requests.cpu` applies when `limits.cpu` is unset. CPU must be 1, 2, 4, 6 or 8 vCPU, memory 512Mi to 32Gi in whole `Mi` or `M`, and memory must fall in the range the vCPU count allows (1 vCPU up to 4Gi; 2 up to 8Gi; 4 from 2Gi to 16Gi; 6 from 4Gi to 24Gi; 8 from 4Gi to 32Gi). A resource left unset is checked at its platform default, so `limits.cpu: "4"` also needs `limits.memory` of at least `2Gi`. Values outside these limits fail the create with an error naming the field, before anything is provisioned. Errors name the CPU limit as the resolved `resources.limits.cpu`, which the built-in default or a larger `requests.cpu` may have set. Cloud Run Instances keep CPU allocated for their whole lifetime; the runtime does not set the request-based `cpu_idle` option. `resources.disk` is not applied; the Runtime Broker logs the effective CPU and memory, and any unapplied disk, when it creates the Instance.
+- **Resources.** The agent's resolved `resources` set the Instance container's CPU and memory limits. Cloud Run has limits only, so each takes `limits`, or `requests` when no limit is set; with neither, the platform default applies (1 vCPU, 512Mi). Unless `runtime.enforce_resource_defaults` is false, `limits.cpu` always has a value, because the built-in default `limits.cpu: "2"` applies here as on other runtimes, so `requests.cpu` takes effect only when it is above 2 (it then raises the limit to match); with the defaults off, `requests.cpu` applies when `limits.cpu` is unset. CPU must be 1, 2, 4, 6 or 8 vCPU, memory 512Mi to 32Gi in whole `Mi` or `M`, and memory must fall in the range the vCPU count allows (1 vCPU up to 4Gi; 2 up to 8Gi; 4 from 2Gi to 16Gi; 6 from 4Gi to 24Gi; 8 from 4Gi to 32Gi). A resource left unset is checked at its platform default, so `limits.cpu: "4"` also needs `limits.memory` of at least `2Gi`. Values outside these limits fail before anything is provisioned, with a message naming the field, the quoted value and the platform rule: a synchronous create, start or restart answers HTTP 400 (`validation_error`), and an asynchronous launch ends with launch error `container_config`. Errors name the CPU limit as the resolved `resources.limits.cpu`, which the built-in default or a larger `requests.cpu` may have set. Cloud Run Instances keep CPU allocated for their whole lifetime; the runtime does not set the request-based `cpu_idle` option. `resources.disk` is not applied; the Runtime Broker logs the effective CPU and memory, and any unapplied disk, when it creates the Instance.
 - **Clone-per-agent.** A clone-per-agent agent gets its own workspace on the NFS share, `<subpath_root>/<project-id>/agents/<agent>/workspace`, next to its home, and the Instance mounts it at `/workspace`. The project's shared workspace is neither cloned nor mounted for it. `sciontool init` clones the repository into the empty workspace inside the container on the agent's first start; a later start, resume or restart finds it populated and keeps the agent's work (it only refreshes the git credential helper). Deleting the agent removes its workspace. An agent created before this layout keeps working in the project's shared checkout, in shared-plain mode, until it is recreated. The workspace is on the share, but everything else the agent writes, to the container's root filesystem or `/tmp`, is held in memory and counts against the Instance's memory limit. Empty-per-agent is still not supported on this runtime. Moving a clone-per-agent agent to another Runtime Broker with its workspace (an `export` move) is refused on every runtime other than Kubernetes, by the `workspace_on_export` move check.
 
 #### Asynchronous agent start
@@ -1596,17 +1596,20 @@ notification_channels:
 
 ### Email channel
 
-Delivers notifications by email.
+Delivers notifications by SMTP email. Each `From`, `To` (per recipient) and `Subject` header value is kept on a single line: any run of `\r` and `\n` characters is collapsed to a single space and trimmed at both ends.
 
 **Type:** `email`
 
 **Parameters:**
 
-| Param    | Required | Description |
-|----------|----------|-------------|
-| `to`     | yes      | Recipient email address. |
-| `from`   | no       | Sender address override. |
-| `smtp`   | no       | SMTP server host:port. |
+| Param      | Required | Description |
+|------------|----------|-------------|
+| `host`     | yes      | SMTP server host (e.g. `smtp.example.com`). |
+| `port`     | no       | SMTP server port (defaults to `"587"`). |
+| `from`     | yes      | Sender email address. |
+| `to`       | yes      | Recipient email address(es), comma-separated. |
+| `username` | no       | SMTP authentication username (authentication is skipped when empty). |
+| `password` | no       | SMTP authentication password. |
 
 **Example:**
 
@@ -1614,7 +1617,40 @@ Delivers notifications by email.
 notification_channels:
   - type: email
     params:
+      host: smtp.example.com
+      from: scion@example.com
       to: oncall@example.com
+```
+
+### Teams channel
+
+Delivers notifications to a Microsoft Teams conversation via the Bot Connector REST API.
+
+**Type:** `teams`
+
+**Parameters:**
+
+| Param             | Required | Description |
+|-------------------|----------|-------------|
+| `app_id`          | yes      | Azure App Registration client ID. |
+| `app_secret`      | yes      | Azure App Registration client secret. |
+| `tenant_id`       | yes      | Azure AD tenant ID (must be a valid UUID). |
+| `conversation_id` | yes      | Teams conversation ID to deliver notifications to. |
+| `service_url`     | yes      | Bot Framework service URL. Must use `https://` and its host must be one of the recognised Bot Framework service hosts: `smba.trafficmanager.net`, `smba.infra.gcc.teams.microsoft.com`, `smba.infra.gov.teams.microsoft.us`, or `smba.infra.dod.teams.microsoft.us`. |
+
+Parameter values are used exactly as written; settings files do not expand environment variables.
+
+**Example:**
+
+```yaml
+notification_channels:
+  - type: teams
+    params:
+      app_id: 00000000-0000-0000-0000-000000000000
+      app_secret: <client-secret>
+      tenant_id: 11111111-1111-1111-1111-111111111111
+      conversation_id: 19:meeting_example@thread.v2
+      service_url: https://smba.trafficmanager.net/amer
 ```
 
 ### Discord channel
