@@ -26,6 +26,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/grant"
 	"github.com/stretchr/testify/require"
 )
 
@@ -176,6 +177,43 @@ func TestSystemIdentityAppliesWithoutRestart(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "Renamed Owner", stored.DisplayName)
 	require.Equal(t, "owner@example.com", stored.Email)
+}
+
+// TestDevIdentityCallSitesFollowSetIdentity pins the paths that rebuild the
+// development identity outside the auth middleware (relay re-check, conduit
+// renewal, pending config saver): after an identity change they return the
+// new display name and email, and still the trusted local dev user.
+func TestDevIdentityCallSitesFollowSetIdentity(t *testing.T) {
+	srv, _ := testServer(t)
+	ctx := context.Background()
+	require.NotNil(t, srv.authConfig.DevUser)
+	srv.authConfig.DevUser.SetIdentity("Desk Owner", "owner@example.com")
+
+	requireNewIdentity := func(t *testing.T, ident Identity) {
+		t.Helper()
+		require.True(t, isTrustedLocalDevUser(ident), "identity %T", ident)
+		du := ident.(*DevUser)
+		require.Equal(t, "Desk Owner", du.DisplayName())
+		require.Equal(t, "owner@example.com", du.Email())
+	}
+
+	t.Run("relay re-check", func(t *testing.T) {
+		ident, verdict, reason := srv.relayUserIdentity(ctx,
+			conduitAdmissionClaims{ID: DevUserID, AuthType: AuthTypeDevToken})
+		require.Equal(t, conduitAuthzAllowed, verdict, reason)
+		requireNewIdentity(t, ident)
+	})
+	t.Run("conduit renewal", func(t *testing.T) {
+		ident, err := srv.conduitRenewalIdentity(ctx, &grant.RecheckClaims{}, DevUserID)
+		require.NoError(t, err)
+		requireNewIdentity(t, ident)
+	})
+	t.Run("pending config saver", func(t *testing.T) {
+		d, err := srv.resolvePendingDevSaver(ctx)
+		require.NoError(t, err)
+		require.Equal(t, saverApply, d.out, d.reason)
+		requireNewIdentity(t, d.identity)
+	})
 }
 
 func TestSystemReadRoutesStayWorkstationOnly(t *testing.T) {
