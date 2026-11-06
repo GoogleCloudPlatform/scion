@@ -873,7 +873,7 @@ if [ "${CB_WAIT}" = "true" ]; then
       if [ -n "${IMG_DIGESTS[$j]}" ] && [ "${IMG_DIGESTS[$j]}" != "${rdig}" ]; then
         stop_cb "results.images report two different digests for ${rname}"
       fi
-      IMG_DIGESTS[$j]="${rdig}"
+      IMG_DIGESTS[j]="${rdig}"
     done <<< "${out}"
     out="$(gcloud builds describe "${id}" "${cb_where[@]}" --format='value(results.buildStepOutputs)')" \
       || stop_cb "could not read results.buildStepOutputs of Cloud Build ${id}"
@@ -897,7 +897,7 @@ if [ "${CB_WAIT}" = "true" ]; then
         if [ -n "${STEP_DIGESTS[$j]}" ]; then
           stop_cb "the build step outputs name ${rname} more than once"
         fi
-        STEP_DIGESTS[$j]="${rdig}"
+        STEP_DIGESTS[j]="${rdig}"
       done <<< "${dec}"
     done
     k=$((k + 1))

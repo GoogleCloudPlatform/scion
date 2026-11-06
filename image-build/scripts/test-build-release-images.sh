@@ -806,9 +806,9 @@ done
 hexd() { printf 'sha256:%s' "$(printf '%s' "$1" | sha256sum | cut -c1-64)"; }
 IMGS4=(core-base scion-base scion-claude scion-hub)
 present_remote() {  # present_remote <registry> <tag>
-  local n p=()
-  for n in "${IMGS4[@]}"; do p+=("remote:$1/${n}:$2"); done
-  present "${p[@]}"
+  local n refs=()
+  for n in "${IMGS4[@]}"; do refs+=("remote:$1/${n}:$2"); done
+  present "${refs[@]}"
 }
 
 reset_cache
