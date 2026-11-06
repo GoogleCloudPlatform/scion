@@ -221,9 +221,10 @@ func TestHandleAgentCloudLogs_Unauthenticated(t *testing.T) {
 // labels.project_id (many server entries carry agent_id without it).
 func TestAgentCloudLogOptions_QueryAndStreamAgree(t *testing.T) {
 	tests := []struct {
-		name  string
-		agent *store.Agent
-		query url.Values
+		name     string
+		agent    *store.Agent
+		severity string
+		query    url.Values
 	}{
 		{
 			name:  "agent with project",
@@ -231,16 +232,17 @@ func TestAgentCloudLogOptions_QueryAndStreamAgree(t *testing.T) {
 			query: url.Values{},
 		},
 		{
-			name:  "with severity and broker filters",
-			agent: &store.Agent{ID: "8f0c2a4e-agent", ProjectID: "proj-123"},
-			query: url.Values{"severity": {"ERROR"}, "broker_id": {"broker-1"}},
+			name:     "with severity and broker filters",
+			agent:    &store.Agent{ID: "8f0c2a4e-agent", ProjectID: "proj-123"},
+			severity: "ERROR",
+			query:    url.Values{"broker_id": {"broker-1"}},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			list := agentCloudLogListOptions("hub-a", tt.agent, tt.query)
-			stream := agentCloudLogQueryOptions("hub-a", tt.agent, tt.query)
+			list := agentCloudLogListOptions("hub-a", tt.agent, tt.severity, tt.query)
+			stream := agentCloudLogQueryOptions("hub-a", tt.agent, tt.severity, tt.query)
 
 			listFilter := BuildLogFilter(list, "gcp-proj")
 			streamFilter := BuildLogFilter(stream, "gcp-proj")
@@ -267,7 +269,7 @@ func TestAgentCloudLogListOptions_ParsesRange(t *testing.T) {
 		"since": {"2026-01-02T03:04:05Z"},
 		"until": {"2026-01-03T03:04:05Z"},
 	}
-	opts := agentCloudLogListOptions("hub-a", agent, q)
+	opts := agentCloudLogListOptions("hub-a", agent, "", q)
 	if opts.Tail != 25 {
 		t.Errorf("Tail = %d, want 25", opts.Tail)
 	}
@@ -334,6 +336,173 @@ func TestHandleAgentCloudLogs_HandlersBuildSameFilter(t *testing.T) {
 		}
 		if !strings.Contains(f, `labels.agent_id = "`+agent.ID+`"`) {
 			t.Errorf("%s filter missing agent_id clause: %s", name, f)
+		}
+	}
+}
+
+// cloudLogPaths returns the four cloud log endpoints that take a severity.
+func cloudLogPaths(agentID string) []string {
+	return []string{
+		"/api/v1/agents/" + agentID + "/cloud-logs",
+		"/api/v1/agents/" + agentID + "/cloud-logs/stream",
+		"/api/v1/admin/diagnostics/logs",
+		"/api/v1/admin/diagnostics/logs/stream",
+	}
+}
+
+func getWithDevToken(srv *Server, path string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	req.Header.Set("Authorization", "Bearer "+testDevToken)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	return w
+}
+
+// TestCloudLogs_InvalidSeverityRefused checks that every cloud log endpoint
+// answers an unknown severity with 400 validation_error (field severity)
+// before it calls the log query service or starts a stream.
+func TestCloudLogs_InvalidSeverityRefused(t *testing.T) {
+	srv, s := testServer(t)
+	fake := &fakeLogQuerier{}
+	srv.logQueryService = fake
+	agent := createTestAgent(t, s)
+
+	for _, bad := range []string{"TRACE", "warn", "INFO OR true", "INFO ", "\u0131nfo"} {
+		for _, path := range cloudLogPaths(agent.ID) {
+			w := getWithDevToken(srv, path+"?severity="+url.QueryEscape(bad))
+			if w.Code != http.StatusBadRequest {
+				t.Errorf("GET %s severity=%q: status = %d, want 400; body = %s", path, bad, w.Code, w.Body.String())
+				continue
+			}
+			if ct := w.Header().Get("Content-Type"); strings.HasPrefix(ct, "text/event-stream") {
+				t.Errorf("GET %s severity=%q: stream started (Content-Type %q)", path, bad, ct)
+			}
+			var resp struct {
+				Error struct {
+					Code    string                 `json:"code"`
+					Details map[string]interface{} `json:"details"`
+				} `json:"error"`
+			}
+			if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("GET %s: unmarshal response: %v", path, err)
+			}
+			if resp.Error.Code != ErrCodeValidationError || resp.Error.Details["field"] != "severity" {
+				t.Errorf("GET %s severity=%q: code %q field %v, want %q severity", path, bad, resp.Error.Code, resp.Error.Details["field"], ErrCodeValidationError)
+			}
+		}
+	}
+
+	if len(fake.queryOpts) != 0 || len(fake.tailOpts) != 0 {
+		t.Errorf("log query service called: Query = %d, Tail = %d, want 0", len(fake.queryOpts), len(fake.tailOpts))
+	}
+}
+
+// TestCloudLogs_AcceptedSeverities checks that every Cloud Logging severity
+// name, in any ASCII case, is accepted by every endpoint and reaches the
+// filter as the canonical name.
+func TestCloudLogs_AcceptedSeverities(t *testing.T) {
+	srv, s := testServer(t)
+	fake := &fakeLogQuerier{}
+	srv.logQueryService = fake
+	agent := createTestAgent(t, s)
+
+	names := []string{"DEFAULT", "DEBUG", "INFO", "NOTICE", "WARNING", "ERROR", "CRITICAL", "ALERT", "EMERGENCY"}
+	// Each name is sent in lower case and in mixed case ("eRrOr").
+	forms := func(name string) []string {
+		mixed := []byte(strings.ToLower(name))
+		for i := 1; i < len(mixed); i += 2 {
+			mixed[i] -= 'a' - 'A'
+		}
+		return []string{strings.ToLower(name), string(mixed)}
+	}
+	for _, name := range names {
+		for _, form := range forms(name) {
+			for _, path := range cloudLogPaths(agent.ID) {
+				w := getWithDevToken(srv, path+"?severity="+form)
+				if w.Code != http.StatusOK {
+					t.Fatalf("GET %s severity=%s: status = %d, body = %s", path, form, w.Code, w.Body.String())
+				}
+			}
+		}
+	}
+
+	// Per name: 2 forms x 2 endpoints each for Query and for Tail.
+	const perName = 4
+	if len(fake.queryOpts) != perName*len(names) || len(fake.tailOpts) != perName*len(names) {
+		t.Fatalf("calls: Query = %d, Tail = %d, want %d each", len(fake.queryOpts), len(fake.tailOpts), perName*len(names))
+	}
+	for i, name := range names {
+		got := append(append([]LogQueryOptions{}, fake.queryOpts[perName*i:perName*(i+1)]...), fake.tailOpts[perName*i:perName*(i+1)]...)
+		for _, opts := range got {
+			if opts.Severity != name {
+				t.Errorf("severity %s: options carry %q, want the canonical name", name, opts.Severity)
+			}
+			if f := BuildLogFilter(opts); !strings.Contains(f, "severity >= "+name) {
+				t.Errorf("severity %s: filter %q lacks the canonical clause", name, f)
+			}
+		}
+	}
+}
+
+// TestHandleAgentCloudLogs_SeverityCheckOrder checks that the agent cloud
+// log endpoints keep 403 and 404 ahead of the severity 400, and the 400
+// ahead of the 501 for an unconfigured log service.
+func TestHandleAgentCloudLogs_SeverityCheckOrder(t *testing.T) {
+	srv, s := testServer(t)
+	srv.logQueryService = &fakeLogQuerier{}
+	agent := createTestAgent(t, s)
+	other := createTestAgent(t, s) // in another project
+
+	tokenSvc := srv.GetAgentTokenService()
+	if tokenSvc == nil {
+		t.Fatal("agent token service is nil")
+	}
+	noReadToken, err := tokenSvc.GenerateAgentToken(agent.ID, agent.ProjectID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
+	if err != nil {
+		t.Fatalf("GenerateAgentToken: %v", err)
+	}
+	otherProjectToken, err := tokenSvc.GenerateAgentToken(other.ID, other.ProjectID, []AgentTokenScope{ScopeProjectRead}, nil)
+	if err != nil {
+		t.Fatalf("GenerateAgentToken: %v", err)
+	}
+
+	for _, suffix := range []string{"/cloud-logs", "/cloud-logs/stream"} {
+		path := "/api/v1/agents/" + agent.ID + suffix + "?severity=TRACE"
+
+		if w := doRequestWithAgentToken(t, srv, http.MethodGet, path, nil, noReadToken); w.Code != http.StatusForbidden {
+			t.Errorf("%s without read scope: status = %d, want 403", suffix, w.Code)
+		}
+		if w := doRequestWithAgentToken(t, srv, http.MethodGet, path, nil, otherProjectToken); w.Code != http.StatusNotFound {
+			t.Errorf("%s from another project: status = %d, want 404", suffix, w.Code)
+		}
+		if w := getWithDevToken(srv, "/api/v1/agents/nonexistent"+suffix+"?severity=TRACE"); w.Code != http.StatusNotFound {
+			t.Errorf("%s for a missing agent: status = %d, want 404", suffix, w.Code)
+		}
+	}
+
+	srv.logQueryService = nil
+	for _, suffix := range []string{"/cloud-logs", "/cloud-logs/stream"} {
+		base := "/api/v1/agents/" + agent.ID + suffix
+		// Control: with a valid severity the unconfigured service answers 501.
+		if w := getWithDevToken(srv, base+"?severity=INFO"); w.Code != http.StatusNotImplemented {
+			t.Errorf("%s with no log service and a valid severity: status = %d, want 501", suffix, w.Code)
+		}
+		w := getWithDevToken(srv, base+"?severity=TRACE")
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("%s with no log service: status = %d, want 400 before 501", suffix, w.Code)
+			continue
+		}
+		var resp struct {
+			Error struct {
+				Code    string                 `json:"code"`
+				Details map[string]interface{} `json:"details"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("%s: unmarshal response: %v", suffix, err)
+		}
+		if resp.Error.Code != ErrCodeValidationError || resp.Error.Details["field"] != "severity" {
+			t.Errorf("%s with no log service: code %q field %v, want %q severity", suffix, resp.Error.Code, resp.Error.Details["field"], ErrCodeValidationError)
 		}
 	}
 }
