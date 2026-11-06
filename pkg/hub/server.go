@@ -3457,6 +3457,7 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 		DevAuthEnabled:     cfg.DevAuthToken != "",
 		DevAuthToken:       cfg.DevAuthToken,
 		DevUserCfg:         cfg.DevUserConfig,
+		DevUser:            newDevUserSource(cfg.DevUserConfig),
 		AgentTokenSvc:      srv.agentTokenService,
 		UserTokenSvc:       srv.userTokenService,
 		UATSvc:             srv.uatService,

@@ -694,7 +694,7 @@ func (s *Server) conduitRenewalIdentity(ctx context.Context, c *grant.RecheckCla
 	}
 	var ident UserIdentity
 	if devUser {
-		ident = NewDevUser(s.authConfig.DevUserCfg)
+		ident = s.authConfig.currentDevUser()
 	} else {
 		ident = NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "")
 	}

@@ -40,6 +40,10 @@ type AuthConfig struct {
 	DevAuthToken string
 	// DevUserCfg holds identity overrides for the development user
 	DevUserCfg DevUserConfig
+	// DevUser, when set, is the live development identity (see
+	// devUserSource); it takes precedence over DevUserCfg so an identity
+	// change is picked up by the next request. Nil uses DevUserCfg as is.
+	DevUser *devUserSource
 	// AgentTokenSvc handles agent JWT validation
 	AgentTokenSvc *AgentTokenService
 	// UserTokenSvc handles user JWT validation
@@ -298,7 +302,10 @@ func handlerAfterAuth(next http.Handler) http.Handler {
 func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 	// Parse trusted proxy CIDRs
 	trustedNets := parseTrustedProxies(cfg.TrustedProxies)
-	devUser := NewDevUser(cfg.DevUserCfg)
+	devUsers := cfg.DevUser
+	if devUsers == nil {
+		devUsers = newDevUserSource(cfg.DevUserCfg)
+	}
 	log := cfg.Logger
 	if log == nil {
 		log = slog.Default()
@@ -631,6 +638,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				if !admitDevUserAccount(ctx, cfg, log, w) {
 					return
 				}
+				devUser := devUsers.Load()
 				ctx = context.WithValue(ctx, userContextKey{}, devUser)
 				ctx = contextWithIdentity(ctx, devUser)
 				ctx = contextWithCredentialContext(ctx, credentialContextForIdentity(devUser))
@@ -726,6 +734,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 						if !admitDevUserAccount(ctx, cfg, log, w) {
 							return
 						}
+						devUser := devUsers.Load()
 						ctx = context.WithValue(ctx, userContextKey{}, devUser)
 						ctx = contextWithIdentity(ctx, devUser)
 						ctx = contextWithCredentialContext(ctx, credentialContextForIdentity(devUser))
