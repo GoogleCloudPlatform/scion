@@ -403,6 +403,37 @@ func TestFlatCloudRunTargetExperimentRegistered(t *testing.T) {
 	}
 }
 
+// TestConduitDeliverExperimentRegistered pins the hub.conduit_deliver entry:
+// a server-only alpha experiment, off by default, that names its dependency
+// on hub.conduit.
+func TestConduitDeliverExperimentRegistered(t *testing.T) {
+	e, ok := Default().Lookup(ConduitDeliver)
+	if !ok {
+		t.Fatalf("%s is not registered", ConduitDeliver)
+	}
+	if ConduitDeliver != "hub.conduit_deliver" {
+		t.Fatalf("frozen name changed: %q", ConduitDeliver)
+	}
+	if e.Default {
+		t.Fatal("hub.conduit_deliver must default to off")
+	}
+	if e.Stage != StageAlpha {
+		t.Fatalf("must be alpha, got %q", e.Stage)
+	}
+	if len(e.Layers) != 1 || !e.HasLayer(LayerServer) {
+		t.Fatalf("must be a server-only experiment, got %v", e.Layers)
+	}
+	if !strings.Contains(e.Description, "Requires hub.conduit") {
+		t.Fatalf("description must name the hub.conduit dependency: %q", e.Description)
+	}
+	if _, ok := Default().Lookup("hub.conduit"); !ok {
+		t.Fatal("hub.conduit, its dependency, is not registered")
+	}
+	if e.Title == "" || e.Issue != "ptone/scion#7353" || e.Owner != "conduit" {
+		t.Fatalf("incomplete registration: %+v", e)
+	}
+}
+
 // TestArtifactsExperiment_Registered pins the hub.artifacts entry: it gates
 // both the web surfaces and the hub routes, so it needs both layers, and it
 // ships off.

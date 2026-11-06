@@ -149,6 +149,15 @@ const FlatRuntimeBrokers = "hub.flat_runtime_brokers"
 // instance environment variables (ptone/scion#7309).
 const FlatCloudRunTarget = "hub.flat_cloudrun_target"
 
+// ConduitDeliver gates message delivery over an agent's Conduit session (the
+// deliver-message control route; ptone/scion#7353). It requires hub.conduit:
+// the hub enforces both. It lands in slices: until the sciontool route, the
+// hub endpoint and the broker caller are in, turning it on changes nothing,
+// and delivery keeps using runtime exec. It is enforced in hub server code;
+// what agents are told at start is fixed at launch, so an agent started
+// before it was turned on keeps using exec until it restarts.
+const ConduitDeliver = "hub.conduit_deliver"
+
 // Artifacts gates the artifact service (pkg/artifacts): the hub's
 // /api/v1/artifacts routes answer 404 while it is off, and the web UI hides
 // every artifact surface.
@@ -568,6 +577,17 @@ var compiled = []Experiment{
 		Layers:      []Layer{LayerServer},
 		Stage:       StageAlpha,
 		Issue:       "ptone/scion#2774",
+		Owner:       "conduit",
+		ReviewBy:    "2027-03-31",
+	},
+	{
+		Name:        ConduitDeliver,
+		Title:       "Message delivery over Conduit",
+		Description: "Delivers messages to an agent over its Conduit session (the deliver-message control route) instead of through runtime exec, for agents whose session offers it; Cloud Run agents first. Requires hub.conduit. Lands in parts: until all of them are in, it changes nothing and delivery uses runtime exec. Agents started before it is turned on keep using exec until they restart. Text and interrupts only; attachments stay on exec.",
+		Default:     false,
+		Layers:      []Layer{LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#7353",
 		Owner:       "conduit",
 		ReviewBy:    "2027-03-31",
 	},
