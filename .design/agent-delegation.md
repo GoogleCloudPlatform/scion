@@ -845,6 +845,10 @@ list route that is not in the admission table refuses a delegated request at the
     ([ptone/scion#1811](https://github.com/ptone/scion/issues/1811)). ptone included attach in v1
     on 2026-09-28 with this documentation obligation; the operator docs, the CLI help and the future
     web grant form repeat it.
+  - A delegated attach is not supported through the sciontool delegation socket: the socket
+    forwards plain HTTP requests only and copies no `Connection`, `Upgrade` or `Sec-WebSocket-*`
+    header, so the Hub answers the request as an attach preflight and no session opens. The scion
+    CLI does not use delegated credentials (§18.8). Tracked in ptone/scion#7473.
 - **No read-only allowance on errors.** Unlike the project delegation ceiling's read allowance
   (`ceilingReadAllowance`, `authz_delegation_ceiling.go:105`), a delegated credential denies on any
   lookup error, including for reads.
@@ -1010,8 +1014,8 @@ renders `verified=true`, because the binding was checked at exchange, not per re
 - Every delegated deny sets `Decision.DeniedBy = "agent_delegation"` (a new `DeniedBy` constant next
   to `DeniedByDelegationCeiling`, `authz.go:418`). The fine-grained G code goes in the G block on
   `Decision` as `AgentDelegationCode` and in `Reason`, which the existing record builder already
-  maps; until the follow-up, a retained decision record carries `denied_by` and the reason, not the
-  G block.
+  maps. The decision log does not include decisions for a delegated credential (§14.4).
+  Tracked in ptone/scion#2132.
 - A deny from G's own issuance (§6) or exchange (§8) checks writes one decision record with the same
   `denied_by` and the code in `Reason`, built with `BuildDecisionAuditRecord`. An ordinary pipeline deny of those
   operations, before G's checks run, keeps the pipeline's own `denied_by`.
@@ -1032,8 +1036,9 @@ Mutation audit is persisted and transactional. It is G's durable attribution:
   it revoked with the grant. Each credential an exchange supersedes gets its own
   `agent_delegation_credential_revoke` row (reason `superseded`), written in the exchange's
   transaction together with the new credential and its `agent_delegation_credential_issue` row;
-- every mutation made with a delegated credential, through the normal mutation-audit path, with the
-  G block filled in.
+- no other write. The one write a delegated credential can make, a message send, writes no
+  mutation record (no caller's message send does). It is attributed on the immutable message row:
+  the sender is the actor agent, and the row carries the authorizing user and the grant.
 
 Each row names the agent, the issuing user and the grant. Because credentials live at most 60
 minutes and each issuance is recorded, every delegated request falls inside a recorded,
@@ -1045,9 +1050,10 @@ Per-decision records for delegated requests, including delegated reads, follow t
 decision-audit sink exactly as for every other caller: its experiment flag
 (`hub.authorization_decision_audit_v2`) and its domain and validation exclusions. `AlwaysAudit`
 only exempts a decision from allow sampling; it does not bring a decision into the sink's recorded
-domain. Many delegated decisions, for example `agent.read` on an agent inside a project, therefore
-produce no decision record even when the sink is on. G does not add its own per-request database
-writes.
+domain. The decision log does not include decisions for a delegated credential, allow or deny.
+Tracked in ptone/scion#2132. A deny from issuance or exchange is a decision for the issuing user or
+for the agent's own credential, and is recorded like any other decision of those principals. G does
+not add its own per-request database writes.
 
 The aggregated list-filter record (§14.2) is in-memory only and is not persisted or logged. The
 decision-log adapter excludes every record with a `RecordKind` under its own disposition,
@@ -1181,7 +1187,9 @@ lifetime is not a maximum session duration. In v1 a delegated attach takes only 
 broker's terminal path: an attach that would take the agent's conduit path (for example, an agent
 on a managed runtime) is refused before the upgrade with 503 `runtime_attach_unsupported`, reason
 `delegated_credential_broker_path_only`. A future PTY ticket mint must deny for delegated
-credentials, or re-run `decideAgentDelegation` when the ticket is redeemed.
+credentials, or re-run `decideAgentDelegation` when the ticket is redeemed. The sciontool
+delegation socket does not forward the WebSocket upgrade, so a delegated attach is not supported
+through it (§11.9, ptone/scion#7473).
 
 ## 17. Concrete flows
 
@@ -1191,10 +1199,8 @@ credentials, or re-run `decideAgentDelegation` when the ticket is redeemed.
    issues a hub grant for `project:read`, `agent:read` and `agent:list` for 7 days. A exchanges it
    with its JWT, gets a 15-minute credential, and lists agents in P2. Allowed: Alice is admitted to
    P2 and holds `agent.list` and `agent.read` there. The mutation record of the exchange names
-   agent A, Alice and the grant. When `hub.authorization_decision_audit_v2` is admitted (or under
-   the test sink) and the decision is inside the sink's recorded domain, the decision record also
-   shows actor `agent:A`, authorizing user Alice and the
-   grant.
+   agent A, Alice and the grant. The decision log does not record the delegated decisions
+   (§14.4).
 2. **Read an agent in another project (G.2-a).** With a hub grant for `agent:read`, A reads agent B
    in P2. Allowed while Alice can read B. The environment in the response is redacted.
 3. **Attach to the issuer's own descendant.** Alice issues a project(P1) grant for `agent:attach`. A
@@ -1460,9 +1466,10 @@ and exchange (agent).
 
 - `ExchangeDelegation(ctx, grantID, audience)` next to `RefreshToken` (`pkg/sciontool/hub/client.go:744`)
   and a new `pkg/sciontool/delegation/` helper.
-- sciontool holds the delegated token in memory only and serves it to processes in the agent
-  container through a local unix socket (mode 0600, owned by the agent user). The preferred form is a
-  proxy that attaches the header to a hub request, so the token never leaves sciontool. It is never
+- sciontool holds the delegated token in memory only and forwards hub requests for processes in
+  the agent container through a local unix socket (mode 0600, owned by the agent user): a proxy
+  that attaches the header to each forwarded plain HTTP request, so the token never leaves
+  sciontool. It does not forward a WebSocket upgrade (§16.6). It is never
   written to the token file, a config file or a child process's environment.
 - sciontool re-exchanges before expiry and after every agent JWT refresh. It treats both 401
   responses from exchange (`unauthorized` and `agent_credential_invalid`) as "re-authenticate" and
