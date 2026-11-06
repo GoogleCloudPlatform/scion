@@ -310,11 +310,11 @@ type ProvisionInput struct {
 	// pod that starts for this project (they'd all see the sentinel and skip
 	// provisioning, forever).
 	//
-	// A chown that fails with EPERM on an entry already owned by
-	// NFSUID:NFSGID is not a failure, with or without this flag: on an NFS
-	// export with all_squash, or root_squash with anonuid/anongid set to the
-	// workspace owner, root cannot chown but every entry already has the
-	// wanted owner (see checkChownEPERM).
+	// A chown that fails with EPERM on an entry already owned by the
+	// resolved owner (NFSUID:NFSGID, 0 meaning 1000) is not a failure, with
+	// or without this flag: on an NFS export with all_squash, or root_squash
+	// with anonuid/anongid set to the workspace owner, root cannot chown but
+	// every entry already has the wanted owner (see checkChownEPERM).
 	RequireChownSuccess bool
 
 	// MountedWorktree is set by the Kubernetes provisioning init container

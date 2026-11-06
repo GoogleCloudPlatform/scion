@@ -30,6 +30,11 @@ detail). `recreateEmptyDir` checks against the owner it was given (the owner
 observed on the removed directory) and calls the stubbable `lchownFile`
 instead of `os.Lchown`; its mode step still runs.
 
+Log level: with `RequireChownSuccess=false`, an EPERM on an entry that already
+has the wanted owner used to log the Warn "chown failed (continuing)"; it is
+now success and logs only `checkChownEPERM`'s Debug line. EPERM with another
+owner and other errors still log the Warn.
+
 No pod-spec change: the init container still chowns to uid 1000; `nfs.uid`
 unset or 1000 is unchanged.
 

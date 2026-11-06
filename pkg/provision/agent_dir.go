@@ -73,8 +73,8 @@ var ErrAgentBranchMismatch = errors.New("the agent's kept workspace was created 
 //     it is;
 //   - creates each shared directory, and chowns it while it is empty;
 //   - treats a chown that fails with EPERM as done when the entry is
-//     already owned by NFSUID:NFSGID (a squashing NFS export), so
-//     RequireChownSuccess does not fail on it;
+//     already owned by the resolved owner (NFSUID:NFSGID, 0 meaning 1000;
+//     a squashing NFS export), so RequireChownSuccess does not fail on it;
 //   - writes the provisioning sentinel in the agent directory.
 //
 // The lock, the record and the sentinel live in the agent directory, next
