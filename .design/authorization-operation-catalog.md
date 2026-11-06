@@ -16,7 +16,7 @@
 - [agent.hold.lift](#agentholdlift) — Lift the holds of a suspended agent whose owners are admitted to its project again (hub admin)
 - [agent.lifecycle.reincarnate](#agentlifecyclereincarnate) — Reincarnate an agent
 - [agent.read](#agentread) — Read a single agent's metadata by ID
-- [agent.list](#agentlist) — List agents within the caller's authorized project scope. A user access token needs agent:list on either boundary: a project token lists only its boundary project's agents. The project form lists one project's agents and decides agent.list on that project. An agent delegated credential is admitted on the hub form only: its scope is the authorizing user's list scope within the grant boundary, and each item is also decided for agent.read
+- [agent.list](#agentlist) — List agents within the caller's authorized project scope. A user access token needs agent:list on either boundary: a project token lists only its boundary project's agents. The project form lists one project's agents and decides agent.list on that project. An agent delegated credential is admitted on the hub and project forms: its scope is the authorizing user's list scope within the grant boundary (on the project form, within that one project), and each item is also decided for agent.read
 - [agent.update](#agentupdate) — Update agent configuration or metadata
 - [agent.update.pendingconfig.delete](#agentupdatependingconfigdelete) — Discard an agent's pending config edits (behind hub.agent_edit_held; 404 while it is off)
 - [agent.status.update](#agentstatusupdate) — Report an agent's status: the agent itself, or a user who may update the agent
@@ -294,13 +294,13 @@
 - [hub.conduitgrantkeys.read](#hubconduitgrantkeysread) — Read the conduit grant verification keys (public halves only). Any signed-in identity reads them, and any token reads them; 404 while the hub.conduit experiment is off
 - [hub.prestarthooks.read](#hubprestarthooksread) — Read hub pre-start hooks. Any signed-in user reads them; the script body is returned only to a holder of hub.lifecycle_hooks.read on an interactive session or dev credential; every other credential, a user access token included, gets it redacted
 - [hub.policies.removed](#hubpoliciesremoved) — Removed policy API; every method and sub-path answers 410 Gone and points callers to role bindings
-- [skill.list](#skilllist) — List skills; each row is filtered by skill read. A user access token needs skill:list on either boundary; its page, total and cursor count only the rows it may read
+- [skill.list](#skilllist) — List skills; each row is filtered by skill read. A user access token needs skill:list on either boundary; its page, total and cursor count only the rows it may read. An agent delegated credential lists project-scoped skills only: its scope is the authorizing user's skill list scope within the grant boundary, and each item is also decided for skill.read
 - [skill.read](#skillread) — Read a skill, its versions, its download URLs, its resolved version and its files. A record the caller may not read answers as not found
 - [skill.create](#skillcreate) — Create a skill in a project named by the request body. A user access token needs skill:create on a boundary that contains the project
 - [skill.update](#skillupdate) — Update a skill: its metadata, version publishing and deprecation, file uploads and finalize. A user-scope skill refuses a federated caller (requireProfileWriter)
 - [skill.delete](#skilldelete) — Delete a skill definition. A user-scope skill refuses a federated caller (requireProfileWriter)
 - [skill.register](#skillregister) — Manage skill registries and their pinned hashes. The route guard checks skill.register on the hub-scoped registry target, so a user access token needs skill:register on a hub boundary
-- [template.list](#templatelist) — List templates; each row is filtered by template read. The unfiltered list is used only with hub-level evidence for template.list: a user access token needs template:list on a hub boundary and hub-wide list authority for it. Every other token, project tokens included, gets the per-row template read scan
+- [template.list](#templatelist) — List templates; each row is filtered by template read. The unfiltered list is used only with hub-level evidence for template.list: a user access token needs template:list on a hub boundary and hub-wide list authority for it. Every other token, project tokens included, gets the per-row template read scan. An agent delegated credential lists project-scoped templates only: its scope is the authorizing user's template list scope within the grant boundary, and each item is also decided for template.read
 - [template.read](#templateread) — Read a template, its download URLs, its storage validation and its files. A record the caller may not read answers as not found
 - [template.create](#templatecreate) — Create a template in the global, project or caller's own user scope the request body names. A user-scope create refuses a federated caller (requireProfileWriter)
 - [template.update](#templateupdate) — Update a template: its definition and metadata, file uploads, finalize and file writes. A user-scope template refuses a federated caller (requireProfileWriter)
@@ -747,7 +747,7 @@
 
 **Domain:** agent
 
-**Description:** List agents within the caller's authorized project scope. A user access token needs agent:list on either boundary: a project token lists only its boundary project's agents. The project form lists one project's agents and decides agent.list on that project. An agent delegated credential is admitted on the hub form only: its scope is the authorizing user's list scope within the grant boundary, and each item is also decided for agent.read
+**Description:** List agents within the caller's authorized project scope. A user access token needs agent:list on either boundary: a project token lists only its boundary project's agents. The project form lists one project's agents and decides agent.list on that project. An agent delegated credential is admitted on the hub and project forms: its scope is the authorizing user's list scope within the grant boundary (on the project form, within that one project), and each item is also decided for agent.read
 
 ### Entry Points
 
@@ -801,6 +801,7 @@
 - `pkg/hub:TestListFilters_CannotEnlargeTokenResults`
 - `pkg/hub:TestAgentDelegatedAgentList_ExplicitScopeAcrossProjects`
 - `pkg/hub:TestAgentDelegatedAgentList_MixedItemsAndCounts`
+- `pkg/hub:TestDelegatedProjectAgentList_ScopeAndBinding`
 
 ---
 
@@ -11035,7 +11036,7 @@
 
 **Domain:** skill
 
-**Description:** List skills; each row is filtered by skill read. A user access token needs skill:list on either boundary; its page, total and cursor count only the rows it may read
+**Description:** List skills; each row is filtered by skill read. A user access token needs skill:list on either boundary; its page, total and cursor count only the rows it may read. An agent delegated credential lists project-scoped skills only: its scope is the authorizing user's skill list scope within the grant boundary, and each item is also decided for skill.read
 
 ### Entry Points
 
@@ -11043,9 +11044,9 @@
 |------|--------|---------|
 | http_route | GET | `/api/v1/skills` |
 
-**Principals:** `user`
+**Principals:** `user`, `agent_delegated`
 
-**Credentials:** `session_jwt`, `scoped_uat`
+**Credentials:** `session_jwt`, `scoped_uat`, `delegated_agent`
 
 **Bearer:** `admit` (target `list_scope`; boundaries `project`, `hub`)
 
@@ -11055,12 +11056,15 @@
 
 **Effects:** `list-scoped`
 
-**Denial Codes:** `forbidden`
+**Denial Codes:** `forbidden`, `credential_not_admitted`
 
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
 - `pkg/hub:TestSkillListToken_CountsOnlyAuthorizedRows`
+- `pkg/hub:TestDelegatedSkillList_ScopeAndItemFilter`
+- `pkg/hub:TestDelegatedListRoutes_CursorBoundToCredentialGrantAgentAndBoundary`
+- `pkg/hub:TestDelegatedCatalogLists_HubCatalogNeverListed`
 
 ---
 
@@ -11264,7 +11268,7 @@
 
 **Domain:** template
 
-**Description:** List templates; each row is filtered by template read. The unfiltered list is used only with hub-level evidence for template.list: a user access token needs template:list on a hub boundary and hub-wide list authority for it. Every other token, project tokens included, gets the per-row template read scan
+**Description:** List templates; each row is filtered by template read. The unfiltered list is used only with hub-level evidence for template.list: a user access token needs template:list on a hub boundary and hub-wide list authority for it. Every other token, project tokens included, gets the per-row template read scan. An agent delegated credential lists project-scoped templates only: its scope is the authorizing user's template list scope within the grant boundary, and each item is also decided for template.read
 
 ### Entry Points
 
@@ -11272,9 +11276,9 @@
 |------|--------|---------|
 | http_route | GET | `/api/v1/templates` |
 
-**Principals:** `user`
+**Principals:** `user`, `agent_delegated`
 
-**Credentials:** `session_jwt`, `scoped_uat`
+**Credentials:** `session_jwt`, `scoped_uat`, `delegated_agent`
 
 **Bearer:** `admit` (target `hub_collection`; boundaries `hub`)
 
@@ -11284,12 +11288,15 @@
 
 **Effects:** `list-scoped`
 
-**Denial Codes:** `forbidden`
+**Denial Codes:** `forbidden`, `credential_not_admitted`
 
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
 - `pkg/hub:TestCatalogWideList_UsesListSelectorThroughEvidence`
+- `pkg/hub:TestDelegatedTemplateList_ScopeAndItemFilter`
+- `pkg/hub:TestDelegatedListRoutes_CursorBoundToCredentialGrantAgentAndBoundary`
+- `pkg/hub:TestDelegatedCatalogLists_HubCatalogNeverListed`
 
 ---
 

@@ -121,23 +121,41 @@ What to configure:
 
 ## Delegated lists
 
-A delegated credential that holds `agent:list` can list agents on the hub agent list,
-`GET /api/v1/agents`. The project agent list and the skill and template lists do not accept a
-delegated credential yet: they answer `403 credential_not_admitted`.
+A delegated credential can use four list routes. Each needs its list permission, and each listed
+item is also checked for its read permission:
 
-- **Scope:** the issuer's own `agent:list` access right now, within the grant's boundary. A
-  project-bounded grant lists only that project's agents. The agent's own access adds nothing.
-- **A refused list is empty, not an error:** when the list itself is refused (the grant lacks
-  `agent:list`, the issuer has no list access, any revocation-chain check fails, or the Hub hits
-  an error deciding the scope), the answer is `200` with an empty list and `totalCount: 0`. The
-  reason is in the decision record, never in the response.
-- **Each agent is checked too:** an agent is listed only if the issuer may also read it, so the
-  grant needs `agent:read` as well. A grant with `agent:list` but not `agent:read` lists nothing.
-  Each listed agent carries only the `read` capability, its environment is redacted, and the list
-  has no list-level capabilities.
-- **Order and filters:** the default order only. `sort` or `ids` answers
-  `400 delegated_list_sort_unsupported`. `scope=mine`, `scope=shared` and `mine=true` list
-  nothing, because the agent owns no projects. `limit` is 1 to 100, 50 by default.
+| Route | List permission | Each item needs |
+|---|---|---|
+| `GET /api/v1/agents` | `agent:list` | `agent:read` |
+| `GET /api/v1/projects/{id}/agents` | `agent:list` | `agent:read` |
+| `GET /api/v1/skills` | `skill:list` | `skill:read` |
+| `GET /api/v1/templates` | `template:list` | `template:read` |
+
+`skill:read` and `template:read` only decide which skills and templates a list returns. A
+delegated credential cannot read a single skill or template, download one, or resolve a skill:
+those routes answer `403 credential_not_admitted`.
+
+- **Scope:** the issuer's own list access right now, within the grant's boundary. A
+  project-bounded grant lists only that project. The project agent list lists only its one
+  project, and lists nothing for a project outside the issuer's access or the grant's boundary.
+  A project that does not exist answers `404`, as it does for every caller; name the project by
+  its ID, because a slug in the path answers `403 credential_not_admitted`. The agent's own access
+  adds nothing.
+- **Project items only on the skill and template lists:** only project-scoped skills and templates
+  are listed. Hub catalog (global and core) and user-scoped skills and templates are never listed
+  to a delegated credential. `scope=global`, `scope=core` and `scope=user` list nothing, and so
+  does a `projectId` or `scopeId` outside the scope.
+- **A refused list is empty, not an error:** when the list itself is refused (the grant lacks the
+  list permission, the issuer has no list access, any revocation-chain check fails, or the Hub
+  hits an error deciding the scope), the answer is `200` with an empty list and `totalCount: 0`.
+  The reason is in the decision record, never in the response.
+- **Each item is checked too:** an item is listed only if the issuer may also read it, so the grant
+  needs the read permission as well. A grant with the list permission but not the read permission
+  lists nothing. Each listed item carries only the `read` capability, an agent's environment is
+  redacted, and the list has no list-level capabilities.
+- **Order and filters:** the default order only. On the agent lists, `sort` or `ids` answers
+  `400 delegated_list_sort_unsupported`, and on the hub agent list `scope=mine`, `scope=shared` and
+  `mine=true` list nothing, because the agent owns no projects. `limit` is 1 to 100, 50 by default.
 - **Paging:**
   - A page can be empty and still carry a `nextCursor`, and `totalCount` can be a lower bound
     (`totalCountApproximate: true`). Follow `nextCursor` until it is absent.
@@ -146,7 +164,7 @@ delegated credential yet: they answer `403 credential_not_admitted`.
     new exchange cannot resume a walk that an earlier credential started.
   - `400 invalid_cursor` means "restart from the first page".
 - **Audit:** each list request writes one decision record for the list, and one in-memory
-  summary of its per-agent decisions (counts and up to 50 refused agent IDs). The summary is not
+  summary of its per-item decisions (counts and up to 50 refused item IDs). The summary is not
   written to the decision log yet.
 
 ## Revoke, revoke-all and lists

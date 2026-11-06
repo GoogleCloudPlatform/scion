@@ -133,8 +133,10 @@ func (s *Server) hasCatalogWideListAccess(ctx context.Context, identity Identity
 // Every other identity kind uses the ordinary AuthorizeReadBatch path
 // unchanged.
 func (s *Server) catalogListReadBatch(identity Identity) func(context.Context, Identity, []Resource) ([]bool, error) {
-	// No list operation admits an agent delegated credential yet
-	// (.design/agent-delegation.md §11.8): deny every row.
+	// An agent delegated credential's admitted lists (agents, skills,
+	// templates) run their own item filter (delegatedListItemRead) and never
+	// call this batch. Any other catalog list (harness configs, which are not
+	// admitted) denies every row (.design/agent-delegation.md §11.8).
 	if isDelegatedAgentIdentity(identity) {
 		return func(_ context.Context, _ Identity, resources []Resource) ([]bool, error) {
 			return make([]bool, len(resources)), nil

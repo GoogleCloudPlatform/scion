@@ -991,7 +991,9 @@ func TestResourceTypeLiterals_AllInRegistry(t *testing.T) {
 var unresolvedResourceTypeValues = []string{
 	// delegatedListScope and flushListFilter: resourceType is the item
 	// resource type of an admitted delegated list route, passed by its
-	// handler as a registry type ("agent" from listAgentsDelegated).
+	// handler as a registry type ("agent" from listAgentsDelegated and
+	// listProjectAgentsDelegated, "skill" and "template" from the skill and
+	// template list handlers).
 	"agent_delegation_list.go: resourceType",
 	"agent_delegation_list.go: resourceType",
 	"audit_authz.go: req.Resource.Type",

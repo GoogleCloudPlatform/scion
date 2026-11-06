@@ -288,6 +288,14 @@ func (s *Server) listTemplatesV2(w http.ResponseWriter, r *http.Request) {
 		filter.Status = store.TemplateStatusActive
 	}
 
+	// An agent delegated credential lists project-scoped templates only, with
+	// its scope from the delegated list arm (.design/agent-delegation.md
+	// §11.8). It is not a user: scope=user lists nothing for it.
+	if d, ok := GetIdentityFromContext(ctx).(*DelegatedAgentIdentity); ok && d != nil {
+		s.listTemplatesDelegated(w, r, d, filter)
+		return
+	}
+
 	// When listing without explicit scope, include user-scoped templates
 	// for the authenticated user in the resolution results.
 	switch filter.Scope {

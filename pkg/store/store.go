@@ -2128,6 +2128,12 @@ type TemplateFilter struct {
 	// starts with this value (used to find legacy rows nested under a
 	// legacy path, such as pre-blob clones at <slug path>/<clone id>).
 	StoragePathPrefix string
+	// ProjectIDs, when non-nil, narrows the list to project-scoped
+	// templates whose scope ID or (deprecated) project ID is in the set,
+	// applied before COUNT and LIMIT. A non-nil empty set matches nothing;
+	// nil applies no restriction. Only the agent delegated credential's
+	// list sets it (.design/agent-delegation.md §11.8).
+	ProjectIDs []string
 }
 
 // HarnessConfigStore defines harness config persistence operations.
@@ -3564,10 +3570,18 @@ type SkillFilter struct {
 //     CallerID (the owning user; for an agent caller, its creator).
 //   - ProjectIDs: a project-scoped skill is visible only when its ScopeID is
 //     one of these (the caller's project memberships).
+//   - AllProjects: every project-scoped skill matches, in any project.
 type SkillAccessScope struct {
 	IncludeHubScope bool
 	CallerID        string
 	ProjectIDs      []string
+	// AllProjects matches project-scoped skills in every project. It is
+	// for hub-boundary list callers whose project admission is decided per
+	// row after the query: the agent delegated credential's list
+	// (.design/agent-delegation.md §11.8), and bearer lists that reuse it.
+	// It is never set on agent-principal paths (agentSkillAccessScope), and
+	// it adds no hub-scoped or user-scoped skill. The default is false.
+	AllProjects bool
 }
 
 // =============================================================================

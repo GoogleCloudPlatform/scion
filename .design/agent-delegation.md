@@ -753,10 +753,10 @@ cross-request cache needs its own staleness bound and review.
 
 ### 11.8 Delegated lists (G.3-L)
 
-The list slice lands in two steps. The first admits `agent.list` on the hub agent list,
-`GET /api/v1/agents` (`listAgentsDelegated`, `agent_delegation_list.go`). The second admits the
-project agent list, the skill list and the template list. Until a list route is in the admission
-table, a delegated request on it is refused at the route gate.
+The list slice landed in two steps. The first admitted `agent.list` on the hub agent list,
+`GET /api/v1/agents` (`listAgentsDelegated`, `agent_delegation_list.go`). The second admitted the
+project agent list, the skill list and the template list (`agent_delegation_list_routes.go`). A
+list route that is not in the admission table refuses a delegated request at the route gate.
 
 - **Scope.** A delegated caller's list scope comes only from the delegated list arm
   (`delegatedListScope`). It runs the route, chain and permission checks of §11.2 for the
@@ -771,7 +771,8 @@ table, a delegated request on it is refused at the route gate.
   check. A store error during the arm's checks is recorded as a `lookup_error` deny; an internal error in
   the list arm itself is also logged at warn level, with no item IDs.
 - **Item filter.** Each admitted list route names exactly one per-item permission in its admission
-  entry (`agentDelegationAdmission.ItemFilter`; `agent.list → agent.read`). Only the item filter
+  entry (`agentDelegationAdmission.ItemFilter`; `agent.list → agent.read`, `skill.list →
+  skill.read`, `template.list → template.read`). Only the item filter
   (`delegatedListItemRead`) accepts that permission; a request that asks `Decide` for it on the
   list route is refused like any permission the route does not admit. Every item is decided by the
   same procedure as a single request: the route, chain and permission checks once per request, then
@@ -794,10 +795,34 @@ table, a delegated request on it is refused at the route gate.
 - **Audit.** One primary decision record (the list arm) and one aggregated item-filter record per
   list request (§14.2). routeGuard installs the request's collector on admitted list routes and
   flushes it when the request ends, including on a panic or a cancelled request.
-- **Second step.** The project agent list (binding key `project-agents:<projectID>`), the skill
-  list (`skills`) and the template list (`templates`) get delegated branches on the same helpers,
-  with the store additions they need: a template project-ID filter and an all-projects skill scope.
-  The skill store already honours `SkipTotalCount`.
+- **Second step (landed).** The project agent list, the skill list and the template list have
+  delegated branches on the same helpers:
+  - **Project agent list** (`GET /api/v1/projects/{id}/agents`, exact resolution
+    `projects.agents.collection`). The arm's scope is narrowed to that one project, so it is
+    Explicit {P} or None; a project outside the issuer's scope or the grant boundary lists nothing.
+    The binding key is the landed `project-agents:<projectID>` (through `sortSuffix`). The route
+    target is the project segment as the path names it, so a slug path, whose segment differs from
+    the loaded project's ID, is refused with 403 `credential_not_admitted`. An unknown project answers
+    the existing 404 from `handleProjectAgents`, which runs before the list arm for every caller, so
+    no decision record is written for it: unlike the empty 200 for a project outside the scope, the
+    404 tells the caller the project does not exist, as it does any other caller.
+    When the issuer's scope holds the project but the grant boundary removes it, the arm's deny code
+    is `outside_boundary`; otherwise `issuer_authority`.
+  - **Skill list** (`skills.list.collection`). No `project.list` scope is resolved for the caller.
+    The query lists project-scoped skills only: the scope's projects in Explicit mode, or every
+    project (`SkillAccessScope.AllProjects`) in AllProjects mode, with project admission per item.
+    Excluded projects are enforced per item, not pushed into the query. `scope=global`, `core` or
+    `user`, and a `scopeId` outside the scope, list nothing. The binding key is `skills`, and the
+    response gains `totalCountApproximate`.
+  - **Template list** (`templates.list.collection`). Project-scoped templates only, through
+    `TemplateFilter.ProjectIDs` (the scope's projects in Explicit mode, intersected with a caller
+    `projectId` or `scopeId`; a non-nil empty set matches nothing). An item's project is its
+    `ScopeID`, so a legacy row matched through its deprecated project ID is dropped when its scope ID
+    is outside the scope. `scope=global` and `scope=user` answer an empty 200, never a 401. The
+    binding key is `templates`; the request cursor is validated after it is opened.
+  - **Hub catalog.** Global and core skills and templates, and user-scoped ones, have no project
+    parent, so they are never listed. `catalogListReadBatch` denies every row for a delegated
+    identity.
 
 ### 11.9 What a delegated decision bounds, and what it does not
 
@@ -906,8 +931,9 @@ each, with a test:
   - no key is the base permission of a catalog operation whose effects include grant authority,
     change authority, change ownership, mint credential, issue credential, assign credential or
     create resource;
-  - every key has at least one catalog operation that admits the delegated credential, and every
-    such operation's permission is a key.
+  - every key has at least one catalog operation that admits the delegated credential, either as
+    its base permission or as the item filter of an admitted list route, and every such
+    operation's permission is a key.
   The effect guard covers every catalog operation, apart from the operations listed in
   `permissions.AgentDelegationSharedKeyExemptions`: operations that share a delegable key but are never
   admitted for the delegated credential (today `project.broadcast`, which shares `project.read`), as
@@ -922,11 +948,16 @@ each, with a test:
   | `project.read` | project, hub | `GET` project (operation `project.read`) | G.3-a |
   | `agent.message` | project, hub | the HTTP agent message route, operation `agent.action.message`, by ID (`agents.action.message`) and in the project form (`projects.agents.action.message`). `agent.message.send` (broker call) is not admitted | G.3-a |
   | `agent.attach` | project, hub | the PTY WebSocket (`agents.pty`, operation `agent.attach`) only. `agent.lifecycle.exec`, `.env` and `.resetauth` share the permission but are **not** admitted | G.3-a |
-  | `agent.list` | project, hub | the hub agent list `GET /api/v1/agents` (`agents.list`, exact resolution `agents.list.collection`, operation `agent.list`), with item filter `agent.read` (§11.8). The project form of the operation is not admitted yet | G.3-L, step 1 |
-  | skill and template list; the project agent list | project, hub | per D.2's merged list operations | G.3-L, step 2 |
+  | `agent.list` | project, hub | the hub agent list `GET /api/v1/agents` (`agents.list`, exact resolution `agents.list.collection`) and the project agent list `GET /api/v1/projects/{id}/agents` (`projects.byId`, exact resolution `projects.agents.collection`), operation `agent.list`, with item filter `agent.read` (§11.8) | G.3-L |
+  | `skill.list` | project, hub | the skill list `GET /api/v1/skills` (`skills.list`, exact resolution `skills.list.collection`, operation `skill.list`), with item filter `skill.read` | G.3-L, step 2 |
+  | `template.list` | project, hub | the template list `GET /api/v1/templates` (`templates.list`, exact resolution `templates.list.collection`, operation `template.list`), with item filter `template.read` | G.3-L, step 2 |
+  | `skill.read`, `template.read` | project, hub | none of their own: item-filter-only keys of the skill and template lists. A single read, a download or a resolve is refused at the route gate | G.3-L, step 2 |
 
   A key enters `AgentDelegableRegistry` in the same change that admits its first route, so the
-  guard tests always hold.
+  guard tests always hold. A key is admitted by an admitted operation whose base permission it is,
+  or by an admitted list route whose item filter it is (an item-filter-only key). The effect guard
+  covers item-filter-only keys like any other key: every catalog operation whose base permission is
+  `skill.read` or `template.read` has a read effect only.
 - **Hub-level targets.** A.1 now resolves hub-level targets (hub resources, global and core skills
   and templates) to the hub target scope through explicit evidence (`authz_hub_target.go`). A
   delegated request on a hub-level target is evaluated like any other: only on an admitted route,

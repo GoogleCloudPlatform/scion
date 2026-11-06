@@ -463,6 +463,21 @@ func (s *TemplateStore) ListTemplates(ctx context.Context, filter store.Template
 			enttemplate.ProjectIDEQ(filter.ProjectID),
 		))
 	}
+	if filter.ProjectIDs != nil {
+		if len(filter.ProjectIDs) == 0 {
+			// A non-nil empty set matches nothing (store.TemplateFilter).
+			// No template ID is ever the nil UUID.
+			query.Where(enttemplate.IDEQ(uuid.Nil))
+		} else {
+			query.Where(enttemplate.And(
+				enttemplate.ScopeEQ(store.TemplateScopeProject),
+				enttemplate.Or(
+					enttemplate.ScopeIDIn(filter.ProjectIDs...),
+					enttemplate.ProjectIDIn(filter.ProjectIDs...),
+				),
+			))
+		}
+	}
 	if filter.Harness != "" {
 		query.Where(enttemplate.HarnessEQ(filter.Harness))
 	}
