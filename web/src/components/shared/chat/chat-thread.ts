@@ -80,6 +80,11 @@ import {
   WAKE_RETRY_DELAY_MS,
   errorMessageFromBody,
   isChatPostDeniedBody,
+  chatPostDeniedReason,
+  postStateFromHistory,
+  readOnlyNoticeText,
+  type ChatCapabilities,
+  type ChatPostDeniedReason,
   WakeOutcomeUnknownError,
   isAnswerAboutThisSend,
   isGatewayDrop,
@@ -772,6 +777,8 @@ export class ScionChatThread extends LitElement {
    * read-only notice. DMs never set it.
    */
   @state() private canPost = true;
+  /** Why the caller may not post (`canPost` false), from the hub; '' if unknown. */
+  @state() private postDeniedReason: ChatPostDeniedReason = '';
   /**
    * Conversation whose wake-and-send is in flight, or ''. Its composer is
    * blocked meanwhile (up to the hub's wake budget), so text typed during
@@ -1984,6 +1991,7 @@ export class ScionChatThread extends LitElement {
     this.error = null;
     this.sendError = null;
     this.canPost = true;
+    this.postDeniedReason = '';
     // A send still in flight belongs to the conversation we just left; its
     // completion will not touch `sending` (fetchId guard), so release the
     // composer here.
@@ -2589,12 +2597,17 @@ export class ScionChatThread extends LitElement {
         replyPreviews?: Record<string, ReplyPreviewInfo>;
         retention?: HistoryRetention;
         canPost?: boolean;
+        _capabilities?: ChatCapabilities;
       };
 
       // The body can still be arriving after the headers; a conversation
       // switch in the meantime must not merge this page into the new one.
       if (currentId !== this.fetchId) return false;
-      if (typeof data?.canPost === 'boolean') this.canPost = data.canPost;
+      const postState = data ? postStateFromHistory(data) : undefined;
+      if (postState) {
+        this.canPost = postState.canPost;
+        this.postDeniedReason = postState.reason;
+      }
       if (!shouldMerge()) return true;
 
       const items = data?.items ?? data?.messages ?? [];
@@ -3639,6 +3652,7 @@ export class ScionChatThread extends LitElement {
           if (isChatPostDeniedBody(data) && !threadMovedOn()) {
             // The notice says it; no separate send error.
             this.canPost = false;
+            this.postDeniedReason = chatPostDeniedReason(data);
             this.sendError = null;
           }
         } else {
@@ -6985,11 +6999,12 @@ export class ScionChatThread extends LitElement {
 
   /**
    * Shown in place of the composer in a thread the caller may read but not
-   * post in (no project.chat_post on its project).
+   * post in (no post action in its _capabilities); the text follows the
+   * hub's reason.
    */
   private renderReadOnlyNotice() {
     return html`<div class="read-only-notice" role="status">
-      You can read this thread, but you don't have permission to post in it.
+      ${readOnlyNoticeText(this.postDeniedReason)}
     </div>`;
   }
 

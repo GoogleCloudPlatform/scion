@@ -4328,6 +4328,10 @@ const (
 	ProjectRoleOwner  = "project-owner"
 	ProjectRoleAdmin  = "project-admin"
 	ProjectRoleMember = "project-member"
+	// ProjectRoleViewer is a built-in membership role (ptone/scion#5519):
+	// it reads the project, its agents and its chat, and cannot post
+	// messages, create agents or message them.
+	ProjectRoleViewer = "project-viewer"
 	// ProjectRoleVisitor is the seeded project role for a federated
 	// account granted visitor access to a project. It does not confer
 	// membership (RoleDefinition.ConfersMembership is false), and only
@@ -4357,12 +4361,22 @@ var BuiltInProjectMembershipRoles = map[string]bool{
 	ProjectRoleOwner:  true,
 	ProjectRoleAdmin:  true,
 	ProjectRoleMember: true,
+	ProjectRoleViewer: true,
 }
 
 // IsBuiltInProjectMembershipRole reports whether the given role name is
 // a built-in project membership role.
 func IsBuiltInProjectMembershipRole(roleName string) bool {
 	return BuiltInProjectMembershipRoles[roleName]
+}
+
+// IsBuiltInProjectMembershipRoleDef reports whether rd is a built-in project
+// membership role: a system role definition with one of the built-in names.
+// A custom (non-system) role that holds such a name is not one
+// (ptone/scion#5519). Prefer it to IsBuiltInProjectMembershipRole wherever
+// the definition is at hand.
+func IsBuiltInProjectMembershipRoleDef(rd *RoleDefinition) bool {
+	return rd != nil && rd.System && BuiltInProjectMembershipRoles[rd.Name]
 }
 
 // Agent role definition names (matching existing AgentRole constants)

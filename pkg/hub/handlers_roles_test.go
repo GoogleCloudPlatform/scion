@@ -112,8 +112,9 @@ func TestRolesAPI_CreateRoleDefinition_ProjectScope(t *testing.T) {
 	srv, _ := testServer(t)
 
 	def := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
-		Name:        "project-viewer",
-		Description: "Project viewer role",
+		// project-viewer is a built-in role name since ptone/scion#5519.
+		Name:        "project-agent-reader",
+		Description: "Project agent reader role",
 		ScopeType:   "project",
 		Permissions: []string{"agent.read", "agent.list"},
 	})

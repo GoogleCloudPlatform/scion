@@ -22,7 +22,10 @@ vi.mock('../confirm-dialog.js', () => ({
 }));
 
 const {
+  chatPostDeniedReason,
   confirmWake,
+  postStateFromHistory,
+  readOnlyNoticeText,
   WAKE_CONFIRM_MAX_MS,
   errorMessageFromBody,
   isAnswerAboutThisSend,
@@ -170,5 +173,52 @@ describe('isAnswerAboutThisSend', () => {
     expect(isAnswerAboutThisSend(502, { error: { code: 'runtime_error' } })).toBe(true);
     expect(isAnswerAboutThisSend(403, { error: { code: 'forbidden' } })).toBe(true);
     expect(isAnswerAboutThisSend(500, null)).toBe(true);
+  });
+});
+
+describe('chatPostDeniedReason', () => {
+  it('reads the reason of a chat_post_denied body', () => {
+    const body = (reason: unknown): unknown => ({
+      error: { code: 'chat_post_denied', message: 'x', details: { reason } },
+    });
+    expect(chatPostDeniedReason(body('read_only'))).toBe('read_only');
+    expect(chatPostDeniedReason(body('token_scope'))).toBe('token_scope');
+    expect(chatPostDeniedReason(body('other'))).toBe('');
+  });
+
+  it('is empty for other codes and malformed bodies', () => {
+    expect(
+      chatPostDeniedReason({ error: { code: 'forbidden', details: { reason: 'read_only' } } })
+    ).toBe('');
+    expect(chatPostDeniedReason({ error: { code: 'chat_post_denied' } })).toBe('');
+    expect(chatPostDeniedReason(null)).toBe('');
+  });
+});
+
+describe('postStateFromHistory', () => {
+  it('prefers _capabilities over canPost', () => {
+    expect(
+      postStateFromHistory({
+        canPost: true,
+        _capabilities: { actions: ['read'], reason: 'read_only' },
+      })
+    ).toEqual({ canPost: false, reason: 'read_only' });
+    expect(postStateFromHistory({ canPost: false, _capabilities: { actions: ['post'] } })).toEqual({
+      canPost: true,
+      reason: '',
+    });
+  });
+
+  it('falls back to canPost, then to nothing', () => {
+    expect(postStateFromHistory({ canPost: false })).toEqual({ canPost: false, reason: '' });
+    expect(postStateFromHistory({})).toBeUndefined();
+  });
+});
+
+describe('readOnlyNoticeText', () => {
+  it('names the token for token_scope and the permission otherwise', () => {
+    expect(readOnlyNoticeText('token_scope')).toContain('access token');
+    expect(readOnlyNoticeText('read_only')).toContain("don't have permission to post");
+    expect(readOnlyNoticeText('')).toContain("don't have permission to post");
   });
 });

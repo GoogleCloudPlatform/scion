@@ -513,7 +513,7 @@ var agentOperations = []OperationSpec{
 	{
 		ID:          "agent.action.message",
 		Domain:      "agent",
-		Description: "Send a message to an agent through its message action",
+		Description: "Send a message to an agent through its message action. A user's post into a thread by thread key also needs the post action of chat-thread-access on the agent's project (project:read, then project.chat_post; 403 chat_post_denied with reason read_only), decided before any wake or row",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/message", Method: "POST"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/agents/{id}/message", Method: "POST"},

@@ -2901,7 +2901,9 @@ func activeDirectProjectRoles(ctx context.Context, st store.Store, authz *AuthzS
 		// Callers decide membership and ownership from these names, so a
 		// role that does not confer membership (project-visitor) is left
 		// out.
-		if rd.ConfersProjectMembership() {
+		// Only built-in membership roles (system rows) are named: a custom
+		// role that holds a built-in name is not one (ptone/scion#5519).
+		if rd.ConfersProjectMembership() && store.IsBuiltInProjectMembershipRoleDef(rd) {
 			roles[rd.Name] = true
 		}
 	}
@@ -2956,7 +2958,7 @@ func (a *AuthzService) isProjectOwnerOrAdmin(ctx context.Context, userID, projec
 		if err != nil {
 			continue
 		}
-		if rd.Name == store.ProjectRoleOwner || rd.Name == store.ProjectRoleAdmin {
+		if rd.System && (rd.Name == store.ProjectRoleOwner || rd.Name == store.ProjectRoleAdmin) {
 			return true
 		}
 	}

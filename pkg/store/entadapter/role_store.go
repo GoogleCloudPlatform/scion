@@ -942,7 +942,9 @@ func (r *RoleStore) createRoleBinding(ctx context.Context, rb *store.RoleBinding
 	// (idx_rolebinding_one_membership_per_principal_per_project) catches
 	// concurrent races that slip past this check.
 	var membershipKind *string
-	if store.IsBuiltInProjectMembershipRole(rd.Name) {
+	// Only a system role of a built-in name is a built-in membership role; a
+	// custom row that holds such a name is not (ptone/scion#5519).
+	if rd.System && store.IsBuiltInProjectMembershipRole(rd.Name) {
 		mk := store.MembershipKindBuiltin
 		membershipKind = &mk
 
@@ -1253,15 +1255,17 @@ func (r *RoleStore) IsProjectMember(ctx context.Context, projectID, userID strin
 // roleRank returns a numeric ranking for role bindings based on the role
 // definition name. Higher rank = more privilege.
 func roleRank(rb *ent.RoleBinding) int {
-	if rb.Edges.RoleDefinition == nil {
+	if rb.Edges.RoleDefinition == nil || !rb.Edges.RoleDefinition.System {
 		return 0
 	}
 	switch rb.Edges.RoleDefinition.Name {
 	case store.ProjectRoleOwner:
-		return 3
+		return 4
 	case store.ProjectRoleAdmin:
-		return 2
+		return 3
 	case store.ProjectRoleMember:
+		return 2
+	case store.ProjectRoleViewer:
 		return 1
 	default:
 		return 0
