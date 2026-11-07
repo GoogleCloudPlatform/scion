@@ -421,6 +421,11 @@ type ServerConfig struct {
 	// effect is applied live from the endpoints settings section
 	// (ApplySnapshot); read it through HubEndpoints().Content, not directly.
 	ContentURL string
+	// ContentURLAllowSameSite is server.hub.content_url_allow_same_site as
+	// configured at startup: the override that lets ContentURL be on the
+	// hub's registrable domain. Applied live like ContentURL; read it
+	// through contentURLAllowSameSiteLiveValue.
+	ContentURLAllowSameSite bool
 	// DisableLegacyStorageFallback disables the legacy un-namespaced storage
 	// path fallback. When true, only hub-scoped paths are checked.
 	DisableLegacyStorageFallback bool
@@ -2426,11 +2431,16 @@ type Server struct {
 	// Dedicated artifact decision logger (nil = entries are discarded)
 	artifactDecisionLog *slog.Logger
 
-	// contentURLLive is the server.hub.content_url ApplySnapshot last
-	// applied, or nil before the first apply (ServerConfig.ContentURL then
-	// applies). It is read on every request by the content host's guard, so
-	// it is an atomic rather than a field under mu.
-	contentURLLive atomic.Pointer[string]
+	// contentURLLive is server.hub.content_url and
+	// server.hub.content_url_allow_same_site as ApplySnapshot last applied
+	// them, with what the hub derives from them (the classification, the
+	// parsed content host and the hub's host name; newContentURLLiveState),
+	// or nil before the first apply (ServerConfig then applies). It is read
+	// on every request by the content host's guard, so it is an atomic
+	// rather than a field under mu, and nothing in it is parsed per request.
+	// The values share one pointer so that no reader sees a new URL with the
+	// old override, or a parsed host from another apply.
+	contentURLLive atomic.Pointer[contentURLLiveState]
 	// contentURLWarned is the server.hub.content_url value whose problem
 	// (invalid, or on or beside the hub's own host) was last logged
 	// (contentURLInEffect), so each value is warned about once.

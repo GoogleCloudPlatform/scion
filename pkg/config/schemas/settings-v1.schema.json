@@ -1415,8 +1415,14 @@
           "type": "string",
           "format": "uri",
           "maxLength": 2048,
-          "description": "Optional content host: a second public origin, apart from public_url, on which shared artifact links and HTML artifact views are served. Must be https://host[:port] (http only for localhost or a loopback address), with no path, query, fragment or user credentials; IPv6 literals are refused. A value whose host name is public_url's host name, at any scheme or port, is refused on save and ignored at runtime. A value on public_url's registrable domain is accepted with a warning. On a request whose Host is this value the Hub serves only the artifact share and view routes and answers 404 to everything else, and it never sends or accepts the Hub session there. The content host must not sit behind an identity-aware proxy. Empty, the default, serves everything on public_url. Admins set it through the server-config API; user access tokens cannot.",
+          "description": "Optional content host: a second public origin, apart from public_url, on which shared artifact links and HTML artifact views are served. Must be https://host[:port] (http only for localhost or a loopback address), with no path, query, fragment or user credentials; IPv6 literals are refused. A value whose host name is public_url's host name, at any scheme or port, is refused on save and ignored at runtime. A value on public_url's registrable domain (for example content.example.com for a Hub at hub.example.com) is refused on save and ignored at runtime unless content_url_allow_same_site is set; with the override it is accepted and logs a warning, because it is not a separate security origin for cookies. The supported setup is a content host on a different registrable domain, such as example-content.net. On a request whose Host is this value the Hub serves only the artifact share and view routes and answers 404 to everything else, and it never sends or accepts the Hub session there. The content host must not sit behind an identity-aware proxy. Empty, the default, serves everything on public_url. Admins set it through the server-config API; user access tokens cannot.",
           "x-env-var": "SCION_SERVER_HUB_CONTENTURL",
+          "x-since": "1"
+        },
+        "content_url_allow_same_site": {
+          "type": "boolean",
+          "description": "Override that lets content_url be on public_url's registrable domain. Without it such a value is refused on save and ignored at runtime, because a content host on the Hub's registrable domain is not a separate security origin for cookies: the browser treats the two hosts as same-site and a cookie scoped to that domain reaches both. The supported setup is a content host on a different registrable domain. With the override the value is accepted and the Hub logs a warning. A value on public_url's own host name stays refused. Default false. Admins set it through the server-config API; user access tokens cannot.",
+          "x-env-var": "SCION_SERVER_HUB_CONTENTURLALLOWSAMESITE",
           "x-since": "1"
         },
         "agent_endpoint": {

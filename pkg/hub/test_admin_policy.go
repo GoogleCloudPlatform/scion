@@ -524,6 +524,7 @@ var testAdminSettingsKeyPolicy = map[string]testAdminPolicy{
 	"server.hub.public_url":                    testAdminPolicyDeny,
 	"server.hub.hub_name":                      testAdminPolicyDeny,
 	"server.hub.content_url":                   testAdminPolicyDeny,
+	"server.hub.content_url_allow_same_site":   testAdminPolicyDeny,
 	"image_registry":                           testAdminPolicyDeny,
 	"server.hub.monitoring_dashboard_url":      testAdminPolicyDeny,
 	"server.github_app":                        testAdminPolicyDeny,

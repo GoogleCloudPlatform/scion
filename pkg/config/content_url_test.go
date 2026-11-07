@@ -169,3 +169,45 @@ func TestContentURLSameHost(t *testing.T) {
 		}
 	}
 }
+
+// TestContentURLAllowSameSiteEnv: SCION_SERVER_HUB_CONTENTURLALLOWSAMESITE
+// reaches GlobalConfig.Hub.ContentURLAllowSameSite and the opsettings key
+// through the generic env mapping (no table entry), as
+// SCION_SERVER_HUB_CONTENTURL does (ptone/scion#7107 phase B item 1).
+func TestContentURLAllowSameSiteEnv(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("SCION_SERVER_HUB_CONTENTURLALLOWSAMESITE", "true")
+	cfg, err := LoadGlobalConfig("")
+	if err != nil {
+		t.Fatalf("LoadGlobalConfig: %v", err)
+	}
+	if !cfg.Hub.ContentURLAllowSameSite {
+		t.Errorf("SCION_SERVER_HUB_CONTENTURLALLOWSAMESITE=true did not reach GlobalConfig.Hub.ContentURLAllowSameSite")
+	}
+	if !LoadEnvKoanf().Bool(ContentURLAllowSameSiteKey) {
+		t.Errorf("SCION_SERVER_HUB_CONTENTURLALLOWSAMESITE=true did not reach %s", ContentURLAllowSameSiteKey)
+	}
+}
+
+// TestContentURLAllowSameSiteV1RoundTrip: settings.yaml (v1) and
+// GlobalConfig carry the override both ways, true and absent.
+func TestContentURLAllowSameSiteV1RoundTrip(t *testing.T) {
+	on := true
+	gc := ConvertV1ServerToGlobalConfig(&V1ServerConfig{Hub: &V1ServerHubConfig{ContentURLAllowSameSite: &on}})
+	if !gc.Hub.ContentURLAllowSameSite {
+		t.Fatalf("v1 -> GlobalConfig lost true")
+	}
+	back := ConvertGlobalToV1ServerConfig(gc)
+	if back.Hub == nil || back.Hub.ContentURLAllowSameSite == nil || !*back.Hub.ContentURLAllowSameSite {
+		t.Fatalf("GlobalConfig -> v1 lost true: %+v", back.Hub)
+	}
+
+	gc = ConvertV1ServerToGlobalConfig(&V1ServerConfig{Hub: &V1ServerHubConfig{ContentURL: "https://links.example.net"}})
+	if gc.Hub.ContentURLAllowSameSite {
+		t.Fatalf("v1 without the key -> GlobalConfig set it")
+	}
+	back = ConvertGlobalToV1ServerConfig(gc)
+	if back.Hub == nil || back.Hub.ContentURLAllowSameSite != nil {
+		t.Fatalf("GlobalConfig without the key -> v1 set it: %+v", back.Hub)
+	}
+}

@@ -86,6 +86,11 @@ type ServerConfigDBResponse struct {
 	// Read-only.
 	PublicURLStatus *PublicURLStatus `json:"public_url_status,omitempty"`
 
+	// ContentURLStatus reports whether server.hub.content_url is in effect,
+	// and if not, why it is ignored (ptone/scion#7107). Read-only: a PUT
+	// body that sends it back has it dropped.
+	ContentURLStatus *ContentURLStatus `json:"content_url_status,omitempty"`
+
 	// ObservabilityExport reports whether the hub's own metrics and trace
 	// exporters run, why, and the export project with its source (env,
 	// file or metadata), as decided at startup. Read-only: the export
@@ -257,6 +262,8 @@ func (s *Server) buildServerConfigDBResponse(ctx context.Context, ops *Operation
 	resp.EnvOverrides = overrides
 	// How the hub endpoint was resolved at startup (ptone/scion#3905).
 	resp.PublicURLStatus = s.publicURLStatus()
+	// Whether the content host is in effect (ptone/scion#7107).
+	resp.ContentURLStatus = s.contentURLStatus()
 	// The hub observability exporters as started (ptone/scion#4914).
 	resp.ObservabilityExport = s.ObservabilityExportStatus()
 
@@ -350,6 +357,8 @@ func applySnapshotToResponse(resp *ServerConfigResponse, snap Layer1Snapshot) {
 	// Endpoints
 	resp.Server.Hub.PublicURL = snap.PublicURL
 	resp.Server.Hub.ContentURL = snap.ContentURL
+	allowSameSite := snap.ContentURLAllowSameSite
+	resp.Server.Hub.ContentURLAllowSameSite = &allowSameSite
 	resp.Server.Hub.MonitoringDashboardURL = snap.MonitoringDashboardURL
 
 	// Hub observability export switches: the saved (or bootstrap) value;
@@ -735,7 +744,8 @@ const (
 )
 
 // echoedRunningValueKeys returns the keys of soft_delete_retention,
-// soft_delete_retain_files and authorized_domains that the request sends back
+// soft_delete_retain_files, content_url_allow_same_site and
+// authorized_domains that the request sends back
 // as the running value GET showed for them while no value is stored
 // (applyRunningValuesForUnsetKeys). Such a value is an echo, not a change:
 // writing it would pin this replica's startup value (which may come from
@@ -776,6 +786,13 @@ func (s *Server) echoedRunningValueKeys(ctx context.Context, ops *OperationalSet
 		if hub.SoftDeleteRetainFiles != nil && *hub.SoftDeleteRetainFiles == retainFiles &&
 			storedKeyUnset(ctx, ops, softDeleteRetainFilesKey) {
 			echoed[softDeleteRetainFilesKey] = true
+		}
+		// content_url_allow_same_site: GET always shows the value in effect
+		// (false, or a bootstrap true); sending it back must not pin the
+		// override into the shared row (ptone/scion#7107).
+		if hub.ContentURLAllowSameSite != nil && *hub.ContentURLAllowSameSite == ops.Snapshot().ContentURLAllowSameSite &&
+			storedKeyUnset(ctx, ops, config.ContentURLAllowSameSiteKey) {
+			echoed[config.ContentURLAllowSameSiteKey] = true
 		}
 	}
 	return echoed
@@ -941,6 +958,12 @@ func overlayEndpointsRequest(d *opsettings.EndpointsSettings, req *ServerConfigU
 		} else if hubFP.has("content_url") {
 			d.ContentURL = "" // explicitly cleared
 		}
+		if req.Server.Hub.ContentURLAllowSameSite != nil {
+			v := *req.Server.Hub.ContentURLAllowSameSite
+			d.ContentURLAllowSameSite = &v
+		} else if hubFP.has("content_url_allow_same_site") {
+			d.ContentURLAllowSameSite = nil // explicitly cleared
+		}
 		if hubNameChanged {
 			d.HubName = req.Server.Hub.HubName
 		}
@@ -963,7 +986,8 @@ func accessNoRowBase(ops *OperationalSettings) map[string]json.RawMessage {
 }
 
 // endpointsNoRowBase is the endpoints base when no endpoints row exists:
-// the effective monitoring_dashboard_url and content_url. hub_name is left
+// the effective monitoring_dashboard_url, content_url and
+// content_url_allow_same_site. hub_name is left
 // out: the
 // bootstrap value applies without being written
 // (bootstrapAppliesWhenAbsent). public_url and image_registry are left out
@@ -972,10 +996,17 @@ func accessNoRowBase(ops *OperationalSettings) map[string]json.RawMessage {
 // change (ptone/scion#3905, ptone/scion#3916).
 func endpointsNoRowBase(ops *OperationalSettings) map[string]json.RawMessage {
 	snap := ops.Snapshot()
-	return structToRawMap(opsettings.EndpointsSettings{
+	base := opsettings.EndpointsSettings{
 		MonitoringDashboardURL: snap.MonitoringDashboardURL,
 		ContentURL:             snap.ContentURL,
-	})
+	}
+	// The same-site override goes with the content host it governs, so a
+	// first save keeps a bootstrap content_url that relies on it in effect.
+	if snap.ContentURLAllowSameSite {
+		allowSameSite := true
+		base.ContentURLAllowSameSite = &allowSameSite
+	}
+	return structToRawMap(base)
 }
 
 // endpointsSeededBase drops hub_name and public_url from a non-managed
@@ -1096,6 +1127,9 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	rawBody = dropImageRegistryProvenance(rawBody)
 	// Likewise the read-only placement pre-upgrade report of a GET body.
 	rawBody = dropTopLevelMember(rawBody, placementPreflightKey)
+	// And the read-only content URL status, which a save in between (on
+	// any replica) changes.
+	rawBody = dropTopLevelMember(rawBody, contentURLStatusKey)
 	if s.rejectGateProtectedSettingsKeys(w, rawBody) {
 		return
 	}
@@ -1162,7 +1196,7 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	// writes a sent agent_endpoint to settings.yaml, so a save that sends one
 	// is checked against it, as file mode does.
 	dbRequestAgentEndpoint := requestAgentEndpoint(&req.ServerConfigUpdateRequest)
-	if !validateContentURLRequest(w, &req.ServerConfigUpdateRequest, s.HubEndpoints().Public, s.config.AgentEndpoint, dbRequestAgentEndpoint) {
+	if !validateContentURLRequest(w, &req.ServerConfigUpdateRequest, s.HubEndpoints().Public, contentURLAllowSameSiteAfter(&req.ServerConfigUpdateRequest, s.contentURLAllowSameSiteLiveValue()), s.config.AgentEndpoint, dbRequestAgentEndpoint) {
 		return
 	}
 	if rejectInvalidThinkingLevel(w, req.DefaultThinkingLevel) {
@@ -1997,12 +2031,13 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		// A change to the stored public URL is recorded before it is
 		// written, like a GCP permission-check change; if the record cannot
 		// be written, the change is not made (ptone/scion#3905).
-		publicURLBefore, publicURLAfter := "", ""
-		publicURLChange := false
+		// A failure records every change already recorded as not applied
+		// (endpointURLAudits).
+		endpointAudits := &endpointURLAudits{s: s, ctx: r.Context(), surface: gcpIAMSurfaceSave}
 		if secName == "endpoints" {
-			publicURLBefore, publicURLAfter = storedManagedPublicURL(ops), publicURLFromSectionDoc(doc)
-			if publicURLChange = publicURLBefore != publicURLAfter; publicURLChange {
-				if err := s.auditEndpointURLChange(r.Context(), config.PublicURLKey, gcpIAMSurfaceSave, publicURLBefore, publicURLAfter); err != nil {
+			publicURLBefore, publicURLAfter := storedManagedPublicURL(ops), publicURLFromSectionDoc(doc)
+			if publicURLBefore != publicURLAfter {
+				if err := endpointAudits.record(config.PublicURLKey, publicURLBefore, publicURLAfter); err != nil {
 					slog.Error("PUT server-config: failed to record public URL change", "error", err)
 					fileTxn.abort()
 					writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
@@ -2014,12 +2049,10 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 
 		// So is a change to the content host in effect (ptone/scion#7107
 		// phase A).
-		contentURLBefore, contentURLAfter := "", ""
-		contentURLChange := false
 		if secName == "endpoints" {
-			contentURLBefore, contentURLAfter = ops.Snapshot().ContentURL, contentURLInEffectWith(ops, doc)
-			if contentURLChange = contentURLBefore != contentURLAfter; contentURLChange {
-				if err := s.auditEndpointURLChange(r.Context(), config.ContentURLKey, gcpIAMSurfaceSave, contentURLBefore, contentURLAfter); err != nil {
+			contentURLBefore, contentURLAfter := ops.Snapshot().ContentURL, contentURLInEffectWith(ops, doc)
+			if contentURLBefore != contentURLAfter {
+				if err := endpointAudits.record(config.ContentURLKey, contentURLForAudit(contentURLBefore), contentURLForAudit(contentURLAfter)); err != nil {
 					slog.Error("PUT server-config: failed to record content URL change", "error", err)
 					fileTxn.abort()
 					writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
@@ -2029,12 +2062,24 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			}
 		}
 
-		newRev, inEffect, err := ops.update(r.Context(), secName, doc, updatedBy, expectedRev, "managed")
-		if publicURLChange && err != nil {
-			s.auditEndpointURLNotApplied(r.Context(), config.PublicURLKey, gcpIAMSurfaceSave, publicURLBefore, publicURLAfter, err)
+		// And a change to the same-site override in effect (phase B item 1).
+		if secName == "endpoints" {
+			allowSameSiteBefore := strconv.FormatBool(ops.Snapshot().ContentURLAllowSameSite)
+			allowSameSiteAfter := strconv.FormatBool(contentURLAllowSameSiteInEffectWith(ops, doc))
+			if allowSameSiteBefore != allowSameSiteAfter {
+				if err := endpointAudits.record(config.ContentURLAllowSameSiteKey, allowSameSiteBefore, allowSameSiteAfter); err != nil {
+					slog.Error("PUT server-config: failed to record content URL same-site override change", "error", err)
+					fileTxn.abort()
+					writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+						fmt.Sprintf("Failed to update section %q", secName), map[string]interface{}{"applied": applied})
+					return
+				}
+			}
 		}
-		if contentURLChange && err != nil {
-			s.auditEndpointURLNotApplied(r.Context(), config.ContentURLKey, gcpIAMSurfaceSave, contentURLBefore, contentURLAfter, err)
+
+		newRev, inEffect, err := ops.update(r.Context(), secName, doc, updatedBy, expectedRev, "managed")
+		if err != nil {
+			endpointAudits.notApplied(err)
 		}
 		if secName == gcpIAMSection {
 			// The approval covers only this write's own self-apply.
@@ -2456,6 +2501,9 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 			}
 			if hub.ContentURL != "" {
 				keys = append(keys, config.ContentURLKey)
+			}
+			if hub.ContentURLAllowSameSite != nil {
+				keys = append(keys, config.ContentURLAllowSameSiteKey)
 			}
 			if o := hub.Observability; o != nil {
 				if o.MetricsEnabled != nil {
@@ -3499,8 +3547,10 @@ var serverConfigTokenKeys = map[string]settingsTokenClass{
 	// endpoints
 	"server.hub.public_url": settingsTokenRefused, // the origin users and agents reach the hub on
 	config.ContentURLKey:    settingsTokenRefused, // the origin users open shared artifacts on
-	"image_registry":        settingsTokenRefused, // the registry agent images come from
-	"server.hub.hub_name":   settingsTokenConfiguration,
+	// whether that origin may share the hub's registrable domain
+	config.ContentURLAllowSameSiteKey: settingsTokenRefused,
+	"image_registry":                  settingsTokenRefused, // the registry agent images come from
+	"server.hub.hub_name":             settingsTokenConfiguration,
 	// the link operators follow from the Health page
 	"server.hub.monitoring_dashboard_url": settingsTokenRefused,
 }

@@ -2986,6 +2986,8 @@ func buildHubServerConfig(cfg *config.GlobalConfig, hubEndpoint, devAuthToken st
 		// ignores, with a warning, a value that is invalid or on its own
 		// host name (contentURLInEffect).
 		ContentURL: cfg.Hub.ContentURL,
+		// The override that lets it be on the hub's registrable domain.
+		ContentURLAllowSameSite: cfg.Hub.ContentURLAllowSameSite,
 		// Derive the agent/user JWT signing keys from the same shared session
 		// secret the web cookie store uses, so every replica behind the load
 		// balancer agrees on the signing key regardless of its host-derived
@@ -3681,6 +3683,8 @@ func initOperationalSettings(ctx context.Context, cfg *config.GlobalConfig, hubS
 	// A saved authorized_domains that differs from the deployment value
 	// (before ptone/scion#6000 a saved list was not enforced).
 	hubSrv.WarnAuthorizedDomainsDrift(snap)
+	// A stored content URL that is not in effect (ptone/scion#7107).
+	hubSrv.WarnContentURLNotInEffect()
 
 	if envKeys := ops.EnvOverriddenKeys(); len(envKeys) > 0 {
 		slog.Warn("Layer-1 settings overridden by SCION_SERVER_* env vars on this node — these values diverge from the shared DB",
