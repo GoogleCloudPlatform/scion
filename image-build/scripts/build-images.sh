@@ -245,17 +245,41 @@ if [[ "${PUSH}" != "true" ]]; then
   LOAD="true"
 fi
 
+# BEGIN release-tag rule (keep identical in hack/version.sh and
+# image-build/scripts/build-images.sh; test-build-images.sh compares them)
+# VERSION accepts only the tag forms the release process cuts: vX.Y.Z,
+# vX.Y.Z-preview.N, vX.Y.Z-rc.N and nightly-YYYYMMDD (the pattern of
+# scripts/release/update-homebrew-formula.sh plus the nightly form). Any
+# other tag is treated as no release tag: VERSION stays empty, so the
+# binaries report "dev", and one warning goes to stderr. It never fails.
+release_tag_or_empty() {
+  local re='^(v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(preview|rc)\.(0|[1-9][0-9]*))?|nightly-[0-9]{8})$'
+  if [[ -z "$1" ]]; then
+    return 0
+  elif [[ "$1" =~ $re ]]; then
+    printf '%s\n' "$1"
+  elif [[ "$1" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    printf 'Warning: tag %s is not a release tag form; VERSION is left empty and the binaries report "dev".\n' "$1" >&2
+  else
+    printf 'Warning: a tag with unexpected characters is not a release tag form; VERSION is left empty and the binaries report "dev".\n' >&2
+  fi
+}
+# END release-tag rule
+
 # exact_tag_version <repo>
 #
-# Echoes the tag HEAD is exactly on, or nothing when HEAD is not on a tag.
+# Echoes the tag HEAD is exactly on, or nothing when HEAD is not on a tag
+# or the tag is not a release tag form (release_tag_or_empty).
 # Same rule as hack/version.sh: a v* tag first, then any exact tag. A
 # preview or stable tag shares its commit with a nightly tag, and among
 # lightweight tags git describe picks the first in refname order
 # (nightly-* before v*), so a plain --exact-match would name the nightly.
 exact_tag_version() {
-  git -C "$1" describe --tags --exact-match --match 'v*' 2>/dev/null \
+  local tag
+  tag="$(git -C "$1" describe --tags --exact-match --match 'v*' 2>/dev/null \
     || git -C "$1" describe --tags --exact-match 2>/dev/null \
-    || true
+    || true)"
+  release_tag_or_empty "${tag}"
 }
 
 # Compute git metadata once. Both used directly (in build-args, substitutions)
