@@ -309,6 +309,12 @@ type ProvisionInput struct {
 	// sentinel would still be written, masking the failure from every future
 	// pod that starts for this project (they'd all see the sentinel and skip
 	// provisioning, forever).
+	//
+	// A chown that fails with EPERM on an entry already owned by the
+	// resolved owner (NFSUID:NFSGID, 0 meaning 1000) is not a failure, with
+	// or without this flag: on an NFS export with all_squash, or root_squash
+	// with anonuid/anongid set to the workspace owner, root cannot chown but
+	// every entry already has the wanted owner (see checkChownEPERM).
 	RequireChownSuccess bool
 
 	// MountedWorktree is set by the Kubernetes provisioning init container
@@ -656,8 +662,10 @@ func ensureMountedWorktree(ctx context.Context, in ProvisionInput) error {
 		var err error
 		if recursive {
 			err = chownProjectTree(ctx, path, "", uid, gid)
-		} else {
-			err = lchownFile(path, uid, gid)
+		} else if lerr := lchownFile(path, uid, gid); lerr != nil {
+			// EPERM on an entry already owned by uid:gid (a squashing NFS
+			// export) is success, as in the recursive walk.
+			err = checkChownEPERM(path, uid, gid, lerr)
 		}
 		if err != nil {
 			if in.RequireChownSuccess {
@@ -4140,14 +4148,17 @@ func staleEntryError(in ProvisionInput, path string, state staleEntryState, err 
 }
 
 // recreateEmptyDir creates dir with mode and owner. The mode is applied
-// after the owner, since changing the owner can clear setgid. A variable
-// so tests can make it fail.
+// after the owner, since changing the owner can clear setgid. A chown that
+// fails with EPERM while dir already has the owner uid:gid (a squashing NFS
+// export) is not a failure. A variable so tests can make it fail.
 var recreateEmptyDir = func(dir string, mode os.FileMode, uid, gid int) error {
 	if err := os.Mkdir(dir, mode.Perm()); err != nil {
 		return err
 	}
-	if err := os.Lchown(dir, uid, gid); err != nil {
-		return err
+	if err := lchownFile(dir, uid, gid); err != nil {
+		if cerr := checkChownEPERM(dir, uid, gid, err); cerr != nil {
+			return cerr
+		}
 	}
 	return os.Chmod(dir, mode)
 }

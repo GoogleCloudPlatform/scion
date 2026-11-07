@@ -882,6 +882,20 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 			templateName, strings.Join(fields, " and ")))
 	}
 
+	// image_tag (ptone/scion#6625): the hub sends the resolved tag only
+	// while hub.image_tag_setting is on. It is applied to the short form
+	// first, so the local-image check below looks for the tagged image and
+	// the registry rewrite qualifies the tagged name; RewriteImageRef then
+	// also retags the registry rewrite's own output form. With no tag both
+	// rewrites are byte-identical to the image_registry rewrite alone.
+	imageTag := api.HubAgentDefaultsFromContext(ctx).ResolvedImageTag()
+	if imageTag != "" && resolvedImage != "" {
+		if tagged := config.RewriteImageTag(resolvedImage, imageTag); tagged != resolvedImage {
+			util.Debugf("image resolution: image_tag rewrite %s -> %s", resolvedImage, tagged)
+			resolvedImage = tagged
+		}
+	}
+
 	// Two-phase image resolution: for short-form (bare) images, prefer a
 	// locally-built image over the registry version. If no local image
 	// exists, fall back to the registry rewrite.
@@ -919,14 +933,14 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 			if localExists {
 				util.Debugf("image resolution: using local short-form image %s", resolvedImage)
 			} else {
-				rewritten := config.RewriteImageRegistry(resolvedImage, imageRegistry)
+				rewritten := config.RewriteImageRef(resolvedImage, imageRegistry, imageTag)
 				if rewritten != resolvedImage {
 					util.Debugf("image resolution: image_registry rewrite %s -> %s", resolvedImage, config.RedactImageRegistry(rewritten))
 					resolvedImage = rewritten
 				}
 			}
 		} else if imageRegistry != "" {
-			rewritten := config.RewriteImageRegistry(resolvedImage, imageRegistry)
+			rewritten := config.RewriteImageRef(resolvedImage, imageRegistry, imageTag)
 			if rewritten != resolvedImage {
 				util.Debugf("image resolution: image_registry rewrite %s -> %s", resolvedImage, config.RedactImageRegistry(rewritten))
 				resolvedImage = rewritten
@@ -2712,6 +2726,7 @@ authDone:
 			return nil
 		}(),
 		KubernetesBlockIdentity: opts.KubernetesBlockIdentity != nil,
+		CloudRunIdentity:        opts.CloudRunIdentity,
 		Kubernetes: func() *api.KubernetesConfig {
 			// Start from the template/agent config's Kubernetes settings
 			// (namespace, resources, node selector, etc.), then ALWAYS

@@ -704,7 +704,9 @@ func TestAgentDelegation_RouteGateDeniesEverythingElse(t *testing.T) {
 		{http.MethodGet, "/api/v1/projects/" + f.other.ID + "/members"},
 		{http.MethodGet, "/api/v1/projects/" + f.other.ID + "/settings"},
 		{http.MethodGet, "/api/v1/projects/" + f.other.ID + "/agents/" + f.agentB.ID},
-		{http.MethodGet, "/api/v1/projects/" + f.other.ID + "/agents"},
+		// GET /api/v1/projects/{id}/agents is admitted (agent.list); other methods on it are not.
+		{http.MethodHead, "/api/v1/projects/" + f.other.ID + "/agents"},
+		{http.MethodPost, "/api/v1/projects/" + f.other.ID + "/agents"},
 		{http.MethodGet, "/api/v1/auth/tokens"},
 		{http.MethodPost, "/api/v1/agents/" + f.agentA.ID + "/token/refresh"},
 		{http.MethodPost, "/api/v1/agents/" + f.agentA.ID + "/delegations"},
@@ -735,6 +737,23 @@ func TestAgentDelegation_RouteGateDeniesEverythingElse(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &list))
 	assert.Empty(t, list.Agents)
 	assert.Zero(t, list.TotalCount)
+	// So are the project agent, skill and template lists: without their list permission they answer an empty 200.
+	for path, key := range map[string]string{
+		"/api/v1/projects/" + f.other.ID + "/agents": "agents",
+		"/api/v1/skills":    "skills",
+		"/api/v1/templates": "templates",
+	} {
+		rec := f.do(t, http.MethodGet, path, nil, adtBearer(cred.Token))
+		require.Equal(t, http.StatusOK, rec.Code, "%s: %s", path, rec.Body.String())
+		var body map[string]json.RawMessage
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+		var items []json.RawMessage
+		require.NoError(t, json.Unmarshal(body[key], &items), path)
+		assert.Empty(t, items, path)
+		var total int
+		require.NoError(t, json.Unmarshal(body["totalCount"], &total), path)
+		assert.Zero(t, total, path)
+	}
 	g, err := f.store.GetAgentDelegationGrant(context.Background(), grant.ID)
 	require.NoError(t, err)
 	assert.Nil(t, g.RevokedAt, "no denied request revoked the grant")

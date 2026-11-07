@@ -53,6 +53,7 @@ Controls the central Hub API server.
 | `port` | int | `9810` | HTTP port to listen on (standalone mode). In combined mode (`--enable-web`), the Hub API is served on the web port instead and this setting is ignored. |
 | `host` | string | `"0.0.0.0"` | Network interface to bind to. |
 | `public_url` | string | | The externally accessible URL of the Hub (used for callbacks). Also editable in the admin UI; resolved at startup as described in [Hub Endpoint Resolution](#hub-endpoint-resolution): `--base-url`, then `SCION_SERVER_HUB_ENDPOINT`, then `SCION_SERVER_BASE_URL`, then a value saved in the database, then this file (the web server's base URL uses only operator inputs and never reads the database; see [Web Base URL](#web-base-url)). See [`server.hub.public_url`: environment first](/scion/reference/admin-settings/#serverhubpublic_url-environment-first). |
+| `content_url` | string | | Optional content host: a second public address, apart from `public_url`, on which shared artifact links and HTML artifact views are served. `https://host[:port]` only (`http` only for `localhost` or a loopback address), with no path, query, fragment or user info. Refused on save when it is on the same host name as `public_url` or `agent_endpoint`, at any scheme or port, and ignored at runtime in that case. On a request whose `Host` is this value the Hub serves only the artifact share and view routes and answers `404` to everything else. Admins set it; user access tokens cannot. Applied without a restart; when it changes or is cleared, the previous host is no longer confined and is served like any other host, so remove its DNS record or proxy route at the same time (the Hub's cookies stay host-only). See [`server.hub.content_url`](/scion/reference/admin-settings/#serverhubcontent_url-the-content-host) and [Content host](/scion/reference/security/#6-content-host). Env: `SCION_SERVER_HUB_CONTENTURL`. |
 | `agent_endpoint` | string | | Optional override of `public_url` used **only** for the Hub URL injected into agents (`SCION_HUB_ENDPOINT`). Use when agents reach the Hub on a different address than users — e.g. an internal VPC URL — while invite links, chat-bridge links, the OIDC issuer default, and the `cloudrun_invoker` audience default keep using `public_url`. Must be `scheme://host[:port]` only: `http` or `https`, an IP literal or a hostname of letters, digits, `_`, `-`, and `.`, no path, query, fragment, or credentials (a trailing `/` is stripped); the Hub fails to start otherwise. When unset, agents receive the Hub's regular endpoint (`public_url`, or the endpoint the Hub resolves when `public_url` is unset). **Scope:** injected into agents on every broker attached to this Hub, including remote brokers — see [Splitting the agent endpoint from the public URL](#splitting-the-agent-endpoint-from-the-public-url). **Security:** an `http://` value sends agent bearer tokens and fetched secrets unencrypted; prefer `https://` unless the network is trusted and isolated. |
 | `monitoring_dashboard_url` | string | | Optional link to an external monitoring dashboard for this Hub, such as a Cloud Monitoring or Grafana dashboard. Must be an absolute `http` or `https` URL with a host, at most 2048 characters, with no user credentials, a port (if any) from 1 to 65535, and no whitespace (including Unicode spaces such as U+00A0), control characters (C0, DEL or C1), bidirectional formatting characters, invisible format characters (U+00AD, U+180E, U+200B to U+200D, U+2060, U+FEFF) or U+FFFD; a path, query and fragment are allowed. Any other value is rejected with `422` when saved through the admin API. When set, the Health page header shows **Open monitoring dashboard**, which opens the URL in a new tab; when unset, no link is shown. Editable in **Server Config** and applied without a restart. Only callers with `hub.health.read` receive it (as `links.monitoring_dashboard` in the health summary); it is not part of `/api/v1/settings/public`. Env: `SCION_SERVER_HUB_MONITORINGDASHBOARDURL` (seed: `SCION_SEED_SERVER_HUB_MONITORINGDASHBOARDURL`). |
 | `gcp_project_id` | string | | The Hub's GCP project. Layer-0, read once at startup: set it in `settings.yaml` (`server.hub.gcp_project_id`) or with `SCION_SERVER_HUB_GCPPROJECTID`, which wins over the file. A legacy `server.yaml` `hub.gcpProjectId` is read only when `settings.yaml` has no `server` key: a `settings.yaml` with a `server` block replaces `server.yaml` as a whole (see [Which GCP project the Hub uses](#which-gcp-project-the-hub-uses)). Used as the project for service account minting and as the Policy Troubleshooter quota project; when it is unset, both use the project of the GCP metadata server on GCE, GKE or Cloud Run. It is also the export project of the Hub's own metrics and traces, and turns metrics export on when [`observability.metrics_enabled`](#observability-export-serverhubobservability) is unset. Not editable in the admin UI, and refused by `PUT /api/v1/admin/server-config` in every mode, workstation included (`GET` leaves it out), because it selects the service account minting project. See [Which GCP project the Hub uses](#which-gcp-project-the-hub-uses). |
@@ -240,7 +241,7 @@ server:
 
 - **Restarts.** The runtime does not set a restart policy on the Instance, so the platform's default restart behavior applies: an agent that exits with code 0 may not be restarted. Start it again with `scion start`.
 - **Launch timeout.** Set `launch_timeout` to at least `"120s"`; the default (`"5m"`) is above this. The figure comes from measurements on the live Instances API: an Instance whose image was already cached was ready about 8 seconds after the create was accepted (worst of the cached runs), and the single start measured with an image not yet pulled took about 46 seconds. The broker waits for the create to finish and stops the launch 20 seconds before its deadline, so an uncached start needs a deadline of about 66 seconds. Allowing about 54 seconds more, close to double, for the work the broker does before the create and for larger images and slower pulls than the single uncached start measured, gives 120 seconds. Raise it further for large agent images.
-- **Resources.** The agent's resolved `resources` set the Instance container's CPU and memory limits. Cloud Run has limits only, so each takes `limits`, or `requests` when no limit is set; with neither, the platform default applies (1 vCPU, 512Mi). Unless `runtime.enforce_resource_defaults` is false, `limits.cpu` always has a value, because the built-in default `limits.cpu: "2"` applies here as on other runtimes, so `requests.cpu` takes effect only when it is above 2 (it then raises the limit to match); with the defaults off, `requests.cpu` applies when `limits.cpu` is unset. CPU must be 1, 2, 4, 6 or 8 vCPU, memory 512Mi to 32Gi in whole `Mi` or `M`, and memory must fall in the range the vCPU count allows (1 vCPU up to 4Gi; 2 up to 8Gi; 4 from 2Gi to 16Gi; 6 from 4Gi to 24Gi; 8 from 4Gi to 32Gi). A resource left unset is checked at its platform default, so `limits.cpu: "4"` also needs `limits.memory` of at least `2Gi`. Values outside these limits fail the create with an error naming the field, before anything is provisioned. Errors name the CPU limit as the resolved `resources.limits.cpu`, which the built-in default or a larger `requests.cpu` may have set. Cloud Run Instances keep CPU allocated for their whole lifetime; the runtime does not set the request-based `cpu_idle` option. `resources.disk` is not applied; the Runtime Broker logs the effective CPU and memory, and any unapplied disk, when it creates the Instance.
+- **Resources.** The agent's resolved `resources` set the Instance container's CPU and memory limits. Cloud Run has limits only, so each takes `limits`, or `requests` when no limit is set; with neither, the platform default applies (1 vCPU, 512Mi). Unless `runtime.enforce_resource_defaults` is false, `limits.cpu` always has a value, because the built-in default `limits.cpu: "2"` applies here as on other runtimes, so `requests.cpu` takes effect only when it is above 2 (it then raises the limit to match); with the defaults off, `requests.cpu` applies when `limits.cpu` is unset. CPU must be 1, 2, 4, 6 or 8 vCPU, memory 512Mi to 32Gi in whole `Mi` or `M`, and memory must fall in the range the vCPU count allows (1 vCPU up to 4Gi; 2 up to 8Gi; 4 from 2Gi to 16Gi; 6 from 4Gi to 24Gi; 8 from 4Gi to 32Gi). A resource left unset is checked at its platform default, so `limits.cpu: "4"` also needs `limits.memory` of at least `2Gi`. Values outside these limits fail before anything is provisioned, with a message naming the field, the quoted value and the platform rule: a synchronous create, start or restart answers HTTP 400 (`validation_error`), and an asynchronous launch ends with launch error `container_config`. Errors name the CPU limit as the resolved `resources.limits.cpu`, which the built-in default or a larger `requests.cpu` may have set. Cloud Run Instances keep CPU allocated for their whole lifetime; the runtime does not set the request-based `cpu_idle` option. `resources.disk` is not applied; the Runtime Broker logs the effective CPU and memory, and any unapplied disk, when it creates the Instance.
 - **Clone-per-agent.** A clone-per-agent agent gets its own workspace on the NFS share, `<subpath_root>/<project-id>/agents/<agent>/workspace`, next to its home, and the Instance mounts it at `/workspace`. The project's shared workspace is neither cloned nor mounted for it. `sciontool init` clones the repository into the empty workspace inside the container on the agent's first start; a later start, resume or restart finds it populated and keeps the agent's work (it only refreshes the git credential helper). Deleting the agent removes its workspace. An agent created before this layout keeps working in the project's shared checkout, in shared-plain mode, until it is recreated. The workspace is on the share, but everything else the agent writes, to the container's root filesystem or `/tmp`, is held in memory and counts against the Instance's memory limit. Empty-per-agent is still not supported on this runtime. Moving a clone-per-agent agent to another Runtime Broker with its workspace (an `export` move) is refused on every runtime other than Kubernetes, by the `workspace_on_export` move check.
 
 #### Asynchronous agent start
@@ -976,7 +977,7 @@ In both modes, NFS problems are logged and reported per share in the `nfs_mounts
 
 #### NFS Workspaces on Kubernetes
 
-With the `nfs` backend, each Kubernetes agent pod gets a `workspace-provision` init container, whether the pod mounts the share through a bound PV claim (`nfs.shares[].pv_name`) or inline (no `pv_name`). It runs for both git and non-git agents. It creates the per-project subPath (or, if another pod is already provisioning it, waits for that pod to finish) and chowns it to the agent runtime uid (`1000`) and `nfs.gid` so the agent can write `/workspace`; `nfs.uid` is ignored on Kubernetes (see the `nfs.uid` row above). For git agents, it also clones the repository. The init container runs as root with only the `CHOWN`, `FOWNER`, and `DAC_OVERRIDE` capabilities and does not follow symlinks. If the chown fails, the agent start fails and the error names the failed init container, so the agent never runs with an unwritable workspace.
+With the `nfs` backend, each Kubernetes agent pod gets a `workspace-provision` init container, whether the pod mounts the share through a bound PV claim (`nfs.shares[].pv_name`) or inline (no `pv_name`). It runs for both git and non-git agents. It creates the per-project subPath (or, if another pod is already provisioning it, waits for that pod to finish) and chowns it to the agent runtime uid (`1000`) and `nfs.gid` so the agent can write `/workspace`; `nfs.uid` is ignored on Kubernetes (see the `nfs.uid` row above). For git agents, it also clones the repository. The init container runs as root with only the `CHOWN`, `FOWNER`, and `DAC_OVERRIDE` capabilities and does not follow symlinks. If the chown fails, the agent start fails and the error names the failed init container, so the agent never runs with an unwritable workspace. A chown refused with `EPERM` on an entry that already has the wanted owner (uid `1000` and `nfs.gid`) does not count as a failure. That is what an export that maps root to an anonymous user (`root_squash` or `all_squash`) looks like to the init container. Such an export works only when it maps root to `anonuid=1000` and `anongid=<nfs.gid>`, with `nfs.uid` unset or `1000`: a Hub or Runtime Broker that runs as root gives each new workspace or shared-directory leaf it creates to `nfs.uid` (see above), and on such an export the init container cannot change that owner. With the default `anonuid=65534`, entries are owned by `65534` and the agent start fails.
 
 Pods get `fsGroup` from `nfs.gid` (default `1000`). For shared directories on the NFS export, Scion also adds each shared directory's own group to the pod's supplementary groups (see [Agent groups](#agent-groups-on-nfs-shared-directories)), so `nfs.gid` does not need to match it.
 
@@ -1309,6 +1310,7 @@ File permissions: mount the keyring file with mode 0400 (0440 when a group must 
 - `server.hub.gcp_iam_deny_unknown_policy` -> `SCION_SERVER_HUB_GCPIAMDENYUNKNOWNPOLICY`
 - `server.hub.admin_emails` -> `SCION_SERVER_HUB_ADMINEMAILS`
 - `server.hub.stalled_threshold` -> `SCION_SERVER_HUB_STALLEDTHRESHOLD`
+- `server.hub.content_url` -> `SCION_SERVER_HUB_CONTENTURL`
 - `server.hub.monitoring_dashboard_url` -> `SCION_SERVER_HUB_MONITORINGDASHBOARDURL`
 - `server.hub.observability.metrics_enabled` -> `SCION_SERVER_HUB_OBSERVABILITY_METRICSENABLED`
 - `server.hub.observability.tracing_enabled` -> `SCION_SERVER_HUB_OBSERVABILITY_TRACINGENABLED`
@@ -1596,17 +1598,20 @@ notification_channels:
 
 ### Email channel
 
-Delivers notifications by email.
+Delivers notifications by SMTP email. Each `From`, `To` (per recipient) and `Subject` header value is kept on a single line: any run of `\r` and `\n` characters is collapsed to a single space and trimmed at both ends.
 
 **Type:** `email`
 
 **Parameters:**
 
-| Param    | Required | Description |
-|----------|----------|-------------|
-| `to`     | yes      | Recipient email address. |
-| `from`   | no       | Sender address override. |
-| `smtp`   | no       | SMTP server host:port. |
+| Param      | Required | Description |
+|------------|----------|-------------|
+| `host`     | yes      | SMTP server host (e.g. `smtp.example.com`). |
+| `port`     | no       | SMTP server port (defaults to `"587"`). |
+| `from`     | yes      | Sender email address. |
+| `to`       | yes      | Recipient email address(es), comma-separated. |
+| `username` | no       | SMTP authentication username (authentication is skipped when empty). |
+| `password` | no       | SMTP authentication password. |
 
 **Example:**
 
@@ -1614,7 +1619,40 @@ Delivers notifications by email.
 notification_channels:
   - type: email
     params:
+      host: smtp.example.com
+      from: scion@example.com
       to: oncall@example.com
+```
+
+### Teams channel
+
+Delivers notifications to a Microsoft Teams conversation via the Bot Connector REST API.
+
+**Type:** `teams`
+
+**Parameters:**
+
+| Param             | Required | Description |
+|-------------------|----------|-------------|
+| `app_id`          | yes      | Azure App Registration client ID. |
+| `app_secret`      | yes      | Azure App Registration client secret. |
+| `tenant_id`       | yes      | Azure AD tenant ID (must be a valid UUID). |
+| `conversation_id` | yes      | Teams conversation ID to deliver notifications to. |
+| `service_url`     | yes      | Bot Framework service URL. Must use `https://` and its host must be one of the recognised Bot Framework service hosts: `smba.trafficmanager.net`, `smba.infra.gcc.teams.microsoft.com`, `smba.infra.gov.teams.microsoft.us`, or `smba.infra.dod.teams.microsoft.us`. |
+
+Parameter values are used exactly as written; settings files do not expand environment variables.
+
+**Example:**
+
+```yaml
+notification_channels:
+  - type: teams
+    params:
+      app_id: 00000000-0000-0000-0000-000000000000
+      app_secret: <client-secret>
+      tenant_id: 11111111-1111-1111-1111-111111111111
+      conversation_id: 19:meeting_example@thread.v2
+      service_url: https://smba.trafficmanager.net/amer
 ```
 
 ### Discord channel

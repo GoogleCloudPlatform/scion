@@ -1339,6 +1339,24 @@ type HubAgentDefaults struct {
 	// settings telemetry into the stored config on create, so those
 	// fields rank as agent config here (ptone/scion#4241).
 	Telemetry *TelemetryConfig `json:"telemetry,omitempty"`
+	// ImageTag is the tag the hub's image_tag setting selects for the
+	// bundled scion-* images (ptone/scion#6625), already resolved and
+	// expanded by the hub ("version" becomes the hub's version). The hub
+	// sends it only while hub.image_tag_setting is on and the setting is
+	// set. The broker applies it with config.RewriteImageTag and
+	// config.RewriteImageRef to the image it resolves, before the
+	// image_registry rewrite; an absent value leaves the image unchanged,
+	// which is also what a broker that predates the field does.
+	ImageTag string `json:"imageTag,omitempty"`
+}
+
+// ResolvedImageTag returns the hub-resolved image tag, or "" when the hub
+// sent none. Safe on a nil receiver.
+func (d *HubAgentDefaults) ResolvedImageTag() string {
+	if d == nil {
+		return ""
+	}
+	return d.ImageTag
 }
 
 // ExperimentEnabled reports whether the hub sent name as enabled.
@@ -1371,7 +1389,7 @@ func (d *HubAgentDefaults) IsEmpty() bool {
 		return true
 	}
 	return d.MaxTurns == 0 && d.MaxModelCalls == 0 && d.MaxDuration == "" && d.Resources == nil &&
-		d.AutoExposePorts == nil && len(d.Experiments) == 0 && d.Telemetry == nil
+		d.AutoExposePorts == nil && len(d.Experiments) == 0 && d.Telemetry == nil && d.ImageTag == ""
 }
 
 // EnvAutoExposePorts is the env key that enables in-container port
@@ -1538,6 +1556,13 @@ type StartOptions struct {
 	// is recomputed on every dispatch.
 	KubernetesBlockIdentity *KubernetesBlockIdentity
 
+	// CloudRunIdentity is set by the broker when the dispatch targets the
+	// Cloud Run runtime and the hub sent the hub.cloudrun_native_identity
+	// experiment: the instance then runs as its ServiceAccount. Nil keeps
+	// the runtime's configured account. It is per dispatch and never
+	// persisted, so it is recomputed on every start.
+	CloudRunIdentity *CloudRunIdentity `json:"-"`
+
 	// ResolvedPlacement is the Kubernetes placement (node selector,
 	// tolerations, runtime class) the agent runtime server resolved for this
 	// start from its settings (ptone/scion#5085), and PlacementResolved
@@ -1593,6 +1618,19 @@ type KubernetesBlockIdentity struct {
 	// ServiceAccountName is the operator-configured block ServiceAccount,
 	// or empty for the namespace's default ServiceAccount.
 	ServiceAccountName string
+}
+
+// CloudRunIdentity is the broker-resolved instance identity for one Cloud Run
+// dispatch. Nil = gate off / not Cloud Run: the runtime uses its configured
+// account. Non-nil with an empty ServiceAccount is invalid and the runtime
+// refuses it (fail closed). See StartOptions.CloudRunIdentity.
+type CloudRunIdentity struct {
+	// ServiceAccount is the account the instance runs as (the assigned
+	// account, or the block account).
+	ServiceAccount string
+	// Mode is the GCP identity mode as resolved, before the metadata env
+	// rewrite: "assign" or "block".
+	Mode string
 }
 
 // ResourceHandle identifies one runtime resource created during a launch

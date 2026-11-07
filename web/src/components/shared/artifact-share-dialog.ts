@@ -71,7 +71,7 @@ import {
   patchArtifact,
   putGrant,
   revokeLink,
-  shareLinkUrl,
+  createdLinkUrl,
 } from '../../client/artifacts.js';
 import type {
   Artifact,
@@ -530,7 +530,7 @@ export class ScionArtifactShareDialog extends LitElement {
   private async copyCreated(): Promise<void> {
     if (!this.created) return;
     try {
-      await navigator.clipboard.writeText(shareLinkUrl(this.created.url, window.location.origin));
+      await navigator.clipboard.writeText(createdLinkUrl(this.created, window.location.origin));
       this.copied = true;
     } catch {
       this.error = 'Could not copy. Select the link and copy it yourself.';
@@ -809,7 +809,7 @@ export class ScionArtifactShareDialog extends LitElement {
   private renderCreated(): TemplateResult | typeof nothing {
     const c = this.created;
     if (!c) return nothing;
-    const url = shareLinkUrl(c.url, window.location.origin);
+    const url = createdLinkUrl(c, window.location.origin);
     // Copy follows the approved Share mock: the success alert says the link
     // is shown once and until when it works; when the artifact's expiry cut
     // the link short, the alert keeps only the shown-once line and a

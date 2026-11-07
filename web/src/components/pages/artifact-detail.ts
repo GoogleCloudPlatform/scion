@@ -63,6 +63,7 @@ import { showToast } from '../../utils/toast.js';
 import {
   ARTIFACTS_FLAG,
   MAX_INLINE_TEXT_BYTES,
+  artifactArchiveUrl,
   artifactFileUrl,
   artifactOriginOf,
   artifactPagePath,
@@ -600,6 +601,20 @@ export class ScionPageArtifactDetail extends LitElement {
         font-size: 0.8125rem;
         color: var(--sl-color-neutral-600);
         margin: 0.5rem 0;
+      }
+      .files-header {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.5rem;
+      }
+      .archive {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        font-size: 0.8125rem;
+        color: var(--sl-color-neutral-600);
       }
       .single-version {
         text-align: center;
@@ -2362,15 +2377,18 @@ export class ScionPageArtifactDetail extends LitElement {
     const fetched = remote.filter((x) => x.fetchStatus === 'ok').length;
     const total = own.reduce((n, x) => n + x.size, 0);
     return html`
-      <div class="summary">
-        ${own.length} ${own.length === 1 ? 'file' : 'files'} · ${formatBytes(total)} · version
-        ${v.seq}
-        ${remote.length > 0
-          ? html` · remote images fetched when published: ${fetched}
-            ${remote.length > fetched
-              ? html`, could not be fetched: ${remote.length - fetched}`
-              : nothing}`
-          : nothing}
+      <div class="files-header">
+        <div class="summary">
+          ${own.length} ${own.length === 1 ? 'file' : 'files'} · ${formatBytes(total)} · version
+          ${v.seq}
+          ${remote.length > 0
+            ? html` · remote images fetched when published: ${fetched}
+              ${remote.length > fetched
+                ? html`, could not be fetched: ${remote.length - fetched}`
+                : nothing}`
+            : nothing}
+        </div>
+        ${this.renderArchive(v.seq)}
       </div>
       <table>
         <thead>
@@ -2423,6 +2441,36 @@ export class ScionPageArtifactDetail extends LitElement {
         </tbody>
       </table>
     `;
+  }
+
+  /**
+   * Download all (.zip) on the Files tab (ptone/scion#7106). It is shown
+   * only when the hub's version response says whether the zip is
+   * available, so the hub alone decides; the browser's download manager
+   * shows progress and allows cancel.
+   */
+  private renderArchive(seq: number): TemplateResult | typeof nothing {
+    const archive = this.data?.archive;
+    if (!archive) return nothing;
+    if (!archive.available) {
+      const why =
+        archive.reason === 'unsupported_name'
+          ? 'A file name cannot be stored in a zip; download files individually'
+          : 'Too large for one archive; download files individually';
+      return html`<div class="archive">
+        <sl-button size="small" disabled>
+          <sl-icon slot="prefix" name="download"></sl-icon>
+          Download all (.zip)
+        </sl-button>
+        <span class="archive-note">${why}</span>
+      </div>`;
+    }
+    return html`<div class="archive">
+      <sl-button size="small" href=${artifactArchiveUrl(this.artifactId, seq)} download="">
+        <sl-icon slot="prefix" name="download"></sl-icon>
+        Download all (.zip)
+      </sl-button>
+    </div>`;
   }
 
   private createdBy(v: ArtifactVersion): string {

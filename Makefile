@@ -850,13 +850,15 @@ vet-integration-extras:
 compat-literals:
 	@./hack/check-project-compat-literals.sh
 
-## check-authz-guards: Verify no authorization-bypass patterns exist in handler code
+## check-authz-guards: Verify no authorization-bypass patterns exist in handler code, and that the scan reaches every hack/area-dirs.txt directory
 # NOTE: make reports its own failure code (2) rather than the recipe's, so the
-# script's exit 1 (violations found) and exit 2 (nothing was analysed — skipped,
-# not clean) are indistinguishable to anything reading this target's exit status.
-# The messages still differ on stderr. Any caller that needs to tell those two
-# apart must invoke ./hack/check-authz-guards.sh directly, as CI does.
+# script's exit 1 (violations found, or the --self-test-dirs self-test failed)
+# and exit 3, 4 or 5 (nothing was analysed —
+# skipped, not clean) are indistinguishable to anything reading this target's
+# exit status. The messages still differ on stderr. Any caller that needs to
+# tell them apart must invoke ./hack/check-authz-guards.sh directly, as CI does.
 check-authz-guards:
+	@./hack/check-authz-guards.sh --self-test-dirs
 	@./hack/check-authz-guards.sh
 
 ## check-annotation-prefix: Flag new scion.io/ annotation keys (migration to scion.dev/)
@@ -913,9 +915,11 @@ time-literals:
 check-harness-coverage:
 	@./image-build/scripts/check-harness-coverage.sh
 
-## test-image-scripts: Test the release image driver (image-build/scripts/build-release-images.sh) with stubs; no docker, no network
+## test-image-scripts: Test the release image driver (build-release-images.sh), the build-images.sh guards and the assert-no-cgo.sh exit contract with stubs; no docker, no network
 test-image-scripts:
 	@bash ./image-build/scripts/test-build-release-images.sh
+	@bash ./image-build/scripts/test-build-images.sh
+	@bash ./image-build/scripts/test-assert-no-cgo.sh
 
 ## check-image-go-dirs: Verify every Dockerfile that builds the root Go module copies all of its top-level Go dirs (ptone/scion#5453)
 # NOTE: same caveat as check-authz-guards above -- make collapses the
@@ -999,6 +1003,7 @@ container-sciontool:
 	@GOOS=$(CONTAINER_OS) GOARCH=$(CONTAINER_ARCH) CGO_ENABLED=0 \
 		go build -buildvcs=false -ldflags "$(SCIONTOOL_LDFLAGS)" \
 		-o $(CONTAINER_DIR)/sciontool ./cmd/sciontool
+	@bash image-build/lib/assert-no-cgo.sh $(CONTAINER_DIR)/sciontool
 	@echo "Built: $(CONTAINER_DIR)/sciontool"
 
 ## container-scion: Cross-compile scion CLI for Linux containers

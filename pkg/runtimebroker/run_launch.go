@@ -1063,6 +1063,14 @@ func classifyStartErrorCode(err error, templateSlug, op string) (code, message s
 		// directory, so only the refusal is reported.
 		return api.LaunchCodeGitConfigRefused, text
 	}
+	// The runtime refused the resource spec before creating anything
+	// (ptone/scion#7103): container_config, with the public message, which
+	// names only the fields, the caller's values and the platform rule.
+	// This and the git config refusal above match disjoint error types, so
+	// their order does not change behaviour.
+	if re, ok := resourceLimitsErrorFrom(err); ok {
+		return api.LaunchCodeContainerConfig, re.PublicMessage()
+	}
 	var skillErr *agent.SkillResolutionError
 	switch {
 	case errors.Is(err, agent.ErrContainerNameInUse):

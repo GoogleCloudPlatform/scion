@@ -41,6 +41,7 @@ import {
   READABLE_PROJECTS_CAP,
   rendererFor,
   sha256Hex,
+  createdLinkUrl,
   shareLinkUrl,
   sortProjectChoices,
   type ArtifactGrant,
@@ -631,6 +632,22 @@ describe('sharing helpers', () => {
 
   it('makes the hub-relative link absolute', () => {
     expect(shareLinkUrl('/api/v1/artifacts/shared/abc', 'https://hub.example.com')).toBe(
+      'https://hub.example.com/api/v1/artifacts/shared/abc'
+    );
+  });
+
+  it('prefers the hub shareUrl for a created link and falls back to the hub-relative url (ptone/scion#7107)', () => {
+    const url = '/api/v1/artifacts/shared/abc';
+    expect(
+      createdLinkUrl(
+        { url, shareUrl: 'https://links.example.net/api/v1/artifacts/shared/abc' },
+        'https://hub.example.com'
+      )
+    ).toBe('https://links.example.net/api/v1/artifacts/shared/abc');
+    expect(createdLinkUrl({ url }, 'https://hub.example.com')).toBe(
+      'https://hub.example.com/api/v1/artifacts/shared/abc'
+    );
+    expect(createdLinkUrl({ url, shareUrl: '' }, 'https://hub.example.com')).toBe(
       'https://hub.example.com/api/v1/artifacts/shared/abc'
     );
   });

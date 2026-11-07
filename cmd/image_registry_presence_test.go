@@ -165,12 +165,14 @@ func TestBootstrapImageRegistryConfigured(t *testing.T) {
 }
 
 // TestImageRegistryPresenceHint_LinksReleaseBuild: the missing-registry
-// hint points at the README section on building images that match a
-// release (ptone/scion#6625), next to the general build instructions.
+// hint names the release image driver and the README section on building
+// images that match a release (ptone/scion#6625), next to the general
+// build instructions.
 func TestImageRegistryPresenceHint_LinksReleaseBuild(t *testing.T) {
 	t.Setenv(config.EnvMaintenanceImageRegistry, "")
 	msg := brokerRegistryMissingError().Error()
 	assert.Contains(t, msg, "See image-build/README.md")
 	assert.Contains(t, msg, "image-build/README.md#build-images-for-a-release")
+	assert.Contains(t, msg, "run image-build/scripts/build-release-images.sh <version>")
 	assert.Contains(t, msg, "image_tag")
 }

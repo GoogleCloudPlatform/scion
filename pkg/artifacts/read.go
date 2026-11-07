@@ -331,6 +331,7 @@ func (s *Service) handleGetArtifact(w http.ResponseWriter, r *http.Request, id s
 			return
 		}
 		resp.Version = versionInfo(v, files)
+		resp.Archive = s.archiveInfo(r.Context(), b, files)
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

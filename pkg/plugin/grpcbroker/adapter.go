@@ -61,9 +61,8 @@ type AdapterConfig struct {
 }
 
 // GRPCBrokerAdapter implements eventbus.EventBus by wrapping gRPC client calls
-// to a remote BrokerService. It includes reconnection logic modeled on
-// reconnectingBrokerAdapter: maintains an activeSubs map and re-subscribes
-// after reconnect.
+// to a remote BrokerService. It includes its own reconnection logic: it
+// maintains an activeSubs map and re-subscribes after reconnect.
 type GRPCBrokerAdapter struct {
 	address string
 	tlsCfg  *TLSConfig

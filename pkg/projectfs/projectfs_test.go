@@ -158,7 +158,7 @@ func TestResolveRejects(t *testing.T) {
 		{"local/no project dir", localLayout(), Project{ID: testPID}, "", WorkspaceMount(ModeSharedPlain, ""), "project directory is required"},
 		{"local/agent workspace", localLayout(), Project{Dir: "/p"}, "dev", WorkspaceMount(ModeClonePerAgent, ""), "not resolved here yet"},
 		{"unknown backend", Layout{Backend: "gcs"}, Project{ID: testPID}, "", scratch, "unsupported backend"},
-		{"unknown kind", nfsLayout(), Project{ID: testPID}, "", Mount{Kind: "volume", Name: "v"}, "unsupported mount kind"},
+		{"unknown kind", nfsLayout(), Project{ID: testPID}, "", Mount{Kind: "other", Name: "v"}, "unsupported mount kind"},
 		{"user owned", nfsLayout(), Project{ID: testPID}, "", Mount{Kind: KindSharedDir, Name: "v", Owner: OwnerUser}, "user-owned"},
 	}
 	for _, tt := range tests {

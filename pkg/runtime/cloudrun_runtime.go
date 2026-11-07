@@ -261,10 +261,13 @@ var cloudRunRuntimeEnvKeys = []string{"SCION_HOST_UID", "SCION_HOST_GID", startu
 
 // cloudRunResolvedAuthTaken reports the names that win over a resolved-auth
 // entry on a Cloud Run instance, before env-type secrets are folded into
-// cfg.Env: a cfg.Env name, an env-type secret's target and the runtime
-// keys (cloudRunRuntimeEnvKeys), as on Docker.
+// cfg.Env: a cfg.Env name, an env-type secret's target, the runtime keys
+// (cloudRunRuntimeEnvKeys) and the harness env (cloudRunHarnessEnv), as on
+// Docker. buildCloudRunInstance emits the same harness entries, so a name
+// the harness env sets is neither staged nor emitted from resolved auth.
 func cloudRunResolvedAuthTaken(cfg RunConfig) func(name string) bool {
-	taken := make(map[string]bool, len(cfg.Env)+len(cfg.ResolvedSecrets)+len(cloudRunRuntimeEnvKeys))
+	harnessEnv, _ := cloudRunHarnessEnv(cfg)
+	taken := make(map[string]bool, len(cfg.Env)+len(cfg.ResolvedSecrets)+len(cloudRunRuntimeEnvKeys)+len(harnessEnv))
 	for _, e := range cfg.Env {
 		k, _, _ := strings.Cut(e, "=")
 		taken[k] = true
@@ -277,7 +280,74 @@ func cloudRunResolvedAuthTaken(cfg RunConfig) func(name string) bool {
 	for _, k := range cloudRunRuntimeEnvKeys {
 		taken[k] = true
 	}
+	for _, e := range harnessEnv {
+		k, _, _ := strings.Cut(e, "=")
+		taken[k] = true
+	}
 	return func(name string) bool { return taken[name] }
+}
+
+// cloudRunHarnessEnvDeniedNames are the names the harness env never sets
+// on a Cloud Run instance, whatever their value: sciontool init and the
+// runtime own them (the staged blob, its markers and the telemetry
+// credential path), so harness env must never pre-empt the staged-secret
+// channel. Unlike Docker, a denied name is dropped even when no other
+// source sets it. reservedAgentEnvName names are denied too.
+var cloudRunHarnessEnvDeniedNames = map[string]bool{
+	stagedsecrets.EnvVar:               true,
+	stagedsecrets.HubTokenStagedEnvVar: true,
+	telemetryGCPCredentialsEnvVar:      true,
+}
+
+// cloudRunHarnessEnvDeniedPrefix marks the GCP metadata settings the hub
+// and broker write into cfg.Env (for example SCION_METADATA_MODE and, for
+// a native identity, SCION_METADATA_SA_EMAIL): the harness env never sets
+// one, so a value the hub did not write can never reach the instance.
+const cloudRunHarnessEnvDeniedPrefix = "SCION_METADATA_"
+
+// cloudRunHarnessEnvDenied reports whether the harness env may not set name
+// on a Cloud Run instance.
+func cloudRunHarnessEnvDenied(name string) bool {
+	return cloudRunHarnessEnvDeniedNames[name] || reservedAgentEnvName(name) || strings.HasPrefix(name, cloudRunHarnessEnvDeniedPrefix)
+}
+
+// cloudRunHarnessEnv returns the harness env entries (harnessEnvEntries) a
+// Cloud Run instance receives, sorted by name, and the sorted names it
+// denied (cloudRunHarnessEnvDenied). GetEnv gets cfg.HomeDir, the
+// broker-side host path per the {{ .AgentHome }} contract, as on Docker
+// and Kubernetes. A name cfg.Env or a runtime key (cloudRunRuntimeEnvKeys)
+// sets is left out: those win over the harness env, as on Docker.
+//
+// It runs twice per start, once for Run's staged split
+// (cloudRunResolvedAuthTaken) and once in buildCloudRunInstance, so
+// GetEnv and GetTelemetryEnv are called twice per Cloud Run start; this
+// assumes they are deterministic and side-effect free, as every in-tree
+// harness is. Otherwise the two name sets could differ.
+func cloudRunHarnessEnv(cfg RunConfig) (entries, denied []string) {
+	all := harnessEnvEntries(cfg, cfg.HomeDir)
+	if len(all) == 0 {
+		return nil, nil
+	}
+	set := make(map[string]bool, len(cfg.Env)+len(cloudRunRuntimeEnvKeys))
+	for _, e := range cfg.Env {
+		k, _, _ := strings.Cut(e, "=")
+		set[k] = true
+	}
+	for _, k := range cloudRunRuntimeEnvKeys {
+		set[k] = true
+	}
+	for _, e := range all {
+		k, _, _ := strings.Cut(e, "=")
+		if cloudRunHarnessEnvDenied(k) {
+			denied = append(denied, k)
+			continue
+		}
+		if set[k] {
+			continue
+		}
+		entries = append(entries, e)
+	}
+	return entries, denied
 }
 
 // cloudRunOwnerIDs returns the uid and gid the Cloud Run instance runs
@@ -306,6 +376,12 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 		return "", err
 	}
 	if err := r.checkOwnerLabel(cfg); err != nil {
+		return "", err
+	}
+	// A broker-resolved identity with no account is refused before
+	// anything is provisioned: it never falls back to the configured
+	// account (hub.cloudrun_native_identity, fail closed).
+	if err := checkCloudRunIdentity(cfg); err != nil {
 		return "", err
 	}
 	// The instance's CPU and memory from the resolved resources, checked
@@ -497,6 +573,15 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 	var first *runpb.Instance
 	op, err := c.CreateInstance(ctx, req, defaultCallOpts...)
 	switch {
+	case err != nil && status.Code(err) == codes.AlreadyExists && ctx.Err() == nil && cfg.CloudRunIdentity != nil:
+		// With a broker-resolved identity, an instance holding the ID
+		// cannot be shown to have been created by this Run: the refused
+		// create returned no operation (it may also be this Run's own
+		// create, retried after it landed). It is never adopted.
+		clearCloudRunCreateInDoubt(getReq.Name, runID)
+		runtimeLog().Info("Cloud Run create found an instance that cannot be shown to be this start's; not adopting it under a native identity",
+			"instance", instanceID, "agent_id", agentID, "run_id", want)
+		return "", fmt.Errorf("agent %q: instance %s holds the ID and cannot be shown to have been created by this start, so it is not adopted under a native identity: %w: %w", agentID, instanceID, ErrRunConflict, err)
 	case err != nil && status.Code(err) == codes.AlreadyExists && ctx.Err() == nil:
 		// An instance holds the ID (a client retry of a create that had
 		// landed, or another start racing this one). It is adopted only
@@ -550,6 +635,9 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 //   - a legacy instance with no run label, or this run's instance with a
 //     differing spec, is deleted run-checked (another run's instance is
 //     never deleted) and then waited for.
+//
+// With a broker-resolved identity (cfg.CloudRunIdentity) it never reports
+// true: see clearExistingForIdentity.
 func (r *CloudRunRuntime) reuseOrClearExisting(ctx context.Context, c cloudrun.InstancesAPI, cfg RunConfig, name string, existing, inst *runpb.Instance, secretEnv map[string]bool, want string, bounds cloudRunReadyBounds, hooks launchHooks) (bool, error) {
 	short := cloudRunShortInstanceID(name)
 	if existing.GetDeleteTime() != nil {
@@ -562,6 +650,9 @@ func (r *CloudRunRuntime) reuseOrClearExisting(ctx context.Context, c cloudrun.I
 	}
 	run := existing.GetLabels()[sanitizeGCPLabelKey(api.LabelRunID)]
 	diff := cloudRunSpecDiff(existing, inst, secretEnv)
+	if cfg.CloudRunIdentity != nil {
+		return false, r.clearExistingForIdentity(ctx, c, cfg, name, existing, run, want, diff, bounds, hooks)
+	}
 	if (run == want || want == "") && len(diff) == 0 {
 		if want == "" && run != "" {
 			// A start with no run ID reuses a matching instance labelled
@@ -597,6 +688,71 @@ func (r *CloudRunRuntime) reuseOrClearExisting(ctx context.Context, c cloudrun.I
 		return false, fmt.Errorf("cloudrun: failed to remove instance %s before recreating it: %w", short, err)
 	}
 	return false, waitCloudRunInstanceGone(ctx, c, name, bounds)
+}
+
+// clearExistingForIdentity handles, for reuseOrClearExisting, an instance
+// that holds the agent's instance ID, is not being deleted and is not
+// another run's live instance (Run refuses that one), when the dispatch
+// carries a broker-resolved identity (hub.cloudrun_native_identity). Such
+// an instance is never started, even when its spec matches: an identity
+// change or a secret change must reach a new instance, and the Instances
+// API cannot update either in place. So:
+//   - an instance with no run label, or a start with no run ID, cannot be
+//     matched to this run and is refused with ErrRunConflict, naming the
+//     agent; nothing is deleted, and the exec key cached for the instance
+//     ID is dropped, since the name belongs to an instance this run cannot
+//     attribute;
+//   - this run's own instance is deleted run-checked and strict
+//     (instanceOpWith): one that has no run label at the delete's own read
+//     is refused like the first case, its exec key dropped as well.
+//     Otherwise the exec key cached for it is dropped, and the instance is
+//     waited for until it is gone; Run then creates a new one with the
+//     current account and staged secrets, and waits for it to be ready. A
+//     delete that finds the instance already gone is not an error.
+//
+// The identity labels are compared and logged as hashes only, with the
+// names of the fields whose spec differs.
+func (r *CloudRunRuntime) clearExistingForIdentity(ctx context.Context, c cloudrun.InstancesAPI, cfg RunConfig, name string, existing *runpb.Instance, run, want string, diff []string, bounds cloudRunReadyBounds, hooks launchHooks) error {
+	short := cloudRunShortInstanceID(name)
+	agentID := cfg.Labels["agent_id"]
+	// run != want is reached only if Run's check of another run's live
+	// instance changes; dropping the cached exec key there is harmless (the
+	// key is fetched again when needed).
+	if run == "" || want == "" || run != want {
+		runtimeLog().Info("Cloud Run instance that cannot be matched to this start's run holds the agent's instance ID; not replacing it under a native identity",
+			"instance", short, "agent_id", agentID, "run_id", want, "instance_run_id", run)
+		r.forgetExecKey(short)
+		return fmt.Errorf("agent %q: existing instance %s cannot be matched to this start's run, so it is neither started nor replaced: %w", agentID, short, ErrRunConflict)
+	}
+	have := existing.GetLabels()[cloudRunIdentityLabel]
+	next := cloudRunIdentityHash(cfg.CloudRunIdentity.ServiceAccount)
+	runtimeLog().Info("Cloud Run start: replacing this run's existing instance; it is never started in place under a native identity",
+		"instance", short, "agent_id", agentID, "run_id", want, "identity_label", have, "identity_label_next", next,
+		"identity_changed", have != next, "changed_fields", strings.Join(diff, ","))
+	// The delete is by the deterministic instance ID, so an async launch
+	// checkpoints first, as Start's pre-clean does.
+	if err := hooks.checkpoint(ctx, CheckpointStepPreClean); err != nil {
+		return err
+	}
+	// Strict: an instance that, on the delete's own read, has no run label
+	// cannot be attributed to this run and is not deleted.
+	ref := RunRef{ID: short, RunID: cfg.Labels[api.LabelRunID]}
+	err := r.instanceOpWith(ctx, c, ref, "delete", true, func(c cloudrun.InstancesAPI, name, etag string) (cloudrun.InstanceOperation, error) {
+		return c.DeleteInstance(ctx, &runpb.DeleteInstanceRequest{Name: name, Etag: etag}, defaultCallOpts...)
+	})
+	if errors.Is(err, errCloudRunUnlabelled) {
+		runtimeLog().Info("Cloud Run instance without a run label holds the agent's instance ID at the delete's read; not replacing it under a native identity",
+			"instance", short, "agent_id", agentID, "run_id", want)
+		r.forgetExecKey(short)
+		return fmt.Errorf("agent %q: existing instance %s cannot be matched to this start's run, so it is neither started nor replaced: %w", agentID, short, ErrRunConflict)
+	}
+	// The new instance has the same name, so the exec key cached for the
+	// deleted one is dropped, also after a failed delete, as Delete does.
+	r.forgetExecKey(short)
+	if err != nil && status.Code(err) != codes.NotFound {
+		return fmt.Errorf("cloudrun: failed to remove instance %s before recreating it: %w", short, err)
+	}
+	return waitCloudRunInstanceGone(ctx, c, name, bounds)
 }
 
 // startExistingInstance starts existing, this run's own matching instance
@@ -706,6 +862,21 @@ func (r *CloudRunRuntime) deleteOwnAfterFailedWait(ctx context.Context, c cloudr
 	}
 }
 
+// buildCloudRunInstance computes the instance Run creates for cfg. Its
+// environment follows the Docker order (buildCommonRunArgs); for a name
+// set by more than one source, the later source in this list wins:
+//  1. resolved auth: the discovery names as plain env, every other entry
+//     in the staged blob (splitResolvedAuthEnv, Run);
+//  2. the harness env: Harness.GetEnv, then Harness.GetTelemetryEnv when
+//     telemetry is enabled (cloudRunHarnessEnv);
+//  3. cfg.Env, with the env-type secrets folded into it for names it does
+//     not set (applyStagedSecretsToEnvExtras, Run), and the runtime keys
+//     (cloudRunRuntimeEnvKeys).
+//
+// The template fallback then fills only names no source set. A reserved
+// name (reservedAgentEnvName) never reaches the instance from any source,
+// and the harness env never sets a name cloudRunHarnessEnvDenied reports,
+// so the GCP metadata settings in cfg.Env are always the hub's.
 func (r *CloudRunRuntime) buildCloudRunInstance(cfg RunConfig, uid, gid int, nfsPaths *cloudRunNFSProvisionPaths) *runpb.Instance {
 	var envVars []*runpb.EnvVar
 	for _, e := range cfg.Env {
@@ -744,6 +915,23 @@ func (r *CloudRunRuntime) buildCloudRunInstance(cfg RunConfig, uid, gid int, nfs
 		Name:   startuplistener.EnvPort,
 		Values: &runpb.EnvVar_Value{Value: strconv.Itoa(startuplistener.Port)},
 	})
+
+	// The harness env (GetEnv, then GetTelemetryEnv when telemetry is
+	// enabled), with the Docker rules: cfg.Env (with the env-type secrets
+	// folded into it) and the runtime keys above win, and an empty value
+	// is skipped. It wins over resolved auth and the template fallback
+	// below, which treat its names as set; Run's staged split
+	// (cloudRunResolvedAuthTaken) leaves the same names out. A denied name
+	// (cloudRunHarnessEnvDenied) is dropped and logged by name only.
+	harnessEnv, deniedHarnessEnv := cloudRunHarnessEnv(cfg)
+	for _, e := range harnessEnv {
+		k, v, _ := strings.Cut(e, "=")
+		envVars = append(envVars, &runpb.EnvVar{Name: k, Values: &runpb.EnvVar_Value{Value: v}})
+	}
+	if len(deniedHarnessEnv) > 0 {
+		runtimeLog().Warn("Cloud Run start: harness env names not applied; the runtime owns them",
+			"agent_id", cfg.Labels["agent_id"], "names", strings.Join(deniedHarnessEnv, ","))
+	}
 
 	emitted := make(map[string]bool, len(envVars))
 	for _, ev := range envVars {
@@ -853,6 +1041,11 @@ func (r *CloudRunRuntime) buildCloudRunInstance(cfg RunConfig, uid, gid int, nfs
 	}
 
 	labels := CloudRunStoredLabels(cfg.Labels)
+	// An instance created under a broker-resolved identity records it,
+	// hashed, so a later start can log whether the identity changed.
+	if cfg.CloudRunIdentity != nil {
+		labels[cloudRunIdentityLabel] = cloudRunIdentityHash(cfg.CloudRunIdentity.ServiceAccount)
+	}
 
 	// Build the container command. Cloud Run Instances have no TTY, so the
 	// harness is wrapped in tmux (which allocates a PTY) following the same
@@ -931,7 +1124,38 @@ func (r *CloudRunRuntime) buildCloudRunInstance(cfg RunConfig, uid, gid int, nfs
 			}
 		}
 	}
+	// The broker-resolved identity replaces the configured account; nil
+	// leaves the instance as before. Run has already refused one with no
+	// account (checkCloudRunIdentity).
+	if cfg.CloudRunIdentity != nil {
+		inst.ServiceAccount = cfg.CloudRunIdentity.ServiceAccount
+	}
 	return inst
+}
+
+// cloudRunIdentityLabel is the instance label holding cloudRunIdentityHash
+// of the account an instance was created with under a broker-resolved
+// identity (hub.cloudrun_native_identity). Instances created without one
+// have no such label.
+const cloudRunIdentityLabel = "scion-identity"
+
+// cloudRunIdentityHash returns the first 16 hex characters of the SHA-256
+// of the lower-cased account. A label value cannot hold '@' or '.', and
+// the hash keeps the account itself off the instance's labels and out of
+// the logs.
+func cloudRunIdentityHash(account string) string {
+	sum := sha256.Sum256([]byte(strings.ToLower(account)))
+	return hex.EncodeToString(sum[:])[:16]
+}
+
+// checkCloudRunIdentity refuses a broker-resolved identity that names no
+// account. Nil (the experiment off, or no identity resolved) passes and
+// the configured account is used, as before.
+func checkCloudRunIdentity(cfg RunConfig) error {
+	if cfg.CloudRunIdentity != nil && strings.TrimSpace(cfg.CloudRunIdentity.ServiceAccount) == "" {
+		return fmt.Errorf("cloudrun: agent %q: the dispatch's instance identity names no service account; refusing to start", cfg.Labels["agent_id"])
+	}
+	return nil
 }
 
 // cloudRunShortInstanceID returns the bare instance ID for either a short ID
@@ -1489,9 +1713,10 @@ type instanceCall func(c cloudrun.InstancesAPI, name, etag string) (cloudrun.Ins
 //   - an instance that is gone at the read gives the same NotFound error the
 //     call itself gives.
 //
-// strict (the launch cleanup, DeleteResource) also leaves a legacy
-// instance with no run label untouched and returns errCloudRunUnlabelled;
-// user stop and delete pass false and keep the legacy rule.
+// strict (the launch cleanup, DeleteResource, and the native identity
+// recreate, clearExistingForIdentity) also leaves a legacy instance with
+// no run label untouched and returns errCloudRunUnlabelled; user stop and
+// delete pass false and keep the legacy rule.
 func (r *CloudRunRuntime) instanceOp(ctx context.Context, ref RunRef, verb string, strict bool, call instanceCall) error {
 	if err := r.resolveConfig(ctx); err != nil {
 		return fmt.Errorf("failed to resolve Cloud Run config: %w", err)

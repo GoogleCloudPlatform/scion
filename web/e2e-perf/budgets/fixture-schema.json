@@ -36,6 +36,7 @@
       "fields": [
         "experiments.federation.project_visitors:boolean",
         "experiments.hub.agent_edit_held:boolean",
+        "experiments.hub.artifact_archive:boolean",
         "experiments.hub.artifacts:boolean",
         "experiments.hub.attachment_artifacts:boolean",
         "experiments.hub.chat_retention:boolean",

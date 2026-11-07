@@ -1,0 +1,6 @@
+# Fixture for TestGuardScanSubdirsCoverAreas: hack/area-dirs.txt format with
+# one area that guardScanSubdirs does not list. The coverage check must
+# report it, so the check cannot pass vacuously.
+area        maintenance
+area        zz_not_in_guard_scan_subdirs
+testsupport internal/hubtestutil

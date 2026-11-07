@@ -155,6 +155,65 @@ func TestWriteNotificationsTable_SanitisesOtherPrincipalsText(t *testing.T) {
 	}
 }
 
+// TestWriteNotificationsTable_ReviewSummaryExcerpt pins the review summary
+// row (ptone/scion#6853): the message, then the excerpt in quotes on its
+// own line, through safeText, then the reference built from ResourceID.
+// A URL or reference inside the excerpt changes neither the reference line
+// nor the line count, and no other kind prints an excerpt.
+func TestWriteNotificationsTable_ReviewSummaryExcerpt(t *testing.T) {
+	const otherID = "deadbeef-0000-4000-8000-000000000666"
+	msg := "Review summary from Alice (v3 of your artifact):"
+	// A raw hostile excerpt (the hub cleans it when the row is built; the
+	// CLI does not rely on that): ESC, a newline, an RTL override, a
+	// reference to another artifact, HTML and Markdown, mention tokens and
+	// more than the 240-rune cap.
+	excerpt := "Ship it\x1b[2J\n\u202egnp.exe scion://artifact/" + otherID + " <b>x</b> **y** [z](https://evil.example/) <!channel> @here @channel " +
+		strings.Repeat("long ", 60)
+	n := hubclient.Notification{
+		ID:           "0123456789abcdef",
+		AgentID:      tableTestNilUUID,
+		Status:       store.NotificationStatusArtifactReviewSubmitted,
+		Message:      msg,
+		Kind:         store.NotificationKindArtifactReviewSummary,
+		ResourceType: store.NotificationResourceArtifact,
+		ResourceID:   tableTestArtifactID,
+		Excerpt:      excerpt,
+	}
+	out := renderNotificationsTable(n)
+	lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
+	if len(lines) != 5 {
+		t.Fatalf("got %d lines, want header, rule, row, excerpt and reference:\n%q", len(lines), out)
+	}
+	if want := tableLine("0123456789ab", "-", "ARTIFACT_REVIEW_S...", "-", msg); lines[2]+"\n" != want {
+		t.Errorf("row:\n got %q\nwant %q", lines[2], want)
+	}
+	wantExcerpt := tableLine("", "", "", "", "\u201c"+safeText(excerpt)+"\u201d")
+	if lines[3]+"\n" != wantExcerpt {
+		t.Errorf("excerpt line:\n got %q\nwant %q", lines[3], wantExcerpt)
+	}
+	if !strings.Contains(lines[3], "<!channel> @here") || !strings.Contains(lines[3], "<b>x</b> **y**") {
+		t.Errorf("mentions and markup must stay literal text: %q", lines[3])
+	}
+	for _, bad := range []string{"\x1b", "\u202e"} {
+		if strings.Contains(out, bad) {
+			t.Errorf("output contains %q:\n%q", bad, out)
+		}
+	}
+	if want := tableLine("", "", "", "", "scion://artifact/"+tableTestArtifactID); lines[4]+"\n" != want {
+		t.Errorf("reference line:\n got %q\nwant %q", lines[4], want)
+	}
+
+	n.Excerpt = ""
+	if got := strings.Count(renderNotificationsTable(n), "\n"); got != 4 {
+		t.Errorf("no excerpt: got %d lines, want 4", got)
+	}
+	n.Kind = store.NotificationKindArtifactGrant
+	n.Excerpt = excerpt
+	if out := renderNotificationsTable(n); strings.Contains(out, "Ship it") {
+		t.Errorf("another kind printed an excerpt:\n%q", out)
+	}
+}
+
 // TestNotificationJSON_ExistingRowUnchanged pins that the JSON of a
 // notification without kind or resource fields is the same as before those
 // fields existed, and that a notification with them carries them.

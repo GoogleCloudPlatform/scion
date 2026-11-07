@@ -419,6 +419,9 @@ func TestViewSandboxBrowserProbe(t *testing.T) {
 	}))
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
+	// The view CSP names the hub's configured public origin, which here is
+	// the test server.
+	f.svc.SetLimits(func(context.Context) Limits { return Limits{PublicOrigin: srv.URL} })
 
 	check := func(t *testing.T, r probeResult, framed bool) {
 		t.Helper()

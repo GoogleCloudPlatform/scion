@@ -2170,6 +2170,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		policyDecision, isPolicyErr := harnessPolicyRefusalFrom(err)
 		unusableErr, isUnusable := unusableProvisionerFrom(err)
 		storageErr, isStorageRefusal := storageMigrationRequiredFrom(err)
+		resourceErr, isResourceRefusal := resourceLimitsErrorFrom(err)
 		switch {
 		case isPolicyErr:
 			markAttemptFailed(policyDecision.HTTPStatus, policyDecision.detail())
@@ -2177,6 +2178,8 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			markAttemptFailed(http.StatusUnprocessableEntity, unusableErr.PublicMessage())
 		case isStorageRefusal:
 			markAttemptFailed(http.StatusUnprocessableEntity, storageErr.PublicMessage())
+		case isResourceRefusal:
+			markAttemptFailed(resourceLimitsStatus, resourceErr.PublicMessage())
 		case notFoundErr:
 			markAttemptFailed(http.StatusNotFound, "failed to create agent")
 		case isSkillErr:
@@ -2265,6 +2268,10 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			s.writeUnusableProvisioner(w, unusableErr, "create agent", req.ID, nil)
 		case isStorageRefusal:
 			s.writeStorageMigrationRequired(w, storageErr, "create agent", req.ID, nil)
+		case isResourceRefusal:
+			// The runtime refused the resource spec before creating
+			// anything (ptone/scion#7103). The full error is logged above.
+			writeResourceLimitsRefused(w, resourceErr, opCreateAgent, nil)
 		case errors.Is(err, agent.ErrContainerNameInUse):
 			// Fixed text, as restart and the async launch give: a wrapped
 			// error can carry runtime detail. The full error is logged above.
@@ -4123,6 +4130,15 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		s.writeStartContextError(w, sce, "start agent", "agent_id", id, "runtime", resolvedRuntimeType, "profile", runtimeOpts.Profile)
 		return
 	}
+	if sce := rejectCloudRunIdentityRuntimeChange(ctx, runtimeOpts, sc.CloudRunSelection, resolvedRuntimeType, func() dispatchProfileSelection {
+		return s.resolveDispatchProfileSelection(runtimeOpts)
+	}); sce != nil {
+		if s.refuseCancelledStart(w, span, ss, id, projectID, trackedRunID) {
+			return
+		}
+		s.writeStartContextError(w, sce, "start agent", "agent_id", id, "runtime", resolvedRuntimeType, "profile", runtimeOpts.Profile)
+		return
+	}
 	// Belt and braces: the preliminary classification (buildStartContext)
 	// must agree with this authoritative runtime; the specific rejections
 	// above report their own, more actionable errors first.
@@ -4267,11 +4283,15 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		ue, unusable := unusableProvisionerFrom(err)
 		gitRefusal, isGitRefusal := util.StartRefusalText(err)
 		storageErr, isStorageRefusal := storageMigrationRequiredFrom(err)
+		resourceErr, isResourceRefusal := resourceLimitsErrorFrom(err)
 		switch {
 		case unusable:
 			s.writeUnusableProvisioner(w, ue, "start agent", id, details)
 		case isStorageRefusal:
 			s.writeStorageMigrationRequired(w, storageErr, "start agent", id, details)
+		case isResourceRefusal:
+			// As on create (ptone/scion#7103); logged above.
+			writeResourceLimitsRefused(w, resourceErr, "start agent", details)
 		case errors.Is(err, agent.ErrContainerNameInUse):
 			// Fixed text, as restart and the async launch give: a wrapped
 			// error can carry runtime detail. The full error is logged above.
@@ -5373,6 +5393,12 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		s.writeStartContextError(w, sce, "restart agent", "agent_id", id, "runtime", resolvedRuntimeType, "profile", runtimeOpts.Profile)
 		return
 	}
+	if sce := rejectCloudRunIdentityRuntimeChange(ctx, runtimeOpts, sc.CloudRunSelection, resolvedRuntimeType, func() dispatchProfileSelection {
+		return s.resolveDispatchProfileSelection(runtimeOpts)
+	}); sce != nil {
+		s.writeStartContextError(w, sce, "restart agent", "agent_id", id, "runtime", resolvedRuntimeType, "profile", runtimeOpts.Profile)
+		return
+	}
 	// Belt and braces: the preliminary classification (buildStartContext)
 	// must agree with this authoritative runtime; the specific rejections
 	// above report their own, more actionable errors first.
@@ -5493,6 +5519,11 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		}
 		if se, ok := storageMigrationRequiredFrom(err); ok {
 			s.writeStorageMigrationRequired(w, se, "restart agent", id, details)
+			return
+		}
+		// As on create (ptone/scion#7103); logged above.
+		if re, ok := resourceLimitsErrorFrom(err); ok {
+			writeResourceLimitsRefused(w, re, "restart agent", details)
 			return
 		}
 		// Start can re-provision the agent: a required skill reference that

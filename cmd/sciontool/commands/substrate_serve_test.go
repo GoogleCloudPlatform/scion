@@ -1504,52 +1504,43 @@ func TestSubstrateServeInitOptions_ResolveWorkingDir_BothUnusable_ReturnsError(t
 // is lazy: it reads the filesystem only when invoked, not when built, so a
 // candidate whose usability changes between substrateServeInitOptions
 // building the InitRunOptions and something calling ResolveWorkingDir — here,
-// simulating the workspace clone chowning it to the scion uid — is seen
-// correctly at call time. RunInit's own guarantee that it calls
+// simulating the workspace clone making it usable by the scion uid — is
+// seen correctly at call time. RunInit's own guarantee that it calls
 // ResolveWorkingDir only after the real workspace clone and ownership fixup
 // run is pinned separately, by
 // TestRunInit_ResolveWorkingDir_CalledAfterCloneAndOverridesWorkingDir
 // (init_working_dir_test.go), which drives RunInit itself; this test does
 // not exercise RunInit at all.
 //
-// workspace and home are created directly under os.TempDir() (not via
-// t.TempDir(), whose nested per-test directory is itself mode 0700 and would
-// make every candidate "not searchable" for an unrelated reason, regardless
-// of this test's own chmods) so their searchability is controlled by this
-// test's own chmod calls alone.
+// workspace and home live under t.TempDir() and the fake scion user takes
+// this test process's own uid/gid, the same as
+// TestSubstrateServeInitOptions_ResolveWorkingDir_SetsWorkingDirFromRealEnv:
+// canSearchDir then decides on the owner bit for every directory this test
+// creates, so the outcome never depends on whether TMPDIR's ancestors are
+// searchable by some other uid. canSearchDir reads mode bits only and does
+// not special-case root, so mode 0 makes the workspace unusable even when
+// run as root.
 func TestSubstrateServeInitOptions_ResolveWorkingDir_IsLazy_SeesStateAtCallTime(t *testing.T) {
-	workspace, err := os.MkdirTemp("", "cwd-ordering-workspace-*")
-	if err != nil {
-		t.Fatalf("MkdirTemp(workspace): %v", err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(workspace) })
-	// Mode 0700: not yet searchable by the fake scion uid/gid below —
+	workspace := t.TempDir()
+	home := t.TempDir()
+	// Mode 0: not yet searchable by the scion uid (its owner, below),
 	// modelling a fresh git-clone agent's workspace before the clone step
-	// has chowned it to the scion uid.
-	if err := os.Chmod(workspace, 0o700); err != nil {
+	// has made it usable by the scion uid.
+	if err := os.Chmod(workspace, 0); err != nil {
 		t.Fatalf("os.Chmod(workspace): %v", err)
 	}
 
-	home, err := os.MkdirTemp("", "cwd-ordering-home-*")
-	if err != nil {
-		t.Fatalf("MkdirTemp(home): %v", err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(home) })
-	if err := os.Chmod(home, 0o777); err != nil {
-		t.Fatalf("os.Chmod(home): %v", err)
-	}
-
 	withScionUserLookup(t, func(string) (*user.User, error) {
-		return &user.User{Uid: "1", Gid: "1", HomeDir: home}, nil
+		return &user.User{Uid: strconv.Itoa(os.Getuid()), Gid: strconv.Itoa(os.Getgid()), HomeDir: home}, nil
 	})
 	t.Setenv("SCION_WORKSPACE_PATH", workspace)
 
 	opts := substrateServeInitOptions(false)
 
 	// Simulate the workspace clone step's real effect (ensureWorkspaceOwnership
-	// chowning the workspace to the scion uid) completing before resolution
-	// is invoked, mirroring RunInit's own call order.
-	if err := os.Chmod(workspace, 0o777); err != nil {
+	// making the workspace usable by the scion uid) completing before
+	// resolution is invoked, mirroring RunInit's own call order.
+	if err := os.Chmod(workspace, 0o700); err != nil {
 		t.Fatalf("os.Chmod(workspace): %v", err)
 	}
 
@@ -1558,7 +1549,7 @@ func TestSubstrateServeInitOptions_ResolveWorkingDir_IsLazy_SeesStateAtCallTime(
 		t.Fatalf("ResolveWorkingDir() error = %v", err)
 	}
 	if got != workspace {
-		t.Errorf("ResolveWorkingDir() = %q, want %q", got, workspace)
+		t.Errorf("ResolveWorkingDir() = %q, want %q (an eager resolver would have seen the mode-0 workspace and picked home %q)", got, workspace, home)
 	}
 }
 

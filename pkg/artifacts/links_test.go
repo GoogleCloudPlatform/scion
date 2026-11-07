@@ -152,6 +152,7 @@ func TestLinkCreateHeaders(t *testing.T) {
 // policy; the database holds the token's hash and never the token.
 func TestLinkMintAndShare(t *testing.T) {
 	f, id := newLinkFixture(t)
+	f.svc.SetLimits(func(context.Context) Limits { return Limits{PublicOrigin: "https://example.com"} })
 	before := time.Now()
 	token, resp := f.mustMintLink(userU, id, "")
 	if d := resp.Link.ExpiresAt.Sub(before); d < DefaultLinkTTL-time.Minute || d > DefaultLinkTTL+time.Minute {

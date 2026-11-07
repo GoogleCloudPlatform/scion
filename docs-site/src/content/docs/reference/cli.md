@@ -1524,6 +1524,7 @@ Manages notifications and notification subscriptions.
 
 - `scion notifications`: List your recent unacknowledged notifications.
     - Flags: `--all` (include acknowledged notifications), `--json` (format output as JSON).
+    - A notification about an artifact is followed by a line with its `scion://artifact/` reference. A review of your artifact (kind `artifact_review_summary`) also shows the start of the reviewer's note, in quotes, on its own line (see [Reviews](/scion/reference/artifacts/#reviews)).
 - `scion notifications ack [id]`: Acknowledge one or all notifications.
     - Flags: `--all` (acknowledge all unacknowledged notifications).
 - `scion notifications subscribe`: Subscribe to notifications for a specific agent or all agents in a project.
@@ -1714,8 +1715,12 @@ available inside agent containers.
 - **Platform Health**: The Hub's health summary (`GET /api/v1/admin/health/summary`), the same
   data as the [health dashboard](/scion/workstation/dashboard/). It shows the overall status, then
   every "Needs attention" item in the Hub's order (critical items as failures, warnings as
-  warnings), then one line each for the Hub fleet, runtime brokers, agents, dispatch and
-  integrations, the service account check when it cannot run, and the test identity settings when
+  warnings — including `"Integration <name> is degraded"` while a supervised message-broker plugin
+  is restarting after a lost session and `"Integration <name> is unhealthy"` after 5 consecutive
+  failed restart attempts; see [Message-Bus Plugin Supervision](/scion/hosted/user/external-channels/#message-bus-plugin-supervision)),
+  then one line each for the Hub fleet, runtime brokers, agents, dispatch and integrations
+  (`N total: H healthy, D degraded, U unhealthy, K unknown`, plus per-integration lines under
+  `--verbose`), the service account check when it cannot run, and the test identity settings when
   any is on. Doctor shows the summary as the Hub computed it and does not recompute the status.
   - Reading the summary needs the `hub.health.read` permission (hub admins). Without it, the
     section shows `requires hub.health.read`, and Hub Health checks runtime brokers and agents

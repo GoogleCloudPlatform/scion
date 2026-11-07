@@ -291,7 +291,10 @@ const notificationMessageWidth = 60
 // an artifact gets a second line with its scion://artifact/ reference,
 // built from ResourceID, so the reference is never cut off. Other messages
 // are cut at notificationMessageWidth runes. The AGENT column shows "-"
-// for a notification that names no agent (the nil UUID).
+// for a notification that names no agent (the nil UUID). A review summary
+// notification (ptone/scion#6853) gets its excerpt, the reviewer's own
+// words, on a line of its own in quotes under the message that attributes
+// it, also through safeText; no other kind prints an excerpt.
 func writeNotificationsTable(w io.Writer, notifs []hubclient.Notification) {
 	_, _ = fmt.Fprintf(w, "%-12s  %-14s  %-20s  %-22s  %s\n", "ID", "AGENT", "STATUS", "TIME", "MESSAGE")
 	_, _ = fmt.Fprintf(w, "%-12s  %-14s  %-20s  %-22s  %s\n", "------------", "--------------", "--------------------", "----------------------", "-------")
@@ -313,6 +316,9 @@ func writeNotificationsTable(w io.Writer, notifs []hubclient.Notification) {
 		}
 		status := truncateRunes(safeText(n.Status), 20, true)
 		_, _ = fmt.Fprintf(w, "%-12s  %-14s  %-20s  %-22s  %s\n", shortID, agentDisplay, status, timeStr, msg)
+		if n.Kind == store.NotificationKindArtifactReviewSummary && n.Excerpt != "" {
+			_, _ = fmt.Fprintf(w, "%-12s  %-14s  %-20s  %-22s  %s\n", "", "", "", "", "“"+safeText(n.Excerpt)+"”")
+		}
 		if ref := notificationArtifactRef(n); ref != "" {
 			_, _ = fmt.Fprintf(w, "%-12s  %-14s  %-20s  %-22s  %s\n", "", "", "", "", ref)
 		}

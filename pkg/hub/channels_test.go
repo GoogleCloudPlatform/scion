@@ -337,6 +337,53 @@ func TestEmailChannel_CustomPort(t *testing.T) {
 	assert.Equal(t, "465", ch.port)
 }
 
+func TestEmailHeaderValue(t *testing.T) {
+	tests := []struct {
+		in, want string
+	}{
+		{"plain", "plain"},
+		{"a\r\nb", "a b"},
+		{"a\rb", "a b"},           // a lone CR
+		{"a\nb", "a b"},           // a lone LF
+		{"a\r\n\r\n\n\rb", "a b"}, // a run of CR and LF is one space
+		{"a\rb\nc", "a b c"},
+		{"\r\nedge\r\n", "edge"}, // a run at either end is dropped
+		{"\r\n\r\n", ""},
+		{"two  spaces", "two  spaces"}, // other whitespace is kept
+		{"", ""},
+	}
+	for _, tc := range tests {
+		assert.Equal(t, tc.want, emailHeaderValue(tc.in), "input %q", tc.in)
+	}
+}
+
+func TestEmailChannel_HeaderValuesStripCRLF(t *testing.T) {
+	msg := &messages.StructuredMessage{
+		Type:   "state-change\r\nBcc: x@example.com",
+		Sender: "agent:a\nReply-To: y@example.com",
+		Msg:    "line one\r\nline two",
+	}
+	raw := string(buildEmailMessage("a@b.com\r\nCc: z@example.com", []string{"c@d.com\n", "e@f.com"}, msg))
+
+	head, body, ok := strings.Cut(raw, "\r\n\r\n")
+	require.True(t, ok, "message has no header/body separator")
+
+	lines := strings.Split(head, "\r\n")
+	assert.Equal(t, []string{
+		"From: a@b.com Cc: z@example.com",
+		"To: c@d.com, e@f.com",
+		"Subject: [Scion] state-change Bcc: x@example.com from agent:a Reply-To: y@example.com",
+		"Content-Type: text/plain; charset=UTF-8",
+	}, lines)
+	for _, l := range lines {
+		assert.NotContains(t, l, "\r", "header line %q", l)
+		assert.NotContains(t, l, "\n", "header line %q", l)
+	}
+
+	// The body is not altered.
+	assert.True(t, strings.HasPrefix(body, "line one\r\nline two\r\n\r\n"), "body = %q", body)
+}
+
 func TestSlackChannel_Validate(t *testing.T) {
 	tests := []struct {
 		name    string

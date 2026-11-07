@@ -523,6 +523,7 @@ var testAdminSettingsKeyPolicy = map[string]testAdminPolicy{
 	"default_gcp_identity_service_account_id":  testAdminPolicyDeny,
 	"server.hub.public_url":                    testAdminPolicyDeny,
 	"server.hub.hub_name":                      testAdminPolicyDeny,
+	"server.hub.content_url":                   testAdminPolicyDeny,
 	"image_registry":                           testAdminPolicyDeny,
 	"server.hub.monitoring_dashboard_url":      testAdminPolicyDeny,
 	"server.github_app":                        testAdminPolicyDeny,
@@ -562,10 +563,12 @@ var testAdminExperimentPolicy = map[string]testAdminPolicy{
 	experiments.AuthorizationDecisionAuditV2: testAdminPolicyDeny,
 	"web.gcs_links":                          testAdminPolicyDeny,
 	experiments.K8sNFSHome:                   testAdminPolicyDeny,
+	experiments.CloudRunNativeIdentity:       testAdminPolicyDeny,
 	experiments.FlatRuntimeBrokers:           testAdminPolicyDeny,
 	experiments.FlatCloudRunTarget:           testAdminPolicyDeny,
 	experiments.Artifacts:                    testAdminPolicyDeny,
 	"hub.conduit":                            testAdminPolicyDeny,
+	experiments.ConduitDeliver:               testAdminPolicyDeny,
 	experiments.ChatScheduledSend:            testAdminPolicyDeny,
 	experiments.ChatStarredMessages:          testAdminPolicyDeny,
 	experiments.ChatRetention:                testAdminPolicyDeny,
@@ -584,6 +587,7 @@ var testAdminExperimentPolicy = map[string]testAdminPolicy{
 	experiments.ArtifactSponsorReviewGrant:   testAdminPolicyDeny,
 	experiments.SkillContentHashV2:           testAdminPolicyDeny,
 	experiments.UserDeleteForceCascade:       testAdminPolicyDeny,
+	experiments.ArtifactArchive:              testAdminPolicyDeny,
 	experiments.ImageTagSetting:              testAdminPolicyDeny,
 }
 

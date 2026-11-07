@@ -67009,6 +67009,7 @@ type NotificationMutation struct {
 	kind                 *string
 	resource_type        *string
 	resource_id          *string
+	excerpt              *string
 	created              *time.Time
 	clearedFields        map[string]struct{}
 	done                 bool
@@ -67729,6 +67730,42 @@ func (m *NotificationMutation) ResetResourceID() {
 	m.resource_id = nil
 }
 
+// SetExcerpt sets the "excerpt" field.
+func (m *NotificationMutation) SetExcerpt(s string) {
+	m.excerpt = &s
+}
+
+// Excerpt returns the value of the "excerpt" field in the mutation.
+func (m *NotificationMutation) Excerpt() (r string, exists bool) {
+	v := m.excerpt
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldExcerpt returns the old "excerpt" field's value of the Notification entity.
+// If the Notification object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *NotificationMutation) OldExcerpt(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldExcerpt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldExcerpt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldExcerpt: %w", err)
+	}
+	return oldValue.Excerpt, nil
+}
+
+// ResetExcerpt resets all changes to the "excerpt" field.
+func (m *NotificationMutation) ResetExcerpt() {
+	m.excerpt = nil
+}
+
 // SetCreated sets the "created" field.
 func (m *NotificationMutation) SetCreated(t time.Time) {
 	m.created = &t
@@ -67799,7 +67836,7 @@ func (m *NotificationMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *NotificationMutation) Fields() []string {
-	fields := make([]string, 0, 17)
+	fields := make([]string, 0, 18)
 	if m.subscription_id != nil {
 		fields = append(fields, notification.FieldSubscriptionID)
 	}
@@ -67848,6 +67885,9 @@ func (m *NotificationMutation) Fields() []string {
 	if m.resource_id != nil {
 		fields = append(fields, notification.FieldResourceID)
 	}
+	if m.excerpt != nil {
+		fields = append(fields, notification.FieldExcerpt)
+	}
 	if m.created != nil {
 		fields = append(fields, notification.FieldCreated)
 	}
@@ -67891,6 +67931,8 @@ func (m *NotificationMutation) Field(name string) (ent.Value, bool) {
 		return m.ResourceType()
 	case notification.FieldResourceID:
 		return m.ResourceID()
+	case notification.FieldExcerpt:
+		return m.Excerpt()
 	case notification.FieldCreated:
 		return m.Created()
 	}
@@ -67934,6 +67976,8 @@ func (m *NotificationMutation) OldField(ctx context.Context, name string) (ent.V
 		return m.OldResourceType(ctx)
 	case notification.FieldResourceID:
 		return m.OldResourceID(ctx)
+	case notification.FieldExcerpt:
+		return m.OldExcerpt(ctx)
 	case notification.FieldCreated:
 		return m.OldCreated(ctx)
 	}
@@ -68056,6 +68100,13 @@ func (m *NotificationMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetResourceID(v)
+		return nil
+	case notification.FieldExcerpt:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetExcerpt(v)
 		return nil
 	case notification.FieldCreated:
 		v, ok := value.(time.Time)
@@ -68184,6 +68235,9 @@ func (m *NotificationMutation) ResetField(name string) error {
 		return nil
 	case notification.FieldResourceID:
 		m.ResetResourceID()
+		return nil
+	case notification.FieldExcerpt:
+		m.ResetExcerpt()
 		return nil
 	case notification.FieldCreated:
 		m.ResetCreated()

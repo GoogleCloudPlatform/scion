@@ -31,12 +31,21 @@ brew tap homebrew-scion/scion
 brew install homebrew-scion/scion/scion
 ```
 
-This installs:
+This installs **`scion`**, the CLI with the embedded web UI, from the prebuilt binaries of
+the latest preview release. The [Onboarding Wizard](/scion/getting-started/onboarding/)
+suggests `ghcr.io/homebrew-scion` as the image registry, so the harness images can be pulled for
+you. Chat plugins such as Telegram and Discord are not included; their setup guides explain how
+to install them.
 
-- **`scion`** — the main CLI, pre-configured to use `ghcr.io/homebrew-scion` as the default
-  image registry, so the harness images are pulled for you.
-- **`scion-plugin-telegram`** — the Telegram broker plugin, installed automatically alongside
-  the CLI. To connect it, follow [Setting Up Telegram](/scion/getting-started/telegram/).
+:::note[Older Linux distributions]
+On Linux hosts whose glibc is older than 2.39 or libstdc++ older than 6.0.33 (for example Debian
+12, Ubuntu 22.04 or RHEL 9), Homebrew installs its own `gcc` (and its own `glibc`, if glibc is
+older than 2.39), with their dependencies, the first time you install any formula. Scion is a
+static binary and does not use them. To avoid them, download `scion-linux-amd64.tar.gz` or
+`scion-linux-arm64.tar.gz` from the [GitHub
+releases](https://github.com/GoogleCloudPlatform/scion/releases), verify it against the
+release's `SHA256SUMS`, and put `scion` on your `$PATH`.
+:::
 
 To upgrade later:
 
@@ -163,13 +172,41 @@ scion version
 
 ## Build container images
 
-No publicly hosted images are currently available for Scion, but quick and easy build scripts are included.
+Agents run in container images. The Homebrew onboarding suggests the `ghcr.io/homebrew-scion`
+registry. Images there are tagged with the release tag; `:latest` there is an old image, so set
+the experimental `image_tag` setting (see
+[Images that match a release](/scion/local/custom-images/#images-that-match-a-release)) or build
+the images locally with the scripts in the repository.
 
-The easiest way to get these images is to fork this repo, and then go to the "Actions" tab and select the "Build Scion Images" workflow.
+To build the images that match your `scion` binary, run the release image driver. It clones the
+release tag and builds the full image set from that release's own image specs, tagged
+`:<version>`. It needs only bash, git, and Docker or Podman, and runs from a checkout or as a single
+downloaded file:
 
-You will then use your `ghcr.io/myorg` registry for the `image_registry` setting. These images must be available in the registry before running the initialization command.
+```bash
+curl -fsSLO https://raw.githubusercontent.com/GoogleCloudPlatform/scion/main/image-build/scripts/build-release-images.sh
 
-See [Building Containers](/scion/local/custom-images/) for more details
+# With no version, it builds the release `scion version` reports. These images stay in the
+# local image store, named localhost/scion/<image>; nothing is pushed. --also-tag latest also
+# tags them :latest, the tag agents use by default; naming a registry prefix makes the driver
+# ask for --force-latest as well.
+bash build-release-images.sh --also-tag latest --force-latest -- --registry localhost/scion
+scion config set --global image_registry localhost/scion
+
+# Or build a given release and push it to your own registry:
+bash build-release-images.sh v0.3.0-preview.5 --also-tag latest --force-latest -- \
+  --registry ghcr.io/myorg --platform all --push
+scion config set --global image_registry ghcr.io/myorg
+```
+
+The images must be available before you run the initialization command below. See
+[Images that match a release](/scion/local/custom-images/#images-that-match-a-release) for the
+`image_tag` alternative to `--also-tag latest`.
+
+To build from the tip of `main` instead, fork the repository and run the "Build Scion Images"
+workflow from its "Actions" tab, then use your `ghcr.io/myorg` registry for `image_registry`.
+
+See [Building Custom Images](/scion/local/custom-images/) for more details.
 
 ## Configuration
 

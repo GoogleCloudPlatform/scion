@@ -193,6 +193,10 @@ type Layer1Snapshot struct {
 	// MonitoringDashboardURL is server.hub.monitoring_dashboard_url; ""
 	// means unset (no Health page link). Every snapshot constructor sets it.
 	MonitoringDashboardURL string
+	// ContentURL is server.hub.content_url, the hub's content host; ""
+	// means unset (shared artifacts stay on the hub origin). Every snapshot
+	// constructor sets it.
+	ContentURL string
 
 	// GitHub App (non-secret fields only)
 	GitHubAppID           int64
@@ -1387,6 +1391,7 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 	snap.HubName = k.String("server.hub.hub_name")
 	snap.ImageRegistry = k.String("image_registry")
 	snap.MonitoringDashboardURL = k.String(config.MonitoringDashboardURLKey)
+	snap.ContentURL = k.String(config.ContentURLKey)
 
 	// GitHub App
 	snap.GitHubAppID = k.Int64("server.github_app.app_id")
@@ -1485,6 +1490,8 @@ func BuildLayer1SnapshotFromFile(gc *config.GlobalConfig) Layer1Snapshot {
 		// Applied live in file mode too, so a settings.yaml edit followed
 		// by a reload changes the Health page link without a restart.
 		MonitoringDashboardURL: gc.Hub.MonitoringDashboardURL,
+		// Applied live in file mode too, like the monitoring link.
+		ContentURL: gc.Hub.ContentURL,
 	}
 
 	if gc.TelemetryConfig != nil {
@@ -1908,6 +1915,17 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 		applied = append(applied, "monitoring_dashboard_url")
 	}
 
+	// Content host: written unconditionally so that clearing the key ends
+	// the confinement and shareUrl. The guard, the view CSP and shareUrl
+	// read it on every request through HubEndpoints().Content, which
+	// ignores (and logs once) a value that is invalid or on the hub's own
+	// host name (contentURLInEffect).
+	if s.contentURLLiveValue() != snap.ContentURL {
+		applied = append(applied, "content_url")
+	}
+	contentURL := snap.ContentURL
+	s.contentURLLive.Store(&contentURL)
+
 	// image_registry is not applied here: every hub read resolves it from
 	// the operational settings when it needs it (hubScopeImageRegistry,
 	// dispatchImageRegistryFor; ptone/scion#3916), and the co-located
@@ -2025,6 +2043,11 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 	if snap.FromOperationalSettings {
 		feedImageRegistryOverlay(s.GetOperationalSettings())
 	}
+	// image_tag (ptone/scion#6625): log the hub-scope value and every
+	// profile value, with their sources, when a save, an experiment toggle
+	// or another replica's change moved any of them. Nothing is logged
+	// before the startup line (LogImageTag).
+	s.logImageTagIfChanged()
 	// The placement findings are recorded with the maps under one lock,
 	// and for every DB-backed snapshot even when no map changed: a stored
 	// runtimes document that does not decode leaves the runtimes map nil

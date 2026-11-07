@@ -30,11 +30,12 @@ import { apiFetch, extractApiError } from '../../client/api.js';
 import { invalidatePublicSettings } from '../../client/server-feature-flags.js';
 import { KNOWN_HARNESS_NAMES, harnessDisplayName } from '../../shared/harness-utils.js';
 import { normalizeModelAlias } from '../../shared/model-utils.js';
+import { isKubernetesRuntimeType } from '../../shared/runtime-kind.js';
 import type { RuntimeBroker, GCPServiceAccount } from '../../shared/types.js';
 import { formatInstantWithZone, isValidTimeZone } from '../../utils/time.js';
 import { isHttpUrl } from '../../utils/http-url.js';
-import { renderReleaseNotesLink } from '../../utils/release-notes-link.js';
 import '../shared/timezone-picker.js';
+import type { UpdateStatus } from './admin-maintenance-update-card.js';
 import type { TimezoneChangeDetail } from '../shared/timezone-picker.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 import {
@@ -64,6 +65,7 @@ import './admin-chat-retention.js';
 import { showConfirm } from '../shared/confirm-dialog.js';
 import {
   issuesAt,
+  parseQuantity,
   validateResourceSpec,
   type QuantityIssues,
   type ResourceSpecInput,
@@ -430,6 +432,8 @@ interface V1ProfileConfig {
   env?: Record<string, string>;
   resources?: ResourceSpec;
   safe_to_evict?: boolean;
+  shared_dir_storage_class?: string;
+  shared_dir_size?: string;
   [key: string]: unknown;
 }
 
@@ -602,31 +606,6 @@ interface ConflictInfo {
   appliedKeys: string[];
   pendingRestart: string[];
   skipped: SkippedKey[];
-}
-
-interface UpdateCommitInfo {
-  hash: string;
-  subject: string;
-}
-
-interface UpdateCheckResult {
-  // Common
-  tier?: string; // "source" or "binary"
-  update_available: boolean;
-
-  // Source/git tier
-  current_commit?: string;
-  latest_commit?: string;
-  current_branch?: string;
-  tracking_ref?: string;
-  commits_behind?: number;
-  new_commits?: UpdateCommitInfo[];
-
-  // Binary tier
-  current_version?: string;
-  latest_version?: string;
-  channel?: string;
-  release_url?: string;
 }
 
 interface GitHubInstallationInfo {
@@ -893,11 +872,14 @@ const REMOVED_STORAGE_OVERRIDE_KEYS = [
   'home_storage_leaf',
 ];
 
-// Container and Kubernetes runtime fields, cleared when a runtime switches
-// to Cloud Run.
-const CONTAINER_RUNTIME_KEYS = [
-  'host',
-  'context',
+// Runtime fields docker, podman and Kubernetes share; a switch between them
+// keeps them.
+const CONTAINER_HOST_KEYS = ['host', 'context'] as const;
+
+// Kubernetes-only runtime fields, cleared when a runtime switches to a
+// non-Kubernetes container type (docker, podman) or to Cloud Run, and hidden
+// on the card of a non-Kubernetes container type.
+const KUBERNETES_ONLY_RUNTIME_KEYS = [
   'namespace',
   'gke',
   'list_all_namespaces',
@@ -912,14 +894,65 @@ const CONTAINER_RUNTIME_KEYS = [
   'shared_dir_size',
 ] as const;
 
+// Container and Kubernetes runtime fields, cleared when a runtime switches
+// to Cloud Run.
+const CONTAINER_RUNTIME_KEYS = [...CONTAINER_HOST_KEYS, ...KUBERNETES_ONLY_RUNTIME_KEYS];
+
+/**
+ * Whether a runtime type is a container type that is not Kubernetes (docker,
+ * podman): set, not a Cloud Run type and not a Kubernetes type. An empty type
+ * is not one, since an untyped entry can be Kubernetes by its name.
+ */
+function isNonKubernetesContainerType(type: string): boolean {
+  return (
+    type !== '' &&
+    type !== 'cloudrun' &&
+    type !== 'cloudrun-instances' &&
+    !isKubernetesRuntimeType(type)
+  );
+}
+
+/**
+ * Whether the shared-dir PVC fields are hidden for a runtime type: a
+ * non-Kubernetes container type (the predicate above) or a Cloud Run type.
+ * A runtime card renders the fields in its Kubernetes-only block, which both
+ * leave out; a profile card applies this to the type of its runtime.
+ */
+function hidesSharedDirFields(type: string): boolean {
+  if (type === 'cloudrun' || type === 'cloudrun-instances') return true;
+  return isNonKubernetesContainerType(type);
+}
+
+// A quantity is positive when it has no leading "-" and a non-zero digit
+// before any exponent or suffix. Read from the text, not a float: 1e-400 is
+// positive for the hub but underflows to 0 as a number.
+const POSITIVE_QUANTITY = /^[+]?[0-9.]*[1-9]/;
+
+/**
+ * The inline error for a shared_dir_size value, or null when it is valid:
+ * empty (unset) or a positive Kubernetes quantity, the hub's rule
+ * (config.ValidateSharedDirSize). The text names the field, never the value.
+ */
+export function sharedDirSizeError(value: string): string | null {
+  if (!value) return null;
+  if (parseQuantity(value) !== null && POSITIVE_QUANTITY.test(value)) return null;
+  return 'shared_dir_size must be a positive Kubernetes quantity, such as 10Gi or 1Ti.';
+}
+
 /**
  * The runtime entry keys a switch to type clears: the container and
  * Kubernetes fields and the other Cloud Run block when switching to a Cloud
- * Run type, both Cloud Run blocks otherwise.
+ * Run type; the Kubernetes-only fields and both Cloud Run blocks when
+ * switching to a non-Kubernetes container type (docker, podman), which keeps
+ * host and context; both Cloud Run blocks otherwise (a Kubernetes type or no
+ * type).
  */
 export function runtimeTypeSwitchKeys(type: string): string[] {
   if (type === 'cloudrun') return [...CONTAINER_RUNTIME_KEYS, 'cloudrun_instances'];
   if (type === 'cloudrun-instances') return [...CONTAINER_RUNTIME_KEYS, 'cloudrun'];
+  if (isNonKubernetesContainerType(type)) {
+    return [...KUBERNETES_ONLY_RUNTIME_KEYS, 'cloudrun', 'cloudrun_instances'];
+  }
   return ['cloudrun', 'cloudrun_instances'];
 }
 
@@ -966,14 +999,12 @@ export class ScionPageAdminServerConfig extends LitElement {
   @state() private scionCommit = '';
   @state() private scionBuildTime = '';
 
-  // ── Update check state ──
-  @state() private updateCheckLoading = false;
-  @state() private updateCheckError: string | null = null;
-  @state() private updateCheckResult: UpdateCheckResult | null = null;
-  @state() private updateRunning = false;
-  @state() private showUpdateConfirm = false;
-  /** Deployment tier ("binary" or "source"), learned from the update check response. */
-  @state() private deploymentTier: 'binary' | 'source' = 'source';
+  /**
+   * Running version and effective channel from GET
+   * /api/v1/admin/maintenance/update-status, or null when it is not loaded.
+   * Updates are managed on the Maintenance page only; this page shows them.
+   */
+  @state() private updateStatus: UpdateStatus | null = null;
 
   // ── Form state (mirrors settings.yaml) ──
 
@@ -1472,92 +1503,22 @@ export class ScionPageAdminServerConfig extends LitElement {
       border: 1px solid var(--scion-border, #e2e8f0);
     }
 
-    .version-actions {
+    .version-summary {
       display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      margin-left: auto;
-      align-self: flex-start;
-    }
-
-    .update-banner {
-      margin-top: 0.75rem;
-      padding: 0.75rem 1rem;
-      border-radius: 0.375rem;
-      border: 1px solid var(--sl-color-primary-200, #bfdbfe);
-      background: var(--sl-color-primary-50, #eff6ff);
-    }
-
-    .update-banner-header {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      font-weight: 600;
+      flex-wrap: wrap;
+      align-items: baseline;
+      gap: 0.5rem 1rem;
+      margin-bottom: 0.75rem;
       font-size: 0.875rem;
-      color: var(--sl-color-primary-700, #1d4ed8);
-    }
-
-    .update-banner-header sl-icon {
-      font-size: 1rem;
-    }
-
-    .update-commits {
-      margin-top: 0.5rem;
-      max-height: 10rem;
-      overflow-y: auto;
-      font-size: 0.8125rem;
-      font-family: var(--sl-font-mono, monospace);
-      line-height: 1.5;
       color: var(--scion-text, #1e293b);
     }
 
-    .update-commits .commit-hash {
-      color: var(--sl-color-primary-600, #2563eb);
-      margin-right: 0.5rem;
-    }
-
-    .update-banner-actions {
-      margin-top: 0.75rem;
-      display: flex;
-      gap: 0.5rem;
-    }
-
-    .update-current {
-      margin-top: 0.5rem;
-      font-size: 0.8125rem;
-      color: var(--scion-text-muted, #64748b);
-    }
-
-    .update-error {
-      margin-top: 0.5rem;
-      font-size: 0.8125rem;
-      color: var(--sl-color-danger-700, #b91c1c);
-    }
-
-    .release-info {
-      display: flex;
-      flex-direction: column;
-      gap: 0.25rem;
-      margin-top: 0.375rem;
-      font-size: 0.8125rem;
-    }
-
-    .release-info .release-field {
-      display: flex;
-      gap: 0.5rem;
-    }
-
-    .release-info .release-label {
-      color: var(--scion-text-muted, #64748b);
-      min-width: 7rem;
-    }
-
-    .release-info a {
+    .version-summary a {
       color: var(--sl-color-primary-600, #2563eb);
       text-decoration: none;
     }
 
-    .release-info a:hover {
+    .version-summary a:hover {
       text-decoration: underline;
     }
 
@@ -2066,6 +2027,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     void this.loadHubGCPServiceAccounts();
     void this.loadGitHubAppInstallations();
     void this.loadMessagingSettings();
+    void this.loadUpdateStatus();
   }
 
   private async loadConfig(): Promise<void> {
@@ -2515,7 +2477,27 @@ export class ScionPageAdminServerConfig extends LitElement {
         add(`profiles.${name}.harness_overrides.${harness}.resources`, ho?.resources);
       }
     }
+    // shared_dir_size on the entries that show it (ptone/scion#2649).
+    const sharedDirSize = (path: string, value: string | undefined): void => {
+      const message = sharedDirSizeError(value ?? '');
+      if (message) all.errors.push({ path, message });
+    };
+    for (const [name, rt] of Object.entries(this.runtimes)) {
+      if (hidesSharedDirFields(rt.type || '')) continue;
+      sharedDirSize(`runtimes.${name}.shared_dir_size`, rt.shared_dir_size);
+    }
+    for (const [name, profile] of Object.entries(this.profiles)) {
+      if (hidesSharedDirFields(this.profileRuntimeType(profile))) continue;
+      sharedDirSize(`profiles.${name}.shared_dir_size`, profile.shared_dir_size);
+    }
     return all;
+  }
+
+  /** The type of the runtime a profile names; empty when unset, unknown or untyped. */
+  private profileRuntimeType(profile: V1ProfileConfig): string {
+    const name = profile.runtime;
+    if (!name || !hasOwn(this.runtimes, name)) return '';
+    return this.runtimes[name]?.type || '';
   }
 
   private get hasResourceQuantityErrors(): boolean {
@@ -4338,125 +4320,52 @@ export class ScionPageAdminServerConfig extends LitElement {
 
   // ── Tab renderers ──
 
+  /**
+   * The read-only "Scion version: X (channel)" line. The version and channel
+   * come from update-status; before it loads, or when it cannot be read, the
+   * version falls back to the server-config build info and no channel is shown.
+   */
+  private renderVersionSummary() {
+    const version = this.updateStatus?.current.version || this.scionVersion;
+    const channel = this.updateStatus?.channel.effective ?? '';
+    return html`
+      <div class="version-summary">
+        ${version
+          ? html`<span class="version-line"
+              >Scion version: <strong>${version}</strong>${channel
+                ? html` (${channel})`
+                : nothing}</span
+            >`
+          : nothing}
+        <a class="manage-updates-link" href="/admin/maintenance">Manage updates &rarr;</a>
+      </div>
+    `;
+  }
+
   private renderVersionInfo() {
-    if (!this.scionVersion && !this.scionCommit) return nothing;
-    const r = this.updateCheckResult;
     return html`
       <div class="section">
         <h3 class="section-title">Scion Server Version</h3>
-        <div class="version-info">
-          ${this.scionVersion
-            ? html`<div class="version-item">
-                <span class="version-label">Version</span>
-                <span class="version-value">${this.scionVersion}</span>
-              </div>`
-            : nothing}
-          ${this.scionCommit
-            ? html`<div class="version-item">
-                <span class="version-label">Git Commit</span>
-                <span class="version-value"><code>${this.scionCommit}</code></span>
-              </div>`
-            : nothing}
-          ${this.scionBuildTime
-            ? html`<div class="version-item">
-                <span class="version-label">Build Time</span>
-                <span class="version-value" title=${this.scionBuildTime}
-                  >${formatInstantWithZone(this.scionBuildTime) || this.scionBuildTime}</span
-                >
-              </div>`
-            : nothing}
-          <div class="version-actions">
-            <sl-button
-              size="small"
-              variant="default"
-              ?loading=${this.updateCheckLoading}
-              @click=${() => this.checkForUpdates()}
-            >
-              <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
-              Check for Updates
-            </sl-button>
-          </div>
-        </div>
-        ${this.updateCheckError
-          ? html`<div class="update-error">${this.updateCheckError}</div>`
-          : nothing}
-        ${r && r.update_available
-          ? html`
-              <div class="update-banner">
-                <div class="update-banner-header">
-                  <sl-icon name="info-circle"></sl-icon>
-                  ${r.tier === 'binary'
-                    ? html`Update available`
-                    : html`Update
-                      available${r.current_branch && r.current_branch !== 'main'
-                        ? html` on <code>${r.current_branch}</code>`
-                        : nothing}${r.commits_behind != null
-                        ? html` &mdash; ${r.commits_behind} new
-                          commit${r.commits_behind === 1 ? '' : 's'}`
-                        : nothing}`}
-                </div>
-                ${r.tier === 'binary'
-                  ? html`
-                      <div class="release-info">
-                        <div class="release-field">
-                          <span class="release-label">Current version:</span>
-                          <span>${r.current_version}</span>
-                        </div>
-                        <div class="release-field">
-                          <span class="release-label">Latest version:</span>
-                          <span>${r.latest_version}</span>
-                        </div>
-                        ${r.channel
-                          ? html`<div class="release-field">
-                              <span class="release-label">Channel:</span>
-                              <span>${r.channel}</span>
-                            </div>`
-                          : nothing}
-                        ${r.release_url
-                          ? html`<div class="release-field">
-                              <span class="release-label">Release notes:</span>
-                              ${renderReleaseNotesLink(r.release_url)}
-                            </div>`
-                          : nothing}
-                      </div>
-                    `
-                  : r.new_commits && r.new_commits.length > 0
-                    ? html`
-                        <div class="update-commits">
-                          ${r.new_commits.map(
-                            (c) => html`
-                              <div><span class="commit-hash">${c.hash}</span>${c.subject}</div>
-                            `
-                          )}
-                        </div>
-                      `
-                    : nothing}
-                <div class="update-banner-actions">
-                  <sl-button
-                    size="small"
-                    variant="primary"
-                    ?loading=${this.updateRunning}
-                    @click=${() => (this.showUpdateConfirm = true)}
-                  >
-                    <sl-icon slot="prefix" name="download"></sl-icon>
-                    Update Now
-                  </sl-button>
-                </div>
-              </div>
-            `
-          : nothing}
-        ${r && !r.update_available
-          ? html`<div class="update-current">
-              ${r.tier === 'binary'
-                ? html`Server is up to date (${r.current_version}).`
-                : html`Server is up to
-                  date${r.current_branch && r.current_branch !== 'main'
-                    ? html` on <code>${r.current_branch}</code>`
-                    : nothing}.`}
+        ${this.renderVersionSummary()}
+        ${this.scionCommit || this.scionBuildTime
+          ? html`<div class="version-info">
+              ${this.scionCommit
+                ? html`<div class="version-item">
+                    <span class="version-label">Git Commit</span>
+                    <span class="version-value"><code>${this.scionCommit}</code></span>
+                  </div>`
+                : nothing}
+              ${this.scionBuildTime
+                ? html`<div class="version-item">
+                    <span class="version-label">Build Time</span>
+                    <span class="version-value" title=${this.scionBuildTime}
+                      >${formatInstantWithZone(this.scionBuildTime) || this.scionBuildTime}</span
+                    >
+                  </div>`
+                : nothing}
             </div>`
           : nothing}
       </div>
-      ${this.showUpdateConfirm ? this.renderUpdateConfirmDialog() : nothing}
     `;
   }
 
@@ -5663,6 +5572,9 @@ export class ScionPageAdminServerConfig extends LitElement {
     const rt = this.runtimes[name];
     if (!rt) return nothing;
     const isCloudRun = rt.type === 'cloudrun' || rt.type === 'cloudrun-instances';
+    // Docker and podman cards leave out the Kubernetes-only fields, the ones a
+    // switch to that type clears (ptone/scion#2649).
+    const hideK8sFields = isNonKubernetesContainerType(rt.type || '');
     return html`
       <sl-card class="runtime-card">
         <div slot="header" style="display:flex;align-items:center;justify-content:space-between;">
@@ -5732,57 +5644,72 @@ export class ScionPageAdminServerConfig extends LitElement {
                     }}
                   ></sl-input>
                 </div>
-                <div class="form-field">
-                  <label>Namespace</label>
-                  <sl-input
-                    value=${rt.namespace || ''}
-                    ?disabled=${readOnly}
-                    @sl-input=${(e: Event) => {
-                      this.updateRuntimeField(
-                        name,
-                        'namespace',
-                        (e.target as HTMLInputElement).value
-                      );
-                    }}
-                  ></sl-input>
-                </div>
-                <div class="form-field">
-                  <sl-switch
-                    ?checked=${rt.gke || false}
-                    ?disabled=${readOnly}
-                    @sl-change=${(e: Event) => {
-                      this.updateRuntimeBool(name, 'gke', (e.target as HTMLInputElement).checked);
-                    }}
-                    >GKE cluster</sl-switch
-                  >
-                  <span class="hint">Enable GKE-specific features</span>
-                </div>
-                <div class="form-field">
-                  <sl-switch
-                    ?checked=${rt.list_all_namespaces || false}
-                    ?disabled=${readOnly}
-                    @sl-change=${(e: Event) => {
-                      this.updateRuntimeBool(
-                        name,
-                        'list_all_namespaces',
-                        (e.target as HTMLInputElement).checked
-                      );
-                    }}
-                    >List all namespaces</sl-switch
-                  >
-                  <span class="hint">List agents across all namespaces</span>
-                </div>
-                <div class="form-field">
-                  <label>Safe to Evict</label>
-                  <span class="hint"
-                    >Kubernetes only. false adds the cluster-autoscaler safe-to-evict: "false"
-                    annotation to agent pods; true adds nothing. A profile's value wins.</span
-                  >
-                  ${this.renderSafeToEvictSelect(rt.safe_to_evict, readOnly, (v) =>
-                    this.updateRuntimeSafeToEvict(name, v)
-                  )}
-                  ${this.renderSafeToEvictIgnored(this.isKubernetesRuntime(name))}
-                </div>
+                ${hideK8sFields
+                  ? nothing
+                  : html`
+                      <div class="form-field">
+                        <label>Namespace</label>
+                        <sl-input
+                          value=${rt.namespace || ''}
+                          ?disabled=${readOnly}
+                          @sl-input=${(e: Event) => {
+                            this.updateRuntimeField(
+                              name,
+                              'namespace',
+                              (e.target as HTMLInputElement).value
+                            );
+                          }}
+                        ></sl-input>
+                      </div>
+                      ${this.renderSharedDirFields(
+                        `runtimes.${name}`,
+                        rt.shared_dir_storage_class,
+                        rt.shared_dir_size,
+                        readOnly,
+                        (field, value) => this.updateRuntimeField(name, field, value)
+                      )}
+                      <div class="form-field">
+                        <sl-switch
+                          ?checked=${rt.gke || false}
+                          ?disabled=${readOnly}
+                          @sl-change=${(e: Event) => {
+                            this.updateRuntimeBool(
+                              name,
+                              'gke',
+                              (e.target as HTMLInputElement).checked
+                            );
+                          }}
+                          >GKE cluster</sl-switch
+                        >
+                        <span class="hint">Enable GKE-specific features</span>
+                      </div>
+                      <div class="form-field">
+                        <sl-switch
+                          ?checked=${rt.list_all_namespaces || false}
+                          ?disabled=${readOnly}
+                          @sl-change=${(e: Event) => {
+                            this.updateRuntimeBool(
+                              name,
+                              'list_all_namespaces',
+                              (e.target as HTMLInputElement).checked
+                            );
+                          }}
+                          >List all namespaces</sl-switch
+                        >
+                        <span class="hint">List agents across all namespaces</span>
+                      </div>
+                      <div class="form-field">
+                        <label>Safe to Evict</label>
+                        <span class="hint"
+                          >Kubernetes only. false adds the cluster-autoscaler safe-to-evict: "false"
+                          annotation to agent pods; true adds nothing. A profile's value wins.</span
+                        >
+                        ${this.renderSafeToEvictSelect(rt.safe_to_evict, readOnly, (v) =>
+                          this.updateRuntimeSafeToEvict(name, v)
+                        )}
+                        ${this.renderSafeToEvictIgnored(this.isKubernetesRuntime(name))}
+                      </div>
+                    `}
               `
             : html`
                 <div class="form-field">
@@ -6192,6 +6119,9 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (field === 'type') {
       for (const key of runtimeTypeSwitchKeys(value)) {
         delete (rt as Record<string, unknown>)[key];
+        // Drop the rows being edited for a cleared map field, so a switch
+        // back starts from the entry's (now empty) map.
+        this.k8sRows.delete(`${name}\u0000${key}`);
       }
     }
     updated[name] = rt;
@@ -6231,8 +6161,7 @@ export class ScionPageAdminServerConfig extends LitElement {
    */
   private isKubernetesRuntime(name: string): boolean {
     const rt = this.runtimes[name];
-    const t = rt?.type || name;
-    return t === 'kubernetes' || t === 'k8s' || t === 'remote';
+    return isKubernetesRuntimeType(rt?.type || name);
   }
 
   /** Label shown under the safe_to_evict select when it would be ignored. */
@@ -6241,6 +6170,49 @@ export class ScionPageAdminServerConfig extends LitElement {
     return html`<span class="hint safe-to-evict-ignored"
       >Ignored: this runtime is not Kubernetes.</span
     >`;
+  }
+
+  /**
+   * The shared-dir PVC inputs of a runtime or profile entry (ptone/scion#2649).
+   * path is the entry's koanf path (runtimes.NAME or profiles.NAME); an empty
+   * input removes the key through update.
+   */
+  private renderSharedDirFields(
+    path: string,
+    storageClass: string | undefined,
+    size: string | undefined,
+    readOnly: boolean,
+    update: (field: 'shared_dir_storage_class' | 'shared_dir_size', value: string) => void
+  ): TemplateResult {
+    return html`
+      <div class="form-field">
+        <label>Shared dir storage class</label>
+        <sl-input
+          class="shared-dir-storage-class"
+          value=${storageClass || ''}
+          placeholder="e.g. standard-rwx"
+          ?disabled=${readOnly}
+          @sl-input=${(e: Event) => {
+            update('shared_dir_storage_class', (e.target as HTMLInputElement).value);
+          }}
+        ></sl-input>
+        <span class="hint">Kubernetes only. Empty uses the cluster default.</span>
+      </div>
+      <div class="form-field">
+        <label>Shared dir size</label>
+        <sl-input
+          class="shared-dir-size"
+          value=${size || ''}
+          placeholder="e.g. 10Gi"
+          ?disabled=${readOnly}
+          @sl-input=${(e: Event) => {
+            update('shared_dir_size', (e.target as HTMLInputElement).value);
+          }}
+        ></sl-input>
+        <span class="hint">Kubernetes only. A Kubernetes quantity, such as 10Gi or 1Ti.</span>
+        ${this.renderQuantityIssues(`${path}.shared_dir_size`)}
+      </div>
+    `;
   }
 
   private updateRuntimeSafeToEvict(name: string, value: boolean | undefined): void {
@@ -6459,6 +6431,15 @@ export class ScionPageAdminServerConfig extends LitElement {
                 this.isKubernetesRuntime(profile.runtime)
             )}
           </div>
+          ${hidesSharedDirFields(this.profileRuntimeType(profile))
+            ? nothing
+            : this.renderSharedDirFields(
+                `profiles.${name}`,
+                profile.shared_dir_storage_class,
+                profile.shared_dir_size,
+                readOnly,
+                (field, value) => this.updateProfileField(name, field, value)
+              )}
           <div class="form-field">
             <label>CPU Request</label>
             <sl-input
@@ -8059,127 +8040,23 @@ export class ScionPageAdminServerConfig extends LitElement {
     }
   }
 
-  // ── Update check ──
-
-  private async checkForUpdates(): Promise<void> {
-    this.updateCheckLoading = true;
-    this.updateCheckError = null;
-    this.updateCheckResult = null;
-    try {
-      const res = await apiFetch('/api/v1/admin/maintenance/check-updates', {
-        method: 'POST',
-      });
-      if (!res.ok) {
-        this.updateCheckError = await extractApiError(res, 'Failed to check for updates');
-        return;
-      }
-      const result = (await res.json()) as UpdateCheckResult;
-      this.updateCheckResult = result;
-      if (result.tier === 'binary' || result.tier === 'source') {
-        this.deploymentTier = result.tier;
-      }
-    } catch {
-      this.updateCheckError = 'Failed to connect to server';
-    } finally {
-      this.updateCheckLoading = false;
-    }
-  }
-
-  private renderUpdateConfirmDialog() {
-    return html`
-      <sl-dialog
-        label="Update Server"
-        open
-        @sl-request-close=${() => (this.showUpdateConfirm = false)}
-      >
-        <div>
-          ${this.deploymentTier === 'binary'
-            ? html`<p>
-                This will download the latest release binary and
-                <strong>restart the server</strong>.
-              </p>`
-            : html`<p>
-                This will pull the latest code, rebuild the server, and
-                <strong>restart the service</strong>. You will temporarily lose connectivity.
-              </p>`}
-          <p>
-            Running agent containers are not affected and will continue working through the restart.
-          </p>
-          ${this.updateCheckResult &&
-          this.deploymentTier !== 'binary' &&
-          this.updateCheckResult.commits_behind != null
-            ? html`<p>
-                <strong>${this.updateCheckResult.commits_behind}</strong> new
-                commit${this.updateCheckResult.commits_behind === 1 ? '' : 's'} will be applied.
-              </p>`
-            : nothing}
-          ${this.updateCheckResult &&
-          this.deploymentTier === 'binary' &&
-          this.updateCheckResult.latest_version
-            ? html`<p>
-                Version <strong>${this.updateCheckResult.latest_version}</strong> will be installed.
-              </p>`
-            : nothing}
-        </div>
-        <sl-button
-          slot="footer"
-          variant="default"
-          @click=${() => (this.showUpdateConfirm = false)}
-          ?disabled=${this.updateRunning}
-          >Cancel</sl-button
-        >
-        <sl-button
-          slot="footer"
-          variant="warning"
-          ?loading=${this.updateRunning}
-          @click=${() => this.triggerUpdate()}
-        >
-          <sl-icon slot="prefix" name="download"></sl-icon>
-          Update &amp; Restart
-        </sl-button>
-      </sl-dialog>
-    `;
-  }
+  // ── Update status (read-only) ──
 
   /**
-   * update-binary params: the checked release tag when the check returned
-   * one, otherwise the latest release in the checked channel, which the hub
-   * resolves. The hub rejects any other param. Null when neither is known.
+   * Loads the running version and effective channel for the read-only
+   * version line. A failure leaves updateStatus null: the line then shows the
+   * server-config version without a channel, and never guesses one.
    */
-  private updateBinaryParams(): Record<string, string> | null {
-    const r = this.updateCheckResult;
-    const target = r?.latest_version || (r?.channel ? `latest:${r.channel}` : '');
-    return target ? { target_version: target, pin: 'latest' } : null;
-  }
-
-  private async triggerUpdate(): Promise<void> {
-    const opKey = this.deploymentTier === 'binary' ? 'update-binary' : 'rebuild-server';
-    const params = opKey === 'update-binary' ? this.updateBinaryParams() : {};
-    if (!params) {
-      this.updateCheckError =
-        'No update target is known. Run Check for Updates first, then update.';
-      return;
-    }
-    this.updateRunning = true;
+  private async loadUpdateStatus(): Promise<void> {
     try {
-      const res = await apiFetch(`/api/v1/admin/maintenance/operations/${opKey}/run`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ params }),
-      });
-      if (!res.ok) {
-        const errMsg = await extractApiError(res, `HTTP ${res.status}`);
-        this.updateCheckError = errMsg;
-        return;
+      const res = await apiFetch('/api/v1/admin/maintenance/update-status');
+      if (!res.ok) return;
+      const data = (await res.json()) as Partial<UpdateStatus> | null;
+      if (data?.current && typeof data.current.version === 'string' && data.channel) {
+        this.updateStatus = data as UpdateStatus;
       }
-      // Server will restart — the page will lose connectivity.
-      this.showUpdateConfirm = false;
-      this.updateCheckResult = null;
-      this.successMessage = 'Update started. The server will restart shortly.';
     } catch {
-      this.updateCheckError = 'Failed to trigger update';
-    } finally {
-      this.updateRunning = false;
+      // Keep the server-config fallback.
     }
   }
 }

@@ -17,11 +17,13 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 
@@ -137,6 +139,9 @@ func (s *LogQueryService) Close() error {
 
 // Query returns log entries matching the given options.
 func (s *LogQueryService) Query(ctx context.Context, opts LogQueryOptions) (*LogQueryResult, error) {
+	if err := validateLogQueryOptions(opts); err != nil {
+		return nil, err
+	}
 	filter := BuildLogFilter(opts, s.projectID)
 
 	tail := opts.Tail
@@ -169,6 +174,46 @@ func (s *LogQueryService) Query(ctx context.Context, opts LogQueryOptions) (*Log
 	return &LogQueryResult{
 		Entries: entries,
 	}, nil
+}
+
+// logSeverityNames is the closed set of Cloud Logging severity names a log
+// query accepts. It is the one table behind the request check
+// (logSeverityParam), the service check (validateLogQueryOptions) and the
+// severity clause of BuildLogFilter.
+var logSeverityNames = []string{
+	"DEFAULT", "DEBUG", "INFO", "NOTICE", "WARNING", "ERROR", "CRITICAL", "ALERT", "EMERGENCY",
+}
+
+// errInvalidLogSeverity is returned for a severity outside logSeverityNames.
+var errInvalidLogSeverity = errors.New("severity must be one of: " + strings.Join(logSeverityNames, ", "))
+
+// normalizeLogSeverity returns the logSeverityNames entry that s names,
+// ignoring ASCII case. A value with any non-ASCII byte is refused before
+// matching, so Unicode case folding can never turn it into a name; the
+// result is always the table constant, never the caller's bytes.
+func normalizeLogSeverity(s string) (string, bool) {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= utf8.RuneSelf {
+			return "", false
+		}
+	}
+	for _, name := range logSeverityNames {
+		if strings.EqualFold(s, name) {
+			return name, true
+		}
+	}
+	return "", false
+}
+
+// validateLogQueryOptions checks the options before a filter is built.
+// An empty severity means no severity filter.
+func validateLogQueryOptions(opts LogQueryOptions) error {
+	if opts.Severity != "" {
+		if _, ok := normalizeLogSeverity(opts.Severity); !ok {
+			return errInvalidLogSeverity
+		}
+	}
+	return nil
 }
 
 // messageRecordFilter restricts message log queries to message records:
@@ -238,7 +283,13 @@ func BuildLogFilter(opts LogQueryOptions, projectID ...string) string {
 		parts = append(parts, fmt.Sprintf(`timestamp < %q`, opts.Until.UTC().Format(time.RFC3339Nano)))
 	}
 	if opts.Severity != "" {
-		parts = append(parts, fmt.Sprintf(`severity >= %s`, strings.ToUpper(opts.Severity)))
+		// Defence in depth only: Query and Tail refuse an unknown severity
+		// (validateLogQueryOptions) before they build a filter, so the clause
+		// is never dropped silently on their path. The clause carries the
+		// table constant, never the caller's bytes.
+		if sev, ok := normalizeLogSeverity(opts.Severity); ok {
+			parts = append(parts, "severity >= "+sev)
+		}
 	}
 	if opts.HubName != "" {
 		parts = append(parts, fmt.Sprintf(`labels.hub = %q`, opts.HubName))
@@ -347,6 +398,9 @@ func ConvertLogEntry(entry *gcplog.Entry) CloudLogEntry {
 // It sends matching log entries to the returned channel. The caller must call
 // the returned cancel function to stop the stream and release resources.
 func (s *LogQueryService) Tail(ctx context.Context, opts LogQueryOptions) (<-chan CloudLogEntry, func(), error) {
+	if err := validateLogQueryOptions(opts); err != nil {
+		return nil, nil, err
+	}
 	filter := BuildLogFilter(opts, s.projectID)
 
 	stream, err := s.tailClient.TailLogEntries(ctx)

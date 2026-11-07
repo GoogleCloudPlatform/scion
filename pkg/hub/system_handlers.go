@@ -746,6 +746,9 @@ type imagePullResponse struct {
 	JobID string `json:"jobId"`
 }
 
+// systemImagePuller is the signature of runtime.PullImages.
+type systemImagePuller func(ctx context.Context, rt runtime.Runtime, harnesses []string, registry, tag string, onEvent func(runtime.PullResult)) error
+
 func (s *Server) handleSystemImagesPull(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w, http.MethodPost)
@@ -776,6 +779,9 @@ func (s *Server) handleSystemImagesPull(w http.ResponseWriter, r *http.Request) 
 	}
 
 	registry := s.resolveImageRegistry()
+	// The harness images take the hub-scope image_tag (ptone/scion#6625);
+	// "" while hub.image_tag_setting is off.
+	imageTag := s.hubScopeImageTag()
 	if registry == "" {
 		s.imagePullActive.Store(false)
 		writeError(w, http.StatusUnprocessableEntity, ErrCodeUnprocessable, "image_registry is not configured — run 'scion config set --global image_registry <registry>' or reinstall via Homebrew", nil)
@@ -787,10 +793,14 @@ func (s *Server) handleSystemImagesPull(w http.ResponseWriter, r *http.Request) 
 	rt := runtime.GetRuntime(systemRuntimeProjectPath, "")
 
 	requestedHarnesses := req.Harnesses
+	pull := s.systemImagePull
+	if pull == nil {
+		pull = runtime.PullImages
+	}
 
 	go func() {
 		defer s.imagePullActive.Store(false)
-		if err := runtime.PullImages(s.ctx, rt, requestedHarnesses, registry, func(pr runtime.PullResult) {
+		if err := pull(s.ctx, rt, requestedHarnesses, registry, imageTag, func(pr runtime.PullResult) {
 			s.events.PublishRaw("system.images."+jobID, pr)
 		}); err != nil {
 			s.events.PublishRaw("system.images."+jobID, map[string]string{

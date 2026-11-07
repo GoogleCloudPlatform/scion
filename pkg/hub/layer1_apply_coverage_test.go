@@ -260,6 +260,8 @@ func layer1LiveProbes(t *testing.T) map[string]layer1LiveProbe {
 			observe: func(s *Server, _ *OperationalSettings) any { return s.resolveImageRegistry() }},
 		"server.hub.monitoring_dashboard_url": {section: "endpoints", doc: `{"monitoring_dashboard_url":"https://monitoring.example.com/d/1"}`,
 			observe: observeLocked(func(s *Server) any { return s.config.MonitoringDashboardURL })},
+		"server.hub.content_url": {section: "endpoints", doc: `{"content_url":"https://content.example.net"}`,
+			observe: func(s *Server, _ *OperationalSettings) any { return s.contentURLLiveValue() }},
 
 		// github_app
 		"server.github_app":                  {section: "github_app", base: ghBase + `}`, doc: ghBase + `,"api_base_url":"https://ghe.example.com/api/v3"}`, observe: observeGitHubApp},

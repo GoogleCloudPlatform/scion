@@ -78,10 +78,10 @@ func brokerRegistryMissingError() error {
 	if maintenanceOnlyRegistrySet() {
 		msg += maintenanceRegistryOnlyNote + ".\n\n"
 	}
-	msg += "See image-build/README.md for instructions on building and pushing images,\n" +
-		"and image-build/README.md#build-images-for-a-release for images that match a release\n" +
-		"(the experimental image_tag setting, hub.image_tag_setting, will select their tag\n" +
-		"in a follow-up change)"
+	msg += "See image-build/README.md for instructions on building and pushing images.\n" +
+		"For images that match a release, run image-build/scripts/build-release-images.sh <version>\n" +
+		"(image-build/README.md#build-images-for-a-release); the experimental image_tag setting,\n" +
+		"behind hub.image_tag_setting, selects their tag"
 	return errors.New(msg)
 }
 

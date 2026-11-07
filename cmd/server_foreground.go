@@ -989,12 +989,13 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 									}
 								}
 								// Inject transport auth config so plugins can authenticate
-								// with IAP-protected hub endpoints.
-								if cfg.Auth.Transport != nil && cfg.Auth.Transport.Mode != "" {
-									hubCreds["transport_mode"] = cfg.Auth.Transport.Mode
-								}
-								if cfg.Auth.Transport != nil && cfg.Auth.Transport.OIDCAudience != "" {
-									hubCreds["transport_audience"] = cfg.Auth.Transport.OIDCAudience
+								// with IAP-protected hub endpoints. The hub's resolved values
+								// are used, the same ones a plugin restart reconstructs.
+								if mode, audience := hubSrv.PluginTransportAuth(); mode != "" {
+									hubCreds["transport_mode"] = mode
+									if audience != "" {
+										hubCreds["transport_audience"] = audience
+									}
 								}
 								if cfg.Database.Driver != "" && cfg.Database.Driver != "sqlite" {
 									hubCreds["database_driver"] = cfg.Database.Driver
@@ -1051,6 +1052,12 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		} else if err != nil {
 			log.Printf("Warning: failed to load settings; message broker is not started: %v", err)
 		}
+
+		// Watch the broker plugin sessions: a lost session is respawned
+		// (hub-managed) or re-dialled (self-managed) with backoff, and the
+		// plugin's fan-out spoke is then replaced (hooks wired by
+		// SetPluginManager).
+		pluginMgr.StartSupervisor(ctx)
 
 		hubSrv.StartNotificationDispatcher()
 		hubSrv.InitPresenceManager()
@@ -2965,6 +2972,7 @@ func buildHubServerConfig(cfg *config.GlobalConfig, hubEndpoint, devAuthToken st
 		},
 		MaintenanceConfig:       resolveMaintenanceConfig(cfg),
 		NodeImageRegistry:       config.ImageRegistryFromEnv(),
+		NodeImageTag:            config.ImageTagFromEnv(),
 		SecretBackend:           secretBackend,
 		GCPIAMCheckMode:         cfg.Hub.GCPIAMCheckMode,
 		GCPIAMDenyUnknownPolicy: cfg.Hub.GCPIAMDenyUnknownPolicy,
@@ -2972,6 +2980,10 @@ func buildHubServerConfig(cfg *config.GlobalConfig, hubEndpoint, devAuthToken st
 		// Startup value for a hub without OperationalSettings; with them,
 		// ApplySnapshot replaces it from the endpoints section.
 		MonitoringDashboardURL: config.MonitoringDashboardURLOrEmpty(cfg.Hub.MonitoringDashboardURL),
+		// Likewise the content host (server.hub.content_url); the hub
+		// ignores, with a warning, a value that is invalid or on its own
+		// host name (contentURLInEffect).
+		ContentURL: cfg.Hub.ContentURL,
 		// Derive the agent/user JWT signing keys from the same shared session
 		// secret the web cookie store uses, so every replica behind the load
 		// balancer agrees on the signing key regardless of its host-derived
@@ -3660,6 +3672,10 @@ func initOperationalSettings(ctx context.Context, cfg *config.GlobalConfig, hubS
 	// values a saved hub value now beats.
 	hubSrv.WarnMaintenanceImageRegistryDrift()
 	hubSrv.WarnShadowedImageRegistries(flatInstanceImageRegistries())
+	// image_tag (ptone/scion#6625): the resolved value and its source, once;
+	// later changes are logged as they are applied. Warns when a value is
+	// set while hub.image_tag_setting is off.
+	hubSrv.LogImageTag()
 	// A saved authorized_domains that differs from the deployment value
 	// (before ptone/scion#6000 a saved list was not enforced).
 	hubSrv.WarnAuthorizedDomainsDrift(snap)

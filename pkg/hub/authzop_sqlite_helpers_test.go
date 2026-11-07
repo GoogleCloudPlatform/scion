@@ -705,15 +705,16 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	f.artifact = seedLiveInventoryArtifact(t, ctx, artStore, artBlobs, f.project)
 	seedLiveInventoryCatalogFiles(t, ctx, s, artBlobs, &f)
 
-	// hub.conduit, hub.agent_delegation, federation.project_visitors and
-	// hub.agent_edit_held on too, so their experiment-gated routes are
-	// live: the registry above with all four also defaulting on (no
+	// hub.conduit, hub.agent_delegation, federation.project_visitors,
+	// hub.agent_edit_held and hub.artifact_archive on too, so their
+	// experiment-gated routes are live: the registry above with them also
+	// defaulting on (no
 	// operational settings, which the other entries rely on, are replaced).
 	var active []experiments.Experiment
 	for _, e := range srv.experimentRegistry().All() {
 		if e.Name == conduitExperiment || e.Name == experiments.AgentDelegation || e.Name == experiments.FederationProjectVisitors ||
 			e.Name == experiments.ChatStarredMessages || e.Name == experiments.AgentEditHeld ||
-			e.Name == experiments.UserDeleteForceCascade {
+			e.Name == experiments.UserDeleteForceCascade || e.Name == experiments.ArtifactArchive {
 			e.Default = true
 		}
 		active = append(active, e)
@@ -728,6 +729,7 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	require.True(t, srv.experimentEnabled(experiments.ChatStarredMessages))
 	require.True(t, srv.experimentEnabled(experiments.AgentEditHeld))
 	require.True(t, srv.experimentEnabled(experiments.UserDeleteForceCascade))
+	require.True(t, srv.experimentEnabled(experiments.ArtifactArchive))
 	// POST /api/v1/auth/federation-token also answers 404 while the OIDC
 	// provider is off: install a test key manager and allow the audience
 	// that bodyOverrides sends, so the route reaches its caller checks.
@@ -945,6 +947,7 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/artifacts/{id}/versions/{seq}":              {"id": f.artifact, "seq": "1"},
 		"/api/v1/artifacts/{id}/versions/{seq}/finalize":     {"id": f.artifact, "seq": "1"},
 		"/api/v1/artifacts/{id}/versions/{seq}/view":         {"id": f.artifact, "seq": "1"},
+		"/api/v1/artifacts/{id}/versions/{seq}/archive":      {"id": f.artifact, "seq": "1"},
 
 		// --- test identity family ---
 		"/api/v1/test-identities/{id}/token":          {"id": f.testIdentity},

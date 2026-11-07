@@ -146,6 +146,8 @@ To share a page that works whether or not page view is on, build it as one self-
 
 The page cannot load data from the app after it opens, so include everything it needs at build time.
 
+For the Hub-wide content host, a separate origin for untrusted content, see [Content host](/scion/reference/security/#6-content-host). It serves shared artifacts only.
+
 ### Full fidelity: `scion tunnel`
 
 For a multi-file app, an app that talks to its own backend, or a dev server with live reload, use [`scion tunnel`](#tunnels-from-your-machine-scion-tunnel) from your machine. It needs the `scion` CLI and the `hub.conduit` experiment:

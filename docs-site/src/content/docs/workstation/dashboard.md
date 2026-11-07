@@ -5,6 +5,8 @@ description: Using the Scion Web Dashboard for visualization and control.
 
 The Scion Web Dashboard provides a visual interface for managing your agents, projects, and runtime brokers. It complements the CLI by providing real-time status updates and easier management of complex environments.
 
+Open the dashboard on the URL the server prints at start (`http://localhost:<port>`). HTML artifacts are served with a policy that names that URL, so one opened through another host name, such as `127.0.0.1`, shows its page without its own scripts, styles and images (see [HTML artifacts](/scion/reference/artifacts/#html-artifacts)).
+
 ## Overview
 
 The dashboard is organized into several key areas:
@@ -215,7 +217,7 @@ Centralized views for managing the Scion infrastructure and access control (avai
 
   #### Integrations across Hub instances
 
-  Each Hub instance also writes the health of the chat plugins it runs to its row, on the same 15-second schedule: at most 32 plugins, each with its name, health (`healthy`, `degraded`, `unhealthy` or `unknown`), whether it is connected, and its version. The plugin's own health message and details are never stored. A plugin that does not answer within 2 seconds is stored as `unknown`. These health queries run only in this background write, so opening more Health pages adds no plugin calls; the summary itself queries no plugin.
+  Each Hub instance also writes the health of the chat plugins it runs to its row, on the same 15-second schedule: at most 32 plugins, each with its name, health (`healthy`, `degraded`, `unhealthy` or `unknown`), whether it is connected, and its version. When the plugin supervisor detects a lost RPC session, the instance reports `connected: false` with health `degraded` (`State: "restarting"`, attempts 1–4) or `unhealthy` (`State: "failing"`, after 5 consecutive failed attempts); a `degraded` integration adds the warning `"Integration <name> is degraded"` to **Needs attention**, and an `unhealthy` integration adds `"Integration <name> is unhealthy"` and degrades the overall summary status (see [Message-Bus Plugin Supervision](/scion/hosted/user/external-channels/#message-bus-plugin-supervision)). The plugin's own health message and details are never stored. A plugin that does not answer within 2 seconds is stored as `unknown`. These health queries run only in this background write, so opening more Health pages adds no plugin calls; the summary itself queries no plugin.
 
   The summary merges the reports of the **live** instances for each plugin:
 

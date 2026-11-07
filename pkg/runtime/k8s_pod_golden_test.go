@@ -50,6 +50,20 @@ func podGoldenCases() []struct {
 		},
 	}
 
+	// userVolumes: every `volumes:` shape on a pod (ptone/scion#5837):
+	// gcs volumes become CSI volume mounts, the others are skipped.
+	userVolumes := RunConfig{
+		Name:         "test-agent",
+		Image:        "test:latest",
+		UnixUsername: "scion",
+		Volumes: []api.VolumeMount{
+			{Type: "gcs", Bucket: "b1", Prefix: "p/q", Mode: "ro,implicit-dirs", Target: "/data", ReadOnly: true},
+			{Source: "/host/data", Target: "/local"},
+			{Type: "nfs", Server: "10.0.0.2", Source: "/export/x", Target: "/nfs"},
+			{Type: "gcs", Bucket: "b2", Target: "~/gcs"},
+		},
+	}
+
 	minimal := RunConfig{
 		Name:         "test-agent",
 		Image:        "test:latest",
@@ -64,6 +78,7 @@ func podGoldenCases() []struct {
 		{"home-files", false, files},
 		{"gke-csi", true, gke},
 		{"volumes", false, volumes},
+		{"volumes-user", false, userVolumes},
 		{"minimal", false, minimal},
 	}
 }

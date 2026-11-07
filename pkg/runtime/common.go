@@ -39,6 +39,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	stagedsecrets "github.com/GoogleCloudPlatform/scion/pkg/stagedsecrets"
@@ -410,8 +411,16 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 			}
 			return
 		}
+		// The entry is a user-owned Mount realized as a bind mount.
+		realized, err := realizeUserVolume(src, tgt, v.ReadOnly, projectfs.RuntimeBind)
+		if err != nil {
+			if volumeErr == nil {
+				volumeErr = err
+			}
+			return
+		}
 		// Generic volumes from config should NOT overwrite already registered mounts (like workspace)
-		registerMount(src, tgt, v.ReadOnly, false)
+		registerMount(realized.Source, realized.Target, realized.ReadOnly, false)
 	}
 
 	addArg("--name", config.Name)
@@ -2296,6 +2305,51 @@ func resolvedAuthEnvEntries(ra *api.ResolvedAuth, taken func(name string) bool) 
 	entries := make([]string, 0, len(names))
 	for _, k := range names {
 		entries = append(entries, k+"="+ra.EnvVars[k])
+	}
+	return entries
+}
+
+// harnessEnvEntries returns the harness env an agent container receives,
+// as KEY=VALUE entries sorted by name, with the Docker rules
+// (buildCommonRunArgs):
+//   - Harness.GetEnv(cfg.Name, agentHome, cfg.UnixUsername), then, when
+//     cfg.TelemetryEnabled, Harness.GetTelemetryEnv(), which wins over
+//     GetEnv for a name both set;
+//   - an entry with an empty value is skipped (Docker's addEnv skips it),
+//     so an empty telemetry value leaves a GetEnv value in place.
+//
+// It is nil without a harness. Reserved names are not filtered here: the
+// caller emits these entries before the runtime's reserved-name drop,
+// which covers every source.
+//
+// A runtime may call it more than once per start: GetEnv and
+// GetTelemetryEnv are called twice per Cloud Run start (cloudRunHarnessEnv);
+// this assumes they are deterministic and side-effect free, as every
+// in-tree harness is.
+func harnessEnvEntries(cfg RunConfig, agentHome string) []string {
+	if cfg.Harness == nil {
+		return nil
+	}
+	env := make(map[string]string)
+	add := func(src map[string]string) {
+		for k, v := range src {
+			if v != "" {
+				env[k] = v
+			}
+		}
+	}
+	add(cfg.Harness.GetEnv(cfg.Name, agentHome, cfg.UnixUsername))
+	if cfg.TelemetryEnabled {
+		add(cfg.Harness.GetTelemetryEnv())
+	}
+	names := make([]string, 0, len(env))
+	for k := range env {
+		names = append(names, k)
+	}
+	slices.Sort(names)
+	entries := make([]string, 0, len(names))
+	for _, k := range names {
+		entries = append(entries, k+"="+env[k])
 	}
 	return entries
 }

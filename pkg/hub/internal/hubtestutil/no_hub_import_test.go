@@ -138,6 +138,8 @@ func TestNonTestImportersDetects(t *testing.T) {
 func nonTestImporters(dir, path string) ([]string, error) {
 	var out []string
 	fset := token.NewFileSet()
+	// pkgmove:scan-covers pkg/hub/...
+	// recursive walk of dir (pkg/hub); it skips only testdata, dot and underscore dirs, which the go build ignores too.
 	err := filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -193,6 +195,7 @@ func TestFindImportThroughRootPackage(t *testing.T) {
 
 func moduleRoot(t *testing.T) string {
 	t.Helper()
+	// scan-coverage:exempt module root lookup; reads no sources.
 	dir, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
@@ -246,6 +249,7 @@ func packageImports(root, pkg string) ([]string, error) {
 	if pkg != modulePath {
 		dir = filepath.Join(root, filepath.FromSlash(strings.TrimPrefix(pkg, modulePath+"/")))
 	}
+	// scan-coverage:exempt import-graph read from hubtestutil, not a coverage scan of pkg/hub sources.
 	names, err := filepath.Glob(filepath.Join(dir, "*.go"))
 	if err != nil {
 		return nil, err

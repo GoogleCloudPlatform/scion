@@ -37,6 +37,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/hubexport"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -348,6 +349,7 @@ func applySnapshotToResponse(resp *ServerConfigResponse, snap Layer1Snapshot) {
 
 	// Endpoints
 	resp.Server.Hub.PublicURL = snap.PublicURL
+	resp.Server.Hub.ContentURL = snap.ContentURL
 	resp.Server.Hub.MonitoringDashboardURL = snap.MonitoringDashboardURL
 
 	// Hub observability export switches: the saved (or bootstrap) value;
@@ -590,10 +592,11 @@ func (s *Server) computeSupersededKeys(ops *OperationalSettings) map[string][]Su
 				continue
 			}
 			if sec.Name == "profiles" && exists {
-				// A managed profile without image_registry inherits the
-				// file value, so the profile is compared without it unless
-				// the row holds one (ptone/scion#3916).
-				bootstrapVal = withoutInheritedImageRegistry(bootstrapVal, dbVal)
+				// A managed profile without image_registry or image_tag
+				// inherits the file value, so the profile is compared
+				// without it unless the row holds one (ptone/scion#3916,
+				// ptone/scion#6625).
+				bootstrapVal = withoutInheritedProfileKeys(bootstrapVal, dbVal)
 			}
 			if !exists || !reflect.DeepEqual(dbVal, bootstrapVal) {
 				koanfPath := opsettings.KoanfPathFromSectionKey(sec.Name, key)
@@ -622,25 +625,31 @@ func (s *Server) computeSupersededKeys(ops *OperationalSettings) map[string][]Su
 	return result
 }
 
-// withoutInheritedImageRegistry returns the bootstrap profile bootstrapVal
-// without image_registry when the stored profile dbVal has none: the stored
-// profile then inherits the file value rather than superseding it.
-func withoutInheritedImageRegistry(bootstrapVal, dbVal interface{}) interface{} {
+// withoutInheritedProfileKeys returns the bootstrap profile bootstrapVal
+// without image_registry, and without image_tag, when the stored profile
+// dbVal has none: the stored profile then inherits the file value rather
+// than superseding it.
+func withoutInheritedProfileKeys(bootstrapVal, dbVal interface{}) interface{} {
 	boot, ok := bootstrapVal.(map[string]interface{})
 	if !ok {
 		return bootstrapVal
 	}
-	if db, ok := dbVal.(map[string]interface{}); ok {
-		if v, has := db[endpointsImageRegistryKey]; has && v != "" {
-			return bootstrapVal
+	db, _ := dbVal.(map[string]interface{})
+	drop := map[string]bool{}
+	for _, key := range []string{endpointsImageRegistryKey, profilesImageTagKey} {
+		if v, has := db[key]; has && v != "" {
+			continue
+		}
+		if _, has := boot[key]; has {
+			drop[key] = true
 		}
 	}
-	if _, has := boot[endpointsImageRegistryKey]; !has {
+	if len(drop) == 0 {
 		return bootstrapVal
 	}
 	out := make(map[string]interface{}, len(boot))
 	for k, v := range boot {
-		if k != endpointsImageRegistryKey {
+		if !drop[k] {
 			out[k] = v
 		}
 	}
@@ -709,12 +718,13 @@ func (s *Server) applyRunningValuesForUnsetKeys(resp *ServerConfigResponse, snap
 		}
 	}
 	// image_registry: the managed value, else this replica's file tier,
-	// never a node env; profiles show managed values only. A save compares
-	// with exactly these values (ptone/scion#3916).
+	// never a node env; profiles show managed image_registry and image_tag
+	// values only. A save compares with exactly these values
+	// (ptone/scion#3916, ptone/scion#6625).
 	if ops := s.GetOperationalSettings(); ops != nil {
 		resp.ImageRegistry = shownImageRegistry(ops)
 		_, managed := ops.managedImageRegistries()
-		resp.Profiles = showManagedProfileImageRegistries(resp.Profiles, managed)
+		resp.Profiles = showManagedProfileImageSettings(resp.Profiles, managed, ops.managedProfileImageTags())
 	}
 }
 
@@ -904,8 +914,8 @@ func dropEchoedHubName(keys []string, req *ServerConfigUpdateRequest, effective 
 
 // overlayEndpointsRequest applies the endpoints fields the request sets
 // onto d, which buildSingleSectionDoc then encodes as the request doc:
-//   - public_url, monitoring_dashboard_url and image_registry: their
-//     request values.
+//   - public_url, content_url, monitoring_dashboard_url and
+//     image_registry: their request values.
 //   - hub_name: set when hubNameChanged (see dropEchoedHubName, which drops
 //     an echo of the configured value).
 //
@@ -925,6 +935,11 @@ func overlayEndpointsRequest(d *opsettings.EndpointsSettings, req *ServerConfigU
 			d.MonitoringDashboardURL = req.Server.Hub.MonitoringDashboardURL
 		} else if hubFP.has("monitoring_dashboard_url") {
 			d.MonitoringDashboardURL = "" // explicitly cleared
+		}
+		if req.Server.Hub.ContentURL != "" {
+			d.ContentURL = req.Server.Hub.ContentURL
+		} else if hubFP.has("content_url") {
+			d.ContentURL = "" // explicitly cleared
 		}
 		if hubNameChanged {
 			d.HubName = req.Server.Hub.HubName
@@ -948,7 +963,8 @@ func accessNoRowBase(ops *OperationalSettings) map[string]json.RawMessage {
 }
 
 // endpointsNoRowBase is the endpoints base when no endpoints row exists:
-// the effective monitoring_dashboard_url. hub_name is left out: the
+// the effective monitoring_dashboard_url and content_url. hub_name is left
+// out: the
 // bootstrap value applies without being written
 // (bootstrapAppliesWhenAbsent). public_url and image_registry are left out
 // too: each is stored only when an admin sets it, so a bootstrap value
@@ -958,6 +974,7 @@ func endpointsNoRowBase(ops *OperationalSettings) map[string]json.RawMessage {
 	snap := ops.Snapshot()
 	return structToRawMap(opsettings.EndpointsSettings{
 		MonitoringDashboardURL: snap.MonitoringDashboardURL,
+		ContentURL:             snap.ContentURL,
 	})
 }
 
@@ -1138,6 +1155,14 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	// A public URL saved in the database must pass the stricter rule the
 	// hub applies to it at startup (ptone/scion#3905).
 	if !validatePublicURLRequest(w, &req.ServerConfigUpdateRequest, ops.Snapshot().PublicURL) {
+		return
+	}
+	// The content host must be an origin, and not on the hub's own host name
+	// or the agent endpoint's (ptone/scion#7107 phase A). A workstation
+	// writes a sent agent_endpoint to settings.yaml, so a save that sends one
+	// is checked against it, as file mode does.
+	dbRequestAgentEndpoint := requestAgentEndpoint(&req.ServerConfigUpdateRequest)
+	if !validateContentURLRequest(w, &req.ServerConfigUpdateRequest, s.HubEndpoints().Public, s.config.AgentEndpoint, dbRequestAgentEndpoint) {
 		return
 	}
 	if rejectInvalidThinkingLevel(w, req.DefaultThinkingLevel) {
@@ -1411,10 +1436,11 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 
 	// profiles replaces the section wholesale: a profile the body leaves
 	// out is deleted with its values, and a profile's omitted or ""
-	// image_registry stores none. GET shows managed profile registries
-	// only, so an echo carries no file copies. A save equal to the
-	// filtered base from one row read (that row's revision is the CAS
-	// base) writes nothing (ptone/scion#3916).
+	// image_registry or image_tag stores none. GET shows managed profile
+	// image_registry and image_tag values only, so an echo carries no file
+	// copies. A save equal to the filtered base from one row read (that
+	// row's revision is the CAS base) writes nothing (ptone/scion#3916,
+	// ptone/scion#6625).
 	if doc, ok := sectionDocs["profiles"]; ok {
 		var row *store.HubSetting
 		rev := int64(0)
@@ -1432,6 +1458,14 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		if err != nil {
 			slog.Error("PUT server-config: failed to decode profiles section", "error", err)
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to read existing settings", nil)
+			return
+		}
+		// image_tag is refused while its experiment is off: a save that
+		// sets or changes a profile's image_tag gets 412
+		// experiment_disabled (ptone/scion#6625). An echo of a stored
+		// value, or a clear, passes, so the rest of the page still saves.
+		if !s.experimentEnabled(experiments.ImageTagSetting) && profilesSaveSetsImageTag(doc, base) {
+			writeImageTagExperimentDisabled(w)
 			return
 		}
 		mergedBaseRevs["profiles"] = rev
@@ -1968,8 +2002,25 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		if secName == "endpoints" {
 			publicURLBefore, publicURLAfter = storedManagedPublicURL(ops), publicURLFromSectionDoc(doc)
 			if publicURLChange = publicURLBefore != publicURLAfter; publicURLChange {
-				if err := s.auditPublicURLChange(r.Context(), gcpIAMSurfaceSave, publicURLBefore, publicURLAfter); err != nil {
+				if err := s.auditEndpointURLChange(r.Context(), config.PublicURLKey, gcpIAMSurfaceSave, publicURLBefore, publicURLAfter); err != nil {
 					slog.Error("PUT server-config: failed to record public URL change", "error", err)
+					fileTxn.abort()
+					writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+						fmt.Sprintf("Failed to update section %q", secName), map[string]interface{}{"applied": applied})
+					return
+				}
+			}
+		}
+
+		// So is a change to the content host in effect (ptone/scion#7107
+		// phase A).
+		contentURLBefore, contentURLAfter := "", ""
+		contentURLChange := false
+		if secName == "endpoints" {
+			contentURLBefore, contentURLAfter = ops.Snapshot().ContentURL, contentURLInEffectWith(ops, doc)
+			if contentURLChange = contentURLBefore != contentURLAfter; contentURLChange {
+				if err := s.auditEndpointURLChange(r.Context(), config.ContentURLKey, gcpIAMSurfaceSave, contentURLBefore, contentURLAfter); err != nil {
+					slog.Error("PUT server-config: failed to record content URL change", "error", err)
 					fileTxn.abort()
 					writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 						fmt.Sprintf("Failed to update section %q", secName), map[string]interface{}{"applied": applied})
@@ -1980,7 +2031,10 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 
 		newRev, inEffect, err := ops.update(r.Context(), secName, doc, updatedBy, expectedRev, "managed")
 		if publicURLChange && err != nil {
-			s.auditPublicURLNotApplied(r.Context(), gcpIAMSurfaceSave, publicURLBefore, publicURLAfter, err)
+			s.auditEndpointURLNotApplied(r.Context(), config.PublicURLKey, gcpIAMSurfaceSave, publicURLBefore, publicURLAfter, err)
+		}
+		if contentURLChange && err != nil {
+			s.auditEndpointURLNotApplied(r.Context(), config.ContentURLKey, gcpIAMSurfaceSave, contentURLBefore, contentURLAfter, err)
 		}
 		if secName == gcpIAMSection {
 			// The approval covers only this write's own self-apply.
@@ -2399,6 +2453,9 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 			}
 			if hub.MonitoringDashboardURL != "" {
 				keys = append(keys, config.MonitoringDashboardURLKey)
+			}
+			if hub.ContentURL != "" {
+				keys = append(keys, config.ContentURLKey)
 			}
 			if o := hub.Observability; o != nil {
 				if o.MetricsEnabled != nil {
@@ -3441,6 +3498,7 @@ var serverConfigTokenKeys = map[string]settingsTokenClass{
 	"default_timezone":                        settingsTokenConfiguration,
 	// endpoints
 	"server.hub.public_url": settingsTokenRefused, // the origin users and agents reach the hub on
+	config.ContentURLKey:    settingsTokenRefused, // the origin users open shared artifacts on
 	"image_registry":        settingsTokenRefused, // the registry agent images come from
 	"server.hub.hub_name":   settingsTokenConfiguration,
 	// the link operators follow from the Health page

@@ -26,6 +26,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 )
 
@@ -59,6 +60,7 @@ func (s *Server) artifactsConfig() opsettings.ArtifactsConfig {
 // every write, so a limit change applies without a restart.
 func (s *Server) artifactLimits(context.Context) artifacts.Limits {
 	c := s.artifactsConfig()
+	e := s.HubEndpoints()
 	return artifacts.Limits{
 		MaxFileBytes: c.MaxFileBytes, MaxBundleBytes: c.MaxBundleBytes, MaxFiles: c.MaxFiles,
 		LinkDefaultTTL:   time.Duration(c.LinkDefaultTTLHours) * time.Hour,
@@ -71,6 +73,8 @@ func (s *Server) artifactLimits(context.Context) artifacts.Limits {
 			FetchTimeout: time.Duration(c.RemoteImageFetchTimeoutS) * time.Second,
 			TotalBudget:  time.Duration(c.RemoteImageTotalBudgetS) * time.Second,
 		},
+		ContentURL:   e.Content,
+		PublicOrigin: e.Public,
 	}
 }
 
@@ -88,6 +92,7 @@ func (s *Server) artifactsHandler() http.Handler {
 	svc.SetBackendProvider(s.artifactBackend)
 	svc.SetReviewNotifier(s.notifyArtifactReview)
 	svc.SetLogger(s.artifactLog)
+	svc.SetArchiveEnabled(func(context.Context) bool { return s.experimentEnabled(experiments.ArtifactArchive) })
 	// Share-link reads are rate limited per client, read through the
 	// hub's trusted proxies the same way as its other pre-auth limits.
 	trusted := parseTrustedProxies(s.config.TrustedProxies)

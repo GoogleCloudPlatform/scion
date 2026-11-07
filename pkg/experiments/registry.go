@@ -121,6 +121,14 @@ func (e Experiment) ReviewOverdue(now time.Time) bool {
 // which uses an NFS home only when it is on.
 const K8sNFSHome = "hub.k8s_nfs_home"
 
+// CloudRunNativeIdentity gates running each Cloud Run instance as the GCP
+// identity the hub resolved for its agent, instead of the runtime's one
+// configured service account. The hub resolves it at each agent dispatch
+// and sends it to the broker, which reads it only from the dispatch
+// (HubAgentDefaults). While it is off, Cloud Run instances are created
+// exactly as before.
+const CloudRunNativeIdentity = "hub.cloudrun_native_identity"
+
 // FlatRuntimeBrokers gates flat (single-target) Runtime Brokers: the hub
 // accepts single-target Runtime Broker registrations, pins new agents to
 // that target and refuses mismatched dispatches
@@ -140,6 +148,15 @@ const FlatRuntimeBrokers = "hub.flat_runtime_brokers"
 // agent secrets are delivered by a means other than plain Cloud Run
 // instance environment variables (ptone/scion#7309).
 const FlatCloudRunTarget = "hub.flat_cloudrun_target"
+
+// ConduitDeliver gates message delivery over an agent's Conduit session (the
+// deliver-message control route; ptone/scion#7353). It requires hub.conduit:
+// the hub enforces both. It lands in slices: until the sciontool route, the
+// hub endpoint and the broker caller are in, turning it on changes nothing,
+// and delivery keeps using runtime exec. It is enforced in hub server code;
+// what agents are told at start is fixed at launch, so an agent started
+// before it was turned on keeps using exec until it restarts.
+const ConduitDeliver = "hub.conduit_deliver"
 
 // Artifacts gates the artifact service (pkg/artifacts): the hub's
 // /api/v1/artifacts routes answer 404 while it is off, and the web UI hides
@@ -363,6 +380,14 @@ const ArtifactManageAccess = "web.artifact_manage_access"
 // grants already made stay until removed.
 const ArtifactSponsorReviewGrant = "hub.artifact_sponsor_review_grant"
 
+// ArtifactArchive gates the zip download of an artifact version's files
+// (ptone/scion#7106): GET|HEAD /api/v1/artifacts/{id}/versions/{seq}/archive
+// and the archive field of a version response, which the Files tab's
+// Download all button follows. The hub checks it in the artifact service
+// (SetArchiveEnabled); while it is off the route answers 404 and the field
+// is left out. It needs hub.artifacts.
+const ArtifactArchive = "hub.artifact_archive"
+
 // UserDeleteForceCascade gates the forced user delete (ptone/scion#2143):
 // DELETE /api/v1/users/{id}?force=true, which revokes the user's authority,
 // records a deletion tombstone and stops the user's agents, the GET
@@ -376,9 +401,11 @@ const UserDeleteForceCascade = "hub.user_delete_force_cascade"
 // selects the tag of the bundled scion-* agent images ("version" for the
 // hub binary's own version, or a literal tag) instead of :latest. The hub
 // checks it: while it is off, image_tag is ignored and every image
-// reference is unchanged. Applying the tag to agent images, and refusing a
-// hub save of image_tag while the experiment is off, arrive with the
-// follow-up change; until then the setting has no effect.
+// reference is unchanged, a hub save that sets image_tag is refused (412
+// experiment_disabled), and a value from the environment or a settings
+// file is reported with a startup warning. While it is on, the hub applies
+// the tag to the images it sends and checks and sends it with each
+// dispatch, so the Runtime Broker applies it to the images it resolves.
 const ImageTagSetting = "hub.image_tag_setting"
 
 // compiled is the production experiment list. It is reachable only through
@@ -474,6 +501,17 @@ var compiled = []Experiment{
 		ReviewBy:    "2027-01-04",
 	},
 	{
+		Name:        CloudRunNativeIdentity,
+		Title:       "Native agent identity on Cloud Run Instances",
+		Description: "Runs each Cloud Run instance as the service account the hub assigned to its agent, taken from the dispatch and checked against the Runtime Broker's cloudrun.assignable_service_accounts list, instead of the runtime's configured account. Existing instances are recreated at their next start. Other identity modes are refused on Cloud Run while it is on.",
+		Default:     false,
+		Layers:      []Layer{LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#7374",
+		Owner:       "cloudrun-runtime",
+		ReviewBy:    "2027-02-04",
+	},
+	{
 		Name:        FlatRuntimeBrokers,
 		Title:       "Flat Runtime Brokers",
 		Description: "Lets a Runtime Broker serve exactly one runtime target with a stable identity: the hub accepts single-target Runtime Broker registrations, pins new agents to that target and rejects mismatched dispatches. Existing profile-based Runtime Brokers are unchanged. The web layer only lets the web UI read the flag (presentation only); every hub check is LayerServer. With it on, the web UI shows the Brokers area.",
@@ -539,6 +577,17 @@ var compiled = []Experiment{
 		Layers:      []Layer{LayerServer},
 		Stage:       StageAlpha,
 		Issue:       "ptone/scion#2774",
+		Owner:       "conduit",
+		ReviewBy:    "2027-03-31",
+	},
+	{
+		Name:        ConduitDeliver,
+		Title:       "Message delivery over Conduit",
+		Description: "Delivers messages to an agent over its Conduit session (the deliver-message control route) instead of through runtime exec, for agents whose session offers it; Cloud Run agents first. Requires hub.conduit. Lands in parts: until all of them are in, it changes nothing and delivery uses runtime exec. Agents started before it is turned on keep using exec until they restart. Text and interrupts only; attachments stay on exec.",
+		Default:     false,
+		Layers:      []Layer{LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#7353",
 		Owner:       "conduit",
 		ReviewBy:    "2027-03-31",
 	},
@@ -653,6 +702,17 @@ var compiled = []Experiment{
 		ReviewBy:    "2027-02-01",
 	},
 	{
+		Name:        ArtifactArchive,
+		Title:       "Artifact zip download",
+		Description: "Adds a Download all (.zip) button to an artifact's Files tab and the hub route behind it. Needs hub.artifacts.",
+		Default:     false,
+		Layers:      []Layer{LayerServer, LayerWeb},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#7106",
+		Owner:       "artifacts",
+		ReviewBy:    "2027-02-01",
+	},
+	{
 		Name:        UserDeleteForceCascade,
 		Title:       "Force user delete",
 		Description: "Lets an admin delete a user who has agents: DELETE /api/v1/users/{id}?force=true revokes the user's authority at once (status deleting, role bindings, access tokens, delegations), stops the user's agents through the agent delete, and removes the user once every agent is stopped or removed by an operator. Needs agent.delete on every one of those agents. While off, force is ignored (a user with agents is refused as before) and the deletion resource answers 404; a deletion accepted while it was on runs to completion.",
@@ -712,7 +772,7 @@ var compiled = []Experiment{
 	{
 		Name:        ImageTagSetting,
 		Title:       "Image tag setting",
-		Description: "Lets the image_tag setting choose the tag of the bundled scion-* agent images whose tag is latest or absent: \"version\" selects the hub binary's version (latest for a development build), any other value is a literal tag. Images with another tag, a digest, or a registry host are left alone, except exactly <image_registry>/scion-<name> (latest or untagged), the form the image_registry rewrite produces, which is retagged too. While it is off, image_tag is ignored and image references are unchanged. In this release the setting is accepted and validated but not yet applied; applying it, and refusing a hub save of image_tag while the experiment is off, arrive with the follow-up change. Agents need images built for that tag (image-build/README.md, \"Build images for a release\").",
+		Description: "Lets the image_tag setting choose the tag of the bundled scion-* agent images whose tag is latest or absent: \"version\" selects the hub binary's version (latest for a development build), any other value is a literal tag. Images with another tag, a digest, or a registry host are left alone, except exactly <image_registry>/scion-<name> (latest or untagged), the form the image_registry rewrite produces, which is retagged too. While it is off, image_tag is ignored and image references are unchanged; a hub save that sets image_tag is refused, and a settings-file or environment value is reported at startup. Maintenance builds and the system image build keep latest. Agents need images built for that tag (image-build/README.md, \"Build images for a release\").",
 		Default:     false,
 		Layers:      []Layer{LayerServer},
 		Stage:       StageAlpha,

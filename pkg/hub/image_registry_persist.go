@@ -38,7 +38,7 @@ import (
 //     values only). An equal value or "" stores nothing.
 //
 // A seeded or no-row base never carries image_registry into a managed row
-// (endpointsSeededBase, endpointsNoRowBase, stripProfileImageRegistries),
+// (endpointsSeededBase, endpointsNoRowBase, stripProfileFileCopies),
 // and a save whose filtered document equals the filtered base from the
 // same read is not written (sameAsFilteredBase), so an echo neither adopts
 // a seeded row nor bumps its revision.
@@ -110,11 +110,15 @@ func sameAsFilteredBase(doc, base json.RawMessage) bool {
 	return reflect.DeepEqual(a, b)
 }
 
-// stripProfileImageRegistries removes image_registry from every profile.
-func stripProfileImageRegistries(profiles map[string]config.V1ProfileConfig) {
+// stripProfileFileCopies removes image_registry and image_tag from every
+// profile: in a seeded row, or the bootstrap catalog, they are copies of the
+// settings file, and a save must not turn them into managed values that
+// shadow a later file edit (ptone/scion#3916, ptone/scion#6625).
+func stripProfileFileCopies(profiles map[string]config.V1ProfileConfig) {
 	for name, p := range profiles {
-		if p.ImageRegistry != "" {
+		if p.ImageRegistry != "" || p.ImageTag != "" {
 			p.ImageRegistry = ""
+			p.ImageTag = ""
 			profiles[name] = p
 		}
 	}
@@ -123,7 +127,8 @@ func stripProfileImageRegistries(profiles map[string]config.V1ProfileConfig) {
 // profilesFilteredBase returns the profiles document a save that sends
 // back what GET showed would write, from row (nil = no row): a managed
 // row as stored; a seeded row, or with no row the effective (bootstrap)
-// catalog, without image_registry values, which are file copies there.
+// catalog, without image_registry and image_tag values, which are file
+// copies there.
 func profilesFilteredBase(ops *OperationalSettings, row *store.HubSetting) (json.RawMessage, error) {
 	profiles := map[string]config.V1ProfileConfig{}
 	switch {
@@ -134,13 +139,13 @@ func profilesFilteredBase(ops *OperationalSettings, row *store.HubSetting) (json
 			}
 		}
 		if row.Origin != opsettings.OriginManaged {
-			stripProfileImageRegistries(profiles)
+			stripProfileFileCopies(profiles)
 		}
 	default:
 		for name, p := range ops.Snapshot().Profiles {
 			profiles[name] = p
 		}
-		stripProfileImageRegistries(profiles)
+		stripProfileFileCopies(profiles)
 	}
 	if profiles == nil {
 		profiles = map[string]config.V1ProfileConfig{}
@@ -148,17 +153,19 @@ func profilesFilteredBase(ops *OperationalSettings, row *store.HubSetting) (json
 	return json.Marshal(profiles)
 }
 
-// showManagedProfileImageRegistries returns profiles (a GET view) with each
-// image_registry replaced by the managed profiles row's value: blank for a
-// seeded row, for no row, and for a profile of a managed row without one.
-// The map is copied; profiles is not modified.
-func showManagedProfileImageRegistries(profiles map[string]config.V1ProfileConfig, managed map[string]string) map[string]config.V1ProfileConfig {
+// showManagedProfileImageSettings returns profiles (a GET view) with each
+// image_registry and image_tag replaced by the managed profiles row's value
+// (managedRegistries, managedTags): blank for a seeded row, for no row, and
+// for a profile of a managed row without one. The map is copied; profiles
+// is not modified.
+func showManagedProfileImageSettings(profiles map[string]config.V1ProfileConfig, managedRegistries, managedTags map[string]string) map[string]config.V1ProfileConfig {
 	if profiles == nil {
 		return nil
 	}
 	out := make(map[string]config.V1ProfileConfig, len(profiles))
 	for name, p := range profiles {
-		p.ImageRegistry = managed[name]
+		p.ImageRegistry = managedRegistries[name]
+		p.ImageTag = managedTags[name]
 		out[name] = p
 	}
 	return out

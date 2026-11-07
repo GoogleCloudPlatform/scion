@@ -78,6 +78,14 @@ export const reviewEditorStyles = css`
     color: var(--scion-text, #0f172a);
     counter-reset: critic-note;
   }
+  /* The document is editable: 16px or more on a touch screen, or iOS
+     Safari zooms in when it takes focus and keeps the zoom after the
+     keyboard closes, leaving the pinned review toolbar out of view. */
+  @media (pointer: coarse) {
+    .ProseMirror {
+      font-size: max(16px, 0.9375rem);
+    }
+  }
   .ProseMirror:focus-visible {
     outline: 2px solid var(--sl-color-primary-500, #0ea5e9);
     outline-offset: -2px;
