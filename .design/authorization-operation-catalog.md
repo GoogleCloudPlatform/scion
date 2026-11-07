@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 377
+**Operations:** 378
 
 ## Table of Contents
 
@@ -83,6 +83,7 @@
 - [artifact.link.revoke](#artifactlinkrevoke) — Revoke one share link of an artifact
 - [artifact.delete](#artifactdelete) — Delete an artifact with its grants and share links (its files are removed after the hub's grace period); allowed for its managers (the owner or an admin grantee), on an artifact owned by an agent for its stewards (an owner of its home project, or the agent's delegating user who reads there), and, as custodian, for an admin of its home project (project.manage there), each a user whose credential permits artifact.manage in the home project
 - [artifact.version.create](#artifactversioncreate) — Start a pending version of an artifact from a manifest; a review grantee may start review versions only
+- [artifact.review.session.write](#artifactreviewsessionwrite) — Record or end the caller's own review session of an artifact (the heartbeat of a review tab, ptone/scion#6849); 404 while the hub.artifacts_open_review_check experiment is off; any caller who may start a review version passes (the write check of artifact.version.create); rate limited per principal after authorization; the row is always the caller's own; a DELETE that deletes the caller's session row writes a review_session_ended decision-log entry; the Hub keeps the row until the reaper deletes it, at least an hour after its last beat, so this includes a session that no longer counts as open; a DELETE when no such row exists writes none (both answer 204)
 - [artifact.version.upload](#artifactversionupload) — Upload one manifest file of a pending version; only the principal that started the version may upload to it
 - [artifact.version.finalize](#artifactversionfinalize) — Finalize a pending version once every file has arrived, making it ready (and current unless a later one is); only the principal that started it may finalize it, and a review is checked against its base
 - [artifact.version.view](#artifactversionview) — Get a view URL for a ready version whose entry is HTML: a capability, valid for a limited time, that serves only that version's files under /api/v1/artifacts/view/ in the sandboxed viewer (see the view exemption); the caller needs only the read check
@@ -3541,6 +3542,49 @@
 
 - `pkg/hub:TestArtifactsTwoStepBundleOnRoutes`
 - `pkg/artifacts:TestTwoStepWriteAuthorization`
+
+---
+
+## artifact.review.session.write
+
+**Domain:** artifact
+
+**Description:** Record or end the caller's own review session of an artifact (the heartbeat of a review tab, ptone/scion#6849); 404 while the hub.artifacts_open_review_check experiment is off; any caller who may start a review version passes (the write check of artifact.version.create); rate limited per principal after authorization; the row is always the caller's own; a DELETE that deletes the caller's session row writes a review_session_ended decision-log entry; the Hub keeps the row until the reaper deletes it, at least an hour after its last beat, so this includes a session that no longer counts as open; a DELETE when no such row exists writes none (both answer 204)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PUT | `/api/v1/artifacts/{id}/review-sessions/{sid}` |
+| http_route | DELETE | `/api/v1/artifacts/{id}/review-sessions/{sid}` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `artifact_record`; boundaries `project`, `hub`; pinned by `TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded`)
+
+**Base Permission:** `artifact.create`
+
+**Resource Resolver:** artifact-home-project
+
+**Effects:** `create-resource`, `delete-resource`
+
+### Audit
+
+- **Event Type:** `artifact decision log (review_session_ended)`
+- **Context Fields:** route, principal_kind, principal_id, project_id
+- **Before Fields:** artifact_id
+- **Atomic:** No
+- **Non-Atomic Justification:** The entry is written after the store deletes the session row, outside its transaction, as for every artifact decision-log entry. The row is the caller's own presence signal: it stops counting as open at most five minutes after its last beat (sooner for an idle or outdated review) and is kept until the reaper deletes it, at least an hour after its last beat, so a lost entry loses no authority or data. The decision log rather than a durable artifact_event record is a deliberate choice for this ephemeral row only; it is not a precedent for an operation that deletes a durable resource
+
+**Denial Codes:** `not_found`, `forbidden`, `rate_limited`, `too_many_review_sessions`
+
+### Tests
+
+- `pkg/hub:TestArtifactsOpenReviewOnRoutes`
+- `pkg/artifacts:TestReviewSessionAuthorization`
+- `pkg/artifacts:TestReviewSessionEndLogged`
 
 ---
 
