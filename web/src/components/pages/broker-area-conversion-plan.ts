@@ -148,10 +148,14 @@ export class ScionBrokerAreaConversionPlan extends LitElement {
       );
       if (this.requestedFor !== id) return;
       if (res.ok) {
-        this.load = { kind: 'loaded', plan: (await res.json()) as ConversionPlanResponse };
+        const plan = (await res.json()) as ConversionPlanResponse;
+        // The broker may have changed while the body was read.
+        if (this.requestedFor !== id) return;
+        this.load = { kind: 'loaded', plan };
         return;
       }
       const code = await errorCode(res);
+      if (this.requestedFor !== id) return;
       if (res.status === 404 && code === CONVERSION_PLAN_NOT_REPORTED) {
         this.load = { kind: 'not-reported' };
       } else if (res.status === 409 && code === RUNTIME_BROKER_NOT_LEGACY) {
@@ -298,7 +302,7 @@ export class ScionBrokerAreaConversionPlan extends LitElement {
                   <th>Code</th>
                   <th>Settings key</th>
                   <th>Profiles</th>
-                  <th></th>
+                  <th>Explanation</th>
                 </tr>
               </thead>
               <tbody>
@@ -425,7 +429,7 @@ export class ScionBrokerAreaConversionPlan extends LitElement {
     switch (this.load.kind) {
       case 'idle':
       case 'loading':
-        return html`<sl-spinner></sl-spinner>`;
+        return html`<sl-spinner label="Loading the plan"></sl-spinner>`;
       case 'not-reported':
         return html`<p class="plan-note not-reported">
           This Runtime Broker has not reported a plan. Upgrade the Runtime Broker, or run

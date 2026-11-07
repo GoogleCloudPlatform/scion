@@ -212,6 +212,70 @@ describe('scion-broker-area-conversion-plan', () => {
     expect(text(el)).not.toContain('SERVER-TEXT');
   });
 
+  it('network failure: the fixed text with no HTTP status', async () => {
+    fetchMock.mockImplementation(() => {
+      throw new TypeError('network down');
+    });
+    const el = await mount(LEGACY);
+    const err = el.shadowRoot!.querySelector('.plan-error')?.textContent ?? '';
+    expect(err).toContain('Could not load the plan.');
+    expect(err).not.toContain('HTTP');
+    expect(text(el)).not.toContain('network down');
+  });
+
+  it('a denied broker read (404 not_found) renders "The plan is not available."', async () => {
+    planStatus = 404;
+    planBody = { error: { code: 'not_found', message: 'RuntimeBroker not found' } };
+    const el = await mount(LEGACY);
+    expect(el.shadowRoot!.querySelector('.unavailable')?.textContent).toContain(
+      'The plan is not available.'
+    );
+    expect(text(el)).not.toContain('RuntimeBroker not found');
+  });
+
+  it('a broker switch issues a second GET and drops the first response', async () => {
+    const other: RuntimeBroker = {
+      ...LEGACY,
+      id: 'legacy-2',
+      name: 'other-box',
+      slug: 'other-box',
+    };
+    const otherUrl = `/api/v1/runtime-brokers/${other.id}/conversion-plan`;
+    const planWith = (key: string): ConversionPlanResponse =>
+      response({
+        plan: {
+          schemaVersion: 1,
+          instances: [{ schemaVersion: 1, key, name: key, target: { type: 'docker' } }],
+          profileMap: {},
+          findings: [],
+        },
+      });
+    // The first response arrives, but its body is held until after the switch.
+    let releaseFirstBody: (v: unknown) => void = () => {};
+    const firstBody = new Promise((resolve) => {
+      releaseFirstBody = resolve;
+    });
+    const firstResponse = {
+      ok: true,
+      status: 200,
+      headers: new Headers(),
+      json: () => firstBody,
+    } as unknown as Response;
+    fetchMock.mockImplementation((url: string) => {
+      if (url === PLAN_URL) return firstResponse;
+      if (url === otherUrl) return jsonResponse(planWith('SECOND-ONLY'));
+      return jsonResponse({}, 404);
+    });
+    const el = await mount(LEGACY);
+    el.broker = other;
+    await settle(el);
+    releaseFirstBody(planWith('FIRST-ONLY'));
+    await settle(el);
+    expect(planCalls().map(([u]) => u)).toEqual([PLAN_URL, otherUrl]);
+    expect(text(el)).toContain('SECOND-ONLY');
+    expect(text(el)).not.toContain('FIRST-ONLY');
+  });
+
   it('with findings: fixed text, key path and profiles, never a message', async () => {
     const el = await mount(LEGACY);
     const row = el.shadowRoot!.querySelector('.findings tr.finding')!;
