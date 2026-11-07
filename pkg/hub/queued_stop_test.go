@@ -81,7 +81,17 @@ func TestQueuedStop_LaterStartSupersedesQueuedStop(t *testing.T) {
 	require.Equal(t, 200, code, body)
 
 	f.heartbeat(completeInventory(), a.Slug)
-	require.Eventually(t, func() bool { return pendingStops(t, f) == 0 }, 5*time.Second, 10*time.Millisecond)
+	// The row leaves pending when the drain claims it, before the drain
+	// decides; it is settled only after the decision, so wait for that.
+	id := tid("qs-" + a.Slug)
+	require.Eventually(t, func() bool {
+		row, err := f.s.GetBrokerDispatch(context.Background(), id)
+		return err == nil && (row.State == store.DispatchStateDone || row.State == store.DispatchStateFailed)
+	}, 5*time.Second, 10*time.Millisecond)
+	row, err := f.s.GetBrokerDispatch(context.Background(), id)
+	require.NoError(t, err)
+	assert.Equal(t, store.DispatchStateDone, row.State, row.Error)
+	assert.Equal(t, stopSupersededResult, row.Result, "the drain records the queued stop as superseded")
 	assert.Equal(t, int32(0), d.stops.Load(), "the queued stop is not applied over the newer start")
 	assert.Equal(t, store.RunIntentRunning, getAgent(t, f.s, a.ID).RunIntent)
 }
