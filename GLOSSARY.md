@@ -372,6 +372,36 @@ A named set of a project's group conversations (threads), owned by the project a
 _Avoid_: group (bare), folder, channel, conversation group, thread folder
 _See also_: Group (hub users, not threads), Message Group (recipients of one send, not threads), Native Web Chat
 
+**Decision** (choices):
+One thing an agent needs a human to decide, posted in a choice prompt. It has a per-agent **key** (one the agent picks, such as `D234`, which has at least one non-digit, or a number the Hub assigns from a per-agent counter, such as `17`), **versions** (reposting the key with `--update` adds one), and a **status**: `pending`, `decided` or `replaced`. It is named across versions by `<asker-agent-uuid>/<key>`, and one version by `<asker-agent-uuid>/<key>@<version>`. The feature as a whole is called **choices** (the `web.chat_choices` experiment).
+_Avoid_: prompt (for the decision), poll, ticket, request
+_See also_: Question, Choice, Answer, Choice prompt
+
+**Question** (choices):
+The text of a decision: a markdown field the agent writes.
+_Avoid_: prompt, title
+_See also_: Decision
+
+**Choice** (choices):
+One of the options offered for a decision: an id (agent-supplied or `1..N` by position), a plain-text label, and an optional description.
+_Avoid_: option, button (for the data; acceptable for the UI control)
+_See also_: Decision, Answer
+
+**Answer** (choices):
+The choice recorded for a decision. It is **direct** (a user's click) or **interpreted** (recorded by the asking agent from a user's free-text reply), and a direct answer may **confirm** or **override** an interpreted one. The answer comes back to the agent as a `choice-response` message.
+_Avoid_: decision (for the answer), vote, selection, response (for the record)
+_See also_: Decision, Decision log
+
+**Choice prompt**:
+The message (type `choice-prompt`) that carries one or more decisions. Its text also holds a markdown copy of them, so surfaces that cannot show the cards still show the decisions.
+_Avoid_: choices message, poll, question message
+_See also_: Decision, Answer
+
+**Decision log**:
+The list of answers, append-only and kept forever, each with the question and label snapshots, who answered, the surface and the provenance (direct or interpreted).
+_Avoid_: answer history, audit log (the audit log is a different record)
+_See also_: Answer, Decision
+
 ## Identity & State
 
 **Project ID**:

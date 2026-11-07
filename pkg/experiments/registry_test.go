@@ -541,6 +541,29 @@ func TestAttachmentArtifacts_RegisteredDefaultOff(t *testing.T) {
 	}
 }
 
+// TestChatChoices_RegisteredDefaultOff pins web.chat_choices (design
+// native-chat choices v4, 4.12): the hub enforces it on sends, routes and
+// history and the web only toggles the cards, so it has both layers, and it
+// ships off.
+func TestChatChoices_RegisteredDefaultOff(t *testing.T) {
+	entry, ok := Default().Lookup(ChatChoices)
+	if !ok {
+		t.Fatalf("compiled registry entry %q absent", ChatChoices)
+	}
+	if entry.Name != "web.chat_choices" {
+		t.Errorf("Name = %q, want web.chat_choices", entry.Name)
+	}
+	if entry.Default {
+		t.Error("Default = true, want false")
+	}
+	if len(entry.Layers) != 2 || !entry.HasLayer(LayerWeb) || !entry.HasLayer(LayerServer) {
+		t.Errorf("Layers = %v, want exactly LayerWeb and LayerServer", entry.Layers)
+	}
+	if entry.Stage != StageAlpha || entry.Owner != "native-chat" || entry.Issue != "ptone/scion#7514" || entry.ReviewBy != "2027-02-05" {
+		t.Errorf("chat choices experiment metadata mismatch: %+v", entry)
+	}
+}
+
 // TestAsyncAgentLaunchExperimentRegistered pins hub.async_agent_launch: it
 // changes what the hub sends to brokers, so it is server-layer only (the
 // web form opts in unconditionally), and it ships on (ptone/scion#6640).
