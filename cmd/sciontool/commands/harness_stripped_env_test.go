@@ -45,6 +45,7 @@ var harnessStripNameExprs = map[string]string{
 	"stagedsecrets.EnvVar":                  stagedsecrets.EnvVar,
 	"transportauth.EnvTransportToken":       transportauth.EnvTransportToken,
 	"transportauth.EnvTransportTokenExpiry": transportauth.EnvTransportTokenExpiry,
+	"transportauth.EnvTransportTokenFile":   transportauth.EnvTransportTokenFile,
 	"hooks.NativeTelemetryPolicyKey":        hooks.NativeTelemetryPolicyKey,
 }
 

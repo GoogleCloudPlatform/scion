@@ -88,6 +88,7 @@ var harnessStrippedEnvNames = []string{
 	"PORT",
 	"SCION_TRANSPORT_TOKEN",
 	"SCION_TRANSPORT_TOKEN_EXPIRY",
+	"SCION_TRANSPORT_TOKEN_FILE", // stripped on the refused-start path; init sets it for children otherwise
 	"SCION_EXTRA_PATH",
 	"SCION_NATIVE_TELEMETRY_POLICY",
 }
