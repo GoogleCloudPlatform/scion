@@ -260,7 +260,9 @@ func (s *Server) requireChatMessageAction(w http.ResponseWriter, r *http.Request
 	}
 	project, err := s.store.GetProject(ctx, topic.ProjectID)
 	if err != nil {
-		NotFound(w, "Thread")
+		// A missing project answers as a missing thread does, so the
+		// status and text do not tell the two apart.
+		writeStoreErr(w, err, "Thread")
 		return false
 	}
 	return s.requireChatThreadAction(w, r, user, chatThreadRef{Key: key, Project: project}, "Thread", action)
@@ -277,7 +279,7 @@ func (s *Server) requireChatConversationAction(w http.ResponseWriter, r *http.Re
 	}
 	project, err := s.store.GetProject(r.Context(), *conv.ProjectID)
 	if err != nil {
-		writeErrorFromErr(w, err, "Conversation")
+		writeErrorFromErr(w, err, "")
 		return false
 	}
 	return s.requireChatThreadAction(w, r, user, chatThreadRef{Project: project, ConversationID: conv.ID}, "Conversation", action)
