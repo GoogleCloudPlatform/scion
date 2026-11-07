@@ -37,7 +37,11 @@ type Section = HTMLElement & { broker: RuntimeBroker | null; updateComplete: Pro
 
 const PLAN_URL = `/api/v1/runtime-brokers/${LEGACY.id}/conversion-plan`;
 
-function k8s(key: string, sharedDirSize: string, extra: Record<string, unknown> = {}): RuntimeTargetPresentation {
+function k8s(
+  key: string,
+  sharedDirSize: string,
+  extra: Record<string, unknown> = {}
+): RuntimeTargetPresentation {
   return {
     schemaVersion: 1,
     key,
@@ -52,7 +56,9 @@ function response(over: Partial<ConversionPlanResponse> = {}): ConversionPlanRes
     observedAt: '2026-11-03T12:00:00Z',
     plan: {
       schemaVersion: 1,
-      instances: [{ schemaVersion: 1, key: 'docker-local', name: 'docker-local', target: { type: 'docker' } }],
+      instances: [
+        { schemaVersion: 1, key: 'docker-local', name: 'docker-local', target: { type: 'docker' } },
+      ],
       profileMap: { a: 'docker-local' },
       findings: [
         {
@@ -68,7 +74,15 @@ function response(over: Partial<ConversionPlanResponse> = {}): ConversionPlanRes
     },
     agents: {
       items: [
-        { id: 'ag 1', name: 'worker', projectId: 'p1', phase: 'running', profile: 'a', mapping: 'mapped', instance: 'docker-local' },
+        {
+          id: 'ag 1',
+          name: 'worker',
+          projectId: 'p1',
+          phase: 'running',
+          profile: 'a',
+          mapping: 'mapped',
+          instance: 'docker-local',
+        },
         { id: 'ag2', name: 'pod-worker', profile: 'pod', mapping: 'no_mapping' },
       ],
       hiddenCount: 3,
@@ -204,7 +218,9 @@ describe('scion-broker-area-conversion-plan', () => {
     expect(row.textContent).toContain('unsupported_flat_target_type');
     expect(row.querySelector('.finding-path')?.textContent).toBe('profiles.pod.runtime');
     expect(row.textContent).toContain('pod');
-    expect(row.querySelector('.finding-text')?.textContent).toContain('no flat Runtime Broker target');
+    expect(row.querySelector('.finding-text')?.textContent).toContain(
+      'no flat Runtime Broker target'
+    );
     expect(text(el)).not.toContain('MESSAGE-PLANTED-7731');
     // The blocked profile appears in the map as unmapped, with its code.
     expect(el.shadowRoot!.querySelector('.profile-map')?.textContent).toContain('no mapping');
@@ -239,7 +255,9 @@ describe('scion-broker-area-conversion-plan', () => {
     expect(el.shadowRoot!.querySelector('.hidden-agents')?.textContent).toContain(
       '3 agents not visible to you'
     );
-    expect(el.shadowRoot!.querySelector('.providing-projects')?.textContent).toContain('visible-project');
+    expect(el.shadowRoot!.querySelector('.providing-projects')?.textContent).toContain(
+      'visible-project'
+    );
     expect(text(el)).not.toContain('HIDDEN-PROJECT-PLANTED');
     expect(text(el)).not.toContain('hid-1');
   });
@@ -250,7 +268,14 @@ describe('scion-broker-area-conversion-plan', () => {
         schemaVersion: 1,
         instances: [k8s('grp-a', '40Gi'), k8s('grp-b', '80Gi')],
         profileMap: { a: 'grp-a', b: 'grp-b' },
-        findings: [{ code: 'profile_conflict', severity: 'notice', path: 'profiles.*', profiles: ['a', 'b'] }],
+        findings: [
+          {
+            code: 'profile_conflict',
+            severity: 'notice',
+            path: 'profiles.*',
+            profiles: ['a', 'b'],
+          },
+        ],
       },
     });
     const el = await mount(LEGACY);
@@ -267,9 +292,19 @@ describe('scion-broker-area-conversion-plan', () => {
       plan: {
         schemaVersion: 1,
         // A field outside the published set, planted on one instance only.
-        instances: [k8s('grp-a', '40Gi', { kubeconfig: '/home/u/KUBE-PLANTED' }), k8s('grp-b', '40Gi')],
+        instances: [
+          k8s('grp-a', '40Gi', { kubeconfig: '/home/u/KUBE-PLANTED' }),
+          k8s('grp-b', '40Gi'),
+        ],
         profileMap: { a: 'grp-a', b: 'grp-b' },
-        findings: [{ code: 'profile_conflict', severity: 'notice', path: 'profiles.*', profiles: ['a', 'b'] }],
+        findings: [
+          {
+            code: 'profile_conflict',
+            severity: 'notice',
+            path: 'profiles.*',
+            profiles: ['a', 'b'],
+          },
+        ],
       },
     });
     const el = await mount(LEGACY);
@@ -317,7 +352,9 @@ describe('scion-broker-area-conversion-plan', () => {
     const el = await mount(LEGACY);
     expect(el.shadowRoot!.querySelector('.plan-section')).not.toBeNull();
     expect(
-      el.shadowRoot!.querySelectorAll('button, sl-button, form, input, select, textarea, sl-input, sl-select')
+      el.shadowRoot!.querySelectorAll(
+        'button, sl-button, form, input, select, textarea, sl-input, sl-select'
+      )
     ).toHaveLength(0);
   });
 });

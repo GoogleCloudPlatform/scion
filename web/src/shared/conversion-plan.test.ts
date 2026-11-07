@@ -24,8 +24,14 @@ import {
   splitGroups,
   type ConversionPlanPresentation,
 } from './conversion-plan.js';
+import type { RuntimeTargetPresentation } from './types.js';
 
-const docker = (key: string) => ({ schemaVersion: 1, key, name: key, target: { type: 'docker' } });
+const docker = (key: string): RuntimeTargetPresentation => ({
+  schemaVersion: 1,
+  key,
+  name: key,
+  target: { type: 'docker' },
+});
 
 describe('conversion plan helpers', () => {
   it('profileMapRows: mapped profiles plus blocked unmapped ones, sorted', () => {
@@ -33,8 +39,18 @@ describe('conversion plan helpers', () => {
       schemaVersion: 1,
       profileMap: { b: 'i-b', a: 'i-a' },
       findings: [
-        { code: 'unsupported_flat_target_type', severity: 'blocking', path: 'profiles.c.runtime', profiles: ['c'] },
-        { code: 'legacy_field_no_effect', severity: 'notice', path: 'profiles.d.default_template', profiles: ['d'] },
+        {
+          code: 'unsupported_flat_target_type',
+          severity: 'blocking',
+          path: 'profiles.c.runtime',
+          profiles: ['c'],
+        },
+        {
+          code: 'legacy_field_no_effect',
+          severity: 'notice',
+          path: 'profiles.d.default_template',
+          profiles: ['d'],
+        },
       ],
     };
     expect(profileMapRows(plan)).toEqual([
@@ -55,7 +71,12 @@ describe('conversion plan helpers', () => {
       profileMap: { a: 'g-a' },
       findings: [
         { code: 'profile_conflict', severity: 'notice', path: 'profiles.*', profiles: ['a', 'b'] },
-        { code: 'profile_conflict', severity: 'notice', path: 'profiles.a.node_selector', profiles: ['a'] },
+        {
+          code: 'profile_conflict',
+          severity: 'notice',
+          path: 'profiles.a.node_selector',
+          profiles: ['a'],
+        },
       ],
     };
     const groups = splitGroups(plan);

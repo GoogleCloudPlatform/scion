@@ -28,7 +28,7 @@
  * text. There are no actions: applying a plan is not part of this page.
  */
 
-import { LitElement, css, html, nothing } from 'lit';
+import { LitElement, css, html, nothing, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import type { RuntimeBroker } from '../../shared/types.js';
@@ -140,9 +140,12 @@ export class ScionBrokerAreaConversionPlan extends LitElement {
   private async fetchPlan(id: string): Promise<void> {
     this.load = { kind: 'loading' };
     try {
-      const res = await apiFetch(`/api/v1/runtime-brokers/${encodeURIComponent(id)}/conversion-plan`, {
-        suppressAccessDeniedToast: true,
-      });
+      const res = await apiFetch(
+        `/api/v1/runtime-brokers/${encodeURIComponent(id)}/conversion-plan`,
+        {
+          suppressAccessDeniedToast: true,
+        }
+      );
       if (this.requestedFor !== id) return;
       if (res.ok) {
         this.load = { kind: 'loaded', plan: (await res.json()) as ConversionPlanResponse };
@@ -163,11 +166,16 @@ export class ScionBrokerAreaConversionPlan extends LitElement {
     }
   }
 
-  private renderFinding(f: ConversionPlanFinding, groups: Map<ConversionPlanFinding, SplitGroup>) {
+  private renderFinding(
+    f: ConversionPlanFinding,
+    groups: Map<ConversionPlanFinding, SplitGroup>
+  ): TemplateResult {
     const group = groups.get(f);
     return html`
       <tr class="finding">
-        <td><span class="severity ${f.severity === 'blocking' ? 'blocking' : ''}">${f.severity}</span></td>
+        <td>
+          <span class="severity ${f.severity === 'blocking' ? 'blocking' : ''}">${f.severity}</span>
+        </td>
         <td><code>${f.code}</code></td>
         <td><code class="finding-path">${f.path}</code></td>
         <td>${(f.profiles ?? []).join(', ')}</td>
@@ -179,7 +187,7 @@ export class ScionBrokerAreaConversionPlan extends LitElement {
     `;
   }
 
-  private renderSplitGroup(group: SplitGroup) {
+  private renderSplitGroup(group: SplitGroup): TemplateResult {
     if (group.differences.length === 0) {
       return html`<p class="plan-note split-not-published">${NOT_PUBLISHED_TEXT}</p>`;
     }
@@ -205,7 +213,7 @@ export class ScionBrokerAreaConversionPlan extends LitElement {
     `;
   }
 
-  private renderPlan(r: ConversionPlanResponse) {
+  private renderPlan(r: ConversionPlanResponse): TemplateResult {
     const plan = r.plan ?? { schemaVersion: 0 };
     const instances = plan.instances ?? [];
     const findings = plan.findings ?? [];
@@ -228,7 +236,9 @@ export class ScionBrokerAreaConversionPlan extends LitElement {
             incomplete. Run <code>${CLI_POINTER}</code> on the host for the full plan.
           </sl-alert>`
         : nothing}
-      ${computed ? html`<p class="plan-note">Computed by the Runtime Broker at ${computed}.</p>` : nothing}
+      ${computed
+        ? html`<p class="plan-note">Computed by the Runtime Broker at ${computed}.</p>`
+        : nothing}
 
       <h3>Proposed instances</h3>
       ${instances.length === 0
@@ -240,17 +250,25 @@ export class ScionBrokerAreaConversionPlan extends LitElement {
                   ? html` (${inst.name})`
                   : nothing}
                 <dl class="runtime-target-rows">
-                  ${instanceRows(inst).map((row) => html`<dt>${row.label}</dt><dd>${row.value}</dd>`)}
+                  ${instanceRows(inst).map(
+                    (row) =>
+                      html`<dt>${row.label}</dt>
+                        <dd>${row.value}</dd>`
+                  )}
                 </dl>
               </div>
             `
           )}
-
       ${mapRows.length > 0
         ? html`
             <h3>Profile map</h3>
             <table class="plan-table profile-map">
-              <thead><tr><th>Profile</th><th>Proposed instance</th></tr></thead>
+              <thead>
+                <tr>
+                  <th>Profile</th>
+                  <th>Proposed instance</th>
+                </tr>
+              </thead>
               <tbody>
                 ${mapRows.map(
                   (row) => html`
@@ -275,26 +293,44 @@ export class ScionBrokerAreaConversionPlan extends LitElement {
         : html`
             <table class="plan-table findings">
               <thead>
-                <tr><th>Severity</th><th>Code</th><th>Settings key</th><th>Profiles</th><th></th></tr>
+                <tr>
+                  <th>Severity</th>
+                  <th>Code</th>
+                  <th>Settings key</th>
+                  <th>Profiles</th>
+                  <th></th>
+                </tr>
               </thead>
-              <tbody>${findings.map((f) => this.renderFinding(f, groups))}</tbody>
+              <tbody>
+                ${findings.map((f) => this.renderFinding(f, groups))}
+              </tbody>
             </table>
           `}
-
       ${capacity
         ? html`
             <h3>Capacity</h3>
             <div class="capacity">
-              <p>${capacityOutcomeLabel(capacity.outcome)}${capacity.maxAgents !== undefined &&
+              <p>
+                ${capacityOutcomeLabel(capacity.outcome)}${capacity.maxAgents !== undefined &&
                 capacity.maxAgents !== null
                   ? html` (legacy maxAgents ${capacity.maxAgents})`
-                  : nothing}</p>
+                  : nothing}
+              </p>
               ${(capacity.allocations ?? []).length > 0
                 ? html`<table class="plan-table">
-                    <thead><tr><th>Proposed instance</th><th>maxAgents</th></tr></thead>
+                    <thead>
+                      <tr>
+                        <th>Proposed instance</th>
+                        <th>maxAgents</th>
+                      </tr>
+                    </thead>
                     <tbody>
                       ${capacity.allocations!.map(
-                        (a) => html`<tr><td>${a.instance}</td><td>${a.maxAgents}</td></tr>`
+                        (a) =>
+                          html`<tr>
+                            <td>${a.instance}</td>
+                            <td>${a.maxAgents}</td>
+                          </tr>`
                       )}
                     </tbody>
                   </table>`
@@ -311,7 +347,13 @@ export class ScionBrokerAreaConversionPlan extends LitElement {
         ? html`
             <table class="plan-table bound-agents">
               <thead>
-                <tr><th>Agent</th><th>Project</th><th>Phase</th><th>Profile</th><th>Proposed instance</th></tr>
+                <tr>
+                  <th>Agent</th>
+                  <th>Project</th>
+                  <th>Phase</th>
+                  <th>Profile</th>
+                  <th>Proposed instance</th>
+                </tr>
               </thead>
               <tbody>
                 ${agents.map(
@@ -343,7 +385,11 @@ export class ScionBrokerAreaConversionPlan extends LitElement {
         ? html`
             <table class="plan-table providing-projects">
               <thead>
-                <tr><th>Project</th><th>Active profile</th><th>Per-profile service accounts</th></tr>
+                <tr>
+                  <th>Project</th>
+                  <th>Active profile</th>
+                  <th>Per-profile service accounts</th>
+                </tr>
               </thead>
               <tbody>
                 ${projects.map(
@@ -368,12 +414,14 @@ export class ScionBrokerAreaConversionPlan extends LitElement {
           `
         : nothing}
       ${hiddenProjects > 0
-        ? html`<p class="plan-note hidden-projects">${hiddenProjects} projects not visible to you.</p>`
+        ? html`<p class="plan-note hidden-projects">
+            ${hiddenProjects} projects not visible to you.
+          </p>`
         : nothing}
     `;
   }
 
-  private renderBody() {
+  private renderBody(): TemplateResult | typeof nothing {
     switch (this.load.kind) {
       case 'idle':
       case 'loading':
@@ -396,7 +444,7 @@ export class ScionBrokerAreaConversionPlan extends LitElement {
     }
   }
 
-  override render() {
+  override render(): TemplateResult | typeof nothing {
     if (!this.active || this.load.kind === 'not-legacy') return nothing;
     return html`
       <div class="section plan-section">

@@ -28,11 +28,7 @@
  */
 
 import type { RuntimeTargetPresentation } from './types.js';
-import {
-  placementRows,
-  presentationRows,
-  type DisplayRow,
-} from './runtime-target.js';
+import { placementRows, presentationRows, type DisplayRow } from './runtime-target.js';
 
 /** One converter finding without its message. */
 export interface ConversionPlanFinding {
@@ -115,7 +111,8 @@ const FINDING_TEXTS: Record<string, string> = {
   profile_conflict:
     'These profiles differ on a shared target. Each value is kept: the profiles are split onto separate proposed instances, or keep their own placement.',
   profile_conflict_resolved: 'These profiles differed here; an operator choice resolves it.',
-  legacy_field_no_effect: 'This legacy setting has no effect on a flat instance and is not carried over.',
+  legacy_field_no_effect:
+    'This legacy setting has no effect on a flat instance and is not carried over.',
   legacy_field_removed: 'This setting was removed and is not carried over.',
   unknown_settings_key:
     'This settings key is not recognized, or an operator choice cannot be applied. Review it on the host.',
@@ -242,7 +239,12 @@ export function splitGroups(plan: ConversionPlanPresentation): SplitGroup[] {
     const keys = Array.from(
       new Set(profiles.map((p) => map[p]).filter((k): k is string => !!k && byKey.has(k)))
     ).sort();
-    groups.push({ finding: f, profiles, instances: keys, differences: keys.length < 2 ? [] : compare(keys, byKey) });
+    groups.push({
+      finding: f,
+      profiles,
+      instances: keys,
+      differences: keys.length < 2 ? [] : compare(keys, byKey),
+    });
   }
   return groups;
 }
