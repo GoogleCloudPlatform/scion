@@ -366,9 +366,10 @@ Other behaviour:
 
 ### Making agents use release images: `--also-tag latest`
 
-Agents currently run `scion-<harness>:latest`. Until a runtime setting can
-select a version tag, add `--also-tag latest` so the release images are also
-tagged `:latest`:
+Agents run `scion-<harness>:latest` unless the `image_tag` setting (behind
+the `hub.image_tag_setting` experiment) selects another tag; `image_tag:
+version` selects the Hub's own version. Without it, add `--also-tag latest`
+so the release images are also tagged `:latest`:
 
 ```bash
 image-build/scripts/build-release-images.sh v0.3.0-preview.5 --also-tag latest
@@ -380,6 +381,54 @@ requires `--force-latest`:
 ```bash
 image-build/scripts/build-release-images.sh v0.3.0-preview.5 --also-tag latest --force-latest -- --registry localhost/scion
 ```
+
+### Single-node VM (`deploy.sh`)
+
+With `container_images.source: build`, `scripts/single-node-vm/deploy.sh`
+builds the images on the VM with this driver. It copies the driver from the
+checkout it runs from to `/opt/scion-image-build/` on the VM (installed
+root-owned and checked against the local copy's SHA-256), then runs it as
+root once per image, in order:
+
+```bash
+build-release-images.sh <VERSION> --src-dir /opt/scion-image-src/<VERSION> \
+  --also-tag latest --force-latest -- --builder local-docker --registry localhost/scion --target <image>
+```
+
+for `core-base`, `scion-base` and `scion-antigravity`, the minimal set the
+hub needs. Notes for adopters:
+
+- **Nothing is pushed.** `--registry localhost/scion` without `--push` only
+  names the images in the VM's local Docker store
+  (`localhost/scion/<image>:<VERSION>`, `:<short-sha>` and `:latest`).
+  `--force-latest` is there because the driver requires it whenever a
+  registry is named; it moves only the local `:latest`, which is what the hub
+  runs.
+- **Release tags only.** `VERSION` must be `vX.Y.Z`, `vX.Y.Z-preview.N`,
+  `vX.Y.Z-rc.N` or `nightly-YYYYMMDD`; anything else is refused before the
+  driver runs. An expired nightly fails with `tag not found`.
+- **Version floor.** `container_images.source: build` needs
+  v0.3.0-preview.4 or later, because the single-image target
+  `scion-antigravity` exists only from that release on.
+  - An older release given with `--version`, or on a new install, is
+    refused before `deploy.sh` creates anything, even if the VM already
+    has its images: that is only known from a VM call after Phase 2.
+  - A re-run without `--version` that keeps the older release a VM
+    already runs is refused only if its images must be rebuilt (the
+    marker or an image is missing, or a rebuild is forced); when they
+    are built, the build is skipped and the deploy goes on.
+  - Workaround: re-run without `--version` to keep the installed
+    release, or use `container_images.source: registry`.
+- **Reuse.** A successful build writes
+  `/opt/scion-image-build/images-built.version`. A re-run with the same
+  `VERSION` skips the build when that marker (or the
+  `/opt/scion-source/.images-built.version` marker an older `deploy.sh`
+  wrote) matches and the three `localhost/scion/*:latest` images exist.
+  `--rebuild-images` or `container_images.force_rebuild: true` forces a
+  rebuild. Each version's clone stays in `/opt/scion-image-src/<VERSION>/`
+  and is reused by a rebuild; remove old ones yourself to free disk.
+- **The IAP proxy** is still built from `/opt/scion-source`, which `deploy.sh`
+  checks out at `VERSION`.
 
 ### Same recipe, not same bits
 

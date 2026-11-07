@@ -2336,7 +2336,8 @@ test_layout_image_build_status_private_and_log_sanitized() {
   export GCLOUD_STUB_SSH_BUILD_EXIT_SEQ="running 0"
   export GCLOUD_STUB_SSH_BUILD_LOG_LINE='step 2\033[2J\033]0;pwned\007 done'
   export SCION_TEST_BUILD_POLL_SECS=0
-  LAYOUT_SENTINEL=images-verified layout_deploy_through_settings "$(layout_config_json "$HUB" notify)"
+  # A release tag: Phase 3b refuses to build images for anything else.
+  LAYOUT_DEPLOY_VERSION=v1.0.0 LAYOUT_SENTINEL=images-verified layout_deploy_through_settings "$(layout_config_json "$HUB" notify)"
   unset GCLOUD_STUB_SSH_BUILD_EXIT_SEQ GCLOUD_STUB_SSH_BUILD_LOG_LINE SCION_TEST_BUILD_POLL_SECS
   local log
   log="$(gcloud_log)"
@@ -2356,17 +2357,17 @@ test_layout_image_build_status_private_and_log_sanitized() {
 }
 
 # Run the generated build-start command for real (sudo is a no-op shim,
-# HOME and the source checkout point into a work dir): the status dir is
+# HOME and /opt point into a work dir): the status dir is
 # created 0700 and gets exit/log/pid; a symlinked or non-directory status
 # dir is refused and nothing is written through it.
 test_layout_image_build_status_dir_checked() {
   fresh_gcloud_state
   export SCION_TEST_BUILD_POLL_SECS=0
-  LAYOUT_SENTINEL=image-build-started layout_deploy_through_settings "$(layout_config_json "$HUB" notify)"
+  LAYOUT_DEPLOY_VERSION=v1.0.0 LAYOUT_SENTINEL=image-build-started layout_deploy_through_settings "$(layout_config_json "$HUB" notify)"
   unset SCION_TEST_BUILD_POLL_SECS
   local cmd kind work out rc waited
   cmd="$(_layout_ssh_cmd_with "$(gcloud_log)" "Image build started in background")"
-  assert_contains "$cmd" "cd /opt/scion-source" "sanity: the build-start command must have been captured"
+  assert_contains "$cmd" "build-release-images.sh" "sanity: the build-start command must have been captured"
   for kind in fresh symlink file; do
     work="$(mktemp -d)"
     mkdir -p "${work}/home" "${work}/src" "${work}/shim" "${work}/victim"
@@ -2379,7 +2380,7 @@ test_layout_image_build_status_dir_checked() {
       file) echo "not a dir" > "${work}/home/.scion-image-build" ;;
     esac
     out="$(cd "$work" && HOME="${work}/home" PATH="${work}/shim:${PATH}" \
-      bash -c "${cmd//cd \/opt\/scion-source/cd \"${work}/src\"}" 2>&1 < /dev/null)"
+      bash -c "${cmd//\/opt\//${work}/opt/}" 2>&1 < /dev/null)"
     rc=$?
     if [[ "$kind" == fresh ]]; then
       assert_eq "0" "$rc" "the build start must succeed with a fresh status dir (output: ${out})"

@@ -3,7 +3,7 @@ title: Building Custom Images
 description: Build and configure your own Scion container images using Docker, Podman, GitHub Actions, or Google Cloud Build.
 ---
 
-Scion agents run inside container images that bundle an LLM harness (Claude, Gemini, etc.) with the Scion toolchain. By default, Scion uses pre-built images from the upstream registry. This guide shows how to build your own images and configure Scion to use them.
+Scion agents run inside container images that bundle an LLM harness (Claude, Gemini, etc.) with the Scion toolchain. You can build them yourself: from a release tag, to match the `scion` you run (see [Images that match a release](#images-that-match-a-release)), or from your own checkout. This guide shows how to build images and configure Scion to use them.
 
 ## Why Build Custom Images?
 
@@ -100,6 +100,29 @@ PIP_CONFIG_FILE=~/.pip/pip.conf \
 ```
 :::
 
+## Images that match a release
+
+To build the images for a release, use the release image driver, `image-build/scripts/build-release-images.sh`. It clones the release tag and runs that tag's own `build-images.sh` with `--target all --tag <version>`, so the images use exactly the release's Dockerfiles and source, and the `scion` and `sciontool` binaries inside report the release version (v0.3.0-preview.4 and later). It runs from a checkout of `main`, or as a single downloaded file, and needs only bash, git, and Docker or Podman:
+
+```bash
+# Build the release your scion binary reports (scion version), in the local image store
+image-build/scripts/build-release-images.sh
+
+# Build a given release and push it to your registry (multi-arch)
+image-build/scripts/build-release-images.sh v0.3.0-preview.5 -- \
+  --registry ghcr.io/myorg --platform all --push
+scion config set image_registry ghcr.io/myorg
+```
+
+The images are tagged `:<version>` and `:<short-sha>`. Agents use `scion-<harness>:latest` unless told otherwise, so either:
+
+- add `--also-tag latest` to the driver so the release images are also tagged `:latest` (with a registry this moves that registry's `:latest`, so the driver also requires `--force-latest`); or
+- with the `hub.image_tag_setting` [experiment](/scion/reference/experiments/) enabled, set `image_tag: version` so agents use the tag of the Hub's own version (see [Image tag](/scion/reference/settings-precedence/#image-tag-experimental)).
+
+A release build uses the same recipe, not the same bits: inputs such as harness CLIs installed at `@latest` and apt packages resolve at build time. The driver's `--help` and the "Build images for a release" section of `image-build/README.md` cover every option, including staged builds and Cloud Build.
+
+The rest of this guide covers `build-images.sh`, which builds from the checkout it runs in (for example `main`, or your own changes) and tags `:latest` by default.
+
 ## How the Build Tooling Is Organized
 
 A single orchestrator script — `image-build/scripts/build-images.sh` — owns the build DAG (which images depend on which, in what order, with which tags). The execution backend is selected with `--builder`. Three backends ship today:
@@ -188,16 +211,16 @@ The old `trigger-cloudbuild.sh` script is now a thin deprecation shim that forwa
 
 ## Configuring Scion: `image_registry`
 
-The `image_registry` setting tells Scion to pull images from your registry instead of the upstream default. It rewrites the registry prefix of all standard harness images (those named `scion-<harness>`) while preserving the image name and tag.
+The `image_registry` setting tells Scion which registry to pull images from. It rewrites the registry prefix of all standard harness images (those named `scion-<harness>`) while preserving the image name and tag.
 
 ### How It Works
 
-When `image_registry` is set, Scion transforms the default image reference:
+When `image_registry` is set, Scion transforms the default image reference, which the harness-config names without a registry:
 
 | Default Image | `image_registry` | Resolved Image |
 | :--- | :--- | :--- |
-| `us-central1-docker.pkg.dev/.../scion-claude:latest` | `ghcr.io/myorg` | `ghcr.io/myorg/scion-claude:latest` |
-| `us-central1-docker.pkg.dev/.../scion-gemini-cli:latest` | `ghcr.io/myorg` | `ghcr.io/myorg/scion-gemini-cli:latest` |
+| `scion-claude:latest` | `ghcr.io/myorg` | `ghcr.io/myorg/scion-claude:latest` |
+| `scion-gemini-cli:latest` | `ghcr.io/myorg` | `ghcr.io/myorg/scion-gemini-cli:latest` |
 
 ### Setting It
 
