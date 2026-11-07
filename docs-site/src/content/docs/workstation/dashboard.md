@@ -5,6 +5,8 @@ description: Using the Scion Web Dashboard for visualization and control.
 
 The Scion Web Dashboard provides a visual interface for managing your agents, projects, and runtime brokers. It complements the CLI by providing real-time status updates and easier management of complex environments.
 
+Open the dashboard on the URL the server prints at start (`http://localhost:<port>`). HTML artifacts are served with a policy that names that URL, so one opened through another host name, such as `127.0.0.1`, shows its page without its own scripts, styles and images (see [HTML artifacts](/scion/reference/artifacts/#html-artifacts)).
+
 ## Overview
 
 The dashboard is organized into several key areas:

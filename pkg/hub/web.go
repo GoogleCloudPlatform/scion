@@ -284,6 +284,10 @@ type WebServer struct {
 	startTime      time.Time
 	log            *slog.Logger // subsystem logger for hub.web
 
+	// contentHostGuard is the mounted hub's content host guard, applied
+	// outermost by buildHandler (SetContentHostGuard), or nil.
+	contentHostGuard func(http.Handler) http.Handler
+
 	// sessionCodecs are sessionStore's codecs, active generation first.
 	sessionCodecs []securecookie.Codec
 	// signingRing is the ring sessionCodecs came from.
@@ -4399,14 +4403,54 @@ func (ws *WebServer) buildHandler() http.Handler {
 	// Security headers
 	handler = ws.securityHeadersMiddleware(handler)
 
-	// Request logging (outermost)
+	// Request logging
 	if ws.requestLogger != nil {
 		handler = logging.RequestLogMiddleware(ws.requestLogger, "web", nil, ws.config.SlowRequestThreshold)(handler)
 	} else {
 		handler = ws.loggingMiddleware(handler)
 	}
 
+	// Outermost: the mounted hub's content host guard, so a request on
+	// server.hub.content_url reaches neither the web app nor the session
+	// bridge unless it is a share or view read, and never with a
+	// credential. It comes from SetContentHostGuard, or else from the access
+	// settings provider when that is the hub (contentHostGuardSource), so a
+	// combined server that wires the hub as its provider cannot leave it out.
+	if guard := ws.contentHostGuardFor(); guard != nil {
+		handler = guard(handler)
+	}
+
 	return handler
+}
+
+// errContentHostGuardMissing refuses to start a web server that mounts the
+// hub API without the hub's content host guard.
+var errContentHostGuardMissing = errors.New("web server: the hub API is mounted but no content host guard is set (set the hub as the access settings provider, or SetContentHostGuard)")
+
+// contentHostGuardSource is implemented by the hub Server: its content host
+// guard.
+type contentHostGuardSource interface {
+	ContentHostGuard(http.Handler) http.Handler
+}
+
+// contentHostGuardFor returns the guard buildHandler applies outermost: the
+// one SetContentHostGuard set, else the access settings provider's when it
+// is a contentHostGuardSource (the hub), else nil.
+func (ws *WebServer) contentHostGuardFor() func(http.Handler) http.Handler {
+	if ws.contentHostGuard != nil {
+		return ws.contentHostGuard
+	}
+	if src, ok := ws.accessSettings.(contentHostGuardSource); ok {
+		return src.ContentHostGuard
+	}
+	return nil
+}
+
+// SetContentHostGuard sets the middleware buildHandler applies outermost,
+// overriding the access settings provider's (contentHostGuardFor). Call it
+// before Start.
+func (ws *WebServer) SetContentHostGuard(guard func(http.Handler) http.Handler) {
+	ws.contentHostGuard = guard
 }
 
 // Start starts the web frontend HTTP server.
@@ -4416,6 +4460,12 @@ func (ws *WebServer) buildHandler() http.Handler {
 // long-lived SSE streams. When deployed behind a TLS-terminating reverse
 // proxy (e.g. Caddy), the proxy negotiates HTTP/2 with the browser natively.
 func (ws *WebServer) Start(ctx context.Context) error {
+	// A mounted hub API is served only behind the hub's content host guard
+	// (contentHostGuardFor): fail closed rather than serve the web app and
+	// the session bridge unguarded.
+	if ws.hubHandler != nil && ws.contentHostGuardFor() == nil {
+		return errContentHostGuardMissing
+	}
 	handler := ws.buildHandler()
 
 	// Wrap the handler with h2c to support HTTP/2 cleartext upgrades.
