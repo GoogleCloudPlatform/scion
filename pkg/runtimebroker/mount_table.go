@@ -15,48 +15,22 @@
 package runtimebroker
 
 import (
-	"bufio"
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
-	"strconv"
-	"strings"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 )
 
 // procMountsPath is the Linux mount table read by ReadProcMountTable.
 const procMountsPath = "/proc/mounts"
 
-// maxMountTableLine bounds a single /proc/mounts line (long option strings
-// can exceed bufio.Scanner's 64 KiB default).
-const maxMountTableLine = 1 << 20
+// MountEntry is projectfs.MountEntry, the parsed mount table entry shared
+// with the runtimes.
+type MountEntry = projectfs.MountEntry
 
-// MountEntry is one mount table entry: the source mounted at a path
-// (server:export for NFS) and the mount options the kernel reports for it
-// ("rw,nosuid,nodev,relatime,vers=3,...").
-type MountEntry struct {
-	Source  string
-	Options string
-}
-
-// MountTable is a parsed mount table: cleaned, unescaped mountpoint to the
-// entry mounted there. When a path is mounted more than once, the last
-// (topmost, visible) entry wins.
-type MountTable map[string]MountEntry
-
-// Lookup returns the source mounted at path and whether path is a
-// mountpoint. path is compared after filepath.Clean.
-func (t MountTable) Lookup(path string) (source string, mounted bool) {
-	e, mounted := t.LookupEntry(path)
-	return e.Source, mounted
-}
-
-// LookupEntry returns the entry mounted at path and whether path is a
-// mountpoint. path is compared after filepath.Clean.
-func (t MountTable) LookupEntry(path string) (MountEntry, bool) {
-	e, mounted := t[filepath.Clean(path)]
-	return e, mounted
-}
+// MountTable is projectfs.MountTable.
+type MountTable = projectfs.MountTable
 
 // ReadProcMountTable reads and parses /proc/mounts. It reads the mount
 // table only and never stats a mountpoint, so a hung NFS mount cannot block
@@ -71,27 +45,10 @@ func ReadProcMountTable() (MountTable, error) {
 	return ParseMountTable(f)
 }
 
-// ParseMountTable parses a /proc/mounts-format table, decoding the
-// kernel's octal escapes in the source and mountpoint fields.
+// ParseMountTable parses a /proc/mounts-format table; see
+// projectfs.ParseMountTable.
 func ParseMountTable(r io.Reader) (MountTable, error) {
-	t := MountTable{}
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 0, 64*1024), maxMountTableLine)
-	for scanner.Scan() {
-		fields := strings.Fields(scanner.Text())
-		if len(fields) < 2 {
-			continue
-		}
-		e := MountEntry{Source: unescapeMountField(fields[0])}
-		if len(fields) >= 4 {
-			e.Options = unescapeMountField(fields[3])
-		}
-		t[filepath.Clean(unescapeMountField(fields[1]))] = e
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("reading mount table: %w", err)
-	}
-	return t, nil
+	return projectfs.ParseMountTable(r)
 }
 
 // ProcMountEntry looks path up in /proc/mounts and returns the entry
@@ -103,24 +60,4 @@ func ProcMountEntry(path string) (entry MountEntry, mounted bool, err error) {
 	}
 	entry, mounted = t.LookupEntry(path)
 	return entry, mounted, nil
-}
-
-// unescapeMountField decodes the octal escapes (\040 for space, etc.) the
-// kernel uses in /proc/mounts fields.
-func unescapeMountField(s string) string {
-	if !strings.Contains(s, `\`) {
-		return s
-	}
-	var b strings.Builder
-	for i := 0; i < len(s); i++ {
-		if s[i] == '\\' && i+3 < len(s) {
-			if v, err := strconv.ParseUint(s[i+1:i+4], 8, 8); err == nil {
-				b.WriteByte(byte(v))
-				i += 3
-				continue
-			}
-		}
-		b.WriteByte(s[i])
-	}
-	return b.String()
 }

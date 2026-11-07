@@ -134,6 +134,13 @@ type KubernetesRuntime struct {
 	// waitForPodReady log only once per runtime that it cannot read
 	// events, and so waits as it would without the check.
 	mountEventsFallbackLogged atomic.Bool
+
+	// volumeHealthInterval and volumeHealthProbeTimeout, when non-zero,
+	// replace the NFS volume health check's 5s interval between checks and
+	// its 10s bound on each exec (see k8s_volume_health.go). Tests shorten
+	// them.
+	volumeHealthInterval     time.Duration
+	volumeHealthProbeTimeout time.Duration
 }
 
 // agentContainerName is the name of the primary scion agent container in
@@ -912,6 +919,15 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 	runtimeLog().Info("Waiting for pod exec tunnel", "agent", config.Name, "namespace", namespace, "phase", "wait-exec")
 	if err := r.waitForExecReady(ctx, namespace, createdPod.Name, config.Name); err != nil {
 		return createdPod.Name, fmt.Errorf("pod exec tunnel not ready: %w", err)
+	}
+
+	// NFS volume health: every NFS volume the agent container mounts must
+	// be usable before anything is copied into the pod or the harness
+	// starts. Like the exec wait above, this runs for every pod this
+	// function creates, so a restart, resume or wake checks again (see
+	// k8s_volume_health.go).
+	if err := r.checkPodVolumeHealth(ctx, namespace, createdPod.Name, config.Name, volumeHealthTargets(pod, newPodMountWatch(pod, config))); err != nil {
+		return createdPod.Name, err
 	}
 
 	// NFS-home pods: home-prepare chose how this start fills the home.
