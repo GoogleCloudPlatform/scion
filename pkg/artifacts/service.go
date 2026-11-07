@@ -92,6 +92,11 @@ type Service struct {
 	limiter     *rateLimiter
 	clientKeyFn func(*http.Request) string
 
+	// notifyLimiter rate-limits the notifications of grants with notify
+	// (Ask for review), per requester and in all (notifyLimiterFor).
+	notifyLimiterOnce sync.Once
+	notifyLimiter     *rateLimiter
+
 	fetcherFactory func(RemoteImageLimits) ImageFetcher
 	// fetchFloor overrides the fetch floor in tests; zero means the
 	// fetcher's connect timeout.
@@ -293,6 +298,17 @@ func (s *Service) sharedLimiter() *rateLimiter {
 		}
 	})
 	return s.limiter
+}
+
+// notifyLimiterFor returns the Ask-for-review notification limiter.
+func (s *Service) notifyLimiterFor() *rateLimiter {
+	s.notifyLimiterOnce.Do(func() {
+		if s.notifyLimiter == nil {
+			s.notifyLimiter = newPeriodLimiter(time.Now, NotifyPerHour, time.Hour, NotifyBurst,
+				NotifyGlobalPerHour, time.Hour, NotifyGlobalBurst, notifyMaxRequesters)
+		}
+	})
+	return s.notifyLimiter
 }
 
 // SetLimits sets the function that yields the current limits. It is called
