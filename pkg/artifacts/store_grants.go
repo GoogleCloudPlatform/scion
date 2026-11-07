@@ -87,9 +87,9 @@ func reviewSubjectOK(p, kind, ref string) bool {
 	return p != GrantReview || (kind == SubjectPrincipal && strings.HasPrefix(ref, PrincipalKindUser+":"))
 }
 
-// putGrant is PutGrant and PutGrantNotify. A review grant never replaces a
-// read, write or admin grant: the subject's one principal row would lose
-// the read the review counts with. notified is true when notify holds and the write raised the
+// putGrant is PutGrant and PutGrantNotify. Moving a subject between read,
+// review, write and admin, either way, is an ordinary level change
+// (ptone/scion#5145). notified is true when notify holds and the write raised the
 // subject's level (grantRank; a created grant counts as a raise), decided
 // under the artifact's lock; the event's detail then records
 // "notified": true.
@@ -147,9 +147,6 @@ func (s *sqlStore) putGrant(ctx context.Context, g *Grant, maxGrants int, crossS
 		WHERE artifact_id = ? AND subject_kind = ? AND subject_ref = ?`), g.ArtifactID, g.SubjectKind, g.SubjectRef).Scan(&id, &perm, &by, &created)
 	switch {
 	case err == nil:
-		if g.Permission == GrantReview && perm != GrantReview {
-			return GrantPutUnchanged, false, ErrReviewReplacesAccess
-		}
 		if perm != g.Permission {
 			// A level change by a person ends an automatic grant's
 			// automatic form (ptone/scion#7134): its creator becomes that

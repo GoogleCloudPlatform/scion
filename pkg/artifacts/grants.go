@@ -33,10 +33,9 @@ import (
 
 // Grants (design §5.2, D7, D16). A grant gives a principal (a user or an
 // agent) or a scope (a project's members) read, write or admin on one
-// artifact, or gives a user review (ptone/scion#4538): versions of kind
-// review only, with no read of its own; it counts only while the user
-// reads the artifact through the home project or a grant to one of their
-// projects. Grants are read at request time by the same read check every
+// artifact, or gives a user review (ptone/scion#4538), which reads and
+// lets the user append versions of kind review; the levels form a ladder,
+// read ⊂ review ⊂ write ⊂ admin (ptone/scion#5145). Grants are read at request time by the same read check every
 // route uses (canReadWith), so a grant never reaches past what the
 // caller's credential permits (Host.Permits, for agents including the live
 // delegation chain).
@@ -56,14 +55,6 @@ import (
 // to any other project needs the host to allow sharing across projects
 // (CrossScopeSharing) when it is created; existing grants keep working if
 // that is turned off later.
-
-// CodeReviewReplacesAccess is the error code of a review grant refused
-// because the user holds a principal read, write or admin grant.
-const CodeReviewReplacesAccess = "review_replaces_access"
-
-// reviewReplacesAccessMessage is the text of a CodeReviewReplacesAccess
-// refusal (handlePutGrant, with 400).
-const reviewReplacesAccessMessage = "a review grant cannot replace a user's read, write or admin grant"
 
 // MaxGrantsPerArtifact caps the principal and scope grants of one
 // artifact, the home project's included.
@@ -355,9 +346,6 @@ func (s *Service) handlePutGrant(w http.ResponseWriter, r *http.Request, id stri
 		return
 	case errors.Is(err, ErrHomeGrantAdmin):
 		writeError(w, http.StatusBadRequest, "bad_request", "the home project's grant may be read or write")
-		return
-	case errors.Is(err, ErrReviewReplacesAccess):
-		writeError(w, http.StatusBadRequest, CodeReviewReplacesAccess, reviewReplacesAccessMessage)
 		return
 	case errors.Is(err, ErrCrossScopeDisabled):
 		s.logRefusal(r, logActionShare, logReasonCrossProjectDisabled, a)

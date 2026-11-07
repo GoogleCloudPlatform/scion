@@ -44,12 +44,6 @@ var ErrTooManyGrants = errors.New("artifacts: too many grants")
 // project's grant is read or write only.
 var ErrHomeGrantAdmin = errors.New("artifacts: the home scope's grant may only be read or write")
 
-// ErrReviewReplacesAccess is returned by PutGrant for
-// a review grant to a user who holds a principal read, write or admin
-// grant on the artifact: the review grant would take that grant's row,
-// and with it the user's read.
-var ErrReviewReplacesAccess = errors.New("artifacts: a review grant cannot replace a read, write or admin grant")
-
 // ErrCrossScopeDisabled is returned by PutGrant for a scope grant to a
 // scope other than the artifact's home while sharing across scopes is off.
 var ErrCrossScopeDisabled = errors.New("artifacts: sharing with other scopes is off")
@@ -463,8 +457,7 @@ type Store interface {
 	// GrantPutUnchanged when the grant already had g's permission. Under
 	// the artifact's lock it reads the artifact's home scope and refuses an admin grant to it
 	// (ErrHomeGrantAdmin) and, unless crossScope, a scope grant to any
-	// other scope (ErrCrossScopeDisabled), and a review grant over a
-	// subject's read, write or admin grant (ErrReviewReplacesAccess). It
+	// other scope (ErrCrossScopeDisabled). It
 	// refuses with ErrTooManyGrants when adding would exceed maxGrants
 	// principal and scope grants, and returns ErrNotFound when the artifact
 	// is absent or deleted.

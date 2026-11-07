@@ -1196,7 +1196,7 @@ var projectOperations = []OperationSpec{
 			AfterFields:   []string{"grantId", "subjectKind", "subjectRef", "permission", "newPermission"},
 			Atomic:        true,
 		},
-		DenialCodes: []DenialCode{DenialResourceNotFound, DenialForbidden, "cross_project_sharing_disabled", "review_replaces_access", "steward_action_not_allowed"},
+		DenialCodes: []DenialCode{DenialResourceNotFound, DenialForbidden, "cross_project_sharing_disabled", "steward_action_not_allowed"},
 		TestRefs: []TestRef{
 			{Package: "pkg/hub", Function: "TestArtifactsGrantsOnRoutes"},
 			{Package: "pkg/artifacts", Function: "TestGrantsAdminGate"},

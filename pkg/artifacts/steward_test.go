@@ -563,8 +563,8 @@ func TestStewardCrossProjectSwitch(t *testing.T) {
 // TestStewardReviewGrantTakesManagerPath: a steward's review grant is
 // served by the manager path (the only grant path since the review-only
 // path was removed, ptone/scion#5145), so it does not check that the user
-// can already read the artifact, and replacing a read grant answers the
-// manager path's 400 review_replaces_access.
+// can already read the artifact, and review over a read grant is an
+// ordinary level change (the ladder).
 func TestStewardReviewGrantTakesManagerPath(t *testing.T) {
 	f := newStewardFixture(t)
 	f.host.mu.Lock()
@@ -588,8 +588,8 @@ func TestStewardReviewGrantTakesManagerPath(t *testing.T) {
 		t.Fatal(rec.Body.String())
 	}
 	rec = f.jsonDo(delegSteward, http.MethodPost, grantsPath(f.id), reviewBody(SubjectPrincipal, "user:outsider", GrantReview))
-	if rec.Code != http.StatusBadRequest || errCode(t, rec) != CodeReviewReplacesAccess {
-		t.Fatalf("steward review over a read grant: %d %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("steward review over a read grant: %d %s, want 200", rec.Code, rec.Body.String())
 	}
 }
 

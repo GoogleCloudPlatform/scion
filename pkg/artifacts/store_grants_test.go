@@ -402,10 +402,12 @@ func TestStoreCandidatesSharedWithScope(t *testing.T) {
 	})
 }
 
-// TestStorePutGrantReview: PutGrant stores a review grant to a user
-// principal, repeats it, raises it to write, never puts review over a
-// read, write or admin grant (ErrReviewReplacesAccess), and refuses review
-// for an agent or a scope, on both dialects (ptone/scion#4538).
+// TestStorePutGrantReview (TestGrantLevelChangesBothWays, K3): PutGrant
+// stores a review grant to a user principal, repeats it, raises it to
+// write, and, since the ladder (ptone/scion#5145), moves it down to review
+// again from write, read or admin as an ordinary level change with a
+// grant_changed event; it refuses review for an agent or a scope, on both
+// dialects (ptone/scion#4538).
 func TestStorePutGrantReview(t *testing.T) {
 	forEachBackend(t, func(t *testing.T, db *sql.DB, st Store, _ func() *sql.DB) {
 		ctx := context.Background()
@@ -438,8 +440,7 @@ func TestStorePutGrantReview(t *testing.T) {
 		if created, err := st.PutGrant(ctx, up, 10, false, testActor); err != nil || created != GrantPutChanged {
 			t.Errorf("review to write: %v %v", created, err)
 		}
-		// Back to review over write, and over read or admin: refused, the
-		// grant unchanged.
+		// Back to review from write, read or admin: an ordinary change.
 		for _, perm := range []string{GrantWrite, GrantRead, GrantAdmin} {
 			set := &Grant{ID: uuid.NewString(), ArtifactID: a.ID, SubjectKind: SubjectPrincipal, SubjectRef: "user:rv",
 				Permission: perm, CreatedAt: time.Now()}
@@ -448,17 +449,21 @@ func TestStorePutGrantReview(t *testing.T) {
 			}
 			down := &Grant{ID: uuid.NewString(), ArtifactID: a.ID, SubjectKind: SubjectPrincipal, SubjectRef: "user:rv",
 				Permission: GrantReview, CreatedAt: time.Now()}
-			if _, err := st.PutGrant(ctx, down, 10, false, testActor); !errors.Is(err, ErrReviewReplacesAccess) {
-				t.Errorf("review over %s: %v", perm, err)
+			if put, err := st.PutGrant(ctx, down, 10, false, testActor); err != nil || put != GrantPutChanged {
+				t.Errorf("review over %s: %v %v, want a change", perm, put, err)
 			}
 			gs, err := st.ListGrants(ctx, a.ID)
 			if err != nil {
 				t.Fatal(err)
 			}
 			for _, x := range gs {
-				if x.SubjectRef == "user:rv" && x.Permission != perm {
-					t.Errorf("grant changed from %s to %s", perm, x.Permission)
+				if x.SubjectRef == "user:rv" && x.Permission != GrantReview {
+					t.Errorf("grant after review over %s is %s", perm, x.Permission)
 				}
+			}
+			evs := eventsOf(t, st, a.ID)
+			if e := evs[len(evs)-1]; e.Action != EventGrantChanged || e.Detail["oldPermission"] != perm || e.Detail["newPermission"] != GrantReview {
+				t.Errorf("event after review over %s: %+v", perm, e)
 			}
 		}
 		for _, bad := range []*Grant{

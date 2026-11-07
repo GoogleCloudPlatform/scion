@@ -3302,7 +3302,7 @@
 - **After Fields:** grantId, subjectKind, subjectRef, permission, newPermission
 - **Atomic:** Yes
 
-**Denial Codes:** `not_found`, `forbidden`, `cross_project_sharing_disabled`, `review_replaces_access`, `steward_action_not_allowed`
+**Denial Codes:** `not_found`, `forbidden`, `cross_project_sharing_disabled`, `steward_action_not_allowed`
 
 ### Tests
 
