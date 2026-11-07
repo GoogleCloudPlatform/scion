@@ -42,6 +42,9 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conduitsession"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conversation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conversationparticipant"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/decision"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/decisionanswer"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/decisionkeycounter"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/delegationadoption"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/delegationedge"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entitlementbinding"
@@ -194,6 +197,9 @@ func checkColumn(t, c string) error {
 			conduitsession.Table:                conduitsession.ValidColumn,
 			conversation.Table:                  conversation.ValidColumn,
 			conversationparticipant.Table:       conversationparticipant.ValidColumn,
+			decision.Table:                      decision.ValidColumn,
+			decisionanswer.Table:                decisionanswer.ValidColumn,
+			decisionkeycounter.Table:            decisionkeycounter.ValidColumn,
 			delegationadoption.Table:            delegationadoption.ValidColumn,
 			delegationedge.Table:                delegationedge.ValidColumn,
 			entitlementbinding.Table:            entitlementbinding.ValidColumn,

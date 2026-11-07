@@ -36,6 +36,9 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conduitsession"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conversation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conversationparticipant"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/decision"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/decisionanswer"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/decisionkeycounter"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/delegationadoption"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/delegationedge"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entitlementbinding"
@@ -1132,6 +1135,148 @@ func init() {
 	conversationparticipantDescID := conversationparticipantFields[0].Descriptor()
 	// conversationparticipant.DefaultID holds the default value on creation for the id field.
 	conversationparticipant.DefaultID = conversationparticipantDescID.Default.(func() uuid.UUID)
+	decisionFields := schema.Decision{}.Fields()
+	_ = decisionFields
+	// decisionDescPosition is the schema descriptor for position field.
+	decisionDescPosition := decisionFields[4].Descriptor()
+	// decision.PositionValidator is a validator for the "position" field. It is called by the builders before save.
+	decision.PositionValidator = decisionDescPosition.Validators[0].(func(int) error)
+	// decisionDescKey is the schema descriptor for key field.
+	decisionDescKey := decisionFields[7].Descriptor()
+	// decision.KeyValidator is a validator for the "key" field. It is called by the builders before save.
+	decision.KeyValidator = func() func(string) error {
+		validators := decisionDescKey.Validators
+		fns := [...]func(string) error{
+			validators[0].(func(string) error),
+			validators[1].(func(string) error),
+		}
+		return func(key string) error {
+			for _, fn := range fns {
+				if err := fn(key); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+	}()
+	// decisionDescKeyNorm is the schema descriptor for key_norm field.
+	decisionDescKeyNorm := decisionFields[8].Descriptor()
+	// decision.KeyNormValidator is a validator for the "key_norm" field. It is called by the builders before save.
+	decision.KeyNormValidator = func() func(string) error {
+		validators := decisionDescKeyNorm.Validators
+		fns := [...]func(string) error{
+			validators[0].(func(string) error),
+			validators[1].(func(string) error),
+		}
+		return func(key_norm string) error {
+			for _, fn := range fns {
+				if err := fn(key_norm); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+	}()
+	// decisionDescVersion is the schema descriptor for version field.
+	decisionDescVersion := decisionFields[10].Descriptor()
+	// decision.VersionValidator is a validator for the "version" field. It is called by the builders before save.
+	decision.VersionValidator = decisionDescVersion.Validators[0].(func(int) error)
+	// decisionDescIntroLength is the schema descriptor for intro_length field.
+	decisionDescIntroLength := decisionFields[14].Descriptor()
+	// decision.DefaultIntroLength holds the default value on creation for the intro_length field.
+	decision.DefaultIntroLength = decisionDescIntroLength.Default.(int)
+	// decision.IntroLengthValidator is a validator for the "intro_length" field. It is called by the builders before save.
+	decision.IntroLengthValidator = decisionDescIntroLength.Validators[0].(func(int) error)
+	// decisionDescCreatedAt is the schema descriptor for created_at field.
+	decisionDescCreatedAt := decisionFields[17].Descriptor()
+	// decision.DefaultCreatedAt holds the default value on creation for the created_at field.
+	decision.DefaultCreatedAt = decisionDescCreatedAt.Default.(func() time.Time)
+	// decisionDescID is the schema descriptor for id field.
+	decisionDescID := decisionFields[0].Descriptor()
+	// decision.DefaultID holds the default value on creation for the id field.
+	decision.DefaultID = decisionDescID.Default.(func() uuid.UUID)
+	decisionanswerFields := schema.DecisionAnswer{}.Fields()
+	_ = decisionanswerFields
+	// decisionanswerDescKey is the schema descriptor for key field.
+	decisionanswerDescKey := decisionanswerFields[4].Descriptor()
+	// decisionanswer.KeyValidator is a validator for the "key" field. It is called by the builders before save.
+	decisionanswer.KeyValidator = func() func(string) error {
+		validators := decisionanswerDescKey.Validators
+		fns := [...]func(string) error{
+			validators[0].(func(string) error),
+			validators[1].(func(string) error),
+		}
+		return func(key string) error {
+			for _, fn := range fns {
+				if err := fn(key); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+	}()
+	// decisionanswerDescVersion is the schema descriptor for version field.
+	decisionanswerDescVersion := decisionanswerFields[5].Descriptor()
+	// decisionanswer.VersionValidator is a validator for the "version" field. It is called by the builders before save.
+	decisionanswer.VersionValidator = decisionanswerDescVersion.Validators[0].(func(int) error)
+	// decisionanswerDescChoiceID is the schema descriptor for choice_id field.
+	decisionanswerDescChoiceID := decisionanswerFields[7].Descriptor()
+	// decisionanswer.ChoiceIDValidator is a validator for the "choice_id" field. It is called by the builders before save.
+	decisionanswer.ChoiceIDValidator = func() func(string) error {
+		validators := decisionanswerDescChoiceID.Validators
+		fns := [...]func(string) error{
+			validators[0].(func(string) error),
+			validators[1].(func(string) error),
+		}
+		return func(choice_id string) error {
+			for _, fn := range fns {
+				if err := fn(choice_id); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+	}()
+	// decisionanswerDescAnsweredByName is the schema descriptor for answered_by_name field.
+	decisionanswerDescAnsweredByName := decisionanswerFields[10].Descriptor()
+	// decisionanswer.DefaultAnsweredByName holds the default value on creation for the answered_by_name field.
+	decisionanswer.DefaultAnsweredByName = decisionanswerDescAnsweredByName.Default.(string)
+	// decisionanswerDescAnsweredByEmail is the schema descriptor for answered_by_email field.
+	decisionanswerDescAnsweredByEmail := decisionanswerFields[11].Descriptor()
+	// decisionanswer.DefaultAnsweredByEmail holds the default value on creation for the answered_by_email field.
+	decisionanswer.DefaultAnsweredByEmail = decisionanswerDescAnsweredByEmail.Default.(string)
+	// decisionanswerDescIdempotencyKey is the schema descriptor for idempotency_key field.
+	decisionanswerDescIdempotencyKey := decisionanswerFields[20].Descriptor()
+	// decisionanswer.IdempotencyKeyValidator is a validator for the "idempotency_key" field. It is called by the builders before save.
+	decisionanswer.IdempotencyKeyValidator = func() func(string) error {
+		validators := decisionanswerDescIdempotencyKey.Validators
+		fns := [...]func(string) error{
+			validators[0].(func(string) error),
+			validators[1].(func(string) error),
+		}
+		return func(idempotency_key string) error {
+			for _, fn := range fns {
+				if err := fn(idempotency_key); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+	}()
+	// decisionanswerDescCreatedAt is the schema descriptor for created_at field.
+	decisionanswerDescCreatedAt := decisionanswerFields[21].Descriptor()
+	// decisionanswer.DefaultCreatedAt holds the default value on creation for the created_at field.
+	decisionanswer.DefaultCreatedAt = decisionanswerDescCreatedAt.Default.(func() time.Time)
+	// decisionanswerDescID is the schema descriptor for id field.
+	decisionanswerDescID := decisionanswerFields[0].Descriptor()
+	// decisionanswer.DefaultID holds the default value on creation for the id field.
+	decisionanswer.DefaultID = decisionanswerDescID.Default.(func() uuid.UUID)
+	decisionkeycounterFields := schema.DecisionKeyCounter{}.Fields()
+	_ = decisionkeycounterFields
+	// decisionkeycounterDescNext is the schema descriptor for next field.
+	decisionkeycounterDescNext := decisionkeycounterFields[1].Descriptor()
+	// decisionkeycounter.NextValidator is a validator for the "next" field. It is called by the builders before save.
+	decisionkeycounter.NextValidator = decisionkeycounterDescNext.Validators[0].(func(int64) error)
 	delegationadoptionFields := schema.DelegationAdoption{}.Fields()
 	_ = delegationadoptionFields
 	// delegationadoptionDescCohortID is the schema descriptor for cohort_id field.
