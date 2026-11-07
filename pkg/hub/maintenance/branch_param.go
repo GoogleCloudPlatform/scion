@@ -112,8 +112,10 @@ func parseGitVersion(out string) (major, minor int, ok bool) {
 // branchArgs returns git arguments that end with branch, preceded by
 // --end-of-options when the host git supports it.
 func branchArgs(endOfOptions bool, branch string, args ...string) []string {
+	res := make([]string, 0, len(args)+2)
+	res = append(res, args...)
 	if endOfOptions {
-		args = append(args, "--end-of-options")
+		res = append(res, "--end-of-options")
 	}
-	return append(args, branch)
+	return append(res, branch)
 }

@@ -122,6 +122,26 @@ func TestBranchArgs(t *testing.T) {
 	}
 }
 
+// branchArgs must not write into the caller's backing array, even when the
+// variadic args slice has spare capacity.
+func TestBranchArgs_DoesNotMutateCallerSlice(t *testing.T) {
+	for _, eoo := range []bool{false, true} {
+		s := make([]string, 1, 4)
+		s[0] = "checkout"
+		got := branchArgs(eoo, "main", s...)
+		if full := s[:cap(s)]; !reflect.DeepEqual(full, []string{"checkout", "", "", ""}) {
+			t.Errorf("branchArgs(%v) changed the caller's backing array: %q", eoo, full)
+		}
+		want := []string{"checkout", "main"}
+		if eoo {
+			want = []string{"checkout", "--end-of-options", "main"}
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("branchArgs(%v) = %q, want %q", eoo, got, want)
+		}
+	}
+}
+
 // A git that cannot run (here: the checkout directory is gone) is reported
 // as such, quoted, not as an invalid branch name.
 func TestValidateBranchName_GitCannotRun(t *testing.T) {
