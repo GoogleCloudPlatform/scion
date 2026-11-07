@@ -3431,9 +3431,11 @@ type MaintenanceStore interface {
 	// ListMaintenanceRuns returns runs for a given operation key, ordered by started_at DESC.
 	ListMaintenanceRuns(ctx context.Context, operationKey string, limit int) ([]MaintenanceOperationRun, error)
 
-	// AbortRunningMaintenanceOps transitions any "running" operation runs and
-	// migrations to "failed". Called at server startup to clean up operations
-	// that were interrupted by a restart.
+	// AbortRunningMaintenanceOps transitions any "running" operation runs to
+	// "failed" and resets "running" migrations to "pending". Called at server
+	// startup to clean up operations that were interrupted by a restart. A
+	// run's JSON-object Result keeps its keys and gains "error" and
+	// "aborted": true; any other Result is replaced by the abort error.
 	AbortRunningMaintenanceOps(ctx context.Context) (runs int64, migrations int64, err error)
 }
 

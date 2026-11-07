@@ -16,6 +16,7 @@ package entadapter
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 
 	entsql "entgo.io/ent/dialect/sql"
@@ -37,7 +38,14 @@ func NewMaintenanceStore(client *ent.Client) *MaintenanceStore {
 
 // abortResult is the result message stamped on operations/runs that were
 // interrupted by a server restart. Kept identical to the SQLite backend.
-const abortResult = `{"error":"aborted: server was restarted while operation was running"}`
+const abortResult = `{"error":"` + abortText + `"}`
+
+// abortText is the error text of an operation or run interrupted by a
+// server restart.
+const abortText = "aborted: server was restarted while operation was running"
+
+// abortTextJSON is abortText as a JSON string.
+var abortTextJSON, _ = json.Marshal(abortText)
 
 // AppliedConfigTZCleanupKey is the maintenance operation key of the
 // applied-config TZ cleanup.
@@ -440,17 +448,38 @@ func (s *MaintenanceStore) ListMaintenanceRuns(ctx context.Context, operationKey
 // "failed" and resets stalled "running" migrations back to "pending" so they
 // can be retried. Called at server startup to clean up operations interrupted
 // by a restart.
+//
+// A run whose Result is a JSON object keeps its keys (what the run recorded
+// before the restart, for example a checkpoint) and gains "error" (the
+// abort text) and "aborted": true; any other Result is replaced by the
+// abort text alone. Each run is updated on its own, only while it is still
+// running, and the returned run count is the number of those updates that
+// matched.
 func (s *MaintenanceStore) AbortRunningMaintenanceOps(ctx context.Context) (int64, int64, error) {
 	now := time.Now()
 
-	runs, err := s.client.MaintenanceOperationRun.Update().
+	running, err := s.client.MaintenanceOperationRun.Query().
 		Where(maintenanceoperationrun.StatusEQ(store.MaintenanceStatusRunning)).
-		SetStatus(store.MaintenanceStatusFailed).
-		SetCompletedAt(now).
-		SetResult(abortResult).
-		Save(ctx)
+		Select(maintenanceoperationrun.FieldID, maintenanceoperationrun.FieldResult).
+		All(ctx)
 	if err != nil {
 		return 0, 0, err
+	}
+	var runs int64
+	for _, r := range running {
+		n, err := s.client.MaintenanceOperationRun.Update().
+			Where(
+				maintenanceoperationrun.IDEQ(r.ID),
+				maintenanceoperationrun.StatusEQ(store.MaintenanceStatusRunning),
+			).
+			SetStatus(store.MaintenanceStatusFailed).
+			SetCompletedAt(now).
+			SetResult(abortedRunResult(r.Result)).
+			Save(ctx)
+		if err != nil {
+			return runs, 0, err
+		}
+		runs += int64(n)
 	}
 
 	migrations, err := s.client.MaintenanceOperation.Update().
@@ -464,8 +493,25 @@ func (s *MaintenanceStore) AbortRunningMaintenanceOps(ctx context.Context) (int6
 		SetResult(abortResult).
 		Save(ctx)
 	if err != nil {
-		return int64(runs), 0, err
+		return runs, 0, err
 	}
 
-	return int64(runs), int64(migrations), nil
+	return runs, int64(migrations), nil
+}
+
+// abortedRunResult is the Result of a run aborted by a restart, given the
+// Result it had: a JSON object keeps its keys, with "error" set to the
+// abort text and "aborted" to true; anything else becomes abortResult.
+func abortedRunResult(prev string) string {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(prev), &obj); err != nil || obj == nil {
+		return abortResult
+	}
+	obj["error"] = abortTextJSON
+	obj["aborted"] = json.RawMessage("true")
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return abortResult
+	}
+	return string(out)
 }

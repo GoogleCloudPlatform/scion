@@ -18,6 +18,7 @@ package entadapter
 
 import (
 	"context"
+	"encoding/json"
 	"sync"
 	"testing"
 	"time"
@@ -284,4 +285,125 @@ func TestAbortRunningMaintenanceOps(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, store.MaintenanceStatusPending, gotMig.Status)
 	assert.Nil(t, gotMig.StartedAt)
+}
+
+// createRunWithResult stores a run of pull-images with the given status and
+// Result, and returns its ID.
+func createRunWithResult(t *testing.T, s *MaintenanceStore, status, result string) string {
+	t.Helper()
+	run := &store.MaintenanceOperationRun{
+		ID:           uuid.NewString(),
+		OperationKey: "pull-images",
+		Status:       status,
+		StartedAt:    time.Now().UTC().Truncate(time.Second),
+		Result:       result,
+	}
+	if status != store.MaintenanceStatusRunning {
+		done := run.StartedAt.Add(time.Minute)
+		run.CompletedAt = &done
+	}
+	require.NoError(t, s.CreateMaintenanceRun(context.Background(), run))
+	return run.ID
+}
+
+// A running run whose Result is a JSON object keeps every key it recorded
+// (values byte for byte) and gains the abort error and "aborted": true.
+// Any other Result is replaced by the abort text, as before, and a run that
+// is not running is left alone. Runs on SQLite, and on Postgres under
+// -tags integration.
+func TestAbortRunningMaintenanceOps_KeepsObjectResultKeys(t *testing.T) {
+	s := newTestMaintenanceStore(t)
+	ctx := context.Background()
+	require.NoError(t, s.SeedMaintenanceOperations(ctx))
+
+	const recorded = `{"rerunOf":"run-1","override":{"actorId":"u-1","findings":[{"code":"c"}]},"big":12345678901234567890,"error":"old"}`
+	objectRun := createRunWithResult(t, s, store.MaintenanceStatusRunning, recorded)
+	replaced := map[string]string{}
+	for _, prev := range []string{"", "null", `["a"]`, `"text"`, "12", "{not json"} {
+		replaced[createRunWithResult(t, s, store.MaintenanceStatusRunning, prev)] = prev
+	}
+	const doneResult = `{"commit":"abc"}`
+	completedRun := createRunWithResult(t, s, store.MaintenanceStatusCompleted, doneResult)
+	completedBefore, err := s.GetMaintenanceRun(ctx, completedRun)
+	require.NoError(t, err)
+
+	runs, _, err := s.AbortRunningMaintenanceOps(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1+len(replaced)), runs, "the count is the number of running runs updated")
+
+	got, err := s.GetMaintenanceRun(ctx, objectRun)
+	require.NoError(t, err)
+	assert.Equal(t, store.MaintenanceStatusFailed, got.Status)
+	require.NotNil(t, got.CompletedAt)
+	var obj map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal([]byte(got.Result), &obj), got.Result)
+	var want map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal([]byte(recorded), &want))
+	for k, v := range want {
+		if k == "error" {
+			continue
+		}
+		assert.JSONEq(t, string(v), string(obj[k]), "key %q must be kept", k)
+	}
+	assert.Equal(t, "12345678901234567890", string(obj["big"]), "values are kept byte for byte")
+	assert.Equal(t, `"`+abortText+`"`, string(obj["error"]))
+	assert.Equal(t, "true", string(obj["aborted"]))
+	assert.Len(t, obj, len(want)+1, "only error and aborted are added")
+
+	for id, prev := range replaced {
+		got, err := s.GetMaintenanceRun(ctx, id)
+		require.NoError(t, err)
+		assert.Equal(t, store.MaintenanceStatusFailed, got.Status, "Result %q", prev)
+		assert.Equal(t, abortResult, got.Result, "a Result %q that is not a JSON object is replaced", prev)
+	}
+
+	completedAfter, err := s.GetMaintenanceRun(ctx, completedRun)
+	require.NoError(t, err)
+	assert.Equal(t, store.MaintenanceStatusCompleted, completedAfter.Status)
+	assert.Equal(t, doneResult, completedAfter.Result)
+	require.NotNil(t, completedAfter.CompletedAt)
+	assert.True(t, completedBefore.CompletedAt.Equal(*completedAfter.CompletedAt))
+}
+
+// A run that finishes between the abort's read and its update is left as it
+// finished: each update matches only a run that is still running, and the
+// count includes only the updates that matched.
+func TestAbortRunningMaintenanceOps_SkipsRunFinishedMeanwhile(t *testing.T) {
+	s := newTestMaintenanceStore(t)
+	ctx := context.Background()
+	require.NoError(t, s.SeedMaintenanceOperations(ctx))
+	racing := createRunWithResult(t, s, store.MaintenanceStatusRunning, `{"commit":"abc"}`)
+
+	// Before the abort's first update runs, the run completes (as if its
+	// executor wrote its final result at that moment).
+	const finalResult = `{"commit":"abc","installed":true}`
+	var once sync.Once
+	s.client.MaintenanceOperationRun.Use(func(next ent.Mutator) ent.Mutator {
+		return ent.MutateFunc(func(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+			if m.Op().Is(ent.OpUpdate) {
+				var finishErr error
+				once.Do(func() {
+					done := time.Now()
+					finishErr = s.client.MaintenanceOperationRun.UpdateOneID(uuid.MustParse(racing)).
+						SetStatus(store.MaintenanceStatusCompleted).
+						SetCompletedAt(done).
+						SetResult(finalResult).
+						Exec(ctx)
+				})
+				if finishErr != nil {
+					return nil, finishErr
+				}
+			}
+			return next.Mutate(ctx, m)
+		})
+	})
+
+	runs, _, err := s.AbortRunningMaintenanceOps(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), runs)
+
+	got, err := s.GetMaintenanceRun(ctx, racing)
+	require.NoError(t, err)
+	assert.Equal(t, store.MaintenanceStatusCompleted, got.Status)
+	assert.Equal(t, finalResult, got.Result)
 }
