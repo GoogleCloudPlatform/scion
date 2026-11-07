@@ -500,6 +500,20 @@ tree_has_step_targets() {
   # shellcheck disable=SC2016 # a literal line of targets.sh, not an expansion
   grep -qF 'for _id in "${ALL_STEP_IDS[@]}"' "${root}/image-build/scripts/lib/targets.sh" 2>/dev/null
 }
+# tree_stamps_version <root> <version>: the tree's own hack/version.sh, run
+# in the tree, stamps exactly <version>. hack/version.sh and build-images.sh
+# derive VERSION by the same rule (from v0.3.0-preview.4 on, and with the
+# same release tag forms in later trees), so a tag that rule does not accept
+# would give images whose binaries report "dev". The driver fails instead.
+tree_stamps_version() {
+  local root="${1:?}" want="${2:?}" ldflags
+  [ -f "${root}/hack/version.sh" ] || return 1
+  ldflags="$(cd "${root}" && bash ./hack/version.sh scionpkg)" || return 1
+  case " ${ldflags} " in
+    *" -X scionpkg.Version=${want} "*) return 0 ;;
+  esac
+  return 1
+}
 
 case "${P_TARGET}" in
   core-base|thick-prep|scion-base|harnesses|hub|omni|common|all|thick) ;;
@@ -514,6 +528,9 @@ VERSION_STAMPED="false"
 if [ "${MODE}" = "tag" ]; then
   if tree_is_stamped "${SRC_DIR}"; then
     VERSION_STAMPED="true"
+    if ! tree_stamps_version "${SRC_DIR}" "${VERSION}"; then
+      die "the tree at ${VERSION} would not stamp '${VERSION}' into its binaries: its hack/version.sh does not accept it as a release tag (or is missing), so the images would report 'dev'"
+    fi
   else
     warn "${VERSION} predates version stamping (needs v0.3.0-preview.4 or later): the images are tagged :${VERSION}, but the scion and sciontool binaries inside report 'dev'"
   fi
