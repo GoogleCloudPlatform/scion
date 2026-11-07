@@ -2799,6 +2799,58 @@ func TestGetPluginHubCreds_TransportKeys(t *testing.T) {
 	assert.Equal(t, creds["transport_audience"], audience)
 }
 
+func TestHubKeys_CoverEveryHubCredential(t *testing.T) {
+	srv, _ := testServer(t)
+	srv.transportMode = "iap"
+	srv.transportAudience = "/projects/1/global/backendServices/2"
+	srv.dbDriver = "postgres"
+	srv.databaseDSN = "host=db.example.internal dbname=hub"
+
+	creds := srv.getPluginHubCreds(context.Background(), "discord")
+	require.Contains(t, creds, "transport_mode")
+	require.Contains(t, creds, "transport_audience")
+	for key := range creds {
+		assert.True(t, hubKeys[key], "hub credential %s must be listed in hubKeys", key)
+	}
+}
+
+func TestFilterSensitiveConfig_OmitsTransportKeys(t *testing.T) {
+	filtered := filterSensitiveConfig("discord", map[string]string{
+		"guild_id":           "g1",
+		"transport_mode":     "iap",
+		"transport_audience": "/projects/1/global/backendServices/2",
+	})
+	assert.NotContains(t, filtered, "transport_mode")
+	assert.NotContains(t, filtered, "transport_audience")
+	assert.Equal(t, map[string]string{"guild_id": "g1"}, filtered)
+}
+
+func TestResolveIntegrationMergedConfig_TransportKeysComeFromHub(t *testing.T) {
+	configFile := filepath.Join(t.TempDir(), "discord.yaml")
+	require.NoError(t, os.WriteFile(configFile, []byte("guild_id: from-file\n"), 0o600))
+
+	mgr := newMockIntegrationManager()
+	mgr.plugins["discord"] = map[string]string{
+		"config_file":        configFile,
+		"transport_mode":     "stale-mode",
+		"transport_audience": "stale-audience",
+	}
+	srv, _ := testServer(t)
+
+	// No hub transport: the cached values are not carried over.
+	merged := srv.resolveIntegrationMergedConfig(context.Background(), mgr, "discord")
+	assert.Equal(t, "from-file", merged["guild_id"])
+	assert.NotContains(t, merged, "transport_mode")
+	assert.NotContains(t, merged, "transport_audience")
+
+	// Hub transport set: the live hub values win over the cached ones.
+	srv.transportMode = "iap"
+	srv.transportAudience = "/projects/1/global/backendServices/2"
+	merged = srv.resolveIntegrationMergedConfig(context.Background(), mgr, "discord")
+	assert.Equal(t, "iap", merged["transport_mode"])
+	assert.Equal(t, "/projects/1/global/backendServices/2", merged["transport_audience"])
+}
+
 // replayFailingBus is an EventBus whose Subscribe fails.
 type replayFailingBus struct{}
 

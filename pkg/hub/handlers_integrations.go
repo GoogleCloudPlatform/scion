@@ -49,13 +49,15 @@ import (
 // and must be carried over during reconfigure (they are not in config files).
 var pluginBrokerNS = uuid.MustParse("5c104390-a1d0-5e9a-9b1e-5c104390a1d0")
 
-// hubKeys lists the hub wiring keys that getPluginHubCreds supplies. It has
-// two uses: resolveIntegrationMergedConfig keeps these keys out of the
-// cached-config carry-over (the live hub values override them), and
+// hubKeys lists every hub wiring key that getPluginHubCreds supplies,
+// including the transport settings (transport_mode, transport_audience).
+// It has two uses: resolveIntegrationMergedConfig keeps these keys out of
+// the cached-config carry-over (the live hub values override them), and
 // filterSensitiveConfig omits them from integration settings responses.
 var hubKeys = map[string]bool{
 	"hub_url": true, "broker_id": true, "hmac_key": true,
 	"plugin_name": true, "project_slug_map": true,
+	"transport_mode": true, "transport_audience": true,
 	"database_driver": true, "database_url": true,
 }
 
