@@ -2511,14 +2511,14 @@ const clearRuntimeTargetAttempts = 5
 // conditional on the stored applied config and state_version being
 // unchanged; if it still misses, the row is re-read and the clear retried, up
 // to clearRuntimeTargetAttempts times, after which an error is returned.
-func (s *AgentStore) ClearAgentRuntimeTarget(ctx context.Context, id string) (bool, int64, error) {
+func (s *AgentStore) ClearAgentRuntimeTarget(ctx context.Context, id string, recordPending bool) (bool, int64, error) {
 	uid, err := parseUUID(id)
 	if err != nil {
 		return false, 0, err
 	}
 	useLock := s.usesRowLocks()
 	for i := 0; i < clearRuntimeTargetAttempts; i++ {
-		res, err := s.clearRuntimeTargetOnce(ctx, uid, id, useLock)
+		res, err := s.clearRuntimeTargetOnce(ctx, uid, id, useLock, recordPending)
 		if err != nil {
 			return false, 0, err
 		}
@@ -2533,6 +2533,20 @@ func (s *AgentStore) ClearAgentRuntimeTarget(ctx context.Context, id string) (bo
 // removes.
 var runtimeTargetKeys = []string{"runtimeTarget", "runtimeTargetCandidate"}
 
+// runtimeTargetPendingKey is the applied-config JSON key of
+// AgentAppliedConfig.RuntimeTargetPending.
+const runtimeTargetPendingKey = "runtimeTargetPending"
+
+// rawJSONString returns the string value stored under key in raw, or "" when
+// the key is absent or not a JSON string.
+func rawJSONString(raw map[string]json.RawMessage, key string) string {
+	var v string
+	if msg, ok := raw[key]; ok {
+		_ = json.Unmarshal(msg, &v)
+	}
+	return v
+}
+
 // clearRuntimeTargetResult is the outcome of one ClearAgentRuntimeTarget
 // attempt. done is false only when the conditional write matched no row
 // because the agent changed after it was read.
@@ -2543,7 +2557,7 @@ type clearRuntimeTargetResult struct {
 }
 
 // clearRuntimeTargetOnce is one ClearAgentRuntimeTarget attempt.
-func (s *AgentStore) clearRuntimeTargetOnce(ctx context.Context, uid uuid.UUID, id string, useLock bool) (clearRuntimeTargetResult, error) {
+func (s *AgentStore) clearRuntimeTargetOnce(ctx context.Context, uid uuid.UUID, id string, useLock, recordPending bool) (clearRuntimeTargetResult, error) {
 	tx, err := s.client.Tx(ctx)
 	if err != nil {
 		return clearRuntimeTargetResult{}, err
@@ -2571,6 +2585,31 @@ func (s *AgentStore) clearRuntimeTargetOnce(ctx context.Context, uid uuid.UUID, 
 	if err := json.Unmarshal([]byte(row.AppliedConfig), &raw); err != nil {
 		return clearRuntimeTargetResult{}, fmt.Errorf("clear runtime target for agent %s: %w", id, err)
 	}
+	if raw == nil { // the stored value was the JSON literal null
+		return clearRuntimeTargetResult{done: true}, nil
+	}
+	// With recordPending, the pending target is the target being removed,
+	// else the pending target an earlier clear left, else
+	// store.RuntimeTargetPendingDefault.
+	pendingChanged := false
+	if recordPending {
+		previousPending := rawJSONString(raw, runtimeTargetPendingKey)
+		pending := rawJSONString(raw, "runtimeTarget")
+		if pending == "" {
+			pending = previousPending
+		}
+		if pending == "" {
+			pending = store.RuntimeTargetPendingDefault
+		}
+		if pending != previousPending {
+			enc, err := json.Marshal(pending)
+			if err != nil {
+				return clearRuntimeTargetResult{}, err
+			}
+			raw[runtimeTargetPendingKey] = enc
+			pendingChanged = true
+		}
+	}
 	found := false
 	for _, k := range runtimeTargetKeys {
 		if _, ok := raw[k]; ok {
@@ -2578,7 +2617,7 @@ func (s *AgentStore) clearRuntimeTargetOnce(ctx context.Context, uid uuid.UUID, 
 			found = true
 		}
 	}
-	if !found {
+	if !found && !pendingChanged {
 		return clearRuntimeTargetResult{done: true}, nil
 	}
 	cleared, err := json.Marshal(raw)
@@ -2588,7 +2627,13 @@ func (s *AgentStore) clearRuntimeTargetOnce(ctx context.Context, uid uuid.UUID, 
 	if clearRuntimeTargetHook != nil {
 		clearRuntimeTargetHook(ctx, tx, uid)
 	}
-	newVersion := row.StateVersion + 1
+	// Only removing a target bumps state_version; recording the pending
+	// target alone does not, so a start of an agent with no target yet
+	// causes no version conflict.
+	newVersion := row.StateVersion
+	if found {
+		newVersion++
+	}
 	n, err := tx.Agent.Update().
 		Where(
 			agent.IDEQ(uid),
@@ -2608,7 +2653,7 @@ func (s *AgentStore) clearRuntimeTargetOnce(ctx context.Context, uid uuid.UUID, 
 	if err := tx.Commit(); err != nil {
 		return clearRuntimeTargetResult{}, err
 	}
-	return clearRuntimeTargetResult{done: true, cleared: true, newVersion: newVersion}, nil
+	return clearRuntimeTargetResult{done: true, cleared: found, newVersion: newVersion}, nil
 }
 
 // appliedConfigUnchanged matches a row whose applied_config is still the
@@ -2626,7 +2671,8 @@ func appliedConfigUnchanged(read string) predicate.Agent {
 // The read and the conditional write run in one transaction, with the row
 // locked where the dialect supports it. The write is conditional on
 // state_version and the stored applied config being unchanged, and edits
-// only the two target keys in the raw JSON, so concurrent status writes
+// only the target keys (and drops the pending target when a target is
+// recorded) in the raw JSON, so concurrent status writes
 // (which do not touch applied_config) are never undone.
 func (s *AgentStore) SetAgentRuntimeTarget(ctx context.Context, id string, expectedVersion int64, target, candidate string) (bool, error) {
 	uid, err := parseUUID(id)
@@ -2673,6 +2719,10 @@ func (s *AgentStore) SetAgentRuntimeTarget(ctx context.Context, id string, expec
 			return false, err
 		}
 		raw[key] = enc
+	}
+	if target != "" {
+		// A recorded target supersedes the pending one (ptone/scion#7251).
+		delete(raw, runtimeTargetPendingKey)
 	}
 	updated, err := json.Marshal(raw)
 	if err != nil {

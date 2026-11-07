@@ -101,8 +101,67 @@ func TestDispatch_StartAndRestartForgetRuntimeTarget(t *testing.T) {
 			assert.Equal(t, "example/image:1", cfg.Image, "other fields kept")
 			assert.Equal(t, "remote", cfg.Profile, "other fields kept")
 			assert.Empty(t, a.AppliedConfig.RuntimeTarget, "in-memory target cleared")
+			assert.Empty(t, cfg.RuntimeTargetPending, "no pending target on a broker that is not flat")
+			assert.Empty(t, a.AppliedConfig.RuntimeTargetPending, "in memory either")
 		})
 	}
+}
+
+// On a flat Runtime Broker, forgetRuntimeTarget keeps the cleared target
+// (else RuntimeTargetPendingDefault) as the pending target, in the store
+// and in memory (ptone/scion#7251). Only removing a target bumps
+// state_version, which the dispatched agent adopts.
+func TestForgetRuntimeTarget_FlatBrokerRecordsPending(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		target      string
+		wantPending string
+		wantBump    bool
+	}{
+		{"previous target", "docker", "docker", true},
+		{"no previous target", "", store.RuntimeTargetPendingDefault, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
+			a := f.pinnedAgentWith(t, "forget", string(state.PhaseRunning), func(a *store.Agent) {
+				a.AppliedConfig.RuntimeTarget = tc.target
+			})
+			before := a.StateVersion
+			d := NewHTTPAgentDispatcherWithClient(f.s, &mockRuntimeBrokerClient{}, false, slog.Default())
+
+			d.forgetRuntimeTarget(ctx, a)
+
+			stored := storedRuntimeTarget(t, f.s, a.ID)
+			assert.Empty(t, stored.RuntimeTarget)
+			assert.Equal(t, tc.wantPending, stored.RuntimeTargetPending)
+			assert.Empty(t, a.AppliedConfig.RuntimeTarget)
+			assert.Equal(t, tc.wantPending, a.AppliedConfig.RuntimeTargetPending, "memory mirrors the store")
+			got, err := f.s.GetAgent(ctx, a.ID)
+			require.NoError(t, err)
+			want := before
+			if tc.wantBump {
+				want++
+			}
+			assert.Equal(t, want, got.StateVersion)
+			assert.Equal(t, got.StateVersion, a.StateVersion, "the dispatched agent holds the current version")
+		})
+	}
+}
+
+// An in-memory agent without an applied config records no pending target,
+// in memory or in the store, even on a flat Runtime Broker.
+func TestForgetRuntimeTarget_NilAppliedConfigRecordsNoPending(t *testing.T) {
+	ctx := context.Background()
+	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
+	a := f.pinnedAgent(t, "forget-nil", string(state.PhaseRunning))
+	a.AppliedConfig = nil
+	d := NewHTTPAgentDispatcherWithClient(f.s, &mockRuntimeBrokerClient{}, false, slog.Default())
+
+	d.forgetRuntimeTarget(ctx, a)
+
+	assert.Nil(t, a.AppliedConfig, "memory is not given an applied config")
+	assert.Empty(t, storedRuntimeTarget(t, f.s, a.ID).RuntimeTargetPending)
 }
 
 // nilStartResponseClient accepts a start with no parseable response body,
@@ -171,6 +230,7 @@ func TestDispatch_FailedStartKeepsRuntimeTarget(t *testing.T) {
 	client.returnErr = errors.New("broker unavailable")
 	require.Error(t, d.DispatchAgentStart(context.Background(), a, "", false))
 	assert.Equal(t, k8sTargetB, storedRuntimeTarget(t, s, a.ID).RuntimeTarget)
+	assert.Empty(t, storedRuntimeTarget(t, s, a.ID).RuntimeTargetPending, "a failed start records no pending target")
 }
 
 func brokerNotFoundErr(code string) error {

@@ -454,7 +454,7 @@ func TestHeartbeat_StaleReportAfterClearNotRecorded(t *testing.T) {
 	f := newReconcileFixture(t)
 	a := f.addAgent("moved", "running", "working", withRuntimeTarget(k8sTargetB))
 
-	cleared, _, err := f.s.ClearAgentRuntimeTarget(ctx, a.ID)
+	cleared, _, err := f.s.ClearAgentRuntimeTarget(ctx, a.ID, false)
 	require.NoError(t, err)
 	require.True(t, cleared)
 
@@ -503,7 +503,7 @@ func TestHeartbeat_TargetWriteKeepsConcurrentStatus(t *testing.T) {
 			f := newReconcileFixture(t)
 			a := f.addAgent("starting", "suspended", "", withRuntimeTarget(k8sTargetB))
 			clearTarget := func() {
-				cleared, _, err := f.s.ClearAgentRuntimeTarget(ctx, a.ID)
+				cleared, _, err := f.s.ClearAgentRuntimeTarget(ctx, a.ID, false)
 				require.NoError(t, err)
 				require.True(t, cleared)
 			}
@@ -860,4 +860,243 @@ func TestHeartbeat_StartingKeepsCreateLaunchActive(t *testing.T) {
 	assert.Equal(t, string(state.PhaseRunning), gotRunning.Phase)
 	assert.Equal(t, store.LaunchStateEnded, gotRunning.LaunchState, "a running heartbeat ends the launch")
 	assert.Equal(t, store.LaunchEndReasonRunningObserved, gotRunning.LaunchEndReason)
+}
+
+func withPendingTarget(pending string) func(a *store.Agent) {
+	return func(a *store.Agent) {
+		a.AppliedConfig = &store.AgentAppliedConfig{RuntimeTargetPending: pending}
+	}
+}
+
+// flatPendingFixture is a flat Runtime Broker (one runtime target, listed as
+// "docker" in its heartbeats) with a running agent that has no recorded
+// target, made online and fresh by one heartbeat.
+type flatPendingFixture struct {
+	t *testing.T
+	f *flatHubFixture
+	a *store.Agent
+}
+
+func newFlatPendingFixture(t *testing.T, mutate func(a *store.Agent)) *flatPendingFixture {
+	t.Helper()
+	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
+	grantDevUserRuntimeBrokerAccess(t, f.s)
+	a := f.pinnedAgentWith(t, "pending", string(state.PhaseRunning), func(a *store.Agent) {
+		a.Activity = "working"
+		a.LastSeen = time.Now().Add(-time.Hour)
+		if mutate != nil {
+			mutate(a)
+		}
+	})
+	p := &flatPendingFixture{t: t, f: f, a: a}
+	p.send(completeInventory())
+	return p
+}
+
+// send sends an online heartbeat with inv and the given agent reports.
+func (p *flatPendingFixture) send(inv *brokerInventory, agents ...brokerAgentHeartbeat) {
+	p.t.Helper()
+	sendFlatHeartbeat(p.t, p.f, p.f.flat.ID, brokerHeartbeatRequest{
+		Status:    store.BrokerStatusOnline,
+		Inventory: inv,
+		Projects:  []brokerProjectHeartbeat{{ProjectID: p.f.project.ID, Agents: agents}},
+	})
+}
+
+func (p *flatPendingFixture) hasClock() bool {
+	tr := &p.f.srv.missingAgents
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	_, ok := tr.since[p.f.flat.ID][p.a.ID]
+	return ok
+}
+
+func (p *flatPendingFixture) expireClock() {
+	p.t.Helper()
+	tr := &p.f.srv.missingAgents
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	require.Contains(p.t, tr.since[p.f.flat.ID], p.a.ID, "agent has no missing clock")
+	tr.since[p.f.flat.ID][p.a.ID] = time.Now().Add(-2 * p.f.srv.missingAgentGrace())
+}
+
+func (p *flatPendingFixture) get() *store.Agent {
+	p.t.Helper()
+	got, err := p.f.s.GetAgent(context.Background(), p.a.ID)
+	require.NoError(p.t, err)
+	return got
+}
+
+// TestReconcileMissing_FlatBrokerContainerGoneRightAfterStart
+// (ptone/scion#7251): on a flat Runtime Broker a start is accepted (the
+// recorded target is cleared and the pending target recorded), and the
+// container disappears before any heartbeat lists the agent. Complete
+// inventories of the broker's one target omit the agent for longer than the
+// grace period, so the agent is reconciled against its pending target.
+func TestReconcileMissing_FlatBrokerContainerGoneRightAfterStart(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		target string // recorded before the start; "" means none
+	}{
+		{"previous target", "docker"},
+		{"no previous target", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newFlatPendingFixture(t, func(a *store.Agent) { a.AppliedConfig.RuntimeTarget = tc.target })
+			_, _, err := p.f.s.ClearAgentRuntimeTarget(context.Background(), p.a.ID, true) // the accepted start
+			require.NoError(t, err)
+			cfg := p.get().AppliedConfig
+			require.Empty(t, cfg.RuntimeTarget)
+			require.NotEmpty(t, cfg.RuntimeTargetPending)
+
+			p.send(completeInventory())
+			require.True(t, p.hasClock(), "the pending target starts the clock")
+			assert.Equal(t, string(state.PhaseRunning), p.get().Phase)
+			p.expireClock()
+			p.send(completeInventory())
+			got := p.get()
+			assert.Equal(t, string(state.PhaseError), got.Phase)
+			assert.Equal(t, string(state.ExitReasonContainerMissing), got.ExitReason)
+		})
+	}
+}
+
+// TestReconcileMissing_FlatBrokerPendingGuards: an agent with only a pending
+// target on a flat Runtime Broker is not concluded when any guard fails.
+func TestReconcileMissing_FlatBrokerPendingGuards(t *testing.T) {
+	pending := func(p string) func(a *store.Agent) {
+		return func(a *store.Agent) { a.AppliedConfig.RuntimeTargetPending = p }
+	}
+	// blocked starts the clock with a complete inventory, expires it, runs
+	// second and asserts the agent is still running.
+	blocked := func(t *testing.T, p *flatPendingFixture, second func()) {
+		t.Helper()
+		p.send(completeInventory())
+		require.True(t, p.hasClock())
+		p.expireClock()
+		second()
+		got := p.get()
+		assert.Equal(t, string(state.PhaseRunning), got.Phase)
+		assert.Empty(t, got.ExitReason)
+	}
+
+	t.Run("listing failed", func(t *testing.T) {
+		p := newFlatPendingFixture(t, pending(store.RuntimeTargetPendingDefault))
+		blocked(t, p, func() {
+			p.send(&brokerInventory{Targets: []brokerInventoryTarget{{ID: "docker", Complete: false}}})
+		})
+		assert.False(t, p.hasClock())
+	})
+
+	t.Run("no target listed", func(t *testing.T) {
+		p := newFlatPendingFixture(t, pending(store.RuntimeTargetPendingDefault))
+		blocked(t, p, func() { p.send(&brokerInventory{}) })
+	})
+
+	t.Run("more than one target listed", func(t *testing.T) {
+		p := newFlatPendingFixture(t, pending(store.RuntimeTargetPendingDefault))
+		blocked(t, p, func() { p.send(completeInventory("docker", k8sTargetA)) })
+		assert.False(t, p.hasClock(), "a heartbeat that is not flat-shaped proves nothing")
+	})
+
+	t.Run("pending target differs from the listed target", func(t *testing.T) {
+		p := newFlatPendingFixture(t, pending(k8sTargetA))
+		p.send(completeInventory())
+		assert.False(t, p.hasClock())
+		p.send(completeInventory())
+		assert.Equal(t, string(state.PhaseRunning), p.get().Phase)
+	})
+
+	t.Run("lifecycle operation in flight", func(t *testing.T) {
+		p := newFlatPendingFixture(t, pending(store.RuntimeTargetPendingDefault))
+		blocked(t, p, func() {
+			end := p.f.srv.beginLifecycleOp(p.a.ID)
+			defer end()
+			p.send(completeInventory())
+		})
+	})
+
+	t.Run("recent last_seen", func(t *testing.T) {
+		p := newFlatPendingFixture(t, func(a *store.Agent) {
+			a.AppliedConfig.RuntimeTargetPending = store.RuntimeTargetPendingDefault
+			a.LastSeen = time.Now()
+		})
+		blocked(t, p, func() { p.send(completeInventory()) })
+	})
+
+	t.Run("agent listed", func(t *testing.T) {
+		p := newFlatPendingFixture(t, pending(store.RuntimeTargetPendingDefault))
+		blocked(t, p, func() { p.send(completeInventory(), flatAgentHeartbeat(p.a.Slug)) })
+		assert.False(t, p.hasClock(), "a listed agent is present")
+	})
+}
+
+// TestReconcileMissing_NonFlatBrokerIgnoresPending: on a Runtime Broker that
+// is not flat, the heartbeat lists only the targets the broker has
+// registered, so an agent may run on a runtime the inventory does not list
+// at all while every listed target is complete. Its pending target is not
+// used, so it is never concluded.
+func TestReconcileMissing_NonFlatBrokerIgnoresPending(t *testing.T) {
+	for _, pending := range []string{store.RuntimeTargetPendingDefault, "docker"} {
+		t.Run(pending, func(t *testing.T) {
+			f := newReconcileFixture(t)
+			// The agent runs on a Kubernetes target the broker has not
+			// registered yet, so no heartbeat lists it.
+			a := f.addAgent("unlisted-runtime", "running", "working", withPendingTarget(pending))
+			for i := 0; i < 3; i++ {
+				f.heartbeat(completeInventory("docker"))
+				assert.False(t, f.hasClock(a.ID), "no clock without a recorded target")
+			}
+			f.assertUntouched(a.ID, "running")
+		})
+	}
+}
+
+// TestHeartbeat_RecordedTargetDropsPending: once two heartbeats have
+// recorded a target, the pending target is gone and the recorded target is
+// what the reconcile uses.
+func TestHeartbeat_RecordedTargetDropsPending(t *testing.T) {
+	f := newReconcileFixture(t)
+	a := f.addAgent("listed", "running", "working", withPendingTarget(k8sTargetB))
+	f.heartbeat(completeInventory(), a.Slug)
+	assert.Equal(t, k8sTargetB, f.get(a.ID).AppliedConfig.RuntimeTargetPending, "a candidate alone keeps the pending target")
+	f.heartbeat(completeInventory(), a.Slug)
+	got := f.get(a.ID)
+	assert.Equal(t, "docker", got.AppliedConfig.RuntimeTarget)
+	assert.Empty(t, got.AppliedConfig.RuntimeTargetPending)
+}
+
+func TestReconcileTarget(t *testing.T) {
+	one := &brokerHeartbeatRequest{Inventory: completeInventory("docker")}
+	two := &brokerHeartbeatRequest{Inventory: completeInventory("docker", k8sTargetA)}
+	failed := &brokerHeartbeatRequest{Inventory: &brokerInventory{Targets: []brokerInventoryTarget{{ID: "docker", Complete: false}}}}
+	cfg := func(target, pending string) *store.Agent {
+		return &store.Agent{AppliedConfig: &store.AgentAppliedConfig{RuntimeTarget: target, RuntimeTargetPending: pending}}
+	}
+	def := store.RuntimeTargetPendingDefault
+	for _, tc := range []struct {
+		name string
+		a    *store.Agent
+		hb   *brokerHeartbeatRequest
+		flat bool
+		want string
+	}{
+		{"recorded target wins", cfg(k8sTargetA, def), one, true, k8sTargetA},
+		{"recorded target on a non-flat broker", cfg(k8sTargetA, ""), two, false, k8sTargetA},
+		{"flat: default maps to the sole target", cfg("", def), one, true, "docker"},
+		{"flat: concrete pending equal to the sole target", cfg("", "docker"), one, true, "docker"},
+		{"flat: concrete pending differs from the sole target", cfg("", k8sTargetA), one, true, ""},
+		{"flat: two targets listed", cfg("", def), two, true, ""},
+		{"flat: sole target incomplete", cfg("", def), failed, true, ""},
+		{"flat: no inventory", cfg("", def), &brokerHeartbeatRequest{}, true, ""},
+		{"flat: empty inventory", cfg("", def), &brokerHeartbeatRequest{Inventory: &brokerInventory{}}, true, ""},
+		{"non-flat: pending not used", cfg("", def), one, false, ""},
+		{"non-flat: concrete pending not used", cfg("", "docker"), one, false, ""},
+		{"neither", cfg("", ""), one, true, ""},
+		{"no applied config", &store.Agent{}, one, true, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, reconcileTarget(tc.a, tc.hb, tc.flat))
+		})
+	}
 }

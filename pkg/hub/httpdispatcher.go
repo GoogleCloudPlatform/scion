@@ -1690,15 +1690,34 @@ func brokerEffectiveConfigOf(info *RemoteAgentInfo, brokerID string, log *slog.L
 // the caller's own later UpdateAgent still succeeds, while any other holder
 // of a pre-clear read gets a version conflict instead of writing the old
 // target back.
+//
+// On a flat Runtime Broker, which serves exactly one runtime target, the
+// removed target (else an earlier pending target, else
+// store.RuntimeTargetPendingDefault) is kept as the pending target, so an
+// agent whose container is gone before any heartbeat lists it can still be
+// reconciled (ptone/scion#7251, see reconcileTarget). Another broker may
+// place the agent on any of its targets, including one its heartbeats do not
+// list yet, so no pending target is recorded for it. Nothing is recorded
+// when the in-memory agent has no applied config, and the in-memory agent
+// mirrors the store, so the caller's own later UpdateAgent keeps the pending
+// target.
 func (d *HTTPAgentDispatcher) forgetRuntimeTarget(ctx context.Context, agent *store.Agent) {
-	if agent.AppliedConfig != nil {
-		agent.AppliedConfig.RuntimeTarget = ""
-		agent.AppliedConfig.RuntimeTargetCandidate = ""
+	recordPending := agent.AppliedConfig != nil && d.brokerIsFlat(ctx, agent.RuntimeBrokerID)
+	if cfg := agent.AppliedConfig; cfg != nil {
+		if recordPending {
+			if cfg.RuntimeTarget != "" {
+				cfg.RuntimeTargetPending = cfg.RuntimeTarget
+			} else if cfg.RuntimeTargetPending == "" {
+				cfg.RuntimeTargetPending = store.RuntimeTargetPendingDefault
+			}
+		}
+		cfg.RuntimeTarget = ""
+		cfg.RuntimeTargetCandidate = ""
 	}
 	if d.store == nil || agent.ID == "" {
 		return
 	}
-	cleared, newVersion, err := d.store.ClearAgentRuntimeTarget(ctx, agent.ID)
+	cleared, newVersion, err := d.store.ClearAgentRuntimeTarget(ctx, agent.ID, recordPending)
 	if err != nil {
 		d.log.Warn("Failed to clear the recorded runtime target after dispatch",
 			"agent_id", agent.ID, "error", err)
@@ -1707,6 +1726,17 @@ func (d *HTTPAgentDispatcher) forgetRuntimeTarget(ctx context.Context, agent *st
 	if cleared && agent.StateVersion == newVersion-1 {
 		agent.StateVersion = newVersion
 	}
+}
+
+// brokerIsFlat reports whether the Runtime Broker brokerID is flat. A broker
+// that cannot be read is treated as not flat, which records no pending
+// target.
+func (d *HTTPAgentDispatcher) brokerIsFlat(ctx context.Context, brokerID string) bool {
+	if d.store == nil || brokerID == "" {
+		return false
+	}
+	b, err := d.store.GetRuntimeBroker(ctx, brokerID)
+	return err == nil && b.IsFlat()
 }
 
 // beginRun mints a fresh run identity for a create, start or restart
