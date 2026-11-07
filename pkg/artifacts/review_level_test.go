@@ -18,9 +18,7 @@ package artifacts
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -449,112 +447,8 @@ func TestAdminGrantRouteReview(t *testing.T) {
 	}
 }
 
-// TestReviewGrantSubjectCheckFailureIsLoud: when the subject read check
-// cannot be answered, the review grant answers 500 and writes nothing.
-func TestReviewGrantSubjectCheckFailureIsLoud(t *testing.T) {
-	f, id := newReviewGrantFixture(t)
-	f.host.subjectErr = errors.New("lookup failed")
-	c := captureLog(f, slog.LevelInfo)
-	rec := f.postGrantBody(delegator, id, reviewBody(SubjectPrincipal, reviewerID, GrantReview))
-	if rec.Code != http.StatusInternalServerError {
-		t.Errorf("subject check failing: %d %s", rec.Code, rec.Body.String())
-	}
-	if g := f.grantOf(id, reviewerID); g != nil {
-		t.Errorf("grant written: %+v", g)
-	}
-	if got, raw := c.take(t); len(got) != 0 {
-		t.Errorf("a failed lookup logged as a refusal: %s", raw)
-	}
-}
-
-// countingGrantsStore counts ListGrants calls and fails call number failAt
-// (1-based; 0 never fails).
-type countingGrantsStore struct {
-	Store
-	calls, failAt int
-}
-
-func (s *countingGrantsStore) ListGrants(ctx context.Context, id string) ([]Grant, error) {
-	s.calls++
-	if s.calls == s.failAt {
-		return nil, errors.New("grants unavailable")
-	}
-	return s.Store.ListGrants(ctx, id)
-}
-
-// TestReviewGrantAccessCheckFailureIsLoud: when the grants read of the
-// existing-access check (for a subject that cannot read) fails, the review
-// grant answers 500, writes nothing and logs no refusal.
-func TestReviewGrantAccessCheckFailureIsLoud(t *testing.T) {
-	const stranger = "user:stranger"
-	body := reviewBody(SubjectPrincipal, stranger, GrantReview)
-	// Calibrate: the existing-access check is the last grants read of a
-	// refused request for a subject that cannot read.
-	f, id := newReviewGrantFixture(t)
-	st := &countingGrantsStore{Store: f.store}
-	f.svc.SetStore(st)
-	wantRefusal(t, f.postGrantBody(delegator, id, body), CodeReviewSubjectCannotRead, reviewSubjectCannotReadMessage)
-	last := st.calls
-	if last == 0 {
-		t.Fatal("no grants read")
-	}
-	st.calls, st.failAt = 0, last
-	c := captureLog(f, slog.LevelInfo)
-	rec := f.postGrantBody(delegator, id, body)
-	if rec.Code != http.StatusInternalServerError {
-		t.Errorf("access check failing: %d %s", rec.Code, rec.Body.String())
-	}
-	if st.calls != last {
-		t.Errorf("grants reads %d, want %d", st.calls, last)
-	}
-	if g := f.grantOf(id, stranger); g != nil {
-		t.Errorf("grant written: %+v", g)
-	}
-	if got, raw := c.take(t); len(got) != 0 {
-		t.Errorf("a failed lookup logged as a refusal: %s", raw)
-	}
-}
-
-// TestReviewGrantNeedsSubjectSupport: a host without ReviewSubjectAuthority
-// gives no review grant through the D24 path (fail closed), with the same
-// 403 as every other refusal.
-func TestReviewGrantNeedsSubjectSupport(t *testing.T) {
-	f, id := newReviewGrantFixture(t)
-	want := response(f.postGrantBody(member, id, "junk"))
-	svc := NewService(noSubjectHost{f.host})
-	svc.SetStore(f.store)
-	svc.SetBlobStorage(f.blobs, "hub-1")
-	r := withPrincipal(httptest.NewRequest(http.MethodPost, grantsPath(id),
-		strings.NewReader(reviewBody(SubjectPrincipal, reviewerID, GrantReview))), delegator)
-	rec := httptest.NewRecorder()
-	c := &logCapture{}
-	l := slog.New(slog.NewJSONHandler(c, nil))
-	svc.SetLogger(func() *slog.Logger { return l })
-	svc.ServeHTTP(rec, r)
-	if got := response(rec); got != want {
-		t.Errorf("host without the subject check: %s", got)
-	}
-	// One refusal entry, with reason review_subject_unreadable (the subject
-	// check cannot run, so it fails closed), the artifact and the grantee.
-	if got, raw := c.take(t); len(got) != 1 || got[0][logKeyReason] != logReasonReviewSubjectUnreadable ||
-		got[0][logKeyArtifactID] != id || got[0][logKeySubjectRef] != reviewerID {
-		t.Errorf("refusal entries: %s", raw)
-	}
-	if g := f.grantOf(id, reviewerID); g != nil {
-		t.Errorf("grant written: %+v", g)
-	}
-}
-
-// noSubjectHost is the fake host with ReviewGrantAuthority and without
-// ReviewSubjectAuthority.
-type noSubjectHost struct{ Host }
-
-func (h noSubjectHost) MayGrantReview(ctx context.Context, ownerAgentID, homeScope, sponsorRef string) bool {
-	return h.Host.(ReviewGrantAuthority).MayGrantReview(ctx, ownerAgentID, homeScope, sponsorRef)
-}
-
-// TestReviewSubjectIsGetWithoutOwnGrant: the review-access subject check
-// answers what a real GET by the same user answers once that user's own
+// TestReviewSubjectIsGetWithoutOwnGrant: the review subject check (the
+// notice rule of grantNotifyDecision until review reads) answers what a real GET by the same user answers once that user's own
 // principal grant is left out (the review grant would take its row).
 // A home member and a member of a project with a scope grant: both allow.
 // An outsider and a user holding only a review grant: both refuse.

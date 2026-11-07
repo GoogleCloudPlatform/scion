@@ -708,52 +708,6 @@ func TestGrantNotifyReviewNeedsRead(t *testing.T) {
 	}
 }
 
-// TestReviewGrantPathNeverNotifies (section 2.6, K31n): on the review path
-// (a caller with review-grant authority who does not administer the
-// artifact) notify makes the review grant as today and answers
-// not_permitted without asking the notifier; a caller without that
-// authority sending notify gets the uniform 403.
-func TestReviewGrantPathNeverNotifies(t *testing.T) {
-	f, id := newReviewGrantFixture(t)
-	calls := &[]string{}
-	n := &recNotifier{log: calls}
-	svc := NewService(&notifyHost{fakeHost: f.host, recNotifier: n})
-	svc.SetStore(f.store)
-	svc.SetBlobStorage(f.blobs, "hub-1")
-	f.svc = svc
-	body := `{"subjectKind":"principal","subjectRef":"` + reviewerID + `","permission":"review","notify":true}`
-	rec := f.postGrantBody(delegator, id, body)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("review path with notify: %d %s", rec.Code, rec.Body.String())
-	}
-	resp := decodeInto[GrantResponse](t, rec)
-	if resp.Notified || resp.NotifySkipped != NotifySkippedNotPermitted || resp.Grant.Permission != GrantReview {
-		t.Errorf("response %+v, want the review grant and not_permitted", resp)
-	}
-	if len(*calls) != 0 {
-		t.Errorf("the review path asked the notifier: %q", *calls)
-	}
-	if v, ok := lastNotified(t, f.store, id, reviewerID); ok {
-		t.Errorf("event notified = %v, want absent", v)
-	}
-	// Without notify the response is as before.
-	plain := f.postGrantBody(delegator, id, reviewBody(SubjectPrincipal, reviewerID, GrantReview))
-	if strings.Contains(plain.Body.String(), "notif") {
-		t.Errorf("no-notify review response mentions notify: %s", plain.Body.String())
-	}
-
-	// A caller without review-grant authority: the uniform 403, as for the
-	// same body without notify.
-	want := f.postGrantBody(member, id, reviewBody(SubjectPrincipal, reviewerID, GrantReview))
-	got := f.postGrantBody(member, id, body)
-	if got.Code != http.StatusForbidden || got.Code != want.Code || got.Body.String() != want.Body.String() {
-		t.Errorf("non-authorised caller with notify: %d %s, want %d %s", got.Code, got.Body.String(), want.Code, want.Body.String())
-	}
-	if len(*calls) != 0 {
-		t.Errorf("the notifier was asked: %q", *calls)
-	}
-}
-
 // TestGrantNotifyValidatedAfterAuthority (K17): notify is validated only
 // after the caller's administration is decided: a reader who does not
 // administer the artifact sending a notify body for an agent subject gets

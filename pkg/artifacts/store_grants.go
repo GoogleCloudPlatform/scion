@@ -50,18 +50,8 @@ func (s *sqlStore) PutGrant(ctx context.Context, g *Grant, maxGrants int, crossS
 
 // PutGrantNotify implements Store.
 func (s *sqlStore) PutGrantNotify(ctx context.Context, g *Grant, maxGrants int, crossScope bool, actor *Actor, notify bool) (GrantPutResult, error) {
-	put, notified, err := s.putGrant(ctx, g, maxGrants, crossScope, "", actor, notify)
+	put, notified, err := s.putGrant(ctx, g, maxGrants, crossScope, actor, notify)
 	return GrantPutResult{Put: put, Notified: notified}, err
-}
-
-// PutReviewGrant implements Store.
-func (s *sqlStore) PutReviewGrant(ctx context.Context, g *Grant, maxGrants int, home string, actor *Actor) (GrantPut, error) {
-	if g == nil || g.SubjectKind != SubjectPrincipal || !strings.HasPrefix(g.SubjectRef, PrincipalKindUser+":") ||
-		g.Permission != GrantReview || home == "" {
-		return GrantPutUnchanged, errors.New("artifacts: PutReviewGrant needs a user principal grant with review permission and a home scope")
-	}
-	put, _, err := s.putGrant(ctx, g, maxGrants, false, home, actor, false)
-	return put, err
 }
 
 // validGrantPermission reports whether p is a permission a principal or
@@ -97,16 +87,13 @@ func reviewSubjectOK(p, kind, ref string) bool {
 	return p != GrantReview || (kind == SubjectPrincipal && strings.HasPrefix(ref, PrincipalKindUser+":"))
 }
 
-// putGrant is PutGrant and, with reviewHome set, PutReviewGrant: then the
-// artifact must still be owned by an agent and homed in reviewHome, and an
-// existing grant for the subject other than review is never replaced. A
-// review grant never replaces a read, write or admin grant on either path:
-// the subject's one principal row would lose the read the review counts
-// with. notified is true when notify holds and the write raised the
+// putGrant is PutGrant and PutGrantNotify. A review grant never replaces a
+// read, write or admin grant: the subject's one principal row would lose
+// the read the review counts with. notified is true when notify holds and the write raised the
 // subject's level (grantRank; a created grant counts as a raise), decided
 // under the artifact's lock; the event's detail then records
 // "notified": true.
-func (s *sqlStore) putGrant(ctx context.Context, g *Grant, maxGrants int, crossScope bool, reviewHome string, actor *Actor, notify bool) (GrantPut, bool, error) {
+func (s *sqlStore) putGrant(ctx context.Context, g *Grant, maxGrants int, crossScope bool, actor *Actor, notify bool) (GrantPut, bool, error) {
 	if g == nil || (g.SubjectKind != SubjectPrincipal && g.SubjectKind != SubjectScope) || g.SubjectRef == "" ||
 		!validGrantPermission(g.Permission) || !reviewSubjectOK(g.Permission, g.SubjectKind, g.SubjectRef) {
 		return GrantPutUnchanged, false, errors.New("artifacts: PutGrant needs a principal or scope grant with a permission (review: a user principal only)")
@@ -134,17 +121,6 @@ func (s *sqlStore) putGrant(ctx context.Context, g *Grant, maxGrants int, crossS
 	if err := s.refuseAttachmentTx(ctx, tx, g.ArtifactID); err != nil {
 		return GrantPutUnchanged, false, err
 	}
-	if reviewHome != "" {
-		var home, ownerKind string
-		if err := tx.QueryRowContext(ctx, s.rebind(`SELECT scope_ref, owner_kind FROM artifact WHERE id = ?`), g.ArtifactID).Scan(&home, &ownerKind); err != nil {
-			return GrantPutUnchanged, false, fmt.Errorf("artifacts: read home: %w", err)
-		}
-		if home != reviewHome || ownerKind != PrincipalKindAgent {
-			return GrantPutUnchanged, false, ErrReviewGrantRefused
-		}
-	}
-	// The review path checks its own home and owner first, so its refusal
-	// stays ErrReviewGrantRefused.
 	if err := s.checkExpect(ctx, tx, g.ArtifactID, actor); err != nil {
 		return GrantPutUnchanged, false, err
 	}
@@ -171,8 +147,6 @@ func (s *sqlStore) putGrant(ctx context.Context, g *Grant, maxGrants int, crossS
 		WHERE artifact_id = ? AND subject_kind = ? AND subject_ref = ?`), g.ArtifactID, g.SubjectKind, g.SubjectRef).Scan(&id, &perm, &by, &created)
 	switch {
 	case err == nil:
-		// PutReviewGrant's grant is always a review grant, so this refuses
-		// it too.
 		if g.Permission == GrantReview && perm != GrantReview {
 			return GrantPutUnchanged, false, ErrReviewReplacesAccess
 		}

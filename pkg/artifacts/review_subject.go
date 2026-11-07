@@ -20,14 +20,12 @@ import (
 	"strings"
 )
 
-// The subject read check of a review grant (design D24, ptone/scion#4538).
-//
-// A review grant is given only to a user who can already read the
-// artifact through the home project or a grant to one of the user's
-// projects. A review grant is never itself a read path, and the write
-// decision asks again at every use, so the check here refuses a grant
-// that could never be used. That is a question
-// about a user other than the caller. The service answers it with the one
+// The subject read check for a review grant's notice (ptone/scion#5145
+// phase 2, its Q1): until a review grant reads, Ask for review tells a
+// review subject only when that user can already read the artifact through
+// the home project or a grant to one of the user's projects
+// (grantNotifyDecision). That is a question about a user other than the
+// caller. The service answers it with the one
 // read decision, canReadWith, asked through subjectReadHost, a Host whose
 // caller is the subject. Nothing here grants access, serves content or
 // changes who the caller of a request is.
@@ -56,10 +54,8 @@ type ReviewSubjectAuthority interface {
 // without ReviewSubjectAuthority answers no (fail closed). A failed lookup
 // is an error, never a refusal.
 //
-// By design, whether the grant is made follows this answer, so the outcome
-// of a review-access request reflects whether the named user can already
-// read the artifact. That is accepted: only the delegating user and
-// home-project admins reach this check, and every grant made is recorded.
+// Only a caller that administers the artifact reaches this check, and the
+// answer decides only whether a notice is sent, never the grant.
 func (s *Service) reviewSubjectCanRead(ctx context.Context, b backend, a *Artifact, subject string) (bool, error) {
 	auth, ok := s.host.(ReviewSubjectAuthority)
 	if !ok {

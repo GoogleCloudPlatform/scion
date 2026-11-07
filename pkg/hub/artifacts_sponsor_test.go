@@ -96,10 +96,6 @@ func (f reviewGrantFixture) stewardRecorded(host *artifactHost, identity Identit
 	return host.StewardClause(contextWithIdentity(context.Background(), identity), agentID, home, sponsor, false)
 }
 
-func (f reviewGrantFixture) reviewRecorded(host *artifactHost, identity Identity, agentID, home, sponsor string) string {
-	return host.ReviewGrantClause(contextWithIdentity(context.Background(), identity), agentID, home, sponsor)
-}
-
 // softDeleteAgentForSponsor soft-deletes agentID as the delete engine's
 // transaction does for its edges: the row is marked deleted and its
 // delegation edges are deactivated with cause agent_soft_delete.
@@ -169,20 +165,19 @@ func TestArtifactHostDelegatingUser(t *testing.T) {
 	})
 }
 
-// TestArtifactHostRecordedDelegator: with a recorded delegating user, both
-// clauses decide from it alone: it holds for that user while active and
-// admitted to the current home (and, for the steward clause, reading
-// there through a role), whatever the live chain says, and for no one
-// else.
+// TestArtifactHostRecordedDelegator: with a recorded delegating user, the
+// steward clause decides from it alone: it holds for that user while active,
+// admitted to the current home and reading there through a role, whatever
+// the live chain says, and for no one else.
 func TestArtifactHostRecordedDelegator(t *testing.T) {
 	f := newReviewGrantFixture(t)
 	host := newArtifactHost(f.srv)
-	type clauses struct{ steward, review string }
+	type clauses struct{ steward string }
 	both := func(identity Identity, agentID, home, sponsor string) clauses {
-		return clauses{f.stewardRecorded(host, identity, agentID, home, sponsor), f.reviewRecorded(host, identity, agentID, home, sponsor)}
+		return clauses{f.stewardRecorded(host, identity, agentID, home, sponsor)}
 	}
-	yes := clauses{artifacts.StewardClauseDelegator, artifacts.ReviewClauseDelegatingUser}
-	no := clauses{"", ""}
+	yes := clauses{artifacts.StewardClauseDelegator}
+	no := clauses{""}
 
 	cases := []struct {
 		name     string
@@ -242,35 +237,32 @@ func TestArtifactHostRecordedDelegator(t *testing.T) {
 			}
 		}
 		assert.Equal(t, "", g.stewardRecorded(h, g.user(g.delegator), g.agent.ID, g.home, g.delegator))
-		assert.Equal(t, "", g.reviewRecorded(h, g.user(g.delegator), g.agent.ID, g.home, g.delegator))
 	})
-	// Deleting the home project ends both clauses. The store delete removes
+	// Deleting the home project ends the clause. The store delete removes
 	// only the project row, so the recorded user's role binding in the home
 	// is left behind and would still admit it: the home-exists checks end
-	// the clauses (each clause's own check, and recordedDelegator's, which
-	// the direct call below pins).
+	// the clause (its own check, and recordedDelegator's, which the direct
+	// call below pins).
 	t.Run("home project deleted", func(t *testing.T) {
 		g := newReviewGrantFixture(t)
 		h := newArtifactHost(g.srv)
-		require.Equal(t, artifacts.ReviewClauseDelegatingUser, g.reviewRecorded(h, g.user(g.delegator), g.agent.ID, g.home, g.delegator))
+		require.Equal(t, artifacts.StewardClauseDelegator, g.stewardRecorded(h, g.user(g.delegator), g.agent.ID, g.home, g.delegator))
 		require.NoError(t, g.s.DeleteProject(context.Background(), g.home))
 		assert.Equal(t, "", g.stewardRecorded(h, g.user(g.delegator), g.agent.ID, g.home, g.delegator), "steward clause")
-		assert.Equal(t, "", g.reviewRecorded(h, g.user(g.delegator), g.agent.ID, g.home, g.delegator), "review clause")
 		assert.False(t, h.recordedDelegator(context.Background(), g.delegator, g.delegator, g.home), "recordedDelegator")
 	})
-	// A recorded user with a hub-wide system role: a super-admin passes the
-	// admin clause and is admitted anywhere, so only the home-exists check
-	// at the top of the review clause ends it once the home is deleted.
+	// A recorded user with a hub-wide system role: a super-admin holds
+	// artifact.steward everywhere, so only the home-exists check ends its
+	// steward clause once the home is deleted.
 	t.Run("home project deleted, system-role sponsor", func(t *testing.T) {
 		g := newReviewGrantFixture(t)
 		h := newArtifactHost(g.srv)
 		super := tid("sp-super")
 		createRS3SuperAdmin(t, g.s, super)
-		// The precondition the top check is pinned against: before the
-		// delete the super-admin answers through the admin clause.
-		require.Equal(t, artifacts.ReviewClauseProjectAdmin, g.reviewRecorded(h, g.user(super), g.agent.ID, g.home, super), "before the delete")
+		// The precondition the check is pinned against: before the delete
+		// the super-admin answers through the project-owner clause.
+		require.NotEqual(t, "", g.stewardRecorded(h, g.user(super), g.agent.ID, g.home, super), "before the delete")
 		require.NoError(t, g.s.DeleteProject(context.Background(), g.home))
-		assert.Equal(t, "", g.reviewRecorded(h, g.user(super), g.agent.ID, g.home, super), "review clause")
 		assert.Equal(t, "", g.stewardRecorded(h, g.user(super), g.agent.ID, g.home, super), "steward clause")
 	})
 }
@@ -324,8 +316,8 @@ func sponsorArtifactResponse(t *testing.T, srv *Server, identity Identity, id st
 }
 
 // TestArtifactRecordedDelegatorSurvivesAgentDeletion: an agent publishes;
-// its delegating user is recorded and keeps steward sharing and Grant
-// review access after the agent is soft-deleted and after it is purged,
+// its delegating user is recorded and keeps steward sharing after the
+// agent is soft-deleted and after it is purged,
 // within the steward bounds (no admin grant, no move); another member does
 // not gain them; after a move the clauses follow the new home.
 func TestArtifactRecordedDelegatorSurvivesAgentDeletion(t *testing.T) {
@@ -350,12 +342,10 @@ func TestArtifactRecordedDelegatorSurvivesAgentDeletion(t *testing.T) {
 		require.Equal(t, http.StatusOK, code, stage)
 		assert.True(t, resp.CanShare, "%s: canShare", stage)
 		assert.Equal(t, artifacts.StewardClauseDelegator, resp.ShareAuthority, "%s: shareAuthority", stage)
-		assert.True(t, resp.CanGrantReview, "%s: canGrantReview", stage)
 		assert.False(t, resp.CanManage, "%s: canManage", stage)
 		code, resp = sponsorArtifactResponse(t, f.srv, member, id)
 		require.Equal(t, http.StatusOK, code, stage)
 		assert.False(t, resp.CanShare, "%s: member canShare", stage)
-		assert.False(t, resp.CanGrantReview, "%s: member canGrantReview", stage)
 	}
 	assertDelegator("agent live")
 
@@ -397,7 +387,7 @@ func TestArtifactRecordedDelegatorSurvivesAgentDeletion(t *testing.T) {
 
 	// An admin moves the artifact to other. The delegating user reads it
 	// there through a principal read grant but holds no role in other: no
-	// clause. Once it is a member of other, both clauses again.
+	// clause. Once it is a member of other, the clause again.
 	_, err = st.PutGrant(ctx, &artifacts.Grant{ID: tid("sp-delegator-read"), ArtifactID: id, SubjectKind: artifacts.SubjectPrincipal,
 		SubjectRef: artifacts.PrincipalRef(artifacts.PrincipalKindUser, f.delegator), Permission: artifacts.GrantRead, CreatedAt: time.Now()},
 		artifacts.MaxGrantsPerArtifact, true, &artifacts.Actor{Kind: artifacts.PrincipalKindUser, Ref: "test-setup", Authority: artifacts.AuthorityOwner})
@@ -412,18 +402,16 @@ func TestArtifactRecordedDelegatorSurvivesAgentDeletion(t *testing.T) {
 	code, resp := sponsorArtifactResponse(t, f.srv, delegator, id)
 	require.Equal(t, http.StatusOK, code)
 	assert.False(t, resp.CanShare, "moved, no role in the new home: canShare")
-	assert.False(t, resp.CanGrantReview, "moved, no role in the new home: canGrantReview")
 	createDCUser(t, f.s, f.delegator, "rg-delegator@test.com", f.other, store.ProjectRoleMember)
 	code, resp = sponsorArtifactResponse(t, f.srv, delegator, id)
 	require.Equal(t, http.StatusOK, code)
 	assert.True(t, resp.CanShare, "moved, member of the new home: canShare")
 	assert.Equal(t, artifacts.StewardClauseDelegator, resp.ShareAuthority)
-	assert.True(t, resp.CanGrantReview, "moved, member of the new home: canGrantReview")
 }
 
 // TestArtifactUnrecordedDelegatorFallsBackToLive: an artifact with nothing
 // recorded (created before sponsors were recorded) is decided by the live
-// chain: the delegating user holds both clauses while the agent is live
+// chain: the delegating user holds the steward clause while the agent is live
 // and loses them when it is deleted.
 func TestArtifactUnrecordedDelegatorFallsBackToLive(t *testing.T) {
 	f := newReviewGrantFixture(t)
@@ -438,13 +426,11 @@ func TestArtifactUnrecordedDelegatorFallsBackToLive(t *testing.T) {
 	require.Equal(t, http.StatusOK, code)
 	assert.True(t, resp.CanShare)
 	assert.Equal(t, artifacts.StewardClauseDelegator, resp.ShareAuthority)
-	assert.True(t, resp.CanGrantReview)
 
 	softDeleteAgentForSponsor(t, f.s, f.agent.ID)
 	code, resp = sponsorArtifactResponse(t, f.srv, delegator, id)
 	require.Equal(t, http.StatusOK, code)
 	assert.False(t, resp.CanShare, "live fallback after delete")
-	assert.False(t, resp.CanGrantReview, "live fallback after delete")
 }
 
 // sponsorSeedArtifact stores a published artifact owned by agentID in home
@@ -491,13 +477,12 @@ func TestArtifactSponsorBackfillOnHub(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, done)
 
-	// Backfilled, the delegating user keeps the clauses after a purge.
+	// Backfilled, the delegating user keeps the clause after a purge.
 	softDeleteAgentForSponsor(t, f.s, f.agent.ID)
 	purgeAgentForSponsor(t, f.s, f.agent.ID)
 	code, resp := sponsorArtifactResponse(t, f.srv, f.user(f.delegator), live)
 	require.Equal(t, http.StatusOK, code)
 	assert.True(t, resp.CanShare)
-	assert.True(t, resp.CanGrantReview)
 }
 
 // TestArtifactSponsorBackfillLookupFault: a store fault while resolving an
@@ -528,8 +513,8 @@ func TestArtifactSponsorBackfillLookupFault(t *testing.T) {
 }
 
 // TestArtifactHostStorelessFailsClosed: a host whose server has an
-// authorization service but no store answers no clause from either clause
-// and an error from ScopesExist, and never panics (a panic is recovered and
+// authorization service but no store answers no steward clause and an
+// error from ScopesExist, and never panics (a panic is recovered and
 // reported as a failure, so a missing nil guard fails this test rather
 // than crashing the binary).
 func TestArtifactHostStorelessFailsClosed(t *testing.T) {
@@ -553,9 +538,6 @@ func TestArtifactHostStorelessFailsClosed(t *testing.T) {
 	assert.Equal(t, "", call("StewardClause", func() string {
 		return host.StewardClause(ctx, f.agent.ID, f.home, f.delegator, false)
 	}), "StewardClause")
-	assert.Equal(t, "", call("ReviewGrantClause", func() string {
-		return host.ReviewGrantClause(ctx, f.agent.ID, f.home, f.delegator)
-	}), "ReviewGrantClause")
 	assert.Equal(t, "", call("ScopesExist", func() string {
 		exists, err := host.ScopesExist(ctx, []string{f.home})
 		if err == nil || exists[f.home] {
