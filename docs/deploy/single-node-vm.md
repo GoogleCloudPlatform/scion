@@ -253,7 +253,17 @@ call:
   cannot be put back, its old binary is kept in a
   `.scion-update-*/old/` directory inside the plugin directory, and the
   error says so. The next update removes such directories, with a warning
-  in the run log.
+  in the run log. If such a directory cannot have its applied marker
+  removed, it is renamed to `.scion-plugins-kept-<timestamp>`, which no
+  cleanup removes: the error names it, and you remove it once the plugins
+  work. If that rename fails too, the directory stays marked as applied,
+  and the error asks you to move its backups aside before you restart the
+  Hub; otherwise the next start removes them.
+- After a successful update, the downloads in the temporary directory are
+  removed before the restart. The previous plugin builds stay in a
+  `.scion-update-*/old/` directory, marked as applied, so a failure to
+  record or request the restart can still roll back. Whichever comes first
+  removes it: the update run, or the restarted Hub at startup.
 - Each release keeps a copy of the plugins installed with it in
   `/opt/scion/releases/<tag>/plugins/`. After the boot-failure guard rolls
   back, the restored Hub copies its own plugins back at startup, before

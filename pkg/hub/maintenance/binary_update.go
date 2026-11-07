@@ -681,6 +681,17 @@ func (e *BinaryUpdateExecutor) RunWithBeforeRestart(ctx context.Context, logger 
 		}
 	}
 
+	// The downloads and extracted binaries are no longer needed: Stage
+	// copied the hub binary and the plugin swap its new builds. They are
+	// removed now because the restart below can end this process before the
+	// deferred removal runs (ptone/scion#7177); the defer still covers the
+	// failure paths. The plugin staging keeps old/ for a rollback until the
+	// restart and is marked applied, so the next start removes it.
+	_ = os.RemoveAll(tmpDir)
+	if swap != nil {
+		swap.markApplied(logger)
+	}
+
 	// ── Restart ─────────────────────────────────────────────────────────
 	_, _ = fmt.Fprintf(logger, "\n==> Restarting hub: %s -> %s at %s\n",
 		displayVersion(e.current), target, time.Now().UTC().Format(time.RFC3339))

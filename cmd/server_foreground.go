@@ -440,6 +440,8 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		// Before the plugin manager loads plugins: after a boot-failure
 		// guard rollback, the plugins of the restored release.
 		reconcilePluginsAfterRollback(installRoot)
+		// The previous builds a successful update kept until its restart.
+		removeAppliedPluginStaging()
 		s, entClient, err = initStore(ctx, cfg)
 		if err != nil {
 			// A stop during the migrations is a clean exit, not a failed
