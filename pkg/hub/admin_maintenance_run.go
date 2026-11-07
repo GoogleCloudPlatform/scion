@@ -26,6 +26,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/maintenance"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/rebuildpreflight"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 )
@@ -336,10 +337,7 @@ func (s *Server) launchMaintenanceRun(run *store.MaintenanceOperationRun, execut
 				run.CompletedAt = &finishedAt
 				run.Status = store.MaintenanceStatusFailed
 				run.Log = buf.String()
-				resultJSON, _ := json.Marshal(map[string]interface{}{
-					"error": fmt.Sprintf("executor panic: %v", r),
-				})
-				run.Result = string(resultJSON)
+				run.Result = encodeRunResult(panicRunResult(executor, fmt.Sprintf("executor panic: %v", r)))
 				cleanup(func(ctx context.Context) {
 					if err := s.store.UpdateMaintenanceRun(ctx, run); err != nil {
 						log.Error("Failed to update run record after panic", maintenanceLogAttrs(key, "run_id", runID, "error", err)...)
@@ -374,19 +372,25 @@ func (s *Server) launchMaintenanceRun(run *store.MaintenanceOperationRun, execut
 		case execErr != nil:
 			run.CompletedAt = &finishedAt
 			run.Status = store.MaintenanceStatusFailed
-			result := map[string]interface{}{"error": execErr.Error()}
+			// The executor's own result (maintenance.ResultReporter), with
+			// the run's error added last (rebuildpreflight.MergeFinal).
+			result := rebuildpreflight.MergeFinal(reportedRunResult(executor), execErr.Error())
 			if re, ok := maintenance.IsRequestError(execErr); ok {
 				result["code"] = re.Code
 				if re.Details != nil {
 					result["details"] = re.Details
 				}
 			}
-			resultJSON, _ := json.Marshal(result)
-			run.Result = string(resultJSON)
+			run.Result = encodeRunResult(result)
 			if restarting {
 				cleanup(func(ctx context.Context) { s.clearPendingUpdateFor(ctx, runID) })
 			}
 			log.Error("Operation failed", maintenanceLogAttrs(key, "run_id", runID, "error", execErr, "duration", finishedAt.Sub(run.StartedAt))...)
+			// This writes the run log to the hub log. It is safe only while no
+			// executor writes into buf anything that can carry a credential:
+			// the output of a child given one (for example a database DSN)
+			// must be captured and redacted before it reaches buf, never
+			// streamed into it.
 			log.Debug("Operation failure log output", maintenanceLogAttrs(key, "run_id", runID, "log", run.Log)...)
 		case restarting:
 			// Status, result and log were written before the restart, and
@@ -398,6 +402,7 @@ func (s *Server) launchMaintenanceRun(run *store.MaintenanceOperationRun, execut
 		default:
 			run.CompletedAt = &finishedAt
 			run.Status = store.MaintenanceStatusCompleted
+			run.Result = encodeRunResult(rebuildpreflight.MergeFinal(reportedRunResult(executor), ""))
 			log.Info("Operation completed successfully", maintenanceLogAttrs(key, "run_id", runID, "duration", finishedAt.Sub(run.StartedAt))...)
 		}
 

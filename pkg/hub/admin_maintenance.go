@@ -31,6 +31,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/maintenance"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/rebuildpreflight"
 	"github.com/GoogleCloudPlatform/scion/pkg/preflight"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
@@ -499,6 +500,18 @@ func (s *Server) executeOperation(w http.ResponseWriter, r *http.Request, key st
 		defer func() { _ = r.Body.Close() }()
 		_ = json.NewDecoder(r.Body).Decode(&body)
 	}
+	// Check the request as sent, before the parameter parser trims or
+	// drops anything (for example the branch of a Rebuild from git).
+	if _, rej := rebuildpreflight.CheckRunRequest(key, body); rej != nil {
+		log.Debug("Rejected: invalid run request",
+			maintenanceLogAttrs(key, "status", rej.Status, "reason", rej.Message, "user", user.Email())...)
+		code := ErrCodeInvalidRequest
+		if rej.Status == http.StatusConflict {
+			code = ErrCodeConflict
+		}
+		writeError(w, rej.Status, code, rej.Message, nil)
+		return
+	}
 	params := parseMigrationParams(body) // reuse same param parser
 
 	// Operations with a parameter allowlist refuse anything else, whatever
@@ -521,6 +534,13 @@ func (s *Server) executeOperation(w http.ResponseWriter, r *http.Request, key st
 	if err != nil {
 		log.Error("Failed to resolve executor", maintenanceLogAttrs(key, "error", err)...)
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), nil)
+		return
+	}
+	// An ordinary run has no force grant. No checkpoint writes the run row
+	// yet, so the checkpoint records nothing.
+	if err := wireMaintenanceExecutor(executor, nil, func(map[string]any) error { return nil }); err != nil {
+		log.Error("Failed to prepare executor", maintenanceLogAttrs(key, "error", err)...)
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to prepare the operation", nil)
 		return
 	}
 
@@ -587,6 +607,66 @@ func (s *Server) executeOperation(w http.ResponseWriter, r *http.Request, key st
 		"runId":  runID,
 		"status": "running",
 	})
+}
+
+// wireMaintenanceExecutor hands an executor what its run needs before Run:
+// the force grant, only when the handler built one (an executor that cannot
+// take it is an error, so a forced run never runs unforced), then the
+// checkpoint, to an executor that takes one.
+func wireMaintenanceExecutor(executor MaintenanceExecutor, grant *rebuildpreflight.ForceGrant, checkpoint func(map[string]any) error) error {
+	if grant != nil {
+		fg, ok := executor.(maintenance.ForceGrantee)
+		if !ok {
+			return fmt.Errorf("internal: the %T executor does not take a force grant", executor)
+		}
+		fg.SetForceGrant(grant)
+	}
+	if cp, ok := executor.(maintenance.Checkpointer); ok {
+		cp.SetCheckpoint(checkpoint)
+	}
+	return nil
+}
+
+// reportedRunResult is the executor's RunResult, or nil when it does not
+// report one.
+func reportedRunResult(executor MaintenanceExecutor) map[string]any {
+	if rr, ok := executor.(maintenance.ResultReporter); ok {
+		return rr.RunResult()
+	}
+	return nil
+}
+
+// resultErrorKey marks a run Result the hub could not assemble in full.
+const resultErrorKey = "resultError"
+
+// panicRunResult is the Result of a run whose executor panicked. RunResult
+// is called inside its own recover, so a panic there cannot crash the hub:
+// the Result then keeps only the error, with resultError "internal".
+func panicRunResult(executor MaintenanceExecutor, errText string) (result map[string]any) {
+	defer func() {
+		if recover() != nil {
+			result = map[string]any{rebuildpreflight.ErrorKey: errText, resultErrorKey: "internal"}
+		}
+	}()
+	return rebuildpreflight.MergeFinal(reportedRunResult(executor), errText)
+}
+
+// encodeRunResult is a run Result as stored: "" for none, else its JSON. A
+// Result that cannot be encoded keeps only its error, with resultError
+// "internal".
+func encodeRunResult(result map[string]any) string {
+	if result == nil {
+		return ""
+	}
+	b, err := json.Marshal(result)
+	if err != nil {
+		fallback := map[string]any{resultErrorKey: "internal"}
+		if errText, ok := result[rebuildpreflight.ErrorKey].(string); ok {
+			fallback[rebuildpreflight.ErrorKey] = errText
+		}
+		b, _ = json.Marshal(fallback)
+	}
+	return string(b)
 }
 
 // listOperationRuns returns the run history for a given operation key.

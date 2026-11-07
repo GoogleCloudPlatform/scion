@@ -35,6 +35,7 @@ import (
 	cloudbuildpb "cloud.google.com/go/cloudbuild/apiv1/v2/cloudbuildpb"
 	gcstorage "cloud.google.com/go/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/rebuildpreflight"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/unitdrift"
 	"github.com/GoogleCloudPlatform/scion/pkg/preflight"
 	scionruntime "github.com/GoogleCloudPlatform/scion/pkg/runtime"
@@ -52,6 +53,30 @@ type MaintenanceExecutor interface {
 	// The logger captures output that is stored in the run/operation's log field.
 	// Params contains operation-specific configuration from the API request.
 	Run(ctx context.Context, logger io.Writer, params map[string]string) error
+}
+
+// ResultReporter is an optional MaintenanceExecutor interface: an executor
+// that records a structured result for its run. The hub calls RunResult
+// once Run has returned (or panicked) and stores it as the run's Result,
+// with the run's error added under "error" (rebuildpreflight.MergeFinal).
+// RunResult returns a copy and never sets "error" itself.
+type ResultReporter interface {
+	RunResult() map[string]any
+}
+
+// Checkpointer is an optional MaintenanceExecutor interface: an executor
+// that writes its run's Result while it runs. The hub hands it the
+// checkpoint function before Run. Run, the checkpoint and RunResult all run
+// in the one goroutine that runs the operation, so no lock is needed.
+type Checkpointer interface {
+	SetCheckpoint(func(result map[string]any) error)
+}
+
+// ForceGrantee is an optional MaintenanceExecutor interface: an executor
+// that accepts a force grant. The hub hands the grant over directly, never
+// through the request parameters, and only when the handler built one.
+type ForceGrantee interface {
+	SetForceGrant(*rebuildpreflight.ForceGrant)
 }
 
 // HubSettingSectionUpdateAvailable is the hub_settings section key used to
