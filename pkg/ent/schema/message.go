@@ -178,6 +178,18 @@ func (Message) Indexes() []ent.Index {
 		index.Fields("created", "id").
 			StorageKey("message_failed_created_id").
 			Annotations(entsql.IndexWhere("dispatch_state = 'failed'")),
+		// The conversation consistency check reads the latest messages of a
+		// DM pair, one query per direction, filtering on sender_id and
+		// recipient_id and ordering by created, id. The single-column
+		// participant indexes above match only one side of the pair, so
+		// every row of that participant was read and sorted; with both
+		// columns the lookup reads at most limit+1 rows in index order.
+		index.Fields("sender_id", "recipient_id", "created", "id"),
+		// The same check's thread lookup filters on thread_id alone. The
+		// (thread_id, channel, created, id) index has channel between the
+		// filter and the order, so it cannot serve that ORDER BY without
+		// sorting the whole thread.
+		index.Fields("thread_id", "created", "id"),
 	}
 }
 

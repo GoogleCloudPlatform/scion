@@ -440,7 +440,8 @@ func TestDEF141_AC6_ConversationAsserted_NotInDeliveryText(t *testing.T) {
 // value. Rather than duplicating that test, we verify the specific property
 // that DEF-141's changes preserved: CheckConversationConsistency is called
 // in the broker's deliverToUser (with its return consumed) on EVERY path
-// of the three-way switch.
+// of the three-way switch. The check runs in the background, so each step
+// waits for the runner to go idle before reading the counter.
 // ---------------------------------------------------------------------------
 
 func TestDEF141_AC7_ConsistencyCheckRunsOnAllPaths(t *testing.T) {
@@ -489,6 +490,7 @@ func TestDEF141_AC7_ConsistencyCheckRunsOnAllPaths(t *testing.T) {
 	msg1.ConversationID = created.ID
 	msg1.ConversationAsserted = true
 	proxy.deliverToUser(ctx, projectID, "project."+projectID+".user.message", msg1)
+	messaging.ConsistencyCheckRunner.Wait()
 	ccAfter := messaging.DivergenceMetrics.ConsistencyChecks()
 	require.Greater(t, ccAfter, ccBefore,
 		"AC-7: CheckConversationConsistency must run on the asserted path")
@@ -501,6 +503,7 @@ func TestDEF141_AC7_ConsistencyCheckRunsOnAllPaths(t *testing.T) {
 	msg2.ConversationID = created.ID
 	msg2.ConversationAsserted = false
 	proxy.deliverToUser(ctx, projectID, "project."+projectID+".user.message", msg2)
+	messaging.ConsistencyCheckRunner.Wait()
 	ccAfter = messaging.DivergenceMetrics.ConsistencyChecks()
 	require.Greater(t, ccAfter, ccBefore,
 		"AC-7: CheckConversationConsistency must run on the derived path")
@@ -512,6 +515,7 @@ func TestDEF141_AC7_ConsistencyCheckRunsOnAllPaths(t *testing.T) {
 	msg3.RecipientID = recipientID
 	// No ConversationID, no ConversationAsserted.
 	proxy.deliverToUser(ctx, projectID, "project."+projectID+".user.message", msg3)
+	messaging.ConsistencyCheckRunner.Wait()
 	ccAfter = messaging.DivergenceMetrics.ConsistencyChecks()
 	require.Greater(t, ccAfter, ccBefore,
 		"AC-7: CheckConversationConsistency must run on the default (broker-derived) path")

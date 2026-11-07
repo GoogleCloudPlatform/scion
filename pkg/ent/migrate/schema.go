@@ -2127,6 +2127,16 @@ var (
 					Where: "dispatch_state = 'failed'",
 				},
 			},
+			{
+				Name:    "message_sender_id_recipient_id_created_id",
+				Unique:  false,
+				Columns: []*schema.Column{MessagesColumns[3], MessagesColumns[5], MessagesColumns[23], MessagesColumns[0]},
+			},
+			{
+				Name:    "message_thread_id_created_id",
+				Unique:  false,
+				Columns: []*schema.Column{MessagesColumns[17], MessagesColumns[23], MessagesColumns[0]},
+			},
 		},
 	}
 	// MessageAddresseesColumns holds the columns for the "message_addressees" table.
