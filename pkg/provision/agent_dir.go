@@ -72,6 +72,9 @@ var ErrAgentBranchMismatch = errors.New("the agent's kept workspace was created 
 //     record when it was written; a workspace that holds files is left as
 //     it is;
 //   - creates each shared directory, and chowns it while it is empty;
+//   - treats a chown that fails with EPERM as done when the entry is
+//     already owned by the resolved owner (NFSUID:NFSGID, 0 meaning 1000;
+//     a squashing NFS export), so RequireChownSuccess does not fail on it;
 //   - writes the provisioning sentinel in the agent directory.
 //
 // The lock, the record and the sentinel live in the agent directory, next
@@ -118,10 +121,16 @@ func ProvisionAgentDir(in ProvisionInput) error {
 	uid, gid := resolveUID(in), resolveGID(in)
 	chown := func(path string) error {
 		if err := lchownFile(path, uid, gid); err != nil {
-			if in.RequireChownSuccess {
-				return fmt.Errorf("ProvisionAgentDir: chown %s to %d:%d: %w", path, uid, gid, err)
+			// EPERM on an entry already owned by uid:gid (a squashing NFS
+			// export) is success.
+			cerr := checkChownEPERM(path, uid, gid, err)
+			if cerr == nil {
+				return nil
 			}
-			slog.Warn("ProvisionAgentDir: chown failed (continuing)", "path", path, "uid", uid, "gid", gid, "error", err)
+			if in.RequireChownSuccess {
+				return fmt.Errorf("ProvisionAgentDir: chown %s to %d:%d: %w", path, uid, gid, cerr)
+			}
+			slog.Warn("ProvisionAgentDir: chown failed (continuing)", "path", path, "uid", uid, "gid", gid, "error", cerr)
 		}
 		return nil
 	}
