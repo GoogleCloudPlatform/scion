@@ -972,8 +972,9 @@ func (s *sqlStore) candidateQuery(q CandidateQuery) (string, []any) {
 	arm("artifact a", "a.owner_kind = ? AND a.owner_ref = ?", q.PrincipalKind, q.PrincipalRef)
 	if !q.OwnedOnly {
 		now := s.timeArg(q.Now)
-		grantWhere := " AND (g.expires_at IS NULL OR g.expires_at > ?) AND g.permission IN (?, ?, ?)"
-		grantArgs := []any{now, GrantRead, GrantWrite, GrantAdmin}
+		permSQL, permArgs := readGrantFilter("g")
+		grantWhere := " AND (g.expires_at IS NULL OR g.expires_at > ?) AND " + permSQL
+		grantArgs := append([]any{now}, permArgs...)
 		arm("artifact_grant g JOIN artifact a ON a.id = g.artifact_id",
 			"g.subject_kind = ? AND g.subject_ref = ?"+grantWhere,
 			append([]any{SubjectPrincipal, PrincipalRef(q.PrincipalKind, q.PrincipalRef)}, grantArgs...)...)
@@ -991,6 +992,19 @@ func (s *sqlStore) candidateQuery(q CandidateQuery) (string, []any) {
 	args = append(args, q.Limit)
 
 	return s.rebind(b.String()), args
+}
+
+// readGrantFilter returns the SQL condition, on the grant table aliased
+// alias, that a grant carries a permission in grantsForRead, and its
+// arguments. Both list pushdowns (the grant arms of the candidate query and
+// the "shared with the project" subquery) use it, so the read set the list
+// pushes down to SQL is always the one canReadWith matches in Go.
+func readGrantFilter(alias string) (string, []any) {
+	args := make([]any, len(grantsForRead))
+	for i, p := range grantsForRead {
+		args[i] = p
+	}
+	return alias + ".permission IN (" + strings.TrimSuffix(strings.Repeat("?, ", len(args)), ", ") + ")", args
 }
 
 // candidateColumns is the column list every arm of the candidate query
@@ -1029,9 +1043,10 @@ func (s *sqlStore) writeCandidateFilters(b *strings.Builder, args *[]any, q Cand
 	if q.HomeScope != "" {
 		// Shared with the project: an unexpired scope grant to it, found
 		// through the (artifact_id, subject_kind, subject_ref) unique index.
+		permSQL, permArgs := readGrantFilter("sg")
 		shared := `EXISTS (SELECT 1 FROM artifact_grant sg WHERE sg.artifact_id = a.id AND sg.subject_kind = ?
-			AND sg.subject_ref = ? AND (sg.expires_at IS NULL OR sg.expires_at > ?) AND sg.permission IN (?, ?, ?))`
-		sharedArgs := []any{SubjectScope, q.HomeScope, now, GrantRead, GrantWrite, GrantAdmin}
+			AND sg.subject_ref = ? AND (sg.expires_at IS NULL OR sg.expires_at > ?) AND ` + permSQL + `)`
+		sharedArgs := append([]any{SubjectScope, q.HomeScope, now}, permArgs...)
 		switch {
 		case q.ScopeShares && q.SharedOnly:
 			b.WriteString(" AND a.scope_kind = ? AND a.scope_ref <> ? AND " + shared)
