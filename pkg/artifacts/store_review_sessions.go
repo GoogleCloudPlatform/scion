@@ -160,8 +160,9 @@ func (s *sqlStore) TouchReviewSession(ctx context.Context, rs ReviewSession, edi
 		rs.ArtifactID, rs.PrincipalKind, rs.PrincipalRef, rs.SessionID).Scan(&started); err != nil {
 		return fmt.Errorf("artifacts: read review session: %w", err)
 	}
-	// Both sides at microsecond precision: the stored time has at most
-	// microseconds on both dialects, so the comparison holds on each.
+	// started_at is already at microseconds: timeArg truncates on write, for
+	// both dialects. Truncating it again here is defensive only; the now side
+	// must be truncated for the times to compare equal.
 	if started.Time.Truncate(time.Microsecond).Equal(now.UTC().Truncate(time.Microsecond)) {
 		var live int
 		if err := tx.QueryRowContext(ctx, s.rebind(`SELECT COUNT(*) FROM artifact_review_session

@@ -27,6 +27,7 @@ import type { ScionPageArtifactDetail } from './artifact-detail.js';
 import { resetPrincipalNames } from '../../client/principal-names.js';
 import { requestBodyText, requestUrl } from '../../client/__fixtures__/request-url.js';
 import { showToast } from '../../utils/toast.js';
+import { REVIEW_BEAT_INTERVAL_MS } from '../../client/review-heartbeat.js';
 
 vi.mock('../../utils/toast.js', () => ({ showToast: vi.fn() }));
 
@@ -191,6 +192,47 @@ describe('artifact page: open reviews', () => {
 
   it('follows the artifact when it changes while reviewing', async () => {
     const OTHER = '9a7b6c5d-4e3f-4a1b-8c2d-1e0f9a8b7c6d';
+    // Fake only the beat interval, so one later beat can be fired at will.
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    try {
+      const reqs = mockHub((r) =>
+        r.method === 'PUT'
+          ? new Response(JSON.stringify({ currentSeq: 1 }))
+          : new Response(null, { status: 204 })
+      );
+      const el = await mount({ [FLAG]: true });
+      button(el, '.header-actions sl-button', 'Review')!.click();
+      await settle(el);
+      const first = sessionReqs(reqs);
+      expect(first.map((r) => r.method)).toEqual(['PUT']);
+      expect(first[0].url.startsWith(`/api/v1/artifacts/${ID}/review-sessions/`)).toBe(true);
+      // The page is reused for another artifact while Review mode stays open.
+      (el as unknown as { artifactId: string }).artifactId = OTHER;
+      await settle(el);
+      // One more beat of the new session.
+      vi.advanceTimersByTime(REVIEW_BEAT_INTERVAL_MS);
+      await settle(el);
+      let all = sessionReqs(reqs);
+      expect(all.map((r) => r.method)).toEqual(['PUT', 'DELETE', 'PUT', 'PUT']);
+      // The old session ends on the old artifact...
+      expect(all[1].url).toBe(first[0].url);
+      // ...and every session request after it goes to the new artifact only.
+      expect(all[2].url).toMatch(
+        new RegExp(`^/api/v1/artifacts/${OTHER}/review-sessions/[A-Za-z0-9_-]{22}$`)
+      );
+      expect(all.slice(2).every((r) => r.url === all[2].url)).toBe(true);
+      // Closing Review mode ends the new session, on the new artifact.
+      button(el, '.edit-footer sl-button', 'Cancel')!.click();
+      await settle(el);
+      all = sessionReqs(reqs);
+      expect(all.map((r) => r.method)).toEqual(['PUT', 'DELETE', 'PUT', 'PUT', 'DELETE']);
+      expect(all[4].url).toBe(all[2].url);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('ends the session and beats no more when the artifact id clears while reviewing', async () => {
     const reqs = mockHub((r) =>
       r.method === 'PUT'
         ? new Response(JSON.stringify({ currentSeq: 1 }))
@@ -200,20 +242,11 @@ describe('artifact page: open reviews', () => {
     button(el, '.header-actions sl-button', 'Review')!.click();
     await settle(el);
     const first = sessionReqs(reqs);
-    expect(first.map((r) => r.method)).toEqual(['PUT']);
-    expect(first[0].url.startsWith(`/api/v1/artifacts/${ID}/review-sessions/`)).toBe(true);
-    // The page is reused for another artifact while Review mode stays open.
-    (el as unknown as { artifactId: string }).artifactId = OTHER;
+    (el as unknown as { artifactId: string }).artifactId = '';
     await settle(el);
     const all = sessionReqs(reqs);
-    expect(all.map((r) => r.method)).toEqual(['PUT', 'DELETE', 'PUT']);
-    // The old session ends on the old artifact...
+    expect(all.map((r) => r.method)).toEqual(['PUT', 'DELETE']);
     expect(all[1].url).toBe(first[0].url);
-    // ...and every beat after it goes to the new artifact only.
-    expect(all[2].url).toMatch(
-      new RegExp(`^/api/v1/artifacts/${OTHER}/review-sessions/[A-Za-z0-9_-]{22}$`)
-    );
-    expect(all.slice(2).every((r) => r.url.startsWith(`/api/v1/artifacts/${OTHER}/`))).toBe(true);
   });
 
   const refusal = JSON.stringify({

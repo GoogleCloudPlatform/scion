@@ -173,9 +173,10 @@ func TestReviewSessionStoreCap(t *testing.T) {
 }
 
 // TestReviewSessionStoreCapSubMicrosecondNow: the beat's time carries
-// nanoseconds that the store does not keep. The new-row check compares at
-// microsecond precision on both sides, so the cap still applies to a beat
-// that opens a session, and an existing session still beats on.
+// nanoseconds that the store does not keep (timeArg truncates on write).
+// It guards the truncation of the now side of the new-row check: without
+// it, a beat that opens a session would not be recognised as new, the cap
+// would not apply and this test fails. An existing session still beats on.
 func TestReviewSessionStoreCapSubMicrosecondNow(t *testing.T) {
 	forEachSessionBackend(t, func(t *testing.T, _ *sql.DB, st Store, _ func() *sql.DB) {
 		ctx := context.Background()
