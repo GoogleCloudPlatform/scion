@@ -3676,7 +3676,8 @@ func initOperationalSettings(ctx context.Context, cfg *config.GlobalConfig, hubS
 	hubSrv.WarnShadowedImageRegistries(flatInstanceImageRegistries())
 	// image_tag (ptone/scion#6625): the resolved value and its source, once;
 	// later changes are logged as they are applied. Warns when a value is
-	// set while hub.image_tag_setting is off.
+	// set while hub.image_tag_setting is off (it then also suppresses the
+	// version default).
 	hubSrv.LogImageTag()
 	// A saved authorized_domains that differs from the deployment value
 	// (before ptone/scion#6000 a saved list was not enforced).

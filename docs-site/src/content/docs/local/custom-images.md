@@ -114,14 +114,14 @@ image-build/scripts/build-release-images.sh v0.3.0-preview.5 -- \
 scion config set image_registry ghcr.io/myorg
 ```
 
-The images are tagged `:<version>` and `:<short-sha>`. Agents use `scion-<harness>:latest` unless told otherwise, so either:
+The images are tagged `:<version>` and `:<short-sha>`. A release build of `scion` (`vX.Y.Z`, `vX.Y.Z-preview.N` or `vX.Y.Z-rc.N`) uses its own version as the image tag when `image_tag` is unset (the `hub.image_tag_version_default` [experiment](/scion/reference/experiments/), on by default), so it runs these `:<version>` images directly. An explicit `--image scion-<harness>:latest`, or a bare `scion-<harness>`, is retagged the same way. Development and nightly builds use `scion-<harness>:latest`. For those, or to keep `:latest` on a release build:
 
-- add `--also-tag latest` to the driver so the release images are also tagged `:latest` (with a registry this moves that registry's `:latest`, so the driver also requires `--force-latest`); or
-- with the `hub.image_tag_setting` [experiment](/scion/reference/experiments/) enabled, set `image_tag: version` so agents use the tag of the Hub's own version (see [Image tag](/scion/reference/settings-precedence/#image-tag-experimental)).
+- add `--also-tag latest` to the driver so the release images are also tagged `:latest` (with a registry this moves that registry's `:latest`, so the driver also requires `--force-latest`), and set `image_tag: latest` on a release build to opt out of the version default (or disable the experiment: `scion hub experiments disable hub.image_tag_version_default`, or **Admin → Server Config → Experiments**); or
+- with the `hub.image_tag_setting` experiment enabled, set `image_tag: version` or a literal tag (see [Image tag](/scion/reference/settings-precedence/#image-tag-experimental)).
 
 A release build uses the same recipe, not the same bits: inputs such as harness CLIs installed at `@latest` and apt packages resolve at build time. The driver's `--help` and the "Build images for a release" section of `image-build/README.md` cover every option, including staged builds and Cloud Build.
 
-The rest of this guide covers `build-images.sh`, which builds from the checkout it runs in (for example `main`, or your own changes) and tags `:latest` by default.
+The rest of this guide covers `build-images.sh`, which builds from the checkout it runs in (for example `main`, or your own changes) and tags `:latest` by default. With a release build of `scion`, which pulls `:<version>` by default, also set `image_tag: latest` (or disable `hub.image_tag_version_default`), or build with `--tag <your scion version>`, so agents use these images (see [Image tag](/scion/reference/settings-precedence/#image-tag-experimental)).
 
 ## How the Build Tooling Is Organized
 
@@ -221,6 +221,8 @@ When `image_registry` is set, Scion transforms the default image reference, whic
 | :--- | :--- | :--- |
 | `scion-claude:latest` | `ghcr.io/myorg` | `ghcr.io/myorg/scion-claude:latest` |
 | `scion-gemini-cli:latest` | `ghcr.io/myorg` | `ghcr.io/myorg/scion-gemini-cli:latest` |
+
+These examples show a development build or `image_tag: latest`. With a release build of `scion` and `image_tag` unset, the tag becomes the version, for example `ghcr.io/myorg/scion-claude:v0.3.0` (see [Image tag](/scion/reference/settings-precedence/#image-tag-experimental)).
 
 ### Setting It
 

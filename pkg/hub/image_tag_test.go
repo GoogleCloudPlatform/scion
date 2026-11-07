@@ -44,6 +44,16 @@ func setImageTagExperiment(t *testing.T, ops *OperationalSettings, on bool) {
 	require.NoError(t, err)
 }
 
+// setImageTagOverrides stores exactly these experiment overrides; every
+// other experiment follows its registry default.
+func setImageTagOverrides(t *testing.T, ops *OperationalSettings, overrides map[string]bool) {
+	t.Helper()
+	doc, err := json.Marshal(map[string]map[string]bool{"overrides": overrides})
+	require.NoError(t, err)
+	_, err = ops.Update(context.Background(), "experiments", json.RawMessage(doc), "test", ops.SectionRevision("experiments"), "managed")
+	require.NoError(t, err)
+}
+
 // setTestImageTagFileTier sets this replica's settings-file tier of
 // image_tag (its bootstrap merge) on ops.
 func setTestImageTagFileTier(t *testing.T, ops *OperationalSettings, top string, profiles map[string]string) {
@@ -178,6 +188,66 @@ func TestDispatchImageTagFor_Profile(t *testing.T) {
 	srv = newSrv(t, brokerRowStore{broker: &store.RuntimeBroker{ID: "colocated", DefaultProfile: "gone"}})
 	srv.SetEmbeddedBrokerID("colocated")
 	assert.Equal(t, "file-top", srv.dispatchImageTagFor("colocated", ""), "a default profile outside the catalog has no profile layers")
+}
+
+// TestImageTag_VersionDefault: with image_tag unset, a release build of the
+// hub applies its own version (hub.image_tag_version_default, on by
+// default), even while hub.image_tag_setting is off; any other build
+// leaves images unchanged.
+func TestImageTag_VersionDefault(t *testing.T) {
+	srv, _, ops := newTestDBServer(t)
+
+	for _, v := range []string{"v0.3.0", "v0.3.0-preview.5", "v0.3.0-rc.1"} {
+		setTestVersion(t, v)
+		assert.Equal(t, v, srv.hubScopeImageTag(), "a release build uses its version: %s", v)
+		assert.Equal(t, v, srv.dispatchImageTagFor("", ""), "dispatch carries the version: %s", v)
+	}
+	setTestVersion(t, "v0.3.0-preview.5")
+	short, resolved := srv.hubScopeImageRefs("scion-claude:latest", "ghcr.io/homebrew-scion")
+	assert.Equal(t, "scion-claude:v0.3.0-preview.5", short)
+	assert.Equal(t, "ghcr.io/homebrew-scion/scion-claude:v0.3.0-preview.5", resolved)
+
+	for _, v := range []string{"", "dev", "nightly-20261105", "v0.3.0-dirty", "v0.0.0-20261108002803-39f9e3d31e76"} {
+		setTestVersion(t, v)
+		assert.Equal(t, "", srv.hubScopeImageTag(), "not a release build, images keep latest: %q", v)
+		assert.Equal(t, "", srv.dispatchImageTagFor("", ""), "no dispatch tag: %q", v)
+	}
+
+	setTestVersion(t, "v0.3.0")
+	setImageTagOverrides(t, ops, map[string]bool{experiments.ImageTagVersionDefault: false})
+	assert.Equal(t, "", srv.hubScopeImageTag(), "the version default can be turned off")
+	assert.Equal(t, "", srv.dispatchImageTagFor("", ""), "off: no dispatch tag")
+}
+
+// TestImageTag_ExplicitValueWinsOverVersionDefault: a set image_tag always
+// wins over the version default; with hub.image_tag_setting off it applies
+// nothing and suppresses the default, so image_tag latest opts out.
+func TestImageTag_ExplicitValueWinsOverVersionDefault(t *testing.T) {
+	srv, _, ops := newTestDBServer(t)
+	setTestVersion(t, "v0.3.0")
+	setTestImageTagFileTier(t, ops, "latest", nil)
+	assert.Equal(t, "", srv.hubScopeImageTag(), "a set value suppresses the default while the setting is off")
+	assert.Equal(t, "", srv.dispatchImageTagFor("", ""))
+
+	setImageTagExperiment(t, ops, true)
+	assert.Equal(t, "latest", srv.hubScopeImageTag(), "the explicit value applies")
+
+	srv.config.NodeImageTag = "v0.2.9"
+	assert.Equal(t, "v0.2.9", srv.hubScopeImageTag(), "an explicit older tag wins over the version")
+}
+
+// TestLogImageTag_VersionDefault: the startup line records the version
+// default and the tag it applies, with no warning.
+func TestLogImageTag_VersionDefault(t *testing.T) {
+	buf := captureImageRegistrySlog(t)
+	srv, _, _ := newTestDBServer(t)
+	setTestVersion(t, "v0.3.0-preview.5")
+	srv.LogImageTag()
+	out := buf.String()
+	assert.Contains(t, out, "source=unset")
+	assert.Contains(t, out, "version_default=true")
+	assert.Contains(t, out, "tag=v0.3.0-preview.5")
+	assert.NotContains(t, out, "experiment is off")
 }
 
 // TestLogImageTag_StartupAndChange (R6-F1): the hub logs the resolved

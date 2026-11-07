@@ -39,7 +39,10 @@ func TestImageTagApplication(t *testing.T) {
 		{"version is the binary version", "version", "v0.3.0-preview.5", "scion-claude:latest", "ghcr.io/org", "ghcr.io/org/scion-claude:v0.3.0-preview.5"},
 		{"version falls back to latest for dev", "version", "dev", "scion-claude:latest", "ghcr.io/org", "ghcr.io/org/scion-claude:latest"},
 		{"version falls back to latest for an empty version", "version", "", "scion-claude", "", "scion-claude:latest"},
-		{"unset changes nothing", "", "v0.3.0", "scion-claude:latest", "ghcr.io/org", "ghcr.io/org/scion-claude:latest"},
+		{"unset is the release version", "", "v0.3.0", "scion-claude:latest", "ghcr.io/org", "ghcr.io/org/scion-claude:v0.3.0"},
+		{"unset changes nothing for dev", "", "dev", "scion-claude:latest", "ghcr.io/org", "ghcr.io/org/scion-claude:latest"},
+		{"unset changes nothing for a nightly", "", "nightly-20261105", "scion-claude", "", "scion-claude"},
+		{"explicit latest opts out", "latest", "v0.3.0", "scion-claude:latest", "ghcr.io/org", "ghcr.io/org/scion-claude:latest"},
 		{"non-scion image takes the registry only", "v0.3.0", "dev", "ubuntu:latest", "ghcr.io/org", "ghcr.io/org/ubuntu:latest"},
 	}
 	for _, tt := range tests {

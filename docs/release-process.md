@@ -366,11 +366,16 @@ the onboarding wizard on first start.
 Images are tagged only with the release tag, for example
 `ghcr.io/homebrew-scion/scion-claude:v0.3.0-preview.5`, plus the immutable `:<short-sha>` tag that
 `build-images.sh` always adds. Preview publishing never moves `:latest` and adds no `:preview` tag.
-Scion currently pulls `:latest` unless configured otherwise, and `:latest` in
-`ghcr.io/homebrew-scion` is an old v0.2 image (harnesses added since have no `:latest` there at all).
-Runtime image resolution must use the release tag (`image_tag` in the release images design,
-Phase 3) before Homebrew users get images that match their binary. Until then the formula caveats
-tell users to build images locally or set `image_registry` to a registry with current images.
+A release build of Scion (`vX.Y.Z`, `vX.Y.Z-preview.N` or `vX.Y.Z-rc.N`) pulls the images tagged
+with its own version when `image_tag` is unset (the `hub.image_tag_version_default` experiment, on
+by default), so a Homebrew install pulls exactly the images this job pushes. Development and
+nightly builds, and an `image_tag` of `latest`, keep `:latest`, which in `ghcr.io/homebrew-scion`
+is an old v0.2 image (harnesses added since have no `:latest` there at all). The version comes
+from the build's version stamp only: a build of a tagged commit with local changes counts as that
+release. The formula caveats name the release-tagged images.
+Operators who move to a release build while their custom `image_registry` holds only `:latest`
+images must opt out (`image_tag: latest`, or disable `hub.image_tag_version_default`) or push
+images tagged with the release version.
 
 **The secret.** `HOMEBREW_SCION_TOKEN` is used for both the tap commit and the ghcr push. Store it
 as a secret of a GitHub environment named `homebrew` in `GoogleCloudPlatform/scion`, not as a
