@@ -113,6 +113,9 @@ func newIndex(maxSize int64) *CacheIndex {
 	}
 }
 
+// Dir returns the directory the cache stores its entries in.
+func (c *Cache) Dir() string { return c.basePath }
+
 // Get retrieves a cached template by content hash. It returns the path to the
 // cached directory and true if the content is present on disk.
 func (c *Cache) Get(contentHash string) (string, bool) {

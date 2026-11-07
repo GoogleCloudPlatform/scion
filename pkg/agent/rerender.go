@@ -22,13 +22,11 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"path"
 	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/agentplugin"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
@@ -429,49 +427,20 @@ func rerenderSkippedWarning(keys []string) string {
 }
 
 // rerenderSkills resolves and installs the agent's skills with the
-// provisioning step (resolveAndInstallSkills) into a scratch home, then
-// installs each resolved skill into the agent home confined to it
-// (installHomeDir), writes the resolution record there with the skills
-// already in the home listed as local, as provisioning does, and, for a
-// container-script harness, records it in the control-plane inputs record
-// Start restages from. Skills dropped from the list stay installed, as
-// after a reprovision.
+// provisioning step (installSkillsIntoHome: resolved in broker scratch,
+// installed into the agent home confined to it), writes the resolution
+// record there with the skills already in the home listed as local, as
+// provisioning does, and, for a container-script harness, records it in
+// the control-plane inputs record Start restages from. Skills dropped from
+// the list stay installed, as after a reprovision.
 func rerenderSkills(ctx context.Context, in rerenderInputs) error {
-	scratch, err := os.MkdirTemp("", "scion-rerender-skills-")
-	if err != nil {
-		return err
-	}
-	defer func() { _ = os.RemoveAll(scratch) }()
-	record, err := resolveAndInstallSkills(ctx, in.AgentName, in.ProjectDir, in.Harness, scratch, in.Config.Skills)
+	record, err := installSkillsIntoHome(ctx, in.AgentName, in.ProjectDir, in.Harness, in.AgentHome, in.Config.Skills)
 	if err != nil {
 		return err
 	}
 	if record == nil {
 		return nil
 	}
-	skillsDir := in.Harness.SkillsDir()
-	resolved := map[string]bool{}
-	for _, e := range record.Skills {
-		name := path.Base(e.InstalledPath)
-		if name == "." || name == "/" || name == ".." || strings.ContainsAny(name, "/\\") {
-			return fmt.Errorf("invalid installed skill name %q", name)
-		}
-		resolved[name] = true
-		rel := filepath.Join(skillsDir, name)
-		if err := installHomeDir(filepath.Join(scratch, rel), in.AgentHome, rel); err != nil {
-			return fmt.Errorf("install skill %s: %w", name, err)
-		}
-	}
-	home, err := os.OpenRoot(in.AgentHome)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = home.Close() }()
-	local, err := rootLocalSkills(home, skillsDir, resolved)
-	if err != nil {
-		return err
-	}
-	record.Skills = append(local, record.Skills...)
 	data, err := json.MarshalIndent(record, "", "  ")
 	if err != nil {
 		return err
@@ -487,36 +456,6 @@ func rerenderSkills(ctx context.Context, in rerenderInputs) error {
 		return err
 	}
 	return os.WriteFile(filepath.Join(dir, resolvedSkillsInputName), data, 0o644)
-}
-
-// rootLocalSkills lists, as enumerateLocalSkills does, the skill
-// directories already in the agent home's skills directory, except the
-// names in skip, without following links: an entry that is not a real
-// directory is not a skill. A skills directory that is missing or not a
-// real directory lists none.
-func rootLocalSkills(home *os.Root, skillsDir string, skip map[string]bool) ([]SkillResolutionEntry, error) {
-	if ok, err := realDirChain(home, filepath.Clean(skillsDir), true); err != nil || !ok {
-		return nil, err
-	}
-	entries, err := readRootDir(home, skillsDir)
-	if err != nil {
-		return nil, err
-	}
-	var out []SkillResolutionEntry
-	for _, e := range entries {
-		if !e.IsDir() || e.Type()&os.ModeSymlink != 0 || strings.HasPrefix(e.Name(), ".") || skip[e.Name()] {
-			continue
-		}
-		if fi, err := home.Lstat(filepath.Join(skillsDir, e.Name(), agentplugin.ManifestFile)); err == nil && fi.Mode().IsRegular() {
-			continue
-		}
-		out = append(out, SkillResolutionEntry{
-			Name:          e.Name(),
-			InstalledPath: filepath.ToSlash(filepath.Join(skillsDir, e.Name())),
-			Source:        "local",
-		})
-	}
-	return out, nil
 }
 
 // rerenderServices writes the services file (writeServicesFile, the

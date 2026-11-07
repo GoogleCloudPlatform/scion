@@ -49,10 +49,15 @@ type routedInboundResponse struct {
 	MentionErrors      []routedMentionError   `json:"mention_errors,omitempty"`
 }
 
+// routedStatusHoldLookupFailed is the result status of a recipient whose
+// hold could not be read (ptone/scion#6859): the send is refused, and a
+// primary recipient answers 500 like the other send paths.
+const routedStatusHoldLookupFailed = "hold_lookup_failed"
+
 type routedDeliveryResult struct {
 	AgentSlug          string `json:"agent_slug"`
 	Type               string `json:"type"`   // "message" or "mention"
-	Status             string `json:"status"` // delivered, unauthorized, not_running, conversation_not_resolved, error, not_attempted
+	Status             string `json:"status"` // delivered, unauthorized, not_running, hold_lookup_failed, conversation_not_resolved, error, not_attempted
 	MessageID          string `json:"message_id,omitempty"`
 	Error              string `json:"error,omitempty"`
 	PersistenceWarning string `json:"persistence_warning,omitempty"`
@@ -305,6 +310,13 @@ func (s *Server) handleBrokerInboundRouted(w http.ResponseWriter, r *http.Reques
 				fmt.Sprintf("primary agent %q is not running", primaryAgent.Slug),
 				map[string]interface{}{"results": results})
 			return
+		case routedStatusHoldLookupFailed:
+			// A store fault, not a dispatch failure: the same 500 the other
+			// send paths give when the target's hold cannot be read.
+			dmErr := heldLookupFaultDMError()
+			writeError(w, dmErr.HTTPStatus, dmErr.Code, dmErr.Message,
+				map[string]interface{}{"results": results})
+			return
 		case "conversation_not_resolved":
 			writeError(w, http.StatusConflict, ErrCodeConversationNotResolved,
 				"conversation resolution failed for primary agent",
@@ -405,6 +417,19 @@ func (s *Server) dispatchRoutedRecipient(
 		return result
 	}
 
+	// --- Hold check ---
+	// A held agent (ptone/scion#3433) is refused like a suspended one, with
+	// the refusal the other send paths use (ptone/scion#6859); a lookup
+	// fault refuses. Before conversation resolution, so nothing is written.
+	if dmErr := s.heldTargetRefusal(ctx, agent); dmErr != nil {
+		result.Status = "not_running"
+		if dmErr.HTTPStatus == http.StatusInternalServerError {
+			result.Status = routedStatusHoldLookupFailed
+		}
+		result.Error = dmErr.Message
+		return result
+	}
+
 	// --- Dispatcher availability ---
 	// Check before conversation resolution to avoid creating orphan
 	// conversation rows when no dispatcher is available.
@@ -471,6 +496,8 @@ func (s *Server) dispatchRoutedRecipient(
 	// offload metadata keys — the switch above doesn't exclude them, so a
 	// plugin could otherwise spoof body_offloaded/body_chars/body_sha256.
 	msg.Metadata = messaging.StripReservedMetadata(msg.Metadata)
+	// A human sender's profile time zone travels with the message.
+	msg.Metadata = s.stampSenderTimezone(ctx, msg.Metadata, msg.Sender, msg.SenderID)
 
 	// --- Validate through envelope choke point ---
 	if err := messaging.ValidateLegacyMessage(msg); err != nil {

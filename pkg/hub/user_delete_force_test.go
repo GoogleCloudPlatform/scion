@@ -857,6 +857,93 @@ func TestForceDeleteUser_BrokerUnavailableIsFailed(t *testing.T) {
 	assert.Equal(t, store.DeletionStateNone, mustGetAgent(t, f.s, a.ID).DeletionState, "no delete was claimed")
 }
 
+// An agent whose delete the engine refuses for an inconsistent saved
+// placement (rollbackPlacement) is recorded failed with the refusal's
+// code, not only its message, and kept; the deletion stays stopping and
+// names the code.
+func TestForceDeleteUser_PlacementRefusalRecordsCode(t *testing.T) {
+	f := newForceDelFixture(t, time.Hour)
+	ctx := context.Background()
+	a := f.agent(t, "pr-a", nil)
+	t.Cleanup(func() { deletionPlacementRefusals.Delete(a.ID) })
+	f.disp.setFn(func(_ context.Context, got *store.Agent) error {
+		if got.ID == a.ID {
+			return placementRefusalFor(got)
+		}
+		return nil
+	})
+
+	rec := f.forceDelete(t)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	var v userDeletionView
+	require.Eventually(t, func() bool {
+		v = f.getDeletion(t)
+		return v.Counts.Failed == 1
+	}, 15*time.Second, 20*time.Millisecond, "the agent reads failed")
+	require.Len(t, v.Agents, 1)
+	assert.Equal(t, store.UserDeletionOutcomeFailed, v.Agents[0].Outcome)
+	want := "placement conflict: " + ErrCodeRuntimeTargetPinStale + ": " + placementRefusalFor(a).Message
+	assert.Equal(t, want, v.Agents[0].LastError, "the record names the placement code, then the guidance")
+
+	got := mustGetAgent(t, f.s, a.ID)
+	assert.True(t, got.DeletedAt.IsZero(), "the agent is kept")
+	assert.Equal(t, store.DeletionStateFailed, got.DeletionState)
+	assert.Equal(t, store.DeletionCodeConflict, got.DeletionCode)
+
+	// A later reconcile keeps the code, and the deletion names it.
+	f.srv.reconcileUserDeletion(ctx, v.DeletionID, false)
+	v = f.getDeletion(t)
+	assert.Equal(t, store.UserDeletionStateStopping, v.State)
+	assert.Equal(t, want, v.Agents[0].LastError)
+	assert.Contains(t, v.LastError, a.ID)
+	assert.Contains(t, v.LastError, ErrCodeRuntimeTargetPinStale)
+}
+
+// An agent whose saved placement is inconsistent and whose Runtime Broker
+// is not connected is recorded with the placement refusal, not as broker
+// unavailable: the placement pre-check runs first, as on the agent delete
+// route. No delete is claimed or dispatched.
+func TestForceDeleteUser_PlacementRefusalBeforeBrokerUnavailable(t *testing.T) {
+	f := newForceDelFixture(t, time.Hour)
+	ctx := context.Background()
+	offline := &store.RuntimeBroker{ID: tid("broker-force-del-pr-offline"), Name: "Offline Broker", Slug: "force-del-pr-offline",
+		Status: store.BrokerStatusOffline, Endpoint: "http://localhost:9802"}
+	require.NoError(t, f.s.CreateRuntimeBroker(ctx, offline))
+	// Pinned to the fixture broker, then moved to the offline one (as an
+	// older binary would do): the pin is stale.
+	a := &store.Agent{ID: tid("agent-pr-off"), Slug: "pr-off", Name: "pr-off", ProjectID: f.project.ID,
+		RuntimeBrokerID: f.broker.ID, Phase: string(state.PhaseRunning),
+		PinnedRuntimeBrokerID: f.broker.ID, PinnedRuntimeTargetID: "target-pr-off", PinnedRuntimeTargetType: "docker",
+		OwnerID: f.dave.ID, CreatedBy: f.dave.ID, Ancestry: []string{f.dave.ID}}
+	require.NoError(t, f.s.CreateAgent(ctx, a))
+	moved := mustGetAgent(t, f.s, a.ID)
+	moved.RuntimeBrokerID = offline.ID
+	require.NoError(t, f.s.UpdateAgent(ctx, moved))
+	before := mustGetAgent(t, f.s, a.ID)
+	require.True(t, before.IsPinned())
+	require.False(t, before.PinValid())
+	require.False(t, f.srv.brokerReachable(ctx, before), "the agent's Runtime Broker is not connected")
+
+	rec := f.forceDelete(t)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	var v userDeletionView
+	require.Eventually(t, func() bool {
+		v = f.getDeletion(t)
+		return v.Counts.Failed == 1 && v.LastError != ""
+	}, 15*time.Second, 20*time.Millisecond, "the agent reads failed and the deletion names it")
+	require.Len(t, v.Agents, 1)
+	assert.NotEqual(t, userDeletionBrokerUnavailable, v.Agents[0].LastError)
+	assert.Contains(t, v.Agents[0].LastError, "placement conflict: "+ErrCodeRuntimeTargetPinStale)
+	assert.Contains(t, v.LastError, ErrCodeRuntimeTargetPinStale)
+	assert.NotContains(t, v.LastError, userDeletionBrokerUnavailable)
+
+	after := mustGetAgent(t, f.s, a.ID)
+	assert.Equal(t, before.DeletionClaim, after.DeletionClaim, "no claim is taken")
+	assert.Equal(t, store.DeletionStateNone, after.DeletionState)
+	assert.True(t, after.DeletedAt.IsZero(), "the agent is kept")
+	assert.Zero(t, f.disp.callCount(), "nothing is dispatched")
+}
+
 // A reconcile pass holding an older copy of an agent's record cannot
 // replace the stopped outcome a finalize recorded since it read it: the
 // agent is reported stopped, not removed.

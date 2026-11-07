@@ -32,6 +32,9 @@ var (
 	// ErrRuntimeBrokerNotFlat: the Runtime Broker row has no stored runtime
 	// target (legacy); it is never converted implicitly.
 	ErrRuntimeBrokerNotFlat = errors.New("runtime broker is not a flat runtime broker")
+	// ErrRuntimeBrokerNotLegacy: the Runtime Broker row stores a runtime
+	// target (flat), so it has no conversion plan.
+	ErrRuntimeBrokerNotLegacy = errors.New("runtime broker is not a legacy runtime broker")
 	// ErrPinnedPlacementChanged: SetAgentPinnedRuntimeTarget's expected
 	// placement no longer matches the row.
 	ErrPinnedPlacementChanged = errors.New("pinned placement changed")

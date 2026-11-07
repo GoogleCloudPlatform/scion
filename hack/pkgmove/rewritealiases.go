@@ -29,10 +29,10 @@ import (
 
 // analyzeRewriteAliases plans a -rewrite-aliases run: every reference in the
 // source package (and its external tests) to a resolvable alias becomes a
-// direct reference to the alias target, and unexported entries of
-// pkgmove-generated alias files that are no longer referenced are removed
-// (a file left without entries is deleted). With -to, only aliases of that
-// package are rewritten. No file moves.
+// direct reference to the alias target, and unexported entries of generated
+// alias files (pkgmove or hubshard extract) that are no longer referenced are
+// removed (a file left without entries is deleted). With -to, only aliases of
+// that package are rewritten. No file moves.
 func (a *analysis) analyzeRewriteAliases() (*analysis, error) {
 	a.plan.RewriteAliases = true
 	if len(a.cfg.Files) > 0 {

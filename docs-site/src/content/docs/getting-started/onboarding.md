@@ -51,7 +51,7 @@ The wizard runs through six steps and finishes with a confirmation screen. Each 
 
 ### 1. Welcome & identity
 
-Enter a **display name** and **email**. This identity is attached to the agents and activity you create on this workstation. Provide at least one of the two to continue.
+Enter a **display name** and **email**. This identity is attached to the agents and activity you create on this workstation. Saving this step (`PUT /api/v1/system/identity`) updates the local user record in the Hub database and the live development identity alongside `settings.yaml`, so `GET /api/v1/auth/me`, the dashboard, and `scion hub status` show the chosen display name and email immediately without a server restart. Provide at least one of the two to continue.
 
 ### 2. System check
 

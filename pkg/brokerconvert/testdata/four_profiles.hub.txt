@@ -1,0 +1,68 @@
+Proposed only: nothing was written, registered or changed. Instance keys and names are proposals you may edit. Harness env values are redacted: shown as <redacted> in the human output and omitted from JSON (keys only); --show-env-values prints them in the human output, which then contains secrets and must not be shared.
+Legacy Runtime Broker: build-host (b-legacy)
+
+1. Proposed instances
+# Proposed, not applied. Keys and names are editable.
+server:
+  broker:
+    instances:
+      - key: docker-build
+        name: docker-build
+        runtime_target:
+          type: docker
+        agent_defaults:
+          image_registry: reg.example/build
+      - key: docker-local
+        name: docker-local
+        runtime_target:
+          type: docker
+        agent_defaults:
+          image_registry: reg.example/local
+      - key: k8s-prod-agents
+        name: k8s-prod-agents
+        runtime_target:
+          type: kubernetes
+          context: prod
+          namespace: agents
+
+2. Profile map
+   build -> docker-build
+   k8s -> k8s-prod-agents
+   legacy-podman -> (no mapping: unsupported_flat_target_type)
+   local -> docker-local
+   Notice: the Hub's profile list for this Runtime Broker differs from the local settings.
+     local only: legacy-podman, local
+     Hub only: gpu
+
+3. Findings
+   [notice] profile_conflict profiles.* (profiles: build, local)
+     these profiles share a target but differ in one or more settings, so they keep separate instances; compare the proposed instances, then give the profiles the same values or add a field choice to merge them
+   [blocking] unsupported_flat_target_type runtimes.pod.type (profiles: legacy-podman)
+     this runtime type has no flat Runtime Broker target; keep these profiles on the legacy Runtime Broker
+
+4. Capacity
+   Outcome: preserve_by_split
+   Legacy maxAgents: 10
+   docker-build: maxAgents 4
+   docker-local: maxAgents 3
+   k8s-prod-agents: maxAgents 3
+   Note: enforcement_not_visible: whether the Hub enforces Runtime Broker agent limits is not visible from the CLI
+   Note: proposed_instance_keys: allocations are keyed by the proposed instance keys; Runtime Broker IDs are assigned at registration
+
+5. Still bound on the Hub
+   Agents:
+     a-4  delta  project api  phase created  (profile not recorded)
+     a-3  gamma  project api  phase running  legacy-podman -> (no mapping)
+     a-1  alpha  project web  phase running  local -> docker-local
+     (1 agent in a terminal phase not listed)
+     Agents cannot be moved onto a flat Runtime Broker today: finish or recreate them before the host switches.
+   Projects:
+     p-2  api
+     p-1  web
+       activeProfile: k8s -> k8s-prod-agents
+       service account for profile: legacy-podman -> (no mapping)
+       service account for profile: local -> docker-local
+
+Summary
+   4 profiles in scope, 3 mapped, 3 proposed instances, 1 blocking finding, 1 notice finding, 3 bound agents, 2 providing projects.
+   Result: 1 blocking finding.

@@ -34,8 +34,8 @@ import (
 // every call except wait and answers exec with execExit. wait blocks like a
 // live sandbox's, so the exit watcher a successful Run starts never writes
 // the state file; a cleanup registered after the TempDirs (cleanups run
-// last-in first-out) cancels the watchers before those directories are
-// removed.
+// last-in first-out) joins the watchers (stopWatchersOnCleanup) before
+// those directories are removed.
 func newFenceSandboxRuntime(t *testing.T, execExit int) (*CloudRunSandboxRuntime, string) {
 	t.Helper()
 	log := filepath.Join(t.TempDir(), "calls.log")
@@ -46,14 +46,7 @@ case "$1" in
   *)    exit 0 ;;
 esac`, log, execExit))
 	rt := newWorkaroundTestRuntime(t, bin)
-	t.Cleanup(func() {
-		rt.watchMu.Lock()
-		defer rt.watchMu.Unlock()
-		for name, cancel := range rt.watchCancels {
-			cancel()
-			delete(rt.watchCancels, name)
-		}
-	})
+	stopWatchersOnCleanup(t, rt.state.path, rt)
 	return rt, log
 }
 

@@ -229,7 +229,8 @@ _omni_chain_parent() {
 # step_build_args <step_id>
 #
 # Emits one KEY=VALUE line per build-arg on stdout. Reads orchestrator
-# state from environment: REGISTRY, TAG, SHORT_SHA, COMMIT_SHA, BASE_TAG.
+# state from environment: REGISTRY, TAG, SHORT_SHA, COMMIT_SHA, VERSION,
+# BUILD_TIME, BASE_TAG.
 # BASE_TAG is the tag (sha or mutable) the orchestrator chose for this
 # step's parent image. When REGISTRY is empty (local-only build), BASE_IMAGE
 # is emitted with a bare image name (e.g. core-base:latest) so it matches
@@ -276,6 +277,11 @@ step_build_args() {
       if [[ -n "${VERSION:-}" ]]; then
         echo "VERSION=${VERSION}"
       fi
+      # Commit time (build-images.sh); the Dockerfile falls back to the
+      # build host clock when it is empty.
+      if [[ -n "${BUILD_TIME:-}" ]]; then
+        echo "BUILD_TIME=${BUILD_TIME}"
+      fi
       ;;
     scion-hub)
       echo "BASE_IMAGE=${prefix}scion-base:${BASE_TAG}"
@@ -293,6 +299,11 @@ step_build_args() {
       fi
       if [[ -n "${VERSION:-}" ]]; then
         echo "VERSION=${VERSION}"
+      fi
+      # Commit time (build-images.sh); the Dockerfile falls back to the
+      # build host clock when it is empty.
+      if [[ -n "${BUILD_TIME:-}" ]]; then
+        echo "BUILD_TIME=${BUILD_TIME}"
       fi
       ;;
     *)

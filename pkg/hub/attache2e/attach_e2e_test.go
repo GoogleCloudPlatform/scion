@@ -73,6 +73,10 @@ const (
 	// still fails here.
 	firstDataTimeout = 10 * time.Second
 	stepTimeout      = 10 * time.Second
+
+	// attachAttempts bounds attach's retries of a 4503 session_not_ready
+	// close.
+	attachAttempts = 3
 )
 
 // dbSeq keeps each run's in-memory database unique under -count.
@@ -222,14 +226,8 @@ func TestAttachEndToEnd(t *testing.T) {
 			c := f.ccMgr.GetConnection(f.brokerID)
 			return c != nil && c != before
 		}, 20*time.Second, 50*time.Millisecond, "the broker should reconnect its control channel")
-		// A registered session can still fail the broker's handshake and be
-		// dropped until the broker's next retry, a hub race tracked in
-		// https://github.com/ptone/scion/issues/5869. Until that is fixed, a
-		// 503 "Runtime broker not connected" is retried until the broker is
-		// back.
-		again := f.dialWhileBrokerUnavailable(t, 20*time.Second, 80, 24)
+		again := f.attach(t, 80, 24)
 		defer closeQuietly(again)
-		f.awaitAttached(t, again, 80, 24)
 	})
 }
 
@@ -455,46 +453,32 @@ func (f *fixture) dialOK(t *testing.T, cols, rows int) *websocket.Conn {
 // attach opens the attach WebSocket, reads the first terminal output, and
 // waits until the tmux client is attached at the requested size, so no input
 // is sent before the tmux client is attached.
+//
+// A 4503 session_not_ready close is retried, as the client's reconnect
+// contract does (wsprotocol.PTYReconnectTiming), up to attachAttempts times.
+// The broker sends it when the attach exec never started even though the
+// container is running, which includes a transient failure to start the
+// local PTY exec (ptone/scion#7227: "fork/exec ...: operation not
+// permitted"). The cause of that failure is tracked in ptone/scion#7232.
+// The broker has ended that stream before it sends the close, so the next
+// dial starts from the same state. Any other close fails.
 func (f *fixture) attach(t *testing.T, cols, rows int) *websocket.Conn {
 	t.Helper()
-	conn := f.dialOK(t, cols, rows)
-	f.awaitAttached(t, conn, cols, rows)
-	return conn
-}
-
-// awaitAttached reads the first terminal output on an upgraded attach
-// WebSocket and waits until the tmux client is attached at the given size.
-func (f *fixture) awaitAttached(t *testing.T, conn *websocket.Conn, cols, rows int) {
-	t.Helper()
-	readUntil(t, conn, firstDataTimeout, "the first terminal output", func(out string) bool { return out != "" })
-	f.requireClientSize(t, fmt.Sprintf("%dx%d", cols, rows))
-}
-
-// dialWhileBrokerUnavailable opens the attach WebSocket, retrying while the
-// hub answers 503 because the broker's control channel is not connected. Any
-// other failure, or a 503 that outlasts timeout, fails the test.
-func (f *fixture) dialWhileBrokerUnavailable(t *testing.T, timeout time.Duration, cols, rows int) *websocket.Conn {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for {
-		conn, resp, err := f.dial(cols, rows)
+	for attempt := 1; ; attempt++ {
+		conn := f.dialOK(t, cols, rows)
+		out, err := readData(conn, firstDataTimeout, func(out string) bool { return out != "" })
 		if err == nil {
+			f.requireClientSize(t, fmt.Sprintf("%dx%d", cols, rows))
 			return conn
 		}
-		status, body := 0, ""
-		if resp != nil {
-			status = resp.StatusCode
-			if resp.Body != nil {
-				b, _ := io.ReadAll(resp.Body)
-				_ = resp.Body.Close()
-				body = string(b)
-			}
+		closeQuietly(conn)
+		var ce *websocket.CloseError
+		if attempt < attachAttempts && errors.As(err, &ce) &&
+			ce.Code == wsprotocol.ClosePTYUpstreamUnavailable && ce.Text == wsprotocol.CloseReasonSessionNotReady {
+			t.Logf("attach attempt %d closed with %v; retrying", attempt, err)
+			continue
 		}
-		unavailable := status == http.StatusServiceUnavailable && strings.Contains(body, hub.ErrCodeRuntimeBrokerUnavail)
-		if !unavailable || time.Now().After(deadline) {
-			t.Fatalf("attach upgrade failed: %v (HTTP %d: %s)", err, status, body)
-		}
-		time.Sleep(50 * time.Millisecond)
+		t.Fatalf("waiting for the first terminal output: %v; output so far: %q", err, out)
 	}
 }
 
@@ -502,13 +486,25 @@ func (f *fixture) dialWhileBrokerUnavailable(t *testing.T, timeout time.Duration
 // true. It fails, showing the output so far, on a timeout or a close.
 func readUntil(t *testing.T, conn *websocket.Conn, timeout time.Duration, what string, done func(out string) bool) string {
 	t.Helper()
-	require.NoError(t, conn.SetReadDeadline(time.Now().Add(timeout)))
+	out, err := readData(conn, timeout, done)
+	if err != nil {
+		t.Fatalf("waiting for %s: %v; output so far: %q", what, err, out)
+	}
+	return out
+}
+
+// readData reads data frames, accumulating their bytes, until done reports
+// true. On a timeout or a close it returns the output so far and the error.
+func readData(conn *websocket.Conn, timeout time.Duration, done func(out string) bool) (string, error) {
+	if err := conn.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+		return "", err
+	}
 	defer func() { _ = conn.SetReadDeadline(time.Time{}) }()
 	var out strings.Builder
 	for {
 		_, msg, err := conn.ReadMessage()
 		if err != nil {
-			t.Fatalf("waiting for %s: %v; output so far: %q", what, err, out.String())
+			return out.String(), err
 		}
 		var m wsprotocol.PTYDataMessage
 		if json.Unmarshal(msg, &m) != nil || m.Type != wsprotocol.TypeData {
@@ -516,7 +512,7 @@ func readUntil(t *testing.T, conn *websocket.Conn, timeout time.Duration, what s
 		}
 		out.Write(m.Data)
 		if done(out.String()) {
-			return out.String()
+			return out.String(), nil
 		}
 	}
 }

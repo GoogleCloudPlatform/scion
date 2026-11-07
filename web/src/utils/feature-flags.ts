@@ -218,6 +218,14 @@ export const SSE_HIDDEN_TAB_CLOSE_FLAG = 'web.sse_hidden_tab_close';
 export const ARTIFACT_REVIEW_EDITOR_FLAG = 'web.artifact_review_editor';
 
 /**
+ * Manage access dialog (ptone/scion#7107): one Manage access button and
+ * dialog on the artifact page instead of Share, Grant review access and
+ * Retention…. Presentation only: every change goes through the existing
+ * routes, which the hub decides. Default OFF.
+ */
+export const ARTIFACT_MANAGE_ACCESS_FLAG = 'web.artifact_manage_access';
+
+/**
  * Force user delete (ptone/scion#2143): the admin users page offers to
  * force-delete a user who has agents and shows a deletion in
  * progress. Presentation only: the hub checks the experiment on the force

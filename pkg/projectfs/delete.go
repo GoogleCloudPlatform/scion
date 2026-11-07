@@ -217,6 +217,8 @@ func errorClass(err error) string {
 		return "timed out"
 	case errors.Is(err, context.Canceled):
 		return "canceled"
+	case errors.Is(err, ErrStillPresent):
+		return "still present after removal"
 	case errors.Is(err, ErrNoProjectTree):
 		return "refused: no project tree below the host base (share not mounted)"
 	case errors.Is(err, ErrRefused):
@@ -239,6 +241,10 @@ func AuditAll(ctx context.Context, logger *slog.Logger, deleter Deleter, project
 	}
 }
 
+// provisionDir is a project's state directory below its project root
+// (provisioning lock and sentinel, the deferred-deletion tombstone).
+const provisionDir = "provision"
+
 // DeleteAfterFile is the deferred-deletion tombstone in a project's
 // provision/ directory: an RFC 3339 UTC time.
 const DeleteAfterFile = ".scion-delete-after"
@@ -260,11 +266,27 @@ type DeferredDeletion struct {
 // a share outside the mount root). Retrying cannot help with it.
 var ErrRefused = errors.New("projectfs: deletion refused")
 
+// AgentWorkspacePendingReason is the reason of a kept agent directory: it
+// still holds entries the hub does not own, normally the agent's own
+// workspace, which only the broker removes.
+const AgentWorkspacePendingReason = "the agent directory is not empty: workspace pending broker removal"
+
+// ErrStillPresent marks a tree that was reported removed (or absent) but
+// is still there when checked right after.
+var ErrStillPresent = errors.New("projectfs: still present after removal")
+
 // ErrNoProjectTree marks the refusal of a shared Layout whose host base
 // exists but has no subpath root: the share is not mounted, or the hub has
 // no project yet (callers that can tell, from their own records, treat the
 // latter as expected).
 var ErrNoProjectTree = errors.New("projectfs: no project tree below the host base")
+
+// ErrShareEmpty marks, together with ErrNoProjectTree, a shared Layout whose
+// host base has no entries at all: the share is not mounted (only the empty
+// mount point is), or a mounted share was emptied. errors.Is(err,
+// ErrNoProjectTree) holds for it too, so callers of ErrNoProjectTree see no
+// change.
+var ErrShareEmpty = errors.New("projectfs: the host base is empty")
 
 // Retryable reports whether d failed in a way a later attempt may clear: a
 // removal that failed part-way (for example while a terminating process was

@@ -166,6 +166,11 @@ type HeartbeatService struct {
 	presentationEpoch    int64
 	nextPresentationSeq  func() int64
 
+	// conversionPlan, when set, returns a legacy broker's conversion plan
+	// snapshot (Server.heartbeatConversionPlan), sent on every heartbeat.
+	// A nil result omits the field. Never consulted in flat mode.
+	conversionPlan func() *api.ConversionPlanPresentation
+
 	mu          sync.Mutex
 	listFailing map[string]bool // target key -> last listing failed (guarded by mu)
 	// listings holds the listing in progress for each target key (guarded
@@ -257,6 +262,13 @@ func defaultListingDeadline(interval time.Duration) time.Duration {
 		deadline = floor
 	}
 	return deadline
+}
+
+// SetConversionPlanSource sets the source of a legacy broker's conversion
+// plan snapshot, called once per heartbeat; a nil result omits the field.
+// It has no effect in flat mode. Call it before Start.
+func (s *HeartbeatService) SetConversionPlanSource(fn func() *api.ConversionPlanPresentation) {
+	s.conversionPlan = fn
 }
 
 // SetVersion sets the broker version reported in heartbeats.
@@ -481,6 +493,9 @@ func (s *HeartbeatService) buildHeartbeat(ctx context.Context) *hubclient.Broker
 		heartbeat.PresentationTargetID = s.presentationTargetID
 		heartbeat.PresentationEpoch = s.presentationEpoch
 		heartbeat.PresentationSeq = s.nextPresentationSeq()
+	}
+	if !s.flat && s.conversionPlan != nil {
+		heartbeat.ConversionPlanPresentation = s.conversionPlan()
 	}
 
 	// Starts in flight are read BEFORE the agents are listed: a start that

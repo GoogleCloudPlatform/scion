@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -30,6 +31,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	yamlv3 "gopkg.in/yaml.v3"
 )
 
@@ -221,7 +223,11 @@ func (s *Server) loadGitHubAppSecret(ctx context.Context, name string) (string, 
 	}
 
 	// Fallback: read directly from the database
-	return s.store.GetSecretValue(ctx, name, store.ScopeHub, s.hubID)
+	stored, err := s.store.GetSecretValue(ctx, name, store.ScopeHub, s.hubID)
+	if err != nil {
+		return "", err
+	}
+	return s.openHubSecret(ctx, stored)
 }
 
 // persistGitHubAppConfigToDB writes the non-sensitive GitHub App configuration
@@ -364,12 +370,15 @@ func (s *Server) handleCreateGitHubAppInstallation(w http.ResponseWriter, r *htt
 		return
 	}
 
+	var missing []settingsFieldError
 	if installation.InstallationID == 0 {
-		writeError(w, http.StatusBadRequest, ErrCodeValidationError, "installation_id is required", nil)
-		return
+		missing = append(missing, settingsFieldError{Field: "installation_id", Message: "installation_id is required"})
 	}
 	if installation.AccountLogin == "" {
-		writeError(w, http.StatusBadRequest, ErrCodeValidationError, "account_login is required", nil)
+		missing = append(missing, settingsFieldError{Field: "account_login", Message: "account_login is required"})
+	}
+	if len(missing) > 0 {
+		writeSettingsValidation(w, missing[0].Message, missing, nil)
 		return
 	}
 
@@ -396,8 +405,58 @@ func parseInstallationIDFromPath(r *http.Request) (int64, error) {
 	return strconv.ParseInt(path, 10, 64)
 }
 
-// handleGitHubAppInstallationByIDRead handles GET /api/v1/github-app/installations/{id}.
+// handleGitHubAssociationReport serves the cached admin association report
+// (githubAssociationReport). ?refresh=true asks for a full rebuild, which is
+// refused with 429 and Retry-After inside the rebuild interval.
+func (s *Server) handleGitHubAssociationReport(w http.ResponseWriter, r *http.Request) {
+	refresh := false
+	if v := r.URL.Query().Get("refresh"); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "refresh must be true or false", nil)
+			return
+		}
+		refresh = b
+	}
+	report, retryAfter, err := s.githubAssociationReport(r.Context(), refresh)
+	if errors.Is(err, errGitHubAssociationReportRateLimited) {
+		seconds := int((retryAfter + time.Second - 1) / time.Second)
+		if seconds < 1 {
+			seconds = 1
+		}
+		w.Header().Set("Retry-After", strconv.Itoa(seconds))
+		writeError(w, http.StatusTooManyRequests, ErrCodeRateLimited,
+			"the association report was rebuilt recently; retry later", map[string]interface{}{"retry_after_seconds": seconds})
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to build association report", nil)
+		return
+	}
+	unauthorized := 0
+	for _, e := range report.Entries {
+		if !e.Authorized {
+			unauthorized++
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"associations": report.Entries,
+		"total":        len(report.Entries),
+		"unauthorized": unauthorized,
+		"generated_at": report.GeneratedAt.UTC().Format(time.RFC3339),
+		"truncated":    report.Truncated,
+	})
+}
+
+// handleGitHubAppInstallationByIDRead handles GET /api/v1/github-app/installations/{id}
+// and the read-only association report at
+// GET /api/v1/github-app/installations/association-report (same hub-admin
+// route guard: hub.github_app.read).
 func (s *Server) handleGitHubAppInstallationByIDRead(w http.ResponseWriter, r *http.Request) {
+	if strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/v1/github-app/installations/"), "/") == githubAssociationReportPath {
+		s.handleGitHubAssociationReport(w, r)
+		return
+	}
 	installationID, err := parseInstallationIDFromPath(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "invalid installation ID", nil)
@@ -520,10 +579,33 @@ func projectGitHubRouteAction(method string) Action {
 	}
 }
 
+// githubInstallationBindPermission is the permission a caller needs to bind
+// a GitHub App installation to a project: the same hub GitHub App update
+// permission the hub-admin GitHub App routes require. Binding is admin-only;
+// a non-admin project gets an installation token only through the
+// creator-access proof (authorizeGitHubAppAssociation).
+var githubInstallationBindPermission = RouteMetadata{
+	RouteID:    "projects.githubInstallation.bind",
+	Permission: "hub.github_app.update",
+	Resource:   "hub",
+	Action:     "update",
+}
+
 // handleProjectGitHubInstallation handles PUT and DELETE /api/v1/projects/{id}/github-installation.
+//
+// PUT is an explicit admin binding: the caller must hold
+// githubInstallationBindPermission (in addition to project update, checked
+// by the router), the project's remote must be on the configured GitHub
+// host, and the installation must be active and belong to the remote's
+// owner. The binding is recorded in githubInstallationBindingAnnotation and
+// re-validated at every token mint. DELETE removes the association and any
+// binding; it needs only project update access.
 func (s *Server) handleProjectGitHubInstallation(w http.ResponseWriter, r *http.Request, project *store.Project) {
 	switch r.Method {
 	case http.MethodPut:
+		if !s.enforceRoutePermission(w, r, githubInstallationBindPermission) {
+			return
+		}
 		var req struct {
 			InstallationID int64 `json:"installation_id"`
 		}
@@ -532,12 +614,13 @@ func (s *Server) handleProjectGitHubInstallation(w http.ResponseWriter, r *http.
 			return
 		}
 		if req.InstallationID == 0 {
-			writeError(w, http.StatusBadRequest, ErrCodeValidationError, "installation_id is required", nil)
+			writeSettingsFieldError(w, "installation_id", "installation_id is required")
 			return
 		}
 
 		// Verify installation exists
-		if _, err := s.store.GetGitHubInstallation(r.Context(), req.InstallationID); err != nil {
+		inst, err := s.store.GetGitHubInstallation(r.Context(), req.InstallationID)
+		if err != nil {
 			if err == store.ErrNotFound {
 				writeError(w, http.StatusNotFound, ErrCodeNotFound, "installation not found", nil)
 				return
@@ -546,16 +629,56 @@ func (s *Server) handleProjectGitHubInstallation(w http.ResponseWriter, r *http.
 			return
 		}
 
-		project.GitHubInstallationID = &req.InstallationID
-		project.GitHubAppStatus = &store.GitHubAppProjectStatus{
-			State:       store.GitHubAppStateUnchecked,
-			LastChecked: timeNow(),
+		// An admin binding still has to name the right host and the
+		// installation of the repository's owner.
+		host := s.githubAppWebHost()
+		owner, _, ok := githubapp.RemoteOwnerRepo(project.GitRemote, host)
+		if !ok {
+			writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
+				fmt.Sprintf("project git remote is not an owner/repo on the configured GitHub host %q", host), nil)
+			return
 		}
+		if inst.Status != store.GitHubInstallationStatusActive {
+			writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, "installation is not active", nil)
+			return
+		}
+		if inst.AccountLogin == "" || !strings.EqualFold(inst.AccountLogin, owner) {
+			writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
+				fmt.Sprintf("installation belongs to account %q, not the repository owner %q", inst.AccountLogin, owner), nil)
+			return
+		}
+
+		boundBy := ""
+		if user := GetUserIdentityFromContext(r.Context()); user != nil {
+			boundBy = user.ID()
+		}
+		if boundBy == "" {
+			Forbidden(w)
+			return
+		}
+		binding, err := json.Marshal(githubInstallationBinding{
+			InstallationID: req.InstallationID,
+			Remote:         util.NormalizeGitRemote(project.GitRemote),
+			BoundBy:        boundBy,
+			BoundAt:        timeNow().UTC(),
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to record binding", nil)
+			return
+		}
+		if project.Annotations == nil {
+			project.Annotations = make(map[string]string)
+		}
+		project.Annotations[githubInstallationBindingAnnotation] = string(binding)
+		s.setGitHubInstallationAssociation(project, req.InstallationID)
 
 		if err := s.store.UpdateProject(r.Context(), project); err != nil {
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to update project", nil)
 			return
 		}
+		// Again after the write, so a report read between the two cannot
+		// keep the pre-change outcome.
+		s.invalidateGitHubAssociation(project.ID)
 		s.events.PublishProjectUpdated(r.Context(), project)
 
 		writeJSON(w, http.StatusOK, map[string]interface{}{
@@ -567,11 +690,17 @@ func (s *Server) handleProjectGitHubInstallation(w http.ResponseWriter, r *http.
 	case http.MethodDelete:
 		project.GitHubInstallationID = nil
 		project.GitHubAppStatus = nil
+		// When the binding is present the map stays non-nil (possibly
+		// empty), so the store writes it, clearing the binding; delete is a
+		// no-op on a nil map.
+		delete(project.Annotations, githubInstallationBindingAnnotation)
+		s.invalidateGitHubAssociation(project.ID)
 
 		if err := s.store.UpdateProject(r.Context(), project); err != nil {
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to update project", nil)
 			return
 		}
+		s.invalidateGitHubAssociation(project.ID)
 		s.events.PublishProjectUpdated(r.Context(), project)
 
 		w.WriteHeader(http.StatusNoContent)
@@ -656,9 +785,17 @@ func (s *Server) handleProjectGitHubPermissions(w http.ResponseWriter, r *http.R
 		writeJSON(w, http.StatusOK, perms)
 
 	case http.MethodPut:
+		// Only the known fields, each "", "read" or "write". The mint
+		// never requests an empty set (githubTokenPermissionsForGrant), but
+		// an invalid body is refused here rather than stored.
 		var perms store.GitHubTokenPermissions
-		if err := readJSON(r, &perms); err != nil {
-			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "invalid request body", nil)
+		if err := readJSONStrict(r, &perms); err != nil {
+			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "invalid request body: only contents, pull_requests, issues, metadata, checks and actions are accepted", nil)
+			return
+		}
+		if field, ok := validateGitHubTokenPermissions(perms); !ok {
+			writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+				fmt.Sprintf("%s must be \"read\", \"write\" or empty", field), nil)
 			return
 		}
 
@@ -703,11 +840,19 @@ func (s *Server) handleProjectGitIdentity(w http.ResponseWriter, r *http.Request
 		switch identity.Mode {
 		case "bot", "custom", "co-authored":
 		default:
-			writeError(w, http.StatusBadRequest, ErrCodeValidationError, "mode must be 'bot', 'custom', or 'co-authored'", nil)
+			writeSettingsFieldError(w, "mode", "mode must be 'bot', 'custom', or 'co-authored'")
 			return
 		}
 		if identity.Mode == "custom" && (identity.Name == "" || identity.Email == "") {
-			writeError(w, http.StatusBadRequest, ErrCodeValidationError, "name and email are required when mode is 'custom'", nil)
+			const msg = "name and email are required when mode is 'custom'"
+			var missing []settingsFieldError
+			if identity.Name == "" {
+				missing = append(missing, settingsFieldError{Field: "name", Message: msg})
+			}
+			if identity.Email == "" {
+				missing = append(missing, settingsFieldError{Field: "email", Message: msg})
+			}
+			writeSettingsValidation(w, msg, missing, nil)
 			return
 		}
 		project.GitIdentity = &identity

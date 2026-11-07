@@ -50,7 +50,7 @@ A `scion.dev/clone-url` label must use `https`, `ssh` or `git`. Agents of a proj
 
 ### Option A: GitHub App Integration
 
-When creating a project, Scion automatically associates it with the corresponding GitHub App installation. The system maintains a background refresh loop for installation tokens, and the `sciontool` credential helper provides fresh tokens to `git` on-demand inside the agent container. No manual setup is required.
+When creating a project, Scion associates it with a matching GitHub App installation when the association is authorized: the project's git remote must be on the configured GitHub host (`github.com`, or the host of `github_app.api_base_url` for GitHub Enterprise), the installation must be active and its account must match the remote's owner, and either a Hub admin binds the installation to the project (`PUT /api/v1/projects/{id}/github-installation`) or your user-scope `GITHUB_TOKEN` secret has at least `pull` access to that repository on GitHub (`pull`-only proof yields a read-only installation token; `push` access is required for write permissions). This authorization is checked both when the association is recorded and at every token mint. The system maintains a background refresh loop for installation tokens, and the `sciontool` credential helper provides fresh tokens to `git` on-demand inside the agent container.
 
 ### Option B: Personal Access Tokens
 
@@ -157,7 +157,7 @@ User-scoped secrets take priority over project-scoped ones with the same name (s
 
 A personal token (a user-scoped `GITHUB_TOKEN`, a token from the agent's own environment, or one collected from your shell) is offered to git only when the project's git remote is on the GitHub host: `github.com`, or the host of `github_app.api_base_url` when it is set for GitHub Enterprise.
 
-For a private repository on any other host, set `GITHUB_TOKEN` as a project secret: the Hub and Runtime Broker then clone and fetch the project's recorded HTTPS remote with that secret, and without a project secret they run unauthenticated (never falling back to the host's git credential helpers, `~/.netrc`, or SSH keys). Hub-host clones and pulls of an SSH repository URL (`ssh://`, `git+ssh://`, `ssh+git://`, or `git@host:path`) also require a project git secret (`an ssh repository URL requires a project git secret`).
+For a private repository on any other host, set `GITHUB_TOKEN` as a project secret: the Hub and Runtime Broker then clone and fetch the project's recorded HTTPS remote with that secret, and without a project secret they run unauthenticated (never falling back to the host's git credential helpers, TLS client certificates, askpass, Kerberos credentials, `~/.netrc`, or SSH keys). Hub-host clones and pulls of an SSH repository URL (`ssh://`, `git+ssh://`, `ssh+git://`, or `git@host:path`) also require a project git secret (`an ssh repository URL requires a project git secret`).
 
 ### Web Dashboard Alternative
 

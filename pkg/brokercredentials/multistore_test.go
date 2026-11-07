@@ -20,6 +20,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -657,5 +658,104 @@ func TestMultiStore_LoadPopulatesName(t *testing.T) {
 
 	if loaded.Name != "my-hub" {
 		t.Errorf("Expected Name to be populated from filename: got %q", loaded.Name)
+	}
+}
+
+// invalidStoreNames are names ValidateName rejects; each would otherwise
+// resolve to a file inside or next to the store directory.
+var invalidStoreNames = []struct{ label, name string }{
+	{"empty", ""},
+	{"parent_path", "../x"},
+	{"sub_path", "sub/x"},
+	{"uppercase", "UPPER"},
+	{"leading_hyphen", "-lead"},
+	{"trailing_hyphen", "trail-"},
+	{"space", "has space"},
+	{"too_long", strings.Repeat("a", MaxNameLength+1)},
+}
+
+// newStoreBesideFile returns a store in <root>/store and writes a readable
+// credentials file at <root>/x.json, the target of the name "../x", and
+// another at <root>/store/UPPER.json.
+func newStoreBesideFile(t *testing.T) (*MultiStore, string) {
+	t.Helper()
+	root := t.TempDir()
+	dir := filepath.Join(root, "store")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	data := []byte(`{"name":"x","brokerId":"broker-x","secretKey":"c2VjcmV0"}`)
+	for _, p := range []string{filepath.Join(root, "x.json"), filepath.Join(dir, "UPPER.json")} {
+		if err := os.WriteFile(p, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return NewMultiStore(dir), root
+}
+
+func TestMultiStore_LoadRejectsInvalidName(t *testing.T) {
+	store, _ := newStoreBesideFile(t)
+
+	for _, tc := range invalidStoreNames {
+		name := tc.name
+		t.Run(tc.label, func(t *testing.T) {
+			creds, err := store.Load(name)
+			if creds != nil {
+				t.Errorf("Load(%q) returned credentials %+v", name, creds)
+			}
+			if !errors.Is(err, ErrInvalidName) {
+				t.Fatalf("Load(%q) error = %v, want ErrInvalidName", name, err)
+			}
+			if want := ValidateName(name); err.Error() != want.Error() {
+				t.Errorf("Load(%q) error = %q, want ValidateName's %q", name, err, want)
+			}
+		})
+	}
+
+	// A valid name still loads.
+	if err := store.Save(&BrokerCredentials{Name: "valid", BrokerID: "broker-v", SecretKey: "c2VjcmV0"}); err != nil {
+		t.Fatalf("Save failed: %v", err)
+	}
+	loaded, err := store.Load("valid")
+	if err != nil {
+		t.Fatalf("Load(valid) failed: %v", err)
+	}
+	if loaded.BrokerID != "broker-v" {
+		t.Errorf("Load(valid) BrokerID = %q, want broker-v", loaded.BrokerID)
+	}
+}
+
+func TestMultiStore_DeleteRejectsInvalidName(t *testing.T) {
+	store, root := newStoreBesideFile(t)
+
+	for _, tc := range invalidStoreNames {
+		name := tc.name
+		t.Run(tc.label, func(t *testing.T) {
+			err := store.Delete(name)
+			if !errors.Is(err, ErrInvalidName) {
+				t.Fatalf("Delete(%q) error = %v, want ErrInvalidName", name, err)
+			}
+			if want := ValidateName(name); err.Error() != want.Error() {
+				t.Errorf("Delete(%q) error = %q, want ValidateName's %q", name, err, want)
+			}
+		})
+	}
+
+	// Nothing was removed.
+	for _, p := range []string{filepath.Join(root, "x.json"), filepath.Join(store.Dir(), "UPPER.json")} {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("%s after refused Delete: %v", p, err)
+		}
+	}
+
+	// A valid name still deletes.
+	if err := store.Save(&BrokerCredentials{Name: "valid", BrokerID: "broker-v", SecretKey: "c2VjcmV0"}); err != nil {
+		t.Fatalf("Save failed: %v", err)
+	}
+	if err := store.Delete("valid"); err != nil {
+		t.Fatalf("Delete(valid) failed: %v", err)
+	}
+	if store.Exists("valid") {
+		t.Error("Expected valid to be gone after Delete")
 	}
 }

@@ -131,10 +131,11 @@ func (s *Server) settleQueuedStops(ctx context.Context, brokerID string, prev *s
 		// One conditional store write: the reservation is released only if
 		// the run is the one just read and the queued stop is still the
 		// intent at the same RunIntentAt, so a start that claimed the agent
-		// after the re-read keeps the slot. (Tests rely on this being the only
-		// conditional release with neither NoStartKindClaim nor NotCounted:
-		// settleHookStore in queued_stop_settle_race_test.go selects it that
-		// way. Keep it so, or update that selector.)
+		// after the re-read keeps the slot. (Tests rely on this and the
+		// project release below being the only conditional releases with
+		// neither NoStartKindClaim nor NotCounted: settleHookStore in
+		// queued_stop_settle_race_test.go selects the broker one by that
+		// shape and the broker limit. Keep it so, or update that selector.)
 		released, err := s.releaseBrokerQuotaIf(ctx, cur, store.AgentReleaseCond{
 			ExpectedRunID:         cur.RunID,
 			QueuedStopIntent:      true,
@@ -146,6 +147,13 @@ func (s *Server) settleQueuedStops(ctx context.Context, brokerID string, prev *s
 			// next heartbeat settles it again.
 			continue
 		}
+		// The project reservation follows the same rule, in its own
+		// conditional write with the same condition (ptone/scion#6033).
+		_, _ = s.releaseProjectQuotaIf(ctx, cur, store.AgentReleaseCond{
+			ExpectedRunID:         cur.RunID,
+			QueuedStopIntent:      true,
+			QueuedStopRunIntentAt: a.RunIntentAt,
+		})
 		// Read once more: if the queued stop is no longer the intent, a
 		// start superseded it. Its slot was not freed by the conditional
 		// release above, so the re-assert below is a backstop that writes
@@ -158,6 +166,7 @@ func (s *Server) settleQueuedStops(ctx context.Context, brokerID string, prev *s
 			// Unknown: put the reservation back (idempotent). If no start
 			// took the agent, the next settle releases it again.
 			s.reassertBrokerReservationAt(ctx, a, backstopSiteSettle)
+			s.reassertProjectReservation(ctx, a, backstopSiteSettle)
 			s.agentLifecycleLog.Warn("Queued stop: re-reading the agent after the release failed; reservation put back", "agent_id", a.ID, "error", err)
 			continue
 		}
@@ -189,6 +198,7 @@ func (s *Server) settleQueuedStops(ctx context.Context, brokerID string, prev *s
 				continue
 			}
 			s.reassertBrokerReservationAt(ctx, after, backstopSiteSettle)
+			s.reassertProjectReservation(ctx, after, backstopSiteSettle)
 			s.agentLifecycleLog.Info("Queued stop: a start superseded it during the release; reservation kept", "agent_id", a.ID)
 			continue
 		}

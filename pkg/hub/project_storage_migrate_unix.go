@@ -47,6 +47,12 @@ func (e *ProjectStorageMigrateExecutor) Run(ctx context.Context, w io.Writer, pa
 	}
 	rep, err := migrate.Run(ctx, in, migrate.Options{DryRun: dryRun, AdoptUnverified: adoptUnverified(params["adoptUnverified"])})
 	rep.WriteLog(w)
+	if !dryRun {
+		// A workspace this run moved or copied may hold an older image's
+		// workspace-root provisioning marker (lock-drop note §3.4): promote
+		// it now rather than at the next hub start.
+		e.srv.promoteMigratedWorkspaces(ctx, w, rep)
+	}
 	if err != nil {
 		return err
 	}
@@ -229,7 +235,7 @@ func withWorkspaceProvisionLocks(ctx context.Context, ws migrate.Tree, section f
 	if err != nil || !filepath.IsLocal(stateRel) {
 		return fmt.Errorf("provisioning state dir is not below the host base")
 	}
-	fd, _, err := shareddirs.EnsureLeaf(base, stateRel)
+	fd, _, err := projectfs.EnsureSharedLeaf(base, stateRel)
 	if err != nil {
 		return fmt.Errorf("create provisioning state dir: %w", err)
 	}
@@ -280,4 +286,67 @@ func (s *Server) planStorageMigration(ctx context.Context) (map[string]string, e
 // the project storage cleanup of a project delete.
 func deleteLegacyProjectTrees(layout projectfs.Layout, globalDir, slug, projectID string) ([]projectfs.Deletion, error) {
 	return migrate.DeleteLegacyProjectTrees(layout, globalDir, slug, projectID)
+}
+
+// migratedWorkspaceSteps are the migration steps that move or copy a
+// project's workspace content (the legacy hub-managed tree and a local
+// project's workspace).
+var migratedWorkspaceSteps = map[migrate.Step]bool{migrate.StepHubProjects: true, migrate.StepLocalProjects: true}
+
+// migratedWorkspaceProjects returns the IDs of the projects whose workspace
+// content rep moved or copied.
+func migratedWorkspaceProjects(rep migrate.HubReport) []string {
+	var ids []string
+	for _, p := range rep.Projects {
+		for _, r := range p.Results {
+			if migratedWorkspaceSteps[r.Step] && r.Moved() {
+				ids = append(ids, p.ID)
+				break
+			}
+		}
+	}
+	return ids
+}
+
+// promoteMigratedWorkspaces runs the provisioning state promotion
+// (promoteProjectProvisionState, which takes the project's provisioning
+// locks) for every project whose workspace this migration run moved or
+// copied, so a workspace-root marker the run brought in is promoted at
+// once instead of at the next hub start (lock-drop note §3.4). It writes
+// one outcome line per project to the run's log w (no host path); a
+// failure is logged sanitized and does not fail the migration.
+func (s *Server) promoteMigratedWorkspaces(ctx context.Context, w io.Writer, rep migrate.HubReport) {
+	ids := migratedWorkspaceProjects(rep)
+	if len(ids) == 0 {
+		return
+	}
+	logger := s.projectsLogger()
+	layout, err := s.workspaceLayout()
+	if err != nil || !layout.Backend.Shared() {
+		if err != nil {
+			logger.Warn("provisioning state promotion after the storage migration: no shared workspace layout",
+				"error", sanitizedStorageError(err))
+		}
+		return
+	}
+	p := projectProvisioner(layout)
+	for _, id := range ids {
+		res, err := promoteProjectProvisionState(ctx, layout, p, id)
+		outcome := "unchanged"
+		switch {
+		case err != nil:
+			outcome = "failed (see the hub log); the next hub start retries it"
+			logger.Warn("provisioning state promotion", "project_id", id, "outcome", "failed",
+				"after", "storage migration", "error", sanitizedStorageError(err))
+		case res.Changed():
+			outcome = "cleaned"
+			if res.Promoted {
+				outcome = "promoted"
+			}
+			logger.Info("provisioning state promotion", "project_id", id, "outcome", "changed",
+				"after", "storage migration", "promoted", res.Promoted, "marker_removed", res.MarkerRemoved,
+				"exclude_removed", res.ExcludeRemoved, "litter_removed", res.LitterRemoved)
+		}
+		_, _ = fmt.Fprintf(w, "provisioning state promotion: project %s: %s\n", id, outcome)
+	}
 }

@@ -90,6 +90,12 @@ const (
 	FieldPresentationFencedAt = "presentation_fenced_at"
 	// FieldPresentationObservedAt holds the string denoting the presentation_observed_at field in the database.
 	FieldPresentationObservedAt = "presentation_observed_at"
+	// FieldConversionPlanPresentation holds the string denoting the conversion_plan_presentation field in the database.
+	FieldConversionPlanPresentation = "conversion_plan_presentation"
+	// FieldConversionPlanPresentationHash holds the string denoting the conversion_plan_presentation_hash field in the database.
+	FieldConversionPlanPresentationHash = "conversion_plan_presentation_hash"
+	// FieldConversionPlanObservedAt holds the string denoting the conversion_plan_observed_at field in the database.
+	FieldConversionPlanObservedAt = "conversion_plan_observed_at"
 	// FieldCreated holds the string denoting the created field in the database.
 	FieldCreated = "created"
 	// FieldUpdated holds the string denoting the updated field in the database.
@@ -139,6 +145,9 @@ var Columns = []string{
 	FieldPresentationSeq,
 	FieldPresentationFencedAt,
 	FieldPresentationObservedAt,
+	FieldConversionPlanPresentation,
+	FieldConversionPlanPresentationHash,
+	FieldConversionPlanObservedAt,
 	FieldCreated,
 	FieldUpdated,
 }
@@ -370,6 +379,21 @@ func ByPresentationFencedAt(opts ...sql.OrderTermOption) OrderOption {
 // ByPresentationObservedAt orders the results by the presentation_observed_at field.
 func ByPresentationObservedAt(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldPresentationObservedAt, opts...).ToFunc()
+}
+
+// ByConversionPlanPresentation orders the results by the conversion_plan_presentation field.
+func ByConversionPlanPresentation(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldConversionPlanPresentation, opts...).ToFunc()
+}
+
+// ByConversionPlanPresentationHash orders the results by the conversion_plan_presentation_hash field.
+func ByConversionPlanPresentationHash(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldConversionPlanPresentationHash, opts...).ToFunc()
+}
+
+// ByConversionPlanObservedAt orders the results by the conversion_plan_observed_at field.
+func ByConversionPlanObservedAt(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldConversionPlanObservedAt, opts...).ToFunc()
 }
 
 // ByCreated orders the results by the created field.

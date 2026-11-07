@@ -75,6 +75,11 @@ func AgentStateVersion(v int64) predicate.AgentDelegationGrant {
 	return predicate.AgentDelegationGrant(sql.FieldEQ(FieldAgentStateVersion, v))
 }
 
+// IssuedRunID applies equality check predicate on the "issued_run_id" field. It's identical to IssuedRunIDEQ.
+func IssuedRunID(v string) predicate.AgentDelegationGrant {
+	return predicate.AgentDelegationGrant(sql.FieldEQ(FieldIssuedRunID, v))
+}
+
 // IssuerUserID applies equality check predicate on the "issuer_user_id" field. It's identical to IssuerUserIDEQ.
 func IssuerUserID(v string) predicate.AgentDelegationGrant {
 	return predicate.AgentDelegationGrant(sql.FieldEQ(FieldIssuerUserID, v))
@@ -383,6 +388,71 @@ func AgentStateVersionLT(v int64) predicate.AgentDelegationGrant {
 // AgentStateVersionLTE applies the LTE predicate on the "agent_state_version" field.
 func AgentStateVersionLTE(v int64) predicate.AgentDelegationGrant {
 	return predicate.AgentDelegationGrant(sql.FieldLTE(FieldAgentStateVersion, v))
+}
+
+// IssuedRunIDEQ applies the EQ predicate on the "issued_run_id" field.
+func IssuedRunIDEQ(v string) predicate.AgentDelegationGrant {
+	return predicate.AgentDelegationGrant(sql.FieldEQ(FieldIssuedRunID, v))
+}
+
+// IssuedRunIDNEQ applies the NEQ predicate on the "issued_run_id" field.
+func IssuedRunIDNEQ(v string) predicate.AgentDelegationGrant {
+	return predicate.AgentDelegationGrant(sql.FieldNEQ(FieldIssuedRunID, v))
+}
+
+// IssuedRunIDIn applies the In predicate on the "issued_run_id" field.
+func IssuedRunIDIn(vs ...string) predicate.AgentDelegationGrant {
+	return predicate.AgentDelegationGrant(sql.FieldIn(FieldIssuedRunID, vs...))
+}
+
+// IssuedRunIDNotIn applies the NotIn predicate on the "issued_run_id" field.
+func IssuedRunIDNotIn(vs ...string) predicate.AgentDelegationGrant {
+	return predicate.AgentDelegationGrant(sql.FieldNotIn(FieldIssuedRunID, vs...))
+}
+
+// IssuedRunIDGT applies the GT predicate on the "issued_run_id" field.
+func IssuedRunIDGT(v string) predicate.AgentDelegationGrant {
+	return predicate.AgentDelegationGrant(sql.FieldGT(FieldIssuedRunID, v))
+}
+
+// IssuedRunIDGTE applies the GTE predicate on the "issued_run_id" field.
+func IssuedRunIDGTE(v string) predicate.AgentDelegationGrant {
+	return predicate.AgentDelegationGrant(sql.FieldGTE(FieldIssuedRunID, v))
+}
+
+// IssuedRunIDLT applies the LT predicate on the "issued_run_id" field.
+func IssuedRunIDLT(v string) predicate.AgentDelegationGrant {
+	return predicate.AgentDelegationGrant(sql.FieldLT(FieldIssuedRunID, v))
+}
+
+// IssuedRunIDLTE applies the LTE predicate on the "issued_run_id" field.
+func IssuedRunIDLTE(v string) predicate.AgentDelegationGrant {
+	return predicate.AgentDelegationGrant(sql.FieldLTE(FieldIssuedRunID, v))
+}
+
+// IssuedRunIDContains applies the Contains predicate on the "issued_run_id" field.
+func IssuedRunIDContains(v string) predicate.AgentDelegationGrant {
+	return predicate.AgentDelegationGrant(sql.FieldContains(FieldIssuedRunID, v))
+}
+
+// IssuedRunIDHasPrefix applies the HasPrefix predicate on the "issued_run_id" field.
+func IssuedRunIDHasPrefix(v string) predicate.AgentDelegationGrant {
+	return predicate.AgentDelegationGrant(sql.FieldHasPrefix(FieldIssuedRunID, v))
+}
+
+// IssuedRunIDHasSuffix applies the HasSuffix predicate on the "issued_run_id" field.
+func IssuedRunIDHasSuffix(v string) predicate.AgentDelegationGrant {
+	return predicate.AgentDelegationGrant(sql.FieldHasSuffix(FieldIssuedRunID, v))
+}
+
+// IssuedRunIDEqualFold applies the EqualFold predicate on the "issued_run_id" field.
+func IssuedRunIDEqualFold(v string) predicate.AgentDelegationGrant {
+	return predicate.AgentDelegationGrant(sql.FieldEqualFold(FieldIssuedRunID, v))
+}
+
+// IssuedRunIDContainsFold applies the ContainsFold predicate on the "issued_run_id" field.
+func IssuedRunIDContainsFold(v string) predicate.AgentDelegationGrant {
+	return predicate.AgentDelegationGrant(sql.FieldContainsFold(FieldIssuedRunID, v))
 }
 
 // IssuerUserIDEQ applies the EQ predicate on the "issuer_user_id" field.

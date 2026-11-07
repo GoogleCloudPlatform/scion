@@ -73,6 +73,9 @@ type analysis struct {
 	modPkgs []listedPackage
 	// hazards caches wrapperHazard results.
 	hazards map[*types.Func]string
+	// targetDecls caches, per import path of another module package, its
+	// package-level funcs parsed from source (targetPkgDecls).
+	targetDecls map[string]*targetPkgSrc
 	// assets are non-Go files or directories (base names) moved verbatim.
 	assets []string
 	// imp serves export data (and the dependency lists) of the source's imports.
@@ -106,6 +109,9 @@ type analysis struct {
 	deletes []*srcFile // files removed by the run
 
 	edits map[*srcFile]*fileEdits
+	// outEdits holds the -rewrite-outrefs edits of files outside the source
+	// package, by absolute path (staying source files use edits).
+	outEdits map[string]*outFileEdits
 }
 
 type identUse struct {
@@ -432,7 +438,7 @@ func (a *analysis) selectFiles() error {
 		to := filepath.Join(a.cfg.DstDir, base)
 		a.plan.Moves = append(a.plan.Moves, fileMove{From: a.rel(f.Path), To: a.rel(to)})
 		if isGeneratedAliasFile(f) {
-			a.plan.errorf("%s is a pkgmove-generated alias file; it cannot be moved", a.rel(f.Path))
+			a.plan.errorf("%s is a generated alias file (pkgmove or hubshard extract); it cannot be moved", a.rel(f.Path))
 		}
 		switch {
 		case f.CGo:
@@ -597,8 +603,8 @@ func (a *analysis) checkReferences() {
 						extra += a.equivalenceNote(u.obj.Name())
 					}
 				}
-				a.plan.errorf("%s: moved test file uses %s %s declared in the staying test file %s; the move would separate the test from its helper - move %s too%s",
-					a.posOf(u.id.Pos()), kindOf(u.obj), u.obj.Name(), h.Name, h.Name, extra)
+				a.plan.errorf("%s: moved test file uses %s %s declared in the staying test file %s; the move would separate the test from its helper - move %s too%s%s",
+					a.posOf(u.id.Pos()), kindOf(u.obj), u.obj.Name(), h.Name, h.Name, extra, hint)
 			default:
 				a.plan.errorf("%s: moved file uses %s %s, which stays in %s (%s); the target cannot import %s (the alias file makes %s import the target) - move it too, or invert the dependency first%s",
 					a.posOf(u.id.Pos()), kindOf(u.obj), u.obj.Name(), a.srcName, a.posOf(u.obj.Pos()), a.srcName, a.srcName, hint)

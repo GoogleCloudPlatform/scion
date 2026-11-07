@@ -22,11 +22,13 @@ import (
 )
 
 // errEmptyPerAgentNFSRuntime is returned for an empty-per-agent agent on NFS
-// workspace storage when the runtime is not Kubernetes: only the Kubernetes
-// runtime mounts the agent's own directory on the export, and every other
-// path would mount the project's workspace instead.
+// workspace storage when the start cannot place the agent's own directory
+// on the export (agentDirOnShare): only Kubernetes, and a local container
+// runtime for a project on a shared Layout, mount it, and every other path
+// would mount the project's workspace instead.
 var errEmptyPerAgentNFSRuntime = errors.New("workspace_storage nfs: empty-per-agent workspaces on NFS workspace storage " +
-	"need the Kubernetes runtime; use a broker with local workspace storage for other runtimes")
+	"need the Kubernetes runtime, or a local container runtime with the project on shared project storage; " +
+	"use a broker with local workspace storage otherwise")
 
 // errEmptyPerAgentNFSNoClaim is returned for an empty-per-agent agent on NFS
 // workspace storage when the share has neither a PV claim (pv_name) nor a
@@ -41,14 +43,16 @@ var errEmptyPerAgentNFSNoClaim = errors.New("workspace_storage nfs: empty-per-ag
 // workspace in it), or "" when the workspace storage is not NFS and the
 // agent keeps its node-local (or pod-local) private directory.
 //
-// On NFS storage it is an error, rather than "", when the runtime is not
-// Kubernetes or the agent name is not an agent slug, so an empty-per-agent
-// agent never falls back to the project's shared workspace path.
-func nfsEmptyAgentDirSelection(runtimeName string, cfg *config.V1WorkspaceStorageConfig, agentName string) (string, error) {
+// On NFS storage it is an error, rather than "", when the start cannot place
+// the agent's own directory on the export (agentDirOnShare for runtimeName
+// and projectDir) or the agent name is not an agent slug, so an
+// empty-per-agent agent never falls back to the project's shared workspace
+// path.
+func nfsEmptyAgentDirSelection(runtimeName, projectDir string, cfg *config.V1WorkspaceStorageConfig, agentName string) (string, error) {
 	if cfg == nil || cfg.Backend != "nfs" {
 		return "", nil
 	}
-	if !isKubernetesRuntime(runtimeName) {
+	if !agentDirOnShare(runtimeName, projectDir) {
 		return "", errEmptyPerAgentNFSRuntime
 	}
 	if !isNFSWorktreeName(agentName) {

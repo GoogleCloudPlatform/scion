@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/maintenance"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/unitdrift"
 )
 
@@ -41,10 +42,11 @@ Restart=always
 // installed unit file and stub git/make/go/sudo commands that record their
 // calls.
 type rebuildUnitFixture struct {
-	repoDir string
-	unit    string
-	calls   string
-	stubDir string
+	repoDir   string
+	unit      string
+	calls     string
+	stubDir   string
+	installer maintenance.Installer
 }
 
 func newRebuildUnitFixture(t *testing.T, installed string) *rebuildUnitFixture {
@@ -68,16 +70,72 @@ func newRebuildUnitFixture(t *testing.T, installed string) *rebuildUnitFixture {
 	if err := os.WriteFile(f.unit, []byte(installed), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	for _, cmd := range []string{"git", "make", "go", "sudo"} {
-		// Each stub records its call and, as its very last action, that it
-		// is exiting, so a test can wait for the restart child to be gone.
-		script := fmt.Sprintf("#!/bin/sh\necho '%s' \"$@\" >> '%s'\necho 'exited %s' \"$@\" >> '%s'\n", cmd, f.calls, cmd, f.calls)
-		if err := os.WriteFile(filepath.Join(f.stubDir, cmd), []byte(script), 0o755); err != nil {
+	writeRebuildStubs(t, f.stubDir, f.calls)
+	t.Setenv("PATH", f.stubDir+":"+os.Getenv("PATH"))
+	f.installer = rebuildTestInstaller(t, f.repoDir, filepath.Join(f.repoDir, "installed-scion"))
+	return f
+}
+
+// rebuildStubCommit is the commit the git stub reports for rev-parse HEAD
+// and the go stub's build reports for version --format json.
+const rebuildStubCommit = "0123456789abcdef0123456789abcdef01234567"
+
+// writeRebuildStubs writes git, make, go and sudo stubs into dir. Each
+// records its call in calls and, as its very last action, that it is
+// exiting. git answers rev-parse; go writes, at its -o path, a binary
+// whose version JSON reports rebuildStubCommit; sudo succeeds (so every
+// `sudo -n -l` rule check matches). Only shell builtins and absolute paths
+// are used, so a test may leave PATH holding just dir.
+func writeRebuildStubs(t *testing.T, dir, calls string) {
+	t.Helper()
+	stubs := map[string]string{
+		"git": fmt.Sprintf(`echo 'git' "$@" >> '%[1]s'
+case "$1 $2" in
+  "rev-parse HEAD") echo %[2]s ;;
+  "rev-parse --abbrev-ref") echo main ;;
+esac
+echo 'exited git' "$@" >> '%[1]s'
+`, calls, rebuildStubCommit),
+		"make": fmt.Sprintf(`echo 'make' "$@" >> '%[1]s'
+echo 'exited make' "$@" >> '%[1]s'
+`, calls),
+		"go": fmt.Sprintf(`echo 'go' "$@" >> '%[1]s'
+out=""
+while [ $# -gt 0 ]; do
+  if [ "$1" = "-o" ]; then out="$2"; shift; fi
+  shift
+done
+echo '#!/bin/sh' > "$out"
+echo "echo '{\"version\":\"\",\"commit\":\"%[2]s\"}'" >> "$out"
+/bin/chmod 755 "$out"
+echo 'exited go' >> '%[1]s'
+`, calls, rebuildStubCommit),
+		"sudo": fmt.Sprintf(`echo 'sudo' "$@" >> '%[1]s'
+echo 'exited sudo' "$@" >> '%[1]s'
+`, calls),
+	}
+	for name, body := range stubs {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/sh\n"+body), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
-	t.Setenv("PATH", f.stubDir+":"+os.Getenv("PATH"))
-	return f
+}
+
+// rebuildTestInstaller detects the installer the way the hub does at
+// startup, for a starter hub: no /opt/scion layout, the repo path set and
+// the sudo stub on PATH accepting the rule checks, so sudo-install.
+func rebuildTestInstaller(t *testing.T, repo, binaryDest string) maintenance.Installer {
+	t.Helper()
+	inst := maintenance.Detect(context.Background(), maintenance.DetectOptions{
+		InstallRoot: filepath.Join(t.TempDir(), "no-opt-scion"),
+		RepoPath:    repo,
+		BinaryDest:  binaryDest,
+		ServiceName: "scion-hub",
+	})
+	if inst.Name() != maintenance.StrategySudoInstall {
+		t.Fatalf("installer = %s (%s), want sudo-install", inst.Name(), inst.Status().Reason)
+	}
+	return inst
 }
 
 // options returns the fixture's executor options; a nil locate reports the
@@ -92,8 +150,8 @@ func (f *rebuildUnitFixture) options(locate unitdrift.Locator) RebuildServerOpti
 	return RebuildServerOptions{
 		RepoPath:     f.repoDir,
 		RepoBranch:   "main",
-		BinaryDest:   filepath.Join(f.repoDir, "installed-scion"),
 		ServiceName:  "scion-hub",
+		Installer:    f.installer,
 		UnitLocator:  locate,
 		UnitRevision: func(context.Context, string) (string, error) { return "abc1234", nil },
 	}
@@ -103,22 +161,13 @@ func (f *rebuildUnitFixture) executor(locate unitdrift.Locator) *RebuildServerEx
 	return NewRebuildServerExecutor(f.options(locate))
 }
 
-// restartIssued waits for the fire-and-forget restart stub to run and exit,
-// then gives exec's output copier a moment to see EOF, so the log is read
-// only after the child is gone (the case where a buffer handed straight to
-// the child would be trimmed).
+// restartIssued reports whether the sudo-install restart
+// (`sudo -n systemctl restart --no-block scion-hub`, run to completion
+// before Run returns) ran and exited.
 func (f *rebuildUnitFixture) restartIssued(t *testing.T) bool {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		data, _ := os.ReadFile(f.calls)
-		if strings.Contains(string(data), "exited sudo systemctl restart scion-hub") {
-			time.Sleep(200 * time.Millisecond)
-			return true
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	return false
+	data, _ := os.ReadFile(f.calls)
+	return strings.Contains(string(data), "exited sudo -n systemctl restart --no-block scion-hub")
 }
 
 func renderedRebuildUnit(extra string) string {
@@ -137,7 +186,7 @@ func TestRebuildServerExecutor_UnitDriftReportedAtLogTail(t *testing.T) {
 		t.Fatal("restart not issued")
 	}
 	log := buf.String()
-	complete := strings.Index(log, "Server rebuild complete, restart initiated.")
+	complete := strings.Index(log, "Server rebuild installed; requesting the restart.")
 	block := strings.Index(log, unitdrift.DriftWarning)
 	if complete < 0 || block < 0 || block < complete {
 		t.Fatalf("drift block must follow the completion line:\n%s", log)
@@ -218,47 +267,56 @@ func TestRebuildServerExecutor_UnitCheckFailuresStillRestart(t *testing.T) {
 
 func TestRebuildServerExecutor_UnitReportWrittenWhenRestartFails(t *testing.T) {
 	f := newRebuildUnitFixture(t, renderedRebuildUnit("ExecStartPre=/bin/true\n"))
-	// The sudo stub removes itself after the install step, and PATH holds
-	// only the stubs, so starting the restart fails.
-	sudo := fmt.Sprintf("#!/bin/sh\necho 'sudo' \"$@\" >> '%s'\n/bin/rm -f \"$0\"\n", f.calls)
+	// The sudo stub refuses the restart (as systemctl would on a broken
+	// unit); every other sudo command succeeds.
+	sudo := fmt.Sprintf("#!/bin/sh\necho 'sudo' \"$@\" >> '%s'\ncase \"$*\" in \"-n systemctl restart\"*) exit 1 ;; esac\n", f.calls)
 	if err := os.WriteFile(filepath.Join(f.stubDir, "sudo"), []byte(sudo), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("PATH", f.stubDir)
 	var buf bytes.Buffer
 	err := f.executor(nil).Run(context.Background(), &buf, nil)
-	if err == nil || !strings.Contains(err.Error(), "restarting service failed") {
-		t.Fatalf("want restart failure, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "restarting the hub failed") ||
+		!strings.Contains(err.Error(), "cannot be rolled back by the sudo-install installer") {
+		t.Fatalf("want a restart failure that keeps the installed build, got %v", err)
 	}
 	if !strings.Contains(buf.String(), "\n==> Systemd unit check\n"+unitdrift.DriftWarning+"\n") {
 		t.Fatalf("drift block missing on the restart-failure path:\n%s", buf.String())
 	}
 }
 
-// The restart child writes to the run log too. Its output and the lines
-// written after it starts must all survive the child's exit.
-func TestRebuildServerExecutor_RestartOutputKeepsUnitReport(t *testing.T) {
+// The runner records the run log in the before-restart hook, and nothing
+// written after it survives the restart, so the unit report must already
+// be in the log the hook sees.
+func TestRebuildServerExecutor_UnitReportInLogRecordedBeforeRestart(t *testing.T) {
 	f := newRebuildUnitFixture(t, renderedRebuildUnit("ExecStartPre=/bin/true\n"))
-	sudo := fmt.Sprintf("#!/bin/sh\necho 'sudo' \"$@\" >> '%s'\necho \"restart-stub-output $*\"\necho 'exited sudo' \"$@\" >> '%s'\n", f.calls, f.calls)
-	if err := os.WriteFile(filepath.Join(f.stubDir, "sudo"), []byte(sudo), 0o755); err != nil {
-		t.Fatal(err)
-	}
 	var buf syncBuffer
-	if err := f.executor(nil).Run(context.Background(), &buf, nil); err != nil {
+	var atHook string
+	var pending maintenance.PendingRestart
+	err := f.executor(nil).RunWithBeforeRestart(context.Background(), &buf, nil,
+		func(_ context.Context, p maintenance.PendingRestart) error {
+			atHook, pending = buf.String(), p
+			if f.restartIssued(t) {
+				t.Error("restart ran before the hook")
+			}
+			return nil
+		})
+	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if !f.restartIssued(t) {
 		t.Fatal("restart not issued")
 	}
-	log := buf.String()
 	for _, want := range []string{
-		"restart-stub-output systemctl restart scion-hub",
-		"\nServer rebuild complete, restart initiated.\n",
+		"\nServer rebuild installed; requesting the restart.\n",
 		"\n==> Systemd unit check\n" + unitdrift.DriftWarning + "\n",
 		"  installed: ExecStartPre=/bin/true\n",
 	} {
-		if !strings.Contains(log, want) {
-			t.Errorf("log missing %q:\n%s", want, log)
+		if !strings.Contains(atHook, want) {
+			t.Errorf("log at the hook missing %q:\n%s", want, atHook)
 		}
+	}
+	if pending.Mode != maintenance.UpdateModeGit || pending.Commit != rebuildStubCommit ||
+		pending.To != maintenance.GitReleaseName(rebuildStubCommit) || pending.Strategy != maintenance.StrategySudoInstall {
+		t.Fatalf("pending restart = %+v", pending)
 	}
 }

@@ -22,6 +22,8 @@ const (
 	FieldAgentGeneration = "agent_generation"
 	// FieldAgentStateVersion holds the string denoting the agent_state_version field in the database.
 	FieldAgentStateVersion = "agent_state_version"
+	// FieldIssuedRunID holds the string denoting the issued_run_id field in the database.
+	FieldIssuedRunID = "issued_run_id"
 	// FieldIssuerUserID holds the string denoting the issuer_user_id field in the database.
 	FieldIssuerUserID = "issuer_user_id"
 	// FieldBoundaryKind holds the string denoting the boundary_kind field in the database.
@@ -73,6 +75,7 @@ var Columns = []string{
 	FieldAgentProjectID,
 	FieldAgentGeneration,
 	FieldAgentStateVersion,
+	FieldIssuedRunID,
 	FieldIssuerUserID,
 	FieldBoundaryKind,
 	FieldBoundaryProjectID,
@@ -114,6 +117,8 @@ var (
 	DefaultAgentGeneration int
 	// DefaultAgentStateVersion holds the default value on creation for the "agent_state_version" field.
 	DefaultAgentStateVersion int64
+	// DefaultIssuedRunID holds the default value on creation for the "issued_run_id" field.
+	DefaultIssuedRunID string
 	// IssuerUserIDValidator is a validator for the "issuer_user_id" field. It is called by the builders before save.
 	IssuerUserIDValidator func(string) error
 	// BoundaryKindValidator is a validator for the "boundary_kind" field. It is called by the builders before save.
@@ -162,6 +167,11 @@ func ByAgentGeneration(opts ...sql.OrderTermOption) OrderOption {
 // ByAgentStateVersion orders the results by the agent_state_version field.
 func ByAgentStateVersion(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldAgentStateVersion, opts...).ToFunc()
+}
+
+// ByIssuedRunID orders the results by the issued_run_id field.
+func ByIssuedRunID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldIssuedRunID, opts...).ToFunc()
 }
 
 // ByIssuerUserID orders the results by the issuer_user_id field.

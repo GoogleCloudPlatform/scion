@@ -127,6 +127,43 @@ func assertLegacyNotificationsUpgraded(t *testing.T, cs *CompositeStore) {
 	assert.True(t, pending.Dispatched)
 }
 
+// notificationColumn describes one column of the SQLite notifications
+// table.
+type notificationColumn struct {
+	notNull bool
+	dflt    sql.NullString
+}
+
+// sqliteNotificationColumns returns the SQLite notifications table's columns
+// by name (pragma_table_info).
+func sqliteNotificationColumns(t *testing.T, cs *CompositeStore) map[string]notificationColumn {
+	t.Helper()
+	cols := map[string]notificationColumn{}
+	rows, err := cs.DB().QueryContext(context.Background(), `SELECT name, "notnull", dflt_value FROM pragma_table_info('notifications')`)
+	require.NoError(t, err)
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var name string
+		var notNull int
+		var dflt sql.NullString
+		require.NoError(t, rows.Scan(&name, &notNull, &dflt))
+		cols[name] = notificationColumn{notNull: notNull != 0, dflt: dflt}
+	}
+	require.NoError(t, rows.Err())
+	return cols
+}
+
+// postgresNotificationColumn returns is_nullable and column_default of the
+// Postgres notifications column col.
+func postgresNotificationColumn(t *testing.T, raw *sql.DB, col string) (nullable string, dflt sql.NullString) {
+	t.Helper()
+	require.NoError(t, raw.QueryRowContext(context.Background(),
+		`SELECT is_nullable, column_default FROM information_schema.columns
+		  WHERE table_schema = current_schema() AND table_name = 'notifications' AND column_name = $1`,
+		col).Scan(&nullable, &dflt), col)
+	return nullable, dflt
+}
+
 func TestNotificationDispatchFields_UpgradeFromLegacySchema_SQLite(t *testing.T) {
 	dsn := "file:" + filepath.Join(t.TempDir(), "legacy-notifications.db")
 	raw, err := sql.Open("sqlite", dsn)
@@ -142,22 +179,7 @@ func TestNotificationDispatchFields_UpgradeFromLegacySchema_SQLite(t *testing.T)
 	ctx := context.Background()
 	require.NoError(t, cs.Migrate(ctx))
 
-	type colInfo struct {
-		notNull bool
-		dflt    sql.NullString
-	}
-	cols := map[string]colInfo{}
-	rows, err := cs.DB().QueryContext(ctx, `SELECT name, "notnull", dflt_value FROM pragma_table_info('notifications')`)
-	require.NoError(t, err)
-	for rows.Next() {
-		var name string
-		var notNull int
-		var dflt sql.NullString
-		require.NoError(t, rows.Scan(&name, &notNull, &dflt))
-		cols[name] = colInfo{notNull: notNull != 0, dflt: dflt}
-	}
-	require.NoError(t, rows.Err())
-	_ = rows.Close()
+	cols := sqliteNotificationColumns(t, cs)
 	require.Contains(t, cols, "dispatch_attempts")
 	assert.True(t, cols["dispatch_attempts"].notNull)
 	assert.Contains(t, cols["dispatch_attempts"].dflt.String, "0")
@@ -198,12 +220,7 @@ func TestNotificationDispatchFields_UpgradeFromLegacySchema_Postgres(t *testing.
 		{"dispatch_outcome", "''"},
 		{"dispatch_reason", "''"},
 	} {
-		var nullable string
-		var dflt sql.NullString
-		require.NoError(t, raw.QueryRowContext(ctx,
-			`SELECT is_nullable, column_default FROM information_schema.columns
-			  WHERE table_schema = current_schema() AND table_name = 'notifications' AND column_name = $1`,
-			c.col).Scan(&nullable, &dflt), c.col)
+		nullable, dflt := postgresNotificationColumn(t, raw, c.col)
 		assert.Equal(t, "NO", nullable, c.col)
 		assert.Contains(t, dflt.String, c.dflt, c.col)
 	}

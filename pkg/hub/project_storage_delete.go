@@ -354,9 +354,11 @@ const agentRootOtherFilesReason = "the agent directory still has entries the hub
 // startAgentStorageCleanup starts, in the background, the removal of the
 // deleted agent's storage the hub owns:
 //
-//   - on every shared Layout of the hub, its home-<agent ID> and
+//   - on every shared Layout of the hub, the provisioning-lock litter in
+//     agents/<slug> old enough to remove, its home-<agent ID> and
 //     secrets-<agent ID> below agents/<slug>, and then agents/<slug>
-//     itself only when it is empty (projectfs.Layout.RemoveAgentStorage). The
+//     itself only when it is empty (removeAgentSharedStorage, retried once
+//     when the litter is still too young). The
 //     agent's own workspace or worktree is never removed here: the broker
 //     removes it under the provisioning lock with its git bookkeeping.
 //     A directory that is not empty is kept, audited as workspace pending
@@ -402,16 +404,7 @@ func (s *Server) startAgentStorageCleanup(agent *store.Agent, teardownConfirmed 
 			audit([]projectfs.Deletion{{Tree: projectfs.TreeAgentRoot, Outcome: projectfs.OutcomeFailed,
 				Err: layoutErr, Reason: "the hub's project storage layout is unavailable"}})
 		case shared:
-			ds, err := layout.RemoveAgentStorage(a.ProjectID, a.Slug, a.ID)
-			if err != nil {
-				ds = append(ds, projectfs.Deletion{Tree: projectfs.TreeAgentRoot, Outcome: projectfs.OutcomeFailed, Err: err})
-			}
-			for i := range ds {
-				if ds[i].Tree == projectfs.TreeAgentRoot && ds[i].Outcome == projectfs.OutcomeKept && teardownConfirmed {
-					ds[i].Reason = agentRootOtherFilesReason
-				}
-			}
-			audit(ds)
+			removeAgentSharedStorage(ctx, layout, a, teardownConfirmed, audit)
 		}
 
 		if stor != nil && ctx.Err() == nil {

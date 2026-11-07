@@ -46,6 +46,7 @@ import {
 import type {
   LastUpdate,
   PendingUpdate,
+  ViewRunDetail,
   UpdateRequestDetail,
   UpdateStatus,
 } from './admin-maintenance-update-card.js';
@@ -244,6 +245,17 @@ export function downgradeConfirmationFrom(
 }
 
 /**
+ * The version /healthz must report once the hub restarts on a pending
+ * update: its target release tag. A rebuild from Git (mode git) names its
+ * build git-<sha12>, which /healthz does not report, so the restart is
+ * recognised by uptime alone (null).
+ */
+export function expectedRestartVersion(pending: PendingUpdate): string | null {
+  if (pending.mode === 'git') return null;
+  return pending.to || null;
+}
+
+/**
  * The toast for a recorded update result. A rollback names the release
  * the boot-failure guard restored (restored, else from) and the one that
  * failed (to).
@@ -256,12 +268,18 @@ export function lastUpdateMessage(last: LastUpdate): string {
   return `Update to ${last.to} ${LAST_UPDATE_LABELS[last.status] ?? last.status}.`;
 }
 
+/** The operations that install the hub binary and restart the hub. */
+type HubBinaryOperation = 'update-binary' | 'rebuild-server';
+const HUB_BINARY_OPERATIONS: readonly HubBinaryOperation[] = ['update-binary', 'rebuild-server'];
+
 /**
- * An update-binary run this page follows through the hub restart: one it
- * started, or one the hub's pendingUpdate names.
+ * An update-binary or rebuild-server run this page follows through the hub
+ * restart: one it started, or one the hub's pendingUpdate names.
  */
 interface TrackedUpdate {
   runId: string;
+  /** The run's operation. */
+  operationKey: HubBinaryOperation;
   /** What was asked for: a tag, or latest:<channel>. */
   target: string;
   /** The tag the hub must come back on; null when not known. */
@@ -318,6 +336,8 @@ export async function hubErrorEnvelope(
 interface MaintenanceStateResponse {
   enabled: boolean;
   break_glass?: boolean;
+  /** The message blocked users see; the hub's default when none is saved. */
+  message?: string;
 }
 
 /**
@@ -544,6 +564,20 @@ export class ScionPageAdminMaintenance extends LitElement {
   @state()
   private maintenanceBreakGlass = false;
 
+  /**
+   * The maintenance message blocked users see, as the hub last reported it
+   * (its default when none is saved), and the edit in progress
+   * (ptone/scion#3925).
+   */
+  @state()
+  private maintenanceMessage = '';
+
+  @state()
+  private maintenanceMessageDraft = '';
+
+  @state()
+  private maintenanceMessageSaving = false;
+
   /** Run detail currently being viewed. */
   @state()
   private viewingRun: MaintenanceRun | null = null;
@@ -703,6 +737,17 @@ export class ScionPageAdminMaintenance extends LitElement {
     }
 
     /* -- Maintenance mode toggle ------------------------------------------ */
+
+    .maintenance-message {
+      margin-top: 1rem;
+      max-width: 40rem;
+    }
+
+    .maintenance-message-actions {
+      display: flex;
+      gap: 0.5rem;
+      margin-top: 0.5rem;
+    }
 
     .maintenance-mode-toggle {
       display: flex;
@@ -1262,11 +1307,54 @@ export class ScionPageAdminMaintenance extends LitElement {
       const res = await apiFetch('/api/v1/admin/maintenance');
       if (res.ok) {
         const data = (await res.json()) as MaintenanceStateResponse;
-        this.maintenanceEnabled = data.enabled;
-        this.maintenanceBreakGlass = data.break_glass === true;
+        this.applyMaintenanceState(data);
       }
     } catch {
       // Silently ignore — toggle will default to off.
+    }
+  }
+
+  /**
+   * Applies a maintenance state response. The message draft follows the
+   * reported message unless the admin is editing it.
+   */
+  private applyMaintenanceState(data: MaintenanceStateResponse): void {
+    this.maintenanceEnabled = data.enabled;
+    this.maintenanceBreakGlass = data.break_glass === true;
+    if (typeof data.message === 'string') {
+      const editing = this.maintenanceMessageDraft !== this.maintenanceMessage;
+      this.maintenanceMessage = data.message;
+      if (!editing) this.maintenanceMessageDraft = data.message;
+    }
+  }
+
+  /**
+   * Saves the maintenance message only: the body omits enabled, so the
+   * mode is unchanged. An empty message ("") returns to the hub's default.
+   */
+  private async saveMaintenanceMessage(message: string): Promise<void> {
+    this.maintenanceMessageSaving = true;
+    try {
+      const res = await apiFetch('/api/v1/admin/maintenance', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message }),
+      });
+      if (!res.ok) {
+        throw new Error(await extractApiError(res, `HTTP ${res.status}`));
+      }
+      const data = (await res.json()) as MaintenanceStateResponse;
+      // The saved message replaces the draft.
+      this.maintenanceMessageDraft = typeof data.message === 'string' ? data.message : message;
+      this.applyMaintenanceState(data);
+      showToast(
+        message === '' ? 'Maintenance message reset to the default.' : 'Maintenance message saved.',
+        'success'
+      );
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Failed to save the maintenance message');
+    } finally {
+      this.maintenanceMessageSaving = false;
     }
   }
 
@@ -1282,8 +1370,7 @@ export class ScionPageAdminMaintenance extends LitElement {
         throw new Error(await extractApiError(res, `HTTP ${res.status}`));
       }
       const data = (await res.json()) as MaintenanceStateResponse;
-      this.maintenanceEnabled = data.enabled;
-      this.maintenanceBreakGlass = data.break_glass === true;
+      this.applyMaintenanceState(data);
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Failed to update maintenance mode');
       // The toggle renders from maintenanceEnabled, which is set only from a
@@ -1494,6 +1581,7 @@ export class ScionPageAdminMaintenance extends LitElement {
       if (started.runId) {
         this.trackedUpdate = {
           runId: started.runId,
+          operationKey: 'update-binary',
           target,
           // A confirmed downgrade names the tag the hub resolved, also for
           // latest:<channel>.
@@ -1526,7 +1614,10 @@ export class ScionPageAdminMaintenance extends LitElement {
    * (for example one boot reconciliation did not settle) is shown as in
    * progress and polled, but not waited for. Checked once per run.
    */
-  private async adoptRestartingRun(run: MaintenanceRun): Promise<void> {
+  private async adoptRestartingRun(
+    run: MaintenanceRun,
+    operationKey: HubBinaryOperation
+  ): Promise<void> {
     if (this.peekedRestartingRunId === run.id) return;
     this.peekedRestartingRunId = run.id;
     const pending = await this.peekPendingUpdate();
@@ -1534,16 +1625,22 @@ export class ScionPageAdminMaintenance extends LitElement {
     if (this.trackedUpdate || !pending?.runId || pending.runId !== run.id) return;
     this.trackedUpdate = {
       runId: run.id,
+      operationKey,
       target: pending.to,
-      expectVersion: pending.to || null,
+      expectVersion: expectedRestartVersion(pending),
       lastStatus: 'restarting',
       fromVersion: pending.from || this.updateStatus?.current.version,
     };
     void this.reconnectAfterUpdate();
   }
 
-  private updateBinaryRun(): MaintenanceRun | undefined {
-    return this.operations.find((op) => op.key === 'update-binary')?.lastRun;
+  private operationRun(key: HubBinaryOperation): MaintenanceRun | undefined {
+    return this.operations.find((op) => op.key === key)?.lastRun;
+  }
+
+  /** Whether an update-binary or rebuild-server run is in progress. */
+  private hubBinaryRunInProgress(): boolean {
+    return HUB_BINARY_OPERATIONS.some((key) => isRunInProgress(this.operationRun(key)?.status));
   }
 
   /**
@@ -1555,21 +1652,34 @@ export class ScionPageAdminMaintenance extends LitElement {
    */
   private trackUpdateRun(): void {
     if (!this.isConnected) return;
-    const run = this.updateBinaryRun();
-    if (!this.trackedUpdate && run?.status === 'running') {
-      this.trackedUpdate = {
-        runId: run.id,
-        target: '',
-        expectVersion: null,
-        lastStatus: 'running',
-        fromVersion: this.updateStatus?.current.version,
-      };
+    if (!this.trackedUpdate) {
+      for (const key of HUB_BINARY_OPERATIONS) {
+        const run = this.operationRun(key);
+        if (run?.status === 'running') {
+          this.trackedUpdate = {
+            runId: run.id,
+            operationKey: key,
+            target: '',
+            expectVersion: null,
+            lastStatus: 'running',
+            fromVersion: this.updateStatus?.current.version,
+          };
+          break;
+        }
+      }
     }
     const tracked = this.trackedUpdate;
     if (!tracked) {
-      if (run?.status === 'restarting') void this.adoptRestartingRun(run);
+      for (const key of HUB_BINARY_OPERATIONS) {
+        const run = this.operationRun(key);
+        if (run?.status === 'restarting') {
+          void this.adoptRestartingRun(run, key);
+          return;
+        }
+      }
       return;
     }
+    const run = this.operationRun(tracked.operationKey);
     if (!run || run.id !== tracked.runId) return;
     tracked.lastStatus = run.status;
     if (run.status === 'restarting') {
@@ -1638,7 +1748,11 @@ export class ScionPageAdminMaintenance extends LitElement {
    * and the run was marked failed), so the wait need not run out. Reads
    * the list without touching page state, at most every few seconds.
    */
-  private async trackedRunFinished(runId: string, signal: AbortSignal): Promise<boolean> {
+  private async trackedRunFinished(
+    runId: string,
+    operationKey: HubBinaryOperation,
+    signal: AbortSignal
+  ): Promise<boolean> {
     const now = Date.now();
     if (now - this.lastRunCheckAt < RUN_CHECK_INTERVAL_MS) return false;
     this.lastRunCheckAt = now;
@@ -1649,7 +1763,7 @@ export class ScionPageAdminMaintenance extends LitElement {
       });
       if (!res.ok) return false;
       const data = (await res.json()) as MaintenanceResponse;
-      const run = (data.operations ?? []).find((op) => op.key === 'update-binary')?.lastRun;
+      const run = (data.operations ?? []).find((op) => op.key === operationKey)?.lastRun;
       return !!run && run.id === runId && !isRunInProgress(run.status);
     } catch {
       return false;
@@ -1693,19 +1807,20 @@ export class ScionPageAdminMaintenance extends LitElement {
     this.updateWaitAbort = new AbortController();
     const signal = this.updateWaitAbort.signal;
     try {
-      if (!tracked.expectVersion) {
+      if (!tracked.expectVersion && tracked.operationKey === 'update-binary') {
         // latest:<channel>: the hub writes the concrete tag to pendingUpdate
         // just before it restarts; it may still answer.
         const pending = await this.peekPendingUpdate();
-        if (pending && pending.runId === tracked.runId && pending.to) {
-          this.trackedUpdate = { ...tracked, expectVersion: pending.to };
+        if (pending && pending.runId === tracked.runId) {
+          const expect = expectedRestartVersion(pending);
+          if (expect) this.trackedUpdate = { ...tracked, expectVersion: expect };
         }
       }
       const expectVersion = this.trackedUpdate?.expectVersion ?? undefined;
       const result = await waitForHubRestart({
         expectVersion,
         signal,
-        stopWhen: () => this.trackedRunFinished(tracked.runId, signal),
+        stopWhen: () => this.trackedRunFinished(tracked.runId, tracked.operationKey, signal),
       });
       if (!result.ok && result.aborted) return;
       this.trackedUpdate = null;
@@ -1717,7 +1832,7 @@ export class ScionPageAdminMaintenance extends LitElement {
       // wait ran out): show what it recorded.
       await this.fetchUpdateStatus();
       await this.loadData(true);
-      const run = this.updateBinaryRun();
+      const run = this.operationRun(tracked.operationKey);
       const runIsTracked = !!run && run.id === tracked.runId;
       if (!result.ok && runIsTracked && run.status === 'running') {
         // A blip, not a restart: the run is still going; keep polling it.
@@ -1986,10 +2101,14 @@ export class ScionPageAdminMaintenance extends LitElement {
         throw new Error(errMsg);
       }
 
+      const key = this.runDialogKey;
       this.runDialogKey = null;
 
-      // Reload and start polling for status.
-      await this.loadData();
+      // Reload and start polling for status. A rebuild restarts the hub:
+      // its run is followed like an update (trackUpdateRun), and the
+      // polling load lets a hub already going down count towards the
+      // restart wait instead of replacing the page with an error.
+      await this.loadData(key === 'rebuild-server');
       this.startPolling();
     } catch (err) {
       console.error('Failed to start operation:', err);
@@ -2167,9 +2286,7 @@ export class ScionPageAdminMaintenance extends LitElement {
    */
   private renderServerVersion() {
     const busy =
-      this.applyUpdateLoading ||
-      this.updateReconnecting ||
-      isRunInProgress(this.updateBinaryRun()?.status);
+      this.applyUpdateLoading || this.updateReconnecting || this.hubBinaryRunInProgress();
     return html`
       <scion-admin-maintenance-update-card
         .status=${this.updateStatus}
@@ -2179,13 +2296,14 @@ export class ScionPageAdminMaintenance extends LitElement {
         .reconnectError=${this.updateReconnectError}
         ?busy=${busy}
         @reload-status=${() => this.fetchUpdateStatus()}
-        @view-run=${(e: CustomEvent<{ runId: string }>) =>
+        @view-run=${(e: CustomEvent<ViewRunDetail>) =>
           void this.viewRunDetail({
             id: e.detail.runId,
-            operationKey: 'update-binary',
+            operationKey: e.detail.operationKey,
             status: '',
             startedAt: '',
           })}
+        @rebuild-request=${() => this.openRunDialog('rebuild-server', 'operation')}
         @update-request=${(e: CustomEvent<UpdateRequestDetail>) =>
           this.openUpdateConfirm(e.detail.target, {
             channel: e.detail.channel,
@@ -2768,6 +2886,7 @@ export class ScionPageAdminMaintenance extends LitElement {
           </button>
           <span class="toggle-label"> ${this.maintenanceEnabled ? 'Enabled' : 'Disabled'} </span>
         </div>
+        ${this.renderMaintenanceMessage()}
         ${this.maintenanceBreakGlass
           ? html`<p class="section-description break-glass-notice">
               Maintenance mode is forced on by the server's startup configuration
@@ -2776,6 +2895,51 @@ export class ScionPageAdminMaintenance extends LitElement {
               <code>admin_mode</code> in settings.yaml can only be cleared by editing the file.
             </p>`
           : nothing}
+      </div>
+    `;
+  }
+
+  /**
+   * The message blocked users see while maintenance mode is on: shown and
+   * editable whether or not the mode is on, so it can be set in advance.
+   */
+  private renderMaintenanceMessage(): TemplateResult {
+    const draft = this.maintenanceMessageDraft;
+    const unchanged = draft === this.maintenanceMessage;
+    return html`
+      <div class="maintenance-message">
+        <sl-textarea
+          label="Message shown to blocked users"
+          rows="2"
+          resize="auto"
+          .value=${draft}
+          ?disabled=${this.maintenanceMessageSaving}
+          @sl-input=${(e: Event): void => {
+            this.maintenanceMessageDraft = (e.target as HTMLTextAreaElement).value;
+          }}
+        ></sl-textarea>
+        <div class="maintenance-message-actions">
+          <sl-button
+            size="small"
+            variant="primary"
+            class="save-maintenance-message"
+            ?disabled=${unchanged || draft.trim() === ''}
+            ?loading=${this.maintenanceMessageSaving}
+            @click=${(): void => {
+              void this.saveMaintenanceMessage(draft);
+            }}
+            >Save message</sl-button
+          >
+          <sl-button
+            size="small"
+            class="reset-maintenance-message"
+            ?disabled=${this.maintenanceMessageSaving}
+            @click=${(): void => {
+              void this.saveMaintenanceMessage('');
+            }}
+            >Use the default message</sl-button
+          >
+        </div>
       </div>
     `;
   }
@@ -2906,7 +3070,11 @@ export class ScionPageAdminMaintenance extends LitElement {
         ScionPageAdminMaintenance.BINARY_ONLY_OPS.has(key)
       );
     };
-    return this.operations.filter((op) => !hidden(op.key));
+    // With a repository configured, Rebuild lives in the update card's
+    // Git panel.
+    const inCard = (key: string): boolean =>
+      key === 'rebuild-server' && !!this.updateStatus?.mode.repoConfigured;
+    return this.operations.filter((op) => !hidden(op.key) && !inCard(op.key));
   }
 
   private renderOperations() {

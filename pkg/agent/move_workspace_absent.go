@@ -114,7 +114,7 @@ func (m *AgentManager) moveNFSOwnAgentDir(ctx context.Context, opts api.StartOpt
 		runtimeName = m.Runtime.Name()
 	}
 	emptyPerAgent := isEmptyPerAgentStart(opts)
-	emptyDirName, cloneDirName, _, err := nfsOwnAgentDirSelection(runtimeName, ws, emptyPerAgent, opts.Env, opts.GitClone, opts.Name)
+	emptyDirName, cloneDirName, _, err := nfsOwnAgentDirSelection(runtimeName, projectDir, ws, emptyPerAgent, opts.Env, opts.GitClone, opts.Name)
 	if err != nil {
 		return "", fmt.Errorf("%w: %v", ErrMoveWorkspaceUnconfirmed, err)
 	}

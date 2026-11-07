@@ -120,6 +120,26 @@ func NextAttemptAt(v time.Time) predicate.Notification {
 	return predicate.Notification(sql.FieldEQ(FieldNextAttemptAt, v))
 }
 
+// Kind applies equality check predicate on the "kind" field. It's identical to KindEQ.
+func Kind(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldEQ(FieldKind, v))
+}
+
+// ResourceType applies equality check predicate on the "resource_type" field. It's identical to ResourceTypeEQ.
+func ResourceType(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldEQ(FieldResourceType, v))
+}
+
+// ResourceID applies equality check predicate on the "resource_id" field. It's identical to ResourceIDEQ.
+func ResourceID(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldEQ(FieldResourceID, v))
+}
+
+// Excerpt applies equality check predicate on the "excerpt" field. It's identical to ExcerptEQ.
+func Excerpt(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldEQ(FieldExcerpt, v))
+}
+
 // Created applies equality check predicate on the "created" field. It's identical to CreatedEQ.
 func Created(v time.Time) predicate.Notification {
 	return predicate.Notification(sql.FieldEQ(FieldCreated, v))
@@ -743,6 +763,266 @@ func NextAttemptAtIsNil() predicate.Notification {
 // NextAttemptAtNotNil applies the NotNil predicate on the "next_attempt_at" field.
 func NextAttemptAtNotNil() predicate.Notification {
 	return predicate.Notification(sql.FieldNotNull(FieldNextAttemptAt))
+}
+
+// KindEQ applies the EQ predicate on the "kind" field.
+func KindEQ(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldEQ(FieldKind, v))
+}
+
+// KindNEQ applies the NEQ predicate on the "kind" field.
+func KindNEQ(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldNEQ(FieldKind, v))
+}
+
+// KindIn applies the In predicate on the "kind" field.
+func KindIn(vs ...string) predicate.Notification {
+	return predicate.Notification(sql.FieldIn(FieldKind, vs...))
+}
+
+// KindNotIn applies the NotIn predicate on the "kind" field.
+func KindNotIn(vs ...string) predicate.Notification {
+	return predicate.Notification(sql.FieldNotIn(FieldKind, vs...))
+}
+
+// KindGT applies the GT predicate on the "kind" field.
+func KindGT(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldGT(FieldKind, v))
+}
+
+// KindGTE applies the GTE predicate on the "kind" field.
+func KindGTE(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldGTE(FieldKind, v))
+}
+
+// KindLT applies the LT predicate on the "kind" field.
+func KindLT(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldLT(FieldKind, v))
+}
+
+// KindLTE applies the LTE predicate on the "kind" field.
+func KindLTE(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldLTE(FieldKind, v))
+}
+
+// KindContains applies the Contains predicate on the "kind" field.
+func KindContains(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldContains(FieldKind, v))
+}
+
+// KindHasPrefix applies the HasPrefix predicate on the "kind" field.
+func KindHasPrefix(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldHasPrefix(FieldKind, v))
+}
+
+// KindHasSuffix applies the HasSuffix predicate on the "kind" field.
+func KindHasSuffix(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldHasSuffix(FieldKind, v))
+}
+
+// KindEqualFold applies the EqualFold predicate on the "kind" field.
+func KindEqualFold(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldEqualFold(FieldKind, v))
+}
+
+// KindContainsFold applies the ContainsFold predicate on the "kind" field.
+func KindContainsFold(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldContainsFold(FieldKind, v))
+}
+
+// ResourceTypeEQ applies the EQ predicate on the "resource_type" field.
+func ResourceTypeEQ(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldEQ(FieldResourceType, v))
+}
+
+// ResourceTypeNEQ applies the NEQ predicate on the "resource_type" field.
+func ResourceTypeNEQ(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldNEQ(FieldResourceType, v))
+}
+
+// ResourceTypeIn applies the In predicate on the "resource_type" field.
+func ResourceTypeIn(vs ...string) predicate.Notification {
+	return predicate.Notification(sql.FieldIn(FieldResourceType, vs...))
+}
+
+// ResourceTypeNotIn applies the NotIn predicate on the "resource_type" field.
+func ResourceTypeNotIn(vs ...string) predicate.Notification {
+	return predicate.Notification(sql.FieldNotIn(FieldResourceType, vs...))
+}
+
+// ResourceTypeGT applies the GT predicate on the "resource_type" field.
+func ResourceTypeGT(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldGT(FieldResourceType, v))
+}
+
+// ResourceTypeGTE applies the GTE predicate on the "resource_type" field.
+func ResourceTypeGTE(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldGTE(FieldResourceType, v))
+}
+
+// ResourceTypeLT applies the LT predicate on the "resource_type" field.
+func ResourceTypeLT(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldLT(FieldResourceType, v))
+}
+
+// ResourceTypeLTE applies the LTE predicate on the "resource_type" field.
+func ResourceTypeLTE(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldLTE(FieldResourceType, v))
+}
+
+// ResourceTypeContains applies the Contains predicate on the "resource_type" field.
+func ResourceTypeContains(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldContains(FieldResourceType, v))
+}
+
+// ResourceTypeHasPrefix applies the HasPrefix predicate on the "resource_type" field.
+func ResourceTypeHasPrefix(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldHasPrefix(FieldResourceType, v))
+}
+
+// ResourceTypeHasSuffix applies the HasSuffix predicate on the "resource_type" field.
+func ResourceTypeHasSuffix(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldHasSuffix(FieldResourceType, v))
+}
+
+// ResourceTypeEqualFold applies the EqualFold predicate on the "resource_type" field.
+func ResourceTypeEqualFold(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldEqualFold(FieldResourceType, v))
+}
+
+// ResourceTypeContainsFold applies the ContainsFold predicate on the "resource_type" field.
+func ResourceTypeContainsFold(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldContainsFold(FieldResourceType, v))
+}
+
+// ResourceIDEQ applies the EQ predicate on the "resource_id" field.
+func ResourceIDEQ(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldEQ(FieldResourceID, v))
+}
+
+// ResourceIDNEQ applies the NEQ predicate on the "resource_id" field.
+func ResourceIDNEQ(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldNEQ(FieldResourceID, v))
+}
+
+// ResourceIDIn applies the In predicate on the "resource_id" field.
+func ResourceIDIn(vs ...string) predicate.Notification {
+	return predicate.Notification(sql.FieldIn(FieldResourceID, vs...))
+}
+
+// ResourceIDNotIn applies the NotIn predicate on the "resource_id" field.
+func ResourceIDNotIn(vs ...string) predicate.Notification {
+	return predicate.Notification(sql.FieldNotIn(FieldResourceID, vs...))
+}
+
+// ResourceIDGT applies the GT predicate on the "resource_id" field.
+func ResourceIDGT(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldGT(FieldResourceID, v))
+}
+
+// ResourceIDGTE applies the GTE predicate on the "resource_id" field.
+func ResourceIDGTE(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldGTE(FieldResourceID, v))
+}
+
+// ResourceIDLT applies the LT predicate on the "resource_id" field.
+func ResourceIDLT(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldLT(FieldResourceID, v))
+}
+
+// ResourceIDLTE applies the LTE predicate on the "resource_id" field.
+func ResourceIDLTE(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldLTE(FieldResourceID, v))
+}
+
+// ResourceIDContains applies the Contains predicate on the "resource_id" field.
+func ResourceIDContains(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldContains(FieldResourceID, v))
+}
+
+// ResourceIDHasPrefix applies the HasPrefix predicate on the "resource_id" field.
+func ResourceIDHasPrefix(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldHasPrefix(FieldResourceID, v))
+}
+
+// ResourceIDHasSuffix applies the HasSuffix predicate on the "resource_id" field.
+func ResourceIDHasSuffix(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldHasSuffix(FieldResourceID, v))
+}
+
+// ResourceIDEqualFold applies the EqualFold predicate on the "resource_id" field.
+func ResourceIDEqualFold(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldEqualFold(FieldResourceID, v))
+}
+
+// ResourceIDContainsFold applies the ContainsFold predicate on the "resource_id" field.
+func ResourceIDContainsFold(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldContainsFold(FieldResourceID, v))
+}
+
+// ExcerptEQ applies the EQ predicate on the "excerpt" field.
+func ExcerptEQ(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldEQ(FieldExcerpt, v))
+}
+
+// ExcerptNEQ applies the NEQ predicate on the "excerpt" field.
+func ExcerptNEQ(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldNEQ(FieldExcerpt, v))
+}
+
+// ExcerptIn applies the In predicate on the "excerpt" field.
+func ExcerptIn(vs ...string) predicate.Notification {
+	return predicate.Notification(sql.FieldIn(FieldExcerpt, vs...))
+}
+
+// ExcerptNotIn applies the NotIn predicate on the "excerpt" field.
+func ExcerptNotIn(vs ...string) predicate.Notification {
+	return predicate.Notification(sql.FieldNotIn(FieldExcerpt, vs...))
+}
+
+// ExcerptGT applies the GT predicate on the "excerpt" field.
+func ExcerptGT(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldGT(FieldExcerpt, v))
+}
+
+// ExcerptGTE applies the GTE predicate on the "excerpt" field.
+func ExcerptGTE(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldGTE(FieldExcerpt, v))
+}
+
+// ExcerptLT applies the LT predicate on the "excerpt" field.
+func ExcerptLT(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldLT(FieldExcerpt, v))
+}
+
+// ExcerptLTE applies the LTE predicate on the "excerpt" field.
+func ExcerptLTE(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldLTE(FieldExcerpt, v))
+}
+
+// ExcerptContains applies the Contains predicate on the "excerpt" field.
+func ExcerptContains(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldContains(FieldExcerpt, v))
+}
+
+// ExcerptHasPrefix applies the HasPrefix predicate on the "excerpt" field.
+func ExcerptHasPrefix(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldHasPrefix(FieldExcerpt, v))
+}
+
+// ExcerptHasSuffix applies the HasSuffix predicate on the "excerpt" field.
+func ExcerptHasSuffix(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldHasSuffix(FieldExcerpt, v))
+}
+
+// ExcerptEqualFold applies the EqualFold predicate on the "excerpt" field.
+func ExcerptEqualFold(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldEqualFold(FieldExcerpt, v))
+}
+
+// ExcerptContainsFold applies the ContainsFold predicate on the "excerpt" field.
+func ExcerptContainsFold(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldContainsFold(FieldExcerpt, v))
 }
 
 // CreatedEQ applies the EQ predicate on the "created" field.

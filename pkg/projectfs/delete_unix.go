@@ -19,6 +19,8 @@ package projectfs
 import (
 	"errors"
 	"fmt"
+	"io/fs"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -62,7 +64,10 @@ func (l Layout) checkShareHostBase() error {
 // exist below its host base (the hub's health reports it too): every project on a shared backend has its
 // tree there from create on, so a missing subpath root means the share is
 // not mounted (only the mount point is), and a deletion must report that,
-// never "absent".
+// never "absent". When the host base has no entries at all, the error also
+// wraps ErrShareEmpty; it wraps ErrNoProjectTree either way. The emptiness
+// is read through the same host-base descriptor as the walk
+// (shareddirs.TreeDirState), and a read error is an error, never "empty".
 func (l Layout) CheckTreeMounted() error {
 	root, err := l.subPathRoot()
 	if err != nil {
@@ -73,9 +78,13 @@ func (l Layout) CheckTreeMounted() error {
 	if err != nil {
 		return fmt.Errorf("%w: share not mounted: host base %s: %w", ErrRefused, l.HostBase, err)
 	}
-	if ok, err := shareddirs.DirExistsInTree(base, root); err != nil {
+	exists, empty, err := shareddirs.TreeDirState(base, root)
+	switch {
+	case err != nil:
 		return fmt.Errorf("%w: %w", ErrRefused, err)
-	} else if !ok {
+	case !exists && empty:
+		return fmt.Errorf("%w: %w: %w: share not mounted: %s is empty", ErrRefused, ErrNoProjectTree, ErrShareEmpty, l.HostBase)
+	case !exists:
 		return fmt.Errorf("%w: %w: share not mounted: %s has no %s directory", ErrRefused, ErrNoProjectTree, l.HostBase, root)
 	}
 	return nil
@@ -146,11 +155,6 @@ func (l Layout) RemoveProjectTree(projectID string) ([]Deletion, error) {
 	return out, nil
 }
 
-// AgentWorkspacePendingReason is the reason of a kept agent directory: it
-// still holds entries the hub does not own, normally the agent's own
-// workspace, which only the broker removes.
-const AgentWorkspacePendingReason = "the agent directory is not empty: workspace pending broker removal"
-
 // RemoveAgentStorage removes what the hub owns of agent agentID (the hub agent ID,
 // ValidAgentID) with slug agent: its home-<agentID> and secrets-<agentID>
 // below agents/<slug> on the Layout homes resolve on, then the directory
@@ -186,10 +190,13 @@ func (l Layout) RemoveAgentStorage(projectID, agent, agentID string) ([]Deletion
 		if err != nil {
 			return nil, err
 		}
-		if err := hl.checkShareHostBase(); err != nil {
+		// A share that is not mounted (its subpath root missing below the
+		// host base) is a failure, never "absent": the trees are there,
+		// just not visible here (as for RemoveProjectTree).
+		if err := errors.Join(hl.checkShareHostBase(), hl.CheckTreeMounted()); err != nil {
 			out = append(out, deletion(TreeAgentHome, home.HostPath, false, err), deletion(TreeAgentSecrets, secrets.HostPath, false, err))
 		} else {
-			out = append(out, deleteShared(TreeAgentHome, home), deleteShared(TreeAgentSecrets, secrets))
+			out = append(out, verifyRemoved(deleteShared(TreeAgentHome, home)), verifyRemoved(deleteShared(TreeAgentSecrets, secrets)))
 		}
 	}
 	for _, sl := range l.sharedLayouts() {
@@ -197,13 +204,28 @@ func (l Layout) RemoveAgentStorage(projectID, agent, agentID string) ([]Deletion
 		if err != nil {
 			return out, err
 		}
-		if err := sl.checkShareHostBase(); err != nil {
+		if err := errors.Join(sl.checkShareHostBase(), sl.CheckTreeMounted()); err != nil {
 			out = append(out, deletion(TreeAgentRoot, r.HostPath, false, err))
 			continue
 		}
-		out = append(out, removeEmptyShared(TreeAgentRoot, r))
+		out = append(out, verifyRemoved(removeEmptyShared(TreeAgentRoot, r)))
 	}
 	return out, nil
+}
+
+// verifyRemoved turns a deleted or absent outcome into a failure when the
+// path is still there (Lstat, not following a link): a removal is never
+// reported as done unless the path is gone.
+func verifyRemoved(d Deletion) Deletion {
+	if d.Outcome != OutcomeDeleted && d.Outcome != OutcomeAbsent {
+		return d
+	}
+	if _, err := os.Lstat(d.Path); err == nil {
+		d.Outcome, d.Err = OutcomeFailed, fmt.Errorf("%w: %s", ErrStillPresent, d.Path)
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		d.Outcome, d.Err = OutcomeFailed, fmt.Errorf("check %s after removal: %w", d.Path, err)
+	}
+	return d
 }
 
 // removeEmptyShared removes r (a directory on a shared Layout) only when it
@@ -233,9 +255,6 @@ func removeEmptyShared(tree TreeKind, r Resolved) Deletion {
 // after which it may be removed, in the authority's project-scoped state
 // directory (provision/, inside no agent Mount), and its maintenance pass
 // removes the tree once that time has passed.
-
-// provisionDir is a project's state directory below its project root.
-const provisionDir = "provision"
 
 // DeleteAfterPath resolves the tombstone's directory, <ProjectRoot>/provision,
 // on a shared Layout.

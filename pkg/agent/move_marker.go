@@ -198,7 +198,7 @@ func (m *AgentManager) CheckMoveMarkers(ctx context.Context, projectPath, projec
 			}
 		}
 	}
-	hostBase, rel, err := m.nfsExportWorkspace(projectPath, projectID, agentName)
+	hostBase, rel, _, err := m.nfsExportWorkspace(projectPath, projectID, agentName)
 	if err != nil {
 		return dirs, fmt.Errorf("%w: resolve the NFS export: %v", ErrMoveMarkerMismatch, err)
 	}

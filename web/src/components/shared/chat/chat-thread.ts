@@ -101,6 +101,7 @@ import {
   renderRetentionDivider,
   chatDateDividerStyles,
 } from './chat-date-divider.js';
+import { hasMessagesAfter, unreadDividerAfter } from './chat-unread-divider.js';
 import { DisplayZoneController } from '../../../utils/display-zone-controller.js';
 import { effectiveTimeZone, formatInstantWithZone, toWallClockInput } from '../../../utils/time.js';
 import '../code-editor.js';
@@ -159,6 +160,12 @@ const HISTORY_MAX_PAGE_SIZE = 200;
 
 /** How many around targets a deep starred-only refresh tries before the newest window. */
 const FILTER_AROUND_TRIES = 5;
+
+/** The code of the history around jump's 404 for a message that cannot be shown. */
+const MESSAGE_UNAVAILABLE_CODE = 'message_unavailable';
+
+/** The toast of a jump to a message that is no longer available. */
+export const MESSAGE_UNAVAILABLE_TOAST = 'That message is no longer available.';
 
 /**
  * Detail of `chat-message-filter-change`: the thread asks the page to show
@@ -1510,7 +1517,7 @@ export class ScionChatThread extends LitElement {
         padding: 0.625rem 1rem calc(0.625rem + env(safe-area-inset-bottom, 0px));
         font-size: var(--chat-fs-base);
         border-top: 1px solid var(--scion-border, #e2e8f0);
-        background: var(--scion-surface-2, #f8fafc);
+        background: var(--scion-bg, #f8fafc);
       }
 
       .star-filter-banner > sl-icon {
@@ -1532,6 +1539,20 @@ export class ScionChatThread extends LitElement {
 
       .star-filter-show-all {
         flex-shrink: 0;
+      }
+
+      /* The theme maps Shoelace's neutral scale to the same slate values in
+         both themes, so a default button's label (neutral-700) would sit
+         on a neutral-800 button in the dark theme. Theme tokens keep the
+         label, border and fill readable in both. */
+      .star-filter-show-all::part(base) {
+        background: var(--scion-surface, #ffffff);
+        border-color: var(--scion-border-hover, #cbd5e1);
+        color: var(--scion-text, #1e293b);
+      }
+
+      .star-filter-show-all::part(base):hover {
+        color: var(--scion-primary-hover, #2563eb);
       }
 
       /* A 44 px touch target on a phone or tablet; Shoelace centres the
@@ -3097,6 +3118,19 @@ export class ScionChatThread extends LitElement {
   }
 
   /**
+   * The index of the message the "New messages" divider follows, -1 for
+   * the top of the thread (the watermark was purged by retention), or
+   * null for none.
+   */
+  private unreadDividerIndex(): number | null {
+    return unreadDividerAfter(
+      this.messages.map((m) => m.id),
+      this.lastReadMessageId,
+      this.retentionPurgedBefore !== null
+    );
+  }
+
+  /**
    * Fetch the current user's read watermark for this conversation.
    * Used to position the unread divider on thread open.
    */
@@ -3115,9 +3149,9 @@ export class ScionChatThread extends LitElement {
       if (currentId !== this.fetchId) return;
       if (data?.lastReadMessageId) {
         this.lastReadMessageId = data.lastReadMessageId;
-        // Show divider if there are messages after the watermark.
-        const idx = this.messages.findIndex((m) => m.id === this.lastReadMessageId);
-        if (idx >= 0 && idx < this.messages.length - 1) {
+        // Show divider if there are messages after the watermark (all of
+        // them when retention purged the watermark).
+        if (hasMessagesAfter(this.unreadDividerIndex(), this.messages.length)) {
           this.showUnreadDivider = true;
         }
       }
@@ -4597,7 +4631,7 @@ export class ScionChatThread extends LitElement {
     // the thread shows a spinner, not the scroll container.
     let msgEl = this.shadowRoot?.getElementById(`msg-${messageId}`) ?? null;
     if (!msgEl) {
-      await this.fetchAroundMessage(messageId, isCurrent);
+      await this.fetchAroundMessage(messageId, isCurrent, true);
       await this.updateComplete;
       if (!isCurrent()) return;
       msgEl = this.shadowRoot?.getElementById(`msg-${messageId}`) ?? null;
@@ -4878,10 +4912,15 @@ export class ScionChatThread extends LitElement {
    * `isCurrent`, when given, is re-checked once the response arrives: a
    * caller superseded in the meantime (a restore overtaken by a jump) must
    * not replace the window that the newer request loaded.
+   *
+   * With `notifyUnavailable`, a 404 with code message_unavailable (the
+   * message was removed, for example by the hub's retention policy) shows
+   * the toast "That message is no longer available."
    */
   private async fetchAroundMessage(
     messageId: string,
-    isCurrent: () => boolean = () => true
+    isCurrent: () => boolean = () => true,
+    notifyUnavailable = false
   ): Promise<void> {
     if (!this.conversationKey) return;
 
@@ -4894,7 +4933,22 @@ export class ScionChatThread extends LitElement {
 
     try {
       const res = await apiFetch(this.historyUrl(params));
-      if (currentId !== this.fetchId || !res.ok || !isCurrent()) return;
+      if (currentId !== this.fetchId || !isCurrent()) return;
+      if (!res.ok) {
+        if (notifyUnavailable && res.status === 404) {
+          const body = (await res.json().catch(() => null)) as {
+            error?: { code?: string };
+          } | null;
+          if (
+            body?.error?.code === MESSAGE_UNAVAILABLE_CODE &&
+            currentId === this.fetchId &&
+            isCurrent()
+          ) {
+            showToast(MESSAGE_UNAVAILABLE_TOAST, 'warning');
+          }
+        }
+        return;
+      }
 
       const data = (await res.json()) as HistoryWindow;
       if (currentId !== this.fetchId || !isCurrent()) return;
@@ -7170,9 +7224,10 @@ export class ScionChatThread extends LitElement {
     // Unread divider: find the position of the last-read message so we can
     // insert the divider after it.
     let unreadDividerInserted = false;
-    let lastReadIdx = -1;
+    // null: no divider; -1: before the first message.
+    let lastReadIdx: number | null = null;
     if (this.showUnreadDivider && this.lastReadMessageId) {
-      lastReadIdx = this.messages.findIndex((m) => m.id === this.lastReadMessageId);
+      lastReadIdx = this.unreadDividerIndex();
     }
 
     // Inter-agent messages are dated items like any other row: a run of
@@ -7250,7 +7305,7 @@ export class ScionChatThread extends LitElement {
       }
 
       // Unread divider: insert between the last-read message and the next one.
-      if (!unreadDividerInserted && lastReadIdx >= 0 && mi > lastReadIdx) {
+      if (!unreadDividerInserted && lastReadIdx !== null && mi > lastReadIdx) {
         unreadDividerInserted = true;
         rows.push({
           key: 'unread',

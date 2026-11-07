@@ -180,6 +180,7 @@ func (h *messageCloudHandler) handleWithLabels(ctx context.Context, r slog.Recor
 		Timestamp: r.Time,
 	}
 
+	h.writeStats().RecordWrite()
 	if h.logHook != nil {
 		h.logHook(entry)
 		return nil
@@ -207,6 +208,7 @@ func (h *messageCloudHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 			attrs:     newAttrs,
 			groups:    h.groups,
 			logHook:   h.logHook,
+			stats:     h.stats,
 		},
 	}
 }
@@ -230,6 +232,7 @@ func (h *messageCloudHandler) WithGroup(name string) slog.Handler {
 			attrs:     h.attrs,
 			groups:    newGroups,
 			logHook:   h.logHook,
+			stats:     h.stats,
 		},
 	}
 }

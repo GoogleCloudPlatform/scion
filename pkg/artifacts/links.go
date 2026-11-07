@@ -218,7 +218,7 @@ func (s *Service) stewardAuthority(ctx context.Context, a *Artifact) string {
 	if !ok {
 		return ""
 	}
-	switch st.StewardClause(ctx, a.OwnerRef, a.ScopeRef, "", a.OrphanedAt != nil) {
+	switch st.StewardClause(ctx, a.OwnerRef, a.ScopeRef, a.SponsorRef, a.OrphanedAt != nil) {
 	case StewardClauseProjectOwner:
 		return AuthorityStewardProjectOwner
 	case StewardClauseDelegator:

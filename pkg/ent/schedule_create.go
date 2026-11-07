@@ -252,6 +252,20 @@ func (_c *ScheduleCreate) SetCronExpr(v string) *ScheduleCreate {
 	return _c
 }
 
+// SetTimeZone sets the "time_zone" field.
+func (_c *ScheduleCreate) SetTimeZone(v string) *ScheduleCreate {
+	_c.mutation.SetTimeZone(v)
+	return _c
+}
+
+// SetNillableTimeZone sets the "time_zone" field if the given value is not nil.
+func (_c *ScheduleCreate) SetNillableTimeZone(v *string) *ScheduleCreate {
+	if v != nil {
+		_c.SetTimeZone(*v)
+	}
+	return _c
+}
+
 // SetEventType sets the "event_type" field.
 func (_c *ScheduleCreate) SetEventType(v string) *ScheduleCreate {
 	_c.mutation.SetEventType(v)
@@ -491,6 +505,10 @@ func (_c *ScheduleCreate) defaults() {
 		v := schedule.DefaultAuthorityCeilingBoundaryProjectID
 		_c.mutation.SetAuthorityCeilingBoundaryProjectID(v)
 	}
+	if _, ok := _c.mutation.TimeZone(); !ok {
+		v := schedule.DefaultTimeZone
+		_c.mutation.SetTimeZone(v)
+	}
 	if _, ok := _c.mutation.Payload(); !ok {
 		v := schedule.DefaultPayload
 		_c.mutation.SetPayload(v)
@@ -553,6 +571,9 @@ func (_c *ScheduleCreate) check() error {
 		if err := schedule.CronExprValidator(v); err != nil {
 			return &ValidationError{Name: "cron_expr", err: fmt.Errorf(`ent: validator failed for field "Schedule.cron_expr": %w`, err)}
 		}
+	}
+	if _, ok := _c.mutation.TimeZone(); !ok {
+		return &ValidationError{Name: "time_zone", err: errors.New(`ent: missing required field "Schedule.time_zone"`)}
 	}
 	if _, ok := _c.mutation.EventType(); !ok {
 		return &ValidationError{Name: "event_type", err: errors.New(`ent: missing required field "Schedule.event_type"`)}
@@ -687,6 +708,10 @@ func (_c *ScheduleCreate) createSpec() (*Schedule, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.CronExpr(); ok {
 		_spec.SetField(schedule.FieldCronExpr, field.TypeString, value)
 		_node.CronExpr = value
+	}
+	if value, ok := _c.mutation.TimeZone(); ok {
+		_spec.SetField(schedule.FieldTimeZone, field.TypeString, value)
+		_node.TimeZone = value
 	}
 	if value, ok := _c.mutation.EventType(); ok {
 		_spec.SetField(schedule.FieldEventType, field.TypeString, value)
@@ -1053,6 +1078,18 @@ func (u *ScheduleUpsert) SetCronExpr(v string) *ScheduleUpsert {
 // UpdateCronExpr sets the "cron_expr" field to the value that was provided on create.
 func (u *ScheduleUpsert) UpdateCronExpr() *ScheduleUpsert {
 	u.SetExcluded(schedule.FieldCronExpr)
+	return u
+}
+
+// SetTimeZone sets the "time_zone" field.
+func (u *ScheduleUpsert) SetTimeZone(v string) *ScheduleUpsert {
+	u.Set(schedule.FieldTimeZone, v)
+	return u
+}
+
+// UpdateTimeZone sets the "time_zone" field to the value that was provided on create.
+func (u *ScheduleUpsert) UpdateTimeZone() *ScheduleUpsert {
+	u.SetExcluded(schedule.FieldTimeZone)
 	return u
 }
 
@@ -1610,6 +1647,20 @@ func (u *ScheduleUpsertOne) SetCronExpr(v string) *ScheduleUpsertOne {
 func (u *ScheduleUpsertOne) UpdateCronExpr() *ScheduleUpsertOne {
 	return u.Update(func(s *ScheduleUpsert) {
 		s.UpdateCronExpr()
+	})
+}
+
+// SetTimeZone sets the "time_zone" field.
+func (u *ScheduleUpsertOne) SetTimeZone(v string) *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.SetTimeZone(v)
+	})
+}
+
+// UpdateTimeZone sets the "time_zone" field to the value that was provided on create.
+func (u *ScheduleUpsertOne) UpdateTimeZone() *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.UpdateTimeZone()
 	})
 }
 
@@ -2366,6 +2417,20 @@ func (u *ScheduleUpsertBulk) SetCronExpr(v string) *ScheduleUpsertBulk {
 func (u *ScheduleUpsertBulk) UpdateCronExpr() *ScheduleUpsertBulk {
 	return u.Update(func(s *ScheduleUpsert) {
 		s.UpdateCronExpr()
+	})
+}
+
+// SetTimeZone sets the "time_zone" field.
+func (u *ScheduleUpsertBulk) SetTimeZone(v string) *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.SetTimeZone(v)
+	})
+}
+
+// UpdateTimeZone sets the "time_zone" field to the value that was provided on create.
+func (u *ScheduleUpsertBulk) UpdateTimeZone() *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.UpdateTimeZone()
 	})
 }
 

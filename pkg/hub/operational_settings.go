@@ -23,6 +23,8 @@ import (
 	"maps"
 	"math/rand"
 	"reflect"
+	"slices"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -223,6 +225,13 @@ type Layer1Snapshot struct {
 
 	// HarnessConfigs — map of named harness configurations (DB > bootstrap fallback)
 	HarnessConfigs map[string]config.HarnessConfigEntry
+
+	// PlacementErrors and PlacementWarnings are the Kubernetes placement
+	// findings of Runtimes and Profiles (config.OverlaySections): paths
+	// whose placement is malformed or invalid, which make the co-located
+	// Runtime Broker refuse Kubernetes starts, and ignored unknown keys.
+	PlacementErrors   []string
+	PlacementWarnings []string
 
 	// EnvOverrides lists Layer-1 koanf keys that are overridden by env vars
 	// on this node — used for drift warnings.
@@ -786,6 +795,16 @@ func (o *OperationalSettings) populateMapSections(snap *Layer1Snapshot, dbSectio
 	if !failed["harness_configs"] {
 		snap.HarnessConfigs = sections.HarnessConfigs
 	}
+	snap.PlacementErrors, snap.PlacementWarnings = sections.PlacementErrors, sections.Warnings
+	if failed["runtimes"] || failed["profiles"] {
+		// A section that does not decode cannot be checked: fail closed.
+		for _, sec := range []string{"profiles", "runtimes"} {
+			if failed[sec] && !slices.Contains(snap.PlacementErrors, sec) {
+				snap.PlacementErrors = append(slices.Clone(snap.PlacementErrors), sec)
+			}
+		}
+		sort.Strings(snap.PlacementErrors)
+	}
 }
 
 // maintenanceFromCache extracts maintenance settings from the DB section
@@ -847,7 +866,22 @@ func (o *OperationalSettings) update(
 		return 0, false, err
 	}
 
-	// Update local cache.
+	reread := o.cacheWrite(section, result)
+	inEffect := true
+	if reread {
+		inEffect = o.refreshThrough(ctx, result.SettingsRevision, section)
+	}
+	o.publishAndSelfApply(section, result.Revision)
+
+	return result.Revision, inEffect, nil
+}
+
+// cacheWrite caches one written row, as every write path does: the write
+// is cached directly when its revision is at or above the revision the
+// cache knows this section at (knownAtLocked). It reports whether the
+// cache already held newer state of the section, so the store must be
+// read again (refreshThrough) before the self-apply.
+func (o *OperationalSettings) cacheWrite(section string, result *store.HubSetting) (reread bool) {
 	malformed := !json.Valid(result.Value)
 	if malformed {
 		slog.Error("operational settings: malformed JSON after write (should not happen)",
@@ -876,7 +910,7 @@ func (o *OperationalSettings) update(
 	// not written, and the store is read again below, before the
 	// self-apply (ptone/scion#4457, ptone/scion#5762). A store without
 	// revisions (0) is cached directly, as before.
-	reread := result.SettingsRevision > 0 && result.SettingsRevision < o.knownAtLocked(section)
+	reread = result.SettingsRevision > 0 && result.SettingsRevision < o.knownAtLocked(section)
 	if !reread {
 		o.cache[section] = sectionState{
 			Value:                result.Value,
@@ -895,33 +929,39 @@ func (o *OperationalSettings) update(
 		o.cacheSeq++
 	}
 	o.mu.Unlock()
-	inEffect := true
-	if reread {
-		inEffect = o.refreshThrough(ctx, result.SettingsRevision, section)
-	}
+	return reread
+}
 
-	// Publish admin.settings.updated event to propagate the change to other
-	// replicas via PostgresEventPublisher (design §3.6). On SQLite the
-	// publisher is an in-process ChannelEventPublisher (single replica); it
-	// is nil only before StartPropagation is wired, e.g. in tests.
+// publishAndSelfApply publishes the settings event of a written section and
+// self-applies the current snapshot.
+func (o *OperationalSettings) publishAndSelfApply(section string, revision int64) {
+	o.publish(section, revision)
+	o.selfApply()
+}
+
+// publish sends the admin.settings.updated event for a written section, so
+// other replicas refresh (design §3.6). On SQLite the publisher is an
+// in-process ChannelEventPublisher (single replica); it is nil only before
+// StartPropagation is wired, e.g. in tests.
+func (o *OperationalSettings) publish(section string, revision int64) {
 	if o.events != nil {
 		o.events.PublishRaw(settingsUpdatedSubject, SettingsUpdatedEvent{
 			Section:  section,
-			Revision: result.Revision,
+			Revision: revision,
 		})
 	}
+}
 
-	// Self-apply: the writing node applies its own change synchronously
-	// rather than waiting for its own event (design §3.6). Double-apply
-	// (sync here + own event received via subscription) is harmless because
-	// ApplySnapshot and ApplyMaintenanceFromSnapshot are idempotent.
+// selfApply applies the current snapshot on the writing node synchronously
+// rather than waiting for its own event (design §3.6). Double-apply (sync
+// here + own event received via subscription) is harmless because
+// ApplySnapshot and ApplyMaintenanceFromSnapshot are idempotent.
+func (o *OperationalSettings) selfApply() {
 	if o.server != nil {
 		snap := o.Snapshot()
 		ApplySnapshot(o.server, snap)
 		ApplyMaintenanceFromSnapshot(o.server, snap)
 	}
-
-	return result.Revision, inEffect, nil
 }
 
 // DeleteSection removes a section row from the store, evicts it from the local
@@ -944,7 +984,35 @@ func (o *OperationalSettings) DeleteSection(ctx context.Context, section string)
 	} else if err := o.store.DeleteHubSetting(ctx, section); err != nil {
 		return err
 	}
+	o.applyDelete(ctx, section, deleteRevision)
+	return nil
+}
 
+// deleteGuarded is DeleteSection in a guarded store transaction
+// (store.HubSettingGuardedBatchWriter): the row must still be at
+// expectedRevision and each section in reads at its revision, or
+// store.ErrRevisionConflict is returned and nothing is deleted.
+func (o *OperationalSettings) deleteGuarded(ctx context.Context, section string, expectedRevision int64, reads map[string]int64) error {
+	bw, ok := o.store.(store.HubSettingGuardedBatchWriter)
+	if !ok {
+		return errGuardedBatchUnsupported
+	}
+	if err := o.checkWriteGuard(ctx, section); err != nil {
+		return err
+	}
+	rows, err := bw.UpsertHubSettingsGuarded(ctx,
+		[]store.HubSettingWrite{{Section: section, ExpectedRevision: expectedRevision, Delete: true}}, reads, "", "")
+	if err != nil {
+		return err
+	}
+	o.applyDelete(ctx, section, rows[0].SettingsRevision)
+	return nil
+}
+
+// applyDelete evicts a deleted section from the cache, publishes the event
+// so peers refresh and self-applies. deleteRevision is the
+// operational-settings revision of the delete (0 when unknown).
+func (o *OperationalSettings) applyDelete(ctx context.Context, section string, deleteRevision int64) {
 	o.mu.Lock()
 	// As in Update: a delete at or above the revision the cache knows the
 	// section at is applied to the cache directly, with a tombstone so a
@@ -983,8 +1051,6 @@ func (o *OperationalSettings) DeleteSection(ctx context.Context, section string)
 		ApplySnapshot(o.server, snap)
 		ApplyMaintenanceFromSnapshot(o.server, snap)
 	}
-
-	return nil
 }
 
 // refreshThroughAttempts bounds refreshThrough's reads.
@@ -1565,6 +1631,25 @@ func (a *settingsApplyState) recordLocked(snap Layer1Snapshot) {
 	}
 }
 
+// UpdateSettingsOverlay applies snap's runtimes, profiles and harness
+// configs (nil: no change) and their Kubernetes placement findings to
+// overlay under one lock (config.SettingsOverlay.UpdateWithPlacementFindings),
+// and logs the findings when they change. ApplySnapshot and the co-located
+// Runtime Broker's overlay install both use it, so a snapshot's findings are
+// recorded the same way from the first dispatch on.
+func UpdateSettingsOverlay(overlay *config.SettingsOverlay, snap Layer1Snapshot) {
+	if !overlay.UpdateWithPlacementFindings(snap.Runtimes, snap.Profiles, snap.HarnessConfigs, snap.PlacementErrors, snap.PlacementWarnings) {
+		return
+	}
+	for _, w := range snap.PlacementWarnings {
+		slog.Warn("Stored runtimes and profiles: " + w)
+	}
+	if len(snap.PlacementErrors) > 0 {
+		slog.Error("Stored runtimes and profiles have invalid Kubernetes placement; the co-located Runtime Broker refuses Kubernetes starts until they are fixed",
+			"paths", snap.PlacementErrors)
+	}
+}
+
 // ApplySnapshot writes the Layer1Snapshot values into the Server's config
 // and MaintenanceState. This is the refactored body of the old reloadSettings()
 // logic — no consumer sites change; request-path code keeps reading s.config.*
@@ -1731,6 +1816,15 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 	if iamChanged {
 		applied = append(applied, gcpIAMSection)
 	}
+
+	// Authorized domains (ptone/scion#6000): a SCION_SERVER_* pin on this
+	// node, then the saved list, then the startup value
+	// (authorizedDomainsForSnapshot).
+	domains := authorizedDomainsForSnapshot(snap, s.startupLayer1.AuthorizedDomains)
+	if !slices.Equal(s.config.AuthorizedDomains, domains) {
+		applied = append(applied, "authorized_domains")
+	}
+	s.config.AuthorizedDomains = domains
 
 	// User access mode
 	if snap.UserAccessMode != "" {
@@ -1931,9 +2025,21 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 	if snap.FromOperationalSettings {
 		feedImageRegistryOverlay(s.GetOperationalSettings())
 	}
-	if snap.Runtimes != nil || snap.Profiles != nil || snap.HarnessConfigs != nil {
+	// image_tag (ptone/scion#6625): log the hub-scope value and every
+	// profile value, with their sources, when a save, an experiment toggle
+	// or another replica's change moved any of them. Nothing is logged
+	// before the startup line (LogImageTag).
+	s.logImageTagIfChanged()
+	// The placement findings are recorded with the maps under one lock,
+	// and for every DB-backed snapshot even when no map changed: a stored
+	// runtimes document that does not decode leaves the runtimes map nil
+	// but is still a finding.
+	mapsChanged := snap.Runtimes != nil || snap.Profiles != nil || snap.HarnessConfigs != nil
+	if overlay := config.GetGlobalSettingsOverlay(); overlay != nil && (mapsChanged || snap.FromOperationalSettings) {
+		UpdateSettingsOverlay(overlay, snap)
+	}
+	if mapsChanged {
 		if overlay := config.GetGlobalSettingsOverlay(); overlay != nil {
-			overlay.Update(snap.Runtimes, snap.Profiles, snap.HarnessConfigs)
 			// Recount the built-in profile references the overlay retains
 			// (ptone/scion#5113); never blocks.
 			s.triggerProfileReferences()
@@ -2031,6 +2137,9 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 		"oauth",
 		"secrets.backend",
 	}
+
+	// hub.lifecycle_events is read on every apply (WP1).
+	s.reconcileLifecycleEvents(context.Background())
 
 	return map[string]interface{}{
 		"applied":          applied,
@@ -2462,6 +2571,10 @@ const DefaultAttachmentDeliveryMaxBytes int64 = 32 << 20
 // messaging.attachment_inbox_retention_days (ptone/scion#4596).
 const DefaultAttachmentInboxRetentionDays = 7
 
+// DefaultFailedMessageRetentionDays is the compiled default of
+// messaging.failed_message_retention_days.
+const DefaultFailedMessageRetentionDays = 7
+
 // messagingSection returns the cached messaging section, and false when it
 // is absent or unreadable.
 func (o *OperationalSettings) messagingSection() (opsettings.MessagingSettings, bool) {
@@ -2504,6 +2617,20 @@ func (o *OperationalSettings) AttachmentInboxRetentionDays() int {
 		return DefaultAttachmentInboxRetentionDays
 	}
 	return *ms.AttachmentInboxRetentionDays
+}
+
+// FailedMessageRetentionDays returns how many days a failed message to an
+// agent is kept before the failed-message purge deletes it. The compiled
+// default applies when the section or field is absent or unreadable, or
+// the value is below 1.
+//
+// Hot-reloadable: reads from the DB-backed cache.
+func (o *OperationalSettings) FailedMessageRetentionDays() int {
+	ms, ok := o.messagingSection()
+	if !ok || ms.FailedMessageRetentionDays == nil || *ms.FailedMessageRetentionDays < 1 {
+		return DefaultFailedMessageRetentionDays
+	}
+	return *ms.FailedMessageRetentionDays
 }
 
 // ChatRetention returns the resolved chat retention settings (the

@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -600,4 +601,84 @@ func TestRoleTunnel_TargetRefusalOverBridge(t *testing.T) {
 			}
 		})
 	}
+}
+
+// tunnelLogRecorder records the attributes of every log record whose
+// message is msg.
+type tunnelLogRecorder struct {
+	msg  string
+	mu   sync.Mutex
+	recs []map[string]string
+}
+
+func (h *tunnelLogRecorder) Enabled(context.Context, slog.Level) bool { return true }
+func (h *tunnelLogRecorder) Handle(_ context.Context, r slog.Record) error {
+	if r.Message != h.msg {
+		return nil
+	}
+	attrs := map[string]string{}
+	r.Attrs(func(a slog.Attr) bool {
+		attrs[a.Key] = a.Value.String()
+		return true
+	})
+	h.mu.Lock()
+	h.recs = append(h.recs, attrs)
+	h.mu.Unlock()
+	return nil
+}
+func (h *tunnelLogRecorder) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *tunnelLogRecorder) WithGroup(string) slog.Handler      { return h }
+
+// only returns the single recorded record, failing the test otherwise.
+func (h *tunnelLogRecorder) only(t *testing.T) map[string]string {
+	t.Helper()
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(h.recs) != 1 {
+		t.Fatalf("%d %q records, want 1: %v", len(h.recs), h.msg, h.recs)
+	}
+	return h.recs[0]
+}
+
+// TestRoleTunnel_OpenedLogCarriesRoute (ptone/scion#6562): the relay's
+// "Conduit tunnel opened" line names the relay that holds the target
+// session (owner_instance) and whether that is this relay (route=local) or
+// another one reached through a bridge (route=remote), as the hub's tunnel
+// lines do.
+func TestRoleTunnel_OpenedLogCarriesRoute(t *testing.T) {
+	t.Run("same relay", func(t *testing.T) {
+		f := newRoleFixture(t)
+		logs := &tunnelLogRecorder{msg: "Conduit tunnel opened"}
+		f.role.log = slog.New(logs)
+		target := newEchoTarget()
+		rec := dialTarget(t, f.w, f.node, target.config)
+		ls, _ := userSessionFor(t, f, func(int, relay.HubRPCRequest) hubAnswer {
+			return hubAnswer{status: http.StatusOK, body: tunnelInstruction(t, rec, f.node.Internal.URL)}
+		})
+		if resp := requestTunnel(t, ls); resp.GetStatus() != http.StatusOK {
+			t.Fatalf("answer %v, want 200", resp)
+		}
+		got := logs.only(t)
+		if got["route"] != "local" || got["owner_instance"] != "relay-0" || got["bridged"] != "false" {
+			t.Fatalf("tunnel opened %v; want route=local owner_instance=relay-0 bridged=false", got)
+		}
+	})
+	t.Run("other relay", func(t *testing.T) {
+		f := newRoleFixture(t)
+		logs := &tunnelLogRecorder{msg: "Conduit tunnel opened"}
+		f.role.log = slog.New(logs)
+		owner := f.w.StartNode("relay-1", nil)
+		target := newEchoTarget()
+		rec := dialTarget(t, f.w, owner, target.config)
+		ls, _ := userSessionFor(t, f, func(int, relay.HubRPCRequest) hubAnswer {
+			return hubAnswer{status: http.StatusOK, body: tunnelInstruction(t, rec, owner.Internal.URL)}
+		})
+		if resp := requestTunnel(t, ls); resp.GetStatus() != http.StatusOK {
+			t.Fatalf("answer %v, want 200", resp)
+		}
+		got := logs.only(t)
+		if got["route"] != "remote" || got["owner_instance"] != "relay-1" || got["bridged"] != "true" {
+			t.Fatalf("tunnel opened %v; want route=remote owner_instance=relay-1 bridged=true", got)
+		}
+	})
 }

@@ -170,6 +170,16 @@ type StructuredMessage struct {
 	// the message as before.
 	StoredMessageID string `json:"-"`
 
+	// PersistMessageID and PersistCreatedAt, when set, are the id and the
+	// creation time the sending handler chose for the row the persisting
+	// subscriber stores for this message. The handler has already reported
+	// them to the sender and to observers (the receipt's message_id, the
+	// published Timestamp), so the stored row must carry the same values.
+	// Hub-internal like StoredMessageID: never rendered, never accepted from
+	// request JSON. Empty or zero means the subscriber picks its own.
+	PersistMessageID string    `json:"-"`
+	PersistCreatedAt time.Time `json:"-"`
+
 	// AttachmentDeliveries are the attachments stored as artifacts, bound to
 	// a stored message, that the hub delivers into the recipient agent's
 	// home with this dispatch (ptone/scion#4596). Set by the hub's send path

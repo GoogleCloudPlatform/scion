@@ -191,8 +191,11 @@ var (
 // naming the caller, or a scope grant for a scope in which the host
 // authorizes the caller for scopePerm. With excludeHome, a scope grant for
 // a's home scope does not count (the caller's checks already asked the
-// host about the home scope). Share links never count. It is the one place
-// grants are matched, for reading, writing and administering alike.
+// host about the home scope). Share links never count. A principal grant
+// in its automatic form (CreatedByRef SponsorReviewCreator) counts only
+// while the host authorizes the caller to read in a's home scope. It is
+// the one place grants are matched, for reading, writing and administering
+// alike.
 func grantAllows(ctx context.Context, host Host, a *Artifact, grants []Grant, now time.Time,
 	kind, ref string, perms []string, scopePerm string, excludeHome bool) bool {
 	for _, g := range grants {
@@ -204,9 +207,18 @@ func grantAllows(ctx context.Context, host Host, a *Artifact, grants []Grant, no
 		}
 		switch g.SubjectKind {
 		case SubjectPrincipal:
-			if g.SubjectRef == PrincipalRef(kind, ref) {
-				return true
+			if g.SubjectRef != PrincipalRef(kind, ref) {
+				continue
 			}
+			// An automatic review grant in its automatic form counts only
+			// while its subject holds a role that reads in the home
+			// project (ptone/scion#7134). Authorize is decided from roles,
+			// never from the artifact's grants, so the grant cannot
+			// justify itself; a failed lookup answers false.
+			if g.CreatedByRef == SponsorReviewCreator && !host.Authorize(ctx, a.ScopeRef, PermissionRead) {
+				continue
+			}
+			return true
 		case SubjectScope:
 			if g.SubjectRef == "" || (excludeHome && g.SubjectRef == a.ScopeRef) {
 				continue
@@ -319,6 +331,7 @@ func (s *Service) handleGetArtifact(w http.ResponseWriter, r *http.Request, id s
 			return
 		}
 		resp.Version = versionInfo(v, files)
+		resp.Archive = s.archiveInfo(r.Context(), b, files)
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

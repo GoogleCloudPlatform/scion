@@ -65,13 +65,26 @@
 # Run `hack/check-authz-guards.sh --self-test` to exercise the classifier
 # against a fixture covering every verdict above.
 #
+# Run `hack/check-authz-guards.sh --self-test-dirs` to prove the scan reaches
+# every pkg/hub area directory (ptone/scion#4275): it plants that fixture as
+# <tmp>/pkg/hub/<dir>/zz_planted.go for every directory in hack/area-dirs.txt,
+# scans <tmp> with --root, and requires exactly the fixture's WANT guards to be
+# flagged in every planted file. `--root <dir>` scans <dir> instead of the
+# repository; it exists for that self-test. A relative <dir> resolves against
+# the caller's working directory.
+#
 # EXIT CODES
 #
-#   0  analysed, no violations
-#   1  analysed, violations found — the list is on stderr
+#   0  analysed, no violations (self-tests: PASS)
+#   1  analysed, violations found — the list is on stderr (self-tests: FAIL)
 #   2  RESERVED — never emitted by this script
 #   3  COULD NOT ANALYSE: ripgrep (rg) is not installed — nothing was examined
-#   4  COULD NOT ANALYSE: no candidate files matched — nothing was examined
+#   4  COULD NOT ANALYSE: no candidate files matched, the --root directory is
+#      missing, or hack/area-dirs.txt is unreadable or malformed — nothing was
+#      examined
+#   5  COULD NOT ANALYSE: usage error (unknown argument, --root without a
+#      directory, or --root with --self-test/--self-test-dirs) — nothing was
+#      examined
 #
 # 2 is reserved and deliberately left unused, because it is the one code this
 # script cannot own. GNU make flattens every non-zero recipe exit to 2, so
@@ -116,6 +129,52 @@
 # formatting check that silently skips costs a reformat later, while an
 # authorization check that silently skips ships a bypass.
 set -euo pipefail
+
+self="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+repo="$(dirname "$(dirname "$self")")"
+
+# refuse <code> <message>: a could-not-analyse exit, on both streams (see above).
+refuse() {
+  echo "check-authz-guards: $2"
+  echo "check-authz-guards: $2" >&2
+  exit "$1"
+}
+
+# parse_args <args...>: sets mode, root and root_set; on a usage error sets
+# usage_err and returns 5. The self-test calls it in a subshell, so each
+# refusal has a check that fails if the refusal is removed.
+parse_args() {
+  mode=scan
+  root="$repo"
+  root_set=0
+  usage_err=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --self-test) mode="self-test" ;;
+      --self-test-dirs) mode="self-test-dirs" ;;
+      --root)
+        if [[ $# -lt 2 || -z "$2" ]]; then
+          usage_err="--root needs a directory"
+          return 5
+        fi
+        root="$2"
+        root_set=1
+        shift
+        ;;
+      *)
+        usage_err="unknown argument $1"
+        return 5
+        ;;
+    esac
+    shift
+  done
+  if [[ "$mode" != scan && $root_set -eq 1 ]]; then
+    usage_err="--root does not combine with --self-test or --self-test-dirs"
+    return 5
+  fi
+  return 0
+}
+parse_args "$@" || refuse 5 "$usage_err — NOTHING WAS ANALYSED"
 
 # Classifier. Walks each candidate guard with a brace-depth counter so the
 # verdict depends on the block's real extent rather than on a fixed indentation
@@ -228,10 +287,9 @@ AWK
 # keying on the getter name instead of the guard shape is the specific way this
 # check would go wrong.
 # --------------------------------------------------------------------------
-if [[ "${1:-}" == "--self-test" ]]; then
-  fixture_dir="$(mktemp -d)"
-  fixture="$fixture_dir/fixture.go"
-  cat >"$fixture" <<'FIXTURE'
+# write_fixture <path>: writes the fixture to <path>.
+write_fixture() {
+  cat >"$1" <<'FIXTURE'
 package fixture
 
 // Authorization gate inside an identity-kind guard, no else. The #591 shape.
@@ -367,8 +425,20 @@ func (s *Server) failClosedAfterBranch(ctx context.Context) bool {
 	return s.authzService.CheckAccess(ctx, userIdent, res, ActionRead).Allowed
 }
 FIXTURE
+}
 
-  want="$(grep -n '^[[:space:]]*// WANT$' "$fixture" | cut -d: -f1 | awk '{print $1 + 1}')"
+# fixture_want <path>: the line numbers the classifier must flag in the
+# fixture at <path>, one per line: each line just below a `// WANT` marker.
+fixture_want() {
+  grep -n '^[[:space:]]*// WANT$' "$1" | cut -d: -f1 | awk '{print $1 + 1}'
+}
+
+if [[ "$mode" == self-test ]]; then
+  fixture_dir="$(mktemp -d)"
+  fixture="$fixture_dir/fixture.go"
+  write_fixture "$fixture"
+
+  want="$(fixture_want "$fixture")"
   got="$(awk "$classifier" "$fixture" | cut -d: -f2 || true)"
 
   if [[ "$want" == "$got" ]]; then
@@ -385,7 +455,78 @@ FIXTURE
   exit 1
 fi
 
-cd "$(dirname "$0")/.."
+# --------------------------------------------------------------------------
+# Self-test over the area directories (ptone/scion#4275): the scan must
+# reach every directory in hack/area-dirs.txt. The fixture is planted in each
+# one under a temporary root, the real scan path runs over that root, and every
+# planted file must yield exactly the fixture's WANT lines, so a directory the
+# scan skipped (or a classifier that stopped firing) fails the self-test.
+# --------------------------------------------------------------------------
+if [[ "$mode" == self-test-dirs ]]; then
+  # shellcheck source=SCRIPTDIR/lib/area-dirs.sh
+  source "$repo/hack/lib/area-dirs.sh"
+  list="$(read_area_dirs "$repo/hack/area-dirs.txt")" ||
+    refuse 4 "self-test-dirs: hack/area-dirs.txt is unreadable or malformed — NOTHING WAS ANALYSED"
+  mapfile -t areas <<<"$list"
+
+  plant_root="$(mktemp -d)"
+  trap 'rm -rf "$plant_root"' EXIT
+  write_fixture "$plant_root/reference.go"
+  want="$(fixture_want "$plant_root/reference.go")"
+  want_n="$(printf '%s\n' "$want" | grep -c .)"
+  [[ "$want_n" -gt 0 ]] || refuse 4 "self-test-dirs: the fixture has no WANT marker — NOTHING WAS ANALYSED"
+  for d in "${areas[@]}"; do
+    mkdir -p "$plant_root/pkg/hub/$d"
+    write_fixture "$plant_root/pkg/hub/$d/zz_planted.go"
+  done
+
+  rc=0
+  out="$("$self" --root "$plant_root" 2>&1)" || rc=$?
+  failed=0
+  if [[ $rc -ne 1 ]]; then
+    echo "check-authz-guards self-test-dirs: FAIL: scan of the planted root exited $rc (want 1, violations found)" >&2
+    failed=1
+  fi
+  for d in "${areas[@]}"; do
+    got="$(printf '%s\n' "$out" | awk -v p="pkg/hub/$d/zz_planted.go:" 'index($0, p) == 1' | cut -d: -f2)"
+    if [[ "$got" != "$want" ]]; then
+      echo "check-authz-guards self-test-dirs: FAIL: pkg/hub/$d/zz_planted.go: flagged lines [${got//$'\n'/ }], want [${want//$'\n'/ }]" >&2
+      failed=1
+    fi
+  done
+  # Nothing but the planted guards may be reported.
+  flagged="$(printf '%s\n' "$out" | grep -cE '^[^[:space:]]+\.go:[0-9]+: ' || true)"
+  if [[ "$flagged" -ne $((${#areas[@]} * want_n)) ]]; then
+    echo "check-authz-guards self-test-dirs: FAIL: $flagged findings reported, want $((${#areas[@]} * want_n)) (${#areas[@]} dirs x $want_n)" >&2
+    failed=1
+  fi
+  # Usage refusals (exit 5): end to end for the two that cannot recurse, and
+  # through parse_args in a subshell for every refusal, with a control.
+  for a in --bogus --root; do
+    rc=0; "$self" "$a" >/dev/null 2>&1 || rc=$?
+    [[ $rc -eq 5 ]] || { echo "check-authz-guards self-test-dirs: FAIL: '$a' exited $rc (want 5)" >&2; failed=1; }
+  done
+  expect_parse() {
+    local want=$1 rc=0; shift
+    ( parse_args "$@" ) >/dev/null 2>&1 || rc=$?
+    [[ $rc -eq $want ]] || { echo "check-authz-guards self-test-dirs: FAIL: parse_args $* returned $rc (want $want)" >&2; failed=1; }
+  }
+  expect_parse 5 --bogus
+  expect_parse 5 --root
+  expect_parse 5 --self-test --root /x
+  expect_parse 5 --self-test-dirs --root /x
+  expect_parse 5 --root /x --self-test-dirs
+  expect_parse 0 --root /x
+  if [[ $failed -ne 0 ]]; then
+    echo "scan output:" >&2
+    echo "$out" >&2
+    exit 1
+  fi
+  echo "check-authz-guards self-test-dirs: PASS (${#areas[@]} dirs from hack/area-dirs.txt, $want_n planted guards flagged in each: ${areas[*]})"
+  exit 0
+fi
+
+cd "$root" 2>/dev/null || refuse 4 "scan root $root is missing — NOTHING WAS ANALYSED"
 
 # Report which tree was actually analysed, on every path.
 #

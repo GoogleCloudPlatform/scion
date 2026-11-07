@@ -275,7 +275,6 @@ var EntryPointExemptions = []EntryPointExemption{
 	{Pattern: "/api/v1/users/me/visitor-grants", Kind: ExemptionAuthenticationOnly, Reason: "List a project visitor's own visitor grants, self-service; any other caller gets 404", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/users/me/visitor-dms", Kind: ExemptionAuthenticationOnly, Reason: "List a project visitor's own DMs with agents it may message, self-service; any other caller gets 404", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/principals/", Kind: ExemptionAuthenticationOnly, Reason: "Resolve principal display name, self-service", Owner: "route_metadata.go"},
-	{Pattern: "/api/v1/conduit/grant-keys", Kind: ExemptionAuthenticationOnly, Reason: "Conduit grant public keys, authenticated read-only, experiment-gated", Owner: "route_metadata.go"},
 	// Artifact share links (hub.artifacts experiment): reads authenticated
 	// by a link token in the path only, like the view route below; the
 	// artifact service resolves the token on every request and never uses
@@ -301,8 +300,7 @@ var EntryPointExemptions = []EntryPointExemption{
 	{Pattern: "/api/v1/admin/delegation-adoption", Kind: ExemptionHubAdmin, Reason: "Delegation-provenance adoption status; hub system admin on a session or local development credential only (route guard plus handler check). No registered permission, so it cannot be delegated.", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/admin/delegation-adoption/previews", Kind: ExemptionHubAdmin, Reason: "Delegation-provenance adoption preview; read-only planning, hub system admin on a session or local development credential only.", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/admin/delegation-adoption/commits", Kind: ExemptionHubAdmin, Reason: "Delegation-provenance adoption commit (adopt or revert); hub system admin on a session or local development credential only, rechecked in the commit transaction; per-hop mutation audit. Operation contract deferred, as for the other hub-admin exemptions.", Owner: "route_metadata.go"},
-	{Pattern: "/api/v1/experiments", Kind: ExemptionAuthenticationOnly, Reason: "Resolved experiments map for signed-in callers, no resource-level authorization", Owner: "route_metadata.go"},
-	{Pattern: "/api/v1/profiling", Kind: ExemptionAuthenticationOnly, Reason: "Profiling switches for signed-in callers (one boolean), no resource-level authorization", Owner: "route_metadata.go"},
+	{Pattern: "/api/v1/admin/keys/status", Kind: ExemptionHubAdmin, Reason: "Server key status report (IDs, deadlines, policy state, aggregate counts; never key material or record identifiers), behind server.secret_rotation; unscoped platform admin on a session or local development credential only (route guard falls back to requireAdmin). No registered permission, so it cannot be delegated.", Owner: "route_metadata.go"},
 
 	// Workstation endpoints — workstation token authentication
 	{Pattern: "/api/v1/system/identity", Kind: ExemptionInternalOnly, Reason: "Workstation system endpoint, workstation-token auth", Owner: "route_metadata.go"},
@@ -707,7 +705,7 @@ var MutationClassifications = []MutationClassification{
 	{File: "pkg/hub/server.go", Function: "sweepOrphanedGroupMemberships", Symbol: "DeleteOrphanedGroupMemberships", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Server startup: delete group memberships whose user and agent are both NULL (principal deleted, ON DELETE SET NULL); such rows are always orphans and carry no principal; idempotent, every startup (ptone/scion#2769)", Scope: "pkg/hub/server.go"}},
 	{File: "pkg/hub/agent_token_mint.go", Function: "recordAgentCredential", Symbol: "CreateAgentCredential", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Agent credential record at agent token issue, server infrastructure", Scope: "pkg/hub/agent_token_mint.go"}},
 	{File: "pkg/hub/server.go", Function: "a2aBridgeSweepHandler", Symbol: "GenerateAccessToken", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Background job: A2A bridge sweep generates GCP tokens", Scope: "pkg/hub/server.go"}},
-	{File: "pkg/hub/encryption_audit.go", Function: "runEncryptionAudit", Symbol: "ScanSecretPayloads", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Startup encryption audit (ptone/scion#1530 §5): authenticates every stored payload in process memory before any key sync or backup write; reports identities and counts only", Scope: "pkg/hub/encryption_audit.go"}},
+	{File: "pkg/hub/encryption_scan.go", Function: "scanSecretPayloads", Symbol: "ScanSecretPayloads", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Authenticating payload scan (ptone/scion#1530 §5, §6) shared by the startup encryption audit, key status and the read-only keys verify command: authenticates every stored payload in process memory; reports identities and counts only", Scope: "pkg/hub/encryption_scan.go"}},
 	{File: "pkg/hub/server.go", Function: "backupSigningKeyToStore", Symbol: "UpdateSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC signing key backup, server infrastructure", Scope: "pkg/hub/server.go"}},
 	{File: "pkg/hub/server.go", Function: "backupSigningKeyToStore", Symbol: "UpsertSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC signing key backup, server infrastructure", Scope: "pkg/hub/server.go"}},
 	{File: "pkg/hub/server.go", Function: "ensureSigningKeyWithSource", Symbol: "DeleteSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC signing key rotation, server infrastructure", Scope: "pkg/hub/server.go"}},
@@ -715,15 +713,15 @@ var MutationClassifications = []MutationClassification{
 	{File: "pkg/hub/server.go", Function: "ensureSigningKeyWithSource", Symbol: "GetSecretValue", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC signing key load, server infrastructure", Scope: "pkg/hub/server.go"}},
 
 	// -----------------------------------------------------------------------
-	// pkg/hub/oidckeys.go — OIDC key infrastructure
+	// pkg/hub/oidckeys/oidckeys.go — OIDC key infrastructure
 	// -----------------------------------------------------------------------
-	{File: "pkg/hub/oidckeys.go", Function: "backupKeyToStore", Symbol: "UpdateSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC keyset backup, cryptographic infrastructure", Scope: "pkg/hub/oidckeys.go"}},
-	{File: "pkg/hub/oidckeys.go", Function: "backupKeyToStore", Symbol: "UpsertSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC keyset backup, cryptographic infrastructure", Scope: "pkg/hub/oidckeys.go"}},
-	{File: "pkg/hub/oidckeys.go", Function: "casCreateKeyInStore", Symbol: "CreateSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC keyset CAS create, cryptographic infrastructure", Scope: "pkg/hub/oidckeys.go"}},
-	{File: "pkg/hub/oidckeys.go", Function: "casCreateKeyInStore", Symbol: "GetSecretValue", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC keyset CAS read, cryptographic infrastructure", Scope: "pkg/hub/oidckeys.go"}},
-	{File: "pkg/hub/oidckeys.go", Function: "loadKeysetFromDB", Symbol: "GetSecretValue", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC keyset load, cryptographic infrastructure", Scope: "pkg/hub/oidckeys.go"}},
-	{File: "pkg/hub/oidckeys.go", Function: "loadOrCreateKey", Symbol: "GetSecretValue", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC keyset load-or-create, cryptographic infrastructure", Scope: "pkg/hub/oidckeys.go"}},
-	{File: "pkg/hub/oidckeys.go", Function: "saveKeysetToDB", Symbol: "UpsertSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC keyset save, cryptographic infrastructure", Scope: "pkg/hub/oidckeys.go"}},
+	{File: "pkg/hub/oidckeys/oidckeys.go", Function: "backupKeyToStore", Symbol: "UpdateSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC keyset backup, cryptographic infrastructure", Scope: "pkg/hub/oidckeys/oidckeys.go"}},
+	{File: "pkg/hub/oidckeys/oidckeys.go", Function: "backupKeyToStore", Symbol: "UpsertSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC keyset backup, cryptographic infrastructure", Scope: "pkg/hub/oidckeys/oidckeys.go"}},
+	{File: "pkg/hub/oidckeys/oidckeys.go", Function: "casCreateKeyInStore", Symbol: "CreateSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC keyset CAS create, cryptographic infrastructure", Scope: "pkg/hub/oidckeys/oidckeys.go"}},
+	{File: "pkg/hub/oidckeys/oidckeys.go", Function: "casCreateKeyInStore", Symbol: "GetSecretValue", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC keyset CAS read, cryptographic infrastructure", Scope: "pkg/hub/oidckeys/oidckeys.go"}},
+	{File: "pkg/hub/oidckeys/oidckeys.go", Function: "loadKeysetFromDB", Symbol: "GetSecretValue", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC keyset load, cryptographic infrastructure", Scope: "pkg/hub/oidckeys/oidckeys.go"}},
+	{File: "pkg/hub/oidckeys/oidckeys.go", Function: "loadOrCreateKey", Symbol: "GetSecretValue", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC keyset load-or-create, cryptographic infrastructure", Scope: "pkg/hub/oidckeys/oidckeys.go"}},
+	{File: "pkg/hub/oidckeys/oidckeys.go", Function: "saveKeysetToDB", Symbol: "UpsertSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC keyset save, cryptographic infrastructure", Scope: "pkg/hub/oidckeys/oidckeys.go"}},
 
 	// -----------------------------------------------------------------------
 	// pkg/hub/conduit_grants.go — Conduit grant signing key ring

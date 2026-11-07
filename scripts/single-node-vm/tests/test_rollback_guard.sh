@@ -988,9 +988,9 @@ _rb_decision_table() {
   _rb_case stay "valid, unverified, stale current" stale "too old to roll back automatically" '_rb_update_state "$(_rb_happy_state)"'
   _rb_case stay "valid, unverified, migrated and safe, stale current" stale "too old to roll back automatically" '_rb_update_state "$(_rb_happy_state migrated=true)"'
   _rb_case stay "verified" fresh "was verified" '_rb_update_state "$(_rb_happy_state verified=true)"'
-  _rb_case stay "migrated, previous not safe" fresh "below its downgrade floor" '_rb_update_state "$(_rb_happy_state migrated=true previous_safe=false)"'
+  _rb_case stay "migrated, previous not safe" fresh "cannot be shown to be safe for it (below the downgrade floor, or a Git build)" '_rb_update_state "$(_rb_happy_state migrated=true previous_safe=false)"'
   _rb_case stay "migrated, previous_safe missing" fresh "Restoring after a failed update" '_rb_update_state "$(_rb_happy_state migrated=true previous_safe=)"'
-  _rb_case stay "migrated, previous_safe not a boolean" fresh "below its downgrade floor" '_rb_update_state "$(_rb_happy_state migrated=true previous_safe="\"true\"")"'
+  _rb_case stay "migrated, previous_safe not a boolean" fresh "cannot be shown to be safe for it (below the downgrade floor, or a Git build)" '_rb_update_state "$(_rb_happy_state migrated=true previous_safe="\"true\"")"'
   _rb_case swap "migrated, previous safe" fresh "safe to undo" '_rb_update_state "$(_rb_happy_state migrated=true)"'
   _rb_case swap "not migrated, previous not safe" fresh "safe to undo" '_rb_update_state "$(_rb_happy_state previous_safe=false)"'
   # Readable but about other links: fail closed, never the timer.
@@ -1174,4 +1174,63 @@ test_start_attempt_never_blocks_a_start() {
     assert_eq '{"target":"nightly-20261023","count":2}' "$(_sa_file)" "an unwritable root leaves the file as it was"
     rm -rf "$RB_DIR"
   fi
+}
+
+# =====================================================================
+# Git builds (Phase 4): releases/git-<sha12>
+# =====================================================================
+
+# _rb_git_host CURRENT PREVIOUS -- a host whose current (crash-looping) and
+# previous releases are CURRENT and PREVIOUS, e.g. a rebuild from Git
+# (git-<sha12>) on top of a release.
+_rb_git_host() {
+  local cur="$1" prev="$2"
+  _rb_new_host
+  rm -f "${RB_ROOT}/current" "${RB_ROOT}/previous"
+  mkdir -p "${RB_ROOT}/releases/${cur}" "${RB_ROOT}/releases/${prev}"
+  printf '#!/bin/sh\nexit 1\n' > "${RB_ROOT}/releases/${cur}/scion"
+  printf '#!/bin/sh\nexit 0\n' > "${RB_ROOT}/releases/${prev}/scion"
+  chmod 0755 "${RB_ROOT}/releases/${cur}/scion" "${RB_ROOT}/releases/${prev}/scion"
+  ln -s "releases/${cur}" "${RB_ROOT}/current"
+  ln -s "releases/${prev}" "${RB_ROOT}/previous"
+  _rb_attempts "$cur" 5
+}
+
+# _rb_git_case OUTCOME WHAT CURRENT PREVIOUS MIGRATED PREVIOUS_SAFE SNIPPET --
+# one row: the update-state the hub writes for that switch (target CURRENT,
+# from PREVIOUS, unverified), the guard run, and the outcome checked.
+_rb_git_case() {
+  local outcome="$1" what="$2" cur="$3" prev="$4" migrated="$5" safe="$6" snippet="$7"
+  _rb_git_host "$cur" "$prev"
+  _rb_update_state "$(_rb_happy_state target="\"${cur}\"" from="\"${prev}\"" migrated="$migrated" previous_safe="$safe")"
+  RB_BEFORE="$(_rb_state)"
+  _rb_run
+  what="${RB_SCENARIO:-v249-crash}: ${what}"
+  assert_eq "0" "$RB_RC" "${what}: the guard must exit 0 (output: ${RB_OUT})"
+  if [[ "$outcome" == swap ]]; then
+    assert_eq "releases/${prev}" "$(readlink "${RB_ROOT}/current")" "${what}: current must be the restored release"
+    assert_true "$([[ -f "${RB_ROOT}/rollback.marker" ]] && echo true || echo false)" "${what}: the marker must be written"
+    assert_contains "$(cat "$RB_CALLS")" "systemctl start scion-hub.service" "${what}: the hub must be started"
+  else
+    assert_eq "$RB_BEFORE" "$(_rb_state)" "${what}: nothing may change, no marker"
+    assert_not_contains "$(cat "$RB_CALLS")" "systemctl start" "${what}: the hub must stay stopped"
+  fi
+  assert_contains "$RB_OUT" "$snippet" "${what}: the log must say why"
+  rm -rf "$RB_DIR"
+}
+
+# The guard decides on names and booleans only. The Go hub computes
+# previous_safe: true for a release from at or above the downgrade floor
+# (a preview/stable from with its publish date), false for a git-* from (a
+# commit's schema position against the floor cannot be proven). So
+# release->git rolls back like release->release, and git->git and
+# git->release stay stopped once migrated: the documented fail-closed
+# residual.
+test_rollback_update_state_git_builds() {
+  local g1=git-0123456789ab g2=git-89abcdef0123
+  _rb_git_case swap "release->git, migrated, previous safe" "$g1" v0.3.0-preview.4 true true "safe to undo"
+  _rb_git_case swap "nightly->git, migrated, previous safe" "$g1" nightly-20261020 true true "safe to undo"
+  _rb_git_case stay "git->git, migrated, previous not safe" "$g2" "$g1" true false "cannot be shown to be safe for it (below the downgrade floor, or a Git build)"
+  _rb_git_case stay "git->release, migrated, previous not safe" nightly-20261101 "$g1" true false "cannot be shown to be safe for it (below the downgrade floor, or a Git build)"
+  _rb_git_case swap "git->git, not migrated" "$g2" "$g1" false false "safe to undo"
 }

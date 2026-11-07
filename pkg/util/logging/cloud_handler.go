@@ -90,6 +90,17 @@ type CloudHandler struct {
 	// logHook, when non-nil, receives each entry instead of sending
 	// it to the Cloud Logging API. Used only in tests.
 	logHook func(gcplog.Entry)
+	// stats receives the writer=cloud write count; nil means CloudWriter().
+	// Set only in tests. Shared by derived handlers.
+	stats *CloudWriteStats
+}
+
+// writeStats returns the writer=cloud counters this handler reports to.
+func (h *CloudHandler) writeStats() *CloudWriteStats {
+	if h.stats != nil {
+		return h.stats
+	}
+	return CloudWriter()
 }
 
 // NewCloudHandler creates a new CloudHandler that sends logs to Cloud Logging.
@@ -271,6 +282,9 @@ func (h *CloudHandler) Handle(_ context.Context, r slog.Record) error {
 		delete(payload, "message")
 	}
 
+	// The failure ratio's denominator, counted before the test hook so tests
+	// see it.
+	h.writeStats().RecordWrite()
 	if h.logHook != nil {
 		h.logHook(entry)
 		return nil
@@ -297,6 +311,7 @@ func (h *CloudHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 		attrs:     newAttrs,
 		groups:    h.groups,
 		logHook:   h.logHook,
+		stats:     h.stats,
 	}
 }
 
@@ -318,6 +333,7 @@ func (h *CloudHandler) WithGroup(name string) slog.Handler {
 		attrs:     h.attrs,
 		groups:    newGroups,
 		logHook:   h.logHook,
+		stats:     h.stats,
 	}
 }
 

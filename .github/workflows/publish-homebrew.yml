@@ -1,0 +1,252 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Publish a preview release to the homebrew-scion distribution:
+#   1. build the container images from the release tag and push them to
+#      ghcr.io/homebrew-scion, tagged with the release tag only (plus the
+#      immutable :<short-sha> that build-images.sh always adds);
+#   2. then commit Formula/scion.rb, generated from the release's
+#      SHA256SUMS, to the homebrew-scion/homebrew-scion tap.
+# build-release.yml calls this after it publishes a preview release. Run it
+# by hand to retry a failed publish; see docs/release-process.md.
+#
+# Both steps authenticate with the HOMEBREW_SCION_TOKEN secret of the
+# "homebrew" environment, which is limited to main and preview tags, so a
+# run from any other branch cannot read it. Without the secret the workflow
+# skips with a notice. Setup: docs/release-process.md, "Homebrew publishing".
+
+name: Publish to Homebrew
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: 'Preview release tag, e.g. v0.3.0-preview.5'
+        required: true
+        type: string
+      publish_images:
+        description: 'Build and push images to ghcr.io/homebrew-scion'
+        type: boolean
+        default: true
+      publish_formula:
+        description: 'Commit the formula to homebrew-scion/homebrew-scion'
+        type: boolean
+        default: true
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Preview release tag, e.g. v0.3.0-preview.5'
+        required: true
+        type: string
+      publish_images:
+        description: 'Build and push images to ghcr.io/homebrew-scion'
+        type: boolean
+        default: true
+      publish_formula:
+        description: 'Commit the formula to homebrew-scion/homebrew-scion'
+        type: boolean
+        default: true
+
+permissions: {}
+
+# Same repository guard as build-release.yml, on every job: forks mirror
+# upstream tags and must never publish to homebrew-scion.
+jobs:
+  gate:
+    name: Check tag and token
+    runs-on: ubuntu-latest
+    if: github.repository == 'GoogleCloudPlatform/scion'
+    # The secret lives in this environment; a job outside it cannot see it.
+    environment: homebrew
+    permissions: {}
+    outputs:
+      publish: ${{ steps.check.outputs.publish }}
+      tag: ${{ steps.check.outputs.tag }}
+    steps:
+      - name: Check tag and token
+        id: check
+        env:
+          TAG: ${{ inputs.tag }}
+          # Only whether the secret is set, never its value. One secret
+          # serves both publish jobs (the GHCR login and TAP_TOKEN below).
+          HAS_TOKEN: ${{ secrets.HOMEBREW_SCION_TOKEN != '' }}
+        run: |
+          # The tap follows the preview channel only.
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-preview\.[0-9]+$ ]]; then
+            echo "::error::not a preview tag (want vX.Y.Z-preview.N): ${TAG}"
+            exit 1
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          if [ "$HAS_TOKEN" != "true" ]; then
+            echo "::notice::HOMEBREW_SCION_TOKEN is not set; skipping Homebrew publishing for ${TAG}."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "publish=true" >> "$GITHUB_OUTPUT"
+
+  publish-homebrew-images:
+    name: Build and push images
+    needs: gate
+    runs-on: ubuntu-latest
+    if: github.repository == 'GoogleCloudPlatform/scion' && needs.gate.outputs.publish == 'true' && inputs.publish_images
+    # The full image set for amd64 and arm64 (arm64 under QEMU) takes hours.
+    timeout-minutes: 360
+    environment: homebrew
+    concurrency:
+      group: homebrew-images-${{ needs.gate.outputs.tag }}
+      cancel-in-progress: false
+    permissions:
+      contents: read     # Check out the release tag
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
+        with:
+          ref: refs/tags/${{ needs.gate.outputs.tag }}
+          persist-credentials: false
+
+      # build-images.sh stamps VERSION from `git describe --tags
+      # --exact-match`; a checkout that is not on the tag would embed "dev".
+      # A weekly preview tag shares its commit with a nightly tag. The
+      # shallow checkout above fetches only the preview tag, so describe
+      # returns it; if both tags were ever present and describe picked the
+      # nightly, this check fails instead of building a mislabelled image.
+      - name: Verify checkout is the release tag
+        env:
+          TAG: ${{ needs.gate.outputs.tag }}
+        run: |
+          described=$(git describe --tags --exact-match)
+          if [ "$described" != "$TAG" ]; then
+            echo "::error::checkout is at '${described}', not ${TAG}"
+            exit 1
+          fi
+
+      # The runner image ships toolchains this job never uses; the image
+      # build needs the disk space.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+        with:
+          image: tonistiigi/binfmt:qemu-v10.2.3@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0
+          platforms: arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Log in to GHCR
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          # GHCR authenticates the token, not this name; a fixed name keeps
+          # it independent of who started the run.
+          username: x-access-token
+          password: ${{ secrets.HOMEBREW_SCION_TOKEN }}
+
+      # One multi-arch call for the whole chain: parents built in the same
+      # call are referenced by :<short-sha>, which is then a multi-arch
+      # manifest. Per-arch parallel calls would race on that tag. No build
+      # cache: release images never restore one (cache poisoning).
+      - name: Build and push images
+        env:
+          TAG: ${{ needs.gate.outputs.tag }}
+        run: |
+          image-build/scripts/build-images.sh \
+            --registry ghcr.io/homebrew-scion \
+            --target all \
+            --tag "$TAG" \
+            --platform all \
+            --push
+          echo "Pushed ghcr.io/homebrew-scion images tagged ${TAG}" >> "$GITHUB_STEP_SUMMARY"
+
+  # Runs after the images so the formula never points at a release whose
+  # images are missing. A failed image build stops it; a skipped one
+  # (publish_images: false) does not.
+  publish-homebrew-formula:
+    name: Update Homebrew formula
+    needs: [gate, publish-homebrew-images]
+    runs-on: ubuntu-latest
+    if: >-
+      ${{ !cancelled()
+      && github.repository == 'GoogleCloudPlatform/scion'
+      && needs.gate.result == 'success'
+      && needs.gate.outputs.publish == 'true'
+      && inputs.publish_formula
+      && (needs.publish-homebrew-images.result == 'success' || needs.publish-homebrew-images.result == 'skipped') }}
+    timeout-minutes: 10
+    environment: homebrew
+    # Per tag, so a queued run never replaces a pending run for another tag
+    # (GitHub keeps only one pending run per group). Runs for different tags
+    # that overlap are still safe: the push below is a plain push, so the
+    # later one is rejected as a non-fast-forward and fails visibly, and the
+    # generator never replaces a newer version.
+    concurrency:
+      group: homebrew-tap-formula-${{ needs.gate.outputs.tag }}
+      cancel-in-progress: false
+    permissions:
+      contents: read     # Check out the formula script
+    steps:
+      # The script comes from the commit this run started from: the release
+      # tag for a tag-push build, main for the weekly preview and for manual
+      # reruns (so a rerun for an older tag uses the current generator).
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
+        with:
+          path: scion
+          persist-credentials: false
+
+      # The tap is public: check it out without credentials. Only the push
+      # step below sees the token.
+      - name: Checkout tap
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
+        with:
+          repository: homebrew-scion/homebrew-scion
+          path: tap
+          persist-credentials: false
+
+      - name: Generate formula
+        env:
+          TAG: ${{ needs.gate.outputs.tag }}
+        run: |
+          # Refuses to replace a newer version already in the tap.
+          scion/scripts/release/update-homebrew-formula.sh "$TAG" tap/Formula/scion.rb
+
+      - name: Commit and push formula
+        working-directory: tap
+        env:
+          TAG: ${{ needs.gate.outputs.tag }}
+          # The tap token. A separate tap-only secret would replace the
+          # secret name on this line (and in the gate check) only.
+          TAP_TOKEN: ${{ secrets.HOMEBREW_SCION_TOKEN }}
+        run: |
+          if git diff --quiet -- Formula/scion.rb; then
+            echo "::notice::Formula/scion.rb already matches ${TAG}; nothing to push."
+            exit 0
+          fi
+          git diff -- Formula/scion.rb
+          branch=$(git symbolic-ref --short HEAD)
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/scion.rb
+          git commit -m "scion ${TAG}"
+          # The credential helper reads the token from the environment when
+          # git runs it, so the token is never a command-line argument and is
+          # never written to disk. The single quotes keep it unexpanded here.
+          # shellcheck disable=SC2016
+          git -c credential.helper= \
+            -c 'credential.helper=!f() { echo username=x-access-token; echo "password=${TAP_TOKEN}"; }; f' \
+            push https://github.com/homebrew-scion/homebrew-scion.git "HEAD:refs/heads/${branch}"
+          echo "Updated homebrew-scion/homebrew-scion Formula/scion.rb to ${TAG}" >> "$GITHUB_STEP_SUMMARY"

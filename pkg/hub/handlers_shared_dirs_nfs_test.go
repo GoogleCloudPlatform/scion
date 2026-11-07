@@ -59,6 +59,26 @@ func TestSharedDirConfigDelete_NFSBackend_RemovesLeaf(t *testing.T) {
 	assert.False(t, info.IsDir())
 }
 
+// TestSharedDirCreate_NFSBackend_CreatesLeaf (ptone/scion#5834): POST
+// /shared-dirs creates the leaf on the export through the layout
+// authority's Provisioner, with the brokers' leaf contract (mode 2775).
+func TestSharedDirCreate_NFSBackend_CreatesLeaf(t *testing.T) {
+	hostBase := setNFSSharedDirStorageGlobalSettings(t)
+	srv, _ := testServer(t)
+	useNFSSharedDirStorage(srv, hostBase)
+	project := createTestGitProject(t, srv, "Create Leaf NFS", "github.com/test/create-leaf-nfs")
+
+	rec := doRequest(t, srv, http.MethodPost, fmt.Sprintf("/api/v1/projects/%s/shared-dirs", project.ID),
+		map[string]interface{}{"name": "results"})
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+
+	target := filepath.Join(hostBase, "projects", project.ID, "shared-dirs", "results")
+	info, err := os.Stat(target)
+	require.NoError(t, err, "POST must create the shared dir's leaf on the export")
+	require.True(t, info.IsDir())
+	assert.Equal(t, os.ModeSetgid|0o775, info.Mode()&(os.ModeSetgid|os.ModePerm), "the brokers' leaf mode")
+}
+
 // TestSharedDirConfigDelete_NFSBackend_SymlinkedSharedDirsRefused: a
 // symlinked shared-dirs/ component must not be traversed by the config
 // DELETE's host cleanup. The declaration is still removed from the DB

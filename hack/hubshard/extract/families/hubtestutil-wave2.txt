@@ -1,0 +1,51 @@
+# P1-7 wave 2 (ptone/scion#4361), step 2 of 2: generic pkg/hub test helpers
+# (JSON decoding, slog capture, koanf builders, small value helpers) move
+# to pkg/hub/internal/hubtestutil, so future pkg/hub/<area> packages can
+# use them. pkg/hub keeps their names through
+# zz_alias_hubtestutil_wave2_test.go. Step 1 gathered them with the
+# hubtestutil-wave2-move-*.txt families.
+#
+#   extract export -dir pkg/hub -to pkg/hub/internal/hubtestutil \
+#       -alias zz_alias_hubtestutil_wave2_test.go \
+#       -family hack/hubshard/extract/families/hubtestutil-wave2.txt
+#
+# export writes only a fresh alias file, so this wave uses its own alias file.
+
+# An underscore in a non-test package name trips var-naming lint.
+rename require_NoError=RequireNoError
+# A TestXxx name outside a test file reads like a test entry point.
+rename testDevToken=DevToken
+# Go initialisms: API, not Api.
+rename apiErrorBody=APIErrorBody
+
+# httpjson_helpers_test.go
+decodeJSONBody
+decodeObject
+decodeItems
+errorBody
+decodeErrorMessage
+decodeAPIError
+apiErrorBody
+withCursor
+
+# slogcapture_helpers_test.go
+captureSlog
+captureSlogDefault
+installSentinelLogCapture
+recordAttrs
+findRecord
+recordAttr
+
+# koanf_helpers_test.go
+emptyKoanf
+newFileKoanf
+newEnvKoanf
+
+# basic_helpers_test.go
+testDevToken
+strPtr
+intPtr
+itoa
+alwaysAuthorized
+require_NoError
+waitClosed

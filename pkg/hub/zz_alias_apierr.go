@@ -96,6 +96,7 @@ const (
 	ErrCodeRuntimeTargetMoveUnsupported     = apierr.ErrCodeRuntimeTargetMoveUnsupported
 	ErrCodeRuntimeTargetPinStale            = apierr.ErrCodeRuntimeTargetPinStale
 	ErrCodeRuntimeTargetRequired            = apierr.ErrCodeRuntimeTargetRequired
+	ErrCodeRuntimeTargetTypeUnsupported     = apierr.ErrCodeRuntimeTargetTypeUnsupported
 	ErrCodeScopeMismatch                    = apierr.ErrCodeScopeMismatch
 	ErrCodeScopeNotFound                    = apierr.ErrCodeScopeNotFound
 	ErrCodeSecretScopeRestricted            = apierr.ErrCodeSecretScopeRestricted

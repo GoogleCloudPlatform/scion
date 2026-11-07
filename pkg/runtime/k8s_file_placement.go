@@ -75,49 +75,21 @@ func (r *KubernetesRuntime) useGKESecretsPath(config RunConfig) bool {
 // k8sFileProjections lists every file that the secret and auth-file volumes
 // deliver to the agent container, in a stable order.
 func (r *KubernetesRuntime) k8sFileProjections(config RunConfig) []k8sFileProjection {
-	containerHome := util.GetHomeDir(config.UnixUsername)
+	gke := r.useGKESecretsPath(config)
 	var out []k8sFileProjection
-
-	if len(config.ResolvedSecrets) > 0 {
-		gke := r.useGKESecretsPath(config)
-		hasVariable := false
-		for _, s := range config.ResolvedSecrets {
-			switch s.Type {
-			case "file":
-				vol := k8sAgentSecretsVolume
-				if gke {
-					vol = k8sSecretsStoreVolume
-				}
-				out = append(out, k8sFileProjection{
-					Volume: vol,
-					Key:    s.Name,
-					Target: expandTildeTarget(s.Target, containerHome),
-				})
-			case "variable":
-				hasVariable = true
+	// The CSI path does not deliver variable secrets (unchanged behaviour).
+	for _, f := range stagedFiles(config, !gke) {
+		vol := k8sAuthFilesVolume
+		switch f.Kind {
+		case stagedFileSecret:
+			vol = k8sAgentSecretsVolume
+			if gke {
+				vol = k8sSecretsStoreVolume
 			}
+		case stagedVariablesFile:
+			vol = k8sAgentSecretsVolume
 		}
-		// The CSI path does not deliver variable secrets (unchanged behaviour).
-		if hasVariable && !gke {
-			out = append(out, k8sFileProjection{
-				Volume: k8sAgentSecretsVolume,
-				Key:    "secrets.json",
-				Target: path.Join(containerHome, ".scion", "secrets.json"),
-			})
-		}
-	}
-
-	if config.ResolvedAuth != nil {
-		for i, f := range config.ResolvedAuth.Files {
-			if f.SourcePath == "" {
-				continue
-			}
-			out = append(out, k8sFileProjection{
-				Volume: k8sAuthFilesVolume,
-				Key:    fmt.Sprintf("auth-file-%d", i),
-				Target: expandTildeTarget(f.ContainerPath, containerHome),
-			})
-		}
+		out = append(out, k8sFileProjection{Volume: vol, Key: f.Key, Target: f.Target})
 	}
 	return out
 }

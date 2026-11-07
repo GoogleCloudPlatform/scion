@@ -29,10 +29,12 @@ import (
 )
 
 // TestSharedDirCreate_BackingDirCreatedOnFirstUse pins the backing-directory
-// contract documented on handleProjectSharedDirs (ptone/scion#2879): POST
-// records the declaration only; a list of the declared-but-uncreated dir is
-// a 200 empty list, a read of a file in it is a 404, neither creates it, and
-// the first write creates it.
+// contract documented on handleProjectSharedDirs (ptone/scion#2879,
+// ptone/scion#5834): POST records the declaration and creates the leaf the
+// hub can resolve (on the local layout as the brokers create it). With
+// the leaf gone again, a list of the declared-but-uncreated dir is a 200
+// empty list, a read of a file in it is a 404, neither creates it, and the
+// first write creates it.
 // Creation at agent start is pinned on the broker side by
 // pkg/agent TestResolveSharedDirs_Unset_MatchesLegacyBehavior.
 func TestSharedDirCreate_BackingDirCreatedOnFirstUse(t *testing.T) {
@@ -45,8 +47,11 @@ func TestSharedDirCreate_BackingDirCreatedOnFirstUse(t *testing.T) {
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
 
 	sdPath := resolveTestSharedDirPath(t, project, "results")
-	_, err := os.Lstat(sdPath)
-	assert.True(t, os.IsNotExist(err), "POST must record the declaration only, not create %s", sdPath)
+	fi, err := os.Lstat(sdPath)
+	require.NoError(t, err, "POST must create the leaf %s", sdPath)
+	assert.True(t, fi.IsDir())
+	// From here on: a declared dir whose leaf does not exist (yet).
+	require.NoError(t, os.Remove(sdPath))
 
 	rec = doRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/projects/%s/shared-dirs", project.ID), nil)
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())

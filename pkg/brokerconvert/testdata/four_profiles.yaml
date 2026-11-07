@@ -1,0 +1,21 @@
+schema_version: "1"
+runtimes:
+  docker:
+    type: docker
+  cluster:
+    type: kubernetes
+    context: prod
+    namespace: agents
+  pod:
+    type: podman
+profiles:
+  build:
+    runtime: docker
+    image_registry: reg.example/build
+  local:
+    runtime: docker
+    image_registry: reg.example/local
+  k8s:
+    runtime: cluster
+  legacy-podman:
+    runtime: pod

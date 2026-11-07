@@ -60,16 +60,20 @@ var p3AliasNames = []string{SecretKeyAgentSigningKey, SecretKeyUserSigningKey}
 func p3StaleKey(name string) []byte { return deriveSharedSigningKey(p3StaleAliasSecret, name) }
 
 // aliasCounter counts every key-targeted access to the two JWT signing-key
-// aliases, by key name.
+// aliases, by key name. The startup encryption audit's authenticated read
+// of the stored payloads (ScanSecretPayloads) is a separate, attributed
+// class (audits): it is not an alias read, so it never counts as a
+// fallback read in reads, and totals reports reads and writes only.
 type aliasCounter struct {
 	mu     sync.Mutex
 	reads  map[string]int
 	writes map[string]int
+	audits map[string]int
 	ops    []string
 }
 
 func newAliasCounter() *aliasCounter {
-	return &aliasCounter{reads: map[string]int{}, writes: map[string]int{}}
+	return &aliasCounter{reads: map[string]int{}, writes: map[string]int{}, audits: map[string]int{}}
 }
 
 func isAliasName(name string) bool {
@@ -84,6 +88,16 @@ func (c *aliasCounter) read(op, name string) {
 	defer c.mu.Unlock()
 	c.reads[name]++
 	c.ops = append(c.ops, "read:"+op+":"+name)
+}
+
+func (c *aliasCounter) audit(op, name string) {
+	if !isAliasName(name) {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.audits[name]++
+	c.ops = append(c.ops, "audit:"+op+":"+name)
 }
 
 func (c *aliasCounter) write(op, name string) {
@@ -112,6 +126,13 @@ func (c *aliasCounter) readsOf(name string) int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.reads[name]
+}
+
+// auditsOf counts the alias rows the startup encryption audit read.
+func (c *aliasCounter) auditsOf(name string) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.audits[name]
 }
 
 func (c *aliasCounter) writesOf(name string) int {
@@ -164,6 +185,16 @@ func (s *jwtAliasCountingStore) ListProgenySecrets(ctx context.Context, ancestor
 	rows, err := s.Store.ListProgenySecrets(ctx, ancestorIDs)
 	for _, row := range rows {
 		s.c.read("store.ListProgenySecrets", row.Key)
+	}
+	return rows, err
+}
+
+// ScanSecretPayloads is the startup encryption audit's read: counted as an
+// audit read, never as an alias read.
+func (s *jwtAliasCountingStore) ScanSecretPayloads(ctx context.Context, afterID string, limit int) ([]store.SecretPayload, error) {
+	rows, err := s.Store.ScanSecretPayloads(ctx, afterID, limit)
+	for _, row := range rows {
+		s.c.audit("store.ScanSecretPayloads", row.Key)
 	}
 	return rows, err
 }
@@ -323,8 +354,8 @@ func (f *p3Fixture) aliasValue(t *testing.T, name string) []byte {
 }
 
 // config is a replica's ServerConfig: the shared counting store and
-// backend, the keyring, and the legacy entry as SharedSigningSecret (the
-// other purposes still use it).
+// backend and the keyring. Only the legacy adapter (legacy mode) carries
+// the legacy secret as SharedSigningSecret; a keyring file needs none.
 func (f *p3Fixture) config(k *keyring.Keyring, configured bool) ServerConfig {
 	cfg := testServerConfig()
 	cfg.HubID = p3HubID
@@ -332,8 +363,10 @@ func (f *p3Fixture) config(k *keyring.Keyring, configured bool) ServerConfig {
 	cfg.Keyring = k
 	cfg.KeyringConfigured = configured
 	cfg.KeyringNow = f.clk.now
-	if legacy, ok := k.Signing().LegacySecret(); ok {
-		cfg.SharedSigningSecret = legacy
+	if k != nil && k.Source() == keyring.SourceLegacy {
+		if legacy, ok := k.Signing().LegacySecret(); ok {
+			cfg.SharedSigningSecret = legacy
+		}
 	}
 	return cfg
 }
@@ -406,6 +439,9 @@ func TestP3_AliasHarnessSeesLegacyFallback(t *testing.T) {
 	require.NoError(t, err)
 	for _, name := range p3AliasNames {
 		assert.Positive(t, f.c.readsOf(name), name)
+		// The startup audit read the same rows, counted apart from the
+		// fallback reads above.
+		assert.Equal(t, 1, f.c.auditsOf(name), name)
 	}
 	assert.Equal(t, p3StaleKey(SecretKeyAgentSigningKey), srv.agentTokenService.config.SigningKey)
 	assert.Equal(t, p3StaleKey(SecretKeyUserSigningKey), srv.userTokenService.config.SigningKey)
@@ -422,58 +458,51 @@ func TestP3_ManagedStartupRefusesWithoutAliasReads(t *testing.T) {
 	cases := []struct {
 		name string
 		cfg  func(f *p3Fixture) ServerConfig
-		// noopSeam swaps keyringReleaseCheck for a no-op: the refusal
-		// must not depend on the test seam.
-		noopSeam bool
 	}{
 		// (a) ring file missing or unreadable: cmd built no keyring.
-		{"file missing or unreadable", func(f *p3Fixture) ServerConfig { return f.config(nil, true) }, false},
+		{"file missing or unreadable", func(f *p3Fixture) ServerConfig { return f.config(nil, true) }},
 		// (a') a legacy adapter in place of the configured file.
 		{"legacy adapter instead of the file", func(f *p3Fixture) ServerConfig {
 			cfg := f.config(keyring.Legacy(jkLegacySecret), true)
 			cfg.SharedSigningSecret = jkLegacySecret
 			return cfg
-		}, false},
+		}},
 		// (b) active generation absent.
-		{"active generation absent (configured)", func(f *p3Fixture) ServerConfig { return f.config(&keyring.Keyring{}, true) }, false},
-		{"active generation absent (keyring only)", func(f *p3Fixture) ServerConfig { return f.config(&keyring.Keyring{}, false) }, false},
+		{"active generation absent (configured)", func(f *p3Fixture) ServerConfig { return f.config(&keyring.Keyring{}, true) }},
+		{"active generation absent (keyring only)", func(f *p3Fixture) ServerConfig { return f.config(&keyring.Keyring{}, false) }},
 		// (c) incomplete required signing material.
-		{"no legacy entry", func(f *p3Fixture) ServerConfig { return f.config(noLegacy, true) }, false},
-		{"no legacy entry, release check swapped out", func(f *p3Fixture) ServerConfig { return f.config(noLegacy, true) }, true},
-		{"shared secret not the legacy entry", func(f *p3Fixture) ServerConfig {
+		{"no legacy entry", func(f *p3Fixture) ServerConfig { return f.config(noLegacy, true) }},
+		{"shared secret set in keyring mode", func(f *p3Fixture) ServerConfig {
 			cfg := f.config(good, true)
 			cfg.SharedSigningSecret = p3StaleAliasSecret
 			return cfg
-		}, false},
+		}},
 		// Explicit keys never combine with managed mode.
 		{"explicit agent key", func(f *p3Fixture) ServerConfig {
 			cfg := f.config(good, true)
 			cfg.AgentTokenConfig.SigningKey = p3StaleKey(SecretKeyAgentSigningKey)
 			return cfg
-		}, false},
+		}},
 		{"explicit user key", func(f *p3Fixture) ServerConfig {
 			cfg := f.config(good, true)
 			cfg.UserTokenConfig.SigningKey = p3StaleKey(SecretKeyUserSigningKey)
 			return cfg
-		}, false},
+		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if tc.noopSeam {
-				prev := keyringReleaseCheck
-				keyringReleaseCheck = func(*keyring.Keyring) error { return nil }
-				t.Cleanup(func() { keyringReleaseCheck = prev })
-			}
 			f := newP3Fixture(t)
 			before := f.snapshot(t)
 			logs := captureLogs(t)
 			srv, err := f.start(t, tc.cfg(f))
 			require.Error(t, err)
 			require.Nil(t, srv)
-			if tc.noopSeam {
-				assert.Contains(t, err.Error(), `no "legacy" entry`)
-			}
 			requireNoAliasAccess(t, f)
+			// Every case refuses in validateKeyringConfig, before the startup
+			// encryption audit runs: no audit read either.
+			for _, name := range p3AliasNames {
+				assert.Zero(t, f.c.auditsOf(name), "%s audit reads before the refusal", name)
+			}
 			assert.Equal(t, before, f.snapshot(t))
 			assertNoJWTKeyMaterial(t, err.Error())
 			assertNoJWTKeyMaterial(t, logs.String())
@@ -505,6 +534,14 @@ func TestP3_ManagedStartupDoesNotTouchAliases(t *testing.T) {
 		require.NoError(t, err)
 		_, err = srv.userTokenService.ValidateUserToken(tok)
 		require.NoError(t, err)
+		// The startup audit authenticated both aliases on every start (one
+		// audit read each), and found them readable.
+		for _, name := range p3AliasNames {
+			assert.Equal(t, i+1, f.c.auditsOf(name), "start %d: %s audit reads", i, name)
+		}
+		audit := srv.EncryptionAudit()
+		assert.True(t, audit.Done, "start %d", i)
+		assert.Empty(t, audit.BackupUnreadable, "start %d", i)
 		require.NoError(t, srv.Shutdown(context.Background()))
 		requireNoAliasAccess(t, f)
 		assert.Equal(t, before, f.snapshot(t), "start %d", i)
@@ -651,7 +688,7 @@ func verifiesOnlyUnder(t *testing.T, tok, name string) []string {
 	parsed, err := jwt.ParseSigned(tok, []jose.SignatureAlgorithm{jose.HS256})
 	require.NoError(t, err)
 	var out []string
-	for id, s := range map[string]string{"legacy": jkLegacySecret, "gen2": jkGen2Secret} {
+	for id, s := range map[string]string{"legacy": jkLegacySecret, "gen1": jkGen1Secret, "gen2": jkGen2Secret} {
 		var c jwt.Claims
 		if parsed.Claims(deriveSharedSigningKey(s, name), &c) == nil {
 			out = append(out, id)

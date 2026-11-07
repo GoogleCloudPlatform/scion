@@ -138,20 +138,24 @@ func TestRunProvision_AgentDirMode_NeedsSlugAndBranch(t *testing.T) {
 	}
 }
 
-// An older sciontool that does not know the clone-per-agent env sees the
-// pod as a project without a clone URL: it prepares the mounted agent
-// directory as a plain workspace (the sentinel goes there, outside the
-// agent's workspace), and the workspace the broker created stays empty
+// A pod without the clone-per-agent env is provisioned as a shared-plain
+// project without a clone URL: the mounted agent directory is prepared as a
+// plain workspace, the sentinel goes in the provisioning state directory the
+// pod mounts (the only place it is kept), nothing is written in the
+// mounted directory's root, and the workspace the broker created stays empty
 // for the agent container's clone.
-func TestRunProvision_AgentDir_OlderImageFallback(t *testing.T) {
+func TestRunProvision_AgentDir_WithoutCloneEnvProvisionsSharedPlain(t *testing.T) {
 	agentDir := newTestAgentDir(t)
 	setupProvisionCmd(t, agentDir, "shared-plain", "")
 
 	if err := runProvision(context.Background()); err != nil {
 		t.Fatalf("runProvision: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(agentDir, provision.ProvisionSentinelFile)); err != nil {
-		t.Errorf("sentinel not written in the agent directory: %v", err)
+	if _, err := os.Stat(filepath.Join(provision.ProjectStateDir(agentDir), provision.ProvisionSentinelFile)); err != nil {
+		t.Errorf("sentinel not written in the provisioning state directory: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(agentDir, provision.ProvisionSentinelFile)); err == nil {
+		t.Error("a sentinel was written in the mounted directory's root")
 	}
 	if names := entryNames(t, filepath.Join(agentDir, provision.AgentWorkspaceDir)); len(names) != 0 {
 		t.Errorf("workspace should stay empty, has %v", names)

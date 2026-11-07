@@ -232,6 +232,21 @@ func DefaultHubID() string {
 // across restarts in workstation mode.
 const hubIDFileName = "hub-id"
 
+// ReadPersistedHubID returns the hub ID persisted in the global directory's
+// hub-id file (what PersistentHubID reads and writes), or "" when there is
+// none or it cannot be read. It never writes.
+func ReadPersistedHubID() string {
+	globalDir, err := GetGlobalDir()
+	if err != nil {
+		return ""
+	}
+	data, err := os.ReadFile(filepath.Join(globalDir, hubIDFileName))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
 // PersistentHubID returns the hub instance ID, persisting the derived value to
 // disk on first call so that subsequent startups use the same ID even if the
 // machine hostname changes (e.g. DHCP, OS update, migration). The file is
@@ -756,6 +771,13 @@ type RuntimeTargetConfig struct {
 	SharedDirStorageBackends         map[string]string   `json:"sharedDirStorageBackends,omitempty" yaml:"sharedDirStorageBackends,omitempty" koanf:"sharedDirStorageBackends"`
 	HomeStorageBackend               string              `json:"homeStorageBackend,omitempty" yaml:"homeStorageBackend,omitempty" koanf:"homeStorageBackend"`
 	HomeStorageLeaf                  string              `json:"homeStorageLeaf,omitempty" yaml:"homeStorageLeaf,omitempty" koanf:"homeStorageLeaf"`
+	// Cloud Run only. See V1RuntimeTargetConfig.
+	ProjectID       string `json:"projectId,omitempty" yaml:"projectId,omitempty" koanf:"projectId"`
+	Region          string `json:"region,omitempty" yaml:"region,omitempty" koanf:"region"`
+	ServiceAccount  string `json:"serviceAccount,omitempty" yaml:"serviceAccount,omitempty" koanf:"serviceAccount"`
+	Network         string `json:"network,omitempty" yaml:"network,omitempty" koanf:"network"`
+	Subnetwork      string `json:"subnetwork,omitempty" yaml:"subnetwork,omitempty" koanf:"subnetwork"`
+	CredentialsFile string `json:"credentialsFile,omitempty" yaml:"credentialsFile,omitempty" koanf:"credentialsFile"`
 }
 
 // DatabaseConfig holds database connection settings.
@@ -1250,10 +1272,19 @@ type GlobalConfig struct {
 	// in front of the hub (server.trusted_proxies;
 	// SCION_SERVER_TRUSTEDPROXIES, comma-separated). The hub trusts
 	// X-Forwarded-Proto: https only from a peer in this list, and only for
-	// its hub-broker transport check; empty means never. Validated at
-	// startup (ParseTrustedProxies). Operator-controlled only: never
-	// returned or accepted by the settings API.
+	// its hub-broker transport check. When the setting is not set at all
+	// (TrustedProxiesSet false) a proxy on this host is trusted
+	// (TransportTrustedProxies); set to an empty list, no proxy is.
+	// Validated at startup (ParseTrustedProxies). Operator-controlled only:
+	// never returned or accepted by the settings API.
 	TrustedProxies []string `json:"trustedProxies,omitempty" yaml:"trustedProxies,omitempty" koanf:"trustedProxies"`
+	// TrustedProxiesSet reports whether any source names
+	// server.trusted_proxies, even as an empty list or an empty env value
+	// (see markTrustedProxiesSet). LoadGlobalConfig sets it, through
+	// ConvertV1ServerToGlobalConfig for settings.yaml (a non-nil
+	// V1ServerConfig.TrustedProxies), and ConvertGlobalToV1ServerConfig
+	// writes a set but empty list back as trusted_proxies: [].
+	TrustedProxiesSet bool `json:"-" yaml:"-" koanf:"-"`
 
 	// Admin mode settings
 	AdminMode          bool   `json:"adminMode" yaml:"adminMode" koanf:"adminMode"`
@@ -1417,7 +1448,7 @@ func DefaultGlobalConfig() GlobalConfig {
 			Port:                          9800,
 			Host:                          DefaultBrokerHost,
 			ReadTimeout:                   30 * time.Second,
-			WriteTimeout:                  120 * time.Second, // Longer for agent operations
+			WriteTimeout:                  210 * time.Second, // Outlasts the hub's 180s broker request limit (ptone/scion#6829)
 			CORSEnabled:                   false,             // off by default with no origins: nothing calls the broker from a browser (opt in with server.broker.cors)
 			CORSAllowedOrigins:            []string{},
 			CORSAllowedMethods:            []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
@@ -1516,6 +1547,7 @@ func applyDatabasePoolDefaults(db *DatabaseConfig) {
 func LoadGlobalConfig(configPath string) (*GlobalConfig, error) {
 	// Try loading from settings.yaml first (versioned path)
 	if gc, ok := loadGlobalConfigFromSettings(configPath); ok {
+		markTrustedProxiesSet(gc, nil)
 		return gc, nil
 	}
 
@@ -1523,7 +1555,43 @@ func LoadGlobalConfig(configPath string) (*GlobalConfig, error) {
 	// key, but a settings.yaml may still carry top-level hub sections
 	// (quotas, agent_secrets, default_timezone, ...); honour them so a
 	// file-mode reload does not reset those live values (ptone/scion#2284).
-	return loadGlobalConfigLegacy(configPath, findTopLevelSettingsRaw(configPath))
+	gc, err := loadGlobalConfigLegacy(configPath, findTopLevelSettingsRaw(configPath))
+	if err != nil {
+		return nil, err
+	}
+	markTrustedProxiesSet(gc, nil)
+	return gc, nil
+}
+
+// markTrustedProxiesSet sets gc.TrustedProxiesSet when server.trusted_proxies
+// has a value or any of its SCION_SERVER_* names is defined, even as an
+// empty string (lookupEnv, os.LookupEnv when nil). The file sources mark it
+// themselves when they hold the key, even as an empty list.
+func markTrustedProxiesSet(gc *GlobalConfig, lookupEnv func(string) (string, bool)) {
+	if len(gc.TrustedProxies) > 0 {
+		gc.TrustedProxiesSet = true
+		return
+	}
+	if lookupEnv == nil {
+		lookupEnv = os.LookupEnv
+	}
+	for _, name := range trustedProxiesEnvNames() {
+		if _, ok := lookupEnv(name); ok {
+			gc.TrustedProxiesSet = true
+			return
+		}
+	}
+}
+
+// trustedProxiesEnvNames returns the SCION_SERVER_* names that set
+// server.trusted_proxies: the canonical name and its aliases.
+func trustedProxiesEnvNames() []string {
+	for _, e := range ServerEnvEntries() {
+		if e.Path == TrustedProxiesKey {
+			return append([]string{e.Canonical}, e.Aliases...)
+		}
+	}
+	return []string{"SCION_SERVER_TRUSTEDPROXIES"}
 }
 
 // loadGlobalConfigFromSettings attempts to load server config from settings.yaml files.
@@ -1799,6 +1867,9 @@ func loadGlobalConfigLegacy(configPath string, topLevel map[string]interface{}) 
 		var probe GlobalConfig
 		_ = unmarshalWithUnusedKeyCheck(k, &probe, "server config", serverConfigSources(configPath))
 	}
+	// server.yaml names trustedProxies, even as an empty list: the
+	// operator chose a list (GlobalConfig.TrustedProxiesSet).
+	trustedProxiesInFile := k.Exists("trustedProxies")
 
 	// 3b. settings.yaml top-level telemetry.enabled. Of the top-level
 	// sections only telemetryEnabled is env-overridable (the rest are
@@ -1851,6 +1922,7 @@ func loadGlobalConfigLegacy(configPath string, topLevel map[string]interface{}) 
 	if err := applyEnvToOutsideKoanfFields(config); err != nil {
 		return nil, err
 	}
+	config.TrustedProxiesSet = trustedProxiesInFile
 
 	// Apply defaults for database path if not set
 	if config.Database.URL == "" && config.Database.Driver == "sqlite" {
@@ -2673,6 +2745,9 @@ func loadServerFromSettingsFile(dir string) (*GlobalConfig, bool) {
 		return nil, false
 	}
 
+	// ConvertV1ServerToGlobalConfig sets TrustedProxiesSet when the file
+	// holds trusted_proxies as a list, even an empty one. A null value is
+	// not set, as it is after the hub rewrites the file (omitempty).
 	gc := ConvertV1ServerToGlobalConfig(&v1Server)
 	applyTopLevelSettingsSections(gc, raw)
 

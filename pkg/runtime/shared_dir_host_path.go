@@ -35,9 +35,10 @@ import (
 // fall back to the local layout: no agent mounts it for a shared-backend dir.
 var ErrSharedDirStorageUnavailable = errors.New("nfs shared-dir storage is unavailable")
 
-// ensureSharedDirLeaf is shareddirs.EnsureLeafOwned, replaceable in tests
-// to replace a path component after the walk and reach the backstop check.
-var ensureSharedDirLeaf = shareddirs.EnsureLeafOwned
+// ensureSharedDirLeaf is projectfs.EnsureSharedLeafOwned
+// (shareddirs.EnsureLeafOwned), replaceable in tests to replace a path
+// component after the walk and reach the backstop check.
+var ensureSharedDirLeaf = projectfs.EnsureSharedLeafOwned
 
 // SharedDirHostPath is the host-side directory backing one shared dir, as
 // resolved by ResolveSharedDirHostPath.

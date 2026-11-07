@@ -158,7 +158,9 @@ Each `agent.log` line starts with a UTC RFC 3339 timestamp, followed by `[sciont
 
 ### Cloud Log Viewer & Hub API
 
-Scion provides a built-in Cloud Log Viewer in the Web UI to stream agent logs in real-time. This is backed by the Hub API, which retrieves logs directly from the active runtime broker or from the persisted `agent.log` file, ensuring comprehensive visibility into agent execution regardless of its current state.
+Scion provides a built-in Cloud Log Viewer in the Web UI to stream agent and system diagnostics logs in real time. It is backed by the Hub API:
+- `GET /api/v1/agents/:id/logs` (and `GET /api/v1/projects/:projectId/agents/:agentId/logs`) retrieves the persisted `agent.log` from the agent's Runtime Broker.
+- `GET /api/v1/agents/:id/cloud-logs` and `GET /api/v1/agents/:id/cloud-logs/stream` (and their project-scoped counterparts), plus `GET /api/v1/admin/diagnostics/logs` and `GET /api/v1/admin/diagnostics/logs/stream` (requires `hub.diagnostics.read`), query and tail Google Cloud Logging. On all six cloud log endpoints, the `severity` query parameter accepts only a Cloud Logging severity name (`DEFAULT`, `DEBUG`, `INFO`, `NOTICE`, `WARNING`, `ERROR`, `CRITICAL`, `ALERT`, or `EMERGENCY`, matched ASCII case-insensitively); any other non-empty value is refused before a filter is built with HTTP `400` (`validation_error`, `details.field: "severity"`).
 
 ### Log Ownership and Permissions
 

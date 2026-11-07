@@ -59,6 +59,13 @@ func (AgentDelegationGrant) Fields() []ent.Field {
 		field.Int64("agent_state_version").
 			Default(0).
 			Immutable(),
+		// issued_run_id snapshots the agent's run_id at issuance, under the
+		// same row lock. A suspend that finds a newer run already started
+		// keeps that run's grants (ptone/scion#6403). "" for a grant issued
+		// before the column existed or to an agent not yet dispatched.
+		field.String("issued_run_id").
+			Default("").
+			Immutable(),
 		field.String("issuer_user_id").
 			NotEmpty().
 			Immutable(),

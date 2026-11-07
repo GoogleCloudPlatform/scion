@@ -37,11 +37,6 @@ const stuckMessageLogIDCap = 20
 // so tests can shrink it.
 var stuckMessageCountCap = 1000
 
-// defaultFailedMessageRetentionDays is the fallback retention window (in days)
-// for dispatch_state="failed" messages when
-// Server.Config.FailedMessageRetentionDays is unset or non-positive.
-const defaultFailedMessageRetentionDays = 7
-
 // missingRecipientFailureReason is recorded on messages that are failed early
 // by brokerMessageSweepHandler because their recipient agent no longer exists.
 const missingRecipientFailureReason = "recipient agent no longer exists"
@@ -122,53 +117,79 @@ func (s *Server) brokerMessageSweepHandler() func(ctx context.Context) {
 	}
 }
 
+// failedMessageRetentionTimeout bounds one run of the failed-message purge.
+const failedMessageRetentionTimeout = 30 * time.Second
+
+// failedMessageRetentionDays returns messaging.failed_message_retention_days,
+// or its compiled default without DB-backed operational settings.
+func (s *Server) failedMessageRetentionDays() int {
+	if ops := s.GetOperationalSettings(); ops != nil {
+		return ops.FailedMessageRetentionDays()
+	}
+	return DefaultFailedMessageRetentionDays
+}
+
 // failedMessageRetentionHandler returns a recurring handler that purges
-// messages in dispatch_state="failed" older than the configured retention
-// window (Server.Config.FailedMessageRetentionDays, default
-// defaultFailedMessageRetentionDays). Registered as a RecurringSingleton
-// guarded by LockFailedMessageRetention.
+// messages to agents in dispatch_state="failed" older than
+// messaging.failed_message_retention_days (read on every run, so a change
+// applies without a restart). Registered as a RecurringSingleton guarded by
+// LockFailedMessageRetention.
 //
-// This filters strictly on dispatch_state, unlike the pre-existing
-// Store.PurgeOldMessages (read/unread semantics), which would also delete
-// successfully delivered message history.
+// It filters strictly on dispatch_state and an agent recipient, so
+// delivered history and "user:" rows are never touched, and deletes in
+// paced, capped steps from a persisted cursor with the chat retention
+// cascade (see PurgeFailed), so the dependent rows of every deleted message
+// go with it, and the attachments it unlinks lose their bytes and rows. The
+// counts are added to the open chat retention sweep run when there is one
+// (see addFailedPurgeToSweepRun), and logged.
 func (s *Server) failedMessageRetentionHandler() func(ctx context.Context) {
 	return func(ctx context.Context) {
-		ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		ctx, cancel := context.WithTimeout(ctx, failedMessageRetentionTimeout)
 		defer cancel()
 
-		retentionDays := s.config.FailedMessageRetentionDays
-		if retentionDays <= 0 {
-			retentionDays = defaultFailedMessageRetentionDays
-		}
-		cutoff := time.Now().UTC().AddDate(0, 0, -retentionDays)
-
-		purged, err := s.store.PurgeFailedMessages(ctx, cutoff)
-		if err != nil {
-			s.agentLifecycleLog.Error("failed-message-retention: purge failed", "error", err)
+		// The cascade spans the web chat tables, so the purge needs the
+		// chat retention store, which is wired once they exist.
+		st := s.chatRetentionStore()
+		if st == nil {
+			s.agentLifecycleLog.Warn("failed-message-retention: skipped, no chat retention store (web chat tables not initialized)")
 			return
 		}
-		if purged > 0 {
-			s.agentLifecycleLog.Info("failed-message-retention: purged failed messages",
-				"count", purged, "retentionDays", retentionDays, "cutoff", cutoff)
-		}
+		retentionDays := s.failedMessageRetentionDays()
+		cutoff := time.Now().UTC().AddDate(0, 0, -retentionDays)
 
-		// Drop webchat mention rows whose message is gone. The webchat
-		// tables live outside the Ent graph, so the purge above cannot
-		// cascade to them; sweeping orphans here also covers any other
-		// hard delete of messages.
+		sw := newChatRetentionSweeper(st)
+		// The attachments a purge unlinks lose their bytes, then their
+		// rows; without an attachment store the rows stay for the
+		// attachment GC.
 		s.mu.RLock()
-		wcs := s.webChatStore
+		if as := s.attachmentStore; as != nil {
+			sw.attachments = as
+		}
 		s.mu.RUnlock()
-		if wcs != nil {
-			orphans, err := wcs.PurgeOrphanMentions(ctx)
-			if err != nil {
-				s.agentLifecycleLog.Error("failed-message-retention: mention sweep failed", "error", err)
-				return
+		res, err := sw.PurgeFailed(ctx, cutoff, s.chatRetentionConfig())
+		total := res.Total()
+		var inRun string
+		if total.Failed > 0 {
+			// The run update must still happen when the purge stopped at
+			// the handler's deadline.
+			wctx, wcancel := context.WithTimeout(context.WithoutCancel(ctx), chatRetentionFinalWriteTimeout)
+			var rerr error
+			inRun, rerr = s.addFailedPurgeToSweepRun(wctx, st, res.ByProject, time.Now())
+			wcancel()
+			if rerr != nil {
+				s.agentLifecycleLog.Error("failed-message-retention: record counts in chat retention run failed", "error", rerr)
 			}
-			if orphans > 0 {
-				s.agentLifecycleLog.Info("failed-message-retention: purged orphan mention rows",
-					"count", orphans)
-			}
+		}
+		attrs := []any{"count", total.Failed, "addressees", total.Addressees, "mentions", total.Mentions,
+			"stars", total.Stars, "ext", total.Ext, "attachments", total.Attachments,
+			"attachment_rows", total.AttachmentRows, "attachment_byte_failures", res.AttachmentDeleteFailures,
+			"chunks", res.Chunks, "scans", res.Scans, "done", res.Done, "max_tx_ms", res.MaxTx.Milliseconds(),
+			"chat_retention_run", inRun, "retentionDays", retentionDays, "cutoff", cutoff}
+		switch {
+		case err != nil:
+			s.agentLifecycleLog.Error("failed-message-retention: purge failed", append([]any{"error", err}, attrs...)...)
+		case total.Failed > 0:
+			s.agentLifecycleLog.Info("failed-message-retention: purged failed messages", attrs...)
 		}
 	}
 }

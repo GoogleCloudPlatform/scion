@@ -375,7 +375,7 @@ runtimes:
 
 	t.Run("restart", func(t *testing.T) {
 		srv, mgr := newSrv(t)
-		body := fmt.Sprintf(`{"hubEndpoint": %q, "resolvedEnv": {"SCION_HUB_ENDPOINT": %q}}`, dispatched, dispatched)
+		body := fmt.Sprintf(`{"projectPath": %q, "hubEndpoint": %q, "resolvedEnv": {"SCION_HUB_ENDPOINT": %q}}`, cwdDotScion(t), dispatched, dispatched)
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/test-agent/restart", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		w := httptest.NewRecorder()
@@ -407,7 +407,7 @@ runtimes:
 	t.Run("restart: request field wins over a differing resolvedEnv value", func(t *testing.T) {
 		srv, mgr := newSrv(t)
 		const stale = "https://stale-in-resolved-env.example.com"
-		body := fmt.Sprintf(`{"hubEndpoint": %q, "resolvedEnv": {"SCION_HUB_ENDPOINT": %q}}`, dispatched, stale)
+		body := fmt.Sprintf(`{"projectPath": %q, "hubEndpoint": %q, "resolvedEnv": {"SCION_HUB_ENDPOINT": %q}}`, cwdDotScion(t), dispatched, stale)
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/test-agent/restart", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		w := httptest.NewRecorder()
@@ -618,7 +618,7 @@ runtimes:
 
 	t.Run("http-restart", func(t *testing.T) {
 		srv, mgr := newSrv(t)
-		body := fmt.Sprintf(`{"hubEndpoint": %q, "resolvedEnv": {"SCION_HUB_ENDPOINT": %q}}`, dispatchLocal, dispatchLocal)
+		body := fmt.Sprintf(`{"projectPath": %q, "hubEndpoint": %q, "resolvedEnv": {"SCION_HUB_ENDPOINT": %q}}`, cwdDotScion(t), dispatchLocal, dispatchLocal)
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/test-agent/restart", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("X-Scion-Hub-Connection", connectionName)

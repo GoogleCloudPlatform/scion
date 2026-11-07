@@ -31,6 +31,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/templatecache"
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -53,20 +54,23 @@ type ErrorResponse struct {
 
 // Error codes matching the Runtime Broker API specification.
 const (
-	ErrCodeInvalidRequest     = "invalid_request"
-	ErrCodeValidationError    = "validation_error"
-	ErrCodeUnauthorized       = "unauthorized"
-	ErrCodeForbidden          = "forbidden"
-	ErrCodeAgentNotFound      = "agent_not_found"
-	ErrCodeNotFound           = "not_found"
-	ErrCodeConflict           = "conflict"
-	ErrCodeMethodNotAllowed   = "method_not_allowed"
-	ErrCodeInternalError      = "internal_error"
-	ErrCodeRuntimeError       = "runtime_error"
-	ErrCodeRuntimeUnavailable = "runtime_unavailable"
-	ErrCodeHubUnreachable     = "hub_unreachable"
-	ErrCodeTemplateError      = "template_error"
-	ErrCodeSkillResolution    = api.BrokerErrCodeSkillResolution
+	ErrCodeInvalidRequest  = "invalid_request"
+	ErrCodeValidationError = "validation_error"
+	ErrCodeUnauthorized    = "unauthorized"
+	ErrCodeForbidden       = "forbidden"
+	ErrCodeAgentNotFound   = "agent_not_found"
+	ErrCodeNotFound        = "not_found"
+	ErrCodeConflict        = "conflict"
+	// ErrCodeProjectPathNotInitialized: a plain project's explicit project
+	// path holds no .scion directory or marker (agent.ErrProjectPathNotInitialized).
+	ErrCodeProjectPathNotInitialized = agent.ProjectPathNotInitializedCode
+	ErrCodeMethodNotAllowed          = "method_not_allowed"
+	ErrCodeInternalError             = "internal_error"
+	ErrCodeRuntimeError              = "runtime_error"
+	ErrCodeRuntimeUnavailable        = "runtime_unavailable"
+	ErrCodeHubUnreachable            = "hub_unreachable"
+	ErrCodeTemplateError             = "template_error"
+	ErrCodeSkillResolution           = api.BrokerErrCodeSkillResolution
 
 	// ErrCodeWorkspaceStorageUnconfigured marks a create whose workspace was
 	// uploaded to bucket storage (workspaceStoragePath set) when neither the
@@ -74,6 +78,10 @@ const (
 	// answered with 422 before anything is provisioned, and the hub relays
 	// it unchanged instead of folding it into a 502 (ptone/scion#3422).
 	ErrCodeWorkspaceStorageUnconfigured = api.BrokerErrCodeWorkspaceStorageUnconfigured
+
+	// ErrCodeWorkspaceDownloadModeUnsupported marks a create whose
+	// workspaceDownloadMode this broker does not know (422).
+	ErrCodeWorkspaceDownloadModeUnsupported = api.BrokerErrCodeWorkspaceDownloadModeUnsupported
 
 	// ErrCodeIdentityNotMapped and ErrCodeIdentityKSAMismatch mark a GCP
 	// identity "assign" dispatch on Kubernetes refused for a missing or
@@ -474,6 +482,26 @@ func notFoundResourceText(err error, templateSlug string) string {
 	return config.ErrHarnessConfigNotFound.Error()
 }
 
+// writeGitConfigRefusal answers a create, start or restart whose start was
+// refused because the repository's git config sets keys agents may not be
+// given, and reports whether err was one. The body is 422
+// git_config_refused with the refusal's own text (util.StartRefusalText):
+// every refused key and its remedy, never a value or a host path.
+func writeGitConfigRefusal(w http.ResponseWriter, err error, details map[string]interface{}) bool {
+	text, ok := util.StartRefusalText(err)
+	if !ok {
+		return false
+	}
+	writeGitConfigRefusalText(w, text, details)
+	return true
+}
+
+// writeGitConfigRefusalText writes the 422 git_config_refused answer for a
+// refusal text already found by util.StartRefusalText.
+func writeGitConfigRefusalText(w http.ResponseWriter, text string, details map[string]interface{}) {
+	writeError(w, http.StatusUnprocessableEntity, api.BrokerErrCodeGitConfigRefused, text, details)
+}
+
 // opCreateAgent is the runtimeOpError op for a create's Manager.Start
 // failure. createAgent's synchronous start and the async launch
 // (classifyStartError, run_launch.go) share it, so both report the same
@@ -747,8 +775,9 @@ func skillResolutionFailedWithDetails(w http.ResponseWriter, err *agent.SkillRes
 // this package): a plain error still gets the pre-existing generic 500
 // behavior. The exceptions are errSavedProfileUnresolved (a saved profile
 // that no longer resolves), errDefaultProfileUnresolved (a dispatch needing
-// a default profile the Hub's stored profiles lack) and
-// errProfileUnresolved (a named profile the Hub's stored profiles lack),
+// a default profile the Hub's stored profiles lack),
+// errProfileUnresolved (a named profile the Hub's stored profiles lack) and
+// errProfileRuntimeUnresolved (a stored profile whose runtime is missing),
 // which are checked ahead of every other case and written as the retryable
 // 503 from writeProfileUnresolved; their text is client-safe by
 // construction.
@@ -784,8 +813,9 @@ func (s *Server) writeStartContextError(w http.ResponseWriter, err error, op str
 	// errSavedProfileUnresolved's text names only the agent, the profile
 	// and a fixed or ResolveRuntime cause, and is client-safe as is;
 	// errDefaultProfileUnresolved's and errProfileUnresolved's also name
-	// the stored profile names.
-	if errors.Is(err, errSavedProfileUnresolved) || errors.Is(err, errDefaultProfileUnresolved) || errors.Is(err, errProfileUnresolved) {
+	// the stored profile names, and errProfileRuntimeUnresolved's the
+	// stored runtime names.
+	if errors.Is(err, errSavedProfileUnresolved) || errors.Is(err, errDefaultProfileUnresolved) || errors.Is(err, errProfileUnresolved) || errors.Is(err, errProfileRuntimeUnresolved) {
 		writeProfileUnresolved(w, err)
 		return http.StatusServiceUnavailable
 	}

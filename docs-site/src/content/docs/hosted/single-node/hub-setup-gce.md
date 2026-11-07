@@ -67,6 +67,18 @@ Run these one at a time instead of `gce-demo-deploy.sh` when you need to skip or
 
 The `settings.yaml` that step 5 writes turns on telemetry export and sets `telemetry.cloud.gcp_project_id` to the deployment project (`PROJECT_ID`), so the metrics dashboard in the web UI queries Cloud Monitoring in that project. Step 1 grants the VM's service account `roles/monitoring.viewer` so the Hub can read those metrics. A Hub deployed before this setting existed picks it up at the next `gce-start-hub.sh --full`; re-run `gce-demo-provision.sh` first so the VM's service account has `roles/monitoring.viewer`. See [Metrics & OpenTelemetry](/scion/hosted/single-node/metrics/) for the `telemetry` settings.
 
+The same `settings.yaml` sets `image_registry`, the registry the Hub's runtime broker pulls agent images from. Without a registry the broker refuses to start, and so does the Hub. The value is `localhost/scion`, the VM's local image store (the value the [single-node VM deploy script](https://github.com/GoogleCloudPlatform/scion/blob/main/scripts/single-node-vm/deploy.sh) uses), or `IMAGE_REGISTRY` if you set it when running `gce-start-hub.sh --full`. `SCION_IMAGE_REGISTRY` in `hub.env` takes precedence over `settings.yaml`.
+
+The starter scripts do not build agent images, so agents cannot start until the images exist. Either build them on the VM, from the repository checkout (see [`image-build/README.md`](https://github.com/GoogleCloudPlatform/scion/blob/main/image-build/README.md)):
+
+```bash
+sudo bash image-build/scripts/build-images.sh --builder local-docker --registry localhost/scion --target all
+```
+
+`--target all` also builds the Hub image and every catalog harness. To build less, build `core-base`, then `scion-base`, then `harnesses` or a single harness step ID such as `scion-claude`, with the same `--builder` and `--registry` flags.
+
+or set `SCION_IMAGE_REGISTRY` in `hub.env` to a registry that already holds the images. With `ENABLE_GKE=true`, GKE nodes cannot pull from the VM's local store, so `gce-demo-preflight.sh` and `gce-start-hub.sh --full` refuse a loopback registry (`localhost`, `127.*`, `0.0.0.0` or `::1`, with or without a port). Set `SCION_IMAGE_REGISTRY` or `IMAGE_REGISTRY` to a registry the cluster can pull from.
+
 :::note[Internal or private deployments]
 If your VM has no external IP, or TLS is terminated upstream by a load balancer, reverse proxy, or similar appliance, skip step 4 and see [Internal Deployments (BYO TLS)](#internal-deployments-byo-tls) below.
 :::
@@ -155,6 +167,8 @@ For ongoing Hub administration (auth, permissions, observability), see the other
 ## Binary Release Deployment (single-node VM)
 
 If you don't need to build from source, `scripts/single-node-vm/deploy.sh` stands up a Hub from a published GitHub Release instead. It creates a GCE VM with no public IP that runs the `scion` binary under systemd with embedded SQLite, plus a Cloud Run reverse proxy protected by Identity-Aware Proxy (IAP). The proxy image is built on the VM, pushed to the `cloud-run-source-deploy` Artifact Registry repository, and deployed with `--image`. The deployment does not upload source to Cloud Storage, so it works in organizations whose policies block `storage.googleapis.com`. Re-running the script is idempotent.
+
+**CLI from a workstation.** IAP fronts the proxy URL, so the CLI needs an IAP transport token and a user access token instead of `scion hub auth login`. See [Workstation CLI access](/scion/hosted/ha/auth-proxy-iap/#workstation-cli-access-a-person).
 
 **IAP SSH firewall rule.** The `scion-hub-HUB_NAME-allow-iap-ssh` rule targets only the hub VM's network tag, not every VM on the network. Deployments made before this scoping have an unscoped rule. Re-running `deploy.sh` narrows that rule in place, but only once it confirms the tag is on the hub VM. Any other VM that relied on the old rule for IAP SSH loses that access and needs its own firewall rule.
 
@@ -259,7 +273,7 @@ Then start Caddy manually (`sudo caddy start --config /etc/caddy/Caddyfile`) ins
 
 **Option B — TLS terminated upstream**
 
-If TLS is terminated by an upstream load balancer, reverse proxy, or appliance (e.g., an F5, nginx, or GCP HTTPS Load Balancer), no local TLS configuration is needed. The upstream proxy forwards plain HTTP to the Hub on port 8080. Ensure `SCION_SERVER_BASE_URL` is still set to the `https://` URL that clients use.
+If TLS is terminated by an upstream load balancer, reverse proxy, or appliance (e.g., an F5, nginx, or GCP HTTPS Load Balancer), no local TLS configuration is needed. The upstream proxy forwards plain HTTP to the Hub on port 8080. Ensure `SCION_SERVER_BASE_URL` is still set to the `https://` URL that clients use, and list the proxy's source IP addresses or CIDR ranges in [`server.trusted_proxies`](/scion/reference/server-config/#runtime-broker-transport-and-trusted-proxies) (`SCION_SERVER_TRUSTEDPROXIES`) when the proxy runs on another host so Runtime Brokers can register, join, rotate secrets, and connect through it.
 
 **Option C — Identity-Aware Proxy (GCP)**
 

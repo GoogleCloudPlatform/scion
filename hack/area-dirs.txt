@@ -1,0 +1,22 @@
+# pkg/hub area directories: the subpackages of pkg/hub that the scanner
+# coverage harness (ptone/scion#4275) proves every
+# source-scanning guard reaches. Each scanner's self-test plants a violation
+# under every directory listed here and requires it to be flagged.
+#
+# Format: one entry per line, "<kind> <dir>", fields separated by blanks.
+#   kind  area         a feature area moved out of package hub
+#         testsupport  a non-test package shared by tests only
+#   dir   slash path relative to pkg/hub
+# Blank lines and lines starting with # are ignored.
+#
+# Read by hack/areadirs (Go tests) and by hack/check-authz-guards.sh and
+# hack/check-scan-coverage.sh (shell). Each move PR adds its directory here
+# and to guardScanSubdirs (pkg/hub/ast_test_helpers_test.go) in the same PR.
+
+# Health and maintenance operations, moved out of package hub.
+area        maintenance
+# OIDC signing keys and discovery, moved out of package hub.
+area        oidckeys
+# Helpers shared by pkg/hub tests and the area tests; not importable by
+# production code (its no_hub_import_test.go).
+testsupport internal/hubtestutil

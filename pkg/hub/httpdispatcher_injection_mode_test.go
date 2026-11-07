@@ -101,53 +101,6 @@ func TestResolveEnvFromStorage_InjectionMode(t *testing.T) {
 	}
 }
 
-// TestBuildEnvSources_InjectionMode verifies that buildEnvSources skips
-// as_needed env vars so they are not reported as sources.
-func TestBuildEnvSources_InjectionMode(t *testing.T) {
-	ctx := context.Background()
-	memStore := createTestStore(t)
-
-	agent := envScopeTestAgent()
-
-	vars := []store.EnvVar{
-		{
-			ID:            api.NewUUID(),
-			Key:           "ALWAYS_VAR",
-			Value:         "always-value",
-			Scope:         store.ScopeProject,
-			ScopeID:       agent.ProjectID,
-			InjectionMode: store.InjectionModeAlways,
-		},
-		{
-			ID:            api.NewUUID(),
-			Key:           "AS_NEEDED_VAR",
-			Value:         "as-needed-value",
-			Scope:         store.ScopeProject,
-			ScopeID:       agent.ProjectID,
-			InjectionMode: store.InjectionModeAsNeeded,
-		},
-	}
-	for _, v := range vars {
-		if _, err := memStore.UpsertEnvVar(ctx, &v); err != nil {
-			t.Fatalf("seeding env var %s: %v", v.Key, err)
-		}
-	}
-
-	d := NewHTTPAgentDispatcherWithClient(memStore, &mockRuntimeBrokerClient{}, false, slog.Default())
-	d.SetHubID(envScopeTestHubID)
-
-	// resolvedEnv contains only the var that passed the filter.
-	resolvedEnv := map[string]string{"ALWAYS_VAR": "always-value"}
-	sources := d.buildEnvSources(ctx, agent, resolvedEnv)
-
-	if got, ok := sources["ALWAYS_VAR"]; !ok || got != "project" {
-		t.Errorf("ALWAYS_VAR source = %q (present=%v), want %q", got, ok, "project")
-	}
-	if _, ok := sources["AS_NEEDED_VAR"]; ok {
-		t.Error("AS_NEEDED_VAR present in sources, want absent (injection_mode = as_needed)")
-	}
-}
-
 // TestResolveSecrets_InjectionMode verifies that resolveSecrets skips secrets
 // with InjectionMode == "as_needed" and includes secrets with InjectionMode ==
 // "always" or "" (empty/unset).

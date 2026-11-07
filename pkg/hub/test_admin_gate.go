@@ -53,6 +53,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/internal/keymaterial"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -104,6 +105,8 @@ var (
 		`the test infrastructure marker class is not "test"`)
 	ErrTestAdminMarkerUnreadable = testAdminGateErr("G6", "marker_unreadable",
 		"the test infrastructure marker could not be read")
+	ErrTestAdminKeyringSigning = testAdminGateErr("G7", "keyring_signing",
+		"a keyring file (server.keyring_file) supplies deployment-wide signing keys; the test admin tier requires hub-local signing keys")
 	ErrTestAdminSharedSigningSecret = testAdminGateErr("G7", "shared_signing_secret",
 		"a shared signing secret (--session-secret / SCION_SERVER_SESSION_SECRET) is configured; the test admin tier requires hub-local signing keys")
 	ErrTestAdminPreconfiguredSigningKey = testAdminGateErr("G7", "preconfigured_signing_key",
@@ -191,6 +194,9 @@ func validateTestAdminGateConfig(cfg ServerConfig, hasStore bool) error {
 		return ErrTestAdminMarkerClassNotTest
 	case federationConfigured(&cfg.Federation):
 		return ErrTestAdminFederationConfigured
+	case managedSigning(cfg):
+		// Keyring mode refuses here, before SharedSigningSecret is read.
+		return ErrTestAdminKeyringSigning
 	case cfg.SharedSigningSecret != "":
 		return ErrTestAdminSharedSigningSecret
 	case len(cfg.UserTokenConfig.SigningKey) > 0 || len(cfg.AgentTokenConfig.SigningKey) > 0:
@@ -272,19 +278,20 @@ func (s *Server) liveTestAdminIdentityCount(ctx context.Context) (int, error) {
 }
 
 // Signing-key source labels (signingKeySource). Labels only: no key
-// material is ever recorded or returned.
+// material is ever recorded or returned. They are declared in
+// keymaterial, which the OIDC key manager shares.
 const (
-	signingKeySourceConfig        = "config"
-	signingKeySourceSharedSecret  = "shared_secret"
-	signingKeySourceSecretBackend = "secret_backend"
-	signingKeySourceStore         = "store"
-	signingKeySourceLegacyStore   = "legacy_store"
-	signingKeySourceGenerated     = "generated"
-	signingKeySourceEphemeral     = "ephemeral"
-	signingKeySourceUnresolved    = "unresolved"
+	signingKeySourceConfig        = keymaterial.SourceConfig
+	signingKeySourceSharedSecret  = keymaterial.SourceSharedSecret
+	signingKeySourceSecretBackend = keymaterial.SourceSecretBackend
+	signingKeySourceStore         = keymaterial.SourceStore
+	signingKeySourceLegacyStore   = keymaterial.SourceLegacyStore
+	signingKeySourceGenerated     = keymaterial.SourceGenerated
+	signingKeySourceEphemeral     = keymaterial.SourceEphemeral
+	signingKeySourceUnresolved    = keymaterial.SourceUnresolved
 	// signingKeySourceSharedScope is a key persisted under a fixed scope
 	// every node and hub sharing the database reads (not hub-id scoped).
-	signingKeySourceSharedScope = "shared_scope"
+	signingKeySourceSharedScope = keymaterial.SourceSharedScope
 )
 
 // webSessionKeyName names the web session cookie key class for

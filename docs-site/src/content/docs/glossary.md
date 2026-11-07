@@ -178,25 +178,6 @@ A short-lived, single-use token the Hub issues when a user creates or re-registe
 ### Artifact
 A published file or folder (a bundle) stored by the Hub, with numbered immutable versions and a stable reference `scion://artifact/<id>[@<seq>]` that works from any Runtime Broker and in the web UI. Owned by the publishing agent or user and homed in a project. Gated by the `hub.artifacts` experiment. Not a build output or a chat attachment. See [Artifacts](/scion/reference/artifacts/).
 
-## Users & Access
-
-### Access Boundary
-The user-facing term and UI representation of an underlying **AccessConstraint**. It defines a monotonic maximum-permissions boundary (permission ceiling) for users, group closures, or all principals. Admins can view, create, and manage access boundaries via a guided authoring workflow, previewing and dry-running changes using the built-in preview engine and effective-access integration before committing. It is not a User Access Token's boundary (the single project or the hub a UAT is bound to).
-_Avoid_: access ceiling, permission boundary, role constraint
-_See also_: AccessConstraint, Group, RoleBinding, User Access Token (UAT)
-
-### Agent Authorization Role
-A named authority tier (one of `none`, `readonly`, `baseline`, or `full`) assigned to an agent that governs the API scopes granted in its Hub-issued JWT. At creation, the requested or default role is capped by the project maximum and, for sub-agents, the parent agent's role. Live delegation checks separately verify the caller's authority.
-
-### Group
-A named collection of Hub users, agents and nested groups used by the Hub permissions system to assign access. This is the primary meaning of "group" in Scion. Distinct from a **Message Group** (a set of message recipients), from a **Thread Group** (a set of a project's chat threads) and from a **Project**.
-
-### User Access Token (UAT)
-A scoped, revocable bearer token (prefixed with `scion_pat_`) linked to a user account and used for non-interactive Hub authentication (e.g., CLI, CI/CD pipelines, desktop app integration). Every UAT has a boundary, either a single project or (for a hub-bound token, minted through the API) the hub, and carries a specific list of action permissions (scopes). The token boundary is not an **Access Boundary**. Formerly known as a *Personal Access Token (PAT)*.
-
-### Owner-Based Access Control
-An authorization model where certain resources (such as scheduled events, recurring schedules, and individual agents) are strictly restricted so they can only be viewed, updated, deleted, or managed by their respective creator (the "owner") or system-wide administrators. Enforced via owner-ID validation at the API layer.
-
 ### Quota System
 An advisory-lock-based enforcement system that governs resource consumption at agent and project creation. It uses fail-closed semantics and prevents reservation leaks, operating on schemas including LimitDefinition, EntitlementBinding, and UsageReservation.
 _Avoid_: rate limits, usage caps
@@ -220,6 +201,26 @@ _See also_: Inventory target key, Flat Runtime Broker
 ### Inventory target key
 The string (runtime name, plus context and namespace on Kubernetes) that heartbeats, start claims and recovery use to name the runtime an agent was observed on. It appears on an agent record as `appliedConfig.runtimeTarget` and `appliedConfig.runtimeTargetCandidate`. It is not a runtime target ID.
 _See also_: Runtime target ID
+
+## Users & Access
+
+### Access Boundary
+The user-facing term and UI representation of an underlying **AccessConstraint**. It defines a monotonic maximum-permissions boundary (permission ceiling) for users, group closures, or all principals. Admins can view, create, and manage access boundaries via a guided authoring workflow, previewing and dry-running changes using the built-in preview engine and effective-access integration before committing. It is not a User Access Token's boundary (the single project or the hub a UAT is bound to).
+_Avoid_: access ceiling, permission boundary, role constraint
+_See also_: AccessConstraint, Group, RoleBinding, User Access Token (UAT)
+
+### Agent Authorization Role
+A named authority tier (one of `none`, `readonly`, `baseline`, or `full`) assigned to an agent that governs the API scopes granted in its Hub-issued JWT. At creation, the requested or default role is capped by the project maximum and, for sub-agents, the parent agent's role. Live delegation checks separately verify the caller's authority.
+
+### Group
+A named collection of Hub users, agents and nested groups used by the Hub permissions system to assign access. This is the primary meaning of "group" in Scion. Distinct from a **Message Group** (a set of message recipients), from a **Thread Group** (a set of a project's chat threads) and from a **Project**.
+
+### User Access Token (UAT)
+A scoped, revocable bearer token (prefixed with `scion_pat_`) linked to a user account and used for non-interactive Hub authentication (e.g., CLI, CI/CD pipelines, desktop app integration). Every user access token has a boundary and carries a specific list of action permissions (scopes). Each request is allowed only when the token carries the scope and the user currently has that access. The token boundary is not an **Access Boundary**. Formerly known as a *Personal Access Token (PAT)*.
+_Token boundary_: the reach of a user access token, chosen when it is created in the web UI, the CLI or the API: a single project (a project token), or the hub (a hub token), which works in every project the user can currently access and is the only boundary that can carry hub-level scopes.
+
+### Owner-Based Access Control
+An authorization model where certain resources (such as scheduled events, recurring schedules, and individual agents) are strictly restricted so they can only be viewed, updated, deleted, or managed by their respective creator (the "owner") or system-wide administrators. Enforced via owner-ID validation at the API layer.
 
 ## Messaging
 

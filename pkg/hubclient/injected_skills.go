@@ -75,7 +75,7 @@ func (c *client) UserInjectedSkills() InjectedSkillsService {
 
 // projectPath returns the API path prefix for this project's injected-skills.
 func (s *projectInjectedSkillsService) basePath() string {
-	return fmt.Sprintf("/api/v1/projects/%s/injected-skills", s.projectID)
+	return fmt.Sprintf("/api/v1/projects/%s/injected-skills", url.PathEscape(s.projectID))
 }
 
 // List returns the project-scoped injected-skills list.

@@ -117,7 +117,8 @@ Commands:
   deregister   Remove this broker from the Hub
   hubs         List hub connections
   provide      Add this broker as a provider for a project
-  withdraw     Remove this broker as a provider from a project`,
+  withdraw     Remove this broker as a provider from a project
+  convert      Plan a move to flat Runtime Brokers (read-only, experimental)`,
 }
 
 // brokerRegisterCmd registers this broker with the Hub
@@ -1387,6 +1388,9 @@ func runBrokerProvide(cmd *cobra.Command, args []string) error {
 
 	// Load Hub client: use --hub flag if specified, otherwise fall back to project settings
 	var client hubclient.Client
+	// uat: the client sends a user access token. A named hub connection
+	// uses the broker's own credentials, never one.
+	uat := false
 	if brokerHubFlag != "" {
 		var err error
 		client, err = getHubClientForConnection(brokerHubFlag)
@@ -1403,7 +1407,7 @@ func runBrokerProvide(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("failed to load settings: %w", err)
 		}
 
-		client, err = getHubClient(settings)
+		client, uat, err = getHubClientUAT(settings)
 		if err != nil {
 			return err
 		}
@@ -1414,7 +1418,7 @@ func runBrokerProvide(cmd *cobra.Command, args []string) error {
 
 	// If we used --project flag, resolve project by name or ID
 	if brokerProjectID != "" {
-		project, err := resolveProjectByNameOrID(ctx, client, brokerProjectID)
+		project, err := resolveProjectByNameOrID(ctx, client, brokerProjectID, uat)
 		if err != nil {
 			return fmt.Errorf("failed to find project '%s': %w", brokerProjectID, err)
 		}
@@ -1641,6 +1645,9 @@ func runBrokerWithdraw(cmd *cobra.Command, args []string) error {
 
 	// Load Hub client: use --hub flag if specified, otherwise fall back to project settings
 	var client hubclient.Client
+	// uat: the client sends a user access token. A named hub connection
+	// uses the broker's own credentials, never one.
+	uat := false
 	if brokerHubFlag != "" {
 		var err error
 		client, err = getHubClientForConnection(brokerHubFlag)
@@ -1658,7 +1665,7 @@ func runBrokerWithdraw(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("failed to load settings: %w", err)
 		}
 
-		client, err = getHubClient(settings)
+		client, uat, err = getHubClientUAT(settings)
 		if err != nil {
 			return err
 		}
@@ -1669,7 +1676,7 @@ func runBrokerWithdraw(cmd *cobra.Command, args []string) error {
 
 	// If we used --project flag, resolve project by name or ID
 	if brokerProjectID != "" {
-		project, err := resolveProjectByNameOrID(ctx, client, brokerProjectID)
+		project, err := resolveProjectByNameOrID(ctx, client, brokerProjectID, uat)
 		if err != nil {
 			return fmt.Errorf("failed to find project '%s': %w", brokerProjectID, err)
 		}
@@ -1836,6 +1843,7 @@ func runBrokerStatus(cmd *cobra.Command, args []string) error {
 						status.BrokerName = broker.Name
 						status.BrokerStatus = broker.Status
 						status.LastHeartbeat = broker.LastHeartbeat
+						status.CommandPath = brokerStatusCommandPath(broker.Status, broker.Health)
 					} else if apiclient.IsNotFoundError(err) {
 						// Broker ID exists locally but not on Hub - not actually registered
 						status.Registered = false
@@ -1912,9 +1920,11 @@ func runBrokerStatus(cmd *cobra.Command, args []string) error {
 			liveStatus = queryBrokerHubConnections(port)
 		}
 		liveStatusMap := make(map[string]string)
+		liveInfo := make(map[string]BrokerHubConnectionInfo)
 		if liveStatus != nil {
 			for _, conn := range liveStatus.Connections {
 				liveStatusMap[conn.Name] = conn.Status
+				liveInfo[conn.Name] = conn
 			}
 		}
 
@@ -1933,20 +1943,26 @@ func runBrokerStatus(cmd *cobra.Command, args []string) error {
 			fmt.Printf("    Hub:         %s\n", config.RedactURL(conn.HubEndpoint))
 			fmt.Printf("    Auth:        %s\n", conn.AuthMode)
 			fmt.Printf("    Status:      %s\n", connStatus)
+			if info, ok := liveInfo[conn.Name]; ok {
+				if line := brokerConnectionCommandsText(info); line != "" {
+					fmt.Printf("    Commands:    %s\n", line)
+				}
+			}
 			if !conn.RegisteredAt.IsZero() {
 				fmt.Printf("    Registered:  %s\n", clitime.Format(conn.RegisteredAt, clitime.Date))
 			}
 		}
 		if status.HubConnected {
-			fmt.Printf("\n  Connected:   yes (%s)\n", status.HubStatus)
+			fmt.Printf("\n  Hub API:     reachable (%s)\n", status.HubStatus)
 			if status.BrokerStatus != "" {
 				fmt.Printf("  Status:      %s\n", status.BrokerStatus)
+				printBrokerCommandsLine(status.CommandPath)
 			}
 			if !status.LastHeartbeat.IsZero() {
 				fmt.Printf("  Last seen:   %s\n", clitime.Ago(status.LastHeartbeat))
 			}
 		} else if status.Registered {
-			fmt.Printf("\n  Connected:   no (Hub unreachable)\n")
+			fmt.Printf("\n  Hub API:     unreachable\n")
 		}
 	} else if status.Registered {
 		// Legacy single-connection display
@@ -1961,15 +1977,16 @@ func runBrokerStatus(cmd *cobra.Command, args []string) error {
 		}
 		fmt.Printf("  Hub:         %s\n", config.RedactURL(status.HubEndpoint))
 		if status.HubConnected {
-			fmt.Printf("  Connected:   yes (%s)\n", status.HubStatus)
+			fmt.Printf("  Hub API:     reachable (%s)\n", status.HubStatus)
 			if status.BrokerStatus != "" {
 				fmt.Printf("  Status:      %s\n", status.BrokerStatus)
+				printBrokerCommandsLine(status.CommandPath)
 			}
 			if !status.LastHeartbeat.IsZero() {
 				fmt.Printf("  Last seen:   %s\n", clitime.Ago(status.LastHeartbeat))
 			}
 		} else {
-			fmt.Printf("  Connected:   no (Hub unreachable)\n")
+			fmt.Printf("  Hub API:     unreachable\n")
 		}
 	} else {
 		fmt.Println("Hub Registration")
@@ -2102,6 +2119,7 @@ func runRemoteBrokerStatus(brokerID string) error {
 		LastHeartbeat: broker.LastHeartbeat,
 		HubEndpoint:   invocationHubEndpoint(),
 		HubConnected:  true, // We just connected successfully
+		CommandPath:   brokerStatusCommandPath(broker.Status, broker.Health),
 	}
 
 	// Get projects this broker provides for
@@ -2135,6 +2153,7 @@ func runRemoteBrokerStatus(brokerID string) error {
 		fmt.Printf("  Name:        %s\n", status.BrokerName)
 	}
 	fmt.Printf("  Status:      %s\n", status.BrokerStatus)
+	printBrokerCommandsLine(status.CommandPath)
 	if !status.LastHeartbeat.IsZero() {
 		fmt.Printf("  Last seen:   %s\n", clitime.Ago(status.LastHeartbeat))
 	}
@@ -2185,9 +2204,15 @@ type brokerStatusInfo struct {
 	CredentialsPath string `json:"credentialsPath,omitempty"`
 
 	// Hub connection
-	HubEndpoint   string    `json:"hubEndpoint,omitempty"`
-	HubConnected  bool      `json:"hubConnected"`
-	HubStatus     string    `json:"hubStatus,omitempty"`
+	HubEndpoint  string `json:"hubEndpoint,omitempty"`
+	HubConnected bool   `json:"hubConnected"`
+	HubStatus    string `json:"hubStatus,omitempty"`
+	// CommandPath is whether the Hub can send this broker commands, from
+	// the broker's last report as the Hub stored it: yes, no, pending or
+	// not_reported (brokerStatusCommandPath). Empty while the broker is not
+	// online, since its last report is stale then. HubConnected only says
+	// the Hub API answers.
+	CommandPath   string    `json:"commandPath,omitempty"`
 	HubVersion    string    `json:"hubVersion,omitempty"`
 	LastHeartbeat time.Time `json:"lastHeartbeat,omitempty"`
 
@@ -2220,7 +2245,11 @@ type brokerProjectStatus struct {
 // resolveProjectByNameOrID resolves a project identifier (name, slug, or ID) to a project.
 // It tries multiple strategies in order: direct ID lookup, slug, then name.
 // Returns the project if found, or an error if not found or multiple matches.
-func resolveProjectByNameOrID(ctx context.Context, client hubclient.Client, nameOrID string) (*hubclient.Project, error) {
+// uat reports that client sends a user access token (hubsync.UsesUserAccessToken,
+// or authSourceIsUserAccessToken for a getHubClient client): then a lookup
+// that finds nothing returns hubsync.ScopedTokenProjectLookupEmptyError,
+// which reads the same whether or not the project exists (ptone/scion#5294).
+func resolveProjectByNameOrID(ctx context.Context, client hubclient.Client, nameOrID string, uat bool) (*hubclient.Project, error) {
 	// First try to fetch by ID directly
 	project, err := client.Projects().Get(ctx, nameOrID)
 	if err == nil {
@@ -2253,6 +2282,9 @@ func resolveProjectByNameOrID(ctx context.Context, client hubclient.Client, name
 
 	switch len(resp.Projects) {
 	case 0:
+		if uat {
+			return nil, hubsync.ScopedTokenProjectLookupEmptyError(nameOrID)
+		}
 		return nil, fmt.Errorf("project '%s' not found", nameOrID)
 	case 1:
 		return &resp.Projects[0], nil
@@ -2544,6 +2576,10 @@ type BrokerHubConnectionInfo struct {
 	IsColocated       bool   `json:"isColocated,omitempty"`
 	HasHeartbeat      bool   `json:"hasHeartbeat"`
 	HasControlChannel bool   `json:"hasControlChannel"`
+	// CommandPath and TransportRefused mirror the broker's fields (an
+	// older broker omits them).
+	CommandPath      string `json:"commandPath,omitempty"`
+	TransportRefused bool   `json:"transportRefused,omitempty"`
 }
 
 // queryBrokerHubConnections queries the local broker server for live hub connection status.

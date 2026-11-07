@@ -27,7 +27,8 @@ import (
 )
 
 // collectRelayMetrics returns, by metric name, the observed values keyed by
-// their cause attribute ("" when none).
+// their cause attribute, else their incarnation_source attribute ("" when
+// neither).
 func collectRelayMetrics(t *testing.T, reader *sdkmetric.ManualReader) map[string]map[string]int64 {
 	t.Helper()
 	var rm metricdata.ResourceMetrics
@@ -46,8 +47,11 @@ func collectRelayMetrics(t *testing.T, reader *sdkmetric.ManualReader) map[strin
 				}
 			case metricdata.Sum[int64]:
 				for _, dp := range d.DataPoints {
-					cause, _ := dp.Attributes.Value("cause")
-					vals[cause.AsString()] = dp.Value
+					key, ok := dp.Attributes.Value("cause")
+					if !ok {
+						key, _ = dp.Attributes.Value("incarnation_source")
+					}
+					vals[key.AsString()] = dp.Value
 				}
 			}
 			out[m.Name] = vals
@@ -85,6 +89,15 @@ func TestRelayMetrics_RegisteredOnTheProvider(t *testing.T) {
 		for _, cause := range []string{"ingress_header_untrusted", "ingress_cap_invalid"} {
 			if v, ok := refused[cause]; !ok || v != 0 {
 				t.Fatalf("singleton=%v: %s{cause=%s} = %d (present %v), want 0", singleton, metricIngressHeaderRefused, cause, v, ok)
+			}
+		}
+		admitted, ok := got[metricAgentSessionsAdmitted]
+		if !ok {
+			t.Fatalf("singleton=%v: %s is not registered", singleton, metricAgentSessionsAdmitted)
+		}
+		for _, src := range []string{"launch_id", "generation"} {
+			if v, ok := admitted[src]; !ok || v != 0 {
+				t.Fatalf("singleton=%v: %s{incarnation_source=%s} = %d (present %v), want 0", singleton, metricAgentSessionsAdmitted, src, v, ok)
 			}
 		}
 	}

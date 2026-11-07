@@ -218,9 +218,14 @@ func (s *AgentTokenService) signClaims(claims any, now time.Time) (string, error
 }
 
 // verifyClaims checks tok's signature and decodes its claims into dst.
+// Without a ring (legacy mode) the token's key ID must be absent or
+// "legacy" (checkLegacyJWTKeyID).
 func (s *AgentTokenService) verifyClaims(tok *jwt.JSONWebToken, now time.Time, dst any) error {
 	if s.ring != nil {
 		return s.ring.verify(tok, now, dst)
+	}
+	if err := checkLegacyJWTKeyID(tok); err != nil {
+		return err
 	}
 	return tok.Claims(s.config.SigningKey, dst)
 }

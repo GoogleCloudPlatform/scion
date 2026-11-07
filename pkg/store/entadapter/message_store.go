@@ -619,44 +619,6 @@ func (s *MessageStore) MarkAllMessagesRead(ctx context.Context, recipientID stri
 	return err
 }
 
-// PurgeOldMessages removes read messages older than readCutoff and unread
-// messages older than unreadCutoff. Returns the number of messages removed.
-func (s *MessageStore) PurgeOldMessages(ctx context.Context, readCutoff time.Time, unreadCutoff time.Time) (int, error) {
-	n, err := s.client.Message.Delete().
-		Where(message.Or(
-			message.And(message.ReadEQ(true), message.CreatedLT(readCutoff)),
-			message.And(message.ReadEQ(false), message.CreatedLT(unreadCutoff)),
-		)).
-		Exec(ctx)
-	if err != nil {
-		return 0, err
-	}
-	return n, nil
-}
-
-// PurgeFailedMessages removes messages with dispatch_state="failed" whose
-// created timestamp is before cutoff. Returns the number of messages removed.
-// Unlike PurgeOldMessages, this filters strictly on dispatch_state so
-// successfully delivered (dispatched) message history is never touched.
-// Scoped to agent recipients only (message.RecipientHasPrefix "agent:"):
-// only a message addressed to an agent can have genuinely and irrecoverably
-// failed dispatch. A "user:" recipient row reaching "failed" only ever came
-// from ExpireStuckPendingMessages sweeping a writer bug (nc-promote-busy);
-// deleting it would destroy real chat history the user never saw fail.
-func (s *MessageStore) PurgeFailedMessages(ctx context.Context, cutoff time.Time) (int, error) {
-	n, err := s.client.Message.Delete().
-		Where(
-			message.DispatchStateEQ(store.MessageDispatchFailed),
-			message.CreatedLT(cutoff),
-			message.RecipientHasPrefix("agent:"),
-		).
-		Exec(ctx)
-	if err != nil {
-		return 0, mapError(err)
-	}
-	return n, nil
-}
-
 // SetMessageConversationID updates the conversation_id on an existing message.
 // Used by Phase 4 backfill to link legacy messages to Conversation records.
 func (s *MessageStore) SetMessageConversationID(ctx context.Context, messageID, conversationID string) error {

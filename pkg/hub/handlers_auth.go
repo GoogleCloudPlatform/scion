@@ -2101,7 +2101,9 @@ type ScopeEligibility struct {
 	// admitted, since the caller already knows the project exists in that
 	// case. It appears ONLY as the request's uniform 403 -- never here --
 	// when EVERY evaluated selector was denied for project access; see
-	// handleAuthScopes.
+	// handleAuthScopes. For a hub boundary a denial is authority_required
+	// (or boundary_not_allowed / unknown_selector); the response never
+	// collapses.
 	Reason string `json:"reason,omitempty"`
 	Note   string `json:"note,omitempty"`
 	// IneligibleMembers is set only on an alias entry (AuthScopeAlias): the
@@ -2207,11 +2209,10 @@ func boundaryKindsToStrings(kinds []permissions.BoundaryKind) []string {
 }
 
 // parseAuthScopesBoundary interprets the ?boundary=/?projectId= query
-// parameters for GET /api/v1/auth/scopes. A nil *TokenBoundary with a nil
-// error means "no boundary requested" (today's unchanged catalog-only
-// response). This validation is intentionally independent of the hub-
-// boundary feature gate below it: when that gate is later removed, the
-// projectId-conflict and missing-projectId 400s must still hold.
+// parameters for GET /api/v1/auth/scopes. A nil *TokenBoundary with
+// handled false means "no boundary requested" (the catalog-only response).
+// boundary=project needs a projectId and boundary=hub refuses one; both
+// mistakes, and an unknown boundary value, are 400.
 func parseAuthScopesBoundary(w http.ResponseWriter, r *http.Request) (boundary *TokenBoundary, handled bool) {
 	query := r.URL.Query()
 	boundaryParam := query.Get("boundary")
@@ -2230,17 +2231,12 @@ func parseAuthScopesBoundary(w http.ResponseWriter, r *http.Request) (boundary *
 		}
 		return &TokenBoundary{Kind: BoundaryKindProject, ProjectID: projectID}, false
 	case "hub":
-		// A hub boundary never accepts a projectId, regardless of whether
-		// hub eligibility itself is enabled yet.
+		// A hub boundary never accepts a projectId.
 		if projectID != "" {
 			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "boundary=hub does not accept projectId", nil)
 			return nil, true
 		}
-		// Hub-boundary eligibility is not enabled yet; enabling it is this
-		// single switch. The two validation cases above must keep
-		// returning 400 unchanged when it is.
-		writeError(w, http.StatusBadRequest, "unsupported_boundary", "hub boundary eligibility is not available yet", nil)
-		return nil, true
+		return &TokenBoundary{Kind: BoundaryKindHub}, false
 	default:
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "unknown boundary", nil)
 		return nil, true
@@ -2252,7 +2248,10 @@ func parseAuthScopesBoundary(w http.ResponseWriter, r *http.Request) (boundary *
 // ?projectId= (or the equivalent ?boundary=project&projectId=), each entry
 // additionally reports whether the authenticated user may currently select
 // it as a project-boundary restriction (CanMintSelector), computed fresh for
-// the principal and never widened by whatever credential made this request.
+// the principal. With ?boundary=hub, each entry reports the same for a hub
+// boundary. Eligibility is answered only for an interactive session or dev
+// credential: a user access token reads the catalog alone, and a token
+// request naming a boundary or project is refused with 403.
 //
 // Project-access aggregation: the whole response collapses to the same
 // oracle-resistant 403 as token mint ONLY when the batch has at least one
@@ -2270,7 +2269,8 @@ func parseAuthScopesBoundary(w http.ResponseWriter, r *http.Request) (boundary *
 // admitted for at least one selector already knows the project exists, so
 // seeing which of their own selectors also lack authority is not a new
 // oracle. This keeps the listing consistent with mint: a selector the list
-// shows eligible must mint, and one it shows ineligible must not.
+// shows eligible must mint, and one it shows ineligible must not. A hub
+// boundary names no project, so a hub request always answers per-entry.
 func (s *Server) handleAuthScopes(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w, http.MethodGet)
@@ -2284,8 +2284,18 @@ func (s *Server) handleAuthScopes(w http.ResponseWriter, r *http.Request) {
 		Unauthorized(w)
 		return
 	}
-	if _, ok := selfReadCredential(r.Context(), identity, "user.self.scopes"); !ok {
+	token, ok := selfReadCredential(r.Context(), identity, "user.self.scopes")
+	if !ok {
 		refuseSelfReadCredential(w, r, identity, "user")
+		return
+	}
+	// A user access token reads the selector catalog only. Mint
+	// eligibility is answered for an interactive session or dev
+	// credential, the credentials that may mint.
+	query := r.URL.Query()
+	if token != nil && (query.Has("boundary") || query.Has("projectId")) {
+		logAuthzDenial(r, identity, Resource{Type: "user"}, ActionRead, "boundary eligibility requires a session credential")
+		writeSessionOnlyDenial(w, ErrCodeForbidden, "boundary eligibility requires an interactive session", authzop.ReasonCredentialManagement)
 		return
 	}
 
@@ -2336,7 +2346,7 @@ func (s *Server) handleAuthScopes(w http.ResponseWriter, r *http.Request) {
 				sawProjectAccessDenial = true
 			}
 		}
-		if sawProjectAccessDenial && !sawAdmitted {
+		if boundary.Kind == BoundaryKindProject && sawProjectAccessDenial && !sawAdmitted {
 			// Every selector that reached the project-admission gate was
 			// denied for lack of project access, and nothing else was
 			// admitted: identical to a nonexistent or wholly inaccessible

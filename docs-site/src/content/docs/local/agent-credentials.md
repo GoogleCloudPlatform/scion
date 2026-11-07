@@ -266,7 +266,7 @@ The `gcloud-adc` secret automatically writes the ADC file to the well-known GCP 
 :::
 
 :::tip[Claude Vertex AI Translation]
-For the Claude harness, Scion automatically translates `GOOGLE_CLOUD_PROJECT` to the `ANTHROPIC_VERTEX_PROJECT_ID` environment variable during container provisioning. This ensures that Claude Code's native Vertex AI client authenticates and operates correctly with Vertex Model Garden endpoints without manual environment adjustments.
+For the Claude harness in `vertex-ai` mode, Scion sets `CLAUDE_CODE_USE_VERTEX=1` and translates `GOOGLE_CLOUD_PROJECT` to `ANTHROPIC_VERTEX_PROJECT_ID` and the resolved region (`GOOGLE_CLOUD_LOCATION`, `GOOGLE_CLOUD_REGION`, or `CLOUD_ML_REGION`) to `CLOUD_ML_REGION` during container provisioning (including on Cloud Run, where the resolved values override the harness bundle's `${GOOGLE_CLOUD_PROJECT}` and `${GOOGLE_CLOUD_LOCATION}` environment placeholders). This ensures that Claude Code's native Vertex AI client authenticates and operates against the intended project and region without manual environment adjustments.
 :::
 
 :::tip[Antigravity Vertex AI & ADC]
@@ -326,8 +326,13 @@ run next.
 
 This lets you launch an agent, log in to the harness interactively (e.g. `claude setup-token`,
 `copilot login`, `hermes setup`, `agy`), and then capture the resulting credentials for reuse
-(see below). Every bundle declares `no_auth.behavior: drop-to-shell` along with the harness's
-login command and message.
+(see below). Every bundle declares `no_auth.behavior: drop-to-shell` along with a message, and
+optionally a login command to run first. Copilot runs no command: it starts a shell with sign-in
+instructions. A harness-config can add environment variables for no-auth mode only, in a
+`no-auth-env.yaml` file next to its `config.yaml` with one `env` map. Copilot's sets
+`DBUS_SESSION_BUS_ADDRESS: unix:path=/home/scion/.scion/harness/no-session-bus`, so in that mode
+it runs with no session bus and keeps its sign-in in `~/.copilot/config.json`. Starts with
+credentials never get these variables.
 
 The fallback applies only to **automatic** resolution. If you selected an auth type via the
 [Explicit Path](#the-explicit-path), the fallback is disabled — the required credentials must be
@@ -487,7 +492,7 @@ Two diagnostic commands help troubleshoot auth and connectivity:
 
   The check fails when init's credential has expired or its requests are refused (401/403). When the credential has expired or the Hub refused it, doctor says how to reload the credential.
   In the 20 seconds after a new token file is written, init may still be switching to it, so doctor only warns and asks you to run it again.
-  Init publishes this state in a root-owned file. Where init does not run as root, doctor reports the state as unavailable.
+  Init publishes this state in a root-owned file. When the state file is absent and `init` (PID 1) is the `sciontool` binary running as a non-root user (such as `scion` on Kubernetes), `sciontool doctor` reports `[INFO] Init credential check not applicable: init (PID 1) runs as a non-root user and does not publish its credential state` instead of a warning; when PID 1 runs with effective UID `0` or its privilege cannot be determined, a missing state file is reported as `[WARN] Init credential state unavailable ...`.
   When the Hub refuses a GCP credential request with HTTP `403`, the in-container metadata server opens a capped exponential back-off window with jitter (base 10 seconds, max 5 minutes), tracked separately for the access token and for identity tokens: during the window, token requests receive the cached `403` refusal (`credential refused by hub; retry after ...`) without calling the Hub and one log line is written per back-off step. A successful fetch resets the back-off, as does a change to the agent's assignment (its service account or Hub credential), which is retried at once; any other error returns `502` with no back-off. Concurrent identity-token fetches are deduplicated per target audience.
 
 ## Agent Progeny & Secret Access
@@ -520,7 +525,7 @@ You have configured the **Explicit Path** (e.g., selecting `vertex-ai`) but the 
 The Runtime Broker refused the start before creating a container (see [No-Auth Fallback](#no-auth-fallback)). The message names the harness, the accepted auth types and, for a selected auth type, the credentials it looks for. Provide one of them as a Hub secret (`scion hub secret set`) or a Hub environment setting (`scion hub env set`), or select a different auth type with `--harness-auth`.
 
 ### "agent secrets could not be resolved" or "agent environment settings could not be read"
-Create, start, restart, resume and waking an agent for a direct message fail closed with `503` when the Hub cannot resolve the agent's configured secrets or read its stored environment settings, instead of starting the agent without them. A start leaves the agent as it was, a restart leaves it stopped (its stop leg has already run), and a failed create is rolled back. A provision-only create still succeeds; the agent's later start fails closed. A reincarnation answers `202` and then fails at its start leg: it is recorded as failed with the same message and the previous config is restored. This points to a secret backend or database problem on the Hub, not a missing credential (an agent with no secrets or settings starts normally). Retry once the Hub's backend is healthy; the Hub's server log has the cause.
+Create, start, restart, resume and waking an agent for a direct message fail closed with `503` when the Hub cannot resolve the agent's configured secret metadata or read its stored environment settings, instead of starting the agent without them. A start leaves the agent as it was, a restart leaves it stopped (its stop leg has already run), and a failed create is rolled back. A provision-only create still succeeds; the agent's later start fails closed. A reincarnation answers `202` and then fails at its start leg: it is recorded as failed with the same message and the previous config is restored. This points to a secret backend or database problem on the Hub, not a missing credential (an agent with no secrets or settings starts normally). Retry once the Hub's backend is healthy; the Hub's server log has the cause. When an individual secret's metadata resolves but the secret store cannot return its value (`access`, `not_found`, or `missing`), the Hub skips that secret so the dispatch proceeds without it and returns a warning in `warnings` (`secrets not delivered because the secret store could not return them: <items>; the agent was <started|restarted|created> without them`; see [Start-Time Authorization](/scion/hosted/user/secrets/#start-time-authorization)).
 
 ### "the hub issued no agent token for this start"
 A Hub-dispatched create, start, or restart requires a Hub-issued agent token (`StartOptions.HubIssuedToken`). If the Hub issues none, the Runtime Broker removes any previous `~/.scion/scion-token` file from the Agent home and fails the start with `500 runtime_error` (`the hub issued no agent token for this start; check the hub's agent token service`) without starting a container; on a restart, the running container is stopped first, leaving the agent stopped. Check the Hub's agent token signing configuration (`server.keyring_file` / JWT signing keys) and server logs. Setting `SCION_AUTH_TOKEN` in an agent's or harness-config's `env` does not satisfy this requirement: in Runtime Broker mode that variable is stripped and ignored with a start warning.
@@ -546,7 +551,7 @@ Scion provides deep integration with GitHub Apps to manage Git credentials autom
 2. **Credential Helper**: Scion injects `sciontool` as a Git credential helper into the agent container (`git config --global credential.helper`).
 3. **On-Demand Tokens**: When the agent executes a `git clone`, `push`, or `pull`, Git asks the credential helper for a password. `sciontool` retrieves the fresh, short-lived token provided by the Hub, ensuring operations never fail due to token expiration—even for long-running agents.
 
-This flow is automatically enabled for any project linked to a GitHub App installation.
+This flow is enabled for a project whose GitHub App installation association is authorized (checked when the association is recorded and at every token mint): the project's git remote must be on the configured GitHub host (`github.com`, or the host of `github_app.api_base_url`), the installation must be active and its account must match the remote's owner, and either an active Hub admin bound the installation to that remote (`PUT /api/v1/projects/{id}/github-installation`, recorded in `scion.dev/github-installation-binding` with `installation_id`, `remote`, `bound_by`, and `bound_at`) or the project creator's user-scope `GITHUB_TOKEN` secret has at least `pull` access to the repository on GitHub (`pull`-only proof caps the minted token to read-only, whereas `push` access allows write permissions). On agent create, start, restart, and token refresh, the Hub mints a GitHub App installation token from the agent's own project, or, when the agent's project has no installation configured, from the project named by the `scion.dev/github-token-source-project` label only when the agent's authoritative source user is active and holds `agent.create` in that source project (and that source project's installation association is authorized).
 
 ### Personal Access Tokens (PATs)
 

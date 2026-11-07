@@ -31,6 +31,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -2379,6 +2380,13 @@ func TestCreateProject_AutoAssociatesGitHubInstallation(t *testing.T) {
 		Status:         store.GitHubInstallationStatusActive,
 	}
 	require.NoError(t, st.CreateGitHubInstallation(ctx, inst))
+
+	// The creator (the dev user) proves access to the repository with their
+	// own GitHub token; a repo-name match alone does not associate.
+	giveUserGitHubToken(t, srv, st, DevUserID, "ghp_dev_creator")
+	fakeCreatorAccess(srv, map[string]githubapp.RepoAccess{
+		"ghp_dev_creator|myorg/myrepo": {Push: true, Pull: true},
+	})
 
 	// Create a project whose git remote matches the installation's repo.
 	// Use a local git repo as clone source so the clone actually succeeds.

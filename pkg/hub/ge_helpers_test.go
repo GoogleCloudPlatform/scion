@@ -107,10 +107,6 @@ func addUser(s *fakeUserStore, id, email, role, status string) *store.User {
 	return u
 }
 
-// alwaysAuthorized is a permissive authChecker for tests that don't exercise
-// the authorization policy path.
-func alwaysAuthorized(_ context.Context, _ string) bool { return true }
-
 // newTestResolver builds a GoogleIdentityResolver for tests. roleFor may be
 // nil (defaults to "member", matching the exchange's pre-refactor hardcoded
 // role); pass a custom one to exercise the admin_emails-aware role delta.

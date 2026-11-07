@@ -70,6 +70,7 @@ func entAgentDelegationGrantToStore(g *ent.AgentDelegationGrant) *store.AgentDel
 		AgentProjectID:          g.AgentProjectID,
 		AgentGeneration:         g.AgentGeneration,
 		AgentStateVersion:       g.AgentStateVersion,
+		IssuedRunID:             g.IssuedRunID,
 		IssuerUserID:            g.IssuerUserID,
 		BoundaryKind:            g.BoundaryKind,
 		CeilingVersion:          int(g.CeilingVersion),
@@ -147,6 +148,7 @@ func (s *AgentDelegationStore) CreateAgentDelegationGrant(ctx context.Context, g
 		SetAgentProjectID(grant.AgentProjectID).
 		SetAgentGeneration(grant.AgentGeneration).
 		SetAgentStateVersion(grant.AgentStateVersion).
+		SetIssuedRunID(grant.IssuedRunID).
 		SetIssuerUserID(grant.IssuerUserID).
 		SetBoundaryKind(grant.BoundaryKind).
 		SetNillableBoundaryProjectID(nullableString(grant.BoundaryProjectID)).
@@ -332,6 +334,9 @@ func agentDelegationGrantFilterPredicates(filter store.AgentDelegationGrantFilte
 	}
 	if len(preds) == 0 {
 		return nil, fmt.Errorf("%w: agent delegation grant filter names no agent and no issuer", store.ErrInvalidInput)
+	}
+	if filter.ExceptIssuedRunID != "" {
+		preds = append(preds, agentdelegationgrant.IssuedRunIDNEQ(filter.ExceptIssuedRunID))
 	}
 	return preds, nil
 }

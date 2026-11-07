@@ -193,10 +193,13 @@ type ScopeExplainer interface {
 type ReviewGrantAuthority interface {
 	// MayGrantReview reports whether the caller of ctx, a user, may give a
 	// user a review grant on an artifact owned by agent ownerAgentID and
-	// homed in project homeScope: the caller is the user at the root of the
-	// agent's live, recorded delegation chain, or holds project
-	// administration in homeScope. Any lookup failure answers false.
-	MayGrantReview(ctx context.Context, ownerAgentID, homeScope string) bool
+	// homed in project homeScope: the caller holds project administration
+	// in homeScope, or is the agent's delegating user. sponsorRef is the
+	// delegating user recorded on the artifact (Artifact.SponsorRef); when
+	// it is set it decides who that is, and the agent's live delegation
+	// chain is consulted only when it is "" (an artifact with nothing
+	// recorded). Any lookup failure answers false.
+	MayGrantReview(ctx context.Context, ownerAgentID, homeScope, sponsorRef string) bool
 }
 
 // Review grant clauses, as ReviewGrantClauser names them.
@@ -215,8 +218,9 @@ type ReviewGrantClauser interface {
 	// ReviewGrantClause answers like MayGrantReview: ReviewClauseProjectAdmin
 	// when the caller holds project administration in homeScope,
 	// ReviewClauseDelegatingUser when it is the delegating user of agent
-	// ownerAgentID, or "" when MayGrantReview would answer false.
-	ReviewGrantClause(ctx context.Context, ownerAgentID, homeScope string) string
+	// ownerAgentID (the recorded sponsorRef when set, else the live chain
+	// root), or "" when MayGrantReview would answer false.
+	ReviewGrantClause(ctx context.Context, ownerAgentID, homeScope, sponsorRef string) string
 }
 
 // PrincipalChecker is an optional extension of Host (ptone/scion#4529).
@@ -252,9 +256,10 @@ const (
 	// StewardClauseProjectOwner: the caller holds artifact.steward in the
 	// artifact's home project (its owners, and super-admins).
 	StewardClauseProjectOwner = "project_owner"
-	// StewardClauseDelegator: the caller is the user at the root of the
-	// owning agent's live delegation chain and reads in the home project
-	// through a role.
+	// StewardClauseDelegator: the caller is the owning agent's delegating
+	// user (the user recorded on the artifact at creation, or for an
+	// artifact with nothing recorded the root of the agent's live
+	// delegation chain) and reads in the home project through a role.
 	StewardClauseDelegator = "delegator"
 )
 
@@ -271,9 +276,12 @@ type Stewardship interface {
 	// satisfies for an artifact owned by agent ownerAgentID and homed in
 	// project homeScope: StewardClauseProjectOwner,
 	// StewardClauseDelegator, or "" for none. sponsorRef and orphaned come
-	// from the artifact row (sponsorRef is "" until sponsors are recorded).
-	// A grant on the artifact never makes the caller a steward: the clauses
-	// are decided from roles and the delegation chain only. Any lookup
-	// failure answers "".
+	// from the artifact row: sponsorRef is the delegating user recorded at
+	// creation (Artifact.SponsorRef), which decides the delegator clause
+	// when set, with the agent's live delegation chain consulted only when
+	// it is ""; orphaned is not consulted yet. A grant on the artifact
+	// never makes the caller a steward: the clauses are decided from
+	// roles, the recorded delegating user and the delegation chain only.
+	// Any lookup failure answers "".
 	StewardClause(ctx context.Context, ownerAgentID, homeScope, sponsorRef string, orphaned bool) string
 }

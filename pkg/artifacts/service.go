@@ -100,9 +100,21 @@ type Service struct {
 	// logFn yields the decision logger (SetLogger; auditlog.go).
 	logFn func() *slog.Logger
 
+	// archiveEnabled says whether the archive route is on
+	// (SetArchiveEnabled); archiveSlots caps concurrent archives, and
+	// archiveNow overrides the archive clock in tests (archive.go).
+	archiveEnabled func(context.Context) bool
+	archiveOnce    sync.Once
+	archiveSlots   *archiveSlots
+	archiveNow     func() time.Time
+
 	// viewIssuanceClosedWarned makes the view issuance-closed warning
 	// appear once (warnViewIssuanceClosed).
 	viewIssuanceClosedWarned atomic.Bool
+
+	// sponsorReviewSkips counts automatic review grants the policy refused
+	// or could not decide (SponsorReviewSkips; sponsor_review.go).
+	sponsorReviewSkips atomic.Int64
 }
 
 // Backend is what a request needs from the service's environment: the
@@ -156,16 +168,28 @@ func NewService(host Host) *Service {
 }
 
 // ReviewNotice describes a review version that was just finalized, for the
-// host to tell the artifact's owner (design §8.2). It carries ids only; the
-// host addresses the owner as itself, never as the reviewer.
+// host to tell the artifact's owner (design §8.2). It carries ids and the
+// review's summary note; the host addresses the owner as itself, never as
+// the reviewer.
 type ReviewNotice struct {
 	ArtifactID   string
 	Seq          int
+	ScopeKind    string
 	ScopeRef     string
 	OwnerKind    string
 	OwnerRef     string
 	ReviewerKind string
 	ReviewerRef  string
+	// Note is the review version's summary note as the reviewer wrote it
+	// (at most maxNoteRunes runes). It is the reviewer's text: the host
+	// must clean it before showing it anywhere.
+	Note string
+	// SubmitAuthorized is true when the finalize request that made the
+	// review current admitted the reviewer to append a review version
+	// (writeAccess.allowsKind: a review, write or admin grant), decided by
+	// that request itself, and the reviewer is not the owner
+	// (ptone/scion#6853).
+	SubmitAuthorized bool
 }
 
 // Ref is the notice's versioned reference.
@@ -181,8 +205,9 @@ func (s *Service) SetReviewNotifier(fn func(context.Context, ReviewNotice)) {
 	s.reviewNotifier = fn
 }
 
-// notifyReview tells the review notifier about review version v of a.
-func (s *Service) notifyReview(ctx context.Context, a *Artifact, v *Version) {
+// notifyReview tells the review notifier about review version v of a,
+// finalized by a caller with access.
+func (s *Service) notifyReview(ctx context.Context, a *Artifact, v *Version, access writeAccess) {
 	s.mu.RLock()
 	fn := s.reviewNotifier
 	s.mu.RUnlock()
@@ -190,8 +215,11 @@ func (s *Service) notifyReview(ctx context.Context, a *Artifact, v *Version) {
 		return
 	}
 	fn(context.WithoutCancel(ctx), ReviewNotice{
-		ArtifactID: a.ID, Seq: v.Seq, ScopeRef: a.ScopeRef, OwnerKind: a.OwnerKind, OwnerRef: a.OwnerRef,
+		ArtifactID: a.ID, Seq: v.Seq, ScopeKind: a.ScopeKind, ScopeRef: a.ScopeRef,
+		OwnerKind: a.OwnerKind, OwnerRef: a.OwnerRef,
 		ReviewerKind: v.CreatedByKind, ReviewerRef: v.CreatedByRef,
+		Note:             v.Note,
+		SubmitAuthorized: access.allowsKind(VersionKindReview) && access != accessOwner,
 	})
 }
 
@@ -350,6 +378,7 @@ func (s *Service) RegisterRoutes(mux Mux, guard Guard) {
 //	POST /api/v1/artifacts/{id}/versions/{seq}/view         a view capability for an HTML entry
 //	GET  /api/v1/artifacts/view/{capability}/{path}         a file of the version a capability names
 //	GET  /api/v1/artifacts/{id}/versions/{seq}/files/{path} a file of version seq
+//	GET  /api/v1/artifacts/{id}/versions/{seq}/archive      the files of version seq as one zip (SetArchiveEnabled)
 //	PUT  /api/v1/artifacts/{id}/versions/{seq}/files/{path} upload a file of a pending version
 //	PATCH /api/v1/artifacts/{id}                            set the expiry, move to another project
 //	DELETE /api/v1/artifacts/{id}                           delete (soft delete) the artifact
@@ -484,6 +513,12 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			s.handleFinalize(w, r, id, seq)
+		case len(segs) == 4 && segs[3] == "archive":
+			if !isRead(r.Method) {
+				writeMethodNotAllowed(w, http.MethodGet, http.MethodHead)
+				return
+			}
+			s.handleGetArchive(w, r, id, seq)
 		case len(segs) == 4 && segs[3] == "view":
 			if r.Method != http.MethodPost {
 				writeMethodNotAllowed(w, http.MethodPost)
