@@ -341,8 +341,11 @@ To narrow the token later, split it in two: a fine-grained token (or GitHub App)
 the ghcr push only. In `publish-homebrew.yml` the formula push reads its token as `TAP_TOKEN` from a
 single `env:` line, so the change is that line plus the token check in the gate job.
 
-Packages that a push creates for the first time (for example a new harness image) may start out
-private; make them public in the `homebrew-scion` organization's package settings.
+The images job's anonymous pull check fails on purpose when a new harness image is first published:
+its package starts private. An org admin makes it public in the `homebrew-scion` organization's
+package settings, then reruns the publish with images on, as below (it rebuilds and re-pushes every
+image, and the check runs again). A rerun with `publish_images=false` skips the check and publishes
+the formula with no pull check at all, so choose it knowingly.
 
 **A red `Publish to Homebrew` job does not mean the release failed.** It runs after the GitHub
 release, channel branch and `LATEST.json` steps, and nothing is rolled back when it fails: the
