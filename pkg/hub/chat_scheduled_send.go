@@ -1098,8 +1098,8 @@ func (s *Server) checkScheduledFire(ctx context.Context, m *ScheduledChatMessage
 }
 
 // checkScheduledTopicFire runs the topic checks of a claimed row: the
-// topic exists, and its current project exists, grants the sender read
-// access and lets the sender's account post (chatMayPost). done is false
+// topic exists, its current project exists, and chatThreadAccess lets the
+// sender post in it (which needs read access). done is false
 // when every check passed.
 func (s *Server) checkScheduledTopicFire(ctx context.Context, user UserIdentity, m *ScheduledChatMessage) (scheduledFireCheck, bool) {
 	s.mu.RLock()
@@ -1122,10 +1122,13 @@ func (s *Server) checkScheduledTopicFire(ctx context.Context, user UserIdentity,
 	if err != nil || project == nil {
 		return scheduledFireCheck{transient: true}, true
 	}
-	if !s.authzService.CheckAccess(ctx, user, projectResource(project), ActionRead).Allowed {
-		return scheduledFireCheck{reason: ScheduledFailureNoAccess}, true
+	// The same decision point as a live send (chatThreadAccess): the sender
+	// must still read the topic and may still post in it.
+	access, err := s.chatThreadAccess(ctx, user, chatThreadRef{Key: m.ConversationKey, Project: project})
+	if err != nil {
+		return scheduledFireCheck{transient: true}, true
 	}
-	if !s.chatMayPost(ctx, user, project).Allowed {
+	if !access.Can(ChatActionPost) {
 		return scheduledFireCheck{reason: ScheduledFailureNoAccess}, true
 	}
 	return scheduledFireCheck{}, false

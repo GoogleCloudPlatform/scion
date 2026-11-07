@@ -62,7 +62,28 @@ export const BUILT_IN_PROJECT_MEMBERSHIP_ROLES = [
   'project-owner',
   'project-admin',
   'project-member',
+  'project-viewer',
 ];
+
+/** The built-in membership role that reads the project and its chat and cannot post messages. */
+export const PROJECT_VIEWER_ROLE_NAME = 'project-viewer';
+
+/**
+ * Label of a built-in membership role in the role picker: its tier, except
+ * the viewer role, which shares the member tier (managed with
+ * canManageMembers) but is its own choice.
+ */
+export function builtInRoleLabel(roleName: string): string {
+  if (roleName === PROJECT_VIEWER_ROLE_NAME) return 'Viewer';
+  switch (getRoleTier(roleName)) {
+    case 'owner':
+      return 'Owner';
+    case 'admin':
+      return 'Admin';
+    default:
+      return 'Member';
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Role tier classification

@@ -111,7 +111,7 @@ var chatOperations = []OperationSpec{
 	{
 		ID:          "chat.thread.list",
 		Domain:      "chat",
-		Description: "List the threads of a chat space. Needs project:read on the space's project",
+		Description: "List the threads of a chat space. Needs project:read on the space's project; each thread carries _capabilities, what the caller may do in it (chat-thread-access)",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/spaces/{id}/threads", Method: "GET"},
 		},
@@ -131,7 +131,7 @@ var chatOperations = []OperationSpec{
 	{
 		ID:          "chat.thread.create",
 		Domain:      "chat",
-		Description: "Create a thread in a chat space. Needs project:read on the space's project; a token also needs inbox:write for it",
+		Description: "Create a thread in a chat space. Order: project:read on the space's project, then (for a token) inbox:write for it (plain 403), then, before the body is validated and before any write, a default agent on create needs the set_default_agent action of chat-thread-access and the thread needs the create_thread action of chat-space-access (both project.chat_post on the account; 403 chat_post_denied with details.chat_action and reason read_only without it)",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/spaces/{id}/threads", Method: "POST"},
 		},
@@ -145,6 +145,8 @@ var chatOperations = []OperationSpec{
 		DenialCodes:      []DenialCode{DenialForbidden, DenialResourceNotFound},
 		TestRefs: []TestRef{
 			{Package: "pkg/hub", Function: "TestChatWriteToken_RequiresInboxWrite"},
+			{Package: "pkg/hub", Function: "TestChatCreateThread_RequiresCreateThreadAction"},
+			{Package: "pkg/hub", Function: "TestChatCreateThread_DefaultAgentNeedsSetDefaultAgent"},
 		},
 		Bearer: AdmitOn(BearerTargetProjectPath, BearerBoundaryProject, BearerBoundaryHub),
 	},
@@ -231,7 +233,7 @@ var chatOperations = []OperationSpec{
 	{
 		ID:          "chat.topic.update",
 		Domain:      "chat",
-		Description: "Rename a chat thread or set its default agent. Needs project:read on the thread's project; a token also needs inbox:write for it",
+		Description: "Rename a chat thread or set its default agent. Needs project:read on the thread's project; a token also needs inbox:write for it. Then chat-thread-access decides, before the body is validated: a name needs the rename action and a default agent the set_default_agent action (project.chat_post on the account); a reader without them gets 403 chat_post_denied with details.chat_action and reason read_only, and nothing changes",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/topics/{id}", Method: "PATCH"},
 		},
@@ -245,13 +247,15 @@ var chatOperations = []OperationSpec{
 		DenialCodes:      []DenialCode{DenialForbidden, DenialResourceNotFound},
 		TestRefs: []TestRef{
 			{Package: "pkg/hub", Function: "TestChatWriteToken_RequiresInboxWrite"},
+			{Package: "pkg/hub", Function: "TestChatTopicRename_RequiresRenameAction"},
+			{Package: "pkg/hub", Function: "TestChatTopicDefaultAgent_RequiresSetDefaultAgentAction"},
 		},
 		Bearer: AdmitOn(BearerTargetConversationRecord, BearerBoundaryProject, BearerBoundaryHub),
 	},
 	{
 		ID:          "chat.topic.delete",
 		Domain:      "chat",
-		Description: "Delete a chat thread (soft delete; the last thread of a space stays). Needs project:read on the thread's project; a token also needs inbox:write for it",
+		Description: "Delete a chat thread (soft delete; the last thread of a space stays). Needs project:read on the thread's project; a token also needs inbox:write for it. Then the delete action of chat-thread-access (project.chat_post on the account); a reader without it gets 403 chat_post_denied with details.chat_action delete and reason read_only, and the thread stays",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/topics/{id}", Method: "DELETE"},
 		},
@@ -265,19 +269,20 @@ var chatOperations = []OperationSpec{
 		DenialCodes:      []DenialCode{DenialForbidden, DenialResourceNotFound},
 		TestRefs: []TestRef{
 			{Package: "pkg/hub", Function: "TestChatWriteToken_RequiresInboxWrite"},
+			{Package: "pkg/hub", Function: "TestChatTopicDelete_RequiresDeleteAction"},
 		},
 		Bearer: AdmitOn(BearerTargetConversationRecord, BearerBoundaryProject, BearerBoundaryHub),
 	},
 	{
 		ID:          "chat.conversation.history.topic",
 		Domain:      "chat",
-		Description: "Read the messages of a chat thread. Needs project:read on the thread's project; canPost reports whether the caller's account holds project.chat_post on it",
+		Description: "Read the messages of a chat thread. Decided by chat-thread-access: needs project:read on the thread's project (a caller without it gets the missing-thread answer). _capabilities lists what the caller may do in the thread (post needs project.chat_post on the account, and for a token inbox:write for the project), with reason read_only or token_scope when post is missing; canPost is its post action",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/conversations/{id}/messages", Method: "GET", Variant: "topic"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
-		ResourceResolver: "conversation-project",
+		ResourceResolver: "chat-thread-access",
 		BasePermission:   "project.read",
 		Effects:          []SecurityEffect{EffectReadOne, EffectListScoped},
 		DelegationKind:   DelegationNone,
@@ -312,13 +317,13 @@ var chatOperations = []OperationSpec{
 	{
 		ID:          "chat.conversation.send.topic",
 		Domain:      "chat",
-		Description: "Post a message to a chat thread. Needs project:read and project.chat_post on the thread's project; a caller that reads the thread but lacks project.chat_post gets 403 chat_post_denied. A token also needs inbox:write for it; project.chat_post is checked on the token holder's account, and the project:chat_post selector is not needed (it only lets a token delegate roles that include project.chat_post). Agent recipients need agent:message",
+		Description: "Post a message to a chat thread. Decided by chat-thread-access: needs project:read and project.chat_post on the thread's project; a caller without project:read gets the missing-thread answer, and one that reads the thread but may not post gets 403 chat_post_denied with details.reason read_only (no project.chat_post) or token_scope (a token without inbox:write for the project). project.chat_post is checked on a token holder's account, and the project:chat_post selector is not needed (it only lets a token delegate roles that include project.chat_post). Agent recipients need agent:message",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/conversations/{id}/messages", Method: "POST", Variant: "topic"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
-		ResourceResolver: "conversation-project",
+		ResourceResolver: "chat-thread-access",
 		BasePermission:   "inbox.write",
 		Effects:          []SecurityEffect{EffectCreateResource, EffectEmitExternal},
 		DelegationKind:   DelegationNone,
@@ -401,7 +406,7 @@ var chatOperations = []OperationSpec{
 	{
 		ID:          "chat.message.edit",
 		Domain:      "chat",
-		Description: "Edit one of the caller's chat messages. Only the author edits, and only before an agent replies. A token needs inbox:write, and the message's conversation is re-checked: project:read for a thread, the DM rule for a DM",
+		Description: "Edit one of the caller's chat messages. Only the author edits, and only before an agent replies. A token needs inbox:write, and the message's conversation is re-checked for it first: for a thread, project:read and inbox:write for the thread's project, with a plain 403 when either is missing or the thread is missing or deleted; for a DM, the DM rule. A thread message is then decided by chat-thread-access: project:read on the thread's project now (a session sender who lost it, or a session's message of a deleted thread or of a key that is no thread, gets the missing-thread answer, 404), then the edit_own action (project.chat_post on the account; 403 chat_post_denied with details.chat_action edit_own and reason read_only without it). A DM message is not decided by it",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/conversations/{id}/messages/{messageId}", Method: "PUT"},
 		},
@@ -415,13 +420,15 @@ var chatOperations = []OperationSpec{
 		DenialCodes:      []DenialCode{DenialForbidden, DenialResourceNotFound},
 		TestRefs: []TestRef{
 			{Package: "pkg/hub", Function: "TestChatMessageEdit_RechecksTargetConversation"},
+			{Package: "pkg/hub", Function: "TestChatMessageEdit_RequiresEditOwnAction"},
+			{Package: "pkg/hub", Function: "TestChatMessageEdit_SenderWithoutProjectRead_NotFound"},
 		},
 		Bearer: AdmitOn(BearerTargetConversationRecord, BearerBoundaryProject, BearerBoundaryHub),
 	},
 	{
 		ID:          "chat.message.delete",
 		Domain:      "chat",
-		Description: "Delete one of the caller's chat messages (soft delete). Only the author deletes, and only before an agent replies. A token needs inbox:write, and the message's conversation is re-checked: project:read for a thread, the DM rule for a DM",
+		Description: "Delete one of the caller's chat messages (soft delete). Only the author deletes, and only before an agent replies. A token needs inbox:write, and the message's conversation is re-checked for it first: for a thread, project:read and inbox:write for the thread's project, with a plain 403 when either is missing or the thread is missing or deleted; for a DM, the DM rule. A thread message is then decided by chat-thread-access: project:read on the thread's project now (a session sender who lost it, or a session's message of a deleted thread or of a key that is no thread, gets the missing-thread answer, 404), then the delete_own action, which every reader of the thread holds. A DM message is not decided by it",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/conversations/{id}/messages/{messageId}", Method: "DELETE"},
 		},
@@ -435,6 +442,8 @@ var chatOperations = []OperationSpec{
 		DenialCodes:      []DenialCode{DenialForbidden, DenialResourceNotFound},
 		TestRefs: []TestRef{
 			{Package: "pkg/hub", Function: "TestChatMessageEdit_RechecksTargetConversation"},
+			{Package: "pkg/hub", Function: "TestChatMessageDelete_DeleteOwnAction"},
+			{Package: "pkg/hub", Function: "TestChatMessageDelete_SenderWithoutProjectRead_NotFound"},
 		},
 		Bearer: AdmitOn(BearerTargetConversationRecord, BearerBoundaryProject, BearerBoundaryHub),
 	},
@@ -1014,7 +1023,7 @@ var chatOperations = []OperationSpec{
 	{
 		ID:          "chat.attachment.upload.project",
 		Domain:      "chat",
-		Description: "Upload chat attachments to a space. Needs project:read on the space's project; a token also needs inbox:write for it",
+		Description: "Upload chat attachments to a space. Needs project:read on the space's project, a token also inbox:write for it, and then the post action of chat-thread-access (project.chat_post on the account; 403 chat_post_denied without it)",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/attachments", Method: "POST", Variant: "project"},
 		},
@@ -1126,7 +1135,7 @@ var chatOperations = []OperationSpec{
 	{
 		ID:          "chat.conversation.promote",
 		Domain:      "chat",
-		Description: "Promote one of the caller's DMs with an agent into a thread of the agent's space. Needs DM participation, and project:read and project.chat_post on the agent's project (403 chat_post_denied without project.chat_post); a token also needs inbox:write under the DM rule, and project.chat_post is checked on its holder's account (the project:chat_post selector is not needed)",
+		Description: "Promote one of the caller's DMs with an agent into a thread of the agent's space. Needs DM participation, project:read on the agent's project, and the create_thread action of chat-space-access (project.chat_post; 403 chat_post_denied without it); a token also needs inbox:write under the DM rule, and project.chat_post is checked on its holder's account (the project:chat_post selector is not needed)",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/conversations/{id}/promote", Method: "POST"},
 		},

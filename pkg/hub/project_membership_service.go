@@ -216,7 +216,7 @@ func (svc *ProjectMembershipService) projectEffectiveRole(ctx context.Context, u
 		if rd == nil {
 			continue
 		}
-		bestRole = higherProjectRole(bestRole, rd.Name)
+		bestRole = higherProjectRole(bestRole, builtInRoleName(rd))
 	}
 
 	// 2. Group-derived bindings.
@@ -243,10 +243,10 @@ func (svc *ProjectMembershipService) projectEffectiveRole(ctx context.Context, u
 					continue
 				}
 				// Groups can only confer admin or member, never owner.
-				if rd.Name == store.ProjectRoleOwner {
+				if builtInRoleName(rd) == store.ProjectRoleOwner {
 					continue
 				}
-				bestRole = higherProjectRole(bestRole, rd.Name)
+				bestRole = higherProjectRole(bestRole, builtInRoleName(rd))
 			}
 		}
 	}
@@ -311,7 +311,7 @@ func (svc *ProjectMembershipService) projectEffectiveRoleFromStore(ctx context.C
 		if err != nil {
 			return "", err
 		}
-		bestRole = higherProjectRole(bestRole, rd.Name)
+		bestRole = higherProjectRole(bestRole, builtInRoleName(rd))
 	}
 
 	// Group-derived bindings (read from tx store).
@@ -342,10 +342,10 @@ func (svc *ProjectMembershipService) projectEffectiveRoleFromStore(ctx context.C
 			if err != nil {
 				return "", err
 			}
-			if rd.Name == store.ProjectRoleOwner {
+			if builtInRoleName(rd) == store.ProjectRoleOwner {
 				continue
 			}
-			bestRole = higherProjectRole(bestRole, rd.Name)
+			bestRole = higherProjectRole(bestRole, builtInRoleName(rd))
 		}
 	}
 
@@ -778,8 +778,8 @@ func (svc *ProjectMembershipService) isOperationPermitted(actorRole string, op M
 		// Owners can perform any operation on any target role.
 		return true
 	case store.ProjectRoleAdmin:
-		// Admins can only manage ordinary members.
-		return targetRole == store.ProjectRoleMember
+		// Admins can only manage ordinary members and viewers.
+		return targetRole == store.ProjectRoleMember || targetRole == store.ProjectRoleViewer
 	default:
 		// Members cannot manage membership.
 		return false
@@ -819,8 +819,12 @@ const (
 // audit code in project_membership_set.go); extracted here so there is
 // exactly one definition of "builtin" vs "custom" for display and audit
 // purposes.
-func projectRoleKind(roleName string) string {
-	if store.IsBuiltInProjectMembershipRole(roleName) {
+//
+// It takes the definition, not the name: a custom (non-system) role that
+// holds a built-in name is custom (ptone/scion#5519). A nil definition is
+// custom.
+func projectRoleKind(rd *store.RoleDefinition) string {
+	if store.IsBuiltInProjectMembershipRoleDef(rd) {
 		return roleKindBuiltIn
 	}
 	return roleKindCustom
@@ -834,15 +838,22 @@ func projectRoleKind(roleName string) string {
 // the target role. Per CT1 D3:
 //   - project-owner: direct user only (permanent invariant)
 //   - project-admin: direct user or group (D3 approved)
-//   - project-member: user, agent, or group
-func principalEligibleForRole(principalType, roleName string) bool {
+//   - project-member, project-viewer: user, agent, or group
+//
+// It takes the definition: a custom (non-system) role that holds a built-in
+// name gets the custom-role rule (ptone/scion#5519).
+func principalEligibleForRole(principalType string, rd *store.RoleDefinition) bool {
+	roleName := ""
+	if rd != nil {
+		roleName = rd.Name
+	}
 	// L4 (review r1): the custom-role branch is reached only for a role name
 	// explicitly known NOT to be built-in — not as the switch's default. A
 	// name that reaches the switch below without matching any case (e.g. an
 	// unanticipated built-in role added to the registry but not here) fails
 	// closed instead of silently falling through to the permissive
 	// user/group rule meant for custom roles.
-	if !store.IsBuiltInProjectMembershipRole(roleName) {
+	if !store.IsBuiltInProjectMembershipRoleDef(rd) {
 		// Custom project-scoped roles (ptone/scion#2529 D1, ruling "block"):
 		// user and group only. A custom binding on an agent is a delegation
 		// grant and stays hub-gated via /admin/role-bindings. This is the
@@ -858,7 +869,9 @@ func principalEligibleForRole(principalType, roleName string) bool {
 		// D3: groups are now eligible for project-admin.
 		return principalType == store.RoleBindingPrincipalUser ||
 			principalType == store.RoleBindingPrincipalGroup
-	case store.ProjectRoleMember:
+	case store.ProjectRoleMember, store.ProjectRoleViewer:
+		// project-viewer is assignable wherever project-member is
+		// (ptone/scion#5519).
 		return principalType == store.RoleBindingPrincipalUser ||
 			principalType == store.RoleBindingPrincipalAgent ||
 			principalType == store.RoleBindingPrincipalGroup
@@ -887,7 +900,7 @@ func (svc *ProjectMembershipService) AddMember(ctx context.Context, req Membersh
 	if err != nil {
 		return nil, &MembershipDecision{Allowed: false, DenialCode: "not_found", Reason: "role definition not found", HTTPStatus: 400}
 	}
-	if !store.IsBuiltInProjectMembershipRole(roleDef.Name) {
+	if !store.IsBuiltInProjectMembershipRoleDef(roleDef) {
 		return nil, &MembershipDecision{Allowed: false, DenialCode: "forbidden", Reason: "invalid project role: " + roleDef.Name, HTTPStatus: 400}
 	}
 	if roleDef.ScopeType != store.RoleScopeProject {
@@ -895,7 +908,7 @@ func (svc *ProjectMembershipService) AddMember(ctx context.Context, req Membersh
 	}
 
 	// Principal eligibility.
-	if !principalEligibleForRole(req.PrincipalType, roleDef.Name) {
+	if !principalEligibleForRole(req.PrincipalType, roleDef) {
 		return nil, &MembershipDecision{
 			Allowed:    false,
 			DenialCode: ErrCodePrincipalIneligible,
@@ -905,7 +918,7 @@ func (svc *ProjectMembershipService) AddMember(ctx context.Context, req Membersh
 	}
 
 	// Governance check.
-	decision := svc.checkGovernance(ctx, req, roleDef.Name)
+	decision := svc.checkGovernance(ctx, req, builtInRoleName(roleDef))
 	if !decision.Allowed {
 		return nil, &decision
 	}
@@ -1003,11 +1016,11 @@ func (svc *ProjectMembershipService) AddMember(ctx context.Context, req Membersh
 			if ownerErr != nil {
 				return fmt.Errorf("owner lookup failed under lock: %w", ownerErr)
 			}
-			if !svc.isOperationPermitted(actorRole, req.Op, roleDef.Name) {
+			if !svc.isOperationPermitted(actorRole, req.Op, builtInRoleName(roleDef)) {
 				return governanceDenial(403, fmt.Sprintf("actor role %q cannot %s target role %q (re-evaluated under lock)", actorRole, req.Op, roleDef.Name))
 			}
 			// Fail-closed defence in depth; see isActorDirectOwnerFromStore.
-			if requiresDirectOwner(roleDef.Name) && !actorIsDirectOwner {
+			if requiresDirectOwner(builtInRoleName(roleDef)) && !actorIsDirectOwner {
 				return governanceDenial(403, "only direct project owners can manage admin and owner roles (re-evaluated under lock)")
 			}
 		}
@@ -1055,15 +1068,15 @@ func (svc *ProjectMembershipService) AddMember(ctx context.Context, req Membersh
 			// actorRole already re-evaluated under lock above.
 			// Hub-override actors bypass the project governance matrix.
 			if !hubOverride {
-				if !svc.isOperationPermitted(actorRole, req.Op, oldRoleDef.Name) {
+				if !svc.isOperationPermitted(actorRole, req.Op, builtInRoleName(oldRoleDef)) {
 					reason := fmt.Sprintf("actor role %q cannot %s target role %q", actorRole, req.Op, oldRoleDef.Name)
-					if isProtectedRole(oldRoleDef.Name) {
+					if isProtectedRole(builtInRoleName(oldRoleDef)) {
 						reason = "target role is protected: " + reason
 					}
 					return governanceDenial(403, reason)
 				}
 				// Fail-closed defence in depth; see isActorDirectOwnerFromStore.
-				if requiresDirectOwner(oldRoleDef.Name) && !actorIsDirectOwner {
+				if requiresDirectOwner(builtInRoleName(oldRoleDef)) && !actorIsDirectOwner {
 					return governanceDenial(403, "only direct project owners can manage admin and owner roles")
 				}
 			}
@@ -1074,7 +1087,7 @@ func (svc *ProjectMembershipService) AddMember(ctx context.Context, req Membersh
 			now := svc.nowFunc()
 			var demotedOwners []*store.RoleBinding
 			removedUsable := false
-			if roleDef.Name != store.ProjectRoleOwner {
+			if builtInRoleName(roleDef) != store.ProjectRoleOwner {
 				var oErr error
 				if demotedOwners, oErr = ownerBindingsAmong(ctx, tx, existingBindings); oErr != nil {
 					return oErr
@@ -1194,7 +1207,7 @@ func (svc *ProjectMembershipService) UpdateMemberRole(ctx context.Context, req M
 	if err != nil {
 		return nil, &MembershipDecision{Allowed: false, DenialCode: "not_found", Reason: "new role definition not found", HTTPStatus: 400}
 	}
-	if !store.IsBuiltInProjectMembershipRole(newRoleDef.Name) {
+	if !store.IsBuiltInProjectMembershipRoleDef(newRoleDef) {
 		return nil, &MembershipDecision{Allowed: false, DenialCode: "forbidden", Reason: "invalid project role: " + newRoleDef.Name, HTTPStatus: 400}
 	}
 	if newRoleDef.ScopeType != store.RoleScopeProject {
@@ -1202,7 +1215,7 @@ func (svc *ProjectMembershipService) UpdateMemberRole(ctx context.Context, req M
 	}
 
 	// Principal eligibility for new role.
-	if !principalEligibleForRole(existing.PrincipalType, newRoleDef.Name) {
+	if !principalEligibleForRole(existing.PrincipalType, newRoleDef) {
 		return nil, &MembershipDecision{
 			Allowed:    false,
 			DenialCode: ErrCodePrincipalIneligible,
@@ -1217,19 +1230,19 @@ func (svc *ProjectMembershipService) UpdateMemberRole(ctx context.Context, req M
 	}
 
 	// Governance: check both old and new target roles.
-	decision := svc.checkGovernance(ctx, req, oldRoleDef.Name)
+	decision := svc.checkGovernance(ctx, req, builtInRoleName(oldRoleDef))
 	if !decision.Allowed {
 		return nil, &decision
 	}
 	if oldRoleDef.Name != newRoleDef.Name {
-		decision = svc.checkGovernance(ctx, req, newRoleDef.Name)
+		decision = svc.checkGovernance(ctx, req, builtInRoleName(newRoleDef))
 		if !decision.Allowed {
 			return nil, &decision
 		}
 	}
 
 	// Delegation: conditional-on-increase. Check only when authority increases.
-	if projectRoleLevel(newRoleDef.Name) > projectRoleLevel(oldRoleDef.Name) {
+	if projectRoleLevel(builtInRoleName(newRoleDef)) > projectRoleLevel(builtInRoleName(oldRoleDef)) {
 		if svc.authz != nil {
 			delDecision := svc.authz.CanDelegate(ctx, req.Actor, GrantDescriptor{
 				Type:             GrantTypeRoleBinding,
@@ -1307,20 +1320,20 @@ func (svc *ProjectMembershipService) UpdateMemberRole(ctx context.Context, req M
 			if ownerErr != nil {
 				return fmt.Errorf("owner lookup failed under lock: %w", ownerErr)
 			}
-			if !svc.isOperationPermitted(actorRole, req.Op, oldRoleDef.Name) {
+			if !svc.isOperationPermitted(actorRole, req.Op, builtInRoleName(oldRoleDef)) {
 				return governanceDenial(403, fmt.Sprintf("actor role %q cannot %s target role %q (re-evaluated under lock)", actorRole, req.Op, oldRoleDef.Name))
 			}
 			if oldRoleDef.Name != newRoleDef.Name {
-				if !svc.isOperationPermitted(actorRole, req.Op, newRoleDef.Name) {
+				if !svc.isOperationPermitted(actorRole, req.Op, builtInRoleName(newRoleDef)) {
 					return governanceDenial(403, fmt.Sprintf("actor role %q cannot %s target role %q (re-evaluated under lock)", actorRole, req.Op, newRoleDef.Name))
 				}
 			}
 			// Fail-closed defence in depth; see isActorDirectOwnerFromStore.
-			if requiresDirectOwner(oldRoleDef.Name) && !actorIsDirectOwner {
+			if requiresDirectOwner(builtInRoleName(oldRoleDef)) && !actorIsDirectOwner {
 				return governanceDenial(403, "only direct project owners can manage admin and owner roles (re-evaluated under lock)")
 			}
 			// Fail-closed defence in depth; see isActorDirectOwnerFromStore.
-			if oldRoleDef.Name != newRoleDef.Name && requiresDirectOwner(newRoleDef.Name) && !actorIsDirectOwner {
+			if oldRoleDef.Name != newRoleDef.Name && requiresDirectOwner(builtInRoleName(newRoleDef)) && !actorIsDirectOwner {
 				return governanceDenial(403, "only direct project owners can manage admin and owner roles (re-evaluated under lock)")
 			}
 		}
@@ -1328,7 +1341,7 @@ func (svc *ProjectMembershipService) UpdateMemberRole(ctx context.Context, req M
 		// Last-owner guard (inside tx for serialization, ptone/scion#2769):
 		// note whether the demoted binding is a usable owner, then check the
 		// post-state after the delete and re-create below.
-		demotesOwner := oldRoleDef.Name == store.ProjectRoleOwner && newRoleDef.Name != store.ProjectRoleOwner
+		demotesOwner := builtInRoleName(oldRoleDef) == store.ProjectRoleOwner && builtInRoleName(newRoleDef) != store.ProjectRoleOwner
 		now := svc.nowFunc() // one instant for the pre-state and post-state checks
 		removedUsable := false
 		if demotesOwner {
@@ -1447,7 +1460,7 @@ func (svc *ProjectMembershipService) RemoveMember(ctx context.Context, req Membe
 	}
 
 	// Governance check.
-	decision := svc.checkGovernance(ctx, req, roleDef.Name)
+	decision := svc.checkGovernance(ctx, req, builtInRoleName(roleDef))
 	if !decision.Allowed {
 		return nil, &decision
 	}
@@ -1507,10 +1520,10 @@ func (svc *ProjectMembershipService) RemoveMember(ctx context.Context, req Membe
 		// Re-validate governance under lock.
 		// Hub-override actors bypass project governance matrix.
 		if !hubOverride {
-			if !svc.isOperationPermitted(actorRole, req.Op, roleDef.Name) {
+			if !svc.isOperationPermitted(actorRole, req.Op, builtInRoleName(roleDef)) {
 				return governanceDenial(403, fmt.Sprintf("actor role %q cannot %s target role %q (re-evaluated under lock)", actorRole, req.Op, roleDef.Name))
 			}
-			if requiresDirectOwner(roleDef.Name) {
+			if requiresDirectOwner(builtInRoleName(roleDef)) {
 				actorIsDirectOwner, ownerErr := svc.isActorDirectOwnerFromStore(ctx, tx, req.Actor.ID(), req.ProjectID)
 				if ownerErr != nil {
 					return fmt.Errorf("owner lookup failed under lock: %w", ownerErr)
@@ -1525,7 +1538,7 @@ func (svc *ProjectMembershipService) RemoveMember(ctx context.Context, req Membe
 		// Last-owner guard (inside tx for serialization, ptone/scion#2769):
 		// note whether the removed binding is a usable owner, then check the
 		// post-state after the delete.
-		removesOwner := roleDef.Name == store.ProjectRoleOwner
+		removesOwner := builtInRoleName(roleDef) == store.ProjectRoleOwner
 		now := svc.nowFunc() // one instant for the pre-state and post-state checks
 		removedUsable := false
 		if removesOwner {
@@ -2003,7 +2016,7 @@ func (svc *ProjectMembershipService) findExistingDirectBindingsFromStore(ctx con
 		if rdErr != nil {
 			return nil, fmt.Errorf("resolve role definition %s for binding %s: %w", b.RoleDefinitionID, b.ID, rdErr)
 		}
-		if store.IsBuiltInProjectMembershipRole(rd.Name) {
+		if store.IsBuiltInProjectMembershipRoleDef(rd) {
 			result = append(result, b)
 		}
 	}
@@ -2069,7 +2082,7 @@ func (svc *ProjectMembershipService) highestAuthorityBindingFromStore(ctx contex
 		if err != nil {
 			continue
 		}
-		level := projectRoleLevel(rd.Name)
+		level := projectRoleLevel(builtInRoleName(rd))
 		if level > bestLevel {
 			bestLevel = level
 			best = b
@@ -2194,13 +2207,26 @@ func higherProjectRole(a, b string) string {
 
 // projectRoleLevel returns the authority level of a project role.
 // Higher values mean more authority.
+// builtInRoleName returns rd's name when rd is a built-in membership role
+// (store.IsBuiltInProjectMembershipRoleDef), else "". Every governance and
+// role-tier decision takes its role name through it, so a custom role that
+// holds a built-in name never passes as built-in (ptone/scion#5519).
+func builtInRoleName(rd *store.RoleDefinition) string {
+	if store.IsBuiltInProjectMembershipRoleDef(rd) {
+		return rd.Name
+	}
+	return ""
+}
+
 func projectRoleLevel(role string) int {
 	switch role {
 	case store.ProjectRoleOwner:
-		return 3
+		return 4
 	case store.ProjectRoleAdmin:
-		return 2
+		return 3
 	case store.ProjectRoleMember:
+		return 2
+	case store.ProjectRoleViewer:
 		return 1
 	default:
 		return 0
@@ -2322,9 +2348,9 @@ func (svc *ProjectMembershipService) MigrateMultiRoleBindings(ctx context.Contex
 						"error", rdErr)
 					break
 				}
-				if store.IsBuiltInProjectMembershipRole(rd.Name) {
+				if store.IsBuiltInProjectMembershipRoleDef(rd) {
 					builtIns = append(builtIns, bindingRole{
-						binding: b, role: rd.Name, level: projectRoleLevel(rd.Name),
+						binding: b, role: rd.Name, level: projectRoleLevel(builtInRoleName(rd)),
 					})
 				}
 				// Custom project-scoped roles are additive: ignored by

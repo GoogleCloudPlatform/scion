@@ -595,9 +595,19 @@ func (s *Server) handleListThreads(w http.ResponseWriter, r *http.Request, proje
 		mentionKeys = nil
 	}
 
+	// What the caller may do in a thread of this space. Every topic of the
+	// space has the same project, and chatThreadAccess decides a user by
+	// project alone, so it is decided once for the list.
+	threadAccess, err := s.chatThreadAccess(r.Context(), user, chatThreadRef{Project: project})
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
 	entries := make([]chatTopicEntry, 0, len(topics))
 	for _, t := range topics {
 		entry := chatTopicEntry{
+			Capabilities:   threadCapabilities(threadAccess),
 			ID:             t.ID,
 			ProjectID:      t.ProjectID,
 			Name:           t.Name,
@@ -696,6 +706,21 @@ func (s *Server) handleCreateThread(w http.ResponseWriter, r *http.Request, proj
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		BadRequest(w, "invalid request body")
+		return
+	}
+
+	// What the caller may do: a default agent on create needs
+	// set_default_agent in a thread of the space (chatThreadAccess), decided
+	// first, so a caller who could not set it afterwards cannot set it here;
+	// creating the thread is the space's create_thread action
+	// (chatSpaceAccess). Both are decided after the token checks above and
+	// before the body is validated, so a refused caller learns nothing about
+	// names or agents and nothing is written.
+	if strings.TrimSpace(body.DefaultAgent) != "" &&
+		!s.requireChatThreadAction(w, r, user, chatThreadRef{Project: project}, "Project", ChatActionSetDefaultAgent) {
+		return
+	}
+	if !s.requireChatSpaceAction(w, r, user, project, "Project", ChatActionCreateThread) {
 		return
 	}
 
@@ -843,6 +868,21 @@ func (s *Server) handleTopicPatch(w http.ResponseWriter, r *http.Request, topicI
 		return
 	}
 
+	// What the caller may do in the thread (chatThreadAccess): a name needs
+	// rename, a default agent set_default_agent. Decided before the body is
+	// validated, so a refused caller learns nothing about agents or names
+	// and nothing is changed.
+	var patchActions []string
+	if body.Name != nil {
+		patchActions = append(patchActions, ChatActionRename)
+	}
+	if body.DefaultAgent != nil {
+		patchActions = append(patchActions, ChatActionSetDefaultAgent)
+	}
+	if len(patchActions) > 0 && !s.requireChatThreadAction(w, r, user, chatThreadRef{Key: topicID, Project: project}, "Thread", patchActions...) {
+		return
+	}
+
 	updates := TopicUpdate{}
 
 	if body.Name != nil {
@@ -948,6 +988,10 @@ func (s *Server) handleTopicDelete(w http.ResponseWriter, r *http.Request, topic
 		return
 	}
 	if !s.authorizeChatTokenProject(w, r, token, permInboxWrite, project.ID, chatRefuseForbidden) {
+		return
+	}
+	// Deleting the thread is its delete action (chatThreadAccess).
+	if !s.requireChatThreadAction(w, r, user, chatThreadRef{Key: topicID, Project: project}, "Thread", ChatActionDelete) {
 		return
 	}
 
@@ -1084,10 +1128,19 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 
 	ctx := r.Context()
 
-	// A token posts on its holder's behalf only with inbox:write.
-	token, ok := s.requireChatSelector(w, r, permInboxWrite)
-	if !ok {
-		return
+	// A token posts on its holder's behalf only with inbox:write. For a DM
+	// that is checked here, before any lookup. For a topic it is the
+	// token-scope step of chatThreadAccess, inside authorizeChatSend: a
+	// token that may read the topic but not write chat gets 403
+	// chat_post_denied with reason token_scope, and one that may not read
+	// it gets "Thread not found".
+	isDM := strings.HasPrefix(key, "dm:")
+	var token *ScopedUserIdentity
+	if isDM {
+		var ok bool
+		if token, ok = s.requireChatSelector(w, r, permInboxWrite); !ok {
+			return
+		}
 	}
 
 	// --- Authorize ---
@@ -1099,10 +1152,9 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 		serr.write(w)
 		return
 	}
-	// A token also needs inbox:write for the conversation's project: the
-	// topic's project, or the project of the peer agent of a DM. A DM
-	// between users has no project and needs a hub boundary. A refusal is
-	// answered as a missing thread, as authorizeChatSend answers.
+	// A DM token also needs inbox:write for the project of the peer agent;
+	// a DM between users has no project and needs a hub boundary. A refusal
+	// is answered as a missing thread, as authorizeChatSend answers.
 	if token != nil {
 		allowed, err := s.chatTokenMaySend(ctx, token, key, target.ProjectID)
 		if err != nil {
@@ -2746,6 +2798,11 @@ func (s *Server) handleMessageEdit(w http.ResponseWriter, r *http.Request, key, 
 		return
 	}
 
+	// Then what the caller may do in a topic (edit_own, chatThreadAccess).
+	if !s.requireChatMessageAction(w, r, user, wcs, key, ChatActionEditOwn) {
+		return
+	}
+
 	// Check no agent has replied after this message.
 	if hasAgentReplyAfter(ctx, s.store, key, msg.CreatedAt) {
 		writeError(w, http.StatusConflict, "AGENT_REPLIED", "Cannot edit: an agent has replied after this message", nil)
@@ -2860,6 +2917,11 @@ func (s *Server) handleMessageDelete(w http.ResponseWriter, r *http.Request, key
 
 	// A token is re-checked against the conversation the message is in.
 	if !s.authorizeChatTokenMessageTarget(w, r, token, wcs, key) {
+		return
+	}
+
+	// Then what the caller may do in a topic (delete_own, chatThreadAccess).
+	if !s.requireChatMessageAction(w, r, user, wcs, key, ChatActionDeleteOwn) {
 		return
 	}
 
@@ -2987,10 +3049,12 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 	// Authorize.
 	isDM := strings.HasPrefix(key, "dm:")
 	var topic *WebChatTopic
-	// canPost tells the client whether the caller's account may post in a
-	// topic (chatMayPost), so the composer can show a read-only state
-	// before a send. It is left out for a DM.
+	// capabilities tells the client what the caller may do in a topic
+	// (chatThreadAccess), so the composer can show a read-only state before
+	// a send; canPost is its post action, kept as an alias for one release.
+	// Both are left out for a DM.
 	var canPost *bool
+	var capabilities *ChatAccess
 	if isDM {
 		// A DM is the caller's own record: a token needs inbox:read.
 		token, ok := s.requireChatSelector(w, r, permInboxRead)
@@ -3028,8 +3092,27 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 			rerr.writeHistory(w)
 			return
 		}
-		allowed := s.chatMayPost(ctx, user, project).Allowed
+		// What the caller may do in the thread (ptone/scion#5519):
+		// authorizeChatThreadRead above decides read and the not-found
+		// answer; chatThreadAccess adds the actions behind _capabilities and
+		// canPost, reusing that read decision (readAllowed) instead of
+		// checking project read again.
+		access, err := s.chatThreadAccess(ctx, user, chatThreadRef{Key: key, Project: project, readAllowed: true})
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		if !access.Can(ChatActionRead) {
+			// Unreachable today: authorizeChatThreadRead above already
+			// answers a missing authz service as not found. Kept as defence
+			// in depth, so a resolver without a read action still answers
+			// the thread as missing, like any refused read.
+			NotFound(w, "Thread")
+			return
+		}
+		allowed := access.Can(ChatActionPost)
 		canPost = &allowed
+		capabilities = &access
 	}
 
 	// Parse query params.
@@ -3152,6 +3235,9 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 	}
 
 	page := s.chatHistoryPage(ctx, wcs, key, historyConvID, result, canPost)
+	// What the caller may do in a topic (chatThreadAccess, above); nil for a
+	// DM. The starred-only variant has no composer and carries none.
+	page.Capabilities = capabilities
 	page.Retention = s.chatHistoryRetentionMarker(ctx, result, historyConvID, topic)
 	writeJSON(w, http.StatusOK, page)
 }
@@ -4027,11 +4113,11 @@ func (s *Server) handleConversationPromote(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	// Promotion moves the DM's messages into a new thread of the project,
-	// so the caller's account must be able to post there (chatMayPost).
+	// so the caller must be able to create threads there (chatSpaceAccess).
 	// Checked after the token's own checks, so a token refusal comes first.
-	if decision := s.chatMayPost(ctx, user, project); !decision.Allowed {
-		logAuthzDenial(r, user, projectResource(project), chatPostAction, decision.Reason)
-		chatSendPostDenied().write(w)
+	if access := s.chatSpaceAccess(ctx, user, project); !access.Can(ChatActionCreateThread) {
+		logAuthzDenial(r, user, projectResource(project), ActionChatPost, access.postDenial.Reason)
+		chatSendPostDenied(access.Reason).write(w)
 		return
 	}
 
@@ -5847,6 +5933,19 @@ type chatTopicEntry struct {
 	// HasUnreadMention is true when an unread message (after the caller's
 	// read watermark) in this thread mentions the caller.
 	HasUnreadMention bool `json:"hasUnreadMention"`
+	// Capabilities lists what the caller may do in this thread
+	// (chatThreadAccess).
+	Capabilities *ChatAccess `json:"_capabilities,omitempty"`
+}
+
+// threadCapabilities returns a copy of access for one thread entry, or nil
+// when it allows nothing (the entry then carries no _capabilities).
+func threadCapabilities(access ChatAccess) *ChatAccess {
+	if len(access.Actions) == 0 {
+		return nil
+	}
+	c := ChatAccess{Actions: slices.Clone(access.Actions), Reason: access.Reason}
+	return &c
 }
 
 type chatMessageResponse struct {
@@ -5882,9 +5981,13 @@ type chatHistoryResponse struct {
 	// TotalCount is 0 on an ordinary history page, which skips the count.
 	// The starred-only variant (handleStarredHistory) reports its matches.
 	TotalCount int `json:"totalCount"`
-	// CanPost reports, for a topic, whether the caller's account may post
-	// in it (project.chat_post). Omitted for a DM.
-	CanPost            *bool                      `json:"canPost,omitempty"`
+	// CanPost reports, for a topic, whether the caller may post in it: the
+	// post action of Capabilities, kept as an alias for one release
+	// (ptone/scion#5519). Omitted for a DM.
+	CanPost *bool `json:"canPost,omitempty"`
+	// Capabilities lists what the caller may do in a topic
+	// (chatThreadAccess). Omitted for a DM.
+	Capabilities       *ChatAccess                `json:"_capabilities,omitempty"`
 	MessageAttachments map[string][]AttachmentRef `json:"messageAttachments,omitempty"` // W7: keyed by message ID
 	// MessageArtifacts are artifact references keyed by message ID, as the
 	// viewer sees them (ptone/scion#3224).
@@ -6091,9 +6194,14 @@ func (s *Server) handleAttachmentUpload(w http.ResponseWriter, r *http.Request) 
 	// through the messages that reference it.
 	projectID := r.FormValue("project_id")
 
-	// Authorize: user must have read access to the project (same as sending
-	// messages). A project-less upload is a profile write: it needs no
-	// project access, and it is refused to a federated caller.
+	// Authorize: an upload to a space is a chat write, decided as for a
+	// send: read access to the project, then the token's inbox:write for
+	// it, then the post action of a thread of the project
+	// (chatThreadAccess). A reader who may not post gets 403
+	// chat_post_denied. A project-less upload is a profile
+	// write: it needs no project access, and it is refused to a federated
+	// caller; it binds to a conversation only through a send, which makes
+	// the send's decision.
 	if projectID != "" {
 		project, err := s.store.GetProject(ctx, projectID)
 		if err != nil {
@@ -6104,6 +6212,16 @@ func (s *Server) handleAttachmentUpload(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		if !s.authorizeChatTokenProject(w, r, token, permInboxWrite, project.ID, chatRefuseForbidden) {
+			return
+		}
+		access, err := s.chatThreadAccess(ctx, user, chatThreadRef{Project: project})
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		if !access.Can(ChatActionPost) {
+			logAuthzDenial(r, user, projectResource(project), ActionChatPost, access.postDenial.Reason)
+			chatSendPostDenied(access.Reason).write(w)
 			return
 		}
 	} else if !requireProfileWriter(w, r) {

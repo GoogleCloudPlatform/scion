@@ -931,7 +931,9 @@ func (d *HTTPAgentDispatcher) testAdminRootScopes(ctx context.Context, agent *st
 	if agent.OwnerID == root {
 		allowed[store.ScopeUser] = true
 	}
-	if m := checkEffectiveMembership(ctx, d.store, d.authzService, root, agent.ProjectID); m.Err == nil && m.IsMember {
+	// Project-scope secrets are material: the project-viewer role
+	// alone does not admit them (ptone/scion#5519, AdmitsBeyondViewer).
+	if m := checkEffectiveMembership(ctx, d.store, d.authzService, root, agent.ProjectID); m.Err == nil && m.AdmitsBeyondViewer() {
 		allowed[store.ScopeProject] = true
 	}
 	return true, allowed, root
