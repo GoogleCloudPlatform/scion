@@ -69,6 +69,12 @@ func TestPortViewSessionGen_JWTWithoutGenerationRefused(t *testing.T) {
 	saved := f.srv.authConfig.UserStore
 	f.srv.authConfig.UserStore = nil
 	t.Cleanup(func() { f.srv.authConfig.UserStore = saved })
+	// Positive control, over the same server as the requests below: with no
+	// user store, the same token passes the auth middleware on an
+	// authenticated route that has no capture, so the 401 below comes from
+	// the capture and not from a middleware refusal.
+	me := f.send(t, http.MethodGet, f.base+"/api/v1/auth/me", withBearer(http.Header{}, f.userToken), nil)
+	require.Equal(t, http.StatusOK, me.status, "the token passes the middleware without a store: %s", me.body)
 	for name, h := range map[string]http.Header{"navigation": navHeader(), "sub-request": subHeader()} {
 		res := f.send(t, http.MethodGet, f.viewURL(f.ownerCap(), "page.html"), withBearer(h, f.userToken), nil)
 		assert.Equal(t, http.StatusUnauthorized, res.status, "%s: %s", name, res.body)
