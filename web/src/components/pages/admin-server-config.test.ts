@@ -136,7 +136,8 @@ function createFetchHandler(
       body: unknown;
     };
     messagingResponse?: Record<string, unknown>;
-    checkUpdatesResponse?: Record<string, unknown>;
+    /** update-status body; null answers 403, undefined uses a default. */
+    updateStatusResponse?: Record<string, unknown> | null;
     onOperationRun?: (path: string, body: unknown) => void;
   }
 ) {
@@ -204,12 +205,20 @@ function createFetchHandler(
       );
     }
 
-    if (path.includes('/api/v1/admin/maintenance/check-updates')) {
+    if (path.includes('/api/v1/admin/maintenance/update-status')) {
+      if (opts?.updateStatusResponse === null) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ error: { code: 'forbidden', message: 'forbidden' } }), {
+            status: 403,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        );
+      }
       return Promise.resolve(
-        new Response(
-          JSON.stringify(opts?.checkUpdatesResponse ?? { tier: 'source', update_available: false }),
-          { status: 200, headers: { 'Content-Type': 'application/json' } }
-        )
+        new Response(JSON.stringify(opts?.updateStatusResponse ?? makeUpdateStatus()), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
       );
     }
 
@@ -247,6 +256,20 @@ function createFetchHandler(
         headers: { 'Content-Type': 'application/json' },
       })
     );
+  };
+}
+
+/** A minimal GET /api/v1/admin/maintenance/update-status body. */
+function makeUpdateStatus(version = 'nightly-20261101', channel = 'nightly') {
+  return {
+    current: { version, channel, commit: 'abc123', isGitBuild: false },
+    mode: { effective: 'release', repoConfigured: false },
+    channel: { effective: channel, configured: channel, source: 'config' },
+    pin: 'latest',
+    installer: { strategy: 'symlink', supported: true },
+    updatePolicy: 'notify',
+    pendingUpdate: null,
+    lastUpdate: null,
   };
 }
 
@@ -321,7 +344,8 @@ describe('scion-page-admin-server-config', () => {
   it('renders without errors', async () => {
     element = await createComponent(createFetchHandler(makeBaseConfig()));
     expect(element.shadowRoot).toBeTruthy();
-    expect(shadowText(element)).toContain('0.1.0-test');
+    // The version line shows update-status's version (default mock).
+    expect(shadowText(element)).toContain('nightly-20261101');
   });
 
   it('calls the config API on connect', async () => {
@@ -2956,232 +2980,91 @@ describe('scion-page-admin-server-config', () => {
     });
   });
 
-  // ── Tier-based maintenance dispatch (fork issue: rebuild-server always used) ──
+  // ── Read-only version line (hub-update-channels Phase 6) ──
+  // The server-config page used to dispatch update-binary / rebuild-server
+  // itself, guessing the tier from check-updates. Updates are managed on the
+  // Maintenance page only; this page shows the version and links there.
 
-  describe('Tier-based maintenance dispatch', () => {
-    it('defaults to source tier and dispatches rebuild-server/run', async () => {
-      let ranPath: string | null = null;
-      let ranBody: unknown = null;
+  describe('Read-only version line and Manage updates link', () => {
+    it('shows the update-status version and effective channel', async () => {
       element = await createComponent(
         createFetchHandler(makeBaseConfig(), {
-          checkUpdatesResponse: { tier: 'source', update_available: true, commits_behind: 2 },
-          onOperationRun: (path, body) => {
-            ranPath = path;
-            ranBody = body;
-          },
+          updateStatusResponse: makeUpdateStatus('v0.3.0-preview.4', 'preview'),
         })
       );
 
-      await (element as any).checkForUpdates();
-      await (element as any).updateComplete;
-      expect((element as any).deploymentTier).toBe('source');
-
-      await (element as any).triggerUpdate();
-      await (element as any).updateComplete;
-
-      expect(ranPath).not.toBeNull();
-      expect(ranPath).toContain('/operations/rebuild-server/run');
-      expect(ranBody).toEqual({ params: {} });
+      const line = query(element, '.version-line');
+      expect(line?.textContent?.replace(/\s+/g, ' ').trim()).toBe(
+        'Scion version: v0.3.0-preview.4 (preview)'
+      );
+      expect(vi.mocked(fetch)).toHaveBeenCalledWith(
+        expect.stringContaining('/api/v1/admin/maintenance/update-status'),
+        expect.any(Object)
+      );
     });
 
-    it('sets deploymentTier to binary and dispatches update-binary/run', async () => {
-      let ranPath: string | null = null;
-      let ranBody: unknown = null;
+    it('links to the Maintenance page', async () => {
+      element = await createComponent(createFetchHandler(makeBaseConfig()));
+
+      const link = query(element, 'a.manage-updates-link');
+      expect(link?.getAttribute('href')).toBe('/admin/maintenance');
+      expect(link?.textContent).toContain('Manage updates');
+    });
+
+    it('falls back to the server-config version without a channel when update-status fails', async () => {
       element = await createComponent(
-        createFetchHandler(makeBaseConfig(), {
-          checkUpdatesResponse: {
-            tier: 'binary',
-            update_available: true,
-            current_version: '1.0.0',
-            latest_version: '1.1.0',
-            channel: 'stable',
-          },
-          onOperationRun: (path, body) => {
-            ranPath = path;
-            ranBody = body;
-          },
-        })
+        createFetchHandler(makeBaseConfig(), { updateStatusResponse: null })
       );
 
-      await (element as any).checkForUpdates();
-      await (element as any).updateComplete;
-      expect((element as any).deploymentTier).toBe('binary');
-
-      await (element as any).triggerUpdate();
-      await (element as any).updateComplete;
-
-      expect(ranPath).not.toBeNull();
-      expect(ranPath).toContain('/operations/update-binary/run');
-      // Exactly the checked tag and pin; no asset URLs or current version.
-      expect(ranBody).toEqual({ params: { target_version: '1.1.0', pin: 'latest' } });
+      const line = query(element, '.version-line');
+      expect(line?.textContent?.replace(/\s+/g, ' ').trim()).toBe('Scion version: 0.1.0-test');
+      expect(query(element, 'a.manage-updates-link')).not.toBeNull();
     });
 
-    it('does not post update-binary when the check gave no tag or channel', async () => {
+    // A 200 with a partial body is not trusted (fallback, no channel); an
+    // empty effective channel renders the version without "()".
+    it.each([
+      [
+        'no channel object',
+        { ...makeUpdateStatus('v0.3.0-preview.4', 'preview'), channel: undefined },
+        'Scion version: 0.1.0-test',
+      ],
+      ['an empty effective channel', makeUpdateStatus('v0.3.0', ''), 'Scion version: v0.3.0'],
+    ])('renders the line for a 200 with %s', async (_name, body, expected) => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig(), { updateStatusResponse: body })
+      );
+
+      const line = query(element, '.version-line');
+      expect(line?.textContent?.replace(/\s+/g, ' ').trim()).toBe(expected);
+      expect(line?.textContent).not.toContain('(');
+    });
+
+    it('has no update controls and never checks for updates or runs an operation', async () => {
       let ran = false;
       element = await createComponent(
         createFetchHandler(makeBaseConfig(), {
-          checkUpdatesResponse: { tier: 'binary', update_available: true },
           onOperationRun: () => {
             ran = true;
           },
         })
       );
 
-      await (element as any).checkForUpdates();
-      await (element as any).triggerUpdate();
-
+      const text = shadowText(element);
+      expect(text).not.toContain('Check for Updates');
+      expect(text).not.toContain('Update Now');
+      expect(text).not.toContain('Update & Restart');
+      expect(query(element, '.update-banner')).toBeNull();
+      const urls = vi
+        .mocked(fetch)
+        .mock.calls.map(([input]) =>
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+        );
+      expect(urls.some((u) => u.includes('/maintenance/check-updates'))).toBe(false);
+      expect(urls.some((u) => u.includes('/maintenance/operations/'))).toBe(false);
       expect(ran).toBe(false);
-      expect((element as any).updateCheckError).toContain('Run Check for Updates first');
-      expect((element as any).updateRunning).toBe(false);
-    });
-
-    it('posts latest:<channel> for update-binary when the check has no tag', async () => {
-      let ranBody: unknown = null;
-      element = await createComponent(
-        createFetchHandler(makeBaseConfig(), {
-          checkUpdatesResponse: { tier: 'binary', update_available: false, channel: 'nightly' },
-          onOperationRun: (_path, body) => {
-            ranBody = body;
-          },
-        })
-      );
-
-      await (element as any).checkForUpdates();
-      await (element as any).triggerUpdate();
-
-      expect(ranBody).toEqual({ params: { target_version: 'latest:nightly', pin: 'latest' } });
-    });
-
-    it('renders binary-tier version info in the update banner', async () => {
-      element = await createComponent(
-        createFetchHandler(makeBaseConfig(), {
-          checkUpdatesResponse: {
-            tier: 'binary',
-            update_available: true,
-            current_version: '1.0.0',
-            latest_version: '1.1.0',
-            channel: 'stable',
-            release_url: 'https://example.com/releases/1.1.0',
-          },
-        })
-      );
-
-      await (element as any).checkForUpdates();
-      await (element as any).updateComplete;
-
-      const text = shadowText(element);
-      expect(text).toContain('1.0.0');
-      expect(text).toContain('1.1.0');
-      expect(text).toContain('stable');
-    });
-
-    // ptone/scion#6134: release_url comes from the release manifest; only an
-    // https URL becomes a link, anything else is shown as plain text.
-    it.each([
-      ['https', 'https://github.com/GoogleCloudPlatform/scion/releases/tag/v1.1.0', true],
-      ['javascript:', 'javascript:alert(document.cookie)', false],
-      ['data:', 'data:text/html,<script>alert(1)</script>', false],
-      ['http:', 'http://example.com/releases/1.1.0', false],
-      ['relative', '/releases/1.1.0', false],
-      ['malformed', 'https://', false],
-    ])('renders a %s release_url safely', async (_name, url, linked) => {
-      element = await createComponent(
-        createFetchHandler(makeBaseConfig(), {
-          checkUpdatesResponse: {
-            tier: 'binary',
-            update_available: true,
-            current_version: '1.0.0',
-            latest_version: '1.1.0',
-            channel: 'stable',
-            release_url: url,
-          },
-        })
-      );
-
-      await (element as any).checkForUpdates();
-      await (element as any).updateComplete;
-
-      const root = element.shadowRoot!;
-      const link = root.querySelector<HTMLAnchorElement>('a.release-notes-link');
-      const text = root.querySelector<HTMLElement>('.release-notes-text');
-      if (linked) {
-        expect(link?.getAttribute('href')).toBe(url);
-        expect(text).toBeNull();
-      } else {
-        expect(link).toBeNull();
-        expect(text?.textContent).toBe(url);
-      }
-      // No anchor anywhere carries the unsafe value.
-      for (const a of Array.from(root.querySelectorAll('a'))) {
-        if (!linked) expect(a.getAttribute('href')).not.toBe(url);
-      }
-    });
-
-    it('omits the commit count in the source-tier banner when commits_behind is missing', async () => {
-      element = await createComponent(
-        createFetchHandler(makeBaseConfig(), {
-          checkUpdatesResponse: { tier: 'source', update_available: true },
-        })
-      );
-
-      await (element as any).checkForUpdates();
-      await (element as any).updateComplete;
-
-      const text = shadowText(element);
-      expect(text).toContain('Update');
-      expect(text).not.toContain('undefined');
-      expect(text).not.toMatch(/new\s+commit/);
-    });
-
-    it('renders the commit count in the source-tier banner when commits_behind is set', async () => {
-      element = await createComponent(
-        createFetchHandler(makeBaseConfig(), {
-          checkUpdatesResponse: { tier: 'source', update_available: true, commits_behind: 3 },
-        })
-      );
-
-      await (element as any).checkForUpdates();
-      await (element as any).updateComplete;
-
-      expect(shadowText(element)).toMatch(/3\s+new\s+commits/);
-    });
-
-    it('shows binary-tier confirm dialog text', async () => {
-      element = await createComponent(
-        createFetchHandler(makeBaseConfig(), {
-          checkUpdatesResponse: {
-            tier: 'binary',
-            update_available: true,
-            current_version: '1.0.0',
-            latest_version: '1.1.0',
-            channel: 'stable',
-          },
-        })
-      );
-
-      await (element as any).checkForUpdates();
-      (element as any).showUpdateConfirm = true;
-      await (element as any).updateComplete;
-
-      const text = shadowText(element);
-      expect(text).toContain('download the latest release binary');
-      expect(text).not.toContain('pull the latest code');
-    });
-
-    it('shows source-tier confirm dialog text', async () => {
-      element = await createComponent(
-        createFetchHandler(makeBaseConfig(), {
-          checkUpdatesResponse: { tier: 'source', update_available: true, commits_behind: 3 },
-        })
-      );
-
-      await (element as any).checkForUpdates();
-      (element as any).showUpdateConfirm = true;
-      await (element as any).updateComplete;
-
-      const text = shadowText(element);
-      expect(text).toContain('pull the latest code');
-      expect(text).not.toContain('download the latest release binary');
+      expect((element as any).checkForUpdates).toBeUndefined();
+      expect((element as any).triggerUpdate).toBeUndefined();
     });
   });
 
