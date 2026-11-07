@@ -560,6 +560,13 @@ func TestNotificationDispatcher_MultipleSubscribers(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, agentNotifs, 1)
 
+	// The user subscriber is handled after the agent one, so its
+	// notification may be stored after the dispatch awaited above.
+	require.Eventually(t, func() bool {
+		notifs, _ := env.store.GetNotifications(context.Background(), store.SubscriberTypeUser, "user-456", false)
+		return len(notifs) == 1
+	}, 2*time.Second, 50*time.Millisecond)
+
 	userNotifs, err := env.store.GetNotifications(context.Background(), store.SubscriberTypeUser, "user-456", false)
 	require.NoError(t, err)
 	assert.Len(t, userNotifs, 1)
