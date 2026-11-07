@@ -201,6 +201,21 @@ describe('message menu link items', () => {
     expect(popupRows(el)).toHaveLength(0);
   });
 
+  it('does nothing, without throwing, when the Clipboard API is absent', async () => {
+    const el = await mount();
+    Object.defineProperty(navigator, 'clipboard', { value: undefined, configurable: true });
+    const internals = el as unknown as {
+      copyLinkAddressAction(href: string): { run: () => void };
+    };
+    expect(() => internals.copyLinkAddressAction(DOCS).run()).not.toThrow();
+
+    await rightClick(el, body(el, 'm2').querySelector(`a[href="${DOCS}"]`)!);
+    const rows = popupRows(el);
+    rows[labels(rows).indexOf('Copy link address')].click();
+    await el.updateComplete;
+    expect(popupRows(el)).toHaveLength(0);
+  });
+
   it('still copies the message link from a menu raised on a link', async () => {
     const el = await mount();
     await rightClick(el, body(el, 'm2').querySelector('a')!);

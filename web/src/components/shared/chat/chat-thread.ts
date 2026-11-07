@@ -5289,7 +5289,9 @@ export class ScionChatThread extends LitElement {
       icon: 'link',
       run: (): void => {
         this.closeContextMenu();
-        navigator.clipboard.writeText(href).catch(() => {
+        // The Clipboard API is absent outside a secure context and in some
+        // older browsers; the item then does nothing rather than throwing.
+        navigator.clipboard?.writeText(href).catch(() => {
           // Fallback: ignore clipboard failure silently.
         });
       },
