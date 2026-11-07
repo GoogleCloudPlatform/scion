@@ -98,7 +98,9 @@ var hostGitDoorAllowlist = map[string]hostGitDoorEntry{
 	// rebuild-server builds its table and starts it in runRebuildSteps (4 git
 	// step literals + the dynamic start); its rev-parse reads, and
 	// CheckForUpdates' rev-parse and log reads, go through gitOutput (one git
-	// literal), so CheckForUpdates itself starts only git fetch.
+	// literal), so CheckForUpdates itself starts only git fetch. Both Rebuild
+	// executors' branch checks (check-ref-format, version; branch_param.go,
+	// ptone/scion#6987) also go through gitOutput and add no literal.
 	"pkg/hub/unitdrift/check.go:GitRevision":                              {1, hostGitDoorReasonHub},
 	"pkg/hub/maintenance/maintenance_executors.go:runRebuildSteps":        {5, hostGitDoorReasonHub},
 	"pkg/hub/maintenance/maintenance_executors.go:gitOutput":              {1, hostGitDoorReasonHub},

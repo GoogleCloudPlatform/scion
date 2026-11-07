@@ -464,6 +464,20 @@ last row:
 | `target` or `from` does not match the links | Leaves the Hub stopped: the links were changed by something other than that update |
 | Missing or unreadable (not a regular file, a symlink, over 4 KiB, not a JSON object with string `target` and `from` and boolean `verified` and `migrated`) | Rolls back only if `current` was switched within the last 1800 seconds (the age of the symlink itself; every switch creates a new link), otherwise leaves the Hub stopped |
 
+**Updates performed by a release that predates the guard.** Only releases
+that include the guard write `update-state.json` when they update. When a
+release that predates the guard performs an update (for example, updating
+back up after a downgrade to a pre-guard release), the file is not
+rewritten, so it still describes the earlier update (if no update-state
+file exists yet, the missing-file row above applies instead). A crash loop
+of the newly installed release in that window is therefore **not** rolled
+back automatically: `target` and `from` no longer match the links, so the guard
+refuses on the mismatch and leaves the Hub stopped. It never swaps to a
+wrong release. The next update performed by a release that includes the
+guard (or the next `deploy.sh` switch) rewrites the file. To recover in
+that window, follow
+[Restoring after a failed update](#restoring-after-a-failed-update).
+
 To start a Hub that the guard left stopped, fix the cause shown in
 `journalctl -u scion-hub`, then run
 `sudo systemctl reset-failed scion-hub && sudo systemctl start scion-hub`.

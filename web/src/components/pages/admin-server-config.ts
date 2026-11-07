@@ -34,8 +34,8 @@ import { isKubernetesRuntimeType } from '../../shared/runtime-kind.js';
 import type { RuntimeBroker, GCPServiceAccount } from '../../shared/types.js';
 import { formatInstantWithZone, isValidTimeZone } from '../../utils/time.js';
 import { isHttpUrl } from '../../utils/http-url.js';
-import { renderReleaseNotesLink } from '../../utils/release-notes-link.js';
 import '../shared/timezone-picker.js';
+import type { UpdateStatus } from './admin-maintenance-update-card.js';
 import type { TimezoneChangeDetail } from '../shared/timezone-picker.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 import {
@@ -608,31 +608,6 @@ interface ConflictInfo {
   skipped: SkippedKey[];
 }
 
-interface UpdateCommitInfo {
-  hash: string;
-  subject: string;
-}
-
-interface UpdateCheckResult {
-  // Common
-  tier?: string; // "source" or "binary"
-  update_available: boolean;
-
-  // Source/git tier
-  current_commit?: string;
-  latest_commit?: string;
-  current_branch?: string;
-  tracking_ref?: string;
-  commits_behind?: number;
-  new_commits?: UpdateCommitInfo[];
-
-  // Binary tier
-  current_version?: string;
-  latest_version?: string;
-  channel?: string;
-  release_url?: string;
-}
-
 interface GitHubInstallationInfo {
   installation_id: number;
   account_login: string;
@@ -1024,14 +999,12 @@ export class ScionPageAdminServerConfig extends LitElement {
   @state() private scionCommit = '';
   @state() private scionBuildTime = '';
 
-  // ── Update check state ──
-  @state() private updateCheckLoading = false;
-  @state() private updateCheckError: string | null = null;
-  @state() private updateCheckResult: UpdateCheckResult | null = null;
-  @state() private updateRunning = false;
-  @state() private showUpdateConfirm = false;
-  /** Deployment tier ("binary" or "source"), learned from the update check response. */
-  @state() private deploymentTier: 'binary' | 'source' = 'source';
+  /**
+   * Running version and effective channel from GET
+   * /api/v1/admin/maintenance/update-status, or null when it is not loaded.
+   * Updates are managed on the Maintenance page only; this page shows them.
+   */
+  @state() private updateStatus: UpdateStatus | null = null;
 
   // ── Form state (mirrors settings.yaml) ──
 
@@ -1530,92 +1503,22 @@ export class ScionPageAdminServerConfig extends LitElement {
       border: 1px solid var(--scion-border, #e2e8f0);
     }
 
-    .version-actions {
+    .version-summary {
       display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      margin-left: auto;
-      align-self: flex-start;
-    }
-
-    .update-banner {
-      margin-top: 0.75rem;
-      padding: 0.75rem 1rem;
-      border-radius: 0.375rem;
-      border: 1px solid var(--sl-color-primary-200, #bfdbfe);
-      background: var(--sl-color-primary-50, #eff6ff);
-    }
-
-    .update-banner-header {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      font-weight: 600;
+      flex-wrap: wrap;
+      align-items: baseline;
+      gap: 0.5rem 1rem;
+      margin-bottom: 0.75rem;
       font-size: 0.875rem;
-      color: var(--sl-color-primary-700, #1d4ed8);
-    }
-
-    .update-banner-header sl-icon {
-      font-size: 1rem;
-    }
-
-    .update-commits {
-      margin-top: 0.5rem;
-      max-height: 10rem;
-      overflow-y: auto;
-      font-size: 0.8125rem;
-      font-family: var(--sl-font-mono, monospace);
-      line-height: 1.5;
       color: var(--scion-text, #1e293b);
     }
 
-    .update-commits .commit-hash {
-      color: var(--sl-color-primary-600, #2563eb);
-      margin-right: 0.5rem;
-    }
-
-    .update-banner-actions {
-      margin-top: 0.75rem;
-      display: flex;
-      gap: 0.5rem;
-    }
-
-    .update-current {
-      margin-top: 0.5rem;
-      font-size: 0.8125rem;
-      color: var(--scion-text-muted, #64748b);
-    }
-
-    .update-error {
-      margin-top: 0.5rem;
-      font-size: 0.8125rem;
-      color: var(--sl-color-danger-700, #b91c1c);
-    }
-
-    .release-info {
-      display: flex;
-      flex-direction: column;
-      gap: 0.25rem;
-      margin-top: 0.375rem;
-      font-size: 0.8125rem;
-    }
-
-    .release-info .release-field {
-      display: flex;
-      gap: 0.5rem;
-    }
-
-    .release-info .release-label {
-      color: var(--scion-text-muted, #64748b);
-      min-width: 7rem;
-    }
-
-    .release-info a {
+    .version-summary a {
       color: var(--sl-color-primary-600, #2563eb);
       text-decoration: none;
     }
 
-    .release-info a:hover {
+    .version-summary a:hover {
       text-decoration: underline;
     }
 
@@ -2124,6 +2027,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     void this.loadHubGCPServiceAccounts();
     void this.loadGitHubAppInstallations();
     void this.loadMessagingSettings();
+    void this.loadUpdateStatus();
   }
 
   private async loadConfig(): Promise<void> {
@@ -4416,125 +4320,52 @@ export class ScionPageAdminServerConfig extends LitElement {
 
   // ── Tab renderers ──
 
+  /**
+   * The read-only "Scion version: X (channel)" line. The version and channel
+   * come from update-status; before it loads, or when it cannot be read, the
+   * version falls back to the server-config build info and no channel is shown.
+   */
+  private renderVersionSummary() {
+    const version = this.updateStatus?.current.version || this.scionVersion;
+    const channel = this.updateStatus?.channel.effective ?? '';
+    return html`
+      <div class="version-summary">
+        ${version
+          ? html`<span class="version-line"
+              >Scion version: <strong>${version}</strong>${channel
+                ? html` (${channel})`
+                : nothing}</span
+            >`
+          : nothing}
+        <a class="manage-updates-link" href="/admin/maintenance">Manage updates &rarr;</a>
+      </div>
+    `;
+  }
+
   private renderVersionInfo() {
-    if (!this.scionVersion && !this.scionCommit) return nothing;
-    const r = this.updateCheckResult;
     return html`
       <div class="section">
         <h3 class="section-title">Scion Server Version</h3>
-        <div class="version-info">
-          ${this.scionVersion
-            ? html`<div class="version-item">
-                <span class="version-label">Version</span>
-                <span class="version-value">${this.scionVersion}</span>
-              </div>`
-            : nothing}
-          ${this.scionCommit
-            ? html`<div class="version-item">
-                <span class="version-label">Git Commit</span>
-                <span class="version-value"><code>${this.scionCommit}</code></span>
-              </div>`
-            : nothing}
-          ${this.scionBuildTime
-            ? html`<div class="version-item">
-                <span class="version-label">Build Time</span>
-                <span class="version-value" title=${this.scionBuildTime}
-                  >${formatInstantWithZone(this.scionBuildTime) || this.scionBuildTime}</span
-                >
-              </div>`
-            : nothing}
-          <div class="version-actions">
-            <sl-button
-              size="small"
-              variant="default"
-              ?loading=${this.updateCheckLoading}
-              @click=${() => this.checkForUpdates()}
-            >
-              <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
-              Check for Updates
-            </sl-button>
-          </div>
-        </div>
-        ${this.updateCheckError
-          ? html`<div class="update-error">${this.updateCheckError}</div>`
-          : nothing}
-        ${r && r.update_available
-          ? html`
-              <div class="update-banner">
-                <div class="update-banner-header">
-                  <sl-icon name="info-circle"></sl-icon>
-                  ${r.tier === 'binary'
-                    ? html`Update available`
-                    : html`Update
-                      available${r.current_branch && r.current_branch !== 'main'
-                        ? html` on <code>${r.current_branch}</code>`
-                        : nothing}${r.commits_behind != null
-                        ? html` &mdash; ${r.commits_behind} new
-                          commit${r.commits_behind === 1 ? '' : 's'}`
-                        : nothing}`}
-                </div>
-                ${r.tier === 'binary'
-                  ? html`
-                      <div class="release-info">
-                        <div class="release-field">
-                          <span class="release-label">Current version:</span>
-                          <span>${r.current_version}</span>
-                        </div>
-                        <div class="release-field">
-                          <span class="release-label">Latest version:</span>
-                          <span>${r.latest_version}</span>
-                        </div>
-                        ${r.channel
-                          ? html`<div class="release-field">
-                              <span class="release-label">Channel:</span>
-                              <span>${r.channel}</span>
-                            </div>`
-                          : nothing}
-                        ${r.release_url
-                          ? html`<div class="release-field">
-                              <span class="release-label">Release notes:</span>
-                              ${renderReleaseNotesLink(r.release_url)}
-                            </div>`
-                          : nothing}
-                      </div>
-                    `
-                  : r.new_commits && r.new_commits.length > 0
-                    ? html`
-                        <div class="update-commits">
-                          ${r.new_commits.map(
-                            (c) => html`
-                              <div><span class="commit-hash">${c.hash}</span>${c.subject}</div>
-                            `
-                          )}
-                        </div>
-                      `
-                    : nothing}
-                <div class="update-banner-actions">
-                  <sl-button
-                    size="small"
-                    variant="primary"
-                    ?loading=${this.updateRunning}
-                    @click=${() => (this.showUpdateConfirm = true)}
-                  >
-                    <sl-icon slot="prefix" name="download"></sl-icon>
-                    Update Now
-                  </sl-button>
-                </div>
-              </div>
-            `
-          : nothing}
-        ${r && !r.update_available
-          ? html`<div class="update-current">
-              ${r.tier === 'binary'
-                ? html`Server is up to date (${r.current_version}).`
-                : html`Server is up to
-                  date${r.current_branch && r.current_branch !== 'main'
-                    ? html` on <code>${r.current_branch}</code>`
-                    : nothing}.`}
+        ${this.renderVersionSummary()}
+        ${this.scionCommit || this.scionBuildTime
+          ? html`<div class="version-info">
+              ${this.scionCommit
+                ? html`<div class="version-item">
+                    <span class="version-label">Git Commit</span>
+                    <span class="version-value"><code>${this.scionCommit}</code></span>
+                  </div>`
+                : nothing}
+              ${this.scionBuildTime
+                ? html`<div class="version-item">
+                    <span class="version-label">Build Time</span>
+                    <span class="version-value" title=${this.scionBuildTime}
+                      >${formatInstantWithZone(this.scionBuildTime) || this.scionBuildTime}</span
+                    >
+                  </div>`
+                : nothing}
             </div>`
           : nothing}
       </div>
-      ${this.showUpdateConfirm ? this.renderUpdateConfirmDialog() : nothing}
     `;
   }
 
@@ -8209,127 +8040,23 @@ export class ScionPageAdminServerConfig extends LitElement {
     }
   }
 
-  // ── Update check ──
-
-  private async checkForUpdates(): Promise<void> {
-    this.updateCheckLoading = true;
-    this.updateCheckError = null;
-    this.updateCheckResult = null;
-    try {
-      const res = await apiFetch('/api/v1/admin/maintenance/check-updates', {
-        method: 'POST',
-      });
-      if (!res.ok) {
-        this.updateCheckError = await extractApiError(res, 'Failed to check for updates');
-        return;
-      }
-      const result = (await res.json()) as UpdateCheckResult;
-      this.updateCheckResult = result;
-      if (result.tier === 'binary' || result.tier === 'source') {
-        this.deploymentTier = result.tier;
-      }
-    } catch {
-      this.updateCheckError = 'Failed to connect to server';
-    } finally {
-      this.updateCheckLoading = false;
-    }
-  }
-
-  private renderUpdateConfirmDialog() {
-    return html`
-      <sl-dialog
-        label="Update Server"
-        open
-        @sl-request-close=${() => (this.showUpdateConfirm = false)}
-      >
-        <div>
-          ${this.deploymentTier === 'binary'
-            ? html`<p>
-                This will download the latest release binary and
-                <strong>restart the server</strong>.
-              </p>`
-            : html`<p>
-                This will pull the latest code, rebuild the server, and
-                <strong>restart the service</strong>. You will temporarily lose connectivity.
-              </p>`}
-          <p>
-            Running agent containers are not affected and will continue working through the restart.
-          </p>
-          ${this.updateCheckResult &&
-          this.deploymentTier !== 'binary' &&
-          this.updateCheckResult.commits_behind != null
-            ? html`<p>
-                <strong>${this.updateCheckResult.commits_behind}</strong> new
-                commit${this.updateCheckResult.commits_behind === 1 ? '' : 's'} will be applied.
-              </p>`
-            : nothing}
-          ${this.updateCheckResult &&
-          this.deploymentTier === 'binary' &&
-          this.updateCheckResult.latest_version
-            ? html`<p>
-                Version <strong>${this.updateCheckResult.latest_version}</strong> will be installed.
-              </p>`
-            : nothing}
-        </div>
-        <sl-button
-          slot="footer"
-          variant="default"
-          @click=${() => (this.showUpdateConfirm = false)}
-          ?disabled=${this.updateRunning}
-          >Cancel</sl-button
-        >
-        <sl-button
-          slot="footer"
-          variant="warning"
-          ?loading=${this.updateRunning}
-          @click=${() => this.triggerUpdate()}
-        >
-          <sl-icon slot="prefix" name="download"></sl-icon>
-          Update &amp; Restart
-        </sl-button>
-      </sl-dialog>
-    `;
-  }
+  // ── Update status (read-only) ──
 
   /**
-   * update-binary params: the checked release tag when the check returned
-   * one, otherwise the latest release in the checked channel, which the hub
-   * resolves. The hub rejects any other param. Null when neither is known.
+   * Loads the running version and effective channel for the read-only
+   * version line. A failure leaves updateStatus null: the line then shows the
+   * server-config version without a channel, and never guesses one.
    */
-  private updateBinaryParams(): Record<string, string> | null {
-    const r = this.updateCheckResult;
-    const target = r?.latest_version || (r?.channel ? `latest:${r.channel}` : '');
-    return target ? { target_version: target, pin: 'latest' } : null;
-  }
-
-  private async triggerUpdate(): Promise<void> {
-    const opKey = this.deploymentTier === 'binary' ? 'update-binary' : 'rebuild-server';
-    const params = opKey === 'update-binary' ? this.updateBinaryParams() : {};
-    if (!params) {
-      this.updateCheckError =
-        'No update target is known. Run Check for Updates first, then update.';
-      return;
-    }
-    this.updateRunning = true;
+  private async loadUpdateStatus(): Promise<void> {
     try {
-      const res = await apiFetch(`/api/v1/admin/maintenance/operations/${opKey}/run`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ params }),
-      });
-      if (!res.ok) {
-        const errMsg = await extractApiError(res, `HTTP ${res.status}`);
-        this.updateCheckError = errMsg;
-        return;
+      const res = await apiFetch('/api/v1/admin/maintenance/update-status');
+      if (!res.ok) return;
+      const data = (await res.json()) as Partial<UpdateStatus> | null;
+      if (data?.current && typeof data.current.version === 'string' && data.channel) {
+        this.updateStatus = data as UpdateStatus;
       }
-      // Server will restart — the page will lose connectivity.
-      this.showUpdateConfirm = false;
-      this.updateCheckResult = null;
-      this.successMessage = 'Update started. The server will restart shortly.';
     } catch {
-      this.updateCheckError = 'Failed to trigger update';
-    } finally {
-      this.updateRunning = false;
+      // Keep the server-config fallback.
     }
   }
 }

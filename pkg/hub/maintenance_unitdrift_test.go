@@ -82,7 +82,8 @@ const rebuildStubCommit = "0123456789abcdef0123456789abcdef01234567"
 
 // writeRebuildStubs writes git, make, go and sudo stubs into dir. Each
 // records its call in calls and, as its very last action, that it is
-// exiting. git answers rev-parse; go writes, at its -o path, a binary
+// exiting. git answers rev-parse, check-ref-format --branch (echoing a
+// valid name, as git does) and version; go writes, at its -o path, a binary
 // whose version JSON reports rebuildStubCommit; sudo succeeds (so every
 // `sudo -n -l` rule check matches). Only shell builtins and absolute paths
 // are used, so a test may leave PATH holding just dir.
@@ -93,6 +94,8 @@ func writeRebuildStubs(t *testing.T, dir, calls string) {
 case "$1 $2" in
   "rev-parse HEAD") echo %[2]s ;;
   "rev-parse --abbrev-ref") echo main ;;
+  "check-ref-format --branch") echo "$3" ;;
+  "version ") echo "git version 2.43.0" ;;
 esac
 echo 'exited git' "$@" >> '%[1]s'
 `, calls, rebuildStubCommit),
