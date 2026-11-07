@@ -29,6 +29,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/clock"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/grant"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -509,4 +510,60 @@ func TestWebLogin_RoleChangePublishesConduitRecheck(t *testing.T) {
 			})
 		}
 	}
+}
+
+// leaveProjectAs leaves the recheck fixture's project as user over a web
+// session, with hub.conduit and hub.project_self_leave on.
+func (f *recheckFixture) leaveProjectAs(t *testing.T, user *AuthenticatedUser) {
+	t.Helper()
+	u, err := f.store.GetUser(context.Background(), user.ID())
+	require.NoError(t, err)
+	rec := doRequestAsUser(t, f.srv, u, http.MethodPost, "/api/v1/projects/"+f.agent.ProjectID+"/leave", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+}
+
+// TestProjectLeave_ClosesLeaverConduitStreams (R3, 6c): the leaver's three
+// open streams in the project (an events subscription, a PTY attach and a
+// port view) close with the authz-expired code after the leave, while
+// another member's stream stays open. The periodic sweep is disabled
+// (interval -1), so the streams can only close through the authz-changed
+// publish of the leave route.
+func TestProjectLeave_ClosesLeaverConduitStreams(t *testing.T) {
+	f := newRecheckFixture(t, nil, -1)
+	setExperimentOverrides(t, f.srv, map[string]bool{conduitExperiment: true, experiments.ProjectSelfLeave: true})
+	events := f.open(t, f.u1, grant.StreamKindEvents, 1)
+	pty := f.open(t, f.u1, grant.StreamKindPTY, 3)
+	port := f.open(t, f.u1, grant.StreamKindTCP, 5)
+	control := f.open(t, f.u2, grant.StreamKindPTY, 7)
+
+	f.leaveProjectAs(t, f.u1)
+
+	for name, w := range map[string]*streamWatch{"events": events, "pty": pty, "port": port} {
+		assert.Equal(t, "4401 authz_expired", w.waitClosed(t), name)
+	}
+	control.assertOpen(t)
+	for _, m := range f.metrics.list() {
+		assert.False(t, strings.HasPrefix(m, "interval/") || strings.HasPrefix(m, "sweep/"), "closed by %s, not the notify path", m)
+	}
+}
+
+// TestProjectLeave_ClosesLeaverConduitStreams_MutantNoPublish is the mutant
+// of the test above (M1): with the leave route's authz-changed publish
+// replaced by a no-op, the leaver's stream is not closed although its
+// authority is gone, so the closure assertion above would fail. It proves
+// that test passes only through the publish.
+func TestProjectLeave_ClosesLeaverConduitStreams_MutantNoPublish(t *testing.T) {
+	f := newRecheckFixture(t, nil, -1)
+	setExperimentOverrides(t, f.srv, map[string]bool{conduitExperiment: true, experiments.ProjectSelfLeave: true})
+	orig := projectLeavePublish
+	projectLeavePublish = func(*Server, conduitAuthzMatch) {}
+	t.Cleanup(func() { projectLeavePublish = orig })
+	pty := f.open(t, f.u1, grant.StreamKindPTY, 1)
+
+	f.leaveProjectAs(t, f.u1)
+
+	require.Error(t, f.srv.authorizeConduitAction(context.Background(), f.u1, f.agent, ActionAttach),
+		"the leave removed the leaver's authority")
+	time.Sleep(500 * time.Millisecond)
+	pty.assertOpen(t)
 }

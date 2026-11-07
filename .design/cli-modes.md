@@ -173,6 +173,7 @@ The existing `TestCheckAgentContainerContext` tests should be extended to cover 
 | `grove reconnect` | Y | - |
 | `grove service-accounts` (all except `show`) | Y | - |
 | `project service-accounts show` | Y | Y |
+| `project leave` | Y | - (an agent must not drop its user's membership; the hub also refuses agent credentials, ptone/scion#7494) |
 | `harness-config` (all) | Y | - |
 | `hub status` | Y | Y (runtime: only with a target-hub profile for another hub, ptone/scion#4240) |
 | `hub profile` (`add`, `list`, `show`, `remove`) | Y | Y (`add`/`show`/`remove` refuse a profile for the agent's own hub) |

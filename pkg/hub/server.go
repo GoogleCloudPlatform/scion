@@ -3319,6 +3319,7 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	// Process membership loss checks right after the removal commits
 	// (ptone/scion#3433).
 	srv.membershipService.onMembershipLoss = srv.kickMembershipLossChecks
+	srv.membershipService.userAdmitted = srv.userAdmittedByIDOn
 
 	// RS3: Initialize the project deletion domain service.
 	srv.deletionService = NewProjectDeletionService(

@@ -580,6 +580,10 @@ func (s *Server) handleAgentMessagesStream(w http.ResponseWriter, r *http.Reques
 	}
 	recheck, stopRecheck := streamTokenRecheck(ctx)
 	defer stopRecheck()
+	// A membership change of the caller re-checks the stream for every
+	// credential, sessions included (ptone/scion#7494).
+	membershipCh, unsubscribeMembership := ep.Subscribe(membershipChangedSubject)
+	defer unsubscribeMembership()
 
 	// Server-side timeout matching handlers_logs.go: tell the client to
 	// reconnect after 10 minutes so long-lived connections don't accumulate.
@@ -612,6 +616,18 @@ func (s *Server) handleAgentMessagesStream(w http.ResponseWriter, r *http.Reques
 			flusher.Flush()
 		case <-recheck:
 			if !s.streamTokenStillAuthorized(ctx, res, recheckAction, recheckPermission) {
+				endStreamForCredential(ctx, w, flusher)
+				return
+			}
+		case mevt, ok := <-membershipCh:
+			if !ok {
+				return
+			}
+			if !membershipChangedNames(mevt, userID) {
+				continue
+			}
+			if !s.streamTokenStillAuthorized(ctx, res, recheckAction, recheckPermission) ||
+				!s.agentMessagesStreamStillAuthorized(ctx, user, agent.ID, fullHistory.Allowed) {
 				endStreamForCredential(ctx, w, flusher)
 				return
 			}
@@ -651,4 +667,22 @@ func (c *agentStreamConversation) includes(msgConvID string, participant bool) b
 		c.id = id
 	}
 	return c.id != "" && msgConvID == c.id
+}
+
+// agentMessagesStreamStillAuthorized re-runs the check that admitted an
+// agent messages stream, after a membership change of its caller
+// (ptone/scion#7494): agent.attach for a full-history stream, agent.read
+// otherwise, on the agent as stored now. A lookup error fails the check.
+func (s *Server) agentMessagesStreamStillAuthorized(ctx context.Context, user UserIdentity, agentID string, fullHistory bool) bool {
+	if s.authzService == nil || s.store == nil {
+		return false
+	}
+	agent, err := s.store.GetAgent(ctx, agentID)
+	if err != nil || agent == nil {
+		return false
+	}
+	if fullHistory {
+		return s.agentFullHistoryDecision(ctx, user, agent).Allowed
+	}
+	return s.authzService.CheckAccess(ctx, user, agentResource(agent), ActionRead).Allowed
 }

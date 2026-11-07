@@ -45,11 +45,16 @@ to RS1 typed governance.
 | Add or promote an owner              | No             | No            | Yes           |
 | Demote or remove an owner            | No             | No            | Yes‡          |
 | Change a binding outside this project| No             | No            | No            |
+| Leave the project (own direct bindings)| Yes§         | Yes§          | Yes‡§         |
 
 †D8: Members may view direct and effective project access under `project.read`,
 subject to group-domain privacy boundaries. Mutation capabilities are governed
 separately by the typed governance matrix.
 ‡Subject to last-owner invariant: at least one active direct owner must remain.
+§Through `POST /api/v1/projects/{id}/leave` only (`project.membership.leave`,
+§3.5), behind the `hub.project_self_leave` experiment. The caller removes only
+their own direct user bindings; the rows above are unchanged, so a member's
+DELETE on their own binding is still refused.
 
 ### Current C0 containment
 
@@ -162,6 +167,26 @@ Revocation requires governance (actor/target relationship) but not delegation.
 | **Denial codes**    | `forbidden`                                               |
 | **Tests**           | `pkg/hub:TestProjectMembership_*`                         |
 
+### 3.5 project.membership.leave
+
+| Field               | Value                                                     |
+|---------------------|-----------------------------------------------------------|
+| **ID**              | `project.membership.leave`                                |
+| **Domain**          | `project.membership`                                      |
+| **Entry points**    | `POST /api/v1/projects/{id}/leave` (body optional: `{"dryRun": bool}`) |
+| **Principals**      | `user`                                                    |
+| **Credentials**     | `session_jwt` only; every access token is refused (session-only, `GOV_PENDING`) |
+| **Resolver**        | `project-from-url`                                        |
+| **Base permission** | `project.read`; the service then requires a direct binding |
+| **Effects**         | `revoke-authority`: the caller's direct bindings, and their project-boundary access tokens for the project when no access remains |
+| **Delegation**      | `none`                                                    |
+| **Authority eval**  | `proposed_post_state`                                     |
+| **Governance**      | self only: the caller's own direct user bindings that `leaveBindingClass` classifies removable (an allow-list that fails closed). Never another principal, group, agent or visitor binding. The matrix and the hub-level role-binding override do not apply. |
+| **Invariants**      | `last-owner-guard`, `constraint-admin-lockout` (security, fail-closed) |
+| **Audit**           | `project_member_leave` — context: actor_id, project_id; before: principalId, roles, remainingAccess, agentCount, revokedTokenIds; atomic. The membership loss check carries trigger `member_leave`. |
+| **Denial codes**    | `not_found` (no direct binding, or no such project: the same 404), `membership_group_derived` (409), `last_owner` (409), `constraint_admin_lockout`, `credential_insufficient` (403), `leave_binding_unclassified` (500, nothing changes) |
+| **Tests**           | `pkg/hub:TestProjectLeave_*`, `pkg/hub:TestLeaveBindingClass_*` |
+
 ## 4. Approved Semantics
 
 ### 4.1 Mine and Shared Classification (D6)
@@ -191,6 +216,12 @@ accomplished via add-new-owner → self-remove sequence.
 
 RS1 adds `POST /api/v1/projects/{id}/transfer-ownership` for atomic
 single-step transfer.
+
+Self-removal by any role (member, admin, owner, custom roles) goes through
+leave (`project.membership.leave`, §3.5), which removes all of the caller's
+direct bindings in one transaction under the same last-owner and
+constraint-admin guards. The DELETE route keeps the matrix: an owner's
+self-DELETE still works as above, and a member's is still refused.
 
 ### 4.3 Ownership Transfer (D1)
 

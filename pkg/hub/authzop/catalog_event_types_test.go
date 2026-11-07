@@ -42,6 +42,7 @@ var writtenEventTypeRows = []OperationID{
 	"project.membership.update",
 	"project.membership.remove",
 	"project.membership.transfer",
+	"project.membership.leave",
 }
 
 // TestCatalogEventTypesAreWritten pins catalog AuditObligation EventType

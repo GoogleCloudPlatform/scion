@@ -2223,6 +2223,15 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 	// its metadata snapshot as soon as the client observes the open stream.
 	ch, unsubscribe := ws.events.Subscribe(subjects...)
 	defer unsubscribe()
+	// Membership changes of the caller (internal subject, never written to
+	// the client) re-run the subject authorization below, so a stream does
+	// not outlive the access it was opened with (ptone/scion#7494).
+	membershipCh, unsubscribeMembership := ws.events.Subscribe(membershipChangedSubject)
+	defer unsubscribeMembership()
+	streamUserID := ""
+	if su := getWebSessionUser(r.Context()); su != nil {
+		streamUserID = su.UserID
+	}
 
 	// Register the stream (ptone/scion#5227) and close it on every exit
 	// path below, with the reason set where the loop returns. A panic is
@@ -2298,6 +2307,30 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 			if trace != nil {
 				trace.addSSEEvent(time.Since(writeStart))
 			}
+		case evt, ok := <-membershipCh:
+			if !ok {
+				// The publisher closed the subscription: end the stream as
+				// for the event subscription, so no change can be missed.
+				closeReason = eventstreams.ClosePublisher
+				return
+			}
+			if !membershipChangedNames(evt, streamUserID) {
+				continue
+			}
+			// Fail closed: a subject the caller may no longer read, or a
+			// re-check that cannot decide, ends the stream with a
+			// reconnect hint, so the client reconnects and is authorized
+			// afresh.
+			if !sseStreamStillAuthorized(ws, r, subjects) {
+				n, _ := fmt.Fprintf(w, "event: reconnect\ndata: {}\n\n")
+				flusher.Flush()
+				stream.RecordBytes(n)
+				closeReason = eventstreams.CloseAccessChanged
+				return
+			}
+			// Still authorized: drop cached per-agent decisions so the
+			// message rules are decided again.
+			viewer = ws.newSSEMessageViewer(r)
 		case <-heartbeat.C:
 			if tiSession && !ws.sseTestIdentitySessionStillValid(r) {
 				closeReason = eventstreams.CloseSessionEnded
@@ -2895,6 +2928,10 @@ func (ws *WebServer) authorizeSSESubjects(r *http.Request, subjects []string) []
 			if len(tokens) != 3 || tokens[1] != "images" || isNATSWildcard(tokens[2]) {
 				denied = append(denied, sub)
 			}
+		case "hub":
+			// Internal hub events (membershipChangedSubject): never a client
+			// subscription.
+			denied = append(denied, sub)
 		case "admin":
 			// Admin-only namespace. No web client subscribes to this today.
 			if sessionUser.Role != "admin" {

@@ -58,6 +58,13 @@ type ProjectMembershipService struct {
 	// (ptone/scion#3433). The hub server sets it; the reconciler processes
 	// the check regardless.
 	onMembershipLoss func()
+
+	// userAdmitted, when set, reports whether userID is admitted to
+	// projectID, reading through st (a transaction inside one). The hub
+	// server sets it to its live admission check (userAdmittedByIDOn);
+	// LeaveProject uses it for the remaining access after a leave
+	// (ptone/scion#7494). Unset, a leave counts only group bindings.
+	userAdmitted func(ctx context.Context, st store.Store, userID, projectID string) (bool, error)
 }
 
 // notifyMembershipLoss runs the post-commit membership loss callback.
@@ -107,6 +114,10 @@ const (
 	MembershipOpUpdate   MembershipOp = "update"
 	MembershipOpRemove   MembershipOp = "remove"
 	MembershipOpTransfer MembershipOp = "transfer"
+	// MembershipOpLeave is a project self-leave (LeaveProject,
+	// ptone/scion#7494): self governance, the governance matrix and the
+	// hub-level override are not consulted.
+	MembershipOpLeave MembershipOp = "leave"
 )
 
 // MembershipRequest describes a project membership mutation.
@@ -1535,30 +1546,17 @@ func (svc *ProjectMembershipService) RemoveMember(ctx context.Context, req Membe
 			}
 		}
 
-		// Last-owner guard (inside tx for serialization, ptone/scion#2769):
-		// note whether the removed binding is a usable owner, then check the
-		// post-state after the delete.
-		removesOwner := builtInRoleName(roleDef) == store.ProjectRoleOwner
-		now := svc.nowFunc() // one instant for the pre-state and post-state checks
-		removedUsable := false
-		if removesOwner {
-			if removedUsable, err = anyUsableOwnerBinding(ctx, tx, []*store.RoleBinding{binding}, now); err != nil {
-				return fmt.Errorf("cannot verify usable owner: %w", err)
-			}
+		// Last-owner guard (inside tx for serialization, ptone/scion#2769)
+		// and the constraint-admin lockout guard (shared with user suspend
+		// and delete), around the delete: the remove step LeaveProject
+		// shares (removeProjectBindingsTx), with one instant for the
+		// pre-state and post-state checks.
+		var ownerBindings []*store.RoleBinding
+		if builtInRoleName(roleDef) == store.ProjectRoleOwner {
+			ownerBindings = []*store.RoleBinding{binding}
 		}
-
-		// Constraint-admin lockout guard, shared with user suspend and
-		// delete.
-		if err := checkRoleBindingRemovalAdminLockout(ctx, tx, now, binding); err != nil {
+		if err := removeProjectBindingsTx(ctx, tx, req.ProjectID, svc.nowFunc(), []*store.RoleBinding{binding}, ownerBindings); err != nil {
 			return err
-		}
-		if err := tx.DeleteRoleBinding(ctx, req.BindingID); err != nil {
-			return err
-		}
-		if removesOwner {
-			if err := enforceOwnerRemovalTx(ctx, tx, req.ProjectID, now, removedUsable); err != nil {
-				return err
-			}
 		}
 		// Ask for the removed principal's standing to be re-evaluated
 		// (ptone/scion#3433): a user, or every transitive member user of a
@@ -1939,6 +1937,16 @@ type MembershipCapabilities struct {
 	// the members PUT uses, so the UI never infers custom-role authority
 	// from owner authority.
 	CanManageCustomRoles bool `json:"canManageCustomRoles"`
+
+	// CanLeave and LeaveBlockedReason are the caller's project leave
+	// capabilities (ptone/scion#7494), set only while the
+	// hub.project_self_leave experiment is on and left out otherwise.
+	// CanLeave reports whether a leave would currently remove at least one
+	// direct binding; LeaveBlockedReason is last_owner or group_derived
+	// when a leave is refused for that reason. The dry run is the final
+	// authority.
+	CanLeave           *bool  `json:"canLeave,omitempty"`
+	LeaveBlockedReason string `json:"leaveBlockedReason,omitempty"`
 }
 
 // ComputeCapabilities returns the membership capabilities for the given actor.

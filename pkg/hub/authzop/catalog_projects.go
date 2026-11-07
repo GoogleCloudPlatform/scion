@@ -119,6 +119,47 @@ var projectOperations = []OperationSpec{
 		Bearer:      membershipTokenBearer("TestMembershipToken_GovernanceMatrixApplies"),
 	},
 	{
+		ID:          "project.membership.leave",
+		Domain:      "project.membership",
+		Description: "Leave a project: remove the caller's own direct project roles (ptone/scion#7494)",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/leave", Method: "POST"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "project-from-url",
+		// Any member holds project.read; the service then requires a
+		// direct binding. A caller who cannot read the project gets the
+		// same 404 as for a missing project.
+		BasePermission: "project.read",
+		// revoke-authority covers the removed bindings and the caller's
+		// project-boundary access tokens, revoked in the same transaction
+		// when the caller keeps no access to the project (R1).
+		Effects:        []SecurityEffect{EffectRevokeAuthority},
+		DelegationKind: DelegationNone,
+		Governance: &GovernancePolicy{
+			Kind:        GovernancePeerSuperior,
+			Description: "self only: removes the caller's own direct user bindings on the project, classified removable by leaveBindingClass (allow-list, fails closed); never another principal, never group, agent or visitor bindings. The governance matrix and the hub-level role-binding override do not apply. Enforced by ProjectMembershipService.LeaveProject.",
+		},
+		AuthorityEval: AuthorityEvalProposedPost,
+		Invariants: []Invariant{
+			{ID: "last-owner-guard", Description: "The last usable direct owner cannot leave", Kind: InvariantSecurity, FailClosed: true},
+			{ID: "constraint-admin-lockout", Description: "A leave cannot leave a scope without a constraint admin", Kind: InvariantSecurity, FailClosed: true},
+		},
+		AuditObligation: &AuditObligation{
+			EventType:     "project_member_leave",
+			ContextFields: []string{"actor_id", "project_id"},
+			BeforeFields:  []string{"target_principal_id", "target_roles"},
+			Atomic:        true,
+		},
+		DenialCodes: []DenialCode{DenialForbidden, DenialResourceNotFound, DenialLastOwner, DenialMembershipGroupDerived, DenialConstraintAdminLockout, DenialCredentialInsufficient, DenialLeaveBindingUnclassified},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestProjectLeave_TokenRefusedSessionOnly"},
+		},
+		Bearer: SessionOnly(ReasonGovernancePending),
+	},
+	{
 		ID:          "project.membership.list",
 		Domain:      "project.membership",
 		Description: "List project members and their roles",
