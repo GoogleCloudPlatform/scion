@@ -190,6 +190,11 @@ func resolveDaemonServerMode(cmd *cobra.Command) error {
 // runServerStartOrDaemon handles the server start command. By default it launches
 // the server as a background daemon. When --foreground is set, it runs directly.
 func runServerStartOrDaemon(cmd *cobra.Command, args []string) error {
+	// Resolve a relative --config against the launch directory, for this
+	// process's own reads and for the daemon child's args alike.
+	if err := absolutizeServerConfigPath(); err != nil {
+		return err
+	}
 	if serverStartForeground {
 		return runServerStart(cmd, args)
 	}
