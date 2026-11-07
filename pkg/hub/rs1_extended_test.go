@@ -118,6 +118,11 @@ func TestRS1_AST_BypassPathsDocumented(t *testing.T) {
 		"server.go":                       "server initialization: system-level bootstrap, not project membership",
 		"handlers_users_core.go":          "user admin role sync: creates/deletes system-scoped super-admin and hub-member bindings inside atomic role transitions, guarded by CanDelegate and per-field permission checks",
 		"project_fixture_purge.go":        "test identity purge (ptone/scion#4240): removes only the purged test identity's own bindings on a stamped project it keeps, inside the purge transaction under the project lock, right before the identity is deleted; not a membership mutation of any other principal",
+		// internal/hubtestutil is scanned through guardScanSubdirs, so its
+		// entries are keyed by slash path. Only test code may import it
+		// (its no_hub_import_test.go); these files seed test fixtures.
+		"internal/hubtestutil/access_sqlite.go": "test-only fixture seeder (PvSeedRoleBinding): writes the role binding a test asks for into the test's own store; no request reaches it, not a membership mutation",
+		"internal/hubtestutil/authz_sqlite.go":  "test-only fixture seeders (SystemRoleUserWithPermissions, CreateTestUserWithRole, CreateTestUserWithProjectRole, AddProjectMemberWithRole, GrantProjectAccessOnly): set up the users and role bindings a test asks for in the test's own store; no request reaches them, not a membership mutation",
 	}
 
 	// Scan all .go files in pkg/hub for direct CreateRoleBinding calls.
