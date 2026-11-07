@@ -334,6 +334,10 @@ var bearerMatrixExclusions = map[liveInventoryKey]bearerMatrixExclusion{
 		Reason: "the artifact service answers a caller that cannot read the artifact with 404, as for a missing artifact, on every method, so the generic refusal probes get 404 where the matrix expects 403 for a non-GET method; the admitting token carries only artifact:manage, not artifact:read, so the read check answers it 404 too; with artifact:read added, the super-admin is neither the fixture artifact's owner nor an admin grantee, so the manage check would answer 403 (the review-grant path refuses it with the same 403)",
 		Pin:    "TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded",
 	},
+	{OperationID: "artifact.grant.notify", Method: "POST", Pattern: "/api/v1/artifacts/{id}/grants"}: {
+		Reason: "notify is a body field of the grant route, which admits tokens for the grant itself (artifact.grant.put); a token's notify is never refused with a status but answered notifySkipped not_permitted while the grant is still made, so the generic session-only probe (a 403 with session-only details) does not apply. The dedicated test drives the send gate with every credential kind and pins that only an interactive or dev session sends",
+		Pin:    "TestGrantNotifyGate",
+	},
 	{OperationID: "artifact.grant.delete", Method: "DELETE", Pattern: "/api/v1/artifacts/{id}/grants/{grantId}"}: {
 		Reason: "the artifact service answers a caller that cannot read the artifact with 404, as for a missing artifact, on every method, so the generic refusal probes get 404 where the matrix expects 403 for a non-GET method; the admitting token carries only artifact:manage, not artifact:read, so the read check answers it 404 too; with artifact:read added, the super-admin is neither the fixture artifact's owner nor an admin grantee, so the manage check would answer 403",
 		Pin:    "TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded",

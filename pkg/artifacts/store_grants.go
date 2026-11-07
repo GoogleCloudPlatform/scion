@@ -44,7 +44,14 @@ func (s *sqlStore) lockLiveArtifact(ctx context.Context, tx *sql.Tx, artifactID 
 
 // PutGrant implements Store.
 func (s *sqlStore) PutGrant(ctx context.Context, g *Grant, maxGrants int, crossScope bool, actor *Actor) (GrantPut, error) {
-	return s.putGrant(ctx, g, maxGrants, crossScope, "", actor)
+	res, err := s.PutGrantNotify(ctx, g, maxGrants, crossScope, actor, false)
+	return res.Put, err
+}
+
+// PutGrantNotify implements Store.
+func (s *sqlStore) PutGrantNotify(ctx context.Context, g *Grant, maxGrants int, crossScope bool, actor *Actor, notify bool) (GrantPutResult, error) {
+	put, notified, err := s.putGrant(ctx, g, maxGrants, crossScope, "", actor, notify)
+	return GrantPutResult{Put: put, Notified: notified}, err
 }
 
 // PutReviewGrant implements Store.
@@ -53,7 +60,8 @@ func (s *sqlStore) PutReviewGrant(ctx context.Context, g *Grant, maxGrants int, 
 		g.Permission != GrantReview || home == "" {
 		return GrantPutUnchanged, errors.New("artifacts: PutReviewGrant needs a user principal grant with review permission and a home scope")
 	}
-	return s.putGrant(ctx, g, maxGrants, false, home, actor)
+	put, _, err := s.putGrant(ctx, g, maxGrants, false, home, actor, false)
+	return put, err
 }
 
 // validGrantPermission reports whether p is a permission a principal or
@@ -64,6 +72,23 @@ func validGrantPermission(p string) bool {
 		return true
 	}
 	return false
+}
+
+// grantRank orders the permissions a principal grant may carry: read 1 <
+// review 2 < write 3 < admin 4, and 0 for anything else. A grant raises
+// its subject's level when its rank is higher than the one it replaces.
+func grantRank(p string) int {
+	switch p {
+	case GrantRead:
+		return 1
+	case GrantReview:
+		return 2
+	case GrantWrite:
+		return 3
+	case GrantAdmin:
+		return 4
+	}
+	return 0
 }
 
 // reviewSubjectOK reports whether a grant of permission p may name the
@@ -77,64 +102,70 @@ func reviewSubjectOK(p, kind, ref string) bool {
 // existing grant for the subject other than review is never replaced. A
 // review grant never replaces a read, write or admin grant on either path:
 // the subject's one principal row would lose the read the review counts
-// with.
-func (s *sqlStore) putGrant(ctx context.Context, g *Grant, maxGrants int, crossScope bool, reviewHome string, actor *Actor) (GrantPut, error) {
+// with. notified is true when notify holds and the write raised the
+// subject's level (grantRank; a created grant counts as a raise), decided
+// under the artifact's lock; the event's detail then records
+// "notified": true.
+func (s *sqlStore) putGrant(ctx context.Context, g *Grant, maxGrants int, crossScope bool, reviewHome string, actor *Actor, notify bool) (GrantPut, bool, error) {
 	if g == nil || (g.SubjectKind != SubjectPrincipal && g.SubjectKind != SubjectScope) || g.SubjectRef == "" ||
 		!validGrantPermission(g.Permission) || !reviewSubjectOK(g.Permission, g.SubjectKind, g.SubjectRef) {
-		return GrantPutUnchanged, errors.New("artifacts: PutGrant needs a principal or scope grant with a permission (review: a user principal only)")
+		return GrantPutUnchanged, false, errors.New("artifacts: PutGrant needs a principal or scope grant with a permission (review: a user principal only)")
 	}
 	if !actor.valid() {
-		return GrantPutUnchanged, errNoActor
+		return GrantPutUnchanged, false, errNoActor
 	}
+	// Only a user is ever told.
+	notify = notify && g.SubjectKind == SubjectPrincipal && strings.HasPrefix(g.SubjectRef, PrincipalKindUser+":")
 	// The automatic form is reserved to the creation path (ptone/scion#7134).
 	if g.CreatedByRef == SponsorReviewCreator || actor.Authority == AuthoritySponsorReview {
-		return GrantPutUnchanged, errSponsorReviewReserved
+		return GrantPutUnchanged, false, errSponsorReviewReserved
 	}
 	if stewardActor(actor) && g.Permission == GrantAdmin {
-		return GrantPutUnchanged, ErrStewardActionNotAllowed
+		return GrantPutUnchanged, false, ErrStewardActionNotAllowed
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return GrantPutUnchanged, fmt.Errorf("artifacts: begin grant: %w", err)
+		return GrantPutUnchanged, false, fmt.Errorf("artifacts: begin grant: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 	if err := s.lockLiveArtifact(ctx, tx, g.ArtifactID); err != nil {
-		return GrantPutUnchanged, err
+		return GrantPutUnchanged, false, err
 	}
 	if err := s.refuseAttachmentTx(ctx, tx, g.ArtifactID); err != nil {
-		return GrantPutUnchanged, err
+		return GrantPutUnchanged, false, err
 	}
 	if reviewHome != "" {
 		var home, ownerKind string
 		if err := tx.QueryRowContext(ctx, s.rebind(`SELECT scope_ref, owner_kind FROM artifact WHERE id = ?`), g.ArtifactID).Scan(&home, &ownerKind); err != nil {
-			return GrantPutUnchanged, fmt.Errorf("artifacts: read home: %w", err)
+			return GrantPutUnchanged, false, fmt.Errorf("artifacts: read home: %w", err)
 		}
 		if home != reviewHome || ownerKind != PrincipalKindAgent {
-			return GrantPutUnchanged, ErrReviewGrantRefused
+			return GrantPutUnchanged, false, ErrReviewGrantRefused
 		}
 	}
 	// The review path checks its own home and owner first, so its refusal
 	// stays ErrReviewGrantRefused.
 	if err := s.checkExpect(ctx, tx, g.ArtifactID, actor); err != nil {
-		return GrantPutUnchanged, err
+		return GrantPutUnchanged, false, err
 	}
 	if g.SubjectKind == SubjectScope {
 		var home string
 		if err := tx.QueryRowContext(ctx, s.rebind(`SELECT scope_ref FROM artifact WHERE id = ?`), g.ArtifactID).Scan(&home); err != nil {
-			return GrantPutUnchanged, fmt.Errorf("artifacts: read home: %w", err)
+			return GrantPutUnchanged, false, fmt.Errorf("artifacts: read home: %w", err)
 		}
 		switch {
 		case g.SubjectRef == home && g.Permission == GrantAdmin:
-			return GrantPutUnchanged, ErrHomeGrantAdmin
+			return GrantPutUnchanged, false, ErrHomeGrantAdmin
 		case g.SubjectRef != home && !crossScope:
-			return GrantPutUnchanged, ErrCrossScopeDisabled
+			return GrantPutUnchanged, false, ErrCrossScopeDisabled
 		}
 	}
 	var (
-		id      string
-		perm    string
-		by      sql.NullString
-		created dbTime
+		id       string
+		perm     string
+		by       sql.NullString
+		created  dbTime
+		notified bool
 	)
 	err = tx.QueryRowContext(ctx, s.rebind(`SELECT id, permission, created_by_ref, created_at FROM artifact_grant
 		WHERE artifact_id = ? AND subject_kind = ? AND subject_ref = ?`), g.ArtifactID, g.SubjectKind, g.SubjectRef).Scan(&id, &perm, &by, &created)
@@ -143,7 +174,7 @@ func (s *sqlStore) putGrant(ctx context.Context, g *Grant, maxGrants int, crossS
 		// PutReviewGrant's grant is always a review grant, so this refuses
 		// it too.
 		if g.Permission == GrantReview && perm != GrantReview {
-			return GrantPutUnchanged, ErrReviewReplacesAccess
+			return GrantPutUnchanged, false, ErrReviewReplacesAccess
 		}
 		if perm != g.Permission {
 			// A level change by a person ends an automatic grant's
@@ -156,46 +187,58 @@ func (s *sqlStore) putGrant(ctx context.Context, g *Grant, maxGrants int, crossS
 			}
 			if _, err := tx.ExecContext(ctx, s.rebind(`UPDATE artifact_grant SET permission = ?, created_by_ref = ? WHERE id = ?`),
 				g.Permission, newBy, id); err != nil {
-				return GrantPutUnchanged, fmt.Errorf("artifacts: update grant: %w", err)
+				return GrantPutUnchanged, false, fmt.Errorf("artifacts: update grant: %w", err)
 			}
-			if err := s.insertEvent(ctx, tx, g.ArtifactID, EventGrantChanged, actor, time.Now(), map[string]any{
+			detail := map[string]any{
 				"grantId": id, "subjectKind": g.SubjectKind, "subjectRef": g.SubjectRef,
 				"oldPermission": perm, "newPermission": g.Permission,
-			}); err != nil {
-				return GrantPutUnchanged, err
+			}
+			// Only a raise is announced (Ask for review): a lowering or a
+			// level change to the same rank is not.
+			notified = notify && grantRank(g.Permission) > grantRank(perm)
+			if notified {
+				detail["notified"] = true
+			}
+			if err := s.insertEvent(ctx, tx, g.ArtifactID, EventGrantChanged, actor, time.Now(), detail); err != nil {
+				return GrantPutUnchanged, false, err
 			}
 		}
 		if err := tx.Commit(); err != nil {
-			return GrantPutUnchanged, fmt.Errorf("artifacts: commit grant: %w", err)
+			return GrantPutUnchanged, false, fmt.Errorf("artifacts: commit grant: %w", err)
 		}
 		g.ID, g.CreatedAt = id, created.Time
 		if perm != g.Permission {
-			return GrantPutChanged, nil
+			return GrantPutChanged, notified, nil
 		}
-		return GrantPutUnchanged, nil
+		return GrantPutUnchanged, false, nil
 	case !errors.Is(err, sql.ErrNoRows):
-		return GrantPutUnchanged, fmt.Errorf("artifacts: find grant: %w", err)
+		return GrantPutUnchanged, false, fmt.Errorf("artifacts: find grant: %w", err)
 	}
 	var n int
 	if err := tx.QueryRowContext(ctx, s.rebind(`SELECT COUNT(*) FROM artifact_grant
 		WHERE artifact_id = ? AND subject_kind IN (?, ?)`), g.ArtifactID, SubjectPrincipal, SubjectScope).Scan(&n); err != nil {
-		return GrantPutUnchanged, fmt.Errorf("artifacts: count grants: %w", err)
+		return GrantPutUnchanged, false, fmt.Errorf("artifacts: count grants: %w", err)
 	}
 	if n >= maxGrants {
-		return GrantPutUnchanged, ErrTooManyGrants
+		return GrantPutUnchanged, false, ErrTooManyGrants
 	}
 	if err := s.insertGrant(ctx, tx, g); err != nil {
-		return GrantPutUnchanged, err
+		return GrantPutUnchanged, false, err
 	}
-	if err := s.insertEvent(ctx, tx, g.ArtifactID, EventGrantCreated, actor, time.Now(), map[string]any{
+	detail := map[string]any{
 		"grantId": g.ID, "subjectKind": g.SubjectKind, "subjectRef": g.SubjectRef, "permission": g.Permission,
-	}); err != nil {
-		return GrantPutUnchanged, err
+	}
+	// A created grant is a raise.
+	if notify {
+		detail["notified"] = true
+	}
+	if err := s.insertEvent(ctx, tx, g.ArtifactID, EventGrantCreated, actor, time.Now(), detail); err != nil {
+		return GrantPutUnchanged, false, err
 	}
 	if err := tx.Commit(); err != nil {
-		return GrantPutUnchanged, fmt.Errorf("artifacts: commit grant: %w", err)
+		return GrantPutUnchanged, false, fmt.Errorf("artifacts: commit grant: %w", err)
 	}
-	return GrantPutCreated, nil
+	return GrantPutCreated, notify, nil
 }
 
 // errSponsorReviewReserved refuses a grant write, other than the creation of

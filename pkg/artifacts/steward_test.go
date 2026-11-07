@@ -663,6 +663,10 @@ func (s laxStore) PutGrant(ctx context.Context, g *Grant, max int, cross bool, a
 	return s.Store.PutGrant(ctx, g, max, cross, laxActor(actor))
 }
 
+func (s laxStore) PutGrantNotify(ctx context.Context, g *Grant, max int, cross bool, actor *Actor, notify bool) (GrantPutResult, error) {
+	return s.Store.PutGrantNotify(ctx, g, max, cross, laxActor(actor), notify)
+}
+
 func (s laxStore) UpdateArtifact(ctx context.Context, id string, u ArtifactUpdate) (*Artifact, error) {
 	u.Actor = laxActor(u.Actor)
 	return s.Store.UpdateArtifact(ctx, id, u)

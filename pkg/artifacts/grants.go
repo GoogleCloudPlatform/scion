@@ -113,6 +113,10 @@ type GrantRequest struct {
 	// Permission is "read", "review", "write" or "admin". Review is for a
 	// user principal only.
 	Permission string `json:"permission"`
+	// Notify asks for the user subject to be told about the grant (Ask for
+	// review, ptone/scion#5145). It never blocks the grant; the response
+	// says whether the user was told.
+	Notify bool `json:"notify,omitempty"`
 }
 
 // GrantInfo describes a principal or scope grant.
@@ -130,7 +134,32 @@ type GrantInfo struct {
 // GrantResponse answers POST /{id}/grants.
 type GrantResponse struct {
 	Grant GrantInfo `json:"grant"`
+	// Notified is true when the request asked for notify and the user was
+	// told.
+	Notified bool `json:"notified,omitempty"`
+	// NotifySkipped says why a request that asked for notify did not tell
+	// the user (a NotifySkipped* value).
+	NotifySkipped string `json:"notifySkipped,omitempty"`
 }
+
+// GrantResponse.NotifySkipped values. Only a caller that already
+// administers the artifact, or holds review-grant authority on it, sees
+// them.
+const (
+	// NotifySkippedSelf: the grant names the caller.
+	NotifySkippedSelf = "self"
+	// NotifySkippedNotPermitted: the caller's credential may not send it,
+	// the user cannot be told (missing, not active), the caller may not
+	// read the user, or, for review, the user cannot read the artifact.
+	NotifySkippedNotPermitted = "not_permitted"
+	// NotifySkippedUnavailable: the hub could not decide or write the
+	// notice, or sends none.
+	NotifySkippedUnavailable = "unavailable"
+	// NotifySkippedNotRaised: the grant did not raise the user's level.
+	NotifySkippedNotRaised = "not_raised"
+	// NotifySkippedRateLimited: the caller, or the hub, sent too many.
+	NotifySkippedRateLimited = "rate_limited"
+)
 
 // GrantListResponse answers GET /{id}/grants.
 type GrantListResponse struct {
@@ -321,6 +350,12 @@ func (s *Service) handlePutGrant(w http.ResponseWriter, r *http.Request, id stri
 		writeError(w, http.StatusBadRequest, "bad_request", "the home project's grant may be read or write")
 		return
 	}
+	if req.Notify && !isUserPrincipal(req.SubjectKind, req.SubjectRef) {
+		// Decided after the caller's authority (K17), so a reader who may
+		// not administer the artifact learns nothing from it.
+		writeError(w, http.StatusBadRequest, "bad_request", "notify is for a user")
+		return
+	}
 	if req.SubjectKind == SubjectScope && !home && !s.crossScopeAllowed(r.Context()) {
 		s.logRefusal(r, logActionShare, logReasonCrossProjectDisabled, a)
 		writeError(w, http.StatusForbidden, "cross_project_sharing_disabled",
@@ -332,10 +367,15 @@ func (s *Service) handlePutGrant(w http.ResponseWriter, r *http.Request, id stri
 		ID: uuid.NewString(), ArtifactID: a.ID, SubjectKind: req.SubjectKind, SubjectRef: req.SubjectRef,
 		Permission: req.Permission, CreatedByRef: PrincipalRef(actor.Kind, actor.Ref), CreatedAt: time.Now().UTC(),
 	}
+	notify, skipped := false, ""
+	if req.Notify {
+		notify, skipped = s.grantNotifyDecision(r, b, a, &req)
+	}
 	// The store decides the home and cross-project rules again under the
 	// artifact's lock, against the home scope as it is then (a concurrent
 	// move may have changed it); the checks above answer early.
-	put, err := b.store.PutGrant(r.Context(), g, MaxGrantsPerArtifact, s.crossScopeAllowed(r.Context()), actor)
+	res, err := b.store.PutGrantNotify(r.Context(), g, MaxGrantsPerArtifact, s.crossScopeAllowed(r.Context()), actor, notify)
+	put := res.Put
 	switch {
 	case errors.Is(err, ErrStewardActionNotAllowed):
 		s.refuseStewardAction(w, r, logActionShare, a)
@@ -371,8 +411,129 @@ func (s *Service) handlePutGrant(w http.ResponseWriter, r *http.Request, id stri
 	if put == GrantPutCreated {
 		status = http.StatusCreated
 	}
-	s.logGrantPut(r, a, g, put, authority)
-	writeJSON(w, status, GrantResponse{Grant: grantInfo(a, g)})
+	resp := GrantResponse{Grant: grantInfo(a, g)}
+	if !req.Notify {
+		s.logGrantPut(r, a, g, put, authority)
+		writeJSON(w, status, resp)
+		return
+	}
+	switch {
+	case skipped != "":
+	case !res.Notified:
+		// The store saw no raise under the lock (a concurrent change made
+		// this write a no-op or a lowering): nothing is sent.
+		skipped = NotifySkippedNotRaised
+	default:
+		resp.Notified = s.sendGrantNotice(r, a, g, actor)
+		if !resp.Notified {
+			// O5: the event, which is append-only, keeps notified; the
+			// response and the decision log say the notice was not sent.
+			skipped = NotifySkippedUnavailable
+		}
+	}
+	resp.NotifySkipped = skipped
+	s.logGrantPutNotify(r, a, g, put, authority, &resp.Notified)
+	writeJSON(w, status, resp)
+}
+
+// isUserPrincipal reports whether the grant subject (kind, ref) is a user
+// principal.
+func isUserPrincipal(kind, ref string) bool {
+	return kind == SubjectPrincipal && strings.HasPrefix(ref, PrincipalKindUser+":")
+}
+
+// grantNotifyDecision decides, for a manager's grant request req that asked
+// for notify, whether the grant is written with notify (section 2.5 of the
+// ptone/scion#5145 phase 2 spec). In order, cheapest and writing nothing
+// first, the limiter last:
+//   - the grant names the caller: skipped "self";
+//   - the host's GrantNotifier.MayNotifyGrant (no notifier: "unavailable";
+//     a refusal: "not_permitted"; a fault: "unavailable");
+//   - for review, until review reads (phase 3): the user must already read
+//     the artifact some other way (reviewSubjectCanRead): "not_permitted",
+//     or "unavailable" on a lookup fault;
+//   - the grant must raise the user's current level: "not_raised";
+//   - the notify limiter, per requester and in all: "rate_limited".
+//
+// A refusal never charges the limiter (B2), and no fault here blocks the
+// grant (condition H): a lookup fault answers "unavailable" and the grant
+// is written without notify.
+func (s *Service) grantNotifyDecision(r *http.Request, b backend, a *Artifact, req *GrantRequest) (notify bool, skipped string) {
+	ctx := r.Context()
+	kind, ref, _, _ := s.host.Principal(ctx)
+	if req.SubjectRef == PrincipalRef(kind, ref) {
+		return false, NotifySkippedSelf
+	}
+	subjectID := strings.TrimPrefix(req.SubjectRef, PrincipalKindUser+":")
+	notifier, has := s.host.(GrantNotifier)
+	if !has {
+		s.logNotifySkipped(r, a, logReasonNotifyUnavailable, req.SubjectRef, req.Permission)
+		return false, NotifySkippedUnavailable
+	}
+	allowed, err := notifier.MayNotifyGrant(ctx, subjectID)
+	if err != nil {
+		slog.WarnContext(ctx, "artifacts: grant notify check failed", "error", err)
+		s.logNotifySkipped(r, a, logReasonNotifyUnavailable, req.SubjectRef, req.Permission)
+		return false, NotifySkippedUnavailable
+	}
+	if !allowed {
+		s.logNotifySkipped(r, a, logReasonNotifyNotPermitted, req.SubjectRef, req.Permission)
+		return false, NotifySkippedNotPermitted
+	}
+	if req.Permission == GrantReview {
+		// Phase 2 only: a review grant does not read, so the review notice
+		// goes only to a user who can already open the artifact (Q1).
+		readable, err := s.reviewSubjectCanRead(ctx, b, a, req.SubjectRef)
+		if err != nil {
+			slog.WarnContext(ctx, "artifacts: grant notify: subject read check failed", "error", err)
+			s.logNotifySkipped(r, a, logReasonNotifyUnavailable, req.SubjectRef, req.Permission)
+			return false, NotifySkippedUnavailable
+		}
+		if !readable {
+			s.logNotifySkipped(r, a, logReasonNotifyNotPermitted, req.SubjectRef, req.Permission)
+			return false, NotifySkippedNotPermitted
+		}
+	}
+	grants, err := b.store.ListGrants(ctx, a.ID)
+	if err != nil {
+		slog.WarnContext(ctx, "artifacts: grant notify: list grants failed", "error", err)
+		s.logNotifySkipped(r, a, logReasonNotifyUnavailable, req.SubjectRef, req.Permission)
+		return false, NotifySkippedUnavailable
+	}
+	for _, g := range grants {
+		if g.SubjectKind == SubjectPrincipal && g.SubjectRef == req.SubjectRef && grantRank(req.Permission) <= grantRank(g.Permission) {
+			return false, NotifySkippedNotRaised
+		}
+	}
+	if _, allowed := s.notifyLimiterFor().allow(PrincipalRef(kind, ref)); !allowed {
+		s.logNotifySkipped(r, a, logReasonNotifyRateLimited, req.SubjectRef, req.Permission)
+		return false, NotifySkippedRateLimited
+	}
+	return true, ""
+}
+
+// sendGrantNotice tells the user subject of grant g, which the store
+// recorded with notified under the artifact's lock, through the host's
+// GrantNotifier, after the commit. It reports whether the notice was
+// written; a failure is logged as notify_failed and never undoes the
+// grant (O5).
+func (s *Service) sendGrantNotice(r *http.Request, a *Artifact, g *Grant, actor *Actor) bool {
+	notifier, ok := s.host.(GrantNotifier)
+	if !ok {
+		s.logNotifySkipped(r, a, logReasonNotifyFailed, g.SubjectRef, g.Permission)
+		return false
+	}
+	err := notifier.NotifyGrant(r.Context(), GrantNotice{
+		ArtifactID: a.ID, HomeScope: a.ScopeRef,
+		SubjectUserID: strings.TrimPrefix(g.SubjectRef, PrincipalKindUser+":"), Permission: g.Permission,
+		ActorKind: actor.Kind, ActorRef: actor.Ref, Authority: actor.Authority,
+	})
+	if err != nil {
+		slog.WarnContext(r.Context(), "artifacts: grant notice not written", "error", err)
+		s.logNotifySkipped(r, a, logReasonNotifyFailed, g.SubjectRef, g.Permission)
+		return false
+	}
+	return true
 }
 
 // putReviewGrant implements POST /{id}/grants for a caller that may read
@@ -402,7 +563,7 @@ func (s *Service) putReviewGrant(w http.ResponseWriter, r *http.Request, b backe
 	var clause string // the review clause that allowed the grant, for the decision log
 	r = r.WithContext(context.WithValue(r.Context(), reviewClauseNote{}, &clause))
 	ctx := r.Context()
-	subject, refusal := s.reviewGrantSubject(r, a)
+	subject, notify, refusal := s.reviewGrantSubject(r, a)
 	if refusal != "" {
 		s.logReviewGrantRefusal(r, a, refusal, subject)
 		s.writeAdminForbidden(w, r)
@@ -475,7 +636,14 @@ func (s *Service) putReviewGrant(w http.ResponseWriter, r *http.Request, b backe
 	if put == GrantPutCreated {
 		status = http.StatusCreated
 	}
-	writeJSON(w, status, GrantResponse{Grant: grantInfo(a, g)})
+	resp := GrantResponse{Grant: grantInfo(a, g)}
+	if notify {
+		// The review path never notifies (spec section 2.6): phase 3
+		// removes it, and its project-admin callers lose review-giving.
+		// Only a caller with review-grant authority gets here.
+		resp.NotifySkipped = NotifySkippedNotPermitted
+	}
+	writeJSON(w, status, resp)
 }
 
 // refuseReviewReplacesAccess logs and answers putReviewGrant's refusal of
@@ -557,34 +725,36 @@ func (s *Service) mayGrantReview(ctx context.Context, a *Artifact) bool {
 //   - the caller passes reviewGrantAuthorized, else reviewRefusalCaller.
 //
 // With a refusal, subject is the well-formed user ref the body named when
-// the body checks passed, and empty otherwise. Without the body checks
-// this is mayGrantReview.
-func (s *Service) reviewGrantSubject(r *http.Request, a *Artifact) (subject string, refusal reviewGrantRefusal) {
+// the body checks passed, and empty otherwise. notify is the body's notify,
+// reported only without a refusal: the review path never notifies, and a
+// caller without review-grant authority learns nothing from it. Without
+// the body checks this is mayGrantReview.
+func (s *Service) reviewGrantSubject(r *http.Request, a *Artifact) (subject string, notify bool, refusal reviewGrantRefusal) {
 	ctx := r.Context()
 	if !s.reviewGrantCaller(ctx, a) {
-		return "", reviewRefusalCaller
+		return "", false, reviewRefusalCaller
 	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxGrantRequestBytes+1))
 	if err != nil || len(body) > maxGrantRequestBytes {
-		return "", reviewRefusalBody
+		return "", false, reviewRefusalBody
 	}
 	var req GrantRequest
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&req); err != nil || dec.More() {
-		return "", reviewRefusalBody
+		return "", false, reviewRefusalBody
 	}
 	if req.SubjectKind != SubjectPrincipal || req.Permission != GrantReview {
-		return "", reviewRefusalBody
+		return "", false, reviewRefusalBody
 	}
 	pk, id, found := strings.Cut(req.SubjectRef, ":")
 	if !found || pk != PrincipalKindUser || !validSubjectID(id) {
-		return "", reviewRefusalBody
+		return "", false, reviewRefusalBody
 	}
 	if !s.reviewGrantAuthorized(ctx, a) {
-		return req.SubjectRef, reviewRefusalCaller
+		return req.SubjectRef, false, reviewRefusalCaller
 	}
-	return req.SubjectRef, ""
+	return req.SubjectRef, req.Notify, ""
 }
 
 // handleDeleteGrant implements DELETE /{id}/grants/{grantId}.
