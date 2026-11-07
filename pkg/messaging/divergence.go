@@ -492,7 +492,9 @@ func CheckConversationConsistency(
 
 	// A hard deadline for all lookups together, whatever the caller's
 	// context allows. A lookup that hits it fails open like any other
-	// query error, and is counted as a timeout.
+	// query error, and is counted as a timeout. The count keys on the
+	// context, not on the error: a driver cut short by the deadline does not
+	// always return an error wrapping context.DeadlineExceeded.
 	ctx, cancel := context.WithTimeout(ctx, ConsistencyCheckTimeout)
 	defer cancel()
 	failOpen := func() bool {

@@ -102,18 +102,22 @@ func GoConsistencyCheck(in ConsistencyInput, fn func(ctx context.Context, in Con
 // Go runs fn(ctx, in) in a new goroutine and returns immediately. ctx is
 // derived from context.Background with the runner's deadline. Go returns
 // false, without running fn, when every slot is busy or a check with the same
-// key is already running; the skip is counted in DivergenceMetrics.
+// key is already running; the skip is counted in DivergenceMetrics. It also
+// returns false, uncounted and without taking a slot, when the input has
+// nothing to check (no conversation, or neither a thread nor a pair):
+// CheckConversationConsistency would return at once for it.
 func (r *ConsistencyRunner) Go(in ConsistencyInput, fn func(ctx context.Context, in ConsistencyInput)) bool {
 	key := in.key()
+	if key == "" || in.ConversationID == "" {
+		return false
+	}
 	r.mu.Lock()
-	if _, busy := r.inflight[key]; (key != "" && busy) || r.running >= r.max {
+	if _, busy := r.inflight[key]; busy || r.running >= r.max {
 		r.mu.Unlock()
 		DivergenceMetrics.IncConsistencySkipped()
 		return false
 	}
-	if key != "" {
-		r.inflight[key] = struct{}{}
-	}
+	r.inflight[key] = struct{}{}
 	r.running++
 	r.mu.Unlock()
 
@@ -141,9 +145,7 @@ func (r *ConsistencyRunner) Go(in ConsistencyInput, fn func(ctx context.Context,
 func (r *ConsistencyRunner) release(key string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if key != "" {
-		delete(r.inflight, key)
-	}
+	delete(r.inflight, key)
 	r.running--
 	if r.running == 0 {
 		r.idle.Broadcast()
