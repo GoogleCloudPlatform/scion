@@ -125,7 +125,9 @@ func TestCredentialReload_TakesEffectAfterReinitialize(t *testing.T) {
 
 	deadline := time.Now().Add(10 * time.Second)
 	for {
-		reinitialized := string(conn.snapshot().SecretKey) == string(newKey) && conn.GetStatus() == ConnectionStatusConnected
+		// The test hub serves no control channel, so a restarted
+		// connection waits for its handshake: connecting.
+		reinitialized := string(conn.snapshot().SecretKey) == string(newKey) && conn.GetStatus() == ConnectionStatusConnecting
 		if reinitialized && status(newKey) == http.StatusOK {
 			break
 		}

@@ -171,3 +171,143 @@ func TestStart_InterceptionRequiredUnavailable_ReleasesPort(t *testing.T) {
 	}
 	_ = ln.Close()
 }
+
+// TestInterceptionInstalled pins what init's CAP_NET_ADMIN drop keys its
+// fail-closed decision on: true once any rule is in place, false when
+// interception was skipped or nothing could be installed.
+func TestInterceptionInstalled(t *testing.T) {
+	failure := errors.New("exit status 4")
+	tests := []struct {
+		name                  string
+		mode                  string
+		networkMode           string
+		uid                   int
+		redirectErr, blockErr error
+		want                  bool
+	}{
+		{name: "assign redirect", mode: modeAssign, want: true},
+		{name: "assign redirect fails", mode: modeAssign, redirectErr: failure, want: false},
+		{name: "block both", mode: modeBlock, want: true},
+		{name: "block redirect fails, filter in place", mode: modeBlock, redirectErr: failure, want: true},
+		{name: "block filter fails, redirect in place", mode: modeBlock, blockErr: failure, want: true},
+		{name: "block both fail", mode: modeBlock, redirectErr: failure, blockErr: failure, want: false},
+		{name: "non-root skipped", mode: modeAssign, uid: 1000, want: false},
+		{name: "host network skipped", mode: modeBlock, networkMode: "host", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stubInterception(t, tt.redirectErr, tt.blockErr)
+			s := New(Config{Mode: tt.mode, NetworkMode: tt.networkMode, Port: 18380})
+			_ = s.configureMetadataInterception(tt.uid)
+			if got := s.InterceptionInstalled(); got != tt.want {
+				t.Errorf("InterceptionInstalled() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestStop_Idempotent: sciontool init stops the server from a deferred call
+// on every return path and again on normal shutdown, so a second Stop on a
+// started server, and Stop on a server that never started, must be safe and
+// leave the port free.
+func TestStop_Idempotent(t *testing.T) {
+	stubInterception(t, nil, nil)
+
+	t.Run("started", func(t *testing.T) {
+		port := freePort(t)
+		s := New(Config{Mode: modeBlock, Port: port})
+		if err := s.Start(context.Background()); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		s.Stop()
+		s.Stop()
+		ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+		if err != nil {
+			t.Fatalf("port %d still bound after two Stops: %v", port, err)
+		}
+		_ = ln.Close()
+	})
+
+	t.Run("never started", func(t *testing.T) {
+		s := New(Config{Mode: modeAssign, Port: freePort(t)})
+		s.Stop()
+		s.Stop()
+	})
+}
+
+// portFree reports whether 127.0.0.1:port can be bound right now.
+func portFree(t *testing.T, port int) bool {
+	t.Helper()
+	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		return false
+	}
+	_ = ln.Close()
+	return true
+}
+
+// TestRestartHTTP_AfterStop: a health-check restart that runs after Stop
+// must not bind the port again.
+func TestRestartHTTP_AfterStop(t *testing.T) {
+	stubInterception(t, nil, nil)
+	port := freePort(t)
+	s := New(Config{Mode: modeBlock, Port: port})
+	if err := s.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	s.Stop()
+	if err := s.restartHTTP(context.Background()); !errors.Is(err, errRestartAfterStop) {
+		t.Fatalf("restartHTTP after Stop = %v, want errRestartAfterStop", err)
+	}
+	if !portFree(t, port) {
+		t.Fatalf("port %d bound after a restart following Stop", port)
+	}
+}
+
+// TestStart_AfterStop: Start on a stopped server refuses at its entry,
+// before binding or installing any interception.
+func TestStart_AfterStop(t *testing.T) {
+	redirectCalled, blockCalled := stubInterception(t, nil, nil)
+	orig := startBeforeServeHook
+	startBeforeServeHook = func(*Server) { t.Error("Start went past its entry check on a stopped server") }
+	t.Cleanup(func() { startBeforeServeHook = orig })
+
+	port := freePort(t)
+	s := New(Config{Mode: modeBlock, Port: port})
+	s.Stop()
+	if err := s.Start(context.Background()); !errors.Is(err, errStartAfterStop) {
+		t.Fatalf("Start after Stop = %v, want errStartAfterStop", err)
+	}
+	if *redirectCalled || *blockCalled {
+		t.Errorf("interception attempted on a stopped server (redirect %v, block %v)", *redirectCalled, *blockCalled)
+	}
+	if s.InterceptionInstalled() {
+		t.Error("interception installed on a stopped server")
+	}
+	if !portFree(t, port) {
+		t.Fatalf("port %d bound by Start on a stopped server", port)
+	}
+}
+
+// TestStart_StopBeforeServe_Backstop: a Stop that lands after Start's entry
+// check but before it installs the server (forced here through
+// startBeforeServeHook) makes Start refuse, release the port and remove
+// any interception it installed.
+func TestStart_StopBeforeServe_Backstop(t *testing.T) {
+	stubInterception(t, nil, nil)
+	orig := startBeforeServeHook
+	startBeforeServeHook = func(s *Server) { s.Stop() }
+	t.Cleanup(func() { startBeforeServeHook = orig })
+
+	port := freePort(t)
+	s := New(Config{Mode: modeBlock, Port: port})
+	if err := s.Start(context.Background()); !errors.Is(err, errStartAfterStop) {
+		t.Fatalf("Start with a Stop before serve = %v, want errStartAfterStop", err)
+	}
+	if s.InterceptionInstalled() {
+		t.Error("interception left installed after the backstop refused")
+	}
+	if !portFree(t, port) {
+		t.Fatalf("port %d still bound after the backstop refused", port)
+	}
+}

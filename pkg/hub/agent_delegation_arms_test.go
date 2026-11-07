@@ -238,6 +238,22 @@ func TestAgentDelegationAdmission_MatchesCatalog(t *testing.T) {
 			route, ok := resolveProjectResourceRoute(entry.Method, "/api/v1/projects/p-1")
 			found = ok && route.OperationID == entry.Operation
 		}
+		if entry.RouteID == agentsCollectionRouteID {
+			route, ok := resolveAgentsCollectionRoute(entry.Method, "/api/v1/agents")
+			found = ok && route.OperationID == entry.Operation
+		}
+		if entry.RouteID == projectAgentsCollectionRouteID {
+			route, _, ok := resolveProjectAgentsCollectionRoute(entry.Method, "/api/v1/projects/p-1/agents")
+			found = ok && route.OperationID == entry.Operation
+		}
+		if entry.RouteID == skillsCollectionRouteID {
+			route, ok := resolveCatalogCollectionRoute(entry.Method, "/api/v1/skills", "/api/v1/skills", skillsCollectionRouteID, opSkillList, hubSkillCollectionTarget)
+			found = ok && route.OperationID == entry.Operation
+		}
+		if entry.RouteID == templatesCollectionRouteID {
+			route, ok := resolveCatalogCollectionRoute(entry.Method, "/api/v1/templates", "/api/v1/templates", templatesCollectionRouteID, opTemplateList, hubTemplateCollectionTarget)
+			found = ok && route.OperationID == entry.Operation
+		}
 		assert.True(t, found, "entry %s %s matches no exact route resolution with that operation", entry.Method, entry.RouteID)
 		assert.True(t, permissions.AgentDelegable(spec.BasePermission, permissions.BoundaryKindHub) ||
 			permissions.AgentDelegable(spec.BasePermission, permissions.BoundaryKindProject),
@@ -252,15 +268,18 @@ func TestAgentDelegationAdmission_MatchesCatalog(t *testing.T) {
 		hasC := slices.Contains(spec.Credentials, authzop.CredentialDelegatedAgent)
 		assert.Equal(t, hasP, hasC, "operation %s admits only half of the delegated pair", spec.ID)
 	}
+	// A key is admitted by an admitted operation whose base permission it
+	// is, or by an admitted list route whose item filter it is (an
+	// item-filter-only key such as skill.read).
 	for perm := range permissions.AgentDelegableRegistry {
 		admitted := false
 		for _, entry := range agentDelegationAdmittedRoutes {
 			spec, _ := catalogOperationByID(entry.Operation)
-			if spec.BasePermission == perm {
+			if spec.BasePermission == perm || entry.ItemFilter == perm {
 				admitted = true
 			}
 		}
-		assert.True(t, admitted, "delegable permission %s has no admitted operation", perm)
+		assert.True(t, admitted, "delegable permission %s has no admitted operation or list item filter", perm)
 	}
 }
 

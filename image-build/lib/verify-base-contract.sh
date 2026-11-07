@@ -444,6 +444,32 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Playwright WebKit/Firefox system libraries — installed by
+# install-core-toolchain.sh playwright-deps on the suites it has a list for
+# (keyed on ID/VERSION_ID; keep this case in step with playwright_deps_for_os).
+# Three sentinels, one per heavy group, catch the step being dropped; the full
+# list is not re-checked here.
+# ---------------------------------------------------------------------------
+# shellcheck source=/dev/null
+pw_os="$(. /etc/os-release 2>/dev/null && printf '%s%s' "${ID:-}" "${VERSION_ID:-}")"
+case "$pw_os" in
+debian13)
+  for pw_pkg in libgtk-4-1 gstreamer1.0-plugins-bad libavcodec61; do
+    # shellcheck disable=SC2016 # ${Status} is a dpkg-query field, not a shell variable
+    if dpkg-query -W -f='${Status}' "$pw_pkg" 2>/dev/null | grep -q 'install ok installed'; then
+      ok "Playwright library package $pw_pkg installed"
+    else
+      fail "$pw_pkg not installed — run install-core-toolchain.sh playwright-deps;
+      without it Playwright's WebKit and Firefox cannot start for non-root agents"
+    fi
+  done
+  ;;
+*)
+  note "no Playwright WebKit/Firefox library list for '${pw_os:-unknown}'; not checked"
+  ;;
+esac
+
+# ---------------------------------------------------------------------------
 # Timezone data — the agent TZ (defaulted to UTC by sciontool's harness
 # provisioning, cmd/sciontool/commands/harness.go) only takes effect if the
 # zone files exist. glibc treats an unknown zone as UTC without any error, so

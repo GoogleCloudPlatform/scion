@@ -836,8 +836,9 @@ func (r *GitHubSkillResolver) credentialSource(ghRef *GitHubSkillRef) string {
 // an explicit GITHUB_TOKEN set on the agent's own applied config or its
 // template, a project secret used to fill that same env key when it would
 // otherwise be absent, a GitHub App installation token minted fresh for this
-// create, the same mint redirected to a different project's installation via
-// the source-project label, the broker process's own GITHUB_TOKEN, and a
+// create (from the agent's own project's installation, or from a token-source
+// project's installation only when the hub's gated association check allows
+// it), the broker process's own GITHUB_TOKEN, and a
 // provision-credential fallback of the same name — every one of these ends
 // up as r.token by the time tokenForRef's default cascade runs, and none of
 // them is special-cased here: the hash treats them alike. Named sources

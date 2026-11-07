@@ -33,9 +33,10 @@ import (
 // On a shared backend the directory is reached by pkg/shareddirs' anchored
 // walk, which opens every component below HostBase with O_NOFOLLOW and
 // checks that the Root opened is the directory the walk saw. With create,
-// a missing leaf is first created by shareddirs.EnsureLeafOwned (its own
-// O_NOFOLLOW walk, which applies the leaf mode and ACL, and which gives a
-// root creator's new directories the Layout's owner, Resolved.Owner).
+// a missing leaf is first created by EnsureSharedLeafOwned
+// (shareddirs.EnsureLeafOwned's own O_NOFOLLOW walk, which applies the leaf
+// mode and ACL, and which gives a root creator's new directories the
+// Layout's owner, Resolved.Owner).
 //
 // On the local backend the directory itself must not be a symlink (rooting
 // at a symlink would confine to wherever it points); its parents are
@@ -52,7 +53,7 @@ func (r Resolved) Open(create bool) (*os.Root, error) {
 			return nil, err
 		}
 		if create {
-			leafFd, _, err := shareddirs.EnsureLeafOwned(base, r.RelPath, r.Owner())
+			leafFd, _, err := EnsureSharedLeafOwned(base, r.RelPath, r.Owner())
 			if err != nil {
 				return nil, fmt.Errorf("create %s %q: %w", r.Kind, r.Name, err)
 			}

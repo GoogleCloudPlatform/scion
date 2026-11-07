@@ -19,7 +19,9 @@ package entadapter
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -29,6 +31,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/conversation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/messageaddressee"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
@@ -76,11 +79,62 @@ func newChatRetentionFixture(t *testing.T) *chatRetentionFixture {
 	client := enttest.NewClient(t)
 	f := &chatRetentionFixture{t: t, ctx: context.Background(), client: client, db: clientDB(client), st: NewChatRetentionStore(client)}
 	require.NotNil(t, f.db)
-	for _, ddl := range chatRetentionTestDDL {
+	// webchat_topic's time columns are TEXT on SQLite and TIMESTAMPTZ on
+	// Postgres, as the web chat store creates them.
+	timeType := "TEXT"
+	if f.pg() {
+		timeType = "TIMESTAMPTZ"
+	}
+	topicDDL := []string{
+		`CREATE TABLE webchat_topic (
+    id TEXT PRIMARY KEY, project_id TEXT NOT NULL, name TEXT NOT NULL, conversation_id TEXT,
+    created_by TEXT NOT NULL, created_at ` + timeType + ` NOT NULL, deleted_at ` + timeType + `)`,
+		`CREATE INDEX idx_webchat_topic_deleted ON webchat_topic (deleted_at) WHERE deleted_at IS NOT NULL`,
+	}
+	for _, ddl := range append(append([]string{}, chatRetentionTestDDL...), topicDDL...) {
 		_, err := f.db.ExecContext(f.ctx, ddl)
 		require.NoError(t, err, ddl)
 	}
 	return f
+}
+
+// webchatTime is the stored form of t in a webchat_topic time column.
+func (f *chatRetentionFixture) webchatTime(t time.Time) any {
+	if f.pg() {
+		return t.UTC()
+	}
+	return t.UTC().Format(time.RFC3339Nano)
+}
+
+// topic stores a web chat topic; conv "" stores a NULL conversation_id and
+// a zero deleted a live topic.
+func (f *chatRetentionFixture) topic(id, conv string, deleted time.Time) {
+	f.t.Helper()
+	var convArg, deletedArg any
+	if conv != "" {
+		convArg = conv
+	}
+	if !deleted.IsZero() {
+		deletedArg = f.webchatTime(deleted)
+	}
+	_, err := f.db.ExecContext(f.ctx, f.q(`INSERT INTO webchat_topic (id, project_id, name, conversation_id, created_by, created_at, deleted_at) VALUES (?, ?, ?, ?, ?, ?, ?)`),
+		id, uuid.NewString(), id, convArg, "u1", f.webchatTime(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)), deletedArg)
+	require.NoError(f.t, err)
+}
+
+// conversation stores a conversation, soft-deleted at deleted unless it is
+// zero.
+func (f *chatRetentionFixture) conversation(deleted time.Time) string {
+	f.t.Helper()
+	c := f.client.Conversation.Create().
+		SetKind(conversation.KindGroup).
+		SetSurface(conversation.SurfaceNative)
+	if !deleted.IsZero() {
+		c.SetDeletedAt(deleted)
+	}
+	row, err := c.Save(f.ctx)
+	require.NoError(f.t, err)
+	return row.ID.String()
 }
 
 func (f *chatRetentionFixture) pg() bool { return f.client.Driver().Dialect() == dialect.Postgres }
@@ -89,11 +143,13 @@ func (f *chatRetentionFixture) pg() bool { return f.client.Driver().Dialect() ==
 func (f *chatRetentionFixture) q(query string) string { return f.st.rebind(query) }
 
 type chatRetentionMsg struct {
-	project uuid.UUID
-	created time.Time
-	state   string
-	channel string
-	conv    *uuid.UUID
+	project   uuid.UUID
+	created   time.Time
+	state     string
+	channel   string
+	conv      *uuid.UUID
+	thread    string
+	recipient string // default "agent:bot"
 }
 
 func (f *chatRetentionFixture) message(m chatRetentionMsg) string {
@@ -101,10 +157,13 @@ func (f *chatRetentionFixture) message(m chatRetentionMsg) string {
 	if m.state == "" {
 		m.state = "delivered"
 	}
+	if m.recipient == "" {
+		m.recipient = "agent:bot"
+	}
 	c := f.client.Message.Create().
 		SetProjectID(m.project).
 		SetSender("user:alice").
-		SetRecipient("agent:bot").
+		SetRecipient(m.recipient).
 		SetMsg("hello").
 		SetDispatchState(m.state).
 		SetCreated(m.created)
@@ -113,6 +172,9 @@ func (f *chatRetentionFixture) message(m chatRetentionMsg) string {
 	}
 	if m.conv != nil {
 		c.SetConversationID(*m.conv)
+	}
+	if m.thread != "" {
+		c.SetThreadID(m.thread)
 	}
 	row, err := c.Save(f.ctx)
 	require.NoError(f.t, err)
@@ -236,6 +298,158 @@ func TestChatRetentionStore_SelectCandidates(t *testing.T) {
 	require.Empty(t, got)
 }
 
+// TestChatRetentionStore_SelectFailedMessages: the failed-message scan
+// returns the rows the former unbounded DELETE removed (failed, agent
+// recipient, created strictly before the cutoff), oldest first in
+// (created, id) order, and never a pending, deferred, delivered or "user:"
+// recipient row; the limit and the cursor bound and resume it.
+func TestChatRetentionStore_SelectFailedMessages(t *testing.T) {
+	f := newChatRetentionFixture(t)
+	project := uuid.New()
+	cutoff := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	at := func(h int) time.Time { return cutoff.Add(time.Duration(-h) * time.Hour) }
+
+	oldFailed := f.message(chatRetentionMsg{project: project, created: at(72), state: "failed"})
+	_ = f.message(chatRetentionMsg{project: project, created: at(71), state: "failed", recipient: "user:alice"})
+	_ = f.message(chatRetentionMsg{project: project, created: at(70), state: "pending"})
+	_ = f.message(chatRetentionMsg{project: project, created: at(69), state: "deferred"})
+	_ = f.message(chatRetentionMsg{project: project, created: at(68), state: "dispatched"})
+	_ = f.message(chatRetentionMsg{project: project, created: at(67)}) // delivered
+	oldFailedDiscord := f.message(chatRetentionMsg{project: project, created: at(66), state: "failed", channel: "discord"})
+	tieAt := at(1)
+	tieA := f.message(chatRetentionMsg{project: project, created: tieAt, state: "failed"})
+	tieB := f.message(chatRetentionMsg{project: project, created: tieAt, state: "failed"})
+	_ = f.message(chatRetentionMsg{project: project, created: cutoff, state: "failed"})                  // boundary: not older
+	_ = f.message(chatRetentionMsg{project: project, created: cutoff.Add(time.Second), state: "failed"}) // newer
+
+	ties := []string{tieA, tieB}
+	sort.Strings(ties)
+	want := []string{oldFailed, oldFailedDiscord, ties[0], ties[1]}
+
+	got, err := f.st.SelectFailedMessages(f.ctx, cutoff, store.ChatRetentionPosition{}, 100, 100)
+	require.NoError(t, err)
+	require.Equal(t, want, candidateIDs(got.Candidates))
+	assert.True(t, got.Exhausted)
+	assert.Equal(t, ties[1], got.Next.ID, "the scan rests at the last row below the cutoff")
+	assert.Equal(t, project.String(), got.Candidates[0].ProjectID)
+	assert.True(t, got.Candidates[0].Created.Equal(at(72)), "created %v", got.Candidates[0].Created)
+
+	// The limit cuts the scan at the last candidate.
+	got, err = f.st.SelectFailedMessages(f.ctx, cutoff, store.ChatRetentionPosition{}, 100, 3)
+	require.NoError(t, err)
+	require.Equal(t, want[:3], candidateIDs(got.Candidates))
+	assert.False(t, got.Exhausted)
+	assert.Equal(t, ties[0], got.Next.ID)
+
+	got, err = f.st.SelectFailedMessages(f.ctx, cutoff, store.ChatRetentionPosition{Created: tieAt, ID: ties[0]}, 100, 100)
+	require.NoError(t, err)
+	require.Equal(t, []string{ties[1]}, candidateIDs(got.Candidates))
+	got, err = f.st.SelectFailedMessages(f.ctx, cutoff, store.ChatRetentionPosition{Created: tieAt, ID: ties[1]}, 100, 100)
+	require.NoError(t, err)
+	require.Empty(t, got.Candidates)
+	assert.True(t, got.Exhausted)
+	assert.Equal(t, ties[1], got.Next.ID, "an empty scan stays where it started")
+
+	got, err = f.st.SelectFailedMessages(f.ctx, cutoff, store.ChatRetentionPosition{}, 100, 0)
+	require.NoError(t, err)
+	require.Empty(t, got.Candidates)
+}
+
+// TestChatRetentionStore_SelectFailedMessagesScanCap: with failed agent
+// rows sparse among failed "user:" rows (both in the failed index) and
+// delivered rows (not in it), each scan reads at most scanLimit failed
+// rows and moves the position to the last row it read, so a walk of capped
+// scans finds every failed agent row and no other.
+func TestChatRetentionStore_SelectFailedMessagesScanCap(t *testing.T) {
+	f := newChatRetentionFixture(t)
+	project := uuid.New()
+	cutoff := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	base := cutoff.Add(-48 * time.Hour)
+	var failed []string
+	for i := 0; i < 45; i++ {
+		at := base.Add(time.Duration(i) * time.Minute)
+		recipient := "user:alice"
+		if i%20 == 13 {
+			recipient = "agent:bot"
+		}
+		id := f.message(chatRetentionMsg{project: project, created: at, state: "failed", recipient: recipient})
+		if recipient == "agent:bot" {
+			failed = append(failed, id)
+		}
+		_ = f.message(chatRetentionMsg{project: project, created: at.Add(30 * time.Second), state: "dispatched"})
+	}
+
+	// The first scan reads 10 failed "user:" rows: no candidate, but the
+	// position moves past them (the delivered rows between are not read).
+	first, err := f.st.SelectFailedMessages(f.ctx, cutoff, store.ChatRetentionPosition{}, 10, 100)
+	require.NoError(t, err)
+	assert.Empty(t, first.Candidates)
+	assert.False(t, first.Exhausted)
+	assert.True(t, first.Next.Created.Equal(base.Add(9*time.Minute)), "next %v", first.Next.Created)
+
+	var found []string
+	pos, scans := store.ChatRetentionPosition{}, 0
+	for {
+		got, err := f.st.SelectFailedMessages(f.ctx, cutoff, pos, 10, 100)
+		require.NoError(t, err)
+		scans++
+		require.LessOrEqual(t, scans, 10, "the walk ends")
+		found = append(found, candidateIDs(got.Candidates)...)
+		pos = got.Next
+		if got.Exhausted {
+			break
+		}
+	}
+	assert.Equal(t, failed, found)
+	assert.Equal(t, 5, scans, "45 rows in scans of 10, the last one short")
+}
+
+// TestChatRetentionStore_PurgeFailedMessages: the failed-message purge
+// deletes the messages with every dependent row (no orphan, including the
+// message_addressees rows the former ent DELETE left behind), counts the
+// messages under Failed and not Main, writes no cursor, keeps the other
+// messages' rows, and is idempotent.
+func TestChatRetentionStore_PurgeFailedMessages(t *testing.T) {
+	f := newChatRetentionFixture(t)
+	p1, p2 := uuid.New(), uuid.New()
+	old := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	m1 := f.message(chatRetentionMsg{project: p1, created: old, state: "failed"})
+	m2 := f.message(chatRetentionMsg{project: p2, created: old.Add(time.Minute), state: "failed"})
+	keep := f.message(chatRetentionMsg{project: p1, created: old.Add(2 * time.Minute), state: "failed"})
+	f.dependents(m1, p1)
+	f.dependents(m2, p2)
+	f.dependents(keep, p1)
+	f.attachment("att-only-m1", p1, m1)
+	f.attachment("att-shared", p1, m1, keep)
+
+	res, err := f.st.PurgeFailedMessages(f.ctx, []string{m1, m2}, map[string]string{m1: p1.String(), m2: p2.String()})
+	require.NoError(t, err)
+	assert.Equal(t, store.ChatRetentionCounts{Failed: 1, Addressees: 1, Mentions: 1, Stars: 1, Ext: 1, Attachments: 2, UnlinkedAttachments: 1}, res.ByProject[p1.String()])
+	assert.Equal(t, store.ChatRetentionCounts{Failed: 1, Addressees: 1, Mentions: 1, Stars: 1, Ext: 1}, res.ByProject[p2.String()])
+	assert.Equal(t, []store.ChatRetentionAttachment{{ID: "att-only-m1", ProjectID: p1.String(), Size: 1}}, res.UnlinkedAttachments)
+
+	assert.Equal(t, noOrphans(), f.orphans())
+	assert.Equal(t, 1, f.count(`SELECT COUNT(*) FROM messages`))
+	for _, table := range []string{"message_addressees", "webchat_message_ext", "webchat_mention", "webchat_message_star", "webchat_message_attachment"} {
+		assert.Equal(t, 1, f.count(`SELECT COUNT(*) FROM `+table+` WHERE message_id = ?`, keep), table)
+	}
+	assert.Equal(t, 0, f.count(`SELECT COUNT(*) FROM chat_retention_cursors`), "the purge transaction writes no cursor")
+	// The store purge only reports the unlinked attachment: its row stays
+	// until the sweeper has deleted the bytes (then DeleteUnlinkedChatAttachment).
+	assert.Equal(t, 1, f.count(`SELECT COUNT(*) FROM webchat_attachment WHERE id = ?`, "att-only-m1"),
+		"the unlinked attachment row survives the store purge")
+	assert.Equal(t, 2, f.count(`SELECT COUNT(*) FROM webchat_attachment`))
+
+	res, err = f.st.PurgeFailedMessages(f.ctx, []string{m1, m2}, nil)
+	require.NoError(t, err)
+	assert.Equal(t, store.ChatRetentionCounts{}, res.Total())
+	res, err = f.st.PurgeFailedMessages(f.ctx, nil, nil)
+	require.NoError(t, err)
+	assert.Equal(t, store.ChatRetentionCounts{}, res.Total())
+	assert.Equal(t, 1, f.count(`SELECT COUNT(*) FROM messages`))
+}
+
 // TestChatRetentionStore_PurgeCascade: one purge deletes the messages and
 // every dependent row, leaves no orphan, keeps the survivors' rows and
 // unlinked attachment metadata, reports per-project counts and the
@@ -268,7 +482,7 @@ func TestChatRetentionStore_PurgeCascade(t *testing.T) {
 
 	assert.Equal(t, store.ChatRetentionCounts{Main: 1, Addressees: 1, Mentions: 1, Stars: 1, Ext: 1, Attachments: 2, UnlinkedAttachments: 1}, res.ByProject[p1.String()])
 	assert.Equal(t, store.ChatRetentionCounts{Main: 1, Addressees: 1, Mentions: 1, Stars: 1, Ext: 1}, res.ByProject[p2.String()])
-	assert.Equal(t, []string{"att-only-m1"}, res.UnlinkedAttachmentIDs)
+	assert.Equal(t, []store.ChatRetentionAttachment{{ID: "att-only-m1", ProjectID: p1.String(), Size: 1}}, res.UnlinkedAttachments)
 
 	assert.Equal(t, noOrphans(), f.orphans())
 	assert.Equal(t, 1, f.count(`SELECT COUNT(*) FROM messages`))
@@ -276,7 +490,8 @@ func TestChatRetentionStore_PurgeCascade(t *testing.T) {
 		assert.Equal(t, 1, f.count(`SELECT COUNT(*) FROM `+table), table)
 	}
 	assert.Equal(t, 1, f.count(`SELECT COUNT(*) FROM webchat_message_attachment WHERE message_id = ?`, keep))
-	// Phase 1 leaves attachment metadata for the attachment GC.
+	// The purge leaves attachment metadata; the caller deletes the bytes
+	// and then the row.
 	assert.Equal(t, 2, f.count(`SELECT COUNT(*) FROM webchat_attachment`))
 
 	got, err := f.st.GetChatRetentionCursor(f.ctx, store.ChatRetentionPhaseMain)
@@ -292,21 +507,346 @@ func TestChatRetentionStore_PurgeCascade(t *testing.T) {
 }
 
 // TestChatRetentionStore_PurgeIsOneTransaction: when a later statement of
-// the purge fails (here the cursor write), nothing is deleted. This is the
-// single-transaction property of design Open Question 1: the ent tables
-// and the web chat tables share one *sql.DB.
+// the purge fails (here the unlinked-attachment read, after the messages
+// were deleted, because webchat_attachment is gone), nothing is deleted.
+// This is the single-transaction property of design Open Question 1: the
+// ent tables and the web chat tables share one *sql.DB.
 func TestChatRetentionStore_PurgeIsOneTransaction(t *testing.T) {
 	f := newChatRetentionFixture(t)
 	p := uuid.New()
 	m := f.message(chatRetentionMsg{project: p, created: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)})
 	f.dependents(m, p)
+	f.attachment("att-m", p, m)
+	_, err := f.db.ExecContext(f.ctx, `DROP TABLE webchat_attachment`)
+	require.NoError(t, err)
 
-	_, err := f.st.PurgeChatMessages(f.ctx, []string{m}, map[string]string{m: p.String()}, store.ChatRetentionCursor{})
+	_, err = f.st.PurgeChatMessages(f.ctx, []string{m}, map[string]string{m: p.String()},
+		store.ChatRetentionCursor{Phase: store.ChatRetentionPhaseMain, UpdatedAt: time.Now()})
 	require.Error(t, err)
 	assert.Equal(t, 1, f.count(`SELECT COUNT(*) FROM messages`))
 	for _, table := range []string{"message_addressees", "webchat_message_ext", "webchat_mention", "webchat_message_star"} {
 		assert.Equal(t, 1, f.count(`SELECT COUNT(*) FROM `+table), table)
 	}
+}
+
+// TestChatRetentionStore_PurgeWithoutCursor: a purge whose cursor has no
+// phase (the deleted-conversation phase) deletes the messages and stores
+// no cursor row.
+func TestChatRetentionStore_PurgeWithoutCursor(t *testing.T) {
+	f := newChatRetentionFixture(t)
+	p := uuid.New()
+	m := f.message(chatRetentionMsg{project: p, created: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)})
+	f.dependents(m, p)
+
+	res, err := f.st.PurgeChatMessages(f.ctx, []string{m}, map[string]string{m: p.String()}, store.ChatRetentionCursor{})
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), res.Total().Main)
+	assert.Equal(t, 0, f.count(`SELECT COUNT(*) FROM messages`))
+	assert.Equal(t, noOrphans(), f.orphans())
+	assert.Equal(t, 0, f.count(`SELECT COUNT(*) FROM chat_retention_cursors`))
+}
+
+// TestChatRetentionStore_DeletedConversationsAndTopics: only
+// conversations and topics soft-deleted strictly before the cutoff are
+// listed, in ID order, in pages resumed after the last ID; a legacy topic
+// lists with no conversation.
+func TestChatRetentionStore_DeletedConversationsAndTopics(t *testing.T) {
+	f := newChatRetentionFixture(t)
+	cutoff := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+
+	var oldConvs []string
+	for i := 0; i < 3; i++ {
+		oldConvs = append(oldConvs, f.conversation(cutoff.Add(-time.Duration(i+1)*24*time.Hour)))
+	}
+	sort.Strings(oldConvs)
+	_ = f.conversation(cutoff.Add(time.Hour)) // deleted inside the grace
+	_ = f.conversation(time.Time{})           // live
+
+	got, err := f.st.ListChatRetentionDeletedConversations(f.ctx, cutoff, "", 100)
+	require.NoError(t, err)
+	require.Equal(t, oldConvs, got)
+	page, err := f.st.ListChatRetentionDeletedConversations(f.ctx, cutoff, "", 2)
+	require.NoError(t, err)
+	require.Equal(t, oldConvs[:2], page)
+	page, err = f.st.ListChatRetentionDeletedConversations(f.ctx, cutoff, page[1], 2)
+	require.NoError(t, err)
+	require.Equal(t, oldConvs[2:], page)
+
+	f.topic("t-a-linked", "conv-a", cutoff.Add(-48*time.Hour))
+	f.topic("t-b-legacy", "", cutoff.Add(-time.Minute))
+	f.topic("t-c-recent", "conv-c", cutoff.Add(time.Minute))
+	f.topic("t-d-live", "conv-d", time.Time{})
+
+	topics, err := f.st.ListChatRetentionDeletedTopics(f.ctx, cutoff, "", 100)
+	require.NoError(t, err)
+	require.Equal(t, []store.ChatRetentionDeletedTopic{{ID: "t-a-linked", ConversationID: "conv-a"}, {ID: "t-b-legacy"}}, topics)
+	topics, err = f.st.ListChatRetentionDeletedTopics(f.ctx, cutoff, "t-a-linked", 100)
+	require.NoError(t, err)
+	require.Equal(t, []store.ChatRetentionDeletedTopic{{ID: "t-b-legacy"}}, topics)
+}
+
+// TestChatRetentionStore_DeletedCandidatePlans: the deleted-candidate
+// page queries, first page and resumed, are served by the partial
+// deleted_at indexes and never scan the table (design §6.4: no
+// whole-table work). SQLite's plan is asserted. Postgres plans by cost, so
+// a test-sized table says little about a real one: its plan is logged.
+func TestChatRetentionStore_DeletedCandidatePlans(t *testing.T) {
+	f := newChatRetentionFixture(t)
+	cutoff := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	for i := 0; i < 20; i++ {
+		_ = f.conversation(time.Time{})
+		f.topic(fmt.Sprintf("live-%02d", i), "", time.Time{})
+	}
+	_ = f.conversation(cutoff.Add(-48 * time.Hour))
+	f.topic("gone", "", cutoff.Add(-48*time.Hour))
+
+	for _, tc := range []struct {
+		name, cols, table, index string
+		cutoffArg                any
+	}{
+		{"conversations", "id", "conversations", "conversation_deleted_at", cutoff.UTC()},
+		{"topics", "id, conversation_id", "webchat_topic", "idx_webchat_topic_deleted", f.webchatTime(cutoff)},
+	} {
+		for _, withAfter := range []bool{false, true} {
+			args := []any{tc.cutoffArg}
+			if withAfter {
+				args = append(args, "00000000-0000-0000-0000-000000000000")
+			}
+			args = append(args, 100)
+			query := f.st.deletedCandidatesQuery(tc.cols, tc.table, withAfter)
+			name := fmt.Sprintf("%s after=%t", tc.name, withAfter)
+			if f.pg() {
+				rows, err := f.db.QueryContext(f.ctx, "EXPLAIN "+query, args...)
+				require.NoError(t, err, name)
+				var plan []string
+				for rows.Next() {
+					var line string
+					require.NoError(t, rows.Scan(&line))
+					plan = append(plan, line)
+				}
+				require.NoError(t, rows.Close())
+				t.Logf("%s plan (Postgres):\n%s", name, strings.Join(plan, "\n"))
+				continue
+			}
+			rows, err := f.db.QueryContext(f.ctx, "EXPLAIN QUERY PLAN "+query, args...)
+			require.NoError(t, err, name)
+			var details []string
+			for rows.Next() {
+				var id, parent, notused int
+				var detail string
+				require.NoError(t, rows.Scan(&id, &parent, &notused, &detail))
+				details = append(details, detail)
+			}
+			require.NoError(t, rows.Close())
+			plan := strings.Join(details, " | ")
+			assert.Contains(t, plan, "INDEX "+tc.index, "%s: plan %q", name, plan)
+			for _, d := range details {
+				if strings.HasPrefix(d, "SCAN "+tc.table) {
+					assert.Contains(t, d, tc.index, "%s: a table scan %q", name, d)
+				}
+			}
+		}
+	}
+
+	// The queries still return the deleted rows in ID order.
+	ids, err := f.st.ListChatRetentionDeletedConversations(f.ctx, cutoff, "", 100)
+	require.NoError(t, err)
+	assert.Len(t, ids, 1)
+	topics, err := f.st.ListChatRetentionDeletedTopics(f.ctx, cutoff, "", 100)
+	require.NoError(t, err)
+	assert.Equal(t, []store.ChatRetentionDeletedTopic{{ID: "gone"}}, topics)
+}
+
+// TestChatRetentionStore_SelectConversationMessages: a deleted
+// conversation's messages are selected by conversation_id, and a legacy
+// topic's by thread_id when they have no conversation_id; pending and
+// deferred messages are skipped; the limit spans both arms.
+func TestChatRetentionStore_SelectConversationMessages(t *testing.T) {
+	f := newChatRetentionFixture(t)
+	project := uuid.New()
+	conv, other := uuid.New(), uuid.New()
+	at := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	byConv := []string{
+		f.message(chatRetentionMsg{project: project, created: at, conv: &conv, thread: "topic-1"}),
+		f.message(chatRetentionMsg{project: project, created: at, conv: &conv, state: "failed"}),
+	}
+	_ = f.message(chatRetentionMsg{project: project, created: at, conv: &conv, state: "pending"})
+	_ = f.message(chatRetentionMsg{project: project, created: at, conv: &conv, state: "deferred"})
+	byThread := []string{
+		f.message(chatRetentionMsg{project: project, created: at, thread: "topic-1"}),
+		f.message(chatRetentionMsg{project: project, created: at, thread: "topic-1"}),
+	}
+	_ = f.message(chatRetentionMsg{project: project, created: at, thread: "topic-1", state: "pending"})
+	_ = f.message(chatRetentionMsg{project: project, created: at, conv: &other, thread: "topic-1"}) // re-keyed elsewhere
+	_ = f.message(chatRetentionMsg{project: project, created: at, conv: &other})
+	_ = f.message(chatRetentionMsg{project: project, created: at, thread: "topic-2"})
+
+	sorted := func(ids []string) []string {
+		out := append([]string{}, ids...)
+		sort.Strings(out)
+		return out
+	}
+	got, err := f.st.SelectChatRetentionConversationMessages(f.ctx, conv.String(), "", 100)
+	require.NoError(t, err)
+	assert.Equal(t, sorted(byConv), sorted(candidateIDs(got)))
+	assert.Equal(t, project.String(), got[0].ProjectID)
+
+	got, err = f.st.SelectChatRetentionConversationMessages(f.ctx, "", "topic-1", 100)
+	require.NoError(t, err)
+	assert.Equal(t, sorted(byThread), sorted(candidateIDs(got)))
+
+	got, err = f.st.SelectChatRetentionConversationMessages(f.ctx, conv.String(), "topic-1", 100)
+	require.NoError(t, err)
+	assert.Equal(t, sorted(append(append([]string{}, byConv...), byThread...)), sorted(candidateIDs(got)))
+
+	got, err = f.st.SelectChatRetentionConversationMessages(f.ctx, conv.String(), "topic-1", 3)
+	require.NoError(t, err)
+	assert.Len(t, got, 3, "the limit spans both arms")
+
+	got, err = f.st.SelectChatRetentionConversationMessages(f.ctx, uuid.NewString(), "no-such-topic", 100)
+	require.NoError(t, err)
+	assert.Empty(t, got)
+}
+
+// TestChatRetentionStore_SelectConversationPage: the preview's page walk
+// of one deleted conversation (or a legacy topic's thread) returns its
+// messages in (created, id) order from a position, never pending or
+// deferred, with their thread; it takes exactly one of the two IDs.
+func TestChatRetentionStore_SelectConversationPage(t *testing.T) {
+	f := newChatRetentionFixture(t)
+	project := uuid.New()
+	conv, other := uuid.New(), uuid.New()
+	at := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	var byConv []string
+	for i := 0; i < 5; i++ {
+		byConv = append(byConv, f.message(chatRetentionMsg{project: project, created: at.Add(time.Duration(i%3) * time.Minute), conv: &conv, thread: "topic-1"}))
+	}
+	_ = f.message(chatRetentionMsg{project: project, created: at, conv: &conv, state: "pending"})
+	_ = f.message(chatRetentionMsg{project: project, created: at, conv: &other})
+	byThread := []string{
+		f.message(chatRetentionMsg{project: project, created: at, thread: "topic-1"}),
+		f.message(chatRetentionMsg{project: project, created: at.Add(time.Hour), thread: "topic-1"}),
+	}
+	_ = f.message(chatRetentionMsg{project: project, created: at, thread: "topic-1", state: "deferred"})
+	_ = f.message(chatRetentionMsg{project: project, created: at, conv: &other, thread: "topic-1"}) // re-keyed elsewhere
+
+	walk := func(convID, thread string, limit int) []store.ChatRetentionCandidate {
+		t.Helper()
+		var out []store.ChatRetentionCandidate
+		var pos store.ChatRetentionPosition
+		for i := 0; i < 20; i++ {
+			got, err := f.st.SelectChatRetentionConversationPage(f.ctx, convID, thread, pos, limit)
+			require.NoError(t, err)
+			out = append(out, got...)
+			if len(got) < limit {
+				return out
+			}
+			pos = store.ChatRetentionPosition{Created: got[len(got)-1].Created, ID: got[len(got)-1].ID}
+		}
+		t.Fatal("the walk did not end")
+		return nil
+	}
+	got := walk(conv.String(), "", 2)
+	assert.ElementsMatch(t, byConv, candidateIDs(got))
+	assert.True(t, sort.SliceIsSorted(got, func(i, j int) bool {
+		if !got[i].Created.Equal(got[j].Created) {
+			return got[i].Created.Before(got[j].Created)
+		}
+		return got[i].ID < got[j].ID
+	}), "(created, id) order")
+	assert.Equal(t, "topic-1", got[0].ThreadID)
+	assert.Equal(t, conv.String(), got[0].ConversationID)
+
+	got = walk("", "topic-1", 1)
+	assert.Equal(t, byThread, candidateIDs(got))
+
+	_, err := f.st.SelectChatRetentionConversationPage(f.ctx, conv.String(), "topic-1", store.ChatRetentionPosition{}, 10)
+	require.Error(t, err, "both IDs")
+	_, err = f.st.SelectChatRetentionConversationPage(f.ctx, "", "", store.ChatRetentionPosition{}, 10)
+	require.Error(t, err, "neither ID")
+
+	cands, err := f.st.SelectChatRetentionCandidates(f.ctx, at.Add(2*time.Hour), store.ChatRetentionPosition{}, 100)
+	require.NoError(t, err)
+	threads := map[string]string{}
+	for _, c := range cands {
+		threads[c.ID] = c.ThreadID
+	}
+	assert.Equal(t, "topic-1", threads[byThread[0]], "the main walk returns the thread too")
+}
+
+// TestChatRetentionStore_ListRuns: runs are listed newest first, dry runs
+// included, filtered by trigger and by finish time, and capped.
+func TestChatRetentionStore_ListRuns(t *testing.T) {
+	f := newChatRetentionFixture(t)
+	base := time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)
+	save := func(trigger string, dry bool, started time.Time, finished *time.Time) string {
+		t.Helper()
+		r := &store.ChatRetentionRun{Trigger: trigger, DryRun: dry, StartedAt: started, FinishedAt: finished,
+			Status: store.ChatRetentionStatusOK, Actor: "u1",
+			Counts: map[string]store.ChatRetentionCounts{"p1": {Main: 1}}}
+		require.NoError(t, f.st.SaveChatRetentionRun(f.ctx, r))
+		return r.ID
+	}
+	fin := func(d time.Duration) *time.Time { v := base.Add(d); return &v }
+	sweep := save(store.ChatRetentionTriggerSweep, false, base, fin(time.Hour))
+	preview := save(store.ChatRetentionTriggerPreview, true, base.Add(2*time.Hour), fin(3*time.Hour))
+	manual := save(store.ChatRetentionTriggerManual, false, base.Add(4*time.Hour), nil)
+
+	ids := func(runs []store.ChatRetentionRun) []string {
+		out := make([]string, len(runs))
+		for i, r := range runs {
+			out[i] = r.ID
+		}
+		return out
+	}
+	all, err := f.st.ListChatRetentionRuns(f.ctx, store.ChatRetentionRunFilter{})
+	require.NoError(t, err)
+	assert.Equal(t, []string{manual, preview, sweep}, ids(all))
+	assert.True(t, all[1].DryRun)
+	assert.Equal(t, "u1", all[1].Actor)
+	assert.Equal(t, int64(1), all[1].Counts["p1"].Main)
+
+	got, err := f.st.ListChatRetentionRuns(f.ctx, store.ChatRetentionRunFilter{Trigger: store.ChatRetentionTriggerPreview, Limit: 1})
+	require.NoError(t, err)
+	assert.Equal(t, []string{preview}, ids(got))
+
+	got, err = f.st.ListChatRetentionRuns(f.ctx, store.ChatRetentionRunFilter{FinishedAfter: base.Add(90 * time.Minute)})
+	require.NoError(t, err)
+	assert.Equal(t, []string{preview}, ids(got), "an unfinished run never matches a finish filter")
+
+	got, err = f.st.ListChatRetentionRuns(f.ctx, store.ChatRetentionRunFilter{Limit: 2})
+	require.NoError(t, err)
+	assert.Equal(t, []string{manual, preview}, ids(got))
+}
+
+// TestChatRetentionStore_UnlinkedAttachmentRow: an attachment row is
+// deleted only while no message links it.
+func TestChatRetentionStore_UnlinkedAttachmentRow(t *testing.T) {
+	f := newChatRetentionFixture(t)
+	p := uuid.New()
+	m := f.message(chatRetentionMsg{project: p, created: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)})
+	f.attachment("att-linked", p, m)
+	f.attachment("att-free", p)
+
+	linked, err := f.st.ChatAttachmentLinked(f.ctx, "att-linked")
+	require.NoError(t, err)
+	assert.True(t, linked)
+	linked, err = f.st.ChatAttachmentLinked(f.ctx, "att-free")
+	require.NoError(t, err)
+	assert.False(t, linked)
+
+	deleted, err := f.st.DeleteUnlinkedChatAttachment(f.ctx, "att-linked")
+	require.NoError(t, err)
+	assert.False(t, deleted, "a linked attachment keeps its row")
+	deleted, err = f.st.DeleteUnlinkedChatAttachment(f.ctx, "att-free")
+	require.NoError(t, err)
+	assert.True(t, deleted)
+	deleted, err = f.st.DeleteUnlinkedChatAttachment(f.ctx, "att-free")
+	require.NoError(t, err)
+	assert.False(t, deleted, "idempotent")
+	assert.Equal(t, 1, f.count(`SELECT COUNT(*) FROM webchat_attachment`))
 }
 
 // TestChatRetentionStore_CursorRoundTrip: an absent cursor reads as the
@@ -403,4 +943,50 @@ func TestChatRetentionStore_NoAddresseeForeignKey(t *testing.T) {
 		return
 	}
 	assert.Equal(t, 0, f.count(`SELECT COUNT(*) FROM pragma_foreign_key_list('message_addressees')`))
+}
+
+// TestChatRetentionStore_FailRunningRuns: only running runs of the given
+// triggers started before the bound become failed with the error and
+// finish time; others are untouched; no triggers changes nothing.
+func TestChatRetentionStore_FailRunningRuns(t *testing.T) {
+	f := newChatRetentionFixture(t)
+	bound := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	save := func(trigger, status string, started time.Time) string {
+		t.Helper()
+		r := &store.ChatRetentionRun{Trigger: trigger, DryRun: trigger == store.ChatRetentionTriggerPreview, StartedAt: started, Status: status}
+		require.NoError(t, f.st.SaveChatRetentionRun(f.ctx, r))
+		return r.ID
+	}
+	early := bound.Add(-time.Hour)
+	preview := save(store.ChatRetentionTriggerPreview, store.ChatRetentionStatusRunning, early)
+	manual := save(store.ChatRetentionTriggerManual, store.ChatRetentionStatusRunning, early)
+	sweep := save(store.ChatRetentionTriggerSweep, store.ChatRetentionStatusRunning, early)
+	okPreview := save(store.ChatRetentionTriggerPreview, store.ChatRetentionStatusOK, early)
+	late := save(store.ChatRetentionTriggerPreview, store.ChatRetentionStatusRunning, bound.Add(time.Minute))
+
+	n, err := f.st.FailRunningChatRetentionRuns(f.ctx, nil, bound, "x", bound)
+	require.NoError(t, err)
+	assert.Zero(t, n, "no triggers, no change")
+
+	fin := bound.Add(time.Second)
+	n, err = f.st.FailRunningChatRetentionRuns(f.ctx,
+		[]string{store.ChatRetentionTriggerPreview, store.ChatRetentionTriggerManual}, bound, "interrupted", fin)
+	require.NoError(t, err)
+	assert.Equal(t, 2, n)
+
+	runs, err := f.st.ListChatRetentionRuns(f.ctx, store.ChatRetentionRunFilter{})
+	require.NoError(t, err)
+	byID := map[string]store.ChatRetentionRun{}
+	for _, r := range runs {
+		byID[r.ID] = r
+	}
+	for _, id := range []string{preview, manual} {
+		assert.Equal(t, store.ChatRetentionStatusFailed, byID[id].Status)
+		assert.Equal(t, "interrupted", byID[id].Error)
+		require.NotNil(t, byID[id].FinishedAt)
+		assert.True(t, byID[id].FinishedAt.Equal(fin))
+	}
+	assert.Equal(t, store.ChatRetentionStatusRunning, byID[sweep].Status)
+	assert.Equal(t, store.ChatRetentionStatusOK, byID[okPreview].Status)
+	assert.Equal(t, store.ChatRetentionStatusRunning, byID[late].Status)
 }

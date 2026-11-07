@@ -81,14 +81,13 @@ func TestWithWorkspaceProvisionLocks(t *testing.T) {
 // While the locks are held, neither provisioner shape can take its lock,
 // using ProvisionShared's own derivation (acquireProvisionLock): the
 // hub-side Cloud Run provisioner (no SentinelDir: it locks the project
-// root) and the Kubernetes init container (SentinelDir = state dir,
-// LegacyDir = workspace).
+// root) and the Kubernetes init container (SentinelDir = state dir).
 func TestWithWorkspaceProvisionLocks_ExcludesEveryProvisioner(t *testing.T) {
 	ws := newWorkspaceTree(t)
 	stateDir := ProjectStateDir(ws)
 	shapes := map[string]ProvisionInput{
 		"cloudrun-hub": {Resolved: ResolvedWorkspace{HostPath: ws}},
-		"k8s-init":     {Resolved: ResolvedWorkspace{HostPath: ws}, SentinelDir: stateDir, LegacyDir: ws},
+		"k8s-init":     {Resolved: ResolvedWorkspace{HostPath: ws}, SentinelDir: stateDir},
 	}
 	err := WithWorkspaceProvisionLocks(context.Background(), ws, func(context.Context) error {
 		for name, in := range shapes {

@@ -130,6 +130,7 @@ const (
 	ErrCodeRuntimeTargetPinStale            = "runtime_target_pin_stale"             // 409
 	ErrCodeRuntimeBrokerNotLinked           = "runtime_broker_not_linked"            // 422
 	ErrCodeRuntimeBrokerLinkPathUnsupported = "runtime_broker_link_path_unsupported" // 409
+	ErrCodeRuntimeTargetTypeUnsupported     = "runtime_target_type_unsupported"      // 422
 	ErrCodeExperimentDisabled               = "experiment_disabled"                  // 412
 
 	// ErrCodeDeleteInProgress is returned (409) by start, restart,

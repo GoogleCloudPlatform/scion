@@ -197,3 +197,64 @@ func TestStart_CloudRunRunningInstanceFromListKept(t *testing.T) {
 		t.Errorf("Start returned ContainerID=%q RunID=%q, want the running instance with run-a", got.ContainerID, got.RunID)
 	}
 }
+
+// Symptom 1 of ptone/scion#7289: the first start after a stop failed once
+// with "container started but exited immediately ... Instance stopped.".
+// Start's pre-clean deletes run A's stopped instance and Run creates run
+// B's under the same deterministic instance ID, but the List right after
+// Run still reports run A's stopped instance (a List that lags behind the
+// delete). That entry is another run's, so Start neither fails nor deletes
+// run B's instance; only the pre-clean deletes, with run A.
+func TestStart_CloudRunStopThenStart_StaleStoppedEntryAfterRun(t *testing.T) {
+	projectScionDir, _ := startTZFixture(t, "", `""`)
+	const instance = "projects/test-project/locations/us-central1/instances/agent-tz-agent-0123456789"
+	fake := &crStopInstances{instances: []*runpb.Instance{{
+		Name: instance,
+		Labels: map[string]string{
+			"agent_id":         "agent-1",
+			"scion_agent":      "true",
+			"scion_name":       "tz-agent",
+			"scion_run_id":     "run-a",
+			"scion_project_id": identityProjB,
+		},
+		TerminalCondition: &runpb.Condition{Type: "Running", State: runpb.Condition_CONDITION_FAILED, Message: "Instance stopped."},
+		Conditions: []*runpb.Condition{
+			{Type: "ContainerReady", State: runpb.Condition_CONDITION_SUCCEEDED, Message: "Imported container image in 2.66s."},
+			{Type: "ResourcesAvailable", State: runpb.Condition_CONDITION_SUCCEEDED, Message: "Provisioned imported containers."},
+		},
+	}}}
+	cr, err := runtime.NewCloudRunRuntimeForTest(&config.CloudRunConfig{ProjectID: "test-project", Location: "us-central1"},
+		func(context.Context) (cloudrun.InstancesAPI, error) { return fake, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var deletes []runtime.RunRef
+	ran := false
+	rt := &runtime.MockRuntime{
+		// Every List, the pre-clean's and the one right after Run, reports
+		// run A's stopped instance.
+		ListFunc: cr.List,
+		DeleteFunc: func(_ context.Context, ref runtime.RunRef) error {
+			deletes = append(deletes, ref)
+			return nil
+		},
+		RunFunc: func(_ context.Context, cfg runtime.RunConfig) (string, error) {
+			ran = true
+			return "agent-tz-agent-0123456789", nil
+		},
+		GetLogsFunc: func(context.Context, string) (string, error) { return "Instance stopped.", nil },
+	}
+	if _, err := NewManager(rt).Start(context.Background(), api.StartOptions{
+		Name: "tz-agent", ProjectPath: projectScionDir, BrokerMode: true, NoAuth: true, RunID: "run-b",
+		Env: map[string]string{"SCION_PROJECT_ID": identityProjB},
+	}); err != nil {
+		t.Fatalf("Start: %v, want the first start after a stop to succeed", err)
+	}
+	if !ran {
+		t.Fatal("Run was not called")
+	}
+	if len(deletes) != 1 || deletes[0].RunID != "run-a" {
+		t.Errorf("deletes = %+v, want only the pre-clean's, with run-a", deletes)
+	}
+}

@@ -1,0 +1,27 @@
+run
+-d
+-t
+-m
+2G
+--name
+test-agent
+-e
+SCION_AGENT_NAME=test-agent
+-e
+SCION_HOST_UID=HOST_ID
+-e
+SCION_HOST_GID=HOST_ID
+-v
+/golden-home/cache:/home/scion/.cache/tool
+-v
+/golden-home/ro:/host-home:ro
+-v
+/golden-env/sub:/env
+-e
+SCION_METADATA_INTERCEPTION=off
+--label
+scion.bind_sources=W3sic291cmNlIjoiL2dvbGRlbi1ob21lL2NhY2hlIiwiZGVzdGluYXRpb24iOiIvaG9tZS9zY2lvbi8uY2FjaGUvdG9vbCJ9LHsic291cmNlIjoiL2dvbGRlbi1ob21lL3JvIiwiZGVzdGluYXRpb24iOiIvaG9zdC1ob21lIn0seyJzb3VyY2UiOiIvZ29sZGVuLWVudi9zdWIiLCJkZXN0aW5hdGlvbiI6Ii9lbnYifV0=
+scion-agent:latest
+sh
+-c
+tmux new-session -d -s scion -n agent sh -c ''\''hello'\''; echo $? > /tmp/scion-harness-exit-code' \; set-option -g window-size latest \; new-window -t scion -n shell \; select-window -t scion:agent \; attach-session -t scion

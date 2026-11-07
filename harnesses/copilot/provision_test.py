@@ -295,6 +295,30 @@ class CopilotConfigFileAuthTest(BaseTelemetryTest):
         self.assertTrue(os.path.isfile(self.config_path))
         self.assertEqual(self._provision({})["method"], "none")
 
+    def test_no_auth_writes_no_token_and_logs_none(self) -> None:
+        # The shipped no_auth block: no login command. Its no-auth env
+        # (no-auth-env.yaml) is applied to the container env by the agent
+        # manager; it never reaches the provisioner manifest.
+        with open(os.path.join(self.bundle, "inputs", "auth-candidates.json"), "w") as f:
+            json.dump({"schema_version": 1}, f)
+        manifest = {
+            "harness_bundle_dir": self.bundle,
+            "agent_workspace": os.path.join(self.home, "workspace"),
+            "harness_config": {
+                "no_auth": {"behavior": "drop-to-shell", "message": "sign in"},
+            },
+        }
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            provision.provision(scion_harness.ProvisionContext("copilot", manifest))
+        self.assertIn("copilot provision: method=none", stderr.getvalue().splitlines())
+        with open(os.path.join(self.bundle, "outputs", "resolved-auth.json")) as f:
+            self.assertEqual(json.load(f)["method"], "none")
+        with open(os.path.join(self.bundle, "outputs", "env.json")) as f:
+            env = json.load(f)
+        for key in ("COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN", "DBUS_SESSION_BUS_ADDRESS"):
+            self.assertNotIn(key, env)
+
     def test_staged_config_secret_selects_auth_file(self) -> None:
         secret = os.path.join(self.bundle, "secrets", "COPILOT_CONFIG")
         os.makedirs(os.path.dirname(secret))

@@ -457,7 +457,7 @@ func TestArtifactMintView(t *testing.T) {
 // (ptone/scion#4579).
 func TestArtifactGrantCalls(t *testing.T) {
 	var seen []string
-	var putBody map[string]string
+	var putBody map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		seen = append(seen, r.Method+" "+r.URL.Path)
 		switch {
@@ -480,9 +480,12 @@ func TestArtifactGrantCalls(t *testing.T) {
 	if err != nil || len(list.Grants) != 1 || !list.Grants[0].Home || list.Grants[0].SubjectKind != "scope" || !list.CrossProjectSharing {
 		t.Fatalf("ListGrants = %+v, %v", list, err)
 	}
-	g, err := c.Artifacts().PutGrant(ctx, "id-1", &ArtifactGrantRequest{SubjectKind: "principal", SubjectRef: "user:u1", Permission: "write"})
-	if err != nil || g.ID != "g2" || g.Permission != "write" {
-		t.Fatalf("PutGrant = %+v, %v", g, err)
+	res, err := c.Artifacts().PutGrant(ctx, "id-1", &ArtifactGrantRequest{SubjectKind: "principal", SubjectRef: "user:u1", Permission: "write"})
+	if err != nil || res.Grant.ID != "g2" || res.Grant.Permission != "write" || res.Notified || res.NotifySkipped != "" {
+		t.Fatalf("PutGrant = %+v, %v", res, err)
+	}
+	if _, ok := putBody["notify"]; ok {
+		t.Errorf("put body without notify sends the key: %v", putBody)
 	}
 	if putBody["subjectKind"] != "principal" || putBody["subjectRef"] != "user:u1" || putBody["permission"] != "write" {
 		t.Errorf("put body = %v", putBody)
@@ -493,5 +496,32 @@ func TestArtifactGrantCalls(t *testing.T) {
 	want := []string{"GET /api/v1/artifacts/id-1/grants", "POST /api/v1/artifacts/id-1/grants", "DELETE /api/v1/artifacts/id-1/grants/g 2"}
 	if strings.Join(seen, "|") != strings.Join(want, "|") {
 		t.Errorf("requests = %q", seen)
+	}
+}
+
+// TestArtifactGrantNotify: PutGrant sends notify when asked and decodes the
+// response's notified and notifySkipped (ptone/scion#5145).
+func TestArtifactGrantNotify(t *testing.T) {
+	var putBody map[string]any
+	answer := `{"grant":{"id":"g3","subjectKind":"principal","subjectRef":"user:u2","permission":"review"},"notified":true}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&putBody)
+		w.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(w, answer)
+	}))
+	defer srv.Close()
+	c, _ := New(srv.URL)
+	req := &ArtifactGrantRequest{SubjectKind: "principal", SubjectRef: "user:u2", Permission: "review", Notify: true}
+	res, err := c.Artifacts().PutGrant(context.Background(), "id-1", req)
+	if err != nil || res.Grant.ID != "g3" || !res.Notified || res.NotifySkipped != "" {
+		t.Fatalf("PutGrant = %+v, %v", res, err)
+	}
+	if putBody["notify"] != true {
+		t.Errorf("put body = %v, want notify true", putBody)
+	}
+	answer = `{"grant":{"id":"g3","subjectKind":"principal","subjectRef":"user:u2","permission":"review"},"notifySkipped":"not_permitted"}`
+	res, err = c.Artifacts().PutGrant(context.Background(), "id-1", req)
+	if err != nil || res.Notified || res.NotifySkipped != "not_permitted" {
+		t.Fatalf("PutGrant skipped = %+v, %v", res, err)
 	}
 }

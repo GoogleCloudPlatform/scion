@@ -110,6 +110,8 @@ export class ScionPageOnboarding extends LitElement {
   @state() private currentStep = 0;
   @state() private loading = true;
   @state() private stepLoading = false;
+  /** The last harness config list request failed; the step offers a retry. */
+  @state() private harnessLoadFailed = false;
   @state() private error: string | null = null;
 
   // Step 0: Identity
@@ -598,6 +600,9 @@ export class ScionPageOnboarding extends LitElement {
         if (status.harnessesSeeded && this.currentStep <= 3)
           this.currentStep = Math.max(this.currentStep, 4);
       }
+      // A resume that lands on the harness step loads its list like every
+      // other way into the step.
+      if (this.currentStep === 4) await this.enterHarnessStep();
 
       // Prefill identity from current user
       try {
@@ -998,8 +1003,7 @@ export class ScionPageOnboarding extends LitElement {
           <sl-button
             variant="default"
             @click=${() => {
-              this.currentStep = 4;
-              void this.loadHarnessConfigs();
+              void this.enterHarnessStep();
             }}
             >Skip for now</sl-button
           >
@@ -1036,8 +1040,7 @@ export class ScionPageOnboarding extends LitElement {
           <sl-button
             variant="primary"
             @click=${() => {
-              this.currentStep = 4;
-              void this.loadHarnessConfigs();
+              void this.enterHarnessStep();
             }}
             >Next</sl-button
           >
@@ -1049,8 +1052,7 @@ export class ScionPageOnboarding extends LitElement {
   private async handleSaveRegistryAndNext(): Promise<void> {
     await this.handleSaveRegistry();
     if (!this.error) {
-      this.currentStep = 4;
-      void this.loadHarnessConfigs();
+      void this.enterHarnessStep();
     }
   }
 
@@ -1086,6 +1088,19 @@ export class ScionPageOnboarding extends LitElement {
                     <sl-progress-bar
                       value=${Math.round((this.pullIndex / this.pullTotal) * 100)}
                     ></sl-progress-bar>
+                  </div>
+                `
+              : nothing}
+            ${this.harnessLoadFailed
+              ? html`
+                  <div style="margin-bottom:1rem;">
+                    <sl-button
+                      variant="default"
+                      size="small"
+                      class="harness-load-retry"
+                      @click=${() => void this.loadHarnessConfigs()}
+                      >Retry</sl-button
+                    >
                   </div>
                 `
               : nothing}
@@ -1223,9 +1238,19 @@ export class ScionPageOnboarding extends LitElement {
     `;
   }
 
+  /**
+   * Shows the harness step and loads the hub's harness configs it lists.
+   * Every way into the step goes through here, including a resume.
+   */
+  private enterHarnessStep(): Promise<void> {
+    this.currentStep = 4;
+    return this.loadHarnessConfigs();
+  }
+
   private async loadHarnessConfigs(): Promise<void> {
     this.stepLoading = true;
     this.error = null;
+    this.harnessLoadFailed = false;
     try {
       const res = await apiFetch('/api/v1/harness-configs?scope=global&status=active');
       if (res.ok) {
@@ -1241,9 +1266,14 @@ export class ScionPageOnboarding extends LitElement {
           this.selectedHarnesses = preselected;
         }
         void this.checkStaleImageStatuses();
+      } else {
+        this.harnessLoadFailed = true;
+        const message = await extractApiError(res, 'Failed to load harness configurations');
+        this.error = `${message} (HTTP ${res.status}). Retry, or check the server log.`;
       }
     } catch {
-      this.error = 'Failed to load harness configurations.';
+      this.harnessLoadFailed = true;
+      this.error = 'Failed to load harness configurations. Retry, or check the server log.';
     } finally {
       this.stepLoading = false;
     }
@@ -1589,7 +1619,7 @@ export class ScionPageOnboarding extends LitElement {
         <sl-button
           variant="text"
           @click=${() => {
-            this.currentStep = 4;
+            void this.enterHarnessStep();
           }}
           >Back</sl-button
         >

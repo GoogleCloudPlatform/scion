@@ -75,7 +75,8 @@ func (s *Server) hintConduitGrantKeysChanged() {
 	if rt == nil || rt.relay == nil {
 		return
 	}
-	rt.relay.NotifyGrantKeysChanged()
+	n := rt.relay.NotifyGrantKeysChanged()
+	slog.Info("Conduit relay: grant key change hinted to targets", "sessions", n, "trigger", "notice")
 }
 
 // bindConduitGrantKeyEvents (re)binds this node to grant key changes on the

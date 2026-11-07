@@ -72,6 +72,9 @@ var ErrAgentBranchMismatch = errors.New("the agent's kept workspace was created 
 //     record when it was written; a workspace that holds files is left as
 //     it is;
 //   - creates each shared directory, and chowns it while it is empty;
+//   - treats a chown that fails with EPERM as done when the entry is
+//     already owned by the resolved owner (NFSUID:NFSGID, 0 meaning 1000;
+//     a squashing NFS export), so RequireChownSuccess does not fail on it;
 //   - writes the provisioning sentinel in the agent directory.
 //
 // The lock, the record and the sentinel live in the agent directory, next
@@ -118,10 +121,16 @@ func ProvisionAgentDir(in ProvisionInput) error {
 	uid, gid := resolveUID(in), resolveGID(in)
 	chown := func(path string) error {
 		if err := lchownFile(path, uid, gid); err != nil {
-			if in.RequireChownSuccess {
-				return fmt.Errorf("ProvisionAgentDir: chown %s to %d:%d: %w", path, uid, gid, err)
+			// EPERM on an entry already owned by uid:gid (a squashing NFS
+			// export) is success.
+			cerr := checkChownEPERM(path, uid, gid, err)
+			if cerr == nil {
+				return nil
 			}
-			slog.Warn("ProvisionAgentDir: chown failed (continuing)", "path", path, "uid", uid, "gid", gid, "error", err)
+			if in.RequireChownSuccess {
+				return fmt.Errorf("ProvisionAgentDir: chown %s to %d:%d: %w", path, uid, gid, cerr)
+			}
+			slog.Warn("ProvisionAgentDir: chown failed (continuing)", "path", path, "uid", uid, "gid", gid, "error", cerr)
 		}
 		return nil
 	}
@@ -205,15 +214,23 @@ func ProvisionAgentDir(in ProvisionInput) error {
 // Nothing outside agentDir is touched. A missing agent directory or
 // workspace is not an error.
 func RemoveAgentWorkspace(ctx context.Context, agentDir string, lockWait time.Duration) error {
+	_, err := RemoveAgentWorkspaceOutcome(ctx, agentDir, lockWait)
+	return err
+}
+
+// RemoveAgentWorkspaceOutcome is RemoveAgentWorkspace that also reports
+// whether a workspace was there and was moved aside (removed true); a
+// missing agent directory or workspace is removed false with no error.
+func RemoveAgentWorkspaceOutcome(ctx context.Context, agentDir string, lockWait time.Duration) (removed bool, err error) {
 	if _, err := os.Lstat(agentDir); errors.Is(err, fs.ErrNotExist) {
-		return nil
+		return false, nil
 	}
 	if err := checkPlainDir(agentDir); err != nil {
-		return fmt.Errorf("remove agent workspace: %w; left in place", err)
+		return false, fmt.Errorf("remove agent workspace: %w; left in place", err)
 	}
 	held, err := acquireFileLockWithin(context.WithoutCancel(ctx), agentDir, lockWait)
 	if err != nil {
-		return fmt.Errorf("remove agent workspace in %s: %w", agentDir, err)
+		return false, fmt.Errorf("remove agent workspace in %s: %w", agentDir, err)
 	}
 	defer func() {
 		if releaseErr := held.release(); releaseErr != nil {
@@ -226,22 +243,23 @@ func RemoveAgentWorkspace(ctx context.Context, agentDir string, lockWait time.Du
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 	case err != nil:
-		return fmt.Errorf("remove agent workspace %s: %w", workspace, err)
+		return false, fmt.Errorf("remove agent workspace %s: %w", workspace, err)
 	case !fi.IsDir() || fi.Mode()&os.ModeSymlink != 0:
-		return fmt.Errorf("remove agent workspace %s: not a plain directory; left in place", workspace)
+		return false, fmt.Errorf("remove agent workspace %s: not a plain directory; left in place", workspace)
 	default:
 		if !held.stillOwned() {
-			return fmt.Errorf("remove agent workspace: lost the lock in %s; left in place", agentDir)
+			return false, fmt.Errorf("remove agent workspace: lost the lock in %s; left in place", agentDir)
 		}
 		to := filepath.Join(agentDir, removedAgentWorkspacePrefix+AgentWorkspaceDir+"-"+strconv.FormatInt(time.Now().UnixNano(), 36))
 		if err := os.Rename(workspace, to); err != nil {
-			return fmt.Errorf("remove agent workspace: move %s aside: %w", workspace, err)
+			return false, fmt.Errorf("remove agent workspace: move %s aside: %w", workspace, err)
 		}
+		removed = true
 	}
 	if err := os.Remove(filepath.Join(agentDir, AgentBranchFile)); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("remove agent workspace: drop the branch record in %s: %w", agentDir, err)
+		return removed, fmt.Errorf("remove agent workspace: drop the branch record in %s: %w", agentDir, err)
 	}
-	return nil
+	return removed, nil
 }
 
 // PurgeRemovedAgentWorkspaces deletes the directories RemoveAgentWorkspace
@@ -315,13 +333,10 @@ func WorkspaceHasContent(dir string) (bool, error) {
 }
 
 // readAgentBranch returns the branch recorded in path, or "" when there is
-// no record. Only a regular file is read.
+// no record. Only a regular file is read, without following a symlink and at
+// most gitPointerMaxBytes (readSmallFileNoFollow).
 func readAgentBranch(path string) string {
-	fi, err := os.Lstat(path)
-	if err != nil || !fi.Mode().IsRegular() {
-		return ""
-	}
-	data, err := os.ReadFile(path)
+	data, err := readSmallFileNoFollow(path, gitPointerMaxBytes)
 	if err != nil {
 		return ""
 	}

@@ -15,10 +15,7 @@
 package hub
 
 import (
-	"bytes"
-	"log/slog"
 	"sync"
-	"testing"
 	"time"
 )
 
@@ -29,18 +26,6 @@ import (
 // when searched for a distinctive test secret"), no error message or log
 // line produced by any BrokerClient adapter may ever contain it.
 const keysContentSentinel = "SENTINEL-KEYS-7f3a"
-
-// installSentinelLogCapture points the slog default logger at an in-memory
-// buffer, at Debug level so brokerHTTPTransport's debug-only logging is
-// captured too, and restores the previous default logger on test cleanup.
-func installSentinelLogCapture(t *testing.T) *bytes.Buffer {
-	t.Helper()
-	var buf bytes.Buffer
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	t.Cleanup(func() { slog.SetDefault(prev) })
-	return &buf
-}
 
 func newKeysFakeClock() *keysFakeClock {
 	return &keysFakeClock{now: time.Unix(1_700_000_000, 0)}

@@ -5,9 +5,8 @@ description: Let an agent act with a bounded, time-limited subset of a user's Hu
 
 Agent delegation lets a user give an agent they own, or created, a bounded and time-limited subset
 of their own Hub access. For example, an agent might read agents in other projects the user can
-see, message them, or attach to them. The user issues a **grant**. The agent exchanges the grant,
-with its own agent token, for a short-lived **delegated credential** and uses that credential on
-the Hub.
+see, or message them. The user issues a **grant**. The agent exchanges the grant, with its own
+agent token, for a short-lived **delegated credential** and uses that credential on the Hub.
 
 Every use is checked again against the issuer's live access at that moment. If the issuer loses
 access, is suspended or deleted, or stops controlling the agent, or the grant is revoked or
@@ -36,6 +35,11 @@ What happens after an allowed decision is not bounded by the grant:
   agent as the sender and the issuer as the authorizer.
 - **`agent:attach`** gives shell access in the target agent's container. Before you delegate it, know
   what that includes:
+  - **No in-container client:** the Hub authorizes a delegated attach, but a delegated attach is
+    not supported through the sciontool delegation socket. The socket forwards plain HTTP
+    requests only, not the WebSocket upgrade that attach needs, and the scion CLI does not use
+    delegated credentials. Tracked in ptone/scion#7473. The points below describe what the Hub
+    admits for a delegated credential that holds `agent:attach`.
   - **The target's credentials and material:**
     - its agent token (`~/.scion/scion-token`, valid for 10 hours and refreshable);
     - its environment and files;
@@ -83,7 +87,8 @@ scion hub delegation create <agent> --permission agent:read --permission agent:l
   agent's project. Issuance needs an interactive session; an access token, an agent token, a
   delegated credential or a dev session is refused.
 - **What may be delegated:** exact read and list permissions, `agent:message` and `agent:attach`,
-  each only where the issuer could select it for the chosen boundary. Creating agents, starting,
+  each only where the issuer could select it for the chosen boundary. A delegated `agent:attach`
+  is not supported through the sciontool delegation socket (see above). Creating agents, starting,
   stopping and deleting them, and every credential operation are not delegable.
 - **Lifetimes:** a grant lasts 7 days by default, at most 30. Each delegated credential lasts
   15 minutes by default, at most 60, and never outlives the grant or the agent token used for the
@@ -96,10 +101,12 @@ scion hub delegation create <agent> --permission agent:read --permission agent:l
 
 The agent exchanges a grant through sciontool, with its own agent token:
 `POST /api/v1/agents/{agentId}/delegations/{grantId}/exchange`. sciontool keeps the delegated
-credential in memory only, re-exchanges before it expires and after every agent token refresh, and
-serves it to processes in the agent container through a local socket (mode `0600`). It never writes
-the credential to a file or to a child process's environment. The scion CLI never consumes a
-delegated credential.
+credential in memory only, and re-exchanges before it expires and after every agent token refresh.
+Processes in the agent container send plain HTTP requests to a local socket (mode `0600`), naming
+the grant in the `X-Scion-Delegation-Grant` header. sciontool forwards each request to the Hub with
+the delegated credential attached, and never returns the credential to the process, writes it to a
+file or puts it in a child process's environment. The scion CLI never consumes a delegated
+credential.
 
 A refresh of the agent's own token ends the credentials exchanged with the old token at their next
 use. sciontool then exchanges again with the new token.
@@ -118,6 +125,54 @@ What to configure:
   `X-Serverless-Authorization`, beside the delegated credential, and delegated requests pass the
   proxy.
 - **No platform proxy requires a transport credential:** nothing is needed.
+
+## Delegated lists
+
+A delegated credential can use four list routes. Each needs its list permission, and each listed
+item is also checked for its read permission:
+
+| Route | List permission | Each item needs |
+|---|---|---|
+| `GET /api/v1/agents` | `agent:list` | `agent:read` |
+| `GET /api/v1/projects/{id}/agents` | `agent:list` | `agent:read` |
+| `GET /api/v1/skills` | `skill:list` | `skill:read` |
+| `GET /api/v1/templates` | `template:list` | `template:read` |
+
+`skill:read` and `template:read` only decide which skills and templates a list returns. A
+delegated credential cannot read a single skill or template, download one, or resolve a skill:
+those routes answer `403 credential_not_admitted`.
+
+- **Scope:** the issuer's own list access right now, within the grant's boundary. A
+  project-bounded grant lists only that project. The project agent list lists only its one
+  project, and lists nothing for a project outside the issuer's access or the grant's boundary.
+  A project that does not exist answers `404`, as it does for every caller; name the project by
+  its ID, because a slug in the path answers `403 credential_not_admitted`. The agent's own access
+  adds nothing.
+- **Project items only on the skill and template lists:** only project-scoped skills and templates
+  are listed. Hub catalog (global and core) and user-scoped skills and templates are never listed
+  to a delegated credential. `scope=global`, `scope=core` and `scope=user` list nothing, and so
+  does a `projectId` or `scopeId` outside the scope.
+- **A refused list is empty, not an error:** when the list itself is refused (the grant lacks the
+  list permission, the issuer has no list access, any revocation-chain check fails, or the Hub
+  hits an error deciding the scope), the answer is `200` with an empty list and `totalCount: 0`.
+  The reason is never in the response.
+- **Each item is checked too:** an item is listed only if the issuer may also read it, so the grant
+  needs the read permission as well. A grant with the list permission but not the read permission
+  lists nothing. Each listed item carries only the `read` capability, an agent's environment is
+  redacted, and the list has no list-level capabilities.
+- **Order and filters:** the default order only. On the agent lists, `sort` or `ids` answers
+  `400 delegated_list_sort_unsupported`, and on the hub agent list `scope=mine`, `scope=shared` and
+  `mine=true` list nothing, because the agent owns no projects. `limit` is 1 to 100, 50 by default.
+- **Paging:**
+  - A page can be empty and still carry a `nextCursor`, and `totalCount` can be a lower bound
+    (`totalCountApproximate: true`). Follow `nextCursor` until it is absent.
+  - Cursors are opaque: pass them back unchanged.
+  - A cursor works only for the delegated credential that received it, so a credential from a
+    new exchange cannot resume a walk that an earlier credential started.
+  - `400 invalid_cursor` means "restart from the first page".
+- **Audit:** the decision log does not include list decisions for a delegated credential, and the
+  in-memory summary of a list's per-item decisions (counts and up to 50 refused item IDs) is not
+  written to the decision log.
 
 ## Revoke, revoke-all and lists
 
@@ -152,26 +207,24 @@ What to configure:
   24 hours after they expire.
 - **Lifecycle changes revoke grants automatically:**
   - **Transactional:** deleting, restoring or reincarnating an agent, and deleting its project.
-  - **Best effort:** suspending the agent (both manual suspension and idle auto-suspension, before releasing its start claim), and suspending or deleting the issuer.
+  - **Best effort:** suspending the agent (both manual suspension and idle auto-suspension, before releasing its start claim), and suspending or deleting the issuer. If the agent is resumed before a suspend's revocation runs, the grants issued to the resumed run are kept.
 - **Unsuspending an issuer** makes their unrevoked, unexpired grants work again, as for access
   tokens. To end grants, use revoke-all.
 
 ## Dual audit
 
-- **Mutation records (always written).** Every issuance, exchange, revocation (single, credential,
-  revoke-all, and lifecycle) and every mutation made with a delegated credential writes a mutation
-  audit record. Each record carries:
+- **Mutation records (always written).** Every issuance, exchange and revocation (single,
+  credential, revoke-all, and lifecycle) writes a mutation audit record. Each record carries:
   - the actor agent;
   - the authorizing user (the issuer);
   - the grant;
   - the exchange agent credential, where one applies.
 
   Each revoke-all revocation writes its own `agent_delegation_grant_revoke` record.
-- **Decision records.** When `hub.authorization_decision_audit_v2` is admitted and the decision
-  falls inside the sink's recorded domain, each delegated check also writes a decision record. It
-  shows the agent as the actor, the issuer as the authorizing user, the grant, the boundary and the
-  reason a denial was made. A delegated allow is always recorded, whatever the sampling rate.
-  Mutation records remain the source of attribution.
+- **Delegated messages.** A message sent with a delegated credential is attributed on the message
+  record itself: the sender is the actor agent, and the message carries the authorizing user and
+  the grant. A message send writes no mutation audit record.
+- **Decision records.** The decision log does not include decisions for a delegated credential,
+  allow or deny. Tracked in ptone/scion#2132.
 
-Responses to a denied delegated request carry no decision reason. Read the reason in the decision
-record.
+Responses to a denied delegated request carry no decision reason.

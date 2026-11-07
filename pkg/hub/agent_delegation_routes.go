@@ -38,6 +38,65 @@ const projectResourceRouteID delegatedRouteID = "projects.byId.resource"
 // opProjectRead is the catalog operation of GET /api/v1/projects/{id}.
 const opProjectRead authzop.OperationID = "project.read"
 
+// agentsCollectionRouteID is the exact resolution of the hub agent list path
+// /api/v1/agents (no sub-path, no trailing slash). The admission table
+// matches only this resolution of the "agents.list" mux pattern.
+const agentsCollectionRouteID delegatedRouteID = "agents.list.collection"
+
+// opAgentList is the catalog operation of GET /api/v1/agents.
+const opAgentList authzop.OperationID = "agent.list"
+
+// agentCollectionTargetType is the route target type of a list route: the
+// collection the list reads, never one of its items and never a resource
+// type. Capabilities computed for a list item never match it.
+const agentCollectionTargetType = "agent_collection"
+
+// hubAgentCollectionTarget is the route target of the hub agent list: the
+// hub's agent collection.
+var hubAgentCollectionTarget = delegatedRouteTarget{Type: agentCollectionTargetType, ID: "hub"}
+
+// projectAgentsCollectionRouteID is the exact resolution of the project
+// agent list path /api/v1/projects/{projectId}/agents (no sub-path, no
+// trailing slash), on the "projects.byId" mux pattern.
+const projectAgentsCollectionRouteID delegatedRouteID = "projects.agents.collection"
+
+// projectAgentCollectionTarget is the route target of the project agent
+// list: the agent collection of one project, named by the path's project
+// segment resolved the way handleProjectAgents resolves it.
+func projectAgentCollectionTarget(projectID string) delegatedRouteTarget {
+	return delegatedRouteTarget{Type: agentCollectionTargetType, ID: "project:" + projectID}
+}
+
+// skillsCollectionRouteID and templatesCollectionRouteID are the exact
+// resolutions of /api/v1/skills and /api/v1/templates (no sub-path, no
+// trailing slash) on their list mux patterns.
+const (
+	skillsCollectionRouteID    delegatedRouteID = "skills.list.collection"
+	templatesCollectionRouteID delegatedRouteID = "templates.list.collection"
+)
+
+// opSkillList and opTemplateList are the catalog operations of GET
+// /api/v1/skills and GET /api/v1/templates.
+const (
+	opSkillList    authzop.OperationID = "skill.list"
+	opTemplateList authzop.OperationID = "template.list"
+)
+
+// skillCollectionTargetType and templateCollectionTargetType are the route
+// target types of the skill and template lists. Like
+// agentCollectionTargetType, they name a collection, never a resource type.
+const (
+	skillCollectionTargetType    = "skill_collection"
+	templateCollectionTargetType = "template_collection"
+)
+
+// hubSkillCollectionTarget and hubTemplateCollectionTarget are the route
+// targets of the skill and template lists.
+var (
+	hubSkillCollectionTarget    = delegatedRouteTarget{Type: skillCollectionTargetType, ID: "hub"}
+	hubTemplateCollectionTarget = delegatedRouteTarget{Type: templateCollectionTargetType, ID: "hub"}
+)
+
 // delegatedRouteTarget is the resource a delegated request's route resolves
 // to: the agent or project named in the path.
 type delegatedRouteTarget struct {
@@ -89,6 +148,13 @@ type agentDelegationAdmission struct {
 	// needs its own permission in the ceiling and the issuer's live
 	// authority.
 	Secondary []string
+	// ItemFilter is the per-item permission of a list route: every item
+	// the list could return is decided for it, and only allowed items are
+	// returned and counted. It is accepted only by the list's item filter
+	// (delegatedListItemRead), never by Decide: a request that asks Decide
+	// for ItemFilter on this route is still refused. Empty on every
+	// route that is not a list.
+	ItemFilter string
 }
 
 // agentDelegationAdmittedRoutes is the code-owned, deny-by-default list of
@@ -105,6 +171,11 @@ var agentDelegationAdmittedRoutes = []agentDelegationAdmission{
 	// The PTY WebSocket handshake. The lifecycle operations that share
 	// agent.attach (exec, env, resetauth, keys) are not admitted.
 	{Method: http.MethodGet, RouteID: delegatedRouteID(AgentRoutePTY), Operation: opAgentAttach},
+	// The hub agent list. Each listed agent is decided for agent.read.
+	{Method: http.MethodGet, RouteID: agentsCollectionRouteID, Operation: opAgentList, ItemFilter: "agent.read"},
+	{Method: http.MethodGet, RouteID: projectAgentsCollectionRouteID, Operation: opAgentList, ItemFilter: "agent.read"},
+	{Method: http.MethodGet, RouteID: skillsCollectionRouteID, Operation: opSkillList, ItemFilter: "skill.read"},
+	{Method: http.MethodGet, RouteID: templatesCollectionRouteID, Operation: opTemplateList, ItemFilter: "template.read"},
 }
 
 // agentDelegationAdmissionFor returns the admission entry for method and
@@ -143,11 +214,74 @@ func resolveProjectResourceRoute(method, escapedPath string) (delegatedRoute, bo
 	return route, true
 }
 
+// resolveAgentsCollectionRoute resolves method and escapedPath to the exact
+// hub agent list route: exactly /api/v1/agents. Only GET has an operation.
+// The target is the hub's agent collection. It performs no authorization
+// and no store reads.
+func resolveAgentsCollectionRoute(method, escapedPath string) (delegatedRoute, bool) {
+	if escapedPath != "/api/v1/agents" {
+		return delegatedRoute{}, false
+	}
+	route := delegatedRoute{
+		RouteID: agentsCollectionRouteID,
+		Target:  hubAgentCollectionTarget,
+	}
+	if method == http.MethodGet {
+		route.OperationID = opAgentList
+	}
+	return route, true
+}
+
+// resolveProjectAgentsCollectionRoute resolves method and escapedPath to the
+// exact project agent list route: exactly /api/v1/projects/{projectId}/agents,
+// with no trailing slash. It returns the agent sub-route resolution too,
+// because handleProjectAgents dispatches on it. Only GET has an operation.
+// It performs no authorization and no store reads.
+func resolveProjectAgentsCollectionRoute(method, escapedPath string) (delegatedRoute, *AgentSubRoute, bool) {
+	if strings.HasSuffix(escapedPath, "/") {
+		return delegatedRoute{}, nil, false
+	}
+	sub, ok := ResolveAgentSubRoute(method, escapedPath)
+	if !ok || sub.RouteID != ProjectAgentRouteCollection || sub.ProjectID == "" {
+		return delegatedRoute{}, nil, false
+	}
+	route := delegatedRoute{
+		RouteID: projectAgentsCollectionRouteID,
+		Target:  projectAgentCollectionTarget(resolveProjectID(sub.ProjectID)),
+	}
+	if method == http.MethodGet {
+		route.OperationID = opAgentList
+	}
+	return route, &sub, true
+}
+
+// resolveCatalogCollectionRoute resolves method and escapedPath to the exact
+// list route at path: no sub-path and no trailing slash. Only GET has an
+// operation. It performs no authorization and no store reads.
+func resolveCatalogCollectionRoute(method, escapedPath, path string, routeID delegatedRouteID, op authzop.OperationID, target delegatedRouteTarget) (delegatedRoute, bool) {
+	if escapedPath != path {
+		return delegatedRoute{}, false
+	}
+	route := delegatedRoute{RouteID: routeID, Target: target}
+	if method == http.MethodGet {
+		route.OperationID = op
+	}
+	return route, true
+}
+
 // resolveDelegatedRoute returns the single resolution of a delegated request
 // on the mux route meta: the agent sub-route resolution (the one dispatch
 // uses) on the agent sub-route patterns, the exact project resource route
-// on the project pattern, and nothing anywhere else.
+// on the project pattern, the exact hub agent list route on the agent list
+// pattern, and nothing anywhere else.
 func resolveDelegatedRoute(meta RouteMetadata, method, escapedPath string) (delegatedRoute, *AgentSubRoute, bool) {
+	// The project agent list shares the agent sub-route namespace, where
+	// its collection row names no operation; it resolves here first.
+	if meta.RouteID == "projects.byId" {
+		if route, sub, ok := resolveProjectAgentsCollectionRoute(method, escapedPath); ok {
+			return route, sub, true
+		}
+	}
 	if agentSubRouteGuardedRoutes[meta.RouteID] && isAgentSubRoutePath(escapedPath) {
 		route, ok := ResolveAgentSubRoute(method, escapedPath)
 		if !ok {
@@ -168,6 +302,18 @@ func resolveDelegatedRoute(meta RouteMetadata, method, escapedPath string) (dele
 	}
 	if meta.RouteID == "projects.byId" {
 		route, ok := resolveProjectResourceRoute(method, escapedPath)
+		return route, nil, ok
+	}
+	if meta.RouteID == "agents.list" {
+		route, ok := resolveAgentsCollectionRoute(method, escapedPath)
+		return route, nil, ok
+	}
+	if meta.RouteID == "skills.list" {
+		route, ok := resolveCatalogCollectionRoute(method, escapedPath, "/api/v1/skills", skillsCollectionRouteID, opSkillList, hubSkillCollectionTarget)
+		return route, nil, ok
+	}
+	if meta.RouteID == "templates.list" {
+		route, ok := resolveCatalogCollectionRoute(method, escapedPath, "/api/v1/templates", templatesCollectionRouteID, opTemplateList, hubTemplateCollectionTarget)
 		return route, nil, ok
 	}
 	return delegatedRoute{}, nil, false
@@ -198,6 +344,9 @@ func (s *Server) admitDelegatedRequest(w http.ResponseWriter, r *http.Request, m
 		ctx = withAgentSubRoute(ctx, *agentRoute)
 	}
 	ctx = contextWithDelegatedTarget(contextWithDelegatedAdmission(ctx, entry), route.Target)
+	if entry.ItemFilter != "" {
+		ctx = contextWithListFilterCollector(ctx, newListFilterCollector(entry.ItemFilter))
+	}
 	return r.WithContext(ctx), true
 }
 
@@ -237,6 +386,26 @@ func admitDelegatedHandler(w http.ResponseWriter, r *http.Request, op authzop.Op
 	target, hasTarget := delegatedTargetFromContext(ctx)
 	if !admitted || entry.Operation != op || !hasTarget || target.ProjectID != "" ||
 		target.Type != resource.Type || target.ID == "" || target.ID != resource.ID {
+		writeDelegatedNotAdmitted(w)
+		return false
+	}
+	return true
+}
+
+// admitDelegatedListHandler is admitDelegatedHandler for a list handler,
+// whose target is a collection rather than a resource. For a delegated
+// caller it returns true only when routeGuard admitted this request for
+// exactly op, on a list route (an entry with an item filter) whose target
+// is collection; otherwise it answers 403 credential_not_admitted. The
+// handler-branch drift test counts its calls with admitDelegatedHandler's.
+func admitDelegatedListHandler(w http.ResponseWriter, r *http.Request, op authzop.OperationID, collection delegatedRouteTarget) bool {
+	ctx := r.Context()
+	if !isDelegatedAgentIdentity(GetIdentityFromContext(ctx)) {
+		return true
+	}
+	entry, admitted := delegatedAdmissionFromContext(ctx)
+	target, hasTarget := delegatedTargetFromContext(ctx)
+	if !admitted || entry.Operation != op || entry.ItemFilter == "" || !hasTarget || target != collection {
 		writeDelegatedNotAdmitted(w)
 		return false
 	}

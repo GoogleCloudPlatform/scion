@@ -63,6 +63,11 @@ const (
 	// project. See Stewardship.
 	AuthorityStewardProjectOwner = "steward_project_owner"
 	AuthorityStewardDelegator    = "steward_delegator"
+	// AuthoritySponsorReview is the hub's own act of giving an agent's
+	// recorded delegating user review access to a new artifact the agent
+	// creates (ptone/scion#7134; see sponsor_review.go). Only the creation
+	// path records it.
+	AuthoritySponsorReview = "sponsor_review"
 )
 
 // isSteward reports whether authority is a steward clause. A steward may
@@ -150,6 +155,10 @@ var reconcilerActor = Actor{Kind: ActorKindSystem, Ref: AuthorityReconciler, Aut
 
 // retentionActor is the actor of the expiry sweep's deleted events.
 var retentionActor = Actor{Kind: ActorKindSystem, Ref: AuthorityRetention, Authority: AuthorityRetention}
+
+// sponsorReviewActor is the actor of the grant_created event of the
+// automatic review grant written with a new artifact (ptone/scion#7134).
+var sponsorReviewActor = Actor{Kind: ActorKindSystem, Ref: AuthoritySponsorReview, Authority: AuthoritySponsorReview}
 
 // Event is a row of the append-only artifact_event table.
 type Event struct {

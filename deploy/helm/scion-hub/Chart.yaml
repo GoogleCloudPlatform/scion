@@ -52,9 +52,10 @@ type: application
 version: 0.1.0
 
 # appVersion tracks the hub release the chart is written against, and is the
-# default for image.tag. The repository publishes no version tags today
-# (hack/version.sh leaves the version empty off-tag), so this is a placeholder:
-# pin image.digest, or set image.tag explicitly, for any real install.
+# default for image.tag. Versioned hub images are not yet published for each
+# release tag, so this is a placeholder, below the relay TLS floor
+# (scion-hub.relayTlsMinHub): pin image.digest, or set image.tag explicitly, for
+# any real install.
 appVersion: "0.1.0"
 
 home: https://github.com/GoogleCloudPlatform/scion

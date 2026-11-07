@@ -192,6 +192,7 @@ func (h *artifactCloudHandler) Handle(_ context.Context, r slog.Record) error {
 		Labels:    labels,
 		Timestamp: r.Time,
 	}
+	h.writeStats().RecordWrite()
 	if h.logHook != nil {
 		h.logHook(entry)
 		return nil

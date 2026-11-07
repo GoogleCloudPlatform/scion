@@ -18,10 +18,14 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/hack/areadirs"
 )
 
 // ---------------------------------------------------------------------------
@@ -1160,12 +1164,13 @@ func TestMutationClassificationsValid(t *testing.T) {
 	t.Logf("mutation classifications: %d entries validated", len(MutationClassifications))
 }
 
-// TestMutationClassificationBidirectional verifies bidirectional agreement
-// between the scanner and the classification table:
-//  1. Every scanner-discovered call site must have a classification entry.
-//  2. Every classification entry must correspond to a scanner-discovered site.
-func TestMutationClassificationBidirectional(t *testing.T) {
-	repoRoot := findRepoRoot(t)
+// discoverMutationCounts runs the TestSecurityMutationScanProduction
+// scanner over pkg/hub and pkg/store under repoRoot and counts the call
+// sites of SecurityMutationSymbols by "<file>:<function>:<symbol>", file
+// relative to repoRoot. A missing scan root is skipped, so a temporary tree
+// may hold only pkg/hub.
+func discoverMutationCounts(t *testing.T, repoRoot string) map[string]int {
+	t.Helper()
 
 	// Run the same scanner logic as TestSecurityMutationScanProduction
 	type callSite struct {
@@ -1224,14 +1229,29 @@ func TestMutationClassificationBidirectional(t *testing.T) {
 		}
 	}
 
-	// Build classification lookup
-	classifiedCounts := mutationClassificationCounts(MutationClassifications)
-
-	// Build discovered lookup
 	discoveredCounts := make(map[string]int)
 	for _, s := range discovered {
 		key := s.file + ":" + s.function + ":" + s.symbol
 		discoveredCounts[key]++
+	}
+	return discoveredCounts
+}
+
+// TestMutationClassificationBidirectional verifies bidirectional agreement
+// between the scanner and the classification table:
+//  1. Every scanner-discovered call site must have a classification entry.
+//  2. Every classification entry must correspond to a scanner-discovered site.
+func TestMutationClassificationBidirectional(t *testing.T) {
+	repoRoot := findRepoRoot(t)
+
+	// Build classification lookup
+	classifiedCounts := mutationClassificationCounts(MutationClassifications)
+
+	// Build discovered lookup
+	discoveredCounts := discoverMutationCounts(t, repoRoot)
+	discovered := 0
+	for _, n := range discoveredCounts {
+		discovered += n
 	}
 
 	unclassified := findUnclassifiedMutations(discoveredCounts, classifiedCounts)
@@ -1247,7 +1267,47 @@ func TestMutationClassificationBidirectional(t *testing.T) {
 	}
 
 	t.Logf("mutation classification bidirectional check: %d discovered, %d classified",
-		len(discovered), len(MutationClassifications))
+		discovered, len(MutationClassifications))
+}
+
+// TestMutationClassificationBidirectionalReachesAreaDirs plants an
+// unclassified security mutation call in every pkg/hub area directory listed
+// in hack/area-dirs.txt, under a temporary tree, and requires the
+// bidirectional check to report each one (ptone/scion#4275).
+func TestMutationClassificationBidirectionalReachesAreaDirs(t *testing.T) {
+	entries, err := areadirs.Load(findRepoRoot(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	symbols := slices.Sorted(maps.Keys(SecurityMutationSymbols))
+	if len(symbols) == 0 {
+		t.Fatal("SecurityMutationSymbols is empty")
+	}
+	symbol := symbols[0]
+	root := t.TempDir()
+	var want []string
+	for _, e := range entries {
+		dir := filepath.Join(root, "pkg", "hub", filepath.FromSlash(e.Dir))
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		src := "package planted\n\nfunc zzPlantedMutation(s store) { s." + symbol + "(nil) }\n"
+		if err := os.WriteFile(filepath.Join(dir, "zz_planted.go"), []byte(src), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		rel := filepath.Join("pkg", "hub", filepath.FromSlash(e.Dir), "zz_planted.go")
+		want = append(want, rel+":zzPlantedMutation:"+symbol)
+	}
+	discovered := discoverMutationCounts(t, root)
+	unclassified := findUnclassifiedMutations(discovered, mutationClassificationCounts(MutationClassifications))
+	for i, e := range entries {
+		if discovered[want[i]] != 1 {
+			t.Errorf("%s %s: planted call %s not discovered (discovered %v)", e.Kind, e.Dir, want[i], discovered)
+		}
+		if !slices.Contains(unclassified, want[i]) {
+			t.Errorf("%s %s: planted call %s not reported as unclassified (%v)", e.Kind, e.Dir, want[i], unclassified)
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------

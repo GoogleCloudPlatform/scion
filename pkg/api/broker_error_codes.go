@@ -30,6 +30,11 @@ const (
 	// it from (ptone/scion#3422).
 	BrokerErrCodeWorkspaceStorageUnconfigured = "workspace_storage_unconfigured"
 
+	// BrokerErrCodeWorkspaceDownloadModeUnsupported marks a create whose
+	// workspaceDownloadMode this broker does not know (422). The broker
+	// never falls back to another download for it.
+	BrokerErrCodeWorkspaceDownloadModeUnsupported = "workspace_download_mode_unsupported"
+
 	// BrokerErrCodeHarnessConfigUnusable marks a dispatch whose
 	// harness-config provisioner cannot run (422). It is a configuration
 	// error the caller must fix (ptone/scion#3132).
@@ -39,6 +44,11 @@ const (
 	// LocalPath) holds no .scion directory or marker (409). The operator must
 	// initialize the path as a project (ptone/scion#6647).
 	BrokerErrCodeProjectPathNotInitialized = "project_path_not_initialized"
+	// BrokerErrCodeGitConfigRefused marks an agent create, start or restart
+	// the broker refuses (422) because the repository's git config sets keys
+	// agents may not be given. The message names every refused key and how
+	// to remove it, never a value or a host path (ptone/scion#6835).
+	BrokerErrCodeGitConfigRefused = LaunchCodeGitConfigRefused
 
 	// BrokerErrCodeStorageMigrationRequired marks an agent start the broker
 	// refuses (422) because its storage would be placed differently than

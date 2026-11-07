@@ -339,6 +339,23 @@ describe('notificationFromEvent', () => {
     expect(notificationFromEvent({ ...noSubscriber, acknowledged: false }, 'u1')).not.toBeNull();
   });
 
+  it('accepts a payload with kind and resource fields and no agent', () => {
+    const payload = {
+      ...userEventPayload('n2'),
+      agentId: '00000000-0000-0000-0000-000000000000',
+      status: 'ARTIFACT_REVIEW_REQUESTED',
+      kind: 'artifact_grant',
+      resourceType: 'artifact',
+      resourceId: '5f1c2d3e-0000-4000-8000-000000000001',
+    };
+    expect(notificationFromEvent(payload, 'u1')).toMatchObject({
+      id: 'n2',
+      agentId: '00000000-0000-0000-0000-000000000000',
+      status: 'ARTIFACT_REVIEW_REQUESTED',
+      subscriberId: 'u1',
+    });
+  });
+
   it('rejects anything it cannot render or that is not for this user', () => {
     const ok = userEventPayload('n1');
     expect(notificationFromEvent(undefined, 'u1')).toBeNull();
@@ -351,5 +368,56 @@ describe('notificationFromEvent', () => {
     expect(notificationFromEvent({ ...ok, message: 7 }, 'u1')).toBeNull();
     expect(notificationFromEvent({ ...ok, createdAt: 'yesterday' }, 'u1')).toBeNull();
     expect(notificationFromEvent({ ...ok, agentId: undefined }, 'u1')).toBeNull();
+  });
+});
+
+/**
+ * The tray shows a notification's message as text (ptone/scion#5145): an
+ * artifact grant notice's label comes from a user's display name, so markup
+ * in a message must render as its characters, never as elements. This pins
+ * the Lit text binding of `.notif-message`.
+ */
+describe('notification tray: message is text', () => {
+  beforeAll(async () => {
+    await import('./notification-tray.js');
+  });
+
+  beforeEach(() => {
+    apiFetch.mockReset();
+    popups = [];
+    FakeNotification.permission = 'granted';
+    (window as unknown as { Notification: unknown }).Notification = FakeNotification;
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+    vi.useRealTimers();
+    localStorage.clear();
+  });
+
+  it('renders markup in a message as text, with no element children', async () => {
+    const hostile = [
+      '<img src=x onerror="window.__ranHandler=1">',
+      '<a href="https://example.com/x">open</a>',
+      '**x** asked you to look at an artifact (Can review):',
+      'scion://artifact/5f1c2d3e-0000-4000-8000-000000000001',
+    ].join(' ');
+    const tray = await mountTray([
+      {
+        ...notif('hostile'),
+        agentId: '00000000-0000-0000-0000-000000000000',
+        status: 'ARTIFACT_REVIEW_REQUESTED',
+        message: hostile,
+      },
+    ]);
+    tray.open = true;
+    await tray.updateComplete;
+    const nodes = [...tray.shadowRoot.querySelectorAll('.notif-message')] as Element[];
+    expect(nodes).toHaveLength(1);
+    expect(nodes[0].children).toHaveLength(0);
+    expect(nodes[0].querySelector('img, a')).toBeNull();
+    expect(nodes[0].textContent?.trim()).toBe(hostile);
+    expect((window as unknown as { __ranHandler?: number }).__ranHandler).toBeUndefined();
   });
 });

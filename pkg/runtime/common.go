@@ -39,6 +39,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	stagedsecrets "github.com/GoogleCloudPlatform/scion/pkg/stagedsecrets"
@@ -305,6 +306,13 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 	args := []string{"run", "-d", "-i"}
 	addArg := func(flag string, values ...string) {
 		for _, v := range values {
+			if flag == "-e" {
+				// Every container env entry passes here; a reserved name
+				// never reaches the container (reservedAgentEnvName).
+				if name, _, _ := strings.Cut(v, "="); reservedAgentEnvName(name) {
+					continue
+				}
+			}
 			args = append(args, flag, v)
 		}
 	}
@@ -403,8 +411,16 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 			}
 			return
 		}
+		// The entry is a user-owned Mount realized as a bind mount.
+		realized, err := realizeUserVolume(src, tgt, v.ReadOnly, projectfs.RuntimeBind)
+		if err != nil {
+			if volumeErr == nil {
+				volumeErr = err
+			}
+			return
+		}
 		// Generic volumes from config should NOT overwrite already registered mounts (like workspace)
-		registerMount(src, tgt, v.ReadOnly, false)
+		registerMount(realized.Source, realized.Target, realized.ReadOnly, false)
 	}
 
 	addArg("--name", config.Name)
@@ -462,6 +478,13 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 		return nil, err
 	}
 	config.Workspace = resolvedWorkspace
+	// On NFS project storage, no bind may reach the project root, its
+	// configuration directory or another tree of the share
+	// (checkNFSMountScope); every bind is checked when it is emitted below.
+	nfsScope, err := newNFSBindScope(config)
+	if err != nil {
+		return nil, err
+	}
 
 	// Resolve RepoRoot through any symlinks too, the same way Workspace just
 	// was: the branches below compare the two with filepath.Rel to decide
@@ -834,7 +857,7 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 		if s.Type != "environment" && s.Type != "" {
 			continue
 		}
-		if _, collides := envKeys[s.Target]; collides || s.Target == SupplementalGIDsEnvVar || s.Target == MetadataInterceptionEnvVar {
+		if _, collides := envKeys[s.Target]; collides || s.Target == SupplementalGIDsEnvVar || s.Target == MetadataInterceptionEnvVar || reservedAgentEnvName(s.Target) {
 			continue
 		}
 		addArg("-e", fmt.Sprintf("%s=%s", s.Target, s.Value))
@@ -880,6 +903,9 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 		src, err := checkBindSource(spec.src)
 		if err != nil {
 			return nil, err
+		}
+		if err := nfsScope.check(src); err != nil {
+			return nil, fmt.Errorf("bind mount at %s: %w", tgt, err)
 		}
 		val := fmt.Sprintf("%s:%s", src, tgt)
 		if spec.ro {
@@ -2192,8 +2218,10 @@ func BridgeExtraHosts(runtimeName string, env []string) []string {
 func applyResolvedAuth(config RunConfig, addEnv func(string, string), addVolume func(api.VolumeMount), registerMount func(string, string, bool, bool)) error {
 	ra := config.ResolvedAuth
 
-	// Inject env vars
-	for k, v := range ra.EnvVars {
+	// Inject env vars. Every later -e for the same name wins, so no name
+	// is taken yet here.
+	for _, e := range resolvedAuthEnvEntries(ra, nil) {
+		k, v, _ := strings.Cut(e, "=")
 		addEnv(k, v)
 	}
 
@@ -2249,6 +2277,124 @@ func applyResolvedAuth(config RunConfig, addEnv func(string, string), addVolume 
 	return nil
 }
 
+// resolvedAuthEnvEntries returns the env vars of ra that an agent container
+// receives, as KEY=VALUE entries sorted by name. It is the one place the
+// Docker rules for resolved-auth env are decided, shared by every runtime
+// that follows them:
+//   - an entry with an empty value is skipped (Docker's addEnv skips it);
+//   - an entry whose name taken reports is skipped, because a source that
+//     already set that name wins over resolved auth: config.Env (with the
+//     env-type secrets a runtime folded into it) and the runtime's own keys.
+//     Docker gets the same result by emitting resolved auth first and
+//     keeping the last -e for a name, so it passes a nil taken.
+//
+// Reserved names are not filtered here: the caller emits these entries
+// before the runtime's reserved-name drop, which covers every source.
+func resolvedAuthEnvEntries(ra *api.ResolvedAuth, taken func(name string) bool) []string {
+	if ra == nil || len(ra.EnvVars) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(ra.EnvVars))
+	for k, v := range ra.EnvVars {
+		if v == "" || (taken != nil && taken(k)) {
+			continue
+		}
+		names = append(names, k)
+	}
+	slices.Sort(names)
+	entries := make([]string, 0, len(names))
+	for _, k := range names {
+		entries = append(entries, k+"="+ra.EnvVars[k])
+	}
+	return entries
+}
+
+// harnessEnvEntries returns the harness env an agent container receives,
+// as KEY=VALUE entries sorted by name, with the Docker rules
+// (buildCommonRunArgs):
+//   - Harness.GetEnv(cfg.Name, agentHome, cfg.UnixUsername), then, when
+//     cfg.TelemetryEnabled, Harness.GetTelemetryEnv(), which wins over
+//     GetEnv for a name both set;
+//   - an entry with an empty value is skipped (Docker's addEnv skips it),
+//     so an empty telemetry value leaves a GetEnv value in place.
+//
+// It is nil without a harness. Reserved names are not filtered here: the
+// caller emits these entries before the runtime's reserved-name drop,
+// which covers every source.
+//
+// A runtime may call it more than once per start: GetEnv and
+// GetTelemetryEnv are called twice per Cloud Run start (cloudRunHarnessEnv);
+// this assumes they are deterministic and side-effect free, as every
+// in-tree harness is.
+func harnessEnvEntries(cfg RunConfig, agentHome string) []string {
+	if cfg.Harness == nil {
+		return nil
+	}
+	env := make(map[string]string)
+	add := func(src map[string]string) {
+		for k, v := range src {
+			if v != "" {
+				env[k] = v
+			}
+		}
+	}
+	add(cfg.Harness.GetEnv(cfg.Name, agentHome, cfg.UnixUsername))
+	if cfg.TelemetryEnabled {
+		add(cfg.Harness.GetTelemetryEnv())
+	}
+	names := make([]string, 0, len(env))
+	for k := range env {
+		names = append(names, k)
+	}
+	slices.Sort(names)
+	entries := make([]string, 0, len(names))
+	for _, k := range names {
+		entries = append(entries, k+"="+env[k])
+	}
+	return entries
+}
+
+// resolvedAuthPlainEnvNames are the resolved-auth env names a runtime that
+// delivers the instance environment in plain form (Cloud Run) may emit as
+// plain env: discovery settings, never a credential. Every other
+// resolved-auth entry travels in the staged blob (splitResolvedAuthEnv).
+// Extended only by review.
+var resolvedAuthPlainEnvNames = map[string]bool{
+	"SCION_HARNESS_SELECTED_AUTH": true,
+	"GOOGLE_CLOUD_PROJECT":        true,
+	"GOOGLE_CLOUD_REGION":         true,
+	"GOOGLE_CLOUD_LOCATION":       true,
+	"ANTHROPIC_VERTEX_PROJECT_ID": true,
+	"CLOUD_ML_REGION":             true,
+	"CLAUDE_CODE_USE_VERTEX":      true,
+}
+
+// splitResolvedAuthEnv applies resolvedAuthEnvEntries (the Docker rules:
+// empty values and taken names skipped) to ra and splits the result:
+// plain holds the resolvedAuthPlainEnvNames entries as sorted KEY=VALUE
+// entries, staged holds every other entry for the staged blob
+// (stagedExtras.ResolvedAuthEnv). A staged entry whose name is reserved
+// (reservedAgentEnvName, stagedsecrets.ReservedResolvedAuthEnvName) is
+// dropped; sciontool init drops such names again before the harness
+// starts. staged is nil when there is nothing to stage.
+func splitResolvedAuthEnv(ra *api.ResolvedAuth, taken func(name string) bool) (plain []string, staged map[string]string) {
+	for _, e := range resolvedAuthEnvEntries(ra, taken) {
+		k, v, _ := strings.Cut(e, "=")
+		if resolvedAuthPlainEnvNames[k] {
+			plain = append(plain, e)
+			continue
+		}
+		if reservedAgentEnvName(k) || stagedsecrets.ReservedResolvedAuthEnvName(k) {
+			continue
+		}
+		if staged == nil {
+			staged = make(map[string]string)
+		}
+		staged[k] = v
+	}
+	return plain, staged
+}
+
 // copyFileIntoHome copies the host file src to rel in the agent home with
 // src's permission bits less group and other write, creating missing parent directories (0755). Every
 // write is confined to the home (pkg/agenthome): a link at rel is replaced,
@@ -2279,17 +2425,82 @@ func copyFileIntoHome(src string, home *agenthome.Home, rel string) error {
 // the combined environment at ~128KB.
 const stagedSecretWarnThreshold = 100 * 1024
 
+// reservedAgentEnvName reports whether name may not reach an agent
+// container's environment from any source, secret or not, on any runtime:
+// sciontool init reads it as its own marker and only init itself sets it.
+// A value supplied from outside would make init treat a broker-provided
+// token file as one it staged (stagedsecrets.HubTokenStagedEnvVar), or
+// read a resolved-auth carry file it did not write
+// (stagedsecrets.ResolvedAuthStagedEnvVar). Each runtime drops it where it
+// assembles the container environment.
+func reservedAgentEnvName(name string) bool {
+	return name == stagedsecrets.HubTokenStagedEnvVar || name == stagedsecrets.ResolvedAuthStagedEnvVar
+}
+
+// dropReservedAgentEnv deletes the reservedAgentEnvName entries from an
+// environment map.
+func dropReservedAgentEnv(env map[string]string) {
+	for k := range env {
+		if reservedAgentEnvName(k) {
+			delete(env, k)
+		}
+	}
+}
+
 // prepareContainerSecretEnv adds the shared secret-related environment needed
 // by local container runtimes.
 func prepareContainerSecretEnv(config *RunConfig) error {
-	if len(config.ResolvedSecrets) == 0 {
-		return nil
+	return prepareStagedSecretEnv(config, "")
+}
+
+// prepareStagedSecretEnv is prepareContainerSecretEnv that also stages
+// hubToken (the agent's hub-issued credential) in the blob when it is
+// non-empty. Only the Cloud Run runtime passes a token; every other caller
+// goes through prepareContainerSecretEnv and its output is unchanged.
+func prepareStagedSecretEnv(config *RunConfig, hubToken string) error {
+	return prepareStagedSecretEnvExtras(config, stagedExtras{HubToken: hubToken})
+}
+
+// stagedExtras is what a runtime stages in the blob besides the resolved
+// file and variable secrets. Only the Cloud Run runtime sets any of it.
+type stagedExtras struct {
+	// HubToken is the agent's hub-issued credential (Staged.HubToken).
+	HubToken string
+	// HarnessSecrets are the harness bundle's staged secret files
+	// (Staged.HarnessSecrets).
+	HarnessSecrets []stagedsecrets.HarnessSecret
+	// ResolvedAuthEnv are the resolved-auth env entries a runtime delivers
+	// in the blob rather than as plain env (Staged.ResolvedAuthEnv; see
+	// splitResolvedAuthEnv).
+	ResolvedAuthEnv map[string]string
+	// FieldClassErrors makes an oversize error name only the largest
+	// field class (stagedSizes.largestClass), never a secret name, key or path.
+	FieldClassErrors bool
+}
+
+// empty reports whether e stages nothing.
+func (e stagedExtras) empty() bool {
+	return e.HubToken == "" && len(e.HarnessSecrets) == 0 && len(e.ResolvedAuthEnv) == 0
+}
+
+// prepareStagedSecretEnvExtras is prepareStagedSecretEnv for any extras.
+func prepareStagedSecretEnvExtras(config *RunConfig, extras stagedExtras) error {
+	_, err := stageSecretEnv(config, extras)
+	return err
+}
+
+// stageSecretEnv is prepareStagedSecretEnvExtras that also returns the
+// staged structure it encoded (empty when nothing is staged).
+func stageSecretEnv(config *RunConfig, extras stagedExtras) (stagedsecrets.Staged, error) {
+	if len(config.ResolvedSecrets) == 0 && extras.empty() {
+		return stagedsecrets.Staged{}, nil
 	}
 
 	containerHome := util.GetHomeDir(config.UnixUsername)
-	encoded, err := serializeSecrets(containerHome, config.ResolvedSecrets)
+	built := buildStaged(containerHome, config.ResolvedSecrets, extras)
+	encoded, err := encodeStaged(built)
 	if err != nil {
-		return fmt.Errorf("failed to serialize secrets: %w", err)
+		return stagedsecrets.Staged{}, fmt.Errorf("failed to serialize secrets: %w", err)
 	}
 	if encoded != "" {
 		config.Env = append(config.Env, stagedsecrets.EnvVar+"="+encoded)
@@ -2298,7 +2509,7 @@ func prepareContainerSecretEnv(config *RunConfig) error {
 	if credPath := findGCPTelemetryCredentialPath(config.ResolvedSecrets, containerHome); credPath != "" {
 		config.Env = append(config.Env, telemetryGCPCredentialsEnvVar+"="+credPath)
 	}
-	return nil
+	return built, nil
 }
 
 // envSizeLimit is the largest environment entry a runtime accepts.
@@ -2352,20 +2563,48 @@ func (l envSizeLimit) unit() string {
 // It returns the env-type secret keys it added, in order. config.Env is
 // clipped before appending, so a caller's backing array is never written.
 func applyResolvedSecretsToEnv(config *RunConfig, limit envSizeLimit, reservedKeys ...string) ([]string, error) {
-	if len(config.ResolvedSecrets) == 0 {
-		return nil, nil
+	return applyStagedSecretsToEnv(config, limit, "", reservedKeys...)
+}
+
+// applyStagedSecretsToEnv is applyResolvedSecretsToEnv that also stages
+// hubToken in the SCION_STAGED_SECRETS blob when it is non-empty (see
+// prepareStagedSecretEnv). The token never becomes an env entry of its own.
+func applyStagedSecretsToEnv(config *RunConfig, limit envSizeLimit, hubToken string, reservedKeys ...string) ([]string, error) {
+	order, _, err := applyStagedSecretsToEnvExtras(config, limit, stagedExtras{HubToken: hubToken}, reservedKeys...)
+	return order, err
+}
+
+// applyStagedSecretsToEnvExtras is applyStagedSecretsToEnv for any extras.
+// It also returns the sizes of the staged blob (stagedSizes, zero when no
+// blob is staged), for a runtime to log.
+func applyStagedSecretsToEnvExtras(config *RunConfig, limit envSizeLimit, extras stagedExtras, reservedKeys ...string) ([]string, stagedSizes, error) {
+	if len(config.ResolvedSecrets) == 0 && extras.empty() {
+		return nil, stagedSizes{}, nil
 	}
 
 	staged := *config
 	staged.Env = nil
-	if err := prepareContainerSecretEnv(&staged); err != nil {
-		return nil, err
+	built, err := stageSecretEnv(&staged, extras)
+	if err != nil {
+		return nil, stagedSizes{}, err
+	}
+	sizes, err := measureStaged(built)
+	if err != nil {
+		return nil, stagedSizes{}, err
 	}
 	for _, e := range staged.Env {
 		key, val, _ := strings.Cut(e, "=")
 		if key == stagedsecrets.EnvVar && limit.exceeds(key, val) {
-			return nil, fmt.Errorf("file/variable secrets do not fit: %s is %d bytes, over the %d-byte limit for one %s on this runtime (largest secret: %q)",
-				stagedsecrets.EnvVar, limit.size(key, val), limit.maxBytes, limit.unit(), largestStagedSecretName(config.ResolvedSecrets))
+			if extras.FieldClassErrors {
+				return nil, sizes, fmt.Errorf("staged secrets do not fit: %s is %d bytes, over the %d-byte limit for one %s on this runtime; the largest part is the %s",
+					stagedsecrets.EnvVar, limit.size(key, val), limit.maxBytes, limit.unit(), sizes.largestClass())
+			}
+			carries := ""
+			if extras.HubToken != "" {
+				carries = "; it also carries the agent's hub credential"
+			}
+			return nil, sizes, fmt.Errorf("file/variable secrets do not fit: %s is %d bytes, over the %d-byte limit for one %s on this runtime (largest secret: %q%s)",
+				stagedsecrets.EnvVar, limit.size(key, val), limit.maxBytes, limit.unit(), largestStagedSecretName(config.ResolvedSecrets), carries)
 		}
 	}
 
@@ -2377,6 +2616,7 @@ func applyResolvedSecretsToEnv(config *RunConfig, limit envSizeLimit, reservedKe
 	// The staged keys are reserved even when this call does not set them:
 	// sciontool init reads them, so a secret must not supply them.
 	envKeys[stagedsecrets.EnvVar] = struct{}{}
+	envKeys[stagedsecrets.HubTokenStagedEnvVar] = struct{}{}
 	envKeys[telemetryGCPCredentialsEnvVar] = struct{}{}
 	for _, key := range reservedKeys {
 		envKeys[key] = struct{}{}
@@ -2400,7 +2640,7 @@ func applyResolvedSecretsToEnv(config *RunConfig, limit envSizeLimit, reservedKe
 	for _, target := range order {
 		s := values[target]
 		if limit.exceeds(target, s.Value) {
-			return nil, fmt.Errorf("secret %q (env %s) is %d bytes, over the %d-byte limit for one %s on this runtime",
+			return nil, sizes, fmt.Errorf("secret %q (env %s) is %d bytes, over the %d-byte limit for one %s on this runtime",
 				s.Name, s.Target, limit.size(target, s.Value), limit.maxBytes, limit.unit())
 		}
 	}
@@ -2410,7 +2650,71 @@ func applyResolvedSecretsToEnv(config *RunConfig, limit envSizeLimit, reservedKe
 		config.Env = append(config.Env, target+"="+values[target].Value)
 	}
 	config.Env = append(config.Env, staged.Env...)
-	return order, nil
+	return order, sizes, nil
+}
+
+// Field classes of the staged blob, as named in logs and oversize errors.
+const (
+	stagedClassHubToken       = "hub credential"
+	stagedClassFileSecrets    = "file and variable secrets"
+	stagedClassHarnessSecrets = "harness secrets"
+	stagedClassResolvedAuth   = "resolved auth"
+)
+
+// stagedSizes are the encoded sizes, in bytes, of a staged blob and of
+// what each field class adds to it. A class's size is the encoded size of
+// a blob with that class alone, so the parts do not add up exactly to the
+// total. Sizes only: no names, keys or values.
+type stagedSizes struct {
+	Total           int
+	HubToken        int
+	FileSecrets     int
+	HarnessSecrets  int
+	ResolvedAuthEnv int
+}
+
+// measureStaged returns the sizes of staged.
+func measureStaged(staged stagedsecrets.Staged) (stagedSizes, error) {
+	size := func(part stagedsecrets.Staged) (int, error) {
+		if stagedIsEmpty(part) {
+			return 0, nil
+		}
+		enc, err := marshalStaged(part)
+		return len(enc), err
+	}
+	var s stagedSizes
+	var err error
+	if s.Total, err = size(staged); err != nil {
+		return stagedSizes{}, err
+	}
+	if s.HubToken, err = size(stagedsecrets.Staged{HubToken: staged.HubToken}); err != nil {
+		return stagedSizes{}, err
+	}
+	if s.FileSecrets, err = size(stagedsecrets.Staged{FileSecrets: staged.FileSecrets, VariableSecrets: staged.VariableSecrets}); err != nil {
+		return stagedSizes{}, err
+	}
+	if s.HarnessSecrets, err = size(stagedsecrets.Staged{HarnessSecrets: staged.HarnessSecrets}); err != nil {
+		return stagedSizes{}, err
+	}
+	if s.ResolvedAuthEnv, err = size(stagedsecrets.Staged{ResolvedAuthEnv: staged.ResolvedAuthEnv}); err != nil {
+		return stagedSizes{}, err
+	}
+	return s, nil
+}
+
+// largestClass names the field class with the largest size.
+func (s stagedSizes) largestClass() string {
+	class, size := stagedClassFileSecrets, s.FileSecrets
+	if s.HarnessSecrets > size {
+		class, size = stagedClassHarnessSecrets, s.HarnessSecrets
+	}
+	if s.ResolvedAuthEnv > size {
+		class, size = stagedClassResolvedAuth, s.ResolvedAuthEnv
+	}
+	if s.HubToken > size {
+		class = stagedClassHubToken
+	}
+	return class
 }
 
 // largestStagedSecretName returns the name of the largest file or variable
@@ -2433,7 +2737,20 @@ func largestStagedSecretName(secrets []api.ResolvedSecret) string {
 // an environment variable. Returns "" when there are no file or variable secrets.
 // The containerHome parameter is used to expand ~/ prefixes in file target paths.
 func serializeSecrets(containerHome string, secrets []api.ResolvedSecret) (string, error) {
-	var staged stagedsecrets.Staged
+	return serializeStaged(containerHome, secrets, "")
+}
+
+// serializeStaged is serializeSecrets that also carries hubToken in the
+// blob's dedicated HubToken field when it is non-empty; the blob is then
+// produced even with no file or variable secrets.
+func serializeStaged(containerHome string, secrets []api.ResolvedSecret, hubToken string) (string, error) {
+	return encodeStaged(buildStaged(containerHome, secrets, stagedExtras{HubToken: hubToken}))
+}
+
+// buildStaged collects the file and variable secrets and the extras into
+// the staged blob's structure.
+func buildStaged(containerHome string, secrets []api.ResolvedSecret, extras stagedExtras) stagedsecrets.Staged {
+	staged := stagedsecrets.Staged{HubToken: extras.HubToken, HarnessSecrets: extras.HarnessSecrets, ResolvedAuthEnv: extras.ResolvedAuthEnv}
 
 	// Collect file secrets, deduplicating by container target path (last wins).
 	targetIndex := make(map[string]int) // target → index in FileSecrets
@@ -2480,22 +2797,42 @@ func serializeSecrets(containerHome string, secrets []api.ResolvedSecret) (strin
 		staged.VariableSecrets[s.Target] = s.Value
 	}
 
-	if len(staged.FileSecrets) == 0 && len(staged.VariableSecrets) == 0 {
+	return staged
+}
+
+// stagedIsEmpty reports whether staged carries nothing, so no blob is set.
+func stagedIsEmpty(staged stagedsecrets.Staged) bool {
+	return len(staged.FileSecrets) == 0 && len(staged.VariableSecrets) == 0 &&
+		staged.HubToken == "" && len(staged.HarnessSecrets) == 0 && len(staged.ResolvedAuthEnv) == 0
+}
+
+// encodeStaged serializes staged into the blob's encoded form, or "" when
+// it carries nothing.
+func encodeStaged(staged stagedsecrets.Staged) (string, error) {
+	if stagedIsEmpty(staged) {
 		return "", nil
 	}
 
-	jsonData, err := json.Marshal(staged)
+	encoded, err := marshalStaged(staged)
 	if err != nil {
-		return "", fmt.Errorf("failed to serialize staged secrets: %w", err)
+		return "", err
 	}
-
-	encoded := base64.StdEncoding.EncodeToString(jsonData)
 	if len(encoded) > stagedSecretWarnThreshold {
 		slog.Warn("serialized secrets blob exceeds size warning threshold",
 			"size_bytes", len(encoded), "threshold_bytes", stagedSecretWarnThreshold)
 	}
 
 	return encoded, nil
+}
+
+// marshalStaged is encodeStaged without the empty check and the size
+// warning.
+func marshalStaged(staged stagedsecrets.Staged) (string, error) {
+	jsonData, err := json.Marshal(staged)
+	if err != nil {
+		return "", fmt.Errorf("failed to serialize staged secrets: %w", err)
+	}
+	return base64.StdEncoding.EncodeToString(jsonData), nil
 }
 
 // phaseFromContainerStatus derives an agent phase from a container status string.

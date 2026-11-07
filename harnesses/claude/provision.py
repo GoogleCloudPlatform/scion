@@ -138,9 +138,29 @@ CLAUDE_MCP_MAPPING = {
 
 
 def _resolve(ctx: scion_harness.ProvisionContext, name: str) -> str:
-    """Read a secret value, falling back to a ${VAR} placeholder."""
+    """Read a staged credential secret, falling back to a ${VAR} placeholder.
+
+    Credentials never fall back to the process environment: a value read
+    from there would be copied into outputs/env.json.
+    """
     val = ctx.read_secret(name)
     return val if val else "${" + name + "}"
+
+
+# Vertex AI discovery names: project and location, never credentials.
+_VERTEX_DISCOVERY_KEYS = frozenset({"GOOGLE_CLOUD_PROJECT", *scion_harness.vertex_location_keys()})
+
+
+def _read_vertex(ctx: scion_harness.ProvisionContext, name: str) -> str:
+    """Read a Vertex AI discovery value ("" when unset).
+
+    Order: a staged secret file, then the process env for auth candidate
+    names. Only names in _VERTEX_DISCOVERY_KEYS are accepted, so a
+    credential cannot take the process-env fallback through this helper.
+    """
+    if name not in _VERTEX_DISCOVERY_KEYS:
+        raise ValueError(f"{name} is not a Vertex AI discovery name")
+    return ctx.read_secret(name, env_fallback=name in ctx.env_keys)
 
 
 def _apply_api_key_approval(ctx: scion_harness.ProvisionContext, api_key: str) -> None:
@@ -381,18 +401,20 @@ def _build_env_overlay(ctx: scion_harness.ProvisionContext, auth: scion_harness.
         env = {"CLAUDE_CODE_OAUTH_TOKEN": _resolve(ctx, "CLAUDE_CODE_OAUTH_TOKEN")}
     elif auth.method == "vertex-ai":
         region_key = auth.env_key or "GOOGLE_CLOUD_REGION"
-        # Read the sources selection and _resolve use: a staged secret file,
-        # else the process env for candidate keys (Claude then reads the
-        # env value through the ${VAR} placeholder).
-        scion_harness.warn_vertex_location_conflict(
-            lambda k: ctx.read_secret(k, env_fallback=k in ctx.env_keys),
-            ctx.warn,
-        )
-        env = {
-            "CLAUDE_CODE_USE_VERTEX": "1",
-            "ANTHROPIC_VERTEX_PROJECT_ID": _resolve(ctx, "GOOGLE_CLOUD_PROJECT"),
-            "CLOUD_ML_REGION": _resolve(ctx, region_key),
-        }
+        # The conflict check and the written values use the same reader. The
+        # overlay carries real values: a key with no value from either source
+        # is left out, because the overlay is applied literally and a ${VAR}
+        # placeholder would reach Claude as text (ptone/scion#7290).
+        read = lambda k: _read_vertex(ctx, k)  # noqa: E731
+        scion_harness.warn_vertex_location_conflict(read, ctx.warn)
+        env = {"CLAUDE_CODE_USE_VERTEX": "1"}
+        for out_key, src_key in (
+            ("ANTHROPIC_VERTEX_PROJECT_ID", "GOOGLE_CLOUD_PROJECT"),
+            ("CLOUD_ML_REGION", region_key),
+        ):
+            value = read(src_key)
+            if value:
+                env[out_key] = value
     else:
         env = {}
 

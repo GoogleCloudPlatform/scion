@@ -39,6 +39,17 @@ func tzTestDispatcher(t *testing.T, hubDefault string) (*HTTPAgentDispatcher, st
 	return d, s
 }
 
+// mustResolveAgentTZ is d.resolveAgentTZ for a resolution that must not
+// fail.
+func mustResolveAgentTZ(t *testing.T, d *HTTPAgentDispatcher, agent *store.Agent, forGatherAnswer bool) agentTZ {
+	t.Helper()
+	got, err := d.resolveAgentTZ(context.Background(), agent, forGatherAnswer)
+	if err != nil {
+		t.Fatalf("resolveAgentTZ: unexpected error: %v", err)
+	}
+	return got
+}
+
 // TestResolveAgentTZ_StorageScopeOrder checks the storage rung follows
 // envScopePrecedence (user > project > hub > broker) and reports the winning
 // scope as the source.
@@ -62,7 +73,7 @@ func TestResolveAgentTZ_StorageScopeOrder(t *testing.T) {
 	agent := envScopeTestAgent()
 	for _, scope := range order {
 		tzTestEnvVar(t, s, store.EnvVar{Value: values[scope], Scope: scope, ScopeID: envScopeTestScopeID(t, scope)})
-		got := d.resolveAgentTZ(context.Background(), agent, false)
+		got := mustResolveAgentTZ(t, d, agent, false)
 		want := agentTZ{TZ: values[scope], Source: wantSource[scope]}
 		if got != want {
 			t.Fatalf("after seeding %s: resolveAgentTZ() = %+v, want %+v", scope, got, want)
@@ -78,11 +89,11 @@ func TestResolveAgentTZ_ExplicitBeatsStorage(t *testing.T) {
 	agent := envScopeTestAgent()
 	agent.AppliedConfig.ExplicitTimezone = "Europe/Paris"
 
-	if got, want := d.resolveAgentTZ(context.Background(), agent, false), (agentTZ{TZ: "Europe/Paris", Source: TZSourceExplicit}); got != want {
+	if got, want := mustResolveAgentTZ(t, d, agent, false), (agentTZ{TZ: "Europe/Paris", Source: TZSourceExplicit}); got != want {
 		t.Fatalf("resolveAgentTZ() = %+v, want %+v", got, want)
 	}
 	agent.AppliedConfig.ExplicitTimezoneLegacy = true
-	if got, want := d.resolveAgentTZ(context.Background(), agent, false), (agentTZ{TZ: "Europe/Paris", Source: TZSourceLegacy}); got != want {
+	if got, want := mustResolveAgentTZ(t, d, agent, false), (agentTZ{TZ: "Europe/Paris", Source: TZSourceLegacy}); got != want {
 		t.Fatalf("legacy: resolveAgentTZ() = %+v, want %+v", got, want)
 	}
 }
@@ -96,12 +107,12 @@ func TestResolveAgentTZ_SkipsAsNeededAndEmpty(t *testing.T) {
 	tzTestEnvVar(t, s, store.EnvVar{Value: "", Scope: store.ScopeProject, ScopeID: envScopeTestScopeID(t, store.ScopeProject)})
 	agent := envScopeTestAgent()
 
-	if got, want := d.resolveAgentTZ(context.Background(), agent, false), (agentTZ{TZ: "Asia/Tokyo", Source: TZSourceHubDefault}); got != want {
+	if got, want := mustResolveAgentTZ(t, d, agent, false), (agentTZ{TZ: "Asia/Tokyo", Source: TZSourceHubDefault}); got != want {
 		t.Fatalf("no usable storage: resolveAgentTZ() = %+v, want %+v", got, want)
 	}
 
 	tzTestEnvVar(t, s, store.EnvVar{Value: "Europe/Berlin", Scope: store.ScopeRuntimeBroker, ScopeID: envScopeTestScopeID(t, store.ScopeRuntimeBroker)})
-	if got, want := d.resolveAgentTZ(context.Background(), agent, false), (agentTZ{TZ: "Europe/Berlin", Source: TZSourceBroker}); got != want {
+	if got, want := mustResolveAgentTZ(t, d, agent, false), (agentTZ{TZ: "Europe/Berlin", Source: TZSourceBroker}); got != want {
 		t.Fatalf("empty project value must not shadow broker: resolveAgentTZ() = %+v, want %+v", got, want)
 	}
 }
@@ -113,7 +124,7 @@ func TestResolveAgentTZ_OtherKeysIgnored(t *testing.T) {
 	tzTestEnvVar(t, s, store.EnvVar{Key: "TZDIR", Value: "/usr/share/zoneinfo", Scope: store.ScopeUser, ScopeID: envScopeTestScopeID(t, store.ScopeUser)})
 	agent := envScopeTestAgent()
 
-	if got, want := d.resolveAgentTZ(context.Background(), agent, false), (agentTZ{TZ: "", Source: TZSourceNone}); got != want {
+	if got, want := mustResolveAgentTZ(t, d, agent, false), (agentTZ{TZ: "", Source: TZSourceNone}); got != want {
 		t.Fatalf("resolveAgentTZ() = %+v, want %+v", got, want)
 	}
 }
@@ -132,12 +143,12 @@ func TestResolveAgentTZ_Progeny(t *testing.T) {
 	agent := envScopeTestAgent()
 	agent.Ancestry = []string{"user-ancestor-1", "agent-parent-1"}
 
-	if got, want := d.resolveAgentTZ(context.Background(), agent, false), (agentTZ{TZ: "Asia/Kathmandu", Source: TZSourceProgeny}); got != want {
+	if got, want := mustResolveAgentTZ(t, d, agent, false), (agentTZ{TZ: "Asia/Kathmandu", Source: TZSourceProgeny}); got != want {
 		t.Fatalf("progeny only: resolveAgentTZ() = %+v, want %+v", got, want)
 	}
 
 	tzTestEnvVar(t, s, store.EnvVar{Value: "Europe/Berlin", Scope: store.ScopeRuntimeBroker, ScopeID: envScopeTestScopeID(t, store.ScopeRuntimeBroker)})
-	if got, want := d.resolveAgentTZ(context.Background(), agent, false), (agentTZ{TZ: "Europe/Berlin", Source: TZSourceBroker}); got != want {
+	if got, want := mustResolveAgentTZ(t, d, agent, false), (agentTZ{TZ: "Europe/Berlin", Source: TZSourceBroker}); got != want {
 		t.Fatalf("broker beats progeny: resolveAgentTZ() = %+v, want %+v", got, want)
 	}
 }
@@ -152,29 +163,28 @@ func TestResolveAgentTZ_HubDefaultLiveAndNone(t *testing.T) {
 		return opsettings.AgentDefaultsSettings{DefaultTimezone: hubDefault}
 	})
 	agent := envScopeTestAgent()
-	ctx := context.Background()
 
-	if got, want := d.resolveAgentTZ(ctx, agent, false), (agentTZ{TZ: "Asia/Tokyo", Source: TZSourceHubDefault}); got != want {
+	if got, want := mustResolveAgentTZ(t, d, agent, false), (agentTZ{TZ: "Asia/Tokyo", Source: TZSourceHubDefault}); got != want {
 		t.Fatalf("resolveAgentTZ() = %+v, want %+v", got, want)
 	}
 	hubDefault = "Asia/Kathmandu"
-	if got, want := d.resolveAgentTZ(ctx, agent, false), (agentTZ{TZ: "Asia/Kathmandu", Source: TZSourceHubDefault}); got != want {
+	if got, want := mustResolveAgentTZ(t, d, agent, false), (agentTZ{TZ: "Asia/Kathmandu", Source: TZSourceHubDefault}); got != want {
 		t.Fatalf("after default edit: resolveAgentTZ() = %+v, want %+v", got, want)
 	}
 	hubDefault = ""
-	if got, want := d.resolveAgentTZ(ctx, agent, false), (agentTZ{TZ: "", Source: TZSourceNone}); got != want {
+	if got, want := mustResolveAgentTZ(t, d, agent, false), (agentTZ{TZ: "", Source: TZSourceNone}); got != want {
 		t.Fatalf("no rungs: resolveAgentTZ() = %+v, want %+v", got, want)
 	}
-	if got, want := d.resolveAgentTZ(ctx, agent, true), (agentTZ{TZ: "UTC", Source: TZSourceNone}); got != want {
+	if got, want := mustResolveAgentTZ(t, d, agent, true), (agentTZ{TZ: "UTC", Source: TZSourceNone}); got != want {
 		t.Fatalf("no rungs, gather answer: resolveAgentTZ() = %+v, want %+v", got, want)
 	}
 
 	// No provider at all (e.g. file-less test hubs) behaves like an empty default.
 	bare, _ := newEnvScopeDispatcher(t, "UNUSED", nil)
-	if got, want := bare.resolveAgentTZ(ctx, agent, false), (agentTZ{TZ: "", Source: TZSourceNone}); got != want {
+	if got, want := mustResolveAgentTZ(t, bare, agent, false), (agentTZ{TZ: "", Source: TZSourceNone}); got != want {
 		t.Fatalf("no provider: resolveAgentTZ() = %+v, want %+v", got, want)
 	}
-	if got, want := bare.resolveAgentTZ(ctx, nil, false), (agentTZ{TZ: "", Source: TZSourceNone}); got != want {
+	if got, want := mustResolveAgentTZ(t, bare, nil, false), (agentTZ{TZ: "", Source: TZSourceNone}); got != want {
 		t.Fatalf("nil agent: resolveAgentTZ() = %+v, want %+v", got, want)
 	}
 }
@@ -243,7 +253,7 @@ func TestResolveAgentTZ_ProfileSettingsAreNotARung(t *testing.T) {
 			d, _ := tzTestDispatcher(t, tt.hubDefault)
 			agent := envScopeTestAgent()
 			agent.AppliedConfig = &store.AgentAppliedConfig{Profile: "default", HarnessConfig: "claude"}
-			if got := d.resolveAgentTZ(context.Background(), agent, false); got != tt.want {
+			if got := mustResolveAgentTZ(t, d, agent, false); got != tt.want {
 				t.Fatalf("resolveAgentTZ() = %+v, want %+v", got, tt.want)
 			}
 		})
@@ -269,7 +279,7 @@ func TestResolveAgentTZ_UnadoptedLegacyEnvTZ(t *testing.T) {
 			agent := envScopeTestAgent()
 			agent.AppliedConfig = tt.ac
 
-			if got, want := d.resolveAgentTZ(context.Background(), agent, false), (agentTZ{TZ: "Asia/Tokyo", Source: TZSourceHubDefault}); got != want {
+			if got, want := mustResolveAgentTZ(t, d, agent, false), (agentTZ{TZ: "Asia/Tokyo", Source: TZSourceHubDefault}); got != want {
 				t.Fatalf("resolveAgentTZ() = %+v, want %+v", got, want)
 			}
 			if !strings.Contains(buf.String(), "unadopted legacy TZ") {
@@ -284,7 +294,7 @@ func TestResolveAgentTZ_UnadoptedLegacyEnvTZ(t *testing.T) {
 	d.log = slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	agent := envScopeTestAgent()
 	agent.AppliedConfig = &store.AgentAppliedConfig{ExplicitTimezone: "Europe/Paris", ExplicitTimezoneLegacy: true}
-	if got, want := d.resolveAgentTZ(context.Background(), agent, false), (agentTZ{TZ: "Europe/Paris", Source: TZSourceLegacy}); got != want {
+	if got, want := mustResolveAgentTZ(t, d, agent, false), (agentTZ{TZ: "Europe/Paris", Source: TZSourceLegacy}); got != want {
 		t.Fatalf("pinned: resolveAgentTZ() = %+v, want %+v", got, want)
 	}
 	if buf.Len() != 0 {
@@ -311,70 +321,85 @@ func (s *tzErrStore) ListProgenyEnvVars(context.Context, []string) ([]store.EnvV
 	return nil, errors.New("simulated progeny env var read failure")
 }
 
-// TestResolveAgentTZ_StoreErrorsWithNilLog checks a failed storage read is
-// skipped, never a panic, on a dispatcher without a logger, and that the
-// resolver falls through to the next rung.
-func TestResolveAgentTZ_StoreErrorsWithNilLog(t *testing.T) {
+// TestResolveAgentTZ_StoreErrorsAreReturned checks that a failed storage
+// read is returned, never skipped, so no lower-precedence rung (a lower
+// scope, the progeny list, the hub default or none) stands in for a TZ the
+// hub could not read. It also checks a dispatcher without a logger does not
+// panic on the unadopted legacy env TZ warning that precedes the read.
+func TestResolveAgentTZ_StoreErrorsAreReturned(t *testing.T) {
 	newAgent := func() *store.Agent {
 		agent := envScopeTestAgent()
 		// Ancestry of more than one entry makes the resolver read progeny vars.
 		agent.Ancestry = []string{"user-ancestor-1", "agent-parent-1"}
-		// An unadopted legacy env TZ exercises the third warning site.
+		// An unadopted legacy env TZ exercises the nil-log warning site.
 		agent.AppliedConfig = &store.AgentAppliedConfig{Env: map[string]string{"TZ": "Europe/Paris"}}
 		return agent
 	}
 
-	for _, tc := range []struct {
-		name       string
-		hubDefault string
-		want       agentTZ
-	}{
-		{name: "falls through to the hub default", hubDefault: "Asia/Tokyo", want: agentTZ{TZ: "Asia/Tokyo", Source: TZSourceHubDefault}},
-		{name: "falls through to none", want: agentTZ{Source: TZSourceNone}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			d, s := tzTestDispatcher(t, tc.hubDefault)
-			tzTestEnvVar(t, s, store.EnvVar{Value: "Europe/Berlin", Scope: store.ScopeUser, ScopeID: envScopeTestScopeID(t, store.ScopeUser)})
-			d.store = &tzErrStore{Store: s}
-			d.log = nil
-			if got := d.resolveAgentTZ(context.Background(), newAgent(), false); got != tc.want {
-				t.Fatalf("resolveAgentTZ() = %+v, want %+v", got, tc.want)
-			}
-		})
-	}
-
-	// Scopes are walked broker, hub, project, user, and a later scope
-	// overrides an earlier one. Failing a scope that is not the last one walked
-	// shows the walk continues past the error rather than stopping there.
+	// Scopes are walked broker, hub, project, user. Each case seeds a
+	// usable TZ at a rung below the failed read, so a skip would resolve it.
 	for _, tc := range []struct {
 		name    string
 		project string
 		user    string
-		fail    string
-		want    agentTZ
+		fail    map[string]bool // nil fails every scope; progeny always fails
 	}{
 		{
-			name:    "a failed project read is skipped and the user scope still wins",
-			project: "Europe/Berlin", user: "America/Denver", fail: store.ScopeProject,
-			want: agentTZ{TZ: "America/Denver", Source: TZSourceUser},
+			name: "every scope fails; the hub default does not stand in",
+			user: "Europe/Berlin",
 		},
 		{
-			name:    "a failed higher-precedence scope falls back to a lower one",
-			project: "America/Denver", user: "Europe/Berlin", fail: store.ScopeUser,
-			want: agentTZ{TZ: "America/Denver", Source: TZSourceProject},
+			name:    "a failed higher-precedence scope does not fall back to a lower one",
+			project: "America/Denver", user: "Europe/Berlin",
+			fail: map[string]bool{store.ScopeUser: true},
+		},
+		{
+			name:    "a failed lower scope fails even when a higher scope holds a TZ",
+			project: "Europe/Berlin", user: "America/Denver",
+			fail: map[string]bool{store.ScopeProject: true},
+		},
+		{
+			name: "a failed progeny read does not fall through to the hub default",
+			fail: map[string]bool{},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			d, s := tzTestDispatcher(t, "Asia/Tokyo")
-			tzTestEnvVar(t, s, store.EnvVar{Value: tc.project, Scope: store.ScopeProject, ScopeID: envScopeTestScopeID(t, store.ScopeProject)})
-			tzTestEnvVar(t, s, store.EnvVar{Value: tc.user, Scope: store.ScopeUser, ScopeID: envScopeTestScopeID(t, store.ScopeUser)})
-			d.store = &tzErrStore{Store: s, failScopes: map[string]bool{tc.fail: true}}
+			if tc.project != "" {
+				tzTestEnvVar(t, s, store.EnvVar{Value: tc.project, Scope: store.ScopeProject, ScopeID: envScopeTestScopeID(t, store.ScopeProject)})
+			}
+			if tc.user != "" {
+				tzTestEnvVar(t, s, store.EnvVar{Value: tc.user, Scope: store.ScopeUser, ScopeID: envScopeTestScopeID(t, store.ScopeUser)})
+			}
+			d.store = &tzErrStore{Store: s, failScopes: tc.fail}
 			d.log = nil
-			if got := d.resolveAgentTZ(context.Background(), newAgent(), false); got != tc.want {
-				t.Fatalf("resolveAgentTZ() = %+v, want %+v", got, tc.want)
+			got, err := d.resolveAgentTZ(context.Background(), newAgent(), false)
+			if err == nil {
+				t.Fatalf("resolveAgentTZ() = %+v, nil error; want a read error", got)
+			}
+			if got != (agentTZ{}) {
+				t.Fatalf("resolveAgentTZ() = %+v with error; want the zero agentTZ", got)
+			}
+			if strings.Contains(err.Error(), "simulated") {
+				t.Fatalf("error text %q carries the backend error", err.Error())
+			}
+			if gather, err := d.resolveAgentTZ(context.Background(), newAgent(), true); err == nil || gather != (agentTZ{}) {
+				t.Fatalf("gather answer: resolveAgentTZ() = %+v, %v; want the zero agentTZ and an error", gather, err)
 			}
 		})
 	}
+
+	// A pin wins outright: no storage read, so a failing store is not an error.
+	t.Run("an explicit pin needs no storage read", func(t *testing.T) {
+		d, s := tzTestDispatcher(t, "Asia/Tokyo")
+		d.store = &tzErrStore{Store: s}
+		d.log = nil
+		agent := envScopeTestAgent()
+		agent.AppliedConfig = &store.AgentAppliedConfig{ExplicitTimezone: "Asia/Kathmandu"}
+		if got, want := mustResolveAgentTZ(t, d, agent, false), (agentTZ{TZ: "Asia/Kathmandu", Source: TZSourceExplicit}); got != want {
+			t.Fatalf("resolveAgentTZ() = %+v, want %+v", got, want)
+		}
+	})
 }
 
 // TestTZDropWarnings_NilLog checks the TZ-targeted secret and caller-env TZ

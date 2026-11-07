@@ -133,8 +133,10 @@ func (s *Server) hasCatalogWideListAccess(ctx context.Context, identity Identity
 // Every other identity kind uses the ordinary AuthorizeReadBatch path
 // unchanged.
 func (s *Server) catalogListReadBatch(identity Identity) func(context.Context, Identity, []Resource) ([]bool, error) {
-	// No list operation admits an agent delegated credential yet
-	// (.design/agent-delegation.md §11.8): deny every row.
+	// An agent delegated credential's admitted lists (agents, skills,
+	// templates) run their own item filter (delegatedListItemRead) and never
+	// call this batch. Any other catalog list (harness configs, which are not
+	// admitted) denies every row (.design/agent-delegation.md §11.8).
 	if isDelegatedAgentIdentity(identity) {
 		return func(_ context.Context, _ Identity, resources []Resource) ([]bool, error) {
 			return make([]bool, len(resources)), nil
@@ -600,8 +602,9 @@ func listCursorAEAD(key []byte) (cipher.AEAD, error) {
 	return aead, nil
 }
 
-// newListCursorSealer builds a sealer from one fixed 32-byte AES-256 key,
-// sealing and opening the c1 form only (legacy mode).
+// newListCursorSealer builds a sealer from one fixed 32-byte AES-256 key
+// (legacy mode): it seals the c1 form and opens c1 and the c2 form whose
+// key ID is "legacy" (see fixedCapabilityKeys).
 func newListCursorSealer(key []byte) (*listCursorSealer, error) {
 	if _, err := listCursorAEAD(key); err != nil {
 		return nil, err

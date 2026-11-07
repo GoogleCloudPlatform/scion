@@ -95,8 +95,11 @@ func isLocalSlashPath(p string) bool {
 // agent's directory).
 func nfsProvisionStateInitMount(config RunConfig, nfsAgentDir bool, vols *nfsPodVolumes) (*corev1.VolumeMount, *corev1.EnvVar, error) {
 	// An empty NFSSubPath mounts the claim's root as the workspace: there is
-	// no project directory to put a sibling in, so the sentinel stays in the
-	// workspace as before.
+	// no project directory to put a sibling in, so the pod gets no state
+	// directory, and a shared-mode provisioning init container fails (the
+	// sentinel is never kept in the workspace). No workspace backend
+	// produces this shape; the nfs backend always mounts
+	// <subPathRoot>/<projectID>/workspace.
 	if !nfsInitContainerInjected(config) || nfsAgentDir || config.NFSSubPath == "" {
 		return nil, nil, nil
 	}

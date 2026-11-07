@@ -32,3 +32,10 @@ func readSharedDirRecord(path string) ([]byte, error) {
 	}
 	return nil, fmt.Errorf("read shared-dir storage record %s: %w on this platform", path, errors.ErrUnsupported)
 }
+
+// openRetiredSharedDirRecord opens the retired record at path. Off unix
+// there is no O_NOFOLLOW; readRetiredSharedDirRecord's Lstat and its
+// regular-file check on the opened file stay the guard, as before.
+func openRetiredSharedDirRecord(path string) (*os.File, error) {
+	return os.Open(path)
+}

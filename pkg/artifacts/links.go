@@ -92,12 +92,16 @@ type LinkInfo struct {
 	CreatedBy string    `json:"createdBy,omitempty"`
 }
 
-// CreateLinkResponse answers POST /{id}/links. URL is the only place the
-// token ever appears; it is not retrievable later.
+// CreateLinkResponse answers POST /{id}/links. URL and ShareURL are the
+// only places the token ever appears; it is not retrievable later.
 type CreateLinkResponse struct {
 	Link LinkInfo `json:"link"`
 	// URL is the hub-relative path of the link.
 	URL string `json:"url"`
+	// ShareURL is the absolute link on the hub's content host, present
+	// only when server.hub.content_url is set and valid. It is built
+	// from that setting alone, never from the request.
+	ShareURL string `json:"shareUrl,omitempty"`
 	// ClampedToArtifactExpiry is true when the link expires earlier than
 	// asked because the artifact itself expires then.
 	ClampedToArtifactExpiry bool `json:"clampedToArtifactExpiry,omitempty"`
@@ -218,7 +222,7 @@ func (s *Service) stewardAuthority(ctx context.Context, a *Artifact) string {
 	if !ok {
 		return ""
 	}
-	switch st.StewardClause(ctx, a.OwnerRef, a.ScopeRef, "", a.OrphanedAt != nil) {
+	switch st.StewardClause(ctx, a.OwnerRef, a.ScopeRef, a.SponsorRef, a.OrphanedAt != nil) {
 	case StewardClauseProjectOwner:
 		return AuthorityStewardProjectOwner
 	case StewardClauseDelegator:
@@ -467,8 +471,10 @@ func (s *Service) handleCreateLink(w http.ResponseWriter, r *http.Request, id st
 	}
 	s.logLink(r, a, logActionLinkCreated, actor)
 	w.Header().Set("Referrer-Policy", "no-referrer")
+	rel := RouteShared + token
 	writeJSON(w, http.StatusCreated, CreateLinkResponse{
-		Link: linkInfo(g), URL: RouteShared + token, ClampedToArtifactExpiry: clamped,
+		Link: linkInfo(g), URL: rel, ShareURL: shareURL(b.currentLimits(r.Context()), rel),
+		ClampedToArtifactExpiry: clamped,
 	})
 }
 

@@ -2,17 +2,28 @@
 title: Release Notes
 ---
 
-Scion release notes are published weekly.
+Scion release notes are published for each preview and stable release. Earlier notes were published weekly.
 
-## Latest: Week of October 19 -- 25, 2026
+## Releases
 
-Scion now mounts repository git metadata into agents read-only with a private, credential-stripped `.git/config`, mounts project `.scion` directories read-only in shared layouts, and requires clone-per-agent for Kubernetes git projects that would otherwise share one repository across agents. Project storage consolidated into a single `server.project_storage` block and layout authority that backs the Files tab and chat attachments, while WebDAV, project-level `scion sync`, the Hub project copy and GCS workspace sync were retired. Agent-bound delegation added in-memory credential exchange over `~/.scion/delegation.sock`, lifecycle revocation, revoke-all endpoints and visible delegation attribution on messages, alongside `project.chat_post` for project thread posts and expanded User Access Token scopes for users, groups, roles, access boundaries and project creation. Across the web client, CLI and Runtime Brokers, API responses and static assets are compressed, the Agent Edit page replaced Configure, a single model channel feeds the harness `--model` argument, and `scion reincarnate --broker <target> --force` can move agents by recreating their workspace on another Runtime Broker.
+- [v0.3.0-preview.7](/scion/release-notes/v0-3-0-preview-7/) (in preparation)
+- [v0.3.0-preview.6](/scion/release-notes/v0-3-0-preview-6/)
 
-[Read the full release notes for this week ->](/scion/release-notes/2026-10-19/)
+## Weekly notes (through November 1, 2026)
+
+Scion now requires TLS off loopback between the Hub and Runtime Brokers (`server.trusted_proxies`) with single-use nonced requests, runs host-side git without host credentials while checking repository git config before start, and refuses mounts that reach Runtime Broker control files or exceed an agent's NFS scope while disabling Kubernetes API token automounting on agent pods. Authorization along recorded delegation chains now governs user-scope secrets, GCP service-account token minting and lifecycle hook tokens, agent and user JWTs and conduit relay tokens use the server keyring's versioned signing ring, Hub-dispatched starts require a Hub-issued token, and user- and Hub-level secrets and environment variables require an interactive login. Shared `server.project_storage` reached Kubernetes and Cloud Run with centralized validation, Hub-side shared-tree deletion and Hub-signed workspace bootstrap URLs, while asynchronous agent launch (`hub.async_agent_launch`), chat attachment artifacts (`hub.attachment_artifacts`) and starred messages (`web.chat_starred_messages`) graduated to default-on. On the client and operator side, `scion` ships a native Windows client CLI (`amd64` and `arm64`), single-node VM Hubs gained self-update under `/opt/scion` with Runtime Broker plugin updates, confirmed downgrades and boot-failure rollback, and the CLI added `scion hub settings`, `project-defaults`, `experiments` and `delegation` commands alongside per-schedule time zones, `Unlimited` count limits (`0`), and an opt-in `pi` harness.
+
+[Read the full release notes for this week ->](/scion/release-notes/2026-10-26/)
 
 ## Kubernetes agent pods no longer mount a Kubernetes API token
 
 Kubernetes agent pods no longer mount a Kubernetes API token. Restart running agents to apply this to them. To list agent pods that still have a token across all namespaces, see [Agent pod identity](/scion/hosted/ha/kubernetes/#agent-pod-identity).
+
+## Runtime Brokers that cannot receive commands are shown as such
+
+A Runtime Broker is online while its heartbeats arrive, but heartbeats do not use the control channel that carries commands to it. A Runtime Broker whose control channel to the Hub was not connected, for example because the Hub's transport check refused it, still looked healthy. Its health now reports `control_channel` as `healthy` (connected) or `unhealthy` (not connected for more than 90 seconds, or refused by the transport check), and nothing while it is starting or reconnecting within those 90 seconds; `unhealthy` marks the broker `degraded`. A Runtime Broker connected to several Hubs tells each Hub only about its own control channel. The Hub's health summary adds the `broker_command_path` item "is online but cannot receive commands", `scion doctor` counts such brokers, and `scion runtime-broker status` prints a `Commands:` line per hub connection and, while the broker is online, for the broker as the Hub sees it. Its former `Connected: yes` line, which only checked that the Hub API answered, is now `Hub API: reachable`. A hub connection is reported `connecting` until its control channel's handshake completes, instead of `connected` at once. Online status and routing are unchanged.
+
+**Before upgrading, check `server.trusted_proxies`.** A Hub whose TLS ends at a proxy on another host, or at a proxy container on a bridge network, must list the proxy's addresses, or remote Runtime Brokers cannot connect. The Admin -> Maintenance `update-binary` and `rebuild-server` operations now print a `==> Settings check` section that lists required settings left unset; it only warns. See the [upgrade checklist](/scion/reference/hub-upgrade-rollback/#upgrade-checklist-settings-to-check-first).
 
 ## Agents created from a user access token receive shared secrets and launch material again
 
@@ -120,6 +131,7 @@ Upgrade note: on the first start after upgrading, the Hub has no record yet, so 
 
 ## Previous Weeks
 
+- [Week of October 19 -- 25, 2026](/scion/release-notes/2026-10-19/)
 - [Week of October 12 -- 18, 2026](/scion/release-notes/2026-10-12/)
 - [Week of October 5 -- 11, 2026](/scion/release-notes/2026-10-05/)
 - [Week of September 28 -- October 4, 2026](/scion/release-notes/2026-09-28/)

@@ -186,15 +186,22 @@ func TestBuildPod_NFSProvisionStateMount_NotForAgentDirModes(t *testing.T) {
 // A workspace subPath outside the expected project layout fails the build
 // instead of mounting a guessed directory.
 func TestBuildPod_NFSProvisionStateMount_FailsClosed(t *testing.T) {
-	for _, mutate := range []func(*RunConfig){
-		func(c *RunConfig) { c.ProjectID = "proj-other" },
-		func(c *RunConfig) { c.NFSSubPath = "projects/proj-123/../proj-999/workspace" },
-		func(c *RunConfig) { c.NFSSubPath = "projects/proj-123/data" },
+	// A workspace subPath outside the project's tree is refused when the
+	// workspace is mounted (checkNFSMountScope), before the provisioning
+	// state mount is reached; one inside it that is not <project>/workspace
+	// is refused by the provisioning state mount.
+	for _, tc := range []struct {
+		mutate func(*RunConfig)
+		want   string
+	}{
+		{func(c *RunConfig) { c.ProjectID = "proj-other" }, "outside project proj-other's tree"},
+		{func(c *RunConfig) { c.NFSSubPath = "projects/proj-123/../proj-999/workspace" }, "not a clean path"},
+		{func(c *RunConfig) { c.NFSSubPath = "projects/proj-123/data" }, "provisioning state"},
 	} {
 		cfg := nfsBaseConfig("bad")
-		mutate(&cfg)
+		tc.mutate(&cfg)
 		_, err := newNFSTestK8sRuntime().buildPod("default", cfg)
-		assert.ErrorContains(t, err, "provisioning state", "subPath %q project %q", cfg.NFSSubPath, cfg.ProjectID)
+		assert.ErrorContains(t, err, tc.want, "subPath %q project %q", cfg.NFSSubPath, cfg.ProjectID)
 	}
 }
 

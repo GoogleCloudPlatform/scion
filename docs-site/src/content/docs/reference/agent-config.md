@@ -34,8 +34,8 @@ Edits to a template's `env` take effect on an agent's next start. Its job keys a
 | :--- | :--- | :--- |
 | `schema_version` | string | Should be `"1"`. |
 | `default_harness_config` | string | The name of the default harness config to use (e.g., `gemini`, `antigravity`). |
-| `agent_instructions` | string | Role-specific instructions for the agent (harness-agnostic). |
-| `system_prompt` | string | The system prompt to use for the agent (harness-agnostic). |
+| `agent_instructions` | string | Role-specific instructions for the agent (harness-agnostic). A value with a line break is inline text. A single-line value must be a relative path inside the template directory (an absolute path, `..` component, or `.` is refused); if a template in the chain has that path, it is read as a plain regular file of at most 4 MiB without following symlinks or hard links (an invalid or unreadable file is refused), and if no template in the chain has the file, the value is used as inline text (see [`scion-agent.yaml`](/scion/local/templates/#scion-agentyaml)). |
+| `system_prompt` | string | The system prompt to use for the agent (harness-agnostic). Follows the same relative template file or inline text rules as `agent_instructions`. |
 | `harness_config` | string | The harness config to use. When a template sets both this and `default_harness_config`, `default_harness_config` wins. |
 | `env` | map | Environment variables. In a template, a lowest-precedence fallback; see [Environment variables](#environment-variables-env). |
 | `detached` | bool | Run in background (default `true`). |
@@ -216,7 +216,7 @@ When an agent starts:
 ### Project settings precedence
 
 Agents created inside a hub project have one more source of values: the
-project's own defaults, set in Project Settings and stored as `scion.io/*`
+project's own defaults, set in Project Settings (or with [`scion project settings`](/scion/reference/cli/#scion-project)) and stored as `scion.io/*`
 annotations on the project. For these fields the ordering is, highest priority
 first:
 
@@ -236,9 +236,9 @@ first:
 | `resources` | `scion.io/default-resources-cpu-request`, `-memory-request`, `-cpu-limit`, `-memory-limit`, `-disk` |
 
 A project setting is an *override*: it takes precedence over the template the
-project uses. Leave it blank to let the template — and then the rest of the
+project uses. Leave it blank (`null` in `PUT /api/v1/projects/:id/settings`) to let the template — and then the rest of the
 chain — decide. Blank means **unset, falls through** — it does not mean "set to
-whatever the default happens to be".
+whatever the default happens to be". For the two project count limits (`defaultMaxTurns` / `scion.io/default-max-turns` and `defaultMaxModelCalls` / `scion.io/default-max-model-calls`), `0` is **Unlimited** — an explicit "no limit" that new agents receive in their inline config, overriding any template, Hub, or Runtime Broker default limit — while `null` clears the project setting back to inheriting and a negative value is refused with `422 validation_error` (the Project Settings and Agent Configuration forms in the Web UI provide a **Limited / Unlimited** selector for both fields). Changing a project default count limit to `0` records a `project_settings_limit_unlimited` mutation audit event (and logs a warning when the field was previously unset, since a browser tab opened before the upgrade sends `0` for an empty field) and returns a `warnings` entry when a Runtime Broker providing the project does not advertise `unlimitedCountLimits` (agents on such a broker keep the inherited limit).
 
 :::note[This is a partial ordering, and it does not cover environment variables]
 The three ranks above are the top of a longer chain, not the whole of it — below

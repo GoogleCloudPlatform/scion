@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -32,7 +33,9 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config/pgprovider"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/integrationupdate"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	"github.com/google/uuid"
@@ -459,6 +462,8 @@ func TestRestartIntegration_WithSpokeWired(t *testing.T) {
 	// Create a FanOutEventBus with a discord spoke.
 	inproc := eventbus.NewInProcessEventBus(slog.Default())
 	discordBus := eventbus.NewInProcessEventBus(slog.Default())
+	// The restarted plugin's bus, which the spoke refresh installs.
+	mgr.brokers = map[string]eventbus.EventBus{"discord": eventbus.NewInProcessEventBus(slog.Default())}
 	fanout := eventbus.NewFanOutEventBus([]eventbus.NamedEventBus{
 		{Name: "inprocess", Bus: inproc},
 		{Name: "discord", Bus: discordBus},
@@ -1098,8 +1103,12 @@ func TestUpdateConfig_UnknownSecretKey(t *testing.T) {
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
-	if rr.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d: %s", rr.Code, rr.Body.String())
+	if rr.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422, got %d: %s", rr.Code, rr.Body.String())
+	}
+	entries := settingsErrorEntries(t, rr)
+	if entries[0].Field != "secrets.unknown_key" {
+		t.Errorf("field = %q, want secrets.unknown_key", entries[0].Field)
 	}
 }
 
@@ -2727,5 +2736,345 @@ func TestUpdateIntegration_SelfManaged_DevModeRebuild_SourceExists(t *testing.T)
 	// Error body should not leak internal build output
 	if strings.Contains(rr.Body.String(), "go build") {
 		t.Error("response should not leak internal build details")
+	}
+}
+
+// --- broker plugin supervision ---
+
+// supervisionStatusManager is a mockIntegrationManager that also reports
+// supervisor state, as *plugin.Manager does.
+type supervisionStatusManager struct {
+	*mockIntegrationManager
+	status map[string]plugin.SupervisionStatus
+}
+
+func (m *supervisionStatusManager) BrokerSupervision(name string) (plugin.SupervisionStatus, bool) {
+	st, ok := m.status[name]
+	return st, ok
+}
+
+func TestGetIntegrationStatus_SupervisionStates(t *testing.T) {
+	mgr := &supervisionStatusManager{mockIntegrationManager: newMockIntegrationManager(), status: map[string]plugin.SupervisionStatus{
+		"telegram": {State: plugin.SupervisionRestarting, Attempt: 2, DroppedThisOutage: 7},
+		"discord":  {State: plugin.SupervisionFailing, Attempt: 6},
+		"slack":    {State: plugin.SupervisionRunning},
+	}}
+	mgr.infoErr = fmt.Errorf("plugin RPCs must not be called while the session is lost")
+
+	st := getIntegrationStatus(mgr, "telegram")
+	assert.Equal(t, HealthStatusDegraded, st.Health)
+	assert.False(t, st.Connected)
+	assert.Contains(t, st.Message, "attempt 2")
+	assert.Contains(t, st.Message, "7 messages dropped")
+
+	st = getIntegrationStatus(mgr, "discord")
+	assert.Equal(t, HealthStatusUnhealthy, st.Health)
+	assert.False(t, st.Connected)
+	assert.Contains(t, st.Message, "repeatedly failing to restart")
+
+	// Running (and unsupervised) plugins are queried as before.
+	mgr.infoErr = nil
+	for _, name := range []string{"slack", "unsupervised"} {
+		st = getIntegrationStatus(mgr, name)
+		assert.Equal(t, HealthStatusHealthy, st.Health, name)
+		assert.True(t, st.Connected, name)
+	}
+}
+
+func TestGetPluginHubCreds_TransportKeys(t *testing.T) {
+	srv, _ := testServer(t)
+	creds := srv.getPluginHubCreds(context.Background(), "discord")
+	assert.NotContains(t, creds, "transport_mode")
+	assert.NotContains(t, creds, "transport_audience")
+
+	srv.transportMode = "iap"
+	srv.transportAudience = "/projects/1/global/backendServices/2"
+	creds = srv.getPluginHubCreds(context.Background(), "discord")
+	assert.Equal(t, "iap", creds["transport_mode"])
+	assert.Equal(t, "/projects/1/global/backendServices/2", creds["transport_audience"])
+
+	// The same values startup injects.
+	mode, audience := srv.PluginTransportAuth()
+	assert.Equal(t, creds["transport_mode"], mode)
+	assert.Equal(t, creds["transport_audience"], audience)
+}
+
+func TestHubKeys_CoverEveryHubCredential(t *testing.T) {
+	srv, _ := testServer(t)
+	srv.transportMode = "iap"
+	srv.transportAudience = "/projects/1/global/backendServices/2"
+	srv.dbDriver = "postgres"
+	srv.databaseDSN = "host=db.example.internal dbname=hub"
+
+	creds := srv.getPluginHubCreds(context.Background(), "discord")
+	require.Contains(t, creds, "transport_mode")
+	require.Contains(t, creds, "transport_audience")
+	for key := range creds {
+		assert.True(t, hubKeys[key], "hub credential %s must be listed in hubKeys", key)
+	}
+}
+
+func TestFilterSensitiveConfig_OmitsTransportKeys(t *testing.T) {
+	filtered := filterSensitiveConfig("discord", map[string]string{
+		"guild_id":           "g1",
+		"transport_mode":     "iap",
+		"transport_audience": "/projects/1/global/backendServices/2",
+	})
+	assert.NotContains(t, filtered, "transport_mode")
+	assert.NotContains(t, filtered, "transport_audience")
+	assert.Equal(t, map[string]string{"guild_id": "g1"}, filtered)
+}
+
+func TestResolveIntegrationMergedConfig_TransportKeysComeFromHub(t *testing.T) {
+	configFile := filepath.Join(t.TempDir(), "discord.yaml")
+	require.NoError(t, os.WriteFile(configFile, []byte("guild_id: from-file\n"), 0o600))
+
+	mgr := newMockIntegrationManager()
+	mgr.plugins["discord"] = map[string]string{
+		"config_file":        configFile,
+		"transport_mode":     "stale-mode",
+		"transport_audience": "stale-audience",
+	}
+	srv, _ := testServer(t)
+
+	// No hub transport: the cached values are not carried over.
+	merged := srv.resolveIntegrationMergedConfig(context.Background(), mgr, "discord")
+	assert.Equal(t, "from-file", merged["guild_id"])
+	assert.NotContains(t, merged, "transport_mode")
+	assert.NotContains(t, merged, "transport_audience")
+
+	// Hub transport set: the live hub values win over the cached ones.
+	srv.transportMode = "iap"
+	srv.transportAudience = "/projects/1/global/backendServices/2"
+	merged = srv.resolveIntegrationMergedConfig(context.Background(), mgr, "discord")
+	assert.Equal(t, "iap", merged["transport_mode"])
+	assert.Equal(t, "/projects/1/global/backendServices/2", merged["transport_audience"])
+}
+
+// replayFailingBus is an EventBus whose Subscribe fails.
+type replayFailingBus struct{}
+
+func (replayFailingBus) Publish(context.Context, string, *messages.StructuredMessage) error {
+	return nil
+}
+
+func (replayFailingBus) Subscribe(string, eventbus.EventHandler) (eventbus.Subscription, error) {
+	return nil, fmt.Errorf("plugin session lost")
+}
+
+func (replayFailingBus) Close() error { return nil }
+
+// replayAcceptingBus is an EventBus whose Subscribe accepts any pattern,
+// including the nil handler the fan-out passes to non-inprocess spokes, as
+// plugin adapters do.
+type replayAcceptingBus struct{}
+
+func (replayAcceptingBus) Publish(context.Context, string, *messages.StructuredMessage) error {
+	return nil
+}
+
+func (replayAcceptingBus) Subscribe(string, eventbus.EventHandler) (eventbus.Subscription, error) {
+	return replayAcceptingSub{}, nil
+}
+
+func (replayAcceptingBus) Close() error { return nil }
+
+type replayAcceptingSub struct{}
+
+func (replayAcceptingSub) Unsubscribe() error { return nil }
+
+func TestRefreshBrokerSpoke_ReturnsReplayError(t *testing.T) {
+	mgr := newMockIntegrationManager()
+	mgr.plugins["discord"] = map[string]string{}
+	mgr.brokers = map[string]eventbus.EventBus{"discord": replayFailingBus{}}
+
+	fanout := eventbus.NewFanOutEventBus([]eventbus.NamedEventBus{
+		{Name: "inprocess", Bus: eventbus.NewInProcessEventBus(slog.Default())},
+		{Name: "discord", Bus: replayAcceptingBus{}},
+	}, slog.Default())
+	_, err := fanout.Subscribe("agent.>", func(context.Context, string, *messages.StructuredMessage) {})
+	require.NoError(t, err)
+	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
+	srv.SetMessageBrokerProxy(NewMessageBrokerProxy(fanout, nil, nil, nil, slog.Default()))
+
+	err = srv.refreshBrokerSpoke(mgr, "discord")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "plugin session lost")
+	assert.True(t, fanout.HasSpoke("discord"))
+
+	// A missing spoke is added (no subscription to replay fails here).
+	mgr.brokers["telegram"] = replayAcceptingBus{}
+	require.NoError(t, srv.refreshBrokerSpoke(mgr, "telegram"))
+	assert.True(t, fanout.HasSpoke("telegram"))
+}
+
+// supervisionWiringRecorder is a mockIntegrationManager that records the
+// supervisor wiring the hub registers, as *plugin.Manager accepts it.
+type supervisionWiringRecorder struct {
+	*mockIntegrationManager
+	provider plugin.BrokerConfigProvider
+	hooks    []plugin.BrokerRestartHook
+}
+
+func (m *supervisionWiringRecorder) SetBrokerConfigProvider(p plugin.BrokerConfigProvider) {
+	m.provider = p
+}
+
+func (m *supervisionWiringRecorder) OnBrokerRestart(h plugin.BrokerRestartHook) {
+	m.hooks = append(m.hooks, h)
+}
+
+func TestSetPluginManager_WiresBrokerSupervision(t *testing.T) {
+	rec := &supervisionWiringRecorder{mockIntegrationManager: newMockIntegrationManager()}
+	rec.plugins["discord"] = map[string]string{"guild_id": "inline"}
+	newBus := eventbus.NewInProcessEventBus(slog.Default())
+	rec.brokers = map[string]eventbus.EventBus{"discord": newBus}
+
+	srv, _ := testServer(t)
+	srv.transportMode = "iap"
+	srv.transportAudience = "aud"
+	fanout := eventbus.NewFanOutEventBus([]eventbus.NamedEventBus{
+		{Name: "inprocess", Bus: eventbus.NewInProcessEventBus(slog.Default())},
+		{Name: "discord", Bus: replayAcceptingBus{}},
+	}, slog.Default())
+	srv.SetMessageBrokerProxy(NewMessageBrokerProxy(fanout, nil, nil, nil, slog.Default()))
+	srv.SetPluginManager(rec)
+
+	require.NotNil(t, rec.provider, "config provider registered")
+	cfg, err := rec.provider(context.Background(), "discord")
+	require.NoError(t, err)
+	assert.Equal(t, "inline", cfg["guild_id"], "plugin config carried")
+	assert.Equal(t, "discord", cfg["plugin_name"], "hub credentials added")
+	assert.Equal(t, "iap", cfg["transport_mode"])
+
+	require.Len(t, rec.hooks, 1, "restart hook registered")
+	require.NoError(t, rec.hooks[0]("discord"))
+	assert.True(t, fanout.HasSpoke("discord"))
+}
+
+func TestRestartIntegration_ReportsSpokeRefreshFailure(t *testing.T) {
+	mgr := newMockIntegrationManager()
+	mgr.plugins["discord"] = map[string]string{}
+	mgr.brokers = map[string]eventbus.EventBus{"discord": replayFailingBus{}}
+
+	fanout := eventbus.NewFanOutEventBus([]eventbus.NamedEventBus{
+		{Name: "inprocess", Bus: eventbus.NewInProcessEventBus(slog.Default())},
+		{Name: "discord", Bus: replayAcceptingBus{}},
+	}, slog.Default())
+	_, err := fanout.Subscribe("agent.>", func(context.Context, string, *messages.StructuredMessage) {})
+	require.NoError(t, err)
+
+	srv, st := testServer(t)
+	srv.pluginManager = mgr
+	srv.SetMessageBrokerProxy(NewMessageBrokerProxy(fanout, nil, nil, nil, slog.Default()))
+	createTestUserWithRole(t, st, tid("restart-refresh-admin"), "restart-refresh@example.com", "admin", store.SystemRoleSuperAdmin)
+	admin := NewAuthenticatedUser(tid("restart-refresh-admin"), "restart-refresh@example.com", "Admin", "admin", "cli")
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/discord/restart", nil)
+	req = req.WithContext(integSessionContext(req.Context(), admin))
+	rr := httptest.NewRecorder()
+	srv.handleAdminIntegrationByName(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	var resp map[string]interface{}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	warnings, ok := resp["warnings"].([]interface{})
+	require.True(t, ok, "warnings expected, got %v", resp)
+	found := false
+	for _, w := range warnings {
+		if strings.Contains(fmt.Sprint(w), "message routing was not fully restored") {
+			found = true
+		}
+	}
+	assert.True(t, found, "refresh failure reported in %v", warnings)
+}
+
+// secretGetStub is a secret backend whose Get returns err.
+type secretGetStub struct {
+	secret.SecretBackend
+	err error
+}
+
+func (b secretGetStub) Get(context.Context, string, string, string) (*secret.SecretWithValue, error) {
+	return nil, b.err
+}
+
+// hmacWriteFailStore is a store with no broker secret whose broker secret
+// write fails.
+type hmacWriteFailStore struct{ store.Store }
+
+func (hmacWriteFailStore) GetBrokerSecret(context.Context, string) (*store.BrokerSecret, error) {
+	return nil, store.ErrNotFound
+}
+
+func (hmacWriteFailStore) CreateBrokerSecret(context.Context, *store.BrokerSecret) error {
+	return errors.New("database is locked")
+}
+
+// listProjectsFailStore is a store whose ListProjects fails while its fault
+// switch is armed.
+type listProjectsFailStore struct {
+	store.Store
+	fault *storeFaultSwitch
+}
+
+func (l *listProjectsFailStore) ListProjects(ctx context.Context, f store.ProjectFilter, o store.ListOptions) (*store.ListResult[store.Project], error) {
+	if l.fault.Active() {
+		return nil, errors.New("database is locked")
+	}
+	return l.Store.ListProjects(ctx, f, o)
+}
+
+func TestSupervisionConfigProvider_ReportsUnreadableInputs(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		setup   func(t *testing.T, srv *Server, st store.Store, rec *supervisionWiringRecorder)
+		wantErr string // "" means no error
+	}{
+		{name: "unreadable config file", wantErr: "resolve config file", setup: func(t *testing.T, _ *Server, _ store.Store, rec *supervisionWiringRecorder) {
+			bad := filepath.Join(t.TempDir(), "discord.yaml")
+			require.NoError(t, os.WriteFile(bad, []byte("bot_token: [unterminated\n"), 0o600))
+			rec.plugins["discord"] = map[string]string{"config_file": bad}
+		}},
+		{name: "secret backend failure", wantErr: "load secret for", setup: func(_ *testing.T, srv *Server, _ store.Store, _ *supervisionWiringRecorder) {
+			srv.secretBackend = secretGetStub{err: errors.New("backend down")}
+		}},
+		{name: "missing secret is not an error", setup: func(_ *testing.T, srv *Server, _ store.Store, _ *supervisionWiringRecorder) {
+			srv.secretBackend = secretGetStub{err: store.ErrNotFound}
+		}},
+		{name: "hmac key failure", wantErr: "hmac key", setup: func(t *testing.T, srv *Server, st store.Store, _ *supervisionWiringRecorder) {
+			svc := NewBrokerAuthService(DefaultBrokerAuthConfig(), hmacWriteFailStore{st})
+			t.Cleanup(svc.Close)
+			srv.brokerAuthService = svc
+		}},
+		{name: "project list failure", wantErr: "project slug map", setup: func(t *testing.T, srv *Server, _ store.Store, _ *supervisionWiringRecorder) {
+			_, fault := installStoreFault(t, srv, func(inner store.Store, f *storeFaultSwitch) *listProjectsFailStore {
+				return &listProjectsFailStore{Store: inner, fault: f}
+			})
+			fault.Arm()
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &supervisionWiringRecorder{mockIntegrationManager: newMockIntegrationManager()}
+			rec.plugins["discord"] = map[string]string{}
+			srv, st := testServer(t)
+			srv.brokerAuthService = nil
+			tc.setup(t, srv, st, rec)
+			srv.SetPluginManager(rec)
+			require.NotNil(t, rec.provider)
+
+			cfg, err := rec.provider(context.Background(), "discord")
+			if tc.wantErr == "" {
+				require.NoError(t, err)
+			} else {
+				require.Error(t, err, "an unreadable input fails the restart attempt")
+				assert.Contains(t, err.Error(), tc.wantErr)
+			}
+			assert.Equal(t, "discord", cfg["plugin_name"])
+
+			// The admin paths' lenient resolver returns the same map and no error.
+			lenient := srv.resolveIntegrationMergedConfig(context.Background(), rec, "discord")
+			assert.Equal(t, cfg["plugin_name"], lenient["plugin_name"])
+			assert.Equal(t, cfg["hub_url"], lenient["hub_url"])
+		})
 	}
 }

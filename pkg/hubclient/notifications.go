@@ -63,6 +63,17 @@ type Notification struct {
 	// DispatchOutcome is "delivered", "failed", or empty when no outcome is
 	// recorded.
 	DispatchOutcome string `json:"dispatchOutcome"`
+	// Kind says what produced the notification (for example
+	// "artifact_grant"), or is empty when it is not classified.
+	Kind string `json:"kind,omitempty"`
+	// ResourceType and ResourceID name the thing the notification is about
+	// (for example "artifact" and an artifact id), or are empty.
+	ResourceType string `json:"resourceType,omitempty"`
+	ResourceID   string `json:"resourceId,omitempty"`
+	// Excerpt is text another principal wrote (for a review summary, the
+	// start of the reviewer's summary note), kept apart from Message.
+	// Show it as plain text only.
+	Excerpt string `json:"excerpt,omitempty"`
 }
 
 // List returns notifications for the current user.

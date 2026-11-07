@@ -20,7 +20,7 @@ GOLANGCI_LINT         ?= $(GOLANGCI_LINT_PATCHED)
 
 .DEFAULT_GOAL := help
 
-.PHONY: all build build-a2a-bridge test-a2a-integration install test test-fast test-hub-sqlite test-sqlite-nonhub test-cmd-sqlite test-fast-ci test-launch-store-postgres test-store-postgres test-store-postgres-others test-store-postgres-env-check test-store-postgres-integrationtest test-store-postgres-entadapter test-store-postgres-tail testpart-selftest hubshard-skip-summary-selftest test-hub-postgres test-hub-postgres-env-check test-hub-postgres-default test-hub-postgres-integration hub-postgres-integration-shards test-webchat-postgres test-conduit-authz-postgres test-artifacts-postgres test-fixture-coverage hubshard-parity build-hub-shard test-hub-shard test-hub-shards vet-hub-shard vet lint lint-ci vet-integration vet-integration-ci vet-integration-extras compat-literals check-annotation-prefix check-authz-guards check-conversation-upsert-guard check-hub-store-reassign check-store-delete-callers check-scan-coverage check-security-marker-gates cli-time-zones time-literals check-setenv-guard check-harness-coverage check-image-go-dirs check-authorization-catalog check-route-authz-manifest check-method-not-allowed check-entsql-driver-assert check-debug-defaults check-sqlite-coverage sqlite-ci-pkgs check-extras-go-images check-custom golangci-lint golangci-lint-build golangci-lint-split-selftest web web-budget web-typecheck web-lint web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check ent-check tidy-check
+.PHONY: all build build-a2a-bridge test-a2a-integration install test test-fast test-hub-sqlite test-sqlite-nonhub test-cmd-sqlite test-fast-ci test-launch-store-postgres test-store-postgres test-store-postgres-others test-store-postgres-env-check test-store-postgres-integrationtest test-store-postgres-entadapter test-store-postgres-tail testpart-selftest hubshard-skip-summary-selftest test-hub-postgres test-hub-postgres-env-check test-hub-postgres-default test-hub-postgres-integration hub-postgres-integration-shards test-webchat-postgres test-conduit-authz-postgres test-artifacts-postgres test-fixture-coverage hubshard-parity hub-dupcheck build-hub-shard test-hub-shard test-hub-shards vet-hub-shard vet lint lint-ci vet-integration vet-integration-ci vet-integration-extras compat-literals check-annotation-prefix check-authz-guards check-conversation-upsert-guard check-hub-store-reassign check-store-delete-callers check-scan-coverage check-security-marker-gates check-agent-mutators cli-time-zones time-literals check-setenv-guard check-harness-coverage test-image-scripts check-image-go-dirs check-authorization-catalog check-route-authz-manifest check-method-not-allowed check-debug-defaults check-sqlite-coverage sqlite-ci-pkgs check-extras-go-images check-custom golangci-lint golangci-lint-build golangci-lint-split-selftest web web-budget web-typecheck web-lint web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check ent-check tidy-check check-entsql-driver-assert
 
 ## all: Build the web frontend and compile the Go binary (run 'make install' separately to install)
 all: web build
@@ -193,6 +193,16 @@ test-cmd-sqlite:
 # runs it (as go run would). See hack/hubshard/README.md.
 hubshard-parity:
 	@./hack/hubshard/hubshard.sh -parity
+
+## hub-dupcheck: Fail on a duplicate top-level declaration in pkg/hub plus its test files under any CI tag set (parse only)
+# The shards compile apart, so two test files in different shards can each
+# declare the same helper: every shard builds, and every whole-package build
+# (go vet ./pkg/hub/) fails. HUB_DUPCHECK_TAGS are the tag sets CI compiles
+# pkg/hub with: shard tests (default, no_sqlite; race-detection adds race),
+# shard vets and the integration Postgres jobs. See hack/dupdecl/main.go.
+HUB_DUPCHECK_TAGS := "" no_sqlite no_sqlite,race integration integration,tzcontract
+hub-dupcheck:
+	@go run ./hack/dupdecl $(foreach t,$(HUB_DUPCHECK_TAGS),-tags $(t)) ./pkg/hub
 
 ## testpart-selftest: Test hack/testpart.sh, which splits the T1 entadapter Postgres tests over CI jobs (bash only)
 testpart-selftest:
@@ -621,8 +631,9 @@ USER_DELETION_POSTGRES_TESTS := TestForceDeleteUser_RestoreRacesRequest_Postgres
 # test database), the agent delegation issuance vs reincarnation claim
 # race, the broker reservation transfer tests
 # (BROKER_RESERVATION_TRANSFER_POSTGRES_TESTS) and the forced user delete
-# tests (USER_DELETION_POSTGRES_TESTS), and the chat retention cascade and
-# replica race test.
+# tests (USER_DELETION_POSTGRES_TESTS), the chat retention cascade and
+# replica race and deleted-conversation tests, and the two-replica project
+# quota admission test.
 # Each must print a PASS line, and any skip fails (shard.sh postgres).
 HUB_INTEGRATION_POSTGRES_TESTS := TestProjectDeletionService_LockOrderNoDeadlock \
 	TestScheduledSend_TwoHubReplicasPostgres_OneDelivery \
@@ -633,7 +644,14 @@ HUB_INTEGRATION_POSTGRES_TESTS := TestProjectDeletionService_LockOrderNoDeadlock
 	$(BROKER_RESERVATION_TRANSFER_POSTGRES_TESTS) \
 	$(USER_DELETION_POSTGRES_TESTS) \
 	TestHubInternal_ReplayAcrossHubReplicas \
-	TestChatRetention_Postgres_CascadeAndReplicaRace
+	TestChatRetention_Postgres_CascadeAndReplicaRace \
+	TestChatRetention_Postgres_DeletedConversationsAndAttachments \
+	TestProjectQuota_TwoHubReplicasPostgres_OneAdmission \
+	TestEncryptionScan_ClassifiesByAuthenticatingKey \
+	TestEncryptionScan_PagesCoverEveryRow \
+	TestEncryptionAudit_CountsAuthenticatedKeysOnly \
+	TestVerifyEncryption_PolicyAllowedSet \
+	TestVerifyEncryption_AllV2Passes
 
 ## test-hub-postgres: Run the pkg/hub Postgres tests of shard SHARD=K (SHARD=all: every shard holding one)
 # Requires SCION_TEST_POSTGRES_URL (integration tests) and
@@ -832,13 +850,15 @@ vet-integration-extras:
 compat-literals:
 	@./hack/check-project-compat-literals.sh
 
-## check-authz-guards: Verify no authorization-bypass patterns exist in handler code
+## check-authz-guards: Verify no authorization-bypass patterns exist in handler code, and that the scan reaches every hack/area-dirs.txt directory
 # NOTE: make reports its own failure code (2) rather than the recipe's, so the
-# script's exit 1 (violations found) and exit 2 (nothing was analysed — skipped,
-# not clean) are indistinguishable to anything reading this target's exit status.
-# The messages still differ on stderr. Any caller that needs to tell those two
-# apart must invoke ./hack/check-authz-guards.sh directly, as CI does.
+# script's exit 1 (violations found, or the --self-test-dirs self-test failed)
+# and exit 3, 4 or 5 (nothing was analysed —
+# skipped, not clean) are indistinguishable to anything reading this target's
+# exit status. The messages still differ on stderr. Any caller that needs to
+# tell them apart must invoke ./hack/check-authz-guards.sh directly, as CI does.
 check-authz-guards:
+	@./hack/check-authz-guards.sh --self-test-dirs
 	@./hack/check-authz-guards.sh
 
 ## check-annotation-prefix: Flag new scion.io/ annotation keys (migration to scion.dev/)
@@ -860,6 +880,10 @@ check-hub-store-reassign:
 ## check-store-delete-callers: Flag direct store DeleteAgent/DeleteProject calls outside hack/store-delete-callers-allowlist.txt
 check-store-delete-callers:
 	@./hack/check-store-delete-callers.sh
+
+## check-agent-mutators: Verify no package outside pkg/store mutates agent rows directly (WP1 lifecycle observer; type-checks pkg/hub, so ci-full and the CI workflow, not make ci)
+check-agent-mutators:
+	@./hack/check-agent-mutators.sh
 
 ## check-scan-coverage: Every enumeration call in a pkg/hub source-scanning test needs a pkg/hub-wide scan-covers claim (self-test first)
 check-scan-coverage:
@@ -890,6 +914,12 @@ time-literals:
 # one code. CI invokes the script directly to tell those apart.
 check-harness-coverage:
 	@./image-build/scripts/check-harness-coverage.sh
+
+## test-image-scripts: Test the release image driver (build-release-images.sh), the build-images.sh guards and the assert-no-cgo.sh exit contract with stubs; no docker, no network
+test-image-scripts:
+	@bash ./image-build/scripts/test-build-release-images.sh
+	@bash ./image-build/scripts/test-build-images.sh
+	@bash ./image-build/scripts/test-assert-no-cgo.sh
 
 ## check-image-go-dirs: Verify every Dockerfile that builds the root Go module copies all of its top-level Go dirs (ptone/scion#5453)
 # NOTE: same caveat as check-authz-guards above -- make collapses the
@@ -937,7 +967,7 @@ check-extras-go-images:
 	@./hack/check-extras-go-images.sh
 
 ## check-custom: Run all custom CI lint checks (see hack/LINT-CONVENTIONS.md)
-check-custom: hubshard-parity hubshard-skip-summary-selftest testpart-selftest compat-literals check-annotation-prefix check-authz-guards check-setenv-guard check-conversation-upsert-guard check-hub-store-reassign check-store-delete-callers check-scan-coverage check-security-marker-gates check-image-go-dirs check-authorization-catalog check-route-authz-manifest cli-time-zones time-literals check-method-not-allowed check-entsql-driver-assert check-debug-defaults check-sqlite-coverage check-extras-go-images
+check-custom: hubshard-parity hub-dupcheck hubshard-skip-summary-selftest testpart-selftest compat-literals check-annotation-prefix check-authz-guards check-setenv-guard check-conversation-upsert-guard check-hub-store-reassign check-store-delete-callers check-scan-coverage check-security-marker-gates check-image-go-dirs check-authorization-catalog check-route-authz-manifest cli-time-zones time-literals check-method-not-allowed check-entsql-driver-assert check-debug-defaults check-sqlite-coverage check-extras-go-images test-image-scripts
 	@echo "All custom checks passed."
 
 ## golangci-lint-build: Build the patched golangci-lint CI uses into ./build/tools/ (skipped when up to date)
@@ -973,6 +1003,7 @@ container-sciontool:
 	@GOOS=$(CONTAINER_OS) GOARCH=$(CONTAINER_ARCH) CGO_ENABLED=0 \
 		go build -buildvcs=false -ldflags "$(SCIONTOOL_LDFLAGS)" \
 		-o $(CONTAINER_DIR)/sciontool ./cmd/sciontool
+	@bash image-build/lib/assert-no-cgo.sh $(CONTAINER_DIR)/sciontool
 	@echo "Built: $(CONTAINER_DIR)/sciontool"
 
 ## container-scion: Cross-compile scion CLI for Linux containers
@@ -1053,7 +1084,7 @@ ci: fmt-check lint check-custom test-fast build
 	@echo "CI passed."
 
 ## ci-full: Run the full CI pipeline locally (mirrors GitHub Actions, includes web + golangci-lint)
-ci-full: fmt-check web web-budget web-typecheck web-lint web-test lint vet-integration vet-integration-extras check-custom golangci-lint-split-selftest golangci-lint test-fast test-fixture-coverage build
+ci-full: fmt-check web web-budget web-typecheck web-lint web-test lint vet-integration vet-integration-extras check-custom check-agent-mutators golangci-lint-split-selftest golangci-lint test-fast test-fixture-coverage build
 	@echo ""
 	@echo "CI (full) passed."
 

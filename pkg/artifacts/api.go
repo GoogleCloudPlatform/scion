@@ -112,6 +112,10 @@ type ArtifactResponse struct {
 	// rows. It is advisory: when the host cannot tell, it is left unset
 	// (see scopeDeleted).
 	ScopeDeleted bool `json:"scopeDeleted,omitempty"`
+	// Archive, on a GET of the artifact or of one of its versions while
+	// the archive route is on, says whether Version can be downloaded as
+	// one zip from /versions/{seq}/archive (ptone/scion#7106).
+	Archive *ArchiveInfo `json:"archive,omitempty"`
 }
 
 // CreateVersionRequest is the body of POST /api/v1/artifacts (create an

@@ -357,6 +357,14 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 	identity := GetIdentityFromContext(ctx)
 
+	// An agent delegated credential lists through the delegated list arm
+	// only, and never reaches ResolveListScopes below, which has no scope
+	// for it (.design/agent-delegation.md §11.8).
+	if d, ok := identity.(*DelegatedAgentIdentity); ok && d != nil {
+		s.listAgentsDelegated(w, r, d)
+		return
+	}
+
 	// Sorted mode validates sort and dir before either short-circuit below,
 	// so an invalid value is a 400 for every caller and the short-circuit
 	// echo only ever carries validated values. Without sort, nothing here
@@ -421,56 +429,9 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// RS2: Slug-to-ID resolution for projectId filter.
-	// If projectId looks like a slug (not a UUID), resolve it to a project ID.
-	// The resolution must not become a cross-scope existence oracle: nonexistent
-	// and unauthorized slugs are externally indistinguishable — both silently
-	// produce an unmatched filter that returns zero results.
-	projectID := query.Get("projectId")
-	if projectID != "" && gouuid.Validate(projectID) != nil {
-		// Looks like a slug. Resolve within the authorized scope to prevent
-		// the slug lookup from disclosing projects outside the caller's authority.
-		project, lookupErr := s.store.GetProjectBySlug(ctx, projectID)
-		if lookupErr != nil || project == nil {
-			// Slug not found — indistinguishable from unauthorized.
-			projectID = ""
-		} else if !scopeResult.Scopes.Contains(project.ID) {
-			// Project exists but is outside the caller's authorized scope.
-			// Treat identically to "not found" to prevent an existence oracle.
-			projectID = ""
-		} else {
-			projectID = project.ID
-		}
-		// When slug resolution fails (not found or unauthorized), leave
-		// projectID empty. The store filter will return all authorized agents
-		// (no project restriction), which is correct: it prevents the caller
-		// from distinguishing "slug doesn't exist" from "slug exists but I
-		// can't see it".
-		if projectID == "" {
-			// Force empty result: filter to an impossible project ID so the
-			// caller cannot infer slug existence from result count changes.
-			projectID = "00000000-0000-0000-0000-000000000000"
-		}
-	}
-
-	filter := store.AgentFilter{
-		ProjectID:       projectID,
-		RuntimeBrokerID: query.Get("runtimeBrokerId"),
-		Phase:           query.Get("phase"),
-		IncludeDeleted:  query.Get("includeDeleted") == "true",
-	}
-	if err := applyAgentAttributeAndRelationshipFilters(&filter, query); err != nil {
-		BadRequest(w, err.Error())
+	filter, ok := s.agentListQueryFilter(ctx, w, query, scopeResult.Scopes.Contains)
+	if !ok {
 		return
-	}
-
-	if labelParams := query["label"]; len(labelParams) > 0 {
-		parsed, err := parseLabelFilters(labelParams)
-		if err != nil {
-			BadRequest(w, err.Error())
-			return
-		}
-		filter.Labels = parsed
 	}
 
 	// RS2: Push the authorized project predicate into the store filter.
@@ -564,6 +525,68 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 		ServerTime:            time.Now().UTC(),
 		Capabilities:          scopeCap,
 	})
+}
+
+// agentListQueryFilter builds the caller filters of a hub agent list
+// request from query: the projectId filter (a slug resolves only to a
+// project inside the caller's list scope, reported by projectInScope),
+// broker, phase, deleted, attribute, relationship and label filters. It
+// adds no authorization predicate. On a malformed filter it writes the 400
+// and reports false.
+func (s *Server) agentListQueryFilter(ctx context.Context, w http.ResponseWriter, query url.Values, projectInScope func(projectID string) bool) (store.AgentFilter, bool) {
+	// RS2: Slug-to-ID resolution for projectId filter.
+	// If projectId looks like a slug (not a UUID), resolve it to a project ID.
+	// The resolution must not reveal whether a project outside the caller's
+	// scope exists: nonexistent and unauthorized slugs are externally
+	// indistinguishable — both silently produce an unmatched filter that
+	// returns zero results.
+	projectID := query.Get("projectId")
+	if projectID != "" && gouuid.Validate(projectID) != nil {
+		// Looks like a slug. Resolve within the authorized scope to prevent
+		// the slug lookup from disclosing projects outside the caller's authority.
+		project, lookupErr := s.store.GetProjectBySlug(ctx, projectID)
+		if lookupErr != nil || project == nil {
+			// Slug not found — indistinguishable from unauthorized.
+			projectID = ""
+		} else if !projectInScope(project.ID) {
+			// Project exists but is outside the caller's authorized scope.
+			// Treat identically to "not found", so existence is not revealed.
+			projectID = ""
+		} else {
+			projectID = project.ID
+		}
+		// When slug resolution fails (not found or unauthorized), leave
+		// projectID empty. The store filter will return all authorized agents
+		// (no project restriction), which is correct: it prevents the caller
+		// from distinguishing "slug doesn't exist" from "slug exists but I
+		// can't see it".
+		if projectID == "" {
+			// Force empty result: filter to an impossible project ID so the
+			// caller cannot infer slug existence from result count changes.
+			projectID = "00000000-0000-0000-0000-000000000000"
+		}
+	}
+
+	filter := store.AgentFilter{
+		ProjectID:       projectID,
+		RuntimeBrokerID: query.Get("runtimeBrokerId"),
+		Phase:           query.Get("phase"),
+		IncludeDeleted:  query.Get("includeDeleted") == "true",
+	}
+	if err := applyAgentAttributeAndRelationshipFilters(&filter, query); err != nil {
+		BadRequest(w, err.Error())
+		return store.AgentFilter{}, false
+	}
+
+	if labelParams := query["label"]; len(labelParams) > 0 {
+		parsed, err := parseLabelFilters(labelParams)
+		if err != nil {
+			BadRequest(w, err.Error())
+			return store.AgentFilter{}, false
+		}
+		filter.Labels = parsed
+	}
+	return filter, true
 }
 
 // addAgentCreateIfAnyProjectAllows adds "create" to the agents list's
@@ -900,6 +923,27 @@ func quotaExceededMessage(limitName string) string {
 	return "quota exceeded: " + limitName
 }
 
+// quotaRefusal returns the message and details of a request refused at a
+// quota. The limit is the one the error names (a *QuotaExceededError), else
+// limitName. A project agent limit names the project, its count and limit,
+// and how to free a slot (ptone/scion#6033); every other limit keeps
+// quotaExceededMessage and quotaExceededDetails.
+func quotaRefusal(limitName string, err error) (string, map[string]interface{}) {
+	var exceeded *QuotaExceededError
+	if !errors.As(err, &exceeded) {
+		return quotaExceededMessage(limitName), quotaExceededDetails(err)
+	}
+	if exceeded.Limit == store.LimitMaxAgentsPerProject && exceeded.ScopeType == store.QuotaScopeProject {
+		return fmt.Sprintf("%s (project %s: %d of %d agents in use); stop or delete an agent in this project to free a slot",
+				quotaExceededMessage(exceeded.Limit), exceeded.ScopeID, exceeded.Count, exceeded.Max),
+			map[string]interface{}{"projectId": exceeded.ScopeID, "count": exceeded.Count, "limit": exceeded.Max}
+	}
+	if exceeded.Limit != "" {
+		limitName = exceeded.Limit
+	}
+	return quotaExceededMessage(limitName), quotaExceededDetails(err)
+}
+
 // reserveQuotaHTTP is checkAndReserveQuota that also reports whether this
 // call created a new reservation (see QuotaService.Reserve). created is
 // only meaningful when ok is true.
@@ -927,8 +971,8 @@ func writeQuotaReserveError(w http.ResponseWriter, limitName string, err error) 
 			fmt.Sprintf("agent %s already holds capacity on Runtime Broker %s; it cannot be admitted on %s",
 				conflict.ResourceID, conflict.HeldScopeID, conflict.RequestedScopeID), nil)
 	case errors.Is(err, store.ErrQuotaExceeded):
-		writeError(w, http.StatusTooManyRequests, ErrCodeQuotaExceeded,
-			quotaExceededMessage(limitName), quotaExceededDetails(err))
+		message, details := quotaRefusal(limitName, err)
+		writeError(w, http.StatusTooManyRequests, ErrCodeQuotaExceeded, message, details)
 	case errors.Is(err, ErrQuotaLockContention):
 		writeError(w, http.StatusTooManyRequests, ErrCodeQuotaExceeded,
 			"quota check temporarily unavailable, please retry", nil)
@@ -963,7 +1007,7 @@ func (s *Server) releaseAgentQuotas(ctx context.Context, resourceID, runtimeBrok
 	if runtimeBrokerID != "" {
 		s.quotaService.Release(ctx, store.LimitMaxAgentsPerBroker, resourceID)
 	}
-	s.quotaService.Release(ctx, "max_agents_per_project", resourceID)
+	s.quotaService.Release(ctx, store.LimitMaxAgentsPerProject, resourceID)
 }
 
 // Budgets for best-effort cleanup that must outlive the request that
@@ -1059,11 +1103,13 @@ type createRollback struct {
 // the client sees a timeout rather than the create error — a deliberate
 // trade for not leaking the agent's row, runtime resources and reservations.
 //
-// Failures of steps 1, 2 and 4 are logged and otherwise ignored, with one
-// exception: when the broker refuses step 2 because it holds a different
+// Failures of steps 1, 2 and 4 are logged and otherwise ignored, with two
+// exceptions: when the broker refuses step 2 because it holds a different
 // run of the agent (ptone/scion#3080) and refuseDeleteRunMismatch refuses,
-// steps 3 and 4 are skipped, and the row is left in phase error with its
-// quotas held (markCreateCleanupRefused). When the
+// or when the dispatcher refuses it because the agent's saved placement is
+// inconsistent (placementRefusalOf), steps 3 and 4 are skipped, and the
+// row is left in phase error with its quotas held
+// (markCreateCleanupRefused). When the
 // compensation transaction fails, the failure is logged at ERROR with a
 // correlation ID and the compensation's op ID, and a fallback runs: a
 // delete of the agent row without the audit record, in one transaction
@@ -1099,14 +1145,29 @@ func (s *Server) cleanupFailedCreate(ctx context.Context, rb createRollback) (co
 			}
 		}()
 		var refused *DeleteRunMismatchError
+		var deleteErr error
 		func() {
 			rctx, cancel := detachedCleanupContext(ctx, createCleanupRuntimeTimeout)
 			defer cancel()
 			if err := rb.DeleteRuntime(rctx); err != nil {
 				s.agentLifecycleLog.Warn("Create-failure cleanup: runtime delete failed", "agent_id", agent.ID, "error", err)
 				errors.As(err, &refused)
+				deleteErr = err
 			}
 		}()
+		// The agent's saved placement is inconsistent, so the dispatcher
+		// refused the delete before sending anything: as for a run
+		// mismatch, removing the row could leave a workload running with
+		// no row and release its capacity with no evidence of teardown.
+		// The row is kept in phase error with the placement guidance and
+		// its quotas stay held, as the delete engine keeps it
+		// (rollbackPlacement).
+		if refusal, ok := placementRefusalOf(deleteErr); ok {
+			s.agentLifecycleLog.Warn("Create-failure cleanup: agent placement is inconsistent; nothing was dispatched, keeping the agent row",
+				"agent_id", agent.ID, "code", refusal.Code, "stage", rb.Stage)
+			s.markCreateCleanupRefused(lifecycleCreateFailed(ctx, rb.Stage), agent.ID, createCleanupTargetRun(deleteErr), createCleanupRefusedPrefix+refusal.Message)
+			return ""
+		}
 		// The broker holds a different run of the agent than the row
 		// records and deleted nothing (ptone/scion#3080): removing the row
 		// would leave that run with no row. The row is kept in phase error
@@ -1117,7 +1178,7 @@ func (s *Server) cleanupFailedCreate(ctx context.Context, rb createRollback) (co
 		if refused != nil && refuseDeleteRunMismatch(false, true) {
 			s.agentLifecycleLog.Warn("Create-failure cleanup: broker holds a different run than the hub recorded; keeping the agent row",
 				"agent_id", agent.ID, "hub_run_id", refused.RequestedRunID, "broker_run_id", refused.CurrentRunID, "stage", rb.Stage)
-			s.markCreateCleanupRefused(ctx, agent.ID, refused)
+			s.markCreateCleanupRefused(lifecycleCreateFailed(ctx, rb.Stage), agent.ID, refused.RequestedRunID, createCleanupRefusedMessage(refused))
 			return ""
 		}
 	}
@@ -1159,7 +1220,7 @@ func (s *Server) cleanupFailedCreate(ctx context.Context, rb createRollback) (co
 		// The row delete is retried a few times; if it still fails, the row
 		// is left visibly failed rather than in phase created with no
 		// message.
-		derr := s.deleteFailedCreateRow(ctx, agent, opID)
+		derr := s.deleteFailedCreateRow(lifecycleCreateRollback(ctx, rb.Stage), agent, opID)
 		if errors.Is(derr, errCreateRowDeleteHeld) {
 			// A delete claimed the row since: it owns the row and its
 			// edge. The failed compensation's correlation ID is logged
@@ -1181,7 +1242,7 @@ func (s *Server) cleanupFailedCreate(ctx context.Context, rb createRollback) (co
 		}
 		if derr != nil {
 			s.agentLifecycleLog.Warn("Create-failure cleanup: agent row delete failed", "agent_id", agent.ID, "error", derr)
-			mctx, mcancel := detachedCleanupContext(ctx, createCleanupStoreTimeout)
+			mctx, mcancel := detachedCleanupContext(lifecycleCreateFailed(ctx, rb.Stage), createCleanupStoreTimeout)
 			defer mcancel()
 			if err := s.store.UpdateAgentStatus(mctx, agent.ID, store.AgentStatusUpdate{
 				Phase:   string(state.PhaseError),
@@ -1205,21 +1266,22 @@ func (s *Server) cleanupFailedCreate(ctx context.Context, rb createRollback) (co
 }
 
 // markCreateCleanupRefused leaves a failed create's row, whose runtime
-// delete the broker refused because it holds another run
-// (ptone/scion#3080), in phase error with the refusal's message.
+// delete was refused, in phase error with message: the broker holds
+// another run (ptone/scion#3080, createCleanupRefusedMessage), or the
+// agent's saved placement is inconsistent (createCleanupRefusedPrefix and
+// the placement guidance).
 //
 // The write is guarded on the run the refused delete named
-// (IfRunID: refused.RequestedRunID, ptone/scion#2550): when the row has
-// moved on since (to the broker's run, or any newer one), it records a live
-// run, which must not be marked failed, so nothing is written. Failures
-// are logged.
-func (s *Server) markCreateCleanupRefused(ctx context.Context, agentID string, refused *DeleteRunMismatchError) {
+// (IfRunID: runID, ptone/scion#2550): when the row has moved on since (to
+// the broker's run, or any newer one), it records a live run, which must
+// not be marked failed, so nothing is written. Failures are logged.
+func (s *Server) markCreateCleanupRefused(ctx context.Context, agentID, runID, message string) {
 	mctx, cancel := detachedCleanupContext(ctx, createCleanupStoreTimeout)
 	defer cancel()
 	err := s.store.UpdateAgentStatus(mctx, agentID, store.AgentStatusUpdate{
 		Phase:   string(state.PhaseError),
-		Message: createCleanupRefusedMessage(refused),
-		IfRunID: refused.RequestedRunID,
+		Message: message,
+		IfRunID: runID,
 	})
 	switch {
 	case errors.Is(err, store.ErrRunChanged):
@@ -1228,7 +1290,7 @@ func (s *Server) markCreateCleanupRefused(ctx context.Context, agentID string, r
 			current = a.RunID
 		}
 		s.agentLifecycleLog.Warn("Create-failure cleanup: the agent moved to another run after the refused delete; not marking it failed",
-			"agent_id", agentID, "hub_run_id", refused.RequestedRunID, "broker_run_id", refused.CurrentRunID, "current_run_id", current)
+			"agent_id", agentID, "hub_run_id", runID, "current_run_id", current)
 	case err != nil:
 		s.agentLifecycleLog.Warn("Create-failure cleanup: marking the kept row failed also failed", "agent_id", agentID, "error", err)
 	}
@@ -1350,8 +1412,36 @@ func writeCreateFailure(w http.ResponseWriter, correlationID string, writeOrigin
 // name a run that never reached the broker (ptone/scion#2550).
 func dispatchDeleteFailedCreate(st store.Store, dispatcher AgentDispatcher, agent *store.Agent) func(context.Context) error {
 	return func(ctx context.Context) error {
-		return dispatcher.DispatchAgentDelete(ctx, failedCreateDeleteTarget(ctx, st, agent), true, true, false, time.Time{})
+		target := failedCreateDeleteTarget(ctx, st, agent)
+		err := dispatcher.DispatchAgentDelete(ctx, target, true, true, false, time.Time{})
+		if _, ok := placementRefusalOf(err); ok {
+			return &createCleanupDeleteError{runID: target.RunID, err: err}
+		}
+		return err
 	}
+}
+
+// createCleanupDeleteError is a failed create's refused runtime delete,
+// with the run it named, so the cleanup can guard its write of the kept
+// row on that run (markCreateCleanupRefused). It wraps the refusal.
+type createCleanupDeleteError struct {
+	runID string
+	err   error
+}
+
+func (e *createCleanupDeleteError) Error() string { return e.err.Error() }
+
+func (e *createCleanupDeleteError) Unwrap() error { return e.err }
+
+// createCleanupTargetRun is the run a failed create's refused runtime
+// delete named (createCleanupDeleteError), or "" (no run guard) when err
+// does not carry it.
+func createCleanupTargetRun(err error) string {
+	var ce *createCleanupDeleteError
+	if errors.As(err, &ce) {
+		return ce.runID
+	}
+	return ""
 }
 
 // failedCreateDeleteTarget returns the agent a failed create's cleanup
@@ -1423,7 +1513,7 @@ func (s *Server) applyCreateEffectCeiling(
 	// (uatHopEffectCeiling); the stored ceiling stays the token's verbatim.
 	capped, cause, allowed := childRoleWithinCeiling(uatHopEffectCeiling(prov.SourcePrincipalKind, prov.SourcePrincipalID, prov, ceiling), role, roleExplicit)
 	if !allowed {
-		msg := reasonNoUsableRole
+		msg := noUsableRoleMessage(uatHopEffectCeiling(prov.SourcePrincipalKind, prov.SourcePrincipalID, prov, ceiling))
 		if roleExplicit {
 			msg = fmt.Sprintf("the credential's scopes do not cover agent role %q; request a role the token covers, request role=none explicitly, or create from a session", role)
 		}
@@ -1516,6 +1606,20 @@ func (s *Server) createAgentInProject(
 	// Field-level GCP identity validation, before any persistence or SA
 	// resolution. Both create routes reach it here.
 	if !validateGCPIdentityRequest(w, req.GCPIdentity) {
+		return
+	}
+
+	// The request's template, before any persistence or the existing-agent
+	// handling below: a template name or ID, never a host directory or a
+	// remote source (templateRefAllowed). Defaults are checked where they
+	// are filled in.
+	if !templateRefAllowed(req.Template) {
+		ValidationError(w, templateRefRefusal, nil)
+		return
+	}
+	// Likewise the request's harness-config names: one path component each.
+	if !createRequestHarnessConfigAllowed(&req) {
+		ValidationError(w, harnessConfigNameRefusal, nil)
 		return
 	}
 
@@ -1831,9 +1935,11 @@ func (s *Server) createAgentInProject(
 	}
 
 	// Apply project-level default template if no template specified in request
+	templateFromProjectDefault := false
 	if req.Template == "" && project != nil && project.Annotations != nil {
 		if dt := project.Annotations[projectSettingDefaultTemplate]; dt != "" {
 			req.Template = dt
+			templateFromProjectDefault = true
 		}
 	}
 
@@ -1913,6 +2019,24 @@ func (s *Server) createAgentInProject(
 	// as evidence — with one honest difference: that code can only log and do
 	// nothing, whereas here the caller is still on the other end of an HTTP
 	// request, so the ambiguous branch can and should return a real error.
+	// The template after defaults are filled in, checked again before the
+	// lookup, so an unmatched value can never reach a broker with local
+	// access as anything but a template name. A hub-default value that fails
+	// degrades like an unusable hub default; a project-default value is
+	// refused naming the setting; any other is refused.
+	if !templateRefAllowed(req.Template) {
+		if templateFromProjectDefault {
+			ValidationError(w, projectDefaultTemplateRefusal, nil)
+			return
+		}
+		if !templateFromHubDefault {
+			ValidationError(w, templateRefRefusal, nil)
+			return
+		}
+		s.warnHubDefaultTemplateUnusable(ctx, req.Template, projectID, "not a template name")
+		req.Template = ""
+	}
+
 	var resolvedTemplate *store.Template
 	if req.Template != "" {
 		resolvedTemplate, err = s.resolveTemplate(ctx, req.Template, projectID)
@@ -2357,7 +2481,7 @@ func (s *Server) createAgentInProject(
 			return
 		}
 	}
-	if !s.checkAndReserveQuota(ctx, w, "max_agents_per_project", createdBy, "project", projectID, agent.ID) {
+	if !s.checkAndReserveQuota(ctx, w, store.LimitMaxAgentsPerProject, createdBy, store.QuotaScopeProject, projectID, agent.ID) {
 		s.releaseAgentQuotas(ctx, agent.ID, runtimeBrokerID)
 		return
 	}
@@ -3032,6 +3156,7 @@ func (s *Server) preserveTerminalPhase(ctx context.Context, agent *store.Agent) 
 }
 
 func (s *Server) updateAgentAfterDispatch(ctx context.Context, agent *store.Agent) error {
+	ctx = lifecycleDispatchResult(ctx, agent) // WP1 E(iv): the broker's answer about agent's run
 	// One retry is intentional here: we only need to recover the common case
 	// where a single concurrent status update bumps StateVersion while dispatch
 	// is in flight. If a second write wins the race too, return the conflict to
@@ -3222,8 +3347,17 @@ func (s *Server) buildEnvGatherResponse(ctx context.Context, agent *store.Agent,
 	// Label each key the Hub provided with the source whose value won.
 	for _, key := range brokerReqs.HubHas {
 		if key == agentTZEnvKey {
-			// TZ is labelled with the rung of the agent TZ chain.
-			resp.HubHas = append(resp.HubHas, EnvSource{Key: key, Scope: s.agentTZ(ctx, agent).Source})
+			// TZ is labelled with the rung of the agent TZ chain. The
+			// label is advisory, like envGatherStoredScope: a failed
+			// storage read omits the entry rather than reporting a
+			// lower rung.
+			tz, err := s.agentTZ(ctx, agent)
+			if err != nil {
+				slog.WarnContext(ctx, "env-gather provenance: reading stored TZ settings failed; omitting the TZ label",
+					"agent_id", agent.ID, "scope", tzReadScope(err))
+				continue
+			}
+			resp.HubHas = append(resp.HubHas, EnvSource{Key: key, Scope: tz.Source})
 			continue
 		}
 		resp.HubHas = append(resp.HubHas, EnvSource{Key: key, Scope: s.envGatherSourceLabel(ctx, agent, envFilters, key)})
@@ -4041,7 +4175,28 @@ func (s *Server) authorizeSingleAgentRead(w http.ResponseWriter, r *http.Request
 // every route that returns a single agent. It performs no authorization --
 // callers must gate before calling this (see getAgent and getProjectAgent
 // above, which apply the same rule).
+//
+// It is for read-only routes: a stored TZ settings read error answers 503
+// with EnvSettingsUnavailableText (nothing was written, so a retry is safe).
+// A route that has already committed a write uses
+// writeAgentResponseAfterWrite instead.
 func (s *Server) writeAgentGetResponse(w http.ResponseWriter, r *http.Request, agent *store.Agent) {
+	s.writeAgentResponse(w, r, agent, true)
+}
+
+// writeAgentResponseAfterWrite is writeAgentGetResponse for a route that has
+// already committed a write (the restore). A 503 there would report a
+// committed change as failed and invite a retry of a write that already
+// happened, so a stored TZ settings read error instead omits
+// resolvedTimezone and timezoneSource, as for a caller without env view;
+// no lower-precedence zone is reported.
+func (s *Server) writeAgentResponseAfterWrite(w http.ResponseWriter, r *http.Request, agent *store.Agent) {
+	s.writeAgentResponse(w, r, agent, false)
+}
+
+// writeAgentResponse implements writeAgentGetResponse (unavailableOnTZError
+// true) and writeAgentResponseAfterWrite (false).
+func (s *Server) writeAgentResponse(w http.ResponseWriter, r *http.Request, agent *store.Agent, unavailableOnTZError bool) {
 	ctx := r.Context()
 
 	// Show a TZ that an older hub persisted in the env records as the legacy
@@ -4083,9 +4238,19 @@ func (s *Server) writeAgentGetResponse(w http.ResponseWriter, r *http.Request, a
 	// may view the agent's env: the zone can come from a user, project, hub
 	// or broker TZ env var (ptone/scion#2767). Others get neither field.
 	if s.envViewAllowed(ctx, GetIdentityFromContext(ctx), agent, resp.Cap) {
-		tz := s.agentTZ(ctx, agent)
-		resp.ResolvedTimezone = &tz.TZ
-		resp.TimezoneSource = &tz.Source
+		tz, err := s.agentTZ(ctx, agent)
+		switch {
+		case err != nil && unavailableOnTZError:
+			slog.WarnContext(ctx, "agent detail: reading stored TZ settings failed", "agent_id", agent.ID, "scope", tzReadScope(err))
+			writeEnvSettingsUnavailable(w)
+			return
+		case err != nil:
+			slog.WarnContext(ctx, "agent response after a committed write: reading stored TZ settings failed; omitting the resolved timezone",
+				"agent_id", agent.ID, "scope", tzReadScope(err))
+		default:
+			resp.ResolvedTimezone = &tz.TZ
+			resp.TimezoneSource = &tz.Source
+		}
 	}
 
 	resp.AppliedConfig, resp.PendingConfig = s.redactAgentConfigsForResponse(resp.AppliedConfig, resp.PendingConfig, s.envViewAllowed(ctx, GetIdentityFromContext(ctx), agent, resp.Cap))
@@ -4551,7 +4716,13 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		live := phaseHasLiveContainer(agent.Phase)
 		var zoneBefore string
 		if live {
-			zoneBefore = s.agentTZ(ctx, agent).TZ
+			tzBefore, err := s.agentTZ(ctx, agent)
+			if err != nil {
+				slog.WarnContext(ctx, "agent update: reading stored TZ settings failed; nothing written", "agent_id", agent.ID, "scope", tzReadScope(err))
+				writeEnvSettingsUnavailable(w)
+				return
+			}
+			zoneBefore = tzBefore.TZ
 		}
 		changed, err := applyExplicitTimezoneEdit(agent.AppliedConfig, *updates.ExplicitTimezone)
 		if err != nil {
@@ -4559,9 +4730,28 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 			return
 		}
 		timezoneChanged = changed
-		if live && changed && s.agentTZ(ctx, agent).TZ != zoneBefore {
-			warnings = append(warnings, explicitTimezoneNextStartWarning)
+		if live && changed {
+			tzAfter, err := s.agentTZ(ctx, agent)
+			if err != nil {
+				slog.WarnContext(ctx, "agent update: reading stored TZ settings failed; nothing written", "agent_id", agent.ID, "scope", tzReadScope(err))
+				writeEnvSettingsUnavailable(w)
+				return
+			}
+			if tzAfter.TZ != zoneBefore {
+				warnings = append(warnings, explicitTimezoneNextStartWarning)
+			}
 		}
+	}
+
+	// The resolved TZ for the response, read before anything is written:
+	// a stored settings read error answers 503 with nothing committed, and
+	// never a lower-precedence zone. The writes below do not change any
+	// input of the TZ chain beyond the in-memory agent already updated.
+	tz, tzErr := s.agentTZ(ctx, agent)
+	if tzErr != nil {
+		slog.WarnContext(ctx, "agent update: reading stored TZ settings failed; nothing written", "agent_id", agent.ID, "scope", tzReadScope(tzErr))
+		writeEnvSettingsUnavailable(w)
+		return
 	}
 
 	if updates.Name != "" {
@@ -4624,7 +4814,6 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		s.auditPendingConfig(ctx, agent.ID, mutationTypeAgentPendingConfigDiscarded, pendingExperimentOff, pendingDiscardTriggerExperimentOff)
 	}
 
-	tz := s.agentTZ(ctx, agent)
 	disposition := agentUpdateDisposition(before, agent, configApplied, configHeldForReincarnate, timezoneChanged, saWrite != nil && saWrite.Assignment != nil)
 	if len(configHeld) > 0 {
 		disposition.Held = configHeld
@@ -4912,7 +5101,8 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id string) 
 
 // performAgentDelete deletes an agent through the backend-driven engine
 // (design ptone/scion#2483 §2.4): load, authorize, DeletedAt → 204, an
-// active delete → join, broker availability → 503, claim, then start the
+// active delete → join, placement pre-check → 409, broker availability →
+// 503, claim, then start the
 // engine and wait up to deleteSyncWait for its outcome. A fast delete answers
 // 204 (or 502/409 on failure) exactly as before; a slow one answers 202
 // {agentId, deletion} and its outcome arrives as events. A second DELETE
@@ -4971,6 +5161,17 @@ func (s *Server) performAgentDelete(w http.ResponseWriter, r *http.Request, agen
 			return
 		}
 
+		// The placement pre-check first (the claim repeats it on the row it
+		// re-reads): an agent whose saved placement is inconsistent is
+		// refused with its specific 409 whether or not its Runtime Broker
+		// is reachable, force or not (ptone/scion#4959).
+		if err := s.deletePlacementPreCheckRow(ctx, agent); err != nil {
+			if !writeRuntimeTargetRefusal(w, err) {
+				writeErrorFromErr(w, err, "")
+			}
+			return
+		}
+
 		// Verify the broker is reachable before claiming, to avoid orphaned
 		// containers. Force bypasses this so stuck agents can always be
 		// cleaned up; managed agents have no broker; a created row with no
@@ -4985,7 +5186,11 @@ func (s *Server) performAgentDelete(w http.ResponseWriter, r *http.Request, agen
 
 		plan, err := s.claimAgentDeletion(ctx, agent.ID, params)
 		if err != nil {
-			writeErrorFromErr(w, err, "")
+			// A placement refusal carries its details, as the engine's
+			// answer for the same refusal does.
+			if !writeRuntimeTargetRefusal(w, err) {
+				writeErrorFromErr(w, err, "")
+			}
 			return
 		}
 		if plan != nil {
@@ -5031,7 +5236,7 @@ func (s *Server) awaitAgentDeletion(w http.ResponseWriter, r *http.Request, plan
 		case deletionOutcomeDeleted:
 			w.WriteHeader(http.StatusNoContent)
 		case deletionOutcomeFailed:
-			writeDeletionFailure(w, plan.snapshot.ID, out.code, out.message, out.retryAfter, isAdmin)
+			writeDeletionFailureWithRefusal(w, plan.snapshot.ID, out.code, out.message, out.retryAfter, out.refusal, isAdmin)
 		default: // lost: someone else holds the row now
 			s.joinAgentDeletion(w, r, plan.snapshot.ID, plan.claim, deadline, isAdmin)
 		}
@@ -5883,6 +6088,10 @@ func relayBrokerRefusal(w http.ResponseWriter, err error) bool {
 	case se.StatusCode == http.StatusBadRequest && code == ErrCodeValidationError:
 	case se.StatusCode == http.StatusUnprocessableEntity && code == harnessConfigUnusableErrorCode:
 	case se.StatusCode == http.StatusUnprocessableEntity && code == storageMigrationRequiredErrorCode:
+	case se.StatusCode == http.StatusUnprocessableEntity && code == api.BrokerErrCodeGitConfigRefused:
+		// The repository's git config sets keys agents may not be given.
+		// The broker's text names every refused key and its remedy, never
+		// a value or a host path.
 	case se.StatusCode == http.StatusServiceUnavailable && code == projectStorageUnavailableErrorCode:
 		// The broker does not see the project storage share. Its message is
 		// relayed only when it is one of the known path-free texts; a broker

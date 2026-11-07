@@ -460,6 +460,35 @@ func TestNFSResolve_SubPathRootDefault(t *testing.T) {
 	}
 }
 
+// TestNFSResolve_Owner verifies that Resolve carries the configured nfs uid
+// and gid, and the default 1000 for an unset one.
+func TestNFSResolve_Owner(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		uid, gid         int
+		wantUID, wantGID int
+	}{
+		{name: "configured", uid: 2001, gid: 3001, wantUID: 2001, wantGID: 3001},
+		{name: "unset", wantUID: 1000, wantGID: 1000},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := NewNFSBackend(&config.V1NFSConfig{
+				MountRoot: "/mnt/nfs",
+				Shares:    []config.V1NFSShare{{ID: "share1", Server: "10.0.0.2", Export: "/scion-workspaces"}},
+				UID:       tc.uid,
+				GID:       tc.gid,
+			})
+			res, err := b.Resolve(ResolveInput{ProjectID: "proj1", Mode: store.SharingModeSharedPlain})
+			if err != nil {
+				t.Fatalf("Resolve: %v", err)
+			}
+			if res.OwnerUID != tc.wantUID || res.OwnerGID != tc.wantGID {
+				t.Errorf("owner = %d:%d, want %d:%d", res.OwnerUID, res.OwnerGID, tc.wantUID, tc.wantGID)
+			}
+		})
+	}
+}
+
 // --- Local Backend Resolve tests ---
 
 func TestLocalBackendResolve(t *testing.T) {

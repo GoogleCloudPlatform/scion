@@ -879,8 +879,19 @@ export interface AgentFieldEditState {
   sessionSensitive?: boolean;
   /** "session" for a session-sensitive field of a suspended agent. */
   note?: string;
-  /** Clearing or zeroing the field takes effect only at the next reincarnation. */
+  /** Clearing the field takes effect only at the next reincarnation. */
   clearNeedsReincarnate?: boolean;
+  /**
+   * On a count limit: the agent's broker cannot apply Unlimited (0), so the
+   * hub refuses a change to it (unlimitedCountLimits capability).
+   */
+  unlimitedUnsupported?: boolean;
+  /**
+   * On config.resources: the agent's broker does not apply a removed
+   * resources sub-field at a start (clearedResourceSubfields capability), so
+   * the removal takes effect only at the next reincarnation.
+   */
+  subfieldClearUnsupported?: boolean;
   /** Why a locked field is locked. */
   reason?: string;
 }
@@ -1665,6 +1676,18 @@ export interface Notification {
   dispatched: boolean;
   acknowledged: boolean;
   createdAt: string;
+  /** What produced the notification (for example "artifact_grant"); absent when not classified. */
+  kind?: string;
+  /** The kind of thing the notification is about (for example "artifact"); absent otherwise. */
+  resourceType?: string;
+  /** The id of the thing the notification is about; absent otherwise. */
+  resourceId?: string;
+  /**
+   * Text another principal wrote, kept apart from `message`: for an
+   * "artifact_review_summary" row, the start of the reviewer's summary note.
+   * Render it as plain text only; absent for other kinds.
+   */
+  excerpt?: string;
 }
 
 // ---------------------------------------------------------------------------

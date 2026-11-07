@@ -42,6 +42,7 @@ make test-hub-postgres-default SHARD=2     # ... only the default-tag ones (CI: 
 make test-hub-postgres-integration SHARD=2 # ... only the -tags integration ones (CI: own job)
 make hub-postgres-integration-shards   # the shards holding a -tags integration Postgres test
 make hubshard-parity                   # parse only: every test runs in exactly one shard
+make hub-dupcheck                      # parse only: no top-level name declared twice (any CI tag set)
 make test-hub-shards                   # every shard in turn (NOSQLITE=1, RACE=1 as above)
 make test-hub-sqlite                   # every shard in turn, plus the non-hub SQLite packages
 hack/hubshard/hubshard.sh              # print the shard sizes
@@ -124,6 +125,14 @@ with `go/build` itself deciding which file each build compiles:
   example on a branch that predates this) is stripped with `go run
   ./hack/hubshard -untag`; a clause outside `pkg/hub` (a file moved by
   `hack/pkgmove`) is deleted by hand.
+
+Parity does not see a top-level name declared twice in two shards' files:
+each shard builds, and every whole-package build (`go vet ./pkg/hub/`)
+fails with "redeclared in this block". `make hub-dupcheck`
+([`hack/dupdecl`](../dupdecl/main.go), parse only, a few seconds) checks
+`pkg/hub` and its test files for that (and for a top-level name that
+clashes with an import's name) under every tag set CI compiles
+`pkg/hub` with; Build & Test runs it next to the parity check.
 
 Each shard job also compares its compiled binary's `-test.list` with
 `hubshard -list K` and fails on any difference, so the static check and

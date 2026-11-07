@@ -279,7 +279,7 @@ func (s *Server) lookupHarnessConfigDirForPolicy(req CreateAgentRequest, hydrate
 	}
 	if projectDir != "" {
 		tier := harnessConfigProjectTier(req.ProjectPath)
-		hcDir, err := config.ResolveHarnessConfigDir("", name, tier, templateChainPaths(templateForChain, req.ProjectPath)...)
+		hcDir, err := config.ResolveHarnessConfigDir("", name, tier, templateChainPaths(context.Background(), templateForChain, req.ProjectPath)...)
 		if err == nil && hcDir != nil {
 			return name, []config.HarnessConfigEntry{hcDir.Config}, hcDir, true, nil
 		}
@@ -345,11 +345,11 @@ func harnessConfigProjectTier(projectPath string) string {
 // (hydrated) path; an empty searchPath resolves as config.GetTemplateChainInProject
 // does for it (global templates). Returns nil when template is empty or the
 // chain does not resolve.
-func templateChainPaths(template, searchPath string) []string {
+func templateChainPaths(ctx context.Context, template, searchPath string) []string {
 	if template == "" {
 		return nil
 	}
-	chain, err := config.GetTemplateChainInProject(template, searchPath)
+	chain, err := config.GetTemplateChainInProject(ctx, template, searchPath)
 	if err != nil {
 		return nil
 	}

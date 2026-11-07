@@ -448,17 +448,16 @@ func (h *Host) Prepare(ctx context.Context) error {
 	return nil
 }
 
-// ScopeKey is the identity part of an execution scope (contract section 5):
-// the Docker daemon ID, or the Kubernetes cluster UID plus namespace.
+// ScopeKey is the identity part of an execution scope (contract section 5
+// and amendment P5-CR, CR3): brokeridentity.ScopeIdentity, the one source of
+// the scope identity for every target type. A scope without an identity
+// gives "<type>:"; Prepare only groups scopes that passed LoadOrCreate,
+// which verified their identity.
 func ScopeKey(s brokeridentity.ExecutionScope) string {
-	switch {
-	case s.Docker != nil:
-		return "docker:" + s.Docker.DaemonID
-	case s.Kubernetes != nil:
-		return "kubernetes:" + s.Kubernetes.ClusterUID + "/" + s.Kubernetes.Namespace
-	default:
-		return s.Type + ":"
+	if id, err := brokeridentity.ScopeIdentity(s); err == nil {
+		return id
 	}
+	return s.Type + ":"
 }
 
 // Status returns every configured instance's state, in configuration order.

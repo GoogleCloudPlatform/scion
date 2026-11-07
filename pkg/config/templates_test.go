@@ -15,6 +15,7 @@
 package config
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -524,7 +525,7 @@ func TestFindTemplateInProjectPath(t *testing.T) {
 	}
 
 	t.Run("project template found when projectPath is provided", func(t *testing.T) {
-		tpl, err := FindTemplateInProjectPath("my-tpl", projectPath)
+		tpl, err := FindTemplateInProjectPath(context.Background(), "my-tpl", projectPath)
 		if err != nil {
 			t.Fatalf("FindTemplateInProjectPath failed: %v", err)
 		}
@@ -537,7 +538,7 @@ func TestFindTemplateInProjectPath(t *testing.T) {
 	})
 
 	t.Run("falls back to global when project has no template", func(t *testing.T) {
-		tpl, err := FindTemplateInProjectPath("my-tpl", filepath.Join(tmpDir, "empty-project"))
+		tpl, err := FindTemplateInProjectPath(context.Background(), "my-tpl", filepath.Join(tmpDir, "empty-project"))
 		if err != nil {
 			t.Fatalf("FindTemplateInProjectPath failed: %v", err)
 		}
@@ -551,7 +552,7 @@ func TestFindTemplateInProjectPath(t *testing.T) {
 
 	t.Run("falls back to FindTemplate when projectPath is empty", func(t *testing.T) {
 		// With empty projectPath and CWD having no .scion, should fall back to global
-		tpl, err := FindTemplateInProjectPath("my-tpl", "")
+		tpl, err := FindTemplateInProjectPath(context.Background(), "my-tpl", "")
 		if err != nil {
 			t.Fatalf("FindTemplateInProjectPath failed: %v", err)
 		}
@@ -561,7 +562,7 @@ func TestFindTemplateInProjectPath(t *testing.T) {
 	})
 
 	t.Run("returns error when template not found anywhere", func(t *testing.T) {
-		_, err := FindTemplateInProjectPath("nonexistent", projectPath)
+		_, err := FindTemplateInProjectPath(context.Background(), "nonexistent", projectPath)
 		if err == nil {
 			t.Fatal("expected error for nonexistent template, got nil")
 		}
@@ -577,8 +578,20 @@ func TestFindTemplateInProjectPath(t *testing.T) {
 		}
 	})
 
-	t.Run("absolute path bypasses project resolution", func(t *testing.T) {
-		tpl, err := FindTemplateInProjectPath(globalTplDir, projectPath)
+	t.Run("absolute path outside the hydration roots is refused", func(t *testing.T) {
+		// A project-scoped lookup does not accept an arbitrary absolute
+		// directory: the request's template value is never a host path.
+		withHydrationRoots(t)
+		if _, err := FindTemplateInProjectPath(context.Background(), globalTplDir, projectPath); !errors.Is(err, ErrTemplateRefNotAllowed) {
+			t.Fatalf("FindTemplateInProjectPath(absolute, no roots) error = %v, want ErrTemplateRefNotAllowed", err)
+		}
+	})
+
+	t.Run("absolute path below a hydration root bypasses project resolution", func(t *testing.T) {
+		// Below a registered hydration root (the broker's template cache),
+		// an absolute directory is the template, without project lookup.
+		withHydrationRoots(t, filepath.Dir(globalTplDir))
+		tpl, err := FindTemplateInProjectPath(context.Background(), globalTplDir, projectPath)
 		if err != nil {
 			t.Fatalf("FindTemplateInProjectPath failed: %v", err)
 		}
@@ -606,7 +619,7 @@ func TestFindTemplateInProjectPath_GitProjectInRepoTemplates(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	tpl, err := FindTemplateInProjectPath("my-tpl", projectDir)
+	tpl, err := FindTemplateInProjectPath(context.Background(), "my-tpl", projectDir)
 	if err != nil {
 		t.Fatalf("FindTemplateInProjectPath failed: %v", err)
 	}
@@ -642,7 +655,7 @@ func TestGetTemplateChainInProject(t *testing.T) {
 
 	// No default template exists on disk, so it is hydrated from the embedded
 	// copy into the global templates dir and prepended to the chain.
-	chain, err := GetTemplateChainInProject("test-tpl", projectPath)
+	chain, err := GetTemplateChainInProject(context.Background(), "test-tpl", projectPath)
 	if err != nil {
 		t.Fatalf("GetTemplateChainInProject failed: %v", err)
 	}
@@ -686,7 +699,7 @@ func TestGetTemplateChainInProjectWithDefault(t *testing.T) {
 	}
 
 	// Non-default template should produce a 2-link chain: [default, custom]
-	chain, err := GetTemplateChainInProject("custom", projectPath)
+	chain, err := GetTemplateChainInProject(context.Background(), "custom", projectPath)
 	if err != nil {
 		t.Fatalf("GetTemplateChainInProject failed: %v", err)
 	}
@@ -701,7 +714,7 @@ func TestGetTemplateChainInProjectWithDefault(t *testing.T) {
 	}
 
 	// Default template itself should produce a 1-link chain: [default]
-	chain, err = GetTemplateChainInProject("default", projectPath)
+	chain, err = GetTemplateChainInProject(context.Background(), "default", projectPath)
 	if err != nil {
 		t.Fatalf("GetTemplateChainInProject for default failed: %v", err)
 	}
@@ -730,7 +743,7 @@ func TestGetTemplateChainInProject_HydratesDefaultFromEmbedded(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	chain, err := GetTemplateChainInProject("my-custom", "")
+	chain, err := GetTemplateChainInProject(context.Background(), "my-custom", "")
 	if err != nil {
 		t.Fatalf("GetTemplateChainInProject failed: %v", err)
 	}
@@ -758,7 +771,7 @@ func TestGetTemplateChainInProject_HydratesDefaultWhenPrimary(t *testing.T) {
 	t.Chdir(tmpDir)
 
 	// No templates at all — default should be hydrated from the embedded copy.
-	chain, err := GetTemplateChainInProject("default", "")
+	chain, err := GetTemplateChainInProject(context.Background(), "default", "")
 	if err != nil {
 		t.Fatalf("GetTemplateChainInProject failed: %v", err)
 	}
@@ -790,7 +803,7 @@ func TestGetTemplateChainInProject_ExistingDefaultIsNotReseeded(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	chain, err := GetTemplateChainInProject("default", "")
+	chain, err := GetTemplateChainInProject(context.Background(), "default", "")
 	if err != nil {
 		t.Fatalf("GetTemplateChainInProject failed: %v", err)
 	}
@@ -845,7 +858,7 @@ func TestGetTemplateChainInProject_ConcurrentHydration(t *testing.T) {
 				go func(idx int) {
 					defer wg.Done()
 					start.Wait()
-					chain, err := GetTemplateChainInProject("default", "")
+					chain, err := GetTemplateChainInProject(context.Background(), "default", "")
 					errs[idx] = err
 					chains[idx] = chain
 					if err == nil && len(chain) == 1 {
@@ -2274,7 +2287,9 @@ func TestFindTemplateContentHashDirHasNoName(t *testing.T) {
 	finders := map[string]func(string) (*Template, error){
 		"FindTemplate": FindTemplate,
 		"FindTemplateInProjectPath": func(name string) (*Template, error) {
-			return FindTemplateInProjectPath(name, projectPath)
+			// root is a registered hydration root, as the broker's cache.
+			withHydrationRoots(t, root)
+			return FindTemplateInProjectPath(context.Background(), name, projectPath)
 		},
 	}
 	for fname, find := range finders {

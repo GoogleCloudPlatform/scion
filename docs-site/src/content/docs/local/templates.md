@@ -34,10 +34,12 @@ Only `scion-agent.yaml` is required for Scion to recognize the directory as a te
 
 The config file drives the role. Fields that point at content — `agent_instructions`, `system_prompt` — accept **either a filename** (resolved relative to the template directory) **or inline text**. The convention is to keep prose in separate `.md` files:
 
-- A single-line value names a file. It must be a relative path inside the template directory (no absolute path, no `..`). If no template in the chain has that file, the value is used as inline text.
-- A value with a line break is always inline text.
-- A content file must be a regular file of at most 4 MiB, reached without a symbolic link. A symbolic link at the file or at any directory on its path is refused with an error; replace it with the file or directory itself.
-- The same rules apply when Scion picks up `agents.md` or `system-prompt.md` by convention; a linked file is not picked up.
+- A single-line value names a file. It must be a relative path inside the template directory (not an absolute path, no `..` component, and not `.`; a single-line value that is not a local relative path is refused with an error). If a template in the chain has that path and it cannot be read as a valid content file, loading fails with an error (`template content file refused`) instead of using the value as inline text; only when no template in the chain has that file (`ErrNotExist`) is the value used as inline text.
+- A value with a line break is always inline text and is never looked up as a file.
+- A content file must be a plain regular file of at most 4 MiB inside the template directory, reached without following a symbolic link. A symbolic link at the file or at any directory on its path, a non-directory path component, a hard link, directory or device, a file larger than 4 MiB, or an unreadable file (permission denied) is refused with an error; replace a link with the file or directory itself, or use multi-line inline text.
+- The same rules apply when Scion checks for `agents.md` or `system-prompt.md` by convention (`TemplateHasContentFile`); a file that would be refused is not picked up.
+- A system prompt file that is empty or holds only the default template's `# Placeholder` counts as no system prompt: Scion does not stage `~/.scion/harness/inputs/system-prompt.md` (and a start-time re-render removes any placeholder recorded earlier in the control-plane inputs directory), so the harness keeps its own prompt. Because the `default` template is layered under every template, a template without its own `system-prompt.md` inherits this placeholder and gets no system prompt. Inline `system_prompt` content is staged as given.
+- `scion-agent.yaml` (or `.yml`, `.json`) itself must be a regular file of at most 4 MiB, reached without a symbolic link; a linked config file is refused with an error.
 
 ```yaml
 schema_version: "1"
@@ -138,15 +140,19 @@ scion start coord --type gh://scion-frontiers/agent-team/templates/coordinator
 scion start coord --type ./templates/coordinator
 ```
 
+The CLI resolves a path or URI on your own machine and uploads the template to the Hub. What reaches the Hub, and from there a Runtime Broker, is always a template name (a single path component; an empty template name resolves the `default` template and never resolves a `templates/` directory itself as a template) or a template ID: an agent create request or a scheduled `dispatch_agent` event or schedule that sets `template` in another form is refused (`template must be a template name or ID`). A project default template (`scion.io/default-template`) in another form is refused (`the project's default template setting must be a template name or ID`), and a Hub default template (`agent_defaults.default_template`) or a template name read back from `agent-info.json` in another form is ignored with a warning. A Runtime Broker loads a template directory by absolute path only from its own template cache or, when it runs with a Hub that stores files locally, from that Hub's template storage. A remote `default_template` in the broker's settings is still fetched.
+
 ### Which harness-config is used
 
 When you do not pass `--harness-config`, Scion resolves it in this order:
 
-1. **CLI flag** — `--harness-config` (alias `--harness`).
+1. **CLI flag / request** — `--harness-config` (alias `--harness`), or `harness_config` / `default_harness_config` in the request's inline config. Must be a single path component (`harness config must be a harness-config name`).
 2. **Project default** — the project's `scion.io/default-harness-config` setting.
 3. **Template default** — `default_harness_config` in the template's `scion-agent.yaml`, else its `harness_config`. When both are set, `default_harness_config` wins.
 4. **Hub default** — `agent_defaults.default_harness_config` on the hub.
 5. **System default** — `default_harness_config` in the active profile, then in `settings.yaml`.
+
+If a project default, template default, Hub default, or recorded harness-config is not a single path component, the Hub drops that value with a dispatch warning (`the <tier> harness config was ignored: it is not a harness-config name`) and falls through to the next tier.
 
 ## Template composition & inheritance
 
@@ -203,7 +209,7 @@ When the template chain is provisioned, Scion collects the skills from each temp
 | Claude | `.claude/skills/` |
 | Gemini | `.gemini/skills/` |
 
-When multiple templates are chained, skills from later templates overlay earlier ones.
+When multiple templates are chained, skills from later templates overlay earlier ones. Each skill directory (template-mounted, Skill Bank, or platform skill) is installed as a whole into the harness's `skills_dir` (which must be a relative path inside the Agent home: `harness skills_dir must be a relative path inside the agent home`) without following symbolic links in either the source or the Agent home, within a per-skill limit of `4096` entries, `64 MiB`, and `32` directory levels. Symbolic links, special files, and regular files with more than one hard link in a skill's source are skipped (still counting toward the entry limit), and a symbolic link or non-directory on the skill's path in the Agent home or the skill's source refuses the install.
 
 ### 2. Skill Bank references
 
@@ -254,6 +260,8 @@ When you reference a template by bare name, Scion searches in this order and use
 2. **Absolute path** to a template directory.
 3. **Project** templates (`.scion/templates/`).
 4. **Global** templates (`~/.scion/templates/`).
+
+A template name (anything that is not a remote URI or an absolute path) is a single path component, with no `/`, `\`, `..`, `.`, leading `:` or `://`. A name in another form (for example `team/reviewer`) is refused rather than looked up. The same rule applies to harness-config names. The Hub and store refuse such a name on every write (`CreateTemplate`, `UpdateTemplate`, `CreateHarnessConfig`, `UpdateHarnessConfig`, create, rename, clone or import) with `name must be a single path component`, and when an agent create request names a template (`template must be a template name or ID`) or harness-config (`harness config must be a harness-config name`). `scion templates pull` and `scion harness-config pull` without `--to` build the destination directory only from a name in that form.
 
 When connected to a Hub, templates resolve from the Hub across three scopes. If a name matches in several locations, the CLI prompts you to choose; the `--local`, `--hub`, and `--global` flags narrow the search.
 

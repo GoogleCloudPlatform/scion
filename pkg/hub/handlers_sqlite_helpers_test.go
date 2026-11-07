@@ -20,8 +20,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/hmac"
-	"crypto/rand"
-	"crypto/rsa"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
@@ -52,7 +50,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/google/uuid"
 	"github.com/knadh/koanf/v2"
@@ -348,8 +345,6 @@ func def49Setup(t *testing.T) (srv *Server, s store.Store, projectID string, tar
 	srv.SetDispatcher(&recordingDispatcher{})
 	return srv, s, projectID, targetAgent, userID
 }
-
-func strPtr(s string) *string { return &s }
 
 // alwaysDropUserBus is an eventbus.EventBus whose Publish always reports a
 // subscriber-buffer-full drop, simulating InProcessEventBus.Publish when a
@@ -688,7 +683,18 @@ func waitForReincarnationSettled(t *testing.T, s store.Store, agentID string) *s
 // reprovision capability, and wires the given dispatcher.
 func setupReincarnateTestServer(t *testing.T, disp AgentDispatcher) (*Server, store.Store, *store.Project, *store.RuntimeBroker) {
 	t.Helper()
+	return setupReincarnateTestServerWith(t, disp, nil)
+}
+
+// setupReincarnateTestServerWith is setupReincarnateTestServer with a hook
+// that runs right after the server is constructed, before any setup: the
+// place to call installStoreFault (see store_fault_helpers_test.go).
+func setupReincarnateTestServerWith(t *testing.T, disp AgentDispatcher, afterNew func(srv *Server)) (*Server, store.Store, *store.Project, *store.RuntimeBroker) {
+	t.Helper()
 	srv, s := testServer(t)
+	if afterNew != nil {
+		afterNew(srv)
+	}
 	ctx := context.Background()
 
 	project := &store.Project{
@@ -1637,6 +1643,14 @@ type routedTestEnv struct {
 func setupRoutedTestEnv(t *testing.T) routedTestEnv {
 	t.Helper()
 	srv, s := testServer(t)
+	return setupRoutedTestEnvOn(t, srv, s)
+}
+
+// setupRoutedTestEnvOn builds the routed test fixtures on an existing server
+// and its raw store, for a test that installs a store fault wrapper
+// (testServerWithStoreFault) before any setup.
+func setupRoutedTestEnvOn(t *testing.T, srv *Server, s store.Store) routedTestEnv {
+	t.Helper()
 	ctx := context.Background()
 
 	// Wire a recording dispatcher so dispatch tests exercise the full path.
@@ -3432,35 +3446,18 @@ const testOIDCIssuerURL = "https://scion.example.com"
 
 // installTestOIDCKeyManager sets an OIDCKeyManager with a fresh RS256 key and
 // the testOIDCIssuerURL issuer on srv. Routes that New() registers only when
-// the OIDC provider is enabled stay unregistered.
+// the OIDC provider is enabled stay unregistered. The manager is built by
+// NewOIDCKeyManager with no store and no secret backend, so it generates
+// an RSA-2048 key in memory and persists nothing.
 func installTestOIDCKeyManager(t *testing.T, srv *Server) {
 	t.Helper()
 
-	// Generate a test RSA key pair.
-	privKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	mgr, err := NewOIDCKeyManager(context.Background(), OIDCKeyManagerConfig{
+		IssuerURL:   testOIDCIssuerURL,
+		Log:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ValueCipher: secret.NewLegacyValueCipher(""),
+	})
 	require.NoError(t, err)
-
-	kid := computeKeyID(&privKey.PublicKey)
-	signingKey := &OIDCSigningKey{
-		KeyID:      kid,
-		PrivateKey: privKey,
-		PublicKey:  &privKey.PublicKey,
-		Active:     true,
-	}
-
-	// Create the RS256 signer (needed by identity token endpoint).
-	signer, err := jose.NewSigner(
-		jose.SigningKey{Algorithm: jose.RS256, Key: privKey},
-		(&jose.SignerOptions{}).WithType("JWT").WithHeader("kid", kid),
-	)
-	require.NoError(t, err)
-
-	mgr := &OIDCKeyManager{
-		activeKey: signingKey,
-		allKeys:   []*OIDCSigningKey{signingKey},
-		signer:    signer,
-		issuerURL: testOIDCIssuerURL,
-	}
 
 	srv.oidcKeyManager = mgr
 	srv.oidcIssuerURL = testOIDCIssuerURL

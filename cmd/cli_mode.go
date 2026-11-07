@@ -144,6 +144,7 @@ var agentAllowed = map[string]bool{
 	"artifact.versions":             true,
 	"artifact.list":                 true,
 	"artifact.view":                 true,
+	"artifact.comments":             true,
 	// artifact share, artifact grants and artifact delete are human-only
 	// and deliberately absent (ptone/scion#4529, ptone/scion#4579): agents
 	// may not share or delete artifacts, or manage their grants.

@@ -56,8 +56,7 @@ install, refresh, publish, and delete. Manage them with the `scion harness-confi
 ### The `name` field
 
 A harness-config's identifier defaults to its **directory name** (e.g. `claude`,
-`gemini-experimental`). A `config.yaml` may set an explicit `name:` field to override this; path
-separators (`.`, `..`, `/`, `\`) are rejected. On the Hub, each config also has a URL-safe
+`gemini-experimental`). A `config.yaml` may set an explicit `name:` field to override this. Every harness-config name must be a single path component — non-empty, not `.` or `..`, and containing no `/`, `\`, leading `:`, or `://`. A name in any other form is refused on local disk lookup, on `scion harness-config pull` without `--to`, on every Hub and store write (`CreateHarnessConfig`, `UpdateHarnessConfig`, create, rename, clone, or import) with `name must be a single path component`, and on agent create requests (`harness config must be a harness-config name`). A project default, template default, Hub default, or recorded harness-config in another form is ignored with a dispatch warning (`the <tier> harness config was ignored: it is not a harness-config name`). On the Hub, each config also has a URL-safe
 `slug`, and lookups match either the name or the slug.
 
 ### Installing from a source
@@ -399,7 +398,14 @@ A harness-config without a provisioner that declares a `ready` or `delivery` blo
 `config_dir`: its `ready` block is used, its `instructions_file`, `system_prompt_file` and
 `system_prompt_mode` (or the declarative defaults for instructions and system prompts) apply when
 the agent is provisioned, and the harness reports its `harness` type as its name instead of
-`generic`. A `ready` block taken from the built-in bundle does not have this effect. Message
+`generic`. In `config.yaml`, `system_prompt_file`, `instructions_file`, `skills_dir`, and
+`config_dir` must each be empty or a relative path inside the Agent home (not absolute, no `..`
+component, and not `.`). When a declarative harness reads or writes `instructions_file` (default
+`agents.md`, reads bounded to 4 MiB) or `system_prompt_file` (default `.scion/system_prompt.md`),
+every access goes through a handle confined to the Agent home (`pkg/agenthome`): a path that
+leaves the home or traverses a linked directory component is refused, a linked or non-regular file
+is not read, and a symlink at the target file is replaced rather than written through. A `ready`
+block taken from the built-in bundle does not have this effect. Message
 delivery and interrupts still use the built-in bundle for the `harness` type (the defaults for a
 type with no bundle), so a custom `delivery` block, `interrupt_key` and `interrupt_sequence` do
 not yet change how messages are submitted or interrupted.

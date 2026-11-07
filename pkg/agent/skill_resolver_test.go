@@ -27,6 +27,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agenthome"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 )
@@ -477,37 +478,6 @@ func TestCollectRequiredSkillURIs(t *testing.T) {
 	}
 }
 
-func TestWriteResolutionRecord(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, ".scion", "resolved-skills.json")
-
-	record := &SkillResolutionRecord{
-		ResolvedAt: "2026-06-11T00:00:00Z",
-		Resolver:   "mock",
-		Skills: []SkillResolutionEntry{
-			{
-				URI:             "skill://scion/core/test@1.0",
-				Name:            "test",
-				ResolvedVersion: "1.0.0",
-				ContentHash:     "sha256:abc123",
-				Source:          "registry",
-			},
-		},
-	}
-
-	if err := writeResolutionRecord(path, record); err != nil {
-		t.Fatalf("writeResolutionRecord() error: %v", err)
-	}
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("failed to read record: %v", err)
-	}
-	if !strings.Contains(string(data), "test") {
-		t.Error("record should contain skill name")
-	}
-}
-
 func TestInstallResolvedSkills_WithAsRename(t *testing.T) {
 	content := []byte("# Renamed Skill")
 	contentHash := transfer.HashBytes(content)
@@ -655,7 +625,23 @@ func TestInstallResolvedSkills_BundleHashMismatch(t *testing.T) {
 	}
 }
 
-func TestEnumerateLocalSkills(t *testing.T) {
+// localSkillsForTest lists the local skills of skillsDir in agentHome with
+// homeLocalSkills.
+func localSkillsForTest(t *testing.T, agentHome, skillsDir string) []SkillResolutionEntry {
+	t.Helper()
+	home, err := agenthome.Open(agentHome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = home.Close() }()
+	entries, err := homeLocalSkills(home, skillsDir, nil)
+	if err != nil {
+		t.Fatalf("homeLocalSkills: %v", err)
+	}
+	return entries
+}
+
+func TestHomeLocalSkills(t *testing.T) {
 	agentHome := t.TempDir()
 	skillsDir := ".claude/skills"
 	skillsPath := filepath.Join(agentHome, skillsDir)
@@ -668,7 +654,7 @@ func TestEnumerateLocalSkills(t *testing.T) {
 	// Files should be excluded
 	_ = os.WriteFile(filepath.Join(skillsPath, "README.md"), []byte("test"), 0644)
 
-	entries := enumerateLocalSkills(agentHome, skillsDir)
+	entries := localSkillsForTest(t, agentHome, skillsDir)
 	if len(entries) != 2 {
 		t.Fatalf("expected 2 local skills, got %d", len(entries))
 	}
@@ -685,7 +671,7 @@ func TestEnumerateLocalSkills(t *testing.T) {
 	}
 }
 
-func TestEnumerateLocalSkills_SkipsAgentPluginDirs(t *testing.T) {
+func TestHomeLocalSkills_SkipsAgentPluginDirs(t *testing.T) {
 	agentHome := t.TempDir()
 	skillsDir := ".claude/skills"
 	skillsPath := filepath.Join(agentHome, skillsDir)
@@ -703,7 +689,7 @@ func TestEnumerateLocalSkills_SkipsAgentPluginDirs(t *testing.T) {
 	_ = os.MkdirAll(filepath.Join(skillsPath, "dirmark", "plugin.json"), 0755)
 
 	var names []string
-	for _, e := range enumerateLocalSkills(agentHome, skillsDir) {
+	for _, e := range localSkillsForTest(t, agentHome, skillsDir) {
 		names = append(names, e.Name)
 	}
 	sort.Strings(names)
@@ -712,8 +698,8 @@ func TestEnumerateLocalSkills_SkipsAgentPluginDirs(t *testing.T) {
 	}
 }
 
-func TestEnumerateLocalSkills_NonExistentDir(t *testing.T) {
-	entries := enumerateLocalSkills(t.TempDir(), ".claude/skills")
+func TestHomeLocalSkills_NonExistentDir(t *testing.T) {
+	entries := localSkillsForTest(t, t.TempDir(), ".claude/skills")
 	if len(entries) != 0 {
 		t.Errorf("expected 0 entries for non-existent dir, got %d", len(entries))
 	}

@@ -61,6 +61,15 @@ const (
 	// a directory directly under the project-configs directory in the
 	// <slug>__<id8> form. Nothing was changed.
 	alignSkippedUnexpectedIdentity alignOutcome = "skipped_unexpected_identity"
+	// alignSkippedNotFormerID: the recorded identity is neither the
+	// project's own ID nor a former ID of it (see recordedProjectRelation).
+	// Nothing was changed.
+	alignSkippedNotFormerID alignOutcome = "skipped_not_former_id"
+	// alignSkippedOtherProjectDir: the recorded identity is the project's
+	// own ID under another slug, but the project config directory it names
+	// belongs to another live project (a <slug>__<id8> prefix collision).
+	// Nothing was changed.
+	alignSkippedOtherProjectDir alignOutcome = "skipped_other_project_dir"
 )
 
 // identityAlignment describes what alignWorkspaceProjectIdentity did.
@@ -69,6 +78,9 @@ type identityAlignment struct {
 	// Relocated is true when the project config directory was moved to
 	// the name derived from the hub project ID.
 	Relocated bool
+	// RecordedID is the project ID the workspace recorded. It is set for
+	// alignSkippedNotFormerID and alignSkippedOtherProjectDir.
+	RecordedID string
 }
 
 // Changed reports whether the workspace identity was rewritten.
@@ -104,6 +116,11 @@ func confinedProjectConfigRoot(slug, projectID string) (root string, ok bool) {
 // directly under ~/.scion/project-configs in the <slug>__<id8> form;
 // otherwise nothing is changed (alignSkippedUnexpectedIdentity).
 //
+// Only an identity of the same project is aligned. relation is called with
+// the recorded slug and ID before any filesystem inspection; unless it
+// reports recordedSameProject, nothing is changed (alignSkippedNotFormerID
+// or alignSkippedOtherProjectDir).
+//
 // When the workspace holds a different identity, its project config
 // directory is first moved to the hub-derived name, then the identity is
 // rewritten. A hub-derived directory made up only of empty directories is
@@ -114,7 +131,7 @@ func confinedProjectConfigRoot(slug, projectID string) (root string, ok bool) {
 //
 // inUse is called after all checks and immediately before the first change;
 // when it reports true, nothing is changed (alignSkippedInUse).
-func alignWorkspaceProjectIdentity(workspacePath, slug, projectID string, inUse func() (bool, error)) (identityAlignment, error) {
+func alignWorkspaceProjectIdentity(workspacePath, slug, projectID string, relation func(recordedSlug, recordedID string) (recordedRelation, error), inUse func() (bool, error)) (identityAlignment, error) {
 	current, err := config.ReadWorkspaceIdentity(workspacePath)
 	if err != nil {
 		// A recorded project ID outside the project ID format is an identity
@@ -139,6 +156,17 @@ func alignWorkspaceProjectIdentity(workspacePath, slug, projectID string, inUse 
 	if current.ID != "" {
 		if previous, ok = confinedProjectConfigRoot(current.Slug, current.ID); !ok {
 			return identityAlignment{Outcome: alignSkippedUnexpectedIdentity}, nil
+		}
+		rel, err := relation(current.Slug, current.ID)
+		if err != nil {
+			return identityAlignment{}, alignFailed("look up recorded project", err)
+		}
+		switch rel {
+		case recordedSameProject:
+		case recordedOtherProjectDir:
+			return identityAlignment{Outcome: alignSkippedOtherProjectDir, RecordedID: current.ID}, nil
+		default:
+			return identityAlignment{Outcome: alignSkippedNotFormerID, RecordedID: current.ID}, nil
 		}
 	}
 
@@ -306,6 +334,89 @@ func (s *Server) projectConfigInUse(ctx context.Context, projectID string) (bool
 	}
 }
 
+// recordedRelation is how a recorded workspace identity relates to the
+// project being aligned.
+type recordedRelation int
+
+const (
+	// recordedNotFormer: the identity is not one of the project's.
+	recordedNotFormer recordedRelation = iota
+	// recordedSameProject: the identity is the project's own ID under
+	// another slug, or a former ID of the project.
+	recordedSameProject
+	// recordedOtherProjectDir: the identity is the project's own ID under
+	// another slug, and another live project owns the project config
+	// directory it names.
+	recordedOtherProjectDir
+)
+
+// recordedProjectRelation classifies the recorded identity
+// recordedSlug/recordedID against project. The hub keeps no history of
+// project IDs, so:
+//   - the project's own ID under another slug (left by a slug rename) is the
+//     same project, unless another live project owns its project config
+//     directory <recordedSlug>__<id8>. Directory names derive from (slug,
+//     id8) and slugs are unique, so at most one live project maps to that
+//     directory: the one holding recordedSlug, when its ID shares the
+//     project's id8;
+//   - any other ID is a former ID of the project when it lies in the
+//     project's own config namespace (recordedSlug is the project's slug)
+//     and is the ID of no live project.
+//
+// A store error other than not found is returned, and nothing is changed.
+func (s *Server) recordedProjectRelation(ctx context.Context, project *store.Project, recordedSlug, recordedID string) (recordedRelation, error) {
+	if recordedID == project.ID {
+		return s.ownIDRelation(ctx, project, recordedSlug)
+	}
+	if recordedSlug != project.Slug {
+		return recordedNotFormer, nil
+	}
+	_, err := s.store.GetProject(ctx, recordedID)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		return recordedSameProject, nil
+	case err != nil:
+		return recordedNotFormer, err
+	}
+	return recordedNotFormer, nil
+}
+
+// errNoProjectFromLookup reports a project lookup that returned neither a
+// project nor an error.
+var errNoProjectFromLookup = errors.New("project lookup returned no project and no error")
+
+// ownIDRelation classifies the project's own ID recorded under
+// recordedSlug: recordedOtherProjectDir when the live project holding
+// recordedSlug is another project whose project config directory is the
+// one <recordedSlug>__<id8 of project.ID> names, else recordedSameProject.
+// A slug lookup that returns no project and no error is a failure
+// (errNoProjectFromLookup), so nothing is changed.
+func (s *Server) ownIDRelation(ctx context.Context, project *store.Project, recordedSlug string) (recordedRelation, error) {
+	if recordedSlug == project.Slug {
+		return recordedSameProject, nil
+	}
+	holder, err := s.store.GetProjectBySlug(ctx, recordedSlug)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		return recordedSameProject, nil
+	case err != nil:
+		return recordedNotFormer, err
+	case holder == nil:
+		return recordedNotFormer, errNoProjectFromLookup
+	}
+	if holder.ID == project.ID {
+		return recordedSameProject, nil
+	}
+	recordedRoot, ok := confinedProjectConfigRoot(recordedSlug, project.ID)
+	if !ok {
+		return recordedNotFormer, nil
+	}
+	if holderRoot, ok := confinedProjectConfigRoot(holder.Slug, holder.ID); ok && holderRoot == recordedRoot {
+		return recordedOtherProjectDir, nil
+	}
+	return recordedSameProject, nil
+}
+
 // alignErrorAttrs returns log attributes for an alignment failure that carry
 // no filesystem paths: the failed step, and for filesystem errors the
 // operation and the underlying error only.
@@ -329,7 +440,7 @@ func alignErrorAttrs(err error) []any {
 // identityAlignmentCounts summarizes one alignClonedProjectIdentities pass.
 type identityAlignmentCounts struct {
 	aligned, alreadyMatching, noIdentity, skippedInUse, skippedTargetExists,
-	skippedUnexpectedIdentity, failed, notReached int
+	skippedUnexpectedIdentity, skippedNotFormerID, skippedOtherProjectDir, failed, notReached int
 }
 
 func (c *identityAlignmentCounts) add(outcome alignOutcome) {
@@ -346,6 +457,10 @@ func (c *identityAlignmentCounts) add(outcome alignOutcome) {
 		c.skippedTargetExists++
 	case alignSkippedUnexpectedIdentity:
 		c.skippedUnexpectedIdentity++
+	case alignSkippedNotFormerID:
+		c.skippedNotFormerID++
+	case alignSkippedOtherProjectDir:
+		c.skippedOtherProjectDir++
 	}
 }
 
@@ -357,6 +472,8 @@ func (c identityAlignmentCounts) attrs() []any {
 		"skipped_in_use", c.skippedInUse,
 		"skipped_target_exists", c.skippedTargetExists,
 		"skipped_unexpected_identity", c.skippedUnexpectedIdentity,
+		"skipped_not_former_id", c.skippedNotFormerID,
+		"skipped_other_project_dir", c.skippedOtherProjectDir,
 		"failed", c.failed,
 		"not_reached", c.notReached,
 	}
@@ -451,7 +568,10 @@ func (s *Server) alignClonedProjectIdentity(ctx context.Context, project *store.
 	}
 	workspacePath := resolved.HostPath
 
-	res, err := alignWorkspaceProjectIdentity(workspacePath, project.Slug, project.ID, func() (bool, error) {
+	relation := func(recordedSlug, recordedID string) (recordedRelation, error) {
+		return s.recordedProjectRelation(ctx, project, recordedSlug, recordedID)
+	}
+	res, err := alignWorkspaceProjectIdentity(workspacePath, project.Slug, project.ID, relation, func() (bool, error) {
 		return s.projectConfigInUse(ctx, project.ID)
 	})
 	if err != nil {
@@ -475,6 +595,12 @@ func (s *Server) alignClonedProjectIdentity(ctx context.Context, project *store.
 	case alignSkippedUnexpectedIdentity:
 		logger.Warn("cloned project identity: recorded workspace identity is not in the expected form, skipped",
 			"project_id", project.ID)
+	case alignSkippedNotFormerID:
+		logger.Warn("cloned project identity: recorded workspace identity is not a former ID of the project, skipped",
+			"project_id", project.ID, "recorded_project_id", res.RecordedID)
+	case alignSkippedOtherProjectDir:
+		logger.Warn("cloned project identity: project config directory of the recorded identity belongs to another project, skipped",
+			"project_id", project.ID, "recorded_project_id", res.RecordedID)
 	}
 	return res.Outcome, true
 }

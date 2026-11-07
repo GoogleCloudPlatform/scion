@@ -330,11 +330,16 @@ func TestAgentDelegationPolicyNarrowing_DeniesAtIssuanceExchangeAndUse(t *testin
 // TestAgentDelegablePermissions_EachExercisedThroughItsRoute: every key of
 // the hub agent-delegation policy is allowed end to end, through the real
 // middleware, route guard and handler, with a grant that holds only that
-// permission. A new key fails here until it has a case.
+// permission. An item-filter-only key (skill.read, template.read) admits no
+// route of its own: it is exercised through its list route with a grant
+// that holds the list permission too, where it allows items, and a grant
+// holding it alone is refused by the list arm. A new key fails here until
+// it has a case.
 func TestAgentDelegablePermissions_EachExercisedThroughItsRoute(t *testing.T) {
 	f := newADTFixture(t, "adt-keys")
 	f.adtMessageWorld(t)
 	attachTarget, _ := f.adtAttachTarget(t, "adt-keys")
+	decisions := f.captureDecisions(t)
 	cases := map[string]struct {
 		selector string
 		request  func(token string) *httptest.ResponseRecorder
@@ -349,16 +354,86 @@ func TestAgentDelegablePermissions_EachExercisedThroughItsRoute(t *testing.T) {
 		"agent.attach": {"agent:attach", func(token string) *httptest.ResponseRecorder {
 			return f.do(t, http.MethodGet, adtPTYPath(attachTarget.ID), nil, adtBearer(token))
 		}},
+		"agent.list": {"agent:list", func(token string) *httptest.ResponseRecorder {
+			return f.do(t, http.MethodGet, "/api/v1/agents", nil, adtBearer(token))
+		}},
+		"skill.list": {"skill:list", func(token string) *httptest.ResponseRecorder {
+			return f.do(t, http.MethodGet, "/api/v1/skills", nil, adtBearer(token))
+		}},
+		"template.list": {"template:list", func(token string) *httptest.ResponseRecorder {
+			return f.do(t, http.MethodGet, "/api/v1/templates", nil, adtBearer(token))
+		}},
+		"skill.read": {"skill:read", func(token string) *httptest.ResponseRecorder {
+			return f.do(t, http.MethodGet, "/api/v1/skills", nil, adtBearer(token))
+		}},
+		"template.read": {"template:read", func(token string) *httptest.ResponseRecorder {
+			return f.do(t, http.MethodGet, "/api/v1/templates", nil, adtBearer(token))
+		}},
 	}
+	// The list permission an item-filter-only key is exercised with.
+	itemFilterList := map[string]string{"skill.read": "skill:list", "template.read": "template:list"}
+	// Each grant is revoked when its case ends, so the cases stay under the per-agent active-grant limit.
+	issue := func(t *testing.T, selectors ...string) ExchangeAgentDelegationResponse {
+		t.Helper()
+		grant := f.adtIssueGrant(t, map[string]string{"kind": "hub"}, selectors...)
+		t.Cleanup(func() {
+			rec := f.revokeGrant(t, f.session(t, f.alice), f.agentA.ID, grant.ID)
+			assert.Less(t, rec.Code, 300, "revoking the case's grant: %s", rec.Body.String())
+		})
+		return f.delegated(t, grant.ID)
+	}
+	now := time.Now()
+	require.NoError(t, f.store.CreateSkill(context.Background(), &store.Skill{ID: tid("adt-keys-skill"), Name: "adt-keys-skill", Slug: "adt-keys-skill",
+		Scope: store.SkillScopeProject, ScopeID: f.proj.ID, Status: "active", OwnerID: f.alice.ID, Created: now, Updated: now}))
+	require.NoError(t, f.store.CreateTemplate(context.Background(), &store.Template{ID: tid("adt-keys-template"), Name: "adt-keys-template", Slug: "adt-keys-template",
+		Harness: "claude", Scope: store.TemplateScopeProject, ScopeID: f.proj.ID, Status: store.TemplateStatusActive, OwnerID: f.alice.ID, Created: now, Updated: now}))
 	for perm := range permissions.AgentDelegableRegistry {
 		tc, ok := cases[perm]
 		if !assert.True(t, ok, "delegable permission %s has no end-to-end case", perm) {
 			continue
 		}
 		t.Run(perm, func(t *testing.T) {
-			cred := f.delegated(t, f.adtIssueGrant(t, map[string]string{"kind": "hub"}, tc.selector).ID)
+			if list, ok := itemFilterList[perm]; ok {
+				// With the list permission too, the key allows items.
+				cred := issue(t, list, tc.selector)
+				decisions.reset()
+				rec := tc.request(cred.Token)
+				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+				agg := decisions.listFilterRecords()
+				require.Len(t, agg, 1)
+				assert.Positive(t, agg[0].ListFilter.Allowed, "%s allows items on its list route", perm)
+				// Alone, the list arm refuses.
+				alone := issue(t, tc.selector)
+				decisions.reset()
+				rec = tc.request(alone.Token)
+				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+				primary := decisions.primaryDelegated()
+				require.Len(t, primary, 1)
+				assert.Equal(t, "deny", primary[0].Result, "%s alone admits no list", perm)
+				return
+			}
+			cred := issue(t, tc.selector)
+			decisions.reset()
 			rec := tc.request(cred.Token)
 			assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			if perm == "agent.list" || perm == "skill.list" || perm == "template.list" {
+				// A list answers 200 whether the arm allows or refuses, so the arm's record must be the allow,
+				// and the item filter (agent:read is not in the grant) refuses every item.
+				var primary, agg []*store.DecisionAuditRecord
+				for _, r := range decisions.delegated() {
+					if r.RecordKind == store.DecisionAuditRecordKindListFilter {
+						agg = append(agg, r)
+					} else {
+						primary = append(primary, r)
+					}
+				}
+				require.Len(t, primary, 1)
+				assert.Equal(t, "allow", primary[0].Result, "the list arm allows a grant holding agent:list")
+				assert.Equal(t, perm, primary[0].PermissionID)
+				require.Len(t, agg, 1)
+				assert.Positive(t, agg[0].ListFilter.Denied, "without agent:read every item is refused")
+				assert.Zero(t, agg[0].ListFilter.Allowed)
+			}
 		})
 	}
 }

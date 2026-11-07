@@ -103,7 +103,7 @@ func TestBuildPatchedAppliedConfig_ImageRegistryForNewProfile(t *testing.T) {
 	fresh, _, err := f.srv.buildPatchedAppliedConfig(ctx, f.agent, f.project, func(profile string) string {
 		asked = append(asked, profile)
 		return registries[profile]
-	}, nil)
+	}, nil, nil)
 	require.NoError(t, err)
 	require.Equal(t, "new-profile", fresh.Profile, "precondition: the new generation's profile")
 	assert.Equal(t, []string{"new-profile"}, asked, "resolved for the new profile, never the old one")

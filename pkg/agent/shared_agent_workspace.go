@@ -16,12 +16,17 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -66,6 +71,16 @@ func isClonePerAgentStart(opts api.StartOptions) bool {
 		store.ResolveWorkspaceSharingMode(opts.Env["SCION_WORKSPACE_MODE"]) == store.SharingModeClonePerAgent
 }
 
+// cloudRunClonePerAgentStart reports whether a start is a Cloud Run
+// clone-per-agent start whose workspace the broker chose (no explicit
+// workspace). The cloudrun runtime mounts such an agent's own workspace on
+// the share (agents/<slug>/workspace, created by provisionCloudRunNFS),
+// which the agent clones into, so the broker-local <agentDir>/workspace is
+// never mounted.
+func cloudRunClonePerAgentStart(runtimeName string, opts api.StartOptions, explicitWorkspace bool) bool {
+	return isCloudRunRuntime(runtimeName) && !explicitWorkspace && isClonePerAgentStart(opts)
+}
+
 // contextWithClonePerAgentWorkspace marks ctx when opts asks for a
 // clone-per-agent workspace (isClonePerAgentStart).
 func contextWithClonePerAgentWorkspace(ctx context.Context, opts api.StartOptions) context.Context {
@@ -89,6 +104,29 @@ func agentScopedWorkspace(ctx context.Context) bool {
 	return api.IsEmptyPerAgentWorkspaceFromContext(ctx) || isClonePerAgentWorkspace(ctx)
 }
 
+// localRuntimeAgentDirOnShare reports whether a start on runtimeName, a
+// local container runtime (docker, podman, container), places an
+// agent-scoped workspace (clone-per-agent or empty-per-agent) of the
+// project in projectDir in the agent's own directory on the share: the
+// project's configuration is on a shared Layout
+// (config.IsSharedProjectConfigDir). The runtime bind-mounts that
+// directory from the broker's own mount of the share; Start's NFS leaf
+// helpers create it first, as they do for Kubernetes.
+func localRuntimeAgentDirOnShare(runtimeName, projectDir string) bool {
+	return isLocalContainerRuntime(runtimeName) && config.IsSharedProjectConfigDir(projectDir)
+}
+
+// agentDirOnShare reports whether a start on runtimeName may place an
+// agent-scoped workspace of the project in projectDir in the agent's own
+// directory on the share (<subpath_root>/<projectID>/agents/<agent>):
+// always on Kubernetes, and on a local container runtime for a project on a
+// shared Layout (localRuntimeAgentDirOnShare). Every decision about that
+// directory (placement, selection, creation, removal) uses this predicate,
+// so they agree.
+func agentDirOnShare(runtimeName, projectDir string) bool {
+	return isKubernetesRuntime(runtimeName) || localRuntimeAgentDirOnShare(runtimeName, projectDir)
+}
+
 // sharedLayoutAgentWorkspace returns the workspace directory of an
 // agent-scoped workspace (clone-per-agent or empty-per-agent) of a project
 // whose configuration is on a shared Layout: <AgentRoot>/workspace, where
@@ -103,15 +141,12 @@ func agentScopedWorkspace(ctx context.Context) bool {
 //
 // It returns "" (and no error) when the rule does not apply, and the caller
 // keeps <agentDir>/workspace:
-//   - the agent's runtime (agentRuntimeFromContext) is not Kubernetes,
-//     including a caller that recorded none. Only Kubernetes creates the
-//     agent's directory on the share (the NFS leaf helpers and the workspace
-//     init container), so every other runtime keeps the broker-local
-//     workspace it had before. For clone-per-agent the workspace source
-//     guard refuses that workspace (it is outside the project's root on the
-//     share), so such a start fails closed, as before; empty-per-agent is
-//     admitted (its own workspace is its guard root). Placing it on the
-//     share for other runtimes is a follow-up;
+//   - the agent's runtime (agentRuntimeFromContext) does not place
+//     agent-scoped workspaces on the share (agentDirOnShare): only
+//     Kubernetes and the local container runtimes do, and Start's NFS leaf
+//     helpers create the agent's directory for both. Every other runtime,
+//     including a caller that recorded none, keeps the broker-local
+//     workspace it had before;
 //   - projectDir is not a shared project configuration directory
 //     (config.IsSharedProjectConfigDir);
 //   - agentDir is the agent's legacy in-project directory
@@ -125,7 +160,7 @@ func agentScopedWorkspace(ctx context.Context) bool {
 // directory holding projectDir, is an error: the start is refused rather
 // than placing the workspace somewhere else.
 func sharedLayoutAgentWorkspace(ctx context.Context, settings *config.VersionedSettings, projectDir, agentName, agentDir string) (string, error) {
-	if !isKubernetesRuntime(agentRuntimeFromContext(ctx)) {
+	if !agentDirOnShare(agentRuntimeFromContext(ctx), projectDir) {
 		return "", nil
 	}
 	if !config.IsSharedProjectConfigDir(projectDir) {
@@ -177,6 +212,172 @@ func sharedLayoutAgentWorkspace(ctx context.Context, settings *config.VersionedS
 	return filepath.Join(agentRoot.HostPath, "workspace"), nil
 }
 
+// ErrAgentWorkspaceOffShare refuses a local container runtime start of an
+// agent-scoped workspace (clone-per-agent or empty-per-agent) on a shared
+// Layout whose workspace is not in the agent's own directory on the share:
+// an agent created before its project storage moved to the shared Layout
+// (checkLocalRuntimeAgentWorkspace). It is an agent-state conflict
+// (config.IsAgentStateConflict), so brokers answer it with 409 and its
+// message, which names no path; the broker log has the paths.
+var ErrAgentWorkspaceOffShare error = agentWorkspaceOffShareError{}
+
+type agentWorkspaceOffShareError struct{}
+
+func (agentWorkspaceOffShareError) Error() string {
+	return "this agent's workspace is not in its directory on the shared project storage, so the agent was not started and the workspace was left as it is. " +
+		"The Runtime Broker log names the workspace; an operator can move its work out. Deleting the agent removes that workspace; " +
+		"recreate the agent to start it on the shared project storage"
+}
+
+func (agentWorkspaceOffShareError) Unwrap() error { return config.ErrAgentStateConflict }
+
+// provisioningOnlyEntries are the entries provisioning may leave in an
+// otherwise empty agent workspace (the same set isWorkspaceEmptyDir skips).
+var provisioningOnlyEntries = []string{".scion", ".scion-volumes"}
+
+// workspaceHoldsOnlyProvisioningEntries reports whether dir, a directory,
+// holds nothing but provisioningOnlyEntries. Unlike isWorkspaceEmptyDir it
+// fails closed: any read error is returned, never read as "empty".
+func workspaceHoldsOnlyProvisioningEntries(dir string) (bool, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false, err
+	}
+	for _, e := range entries {
+		if !slices.Contains(provisioningOnlyEntries, e.Name()) {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+// checkLocalRuntimeAgentWorkspace is Start's check, for a local container
+// runtime, before the NFS leaf helpers create the agent's own directory
+// dirName on the share (<project>/agents/<dirName>, nfsOwnAgentDirRel of
+// resolved). It admits the start only when:
+//   - workspace, the workspace Start validated, is that directory's
+//     workspace, and
+//   - that workspace exists as a real directory, or it does not exist and
+//     the agent's broker-local <agentDir>/workspace either does not exist or
+//     is a real directory that reads without error and holds nothing but
+//     the entries provisioning may leave there (.scion, .scion-volumes;
+//     workspaceHoldsOnlyProvisioningEntries). Such a workspace never held
+//     the agent's work: a clone-per-agent agent whose start was refused
+//     before its workspace moved to the share never cloned into it. It is
+//     left as it is.
+//
+// Otherwise it returns ErrAgentWorkspaceOffShare, or the error of a check of
+// the share's workspace that fails for a reason other than its absence. It
+// fails closed: a broker-local workspace that cannot be read, or is not a
+// real directory, refuses. The cases it refuses:
+//   - an agent provisioned before its project storage moved to the shared
+//     Layout, in its legacy in-project directory: its workspace is not the
+//     share's. Local container runtimes on the nfs backend refuse such an
+//     agent although the workspace source guard admits its legacy root
+//     (legacyAgentWorkspaceRoot). Before, such a start mounted the project's
+//     shared checkout (the nfs backend's path) rather than that workspace,
+//     so its work may be in either;
+//   - an agent provisioned before the move in the external agents root,
+//     whose work may still be in <agentDir>/workspace.
+//
+// Nothing is created on the share and no local workspace is changed; the
+// workspace source guard and its roots are unchanged. The paths go to the
+// broker log.
+func checkLocalRuntimeAgentWorkspace(agentName, workspace, agentDir string, resolved runtime.ResolvedWorkspace, dirName string) error {
+	agentRel, err := nfsOwnAgentDirRel(resolved, dirName)
+	if err != nil {
+		return err
+	}
+	// The workspace Start validated is symlink-free; so is the share's
+	// path once its mount point is resolved (nothing below it may be a
+	// symlink: the leaf helpers refuse one).
+	hostBase := resolved.HostBase
+	if resolvedBase, err := filepath.EvalSymlinks(hostBase); err == nil {
+		hostBase = resolvedBase
+	}
+	shareWS := filepath.Join(hostBase, agentRel, provision.AgentWorkspaceDir)
+	refuse := func(old, why string) error {
+		slog.Warn("start refused: the agent's workspace is not in its directory on the shared project storage; it is left as it is",
+			"agent", agentName, "workspace", old, "share_workspace", shareWS, "reason", why)
+		return ErrAgentWorkspaceOffShare
+	}
+	if filepath.Clean(workspace) != shareWS && !samePath(workspace, shareWS) {
+		return refuse(workspace, "the validated workspace is not the agent's directory on the share")
+	}
+	shareInfo, err := os.Lstat(shareWS)
+	switch {
+	case err == nil && shareInfo.IsDir():
+		warnLocalWorkOffShare(agentName, agentDir, shareWS)
+		return nil
+	case err == nil:
+		return refuse(shareWS, "the agent's workspace on the share is not a directory")
+	case !errors.Is(err, fs.ErrNotExist):
+		return fmt.Errorf("check the agent's workspace on the shared project storage: %w", err)
+	}
+	if agentDir == "" {
+		return nil
+	}
+	local := filepath.Join(agentDir, provision.AgentWorkspaceDir)
+	if samePath(local, shareWS) {
+		return nil
+	}
+	info, err := os.Lstat(local)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return nil
+	case err != nil:
+		return refuse(local, "the broker-local workspace cannot be checked: "+err.Error())
+	case !info.IsDir():
+		return refuse(local, "the broker-local workspace is not a directory")
+	}
+	if only, err := workspaceHoldsOnlyProvisioningEntries(local); err != nil {
+		return refuse(local, "the broker-local workspace cannot be read: "+err.Error())
+	} else if !only {
+		return refuse(local, "the broker-local workspace holds work")
+	}
+	return nil
+}
+
+// warnLocalWorkOffShare logs, for an agent admitted on its existing
+// workspace on the share (checkLocalRuntimeAgentWorkspace), when its
+// broker-local <agentDir>/workspace still holds more than provisioning
+// entries: that work is not mounted, and deleting the agent removes it. A
+// pre-switch agent whose share leaf already existed for another reason (an
+// operator's mkdir, an earlier agent of the same name) is then not
+// unnoticed. It never blocks the start: a check that fails is logged too.
+// The paths go to the broker log only.
+func warnLocalWorkOffShare(agentName, agentDir, shareWS string) {
+	if agentDir == "" {
+		return
+	}
+	local := filepath.Join(agentDir, provision.AgentWorkspaceDir)
+	if samePath(local, shareWS) {
+		return
+	}
+	info, err := os.Lstat(local)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return
+	case err != nil:
+		slog.Warn("could not check the agent's broker-local workspace; the agent starts on its directory on the shared project storage",
+			"agent", agentName, "workspace", local, "error", err)
+		return
+	case !info.IsDir():
+		slog.Warn("the agent's broker-local workspace is not a directory; the agent starts on its directory on the shared project storage",
+			"agent", agentName, "workspace", local)
+		return
+	}
+	only, err := workspaceHoldsOnlyProvisioningEntries(local)
+	switch {
+	case err != nil:
+		slog.Warn("could not read the agent's broker-local workspace; the agent starts on its directory on the shared project storage",
+			"agent", agentName, "workspace", local, "error", err)
+	case !only:
+		slog.Warn("the agent's broker-local workspace still holds files while it runs on its directory on the shared project storage; they are not mounted, and deleting the agent removes them",
+			"agent", agentName, "workspace", local, "share_workspace", shareWS)
+	}
+}
+
 // startWorkspaceSharingMode is the sharing mode Start selects the workspace
 // backend with, before the Kubernetes worktree adjustment: shared-plain for
 // a shared workspace or a git clone, empty-per-agent for an empty-per-agent
@@ -226,12 +427,22 @@ func startUsesNFSWorkspaceBackend(settings *config.VersionedSettings, opts api.S
 // atomic claim, or return an error), by the Kubernetes workspace init
 // container, or the start is refused (errEmptyPerAgentNFSNoClaim). An
 // agent-scoped workspace on a shared Layout does not exist yet on a fresh
-// agent, because provisioning leaves it to those helpers. Every other start
-// keeps the check, including an nfs start on another runtime: nothing
-// creates the workspace there, and a bind mount of a missing path could
-// create it with the wrong owner.
-func checkStartWorkspaceExists(runtimeName, workspace string, settings *config.VersionedSettings, opts api.StartOptions, emptyPerAgent bool) error {
+// agent, because provisioning leaves it to those helpers.
+//
+// A local container runtime start of an agent-scoped workspace of a project
+// on a shared Layout (localRuntimeAgentDirOnShare) through the nfs backend
+// skips it for the same reason: the leaf helpers create the agent's
+// directory on the share before the bind mount, or the start is refused
+// (checkLocalRuntimeAgentWorkspace, the leaf helpers' own errors). Every
+// other start keeps the check, including any other nfs start on a local
+// container runtime: nothing creates the workspace there, and a bind mount
+// of a missing path could create it with the wrong owner.
+func checkStartWorkspaceExists(runtimeName, projectDir, workspace string, settings *config.VersionedSettings, opts api.StartOptions, emptyPerAgent bool) error {
 	if workspace == "" || (isKubernetesRuntime(runtimeName) && startUsesNFSWorkspaceBackend(settings, opts, emptyPerAgent)) {
+		return nil
+	}
+	if (emptyPerAgent || isClonePerAgentStart(opts)) && localRuntimeAgentDirOnShare(runtimeName, projectDir) &&
+		startUsesNFSWorkspaceBackend(settings, opts, emptyPerAgent) {
 		return nil
 	}
 	if _, err := os.Stat(workspace); os.IsNotExist(err) {

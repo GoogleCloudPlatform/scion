@@ -41,6 +41,10 @@ func presenceGit(t *testing.T, dir string, args ...string) {
 func presenceProject(t *testing.T, withRepo bool) (root string) {
 	t.Helper()
 	t.Setenv("HOME", t.TempDir())
+	// Inside an agent container SCION_HOST_UID is set, and worktree entry
+	// removal then returns early; clear it as the runtimebroker and util
+	// tests do.
+	t.Setenv("SCION_HOST_UID", "")
 	root = t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(root, config.DotScion, "agents"), 0o755))
 	if withRepo {

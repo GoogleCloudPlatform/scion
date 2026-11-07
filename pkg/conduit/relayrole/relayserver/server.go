@@ -52,6 +52,11 @@ import (
 // changes. A hub test keeps this list equal to the hub's own.
 var RevocationSubjects = []string{"conduit.authz.changed", "agent.*.deleted", "agent.*.ports", "project.*.deleted", "conduit.broker.changed"}
 
+// GrantKeysChangedSubject is the hub event published after a grant key
+// rotation or revocation is stored. The relay sends GrantKeysChanged to its
+// stream_renewal.v2 target sessions on it, so they fetch keys at once.
+const GrantKeysChangedSubject = "conduit.grant_keys.changed"
+
 // SettingsUpdatedSubject is the hub event published after a settings
 // change. The relay re-reads hub.conduit on it, besides its periodic read.
 const SettingsUpdatedSubject = "admin.settings.updated"
@@ -215,6 +220,11 @@ type Server struct {
 	PublicAddr   net.Addr
 	InternalAddr net.Addr
 
+	// cancelRole ends the role's re-checks and releases its event
+	// registrations; a failed start calls it (on success the role runs
+	// until Start's context ends).
+	cancelRole context.CancelFunc
+
 	public   *http.Server
 	internal *http.Server
 }
@@ -368,12 +378,23 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	logRegisterRelayMetrics(log, cfg.MeterProvider, r, role, cfg.Singleton)
 	// Ingress dials are served only once the role is bound to the relay.
 	currentRole.Store(role)
-	role.Start(ctx)
+	roleCtx, cancelRole := context.WithCancel(ctx)
+	s.cancelRole = cancelRole
+	role.Start(roleCtx)
 	// Subscribed before the events start, like the role's hooks.
 	var changed <-chan string
 	unsubscribe := func() {}
+	// cancelKeys ends the grant key hint loop, which then removes its
+	// subscription and listen hook; a failed start calls it.
+	cancelKeys := func() {}
 	if cfg.Events != nil {
 		changed, unsubscribe = cfg.Events.Subscribe(SettingsUpdatedSubject)
+		keys, unsubscribeKeys := cfg.Events.Subscribe(GrantKeysChangedSubject)
+		reconnected := make(chan struct{}, 1)
+		removeHook := cfg.Events.AddOnListen(listenReconnectHook(reconnected))
+		keysCtx, cancel := context.WithCancel(ctx)
+		cancelKeys = cancel
+		go followGrantKeys(keysCtx, log, keys, reconnected, r.NotifyGrantKeysChanged, func() { cancel(); unsubscribeKeys(); removeHook() })
 	}
 	if cfg.StartEvents != nil {
 		cfg.StartEvents()
@@ -383,6 +404,13 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	if publicLn == nil {
 		publicLn, err = net.Listen("tcp", cfg.PublicListen)
 		if err != nil {
+			// Release what was registered above: the hint loop (which
+			// removes its subscription and hook), the settings
+			// subscription, and the role's re-checks (which release its
+			// subscription and hook).
+			cancelKeys()
+			unsubscribe()
+			s.cancelRole()
 			r.Kill()
 			_ = s.internal.Close()
 			return nil, fmt.Errorf("relay public listener %s: %w", cfg.PublicListen, err)
@@ -501,4 +529,45 @@ func requireConfidentialArrival(next http.Handler, trusted []*net.IPNet, log *sl
 			"details": map[string]any{"reason": reason, "setting": config.TrustedProxiesKey},
 		}})
 	})
+}
+
+// listenReconnectHook returns an AddOnListen hook that signals reconnected
+// on every LISTEN (re)connect except the first: a notice missed while the
+// connection was down is covered by hinting again. It never blocks the
+// listener (one pending signal is enough).
+func listenReconnectHook(reconnected chan<- struct{}) func() {
+	var listened atomic.Bool
+	return func() {
+		if !listened.Swap(true) {
+			return
+		}
+		select {
+		case reconnected <- struct{}{}:
+		default:
+		}
+	}
+}
+
+// followGrantKeys calls notify (the relay's NotifyGrantKeysChanged) on every
+// grant key change event and on every LISTEN reconnect, until ctx ends or
+// the event channel closes, and logs each hint with the number of target
+// sessions it was sent to and its trigger (notice or reconnect). Targets
+// rate-limit the key fetches a hint triggers.
+func followGrantKeys(ctx context.Context, log *slog.Logger, keys <-chan string, reconnected <-chan struct{}, notify func() int, stop func()) {
+	defer stop()
+	for {
+		trigger := "notice"
+		select {
+		case <-ctx.Done():
+			return
+		case _, ok := <-keys:
+			if !ok {
+				return
+			}
+		case <-reconnected:
+			trigger = "reconnect"
+		}
+		n := notify()
+		log.Info("Conduit relay: grant key change hinted to targets", "sessions", n, "trigger", trigger)
+	}
 }

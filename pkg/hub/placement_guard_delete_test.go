@@ -79,7 +79,7 @@ func TestAgentDelete_PlacementPreCheckRefusesBeforeClaim(t *testing.T) {
 // The dispatcher backstop's refusal (here as rebuilt from another node's
 // dispatch row) is classified like a run mismatch: the delete fails as a
 // conflict and the row is kept, under force and for a best-effort
-// (created, no launch) dispatch too.
+// (created, no launch) dispatch too. The answer carries the refusal's code.
 func TestAgentDelete_PlacementBackstopRefusesUnderForceAndBestEffort(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -99,7 +99,7 @@ func TestAgentDelete_PlacementBackstopRefusesUnderForceAndBestEffort(t *testing.
 			r := f.del(t, tc.query)
 			require.Equal(t, http.StatusConflict, r.rec.Code, r.rec.Body.String())
 			code, details := errorBody(t, r.rec)
-			assert.Equal(t, ErrCodeConflict, code)
+			assert.Equal(t, ErrCodeRuntimeTargetPinStale, code, "the refusal's own code (ptone/scion#4958)")
 			assert.Equal(t, store.DeletionCodeConflict, details["deletionCode"])
 			assert.Contains(t, r.rec.Body.String(), "saved placement is inconsistent")
 

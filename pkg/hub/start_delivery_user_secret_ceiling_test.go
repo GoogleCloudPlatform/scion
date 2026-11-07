@@ -131,7 +131,7 @@ func sdStartDelivery(t *testing.T, d *HTTPAgentDispatcher, s store.Store, agentI
 	out.asNeeded = got[sdAsNeededKey] == sdAsNeededValue
 
 	for _, purpose := range []MaterialPurpose{PurposeDispatch, PurposeRestart} {
-		selected, err := d.selectDeliverySecrets(ctx, newDeliverySelector(d.authzService, agent, purpose), agent)
+		selected, _, err := d.selectDeliverySecrets(ctx, newDeliverySelector(d.authzService, agent, purpose), agent)
 		require.NoError(t, err)
 		var always, private bool
 		for _, r := range selected {
@@ -344,7 +344,7 @@ func TestStartDelivery_OwnerRowDeniedFallsBackToLowerScope(t *testing.T) {
 	// to its own delivery decision there, so only the owner row's absence
 	// and, when the key is delivered, its source are asserted.
 	for _, purpose := range []MaterialPurpose{PurposeDispatch, PurposeRestart} {
-		selected, err := f.disp.selectDeliverySecrets(context.Background(), newDeliverySelector(f.disp.authzService, agent, purpose), agent)
+		selected, _, err := f.disp.selectDeliverySecrets(context.Background(), newDeliverySelector(f.disp.authzService, agent, purpose), agent)
 		require.NoError(t, err)
 		for _, r := range selected {
 			if r.Name == sdAlwaysKey {
@@ -665,7 +665,7 @@ func TestStartDelivery_WithheldOwnerRowLoggedAtWarn(t *testing.T) {
 
 	agent, err := f.Store.GetAgent(context.Background(), direct)
 	require.NoError(t, err)
-	selected, err := f.disp.selectDeliverySecrets(context.Background(), newDeliverySelector(f.disp.authzService, agent, PurposeRestart), agent)
+	selected, _, err := f.disp.selectDeliverySecrets(context.Background(), newDeliverySelector(f.disp.authzService, agent, PurposeRestart), agent)
 	require.NoError(t, err)
 	for _, r := range selected {
 		assert.False(t, r.Name == sdAlwaysKey && r.Source == store.ScopeUser, "the refused owner row was delivered")
@@ -692,7 +692,7 @@ func TestStartDelivery_WithheldProgenyRowLoggedOnce(t *testing.T) {
 
 	agent, err := f.Store.GetAgent(context.Background(), child)
 	require.NoError(t, err)
-	selected, err := f.disp.selectDeliverySecrets(context.Background(), newDeliverySelector(f.disp.authzService, agent, PurposeRestart), agent)
+	selected, _, err := f.disp.selectDeliverySecrets(context.Background(), newDeliverySelector(f.disp.authzService, agent, PurposeRestart), agent)
 	require.NoError(t, err)
 	for _, r := range selected {
 		assert.False(t, r.Name == sdAlwaysKey && r.Source == store.ScopeUser, "the refused progeny row was delivered")

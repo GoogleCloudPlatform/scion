@@ -660,7 +660,7 @@ runtimes:
 	t.Run("restart", func(t *testing.T) {
 		srv, mgr := newKubernetesServer(t)
 		mgr.agents = []api.AgentInfo{{ID: "gcp-block-k8s-restart", Name: "gcp-block-k8s-restart", Phase: "running"}}
-		body := `{"resolvedEnv": {"SCION_METADATA_MODE": "block", "SCION_METADATA_MODE_SOURCE": "hub"}}`
+		body := fmt.Sprintf(`{"projectPath": %q, "resolvedEnv": {"SCION_METADATA_MODE": "block", "SCION_METADATA_MODE_SOURCE": "hub"}}`, cwdDotScion(t))
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/gcp-block-k8s-restart/restart", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		w := httptest.NewRecorder()

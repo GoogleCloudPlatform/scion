@@ -129,7 +129,7 @@ func runExportOn(t *testing.T, dir, target string, spec exportSpec) *exportPlan 
 	if err != nil {
 		t.Fatal(err)
 	}
-	ep, err := planExport(p, spec, target, "example.com/m/support", defaultAliasFile)
+	ep, err := planExport(p, spec, target, "example.com/m/support", "example.com/m", defaultAliasFile)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,7 +213,7 @@ func TestExportMovesAndAliases(t *testing.T) {
 
 	pb, _ := loadPackage(before)
 	pa, _ := loadPackage(dir)
-	r, err := verifyExport(pb, pa, target, "example.com/m/support", exportSpecOf(allExportNames...), defaultAliasFile)
+	r, err := verifyExport(pb, pa, target, "example.com/m/support", "example.com/m", exportSpecOf(allExportNames...), defaultAliasFile)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -275,7 +275,7 @@ func TestVerifyExportCatchesEdits(t *testing.T) {
 			tamper(dir, target)
 			pb, _ := loadPackage(before)
 			pa, _ := loadPackage(dir)
-			r, err := verifyExport(pb, pa, target, "example.com/m/support", exportSpecOf(allExportNames...), defaultAliasFile)
+			r, err := verifyExport(pb, pa, target, "example.com/m/support", "example.com/m", exportSpecOf(allExportNames...), defaultAliasFile)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -437,7 +437,7 @@ func TestExportRefusals(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, err = planExport(p, exportSpec{names: c.names, fields: c.fields}, filepath.Join(t.TempDir(), "support"), "example.com/m/support", defaultAliasFile)
+			_, err = planExport(p, exportSpec{names: c.names, fields: c.fields}, filepath.Join(t.TempDir(), "support"), "example.com/m/support", "example.com/m", defaultAliasFile)
 			if err == nil || !strings.Contains(err.Error(), c.want) {
 				t.Fatalf("err = %v, want it to contain %q", err, c.want)
 			}
@@ -682,7 +682,7 @@ func TestVerifyExportDefaultsTargetFromAfter(t *testing.T) {
 		t.Fatal(err)
 	}
 	spec := exportSpecOf(allExportNames...)
-	ep, err := planExport(p, spec, target, modulePath+"/pkg/hub/internal/hubtestutil", defaultAliasFile)
+	ep, err := planExport(p, spec, target, modulePath+"/pkg/hub/internal/hubtestutil", modulePath+"/pkg/hub", defaultAliasFile)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -61,6 +61,22 @@ HUB_ENV_FILE="${HUB_ENV_FILE:-.scratch/hub-${HUB_NAME}.env}"
 REPO_DIR="${REPO_DIR:-/home/scion/scion}"
 SCION_BIN="${SCION_BIN:-/usr/local/bin/scion}"
 
+# --- Agent images ---
+# IMAGE_REGISTRY is the image_registry gce-start-hub.sh --full writes to the
+# Hub's settings.yaml. The Hub's runtime broker refuses to start without one.
+# SCION_IMAGE_REGISTRY in hub.env, or a registry saved in the Hub, takes
+# precedence over this value.
+# The default, localhost/scion, is the local image store of the VM, the value
+# the single-node VM deploy script uses. The starter scripts do not build agent
+# images: build them on the VM (image-build/README.md), for example from the
+# repository checkout with
+#   sudo bash image-build/scripts/build-images.sh --builder local-docker \
+#     --registry localhost/scion --target all
+# or set SCION_IMAGE_REGISTRY in hub.env to a registry that holds them.
+# With ENABLE_GKE=true the registry must not be a loopback address: GKE nodes
+# cannot pull from the VM's local store.
+IMAGE_REGISTRY="${IMAGE_REGISTRY:-localhost/scion}"
+
 # DNS_ZONE_DESCRIPTION is the description gce-certs.sh sets on a new zone.
 DNS_ZONE_DESCRIPTION="${DNS_ZONE_DESCRIPTION:-Scion Hub zone for ${CERT_DOMAIN}}"
 
@@ -93,15 +109,15 @@ require_cert_email() {
     fi
 }
 
-# hub_env_base_url prints SCION_SERVER_BASE_URL from HUB_ENV_FILE, parsed
-# as systemd's EnvironmentFile= does for these simple cases: the last
-# assignment wins, spaces around "=" are allowed, and surrounding
-# whitespace, a trailing CR and surrounding quotes are removed. Prints
-# nothing when the file does not exist or does not set it.
-hub_env_base_url() {
-    local raw=""
+# hub_env_value KEY prints KEY from HUB_ENV_FILE, parsed as systemd's
+# EnvironmentFile= does for these simple cases: the last assignment wins,
+# spaces around "=" are allowed, and surrounding whitespace, a trailing CR
+# and surrounding quotes are removed. Prints nothing when the file does not
+# exist or does not set it. KEY must be a plain variable name.
+hub_env_value() {
+    local key="$1" raw=""
     if [[ -f "${HUB_ENV_FILE}" ]]; then
-        raw=$(grep -E "^[[:space:]]*SCION_SERVER_BASE_URL[[:space:]]*=" "${HUB_ENV_FILE}" 2>/dev/null | tail -n 1 | cut -d'=' -f2- || true)
+        raw=$(grep -E "^[[:space:]]*${key}[[:space:]]*=" "${HUB_ENV_FILE}" 2>/dev/null | tail -n 1 | cut -d'=' -f2- || true)
     fi
     raw="${raw%$'\r'}"
     # Trim surrounding whitespace.
@@ -112,6 +128,64 @@ hub_env_base_url() {
     raw="${raw#\'}"
     raw="${raw%\'}"
     printf '%s' "$raw"
+}
+
+# hub_env_base_url prints SCION_SERVER_BASE_URL from HUB_ENV_FILE (see
+# hub_env_value).
+hub_env_base_url() {
+    hub_env_value SCION_SERVER_BASE_URL
+}
+
+# registry_is_valid REGISTRY succeeds when REGISTRY is a plain registry path,
+# safe to write into a quoted YAML string: letters, digits and . _ : / -.
+registry_is_valid() {
+    [[ "$1" =~ ^[A-Za-z0-9._:/-]+$ ]]
+}
+
+# registry_is_loopback REGISTRY succeeds when the host of REGISTRY is a
+# loopback address. It is the same test as _hybrid_registry_is_loopback in
+# scripts/single-node-vm/hybrid-tier.sh, used by deploy.sh to refuse such a
+# registry for GKE (tests/run.sh checks the two agree): the host[:port] is
+# the part before the first "/", an IPv6 literal's brackets are stripped
+# first, then a ":port" suffix, and localhost, 127.*, 0.0.0.0 and ::1 are
+# loopback.
+registry_is_loopback() {
+    local registry="$1" host
+    host="${registry%%/*}"
+    if [[ "$host" == \[*\]* ]]; then
+        host="${host#\[}"
+        host="${host%%\]*}"
+    else
+        host="${host%%:*}"
+    fi
+    case "$host" in
+        localhost|127.*|0.0.0.0|::1) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# effective_image_registry prints the registry the Hub's broker uses after
+# --full: SCION_IMAGE_REGISTRY from HUB_ENV_FILE when it sets one (the node
+# environment outranks settings.yaml), else IMAGE_REGISTRY. A registry saved
+# in the Hub is not visible here.
+effective_image_registry() {
+    local v
+    v="$(hub_env_value SCION_IMAGE_REGISTRY)"
+    printf '%s' "${v:-${IMAGE_REGISTRY}}"
+}
+
+# require_gke_reachable_registry exits 1 when ENABLE_GKE=true and the
+# effective image registry is a loopback address, which GKE nodes cannot
+# pull from. Call it before anything is provisioned or uploaded.
+require_gke_reachable_registry() {
+    local reg
+    [[ "${ENABLE_GKE}" == "true" ]] || return 0
+    reg="$(effective_image_registry)"
+    if registry_is_loopback "$reg"; then
+        echo "Error: ENABLE_GKE=true, but the image registry '${reg}' is a loopback address on the VM. GKE nodes cannot pull from it." >&2
+        echo "  Set SCION_IMAGE_REGISTRY in ${HUB_ENV_FILE} (or IMAGE_REGISTRY) to a registry the cluster can pull from, for example us-docker.pkg.dev/<project>/<repo>." >&2
+        exit 1
+    fi
 }
 
 # require_no_tls_https_base_url checks the base URL that will take effect in

@@ -1769,11 +1769,16 @@ func cloneSharedWorkspace(workspacePath, cloneURL, branch, token string, h HostG
 			return &GitError{Kind: gitErr.Kind, Message: fmt.Sprintf("git clone failed: %s", sanitized)}
 		}
 
-		// Create the requested branch locally.
-		checkoutCmd := hostGit("-C", workspacePath, "checkout", "-b", branch)
-		checkoutCmd.Env = env
-		if checkoutOut, checkoutErr := checkoutCmd.CombinedOutput(); checkoutErr != nil {
-			return fmt.Errorf("failed to create local branch %q: %s", branch, strings.TrimSpace(string(checkoutOut)))
+		// Create the requested branch locally. The checkout gets the remote
+		// layer with no token: no credential, and host global and system
+		// config stay isolated as for the clone.
+		checkoutEnv := HostGitRemoteEnv(baseEnv, cloneURL, "")
+		res := RunHostGit(context.Background(), workspacePath, HostGitOptions{Env: checkoutEnv, SkipLFSSmudge: true}, "checkout", "-b", branch)
+		if res.Err != nil {
+			return fmt.Errorf("failed to create local branch %q: %w", branch, res.Err)
+		}
+		if res.ExitCode != 0 {
+			return fmt.Errorf("failed to create local branch %q: %s", branch, strings.TrimSpace(string(res.Stderr)+string(res.Stdout)))
 		}
 	} else if err != nil {
 		sanitized := strings.TrimSpace(sanitizeGitOutput(string(output), token))
@@ -1828,9 +1833,9 @@ type PullResult struct {
 // information.
 //
 // Agents can write the workspace's .git, so the remote is cloneURL rather
-// than the workspace's configured remote, and git runs through
-// HostGitCommand: no repository hooks, no repository-defined filter
-// commands, and a workspace config that sets transport, credential or
+// than the workspace's configured remote, and every git command in the pull
+// runs through HostGitCommand: no repository hooks, no repository-defined
+// filter commands, and a workspace config that sets transport, credential or
 // include keys is refused (RepoConfigRefusedError). The branch fetched is the
 // current branch's configured upstream branch, or the current branch's own
 // name; it is fetched into refs/remotes/origin/<branch>.
@@ -1869,37 +1874,63 @@ func pullSharedWorkspace(workspacePath, cloneURL, token string, h HostGitHardeni
 	// host-side checkout can leak the token to an agent-chosen endpoint.
 	fetchEnv := append(append([]string{}, baseEnv...), h.Env...)
 	// The fetch reads no host global config, so the host user's
-	// safe.directory list does not reach it. The local commands below run
-	// under that list and accept the workspace first; the fetch, and the
-	// door's checks of the workspace config, trust exactly the workspace
-	// path, nothing wider.
+	// safe.directory list does not reach it. The local steps and the merge
+	// run under that list and accept the workspace first; the fetch, and the
+	// door's checks of the workspace config for the fetch, trust exactly the
+	// workspace path, nothing wider.
 	fetchEnv = appendConfigEnv(fetchEnv, "safe.directory", workspacePath)
 	offered := token
 	if h.NoCredentialHelpers {
 		offered = ""
 	}
 
-	branchOut, err := hostGit("-C", workspacePath, "symbolic-ref", "--quiet", "--short", "HEAD").CombinedOutput()
-	if err != nil {
-		return nil, pullErr("the workspace is not on a branch: " + strings.TrimSpace(string(branchOut)))
+	// The local steps run through the door with the merge's policy (managed)
+	// and environment (baseEnv: no credential config; like the merge, they
+	// read the host global config). A door error (a refusal, a start or wait
+	// failure, or a config change during the run) always fails the pull; a
+	// non-zero exit from git keeps each step's handling.
+	ctx := context.Background()
+	local := func(config []string, args ...string) HostGitResult {
+		return RunHostGit(ctx, workspacePath, HostGitOptions{Env: baseEnv, Config: config}, args...)
 	}
-	branch := strings.TrimSpace(string(branchOut))
+
+	res := local(nil, "symbolic-ref", "--quiet", "--short", "HEAD")
+	if res.Err != nil {
+		return nil, pullErr(res.Err.Error())
+	}
+	if res.ExitCode != 0 {
+		return nil, pullErr("the workspace is not on a branch: " + strings.TrimSpace(string(res.Stderr)+string(res.Stdout)))
+	}
+	branch := strings.TrimSpace(string(res.Stdout))
 	remoteBranch := branch
-	if merge, err := hostGit("-C", workspacePath, "config", "--get", "branch."+branch+".merge").Output(); err == nil {
-		if name := strings.TrimPrefix(strings.TrimSpace(string(merge)), "refs/heads/"); name != "" {
+	res = local(nil, "config", "--get", "branch."+branch+".merge")
+	if res.Err != nil {
+		return nil, pullErr(res.Err.Error())
+	}
+	if res.ExitCode == 0 {
+		if name := strings.TrimPrefix(strings.TrimSpace(string(res.Stdout)), "refs/heads/"); name != "" {
 			remoteBranch = name
 		}
 	}
 	trackingRef := "refs/remotes/origin/" + remoteBranch
-	if out, err := hostGit("check-ref-format", trackingRef).CombinedOutput(); err != nil {
-		return nil, pullErr(fmt.Sprintf("invalid branch name %q: %s", remoteBranch, strings.TrimSpace(string(out))))
+	res = local(nil, "check-ref-format", trackingRef)
+	if res.Err != nil {
+		return nil, pullErr(res.Err.Error())
+	}
+	if res.ExitCode != 0 {
+		return nil, pullErr(fmt.Sprintf("invalid branch name %q: %s", remoteBranch, strings.TrimSpace(string(res.Stderr)+string(res.Stdout))))
 	}
 
 	// Capture HEAD before pulling so we can enumerate new commits afterward.
-	oldHead, _ := hostGit("-C", workspacePath, "rev-parse", "HEAD").Output()
-	oldHeadStr := strings.TrimSpace(string(oldHead))
+	// The exit code is ignored: on an unborn branch rev-parse prints the name
+	// HEAD and exits non-zero, and the old/new comparison below relies on
+	// that output.
+	res = local(nil, "rev-parse", "HEAD")
+	if res.Err != nil {
+		return nil, pullErr(res.Err.Error())
+	}
+	oldHeadStr := strings.TrimSpace(string(res.Stdout))
 
-	ctx := context.Background()
 	fetch, err := HostGitCommand(ctx, workspacePath, HostGitOptions{
 		Env: fetchEnv, Network: true, Remote: NewHostGitRemote(cloneURL, offered), Config: h.Config,
 	},
@@ -1921,8 +1952,15 @@ func pullSharedWorkspace(workspacePath, cloneURL, token string, h HostGitHardeni
 		return nil, pullErr(strings.TrimSpace(string(output)))
 	}
 
-	newHead, _ := hostGit("-C", workspacePath, "rev-parse", "HEAD").Output()
-	newHeadStr := strings.TrimSpace(string(newHead))
+	// From here the merge has updated the work tree, but a door error (for
+	// example the repository config changing after the merge) still fails
+	// the pull: fail closed.
+	res = local(nil, "rev-parse", "HEAD")
+	if res.Err != nil {
+		return nil, pullErr(res.Err.Error())
+	}
+	// The exit code is ignored, as for the first HEAD read.
+	newHeadStr := strings.TrimSpace(string(res.Stdout))
 
 	result := &PullResult{}
 	if oldHeadStr == "" || newHeadStr == "" || oldHeadStr == newHeadStr {
@@ -1931,19 +1969,20 @@ func pullSharedWorkspace(workspacePath, cloneURL, token string, h HostGitHardeni
 
 	result.Updated = true
 
-	// git log runs no repository-defined command here (no pager, no
-	// signature display): this relies on the fetch above, whose network
-	// check refuses gpg.*, include and other repository keys outside the
-	// allowlist, and on the merge's config check having passed. Keep it
-	// after both.
-	logCmd := hostGit("-c", "log.showSignature=false", "-C", workspacePath, "log", "--oneline", "--no-decorate",
-		oldHeadStr+".."+newHeadStr)
-	logOut, err := logCmd.Output()
-	if err != nil {
+	// git log runs no repository-defined command here: the door pins
+	// core.pager to cat, log.showSignature=false turns off signature
+	// display, the log's own policy check refuses gpg.*, include and the
+	// other repository keys outside the managed list before it runs, and its
+	// after-run check re-checks the config afterwards.
+	res = local([]string{"log.showSignature=false"}, "log", "--oneline", "--no-decorate", oldHeadStr+".."+newHeadStr)
+	if res.Err != nil {
+		return nil, pullErr(res.Err.Error())
+	}
+	if res.ExitCode != 0 {
 		return result, nil
 	}
 
-	lines := strings.Split(strings.TrimSpace(string(logOut)), "\n")
+	lines := strings.Split(strings.TrimSpace(string(res.Stdout)), "\n")
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if line == "" {

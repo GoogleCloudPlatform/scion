@@ -116,6 +116,7 @@ describe('launch labels', () => {
     );
     expect(launchStepLabel('awaiting_capacity')).toBe('waiting for node capacity');
     expect(launchCodeLabel('image_pull_failed')).toBe('the agent image could not be pulled');
+    expect(launchCodeLabel('volume_mount_failed')).toBe('an agent volume could not be mounted');
     expect(launchCodeLabel('launch_timeout')).toBe('the launch timed out');
   });
 

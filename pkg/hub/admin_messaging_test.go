@@ -532,6 +532,33 @@ func TestHandleAdminMessaging_PutOffloadThresholdRunes_NegativeRejected(t *testi
 	if putRR.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 for a negative offload_threshold_runes, got %d: %s", putRR.Code, putRR.Body.String())
 	}
+	// The schema errors are config.ValidationError values, which encode with
+	// lowercase keys (ptone/scion#4450): {"path", "message"}, not
+	// {"Path", "Message"}.
+	var body struct {
+		Error  string                       `json:"error"`
+		Errors []map[string]json.RawMessage `json:"errors"`
+	}
+	if err := json.Unmarshal(putRR.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v: %s", err, putRR.Body.String())
+	}
+	if body.Error != "validation_failed" || len(body.Errors) == 0 {
+		t.Fatalf("want validation_failed with errors, got %s", putRR.Body.String())
+	}
+	for _, e := range body.Errors {
+		if _, ok := e["message"]; !ok {
+			t.Errorf("entry without a lowercase message key: %s", putRR.Body.String())
+		}
+		if _, ok := e["path"]; !ok {
+			t.Errorf("entry without a lowercase path key: %s", putRR.Body.String())
+		}
+		if _, ok := e["Message"]; ok {
+			t.Errorf("entry still carries the capitalized Message key: %s", putRR.Body.String())
+		}
+		if _, ok := e["Path"]; ok {
+			t.Errorf("entry still carries the capitalized Path key: %s", putRR.Body.String())
+		}
+	}
 }
 
 // --- ptone/scion#4596: attachment delivery settings ---
@@ -599,5 +626,88 @@ func TestHandleAdminMessaging_AttachmentDeliverySettings(t *testing.T) {
 		if rr := putMessaging(t, srv, bad); rr.Code != http.StatusBadRequest {
 			t.Errorf("%s: expected 400, got %d", bad, rr.Code)
 		}
+	}
+}
+
+// TestHandleAdminMessaging_FailedMessageRetentionDays: GET reports the
+// compiled default (7), PUT stores a value and keeps it across a PUT of
+// another field, null resets it, and a value below 1 is refused without
+// storing anything.
+func TestHandleAdminMessaging_FailedMessageRetentionDays(t *testing.T) {
+	srv := newAdminMessagingServer(t, newFakeHubSettingStore())
+	ops := srv.GetOperationalSettings()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/messaging", nil)
+	rr := httptest.NewRecorder()
+	srv.handleAdminMessaging(rr, adminContext(req))
+	var got messagingResponse
+	if err := json.NewDecoder(rr.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.FailedMessageRetentionDays == nil || *got.FailedMessageRetentionDays != DefaultFailedMessageRetentionDays || DefaultFailedMessageRetentionDays != 7 {
+		t.Fatalf("GET failed_message_retention_days = %v; want the default 7", got.FailedMessageRetentionDays)
+	}
+
+	rr = putMessaging(t, srv, `{"failed_message_retention_days": 1}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("PUT expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	var resp messagingResponse
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.FailedMessageRetentionDays == nil || *resp.FailedMessageRetentionDays != 1 || ops.FailedMessageRetentionDays() != 1 {
+		t.Fatalf("PUT response = %+v, read back %d", resp, ops.FailedMessageRetentionDays())
+	}
+	if rr := putMessaging(t, srv, `{"offload_threshold_runes": 10}`); rr.Code != http.StatusOK {
+		t.Fatalf("PUT expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if ops.FailedMessageRetentionDays() != 1 {
+		t.Fatal("a PUT of another field keeps failed_message_retention_days")
+	}
+
+	revision := ops.SectionRevision("messaging")
+	for _, bad := range []string{`{"failed_message_retention_days": 0}`, `{"failed_message_retention_days": -3}`, `{"failed_message_retention_days": "7"}`} {
+		if rr := putMessaging(t, srv, bad); rr.Code != http.StatusBadRequest {
+			t.Errorf("%s: expected 400, got %d", bad, rr.Code)
+		}
+	}
+	if ops.FailedMessageRetentionDays() != 1 || ops.SectionRevision("messaging") != revision {
+		t.Fatal("a refused PUT stores nothing")
+	}
+
+	if rr := putMessaging(t, srv, `{"failed_message_retention_days": null}`); rr.Code != http.StatusOK {
+		t.Fatalf("PUT null expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if ops.FailedMessageRetentionDays() != DefaultFailedMessageRetentionDays {
+		t.Fatal("null resets to the compiled default")
+	}
+}
+
+// TestMessagingSchema_FailedMessageRetentionDays: the section schema accepts
+// the key at 1 and refuses it below 1, so a write path that skips the
+// handler's check still cannot store 0.
+func TestMessagingSchema_FailedMessageRetentionDays(t *testing.T) {
+	if errs := opsettings.Validate("messaging", json.RawMessage(`{"failed_message_retention_days": 1}`)); len(errs) > 0 {
+		t.Fatalf("1 refused: %v", errs)
+	}
+	if errs := opsettings.Validate("messaging", json.RawMessage(`{"failed_message_retention_days": 0}`)); len(errs) == 0 {
+		t.Fatal("0 accepted")
+	}
+}
+
+// TestOperationalSettings_FailedMessageRetentionDaysFallback: a stored value
+// below 1 (written before the schema had the key's minimum, or by hand)
+// reads as the compiled default rather than disabling the purge or
+// purging everything.
+func TestOperationalSettings_FailedMessageRetentionDaysFallback(t *testing.T) {
+	fake := newFakeHubSettingStore()
+	fake.seed("messaging", json.RawMessage(`{"failed_message_retention_days": 0}`))
+	srv := newAdminMessagingServer(t, fake)
+	if got := srv.GetOperationalSettings().FailedMessageRetentionDays(); got != DefaultFailedMessageRetentionDays {
+		t.Fatalf("FailedMessageRetentionDays() = %d; want the default", got)
+	}
+	if got := (&Server{}).failedMessageRetentionDays(); got != DefaultFailedMessageRetentionDays {
+		t.Fatalf("without operational settings = %d; want the default", got)
 	}
 }

@@ -251,7 +251,7 @@ func init() {
 		},
 		{
 			Name:       "endpoints",
-			KoanfPaths: []string{"server.hub.public_url", "server.hub.hub_name", "image_registry", "server.hub.monitoring_dashboard_url"},
+			KoanfPaths: []string{"server.hub.public_url", "server.hub.hub_name", "server.hub.content_url", "image_registry", "server.hub.monitoring_dashboard_url"},
 			New:        func() any { return &EndpointsSettings{} },
 			// public_url is resolved into the hub endpoint at startup.
 			RestartRequired: []string{"server.hub.public_url"},
@@ -559,6 +559,7 @@ func compileSchemas() {
 				"offload_threshold_runes":         map[string]interface{}{"type": "integer", "minimum": 0},
 				"attachment_delivery_max_bytes":   map[string]interface{}{"type": "integer", "minimum": 0},
 				"attachment_inbox_retention_days": map[string]interface{}{"type": "integer", "minimum": 1},
+				"failed_message_retention_days":   map[string]interface{}{"type": "integer", "minimum": 1},
 			},
 			"additionalProperties": false,
 		},
@@ -671,6 +672,7 @@ func compileSchemas() {
 			"properties": map[string]interface{}{
 				"public_url":               getSchemaProperty(root, "server", "hub", "public_url"),
 				"hub_name":                 getSchemaProperty(root, "server", "hub", "hub_name"),
+				"content_url":              getSchemaProperty(root, "server", "hub", "content_url"),
 				"image_registry":           getSchemaProperty(root, "image_registry"),
 				"monitoring_dashboard_url": getSchemaProperty(root, "server", "hub", "monitoring_dashboard_url"),
 			},
@@ -735,6 +737,7 @@ func compileSchemas() {
 					"default_template":       map[string]interface{}{"type": "string"},
 					"default_harness_config": map[string]interface{}{"type": "string"},
 					"image_registry":         map[string]interface{}{"type": "string"},
+					"image_tag":              map[string]interface{}{"type": "string", "pattern": config.ImageTagSettingPattern},
 					"volumes":                map[string]interface{}{"type": "array"},
 					"resources":              map[string]interface{}{"type": "object"},
 					"harness_overrides": map[string]interface{}{

@@ -216,6 +216,7 @@ func TestProvisionAgent_HashTemplateDirRecordsSlug(t *testing.T) {
 			if tt.slug != "" {
 				ctx = api.ContextWithTemplateName(ctx, tt.slug)
 			}
+			allowHydratedTemplate(t, cacheDir)
 			agentHome, _, _, err := ProvisionAgent(ctx, "hydrated-agent", cacheDir, "", "", scionDir, "", "", "", "")
 			if err != nil {
 				t.Fatalf("ProvisionAgent: %v", err)
@@ -382,6 +383,7 @@ profiles:
 				}
 			}
 
+			allowHydratedTemplate(t, hashDir)
 			if _, err := mgr.Start(context.Background(), api.StartOptions{
 				Name: "hash-agent", Template: hashDir, TemplateName: tt.slug,
 				ProjectPath: projectScionDir, NoAuth: true,
@@ -465,6 +467,7 @@ func TestProvisionAndReprovision_HashTemplateRecordsSlug(t *testing.T) {
 	}
 
 	mgr := NewManager(&runtime.MockRuntime{})
+	allowHydratedTemplate(t, hashDir)
 	if _, err := mgr.Provision(context.Background(), api.StartOptions{
 		Name: agentName, Template: hashDir, TemplateName: "web-dev",
 		ProjectPath: scionDir, BrokerMode: true, GitClone: gc,

@@ -17,13 +17,13 @@ package agent
 import (
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agenthome"
 	"github.com/GoogleCloudPlatform/scion/pkg/agentplugin"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -37,17 +37,19 @@ import (
 // the agent keeps its skills under the new harness (ptone/scion#3129).
 //
 // It does nothing when either directory is empty, when both name the same
-// directory, when either is not a local path inside agentHome, when the old
-// directory is missing, or when the new directory already holds any entry
-// (it never merges into or overwrites an existing skills directory). The old
-// directory is left in place. It returns the names of the skills it copied.
+// directory, when either is not a path inside agentHome
+// (config.IsHomeRelPath), when the old directory is missing, when either
+// directory is a symbolic link or sits below one, or when the new directory
+// already holds any entry (it never merges into or overwrites an existing
+// skills directory). The old directory is left in place. It returns the
+// names of the skills it copied.
 //
-// Every read and write goes through an os.Root opened on agentHome, so the
-// carry-over stays within the agent home. Only regular files and directories
-// are copied; a symbolic link anywhere (the skills directories themselves, a
-// parent component of either, or an entry inside a skill) is not followed
-// and is skipped. Python bytecode artifacts (__pycache__ directories and
-// .pyc files) are skipped, as util.CopyDir does.
+// Every read and write goes through pkg/agenthome: the old directory is
+// opened from the home with no component followed through a link, each
+// real skill directory in it is installed with InstallTreeFrom (links and
+// special files inside a skill are skipped, never followed, as are the
+// agenthome.SkipCopyName entries), and an entry in the old directory that
+// is not a real directory is not a skill.
 //
 // If the copy fails partway, what this call wrote is removed again (the new
 // directory itself when this call created it), so a later call retries.
@@ -55,42 +57,46 @@ func carryOverSkillsDir(agentHome, oldSkillsDir, newSkillsDir string) ([]string,
 	if oldSkillsDir == "" || newSkillsDir == "" {
 		return nil, nil
 	}
-	oldRel, newRel := filepath.Clean(oldSkillsDir), filepath.Clean(newSkillsDir)
-	if oldRel == newRel || !filepath.IsLocal(oldRel) || !filepath.IsLocal(newRel) {
+	if !config.IsHomeRelPath(oldSkillsDir) || !config.IsHomeRelPath(newSkillsDir) {
+		return nil, nil
+	}
+	oldRel := filepath.ToSlash(filepath.Clean(oldSkillsDir))
+	newRel := filepath.ToSlash(filepath.Clean(newSkillsDir))
+	if oldRel == newRel {
 		return nil, nil
 	}
 
-	root, err := os.OpenRoot(agentHome)
+	home, err := agenthome.Open(agentHome)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
 		}
 		return nil, carryOverStage("open", fmt.Errorf("open agent home: %w", err))
 	}
-	defer func() { _ = root.Close() }()
+	defer func() { _ = home.Close() }()
 
-	// The source and every parent component of both directories must be
-	// real directories, not symbolic links.
-	if ok, err := realDirChain(root, oldRel, true); err != nil || !ok {
+	src, err := agenthome.OpenBelow(agentHome, oldRel)
+	switch {
+	case errors.Is(err, fs.ErrNotExist), isLinkRefusal(err):
+		return nil, nil
+	case err != nil:
 		return nil, carryOverStage("check", err)
 	}
-	if ok, err := realDirChain(root, newRel, false); err != nil || !ok {
-		return nil, carryOverStage("check", err)
-	}
+	defer func() { _ = src.Close() }()
 
 	newMissing := false
-	if entries, err := readRootDir(root, newRel); err == nil && len(entries) > 0 {
+	switch existing, err := home.ReadDir(newRel); {
+	case err == nil && len(existing) > 0:
 		return nil, nil
-	} else if os.IsNotExist(err) {
+	case errors.Is(err, fs.ErrNotExist):
 		newMissing = true
-	} else if err != nil {
+	case isLinkRefusal(err):
+		return nil, nil
+	case err != nil:
 		return nil, carryOverStage("read", fmt.Errorf("read skills dir %s: %w", newRel, err))
 	}
 
-	entries, err := readRootDir(root, oldRel)
-	if os.IsNotExist(err) {
-		return nil, nil
-	}
+	entries, err := src.ReadDir(".")
 	if err != nil {
 		return nil, carryOverStage("read", fmt.Errorf("read skills dir %s: %w", oldRel, err))
 	}
@@ -102,52 +108,55 @@ func carryOverSkillsDir(agentHome, oldSkillsDir, newSkillsDir string) ([]string,
 	// before (empty) is kept; only the skills written into it are removed.
 	// It returns cause joined with any removal error, so a failed cleanup is
 	// visible to the caller.
-	undo := func(cause error, partial string) error {
+	undo := func(cause error) error {
 		errs := []error{cause}
 		if newMissing {
-			if err := root.RemoveAll(newRel); err != nil {
+			if err := home.RemoveAll(newRel); err != nil {
 				errs = append(errs, carryOverStage("remove", fmt.Errorf("remove %s: %w", newRel, err)))
 			}
 			return errors.Join(errs...)
 		}
-		for _, name := range append(copied, partial) {
-			if name == "" {
-				continue
-			}
-			p := filepath.Join(newRel, name)
-			if err := root.RemoveAll(p); err != nil {
+		for _, name := range copied {
+			p := skillRel(newRel, name)
+			if err := home.RemoveAll(p); err != nil {
 				errs = append(errs, carryOverStage("remove", fmt.Errorf("remove %s: %w", p, err)))
 			}
 		}
 		return errors.Join(errs...)
 	}
 	for _, e := range entries {
-		// Only real skill directories; a symlinked entry is not followed.
-		if !e.IsDir() || e.Type()&os.ModeSymlink != 0 || skipCopyEntry(e) {
+		// Only real skill directories; a link is reported as a link by
+		// ReadDir and never followed.
+		if !e.IsDir() || agenthome.SkipCopyName(e.Name(), true) {
 			continue
 		}
 		// An Agent Plugins bundle (claude installs them in its skills dir)
 		// is not a skill: the new harness installs it natively from the
 		// control-plane record instead.
-		if isAgentPluginDir(root, filepath.Join(oldRel, e.Name())) {
+		if isAgentPluginDir(src, e.Name()) {
 			continue
 		}
-		if err := root.MkdirAll(newRel, 0755); err != nil {
-			return nil, undo(carryOverStage("create", fmt.Errorf("create skills dir %s: %w", newRel, err)), "")
-		}
-		if err := copyRootTree(root, filepath.Join(oldRel, e.Name()), filepath.Join(newRel, e.Name())); err != nil {
-			return nil, undo(carryOverStage("copy", fmt.Errorf("copy skill %s to %s: %w", e.Name(), newRel, err)), e.Name())
+		// InstallTreeFrom leaves the destination as it was on failure, so
+		// only the skills already copied need removing.
+		if err := home.InstallTreeFrom(src, e.Name(), skillRel(newRel, e.Name()), skillTreeLimits); err != nil {
+			return nil, undo(carryOverStage("copy", fmt.Errorf("copy skill %s to %s: %w", e.Name(), newRel, homeSkillError(e.Name(), err))))
 		}
 		copied = append(copied, e.Name())
 	}
 	return copied, nil
 }
 
-// isAgentPluginDir reports whether the directory rel under root holds a
+// isLinkRefusal reports whether err is pkg/agenthome refusing a path
+// because a component is a symbolic link or not a directory.
+func isLinkRefusal(err error) bool {
+	return errors.Is(err, agenthome.ErrLinkComponent) || errors.Is(err, agenthome.ErrNotDirectory)
+}
+
+// isAgentPluginDir reports whether the directory name in dir holds a
 // regular-file plugin.json at its top level, the mark of an Agent Plugins
-// bundle. A symlinked plugin.json does not count (Lstat, never followed).
-func isAgentPluginDir(root *os.Root, rel string) bool {
-	fi, err := root.Lstat(filepath.Join(rel, agentplugin.ManifestFile))
+// bundle. A linked plugin.json does not count (never followed).
+func isAgentPluginDir(dir *agenthome.Home, name string) bool {
+	fi, err := dir.Lstat(name + "/" + agentplugin.ManifestFile)
 	return err == nil && fi.Mode().IsRegular()
 }
 
@@ -192,16 +201,6 @@ func carryOverFailureSummary(err error) (stage, class string) {
 	return stage, class
 }
 
-// skipCopyEntry reports whether the carry-over leaves out e: Python bytecode
-// artifacts (__pycache__ directories and .pyc files). It mirrors the skip
-// rule in util.CopyDir (pkg/util/fs.go); keep the two in step.
-func skipCopyEntry(e os.DirEntry) bool {
-	if e.IsDir() {
-		return e.Name() == "__pycache__"
-	}
-	return strings.HasSuffix(e.Name(), ".pyc")
-}
-
 // realDirChain reports whether every existing component of rel inside root is
 // a real directory (Lstat, never following a symbolic link). A missing
 // component ends the walk: it reports false when requireExist is set, and
@@ -238,73 +237,6 @@ func readRootDir(root *os.Root, rel string) ([]os.DirEntry, error) {
 	return entries, err
 }
 
-// copyRootTree copies the directory src to dst, both inside root, keeping
-// only regular files and directories. Symbolic links, other special files
-// and the entries skipCopyEntry reports are skipped.
-func copyRootTree(root *os.Root, src, dst string) error {
-	fi, err := root.Lstat(src)
-	if err != nil {
-		return err
-	}
-	if !fi.IsDir() {
-		return nil
-	}
-	if err := root.Mkdir(dst, fi.Mode().Perm()); err != nil && !os.IsExist(err) {
-		return err
-	}
-	if dfi, err := root.Lstat(dst); err != nil {
-		return err
-	} else if !dfi.IsDir() {
-		return fmt.Errorf("%s is not a directory", dst)
-	}
-	entries, err := readRootDir(root, src)
-	if err != nil {
-		return err
-	}
-	for _, e := range entries {
-		s, d := filepath.Join(src, e.Name()), filepath.Join(dst, e.Name())
-		switch {
-		case e.Type()&os.ModeSymlink != 0, skipCopyEntry(e):
-			continue
-		case e.IsDir():
-			if err := copyRootTree(root, s, d); err != nil {
-				return err
-			}
-		case e.Type().IsRegular():
-			if err := copyRootFile(root, s, d); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
-// copyRootFile copies the regular file src to dst, both inside root. It
-// re-checks src with Lstat and refuses to replace an existing dst.
-func copyRootFile(root *os.Root, src, dst string) error {
-	fi, err := root.Lstat(src)
-	if err != nil {
-		return err
-	}
-	if !fi.Mode().IsRegular() {
-		return nil
-	}
-	in, err := root.Open(src)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = in.Close() }()
-	out, err := root.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, fi.Mode().Perm())
-	if err != nil {
-		return err
-	}
-	if _, err := io.Copy(out, in); err != nil {
-		_ = out.Close()
-		return err
-	}
-	return out.Close()
-}
-
 // storedHarnessConfigName is the harness-config name recorded in the agent's
 // scion-agent.json at provisioning, or "" when none is recorded.
 func storedHarnessConfigName(cfg *api.ScionConfig) string {
@@ -317,11 +249,17 @@ func storedHarnessConfigName(cfg *api.ScionConfig) string {
 // previousHarnessSkillsDir returns the skills directory of the harness that
 // harness-config name resolves to, read from its effective config entry
 // without constructing a harness, via harness.SkillsDirForEntry (harness.Resolve
-// owns the rule). It returns "" when the harness-config cannot be found.
+// owns the rule) and checked by harnessSkillsDir. It returns "" when the
+// harness-config cannot be found or its skills directory is not a path
+// inside the agent home.
 func previousHarnessSkillsDir(name, projectDir string, templatePaths []string, settings *config.VersionedSettings, profile string) string {
 	hcDir, err := config.ResolveHarnessConfigDir("", name, projectDir, templatePaths...)
 	if err != nil || hcDir == nil {
 		return ""
 	}
-	return harness.SkillsDirForEntry(harness.EffectiveConfig(name, hcDir, settings, profile))
+	dir, err := harnessSkillsDir(entrySkills{harness.EffectiveConfig(name, hcDir, settings, profile)})
+	if err != nil {
+		return ""
+	}
+	return dir
 }

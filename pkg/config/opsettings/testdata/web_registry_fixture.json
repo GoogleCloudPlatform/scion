@@ -35,6 +35,7 @@
     "endpoints": [
       "server.hub.public_url",
       "server.hub.hub_name",
+      "server.hub.content_url",
       "image_registry",
       "server.hub.monitoring_dashboard_url"
     ],

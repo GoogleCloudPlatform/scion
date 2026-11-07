@@ -109,6 +109,10 @@ function makeFullConfig(overrides: Record<string, unknown>): Record<string, unkn
         soft_delete_retain_files: true,
         auto_suspend_stalled: true,
         stalled_threshold: '10m',
+        start_claim_lease_ttl: '2m',
+        start_max_duration: '15m',
+        start_unconfirmed_hold: '18m',
+        start_create_unconfirmed_hold: '17m',
         gcp_iam_check_mode: 'enforce',
         gcp_iam_deny_unknown_policy: 'fail-closed',
         observability: { metrics_enabled: true, tracing_enabled: false },
@@ -185,9 +189,6 @@ function fetchHandler(config: Record<string, unknown>) {
     if (path.includes('/api/v1/admin/server-config')) return jsonResponse(config);
     if (path.includes('/api/v1/admin/messaging')) {
       return jsonResponse({ cross_project_messaging_enabled: false, revision: 1 });
-    }
-    if (path.includes('/api/v1/admin/maintenance/check-updates')) {
-      return jsonResponse({ tier: 'source', update_available: false });
     }
     if (path.includes('/api/v1/github-app/installations')) return jsonResponse([]);
     if (path.includes('/api/v1/github-app')) {

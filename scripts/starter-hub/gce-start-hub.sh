@@ -19,7 +19,12 @@
 #            [--branch <branch>] [--insecure-health-check]
 #
 #   Default (fast): pull → build → restart → health check
-#   --full:         Also uploads config files, installs Caddy, updates systemd/Caddy
+#   --full:         Also uploads config files, installs Caddy, updates systemd/Caddy.
+#                   The settings.yaml it writes sets image_registry to
+#                   IMAGE_REGISTRY (default localhost/scion, see hub-config.sh);
+#                   SCION_IMAGE_REGISTRY in hub.env takes precedence. This
+#                   script does not build agent images (see hub-config.sh).
+#                   With ENABLE_GKE=true a loopback registry is refused.
 #   --no-tls:       Skip the Caddy/TLS step, for a hub behind an upstream TLS
 #                   terminator (env: SKIP_TLS=true). The base URL that takes
 #                   effect (SCION_SERVER_BASE_URL in hub.env if it sets one,
@@ -145,6 +150,17 @@ if [[ -z "$PROJECT_ID" ]]; then
     exit 1
 fi
 
+# IMAGE_REGISTRY (hub-config.sh) is written into settings.yaml (--full) as a
+# quoted YAML string, so it must be a plain registry path. With ENABLE_GKE=true
+# the registry that takes effect must not be a loopback address.
+if $FULL_DEPLOY; then
+    if ! registry_is_valid "${IMAGE_REGISTRY}"; then
+        echo "Error: IMAGE_REGISTRY '${IMAGE_REGISTRY}' is not a registry path (for example localhost/scion or us-docker.pkg.dev/<project>/<repo>)." >&2
+        exit 1
+    fi
+    require_gke_reachable_registry
+fi
+
 # Compute total steps based on mode
 if $FULL_DEPLOY; then
     TOTAL_STEPS=3  # upload, remote-session, remote-health
@@ -180,6 +196,9 @@ if $FULL_DEPLOY; then
     cat <<SETTINGS_EOF > "$UPLOAD_DIR/scion-settings.yaml"
 schema_version: "1"
 active_profile: ${ACTIVE_PROFILE}
+# Registry the runtime broker pulls agent images from; the Hub does not start
+# its broker without one. SCION_IMAGE_REGISTRY in hub.env takes precedence.
+image_registry: "${IMAGE_REGISTRY}"
 server:
   mode: production
 telemetry:
@@ -210,6 +229,9 @@ telemetry:
         - "session_id"
 SETTINGS_EOF
     substep "Prepared settings.yaml"
+    if registry_is_loopback "$(effective_image_registry)"; then
+        substep "Note: agent images come from $(effective_image_registry) on the VM. This script does not build them; see image-build/README.md, or set SCION_IMAGE_REGISTRY in hub.env."
+    fi
 
     # systemd service file, rendered from scion-hub.service.tmpl. Rebuild
     # from git compares the installed unit against that template, so the

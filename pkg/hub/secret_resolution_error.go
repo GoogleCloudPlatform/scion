@@ -108,3 +108,16 @@ func writeSecretResolutionError(w http.ResponseWriter, err error) bool {
 	writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, e.Error(), nil)
 	return true
 }
+
+// EnvSettingsUnavailableText is the fixed body of the 503 a hub handler
+// answers when it cannot read the agent's stored environment settings
+// outside a dispatch (where a *secretResolutionError answers instead). It
+// names no scope, key, value or backend error, so it is safe to return to
+// any caller; the backend error goes to the hub log only.
+const EnvSettingsUnavailableText = "environment settings unavailable"
+
+// writeEnvSettingsUnavailable writes the 503 for a stored environment
+// settings read error with the fixed EnvSettingsUnavailableText body.
+func writeEnvSettingsUnavailable(w http.ResponseWriter) {
+	writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, EnvSettingsUnavailableText, nil)
+}

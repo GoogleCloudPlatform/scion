@@ -220,16 +220,22 @@ jobs:
     runs-on: ubuntu-latest
     # Sized from data (ptone/scion#3183): over the 267 successful upstream
     # runs of this job on 2026-10-04/05, the job took p50 13.4m / p95 14.4m /
-    # max 14.5m (Run Tests: p50 4.7m / max 5.1m). 30m is ~2x the slowest
-    # success; worst case under the Run Tests watchdog below is ~26m (9.8m
-    # max pre-test steps + 15m deadline + 1m grace + Build Binary). Without a
-    # limit the job inherits GitHub's 360m default: two stalled Run Tests on
-    # 2026-10-05 ran 41m and 83m (78m silent) until cancelled by hand.
+    # max 14.5m (Run Tests: p50 4.7m / max 5.1m). Without a limit the job
+    # inherits GitHub's 360m default: two stalled Run Tests on 2026-10-05
+    # ran 41m and 83m (78m silent) until cancelled by hand.
+    # Resized (ptone/scion#7279): over the 34 completed upstream main-push
+    # runs of 2026-11-03, successful runs took up to 29.6m and the steps
+    # before Run Tests up to 21.0m (all steps ~1.3x slower on slow runners);
+    # three runs hit the 30m limit, two inside Run Tests and one in Save Go
+    # cache after the tests passed. Worst case under the Run Tests watchdog
+    # below is ~37m (21.0m max pre-test steps + 15m deadline + 1m grace +
+    # Build Binary).
     # Budget: the watchdog's diagnostics end ~16.1m into Run Tests, so this
     # timeout cuts them off if the steps before Run Tests take more than
-    # ~13.9m (max 9.8m today). Keep timeout > pre-test max + ~17m: raise it
-    # if steps are added before Run Tests or they grow.
-    timeout-minutes: 30
+    # ~28.9m (max 21.0m on 2026-11-03). Keep timeout > pre-test max + ~17m
+    # (21.0m + ~17m = ~38m < 45m on 2026-11-03): raise it if steps are added
+    # before Run Tests or they grow.
+    timeout-minutes: 45
     # needs: changes gates the web checks below (typecheck, e2e-perf
     # lint/test, Vitest) on changes.outputs.web_checks (ptone/scion#4256):
     # true when a PR touches web/, harnesses/, any pkg/**/testdata/ or this
@@ -423,6 +429,18 @@ jobs:
             exit 1
           fi
 
+      # Parse only: pkg/hub plus its test files declares no top-level
+      # identifier twice (nor one an import also declares) under any tag
+      # set CI compiles it with. The shards compile apart, so a duplicate
+      # across two shards passes them and breaks every whole-package build
+      # (go vet ./pkg/hub/).
+      - name: Check pkg/hub for duplicate declarations
+        run: |
+          if ! make hub-dupcheck; then
+            echo "::error title=pkg/hub duplicate declarations::duplicate pkg/hub declarations found, or the check could not run (see the step log above). A duplicate passes each shard but fails go vet ./pkg/hub/. See hack/dupdecl/main.go."
+            exit 1
+          fi
+
       # Bash only: the skipped-tests summary the shard jobs print
       # (hack/hubshard/lib.sh run_skip_summary), with a fake test binary.
       - name: Test the pkg/hub shard skip summary
@@ -449,6 +467,23 @@ jobs:
             0) ;;
             1) echo "::error title=Authorization guards::Authorization-bypass guard patterns found (see ptone/scion#591). The file:line: function list is in the step log above." ;;
             *) echo "::error title=Authorization guards NOT checked::check-authz-guards could not run (exit $rc) — NOTHING WAS ANALYSED. This is an environment failure and is NOT a statement about the codebase. Do not read it as a guard failure." ;;
+          esac
+          exit "$rc"
+
+      - name: Check Authorization Guards reach every pkg/hub area
+        run: |
+          # Plants the self-test fixture in every directory of
+          # hack/area-dirs.txt and requires the scan to flag it there
+          # (ptone/scion#4275). Invoked directly for the same exit-code
+          # reason as the step above.
+          set +e
+          ./hack/check-authz-guards.sh --self-test-dirs
+          rc=$?
+          set -e
+          case "$rc" in
+            0) ;;
+            1) echo "::error title=Authorization guards miss an area::check-authz-guards --self-test-dirs: a planted guard in a hack/area-dirs.txt directory was not flagged. Details are in the step log." ;;
+            *) echo "::error title=Authorization guards area self-test NOT run::check-authz-guards --self-test-dirs could not run (exit $rc) — NOTHING WAS ANALYSED." ;;
           esac
           exit "$rc"
 
@@ -535,6 +570,26 @@ jobs:
           fi
           exit "$rc"
 
+      - name: Check pkg/hub Package DAG
+        run: |
+          set +e
+          ./hack/check-areadag.sh --self-test
+          rc=$?
+          if [ "$rc" -ne 0 ]; then
+            set -e
+            echo "::error title=pkg/hub package DAG NOT checked::check-areadag --self-test failed (exit $rc) — the guard itself is broken or could not run, so nothing was analysed."
+            exit "$rc"
+          fi
+          ./hack/check-areadag.sh
+          rc=$?
+          set -e
+          if [ "$rc" -eq 1 ]; then
+            echo "::error title=pkg/hub package DAG::A declared pkg/hub package imports outside its hack/areadag/dag.txt line, a production file imports a testsupport package, or a pkg/hub alias file imports an undeclared package. Fix the import, or declare a deliberate new edge in hack/areadag/dag.txt. Details are in the step log."
+          elif [ "$rc" -ne 0 ]; then
+            echo "::error title=pkg/hub package DAG NOT checked::check-areadag could not run (exit $rc) — nothing was analysed."
+          fi
+          exit "$rc"
+
       - name: Check Harness Coverage in Cloud Build Configs
         run: |
           # Invoked directly rather than via a Makefile target, for the same
@@ -590,6 +645,30 @@ jobs:
             0) ;;
             1) echo "::error title=Security marker gates::Security marker gate violations found — a guarded symbol was removed or moved out of its enclosing function. See the step log above." ;;
             *) echo "::error title=Security marker gates NOT checked::check-security-marker-gates could not run (exit $rc) — NOTHING WAS ANALYSED. This is an environment failure and is NOT a statement about the codebase. Do not read it as a guard failure." ;;
+          esac
+          exit "$rc"
+
+      - name: Check Agent Mutators
+        run: |
+          # WP1 lifecycle events: only pkg/store writers run the lifecycle
+          # observer, so no other package may mutate agent rows directly.
+          # Invoked directly, like check-security-marker-gates, so exit 1
+          # (finding) and exit 2 (nothing analysed) stay distinct.
+          set +e
+          ./hack/check-agent-mutators.sh --self-test
+          rc=$?
+          if [ "$rc" -ne 0 ]; then
+            set -e
+            echo "::error title=Agent mutators NOT checked::check-agent-mutators --self-test failed (exit $rc) — the guard itself is broken or could not run, so nothing was analysed."
+            exit "$rc"
+          fi
+          ./hack/check-agent-mutators.sh
+          rc=$?
+          set -e
+          case "$rc" in
+            0) ;;
+            1) echo "::error title=Agent mutators::An ent agent mutation outside pkg/store bypasses the lifecycle observer (WP1 design 2.8). Route it through a store method that observes the write. See the step log above." ;;
+            *) echo "::error title=Agent mutators NOT checked::check-agent-mutators could not run (exit $rc) — NOTHING WAS ANALYSED. This is an environment failure, not a statement about the codebase." ;;
           esac
           exit "$rc"
 
@@ -1895,8 +1974,13 @@ jobs:
     # always on push to main. Fails open: if the changes job did not succeed,
     # the harness runs anyway.
     if: ${{ ((github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion') && (!cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.single_node_vm == 'true')) }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Routed to the cr-ci runner when SCION_LARGE_RUNNER is set
+    # (hack/check-runner-routing.sh). Was held until the runner-layout switch: the
+    # scion-layout tests refuse temp trees under a world-writable ancestor, and
+    # the old layout put them under /scratch, mode 777 (cr-ci followups v12).
+    # Hosted runs take 417-457 s, so 15 min leaves headroom on either runner.
+    runs-on: ${{ (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && vars.SCION_LARGE_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 15
     steps:
       - name: Checkout code
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6

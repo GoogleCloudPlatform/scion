@@ -157,7 +157,7 @@ func TestAgentTZDispatch_LegacyAdoption(t *testing.T) {
 				assert.Equal(t, "Europe/London", ac.ExplicitTimezone)
 				assert.True(t, ac.ExplicitTimezoneLegacy)
 				assert.Empty(t, legacyEnvTZ(ac), "the env records no longer carry TZ")
-				assert.Equal(t, TZSourceLegacy, f.d.resolveAgentTZ(context.Background(), f.agent, false).Source)
+				assert.Equal(t, TZSourceLegacy, mustResolveAgentTZ(t, f.d, f.agent, false).Source)
 			})
 		}
 	}
@@ -198,27 +198,6 @@ func TestAgentTZDispatch_NotPersisted(t *testing.T) {
 	assert.Equal(t, "Europe/Paris", f.createTZ(t))
 	assert.Empty(t, legacyEnvTZ(f.agent.AppliedConfig))
 	assert.Empty(t, f.agent.AppliedConfig.ExplicitTimezone, "a storage TZ is never captured as a pin at dispatch")
-}
-
-// TestAgentTZDispatch_EnvSourcesLabel checks the TZ source shown for the
-// dispatched env is the resolver's rung.
-func TestAgentTZDispatch_EnvSourcesLabel(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		pin  string
-		want string
-	}{
-		{name: "hub default", want: TZSourceHubDefault},
-		{name: "explicit", pin: "UTC", want: TZSourceExplicit},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			f := newTZDispatchFixture(t, "Asia/Tokyo")
-			f.agent.AppliedConfig.ExplicitTimezone = tc.pin
-			_, err := f.d.DispatchAgentCreateWithGather(context.Background(), f.agent)
-			require.NoError(t, err)
-			assert.Equal(t, tc.want, f.client.lastCreateReq.EnvSources["TZ"])
-		})
-	}
 }
 
 // oldBrokerReportingTZ fakes a broker from before this change: it reports

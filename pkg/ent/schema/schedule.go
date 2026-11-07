@@ -65,6 +65,10 @@ func (Schedule) Fields() []ent.Field {
 			NotEmpty(),
 		field.String("cron_expr").
 			NotEmpty(),
+		// time_zone is the IANA zone the cron expression is evaluated
+		// in. Empty means UTC.
+		field.String("time_zone").
+			Default(""),
 		field.String("event_type").
 			NotEmpty(),
 		field.String("payload").

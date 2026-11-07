@@ -14,7 +14,10 @@ Authorization is `ActionRead` on the project — the same as
 `GET /api/v1/projects/{projectId}/settings`. It is deliberately not admin-gated,
 because the point is to let non-admin project owners see that hub defaults
 exist. Only the presence of `agent_defaults` entries is exposed, never the
-server configuration itself. The endpoint is read-only; there is no `PUT`.
+server configuration itself. The endpoint is read-only; there is no `PUT`. From
+the CLI, [`scion project settings get --resolved`](/scion/reference/cli/#scion-project)
+reads this endpoint (`scion project settings get`, `set`, and `unset` read and
+update `/api/v1/projects/{projectId}/settings`).
 
 ## This endpoint does not resolve anything
 
@@ -94,7 +97,7 @@ without being wired up here.
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `projectSet` | bool | Whether the project has an annotation for this setting. A stored `scion.io/default-thinking-level` outside 1-100 (for example a `0` saved by an older Hub) counts as unset, as in `GET /settings`: new agents get the hub default, and the next save of the project settings removes it. |
-| `projectValue` | string \| null | The annotation's raw value, or `null` when `projectSet` is false. Always a string — annotations are strings. |
+| `projectValue` | string \| null | The annotation's raw value, or `null` when `projectSet` is false. Always a string — annotations are strings. For `scion.io/default-max-turns` and `scion.io/default-max-model-calls`, `"0"` is Unlimited (an explicit "no limit"), not a clear: a cleared count limit has no annotation. |
 | `hubDefault` | string | Whether a hub-level default exists. See below. |
 
 ### `hubDefault` is tri-state
@@ -134,3 +137,7 @@ statement the third state exists to prevent.
 
 Settings with no hub-level counterpart at all — the hub simply has no such field
 — report `absent`, which is a measured structural fact rather than a guess.
+
+## How the project settings page uses it
+
+The project settings page shows a `present` hub value as a fallback, never as the value in effect: the placeholder reads *Hub fallback: …*, a select offers *Use hub fallback (…)*, and the building icon's tooltip adds that a template or harness config can set its own value, which wins over it. For `unknown`, the icon's tooltip says that the hub could not report its fallback and may still have one. It names no value and does not say that no hub value exists. `absent` shows no icon.

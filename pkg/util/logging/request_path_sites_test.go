@@ -21,9 +21,12 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/hack/areadirs"
 )
 
 // Request path uses in the hub, the artifact service and this package are
@@ -58,6 +61,7 @@ var requestPathSites = []requestPathSite{
 	{"service.go", "Service.ServeHTTP", "URL.EscapedPath", 1, "routing: the artifact service splits the escaped path into route segments"},
 	{"auditlog.go", "routeTemplate", "URL.EscapedPath", 1, "classification only: maps the path to a constant route template for the artifact decision log; no path segment is logged"},
 	{"read.go", "serveFileTTL", "URL(bare)", 1, "not a request URL: the signed object-store URL a file read redirects to"},
+	{"handlers_workspace_download.go", "Server.handleWorkspaceDownload", "URL(bare)", 1, "SENSITIVE, not a request URL: the signed object-store GET URL (a bearer capability) each workspace download page returns to the broker; it must never be logged, and the no-log-call rule above still applies to it"},
 	{"handlers_projects_core.go", "Server.provisionSharedWorkspace", "URL(bare)", 2, "not a request URL: the project's git clone URL, checked before the clone on the hub host (the clone-URL check and the ssh-without-project-secret check; both return URL-free errors)"},
 	{"admin_allow_list.go", "Server.handleAdminAllowListByEmail", "URL.Path", 1, "routing: extracts ids and sub-routes"},
 	{"admin_invites.go", "Server.handleAdminInviteByID", "URL.Path", 1, "routing: extracts ids and sub-routes"},
@@ -106,6 +110,7 @@ var requestPathSites = []requestPathSite{
 	{"handlers_chat_v2.go", "Server.handleChatTopicRoutes", "URL.Path", 1, "routing: extracts ids and sub-routes"},
 	{"handlers_gcp_identity_scoped.go", "Server.handleGCPServiceAccountByID", "URL.Path", 1, "routing: extracts ids and sub-routes"},
 	{"handlers_github_app.go", "parseInstallationIDFromPath", "URL.Path", 1, "routing: extracts the installation id"},
+	{"handlers_github_app.go", "Server.handleGitHubAppInstallationByIDRead", "URL.Path", 1, "routing: selects the association-report sub-route (compared with a constant; not logged or returned)"},
 	{"handlers_groups.go", "Server.handleGroupRoutes", "URL.Path", 1, "routing: extracts ids and sub-routes"},
 	{"handlers_integrations.go", "Server.handleAdminIntegrationByName", "URL.Path", 1, "routing: extracts ids and sub-routes"},
 	{"handlers_principals.go", "Server.handlePrincipalRoutes", "URL.Path", 1, "routing: extracts ids and sub-routes"},
@@ -119,6 +124,8 @@ var requestPathSites = []requestPathSite{
 	{"lifecycle_hook_executor.go", "HTTPExecutor.doHTTPRequest", "URL(bare)", 1, "not a request URL: a lifecycle hook action's configured URL"},
 	{"lifecycle_hook_executor.go", "HTTPExecutor.recordAudit", "URL(bare)", 2, "not a request URL: a lifecycle hook action's configured URL (only its host is recorded)"},
 	{"binary_update.go", "BinaryUpdateExecutor.RunWithBeforeRestart", "URL(bare)", 4, "not a request URL: outbound GitHub release asset download URLs (ReleaseAsset.URL), pinned by CheckAssetURL to the configured repo and tag before they are fetched or logged"},
+	{"plugin_lockstep.go", "BinaryUpdateExecutor.preparePlugins", "URL(bare)", 3, "not a request URL: outbound GitHub release asset download URLs of broker plugin assets (ReleaseAsset.URL), public GitHub release-asset URLs checked by CheckAssetURL against the configured repo and tag before they are fetched; they appear in the update run log and may appear in a returned pin-check or download error, but they are never a hub request path"},
+	{"plugin_lockstep.go", "BinaryUpdateExecutor.fetchReleaseSums", "URL(bare)", 2, "not a request URL: the outbound SHA256SUMS asset download URL (ReleaseAsset.URL) fetched for the downgrade risk list, a public GitHub release-asset URL checked by CheckAssetURL against the configured repo and tag before it is fetched; pin-check and fetch errors are discarded (the risk list then omits the per-line risks), so it is never logged and never a hub request path"},
 	{"releases.go", "GitHubReleases.FetchChecksums", "URL(bare)", 2, "not a request URL: the outbound SHA256SUMS asset download URL (ReleaseAsset.URL) of the release catalog, a public GitHub release-asset URL checked by CheckAssetURL against the configured repo and tag before it is fetched; it may appear in a logged fetch or pin-check error, but it is never a hub request path"},
 	{"perftrace_middleware.go", "perfHeadersAllowed", "URL.Path", 1, "comparison: decides whether timing headers may be added"},
 	{"port_view.go", "Server.handlePortView", "URL.EscapedPath", 1, "routing: cuts the escaped sub-path for the redirect to the port link; never logged"},
@@ -558,11 +565,44 @@ func goFiles(t *testing.T, dirs ...string) []string {
 	return out
 }
 
+// requestPathScanDirs returns the directories TestRequestPathSites scans
+// under pkgDir (the module's pkg directory): pkg/hub, each pkg/hub area
+// directory listed in hack/area-dirs.txt (entries), and pkg/artifacts. A
+// move that lists its directory there is scanned here without a change to
+// this file (ptone/scion#4275).
+func requestPathScanDirs(pkgDir string, entries []areadirs.Entry) []string {
+	dirs := []string{filepath.Join(pkgDir, "hub")}
+	for _, e := range entries {
+		dirs = append(dirs, filepath.Join(pkgDir, "hub", filepath.FromSlash(e.Dir)))
+	}
+	return append(dirs, filepath.Join(pkgDir, "artifacts"))
+}
+
+// loadAreaDirs reads hack/area-dirs.txt from the module root, three levels
+// above this package.
+func loadAreaDirs(t *testing.T) []areadirs.Entry {
+	t.Helper()
+	entries, err := areadirs.Load(filepath.Join("..", "..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return entries
+}
+
+// requestPathSitesDirs returns every directory TestRequestPathSites scans:
+// this package, then requestPathScanDirs over the module's pkg directory and
+// the hack/area-dirs.txt entries. TestRequestPathSites scans exactly this
+// list, and TestRequestPathSitesCoversAreaDirs checks it.
+func requestPathSitesDirs(t *testing.T) []string {
+	t.Helper()
+	return append([]string{"."}, requestPathScanDirs(filepath.Join("..", ".."), loadAreaDirs(t))...)
+}
+
 // TestRequestPathSites: every request path use in the hub and this package
 // is classified, and no log call receives a request path except through
 // RequestPath.
 func TestRequestPathSites(t *testing.T) {
-	files := goFiles(t, ".", "../../hub", "../../hub/maintenance", "../../artifacts")
+	files := goFiles(t, requestPathSitesDirs(t)...)
 	if len(files) < 50 {
 		t.Fatalf("scanned only %d files; is the hub package where this test expects it?", len(files))
 	}
@@ -617,6 +657,46 @@ func TestRequestPathSites(t *testing.T) {
 	for k, s := range allowed {
 		if scan.uses[k] == 0 {
 			t.Errorf("stale requestPathSites entry %s %s %s", s.file, s.fn, s.kind)
+		}
+	}
+}
+
+// TestRequestPathSitesCoversAreaDirs: the directories TestRequestPathSites
+// scans (requestPathSitesDirs) include this package, pkg/hub, pkg/artifacts
+// and every hack/area-dirs.txt directory, and a raw request path use planted
+// in each area directory of a temporary tree is reported.
+func TestRequestPathSitesCoversAreaDirs(t *testing.T) {
+	entries := loadAreaDirs(t)
+	dirs := requestPathSitesDirs(t)
+	if !slices.Contains(dirs, ".") {
+		t.Errorf("scanned directories %v do not include this package", dirs)
+	}
+	for _, want := range []string{"hub", "artifacts"} {
+		if !slices.Contains(dirs, filepath.Join("..", "..", filepath.FromSlash(want))) {
+			t.Errorf("scanned directories %v do not include pkg/%s", dirs, want)
+		}
+	}
+	for _, e := range entries {
+		if want := filepath.Join("..", "..", "hub", filepath.FromSlash(e.Dir)); !slices.Contains(dirs, want) {
+			t.Errorf("scanned directories %v do not include %s area %s", dirs, e.Kind, e.Dir)
+		}
+	}
+
+	pkgDir := filepath.Join(t.TempDir(), "pkg")
+	for i, e := range entries {
+		dir := filepath.Join(pkgDir, "hub", filepath.FromSlash(e.Dir))
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		src := fmt.Sprintf("package planted\n\nimport \"net/http\"\n\nfunc zzPlanted%d(r *http.Request) string { return r.URL.Path }\n", i)
+		if err := os.WriteFile(filepath.Join(dir, "zz_planted.go"), []byte(src), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	scan := scanSources(t, goFiles(t, requestPathScanDirs(pkgDir, entries)...))
+	for i, e := range entries {
+		if k := fmt.Sprintf("zz_planted.go\tzzPlanted%d\tURL.Path", i); scan.uses[k] != 1 {
+			t.Errorf("%s %s: planted raw r.URL.Path use not reported (uses %v)", e.Kind, e.Dir, scan.uses)
 		}
 	}
 }

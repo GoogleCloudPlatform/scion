@@ -144,7 +144,7 @@ func TestCloudRunSandboxSecondStartOneWatcher(t *testing.T) {
   *)    exit 0 ;;
 esac`, pidFile))
 	rt := newWorkaroundTestRuntime(t, bin)
-	cancelWatchersOnCleanup(t, rt)
+	stopWatchersOnCleanup(t, rt.state.path, rt)
 
 	// waitPids waits up to 10 s for n wait processes to have started.
 	waitPids := func(n int) []int {
@@ -199,7 +199,7 @@ func TestCloudRunSandboxOldWatcherKeepsNewerCancel(t *testing.T) {
 	bin := writeMockBin(t, `[ "$1" = wait ] && { echo 0; exit 0; }
 exit 0`)
 	rt := newWorkaroundTestRuntime(t, bin)
-	cancelWatchersOnCleanup(t, rt)
+	stopWatchersOnCleanup(t, rt.state.path, rt)
 	nonceA, err := rt.state.casPut("dev", nonceAbsent, runEntry("dev", "run-a"))
 	if err != nil {
 		t.Fatal(err)

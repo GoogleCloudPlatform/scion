@@ -55,6 +55,7 @@ type personalTokenOpts struct {
 	shared       bool
 	installation bool   // the project has its own GitHub App installation
 	sourceLabel  bool   // an agent label names another project that has an installation
+	allowSource  bool   // the minter authorizes the label's token-source project
 	apiBaseURL   string // configured GitHub API base URL ("" = github.com)
 	userSecret   bool   // the agent owner has a user-scope GITHUB_TOKEN
 	brokerSecret bool   // the broker has a broker-scope GITHUB_TOKEN
@@ -121,7 +122,7 @@ func newPersonalTokenFixture(t *testing.T, o personalTokenOpts) *personalTokenFi
 	client := &mockRuntimeBrokerClient{}
 	d := NewHTTPAgentDispatcherWithClient(st, client, false, slog.Default())
 	d.SetSecretBackend(secret.NewLocalBackend(st, "test-hub-id", "test-secret"))
-	minter := &recordingGitHubAppMinter{}
+	minter := &recordingGitHubAppMinter{allowSource: o.allowSource}
 	d.SetGitHubAppMinter(minter)
 	apiBase := o.apiBaseURL
 	d.SetGitHubWebHostProvider(func() string { return githubapp.WebHostForAPIBaseURL(apiBase) })
@@ -313,6 +314,58 @@ func TestDispatch_GitHubAppTokenOnlyForOwnProject(t *testing.T) {
 			assert.True(t, env["SCION_GITHUB_APP_ENABLED"] == "true", "SCION_GITHUB_APP_ENABLED must be set")
 		})
 	}
+}
+
+// An authorized token-source project mints the agent's GitHub App token from
+// that project's installation, but the token is bound to the source
+// project, not to the agent's own. On create (buildCreateRequest) and on
+// start and restart (injectLifecycleGitHubToken) it reaches the broker as
+// GITHUB_TOKEN, yet it never counts as project-bound for this agent
+// (gitTokenProjectBound), so the token remote of a recorded remote off the
+// GitHub host stays withheld.
+// Mutant this catches: reporting a token-source project's token as the
+// agent's own App token (dropping the mintProject.ID == project.ID check at
+// either site); the token remote for the non-GitHub host is then sent.
+func TestDispatch_AuthorizedSourceTokenNotProjectBound(t *testing.T) {
+	const nonGitHubRemote = "other.example/org/repo"
+	for _, shared := range []bool{false, true} {
+		for _, op := range personalTokenDispatches {
+			mode := "clone-per-agent"
+			if shared {
+				mode = "shared-workspace"
+			}
+			t.Run(mode+"/"+op.name, func(t *testing.T) {
+				f := newPersonalTokenFixture(t, personalTokenOpts{gitRemote: nonGitHubRemote, shared: shared, sourceLabel: true, allowSource: true})
+				require.NoError(t, op.dispatch(context.Background(), f))
+				got, sent := op.sent(f, shared)
+				require.True(t, sent, "fixture check: the clone settings were not sent")
+				require.True(t, f.minter.called, "fixture check: the authorized source must mint")
+				assert.Equal(t, tid("project-token-source"), f.minter.projectID, "minted from the token-source project's installation")
+				env := resolvedEnvOf(f, op.name)
+				assert.Equal(t, "github-app-token", env["GITHUB_TOKEN"], "the source token is delivered as GITHUB_TOKEN")
+				assert.Empty(t, got, "a token-source project's token is not project-bound: the token remote for a non-GitHub host must be withheld")
+			})
+		}
+	}
+}
+
+// injectLifecycleGitHubToken returns a token as the agent's own App token
+// only when it was minted for the agent's own project.
+func TestLifecycleGitHubToken_SourceTokenIsNotOwn(t *testing.T) {
+	f := newPersonalTokenFixture(t, personalTokenOpts{gitRemote: "github.com/org/repo", sourceLabel: true, allowSource: true})
+	env := make(map[string]string)
+	var classifications map[string]api.EnvKind
+	own := f.d.injectLifecycleGitHubToken(context.Background(), f.agent, env, &classifications, "DispatchAgentStart")
+	require.True(t, f.minter.called, "fixture check: the authorized source must mint")
+	assert.Equal(t, tid("project-token-source"), f.minter.projectID)
+	assert.Equal(t, "github-app-token", env["GITHUB_TOKEN"])
+	assert.Empty(t, own, "a token-source project's token is not returned as the agent's own App token")
+
+	g := newPersonalTokenFixture(t, personalTokenOpts{gitRemote: "github.com/org/repo", installation: true})
+	genv := make(map[string]string)
+	var gclassifications map[string]api.EnvKind
+	gown := g.d.injectLifecycleGitHubToken(context.Background(), g.agent, genv, &gclassifications, "DispatchAgentStart")
+	assert.Equal(t, "github-app-token", gown, "the agent's own project's token is returned as its own App token")
 }
 
 // finalize-env decides again after the caller's env is merged: a GITHUB_TOKEN

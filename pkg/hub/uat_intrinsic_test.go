@@ -31,6 +31,8 @@ package hub
 import (
 	"context"
 	"go/ast"
+	"go/parser"
+	"go/token"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -232,6 +234,9 @@ func TestUATIntrinsic_CeilingReadersUseHopCeiling(t *testing.T) {
 			"planAgentDelegatorReissue": true, // an agent parent's ceiling (agentRowEffectCeiling)
 			"dispatchAgentEventHandler": true, // scheduler edge ceiling with role none: not a token hop
 		},
+		// No exceptions: every caller passes uatHopEffectCeiling inline, so
+		// missingRoleSelectors (below) always reads a hop ceiling.
+		"noUsableRoleMessage": {},
 	}
 	// Functions whose .Frozen() receiver is a parameter (its callers pass a
 	// hop ceiling or a fold), a fold, or a scheduler or agent-row ceiling.
@@ -241,6 +246,7 @@ func TestUATIntrinsic_CeilingReadersUseHopCeiling(t *testing.T) {
 		"childEffectCeiling":      true, // source: agentRowEffectCeiling passes uatHopEffectCeiling
 		"foldWithChain":           true, // chain.Ceiling is a fold; the edge is wrapped
 		"intersectEffectCeilings": true, // scheduler revision and agent-row ceilings: not token hops
+		"missingRoleSelectors":    true, // c: noUsableRoleMessage passes it through; its callers pass uatHopEffectCeiling inline (checked above)
 	}
 	_, files := parseHubProduction(t)
 	seen := map[string]int{}
@@ -293,6 +299,53 @@ func TestUATIntrinsic_CeilingReadersUseHopCeiling(t *testing.T) {
 	assert.GreaterOrEqual(t, seen["EffectCeilingAllows"], 8, "control: the scan finds the call sites")
 	assert.GreaterOrEqual(t, seen["childRoleWithinCeiling"], 5, "control: the scan finds the call sites")
 	assert.GreaterOrEqual(t, seen["Frozen"], 8, "control: the scan finds the .Frozen() folds")
+}
+
+// identRefsIn returns, per enclosing function (receiver-qualified, as
+// callsIn names it) or "<package scope>", how many times the identifier
+// name is referenced in files: calls and any other use, such as passing it
+// as a value. The declaration's own name is not counted.
+func identRefsIn(files []*ast.File, name string) map[string]int {
+	out := map[string]int{}
+	for _, f := range files {
+		for _, d := range f.Decls {
+			key := "<package scope>"
+			var node ast.Node = d
+			if fn, ok := d.(*ast.FuncDecl); ok {
+				if fn.Body == nil {
+					continue
+				}
+				key = declReceiverName(fn)
+				node = fn.Body
+			}
+			ast.Inspect(node, func(n ast.Node) bool {
+				if id, ok := n.(*ast.Ident); ok && id.Name == name {
+					out[key]++
+				}
+				return true
+			})
+		}
+	}
+	return out
+}
+
+// TestMissingRoleSelectorsSingleCaller pins the condition behind the
+// frozenAllowed exception for missingRoleSelectors in
+// TestUATIntrinsic_CeilingReadersUseHopCeiling: its ceiling parameter is
+// a hop ceiling only because noUsableRoleMessage, whose calls that test
+// pins to an inline uatHopEffectCeiling, is its one and only reference in
+// the package sources. A planted second caller must be caught.
+func TestMissingRoleSelectorsSingleCaller(t *testing.T) {
+	_, files := parseHubProduction(t)
+	assert.Equal(t, map[string]int{"noUsableRoleMessage": 1}, identRefsIn(files, "missingRoleSelectors"),
+		"missingRoleSelectors must be referenced only by noUsableRoleMessage")
+
+	// Control: a planted caller and a planted function-value use are found.
+	planted, err := parser.ParseFile(token.NewFileSet(), "zz_planted.go",
+		"package hub\nfunc plantedCaller() { _ = missingRoleSelectors(store.EffectCeiling{}, AgentRoleReadOnly) }\nvar plantedValue = missingRoleSelectors\n", 0)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]int{"noUsableRoleMessage": 1, "plantedCaller": 1, "<package scope>": 1},
+		identRefsIn(append(append([]*ast.File{}, files...), planted), "missingRoleSelectors"))
 }
 
 // ---- owner shared secrets (ported from miller79/scion#199) --------------------
@@ -533,7 +586,7 @@ func TestUATIntrinsic_LaunchMaterialStrictWalk(t *testing.T) {
 			k := "LG_ENV_" + strings.ToUpper(scope)
 			assert.NotEmpty(t, env[k], "%s: %s delivered", purpose, k)
 		}
-		selected, err := m.d.selectDeliverySecrets(ctx, newDeliverySelector(m.authz, m.agent, purpose), m.agent)
+		selected, _, err := m.d.selectDeliverySecrets(ctx, newDeliverySelector(m.authz, m.agent, purpose), m.agent)
 		require.NoError(t, err)
 		for _, scope := range []string{store.ScopeProject, store.ScopeHub, store.ScopeRuntimeBroker} {
 			k := "LG_SECRET_" + strings.ToUpper(scope)

@@ -946,6 +946,14 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Permission:     "hub.conduit_grant_keys.execute", Resource: "hub", Action: "execute",
 		SessionOnly: authzop.ReasonCredentialManagement,
 	},
+	// Server key status, behind
+	// server.secret_rotation. Deliberately no registered permission: the
+	// guard falls back to requireAdmin, so only an unscoped platform admin
+	// on a session or dev credential reads it, and it cannot be delegated.
+	"/api/v1/admin/keys/status": {
+		Pattern: "/api/v1/admin/keys/status", RouteID: "admin.keys.status",
+		Classification: RouteHubAdmin,
+	},
 	// Bulk agent auth reset. Session only: a session-recovery route, like
 	// revoke-sessions.
 	"/api/v1/admin/agents/reset-auth-all": {
@@ -1675,6 +1683,12 @@ func (s *Server) routeGuard(meta RouteMetadata, next http.HandlerFunc) http.Hand
 				return
 			}
 			r = admitted
+			// A list route's item filter writes one aggregated record
+			// when the request ends, including on a panic or a
+			// cancelled request (.design/agent-delegation.md §14.2).
+			if c := listFilterCollectorFromContext(r.Context()); c != nil {
+				defer s.flushListFilter(r.Context(), c)
+			}
 		}
 		switch meta.Classification {
 		case RoutePublic:

@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -106,10 +107,19 @@ func resolveSharedDirs(
 	}
 
 	mountsShare := isLocalContainerRuntime(runtimeName) || isKubernetesRuntime(runtimeName)
-	if !sdLayout.Backend.Shared() || (!mountsShare && !split) {
+	if usesLocalSharedDirLayout(sdLayout, split, runtimeName) {
 		// The local layout. Errors here are logged and swallowed, not
 		// propagated — this preserves exact pre-existing behaviour (design
 		// AC1).
+		//
+		// Names that fail api.ValidateSharedDirs are skipped with a log line
+		// and get no directory; the valid ones are created and mounted. This
+		// filter is defensive, for direct callers: Start already passes a
+		// filtered list (run.go).
+		dirs = validLocalSharedDirs(dirs)
+		if len(dirs) == 0 {
+			return nil, nil, nil
+		}
 		if err := config.EnsureSharedDirs(projectDir, dirs); err != nil {
 			util.Debugf("Start: failed to ensure shared dirs: %v", err)
 		}
@@ -296,9 +306,10 @@ func kubeletMayCreateSharedDirs(runtimeName string, sdLayout projectfs.Layout, s
 	return isKubernetesRuntime(runtimeName) && sdLayout.Backend == projectfs.BackendNFS && !split
 }
 
-// ensureSharedDirLeaf is shareddirs.EnsureLeafOwned, replaceable in tests
-// to replace a path component after the walk and reach the backstop check.
-var ensureSharedDirLeaf = shareddirs.EnsureLeafOwned
+// ensureSharedDirLeaf is projectfs.EnsureSharedLeafOwned
+// (shareddirs.EnsureLeafOwned), replaceable in tests to replace a path
+// component after the walk and reach the backstop check.
+var ensureSharedDirLeaf = projectfs.EnsureSharedLeafOwned
 
 // fdGID is shareddirs.FdGID, replaceable in tests to simulate a failed stat.
 var fdGID = shareddirs.FdGID
@@ -381,6 +392,12 @@ func isKubernetesRuntime(name string) bool {
 	return name == "kubernetes"
 }
 
+// isCloudRunRuntime reports whether name is the Cloud Run Instances
+// runtime ("cloudrun", not "cloudrun-sandbox").
+func isCloudRunRuntime(name string) bool {
+	return name == "cloudrun"
+}
+
 // writeAgentRecordFile writes v as JSON to the file name in agentDir. It is
 // the single writer for the per-agent storage records (home storage). The file is written to a temporary name and renamed
 // into place, so a reader never sees a partial record. The file and the
@@ -431,6 +448,47 @@ func writeAgentRecordFile(agentDir, name string, v any) error {
 	return nil
 }
 
+// usesLocalSharedDirLayout reports whether resolveSharedDirs takes its local
+// layout branch for this start: the shared-dir Layout is not on a shared
+// backend, or the runtime neither bind-mounts host paths nor consumes
+// RunConfig.SharedDirStorage (Cloud Run) and the shared dirs are not on the
+// split legacy export.
+func usesLocalSharedDirLayout(sdLayout projectfs.Layout, split bool, runtimeName string) bool {
+	mountsShare := isLocalContainerRuntime(runtimeName) || isKubernetesRuntime(runtimeName)
+	return !sdLayout.Backend.Shared() || (!mountsShare && !split)
+}
+
+// validLocalSharedDirs returns the entries of dirs that pass
+// api.ValidateSharedDirs, in order: a name that is not a slug, or that
+// repeats a kept name, is skipped with one warning naming the entry, its
+// position in dirs and the reason (never a host path), so no directory is
+// created for it.
+func validLocalSharedDirs(dirs []api.SharedDir) []api.SharedDir {
+	kept := make([]api.SharedDir, 0, len(dirs))
+	for i, d := range dirs {
+		if err := api.ValidateSharedDirs(append(kept, d)); err != nil {
+			slog.Warn("shared dirs: skipping an invalid shared-dir name; no directory is created for it",
+				"index", i, "name", d.Name, "reason", sharedDirReason(err))
+			continue
+		}
+		kept = append(kept, d)
+	}
+	return kept
+}
+
+// sharedDirReason returns err's text without the "shared_dirs[N]: " prefix
+// api.ValidateSharedDirs adds, whose N is a position in the list it was
+// given, not in the project's list.
+func sharedDirReason(err error) string {
+	msg := err.Error()
+	if rest, ok := strings.CutPrefix(msg, "shared_dirs["); ok {
+		if _, reason, ok := strings.Cut(rest, "]: "); ok {
+			return reason
+		}
+	}
+	return msg
+}
+
 // agentSharedDirs returns the agent's shared dirs: the project
 // settings' shared_dirs when set, else the dirs the hub dispatched.
 func agentSharedDirs(settings *config.VersionedSettings, opts api.StartOptions) []api.SharedDir {
@@ -450,6 +508,45 @@ const legacySharedDirStorageRecordFile = "shared-dir-storage.json"
 // backend record when it is moved aside.
 const retiredSharedDirRecordSuffix = ".retired"
 
+// retiredSharedDirRecordMaxBytes caps the read of a retired shared-dir
+// backend record (a small JSON object written by earlier versions).
+const retiredSharedDirRecordMaxBytes = 64 << 10
+
+// readRetiredSharedDirRecord reads the retired record at path: a regular
+// file (a symlink or anything else is refused, checked with Lstat, by the
+// open itself on unix (openRetiredSharedDirRecord, O_NOFOLLOW) and again on
+// the opened file), at most retiredSharedDirRecordMaxBytes. The record is
+// in the broker-local agent directory, which the agent container does not
+// mount (it mounts the home below it), so this is defence in depth; a
+// larger file is refused rather than read.
+func readRetiredSharedDirRecord(path string) ([]byte, error) {
+	if fi, err := os.Lstat(path); err != nil {
+		return nil, err
+	} else if !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", path)
+	}
+	f, err := openRetiredSharedDirRecord(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() || fi.Size() > retiredSharedDirRecordMaxBytes {
+		return nil, fmt.Errorf("%s: not a regular file of at most %d bytes", path, retiredSharedDirRecordMaxBytes)
+	}
+	data, err := io.ReadAll(io.LimitReader(f, retiredSharedDirRecordMaxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > retiredSharedDirRecordMaxBytes {
+		return nil, fmt.Errorf("%s: larger than %d bytes", path, retiredSharedDirRecordMaxBytes)
+	}
+	return data, nil
+}
+
 // retireSharedDirRecord handles an agent's per-agent shared-dir backend
 // record from earlier versions, once: when it named another backend for any
 // of dirs than the one sdLayout now places them on, it returns a warning for
@@ -462,7 +559,7 @@ func retireSharedDirRecord(agentDir string, sdLayout projectfs.Layout, dirs []ap
 		return ""
 	}
 	path := filepath.Join(agentDir, legacySharedDirStorageRecordFile)
-	data, err := os.ReadFile(path)
+	data, err := readRetiredSharedDirRecord(path)
 	if err != nil {
 		return ""
 	}

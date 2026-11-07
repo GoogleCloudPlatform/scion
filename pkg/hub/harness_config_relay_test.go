@@ -38,7 +38,10 @@ const (
 	harnessPolicyMessage    = `harness-config "scripted" uses scripted provisioning but this broker has allow_container_script_harnesses=false.`
 	// The broker's text names configuration fields, never the path
 	// (runtime.ProjectShareUnavailableText).
-	projectStorageMessage = `project storage share is not visible on this broker at its configured mount point: make the share (the same storage the hub uses) available in this broker's container at that path`
+	// The broker's git config refusal text (util.RepoConfigRefusals): every
+	// refused key and its remedy, no value or path (ptone/scion#6835).
+	gitConfigRefusedMessage = `agent git config refused: repository config sets 2 keys that are not allowed: core.editor (not on the linked-checkout allow-list), grep.threads (not on the linked-checkout allow-list): remove each from the repository's .git/config. The git-based checks (the cross-check and the submodule check) run once these are fixed and can report more.`
+	projectStorageMessage   = `project storage share is not visible on this broker at its configured mount point: make the share (the same storage the hub uses) available in this broker's container at that path`
 )
 
 // brokerHarnessConfigErr is a broker error answer as it reaches the hub.
@@ -63,6 +66,10 @@ var brokerRefusals = []struct {
 	// The broker's refusal of a start whose storage would be placed
 	// differently than configured (ptone/scion#6371) is relayed the same way.
 	{name: "422 storage migration", status: http.StatusUnprocessableEntity, code: "storage_migration_required", message: storageMigrationMessage},
+	// A start refused because the repository's git config sets keys agents
+	// may not be given: the refusal text reaches the client, not "Failed to
+	// start agent" (ptone/scion#6835).
+	{name: "422 git config refused", status: http.StatusUnprocessableEntity, code: "git_config_refused", message: gitConfigRefusedMessage},
 	{name: "403 policy", status: http.StatusForbidden, code: "forbidden", message: harnessPolicyMessage},
 	// A broker 400 validation_error is relayed by the same helper
 	// (ptone/scion#2666).
@@ -94,6 +101,7 @@ func TestDispatchCreateErrorResponse_OtherBrokerErrorsStay502(t *testing.T) {
 		{name: "500 harness_config_unusable", err: brokerHarnessConfigErr(http.StatusInternalServerError, "harness_config_unusable", "boom")},
 		{name: "500 storage_migration_required", err: brokerHarnessConfigErr(http.StatusInternalServerError, "storage_migration_required", "boom")},
 		{name: "503 forbidden", err: brokerHarnessConfigErr(http.StatusServiceUnavailable, "forbidden", "boom")},
+		{name: "500 git_config_refused", err: brokerHarnessConfigErr(http.StatusInternalServerError, "git_config_refused", "boom")},
 		{name: "500 project_storage_unavailable", err: brokerHarnessConfigErr(http.StatusInternalServerError, "project_storage_unavailable", "boom")},
 		{name: "403 without broker envelope", err: &brokerStatusError{StatusCode: http.StatusForbidden, Body: "<html>Forbidden</html>"}},
 		{name: "422 other code", err: brokerHarnessConfigErr(http.StatusUnprocessableEntity, "validation_error", "boom")},

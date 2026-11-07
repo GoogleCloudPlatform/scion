@@ -146,6 +146,8 @@ To share a page that works whether or not page view is on, build it as one self-
 
 The page cannot load data from the app after it opens, so include everything it needs at build time.
 
+For the Hub-wide content host, a separate origin for untrusted content, see [Content host](/scion/reference/security/#6-content-host). It serves shared artifacts only.
+
 ### Full fidelity: `scion tunnel`
 
 For a multi-file app, an app that talks to its own backend, or a dev server with live reload, use [`scion tunnel`](#tunnels-from-your-machine-scion-tunnel) from your machine. It needs the `scion` CLI and the `hub.conduit` experiment:
@@ -155,10 +157,6 @@ scion tunnel my-agent --port 5173 --local-port 5173
 ```
 
 Then open `http://127.0.0.1:5173/` in your browser. The app behaves as it does on its own machine.
-
-### Port page view (`hub.port_view` experiment)
-
-When an administrator enables the `hub.port_view` [experiment](/scion/reference/experiments/) (alpha, off by default) on a Hub with `hub.conduit` enabled, opening an exposed port from the Hub (`GET /api/v1/agents/{id}/ports/{port}/view`) mints a short-lived page link (default TTL [`server.hub.port_proxy.view_ttl`](/scion/reference/server-config/#port-proxy-serverhubport_proxy), `2h`) so a multi-file page's relative scripts (including module scripts), stylesheets, images, same-app `fetch()`/XHR calls, and WebSockets load in the browser without `scion tunnel`. Pages opened through a port view link must use relative URLs (not root-relative URLs starting with `/`), and browser storage, cookies, and web workers are unavailable inside the sandboxed page. Keep `hub.port_view` off on a Hub behind an authenticating front proxy (such as IAP).
 
 ### Behind an authenticating front proxy
 

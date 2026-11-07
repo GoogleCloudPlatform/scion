@@ -170,6 +170,7 @@ export function buildFixture() {
         experiments: {
           'federation.project_visitors': false,
           'hub.agent_edit_held': false,
+          'hub.artifact_archive': false,
           'hub.artifacts': false,
           'hub.attachment_artifacts': false,
           'hub.chat_retention': false,
@@ -177,6 +178,7 @@ export function buildFixture() {
           'hub.user_delete_force_cascade': false,
           'web.agent_badges': false,
           'web.agent_edit': true,
+          'web.artifact_manage_access': false,
           'web.artifact_review_editor': false,
           'web.chat_scheduled_send': false,
           'web.chat_starred_messages': true,

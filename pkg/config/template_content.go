@@ -50,6 +50,11 @@ func templateBelow(name, root, rel, scope string) *Template {
 	}
 }
 
+// OpenDir opens the template directory for reading or copying from, with
+// openDir's rules: every component from the trusted directory the template
+// was found from down is opened without following a symbolic link.
+func (t *Template) OpenDir() (*agenthome.Home, error) { return t.openDir() }
+
 // openDir opens the template directory for content reads. When the
 // Template records the trusted directory it was found from (templateBelow),
 // every component from there down is opened without following a link;
@@ -70,17 +75,7 @@ func (t *Template) openDir() (*agenthome.Home, error) {
 // isTemplateContentFileName reports whether value names a file inside the
 // template directory: filepath.IsLocal, no ".." element before cleaning,
 // and not the directory itself.
-func isTemplateContentFileName(value string) bool {
-	if !filepath.IsLocal(value) || filepath.Clean(value) == "." {
-		return false
-	}
-	for _, p := range strings.Split(filepath.ToSlash(value), "/") {
-		if p == ".." {
-			return false
-		}
-	}
-	return true
-}
+func isTemplateContentFileName(value string) bool { return IsHomeRelPath(value) }
 
 // refusedContent returns the error for a refused content file: a fixed
 // reason with a fix, wrapping ErrTemplateContentRefused, never the value or
@@ -181,4 +176,84 @@ func TemplateHasContentFile(t *Template, name string) bool {
 	}
 	_, found, err := readTemplateContent(t, name)
 	return found && err == nil
+}
+
+// placeholderSystemPrompt is the content of the system-prompt.md the default
+// template ships (embeds/templates/default). It stands for "no system prompt".
+const placeholderSystemPrompt = "# placeholder"
+
+// IsPlaceholderSystemPrompt reports whether content is not a real system prompt:
+// empty once trimmed, or exactly the default template's "# Placeholder"
+// (case-insensitive). A prompt that only starts with that heading is real.
+// The default template is first in every chain, so a template without its
+// own system-prompt.md resolves to the placeholder; passing it on would
+// replace the harness's own prompt (claude --system-prompt).
+//
+// Keep this rule identical to _is_meaningful_system_prompt in
+// harnesses/gemini-cli/provision.py, which applies it in the container.
+func IsPlaceholderSystemPrompt(content []byte) bool {
+	trimmed := strings.TrimSpace(string(content))
+	return trimmed == "" || strings.EqualFold(trimmed, placeholderSystemPrompt)
+}
+
+// ErrAgentConfigRefused is wrapped by the error of a scion-agent config read
+// (Template.LoadConfig) that is refused: the file or a directory on its path
+// is a symbolic link, or the file is not a plain single-link regular file or
+// is too large. The messages never contain a host path.
+var ErrAgentConfigRefused = errors.New("scion-agent config file refused")
+
+// maxAgentConfigBytes bounds a scion-agent config file read.
+const maxAgentConfigBytes = 4 << 20
+
+// agentConfigFileNames are the scion-agent config file names, in the order
+// they are preferred (GetScionAgentConfigPath's order).
+var agentConfigFileNames = []string{"scion-agent.yaml", "scion-agent.yml", "scion-agent.json"}
+
+// readAgentConfigFile reads t's scion-agent config file through t.openDir,
+// without following a link. It returns the file's path (for messages) and
+// content, or "" and nil data when the directory or every config file is
+// missing. A file that exists but is refused is an error wrapping
+// ErrAgentConfigRefused; the next name is not tried.
+func (t *Template) readAgentConfigFile() (string, []byte, error) {
+	home, err := t.openDir()
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return "", nil, nil
+		}
+		return "", nil, refusedAgentConfig(err)
+	}
+	defer func() { _ = home.Close() }()
+	for _, name := range agentConfigFileNames {
+		data, err := home.ReadFile(name, maxAgentConfigBytes)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return "", nil, refusedAgentConfig(err)
+		}
+		return filepath.Join(t.Path, name), data, nil
+	}
+	return "", nil, nil
+}
+
+// refusedAgentConfig maps an error from opening the directory or reading
+// the scion-agent config file to the reported error: a fixed reason
+// wrapping ErrAgentConfigRefused, never a host path.
+func refusedAgentConfig(err error) error {
+	reason := "the scion-agent config file cannot be read as a plain regular file inside its directory"
+	switch {
+	case errors.Is(err, agenthome.ErrLinkComponent):
+		reason = "a directory on the path to the scion-agent config file is a symbolic link"
+	case errors.Is(err, agenthome.ErrNotDirectory):
+		reason = "a component of the scion-agent config file path is not a directory"
+	case errors.Is(err, syscall.ELOOP):
+		reason = "the scion-agent config file is a symbolic link; replace it with the file itself"
+	case errors.Is(err, dirfd.ErrTooLarge):
+		reason = "the scion-agent config file is larger than 4 MiB"
+	case errors.Is(err, dirfd.ErrNotSingleLinkRegular):
+		reason = "the scion-agent config file is not a plain regular file (a symbolic link, hard link, directory or device)"
+	case errors.Is(err, fs.ErrPermission):
+		reason = "the scion-agent config file or its directory cannot be read (permission denied)"
+	}
+	return fmt.Errorf("%w: %s", ErrAgentConfigRefused, reason)
 }

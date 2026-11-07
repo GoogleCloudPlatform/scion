@@ -386,9 +386,10 @@ func classifyHeldEdits(applied, cmp *api.ScionConfig, raw map[string]json.RawMes
 	provision, cleared := reincarnateOnlyConfigEdits(raw, cmp, applied)
 	removed := removedConfigEntries(applied, cmp, present, canAttachEnv)
 	recorded := nextClearedFields(applied, cmp, raw, cleared, canAttachEnv)
+	resDropped := droppedResourceSubPaths(applied, cmp, present)
 	cleared = withDroppedResourcesSubField(cleared, applied, cmp, present)
 	provision = sup.heldProvisionEdits(provision, applied, cmp, recorded)
-	cleared = sup.heldClearEdits(cleared, recorded, droppedEnvKeys(applied, cmp, present))
+	cleared = sup.heldClearEdits(cleared, recorded, droppedEnvKeys(applied, cmp, present), resDropped)
 	removed = sup.heldRemovals(removed, recorded)
 	isCandidate := make(map[string]bool, len(candidates))
 	for _, k := range candidates {

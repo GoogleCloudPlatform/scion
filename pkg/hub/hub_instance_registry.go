@@ -481,8 +481,15 @@ func (r *hubInstanceRegistry) clock() time.Time {
 
 // jitteredHubInstanceInterval returns hubInstanceTickInterval ± 10%.
 func jitteredHubInstanceInterval() time.Duration {
+	return jitteredInterval(hubInstanceTickInterval)
+}
+
+// jitteredInterval returns d ± hubInstanceTickJitter, so replicas started
+// together do not tick in lock step. The registry writer and the async
+// start gate's refresh loop use it.
+func jitteredInterval(d time.Duration) time.Duration {
 	f := 1 + hubInstanceTickJitter*(2*rand.Float64()-1)
-	return time.Duration(float64(hubInstanceTickInterval) * f)
+	return time.Duration(float64(d) * f)
 }
 
 // tick takes one snapshot and writes it: TouchHubInstance (last_seen and the

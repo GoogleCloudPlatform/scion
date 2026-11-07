@@ -387,3 +387,9 @@ func (h *Home) copyFile(src *os.Root, s, t string, mode os.FileMode, b *treeBudg
 	}
 	return err
 }
+
+// SeedTree is not supported on this platform, which runs no broker: its
+// no-follow checks would be check-then-act rather than descriptor-based.
+func (h *Home) SeedTree(src *os.Root, opts SeedOptions) (SeedResult, error) {
+	return SeedResult{}, fmt.Errorf("agenthome: seeding a home: %w on this platform", errors.ErrUnsupported)
+}

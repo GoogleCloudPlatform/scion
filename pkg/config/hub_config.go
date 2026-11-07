@@ -112,6 +112,11 @@ type HubServerConfig struct {
 	// through the settings API in any mode.
 	TestIdentities *TestIdentitiesConfig `json:"testIdentities,omitempty" yaml:"testIdentities,omitempty" koanf:"testIdentities"`
 
+	// ContentURL is server.hub.content_url (ContentURLKey): the hub's content
+	// host, a second public origin on which shared artifacts are served.
+	// Empty serves them on the hub endpoint. See ValidateContentURL.
+	ContentURL string `json:"contentUrl,omitempty" yaml:"contentUrl,omitempty" koanf:"contentUrl"`
+
 	// MonitoringDashboardURL is an optional absolute http(s) URL of an
 	// external monitoring dashboard for this hub. The Health page links to
 	// it when set. See ValidateMonitoringDashboardURL.
@@ -231,6 +236,21 @@ func DefaultHubID() string {
 // hubIDFileName is the name of the file used to persist the derived hub ID
 // across restarts in workstation mode.
 const hubIDFileName = "hub-id"
+
+// ReadPersistedHubID returns the hub ID persisted in the global directory's
+// hub-id file (what PersistentHubID reads and writes), or "" when there is
+// none or it cannot be read. It never writes.
+func ReadPersistedHubID() string {
+	globalDir, err := GetGlobalDir()
+	if err != nil {
+		return ""
+	}
+	data, err := os.ReadFile(filepath.Join(globalDir, hubIDFileName))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
 
 // PersistentHubID returns the hub instance ID, persisting the derived value to
 // disk on first call so that subsequent startups use the same ID even if the
@@ -756,6 +776,13 @@ type RuntimeTargetConfig struct {
 	SharedDirStorageBackends         map[string]string   `json:"sharedDirStorageBackends,omitempty" yaml:"sharedDirStorageBackends,omitempty" koanf:"sharedDirStorageBackends"`
 	HomeStorageBackend               string              `json:"homeStorageBackend,omitempty" yaml:"homeStorageBackend,omitempty" koanf:"homeStorageBackend"`
 	HomeStorageLeaf                  string              `json:"homeStorageLeaf,omitempty" yaml:"homeStorageLeaf,omitempty" koanf:"homeStorageLeaf"`
+	// Cloud Run only. See V1RuntimeTargetConfig.
+	ProjectID       string `json:"projectId,omitempty" yaml:"projectId,omitempty" koanf:"projectId"`
+	Region          string `json:"region,omitempty" yaml:"region,omitempty" koanf:"region"`
+	ServiceAccount  string `json:"serviceAccount,omitempty" yaml:"serviceAccount,omitempty" koanf:"serviceAccount"`
+	Network         string `json:"network,omitempty" yaml:"network,omitempty" koanf:"network"`
+	Subnetwork      string `json:"subnetwork,omitempty" yaml:"subnetwork,omitempty" koanf:"subnetwork"`
+	CredentialsFile string `json:"credentialsFile,omitempty" yaml:"credentialsFile,omitempty" koanf:"credentialsFile"`
 }
 
 // DatabaseConfig holds database connection settings.
@@ -1426,7 +1453,7 @@ func DefaultGlobalConfig() GlobalConfig {
 			Port:                          9800,
 			Host:                          DefaultBrokerHost,
 			ReadTimeout:                   30 * time.Second,
-			WriteTimeout:                  120 * time.Second, // Longer for agent operations
+			WriteTimeout:                  210 * time.Second, // Outlasts the hub's 180s broker request limit (ptone/scion#6829)
 			CORSEnabled:                   false,             // off by default with no origins: nothing calls the broker from a browser (opt in with server.broker.cors)
 			CORSAllowedOrigins:            []string{},
 			CORSAllowedMethods:            []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},

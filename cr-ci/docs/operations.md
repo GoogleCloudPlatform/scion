@@ -206,7 +206,9 @@ All tool versions and checksums are pinned in one place, the `ARG` block of
 
 **Rollback:** `scripts/deploy-job.sh --tag <previous tag> --apply`. Across the
 runner layout switch (below), run `deploy-job.sh` from the older commit: it sets
-the older volume mount together with the older tag. Old tags
+the older volume mount together with the older tag. Routed jobs that use
+`setup-go-cache` then fail its parity step: since cr-ci FIXUP-7 it accepts only
+the new layout, so restore its old-layout branch first. Old tags
 stay in `ARTIFACT_REPO` (list them with
 `gcloud artifacts docker tags list REGION-docker.pkg.dev/GCP_PROJECT/ARTIFACT_REPO/RUNNER_IMAGE_NAME`).
 
@@ -234,12 +236,15 @@ job's volume mount must match:
   has the new layout: it updates the image tag and the mount in the same
   `gcloud run jobs update`, and the warm-up execution checks the new layout
   before the first real job. The mediator does not change.
-- **The parity check in `.github/actions/setup-go-cache` accepts both layouts**
-  for the switch: the old `/scratch` links, or real directories on a volume at
-  HOME. **Removal step:** once every cr-ci deployment runs an image with the new
-  layout (check the warm-up log and a routed job's "Check cr-ci cache parity"
-  step for `real directory` lines and no `old cr-ci runner layout` note), delete
-  the `if [ -L /home/runner/work ]` branch from that step in a cr-ci change.
+- **The parity check in `.github/actions/setup-go-cache` accepts only the new
+  layout**: real directories on a volume at HOME. **Removal step: done** (cr-ci
+  FIXUP-7, 2026-10-31). During the switch it also accepted the old `/scratch`
+  links. That branch was removed after usw2 ran the new image (job generation 4;
+  the routed parity steps logged `real directory` lines and no `old cr-ci runner
+  layout` note). A runner still on the old layout now fails the parity step
+  (`real directory /home/runner/work is '/scratch/_work'`): run `deploy-job.sh
+  --apply --warm-up` from a current commit. `templates_test.go`
+  (`TestCacheParityActionNewLayoutOnly`) keeps the branch out.
 - **Live verification after the switch** (on a named companion GO): a routed
   diagnostic job checks `pwd -P`, actions/setup-node's npm cache, a temp-directory
   ancestor check, and single-node-vm's tests, and ii3 reads its memory and disk.

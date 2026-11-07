@@ -654,6 +654,20 @@ func heldTargetDMError(agent *store.Agent) *AgentDMError {
 	}
 }
 
+// heldTargetRefusal is the refusal of a send to target when it is held:
+// heldTargetDMError for a held target, heldLookupFaultDMError when the hold
+// could not be read, and nil otherwise.
+func (s *Server) heldTargetRefusal(ctx context.Context, target *store.Agent) *AgentDMError {
+	held, err := s.agentHeld(ctx, target.ID)
+	if err != nil {
+		return heldLookupFaultDMError()
+	}
+	if held {
+		return heldTargetDMError(target)
+	}
+	return nil
+}
+
 // agentStandingForbidden runs agentStanding for an agent caller and writes
 // the endpoint's generic refusal when it fails: 403 Forbidden for a policy
 // refusal (the same response a caller with no access gets), 500 for a
