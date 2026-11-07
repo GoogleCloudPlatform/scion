@@ -904,6 +904,12 @@ export interface CreateLinkResponse {
   link: ShareLink;
   /** Hub-relative path of the link; shown once, never retrievable later. */
   url: string;
+  /**
+   * The absolute link on the hub's content host
+   * (server.hub.content_url), present only when the hub has one; built by the
+   * hub from its configuration, never from the request.
+   */
+  shareUrl?: string;
   /** The link ends earlier than asked because the artifact expires then. */
   clampedToArtifactExpiry?: boolean;
 }
@@ -1114,6 +1120,18 @@ export async function patchArtifact(
 /** The absolute URL of a share link from the hub-relative path it was created with. */
 export function shareLinkUrl(path: string, origin: string): string {
   return new URL(path, origin).toString();
+}
+
+/**
+ * The link to show and copy for a created share link: the hub's shareUrl on
+ * its content host when it sent one, otherwise the hub-relative url
+ * made absolute on origin.
+ */
+export function createdLinkUrl(
+  created: Pick<CreateLinkResponse, 'url' | 'shareUrl'>,
+  origin: string
+): string {
+  return created.shareUrl || shareLinkUrl(created.url, origin);
 }
 
 /**

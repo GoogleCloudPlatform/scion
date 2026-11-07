@@ -106,6 +106,8 @@ interface Server {
   holdCreate?: boolean;
   /** When set, POST /links answers this hub refusal. */
   createError?: { status: number; code: string; message: string };
+  /** When set, POST /links answers with this shareUrl (a hub with a content host). */
+  shareUrl?: string;
   release?: () => void;
 }
 
@@ -147,6 +149,7 @@ function mockServer(init: Partial<Server> = {}): Server {
             {
               link: l,
               url: '/api/v1/artifacts/shared/TOKEN123',
+              ...(s.shareUrl ? { shareUrl: s.shareUrl } : {}),
               clampedToArtifactExpiry: s.clamped,
             },
             201
@@ -431,6 +434,22 @@ describe('share dialog', () => {
     await settle(el);
     expect($(el, '.created')).toBeNull();
     expect(showsToken(el)).toBe(false);
+  });
+
+  it('shows and copies the hub shareUrl when the hub has a content host (ptone/scion#7107)', async () => {
+    const shareUrl = 'https://links.example.net/api/v1/artifacts/shared/TOKEN123';
+    mockServer({ shareUrl });
+    const writeText = vi.fn(() => Promise.resolve());
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+    const el = await mount();
+    button(el, 'Create link').click();
+    await settle(el);
+
+    const input = $(el, '.created sl-input') as HTMLElement & { value: string };
+    expect(input.value).toBe(shareUrl);
+    button(el, 'Copy').click();
+    await settle(el);
+    expect(writeText).toHaveBeenCalledWith(shareUrl);
   });
 
   it('forgets a created link when Done closes the dialog', async () => {

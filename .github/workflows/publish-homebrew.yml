@@ -121,6 +121,10 @@ jobs:
       # shallow checkout above fetches only the preview tag, so describe
       # returns it; if both tags were ever present and describe picked the
       # nightly, this check fails instead of building a mislabelled image.
+      # build-images.sh also accepts only release tag forms, by the same rule
+      # as hack/version.sh, so the second check fails when hack/version.sh
+      # does not stamp exactly TAG (a tag form outside that rule would build
+      # images whose binaries report "dev").
       - name: Verify checkout is the release tag
         env:
           TAG: ${{ needs.gate.outputs.tag }}
@@ -130,6 +134,14 @@ jobs:
             echo "::error::checkout is at '${described}', not ${TAG}"
             exit 1
           fi
+          ldflags=$(bash hack/version.sh scionpkg)
+          case " ${ldflags} " in
+            *" -X scionpkg.Version=${TAG} "*) ;;
+            *)
+              echo "::error::hack/version.sh does not stamp ${TAG} (not a release tag form?); the images would report 'dev'"
+              exit 1
+              ;;
+          esac
 
       # The runner image ships toolchains this job never uses; the image
       # build needs the disk space.

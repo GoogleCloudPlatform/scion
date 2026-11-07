@@ -523,6 +523,7 @@ var testAdminSettingsKeyPolicy = map[string]testAdminPolicy{
 	"default_gcp_identity_service_account_id":  testAdminPolicyDeny,
 	"server.hub.public_url":                    testAdminPolicyDeny,
 	"server.hub.hub_name":                      testAdminPolicyDeny,
+	"server.hub.content_url":                   testAdminPolicyDeny,
 	"image_registry":                           testAdminPolicyDeny,
 	"server.hub.monitoring_dashboard_url":      testAdminPolicyDeny,
 	"server.github_app":                        testAdminPolicyDeny,

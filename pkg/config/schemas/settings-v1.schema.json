@@ -1411,6 +1411,14 @@
           "description": "Public-facing URL for this Hub server. Passed to agents for status callbacks.",
           "x-env-var": "SCION_SERVER_HUB_ENDPOINT"
         },
+        "content_url": {
+          "type": "string",
+          "format": "uri",
+          "maxLength": 2048,
+          "description": "Optional content host: a second public origin, apart from public_url, on which shared artifact links and HTML artifact views are served. Must be https://host[:port] (http only for localhost or a loopback address), with no path, query, fragment or user credentials; IPv6 literals are refused. A value whose host name is public_url's host name, at any scheme or port, is refused on save and ignored at runtime. A value on public_url's registrable domain is accepted with a warning. On a request whose Host is this value the Hub serves only the artifact share and view routes and answers 404 to everything else, and it never sends or accepts the Hub session there. The content host must not sit behind an identity-aware proxy. Empty, the default, serves everything on public_url. Admins set it through the server-config API; user access tokens cannot.",
+          "x-env-var": "SCION_SERVER_HUB_CONTENTURL",
+          "x-since": "1"
+        },
         "agent_endpoint": {
           "type": "string",
           "format": "uri",

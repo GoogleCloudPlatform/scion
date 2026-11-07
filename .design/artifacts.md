@@ -15,7 +15,7 @@ The feature is behind the `hub.artifacts` experiment (default off).
 | D5 | Share links and retention exist in the schema; artifacts are the collaboration medium for cross-project messaging. |
 | D6 | An artifact is a bundle (1..n files, one entry file); a single file is the degenerate case; a version snapshots the manifest. |
 | D7 | Principal-owned, home scope, ACL (scope / principal / link grants) with a neutral scope column. |
-| D8 | HTML renders in a sandboxed iframe (strict CSP, no same-origin) served by the hub; a separate artifact origin when public links ship. |
+| D8 | HTML renders in a sandboxed iframe (strict CSP, no same-origin) served by the hub. The hub's sandboxing is best effort; a secondary origin that routes back to the same hub is an operator best practice, not a precondition (ptone, 2026-11-02). When an operator sets one, the Hub-wide content host (`server.hub.content_url`, ptone/scion#7107 phase A), share links are offered on it and the hub confines it to the share and view routes. |
 | D9 | Publish uploads through the service, with a two-step `create version → upload files → finalize` contract so direct-to-object-store upload is additive later. |
 | D10 | Message refs: structured ref in message metadata plus the `scion://artifact/<id>[@<seq>]` URL in the body; refs carry ids only, never a title; access is checked at read time, per reader. |
 | D11 | A review is a new version (`kind: review`) carrying CriticMarkup; no overlay object. |

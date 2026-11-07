@@ -372,8 +372,25 @@ func (s *Server) handleAdminServerConfigSectionReset(w http.ResponseWriter, r *h
 	publicURLBefore := ""
 	if sectionName == "endpoints" {
 		if publicURLBefore = storedManagedPublicURL(ops); publicURLBefore != "" {
-			if err := s.auditPublicURLChange(r.Context(), gcpIAMSurfaceReset, publicURLBefore, ""); err != nil {
+			if err := s.auditEndpointURLChange(r.Context(), config.PublicURLKey, gcpIAMSurfaceReset, publicURLBefore, ""); err != nil {
 				slog.Error("Failed to record public URL change", "error", err)
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+					"Failed to reset section", nil)
+				return
+			}
+		}
+	}
+
+	// It changes the content host in effect when the row sets one other
+	// than the bootstrap value: recorded before the reset in the same way
+	// (ptone/scion#7107 phase A).
+	contentURLBefore, contentURLAfter := "", ""
+	contentURLChange := false
+	if sectionName == "endpoints" {
+		contentURLBefore, contentURLAfter = ops.Snapshot().ContentURL, ops.bootstrapContentURL()
+		if contentURLChange = contentURLBefore != contentURLAfter; contentURLChange {
+			if err := s.auditEndpointURLChange(r.Context(), config.ContentURLKey, gcpIAMSurfaceReset, contentURLBefore, contentURLAfter); err != nil {
+				slog.Error("Failed to record content URL change", "error", err)
 				writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 					"Failed to reset section", nil)
 				return
@@ -392,7 +409,10 @@ func (s *Server) handleAdminServerConfigSectionReset(w http.ResponseWriter, r *h
 		err = ops.DeleteSection(r.Context(), sectionName)
 	}
 	if publicURLBefore != "" && err != nil {
-		s.auditPublicURLNotApplied(r.Context(), gcpIAMSurfaceReset, publicURLBefore, "", err)
+		s.auditEndpointURLNotApplied(r.Context(), config.PublicURLKey, gcpIAMSurfaceReset, publicURLBefore, "", err)
+	}
+	if contentURLChange && err != nil {
+		s.auditEndpointURLNotApplied(r.Context(), config.ContentURLKey, gcpIAMSurfaceReset, contentURLBefore, contentURLAfter, err)
 	}
 	if gcpIAMChange {
 		// The approval covers only this reset's own self-apply.
@@ -604,6 +624,11 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 	if !validateMonitoringDashboardURLRequest(w, &req) {
 		return
 	}
+	// The content host: the same check as the DB path, against the running
+	// agent endpoint and the one this save sends (S2).
+	if !validateContentURLRequest(w, &req, s.HubEndpoints().Public, s.config.AgentEndpoint, requestAgentEndpoint(&req)) {
+		return
+	}
 
 	// server.auth.default_user_role must be one of the schema enum values
 	// (design D6). The DB path validates section docs against the schema;
@@ -694,7 +719,11 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 		Runtimes map[string]config.V1RuntimeConfig `yaml:"runtimes"`
 		Profiles map[string]config.V1ProfileConfig `yaml:"profiles"`
 	}
+	// The file as read, before the merge: the content URL audit below
+	// compares its content_url with the merged file's (S1).
+	var settingsBefore []byte
 	if data, err := os.ReadFile(settingsPath); err == nil {
+		settingsBefore = data
 		if err := yamlv3.Unmarshal(data, &raw); err != nil {
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to parse existing settings", nil)
 			return
@@ -867,7 +896,27 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 		saveWarnings = append(saveWarnings, gcpIdentityWarning)
 	}
 
+	// A change to the content host in effect is recorded before the write,
+	// as in database mode; if the record cannot be written, nothing is
+	// written (ptone/scion#7107 phase A, SEC-A1).
+	// The values compared are the file's content_url before the merge and
+	// the merged file's, so a clear through null or a "hub": null is
+	// recorded too, whatever the request names (SEC-A2), and a value that
+	// comes only from the environment never looks like a change (S1).
+	fileContentURLBefore, fileContentURLAfter := contentURLFileChange(settingsBefore, newData)
+	fileContentURLChange := false
+	if fileContentURLChange = fileContentURLBefore != fileContentURLAfter; fileContentURLChange {
+		if err := s.auditEndpointURLChange(r.Context(), config.ContentURLKey, gcpIAMSurfaceSave, fileContentURLBefore, fileContentURLAfter); err != nil {
+			slog.Error("PUT server-config: failed to record content URL change", "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to write settings file", nil)
+			return
+		}
+	}
+
 	if err := config.WriteSettingsFileLocked(settingsLock, settingsPath, newData); err != nil {
+		if fileContentURLChange {
+			s.auditEndpointURLNotApplied(r.Context(), config.ContentURLKey, gcpIAMSurfaceSave, fileContentURLBefore, fileContentURLAfter, err)
+		}
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to write settings file", nil)
 		return
 	}

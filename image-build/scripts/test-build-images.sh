@@ -763,6 +763,121 @@ check_not_contains "v* first: v* one commit behind HEAD: no VERSION build-arg" "
 check_not_contains "v* first: v* one commit behind HEAD: no warning" "HEAD is exactly on tag" "${OUT}"
 
 # ---------------------------------------------------------------------------
+# VERSION accepts only release tag forms (build-images.sh and hack/version.sh)
+# ---------------------------------------------------------------------------
+
+HACK_VERSION="${HACK_VERSION_UNDER_TEST:-${SCRIPT_DIR}/../../hack/version.sh}"
+PUBLISH_HOMEBREW="${SCRIPT_DIR}/../../.github/workflows/publish-homebrew.yml"
+
+# One rule, textually identical in both scripts.
+rule_of() { sed -n '/^# BEGIN release-tag rule/,/^# END release-tag rule/p' "$1"; }
+rule_bi="$(rule_of "${IMAGE_BUILD_SRC}/scripts/build-images.sh")"
+rule_hv="$(rule_of "${HACK_VERSION}")"
+check_not_contains "release-tag rule: present in build-images.sh" "<empty>" "${rule_bi:-<empty>}"
+check_eq "release-tag rule: hack/version.sh is identical to build-images.sh" "${rule_bi}" "${rule_hv}"
+
+# tagged_repo <name> <tag>: a copy of OFF with <tag> on HEAD.
+tagged_repo() {
+  cp -R "${OFF}" "${TMP}/tag-$1"
+  git -C "${TMP}/tag-$1" tag "$2"
+}
+# run_hv <repo>: hack/version.sh in <repo>; sets HV_OUT, HV_ERR and RC.
+run_hv() {
+  set +e
+  HV_OUT="$(cd "$1" && env -i PATH="${TOOLBIN}" HOME="${TMP}/home" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+    bash "${HACK_VERSION}" scionpkg 2>"${TMP}/hv.err")"
+  RC=$?
+  set -e
+  HV_ERR="$(cat "${TMP}/hv.err")"
+}
+
+n=0
+for t in v1.2.3 v1.2.3-preview.4 v1.2.3-rc.1 v10.0.0 nightly-20261106; do
+  n=$((n + 1))
+  tagged_repo "ok${n}" "${t}"
+  r="${TMP}/tag-ok${n}"
+  run_bi "${r}" --dry-run --target all --tag "${t}"
+  check_contains "release tag ${t}: banner" "Version:  ${t}" "${OUT}"
+  check_contains "release tag ${t}: VERSION build-arg" "--build-arg VERSION=${t}" "$(line_for scion-base)"
+  check_not_contains "release tag ${t}: no warning" "not a release tag form" "${OUT}"
+  run_bi "${r}" --dry-run --target all --builder cloud-build --registry reg.example/x --tag "${t}"
+  check_contains "release tag ${t}: cloud-build _VERSION" "_VERSION=${t}" "${OUT}"
+  run_hv "${r}"
+  check_contains "release tag ${t}: hack/version.sh stamps it" " -X scionpkg.Version=${t}" "${HV_OUT}"
+  check_eq "release tag ${t}: hack/version.sh no warning" "" "${HV_ERR}"
+done
+
+# Rejected: <tag>|<named in the warning: yes or no>. git refuses a space in a
+# tag name, so ';' stands in for other punctuation.
+n=0
+for c in 'v1.2.3,_TAG=x|no' 'v1.2.3;x|no' 'v1.2|yes' 'v1.2.3-beta.1|yes' 'v01.2.3|yes' 'nightly-2026110|yes' 'latest|yes'; do
+  n=$((n + 1))
+  t="${c%|*}"
+  named="${c#*|}"
+  tagged_repo "bad${n}" "${t}"
+  r="${TMP}/tag-bad${n}"
+  if [ "${named}" = "yes" ]; then
+    want_warn="Warning: tag ${t} is not a release tag form; VERSION is left empty and the binaries report \"dev\"."
+  else
+    want_warn="Warning: a tag with unexpected characters is not a release tag form; VERSION is left empty and the binaries report \"dev\"."
+  fi
+  run_bi "${r}" --dry-run --target all
+  check_rc "non-release tag ${t}: exit 0 (not a build failure)" 0 "${RC}"
+  check_contains "non-release tag ${t}: off-tag banner" "Version:  <none" "${OUT}"
+  check_not_contains "non-release tag ${t}: no VERSION build-arg" "VERSION=" "$(line_for scion-base)"
+  check_contains "non-release tag ${t}: warning" "${want_warn}" "${OUT}"
+  check_not_contains "non-release tag ${t}: no HEAD-on-tag warning" "HEAD is exactly on tag" "${OUT}"
+  if [ "${named}" = "no" ]; then
+    check_not_contains "non-release tag ${t}: tag not printed" "${t}" "${OUT}"
+  fi
+  run_bi "${r}" --dry-run --target all --builder cloud-build --registry reg.example/x
+  check_rc "non-release tag ${t}: cloud-build exit 0" 0 "${RC}"
+  check_not_contains "non-release tag ${t}: no _VERSION substitution" "_VERSION=" "${OUT}"
+  check_not_contains "non-release tag ${t}: tag not in the substitutions" "${t}," "${OUT}"
+  run_hv "${r}"
+  check_rc "non-release tag ${t}: hack/version.sh exit 0" 0 "${RC}"
+  check_not_contains "non-release tag ${t}: hack/version.sh stamps no Version" "Version=" "${HV_OUT}"
+  check_contains "non-release tag ${t}: hack/version.sh still stamps Commit" "-X scionpkg.Commit=" "${HV_OUT}"
+  check_eq "non-release tag ${t}: hack/version.sh warning" "${want_warn}" "${HV_ERR}"
+done
+
+# v* first still holds: a valid v* tag wins over a valid nightly (BOTH), and
+# hack/version.sh agrees; off-tag stamps nothing and warns nothing.
+run_hv "${BOTH}"
+check_contains "hack/version.sh: nightly + v* on HEAD: stamps v*" " -X scionpkg.Version=v9.9.9" "${HV_OUT}"
+run_hv "${OFF}"
+check_not_contains "hack/version.sh: off-tag: no Version" "Version=" "${HV_OUT}"
+check_eq "hack/version.sh: off-tag: no warning" "" "${HV_ERR}"
+
+# publish-homebrew.yml's "Verify checkout is the release tag" step, run as
+# written against a checkout of the tag: it passes for a release tag and
+# fails for a tag its gate admits but hack/version.sh does not stamp.
+verify_step="$(awk '
+  /- name: Verify checkout is the release tag/ { on = 1; next }
+  on && /^      - name:/ { exit }
+  on && run { sub(/^          /, ""); print; next }
+  on && /run: \|/ { run = 1 }
+' "${PUBLISH_HOMEBREW}")"
+check_contains "publish-homebrew verify step: extracted" "hack/version.sh" "${verify_step}"
+# run_verify <repo> <tag>: sets OUT and RC.
+run_verify() {
+  mkdir -p "$1/hack"
+  cp "${HACK_VERSION}" "$1/hack/version.sh"
+  set +e
+  OUT="$(cd "$1" && env -i PATH="${TOOLBIN}" HOME="${TMP}/home" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+    TAG="$2" bash -e -c "${verify_step}" 2>&1)"
+  RC=$?
+  set -e
+}
+tagged_repo pv-ok v1.2.3-preview.4
+run_verify "${TMP}/tag-pv-ok" v1.2.3-preview.4
+check_rc "publish-homebrew verify: v1.2.3-preview.4 passes" 0 "${RC}"
+tagged_repo pv-bad v1.2.3-preview.04
+run_verify "${TMP}/tag-pv-bad" v1.2.3-preview.04
+check_rc "publish-homebrew verify: v1.2.3-preview.04 fails" 1 "${RC}"
+check_contains "publish-homebrew verify: v1.2.3-preview.04 message" "::error::hack/version.sh does not stamp v1.2.3-preview.04" "${OUT}"
+
+# ---------------------------------------------------------------------------
 # BUILD_TIME / SOURCE_DATE_EPOCH from the commit time
 # ---------------------------------------------------------------------------
 

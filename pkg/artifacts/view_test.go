@@ -52,6 +52,9 @@ func (f *fixture) mintView(p *principal, id string, seq int) (*ViewResponse, int
 func TestViewServesTheBundle(t *testing.T) {
 	f := newFixture(t, true) // object storage: views still stream
 	f.svc.SetViewKey(testViewKey)
+	// The CSP names the hub's configured public origin, not the request's
+	// Host (httptest requests carry example.com either way).
+	f.svc.SetLimits(func(context.Context) Limits { return Limits{PublicOrigin: "https://example.com"} })
 	pub := f.publishBundle(agentA, "/api/v1/artifacts", htmlSite.manifest("index.html"), htmlSite)
 	id := pub.Artifact.ID
 

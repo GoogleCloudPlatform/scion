@@ -791,7 +791,33 @@ func TestArtifactsHTMLViewOnRoutes(t *testing.T) {
 	assert.Equal(t, string(page), anon.Body.String())
 	assert.Contains(t, anon.Header().Get("Content-Security-Policy"), "sandbox allow-scripts;")
 	assert.NotContains(t, anon.Header().Get("Content-Security-Policy"), "allow-same-origin")
-	assert.Contains(t, anon.Header().Get("Content-Security-Policy"), "img-src example.com"+strings.TrimSuffix(view.URL, "index.html")+" data:")
+	// The view CSP names the hub's configured public origin, never the
+	// request Host or X-Forwarded-Host (ptone/scion#7107 phase A, condition
+	// 1). With no public URL configured it has no source at all ('none').
+	viewBase := strings.TrimSuffix(view.URL, "index.html")
+	hostileView := func() string {
+		r := httptest.NewRequest(http.MethodGet, view.URL, nil)
+		r.Host = "evil-host.example.org"
+		r.Header.Set("X-Forwarded-Host", "evil-xfh.example.net")
+		r.Header.Set("Forwarded", "host=evil-fwd.example.net")
+		hv := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(hv, r)
+		require.Equal(t, http.StatusOK, hv.Code, hv.Body.String())
+		return hv.Header().Get("Content-Security-Policy")
+	}
+	assert.Contains(t, anon.Header().Get("Content-Security-Policy"), "img-src 'none' data:")
+	assert.NotContains(t, anon.Header().Get("Content-Security-Policy"), "example.com")
+	unset := hostileView()
+	assert.Contains(t, unset, "img-src 'none' data:")
+	for _, hostile := range []string{"evil-host.example.org", "evil-xfh.example.net", "evil-fwd.example.net"} {
+		assert.NotContains(t, unset, hostile, "unset: a request-supplied host reached the CSP")
+	}
+	srv.config.HubEndpoints = &HubEndpoints{Operator: "https://example.com", Public: "https://example.com"}
+	configured := hostileView()
+	assert.Contains(t, configured, "img-src example.com"+viewBase+" data:")
+	for _, hostile := range []string{"evil-host.example.org", "evil-xfh.example.net", "evil-fwd.example.net"} {
+		assert.NotContains(t, configured, hostile, "configured: a request-supplied host reached the CSP")
+	}
 
 	badCred := httptest.NewRequest(http.MethodGet, view.URL, nil)
 	badCred.Header.Set("Authorization", "Bearer not-a-valid-token")

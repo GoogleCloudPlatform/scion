@@ -223,6 +223,27 @@ type ReviewGrantClauser interface {
 	ReviewGrantClause(ctx context.Context, ownerAgentID, homeScope, sponsorRef string) string
 }
 
+// GrantNotifier is an optional extension of Host for Ask for review
+// (ptone/scion#5145): a grant with notify may tell its user subject. A host
+// without it sends nothing, and the response says notifySkipped
+// "unavailable" (fail closed).
+type GrantNotifier interface {
+	// MayNotifyGrant: the whole send authorization, synchronous, writes nothing.
+	// ok=false, err=nil -> "not_permitted"; err != nil -> "unavailable".
+	MayNotifyGrant(ctx context.Context, subjectUserID string) (ok bool, err error)
+	// NotifyGrant: after commit, synchronous, best effort; returns the write error.
+	NotifyGrant(ctx context.Context, n GrantNotice) error
+}
+
+// GrantNotice describes a committed grant whose subject is to be told. It
+// carries ids and enums only: no title and no free text (K14/K19).
+type GrantNotice struct {
+	ArtifactID, HomeScope, SubjectUserID, Permission string
+	// ActorKind, ActorRef and Authority are the granter's, as its event
+	// records them. The hub refuses ActorKind != user in this phase.
+	ActorKind, ActorRef, Authority string
+}
+
 // PrincipalChecker is an optional extension of Host (ptone/scion#4529).
 // The owner liveness reconciler asks it which artifact owners still exist,
 // so it can mark the artifacts of a deleted agent or user. A host without
