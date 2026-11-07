@@ -20,7 +20,6 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -47,11 +46,8 @@ func TestSSEHandler_AgentUnauthorized(t *testing.T) {
 	pub := &sseCountingPublisher{ChannelEventPublisher: NewChannelEventPublisher()}
 	defer pub.Close()
 	ws := &WebServer{store: s, events: pub, authzService: NewAuthzService(s, slog.Default())}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // Bounds the old, incorrectly accepted streaming path without sleeps.
 	subject := "agent." + id + ".>"
-	w := httptest.NewRecorder()
-	ws.handleSSE(w, sseAgentRequest(ctx, "user-1", "user", subject))
+	w := serveSSELive(t, ws, func(ctx context.Context) *http.Request { return sseAgentRequest(ctx, "user-1", "user", subject) })
 	assert.Equal(t, http.StatusForbidden, w.Code)
 	assert.False(t, w.Flushed)
 	assert.Zero(t, pub.subscriptions, "denied requests must never subscribe")
@@ -179,10 +175,7 @@ func TestSSEHandler_AgentMixedBatch(t *testing.T) {
 			if deny {
 				subjects = append(subjects, deniedSubject)
 			}
-			ctx, cancel := context.WithCancel(context.Background())
-			cancel()
-			w := httptest.NewRecorder()
-			ws.handleSSE(w, sseAgentRequest(ctx, "user-1", "user", subjects...))
+			w := serveSSELive(t, ws, func(ctx context.Context) *http.Request { return sseAgentRequest(ctx, "user-1", "user", subjects...) })
 			if deny {
 				assert.Equal(t, http.StatusForbidden, w.Code)
 				assert.False(t, w.Flushed)

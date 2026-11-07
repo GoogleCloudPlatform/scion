@@ -272,7 +272,14 @@ func normalizeConstraintAuditAuthFailures(w http.ResponseWriter, r *http.Request
 
 // serveAfterAuth unwraps the response normalizer before entering downstream
 // middleware or a handler, so only authentication failures are rewritten.
+// It also carries the request's note of authorization checks stopped by
+// the request context ending, and writes its one summary line (if any)
+// when the handler returns, including on panic.
 func serveAfterAuth(w http.ResponseWriter, next http.Handler, r *http.Request) {
+	if ctx, note := withAuthzStoppedNote(r.Context()); note != nil {
+		r = r.WithContext(ctx)
+		defer note.emit(r)
+	}
 	if normalizer, ok := w.(*constraintAuditAuthFailureWriter); ok {
 		next.ServeHTTP(normalizer.ResponseWriter, r)
 		return
