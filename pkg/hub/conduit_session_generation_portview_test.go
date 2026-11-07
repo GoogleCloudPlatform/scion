@@ -56,6 +56,45 @@ func TestPortViewSessionGen_SameUserCurrentAllowed(t *testing.T) {
 	}
 }
 
+// Fails if the page view path stops capturing (for example if the capture
+// moves into the agent port route only), on a hub JWT request that carries
+// no session generation (here: no user store, so the JWT arm sets none). The
+// capture's own refusal answers it with this exact body; without the capture
+// on this path the request would instead reach the conduit transport and be
+// denied there by the track-time guard, with a different answer. So this
+// also pins that the capture runs on the page view path.
+func TestPortViewSessionGen_JWTWithoutGenerationRefused(t *testing.T) {
+	f := newPortViewFixture(t, nil)
+	f.startAgent(t)
+	saved := f.srv.authConfig.UserStore
+	f.srv.authConfig.UserStore = nil
+	t.Cleanup(func() { f.srv.authConfig.UserStore = saved })
+	for name, h := range map[string]http.Header{"navigation": navHeader(), "sub-request": subHeader()} {
+		res := f.send(t, http.MethodGet, f.viewURL(f.ownerCap(), "page.html"), withBearer(h, f.userToken), nil)
+		assert.Equal(t, http.StatusUnauthorized, res.status, "%s: %s", name, res.body)
+		assert.Equal(t, `{"error":{"code":"unauthorized","message":"invalid access token"}}`+"\n", res.body, name)
+	}
+}
+
+// The documented limit: a credential-less page view link keeps working
+// after the link user's sessions are revoked, until the link expires
+// (view_ttl). Fails if a revoke-all starts cutting credential-less links
+// (a behaviour change this restack does not make) or if the link stops
+// being served at all.
+func TestPortViewSessionGen_SignedLinkSurvivesRevokeAll(t *testing.T) {
+	f := newPortViewFixture(t, nil)
+	f.startAgent(t)
+	link := f.viewURL(f.ownerCap(), "page.html")
+	before := f.send(t, http.MethodGet, link, subHeader(), nil)
+	require.Equal(t, http.StatusOK, before.status, before.body)
+
+	revokeSessions(t, f.srv, f.launched.OwnerID)
+
+	after := f.send(t, http.MethodGet, link, subHeader(), nil)
+	require.Equal(t, http.StatusOK, after.status, "the credential-less link still works after a revoke-all: %s", after.body)
+	assert.Equal(t, "hello /page.html?", after.body)
+}
+
 // Fails if the scoped page view identity's captured generation stops
 // driving the stream re-check: a stream opened as the link user's own
 // captured identity is closed once that user's sessions are revoked.
