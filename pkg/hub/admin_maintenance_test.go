@@ -808,3 +808,34 @@ func TestListMaintenanceOperations_ShowsContainerBinariesWhenEnvSet(t *testing.T
 		t.Error("rebuild-container-binaries should be visible when SCION_DEV_BINARIES is set")
 	}
 }
+
+// An invalid branch parameter on rebuild-server or rebuild-web is refused
+// with 400 and the allowed form, before any run is created.
+func TestExecuteOperation_InvalidBranchRejected(t *testing.T) {
+	for _, key := range []string{"rebuild-server", "rebuild-web"} {
+		t.Run(key, func(t *testing.T) {
+			srv, s := newTestServerWithStore(t)
+			admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/maintenance/operations/"+key+"/run",
+				strings.NewReader(`{"params":{"branch":"--upload-pack=x"}}`))
+			req.Header.Set("Content-Type", "application/json")
+			req = req.WithContext(contextWithIdentity(req.Context(), admin))
+			rr := httptest.NewRecorder()
+			srv.handleAdminMaintenanceOps(rr, req)
+
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d: %s", rr.Code, rr.Body.String())
+			}
+			if !strings.Contains(rr.Body.String(), "invalid branch name") || !strings.Contains(rr.Body.String(), "start with a letter or digit") {
+				t.Errorf("expected the reason and the allowed form, got %s", rr.Body.String())
+			}
+			runs, err := s.ListMaintenanceRuns(context.Background(), key, 10)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(runs) != 0 {
+				t.Errorf("a rejected request must not create a run, got %d", len(runs))
+			}
+		})
+	}
+}
