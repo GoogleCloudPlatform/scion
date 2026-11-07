@@ -2,7 +2,7 @@
 
 **Date:** 2026-11-08
 **Issue:** ptone/scion#7541 (follow-ups deferred from Phase 7), items O1 and N2
-**Base:** Phase 7, 9068092d (one commit on upstream main 323b539e)
+**Base:** upstream main 643a4407 (the edits were made on Phase 7, 9068092d; the changed paths are blob-identical at both)
 
 ## What changed
 
@@ -28,10 +28,12 @@
 
 ## Tests
 
-`TestLogImageTag_ExperimentOffLevel` (pkg/hub): three opt-out rows (file
-top level, hub env, file profile) assert the Info line and no warning; two
-rows (a non-latest value, and `latest` next to a non-latest profile) assert
-the warning and no opt-out line. Level and message are asserted together.
+`TestLogImageTag_ExperimentOffLevel` (pkg/hub): four opt-out rows (file
+top level, hub env, file profile, saved hub profile) assert the Info line
+and no warning; three rows (a non-latest value, `latest` next to a
+non-latest file profile, and `latest` next to a saved hub profile `v1`)
+assert the warning and no opt-out line. Level and message are asserted
+together.
 
 ## Notes
 

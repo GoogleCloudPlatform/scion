@@ -365,7 +365,7 @@ func (s *Server) warnImageTagWithoutExperiment() {
 		return
 	}
 	if imageTagValuesAllLatest(nodeEnv, in) {
-		slog.Info("image_tag is latest, the opt-out from the version default: agent images keep latest; "+experiments.ImageTagSetting+" is off",
+		slog.Info("image_tag is latest, the opt-out from the version default: agent images keep their tags (latest); "+experiments.ImageTagSetting+" is off",
 			"sources", sources, "profiles", s.imageTagProfiles())
 		return
 	}

@@ -320,13 +320,14 @@ func TestLogImageTag_InvalidValueWarns(t *testing.T) {
 // documented opt-out from the version default, is logged at Info; any
 // other set value, alone or next to latest, keeps the warning.
 func TestLogImageTag_ExperimentOffLevel(t *testing.T) {
-	const optOut = `level=INFO msg="image_tag is latest, the opt-out from the version default: agent images keep latest; hub.image_tag_setting is off"`
+	const optOut = `level=INFO msg="image_tag is latest, the opt-out from the version default: agent images keep their tags (latest); hub.image_tag_setting is off"`
 	const warn = `level=WARN msg="image_tag is set but the hub.image_tag_setting experiment is off; the value is ignored`
 	tests := []struct {
 		name     string
 		env      string
 		top      string
 		profiles map[string]string
+		managed  string // a saved hub profiles section, stored as a managed row
 		optOut   bool
 	}{
 		{name: "file top latest", top: "latest", optOut: true},
@@ -334,12 +335,18 @@ func TestLogImageTag_ExperimentOffLevel(t *testing.T) {
 		{name: "file profile latest", profiles: map[string]string{"k8s": "latest"}, optOut: true},
 		{name: "file top non-latest", top: "v0.3.0"},
 		{name: "latest next to a non-latest profile", top: "latest", profiles: map[string]string{"k8s": "v1"}},
+		{name: "file top latest next to a saved hub profile v1", top: "latest", managed: `{"k8s":{"runtime":"kubernetes","image_tag":"v1"}}`},
+		{name: "saved hub profile latest only", managed: `{"k8s":{"runtime":"kubernetes","image_tag":"latest"}}`, optOut: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			buf := captureImageRegistrySlog(t)
 			srv, _, ops := newTestDBServer(t)
 			setTestImageTagFileTier(t, ops, tt.top, tt.profiles)
+			if tt.managed != "" {
+				_, err := ops.Update(context.Background(), "profiles", json.RawMessage(tt.managed), "admin", -1, "managed")
+				require.NoError(t, err)
+			}
 			srv.config.NodeImageTag = tt.env
 			srv.LogImageTag()
 			out := buf.String()
