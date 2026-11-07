@@ -2,9 +2,14 @@
 title: Release Notes
 ---
 
-Scion release notes are published weekly.
+Scion release notes are published for each preview and stable release. Earlier notes were published weekly.
 
-## Latest: Week of October 26 -- November 1, 2026
+## Releases
+
+- [v0.3.0-preview.7](/scion/release-notes/v0-3-0-preview-7/) (in preparation)
+- [v0.3.0-preview.6](/scion/release-notes/v0-3-0-preview-6/)
+
+## Weekly notes (through November 1, 2026)
 
 Scion now requires TLS off loopback between the Hub and Runtime Brokers (`server.trusted_proxies`) with single-use nonced requests, runs host-side git without host credentials while checking repository git config before start, and refuses mounts that reach Runtime Broker control files or exceed an agent's NFS scope while disabling Kubernetes API token automounting on agent pods. Authorization along recorded delegation chains now governs user-scope secrets, GCP service-account token minting and lifecycle hook tokens, agent and user JWTs and conduit relay tokens use the server keyring's versioned signing ring, Hub-dispatched starts require a Hub-issued token, and user- and Hub-level secrets and environment variables require an interactive login. Shared `server.project_storage` reached Kubernetes and Cloud Run with centralized validation, Hub-side shared-tree deletion and Hub-signed workspace bootstrap URLs, while asynchronous agent launch (`hub.async_agent_launch`), chat attachment artifacts (`hub.attachment_artifacts`) and starred messages (`web.chat_starred_messages`) graduated to default-on. On the client and operator side, `scion` ships a native Windows client CLI (`amd64` and `arm64`), single-node VM Hubs gained self-update under `/opt/scion` with Runtime Broker plugin updates, confirmed downgrades and boot-failure rollback, and the CLI added `scion hub settings`, `project-defaults`, `experiments` and `delegation` commands alongside per-schedule time zones, `Unlimited` count limits (`0`), and an opt-in `pi` harness.
 
