@@ -3430,7 +3430,7 @@ if [[ "$IMAGE_SOURCE" == "build" ]]; then
         trap 'rm -rf ${IMAGE_DRIVER_STAGE}' EXIT
         sudo install -d -m 0755 -o root -g root ${IMAGE_DRIVER_DIR} /opt/scion-image-src
         sudo install -m 0755 -o root -g root ${IMAGE_DRIVER_STAGE}/build-release-images.sh ${IMAGE_DRIVER_REMOTE}
-        if ! echo '${IMAGE_DRIVER_SHA}  ${IMAGE_DRIVER_REMOTE}' | sha256sum -c --quiet - >/dev/null 2>&1; then
+        if ! echo '${IMAGE_DRIVER_SHA}  ${IMAGE_DRIVER_REMOTE}' | sha256sum -c - >/dev/null 2>&1; then
           sudo rm -f ${IMAGE_DRIVER_REMOTE}
           echo 'ERROR: the image driver on the VM does not match the local copy (SHA-256 mismatch).' >&2
           exit 1
@@ -3623,7 +3623,8 @@ echo "  Image: ${PROXY_IMAGE}"
 gcloud compute ssh "${INSTANCE_NAME}" \
   --zone="${ZONE}" --project="${PROJECT_ID}" \
   --command="
-    set -euo pipefail${PROXY_SOURCE_PREP}
+    set -euo pipefail
+    ${PROXY_SOURCE_PREP}
     sudo docker build -t ${PROXY_IMAGE} /opt/scion-source/extras/cloudrun-iap-proxy
   "
 echo "  Proxy image built on VM."
