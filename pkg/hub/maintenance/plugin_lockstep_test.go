@@ -731,6 +731,7 @@ func TestPluginSwap_RestoreFailureKeepsBackups(t *testing.T) {
 	if err := sw.apply(io.Discard); err != nil {
 		t.Fatal(err)
 	}
+	sw.markApplied(io.Discard)
 	if err := os.Chmod(dir, 0o555); err != nil {
 		t.Fatal(err)
 	}
@@ -749,6 +750,14 @@ func TestPluginSwap_RestoreFailureKeepsBackups(t *testing.T) {
 	sw.cleanup() // a kept backup survives cleanup
 	if _, err := os.Stat(sw.staging); err != nil {
 		t.Fatalf("staging removed: %v", err)
+	}
+	// The restore dropped the applied marker first, so the startup cleanup
+	// leaves the only copy of the old build alone (ptone/scion#7177).
+	if isAppliedPluginStaging(sw.staging) {
+		t.Fatal("a staging kept by a failed restore is still marked applied")
+	}
+	if removed, err := RemoveAppliedPluginStaging(dir); err != nil || len(removed) != 0 {
+		t.Fatalf("RemoveAppliedPluginStaging removed %v (%v)", removed, err)
 	}
 
 	if err := os.Chmod(dir, 0o755); err != nil {
