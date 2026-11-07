@@ -32,17 +32,20 @@ import (
 // text must never reach a response body.
 var errChatProjectLookup = errors.New("chat project lookup: connection refused")
 
-// chatProjectLookupStore answers GetProject with err when err is set.
+// chatProjectLookupStore answers GetProject with err while its fault switch
+// is armed, and delegates to the inner store otherwise. It is installed with
+// testServerWithStoreFault, so the test never reassigns srv.store.
 type chatProjectLookupStore struct {
 	store.Store
-	err error
+	fault *storeFaultSwitch
+	err   error
 }
 
 func (s *chatProjectLookupStore) GetProject(ctx context.Context, id string) (*store.Project, error) {
-	if s.err != nil {
-		return nil, s.err
+	if !s.fault.Active() {
+		return s.Store.GetProject(ctx, id)
 	}
-	return s.Store.GetProject(ctx, id)
+	return nil, s.err
 }
 
 // chatTopicStore answers GetTopic with a fixed topic; no other method is used.
@@ -77,8 +80,10 @@ func TestRequireChatActions_ProjectLookupErrors(t *testing.T) {
 	projectID := "chat-lookup-project"
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			srv, _ := testServer(t)
-			srv.store = &chatProjectLookupStore{Store: srv.store, err: c.err}
+			srv, _, _, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *chatProjectLookupStore {
+				return &chatProjectLookupStore{Store: inner, fault: f, err: c.err}
+			})
+			fault.Arm()
 			check := func(t *testing.T, rec *httptest.ResponseRecorder, ok bool, in string) {
 				t.Helper()
 				assert.False(t, ok)
