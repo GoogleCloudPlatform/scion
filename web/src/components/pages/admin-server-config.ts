@@ -65,6 +65,7 @@ import './admin-chat-retention.js';
 import { showConfirm } from '../shared/confirm-dialog.js';
 import {
   issuesAt,
+  parseQuantity,
   validateResourceSpec,
   type QuantityIssues,
   type ResourceSpecInput,
@@ -431,6 +432,8 @@ interface V1ProfileConfig {
   env?: Record<string, string>;
   resources?: ResourceSpec;
   safe_to_evict?: boolean;
+  shared_dir_storage_class?: string;
+  shared_dir_size?: string;
   [key: string]: unknown;
 }
 
@@ -932,6 +935,33 @@ function isNonKubernetesContainerType(type: string): boolean {
     type !== 'cloudrun-instances' &&
     !isKubernetesRuntimeType(type)
   );
+}
+
+/**
+ * Whether the shared-dir PVC fields are hidden for a runtime type: a
+ * non-Kubernetes container type (the predicate above) or a Cloud Run type.
+ * A runtime card renders the fields in its Kubernetes-only block, which both
+ * leave out; a profile card applies this to the type of its runtime.
+ */
+function hidesSharedDirFields(type: string): boolean {
+  if (type === 'cloudrun' || type === 'cloudrun-instances') return true;
+  return isNonKubernetesContainerType(type);
+}
+
+// A quantity is positive when it has no leading "-" and a non-zero digit
+// before any exponent or suffix. Read from the text, not a float: 1e-400 is
+// positive for the hub but underflows to 0 as a number.
+const POSITIVE_QUANTITY = /^[+]?[0-9.]*[1-9]/;
+
+/**
+ * The inline error for a shared_dir_size value, or null when it is valid:
+ * empty (unset) or a positive Kubernetes quantity, the hub's rule
+ * (config.ValidateSharedDirSize). The text names the field, never the value.
+ */
+export function sharedDirSizeError(value: string): string | null {
+  if (!value) return null;
+  if (parseQuantity(value) !== null && POSITIVE_QUANTITY.test(value)) return null;
+  return 'shared_dir_size must be a positive Kubernetes quantity, such as 10Gi or 1Ti.';
 }
 
 /**
@@ -2543,7 +2573,27 @@ export class ScionPageAdminServerConfig extends LitElement {
         add(`profiles.${name}.harness_overrides.${harness}.resources`, ho?.resources);
       }
     }
+    // shared_dir_size on the entries that show it (ptone/scion#2649).
+    const sharedDirSize = (path: string, value: string | undefined): void => {
+      const message = sharedDirSizeError(value ?? '');
+      if (message) all.errors.push({ path, message });
+    };
+    for (const [name, rt] of Object.entries(this.runtimes)) {
+      if (hidesSharedDirFields(rt.type || '')) continue;
+      sharedDirSize(`runtimes.${name}.shared_dir_size`, rt.shared_dir_size);
+    }
+    for (const [name, profile] of Object.entries(this.profiles)) {
+      if (hidesSharedDirFields(this.profileRuntimeType(profile))) continue;
+      sharedDirSize(`profiles.${name}.shared_dir_size`, profile.shared_dir_size);
+    }
     return all;
+  }
+
+  /** The type of the runtime a profile names; empty when unset, unknown or untyped. */
+  private profileRuntimeType(profile: V1ProfileConfig): string {
+    const name = profile.runtime;
+    if (!name || !hasOwn(this.runtimes, name)) return '';
+    return this.runtimes[name]?.type || '';
   }
 
   private get hasResourceQuantityErrors(): boolean {
@@ -5780,6 +5830,13 @@ export class ScionPageAdminServerConfig extends LitElement {
                           }}
                         ></sl-input>
                       </div>
+                      ${this.renderSharedDirFields(
+                        `runtimes.${name}`,
+                        rt.shared_dir_storage_class,
+                        rt.shared_dir_size,
+                        readOnly,
+                        (field, value) => this.updateRuntimeField(name, field, value)
+                      )}
                       <div class="form-field">
                         <sl-switch
                           ?checked=${rt.gke || false}
@@ -6284,6 +6341,49 @@ export class ScionPageAdminServerConfig extends LitElement {
     >`;
   }
 
+  /**
+   * The shared-dir PVC inputs of a runtime or profile entry (ptone/scion#2649).
+   * path is the entry's koanf path (runtimes.NAME or profiles.NAME); an empty
+   * input removes the key through update.
+   */
+  private renderSharedDirFields(
+    path: string,
+    storageClass: string | undefined,
+    size: string | undefined,
+    readOnly: boolean,
+    update: (field: 'shared_dir_storage_class' | 'shared_dir_size', value: string) => void
+  ): TemplateResult {
+    return html`
+      <div class="form-field">
+        <label>Shared dir storage class</label>
+        <sl-input
+          class="shared-dir-storage-class"
+          value=${storageClass || ''}
+          placeholder="e.g. standard-rwx"
+          ?disabled=${readOnly}
+          @sl-input=${(e: Event) => {
+            update('shared_dir_storage_class', (e.target as HTMLInputElement).value);
+          }}
+        ></sl-input>
+        <span class="hint">Kubernetes only. Empty uses the cluster default.</span>
+      </div>
+      <div class="form-field">
+        <label>Shared dir size</label>
+        <sl-input
+          class="shared-dir-size"
+          value=${size || ''}
+          placeholder="e.g. 10Gi"
+          ?disabled=${readOnly}
+          @sl-input=${(e: Event) => {
+            update('shared_dir_size', (e.target as HTMLInputElement).value);
+          }}
+        ></sl-input>
+        <span class="hint">Kubernetes only. A Kubernetes quantity, such as 10Gi or 1Ti.</span>
+        ${this.renderQuantityIssues(`${path}.shared_dir_size`)}
+      </div>
+    `;
+  }
+
   private updateRuntimeSafeToEvict(name: string, value: boolean | undefined): void {
     const updated = { ...this.runtimes };
     const rt = { ...updated[name] };
@@ -6500,6 +6600,15 @@ export class ScionPageAdminServerConfig extends LitElement {
                 this.isKubernetesRuntime(profile.runtime)
             )}
           </div>
+          ${hidesSharedDirFields(this.profileRuntimeType(profile))
+            ? nothing
+            : this.renderSharedDirFields(
+                `profiles.${name}`,
+                profile.shared_dir_storage_class,
+                profile.shared_dir_size,
+                readOnly,
+                (field, value) => this.updateProfileField(name, field, value)
+              )}
           <div class="form-field">
             <label>CPU Request</label>
             <sl-input
