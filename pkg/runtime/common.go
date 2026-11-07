@@ -1825,6 +1825,16 @@ func runSimpleCommand(ctx context.Context, command string, args ...string) (stri
 	return runCommand(ctx, commandIO{}, command, args...)
 }
 
+// runSimpleCommandWithEnv is runSimpleCommand with env (KEY=VALUE entries)
+// added to the child's environment, overriding this process's value of
+// each name. A container CLI given a bare "-e KEY" reads KEY's value from
+// its own environment, so a value delivered this way is not in argv, where
+// any local user can read it from /proc/<pid>/cmdline.
+func runSimpleCommandWithEnv(ctx context.Context, env []string, command string, args ...string) (string, error) {
+	runtimeLog().Debug("Executing command", "cmd", command, "argc", len(args), "env_entries", len(env))
+	return runCommand(ctx, commandIO{env: env}, command, args...)
+}
+
 // runCombinedCommand runs command and returns its trimmed standard output
 // and standard error interleaved, as written. It is for output shown to a
 // person rather than parsed: container logs, and an exec's output.

@@ -202,6 +202,13 @@ func (r *PodmanRuntime) Run(ctx context.Context, config RunConfig) (string, erro
 
 	newArgs = append(newArgs, args[1:]...)
 
+	// Secret values go to podman through its environment, not argv
+	// (moveSecretEnvOutOfArgv).
+	newArgs, secretEnv, err := moveSecretEnvOutOfArgv(newArgs, config.Image, podmanSecretEnvNames(config))
+	if err != nil {
+		return "", err
+	}
+
 	WriteRuntimeDebugFile(config, r.Command, newArgs)
 
 	// Async-launch gate immediately before the container create (design
@@ -210,7 +217,7 @@ func (r *PodmanRuntime) Run(ctx context.Context, config RunConfig) (string, erro
 	if err := hooks.checkpoint(ctx, CheckpointStepLaunching); err != nil {
 		return "", err
 	}
-	out, err := runSimpleCommand(ctx, r.Command, newArgs...)
+	out, err := runSimpleCommandWithEnv(ctx, secretEnv, r.Command, newArgs...)
 	if err != nil {
 		if ctx.Err() != nil {
 			// The caller gave up while the daemon may still have been
