@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -221,12 +222,22 @@ func (r *PodmanRuntime) Run(ctx context.Context, config RunConfig) (string, erro
 		return "", fmt.Errorf("container run failed: %w (output: %s)", err, out)
 	}
 
-	// Run returns the whole trimmed output, as before; only the launch
-	// handle is restricted to a well-formed container ID line.
+	// "podman run -d" prints the full container ID, and only that, on
+	// stdout (runSimpleCommand keeps stderr out of it). Anything else is
+	// not an ID callers may address the container by: refuse it, and
+	// remove what this run may have created, as for a cancelled create.
 	id := strings.TrimSpace(out)
-	reportContainerCreated(hooks, config.Name, out)
+	if !podmanContainerIDPattern.MatchString(id) {
+		rollbackCancelledCreate(r.Command, config.Name, config.Labels[api.LabelRunID])
+		return "", fmt.Errorf("container run printed no container ID: got %q, want 64 lowercase hex characters", truncateForError(id))
+	}
+	reportContainerCreated(hooks, config.Name, id)
 	return id, nil
 }
+
+// podmanContainerIDPattern matches the full container ID "podman run -d"
+// prints: 64 lowercase hex characters.
+var podmanContainerIDPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 // Stop stops the container ref.ID. The engine container ID is already
 // unique per run, so ref.RunID needs no further check here.

@@ -32,7 +32,9 @@ import (
 // same way with a mock client"): a checkpoint immediately before the
 // container create, the container ID reported after it, and a delete by ID.
 
-const mockContainerID = "0123456789abcdef"
+// mockContainerID is a full container ID, as "run -d" prints it (Podman's
+// Run accepts nothing shorter).
+const mockContainerID = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 // writeMockContainerCLI writes a mock docker/podman/container CLI that logs
 // every invocation's arguments to a log file. "run" prints mockContainerID;
@@ -250,9 +252,10 @@ func TestContainerDeleteResource_MissingAndInvalidHandles(t *testing.T) {
 	}
 }
 
-// TestContainerRun_HandleIDIgnoresWarningLines: the run output interleaves
-// stdout and stderr, so a warning line must not end up in the handle; with
-// no well-formed ID in the output no handle is recorded.
+// TestContainerRun_HandleIDIgnoresWarningLines: a warning line must not end
+// up in the handle; with no well-formed ID in the output no handle is
+// recorded. Docker only: Podman's Run refuses output that is not exactly a
+// full ID (TestPodmanRun_RequiresFullContainerID).
 func TestContainerRun_HandleIDIgnoresWarningLines(t *testing.T) {
 	const fullID = "a3f1c2d4e5b60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90"
 	for _, tc := range []struct {
@@ -276,7 +279,7 @@ func TestContainerRun_HandleIDIgnoresWarningLines(t *testing.T) {
 		// Lines are scanned from the end: the last well-formed ID wins.
 		{"two ids", `echo abcdef012345; echo ` + fullID, fullID},
 	} {
-		for _, rc := range containerRuntimeCases()[:2] { // docker, podman
+		for _, rc := range containerRuntimeCases()[:1] { // docker
 			t.Run(tc.name+"/"+rc.name, func(t *testing.T) {
 				cli, _ := writeMockContainerCLIRun(t, "", tc.runBody)
 				config := containerHookConfig()
@@ -296,6 +299,65 @@ func TestContainerRun_HandleIDIgnoresWarningLines(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// TestPodmanRun_RequiresFullContainerID: "podman run -d" prints the full
+// 64-hex ID on stdout. A warning on stderr (the no-TTY warning of "run -t")
+// is not part of it; stdout that is anything but one full ID fails the
+// Run, records no handle, and removes what the run may have created.
+func TestPodmanRun_RequiresFullContainerID(t *testing.T) {
+	const fullID = "a3f1c2d4e5b60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90"
+	for _, tc := range []struct {
+		name    string
+		runBody string
+		wantID  string // "" means Run fails
+	}{
+		{"id alone", `echo ` + fullID, fullID},
+		{"no-tty warning on stderr", `echo "WARN[0000] The input device is not a TTY" >&2; echo ` + fullID, fullID},
+		{"warning after, on stderr", `echo ` + fullID + `; echo "WARNING: memory limit ignored" >&2`, fullID},
+		{"surrounding whitespace", `printf '  ` + fullID + ` \r\n'`, fullID},
+		{"warning on stdout", `echo "WARN[0000] The input device is not a TTY"; echo ` + fullID, ""},
+		{"short id", `echo abcdef012345`, ""},
+		{"63 hex characters", `echo ` + fullID[:63], ""},
+		{"65 hex characters", `echo ` + fullID + `0`, ""},
+		{"uppercase hex", `echo ` + strings.ToUpper(fullID), ""},
+		{"empty", `true`, ""},
+		{"two ids", `echo ` + fullID + `; echo ` + fullID, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cli, logPath := writeMockContainerCLIRun(t, "", tc.runBody)
+			config := containerHookConfig()
+			var handles []api.ResourceHandle
+			config.OnResourceCreated = func(h api.ResourceHandle) { handles = append(handles, h) }
+			id, err := (&PodmanRuntime{Command: cli}).Run(context.Background(), config)
+			if tc.wantID != "" {
+				if err != nil {
+					t.Fatalf("Run: %v", err)
+				}
+				if id != tc.wantID {
+					t.Fatalf("Run returned %q, want %q", id, tc.wantID)
+				}
+				want := api.ResourceHandle{Kind: api.ResourceKindContainer, Name: "hook-agent", UID: tc.wantID}
+				if len(handles) != 1 || handles[0] != want {
+					t.Fatalf("handles = %+v, want [%+v]", handles, want)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("Run returned %q, want an error for output that is not one full container ID", id)
+			}
+			if id != "" {
+				t.Errorf("Run returned %q with its error, want \"\"", id)
+			}
+			if len(handles) != 0 {
+				t.Errorf("handles = %+v, want none", handles)
+			}
+			calls := readCalls(t, logPath)
+			if last := calls[len(calls)-1]; last != "rm -f hook-agent" {
+				t.Errorf("last call = %q, want the created container removed by name (calls %q)", last, calls)
+			}
+		})
 	}
 }
 
