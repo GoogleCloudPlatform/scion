@@ -160,7 +160,9 @@ func (s *sqlStore) TouchReviewSession(ctx context.Context, rs ReviewSession, edi
 		rs.ArtifactID, rs.PrincipalKind, rs.PrincipalRef, rs.SessionID).Scan(&started); err != nil {
 		return fmt.Errorf("artifacts: read review session: %w", err)
 	}
-	if started.Time.Equal(now.UTC().Truncate(time.Microsecond)) {
+	// Both sides at microsecond precision: the stored time has at most
+	// microseconds on both dialects, so the comparison holds on each.
+	if started.Time.Truncate(time.Microsecond).Equal(now.UTC().Truncate(time.Microsecond)) {
 		var live int
 		if err := tx.QueryRowContext(ctx, s.rebind(`SELECT COUNT(*) FROM artifact_review_session
 			WHERE artifact_id = ? AND principal_kind = ? AND principal_ref = ? AND last_seen_at >= ?`),

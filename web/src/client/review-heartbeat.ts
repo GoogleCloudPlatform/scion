@@ -62,6 +62,8 @@ export interface ReviewHeartbeatOptions {
 
 /** One open review's heartbeat. Use start() once, then stop() once. */
 export class ReviewHeartbeat {
+  /** The artifact this heartbeat reports a review of. */
+  readonly artifactId: string;
   readonly sessionId: string;
   private readonly opts: ReviewHeartbeatOptions;
   private readonly put: NonNullable<ReviewHeartbeatOptions['put']>;
@@ -78,6 +80,7 @@ export class ReviewHeartbeat {
 
   constructor(opts: ReviewHeartbeatOptions) {
     this.opts = opts;
+    this.artifactId = opts.artifactId;
     this.put = opts.put ?? putReviewSession;
     this.end = opts.end ?? endReviewSession;
     this.doc = opts.doc ?? document;

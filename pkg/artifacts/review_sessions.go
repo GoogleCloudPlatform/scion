@@ -15,6 +15,7 @@
 package artifacts
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -398,7 +399,7 @@ func decodeReviewBeat(w http.ResponseWriter, r *http.Request) (ReviewBeatRequest
 		writeError(w, http.StatusBadRequest, "bad_request", "could not read the request body")
 		return req, false
 	}
-	dec := json.NewDecoder(strings.NewReader(string(body)))
+	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&req); err != nil || dec.More() {
 		writeError(w, http.StatusBadRequest, "bad_request", `the body must be {"base": <version>, "edited": <bool>, "dirty": <bool>}`)

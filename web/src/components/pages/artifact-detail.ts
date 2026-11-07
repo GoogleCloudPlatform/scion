@@ -1153,8 +1153,10 @@ export class ScionPageArtifactDetail extends LitElement {
   override updated(changed: PropertyValues<this>): void {
     super.updated(changed);
     this.observeSticky();
-    // reviewing is private state, so it is not a key of PropertyValues<this>.
-    if ((changed as PropertyValues).has('reviewing')) this.syncHeartbeat();
+    // reviewing and artifactId are private state, so they are not keys of
+    // PropertyValues<this>. A new artifactId moves a running heartbeat.
+    const c = changed as PropertyValues;
+    if (c.has('reviewing') || c.has('artifactId')) this.syncHeartbeat();
   }
 
   /**
@@ -1166,6 +1168,12 @@ export class ScionPageArtifactDetail extends LitElement {
   private syncHeartbeat(): void {
     const want =
       this.reviewing && isFeatureEnabled(ARTIFACTS_OPEN_REVIEW_CHECK_FLAG) && !!this.artifactId;
+    // A heartbeat for another artifact (the page was reused for a new one
+    // while reviewing) ends its session before a new one starts.
+    if (this.heartbeat && this.heartbeat.artifactId !== this.artifactId) {
+      this.heartbeat.stop();
+      this.heartbeat = null;
+    }
     if (want && !this.heartbeat) {
       this.heartbeat = new ReviewHeartbeat({
         artifactId: this.artifactId,

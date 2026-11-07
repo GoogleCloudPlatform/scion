@@ -172,6 +172,29 @@ func TestReviewSessionStoreCap(t *testing.T) {
 	})
 }
 
+// TestReviewSessionStoreCapSubMicrosecondNow: the beat's time carries
+// nanoseconds that the store does not keep. The new-row check compares at
+// microsecond precision on both sides, so the cap still applies to a beat
+// that opens a session, and an existing session still beats on.
+func TestReviewSessionStoreCapSubMicrosecondNow(t *testing.T) {
+	forEachSessionBackend(t, func(t *testing.T, _ *sql.DB, st Store, _ func() *sql.DB) {
+		ctx := context.Background()
+		a, _, _, _ := seedArtifact(t, st, "")
+		now := time.Now().UTC().Truncate(time.Microsecond).Add(789 * time.Nanosecond)
+		for i := 1; i <= 2; i++ {
+			if err := st.TouchReviewSession(ctx, session(a, "u1", sid(i), 1, false), false, now, 2); err != nil {
+				t.Fatalf("session %d: %v", i, err)
+			}
+		}
+		if err := st.TouchReviewSession(ctx, session(a, "u1", sid(3), 1, false), false, now, 2); !errors.Is(err, ErrTooManyReviewSessions) {
+			t.Fatalf("third live session at a sub-microsecond time: %v, want ErrTooManyReviewSessions", err)
+		}
+		if err := st.TouchReviewSession(ctx, session(a, "u1", sid(1), 1, false), false, now.Add(time.Second+123*time.Nanosecond), 2); err != nil {
+			t.Errorf("existing session refused: %v", err)
+		}
+	})
+}
+
 // TestReviewSessionStoreCapConcurrent: with the principal one below the
 // cap, two beats opening new sessions at once are serialized, so exactly
 // one is recorded. The first is held inside its transaction, after its
