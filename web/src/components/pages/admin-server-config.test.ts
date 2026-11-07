@@ -4207,6 +4207,430 @@ describe('scion-page-admin-server-config', () => {
     });
   });
 
+  describe('shared-dir PVC inputs (ptone/scion#2649 item 1)', () => {
+    const SIZE_ERROR =
+      'shared_dir_size must be a positive Kubernetes quantity, such as 10Gi or 1Ti.';
+
+    type Input = HTMLElement & { value: string };
+
+    function load(config: Record<string, unknown>, onPut?: (b: Record<string, any>) => void) {
+      return createComponent(
+        createFetchHandler(makeBaseConfig(config), {
+          putHandler: (body) => {
+            if (onPut) onPut(body as Record<string, any>);
+            return { status: 200, body: { reload: { applied: [] } } };
+          },
+        })
+      );
+    }
+
+    // Runtime and profile cards share the runtime-card class; names are unique per test.
+    function card(el: HTMLElement, name: string): HTMLElement {
+      return queryAll(el, '.runtime-card').find(
+        (c) => c.querySelector('strong')?.textContent?.trim() === name
+      ) as HTMLElement;
+    }
+
+    function sharedInputs(el: HTMLElement, name: string) {
+      const c = card(el, name);
+      return {
+        storageClass: c.querySelector('sl-input.shared-dir-storage-class') as Input | null,
+        size: c.querySelector('sl-input.shared-dir-size') as Input | null,
+      };
+    }
+
+    async function enter(el: HTMLElement, input: Input, value: string): Promise<void> {
+      input.value = value;
+      input.dispatchEvent(new Event('sl-input'));
+      await (el as any).updateComplete;
+    }
+
+    async function switchType(el: HTMLElement, to: string): Promise<void> {
+      const sel = queryAll(el, 'sl-select').find((s) =>
+        s.querySelector('sl-option[value="cloudrun-instances"]')
+      ) as HTMLElement & { value: string };
+      sel.value = to;
+      sel.dispatchEvent(new Event('sl-change'));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await (el as any).updateComplete;
+    }
+
+    async function save(el: HTMLElement): Promise<void> {
+      await (el as any).updateComplete;
+      withoutSectionFilter(el);
+      const btn = queryAll(el, 'sl-button[variant="primary"]').find(
+        (b) => b.textContent?.trim() === 'Save & Reload'
+      ) as HTMLElement;
+      btn.click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    }
+
+    // Shoelace is not loaded in these tests, so read the disabled attribute
+    // Lit's ?disabled binding sets.
+    function saveDisabled(el: HTMLElement): boolean {
+      const btn = queryAll(el, 'sl-button[variant="primary"]').find(
+        (b) => b.textContent?.trim() === 'Save & Reload'
+      ) as HTMLElement;
+      return btn.hasAttribute('disabled');
+    }
+
+    const k8sWithValues = {
+      type: 'kubernetes',
+      shared_dir_storage_class: 'rwx-class',
+      shared_dir_size: '10Gi',
+    };
+
+    // ── Runtime cards ──
+
+    it('a Kubernetes runtime card shows both shared-dir inputs with the stored values', async () => {
+      element = await load({ runtimes: { gke: k8sWithValues } });
+      await (element as any).updateComplete;
+      const { storageClass, size } = sharedInputs(element, 'gke');
+      expect(storageClass).not.toBeNull();
+      expect(size).not.toBeNull();
+      expect(storageClass!.getAttribute('value')).toBe('rwx-class');
+      expect(size!.getAttribute('value')).toBe('10Gi');
+    });
+
+    it('setting the shared-dir inputs writes both keys on save', async () => {
+      let captured: Record<string, any> | null = null;
+      element = await load({ runtimes: { gke: { type: 'kubernetes' } } }, (b) => (captured = b));
+      const { storageClass, size } = sharedInputs(element, 'gke');
+      await enter(element, storageClass!, 'premium-rwx');
+      await enter(element, size!, '20Gi');
+      await save(element);
+      expect(captured).not.toBeNull();
+      expect(captured!.runtimes.gke.shared_dir_storage_class).toBe('premium-rwx');
+      expect(captured!.runtimes.gke.shared_dir_size).toBe('20Gi');
+    });
+
+    // The page sends null for a key removed from a loaded runtime entry
+    // (runtimesPayload), as it does for Namespace; never an empty string.
+    it('clearing a shared-dir input removes the key, not an empty string', async () => {
+      let captured: Record<string, any> | null = null;
+      element = await load({ runtimes: { gke: k8sWithValues } }, (b) => (captured = b));
+      const { storageClass, size } = sharedInputs(element, 'gke');
+      await enter(element, storageClass!, '');
+      await enter(element, size!, '');
+      await save(element);
+      expect(captured).not.toBeNull();
+      const sent = captured!.runtimes.gke;
+      expect(sent).toHaveProperty('shared_dir_storage_class', null);
+      expect(sent).toHaveProperty('shared_dir_size', null);
+      const json = JSON.stringify(sent);
+      expect(json).not.toContain('"shared_dir_storage_class":""');
+      expect(json).not.toContain('"shared_dir_size":""');
+    });
+
+    it('an untyped runtime card shows the shared-dir inputs, as it shows Namespace', async () => {
+      element = await load({ runtimes: { plain: {} } });
+      await (element as any).updateComplete;
+      const { storageClass, size } = sharedInputs(element, 'plain');
+      expect(storageClass).not.toBeNull();
+      expect(size).not.toBeNull();
+    });
+
+    // Guard (passes on the base too): docker and podman cards leave them out.
+    it('docker and podman cards show no shared-dir inputs', async () => {
+      element = await load({
+        runtimes: {
+          dock: { type: 'docker', shared_dir_size: '10Gi' },
+          pod: { type: 'podman', shared_dir_size: '10Gi' },
+        },
+      });
+      await (element as any).updateComplete;
+      for (const name of ['dock', 'pod']) {
+        const { storageClass, size } = sharedInputs(element, name);
+        expect(storageClass).toBeNull();
+        expect(size).toBeNull();
+      }
+    });
+
+    // Guard (passes on the base too): Cloud Run cards leave them out.
+    it('Cloud Run cards show no shared-dir inputs', async () => {
+      element = await load({
+        runtimes: {
+          cr: { type: 'cloudrun' },
+          cri: { type: 'cloudrun-instances' },
+        },
+      });
+      await (element as any).updateComplete;
+      for (const name of ['cr', 'cri']) {
+        const { storageClass, size } = sharedInputs(element, name);
+        expect(storageClass).toBeNull();
+        expect(size).toBeNull();
+      }
+    });
+
+    // Fails on the base for the "before" step (no inputs). The clear after
+    // the switch already passes from ef50e964 and is kept as a regression guard.
+    it('switching kubernetes -> docker with both keys set clears them and hides the inputs', async () => {
+      let captured: Record<string, any> | null = null;
+      element = await load({ runtimes: { gke: k8sWithValues } }, (b) => (captured = b));
+      await (element as any).updateComplete;
+      const before = sharedInputs(element, 'gke');
+      expect(before.storageClass).not.toBeNull();
+      expect(before.size).not.toBeNull();
+      await switchType(element, 'docker');
+      const after = sharedInputs(element, 'gke');
+      expect(after.storageClass).toBeNull();
+      expect(after.size).toBeNull();
+      await save(element);
+      expect(captured).not.toBeNull();
+      const sent = captured!.runtimes.gke;
+      expect(sent.type).toBe('docker');
+      expect(sent).toHaveProperty('shared_dir_storage_class', null);
+      expect(sent).toHaveProperty('shared_dir_size', null);
+      const json = JSON.stringify(sent);
+      expect(json).not.toContain('rwx-class');
+      expect(json).not.toContain('10Gi');
+    });
+
+    // ── Validation ──
+
+    // The hub's verdict per row (config.ValidateSharedDirSize, resource.ParseQuantity
+    // plus a positive sign). Rows marked "Go test" are asserted in
+    // pkg/config TestValidateSharedDirSizes; the others follow the Kubernetes
+    // quantity grammar (sign, digits, ".digits", "digits.digits", binary or
+    // decimal SI suffix, or an e<signedNumber> exponent).
+    const PARITY: Array<[string, boolean, string]> = [
+      ['10Gi', true, 'Go test'],
+      ['1Ti', true, 'Go test'],
+      ['500Mi', true, 'Go test: binary SI suffix'],
+      ['1G', true, 'Go test: decimal SI suffix'],
+      ['+1Gi', true, 'explicit + sign'],
+      ['.5Gi', true, '".digits" number, positive'],
+      ['1e3', true, 'decimal exponent suffix'],
+      ['1.5Gi', true, '"digits.digits" number'],
+      ['10GB', false, 'Go test: not a suffix; same class as 1TB'],
+      ['1TB', false, 'Go test'],
+      ['-1Gi', false, 'Go test: not positive'],
+      ['0', false, 'Go test: not positive'],
+      ['abc', false, 'Go test: not a number; same class as "lots"'],
+      ['1e-400', true, 'Go test: positive, below the float64 range'],
+      ['0e5', false, 'Go test: zero mantissa'],
+      ['0.000', false, 'Go test: zero'],
+      ['1e400', true, 'positive, above the float64 range (Infinity as a number)'],
+      ['00', false, 'zero, more than one digit'],
+      ['', true, 'Go test: empty is unset (the UI removes the key)'],
+    ];
+
+    it.each(PARITY)(
+      'sharedDirSizeError matches the hub validator on the parity table: %s',
+      async (value, valid) => {
+        const { sharedDirSizeError } = await import('./admin-server-config.js');
+        const got = sharedDirSizeError(value);
+        if (valid) {
+          expect(got).toBeNull();
+        } else {
+          // The exact fixed text: the message never depends on the value.
+          expect(got).toBe(SIZE_ERROR);
+          // A value that is part of the fixed text itself ("0", in "10Gi")
+          // cannot be absent from it; for every other value, check it is.
+          if (!SIZE_ERROR.includes(value)) expect(got).not.toContain(value);
+        }
+      }
+    );
+
+    it('a bad shared_dir_size blocks save with an inline error that names the field, not the value', async () => {
+      element = await load({ runtimes: { gke: { type: 'kubernetes' } } });
+      const { size } = sharedInputs(element, 'gke');
+      await enter(element, size!, 'ten-gigs');
+      const err = query(
+        element,
+        '[data-quantity-error="runtimes.gke.shared_dir_size"]'
+      ) as HTMLElement | null;
+      expect(err).not.toBeNull();
+      expect(err!.textContent).toContain('shared_dir_size');
+      expect(err!.textContent).not.toContain('ten-gigs');
+      expect(saveDisabled(element)).toBe(true);
+      const banner = query(element, '.resource-quantity-blocked') as HTMLElement | null;
+      expect(banner).not.toBeNull();
+      expect(banner!.textContent).toContain('runtimes.gke.shared_dir_size');
+      expect(banner!.textContent).not.toContain('ten-gigs');
+    });
+
+    it('a valid shared_dir_size such as 10Gi or 1Ti saves', async () => {
+      let captured: Record<string, any> | null = null;
+      element = await load({ runtimes: { gke: { type: 'kubernetes' } } }, (b) => (captured = b));
+      const { size } = sharedInputs(element, 'gke');
+      for (const value of ['10Gi', '1Ti']) {
+        await enter(element, size!, value);
+        expect(query(element, '[data-quantity-error]')).toBeNull();
+        expect(saveDisabled(element)).toBe(false);
+      }
+      await save(element);
+      expect(captured).not.toBeNull();
+      expect(captured!.runtimes.gke.shared_dir_size).toBe('1Ti');
+    });
+
+    // Guard (passes on the base too): a stored value on an entry that hides
+    // the inputs does not block save; the hub stays the authority for it.
+    it('a hidden shared_dir_size (docker runtime with a stored bad value) does not block save', async () => {
+      element = await load({
+        runtimes: { dock: { type: 'docker', shared_dir_size: 'lots' } },
+        profiles: { pd: { runtime: 'dock', shared_dir_size: 'lots' } },
+      });
+      await (element as any).updateComplete;
+      expect(query(element, '[data-quantity-error]')).toBeNull();
+      expect(saveDisabled(element)).toBe(false);
+    });
+
+    it('a read-only runtime and profile disable both shared-dir inputs', async () => {
+      element = await load({
+        env_overrides: ['runtimes', 'profiles'],
+        runtimes: { gke: { type: 'kubernetes' } },
+        profiles: { pk: { runtime: 'gke' } },
+      });
+      await (element as any).updateComplete;
+      for (const name of ['gke', 'pk']) {
+        const { storageClass, size } = sharedInputs(element, name);
+        expect(storageClass).not.toBeNull();
+        expect(size).not.toBeNull();
+        expect(storageClass!.hasAttribute('disabled')).toBe(true);
+        expect(size!.hasAttribute('disabled')).toBe(true);
+      }
+    });
+
+    // Guard (passes on the base too): a stored value on a profile that hides
+    // the inputs does not block save.
+    it('a hidden shared_dir_size on a profile (docker runtime) does not block save', async () => {
+      element = await load({
+        runtimes: { dock: { type: 'docker' } },
+        profiles: { pd: { runtime: 'dock', shared_dir_size: 'lots' } },
+      });
+      await (element as any).updateComplete;
+      expect(query(element, '[data-quantity-error]')).toBeNull();
+      expect(saveDisabled(element)).toBe(false);
+    });
+
+    // ── Profile cards ──
+
+    it('a profile on a Kubernetes runtime shows both shared-dir inputs; setting writes and clearing removes the keys', async () => {
+      let captured: Record<string, any> | null = null;
+      element = await load(
+        {
+          runtimes: { gke: { type: 'kubernetes' } },
+          profiles: {
+            pk: { runtime: 'gke', shared_dir_storage_class: 'old-class', shared_dir_size: '1Gi' },
+          },
+        },
+        (b) => (captured = b)
+      );
+      await (element as any).updateComplete;
+      const { storageClass, size } = sharedInputs(element, 'pk');
+      expect(storageClass).not.toBeNull();
+      expect(size).not.toBeNull();
+      expect(storageClass!.getAttribute('value')).toBe('old-class');
+      expect(size!.getAttribute('value')).toBe('1Gi');
+      await enter(element, storageClass!, 'p-class');
+      await enter(element, size!, '');
+      await save(element);
+      expect(captured).not.toBeNull();
+      const sent = captured!.profiles.pk;
+      expect(sent.shared_dir_storage_class).toBe('p-class');
+      expect('shared_dir_size' in sent).toBe(false);
+      expect(JSON.stringify(sent)).not.toContain('"shared_dir_size":""');
+    });
+
+    // Guard (passes on the base too).
+    it('a profile on a docker or podman runtime shows no shared-dir inputs', async () => {
+      element = await load({
+        runtimes: { dock: { type: 'docker' }, pod: { type: 'podman' } },
+        profiles: { pd: { runtime: 'dock' }, pp: { runtime: 'pod' } },
+      });
+      await (element as any).updateComplete;
+      for (const name of ['pd', 'pp']) {
+        const { storageClass, size } = sharedInputs(element, name);
+        expect(storageClass).toBeNull();
+        expect(size).toBeNull();
+      }
+    });
+
+    // Guard (passes on the base too).
+    it('a profile on a Cloud Run runtime shows no shared-dir inputs', async () => {
+      element = await load({
+        runtimes: { cr: { type: 'cloudrun' }, cri: { type: 'cloudrun-instances' } },
+        profiles: { pc: { runtime: 'cr' }, pci: { runtime: 'cri' } },
+      });
+      await (element as any).updateComplete;
+      for (const name of ['pc', 'pci']) {
+        const { storageClass, size } = sharedInputs(element, name);
+        expect(storageClass).toBeNull();
+        expect(size).toBeNull();
+      }
+    });
+
+    it('a profile with no runtime set shows the shared-dir inputs', async () => {
+      element = await load({
+        runtimes: { gke: { type: 'kubernetes' } },
+        profiles: { pnone: {}, pempty: { runtime: '' } },
+      });
+      await (element as any).updateComplete;
+      for (const name of ['pnone', 'pempty']) {
+        const { storageClass, size } = sharedInputs(element, name);
+        expect(storageClass).not.toBeNull();
+        expect(size).not.toBeNull();
+      }
+    });
+
+    it('a profile on an unknown or untyped runtime shows the shared-dir inputs', async () => {
+      element = await load({
+        runtimes: { plain: {} },
+        profiles: { punknown: { runtime: 'missing' }, puntyped: { runtime: 'plain' } },
+      });
+      await (element as any).updateComplete;
+      for (const name of ['punknown', 'puntyped']) {
+        const { storageClass, size } = sharedInputs(element, name);
+        expect(storageClass).not.toBeNull();
+        expect(size).not.toBeNull();
+      }
+    });
+
+    // Guard (passes on the base too): the profile runtime select clears no
+    // shared-dir key; the inputs hide on a docker runtime and the values stay.
+    it('a profile runtime change clears neither shared-dir key', async () => {
+      let captured: Record<string, any> | null = null;
+      element = await load(
+        {
+          runtimes: { gke: { type: 'kubernetes' }, dock: { type: 'docker' } },
+          profiles: {
+            pk: { runtime: 'gke', shared_dir_storage_class: 'p-class', shared_dir_size: '5Gi' },
+          },
+        },
+        (b) => (captured = b)
+      );
+      await (element as any).updateComplete;
+      const runtimeSelect = card(element, 'pk').querySelector('sl-select') as Input;
+      runtimeSelect.value = 'dock';
+      runtimeSelect.dispatchEvent(new Event('sl-change'));
+      await (element as any).updateComplete;
+      expect(sharedInputs(element, 'pk').size).toBeNull();
+      await save(element);
+      expect(captured).not.toBeNull();
+      const sent = captured!.profiles.pk;
+      expect(sent.runtime).toBe('dock');
+      expect(sent.shared_dir_storage_class).toBe('p-class');
+      expect(sent.shared_dir_size).toBe('5Gi');
+    });
+
+    it('a bad shared_dir_size on a profile blocks save with an inline error at profiles.NAME.shared_dir_size that names the field, not the value', async () => {
+      element = await load({
+        runtimes: { gke: { type: 'kubernetes' } },
+        profiles: { pk: { runtime: 'gke', shared_dir_size: 'lots' } },
+      });
+      await (element as any).updateComplete;
+      const err = query(
+        element,
+        '[data-quantity-error="profiles.pk.shared_dir_size"]'
+      ) as HTMLElement | null;
+      expect(err).not.toBeNull();
+      expect(err!.textContent).toContain('shared_dir_size');
+      expect(err!.textContent).not.toContain('lots');
+      expect(saveDisabled(element)).toBe(true);
+    });
+  });
+
   describe('Regression ptone/scion#1871 — masked secrets are not sent back', () => {
     const maskedServer = {
       notification_channels: [{ type: 'slack', params: { webhook_url: '********' } }],
