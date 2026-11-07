@@ -34,6 +34,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DRIVER="${DRIVER_UNDER_TEST:-${SCRIPT_DIR}/build-release-images.sh}"
 [ -f "${DRIVER}" ] || { echo "driver not found: ${DRIVER}" >&2; exit 2; }
+HACK_VERSION="${SCRIPT_DIR}/../../hack/version.sh"
+[ -f "${HACK_VERSION}" ] || { echo "hack/version.sh not found: ${HACK_VERSION}" >&2; exit 2; }
 
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/test-build-release-images.XXXXXX")"
 trap 'rm -rf -- "${TMP:?}"' EXIT
@@ -80,7 +82,10 @@ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 # a top-level file:// clone.
 
 UP="${TMP}/up"
-mkdir -p "${UP}/image-build/scripts/lib" "${UP}/image-build/scion-base"
+mkdir -p "${UP}/image-build/scripts/lib" "${UP}/image-build/scion-base" "${UP}/hack"
+# The real hack/version.sh: the driver runs the tree's copy to check that a
+# stamped tree stamps exactly the tag.
+cp "${HACK_VERSION}" "${UP}/hack/version.sh"
 printf 'FROM core-base\nARG VERSION\n' > "${UP}/image-build/scion-base/Dockerfile"
 # The step-ID fallback line that v0.3.0-preview.4+ targets.sh carries.
 # shellcheck disable=SC2016 # literal file content, not an expansion
@@ -162,6 +167,15 @@ cp "${TMP}/bi.sh" "${UP}/image-build/scripts/build-images.sh"
 git -C "${UP}" commit -q -am "c4: no VERSION derivation"
 C4="$(git -C "${UP}" rev-parse HEAD)"
 git -C "${UP}" tag v0.9.1
+# A stamped tree on a side branch (main stays at C4) tagged with a form
+# hack/version.sh does not accept as a release tag.
+git -C "${UP}" checkout -q -b side
+sed 's/describe --exact-match --tags/describe --tags --exact-match/' "${UP}/image-build/scripts/build-images.sh" > "${TMP}/bi.sh"
+cp "${TMP}/bi.sh" "${UP}/image-build/scripts/build-images.sh"
+git -C "${UP}" commit -q -am "c5: stamped again"
+git -C "${UP}" tag v1.2.0-beta.1
+git -C "${UP}" tag v1.2.0-preview.01
+git -C "${UP}" checkout -q main
 REPO_URL="file://${UP}"
 
 # ---------------------------------------------------------------------------
@@ -595,6 +609,17 @@ check_contains "release without VERSION derivation: warning" "predates version s
 check_contains "release without VERSION derivation: manifest records it" '"version_stamped": false,' "$(cat "${CACHE}/scion/image-src/v0.9.1/build-manifest.json" 2>/dev/null || true)"
 run_driver v1.0.0 --repo "${REPO_URL}"
 check_not_contains "stamped release: no stamping warning" "predates version stamping" "${OUT}"
+
+# A stamped tree whose hack/version.sh does not stamp the tag (a tag form
+# outside the release rule) fails before the build instead of building
+# images whose binaries report "dev".
+for t in v1.2.0-beta.1 v1.2.0-preview.01; do
+  reset_cache
+  run_driver "${t}" --repo "${REPO_URL}"
+  check_rc "non-release tag form ${t}: exit 1" 1 "${RC}"
+  check_contains "non-release tag form ${t}: message" "would not stamp '${t}' into its binaries" "${OUT}"
+  check_eq "non-release tag form ${t}: build not started" "" "$(argv)"
+done
 
 # ---------------------------------------------------------------------------
 # Round 2: arguments that start with '-' (F3, F5)
