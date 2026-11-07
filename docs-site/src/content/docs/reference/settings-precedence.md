@@ -1241,7 +1241,7 @@ typing any value into it saves that value.
 
 ### Image tag (experimental)
 
-Introduced by ptone/scion#6625, behind the `hub.image_tag_setting` experiment (off by default).
+Behind the `hub.image_tag_setting` [experiment](/scion/reference/experiments/) (off by default).
 The bundled agent images are tagged `latest` by default. `image_tag` selects another tag, so
 agents can run images built for a release (see "Build images for a release" in
 `image-build/README.md`):

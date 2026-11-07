@@ -189,7 +189,7 @@ As with `--version-of`, a reference with `@<n>` must name the current version. T
 
 ### Act on a review (owner)
 
-When an agent owns the artifact, the Hub sends it a message when someone else's review is published, with the commands to read it. A user owner gets no message; check for the *Review pending* badge instead. To read a review or list its comments, suggested changes and highlights as entries without parsing CriticMarkup:
+When an agent owns the artifact, the Hub sends it a message when someone else's review is published, with the commands to read it. When a user owns the artifact and someone else publishes a review of it, the Hub sends the owner an in-app notification (`kind: "artifact_review_summary"`, `status: "ARTIFACT_REVIEW_SUBMITTED"`, `resourceType: "artifact"`, `resourceId: "<artifact-id>"`) in the Web Dashboard's notification tray and in [`scion notifications`](/scion/reference/cli/#scion-notifications), with the cleaned start of the reviewer's summary note (up to 240 runes) in `excerpt`; see [Reviews](/scion/reference/artifacts/#reviews). To read a review or list its comments, suggested changes and highlights as entries without parsing CriticMarkup:
 
 ```bash
 scion artifact comments scion://artifact/5f1c2d3e-...        # list the newest review's entries (@<seq> for a specific review, --format json for JSON)

@@ -291,6 +291,8 @@ The Hub masks the password in its database connection string (DSN) before writin
 
 URL user-info redaction (`pkg/util/urlredact`) is shared across CLI output, API client errors, log text (`SanitizeText`), Hub endpoint strings, git clone URLs, template update URLs, artifact remote fetches, and tunnel endpoints. When a URL holds an `@` and its user info cannot be told apart from its host and path, `urlredact` fails closed and shows only the URL's scheme followed by a placeholder (`xxxxx` in CLI output and API client errors) rather than returning the input unchanged. Skills directory discovery (`POST /api/v1/skills/discover-directory`) passes through only the `?token=<SECRET_NAME>` query parameter (`[A-Z][A-Z0-9_]*`, a `token` value that is not such a name is refused with `400`) and strips all other query parameters and fragments before normalizing or logging candidate URIs.
 
+Cloud Logging query and stream endpoints (`GET /api/v1/agents/:id/cloud-logs`, `GET /api/v1/agents/:id/cloud-logs/stream`, their project-scoped counterparts, `GET /api/v1/admin/diagnostics/logs`, and `GET /api/v1/admin/diagnostics/logs/stream`) accept only the nine Cloud Logging severity names in the `severity` query parameter (`DEFAULT`, `DEBUG`, `INFO`, `NOTICE`, `WARNING`, `ERROR`, `CRITICAL`, `ALERT`, `EMERGENCY`, matched ASCII case-insensitively with non-ASCII bytes refused) and interpolate only the canonical table constant into `severity >= <LEVEL>`; any other non-empty `severity` value is rejected with `400 validation_error` (`details.field: "severity"`) before a filter is constructed.
+
 ## 5. Development Security
 
 To facilitate local development, Scion provides a **Development Authentication** mode.
