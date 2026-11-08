@@ -216,8 +216,15 @@ func (s *Server) applyAgentConfigUpdateHeld(ctx context.Context, w http.Response
 	// What the agent's broker applies at a start (ptone/scion#3982): with
 	// changedFields, a provision-rendered key it re-renders is written now
 	// in a phase with no container, like a container key, and applied by
-	// the next start's fold when held.
-	sup := s.agentBrokerStartSupport(ctx, agent)
+	// the next start's fold when held. The request's keys and the pending
+	// keys folded below are split by it together, so it is read up front;
+	// a record that cannot be read refuses the PATCH before anything is
+	// written (ptone/scion#7544).
+	sup, err := s.agentBrokerStartSupport(ctx, agent)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, brokerUnavailableMessage, nil)
+		return out, false
+	}
 
 	isHeld := func(f agentEditField) bool {
 		if live {
@@ -245,7 +252,8 @@ func (s *Server) applyAgentConfigUpdateHeld(ctx context.Context, w http.Response
 		out.drops = plan.drops
 		waiting, deferred := plan.waiting, plan.deferred
 		if !nowPart.empty() {
-			res := s.applyAgentConfigPatch(ctx, agent, nowPart, canAttachEnv)
+			// The support is known, so the apply cannot fail.
+			res, _ := s.applyAgentConfigPatch(ctx, agent, nowPart, canAttachEnv, knownBrokerSupport(sup))
 			out.warnings = append(out.warnings, res.warnings...)
 			out.applied = res.applied
 			out.heldForReincarnate = res.heldForReincarnate
@@ -585,6 +593,9 @@ type pendingFoldPlan struct {
 	// envCanView is the env saver's current env-view decision: whether the
 	// fold applies env removals.
 	envCanView bool
+	// sup is the broker start support the plan was made with; the fold
+	// applies the kept keys with it.
+	sup brokerStartSupport
 }
 
 // dropped returns every key the plan drops, sorted.
@@ -618,7 +629,7 @@ func (p pendingFoldPlan) dropped() []string {
 func (s *Server) planPendingFold(ctx context.Context, stored *store.Agent, sup brokerStartSupport) (pendingFoldPlan, error) {
 	pc := stored.PendingConfig
 	keep0, waiting := sup.foldKeep(pc)
-	plan := pendingFoldPlan{keep: keep0, waiting: waiting}
+	plan := pendingFoldPlan{keep: keep0, waiting: waiting, sup: sup}
 	if pc.IsEmpty() {
 		return plan, nil
 	}
@@ -716,7 +727,8 @@ func (s *Server) foldPendingConfig(ctx context.Context, agent *store.Agent, plan
 	sort.Strings(unappliable)
 	p := full.subset(plan.keep)
 	if !p.empty() {
-		s.applyAgentConfigPatch(ctx, agent, p, plan.envCanView)
+		// The plan's support is known, so the apply cannot fail.
+		_, _ = s.applyAgentConfigPatch(ctx, agent, p, plan.envCanView, knownBrokerSupport(plan.sup))
 		for _, f := range configPatchKeys(p.raw) {
 			folded = append(folded, f.Key)
 			delete(rest.Config, strings.TrimPrefix(f.Key, agentConfigKeyPrefix))
@@ -850,8 +862,13 @@ func (s *Server) foldPendingConfigAtStart(ctx context.Context, agent *store.Agen
 	// Container keys are applied at every start; provision-rendered keys
 	// too when the agent's broker re-renders them at start (changedFields,
 	// ptone/scion#3982): applyAgentConfigPatch then lists them in
-	// changed_fields. Other pending keys stay pending.
-	sup := s.agentBrokerStartSupport(ctx, agent)
+	// changed_fields. Other pending keys stay pending. A broker record
+	// that cannot be read refuses the start before its dispatch, which
+	// reads that record too: the fold never guesses (ptone/scion#7544).
+	sup, err := s.agentBrokerStartSupport(ctx, agent)
+	if err != nil {
+		return none, fmt.Errorf("%w: %w", errPendingConfigFold, err)
+	}
 	lastErr := store.ErrVersionConflict
 	for attempt := 0; attempt < pendingFoldAttempts; attempt++ {
 		stored, err := s.store.GetAgent(ctx, agent.ID)
