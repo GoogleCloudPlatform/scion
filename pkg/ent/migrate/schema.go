@@ -1331,6 +1331,11 @@ var (
 				Unique:  false,
 				Columns: []*schema.Column{DecisionAnswersColumns[17]},
 			},
+			{
+				Name:    "decisionanswer_answered_by_user_id",
+				Unique:  false,
+				Columns: []*schema.Column{DecisionAnswersColumns[9]},
+			},
 		},
 	}
 	// DecisionKeyCountersColumns holds the columns for the "decision_key_counters" table.

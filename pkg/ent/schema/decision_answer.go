@@ -145,6 +145,8 @@ func (DecisionAnswer) Indexes() []ent.Index {
 		index.Fields("project_id", "created_at"),
 		// History joins choice-response messages to their answer.
 		index.Fields("response_message_id"),
+		// User deletion clears answered_by_user_id on the user's answers.
+		index.Fields("answered_by_user_id"),
 	}
 }
 
