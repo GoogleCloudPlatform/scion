@@ -1909,6 +1909,8 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 	}
 	if su.ContainerStatus != "" {
 		upd.SetContainerStatus(su.ContainerStatus)
+	} else if containerStatusOutlived(current.Phase, su.Phase, current.ContainerStatus) {
+		upd.SetContainerStatus("")
 	}
 	if su.ExitCode != nil {
 		upd.SetExitCode(*su.ExitCode)
@@ -1996,6 +1998,21 @@ func isPreRunningPhase(phase string) bool {
 // refine a halted agent's exit reason.
 func isBrokerHeartbeat(su store.AgentStatusUpdate) bool {
 	return su.ReportSource == store.StatusReportSourceRuntime
+}
+
+// containerStatusOutlived reports whether a phase write that carries no
+// container status must clear the stored one: the phase moves between at
+// rest and live, so the stored status describes the container before the
+// change (a "running" left on a stopped agent, a "stopped" on a starting
+// one) and would contradict the phase in the agent list
+// (ptone/scion#3607). A stop queued while the broker was offline keeps its
+// stop_queued status; the hub retires it.
+func containerStatusOutlived(currentPhase, newPhase, currentStatus string) bool {
+	if newPhase == "" || newPhase == currentPhase || currentStatus == "" ||
+		currentStatus == store.ContainerStatusStopQueued {
+		return false
+	}
+	return store.PhaseAtRest(newPhase) != store.PhaseAtRest(currentPhase)
 }
 
 // startClaimHeld reports whether a start claim (of any kind, live or
