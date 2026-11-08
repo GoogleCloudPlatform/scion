@@ -268,6 +268,7 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/chat/user-prefs":            "authenticated", // Chat user preferences
 	"/api/v1/chat/presence":              "authenticated", // Chat presence
 	"/api/v1/chat/search":                "authenticated", // Chat search
+	"/api/v1/decisions/":                 "authenticated", // Choice prompt decisions (read, answer)
 	"/api/v1/chat/stars":                 "authenticated", // Caller's starred messages in one conversation; 404 when the experiment is off
 	"/api/v1/chat/stars/":                "authenticated", // Star state, star detail, star add/remove (caller's own); 404 when the experiment is off
 	"/api/v1/chat/starred-conversations": "authenticated", // Caller's conversations with starred messages (the Starred rail); 404 when the experiment is off
