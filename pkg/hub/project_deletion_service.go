@@ -461,7 +461,7 @@ func (svc *ProjectDeletionService) checkDeletionGovernanceFromStore(ctx context.
 		if rdErr != nil {
 			continue
 		}
-		if rd.Name == store.ProjectRoleOwner {
+		if builtInRoleName(rd) == store.ProjectRoleOwner {
 			return ProjectDeleteDecision{Allowed: true}
 		}
 	}

@@ -86,6 +86,8 @@ func unmarshalAppliedConfigSnapshot(raw string) (*store.AgentAppliedConfig, erro
 	if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
 		return nil, err
 	}
+	// As parseAppliedConfig: only the exact-key reader reads the decision.
+	cfg.NativeCloudRun = rowNativeCloudRun(raw)
 	return &cfg, nil
 }
 

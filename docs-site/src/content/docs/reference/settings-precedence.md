@@ -1241,15 +1241,18 @@ typing any value into it saves that value.
 
 ### Image tag (experimental)
 
-Behind the `hub.image_tag_setting` [experiment](/scion/reference/experiments/) (off by default).
-The bundled agent images are tagged `latest` by default. `image_tag` selects another tag, so
-agents can run images built for a release (see "Build images for a release" in
-`image-build/README.md`):
+A set `image_tag` is behind the `hub.image_tag_setting` [experiment](/scion/reference/experiments/)
+(off by default). The bundled agent images are tagged `latest`. When `image_tag` is unset, a
+release build of the Hub (`vX.Y.Z`, `vX.Y.Z-preview.N` or `vX.Y.Z-rc.N`) uses its own version as
+the tag instead (the `hub.image_tag_version_default` experiment, on by default), so a Homebrew or
+release install runs the images published for its release. `image_tag` selects another tag (see
+"Build images for a release" in `image-build/README.md`):
 
 | Value | Effect |
 | :--- | :--- |
-| unset or `""` | No change: image references are exactly as without the setting. |
-| `version` | The Hub binary's version (for example `v0.3.0-preview.5`); `latest` for a development build. |
+| unset or `""` | The version default: a release build of the Hub uses its own version (for example `v0.3.0-preview.5`); any other build (development, nightly, or a build without a release version) makes no change. Off while `hub.image_tag_version_default` is off. |
+| `version` | The Hub binary's release version; `latest` for any other build. |
+| `latest` | Keeps `latest`: the opt-out from the version default. |
 | any other value | That literal tag. It must be a valid image tag: letters, digits, `_`, `.` and `-`, at most 128 characters, not starting with `.` or `-`, with no surrounding spaces. `scion config set image_tag` refuses anything else and leaves the settings file unchanged. |
 
 The tag applies only to a short-form `scion-*` image (no registry host) whose tag is `latest` or
@@ -1268,7 +1271,7 @@ Hub's own, and the Hub stores `image_tag` only per profile, so there is no Hub t
 | 2 | Hub profile | `profiles.<name>.image_tag` saved in the Hub's settings |
 | 3 | File profile | `profiles.<name>.image_tag` in the settings file |
 | 4 | File top level | `image_tag` in the settings file |
-| 5 | Default | none: images keep their tag |
+| 5 | Default | unset: the version default on a release build, else images keep their tag |
 
 An agent resolves the layers for its profile; an agent with no profile uses its Runtime Broker's
 default profile (when that profile is in the Hub's profile catalog). If the catalog holds a single
@@ -1295,8 +1298,15 @@ Notes:
   dispatch, so the Hub alone decides which images its agents run. A Runtime Broker older than
   this setting ignores the tag it is sent: explicit images still arrive tagged by the Hub, and
   the images it resolves itself keep their tag.
-- While the experiment is off, `image_tag` is ignored everywhere and image references are exactly
-  as without the setting. A Hub settings save that sets or changes a profile's `image_tag`, in
+- The version default applies the same rules: an image named explicitly with
+  `--image scion-claude:latest`, or a bare `scion-claude`, is retagged to `scion-claude:<version>`.
+  To keep `latest`, set `image_tag: latest` (`scion config set --global image_tag latest`, then
+  restart the server). To turn the default off for the whole Hub, run
+  `scion hub experiments disable hub.image_tag_version_default`, or switch it off under
+  **Admin → Server Config → Experiments**. The release version comes from the build's version
+  stamp only: a build of a tagged commit with local changes counts as that release.
+- While `hub.image_tag_setting` is off, a set `image_tag` is not applied: image references keep
+  their tags, and the set value suppresses the version default. A Hub settings save that sets or changes a profile's `image_tag`, in
   database or settings-file mode, is refused with `412 experiment_disabled` naming the experiment
   (saving the stored value back, or clearing it, still works), and a value in the environment, a
   settings file or a saved Hub profile is reported with a warning at startup.

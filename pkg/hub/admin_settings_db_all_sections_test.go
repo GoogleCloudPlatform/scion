@@ -118,11 +118,12 @@ var layer1RoundTripSamples = map[string]string{
 	"default_gcp_identity_mode":               `"block"`,
 	"default_gcp_identity_service_account_id": `"sa-1"`,
 	// endpoints
-	"server.hub.public_url":               `"https://hub.example.com"`,
-	"server.hub.hub_name":                 `"hub-a"`,
-	"server.hub.content_url":              `"https://content.example.net"`,
-	"image_registry":                      `"registry.example.com/scion"`,
-	"server.hub.monitoring_dashboard_url": `"https://dash.example.com/d/hub"`,
+	"server.hub.public_url":                  `"https://hub.example.com"`,
+	"server.hub.hub_name":                    `"hub-a"`,
+	"server.hub.content_url":                 `"https://content.example.net"`,
+	"server.hub.content_url_allow_same_site": `true`,
+	"image_registry":                         `"registry.example.com/scion"`,
+	"server.hub.monitoring_dashboard_url":    `"https://dash.example.com/d/hub"`,
 	// github_app
 	"server.github_app.app_id":           `12345`,
 	"server.github_app.api_base_url":     `"https://api.github.com"`,
@@ -435,6 +436,7 @@ func TestPutServerConfigDB_EndpointURLNeedsAuditStore(t *testing.T) {
 	}{
 		{config.PublicURLKey, `{"server":{"hub":{"public_url":"https://hub.example.com"}}}`},
 		{config.ContentURLKey, `{"server":{"hub":{"content_url":"https://content.example.net"}}}`},
+		{config.ContentURLAllowSameSiteKey, `{"server":{"hub":{"content_url_allow_same_site":true}}}`},
 	} {
 		t.Run(tc.key, func(t *testing.T) {
 			t.Setenv("HOME", t.TempDir())
@@ -447,6 +449,7 @@ func TestPutServerConfigDB_EndpointURLNeedsAuditStore(t *testing.T) {
 			snap := ops.Snapshot()
 			assert.Empty(t, snap.PublicURL, "the public URL was applied")
 			assert.Empty(t, snap.ContentURL, "the content URL was applied")
+			assert.False(t, snap.ContentURLAllowSameSite, "the same-site override was applied")
 			assert.Empty(t, srv.HubEndpoints().Content, "the content URL in effect changed")
 		})
 	}

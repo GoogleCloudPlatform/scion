@@ -182,8 +182,7 @@ var fixtureCreateSites = []fixtureCreateSite{
 	// ── Not store creates (broker / hub client RPCs of the same name) ─
 	{"pkg/hub/brokerclient.go", "c.transport.CreateAgent(", false, "broker RPC: starts an agent already created by commitAgentCreate"},
 	{"pkg/hub/httpdispatcher.go", "c.transport.CreateAgent(", false, "broker RPC"},
-	{"pkg/hub/httpdispatcher.go", "d.client.CreateAgent(", false, "broker RPC"},
-	{"pkg/hub/httpdispatcher.go", "d.client.CreateAgent(", false, "broker RPC (retry)"},
+	{"pkg/hub/dispatch_metadata_seal.go", "d.client.CreateAgent(", false, "broker RPC (sealed send wrapper; the dispatcher's create and its retry both call it)"},
 	{"pkg/hub/controlchannel_client.go", "c.controlChannel.CreateAgent(", false, "broker RPC over the control channel"},
 	{"pkg/hub/controlchannel_client.go", "c.httpClient.CreateAgent(", false, "broker RPC (HTTP fallback)"},
 	{"pkg/hub/controlchannel_client.go", "c.httpClient.CreateAgent(", false, "broker RPC (HTTP)"},

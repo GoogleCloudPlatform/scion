@@ -82,7 +82,9 @@ grep -qF 'version "0.3.0-preview.5"' "$out" || fail "missing version"
 grep -qF 'license "Apache-2.0"' "$out" || fail "missing license"
 grep -qF 'shell_output("#{bin}/scion version")' "$out" || fail "missing test block"
 grep -qF 'scion server start' "$out" || fail "caveats lack the onboarding command"
-grep -qF 'ghcr.io/homebrew-scion is an old v0.2 image' "$out" || fail "caveats lack the stale :latest warning"
+grep -qF 'This version of Scion pulls the images tagged with its own version.' "$out" ||
+  fail "caveats lack the by-version image note"
+if grep -qF 'old v0.2 image' "$out"; then fail "caveats still carry the stale :latest warning"; fi
 grep -qx '    if OS.linux?' "$out" || fail "caveats lack the Linux-only block"
 grep -qF 'Homebrew installs its own gcc, once for all formulae' "$out" || fail "caveats lack the Linux gcc note"
 grep -qF 'its own glibc as well when glibc is older than 2.39' "$out" || fail "caveats lack the Linux glibc condition"

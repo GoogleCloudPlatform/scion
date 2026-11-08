@@ -36,8 +36,9 @@ import (
 // proxy in front of the content host must preserve Host, or the hub cannot
 // tell the origins apart.
 
-// contentHost is a parsed content host.
-type contentHost struct {
+// ContentHost is a parsed content host (ParseContentHost). The zero value is
+// no content host: it matches no request.
+type ContentHost struct {
 	host string // lower-cased host name, no trailing dot
 	port string // explicit or the scheme's default port
 	def  string // the scheme's default port
@@ -46,32 +47,37 @@ type contentHost struct {
 	cspHost string
 }
 
-// parseContentHost parses a content URL with config.ParseContentURL, the
+// ParseContentHost parses a content URL with config.ParseContentURL, the
 // one parse validation and the hub's conflict check use too, so the guard
 // never accepts a value the settings would refuse. An empty or invalid value
-// gives no content host, no confinement and no shareUrl.
-func parseContentHost(raw string) (contentHost, bool) {
+// gives no content host, no confinement and no shareUrl. The hub parses the
+// value once per settings apply and hands the result to ContentHostGuard, so
+// no request parses it.
+func ParseContentHost(raw string) (ContentHost, bool) {
 	p, ok := config.ParseContentURL(raw)
 	if !ok {
-		return contentHost{}, false
+		return ContentHost{}, false
 	}
-	o := contentHost{host: p.Host, port: p.Port, def: p.DefaultPort, cspHost: p.Host}
+	o := ContentHost{host: p.Host, port: p.Port, def: p.DefaultPort, cspHost: p.Host}
 	if p.Port != p.DefaultPort {
 		o.cspHost += ":" + p.Port
 	}
 	// Kept as defence in depth: the CSP source must be a plain host-source
 	// whatever the parser accepts.
 	if !validCSPHost(o.cspHost) {
-		return contentHost{}, false
+		return ContentHost{}, false
 	}
 	return o, true
 }
+
+// IsSet reports whether o is a content host (not the zero value).
+func (o ContentHost) IsSet() bool { return o.host != "" }
 
 // matchesHost reports whether a request Host names this origin: the host
 // compared case-insensitively (a single trailing dot ignored, since it
 // names the same host), the port exactly, with the scheme's default port
 // implied when the Host carries none.
-func (o contentHost) matchesHost(reqHost string) bool {
+func (o ContentHost) matchesHost(reqHost string) bool {
 	host, port := reqHost, ""
 	if h, p, err := net.SplitHostPort(reqHost); err == nil {
 		host, port = h, p
@@ -87,7 +93,7 @@ func (o contentHost) matchesHost(reqHost string) bool {
 // origin's host and port. It reads nothing else from the request. An empty
 // or unparseable contentURL matches no request.
 func ContentHostRequest(r *http.Request, contentURL string) bool {
-	o, ok := parseContentHost(contentURL)
+	o, ok := ParseContentHost(contentURL)
 	return ok && o.matchesHost(r.Host)
 }
 
@@ -103,9 +109,12 @@ func contentHostCSPHost(ctx context.Context) (string, bool) {
 }
 
 // ContentHostGuard returns the outermost middleware for the content host
-// (security review conditions 2 and 3, and C1-1). contentURL yields the
-// content URL in effect, normalized ("" when none is set), read on every
-// request so a settings change applies without a restart.
+// (security review conditions 2 and 3, and C1-1). contentHost yields the
+// parsed content host in effect for r (the zero ContentHost when none is
+// set), read on every request so a settings change applies without a
+// restart; the caller parses the value once per change (ParseContentHost),
+// not per request, and may hand the guard the value it already loaded for
+// r so the whole request sees one snapshot.
 //
 // On a request that is not a content-host request (ContentHostRequest), the
 // middleware does nothing. On one that is:
@@ -127,11 +136,11 @@ func contentHostCSPHost(ctx context.Context) (string, bool) {
 //     the content host.
 //
 // The inner handler gets a clone; the caller's request is not changed.
-func ContentHostGuard(contentURL func() string, servesOnHost func(*http.Request) bool, stripCredentials func(http.Header), refused func(*http.Request)) func(http.Handler) http.Handler {
+func ContentHostGuard(contentHost func(*http.Request) ContentHost, servesOnHost func(*http.Request) bool, stripCredentials func(http.Header), refused func(*http.Request)) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			o, ok := parseContentHost(contentURL())
-			if !ok || !o.matchesHost(r.Host) {
+			o := contentHost(r)
+			if !o.IsSet() || !o.matchesHost(r.Host) {
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -204,7 +213,7 @@ func (w *contentHostWriter) Unwrap() http.ResponseWriter { return w.ResponseWrit
 // hub-relative link path rel, or "" when limits carry no valid content URL.
 // It is built from the configured value only.
 func shareURL(l Limits, rel string) string {
-	if _, ok := parseContentHost(l.ContentURL); !ok {
+	if _, ok := ParseContentHost(l.ContentURL); !ok {
 		return ""
 	}
 	return strings.TrimSuffix(l.ContentURL, "/") + rel

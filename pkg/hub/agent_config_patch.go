@@ -21,10 +21,12 @@ import (
 	"maps"
 	"net/http"
 	"reflect"
+	"sort"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -89,12 +91,42 @@ func (p configPatch) subset(keep func(agentEditField) bool) configPatch {
 // range. On a failure it writes the error response and returns false. A
 // held edit is validated by the same call when it is saved; the harness is
 // fixed after create, so the check still holds when the edit is applied.
-func (s *Server) validateAgentConfigPatch(ctx context.Context, w http.ResponseWriter, agent *store.Agent, cfg *api.ScionConfig) bool {
+//
+// nilEnvClears says a nil cfg.Env clears the env, as a held edit that names
+// env with a null value does; on the live path a nil env leaves it as it is.
+func (s *Server) validateAgentConfigPatch(ctx context.Context, w http.ResponseWriter, agent *store.Agent, cfg *api.ScionConfig, nilEnvClears bool) bool {
 	resolvedHarness, harnessCaps := s.resolveAgentHarnessCapabilities(ctx, agent)
 	if issues := validateConfigAgainstHarnessCapabilities(cfg, harnessCaps); len(issues) > 0 {
 		ValidationError(w, "Config contains unsupported fields for harness "+resolvedHarness, map[string]interface{}{
 			"harness": resolvedHarness,
 			"fields":  issues,
+		})
+		return false
+	}
+	// config.env never adds, changes or removes a reserved control-plane
+	// key (SCION_*, GCE_METADATA_*; secret.IsReservedEnvTarget, the helper
+	// the env submit and env-secret refusals use): the SCION_METADATA_*
+	// keys carry the hub's own GCP identity decision to the broker. The only
+	// exception is the exact names in patchableReservedEnvKeys, the
+	// user-facing auto-expose keys (patchReservedEnvKey). A key stored with
+	// the agent may be sent back byte-identical (the configure page sends
+	// the whole env), except the native Cloud Run marker, which is always
+	// refused when sent (dropping it is allowed). The stored env compared is
+	// the one this request read, and the write is a compare-and-set on that
+	// same state version, so a concurrent change of it makes the write fail
+	// instead.
+	var stored map[string]string
+	if agent != nil && agent.AppliedConfig != nil {
+		stored = agent.AppliedConfig.Env
+	}
+	requested := cfg.Env
+	if requested == nil && nilEnvClears {
+		requested = map[string]string{}
+	}
+	if key := reservedEnvEditKey(stored, requested); key != "" {
+		ValidationError(w, "config.env may not add, change or remove a key reserved for scion's own control-plane environment variables", map[string]interface{}{
+			"field": "env",
+			"value": key,
 		})
 		return false
 	}
@@ -105,6 +137,58 @@ func (s *Server) validateAgentConfigPatch(ctx context.Context, w http.ResponseWr
 		}
 	}
 	return s.validateUnlimitedCounts(ctx, w, agent, cfg)
+}
+
+// patchableReservedEnvKeys are the reserved env keys (by exact name, never
+// a prefix) that config.env may add, change or remove: the user-facing
+// auto-expose keys, which the configure page sends and sciontool reads
+// (the same set as autoExposeEnvKeys). Their values are not validated
+// here: sciontool parses them leniently. A name is added only with a test
+// that patches it.
+var patchableReservedEnvKeys = map[string]bool{
+	"SCION_AUTO_EXPOSE_PORTS":      true,
+	"SCION_AUTO_EXPOSE_MODE":       true,
+	"SCION_AUTO_EXPOSE_PORTS_LIST": true,
+	"SCION_AUTO_EXPOSE_INTERVAL":   true,
+}
+
+// patchReservedEnvKey reports whether k is a reserved key a config patch
+// must not add, change or remove.
+func patchReservedEnvKey(k string) bool {
+	return secret.IsReservedEnvTarget(k) && !patchableReservedEnvKeys[k]
+}
+
+// reservedEnvEditKey returns, in sorted order, the first reserved env key
+// (patchReservedEnvKey) that requested, a patch's whole new env,
+// would add, change or remove against stored, or "". The native Cloud Run
+// marker counts whenever requested names it, and its removal does not. A
+// nil requested leaves the env as it is and edits nothing. Only key names
+// are returned, never values.
+func reservedEnvEditKey(stored, requested map[string]string) string {
+	if requested == nil {
+		return ""
+	}
+	var keys []string
+	for k, v := range requested {
+		if !patchReservedEnvKey(k) {
+			continue
+		}
+		if sv, ok := stored[k]; k == envNativeCloudRun || !ok || sv != v {
+			keys = append(keys, k)
+		}
+	}
+	for k := range stored {
+		// Removing the marker is allowed: it is refused whenever sent, so
+		// dropping it is the only edit that leaves an env holding it.
+		if _, ok := requested[k]; !ok && k != envNativeCloudRun && patchReservedEnvKey(k) {
+			keys = append(keys, k)
+		}
+	}
+	if len(keys) == 0 {
+		return ""
+	}
+	sort.Strings(keys)
+	return keys[0]
 }
 
 // validateUnlimitedCounts refuses a change of a count limit to Unlimited (0)

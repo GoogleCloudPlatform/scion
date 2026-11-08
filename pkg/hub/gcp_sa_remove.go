@@ -428,6 +428,11 @@ func (s *Server) gcpServiceAccountImpact(ctx context.Context, sa *store.GCPServi
 	}
 	for _, b := range brokers {
 		for _, p := range b.Profiles {
+			// A Cloud Run profile's entries are the accounts its broker may
+			// run instances as, not Kubernetes mappings.
+			if isCloudRunProfileType(p.Type) {
+				continue
+			}
 			for _, m := range p.ServiceAccountMappings {
 				if strings.EqualFold(m.GSA, sa.Email) {
 					impact.BrokerMappings = append(impact.BrokerMappings, GCPServiceAccountImpactMapping{

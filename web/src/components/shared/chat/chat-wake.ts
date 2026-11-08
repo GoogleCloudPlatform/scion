@@ -122,6 +122,59 @@ export function isChatPostDeniedBody(data: unknown): boolean {
   return (err as { code?: unknown }).code === CHAT_POST_DENIED_CODE;
 }
 
+/**
+ * Why a caller that reads a thread may not post in it: `read_only` (the
+ * account lacks project.chat_post) or `token_scope` (the access token in
+ * use may not write chat in the project). Empty when unknown.
+ */
+export type ChatPostDeniedReason = 'read_only' | 'token_scope' | '';
+
+function asPostDeniedReason(value: unknown): ChatPostDeniedReason {
+  return value === 'read_only' || value === 'token_scope' ? value : '';
+}
+
+/** The details.reason of a chat_post_denied error body, or ''. */
+export function chatPostDeniedReason(data: unknown): ChatPostDeniedReason {
+  if (!isChatPostDeniedBody(data)) return '';
+  const details: unknown = (data as { error: { details?: unknown } }).error.details;
+  if (!details || typeof details !== 'object') return '';
+  return asPostDeniedReason((details as { reason?: unknown }).reason);
+}
+
+/** The chat capabilities a thread response carries (`_capabilities`). */
+export interface ChatCapabilities {
+  actions: string[];
+  reason?: string;
+}
+
+/**
+ * Whether the caller may post, and why not, from a thread history
+ * response: `_capabilities` decides when present; otherwise the legacy
+ * `canPost` alias; otherwise nothing is known (undefined).
+ */
+export function postStateFromHistory(data: {
+  _capabilities?: ChatCapabilities;
+  canPost?: boolean;
+}): { canPost: boolean; reason: ChatPostDeniedReason } | undefined {
+  const caps = data._capabilities;
+  if (caps && Array.isArray(caps.actions)) {
+    const canPost = caps.actions.includes('post');
+    return { canPost, reason: canPost ? '' : asPostDeniedReason(caps.reason) };
+  }
+  if (typeof data.canPost === 'boolean') {
+    return { canPost: data.canPost, reason: '' };
+  }
+  return undefined;
+}
+
+/** Text of the notice shown in place of the composer of a read-only thread. */
+export function readOnlyNoticeText(reason: ChatPostDeniedReason): string {
+  if (reason === 'token_scope') {
+    return "You can read this thread, but the access token you're using can't post in it.";
+  }
+  return "You can read this thread, but you don't have permission to post in it.";
+}
+
 /** Body text of the wake confirmation dialog. */
 export function wakeConfirmMessage(offer: WakeOffer): string {
   const name = offer.agentSlug ? `@${offer.agentSlug}` : 'This agent';
