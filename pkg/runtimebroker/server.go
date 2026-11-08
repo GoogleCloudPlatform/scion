@@ -327,6 +327,8 @@ type Server struct {
 	mux        *http.ServeMux
 	mu         sync.RWMutex
 	startTime  time.Time
+	// listening is closed once Start's listener is bound (Listening).
+	listening listenSignal
 	// servicesStarted is set once startServices begins (Started).
 	servicesStarted bool
 
@@ -1574,6 +1576,12 @@ func (s *Server) GetHydrator() *templatecache.Hydrator {
 	return nil
 }
 
+// Listening returns a channel that is closed once Start has bound its HTTP
+// listener. It is never closed when the bind fails. A server start uses it
+// to release the 'runtime-broker convert' host lock only after the
+// broker's own listener is up.
+func (s *Server) Listening() <-chan struct{} { return s.listening.ch() }
+
 // Start starts the broker's services and its own HTTP listener, and blocks
 // until ctx is done (then shuts down) or the listener fails.
 func (s *Server) Start(ctx context.Context) error {
@@ -1581,9 +1589,19 @@ func (s *Server) Start(ctx context.Context) error {
 		return err
 	}
 
+	addr := s.httpServer.Addr
+	if addr == "" {
+		addr = ":http"
+	}
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+	s.listening.mark()
+
 	errCh := make(chan error, 1)
 	go func() {
-		if err := s.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := s.httpServer.Serve(ln); err != nil && err != http.ErrServerClosed {
 			errCh <- err
 		}
 		close(errCh)

@@ -133,11 +133,14 @@ func setConvertFlags(t *testing.T, plan, skipHub bool, format string, profiles .
 	// convert turns the process-wide no-write switch on; keep it per test.
 	writesonread.IsolateForTest(t)
 	oldPlan, oldSkipHub, oldProfiles, oldChoices, oldFormat, oldShowEnv := brokerConvertPlan, brokerConvertSkipHub, brokerConvertProfiles, brokerConvertChoices, outputFormat, brokerConvertShowEnv
+	oldApply, oldStatus, oldRollback := brokerConvertApply, brokerConvertStatus, brokerConvertRollback
 	t.Cleanup(func() {
 		brokerConvertPlan, brokerConvertSkipHub, brokerConvertProfiles, brokerConvertChoices, outputFormat, brokerConvertShowEnv = oldPlan, oldSkipHub, oldProfiles, oldChoices, oldFormat, oldShowEnv
+		brokerConvertApply, brokerConvertStatus, brokerConvertRollback = oldApply, oldStatus, oldRollback
 	})
 	brokerConvertPlan, brokerConvertSkipHub, brokerConvertProfiles, brokerConvertChoices, outputFormat = plan, skipHub, profiles, "", format
 	brokerConvertShowEnv = false
+	brokerConvertApply, brokerConvertStatus, brokerConvertRollback = false, false, false
 }
 
 func setConvertHubClient(t *testing.T, f func(*config.Settings) (hubclient.Client, error)) {
@@ -204,11 +207,56 @@ func newConvertGETOnlyHub(t *testing.T) *convertGETOnlyHub {
 	return h
 }
 
-func TestBrokerConvert_RequiresPlan(t *testing.T) {
+func TestBrokerConvert_RequiresExactlyOneMode(t *testing.T) {
 	setConvertFlags(t, false, true, "")
 	_, err := runConvertForTest(t)
-	assert.ErrorIs(t, err, errConvertPlanOnly)
-	assert.Equal(t, "convert currently supports only --plan (read-only)", err.Error())
+	assert.ErrorIs(t, err, errConvertOneMode, "no mode")
+
+	setConvertFlags(t, true, false, "")
+	brokerConvertApply = true
+	_, err = runConvertForTest(t)
+	assert.ErrorIs(t, err, errConvertOneMode, "two modes")
+
+	setConvertFlags(t, false, false, "")
+	brokerConvertStatus, brokerConvertRollback = true, true
+	_, err = runConvertForTest(t)
+	assert.ErrorIs(t, err, errConvertOneMode, "status and rollback")
+}
+
+// --skip-hub and --show-env-values belong to --plan; --profiles and
+// --choices are refused with --status and --rollback.
+func TestBrokerConvert_ModeFlagScope(t *testing.T) {
+	setConvertFlags(t, false, true, "")
+	brokerConvertApply = true
+	_, err := runConvertForTest(t)
+	assert.ErrorIs(t, err, errConvertPlanFlag)
+
+	setConvertFlags(t, false, false, "")
+	brokerConvertApply, brokerConvertShowEnv = true, true
+	_, err = runConvertForTest(t)
+	assert.ErrorIs(t, err, errConvertPlanFlag)
+
+	setConvertFlags(t, false, false, "", "build")
+	brokerConvertStatus = true
+	_, err = runConvertForTest(t)
+	assert.ErrorIs(t, err, errConvertStatusFlag)
+
+	setConvertFlags(t, false, false, "")
+	brokerConvertRollback, brokerConvertChoices = true, "choices.yaml"
+	_, err = runConvertForTest(t)
+	assert.ErrorIs(t, err, errConvertStatusFlag)
+}
+
+// --status with no recorded run writes nothing under HOME (read-only).
+func TestBrokerConvert_StatusWritesNothing(t *testing.T) {
+	home, _ := convertTestHome(t, convertTestSettings)
+	setConvertFlags(t, false, false, "")
+	brokerConvertStatus = true
+	setConvertHubClient(t, func(*config.Settings) (hubclient.Client, error) { return nil, errHubNotConfigured })
+	before := convertTreeSnapshot(t, home)
+	_, err := runConvertForTest(t)
+	require.Error(t, err, "no recorded run")
+	assert.Equal(t, before, convertTreeSnapshot(t, home), "status writes nothing under HOME")
 }
 
 // --skip-hub: the local plan, no Hub client, and not one file written,

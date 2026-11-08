@@ -508,6 +508,7 @@ func startFlatRuntimeBrokerHost(ctx context.Context, p flatHostParams) error {
 	}
 
 	log.Printf("Starting Runtime Broker API server on %s:%d", cfg.RuntimeBroker.Host, cfg.RuntimeBroker.Port)
+	brokerListeners.add(host.Listening())
 	p.wg.Add(1)
 	go func() {
 		defer p.wg.Done()

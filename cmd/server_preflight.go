@@ -112,6 +112,14 @@ func isNoWriteCommand(cmd *cobra.Command) bool {
 	case "preflight":
 		parentName = "server"
 	case "convert":
+		// Every convert mode, the write modes included (convert-apply
+		// design section 3, erratum E1): the guard blocks loader and
+		// migration side-effect rewrites only. The explicit writers of
+		// --apply and --rollback (the instances writer, the journal, the
+		// evidence copy, the identity moves) do not consult it, and the
+		// instances writer is listed in settingsBypassAllowed. There is no
+		// up-front refusal under the guard: convert sets it itself, and no
+		// other setter reaches it.
 		parentName = "runtime-broker"
 	default:
 		return false

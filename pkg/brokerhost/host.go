@@ -250,8 +250,21 @@ type Host struct {
 	prepared  bool
 	httpSrv   *http.Server
 	addr      string
+	// listening is closed once Run's listener is bound (Listening).
+	listenInit  sync.Once
+	listenClose sync.Once
+	listenCh    chan struct{}
 	// servicesStop stops the host services once.
 	servicesStop sync.Once
+}
+
+// Listening returns a channel that is closed once Run has bound the
+// process-wide listener. It is never closed when the bind fails. A server
+// start uses it to release the 'runtime-broker convert' host lock only
+// after its own listener is up.
+func (h *Host) Listening() <-chan struct{} {
+	h.listenInit.Do(func() { h.listenCh = make(chan struct{}) })
+	return h.listenCh
 }
 
 // New validates cfg and returns a Host. Invalid instance configuration
@@ -715,6 +728,8 @@ func (h *Host) Run(ctx context.Context) error {
 		h.shutdownInstances(ctx)
 		return err
 	}
+	h.Listening()
+	h.listenClose.Do(func() { close(h.listenCh) })
 	handler := h.Handler()
 	h.mu.Lock()
 	h.httpSrv = &http.Server{
