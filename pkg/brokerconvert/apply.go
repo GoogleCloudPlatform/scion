@@ -112,7 +112,7 @@ func Apply(ctx context.Context, env *Env, in ApplyInput) (*Report, error) {
 	if p == nil || p.LegacyBrokerID == "" || p.Agents == nil || p.Projects == nil {
 		return refused(ModeApply, nil, refuse(RefuseHubSections))
 	}
-	if p.ExitCode() != ExitOK || p.Agents.Note != "" || p.Projects.Note != "" {
+	if p.ExitCode() != ExitClean || p.Agents.Note != "" || p.Projects.Note != "" {
 		return refused(ModeApply, nil, refuse(RefusePlanNotClean))
 	}
 	insts := p.SettingsInstances()
