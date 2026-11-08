@@ -184,7 +184,14 @@ func (Message) Indexes() []ent.Index {
 		// participant indexes above match only one side of the pair, so
 		// every row of that participant was read and sorted; with both
 		// columns the lookup reads at most limit+1 rows in index order.
-		index.Fields("sender_id", "recipient_id", "created", "id"),
+		// The index is partial on recipient_id IS NOT NULL so that only
+		// queries with a recipient_id term can use it: a sender_id-only
+		// read (the participant view's sender branch) cannot, and keeps
+		// (sender_id, created, id), which serves its ORDER BY with no sort.
+		// recipient_id = ? implies the WHERE, so the pair lookup still
+		// uses it.
+		index.Fields("sender_id", "recipient_id", "created", "id").
+			Annotations(entsql.IndexWhere("recipient_id IS NOT NULL")),
 		// The same check's thread lookup filters on thread_id alone. The
 		// (thread_id, channel, created, id) index has channel between the
 		// filter and the order, so it cannot serve that ORDER BY without

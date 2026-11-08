@@ -135,11 +135,19 @@ func TestListMessages_ConsistencyCheckLookupsUseIndexes(t *testing.T) {
 		filter store.MessageFilter
 		opts   store.ListOptions
 		index  string
+		avoid  string // an index the plan must not use ("" for none)
 	}{
-		{"pair", store.MessageFilter{SenderID: busySender, RecipientID: busyRecipient}, dmOpts, messageSenderRecipientCreatedIDIndex},
-		{"pair_reverse", store.MessageFilter{SenderID: busyRecipient, RecipientID: busySender}, dmOpts, messageSenderRecipientCreatedIDIndex},
-		{"thread", store.MessageFilter{ThreadID: "dm:busy"}, store.ListOptions{Limit: 50, SkipTotalCount: true}, messageThreadCreatedIDIndex},
-		{"unrelated_pair", store.MessageFilter{SenderID: peer, RecipientID: busyRecipient}, dmOpts, messageSenderRecipientCreatedIDIndex},
+		{"pair", store.MessageFilter{SenderID: busySender, RecipientID: busyRecipient}, dmOpts, messageSenderRecipientCreatedIDIndex, ""},
+		{"pair_reverse", store.MessageFilter{SenderID: busyRecipient, RecipientID: busySender}, dmOpts, messageSenderRecipientCreatedIDIndex, ""},
+		{"thread", store.MessageFilter{ThreadID: "dm:busy"}, store.ListOptions{Limit: 50, SkipTotalCount: true}, messageThreadCreatedIDIndex, ""},
+		{"unrelated_pair", store.MessageFilter{SenderID: peer, RecipientID: busyRecipient}, dmOpts, messageSenderRecipientCreatedIDIndex, ""},
+		// A sender_id-only or recipient_id-only read must keep its own
+		// (column, created, id) index: the pair index is partial on
+		// recipient_id IS NOT NULL, so a read with no recipient_id term
+		// cannot use it, and its sender_id prefix cannot serve a
+		// recipient_id filter.
+		{"sender_only", store.MessageFilter{SenderID: busySender}, dmOpts, messageSenderIDCreatedIDIndex, messageSenderRecipientCreatedIDIndex},
+		{"recipient_only", store.MessageFilter{RecipientID: busyRecipient}, dmOpts, messageRecipientIDCreatedIDIndex, messageSenderRecipientCreatedIDIndex},
 	}
 	recorded := make(map[string]recordedQuery, len(cases))
 	for _, tc := range cases {
@@ -162,6 +170,9 @@ func TestListMessages_ConsistencyCheckLookupsUseIndexes(t *testing.T) {
 			plan := explain(t, q)
 			t.Logf("plan for %s:\n%s", tc.name, plan)
 			assert.Contains(t, plan, tc.index, "plan for %s", q.sql)
+			if tc.avoid != "" {
+				assert.NotContains(t, plan, tc.avoid, "plan for %s", q.sql)
+			}
 			assert.NotContains(t, plan, "SCAN messages", "plan for %s", q.sql)
 			assert.NotContains(t, plan, "TEMP B-TREE", "plan for %s", q.sql)
 		})

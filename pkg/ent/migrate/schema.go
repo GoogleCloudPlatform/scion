@@ -2131,6 +2131,9 @@ var (
 				Name:    "message_sender_id_recipient_id_created_id",
 				Unique:  false,
 				Columns: []*schema.Column{MessagesColumns[3], MessagesColumns[5], MessagesColumns[23], MessagesColumns[0]},
+				Annotation: &entsql.IndexAnnotation{
+					Where: "recipient_id IS NOT NULL",
+				},
 			},
 			{
 				Name:    "message_thread_id_created_id",
