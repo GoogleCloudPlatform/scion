@@ -22,7 +22,8 @@
  * otherwise. Tabs (?tab=):
  *
  * - overview: runtime target card, capacity, capabilities, legacy profiles,
- *   and the read-only project storage card;
+ *   the read-only conversion plan of a legacy broker, and the read-only
+ *   project storage card;
  * - agents: the projects this broker provides for, with their agents;
  * - health: shown only to a user holding hub.health.read, exactly the set
  *   the health summary endpoint authorizes; also hidden on a 401/403;
@@ -50,6 +51,7 @@ import type { BrokerAreaProject } from './broker-area-agents.js';
 import '../shared/status-badge.js';
 import '../shared/detail-header.js';
 import './broker-area-overview.js';
+import './broker-area-conversion-plan.js';
 import './broker-area-agents.js';
 import './broker-area-health.js';
 import './broker-area-configure.js';
@@ -360,6 +362,7 @@ export class ScionPageBrokerAreaDetail extends LitElement {
             .broker=${broker}
             .settings=${this.settings}
           ></scion-broker-area-overview>
+          <scion-broker-area-conversion-plan .broker=${broker}></scion-broker-area-conversion-plan>
           <scion-broker-storage-card
             .storage=${broker.workspaceStorage}
             .mismatch=${this.storageMismatch}
