@@ -644,7 +644,9 @@ func applySucceededAgentInfo(upd *ent.AgentUpdateOne, current *ent.Agent, r stor
 		upd.SetRuntime(a.Runtime)
 	}
 	if a.AppliedConfig != nil {
-		if raw := marshalAppliedConfig(a.AppliedConfig); raw != "" && raw != current.AppliedConfig {
+		// Keeps the recorded native Cloud Run decision: written from the
+		// locked row's own exact reading (rowNativeCloudRun).
+		if raw := marshalAppliedConfigNative(a.AppliedConfig, rowNativeCloudRun(current.AppliedConfig)); raw != "" && raw != current.AppliedConfig {
 			upd.SetAppliedConfig(raw)
 			upd.SetHarnessConfig(harnessConfigOf(a.AppliedConfig))
 		}

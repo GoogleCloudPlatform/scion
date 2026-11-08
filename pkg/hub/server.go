@@ -1745,6 +1745,14 @@ type RemoteGCPIdentityConfig struct {
 	// name; the two types are decoded independently (no shared Go type), so
 	// nothing but the tag keeps them in step.
 	RequireLocalRuntime bool `json:"require_local_runtime,omitempty"`
+
+	// NativeCloudRun marks a create the hub decided runs on Cloud Run
+	// Instances as the agent's own identity (markCloudRunNative). It is set
+	// only from that dispatch's decision, never copied from the agent's
+	// config, the create request or a template. The broker runs an assign
+	// create natively only with it. The JSON tag must match
+	// runtimebroker.GCPIdentityConfig's field of the same name.
+	NativeCloudRun bool `json:"native_cloud_run,omitempty"`
 }
 
 // RemoteAgentResponse is the response from creating an agent on a remote runtime broker.

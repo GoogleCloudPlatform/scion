@@ -17,6 +17,9 @@ package runtime
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -220,22 +223,29 @@ func TestCloudRunRun_EmptyIdentityAccountRefused(t *testing.T) {
 
 // No instance yet: the create carries the dispatch account and label.
 func TestCloudRunRun_IdentityCreate(t *testing.T) {
-	fake := &fakeInstancesClient{getErr: notFoundErr()}
-	rt, _ := nativeIdentityRuntime(t, fake)
-	cfg := nativeIdentityRunConfig(&api.CloudRunIdentity{ServiceAccount: nativeIDAssignedSA, Mode: "assign"})
+	for _, id := range []*api.CloudRunIdentity{
+		{ServiceAccount: nativeIDAssignedSA, Mode: "assign"},
+		{ServiceAccount: nativeIDBlockSA, Mode: "block"},
+	} {
+		t.Run(id.Mode, func(t *testing.T) {
+			fake := &fakeInstancesClient{getErr: notFoundErr()}
+			rt, _ := nativeIdentityRuntime(t, fake)
+			cfg := nativeIdentityRunConfig(id)
 
-	if _, err := rt.Run(context.Background(), cfg); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if len(fake.createReqs) != 1 || len(fake.startReqs) != 0 || len(fake.deleteReqs) != 0 {
-		t.Fatalf("create %d, start %d, delete %d; want 1, 0, 0", len(fake.createReqs), len(fake.startReqs), len(fake.deleteReqs))
-	}
-	inst := fake.createReqs[0].GetInstance()
-	if inst.GetServiceAccount() != nativeIDAssignedSA {
-		t.Errorf("ServiceAccount = %q, want the assigned account", inst.GetServiceAccount())
-	}
-	if inst.GetLabels()[cloudRunIdentityLabel] != cloudRunIdentityHash(nativeIDAssignedSA) {
-		t.Errorf("identity label = %q", inst.GetLabels()[cloudRunIdentityLabel])
+			if _, err := rt.Run(context.Background(), cfg); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if len(fake.createReqs) != 1 || len(fake.startReqs) != 0 || len(fake.deleteReqs) != 0 {
+				t.Fatalf("create %d, start %d, delete %d; want 1, 0, 0", len(fake.createReqs), len(fake.startReqs), len(fake.deleteReqs))
+			}
+			inst := fake.createReqs[0].GetInstance()
+			if inst.GetServiceAccount() != id.ServiceAccount {
+				t.Errorf("ServiceAccount = %q, want %q", inst.GetServiceAccount(), id.ServiceAccount)
+			}
+			if inst.GetLabels()[cloudRunIdentityLabel] != cloudRunIdentityHash(id.ServiceAccount) {
+				t.Errorf("identity label = %q", inst.GetLabels()[cloudRunIdentityLabel])
+			}
+		})
 	}
 }
 
@@ -531,4 +541,221 @@ func TestCloudRunRun_CreateAlreadyExistsAdoption(t *testing.T) {
 			t.Errorf("GetInstance called %d times, want the adoption read", len(fake.getReqs))
 		}
 	})
+}
+
+// crInitFirewallCases mirror sciontool init's own parse of
+// SCION_INIT_FIREWALL (initFirewallRequested; its cases are
+// TestSetupInitFirewall in cmd/sciontool/commands/init_netadmin_test.go),
+// with more spellings strconv.ParseBool accepts or rejects and surrounding
+// space. wantOn: init reads it as on. wantErr: init fails the start.
+var crInitFirewallCases = []struct {
+	value   string
+	wantOn  bool
+	wantErr bool
+}{
+	// init's own cases.
+	{value: ""},
+	{value: "0"},
+	{value: "false"},
+	{value: "1", wantOn: true},
+	{value: "true", wantOn: true},
+	{value: "yes please", wantErr: true},
+	// Trimmed, then strconv.ParseBool.
+	{value: "  "},
+	{value: " 0 "},
+	{value: "F"},
+	{value: "TRUE", wantOn: true},
+	{value: "t", wantOn: true},
+	{value: " true ", wantOn: true},
+	{value: "\ttrue\n", wantOn: true},
+	{value: "garbage", wantErr: true},
+	{value: "yes", wantErr: true},
+	{value: "on", wantErr: true},
+}
+
+// CloudRunInitFirewallRequested reads every value as sciontool init does,
+// and CloudRunInitFirewallRefused gives the refusal for an on value, the
+// invalid-value refusal for an unparsable one and nothing for an off
+// value, never carrying the value.
+func TestCloudRunInitFirewallRequested(t *testing.T) {
+	for _, tc := range crInitFirewallCases {
+		t.Run(strconv.Quote(tc.value), func(t *testing.T) {
+			on, err := CloudRunInitFirewallRequested(tc.value)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("CloudRunInitFirewallRequested(%q) error = %v, wantErr %v", tc.value, err, tc.wantErr)
+			}
+			if on != tc.wantOn {
+				t.Errorf("CloudRunInitFirewallRequested(%q) = %v, want %v", tc.value, on, tc.wantOn)
+			}
+			refusal := CloudRunInitFirewallRefused(tc.value)
+			switch {
+			case tc.wantErr:
+				if refusal != "the "+CloudRunInitFirewallEnv+" value is invalid; "+CloudRunInitFirewallRefusal {
+					t.Errorf("CloudRunInitFirewallRefused(%q) = %q, want the invalid-value refusal", tc.value, refusal)
+				}
+			case tc.wantOn:
+				if refusal != CloudRunInitFirewallRefusal {
+					t.Errorf("CloudRunInitFirewallRefused(%q) = %q, want the refusal", tc.value, refusal)
+				}
+			default:
+				if refusal != "" {
+					t.Errorf("CloudRunInitFirewallRefused(%q) = %q, want none", tc.value, refusal)
+				}
+			}
+			if v := strings.TrimSpace(tc.value); len(v) > 3 && strings.Contains(refusal, v) {
+				t.Errorf("CloudRunInitFirewallRefused(%q) carries the value", tc.value)
+			}
+		})
+	}
+}
+
+// On a native "assign" instance, Run refuses SCION_INIT_FIREWALL in the
+// final instance env (here from cfg.Env, which carries every layer the
+// agent manager assembles) when init would read it as on or cannot parse
+// it, before any Instances API call, so no instance is created. An off
+// value is created as before, with the setting unchanged.
+func TestCloudRunRun_AssignInitFirewallRefused(t *testing.T) {
+	for _, tc := range crInitFirewallCases {
+		t.Run(strconv.Quote(tc.value), func(t *testing.T) {
+			fake := &fakeInstancesClient{getErr: notFoundErr()}
+			rt, _ := nativeIdentityRuntime(t, fake)
+			provisioned := crCountProvisionNFS(rt)
+			cfg := nativeIdentityRunConfig(&api.CloudRunIdentity{ServiceAccount: nativeIDAssignedSA, Mode: "assign"})
+			cfg.Env = []string{CloudRunInitFirewallEnv + "=" + tc.value}
+
+			_, err := rt.Run(context.Background(), cfg)
+			if !tc.wantOn && !tc.wantErr {
+				if err != nil {
+					t.Fatalf("Run: %v", err)
+				}
+				if *provisioned != 1 {
+					t.Errorf("provisioned %d times, want 1", *provisioned)
+				}
+				if got := crInstanceEnv(t, fake)[CloudRunInitFirewallEnv]; got != tc.value {
+					t.Errorf("%s = %q, want %q unchanged", CloudRunInitFirewallEnv, got, tc.value)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("Run succeeded, want the init firewall refusal")
+			}
+			want := fmt.Sprintf("agent %q: %s", "agent-1", CloudRunInitFirewallRefused(tc.value))
+			if err.Error() != want {
+				t.Errorf("Run error = %q, want %q", err.Error(), want)
+			}
+			if strings.Contains(err.Error(), nativeIDAssignedSA) {
+				t.Errorf("Run error %q names the account", err.Error())
+			}
+			if *provisioned != 0 {
+				t.Errorf("provisioned %d times before the refusal, want none", *provisioned)
+			}
+			if len(fake.getReqs)+len(fake.createReqs)+len(fake.startReqs)+len(fake.deleteReqs) != 0 {
+				t.Errorf("Instances API called (get %d, create %d, start %d, delete %d), want none",
+					len(fake.getReqs), len(fake.createReqs), len(fake.startReqs), len(fake.deleteReqs))
+			}
+		})
+	}
+}
+
+// Negative controls: native "block" and an instance without a native
+// identity run unchanged with SCION_INIT_FIREWALL on or invalid in cfg.Env,
+// and the setting reaches the created instance unchanged.
+func TestCloudRunRun_InitFirewallNotRefusedOffAssign(t *testing.T) {
+	for _, id := range []*api.CloudRunIdentity{
+		{ServiceAccount: nativeIDBlockSA, Mode: "block"},
+		nil,
+	} {
+		for _, value := range []string{"true", "garbage"} {
+			label := "identity-unset"
+			if id != nil {
+				label = id.Mode
+			}
+			t.Run(label+"/"+value, func(t *testing.T) {
+				fake := &fakeInstancesClient{getErr: notFoundErr()}
+				rt, _ := nativeIdentityRuntime(t, fake)
+				cfg := nativeIdentityRunConfig(id)
+				cfg.Env = []string{CloudRunInitFirewallEnv + "=" + value}
+
+				if _, err := rt.Run(context.Background(), cfg); err != nil {
+					t.Fatalf("Run: %v", err)
+				}
+				if got := crInstanceEnv(t, fake)[CloudRunInitFirewallEnv]; got != value {
+					t.Errorf("%s = %q, want %q unchanged", CloudRunInitFirewallEnv, got, value)
+				}
+			})
+		}
+	}
+}
+
+// crCountProvisionNFS wraps rt's NFS provisioning stub and returns the
+// number of times Run has called it.
+func crCountProvisionNFS(rt *CloudRunRuntime) *int {
+	calls := new(int)
+	provision := rt.provisionNFS
+	rt.provisionNFS = func(ctx context.Context, cfg RunConfig, agentID string, uid, gid int) (*cloudRunNFSProvisionPaths, error) {
+		*calls++
+		return provision(ctx, cfg, agentID, uid, gid)
+	}
+	return calls
+}
+
+// On a native "assign" start with SCION_INIT_FIREWALL on, Run refuses
+// before anything is provisioned: with the real NFS provisioning
+// (rollbackTestRun), the project's shared workspace provisioning
+// (cloudRunProvisionShared) is never invoked, no agent directory or
+// workspace is created on the share and the Instances API is not called.
+// The control: with the setting off, the same start provisions as before.
+func TestCloudRunRun_AssignInitFirewallRefusedBeforeProvisioning(t *testing.T) {
+	for name, clone := range map[string]bool{"clone-per-agent": true, "shared-plain": false} {
+		for _, value := range []string{"true", "garbage", "false"} {
+			t.Run(name+"/"+value, func(t *testing.T) {
+				fake := &fakeInstancesClient{getErr: notFoundErr()}
+				rt, cfg, agentDir := rollbackTestRun(t, fake, clone)
+				shared := 0
+				stubCloudRunNFSMount(t, func(ProvisionInput) error {
+					shared++
+					return nil
+				})
+				cfg.CloudRunIdentity = &api.CloudRunIdentity{ServiceAccount: nativeIDAssignedSA, Mode: "assign"}
+				cfg.Env = append(append([]string(nil), cfg.Env...), CloudRunInitFirewallEnv+"="+value)
+
+				_, err := rt.Run(context.Background(), cfg)
+				if value == "false" {
+					if err != nil {
+						t.Fatalf("Run: %v", err)
+					}
+					wantShared := 1
+					if clone {
+						wantShared = 0
+					}
+					if shared != wantShared {
+						t.Errorf("shared workspace provisioned %d times, want %d", shared, wantShared)
+					}
+					if _, statErr := os.Stat(agentDir); statErr != nil {
+						t.Errorf("agent directory: %v, want it provisioned", statErr)
+					}
+					return
+				}
+				if err == nil {
+					t.Fatal("Run succeeded, want the init firewall refusal")
+				}
+				want := fmt.Sprintf("agent %q: %s", crTestAgentID, CloudRunInitFirewallRefused(value))
+				if err.Error() != want {
+					t.Errorf("Run error = %q, want %q", err.Error(), want)
+				}
+				if shared != 0 {
+					t.Errorf("shared workspace provisioned %d times before the refusal, want none", shared)
+				}
+				for _, dir := range []string{agentDir, cfg.Workspace} {
+					if _, statErr := os.Stat(dir); !os.IsNotExist(statErr) {
+						t.Errorf("%s exists after the refusal (stat error %v), want nothing created", dir, statErr)
+					}
+				}
+				if len(fake.getReqs)+len(fake.createReqs)+len(fake.startReqs)+len(fake.deleteReqs) != 0 {
+					t.Errorf("Instances API called (get %d, create %d, start %d, delete %d), want none",
+						len(fake.getReqs), len(fake.createReqs), len(fake.startReqs), len(fake.deleteReqs))
+				}
+			})
+		}
+	}
 }

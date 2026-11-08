@@ -1457,6 +1457,11 @@ func (s *Server) handleAgentGCPToken(w http.ResponseWriter, r *http.Request) {
 	if s.agentStandingForbidden(r.Context(), w, agentRecord.ID) {
 		return
 	}
+	// A natively assigned Cloud Run agent is refused from its stored
+	// record, whatever scopes its token carries.
+	if s.refuseCloudRunNativeMint(r.Context(), w, agentRecord) {
+		return
+	}
 
 	// Recheck the agent record and assignment mode from the store, then the
 	// JWT scope, before paying for the service-account row lookup below -- a
@@ -1558,6 +1563,11 @@ func (s *Server) handleAgentGCPIdentityToken(w http.ResponseWriter, r *http.Requ
 	// No external token for an agent that is not in good standing
 	// (ptone/scion#3433); a lookup fault refuses.
 	if s.agentStandingForbidden(r.Context(), w, agentRecord.ID) {
+		return
+	}
+	// A natively assigned Cloud Run agent is refused from its stored
+	// record, whatever scopes its token carries.
+	if s.refuseCloudRunNativeMint(r.Context(), w, agentRecord) {
 		return
 	}
 

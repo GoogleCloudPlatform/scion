@@ -4130,9 +4130,11 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		s.writeStartContextError(w, sce, "start agent", "agent_id", id, "runtime", resolvedRuntimeType, "profile", runtimeOpts.Profile)
 		return
 	}
+	// Start resolves through settings only (resolveManagerForOptsStrict),
+	// never the pin, so there is no pinned entry to check.
 	if sce := rejectCloudRunIdentityRuntimeChange(ctx, runtimeOpts, sc.CloudRunSelection, resolvedRuntimeType, func() dispatchProfileSelection {
 		return s.resolveDispatchProfileSelection(runtimeOpts)
-	}); sce != nil {
+	}, nil); sce != nil {
 		if s.refuseCancelledStart(w, span, ss, id, projectID, trackedRunID) {
 			return
 		}
@@ -5395,7 +5397,7 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 	}
 	if sce := rejectCloudRunIdentityRuntimeChange(ctx, runtimeOpts, sc.CloudRunSelection, resolvedRuntimeType, func() dispatchProfileSelection {
 		return s.resolveDispatchProfileSelection(runtimeOpts)
-	}); sce != nil {
+	}, s.pinnedCloudRunEntry(runtimeOpts, pin)); sce != nil {
 		s.writeStartContextError(w, sce, "restart agent", "agent_id", id, "runtime", resolvedRuntimeType, "profile", runtimeOpts.Profile)
 		return
 	}
@@ -7744,12 +7746,35 @@ func (s *Server) restartPin(match agentMatch) pinnedRuntime {
 // registered runtime; one that resolves to none is ignored by
 // resolveManagerForOptsStrict, so it does not drop the pin either.
 func (s *Server) resolveExistingAgentManager(opts api.StartOptions, mode profileResolution, pin pinnedRuntime) (runtimeResolution, error) {
-	if opts.Profile == "" && pin.mgr != nil && pin.name != "" {
-		if _, forced := s.forcedRuntime(); !forced {
-			return runtimeResolution{Manager: pin.mgr, Runtime: pin.rt, Record: pin.record, RuntimeType: pin.name, How: resolutionUnrecorded}, nil
-		}
+	if s.existingAgentUsesPin(opts, pin) {
+		return runtimeResolution{Manager: pin.mgr, Runtime: pin.rt, Record: pin.record, RuntimeType: pin.name, How: resolutionUnrecorded}, nil
 	}
 	return s.resolveManagerForOptsStrict(opts, mode)
+}
+
+// existingAgentUsesPin reports whether resolveExistingAgentManager returns
+// the pinned runtime for opts: no profile, a pin, and no forced runtime.
+func (s *Server) existingAgentUsesPin(opts api.StartOptions, pin pinnedRuntime) bool {
+	if opts.Profile != "" || pin.mgr == nil || pin.name == "" {
+		return false
+	}
+	_, forced := s.forcedRuntime()
+	return !forced
+}
+
+// pinnedCloudRunEntry returns, for rejectCloudRunIdentityRuntimeChange, the
+// global runtime entry the pinned runtime was built from when
+// resolveExistingAgentManager runs opts on the pin ("" when the pin records
+// none), or nil when it does not use the pin.
+func (s *Server) pinnedCloudRunEntry(opts api.StartOptions, pin pinnedRuntime) *string {
+	if !s.existingAgentUsesPin(opts, pin) {
+		return nil
+	}
+	entry := ""
+	if pin.record.Present {
+		entry = pin.record.EntryName
+	}
+	return &entry
 }
 
 // profileResolution selects how resolveManagerForOptsStrict treats a

@@ -235,6 +235,12 @@ const (
 	BrokerKSASourceDiscovered = "discovered"
 )
 
+// BrokerSASourceCloudRunAllowlist is the Source of a service account report
+// entry for a Cloud Run profile: the account is listed in the selected
+// runtime entry's cloudrun.assignable_service_accounts in the broker's
+// global settings. Such an entry carries only the GSA.
+const BrokerSASourceCloudRunAllowlist = "cloudrun_allowlist"
+
 // Values of BrokerErrDetailDiscovery.
 const (
 	// BrokerKSADiscoveryNoMatch: no ServiceAccount in the namespace carries
@@ -260,6 +266,14 @@ const (
 // account report (hubclient.ProfileSAMappingsState.ReportVersion). Version
 // 2 means the broker reports a profile incomplete whenever dispatch would
 // not use the profile's entries (BrokerSAReportForceRuntime). The Hub
-// refuses a dispatch from a report only at this version or later; a report
-// without it (an older broker) is unknown.
-const BrokerSAReportVersion = 2
+// refuses a Kubernetes dispatch from a report only at version 2 or later;
+// a report without a version is unknown.
+//
+// Version 3 adds a report for each Cloud Run profile: its
+// cloudrun.assignable_service_accounts as entries with Source
+// BrokerSASourceCloudRunAllowlist, whether the profile can run an instance
+// as a per-dispatch identity, and whether a block account is configured
+// (as a boolean only). With the hub.cloudrun_native_identity experiment
+// on, the Hub refuses a Cloud Run dispatch from a profile whose report is
+// missing or below version 3.
+const BrokerSAReportVersion = 3

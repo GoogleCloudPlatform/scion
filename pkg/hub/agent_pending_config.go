@@ -209,7 +209,7 @@ func (s *Server) applyAgentConfigUpdateHeld(ctx context.Context, w http.Response
 		Conflict(w, "Config cannot be updated in the agent's current phase")
 		return out, false
 	}
-	if !s.validateAgentConfigPatch(ctx, w, agent, p.cfg) {
+	if !s.validateAgentConfigPatch(ctx, w, agent, p.cfg, p.present["env"]) {
 		return out, false
 	}
 	canAttachEnv := canViewAgentEnv(ctx, s, agent)
