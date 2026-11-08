@@ -169,6 +169,65 @@ release branch when no branch is provided. It:
 The commit equality check prevents promotion when fixes on the release branch have not yet been
 published and tested as a preview. If it fails, publish another preview before promoting.
 
+### Release notes page for rc and stable tags
+
+The body of every preview, rc and stable release links to `/release-notes/<slug>/` (see
+[Release notes](#release-notes)). Weekly previews get a placeholder page from doc-lead
+automatically. For an rc or stable tag, the release manager does this:
+
+1. Before pushing the tag (before running `promote-stable.sh`, or before pushing an rc tag by
+   hand), ask doc-lead for that tag's release-notes page,
+   `docs-site/src/content/docs/release-notes/<slug>.md`, or at least a placeholder.
+2. Push the tag only once that page (or the placeholder) is merged, so the link in the release body
+   resolves from the start.
+
+### Publish release images to the dev registry (stage 2a)
+
+After each stable release and each release on the preview channel (weekly previews, bumped
+previews and release candidates), the release manager publishes that release's image set to
+`us-central1-docker.pkg.dev/ptone-misc/public-docker`. The release manager agent runs this step; no
+GitHub workflow does. It never runs for nightly tags. The driver lives outside the tag's tree. Run
+it from a checkout of `main`, with the channel tag that matches the release (`preview` for
+`vX.Y.Z-preview.N` and `vX.Y.Z-rc.N`, `stable` for `vX.Y.Z`):
+
+```bash
+# preview channel: vX.Y.Z-preview.N (or vX.Y.Z-rc.N in the same form)
+bash image-build/scripts/build-release-images.sh vX.Y.Z-preview.N --channel-tag preview \
+  --src-dir /tmp/release-images/vX.Y.Z-preview.N -- \
+  --registry us-central1-docker.pkg.dev/ptone-misc/public-docker --builder cloud-build
+
+# stable vX.Y.Z
+bash image-build/scripts/build-release-images.sh vX.Y.Z --channel-tag stable \
+  --src-dir /tmp/release-images/vX.Y.Z -- \
+  --registry us-central1-docker.pkg.dev/ptone-misc/public-docker --builder cloud-build
+```
+
+- The images are tagged `:vX...` and `:<short-sha>`, and the matching channel tag (`:preview` or
+  `:stable`) moves to the same digests. `:latest` in that registry is the build-from-main stream.
+  This step never moves it: do not add `--also-tag latest`.
+- The driver waits for the Cloud Build builds. `--build-timeout` is 4h per build by default, and
+  `--wait-timeout` is 6h in total. It takes each image's digest from the builds' own results and
+  requires `:vX...` to point to that digest. Every digest is verified, and each channel tag's
+  current digest is recorded, before the first channel tag moves.
+- If a tag move or read-back fails part-way, the run stops, lists the tags already moved, and writes
+  the commands that point each of them back to its recorded digest to
+  `<src-dir>/channel-recovery.XXXXXX` (the driver never runs them). No `build-manifest.json` is
+  written then. Recover by re-running the same command, or by running the commands in that file
+  (`gcloud artifacts docker tags add IMG@PREVIOUS_DIGEST IMG:CHANNEL`, or `tags delete` for a tag
+  that did not exist), and record what happened in the published record. If several
+  `channel-recovery.*` files exist, use for each tag the line from the oldest file that names it: a
+  later file records, as its starting point, tags that an earlier run had already moved.
+- Keep the record: copy `<src-dir>/build-manifest.json` (image, `:vX...` ref, digest, channel tag)
+  to `<scratchpad>/projects/release-images/published/<vX...>.json`.
+- **Known gap.** For release tags whose Cloud Build configs do not list their images (they push from
+  inside a build step; only `cloudbuild-omni.yaml`, the `omni` target, lists its images, and stage
+  2a builds `--target all`), the build results carry no image digests. For those tags the
+  cloud-build commands above stop at "no build-result digest" and move no channel tag. That is a safe stop, not a partial publish. For
+  such a tag the channel tag can only be moved by a pushed local build on a host with docker or
+  podman: the same command with
+  `-- --registry us-central1-docker.pkg.dev/ptone-misc/public-docker --platform all` and no
+  `--builder cloud-build`.
+
 ## Version manifest
 
 [`LATEST.json`](../LATEST.json) at the repository root records the latest release in each channel.
@@ -288,7 +347,10 @@ After `build-release.yml` publishes a `vX.Y.Z-preview.N` release, its `publish-h
 
 1. Checks that the tag is a preview tag and that the `HOMEBREW_SCION_TOKEN` secret is set. Without
    the secret it skips both steps below with a notice and does not fail the release.
-2. Checks out the release tag and runs `image-build/scripts/build-images.sh --registry
+2. Checks out the release tag. The "Verify checkout is the release tag" step fails the job unless
+   `git describe --tags --exact-match` prints exactly the tag and the tree's `hack/version.sh`
+   stamps exactly that tag, so the images never carry binaries that report `dev`. The job then
+   runs `image-build/scripts/build-images.sh --registry
    ghcr.io/homebrew-scion --target all --tag <tag> --platform all --push`. One job builds the whole
    image chain for amd64 and arm64 (arm64 under QEMU), without a build cache. **Expect it to take
    about 1.5 to 3 hours**; the job times out after 6 hours.
