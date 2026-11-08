@@ -117,6 +117,11 @@ type HubServerConfig struct {
 	// Empty serves them on the hub endpoint. See ValidateContentURL.
 	ContentURL string `json:"contentUrl,omitempty" yaml:"contentUrl,omitempty" koanf:"contentUrl"`
 
+	// ContentURLAllowSameSite is server.hub.content_url_allow_same_site
+	// (ContentURLAllowSameSiteKey): the override that lets ContentURL be on
+	// the hub endpoint's registrable domain, which is refused without it.
+	ContentURLAllowSameSite bool `json:"contentUrlAllowSameSite,omitempty" yaml:"contentUrlAllowSameSite,omitempty" koanf:"contentUrlAllowSameSite"`
+
 	// MonitoringDashboardURL is an optional absolute http(s) URL of an
 	// external monitoring dashboard for this hub. The Health page links to
 	// it when set. See ValidateMonitoringDashboardURL.

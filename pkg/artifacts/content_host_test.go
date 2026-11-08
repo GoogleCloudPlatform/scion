@@ -79,10 +79,18 @@ func contentURLLimits(lo string) func(context.Context) Limits {
 // hub mounts it.
 func (f *fixture) guarded(lo string, r *http.Request) *httptest.ResponseRecorder {
 	f.t.Helper()
-	h := ContentHostGuard(func() string { return lo }, testServesOnOrigin, stripHeaders(testAgentHeader), nil)(f.svc)
+	h := ContentHostGuard(fixedContentHost(lo), testServesOnOrigin, stripHeaders(testAgentHeader), nil)(f.svc)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, r)
 	return rec
+}
+
+// fixedContentHost parses raw once, as the hub does at each settings apply,
+// and returns the guard's view of it; "" (or an invalid value) gives the
+// zero ContentHost, which matches no request.
+func fixedContentHost(raw string) func(*http.Request) ContentHost {
+	o, _ := ParseContentHost(raw)
+	return func(*http.Request) ContentHost { return o }
 }
 
 func requestOn(method, host, target string, hdr map[string]string) *http.Request {
@@ -222,7 +230,7 @@ func TestContentHostGuardConfines(t *testing.T) {
 		reached = append(reached, r.Method+" "+r.URL.Path)
 		w.WriteHeader(http.StatusTeapot)
 	})
-	guard := ContentHostGuard(func() string { return testContentURL }, testServesOnOrigin, stripHeaders(testAgentHeader), nil)(inner)
+	guard := ContentHostGuard(fixedContentHost(testContentURL), testServesOnOrigin, stripHeaders(testAgentHeader), nil)(inner)
 	serve := func(method, host, target string) int {
 		r := httptest.NewRequest(method, target, nil)
 		r.Host = host
@@ -249,7 +257,7 @@ func TestContentHostGuardConfines(t *testing.T) {
 		}
 	}
 	// No content URL: nothing is confined.
-	open := ContentHostGuard(func() string { return "" }, testServesOnOrigin, nil, nil)(inner)
+	open := ContentHostGuard(fixedContentHost(""), testServesOnOrigin, nil, nil)(inner)
 	r := httptest.NewRequest(http.MethodGet, "/api/v1/agents", nil)
 	r.Host = testContentHost
 	rec := httptest.NewRecorder()
@@ -305,7 +313,7 @@ func TestContentHostGuardDropsCredentials(t *testing.T) {
 		_, marked = contentHostCSPHost(r.Context())
 		w.WriteHeader(http.StatusOK)
 	})
-	guard := ContentHostGuard(func() string { return testContentURL }, testServesOnOrigin, stripHeaders(testAgentHeader, "X-Scion-Federation-Token"), nil)(inner)
+	guard := ContentHostGuard(fixedContentHost(testContentURL), testServesOnOrigin, stripHeaders(testAgentHeader, "X-Scion-Federation-Token"), nil)(inner)
 	target := RouteShared + "tok"
 
 	r := requestOn(http.MethodGet, testContentHost, target, creds)
@@ -516,7 +524,7 @@ func TestShareURL(t *testing.T) {
 func TestContentHostGuardAlwaysDropsCookieAndAuthorization(t *testing.T) {
 	var seen http.Header
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { seen = r.Header.Clone() })
-	guard := ContentHostGuard(func() string { return testContentURL }, testServesOnOrigin, nil, nil)(inner)
+	guard := ContentHostGuard(fixedContentHost(testContentURL), testServesOnOrigin, nil, nil)(inner)
 	r := requestOn(http.MethodGet, testContentHost, RouteView+"cap/index.html",
 		map[string]string{"Cookie": "scion_sess=valid", "Authorization": "Bearer t", "Accept": "text/html"})
 	guard.ServeHTTP(httptest.NewRecorder(), r)
@@ -533,7 +541,7 @@ func TestContentHostGuardAlwaysDropsCookieAndAuthorization(t *testing.T) {
 func TestContentHostGuardNilRouteCheckServesNothing(t *testing.T) {
 	reached := false
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { reached = true })
-	guard := ContentHostGuard(func() string { return testContentURL }, nil, nil, nil)(inner)
+	guard := ContentHostGuard(fixedContentHost(testContentURL), nil, nil, nil)(inner)
 	rec := httptest.NewRecorder()
 	guard.ServeHTTP(rec, requestOn(http.MethodGet, testContentHost, RouteShared+"tok", nil))
 	if rec.Code != http.StatusNotFound || reached {
@@ -575,7 +583,7 @@ func TestContentHostResponseHeaders(t *testing.T) {
 		}
 		w.WriteHeader(http.StatusOK)
 	})
-	guard := ContentHostGuard(func() string { return testContentURL }, testServesOnOrigin, nil, nil)(weak)
+	guard := ContentHostGuard(fixedContentHost(testContentURL), testServesOnOrigin, nil, nil)(weak)
 	for _, target := range []string{RouteView + "cap/index.html", RouteView + "cap/bare.html", "/api/v1/agents"} {
 		rec := httptest.NewRecorder()
 		guard.ServeHTTP(rec, requestOn(http.MethodGet, testContentHost, target, map[string]string{"Origin": "https://evil.example.org"}))
@@ -610,7 +618,7 @@ func TestContentHostResponseHeaders(t *testing.T) {
 func TestContentHostGuardReportsRefused(t *testing.T) {
 	var got []string
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusTeapot) })
-	guard := ContentHostGuard(func() string { return testContentURL }, testServesOnOrigin, nil,
+	guard := ContentHostGuard(fixedContentHost(testContentURL), testServesOnOrigin, nil,
 		func(r *http.Request) { got = append(got, r.Method+" "+r.URL.Path) })(inner)
 	for _, rq := range []struct{ method, host, target string }{
 		{http.MethodPost, testContentHost, RouteView + "cap/x"},

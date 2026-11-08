@@ -1711,6 +1711,11 @@ type V1ServerHubConfig struct {
 	// artifacts are served. Empty, the default, serves them on PublicURL.
 	// See ValidateContentURL.
 	ContentURL string `json:"content_url,omitempty" yaml:"content_url,omitempty" koanf:"content_url"`
+	// ContentURLAllowSameSite is server.hub.content_url_allow_same_site
+	// (ContentURLAllowSameSiteKey): the override that lets ContentURL be on
+	// PublicURL's registrable domain, which is refused without it. See
+	// ContentURLHubConflict.
+	ContentURLAllowSameSite *bool `json:"content_url_allow_same_site,omitempty" yaml:"content_url_allow_same_site,omitempty" koanf:"content_url_allow_same_site"`
 	// HubClass is server.hub.class (see HubServerConfig.HubClass). It is
 	// file/env only: the server-config API refuses it in every mode.
 	HubClass string `json:"class,omitempty" yaml:"class,omitempty" koanf:"class"`
@@ -4319,6 +4324,9 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		if v1.Hub.ContentURL != "" {
 			gc.Hub.ContentURL = v1.Hub.ContentURL
 		}
+		if v1.Hub.ContentURLAllowSameSite != nil {
+			gc.Hub.ContentURLAllowSameSite = *v1.Hub.ContentURLAllowSameSite
+		}
 		if v1.Hub.AgentEndpoint != "" {
 			gc.Hub.AgentEndpoint = v1.Hub.AgentEndpoint
 		}
@@ -4882,6 +4890,10 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	}
 	if gc.Hub.StartCreateUnconfirmedHold > 0 {
 		v1Hub.StartCreateUnconfirmedHold = gc.Hub.StartCreateUnconfirmedHold.String()
+	}
+	if gc.Hub.ContentURLAllowSameSite {
+		allowSameSite := true
+		v1Hub.ContentURLAllowSameSite = &allowSameSite
 	}
 	if gc.Hub.SoftDeleteRetainFiles {
 		retainFiles := true

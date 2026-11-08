@@ -182,6 +182,8 @@ interface V1ServerHubConfig {
   host?: string;
   public_url?: string;
   monitoring_dashboard_url?: string;
+  /** Read-only on this page (shown with content_url_status). */
+  content_url?: string;
   read_timeout?: string;
   write_timeout?: string;
   cors?: V1CORSConfig;
@@ -493,6 +495,7 @@ interface ServerConfigResponse {
    */
   running_values?: Record<string, RunningKeyValue>;
   public_url_status?: PublicURLStatus;
+  content_url_status?: ContentURLStatus;
   observability_export?: HubObservabilityExport;
   /** Where the image_registry in effect comes from (read-only, ptone/scion#3916). */
   image_registry_provenance?: ImageRegistryProvenance;
@@ -546,6 +549,61 @@ interface PublicURLStatus {
   effective: string;
   source: string; // "env" | "flag" | "database" | "file" | a fallback label
   pinned_by?: string; // SCION_SERVER_HUB_ENDPOINT, --base-url or SCION_SERVER_BASE_URL
+}
+
+/**
+ * What the hub does with server.hub.content_url as applied (read-only,
+ * ptone/scion#7107): in effect, or why it is ignored.
+ */
+export interface ContentURLStatus {
+  state: string; // "unset" | "in_effect" | "ignored_invalid" | "refused_same_host" | "ignored_same_site" | "ignored_agent_endpoint_host"
+  effective?: string; // the content host in use, for in_effect
+  override_key?: string; // server.hub.content_url_allow_same_site, for ignored_same_site
+}
+
+/** The badge and one-line reason the page shows for a content URL status. */
+export function contentUrlStatusText(st: ContentURLStatus): {
+  badge: string;
+  variant: 'success' | 'neutral' | 'warning' | 'danger';
+  reason: string;
+} {
+  const hubOrigin = 'shared artifacts stay on the hub origin';
+  switch (st.state) {
+    case 'unset':
+      return { badge: 'Not set', variant: 'neutral', reason: `No content host; ${hubOrigin}.` };
+    case 'in_effect':
+      return {
+        badge: 'In effect',
+        variant: 'success',
+        reason: `Shared artifacts are served from ${st.effective ?? 'the content host'}.`,
+      };
+    case 'ignored_invalid':
+      return {
+        badge: 'Ignored',
+        variant: 'warning',
+        reason: `The value is invalid; ${hubOrigin}.`,
+      };
+    case 'refused_same_host':
+      return {
+        badge: 'Refused',
+        variant: 'danger',
+        reason: `The value is on the hub's own host name; ${hubOrigin}.`,
+      };
+    case 'ignored_same_site':
+      return {
+        badge: 'Ignored',
+        variant: 'danger',
+        reason: `The value shares the hub's registrable domain, so it is not a separate security origin for cookies; ${hubOrigin}. Use a content host on a different registrable domain, or set ${st.override_key ?? 'server.hub.content_url_allow_same_site'}.`,
+      };
+    case 'ignored_agent_endpoint_host':
+      return {
+        badge: 'Ignored',
+        variant: 'warning',
+        reason: `The value is on the host name of server.hub.agent_endpoint; ${hubOrigin}.`,
+      };
+    default:
+      return { badge: 'Unknown', variant: 'neutral', reason: `Unrecognised state "${st.state}".` };
+  }
 }
 
 /** The export project of the hub's own metrics and traces, as resolved at startup. */
@@ -1264,6 +1322,9 @@ export class ScionPageAdminServerConfig extends LitElement {
   @state() private envValues: Record<string, EnvKeyValue> = {};
   @state() private runningValues: Record<string, RunningKeyValue> = {};
   @state() private publicUrlStatus: PublicURLStatus | null = null;
+  /** Stored server.hub.content_url and its status; read-only here (ptone/scion#7107). */
+  @state() private hubContentUrl = '';
+  @state() private contentUrlStatus: ContentURLStatus | null = null;
   @state() private imageRegistryProvenance: ImageRegistryProvenance | null = null;
   @state() private observabilityExport: HubObservabilityExport | null = null;
 
@@ -2187,6 +2248,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     this.hubHost = hubBlock.host || '';
     this.hubPublicUrl = hubBlock.public_url || '';
     this.hubMonitoringDashboardUrl = hubBlock.monitoring_dashboard_url || '';
+    this.hubContentUrl = hubBlock.content_url || '';
     this.loadedMonitoringDashboardUrl = this.hubMonitoringDashboardUrl;
     this.monitoringDashboardUrlTouched = false;
     this.hubReadTimeout = hubBlock.read_timeout || '';
@@ -2323,6 +2385,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     this.envValues = data.env_values || {};
     this.runningValues = data.running_values || {};
     this.publicUrlStatus = data.public_url_status || null;
+    this.contentUrlStatus = data.content_url_status || null;
     this.imageRegistryProvenance = data.image_registry_provenance || null;
     this.observabilityExport = data.observability_export || null;
     this.sectionMetadata = data.section_metadata || null;
@@ -3708,6 +3771,24 @@ export class ScionPageAdminServerConfig extends LitElement {
     return html`<span class="hint env-value-saved"
       >${where}, not in effect on this node: <code>${displayValue || '—'}</code></span
     >`;
+  }
+
+  /**
+   * The stored content URL, read-only, with the status the hub reports for
+   * it (content_url_status): a badge and a one-line reason. Not shown when
+   * the hub reports no status.
+   */
+  private renderContentUrlStatus(): typeof nothing | ReturnType<typeof html> {
+    const st = this.contentUrlStatus;
+    if (!st) return nothing;
+    const t = contentUrlStatusText(st);
+    return html`<div class="form-field full-width content-url-status">
+      <label>Content URL</label>
+      <span class="hint">Read-only here; set through the server-config API</span>
+      <span class="read-only-value">${this.hubContentUrl || '—'}</span>
+      <sl-badge variant=${t.variant}>${t.badge}</sl-badge>
+      <span class="hint content-url-status-reason">${t.reason}</span>
+    </div>`;
   }
 
   /**
@@ -5204,6 +5285,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                     >`}`
             )}
           </div>
+          ${this.renderContentUrlStatus()}
           <div class="form-field">
             <label>Read Timeout</label>
             ${this.renderFieldValue(

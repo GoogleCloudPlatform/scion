@@ -251,7 +251,7 @@ func init() {
 		},
 		{
 			Name:       "endpoints",
-			KoanfPaths: []string{"server.hub.public_url", "server.hub.hub_name", "server.hub.content_url", "image_registry", "server.hub.monitoring_dashboard_url"},
+			KoanfPaths: []string{"server.hub.public_url", "server.hub.hub_name", "server.hub.content_url", "server.hub.content_url_allow_same_site", "image_registry", "server.hub.monitoring_dashboard_url"},
 			New:        func() any { return &EndpointsSettings{} },
 			// public_url is resolved into the hub endpoint at startup.
 			RestartRequired: []string{"server.hub.public_url"},
@@ -670,11 +670,12 @@ func compileSchemas() {
 		"endpoints": {
 			"type": "object",
 			"properties": map[string]interface{}{
-				"public_url":               getSchemaProperty(root, "server", "hub", "public_url"),
-				"hub_name":                 getSchemaProperty(root, "server", "hub", "hub_name"),
-				"content_url":              getSchemaProperty(root, "server", "hub", "content_url"),
-				"image_registry":           getSchemaProperty(root, "image_registry"),
-				"monitoring_dashboard_url": getSchemaProperty(root, "server", "hub", "monitoring_dashboard_url"),
+				"public_url":                  getSchemaProperty(root, "server", "hub", "public_url"),
+				"hub_name":                    getSchemaProperty(root, "server", "hub", "hub_name"),
+				"content_url":                 getSchemaProperty(root, "server", "hub", "content_url"),
+				"content_url_allow_same_site": getSchemaProperty(root, "server", "hub", "content_url_allow_same_site"),
+				"image_registry":              getSchemaProperty(root, "image_registry"),
+				"monitoring_dashboard_url":    getSchemaProperty(root, "server", "hub", "monitoring_dashboard_url"),
 			},
 			"additionalProperties": false,
 		},
