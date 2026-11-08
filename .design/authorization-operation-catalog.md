@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 377
+**Operations:** 379
 
 ## Table of Contents
 
@@ -197,6 +197,8 @@
 - [chat.attachment.probe](#chatattachmentprobe) — Answer where the caller's attachment uploads go (artifact or legacy) and the delivery budget (ptone/scion#4596). Reads and writes nothing
 - [chat.attachment.download.project](#chatattachmentdownloadproject) — Download a chat attachment of a project. Needs project:read on the project; a session also reads its own uploads and files attached to messages it can read
 - [chat.conversation.promote](#chatconversationpromote) — Promote one of the caller's DMs with an agent into a thread of the agent's space. Needs DM participation, project:read on the agent's project, and the create_thread action of chat-space-access (project.chat_post; 403 chat_post_denied without it); a token also needs inbox:write under the DM rule, and project.chat_post is checked on its holder's account (the project:chat_post selector is not needed)
+- [chat.decision.read](#chatdecisionread) — Read one version of a choice prompt decision. Needs read access to the prompt's conversation (project:read for a thread; the caller in a user slot of a DM key). Agents, visitors and tokens get 403; a missing or unreadable decision is 404. 404 while web.chat_choices is off
+- [chat.decision.answer](#chatdecisionanswer) — Answer a choice prompt decision by choice id (the label is copied from the stored row). Needs the right to send in the prompt's conversation (project:read and project.chat_post for a thread; for a DM, only the user in its key). Agents, visitors and tokens get 403. A replaced version or an answered one is 409; the first answer wins. Records the answer and a choice-response message, delivers it to the asking agent and publishes choice.updated. 404 while web.chat_choices is off
 - [role.definition.create](#roledefinitioncreate) — Create a custom role definition (create, import, duplicate). A token needs role:create and role:read on a hub boundary and the holder's live role.create authority; the holder must hold every permission of the role within the token's selectors. A project-scoped definition can be bound in every project, so it is judged on the holder's system-scope authority; a system-scoped definition is refused to every token
 - [role.definition.update](#roledefinitionupdate) — Update a custom role definition. A token needs role:update and role:read on a hub boundary and the holder's live role.update authority; the holder must hold every permission of the updated role within the token's selectors, judged as for create
 - [role.definition.delete](#roledefinitiondelete) — Delete a custom role definition. A token needs role:delete and role:read on a hub boundary and the holder's live role.delete authority; system roles and roles that are still bound are kept
@@ -7424,6 +7426,87 @@
 ### Tests
 
 - `pkg/hub:TestChatDirectMessageToken_PeerAgentInsideBoundary`
+
+---
+
+## chat.decision.read
+
+**Domain:** chat
+
+**Description:** Read one version of a choice prompt decision. Needs read access to the prompt's conversation (project:read for a thread; the caller in a user slot of a DM key). Agents, visitors and tokens get 403; a missing or unreadable decision is 404. 404 while web.chat_choices is off
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/decisions/{rowId}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `INTERACTIVE_STATE`)
+
+**Base Permission:** `inbox.read`
+
+**Resource Resolver:** conversation-project
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestDecisionGet_ReadAccess`
+
+---
+
+## chat.decision.answer
+
+**Domain:** chat
+
+**Description:** Answer a choice prompt decision by choice id (the label is copied from the stored row). Needs the right to send in the prompt's conversation (project:read and project.chat_post for a thread; for a DM, only the user in its key). Agents, visitors and tokens get 403. A replaced version or an answered one is 409; the first answer wins. Records the answer and a choice-response message, delivers it to the asking agent and publishes choice.updated. 404 while web.chat_choices is off
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/decisions/{rowId}/answer` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `INTERACTIVE_STATE`)
+
+**Base Permission:** `inbox.write`
+
+**Resource Resolver:** conversation-project
+
+**Effects:** `create-resource`, `emit-external-effect`
+
+### Audit
+
+- **Event Type:** `chat.decision.answer`
+- **Context Fields:** actor_id, decision_row_id
+- **After Fields:** response_message_id
+- **Atomic:** No
+- **Non-Atomic Justification:** The answer and its response message are stored in one transaction before agent delivery, which is fire-and-forget
+
+### External Effect Policy
+
+- **Delivery:** `fire_and_forget`
+- **Failure Mode:** `log_and_continue`
+- **Idempotency:** idempotency_key of the answer
+- **Retry:** a client retry with the same idempotency key replays the recorded answer
+- **Auth Before Emit:** Yes
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestDecisionAnswer_Authorization`
+- `pkg/hub:TestDecisionAnswer_ConcurrentOneWinner`
 
 ---
 
