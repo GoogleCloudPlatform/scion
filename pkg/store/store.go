@@ -3435,7 +3435,8 @@ type MaintenanceStore interface {
 	// "failed" and resets "running" migrations to "pending". Called at server
 	// startup to clean up operations that were interrupted by a restart. A
 	// run's JSON-object Result keeps its keys and gains "error" and
-	// "aborted": true; any other Result is replaced by the abort error.
+	// "aborted": true; any other Result is replaced by the abort error. A
+	// Result written while the abort runs is not overwritten.
 	AbortRunningMaintenanceOps(ctx context.Context) (runs int64, migrations int64, err error)
 }
 

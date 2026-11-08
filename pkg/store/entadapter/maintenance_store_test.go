@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/maintenanceoperationrun"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	"github.com/google/uuid"
@@ -406,4 +407,88 @@ func TestAbortRunningMaintenanceOps_SkipsRunFinishedMeanwhile(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, store.MaintenanceStatusCompleted, got.Status)
 	assert.Equal(t, finalResult, got.Result)
+}
+
+// A Result written to a run that is still running, between the abort's read
+// and its update, is not overwritten: the update matches only the Result it
+// read, so it misses, and the run is read again and aborted with the new
+// Result. Runs on SQLite, and on Postgres under -tags integration.
+func TestAbortRunningMaintenanceOps_KeepsResultWrittenMeanwhile(t *testing.T) {
+	s := newTestMaintenanceStore(t)
+	ctx := context.Background()
+	require.NoError(t, s.SeedMaintenanceOperations(ctx))
+	racing := createRunWithResult(t, s, store.MaintenanceStatusRunning, `{"commit":"abc"}`)
+
+	// Before the abort's first update runs, the still-running run records a
+	// new Result (as a checkpoint would); only the Result changes.
+	const written = `{"commit":"abc","step":"2"}`
+	var once sync.Once
+	s.client.MaintenanceOperationRun.Use(func(next ent.Mutator) ent.Mutator {
+		return ent.MutateFunc(func(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+			if m.Op().Is(ent.OpUpdate) {
+				var writeErr error
+				once.Do(func() {
+					writeErr = s.client.MaintenanceOperationRun.UpdateOneID(uuid.MustParse(racing)).
+						SetResult(written).
+						Exec(ctx)
+				})
+				if writeErr != nil {
+					return nil, writeErr
+				}
+			}
+			return next.Mutate(ctx, m)
+		})
+	})
+
+	runs, _, err := s.AbortRunningMaintenanceOps(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), runs)
+
+	got, err := s.GetMaintenanceRun(ctx, racing)
+	require.NoError(t, err)
+	assert.Equal(t, store.MaintenanceStatusFailed, got.Status)
+	var obj map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal([]byte(got.Result), &obj), got.Result)
+	assert.Equal(t, `"abc"`, string(obj["commit"]))
+	assert.Equal(t, `"2"`, string(obj["step"]), "the Result written meanwhile is kept")
+	assert.Equal(t, `"`+abortText+`"`, string(obj["error"]))
+	assert.Equal(t, "true", string(obj["aborted"]))
+	assert.Len(t, obj, 4)
+}
+
+// A running run with no Result (NULL in the column) and one with an empty
+// Result are both aborted: the update's Result check matches either. Runs
+// on SQLite, and on Postgres under -tags integration.
+func TestAbortRunningMaintenanceOps_AbortsNullAndEmptyResult(t *testing.T) {
+	s := newTestMaintenanceStore(t)
+	ctx := context.Background()
+	require.NoError(t, s.SeedMaintenanceOperations(ctx))
+	nullRun := createRunWithResult(t, s, store.MaintenanceStatusRunning, "")
+	emptyID := uuid.New()
+	require.NoError(t, s.client.MaintenanceOperationRun.Create().
+		SetID(emptyID).
+		SetOperationKey("pull-images").
+		SetStatus(store.MaintenanceStatusRunning).
+		SetResult("").
+		Exec(ctx))
+	nulls, err := s.client.MaintenanceOperationRun.Query().
+		Where(maintenanceoperationrun.IDEQ(uuid.MustParse(nullRun)), maintenanceoperationrun.ResultIsNil()).
+		Count(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, nulls, "the first run's Result column is NULL")
+	empties, err := s.client.MaintenanceOperationRun.Query().
+		Where(maintenanceoperationrun.IDEQ(emptyID), maintenanceoperationrun.ResultEQ("")).
+		Count(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, empties, "the second run's Result is the empty string")
+
+	runs, _, err := s.AbortRunningMaintenanceOps(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), runs)
+	for _, id := range []string{nullRun, emptyID.String()} {
+		got, err := s.GetMaintenanceRun(ctx, id)
+		require.NoError(t, err)
+		assert.Equal(t, store.MaintenanceStatusFailed, got.Status)
+		assert.Equal(t, abortResult, got.Result)
+	}
 }

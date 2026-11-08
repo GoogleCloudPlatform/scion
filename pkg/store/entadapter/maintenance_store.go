@@ -20,6 +20,8 @@ import (
 	"time"
 
 	entsql "entgo.io/ent/dialect/sql"
+	"github.com/google/uuid"
+
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/maintenanceoperation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/maintenanceoperationrun"
@@ -453,8 +455,10 @@ func (s *MaintenanceStore) ListMaintenanceRuns(ctx context.Context, operationKey
 // before the restart, for example a checkpoint) and gains "error" (the
 // abort text) and "aborted": true; any other Result is replaced by the
 // abort text alone. Each run is updated on its own, only while it is still
-// running, and the returned run count is the number of those updates that
-// matched.
+// running and its Result is the one read, so a Result written in between is
+// never overwritten: the run is then read again and updated once more if it
+// is still running. The returned run count is the number of those updates
+// that matched.
 func (s *MaintenanceStore) AbortRunningMaintenanceOps(ctx context.Context) (int64, int64, error) {
 	now := time.Now()
 
@@ -467,17 +471,29 @@ func (s *MaintenanceStore) AbortRunningMaintenanceOps(ctx context.Context) (int6
 	}
 	var runs int64
 	for _, r := range running {
-		n, err := s.client.MaintenanceOperationRun.Update().
-			Where(
-				maintenanceoperationrun.IDEQ(r.ID),
-				maintenanceoperationrun.StatusEQ(store.MaintenanceStatusRunning),
-			).
-			SetStatus(store.MaintenanceStatusFailed).
-			SetCompletedAt(now).
-			SetResult(abortedRunResult(r.Result)).
-			Save(ctx)
+		n, err := s.abortRunningRun(ctx, r.ID, r.Result, now)
 		if err != nil {
 			return runs, 0, err
+		}
+		if n == 0 {
+			// The run finished, or its Result changed, after it was read.
+			cur, err := s.client.MaintenanceOperationRun.Query().
+				Where(
+					maintenanceoperationrun.IDEQ(r.ID),
+					maintenanceoperationrun.StatusEQ(store.MaintenanceStatusRunning),
+				).
+				Select(maintenanceoperationrun.FieldID, maintenanceoperationrun.FieldResult).
+				Only(ctx)
+			switch {
+			case ent.IsNotFound(err):
+				// No longer running: nothing to abort.
+			case err != nil:
+				return runs, 0, err
+			default:
+				if n, err = s.abortRunningRun(ctx, cur.ID, cur.Result, now); err != nil {
+					return runs, 0, err
+				}
+			}
 		}
 		runs += int64(n)
 	}
@@ -497,6 +513,27 @@ func (s *MaintenanceStore) AbortRunningMaintenanceOps(ctx context.Context) (int6
 	}
 
 	return runs, int64(migrations), nil
+}
+
+// abortRunningRun marks run id failed with the abort Result built from
+// result, only while the run is still running and its Result is still
+// result. It returns the number of rows updated (0 or 1).
+func (s *MaintenanceStore) abortRunningRun(ctx context.Context, id uuid.UUID, result string, now time.Time) (int, error) {
+	resultIs := maintenanceoperationrun.ResultEQ(result)
+	if result == "" {
+		// An unset Result reads as "" whether the column is NULL or empty.
+		resultIs = maintenanceoperationrun.Or(maintenanceoperationrun.ResultIsNil(), maintenanceoperationrun.ResultEQ(""))
+	}
+	return s.client.MaintenanceOperationRun.Update().
+		Where(
+			maintenanceoperationrun.IDEQ(id),
+			maintenanceoperationrun.StatusEQ(store.MaintenanceStatusRunning),
+			resultIs,
+		).
+		SetStatus(store.MaintenanceStatusFailed).
+		SetCompletedAt(now).
+		SetResult(abortedRunResult(result)).
+		Save(ctx)
 }
 
 // abortedRunResult is the Result of a run aborted by a restart, given the
