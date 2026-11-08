@@ -7,18 +7,14 @@ Copyright 2025 The Scion Authors.
 // for waiting_for_input), the event log line and the report to the Hub.
 // The scion CLI runs the same path after sending a choice prompt from an
 // agent (the ask_user side effect), so both binaries share one
-// implementation.
+// implementation. The local update is unix-only (agentstatus_unix.go); the
+// Windows build of the scion CLI links agentstatus_other.go, which refuses
+// it.
 package agentstatus
 
 import (
-	"context"
-	"fmt"
-	"time"
-
 	state "github.com/GoogleCloudPlatform/scion/pkg/agent/state"
-	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks/handlers"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
-	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 )
 
 // Status types.
@@ -70,37 +66,6 @@ var definitions = map[string]Definition{
 func Lookup(statusType string) (Definition, bool) {
 	d, ok := definitions[statusType]
 	return d, ok
-}
-
-// Run performs the status update: the local activity (handlers keep
-// waiting_for_input sticky through the next tool-end hook), the event log
-// line, and the Hub report when a Hub is configured. Failures are logged,
-// never returned: a status update never fails its caller.
-func Run(definition Definition, message string) {
-	if message == "" {
-		message = definition.DefaultMessage
-	}
-	statusHandler := handlers.NewStatusHandler()
-	loggingHandler := handlers.NewLoggingHandler()
-
-	if err := statusHandler.UpdateActivity(definition.Activity, ""); err != nil {
-		log.Error("Failed to update status: %v", err)
-	}
-
-	logMessage := fmt.Sprintf("%s: %s", definition.eventPrefix, message)
-	if err := loggingHandler.LogEvent(string(definition.Activity), logMessage); err != nil {
-		log.Error("Failed to log event: %v", err)
-	}
-
-	if hubClient := hub.NewClient(); hubClient != nil && hubClient.IsConfigured() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := hubClient.UpdateStatus(ctx, definition.HubUpdate(message)); err != nil {
-			log.Error("Failed to report to Hub: %v", err)
-		}
-	}
-
-	log.Info("%s: %s", definition.outputPrefix, message)
 }
 
 // RunAskUser performs the ask_user status update with message, exactly as
