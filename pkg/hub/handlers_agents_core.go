@@ -1379,6 +1379,11 @@ const (
 	createRowRemoveFailedMessage = "Create failed and the agent record could not be removed; delete the agent to retry."
 )
 
+// errWorkspaceUploadURLs is the rollback cause recorded when the workspace
+// bootstrap's signed upload URLs could not be generated. It is fixed text:
+// the object-store detail is logged, never persisted in the audit record.
+var errWorkspaceUploadURLs = errors.New("failed to generate workspace upload URLs")
+
 // writeCreateFailure writes a create-failure response. When the create's
 // compensation failed (correlationID != ""), it writes a 500 that carries the
 // correlation ID, because the create's records may be left behind;
@@ -2636,7 +2641,10 @@ func (s *Server) createAgentInProject(
 			storagePath := storage.WorkspaceStoragePath(s.HubID(), agent.ProjectID, agent.ID)
 			uploadURLs, existingFiles, err := generateWorkspaceUploadURLs(ctx, stor, storagePath, req.WorkspaceFiles)
 			if err != nil {
-				failCreate(createRollback{Stage: createStageUploadURL, Cause: err}, func() { RuntimeError(w, "Failed to generate upload URLs: "+err.Error()) })
+				// The object-store detail goes to the server log only; the
+				// response and the persisted rollback record carry fixed text.
+				slog.ErrorContext(ctx, "agent create: workspace upload URLs failed", "agent_id", agent.ID, "error", upstreamText(err.Error()))
+				failCreate(createRollback{Stage: createStageUploadURL, Cause: errWorkspaceUploadURLs}, func() { RuntimeError(w, "Failed to generate upload URLs") })
 				return
 			}
 
