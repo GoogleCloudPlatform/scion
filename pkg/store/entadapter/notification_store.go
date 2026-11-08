@@ -24,6 +24,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/agenthold"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/notification"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/notificationsubscription"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/subscriptiontemplate"
@@ -840,9 +841,32 @@ func writeNotSuspended(b *entsql.Builder) {
 	b.Arg(string(state.PhaseSuspended))
 }
 
+// writeNotHeld appends a "has no active hold" condition to an EXISTS
+// subquery over the agents table (ptone/scion#7145). A held subscriber's
+// notifications are parked like a suspended one's, whatever its phase,
+// and selected again once its holds are cleared.
+func writeNotHeld(b *entsql.Builder) {
+	b.WriteString(" AND NOT EXISTS (SELECT 1 FROM ")
+	b.Ident(agenthold.Table)
+	b.WriteString(" WHERE ")
+	b.Ident(agenthold.Table)
+	b.WriteString(".")
+	b.Ident(agenthold.FieldAgentID)
+	b.WriteString(" = ")
+	b.Ident(agent.Table)
+	b.WriteString(".")
+	b.Ident(agent.FieldID)
+	b.WriteString(" AND ")
+	b.Ident(agenthold.Table)
+	b.WriteString(".")
+	b.Ident(agenthold.FieldClearedAt)
+	b.WriteString(" IS NULL)")
+}
+
 // GetUndispatchedAgentNotifications returns agent-targeted notifications with
 // dispatched=false, ordered oldest-first, limited to 100 rows. A
-// notification whose subscriber agent is suspended is never returned.
+// notification whose subscriber agent is suspended or held is never
+// returned.
 //
 // When brokerID is empty (sweep mode), a 60s grace period is applied so the
 // sweep does not race with an in-flight primary dispatch. When brokerID is
@@ -895,6 +919,7 @@ func (s *NotificationStore) GetUndispatchedAgentNotifications(ctx context.Contex
 				b.WriteString(" = ")
 				b.WriteString(projIDCol)
 				writeNotSuspended(b)
+				writeNotHeld(b)
 				b.WriteString(" AND ")
 				b.Ident(agent.Table)
 				b.WriteString(".")
@@ -928,6 +953,7 @@ func (s *NotificationStore) GetUndispatchedAgentNotifications(ctx context.Contex
 				b.WriteString(" = ")
 				b.WriteString(projIDCol)
 				writeNotSuspended(b)
+				writeNotHeld(b)
 				b.WriteString(" AND ")
 				b.Ident(agent.Table)
 				b.WriteString(".")

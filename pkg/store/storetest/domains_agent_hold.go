@@ -419,6 +419,69 @@ func AgentHoldConformance(t *testing.T, factory Factory) {
 			assert.False(t, seen[f.agents[4]], "cleared holds are not listed")
 		})
 
+		t.Run("a held subscriber's notifications are parked", func(t *testing.T) {
+			// ptone/scion#7145: GetUndispatchedAgentNotifications leaves out
+			// a subscriber with an active hold, in sweep mode and in
+			// broker-connect mode, and selects it again once its holds are
+			// cleared.
+			s := factory(t)
+			const broker = "hold-notif-broker"
+			projectID := uuid.NewString()
+			require.NoError(t, s.CreateProject(ctx, &store.Project{
+				ID:   projectID,
+				Name: "hold-notif-project",
+				Slug: "hold-notif-project-" + projectID[:8],
+			}))
+			onBroker := func(a *store.Agent) { a.RuntimeBrokerID = broker }
+			held := seedProjectAgent(t, ctx, s, projectID, "hold-notif-held", onBroker)
+			free := seedProjectAgent(t, ctx, s, projectID, "hold-notif-free", onBroker)
+
+			notify := func(agentID string) string {
+				a, err := s.GetAgent(ctx, agentID)
+				require.NoError(t, err)
+				id := uuid.NewString()
+				require.NoError(t, s.CreateNotification(ctx, &store.Notification{
+					ID:             id,
+					SubscriptionID: uuid.NewString(),
+					AgentID:        uuid.NewString(),
+					ProjectID:      projectID,
+					SubscriberType: store.SubscriberTypeAgent,
+					SubscriberID:   a.Slug,
+					Status:         "COMPLETED",
+					Message:        "done",
+					// Older than the sweep's grace period.
+					CreatedAt: time.Now().Add(-2 * time.Minute),
+				}))
+				return id
+			}
+			heldNotif, freeNotif := notify(held), notify(free)
+			selected := func(mode string) map[string]bool {
+				got, err := s.GetUndispatchedAgentNotifications(ctx, mode)
+				require.NoError(t, err)
+				ids := map[string]bool{}
+				for _, n := range got {
+					ids[n.ID] = true
+				}
+				return ids
+			}
+
+			_, err := s.CreateAgentHolds(ctx, []*store.AgentHold{newHold(projectID, held, uuid.NewString())})
+			require.NoError(t, err)
+			for _, mode := range []string{"", broker} {
+				got := selected(mode)
+				assert.False(t, got[heldNotif], "mode %q: a held subscriber's notification must be parked", mode)
+				assert.True(t, got[freeNotif], "mode %q: an unheld subscriber's notification is selected", mode)
+			}
+
+			_, err = s.ClearAgentHolds(ctx, held, store.ClearActor{Kind: store.ClearActorUser, ID: uuid.NewString()}, "lifted")
+			require.NoError(t, err)
+			for _, mode := range []string{"", broker} {
+				got := selected(mode)
+				assert.True(t, got[heldNotif], "mode %q: a lifted subscriber's notification is selected again", mode)
+				assert.True(t, got[freeNotif], "mode %q: an unheld subscriber's notification is selected", mode)
+			}
+		})
+
 		t.Run("create participates in WithTx", func(t *testing.T) {
 			s := factory(t)
 			f := seedHoldFixture(t, ctx, s, 1)

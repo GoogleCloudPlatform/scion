@@ -1438,6 +1438,10 @@ func (p *MessageBrokerProxy) publishDeliveryFailed(ctx context.Context, projectI
 			"senderID", msg.SenderID, "error", err)
 		return
 	}
+	// A held sender gets no notice (ptone/scion#7145).
+	if heldNoticeWithheld(ctx, p.store, noticeLogger(p.messageLog, p.log), senderAgent, heldNoticeDeliveryFailed) {
+		return
+	}
 
 	var failMsg string
 	if deliveryErr != nil && !errors.Is(deliveryErr, store.ErrNotFound) {
@@ -1490,6 +1494,10 @@ func (p *MessageBrokerProxy) publishDeliveryDeferred(ctx context.Context, agentS
 	if err != nil {
 		p.log.Warn("Could not resolve sender agent for DELIVERY_DEFERRED notification",
 			"senderID", msg.SenderID, "error", err)
+		return
+	}
+	// A held sender gets no notice (ptone/scion#7145).
+	if heldNoticeWithheld(ctx, p.store, noticeLogger(p.messageLog, p.log), senderAgent, heldNoticeDeliveryDeferred) {
 		return
 	}
 

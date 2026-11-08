@@ -294,10 +294,10 @@ func (nd *NotificationDispatcher) setOutcome(ctx context.Context, notificationID
 // is called before delivery to prevent double-dispatch when the sweep and hook
 // race on the same notification. If the claim fails (another caller already
 // claimed it), this is a no-op. If delivery cannot proceed (no dispatcher, no
-// broker, a suspended subscriber) the claim is reverted with no attempt
-// counted. If the delivery attempt fails, the claim is reverted with a retry
-// backoff (store.NotificationRetryBackoff) before which the sweep does not
-// claim it again. When it gives up instead (a failed delivery older than
+// broker, a suspended or held subscriber) the claim is reverted with no
+// attempt counted. If the delivery attempt fails, the claim is reverted with
+// a retry backoff (store.NotificationRetryBackoff) before which the sweep
+// does not claim it again. When it gives up instead (a failed delivery older than
 // notificationRetryMaxAge, or a subscription, subscriber or watched agent
 // that is gone), the notification stays claimed with the failed outcome and
 // a reason (store.NotificationReason*). A
@@ -407,6 +407,16 @@ func (nd *NotificationDispatcher) retryDispatch(ctx context.Context, notif *stor
 	if subscriberSuspended(subscriber) {
 		nd.log.Debug("retry: subscriber is suspended, reverting claim",
 			"subscriberID", sub.SubscriberID, "notificationID", notif.ID)
+		nd.revertClaim(ctx, notif.ID)
+		return retryNotAttempted, ""
+	}
+
+	// A held subscriber gets no notice (ptone/scion#7145): its
+	// notifications are parked like a suspended subscriber's, whatever its
+	// phase, and the sweep query leaves them out while it is held. Reaching
+	// here means the hold was set after the query selected the row, or the
+	// hold could not be read (which parks it too).
+	if heldNoticeWithheld(ctx, nd.store, noticeLogger(nd.messageLog, nd.log), subscriber, heldNoticeNotification) {
 		nd.revertClaim(ctx, notif.ID)
 		return retryNotAttempted, ""
 	}

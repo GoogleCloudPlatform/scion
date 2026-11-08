@@ -80,6 +80,11 @@ func (s *Server) deliverArtifactReview(ctx context.Context, n artifacts.ReviewNo
 	if reincarnationInFlight(agent) {
 		return fmt.Errorf("owner agent is reincarnating")
 	}
+	// A held owner gets no notice (ptone/scion#7145); the drop is logged
+	// there.
+	if heldNoticeWithheld(ctx, s.store, s.messageLog, agent, heldNoticeArtifactReview) {
+		return nil
+	}
 	dispatcher := s.GetDispatcher()
 	if dispatcher == nil {
 		return fmt.Errorf("no dispatcher available")

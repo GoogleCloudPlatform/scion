@@ -451,6 +451,14 @@ func (nd *NotificationDispatcher) dispatchToAgent(ctx context.Context, sub *stor
 		return
 	}
 
+	// A held subscriber gets no notice (ptone/scion#7145): the
+	// notification is parked as for a suspended one, whatever the
+	// subscriber's phase. The dispatch sweep leaves it out while the
+	// subscriber is held and expires it at notificationRetryMaxAge.
+	if heldNoticeWithheld(ctx, nd.store, noticeLogger(nd.messageLog, nd.log), subscriber, heldNoticeNotification) {
+		return
+	}
+
 	dispatcher := nd.getDispatcher()
 	if dispatcher == nil {
 		nd.log.Error("No dispatcher available; notification NOT dispatched",
