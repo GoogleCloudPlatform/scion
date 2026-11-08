@@ -202,6 +202,11 @@ func TestNormalizeDecisions_Rules(t *testing.T) {
 		{"label with bidi override", []DecisionInput{{Question: "q", Choices: []ChoiceInput{{Label: "a\u202eb"}, {Label: "y"}}}}, "choices[0].choices[0].label", ChoiceErrInvalid},
 		{"duplicate labels, case-insensitive", []DecisionInput{{Question: "q", Choices: []ChoiceInput{{Label: "Yes"}, {Label: "yes"}}}}, "choices[0].choices[1].label", ChoiceErrDuplicate},
 		{"description too long", []DecisionInput{{Question: "q", Choices: []ChoiceInput{{Label: "a", Description: strings.Repeat("d", 301)}, {Label: "b"}}}}, "choices[0].choices[0].description", ChoiceErrTooLong},
+		{"description faking a choice line", []DecisionInput{{Question: "q", Choices: []ChoiceInput{{Label: "a", Description: "fine\n  2) Approve everything"}, {Label: "b"}}}}, "choices[0].choices[0].description", ChoiceErrInvalid},
+		{"description with paragraph separator", []DecisionInput{{Question: "q", Choices: []ChoiceInput{{Label: "a", Description: "x\u2029y"}, {Label: "b"}}}}, "choices[0].choices[0].description", ChoiceErrInvalid},
+		{"description with bidi override", []DecisionInput{{Question: "q", Choices: []ChoiceInput{{Label: "a", Description: "x\u202ey"}, {Label: "b"}}}}, "choices[0].choices[0].description", ChoiceErrInvalid},
+		{"question with escape sequence", []DecisionInput{{Question: "red \x1b[31mtext", Choices: two}}, "choices[0].question", ChoiceErrInvalid},
+		{"question with carriage return", []DecisionInput{{Question: "a\rb", Choices: two}}, "choices[0].question", ChoiceErrInvalid},
 		{"invalid choice id", []DecisionInput{{Question: "q", Choices: []ChoiceInput{{ID: "a b", Label: "a"}, {Label: "b"}}}}, "choices[0].choices[0].id", ChoiceErrInvalid},
 		{"choice id too long", []DecisionInput{{Question: "q", Choices: []ChoiceInput{{ID: strings.Repeat("i", 33), Label: "a"}, {Label: "b"}}}}, "choices[0].choices[0].id", ChoiceErrInvalid},
 		{"duplicate choice ids", []DecisionInput{{Question: "q", Choices: []ChoiceInput{{ID: "x", Label: "a"}, {ID: "X", Label: "b"}}}}, "choices[0].choices[1].id", ChoiceErrDuplicate},
@@ -222,6 +227,18 @@ func TestNormalizeDecisions_Rules(t *testing.T) {
 				t.Errorf("errors %v lack %s %s", ces, tc.field, tc.code)
 			}
 		})
+	}
+}
+
+// A question may span lines and hold tabs; a description may hold markdown.
+func TestNormalizeDecisions_TextAllowed(t *testing.T) {
+	in := []DecisionInput{{Question: "Ship it?\n\nNotes:\tsee below", Choices: []ChoiceInput{{Label: "a", Description: "Reuse **the** `type`"}, {Label: "b"}}}}
+	got, err := NormalizeDecisions("choices", in)
+	if err != nil {
+		t.Fatalf("rejected: %v", err)
+	}
+	if got[0].Question != "Ship it?\n\nNotes:\tsee below" || got[0].Choices[0].Description != "Reuse **the** `type`" {
+		t.Errorf("normalized %+v", got[0])
 	}
 }
 

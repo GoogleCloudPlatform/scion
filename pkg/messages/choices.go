@@ -31,6 +31,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/util/plaintext"
@@ -370,8 +371,8 @@ func NormalizeDecisions(root string, in []DecisionInput) ([]Decision, error) {
 		switch {
 		case nd.Question == "":
 			add(p+".question", ChoiceErrRequired, "question is required")
-		case !utf8.ValidString(nd.Question) || strings.ContainsRune(nd.Question, 0):
-			add(p+".question", ChoiceErrInvalid, "question must be valid UTF-8 text")
+		case !validQuestionText(nd.Question):
+			add(p+".question", ChoiceErrInvalid, "question must be valid UTF-8 text without control characters (line breaks and tabs are allowed)")
 		case utf8.RuneCountInString(nd.Question) > MaxDecisionQuestionLen:
 			add(p+".question", ChoiceErrTooLong, "question is at most %d characters", MaxDecisionQuestionLen)
 		}
@@ -458,8 +459,8 @@ func normalizeChoices(p string, in []ChoiceInput, add func(field, code, format s
 
 		switch {
 		case nc.Description == "":
-		case !utf8.ValidString(nc.Description) || strings.ContainsRune(nc.Description, 0):
-			add(cp+".description", ChoiceErrInvalid, "description must be valid UTF-8 text")
+		case !validPlainText(nc.Description):
+			add(cp+".description", ChoiceErrInvalid, "description must be one line of text without control characters")
 		case utf8.RuneCountInString(nc.Description) > MaxChoiceDescriptionLen:
 			add(cp+".description", ChoiceErrTooLong, "description is at most %d characters", MaxChoiceDescriptionLen)
 		}
@@ -486,6 +487,22 @@ func matchDefault(choices []Choice, def string) (string, bool) {
 
 // validPlainText reports whether s is valid UTF-8 with no control, format,
 // line or paragraph separator characters (so no newlines).
+// validQuestionText reports whether s is valid UTF-8 without control
+// characters other than line feed and tab: a question may span lines, but
+// no other control character (a carriage return, an escape sequence) may
+// change how it, or the choices after it, are shown.
+func validQuestionText(s string) bool {
+	if !utf8.ValidString(s) {
+		return false
+	}
+	for _, r := range s {
+		if r != '\n' && r != '\t' && unicode.Is(unicode.Cc, r) {
+			return false
+		}
+	}
+	return true
+}
+
 func validPlainText(s string) bool {
 	if !utf8.ValidString(s) {
 		return false
