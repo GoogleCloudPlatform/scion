@@ -128,7 +128,7 @@ def main(argv):
     try:
         with open(generated_path, "w", encoding="utf-8") as fh:
             yaml.safe_dump(merged, fh, default_flow_style=False, sort_keys=False)
-    except OSError as exc:
+    except (OSError, yaml.YAMLError) as exc:
         print(f"merge-settings: cannot write merged settings: {exc}", file=sys.stderr)
         return 1
 
