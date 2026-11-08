@@ -95,6 +95,16 @@ type OutboundMessageRequest struct {
 	// ignored for user and group recipients (zero resumes invoked).
 	Wake bool `json:"wake,omitempty"`
 
+	// Choices makes the message a choice prompt: one or more decisions
+	// for a user or a conversation (design choices v4, 4.3). Gated by the
+	// web.chat_choices experiment; the hub validates and normalizes them,
+	// stores them with the message, and renders Msg (the optional intro)
+	// followed by a markdown fallback of the decisions.
+	Choices []messages.DecisionInput `json:"choices,omitempty"`
+	// ChoicesUpdate allows Choices to replace decisions whose keys already
+	// exist (a new version each). Valid only with Choices.
+	ChoicesUpdate bool `json:"choices_update,omitempty"`
+
 	// This outbound path never accepted a raw field. A "raw" member in the
 	// request body is an unknown field and is ignored by JSON decoding; it
 	// is not a message-raw ingress (see .design/agent-keys-raw-inventory.md).
@@ -1138,6 +1148,18 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	// choice-prompt and choice-response are minted by the hub only.
+	if rejectHubMintedType(w, req.Type) {
+		return
+	}
+	choiceSend, ok := s.prepareChoicePromptSend(w, &req)
+	if !ok {
+		return
+	}
+	if choiceSend != nil {
+		req.Type = messages.TypeChoicePrompt
+	}
+
 	if req.Type == "" {
 		req.Type = "input-needed"
 	}
@@ -1151,7 +1173,8 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	if req.Msg == "" {
+	// With choices the body is the optional intro above the decisions.
+	if req.Msg == "" && choiceSend == nil {
 		ValidationError(w, "msg is required", nil)
 		return
 	}
@@ -1214,6 +1237,14 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 				}
 			}
 		}
+	}
+
+	// A choice prompt is for humans: a recipient that routing resolved to
+	// an agent (an agent DM, or a conversation that is one) is refused.
+	if choiceSend != nil && (outboundTargetAgentID != "" || result.DeliveryPath == deliveryAgentDM) {
+		ValidationError(w, "choices can be sent only to a user or a conversation, not to an agent",
+			map[string]interface{}{"field": "recipient"})
+		return
 	}
 
 	// Attachments stored as artifacts named by id (ptone/scion#4596): the
@@ -1435,7 +1466,12 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	// deliverToUser before the SSE publish.
 	var stampWatermarks func(context.Context, *store.Message)
 	storeOutboundRow := func(storeCtx context.Context) error {
-		if err := s.store.CreateMessage(storeCtx, storeMsg); err != nil {
+		if choiceSend != nil {
+			// The message and its decisions in one transaction.
+			if err := s.storeChoicePrompt(storeCtx, choiceSend, agent, storeMsg, structuredMsg); err != nil {
+				return err
+			}
+		} else if err := s.store.CreateMessage(storeCtx, storeMsg); err != nil {
 			return err
 		}
 		// Attachments stored as artifacts are bound now that the row exists
@@ -1456,8 +1492,13 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 			stampWatermarks(storeCtx, storeMsg)
 		}
 		publishRefs := append(append([]AttachmentRef(nil), attachmentRefs...), boundAttachments...)
-		s.events.PublishUserMessage(storeCtx, storeMsg, publishRefs, recordedRefs)
-		s.fanOutThreadMessageToMembersAsync(storeCtx, storeMsg, publishRefs, recordedRefs)
+		pubCtx := storeCtx
+		if choiceSend != nil {
+			// The chat events of a choice prompt carry its decisions.
+			pubCtx = withChoiceEventPayload(storeCtx, &choiceEventPayload{Prompt: s.choicePromptViewOf(storeCtx, storeMsg)})
+		}
+		s.events.PublishUserMessage(pubCtx, storeMsg, publishRefs, recordedRefs)
+		s.fanOutThreadMessageToMembersAsync(pubCtx, storeMsg, publishRefs, recordedRefs)
 		return nil
 	}
 
@@ -1496,7 +1537,9 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	case deliveryUserBroker:
 		// Broker path: PublishUserMessage handles persistence and SSE.
 		if bp := s.GetMessageBrokerProxy(); bp != nil {
-			if len(artifactAttachments) > 0 {
+			if len(artifactAttachments) > 0 || choiceSend != nil {
+				// A choice prompt is stored with its decisions by this
+				// handler, so it takes the same stored-first path.
 				// Decision D2 (ptone/scion#4596): a message that carries
 				// attachments stored as artifacts is stored by this handler,
 				// so they can be bound to the stored row; deliverToUser then
@@ -1587,6 +1630,9 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	case deliveryUserDirect:
 		// Direct path: persist, link attachments, publish SSE, dispatch to channels.
 		if err := storeOutboundRow(ctx); err != nil {
+			if writeChoiceStoreError(w, err) {
+				return
+			}
 			s.messageLog.Error("Failed to persist outbound message", "error", err)
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 				"Failed to persist message", nil)
@@ -1610,19 +1656,24 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	// caller's own free-text thread_id (Rules 2/3) is minted on demand, so
 	// its external_ref embeds whatever the caller chose to send; fan-out
 	// treats that the same as no group context at all.
-	mentionResults := s.fanOutAgentMentions(ctx, agentMentionFanoutInput{
-		Sender:             agent,
-		SenderIdent:        agentIdent,
-		Primary:            nil,
-		Msg:                originalMsgForMentions,
-		Type:               req.Type,
-		ParentConv:         result.ConvResult,
-		ParentConvVerified: result.Asserted,
-		ParentMessageID:    storeMsg.ID,
-		ParentAttachments:  boundAttachments,
-		Channel:            result.Channel,
-		HumanMembers:       humanMembers,
-	})
+	//
+	// A choice prompt is addressed to humans and fans out to no agent.
+	var mentionResults []messages.MentionResult
+	if choiceSend == nil {
+		mentionResults = s.fanOutAgentMentions(ctx, agentMentionFanoutInput{
+			Sender:             agent,
+			SenderIdent:        agentIdent,
+			Primary:            nil,
+			Msg:                originalMsgForMentions,
+			Type:               req.Type,
+			ParentConv:         result.ConvResult,
+			ParentConvVerified: result.Asserted,
+			ParentMessageID:    storeMsg.ID,
+			ParentAttachments:  boundAttachments,
+			Channel:            result.Channel,
+			HumanMembers:       humanMembers,
+		})
+	}
 
 	// A group post that @mentions no agent goes to the conversation's
 	// default agent. The sender's agentGroupPostDecision already allowed
@@ -1631,7 +1682,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	// (group_message_mode.go).
 	isGroupPost := result.ConvResult != nil && result.ConvResult.Kind == "group"
 	var defaultAgentResult *messages.MentionResult
-	if isGroupPost {
+	if isGroupPost && choiceSend == nil {
 		defaultAgentResult = s.wakeGroupDefaultAgent(ctx, groupDefaultWakeInput{
 			Sender:            agent,
 			SenderIdent:       agentIdent,
@@ -1703,6 +1754,9 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	}
 	if outboundArtifactWarning != "" {
 		respBody["artifact_warning"] = outboundArtifactWarning
+	}
+	if choiceSend != nil {
+		respBody["decisions"] = choiceDecisionResults(agent.ID, choiceSend.result)
 	}
 	writeJSON(w, http.StatusOK, respBody)
 }
@@ -2049,6 +2103,10 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			structuredMsg.Sender = "agent:" + senderSlug
 		}
 		defaultInboundStructured(structuredMsg)
+		// choice-prompt and choice-response are minted by the hub only.
+		if rejectHubMintedType(w, structuredMsg.Type) {
+			return
+		}
 		messaging.RecordStep(ctx, "sender_identity_extracted")
 	} else if req.Message != "" {
 		plainMessage = req.Message
@@ -4022,6 +4080,10 @@ func (s *Server) handleProjectBroadcast(w http.ResponseWriter, r *http.Request, 
 	// ptone/scion#2100: fill what a minimal client payload omits, as
 	// handleAgentMessage does.
 	defaultInboundStructured(req.StructuredMessage)
+	// choice-prompt and choice-response are minted by the hub only.
+	if rejectHubMintedType(w, req.StructuredMessage.Type) {
+		return
+	}
 
 	// Use authenticated identity for self-skip, not the Sender field.
 	// The Sender field is a display label; the auth identity is the
