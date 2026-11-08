@@ -31,10 +31,13 @@ import (
 type sseCountingPublisher struct {
 	*ChannelEventPublisher
 	subscriptions int
+	// patterns holds each Subscribe call's patterns, in call order.
+	patterns [][]string
 }
 
 func (p *sseCountingPublisher) Subscribe(patterns ...string) (<-chan Event, func()) {
 	p.subscriptions++
+	p.patterns = append(p.patterns, append([]string(nil), patterns...))
 	return p.ChannelEventPublisher.Subscribe(patterns...)
 }
 
@@ -188,7 +191,22 @@ func TestSSEHandler_AgentMixedBatch(t *testing.T) {
 			} else {
 				assert.Equal(t, http.StatusOK, w.Code)
 				assert.True(t, w.Flushed)
-				assert.Equal(t, 1, pub.subscriptions)
+				// One subscription for the whole authorized batch, plus the
+				// internal membership-change subscription every stream
+				// holds (ptone/scion#7494).
+				assert.Equal(t, 2, pub.subscriptions)
+				var client, internal [][]string
+				for _, p := range pub.patterns {
+					if len(p) == 1 && p[0] == membershipChangedSubject {
+						internal = append(internal, p)
+					} else {
+						client = append(client, p)
+					}
+				}
+				assert.Len(t, internal, 1, "exactly one internal membership subscription")
+				if assert.Len(t, client, 1, "exactly one client subscription for the batch") {
+					assert.ElementsMatch(t, subjects, client[0])
+				}
 			}
 			assertNoSSESubscribers(t, pub.ChannelEventPublisher)
 		})
