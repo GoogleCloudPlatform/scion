@@ -5183,12 +5183,12 @@ func (s *Server) performAgentDelete(w http.ResponseWriter, r *http.Request, agen
 		// Verify the broker is reachable before claiming, to avoid orphaned
 		// containers. Force bypasses this so stuck agents can always be
 		// cleaned up; managed agents have no broker; a created row with no
-		// launch in flight dispatches best-effort (ptone/scion#2635); a
-		// finalizing row already ran its teardown, and its re-claim skips
+		// launch in flight, and a create the broker refused before it
+		// created any container, dispatch best-effort (deleteSkipsBrokerCheck);
+		// a finalizing row already ran its teardown, and its re-claim skips
 		// the dispatch (ptone/scion#2890).
-		createdNoLaunch := agent.Phase == string(state.PhaseCreated) && agent.LaunchState != store.LaunchStateActive
 		finalizing := agent.DeletionState == store.DeletionStateFinalizing
-		if !isManagedAgentRuntime(agent.Runtime) && !createdNoLaunch && !finalizing && !params.force && !s.checkBrokerAvailability(w, r, agent) {
+		if !isManagedAgentRuntime(agent.Runtime) && !deleteSkipsBrokerCheck(agent) && !finalizing && !params.force && !s.checkBrokerAvailability(w, r, agent) {
 			return
 		}
 
