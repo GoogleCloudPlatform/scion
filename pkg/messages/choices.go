@@ -89,11 +89,6 @@ var reservedDecisionFields = map[string]bool{
 	"expires_in":  true,
 }
 
-var (
-	decisionInputFields = map[string]bool{"id": true, "question": true, "choices": true, "default": true}
-	choiceInputFields   = map[string]bool{"id": true, "label": true, "description": true}
-)
-
 // ChoiceInput is one choice as an agent writes it: either a JSON string
 // (the label) or an object {id?, label, description?}.
 type ChoiceInput struct {
