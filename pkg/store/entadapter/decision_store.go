@@ -38,9 +38,14 @@ import (
 // errDecisionRace marks a write that lost a race with a concurrent prompt
 // or answer: a unique-index violation on decisions, decision_answers or
 // decision_key_counters, or an active version replaced under us. The
-// non-transactional entry points retry (CreateChoicePrompt) or re-read
-// (RecordAnswer) once on it.
+// non-transactional entry points retry (CreateChoicePrompt, up to
+// maxDecisionRaceRetries times) or re-read (RecordAnswer) once on it.
 var errDecisionRace = errors.New("concurrent decision write")
+
+// maxDecisionRaceRetries bounds CreateChoicePrompt's retries of a lost
+// race: each retry reads the winner's rows, so n concurrent reposts of one
+// key need up to n-1 retries for the last one.
+const maxDecisionRaceRetries = 5
 
 // markDecisionRace wraps a constraint violation as errDecisionRace and
 // maps any other error as usual.
@@ -70,8 +75,8 @@ func (c *CompositeStore) CreateChoicePrompt(ctx context.Context, in *store.Choic
 			return res, nil
 		}
 		// The loser of a concurrent repost (or of the first use of the
-		// agent's counter) retries once, then reads the winner's rows.
-		if attempt == 0 && (errors.Is(err, errDecisionRace) || errors.Is(err, store.ErrTransient)) {
+		// agent's counter) retries on the winner's rows.
+		if attempt < maxDecisionRaceRetries && (errors.Is(err, errDecisionRace) || errors.Is(err, store.ErrTransient)) {
 			continue
 		}
 		if errors.Is(err, errDecisionRace) {
@@ -155,7 +160,7 @@ func (c *CompositeStore) createChoicePromptTx(ctx context.Context, in *store.Cho
 	}
 
 	// 3. The existing versions of every key the prompt names.
-	states, err := loadKeyStates(ctx, client, agentID, in.Decisions)
+	states, err := loadKeyStates(ctx, client, agentID, in.Decisions, c.isPostgres())
 	if err != nil {
 		return nil, err
 	}
@@ -337,8 +342,12 @@ func reserveDecisionNumbers(ctx context.Context, client *ent.Client, agentID uui
 }
 
 // loadKeyStates reads, for every key the prompt names, its highest version
-// and its active (not replaced) version.
-func loadKeyStates(ctx context.Context, client *ent.Client, agentID uuid.UUID, ds []messages.Decision) (map[string]*keyState, error) {
+// and its active (not replaced) version. With lock (Postgres) it locks the
+// rows it reads for the transaction, in key and version order: an answer
+// in flight on the active row (recordAnswerTx locks it too) commits first,
+// so the active row's status read here, and the answers read after it, are
+// current when the repost replaces it.
+func loadKeyStates(ctx context.Context, client *ent.Client, agentID uuid.UUID, ds []messages.Decision, lock bool) (map[string]*keyState, error) {
 	var norms []string
 	for _, d := range ds {
 		if d.Key != "" {
@@ -349,10 +358,13 @@ func loadKeyStates(ctx context.Context, client *ent.Client, agentID uuid.UUID, d
 	if len(norms) == 0 {
 		return states, nil
 	}
-	rows, err := client.Decision.Query().
+	q := client.Decision.Query().
 		Where(decision.AskerAgentID(agentID), decision.KeyNormIn(norms...)).
-		Order(decision.ByKeyNorm(), decision.ByVersion()).
-		All(ctx)
+		Order(decision.ByKeyNorm(), decision.ByVersion())
+	if lock {
+		q = q.ForUpdate()
+	}
+	rows, err := q.All(ctx)
 	if err != nil {
 		return nil, mapError(err)
 	}
@@ -453,6 +465,30 @@ func (c *CompositeStore) GetDecisionsByMessageIDs(ctx context.Context, messageID
 	return out, nil
 }
 
+// GetDecisionRowsByIDs implements store.DecisionStore.
+func (c *CompositeStore) GetDecisionRowsByIDs(ctx context.Context, rowIDs []string) (map[string]*store.Decision, error) {
+	out := map[string]*store.Decision{}
+	uids := make([]uuid.UUID, 0, len(rowIDs))
+	for _, id := range rowIDs {
+		if uid, err := uuid.Parse(id); err == nil {
+			uids = append(uids, uid)
+		}
+	}
+	if len(uids) == 0 {
+		return out, nil
+	}
+	rows, err := c.client.Decision.Query().
+		Where(decision.IDIn(uids...)).
+		All(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	for _, r := range rows {
+		out[r.ID.String()] = decisionToStore(r)
+	}
+	return out, nil
+}
+
 // GetDecisionAnswersByResponseMessageIDs implements store.DecisionStore.
 func (c *CompositeStore) GetDecisionAnswersByResponseMessageIDs(ctx context.Context, messageIDs []string) (map[string]*store.DecisionAnswer, error) {
 	out := map[string]*store.DecisionAnswer{}
@@ -482,6 +518,11 @@ func (c *CompositeStore) GetDecisionAnswersByResponseMessageIDs(ctx context.Cont
 // transaction. The tables carry project_id as a plain column with no
 // foreign key, so the cascade is explicit. Chat retention never touches
 // them; only project deletion does.
+//
+// Only the counters of agentIDs (the agents deleted with the project) go.
+// The counter of an agent hard-deleted earlier, outside a project delete,
+// stays as an orphan row: that is accepted, as decided in the choices
+// design. It is one small row per such agent, and no agent ID is reused.
 func deleteProjectDecisions(ctx context.Context, client *ent.Client, projectID uuid.UUID, agentIDs []uuid.UUID) error {
 	if _, err := client.DecisionAnswer.Delete().
 		Where(decisionanswer.ProjectIDEQ(projectID)).Exec(ctx); err != nil {
@@ -616,7 +657,14 @@ func (c *CompositeStore) recordAnswerTx(ctx context.Context, in *store.RecordAns
 	if err != nil {
 		return nil, false, err
 	}
-	row, err := client.Decision.Get(ctx, rowID)
+	// Lock the row on Postgres: a concurrent repost of the key (which
+	// locks it in loadKeyStates) either finishes first, and this answer
+	// sees the version replaced, or waits and then sees it decided.
+	q := client.Decision.Query().Where(decision.ID(rowID))
+	if c.isPostgres() {
+		q = q.ForUpdate()
+	}
+	row, err := q.Only(ctx)
 	if err != nil {
 		return nil, false, mapError(err)
 	}
@@ -639,14 +687,16 @@ func (c *CompositeStore) recordAnswerTx(ctx context.Context, in *store.RecordAns
 	if label == "" {
 		return nil, false, fmt.Errorf("%w: %s has no choice %q", store.ErrInvalidInput, row.Key, in.ChoiceID)
 	}
-	taken, err := client.DecisionAnswer.Query().
-		Where(decisionanswer.DecisionRowID(rowID), decisionanswer.ProvenanceEQ(decisionanswer.Provenance(in.Provenance))).
-		Exist(ctx)
+	existing, err := loadAnswers(ctx, client, []uuid.UUID{rowID})
 	if err != nil {
-		return nil, false, mapError(err)
+		return nil, false, err
 	}
-	if taken {
-		return nil, false, fmt.Errorf("%w: version %d of %s already has a %s answer", store.ErrDecisionAnswerConflict, row.Version, row.Key, in.Provenance)
+	outcome := in.Outcome
+	if outcome == "" {
+		outcome = store.DecisionOutcomeAnswer
+	}
+	if err := checkAnswerPreconditions(row, existing[rowID], in, outcome); err != nil {
+		return nil, false, err
 	}
 
 	in.ResponseMessage.Type = messages.TypeChoiceResponse
@@ -655,10 +705,6 @@ func (c *CompositeStore) recordAnswerTx(ctx context.Context, in *store.RecordAns
 	}
 	responseID, _ := parseUUID(in.ResponseMessage.ID)
 	now := time.Now().UTC()
-	outcome := in.Outcome
-	if outcome == "" {
-		outcome = store.DecisionOutcomeAnswer
-	}
 	cr := client.DecisionAnswer.Create().
 		SetDecisionRowID(rowID).
 		SetProjectID(row.ProjectID).
@@ -699,16 +745,57 @@ func (c *CompositeStore) recordAnswerTx(ctx context.Context, in *store.RecordAns
 	}
 	// Only the pending-to-decided transition sets decided_at; a later
 	// answer (a direct one after an interpreted one) leaves it.
+	// It must change exactly the row read above: none changed means a
+	// concurrent repost replaced the version, and the whole answer rolls
+	// back.
 	if row.Status == decision.StatusPending {
-		if _, err := client.Decision.Update().
+		n, err := client.Decision.Update().
 			Where(decision.ID(rowID), decision.StatusEQ(decision.StatusPending)).
 			SetStatus(decision.StatusDecided).
 			SetDecidedAt(now).
-			Save(ctx); err != nil {
+			Save(ctx)
+		if err != nil {
 			return nil, false, mapError(err)
+		}
+		if n != 1 {
+			return nil, false, fmt.Errorf("%w: version %d of %s was replaced concurrently", store.ErrDecisionReplaced, row.Version, row.Key)
 		}
 	}
 	return answerToStore(saved), false, nil
+}
+
+// checkAnswerPreconditions enforces in the store what the answer endpoint
+// checks before it calls RecordAnswer, so no caller can skip it: one
+// answer per provenance; a direct answer over an agent_interpreted one
+// comes only from the user it records, as a confirm (same choice) or an
+// override (another choice); every other answer is outcome answer.
+func checkAnswerPreconditions(row *ent.Decision, existing []*ent.DecisionAnswer, in *store.RecordAnswerInput, outcome string) error {
+	var interpreted *ent.DecisionAnswer
+	for _, a := range existing {
+		if string(a.Provenance) == in.Provenance {
+			return fmt.Errorf("%w: version %d of %s already has a %s answer", store.ErrDecisionAnswerConflict, row.Version, row.Key, in.Provenance)
+		}
+		if a.Provenance == decisionanswer.ProvenanceAgentInterpreted {
+			interpreted = a
+		}
+	}
+	if in.Provenance != store.DecisionProvenanceDirect || interpreted == nil {
+		if outcome != store.DecisionOutcomeAnswer {
+			return fmt.Errorf("%w: outcome %s needs an agent_interpreted answer to confirm or override", store.ErrInvalidInput, outcome)
+		}
+		return nil
+	}
+	if interpreted.AnsweredByUserID == nil || *interpreted.AnsweredByUserID != in.AnsweredByUserID {
+		return fmt.Errorf("%w: version %d of %s", store.ErrNotRecordedAnswerer, row.Version, row.Key)
+	}
+	want := store.DecisionOutcomeConfirm
+	if interpreted.ChoiceID != in.ChoiceID {
+		want = store.DecisionOutcomeOverride
+	}
+	if outcome != want {
+		return fmt.Errorf("%w: an answer over the agent_interpreted one is outcome %s, not %s", store.ErrInvalidInput, want, outcome)
+	}
+	return nil
 }
 
 func decisionToStore(r *ent.Decision) *store.Decision {

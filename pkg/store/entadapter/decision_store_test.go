@@ -344,11 +344,24 @@ func TestCreateChoicePrompt_PendingCap(t *testing.T) {
 }
 
 func TestCreateChoicePrompt_ConcurrentUpdatesGiveConsecutiveVersions(t *testing.T) {
+	testConcurrentUpdates(t, 2)
+}
+
+// TestCreateChoicePrompt_ThreeConcurrentUpdates: the last of n concurrent
+// reposts of one key needs n-1 retries, more than the single retry a
+// two-way race needs.
+func TestCreateChoicePrompt_ThreeConcurrentUpdates(t *testing.T) {
+	testConcurrentUpdates(t, 3)
+}
+
+// testConcurrentUpdates races n --update reposts of one key: each gets
+// its own next version and exactly one version stays active.
+func testConcurrentUpdates(t *testing.T, n int) {
+	t.Helper()
 	f := newDecisionFixture(t)
 	ctx := context.Background()
 	f.create(t, false, yesNo("D1", "v1"))
 
-	const n = 2
 	var wg sync.WaitGroup
 	start := make(chan struct{})
 	results := make([]*store.ChoicePromptResult, n)
@@ -364,13 +377,14 @@ func TestCreateChoicePrompt_ConcurrentUpdatesGiveConsecutiveVersions(t *testing.
 	close(start)
 	wg.Wait()
 
-	var versions []int
+	var versions, want []int
 	for i := 0; i < n; i++ {
 		require.NoError(t, errs[i], "racer %d", i)
 		versions = append(versions, results[i].Decisions[0].Version)
+		want = append(want, i+2)
 	}
 	sort.Ints(versions)
-	assert.Equal(t, []int{2, 3}, versions)
+	assert.Equal(t, want, versions)
 
 	rows, err := f.cs.client.Decision.Query().All(ctx)
 	require.NoError(t, err)
@@ -378,7 +392,7 @@ func TestCreateChoicePrompt_ConcurrentUpdatesGiveConsecutiveVersions(t *testing.
 	for _, r := range rows {
 		if string(r.Status) != store.DecisionStatusReplaced {
 			active++
-			assert.Equal(t, 3, r.Version)
+			assert.Equal(t, n+1, r.Version)
 		}
 	}
 	assert.Equal(t, 1, active, "exactly one version stays active")
@@ -741,4 +755,121 @@ func TestDeleteUser_ClearsAnswerUserKeepsSnapshots(t *testing.T) {
 	assert.Empty(t, d.Answers[0].AnsweredByUserID)
 	assert.Equal(t, "Pat", d.Answers[0].AnsweredByName)
 	assert.Equal(t, "pat@example.com", d.Answers[0].AnsweredByEmail)
+}
+
+// TestDeleteUser_FailedDeleteKeepsAnswerUser: the clearing of the user id
+// on the answers and the user delete are one transaction, so a delete
+// that fails (here: no such user) leaves the answers as they were.
+func TestDeleteUser_FailedDeleteKeepsAnswerUser(t *testing.T) {
+	f := newDecisionFixture(t)
+	ctx := context.Background()
+	userID := uuid.NewString() // no user row: the delete fails
+	res := f.create(t, false, yesNo("D1", "Keep?"))
+	_, _, err := f.cs.RecordAnswer(ctx, f.answer(res.Decisions[0].RowID, "1", userID, ""))
+	require.NoError(t, err)
+
+	err = f.cs.DeleteUser(ctx, userID)
+	require.ErrorIs(t, err, store.ErrNotFound)
+
+	d, err := f.cs.GetDecision(ctx, res.Decisions[0].RowID)
+	require.NoError(t, err)
+	require.Len(t, d.Answers, 1)
+	assert.Equal(t, userID, d.Answers[0].AnsweredByUserID, "the failed delete rolled back the clear")
+}
+
+// interpretedAnswer is an agent_interpreted answer of userID.
+func (f *decisionFixture) interpretedAnswer(rowID, choiceID, userID string) *store.RecordAnswerInput {
+	in := f.answer(rowID, choiceID, userID, "")
+	in.Provenance = store.DecisionProvenanceAgentInterpreted
+	in.InterpretedByAgentID = f.agentID
+	in.SourceMessageID = uuid.NewString()
+	in.Surface = store.DecisionSurfaceSlack
+	return in
+}
+
+// TestRecordAnswer_OutcomeNeedsInterpretedAnswer: confirm and override
+// exist only over an agent_interpreted answer.
+func TestRecordAnswer_OutcomeNeedsInterpretedAnswer(t *testing.T) {
+	f := newDecisionFixture(t)
+	ctx := context.Background()
+	row := f.create(t, false, yesNo("D1", "q")).Decisions[0].RowID
+
+	for _, outcome := range []string{store.DecisionOutcomeConfirm, store.DecisionOutcomeOverride} {
+		in := f.answer(row, "1", "user-1", "")
+		in.Outcome = outcome
+		_, _, err := f.cs.RecordAnswer(ctx, in)
+		assert.ErrorIs(t, err, store.ErrInvalidInput, outcome)
+	}
+	// An interpreted answer is itself outcome answer.
+	interp := f.interpretedAnswer(row, "1", "user-1")
+	interp.Outcome = store.DecisionOutcomeConfirm
+	_, _, err := f.cs.RecordAnswer(ctx, interp)
+	assert.ErrorIs(t, err, store.ErrInvalidInput)
+
+	d, err := f.cs.GetDecision(ctx, row)
+	require.NoError(t, err)
+	assert.Equal(t, store.DecisionStatusPending, d.Status)
+	assert.Empty(t, d.Answers)
+
+	// Positive control: outcome answer is recorded.
+	_, _, err = f.cs.RecordAnswer(ctx, f.answer(row, "1", "user-1", ""))
+	require.NoError(t, err)
+}
+
+// TestRecordAnswer_OverInterpretedOnlyByRecordedAnswerer: the store itself
+// refuses a direct answer over an agent_interpreted one from any other
+// user, with or without a fresh idempotency key, and checks its outcome.
+func TestRecordAnswer_OverInterpretedOnlyByRecordedAnswerer(t *testing.T) {
+	f := newDecisionFixture(t)
+	ctx := context.Background()
+	row := f.create(t, false, yesNo("D1", "q")).Decisions[0].RowID
+	_, _, err := f.cs.RecordAnswer(ctx, f.interpretedAnswer(row, "1", "user-1"))
+	require.NoError(t, err)
+
+	for name, in := range map[string]*store.RecordAnswerInput{
+		"third user, no key":         f.answer(row, "2", "user-3", ""),
+		"third user, fresh key":      f.answer(row, "2", "user-3", "fresh-key"),
+		"third user, as a confirm":   withOutcome(f.answer(row, "1", "user-3", "k2"), store.DecisionOutcomeConfirm),
+		"third user, as an override": withOutcome(f.answer(row, "2", "user-3", ""), store.DecisionOutcomeOverride),
+	} {
+		_, _, err := f.cs.RecordAnswer(ctx, in)
+		assert.ErrorIs(t, err, store.ErrNotRecordedAnswerer, name)
+	}
+	// The recorded answerer, with the wrong outcome.
+	_, _, err = f.cs.RecordAnswer(ctx, f.answer(row, "1", "user-1", ""))
+	assert.ErrorIs(t, err, store.ErrInvalidInput, "outcome answer over an interpreted answer")
+	_, _, err = f.cs.RecordAnswer(ctx, withOutcome(f.answer(row, "2", "user-1", ""), store.DecisionOutcomeConfirm))
+	assert.ErrorIs(t, err, store.ErrInvalidInput, "confirm with another choice")
+
+	d, err := f.cs.GetDecision(ctx, row)
+	require.NoError(t, err)
+	require.Len(t, d.Answers, 1, "no refused answer was stored")
+
+	// Positive control: the recorded answerer confirms.
+	a, _, err := f.cs.RecordAnswer(ctx, withOutcome(f.answer(row, "1", "user-1", ""), store.DecisionOutcomeConfirm))
+	require.NoError(t, err)
+	assert.Equal(t, store.DecisionOutcomeConfirm, a.Outcome)
+}
+
+func withOutcome(in *store.RecordAnswerInput, outcome string) *store.RecordAnswerInput {
+	in.Outcome = outcome
+	return in
+}
+
+func TestGetDecisionRowsByIDs(t *testing.T) {
+	f := newDecisionFixture(t)
+	ctx := context.Background()
+	res := f.create(t, false, yesNo("D1", "a"), yesNo("D2", "b"))
+	a, b := res.Decisions[0].RowID, res.Decisions[1].RowID
+
+	rows, err := f.cs.GetDecisionRowsByIDs(ctx, []string{a, b, "not-a-uuid", uuid.NewString()})
+	require.NoError(t, err)
+	require.Len(t, rows, 2)
+	assert.Equal(t, "D1", rows[a].Key)
+	assert.Equal(t, "D2", rows[b].Key)
+	assert.Empty(t, rows[a].Answers, "rows only")
+
+	none, err := f.cs.GetDecisionRowsByIDs(ctx, nil)
+	require.NoError(t, err)
+	assert.Empty(t, none)
 }

@@ -90,6 +90,10 @@ var (
 	// ErrDecisionAnswerConflict: the version already has an answer of this
 	// provenance, or the idempotency key was used for a different answer.
 	ErrDecisionAnswerConflict = errors.New("decision answer conflict")
+	// ErrNotRecordedAnswerer: a direct answer to a version that has an
+	// agent_interpreted answer, from a user other than the one that answer
+	// records. Only the recorded answerer may confirm or override it.
+	ErrNotRecordedAnswerer = errors.New("not the recorded answerer")
 )
 
 // ExistingDecisionKey describes the active version of a key a prompt tried
@@ -344,7 +348,9 @@ type DecisionStore interface {
 	// (ErrTooManyPendingDecisions), renders the markdown fallback into the
 	// message's Msg, and inserts the message and the decision rows. On any
 	// error nothing is stored. Concurrent reposts of one key serialize on
-	// the (agent, key, version) unique index and the loser retries once.
+	// the (agent, key, version) unique index (and, on Postgres, on the
+	// lock of the key's rows) and a loser retries, a bounded number of
+	// times.
 	// Called inside WithTx it joins that transaction and does not retry.
 	CreateChoicePrompt(ctx context.Context, in *ChoicePromptInput) (*ChoicePromptResult, error)
 
@@ -364,10 +370,22 @@ type DecisionStore interface {
 	// ErrInvalidInput for an unknown choice or malformed input,
 	// ErrDecisionReplaced for a replaced version, and
 	// ErrDecisionAnswerConflict when the version already has an answer of
-	// this provenance or the idempotency key names another answer. A retry
+	// this provenance or the idempotency key names another answer. A direct
+	// answer to a version with an agent_interpreted answer must come from
+	// the user that answer records (else ErrNotRecordedAnswerer) and carry
+	// outcome confirm (same choice) or override (another choice); every
+	// other answer carries outcome answer (else ErrInvalidInput). A retry
 	// with the same idempotency key, choice and answerer returns the
-	// recorded answer with replayed true and stores nothing.
+	// recorded answer with replayed true and stores nothing. On Postgres
+	// the decision row is locked for the transaction, so an answer and a
+	// concurrent repost of the key serialize.
 	RecordAnswer(ctx context.Context, in *RecordAnswerInput) (answer *DecisionAnswer, replayed bool, err error)
+
+	// GetDecisionRowsByIDs returns the given decision versions keyed by
+	// row ID, without their answers, in one query (history pages read the
+	// versions that replaced theirs and the prompts their responses
+	// answer). Unknown and malformed IDs are absent.
+	GetDecisionRowsByIDs(ctx context.Context, rowIDs []string) (map[string]*Decision, error)
 
 	// GetDecisionAnswersByResponseMessageIDs returns the answer recorded
 	// with each of the given choice-response messages, keyed by message

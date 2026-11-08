@@ -553,6 +553,17 @@ func (c *CompositeStore) DeleteProject(ctx context.Context, id string) error {
 	return c.ProjectStore.DeleteProject(ctx, id)
 }
 
+// DeleteUser removes a user, in one transaction with the clearing of the
+// user id on the user's choice answers (UserStore.DeleteUser does both):
+// a failed delete leaves the answers as they were. Called inside WithTx it
+// joins that transaction.
+func (c *CompositeStore) DeleteUser(ctx context.Context, id string) error {
+	if !c.inTx {
+		return c.WithTx(ctx, func(tx store.Store) error { return tx.DeleteUser(ctx, id) })
+	}
+	return c.UserStore.DeleteUser(ctx, id)
+}
+
 // purgeDeletedAgentsBatchSize caps how many agent IDs a single purge
 // statement's IN(...) clause covers, so a large purge-eligible set is
 // processed in bounded chunks rather than one unbounded IN(...) list. A var,
