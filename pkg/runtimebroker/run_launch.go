@@ -28,6 +28,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
 // gateAction classifies a claim/checkpoint/keepalive answer (design
@@ -453,7 +454,7 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 		// superseding start that removed the pod must never be reported as
 		// pod_disrupted (each cancels ctx' before deleting anything, and
 		// the Hub's own answer arrives as an abort).
-		code, step, message := classifyStartError(ctx, sr.err, lc.opts.TemplateName, sender.LastStep())
+		code, step, message := classifyStartError(ctx, sr.err, lc.opts.TemplateName, sender.LastStep(), rec.Kind)
 		// message is fixed text for the client (ptone/scion#3113); the
 		// full error reaches only the broker's own log.
 		// A skill failure anywhere in the error chain has its full text
@@ -512,13 +513,25 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 
 			HarnessConfigSource: sr.info.HarnessConfigSource,
 			WorkspacePlacement:  sr.info.WorkspacePlacement,
+
+			TemplateHash:          sr.info.TemplateHash,
+			Harness:               sr.info.Harness,
+			Model:                 sr.info.Model,
+			HarnessConfigRevision: sr.info.HarnessConfigRevision,
+			BrokerBuild:           effectiveBrokerBuild(*sr.info),
 		}
 	}
 	// Journalled before it is sent (design wave 3 §1 C-a write 3): a
 	// restarted broker resends it unchanged and never turns it into a
 	// failure.
-	rec.journal.terminal(journalTerminal{Succeeded: true, AgentInfo: info})
-	result, err := sender.SendTerminal(terminalCtx, true, "", "", "", "", info)
+	// The start's notice (for example the repository git config keys left
+	// out of the agent's private copy) becomes the agent's status message.
+	notice := ""
+	if sr.info != nil {
+		notice = sr.info.StartNotice
+	}
+	rec.journal.terminal(journalTerminal{Succeeded: true, Message: notice, AgentInfo: info})
+	result, err := sender.SendTerminal(terminalCtx, true, "", "", notice, "", info)
 	if err != nil {
 		// No definitive answer by the TTL: no cleanup (same rule as a
 		// failed report, design §3.8.2 step 7); the journal record is kept so
@@ -937,6 +950,7 @@ var launchFailureText = map[string]string{
 	api.LaunchCodeContainerConfig:     "the agent container could not be configured",
 	api.LaunchCodeCrashLoop:           "the agent container keeps crashing on start",
 	api.LaunchCodeInitContainerFailed: "an init container of the agent pod failed",
+	api.LaunchCodeVolumeMountFailed:   "an agent volume could not be mounted",
 	api.LaunchCodeUnschedulable:       "the agent pod cannot be scheduled",
 	api.LaunchCodePodDisrupted:        "the agent pod was preempted, evicted or deleted while starting",
 	api.LaunchCodeLaunchTimeout:       "launch timed out waiting for the agent pod to be ready",
@@ -962,13 +976,17 @@ func launchReasonEnum(reason string) string {
 
 // classifyStartError maps a Manager.Start failure to a launch error code,
 // the step the launch failed in, and the report text (design §3.9; wave 3
-// §3 E-d). lastStep is the latest step the launch reached
+// §3 E-d). kind is the launch's kind (store.LaunchKindCreate or
+// store.LaunchKindStart): the fixed texts that name the operation say
+// "create agent" for a create and "start agent" for a start, as the
+// synchronous create and start do (wave 3 E-AC6). lastStep is the latest step the launch reached
 // (launchSender.LastStep); the step is a typed failure's own step, else
 // lastStep, else launching. ctx having already expired (DeadlineExceeded)
 // takes precedence: that is ctx', so it means the launch ran out of its
 // budget, which is launch_timeout regardless of the error Start happened to
 // return when it unwound.
-func classifyStartError(ctx context.Context, err error, templateSlug, lastStep string) (code, step, message string) {
+func classifyStartError(ctx context.Context, err error, templateSlug, lastStep, kind string) (code, step, message string) {
+	op := launchOp(kind)
 	step = lastStep
 	if step == "" {
 		step = api.LaunchStepLaunching
@@ -980,7 +998,7 @@ func classifyStartError(ctx context.Context, err error, templateSlug, lastStep s
 		}
 		return api.LaunchCodeLaunchTimeout, step, "launch timed out before the agent started"
 	}
-	code, message = classifyStartErrorCode(err, templateSlug)
+	code, message = classifyStartErrorCode(err, templateSlug, op)
 	if code != "" {
 		return code, step, message
 	}
@@ -1002,17 +1020,33 @@ func classifyStartError(ctx context.Context, err error, templateSlug, lastStep s
 			return lf.Code, step, text
 		}
 	}
-	// The same fixed text the synchronous create returns for a
+	// The same fixed text the synchronous create or start returns for a
 	// Manager.Start failure (runtimeOpError): the raw error routinely
 	// embeds a container ID, pod name, namespace, image reference or file
 	// path. The full error is logged by runLaunch.
-	return api.LaunchCodeRuntimeError, step, runtimeOpError(opCreateAgent, err).Error()
+	return api.LaunchCodeRuntimeError, step, runtimeOpError(op, err).Error()
 }
+
+// launchOp is the runtimeOpError op naming a launch of kind: "create
+// agent" for a create, "start agent" for a start (a restart's start leg
+// is launched as a start), matching the synchronous create and start
+// handlers' fixed texts.
+func launchOp(kind string) string {
+	if kind == store.LaunchKindCreate {
+		return opCreateAgent
+	}
+	return opStartAgent
+}
+
+// projectPathNotInitializedLaunchText is the launch report's fixed text for
+// agent.ErrProjectPathNotInitialized (no host path).
+const projectPathNotInitializedLaunchText = "the project path on the Runtime Broker is not initialized as a project (no .scion directory or marker inside it); a project or broker admin must create a .scion directory inside the project path (not a symlink to another location) and retry"
 
 // classifyStartErrorCode is classifyStartError's cases that do not depend on
 // the launch step or a runtime-typed failure. It returns "" when none
-// matches.
-func classifyStartErrorCode(err error, templateSlug string) (code, message string) {
+// matches. op names the operation in the template-not-found text (see
+// launchOp).
+func classifyStartErrorCode(err error, templateSlug, op string) (code, message string) {
 	if d, ok := harnessPolicyRefusalFrom(err); ok {
 		return LaunchErrCodeHarnessConfigPolicy, d.Message
 	}
@@ -1021,6 +1055,21 @@ func classifyStartErrorCode(err error, templateSlug string) (code, message strin
 	}
 	if se, ok := storageMigrationRequiredFrom(err); ok {
 		return ErrCodeStorageMigrationRequired, se.PublicMessage()
+	}
+	if text, ok := util.StartRefusalText(err); ok {
+		// The repository's git config sets keys agents may not be given.
+		// The refusal's own text names every refused key and its remedy,
+		// never a value or a host path; what wraps it can name the agent
+		// directory, so only the refusal is reported.
+		return api.LaunchCodeGitConfigRefused, text
+	}
+	// The runtime refused the resource spec before creating anything
+	// (ptone/scion#7103): container_config, with the public message, which
+	// names only the fields, the caller's values and the platform rule.
+	// This and the git config refusal above match disjoint error types, so
+	// their order does not change behaviour.
+	if re, ok := resourceLimitsErrorFrom(err); ok {
+		return api.LaunchCodeContainerConfig, re.PublicMessage()
 	}
 	var skillErr *agent.SkillResolutionError
 	switch {
@@ -1041,14 +1090,19 @@ func classifyStartErrorCode(err error, templateSlug string) (code, message strin
 		// full error (see skillResolutionPublicText).
 		return ErrCodeSkillResolution, skillResolutionPublicText(skillErr, "")
 	case errors.Is(err, config.ErrTemplateNotFound), errors.Is(err, config.ErrHarnessConfigNotFound):
-		// The same text the synchronous create gives: it names the
+		// The same text the synchronous create (or start) gives: it names the
 		// template or harness-config (the ptone/scion#1316 404 contract)
 		// but not err's own text, which can name broker filesystem paths
 		// or a content hash (ptone/scion#3113; see notFoundResourceText).
 		// The full error is logged by runLaunch.
-		return api.LaunchCodeTemplateNotFound, notFoundMessage(opCreateAgent, err, templateSlug)
+		return api.LaunchCodeTemplateNotFound, notFoundMessage(op, err, templateSlug)
 	case errors.Is(err, config.ErrAgentStateDirUnavailable):
 		return LaunchErrCodeAgentStateUnavailable, err.Error()
+	case errors.Is(err, agent.ErrProjectPathNotInitialized):
+		// Before the generic agent-state conflict it also unwraps to. The
+		// launch report is stored by the hub and shown to clients, so it
+		// carries a fixed text, never the host path.
+		return ErrCodeProjectPathNotInitialized, projectPathNotInitializedLaunchText
 	case errors.Is(err, config.ErrAgentStateConflict):
 		return LaunchErrCodeAgentStateConflict, err.Error()
 	case errors.Is(err, agent.ErrProjectShareNotMounted):

@@ -26,6 +26,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 )
@@ -129,7 +130,7 @@ func resolveProjectSkillsClient(ctx context.Context, projectArg string) (hubclie
 	}
 	var projectID string
 	if projectArg != "" {
-		project, err := resolveProjectByNameOrID(ctx, hubCtx.Client, projectArg)
+		project, err := resolveProjectByNameOrID(ctx, hubCtx.Client, projectArg, hubsync.UsesUserAccessToken(hubCtx.CredentialKind))
 		if err != nil {
 			return nil, fmt.Errorf("could not resolve project %q: %w", projectArg, err)
 		}
@@ -401,7 +402,7 @@ func runProjectSkillsFromDirectory(cmd *cobra.Command, projectArg, dirURL string
 
 	var projectID string
 	if projectArg != "" {
-		proj, err := resolveProjectByNameOrID(discoverCtx, hubCtx.Client, projectArg)
+		proj, err := resolveProjectByNameOrID(discoverCtx, hubCtx.Client, projectArg, hubsync.UsesUserAccessToken(hubCtx.CredentialKind))
 		if err != nil {
 			return fmt.Errorf("could not resolve project %q: %w", projectArg, err)
 		}

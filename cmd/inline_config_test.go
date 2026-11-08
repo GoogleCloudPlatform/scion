@@ -70,8 +70,8 @@ env:
 	if cfg.Branch != "review-branch" {
 		t.Errorf("expected Branch='review-branch', got %q", cfg.Branch)
 	}
-	if cfg.MaxTurns != 50 {
-		t.Errorf("expected MaxTurns=50, got %d", cfg.MaxTurns)
+	if !api.IntPtrEqual(cfg.MaxTurns, api.IntPtr(50)) {
+		t.Errorf("expected MaxTurns=50, got %s", api.FormatCountLimit(cfg.MaxTurns))
 	}
 	if cfg.MaxDuration != "30m" {
 		t.Errorf("expected MaxDuration='30m', got %q", cfg.MaxDuration)

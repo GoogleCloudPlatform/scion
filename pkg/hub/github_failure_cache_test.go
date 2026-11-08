@@ -430,9 +430,7 @@ func TestResolveGitHubSkill_PublicNotFoundNotServedToInstallation(t *testing.T) 
 		AppID:          1,
 		Status:         store.GitHubInstallationStatusActive,
 	}))
-	id := instID
-	project.GitHubInstallationID = &id
-	require.NoError(t, s.UpdateProject(ctx, project))
+	bindProjectForTest(t, srv, s, project, instID, "acme", "private")
 
 	_, err = srv.resolveGitHubSkill(ctx, uri, project.ID, nil)
 	require.Error(t, err)

@@ -165,9 +165,9 @@ var compressBypassedUntagged = map[string]string{
 	// whose Location header carries the view capability, and the view route
 	// serves the artifact's own files under that capability; neither body
 	// carries a credential.
-	"pending GET /api/v1/artifacts/shared/{token}": "artifact capability route",
-	"exemption /api/v1/artifacts/shared/":          "artifact capability route",
-	"exemption /api/v1/artifacts/view/":            "artifact capability route",
+	"exemption /api/v1/artifacts/shared/": "artifact capability route",
+	"exemption /api/v1/artifacts/view/":   "artifact capability route",
+	"exemption /api/v1/portview/":         "port page view route: streams the agent port's own responses",
 
 	// Agent auth reset: the path ends in agents/{segment} like an agent item.
 	"POST /api/v1/admin/agents/reset-auth-all": "item route",
@@ -328,6 +328,7 @@ func TestCompressBypass_SensitiveResponsesFromCatalog(t *testing.T) {
 		"POST /api/v1/artifacts/{id}/links",
 		"POST /api/v1/artifacts/{id}/versions/{seq}/view",
 		"POST /api/v1/agents/{id}/workspace/sync-from",
+		"POST /api/v1/runtime-brokers/{id}/agents/{agentId}/workspace-download",
 		"POST /api/v1/skills/resolve #ref=skill",
 		"pending POST /api/v1/skills/resolve #ref=registry",
 	} {

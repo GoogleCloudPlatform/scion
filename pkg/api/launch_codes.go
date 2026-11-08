@@ -90,6 +90,13 @@ const (
 	LaunchCodeHarnessConfigUnusable = BrokerErrCodeHarnessConfigUnusable
 	LaunchCodeAgentStateUnavailable = "agent_state_unavailable"
 	LaunchCodeAgentStateConflict    = "agent_state_conflict"
+	// LaunchCodeProjectPathNotInitialized: the project path on the broker
+	// holds no .scion directory or marker (BrokerErrCodeProjectPathNotInitialized).
+	LaunchCodeProjectPathNotInitialized = BrokerErrCodeProjectPathNotInitialized
+	// LaunchCodeGitConfigRefused: the repository's git config sets keys
+	// agents may not be given. The broker's synchronous refusal uses the
+	// same value (BrokerErrCodeGitConfigRefused).
+	LaunchCodeGitConfigRefused = "git_config_refused"
 
 	// LaunchCodeImagePullFailed: the agent image could not be pulled
 	// (Kubernetes ImagePullBackOff or ErrImagePull).
@@ -97,8 +104,10 @@ const (
 	// LaunchCodeInvalidImage: the image reference is not valid
 	// (Kubernetes InvalidImageName).
 	LaunchCodeInvalidImage = "invalid_image"
-	// LaunchCodeContainerConfig: the container could not be configured,
-	// e.g. a missing secret or volume (Kubernetes CreateContainerConfigError).
+	// LaunchCodeContainerConfig: the runtime refused the agent container's
+	// configuration, e.g. a missing secret or volume (Kubernetes
+	// CreateContainerConfigError), or CPU and memory limits outside what
+	// Cloud Run offers (runtime.ResourceLimitsError).
 	LaunchCodeContainerConfig = "container_config"
 	// LaunchCodeCrashLoop: the main container keeps crashing on start
 	// (Kubernetes CrashLoopBackOff).
@@ -106,6 +115,9 @@ const (
 	// LaunchCodeInitContainerFailed: an init container exited non-zero or
 	// could not start.
 	LaunchCodeInitContainerFailed = "init_container_failed"
+	// LaunchCodeVolumeMountFailed: an NFS volume of the agent pod could
+	// not be mounted (Kubernetes FailedMount or FailedAttachVolume).
+	LaunchCodeVolumeMountFailed = "volume_mount_failed"
 	// LaunchCodeUnschedulable: the pod cannot be scheduled and the cluster
 	// will not add capacity for it (not GKE).
 	LaunchCodeUnschedulable = "unschedulable"

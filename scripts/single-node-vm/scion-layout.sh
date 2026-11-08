@@ -51,12 +51,24 @@
 #       keeps notify/disabled, and writes notify when the key is absent.
 #       Run as root, it re-runs itself as the settings file's owner for the
 #       edit, and verifies the result before replacing the file.
+#   scion-layout.sh install-guard ROLLBACK_SCRIPT START_ATTEMPT_SCRIPT
+#       Install ROLLBACK_SCRIPT (scion-hub-rollback.sh, the boot-failure
+#       guard) at <rollback-path> and START_ATTEMPT_SCRIPT
+#       (scion-hub-start-attempt.sh, the start-attempts counter run by the
+#       hub unit's ExecStartPre=-) at <start-attempt-path>, root-owned, mode
+#       0755, creating their directory root-owned 0755. Outside <root> on purpose: a root-owned
+#       file inside the owner's tree could be replaced by the owner, and
+#       root runs this one. A no-op when the installed copy is identical.
 #
 # Environment (defaults are what deploy.sh uses; tests override them):
 #   SCION_INSTALL_ROOT    install root            (default /opt/scion)
 #   SCION_BIN_LINK        CLI symlink path        (default /usr/local/bin/scion)
 #   SCION_INSTALL_OWNER   user:group owning the root (default scion:scion);
 #                         empty skips chown (tests run unprivileged)
+#   SCION_ROLLBACK_PATH   boot-failure guard script path
+#                         (default /usr/local/libexec/scion/scion-hub-rollback.sh)
+#   SCION_START_ATTEMPT_PATH  start-attempts counter script path (default
+#                         /usr/local/libexec/scion/scion-hub-start-attempt.sh)
 #   SCION_LAYOUT_YAML_TO_JSON
 #                         shell command that parses YAML on stdin to JSON,
 #                         used to verify settings edits (default: python3
@@ -67,6 +79,8 @@ set -euo pipefail
 INSTALL_ROOT="${SCION_INSTALL_ROOT:-/opt/scion}"
 BIN_LINK="${SCION_BIN_LINK:-/usr/local/bin/scion}"
 OWNER="${SCION_INSTALL_OWNER-scion:scion}"
+ROLLBACK_PATH="${SCION_ROLLBACK_PATH:-/usr/local/libexec/scion/scion-hub-rollback.sh}"
+START_ATTEMPT_PATH="${SCION_START_ATTEMPT_PATH:-/usr/local/libexec/scion/scion-hub-start-attempt.sh}"
 
 # canonical_abs PATH -- an absolute path in plain form: starts with /, no
 # empty, "." or ".." components, no trailing /. Everything below walks
@@ -82,6 +96,8 @@ log() { echo "scion-layout: $*"; }
 die() { echo "scion-layout: ERROR: $*" >&2; exit 1; }
 
 canonical_abs "$INSTALL_ROOT" || die "SCION_INSTALL_ROOT must be an absolute path without '.', '..', '//' or a trailing '/' (got '$INSTALL_ROOT')"
+canonical_abs "$START_ATTEMPT_PATH" || die "SCION_START_ATTEMPT_PATH must be an absolute path without '.', '..', '//' or a trailing '/' (got '$START_ATTEMPT_PATH')"
+canonical_abs "$ROLLBACK_PATH" || die "SCION_ROLLBACK_PATH must be an absolute path without '.', '..', '//' or a trailing '/' (got '$ROLLBACK_PATH')"
 canonical_abs "$BIN_LINK" || die "SCION_BIN_LINK must be an absolute path without '.', '..', '//' or a trailing '/' (got '$BIN_LINK')"
 
 # valid_tag TAG -- a release tag (nightly-20261023, v0.3.0-preview.4) or a
@@ -272,8 +288,10 @@ make_dirs_down_to() {
 }
 
 # unsafe_parent_die -- refuse with the reason the parent chain is unsafe.
+# UNSAFE_TARGET names what was being set up (default <root>).
 unsafe_parent_die() {
-  die "$UNSAFE_REASON; the directories above $INSTALL_ROOT must be real directories owned by root and not writable by group or others. Refusing to set up $INSTALL_ROOT there."
+  local target="${UNSAFE_TARGET:-$INSTALL_ROOT}"
+  die "$UNSAFE_REASON; the directories above $target must be real directories owned by root and not writable by group or others. Refusing to set up $target there."
 }
 
 # build_and_hand_over VERB -- with <root> a real directory only root can
@@ -417,9 +435,12 @@ stage_release() {
 }
 
 # activate TAG -- make releases/TAG current; the release current pointed at
-# before (if any, and if different) becomes previous.
+# before (if any, and if different) becomes previous. Sets ACTIVATED_FROM
+# to that previous tag when current was switched with a previous release,
+# empty otherwise.
 activate() {
   local tag="$1" target="releases/$1" old=""
+  ACTIVATED_FROM=""
   if [[ -L "$INSTALL_ROOT/current" ]]; then
     old="$(readlink "$INSTALL_ROOT/current")"
   elif [[ -e "$INSTALL_ROOT/current" ]]; then
@@ -431,9 +452,34 @@ activate() {
   fi
   if [[ -n "$old" && -d "$INSTALL_ROOT/$old" ]]; then
     swap_link previous "$old"
+    ACTIVATED_FROM="${old##*/}"
   fi
   swap_link current "$target"
   log "current -> $target${old:+ (previous -> $old)}"
+}
+
+# write_update_state TARGET FROM -- record the switch to TARGET from FROM
+# in <root>/update-state.json for the boot-failure guard
+# (scion-hub-rollback.sh, "Update state"), the same object the hub writes
+# before its own update restart, with runId "deploy.sh". The new binary
+# fills in migrated/previous_safe/verified as it boots. Atomic (a fresh
+# temp file renamed over it, so a planted symlink is replaced, not
+# followed), 0644. Best effort. If the write fails, whatever was there is
+# left in place on purpose. An older valid file normally no longer matches
+# the links, so the guard leaves the hub stopped (fail closed); an absent
+# or unreadable one gives the guard its switch-time fallback. Removing an
+# older file here would force that fallback, which cannot see a
+# destructive migration.
+write_update_state() {
+  local tmp
+  if tmp="$(mktemp "$INSTALL_ROOT/update-state.json.XXXXXX")" \
+     && printf '{"target":"%s","from":"%s","runId":"deploy.sh","verified":false,"migrated":false,"previous_safe":true}\n' "$1" "$2" > "$tmp" \
+     && chmod 0644 "$tmp" && mv -fT "$tmp" "$INSTALL_ROOT/update-state.json"; then
+    log "update-state.json: $2 -> $1"
+    return 0
+  fi
+  [[ -n "${tmp:-}" ]] && rm -f "$tmp"
+  echo "scion-layout: WARNING: could not write $INSTALL_ROOT/update-state.json; the boot-failure guard will not roll this release back automatically unless that file is absent or unreadable and current was switched within the last 30 minutes" >&2
 }
 
 # cmd_as_owner TAG BINARY [TAG BINARY...] -- runs as the owner: create any
@@ -449,12 +495,19 @@ cmd_as_owner() {
       chmod 0755 "$INSTALL_ROOT/$d"
     fi
   done
+  local last=""
   while [[ $# -gt 0 ]]; do
     valid_tag "$1" || die "invalid release tag: '$1'"
     stage_release "$1" "$2"
     activate "$1"
+    last="$1"
     shift 2
   done
+  # Only a real switch with a previous release is a state the guard can
+  # undo; a re-run on the same release keeps the hub's own record.
+  if [[ -n "$ACTIVATED_FROM" ]]; then
+    write_update_state "$last" "$ACTIVATED_FROM"
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -577,6 +630,46 @@ cmd_adopt() {
   stage_inputs "$tag" "$src" "$(adopt_reader)"
   run_as_owner "${STAGED_PAIRS[@]}"
   link_bin
+}
+
+# cmd_install_guard SCRIPT -- install SCRIPT as <rollback-path>, root-owned
+# 0755, in a directory chain only root can change (dir_chain_is_safe): the
+# root oneshot scion-hub-rollback.service runs it. Missing directories are
+# created one at a time (make_dirs_down_to), root-owned 0755. The new copy
+# is written next to the target under a fresh name and renamed over it, so
+# the path always holds either the old or the complete new script.
+cmd_install_guard() {
+  [[ $# -eq 2 ]] || die "usage: install-guard ROLLBACK_SCRIPT START_ATTEMPT_SCRIPT"
+  [[ -f "$1" ]] || die "rollback script not found: $1"
+  [[ -f "$2" ]] || die "start-attempt script not found: $2"
+  install_root_script "$1" "$ROLLBACK_PATH"
+  install_root_script "$2" "$START_ATTEMPT_PATH"
+}
+
+# install_root_script SRC DEST -- install SRC as DEST, owned by the running
+# user (root on the VM), mode 0755, in a directory chain only root can
+# change (created 0755 if missing). A no-op when DEST is already identical.
+install_root_script() {
+  local src="$1" dest="$2" dir tmp
+  UNSAFE_TARGET="$dest"
+  dir="$(dirname "$dest")"
+  dir_chain_is_safe "$(nearest_existing "$dir")" || die "$UNSAFE_REASON; refusing to install $dest"
+  make_dirs_down_to "$dir"
+  dir_chain_is_safe "$dir" || die "$UNSAFE_REASON; refusing to install $dest"
+  refuse_symlink "$dest"
+  if [[ -f "$dest" ]] && cmp -s "$src" "$dest" \
+     && [[ "$(stat -c '%a|%U' -- "$dest")" == "755|$(id -un)" ]]; then
+    log "$dest already installed"
+    return 0
+  fi
+  tmp="$(mktemp "$dest.XXXXXX")"
+  if ! cp -- "$src" "$tmp" || ! cmp -s "$src" "$tmp"; then
+    rm -f "$tmp"
+    die "copy of $src to $dir is incomplete (disk full?); nothing was changed"
+  fi
+  chmod 0755 "$tmp"
+  mv -fT "$tmp" "$dest"
+  log "installed $dest"
 }
 
 # YAML_TO_JSON_PY -- the default settings parser for verify_settings_edit:
@@ -802,7 +895,8 @@ main() {
     __as-owner) cmd_as_owner "$@" ;;
     adopt) cmd_adopt "$@" ;;
     set-maintenance) cmd_set_maintenance "$@" ;;
-    *) die "usage: scion-layout.sh {install TAG BINARY | adopt | set-maintenance SETTINGS_FILE POLICY}" ;;
+    install-guard) cmd_install_guard "$@" ;;
+    *) die "usage: scion-layout.sh {install TAG BINARY | adopt | set-maintenance SETTINGS_FILE POLICY | install-guard ROLLBACK_SCRIPT START_ATTEMPT_SCRIPT}" ;;
   esac
 }
 

@@ -595,6 +595,27 @@ func getHubClient(settings *config.Settings) (hubclient.Client, error) {
 	return c, err
 }
 
+// getHubClientUAT is getHubClient that also reports whether the client
+// sends a user access token (see authSourceIsUserAccessToken).
+func getHubClientUAT(settings *config.Settings) (hubclient.Client, bool, error) {
+	c, source, err := getHubClientWithAuthSource(settings)
+	if err != nil {
+		return nil, false, err
+	}
+	return c, authSourceIsUserAccessToken(source), nil
+}
+
+// authSourceIsUserAccessToken reports whether a client whose credential
+// came from source (a hubAuthSource value) sends a user access token: the
+// SCION_HUB_TOKEN credential holding one. It is the rule of
+// hubsync.UsesUserAccessToken for clients built by getHubClient, which do
+// not report a hubsync.CredentialKind. A user access token sees the project
+// list only with project:list, so an empty project lookup under one most
+// likely means a missing scope (ptone/scion#5294).
+func authSourceIsUserAccessToken(source string) bool {
+	return source == hubAuthSourceEnvHubToken && hubsync.IsUserAccessToken(os.Getenv("SCION_HUB_TOKEN"))
+}
+
 // hubClientForEndpoint returns a client for the hub at endpoint, with the
 // credential getHubClient would choose for that endpoint.
 func hubClientForEndpoint(settings *config.Settings, endpoint string) (hubclient.Client, error) {
@@ -726,9 +747,19 @@ func hubClientAndAuthSourceForEndpoint(settings *config.Settings, endpoint strin
 	util.Debugf("Hub client auth: %s (source: %s)", info.Method, info.Source)
 	util.Debugf("Hub endpoint: %s", config.RedactURL(endpoint))
 
+	// The transport rule (newUserHubClient) applies to every credential.
+	// The one exception is the broker-injected agent token sent to exactly
+	// the broker-injected endpoint inside a hub-managed agent
+	// (hubsync.NewInjectedAgentHubClient checks all of that itself).
+	if source == hubAuthSourceAgentTokenFile || source == hubAuthSourceEnvAuthToken {
+		if c, ok := hubsync.NewInjectedAgentHubClient(endpoint, hubClientTimeout); ok {
+			return c, source, nil
+		}
+	}
+
 	opts = append(opts, hubclient.WithTimeout(hubClientTimeout))
 
-	c, err := hubclient.New(endpoint, opts...)
+	c, err := newUserHubClient(endpoint, opts...)
 	return c, source, err
 }
 
@@ -1560,7 +1591,7 @@ func runHubProjectsInfo(cmd *cobra.Command, args []string) error {
 		outputFormat = "json"
 	}
 
-	projectName, client, err := hubProjectsTarget(args)
+	projectName, client, uat, err := hubProjectsTarget(args)
 	if err != nil {
 		return err
 	}
@@ -1568,7 +1599,7 @@ func runHubProjectsInfo(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	project, err := resolveProjectNameOrID(ctx, client, projectName)
+	project, err := resolveProjectNameOrID(ctx, client, projectName, uat)
 	if err != nil {
 		return err
 	}
@@ -1704,16 +1735,18 @@ func providerCapacityIndicator(p hubclient.ProjectProvider) string {
 // project) and a hub client for 'hub projects info' and 'delete'. With a
 // hub profile the project must be named: no local project is resolved and
 // no local settings are read.
-func hubProjectsTarget(args []string) (string, hubclient.Client, error) {
+func hubProjectsTarget(args []string) (string, hubclient.Client, bool, error) {
 	if hubProfileSelected() {
 		if len(args) == 0 || strings.TrimSpace(args[0]) == "" {
-			return "", nil, errors.New("with a hub profile, name the project on the target hub (its name or id): the current directory's project is not used")
+			return "", nil, false, errors.New("with a hub profile, name the project on the target hub (its name or id): the current directory's project is not used")
 		}
+		// A hub profile mints its own tokens; it never sends a user
+		// access token.
 		client, err := openHubProfileClient()
 		if err != nil {
-			return "", nil, err
+			return "", nil, false, err
 		}
-		return args[0], client, nil
+		return args[0], client, false, nil
 	}
 
 	// Resolve project path to find project settings
@@ -1724,12 +1757,12 @@ func hubProjectsTarget(args []string) (string, hubclient.Client, error) {
 
 	resolvedPath, isGlobal, err := config.ResolveProjectPath(gp)
 	if err != nil {
-		return "", nil, fmt.Errorf("failed to resolve project path: %w", err)
+		return "", nil, false, fmt.Errorf("failed to resolve project path: %w", err)
 	}
 
 	settings, err := config.LoadSettings(resolvedPath)
 	if err != nil {
-		return "", nil, fmt.Errorf("failed to load settings: %w", err)
+		return "", nil, false, fmt.Errorf("failed to load settings: %w", err)
 	}
 
 	// Determine project name from args or current project
@@ -1750,15 +1783,15 @@ func hubProjectsTarget(args []string) (string, hubclient.Client, error) {
 		}
 	}
 
-	client, err := getHubClient(settings)
+	client, uat, err := getHubClientUAT(settings)
 	if err != nil {
-		return "", nil, err
+		return "", nil, false, err
 	}
-	return projectName, client, nil
+	return projectName, client, uat, nil
 }
 
 func runHubProjectsDelete(cmd *cobra.Command, args []string) error {
-	projectName, client, err := hubProjectsTarget(args)
+	projectName, client, uat, err := hubProjectsTarget(args)
 	if err != nil {
 		return err
 	}
@@ -1767,7 +1800,7 @@ func runHubProjectsDelete(cmd *cobra.Command, args []string) error {
 	defer cancel()
 
 	// Find the project by name or ID, exactly as `hub projects info` does.
-	project, err := resolveProjectNameOrID(ctx, client, projectName)
+	project, err := resolveProjectNameOrID(ctx, client, projectName, uat)
 	if err != nil {
 		return err
 	}
@@ -2134,8 +2167,11 @@ func parseDefaultBranch(output string) string {
 }
 
 // findProjectByName finds a project by name (case-insensitive) and returns it.
-// Returns an error if not found or multiple matches are found.
-func findProjectByName(ctx context.Context, client hubclient.Client, name string) (*hubclient.Project, error) {
+// Returns an error if not found or multiple matches are found. uat reports
+// that client sends a user access token: then a lookup that finds nothing
+// returns hubsync.ScopedTokenProjectLookupEmptyError, which reads the same
+// whether or not the project exists.
+func findProjectByName(ctx context.Context, client hubclient.Client, name string, uat bool) (*hubclient.Project, error) {
 	resp, err := client.Projects().List(ctx, &hubclient.ListProjectsOptions{
 		Name: name,
 	})
@@ -2144,6 +2180,9 @@ func findProjectByName(ctx context.Context, client hubclient.Client, name string
 	}
 
 	if len(resp.Projects) == 0 {
+		if uat {
+			return nil, hubsync.ScopedTokenProjectLookupEmptyError(name)
+		}
 		return nil, fmt.Errorf("project '%s' not found", name)
 	}
 
@@ -2164,17 +2203,18 @@ func findProjectByName(ctx context.Context, client hubclient.Client, name string
 // the REST API) goes through the shared ID-first resolver, which looks the
 // project up by ID and falls back to an exact slug or case-insensitive name
 // match of the same string (ptone/scion#3772, ptone/scion#3792). Any other
-// value keeps the existing name lookup unchanged.
-func resolveProjectNameOrID(ctx context.Context, client hubclient.Client, arg string) (*hubclient.Project, error) {
+// value keeps the existing name lookup unchanged. uat is as for
+// findProjectByName.
+func resolveProjectNameOrID(ctx context.Context, client hubclient.Client, arg string, uat bool) (*hubclient.Project, error) {
 	// An empty or blank argument is never a valid project; an empty one
 	// would also list every project instead of looking one up.
 	if strings.TrimSpace(arg) == "" {
 		return nil, fmt.Errorf("project name or ID must not be empty")
 	}
 	if isUUIDLike(arg) {
-		return resolveProjectByNameOrID(ctx, client, arg)
+		return resolveProjectByNameOrID(ctx, client, arg, uat)
 	}
-	return findProjectByName(ctx, client, arg)
+	return findProjectByName(ctx, client, arg, uat)
 }
 
 // valueOrDefault returns value if non-empty, otherwise returns the default.
@@ -2613,7 +2653,11 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 	// Read this project's own settings in isolation (without global merge) to
 	// determine whether hub.projectId was explicitly set for THIS project, rather
 	// than inherited from global settings via the koanf merge chain.
-	localSettings, _ := config.LoadSettingsFromDir(resolvedPath)
+	loadOwn := config.LoadProjectSettingsFromDir
+	if isGlobal {
+		loadOwn = config.LoadSettingsFromDir
+	}
+	localSettings, _ := loadOwn(resolvedPath)
 	localHubProjectID := ""
 	if localSettings != nil {
 		localHubProjectID = localSettings.GetHubProjectID()

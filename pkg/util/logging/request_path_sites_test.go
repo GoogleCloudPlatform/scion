@@ -21,9 +21,12 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/hack/areadirs"
 )
 
 // Request path uses in the hub, the artifact service and this package are
@@ -58,7 +61,8 @@ var requestPathSites = []requestPathSite{
 	{"service.go", "Service.ServeHTTP", "URL.EscapedPath", 1, "routing: the artifact service splits the escaped path into route segments"},
 	{"auditlog.go", "routeTemplate", "URL.EscapedPath", 1, "classification only: maps the path to a constant route template for the artifact decision log; no path segment is logged"},
 	{"read.go", "serveFileTTL", "URL(bare)", 1, "not a request URL: the signed object-store URL a file read redirects to"},
-	{"handlers_projects_core.go", "Server.provisionSharedWorkspace", "URL(bare)", 1, "not a request URL: the project's git clone URL, checked before the clone on the hub host"},
+	{"handlers_workspace_download.go", "Server.handleWorkspaceDownload", "URL(bare)", 1, "SENSITIVE, not a request URL: the signed object-store GET URL (a bearer capability) each workspace download page returns to the broker; it must never be logged, and the no-log-call rule above still applies to it"},
+	{"handlers_projects_core.go", "Server.provisionSharedWorkspace", "URL(bare)", 2, "not a request URL: the project's git clone URL, checked before the clone on the hub host (the clone-URL check and the ssh-without-project-secret check; both return URL-free errors)"},
 	{"admin_allow_list.go", "Server.handleAdminAllowListByEmail", "URL.Path", 1, "routing: extracts ids and sub-routes"},
 	{"admin_invites.go", "Server.handleAdminInviteByID", "URL.Path", 1, "routing: extracts ids and sub-routes"},
 	{"admin_maintenance.go", "Server.handleAdminMaintenanceMigrations", "URL.Path", 1, "routing: extracts ids and sub-routes"},
@@ -87,6 +91,7 @@ var requestPathSites = []requestPathSite{
 	{"conduit_relay_admit.go", "Server.hubAdmit", "URL(bare)", 1, "not the served request: the forwarded handshake request (fixed path /api/v1/conduit) a relay admission runs through the middleware chain"},
 	{"conduit_relay_admit.go", "relayServesHost", "URL(bare)", 1, "comparison: a URL built from the dialer's Host for hostname and port matching; not logged"},
 	{"devauth.go", "DevAuthMiddlewareWithDebug", "URL.Path", 2, "comparison: health endpoint checks"},
+	{"dispatch_workspace.go", "checkDispatchCloneURLs", "URL(bare)", 4, "clone URL read only for the host-side clone-URL refusal check (CheckHostCloneURL), which returns a URL-free sentinel; never logged, never embedded in a returned error, never delivered."},
 	{"download_signing.go", "Server.signSkillFileDownloadURLs", "URL(bare)", 3, "not a request URL: a signed storage URL field"},
 	{"download_signing.go", "isSignedSkillFileRequest", "URL.Path", 3, "comparison: shape check of a signed skill file read"},
 	{"federation_visitor_messaging.go", "matchVisitorAgentSubRoute", "URL.EscapedPath", 1, "routing: resolves the agent sub-route a visitor may use from the percent-encoded path; compared only, never logged"},
@@ -105,6 +110,7 @@ var requestPathSites = []requestPathSite{
 	{"handlers_chat_v2.go", "Server.handleChatTopicRoutes", "URL.Path", 1, "routing: extracts ids and sub-routes"},
 	{"handlers_gcp_identity_scoped.go", "Server.handleGCPServiceAccountByID", "URL.Path", 1, "routing: extracts ids and sub-routes"},
 	{"handlers_github_app.go", "parseInstallationIDFromPath", "URL.Path", 1, "routing: extracts the installation id"},
+	{"handlers_github_app.go", "Server.handleGitHubAppInstallationByIDRead", "URL.Path", 1, "routing: selects the association-report sub-route (compared with a constant; not logged or returned)"},
 	{"handlers_groups.go", "Server.handleGroupRoutes", "URL.Path", 1, "routing: extracts ids and sub-routes"},
 	{"handlers_integrations.go", "Server.handleAdminIntegrationByName", "URL.Path", 1, "routing: extracts ids and sub-routes"},
 	{"handlers_principals.go", "Server.handlePrincipalRoutes", "URL.Path", 1, "routing: extracts ids and sub-routes"},
@@ -118,21 +124,30 @@ var requestPathSites = []requestPathSite{
 	{"lifecycle_hook_executor.go", "HTTPExecutor.doHTTPRequest", "URL(bare)", 1, "not a request URL: a lifecycle hook action's configured URL"},
 	{"lifecycle_hook_executor.go", "HTTPExecutor.recordAudit", "URL(bare)", 2, "not a request URL: a lifecycle hook action's configured URL (only its host is recorded)"},
 	{"binary_update.go", "BinaryUpdateExecutor.RunWithBeforeRestart", "URL(bare)", 4, "not a request URL: outbound GitHub release asset download URLs (ReleaseAsset.URL), pinned by CheckAssetURL to the configured repo and tag before they are fetched or logged"},
+	{"plugin_lockstep.go", "BinaryUpdateExecutor.preparePlugins", "URL(bare)", 3, "not a request URL: outbound GitHub release asset download URLs of broker plugin assets (ReleaseAsset.URL), public GitHub release-asset URLs checked by CheckAssetURL against the configured repo and tag before they are fetched; they appear in the update run log and may appear in a returned pin-check or download error, but they are never a hub request path"},
+	{"plugin_lockstep.go", "BinaryUpdateExecutor.fetchReleaseSums", "URL(bare)", 2, "not a request URL: the outbound SHA256SUMS asset download URL (ReleaseAsset.URL) fetched for the downgrade risk list, a public GitHub release-asset URL checked by CheckAssetURL against the configured repo and tag before it is fetched; pin-check and fetch errors are discarded (the risk list then omits the per-line risks), so it is never logged and never a hub request path"},
 	{"releases.go", "GitHubReleases.FetchChecksums", "URL(bare)", 2, "not a request URL: the outbound SHA256SUMS asset download URL (ReleaseAsset.URL) of the release catalog, a public GitHub release-asset URL checked by CheckAssetURL against the configured repo and tag before it is fetched; it may appear in a logged fetch or pin-check error, but it is never a hub request path"},
 	{"perftrace_middleware.go", "perfHeadersAllowed", "URL.Path", 1, "comparison: decides whether timing headers may be added"},
-	{"proxy_write_guard.go", "Server.proxyModeWriteGuard", "URL.Path", 1, "comparison: matches the capability-only page-view prefix; not logged"},
-	{"proxy_write_guard.go", "acceptableWriteBody", "URL.Path", 2, "comparison: matches the upload and policy report routes; not logged"},
-	{"proxy_write_guard.go", "isStateChangingAPIRequest", "URL.Path", 1, "comparison: checks the /api/v1/ prefix; not logged"},
+	{"port_view.go", "Server.handlePortView", "URL.EscapedPath", 1, "routing: cuts the escaped sub-path for the redirect to the port link; never logged"},
+	{"port_view.go", "Server.handlePortView", "URL.Path", 1, "routing: cuts the page link and the sub-path forwarded to the agent port; never logged"},
+	{"port_view.go", "Server.portViewRedirect", "URL.EscapedPath", 2, "routing: builds the relative Location of the page link from the port link's escaped path; never logged"},
+	{"port_view.go", "isPortViewRequest", "URL.EscapedPath", 1, "comparison: checks the shape of a credential-less page view request on both path forms"},
+	{"port_view.go", "isPortViewRequest", "URL.Path", 1, "comparison: checks the shape of a credential-less page view request on both path forms"},
+	{"port_view.go", "redirectToPortLink", "URL.EscapedPath", 1, "routing: builds the relative Location of the port link; never logged"},
+	{"proxy_write_guard.go", "acceptableWriteBody", "URL.Path", 2, "comparison: matches the upload and policy report routes for the accepted body types; never logged"},
+	{"proxy_write_guard.go", "isStateChangingAPIRequest", "URL.Path", 1, "comparison: limits the proxy-mode request checks to /api/v1 routes; never logged"},
 	{"pty_handlers.go", "Server.handleAgentPTY", "URL.Path", 1, "routing: extracts the agent id"},
 	{"redact.go", "IsCredentialURL", "URL(bare)", 1, "the redaction predicate"},
 	{"redact.go", "RedactURL", "URL(bare)", 1, "the redaction helper"},
-	{"redact.go", "RequestPath", "URL(bare)", 3, "the redaction helper"},
+	{"redact.go", "RequestPath", "URL(bare)", 2, "the redaction helper"},
 	{"redact.go", "RequestPath", "URL.Path", 1, "the redaction helper itself"},
 	{"redact.go", "isArtifactURL", "URL(bare)", 1, "the redaction predicate"},
+	{"redact.go", "redactedPath", "URL(bare)", 1, "the redaction predicate"},
 	{"redact.go", "isDeliveryURL", "URL(bare)", 1, "the redaction predicate"},
 	{"request_log.go", "RequestLogMiddleware", "URL(bare)", 1, "redaction: passes r.URL to RedactURL"},
 	{"request_log.go", "RequestLogMiddleware", "URL.Path", 1, "classification only: extracts project/agent ids for log fields (ids, not the path)"},
 	{"server.go", "Server.registerRoutes", "URL.Path", 2, "routing: dispatch inside registered handlers"},
+	{"server.go", "Server.corsMiddleware", "URL.Path", 1, "comparison: leaves the page view route's CORS to its handler"},
 	{"server.go", "extractAction", "URL.Path", 1, "routing: extracts id and action"},
 	{"server.go", "extractID", "URL.Path", 1, "routing: extracts an id"},
 	{"server.go", "traceableRequest", "URL(bare)", 1, "redaction: passes r.URL to IsCredentialURL"},
@@ -550,11 +565,44 @@ func goFiles(t *testing.T, dirs ...string) []string {
 	return out
 }
 
+// requestPathScanDirs returns the directories TestRequestPathSites scans
+// under pkgDir (the module's pkg directory): pkg/hub, each pkg/hub area
+// directory listed in hack/area-dirs.txt (entries), and pkg/artifacts. A
+// move that lists its directory there is scanned here without a change to
+// this file (ptone/scion#4275).
+func requestPathScanDirs(pkgDir string, entries []areadirs.Entry) []string {
+	dirs := []string{filepath.Join(pkgDir, "hub")}
+	for _, e := range entries {
+		dirs = append(dirs, filepath.Join(pkgDir, "hub", filepath.FromSlash(e.Dir)))
+	}
+	return append(dirs, filepath.Join(pkgDir, "artifacts"))
+}
+
+// loadAreaDirs reads hack/area-dirs.txt from the module root, three levels
+// above this package.
+func loadAreaDirs(t *testing.T) []areadirs.Entry {
+	t.Helper()
+	entries, err := areadirs.Load(filepath.Join("..", "..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return entries
+}
+
+// requestPathSitesDirs returns every directory TestRequestPathSites scans:
+// this package, then requestPathScanDirs over the module's pkg directory and
+// the hack/area-dirs.txt entries. TestRequestPathSites scans exactly this
+// list, and TestRequestPathSitesCoversAreaDirs checks it.
+func requestPathSitesDirs(t *testing.T) []string {
+	t.Helper()
+	return append([]string{"."}, requestPathScanDirs(filepath.Join("..", ".."), loadAreaDirs(t))...)
+}
+
 // TestRequestPathSites: every request path use in the hub and this package
 // is classified, and no log call receives a request path except through
 // RequestPath.
 func TestRequestPathSites(t *testing.T) {
-	files := goFiles(t, ".", "../../hub", "../../hub/maintenance", "../../artifacts")
+	files := goFiles(t, requestPathSitesDirs(t)...)
 	if len(files) < 50 {
 		t.Fatalf("scanned only %d files; is the hub package where this test expects it?", len(files))
 	}
@@ -609,6 +657,46 @@ func TestRequestPathSites(t *testing.T) {
 	for k, s := range allowed {
 		if scan.uses[k] == 0 {
 			t.Errorf("stale requestPathSites entry %s %s %s", s.file, s.fn, s.kind)
+		}
+	}
+}
+
+// TestRequestPathSitesCoversAreaDirs: the directories TestRequestPathSites
+// scans (requestPathSitesDirs) include this package, pkg/hub, pkg/artifacts
+// and every hack/area-dirs.txt directory, and a raw request path use planted
+// in each area directory of a temporary tree is reported.
+func TestRequestPathSitesCoversAreaDirs(t *testing.T) {
+	entries := loadAreaDirs(t)
+	dirs := requestPathSitesDirs(t)
+	if !slices.Contains(dirs, ".") {
+		t.Errorf("scanned directories %v do not include this package", dirs)
+	}
+	for _, want := range []string{"hub", "artifacts"} {
+		if !slices.Contains(dirs, filepath.Join("..", "..", filepath.FromSlash(want))) {
+			t.Errorf("scanned directories %v do not include pkg/%s", dirs, want)
+		}
+	}
+	for _, e := range entries {
+		if want := filepath.Join("..", "..", "hub", filepath.FromSlash(e.Dir)); !slices.Contains(dirs, want) {
+			t.Errorf("scanned directories %v do not include %s area %s", dirs, e.Kind, e.Dir)
+		}
+	}
+
+	pkgDir := filepath.Join(t.TempDir(), "pkg")
+	for i, e := range entries {
+		dir := filepath.Join(pkgDir, "hub", filepath.FromSlash(e.Dir))
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		src := fmt.Sprintf("package planted\n\nimport \"net/http\"\n\nfunc zzPlanted%d(r *http.Request) string { return r.URL.Path }\n", i)
+		if err := os.WriteFile(filepath.Join(dir, "zz_planted.go"), []byte(src), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	scan := scanSources(t, goFiles(t, requestPathScanDirs(pkgDir, entries)...))
+	for i, e := range entries {
+		if k := fmt.Sprintf("zz_planted.go\tzzPlanted%d\tURL.Path", i); scan.uses[k] != 1 {
+			t.Errorf("%s %s: planted raw r.URL.Path use not reported (uses %v)", e.Kind, e.Dir, scan.uses)
 		}
 	}
 }

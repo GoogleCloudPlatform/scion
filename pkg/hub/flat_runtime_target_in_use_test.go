@@ -69,7 +69,7 @@ func TestFlatRegistration_RuntimeTargetInUseRefused(t *testing.T) {
 
 // targetHolderHidingStore hides, while armed, the Runtime Broker rows that
 // hold one runtime target ID from ListRuntimeBrokers until the first
-// CreateRuntimeBroker call: the holder looks absent to the registration's
+// create call: the holder looks absent to the registration's
 // checks and appears only once the create has hit the unique index, as when
 // another registration takes the target between the check and the create.
 type targetHolderHidingStore struct {
@@ -102,6 +102,16 @@ func (w *targetHolderHidingStore) CreateRuntimeBroker(ctx context.Context, b *st
 		w.creates.Add(1)
 	}
 	return w.Store.CreateRuntimeBroker(ctx, b)
+}
+
+// CreateRuntimeBrokerClearingCredentials is the create flat registration
+// uses; it is counted and unhides the holder as CreateRuntimeBroker does.
+func (w *targetHolderHidingStore) CreateRuntimeBrokerClearingCredentials(ctx context.Context, b *store.RuntimeBroker) error {
+	if w.fault.Active() {
+		w.created.Store(true)
+		w.creates.Add(1)
+	}
+	return w.Store.CreateRuntimeBrokerClearingCredentials(ctx, b)
 }
 
 // TestFlatRegistration_RuntimeTargetTakenAfterCheckRefused: when the target

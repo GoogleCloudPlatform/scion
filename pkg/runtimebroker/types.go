@@ -23,6 +23,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/version"
 )
 
 // ============================================================================
@@ -125,6 +126,14 @@ type BrokerCapabilities struct {
 	// ClearedFields indicates this broker applies the inline config's
 	// cleared_fields at start (ptone/scion#3906, ptone/scion#4890).
 	ClearedFields bool `json:"clearedFields,omitempty"`
+	// UnlimitedCountLimits indicates this broker honours an explicit
+	// max_turns or max_model_calls of 0 as "no limit" over an inherited one
+	// (ptone/scion#5605).
+	UnlimitedCountLimits bool `json:"unlimitedCountLimits,omitempty"`
+	// ClearedResourceSubfields indicates this broker applies the resources
+	// sub-field entries of cleared_fields (api.ResourceSubPaths) at start
+	// (ptone/scion#5676).
+	ClearedResourceSubfields bool `json:"clearedResourceSubfields,omitempty"`
 	// StartsInFlight indicates the broker reports the agent starts still
 	// running on it in every heartbeat (BrokerHeartbeat.StartsInFlight). Only
 	// then does the hub read a start's absence from that list as "no start
@@ -167,6 +176,15 @@ type HubConnectionInfo struct {
 	IsColocated       bool   `json:"isColocated,omitempty"`
 	HasHeartbeat      bool   `json:"hasHeartbeat"`
 	HasControlChannel bool   `json:"hasControlChannel"`
+	// CommandPath is whether the hub can send commands over this
+	// connection's control channel: healthy, unknown (starting or
+	// reconnecting) or unhealthy (ControlChannelClient.CommandPathState).
+	// Empty when the connection runs no control channel.
+	CommandPath string `json:"commandPath,omitempty"`
+	// TransportRefused reports that the hub's transport policy refused the
+	// last dial of this connection's control channel or conduit (the hub
+	// requires TLS or a proxy it trusts: server.trusted_proxies).
+	TransportRefused bool `json:"transportRefused,omitempty"`
 }
 
 // ============================================================================
@@ -221,6 +239,15 @@ type AgentResponse struct {
 	// the agent's workspace (api.WorkspacePlacementExport or
 	// WorkspacePlacementLocal). Empty when no start resolved it.
 	WorkspacePlacement string `json:"workspacePlacement,omitempty"`
+
+	// The broker's effective configuration of the start (WP1 slice 3
+	// addendum v12 section 5): the template content hash, the harness and
+	// the effective model Start resolved, and the broker build. Older
+	// brokers omit them, and the hub then records nothing.
+	TemplateHash string `json:"templateHash,omitempty"`
+	Harness      string `json:"harness,omitempty"`
+	Model        string `json:"model,omitempty"`
+	BrokerBuild  string `json:"brokerBuild,omitempty"`
 }
 
 // AgentConfig contains agent configuration details.
@@ -263,6 +290,10 @@ type CreateAgentRequest struct {
 	// sets workspaceAbsentAtAdmission). Without the check, a workspace
 	// bootstrap is never treated as finding an existing workspace.
 	workspaceAdmissionChecked bool
+	// workspaceHubConn names the Hub connection the create arrived on
+	// (resolveHubNameForLaunch), which the signed-URL workspace download
+	// asks for its URLs. It is never read from the wire.
+	workspaceHubConn string
 
 	RequestID   string             `json:"requestId,omitempty"`
 	ID          string             `json:"id,omitempty"`   // Hub UUID for status reporting
@@ -344,6 +375,13 @@ type CreateAgentRequest struct {
 	// sent by the hub that uploaded it. When empty the broker falls back to
 	// its own StorageBucket setting (older hubs do not send it).
 	WorkspaceStorageBucket string `json:"workspaceStorageBucket,omitempty"`
+	// WorkspaceDownloadMode selects how a WorkspaceStoragePath upload is
+	// downloaded: empty for the bucket download with this broker's
+	// credentials, api.WorkspaceDownloadModeSignedURLs for the Hub's
+	// signed-URL workspace download (no storage credential, no bucket
+	// listing). Any other value is refused: the broker never falls back to
+	// the bucket download for a mode it does not know.
+	WorkspaceDownloadMode string `json:"workspaceDownloadMode,omitempty"`
 
 	// ProjectSlug is the project slug for hub-managed projects.
 	// When set, the broker creates the workspace at ~/.scion.projects/<slug>/
@@ -674,6 +712,20 @@ type StatsResponse struct {
 // Conversion Functions
 // ============================================================================
 
+// effectiveBrokerBuild is the broker build echoed with info: this
+// broker's version.Short() when the start that produced info resolved the
+// agent's configuration (info.ConfigResolved, set only by agent Start's
+// resolving return paths), else "". A start that found the agent already
+// running, and every list or get entry, carry no brokerBuild and so no
+// effective-only field: the hub records nothing for them (WP1 slice 3
+// addendum v14 section 5).
+func effectiveBrokerBuild(info api.AgentInfo) string {
+	if !info.ConfigResolved {
+		return ""
+	}
+	return version.Short()
+}
+
 // AgentInfoToResponse converts an api.AgentInfo to an AgentResponse.
 func AgentInfoToResponse(info api.AgentInfo) AgentResponse {
 	phase := info.Phase
@@ -726,6 +778,10 @@ func AgentInfoToResponse(info api.AgentInfo) AgentResponse {
 		HarnessConfigRevision: info.HarnessConfigRevision,
 		HarnessConfigSource:   info.HarnessConfigSource,
 		HarnessAuth:           info.HarnessAuth,
+		TemplateHash:          info.TemplateHash,
+		Harness:               info.Harness,
+		Model:                 info.Model,
+		BrokerBuild:           effectiveBrokerBuild(info),
 		Image:                 info.Image,
 		RuntimeType:           info.Runtime,
 		Profile:               info.Profile,

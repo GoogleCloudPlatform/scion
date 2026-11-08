@@ -523,8 +523,8 @@ type ScionConfig struct {
 	// are the transport-agnostic config translated by each harness's
 	// container-side provisioner into native format.
 	MCPServers    map[string]MCPServerConfig `json:"mcp_servers,omitempty" yaml:"mcp_servers,omitempty"`
-	MaxTurns      int                        `json:"max_turns,omitempty" yaml:"max_turns,omitempty"`
-	MaxModelCalls int                        `json:"max_model_calls,omitempty" yaml:"max_model_calls,omitempty"`
+	MaxTurns      *int                       `json:"max_turns,omitempty" yaml:"max_turns,omitempty"`             // nil inherits, 0 is no limit (limits.go)
+	MaxModelCalls *int                       `json:"max_model_calls,omitempty" yaml:"max_model_calls,omitempty"` // nil inherits, 0 is no limit (limits.go)
 	MaxDuration   string                     `json:"max_duration,omitempty" yaml:"max_duration,omitempty"`
 	Hub           *AgentHubConfig            `json:"hub,omitempty" yaml:"hub,omitempty"`
 	Telemetry     *TelemetryConfig           `json:"telemetry,omitempty" yaml:"telemetry,omitempty"`
@@ -693,6 +693,17 @@ type AgentInfo struct {
 	// Start always sets it, so empty means an older broker (ptone/scion#620).
 	HarnessConfigSource string `json:"harnessConfigSource,omitempty"`
 	HarnessAuth         string `json:"harnessAuth,omitempty"` // Resolved harness auth method (api-key, oauth-token, auth-file, vertex-ai)
+	// Harness and Model are what Start resolved: the harness name and the
+	// effective model (resolveEffectiveModel), set only by Start. The hub
+	// records them as the run's effective configuration (WP1 slice 3).
+	Harness string `json:"harness,omitempty"`
+	Model   string `json:"model,omitempty"`
+	// ConfigResolved marks an AgentInfo returned by one of Start's return
+	// paths that resolved the agent's configuration (WP1 slice 3 addendum
+	// v14 section 5). Never on the wire: the broker reads it in-process to
+	// decide whether to echo its build. False on the already-running
+	// return and on every listing.
+	ConfigResolved bool `json:"-"`
 
 	// Project association
 	Project string `json:"project"` // Project name (standard field)
@@ -752,6 +763,11 @@ type AgentInfo struct {
 	// metadata mode that is not enforced under the agent's network mode. They
 	// are also included in Warnings.
 	RelayedWarnings []string `json:"relayedWarnings,omitempty"`
+	// StartNotice is a fact about this start for the agent's status
+	// message, for example the repository git config keys left out of the
+	// agent's private copy. The broker reports it with a successful launch.
+	// It is also in Warnings and RelayedWarnings.
+	StartNotice string `json:"startNotice,omitempty"`
 
 	// ExplicitImage and ExplicitImagePullPolicy record the image /
 	// kubernetes.imagePullPolicy that the INLINE config (--config), not a
@@ -962,7 +978,23 @@ type GitCloneConfig struct {
 	URL    string `json:"url"`              // HTTPS clone URL (without credentials)
 	Branch string `json:"branch,omitempty"` // Branch to clone (default: main)
 	Depth  *int   `json:"depth,omitempty"`  // Clone depth (nil/omitted = shallow depth 1, 0 = full clone, >0 = that depth)
+
+	// TokenRemote is the project's recorded git remote (the hub's
+	// project.GitRemote, host/owner/repo), set by the hub on every dispatch
+	// from the project record, never from the clone URL or a label. The
+	// project's git token is offered to the clone only when URL is https and
+	// names this remote's host and owner/repo (provision.CloneTokenAllowed);
+	// when it is empty no token is offered. Brokers and runtimes relay it
+	// unchanged: to the agent container and to the Kubernetes provisioning
+	// init container as EnvGitTokenRemote.
+	TokenRemote string `json:"tokenRemote,omitempty"`
 }
+
+// EnvGitTokenRemote is the container environment variable that carries
+// GitCloneConfig.TokenRemote to sciontool (init's in-container clone and the
+// provision init container's clone). Without it no git token is offered to
+// the clone.
+const EnvGitTokenRemote = "SCION_GIT_TOKEN_REMOTE"
 
 type gitCloneContextKey struct{}
 
@@ -1041,6 +1073,24 @@ func ContextWithSharedWorkspace(ctx context.Context) context.Context {
 func IsSharedWorkspaceFromContext(ctx context.Context) bool {
 	v, _ := ctx.Value(sharedWorkspaceContextKey{}).(bool)
 	return v
+}
+
+type gitTokenRemoteContextKey struct{}
+
+// ContextWithGitTokenRemote attaches the project's recorded git remote of a
+// shared-plain workspace (StartOptions.SharedWorkspaceClone.TokenRemote, as
+// the hub sent it). Provisioning scopes the agent's git credential helper to
+// this remote's host (provision.TokenRemoteCredentialScope), never to the
+// clone-url label or the workspace's own git config.
+func ContextWithGitTokenRemote(ctx context.Context, remote string) context.Context {
+	return context.WithValue(ctx, gitTokenRemoteContextKey{}, remote)
+}
+
+// GitTokenRemoteFromContext returns the remote ContextWithGitTokenRemote
+// attached, or "" when there is none.
+func GitTokenRemoteFromContext(ctx context.Context) string {
+	s, _ := ctx.Value(gitTokenRemoteContextKey{}).(string)
+	return s
 }
 
 type hubProjectIDContextKey struct{}
@@ -1289,6 +1339,24 @@ type HubAgentDefaults struct {
 	// settings telemetry into the stored config on create, so those
 	// fields rank as agent config here (ptone/scion#4241).
 	Telemetry *TelemetryConfig `json:"telemetry,omitempty"`
+	// ImageTag is the tag the hub's image_tag setting selects for the
+	// bundled scion-* images (ptone/scion#6625), already resolved and
+	// expanded by the hub ("version" becomes the hub's version). The hub
+	// sends it only while hub.image_tag_setting is on and the setting is
+	// set. The broker applies it with config.RewriteImageTag and
+	// config.RewriteImageRef to the image it resolves, before the
+	// image_registry rewrite; an absent value leaves the image unchanged,
+	// which is also what a broker that predates the field does.
+	ImageTag string `json:"imageTag,omitempty"`
+}
+
+// ResolvedImageTag returns the hub-resolved image tag, or "" when the hub
+// sent none. Safe on a nil receiver.
+func (d *HubAgentDefaults) ResolvedImageTag() string {
+	if d == nil {
+		return ""
+	}
+	return d.ImageTag
 }
 
 // ExperimentEnabled reports whether the hub sent name as enabled.
@@ -1321,7 +1389,7 @@ func (d *HubAgentDefaults) IsEmpty() bool {
 		return true
 	}
 	return d.MaxTurns == 0 && d.MaxModelCalls == 0 && d.MaxDuration == "" && d.Resources == nil &&
-		d.AutoExposePorts == nil && len(d.Experiments) == 0 && d.Telemetry == nil
+		d.AutoExposePorts == nil && len(d.Experiments) == 0 && d.Telemetry == nil && d.ImageTag == ""
 }
 
 // EnvAutoExposePorts is the env key that enables in-container port
@@ -1488,6 +1556,13 @@ type StartOptions struct {
 	// is recomputed on every dispatch.
 	KubernetesBlockIdentity *KubernetesBlockIdentity
 
+	// CloudRunIdentity is set by the broker when the dispatch targets the
+	// Cloud Run runtime and the hub sent the hub.cloudrun_native_identity
+	// experiment: the instance then runs as its ServiceAccount. Nil keeps
+	// the runtime's configured account. It is per dispatch and never
+	// persisted, so it is recomputed on every start.
+	CloudRunIdentity *CloudRunIdentity `json:"-"`
+
 	// ResolvedPlacement is the Kubernetes placement (node selector,
 	// tolerations, runtime class) the agent runtime server resolved for this
 	// start from its settings (ptone/scion#5085), and PlacementResolved
@@ -1543,6 +1618,19 @@ type KubernetesBlockIdentity struct {
 	// ServiceAccountName is the operator-configured block ServiceAccount,
 	// or empty for the namespace's default ServiceAccount.
 	ServiceAccountName string
+}
+
+// CloudRunIdentity is the broker-resolved instance identity for one Cloud Run
+// dispatch. Nil = gate off / not Cloud Run: the runtime uses its configured
+// account. Non-nil with an empty ServiceAccount is invalid and the runtime
+// refuses it (fail closed). See StartOptions.CloudRunIdentity.
+type CloudRunIdentity struct {
+	// ServiceAccount is the account the instance runs as (the assigned
+	// account, or the block account).
+	ServiceAccount string
+	// Mode is the GCP identity mode as resolved, before the metadata env
+	// rewrite: "assign" or "block".
+	Mode string
 }
 
 // ResourceHandle identifies one runtime resource created during a launch
@@ -1611,6 +1699,27 @@ const (
 // hub must not finalize the agent's row: that run is still on the broker
 // (ptone/scion#3080). Without one, the delete's 404 is "not found" as before.
 const BrokerErrorCodeRunMismatch = "run_mismatch"
+
+// Error-detail keys a runtime broker sets on a runtime_unavailable 503 that
+// refuses a dispatch because the Hub's stored profiles cannot resolve its
+// runtime profile (ptone/scion#4955): a requested or saved profile the
+// stored profiles lack, an active_profile that does not resolve, or a
+// stored profile whose runtime is not defined. The Hub writes its own
+// client text for it, naming the profile; the broker's text is not relayed.
+// The wire code stays runtime_unavailable, so every Hub classification of
+// that code is unchanged.
+const (
+	// BrokerErrorDetailReason is the refusal's reason; see
+	// BrokerErrorReasonProfileUnresolved.
+	BrokerErrorDetailReason = "reason"
+	// BrokerErrorDetailProfile is the profile that does not resolve; ""
+	// when the dispatch needed the default profile and active_profile is
+	// unset.
+	BrokerErrorDetailProfile = "profile"
+	// BrokerErrorReasonProfileUnresolved is the BrokerErrorDetailReason
+	// value for a stored-profile miss.
+	BrokerErrorReasonProfileUnresolved = "profile_unresolved"
+)
 
 // ResourceHandle.Kind values.
 const (

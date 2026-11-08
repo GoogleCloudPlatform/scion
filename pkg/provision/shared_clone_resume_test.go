@@ -42,6 +42,7 @@ func initBareRepoWithTree(t *testing.T) string {
 	runIn(t, work, "git", "add", "-A")
 	runIn(t, work, "git", "-c", "user.name=test", "-c", "user.email=test@test.com", "commit", "-m", "tree")
 	runIn(t, work, "git", "push", "origin", "main")
+	AllowLocalCloneFixture(t, bare)
 	return bare
 }
 
@@ -75,8 +76,8 @@ func assertCleanCheckout(t *testing.T, ws string) {
 func TestProvisionShared_SharedPlain_MarkedInterruptedMoveIsFinished(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
 	bare := initBareRepoWithTree(t)
-	ws := t.TempDir()
-	writeMarker(t, ws)
+	ws := newWorkspaceDir(t)
+	markWorkspace(t, ws)
 	interruptedClone(t, ws, bare, "README.md")
 	clones := countGitClones(t)
 
@@ -90,17 +91,17 @@ func TestProvisionShared_SharedPlain_MarkedInterruptedMoveIsFinished(t *testing.
 func TestProvisionShared_SharedPlain_UnmarkedInterruptedMoveIsFinished(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
 	bare := initBareRepoWithTree(t)
-	ws := t.TempDir()
+	ws := newWorkspaceDir(t)
 	interruptedClone(t, ws, bare, "README.md", "src")
 	// Stopped before anything was moved.
-	ws2 := t.TempDir()
+	ws2 := newWorkspaceDir(t)
 	interruptedClone(t, ws2, bare)
 	clones := countGitClones(t)
 
 	require.NoError(t, ProvisionShared(sharedPlainInput(ws, bare)))
 	assert.Equal(t, 0, clones())
 	assertCleanCheckout(t, ws)
-	assert.FileExists(t, filepath.Join(ws, ProvisionSentinelFile))
+	assert.FileExists(t, stateSentinel(ws))
 
 	require.NoError(t, ProvisionShared(sharedPlainInput(ws2, bare)))
 	assert.Equal(t, 0, clones())
@@ -113,9 +114,9 @@ func TestProvisionShared_SharedPlain_InterruptedMoveWithForeignEntryRefused(t *t
 	t.Setenv("SCION_HOST_UID", "")
 	bare := initBareRepoWithTree(t)
 	for _, marked := range []bool{true, false} {
-		ws := t.TempDir()
+		ws := newWorkspaceDir(t)
 		if marked {
-			writeMarker(t, ws)
+			markWorkspace(t, ws)
 		}
 		scratch := interruptedClone(t, ws, bare, "README.md")
 		require.NoError(t, os.WriteFile(filepath.Join(ws, "notes.txt"), []byte("agent"), 0o644))
@@ -130,7 +131,7 @@ func TestProvisionShared_SharedPlain_InterruptedMoveWithForeignEntryRefused(t *t
 		require.NoError(t, rerr)
 		assert.Equal(t, "agent", string(data))
 		if !marked {
-			assert.NoFileExists(t, filepath.Join(ws, ProvisionSentinelFile))
+			assert.NoFileExists(t, stateSentinel(ws))
 		}
 	}
 }
@@ -139,7 +140,7 @@ func TestProvisionShared_SharedPlain_InterruptedMoveWithForeignEntryRefused(t *t
 func TestProvisionShared_SharedPlain_InterruptedMoveMissingEntryRefused(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
 	bare := initBareRepoWithTree(t)
-	ws := t.TempDir()
+	ws := newWorkspaceDir(t)
 	scratch := interruptedClone(t, ws, bare, "README.md")
 	require.NoError(t, os.RemoveAll(filepath.Join(scratch, "src")))
 
@@ -172,9 +173,9 @@ func TestProvisionShared_SharedPlain_WorkspaceWrittenDuringCloneKept(t *testing.
 	t.Setenv("SCION_HOST_UID", "")
 	bare := initBareRepoWithTree(t)
 	for _, marked := range []bool{true, false} {
-		ws := t.TempDir()
+		ws := newWorkspaceDir(t)
 		if marked {
-			writeMarker(t, ws)
+			markWorkspace(t, ws)
 		}
 		gitWritesIntoWorkspace(t, ws, "README.md", "agent edit")
 
@@ -188,7 +189,7 @@ func TestProvisionShared_SharedPlain_WorkspaceWrittenDuringCloneKept(t *testing.
 		assert.NoDirExists(t, filepath.Join(ws, "src"))
 		assertNoCloneScratch(t, ws)
 		if !marked {
-			assert.NoFileExists(t, filepath.Join(ws, ProvisionSentinelFile))
+			assert.NoFileExists(t, stateSentinel(ws))
 		}
 	}
 }
@@ -299,7 +300,7 @@ func TestRedactCloneURL_Shapes(t *testing.T) {
 func TestGitCloneWorkspace_IncompleteMoveBackKeepsScratch(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
 	bare := initBareRepoWithTree(t)
-	ws := t.TempDir()
+	ws := newWorkspaceDir(t)
 	in := sharedPlainInput(ws, bare)
 
 	origMove, origBack := moveRenameFile, moveBackFile
@@ -319,12 +320,12 @@ func TestGitCloneWorkspace_IncompleteMoveBackKeepsScratch(t *testing.T) {
 	scratch, serr := completedCloneScratch(ws)
 	require.NoError(t, serr)
 	require.NotEmpty(t, scratch, "the scratch dir and its manifest are kept")
-	assert.NoFileExists(t, filepath.Join(ws, ProvisionSentinelFile))
+	assert.NoFileExists(t, stateSentinel(ws))
 
 	moveRenameFile, moveBackFile = origMove, origBack
 	require.NoError(t, ProvisionShared(in))
 	assertCleanCheckout(t, ws)
-	assert.FileExists(t, filepath.Join(ws, ProvisionSentinelFile))
+	assert.FileExists(t, stateSentinel(ws))
 }
 
 // An interrupted clone of another repository or branch is not finished.
@@ -333,7 +334,7 @@ func TestProvisionShared_SharedPlain_InterruptedMoveOfOtherRepoRefused(t *testin
 	bare := initBareRepoWithTree(t)
 	other := initBareRepoWithTree(t)
 
-	ws := t.TempDir()
+	ws := newWorkspaceDir(t)
 	interruptedClone(t, ws, bare, "README.md")
 	err := ProvisionShared(sharedPlainInput(ws, other))
 	require.Error(t, err)
@@ -341,7 +342,7 @@ func TestProvisionShared_SharedPlain_InterruptedMoveOfOtherRepoRefused(t *testin
 	assert.Contains(t, err.Error(), "the project clones "+other+" branch \"main\"")
 	assert.NoDirExists(t, filepath.Join(ws, ".git"))
 
-	ws2 := t.TempDir()
+	ws2 := newWorkspaceDir(t)
 	interruptedClone(t, ws2, bare, "README.md")
 	in := sharedPlainInput(ws2, bare)
 	in.GitClone.Branch = "develop"
@@ -362,9 +363,9 @@ func TestProvisionShared_SharedPlain_FinishedScratchRemoved(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
 	bare := initBareRepoWithTree(t)
 	for _, marked := range []bool{true, false} {
-		ws := t.TempDir()
+		ws := newWorkspaceDir(t)
 		if marked {
-			writeMarker(t, ws)
+			markWorkspace(t, ws)
 		}
 		scratch := interruptedClone(t, ws, bare, "README.md", "src", ".git")
 		clones := countGitClones(t)
@@ -389,7 +390,7 @@ func TestCloneScratchAndIgnorableEntries_SymlinksNotFollowed(t *testing.T) {
 	target := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(target, cloneManifestFile), nil, 0o644))
 
-	ws := t.TempDir()
+	ws := newWorkspaceDir(t)
 	link := filepath.Join(ws, cloneTempDirPrefix+"link")
 	require.NoError(t, os.Symlink(target, link))
 	require.NoError(t, removeCloneTempDirs(ws))
@@ -410,14 +411,14 @@ func TestCloneScratchAndIgnorableEntries_SymlinksNotFollowed(t *testing.T) {
 	assert.Equal(t, []string{cloneTempDirPrefix + "link"}, other)
 
 	for _, name := range []string{".scion-volumes", "worktrees"} {
-		ws := t.TempDir()
+		ws := newWorkspaceDir(t)
 		require.NoError(t, os.Symlink(t.TempDir(), filepath.Join(ws, name)))
 		other, err := nonIgnorableWorkspaceEntries(sharedPlainInput(ws, "file:///repo.git"), ws)
 		require.NoError(t, err)
 		assert.Equal(t, []string{name}, other)
 	}
 
-	ws2 := t.TempDir()
+	ws2 := newWorkspaceDir(t)
 	require.NoError(t, os.MkdirAll(filepath.Join(ws2, ".scion-volumes"), 0o755))
 	require.NoError(t, os.Symlink(t.TempDir(), filepath.Join(ws2, ".scion-volumes", "x")))
 	other, err = nonIgnorableWorkspaceEntries(sharedPlainInput(ws2, "file:///repo.git"), ws2)

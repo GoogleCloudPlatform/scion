@@ -41,6 +41,7 @@ var harnessVendors = map[string]string{
 	"copilot":  "copilot",
 	"hermes":   "hermes",
 	"opencode": "opencode",
+	"pi":       "pi",
 }
 
 // Vendor returns the vendor of the harness named harnessName (see

@@ -22,6 +22,16 @@
  * call tries again.
  */
 
+/**
+ * The detail of a review-change event from <scion-review-editor>: the text,
+ * and whether focus leaving the editor sent it (blur) rather than a pause
+ * in typing.
+ */
+export interface ReviewChangeDetail {
+  text: string;
+  blur: boolean;
+}
+
 /** What the artifact page calls on a <scion-review-editor>. */
 export interface ReviewEditorElement extends HTMLElement {
   flush(): string | null;

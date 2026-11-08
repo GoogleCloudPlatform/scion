@@ -21,7 +21,9 @@ import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 // refresh with "as of" and the stale warning, and when Update is enabled.
 
 import {
+  NO_SNAPSHOTS_REASON,
   channelSourceLabel,
+  rollbackTarget,
   isReleasesResponse,
   pinLabel,
   releaseBadges,
@@ -259,12 +261,33 @@ describe('releaseDisabledReason', () => {
     ...over,
   });
 
-  it.each(['same', 'upgrade', 'switch-newer'])('allows class %s', (cls) => {
-    expect(releaseDisabledReason(r({ class: cls }))).toBeNull();
-  });
+  it.each(['same', 'upgrade', 'switch-newer', 'downgrade', 'switch-older'])(
+    'allows class %s',
+    (cls) => {
+      expect(releaseDisabledReason(r({ class: cls }))).toBeNull();
+      expect(releaseDisabledReason(r({ class: cls }), 'f-1', true)).toBeNull();
+    }
+  );
 
-  it.each(['downgrade', 'switch-older'])('disables older class %s', (cls) => {
-    expect(releaseDisabledReason(r({ class: cls }))).toContain('not supported yet');
+  it.each(['downgrade', 'switch-older'])(
+    'disables older class %s when the hub cannot take snapshots',
+    (cls) => {
+      expect(releaseDisabledReason(r({ class: cls }), 'f-1', false)).toBe(NO_SNAPSHOTS_REASON);
+    }
+  );
+
+  it.each(['same', 'upgrade', 'switch-newer'])(
+    'still allows class %s when the hub cannot take snapshots',
+    (cls) => {
+      expect(releaseDisabledReason(r({ class: cls }), 'f-1', false)).toBeNull();
+    }
+  );
+
+  it('keeps below-floor and not-installable disabled whatever snapshotsSupported says', () => {
+    expect(releaseDisabledReason(r({ class: 'below-floor' }), 'f-1', true)).toContain('floor');
+    expect(releaseDisabledReason(r({ installable: false, class: 'downgrade' }), 'f-1', true)).toBe(
+      'Not installable: the release has no verifiable binary'
+    );
   });
 
   it('disables below-floor with the floor', () => {
@@ -307,6 +330,12 @@ describe('releaseBadges', () => {
     expect(ni[0].tooltip).toBe('no SHA256SUMS');
     const bf = releaseBadges({ tag: 't', installable: true, class: 'below-floor' }, 'f-1');
     expect(bf[0].tooltip).toContain('f-1');
+  });
+
+  it('explains Older: typed confirmation, or no snapshots', () => {
+    const older: CatalogRelease = { tag: 't', installable: true, class: 'downgrade' };
+    expect(releaseBadges(older)[0].tooltip).toContain('typing its tag');
+    expect(releaseBadges(older, 'f-1', false)[0].tooltip).toBe(NO_SNAPSHOTS_REASON);
   });
 });
 
@@ -376,7 +405,7 @@ describe('Release picker', () => {
     expect(badges(option(el, 'nightly-20261008'))).toEqual(['Below floor']);
   });
 
-  it('disables not-installable, below-floor and older entries with the reason', async () => {
+  it('disables not-installable and below-floor entries with the reason, not older ones', async () => {
     el = await mount();
     const ni = option(el, 'nightly-20261020');
     expect(ni.hasAttribute('disabled')).toBe(true);
@@ -388,20 +417,20 @@ describe('Release picker', () => {
     expect(tooltip(bf, 'Below floor')).toBe("Below this hub's downgrade floor (nightly-20261009)");
 
     const older = option(el, 'nightly-20261021');
-    expect(older.hasAttribute('disabled')).toBe(true);
-    expect(older.getAttribute('title')).toContain('not supported yet');
+    expect(older.hasAttribute('disabled')).toBe(false);
+    expect(tooltip(older, 'Older')).toContain('typing its tag');
 
     expect(option(el, 'latest').hasAttribute('disabled')).toBe(false);
     expect(option(el, 'nightly-20261023').hasAttribute('disabled')).toBe(false);
     expect(option(el, 'nightly-20261022').hasAttribute('disabled')).toBe(false);
   });
 
-  it('disables switch-older entries in another channel but not switch-newer', async () => {
+  it('enables switch-older and switch-newer entries in another channel', async () => {
     el = await mount();
     await pick(el, 'channel-select', 'preview');
     expect(option(el, 'latest').textContent?.trim()).toBe('Latest (v0.3.0-preview.4)');
     expect(option(el, 'v0.3.0-preview.4').hasAttribute('disabled')).toBe(false);
-    expect(option(el, 'v0.3.0-preview.1').hasAttribute('disabled')).toBe(true);
+    expect(option(el, 'v0.3.0-preview.1').hasAttribute('disabled')).toBe(false);
     expect(badges(option(el, 'v0.3.0-preview.1'))).toEqual(['Older']);
     expect(option(el, 'v0.3.0-preview.3').hasAttribute('disabled')).toBe(true);
     expect(tooltip(option(el, 'v0.3.0-preview.3'), 'Not installable')).toBe('no SHA256SUMS');
@@ -435,7 +464,7 @@ describe('Release picker', () => {
     expect(select(el, 'channel-select').value).toBe('nightly');
   });
 
-  it('disables Latest when the latest release is older than the running one', async () => {
+  it('does not preselect Latest when the latest release is older than the running one', async () => {
     el = await mount([
       catalog({
         channels: {
@@ -446,10 +475,42 @@ describe('Release picker', () => {
         },
       }),
     ]);
-    expect(option(el, 'latest').hasAttribute('disabled')).toBe(true);
+    expect(option(el, 'latest').hasAttribute('disabled')).toBe(false);
     expect(select(el, 'release-select').value).toBe('');
     expect(updateButton(el).hasAttribute('disabled')).toBe(true);
     expect(blockedText(el)).toBe('Pick a release');
+  });
+
+  it('disables older entries and an older Latest when the hub cannot take snapshots', async () => {
+    el = await mount(
+      [
+        catalog({
+          channels: {
+            nightly: { latest: 'nightly-20261023', releases: NIGHTLY_RELEASES },
+            stable: {
+              latest: 'v0.2.0',
+              releases: [{ tag: 'v0.2.0', installable: true, class: 'switch-older' }],
+            },
+          },
+        }),
+      ],
+      status({ downgrade: { floor: 'nightly-20261009', snapshotsSupported: false } })
+    );
+    const older = option(el, 'nightly-20261021');
+    expect(older.hasAttribute('disabled')).toBe(true);
+    expect(older.getAttribute('title')).toBe(NO_SNAPSHOTS_REASON);
+    expect(tooltip(older, 'Older')).toBe(NO_SNAPSHOTS_REASON);
+    // Newer entries are unaffected.
+    expect(option(el, 'latest').hasAttribute('disabled')).toBe(false);
+    expect(option(el, 'nightly-20261023').hasAttribute('disabled')).toBe(false);
+
+    await pick(el, 'channel-select', 'stable');
+    expect(option(el, 'latest').hasAttribute('disabled')).toBe(true);
+    expect(option(el, 'latest').getAttribute('title')).toBe(NO_SNAPSHOTS_REASON);
+    expect(option(el, 'v0.2.0').hasAttribute('disabled')).toBe(true);
+    await pick(el, 'release-select', 'v0.2.0');
+    expect(updateButton(el).hasAttribute('disabled')).toBe(true);
+    expect(blockedText(el)).toBe(NO_SNAPSHOTS_REASON);
   });
 
   it('a channel with only non-installable releases has no Latest entry', async () => {
@@ -526,6 +587,55 @@ describe('Update button', () => {
         releaseClass: 'switch-newer',
       },
     ]);
+  });
+
+  it('requests a picked downgrade with its class and says it asks for a typed confirmation', async () => {
+    el = await mount();
+    const got = captureRequests(el);
+    await pick(el, 'release-select', 'nightly-20261021');
+    expect(updateButton(el).hasAttribute('disabled')).toBe(false);
+    expect(root(el).querySelector('.older-note')?.textContent).toContain('type the tag');
+    updateButton(el).click();
+    expect(got).toEqual([
+      {
+        target: 'nightly-20261021',
+        channel: 'nightly',
+        pin: 'nightly-20261021',
+        releaseClass: 'downgrade',
+      },
+    ]);
+  });
+
+  it('requests an older Latest in another channel with pin latest', async () => {
+    el = await mount([
+      catalog({
+        channels: {
+          nightly: { latest: 'nightly-20261023', releases: NIGHTLY_RELEASES },
+          stable: {
+            latest: 'v0.2.0',
+            releases: [{ tag: 'v0.2.0', installable: true, class: 'switch-older' }],
+          },
+        },
+      }),
+    ]);
+    const got = captureRequests(el);
+    await pick(el, 'channel-select', 'stable');
+    expect(select(el, 'release-select').value).toBe('');
+    await pick(el, 'release-select', 'latest');
+    updateButton(el).click();
+    expect(got).toEqual([
+      { target: 'v0.2.0', channel: 'stable', pin: 'latest', releaseClass: 'switch-older' },
+    ]);
+  });
+
+  it('keeps below-floor entries disabled with the floor', async () => {
+    el = await mount();
+    const got = captureRequests(el);
+    await pick(el, 'release-select', 'nightly-20261008');
+    expect(updateButton(el).hasAttribute('disabled')).toBe(true);
+    expect(blockedText(el)).toBe("Below this hub's downgrade floor (nightly-20261009)");
+    updateButton(el).click();
+    expect(got).toEqual([]);
   });
 
   it('is disabled for the running release (class same)', async () => {
@@ -767,5 +877,81 @@ describe('Channel source and pin', () => {
     expect(text(el, '.channel-source')).toBe('config (from the server settings)');
     expect(root(el).querySelector('.pin-state')).toBeNull();
     expect(root(el).querySelector('.channel-source-note')).toBeNull();
+  });
+});
+
+describe('Last update', () => {
+  function lastUpdateText(e: Card): string {
+    return (root(e).querySelector('.last-update')?.textContent ?? '').replace(/\s+/g, ' ').trim();
+  }
+
+  it('shows a rolled-back update as a rollback to the previous release', async () => {
+    el = await mount(
+      [catalog()],
+      status({
+        lastUpdate: {
+          runId: 'run-3',
+          from: 'nightly-20261021',
+          to: 'nightly-20261022',
+          status: 'rolled_back',
+          at: '2026-10-22T01:00:00Z',
+        },
+      })
+    );
+    expect(root(el).querySelector('.last-update-rollback')?.textContent?.replace(/\s+/g, ' ')).toBe(
+      'Rolled back to nightly-20261021 after nightly-20261022 failed to start'
+    );
+    const badge = root(el).querySelector('.last-update .status-badge');
+    expect(badge?.textContent?.trim()).toBe('rolled back');
+    expect(badge?.classList.contains('failed')).toBe(true);
+    expect(lastUpdateText(el)).not.toContain('→');
+  });
+
+  it('names the restored release when the hub reports it', async () => {
+    el = await mount(
+      [catalog()],
+      status({
+        lastUpdate: {
+          runId: 'run-4',
+          from: 'nightly-20261021',
+          to: 'nightly-20261022',
+          status: 'rolled_back',
+          at: '2026-10-22T01:00:00Z',
+          restored: 'nightly-20261020',
+        },
+      })
+    );
+    expect(root(el).querySelector('.last-update-rollback')?.textContent?.replace(/\s+/g, ' ')).toBe(
+      'Rolled back to nightly-20261020 after nightly-20261022 failed to start'
+    );
+  });
+
+  it('shows a verified update as from → to', async () => {
+    el = await mount(
+      [catalog()],
+      status({
+        lastUpdate: {
+          runId: 'run-2',
+          from: 'nightly-20261021',
+          to: 'nightly-20261022',
+          status: 'verified',
+          at: '2026-10-22T01:00:00Z',
+        },
+      })
+    );
+    expect(root(el).querySelector('.last-update-rollback')).toBeNull();
+    expect(lastUpdateText(el)).toContain('nightly-20261021 → nightly-20261022');
+    expect(root(el).querySelector('.last-update .status-badge.completed')).not.toBeNull();
+  });
+});
+
+describe('rollbackTarget', () => {
+  const base = { runId: 'r', from: 'v1', to: 'v2', status: 'rolled_back', at: '' };
+
+  it('prefers restored, then from, then a placeholder', () => {
+    expect(rollbackTarget({ ...base, restored: 'v0' })).toBe('v0');
+    expect(rollbackTarget(base)).toBe('v1');
+    expect(rollbackTarget({ ...base, restored: '' })).toBe('v1');
+    expect(rollbackTarget({ ...base, from: '' })).toBe('the previous release');
   });
 });

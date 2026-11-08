@@ -261,13 +261,21 @@ type RunConfig struct {
 	// resources.
 	ObserveResourceCreated func(api.ResourceHandle)
 	// KubernetesBlockIdentity marks a pod whose GCP identity mode is
-	// "block" (ptone/scion#4034). The Kubernetes runtime then sets
-	// automountServiceAccountToken false and adds the Workload Identity node
-	// selector (KubernetesWorkloadIdentityNodeLabel). The ServiceAccount
+	// "block" (ptone/scion#4034). The Kubernetes runtime then adds the
+	// Workload Identity node selector (KubernetesWorkloadIdentityNodeLabel).
+	// automountServiceAccountToken is false on every agent pod, in every
+	// GCP identity mode, not only under block. The ServiceAccount
 	// itself comes from Kubernetes.ServiceAccountName, which the agent
 	// manager has already set to the block ServiceAccount or cleared.
 	// Ignored by other runtimes.
 	KubernetesBlockIdentity bool
+	// CloudRunIdentity is the broker-resolved Cloud Run instance identity
+	// for this dispatch (api.StartOptions.CloudRunIdentity). Nil: the Cloud
+	// Run runtime uses its configured service account, as before. Non-nil:
+	// the instance runs as its ServiceAccount, an empty ServiceAccount is
+	// refused before any create, and an existing instance is never started
+	// in place. Ignored by other runtimes.
+	CloudRunIdentity *api.CloudRunIdentity
 
 	// FallbackEnv is the template env layer (ptone/scion#4524): every
 	// runtime applies it with FallbackEnvEntries as the LAST step of its

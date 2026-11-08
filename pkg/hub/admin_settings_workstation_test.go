@@ -460,7 +460,7 @@ func TestWorkstation_PutServerConfig_NoPartialWrites(t *testing.T) {
 		status int
 	}{
 		{"invalid Layer-1 value", `{"default_timezone":"Not/AZone","server":{"hub":{"port":9999}}}`, http.StatusUnprocessableEntity},
-		{"invalid file-routed value", `{"quotas":{"enforce_broker_quotas":false},"server":{"hub":{"agent_endpoint":"not a url"}}}`, http.StatusBadRequest},
+		{"invalid file-routed value", `{"quotas":{"enforce_broker_quotas":false},"server":{"hub":{"agent_endpoint":"not a url"}}}`, http.StatusUnprocessableEntity},
 		{"unknown key", `{"quotas":{"enforce_broker_quotas":false},"server":{"hub":{"port":9999,"bogus":1}}}`, http.StatusUnprocessableEntity},
 		{"revision conflict", `{"expected_revisions":{"quotas":999},"quotas":{"enforce_broker_quotas":false},"server":{"hub":{"port":9999}}}`, http.StatusConflict},
 	}
@@ -731,8 +731,10 @@ func TestWorkstation_PutServerConfig_InvalidModeRejected(t *testing.T) {
 	before := readFileString(t, settingsPath)
 	for _, mode := range []string{"Hosted", "prod"} {
 		rr := putServerConfig(t, srv, `{"server":{"mode":"`+mode+`"}}`)
-		if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "invalid server.mode") {
-			t.Errorf("mode %q: expected 400 invalid server.mode, got %d: %s", mode, rr.Code, rr.Body.String())
+		if rr.Code != http.StatusUnprocessableEntity || !strings.Contains(rr.Body.String(), "invalid server.mode") {
+			t.Errorf("mode %q: expected 422 invalid server.mode, got %d: %s", mode, rr.Code, rr.Body.String())
+		} else if e := settingsErrorEntries(t, rr); e[0].Field != "server.mode" {
+			t.Errorf("mode %q: field = %q, want server.mode", mode, e[0].Field)
 		}
 	}
 	if after := readFileString(t, settingsPath); after != before {
@@ -1123,7 +1125,7 @@ func TestWorkstation_PutServerConfig_ServerYAMLWithServerKeyAllowed(t *testing.T
 }
 
 // A workstation PUT checks server.home_storage like the file-mode handler:
-// unknown values are rejected with 400 and nothing is written; a valid
+// unknown values are rejected with 422 and nothing is written; a valid
 // block is written.
 func TestWorkstation_PutServerConfig_HomeStorageValidated(t *testing.T) {
 	for _, body := range []string{
@@ -1136,9 +1138,10 @@ func TestWorkstation_PutServerConfig_HomeStorageValidated(t *testing.T) {
 			srv, _, _ := newSQLiteHubInMode(t, true, nil)
 			before := readFileString(t, settingsPath)
 			rr := putServerConfig(t, srv, body)
-			if rr.Code != http.StatusBadRequest {
-				t.Fatalf("expected 400, got %d: %s", rr.Code, rr.Body.String())
+			if rr.Code != http.StatusUnprocessableEntity {
+				t.Fatalf("expected 422, got %d: %s", rr.Code, rr.Body.String())
 			}
+			settingsErrorEntries(t, rr)
 			if after := readFileString(t, settingsPath); after != before {
 				t.Errorf("settings.yaml changed:\n%s", after)
 			}

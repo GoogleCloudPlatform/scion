@@ -48,3 +48,7 @@ var ErrReservedChannel = errors.New("channel is reserved for internal use")
 // (FanOutEventBus). External spokes behind a FanOutEventBus still receive a
 // nil handler by design: they only use the pattern for remote-side filtering.
 var ErrNilHandler = errors.New("event bus: nil handler")
+
+// ErrSpokeNotFound is returned by FanOutEventBus.ReplaceSpoke and
+// RemoveSpoke when no spoke has the given name.
+var ErrSpokeNotFound = errors.New("event bus: spoke not found")

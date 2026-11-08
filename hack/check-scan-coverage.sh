@@ -11,8 +11,11 @@
 # This guard checks every enumeration call instead, so a new scan needs its
 # claim when it is written, not at the next move.
 #
-# Scope: pkg/hub/*_test.go files that import go/parser, go/ast or
-# golang.org/x/tools/go/packages. In them, every enumeration call
+# Scope: the *_test.go files of pkg/hub and of every pkg/hub area directory
+# listed in hack/area-dirs.txt (one level deep each) that import go/parser,
+# go/ast or golang.org/x/tools/go/packages. Each move PR adds its directory to
+# that list, so a scanning test moved with an area stays checked
+# (ptone/scion#4275). In them, every enumeration call
 #   filepath.Glob/Walk/WalkDir, os.ReadDir/Getwd, ioutil.ReadDir,
 #   parser.ParseDir, packages.Load, fs.WalkDir/Glob/ReadDir
 # must have, within the $window lines above it and in the same top-level
@@ -54,22 +57,72 @@
 #     the function that assigns it is expected to carry a claim anyway.
 #
 # Severity: guard-grade (an empty scan fails)
-#   Scan root missing:            exit 4
+#   Scan root or a listed area
+#   directory missing, or
+#   hack/area-dirs.txt malformed: exit 4
 #   No candidate file or call:    exit 4
+#   Unknown argument, --root
+#   without a directory, or
+#   --root with --self-test:      exit 5
 #   Violations found:             exit 1
 #   Clean:                        exit 0
 #
-# Usage: hack/check-scan-coverage.sh [--self-test]
+# Usage: hack/check-scan-coverage.sh [--self-test | --root <dir>]
+#   --root <dir> scans <dir> (its pkg/hub and its hack/area-dirs.txt) instead
+#   of the repository; the self-test uses it to run the real main path over a
+#   fixture tree. A relative <dir> resolves against the repository root (the
+#   script cds there first).
 #
 # See hack/LINT-CONVENTIONS.md for the conventions this script follows.
 set -euo pipefail
 
-cd "$(dirname "$0")/.."
+self="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+repo="$(dirname "$(dirname "$self")")"
+cd "$repo"
+
+# shellcheck source=SCRIPTDIR/lib/area-dirs.sh
+source "$repo/hack/lib/area-dirs.sh"
 
 export LC_ALL=C
 
 name="check-scan-coverage"
 window=15
+
+# parse_args <args...>: sets mode and root; on a usage error sets usage_err
+# and returns 5. The self-test calls it in a subshell, so each refusal has a
+# check that fails if the refusal is removed.
+parse_args() {
+  mode=scan
+  root=""
+  usage_err=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --self-test) mode="self-test" ;;
+      --root)
+        if [[ $# -lt 2 || -z "$2" ]]; then
+          usage_err="--root needs a directory"
+          return 5
+        fi
+        root="$2"
+        shift
+        ;;
+      *)
+        usage_err="unknown argument $1"
+        return 5
+        ;;
+    esac
+    shift
+  done
+  if [[ "$mode" == self-test && -n "$root" ]]; then
+    usage_err="--root does not combine with --self-test"
+    return 5
+  fi
+  return 0
+}
+if ! parse_args "$@"; then
+  echo "$name: $usage_err — NOTHING WAS ANALYSED" >&2
+  exit 5
+fi
 
 # Helpers whose enumeration calls are the guardScanSubdirs mechanism itself:
 # "<file>:<function>", or "<file>:*" for every function of the file.
@@ -96,20 +149,34 @@ candidate_files() (
   fi
 )
 
-# scan <root>: checks <root>/pkg/hub. Prints findings on stderr. Returns 0
-# clean, 1 violations, 4 when nothing was analysed.
+# scan <root> [<dir>...]: checks <root>/pkg/hub and each <dir>, a slash
+# path relative to pkg/hub (the hack/area-dirs.txt entries). Files are named
+# by their path relative to pkg/hub, so a file in an area directory is never
+# taken for the pkg/hub file of the same name. Prints findings on stderr.
+# Returns 0 clean, 1 violations, 4 when nothing was analysed or a listed
+# directory is missing.
 scan() {
   local hub="$1/pkg/hub"
+  shift
   if [[ ! -d "$hub" ]]; then
     echo "$name: scan root $hub is missing — NOTHING WAS ANALYSED" >&2
     return 4
   fi
-  local files=() f
+  local files=() f d
   while IFS= read -r f; do
     files+=("$f")
   done < <(candidate_files "$hub")
+  for d in "$@"; do
+    if [[ ! -d "$hub/$d" ]]; then
+      echo "$name: listed area directory $hub/$d is missing — NOTHING WAS ANALYSED" >&2
+      return 4
+    fi
+    while IFS= read -r f; do
+      files+=("$d/$f")
+    done < <(candidate_files "$hub/$d")
+  done
   if [[ ${#files[@]} -eq 0 ]]; then
-    echo "$name: no pkg/hub test file imports go/parser, go/ast or go/packages under $hub — NOTHING WAS ANALYSED" >&2
+    echo "$name: no pkg/hub test file imports go/parser, go/ast or go/packages under $hub or its $# listed area dir(s) — NOTHING WAS ANALYSED" >&2
     return 4
   fi
 
@@ -211,6 +278,49 @@ scan() {
     return 1
   fi
   return 0
+}
+
+# reader_self_test: hack/lib/area-dirs.sh's read_area_dirs rejects the same
+# inputs as the Go reader's TestParseRejects (hack/areadirs) and accepts the
+# same valid list. One known divergence, which fails closed: a CRLF list is
+# accepted by the Go reader (it trims the line) and rejected here (the "\r"
+# fails the segment rule).
+reader_self_test() {
+  local failed=0 f out rc n=0
+  local -a cases=(
+    "empty|# only a comment\n\n"
+    "one field|area\n"
+    "extra field|area maintenance apierr\n"
+    "unknown kind|leaf apierr\n"
+    "absolute|area /pkg/hub/x\n"
+    "dot|area .\n"
+    "parent|area ../store\n"
+    "unclean|area authz//kernel\n"
+    "trailing sep|area authz/\n"
+    'backslash|area authz\\kernel\n'
+    "duplicate dir|area maintenance\ntestsupport maintenance\n"
+  )
+  f="$work/reader-case.txt"
+  local c label src
+  for c in "${cases[@]}"; do
+    label="${c%%|*}"; src="${c#*|}"
+    # shellcheck disable=SC2059 # the case text carries its own escapes
+    printf "$src" >"$f"
+    rc=0; out="$(read_area_dirs "$f" 2>/dev/null)" || rc=$?
+    if [[ $rc -ne 1 || -n "$out" ]]; then
+      echo "self-test FAIL: reader case \"$label\": rc=$rc stdout=[$out] (want rc 1, empty stdout)" >&2
+      failed=1
+    fi
+    n=$((n + 1))
+  done
+  [[ $n -eq 11 ]] || { echo "self-test FAIL: reader ran $n reject cases (want 11)" >&2; failed=1; }
+  printf '# comment\n\narea  maintenance\n  testsupport\tinternal/hubtestutil  \n' >"$f"
+  rc=0; out="$(read_area_dirs "$f" 2>&1)" || rc=$?
+  if [[ $rc -ne 0 || "$out" != $'maintenance\ninternal/hubtestutil' ]]; then
+    echo "self-test FAIL: reader accept case: rc=$rc stdout=[$out]" >&2
+    failed=1
+  fi
+  return "$failed"
 }
 
 self_test() {
@@ -422,6 +532,94 @@ EOF
   [[ "$out" != *"bad_test.go:12:"* ]] || { echo "self-test FAIL: the claimed walk in marked was reported" >&2; failed=1; }
   rm "$hub/bad_test.go"
 
+  # Area directories (ptone/scion#4275): the MAIN path must read the fixture
+  # tree's own hack/area-dirs.txt and scan each listed directory (areas and
+  # testsupport alike). An unclaimed scanning test planted in every listed
+  # directory must be flagged, and a claimed call beside it must not.
+  # pkg/hub/authz is a temp-only extra entry: a later move adds it to the
+  # real list. A file in an area directory that shares a helper file's name
+  # gets no helper exemption. The run goes through "$self --root", so the
+  # wiring from the list to scan() is what is tested.
+  local list areas=() a
+  if ! list="$(read_area_dirs "$repo/hack/area-dirs.txt")"; then
+    echo "self-test FAIL: hack/area-dirs.txt is unreadable or malformed" >&2
+    return 1
+  fi
+  mapfile -t areas <<<"$list"
+  areas+=(authz)
+  mkdir -p "$dir/hack"
+  : >"$dir/hack/area-dirs.txt"
+  for a in "${areas[@]}"; do
+    printf 'area %s\n' "$a" >>"$dir/hack/area-dirs.txt"
+    mkdir -p "$hub/$a"
+    cat >"$hub/$a/zz_planted_test.go" <<'EOF'
+package planted
+
+import (
+	"go/parser"
+	"os"
+)
+
+func unclaimed() {
+	_, _ = os.ReadDir(".")
+	_ = parser.ParseFile
+}
+
+func claimed() {
+	// scan-coverage:exempt reads this temporary directory only.
+	_, _ = os.ReadDir(".")
+}
+EOF
+  done
+  printf 'package planted\n\nimport "go/ast"\n\nfunc g() { _, _ = os.Getwd() }\n' >"$hub/${areas[0]}/ast_test_helpers_test.go"
+  rc=0; out="$("$self" --root "$dir" 2>&1)" || rc=$?
+  local area_failed=0
+  for a in "${areas[@]}"; do
+    want="pkg/hub/$a/zz_planted_test.go:9: os.ReadDir in unclaimed has no covering claim"
+    [[ "$out" == *"$want"* ]] || { echo "self-test FAIL: area $a: missing \"$want\"" >&2; area_failed=1; }
+    [[ "$out" != *"pkg/hub/$a/zz_planted_test.go:15:"* ]] || { echo "self-test FAIL: area $a: the claimed call was reported" >&2; area_failed=1; }
+  done
+  want="pkg/hub/${areas[0]}/ast_test_helpers_test.go:5: os.Getwd in g has no covering claim"
+  [[ "$out" == *"$want"* ]] || { echo "self-test FAIL: missing \"$want\"" >&2; area_failed=1; }
+  want="$((${#areas[@]} + 1)) enumeration call(s) without a covering claim"
+  [[ "$out" == *"$want"* ]] || { echo "self-test FAIL: missing \"$want\"" >&2; area_failed=1; }
+  [[ $rc -eq 1 ]] || { echo "self-test FAIL: area directories: rc=$rc (want 1)" >&2; area_failed=1; }
+  [[ $area_failed -eq 0 ]] || { echo "$out" >&2; failed=1; }
+  # The same main path refuses a listed directory that is missing, and a
+  # malformed list.
+  cp "$dir/hack/area-dirs.txt" "$work/list.ok"
+  printf 'area no/such/area\n' >>"$dir/hack/area-dirs.txt"
+  rc=0; "$self" --root "$dir" >/dev/null 2>&1 || rc=$?
+  [[ $rc -eq 4 ]] || { echo "self-test FAIL: missing listed area directory: rc=$rc (want 4)" >&2; failed=1; }
+  printf 'area\n' >"$dir/hack/area-dirs.txt"
+  rc=0; "$self" --root "$dir" >/dev/null 2>&1 || rc=$?
+  [[ $rc -eq 4 ]] || { echo "self-test FAIL: malformed list: rc=$rc (want 4)" >&2; failed=1; }
+  cp "$work/list.ok" "$dir/hack/area-dirs.txt"
+  for a in "${areas[@]}"; do
+    rm -r "${hub:?}/${a%%/*}" 2>/dev/null || true
+  done
+  rm -r "${dir:?}/hack"
+
+  reader_self_test || failed=1
+
+  # Usage refusals (exit 5): end to end for the two that cannot recurse, and
+  # through parse_args in a subshell for every refusal, with a control.
+  local u
+  for u in --bogus --root; do
+    rc=0; "$self" "$u" >/dev/null 2>&1 || rc=$?
+    [[ $rc -eq 5 ]] || { echo "self-test FAIL: '$u' exited $rc (want 5)" >&2; failed=1; }
+  done
+  rc=0; ( parse_args --bogus ) >/dev/null 2>&1 || rc=$?
+  [[ $rc -eq 5 ]] || { echo "self-test FAIL: parse_args --bogus returned $rc (want 5)" >&2; failed=1; }
+  rc=0; ( parse_args --root ) >/dev/null 2>&1 || rc=$?
+  [[ $rc -eq 5 ]] || { echo "self-test FAIL: parse_args --root returned $rc (want 5)" >&2; failed=1; }
+  rc=0; ( parse_args --self-test --root /x ) >/dev/null 2>&1 || rc=$?
+  [[ $rc -eq 5 ]] || { echo "self-test FAIL: parse_args --self-test --root returned $rc (want 5)" >&2; failed=1; }
+  rc=0; ( parse_args --root /x --self-test ) >/dev/null 2>&1 || rc=$?
+  [[ $rc -eq 5 ]] || { echo "self-test FAIL: parse_args --root --self-test returned $rc (want 5)" >&2; failed=1; }
+  rc=0; ( parse_args --root /x ) >/dev/null 2>&1 || rc=$?
+  [[ $rc -eq 0 ]] || { echo "self-test FAIL: parse_args --root /x returned $rc (want 0)" >&2; failed=1; }
+
   # Nothing analysed.
   rm "$hub"/*_test.go
   rc=0; scan "$dir" 2>/dev/null || rc=$?
@@ -440,16 +638,25 @@ EOF
   return 0
 }
 
-if [[ "${1:-}" == "--self-test" ]]; then
+if [[ "$mode" == self-test ]]; then
   self_test
   exit $?
 fi
 
+if [[ -n "$root" ]] && ! cd "$root" 2>/dev/null; then
+  echo "$name: scan root $root is missing — NOTHING WAS ANALYSED" >&2
+  exit 4
+fi
 sha="$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")"
 if [[ "$sha" != "unknown" && -n "$(git status --porcelain 2>/dev/null)" ]]; then
   sha="${sha}-dirty"
 fi
 echo "$name: analysed ${sha}" >&2
+if ! list="$(read_area_dirs hack/area-dirs.txt)"; then
+  echo "$name: hack/area-dirs.txt is unreadable or malformed — NOTHING WAS ANALYSED" >&2
+  exit 4
+fi
+mapfile -t areas <<<"$list"
 rc=0
-scan "." || rc=$?
+scan "." "${areas[@]}" || rc=$?
 exit "$rc"

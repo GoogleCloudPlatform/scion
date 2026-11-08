@@ -1755,6 +1755,8 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 	var artifactWarning string
 	msg.Metadata, artifactRefs, artifactWarning = s.admitMessageArtifacts(ctx, msg.Metadata, directAgentRecipient(primaryAgent, ""))
 	msg.ArtifactRefsAdmitted = len(artifactRefs) > 0
+	// The sender's profile time zone travels with the message.
+	msg.Metadata = s.stampSenderTimezone(ctx, msg.Metadata, msg.Sender, msg.SenderID)
 
 	// Phase gate (nc-delivery-unreachable): a primary that is soft-deleted or
 	// in a lifecycle phase where the container cannot accept a buffered
@@ -2185,6 +2187,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 			// already stripped above, so this is a defence-in-depth no-op
 			// today, not a load-bearing second strip.
 			mentionMsg.Metadata = messaging.StripReservedMetadata(mentionMsg.Metadata)
+			mentionMsg.Metadata = s.stampSenderTimezone(ctx, mentionMsg.Metadata, mentionMsg.Sender, mentionMsg.SenderID)
 
 			// Migration gate (design agent-reincarnate §3.7, F2 p2a-r2
 			// review): a mentioned (secondary) agent is a recipient in its
@@ -2946,6 +2949,16 @@ func hasAgentReplyAfter(ctx context.Context, s store.Store, threadID string, aft
 // Message History
 // ---------------------------------------------------------------------------
 
+// errCodeMessageUnavailable is the code of the history around jump's 404
+// for an anchor message that cannot be shown.
+const errCodeMessageUnavailable = "message_unavailable"
+
+// writeAroundMessageUnavailable writes the history around jump's 404: the
+// usual "Message not found" with code message_unavailable.
+func writeAroundMessageUnavailable(w http.ResponseWriter) {
+	writeError(w, http.StatusNotFound, errCodeMessageUnavailable, "Message not found", nil)
+}
+
 // handleConversationHistory handles GET /api/v1/chat/conversations/{key}/messages.
 //
 // Query params:
@@ -3057,14 +3070,19 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 
 	var result *store.ListResult[store.Message]
 	if aroundID := q.Get("around"); aroundID != "" {
+		// Every anchor that cannot be shown here (no such message, one
+		// purged by chat retention or deleted, one in another
+		// conversation) gets the same not-found response, with code
+		// message_unavailable so the web can say so (design chat message
+		// retention §8.3); the response does not tell them apart.
 		if _, err := uuid.Parse(aroundID); err != nil {
-			NotFound(w, "Message")
+			writeAroundMessageUnavailable(w)
 			return
 		}
 		anchor, err := s.store.GetMessage(ctx, aroundID)
 		if err != nil {
 			if errors.Is(err, store.ErrNotFound) {
-				NotFound(w, "Message")
+				writeAroundMessageUnavailable(w)
 			} else {
 				writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to fetch message", nil)
 			}
@@ -3073,7 +3091,7 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 		if (filter.Channel != "" && anchor.Channel != filter.Channel) ||
 			(filter.ConversationID != "" && anchor.ConversationID != filter.ConversationID) ||
 			(filter.ThreadID != "" && anchor.ThreadID != filter.ThreadID) {
-			NotFound(w, "Message")
+			writeAroundMessageUnavailable(w)
 			return
 		}
 
@@ -3133,7 +3151,9 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
-	writeJSON(w, http.StatusOK, s.chatHistoryPage(ctx, wcs, key, historyConvID, result, canPost))
+	page := s.chatHistoryPage(ctx, wcs, key, historyConvID, result, canPost)
+	page.Retention = s.chatHistoryRetentionMarker(ctx, result, historyConvID, topic)
+	writeJSON(w, http.StatusOK, page)
 }
 
 // chatHistoryPage enriches one page of conversation history for the
@@ -3217,8 +3237,21 @@ func (s *Server) chatHistoryPage(ctx context.Context, wcs WebChatStore, key, his
 				}
 
 				refMsgs, err := s.store.GetMessagesByIDs(ctx, replyToIDs)
-				if err == nil && len(refMsgs) > 0 {
-					replyPreviews = make(map[string]chatReplyPreview, len(refMsgs))
+				if err == nil {
+					replyPreviews = make(map[string]chatReplyPreview, len(replyToIDs))
+					// A reply target that no longer exists (removed by
+					// chat retention or any other hard delete) gets a
+					// preview marked unavailable, so the client can show
+					// a muted quote instead of dropping it.
+					for _, id := range replyToIDs {
+						if _, ok := refMsgs[id]; !ok {
+							replyPreviews[id] = chatReplyPreview{
+								MessageID:   id,
+								Content:     chatReplyUnavailablePreview,
+								Unavailable: true,
+							}
+						}
+					}
 					for id, refMsg := range refMsgs {
 						// A preview shows only a message of this
 						// conversation, also for reply rows stored
@@ -5863,6 +5896,16 @@ type chatHistoryResponse struct {
 	MessageArtifactsUnavailable []string                      `json:"messageArtifactsUnavailable,omitempty"`
 	MessageExtensions           map[string]*WebChatMessageExt `json:"messageExtensions,omitempty"` // Phase-3: keyed by message ID
 	ReplyPreviews               map[string]chatReplyPreview   `json:"replyPreviews,omitempty"`     // Phase-3: keyed by reply-to message ID
+	// Retention marks where the conversation's history now starts because
+	// of the hub's chat retention policy (hub.chat_retention). Set only on
+	// the oldest page (no nextCursor); see chatHistoryRetentionMarker.
+	Retention *chatHistoryRetention `json:"retention,omitempty"`
+}
+
+// chatHistoryRetention is the history page's retention marker: messages
+// before PurgedBefore are removed by the hub's retention policy.
+type chatHistoryRetention struct {
+	PurgedBefore time.Time `json:"purgedBefore"`
 }
 
 // chatReplyPreview provides a truncated preview of the message being replied to.
@@ -5870,7 +5913,15 @@ type chatReplyPreview struct {
 	MessageID  string `json:"messageId"`
 	SenderName string `json:"senderName"`
 	Content    string `json:"content"` // truncated to 100 chars
+	// Unavailable is true when the replied-to message no longer exists
+	// (for example removed by chat retention). SenderName is then empty
+	// and Content is chatReplyUnavailablePreview.
+	Unavailable bool `json:"unavailable,omitempty"`
 }
+
+// chatReplyUnavailablePreview is the content of a reply preview whose
+// target message no longer exists.
+const chatReplyUnavailablePreview = "[no longer available]"
 
 type chatDMListResponse struct {
 	DMs []chatDMEntry `json:"dms"`

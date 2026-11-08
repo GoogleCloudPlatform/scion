@@ -89,6 +89,7 @@ profiles:
 		},
 	})
 	e := hydratedTemplateStartEnv{projectScionDir: projectScionDir, agentName: "hash-agent", mgr: mgr, captured: captured}
+	allowHydratedTemplate(t, hashDir)
 	if _, err := mgr.Start(context.Background(), api.StartOptions{
 		Name: e.agentName, Template: hashDir, TemplateName: "web-dev",
 		ProjectPath: projectScionDir, NoAuth: true,

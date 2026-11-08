@@ -146,8 +146,16 @@ func (a *admitter) Admit(ctx context.Context, hello *conduitv1.Hello) (*conduitv
 	// Local waits for it rather than answering not_local (r2-F1).
 	r.addPending(rec.SessionID, a.e)
 	if p.Kind != registry.PrincipalUser {
-		r.log.Info("Conduit session admitted", "session_id", rec.SessionID, "principal_kind", p.Kind,
-			"principal_id", p.ID, "connection_epoch", epoch, "incarnation_source", inc.Source)
+		attrs := []any{"session_id", rec.SessionID, "principal_kind", p.Kind,
+			"principal_id", p.ID, "connection_epoch", epoch, "incarnation_source", inc.Source}
+		if p.IngressInstance != "" {
+			// The hub instance whose ingress proxied this session.
+			attrs = append(attrs, "ingress_instance", p.IngressInstance)
+		}
+		r.log.Info("Conduit session admitted", attrs...)
+	}
+	if p.Kind == registry.PrincipalAgent {
+		r.countAgentAdmit(inc.Source)
 	}
 
 	// endpoint_incarnation is the ADMITTED value (a launch id, or gen-N

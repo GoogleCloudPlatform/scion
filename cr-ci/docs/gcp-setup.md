@@ -140,7 +140,10 @@ scripts/deploy-job.sh --apply [--tag TAG] [--warm-up]
   - one task, `--max-retries=0`, and `--task-timeout` from `TASK_TIMEOUT` (in
     seconds);
   - service account `EXEC_SA_NAME`, label `managed-by=cr-ci`;
-  - an ephemeral-disk volume of `RUNNER_DISK_GI` GiB mounted at `/scratch`.
+  - an ephemeral-disk volume of `RUNNER_DISK_GI` GiB mounted at the runner's HOME,
+    `/home/runner` (the runner itself is installed at `/opt/actions-runner`; the
+    entrypoint creates the work folder and caches on the disk; operations.md,
+    "Runner layout switch").
 - The GA `gcloud run jobs create` accepts the ephemeral-disk flags (verified
   in the P6 deploy). An update replaces the volume (`--clear-volumes
   --clear-volume-mounts`, then the same `--add-volume`); that clear and add
@@ -152,7 +155,8 @@ scripts/deploy-job.sh --apply [--tag TAG] [--warm-up]
   re-checks that `EXEC_SA_NAME` holds no project role.
 - `--warm-up` then runs one no-op execution and waits for it
   (`gcloud run jobs execute --update-env-vars=RUNNER_WARMUP=1 --wait`). The
-  entrypoint runs its image, `/scratch` and HOME-link checks and exits 0 before
+  entrypoint runs its image, volume (HOME) and work and cache directory checks and
+  exits 0 before
   any claim. The first execution after an image change pays the image import (about
   34 s for the 371 MiB image in the P6 PoC); the warm-up takes that hit instead
   of the first real job, and it fails the deploy if the checks fail. A failed

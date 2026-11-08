@@ -606,6 +606,13 @@ func (t *Transport) Delete(ctx context.Context, path string, headers http.Header
 	return t.Do(ctx, req)
 }
 
+// DeleteJSON performs an HTTP DELETE request with a JSON body, for
+// endpoints whose delete takes parameters in the body (for example a
+// compare-and-set revision).
+func (t *Transport) DeleteJSON(ctx context.Context, path string, body interface{}, headers http.Header) (*http.Response, error) {
+	return t.doJSON(ctx, http.MethodDelete, path, body, headers)
+}
+
 // doJSON performs an HTTP request with a JSON body.
 func (t *Transport) doJSON(ctx context.Context, method, path string, body interface{}, headers http.Header) (*http.Response, error) {
 	return t.doJSONVia(ctx, t.Do, method, path, body, headers)

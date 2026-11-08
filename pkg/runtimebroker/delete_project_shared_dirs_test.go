@@ -35,8 +35,6 @@ func doDeleteProject(t *testing.T, srv *Server, slug, projectID string) *httptes
 	}
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, target, nil))
-	// Wait for any background NFS tree removal the delete started.
-	srv.nfsCleanupWG.Wait()
 	return rec
 }
 

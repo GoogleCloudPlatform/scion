@@ -37,6 +37,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
+	"github.com/GoogleCloudPlatform/scion/pkg/keyring"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
@@ -225,7 +226,7 @@ func TestSigningKeySource_EveryClassHubLocalAfterNew(t *testing.T) {
 		src := srv.signingKeySource(c.KeyName)
 		assert.True(t, signingKeySourceIsHubLocal(src), "%s source %q", c.Class, src)
 	}
-	for _, want := range []string{"user_jwt", "agent_token", "oidc", "download_url", "artifact_view_url", "attachment_delivery", "list_cursor", "conduit_grant", "web_session"} {
+	for _, want := range []string{"user_jwt", "agent_token", "oidc", "download_url", "artifact_view_url", "attachment_delivery", "port_view_url", "list_cursor", "conduit_grant", "web_session"} {
 		assert.True(t, got[want], "class %s is checked", want)
 	}
 	assert.Len(t, testAdminSigningKeyClasses(false), len(classes)-1, "OIDC is checked only when enabled")
@@ -236,7 +237,7 @@ func TestSigningKeySource_SharedAndPreconfiguredLabels(t *testing.T) {
 	cfg.SharedSigningSecret = "synthetic-test-secret"
 	srv, _, err := tiaNewServer(t, cfg)
 	require.NoError(t, err)
-	for _, k := range []string{SecretKeyUserSigningKey, SecretKeyAgentSigningKey, SecretKeyDownloadSigningKey, SecretKeyArtifactViewKey, SecretKeyAttachmentDeliveryKey, SecretKeyListCursorKey} {
+	for _, k := range []string{SecretKeyUserSigningKey, SecretKeyAgentSigningKey, SecretKeyDownloadSigningKey, SecretKeyArtifactViewKey, SecretKeyAttachmentDeliveryKey, SecretKeyListCursorKey, SecretKeyPortViewKey} {
 		assert.Equal(t, signingKeySourceSharedSecret, srv.signingKeySource(k), k)
 	}
 	assert.Equal(t, signingKeySourceUnresolved, srv.signingKeySource(SecretKeyOIDCSigningKey), "OIDC off: unresolved")
@@ -678,12 +679,12 @@ func TestTestAdminBroker_RemoteRegistrationRefusedWhileTierOn(t *testing.T) {
 		{"name": "remote-broker"},
 		{"name": "remote-broker", "brokerId": tiaRemoteBrokerID},
 	} {
-		rec := doRequest(t, srv, http.MethodPost, "/api/v1/brokers", body)
+		rec := doRequestLoopback(t, srv, http.MethodPost, "/api/v1/brokers", body)
 		require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 		assert.Contains(t, rec.Body.String(), ErrCodeTestAdminRemoteBrokerRefused)
 	}
 
-	rec := doRequestNoAuth(t, srv, http.MethodPost, "/api/v1/brokers/join",
+	rec := doRequestNoAuthLoopback(t, srv, http.MethodPost, "/api/v1/brokers/join",
 		map[string]interface{}{"brokerId": tiaRemoteBrokerID, "joinToken": "synthetic-join-token"})
 	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 	assert.Contains(t, rec.Body.String(), ErrCodeTestAdminRemoteBrokerRefused)
@@ -702,7 +703,7 @@ func TestTestAdminBroker_ColocatedRegistrationAllowed(t *testing.T) {
 
 	// Through the HTTP route the co-located id passes the gate (whatever
 	// the registration itself then answers, it is not the gate refusal).
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/brokers",
+	rec := doRequestLoopback(t, srv, http.MethodPost, "/api/v1/brokers",
 		map[string]interface{}{"name": "colocated", "brokerId": tiaColocatedBrokerID})
 	assert.NotContains(t, rec.Body.String(), ErrCodeTestAdminRemoteBrokerRefused, rec.Body.String())
 }
@@ -711,7 +712,7 @@ func TestTestAdminBroker_RegistrationUnaffectedWhileTierOff(t *testing.T) {
 	srv, _ := testServer(t)
 	rr := httptest.NewRecorder()
 	assert.False(t, srv.refuseTestAdminBrokerRegistration(rr, tiaRemoteBrokerID))
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/brokers", map[string]interface{}{"name": "remote-broker"})
+	rec := doRequestLoopback(t, srv, http.MethodPost, "/api/v1/brokers", map[string]interface{}{"name": "remote-broker"})
 	assert.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 }
 
@@ -850,6 +851,7 @@ var tiaSecretKeyClasses = map[string]string{
 	"SecretKeyDownloadSigningKey":    "download_url",
 	"SecretKeyArtifactViewKey":       "artifact_view_url",
 	"SecretKeyAttachmentDeliveryKey": "attachment_delivery",
+	"SecretKeyPortViewKey":           "port_view_url",
 	"SecretKeyListCursorKey":         "list_cursor",
 	"SecretKeyOIDCSigningKey":        "oidc",
 	"SecretKeyOIDCKeyset":            "oidc", // the same manager's persisted keyset
@@ -903,12 +905,14 @@ var tiaKeyMaterialSites = map[string]string{
 	"usertoken.go:NewUserTokenService:github.com/go-jose/go-jose/v4.NewSigner":                      "user_jwt",
 	"agenttoken.go:newRingAgentTokenService:github.com/go-jose/go-jose/v4.NewSigner":                "agent_token",
 	"usertoken.go:newRingUserTokenService:github.com/go-jose/go-jose/v4.NewSigner":                  "user_jwt",
-	"oidckeys.go:NewOIDCKeyManager:github.com/go-jose/go-jose/v4.NewSigner":                         "oidc",
-	"oidckeys.go:RotateKey:github.com/go-jose/go-jose/v4.NewSigner":                                 "oidc",
-	"oidckeys.go:refreshKeysFromDB:github.com/go-jose/go-jose/v4.NewSigner":                         "oidc",
-	"oidckeys.go:generateRSAKeyPair:crypto/rsa.GenerateKey":                                         "oidc",
-	"oidckeys.go:decodePEMPrivateKey:crypto/x509.ParsePKCS8PrivateKey":                              "oidc",
+	"oidckeys/oidckeys.go:NewOIDCKeyManager:github.com/go-jose/go-jose/v4.NewSigner":                "oidc",
+	"oidckeys/oidckeys.go:RotateKey:github.com/go-jose/go-jose/v4.NewSigner":                        "oidc",
+	"oidckeys/oidckeys.go:refreshKeysFromDB:github.com/go-jose/go-jose/v4.NewSigner":                "oidc",
+	"oidckeys/oidckeys.go:GenerateRSAKeyPair:crypto/rsa.GenerateKey":                                "oidc",
+	"oidckeys/oidckeys.go:DecodePEMPrivateKey:crypto/x509.ParsePKCS8PrivateKey":                     "oidc",
 	"download_signing.go:computeSkillFileHMAC:crypto/hmac.New":                                      "download_url",
+	"internal/portview/capability.go:mac:crypto/hmac.New":                                           "port_view_url",
+	"internal/portview/capability.go:macKeyed:crypto/hmac.New":                                      "port_view_url",
 	"download_signing.go:computeSkillFileHMACv2:crypto/hmac.New":                                    "download_url",
 	"attachment_delivery.go:deliveryMACv2:crypto/hmac.New":                                          "attachment_delivery",
 	"attachment_delivery.go:deliveryMAC:crypto/hmac.New":                                            "attachment_delivery",
@@ -921,8 +925,8 @@ var tiaKeyMaterialSites = map[string]string{
 	"brokerauth.go:computeHMAC:crypto/hmac.New":                                                     "exempt: per-broker HMAC secret, generated per broker; authenticates a broker to this hub, never a user",
 	"access_constraint_preview.go:issueToken:crypto/hmac.New":                                       "exempt: preview token key, random per process and memory-only",
 	"access_constraint_preview.go:ValidateToken:crypto/hmac.New":                                    "exempt: preview token key, random per process and memory-only",
-	"conduit_admission.go:conduitAdmissionAEAD:crypto/aes.NewCipher":                                "exempt: admission token key, derived only from the shared signing secret, which the test admin tier refuses (G7), so it is never live there; it seals relay admission tokens, never a credential a test identity could carry",
-	"conduit_admission.go:conduitAdmissionAEAD:crypto/cipher.NewGCM":                                "exempt: admission token key, derived only from the shared signing secret, which the test admin tier refuses (G7), so it is never live there; it seals relay admission tokens, never a credential a test identity could carry",
+	"conduit_admission.go:newConduitAdmissionAEAD:crypto/aes.NewCipher":                             "exempt: admission token key, derived only from the shared signing secret or the keyring signing ring (source keyring), both of which the test admin tier refuses (G7), so it is never live there; it seals relay admission tokens, never a credential a test identity could carry",
+	"conduit_admission.go:newConduitAdmissionAEAD:crypto/cipher.NewGCM":                             "exempt: admission token key, derived only from the shared signing secret or the keyring signing ring (source keyring), both of which the test admin tier refuses (G7), so it is never live there; it seals relay admission tokens, never a credential a test identity could carry",
 	"githubapp/githubapp.go:GenerateJWT:github.com/go-jose/go-jose/v4.NewSigner":                    "exempt: GitHub App key; signs requests to GitHub, never a hub credential",
 	"githubapp/githubapp.go:ParsePrivateKey:crypto/x509.ParsePKCS1PrivateKey":                       "exempt: GitHub App key; signs requests to GitHub, never a hub credential",
 	"githubapp/githubapp.go:ParsePrivateKey:crypto/x509.ParsePKCS8PrivateKey":                       "exempt: GitHub App key; signs requests to GitHub, never a hub credential",
@@ -1104,7 +1108,7 @@ func TestReservedPluginLabelNeverStoredFromClient(t *testing.T) {
 	assert.Equal(t, map[string]string{"team": "b", pluginBrokerLabel: "chat"}, b.Labels)
 
 	// Registration: the label is not stored.
-	rec = doRequest(t, srv, http.MethodPost, "/api/v1/brokers",
+	rec = doRequestLoopback(t, srv, http.MethodPost, "/api/v1/brokers",
 		map[string]interface{}{"name": "labelled-broker", "labels": map[string]string{"team": "c", pluginBrokerLabel: "x"}})
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 	var resp CreateBrokerRegistrationResponse
@@ -1114,4 +1118,36 @@ func TestReservedPluginLabelNeverStoredFromClient(t *testing.T) {
 	_, has := b.Labels[pluginBrokerLabel]
 	assert.False(t, has, "registration must not store the plugin label")
 	assert.Equal(t, "c", b.Labels["team"])
+}
+
+// G7 at construction in keyring mode: the hub re-check refuses with
+// keyring_signing, before (and whatever) SharedSigningSecret says; the
+// source-order guard TestValidateTestAdminGateConfig_KeyringRefusalPrecedesSharedSecret
+// pins that the shared secret is not read on that path. The legacy adapter
+// is legacy mode: the shared-secret refusal still applies there.
+func TestTestAdminGate_KeyringModeRefusesBeforeSharedSecret(t *testing.T) {
+	ka, _ := krRollout(t)
+	for name, mutate := range map[string]func(*ServerConfig){
+		"keyring file": func(c *ServerConfig) { c.Keyring = ka; c.KeyringConfigured = true },
+		"keyring file and a shared secret": func(c *ServerConfig) {
+			c.Keyring = ka
+			c.KeyringConfigured = true
+			c.SharedSigningSecret = "synthetic-test-secret"
+		},
+		"configured, not loaded": func(c *ServerConfig) { c.KeyringConfigured = true },
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := tiaGateServerConfig()
+			mutate(&cfg)
+			err := validateTestAdminGateConfig(cfg, true)
+			require.Error(t, err)
+			assert.True(t, errors.Is(err, ErrTestAdminKeyringSigning), "got %v", err)
+		})
+	}
+	cfg := tiaGateServerConfig()
+	cfg.Keyring = keyring.Legacy("synthetic-test-secret")
+	cfg.SharedSigningSecret = "synthetic-test-secret"
+	err := validateTestAdminGateConfig(cfg, true)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrTestAdminSharedSigningSecret), "got %v", err)
 }

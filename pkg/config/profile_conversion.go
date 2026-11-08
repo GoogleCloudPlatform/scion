@@ -380,6 +380,13 @@ func foldProfile(st *convState, vs *VersionedSettings, configured func(string) b
 		st.add(ConversionLegacyFieldNoEffect, ConversionSeverityNotice, pp+"default_template",
 			fmt.Sprintf("profiles.%s.default_template has no effect today (the default template comes from the top-level default_template and the Hub agent_defaults); it is not converted", name), name)
 	}
+	if prof.ImageTag != "" {
+		// A flat instance's agent_defaults carry no image_tag (out of
+		// scope for ptone/scion#6625), so the value is reported, not
+		// silently dropped.
+		st.add(ConversionLegacyFieldNoEffect, ConversionSeverityNotice, pp+"image_tag",
+			fmt.Sprintf("profiles.%s.image_tag is not converted: a flat Runtime Broker instance has no image_tag; set the top-level image_tag or the Hub image_tag instead", name), name)
+	}
 	if !ok {
 		return nil
 	}

@@ -112,21 +112,21 @@ func TestClassifyStartError(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 0)
 		defer cancel()
 		<-ctx.Done()
-		code, _, _ := classifyStartError(ctx, errors.New("some runtime error"), "", "")
+		code, _, _ := classifyStartError(ctx, errors.New("some runtime error"), "", "", store.LaunchKindCreate)
 		if code != "launch_timeout" {
 			t.Fatalf("code = %q, want launch_timeout", code)
 		}
 	})
 
 	t.Run("template not found", func(t *testing.T) {
-		code, _, _ := classifyStartError(context.Background(), config.ErrTemplateNotFound, "", "")
+		code, _, _ := classifyStartError(context.Background(), config.ErrTemplateNotFound, "", "", store.LaunchKindCreate)
 		if code != "template_not_found" {
 			t.Fatalf("code = %q, want template_not_found", code)
 		}
 	})
 
 	t.Run("harness config not found", func(t *testing.T) {
-		code, _, _ := classifyStartError(context.Background(), config.ErrHarnessConfigNotFound, "", "")
+		code, _, _ := classifyStartError(context.Background(), config.ErrHarnessConfigNotFound, "", "", store.LaunchKindCreate)
 		if code != "template_not_found" {
 			t.Fatalf("code = %q, want template_not_found", code)
 		}
@@ -135,7 +135,7 @@ func TestClassifyStartError(t *testing.T) {
 	t.Run("harness-config policy refusal", func(t *testing.T) {
 		d := harnessPolicyDecision{OK: false, Code: ErrCodeForbidden, HTTPStatus: 403, Message: "refused: set allow_container_script_harnesses=true"}
 		err := fmt.Errorf("%w: %w", agent.ErrHarnessConfigPolicy, &harnessPolicyRefusal{d: d})
-		code, _, msg := classifyStartError(context.Background(), err, "", "")
+		code, _, msg := classifyStartError(context.Background(), err, "", "", store.LaunchKindCreate)
 		if code != "harness_config_policy" || msg != d.Message {
 			t.Errorf("got (%q, %q), want (harness_config_policy, %q)", code, msg, d.Message)
 		}
@@ -143,7 +143,7 @@ func TestClassifyStartError(t *testing.T) {
 
 	t.Run("required skill resolution failure", func(t *testing.T) {
 		skillErr := &agent.SkillResolutionError{URI: "gh://owner/repo/my-skill@main", Code: agent.SkillErrCodeNotFound, Message: "skill not found"}
-		code, _, message := classifyStartError(context.Background(), fmt.Errorf("start: %w", skillErr), "", "")
+		code, _, message := classifyStartError(context.Background(), fmt.Errorf("start: %w", skillErr), "", "", store.LaunchKindCreate)
 		if code != ErrCodeSkillResolution {
 			t.Fatalf("code = %q, want %q", code, ErrCodeSkillResolution)
 		}
@@ -153,7 +153,7 @@ func TestClassifyStartError(t *testing.T) {
 	})
 
 	t.Run("other errors are runtime_error", func(t *testing.T) {
-		code, _, _ := classifyStartError(context.Background(), errors.New("boom"), "", "")
+		code, _, _ := classifyStartError(context.Background(), errors.New("boom"), "", "", store.LaunchKindCreate)
 		if code != "runtime_error" {
 			t.Fatalf("code = %q, want runtime_error", code)
 		}

@@ -23,9 +23,10 @@ import (
 // LISTENs only on pgConduitChannel, never on the global channel. The hub
 // publishes there, in the same statement as the global notice (so both are
 // delivered on commit or neither is), every subject a relay acts on: the
-// revocation subjects that trigger a re-check and the settings change
-// subject. A conduit notice carries the subject and identifiers only: no
-// entity body, credential or token.
+// revocation subjects that trigger a re-check, the settings change subject,
+// and the grant key change subject (the relay hints its targets to fetch
+// keys; the notice carries the subject only). A conduit notice carries the
+// subject and identifiers only: no entity body, credential or token.
 
 // pgConduitChannel is the dedicated conduit channel.
 const pgConduitChannel = "scion_ev_conduit"
@@ -33,7 +34,7 @@ const pgConduitChannel = "scion_ev_conduit"
 // conduitChannelSubjects are the subject patterns published on the conduit
 // channel: what a separate relay acts on.
 func conduitChannelSubjects() []string {
-	return append(append(append([]string(nil), conduitAuthzEventPatterns...), conduitBrokerChangedSubject), settingsUpdatedSubject)
+	return append(append(append([]string(nil), conduitAuthzEventPatterns...), conduitBrokerChangedSubject), settingsUpdatedSubject, conduitGrantKeysChangedSubject)
 }
 
 // conduitNotice is a conduit channel payload.

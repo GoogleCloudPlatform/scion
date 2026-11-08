@@ -23,14 +23,16 @@ import (
 // DELETE are left to the first check, since they legitimately carry file
 // bodies.
 //
-// The /api/v1/portview/ route is not checked: it authorizes by capability and
-// serves an agent app's own page requests.
+// Page view requests (/api/v1/portview/, as isPortViewRequest accepts them) are
+// not checked: the route authorizes by capability and serves an agent app's own
+// page requests. Any other path, including one that only decodes to that
+// prefix, is checked.
 func (s *Server) proxyModeWriteGuard(next http.Handler) http.Handler {
 	if s.authConfig.AuthMode != proxyAuthMode {
 		return next
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !isStateChangingAPIRequest(r) || isPortViewPath(r.URL.Path) {
+		if !isStateChangingAPIRequest(r) || isPortViewRequest(r) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -56,12 +58,6 @@ const proxyAuthMode = "proxy"
 // errCodeUnsupportedMediaType is the API error code for a refused body content
 // type (HTTP 415).
 const errCodeUnsupportedMediaType = "unsupported_media_type"
-
-// portViewPathPrefix is the capability-only page-view route, which the guard
-// does not check (see the doc comment).
-const portViewPathPrefix = "/api/v1/portview/"
-
-func isPortViewPath(path string) bool { return strings.HasPrefix(path, portViewPathPrefix) }
 
 // multipartUploadRoutes are the state-changing /api/v1 routes that receive a
 // multipart/form-data body (file and list uploads from the hub's web UI or from

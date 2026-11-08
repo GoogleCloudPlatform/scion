@@ -31,6 +31,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/tunnelclient"
 )
@@ -64,7 +65,17 @@ type sshHubConn struct {
 	endpoint string
 	client   hubclient.Client
 	raw      *apiclient.Transport
+	// uat reports that the token is a user access token, which sees the
+	// project list only with project:list (ptone/scion#5294).
+	uat bool
 }
+
+// sshScopedTokenHint is added, on the same line, to a project-not-found
+// error when the token is a user access token: the empty lookup most likely
+// means a missing scope. It reads the same whether or not the project
+// exists. It is the one-line form of hubsync.ScopedTokenProjectLookupEmptyError,
+// since ssh and editor logs get one line.
+const sshScopedTokenHint = "the user access token may lack the project:read and project:list scopes (project:manage includes neither)"
 
 // sshTransportResolver resolves transport-layer auth (for example IAP) for
 // the hub requests; tests replace it.
@@ -74,6 +85,11 @@ var sshTransportResolver = func() (transportauth.TokenSource, transportauth.Head
 
 // newSSHHubConn builds the hub access for endpoint with a user token.
 func newSSHHubConn(endpoint, token string) (*sshHubConn, error) {
+	// The transport rule, before the transport source is resolved and
+	// before either client gets the token.
+	if err := checkUserHubTransport(endpoint); err != nil {
+		return nil, tunnelclient.Errorf(tunnelclient.ExitError, "%v", err)
+	}
 	hc := &http.Client{Timeout: sshHubRequestTimeout}
 	src, mode, err := sshTransportResolver()
 	if err != nil {
@@ -82,7 +98,7 @@ func newSSHHubConn(endpoint, token string) (*sshHubConn, error) {
 	if src != nil {
 		hc.Transport = transportauth.Wrap(http.DefaultTransport, src, mode)
 	}
-	client, err := hubclient.New(endpoint,
+	client, err := newUserHubClient(endpoint,
 		hubclient.WithHTTPClient(hc),
 		hubclient.WithBearerToken(token),
 		// hc already carries any transport auth; stop New wrapping it again.
@@ -95,7 +111,7 @@ func newSSHHubConn(endpoint, token string) (*sshHubConn, error) {
 		apiclient.WithHTTPClient(hc),
 		apiclient.WithAuth(&apiclient.BearerAuth{Token: token}),
 	)
-	return &sshHubConn{endpoint: endpoint, client: client, raw: raw}, nil
+	return &sshHubConn{endpoint: endpoint, client: client, raw: raw, uat: hubsync.IsUserAccessToken(token)}, nil
 }
 
 // sshAgentHostKeyResponse is the part of GET agent the host-key accessor
@@ -182,6 +198,9 @@ func (h *sshHubConn) resolveSSHProjectID(ctx context.Context, project string) (i
 		if p.Slug == project {
 			return p.ID, p.Slug, nil
 		}
+	}
+	if h.uat {
+		return "", "", tunnelclient.Errorf(tunnelclient.ExitAgentNotFound, "project not found: %s; %s", project, sshScopedTokenHint)
 	}
 	return "", "", tunnelclient.Errorf(tunnelclient.ExitAgentNotFound, "project not found: %s", project)
 }
@@ -297,6 +316,10 @@ func tunnelSSHHostKeyHintIn(cmd *cobra.Command, ssh bool, endpoint, project, age
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
+		return
+	}
+	// A hint only: a hub the transport rule refuses is not asked.
+	if checkUserHubTransport(endpoint) != nil {
 		return
 	}
 	token := getHubAccessToken(endpoint)

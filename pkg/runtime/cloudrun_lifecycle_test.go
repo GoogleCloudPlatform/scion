@@ -126,6 +126,21 @@ type fakeInstancesClient struct {
 	// report the instance Reconciling; while it is above 0 DeleteInstance
 	// is refused with FailedPrecondition.
 	reconcilingReads int
+	// createOpInstance and startOpInstance, when set, are the instance
+	// the create or start operation's Wait returns. Unset, the create's
+	// is the requested instance and the start's the read instance, each
+	// in the ready shape (fakeReadyInstance).
+	createOpInstance *runpb.Instance
+	startOpInstance  *runpb.Instance
+	// beforeGet, when set, runs at the start of every GetInstance with the
+	// call's 1-based index.
+	beforeGet func(n int)
+	// beforeStart, when set, runs at the start of every StartInstance with
+	// the call's 1-based index.
+	beforeStart func(n int)
+	// startErrSeq is per-call StartInstance errors, consumed in order (a
+	// nil entry lets that call succeed); once exhausted, startErr applies.
+	startErrSeq []error
 
 	// Recorded requests.
 	getReqs    []*runpb.GetInstanceRequest
@@ -139,6 +154,9 @@ type fakeInstancesClient struct {
 
 func (c *fakeInstancesClient) GetInstance(ctx context.Context, req *runpb.GetInstanceRequest, opts ...gax.CallOption) (*runpb.Instance, error) {
 	c.getReqs = append(c.getReqs, req)
+	if c.beforeGet != nil {
+		c.beforeGet(len(c.getReqs))
+	}
 	inst, err := c.getInstance, c.getErr
 	if len(c.getSeq) > 0 {
 		inst, err = c.getSeq[0].inst, c.getSeq[0].err
@@ -171,15 +189,48 @@ func (c *fakeInstancesClient) CreateInstance(ctx context.Context, req *runpb.Cre
 	if c.createWaitErr != nil {
 		return &fakeInstanceOperation{waitErr: c.createWaitErr}, nil
 	}
-	return &fakeInstanceOperation{waitErr: c.waitErr}, nil
+	inst := c.createOpInstance
+	if inst == nil {
+		inst = fakeReadyInstance(req.GetInstance(), req.GetParent()+"/instances/"+req.GetInstanceId(), 0)
+	}
+	return &fakeInstanceOperation{instance: inst, waitErr: c.waitErr}, nil
+}
+
+// fakeReadyInstance is a copy of base (nil for an empty one) named name,
+// in the ready shape a create or start operation returns: terminal
+// condition succeeded, not reconciling, observed generation equal to a
+// generation one above gen.
+func fakeReadyInstance(base *runpb.Instance, name string, gen int64) *runpb.Instance {
+	inst := &runpb.Instance{}
+	if base != nil {
+		inst = proto.Clone(base).(*runpb.Instance)
+	}
+	inst.Name = name
+	inst.Reconciling = false
+	inst.Generation = gen + 1
+	inst.ObservedGeneration = gen + 1
+	inst.TerminalCondition = &runpb.Condition{Type: "Running", State: runpb.Condition_CONDITION_SUCCEEDED}
+	return inst
 }
 
 func (c *fakeInstancesClient) StartInstance(ctx context.Context, req *runpb.StartInstanceRequest, opts ...gax.CallOption) (cloudrun.InstanceOperation, error) {
 	c.startReqs = append(c.startReqs, req)
-	if c.startErr != nil {
-		return nil, c.startErr
+	if c.beforeStart != nil {
+		c.beforeStart(len(c.startReqs))
 	}
-	return &fakeInstanceOperation{waitErr: c.waitErr}, nil
+	err := c.startErr
+	if len(c.startErrSeq) > 0 {
+		err = c.startErrSeq[0]
+		c.startErrSeq = c.startErrSeq[1:]
+	}
+	if err != nil {
+		return nil, err
+	}
+	inst := c.startOpInstance
+	if inst == nil {
+		inst = fakeReadyInstance(c.getInstance, req.GetName(), c.getInstance.GetGeneration())
+	}
+	return &fakeInstanceOperation{instance: inst, waitErr: c.waitErr}, nil
 }
 
 func (c *fakeInstancesClient) StopInstance(ctx context.Context, req *runpb.StopInstanceRequest, opts ...gax.CallOption) (cloudrun.InstanceOperation, error) {
@@ -392,8 +443,9 @@ func TestCloudRunRun_HubEndpointEnvPassthrough(t *testing.T) {
 func TestCloudRunRun_StartsExistingInstance(t *testing.T) {
 	wantID := cloudRunInstanceID("agent-1")
 	wantName := "projects/test-project/locations/us-central1/instances/" + wantID
-	fake := &fakeInstancesClient{getInstance: &runpb.Instance{Name: wantName}}
+	fake := &fakeInstancesClient{}
 	rt := newFakeCloudRunRuntime(t, fake)
+	fake.getInstance = computedCloudRunInstance(t, rt, runConfigForTest())
 
 	id, err := rt.Run(context.Background(), runConfigForTest())
 	if err != nil {
@@ -403,7 +455,8 @@ func TestCloudRunRun_StartsExistingInstance(t *testing.T) {
 		t.Errorf("Run returned id %q, want %q", id, wantID)
 	}
 
-	// An existing instance is started, never re-created.
+	// An existing instance that matches the computed spec is started,
+	// never re-created.
 	if len(fake.startReqs) != 1 {
 		t.Fatalf("StartInstance called %d times, want 1", len(fake.startReqs))
 	}
@@ -420,6 +473,8 @@ func TestCloudRunRun_ErrorPaths(t *testing.T) {
 		name    string
 		fake    *fakeInstancesClient
 		wantErr string
+		// existing sets an existing instance with the computed spec.
+		existing bool
 		// assertions on what must NOT have happened
 		wantNoCreate bool
 		wantNoStart  bool
@@ -445,13 +500,15 @@ func TestCloudRunRun_ErrorPaths(t *testing.T) {
 		},
 		{
 			name:         "start call fails",
-			fake:         &fakeInstancesClient{getInstance: &runpb.Instance{}, startErr: errors.New("boom")},
+			fake:         &fakeInstancesClient{startErr: errors.New("boom")},
+			existing:     true,
 			wantErr:      "failed to start existing instance",
 			wantNoCreate: true,
 		},
 		{
 			name:         "start operation wait fails",
-			fake:         &fakeInstancesClient{getInstance: &runpb.Instance{}, waitErr: errors.New("lro failed")},
+			fake:         &fakeInstancesClient{waitErr: errors.New("lro failed")},
+			existing:     true,
 			wantErr:      "wait for start operation failed",
 			wantNoCreate: true,
 		},
@@ -460,6 +517,9 @@ func TestCloudRunRun_ErrorPaths(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			rt := newFakeCloudRunRuntime(t, tc.fake)
+			if tc.existing {
+				tc.fake.getInstance = computedCloudRunInstance(t, rt, runConfigForTest())
+			}
 			id, err := rt.Run(context.Background(), runConfigForTest())
 			if err == nil {
 				t.Fatalf("Run returned id %q, want error", id)

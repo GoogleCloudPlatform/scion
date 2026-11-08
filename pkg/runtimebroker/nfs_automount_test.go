@@ -25,6 +25,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -41,6 +42,11 @@ import (
 type syncMountChecker struct {
 	mu          sync.Mutex
 	mountpoints map[string]string
+	// options maps path → mount table options; unset shows
+	// mockTableOptions (with nosuid and nodev).
+	options     map[string]string
+	remounts    int
+	tableErr    error // if non-nil, ReadMountTable fails
 	mountErr    error
 	mounts      int
 	mkdirs      int
@@ -52,7 +58,7 @@ type syncMountChecker struct {
 }
 
 func newSyncMountChecker() *syncMountChecker {
-	return &syncMountChecker{mountpoints: map[string]string{}}
+	return &syncMountChecker{mountpoints: map[string]string{}, options: map[string]string{}}
 }
 
 func (m *syncMountChecker) setMounted(path, source string) {
@@ -77,11 +83,26 @@ func (m *syncMountChecker) IsMountpoint(_ context.Context, path string) (bool, e
 func (m *syncMountChecker) ReadMountTable() (MountTable, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.tableErr != nil {
+		return nil, m.tableErr
+	}
 	t := MountTable{}
 	for path, src := range m.mountpoints {
-		t[filepath.Clean(path)] = src
+		opts, ok := m.options[path]
+		if !ok {
+			opts = mockTableOptions
+		}
+		t[filepath.Clean(path)] = MountEntry{Source: src, Options: opts}
 	}
 	return t, nil
+}
+
+func (m *syncMountChecker) RemountRequiredFlags(_ context.Context, target string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.remounts++
+	m.options[target] = HardenNFSMountOptions(m.options[target])
+	return nil
 }
 
 func (m *syncMountChecker) Mount(ctx context.Context, server, export, target, options string) error {
@@ -115,6 +136,9 @@ func (m *syncMountChecker) Mount(ctx context.Context, server, export, target, op
 		return mountErr
 	}
 	m.setMounted(target, server+":"+export)
+	m.mu.Lock()
+	m.options[target] = "rw," + options
+	m.mu.Unlock()
 	return nil
 }
 
@@ -205,17 +229,12 @@ func TestReconcile_CheckOnly_WrongSource_NoRemount(t *testing.T) {
 }
 
 func TestCheckNFSForDispatch_AutoMountOff_NoGate(t *testing.T) {
-	mc := newMockMountChecker()
-	cfg := nfsCfg(false)
-	srv := &Server{
-		config:             ServerConfig{NFSConfig: cfg},
-		nfsMountReconciler: NewNFSMountReconciler(cfg, mc, nil),
-	}
+	srv, mc := newGateServer(t, nfsCfg(false), "docker", "docker")
 	if err := srv.checkNFSForDispatch(context.Background(), "a", "", "", ""); err != nil {
 		t.Fatalf("checkNFSForDispatch with auto_mount off = %v, want nil", err)
 	}
-	if len(mc.mountCalls) != 0 {
-		t.Errorf("mountCalls = %d, want 0", len(mc.mountCalls))
+	if mounts, mkdirs, unmounts := mc.counts(); mounts+mkdirs+unmounts != 0 {
+		t.Errorf("mounts=%d mkdirs=%d unmounts=%d, want none", mounts, mkdirs, unmounts)
 	}
 }
 
@@ -530,6 +549,260 @@ func TestCheckNFSForDispatch(t *testing.T) {
 	}
 }
 
+// mountFlagsCase is a dispatch or start check against a workspace share
+// whose mount table entry is set up by the case.
+type mountFlagsCase struct {
+	name          string
+	autoMount     bool
+	brokerRuntime string // broker default runtime; "" = same as runtime
+	runtime       string // the dispatch's resolved runtime
+	mounted       bool   // the share is in the mount table
+	source        string // its source; "" = the expected server:export
+	options       string // its mount table options
+	nested        string // if set, a mount below the share with these options
+	// recordFirst is the mount table options a reconcile pass sees before
+	// the check ("" = no pass, so no recorded status). The table then
+	// changes to options, which makes the recorded status stale.
+	recordFirst  string
+	tableErr     bool // the mount table cannot be read at check time
+	mountOK      bool // the fake mount succeeds (gate servers fail mounts by default)
+	wantRefused  bool
+	wantRemounts int
+	// wantMounts and wantUnmounts are the mount and unmount calls a create
+	// dispatch makes (auto_mount on, wrong source); a start never mounts.
+	wantMounts   int
+	wantUnmounts int
+}
+
+const (
+	flagsTarget = "/mnt/nfs/ws1"
+	goodOpts    = "rw,nosuid,nodev,relatime"
+	noFlagsOpts = "rw,relatime"
+)
+
+var mountFlagsCases = []mountFlagsCase{
+	{name: "auto_mount off, flags missing, recorded: refused", runtime: "docker",
+		mounted: true, options: noFlagsOpts, recordFirst: noFlagsOpts, wantRefused: true},
+	{name: "auto_mount off, nodev missing: refused", runtime: "docker",
+		mounted: true, options: "rw,nosuid", wantRefused: true},
+	{name: "auto_mount off, unknown status, flags missing: refused", runtime: "docker",
+		mounted: true, options: noFlagsOpts, wantRefused: true},
+	{name: "auto_mount off, unknown status, good table: proceeds", runtime: "docker",
+		mounted: true, options: goodOpts},
+	{name: "auto_mount off, stale healthy status, flags now missing: refused", runtime: "docker",
+		mounted: true, options: noFlagsOpts, recordFirst: goodOpts, wantRefused: true},
+	{name: "auto_mount off, stale mount_flags status, flags now present: proceeds", runtime: "docker",
+		mounted: true, options: goodOpts, recordFirst: noFlagsOpts},
+	{name: "auto_mount off, mount table unreadable: refused", runtime: "docker",
+		mounted: true, options: goodOpts, tableErr: true, wantRefused: true},
+	{name: "auto_mount off, not mounted: proceeds", runtime: "docker"},
+	{name: "auto_mount off, other source without flags: refused", runtime: "docker",
+		mounted: true, source: "10.9.9.9:/other", options: noFlagsOpts, wantRefused: true},
+	{name: "auto_mount off, other source with flags: proceeds", runtime: "docker",
+		mounted: true, source: "10.9.9.9:/other", options: goodOpts},
+	{name: "auto_mount off, nested mount without flags: refused", runtime: "docker",
+		mounted: true, options: goodOpts, nested: noFlagsOpts, wantRefused: true},
+	{name: "auto_mount off, not mounted, nested mount without flags: refused", runtime: "docker",
+		nested: noFlagsOpts, wantRefused: true},
+	{name: "auto_mount off, nested mount with flags: proceeds", runtime: "docker",
+		mounted: true, options: goodOpts, nested: goodOpts},
+	{name: "auto_mount off, flags missing, kubernetes dispatch: proceeds", brokerRuntime: "docker", runtime: "kubernetes",
+		mounted: true, options: noFlagsOpts},
+	{name: "auto_mount off, kubernetes broker, docker dispatch, flags missing: refused", brokerRuntime: "kubernetes", runtime: "docker",
+		mounted: true, options: noFlagsOpts, wantRefused: true},
+	{name: "auto_mount on, flags missing, docker: remounted, proceeds", autoMount: true, runtime: "docker",
+		mounted: true, options: noFlagsOpts, wantRemounts: 1},
+	{name: "auto_mount on, kubernetes broker, docker dispatch, flags missing: refused, not remounted", autoMount: true, brokerRuntime: "kubernetes", runtime: "docker",
+		mounted: true, options: noFlagsOpts, wantRefused: true},
+	{name: "auto_mount on, mount table unreadable: refused", autoMount: true, runtime: "docker",
+		mounted: true, options: goodOpts, tableErr: true, wantRefused: true},
+	{name: "auto_mount on, nested mount without flags: refused", autoMount: true, runtime: "docker",
+		mounted: true, options: goodOpts, nested: noFlagsOpts, wantRefused: true},
+	{name: "auto_mount on, other source without flags, remount fails: refused", autoMount: true, runtime: "docker",
+		mounted: true, source: "10.9.9.9:/other", options: noFlagsOpts, wantRefused: true, wantMounts: 1, wantUnmounts: 1},
+	{name: "auto_mount on, other source without flags, remounted, nested mount without flags: refused", autoMount: true, runtime: "docker",
+		mounted: true, source: "10.9.9.9:/other", options: noFlagsOpts, nested: noFlagsOpts, mountOK: true, wantRefused: true, wantMounts: 1, wantUnmounts: 1},
+	{name: "auto_mount on, other source without flags, remounted: proceeds", autoMount: true, runtime: "docker",
+		mounted: true, source: "10.9.9.9:/other", options: noFlagsOpts, mountOK: true, wantMounts: 1, wantUnmounts: 1},
+}
+
+// runMountFlagsCase builds the server and mount table of tc, calls check,
+// and verifies the outcome. The check never mounts or unmounts.
+func runMountFlagsCase(t *testing.T, tc mountFlagsCase, check func(srv *Server, projectDir string) error) {
+	t.Helper()
+	brokerRT := tc.brokerRuntime
+	if brokerRT == "" {
+		brokerRT = tc.runtime
+	}
+	srv, mc := newGateServer(t, nfsCfg(tc.autoMount), brokerRT, tc.runtime)
+	set := func(opts string) {
+		mc.mu.Lock()
+		mc.mountpoints[flagsTarget] = "10.0.0.2:/scion-workspaces"
+		mc.options[flagsTarget] = opts
+		mc.mu.Unlock()
+	}
+	if tc.recordFirst != "" {
+		set(tc.recordFirst)
+		if err := srv.nfsMountReconciler.Reconcile(context.Background()); err != nil {
+			t.Fatalf("Reconcile: %v", err)
+		}
+		mc.mu.Lock()
+		delete(mc.mountpoints, flagsTarget)
+		mc.mu.Unlock()
+	}
+	if tc.mounted {
+		set(tc.options)
+		if tc.source != "" {
+			mc.mu.Lock()
+			mc.mountpoints[flagsTarget] = tc.source
+			mc.mu.Unlock()
+		}
+	}
+	if tc.nested != "" {
+		mc.mu.Lock()
+		mc.mountpoints[flagsTarget+"/projects/p1"] = "10.0.0.7:/nested"
+		mc.options[flagsTarget+"/projects/p1"] = tc.nested
+		mc.mu.Unlock()
+	}
+	if tc.tableErr {
+		mc.mu.Lock()
+		mc.tableErr = errors.New("reading mount table: permission denied")
+		mc.mu.Unlock()
+	}
+	if tc.mountOK {
+		mc.mu.Lock()
+		mc.mountErr = nil
+		mc.mu.Unlock()
+	}
+	projectPath := t.TempDir()
+	writeSettings(t, projectPath, "schema_version: \"1\"\n")
+	err := check(srv, filepath.Join(projectPath, ".scion"))
+	if (err != nil) != tc.wantRefused {
+		t.Fatalf("err = %v, wantRefused %v", err, tc.wantRefused)
+	}
+	if tc.wantRefused {
+		// A path-free refusal: the flag check's text, or (auto_mount on, a
+		// remount that failed) the mount-failed text.
+		if msg := err.Error(); msg != runtime.ProjectShareMountFlagsText(runtime.ProjectShareMountPathField) &&
+			msg != runtime.ProjectShareMountFailedText(runtime.ProjectShareMountPathField) {
+			t.Errorf("error %q is not a path-free refusal text", msg)
+		}
+	}
+	mounts, _, unmounts := mc.counts()
+	mc.mu.Lock()
+	remounts := mc.remounts
+	mc.mu.Unlock()
+	if mounts != tc.wantMounts || unmounts != tc.wantUnmounts || remounts != tc.wantRemounts {
+		t.Errorf("mounts=%d unmounts=%d remounts=%d, want %d, %d, %d", mounts, unmounts, remounts, tc.wantMounts, tc.wantUnmounts, tc.wantRemounts)
+	}
+}
+
+// TestCheckNFSForDispatch_MountFlags: a create dispatch to a local-container
+// runtime confirms nosuid,nodev on the workspace share from a fresh mount
+// table read, in every reconciler mode, and never trusts a recorded status.
+func TestCheckNFSForDispatch_MountFlags(t *testing.T) {
+	for _, tc := range mountFlagsCases {
+		t.Run(tc.name, func(t *testing.T) {
+			runMountFlagsCase(t, tc, func(srv *Server, projectDir string) error {
+				return srv.checkNFSForDispatch(context.Background(), "agent-1", projectDir, "", "")
+			})
+		})
+	}
+}
+
+// TestCheckNFSMountFlagsForStart: a start or restart of an existing agent
+// on a local-container runtime confirms nosuid,nodev the same way. It
+// never mounts, so a share that needs a remount is refused even with
+// auto_mount on until the reconciler has remounted it.
+func TestCheckNFSMountFlagsForStart(t *testing.T) {
+	for _, tc := range mountFlagsCases {
+		// A start only checks: it never mounts, unmounts or remounts, so a
+		// share the create path would fix is refused.
+		if tc.wantRemounts > 0 || tc.wantMounts > 0 {
+			tc.wantRefused = true
+		}
+		tc.wantRemounts, tc.wantMounts, tc.wantUnmounts = 0, 0, 0
+		t.Run(tc.name, func(t *testing.T) {
+			runMountFlagsCase(t, tc, func(srv *Server, projectDir string) error {
+				return srv.checkNFSMountFlagsForStart(context.Background(), "agent-1", projectDir, tc.runtime)
+			})
+		})
+	}
+}
+
+// TestNFSMountFlagsCheck_CtxDone: the synchronous flag check refuses when
+// its ctx ends while another pass holds the reconcile semaphore, and when
+// ctx is already done with the semaphore free, even if the mount table is
+// good. Both for a create dispatch with auto_mount off and for a start.
+func TestNFSMountFlagsCheck_CtxDone(t *testing.T) {
+	checks := map[string]func(srv *Server, ctx context.Context, projectDir string) error{
+		"create": func(srv *Server, ctx context.Context, projectDir string) error {
+			return srv.checkNFSForDispatch(ctx, "agent-1", projectDir, "", "")
+		},
+		"start": func(srv *Server, ctx context.Context, projectDir string) error {
+			return srv.checkNFSMountFlagsForStart(ctx, "agent-1", projectDir, "docker")
+		},
+	}
+	setup := func(t *testing.T) (*Server, string) {
+		srv, mc := newGateServer(t, nfsCfg(false), "docker", "docker")
+		mc.setMounted(flagsTarget, "10.0.0.2:/scion-workspaces")
+		projectPath := t.TempDir()
+		writeSettings(t, projectPath, "schema_version: \"1\"\n")
+		return srv, filepath.Join(projectPath, ".scion")
+	}
+	for name, check := range checks {
+		t.Run(name+", semaphore held, ctx ends: refused", func(t *testing.T) {
+			srv, projectDir := setup(t)
+			srv.nfsMountReconciler.reconcileSem <- struct{}{}
+			defer func() { <-srv.nfsMountReconciler.reconcileSem }()
+			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			defer cancel()
+			done := make(chan error, 1)
+			go func() { done <- check(srv, ctx, projectDir) }()
+			select {
+			case err := <-done:
+				if err == nil || !errors.Is(err, context.DeadlineExceeded) {
+					t.Fatalf("err = %v, want a refusal wrapping context.DeadlineExceeded", err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("the check did not return after its ctx ended")
+			}
+		})
+		t.Run(name+", ctx already done, semaphore free, good table: refused", func(t *testing.T) {
+			srv, projectDir := setup(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			for i := 0; i < 20; i++ { // select would pick a ready case at random
+				err := check(srv, ctx, projectDir)
+				if err == nil || !errors.Is(err, context.Canceled) {
+					t.Fatalf("attempt %d: err = %v, want a refusal wrapping context.Canceled", i, err)
+				}
+			}
+		})
+		t.Run(name+", live ctx, good table: proceeds", func(t *testing.T) {
+			srv, projectDir := setup(t)
+			if err := check(srv, context.Background(), projectDir); err != nil {
+				t.Fatalf("err = %v, want nil", err)
+			}
+		})
+	}
+}
+
+// TestNFSMountFlags_HandlersCallCheck: the create, start and restart
+// handlers each run their NFS check.
+func TestNFSMountFlags_HandlersCallCheck(t *testing.T) {
+	want := map[string]string{
+		"createAgent":  "checkNFSForDispatch",
+		"startAgent":   "checkNFSMountFlagsForStart",
+		"restartAgent": "checkNFSMountFlagsForStart",
+	}
+	for fn, call := range want {
+		if n := len(callsNamed(funcDecl(t, "handlers.go", fn), call)); n != 1 {
+			t.Errorf("%s calls %s %d times, want 1", fn, call, n)
+		}
+	}
+}
+
 // TestCheckNFSForDispatch_WarnOnlyRuntime_NeverChecksShare verifies that a
 // Kubernetes or Cloud Run dispatch only reads the recorded status: it does
 // not wait on the reconcile semaphore (held here by a stuck background
@@ -633,6 +906,108 @@ func TestCreateAgent_NFSGate_Returns503(t *testing.T) {
 			for _, v := range []string{"ws1", "/mnt/nfs", "10.0.0.2", "/scion-workspaces"} {
 				if strings.Contains(rec.Body.String(), v) {
 					t.Errorf("body carries %q: %s", v, rec.Body.String())
+				}
+			}
+		})
+	}
+}
+
+// TestStartRestart_NFSMountFlags_Returns503: start and restart of an agent
+// on a local-container runtime are refused with 503 nfs_unavailable when the
+// workspace share lacks nosuid,nodev, before the agent is started (and, for
+// restart, before it is stopped). With the flags they go ahead.
+func TestStartRestart_NFSMountFlags_Returns503(t *testing.T) {
+	for _, action := range []string{"start", "restart"} {
+		for _, opts := range []string{noFlagsOpts, goodOpts} {
+			refused := opts == noFlagsOpts
+			t.Run(action+", "+opts, func(t *testing.T) {
+				srv, mc := newGateServer(t, nfsCfg(false), "docker", "docker")
+				mc.mu.Lock()
+				mc.mountpoints[flagsTarget] = "10.0.0.2:/scion-workspaces"
+				mc.options[flagsTarget] = opts
+				mc.mu.Unlock()
+				mgr, ok := srv.manager.(*mockManager)
+				if !ok {
+					t.Fatalf("manager is %T, want *mockManager", srv.manager)
+				}
+				projectPath := writeSettings(t, t.TempDir(), "schema_version: \"1\"\n")
+				body := fmt.Sprintf(`{"projectPath":%q}`, filepath.Join(projectPath, ".scion"))
+				req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/test-agent-1/"+action, strings.NewReader(body))
+				req.Header.Set("Content-Type", "application/json")
+				rec := httptest.NewRecorder()
+				srv.Handler().ServeHTTP(rec, req)
+
+				mgr.mu.Lock()
+				starts, stops := mgr.startCalls, mgr.stopCalls
+				mgr.mu.Unlock()
+				if refused {
+					if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "nfs_unavailable") {
+						t.Fatalf("%s = %d %s, want 503 nfs_unavailable", action, rec.Code, rec.Body.String())
+					}
+					if starts != 0 || stops != 0 {
+						t.Errorf("starts=%d stops=%d, want the agent left alone", starts, stops)
+					}
+					return
+				}
+				if rec.Code == http.StatusServiceUnavailable {
+					t.Fatalf("%s = 503 %s with nosuid,nodev present", action, rec.Body.String())
+				}
+				if starts != 1 {
+					t.Errorf("starts=%d, want 1 (%d %s)", starts, rec.Code, rec.Body.String())
+				}
+			})
+		}
+	}
+}
+
+// TestNFSMountFlags_RefusalBodyIsPathFree: the create (auto_mount off and
+// on), start and restart refusals over a share without nosuid,nodev carry
+// only the path-free text (runtime.ProjectShareMountFlagsText, one of the
+// texts the hub relays) and never a server, export or mount path; the
+// detail goes to the broker log.
+func TestNFSMountFlags_RefusalBodyIsPathFree(t *testing.T) {
+	want := runtime.ProjectShareMountFlagsText(runtime.ProjectShareMountPathField)
+	if !slices.Contains(runtime.ProjectShareClientTexts(), want) {
+		t.Fatalf("%q is not one of runtime.ProjectShareClientTexts()", want)
+	}
+	cases := []struct {
+		name, method, path string
+		autoMount          bool
+		nested             bool // the flagless mount is below the share (auto_mount on keeps the share itself good)
+	}{
+		{name: "create, auto_mount off", method: http.MethodPost, path: "/api/v1/agents"},
+		{name: "create, auto_mount on", method: http.MethodPost, path: "/api/v1/agents", autoMount: true, nested: true},
+		{name: "start", method: http.MethodPost, path: "/api/v1/agents/test-agent-1/start"},
+		{name: "restart", method: http.MethodPost, path: "/api/v1/agents/test-agent-1/restart"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, mc := newGateServer(t, nfsCfg(tc.autoMount), "docker", "docker")
+			mc.mu.Lock()
+			mc.mountpoints[flagsTarget] = "10.0.0.2:/scion-workspaces"
+			mc.options[flagsTarget] = noFlagsOpts
+			if tc.nested {
+				mc.options[flagsTarget] = goodOpts
+				mc.mountpoints[flagsTarget+"/projects/p1"] = "10.0.0.7:/nested"
+				mc.options[flagsTarget+"/projects/p1"] = noFlagsOpts
+			}
+			mc.mu.Unlock()
+			projectPath := writeSettings(t, t.TempDir(), "schema_version: \"1\"\n")
+			body := fmt.Sprintf(`{"name":"nfs-agent","id":"agent-nfs-1","projectPath":%q}`, filepath.Join(projectPath, ".scion"))
+			req := httptest.NewRequest(tc.method, tc.path, strings.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rec, req)
+			got := rec.Body.String()
+			if rec.Code != http.StatusServiceUnavailable || !strings.Contains(got, "nfs_unavailable") {
+				t.Fatalf("%s = %d %s, want 503 nfs_unavailable", tc.name, rec.Code, got)
+			}
+			if !strings.Contains(got, want) {
+				t.Errorf("body %s does not carry the path-free text %q", got, want)
+			}
+			for _, leak := range []string{"10.0.0.2", "10.0.0.7", "/scion-workspaces", "/nested", "/mnt/nfs", flagsTarget} {
+				if strings.Contains(got, leak) {
+					t.Errorf("body names %q: %s", leak, got)
 				}
 			}
 		})

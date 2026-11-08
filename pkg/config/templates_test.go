@@ -15,6 +15,7 @@
 package config
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -269,20 +270,20 @@ func TestMergeScionConfig(t *testing.T) {
 	})
 
 	t.Run("max_turns override replaces base", func(t *testing.T) {
-		base := &api.ScionConfig{MaxTurns: 10}
-		override := &api.ScionConfig{MaxTurns: 50}
+		base := &api.ScionConfig{MaxTurns: api.IntPtr(10)}
+		override := &api.ScionConfig{MaxTurns: api.IntPtr(50)}
 		got := MergeScionConfig(base, override)
-		if got.MaxTurns != 50 {
-			t.Errorf("expected MaxTurns=50, got %d", got.MaxTurns)
+		if !api.IntPtrEqual(got.MaxTurns, api.IntPtr(50)) {
+			t.Errorf("expected MaxTurns=50, got %s", api.FormatCountLimit(got.MaxTurns))
 		}
 	})
 
 	t.Run("max_turns zero override keeps base", func(t *testing.T) {
-		base := &api.ScionConfig{MaxTurns: 10}
+		base := &api.ScionConfig{MaxTurns: api.IntPtr(10)}
 		override := &api.ScionConfig{}
 		got := MergeScionConfig(base, override)
-		if got.MaxTurns != 10 {
-			t.Errorf("expected MaxTurns=10, got %d", got.MaxTurns)
+		if !api.IntPtrEqual(got.MaxTurns, api.IntPtr(10)) {
+			t.Errorf("expected MaxTurns=10, got %s", api.FormatCountLimit(got.MaxTurns))
 		}
 	})
 
@@ -524,7 +525,7 @@ func TestFindTemplateInProjectPath(t *testing.T) {
 	}
 
 	t.Run("project template found when projectPath is provided", func(t *testing.T) {
-		tpl, err := FindTemplateInProjectPath("my-tpl", projectPath)
+		tpl, err := FindTemplateInProjectPath(context.Background(), "my-tpl", projectPath)
 		if err != nil {
 			t.Fatalf("FindTemplateInProjectPath failed: %v", err)
 		}
@@ -537,7 +538,7 @@ func TestFindTemplateInProjectPath(t *testing.T) {
 	})
 
 	t.Run("falls back to global when project has no template", func(t *testing.T) {
-		tpl, err := FindTemplateInProjectPath("my-tpl", filepath.Join(tmpDir, "empty-project"))
+		tpl, err := FindTemplateInProjectPath(context.Background(), "my-tpl", filepath.Join(tmpDir, "empty-project"))
 		if err != nil {
 			t.Fatalf("FindTemplateInProjectPath failed: %v", err)
 		}
@@ -551,7 +552,7 @@ func TestFindTemplateInProjectPath(t *testing.T) {
 
 	t.Run("falls back to FindTemplate when projectPath is empty", func(t *testing.T) {
 		// With empty projectPath and CWD having no .scion, should fall back to global
-		tpl, err := FindTemplateInProjectPath("my-tpl", "")
+		tpl, err := FindTemplateInProjectPath(context.Background(), "my-tpl", "")
 		if err != nil {
 			t.Fatalf("FindTemplateInProjectPath failed: %v", err)
 		}
@@ -561,7 +562,7 @@ func TestFindTemplateInProjectPath(t *testing.T) {
 	})
 
 	t.Run("returns error when template not found anywhere", func(t *testing.T) {
-		_, err := FindTemplateInProjectPath("nonexistent", projectPath)
+		_, err := FindTemplateInProjectPath(context.Background(), "nonexistent", projectPath)
 		if err == nil {
 			t.Fatal("expected error for nonexistent template, got nil")
 		}
@@ -577,8 +578,20 @@ func TestFindTemplateInProjectPath(t *testing.T) {
 		}
 	})
 
-	t.Run("absolute path bypasses project resolution", func(t *testing.T) {
-		tpl, err := FindTemplateInProjectPath(globalTplDir, projectPath)
+	t.Run("absolute path outside the hydration roots is refused", func(t *testing.T) {
+		// A project-scoped lookup does not accept an arbitrary absolute
+		// directory: the request's template value is never a host path.
+		withHydrationRoots(t)
+		if _, err := FindTemplateInProjectPath(context.Background(), globalTplDir, projectPath); !errors.Is(err, ErrTemplateRefNotAllowed) {
+			t.Fatalf("FindTemplateInProjectPath(absolute, no roots) error = %v, want ErrTemplateRefNotAllowed", err)
+		}
+	})
+
+	t.Run("absolute path below a hydration root bypasses project resolution", func(t *testing.T) {
+		// Below a registered hydration root (the broker's template cache),
+		// an absolute directory is the template, without project lookup.
+		withHydrationRoots(t, filepath.Dir(globalTplDir))
+		tpl, err := FindTemplateInProjectPath(context.Background(), globalTplDir, projectPath)
 		if err != nil {
 			t.Fatalf("FindTemplateInProjectPath failed: %v", err)
 		}
@@ -606,7 +619,7 @@ func TestFindTemplateInProjectPath_GitProjectInRepoTemplates(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	tpl, err := FindTemplateInProjectPath("my-tpl", projectDir)
+	tpl, err := FindTemplateInProjectPath(context.Background(), "my-tpl", projectDir)
 	if err != nil {
 		t.Fatalf("FindTemplateInProjectPath failed: %v", err)
 	}
@@ -642,7 +655,7 @@ func TestGetTemplateChainInProject(t *testing.T) {
 
 	// No default template exists on disk, so it is hydrated from the embedded
 	// copy into the global templates dir and prepended to the chain.
-	chain, err := GetTemplateChainInProject("test-tpl", projectPath)
+	chain, err := GetTemplateChainInProject(context.Background(), "test-tpl", projectPath)
 	if err != nil {
 		t.Fatalf("GetTemplateChainInProject failed: %v", err)
 	}
@@ -686,7 +699,7 @@ func TestGetTemplateChainInProjectWithDefault(t *testing.T) {
 	}
 
 	// Non-default template should produce a 2-link chain: [default, custom]
-	chain, err := GetTemplateChainInProject("custom", projectPath)
+	chain, err := GetTemplateChainInProject(context.Background(), "custom", projectPath)
 	if err != nil {
 		t.Fatalf("GetTemplateChainInProject failed: %v", err)
 	}
@@ -701,7 +714,7 @@ func TestGetTemplateChainInProjectWithDefault(t *testing.T) {
 	}
 
 	// Default template itself should produce a 1-link chain: [default]
-	chain, err = GetTemplateChainInProject("default", projectPath)
+	chain, err = GetTemplateChainInProject(context.Background(), "default", projectPath)
 	if err != nil {
 		t.Fatalf("GetTemplateChainInProject for default failed: %v", err)
 	}
@@ -730,7 +743,7 @@ func TestGetTemplateChainInProject_HydratesDefaultFromEmbedded(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	chain, err := GetTemplateChainInProject("my-custom", "")
+	chain, err := GetTemplateChainInProject(context.Background(), "my-custom", "")
 	if err != nil {
 		t.Fatalf("GetTemplateChainInProject failed: %v", err)
 	}
@@ -758,7 +771,7 @@ func TestGetTemplateChainInProject_HydratesDefaultWhenPrimary(t *testing.T) {
 	t.Chdir(tmpDir)
 
 	// No templates at all — default should be hydrated from the embedded copy.
-	chain, err := GetTemplateChainInProject("default", "")
+	chain, err := GetTemplateChainInProject(context.Background(), "default", "")
 	if err != nil {
 		t.Fatalf("GetTemplateChainInProject failed: %v", err)
 	}
@@ -790,7 +803,7 @@ func TestGetTemplateChainInProject_ExistingDefaultIsNotReseeded(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	chain, err := GetTemplateChainInProject("default", "")
+	chain, err := GetTemplateChainInProject(context.Background(), "default", "")
 	if err != nil {
 		t.Fatalf("GetTemplateChainInProject failed: %v", err)
 	}
@@ -845,7 +858,7 @@ func TestGetTemplateChainInProject_ConcurrentHydration(t *testing.T) {
 				go func(idx int) {
 					defer wg.Done()
 					start.Wait()
-					chain, err := GetTemplateChainInProject("default", "")
+					chain, err := GetTemplateChainInProject(context.Background(), "default", "")
 					errs[idx] = err
 					chains[idx] = chain
 					if err == nil && len(chain) == 1 {
@@ -1384,27 +1397,27 @@ func TestMergeScionConfig_InlineConfigFields(t *testing.T) {
 	})
 
 	t.Run("max_model_calls override replaces base", func(t *testing.T) {
-		base := &api.ScionConfig{MaxModelCalls: 100}
-		override := &api.ScionConfig{MaxModelCalls: 200}
+		base := &api.ScionConfig{MaxModelCalls: api.IntPtr(100)}
+		override := &api.ScionConfig{MaxModelCalls: api.IntPtr(200)}
 		got := MergeScionConfig(base, override)
-		if got.MaxModelCalls != 200 {
-			t.Errorf("expected MaxModelCalls=200, got %d", got.MaxModelCalls)
+		if !api.IntPtrEqual(got.MaxModelCalls, api.IntPtr(200)) {
+			t.Errorf("expected MaxModelCalls=200, got %s", api.FormatCountLimit(got.MaxModelCalls))
 		}
 	})
 
 	t.Run("max_model_calls zero override keeps base", func(t *testing.T) {
-		base := &api.ScionConfig{MaxModelCalls: 150}
+		base := &api.ScionConfig{MaxModelCalls: api.IntPtr(150)}
 		override := &api.ScionConfig{}
 		got := MergeScionConfig(base, override)
-		if got.MaxModelCalls != 150 {
-			t.Errorf("expected MaxModelCalls=150, got %d", got.MaxModelCalls)
+		if !api.IntPtrEqual(got.MaxModelCalls, api.IntPtr(150)) {
+			t.Errorf("expected MaxModelCalls=150, got %s", api.FormatCountLimit(got.MaxModelCalls))
 		}
 	})
 
 	t.Run("full inline config merge over template", func(t *testing.T) {
 		template := &api.ScionConfig{
 			Model:         "claude-sonnet-4-6",
-			MaxTurns:      100,
+			MaxTurns:      api.IntPtr(100),
 			HarnessConfig: "claude-default",
 			User:          "root",
 		}
@@ -1418,8 +1431,8 @@ func TestMergeScionConfig_InlineConfigFields(t *testing.T) {
 		if got.Model != "claude-opus-4-6" {
 			t.Errorf("expected Model='claude-opus-4-6', got %q", got.Model)
 		}
-		if got.MaxTurns != 100 {
-			t.Errorf("expected MaxTurns=100 (from template), got %d", got.MaxTurns)
+		if !api.IntPtrEqual(got.MaxTurns, api.IntPtr(100)) {
+			t.Errorf("expected MaxTurns=100 (from template), got %s", api.FormatCountLimit(got.MaxTurns))
 		}
 		if got.HarnessConfig != "claude-default" {
 			t.Errorf("expected HarnessConfig='claude-default' (from template), got %q", got.HarnessConfig)
@@ -2274,7 +2287,9 @@ func TestFindTemplateContentHashDirHasNoName(t *testing.T) {
 	finders := map[string]func(string) (*Template, error){
 		"FindTemplate": FindTemplate,
 		"FindTemplateInProjectPath": func(name string) (*Template, error) {
-			return FindTemplateInProjectPath(name, projectPath)
+			// root is a registered hydration root, as the broker's cache.
+			withHydrationRoots(t, root)
+			return FindTemplateInProjectPath(context.Background(), name, projectPath)
 		},
 	}
 	for fname, find := range finders {

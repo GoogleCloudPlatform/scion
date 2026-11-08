@@ -48,6 +48,13 @@ var fc4aRows = map[string]map[string]string{
 		"shared_dir_storage_backend": fc4AsIs, "shared_dir_storage_backends": fc4AsIs,
 		"home_storage_backend": fc4AsIs, "home_storage_leaf": fc4Never,
 		"node_selector": fc4AsIs, "tolerations": fc4AsIs, "runtime_class_name": fc4AsIs,
+		// Cloud Run (contract amendment P5-CR, CR8). project_id,
+		// service_account, network, subnetwork and credentials_file are
+		// never published. CR8 allows region as is; until the presentation
+		// carries a region field it is not published either, which this
+		// row records.
+		"project_id": fc4Never, "region": fc4Never, "service_account": fc4Never,
+		"network": fc4Never, "subnetwork": fc4Never, "credentials_file": fc4Never,
 	},
 	"agent_defaults": {
 		"default_harness_config": fc4AsIs, "image_registry": fc4AsIs, "clone_depth": fc4AsIs,

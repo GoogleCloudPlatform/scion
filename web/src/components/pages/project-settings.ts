@@ -42,6 +42,24 @@ import { projectVisitorsVisible } from '../../shared/project-visitors.js';
 import { isBrokerKubernetesOnly } from '../../shared/runtime-kind.js';
 import { KUBERNETES_BLOCK_HINT } from '../../shared/gcp-identity-state.js';
 import { projectServiceAccountListUrl } from '../../shared/gcp-sa-assign-status.js';
+import {
+  PROFILE_DEFAULTS_FIELD,
+  effectiveIdentityForProfile,
+  knownProfiles,
+  mapFromRows,
+  profileErrorsFromBody,
+  profileOptionsForRow,
+  profilesMissingDefault,
+  rowProblem,
+  rowsFromMap,
+  sameProfileMap,
+  serviceAccountOptionsForProfile,
+  splitProfileWarnings,
+  type EffectiveIdentity,
+  type KnownProfile,
+  type ProfileDefaultRow,
+  type ProfileMessages,
+} from '../../shared/gcp-profile-defaults.js';
 import { normalizeModelAlias } from '../../shared/model-utils.js';
 import { KNOWN_HARNESS_NAMES, harnessDisplayName } from '../../shared/harness-utils.js';
 import type { AccessBoundarySummary } from '../../shared/access-boundaries.js';
@@ -84,17 +102,33 @@ interface ProjectSettings {
   telemetryEnabled?: boolean | null | undefined;
   autoExposePortsEnabled?: boolean | null | undefined;
   activeProfile?: string | undefined;
-  defaultMaxTurns?: number | undefined;
-  defaultMaxModelCalls?: number | undefined;
+  /** null clears (inherit), 0 is Unlimited, n >= 1 a limit. */
+  defaultMaxTurns?: number | null | undefined;
+  defaultMaxModelCalls?: number | null | undefined;
   defaultMaxDuration?: string | undefined;
   defaultResources?: ProjectResourceSpec | undefined;
   defaultGCPIdentityMode?: string | undefined;
   defaultGCPIdentityServiceAccountID?: string | undefined;
+  defaultGCPIdentityServiceAccountIDByProfile?: Record<string, string> | undefined;
   defaultModel?: string | undefined;
   defaultThinkingLevel?: number | null | undefined;
   maxAgentRole?: string | undefined;
   defaultAgentRole?: string | undefined;
 }
+
+/**
+ * The tooltip of the hub fallback indicator (ptone/scion#3925). The hub
+ * value is the last fallback, not the value an agent is sure to get: a
+ * template or harness config can set its own, which wins, so the page never
+ * calls it the value in effect.
+ */
+export function hubFallbackTooltip(displayValue: string): string {
+  return `Hub fallback: ${displayValue}. A template or harness config can set its own value, which wins over it.`;
+}
+
+/** The tooltip when the hub does not report its fallback (hubDefault "unknown"). */
+export const HUB_FALLBACK_UNKNOWN_TOOLTIP =
+  'This hub could not report its fallback for this setting; it may still have one. A template or harness config can also set its own value.';
 
 interface ResolvedHubSetting {
   projectSet: boolean;
@@ -119,6 +153,36 @@ interface HarnessConfigEntry {
 
 interface RuntimeBrokerWithProvider extends RuntimeBroker {
   localPath?: string;
+}
+
+/** A stored project count limit as page state: null (inherit), 0 or n. */
+export function countLimitOrNull(v: number | null | undefined): number | null {
+  return typeof v === 'number' && Number.isInteger(v) && v >= 0 ? v : null;
+}
+
+/** Whether a settings PUT warning is about the default count limits. */
+export function isCountLimitWarning(w: string): boolean {
+  return /^(defaultMaxTurns|defaultMaxModelCalls)\b/.test(w);
+}
+
+/** isCountLimitWarning for a warning of unknown type: only a string can be one. */
+function isCountLimitWarningValue(w: unknown): w is string {
+  return typeof w === 'string' && isCountLimitWarning(w);
+}
+
+/**
+ * The number input's text as a count limit. Empty is Inherit (null); a
+ * positive integer is a limit; anything else is an error and changes
+ * nothing, so a typo never clears a stored limit.
+ */
+export function parseCountLimitInput(text: string): { value: number | null; error?: string } {
+  const t = text.trim();
+  if (t === '') return { value: null };
+  if (/^[1-9]\d*$/.test(t)) return { value: parseInt(t, 10) };
+  if (/^0+$/.test(t)) {
+    return { value: null, error: 'For no limit, tick Unlimited; a limit must be greater than 0.' };
+  }
+  return { value: null, error: 'Must be a whole number greater than 0, or Unlimited.' };
 }
 
 @customElement('scion-page-project-settings')
@@ -210,12 +274,26 @@ export class ScionPageProjectSettings extends LitElement {
   @state()
   private resolvedSettings: Record<string, ResolvedHubSetting> = {};
 
-  // Default agent limits
+  // Default agent limits. A count limit is null (inherit: no project
+  // value), 0 (Unlimited) or a limit n >= 1. The loaded values decide
+  // whether a save sends the field: an untouched count limit is left out,
+  // so a save never changes it.
   @state()
-  private configDefaultMaxTurns = 0;
+  private configDefaultMaxTurns: number | null = null;
 
   @state()
-  private configDefaultMaxModelCalls = 0;
+  private configDefaultMaxModelCalls: number | null = null;
+
+  private loadedDefaultMaxTurns: number | null = null;
+  private loadedDefaultMaxModelCalls: number | null = null;
+
+  /** Per count-limit input error (by annotation key); a save is refused while any is set. */
+  @state()
+  private countLimitErrors: Record<string, string> = {};
+
+  /** The last save's warnings about the count limits (Unlimited on an older broker). */
+  @state()
+  private countLimitWarnings: string[] = [];
 
   @state()
   private configDefaultMaxDuration = '';
@@ -242,6 +320,26 @@ export class ScionPageProjectSettings extends LitElement {
 
   @state()
   private configDefaultGCPIdentitySAID = '';
+
+  /**
+   * Per-profile default service account rows
+   * (defaultGCPIdentityServiceAccountIDByProfile, ptone/scion#3947).
+   */
+  @state()
+  private profileDefaultRows: ProfileDefaultRow[] = [];
+
+  /** The stored map the rows were loaded from, to tell whether they changed. */
+  private profileDefaultsStored: Record<string, string> = {};
+
+  private profileDefaultRowKey = 0;
+
+  /** Inline errors from the last failed save, by profile and for the map. */
+  @state()
+  private profileDefaultErrors: ProfileMessages = { byProfile: {}, general: [] };
+
+  /** Warnings from the last successful save, by profile and the rest. */
+  @state()
+  private profileDefaultWarnings: ProfileMessages = { byProfile: {}, general: [] };
 
   // Agent authorization
   @state()
@@ -643,6 +741,49 @@ export class ScionPageProjectSettings extends LitElement {
       vertical-align: middle;
       margin-left: 0.25rem;
       cursor: help;
+    }
+
+    .profile-default-rows {
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+    }
+
+    .profile-default-row {
+      display: flex;
+      flex-direction: column;
+      gap: 0.25rem;
+    }
+
+    .profile-default-inputs {
+      display: grid;
+      grid-template-columns: minmax(8rem, 1fr) minmax(12rem, 2fr) auto;
+      gap: 0.5rem;
+      align-items: end;
+    }
+
+    .profile-effective {
+      display: flex;
+      flex-direction: column;
+      gap: 0.25rem;
+      margin-top: 0.5rem;
+    }
+
+    .profile-effective-title {
+      font-size: 0.8125rem;
+      font-weight: 600;
+    }
+
+    .profile-effective-table {
+      border-collapse: collapse;
+      font-size: 0.8125rem;
+    }
+
+    .profile-effective-table th,
+    .profile-effective-table td {
+      text-align: left;
+      padding: 0.25rem 0.5rem;
+      border-bottom: 1px solid var(--scion-border, #e2e8f0);
     }
 
     .config-field.hub-inherited {
@@ -1327,8 +1468,14 @@ export class ScionPageProjectSettings extends LitElement {
       this.configDefaultHarnessAuth = this.settings.defaultHarnessAuth || '';
       this.configTelemetryEnabled = this.settings.telemetryEnabled ?? null;
       this.configAutoExposePortsEnabled = this.settings.autoExposePortsEnabled ?? null;
-      this.configDefaultMaxTurns = this.settings.defaultMaxTurns || 0;
-      this.configDefaultMaxModelCalls = this.settings.defaultMaxModelCalls || 0;
+      this.configDefaultMaxTurns = countLimitOrNull(this.settings.defaultMaxTurns);
+      this.configDefaultMaxModelCalls = countLimitOrNull(this.settings.defaultMaxModelCalls);
+      this.loadedDefaultMaxTurns = this.configDefaultMaxTurns;
+      this.loadedDefaultMaxModelCalls = this.configDefaultMaxModelCalls;
+      // Reloaded values replace any edit, so its input errors and the last
+      // save's warnings no longer apply.
+      this.countLimitErrors = {};
+      this.countLimitWarnings = [];
       this.configDefaultMaxDuration = this.settings.defaultMaxDuration || '';
       const res = this.settings.defaultResources;
       this.configDefaultResCpuReq = res?.requests?.cpu || '';
@@ -1338,6 +1485,7 @@ export class ScionPageProjectSettings extends LitElement {
       this.configDefaultResDisk = res?.disk || '';
       this.configDefaultGCPIdentityMode = this.settings.defaultGCPIdentityMode || '';
       this.configDefaultGCPIdentitySAID = this.settings.defaultGCPIdentityServiceAccountID || '';
+      this.loadProfileDefaultRows(this.settings.defaultGCPIdentityServiceAccountIDByProfile);
       this.configMaxAgentRole = this.settings.maxAgentRole || '';
       this.configDefaultAgentRole = this.settings.defaultAgentRole || '';
       if (this.settings.defaultModel) {
@@ -1371,7 +1519,7 @@ export class ScionPageProjectSettings extends LitElement {
   }
 
   /**
-   * Returns a formatted hub default hint string for a given annotation key,
+   * Returns a formatted hub fallback hint string for a given annotation key,
    * or null if no hub value is available for display.
    *
    * Used to populate placeholder text on text/number inputs and to label the
@@ -1382,17 +1530,17 @@ export class ScionPageProjectSettings extends LitElement {
     if (!entry || entry.hubDefault !== 'present' || entry.hubValue == null) {
       return null;
     }
-    return `Hub default: ${entry.hubValue}`;
+    return `Hub fallback: ${entry.hubValue}`;
   }
 
   /**
-   * Returns a select-option label incorporating the hub default value,
+   * Returns a select-option label incorporating the hub fallback value,
    * or a generic fallback label when no hub value is available.
    */
   private hubSelectLabel(annotationKey: string, fallbackLabel: string): string {
     const entry = this.resolvedSettings[annotationKey];
     if (entry?.hubDefault === 'present' && entry.hubValue != null) {
-      return `Use hub default (${entry.hubValue})`;
+      return `Use hub fallback (${entry.hubValue})`;
     }
     return fallbackLabel;
   }
@@ -1407,12 +1555,78 @@ export class ScionPageProjectSettings extends LitElement {
   }
 
   /**
+   * A project default count limit: a number input plus an Unlimited box,
+   * as on the agent Edit page. Empty with the box clear is Inherit (null);
+   * the box sends 0 (Unlimited); a positive integer is a limit
+   * (ptone/scion#3925).
+   */
+  private renderCountLimitField(
+    label: string,
+    annotationKey: string,
+    value: number | null,
+    set: (v: number | null) => void,
+    help: string,
+    canEdit: boolean
+  ) {
+    const unlimited = value === 0;
+    return html`<div
+      class="config-field ${this.isHubDefault(annotationKey) ? 'hub-inherited' : ''}"
+    >
+      <label>${label} ${this.renderHubIndicator(annotationKey)}</label>
+      <sl-input
+        type="number"
+        inputmode="numeric"
+        placeholder=${unlimited ? 'Unlimited' : this.hubHint(annotationKey) || 'Inherit'}
+        .value=${value && value > 0 ? String(value) : ''}
+        ?disabled=${!canEdit || unlimited}
+        @sl-input=${(e: Event) => {
+          const parsed = parseCountLimitInput((e.target as HTMLInputElement).value);
+          const errors = { ...this.countLimitErrors };
+          if (parsed.error) {
+            // Keep the current value: an invalid entry never clears a stored limit.
+            errors[annotationKey] = parsed.error;
+          } else {
+            delete errors[annotationKey];
+            set(parsed.value);
+          }
+          this.countLimitErrors = errors;
+        }}
+      ></sl-input>
+      <sl-checkbox
+        size="small"
+        class="unlimited"
+        ?checked=${unlimited}
+        ?disabled=${!canEdit}
+        @sl-change=${(e: Event) => {
+          const errors = { ...this.countLimitErrors };
+          delete errors[annotationKey];
+          this.countLimitErrors = errors;
+          set((e.target as HTMLInputElement).checked ? 0 : null);
+        }}
+        >Unlimited</sl-checkbox
+      >
+      ${this.countLimitErrors[annotationKey]
+        ? html`<span class="field-help count-limit-error" style="color: var(--sl-color-danger-600);"
+            >${this.countLimitErrors[annotationKey]}</span
+          >`
+        : html`<span class="field-help">${help}</span>`}
+    </div>`;
+  }
+
+  /**
    * Renders a small hub-default indicator icon with a tooltip showing the
    * inherited hub value. Returns `nothing` when the setting is overridden at
    * the project level or when no hub default exists.
    */
   private renderHubIndicator(annotationKey: string) {
     const entry = this.resolvedSettings[annotationKey];
+    if (entry && !entry.projectSet && entry.hubDefault === 'unknown') {
+      return html`
+        <sl-tooltip content=${HUB_FALLBACK_UNKNOWN_TOOLTIP}>
+          <sl-icon name="building" class="hub-indicator-icon hub-fallback-unknown"></sl-icon>
+        </sl-tooltip>
+      `;
+    }
     if (!entry || entry.projectSet || entry.hubDefault !== 'present') {
       return nothing;
     }
@@ -1425,7 +1639,7 @@ export class ScionPageProjectSettings extends LitElement {
       }
     }
     return html`
-      <sl-tooltip content="Hub default: ${displayValue}">
+      <sl-tooltip content=${hubFallbackTooltip(displayValue)}>
         <sl-icon name="building" class="hub-indicator-icon"></sl-icon>
       </sl-tooltip>
     `;
@@ -1543,6 +1757,314 @@ export class ScionPageProjectSettings extends LitElement {
     return nothing;
   }
 
+  private loadProfileDefaultRows(map: Record<string, string> | null | undefined): void {
+    this.profileDefaultsStored = { ...(map ?? {}) };
+    this.profileDefaultRows = rowsFromMap(map, () => ++this.profileDefaultRowKey);
+  }
+
+  /** Whether the per-profile rows differ from the stored map. */
+  private get profileDefaultsDirty(): boolean {
+    const rows = this.profileDefaultRows;
+    const complete = mapFromRows(rows);
+    // An incomplete row is an edit even though it maps to nothing yet.
+    if (Object.keys(complete).length !== rows.length) return true;
+    return !sameProfileMap(complete, this.profileDefaultsStored);
+  }
+
+  /** The profiles this project's linked brokers report. */
+  private get knownBrokerProfiles(): KnownProfile[] {
+    return knownProfiles(this.brokers);
+  }
+
+  private updateProfileDefaultRow(key: number, patch: Partial<ProfileDefaultRow>): void {
+    this.profileDefaultRows = this.profileDefaultRows.map((row) =>
+      row.key === key ? { ...row, ...patch } : row
+    );
+  }
+
+  private addProfileDefaultRow(): void {
+    const free = profileOptionsForRow(
+      { key: -1, profile: '', serviceAccountId: '' },
+      this.profileDefaultRows,
+      this.knownBrokerProfiles
+    );
+    this.profileDefaultRows = [
+      ...this.profileDefaultRows,
+      {
+        key: ++this.profileDefaultRowKey,
+        profile: free.length === 1 ? (free[0] ?? '') : '',
+        serviceAccountId: '',
+      },
+    ];
+  }
+
+  private removeProfileDefaultRow(key: number): void {
+    this.profileDefaultRows = this.profileDefaultRows.filter((row) => row.key !== key);
+  }
+
+  private serviceAccountLabel(id: string): string {
+    const sa = this.gcpServiceAccounts.find((s) => s.id === id);
+    return sa ? sa.displayName || sa.email : id;
+  }
+
+  /** The hub default mode and account, when the resolved endpoint reports them. */
+  private get hubGCPIdentityDefault(): { mode: string; serviceAccountId: string } {
+    const mode = this.resolvedSettings['scion.io/default-gcp-identity-mode'];
+    const sa = this.resolvedSettings['scion.io/default-gcp-identity-service-account-id'];
+    return {
+      mode: mode?.hubDefault === 'present' && mode.hubValue ? String(mode.hubValue) : '',
+      serviceAccountId: sa?.hubDefault === 'present' && sa.hubValue ? String(sa.hubValue) : '',
+    };
+  }
+
+  private describeEffectiveIdentity(e: EffectiveIdentity, kubernetes: boolean): string {
+    const what =
+      e.mode === 'assign'
+        ? `Assign ${this.serviceAccountLabel(e.serviceAccountId)}`
+        : e.mode === 'passthrough'
+          ? 'Passthrough'
+          : e.mode === 'block'
+            ? 'Block'
+            : kubernetes
+              ? 'No identity set (the Kubernetes runtime applies its default)'
+              : 'No identity set (the runtime applies its default)';
+    switch (e.source) {
+      case 'profile':
+        return `${what} (this profile's default)`;
+      case 'project':
+        return `${what} (project default)`;
+      case 'hub':
+        return `${what} (hub default)`;
+      default:
+        return what;
+    }
+  }
+
+  private renderProfileDefaultMessages(
+    messages: readonly string[],
+    kind: 'error' | 'warning'
+  ): TemplateResult[] {
+    return messages.map((m) =>
+      kind === 'error'
+        ? html`<span class="field-help field-help-error profile-default-error" role="alert"
+            >${m}</span
+          >`
+        : html`<sl-alert class="profile-default-warning" variant="warning" open>
+            <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
+            ${m}
+          </sl-alert>`
+    );
+  }
+
+  /**
+   * The per-profile default service account editor and the identity each
+   * known profile resolves to (ptone/scion#3947).
+   */
+  private renderProfileDefaults(canEdit: boolean): TemplateResult {
+    const rows = this.profileDefaultRows;
+    const known = this.knownBrokerProfiles;
+    const knownNames = new Set(known.map((p) => p.name));
+    const errors = this.profileDefaultErrors;
+    const warnings = this.profileDefaultWarnings;
+    const missing = profilesMissingDefault(rows, known);
+    const dirty = this.profileDefaultsDirty;
+    const canAdd =
+      canEdit &&
+      profileOptionsForRow({ key: -1, profile: '', serviceAccountId: '' }, rows, known).length > 0;
+    const project = {
+      mode: this.configDefaultGCPIdentityMode,
+      serviceAccountId:
+        this.configDefaultGCPIdentityMode === 'assign' ? this.configDefaultGCPIdentitySAID : '',
+    };
+    const hub = this.hubGCPIdentityDefault;
+    const currentMap = mapFromRows(rows);
+    // The effective view lists every reported profile, plus any profile a
+    // row names that no broker reports.
+    const effectiveProfiles: KnownProfile[] = [
+      ...known,
+      ...rows
+        .filter((r) => r.profile && !knownNames.has(r.profile))
+        .map((r) => ({ name: r.profile, types: [], kubernetes: false })),
+    ];
+
+    return html`
+      <div class="config-field profile-defaults" data-field=${PROFILE_DEFAULTS_FIELD}>
+        <label id="profile-defaults-label">Per-profile default service accounts</label>
+        <span class="field-help"
+          >A default for one runtime profile wins over the project default above for agents that run
+          under that profile and choose no identity. Only verified service accounts are
+          offered.</span
+        >
+        ${rows.length > 0
+          ? html`
+              <div
+                class="profile-default-rows"
+                role="group"
+                aria-labelledby="profile-defaults-label"
+              >
+                ${rows.map((row) => this.renderProfileDefaultRow(row, canEdit, dirty))}
+              </div>
+            `
+          : html`<span class="field-help profile-defaults-empty"
+              >No per-profile defaults. Every profile uses the project default.</span
+            >`}
+        ${this.renderProfileDefaultMessages(errors.general, 'error')}
+        ${this.renderProfileDefaultMessages(warnings.general, 'warning')}
+        ${missing.length > 0
+          ? html`<sl-alert class="profile-default-sibling-warning" variant="warning" open>
+              <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
+              ${missing.length === 1
+                ? html`Kubernetes profile "${missing[0]}" has no per-profile default while another
+                  profile has one, so its agents use the project default. That identity may not be
+                  mapped on that profile's cluster.`
+                : html`Kubernetes profiles ${missing.map((p) => `"${p}"`).join(', ')} have no
+                  per-profile default while another profile has one, so their agents use the project
+                  default. That identity may not be mapped on those clusters.`}
+            </sl-alert>`
+          : nothing}
+        <div>
+          <sl-button
+            class="profile-default-add"
+            size="small"
+            ?disabled=${!canAdd}
+            @click=${() => this.addProfileDefaultRow()}
+          >
+            <sl-icon slot="prefix" name="plus-lg"></sl-icon>
+            Add profile default
+          </sl-button>
+        </div>
+        ${effectiveProfiles.length > 0
+          ? html`
+              <div class="profile-effective">
+                <span class="profile-effective-title">Effective default identity per profile</span>
+                <table class="profile-effective-table">
+                  <thead>
+                    <tr>
+                      <th scope="col">Profile</th>
+                      <th scope="col">New agents get</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    ${effectiveProfiles.map(
+                      (p) => html`
+                        <tr data-profile=${p.name}>
+                          <td>${p.name}</td>
+                          <td>
+                            ${this.describeEffectiveIdentity(
+                              effectiveIdentityForProfile(p.name, currentMap, project, hub),
+                              p.kubernetes
+                            )}
+                          </td>
+                        </tr>
+                      `
+                    )}
+                  </tbody>
+                </table>
+                <span class="field-help"
+                  >For agents that choose no identity. Unsaved edits are included.</span
+                >
+              </div>
+            `
+          : nothing}
+      </div>
+    `;
+  }
+
+  private renderProfileDefaultRow(
+    row: ProfileDefaultRow,
+    canEdit: boolean,
+    dirty: boolean
+  ): TemplateResult {
+    const rows = this.profileDefaultRows;
+    const known = this.knownBrokerProfiles;
+    const problem = rowProblem(row, rows);
+    const rowErrors = row.profile ? (this.profileDefaultErrors.byProfile[row.profile] ?? []) : [];
+    const rowWarnings = row.profile
+      ? (this.profileDefaultWarnings.byProfile[row.profile] ?? [])
+      : [];
+    const options = profileOptionsForRow(row, rows, known);
+    const saOptions = serviceAccountOptionsForProfile(this.gcpServiceAccounts, row.profile);
+    const savedSAMissing =
+      row.serviceAccountId !== '' && !saOptions.some((sa) => sa.id === row.serviceAccountId);
+    const reported = known.some((k) => k.name === row.profile);
+    return html`
+      <div class="profile-default-row" data-profile=${row.profile}>
+        <div class="profile-default-inputs">
+          <sl-select
+            class="profile-default-profile"
+            label="Profile"
+            placeholder="Select a profile"
+            value=${row.profile}
+            ?disabled=${!canEdit}
+            @sl-change=${(e: Event) => {
+              this.updateProfileDefaultRow(row.key, {
+                profile: (e.target as HTMLSelectElement).value,
+              });
+            }}
+          >
+            ${options.map((name) => {
+              const p = known.find((k) => k.name === name);
+              const note = p
+                ? p.types.length > 0
+                  ? html` <small>(${p.types.join(', ')})</small>`
+                  : nothing
+                : html` <small>(not reported by any broker)</small>`;
+              return html`<sl-option value=${name}>${name}${note}</sl-option>`;
+            })}
+          </sl-select>
+          <sl-select
+            class="profile-default-sa"
+            label="Service account"
+            placeholder="Select a verified service account"
+            value=${row.serviceAccountId}
+            ?disabled=${!canEdit}
+            @sl-change=${(e: Event) => {
+              this.updateProfileDefaultRow(row.key, {
+                serviceAccountId: (e.target as HTMLSelectElement).value,
+              });
+            }}
+          >
+            ${saOptions.map(
+              (sa) => html`
+                <sl-option value=${sa.id}>
+                  ${sa.displayName || sa.email}
+                  <small>(${sa.email})</small>${sa.scope === 'hub' ? ' (Hub)' : ''}
+                </sl-option>
+              `
+            )}
+            ${savedSAMissing
+              ? html`<sl-option value=${row.serviceAccountId}
+                  >${row.serviceAccountId}
+                  <small>(not a verified account in this project)</small></sl-option
+                >`
+              : nothing}
+          </sl-select>
+          <sl-icon-button
+            class="profile-default-remove"
+            name="trash"
+            label=${row.profile
+              ? `Remove the default for profile ${row.profile}`
+              : 'Remove this row'}
+            ?disabled=${!canEdit}
+            @click=${() => this.removeProfileDefaultRow(row.key)}
+          ></sl-icon-button>
+        </div>
+        ${row.profile && !reported && known.length > 0
+          ? html`<span class="field-help"
+              >No broker linked to this project reports profile "${row.profile}".</span
+            >`
+          : nothing}
+        ${problem && dirty
+          ? html`<span class="field-help field-help-error profile-default-problem"
+              >${problem}</span
+            >`
+          : nothing}
+        ${this.renderProfileDefaultMessages(rowErrors, 'error')}
+        ${this.renderProfileDefaultMessages(rowWarnings, 'warning')}
+      </div>
+    `;
+  }
+
   private async loadHarnessConfigs(): Promise<void> {
     try {
       const response = await apiFetch(
@@ -1612,9 +2134,28 @@ export class ScionPageProjectSettings extends LitElement {
   }
 
   private async handleSaveConfig(): Promise<void> {
-    this.settingsSaving = true;
     this.settingsError = null;
     this.settingsSuccess = null;
+    this.profileDefaultErrors = { byProfile: {}, general: [] };
+    this.profileDefaultWarnings = { byProfile: {}, general: [] };
+
+    this.countLimitWarnings = [];
+    if (Object.keys(this.countLimitErrors).length > 0) {
+      this.settingsError =
+        'Fix the default count limits: each must be a whole number greater than 0, Unlimited, or empty.';
+      return;
+    }
+
+    const profileDefaultsDirty = this.profileDefaultsDirty;
+    if (
+      profileDefaultsDirty &&
+      this.profileDefaultRows.some((row) => rowProblem(row, this.profileDefaultRows))
+    ) {
+      this.settingsError = 'Complete or remove the incomplete per-profile default rows.';
+      return;
+    }
+
+    this.settingsSaving = true;
 
     try {
       // Build default resources if any field is set
@@ -1650,10 +2191,14 @@ export class ScionPageProjectSettings extends LitElement {
           : this.defaultModelSelection;
 
       // The PUT keeps any field the body leaves out, so every field this
-      // page manages is sent: "" / 0 / {} clears it, and null resets a
+      // page manages is sent: "" / {} clears it, and null resets a
       // tri-state field (telemetry, auto-expose, thinking level) to inherit.
-      // Fields this page does not manage (activeProfile, the per-profile
-      // service account map) are left out so a save keeps them.
+      // The count limits are sent only when changed: null for inherit, 0
+      // for Unlimited, n for a limit (ptone/scion#3925).
+      // activeProfile, which this page does not manage, is left out so a
+      // save keeps it. The per-profile service account map is replaced as a
+      // whole when present, so it is sent only when its rows changed ({}
+      // clears it); otherwise it is left out and kept as stored.
       const body: ProjectSettings = {
         defaultTemplate: this.configDefaultTemplate || '',
         defaultHarnessConfig: this.configDefaultHarnessConfig || '',
@@ -1661,8 +2206,6 @@ export class ScionPageProjectSettings extends LitElement {
         defaultModel: defaultModel || '',
         telemetryEnabled: this.configTelemetryEnabled,
         autoExposePortsEnabled: this.configAutoExposePortsEnabled,
-        defaultMaxTurns: this.configDefaultMaxTurns || 0,
-        defaultMaxModelCalls: this.configDefaultMaxModelCalls || 0,
         defaultMaxDuration: this.configDefaultMaxDuration || '',
         defaultResources: defaultResources ?? {},
         defaultThinkingLevel: this.defaultThinkingLevel,
@@ -1674,6 +2217,15 @@ export class ScionPageProjectSettings extends LitElement {
         maxAgentRole: this.configMaxAgentRole || '',
         defaultAgentRole: this.configDefaultAgentRole || '',
       };
+      if (this.configDefaultMaxTurns !== this.loadedDefaultMaxTurns) {
+        body.defaultMaxTurns = this.configDefaultMaxTurns;
+      }
+      if (this.configDefaultMaxModelCalls !== this.loadedDefaultMaxModelCalls) {
+        body.defaultMaxModelCalls = this.configDefaultMaxModelCalls;
+      }
+      if (profileDefaultsDirty) {
+        body.defaultGCPIdentityServiceAccountIDByProfile = mapFromRows(this.profileDefaultRows);
+      }
 
       const response = await apiFetch(`/api/v1/projects/${this.projectId}/settings`, {
         method: 'PUT',
@@ -1682,11 +2234,40 @@ export class ScionPageProjectSettings extends LitElement {
       });
 
       if (!response.ok) {
+        if (profileDefaultsDirty) {
+          try {
+            this.profileDefaultErrors = profileErrorsFromBody(await response.clone().json());
+          } catch {
+            // Not JSON: the page-level message below still reports it.
+          }
+        }
         throw new Error(await extractApiError(response, `Failed to save: HTTP ${response.status}`));
       }
 
-      this.settings = (await response.json()) as ProjectSettings;
-      this.settingsSuccess = 'Configuration saved.';
+      const saved = (await response.json()) as ProjectSettings & { warnings?: unknown };
+      const { warnings, ...savedSettings } = saved;
+      this.settings = savedSettings;
+      this.loadProfileDefaultRows(savedSettings.defaultGCPIdentityServiceAccountIDByProfile);
+      // The saved values are the new baseline, so the next save compares
+      // against them and sends only what changes after this one.
+      this.configDefaultMaxTurns = countLimitOrNull(savedSettings.defaultMaxTurns);
+      this.configDefaultMaxModelCalls = countLimitOrNull(savedSettings.defaultMaxModelCalls);
+      this.loadedDefaultMaxTurns = this.configDefaultMaxTurns;
+      this.loadedDefaultMaxModelCalls = this.configDefaultMaxModelCalls;
+      const allWarnings: unknown[] = Array.isArray(warnings) ? warnings : [];
+      this.countLimitWarnings = allWarnings.filter(isCountLimitWarningValue);
+      const otherWarnings = allWarnings.filter(
+        (w): w is string => typeof w === 'string' && !isCountLimitWarning(w)
+      );
+      this.profileDefaultWarnings = splitProfileWarnings(otherWarnings);
+      const warningCount =
+        Object.values(this.profileDefaultWarnings.byProfile).flat().length +
+        this.profileDefaultWarnings.general.length +
+        this.countLimitWarnings.length;
+      this.settingsSuccess =
+        warningCount > 0
+          ? 'Configuration saved, with warnings (see above).'
+          : 'Configuration saved.';
     } catch (err) {
       console.error('Failed to save project settings:', err);
       this.settingsError = err instanceof Error ? err.message : 'Failed to save settings';
@@ -2634,6 +3215,7 @@ export class ScionPageProjectSettings extends LitElement {
                     </div>
                   `
                 : ''}
+              ${this.renderProfileDefaults(canEdit)}
             </div>
           </sl-tab-panel>
 
@@ -2643,50 +3225,31 @@ export class ScionPageProjectSettings extends LitElement {
                 >Applied to new agents unless overridden by template or agent config.</span
               >
 
-              <div
-                class="config-field ${this.isHubDefault('scion.io/default-max-turns')
-                  ? 'hub-inherited'
-                  : ''}"
-              >
-                <label
-                  >Default Max Turns ${this.renderHubIndicator('scion.io/default-max-turns')}</label
-                >
-                <sl-input
-                  type="number"
-                  placeholder=${this.hubHint('scion.io/default-max-turns') || 'No limit'}
-                  .value=${this.configDefaultMaxTurns ? String(this.configDefaultMaxTurns) : ''}
-                  ?disabled=${!canEdit}
-                  @sl-input=${(e: Event) => {
-                    this.configDefaultMaxTurns =
-                      parseInt((e.target as HTMLInputElement).value) || 0;
-                  }}
-                ></sl-input>
-                <span class="field-help">Maximum conversation turns per agent.</span>
-              </div>
-
-              <div
-                class="config-field ${this.isHubDefault('scion.io/default-max-model-calls')
-                  ? 'hub-inherited'
-                  : ''}"
-              >
-                <label
-                  >Default Max Model Calls
-                  ${this.renderHubIndicator('scion.io/default-max-model-calls')}</label
-                >
-                <sl-input
-                  type="number"
-                  placeholder=${this.hubHint('scion.io/default-max-model-calls') || 'No limit'}
-                  .value=${this.configDefaultMaxModelCalls
-                    ? String(this.configDefaultMaxModelCalls)
-                    : ''}
-                  ?disabled=${!canEdit}
-                  @sl-input=${(e: Event) => {
-                    this.configDefaultMaxModelCalls =
-                      parseInt((e.target as HTMLInputElement).value) || 0;
-                  }}
-                ></sl-input>
-                <span class="field-help">Maximum LLM API calls per agent.</span>
-              </div>
+              ${this.renderCountLimitField(
+                'Default Max Turns',
+                'scion.io/default-max-turns',
+                this.configDefaultMaxTurns,
+                (v) => (this.configDefaultMaxTurns = v),
+                'Maximum conversation turns per agent.',
+                canEdit
+              )}
+              ${this.renderCountLimitField(
+                'Default Max Model Calls',
+                'scion.io/default-max-model-calls',
+                this.configDefaultMaxModelCalls,
+                (v) => (this.configDefaultMaxModelCalls = v),
+                'Maximum LLM API calls per agent.',
+                canEdit
+              )}
+              ${this.countLimitWarnings.map(
+                (w) =>
+                  html`<div
+                    class="field-help count-limit-warning"
+                    style="color: var(--sl-color-warning-700);"
+                  >
+                    ${w}
+                  </div>`
+              )}
 
               <div
                 class="config-field ${this.isHubDefault('scion.io/default-max-duration')

@@ -48,14 +48,14 @@ func TestFindTemplateInProjectPath_WorkspaceRootUsesScionTemplates(t *testing.T)
 	}
 
 	for _, projectPath := range []string{root, filepath.Join(root, ".scion")} {
-		tpl, err := FindTemplateInProjectPath("in-scion", projectPath)
+		tpl, err := FindTemplateInProjectPath(context.Background(), "in-scion", projectPath)
 		if err != nil {
 			t.Fatalf("%s: in-scion: %v", projectPath, err)
 		}
 		if tpl.Scope != "project" || !strings.HasPrefix(tpl.Path, resolvedScion) && !strings.HasPrefix(tpl.Path, filepath.Join(root, ".scion")) {
 			t.Errorf("%s: in-scion = %+v, want the project template under .scion", projectPath, tpl)
 		}
-		if tpl, err := FindTemplateInProjectPath("at-root", projectPath); err == nil {
+		if tpl, err := FindTemplateInProjectPath(context.Background(), "at-root", projectPath); err == nil {
 			t.Errorf("%s: at-root resolved to %+v; the workspace root's templates/ is not a template source", projectPath, tpl)
 		}
 	}
@@ -63,7 +63,7 @@ func TestFindTemplateInProjectPath_WorkspaceRootUsesScionTemplates(t *testing.T)
 	// A workspace-root template does not shadow a global one of the same
 	// name.
 	mkTemplate(t, filepath.Join(home, ".scion", "templates", "at-root"))
-	tpl, err := FindTemplateInProjectPath("at-root", root)
+	tpl, err := FindTemplateInProjectPath(context.Background(), "at-root", root)
 	if err != nil || tpl.Scope != "global" {
 		t.Errorf("at-root = (%+v, %v), want the global template", tpl, err)
 	}
@@ -75,7 +75,7 @@ func TestFindTemplateInProjectPath_PlainPathUnchanged(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	dir := filepath.Join(t.TempDir(), "configs")
 	mkTemplate(t, filepath.Join(dir, "templates", "t1"))
-	tpl, err := FindTemplateInProjectPath("t1", dir)
+	tpl, err := FindTemplateInProjectPath(context.Background(), "t1", dir)
 	if err != nil || tpl.Scope != "project" || tpl.Path != filepath.Join(dir, "templates", "t1") {
 		t.Errorf("t1 = (%+v, %v)", tpl, err)
 	}
@@ -122,7 +122,7 @@ func TestFindTemplateInProjectPath_HubWorkspaceWithoutScion(t *testing.T) {
 	t.Setenv("HOME", home)
 	root := filepath.Join(home, ".scion", "projects", "proj")
 	mkTemplate(t, filepath.Join(root, "templates", "at-root"))
-	if tpl, err := FindTemplateInProjectPath("at-root", root); err == nil {
+	if tpl, err := FindTemplateInProjectPath(context.Background(), "at-root", root); err == nil {
 		t.Errorf("at-root resolved to %+v; a hub workspace root without .scion has no project tier", tpl)
 	}
 	w := LegacyProjectTemplatesWarning(root)
@@ -132,7 +132,7 @@ func TestFindTemplateInProjectPath_HubWorkspaceWithoutScion(t *testing.T) {
 	// Outside the hub projects directory the path is used as given.
 	plain := filepath.Join(t.TempDir(), "configs")
 	mkTemplate(t, filepath.Join(plain, "templates", "t1"))
-	if tpl, err := FindTemplateInProjectPath("t1", plain); err != nil || tpl.Scope != "project" {
+	if tpl, err := FindTemplateInProjectPath(context.Background(), "t1", plain); err != nil || tpl.Scope != "project" {
 		t.Errorf("t1 = (%+v, %v)", tpl, err)
 	}
 }

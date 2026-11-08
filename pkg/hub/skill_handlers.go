@@ -61,10 +61,15 @@ type CreateSkillResponse struct {
 
 // ListSkillsResponse is the response for listing skills.
 type ListSkillsResponse struct {
-	Skills       []SkillWithCapabilities `json:"skills"`
-	NextCursor   string                  `json:"nextCursor,omitempty"`
-	TotalCount   int                     `json:"totalCount"`
-	Capabilities *Capabilities           `json:"_capabilities,omitempty"`
+	Skills     []SkillWithCapabilities `json:"skills"`
+	NextCursor string                  `json:"nextCursor,omitempty"`
+	TotalCount int                     `json:"totalCount"`
+	// TotalCountApproximate marks TotalCount as a lower bound: set when a
+	// per-item list's candidate pool crossed authorizedListMaxCandidates
+	// before the count scan finished. Only the agent delegated
+	// credential's list sets it.
+	TotalCountApproximate bool          `json:"totalCountApproximate,omitempty"`
+	Capabilities          *Capabilities `json:"_capabilities,omitempty"`
 }
 
 // SkillWithCapabilities wraps a store.Skill with capability annotations.
@@ -257,6 +262,14 @@ func (s *Server) listSkills(w http.ResponseWriter, r *http.Request) {
 	}
 
 	identity := GetIdentityFromContext(ctx)
+
+	// An agent delegated credential takes its scope only from the delegated
+	// list arm; no project.list scope is resolved for it
+	// (.design/agent-delegation.md §11.8).
+	if d, ok := identity.(*DelegatedAgentIdentity); ok && d != nil {
+		s.listSkillsDelegated(w, r, d, filter)
+		return
+	}
 
 	// A user access token lists skills only when its ceiling carries
 	// skill.list and skill.list is eligible for its boundary kind. Without
@@ -1129,7 +1142,7 @@ func (s *Server) publishSkillVersion(w http.ResponseWriter, r *http.Request, ski
 			uploadURLs, _, err := generateUploadURLs(ctx, stor, versionPath, req.Files)
 			if err == nil && len(uploadURLs) > 0 {
 				if stor.Provider() == storage.ProviderLocal {
-					hubURL := requestBaseURL(r)
+					hubURL := s.requestBaseURL(r)
 					uploadURLs = rewriteLocalUploadURLs(uploadURLs, hubURL, "skills", skillID)
 					uploadURLs = withSkillVersionUploadQuery(uploadURLs, req.Version)
 				}
@@ -1407,7 +1420,7 @@ func (s *Server) handleSkillUpload(w http.ResponseWriter, r *http.Request, skill
 	}
 
 	if stor.Provider() == storage.ProviderLocal {
-		hubURL := requestBaseURL(r)
+		hubURL := s.requestBaseURL(r)
 		uploadURLs = rewriteLocalUploadURLs(uploadURLs, hubURL, "skills", skillID)
 		uploadURLs = withSkillVersionUploadQuery(uploadURLs, req.Version)
 	}
@@ -1525,7 +1538,12 @@ func (s *Server) handleSkillFinalize(w http.ResponseWriter, r *http.Request, ski
 		if writeInvalidFilePathError(w, err) {
 			return
 		}
-		ValidationError(w, err.Error(), nil)
+		var notFound *fileNotFoundError
+		if errors.As(err, &notFound) {
+			ValidationError(w, err.Error(), nil)
+			return
+		}
+		writeErrorFromErr(w, err, "")
 		return
 	}
 
@@ -1599,7 +1617,7 @@ func (s *Server) handleSkillDownload(w http.ResponseWriter, r *http.Request, ski
 	}
 
 	if stor.Provider() == storage.ProviderLocal {
-		hubURL := requestBaseURL(r)
+		hubURL := s.requestBaseURL(r)
 		downloadURLs = rewriteLocalDownloadURLs(downloadURLs, hubURL, "skills", skillID)
 		downloadURLs = withSkillVersionDownloadQuery(downloadURLs, sv.Version)
 	}
@@ -1761,7 +1779,7 @@ func (s *Server) handleSkillsResolve(w http.ResponseWriter, r *http.Request) {
 
 		baseURL := ""
 		if stor != nil && stor.Provider() == storage.ProviderLocal {
-			baseURL = requestBaseURL(r)
+			baseURL = s.requestBaseURL(r)
 		}
 		entry, resolveErr := s.resolveRegistrySkillRef(ctx, GetIdentityFromContext(ctx), skillRef.URI, uri,
 			req.ProjectID, req.UserID, baseURL)

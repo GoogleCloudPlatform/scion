@@ -31,6 +31,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/maintenance"
+	"github.com/GoogleCloudPlatform/scion/pkg/preflight"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
@@ -64,6 +65,12 @@ func (s *Server) handleAdminMaintenanceOps(w http.ResponseWriter, r *http.Reques
 	// Parse: {key}, {key}/run, {key}/runs, {key}/runs/{runId}
 	parts := strings.SplitN(subPath, "/", 3)
 	key := parts[0]
+
+	// An operation of an experiment that is off does not exist.
+	if !s.maintenanceOperationAvailable(key) {
+		writeError(w, http.StatusNotFound, ErrCodeNotFound, "Operation not found", nil)
+		return
+	}
 
 	if len(parts) == 1 {
 		if r.Method != http.MethodGet {
@@ -358,6 +365,10 @@ func (s *Server) resolveMaintenanceExecutor(key string) (MaintenanceExecutor, er
 		return &ProjectStorageMigrateExecutor{srv: s}, nil
 	case entadapter.ChatStarReconcileKey:
 		return &ChatStarReconcileExecutor{srv: s}, nil
+	case entadapter.ChatRetentionPreviewKey:
+		return &ChatRetentionPreviewExecutor{srv: s}, nil
+	case entadapter.ChatRetentionRunKey:
+		return &ChatRetentionRunExecutor{srv: s}, nil
 	case "pull-images":
 		log.Debug("Resolved pull-images executor",
 			"runtime_bin", mc.RuntimeBin, "registry", config.RedactImageRegistry(s.maintenanceImageRegistry()),
@@ -369,15 +380,19 @@ func (s *Server) resolveMaintenanceExecutor(key string) (MaintenanceExecutor, er
 			Harnesses:  mc.Harnesses,
 		}), nil
 	case "rebuild-server":
+		installer := s.updateInstaller()
 		log.Debug("Resolved rebuild-server executor",
 			"repo_path", mc.RepoPath, "branch", mc.RepoBranch,
-			"binary_dest", mc.BinaryDest, "service_name", mc.ServiceName)
+			"installer", installer.Name(), "service_name", mc.ServiceName)
 		return NewRebuildServerExecutor(RebuildServerOptions{
-			RepoPath:    mc.RepoPath,
-			RepoBranch:  mc.RepoBranch,
-			BinaryDest:  mc.BinaryDest,
-			ServiceName: mc.ServiceName,
-			Store:       s.store,
+			RepoPath:      mc.RepoPath,
+			RepoBranch:    mc.RepoBranch,
+			ServiceName:   mc.ServiceName,
+			Installer:     installer,
+			Releases:      s.updateReleaseSource(),
+			Snapshotter:   s.updateSnapshotter(context.Background()),
+			Store:         s.store,
+			SettingsCheck: s.requiredSettingsCheck,
 		}), nil
 	case "rebuild-web":
 		log.Debug("Resolved rebuild-web executor", "repo_path", mc.RepoPath, "branch", mc.RepoBranch)
@@ -405,14 +420,24 @@ func (s *Server) resolveMaintenanceExecutor(key string) (MaintenanceExecutor, er
 		log.Debug("Resolved update-binary executor",
 			"installer", installer.Name(), "github_repo", mc.GitHubRepo)
 		return NewBinaryUpdateExecutor(BinaryUpdateOptions{
-			GitHubRepo: mc.GitHubRepo,
-			Installer:  installer,
-			Releases:   s.updateReleaseSource(),
-			Catalog:    s.updateReleaseCatalog(),
+			GitHubRepo:    mc.GitHubRepo,
+			Installer:     installer,
+			Releases:      s.updateReleaseSource(),
+			Catalog:       s.updateReleaseCatalog(),
+			Snapshotter:   s.updateSnapshotter(context.Background()),
+			SettingsCheck: s.requiredSettingsCheck,
+			PluginDir:     updatePluginDir(),
 		}), nil
 	default:
 		return nil, fmt.Errorf("no executor registered for operation %q", key)
 	}
+}
+
+// requiredSettingsCheck lists the required settings the server config the
+// hub was started with (ConfigPath) leaves unset, for the update
+// operations' "Settings check" log section: warnings only.
+func (s *Server) requiredSettingsCheck() []preflight.Finding {
+	return preflight.LoadRequiredSettingsFindings(s.config.ConfigPath)
 }
 
 // executeOperation starts execution of a routine operation by key.
@@ -484,6 +509,12 @@ func (s *Server) executeOperation(w http.ResponseWriter, r *http.Request, key st
 			return
 		}
 	}
+	if stringParamOperations[key] {
+		if err := checkStringParams(body); err != nil {
+			writeMaintenanceRequestError(w, err)
+			return
+		}
+	}
 
 	// Resolve the executor.
 	executor, err := s.resolveMaintenanceExecutor(key)
@@ -498,6 +529,30 @@ func (s *Server) executeOperation(w http.ResponseWriter, r *http.Request, key st
 			log.Debug("Rejected: invalid parameters", maintenanceLogAttrs(key, "error", err)...)
 			writeMaintenanceRequestError(w, err)
 			return
+		}
+	}
+
+	// Executors that record who started them get the caller's user ID.
+	if a, ok := executor.(maintenanceActorSetter); ok {
+		a.setMaintenanceActor(user.ID())
+	}
+
+	// Checks that need a release lookup (cross-channel order, the floor of
+	// a preview or stable target, the confirmation of an older target) are
+	// answered here too, so the 409 downgrade_requires_confirmation and its
+	// risk list reach the caller instead of a failed run. A lookup that
+	// fails is not a refusal: the run repeats every check.
+	if c, ok := executor.(maintenance.TargetChecker); ok {
+		checkCtx, cancel := context.WithTimeout(ctx, maintenanceTargetCheckTimeout)
+		err := c.CheckTarget(checkCtx, params)
+		cancel()
+		if _, refused := maintenance.IsRequestError(err); refused {
+			log.Debug("Rejected: target refused", maintenanceLogAttrs(key, "error", err)...)
+			writeMaintenanceRequestError(w, err)
+			return
+		} else if err != nil {
+			log.Warn("Could not check the target before the run; the run checks it again",
+				maintenanceLogAttrs(key, "error", err)...)
 		}
 	}
 
@@ -602,6 +657,9 @@ func (s *Server) listMaintenanceOperations(w http.ResponseWriter, r *http.Reques
 	devBinaries := os.Getenv("SCION_DEV_BINARIES") != ""
 	for _, op := range ops {
 		if op.Key == "rebuild-container-binaries" && !devBinaries {
+			continue
+		}
+		if !s.maintenanceOperationAvailable(op.Key) {
 			continue
 		}
 		if op.Category == store.MaintenanceCategoryMigration {
@@ -751,10 +809,14 @@ func toMaintenanceRunResponse(run store.MaintenanceOperationRun) maintenanceRunR
 }
 
 // handleCheckForUpdates handles POST /api/v1/admin/maintenance/check-updates.
-// It dispatches to the appropriate update checker based on the deployment tier:
-//   - "binary": checks the effective channel's latest release in the release
-//     catalog (refreshed, within the catalog's throttle)
-//   - "source" (default): checks for git updates via origin fetch
+// The optional query parameter mode=release|git picks the checker (the
+// update card's mode toggle asks for the panel it shows); without it the
+// deployment tier does:
+//   - release ("binary" tier): checks the effective channel's latest
+//     release in the release catalog (refreshed, within the catalog's
+//     throttle)
+//   - git (otherwise): checks the maintenance repo for upstream commits
+//     via origin fetch
 //
 // Authorization: enforced by routeGuard via hub.maintenance.execute permission.
 func (s *Server) handleCheckForUpdates(w http.ResponseWriter, r *http.Request) {
@@ -765,8 +827,21 @@ func (s *Server) handleCheckForUpdates(w http.ResponseWriter, r *http.Request) {
 
 	mc := s.config.MaintenanceConfig
 
-	switch mc.DeploymentTier {
-	case "binary":
+	checkRelease := mc.DeploymentTier == "binary"
+	switch mode := r.URL.Query().Get("mode"); mode {
+	case "":
+	case UpdateModeRelease:
+		checkRelease = true
+	case UpdateModeGit:
+		checkRelease = false
+	default:
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+			fmt.Sprintf("invalid mode %q: expected %q or %q", mode, UpdateModeRelease, UpdateModeGit), nil)
+		return
+	}
+
+	switch {
+	case checkRelease:
 		sel, err := s.readReleaseSelection(r.Context())
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to read the release selection", nil)
@@ -803,7 +878,11 @@ func (s *Server) handleCheckForUpdates(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		result, err := CheckForUpdates(r.Context(), mc.RepoPath)
+		result, err := CheckForUpdates(r.Context(), maintenance.UpdateCheckOptions{
+			RepoPath:      mc.RepoPath,
+			Branch:        mc.RepoBranch,
+			RunningCommit: version.GetCommit(),
+		})
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 				"Failed to check for updates: "+err.Error(), nil)
@@ -815,6 +894,7 @@ func (s *Server) handleCheckForUpdates(w http.ResponseWriter, r *http.Request) {
 			"tier":             "source",
 			"update_available": result.UpdateAvailable,
 			"current_commit":   result.CurrentCommit,
+			"compared":         result.Compared,
 			"latest_commit":    result.LatestCommit,
 			"current_branch":   result.CurrentBranch,
 			"tracking_ref":     result.TrackingRef,

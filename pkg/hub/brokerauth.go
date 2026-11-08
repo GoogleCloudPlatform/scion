@@ -351,6 +351,10 @@ func capabilitiesFromStrings(names []string) *store.BrokerCapabilities {
 			caps.ChangedFields = true
 		case "clearedfields", "cleared_fields":
 			caps.ClearedFields = true
+		case "unlimitedcountlimits", "unlimited_count_limits":
+			caps.UnlimitedCountLimits = true
+		case "clearedresourcesubfields", "cleared_resource_subfields":
+			caps.ClearedResourceSubfields = true
 		case "startsinflight", "starts_in_flight":
 			caps.StartsInFlight = true
 		case "templatetiers", "template_tiers":
@@ -621,7 +625,7 @@ func (s *BrokerAuthService) createBrokerRegistration(ctx context.Context, req Cr
 		if err := hostSAClaimWriteAllowed(hostSAClaim{}, hostSAClaimOf(broker), hostSA); err != nil {
 			return nil, err
 		}
-		if err := s.store.CreateRuntimeBroker(ctx, broker); err != nil {
+		if err := s.store.CreateRuntimeBrokerClearingCredentials(ctx, broker); err != nil {
 			return nil, fmt.Errorf("failed to create runtime broker: %w", err)
 		}
 	}
@@ -814,6 +818,27 @@ var (
 // errJoinTokenNotConsumed aborts the CompleteBrokerJoin transaction when no
 // token was consumed; the reason is worked out afterwards.
 var errJoinTokenNotConsumed = errors.New("join token not consumed")
+
+// RevokeExposedJoinToken consumes the pending join token of brokerID when
+// joinToken is that token (same hash, same broker, not expired), and does
+// nothing otherwise. A join refused because it arrived unencrypted over the
+// network calls it: the token has crossed the network in the clear, so it
+// must not stay usable for a later join over TLS. A token that does not
+// match is left alone, so a request with a wrong token cannot revoke the
+// broker's real one. It reports whether a token was revoked.
+func (s *BrokerAuthService) RevokeExposedJoinToken(ctx context.Context, brokerID, joinToken string) (bool, error) {
+	if brokerID == "" || joinToken == "" {
+		return false, nil
+	}
+	err := s.store.ConsumeJoinToken(ctx, sha256Hash(joinToken), brokerID, time.Now())
+	if errors.Is(err, store.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("failed to revoke join token: %w", err)
+	}
+	return true, nil
+}
 
 // classifyUnconsumedJoinToken explains why ConsumeJoinToken matched no row,
 // with a read outside the join transaction. The read only selects the error
@@ -1009,11 +1034,28 @@ var (
 	errBrokerAuthSecretExpired    = errors.New("broker secret has expired")
 	errBrokerAuthInvalidSignature = errors.New("invalid signature")
 	errBrokerAuthNoValidSecrets   = errors.New("no valid secrets found")
+	errBrokerAuthBrokerLookup     = errors.New("failed to get runtime broker")
 	// errBrokerAuthBodyTooLarge reports a body over
 	// apiclient.MaxSignedRequestBodyBytes. Callers answer it with 413
 	// (writeBrokerAuthFailure), not 401.
 	errBrokerAuthBodyTooLarge = errors.New(apiclient.SignedBodyTooLargeMessage)
 )
+
+// requireLiveBroker refuses a request whose signature verified against a
+// stored secret when the broker's runtime_brokers row does not exist: a
+// secret authenticates only the live broker row with its ID, never an ID
+// whose row was deleted. It runs after the signature check, so a caller
+// without the secret learns nothing from it. A lookup failure is refused
+// (fail closed).
+func (s *BrokerAuthService) requireLiveBroker(ctx context.Context, brokerID string) error {
+	if _, err := s.store.GetRuntimeBroker(ctx, brokerID); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return fmt.Errorf("%w: %s", errBrokerAuthUnknownBroker, brokerID)
+		}
+		return fmt.Errorf("%w: %w", errBrokerAuthBrokerLookup, err)
+	}
+	return nil
+}
 
 // limitBrokerAuthBody bounds r's body before the verifier reads it to build
 // the canonical string. The verifiers have no response writer, so the cap is
@@ -1104,6 +1146,13 @@ func (s *BrokerAuthService) ValidateBrokerSignature(ctx context.Context, r *http
 
 	if !hmac.Equal([]byte(signature), []byte(expectedSigB64)) {
 		return nil, errBrokerAuthInvalidSignature
+	}
+
+	// The broker row must exist: checked after the signature verifies and
+	// before the nonce is recorded, so only a request that authenticates as
+	// a live broker records its nonce.
+	if err := s.requireLiveBroker(ctx, brokerID); err != nil {
+		return nil, err
 	}
 
 	// Record the nonce only for a request whose signature verified, so a
@@ -1253,6 +1302,12 @@ func (s *BrokerAuthService) ValidateBrokerSignatureWithRotation(ctx context.Cont
 		if err == nil {
 			return identity, nil
 		}
+		// A signature that verified but whose broker row is missing (or
+		// could not be read) is refused at once, not masked by trying
+		// another secret.
+		if errors.Is(err, errBrokerAuthUnknownBroker) || errors.Is(err, errBrokerAuthBrokerLookup) {
+			return nil, err
+		}
 		lastErr = err
 	}
 
@@ -1312,6 +1367,13 @@ func (s *BrokerAuthService) validateWithSecret(ctx context.Context, r *http.Requ
 
 	if !hmac.Equal([]byte(signature), []byte(expectedSigB64)) {
 		return nil, errBrokerAuthInvalidSignature
+	}
+
+	// The broker row must exist: checked after the signature verifies and
+	// before the nonce is recorded, in the same order as
+	// ValidateBrokerSignature.
+	if err := s.requireLiveBroker(ctx, brokerID); err != nil {
+		return nil, err
 	}
 
 	// Only add nonce to cache after successful validation — use DB-backed

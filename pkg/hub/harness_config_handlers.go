@@ -292,6 +292,9 @@ func (s *Server) createHarnessConfig(w http.ResponseWriter, r *http.Request) {
 		ValidationError(w, "name is required", nil)
 		return
 	}
+	if refuseNonComponentResourceName(w, req.Name) {
+		return
+	}
 	if req.Harness == "" {
 		ValidationError(w, "harness is required", nil)
 		return
@@ -399,7 +402,7 @@ func (s *Server) createHarnessConfig(w http.ResponseWriter, r *http.Request) {
 	// available. Finalize commits them.
 	if len(req.Files) > 0 && stor != nil {
 		uploadID := api.NewUUID()
-		uploadURLs, err := s.generateHarnessConfigUploadURLs(ctx, stor, hc, req.Files, uploadID, requestBaseURL(r))
+		uploadURLs, err := s.generateHarnessConfigUploadURLs(ctx, stor, hc, req.Files, uploadID, s.requestBaseURL(r))
 		if err == nil {
 			response.UploadURLs = uploadURLs
 			response.UploadID = uploadID
@@ -635,6 +638,9 @@ func (s *Server) updateHarnessConfig(w http.ResponseWriter, r *http.Request, exi
 		BadRequest(w, "Invalid request body: "+err.Error())
 		return
 	}
+	if refuseNonComponentResourceName(w, req.Name) {
+		return
+	}
 
 	// A PUT replaces only the metadata. Everything else keeps its stored
 	// value: identity, scope and ownership, the files and what is derived
@@ -789,7 +795,7 @@ func (s *Server) handleHarnessConfigUpload(w http.ResponseWriter, r *http.Reques
 	// them and commits (ptone/scion#4219). Local-storage URLs point at the
 	// hub's file endpoint with ?uploadId=, which stages only.
 	uploadID := api.NewUUID()
-	uploadURLs, err := s.generateHarnessConfigUploadURLs(ctx, stor, hc, req.Files, uploadID, requestBaseURL(r))
+	uploadURLs, err := s.generateHarnessConfigUploadURLs(ctx, stor, hc, req.Files, uploadID, s.requestBaseURL(r))
 	if err != nil {
 		if writeInvalidFilePathError(w, err) {
 			return
@@ -941,7 +947,7 @@ func (s *Server) handleHarnessConfigCheckImage(w http.ResponseWriter, r *http.Re
 	}
 
 	registry := s.resolveImageRegistry()
-	resolvedImage := config.RewriteImageRegistry(image, registry)
+	image, resolvedImage := s.hubScopeImageRefs(image, registry)
 	slog.Info("checking image status", "id", hc.ID, "image", image,
 		"resolved", config.RedactImageRegistry(resolvedImage), "registry", config.RedactImageRegistry(registry))
 
@@ -1111,7 +1117,7 @@ func (s *Server) handleHarnessConfigDownload(w http.ResponseWriter, r *http.Requ
 	// A blob row's local URLs carry the file's hash, so the raw read serves
 	// that blob even after a later commit replaced the file.
 	if stor.Provider() == storage.ProviderLocal {
-		downloadURLs = rewriteLocalBlobDownloadURLs(downloadURLs, requestBaseURL(r), "harness-configs", hc.ID, isHarnessConfigBlobLayout(hc))
+		downloadURLs = rewriteLocalBlobDownloadURLs(downloadURLs, s.requestBaseURL(r), "harness-configs", hc.ID, isHarnessConfigBlobLayout(hc))
 	}
 
 	// ContentHash names the version the URLs were signed for, so a broker
@@ -1161,6 +1167,9 @@ func (s *Server) handleHarnessConfigClone(w http.ResponseWriter, r *http.Request
 
 	if req.Name == "" {
 		ValidationError(w, "name is required", nil)
+		return
+	}
+	if refuseNonComponentResourceName(w, req.Name) {
 		return
 	}
 	if !isValidHarnessConfigScope(req.Scope) {
@@ -1503,7 +1512,7 @@ func (s *Server) handleHarnessConfigImageStatus(w http.ResponseWriter, r *http.R
 	}
 
 	registry := s.resolveImageRegistry()
-	longImage := config.RewriteImageRegistry(image, registry)
+	image, longImage := s.hubScopeImageRefs(image, registry)
 
 	shortImage := image
 	if !imagecheck.IsBareImageName(image) {
@@ -1758,7 +1767,7 @@ func (s *Server) handleHarnessConfigPullImage(w http.ResponseWriter, r *http.Req
 	}
 
 	registry := s.resolveImageRegistry()
-	pullImage := config.RewriteImageRegistry(image, registry)
+	_, pullImage := s.hubScopeImageRefs(image, registry)
 
 	brokerID := r.URL.Query().Get("broker_id")
 	if brokerID != "" {

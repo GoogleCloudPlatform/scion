@@ -71,7 +71,12 @@ func (s *Server) attachmentUploadsToArtifacts(ctx context.Context) bool {
 // (artifacts.Service.MayReadAttachments and ServeAttachment over
 // artifactHost). Admitted: a session of a user or the dev user, a user
 // access token (as its holder; the routes keep their token checks,
-// ptone/scion#4596 section 9), and an agent that may send (agentMaySend).
+// ptone/scion#4596 section 9), and an agent that may send (agentMaySend)
+// and that the artifact service serves (artifactsServeAgent, the agent
+// predicate of artifactHost.Principal). An agent whose token lacks
+// project:artifact:read (its chain ceiling withheld it) keeps the
+// AttachmentStore path: its upload answers attachment_artifacts_unavailable
+// and the probe "legacy", not a server error (ptone/scion#7362).
 func (s *Server) attachmentWriterKind(ctx context.Context) string {
 	cred, token := inboxCredentialOf(ctx)
 	if cred == inboxCredentialToken {
@@ -81,6 +86,10 @@ func (s *Server) attachmentWriterKind(ctx context.Context) string {
 		return ""
 	}
 	if cred == inboxCredentialAgent {
+		agent, _ := GetIdentityFromContext(ctx).(*agentIdentityWrapper)
+		if !artifactsServeAgent(agent) {
+			return ""
+		}
 		if _, ok := s.agentMaySend(ctx); ok {
 			return artifacts.PrincipalKindAgent
 		}

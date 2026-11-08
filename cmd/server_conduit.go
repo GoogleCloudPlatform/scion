@@ -34,6 +34,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub"
+	"github.com/GoogleCloudPlatform/scion/pkg/keyring"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/cloudrunenv"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -442,7 +443,9 @@ func conduitHopTLS(c config.HubConduitConfig) (server, client *tls.Config, err e
 }
 
 // conduitPeerAuthOptions builds the relay-peer auth options from config
-// and the environment.
+// and the environment: the shared session secret, plus the keyring file's
+// signing ring when one is loaded. The relay role builds its own options
+// (relayServerConfig) and never carries either.
 func conduitPeerAuthOptions(ctx context.Context, cfg *config.GlobalConfig, selfID string, onGCP bool) hub.ConduitPeerAuthOptions {
 	o := hub.ConduitPeerAuthOptions{
 		Mode:            cfg.Hub.Conduit.PeerAuthMode(),
@@ -452,6 +455,11 @@ func conduitPeerAuthOptions(ctx context.Context, cfg *config.GlobalConfig, selfI
 		Audience:        cfg.Hub.Conduit.PeerAudience,
 		ServiceAccounts: cfg.Hub.Conduit.PeerServiceAccounts,
 	}
+	// Managed ring mode (ptone/scion#1530 Phase 5): without a dedicated
+	// peer secret the relay-peer keys come from the keyring file's signing
+	// ring rather than from the "legacy" entry alone. Legacy mode keeps
+	// the shared secret.
+	o.SigningRing = serverSigningRingFromFile()
 	if onGCP {
 		if email, err := metadata.EmailWithContext(ctx, "default"); err == nil {
 			o.OwnServiceAccount = email
@@ -464,19 +472,24 @@ func conduitPeerAuthOptions(ctx context.Context, cfg *config.GlobalConfig, selfI
 // secret (design §3.9): it is required in external relay mode and, with
 // relayRole, on --role relay; when set, a hub refuses one equal to its
 // session secret (a relay never resolves the session secret and passes
-// ""). Strength is checked by HubConduitConfig.Validate. Errors name the
-// setting, never the value.
-func validateConduitPeerSecret(c config.HubConduitConfig, relayRole bool, sessionSecret string) error {
+// ""). In managed ring mode (ring is the keyring file's signing ring) it
+// must also differ from the secret of every signing generation
+// (relay.CheckPeerSecretNotInRing); a relay passes a nil ring. Strength is
+// checked by HubConduitConfig.Validate. Errors name the setting, never the
+// value.
+func validateConduitPeerSecret(c config.HubConduitConfig, relayRole bool, sessionSecret string, ring *keyring.SigningRing) error {
 	secret := c.PeerSecretValue() // a value that is only a newline is unset
 	switch {
 	case secret == "" && relayRole:
 		return errors.New("server.hub.conduit.peer_secret is required on --role relay")
 	case secret == "" && c.ExternalRelay():
 		return errors.New("server.hub.conduit.peer_secret is required when server.hub.conduit.relay_mode is external")
-	case secret != "" && sessionSecret != "" && secret == sessionSecret:
+	case secret == "":
+		return nil
+	case sessionSecret != "" && secret == sessionSecret:
 		return errors.New("server.hub.conduit.peer_secret must differ from the session secret")
 	}
-	return nil
+	return relay.CheckPeerSecretNotInRing(secret, ring)
 }
 
 // conduitInternalRelayAPIServed reports whether this node serves the

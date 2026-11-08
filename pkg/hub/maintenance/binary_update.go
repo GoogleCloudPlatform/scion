@@ -31,6 +31,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/preflight"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"github.com/GoogleCloudPlatform/scion/pkg/version"
 	"github.com/GoogleCloudPlatform/scion/pkg/version/update"
@@ -56,6 +57,9 @@ const (
 	ParamTargetVersion = "target_version"
 	ParamChannel       = "channel"
 	ParamPin           = "pin"
+	// ParamConfirmDowngrade must equal the resolved target tag to install
+	// an older release (a downgrade or switch-older; design D4).
+	ParamConfirmDowngrade = "confirm_downgrade"
 )
 
 // PinLatest is the pin of a hub that follows its channel's latest release
@@ -64,14 +68,24 @@ const PinLatest = "latest"
 
 // UpdateBinaryParams is the complete set of update-binary parameters. Any
 // other parameter is refused with CodeUnknownParam.
-var UpdateBinaryParams = []string{ParamTargetVersion, ParamChannel, ParamPin}
+var UpdateBinaryParams = []string{ParamTargetVersion, ParamChannel, ParamPin, ParamConfirmDowngrade}
 
 // Request error codes returned (as *RequestError) by ValidateParams and Run.
 const (
-	CodeUnknownParam             = "unknown_param"
-	CodeInvalidParam             = "invalid_param"
-	CodeAlreadyRunning           = "already_running"
-	CodeDowngradeNotYetSupported = "downgrade_not_yet_supported"
+	CodeUnknownParam   = "unknown_param"
+	CodeInvalidParam   = "invalid_param"
+	CodeAlreadyRunning = "already_running"
+	// CodeDowngradeRequiresConfirmation refuses an older target (downgrade
+	// or switch-older) whose confirm_downgrade parameter is missing or is
+	// not the resolved target tag. Its Details carry the risk list (see
+	// DowngradeDetails).
+	CodeDowngradeRequiresConfirmation = "downgrade_requires_confirmation"
+	// CodeBelowDowngradeFloor refuses a target older than the running
+	// binary's version.DowngradeFloor, whether confirmed or not.
+	CodeBelowDowngradeFloor = "below_downgrade_floor"
+	// CodeDowngradeUnsupportedDriver refuses an older target on a hub whose
+	// database cannot be snapshotted (PostgreSQL).
+	CodeDowngradeUnsupportedDriver = "downgrade_unsupported_driver"
 )
 
 // RequestError is a refusal of the requested operation that an API handler
@@ -79,6 +93,9 @@ const (
 type RequestError struct {
 	Code    string
 	Message string
+	// Details is extra machine-readable context for the API error's
+	// "details" object (nil for none).
+	Details map[string]any
 }
 
 func (e *RequestError) Error() string { return e.Message }
@@ -132,13 +149,31 @@ func CheckAllowedParams(params map[string]string, allowed []string) error {
 // PendingRestart describes an installed update whose hub restart is about to
 // be requested. It is passed to the before-restart hook.
 type PendingRestart struct {
-	From     string // running version ("" for a git build)
-	To       string // installed release tag
+	From     string // running version ("" for a git build); rebuild-server: RunningReleaseName
+	To       string // installed release tag, or git-<sha12> for a rebuild from Git
 	Strategy string // Installer.Name()
-	Snapshot string // database snapshot path; always "" until snapshots exist
+	// Mode is UpdateModeRelease (update-binary) or UpdateModeGit
+	// (rebuild-server). Boot reconciliation records it in the selection.
+	Mode string
+	// Commit is the full commit id of a rebuild from Git ("" for a
+	// release).
+	Commit   string
+	Snapshot string // database snapshot path; "" when none could be taken (PostgreSQL)
 	Channel  string // the installed release's channel
 	Pin      string // PinLatest or the installed tag (the pin parameter)
+	// FromPublishedAt is the publish date of a preview or stable From
+	// (zero for a nightly, which carries its date, a git build, or when the
+	// lookup failed). It goes into the update-state file for the target's
+	// previous_safe computation.
+	FromPublishedAt time.Time
 }
+
+// Update modes: how the hub binary is obtained. The release selection and
+// update-status report them.
+const (
+	UpdateModeRelease = "release"
+	UpdateModeGit     = "git"
+)
 
 // BeforeRestartFunc runs after the new binary is activated and before the
 // hub is restarted. The runner implements it to persist the run (status
@@ -157,6 +192,10 @@ type RestartingExecutor interface {
 // BinaryUpdateOptions configures a BinaryUpdateExecutor. Zero values take
 // the documented defaults.
 type BinaryUpdateOptions struct {
+	// SettingsCheck, when set, lists the required settings that are unset
+	// (preflight.LoadRequiredSettingsFindings); Run writes them to the log
+	// as warnings and goes on. nil skips the section.
+	SettingsCheck func() []preflight.Finding
 	// GitHubRepo is the release repository (owner/name); default
 	// DefaultGitHubRepo.
 	GitHubRepo string
@@ -182,24 +221,44 @@ type BinaryUpdateOptions struct {
 	// DownloadTimeout bounds resolve + download + verify; default
 	// DefaultDownloadTimeout.
 	DownloadTimeout time.Duration
+	// Snapshotter takes the database snapshot before every update. nil
+	// means snapshots are unsupported: upgrades go ahead without one and
+	// older targets are refused (CodeDowngradeUnsupportedDriver).
+	Snapshotter DBSnapshotter
+	// DowngradeFloor is the oldest installable release; default
+	// version.DowngradeFloor.
+	DowngradeFloor string
+	// PluginDir is the broker plugin directory whose plugins are updated
+	// with the hub (~/.scion/plugins/broker; design D6). "" disables
+	// plugin lockstep.
+	PluginDir string
 }
 
 // BinaryUpdateExecutor installs one verified release tag of GitHubRepo
 // through an Installer:
 //
-//  1. validate params (target_version only; see ValidateParams);
+//  1. validate params (see ValidateParams);
 //  2. Installer.Preflight, before any network access;
 //  3. resolve latest:<channel> through the release catalog, look the
-//     release up with a single-tag API lookup and refuse same or older
-//     targets;
+//     release up with a single-tag API lookup and refuse the running
+//     version, targets below the downgrade floor and older targets without
+//     confirm_downgrade (checkTarget);
 //  4. download the tarball and SHA256SUMS from the pinned release URL
 //     (redirects only to *.githubusercontent.com, size and time capped) and
 //     verify the tarball's own checksum line;
 //  5. extract only `scion` and check `scion version --format json`;
-//  6. Installer.Stage, Installer.Activate, the before-restart hook,
-//     Installer.Restart. If the hook or Restart fails, an installer that
-//     implements Deactivator (symlink) is rolled back so nothing changed;
-//     sudo-install cannot be, and its error says the new binary stays.
+//  6. download, verify and extract the target's builds of the broker
+//     plugins installed in PluginDir (preparePlugins; plugin lockstep,
+//     design D6), with the same pin, SHA256SUMS and caps;
+//  7. snapshot the database (DBSnapshotter; skipped, with a log line, when
+//     unsupported) and pass its path to the before-restart hook;
+//  8. Installer.Stage, plugin retention under releases/<tag>/plugins/
+//     (PluginRetainer installers), Installer.Activate, the plugin swap,
+//     the before-restart hook, Installer.Restart. If the plugin swap, the
+//     hook or Restart fails, an installer that implements Deactivator
+//     (symlink) is rolled back, and then the plugins too, so nothing
+//     changed; sudo-install cannot be, and its error says the new binary
+//     (and plugins) stay.
 //
 // Preflight, install, the hook and Restart each run under a short deadline
 // derived from the run ctx, the download phase under DownloadTimeout.
@@ -215,6 +274,10 @@ type BinaryUpdateExecutor struct {
 	buildTime  time.Time
 	maxBytes   int64
 	timeout    time.Duration
+	snapshots  DBSnapshotter
+	floor      string
+	settings   func() []preflight.Finding
+	pluginDir  string
 
 	// Per-step deadlines after the download phase.
 	preflightTimeout time.Duration
@@ -243,6 +306,10 @@ func NewBinaryUpdateExecutor(opts BinaryUpdateOptions) *BinaryUpdateExecutor {
 		buildTime:  opts.CurrentBuildTime,
 		maxBytes:   opts.MaxDownloadBytes,
 		timeout:    opts.DownloadTimeout,
+		snapshots:  opts.Snapshotter,
+		floor:      opts.DowngradeFloor,
+		settings:   opts.SettingsCheck,
+		pluginDir:  opts.PluginDir,
 	}
 	if e.repo == "" {
 		e.repo = DefaultGitHubRepo
@@ -276,6 +343,12 @@ func NewBinaryUpdateExecutor(opts BinaryUpdateOptions) *BinaryUpdateExecutor {
 	if e.timeout <= 0 {
 		e.timeout = DefaultDownloadTimeout
 	}
+	if e.snapshots == nil {
+		e.snapshots = NewUnsupportedDBSnapshotter("no database snapshotter is configured")
+	}
+	if e.floor == "" {
+		e.floor = version.DowngradeFloor
+	}
 	e.preflightTimeout = preflightTimeout
 	e.installTimeout = installTimeout
 	e.hookTimeout = hookTimeout
@@ -285,16 +358,22 @@ func NewBinaryUpdateExecutor(opts BinaryUpdateOptions) *BinaryUpdateExecutor {
 
 // ValidateParams implements ParamValidator. It needs no network, so a
 // handler can call it before creating a run:
-//   - only target_version, channel and pin are accepted (CodeUnknownParam);
+//   - only target_version, channel, pin and confirm_downgrade are accepted
+//     (CodeUnknownParam);
 //   - target_version is a release tag, or latest:<channel> for any release
 //     channel (CodeInvalidParam);
 //   - channel, when given, is the target's channel (CodeInvalidParam);
 //   - pin, when given, is "latest" or the target_version tag; a
 //     latest:<channel> target can only be pinned to "latest"
 //     (CodeInvalidParam). An absent pin means "latest";
-//   - a concrete target equal to the running version is CodeAlreadyRunning,
-//     an older one in the same channel CodeDowngradeNotYetSupported.
-//     Cross-channel order needs publish dates and is checked by Run.
+//   - confirm_downgrade, when given, is a release tag (CodeInvalidParam);
+//   - a concrete target equal to the running version is CodeAlreadyRunning;
+//     a nightly target older than the downgrade floor is
+//     CodeBelowDowngradeFloor; an older one in the same channel needs
+//     confirm_downgrade == target (see admitDowngrade).
+//
+// Cross-channel order and the floor of a preview or stable target need
+// publish dates; CheckTarget and Run check them.
 func (e *BinaryUpdateExecutor) ValidateParams(params map[string]string) error {
 	if err := CheckAllowedParams(params, UpdateBinaryParams); err != nil {
 		return err
@@ -305,6 +384,9 @@ func (e *BinaryUpdateExecutor) ValidateParams(params map[string]string) error {
 	}
 	channel := params[ParamChannel]
 	pin := params[ParamPin]
+	if c := params[ParamConfirmDowngrade]; c != "" && !update.IsReleaseTag(c) {
+		return requestErrorf(CodeInvalidParam, "confirm_downgrade %q is not a release tag", c)
+	}
 
 	if ch, ok := strings.CutPrefix(target, LatestTargetPrefix); ok {
 		if !slices.Contains(catalogChannels[:], ch) {
@@ -329,7 +411,18 @@ func (e *BinaryUpdateExecutor) ValidateParams(params map[string]string) error {
 	if pin != "" && pin != PinLatest && pin != target {
 		return requestErrorf(CodeInvalidParam, "pin %q must be %q or the target_version %q", pin, PinLatest, target)
 	}
-	return refuseClass(update.Compare(e.current, target), e.current, target)
+	// Only what the tag strings decide; an undecidable floor or order is
+	// left to CheckTarget and Run, which have the publish dates.
+	if below, known := update.BelowFloor(e.floor, update.Ref{Version: target}); known && below {
+		return e.belowFloorError(target)
+	}
+	switch c := update.Compare(e.current, target); {
+	case c == update.ClassSame:
+		return requestErrorf(CodeAlreadyRunning, "the hub is already running %s", target)
+	case c.IsDowngrade():
+		return e.admitDowngrade(target, c, params)
+	}
+	return nil
 }
 
 // pinParam is the pin recorded for an update: the pin parameter, PinLatest
@@ -341,16 +434,79 @@ func pinParam(params map[string]string) string {
 	return PinLatest
 }
 
-// refuseClass maps classes that Phase 1 does not install to request errors.
-func refuseClass(c update.Class, current, target string) error {
-	switch {
-	case c == update.ClassSame:
-		return requestErrorf(CodeAlreadyRunning, "the hub is already running %s", target)
-	case c.IsDowngrade():
-		return requestErrorf(CodeDowngradeNotYetSupported,
-			"%s is older than the running version %s; downgrades are not supported yet", target, current)
+// belowFloorError refuses target as older than the downgrade floor.
+func (e *BinaryUpdateExecutor) belowFloorError(target string) error {
+	return &RequestError{
+		Code: CodeBelowDowngradeFloor,
+		Message: fmt.Sprintf("%s is older than the downgrade floor %s of the running version: "+
+			"releases before it cannot run on this hub's database schema", target, e.floor),
+		Details: map[string]any{"target": target, "floor": e.floor},
 	}
-	return nil
+}
+
+// admitDowngrade decides whether an older target (class downgrade or
+// switch-older) may be installed: only when the database can be
+// snapshotted (CodeDowngradeUnsupportedDriver otherwise) and
+// confirm_downgrade is the target tag (CodeDowngradeRequiresConfirmation,
+// with the risk list, otherwise).
+func (e *BinaryUpdateExecutor) admitDowngrade(target string, class update.Class, params map[string]string) error {
+	st := e.snapshots.SnapshotStatus()
+	if !st.Supported {
+		return &RequestError{
+			Code: CodeDowngradeUnsupportedDriver,
+			Message: fmt.Sprintf("%s is older than the running version %s, and downgrades need a database snapshot, "+
+				"which this hub cannot take (%s)", target, displayVersion(e.current), st.Reason),
+			Details: map[string]any{"target": target, "class": string(class), "reason": st.Reason},
+		}
+	}
+	if params[ParamConfirmDowngrade] == target {
+		return nil
+	}
+	return &RequestError{
+		Code: CodeDowngradeRequiresConfirmation,
+		Message: fmt.Sprintf("%s is older than the running version %s; set confirm_downgrade to %q to install it",
+			target, displayVersion(e.current), target),
+		Details: DowngradeDetails(e.current, target, class, e.floor, st),
+	}
+}
+
+// DowngradeDetails is the "details" object of a
+// CodeDowngradeRequiresConfirmation refusal (design D4 §4): the target, the
+// running version, the class, the floor, the snapshot directory and the
+// risks to show before the operator types the target tag.
+//
+// snapshotPath is the directory the snapshot will be written to; the file
+// (hub-<from>-<timestamp>.db) is named in the run log and result.
+func DowngradeDetails(current, target string, class update.Class, floor string, st DBSnapshotStatus) map[string]any {
+	running := displayVersion(current)
+	order := fmt.Sprintf("%s is older than the running version %s.", target, running)
+	if class == update.ClassSwitchOlder {
+		order = fmt.Sprintf("%s (%s channel) was published before the running version %s.",
+			target, update.DetectChannel(target), running)
+	}
+	risks := []string{
+		order,
+		fmt.Sprintf("The database schema is not migrated down: tables and columns added after %s are ignored by it, "+
+			"and data that newer releases already removed (the decision_audits table, the templates.config "+
+			"and templates.image columns) does not come back.", target),
+		fmt.Sprintf("Harness bundles created by newer releases may be rejected by %s.", target),
+		fmt.Sprintf("Settings keys that %s does not know may be dropped when it rewrites settings.yaml "+
+			"(a copy is saved with the snapshot).", target),
+		fmt.Sprintf("Broker plugins in the hub's plugin directory are switched to %s's builds with the hub; "+
+			"a plugin %s does not publish or list in its SHA256SUMS, or a plugin directory the hub cannot update, "+
+			"stays at its current build and may fail with %s.",
+			target, target, target),
+		fmt.Sprintf("A database snapshot is written to %s before the update. Restoring it is a manual step: "+
+			"stop the hub, copy the snapshot over the database, switch the release back, start the hub.", st.Dir),
+	}
+	return map[string]any{
+		"target":       target,
+		"current":      running,
+		"class":        string(class),
+		"floor":        floor,
+		"snapshotPath": st.Dir,
+		"risks":        risks,
+	}
 }
 
 // Run implements MaintenanceExecutor. Without a before-restart hook the
@@ -381,6 +537,11 @@ func (e *BinaryUpdateExecutor) RunWithBeforeRestart(ctx context.Context, logger 
 		return fmt.Errorf("installer preflight failed (%s): %w", e.installer.Name(), err)
 	}
 	_, _ = fmt.Fprintln(logger, "Preflight passed.")
+	// Warnings only: an unset required setting never stops the update.
+	if e.settings != nil {
+		_, _ = fmt.Fprintln(logger)
+		preflight.WriteSettingsCheck(logger, e.settings())
+	}
 
 	dlCtx, cancel := context.WithTimeout(ctx, e.timeout)
 	defer cancel()
@@ -403,9 +564,10 @@ func (e *BinaryUpdateExecutor) RunWithBeforeRestart(ctx context.Context, logger 
 	if rel.Draft || rel.Tag != target {
 		return fmt.Errorf("release %s is not a published release of %s", target, e.repo)
 	}
-	if err := e.checkOrder(dlCtx, target, rel); err != nil {
+	if err := e.checkTarget(dlCtx, target, rel, params); err != nil {
 		return err
 	}
+	fromPublished := e.runningPublished(dlCtx)
 
 	assetName := BinaryAssetName()
 	binAsset, ok := rel.Asset(assetName)
@@ -461,7 +623,19 @@ func (e *BinaryUpdateExecutor) RunWithBeforeRestart(ctx context.Context, logger 
 	if err := VerifyScionBinary(dlCtx, bin, target, logger); err != nil {
 		return fmt.Errorf("verification failed: %w", err)
 	}
+	plugins, err := e.preparePlugins(dlCtx, logger, client, rel, target, sums.Bytes(), tmpDir)
+	if err != nil {
+		return fmt.Errorf("broker plugin lockstep failed, nothing was installed: %w", err)
+	}
 	cancel()
+
+	// ── Database snapshot, before anything changes ──────────────────────
+	// On the run ctx (the overall backstop): VACUUM INTO of a large
+	// database can take a while.
+	snapshot, err := e.snapshot(ctx, logger)
+	if err != nil {
+		return err
+	}
 
 	// ── Install ─────────────────────────────────────────────────────────
 	// Each remaining step has its own deadline, derived from the run ctx, so
@@ -473,30 +647,60 @@ func (e *BinaryUpdateExecutor) RunWithBeforeRestart(ctx context.Context, logger 
 		cancelInstall()
 		return fmt.Errorf("stage %s: %w", target, err)
 	}
+	if r, ok := e.installer.(PluginRetainer); ok {
+		retainPlugins(logger, e.installer, plugins, r.ActiveRelease(), filepath.Base(staged))
+	}
+	// The plugin replacements are staged before Activate, so a failure
+	// here (disk full, permissions) changes nothing that needs undoing.
+	var swap *pluginSwap
+	if plugins != nil {
+		swap, err = stagePluginSwap(logger, plugins)
+		if err != nil {
+			cancelInstall()
+			return fmt.Errorf("stage the broker plugins, nothing was activated: %w", err)
+		}
+	}
 	err = e.installer.Activate(installCtx, staged)
 	cancelInstall()
 	if err != nil {
+		if swap != nil {
+			swap.cleanup()
+		}
 		return fmt.Errorf("activate %s: %w", target, err)
 	}
 	_, _ = fmt.Fprintf(logger, "Installed %s.\n", target)
+
+	// ── Broker plugins, before the restart ──────────────────────────────
+	if plugins != nil {
+		_, _ = fmt.Fprintf(logger, "\n==> Installing broker plugins (%s)\n", plugins.dir)
+		if swap == nil {
+			_, _ = fmt.Fprintln(logger, "No broker plugin to replace.")
+		} else if err := swap.apply(logger); err != nil {
+			return e.undoActivation(ctx, logger, target, swap,
+				fmt.Errorf("installing the broker plugins failed, so the hub was not restarted: %w", err))
+		}
+	}
 
 	// ── Restart ─────────────────────────────────────────────────────────
 	_, _ = fmt.Fprintf(logger, "\n==> Restarting hub: %s -> %s at %s\n",
 		displayVersion(e.current), target, time.Now().UTC().Format(time.RFC3339))
 	if before != nil {
 		p := PendingRestart{
-			From:     e.current,
-			To:       target,
-			Strategy: e.installer.Name(),
-			Channel:  update.DetectChannel(target),
-			Pin:      pinParam(params),
+			From:            e.current,
+			To:              target,
+			Strategy:        e.installer.Name(),
+			Mode:            UpdateModeRelease,
+			Snapshot:        snapshot,
+			Channel:         update.DetectChannel(target),
+			Pin:             pinParam(params),
+			FromPublishedAt: fromPublished,
 		}
 		hookCtx, cancelHook := context.WithTimeout(ctx, e.hookTimeout)
 		err := before(hookCtx, p)
 		cancelHook()
 		if err != nil {
 			log.Error("Before-restart hook failed; not restarting", "error", err)
-			return e.undoActivation(ctx, logger, target,
+			return e.undoActivation(ctx, logger, target, swap,
 				fmt.Errorf("recording the restart failed, so the hub was not restarted: %w", err))
 		}
 	}
@@ -504,7 +708,10 @@ func (e *BinaryUpdateExecutor) RunWithBeforeRestart(ctx context.Context, logger 
 	err = e.installer.Restart(restartCtx)
 	cancelRestart()
 	if err != nil {
-		return e.undoActivation(ctx, logger, target, fmt.Errorf("restarting the hub failed: %w", err))
+		return e.undoActivation(ctx, logger, target, swap, fmt.Errorf("restarting the hub failed: %w", err))
+	}
+	if swap != nil {
+		swap.cleanup()
 	}
 	log.Info("Binary update installed, restart requested", "from", e.current, "to", target)
 	_, _ = fmt.Fprintln(logger, "Restart requested.")
@@ -512,35 +719,57 @@ func (e *BinaryUpdateExecutor) RunWithBeforeRestart(ctx context.Context, logger 
 }
 
 // undoActivation is called when an activated update cannot be followed by a
-// restart. Installers that implement Deactivator are rolled back, so the
+// restart. Installers that implement Deactivator are rolled back, and
+// then the broker plugins swap replaced (when swap is not nil), so the
 // failed run changed nothing. Others (sudo-install keeps no backup) leave
 // the new binary installed, and the error says it will run after the next
-// restart.
-func (e *BinaryUpdateExecutor) undoActivation(ctx context.Context, logger io.Writer, target string, cause error) error {
-	d, ok := e.installer.(Deactivator)
+// restart; its plugins stay replaced too, so they match the hub that runs.
+func (e *BinaryUpdateExecutor) undoActivation(ctx context.Context, logger io.Writer, target string, swap *pluginSwap, cause error) error {
+	return undoInstall(ctx, e.installer, e.installTimeout, logger, target, swap, cause)
+}
+
+// undoInstall rolls back the last Activate of inst when it implements
+// Deactivator (bounded by timeout), then restores the broker plugins swap
+// replaced (when swap is not nil), and returns cause annotated with the
+// outcome. It is shared by update-binary and rebuild-server (which installs
+// no plugins and passes a nil swap).
+func undoInstall(ctx context.Context, inst Installer, timeout time.Duration, logger io.Writer, target string, swap *pluginSwap, cause error) error {
+	d, ok := inst.(Deactivator)
 	if !ok {
+		if swap != nil {
+			swap.cleanup()
+		}
 		return fmt.Errorf("%w; %s cannot be rolled back by the %s installer (no backup of the previous binary is kept): %s stays installed and will run after the hub's next restart",
-			cause, target, e.installer.Name(), target)
+			cause, target, inst.Name(), target)
 	}
 	// ctx is the run's context, not the hook's or Restart's (their own
 	// deadlines never reach here). It may still have ended: the run's
-	// overall deadline (the 20-minute update-binary backstop) or a
-	// cancellation. The rollback must run regardless, so it is detached from
-	// that cancellation, keeps ctx's values (logging, trace) and is bounded
-	// on its own.
-	undoCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), e.installTimeout)
+	// overall deadline or a cancellation. The rollback must run
+	// regardless, so it is detached from that cancellation, keeps ctx's
+	// values (logging, trace) and is bounded on its own.
+	undoCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
 	defer cancel()
 	if err := d.Deactivate(undoCtx); err != nil {
+		if swap != nil {
+			swap.cleanup()
+		}
 		return fmt.Errorf("%w; rolling back %s also failed (%v): %s stays installed and will run after the hub's next restart",
 			cause, target, err, target)
+	}
+	if swap != nil {
+		if err := swap.restore(); err != nil {
+			return fmt.Errorf("%w; %s was rolled back, but restoring the previous broker plugins failed (%v): they stay at %s's builds",
+				cause, target, err, target)
+		}
+		_, _ = fmt.Fprintf(logger, "Restored the previous broker plugins.\n")
 	}
 	_, _ = fmt.Fprintf(logger, "Rolled back: the previous release is active again.\n")
 	return fmt.Errorf("%w; %s was rolled back, nothing changed", cause, target)
 }
 
 // resolveLatest returns the newest installable release of channel in the
-// release catalog and refuses it when it is the running version or older
-// in the same channel (a cross-channel order is checked by checkOrder).
+// release catalog. Its order against the running version is checked by
+// checkTarget.
 func (e *BinaryUpdateExecutor) resolveLatest(ctx context.Context, channel string) (string, error) {
 	snap, err := e.catalog.Get(ctx, false)
 	if err != nil {
@@ -554,16 +783,32 @@ func (e *BinaryUpdateExecutor) resolveLatest(ctx context.Context, channel string
 	if !update.IsReleaseTag(tag) || update.DetectChannel(tag) != channel {
 		return "", fmt.Errorf("release catalog lists %q as latest %s, which is not a %s release tag", tag, channel, channel)
 	}
-	if err := refuseClass(update.Compare(e.current, tag), e.current, tag); err != nil {
-		return "", err
+	if update.Compare(e.current, tag) == update.ClassSame {
+		return "", requestErrorf(CodeAlreadyRunning, "the hub is already running %s, the latest %s release", tag, channel)
 	}
 	return tag, nil
 }
 
-// checkOrder refuses a target that is the running version or older, using
-// publish dates for cross-channel targets.
-func (e *BinaryUpdateExecutor) checkOrder(ctx context.Context, target string, rel *Release) error {
+// checkTarget admits the resolved target release rel: it refuses a target
+// below the downgrade floor (by publish date for another channel; an
+// undecidable floor is refused), the running version, and an older target
+// (downgrade or switch-older) that admitDowngrade does not admit. A
+// cross-channel order that cannot be decided (no publish date for the
+// running release) counts as switch-older, so it needs the confirmation.
+func (e *BinaryUpdateExecutor) checkTarget(ctx context.Context, target string, rel *Release, params map[string]string) error {
 	tgt := update.Ref{Version: target, Date: rel.PublishedAt}
+	switch below, known := update.BelowFloor(e.floor, tgt); {
+	case !known:
+		return &RequestError{
+			Code: CodeBelowDowngradeFloor,
+			Message: fmt.Sprintf("cannot tell whether %s is older than the downgrade floor %s (no publish date); refusing",
+				target, e.floor),
+			Details: map[string]any{"target": target, "floor": e.floor},
+		}
+	case below:
+		return e.belowFloorError(target)
+	}
+
 	cur := update.Ref{Version: e.current, Date: e.buildTime}
 	if update.IsReleaseTag(e.current) && update.DetectChannel(e.current) != update.DetectChannel(target) {
 		// Another channel: order by the running release's publish date.
@@ -572,13 +817,127 @@ func (e *BinaryUpdateExecutor) checkOrder(ctx context.Context, target string, re
 			cur.Date = curRel.PublishedAt
 		}
 	}
-	class := update.CompareRefs(cur, tgt)
-	if class == update.ClassUnknown {
-		return requestErrorf(CodeDowngradeNotYetSupported,
-			"cannot tell whether %s is newer than the running version %s; refusing because downgrades are not supported yet",
-			target, displayVersion(e.current))
+	switch class := update.CompareRefs(cur, tgt); {
+	case class == update.ClassSame:
+		return requestErrorf(CodeAlreadyRunning, "the hub is already running %s", target)
+	case class == update.ClassUnknown:
+		return e.withPluginRisks(ctx, e.admitDowngrade(target, update.ClassSwitchOlder, params), rel, target)
+	case class.IsDowngrade():
+		return e.withPluginRisks(ctx, e.admitDowngrade(target, class, params), rel, target)
 	}
-	return refuseClass(class, displayVersion(e.current), target)
+	return nil
+}
+
+// withPluginRisks adds to the risk list of a downgrade confirmation what
+// plugin lockstep cannot do for target (pluginRisks).
+func (e *BinaryUpdateExecutor) withPluginRisks(ctx context.Context, err error, rel *Release, target string) error {
+	re, ok := IsRequestError(err)
+	if !ok || re.Code != CodeDowngradeRequiresConfirmation || re.Details == nil {
+		return err
+	}
+	if risks, ok := re.Details["risks"].([]string); ok {
+		re.Details["risks"] = append(risks, e.pluginRisks(ctx, rel, target)...)
+	}
+	return err
+}
+
+// CheckTarget runs every check Run makes before its download, without
+// preflight, download or install: the parameters, latest:<channel>
+// resolution, the release lookup, the downgrade floor and the
+// confirmation of an older target. A handler calls it before creating a
+// run so a refusal (a *RequestError, such as the 409
+// downgrade_requires_confirmation with its risk list) is answered
+// synchronously. Any other error (GitHub unreachable) is not a refusal; Run
+// repeats every check.
+func (e *BinaryUpdateExecutor) CheckTarget(ctx context.Context, params map[string]string) error {
+	if err := e.ValidateParams(params); err != nil {
+		// A same-channel downgrade is refused without a release lookup;
+		// its risk list still names the plugins the target lacks. A failed
+		// lookup leaves the generic plugin risk only.
+		if re, ok := IsRequestError(err); ok && re.Code == CodeDowngradeRequiresConfirmation && e.hasInstalledPlugins() {
+			target := params[ParamTargetVersion]
+			if rel, lerr := e.releases.ReleaseByTag(ctx, target); lerr == nil && rel != nil && rel.Tag == target {
+				return e.withPluginRisks(ctx, err, rel, target)
+			}
+		}
+		return err
+	}
+	target := params[ParamTargetVersion]
+	if ch, ok := strings.CutPrefix(target, LatestTargetPrefix); ok {
+		resolved, err := e.resolveLatest(ctx, ch)
+		if err != nil {
+			return err
+		}
+		target = resolved
+	}
+	rel, err := e.releases.ReleaseByTag(ctx, target)
+	if err != nil {
+		return fmt.Errorf("look up release %s: %w", target, err)
+	}
+	if rel.Draft || rel.Tag != target {
+		return fmt.Errorf("release %s is not a published release of %s", target, e.repo)
+	}
+	return e.checkTarget(ctx, target, rel, params)
+}
+
+// snapshot takes the database snapshot before an update and returns its
+// path. A hub that cannot snapshot (PostgreSQL) reaches here only for an
+// upgrade (admitDowngrade refuses older targets): it goes ahead without one
+// and says so in the run log. A failed snapshot fails the update before
+// anything is installed.
+func (e *BinaryUpdateExecutor) snapshot(ctx context.Context, logger io.Writer) (string, error) {
+	return takeUpdateSnapshot(ctx, e.snapshots, e.current, logger, "hub.maintenance.update-binary",
+		"Upgrades go ahead without one; downgrades are refused.")
+}
+
+// takeUpdateSnapshot takes the pre-update database snapshot (design D4)
+// shared by update-binary and rebuild-server, logging under subsystem. An
+// unsupported snapshotter (PostgreSQL) logs why, then the caller's
+// unsupportedNote (what happens without one), and returns "" with no error;
+// a failed snapshot is an error, and the caller installs nothing.
+func takeUpdateSnapshot(ctx context.Context, snaps DBSnapshotter, from string, logger io.Writer, subsystem, unsupportedNote string) (string, error) {
+	_, _ = fmt.Fprintf(logger, "\n==> Database snapshot\n")
+	st := snaps.SnapshotStatus()
+	if !st.Supported {
+		logging.Subsystem(subsystem).Warn("Updating without a database snapshot", "reason", st.Reason)
+		_, _ = fmt.Fprintf(logger, "No database snapshot taken: %s. %s\n", st.Reason, unsupportedNote)
+		return "", nil
+	}
+	path, err := snaps.Snapshot(ctx, from, logger)
+	if err != nil {
+		return "", fmt.Errorf("database snapshot failed, nothing was installed: %w", err)
+	}
+	return path, nil
+}
+
+// runningPublished returns the publish date of the running preview or
+// stable release, zero for a nightly (its tag carries the date), a git
+// build or a failed lookup. It is best-effort: it only dates the
+// update-state file's from.
+func (e *BinaryUpdateExecutor) runningPublished(ctx context.Context) time.Time {
+	return releasePublishedAt(ctx, e.releases, e.current)
+}
+
+// releasePublishedAt is the publish date of a preview or stable release tag,
+// looked up in releases; zero for a nightly (it carries its date), a Git
+// build, a nil source or a failed lookup. It dates an update's "from" for
+// the boot-failure guard's previous_safe computation.
+func releasePublishedAt(ctx context.Context, releases ReleaseSource, tag string) time.Time {
+	if releases == nil || !update.IsReleaseTag(tag) || update.DetectChannel(tag) == "nightly" {
+		return time.Time{}
+	}
+	rel, err := releases.ReleaseByTag(ctx, tag)
+	if err != nil || rel == nil {
+		return time.Time{}
+	}
+	return rel.PublishedAt
+}
+
+// TargetChecker is implemented by executors that can check a request
+// against remote state (release lookups) before a run is created; see
+// BinaryUpdateExecutor.CheckTarget.
+type TargetChecker interface {
+	CheckTarget(ctx context.Context, params map[string]string) error
 }
 
 // downloadHashed downloads u to path (at most maxBytes) and returns the

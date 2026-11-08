@@ -512,7 +512,9 @@ func TestPatchAgent_ExplicitTimezone(t *testing.T) {
 		setHubAgentDefaults(srv, opsettings.AgentDefaultsSettings{DefaultTimezone: "UTC"})
 		got, err := s.GetAgent(ctx, agent.ID)
 		require.NoError(t, err)
-		assert.Equal(t, agentTZ{TZ: "Asia/Tokyo", Source: TZSourceExplicit}, srv.agentTZ(ctx, got))
+		resolved, err := srv.agentTZ(ctx, got)
+		require.NoError(t, err)
+		assert.Equal(t, agentTZ{TZ: "Asia/Tokyo", Source: TZSourceExplicit}, resolved)
 	})
 
 	t.Run("unadopted legacy agent re-saved with an unrelated env change keeps its zone", func(t *testing.T) {

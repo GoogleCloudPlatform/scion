@@ -224,11 +224,11 @@ func TestPlacementOrder_RestartRefusedBeforeStop_O5(t *testing.T) {
 
 // O6: a restart through the agent runtime's restart endpoint whose persisted
 // kubernetes block conflicts with the placement in effect is refused before
-// that endpoint's stop.
+// that endpoint's stop, naming the agent's stored config.
 func TestPlacementOrder_RestartLegacyBlockRefusedBeforeStop_O6(t *testing.T) {
 	f, _ := newOrderFixture(t, plGlobal(""), plGoodRecord(), `{"kubernetes": {"tolerations": [{"operator": "Exists"}]}}`)
 	w := postAgentOpFor(t, f.srv, plOrderAgent, "restart", projectBody(f.dotScion, ""))
-	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "kubernetes.tolerations[0] in the agent config matches all taints") {
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "kubernetes.tolerations[0] in the agent's stored config matches all taints") {
 		t.Fatalf("got %d %s", w.Code, w.Body.String())
 	}
 	if f.mgr.stopCalls != 0 || f.mgr.startCalls != 0 {
@@ -254,7 +254,8 @@ func TestPlacementOrder_StartRefusedBeforeConfigWrite_O7(t *testing.T) {
 }
 
 // O8: a start whose inline update would make the merged kubernetes block
-// conflict with the placement in effect is refused, writing nothing. With
+// conflict with the placement in effect is refused, writing nothing; the
+// request's own block is checked first, so the refusal names the request. With
 // an unreadable scion-agent.json (the update would write nothing), the
 // inline block alone is checked.
 func TestPlacementOrder_StartInlineConflictWritesNothing_O8(t *testing.T) {
@@ -263,7 +264,7 @@ func TestPlacementOrder_StartInlineConflictWritesNothing_O8(t *testing.T) {
 	before := readFile(t, cfgPath)
 	w := postAgentOpFor(t, f.srv, plOrderAgent, "start", projectBody(f.dotScion,
 		`, "inlineConfig": {"max_turns": 7, "kubernetes": {"runtimeClassName": "kata"}}`))
-	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "kubernetes.runtimeClassName in the agent config differs from the agent runtime's runtime_class_name") {
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "kubernetes.runtimeClassName in the request is set, but the agent runtime configures no runtime class") {
 		t.Fatalf("got %d %s", w.Code, w.Body.String())
 	}
 	if after := readFile(t, cfgPath); after != before {
@@ -292,7 +293,7 @@ func TestCheckStartLegacyPlacement(t *testing.T) {
 	f, agentDir := newOrderFixture(t, plGlobal(""), plGoodRecord(), `{"kubernetes": {"tolerations": [{"operator": "Exists"}]}}`)
 	rp := &api.ResolvedPlacement{NodeSelector: map[string]string{"pool": "agents"}}
 	matchAll := &api.ScionConfig{Kubernetes: &api.KubernetesConfig{Tolerations: []api.K8sToleration{{Operator: "Exists"}}}}
-	benign := &api.ScionConfig{MaxTurns: 4}
+	benign := &api.ScionConfig{MaxTurns: api.IntPtr(4)}
 
 	if err := f.srv.checkStartLegacyPlacement(plOrderAgent, f.dotScion, benign, false, rp); err == nil {
 		t.Error("persisted match-all toleration with a benign inline update: want a refusal")

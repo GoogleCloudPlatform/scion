@@ -349,6 +349,8 @@ var testAdminLegacyRoutePolicy = map[string]testAdminPolicy{
 	"admin.delegationAdoption":          testAdminPolicyDeny,
 	"admin.delegationAdoption.previews": testAdminPolicyDeny,
 	"admin.delegationAdoption.commits":  testAdminPolicyDeny,
+	// Server key status: deployment-wide key configuration.
+	"admin.keys.status": testAdminPolicyDeny,
 	// Lifting a governance hold on one agent.
 	"agents.hold.lift": testAdminPolicyAllow,
 	// Revoking one user's web sessions.
@@ -376,6 +378,7 @@ var testAdminRoleGatePolicy = map[string]testAdminRoleGate{
 	"admin_delegation_adoption.go:recheckDelegationAdoptionAdmin": {Policy: testAdminPolicyDeny, Reason: "agent authority migration"},
 	"admin_mode.go:adminModeMiddleware":                           {Policy: testAdminPolicyAllow, Reason: "admins pass while admin mode is on (the mode itself is hub.admin_mode.update, deny)"},
 	"admin_mode.go:adminModeWebMiddleware":                        {Policy: testAdminPolicyAllow, Reason: "admins pass while admin mode is on (web)"},
+	"agent_pending_config_authz.go:deferDuringMaintenance":        {Policy: testAdminPolicyAllow, Reason: "a held edit's fold mirrors adminModeMiddleware: an admin saver's keys are not deferred while admin mode is on"},
 	"gcp_iam_settings.go:gcpIAMHubAdmin":                          {Policy: testAdminPolicyDeny, EnforcedIn: "requireGCPIAMHubAdmin", Reason: "GCP permission check settings are runtime configuration"},
 	"handlers_env_secrets.go:authorizeHubEnvVarList":              {Policy: testAdminPolicyDeny, Reason: "hub environment variables (hub.env_vars.read)"},
 	"handlers_env_secrets.go:resolveEnvSecretAccess":              {Policy: testAdminPolicyDeny, Reason: "hub-scope environment variables and secrets"},
@@ -442,6 +445,7 @@ var testAdminSettingsSectionPolicy = map[string]testAdminPolicy{
 	"profiling":         testAdminPolicyDeny,
 
 	"agent_delegation_policy": testAdminPolicyDeny,
+	"chat_retention":          testAdminPolicyDeny,
 }
 
 // testAdminSettingsKeyPolicy classifies every operational settings key
@@ -519,6 +523,7 @@ var testAdminSettingsKeyPolicy = map[string]testAdminPolicy{
 	"default_gcp_identity_service_account_id":  testAdminPolicyDeny,
 	"server.hub.public_url":                    testAdminPolicyDeny,
 	"server.hub.hub_name":                      testAdminPolicyDeny,
+	"server.hub.content_url":                   testAdminPolicyDeny,
 	"image_registry":                           testAdminPolicyDeny,
 	"server.hub.monitoring_dashboard_url":      testAdminPolicyDeny,
 	"server.github_app":                        testAdminPolicyDeny,
@@ -558,22 +563,32 @@ var testAdminExperimentPolicy = map[string]testAdminPolicy{
 	experiments.AuthorizationDecisionAuditV2: testAdminPolicyDeny,
 	"web.gcs_links":                          testAdminPolicyDeny,
 	experiments.K8sNFSHome:                   testAdminPolicyDeny,
+	experiments.CloudRunNativeIdentity:       testAdminPolicyDeny,
 	experiments.FlatRuntimeBrokers:           testAdminPolicyDeny,
+	experiments.FlatCloudRunTarget:           testAdminPolicyDeny,
 	experiments.Artifacts:                    testAdminPolicyDeny,
 	"hub.conduit":                            testAdminPolicyDeny,
+	experiments.ConduitDeliver:               testAdminPolicyDeny,
 	experiments.ChatScheduledSend:            testAdminPolicyDeny,
 	experiments.ChatStarredMessages:          testAdminPolicyDeny,
+	experiments.ChatRetention:                testAdminPolicyDeny,
 	experiments.AgentEdit:                    testAdminPolicyDeny,
 	experiments.AgentEditHeld:                testAdminPolicyDeny,
 	experiments.AttachmentArtifacts:          testAdminPolicyDeny,
 	experiments.AgentPlugins:                 testAdminPolicyDeny,
+	experiments.PortView:                     testAdminPolicyDeny,
 	experiments.AgentBadges:                  testAdminPolicyDeny,
 	experiments.SSEHiddenTabClose:            testAdminPolicyDeny,
 	experiments.SecretRotation:               testAdminPolicyDeny,
 	experiments.ContentHashV2:                testAdminPolicyDeny,
+	experiments.LifecycleEvents:              testAdminPolicyDeny,
 	experiments.ArtifactReviewEditor:         testAdminPolicyDeny,
+	experiments.ArtifactManageAccess:         testAdminPolicyDeny,
+	experiments.ArtifactSponsorReviewGrant:   testAdminPolicyDeny,
 	experiments.SkillContentHashV2:           testAdminPolicyDeny,
 	experiments.UserDeleteForceCascade:       testAdminPolicyDeny,
+	experiments.ArtifactArchive:              testAdminPolicyDeny,
+	experiments.ImageTagSetting:              testAdminPolicyDeny,
 }
 
 // testAdminPolicyInputs are the vocabularies the classification must cover.
@@ -965,7 +980,7 @@ func (d *HTTPAgentDispatcher) applyTestAdminSecretScopes(ctx context.Context, ag
 // envScopesForDispatch is envScopesInPrecedenceOrder with testAdminRootScopes
 // applied: the env var scopes an agent rooted at an admin-kind test
 // identity may receive. Every dispatch env read uses it (first pass,
-// as_needed pass, env source labels); the TZ chain (resolveStorageTZ)
+// as_needed pass); the TZ chain (resolveStorageTZ)
 // reads only TZ and keeps every scope.
 func (d *HTTPAgentDispatcher) envScopesForDispatch(ctx context.Context, agent *store.Agent) []store.EnvVarFilter {
 	filters := d.envScopesInPrecedenceOrder(agent)

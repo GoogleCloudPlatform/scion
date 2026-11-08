@@ -1,6 +1,6 @@
 ---
 title: Hub Upgrade and Binary Rollback
-description: Which stored data a newer Hub build rewrites one way on startup, why rolling the binary back afterwards is unsupported, and the startup warning an older build logs.
+description: The settings to check before upgrading a Hub, which stored data a newer Hub build rewrites one way on startup, why rolling the binary back afterwards is unsupported, and the startup warning an older build logs.
 ---
 
 A Hub upgrade is one-way. When a newer Hub build starts on a database (and on
@@ -10,6 +10,63 @@ older Hub binary after a newer build has started once (a binary rollback) is
 unsupported.** To return to an older build, restore the database and settings
 files from a copy taken before the newer build first started.
 
+## Upgrade checklist: settings to check first
+
+Some releases add a setting that a Hub needs for a given deployment. Check
+these before you upgrade. The Admin -> Maintenance update operations
+(`update-binary` and `rebuild-server`) print a `==> Settings check` section in
+their log that lists the required settings this Hub leaves unset, and
+`scion server preflight` reports the same as warnings. Both only warn: the
+update goes ahead.
+
+### `server.trusted_proxies` (Runtime Broker transport)
+
+The Hub accepts Runtime Broker registration, joins, secret rotation, the
+control channel and the conduit only over a confidential transport: TLS, a
+loopback request, or a request from a TLS-terminating proxy it trusts. See
+[Runtime Broker transport and trusted proxies](/scion/reference/server-config/#runtime-broker-transport-and-trusted-proxies).
+
+1. **Find where TLS ends.** If the Hub's public URL is `https`, TLS ends at a
+   proxy in front of the Hub (a load balancer, an ingress, Caddy, nginx).
+2. **Pick the value of `server.trusted_proxies`:**
+   - **Not set:** a proxy on the Hub's own host that connects from loopback
+     (`127.0.0.1`, `::1`) is trusted. The Hub logs one warning at startup.
+     This is enough for Caddy or nginx installed on the Hub's host.
+   - **A list:** the addresses the proxy connects to the Hub from. **A proxy
+     on another host must be listed.** **A proxy container on a bridge
+     network must be listed too:** it connects from the bridge address (for
+     example `172.17.0.1`), not from loopback.
+   - **`[]`:** trust no proxy. Only TLS to the Hub itself, or a loopback
+     request without forwarding headers, is accepted.
+3. **After the upgrade, check the command path.** `scion doctor` counts
+   Runtime Brokers that are "online but cannot receive commands", and
+   `scion runtime-broker status` prints a `Commands:` line for each hub
+   connection and, while the broker is online, for the broker as the Hub
+   sees it. A Runtime Broker is
+   online when its heartbeats arrive, which does not use the control channel;
+   `Commands: yes` means the control channel is connected.
+4. **Reading a refusal:**
+   - The client gets `403` with the code `transport_not_confidential` and
+     `details` `{"reason": ..., "setting": "server.trusted_proxies"}`. The
+     reason is `untrusted_local_proxy` or `local_proxy_not_trusted` (a proxy
+     on the Hub's host that is not trusted), `proxy_proto_not_https` (the
+     proxy did not forward `https`) or `not_tls` (a plain request from another
+     address, such as a bridge network proxy or a proxy on another host).
+   - The Hub logs a refusal from a proxy on its own host at ERROR and reports
+     the health check `broker_transport_proxy` for 15 minutes; other refusals
+     are a WARN that names `server.trusted_proxies`.
+   - The Runtime Broker logs an ERROR naming the reason and
+     `server.trusted_proxies`, and reports its `control_channel` (and
+     `conduit`) check unhealthy. The Hub's health summary then shows the
+     broker as online but unable to receive commands.
+
+### `hub.async_agent_start` (multi-node upgrade and downgrade)
+
+The `hub.async_agent_start` [experiment](/scion/reference/experiments/#server-experiments-with-notes) is on by default (see [Asynchronous agent start](/scion/reference/server-config/#asynchronous-agent-start)). During a rolling upgrade between versions that write the `hub_instances` registry, starts stay synchronous automatically while any live Hub replica lacks `async_start_v1`.
+
+- **Multi-node upgrade from a version before the `hub_instances` registry:** replicas on a version that does not register in `hub_instances` are not visible to that capability check. Set an explicit override turning `hub.async_agent_start` **off** before upgrading the first replica (`scion hub experiments disable hub.async_agent_start` or in **Admin -> Server Config -> Experiments**), upgrade every Hub replica, and then reset the override (`scion hub experiments reset hub.async_agent_start`). Single-node Hubs need no extra step.
+- **Before downgrading a Hub node:** turn `hub.async_agent_start` **off** and wait `launch_timeout` (`server.hub.async_launch.launch_timeout`, default `2m` or `5m` for Kubernetes) plus 15 seconds so every in-flight asynchronous start settles before an older binary runs.
+
 ## What a newer build rewrites one way
 
 | Stored data | What startup does | Effect on an older binary |
@@ -18,6 +75,7 @@ files from a copy taken before the newer build first started.
 | Project members group marker (group annotation) | A one-time migration rewrites the old key `scion.io/system-project-members-group` to `scion.io/project-members-group`, and records completion in the `hub_settings` key `migration_legacy_project_members_group_marker_v1`. | A build from before the marker change recognises only the old key, so it does not recognise the rewritten groups as project members groups. |
 | Settings files (`settings.yaml`, global and per project) | When the file is loaded, a legacy `hub.grove_id` key is rewritten in place to `hub.project_id`. | A build that reads only `hub.grove_id` no longer finds the project link. |
 | `.scion` project marker files | When a marker file is read, legacy `grove-id`, `grove-name` and `grove-slug` keys are rewritten in place to `project-id`, `project-name` and `project-slug`. | A build that reads only the `grove-*` keys no longer finds them. |
+| Provisioning sentinel of shared workspaces (`<subpath_root>/<project-id>/workspace/.scion-provisioned`) | On a shared project storage backend, the Hub moves a workspace-root sentinel to the project's provisioning state directory (`provision/.scion-provisioned`) and removes the workspace-root file and its git exclude line, at every Hub start and right after a project storage migration run for the workspaces that run moved. See [Upgrading from releases that kept the sentinel in the workspace](/scion/hosted/ha/kubernetes/#upgrading-from-releases-that-kept-the-sentinel-in-the-workspace). | An older build, and an agent image from before the provisioning state directory, look for the sentinel in the workspace root only, so they provision the workspace again on every start. |
 | `templates` table (`config` and `image` columns) | After schema migration, startup drops the retired `templates.config` and `templates.image` columns on SQLite and PostgreSQL (`templates.agent_config` is kept). | An older build that queries or writes `templates.config` or `templates.image` fails against the migrated schema. |
 
 Other one-time data migrations record their completion in `hub_settings` keys

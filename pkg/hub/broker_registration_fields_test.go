@@ -106,7 +106,7 @@ func (f *ownedBrokerFixture) req(mutate func(*CreateBrokerRegistrationRequest)) 
 
 func (f *ownedBrokerFixture) reregister(t *testing.T, mutate func(*CreateBrokerRegistrationRequest)) CreateBrokerRegistrationResponse {
 	t.Helper()
-	rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPost, "/api/v1/brokers", f.req(mutate))
+	rec := doRequestAsUserLoopback(t, f.srv, f.owner, http.MethodPost, "/api/v1/brokers", f.req(mutate))
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
 	resp := decodeBrokerRegistration(t, rec.Body)
 	require.Equal(t, f.id, resp.BrokerID)
@@ -250,14 +250,14 @@ func TestReregistration_KeepsGCPHostFieldsForEveryCaller(t *testing.T) {
 		do   func(t *testing.T, f *ownedBrokerFixture, req CreateBrokerRegistrationRequest) *httptest.ResponseRecorder
 	}{
 		{"owner session", func(t *testing.T, f *ownedBrokerFixture, req CreateBrokerRegistrationRequest) *httptest.ResponseRecorder {
-			return doRequestAsUser(t, f.srv, f.owner, http.MethodPost, "/api/v1/brokers", req)
+			return doRequestAsUserLoopback(t, f.srv, f.owner, http.MethodPost, "/api/v1/brokers", req)
 		}},
 		{"owner token", func(t *testing.T, f *ownedBrokerFixture, req CreateBrokerRegistrationRequest) *httptest.ResponseRecorder {
 			key := mintHubBrokerUAT(t, f.srv, f.owner.ID, "broker:create")
-			return doRequestWithToken(t, f.srv, key, http.MethodPost, "/api/v1/brokers", req)
+			return doRequestWithTokenLoopback(t, f.srv, key, http.MethodPost, "/api/v1/brokers", req)
 		}},
 		{"super-admin", func(t *testing.T, f *ownedBrokerFixture, req CreateBrokerRegistrationRequest) *httptest.ResponseRecorder {
-			return doRequest(t, f.srv, http.MethodPost, "/api/v1/brokers", req)
+			return doRequestLoopback(t, f.srv, http.MethodPost, "/api/v1/brokers", req)
 		}},
 	}
 	for _, c := range callers {
@@ -402,7 +402,7 @@ func TestReregistration_KeptSettingsInResponseJSON(t *testing.T) {
 	t.Parallel()
 	f := newOwnedBrokerFixture(t, false, "kept-json")
 	f.update(t, gcpHostBody(ownedEmailA, ownedProjectA))
-	rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPost, "/api/v1/brokers", f.req(withGCPHost(ownedEmailB, "")))
+	rec := doRequestAsUserLoopback(t, f.srv, f.owner, http.MethodPost, "/api/v1/brokers", f.req(withGCPHost(ownedEmailB, "")))
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 	var raw map[string]interface{}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &raw))
@@ -456,7 +456,7 @@ func TestJoin_LeavesUpdateManagedFields(t *testing.T) {
 		if flat {
 			join.RuntimeTarget = f.base.RuntimeTarget
 		}
-		rec := doRequestNoAuth(t, f.srv, http.MethodPost, "/api/v1/brokers/join", join)
+		rec := doRequestNoAuthLoopback(t, f.srv, http.MethodPost, "/api/v1/brokers/join", join)
 		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
 		f.requireGCPHost(t, ownedEmailA, ownedProjectA)
@@ -500,7 +500,7 @@ func TestReregistration_NeverClearsGCPHostFields(t *testing.T) {
 		{"join", func(t *testing.T, f *ownedBrokerFixture) {
 			resp := f.reregister(t, nil)
 			join := BrokerJoinRequest{BrokerID: f.id, JoinToken: resp.JoinToken, Hostname: "never-clears", Version: "1.0.0", RuntimeTarget: f.base.RuntimeTarget}
-			rec := doRequestNoAuth(t, f.srv, http.MethodPost, "/api/v1/brokers/join", join)
+			rec := doRequestNoAuthLoopback(t, f.srv, http.MethodPost, "/api/v1/brokers/join", join)
 			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 		}},
 		{"heartbeat copy", func(t *testing.T, f *ownedBrokerFixture) {
@@ -774,7 +774,7 @@ func TestBrokerReregistration_DeniedCallerWritesNoGCPHostFields(t *testing.T) {
 		other := newHubMemberUser(t, f.s, "denied-no-write-other")
 		fault.Arm()
 
-		rec := doRequestAsUser(t, f.srv, other, http.MethodPost, "/api/v1/brokers", f.req(withGCPHost(ownedEmailA, ownedProjectA)))
+		rec := doRequestAsUserLoopback(t, f.srv, other, http.MethodPost, "/api/v1/brokers", f.req(withGCPHost(ownedEmailA, ownedProjectA)))
 
 		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 		assert.Empty(t, spy.calls)
@@ -820,15 +820,15 @@ func TestBrokerReregistration_FlatAuthorizationMatrix(t *testing.T) {
 		}},
 		{"owner token", true, func(t *testing.T, f *flatRegFixture, req CreateBrokerRegistrationRequest) *httptest.ResponseRecorder {
 			key := mintHubBrokerUAT(t, f.srv, f.operator.ID, "broker:create")
-			return doRequestWithToken(t, f.srv, key, http.MethodPost, "/api/v1/brokers", req)
+			return doRequestWithTokenLoopback(t, f.srv, key, http.MethodPost, "/api/v1/brokers", req)
 		}},
 		{"super-admin token on another user's broker", false, func(t *testing.T, f *flatRegFixture, req CreateBrokerRegistrationRequest) *httptest.ResponseRecorder {
 			admin := newSuperAdminUser(t, f.s, "flat-matrix-admin")
 			key := mintHubBrokerUAT(t, f.srv, admin.ID, "broker:create")
-			return doRequestWithToken(t, f.srv, key, http.MethodPost, "/api/v1/brokers", req)
+			return doRequestWithTokenLoopback(t, f.srv, key, http.MethodPost, "/api/v1/brokers", req)
 		}},
 		{"super-admin dev credential", true, func(t *testing.T, f *flatRegFixture, req CreateBrokerRegistrationRequest) *httptest.ResponseRecorder {
-			return doRequest(t, f.srv, http.MethodPost, "/api/v1/brokers", req)
+			return doRequestLoopback(t, f.srv, http.MethodPost, "/api/v1/brokers", req)
 		}},
 	}
 	for _, preserve := range []bool{false, true} {
@@ -875,7 +875,7 @@ func TestBrokerReregistration_FlatAuthorizationMatrix(t *testing.T) {
 			req := CreateBrokerRegistrationRequest{BrokerID: row.ID, Name: row.Name, RuntimeTarget: &api.RuntimeTargetDescriptor{ID: target.ID, Type: target.Type, DisplayName: target.DisplayName}, PreserveSettings: preserve}
 			rec := f.register(t, f.operator, req)
 			assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
-			rec = doRequestWithToken(t, f.srv, adminKey, http.MethodPost, "/api/v1/brokers", req)
+			rec = doRequestWithTokenLoopback(t, f.srv, adminKey, http.MethodPost, "/api/v1/brokers", req)
 			assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 		}
 	})
@@ -917,7 +917,7 @@ func TestBrokerRoleLabel_HubManaged(t *testing.T) {
 	t.Run("new legacy row", func(t *testing.T) {
 		srv, s := testServer(t)
 		member := newHubMemberUser(t, s, "role-new-legacy")
-		rec := doRequestAsUser(t, srv, member, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{Name: "role-new-legacy", Labels: embeddedLabel})
+		rec := doRequestAsUserLoopback(t, srv, member, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{Name: "role-new-legacy", Labels: embeddedLabel})
 		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 		row, err := s.GetRuntimeBroker(context.Background(), decodeBrokerRegistration(t, rec.Body).BrokerID)
 		require.NoError(t, err)

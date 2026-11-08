@@ -498,6 +498,7 @@ func TestRouteTemplate(t *testing.T) {
 		"/api/v1/artifacts/" + id + "/versions/3":                "/api/v1/artifacts/{id}/versions/{seq}",
 		"/api/v1/artifacts/" + id + "/versions/3/finalize":       "/api/v1/artifacts/{id}/versions/{seq}/finalize",
 		"/api/v1/artifacts/" + id + "/versions/3/view":           "/api/v1/artifacts/{id}/versions/{seq}/view",
+		"/api/v1/artifacts/" + id + "/versions/3/archive":        "/api/v1/artifacts/{id}/versions/{seq}/archive",
 		"/api/v1/artifacts/" + id + "/versions/3/files/a/b.png":  "/api/v1/artifacts/{id}/versions/{seq}/files/{path}",
 		"/api/v1/artifacts/" + id + "/versions/3/secret-segment": "/api/v1/artifacts/{id}/unknown",
 		"/api/v1/artifacts/shared/TOKEN-SECRET/files/x.md":       "/api/v1/artifacts/shared/{token}",

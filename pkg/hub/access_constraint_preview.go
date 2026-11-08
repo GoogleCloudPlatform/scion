@@ -2155,13 +2155,16 @@ func (ps *PreviewService) issueToken(
 // Token validation
 // ---------------------------------------------------------------------------
 
-// ValidateToken validates a preview token for commit.
+// ValidateToken validates a preview token for commit. constraintID is the
+// target constraint of an update or delete (empty for create); a token for
+// an update or delete is accepted only for the constraint it was issued for.
 // Returns nil on success, or a TokenValidationError with a specific code.
 func (ps *PreviewService) ValidateToken(
 	ctx context.Context,
 	token string,
 	actor PrincipalContext,
 	operation string,
+	constraintID string,
 	draft *store.AccessConstraint,
 	objectRevision int64,
 ) error {
@@ -2233,6 +2236,17 @@ func (ps *PreviewService) ValidateToken(
 		return &TokenValidationError{
 			Code:    ErrCodePreviewOperationMismatch,
 			Message: fmt.Sprintf("operation %q does not match token operation %q", operation, payload.Operation),
+		}
+	}
+
+	// Check the target constraint: an update or delete token is accepted
+	// only for the constraint it was issued for.
+	if operation == "update" || operation == "delete" {
+		if constraintID == "" || payload.ConstraintID != constraintID {
+			return &TokenValidationError{
+				Code:    ErrCodePreviewConstraintMismatch,
+				Message: "target constraint does not match the preview token",
+			}
 		}
 	}
 

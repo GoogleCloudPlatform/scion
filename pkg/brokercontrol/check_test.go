@@ -20,6 +20,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/internal/testutil/wintest"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/pathcanon"
 )
 
 // fixture is a fake home with a Scion global directory and some control
@@ -94,9 +97,7 @@ func write(t *testing.T, p string) {
 func symlink(t *testing.T, target, link string) {
 	t.Helper()
 	mkdir(t, filepath.Dir(link))
-	if err := os.Symlink(target, link); err != nil {
-		t.Skipf("symlinks unavailable: %v", err)
-	}
+	wintest.MustSymlink(t, target, link)
 }
 
 // raw joins path elements with the separator without cleaning, so ".."
@@ -431,6 +432,34 @@ func TestTokenFilesAreCredentials(t *testing.T) {
 			_, err = Check(f.global, VolumeAllowed)
 			wantRefused(t, err, "")
 		})
+	}
+}
+
+// TestVolumeAllowed_CaseVariantRefused: with the paths inside the global
+// directory (containment holds), an agent-data subtree is allowed only in
+// its exact spelling; a case variant is refused on every platform.
+func TestVolumeAllowed_CaseVariantRefused(t *testing.T) {
+	f := newFixture(t)
+	pairs := [][2]string{
+		{filepath.Join(f.global, "workspace"), filepath.Join(f.global, "WORKSPACE")},
+		{filepath.Join(f.global, "projects", "p", "workspace"), filepath.Join(f.global, "projects", "p", "WORKSPACE")},
+	}
+	for _, pair := range pairs {
+		canonical, variant := pair[0], pair[1]
+		mkdir(t, canonical)
+		mkdir(t, variant)
+		for _, p := range []string{canonical, variant} {
+			in, err := pathcanon.Within(f.global, p)
+			if err != nil || !in {
+				t.Fatalf("pathcanon.Within(%q, %q) = %v, %v; want inside", f.global, p, in, err)
+			}
+		}
+		if !VolumeAllowed(canonical, f.global) {
+			t.Errorf("VolumeAllowed(%q) = false, want true", canonical)
+		}
+		if VolumeAllowed(variant, f.global) {
+			t.Errorf("VolumeAllowed(%q) = true, want false", variant)
+		}
 	}
 }
 

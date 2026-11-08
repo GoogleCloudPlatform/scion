@@ -656,6 +656,7 @@ func TestClassifyStartError_LaunchFailure(t *testing.T) {
 		{api.LaunchCodeContainerConfig, api.LaunchStepContainerCreate, "CreateContainerConfigError", "the agent container could not be configured (CreateContainerConfigError)"},
 		{api.LaunchCodeCrashLoop, api.LaunchStepContainerStart, "CrashLoopBackOff", "the agent container keeps crashing on start (CrashLoopBackOff)"},
 		{api.LaunchCodeInitContainerFailed, api.LaunchStepInitContainers, "Error", "an init container of the agent pod failed (Error)"},
+		{api.LaunchCodeVolumeMountFailed, api.LaunchStepContainerCreate, "FailedMount", "an agent volume could not be mounted (FailedMount)"},
 		{api.LaunchCodeUnschedulable, api.LaunchStepScheduling, "Unschedulable", "the agent pod cannot be scheduled (Unschedulable)"},
 		{api.LaunchCodePodDisrupted, api.LaunchStepScheduling, "PreemptionByScheduler", "the agent pod was preempted, evicted or deleted while starting: it was preempted (PreemptionByScheduler)"},
 		{api.LaunchCodePodDisrupted, api.LaunchStepContainerCreate, "Evicted", "the agent pod was preempted, evicted or deleted while starting: it was evicted (Evicted)"},
@@ -671,7 +672,7 @@ func TestClassifyStartError_LaunchFailure(t *testing.T) {
 	} {
 		t.Run(c.code+"/"+c.reason, func(t *testing.T) {
 			err := fmt.Errorf("start agent: %w", &scionrt.LaunchFailure{Code: c.code, Step: c.step, Reason: c.reason, Err: raw})
-			code, step, msg := classifyStartError(context.Background(), err, "", api.LaunchStepScheduling)
+			code, step, msg := classifyStartError(context.Background(), err, "", api.LaunchStepScheduling, store.LaunchKindCreate)
 			if code != c.code || step != c.step || msg != c.want {
 				t.Fatalf("got (%q, %q, %q), want (%q, %q, %q)", code, step, msg, c.code, c.step, c.want)
 			}
@@ -685,13 +686,13 @@ func TestClassifyStartError_LaunchFailure(t *testing.T) {
 
 	t.Run("unknown code is runtime_error", func(t *testing.T) {
 		err := &scionrt.LaunchFailure{Code: "something_new", Step: api.LaunchStepContainerCreate, Err: raw}
-		code, step, msg := classifyStartError(context.Background(), err, "", api.LaunchStepScheduling)
+		code, step, msg := classifyStartError(context.Background(), err, "", api.LaunchStepScheduling, store.LaunchKindCreate)
 		if code != api.LaunchCodeRuntimeError || step != api.LaunchStepScheduling || strings.Contains(msg, "secret") {
 			t.Fatalf("got (%q, %q, %q), want runtime_error in scheduling with fixed text", code, step, msg)
 		}
 	})
 	t.Run("no step falls back to launching", func(t *testing.T) {
-		_, step, _ := classifyStartError(context.Background(), errors.New("boom"), "", "")
+		_, step, _ := classifyStartError(context.Background(), errors.New("boom"), "", "", store.LaunchKindCreate)
 		if step != api.LaunchStepLaunching {
 			t.Fatalf("step = %q, want launching", step)
 		}
@@ -706,13 +707,13 @@ func TestClassifyStartError_TimeoutInAwaitingCapacity(t *testing.T) {
 	defer cancel()
 	<-ctx.Done()
 
-	code, step, msg := classifyStartError(ctx, errors.New("context deadline exceeded"), "", api.LaunchStepAwaitingCapacity)
+	code, step, msg := classifyStartError(ctx, errors.New("context deadline exceeded"), "", api.LaunchStepAwaitingCapacity, store.LaunchKindCreate)
 	if code != api.LaunchCodeLaunchTimeout || step != api.LaunchStepAwaitingCapacity || msg != "timed out waiting for node capacity" {
 		t.Fatalf("got (%q, %q, %q), want (launch_timeout, awaiting_capacity, timed out waiting for node capacity)", code, step, msg)
 	}
 
 	typed := &scionrt.LaunchFailure{Code: api.LaunchCodeImagePullFailed, Step: api.LaunchStepContainerCreate, Reason: "ImagePullBackOff", Err: errors.New("x")}
-	code, step, msg = classifyStartError(ctx, typed, "", api.LaunchStepContainerCreate)
+	code, step, msg = classifyStartError(ctx, typed, "", api.LaunchStepContainerCreate, store.LaunchKindCreate)
 	if code != api.LaunchCodeLaunchTimeout || step != api.LaunchStepContainerCreate || msg != "launch timed out before the agent started" {
 		t.Fatalf("typed failure under an expired ctx: got (%q, %q, %q), want launch_timeout in container_create", code, step, msg)
 	}

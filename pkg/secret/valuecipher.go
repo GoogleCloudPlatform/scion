@@ -231,6 +231,25 @@ func (c *ValueCipher) Encrypt(plaintext string) (string, error) {
 // ErrPlaintextNotAdmitted in managed mode. Every failure is a typed error;
 // a failure never yields a value.
 func (c *ValueCipher) Decrypt(stored string) (string, error) {
+	pt, _, err := c.decrypt(stored, false)
+	return pt, err
+}
+
+// Authentication says how DecryptAuthenticated read a stored value: its
+// envelope format and, for an encrypted value, the ID of the ring key
+// whose authenticated decryption actually succeeded (never the envelope
+// label alone). KID is "" for plaintext. It holds no key material.
+type Authentication struct {
+	Format secretenvelope.Format
+	KID    string
+}
+
+// DecryptAuthenticated is Decrypt (the same candidates, the same refusals
+// and the same typed errors) that also reports the authenticating key. A
+// version 2 value is only ever tried with its named key, so a value
+// labelled with one key ID but sealed under another fails. On error the
+// Authentication is zero.
+func (c *ValueCipher) DecryptAuthenticated(stored string) (string, Authentication, error) {
 	return c.decrypt(stored, false)
 }
 
@@ -241,25 +260,26 @@ func (c *ValueCipher) Decrypt(stored string) (string, error) {
 // an allow-list.
 func (c *ValueCipher) DecryptForMigration(stored string, m *store.EncryptionMigration) (string, error) {
 	admit := m != nil && m.State == store.EncryptionMigrationRunning && m.PlaintextReadAdmitted
-	return c.decrypt(stored, admit)
+	pt, _, err := c.decrypt(stored, admit)
+	return pt, err
 }
 
-func (c *ValueCipher) decrypt(stored string, admitPlaintext bool) (string, error) {
+func (c *ValueCipher) decrypt(stored string, admitPlaintext bool) (string, Authentication, error) {
 	if !c.configured() {
-		return "", ErrCipherNotConfigured
+		return "", Authentication{}, ErrCipherNotConfigured
 	}
 	env, err := secretenvelope.Parse(stored)
 	if err != nil {
-		return "", err
+		return "", Authentication{}, err
 	}
 	if env.Format == secretenvelope.FormatPlaintext {
 		if admitPlaintext || c.mode != modeManaged {
-			return stored, nil
+			return stored, Authentication{Format: secretenvelope.FormatPlaintext}, nil
 		}
-		return "", ErrPlaintextNotAdmitted
+		return "", Authentication{}, ErrPlaintextNotAdmitted
 	}
 	if !c.Enabled() {
-		return "", ErrNoDecryptionKey
+		return "", Authentication{}, ErrNoDecryptionKey
 	}
 	var (
 		candidates []keyring.EncryptionKey
@@ -269,13 +289,13 @@ func (c *ValueCipher) decrypt(stored string, admitPlaintext bool) (string, error
 	case secretenvelope.FormatV1:
 		candidates = c.ring.Candidates("")
 		if len(candidates) == 0 {
-			return "", ErrNoDecryptionKey
+			return "", Authentication{}, ErrNoDecryptionKey
 		}
 		aad = func(string) []byte { return nil }
 	case secretenvelope.FormatV2:
 		candidates = c.ring.Candidates(env.KID)
 		if len(candidates) == 0 {
-			return "", ErrUnknownKeyID
+			return "", Authentication{}, ErrUnknownKeyID
 		}
 		aad = secretenvelope.AADV2
 	}
@@ -286,10 +306,46 @@ func (c *ValueCipher) decrypt(stored string, admitPlaintext bool) (string, error
 			continue
 		}
 		if pt, err := gcm.Open(nil, nonce, sealed, aad(k.ID)); err == nil {
-			return string(pt), nil
+			return string(pt), Authentication{Format: env.Format, KID: k.ID}, nil
 		}
 	}
-	return "", ErrDecrypt
+	return "", Authentication{}, ErrDecrypt
+}
+
+// DecryptWriter opens stored only with the active (writer) key in the
+// configured write format, so ok means c.Encrypt would write a value of
+// the same format under the same key. Unlike Decrypt, no other key is
+// tried: an enc:v1: value sealed under another legacy v1 reader, an
+// enc:v2: value naming another key ID, a value in the other format, a
+// plaintext value and a disabled, nil or zero cipher all return ok
+// false. It never returns a plaintext with ok false.
+func (c *ValueCipher) DecryptWriter(stored string) (string, bool) {
+	if !c.Enabled() {
+		return "", false
+	}
+	env, err := secretenvelope.Parse(stored)
+	if err != nil {
+		return "", false
+	}
+	active := c.ring.Active()
+	var aad []byte
+	switch {
+	case env.Format == secretenvelope.FormatV1 && c.ring.WriteFormat() == keyring.WriteV1:
+	case env.Format == secretenvelope.FormatV2 && c.ring.WriteFormat() == keyring.WriteV2 && env.KID == active.ID:
+		aad = secretenvelope.AADV2(active.ID)
+	default:
+		return "", false
+	}
+	gcm, err := newGCM(active.Bytes())
+	if err != nil {
+		return "", false
+	}
+	nonce, sealed := env.Sealed[:secretenvelope.NonceSize], env.Sealed[secretenvelope.NonceSize:]
+	pt, err := gcm.Open(nil, nonce, sealed, aad)
+	if err != nil {
+		return "", false
+	}
+	return string(pt), true
 }
 
 // Inspect parses a stored value without decrypting it.

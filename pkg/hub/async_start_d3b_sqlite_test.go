@@ -37,7 +37,6 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -600,23 +599,6 @@ func (d *asyncHubDispatcher) calls() ([]StartDispatchOptions, int, []bool) {
 	return append([]StartDispatchOptions(nil), d.opts...), d.plain, append([]bool(nil), d.resumes...)
 }
 
-// setAsyncStartExperiment sets hub.async_agent_start's default on srv's
-// registry.
-func setAsyncStartExperiment(t *testing.T, srv *Server, on bool) {
-	t.Helper()
-	var active []experiments.Experiment
-	for _, e := range experiments.Default().All() {
-		if e.Name == experiments.AsyncAgentStart {
-			e.Default = on
-		}
-		active = append(active, e)
-	}
-	reg, err := experiments.NewRegistry(active, nil)
-	require.NoError(t, err)
-	srv.experiments = reg
-	require.Equal(t, on, srv.experimentEnabled(experiments.AsyncAgentStart))
-}
-
 // seedAsyncStartGate sets the all-live-hubs answer as a fresh refresh would.
 func seedAsyncStartGate(srv *Server, value bool) {
 	g := &srv.asyncStartGate
@@ -625,6 +607,47 @@ func seedAsyncStartGate(srv *Server, value bool) {
 	g.value = value
 	g.refreshedAt = asyncStartGateNow()
 	g.logged = true
+}
+
+// TestStartBackgroundServices_RefreshesAsyncStartGate pins the wiring of
+// ptone/scion#7250: with the experiment on, StartBackgroundServices starts
+// the gate's refresh loop, which reads the registry without any start
+// asking for it, and CleanupBackgroundResources joins the loop.
+func TestStartBackgroundServices_RefreshesAsyncStartGate(t *testing.T) {
+	s, err := newTestStore(t, ":memory:")
+	require.NoError(t, err)
+	srv, err := newTestHubServer(t, DefaultServerConfig(), s)
+	require.NoError(t, err)
+	setAsyncStartExperiment(t, srv, true)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	srv.StartBackgroundServices(ctx)
+
+	// The loop's first tick runs at once. Only that a refresh landed is
+	// asserted, not its value: if this replica's first registry write is
+	// slow, that first read may see no live row.
+	g := &srv.asyncStartGate
+	require.Eventually(t, func() bool {
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		return !g.refreshedAt.IsZero()
+	}, 30*time.Second, 10*time.Millisecond, "the refresh loop read the registry with no start")
+
+	srv.mu.RLock()
+	h := srv.asyncStartGateRefresherStop
+	srv.mu.RUnlock()
+	require.NotNil(t, h, "the loop's stop handle is recorded")
+	done := h.done
+	require.NoError(t, srv.CleanupBackgroundResources(context.Background()))
+	select {
+	case <-done:
+	default:
+		t.Fatal("CleanupBackgroundResources returned before the refresh loop exited")
+	}
+	srv.mu.RLock()
+	defer srv.mu.RUnlock()
+	assert.Nil(t, srv.asyncStartGateRefresherStop, "CleanupBackgroundResources took the loop's stop handle to join it")
 }
 
 // newAsyncStartFixture is newClaimFixture (start claims on) with an
@@ -1657,4 +1680,105 @@ func TestAsyncStartD2Contract(t *testing.T) {
 		require.NoError(t, json.Unmarshal([]byte(`{"asyncStart":true}`), &caps))
 		assert.True(t, caps.AsyncStart, "heartbeat/info JSON field asyncStart")
 	})
+}
+
+// TestAsyncStartHeartbeatGuard_OldContainerIgnored pins design wave 3
+// D-AC6 / D-T5, the broker-heartbeat half (the self-report half is
+// TestAsyncStartGuard0f_*): during an asynchronous start, the broker's
+// heartbeat entry for the OLD container (the previous run, reporting
+// stopped) does not change the agent's phase or end the launch, the launch
+// still completes, and after it an old-run heartbeat does not move the
+// running agent either. Two guards cover it:
+//   - the live start claim (heartbeatPhaseGuarded/heartbeatGuardingClaim)
+//     defers any uncounted heartbeat phase while the launch holds it;
+//   - the store's run check (AgentStatusUpdate.ReportRunID) writes only
+//     last-seen for a heartbeat entry of another run.
+//
+// Case (a), an old-run entry during the launch, is covered by both, so it
+// holds if either guard alone is removed. Case (b), an entry with no run
+// ID (an older broker), is covered by the claim alone, and case (d), an
+// old-run entry after the launch, by the run check alone.
+func TestAsyncStartHeartbeatGuard_OldContainerIgnored(t *testing.T) {
+	f, d := newAsyncStartFixture(t)
+	const oldRun, newRun = "run-old-container", "run-new-container"
+	a := f.addAgent("as-hb-old", string(state.PhaseStopped), "")
+	// The previous run, as its own start recorded it (CreateAgent does not
+	// store a run ID).
+	_, err := f.s.SetAgentRunID(context.Background(), a.ID, oldRun, nil)
+	require.NoError(t, err)
+	require.Equal(t, oldRun, getAgent(t, f.s, a.ID).RunID)
+	// The start's run, as the real dispatcher's beginRun records it before
+	// the send.
+	d.onAccept = func(ctx context.Context, ag *store.Agent) {
+		_, err := f.s.SetAgentRunID(ctx, ag.ID, newRun, nil)
+		require.NoError(t, err)
+	}
+
+	code, body := lifecycleWithBody(t, f, a.ID, "start", map[string]bool{"acceptAsyncLaunch": true})
+	require.Equal(t, http.StatusOK, code, body)
+	row := requireHandedOff(t, f.s, a.ID, store.LaunchKindStart, string(state.PhaseStopped))
+	require.Equal(t, newRun, row.RunID)
+	require.Equal(t, store.StartClaimLive, row.StartClaimState, "the launch holds a live start claim")
+	launchID := row.LaunchID
+
+	stoppedEntry := func(runID string) {
+		t.Helper()
+		f.send(brokerHeartbeatRequest{
+			Status: store.BrokerStatusOnline,
+			Projects: []brokerProjectHeartbeat{{ProjectID: f.projectID, Agents: []brokerAgentHeartbeat{{
+				Slug: a.Slug, Phase: string(state.PhaseStopped), ContainerStatus: "Exited (0)",
+				RuntimeTarget: "docker", RunID: runID,
+			}}}},
+		})
+	}
+	requireLaunching := func(what string) {
+		t.Helper()
+		got := getAgent(t, f.s, a.ID)
+		assert.Equal(t, string(state.PhaseStarting), got.Phase, "%s: the phase stays starting", what)
+		assert.Equal(t, store.LaunchStateActive, got.LaunchState, "%s: the launch stays active", what)
+		assert.Equal(t, launchID, got.LaunchID, "%s: the same launch", what)
+		assert.Equal(t, store.StartClaimLive, got.StartClaimState, "%s: the claim stays live", what)
+	}
+
+	// (a) The old container's stopped entry during the launch.
+	stoppedEntry(oldRun)
+	requireLaunching("old-run heartbeat")
+
+	// (b) The same entry from a broker that sends no run ID: the claim
+	// alone guards it.
+	stoppedEntry("")
+	requireLaunching("run-less heartbeat")
+
+	// (c) The launch completes.
+	rec := postLaunchReport(t, f.srv, f.brokerID, a.ID, f.brokerID, AgentLaunchReport{
+		LaunchID: launchID, InstanceID: "inst-1", State: "succeeded",
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), store.LaunchReportResultApplied)
+	done := getAgent(t, f.s, a.ID)
+	require.Equal(t, string(state.PhaseRunning), done.Phase, "the launch completes despite the old container's reports")
+	require.Equal(t, store.LaunchStateEnded, done.LaunchState)
+	require.Equal(t, store.LaunchEndReasonSucceeded, done.LaunchEndReason)
+	// The launch's end settles the start claim, so from here on only the
+	// store's run check stands between an old-run entry and the phase:
+	// case (d) below tests that guard alone.
+	require.Empty(t, done.StartClaimID, "the succeeded launch released the start claim")
+
+	// (d) After the launch, a late stopped entry of the old run does not
+	// move the running agent: the run check drops it.
+	stoppedEntry(oldRun)
+	after := getAgent(t, f.s, a.ID)
+	assert.Equal(t, string(state.PhaseRunning), after.Phase, "a late old-run heartbeat does not stop the new run")
+	assert.Equal(t, newRun, after.RunID)
+
+	// (e) Control: the new run's own entry applies as usual.
+	f.send(brokerHeartbeatRequest{
+		Status: store.BrokerStatusOnline,
+		Projects: []brokerProjectHeartbeat{{ProjectID: f.projectID, Agents: []brokerAgentHeartbeat{{
+			Slug: a.Slug, Phase: string(state.PhaseRunning), Activity: "working", RuntimeTarget: "docker", RunID: newRun,
+		}}}},
+	})
+	ctrl := getAgent(t, f.s, a.ID)
+	assert.Equal(t, string(state.PhaseRunning), ctrl.Phase)
+	assert.Equal(t, "working", ctrl.Activity, "the new run's heartbeat applies")
 }

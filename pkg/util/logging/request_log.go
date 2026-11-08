@@ -387,7 +387,7 @@ func RequestLogMiddleware(logger *slog.Logger, component string, patterns []Path
 				ResponseSize:  wrapped.bytesWritten,
 				UserAgent:     r.UserAgent(),
 				RemoteIp:      r.RemoteAddr,
-				Referer:       r.Referer(),
+				Referer:       RedactReferer(r.Referer()),
 				Latency:       fmt.Sprintf("%.3fs", duration.Seconds()),
 				Protocol:      r.Proto,
 			}

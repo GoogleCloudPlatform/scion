@@ -16,7 +16,6 @@ package cmd
 
 import (
 	"context"
-	"net/url"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -37,7 +36,7 @@ func newUserLabeler(ctx context.Context, client hubclient.Client) userLabeler {
 			return label
 		}
 		label := userID
-		if u, err := client.Users().Get(ctx, url.PathEscape(userID)); err == nil && u != nil {
+		if u, err := client.Users().Get(ctx, userID); err == nil && u != nil {
 			switch {
 			case u.DisplayName != "":
 				label = u.DisplayName

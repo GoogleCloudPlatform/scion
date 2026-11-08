@@ -120,6 +120,7 @@ var layer1RoundTripSamples = map[string]string{
 	// endpoints
 	"server.hub.public_url":               `"https://hub.example.com"`,
 	"server.hub.hub_name":                 `"hub-a"`,
+	"server.hub.content_url":              `"https://content.example.net"`,
 	"image_registry":                      `"registry.example.com/scion"`,
 	"server.hub.monitoring_dashboard_url": `"https://dash.example.com/d/hub"`,
 	// github_app
@@ -339,15 +340,19 @@ func TestPutServerConfigDB_Layer1RoundTrip(t *testing.T) {
 			t.Run(koanf, func(t *testing.T) {
 				t.Setenv("HOME", t.TempDir())
 				f := layer1FieldFor(t, sec.Name, koanf)
-				// Clearing a saved public URL is recorded before it is
-				// written, and not made without the record
-				// (ptone/scion#3905), so that save needs an audit store.
+				// A change to the saved public URL or to the content URL in
+				// effect is recorded before it is written, and not made
+				// without the record (ptone/scion#3905, ptone/scion#7107),
+				// so an endpoints save needs an audit store. Every endpoints
+				// key gets one: the omit body of a sibling key can send the
+				// content URL sample, which is such a change.
 				var audit *settingsAuditStore
 				var st store.Store
-				if koanf == config.PublicURLKey {
+				if sec.Name == "endpoints" {
 					audit = &settingsAuditStore{}
 					st = audit
 				}
+				auditedURL := koanf == config.PublicURLKey || koanf == config.ContentURLKey
 				srv, fake, ops := newTestDBServerWithStore(t, st)
 
 				seed := sample
@@ -398,9 +403,9 @@ func TestPutServerConfigDB_Layer1RoundTrip(t *testing.T) {
 					_, ok = valueAtPath(doc, pf.docPath)
 					assert.False(t, ok, "an explicit null must clear %s with %s; row %s", partner, koanf, row.Value)
 				}
-				if audit != nil {
+				if auditedURL {
 					recs := audit.records()
-					require.Len(t, recs, 1, "only the clear changes the stored public URL")
+					require.Len(t, recs, 1, "only the clear changes the stored %s", koanf)
 					assert.Equal(t, want, recs[0].BeforeSummary)
 					assert.Empty(t, recs[0].AfterSummary)
 				}
@@ -415,6 +420,35 @@ func TestPutServerConfigDB_Layer1RoundTrip(t *testing.T) {
 	}
 	for k, partner := range layer1RoundTripPairs {
 		assert.True(t, covered[k] && covered[partner], "layer1RoundTripPairs has %s / %s, which is not a registry key pair", k, partner)
+	}
+}
+
+// TestPutServerConfigDB_EndpointURLNeedsAuditStore: on a hub with no store
+// for the audit record, an endpoints save that changes the public URL or
+// the content URL in effect is refused with 500, writes nothing and applies
+// nothing. Neither change is made without its record (ptone/scion#3905,
+// ptone/scion#7107); the round trip above gives every endpoints save a
+// store, so this is where the refusal itself is checked.
+func TestPutServerConfigDB_EndpointURLNeedsAuditStore(t *testing.T) {
+	for _, tc := range []struct {
+		key, body string
+	}{
+		{config.PublicURLKey, `{"server":{"hub":{"public_url":"https://hub.example.com"}}}`},
+		{config.ContentURLKey, `{"server":{"hub":{"content_url":"https://content.example.net"}}}`},
+	} {
+		t.Run(tc.key, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			srv, fake, ops := newTestDBServerWithStore(t, nil)
+			ops.server = srv // a save that went through would apply at once
+			rr := putLayer1(t, srv, ops, "endpoints", tc.body)
+			require.Equal(t, http.StatusInternalServerError, rr.Code, rr.Body.String())
+			assert.Contains(t, rr.Body.String(), `Failed to update section \"endpoints\"`)
+			assert.Nil(t, storedRow(fake, "endpoints"), "the save was written without its audit record")
+			snap := ops.Snapshot()
+			assert.Empty(t, snap.PublicURL, "the public URL was applied")
+			assert.Empty(t, snap.ContentURL, "the content URL was applied")
+			assert.Empty(t, srv.HubEndpoints().Content, "the content URL in effect changed")
+		})
 	}
 }
 

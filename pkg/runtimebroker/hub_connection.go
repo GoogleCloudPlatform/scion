@@ -41,6 +41,9 @@ const (
 	ConnectionStatusConnected ConnectionStatus = "connected"
 	// ConnectionStatusDisconnected indicates the connection is not active.
 	ConnectionStatusDisconnected ConnectionStatus = "disconnected"
+	// ConnectionStatusConnecting indicates the control channel has not
+	// completed its first handshake yet (it is dialing, or its dials fail).
+	ConnectionStatusConnecting ConnectionStatus = "connecting"
 	// ConnectionStatusReconnecting indicates the control channel dropped and is attempting to reconnect.
 	ConnectionStatusReconnecting ConnectionStatus = "reconnecting"
 	// ConnectionStatusError indicates the connection encountered an error.
@@ -147,6 +150,9 @@ type HubConnection struct {
 	// the control channel with its own lifecycle (conduit_dial.go).
 	conduitCancel context.CancelFunc
 	conduitWg     sync.WaitGroup
+	// conduitDialer is the running conduit dialer (nil when none), read for
+	// the broker's health checks. Guarded by mu.
+	conduitDialer *ConduitDialer
 	// conduitExitHook, when set, runs on the dialer goroutine after the
 	// dialer returned, before the goroutine ends (tests only).
 	conduitExitHook func()
@@ -171,6 +177,8 @@ type hubConnectionSnapshot struct {
 	SecretKey         []byte
 	Heartbeat         *HeartbeatService
 	HasControlChannel bool
+	ControlChannel    *ControlChannelClient
+	ConduitDialer     *ConduitDialer
 }
 
 // snapshot returns a copy of the concurrently read fields, taken under hc.mu.
@@ -185,6 +193,8 @@ func (hc *HubConnection) snapshot() hubConnectionSnapshot {
 		SecretKey:         hc.SecretKey,
 		Heartbeat:         hc.Heartbeat,
 		HasControlChannel: hc.ControlChannel != nil,
+		ControlChannel:    hc.ControlChannel,
+		ConduitDialer:     hc.conduitDialer,
 	}
 }
 
@@ -238,6 +248,9 @@ func (hc *HubConnection) start(ctx context.Context, server *Server) error {
 			}
 
 			hb := server.newHeartbeatService(hc.HubClient.RuntimeBrokers(), hc.BrokerID, hc.HubEndpoint, interval)
+			// This hub is told only about its own control channel and
+			// conduit, never another connection's.
+			hb.health = server.heartbeatHealthReportFor(hc)
 			hc.mu.Lock()
 			hc.Heartbeat = hb
 			hc.mu.Unlock()
@@ -247,6 +260,7 @@ func (hc *HubConnection) start(ctx context.Context, server *Server) error {
 	}
 
 	// Start control channel if enabled
+	channelStarted := false
 	if server.config.ControlChannelEnabled && hc.HubEndpoint != "" && hc.BrokerID != "" {
 		if !hasValidCredentials {
 			slog.Warn("Skipping control channel for connection: no valid credentials", "name", hc.Name)
@@ -279,7 +293,12 @@ func (hc *HubConnection) start(ctx context.Context, server *Server) error {
 			hc.mu.Lock()
 			hc.ControlChannel = cc
 			hc.ccCancel = ccCancel
+			// Connected only once the handshake completes
+			// (OnConnectionStateChange); set before Connect starts, so
+			// the callback is never overwritten.
+			hc.Status = ConnectionStatusConnecting
 			hc.mu.Unlock()
+			channelStarted = true
 			// Capture cc locally so the goroutine doesn't race with Stop()
 			// nil-ing hc.ControlChannel out from under it.
 			hc.ccWg.Add(1)
@@ -290,6 +309,7 @@ func (hc *HubConnection) start(ctx context.Context, server *Server) error {
 						slog.Info("Control channel stopped", "name", hc.Name)
 					} else {
 						slog.Error("Control channel error", "name", hc.Name, "error", err)
+						hc.setStatus(ConnectionStatusError)
 					}
 				}
 			}()
@@ -298,7 +318,11 @@ func (hc *HubConnection) start(ctx context.Context, server *Server) error {
 		}
 	}
 
-	hc.setStatus(ConnectionStatusConnected)
+	// Without a control channel the connection's services (heartbeat) are
+	// running; with one, its handshake decides the status.
+	if !channelStarted {
+		hc.setStatus(ConnectionStatusConnected)
+	}
 	return nil
 }
 
@@ -554,6 +578,13 @@ func (hc *HubConnection) reinitialize(ctx context.Context, server *Server, creds
 	// Stop existing services. stop takes hc.mu itself.
 	hc.stop()
 
+	// New credentials may name another hub; the transport rule applies to
+	// it before anything is sent (createHubConnection does the same).
+	if err := config.CheckHubTransport(creds.HubEndpoint); err != nil {
+		hc.setStatus(ConnectionStatusError)
+		return fmt.Errorf("hub connection %q: %w", hc.Name, err)
+	}
+
 	// Update credentials
 	hc.mu.Lock()
 	hc.Credentials = creds
@@ -700,6 +731,11 @@ func HubClientForCredentials(creds *brokercredentials.BrokerCredentials) (hubcli
 	if creds == nil || creds.SecretKey == "" {
 		return nil, fmt.Errorf("hub credentials have no secret")
 	}
+	// The transport rule createHubConnection applies: credentials written
+	// before it existed may name a plain http network hub.
+	if err := config.CheckHubTransport(creds.HubEndpoint); err != nil {
+		return nil, fmt.Errorf("hub credentials: %w", err)
+	}
 	secretKey, err := base64.StdEncoding.DecodeString(creds.SecretKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode secret key: %w", err)
@@ -735,6 +771,9 @@ func (s *Server) newHeartbeatService(client hubclient.RuntimeBrokerService, brok
 	hb.startsInFlight = s.startsInFlightSnapshot
 	hb.defaultProfile = s.defaultProfile
 	hb.flat = s.isFlat()
+	if !hb.flat {
+		hb.SetConversionPlanSource(s.heartbeatConversionPlan)
+	}
 	if fi := s.flatInstance(); fi != nil {
 		// The instance publishes its FC4-a presentation, built only by
 		// config.PresentInstance, on every heartbeat

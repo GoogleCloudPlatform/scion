@@ -54,7 +54,7 @@ Inbound messages from external systems arrive via `POST /api/v1/broker/inbound`.
 | `InProcessBroker` | `pkg/broker/inprocess.go` | In-memory pub/sub with NATS-style matching |
 | `MessageBrokerProxy` | `pkg/hub/messagebroker.go` | Bridges broker ↔ hub agent lifecycle |
 | `BrokerPluginAdapter` | `pkg/plugin/broker_plugin.go` | Wraps RPC client as `broker.MessageBroker` |
-| `reconnectingBrokerAdapter` | `pkg/plugin/broker_plugin.go` | Auto-reconnect wrapper for self-managed plugins |
+| Broker plugin supervisor | `pkg/plugin/supervisor.go` | Detects a lost plugin session and respawns (hub-managed) or re-dials (self-managed) with backoff; restart hooks replace the fan-out spoke |
 | `PluginsConfig` | `pkg/plugin/config.go` | Config: `map[string]PluginEntry` (already supports N entries) |
 | `V1MessageBrokerConfig` | `pkg/config/settings_v1.go` | Settings: `enabled` + `type` (single string) |
 | `Server.StartMessageBroker` | `pkg/hub/server.go:1286` | Creates proxy with single broker, no-op on subsequent calls |

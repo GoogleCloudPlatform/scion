@@ -15,7 +15,10 @@
 package hub
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
+	"log/slog"
 	"reflect"
 	"strings"
 
@@ -120,15 +123,6 @@ func dbStoredValues(file map[string]any, ops *OperationalSettings) map[string]an
 	return out
 }
 
-// startupOnlyLayer1Keys are Layer-1 keys whose saved value ApplySnapshot does
-// not apply, so the hub runs with the startup value (the bootstrap merge,
-// SCION_SERVER_* included) whatever is saved. Each maps to the running
-// value. See layer1ExemptKeys in layer1_apply_coverage_test.go and
-// ptone/scion#6000.
-var startupOnlyLayer1Keys = map[string]func(s *Server) any{
-	"server.auth.authorized_domains": func(s *Server) any { return s.AuthorizedDomains() },
-}
-
 // withheldEnvValueRoots are settings roots whose environment values are never
 // shown: their maps (env, secrets, credentials of runtimes, profiles and
 // harness configs) have no masking in the GET view.
@@ -204,8 +198,9 @@ func serverConfigResponseFromSettings(vs *config.VersionedSettings) ServerConfig
 // back must not send them;
 // nor is the relay-peer secret ever returned, nor the proxy driver settings
 // (WS2), nor the server keyring file path and its world-readable override
-// (ptone/scion#1530). Both tiers' GET builders and the env_values view use
-// it, so the three cannot drift.
+// (ptone/scion#1530), nor server.trusted_proxies (the transport policy's
+// trust set). Both tiers' GET builders and the env_values view use it, so
+// the three cannot drift.
 func hideNeverShownServerKeys(srv *config.V1ServerConfig) {
 	if srv == nil {
 		return
@@ -221,6 +216,7 @@ func hideNeverShownServerKeys(srv *config.V1ServerConfig) {
 	hideNeverAPIWritableProxyKeys(srv)
 	srv.KeyringFile = ""
 	srv.KeyringFileAllowWorldReadable = false
+	srv.TrustedProxies = nil
 }
 
 // shownEnvValue returns the value the GET may show for the environment
@@ -373,8 +369,9 @@ func fileTierEnvValues(envK *koanf.Koanf, keys []string, startup *config.V1Serve
 // hub runs with (the snapshot, a saved database value winning over the
 // bootstrap merge). A key start-up overrides compares with the start-up
 // value (startupEnvInEffect). A Layer-1 environment value is in effect when
-// it equals the value in view, or for startupOnlyLayer1Keys when it equals
-// the running value; a pinned public URL is in effect. Other Layer-0 keys
+// it equals the value in view; a pinned public URL is in effect, and so is
+// a key a SCION_SERVER_* variable pins (authorized_domains,
+// ptone/scion#6000). Other Layer-0 keys
 // are read at startup from the bootstrap merge, where SCION_SERVER_* is the
 // top layer, so they are in effect.
 //
@@ -417,16 +414,75 @@ func (s *Server) dbTierEnvInEffect(envK *koanf.Koanf, key string, running map[st
 	if key == config.PublicURLKey && s.HubEndpoints().Pin != "" {
 		return true
 	}
-	if runningValue, ok := startupOnlyLayer1Keys[key]; ok {
-		cur, err := config.FlattenSettingsJSON(map[string]any{"v": runningValue(s)})
-		if err != nil {
-			return false
-		}
-		single := map[string]any{}
-		if v, ok := cur["v"]; ok {
-			single[key] = v
-		}
-		return envValueEqualsShown(envK, key, single)
+	if key != config.PublicURLKey && opsettings.IsEnvPinnedLayer1Key(key) {
+		// The variable pins the key on this node: the hub started with
+		// its value and keeps it whatever is saved
+		// (authorizedDomainsForSnapshot).
+		return true
 	}
 	return envValueEqualsShown(envK, key, running)
+}
+
+// Settings keys of the hub default GCP identity pair.
+const (
+	defaultGCPIdentityModeKey = "default_gcp_identity_mode"
+	defaultGCPIdentitySAKey   = "default_gcp_identity_service_account_id"
+)
+
+// effectiveFileGCPIdentity returns the hub default GCP identity pair a
+// file-tier hub runs with after a PUT: each key from the environment when a
+// SCION_SERVER_* variable sets it (the settings loader layers the
+// environment above settings.yaml, and start-up does not override these
+// keys), else from merged, the settings.yaml document the PUT would write
+// (ptone/scion#3071). It only chooses which value to validate: it changes
+// neither what is written nor which keys the environment overrides.
+func effectiveFileGCPIdentity(envK *koanf.Koanf, merged map[string]any) opsettings.AgentDefaultsSettings {
+	mode, _ := merged[defaultGCPIdentityModeKey].(string)
+	saID, _ := merged[defaultGCPIdentitySAKey].(string)
+	if envK != nil {
+		if envK.Exists(defaultGCPIdentityModeKey) {
+			mode = envK.String(defaultGCPIdentityModeKey)
+		}
+		if envK.Exists(defaultGCPIdentitySAKey) {
+			saID = envK.String(defaultGCPIdentitySAKey)
+		}
+	}
+	return opsettings.AgentDefaultsSettings{
+		DefaultGCPIdentityMode:             mode,
+		DefaultGCPIdentityServiceAccountID: saID,
+	}
+}
+
+// storedGCPIdentityPinWarning returns a save warning when the environment
+// sets a key of the hub default GCP identity pair and the pair as stored in
+// settings.yaml (merged, the document the PUT writes) would be refused on
+// its own: the save is accepted because the environment value is in effect,
+// but the stored pair applies, unchecked, once the variable is removed
+// (ptone/scion#3071). "" when the environment sets neither key or the stored
+// pair is valid. A store error while checking gives no warning (the save
+// itself passed); it is logged.
+func (s *Server) storedGCPIdentityPinWarning(ctx context.Context, envK *koanf.Koanf, merged map[string]any) string {
+	if envK == nil {
+		return ""
+	}
+	var pinned []string
+	for _, k := range []string{defaultGCPIdentityModeKey, defaultGCPIdentitySAKey} {
+		if envK.Exists(k) {
+			pinned = append(pinned, k)
+		}
+	}
+	if len(pinned) == 0 {
+		return ""
+	}
+	p := s.hubDefaultGCPIdentityProblem(ctx, effectiveFileGCPIdentity(nil, merged))
+	if p == nil {
+		return ""
+	}
+	if p.err != nil {
+		slog.Warn("PUT server-config: could not check the stored hub default GCP identity", "error", p.err)
+		return ""
+	}
+	return fmt.Sprintf("The hub default GCP identity saved in settings.yaml is not valid on its own (%s: %s). "+
+		"It is accepted because the environment sets %s on this node, and it would apply when that variable is removed.",
+		p.field, p.msg, strings.Join(pinned, " and "))
 }

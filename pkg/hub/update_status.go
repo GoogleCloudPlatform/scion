@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/maintenance"
+	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/version"
 	"github.com/GoogleCloudPlatform/scion/pkg/version/update"
@@ -58,8 +59,8 @@ const (
 
 // Update modes reported by update-status.
 const (
-	UpdateModeGit     = "git"
-	UpdateModeRelease = "release"
+	UpdateModeGit     = maintenance.UpdateModeGit
+	UpdateModeRelease = maintenance.UpdateModeRelease
 )
 
 // Channel sources reported by update-status. ChannelSourceSelection means
@@ -91,16 +92,22 @@ type PendingUpdate struct {
 	Pin string `json:"pin,omitempty"`
 	// SetBy is who started the update run (its started_by).
 	SetBy string `json:"setBy,omitempty"`
+	// Mode is UpdateModeGit for a rebuild from Git (rebuild-server),
+	// UpdateModeRelease for update-binary; absent from rows written before
+	// Phase 4 (a release).
+	Mode string `json:"mode,omitempty"`
+	// Commit is the full commit id of a rebuild from Git.
+	Commit string `json:"commit,omitempty"`
 }
 
 // ReleaseSelection is the system.release_selection row: how the operator
 // last chose to run this hub, recorded when that update was verified on
 // boot (design D5).
 type ReleaseSelection struct {
-	Mode    string `json:"mode"`    // UpdateModeRelease (UpdateModeGit from Phase 4)
-	Channel string `json:"channel"` // the selected channel
-	Pin     string `json:"pin"`     // maintenance.PinLatest or a release tag
-	Version string `json:"version"` // the version installed by the selection
+	Mode    string `json:"mode"`    // UpdateModeRelease or UpdateModeGit
+	Channel string `json:"channel"` // the selected channel ("" in git mode)
+	Pin     string `json:"pin"`     // maintenance.PinLatest or a release tag ("" in git mode)
+	Version string `json:"version"` // the version installed by the selection (git-<sha12> in git mode)
 	SetBy   string `json:"set_by"`
 	SetAt   string `json:"set_at"`
 	RunID   string `json:"run_id"`
@@ -112,7 +119,15 @@ type LastUpdate struct {
 	From   string `json:"from"`
 	To     string `json:"to"`
 	Status string `json:"status"`
-	At     string `json:"at"`
+	// At is when the outcome was recorded; for LastUpdateRolledBack, when
+	// the boot-failure guard rolled back (the marker's "at").
+	At string `json:"at"`
+	// Restored is the release the boot-failure guard restored (the
+	// marker's "to"); set only for LastUpdateRolledBack.
+	Restored string `json:"restored,omitempty"`
+	// Mode is UpdateModeGit for a rebuild from Git (its run is a
+	// rebuild-server run), else empty (an update-binary run).
+	Mode string `json:"mode,omitempty"`
 }
 
 // effectiveUpdateMode is how this hub is updated: the release selection's
@@ -174,7 +189,21 @@ func (s *Server) readReleaseSelection(ctx context.Context) (*ReleaseSelection, e
 // auto-update run (started by system:auto-update). Neither carried an
 // operator choice, and recording one would silently override the configured
 // release_channel from then on.
+//
+// A verified rebuild from Git (mode git) records the git mode, with no
+// channel or pin: the scheduled release check then skips the hub, and the
+// configured release_channel applies again once the operator switches
+// back to a release.
 func selectionFromPending(p PendingUpdate, at time.Time) (sel ReleaseSelection, skip string) {
+	if p.Mode == UpdateModeGit {
+		return ReleaseSelection{
+			Mode:    UpdateModeGit,
+			Version: p.To,
+			SetBy:   p.SetBy,
+			SetAt:   at.UTC().Format(time.RFC3339),
+			RunID:   p.RunID,
+		}, ""
+	}
 	switch {
 	case p.Channel == "":
 		return ReleaseSelection{}, "the pending update has no channel (written before release selections)"
@@ -204,6 +233,17 @@ func (s *Server) updateInstaller() maintenance.Installer {
 		return inst
 	}
 	return maintenance.NewUnsupportedInstaller("no update installer was detected at startup", "")
+}
+
+// updatePluginDir is the broker plugin directory whose plugins an update
+// installs in lockstep (~/.scion/plugins/broker; design D6), "" when the
+// home directory cannot be resolved (lockstep is then off).
+func updatePluginDir() string {
+	dir, err := plugin.DefaultPluginsDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(dir, plugin.PluginTypeBroker)
 }
 
 // DetectMaintenanceInstaller detects the update Installer for this host from
@@ -262,12 +302,16 @@ func (s *Server) clearPendingUpdateFor(ctx context.Context, runID string) {
 }
 
 // updateOutcome decides the LastUpdate status of a pending update from the
-// version the hub booted on. Phase 3 adds the rollback marker written by
-// the boot-failure guard here: when it is present the outcome is
-// LastUpdateRolledBack instead of LastUpdateFailed.
-func updateOutcome(p PendingUpdate, running string) string {
+// version the hub booted on and the boot-failure guard's rollback marker
+// not yet seen (nil for none): LastUpdateVerified when the hub runs the
+// target, LastUpdateRolledBack when the marker records a rollback from
+// the target (markerMatchesPending), LastUpdateFailed otherwise.
+func updateOutcome(p PendingUpdate, running string, marker *RollbackMarker) string {
 	if p.To != "" && running == p.To {
 		return LastUpdateVerified
+	}
+	if markerMatchesPending(marker, p) {
+		return LastUpdateRolledBack
 	}
 	return LastUpdateFailed
 }
@@ -277,7 +321,10 @@ func updateOutcome(p PendingUpdate, running string) string {
 // "completed" with system.last_update status "verified" (the release
 // selection recorded from the row, and the update-available notification
 // cleared) when the hub now runs the target version, "failed" otherwise
-// (the notification and the previous selection stay). It then clears the row. It
+// (the notification and the previous selection stay), with status
+// "rolled_back" when the boot-failure guard's rollback marker records the
+// rollback from the target. A new rollback marker is recorded as seen, so
+// it is reported once. It then clears the row. It
 // is idempotent (a re-run after a partial failure converges), tolerates a
 // missing run row, and fails any other update-binary run still left
 // "restarting" (its restart was never confirmed), so no stale run blocks
@@ -297,8 +344,9 @@ func (s *Server) reconcilePendingUpdate(ctx context.Context, running string) err
 		p = PendingUpdate{}
 	}
 
+	marker := s.newRollbackMarker(ctx)
 	if found && p.RunID != "" {
-		status := updateOutcome(p, running)
+		status := updateOutcome(p, running, marker)
 		if err := s.finishPendingRun(ctx, p, status, running); err != nil {
 			return err
 		}
@@ -309,8 +357,22 @@ func (s *Server) reconcilePendingUpdate(ctx context.Context, running string) err
 			Status: status,
 			At:     time.Now().UTC().Format(time.RFC3339),
 		}
+		if p.Mode == UpdateModeGit {
+			last.Mode = UpdateModeGit
+		}
+		if status == LastUpdateRolledBack {
+			last.At, last.Restored = marker.At, marker.To
+		}
 		if err := s.writeHubSettingJSON(ctx, HubSettingSectionLastUpdate, last); err != nil {
 			return err
+		}
+		if status == LastUpdateRolledBack {
+			// After last_update: a failed write keeps pending_update, and
+			// the next boot reports the same marker again.
+			if err := s.recordRollbackMarker(ctx, marker, p.RunID); err != nil {
+				return err
+			}
+			marker = nil
 		}
 		// The operator's choice (channel, pin) takes effect only once the
 		// hub runs it. A failed write keeps pending_update, so the next
@@ -343,6 +405,16 @@ func (s *Server) reconcilePendingUpdate(ctx context.Context, running string) err
 			return fmt.Errorf("clear pending_update: %w", err)
 		}
 	}
+	if marker != nil {
+		// A rollback with no matching pending update (an update not made
+		// by this hub, or a marker older than the update): reported in the
+		// log only, once.
+		log.Warn("The boot-failure guard rolled back a release that failed to start",
+			"from", marker.From, "to", marker.To, "at", marker.At)
+		if err := s.recordRollbackMarker(ctx, marker, ""); err != nil {
+			log.Warn("Failed to record the rollback marker as seen", "error", err)
+		}
+	}
 	return s.failStaleRestartingRuns(ctx)
 }
 
@@ -372,6 +444,12 @@ func (s *Server) finishPendingRun(ctx context.Context, p PendingUpdate, status, 
 	if status == LastUpdateVerified {
 		run.Status = store.MaintenanceStatusCompleted
 		line = fmt.Sprintf("\n==> Hub restarted on %s at %s: update verified.\n", running, now.UTC().Format(time.RFC3339))
+	} else if status == LastUpdateRolledBack {
+		run.Status = store.MaintenanceStatusFailed
+		result["error"] = fmt.Sprintf("%q failed to start; the boot-failure guard rolled back and the hub restarted on %q",
+			p.To, displayRunningVersion(running))
+		line = fmt.Sprintf("\n==> %s failed to start; the boot-failure guard rolled back. Hub restarted on %s at %s.\n",
+			p.To, displayRunningVersion(running), now.UTC().Format(time.RFC3339))
 	} else {
 		run.Status = store.MaintenanceStatusFailed
 		result["error"] = fmt.Sprintf("the hub restarted on %q, not the installed %q", displayRunningVersion(running), p.To)
@@ -391,14 +469,22 @@ func (s *Server) finishPendingRun(ctx context.Context, p PendingUpdate, status, 
 	return nil
 }
 
-// failStaleRestartingRuns fails update-binary runs still "restarting" once
-// the pending update is reconciled: their restart can no longer be
-// confirmed. Only update-binary restarts the hub, and only its latest runs
-// can be in flight.
+// restartingOperations are the operations whose runs end "restarting":
+// they install the hub binary and restart the hub.
+var restartingOperations = []string{"update-binary", "rebuild-server"}
+
+// failStaleRestartingRuns fails update-binary and rebuild-server runs still
+// "restarting" once the pending update is reconciled: their restart can no
+// longer be confirmed. Only these operations restart the hub, and only
+// their latest runs can be in flight.
 func (s *Server) failStaleRestartingRuns(ctx context.Context) error {
-	runs, err := s.store.ListMaintenanceRuns(ctx, "update-binary", 20)
-	if err != nil {
-		return fmt.Errorf("list update-binary runs: %w", err)
+	var runs []store.MaintenanceOperationRun
+	for _, key := range restartingOperations {
+		r, err := s.store.ListMaintenanceRuns(ctx, key, 20)
+		if err != nil {
+			return fmt.Errorf("list %s runs: %w", key, err)
+		}
+		runs = append(runs, r...)
 	}
 	for i := range runs {
 		run := &runs[i]
@@ -435,6 +521,7 @@ type updateStatusResponse struct {
 	Pin           string                      `json:"pin"`
 	Installer     maintenance.InstallerStatus `json:"installer"`
 	UpdatePolicy  string                      `json:"updatePolicy"`
+	Downgrade     updateStatusDowngrade       `json:"downgrade"`
 	PendingUpdate *PendingUpdate              `json:"pendingUpdate"`
 	LastUpdate    *LastUpdate                 `json:"lastUpdate"`
 }
@@ -467,6 +554,13 @@ type runningBuild struct {
 	Version   string
 	Commit    string
 	BuildTime string
+}
+
+// runningReleaseName is the running build's name in the update lifecycle
+// (maintenance.RunningReleaseName): its release version, else
+// git-<sha12>.
+func runningReleaseName() string {
+	return maintenance.RunningReleaseName(version.Version, version.GetCommit())
 }
 
 func currentRunningBuild() runningBuild {
@@ -514,6 +608,10 @@ func (s *Server) buildUpdateStatus(ctx context.Context, cur runningBuild) (*upda
 		Pin:          effectivePin(sel),
 		Installer:    redactInstallerStatus(s.updateInstaller().Status(), mc.RepoPath),
 		UpdatePolicy: mc.UpdatePolicy,
+		Downgrade: updateStatusDowngrade{
+			Floor:              version.DowngradeFloor,
+			SnapshotsSupported: s.updateSnapshotter(ctx).SnapshotStatus().Supported,
+		},
 	}
 
 	var pending PendingUpdate

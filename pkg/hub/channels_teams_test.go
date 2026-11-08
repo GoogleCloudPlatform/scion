@@ -174,6 +174,65 @@ func TestTeamsChannel_Validate_ServiceURLMustBeHTTPS(t *testing.T) {
 	}
 }
 
+func TestTeamsChannel_Validate_ServiceURLHost(t *testing.T) {
+	const hostErr = "is not a recognised Bot Framework service host"
+	tests := []struct {
+		name       string
+		serviceURL string
+		wantErr    string
+	}{
+		{name: "other host refused", serviceURL: "https://example.com/teams/", wantErr: hostErr},
+		{name: "suffix lookalike refused", serviceURL: "https://smba.trafficmanager.net.example.com/teams/", wantErr: hostErr},
+		{name: "subdomain refused", serviceURL: "https://x.smba.trafficmanager.net/teams/", wantErr: hostErr},
+		{name: "prefixed name refused", serviceURL: "https://notsmba.trafficmanager.net/teams/", wantErr: hostErr},
+		{name: "trailing dot refused", serviceURL: "https://smba.trafficmanager.net./teams/", wantErr: hostErr},
+		{name: "allowed name as userinfo refused", serviceURL: "https://smba.trafficmanager.net@example.com/teams/", wantErr: hostErr},
+		{name: "IP address refused", serviceURL: "https://203.0.113.10/teams/", wantErr: hostErr},
+		{name: "public cloud accepted", serviceURL: "https://smba.trafficmanager.net/teams/"},
+		{name: "public cloud regional path accepted", serviceURL: "https://smba.trafficmanager.net/amer/"},
+		{name: "explicit port accepted", serviceURL: "https://smba.trafficmanager.net:8443/amer/"},
+		{name: "host case ignored", serviceURL: "https://SMBA.TrafficManager.NET/emea/"},
+		{name: "GCC accepted", serviceURL: "https://smba.infra.gcc.teams.microsoft.com/teams"},
+		{name: "GCC High accepted", serviceURL: "https://smba.infra.gov.teams.microsoft.us/teams"},
+		{name: "DoD accepted", serviceURL: "https://smba.infra.dod.teams.microsoft.us/teams"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ch := NewTeamsChannel(map[string]string{
+				"app_id":          "test-app",
+				"app_secret":      "test-secret",
+				"tenant_id":       "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+				"conversation_id": "conv-123",
+				"service_url":     tc.serviceURL,
+			})
+			err := ch.Validate()
+			if tc.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tc.wantErr)
+				assert.Contains(t, err.Error(), "smba.infra.dod.teams.microsoft.us", "error names the accepted hosts")
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestTeamsChannel_Validate_ServiceURLHostErrorOmitsUserinfo(t *testing.T) {
+	ch := NewTeamsChannel(map[string]string{
+		"app_id":          "test-app",
+		"app_secret":      "test-secret",
+		"tenant_id":       "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+		"conversation_id": "conv-123",
+		"service_url":     "https://someuser:somepass@example.com/teams/",
+	})
+	err := ch.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `"example.com"`)
+	assert.NotContains(t, err.Error(), "someuser")
+	assert.NotContains(t, err.Error(), "somepass")
+}
+
 func TestTeamsChannel_Validate_TenantIDMustBeUUID(t *testing.T) {
 	tests := []struct {
 		name     string

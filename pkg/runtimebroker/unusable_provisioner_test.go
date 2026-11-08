@@ -26,6 +26,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // unusableResolveErr returns the error harness.Resolve gives for a
@@ -125,7 +126,7 @@ func TestUnusableProvisioner_DispatchPathsAnswer422(t *testing.T) {
 // message.
 func TestClassifyStartError_UnusableProvisioner(t *testing.T) {
 	dir, err := unusableResolveErr(t)
-	code, _, msg := classifyStartError(context.Background(), err, "", "")
+	code, _, msg := classifyStartError(context.Background(), err, "", "", store.LaunchKindCreate)
 	if code != ErrCodeHarnessConfigUnusable {
 		t.Errorf("code = %q, want %q", code, ErrCodeHarnessConfigUnusable)
 	}

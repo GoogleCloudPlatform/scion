@@ -123,6 +123,12 @@ type HubEndpoints struct {
 	// PublicSource is HubEndpointSourceDatabase when the database value
 	// applies, otherwise OperatorSource.
 	PublicSource string
+	// Content is the content host in effect (server.hub.content_url,
+	// normalized), or "" when none is set or the value is ignored (invalid,
+	// or on the public endpoint's host name; see contentURLInEffect). Unlike
+	// the other fields it is read live: Server.HubEndpoints fills it on
+	// every call, so a saved change applies without a restart.
+	Content string
 }
 
 // For returns the endpoint the hub hands out for use: the operator endpoint
@@ -202,9 +208,12 @@ const hubEndpointSourceLabelFile = "file"
 // HubEndpoints returns the endpoints this hub resolved at startup
 // (ServerConfig.HubEndpoints, else ServerConfig.HubEndpoint for both). They
 // never change while the hub runs: server.hub.public_url is
-// restart-required.
+// restart-required. Content is the exception: it is the content host in
+// effect now (contentURLInEffect).
 func (s *Server) HubEndpoints() HubEndpoints {
-	return hubEndpointsFromConfig(s.config)
+	e := hubEndpointsFromConfig(s.config)
+	e.Content = s.contentURLInEffect(e.Public)
+	return e
 }
 
 // HubEndpointFor returns the endpoint the hub hands out for use (see

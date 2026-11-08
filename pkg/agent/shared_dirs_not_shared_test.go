@@ -17,6 +17,7 @@ package agent
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -82,4 +83,24 @@ func TestRetireSharedDirRecord(t *testing.T) {
 	require.NoError(t, os.WriteFile(rec, []byte(`{"backend":"nfs"}`), 0o600))
 	assert.Empty(t, retireSharedDirRecord(dir, nfs, dirs), "an agreeing record gives no warning")
 	assert.Empty(t, retireSharedDirRecord("", nfs, dirs))
+}
+
+// A retired record above the read cap, or a symlinked one, is not read (and
+// so gives no warning), even when its content would name another backend.
+func TestRetireSharedDirRecord_BoundedRead(t *testing.T) {
+	nfs := projectfs.Layout{Backend: projectfs.BackendNFS}
+	dirs := []api.SharedDir{{Name: "cache"}}
+	pinned := `{"backend":"nfs","dirs":{"cache":"local"}}`
+
+	dir := t.TempDir()
+	rec := filepath.Join(dir, legacySharedDirStorageRecordFile)
+	padded := pinned + strings.Repeat(" ", retiredSharedDirRecordMaxBytes)
+	require.NoError(t, os.WriteFile(rec, []byte(padded), 0o600))
+	assert.Empty(t, retireSharedDirRecord(dir, nfs, dirs), "an over-cap record is not read")
+
+	dir2 := t.TempDir()
+	target := filepath.Join(t.TempDir(), "elsewhere.json")
+	require.NoError(t, os.WriteFile(target, []byte(pinned), 0o600))
+	require.NoError(t, os.Symlink(target, filepath.Join(dir2, legacySharedDirStorageRecordFile)))
+	assert.Empty(t, retireSharedDirRecord(dir2, nfs, dirs), "a symlinked record is not followed")
 }

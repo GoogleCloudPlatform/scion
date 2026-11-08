@@ -16,12 +16,14 @@
 
 /**
  * Fixtures of the review editor suite: a project, artifacts published
- * through the hub API as the dev-auth admin, and the two experiments the
- * suite needs (hub.artifacts and web.artifact_review_editor), switched on
- * for the suite's throwaway hub only and reset afterwards.
+ * through the hub API as the dev-auth admin, and the experiments the suite
+ * needs (hub.artifacts, web.artifact_review_editor and, for the zip
+ * download, hub.artifact_archive), switched on for the suite's throwaway
+ * hub only and reset afterwards.
  */
 
 import { createHash } from 'node:crypto';
+import { inflateRawSync } from 'node:zlib';
 
 import { expect } from '@playwright/test';
 import type { Page } from '@playwright/test';
@@ -32,7 +34,11 @@ import type { HubState } from '../harness/hub.js';
 import { solidPng } from '../artifacts-access/render-fixtures.js';
 import { stateFile } from './state.js';
 
-export const EXPERIMENTS = ['hub.artifacts', 'web.artifact_review_editor'] as const;
+export const EXPERIMENTS = [
+  'hub.artifacts',
+  'web.artifact_review_editor',
+  'hub.artifact_archive',
+] as const;
 
 export function hub(): HubState {
   const state = readHubState(stateFile());
@@ -225,4 +231,43 @@ export async function editorText(page: Page): Promise<string> {
   return page
     .locator('scion-review-editor')
     .evaluate((el) => (el as HTMLElement & { flush(): string | null }).flush() ?? '');
+}
+
+/**
+ * The entries of a zip, by name, read from its central directory: enough
+ * for the archives the hub writes (stored or deflated, no zip64).
+ */
+export function readZip(zip: Buffer): Map<string, Buffer> {
+  let eocd = -1;
+  for (let i = zip.length - 22; i >= 0; i--) {
+    if (zip.readUInt32LE(i) === 0x06054b50) {
+      eocd = i;
+      break;
+    }
+  }
+  if (eocd < 0) throw new Error('not a zip: no end of central directory');
+  const count = zip.readUInt16LE(eocd + 10);
+  let p = zip.readUInt32LE(eocd + 16);
+  const out = new Map<string, Buffer>();
+  for (let n = 0; n < count; n++) {
+    if (zip.readUInt32LE(p) !== 0x02014b50) throw new Error('bad central directory entry');
+    const method = zip.readUInt16LE(p + 10);
+    const compressed = zip.readUInt32LE(p + 20);
+    const size = zip.readUInt32LE(p + 24);
+    const nameLen = zip.readUInt16LE(p + 28);
+    const extraLen = zip.readUInt16LE(p + 30);
+    const commentLen = zip.readUInt16LE(p + 32);
+    const local = zip.readUInt32LE(p + 42);
+    const name = zip.subarray(p + 46, p + 46 + nameLen).toString('utf8');
+    const start = local + 30 + zip.readUInt16LE(local + 26) + zip.readUInt16LE(local + 28);
+    const raw = zip.subarray(start, start + compressed);
+    let data: Buffer;
+    if (method === 0) data = Buffer.from(raw);
+    else if (method === 8) data = inflateRawSync(raw);
+    else throw new Error(`entry ${name}: method ${method}`);
+    if (data.length !== size) throw new Error(`entry ${name}: ${data.length} bytes, want ${size}`);
+    out.set(name, data);
+    p += 46 + nameLen + extraLen + commentLen;
+  }
+  return out;
 }

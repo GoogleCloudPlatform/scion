@@ -57,18 +57,19 @@ func explicitDispatchImage(ac *store.AgentAppliedConfig) string {
 	return ""
 }
 
-// dispatchImageForBroker is explicitDispatchImage rewritten to the image
-// registry for the agent's broker and profile, the form every dispatch
-// sends.
-func (d *HTTPAgentDispatcher) dispatchImageForBroker(agent *store.Agent) string {
+// dispatchImageForBroker is explicitDispatchImage with imageTag (the
+// dispatch's image_tag, dispatchImageTag, resolved once per dispatch) and
+// the image registry for the agent's broker and profile applied
+// (config.RewriteImageRef, tag first): the form every dispatch sends. The
+// broker applies the same tag again (it also arrives as
+// HubAgentDefaults.ImageTag); both rewrites are idempotent. With no tag
+// this is exactly the image_registry rewrite (ptone/scion#6625).
+func (d *HTTPAgentDispatcher) dispatchImageForBroker(agent *store.Agent, imageTag string) string {
 	image := explicitDispatchImage(agent.AppliedConfig)
 	if image == "" {
 		return ""
 	}
-	if registry := d.ImageRegistryFor(agentImageRegistryTarget(agent)); registry != "" {
-		image = config.RewriteImageRegistry(image, registry)
-	}
-	return image
+	return config.RewriteImageRef(image, d.ImageRegistryFor(agentImageRegistryTarget(agent)), imageTag)
 }
 
 // dropEchoedInlineImage keeps a configure-page echo of the live image out of

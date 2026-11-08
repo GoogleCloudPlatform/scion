@@ -232,7 +232,10 @@ func TestBuildAgentEditability_HeldIsNotAvailableYet(t *testing.T) {
 				Disposition:           EditLocked,
 				SessionSensitive:      wantSessionSensitive[key],
 				ClearNeedsReincarnate: true,
-				Reason:                editReasonRunning,
+				// No broker capabilities here, so the count limit is
+				// flagged: Unlimited cannot be promised (ptone/scion#5605).
+				UnlimitedUnsupported: key == "config.max_turns",
+				Reason:               editReasonRunning,
 			}, ed.Fields[key], "%s in %s", key, phase)
 		}
 		assert.Equal(t, EditNow, ed.Fields["explicitTimezone"].Disposition, "timezone in %s", phase)
@@ -324,12 +327,12 @@ func rawConfigOf(t *testing.T, body string) map[string]json.RawMessage {
 }
 
 func TestReincarnateOnlyConfigEdits(t *testing.T) {
-	body := `{"model":"m","Max_Turns":0,"max_duration":null,"thinking_level":50,"image":"","system_prompt":"p","skills":[],"not_a_key":1,"env":{}}`
+	body := `{"model":"m","Max_Turns":null,"max_duration":null,"thinking_level":50,"image":"","system_prompt":"p","skills":[],"not_a_key":1,"env":{}}`
 	var req api.ScionConfig
 	require.NoError(t, json.Unmarshal([]byte(body), &req))
 	raw := rawConfigOf(t, body)
 	stored := &api.ScionConfig{
-		MaxTurns: 3, MaxDuration: "1h", Image: "img", Env: map[string]string{"A": "1"},
+		MaxTurns: api.IntPtr(3), MaxDuration: "1h", Image: "img", Env: map[string]string{"A": "1"},
 		Skills: []api.SkillReference{{URI: "s"}},
 	}
 	provision, cleared := reincarnateOnlyConfigEdits(raw, &req, stored)
@@ -356,12 +359,13 @@ func TestReincarnateOnlyConfigEdits(t *testing.T) {
 	})
 
 	t.Run("values the start merge applies are not reported as cleared", func(t *testing.T) {
-		body := `{"max_duration":"0","thinking_level":0,"telemetry":{"enabled":false}}`
+		// max_turns 0 is Unlimited, a value (ptone/scion#5605).
+		body := `{"max_duration":"0","max_turns":0,"thinking_level":0,"telemetry":{"enabled":false}}`
 		var req api.ScionConfig
 		require.NoError(t, json.Unmarshal([]byte(body), &req))
 		tl := 40
 		on := true
-		stored := &api.ScionConfig{MaxDuration: "1h", ThinkingLevel: &tl, Telemetry: &api.TelemetryConfig{Enabled: &on}}
+		stored := &api.ScionConfig{MaxDuration: "1h", MaxTurns: api.IntPtr(3), ThinkingLevel: &tl, Telemetry: &api.TelemetryConfig{Enabled: &on}}
 		provision, cleared := reincarnateOnlyConfigEdits(rawConfigOf(t, body), &req, stored)
 		assert.Empty(t, provision)
 		assert.Empty(t, cleared)
@@ -369,7 +373,7 @@ func TestReincarnateOnlyConfigEdits(t *testing.T) {
 	})
 
 	five := rawConfigOf(t, `{"model":"m","max_turns":5}`)
-	assert.Empty(t, reincarnateOnlyEditWarnings(reincarnateOnlyConfigEdits(five, &api.ScionConfig{Model: "m", MaxTurns: 5}, stored)))
+	assert.Empty(t, reincarnateOnlyEditWarnings(reincarnateOnlyConfigEdits(five, &api.ScionConfig{Model: "m", MaxTurns: api.IntPtr(5)}, stored)))
 	assert.Empty(t, reincarnateOnlyEditWarnings(reincarnateOnlyConfigEdits(nil, nil, stored)))
 }
 
@@ -379,16 +383,17 @@ func TestConfigEditDisposition(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(body), &req))
 	tl := 40
 	stored := &api.ScionConfig{
-		Model: "old", MaxTurns: 3, MaxDuration: "1h", ThinkingLevel: &tl, Image: "img",
+		Model: "old", MaxTurns: api.IntPtr(3), MaxDuration: "1h", ThinkingLevel: &tl, Image: "img",
 		Env: map[string]string{"A": "1"}, Skills: []api.SkillReference{{URI: "s"}},
 	}
 	removed := map[string][]string{"env": {"A"}}
 	provision, cleared := reincarnateOnlyConfigEdits(rawConfigOf(t, body), &req, stored)
 	applied, held := configEditDisposition(rawConfigOf(t, body), &req, stored, provision, cleared, removed)
-	// max_duration "0" and thinking_level 0 apply at the next start; the
-	// image and branch are echoes and volumes clears nothing.
-	assert.Equal(t, []string{"config.max_duration", "config.model", "config.thinking_level"}, applied)
-	assert.Equal(t, []string{"config.env", "config.max_turns", "config.skills", "config.system_prompt"}, held)
+	// max_duration "0", max_turns 0 (Unlimited, ptone/scion#5605) and
+	// thinking_level 0 apply at the next start; the image and branch are
+	// echoes and volumes clears nothing.
+	assert.Equal(t, []string{"config.max_duration", "config.max_turns", "config.model", "config.thinking_level"}, applied)
+	assert.Equal(t, []string{"config.env", "config.skills", "config.system_prompt"}, held)
 
 	t.Run("an env edit that removes nothing is applied", func(t *testing.T) {
 		raw := rawConfigOf(t, `{"env":{"A":"1","B":"2"}}`)
@@ -570,7 +575,7 @@ func TestStartMergeKeepsBase_MatchesBrokerMerge(t *testing.T) {
 	tl := 60
 	base := &api.ScionConfig{
 		Model: "old", Image: "img", User: "u", AuthSelectedType: "api-key", Task: "t", TaskFlag: "--task",
-		MaxTurns: 9, MaxModelCalls: 9, MaxDuration: "1h", ThinkingLevel: &tl,
+		MaxTurns: api.IntPtr(9), MaxModelCalls: api.IntPtr(9), MaxDuration: "1h", ThinkingLevel: &tl,
 		Env: map[string]string{"A": "1"}, Volumes: []api.VolumeMount{{Source: "/a", Target: "/b"}},
 		CommandArgs: []string{"--x"}, MCPServers: map[string]api.MCPServerConfig{"m": {Transport: "stdio"}},
 		Resources:  &api.ResourceSpec{Disk: "10Gi", Requests: api.ResourceList{CPU: "1"}},
@@ -584,8 +589,10 @@ func TestStartMergeKeepsBase_MatchesBrokerMerge(t *testing.T) {
 		req  api.ScionConfig
 		kept bool
 	}{
-		{name: "max_turns 0 (Unlimited)", key: "max_turns", req: api.ScionConfig{MaxTurns: 0}, kept: true},
-		{name: "max_model_calls 0", key: "max_model_calls", req: api.ScionConfig{}, kept: true},
+		{name: "max_turns 0 (Unlimited)", key: "max_turns", req: api.ScionConfig{MaxTurns: &zero}, kept: false},
+		{name: "max_turns null", key: "max_turns", req: api.ScionConfig{}, kept: true},
+		{name: "max_model_calls 0 (Unlimited)", key: "max_model_calls", req: api.ScionConfig{MaxModelCalls: &zero}, kept: false},
+		{name: "max_model_calls null", key: "max_model_calls", req: api.ScionConfig{}, kept: true},
 		{name: `max_duration "0" (Unlimited)`, key: "max_duration", req: api.ScionConfig{MaxDuration: "0"}, kept: false},
 		{name: "max_duration cleared", key: "max_duration", req: api.ScionConfig{}, kept: true},
 		{name: "thinking_level 0", key: "thinking_level", req: api.ScionConfig{ThinkingLevel: &zero}, kept: false},
@@ -649,7 +656,7 @@ func TestDropFixedConfigKeys(t *testing.T) {
 	dropFixedConfigKeys(&cfg, raw, present)
 	assert.Empty(t, cfg.Branch)
 	assert.Empty(t, cfg.Harness)
-	assert.Equal(t, 4, cfg.MaxTurns)
+	assert.Equal(t, api.IntPtr(4), cfg.MaxTurns)
 	assert.Equal(t, map[string]bool{"max_turns": true, "bogus": true}, present)
 	assert.Len(t, raw, 2)
 	assert.Contains(t, raw, "max_turns")
@@ -699,7 +706,7 @@ func TestStartMergeKeepsBase_ValuesThatApply(t *testing.T) {
 		req api.ScionConfig
 	}{
 		{key: "telemetry", req: api.ScionConfig{Telemetry: &api.TelemetryConfig{Enabled: &on}}},
-		{key: "max_turns", req: api.ScionConfig{MaxTurns: turns}},
+		{key: "max_turns", req: api.ScionConfig{MaxTurns: &turns}},
 		{key: "thinking_level", req: api.ScionConfig{ThinkingLevel: &turns}},
 		{key: "max_duration", req: api.ScionConfig{MaxDuration: "0"}},
 		{key: "model", req: api.ScionConfig{Model: "\x00populated-a"}},

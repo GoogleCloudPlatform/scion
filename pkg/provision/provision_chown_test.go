@@ -167,11 +167,11 @@ func TestProvisionShared_RequireChownSuccess_EPERM_OwnerMatches(t *testing.T) {
 		Mode:                store.SharingModeSharedPlain,
 		NFSUID:              os.Getuid(),
 		NFSGID:              os.Getgid(),
-		SentinelDir:         hostPath,
+		SentinelDir:         ProjectStateDir(hostPath),
 		RequireChownSuccess: true,
 	})
 	require.NoError(t, err)
-	_, statErr := os.Stat(filepath.Join(hostPath, ProvisionSentinelFile))
+	_, statErr := os.Stat(filepath.Join(ProjectStateDir(hostPath), ProvisionSentinelFile))
 	assert.NoError(t, statErr, "sentinel must be written")
 }
 
@@ -185,12 +185,12 @@ func TestProvisionShared_RequireChownSuccess_EPERM_OwnerMismatch(t *testing.T) {
 		Mode:                store.SharingModeSharedPlain,
 		NFSUID:              os.Getuid() + 1,
 		NFSGID:              os.Getgid(),
-		SentinelDir:         hostPath,
+		SentinelDir:         ProjectStateDir(hostPath),
 		RequireChownSuccess: true,
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "owner is")
-	_, statErr := os.Stat(filepath.Join(hostPath, ProvisionSentinelFile))
+	_, statErr := os.Stat(filepath.Join(ProjectStateDir(hostPath), ProvisionSentinelFile))
 	assert.Error(t, statErr, "sentinel must not be written")
 }
 

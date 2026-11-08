@@ -15,6 +15,7 @@
 package config
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -122,7 +123,7 @@ func projectLayerLoaded(t *testing.T, dir, tag string) (settings, template, harn
 		t.Fatalf("LoadVersionedSettings(%s): %v", dir, err)
 	}
 	settings = vs.DefaultTemplate == "from-"+tag
-	if tpl, err := FindTemplateInProjectPath(tag, dir); err == nil && tpl.Scope == "project" {
+	if tpl, err := FindTemplateInProjectPath(context.Background(), tag, dir); err == nil && tpl.Scope == "project" {
 		template = true
 	}
 	if _, err := FindHarnessConfigDir(tag, dir); err == nil {

@@ -513,12 +513,23 @@ func TestTIWebIAP_TransportIdentityInvariant(t *testing.T) {
 	// transport identity before its first lookup.
 	assert.Equal(t, []string{
 		"Exchange s.resolver",
+		// slog.Value.Resolve in the test log capture helper
+		// (internal/hubtestutil, scanned through guardScanSubdirs), not a
+		// user or transport resolver.
+		"RecordAttrs a.Value",
 		"agentPTYPath rtr",
 		"authenticateExternalBearer cfg.GoogleResolver",
 		"brokerPTYPath rtr",
 		// The experiments registry (Registry.Resolve), not a user or
 		// transport resolver.
 		"experimentEnabledIn s.experimentRegistry()",
+		// The chat_retention settings document's bounds check
+		// (opsettings.ChatRetentionSettings.Resolve), not a user or
+		// transport resolver.
+		"handlePutChatRetention settings",
+		// The conduit router (router.Resolve: which session would carry a
+		// page view stream), not a user or transport resolver.
+		"portViewConduitRoute rtr",
 		// The project storage layout authority (pkg/projectfs), not a
 		// user or transport resolver.
 		"projectRecordSharedDirPath localLayout",
@@ -526,6 +537,10 @@ func TestTIWebIAP_TransportIdentityInvariant(t *testing.T) {
 		// (projectfs.Layout.Resolve; workspace_layout.go), not a user or
 		// transport resolver.
 		"projectWorkspaceResolved layout",
+		// The workspace Mount of a project tree, for the one-shot
+		// provisioning state promotion (provision_promote.go), through
+		// the same layout authority; not a user or transport resolver.
+		"promoteProjectProvisionState layout",
 		"resolveAsNeededForKeys d.secretBackend",
 		"resolveNFSSharedDir layout",
 		"resolveOutboundRouting messaging",

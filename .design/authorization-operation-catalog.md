@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 368
+**Operations:** 377
 
 ## Table of Contents
 
@@ -16,7 +16,7 @@
 - [agent.hold.lift](#agentholdlift) — Lift the holds of a suspended agent whose owners are admitted to its project again (hub admin)
 - [agent.lifecycle.reincarnate](#agentlifecyclereincarnate) — Reincarnate an agent
 - [agent.read](#agentread) — Read a single agent's metadata by ID
-- [agent.list](#agentlist) — List agents within the caller's authorized project scope. A user access token needs agent:list on either boundary: a project token lists only its boundary project's agents. The project form lists one project's agents and decides agent.list on that project
+- [agent.list](#agentlist) — List agents within the caller's authorized project scope. A user access token needs agent:list on either boundary: a project token lists only its boundary project's agents. The project form lists one project's agents and decides agent.list on that project. An agent delegated credential is admitted on the hub and project forms: its scope is the authorizing user's list scope within the grant boundary (on the project form, within that one project), and each item is also decided for agent.read
 - [agent.update](#agentupdate) — Update agent configuration or metadata
 - [agent.update.pendingconfig.delete](#agentupdatependingconfigdelete) — Discard an agent's pending config edits (behind hub.agent_edit_held; 404 while it is off)
 - [agent.status.update](#agentstatusupdate) — Report an agent's status: the agent itself, or a user who may update the agent
@@ -70,12 +70,13 @@
 - [schedule.event.pause](#scheduleeventpause) — Pause a recurring schedule. Pausing only stops future runs, so a token with scheduled_event:update is admitted
 - [schedule.event.delete](#scheduleeventdelete) — Cancel a scheduled event or delete a recurring schedule
 - [schedule.event.fire](#scheduleeventfire) — Fire a scheduled message or dispatch_agent event, one-shot or materialized from a recurring schedule, under the authority its revision recorded
-- [artifact.read](#artifactread) — Read an artifact's metadata or file bytes (owner, home-project readers via the scope grant, or principal grants); unreadable artifacts answer 404
+- [artifact.read](#artifactread) — Read an artifact's metadata or file bytes, one by one or as a zip of a version (owner, home-project readers via the scope grant, or principal grants); unreadable artifacts answer 404
 - [artifact.list](#artifactlist) — List the artifacts the caller owns, holds a grant on, or that are shared to a project it is a member of (?mine=1); each row passes the artifact.read check, so an artifact the caller cannot read is omitted, never denied
 - [artifact.create](#artifactcreate) — Create an artifact homed in a project (the caller's own, or ?scope=): a single file published at once (?name=), or a manifest that starts a pending first version (JSON body), whose files are then uploaded and finalized through the artifact.version.upload and artifact.version.finalize routes
 - [artifact.update](#artifactupdate) — Set or clear an artifact's expiry, or move it to another home project (PATCH); a move also requires artifact.create in the target project and cross-project sharing on; it removes the old home project's grant, so that project's members lose read unless another grant covers them, and gives the target project a read grant unless it already holds a scope grant (an admin one is refused with 409 home_admin_grant); a steward may change the expiry but a move from it is refused with 403 steward_action_not_allowed
 - [artifact.grant.list](#artifactgrantlist) — List an artifact's principal and scope grants, home grant first, with whether cross-project sharing is on
-- [artifact.grant.put](#artifactgrantput) — Give a user, agent or project read, write or admin on an artifact, or a user review, or change an existing grant's permission (POST); a steward (on an artifact owned by an agent: an owner of its home project, or the agent's delegating user who reads in the home project) gives read, review or write, and an admin grant from it is refused with 403 steward_action_not_allowed; a caller that may not manage the artifact may still give a user the review level on an artifact owned by an agent when it is that agent's delegating user or an admin of the artifact's home project (project.manage there; ReviewGrantClause), to a user who can already read it through the home project or a grant to one of the user's projects, never replacing a read, write or admin grant; a caller with that authority asking for a well-formed review grant is refused with 403 review_subject_cannot_read when the user cannot read the artifact and 403 review_replaces_access when the user holds a read, write or admin grant; every other request from such a caller is refused with the same 403, and an accepted one can still answer 409 too_many_grants, or 404 when the artifact went away meanwhile
+- [artifact.grant.put](#artifactgrantput) — Give a user, agent or project read, write or admin on an artifact, or a user review, or change an existing grant's permission (POST); a steward (on an artifact owned by an agent: an owner of its home project, or the agent's delegating user who reads in the home project) gives read, review or write, and an admin grant from it is refused with 403 steward_action_not_allowed; a caller that may not manage the artifact may still give a user the review level on an artifact owned by an agent when it is that agent's delegating user or an admin of the artifact's home project (project.manage there; ReviewGrantClause), to a user who can already read it through the home project or a grant to one of the user's projects, never replacing a read, write or admin grant; a caller with that authority asking for a well-formed review grant is refused with 403 review_subject_cannot_read when the user cannot read the artifact and 403 review_replaces_access when the user holds a read, write or admin grant; every other request from such a caller is refused with the same 403, and an accepted one can still answer 409 too_many_grants, or 404 when the artifact went away meanwhile; with notify, may write one hub notification (artifact.grant.notify)
+- [artifact.grant.notify](#artifactgrantnotify) — Ask for review: with notify on an artifact grant to a user (POST, body notify true), write one hub notification to that user after the grant commits, naming the granter and the level, never the artifact's title or any request text; only an artifact manager or steward on an interactive, unscoped user session (the scheduled-send gate) sends it, only to an active user the caller may read, only when the grant raises the user's level and, for review until the review ladder lands, only to a user who can already read the artifact; at most 30 per hour per requester (burst 10) and 600 per hour in all (burst 60); a refusal never blocks the grant and answers notifySkipped (self, not_permitted, unavailable, not_raised, rate_limited); the review path for non-managers never notifies
 - [artifact.grant.delete](#artifactgrantdelete) — Remove one grant from an artifact; the home project's grant cannot be removed
 - [artifact.link.list](#artifactlinklist) — List an artifact's unexpired share links (ids, creator, expiry; never the tokens)
 - [artifact.link.create](#artifactlinkcreate) — Create a share link: an unguessable token, shown once, that lets anyone holding it read the artifact's current version without signing in until it expires (at most the hub's maximum lifetime, never past the artifact's own expiry) or is revoked
@@ -111,6 +112,7 @@
 - [project.workspace.read](#projectworkspaceread) — Read a project's workspace: archive and file reads
 - [project.workspace.write](#projectworkspacewrite) — Change a project's workspace: file upload, write and delete, and git pull
 - [project.github.read](#projectgithubread) — Read a project's GitHub status, GitHub permissions and git identity
+- [project.github.installation.bind](#projectgithubinstallationbind) — Bind a GitHub App installation to a project (admin only: also requires hub.github_app.update)
 - [project.github.write](#projectgithubwrite) — Change a project's GitHub installation, status check, GitHub permissions and git identity
 - [project.members.assignableroles](#projectmembersassignableroles) — List the roles the caller may assign in a project
 - [agent.message.send](#agentmessagesend) — Send a message to an agent
@@ -214,10 +216,10 @@
 - [user.admin.suspend](#useradminsuspend) — Suspend or reactivate a user account (dispatched from PATCH /api/v1/users/{id} when status field is present). A token needs user:suspend on a hub boundary, checked on the hub-level user record. The caller's own status and activating an invited user are refused for every credential
 - [user.admin.invite](#useradmininvite) — Invite users to the platform (single or bulk) and manage invitation codes (list, create, read stats, read, revoke, delete). The invited record has status invited, the placeholder role member and no role binding or group membership; an invitation code names no role. A token needs user:invite on the hub boundary and the holder's live user.invite authority
 - [user.admin.provision](#useradminprovision) — Pre-register a user (status invited) through POST /api/v1/users; invitation-equivalent, shares the invite creation core; no role, no grants. A token needs user:invite on the hub boundary and the holder's live user.invite authority, checked at the hub user collection; the user_provision audit records the token as the credential. Refused for every caller on a hub running with dev authentication
-- [user.admin.promote](#useradminpromote) — Promote or demote a user's administrative level (dispatched from PATCH /api/v1/users/{id} when role field is present)
-- [user.admin.delete](#useradmindelete) — Delete a user account
-- [user.admin.deleteblockers](#useradmindeleteblockers) — List what blocks deleting a user (agents and active delegations), without deleting
-- [user.admin.deletion](#useradmindeletion) — Read the forced deletion of a user: its state and the outcome of each of the user's agents
+- [user.admin.promote](#useradminpromote) — Promote or demote a user's administrative level (dispatched from PATCH /api/v1/users/{id} when role field is present). A token needs user:promote on a hub boundary, checked on the hub-level user record. CanDelegate applies to every change that involves a super-admin binding, so a token never creates or removes one; the last super-admin, self-demotion, invited-user and binding-drift guards apply to every credential, and a token's own role is session-only
+- [user.admin.delete](#useradmindelete) — Delete a user account. A token needs user:delete on a hub boundary, checked on the hub-level user record, and is refused while the user holds a direct system-scope role binding of any lifecycle state (403 forbidden, details.reason system_role_binding_held; judged again in the transaction on the bindings the delete removes, 409 conflict with details.reason binding_state_drift), with or without force. The completion of a forced deletion a token requested applies the same rule
+- [user.admin.deleteblockers](#useradmindeleteblockers) — List what blocks deleting a user (agents and active delegations), without deleting. A token needs user:delete on a hub boundary, checked on the hub-level user record
+- [user.admin.deletion](#useradmindeletion) — Read the forced deletion of a user: its state and the outcome of each of the user's agents. A token needs user:delete on a hub boundary, checked on the hub-level user record
 - [group.read](#groupread) — Read group details
 - [group.list](#grouplist) — List groups. Each row is shown only when the caller may read it (group.read); a user access token needs group:read on a hub boundary, and a group with no project resolves to the hub
 - [group.create](#groupcreate) — Create a new group. A user access token needs group:create on a hub boundary; the target is the hub's group collection. Creating under a parent group runs the member-add delegation check on the parent
@@ -243,7 +245,7 @@
 - [hub.audit.explain](#hubauditexplain) — Explain another principal's authorization, or compare two principals' effective permissions. A token needs hub_audit:read on a hub boundary; grant details of the other principal are redacted
 - [user.self.explain](#userselfexplain) — Explain the caller's own authorization. A token's decisions apply its ceiling and boundary, and its effective permission list holds only the permissions it may use; a project-boundary token explains only targets in its boundary project, while its holder is a current member of that project
 - [user.self.profile](#userselfprofile) — Read the caller's own profile and preferences. Any token reads its holder's own profile. A visitor reads its own federated account; an unlinked federated user is refused
-- [user.self.scopes](#userselfscopes) — List the token selectors and, for a requested boundary, the caller's own mint eligibility for each. Any token reads it
+- [user.self.scopes](#userselfscopes) — List the token selectors and, for a requested boundary, the caller's own mint eligibility for each. Any token reads the selector list. Eligibility needs an interactive session: a token request naming a boundary or project is refused
 - [user.self.adminstatus](#userselfadminstatus) — Read the caller's own admin status and system-scope permissions. For a token the permission list holds only the permissions its ceiling allows that are eligible for its boundary kind
 - [user.self.groups](#userselfgroups) — List the caller's own effective groups. A project-boundary token lists groups that belong to no project and the groups of its boundary project, the latter only while its holder is a current member of that project
 - [user.invite.redeem](#userinviteredeem) — Redeem an invitation code for the caller's identity. Session-only: a token does not bind an invitation to its holder
@@ -255,6 +257,7 @@
 - [hub.config.update](#hubconfigupdate) — Update server configuration sections. The route guard checks hub.config.read, so a token needs hub_config:read and hub_config:update, and writes configuration keys only
 - [hub.messaging.update](#hubmessagingupdate) — Read and update messaging configuration switches
 - [hub.profiling.update](#hubprofilingupdate) — Read and update the profiling switches (session only)
+- [hub.chatretention.update](#hubchatretentionupdate) — Read and update the chat message retention settings (session only)
 - [hub.experiments.update](#hubexperimentsupdate) — Read and update hub-wide experiment overrides
 - [hub.conduitgrantkeys.rotate](#hubconduitgrantkeysrotate) — Rotate the conduit grant signing key (kids and timestamps only in the response)
 - [hub.conduitgrantkeys.revoke](#hubconduitgrantkeysrevoke) — Revoke a conduit grant key at once (the kid only in the response)
@@ -286,14 +289,19 @@
 - [quota.brokersettings.update](#quotabrokersettingsupdate) — Replace a runtime broker's settings document. Requires broker.read on the broker and quota.update on the hub-scoped quota target for every write, including one that changes no key, and each changed key's declared permission (maxAgents declares quota.update)
 - [quota.delete](#quotadelete) — Delete limit definitions and entitlement bindings. The route guard checks quota.read, so a token needs quota:read and quota:delete
 - [quota.usage.self.read](#quotausageselfread) — Read the caller's own quota usage: each limit's effective value and active count for the caller only
+- [hub.experiments.read](#hubexperimentsread) — Read the resolved experiment flags. Any signed-in identity (user, agent or broker) reads them, and any user access token reads them
+- [hub.profiling.read](#hubprofilingread) — Read the client profiling switch. Any signed-in identity (user, agent or broker) reads it, and any user access token reads it
+- [hub.injectedskills.read](#hubinjectedskillsread) — Read the hub injected skill references. Any signed-in identity reads them, and any token reads them
+- [hub.conduitgrantkeys.read](#hubconduitgrantkeysread) — Read the conduit grant verification keys (public halves only). Any signed-in identity reads them, and any token reads them; 404 while the hub.conduit experiment is off
+- [hub.prestarthooks.read](#hubprestarthooksread) — Read hub pre-start hooks. Any signed-in user reads them; the script body is returned only to a holder of hub.lifecycle_hooks.read on an interactive session or dev credential; every other credential, a user access token included, gets it redacted
 - [hub.policies.removed](#hubpoliciesremoved) — Removed policy API; every method and sub-path answers 410 Gone and points callers to role bindings
-- [skill.list](#skilllist) — List skills; each row is filtered by skill read. A user access token needs skill:list on either boundary; its page, total and cursor count only the rows it may read
+- [skill.list](#skilllist) — List skills; each row is filtered by skill read. A user access token needs skill:list on either boundary; its page, total and cursor count only the rows it may read. An agent delegated credential lists project-scoped skills only: its scope is the authorizing user's skill list scope within the grant boundary, and each item is also decided for skill.read
 - [skill.read](#skillread) — Read a skill, its versions, its download URLs, its resolved version and its files. A record the caller may not read answers as not found
 - [skill.create](#skillcreate) — Create a skill in a project named by the request body. A user access token needs skill:create on a boundary that contains the project
 - [skill.update](#skillupdate) — Update a skill: its metadata, version publishing and deprecation, file uploads and finalize. A user-scope skill refuses a federated caller (requireProfileWriter)
 - [skill.delete](#skilldelete) — Delete a skill definition. A user-scope skill refuses a federated caller (requireProfileWriter)
 - [skill.register](#skillregister) — Manage skill registries and their pinned hashes. The route guard checks skill.register on the hub-scoped registry target, so a user access token needs skill:register on a hub boundary
-- [template.list](#templatelist) — List templates; each row is filtered by template read. The unfiltered list is used only with hub-level evidence for template.list: a user access token needs template:list on a hub boundary and hub-wide list authority for it. Every other token, project tokens included, gets the per-row template read scan
+- [template.list](#templatelist) — List templates; each row is filtered by template read. The unfiltered list is used only with hub-level evidence for template.list: a user access token needs template:list on a hub boundary and hub-wide list authority for it. Every other token, project tokens included, gets the per-row template read scan. An agent delegated credential lists project-scoped templates only: its scope is the authorizing user's template list scope within the grant boundary, and each item is also decided for template.read
 - [template.read](#templateread) — Read a template, its download URLs, its storage validation and its files. A record the caller may not read answers as not found
 - [template.create](#templatecreate) — Create a template in the global, project or caller's own user scope the request body names. A user-scope create refuses a federated caller (requireProfileWriter)
 - [template.update](#templateupdate) — Update a template: its definition and metadata, file uploads, finalize and file writes. A user-scope template refuses a federated caller (requireProfileWriter)
@@ -333,6 +341,7 @@
 - [broker.delete](#brokerdelete) — Deregister a runtime broker: unlink it from every project, clear project defaults that name it, and remove its credentials. A user needs an interactive session and broker.delete on the broker
 - [broker.heartbeat](#brokerheartbeat) — Record a broker heartbeat: broker liveness and the state of the agents it runs. The broker sends its own; a user needs an interactive session and broker.update on the broker from a role binding (the owner relationship does not apply)
 - [broker.agent.launchreport](#brokeragentlaunchreport) — Record a broker's launch report for an agent it runs
+- [broker.agent.workspacedownload](#brokeragentworkspacedownload) — Issue signed download URLs for the uploaded workspace files of an agent the broker runs
 - [broker.messagefailures.report](#brokermessagefailuresreport) — Record buffered message delivery failures reported by a broker
 - [broker.attachment.redeem](#brokerattachmentredeem) — Redeem an attachment delivery capability (ptone/scion#4596): the broker the hub issued it to downloads one attachment, once, before it expires, to write it into the recipient agent's home
 - [broker.controlchannel.call](#brokercontrolchannelcall) — Carry a call between the hub and a connected broker over the control channel; each call runs under the operation that initiated it
@@ -739,7 +748,7 @@
 
 **Domain:** agent
 
-**Description:** List agents within the caller's authorized project scope. A user access token needs agent:list on either boundary: a project token lists only its boundary project's agents. The project form lists one project's agents and decides agent.list on that project
+**Description:** List agents within the caller's authorized project scope. A user access token needs agent:list on either boundary: a project token lists only its boundary project's agents. The project form lists one project's agents and decides agent.list on that project. An agent delegated credential is admitted on the hub and project forms: its scope is the authorizing user's list scope within the grant boundary (on the project form, within that one project), and each item is also decided for agent.read
 
 ### Entry Points
 
@@ -748,9 +757,9 @@
 | http_route | GET | `/api/v1/agents` |
 | http_route | GET | `/api/v1/projects/{id}/agents` |
 
-**Principals:** `user`, `agent`
+**Principals:** `user`, `agent`, `agent_delegated`
 
-**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`, `delegated_agent`
 
 **Bearer:** `admit` (target `list_scope`; boundaries `project`, `hub`)
 
@@ -769,7 +778,7 @@
 | no-broad-query-on-none | security | ScopeSetNone produces empty list without issuing any resource query | Yes |
 | slug-not-oracle | security | Project slug lookup for agent list filter must not distinguish unauthorized from nonexistent | Yes |
 
-**Denial Codes:** `forbidden`, `credential_insufficient`, `user_suspended`
+**Denial Codes:** `forbidden`, `credential_insufficient`, `user_suspended`, `credential_not_admitted`, `delegated_list_sort_unsupported`
 
 ### Tests
 
@@ -791,6 +800,9 @@
 - `pkg/hub:TestListCaveats_ProjectBoundaryRequiresListPermissionInCeiling`
 - `pkg/hub:TestProjectAgentListToken_RequiresAgentListOnTheProject`
 - `pkg/hub:TestListFilters_CannotEnlargeTokenResults`
+- `pkg/hub:TestAgentDelegatedAgentList_ExplicitScopeAcrossProjects`
+- `pkg/hub:TestAgentDelegatedAgentList_MixedItemsAndCounts`
+- `pkg/hub:TestDelegatedProjectAgentList_ScopeAndBinding`
 
 ---
 
@@ -3021,7 +3033,7 @@
 
 **Domain:** artifact
 
-**Description:** Read an artifact's metadata or file bytes (owner, home-project readers via the scope grant, or principal grants); unreadable artifacts answer 404
+**Description:** Read an artifact's metadata or file bytes, one by one or as a zip of a version (owner, home-project readers via the scope grant, or principal grants); unreadable artifacts answer 404
 
 ### Entry Points
 
@@ -3030,6 +3042,7 @@
 | http_route | GET | `/api/v1/artifacts/{id}` |
 | http_route | GET | `/api/v1/artifacts/{id}/files/{path}` |
 | http_route | GET | `/api/v1/artifacts/{id}/versions/{seq}/files/{path}` |
+| http_route | GET | `/api/v1/artifacts/{id}/versions/{seq}/archive` |
 
 **Principals:** `user`, `agent`
 
@@ -3198,7 +3211,7 @@
 
 **Domain:** artifact
 
-**Description:** Give a user, agent or project read, write or admin on an artifact, or a user review, or change an existing grant's permission (POST); a steward (on an artifact owned by an agent: an owner of its home project, or the agent's delegating user who reads in the home project) gives read, review or write, and an admin grant from it is refused with 403 steward_action_not_allowed; a caller that may not manage the artifact may still give a user the review level on an artifact owned by an agent when it is that agent's delegating user or an admin of the artifact's home project (project.manage there; ReviewGrantClause), to a user who can already read it through the home project or a grant to one of the user's projects, never replacing a read, write or admin grant; a caller with that authority asking for a well-formed review grant is refused with 403 review_subject_cannot_read when the user cannot read the artifact and 403 review_replaces_access when the user holds a read, write or admin grant; every other request from such a caller is refused with the same 403, and an accepted one can still answer 409 too_many_grants, or 404 when the artifact went away meanwhile
+**Description:** Give a user, agent or project read, write or admin on an artifact, or a user review, or change an existing grant's permission (POST); a steward (on an artifact owned by an agent: an owner of its home project, or the agent's delegating user who reads in the home project) gives read, review or write, and an admin grant from it is refused with 403 steward_action_not_allowed; a caller that may not manage the artifact may still give a user the review level on an artifact owned by an agent when it is that agent's delegating user or an admin of the artifact's home project (project.manage there; ReviewGrantClause), to a user who can already read it through the home project or a grant to one of the user's projects, never replacing a read, write or admin grant; a caller with that authority asking for a well-formed review grant is refused with 403 review_subject_cannot_read when the user cannot read the artifact and 403 review_replaces_access when the user holds a read, write or admin grant; every other request from such a caller is refused with the same 403, and an accepted one can still answer 409 too_many_grants, or 404 when the artifact went away meanwhile; with notify, may write one hub notification (artifact.grant.notify)
 
 ### Entry Points
 
@@ -3221,7 +3234,7 @@
 ### Delegation
 
 - **Kind:** `non_amplification`
-- A manager (the owner or an admin grantee) grants at most admin, the level it holds, and admin is never given to the home project's grant; a steward grants at most write (no stored admin grant can outlive its computed authority), decided from roles and the delegation chain (StewardClause), never from grants the caller holds; the review path gives only the review level, which allows review versions and no read of its own, decided by the host's review-grant authority (MayGrantReview) rather than by grants the caller holds
+- A manager (the owner or an admin grantee) grants at most admin, the level it holds, and admin is never given to the home project's grant; a steward grants at most write (no stored admin grant can outlive its computed authority), decided from roles, the delegating user recorded on the artifact and, when none is recorded, the delegation chain (StewardClause), never from grants the caller holds; the review path gives only the review level, which allows review versions and no read of its own, decided by the host's review-grant authority (MayGrantReview) rather than by grants the caller holds
 
 ### Audit
 
@@ -3245,6 +3258,42 @@
 - `pkg/artifacts:TestStewardBoundedTable`
 - `pkg/artifacts:TestStewardEvents`
 - `pkg/artifacts:TestStoreCreationEvents`
+
+---
+
+## artifact.grant.notify
+
+**Domain:** artifact
+
+**Description:** Ask for review: with notify on an artifact grant to a user (POST, body notify true), write one hub notification to that user after the grant commits, naming the granter and the level, never the artifact's title or any request text; only an artifact manager or steward on an interactive, unscoped user session (the scheduled-send gate) sends it, only to an active user the caller may read, only when the grant raises the user's level and, for review until the review ladder lands, only to a user who can already read the artifact; at most 30 per hour per requester (burst 10) and 600 per hour in all (burst 60); a refusal never blocks the grant and answers notifySkipped (self, not_permitted, unavailable, not_raised, rate_limited); the review path for non-managers never notifies
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/artifacts/{id}/grants` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `INTERACTIVE_STATE`)
+
+**Base Permission:** `artifact.manage`
+
+**Resource Resolver:** artifact-home-project
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `not_found`, `forbidden`
+
+### Tests
+
+- `pkg/hub:TestArtifactsGrantNotifyOnRoutes`
+- `pkg/hub:TestGrantNotifyGate`
+- `pkg/hub:TestArtifactGrantNotifyCatalogEntry`
+- `pkg/hub:TestGrantNotifyTokenOnRoute`
+- `pkg/artifacts:TestGrantNotifyOrder`
 
 ---
 
@@ -4502,6 +4551,47 @@
 
 ---
 
+## project.github.installation.bind
+
+**Domain:** project
+
+**Description:** Bind a GitHub App installation to a project (admin only: also requires hub.github_app.update)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PUT | `/api/v1/projects/{id}/github-installation` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `project_path`; boundaries `hub`)
+
+**Base Permission:** `project.update`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `update-resource`
+
+### Audit
+
+- **Event Type:** `project.github.installation.bind`
+- **Context Fields:** actor_id, project_id
+- **Before Fields:** setting
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+- `pkg/hub:TestGitHubInstallationBind_RequiresHubGitHubAppUpdate`
+- `pkg/hub:TestGitHubInstallationBind_HubBearerBoundaryOnly`
+
+---
+
 ## project.github.write
 
 **Domain:** project
@@ -4512,7 +4602,6 @@
 
 | Kind | Method | Pattern |
 |------|--------|---------|
-| http_route | PUT | `/api/v1/projects/{id}/github-installation` |
 | http_route | DELETE | `/api/v1/projects/{id}/github-installation` |
 | http_route | POST | `/api/v1/projects/{id}/github-status` |
 | http_route | PUT | `/api/v1/projects/{id}/github-permissions` |
@@ -4593,7 +4682,9 @@
 
 **Principals:** `user`, `agent`, `broker`
 
-**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`, `broker_token`
+**Credentials:** `session_jwt`, `agent_jwt`, `broker_token`
+
+**Bearer:** `non_user`
 
 **Base Permission:** `agent.message`
 
@@ -8194,7 +8285,7 @@
 
 **Domain:** user.admin
 
-**Description:** Promote or demote a user's administrative level (dispatched from PATCH /api/v1/users/{id} when role field is present)
+**Description:** Promote or demote a user's administrative level (dispatched from PATCH /api/v1/users/{id} when role field is present). A token needs user:promote on a hub boundary, checked on the hub-level user record. CanDelegate applies to every change that involves a super-admin binding, so a token never creates or removes one; the last super-admin, self-demotion, invited-user and binding-drift guards apply to every credential, and a token's own role is session-only
 
 ### Entry Points
 
@@ -8204,9 +8295,9 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
 
-**Bearer:** `session_only` (reason `GOV_PENDING`)
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`; pinned by `TestUserRoleToken_PromotionToAdminDenied`)
 
 **Base Permission:** `user.promote`
 
@@ -8229,11 +8320,14 @@
 - **After Fields:** new_level
 - **Atomic:** Yes
 
-**Denial Codes:** `forbidden`
+**Denial Codes:** `forbidden`, `conflict`
 
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestUserRoleToken_PromotionToAdminDenied`
+- `pkg/hub:TestUserRoleToken_LastSuperAdminProtected`
+- `pkg/hub:TestUserPatchToken_MixedRoleAndStatusAllOrNothing`
 
 ---
 
@@ -8241,7 +8335,7 @@
 
 **Domain:** user.admin
 
-**Description:** Delete a user account
+**Description:** Delete a user account. A token needs user:delete on a hub boundary, checked on the hub-level user record, and is refused while the user holds a direct system-scope role binding of any lifecycle state (403 forbidden, details.reason system_role_binding_held; judged again in the transaction on the bindings the delete removes, 409 conflict with details.reason binding_state_drift), with or without force. The completion of a forced deletion a token requested applies the same rule
 
 ### Entry Points
 
@@ -8251,9 +8345,9 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
 
-**Bearer:** `session_only` (reason `GOV_PENDING`)
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
 
 **Base Permission:** `user.delete`
 
@@ -8268,13 +8362,19 @@
 - **Before Fields:** target_user_id, email, role, status
 - **Atomic:** Yes
 
-**Denial Codes:** `forbidden`, `last_owner`, `user_delete_blocked`, `conflict`, `user_delete_force_forbidden`, `user_delete_blockers_changed`, `user_deletion_in_progress`
+**Denial Codes:** `forbidden`, `last_owner`, `user_delete_blocked`, `conflict`, `user_delete_force_forbidden`, `user_delete_blockers_changed`, `user_deletion_in_progress`, `not_found`
 
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
 - `pkg/hub:TestDeleteUser_GuardOrder`
 - `pkg/hub:TestForceDeleteUser_ForbiddenWritesNothing`
+- `pkg/hub:TestUserDeleteToken_LastProjectOwnerProtected`
+- `pkg/hub:TestUserDeleteToken_SystemBindingHolderRefused`
+- `pkg/hub:TestUserDeleteToken_ForceUsesTokenAgentDelete`
+- `pkg/hub:TestUserDeleteToken_BindingAddedAfterPreCheckRefused`
+- `pkg/hub:TestUserDeleteToken_ForcedCompletionKeepsSystemBinding`
+- `pkg/hub:TestUserDeleteToken_ConcurrentlyDeletedUserNotFound`
 
 ---
 
@@ -8282,7 +8382,7 @@
 
 **Domain:** user.admin
 
-**Description:** List what blocks deleting a user (agents and active delegations), without deleting
+**Description:** List what blocks deleting a user (agents and active delegations), without deleting. A token needs user:delete on a hub boundary, checked on the hub-level user record
 
 ### Entry Points
 
@@ -8292,9 +8392,9 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
 
-**Bearer:** `session_only` (reason `GOV_PENDING`)
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
 
 **Base Permission:** `user.delete`
 
@@ -8308,7 +8408,7 @@
 
 - `pkg/hub/authzop:TestCatalogValidation`
 - `pkg/hub:TestUserDeleteBlockers_RequiresUserDelete`
-- `pkg/hub:TestSessionOnlyGate_ReasonIsReported`
+- `pkg/hub:TestUserDeleteReadsToken_RequireDeleteSelectorAndHubBoundary`
 
 ---
 
@@ -8316,7 +8416,7 @@
 
 **Domain:** user.admin
 
-**Description:** Read the forced deletion of a user: its state and the outcome of each of the user's agents
+**Description:** Read the forced deletion of a user: its state and the outcome of each of the user's agents. A token needs user:delete on a hub boundary, checked on the hub-level user record
 
 ### Entry Points
 
@@ -8326,9 +8426,9 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
 
-**Bearer:** `session_only` (reason `GOV_PENDING`)
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
 
 **Base Permission:** `user.delete`
 
@@ -8342,6 +8442,7 @@
 
 - `pkg/hub/authzop:TestCatalogValidation`
 - `pkg/hub:TestUserDeletion_RequiresUserDelete`
+- `pkg/hub:TestUserDeleteReadsToken_RequireDeleteSelectorAndHubBoundary`
 
 ---
 
@@ -9217,7 +9318,7 @@
 
 **Domain:** user
 
-**Description:** List the token selectors and, for a requested boundary, the caller's own mint eligibility for each. Any token reads it
+**Description:** List the token selectors and, for a requested boundary, the caller's own mint eligibility for each. Any token reads the selector list. Eligibility needs an interactive session: a token request naming a boundary or project is refused
 
 ### Entry Points
 
@@ -9240,6 +9341,7 @@
 ### Tests
 
 - `pkg/hub:TestSelfIdentityReadsToken_AnyTokenReads`
+- `pkg/hub:TestAuthScopes_TokenCannotRequestBoundaryEligibility`
 
 ### Exemptions
 
@@ -9674,6 +9776,39 @@
 ### Tests
 
 - `pkg/hub:TestAdminProfiling_TokenRefused`
+
+---
+
+## hub.chatretention.update
+
+**Domain:** hub
+
+**Description:** Read and update the chat message retention settings (session only)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/admin/chat-retention` |
+| http_route | PUT | `/api/v1/admin/chat-retention` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `IRREVERSIBLE_CASCADE`)
+
+**Base Permission:** `hub.config.update`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestAdminChatRetention_TokenRefused`
 
 ---
 
@@ -10724,6 +10859,183 @@
 
 ---
 
+## hub.experiments.read
+
+**Domain:** hub
+
+**Description:** Read the resolved experiment flags. Any signed-in identity (user, agent or broker) reads them, and any user access token reads them
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/experiments` |
+
+**Principals:** `user`, `agent`, `broker`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`, `broker_token`
+
+**Bearer:** `admit_self` (self filter `none`; pinned by `TestExperimentsRead_AnyTokenReads`)
+
+**Resource Resolver:** none
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestExperimentsRead_AnyTokenReads`
+- `pkg/hub:TestAuthenticatedReads_AgentTokenReads`
+- `pkg/hub:TestAuthenticatedReads_BrokerReads`
+
+### Exemptions
+
+- **authentication_only:** Resolved web-layer experiment flags; carries no authority and no other user's records (scope: resolved experiment flags) — waives: `base_permission`
+
+---
+
+## hub.profiling.read
+
+**Domain:** hub
+
+**Description:** Read the client profiling switch. Any signed-in identity (user, agent or broker) reads it, and any user access token reads it
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/profiling` |
+
+**Principals:** `user`, `agent`, `broker`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`, `broker_token`
+
+**Bearer:** `admit_self` (self filter `none`; pinned by `TestProfilingRead_AnyTokenReads`)
+
+**Resource Resolver:** none
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestProfilingRead_AnyTokenReads`
+- `pkg/hub:TestAuthenticatedReads_AgentTokenReads`
+- `pkg/hub:TestAuthenticatedReads_BrokerReads`
+
+### Exemptions
+
+- **authentication_only:** One client profiling boolean; carries no authority and no other user's records (scope: client profiling switch) — waives: `base_permission`
+
+---
+
+## hub.injectedskills.read
+
+**Domain:** hub
+
+**Description:** Read the hub injected skill references. Any signed-in identity reads them, and any token reads them
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/hub/settings/injected-skills` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit_self` (self filter `none`; pinned by `TestHubInjectedSkillsRead_AnyTokenReads`)
+
+**Resource Resolver:** none
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestHubInjectedSkillsRead_AnyTokenReads`
+
+### Exemptions
+
+- **authentication_only:** Hub skill references every user and agent reads at provision time; carries no authority (scope: hub injected skill references) — waives: `base_permission`
+
+---
+
+## hub.conduitgrantkeys.read
+
+**Domain:** hub
+
+**Description:** Read the conduit grant verification keys (public halves only). Any signed-in identity reads them, and any token reads them; 404 while the hub.conduit experiment is off
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/conduit/grant-keys` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit_self` (self filter `none`; pinned by `TestConduitGrantKeysRead_AnyTokenReads`)
+
+**Resource Resolver:** none
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestConduitGrantKeysRead_AnyTokenReads`
+- `pkg/hub:TestConduitGrantKeysEndpoint`
+
+### Exemptions
+
+- **authentication_only:** Public verification key halves only; carries no authority (scope: conduit grant public keys) — waives: `base_permission`
+
+---
+
+## hub.prestarthooks.read
+
+**Domain:** hub
+
+**Description:** Read hub pre-start hooks. Any signed-in user reads them; the script body is returned only to a holder of hub.lifecycle_hooks.read on an interactive session or dev credential; every other credential, a user access token included, gets it redacted
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/pre-start-hooks` |
+| http_route | GET | `/api/v1/pre-start-hooks/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit_self` (self filter `none`; pinned by `TestHubPreStartHookRead_MemberAndProjectTokensRead`)
+
+**Resource Resolver:** none
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestHubPreStartHookRead_TokenGetsRedactedScript`
+- `pkg/hub:TestHubPreStartHookRead_MemberAndProjectTokensRead`
+
+### Exemptions
+
+- **authentication_only:** Hook metadata for the inherited-hook banner; the script is redacted for every token and non-admin (scope: hub pre-start hook metadata) — waives: `base_permission`
+
+---
+
 ## hub.policies.removed
 
 **Domain:** hub
@@ -10761,7 +11073,7 @@
 
 **Domain:** skill
 
-**Description:** List skills; each row is filtered by skill read. A user access token needs skill:list on either boundary; its page, total and cursor count only the rows it may read
+**Description:** List skills; each row is filtered by skill read. A user access token needs skill:list on either boundary; its page, total and cursor count only the rows it may read. An agent delegated credential lists project-scoped skills only: its scope is the authorizing user's skill list scope within the grant boundary, and each item is also decided for skill.read
 
 ### Entry Points
 
@@ -10769,9 +11081,9 @@
 |------|--------|---------|
 | http_route | GET | `/api/v1/skills` |
 
-**Principals:** `user`
+**Principals:** `user`, `agent_delegated`
 
-**Credentials:** `session_jwt`, `scoped_uat`
+**Credentials:** `session_jwt`, `scoped_uat`, `delegated_agent`
 
 **Bearer:** `admit` (target `list_scope`; boundaries `project`, `hub`)
 
@@ -10781,12 +11093,15 @@
 
 **Effects:** `list-scoped`
 
-**Denial Codes:** `forbidden`
+**Denial Codes:** `forbidden`, `credential_not_admitted`
 
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
 - `pkg/hub:TestSkillListToken_CountsOnlyAuthorizedRows`
+- `pkg/hub:TestDelegatedSkillList_ScopeAndItemFilter`
+- `pkg/hub:TestDelegatedListRoutes_CursorBoundToCredentialGrantAgentAndBoundary`
+- `pkg/hub:TestDelegatedCatalogLists_HubCatalogNeverListed`
 
 ---
 
@@ -10990,7 +11305,7 @@
 
 **Domain:** template
 
-**Description:** List templates; each row is filtered by template read. The unfiltered list is used only with hub-level evidence for template.list: a user access token needs template:list on a hub boundary and hub-wide list authority for it. Every other token, project tokens included, gets the per-row template read scan
+**Description:** List templates; each row is filtered by template read. The unfiltered list is used only with hub-level evidence for template.list: a user access token needs template:list on a hub boundary and hub-wide list authority for it. Every other token, project tokens included, gets the per-row template read scan. An agent delegated credential lists project-scoped templates only: its scope is the authorizing user's template list scope within the grant boundary, and each item is also decided for template.read
 
 ### Entry Points
 
@@ -10998,9 +11313,9 @@
 |------|--------|---------|
 | http_route | GET | `/api/v1/templates` |
 
-**Principals:** `user`
+**Principals:** `user`, `agent_delegated`
 
-**Credentials:** `session_jwt`, `scoped_uat`
+**Credentials:** `session_jwt`, `scoped_uat`, `delegated_agent`
 
 **Bearer:** `admit` (target `hub_collection`; boundaries `hub`)
 
@@ -11010,12 +11325,15 @@
 
 **Effects:** `list-scoped`
 
-**Denial Codes:** `forbidden`
+**Denial Codes:** `forbidden`, `credential_not_admitted`
 
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
 - `pkg/hub:TestCatalogWideList_UsesListSelectorThroughEvidence`
+- `pkg/hub:TestDelegatedTemplateList_ScopeAndItemFilter`
+- `pkg/hub:TestDelegatedListRoutes_CursorBoundToCredentialGrantAgentAndBoundary`
+- `pkg/hub:TestDelegatedCatalogLists_HubCatalogNeverListed`
 
 ---
 
@@ -12113,6 +12431,7 @@
 | http_route | GET | `/api/v1/runtime-brokers/{id}` |
 | http_route | GET | `/api/v1/runtime-brokers/{id}/settings` |
 | http_route | GET | `/api/v1/runtime-brokers/{id}/projects` |
+| http_route | GET | `/api/v1/runtime-brokers/{id}/conversion-plan` |
 
 **Principals:** `user`
 
@@ -12354,6 +12673,40 @@
 
 ---
 
+## broker.agent.workspacedownload
+
+**Domain:** broker
+
+**Description:** Issue signed download URLs for the uploaded workspace files of an agent the broker runs
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/runtime-brokers/{id}/agents/{agentId}/workspace-download` |
+
+**Principals:** `broker`
+
+**Credentials:** `broker_token`
+
+**Bearer:** `non_user`
+
+**Resource Resolver:** broker-self
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDisposition_EveryRoutePatternCovered`
+
+### Exemptions
+
+- **internal_only:** The broker authenticates with its own HMAC credential for an agent assigned to it in a project it still provides for; no user permission applies (scope: broker self access) — waives: `base_permission`
+
+---
+
 ## broker.messagefailures.report
 
 **Domain:** broker
@@ -12435,9 +12788,9 @@
 |------|--------|---------|
 | broker_call | — | `TunnelRequest:controlchannel` |
 | broker_call | — | `OpenStream:controlchannel` |
-| broker_call | — | `SendStreamData:controlchannel` |
-| broker_call | — | `ResizeStream:controlchannel` |
-| broker_call | — | `CloseStream:controlchannel` |
+| broker_call | — | `SendStreamData:brokerconnection` |
+| broker_call | — | `ResizeStream:brokerconnection` |
+| broker_call | — | `CloseStream:brokerconnection` |
 | broker_call | — | `handleResponse:controlchannel` |
 | broker_call | — | `handleStreamData:controlchannel` |
 | broker_call | — | `handleStreamClose:controlchannel` |
@@ -12603,6 +12956,8 @@
 **Principals:** `agent`
 
 **Credentials:** `agent_jwt`
+
+**Bearer:** `non_user`
 
 **Base Permission:** `gcp_service_account.use`
 

@@ -100,6 +100,7 @@ func TestBuildPod_WorkspaceVolume_NFSBackend_PVCWithSubPath(t *testing.T) {
 		UnixUsername:         "scion",
 		WorkspaceBackendName: "nfs",
 		NFSPVClaimName:       "scion-workspaces",
+		ProjectID:            "proj-123",
 		NFSSubPath:           "projects/proj-123/workspace",
 	}
 
@@ -336,6 +337,7 @@ func TestBuildPod_NFSBackend_InitContainer_SecurityContext(t *testing.T) {
 		UnixUsername:         "scion",
 		WorkspaceBackendName: "nfs",
 		NFSPVClaimName:       "scion-workspaces",
+		ProjectID:            "proj-123",
 		NFSSubPath:           "projects/proj-123/workspace",
 	}
 
@@ -719,7 +721,7 @@ func TestWaitForPodReady_NamesFailedInitContainer(t *testing.T) {
 		t.Fatalf("failed to create test pod: %v", err)
 	}
 
-	err := r.waitForPodReady(context.Background(), namespace, podName, launchHooks{})
+	err := r.waitForPodReady(context.Background(), namespace, podName, launchHooks{}, podMountWatch{})
 	if err == nil {
 		t.Fatal("expected waitForPodReady to fail when an init container has terminated with a non-zero exit code")
 	}
@@ -781,7 +783,7 @@ func TestWaitForPodReady_InitContainerTerminalWaitingReasons(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 
-			err := r.waitForPodReady(ctx, namespace, podName, launchHooks{})
+			err := r.waitForPodReady(ctx, namespace, podName, launchHooks{}, podMountWatch{})
 			if err == nil {
 				t.Fatalf("expected waitForPodReady to fail promptly for init container reason %s", reason)
 			}
@@ -828,7 +830,7 @@ func TestWaitForPodReady_InitContainerNonTerminalWaitingReasonKeepsWaiting(t *te
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	err := r.waitForPodReady(ctx, namespace, podName, launchHooks{})
+	err := r.waitForPodReady(ctx, namespace, podName, launchHooks{}, podMountWatch{})
 	if err == nil {
 		t.Fatal("expected waitForPodReady to time out while the init container is still PodInitializing, not succeed")
 	}
@@ -904,7 +906,7 @@ func TestWaitForPodReady_MainContainerTerminalWaitingReasons(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 
-			err := r.waitForPodReady(ctx, namespace, podName, launchHooks{})
+			err := r.waitForPodReady(ctx, namespace, podName, launchHooks{}, podMountWatch{})
 			if err == nil {
 				t.Fatalf("expected waitForPodReady to fail for main container reason %s", tc.reason)
 			}
@@ -949,6 +951,8 @@ func TestBuildPod_FSGroup_NFSBackend_UsesStableGID(t *testing.T) {
 		UnixUsername:         "scion",
 		WorkspaceBackendName: "nfs",
 		NFSPVClaimName:       "scion-workspaces",
+		NFSSubPath:           "projects/proj-123/workspace",
+		ProjectID:            "proj-123",
 		NFSGID:               1000,
 	}
 
@@ -974,6 +978,8 @@ func TestBuildPod_FSGroup_NFSBackend_DefaultGID(t *testing.T) {
 		UnixUsername:         "scion",
 		WorkspaceBackendName: "nfs",
 		NFSPVClaimName:       "scion-workspaces",
+		NFSSubPath:           "projects/proj-123/workspace",
+		ProjectID:            "proj-123",
 		// NFSGID is 0 (unset) — should default to 1000
 	}
 
@@ -999,6 +1005,8 @@ func TestBuildPod_FSGroup_NFSBackend_CustomGID(t *testing.T) {
 		UnixUsername:         "scion",
 		WorkspaceBackendName: "nfs",
 		NFSPVClaimName:       "scion-workspaces",
+		NFSSubPath:           "projects/proj-123/workspace",
+		ProjectID:            "proj-123",
 		NFSGID:               2000,
 	}
 
@@ -1138,6 +1146,7 @@ func TestBuildPod_SharedDirs_NFSBackend_UsesNFSSubPaths(t *testing.T) {
 		UnixUsername:         "scion",
 		WorkspaceBackendName: "nfs",
 		NFSPVClaimName:       "scion-workspaces",
+		ProjectID:            "proj-123",
 		NFSSubPath:           "projects/proj-123/workspace",
 		Labels: map[string]string{
 			"scion.project": "my-project",
@@ -1214,6 +1223,7 @@ func TestBuildPod_NFSBackend_InitContainer_MountsSharedDirs(t *testing.T) {
 		UnixUsername:         "scion",
 		WorkspaceBackendName: "nfs",
 		NFSPVClaimName:       "scion-workspaces",
+		ProjectID:            "proj-123",
 		NFSSubPath:           "projects/proj-123/workspace",
 		SharedDirs: []api.SharedDir{
 			{Name: "scratchpad"},
@@ -1285,6 +1295,7 @@ func TestBuildPod_NFSBackend_InitAndMainSharedDirMounts_MatchExactly(t *testing.
 		UnixUsername:         "scion",
 		WorkspaceBackendName: "nfs",
 		NFSPVClaimName:       "scion-workspaces",
+		ProjectID:            "proj-123",
 		NFSSubPath:           "projects/proj-123/workspace",
 		SharedDirs: []api.SharedDir{
 			{Name: "scratchpad"},
@@ -1382,6 +1393,7 @@ func TestBuildPod_NFSBackend_InitContainer_NoSharedDirMounts_WhenSharedDirStorag
 		UnixUsername:         "scion",
 		WorkspaceBackendName: "nfs",
 		NFSPVClaimName:       "scion-workspaces",
+		ProjectID:            "proj-123",
 		NFSSubPath:           "projects/proj-123/workspace",
 		SharedDirs: []api.SharedDir{
 			{Name: "scratchpad"},
@@ -1610,6 +1622,7 @@ func TestBuildPod_NFSBackend_WorktreeSubPath_Rejected(t *testing.T) {
 		UnixUsername:         "scion",
 		WorkspaceBackendName: "nfs",
 		NFSPVClaimName:       "scion-workspaces",
+		ProjectID:            "proj-123",
 		NFSSubPath:           "projects/proj-123/workspace/worktrees/agent-1",
 		GitCloneForInit: &api.GitCloneConfig{
 			URL:    "https://github.com/org/repo.git",

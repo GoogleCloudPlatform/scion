@@ -49,6 +49,8 @@ steps:
       - 'GIT_COMMIT=$_COMMIT_SHA'
       - '--build-arg'
       - 'VERSION=$_VERSION'
+      - '--build-arg'
+      - 'BUILD_TIME=$_BUILD_TIME'
       - '-t'
       - '$_REGISTRY/scion-base:$_SHORT_SHA'
       - '-t'
@@ -65,6 +67,7 @@ substitutions:
   _REGISTRY: 'us-central1-docker.pkg.dev/${PROJECT_ID}/public-docker'
   _TAG: 'latest'
   _VERSION: ''
+  _BUILD_TIME: ''
 options:
   dynamicSubstitutions: true
   machineType: 'E2_HIGHCPU_8'

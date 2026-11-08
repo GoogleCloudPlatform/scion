@@ -22,8 +22,7 @@
 
 import { apiFetch, extractApiError } from './api.js';
 
-/** Feature flag that gates every artifact surface in the web UI. */
-export const ARTIFACTS_FLAG = 'hub.artifacts';
+export { ARTIFACTS_FLAG } from './artifacts-flag.js';
 
 export interface ArtifactFile {
   path: string;
@@ -117,6 +116,18 @@ export interface ArtifactResponse {
    * the hub cannot tell.
    */
   scopeDeleted?: boolean;
+  /**
+   * On a GET, only while the hub's zip download is on (ptone/scion#7106):
+   * whether the version's files can be downloaded as one zip.
+   */
+  archive?: ArtifactArchive;
+}
+
+/** ArtifactResponse.archive: the hub's answer for the version's zip download. */
+export interface ArtifactArchive {
+  available: boolean;
+  /** Why the zip is not available: "too_large" or "unsupported_name". */
+  reason?: string;
 }
 
 /** GET /api/v1/artifacts/{id}/versions: ready versions, newest first, without files. */
@@ -267,6 +278,11 @@ export function artifactFileUrl(id: string, seq: number, path: string, stream = 
   const version = seq > 0 ? `/versions/${seq}` : '';
   const query = stream ? '?stream=1' : '';
   return `/api/v1/artifacts/${encodeURIComponent(id)}${version}/files/${encodedPath}${query}`;
+}
+
+/** The zip of every file of version seq (ptone/scion#7106). */
+export function artifactArchiveUrl(id: string, seq: number): string {
+  return `/api/v1/artifacts/${encodeURIComponent(id)}/versions/${seq}/archive`;
 }
 
 /**
@@ -836,9 +852,37 @@ export function artifactListUrl(filters: ArtifactListFilters, cursor?: string): 
  * Path of an artifact's page in the web UI; seq above 0 names one of its
  * versions, 0 the current one.
  */
-export function artifactPagePath(a: Pick<Artifact, 'id' | 'scopeRef'>, seq = 0): string {
+export function artifactPagePath(
+  a: Pick<Artifact, 'id' | 'scopeRef'>,
+  seq = 0,
+  origin: ArtifactOrigin = 'project'
+): string {
   const base = `/projects/${encodeURIComponent(a.scopeRef)}/artifacts/${encodeURIComponent(a.id)}`;
-  return seq > 0 ? `${base}/v/${seq}` : base;
+  const path = seq > 0 ? `${base}/v/${seq}` : base;
+  return origin === 'artifacts' ? `${path}?${ARTIFACT_ORIGIN_PARAM}=artifacts` : path;
+}
+
+/**
+ * Where an artifact's page was opened from (ptone/scion#6847): the
+ * hub-wide Artifacts list, or (by default) the artifact's project. Its
+ * page goes back there, after a delete too.
+ */
+export type ArtifactOrigin = 'artifacts' | 'project';
+
+/**
+ * The query parameter that records an Artifacts-list origin on the page's
+ * URL, so a reload or a link opened in a new tab keeps it.
+ */
+export const ARTIFACT_ORIGIN_PARAM = 'from';
+
+/** The origin an artifact page path records; a path without one is the project's. */
+export function artifactOriginOf(path: string): ArtifactOrigin {
+  const q = path.indexOf('?');
+  if (q < 0) return 'project';
+  const query = path.slice(q + 1).split('#')[0];
+  return new URLSearchParams(query).get(ARTIFACT_ORIGIN_PARAM) === 'artifacts'
+    ? 'artifacts'
+    : 'project';
 }
 
 // ---------------------------------------------------------------------------
@@ -860,6 +904,12 @@ export interface CreateLinkResponse {
   link: ShareLink;
   /** Hub-relative path of the link; shown once, never retrievable later. */
   url: string;
+  /**
+   * The absolute link on the hub's content host
+   * (server.hub.content_url), present only when the hub has one; built by the
+   * hub from its configuration, never from the request.
+   */
+  shareUrl?: string;
   /** The link ends earlier than asked because the artifact expires then. */
   clampedToArtifactExpiry?: boolean;
 }
@@ -1070,6 +1120,18 @@ export async function patchArtifact(
 /** The absolute URL of a share link from the hub-relative path it was created with. */
 export function shareLinkUrl(path: string, origin: string): string {
   return new URL(path, origin).toString();
+}
+
+/**
+ * The link to show and copy for a created share link: the hub's shareUrl on
+ * its content host when it sent one, otherwise the hub-relative url
+ * made absolute on origin.
+ */
+export function createdLinkUrl(
+  created: Pick<CreateLinkResponse, 'url' | 'shareUrl'>,
+  origin: string
+): string {
+  return created.shareUrl || shareLinkUrl(created.url, origin);
 }
 
 /**

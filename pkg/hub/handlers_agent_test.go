@@ -1934,7 +1934,7 @@ func TestCreateAgent_ScionConfigInlineConfigPreserved(t *testing.T) {
 			HarnessConfig:    "claude-default",
 			AuthSelectedType: "api-key",
 			SystemPrompt:     "You are a code reviewer.",
-			MaxTurns:         50,
+			MaxTurns:         api.IntPtr(50),
 		},
 	})
 
@@ -1956,7 +1956,7 @@ func TestCreateAgent_ScionConfigInlineConfigPreserved(t *testing.T) {
 	// Verify the full inline config is preserved
 	require.NotNil(t, resp.Agent.AppliedConfig.InlineConfig, "InlineConfig should be preserved")
 	assert.Equal(t, "You are a code reviewer.", resp.Agent.AppliedConfig.InlineConfig.SystemPrompt)
-	assert.Equal(t, 50, resp.Agent.AppliedConfig.InlineConfig.MaxTurns)
+	assert.Equal(t, api.IntPtr(50), resp.Agent.AppliedConfig.InlineConfig.MaxTurns)
 	assert.Equal(t, "claude-opus-4-6", resp.Agent.AppliedConfig.InlineConfig.Model)
 
 	// Verify persisted in store

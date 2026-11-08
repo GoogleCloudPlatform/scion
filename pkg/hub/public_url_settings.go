@@ -184,21 +184,21 @@ func publicURLInEffectDoc(doc json.RawMessage, saved, operator string) json.RawM
 	return out
 }
 
-// auditPublicURLChange records a change to the stored server.hub.public_url
-// before it is written, through the hub settings audit path the GCP
-// permission-check settings use: a hub_setting_update mutation audit record
-// naming the key, the old and new stored values, and the actor. If the record
-// cannot be written, it returns an error and the caller does not make the
-// change. If the write then fails, the caller records that with
-// auditPublicURLNotApplied.
-func (s *Server) auditPublicURLChange(ctx context.Context, surface, before, after string) error {
+// auditEndpointURLChange records a change to a stored endpoint URL setting
+// (key: server.hub.public_url or server.hub.content_url) before it is
+// written, through the hub settings audit path the GCP permission-check
+// settings use: a hub_setting_update mutation audit record naming the key,
+// the old and new values, and the actor. If the record cannot be written,
+// it returns an error and the caller does not make the change. If the
+// write then fails, the caller records that with auditEndpointURLNotApplied.
+func (s *Server) auditEndpointURLChange(ctx context.Context, key, surface, before, after string) error {
 	if s.store == nil {
 		return errors.New("no store for the audit record")
 	}
 	rec := &store.MutationAuditRecord{
 		MutationType:  gcpIAMAuditMutation, // hub_setting_update
 		TargetType:    gcpIAMAuditTarget,   // hub_setting
-		TargetID:      config.PublicURLKey,
+		TargetID:      key,
 		BeforeSummary: before,
 		AfterSummary:  after,
 		ExecutorKind:  gcpIAMSurfaceKind,
@@ -206,31 +206,35 @@ func (s *Server) auditPublicURLChange(ctx context.Context, surface, before, afte
 	}
 	auditActorFromContext(ctx).ApplyActor(rec)
 	if rec.ActorPrincipalKind == "" || rec.ActorPrincipalID == "" {
-		return fmt.Errorf("recording %s change: no actor", config.PublicURLKey)
+		return fmt.Errorf("recording %s change: no actor", key)
 	}
 	rec.Timestamp = time.Now().UTC()
 	if err := s.store.CreateMutationAudit(ctx, rec); err != nil {
-		return fmt.Errorf("recording %s change: %w", config.PublicURLKey, err)
+		return fmt.Errorf("recording %s change: %w", key, err)
 	}
-	slog.Info("Hub public URL setting changed; applies after restart",
-		"key", config.PublicURLKey, "old", before, "new", after, "surface", surface,
+	applies := "now"
+	if key == config.PublicURLKey {
+		applies = "after restart"
+	}
+	slog.Info("Hub endpoint setting changed",
+		"key", key, "old", before, "new", after, "applies", applies, "surface", surface,
 		"principal_kind", rec.ActorPrincipalKind, "principal", rec.ActorPrincipalID,
 		"audit_id", rec.ID)
 	return nil
 }
 
-// auditPublicURLNotApplied records that a change recorded by
-// auditPublicURLChange was not written (the section write failed or hit a
-// revision conflict), as auditGCPIAMNotApplied does for the GCP
+// auditEndpointURLNotApplied records that a change recorded by
+// auditEndpointURLChange was not written (the section write failed or hit
+// a revision conflict), as auditGCPIAMNotApplied does for the GCP
 // permission-check settings. A failed record is logged and does not change
 // the response.
-func (s *Server) auditPublicURLNotApplied(ctx context.Context, surface, before, after string, cause error) {
-	slog.Error("Hub public URL setting change was recorded but not written",
-		"key", config.PublicURLKey, "new", after, "error", cause)
+func (s *Server) auditEndpointURLNotApplied(ctx context.Context, key, surface, before, after string, cause error) {
+	slog.Error("Hub endpoint setting change was recorded but not written",
+		"key", key, "new", after, "error", cause)
 	rec := &store.MutationAuditRecord{
 		MutationType:  gcpIAMNotAppliedMutation, // hub_setting_update_not_applied
 		TargetType:    gcpIAMAuditTarget,
-		TargetID:      config.PublicURLKey,
+		TargetID:      key,
 		BeforeSummary: before,
 		AfterSummary:  after,
 		ExecutorKind:  gcpIAMSurfaceKind,

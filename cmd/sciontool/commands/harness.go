@@ -7,6 +7,7 @@ package commands
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -115,6 +116,10 @@ func (r *provisionStatusRecorder) write(state, msg string) {
 		return
 	}
 	if err := hooks.WriteHarnessProvisionStatus(r.path, state, msg); err != nil {
+		if errors.Is(err, hooks.ErrProvisionStatusDirUnsafe) {
+			log.Warn("provision status not recorded: %v", err)
+			return
+		}
 		log.TaggedInfo("provision", "could not record provision status: %v", err)
 	}
 }
@@ -323,7 +328,11 @@ func validateManifestPaths(m *containerProvisionManifest, bundleRoot, home strin
 		}
 		clean := filepath.Clean(path)
 		for _, root := range allowed {
-			if strings.HasPrefix(clean, root) {
+			if root == "" {
+				continue
+			}
+			rel, err := filepath.Rel(root, clean)
+			if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 				return nil
 			}
 		}

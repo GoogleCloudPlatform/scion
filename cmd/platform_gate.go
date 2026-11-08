@@ -85,6 +85,12 @@ var windowsAllowed = map[string]bool{
 	// 'scion project' alone is refused; 'scion project use' still runs.
 	"use":         true,
 	"project.use": true,
+	// Project settings on the Hub: Hub API calls only, no local writes. The
+	// parent 'project' stays gated, as for project.use.
+	"project.settings":       true,
+	"project.settings.get":   true,
+	"project.settings.set":   true,
+	"project.settings.unset": true,
 
 	"config":            true,
 	"config.list":       true,
@@ -109,6 +115,22 @@ var windowsAllowed = map[string]bool{
 	"hub.secret.list":           true,
 	"hub.secret.clear":          true,
 	"hub.secret.update":         true,
+	// Hub administrative settings: Hub API calls only; the one local file
+	// access is reading a settings document (hub settings set --file).
+	"hub.settings":               true,
+	"hub.settings.get":           true,
+	"hub.settings.set":           true,
+	"hub.settings.unset":         true,
+	"hub.settings.schema":        true,
+	"hub.project-defaults":       true,
+	"hub.project-defaults.get":   true,
+	"hub.project-defaults.set":   true,
+	"hub.project-defaults.unset": true,
+	"hub.experiments":            true,
+	"hub.experiments.list":       true,
+	"hub.experiments.enable":     true,
+	"hub.experiments.disable":    true,
+	"hub.experiments.reset":      true,
 	// hub.secret.migrate and hub.secret.migrate-names are deliberately
 	// absent: they are hub-server-host admin tools that open the local hub
 	// database read-write (schema migration, WAL) and can write a foreign-key

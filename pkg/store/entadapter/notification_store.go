@@ -140,6 +140,11 @@ func entNotifToStore(e *ent.Notification) *store.Notification {
 		DispatchOutcome:  e.DispatchOutcome,
 		DispatchReason:   e.DispatchReason,
 		NextAttemptAt:    e.NextAttemptAt,
+
+		Kind:         e.Kind,
+		ResourceType: e.ResourceType,
+		ResourceID:   e.ResourceID,
+		Excerpt:      e.Excerpt,
 	}
 }
 
@@ -416,6 +421,10 @@ func (s *NotificationStore) CreateNotification(ctx context.Context, notif *store
 		SetCreated(notif.CreatedAt).
 		SetDispatchAttempts(notif.DispatchAttempts).
 		SetDispatchOutcome(notif.DispatchOutcome).
+		SetKind(notif.Kind).
+		SetResourceType(notif.ResourceType).
+		SetResourceID(notif.ResourceID).
+		SetExcerpt(notif.Excerpt).
 		Save(ctx)
 	if err != nil {
 		return mapError(err)

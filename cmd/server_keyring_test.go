@@ -112,11 +112,12 @@ func TestLoadServerKeyring_RingMode(t *testing.T) {
 	k := serverKeyringFromFile()
 	require.NotNil(t, k)
 	assert.Equal(t, "gen1", serverSigningRingFromFile().ActiveID())
-	// Every other purpose keeps the legacy entry.
-	assert.Equal(t, cmdKRLegacySecret, resolveSessionSecret())
-	assert.Equal(t, cmdKRLegacySecret, sessionSecretValue())
+	// With a keyring file no cmd consumer resolves a session secret: every
+	// purpose takes its keys from the ring, so the legacy entry is not read.
+	assert.Empty(t, resolveSessionSecret())
+	assert.Empty(t, sessionSecretValue())
 	assert.Equal(t, hub.SigningKeySourceKeyring, webSessionKeySource(resolveSessionSecret()))
-	assert.Contains(t, logs.String(), "session cookies, JWTs and those capabilities only")
+	assert.Contains(t, logs.String(), "entry in the ring, but no purpose reads it outside the ring")
 	assertNoCmdKRSecret(t, logs.String())
 }
 
@@ -451,4 +452,31 @@ func TestBuildHubServerConfig_KeyringConfigured(t *testing.T) {
 	assert.True(t, hubCfg.KeyringConfigured)
 	require.NotNil(t, hubCfg.Keyring)
 	assert.Equal(t, "gen1", hubCfg.Keyring.Signing().ActiveID())
+}
+
+// TestLoadServerKeyring_ReleaseCheckGoesThroughTheHubSeam: the server's
+// load of the keyring file applies the hub's release check
+// (hub.CheckKeyringRelease), so lifting the release limits in that one
+// place also admits the file here. A ring without the "legacy" entry is
+// refused under the production check and loads with the check relaxed.
+func TestLoadServerKeyring_ReleaseCheckGoesThroughTheHubSeam(t *testing.T) {
+	path := writeCmdKeyring(t, func(doc map[string]any) {
+		s := doc["signing"].(map[string]any)
+		s["keys"] = []any{map[string]any{"id": "gen1", "secret": cmdKRGen1Secret, "sign_until": nil, "verify_until": nil}}
+		s["legacy_read_ids"] = []any{"gen1"}
+	})
+
+	isolateKeyring(t)
+	err := loadServerKeyring(&config.GlobalConfig{KeyringFile: path})
+	require.Error(t, err, "the production release check refuses a ring without the legacy entry")
+	assert.Contains(t, err.Error(), `signing key with id "legacy"`)
+	assertNoCmdKRSecret(t, err.Error())
+	assert.Nil(t, serverKeyringFromFile())
+
+	isolateKeyring(t)
+	t.Cleanup(hub.RelaxKeyringReleaseForTest())
+	require.NoError(t, loadServerKeyring(&config.GlobalConfig{KeyringFile: path}))
+	require.NotNil(t, serverKeyringFromFile())
+	_, ok := serverKeyringFromFile().Signing().LegacySecret()
+	assert.False(t, ok)
 }

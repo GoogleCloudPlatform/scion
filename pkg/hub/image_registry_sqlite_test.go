@@ -101,7 +101,7 @@ func TestDispatchImageForBroker_UsesAgentBrokerAndProfile(t *testing.T) {
 			InlineConfig: &api.ScionConfig{Image: "scion-claude:v1"},
 		}}
 	}
-	assert.Equal(t, "node-1.example/scion-claude:v1", d.dispatchImageForBroker(agent(reporting)))
-	assert.Equal(t, "file.example/scion-claude:v1", d.dispatchImageForBroker(agent(silent)))
-	assert.Equal(t, "scion-claude:v1", d.dispatchImageForBroker(agent(flat)), "a flat target gets the bare image")
+	assert.Equal(t, "node-1.example/scion-claude:v1", d.dispatchImageForBroker(agent(reporting), ""))
+	assert.Equal(t, "file.example/scion-claude:v1", d.dispatchImageForBroker(agent(silent), ""))
+	assert.Equal(t, "scion-claude:v1", d.dispatchImageForBroker(agent(flat), ""), "a flat target gets the bare image")
 }

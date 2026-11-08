@@ -1317,6 +1317,11 @@ func TestDispatchAgentEventHandler_ErroredRowBlocksAndNotifiesOwner(t *testing.T
 	if n.Status != NotificationScheduleBlocked || n.AgentID != "errored-1" || n.ProjectID != "project-1" {
 		t.Errorf("notification = %+v", n)
 	}
+	// The writer names the real agent and sets no kind or resource
+	// (ptone/scion#5145): GC keys on AgentID, never on Kind.
+	if n.Kind != "" || n.ResourceType != "" || n.ResourceID != "" {
+		t.Errorf("schedule-blocked notification kind/resource = %q/%q/%q, want empty", n.Kind, n.ResourceType, n.ResourceID)
+	}
 	if !strings.Contains(n.Message, `Schedule "nightly" is blocked`) || !strings.Contains(n.Message, "Delete the agent to resume this schedule") {
 		t.Errorf("notification message = %q", n.Message)
 	}

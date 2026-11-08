@@ -181,6 +181,11 @@ const missingSinks = sinkWrappers.filter(([, wrap]) => !wrap()).map(([name]) => 
 // Imported after the stand-in is installed, so the libraries see it.
 await import('./chat-message.js');
 await import('./chat-interagent-marker.js');
+// Load the shared markdown renderer (marked and DOMPurify) before any test,
+// so no message renders before it is ready and no render from one test
+// lands in another test's counted window.
+const { getMarkdownRenderer } = await import('../../../utils/markdown.js');
+await getMarkdownRenderer();
 type ScionChatMessage = import('./chat-message.js').ScionChatMessage;
 
 const BODY = [
@@ -237,8 +242,14 @@ async function mount(body: string): Promise<ScionChatMessage> {
   el.senderIsAgent = true;
   document.body.appendChild(el);
   await settle(el);
-  // The first load of marked and DOMPurify takes a few more turns.
-  await new Promise((r) => setTimeout(r, 0));
+  await vi.waitFor(
+    () => {
+      if (!el.shadowRoot?.querySelector('.md-content')) {
+        throw new Error('the message body has not rendered yet');
+      }
+    },
+    { timeout: 2000, interval: 10 }
+  );
   await settle(el);
   return el;
 }
@@ -246,8 +257,9 @@ async function mount(body: string): Promise<ScionChatMessage> {
 describe('chat message markup boundary', () => {
   beforeEach(async () => {
     document.body.replaceChildren();
-    // Warm the shared renderer and Lit's templates outside the counted window.
-    const warm = await mount('warm up @x');
+    // Warm Lit's templates outside the counted window, including the code
+    // block editor's, so no test depends on an earlier test having shown them.
+    const warm = await mount(BODY);
     warm.remove();
     sinkState.calls.length = 0;
   });

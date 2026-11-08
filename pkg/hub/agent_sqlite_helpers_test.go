@@ -306,20 +306,6 @@ func dropParam(query, name string) string {
 	return strings.Join(kept, "&")
 }
 
-func decodeObject(t *testing.T, body []byte) map[string]json.RawMessage {
-	t.Helper()
-	var m map[string]json.RawMessage
-	require.NoError(t, json.Unmarshal(body, &m), string(body))
-	return m
-}
-
-func decodeItems(t *testing.T, raw json.RawMessage) []map[string]json.RawMessage {
-	t.Helper()
-	var items []map[string]json.RawMessage
-	require.NoError(t, json.Unmarshal(raw, &items))
-	return items
-}
-
 // createFixtureAgent stores an agent in the fixture project with the given
 // ancestry and applied role.
 func createFixtureAgent(t *testing.T, f *bypassAgentsFixture, name string, ancestry []string, role AgentRole) *store.Agent {
@@ -713,22 +699,6 @@ type revokeFailingCredentialStore struct {
 	failWith error
 }
 
-// apiErrorBody mirrors the JSON shape written by writeError, for assertions
-// on the error code and message returned to the client.
-type apiErrorBody struct {
-	Error struct {
-		Code    string `json:"code"`
-		Message string `json:"message"`
-	} `json:"error"`
-}
-
-func decodeAPIError(t *testing.T, body []byte) apiErrorBody {
-	t.Helper()
-	var resp apiErrorBody
-	require.NoError(t, json.Unmarshal(body, &resp))
-	return resp
-}
-
 // buildAgentRefreshRequest constructs a POST .../token/refresh request whose
 // context carries the given agent identity and optional credential markers,
 // without routing it through UnifiedAuthMiddleware, so the refresh handler's
@@ -944,28 +914,6 @@ func waitDelete(t *testing.T, ch <-chan deleteResult, within time.Duration) dele
 		t.Fatalf("DELETE did not answer within %s", within)
 		return deleteResult{}
 	}
-}
-
-func waitClosed(t *testing.T, ch <-chan struct{}, within time.Duration, what string) {
-	t.Helper()
-	select {
-	case <-ch:
-	case <-time.After(within):
-		t.Fatalf("timed out waiting for %s", what)
-	}
-}
-
-// errorBody decodes the standard error envelope.
-func errorBody(t *testing.T, rec *httptest.ResponseRecorder) (string, map[string]interface{}) {
-	t.Helper()
-	var body struct {
-		Error struct {
-			Code    string                 `json:"code"`
-			Details map[string]interface{} `json:"details"`
-		} `json:"error"`
-	}
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body), rec.Body.String())
-	return body.Error.Code, body.Error.Details
 }
 
 // agentGone reports whether the row is hard-deleted.
@@ -1364,17 +1312,6 @@ func sendViaStructured(t *testing.T, srv *Server, sender, target *store.Agent, m
 	rr := httptest.NewRecorder()
 	srv.handleAgentMessage(rr, req, target.ID)
 	return rr
-}
-
-// captureSlogDefault swaps slog's default logger for a text handler writing
-// to the returned buffer, and restores the previous default on test cleanup.
-func captureSlogDefault(t *testing.T) *bytes.Buffer {
-	t.Helper()
-	var buf bytes.Buffer
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
-	t.Cleanup(func() { slog.SetDefault(prev) })
-	return &buf
 }
 
 var errInjectedLookup = errors.New("injected lookup fault")
@@ -1967,10 +1904,6 @@ func sessionProv(userID string) store.AuthorityProvenance {
 	}
 }
 
-func withCursor(query, cursor string) string {
-	return query + "&cursor=" + url.QueryEscape(cursor)
-}
-
 // globalCallSpyStore counts every store read the global sorted path can make.
 type globalCallSpyStore struct {
 	store.Store
@@ -2054,17 +1987,6 @@ func globalSortedSetup(t *testing.T) *globalSortedFixture {
 	createTestUserWithProjectRole(t, s, adminID, "sg-admin@test.com", project.ID, store.ProjectRoleAdmin)
 
 	return &globalSortedFixture{srv: srv, store: s, admin: admin, project: project}
-}
-
-func decodeErrorMessage(t *testing.T, body []byte) string {
-	t.Helper()
-	var e struct {
-		Error struct {
-			Message string `json:"message"`
-		} `json:"error"`
-	}
-	require.NoError(t, json.Unmarshal(body, &e))
-	return e.Error.Message
 }
 
 // assertResponsesEqualIgnoringServerTime compares two ListAgentsResponse

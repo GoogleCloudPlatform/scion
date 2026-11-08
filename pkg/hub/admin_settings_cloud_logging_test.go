@@ -37,13 +37,18 @@ func cloudLoggingRefusal(t *testing.T, rr *httptest.ResponseRecorder) (code stri
 	t.Helper()
 	require.Equal(t, http.StatusUnprocessableEntity, rr.Code, rr.Body.String())
 	var body struct {
-		Error   string   `json:"error"`
-		Message string   `json:"message"`
-		Keys    []string `json:"keys"`
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+			Details struct {
+				Keys []string `json:"keys"`
+			} `json:"details"`
+		} `json:"error"`
 	}
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &body), rr.Body.String())
-	assert.NotEmpty(t, body.Message)
-	return body.Error, body.Keys
+	assert.NotEmpty(t, body.Error.Message)
+	settingsErrorEntries(t, rr)
+	return body.Error.Code, body.Error.Details.Keys
 }
 
 func newCloudLoggingDBServer(t *testing.T) (*Server, *fakeHubSettingStore, *OperationalSettings) {

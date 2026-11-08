@@ -102,11 +102,17 @@ func TestPrompts_IdleOpenStdin_DoNotHang(t *testing.T) {
 	})
 }
 
+// processStderr is os.Stderr as the process started, captured at package
+// initialisation like promptOut. The testing package later replaces
+// os.Stderr with os.Stdout under go test -json, so the live value cannot
+// stand in for the default.
+var processStderr io.Writer = os.Stderr
+
 // TestPrompts_AutoConfirmWritesNothingToStdout checks that auto-confirmed
 // prompts, their context lines and the auto-confirm notes stay off stdout,
 // which carries --format json output.
 func TestPrompts_AutoConfirmWritesNothingToStdout(t *testing.T) {
-	if promptOut != io.Writer(os.Stderr) {
+	if promptOut != processStderr {
 		t.Fatalf("prompt output defaults to %v, want os.Stderr", promptOut)
 	}
 

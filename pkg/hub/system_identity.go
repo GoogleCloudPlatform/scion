@@ -62,10 +62,16 @@ func (s *Server) handleSystemIdentity(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Also update the database user record so the name is visible immediately
-	// without a server restart.
-	if s.store != nil && (req.DisplayName != "" || req.Email != "") {
-		s.updateDevUserRecord(r.Context(), req.DisplayName, req.Email)
+	// Also update the database user record and the live development identity
+	// that dev-token requests authenticate as, so the change is visible
+	// immediately without a server restart.
+	if req.DisplayName != "" || req.Email != "" {
+		if s.store != nil {
+			s.updateDevUserRecord(r.Context(), req.DisplayName, req.Email)
+		}
+		if s.authConfig.DevUser != nil {
+			s.authConfig.DevUser.SetIdentity(req.DisplayName, req.Email)
+		}
 	}
 
 	writeJSON(w, http.StatusOK, systemIdentityResponse(req))

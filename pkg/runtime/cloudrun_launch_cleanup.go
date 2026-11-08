@@ -254,6 +254,7 @@ func (r *CloudRunRuntime) DeleteResource(ctx context.Context, h api.ResourceHand
 	if parent := r.parent(); h.Namespace != parent {
 		return fmt.Errorf("cloudrun: instance %s is in %q, not this runtime's %q; not deleting it", h.Name, h.Namespace, parent)
 	}
+	defer r.forgetExecKey(h.Name)
 
 	start := time.Now()
 	budget, cancel := context.WithTimeout(ctx, cloudRunCleanupBudget)

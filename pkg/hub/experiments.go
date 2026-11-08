@@ -140,7 +140,7 @@ func (s *Server) requireExperiment(name string, next http.HandlerFunc) http.Hand
 // dispatchExperimentNames are the server-layer experiments whose state the
 // hub sends with each agent dispatch, because they change what the broker
 // does. hub.conduit is added separately (see dispatchExperiments).
-var dispatchExperimentNames = []string{experiments.K8sNFSHome, experiments.AgentPlugins}
+var dispatchExperimentNames = []string{experiments.K8sNFSHome, experiments.AgentPlugins, experiments.CloudRunNativeIdentity}
 
 // dispatchExperiments returns the dispatch experiments that are enabled
 // now, resolved from one snapshot, or nil when none is. hub.conduit is a

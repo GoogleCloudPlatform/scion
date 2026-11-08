@@ -24,10 +24,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"net/http"
 	"net/http/httptest"
-	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -48,10 +49,22 @@ import (
 
 const encTestHubID = "enc-test-hub"
 
-// encSigningKeys are the six ensureSigningKey backups New creates.
+// encSigningKeys are the seven ensureSigningKey backups New creates.
 var encSigningKeys = []string{
 	SecretKeyAgentSigningKey, SecretKeyUserSigningKey, SecretKeyDownloadSigningKey,
 	SecretKeyArtifactViewKey, SecretKeyAttachmentDeliveryKey, SecretKeyListCursorKey,
+	SecretKeyPortViewKey,
+}
+
+// newOIDCHubTestStore creates an in-memory SQLite store for the OIDC key
+// manager tests that stay in package hub.
+func newOIDCHubTestStore(t *testing.T) store.Store {
+	t.Helper()
+	s, err := newTestStore(t, ":memory:")
+	if err != nil {
+		t.Fatalf("failed to create test store: %v", err)
+	}
+	return s
 }
 
 // v2Cipher is a managed cipher writing enc:v2: under active, holding ids.
@@ -374,7 +387,7 @@ func TestRestartMixedFormatDatabase(t *testing.T) {
 		assert.Equal(t, "HUB_PLAIN", audit.Unreadable[0].Key)
 		assert.Equal(t, secret.FailurePlaintextNotAdmitted, audit.Unreadable[0].Kind)
 		assert.Equal(t, 1, audit.ByFormat["v1"])
-		assert.Equal(t, 1, audit.ByFormat["plaintext"])
+		assert.Zero(t, audit.ByFormat["plaintext"], "an unreadable payload is not counted by format")
 		assert.GreaterOrEqual(t, audit.ByKID["k1"], 1)
 		_, reason := readyz(t, srv)
 		assert.NotEqual(t, readyReasonBackupUnreadable, reason)
@@ -459,13 +472,11 @@ func TestCiphertextReplacementKeepsIdentities(t *testing.T) {
 		if !ok {
 			continue
 		}
-		// The restart's backend path re-saves each signing-key backup
-		// (backupSigningKeyToStore after a backend Get, an UpdateSecret that
-		// bumps Version), so only the grant ring keeps its Version here;
-		// refs and the payload format hold for every row.
-		if p.Key == conduitGrantKeySecretName {
-			assert.Equal(t, b.version, p.Version, "%s version changed", p.Key)
-		}
+		// The replacement already sealed every backup under the new
+		// writer, so the restart's backend path (backupSigningKeyToStore
+		// after a backend Get) re-saves nothing: Version, refs and the
+		// payload format hold for every row.
+		assert.Equal(t, b.version, p.Version, "%s version changed", p.Key)
 		assert.Equal(t, b.ref, p.SecretRef, "%s ref changed", p.Key)
 		assert.True(t, strings.HasPrefix(p.EncryptedValue, "enc:v2:k2:"), "%s is not v2 after the restart", p.Key)
 	}
@@ -542,44 +553,10 @@ func TestServerValueCipher_SharedObject(t *testing.T) {
 	assert.True(t, legacy.Enabled() && !legacy.Managed())
 }
 
-// OIDC acceptance: the RSA key and the keyset round-trip under an
-// independent v2 key across a restart, with identical KIDs and JWKS.
-func TestOIDCKeyManager_IndependentV2RestartKeepsKIDAndJWKS(t *testing.T) {
-	st := createOIDCTestStore(t)
-	ctx := context.Background()
-	c := v2Cipher(t, "k2", "k2")
-	newMgr := func() *OIDCKeyManager {
-		m, err := NewOIDCKeyManager(ctx, OIDCKeyManagerConfig{Store: st, HubID: encTestHubID,
-			IssuerURL: "https://example.com", ValueCipher: c})
-		require.NoError(t, err)
-		return m
-	}
-	m1 := newMgr()
-	require.NoError(t, m1.RotateKey(ctx))
-	kids := func(m *OIDCKeyManager) []string {
-		var out []string
-		for _, k := range m.JWKS().Keys {
-			out = append(out, k.KeyID)
-		}
-		sort.Strings(out)
-		return out
-	}
-	wantKIDs, wantActive := kids(m1), m1.activeKey.KeyID
-	require.Len(t, wantKIDs, 2)
-	for _, key := range []string{SecretKeyOIDCSigningKey, SecretKeyOIDCKeyset} {
-		v, err := st.GetSecretValue(ctx, key, store.ScopeHub, encTestHubID)
-		require.NoError(t, err)
-		assert.True(t, strings.HasPrefix(v, "enc:v2:k2:"), "%s is not enc:v2:k2", key)
-	}
-	m2 := newMgr()
-	assert.Equal(t, wantKIDs, kids(m2))
-	assert.Equal(t, wantActive, m2.activeKey.KeyID)
-}
-
 // D1: an unreadable stored keyset is not replaced at startup (it used to
 // be saved over after a failed restore).
 func TestOIDCRestoreFailureDoesNotSaveKeyset(t *testing.T) {
-	st := createOIDCTestStore(t)
+	st := newOIDCHubTestStore(t)
 	ctx := context.Background()
 	c := v2Cipher(t, "k2", "k2")
 	_, err := NewOIDCKeyManager(ctx, OIDCKeyManagerConfig{Store: st, HubID: encTestHubID,
@@ -600,36 +577,6 @@ func TestOIDCRestoreFailureDoesNotSaveKeyset(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, before.EncryptedValue, after.EncryptedValue, "the unreadable keyset was overwritten")
 	assert.Equal(t, before.Version, after.Version)
-}
-
-// D2: a CAS loser that cannot decrypt the winner's key fails instead of
-// continuing with (and later persisting) its own key.
-func TestOIDCCASLoserUndecryptableFails(t *testing.T) {
-	st := createOIDCTestStore(t)
-	ctx := context.Background()
-	winner, err := generateRSAKeyPair()
-	require.NoError(t, err)
-	winnerPEM, err := encodePEMPrivateKey(winner)
-	require.NoError(t, err)
-	require.NoError(t, st.CreateSecret(ctx, &store.Secret{ID: oidcSigningKeySecretID(encTestHubID), Key: SecretKeyOIDCSigningKey,
-		EncryptedValue: sealForeign(t, "k2", string(winnerPEM)), Scope: store.ScopeHub, ScopeID: encTestHubID,
-		SecretType: store.SecretTypeInternal}))
-	before, err := st.GetSecret(ctx, SecretKeyOIDCSigningKey, store.ScopeHub, encTestHubID)
-	require.NoError(t, err)
-
-	mine, err := generateRSAKeyPair()
-	require.NoError(t, err)
-	minePEM, err := encodePEMPrivateKey(mine)
-	require.NoError(t, err)
-	m := &OIDCKeyManager{store: st, hubID: encTestHubID, log: slog.Default(), cipher: v2Cipher(t, "k2", "k2")}
-	key, err := m.casCreateKeyInStore(ctx, SecretKeyOIDCSigningKey, string(minePEM), encTestHubID)
-	require.Error(t, err)
-	assert.Nil(t, key)
-	assert.ErrorIs(t, err, secret.ErrDecrypt)
-	assert.NotContains(t, err.Error(), "PRIVATE KEY")
-	after, err := st.GetSecret(ctx, SecretKeyOIDCSigningKey, store.ScopeHub, encTestHubID)
-	require.NoError(t, err)
-	assert.Equal(t, before.EncryptedValue, after.EncryptedValue)
 }
 
 // Grant ring: v2 roundtrip and CAS through the shared cipher; a node
@@ -684,7 +631,7 @@ func TestConduitGrantRing_IndependentV2RoundTripAndCAS(t *testing.T) {
 // check passes) but does not parse. The failed restore must leave it in
 // place instead of saving the in-memory keyset over it.
 func TestOIDCRestoreFailureDoesNotSaveUnparseableKeyset(t *testing.T) {
-	st := createOIDCTestStore(t)
+	st := newOIDCHubTestStore(t)
 	ctx := context.Background()
 	c := v2Cipher(t, "k2", "k2")
 	_, err := NewOIDCKeyManager(ctx, OIDCKeyManagerConfig{Store: st, HubID: encTestHubID,
@@ -719,4 +666,278 @@ func TestAuditRecordIDs_Capped(t *testing.T) {
 	assert.True(t, strings.HasSuffix(got, "id-19 (decrypt_failed), and 3 more"))
 	assert.NotContains(t, got, "SECRET_KEY_NAME")
 	assert.Equal(t, "id-00 (decrypt_failed)", auditRecordIDs(recs[:1], 20))
+}
+
+// TestEncryptionAudit_CoversEveryEnsureSigningKeyBackup: every signing key
+// that production code in this package resolves through ensureSigningKey is
+// a backup New creates, so it must be classed and validated by the startup
+// encryption audit (infraPayloadValidators) and listed in encSigningKeys,
+// which the backup round-trip and no-overwrite tests iterate. A new
+// ensureSigningKey call site that is missing from either fails here.
+func TestEncryptionAudit_CoversEveryEnsureSigningKeyBackup(t *testing.T) {
+	fset := token.NewFileSet()
+	// pkgmove:scan-covers guardScanSubdirs
+	// scanned through guardScanSubdirs: pkg/hub and every area moved out of it.
+	files, err := globGuardScanDirs(".", "*.go")
+	require.NoError(t, err)
+	require.NotEmpty(t, files)
+	used := map[string]string{} // key constant -> first call site
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		af, err := parser.ParseFile(fset, f, nil, 0)
+		require.NoError(t, err, f)
+		ast.Inspect(af, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "ensureSigningKey" || len(call.Args) < 2 {
+				return true
+			}
+			arg, ok := call.Args[1].(*ast.Ident)
+			if assert.True(t, ok, "%s: ensureSigningKey key name must be a constant", fset.Position(call.Pos())) {
+				if _, seen := used[arg.Name]; !seen {
+					used[arg.Name] = fset.Position(call.Pos()).String()
+				}
+			}
+			return true
+		})
+	}
+	require.GreaterOrEqual(t, len(used), 7, "input assertion: the ensureSigningKey call sites were found")
+
+	// compositeKeys returns the identifier keys (map literal) or elements
+	// (slice literal) of the package-level var name declared in file.
+	compositeKeys := func(file, name string) map[string]bool {
+		af, err := parser.ParseFile(fset, file, nil, 0)
+		require.NoError(t, err, file)
+		out := map[string]bool{}
+		for _, d := range af.Decls {
+			gd, ok := d.(*ast.GenDecl)
+			if !ok || gd.Tok != token.VAR {
+				continue
+			}
+			for _, spec := range gd.Specs {
+				vs := spec.(*ast.ValueSpec)
+				for i, n := range vs.Names {
+					if n.Name != name || i >= len(vs.Values) {
+						continue
+					}
+					lit, ok := vs.Values[i].(*ast.CompositeLit)
+					require.True(t, ok, "%s: %s is not a composite literal", file, name)
+					for _, e := range lit.Elts {
+						if kv, ok := e.(*ast.KeyValueExpr); ok {
+							e = kv.Key
+						}
+						if id, ok := e.(*ast.Ident); ok {
+							out[id.Name] = true
+						}
+					}
+				}
+			}
+		}
+		require.NotEmpty(t, out, "input assertion: %s found in %s", name, file)
+		return out
+	}
+	audited := compositeKeys("encryption_audit.go", "infraPayloadValidators")
+	listed := compositeKeys("encryption_ring_test.go", "encSigningKeys")
+	for key, site := range used {
+		assert.True(t, audited[key], "%s (%s) is an ensureSigningKey backup missing from infraPayloadValidators", key, site)
+		assert.True(t, listed[key], "%s (%s) is an ensureSigningKey backup missing from encSigningKeys", key, site)
+	}
+	for key := range listed {
+		_, ok := used[key]
+		assert.True(t, ok, "encSigningKeys lists %s, which no ensureSigningKey call site uses", key)
+	}
+}
+
+// versions returns each backup row's Version.
+func versions(t *testing.T, st store.Store, keys ...string) map[string]int {
+	t.Helper()
+	out := map[string]int{}
+	for k, r := range snapRows(t, st, keys...) {
+		out[k] = r.version
+	}
+	return out
+}
+
+// bumped returns versions with every entry increased by one.
+func bumped(v map[string]int) map[string]int {
+	out := map[string]int{}
+	for k, n := range v {
+		out[k] = n + 1
+	}
+	return out
+}
+
+// Acceptance: a restart with an unchanged ring re-saves no signing-key
+// backup: no Version bump and the stored ciphertext is unchanged.
+func TestBackupResave_UnchangedRingNoVersionBump(t *testing.T) {
+	for name, c := range map[string]*secret.ValueCipher{
+		"managed v2": v2Cipher(t, "k2", "k2"),
+		"legacy v1":  secret.NewLegacyValueCipher("FAKE-legacy-secret-A"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			st := encStore(t)
+			srv1 := encServer(t, st, c, true)
+			keys := signingKeyBytes(t, srv1)
+			first := snapRows(t, st, encSigningKeys...)
+			for i := range 3 {
+				srv := encServer(t, st, c, true)
+				assert.Equal(t, first, snapRows(t, st, encSigningKeys...), "restart %d re-saved a backup", i)
+				got := signingKeyBytes(t, srv)
+				for k, b := range keys {
+					assert.True(t, bytes.Equal(b, got[k]), "restart %d: %s changed", i, k)
+				}
+			}
+		})
+	}
+}
+
+// Acceptance: after a rewrap of the ring to a new writer, the first
+// restart re-saves each backup once under the new writer; later restarts
+// write nothing.
+func TestBackupResave_NewWriterResavesOnce(t *testing.T) {
+	st := encStore(t)
+	srv1 := encServer(t, st, v2Cipher(t, "k1", "k1"), true)
+	keys := signingKeyBytes(t, srv1)
+	before := versions(t, st, encSigningKeys...)
+
+	next := v2Cipher(t, "k2", "k1", "k2")
+	encServer(t, st, next, true)
+	assert.Equal(t, bumped(before), versions(t, st, encSigningKeys...), "the first restart on the new writer re-saves each backup once")
+	resaved := snapRows(t, st, encSigningKeys...)
+	for k, r := range resaved {
+		assert.True(t, strings.HasPrefix(r.value, "enc:v2:k2:"), "%s was not re-saved under the new writer", k)
+	}
+	for i := range 2 {
+		srv := encServer(t, st, next, true)
+		assert.Equal(t, resaved, snapRows(t, st, encSigningKeys...), "restart %d after the re-save wrote a backup", i)
+		got := signingKeyBytes(t, srv)
+		for k, b := range keys {
+			assert.True(t, bytes.Equal(b, got[k]), "restart %d: %s changed", i, k)
+		}
+	}
+}
+
+// The skip needs the same key bytes: a writer-sealed backup holding
+// another key than the one the backend resolves is still overwritten,
+// and one holding the same key is left alone.
+func TestBackupResave_ComparesKeyBytes(t *testing.T) {
+	for name, tc := range map[string]struct {
+		sameKey bool
+	}{"same key": {true}, "different key": {false}} {
+		t.Run(name, func(t *testing.T) {
+			st := encStore(t)
+			c := v2Cipher(t, "k2", "k2")
+			resolved, raw := randomB64Key(t)
+			stored := resolved
+			if !tc.sameKey {
+				stored, _ = randomB64Key(t)
+			}
+			sealed, err := c.Encrypt(stored)
+			require.NoError(t, err)
+			seedInfraRow(t, st, SecretKeyAgentSigningKey, sealed, "")
+			before := snapRows(t, st, SecretKeyAgentSigningKey)[SecretKeyAgentSigningKey]
+
+			cfg := DefaultServerConfig()
+			cfg.HubID = encTestHubID
+			cfg.ValueCipher = c
+			cfg.SecretBackend = &externalBackend{values: map[string]string{SecretKeyAgentSigningKey: resolved}}
+			srv, err := newTestHubServer(t, cfg, st)
+			require.NoError(t, err)
+			assert.True(t, bytes.Equal(raw, srv.agentTokenService.config.SigningKey))
+
+			after := snapRows(t, st, SecretKeyAgentSigningKey)[SecretKeyAgentSigningKey]
+			if tc.sameKey {
+				assert.Equal(t, before, after, "a current backup of the same key was re-saved")
+				return
+			}
+			assert.Equal(t, before.version+1, after.version, "a backup of another key must be overwritten")
+			pt, ok := c.DecryptWriter(after.value)
+			require.True(t, ok)
+			assert.Equal(t, resolved, pt)
+		})
+	}
+}
+
+// The skip needs the active writer key: a v1 backup sealed under another
+// legacy v1 reader (which Decrypt opens) is re-saved under the writer.
+func TestBackupResave_V1NonWriterResaves(t *testing.T) {
+	st := encStore(t)
+	encoded, _ := randomB64Key(t)
+	legacy := ciphertest.Cipher(t, ciphertest.Ring{Active: keyring.LegacyID, IDs: []string{keyring.LegacyID},
+		WriteFormat: keyring.WriteV1, V1Readers: []string{keyring.LegacyID}})
+	sealed, err := legacy.Encrypt(encoded)
+	require.NoError(t, err)
+	seedInfraRow(t, st, SecretKeyAgentSigningKey, sealed, "")
+	before := snapRows(t, st, SecretKeyAgentSigningKey)[SecretKeyAgentSigningKey]
+
+	ring := ciphertest.Cipher(t, ciphertest.Ring{Active: "n1", IDs: []string{"n1", keyring.LegacyID},
+		WriteFormat: keyring.WriteV1, V1Readers: []string{"n1", keyring.LegacyID}})
+	// The control: the ring reads the old value, so only the writer check
+	// can tell it apart.
+	pt, err := ring.Decrypt(sealed)
+	require.NoError(t, err)
+	require.Equal(t, encoded, pt)
+	_, ok := ring.DecryptWriter(sealed)
+	require.False(t, ok)
+
+	cfg := DefaultServerConfig()
+	cfg.HubID = encTestHubID
+	cfg.ValueCipher = ring
+	cfg.SecretBackend = &externalBackend{values: map[string]string{SecretKeyAgentSigningKey: encoded}}
+	_, err = newTestHubServer(t, cfg, st)
+	require.NoError(t, err)
+	after := snapRows(t, st, SecretKeyAgentSigningKey)[SecretKeyAgentSigningKey]
+	assert.Equal(t, before.version+1, after.version, "a backup under a non-writer v1 reader must be re-saved")
+	pt, ok = ring.DecryptWriter(after.value)
+	require.True(t, ok, "the re-saved backup is under the writer")
+	assert.Equal(t, encoded, pt)
+
+	// It is now current: the next restart leaves it alone.
+	_, err = newTestHubServer(t, cfg, st)
+	require.NoError(t, err)
+	assert.Equal(t, after, snapRows(t, st, SecretKeyAgentSigningKey)[SecretKeyAgentSigningKey])
+}
+
+// Without a configured ValueCipher, the server takes the local secret
+// backend's cipher (never a second one) and refuses one that does not
+// match the configured keyring.
+func TestServerValueCipher_NilValueCipherUsesBackendCipher(t *testing.T) {
+	st := encStore(t)
+	k := ciphertest.Keyring(t, ciphertest.Ring{Active: "k2", IDs: []string{"k2"}})
+	onRing, err := secret.NewValueCipher(k)
+	require.NoError(t, err)
+
+	got, err := serverValueCipher(ServerConfig{Keyring: k, SecretBackend: secret.NewLocalBackendWithCipher(st, encTestHubID, onRing)})
+	require.NoError(t, err)
+	assert.Same(t, onRing, got, "keyring mode: the backend's cipher is the shared one")
+
+	// Same keys, another ring object: refused.
+	mismatched := v2Cipher(t, "k2", "k2")
+	_, err = serverValueCipher(ServerConfig{Keyring: k, SecretBackend: secret.NewLocalBackendWithCipher(st, encTestHubID, mismatched)})
+	require.Error(t, err, "keyring mode: a backend cipher over another ring must be refused")
+	_, err = serverValueCipher(ServerConfig{Keyring: k, SecretBackend: secret.NewLocalBackend(st, encTestHubID, "FAKE-legacy-secret-A")})
+	require.Error(t, err, "keyring mode: a legacy backend cipher must be refused")
+	_, err = serverValueCipher(ServerConfig{Keyring: k, SecretBackend: secret.NewLocalBackendWithCipher(st, encTestHubID, nil)})
+	require.Error(t, err, "a backend without a cipher must be refused")
+
+	// Legacy mode: the backend's cipher, by identity; a managed one is refused.
+	lb := secret.NewLocalBackend(st, encTestHubID, "FAKE-legacy-secret-A")
+	got, err = serverValueCipher(ServerConfig{SharedSigningSecret: "FAKE-legacy-secret-A", SecretBackend: lb})
+	require.NoError(t, err)
+	assert.Same(t, lb.Cipher(), got, "legacy mode: no second cipher is built")
+	_, err = serverValueCipher(ServerConfig{SecretBackend: secret.NewLocalBackendWithCipher(st, encTestHubID, mismatched)})
+	require.Error(t, err, "a managed backend cipher needs its keyring file")
+	_, err = serverValueCipher(ServerConfig{SecretBackend: secret.NewLocalBackendWithCipher(st, encTestHubID, nil)})
+	require.Error(t, err, "a backend without a cipher must be refused")
+
+	// Through New: the server holds the backend's object.
+	srv := legacyServer(t, st, "FAKE-legacy-secret-A")
+	lbSrv, ok := srv.config.SecretBackend.(*secret.LocalBackend)
+	require.True(t, ok)
+	assert.Same(t, lbSrv.Cipher(), srv.cipher)
 }

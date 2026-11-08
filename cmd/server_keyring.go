@@ -92,16 +92,6 @@ func serverSigningRingFromFile() *keyring.SigningRing {
 	return nil
 }
 
-// keyringLegacySecret returns the keyring file's "legacy" signing entry,
-// which every purpose but the web session cookies still uses in this
-// release, or false without a keyring file.
-func keyringLegacySecret() (string, bool) {
-	if k := serverKeyringFromFile(); k != nil {
-		return k.Signing().LegacySecret()
-	}
-	return "", false
-}
-
 // legacySessionSecretConfigured reports whether a legacy session secret
 // input is present: --session-secret, or either env name (read by
 // scrubServerSecretEnv before it unset them). It reads no keyring.
@@ -154,7 +144,7 @@ func loadServerKeyring(cfg *config.GlobalConfig) error {
 	if err != nil {
 		return fmt.Errorf("%s: %w", config.KeyringFileKey, err)
 	}
-	if err := k.CheckSessionPilot(); err != nil {
+	if err := hub.CheckKeyringRelease(k); err != nil {
 		return fmt.Errorf("%s: %w", config.KeyringFileKey, err)
 	}
 	serverKeyring = k

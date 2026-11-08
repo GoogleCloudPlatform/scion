@@ -35,7 +35,3 @@ func writeHomeFile(agentHome, rel string, data []byte, mode os.FileMode) error {
 func removeHomeFile(agentHome, rel string) error {
 	return errConfinedWriteUnsupported
 }
-
-func installHomeDir(srcDir, agentHome, dstRel string) error {
-	return errConfinedWriteUnsupported
-}

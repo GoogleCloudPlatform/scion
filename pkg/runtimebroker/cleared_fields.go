@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"path"
 	"strings"
 
@@ -49,7 +50,11 @@ import (
 // and the clear takes effect at the agent's next reincarnation.
 //
 // Env keys (env.KEY) are always removed: a template's env is applied at
-// start as a final fill, whichever way the template resolves.
+// start as a final fill, whichever way the template resolves. Resources
+// sub-fields (api.ResourceSubPaths) are always emptied too: templates never
+// supply resources (config.StripTemplateEnvironmentKeys), so the chain has
+// nothing to restore, and the per-start resource tiers fill the emptied
+// sub-field (ptone/scion#5676).
 func (s *Server) applyClearedFields(ctx context.Context, merged *api.ScionConfig, projectPath, projectDir, agentDir, agentName string, paths []string) {
 	if len(paths) == 0 {
 		return
@@ -58,12 +63,13 @@ func (s *Server) applyClearedFields(ctx context.Context, merged *api.ScionConfig
 	if err != nil {
 		var kept, applied []string
 		for _, p := range paths {
-			if api.ClearableConfigPath(p) && !strings.HasPrefix(p, api.ClearedEnvPathPrefix) {
+			if api.ClearableConfigPath(p) && !strings.HasPrefix(p, api.ClearedEnvPathPrefix) && !api.IsResourceSubPath(p) {
 				kept = append(kept, p)
 				continue
 			}
-			// Env keys are applied; paths ApplyClearedFields rejects still
-			// reach it, so they are reported as ignored.
+			// Env keys and resources sub-fields never take a value from
+			// the chain, so they are applied; paths ApplyClearedFields
+			// rejects still reach it, so they are reported as ignored.
 			applied = append(applied, p)
 		}
 		if len(kept) > 0 {
@@ -93,8 +99,10 @@ func (s *Server) applyClearedFields(ctx context.Context, merged *api.ScionConfig
 // when the chain does not resolve.
 func (s *Server) clearedFieldsInheritance(ctx context.Context, projectPath, projectDir, agentDir, agentName string) (*api.ScionConfig, error) {
 	templateRef := "default"
+	operatorDefault := ""
 	if vs, _, _ := config.LoadEffectiveSettingsFor(ctx, projectDir); vs != nil && vs.DefaultTemplate != "" {
 		templateRef = vs.DefaultTemplate
+		operatorDefault = vs.DefaultTemplate
 	}
 	defaultRef := templateRef
 	var hash string
@@ -107,8 +115,14 @@ func (s *Server) clearedFieldsInheritance(ctx context.Context, projectPath, proj
 				if hash == "" {
 					hash = info.Template
 				}
-			} else if info.Template != "" {
+			} else if config.IsTemplateSlug(info.Template) {
+				// agent-info.json is agent-writable: its template is used
+				// only when it is a template slug, never as a host
+				// directory or a remote source.
 				templateRef = info.Template
+			} else if info.Template != "" {
+				// The value is not logged: the agent wrote it.
+				slog.Warn("Ignoring the template recorded in agent-info.json for cleared-field inheritance: not a template name", "agent", agentName)
 			}
 		}
 	}
@@ -137,7 +151,13 @@ func (s *Server) clearedFieldsInheritance(ctx context.Context, projectPath, proj
 		}
 		templateRef = dir
 	}
-	chain, err := config.GetTemplateChainInProject(templateRef, projectPath)
+	var chain []*config.Template
+	var err error
+	if operatorDefault != "" && templateRef == operatorDefault {
+		chain, err = config.GetOperatorTemplateChainInProject(ctx, templateRef, projectPath)
+	} else {
+		chain, err = config.GetTemplateChainInProject(ctx, templateRef, projectPath)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("resolve template chain: %w", err)
 	}

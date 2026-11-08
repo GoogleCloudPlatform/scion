@@ -26,6 +26,10 @@ const (
 	// EventRunnerSwapLowBudget (WARNING) follows runner_swap when the job that
 	// took the runner inherits less than 20 minutes of the task timeout.
 	EventRunnerSwapLowBudget = "runner_swap_low_budget"
+	// EventRunnerRebind (INFO) follows runner_swap when the idle runner launched for
+	// the job that took the runner is handed the displaced job instead; in a chain of
+	// swaps the displaced job is passed on runner by runner, one rebind per hand-off.
+	EventRunnerRebind        = "runner_rebind"
 	EventDispatch            = "dispatch"
 	EventDispatchSkip        = "dispatch_skip"
 	EventCapacityFull        = "capacity_full"

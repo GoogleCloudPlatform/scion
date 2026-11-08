@@ -35,27 +35,37 @@
  * access) for canGrantReview without canManage. Retention… (the Retention
  * and access dialog: expiry, revoke links, remove grants) is shown for
  * canShare without canManage (a steward), and Delete… for canRetire
- * (ptone/scion#4535). An artifact whose owner was deleted has the Owner
- * deleted badge and its owner struck through; the meta row shows when it
- * expires.
+ * (ptone/scion#4535). With the experiment web.artifact_manage_access on
+ * (ptone/scion#7107), one Manage access button, shown for canShare or
+ * canGrantReview, replaces Share, Grant review access and Retention…; it
+ * opens the Share dialog in manage mode, with each section decided from the
+ * same flags. Move… and Delete… are unchanged. An artifact whose owner
+ * was deleted has the Owner deleted badge and its owner struck through;
+ * the meta row shows when it expires.
  * Route: /projects/{projectId}/artifacts/{artifactId}[/v/{seq}]
  */
 
 import { LitElement, html, css, nothing } from 'lit';
-import type { TemplateResult } from 'lit';
+import type { PropertyValues, TemplateResult } from 'lit';
 import { customElement, property, query, state } from 'lit/decorators.js';
 
 import type { PageData } from '../../shared/types.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import { navigateTo, stripBasePath } from '../../client/navigation.js';
-import { ARTIFACT_REVIEW_EDITOR_FLAG, isFeatureEnabled } from '../../utils/feature-flags.js';
+import {
+  ARTIFACT_MANAGE_ACCESS_FLAG,
+  ARTIFACT_REVIEW_EDITOR_FLAG,
+  isFeatureEnabled,
+} from '../../utils/feature-flags.js';
 import { formatInstant } from '../../utils/time.js';
 import { showToast } from '../../utils/toast.js';
 import {
   ARTIFACTS_FLAG,
   MAX_INLINE_TEXT_BYTES,
+  artifactArchiveUrl,
   artifactFileUrl,
+  artifactOriginOf,
   artifactPagePath,
   baseName,
   discardReasonText,
@@ -74,6 +84,7 @@ import {
 import type {
   Artifact,
   ArtifactFile,
+  ArtifactOrigin,
   ArtifactResponse,
   ArtifactRenderer,
   ArtifactVersion,
@@ -103,6 +114,8 @@ import '../shared/detail-header.js';
 import '../shared/artifact-publish-dialog.js';
 import '../shared/artifact-move-dialog.js';
 import '../shared/artifact-share-dialog.js';
+import { capabilitiesFrom, showManageAccess } from '../shared/artifact-access-sections.js';
+import type { AccessCapabilities } from '../shared/artifact-access-sections.js';
 import '../shared/artifact-delete-dialog.js';
 import { ownerDeletedBadge, ownerDeletedStyles } from '../shared/artifact-owner-deleted.js';
 import '../shared/code-editor.js';
@@ -110,9 +123,23 @@ import './not-found.js';
 import { loadReviewEditor, preloadReviewEditor } from '../artifact-review/review-editor-loader.js';
 import { showConfirm } from '../shared/confirm-dialog.js';
 import { countTopLevelBlocks } from '../../utils/markdown-blocks.js';
-import type { ReviewEditorElement } from '../artifact-review/review-editor-loader.js';
+import type {
+  ReviewChangeDetail,
+  ReviewEditorElement,
+} from '../artifact-review/review-editor-loader.js';
 
 type Tab = 'preview' | 'files' | 'history';
+
+/** How often a return to the tab may re-read the version list (ptone/scion#6851). */
+const VERSIONS_RECHECK_MS = 30_000;
+
+/** A version kind as the page shows it (ptone/scion#6852). */
+export function versionKindLabel(kind: string): string {
+  if (kind === 'publish') return 'Publish';
+  if (kind === 'review') return 'Review';
+  if (kind === 'attachment') return 'Attachment';
+  return kind;
+}
 
 /**
  * text with CRLF and lone CR line endings as LF: the form the editor works
@@ -332,6 +359,17 @@ export class ScionPageArtifactDetail extends LitElement {
   @state() private artifactId = '';
   /** Version in the URL; 0 shows the current version. */
   @state() private seq = 0;
+  /** Where the page was opened from (ptone/scion#6847); see artifactOriginOf. */
+  private origin: ArtifactOrigin = 'project';
+  /** A Refresh is reloading the page in place (ptone/scion#6851). */
+  @state() private refreshing = false;
+  /**
+   * The newest version seq the page has seen (ptone/scion#6851): the one
+   * page property every source feeds through noteSeq (an artifact load, a
+   * version list; the review heartbeat of ptone/scion#6849 later), so the
+   * page shows one answer to "is there a newer version".
+   */
+  @state() private newestSeqSeen = 0;
   @state() private loading = true;
   @state() private notFound = false;
   @state() private error: string | null = null;
@@ -375,6 +413,8 @@ export class ScionPageArtifactDetail extends LitElement {
   @state() private moveOpen = false;
   /** The Retention and access dialog is open. */
   @state() private retentionOpen = false;
+  /** The Manage access dialog is open (experiment web.artifact_manage_access). */
+  @state() private accessOpen = false;
   /** The Delete artifact confirmation is open. */
   @state() private deleteOpen = false;
   /**
@@ -427,6 +467,14 @@ export class ScionPageArtifactDetail extends LitElement {
   @query('.untrusted') private untrustedFrame?: HTMLElement;
   @query('scion-code-editor.review-editor') private reviewEditor?: ScionCodeEditor;
   @query('scion-review-editor') private graphicalEditor?: ReviewEditorElement;
+  @query('.g-sticky') private stickyBlock?: HTMLElement;
+  /**
+   * Height of the sticky review toolbar and hint strip, measured as they
+   * wrap and grow, so the editor scrolls the caret clear of them.
+   */
+  @state() private stickyInset = 0;
+  private stickyObserver: ResizeObserver | null = null;
+  private stickyObserved: HTMLElement | null = null;
   /** The view of the graphical review page (experiment web.artifact_review_editor). */
   @state() private reviewView: ReviewView = 'graphical';
   /** The editor chunk: not requested, loading, loaded, or failed. */
@@ -475,6 +523,9 @@ export class ScionPageArtifactDetail extends LitElement {
         display: inline-flex;
         align-items: center;
         gap: 0.25rem;
+      }
+      .version-info .v-state.current {
+        color: var(--sl-color-success-700);
       }
       .menu-note {
         display: block;
@@ -550,6 +601,20 @@ export class ScionPageArtifactDetail extends LitElement {
         font-size: 0.8125rem;
         color: var(--sl-color-neutral-600);
         margin: 0.5rem 0;
+      }
+      .files-header {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.5rem;
+      }
+      .archive {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        font-size: 0.8125rem;
+        color: var(--sl-color-neutral-600);
       }
       .single-version {
         text-align: center;
@@ -672,6 +737,20 @@ export class ScionPageArtifactDetail extends LitElement {
       .graphical-review {
         margin-bottom: 0.25rem;
       }
+      /* The review tools and the hint under them stay in view while the
+         document scrolls under them, at every width. The z-index lifts them
+         over the document only: Shoelace's dialogs, drawers, popups and
+         tooltips stack far above. */
+      /* Sticky offsets count from inside the scroll container's padding
+         (the app shell's .content: 1.5rem, 1rem at 640px and below), so
+         the block rises by that padding to meet the top edge and the text
+         does not show above it. */
+      .g-sticky {
+        position: sticky;
+        top: -1.5rem;
+        z-index: 2;
+        background: var(--scion-bg, #f8fafc);
+      }
       .g-toolbar {
         display: flex;
         flex-wrap: wrap;
@@ -780,6 +859,9 @@ export class ScionPageArtifactDetail extends LitElement {
         padding: 0 0.3rem;
       }
       @media (max-width: 640px) {
+        .g-sticky {
+          top: -1rem;
+        }
         .g-toolbar {
           gap: 0.3rem;
           padding: 0.4rem;
@@ -795,6 +877,13 @@ export class ScionPageArtifactDetail extends LitElement {
         }
         .g-toolbar .narrow {
           display: inline;
+        }
+      }
+      /* Comment is the only way to comment by touch: a tap target of at
+         least 44px on phones and touch screens. */
+      @media (max-width: 640px), (pointer: coarse) {
+        .g-toolbar sl-button.comment {
+          --sl-input-height-small: 2.75rem;
         }
       }
       .download-state,
@@ -824,7 +913,9 @@ export class ScionPageArtifactDetail extends LitElement {
       this.wideReviewViewport = this.wideReviewQuery.matches;
       this.wideReviewQuery.addEventListener?.('change', this.onWideReviewChange);
     }
-    const parsed = parseArtifactPagePath(this.pageData?.path || window.location.pathname);
+    const pagePath = this.pageData?.path || window.location.pathname + window.location.search;
+    this.origin = artifactOriginOf(pagePath);
+    const parsed = parseArtifactPagePath(pagePath);
     if (parsed) {
       this.projectId = parsed.projectId;
       this.artifactId = parsed.id;
@@ -835,6 +926,8 @@ export class ScionPageArtifactDetail extends LitElement {
       this.notFound = true;
       return;
     }
+    document.addEventListener('visibilitychange', this.onVisibility);
+    this.versionsCheckedAt = Date.now();
     void this.load();
   }
 
@@ -869,6 +962,7 @@ export class ScionPageArtifactDetail extends LitElement {
       const data = (await res.json()) as ArtifactResponse;
       if (gen !== this.loadGen) return;
       this.data = data;
+      this.noteSeq(data.artifact.currentSeq);
       dispatchPageTitle(this, data.artifact.title, 'Artifacts');
       const version = data.version;
       this.entry = version?.files.find((f) => f.path === version.entryPath) ?? null;
@@ -896,6 +990,95 @@ export class ScionPageArtifactDetail extends LitElement {
       if (gen === this.loadGen) this.loading = false;
     }
   }
+
+  /** Reloads the artifact and its versions in place (ptone/scion#6851). */
+  private refresh = (): void => {
+    if (this.refreshing || this.editing || this.reviewing || this.publishOpen) return;
+    this.refreshing = true;
+    this.versionsCheckedAt = Date.now();
+    void this.refreshInPlace().finally(() => {
+      this.refreshing = false;
+    });
+  };
+
+  /**
+   * Refresh's reload (ptone/scion#6851): the page stays on screen. The
+   * artifact and, for a text entry, its text are read first and applied
+   * together, so the version shown and its text never come from different
+   * loads. The result is dropped when an edit, a review or an upload started
+   * while it ran (their buttons are disabled meanwhile), or a newer load
+   * began. A
+   * failure is reported in a toast; the page keeps what it showed.
+   */
+  private async refreshInPlace(): Promise<void> {
+    const gen = ++this.loadGen;
+    // Dropped once anything that publishes from the shown version started.
+    const stale = (): boolean =>
+      gen !== this.loadGen || this.editing || this.reviewing || this.publishOpen;
+    try {
+      const res = await apiFetch(this.versionPath);
+      if (stale()) return;
+      if (res.status === 404) {
+        this.notFound = true;
+        return;
+      }
+      if (!res.ok) throw new Error(await extractApiError(res, `HTTP ${res.status}`));
+      const data = (await res.json()) as ArtifactResponse;
+      if (stale()) return;
+      const version = data.version;
+      const entry = version?.files.find((f) => f.path === version.entryPath) ?? null;
+      const kind = entry ? rendererFor(entry.mediaType) : 'download';
+      let text: string | null = null;
+      const inline = entry !== null && entry.size <= MAX_INLINE_TEXT_BYTES;
+      if ((kind === 'markdown' || kind === 'text') && inline) {
+        const r = await apiFetch(artifactFileUrl(this.artifactId, version!.seq, entry.path, true));
+        if (!r.ok) throw new Error(await extractApiError(r, `HTTP ${r.status}`));
+        text = await r.text();
+        if (stale()) return;
+      }
+      // Apply the version, its entry and its text together.
+      this.data = data;
+      this.noteSeq(data.artifact.currentSeq);
+      dispatchPageTitle(this, data.artifact.title, 'Artifacts');
+      this.entry = entry;
+      this.text = text;
+      this.resolveNames();
+      void this.loadVersions(0, gen);
+      if (data.canManage) void this.loadCrossProjectSharing(gen);
+      if (kind === 'html' && version) {
+        void this.loadView(version.seq);
+      } else {
+        this.viewGen++;
+        if (this.viewTimer) clearTimeout(this.viewTimer);
+        this.viewTimer = null;
+        this.view = null;
+        this.viewError = null;
+        this.viewExpired = false;
+      }
+    } catch (err) {
+      if (gen !== this.loadGen) return;
+      console.error('Failed to refresh artifact:', err);
+      const message = err instanceof Error ? err.message : 'Failed to refresh';
+      showToast(`Could not refresh: ${message}`, 'danger');
+    }
+  }
+
+  /** When the version list was last read by a Refresh or a return to the tab. */
+  private versionsCheckedAt = 0;
+
+  /**
+   * A return to the tab re-reads the version list (at most every 30 s), so
+   * a version published meanwhile shows in the list and the Review pending
+   * badge (ptone/scion#6851) without reloading the page. Nothing is re-read
+   * while editing or reviewing.
+   */
+  private onVisibility = (): void => {
+    if (document.visibilityState !== 'visible' || !this.data || this.loading) return;
+    if (this.editing || this.reviewing || this.refreshing) return;
+    if (Date.now() - this.versionsCheckedAt < VERSIONS_RECHECK_MS) return;
+    this.versionsCheckedAt = Date.now();
+    void this.loadVersions(0, this.loadGen);
+  };
 
   private async loadText(file: ArtifactFile, gen: number): Promise<void> {
     const seq = this.data?.version?.seq ?? 0;
@@ -937,6 +1120,7 @@ export class ScionPageArtifactDetail extends LitElement {
   }
 
   override disconnectedCallback(): void {
+    document.removeEventListener('visibilitychange', this.onVisibility);
     super.disconnectedCallback();
     if (this.viewTimer) clearTimeout(this.viewTimer);
     this.viewTimer = null;
@@ -947,6 +1131,28 @@ export class ScionPageArtifactDetail extends LitElement {
     this.wideQuery = null;
     this.wideReviewQuery?.removeEventListener?.('change', this.onWideReviewChange);
     this.wideReviewQuery = null;
+    this.stickyObserver?.disconnect();
+    this.stickyObserver = null;
+    this.stickyObserved = null;
+  }
+
+  override updated(changed: PropertyValues<this>): void {
+    super.updated(changed);
+    this.observeSticky();
+  }
+
+  /** Measures the sticky review block whenever a new one renders. */
+  private observeSticky(): void {
+    const block = this.stickyBlock ?? null;
+    if (block === this.stickyObserved) return;
+    this.stickyObserver?.disconnect();
+    this.stickyObserved = block;
+    if (!block || typeof ResizeObserver === 'undefined') return;
+    this.stickyObserver ??= new ResizeObserver((entries) => {
+      const last = entries[entries.length - 1];
+      if (last) this.stickyInset = last.target.getBoundingClientRect().height;
+    });
+    this.stickyObserver.observe(block);
   }
 
   private async loadVersions(before = 0, gen = this.loadGen): Promise<void> {
@@ -965,6 +1171,7 @@ export class ScionPageArtifactDetail extends LitElement {
         const page = await listVersions(this.artifactId, next);
         if (gen !== this.loadGen) return;
         this.versions = next > 0 ? [...this.versions, ...page.versions] : page.versions;
+        for (const x of page.versions) if (x.state === 'ready') this.noteSeq(x.seq);
         const discarded = page.discarded ?? [];
         this.discarded = next > 0 ? [...this.discarded, ...discarded] : discarded;
         this.versionsNext = page.nextBefore ?? 0;
@@ -1038,7 +1245,8 @@ export class ScionPageArtifactDetail extends LitElement {
     navigateTo(
       artifactPagePath(
         { id: this.artifactId, scopeRef: this.homeProject },
-        seq === current ? 0 : seq
+        seq === current ? 0 : seq,
+        this.origin
       )
     );
   }
@@ -1104,9 +1312,26 @@ export class ScionPageArtifactDetail extends LitElement {
     return !!this.data?.canShare && !this.data?.canManage;
   }
 
-  /** Where the back link goes: the home project, or the artifacts list when it was deleted. */
+  /**
+   * One Manage access button and dialog replace Share, Grant review access
+   * and Retention… (experiment web.artifact_manage_access, ptone/scion#7107).
+   */
+  private get manageAccess(): boolean {
+    return isFeatureEnabled(ARTIFACT_MANAGE_ACCESS_FLAG);
+  }
+
+  /** The capability flags the Manage access dialog reads. */
+  private get accessCaps(): AccessCapabilities {
+    return capabilitiesFrom(this.data);
+  }
+
+  /**
+   * Where the back link goes, and where a delete returns to: the Artifacts
+   * list when the page was opened from it (ptone/scion#6847) or the home
+   * project was deleted, the home project otherwise.
+   */
   private get backTarget(): { href: string; label: string } {
-    return this.data?.scopeDeleted
+    return this.data?.scopeDeleted || this.origin === 'artifacts'
       ? { href: '/artifacts', label: 'Artifacts' }
       : { href: `/projects/${encodeURIComponent(this.homeProject)}`, label: 'Project' };
   }
@@ -1142,13 +1367,27 @@ export class ScionPageArtifactDetail extends LitElement {
     );
   }
 
-  /** The artifact's current version is a review (whichever version is shown). */
+  /**
+   * The newest version the page has seen (newestSeqSeen): the artifact's
+   * current one, or a newer one a version list or another source reported
+   * (ptone/scion#6851).
+   */
+  private get latestSeq(): number {
+    return Math.max(this.newestSeqSeen, this.data?.artifact.currentSeq ?? 0);
+  }
+
+  /** Notes a version seq the page has seen to exist (see newestSeqSeen). */
+  noteSeq(seq: number): void {
+    if (seq > this.newestSeqSeen) this.newestSeqSeen = seq;
+  }
+
+  /** The artifact's newest version seen is a review (whichever version is shown). */
   private get currentIsReview(): boolean {
-    const a = this.data?.artifact;
     const v = this.data?.version;
-    if (!a || !v) return false;
-    if (v.seq === a.currentSeq) return v.kind === 'review';
-    return this.versions.find((x) => x.seq === a.currentSeq)?.kind === 'review';
+    if (!this.data || !v) return false;
+    const seq = this.latestSeq;
+    if (v.seq === seq) return v.kind === 'review';
+    return this.versions.find((x) => x.seq === seq)?.kind === 'review';
   }
 
   /** The version shown is a review. */
@@ -1158,7 +1397,7 @@ export class ScionPageArtifactDetail extends LitElement {
 
   /** The current version is a review the owner has not answered yet. */
   private get reviewPendingNow(): boolean {
-    return this.isReview && this.showsCurrent;
+    return this.isReview && this.showsCurrent && this.data!.version!.seq === this.latestSeq;
   }
 
   /**
@@ -1604,10 +1843,14 @@ export class ScionPageArtifactDetail extends LitElement {
    * page reloads itself.
    */
   private showCurrentVersion(): void {
-    const target = artifactPagePath({ id: this.artifactId, scopeRef: this.homeProject });
+    const target = artifactPagePath(
+      { id: this.artifactId, scopeRef: this.homeProject },
+      0,
+      this.origin
+    );
     this.editing = false;
     this.reviewing = false;
-    if (stripBasePath(window.location.pathname) !== target) {
+    if (stripBasePath(window.location.pathname) + window.location.search !== target) {
       navigateTo(target);
       return;
     }
@@ -1655,7 +1898,23 @@ export class ScionPageArtifactDetail extends LitElement {
           this.publishOpen = false;
         }}
       ></scion-artifact-publish-dialog>
-      ${this.data?.canManage || this.canGrantReview
+      ${this.manageAccess && showManageAccess(this.accessCaps)
+        ? html`<scion-artifact-share-dialog
+            class="access-dialog"
+            .artifact=${this.data.artifact}
+            .currentUserId=${this.pageData?.user?.id ?? ''}
+            .mode=${'manage'}
+            .capabilities=${this.accessCaps}
+            ?open=${this.accessOpen}
+            @artifact-changed=${(e: CustomEvent<Artifact>): void => {
+              if (this.data) this.data = { ...this.data, artifact: e.detail };
+            }}
+            @artifact-share-closed=${(): void => {
+              this.accessOpen = false;
+            }}
+          ></scion-artifact-share-dialog>`
+        : nothing}
+      ${!this.manageAccess && (this.data?.canManage || this.canGrantReview)
         ? html`<scion-artifact-share-dialog
             .artifact=${this.data.artifact}
             .currentUserId=${this.pageData?.user?.id ?? ''}
@@ -1669,7 +1928,7 @@ export class ScionPageArtifactDetail extends LitElement {
             }}
           ></scion-artifact-share-dialog>`
         : nothing}
-      ${this.canRetention
+      ${!this.manageAccess && this.canRetention
         ? html`<scion-artifact-share-dialog
             class="retention-dialog"
             .artifact=${this.data.artifact}
@@ -1724,12 +1983,33 @@ export class ScionPageArtifactDetail extends LitElement {
   /** After a move the artifact lives under its new home project: open it there. */
   private onMoved(moved: Artifact): void {
     this.moveOpen = false;
-    navigateTo(artifactPagePath(moved));
+    navigateTo(artifactPagePath(moved, 0, this.origin));
   }
 
   private versionLabel(v: ArtifactVersion | undefined): string {
     if (!v) return 'none';
-    return v.seq === this.data!.artifact.currentSeq ? `v${v.seq} (current)` : `v${v.seq}`;
+    return v.seq === this.latestSeq ? `v${v.seq} (current)` : `v${v.seq}`;
+  }
+
+  /** "Review by Alice", or the kind alone when the author is not known (ptone/scion#6852). */
+  private kindAndAuthor(v: ArtifactVersion): string {
+    const by = this.createdBy(v);
+    return by ? `${versionKindLabel(v.kind)} by ${by}` : versionKindLabel(v.kind);
+  }
+
+  /**
+   * The shown version's facts in the header (ptone/scion#6852): its number,
+   * whether it is the current version, its kind and author, and its date.
+   */
+  private renderVersionInfo(v: ArtifactVersion): TemplateResult {
+    const latest = this.latestSeq;
+    const state = v.seq === latest ? 'current' : `older, current is v${latest}`;
+    return html`<span class="version-info">
+      Version: <strong class="v-seq">v${v.seq}</strong> ·
+      <span class=${v.seq === latest ? 'v-state current' : 'v-state older'}>${state}</span> ·
+      <span class="v-kind">${this.kindAndAuthor(v)}</span> ·
+      <span class="v-date">${formatInstant(v.createdAt)}</span>
+    </span>`;
   }
 
   private renderVersionMenu(): TemplateResult {
@@ -1746,7 +2026,8 @@ export class ScionPageArtifactDetail extends LitElement {
             : this.versions.map(
                 (x) => html`
                   <sl-menu-item value=${String(x.seq)} ?checked=${x.seq === v?.seq} type="checkbox">
-                    ${this.versionLabel(x)} · ${formatInstant(x.createdAt)}
+                    ${this.versionLabel(x)} · ${this.kindAndAuthor(x)} ·
+                    ${formatInstant(x.createdAt)}
                     ${x.note ? html`<span class="menu-note">${x.note}</span>` : nothing}
                   </sl-menu-item>
                 `
@@ -1764,16 +2045,13 @@ export class ScionPageArtifactDetail extends LitElement {
     // Every action needs a version, edit rights or (for Share and Grant
     // review access) the right to manage the artifact or give review
     // access; all are hidden while editing or reviewing.
+    const accessActions = this.manageAccess
+      ? showManageAccess(this.accessCaps)
+      : !!this.data?.canManage || this.canGrantReview || this.canRetention;
     const hasActions =
       !this.editing &&
       !this.reviewing &&
-      (!!v ||
-        this.canEdit ||
-        this.canReview ||
-        !!this.data?.canManage ||
-        this.canGrantReview ||
-        this.canRetention ||
-        this.canRetire);
+      (!!v || this.canEdit || this.canReview || accessActions || this.canRetire);
     // A deleted home project has no page: go back to the artifacts list
     // instead (ptone/scion#4588).
     const back = this.backTarget;
@@ -1794,6 +2072,7 @@ export class ScionPageArtifactDetail extends LitElement {
           : nothing}
         <div slot="meta" class="meta">
           <span>Owner: ${a.ownerDeleted ? this.goneOwner(a.ownerKind, a.ownerRef) : owner}</span>
+          ${v ? this.renderVersionInfo(v) : nothing}
           ${a.key ? html`<span>Key: <code>${a.key}</code></span>` : nothing}
           <span>Updated: ${formatInstant(a.updatedAt)}</span>
           <span class="expires"
@@ -1814,30 +2093,53 @@ export class ScionPageArtifactDetail extends LitElement {
         ${hasActions
           ? html`
               <div slot="actions" class="header-actions">
+                <sl-tooltip content="Reload the artifact and its versions">
+                  <sl-button
+                    size="small"
+                    class="refresh"
+                    ?loading=${this.refreshing}
+                    @click=${this.refresh}
+                  >
+                    <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
+                    Refresh
+                  </sl-button>
+                </sl-tooltip>
                 ${v ? this.renderVersionMenu() : nothing}
                 ${this.canEdit
-                  ? html`<sl-button size="small" @click=${this.startEdit}>
+                  ? html`<sl-button
+                      size="small"
+                      ?disabled=${this.refreshing}
+                      @click=${this.startEdit}
+                    >
                       <sl-icon slot="prefix" name="pencil"></sl-icon>
                       Edit
                     </sl-button>`
                   : nothing}
                 ${this.canReview
-                  ? html`<sl-button size="small" @click=${this.startReview}>
+                  ? html`<sl-button
+                      size="small"
+                      ?disabled=${this.refreshing}
+                      @click=${this.startReview}
+                    >
                       <sl-icon slot="prefix" name="chat-text"></sl-icon>
                       Review
                     </sl-button>`
                   : nothing}
-                ${this.data!.canManage
+                ${this.manageAccess && showManageAccess(this.accessCaps)
                   ? html`<sl-button
                       size="small"
+                      class="manage-access"
                       @click=${(): void => {
-                        this.shareOpen = true;
+                        this.accessOpen = true;
                       }}
                     >
-                      <sl-icon slot="prefix" name="person-plus"></sl-icon>
-                      Share
+                      <sl-icon slot="prefix" name="shield-lock"></sl-icon>
+                      Manage access
                     </sl-button>`
-                  : this.canGrantReview
+                  : nothing}
+                ${this.manageAccess
+                  ? nothing
+                  : this.data!.canManage
                     ? html`<sl-button
                         size="small"
                         @click=${(): void => {
@@ -1845,10 +2147,20 @@ export class ScionPageArtifactDetail extends LitElement {
                         }}
                       >
                         <sl-icon slot="prefix" name="person-plus"></sl-icon>
-                        Grant review access
+                        Share
                       </sl-button>`
-                    : nothing}
-                ${this.canRetention
+                    : this.canGrantReview
+                      ? html`<sl-button
+                          size="small"
+                          @click=${(): void => {
+                            this.shareOpen = true;
+                          }}
+                        >
+                          <sl-icon slot="prefix" name="person-plus"></sl-icon>
+                          Grant review access
+                        </sl-button>`
+                      : nothing}
+                ${!this.manageAccess && this.canRetention
                   ? html`<sl-button
                       size="small"
                       class="retention"
@@ -2065,15 +2377,18 @@ export class ScionPageArtifactDetail extends LitElement {
     const fetched = remote.filter((x) => x.fetchStatus === 'ok').length;
     const total = own.reduce((n, x) => n + x.size, 0);
     return html`
-      <div class="summary">
-        ${own.length} ${own.length === 1 ? 'file' : 'files'} · ${formatBytes(total)} · version
-        ${v.seq}
-        ${remote.length > 0
-          ? html` · remote images fetched when published: ${fetched}
-            ${remote.length > fetched
-              ? html`, could not be fetched: ${remote.length - fetched}`
-              : nothing}`
-          : nothing}
+      <div class="files-header">
+        <div class="summary">
+          ${own.length} ${own.length === 1 ? 'file' : 'files'} · ${formatBytes(total)} · version
+          ${v.seq}
+          ${remote.length > 0
+            ? html` · remote images fetched when published: ${fetched}
+              ${remote.length > fetched
+                ? html`, could not be fetched: ${remote.length - fetched}`
+                : nothing}`
+            : nothing}
+        </div>
+        ${this.renderArchive(v.seq)}
       </div>
       <table>
         <thead>
@@ -2126,6 +2441,36 @@ export class ScionPageArtifactDetail extends LitElement {
         </tbody>
       </table>
     `;
+  }
+
+  /**
+   * Download all (.zip) on the Files tab (ptone/scion#7106). It is shown
+   * only when the hub's version response says whether the zip is
+   * available, so the hub alone decides; the browser's download manager
+   * shows progress and allows cancel.
+   */
+  private renderArchive(seq: number): TemplateResult | typeof nothing {
+    const archive = this.data?.archive;
+    if (!archive) return nothing;
+    if (!archive.available) {
+      const why =
+        archive.reason === 'unsupported_name'
+          ? 'A file name cannot be stored in a zip; download files individually'
+          : 'Too large for one archive; download files individually';
+      return html`<div class="archive">
+        <sl-button size="small" disabled>
+          <sl-icon slot="prefix" name="download"></sl-icon>
+          Download all (.zip)
+        </sl-button>
+        <span class="archive-note">${why}</span>
+      </div>`;
+    }
+    return html`<div class="archive">
+      <sl-button size="small" href=${artifactArchiveUrl(this.artifactId, seq)} download="">
+        <sl-icon slot="prefix" name="download"></sl-icon>
+        Download all (.zip)
+      </sl-button>
+    </div>`;
   }
 
   private createdBy(v: ArtifactVersion): string {
@@ -2203,7 +2548,7 @@ export class ScionPageArtifactDetail extends LitElement {
       <tr>
         <td>
           <strong>v${x.seq}</strong>
-          ${x.seq === this.data!.artifact.currentSeq
+          ${x.seq === this.latestSeq
             ? html`<sl-badge pill variant="success">current</sl-badge>`
             : nothing}
         </td>
@@ -2285,6 +2630,7 @@ export class ScionPageArtifactDetail extends LitElement {
                   <sl-button
                     size="small"
                     variant="primary"
+                    ?disabled=${this.refreshing}
                     @click=${(): void => {
                       this.publishOpen = true;
                     }}
@@ -2293,7 +2639,11 @@ export class ScionPageArtifactDetail extends LitElement {
                     Upload new version
                   </sl-button>
                   ${this.canEdit
-                    ? html`<sl-button size="small" @click=${this.startEdit}>
+                    ? html`<sl-button
+                        size="small"
+                        ?disabled=${this.refreshing}
+                        @click=${this.startEdit}
+                      >
                         <sl-icon slot="prefix" name="pencil"></sl-icon>
                         Edit
                       </sl-button>`
@@ -2305,6 +2655,7 @@ export class ScionPageArtifactDetail extends LitElement {
           ? html`<div class="more">
               <sl-button
                 size="small"
+                ?disabled=${this.refreshing}
                 @click=${(): void => {
                   this.publishOpen = true;
                 }}
@@ -2450,129 +2801,131 @@ export class ScionPageArtifactDetail extends LitElement {
         publishes a new version as a review; v${v.seq} stays as it is.
       </div>
       <div class="graphical-review" @keydown=${this.onReviewKeydown}>
-        <div class="g-toolbar" role="toolbar" aria-label="Review tools">
-          ${graphical
-            ? html`<sl-tooltip content="A review records every edit as a suggestion">
-                  <!-- A disabled switch takes no focus: the wrapper does, so the
+        <div class="g-sticky">
+          <div class="g-toolbar" role="toolbar" aria-label="Review tools">
+            ${graphical
+              ? html`<sl-tooltip content="A review records every edit as a suggestion">
+                    <!-- A disabled switch takes no focus: the wrapper does, so the
                        tooltip is reachable by keyboard. -->
-                  <span
-                    class="track-wrap"
-                    tabindex="0"
-                    role="switch"
-                    aria-checked="true"
-                    aria-disabled="true"
-                    aria-label="Track changes: on. A review records every edit as a suggestion."
-                  >
-                    <sl-switch size="small" checked disabled class="track" aria-hidden="true">
-                      <span class="lbl">Track changes</span
-                      ><span class="narrow" aria-hidden="true">Track</span>
-                    </sl-switch>
-                  </span>
-                </sl-tooltip>
-                <span class="sep"></span>
-                <sl-tooltip content="Comment on the selection (Ctrl+Alt+M)">
-                  <sl-button
-                    size="small"
-                    class="comment"
-                    ?disabled=${this.editorLoad !== 'ready'}
-                    @click=${(): void => void this.graphicalEditor?.comment()}
-                  >
-                    <sl-icon slot="prefix" name="chat-text"></sl-icon>
-                    <span class="lbl">Comment</span>
-                  </sl-button>
-                </sl-tooltip>`
-            : html`<sl-tooltip content="Comment on the selection (Ctrl+Alt+M)">
-                  <sl-button size="small" @click=${(): void => this.applyTool('comment')}>
-                    <sl-icon slot="prefix" name="chat-text"></sl-icon>
-                    <span class="lbl">Comment</span>
-                  </sl-button>
-                </sl-tooltip>
-                <sl-tooltip content="Suggest a replacement for the selection">
-                  <sl-button size="small" @click=${(): void => this.applyTool('suggest')}>
-                    <sl-icon slot="prefix" name="arrow-left-right"></sl-icon>
-                    <span class="lbl">Suggest</span>
-                  </sl-button>
-                </sl-tooltip>
-                <sl-tooltip content="Suggest an insertion after the selection">
-                  <sl-button size="small" @click=${(): void => this.applyTool('insert')}>
-                    <sl-icon slot="prefix" name="plus-circle"></sl-icon>
-                    <span class="lbl">Insert</span>
-                  </sl-button>
-                </sl-tooltip>
-                <sl-tooltip content="Suggest deleting the selection">
-                  <sl-button size="small" @click=${(): void => this.applyTool('delete')}>
-                    <sl-icon slot="prefix" name="dash-circle"></sl-icon>
-                    <span class="lbl">Delete</span>
-                  </sl-button>
-                </sl-tooltip>
-                ${this.reviewHint ? html`<span class="hint">${this.reviewHint}</span>` : nothing}`}
-          <span class="spacer"></span>
-          <sl-tooltip
-            content=${this.reviewSize === 'too-large'
-              ? TOO_LARGE_TOOLTIP
-              : this.reviewSize === null || this.choosingGraphical
-                ? SIZING_TOOLTIP
-                : 'Undo history is kept per view and resets when you switch'}
-          >
-            <sl-radio-group
-              size="small"
-              label="View"
-              class="view-toggle"
-              value=${this.reviewView}
-              @sl-change=${(e: Event): void => {
-                const group = e.target as HTMLElement & { value: string };
-                this.chooseReviewView(group.value as ReviewView);
-                // A refused switch puts the control back.
-                if (group.value !== this.reviewView) group.value = this.reviewView;
-              }}
+                    <span
+                      class="track-wrap"
+                      tabindex="0"
+                      role="switch"
+                      aria-checked="true"
+                      aria-disabled="true"
+                      aria-label="Track changes: on. A review records every edit as a suggestion."
+                    >
+                      <sl-switch size="small" checked disabled class="track" aria-hidden="true">
+                        <span class="lbl">Track changes</span
+                        ><span class="narrow" aria-hidden="true">Track</span>
+                      </sl-switch>
+                    </span>
+                  </sl-tooltip>
+                  <span class="sep"></span>
+                  <sl-tooltip content="Comment on the selection (Ctrl+Alt+M)">
+                    <sl-button
+                      size="small"
+                      class="comment"
+                      ?disabled=${this.editorLoad !== 'ready'}
+                      @click=${(): void => void this.graphicalEditor?.comment()}
+                    >
+                      <sl-icon slot="prefix" name="chat-text"></sl-icon>
+                      <span class="lbl">Comment</span>
+                    </sl-button>
+                  </sl-tooltip>`
+              : html`<sl-tooltip content="Comment on the selection (Ctrl+Alt+M)">
+                    <sl-button size="small" @click=${(): void => this.applyTool('comment')}>
+                      <sl-icon slot="prefix" name="chat-text"></sl-icon>
+                      <span class="lbl">Comment</span>
+                    </sl-button>
+                  </sl-tooltip>
+                  <sl-tooltip content="Suggest a replacement for the selection">
+                    <sl-button size="small" @click=${(): void => this.applyTool('suggest')}>
+                      <sl-icon slot="prefix" name="arrow-left-right"></sl-icon>
+                      <span class="lbl">Suggest</span>
+                    </sl-button>
+                  </sl-tooltip>
+                  <sl-tooltip content="Suggest an insertion after the selection">
+                    <sl-button size="small" @click=${(): void => this.applyTool('insert')}>
+                      <sl-icon slot="prefix" name="plus-circle"></sl-icon>
+                      <span class="lbl">Insert</span>
+                    </sl-button>
+                  </sl-tooltip>
+                  <sl-tooltip content="Suggest deleting the selection">
+                    <sl-button size="small" @click=${(): void => this.applyTool('delete')}>
+                      <sl-icon slot="prefix" name="dash-circle"></sl-icon>
+                      <span class="lbl">Delete</span>
+                    </sl-button>
+                  </sl-tooltip>
+                  ${this.reviewHint ? html`<span class="hint">${this.reviewHint}</span>` : nothing}`}
+            <span class="spacer"></span>
+            <sl-tooltip
+              content=${this.reviewSize === 'too-large'
+                ? TOO_LARGE_TOOLTIP
+                : this.reviewSize === null || this.choosingGraphical
+                  ? SIZING_TOOLTIP
+                  : 'Undo history is kept per view and resets when you switch'}
             >
-              <sl-radio-button
-                value="graphical"
-                ?disabled=${this.reviewSize === null ||
-                this.reviewSize === 'too-large' ||
-                this.choosingGraphical}
+              <sl-radio-group
+                size="small"
+                label="View"
+                class="view-toggle"
+                value=${this.reviewView}
+                @sl-change=${(e: Event): void => {
+                  const group = e.target as HTMLElement & { value: string };
+                  this.chooseReviewView(group.value as ReviewView);
+                  // A refused switch puts the control back.
+                  if (group.value !== this.reviewView) group.value = this.reviewView;
+                }}
               >
-                <sl-icon slot="prefix" name="file-earmark-richtext"></sl-icon>
-                <span class="lbl">Graphical</span>
-              </sl-radio-button>
-              <sl-radio-button value="source">
-                <sl-icon slot="prefix" name="code-slash"></sl-icon>
-                <span class="lbl">Source</span>
-              </sl-radio-button>
-            </sl-radio-group>
-          </sl-tooltip>
-          <sl-dropdown placement="bottom-end" distance="4">
-            <sl-icon-button
-              slot="trigger"
-              name="question-circle"
-              label="About reviews and shortcuts"
-            ></sl-icon-button>
-            <div class="help-panel">
-              <p>
-                Edit the text directly: typing, deleting and replacing are recorded as suggestions.
-                Select text and choose Comment to leave a note. A review may change nothing outside
-                its marks.
-              </p>
-              <div class="help-sub">Shortcuts</div>
-              <table>
-                <tr>
-                  <td>Comment</td>
-                  <td><kbd>Ctrl+Alt+M</kbd></td>
-                </tr>
-                <tr>
-                  <td>Edit the selected comment</td>
-                  <td><kbd>Enter</kbd></td>
-                </tr>
-              </table>
-              <div class="help-sub">Changes that need the Source view</div>
-              <p>
-                Formatting, headings, lists, tables, code blocks and paragraph breaks are edited in
-                the Source view.
-              </p>
-            </div>
-          </sl-dropdown>
+                <sl-radio-button
+                  value="graphical"
+                  ?disabled=${this.reviewSize === null ||
+                  this.reviewSize === 'too-large' ||
+                  this.choosingGraphical}
+                >
+                  <sl-icon slot="prefix" name="file-earmark-richtext"></sl-icon>
+                  <span class="lbl">Graphical</span>
+                </sl-radio-button>
+                <sl-radio-button value="source">
+                  <sl-icon slot="prefix" name="code-slash"></sl-icon>
+                  <span class="lbl">Source</span>
+                </sl-radio-button>
+              </sl-radio-group>
+            </sl-tooltip>
+            <sl-dropdown placement="bottom-end" distance="4">
+              <sl-icon-button
+                slot="trigger"
+                name="question-circle"
+                label="About reviews and shortcuts"
+              ></sl-icon-button>
+              <div class="help-panel">
+                <p>
+                  Edit the text directly: typing, deleting and replacing are recorded as
+                  suggestions. Select text and choose Comment to leave a note. A review may change
+                  nothing outside its marks.
+                </p>
+                <div class="help-sub">Shortcuts</div>
+                <table>
+                  <tr>
+                    <td>Comment</td>
+                    <td><kbd>Ctrl+Alt+M</kbd></td>
+                  </tr>
+                  <tr>
+                    <td>Edit the selected comment</td>
+                    <td><kbd>Enter</kbd></td>
+                  </tr>
+                </table>
+                <div class="help-sub">Changes that need the Source view</div>
+                <p>
+                  Formatting, headings, lists, tables, code blocks and paragraph breaks are edited
+                  in the Source view.
+                </p>
+              </div>
+            </sl-dropdown>
+          </div>
+          ${this.renderGraphicalHint()}
         </div>
-        ${this.renderGraphicalHint()}
         <div class="g-work">
           ${graphical
             ? this.editorLoad === 'ready' && this.reviewSize !== null
@@ -2583,8 +2936,17 @@ export class ScionPageArtifactDetail extends LitElement {
                   .entryPath=${f.path}
                   .files=${v.files}
                   .noteAuthor=${this.createdBy(v)}
-                  @review-change=${(e: CustomEvent<{ text: string }>): void => {
+                  .scrollInset=${this.stickyInset}
+                  @review-change=${(e: CustomEvent<ReviewChangeDetail>): void => {
                     this.reviewText = e.detail.text;
+                    // A change sent after typing pauses closes the hint. One
+                    // sent because focus left the editor keeps it, even when it
+                    // carries an edit made just before: focus leaves on the
+                    // press of a toolbar or hint button, and the strip closing
+                    // then would move the button from under the pointer before
+                    // the click. A later change sent after a pause, or the
+                    // view switch, also closes it.
+                    if (e.detail.blur) return;
                     if (this.graphicalHint !== 'load-failed') this.clearHint();
                   }}
                   @review-hint=${(e: CustomEvent<{ kind: ReviewHint }>): void =>

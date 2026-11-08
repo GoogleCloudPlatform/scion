@@ -223,6 +223,70 @@ func TestSecretEncryptionFence_Postgres(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, fakeV2("k5"), got.EncryptedValue, "the replacement must survive")
 	})
+
+	t.Run("RefOnlyCASWaitsForTransitionAndKeepsAPayload", func(t *testing.T) {
+		// The reference-only compare-and-swap is fenced like every payload
+		// write: it takes the policy share lock (so it waits for a
+		// transition), and under a policy it refuses to clear the ref of an
+		// empty-value row, which would leave the row with no payload.
+		const ref1, ref2 = "gcpsm:projects/fake/secrets/pg-r1", "gcpsm:projects/fake/secrets/pg-r2"
+		key, scope, scopeID := "PG_FENCE_REF_ONLY", store.ScopeHub, "pg-fence"
+		require.NoError(t, cs.CreateSecret(ctx, &store.Secret{ID: uuid.NewString(), Key: key,
+			EncryptedValue: "", SecretRef: ref1, Scope: scope, ScopeID: scopeID}))
+		before, err := cs.GetSecret(ctx, key, scope, scopeID)
+		require.NoError(t, err)
+		// The raw transition below moves generation 4 (k5) to 5 (k6); pin
+		// the starting state so the subtest does not silently depend on the
+		// earlier subtests' transitions.
+		start, err := cs.GetEncryptionPolicy(ctx)
+		require.NoError(t, err)
+		require.Equal(t, int64(4), start.Generation)
+		require.Equal(t, []string{"k5"}, start.AllowedWriteKIDs)
+
+		tx, err := client.Tx(ctx)
+		require.NoError(t, err)
+		defer func() { _ = tx.Rollback() }()
+		_, err = tx.HubEncryptionPolicy.Query().Where(enthubencryptionpolicy.IDEQ(1)).ForUpdate().Only(ctx)
+		require.NoError(t, err)
+
+		done := make(chan error, 1)
+		go func() {
+			applied, err := cs.UpdateSecretRefIfMatches(ctx, key, scope, scopeID, ref1, before.Version, "")
+			if err == nil && applied {
+				err = assert.AnError
+			}
+			done <- err
+		}()
+		select {
+		case err := <-done:
+			t.Fatalf("reference-only CAS did not wait for the policy transition: %v", err)
+		case <-time.After(blockWindow):
+		}
+		// Policy generation 4 -> 5 (k5 -> k6), committed while the CAS waits.
+		_, err = tx.HubEncryptionPolicy.UpdateOneID(1).SetGeneration(5).SetAllowedWriteKids([]string{"k6"}).
+			SetRequiredReadKids([]string{"k6"}).SetUpdatedAt(time.Now().UTC()).Save(ctx)
+		require.NoError(t, err)
+		require.NoError(t, tx.Commit())
+		select {
+		case err := <-done:
+			assert.ErrorIs(t, err, store.ErrEncryptionPolicyMismatch)
+		case <-time.After(30 * time.Second):
+			t.Fatal("reference-only CAS never completed")
+		}
+		got, err := cs.GetSecret(ctx, key, scope, scopeID)
+		require.NoError(t, err)
+		assert.Equal(t, ref1, got.SecretRef, "a refused CAS cleared the ref")
+		assert.Equal(t, before.Version, got.Version)
+
+		// Rotating to another non-empty ref still applies.
+		applied, err := cs.UpdateSecretRefIfMatches(ctx, key, scope, scopeID, ref1, before.Version, ref2)
+		require.NoError(t, err)
+		assert.True(t, applied)
+		got, err = cs.GetSecret(ctx, key, scope, scopeID)
+		require.NoError(t, err)
+		assert.Equal(t, ref2, got.SecretRef)
+		assert.Equal(t, "", got.EncryptedValue)
+	})
 }
 
 // TestSecretEncryptionPolicyCreation_Postgres pins that creating the policy

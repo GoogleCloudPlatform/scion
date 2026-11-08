@@ -31,9 +31,11 @@
     "auto_expose_ports": [
       "auto_expose_ports.enabled"
     ],
+    "chat_retention": [],
     "endpoints": [
       "server.hub.public_url",
       "server.hub.hub_name",
+      "server.hub.content_url",
       "image_registry",
       "server.hub.monitoring_dashboard_url"
     ],
@@ -135,6 +137,7 @@
   "layer0_prefixes": [
     "server.keyring_file",
     "server.keyring_file_allow_world_readable",
+    "server.trusted_proxies",
     "server.database",
     "server.hub.port",
     "server.hub.host",

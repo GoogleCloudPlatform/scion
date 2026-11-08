@@ -226,7 +226,14 @@ func TestRecordedRuntime_RecordedTypeServesEveryRoute(t *testing.T) {
 					want, wantID, other = defaultMgr, "docker-container", k8sMgr
 				}
 
-				w := serveRR(srv, tc.method, "/api/v1/agents/"+rrAgent+tc.action+rrQuery(recorded), tc.body)
+				body := tc.body
+				if tc.name == "restart" && recorded != "docker" {
+					// A restart on the Kubernetes runtime names the agent's
+					// project, so its stored config (none yet) is checked
+					// before the stop.
+					body = projectBody(cwdDotScion(t), "")
+				}
+				w := serveRR(srv, tc.method, "/api/v1/agents/"+rrAgent+tc.action+rrQuery(recorded), body)
 
 				if w.Code >= 400 {
 					t.Fatalf("status = %d; body = %s", w.Code, w.Body.String())

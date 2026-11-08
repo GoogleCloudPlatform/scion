@@ -97,9 +97,10 @@ func bootsServerInProcess(cmd *cobra.Command) bool {
 // rootCmd.PersistentPreRunE (the deduplicated path for callers — including
 // tests — that invoke rootCmd directly without going through Execute()).
 //
-// It is also skipped for "server preflight", which must not write: the
-// global layout migration would rename directories under the running
-// hub's ~/.scion.
+// It is also skipped for the no-write commands (isNoWriteCommand): "server
+// preflight", where the global layout migration would rename directories
+// under the running hub's ~/.scion, and the read-only "runtime-broker
+// convert --plan".
 func maybeWarnRemovedLegacyEnv(cmd *cobra.Command) {
 	if bootsServerInProcess(cmd) {
 		return

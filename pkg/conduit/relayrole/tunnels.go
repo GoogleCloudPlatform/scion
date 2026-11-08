@@ -168,7 +168,8 @@ func (ro *Role) openTunnel(ctx context.Context, userSessionID string, accepted *
 		targetLS conduit.LocalSession
 		err      error
 	)
-	if owner.InstanceID == ro.relay.InstanceID() {
+	local := owner.InstanceID == ro.relay.InstanceID()
+	if local {
 		// Same relay: the target stream is opened here, with no bridge.
 		if owner.Generation != ro.relay.Generation() {
 			return nil, &tunnelStaleError{err: &relay.StaleRouteError{Reason: "relay_target_mismatch"}}
@@ -272,8 +273,12 @@ func (ro *Role) openTunnel(ctx context.Context, userSessionID string, accepted *
 		}()
 		relay.Splice(user, target)
 	}()
+	// route and owner_instance match the hub's own tunnel lines
+	// (conduitRouteLogAttrs): the relay that holds the target session, and
+	// whether that is this relay.
 	ro.log.Info("Conduit tunnel opened", "session_id", userSessionID, "stream_id", user.ID(),
-		"target_session_id", ids.SessionID, "bridged", bridge != nil)
+		"target_session_id", ids.SessionID, "bridged", bridge != nil,
+		"route", tunnelRoute(local), "owner_instance", owner.InstanceID)
 	out := proto.Clone(accepted).(*conduitv1.RpcResponse)
 	out.Body = body
 	return out, nil
@@ -312,4 +317,23 @@ func withTunnelStreamID(body []byte, streamID uint32) ([]byte, error) {
 	}
 	m[relay.TunnelResponseStreamIDKey] = json.RawMessage(strconv.FormatUint(uint64(streamID), 10))
 	return json.Marshal(m)
+}
+
+// Values of the route log field on "Conduit tunnel opened", as on the hub's
+// tunnel lines.
+const (
+	// tunnelRouteLocal: the target session is held by this relay.
+	tunnelRouteLocal = "local"
+	// tunnelRouteRemote: the target session is held by another relay,
+	// reached through one bridge.
+	tunnelRouteRemote = "remote"
+)
+
+// tunnelRoute is the route log field for a target held by this relay
+// (local) or by another one.
+func tunnelRoute(local bool) string {
+	if local {
+		return tunnelRouteLocal
+	}
+	return tunnelRouteRemote
 }

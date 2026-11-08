@@ -24,10 +24,13 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/grant"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/internal/keymaterial"
 	"github.com/GoogleCloudPlatform/scion/pkg/keyring"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret/secretenvelope"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -45,11 +48,6 @@ const readyReasonBackupUnreadable = "backup_unreadable"
 // infrastructure payload does not parse.
 const auditKindInvalidPayload = "invalid_payload"
 
-// errExistingRecordUnreadable refuses a backup or synchronization write
-// over an existing record this instance cannot read: an unreadable record
-// is preserved, never replaced as a startup repair.
-var errExistingRecordUnreadable = errors.New("existing stored record is unreadable with the configured encryption keys; refusing to overwrite it")
-
 // AuditRecord identifies one unreadable stored record: identity and a
 // stable failure classification, never a payload.
 type AuditRecord struct {
@@ -65,13 +63,21 @@ type AuditRecord struct {
 type EncryptionAudit struct {
 	// Done is false when no audit ran (no store).
 	Done bool
+	// At is when the audit finished (UTC); zero when none ran.
+	At time.Time
 	// Scanned counts every row; ReferenceOnly the empty rows with a
 	// backend reference, which hold no local payload and are not read.
 	Scanned, ReferenceOnly, Readable int
-	// ByFormat counts readable and unreadable payloads by envelope format
-	// ("plaintext", "v1", "v2", "invalid").
+	// EmptyNoRef counts rows with an empty value and no backend
+	// reference; they are read as plaintext like any other row (so a
+	// managed cipher reports them unreadable).
+	EmptyNoRef int
+	// ByFormat counts readable payloads by the format they authenticated
+	// in ("plaintext", "v1", "v2"); unreadable payloads are only in
+	// Unreadable.
 	ByFormat map[string]int
-	// ByKID counts v2 payloads by key ID.
+	// ByKID counts readable v2 payloads by the key ID that authenticated
+	// them (never the envelope label alone).
 	ByKID map[string]int
 	// Unreadable lists every record that failed, infrastructure included.
 	Unreadable []AuditRecord
@@ -112,6 +118,7 @@ var infraPayloadValidators = map[string]func(string) error{
 	SecretKeyArtifactViewKey:       validateSigningKeyPayload,
 	SecretKeyAttachmentDeliveryKey: validateSigningKeyPayload,
 	SecretKeyListCursorKey:         validateSigningKeyPayload,
+	SecretKeyPortViewKey:           validateSigningKeyPayload,
 	SecretKeyOIDCSigningKey:        validateOIDCKeyPayload,
 	SecretKeyOIDCKeyset:            validateOIDCKeysetPayload,
 	conduitGrantKeySecretName:      validateGrantRingPayload,
@@ -200,56 +207,45 @@ func checkEncryptionPolicy(ctx context.Context, st store.SecretEncryptionStore, 
 	return nil
 }
 
-// runEncryptionAudit authenticates every stored payload with c and
-// validates the infrastructure backups. Reference-only rows (empty value,
-// non-empty ref) hold no local payload and are skipped. A scan failure is
-// returned; record failures are reported in the result.
+// runEncryptionAudit aggregates the authenticating scan (encryption_scan.go)
+// of every stored payload with c. Reference-only rows (empty value,
+// non-empty ref) hold no local payload and are never decrypted. Formats
+// and key IDs are those of the key that authenticated a row, so only
+// readable rows are counted by format and key ID; unreadable rows are
+// listed with their failure kind. A scan failure is returned; record
+// failures are reported in the result.
 func runEncryptionAudit(ctx context.Context, st store.SecretStore, c *secret.ValueCipher) (EncryptionAudit, error) {
 	a := EncryptionAudit{Done: true, ByFormat: map[string]int{}, ByKID: map[string]int{}}
-	after := ""
-	for {
-		page, err := st.ScanSecretPayloads(ctx, after, store.MaxSecretPayloadScan)
-		if err != nil {
-			return EncryptionAudit{}, fmt.Errorf("scanning stored secret payloads: %w", err)
+	n, err := scanSecretPayloads(ctx, st, c, func(row ScanRow) error {
+		cl := row.Class
+		if cl.ReferenceOnly {
+			a.ReferenceOnly++
+			return nil
 		}
-		for _, p := range page {
-			a.Scanned++
-			if p.EncryptedValue == "" && p.SecretRef != "" {
-				a.ReferenceOnly++
-				continue
-			}
-			format := "invalid"
-			if env, err := c.Inspect(p.EncryptedValue); err == nil {
-				format = env.Format.String()
-				if env.KID != "" {
-					a.ByKID[env.KID]++
-				}
-			}
-			a.ByFormat[format]++
-			kind := ""
-			plain, err := c.Decrypt(p.EncryptedValue)
-			if err != nil {
-				kind = secret.DecryptFailureKind(err)
-			} else if v, ok := infraPayloadValidators[p.Key]; ok && p.Scope == store.ScopeHub {
-				if v(plain) != nil {
-					kind = auditKindInvalidPayload
-				}
-			}
-			if kind == "" {
-				a.Readable++
-				continue
-			}
-			rec := AuditRecord{ID: p.ID, Key: p.Key, Scope: p.Scope, ScopeID: p.ScopeID, Kind: kind}
-			a.Unreadable = append(a.Unreadable, rec)
-			if isInfraBackup(p.Key, p.Scope) {
-				a.BackupUnreadable = append(a.BackupUnreadable, rec)
-			}
+		if cl.EmptyNoRef {
+			a.EmptyNoRef++
 		}
-		if len(page) < store.MaxSecretPayloadScan {
-			return a, nil
+		if cl.Readable() {
+			a.Readable++
+			a.ByFormat[cl.Format]++
+			if cl.Format == secretenvelope.FormatV2.String() {
+				a.ByKID[cl.KID]++
+			}
+			return nil
 		}
-		after = page[len(page)-1].ID
+		rec := AuditRecord{ID: row.ID, Key: row.Key, Scope: row.Scope, ScopeID: row.ScopeID, Kind: cl.Failure}
+		a.Unreadable = append(a.Unreadable, rec)
+		if isInfraBackup(row.Key, row.Scope) {
+			a.BackupUnreadable = append(a.BackupUnreadable, rec)
+		}
+		return nil
+	})
+	if err != nil {
+		return EncryptionAudit{}, err
 	}
+	a.Scanned = n
+	a.At = time.Now().UTC()
+	return a, nil
 }
 
 // startupEncryptionChecks runs the policy check and the audit in New,
@@ -337,31 +333,12 @@ func (s *Server) auditFlagged(key, scope, scopeID string) bool {
 	return false
 }
 
-// guardOverwrite refuses (errExistingRecordUnreadable) a backup or
+// guardOverwrite refuses (keymaterial.ErrExistingRecordUnreadable) a backup or
 // synchronization write over an existing record the startup audit flagged
-// or that this instance cannot decrypt now. A missing record, or an empty
-// reference-only one, may be written.
+// or that this instance cannot decrypt now. It is
+// keymaterial.GuardOverwrite, which the OIDC key manager shares.
 func guardOverwrite(ctx context.Context, st store.SecretStore, c *secret.ValueCipher, flagged func(key, scope, scopeID string) bool, key, scope, scopeID string) error {
-	if flagged != nil && flagged(key, scope, scopeID) {
-		return errExistingRecordUnreadable
-	}
-	if st == nil {
-		return nil
-	}
-	existing, err := st.GetSecret(ctx, key, scope, scopeID)
-	if errors.Is(err, store.ErrNotFound) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("reading the existing record before overwrite: %w", err)
-	}
-	if existing.EncryptedValue == "" {
-		return nil
-	}
-	if _, err := c.Decrypt(existing.EncryptedValue); err != nil {
-		return errExistingRecordUnreadable
-	}
-	return nil
+	return keymaterial.GuardOverwrite(ctx, st, c, flagged, key, scope, scopeID)
 }
 
 // guardBackupOverwrite is guardOverwrite for this server's store, cipher
