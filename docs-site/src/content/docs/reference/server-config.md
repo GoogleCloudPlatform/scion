@@ -582,6 +582,7 @@ On Postgres, auto-migrate creates these `messages` indexes with a plain `CREATE 
 - `message_project_id_created_id` on `(project_id, created, id)`, for project message pages.
 - `message_sender_id_created_id` on `(sender_id, created, id)` and `message_recipient_id_created_id` on `(recipient_id, created, id)`, for participant reads such as the agent DM inter-agent view.
 - `message_project_id_sender_created_id` on `(project_id, sender, created, id)`, for the inter-agent view's lookup by sender name.
+- `message_sender_id_recipient_id_created_id` on `(sender_id, recipient_id, created, id)` (partial, `WHERE recipient_id IS NOT NULL`) and `message_thread_id_created_id` on `(thread_id, created, id)`, for the conversation consistency check's lookups.
 
 Each build blocks writes to messages until the startup migration commits; during a rolling deploy, writes from the other Hub instances wait too. On a large deployment, create the indexes before upgrading so auto-migrate finds them already in place:
 
@@ -590,11 +591,13 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS message_project_id_created_id ON message
 CREATE INDEX CONCURRENTLY IF NOT EXISTS message_sender_id_created_id ON messages (sender_id, created, id);
 CREATE INDEX CONCURRENTLY IF NOT EXISTS message_recipient_id_created_id ON messages (recipient_id, created, id);
 CREATE INDEX CONCURRENTLY IF NOT EXISTS message_project_id_sender_created_id ON messages (project_id, sender, created, id);
+CREATE INDEX CONCURRENTLY IF NOT EXISTS message_sender_id_recipient_id_created_id ON messages (sender_id, recipient_id, created, id) WHERE recipient_id IS NOT NULL;
+CREATE INDEX CONCURRENTLY IF NOT EXISTS message_thread_id_created_id ON messages (thread_id, created, id);
 ```
 
 On SQLite, the first start after upgrading builds the same indexes before the Hub serves requests, holding the database write lock: allow a few seconds per million messages.
 
-The three participant and sender indexes take disk space too: about 370 MiB per million messages on SQLite. The cost is per message, whatever the message length.
+The three participant and sender indexes take disk space too: about 370 MiB per million messages on SQLite. The cost is per message, whatever the message length. The two consistency check indexes add to it: the sender and recipient index holds both IDs of every message, and the thread index holds the thread ID of every message that has one.
 :::
 
 ### Authentication (`server.auth`)
