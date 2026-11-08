@@ -119,13 +119,17 @@ var envDumpLinePattern = regexp.MustCompile(`(?m)^([ \t]*(?:export[ \t]+|declare
 func redactEnvDumpValues(text, dsn, redacted string, secrets []string) string {
 	return envDumpLinePattern.ReplaceAllStringFunc(text, func(line string) string {
 		m := envDumpLinePattern.FindStringSubmatch(line)
-		v := shellUnquote(strings.TrimRight(m[2], "\r"))
+		value := strings.TrimRight(m[2], "\r")
+		// A rewritten line keeps its line ending: the pattern's value
+		// group runs up to a "\n", so it holds a CRLF line's "\r".
+		eol := m[2][len(value):]
+		v := shellUnquote(value)
 		if v == dsn {
-			return m[1] + redacted
+			return m[1] + redacted + eol
 		}
 		for _, s := range secrets {
 			if len(s) >= minSecretLen && strings.Contains(v, s) {
-				return m[1] + redactedSecret
+				return m[1] + redactedSecret + eol
 			}
 		}
 		return line

@@ -60,7 +60,7 @@ func TestRedactDSNIn(t *testing.T) {
 			"SCION_PREFLIGHT_DB=" + quoteRed + "\nTERM=xterm\n"},
 		{"env dump, export with CRLF", "postgres", urlDSN,
 			"export SCION_PREFLIGHT_DB='" + urlDSN + "'\r\nexport A=b\r\n",
-			"export SCION_PREFLIGHT_DB=" + urlDSNRed + "\nexport A=b\r\n"},
+			"export SCION_PREFLIGHT_DB=" + urlDSNRed + "\r\nexport A=b\r\n"},
 		{"env dump, credential in another variable", "postgres", dollarDSN,
 			"declare -x PGPASSWORD=\"pa\\$\\$w0rd-77\"\nUSER=hub\n",
 			"declare -x PGPASSWORD=xxxxx\nUSER=hub\n"},
