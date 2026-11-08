@@ -3921,7 +3921,7 @@ func (s *Server) authorizeConversationAccess(
 	ctx := r.Context()
 	audience, topic, err := chatKeyReadAudience(ctx, wcs, key)
 	if err != nil {
-		logChatStoreFault(ctx, slog.Default(), "chat conversation: topic lookup failed", "key", key, "error", err)
+		logChatStoreFault(ctx, slog.Default(), "chat conversation: topic lookup failed", key, err)
 		InternalError(w)
 		return false
 	}
@@ -3952,7 +3952,7 @@ func (s *Server) authorizeConversationAccess(
 			NotFound(w, "Thread")
 			return false
 		}
-		logChatStoreFault(ctx, slog.Default(), "chat conversation: topic project lookup failed", "key", key, "error", err)
+		logChatStoreFault(ctx, slog.Default(), "chat conversation: topic project lookup failed", key, err)
 		InternalError(w)
 		return false
 	}
