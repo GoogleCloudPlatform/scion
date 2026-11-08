@@ -34,10 +34,29 @@ brew install homebrew-scion/scion/scion
 This installs **`scion`**, the CLI with the embedded web UI, from the prebuilt binaries of
 the latest preview release. The [Onboarding Wizard](/scion/getting-started/onboarding/)
 suggests `ghcr.io/homebrew-scion` as the image registry. Images are published there for each
-preview release, tagged with that release's tag. `:latest` there is an old image, so pulling
-works only once you set `image_tag` to your release, or build the images locally (see
-[Build container images](#build-container-images)). Chat plugins such as Telegram and Discord are not included; their setup guides explain how
-to install them.
+preview release, tagged with that release's tag, and a Homebrew `scion` pulls the images tagged
+with its own version, so agents run images that match your binary. Chat plugins such as Telegram
+and Discord are not included; their setup guides explain how to install them.
+
+:::note[Which image tag agents use]
+A release build of `scion` (`vX.Y.Z`, `vX.Y.Z-preview.N` or `vX.Y.Z-rc.N`, as Homebrew installs)
+uses its own version as the tag of the bundled `scion-*` images whose tag is `latest` or absent;
+development and nightly builds keep `:latest`.
+
+- An image you name explicitly with `--image scion-claude:latest`, or a bare name such as
+  `scion-claude`, is retagged the same way, to `scion-claude:<version>`.
+- To keep `:latest`, set `image_tag` to `latest`: `scion config set --global image_tag latest`,
+  then `scion server restart`. Any set `image_tag` takes precedence over the version default.
+  While the `hub.image_tag_setting` experiment is off, a set value is not applied (image
+  references keep their tags) but still suppresses the version default; with it on, a value
+  other than `latest` is applied as the tag.
+- To turn the version default off for the whole Hub, disable the
+  `hub.image_tag_version_default` [experiment](/scion/reference/experiments/):
+  `scion hub experiments disable hub.image_tag_version_default`, or switch it off under
+  **Admin → Server Config → Experiments**.
+
+See [Image tag](/scion/reference/settings-precedence/#image-tag-experimental) for the details.
+:::
 
 :::note[Older Linux distributions]
 On Linux hosts whose glibc is older than 2.39 or libstdc++ older than 6.0.33 (for example Debian
@@ -175,10 +194,10 @@ scion version
 ## Build container images
 
 Agents run in container images. The Homebrew onboarding suggests the `ghcr.io/homebrew-scion`
-registry. Images there are tagged with the release tag; `:latest` there is an old image, so set
-the experimental `image_tag` setting (see
-[Images that match a release](/scion/local/custom-images/#images-that-match-a-release)) or build
-the images locally with the scripts in the repository.
+registry. Images there are tagged with the release tag, and a release build of `scion` pulls the
+images tagged with its own version (see
+[Which image tag agents use](#install-with-homebrew-recommended)). You can also build the images
+locally with the scripts in the repository.
 
 To build the images that match your `scion` binary, run the release image driver. It clones the
 release tag and builds the full image set from that release's own image specs, tagged
@@ -189,9 +208,10 @@ downloaded file:
 curl -fsSLO https://raw.githubusercontent.com/GoogleCloudPlatform/scion/main/image-build/scripts/build-release-images.sh
 
 # With no version, it builds the release `scion version` reports. These images stay in the
-# local image store, named localhost/scion/<image>; nothing is pushed. --also-tag latest also
-# tags them :latest, the tag agents use by default; naming a registry prefix makes the driver
-# ask for --force-latest as well.
+# local image store, named localhost/scion/<image>; nothing is pushed. A release build of scion
+# uses the :<version> images. --also-tag latest also tags them :latest, the tag development
+# builds (or image_tag latest) use; naming a registry prefix makes the driver ask for
+# --force-latest as well.
 bash build-release-images.sh --also-tag latest --force-latest -- --registry localhost/scion
 scion config set --global image_registry localhost/scion
 
@@ -202,11 +222,15 @@ scion config set --global image_registry ghcr.io/myorg
 ```
 
 The images must be available before you run the initialization command below. See
-[Images that match a release](/scion/local/custom-images/#images-that-match-a-release) for the
-`image_tag` alternative to `--also-tag latest`.
+[Images that match a release](/scion/local/custom-images/#images-that-match-a-release) for how
+the image tag is chosen.
 
 To build from the tip of `main` instead, fork the repository and run the "Build Scion Images"
 workflow from its "Actions" tab, then use your `ghcr.io/myorg` registry for `image_registry`.
+With a release build of `scion`, also set `image_tag: latest` (or disable
+`hub.image_tag_version_default`), or run the workflow with its image tag set to the version
+`scion version` reports, because a release build pulls `:<version>` by default (see
+[Image tag](/scion/reference/settings-precedence/#image-tag-experimental)).
 
 See [Building Custom Images](/scion/local/custom-images/) for more details.
 

@@ -264,8 +264,8 @@ type HTTPAgentDispatcher struct {
 	imageRegistryProvider func(brokerID, profile string) string
 
 	// imageTagProvider returns the image_tag the hub applies to an agent
-	// dispatched to a broker with a profile ("" = none, always while
-	// hub.image_tag_setting is off). Read at each dispatch. Nil = none.
+	// dispatched to a broker with a profile ("" = none; see
+	// Server.imageTagStateOf). Read at each dispatch. Nil = none.
 	imageTagProvider func(brokerID, profile string) string
 
 	// Resource hash repair callbacks sync a resource's DB manifest from GCS

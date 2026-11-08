@@ -1727,7 +1727,8 @@ type RemoteHubAgentDefaults struct {
 	// ptone/scion#4224).
 	Telemetry *api.TelemetryConfig `json:"telemetry,omitempty"`
 	// ImageTag is the hub-resolved image_tag (api.HubAgentDefaults.ImageTag),
-	// set only while hub.image_tag_setting is on and the setting is set
+	// set only when a tag applies (imageTagStateOf: a set value with
+	// hub.image_tag_setting on, or the version default of a release build)
 	// (withDispatchImageTag). A broker that predates it ignores it and runs
 	// the images it resolves unchanged.
 	ImageTag string `json:"imageTag,omitempty"`
@@ -5446,8 +5447,8 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 	// It is read per dispatch, so a saved image_registry applies to the
 	// next agent (ptone/scion#3904).
 	dispatcher.SetImageRegistryProvider(s.dispatchImageRegistryFor)
-	// image_tag (ptone/scion#6625): read per dispatch, "" while
-	// hub.image_tag_setting is off.
+	// image_tag (ptone/scion#6625): read per dispatch, "" when no tag
+	// applies (imageTagStateOf).
 	dispatcher.SetImageTagProvider(s.dispatchImageTagFor)
 
 	return dispatcher

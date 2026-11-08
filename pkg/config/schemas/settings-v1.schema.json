@@ -65,7 +65,7 @@
     "image_tag": {
       "type": "string",
       "pattern": "^(version|[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?$",
-      "description": "Experimental (hub.image_tag_setting). Tag of the bundled scion-* agent images whose tag is latest or absent: \"version\" selects the hub binary's version (latest for a development build), any other value is a literal tag. Unset leaves images unchanged. Applied by the hub only while the experiment is on.",
+      "description": "Experimental (hub.image_tag_setting). Tag of the bundled scion-* agent images whose tag is latest or absent: \"version\" selects the hub binary's release version (latest for any other build), any other value is a literal tag (\"latest\" opts out of the version default). A set value is applied by the hub only while the experiment is on. Unset: a release build of the hub uses its own version (hub.image_tag_version_default, on by default); other builds leave images unchanged.",
       "x-env-var": "SCION_IMAGE_TAG",
       "x-scope": "any",
       "x-since": "1"

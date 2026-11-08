@@ -24,21 +24,28 @@ import (
 )
 
 // image_tag selects the tag of the bundled scion-* agent images
-// (ptone/scion#6625). It is gated by the hub.image_tag_setting experiment,
-// which the hub checks; with the experiment off, or the value unset, every
-// image reference is left exactly as it is. The hub resolves the setting,
-// expands "version" with its own version (EffectiveImageTag), rewrites the
-// images it sends or checks itself (RewriteImageRef), and sends the
-// resulting tag with each dispatch (api.HubAgentDefaults.ImageTag), so the
-// Runtime Broker applies it to the template and harness-config images it
-// resolves. Maintenance builds and the system image build keep latest.
+// (ptone/scion#6625). A set value is gated by the hub.image_tag_setting
+// experiment; an unset value takes the version default, gated by the
+// hub.image_tag_version_default experiment (on by default). The hub checks
+// both. The hub resolves the setting, expands it with its own version
+// (EffectiveImageTag), rewrites the images it sends or checks itself
+// (RewriteImageRef), and sends the resulting tag with each dispatch
+// (api.HubAgentDefaults.ImageTag), so the Runtime Broker applies it to the
+// template and harness-config images it resolves. Maintenance builds and
+// the system image build keep latest.
 //
 // Values:
 //
-//	""         no change (images keep :latest)
-//	"version"  the binary's own version (pkg/version), or "latest" for a
-//	           development build
+//	""         the version default: a release build (ReleaseImageTag) uses
+//	           its own version; any other build makes no change (images keep
+//	           :latest)
+//	"version"  the binary's release version, or "latest" for any other build
 //	any other  a literal tag, which must match the docker tag grammar
+//	           ("latest" opts out of the version default)
+//
+// A release build is classified from pkg/version.Version alone. A build of
+// a tagged commit with local changes is stamped with the tag
+// (hack/version.sh does not mark dirty trees) and counts as that release.
 //
 // Precedence follows image_registry (ImageRegistryLayers), with one
 // deliberate difference: the env layer is the hub process's
@@ -68,6 +75,21 @@ const ImageTagSettingPattern = `^(version|[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?$`
 
 // imageTagPattern is the docker tag grammar.
 var imageTagPattern = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$`)
+
+// releaseVersionPattern is the release version grammar: vX.Y.Z,
+// vX.Y.Z-preview.N or vX.Y.Z-rc.N, the tag forms the release process cuts
+// and publishes images under (hack/version.sh, without the nightly form).
+var releaseVersionPattern = regexp.MustCompile(`^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(preview|rc)\.(0|[1-9][0-9]*))?$`)
+
+// ReleaseImageTag returns v and true when v is a release version (vX.Y.Z,
+// vX.Y.Z-preview.N or vX.Y.Z-rc.N), else "" and false: an empty version,
+// "dev", a nightly, a Go pseudo-version, or any other form.
+func ReleaseImageTag(v string) (string, bool) {
+	if releaseVersionPattern.MatchString(v) {
+		return v, true
+	}
+	return "", false
+}
 
 // ImageTagFromEnv returns this process's SCION_IMAGE_TAG. It is the only
 // reader of that variable.
@@ -109,23 +131,32 @@ func ValidateImageTag(v string) error {
 }
 
 // EffectiveImageTag returns the tag an image_tag setting selects, given the
-// binary's version (pkg/version.Version): "" for no change, binaryVersion
-// for "version" ("latest" when it is empty or "dev", or not a valid tag),
-// else the literal. The setting is trimmed first, as the resolver trims
-// every layer. An invalid setting returns an error and no tag.
+// binary's version (pkg/version.Version). It is the single resolution of
+// the tag:
+//
+//	unset (blank)  the release version (ReleaseImageTag), or "" (no change)
+//	               for any other build
+//	"version"      the release version, or "latest" for any other build
+//	any other      the literal, which always wins
+//
+// The setting is trimmed first, as the resolver trims every layer. An
+// invalid setting returns an error and no tag. The caller decides whether
+// the unset default applies (hub.image_tag_version_default).
 func EffectiveImageTag(setting, binaryVersion string) (string, error) {
 	setting = strings.TrimSpace(setting)
 	if err := ValidateImageTag(setting); err != nil {
 		return "", err
 	}
-	if setting != ImageTagVersion {
+	if setting != "" && setting != ImageTagVersion {
 		return setting, nil
 	}
-	v := strings.TrimSpace(binaryVersion)
-	if v == "" || v == "dev" || !imageTagPattern.MatchString(v) {
-		return imageTagLatest, nil
+	if v, ok := ReleaseImageTag(strings.TrimSpace(binaryVersion)); ok {
+		return v, nil
 	}
-	return v, nil
+	if setting == "" {
+		return "", nil
+	}
+	return imageTagLatest, nil
 }
 
 // RewriteImageTag sets the tag of a short-form scion-* image reference to
