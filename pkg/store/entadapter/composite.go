@@ -545,6 +545,11 @@ func (c *CompositeStore) DeleteProject(ctx context.Context, id string) error {
 	if err := c.DeleteThreadGroupsForProject(ctx, id); err != nil {
 		return err
 	}
+	// Choice prompt decisions, answers and the deleted agents' key counters
+	// go with the project (they have no DB-level FK either).
+	if err := deleteProjectDecisions(ctx, c.client, uid, agentIDs); err != nil {
+		return err
+	}
 	return c.ProjectStore.DeleteProject(ctx, id)
 }
 

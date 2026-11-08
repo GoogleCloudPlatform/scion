@@ -668,3 +668,77 @@ func TestCreateChoicePrompt_InvalidInput(t *testing.T) {
 		})
 	}
 }
+
+func TestGetDecisionAnswersByResponseMessageIDs(t *testing.T) {
+	f := newDecisionFixture(t)
+	ctx := context.Background()
+	res := f.create(t, false, yesNo("D1", "One?"), yesNo("D2", "Two?"))
+	in := f.answer(res.Decisions[0].RowID, "2", "user-1", "")
+	a, _, err := f.cs.RecordAnswer(ctx, in)
+	require.NoError(t, err)
+
+	got, err := f.cs.GetDecisionAnswersByResponseMessageIDs(ctx, []string{in.ResponseMessage.ID, uuid.NewString(), "not-a-uuid"})
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Equal(t, a.ID, got[in.ResponseMessage.ID].ID)
+	assert.Equal(t, "no", got[in.ResponseMessage.ID].ChoiceLabel)
+	assert.Equal(t, res.Decisions[0].RowID, got[in.ResponseMessage.ID].DecisionRowID)
+
+	empty, err := f.cs.GetDecisionAnswersByResponseMessageIDs(ctx, nil)
+	require.NoError(t, err)
+	assert.Empty(t, empty)
+}
+
+// Deleting a project removes its decisions and answers and the key
+// counters of the agents deleted with it; another project's rows stay.
+func TestDeleteProject_RemovesDecisions(t *testing.T) {
+	f := newDecisionFixture(t)
+	ctx := context.Background()
+	require.NoError(t, f.cs.CreateProject(ctx, &store.Project{ID: f.projectID, Name: "dp-" + f.projectID[:8], Slug: "dp-" + f.projectID[:8]}))
+	a := makeAgent(f.projectID, "dp-agent-"+f.projectID[:8])
+	require.NoError(t, f.cs.CreateAgent(ctx, a))
+	f.agentID = a.ID
+	res := f.create(t, false, yesNo("", "Numbered?"), yesNo("D1", "Keyed?"))
+	_, _, err := f.cs.RecordAnswer(ctx, f.answer(res.Decisions[1].RowID, "1", "user-1", ""))
+	require.NoError(t, err)
+
+	other := newDecisionFixture(t)
+	other.cs = f.cs
+	otherRes := other.create(t, false, yesNo("D9", "Other project?"))
+
+	require.NoError(t, f.cs.DeleteProject(ctx, f.projectID))
+
+	for _, d := range res.Decisions {
+		_, err := f.cs.GetDecision(ctx, d.RowID)
+		assert.ErrorIs(t, err, store.ErrNotFound)
+	}
+	answers, err := f.cs.client.DecisionAnswer.Query().All(ctx)
+	require.NoError(t, err)
+	assert.Empty(t, answers)
+	n, err := f.cs.client.DecisionKeyCounter.Query().Count(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 0, n, "the deleted agent's counter is gone")
+	_, err = f.cs.GetDecision(ctx, otherRes.Decisions[0].RowID)
+	assert.NoError(t, err, "another project's decision stays")
+}
+
+// Deleting a user clears answered_by_user_id on their answers and keeps the
+// name and email snapshots.
+func TestDeleteUser_ClearsAnswerUserKeepsSnapshots(t *testing.T) {
+	f := newDecisionFixture(t)
+	ctx := context.Background()
+	userID := uuid.NewString()
+	require.NoError(t, f.cs.CreateUser(ctx, &store.User{ID: userID, Email: "pat@example.com", Role: store.UserRoleMember, Status: store.UserStatusActive}))
+	res := f.create(t, false, yesNo("D1", "Keep?"))
+	_, _, err := f.cs.RecordAnswer(ctx, f.answer(res.Decisions[0].RowID, "1", userID, ""))
+	require.NoError(t, err)
+
+	require.NoError(t, f.cs.DeleteUser(ctx, userID))
+
+	d, err := f.cs.GetDecision(ctx, res.Decisions[0].RowID)
+	require.NoError(t, err)
+	require.Len(t, d.Answers, 1)
+	assert.Empty(t, d.Answers[0].AnsweredByUserID)
+	assert.Equal(t, "Pat", d.Answers[0].AnsweredByName)
+	assert.Equal(t, "pat@example.com", d.Answers[0].AnsweredByEmail)
+}

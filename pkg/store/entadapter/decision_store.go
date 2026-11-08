@@ -26,6 +26,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/decision"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/decisionanswer"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/decisionkeycounter"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -450,6 +451,64 @@ func (c *CompositeStore) GetDecisionsByMessageIDs(ctx context.Context, messageID
 		out[d.MessageID] = append(out[d.MessageID], d)
 	}
 	return out, nil
+}
+
+// GetDecisionAnswersByResponseMessageIDs implements store.DecisionStore.
+func (c *CompositeStore) GetDecisionAnswersByResponseMessageIDs(ctx context.Context, messageIDs []string) (map[string]*store.DecisionAnswer, error) {
+	out := map[string]*store.DecisionAnswer{}
+	uids := make([]uuid.UUID, 0, len(messageIDs))
+	for _, id := range messageIDs {
+		if uid, err := uuid.Parse(id); err == nil {
+			uids = append(uids, uid)
+		}
+	}
+	if len(uids) == 0 {
+		return out, nil
+	}
+	rows, err := c.client.DecisionAnswer.Query().
+		Where(decisionanswer.ResponseMessageIDIn(uids...)).
+		All(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	for _, r := range rows {
+		out[r.ResponseMessageID.String()] = answerToStore(r)
+	}
+	return out, nil
+}
+
+// deleteProjectDecisions removes a project's decisions and answers, and the
+// key counters of the agents deleted with it, inside the project delete's
+// transaction. The tables carry project_id as a plain column with no
+// foreign key, so the cascade is explicit. Chat retention never touches
+// them; only project deletion does.
+func deleteProjectDecisions(ctx context.Context, client *ent.Client, projectID uuid.UUID, agentIDs []uuid.UUID) error {
+	if _, err := client.DecisionAnswer.Delete().
+		Where(decisionanswer.ProjectIDEQ(projectID)).Exec(ctx); err != nil {
+		return mapError(err)
+	}
+	if _, err := client.Decision.Delete().
+		Where(decision.ProjectIDEQ(projectID)).Exec(ctx); err != nil {
+		return mapError(err)
+	}
+	if len(agentIDs) > 0 {
+		if _, err := client.DecisionKeyCounter.Delete().
+			Where(decisionkeycounter.IDIn(agentIDs...)).Exec(ctx); err != nil {
+			return mapError(err)
+		}
+	}
+	return nil
+}
+
+// clearDecisionAnswerUser clears answered_by_user_id on a deleted user's
+// answers; the name and email snapshots stay (design choices v4, O2).
+func clearDecisionAnswerUser(ctx context.Context, client *ent.Client, userID string) error {
+	if _, err := client.DecisionAnswer.Update().
+		Where(decisionanswer.AnsweredByUserID(userID)).
+		ClearAnsweredByUserID().Exec(ctx); err != nil {
+		return mapError(err)
+	}
+	return nil
 }
 
 // RecordAnswer implements store.DecisionStore.

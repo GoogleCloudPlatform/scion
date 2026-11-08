@@ -368,4 +368,9 @@ type DecisionStore interface {
 	// with the same idempotency key, choice and answerer returns the
 	// recorded answer with replayed true and stores nothing.
 	RecordAnswer(ctx context.Context, in *RecordAnswerInput) (answer *DecisionAnswer, replayed bool, err error)
+
+	// GetDecisionAnswersByResponseMessageIDs returns the answer recorded
+	// with each of the given choice-response messages, keyed by message
+	// ID, for history pages. IDs with no answer (or not UUIDs) are absent.
+	GetDecisionAnswersByResponseMessageIDs(ctx context.Context, messageIDs []string) (map[string]*DecisionAnswer, error)
 }
