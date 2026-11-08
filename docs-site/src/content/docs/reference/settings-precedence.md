@@ -569,6 +569,37 @@ the ordinary env rules on this page.
   explicit value and to the project annotation, and it beats the hub default.
 :::
 
+### A7. The runtime adds its own sources around the merged environment
+
+The variables resolved above reach the Runtime Broker as the agent's merged environment. The
+runtime then adds its own sources. On Docker, Podman, Apple containers and Kubernetes it applies
+them in this order, and for a name set by more than one source the later source wins:
+
+1. resolved-auth env, the values the harness-config's auth method resolves;
+2. the harness env, then the harness telemetry env when telemetry is enabled;
+3. the merged environment;
+4. environment-type secrets, except for a name the merged environment sets (see
+   [A5](#a5-secrets-use-the-same-scope-order-variables-beat-environment-type-secrets));
+5. the runtime's own keys, for example `SCION_HOST_UID`, `SCION_HOST_GID`, `HOME`, `USER` and
+   `LOGNAME` on Kubernetes.
+
+An empty value from resolved auth, the harness env or the telemetry env is not applied, so it does
+not clear a value an earlier source set. [Template env](#template-env-is-a-lowest-precedence-fallback)
+then fills only names that no source set.
+
+The runtimes differ in their own keys and in when they apply resolved-auth env:
+
+- Docker, Podman and Apple containers set `SCION_HOST_UID`, `SCION_HOST_GID`, `SCION_PROJECT`,
+  `SCION_PROJECT_ID` and `SCION_WORKSPACE_BACKEND` before the merged environment, so a
+  merged-environment value for one of those names is used. Only the runtime sets
+  `SCION_METADATA_INTERCEPTION` and `SCION_SUPPLEMENTAL_GIDS`; a merged-environment or secret value
+  for them is dropped. These runtimes apply resolved-auth env only when the agent has a harness.
+- Kubernetes sets `SCION_HOST_UID`, `SCION_HOST_GID`, `HOME`, `USER`, `LOGNAME`,
+  `SCION_OTEL_GCP_CREDENTIALS` (when a telemetry credential is configured), the NFS-home directory
+  keys and, for NFS worktree agents, `SCION_WORKSPACE_PATH` after the merged environment, so it
+  keeps the runtime's value for those names. Only the runtime sets `SCION_SUPPLEMENTAL_GIDS`.
+  Kubernetes applies resolved-auth env with or without a harness.
+
 ### `Changed in this release` — template env is a fallback below every other source
 
 **Before:** template env was merged into the agent's config. For hub-dispatched (broker-mode)
