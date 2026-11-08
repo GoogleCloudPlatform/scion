@@ -997,6 +997,8 @@ type brokerProfileSAMappings struct {
 	IncompleteReason       string                         `json:"incompleteReason,omitempty"`
 	AmbiguousGSAs          []string                       `json:"ambiguousGSAs,omitempty"`
 	ReportVersion          int                            `json:"reportVersion,omitempty"`
+	CloudRunNativeIdentity bool                           `json:"cloudRunNativeIdentity,omitempty"`
+	CloudRunBlockAccount   bool                           `json:"cloudRunBlockAccount,omitempty"`
 }
 
 // brokerProfileSAMappingsHash is one profile's report hash in a heartbeat
@@ -1032,7 +1034,8 @@ const profileSAReportConfirmInterval = 5 * time.Minute
 //     profileSAReportConfirmInterval. A hash that does not match (or no
 //     stored hash) leaves the stored report as is, to age, and asks for the
 //     full report.
-//   - The reports and hashes name every Kubernetes profile of the broker,
+//   - The reports and hashes name every Kubernetes and (from report
+//     version 3) Cloud Run profile of the broker,
 //     so a stored profile named in neither (for example one switched from
 //     Kubernetes to docker) has its report cleared.
 //
@@ -1084,6 +1087,8 @@ func applyProfileSAMappings(profiles []store.BrokerProfile, reported []brokerPro
 			}
 			p.MappingsHash = hash
 			p.MappingsReportVersion = r.ReportVersion
+			p.CloudRunNativeIdentity = r.CloudRunNativeIdentity
+			p.CloudRunBlockAccount = r.CloudRunBlockAccount
 			p.MappingsReportedAt = timePtr(now)
 			changed = true
 		case inHashes:
@@ -1113,6 +1118,8 @@ func profileSAReportEqual(p *store.BrokerProfile, r brokerProfileSAMappings, has
 		p.MappingsComplete == r.Complete &&
 		p.MappingsIncompleteReason == reason &&
 		p.MappingsReportVersion == r.ReportVersion &&
+		p.CloudRunNativeIdentity == r.CloudRunNativeIdentity &&
+		p.CloudRunBlockAccount == r.CloudRunBlockAccount &&
 		slices.Equal(p.ServiceAccountMappings, r.ServiceAccountMappings) &&
 		slices.Equal(p.AmbiguousGSAs, r.AmbiguousGSAs)
 }
@@ -1127,6 +1134,8 @@ func clearProfileSAReport(p *store.BrokerProfile) {
 	p.MappingsHash = ""
 	p.MappingsReportedAt = nil
 	p.MappingsReportVersion = 0
+	p.CloudRunNativeIdentity = false
+	p.CloudRunBlockAccount = false
 }
 
 // timePtr returns a pointer to a copy of t.

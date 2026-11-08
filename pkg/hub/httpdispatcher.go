@@ -967,6 +967,9 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 				SAEmail:             gcpID.ServiceAccountEmail,
 				ProjectID:           gcpID.ProjectID,
 				RequireLocalRuntime: gcpID.RequireLocalRuntime,
+				// Only this dispatch's own decision (markCloudRunNative),
+				// never a stored or client value.
+				NativeCloudRun: cloudRunNativeFrom(ctx),
 			}
 		}
 		// Only the user's explicit image travels as Config.Image (the
@@ -1266,11 +1269,10 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 	// above from agent.AppliedConfig.GCPIdentity) is what the broker trusts
 	// first; this env carries the same decision for the case where that
 	// struct is nil. See applyHubGCPMetadataModeEnv.
-	gcpMetadataMode := ""
-	if req.Config != nil && req.Config.GCPIdentity != nil {
-		gcpMetadataMode = req.Config.GCPIdentity.MetadataMode
-	}
-	applyHubGCPMetadataModeEnv(req.ResolvedEnv, &req.EnvClassifications, gcpMetadataMode)
+	// The request is sealed here (sealCreateRequest) and again by the send
+	// wrapper, which is the step that guarantees no later merge on any path
+	// reaches the broker.
+	sealCreateRequest(ctx, req)
 
 	// GitHub App token minting: if the project has a GitHub App installation,
 	// always mint an installation token. GitHub App tokens take priority over
@@ -1978,7 +1980,8 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreate(ctx context.Context, agent *st
 	// Hub check before dispatch (ptone/scion#3329 phase 4b): no token,
 	// no run and no broker call for a GCP identity the broker's recent,
 	// complete report says is not mapped on the agent's profile.
-	if err := d.kubernetesIdentityPrecheck(ctx, agent); err != nil {
+	ctx, err = d.gcpIdentityPrecheck(ctx, agent)
+	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
@@ -2019,10 +2022,10 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreate(ctx context.Context, agent *st
 	issued = token != ""
 
 	send := func(ctx context.Context, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
-		resp, err := d.client.CreateAgent(ctx, agent.RuntimeBrokerID, endpoint, req)
+		resp, err := d.sendCreate(ctx, agent, endpoint, req)
 		if isHashMismatchError(err) {
 			if repairErr := d.repairHashMismatch(ctx, agent, err); repairErr == nil {
-				resp, err = d.client.CreateAgent(ctx, agent.RuntimeBrokerID, endpoint, req)
+				resp, err = d.sendCreate(ctx, agent, endpoint, req)
 			}
 		}
 		return resp, nil, err
@@ -2109,7 +2112,8 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 	}
 
 	// Hub check before dispatch (see DispatchAgentCreate).
-	if err := d.kubernetesIdentityPrecheck(ctx, agent); err != nil {
+	ctx, err = d.gcpIdentityPrecheck(ctx, agent)
+	if err != nil {
 		return err
 	}
 	if err := d.storageLayoutPrecheck(ctx, agent); err != nil {
@@ -2157,10 +2161,10 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 	// That is conservative: a dial or marshal failure inside the transport
 	// is ambiguous and counts as sent, so a forced move cleans up after it.
 	sent = true
-	resp, envReqs, err := d.client.CreateAgentWithGather(ctx, agent.RuntimeBrokerID, endpoint, req)
+	resp, envReqs, err := d.sendCreateWithGather(ctx, agent, endpoint, req)
 	if isHashMismatchError(err) {
 		if repairErr := d.repairHashMismatch(ctx, agent, err); repairErr == nil {
-			resp, envReqs, err = d.client.CreateAgentWithGather(ctx, agent.RuntimeBrokerID, endpoint, req)
+			resp, envReqs, err = d.sendCreateWithGather(ctx, agent, endpoint, req)
 		}
 	}
 	if errors.Is(err, ErrLifecycleDeferred) {
@@ -2221,10 +2225,10 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 			req.RequestID = api.NewUUID()
 
 			// Replay the provision request with the resolved env.
-			resp2, envReqs2, err2 := d.client.CreateAgentWithGather(ctx, agent.RuntimeBrokerID, endpoint, req)
+			resp2, envReqs2, err2 := d.sendCreateWithGather(ctx, agent, endpoint, req)
 			if isHashMismatchError(err2) {
 				if repairErr := d.repairHashMismatch(ctx, agent, err2); repairErr == nil {
-					resp2, envReqs2, err2 = d.client.CreateAgentWithGather(ctx, agent.RuntimeBrokerID, endpoint, req)
+					resp2, envReqs2, err2 = d.sendCreateWithGather(ctx, agent, endpoint, req)
 				}
 			}
 			if err2 != nil {
@@ -2317,7 +2321,8 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreateWithGather(ctx context.Context,
 	}
 
 	// Hub check before dispatch (see DispatchAgentCreate).
-	if err := d.kubernetesIdentityPrecheck(ctx, agent); err != nil {
+	ctx, err = d.gcpIdentityPrecheck(ctx, agent)
+	if err != nil {
 		return nil, err
 	}
 	if err := d.storageLayoutPrecheck(ctx, agent); err != nil {
@@ -2362,14 +2367,14 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreateWithGather(ctx context.Context,
 		"broker", agent.RuntimeBrokerID, "buildElapsed", time.Since(dispatchStart).String())
 	brokerCallStart := time.Now()
 	send := func(ctx context.Context, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
-		resp, envReqs, err := d.client.CreateAgentWithGather(ctx, agent.RuntimeBrokerID, endpoint, req)
+		resp, envReqs, err := d.sendCreateWithGather(ctx, agent, endpoint, req)
 		d.log.Info("Dispatcher: broker responded",
 			"agent_id", agent.ID, "agent", agent.Name,
 			"brokerElapsed", time.Since(brokerCallStart).String(),
 			"totalElapsed", time.Since(dispatchStart).String())
 		if isHashMismatchError(err) {
 			if repairErr := d.repairHashMismatch(ctx, agent, err); repairErr == nil {
-				resp, envReqs, err = d.client.CreateAgentWithGather(ctx, agent.RuntimeBrokerID, endpoint, req)
+				resp, envReqs, err = d.sendCreateWithGather(ctx, agent, endpoint, req)
 			}
 		}
 		return resp, envReqs, err
@@ -2515,7 +2520,8 @@ func (d *HTTPAgentDispatcher) finalizeEnv(ctx context.Context, agent *store.Agen
 
 	// Hub check before dispatch (see DispatchAgentCreate): the gather pass
 	// can be minutes old, and this pass mints a token and records a run.
-	if err := d.kubernetesIdentityPrecheck(ctx, agent); err != nil {
+	ctx, err = d.gcpIdentityPrecheck(ctx, agent)
+	if err != nil {
 		return nil, err
 	}
 	if err := d.storageLayoutPrecheck(ctx, agent); err != nil {
@@ -2572,10 +2578,10 @@ func (d *HTTPAgentDispatcher) finalizeEnv(ctx context.Context, agent *store.Agen
 	}
 
 	send := func(ctx context.Context, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
-		resp, envReqs, err := d.client.CreateAgentWithGather(ctx, agent.RuntimeBrokerID, endpoint, req)
+		resp, envReqs, err := d.sendCreateWithGather(ctx, agent, endpoint, req)
 		if isHashMismatchError(err) {
 			if repairErr := d.repairHashMismatch(ctx, agent, err); repairErr == nil {
-				resp, envReqs, err = d.client.CreateAgentWithGather(ctx, agent.RuntimeBrokerID, endpoint, req)
+				resp, envReqs, err = d.sendCreateWithGather(ctx, agent, endpoint, req)
 			}
 		}
 		return resp, envReqs, err
@@ -2624,7 +2630,7 @@ func (d *HTTPAgentDispatcher) finalizeEnv(ctx context.Context, agent *store.Agen
 			// async launch, the new launch ID).
 			req.RequestID = api.NewUUID()
 			resp2, envReqs2, launch2, err2 := d.dispatchLaunching(ctx, agent, endpoint, req, true, func(ctx context.Context, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
-				return d.client.CreateAgentWithGather(ctx, agent.RuntimeBrokerID, endpoint, req)
+				return d.sendCreateWithGather(ctx, agent, endpoint, req)
 			})
 			if err2 != nil {
 				return nil, err2
@@ -3103,6 +3109,12 @@ func (d *HTTPAgentDispatcher) resolveAsNeededForKeys(
 				if isAlt {
 					resultKey = canonical
 				}
+				// The key a value is stored under counts too: an
+				// alternative name must not satisfy a reserved canonical
+				// key (the send seal removes it as well).
+				if secret.IsReservedEnvTarget(resultKey) {
+					continue
+				}
 				currentScopeIdx := slices.Index(envScopePrecedence, filter.Scope)
 				isCanonical := !isAlt
 				storedScopeIdx, alreadySet := resultScopeIdx[resultKey]
@@ -3170,6 +3182,10 @@ func (d *HTTPAgentDispatcher) resolveAsNeededForKeys(
 							continue // canonical key already matched; don't overwrite
 						}
 						resultKey = canonical
+					}
+					// As for env vars: never under a reserved canonical key.
+					if secret.IsReservedEnvTarget(resultKey) {
+						continue
 					}
 					if _, alreadySet := result[resultKey]; !alreadySet {
 						result[resultKey] = sv.Value
@@ -3513,43 +3529,10 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 	// metadata-server sidecar correctly on (re-)start. During the
 	// createAgent path this information travels inside CreateAgentConfig,
 	// but the startAgent/restartAgent path doesn't carry that struct, so we
-	// surface the values through resolvedEnv instead.
-	//
-	// These writes are the last word on the GCP identity env (identity vars
-	// are set after the storage/secrets merge above, at "highest precedence"
-	// per the comment on SCION_AGENT_ID et al.). When the agent has no GCP
-	// identity configured at all, gcpMetadataMode stays empty and
-	// applyHubGCPMetadataModeEnv removes any merged-in mode, so the broker
-	// applies its runtime default rather than a stored value.
-	gcpMetadataMode := ""
-	if agent.AppliedConfig != nil {
-		if gcpID := agent.AppliedConfig.GCPIdentity; gcpID != nil {
-			gcpMetadataMode = gcpID.MetadataMode
-			if gcpMetadataMode == store.GCPMetadataModeAssign {
-				resolvedEnv["SCION_METADATA_SA_EMAIL"] = gcpID.ServiceAccountEmail
-				classifyEnv(&envClassifications, "SCION_METADATA_SA_EMAIL", api.EnvKindPlain)
-				resolvedEnv["SCION_METADATA_PROJECT_ID"] = gcpID.ProjectID
-				classifyEnv(&envClassifications, "SCION_METADATA_PROJECT_ID", api.EnvKindPlain)
-			}
-			// RequireLocalRuntime doesn't travel inside CreateAgentConfig on
-			// this path either (see above), so surface it the same way: the
-			// broker re-checks a hub-default-granted passthrough against the
-			// runtime it resolves for this (re)start and downgrades to block
-			// itself if that runtime turns out not to be a local container
-			// runtime. Absent when false, matching this env's own convention
-			// — cleared, not just left unset, so that only this grant, not a
-			// value merged in above from stored env or a secret (both fill
-			// absent keys only; resolvedEnv itself is rebuilt fresh on every
-			// dispatch), can set it.
-			if gcpID.RequireLocalRuntime {
-				resolvedEnv["SCION_METADATA_REQUIRE_LOCAL_RUNTIME"] = "true"
-				classifyEnv(&envClassifications, "SCION_METADATA_REQUIRE_LOCAL_RUNTIME", api.EnvKindPlain)
-			} else {
-				delete(resolvedEnv, "SCION_METADATA_REQUIRE_LOCAL_RUNTIME")
-			}
-		}
-	}
-	applyHubGCPMetadataModeEnv(resolvedEnv, &envClassifications, gcpMetadataMode)
+	// surface the values through resolvedEnv instead
+	// (sealDispatchMetadataEnv). The send wrapper seals the env again
+	// right before the request goes to the broker.
+	sealDispatchMetadataEnv(ctx, agent, resolvedEnv, &envClassifications)
 
 	// Authorize a fresh agent token for Hub authentication. A denial
 	// stops the start or restart before any broker request. The token is
@@ -3722,7 +3705,8 @@ func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *sto
 	// Hub check before dispatch (ptone/scion#3329 phase 4b): no token,
 	// no run and no broker call for a GCP identity the broker's recent,
 	// complete report says is not mapped on the agent's profile.
-	if err := d.kubernetesIdentityPrecheck(ctx, agent); err != nil {
+	ctx, err = d.gcpIdentityPrecheck(ctx, agent)
+	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
@@ -3914,14 +3898,14 @@ func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *sto
 			ex.LaunchTimeoutSeconds = f.TimeoutSeconds
 			ex.LaunchKeepaliveSeconds = f.KeepaliveSeconds
 		}
-		resp, err := d.client.StartAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, task, projectPath, projectSlug, harnessConfig, harnessConfigID, harnessConfigHash, resolvedEnv, resolvedSecrets, inlineConfig, projectInfo.sharedDirs, projectInfo.sharedWorkspace, resume, ex)
+		resp, err := d.sendStart(ctx, agent, endpoint, agent.Slug, agent.ProjectID, task, projectPath, projectSlug, harnessConfig, harnessConfigID, harnessConfigHash, resolvedEnv, resolvedSecrets, inlineConfig, projectInfo.sharedDirs, projectInfo.sharedWorkspace, resume, ex)
 		if isHashMismatchError(err) {
 			if repairErr := d.repairHashMismatch(ctx, agent, err); repairErr == nil {
 				if f != nil {
 					// The repair took time: send the budget left now.
 					ex.LaunchTimeoutSeconds = f.remaining()
 				}
-				resp, err = d.client.StartAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, task, projectPath, projectSlug, harnessConfig, harnessConfigID, harnessConfigHash, resolvedEnv, resolvedSecrets, inlineConfig, projectInfo.sharedDirs, projectInfo.sharedWorkspace, resume, ex)
+				resp, err = d.sendStart(ctx, agent, endpoint, agent.Slug, agent.ProjectID, task, projectPath, projectSlug, harnessConfig, harnessConfigID, harnessConfigHash, resolvedEnv, resolvedSecrets, inlineConfig, projectInfo.sharedDirs, projectInfo.sharedWorkspace, resume, ex)
 			}
 		}
 		return resp, err
@@ -4073,7 +4057,12 @@ func (d *HTTPAgentDispatcher) DispatchAgentStop(ctx context.Context, agent *stor
 	// error.
 	err = d.client.StopAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, agent.RunID)
 	if errors.Is(err, ErrLifecycleDeferred) {
-		return d.deferredStop(ctx, agent)
+		err = d.deferredStop(ctx, agent)
+	}
+	if err == nil {
+		// A confirmed stop: the native instance holds the agent's token
+		// nowhere, so the recorded native decision is removed.
+		d.clearCloudRunNative(ctx, agent)
 	}
 	return err
 }
@@ -4104,7 +4093,8 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 	}
 
 	// Hub check before dispatch (see DispatchAgentStart).
-	if err := d.kubernetesIdentityPrecheck(ctx, agent); err != nil {
+	ctx, err = d.gcpIdentityPrecheck(ctx, agent)
+	if err != nil {
 		return err
 	}
 	if err := d.storageLayoutPrecheck(ctx, agent); err != nil {
@@ -4187,7 +4177,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 	// secret-bootstrap kind, without which the broker drops it.
 	extras.EnvClassifications = envClassifications
 
-	resp, err := d.client.RestartAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, resolvedEnv, extras)
+	resp, err := d.sendRestart(ctx, agent, endpoint, agent.Slug, agent.ProjectID, resolvedEnv, extras)
 	d.reportSkippedSecrets(ctx, agent, startEnv, err)
 	if errors.Is(err, ErrLifecycleDeferred) {
 		// The owning node mints and records its own run ID.
@@ -4320,7 +4310,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentDelete(ctx context.Context, agent *st
 	}
 	err = d.client.DeleteAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, opts)
 	if errors.Is(err, ErrLifecycleDeferred) {
-		return d.deferredDelete(ctx, agent, deleteFiles, removeBranch, softDelete, deletedAt)
+		if err := d.deferredDelete(ctx, agent, deleteFiles, removeBranch, softDelete, deletedAt); err != nil {
+			return err
+		}
+		d.clearCloudRunNative(ctx, agent)
+		return nil
 	}
 	if err != nil {
 		if refused, ok := deleteRunMismatch(err, agent.RunID); ok {
@@ -4330,7 +4324,13 @@ func (d *HTTPAgentDispatcher) DispatchAgentDelete(ctx context.Context, agent *st
 		}
 		return err
 	}
-	return d.deletePreviousRuns(ctx, agent, endpoint, opts)
+	if err := d.deletePreviousRuns(ctx, agent, endpoint, opts); err != nil {
+		return err
+	}
+	// A confirmed delete of every run: the recorded native decision is
+	// removed.
+	d.clearCloudRunNative(ctx, agent)
+	return nil
 }
 
 // deletePreviousRuns deletes the runtime entries of the agent's previous

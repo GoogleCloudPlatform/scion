@@ -562,6 +562,10 @@
               "type": "array",
               "items": { "type": "string" },
               "description": "Global settings only. Service accounts this Runtime Broker may run a Cloud Run instance as for GCP identity mode \"assign\" while the hub.cloudrun_native_identity experiment is on. Empty or unset: assign is refused. Ignored in a project's settings.yaml."
+            },
+            "block_service_account": {
+              "type": "string",
+              "description": "Global settings only. Service account, holding no roles, that this Runtime Broker runs a Cloud Run instance as for GCP identity mode \"block\" (and an unset mode) while the hub.cloudrun_native_identity experiment is on. Empty or unset: block is refused. Ignored in a project's settings.yaml."
             }
           },
           "additionalProperties": false

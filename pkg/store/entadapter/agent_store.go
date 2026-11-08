@@ -280,6 +280,9 @@ func parseAppliedConfig(raw string) (*store.AgentAppliedConfig, error) {
 	if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
 		return nil, fmt.Errorf("applied_config is not valid JSON, ignoring it entirely: %w", err)
 	}
+	// The recorded native Cloud Run decision is read only by the exact-key
+	// reader, as SQL reads it; the struct decode matches keys in any case.
+	cfg.NativeCloudRun = rowNativeCloudRun(raw)
 	if cfg.GCPIdentity != nil && !validGCPMetadataMode(cfg.GCPIdentity.MetadataMode) {
 		bad := cfg.GCPIdentity.MetadataMode
 		cfg.GCPIdentity = nil
@@ -393,7 +396,12 @@ func (s *AgentStore) CreateAgent(ctx context.Context, a *store.Agent) (err error
 		a.Ancestry = canonicalPrincipalIDs(a.Ancestry)
 		create.SetAncestry(a.Ancestry)
 	}
-	if cfg := marshalAppliedConfig(a.AppliedConfig); cfg != "" {
+	// A new row has no recorded native Cloud Run decision: only
+	// SetAgentNativeCloudRun records one (appliedConfigForWrite).
+	if a.AppliedConfig != nil {
+		a.AppliedConfig.NativeCloudRun = false
+	}
+	if cfg := marshalAppliedConfigNative(a.AppliedConfig, false); cfg != "" {
 		create.SetAppliedConfig(cfg)
 	}
 	pending, err := store.MarshalPendingConfigForStorage(a.PendingConfig)
@@ -588,12 +596,14 @@ func (s *AgentStore) UpdateAgent(ctx context.Context, a *store.Agent) error {
 	}
 
 	if a.Phase != "running" {
-		// Fast path, unchanged from before T1: one statement, no
-		// transaction. Rows whose write never touches phase=running (the
-		// overwhelming majority of UpdateAgent calls) pay nothing extra and
-		// gain no new error path (design t1-async-create-v11.md §3.3: "the
-		// same transaction runs" applies only to a running write).
-		update, err := buildAgentUpdate(s.client.Agent, uid, a, expectedVersion, newVersion, now)
+		// Fast path: no transaction. Rows whose write never touches
+		// phase=running (the overwhelming majority of UpdateAgent calls)
+		// take no launch transaction (design t1-async-create-v11.md §3.3:
+		// "the same transaction runs" applies only to a running write).
+		// buildAgentUpdate reads the row's recorded native Cloud Run
+		// decision first (appliedConfigForWrite), so the write is one read
+		// and one conditional update.
+		update, err := buildAgentUpdate(ctx, s.client.Agent, uid, a, expectedVersion, newVersion, now, false)
 		if err != nil {
 			return err
 		}
@@ -720,7 +730,7 @@ func (s *AgentStore) UpdateAgent(ctx context.Context, a *store.Agent) error {
 // running branch). It reports whether the statement matched a row; it never
 // opens a transaction.
 func (s *AgentStore) tryRunningFastPath(ctx context.Context, uid uuid.UUID, a *store.Agent, expectedVersion, newVersion int64, now time.Time) (bool, error) {
-	update, err := buildAgentUpdate(s.client.Agent, uid, a, expectedVersion, newVersion, now)
+	update, err := buildAgentUpdate(ctx, s.client.Agent, uid, a, expectedVersion, newVersion, now, false)
 	if err != nil {
 		return false, err
 	}
@@ -811,7 +821,7 @@ func injectAgentRunningRace(point string) {
 // store.ErrNotFound / store.ErrVersionConflict, without touching
 // launch_state, when the CAS did not match a row.
 func (s *AgentStore) updateAgentRunningTx(ctx context.Context, client *ent.Client, uid uuid.UUID, a *store.Agent, expectedVersion, newVersion int64, now time.Time) error {
-	update, err := buildAgentUpdate(client.Agent, uid, a, expectedVersion, newVersion, now)
+	update, err := buildAgentUpdate(ctx, client.Agent, uid, a, expectedVersion, newVersion, now, s.usesRowLocks())
 	if err != nil {
 		return err
 	}
@@ -865,7 +875,7 @@ func (s *AgentStore) updateAgentObserved(ctx context.Context, obs store.AgentWri
 		err = s.updateAgentRunningTx(ctx, client, uid, a, expectedVersion, newVersion, now)
 	} else {
 		var update *ent.AgentUpdate
-		if update, err = buildAgentUpdate(client.Agent, uid, a, expectedVersion, newVersion, now); err == nil {
+		if update, err = buildAgentUpdate(ctx, client.Agent, uid, a, expectedVersion, newVersion, now, s.usesRowLocks()); err == nil {
 			var affected int
 			if affected, err = update.Save(ctx); err != nil {
 				err = mapError(err)
@@ -894,9 +904,23 @@ func (s *AgentStore) updateAgentObserved(ctx context.Context, obs store.AgentWri
 // buildAgentUpdate constructs the CAS update statement shared by both the
 // fast path and the running-write transactional path. ac is either
 // s.client.Agent or a tx-scoped client's Agent — both are *ent.AgentClient.
-func buildAgentUpdate(ac *ent.AgentClient, uid uuid.UUID, a *store.Agent, expectedVersion, newVersion int64, now time.Time) (*ent.AgentUpdate, error) {
+//
+// The applied_config document comes from appliedConfigForWrite: it keeps the
+// row's recorded native Cloud Run decision whatever a.AppliedConfig says,
+// and the write is conditional on the row still holding it (lock takes the
+// row lock for that read inside the caller's transaction). a.AppliedConfig
+// is updated to the row's value, so the caller's copy matches what is
+// written.
+func buildAgentUpdate(ctx context.Context, ac *ent.AgentClient, uid uuid.UUID, a *store.Agent, expectedVersion, newVersion int64, now time.Time, lock bool) (*ent.AgentUpdate, error) {
+	appliedRaw, native, keepNative, err := appliedConfigForWrite(ctx, ac, uid, a.AppliedConfig, lock)
+	if err != nil {
+		return nil, err
+	}
+	if a.AppliedConfig != nil {
+		a.AppliedConfig.NativeCloudRun = native
+	}
 	update := ac.Update().
-		Where(agent.IDEQ(uid), agent.StateVersionEQ(expectedVersion)).
+		Where(agent.IDEQ(uid), agent.StateVersionEQ(expectedVersion), keepNative).
 		SetSlug(a.Slug).
 		SetName(a.Name).
 		SetTemplate(a.Template).
@@ -943,8 +967,9 @@ func buildAgentUpdate(ac *ent.AgentClient, uid uuid.UUID, a *store.Agent, expect
 	} else {
 		update.ClearAnnotations()
 	}
-	if cfg := marshalAppliedConfig(a.AppliedConfig); cfg != "" {
-		update.SetAppliedConfig(cfg)
+	// Preserves the recorded native Cloud Run decision (appliedConfigForWrite).
+	if appliedRaw != "" {
+		update.SetAppliedConfig(appliedRaw)
 	} else {
 		update.ClearAppliedConfig()
 	}
@@ -2167,14 +2192,24 @@ func (s *AgentStore) UpdateAgentConfig(ctx context.Context, agentID string, expe
 	}
 	newVersion := expectedVersion + 1
 	write := func(ac *ent.AgentClient) (int, error) {
+		// Preserves the recorded native Cloud Run decision: the document
+		// carries the row's value and the write applies only while the row
+		// still holds it (appliedConfigForWrite).
+		appliedRaw, native, keepNative, err := appliedConfigForWrite(ctx, ac, uid, applied, s.usesRowLocks())
+		if err != nil {
+			return 0, err
+		}
+		if applied != nil {
+			applied.NativeCloudRun = native
+		}
 		update := ac.Update().
-			Where(agent.IDEQ(uid), agent.StateVersionEQ(expectedVersion), agent.DeletedAtIsNil()).
+			Where(agent.IDEQ(uid), agent.StateVersionEQ(expectedVersion), agent.DeletedAtIsNil(), keepNative).
 			SetStateVersion(newVersion).
 			SetUpdated(time.Now()).
 			// Always set, never NULL: see buildAgentUpdate.
 			SetHarnessConfig(harnessConfigOf(applied))
-		if cfg := marshalAppliedConfig(applied); cfg != "" {
-			update.SetAppliedConfig(cfg)
+		if appliedRaw != "" {
+			update.SetAppliedConfig(appliedRaw)
 		} else {
 			update.ClearAppliedConfig()
 		}
@@ -2686,6 +2721,91 @@ func (s *AgentStore) SetAgentRuntimeTarget(ctx context.Context, id string, expec
 			agent.IDEQ(uid),
 			agent.DeletedAtIsNil(),
 			agent.StateVersionEQ(expectedVersion),
+			appliedConfigUnchanged(row.AppliedConfig),
+		).
+		SetAppliedConfig(string(updated)).
+		Save(ctx)
+	if err != nil {
+		return false, mapError(err)
+	}
+	if n == 0 {
+		return false, nil
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// setAgentNativeCloudRunAttempts bounds the retries of SetAgentNativeCloudRun
+// when the applied config changes between its read and its write.
+const setAgentNativeCloudRunAttempts = 5
+
+// SetAgentNativeCloudRun implements store.AgentStore. See the interface for
+// the contract. It edits only the nativeCloudRun key in the raw applied
+// config JSON, conditional on the stored applied config being the same as
+// when it was read (with the row locked where the dialect supports it).
+func (s *AgentStore) SetAgentNativeCloudRun(ctx context.Context, id string, native bool) error {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return err
+	}
+	for attempt := 0; attempt < setAgentNativeCloudRunAttempts; attempt++ {
+		done, err := s.setAgentNativeCloudRunOnce(ctx, uid, id, native)
+		if err != nil || done {
+			return err
+		}
+	}
+	return fmt.Errorf("set native Cloud Run flag for agent %s: applied config kept changing", id)
+}
+
+func (s *AgentStore) setAgentNativeCloudRunOnce(ctx context.Context, uid uuid.UUID, id string, native bool) (bool, error) {
+	tx, err := s.client.Tx(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	q := tx.Agent.Query().Where(agent.IDEQ(uid), agent.DeletedAtIsNil())
+	if s.usesRowLocks() {
+		q = q.ForUpdate()
+	}
+	row, err := q.Select(agent.FieldAppliedConfig).Only(ctx)
+	if err != nil {
+		if ent.IsNotFound(err) {
+			return false, store.ErrNotFound
+		}
+		return false, mapError(err)
+	}
+	raw := map[string]json.RawMessage{}
+	if row.AppliedConfig != "" {
+		if err := json.Unmarshal([]byte(row.AppliedConfig), &raw); err != nil {
+			return false, fmt.Errorf("set native Cloud Run flag for agent %s: %w", id, err)
+		}
+		if raw == nil { // the stored value was the JSON literal null
+			raw = map[string]json.RawMessage{}
+		}
+	}
+	// Already as asked: recorded means the key holds the boolean true
+	// (rowNativeCloudRun); not recorded means the key is absent.
+	_, present := raw[nativeCloudRunKey]
+	recorded := bytes.Equal(bytes.TrimSpace(raw[nativeCloudRunKey]), []byte("true"))
+	if (native && recorded) || (!native && !present) {
+		return true, nil
+	}
+	if native {
+		raw[nativeCloudRunKey] = json.RawMessage("true")
+	} else {
+		delete(raw, nativeCloudRunKey)
+	}
+	updated, err := json.Marshal(raw)
+	if err != nil {
+		return false, err
+	}
+	n, err := tx.Agent.Update().
+		Where(
+			agent.IDEQ(uid),
+			agent.DeletedAtIsNil(),
 			appliedConfigUnchanged(row.AppliedConfig),
 		).
 		SetAppliedConfig(string(updated)).
