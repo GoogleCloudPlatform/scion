@@ -232,8 +232,9 @@ func (s *SQLiteSnapshotter) SnapshotStatus() DBSnapshotStatus {
 //
 // The size check and VACUUM INTO run on a private read-only connection
 // (OpenDB, see writeDBSnapshot), closed as soon as the copy is written, so
-// the hub keeps serving requests during the copy (ptone/scion#7360). The start, duration, size
-// and outcome of the copy go to the run log and to the server log.
+// the hub keeps serving requests during the copy (ptone/scion#7360). The
+// start, duration, size and outcome of the copy go to the run log and to
+// the server log.
 //
 // Leftover ".partial" files of a killed snapshot are removed first
 // (pruneStalePartials), so they do not count against the free space.
