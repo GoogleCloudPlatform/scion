@@ -641,22 +641,24 @@ const resultErrorKey = "resultError"
 
 // panicRunResult is the Result of a run whose executor panicked. RunResult
 // is called inside its own recover, so a panic there cannot crash the hub:
-// the Result then keeps only the error, with resultError "internal".
-func panicRunResult(executor MaintenanceExecutor, errText string) (result map[string]any) {
+// the Result then keeps only the error, with resultError "internal", and
+// the recovered value is returned for the caller to log.
+func panicRunResult(executor MaintenanceExecutor, errText string) (result map[string]any, resultPanic any) {
 	defer func() {
-		if recover() != nil {
+		if r := recover(); r != nil {
 			result = map[string]any{rebuildpreflight.ErrorKey: errText, resultErrorKey: "internal"}
+			resultPanic = r
 		}
 	}()
-	return rebuildpreflight.MergeFinal(reportedRunResult(executor), errText)
+	return rebuildpreflight.MergeFinal(reportedRunResult(executor), errText), nil
 }
 
 // encodeRunResult is a run Result as stored: "" for none, else its JSON. A
 // Result that cannot be encoded keeps only its error, with resultError
-// "internal".
-func encodeRunResult(result map[string]any) string {
+// "internal", and the encoding error is returned for the caller to log.
+func encodeRunResult(result map[string]any) (string, error) {
 	if result == nil {
-		return ""
+		return "", nil
 	}
 	b, err := json.Marshal(result)
 	if err != nil {
@@ -664,9 +666,10 @@ func encodeRunResult(result map[string]any) string {
 		if errText, ok := result[rebuildpreflight.ErrorKey].(string); ok {
 			fallback[rebuildpreflight.ErrorKey] = errText
 		}
+		// The fallback holds only strings, so it always encodes.
 		b, _ = json.Marshal(fallback)
 	}
-	return string(b)
+	return string(b), err
 }
 
 // listOperationRuns returns the run history for a given operation key.

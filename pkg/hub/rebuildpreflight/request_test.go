@@ -72,6 +72,39 @@ func TestCheckRunRequest_NonStringBranchRejected(t *testing.T) {
 	}
 }
 
+// The parameter parser trims keys as well as values, so a key that trims to
+// "branch" is the branch parameter: its value is checked like "branch", and
+// two such keys (one value would win by map order) are a 400 whatever their
+// values.
+func TestCheckRunRequest_PaddedOrRepeatedBranchKeyRejected(t *testing.T) {
+	for _, key := range []string{RebuildServerKey, RebuildWebKey} {
+		for _, tc := range []struct{ body, prefix string }{
+			{`{"params":{" branch":"x+y"}}`, "invalid branch name: "},
+			{`{"params":{"branch ":"-x"}}`, "invalid branch name: "},
+			{`{"params":{"\tbranch\n":"a..b"}}`, "invalid branch name: "},
+			{`{"params":{" branch ":1}}`, "branch must be a string; "},
+			{`{"params":{"branch":"main","branch ":"x+y"}}`, "branch is given more than once; "},
+			{`{"params":{" branch":"main","branch":"main"}}`, "branch is given more than once; "},
+		} {
+			t.Run(key+" "+tc.body, func(t *testing.T) {
+				_, rej := CheckRunRequest(key, decodeBody(t, tc.body))
+				if rej == nil {
+					t.Fatalf("CheckRunRequest(%s, %s) = nil, want a 400", key, tc.body)
+				}
+				if rej.Status != http.StatusBadRequest {
+					t.Errorf("status = %d, want 400", rej.Status)
+				}
+				if !strings.HasPrefix(rej.Message, tc.prefix) || !strings.HasSuffix(rej.Message, BranchRule) {
+					t.Errorf("message = %q, want prefix %q and the allowed form", rej.Message, tc.prefix)
+				}
+				if strings.Contains(rej.Message, "x+y") {
+					t.Errorf("message = %q echoes the branch", rej.Message)
+				}
+			})
+		}
+	}
+}
+
 func TestCheckRunRequest_Accepts(t *testing.T) {
 	for _, tc := range []struct{ key, body string }{
 		{RebuildServerKey, `{"params":{"branch":"main"}}`},
@@ -82,6 +115,9 @@ func TestCheckRunRequest_Accepts(t *testing.T) {
 		{RebuildServerKey, `{}`},
 		{RebuildServerKey, `{"params":"x"}`},
 		{RebuildWebKey, `{"params":{"branch":"feature_x-y"}}`},
+		// A padded key with a valid value passes this check; the hub's
+		// raw-key allow-list refuses the key itself.
+		{RebuildWebKey, `{"params":{" branch ":"main"}}`},
 		{RebuildWebKey, `{"params":{"dryRun":true}}`},
 		// Other operations do not take a branch to check out.
 		{"pull-images", `{"params":{"branch":"-x"}}`},

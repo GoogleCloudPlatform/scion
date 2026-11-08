@@ -36,6 +36,7 @@ import (
 var operationParamAllowlist = map[string][]string{
 	"update-binary":  maintenance.UpdateBinaryParams,
 	"rebuild-server": {"branch"},
+	"rebuild-web":    {"branch"},
 	// The star reconciliation takes no parameters.
 	entadapter.ChatStarReconcileKey: {},
 	// The chat retention preview takes an optional window; the manual run
@@ -330,6 +331,16 @@ func (s *Server) launchMaintenanceRun(run *store.MaintenanceOperationRun, execut
 			f(ctx)
 		}
 
+		// encode is encodeRunResult, logging a Result that could not be
+		// encoded (the run then stores only its error).
+		encode := func(result map[string]any) string {
+			enc, err := encodeRunResult(result)
+			if err != nil {
+				log.Error("Failed to encode the run result; storing only its error", maintenanceLogAttrs(key, "run_id", runID, "error", err)...)
+			}
+			return enc
+		}
+
 		defer func() {
 			if r := recover(); r != nil {
 				log.Error("Operation executor panicked", maintenanceLogAttrs(key, "run_id", runID, "panic", fmt.Sprint(r))...)
@@ -337,7 +348,11 @@ func (s *Server) launchMaintenanceRun(run *store.MaintenanceOperationRun, execut
 				run.CompletedAt = &finishedAt
 				run.Status = store.MaintenanceStatusFailed
 				run.Log = buf.String()
-				run.Result = encodeRunResult(panicRunResult(executor, fmt.Sprintf("executor panic: %v", r)))
+				result, resultPanic := panicRunResult(executor, fmt.Sprintf("executor panic: %v", r))
+				if resultPanic != nil {
+					log.Error("Operation executor's RunResult panicked; storing only the run error", maintenanceLogAttrs(key, "run_id", runID, "panic", fmt.Sprint(resultPanic))...)
+				}
+				run.Result = encode(result)
 				cleanup(func(ctx context.Context) {
 					if err := s.store.UpdateMaintenanceRun(ctx, run); err != nil {
 						log.Error("Failed to update run record after panic", maintenanceLogAttrs(key, "run_id", runID, "error", err)...)
@@ -381,7 +396,7 @@ func (s *Server) launchMaintenanceRun(run *store.MaintenanceOperationRun, execut
 					result["details"] = re.Details
 				}
 			}
-			run.Result = encodeRunResult(result)
+			run.Result = encode(result)
 			if restarting {
 				cleanup(func(ctx context.Context) { s.clearPendingUpdateFor(ctx, runID) })
 			}
@@ -402,7 +417,7 @@ func (s *Server) launchMaintenanceRun(run *store.MaintenanceOperationRun, execut
 		default:
 			run.CompletedAt = &finishedAt
 			run.Status = store.MaintenanceStatusCompleted
-			run.Result = encodeRunResult(rebuildpreflight.MergeFinal(reportedRunResult(executor), ""))
+			run.Result = encode(rebuildpreflight.MergeFinal(reportedRunResult(executor), ""))
 			log.Info("Operation completed successfully", maintenanceLogAttrs(key, "run_id", runID, "duration", finishedAt.Sub(run.StartedAt))...)
 		}
 

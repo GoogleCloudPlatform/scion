@@ -61,10 +61,11 @@ func (e *ruleError) Error() string {
 
 func (e *ruleError) Unwrap() error { return e.base }
 
-// ValidBranch reports whether name may be passed to git as a branch. Every
-// value that reaches a git argv as a branch (a request's branch parameter
-// and the configured repository branch) passes it first, so none can start
-// with '-' or be read as anything but a branch.
+// ValidBranch reports whether name may be passed to git as a branch.
+// CheckRunRequest applies it to a run request's branch parameter, at the
+// request, before a run is created. Separately, the executor checks every
+// branch it uses (the request's or the configured repository branch) with
+// its own validateBranchName before the branch reaches a git argv.
 //
 // The rules are pure Go (no git check-ref-format call) and at least as
 // strict as check-ref-format for every name the character set admits. Each

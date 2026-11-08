@@ -529,6 +529,17 @@ func TestLaunchMaintenanceRun_MergesTheExecutorResult(t *testing.T) {
 			store.MaintenanceStatusFailed, map[string]any{"error": "real"}},
 		{"RunResult panics on a panicked run", &resultTestExecutor{logText: "built\n", resultPanics: true, panicWith: "boom"},
 			store.MaintenanceStatusFailed, map[string]any{"error": "executor panic: boom", "resultError": "internal"}},
+		// A RunResult panic on the failure or success path is caught by the
+		// run's recover, so the run fails with only the panic as its error.
+		{"RunResult panics on a failed run", &resultTestExecutor{logText: "built\n", resultPanics: true, err: errors.New("install failed")},
+			store.MaintenanceStatusFailed, map[string]any{"error": "executor panic: RunResult broke", "resultError": "internal"}},
+		{"RunResult panics on a successful run", &resultTestExecutor{logText: "built\n", resultPanics: true},
+			store.MaintenanceStatusFailed, map[string]any{"error": "executor panic: RunResult broke", "resultError": "internal"}},
+		// A Result that cannot be encoded keeps only its error.
+		{"unencodable result on a failed run", &resultTestExecutor{logText: "built\n", result: map[string]any{"commit": "abc", "bad": func() {}}, err: errors.New("install failed")},
+			store.MaintenanceStatusFailed, map[string]any{"error": "install failed", "resultError": "internal"}},
+		{"unencodable result on a successful run", &resultTestExecutor{logText: "built\n", result: map[string]any{"commit": "abc", "bad": make(chan int)}},
+			store.MaintenanceStatusCompleted, map[string]any{"resultError": "internal"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

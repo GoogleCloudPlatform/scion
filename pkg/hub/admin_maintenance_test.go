@@ -810,32 +810,40 @@ func TestListMaintenanceOperations_ShowsContainerBinariesWhenEnvSet(t *testing.T
 }
 
 // An invalid branch parameter on rebuild-server or rebuild-web is refused
-// with 400 and the allowed form, before any run is created.
+// with 400 and the allowed form, before any run is created. That includes a
+// key the parameter parser would trim to "branch", and a second such key.
 func TestExecuteOperation_InvalidBranchRejected(t *testing.T) {
+	cases := []struct{ name, body, reason string }{
+		{"invalid", `{"params":{"branch":"--upload-pack=x"}}`, "invalid branch name"},
+		{"padded key", `{"params":{" branch":"x+y"}}`, "invalid branch name"},
+		{"repeated key", `{"params":{"branch":"main","branch ":"x+y"}}`, "branch is given more than once"},
+	}
 	for _, key := range []string{"rebuild-server", "rebuild-web"} {
-		t.Run(key, func(t *testing.T) {
-			srv, s := newTestServerWithStore(t)
-			admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
-			req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/maintenance/operations/"+key+"/run",
-				strings.NewReader(`{"params":{"branch":"--upload-pack=x"}}`))
-			req.Header.Set("Content-Type", "application/json")
-			req = req.WithContext(contextWithIdentity(req.Context(), admin))
-			rr := httptest.NewRecorder()
-			srv.handleAdminMaintenanceOps(rr, req)
+		for _, tc := range cases {
+			t.Run(key+" "+tc.name, func(t *testing.T) {
+				srv, s := newTestServerWithStore(t)
+				admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+				req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/maintenance/operations/"+key+"/run",
+					strings.NewReader(tc.body))
+				req.Header.Set("Content-Type", "application/json")
+				req = req.WithContext(contextWithIdentity(req.Context(), admin))
+				rr := httptest.NewRecorder()
+				srv.handleAdminMaintenanceOps(rr, req)
 
-			if rr.Code != http.StatusBadRequest {
-				t.Fatalf("expected 400, got %d: %s", rr.Code, rr.Body.String())
-			}
-			if !strings.Contains(rr.Body.String(), "invalid branch name") || !strings.Contains(rr.Body.String(), "start with a letter or digit") {
-				t.Errorf("expected the reason and the allowed form, got %s", rr.Body.String())
-			}
-			runs, err := s.ListMaintenanceRuns(context.Background(), key, 10)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if len(runs) != 0 {
-				t.Errorf("a rejected request must not create a run, got %d", len(runs))
-			}
-		})
+				if rr.Code != http.StatusBadRequest {
+					t.Fatalf("expected 400, got %d: %s", rr.Code, rr.Body.String())
+				}
+				if !strings.Contains(rr.Body.String(), tc.reason) || !strings.Contains(rr.Body.String(), "start with a letter or digit") {
+					t.Errorf("expected %q and the allowed form, got %s", tc.reason, rr.Body.String())
+				}
+				runs, err := s.ListMaintenanceRuns(context.Background(), key, 10)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(runs) != 0 {
+					t.Errorf("a rejected request must not create a run, got %d", len(runs))
+				}
+			})
+		}
 	}
 }

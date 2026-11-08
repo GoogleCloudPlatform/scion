@@ -52,21 +52,36 @@ type ForceRequest struct {
 //
 // For rebuild-server and rebuild-web, a "branch" parameter must be a
 // string, and, unless it is blank (the configured branch is used), a valid
-// branch name (ValidBranch). The value is checked as the executor will use
-// it, with surrounding space trimmed.
+// branch name (ValidBranch). The parameter parser trims keys as well as
+// values, so every key that trims to "branch" is the branch parameter: more
+// than one such key is a 400, and the value is checked as the executor will
+// use it, with surrounding space trimmed.
 func CheckRunRequest(key string, rawBody map[string]any) (ForceRequest, *Reject) {
+	if !branchParamKeys[key] {
+		return ForceRequest{}, nil
+	}
 	params, _ := rawBody["params"].(map[string]any)
-	if branchParamKeys[key] {
-		if raw, ok := params["branch"]; ok {
-			branch, isString := raw.(string)
-			if !isString {
-				return ForceRequest{}, &Reject{Status: http.StatusBadRequest, Message: "branch must be a string; " + BranchRule}
-			}
-			if b := strings.TrimSpace(branch); b != "" {
-				if err := ValidBranch(b); err != nil {
-					return ForceRequest{}, &Reject{Status: http.StatusBadRequest, Message: err.Error()}
-				}
-			}
+	var raw any
+	found := 0
+	for k, v := range params {
+		if strings.TrimSpace(k) == "branch" {
+			raw = v
+			found++
+		}
+	}
+	if found > 1 {
+		return ForceRequest{}, &Reject{Status: http.StatusBadRequest, Message: "branch is given more than once; " + BranchRule}
+	}
+	if found == 0 {
+		return ForceRequest{}, nil
+	}
+	branch, isString := raw.(string)
+	if !isString {
+		return ForceRequest{}, &Reject{Status: http.StatusBadRequest, Message: "branch must be a string; " + BranchRule}
+	}
+	if b := strings.TrimSpace(branch); b != "" {
+		if err := ValidBranch(b); err != nil {
+			return ForceRequest{}, &Reject{Status: http.StatusBadRequest, Message: err.Error()}
 		}
 	}
 	return ForceRequest{}, nil
