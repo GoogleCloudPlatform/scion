@@ -21,6 +21,8 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"log/slog"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -341,7 +343,8 @@ func TestSQLiteSnapshotter_StalePartialsFreedBeforeDiskCheck(t *testing.T) {
 func TestSQLiteSnapshotter_DoesNotUseOrBlockHubConnection(t *testing.T) {
 	ctx := context.Background()
 	file := filepath.Join(t.TempDir(), "hub.db")
-	hub, err := sql.Open("sqlite", "file:"+file+"?cache=shared")
+	hubDSN := "file:" + (&url.URL{Path: filepath.ToSlash(file)}).EscapedPath() + "?cache=shared"
+	hub, err := sql.Open("sqlite", hubDSN)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -406,5 +409,77 @@ func TestSQLiteSnapshotter_DoesNotUseOrBlockHubConnection(t *testing.T) {
 	}
 	if err := hub.QueryRowContext(ctx, "SELECT count(*) FROM agents WHERE id = 'pending'").Scan(&pending); err != nil || pending != 1 {
 		t.Fatalf("hub row after commit = %d, err = %v", pending, err)
+	}
+}
+
+// TestSQLiteSnapshotter_ClosesSourceConnection checks that the private
+// source connection is closed when Snapshot returns, on success and on a
+// refusal after it was opened (the disk check).
+func TestSQLiteSnapshotter_ClosesSourceConnection(t *testing.T) {
+	file := openSnapshotTestDB(t)
+	keep := func(held **sql.DB) func(string) (*sql.DB, error) {
+		return func(f string) (*sql.DB, error) {
+			db, err := openSnapshotSource(f)
+			*held = db
+			return db, err
+		}
+	}
+	assertClosed := func(t *testing.T, db *sql.DB) {
+		t.Helper()
+		if db == nil {
+			t.Fatal("the source connection was never opened")
+		}
+		if err := db.Ping(); err == nil || err.Error() != "sql: database is closed" {
+			t.Fatalf("source connection after Snapshot: Ping err = %v, want sql: database is closed", err)
+		}
+	}
+
+	t.Run("success", func(t *testing.T) {
+		var held *sql.DB
+		s := NewSQLiteSnapshotter(SQLiteSnapshotOptions{File: file, Dir: t.TempDir(),
+			FreeSpace: unlimitedFreeSpace, Now: snapshotTestClock(), OpenDB: keep(&held)})
+		if _, err := s.Snapshot(context.Background(), "nightly-20261023", &bytes.Buffer{}); err != nil {
+			t.Fatal(err)
+		}
+		assertClosed(t, held)
+	})
+
+	t.Run("disk check refusal", func(t *testing.T) {
+		var held *sql.DB
+		s := NewSQLiteSnapshotter(SQLiteSnapshotOptions{File: file, Dir: t.TempDir(), Now: snapshotTestClock(),
+			FreeSpace: func(string) (uint64, error) { return 0, nil }, OpenDB: keep(&held)})
+		_, err := s.Snapshot(context.Background(), "nightly-20261023", &bytes.Buffer{})
+		if err == nil || !strings.Contains(err.Error(), "not enough free disk space") {
+			t.Fatalf("err = %v", err)
+		}
+		assertClosed(t, held)
+	})
+}
+
+// TestSQLiteSnapshotter_LogsNoDSN checks that the server log lines of a
+// snapshot carry its size and outcome but never the source connection's
+// DSN.
+func TestSQLiteSnapshotter_LogsNoDSN(t *testing.T) {
+	file := openSnapshotTestDB(t)
+	var buf bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(old) })
+
+	s := NewSQLiteSnapshotter(SQLiteSnapshotOptions{File: file, Dir: t.TempDir(),
+		FreeSpace: unlimitedFreeSpace, Now: snapshotTestClock()})
+	if _, err := s.Snapshot(context.Background(), "nightly-20261023", &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	got := buf.String()
+	for _, want := range []string{"Database snapshot started", "Database snapshot written", "outcome=ok", "bytes=", "duration="} {
+		if !strings.Contains(got, want) {
+			t.Errorf("server log lacks %q:\n%s", want, got)
+		}
+	}
+	for _, banned := range []string{"file:", "mode=ro", "cache=private", "busy_timeout"} {
+		if strings.Contains(got, banned) {
+			t.Errorf("server log contains %q:\n%s", banned, got)
+		}
 	}
 }

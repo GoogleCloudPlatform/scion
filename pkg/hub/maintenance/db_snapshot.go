@@ -231,8 +231,8 @@ func (s *SQLiteSnapshotter) SnapshotStatus() DBSnapshotStatus {
 // Files are created 0600: the database and settings hold secrets.
 //
 // The size check and VACUUM INTO run on a private read-only connection
-// (OpenDB), closed when the snapshot returns, so the hub keeps serving
-// requests during the copy (ptone/scion#7360). The start, duration, size
+// (OpenDB, see writeDBSnapshot), closed as soon as the copy is written, so
+// the hub keeps serving requests during the copy (ptone/scion#7360). The start, duration, size
 // and outcome of the copy go to the run log and to the server log.
 //
 // Leftover ".partial" files of a killed snapshot are removed first
@@ -259,48 +259,11 @@ func (s *SQLiteSnapshotter) Snapshot(ctx context.Context, fromVersion string, lo
 	if err != nil {
 		_, _ = fmt.Fprintf(logger, "Warning: removing leftover partial snapshots failed: %v\n", err)
 	}
-	db, err := s.openDB(s.file)
-	if err != nil {
-		return "", fmt.Errorf("open the database for the snapshot: %w", err)
-	}
-	defer func() { _ = db.Close() }()
-	size, err := sqliteDatabaseSize(ctx, db)
-	if err != nil {
-		return "", err
-	}
-	free, err := s.freeSpace(s.dir)
-	if err != nil {
-		return "", fmt.Errorf("read the free disk space in %s: %w", s.dir, err)
-	}
-	if need := 2 * size; free < need {
-		return "", fmt.Errorf("not enough free disk space for the database snapshot: %d bytes available in %s, "+
-			"at least %d needed (twice the database size of %d bytes); free some space (older snapshots in %s can be removed) and retry",
-			free, s.dir, need, size, s.dir)
-	}
-
 	ts := now.UTC().Format(snapshotTimeFormat)
 	dbPath := filepath.Join(s.dir, dbSnapshotPrefix+snapshotVersionLabel(fromVersion)+"-"+ts+dbSnapshotSuffix)
-	log := logging.Subsystem("hub.maintenance.db-snapshot")
-	_, _ = fmt.Fprintf(logger, "Writing a database snapshot of %d bytes; the hub keeps serving requests meanwhile.\n", size)
-	log.Info("Database snapshot started", "bytes", size, "path", dbPath)
-	start := time.Now()
-	// writeAtomically hands VACUUM INTO an existing, empty .partial file.
-	// SQLite allows that: "The file named by the INTO clause must not
-	// previously exist, or else it must be an empty file"
-	// (https://www.sqlite.org/lang_vacuum.html).
-	err = writeAtomically(dbPath, func(tmp string) error {
-		_, err := db.ExecContext(ctx, "VACUUM INTO ?", tmp)
-		return err
-	})
-	elapsed := time.Since(start).Round(time.Millisecond)
-	if err != nil {
-		log.Warn("Database snapshot failed", "outcome", "failed", "bytes", size, "duration", elapsed,
-			"path", dbPath, "error", err)
-		return "", fmt.Errorf("database snapshot %s: %w", dbPath, err)
+	if err := s.writeDBSnapshot(ctx, dbPath, logger); err != nil {
+		return "", err
 	}
-	log.Info("Database snapshot written", "outcome", "ok", "bytes", size, "duration", elapsed, "path", dbPath)
-	_, _ = fmt.Fprintf(logger, "Database snapshot written: %s (%d bytes in the database, %s)\n",
-		dbPath, size, elapsed)
 
 	if s.settings != "" {
 		settingsPath := filepath.Join(s.dir, settingsSnapshotPrefix+ts+settingsSnapshotSuffix)
@@ -327,6 +290,55 @@ func (s *SQLiteSnapshotter) Snapshot(ctx context.Context, fromVersion string, lo
 		}
 	}
 	return dbPath, nil
+}
+
+// writeDBSnapshot writes the database snapshot to dbPath. It owns the
+// private source connection (OpenDB): it opens it, reads the database size,
+// refuses when the free space in the snapshot directory is less than twice
+// that size, runs VACUUM INTO, and closes the connection before it returns,
+// so the connection is never held during the settings copy or pruning.
+func (s *SQLiteSnapshotter) writeDBSnapshot(ctx context.Context, dbPath string, logger io.Writer) error {
+	db, err := s.openDB(s.file)
+	if err != nil {
+		return fmt.Errorf("open the database for the snapshot: %w", err)
+	}
+	defer func() { _ = db.Close() }()
+	size, err := sqliteDatabaseSize(ctx, db)
+	if err != nil {
+		return err
+	}
+	free, err := s.freeSpace(s.dir)
+	if err != nil {
+		return fmt.Errorf("read the free disk space in %s: %w", s.dir, err)
+	}
+	if need := 2 * size; free < need {
+		return fmt.Errorf("not enough free disk space for the database snapshot: %d bytes available in %s, "+
+			"at least %d needed (twice the database size of %d bytes); free some space (older snapshots in %s can be removed) and retry",
+			free, s.dir, need, size, s.dir)
+	}
+
+	log := logging.Subsystem("hub.maintenance.db-snapshot")
+	_, _ = fmt.Fprintf(logger, "Writing a database snapshot of %d bytes; the hub keeps serving requests meanwhile.\n", size)
+	log.Info("Database snapshot started", "bytes", size, "path", dbPath)
+	start := time.Now()
+	// writeAtomically hands VACUUM INTO an existing, empty .partial file.
+	// SQLite allows that: "The file named by the INTO clause must not
+	// previously exist, or else it must be an empty file"
+	// (https://www.sqlite.org/lang_vacuum.html).
+	err = writeAtomically(dbPath, func(tmp string) error {
+		_, err := db.ExecContext(ctx, "VACUUM INTO ?", tmp)
+		return err
+	})
+	elapsed := time.Since(start).Round(time.Millisecond)
+	if err != nil {
+		log.Warn("Database snapshot failed", "outcome", "failed", "bytes", size, "duration", elapsed,
+			"path", dbPath, "error", err)
+		return fmt.Errorf("database snapshot %s: %w", dbPath, err)
+	}
+	log.Info("Database snapshot written", "outcome", "ok", "bytes", size, "duration", elapsed, "path", dbPath)
+	_, _ = fmt.Fprintf(logger, "Database snapshot written: %s (%d bytes in the database, %s)\n",
+		dbPath, size, elapsed)
+	return nil
 }
 
 // sqliteDatabaseSize is the database's size in bytes (pages × page size).
