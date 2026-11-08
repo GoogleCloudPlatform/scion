@@ -104,7 +104,9 @@ func WriteRuntimeBrokerInstances(dir string, instances []V1RuntimeBrokerInstance
 
 // RemoveRuntimeBrokerInstances is the inverse of
 // WriteRuntimeBrokerInstances: it removes server.broker.instances from the
-// global settings file in dir, and changes nothing else. It refuses, with
+// global settings file in dir, then server.broker and server if that left
+// them empty mappings, and changes nothing else. (A file that already had
+// an explicitly empty server.broker mapping before the write loses it.) It refuses, with
 // an *InstancesMismatchError naming the differing instance keys, unless
 // the current list equals expected. An absent key is a no-op. It writes
 // as WriteRuntimeBrokerInstances does.
@@ -283,12 +285,23 @@ func editInstancesYAML(orig []byte, set []V1RuntimeBrokerInstanceConfig) ([]byte
 		}
 		edit.value = &node
 	}
+	// The removal also prunes the server.broker and server mappings it
+	// leaves empty, innermost first, so a rollback restores a file that
+	// had no server section; a mapping holding any other key is kept.
+	edits := []versionedSettingEdit{edit}
 	if edit.value == nil {
-		_, err = deleteYAMLPath(root, edit.path)
-	} else {
-		_, err = setYAMLPath(root, edit.path, edit.value)
-	}
-	if err != nil {
+		if _, err = deleteYAMLPath(root, edit.path); err != nil {
+			return nil, err
+		}
+		for _, parent := range [][]string{{"server", "broker"}, {"server"}} {
+			if emptyMappingAt(root, parent) {
+				if _, err = deleteYAMLPath(root, parent); err != nil {
+					return nil, err
+				}
+				edits = append(edits, versionedSettingEdit{path: parent})
+			}
+		}
+	} else if _, err = setYAMLPath(root, edit.path, edit.value); err != nil {
 		return nil, err
 	}
 	var want interface{}
@@ -299,7 +312,15 @@ func editInstancesYAML(orig []byte, set []V1RuntimeBrokerInstanceConfig) ([]byte
 	if err != nil {
 		return nil, err
 	}
-	if spliced, ok := spliceVersionedSettingEdit(orig, edit, indent); ok && yamlDecodesTo(spliced, want) && decodeVersionedSettingsYAML(spliced) == nil {
+	// The byte-level splices, one per edit in order, keep every other byte;
+	// the full re-encode above is the fallback.
+	spliced, ok := orig, true
+	for _, e := range edits {
+		if spliced, ok = spliceVersionedSettingEdit(spliced, e, indent); !ok {
+			break
+		}
+	}
+	if ok && yamlDecodesTo(spliced, want) && decodeVersionedSettingsYAML(spliced) == nil {
 		out = spliced
 	}
 	if !yamlDecodesTo(out, want) {
@@ -309,6 +330,19 @@ func editInstancesYAML(orig []byte, set []V1RuntimeBrokerInstanceConfig) ([]byte
 		return nil, fmt.Errorf("the edited settings would not load: %w", err)
 	}
 	return out, nil
+}
+
+// emptyMappingAt reports whether the node at path under root is a mapping
+// with no keys (absent or any other kind: false).
+func emptyMappingAt(root *yamlv3.Node, path []string) bool {
+	n := root
+	for _, k := range path {
+		if n == nil || n.Kind != yamlv3.MappingNode {
+			return false
+		}
+		_, n = findMapKey(n, k)
+	}
+	return n != nil && n.Kind == yamlv3.MappingNode && len(n.Content) == 0
 }
 
 // strictInstancesFromYAML strictly loads server.broker.instances from the

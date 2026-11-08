@@ -367,6 +367,16 @@ func (f *applyFixture) plan() (*Plan, ApplyInput) {
 	return p, ApplyInput{Plan: p, LegacyDefaultProfile: vs.ActiveProfile}
 }
 
+// instanceKey is the fixture's one planned instance key, read from the plan
+// the command would build (the converter names it after its target).
+func (f *applyFixture) instanceKey() string {
+	f.t.Helper()
+	p, _ := f.plan()
+	insts := p.SettingsInstances()
+	require.Len(f.t, insts, 1)
+	return insts[0].Key
+}
+
 // resumeInput rebuilds the plan of a run whose step 2 wrote the settings,
 // as the command does: the settings without the instances key, and the
 // evidence copy as the raw bytes.
@@ -413,6 +423,7 @@ func refusalCode(t *testing.T, err error) string {
 // settings, the link and the default; a second run is a no-op.
 func TestApply_ConvertsAndSecondRunIsNoop(t *testing.T) {
 	f := newApplyFixture(t)
+	key := f.instanceKey() // before apply: once the settings are flat the plan is rebuilt differently
 	rep, err := f.apply()
 	require.NoError(t, err)
 	assert.Equal(t, JournalApplied, rep.State)
@@ -422,7 +433,10 @@ func TestApply_ConvertsAndSecondRunIsNoop(t *testing.T) {
 	insts, err := f.env.LoadInstances()
 	require.NoError(t, err)
 	require.Len(t, insts, 1)
-	assert.Equal(t, "build", insts[0].Key)
+	// The one pinned literal: the converter names the docker-target
+	// instance after its target (profile_conversion.go), not the profile.
+	assert.Equal(t, "docker", insts[0].Key)
+	assert.Equal(t, key, insts[0].Key)
 
 	p1, p2 := f.hub.projects["p-1"], f.hub.projects["p-2"]
 	assert.Contains(t, p1.providers, applyInstanceID)
@@ -485,7 +499,8 @@ func TestApply_RefusesWithNoWrite(t *testing.T) {
 			f.hub.legacy["lastHeartbeat"] = testNow.Add(-30 * time.Second).Format(time.RFC3339)
 		}, RefuseServerRunning},
 		{"instance name collision", func(f *applyFixture) {
-			f.hub.brokers = []map[string]any{{"id": "b-x", "name": "build", "slug": "build"}}
+			key := f.instanceKey()
+			f.hub.brokers = []map[string]any{{"id": "b-x", "name": key, "slug": key}}
 		}, RefuseNameConflict},
 		{"local path link", func(f *applyFixture) { f.hub.projects["p-2"].providers[applyLegacyID] = "/srv/api" }, RefuseLocalPath},
 		{"capacity write not permitted", func(f *applyFixture) { f.hub.canUpdate = false }, RefuseCapacityPermission},
@@ -503,7 +518,7 @@ func TestApply_RefusesWithNoWrite(t *testing.T) {
 			assert.Zero(t, f.hub.writeCount(), "no Hub write")
 			assert.Zero(t, f.regCalls)
 			assert.Equal(t, before, settingsBytes(t, f.g), "settings untouched")
-			_, err = os.Lstat(filepath.Join(f.g, "runtime-brokers", "build"))
+			_, err = os.Lstat(filepath.Join(f.g, "runtime-brokers", f.instanceKey()))
 			assert.True(t, errors.Is(err, fs.ErrNotExist), "no identity minted")
 		})
 	}
@@ -568,6 +583,7 @@ func TestApply_ResumeAfterStep3Failure(t *testing.T) {
 // AC3: rollback before retirement.
 func TestRollback_RestoresLegacyHost(t *testing.T) {
 	f := newApplyFixture(t)
+	key := f.instanceKey()
 	before := settingsBytes(t, f.g)
 	_, err := f.apply()
 	require.NoError(t, err)
@@ -595,14 +611,14 @@ func TestRollback_RestoresLegacyHost(t *testing.T) {
 	assert.Contains(t, p1.providers, applyLegacyID)
 	assert.Nil(t, f.hub.instance, "the instance row is deregistered")
 	// Order: the row is deregistered before its identity is moved aside.
-	moved := filepath.Join(ConvertDir(f.g), RolledBackDirName, rep.RunID, "build")
+	moved := filepath.Join(ConvertDir(f.g), RolledBackDirName, rep.RunID, key)
 	fi, err = os.Lstat(moved)
 	require.NoError(t, err)
 	assert.Equal(t, os.FileMode(0o700), fi.Mode().Perm())
 	fi, err = os.Lstat(filepath.Join(moved, "identity.json"))
 	require.NoError(t, err)
 	assert.Equal(t, os.FileMode(0o600), fi.Mode().Perm())
-	_, err = os.Lstat(filepath.Join(f.g, "runtime-brokers", "build"))
+	_, err = os.Lstat(filepath.Join(f.g, "runtime-brokers", key))
 	assert.True(t, errors.Is(err, fs.ErrNotExist))
 
 	// The server start check passes after a rollback.
@@ -615,16 +631,28 @@ func TestRollback_RestoresLegacyHost(t *testing.T) {
 // since apply, naming the instance key.
 func TestRollback_RefusesChangedInstances(t *testing.T) {
 	f := newApplyFixture(t)
+	key := f.instanceKey()
 	_, err := f.apply()
 	require.NoError(t, err)
-	data := strings.Replace(string(settingsBytes(t, f.g)), plantedApplyEnv, "PLANTED-CHANGED-VALUE", 1)
+	// Change the env value inside server.broker.instances (after its
+	// "instances:" line), not the legacy profile's copy above it.
+	data := string(settingsBytes(t, f.g))
+	at := strings.Index(data, "instances:")
+	require.Greater(t, at, 0, "apply wrote server.broker.instances")
+	data = data[:at] + strings.Replace(data[at:], plantedApplyEnv, "PLANTED-CHANGED-VALUE", 1)
 	require.NoError(t, os.WriteFile(filepath.Join(f.g, "settings.yaml"), []byte(data), 0o640))
+	got, err := f.env.LoadInstances()
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	require.NotEmpty(t, got[0].AgentDefaults)
+	assert.Equal(t, "PLANTED-CHANGED-VALUE", got[0].AgentDefaults.HarnessOverrides["claude"].Env["API_TOKEN"],
+		"the edit landed in server.broker.instances")
 
 	_, err = Rollback(context.Background(), f.env)
 	require.Error(t, err)
 	assert.Equal(t, RefuseSettingsChanged, refusalCode(t, err))
 	assert.Contains(t, err.Error(), "changed since apply")
-	assert.Contains(t, err.Error(), "build")
+	assert.Contains(t, err.Error(), key)
 	assert.NotContains(t, err.Error(), "PLANTED")
 }
 
@@ -686,6 +714,7 @@ func TestStatus_IsReadOnly(t *testing.T) {
 // identity directory, and change nothing else.
 func TestApplyRollback_WritesOnlyExpectedPaths(t *testing.T) {
 	f := newApplyFixture(t)
+	key := f.instanceKey()
 	require.NoError(t, os.WriteFile(filepath.Join(f.g, "unrelated.txt"), []byte("x"), 0o600))
 	before := listTree(t, f.g)
 	_, err := f.apply()
@@ -700,7 +729,7 @@ func TestApplyRollback_WritesOnlyExpectedPaths(t *testing.T) {
 			return true
 		case strings.HasPrefix(rel, "runtime-brokers/.convert"):
 			return true
-		case rel == "runtime-brokers/build" || strings.HasPrefix(rel, "runtime-brokers/build/"):
+		case rel == "runtime-brokers/"+key || strings.HasPrefix(rel, "runtime-brokers/"+key+"/"):
 			return true
 		}
 		return false
@@ -800,6 +829,7 @@ func TestApply_CapacityWriteFailureResumes(t *testing.T) {
 func TestApply_CapacityDriftRefuses(t *testing.T) {
 	f := newApplyFixture(t)
 	f.hub.maxAgents = 7
+	key := f.instanceKey() // before any apply, as in every other test
 	f.hub.failNext["PUT /api/v1/runtime-brokers/"+applyInstanceID+"/settings"] = http.StatusInternalServerError
 	_, err := f.apply()
 	require.Error(t, err)
@@ -808,7 +838,7 @@ func TestApply_CapacityDriftRefuses(t *testing.T) {
 	_, err = f.apply()
 	require.Error(t, err)
 	assert.Equal(t, RefuseCapacityDrift, refusalCode(t, err))
-	assert.Contains(t, err.Error(), "build")
+	assert.Contains(t, err.Error(), key)
 	assert.Equal(t, int64(3), *f.hub.instMax, "not overwritten")
 }
 
@@ -831,6 +861,7 @@ func TestApply_UnderNoWriteGuard_LoaderDoesNotRewrite(t *testing.T) {
 	writesonread.IsolateForTest(t)
 	writesonread.Set()
 	f := newApplyFixture(t)
+	key := f.instanceKey()
 	before := settingsBytes(t, f.g)
 	_, err := config.LoadSettings(f.g)
 	require.NoError(t, err)
@@ -842,7 +873,7 @@ func TestApply_UnderNoWriteGuard_LoaderDoesNotRewrite(t *testing.T) {
 	for rel, v := range listTree(t, f.g) {
 		if old, ok := tree[rel]; !ok || old != v {
 			ok := rel == "settings.yaml" || rel == ".settings.lock" || rel == "runtime-brokers" ||
-				strings.HasPrefix(rel, "runtime-brokers/.convert") || strings.HasPrefix(rel, "runtime-brokers/build")
+				strings.HasPrefix(rel, "runtime-brokers/.convert") || strings.HasPrefix(rel, "runtime-brokers/"+key)
 			assert.True(t, ok, "unexpected write under the guard: %s", rel)
 		}
 	}

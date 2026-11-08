@@ -188,3 +188,41 @@ func TestWriteRuntimeBrokerInstances_SucceedsUnderNoWriteGuard(t *testing.T) {
 	require.NoError(t, WriteRuntimeBrokerInstances(dir, writerTestInstances()))
 	require.NoError(t, RemoveRuntimeBrokerInstances(dir, writerTestInstances()))
 }
+
+// The inverse prunes the server.broker and server mappings the write
+// created: a file with no server section is restored byte for byte.
+func TestRemoveRuntimeBrokerInstances_PrunesEmptiedServerSection(t *testing.T) {
+	const noServer = "schema_version: \"1\"\nhub:\n  endpoint: https://hub.example.test\n"
+	dir := t.TempDir()
+	path := filepath.Join(dir, "settings.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(noServer), 0o600))
+	require.NoError(t, WriteRuntimeBrokerInstances(dir, writerTestInstances()))
+	require.NoError(t, RemoveRuntimeBrokerInstances(dir, writerTestInstances()))
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, noServer, string(data), "no empty server or server.broker mapping is left behind")
+}
+
+// A server mapping that holds another key is kept; only the emptied
+// server.broker goes.
+func TestRemoveRuntimeBrokerInstances_KeepsServerWithOtherKey(t *testing.T) {
+	const withServer = "schema_version: \"1\"\nserver:\n  mode: workstation\n"
+	dir := t.TempDir()
+	path := filepath.Join(dir, "settings.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(withServer), 0o600))
+	require.NoError(t, WriteRuntimeBrokerInstances(dir, writerTestInstances()))
+	require.NoError(t, RemoveRuntimeBrokerInstances(dir, writerTestInstances()))
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, withServer, string(data), "server keeps its other key")
+}
+
+// A server.broker mapping that holds another key is kept.
+func TestRemoveRuntimeBrokerInstances_KeepsBrokerWithOtherKey(t *testing.T) {
+	dir, path := writeWriterTestSettings(t, 0o600) // server.broker holds broker_id
+	require.NoError(t, WriteRuntimeBrokerInstances(dir, writerTestInstances()))
+	require.NoError(t, RemoveRuntimeBrokerInstances(dir, writerTestInstances()))
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, writerTestSettings, string(data), "server.broker keeps broker_id")
+}
