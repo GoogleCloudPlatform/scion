@@ -25,6 +25,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
@@ -76,6 +77,7 @@ func assertObjectStoreFailureFixed(t *testing.T, rec *httptest.ResponseRecorder,
 	assert.Contains(t, rec.Body.String(), ErrCodeRuntimeError)
 	assert.NotContains(t, rec.Body.String(), upstreamMarker)
 	assertLoggedOnceRendered(t, logs, logMsg)
+	assert.Equal(t, 1, strings.Count(logs.String(), upstreamMarker), "the marker reaches exactly one log record")
 }
 
 func TestTemplateUpload_ObjectStoreFailureFixedText(t *testing.T) {

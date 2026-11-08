@@ -75,6 +75,14 @@ func TestUpstreamText(t *testing.T) {
 			in:   long[:upstreamTextMaxBytes-1] + "é" + long,
 			want: long[:upstreamTextMaxBytes-1] + ellipsis,
 		},
+		{
+			// The cap applies to the rendered output, not the input: each
+			// replaced byte grows to the three bytes of U+FFFD, and the cut
+			// lands on a rune boundary at or before the cap.
+			name: "replaced runes capped on output",
+			in:   strings.Repeat("\x00", 600),
+			want: strings.Repeat("�", upstreamTextMaxBytes/utf8.RuneLen(utf8.RuneError)) + ellipsis,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

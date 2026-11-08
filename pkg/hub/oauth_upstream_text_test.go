@@ -189,4 +189,5 @@ func TestCLIDeviceAuthorize_UpstreamBodyLoggedNotReturned(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), "failed to request device code")
 	assert.NotContains(t, rec.Body.String(), upstreamMarker)
 	assertLoggedOnceRendered(t, logs, "Device code request failed")
+	assert.Equal(t, 1, strings.Count(logs.String(), upstreamMarker), "the marker reaches exactly one log record")
 }
