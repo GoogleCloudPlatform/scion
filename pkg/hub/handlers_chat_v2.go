@@ -3919,7 +3919,12 @@ func (s *Server) authorizeConversationAccess(
 		}
 	}
 	ctx := r.Context()
-	audience, topic := chatKeyReadAudience(ctx, wcs, key)
+	audience, topic, err := chatKeyReadAudience(ctx, wcs, key)
+	if err != nil {
+		logChatStoreFault(ctx, slog.Default(), "chat conversation: topic lookup failed", "key", key, "error", err)
+		InternalError(w)
+		return false
+	}
 	if audience == chatAudienceParticipants {
 		if !validDMKey(key) {
 			BadRequest(w, "invalid DM key format")
@@ -3939,8 +3944,16 @@ func (s *Server) authorizeConversationAccess(
 	}
 	project, err := s.store.GetProject(ctx, topic.ProjectID)
 	if err != nil {
-		logReferenceRefused(ctx, logging.RequestPath(r), "topic project lookup failed: "+err.Error(), GetIdentityFromContext(ctx))
-		NotFound(w, "Thread")
+		// A missing project is answered as a missing thread, so the answer
+		// reveals nothing; any other store error is the generic 500, with
+		// the error in the server log only.
+		if errors.Is(err, store.ErrNotFound) {
+			logReferenceRefused(ctx, logging.RequestPath(r), "topic project lookup failed: "+err.Error(), GetIdentityFromContext(ctx))
+			NotFound(w, "Thread")
+			return false
+		}
+		logChatStoreFault(ctx, slog.Default(), "chat conversation: topic project lookup failed", "key", key, "error", err)
+		InternalError(w)
 		return false
 	}
 	// Mute, pin and read state are per-user settings on a conversation the

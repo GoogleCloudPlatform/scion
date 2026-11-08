@@ -421,6 +421,11 @@ type ServerConfig struct {
 	// effect is applied live from the endpoints settings section
 	// (ApplySnapshot); read it through HubEndpoints().Content, not directly.
 	ContentURL string
+	// ContentURLAllowSameSite is server.hub.content_url_allow_same_site as
+	// configured at startup: the override that lets ContentURL be on the
+	// hub's registrable domain. Applied live like ContentURL; read it
+	// through contentURLAllowSameSiteLiveValue.
+	ContentURLAllowSameSite bool
 	// DisableLegacyStorageFallback disables the legacy un-namespaced storage
 	// path fallback. When true, only hub-scoped paths are checked.
 	DisableLegacyStorageFallback bool
@@ -1727,7 +1732,8 @@ type RemoteHubAgentDefaults struct {
 	// ptone/scion#4224).
 	Telemetry *api.TelemetryConfig `json:"telemetry,omitempty"`
 	// ImageTag is the hub-resolved image_tag (api.HubAgentDefaults.ImageTag),
-	// set only while hub.image_tag_setting is on and the setting is set
+	// set only when a tag applies (imageTagStateOf: a set value with
+	// hub.image_tag_setting on, or the version default of a release build)
 	// (withDispatchImageTag). A broker that predates it ignores it and runs
 	// the images it resolves unchanged.
 	ImageTag string `json:"imageTag,omitempty"`
@@ -1745,6 +1751,14 @@ type RemoteGCPIdentityConfig struct {
 	// name; the two types are decoded independently (no shared Go type), so
 	// nothing but the tag keeps them in step.
 	RequireLocalRuntime bool `json:"require_local_runtime,omitempty"`
+
+	// NativeCloudRun marks a create the hub decided runs on Cloud Run
+	// Instances as the agent's own identity (markCloudRunNative). It is set
+	// only from that dispatch's decision, never copied from the agent's
+	// config, the create request or a template. The broker runs an assign
+	// create natively only with it. The JSON tag must match
+	// runtimebroker.GCPIdentityConfig's field of the same name.
+	NativeCloudRun bool `json:"native_cloud_run,omitempty"`
 }
 
 // RemoteAgentResponse is the response from creating an agent on a remote runtime broker.
@@ -2426,11 +2440,16 @@ type Server struct {
 	// Dedicated artifact decision logger (nil = entries are discarded)
 	artifactDecisionLog *slog.Logger
 
-	// contentURLLive is the server.hub.content_url ApplySnapshot last
-	// applied, or nil before the first apply (ServerConfig.ContentURL then
-	// applies). It is read on every request by the content host's guard, so
-	// it is an atomic rather than a field under mu.
-	contentURLLive atomic.Pointer[string]
+	// contentURLLive is server.hub.content_url and
+	// server.hub.content_url_allow_same_site as ApplySnapshot last applied
+	// them, with what the hub derives from them (the classification, the
+	// parsed content host and the hub's host name; newContentURLLiveState),
+	// or nil before the first apply (ServerConfig then applies). It is read
+	// on every request by the content host's guard, so it is an atomic
+	// rather than a field under mu, and nothing in it is parsed per request.
+	// The values share one pointer so that no reader sees a new URL with the
+	// old override, or a parsed host from another apply.
+	contentURLLive atomic.Pointer[contentURLLiveState]
 	// contentURLWarned is the server.hub.content_url value whose problem
 	// (invalid, or on or beside the hub's own host) was last logged
 	// (contentURLInEffect), so each value is warned about once.
@@ -5446,8 +5465,8 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 	// It is read per dispatch, so a saved image_registry applies to the
 	// next agent (ptone/scion#3904).
 	dispatcher.SetImageRegistryProvider(s.dispatchImageRegistryFor)
-	// image_tag (ptone/scion#6625): read per dispatch, "" while
-	// hub.image_tag_setting is off.
+	// image_tag (ptone/scion#6625): read per dispatch, "" when no tag
+	// applies (imageTagStateOf).
 	dispatcher.SetImageTagProvider(s.dispatchImageTagFor)
 
 	return dispatcher

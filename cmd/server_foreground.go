@@ -440,6 +440,8 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		// Before the plugin manager loads plugins: after a boot-failure
 		// guard rollback, the plugins of the restored release.
 		reconcilePluginsAfterRollback(installRoot)
+		// The previous builds a successful update kept until its restart.
+		removeAppliedPluginStaging()
 		s, entClient, err = initStore(ctx, cfg)
 		if err != nil {
 			// A stop during the migrations is a clean exit, not a failed
@@ -2984,6 +2986,8 @@ func buildHubServerConfig(cfg *config.GlobalConfig, hubEndpoint, devAuthToken st
 		// ignores, with a warning, a value that is invalid or on its own
 		// host name (contentURLInEffect).
 		ContentURL: cfg.Hub.ContentURL,
+		// The override that lets it be on the hub's registrable domain.
+		ContentURLAllowSameSite: cfg.Hub.ContentURLAllowSameSite,
 		// Derive the agent/user JWT signing keys from the same shared session
 		// secret the web cookie store uses, so every replica behind the load
 		// balancer agrees on the signing key regardless of its host-derived
@@ -3674,11 +3678,14 @@ func initOperationalSettings(ctx context.Context, cfg *config.GlobalConfig, hubS
 	hubSrv.WarnShadowedImageRegistries(flatInstanceImageRegistries())
 	// image_tag (ptone/scion#6625): the resolved value and its source, once;
 	// later changes are logged as they are applied. Warns when a value is
-	// set while hub.image_tag_setting is off.
+	// set while hub.image_tag_setting is off (it then also suppresses the
+	// version default).
 	hubSrv.LogImageTag()
 	// A saved authorized_domains that differs from the deployment value
 	// (before ptone/scion#6000 a saved list was not enforced).
 	hubSrv.WarnAuthorizedDomainsDrift(snap)
+	// A stored content URL that is not in effect (ptone/scion#7107).
+	hubSrv.WarnContentURLNotInEffect()
 
 	if envKeys := ops.EnvOverriddenKeys(); len(envKeys) > 0 {
 		slog.Warn("Layer-1 settings overridden by SCION_SERVER_* env vars on this node — these values diverge from the shared DB",

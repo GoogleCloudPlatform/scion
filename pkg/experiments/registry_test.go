@@ -652,6 +652,28 @@ func TestLifecycleEventsExperimentRegistered(t *testing.T) {
 	}
 }
 
+// TestImageTagVersionDefaultExperimentRegistered pins
+// hub.image_tag_version_default (ptone/scion#6625): server-layer only, and
+// it ships on, so a release build pulls its own version's images.
+func TestImageTagVersionDefaultExperimentRegistered(t *testing.T) {
+	e, ok := Default().Lookup(ImageTagVersionDefault)
+	if !ok {
+		t.Fatalf("%s is not registered", ImageTagVersionDefault)
+	}
+	if ImageTagVersionDefault != "hub.image_tag_version_default" {
+		t.Fatalf("frozen name changed: %q", ImageTagVersionDefault)
+	}
+	if !e.Default {
+		t.Fatal("the image tag version default must default to on")
+	}
+	if !e.HasLayer(LayerServer) || e.HasLayer(LayerWeb) {
+		t.Fatalf("must be a server-layer (only) experiment, got %v", e.Layers)
+	}
+	if e.Issue != "ptone/scion#6625" || e.Stage != StageAlpha || e.Owner != "hub" {
+		t.Fatalf("unexpected registration: %+v", e)
+	}
+}
+
 // TestImageTagSettingExperimentRegistered pins hub.image_tag_setting
 // (ptone/scion#6625): the hub decides whether image_tag applies, so it is
 // server-layer only, and it ships off.
