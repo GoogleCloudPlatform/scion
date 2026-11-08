@@ -1175,7 +1175,7 @@ var chatOperations = []OperationSpec{
 	{
 		ID:          "chat.decision.answer",
 		Domain:      "chat",
-		Description: "Answer a choice prompt decision by choice id (the label is copied from the stored row). Needs the right to send in the prompt's conversation (project:read and project.chat_post for a thread; for a DM, only the user in its key). Agents, visitors and tokens get 403. A replaced version or an answered one is 409; the first answer wins. Records the answer and a choice-response message, delivers it to the asking agent and publishes choice.updated. 404 while web.chat_choices is off",
+		Description: "Answer a choice prompt decision by choice id (the label is copied from the stored row). Needs the right to send in the prompt's conversation (project:read and project.chat_post for a thread; for a DM, only the user in its key). Agents, visitors and tokens get 403, and so does a user other than the one an agent-interpreted answer records. A replaced version or an answered one is 409, as is an idempotency key reused for another answer; the first answer wins. Records the answer and a choice-response message, delivers it to the asking agent and publishes choice.updated. 404 while web.chat_choices is off",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/decisions/{rowId}/answer", Method: "POST"},
 		},
@@ -1200,10 +1200,11 @@ var chatOperations = []OperationSpec{
 			Atomic:                 false,
 			NonAtomicJustification: "The answer and its response message are stored in one transaction before agent delivery, which is fire-and-forget",
 		},
-		DenialCodes: []DenialCode{DenialForbidden, DenialResourceNotFound},
+		DenialCodes: []DenialCode{DenialForbidden, DenialResourceNotFound, DenialConflict},
 		TestRefs: []TestRef{
 			{Package: "pkg/hub", Function: "TestDecisionAnswer_Authorization"},
 			{Package: "pkg/hub", Function: "TestDecisionAnswer_ConcurrentOneWinner"},
+			{Package: "pkg/hub", Function: "TestDecisionAnswer_IdempotencyKeyKeepsChecks"},
 		},
 		Bearer: SessionOnly(ReasonInteractiveState),
 	},

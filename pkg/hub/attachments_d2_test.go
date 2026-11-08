@@ -169,7 +169,7 @@ type orderedEvents struct {
 	rec *orderRecorder
 }
 
-func (e orderedEvents) PublishUserMessage(ctx context.Context, msg *store.Message, a []AttachmentRef, r []artifacts.MessageRef) {
+func (e orderedEvents) PublishUserMessage(ctx context.Context, msg *store.Message, a []AttachmentRef, r []artifacts.MessageRef, _ ...ChatEventOption) {
 	e.rec.add("sse:" + msg.ID)
 	e.EventPublisher.PublishUserMessage(ctx, msg, a, r)
 }

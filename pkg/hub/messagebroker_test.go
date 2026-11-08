@@ -903,7 +903,7 @@ func TestMessageBrokerProxy_UserMessageLinksAttachments(t *testing.T) {
 	defer unsubscribe()
 	// The member fan-out gets the same refs as the live event.
 	var fanouts [][]AttachmentRef
-	proxy.memberFanout = func(_ context.Context, _ *store.Message, attachments []AttachmentRef, _ []artifacts.MessageRef) {
+	proxy.memberFanout = func(_ context.Context, _ *store.Message, attachments []AttachmentRef, _ []artifacts.MessageRef, _ ...ChatEventOption) {
 		fanouts = append(fanouts, attachments)
 	}
 

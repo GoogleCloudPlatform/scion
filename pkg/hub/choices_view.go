@@ -176,6 +176,16 @@ func (s *Server) choicePromptViews(ctx context.Context, msgs []*store.Message) m
 		slog.WarnContext(ctx, "choices: decisions unreadable for history", "error", err)
 		return nil
 	}
+	// The versions that replaced these, in one batch.
+	var replacedByIDs []string
+	for _, ds := range rows {
+		for _, d := range ds {
+			if d.ReplacedByID != "" {
+				replacedByIDs = append(replacedByIDs, d.ReplacedByID)
+			}
+		}
+	}
+	replacedBy := s.decisionRows(ctx, replacedByIDs)
 	out := make(map[string]ChoicePromptView, len(rows))
 	for id, ds := range rows {
 		if len(ds) == 0 {
@@ -186,11 +196,26 @@ func (s *Server) choicePromptViews(ctx context.Context, msgs []*store.Message) m
 			if d.Position == 0 {
 				view.Intro = messages.ChoiceIntro(byID[id].Msg, d.IntroLength)
 			}
-			view.Decisions = append(view.Decisions, s.decisionViewFor(ctx, d))
+			view.Decisions = append(view.Decisions, decisionView(d, replacedBy[d.ReplacedByID]))
 		}
 		out[id] = view
 	}
 	return out
+}
+
+// decisionRows reads the given decision versions in one batch. A read
+// failure is logged and returns none (the views then omit what needs
+// them).
+func (s *Server) decisionRows(ctx context.Context, rowIDs []string) map[string]*store.Decision {
+	if len(rowIDs) == 0 {
+		return nil
+	}
+	rows, err := s.store.GetDecisionRowsByIDs(ctx, rowIDs)
+	if err != nil {
+		slog.WarnContext(ctx, "choices: decision rows unreadable", "error", err)
+		return nil
+	}
+	return rows
 }
 
 // choicePromptViewOf returns the view of one stored choice prompt, or nil.
@@ -219,6 +244,11 @@ func (s *Server) choiceResponseViews(ctx context.Context, msgs []*store.Message)
 		slog.WarnContext(ctx, "choices: answers unreadable for history", "error", err)
 		return nil
 	}
+	rowIDs := make([]string, 0, len(answers))
+	for _, a := range answers {
+		rowIDs = append(rowIDs, a.DecisionRowID)
+	}
+	prompts := s.decisionRows(ctx, rowIDs)
 	out := make(map[string]ChoiceResponseView, len(answers))
 	for id, a := range answers {
 		v := ChoiceResponseView{
@@ -232,7 +262,7 @@ func (s *Server) choiceResponseViews(ctx context.Context, msgs []*store.Message)
 			Provenance:      a.Provenance,
 			SourceMessageID: a.SourceMessageID,
 		}
-		if d, err := s.store.GetDecision(ctx, a.DecisionRowID); err == nil {
+		if d := prompts[a.DecisionRowID]; d != nil {
 			v.PromptMessageID = d.MessageID
 		}
 		out[id] = v
@@ -268,28 +298,15 @@ func (s *Server) addChoiceHistoryViews(ctx context.Context, resp *chatHistoryRes
 }
 
 // choiceEventPayload is what a chat message event carries for a choice
-// prompt or response. The handler that stores the message puts it on the
-// context of PublishUserMessage, so the event publisher needs no store.
+// prompt or response. The handler that stores the message passes it to
+// PublishUserMessage and the member fan-out (withChoiceEvent), so the
+// event publisher needs no store.
 type choiceEventPayload struct {
 	Prompt   *ChoicePromptView
 	Response *ChoiceResponseView
 }
 
-type choiceEventPayloadKey struct{}
-
-// withChoiceEventPayload returns ctx carrying p for PublishUserMessage.
-func withChoiceEventPayload(ctx context.Context, p *choiceEventPayload) context.Context {
-	if p == nil {
-		return ctx
-	}
-	return context.WithValue(ctx, choiceEventPayloadKey{}, p)
-}
-
-// choiceEventPayloadFrom returns the payload ctx carries, or nil.
-func choiceEventPayloadFrom(ctx context.Context) *choiceEventPayload {
-	if ctx == nil {
-		return nil
-	}
-	p, _ := ctx.Value(choiceEventPayloadKey{}).(*choiceEventPayload)
-	return p
+// withChoiceEvent makes the chat events of a published message carry p.
+func withChoiceEvent(p *choiceEventPayload) ChatEventOption {
+	return func(o *chatEventOptions) { o.choice = p }
 }

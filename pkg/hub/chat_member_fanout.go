@@ -70,12 +70,13 @@ func snapshotThreadMessage(msg *store.Message, attachments []AttachmentRef, arti
 // published; it never blocks or fails them. Paths that also record thread
 // membership for the message use recordThreadMembersThenFanOutAsync, or
 // record membership before publishing, so new members are recipients.
-func (s *Server) fanOutThreadMessageToMembersAsync(ctx context.Context, msg *store.Message, attachments []AttachmentRef, artifactRefs []artifacts.MessageRef) {
+func (s *Server) fanOutThreadMessageToMembersAsync(ctx context.Context, msg *store.Message, attachments []AttachmentRef, artifactRefs []artifacts.MessageRef, opts ...ChatEventOption) {
 	if !isWebThreadMessage(msg) {
 		return
 	}
 	ctx = context.WithoutCancel(ctx)
 	msg, attachments, artifactRefs = snapshotThreadMessage(msg, attachments, artifactRefs)
+	opts = append([]ChatEventOption(nil), opts...)
 	go func() {
 		defer func() {
 			if rec := recover(); rec != nil {
@@ -85,7 +86,7 @@ func (s *Server) fanOutThreadMessageToMembersAsync(ctx context.Context, msg *sto
 		}()
 		ctx, cancel := context.WithTimeout(ctx, s.chatMemberFanout.withDefaults().timeout)
 		defer cancel()
-		s.fanOutThreadMessageToMembers(ctx, msg, attachments, artifactRefs)
+		s.fanOutThreadMessageToMembers(ctx, msg, attachments, artifactRefs, opts...)
 	}()
 }
 
@@ -145,7 +146,7 @@ func isWebThreadMessage(msg *store.Message) bool {
 // rows are a listing index, not authorization, so each recipient must also
 // be an active (not suspended) user who can read the project now. A user
 // who left the thread, or lost project access, gets nothing here.
-func (s *Server) fanOutThreadMessageToMembers(ctx context.Context, msg *store.Message, attachments []AttachmentRef, artifactRefs []artifacts.MessageRef) {
+func (s *Server) fanOutThreadMessageToMembers(ctx context.Context, msg *store.Message, attachments []AttachmentRef, artifactRefs []artifacts.MessageRef, opts ...ChatEventOption) {
 	if !isWebThreadMessage(msg) {
 		return
 	}
@@ -233,5 +234,5 @@ func (s *Server) fanOutThreadMessageToMembers(ctx context.Context, msg *store.Me
 	if len(recipients) == 0 {
 		return
 	}
-	s.events.PublishChatMemberMessage(ctx, msg, attachments, artifactRefs, recipients)
+	s.events.PublishChatMemberMessage(ctx, msg, attachments, artifactRefs, recipients, opts...)
 }

@@ -99,7 +99,8 @@ func (s *Server) prepareChoicePromptSend(w http.ResponseWriter, req *OutboundMes
 		writeChoiceErrors(w, err)
 		return nil, false
 	}
-	return &choicePromptSend{decisions: decisions, update: req.ChoicesUpdate, intro: req.Msg}, true
+	// The intro is set from the body once its mentions are rewritten.
+	return &choicePromptSend{decisions: decisions, update: req.ChoicesUpdate}, true
 }
 
 // isBroadcastRecipient reports whether a recipient names a broadcast.
@@ -201,11 +202,14 @@ type ChoiceDecisionResult struct {
 	Replaced *ChoiceReplacedDecision `json:"replaced"`
 }
 
-// ChoiceReplacedDecision is the version a send replaced, as it was.
+// ChoiceReplacedDecision is the version a send replaced, as it was. For a
+// decided version, Answer is the effective answer's label and AnsweredBy
+// who gave it (the name, else the email).
 type ChoiceReplacedDecision struct {
-	Version int    `json:"version"`
-	Status  string `json:"status"`
-	Answer  string `json:"answer,omitempty"`
+	Version    int    `json:"version"`
+	Status     string `json:"status"`
+	Answer     string `json:"answer,omitempty"`
+	AnsweredBy string `json:"answered_by,omitempty"`
 }
 
 // choiceDecisionResults is the decisions field of the send response.
@@ -218,8 +222,12 @@ func choiceDecisionResults(agentID string, res *store.ChoicePromptResult) []Choi
 		out[i] = ChoiceDecisionResult{Key: d.Key, Version: d.Version, Ref: d.Ref(agentID), RowID: d.RowID}
 		if d.Replaced != nil {
 			r := &ChoiceReplacedDecision{Version: d.Replaced.Version, Status: d.Replaced.Status}
-			if d.Replaced.Answer != nil {
-				r.Answer = d.Replaced.Answer.ChoiceLabel
+			if a := d.Replaced.Answer; a != nil {
+				r.Answer = a.ChoiceLabel
+				r.AnsweredBy = a.AnsweredByName
+				if r.AnsweredBy == "" {
+					r.AnsweredBy = a.AnsweredByEmail
+				}
 			}
 			out[i].Replaced = r
 		}

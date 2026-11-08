@@ -62,7 +62,7 @@ type MessageBrokerProxy struct {
 	// memberFanout, when non-nil, fans a stored web thread message out to
 	// the thread's members on their user subjects (see
 	// Server.fanOutThreadMessageToMembersAsync).
-	memberFanout func(ctx context.Context, msg *store.Message, attachments []AttachmentRef, artifactRefs []artifacts.MessageRef)
+	memberFanout func(ctx context.Context, msg *store.Message, attachments []AttachmentRef, artifactRefs []artifacts.MessageRef, opts ...ChatEventOption)
 	// writeDenyEnabled returns whether the G2 write-deny switch is on.
 	// When nil or returning false, conversation resolution failures are non-fatal
 	// (B10 contract). When returning true, they deny the write (G2 contract).

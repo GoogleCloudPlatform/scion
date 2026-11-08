@@ -1000,7 +1000,7 @@ func TestDeliverToUser_RepublishCarriesNoArtifactAttachments(t *testing.T) {
 	logger, logBuf := newCapturingMessageLogger()
 	proxy.messageLog = logger
 	var fanned [][]AttachmentRef
-	proxy.memberFanout = func(_ context.Context, _ *store.Message, refs []AttachmentRef, _ []artifacts.MessageRef) {
+	proxy.memberFanout = func(_ context.Context, _ *store.Message, refs []AttachmentRef, _ []artifacts.MessageRef, _ ...ChatEventOption) {
 		fanned = append(fanned, refs)
 	}
 

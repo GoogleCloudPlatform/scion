@@ -194,33 +194,47 @@ func (s *Server) handleDecisionAnswer(w http.ResponseWriter, r *http.Request, ro
 		return
 	}
 
-	// Step 3: state. A retry with its idempotency key goes to the store,
-	// which replays the recorded answer before any state check.
-	outcome := store.DecisionOutcomeAnswer
-	var overridden *store.DecisionAnswer
-	if req.IdempotencyKey == "" {
-		if d.Status == store.DecisionStatusReplaced {
-			s.writeDecisionReplaced(w, ctx, d)
-			return
-		}
-		if eff := d.EffectiveAnswer(); eff != nil {
-			if eff.Provenance == store.DecisionProvenanceDirect {
+	// Step 3a: a true replay. The answer recorded under this idempotency
+	// key, if it is this user's answer with this choice, is answered again
+	// (200, replayed) before any state check, so a retry after the version
+	// was replaced or answered still gets its answer. The key used for any
+	// other answer is a conflict. A key with no recorded answer is a fresh
+	// answer and gets every check below.
+	if req.IdempotencyKey != "" {
+		if prior := answerWithIdempotencyKey(d, req.IdempotencyKey); prior != nil {
+			if prior.ChoiceID != choice.ID || prior.AnsweredByUserID != user.ID() {
 				s.writeDecisionAnswered(w, ctx, d)
 				return
 			}
-			// An interpreted answer: only the user the agent recorded as
-			// the answerer may confirm or override it (Q2).
-			if eff.AnsweredByUserID == "" || eff.AnsweredByUserID != user.ID() {
-				writeError(w, http.StatusForbidden, ErrCodeNotRecordedAnswerer,
-					"only the user recorded as the answerer can confirm or change this answer",
-					map[string]interface{}{"decision": s.decisionViewFor(ctx, d)})
-				return
-			}
-			outcome = store.DecisionOutcomeConfirm
-			if eff.ChoiceID != choice.ID {
-				outcome = store.DecisionOutcomeOverride
-				overridden = eff
-			}
+			writeJSON(w, http.StatusOK, DecisionAnswerResponse{
+				Decision: s.decisionViewFor(ctx, d), ResponseMessageID: prior.ResponseMessageID, Replayed: true,
+			})
+			return
+		}
+	}
+
+	// Step 3b: state, for every answer that is not a replay.
+	outcome := store.DecisionOutcomeAnswer
+	var overridden *store.DecisionAnswer
+	if d.Status == store.DecisionStatusReplaced {
+		s.writeDecisionReplaced(w, ctx, d)
+		return
+	}
+	if eff := d.EffectiveAnswer(); eff != nil {
+		if eff.Provenance == store.DecisionProvenanceDirect {
+			s.writeDecisionAnswered(w, ctx, d)
+			return
+		}
+		// An interpreted answer: only the user the agent recorded as
+		// the answerer may confirm or override it (Q2).
+		if eff.AnsweredByUserID == "" || eff.AnsweredByUserID != user.ID() {
+			s.writeNotRecordedAnswerer(w, ctx, d)
+			return
+		}
+		outcome = store.DecisionOutcomeConfirm
+		if eff.ChoiceID != choice.ID {
+			outcome = store.DecisionOutcomeOverride
+			overridden = eff
 		}
 	}
 
@@ -249,6 +263,13 @@ func (s *Server) handleDecisionAnswer(w http.ResponseWriter, r *http.Request, ro
 	case err == nil:
 	case errors.Is(err, store.ErrDecisionReplaced):
 		s.writeDecisionReplaced(w, ctx, d)
+		return
+	case errors.Is(err, store.ErrNotRecordedAnswerer):
+		// An interpreted answer recorded after the state check above.
+		if cur, gerr := s.store.GetDecision(ctx, d.ID); gerr == nil {
+			d = cur
+		}
+		s.writeNotRecordedAnswerer(w, ctx, d)
 		return
 	case errors.Is(err, store.ErrDecisionAnswerConflict):
 		// The loser of a race, or an idempotency key reused for another
@@ -286,6 +307,24 @@ func (s *Server) handleDecisionAnswer(w http.ResponseWriter, r *http.Request, ro
 	}
 	s.publishChoiceUpdated(ctx, prompt, view)
 	writeJSON(w, http.StatusOK, DecisionAnswerResponse{Decision: view, ResponseMessageID: answer.ResponseMessageID})
+}
+
+// answerWithIdempotencyKey returns d's answer recorded under key, or nil.
+func answerWithIdempotencyKey(d *store.Decision, key string) *store.DecisionAnswer {
+	for _, a := range d.Answers {
+		if a.IdempotencyKey == key {
+			return a
+		}
+	}
+	return nil
+}
+
+// writeNotRecordedAnswerer answers 403: only the user an interpreted answer
+// records may confirm or change it.
+func (s *Server) writeNotRecordedAnswerer(w http.ResponseWriter, ctx context.Context, d *store.Decision) {
+	writeError(w, http.StatusForbidden, ErrCodeNotRecordedAnswerer,
+		"only the user recorded as the answerer can confirm or change this answer",
+		map[string]interface{}{"decision": s.decisionViewFor(ctx, d)})
 }
 
 // writeDecisionReplaced answers 409 replaced with the decision and the
@@ -407,11 +446,12 @@ func (s *Server) publishChoiceResponse(ctx context.Context, m *store.Message, d 
 		PromptMessageID: d.MessageID,
 		SourceMessageID: a.SourceMessageID,
 	}
-	pubCtx := withChoiceEventPayload(context.WithoutCancel(ctx), &choiceEventPayload{Response: view})
+	pubCtx := context.WithoutCancel(ctx)
+	opt := withChoiceEvent(&choiceEventPayload{Response: view})
 	s.touchConversationActivity(pubCtx, m.ThreadID, m.ID)
-	s.events.PublishUserMessage(pubCtx, m, nil, nil)
+	s.events.PublishUserMessage(pubCtx, m, nil, nil, opt)
 	if !strings.HasPrefix(m.ThreadID, "dm:") {
-		s.fanOutThreadMessageToMembersAsync(pubCtx, m, nil, nil)
+		s.fanOutThreadMessageToMembersAsync(pubCtx, m, nil, nil, opt)
 	}
 }
 

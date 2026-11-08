@@ -1186,6 +1186,10 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	// (agent DM, mention fan-out, human mentions, the stored row) sees the
 	// same body.
 	req.Msg = rewriteIncomingAgentMentions(req.Msg)
+	if choiceSend != nil {
+		// The intro is the body after that rewrite, as the stored row is.
+		choiceSend.intro = req.Msg
+	}
 
 	// Validate DM key format when the thread_id looks like a DM key.
 	// Non-DM thread IDs (topic UUIDs, etc.) pass through as-is.
@@ -1492,13 +1496,13 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 			stampWatermarks(storeCtx, storeMsg)
 		}
 		publishRefs := append(append([]AttachmentRef(nil), attachmentRefs...), boundAttachments...)
-		pubCtx := storeCtx
+		var chatOpts []ChatEventOption
 		if choiceSend != nil {
 			// The chat events of a choice prompt carry its decisions.
-			pubCtx = withChoiceEventPayload(storeCtx, &choiceEventPayload{Prompt: s.choicePromptViewOf(storeCtx, storeMsg)})
+			chatOpts = append(chatOpts, withChoiceEvent(&choiceEventPayload{Prompt: s.choicePromptViewOf(storeCtx, storeMsg)}))
 		}
-		s.events.PublishUserMessage(pubCtx, storeMsg, publishRefs, recordedRefs)
-		s.fanOutThreadMessageToMembersAsync(pubCtx, storeMsg, publishRefs, recordedRefs)
+		s.events.PublishUserMessage(storeCtx, storeMsg, publishRefs, recordedRefs, chatOpts...)
+		s.fanOutThreadMessageToMembersAsync(storeCtx, storeMsg, publishRefs, recordedRefs, chatOpts...)
 		return nil
 	}
 

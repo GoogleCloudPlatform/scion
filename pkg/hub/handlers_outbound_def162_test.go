@@ -433,7 +433,7 @@ func TestDEF162_AgentMention_Broker_FannedOutToMentioned(t *testing.T) {
 	proxy.webChatStore = srv.webChatStore
 	srv.mu.RUnlock()
 	var hookCalls, memberAtHook atomic.Int32
-	proxy.memberFanout = func(ctx context.Context, msg *store.Message, attachments []AttachmentRef, artifactRefs []artifacts.MessageRef) {
+	proxy.memberFanout = func(ctx context.Context, msg *store.Message, attachments []AttachmentRef, artifactRefs []artifacts.MessageRef, _ ...ChatEventOption) {
 		if isWebThreadMessage(msg) {
 			hookCalls.Add(1)
 			parts, err := s.ListParticipants(ctx, convID)

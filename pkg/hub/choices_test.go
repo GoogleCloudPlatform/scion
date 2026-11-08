@@ -558,3 +558,229 @@ func TestChoicesHistory_ViewsGatedByExperiment(t *testing.T) {
 	assert.Nil(t, h.MessageChoiceIntros)
 	assert.Nil(t, h.MessageChoiceResponses)
 }
+
+// ---------------------------------------------------------------------------
+// Review round 1
+// ---------------------------------------------------------------------------
+
+// A choice prompt into a group conversation is addressed to humans: it
+// wakes no default agent and fans out no agent mention. The same posts
+// without choices (the controls) do both.
+func TestChoicesSend_GroupPostWakesNoAgent(t *testing.T) {
+	f := newGroupWakeFixture(t)
+	setChoicesExperiment(t, f.srv, true)
+	f.setDefault(t, f.target.ID)
+
+	f.post(t, "status update for the group", "")
+	require.Len(t, dispatchesTo(f.dispatcher, f.target.ID), 1, "control: a plain post wakes the default agent")
+	f.post(t, "@"+mentionBystanderSlug+" please look", "")
+	require.Len(t, dispatchesTo(f.dispatcher, f.bystander.ID), 1, "control: a plain post fans out its mention")
+	before := len(f.dispatcher.getCalls())
+
+	for _, msg := range []string{"Please decide", "@" + mentionBystanderSlug + " please decide"} {
+		resp := f.postRequest(t, OutboundMessageRequest{
+			Msg: msg, ConversationRef: "conv:" + f.convID,
+			Choices: decisionInputs(t, `[{"question":"Ship?","choices":["y","n"]}]`),
+		})
+		assert.Nil(t, resp.DefaultAgentResult, msg)
+		assert.Empty(t, resp.MentionResults, msg)
+		assert.Empty(t, resp.WokenAgents, msg)
+	}
+	assert.Len(t, f.dispatcher.getCalls(), before, "a choice prompt dispatches to no agent")
+}
+
+// A DM answer publishes choice.updated to the DM's user only, never on the
+// project subject (a thread answer does, TestDecisionAnswer_PublishesChoiceUpdated).
+func TestDecisionAnswer_DMChoiceUpdatedOnlyToUser(t *testing.T) {
+	f := newChoicesFixture(t)
+	projEvents, unsubProject := f.srv.events.Subscribe("project." + f.project.ID + ".choice.updated")
+	defer unsubProject()
+	userEvents, unsubUser := f.srv.events.Subscribe("user." + f.bob.ID + ".choice.updated")
+	defer unsubUser()
+
+	dm := f.sendPromptToBob(t, `[{"id":"dm-upd","question":"DM?","choices":["y","n"]}]`, false)
+	rr := f.answer(t, f.bob, dm.Decisions[0].RowID, map[string]interface{}{"choice_id": "1"})
+	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+
+	assert.Len(t, collectEvents(userEvents), 1, "the DM's user gets choice.updated")
+	assert.Empty(t, collectEvents(projEvents), "a DM answer is never published on the project subject")
+}
+
+// The asker is gone: the answer still stands (200), its response row is
+// stored as failed, and nothing is dispatched.
+func TestDecisionAnswer_AskerGoneStoresFailedResponse(t *testing.T) {
+	f := newChoicesFixture(t)
+	ctx := context.Background()
+	_, res := f.topicPrompt(t, twoDecisions, false)
+	require.NoError(t, f.store.DeleteAgent(ctx, f.agent.ID))
+	before := len(f.dispatcher.getMessages())
+
+	rr := f.answer(t, f.bob, res.Decisions[0].RowID, map[string]interface{}{"choice_id": "1"})
+	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+	var ans DecisionAnswerResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &ans))
+	assert.Equal(t, store.DecisionStatusDecided, ans.Decision.Status)
+
+	m, err := f.store.GetMessage(ctx, ans.ResponseMessageID)
+	require.NoError(t, err)
+	assert.Equal(t, messages.TypeChoiceResponse, m.Type)
+	assert.Equal(t, store.MessageDispatchFailed, m.DispatchState)
+	assert.Len(t, f.dispatcher.getMessages(), before, "nothing is dispatched to a gone asker")
+}
+
+// A user access token and a visitor get 403 on both decision routes;
+// answers come from a web session only.
+func TestDecisionRoutes_TokenAndVisitorForbidden(t *testing.T) {
+	f := newChoicesFixture(t)
+	_, res := f.topicPrompt(t, twoDecisions, false)
+	row := res.Decisions[0].RowID
+
+	uat := NewScopedUserIdentity(authUser(f.bob), f.project.ID, []string{"project:read"})
+	visitor := NewVisitorIdentity(tid("choices-visitor"), "https://issuer.choices.test", "choices-visitor", "visitor@choices.test", "Visitor")
+	for name, id := range map[string]Identity{"user access token": uat, "visitor": visitor} {
+		rec := requestAsIdentity(t, f.srv, id, http.MethodPost, "/api/v1/decisions/"+row+"/answer", map[string]interface{}{"choice_id": "1"})
+		assert.Equal(t, http.StatusForbidden, rec.Code, "%s answer: %s", name, rec.Body.String())
+		rec = requestAsIdentity(t, f.srv, id, http.MethodGet, "/api/v1/decisions/"+row, nil)
+		assert.Equal(t, http.StatusForbidden, rec.Code, "%s get: %s", name, rec.Body.String())
+	}
+	d, err := f.store.GetDecision(context.Background(), row)
+	require.NoError(t, err)
+	assert.Empty(t, d.Answers)
+	// Control: bob's session answers.
+	assert.Equal(t, http.StatusOK, f.answer(t, f.bob, row, map[string]interface{}{"choice_id": "1"}).Code)
+}
+
+// An idempotency key replays only its own answer: the same key with
+// another choice, or from another user, is 409 at the hub.
+func TestDecisionAnswer_IdempotencyKeyOtherAnswer409(t *testing.T) {
+	f := newChoicesFixture(t)
+	_, res := f.topicPrompt(t, twoDecisions, false)
+	row := res.Decisions[0].RowID
+	first := f.answer(t, f.bob, row, map[string]interface{}{"choice_id": "1", "idempotency_key": "k1"})
+	require.Equal(t, http.StatusOK, first.Code, "body: %s", first.Body.String())
+
+	rr := f.answer(t, f.bob, row, map[string]interface{}{"choice_id": "2", "idempotency_key": "k1"})
+	assert.Equal(t, http.StatusConflict, rr.Code, "another choice: %s", rr.Body.String())
+	rr = f.answer(t, f.alice, row, map[string]interface{}{"choice_id": "1", "idempotency_key": "k1"})
+	assert.Equal(t, http.StatusConflict, rr.Code, "another user: %s", rr.Body.String())
+
+	// Control: the true replay.
+	rr = f.answer(t, f.bob, row, map[string]interface{}{"choice_id": "1", "idempotency_key": "k1"})
+	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+	var a DecisionAnswerResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &a))
+	assert.True(t, a.Replayed)
+}
+
+// A project member who may read but not post (a reader) can read a
+// decision but not answer it.
+func TestDecisionAnswer_ReaderForbidden(t *testing.T) {
+	f := newChoicesFixture(t)
+	_, res := f.topicPrompt(t, twoDecisions, false)
+	row := res.Decisions[0].RowID
+	f.makeChatReader(t, f.bob)
+
+	rr := f.answer(t, f.bob, row, map[string]interface{}{"choice_id": "1"})
+	assert.Contains(t, []int{http.StatusForbidden, http.StatusNotFound}, rr.Code, "body: %s", rr.Body.String())
+	d, err := f.store.GetDecision(context.Background(), row)
+	require.NoError(t, err)
+	assert.Empty(t, d.Answers)
+	// Control: reading is enough to get it.
+	assert.Equal(t, http.StatusOK, doRequestAsUser(t, f.srv, f.bob, http.MethodGet, "/api/v1/decisions/"+row, nil).Code)
+}
+
+// recordInterpreted stores an agent_interpreted answer of u to row, as an
+// agent recording an answer it read elsewhere would.
+func (f *choicesFixture) recordInterpreted(t *testing.T, u *store.User, row, choiceID string) {
+	t.Helper()
+	_, _, err := f.store.RecordAnswer(context.Background(), &store.RecordAnswerInput{
+		DecisionRowID: row, ChoiceID: choiceID,
+		AnsweredByUserID: u.ID, AnsweredByName: u.DisplayName, AnsweredByEmail: u.Email,
+		Provenance: store.DecisionProvenanceAgentInterpreted, InterpretedByAgentID: f.agent.ID,
+		SourceMessageID: api.NewUUID(), Surface: store.DecisionSurfaceSlack,
+		ResponseMessage: &store.Message{
+			ID: api.NewUUID(), ProjectID: f.project.ID, Sender: "agent:" + f.agent.Slug, SenderID: f.agent.ID,
+			Recipient: "user:" + u.Email, RecipientID: u.ID,
+			AgentID: f.agent.ID, Channel: "web", ThreadID: f.topicID, Msg: "interpreted", CreatedAt: time.Now().UTC(),
+			DispatchState: store.MessageDispatchDispatched,
+		},
+	})
+	require.NoError(t, err)
+}
+
+// A fresh idempotency key skips none of the state checks: a third user's
+// fresh key against an interpreted answer is 403, a fresh key on a
+// replaced or directly answered version is 409. A true replay still
+// answers 200.
+func TestDecisionAnswer_IdempotencyKeyKeepsChecks(t *testing.T) {
+	f := newChoicesFixture(t)
+	_, res := f.topicPrompt(t, twoDecisions, false)
+	row := res.Decisions[0].RowID
+	f.recordInterpreted(t, f.alice, row, "1")
+
+	rr := f.answer(t, f.bob, row, map[string]interface{}{"choice_id": "2", "idempotency_key": "bob-fresh"})
+	require.Equal(t, http.StatusForbidden, rr.Code, "body: %s", rr.Body.String())
+	assert.Equal(t, ErrCodeNotRecordedAnswerer, errorCode(t, rr))
+
+	// The recorded answerer confirms with a key; the true replay is 200.
+	rr = f.answer(t, f.alice, row, map[string]interface{}{"choice_id": "1", "idempotency_key": "alice-1"})
+	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+	rr = f.answer(t, f.alice, row, map[string]interface{}{"choice_id": "1", "idempotency_key": "alice-1"})
+	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+	var replay DecisionAnswerResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &replay))
+	assert.True(t, replay.Replayed)
+
+	// Directly answered now: a fresh key is 409 answered.
+	rr = f.answer(t, f.alice, row, map[string]interface{}{"choice_id": "2", "idempotency_key": "alice-2"})
+	require.Equal(t, http.StatusConflict, rr.Code, "body: %s", rr.Body.String())
+	assert.Equal(t, ErrCodeDecisionAnswered, errorCode(t, rr))
+
+	// Replaced: a fresh key is 409 replaced.
+	other := res.Decisions[1].RowID
+	f.topicPrompt(t, `[{"id":"`+res.Decisions[1].Key+`","question":"Which?","choices":["a","b"]}]`, true)
+	rr = f.answer(t, f.bob, other, map[string]interface{}{"choice_id": "a", "idempotency_key": "bob-replaced"})
+	require.Equal(t, http.StatusConflict, rr.Code, "body: %s", rr.Body.String())
+	assert.Equal(t, ErrCodeDecisionReplaced, errorCode(t, rr))
+
+	d, err := f.store.GetDecision(context.Background(), row)
+	require.NoError(t, err)
+	assert.Len(t, d.Answers, 2, "the interpreted answer and alice's confirm only")
+}
+
+// The send response names who decided a replaced version (design 4.2:
+// "replaced D1 v1 (decided by <who>: <label>)").
+func TestChoicesSend_ReplacedNamesWhoDecided(t *testing.T) {
+	f := newChoicesFixture(t)
+	first := f.sendPromptToBob(t, `[{"id":"D7","question":"Ship?","choices":["yes","no"]}]`, false)
+	rr := f.answer(t, f.bob, first.Decisions[0].RowID, map[string]interface{}{"choice_id": "1"})
+	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+
+	upd := f.sendPromptToBob(t, `[{"id":"D7","question":"Ship now?","choices":["yes","no"]}]`, true)
+	require.NotNil(t, upd.Decisions[0].Replaced)
+	r := upd.Decisions[0].Replaced
+	assert.Equal(t, store.DecisionStatusDecided, r.Status)
+	assert.Equal(t, "yes", r.Answer)
+	want := f.bob.DisplayName
+	if want == "" {
+		want = f.bob.Email
+	}
+	assert.Equal(t, want, r.AnsweredBy)
+}
+
+// The intro is the body after the hub's agent-mention rewrite, like every
+// stored body: "@agent:<slug>" is stored as "@<slug>".
+func TestChoicesSend_IntroGetsMentionRewrite(t *testing.T) {
+	f := newChoicesFixture(t)
+	rr := f.sendAsAgent(t, OutboundMessageRequest{
+		Recipient: "user:" + f.bob.Email, Msg: "Ask @agent:helper-bot first",
+		Choices: decisionInputs(t, `[{"question":"Ship?","choices":["y","n"]}]`),
+	})
+	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+	var resp choiceSendResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	msg, err := f.store.GetMessage(context.Background(), resp.MessageID)
+	require.NoError(t, err)
+	assert.Contains(t, msg.Msg, "helper-bot")
+	assert.NotContains(t, msg.Msg, "agent:helper-bot", "the intro was stored before the rewrite")
+}

@@ -274,7 +274,7 @@ func (e *agentKeysEventSpy) PublishNotification(_ context.Context, _ *store.Noti
 func (e *agentKeysEventSpy) PublishUserNotification(_ context.Context, _ *store.Notification) {
 	e.record("PublishUserNotification")
 }
-func (e *agentKeysEventSpy) PublishUserMessage(_ context.Context, _ *store.Message, _ []AttachmentRef, _ []artifacts.MessageRef) {
+func (e *agentKeysEventSpy) PublishUserMessage(_ context.Context, _ *store.Message, _ []AttachmentRef, _ []artifacts.MessageRef, _ ...ChatEventOption) {
 	e.record("PublishUserMessage")
 }
 func (e *agentKeysEventSpy) PublishAgentPorts(_ context.Context, _ *store.Agent) {
@@ -304,7 +304,7 @@ func (e *agentKeysEventSpy) PublishChatOwnReadStateEvent(_ context.Context, _, _
 func (e *agentKeysEventSpy) PublishChatOwnStateChanged(_ context.Context, _, _, _ string, _ *bool) {
 	e.record("PublishChatOwnStateChanged")
 }
-func (e *agentKeysEventSpy) PublishChatMemberMessage(_ context.Context, _ *store.Message, _ []AttachmentRef, _ []artifacts.MessageRef, _ []string) {
+func (e *agentKeysEventSpy) PublishChatMemberMessage(_ context.Context, _ *store.Message, _ []AttachmentRef, _ []artifacts.MessageRef, _ []string, _ ...ChatEventOption) {
 	e.record("PublishChatMemberMessage")
 }
 func (e *agentKeysEventSpy) PublishChatMessageEdited(_ context.Context, _, _ string, _ ChatMessageEditedEvent) {
