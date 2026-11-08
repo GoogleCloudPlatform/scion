@@ -825,3 +825,81 @@ func TestProjectLeave_SelfOnlyCannotTargetAnother(t *testing.T) {
 	assert.Empty(t, directProjectBindings(t, f.store, peer.ID, f.projectID))
 	assert.Equal(t, memberBefore, directProjectBindings(t, f.store, f.member.ID, f.projectID))
 }
+
+// TestProjectLeave_ClampedGroupBindingIsNotRemainingAccess (sec ruling on
+// the census classification): the group read behind the group-derived
+// refusal, the remaining access and the capability passes the test
+// identity clamps. For an admin-kind test identity whose kind is off on
+// the hub, the clamps drop its group binding on the project, so that
+// binding is no remaining access and a leave revokes its project-bound
+// tokens (fail closed). The token service never mints for a test identity
+// (ErrUATTestIdentityDenied), so the token row is seeded in the store: this
+// pins the leave's own decision, not the mint refusal.
+func TestProjectLeave_ClampedGroupBindingIsNotRemainingAccess(t *testing.T) {
+	srv, s, _ := taServer(t)
+	enableProjectLeave(t, srv)
+	ctx := context.Background()
+	super := taUser(t, s, "pl-clamp-super", store.SystemRoleSuperAdmin)
+	id := taIssue(t, srv, super).Identity.ID
+	u, err := s.GetUser(ctx, id)
+	require.NoError(t, err)
+
+	projectID := tid(t.Name() + "-project")
+	taProject(t, s, projectID, super.ID)
+	memberRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	require.NoError(t, err)
+	grpBind(t, s, store.RoleBindingPrincipalUser, id, memberRD.ID, projectID)
+	g := leaveGroup(t, s, "clamped", super.ID)
+	leaveAddGroupMember(t, s, g.ID, store.GroupMemberTypeUser, id)
+	human := leaveUser(t, s, "human", false)
+	leaveAddGroupMember(t, s, g.ID, store.GroupMemberTypeUser, human.ID)
+	grpBind(t, s, store.RoleBindingPrincipalGroup, g.ID, memberRD.ID, projectID)
+	svc := srv.membershipService
+
+	// Control: while the identity's kind is on, its group binding counts.
+	groups, err := activeGroupProjectBindingGroups(ctx, s, srv.authzService, id, projectID, time.Now())
+	require.NoError(t, err)
+	assert.Equal(t, []string{g.ID}, groups)
+
+	// The kind is off on this hub: the clamps drop every binding of the
+	// identity, so the group binding is not remaining access. A human in
+	// the same group keeps it.
+	srv.testAdminGate = testAdminGate{}
+	groups, err = activeGroupProjectBindingGroups(ctx, s, srv.authzService, id, projectID, time.Now())
+	require.NoError(t, err)
+	assert.Empty(t, groups, "a group binding the clamps drop is not counted")
+	groups, err = activeGroupProjectBindingGroups(ctx, s, srv.authzService, human.ID, projectID, time.Now())
+	require.NoError(t, err)
+	assert.Equal(t, []string{g.ID}, groups, "control: a human's group binding passes the clamps")
+
+	// leaveRemainingAccess never reports group access from the dropped
+	// binding: with the server's admission check, and without one (where
+	// the group read alone decides).
+	remaining, err := svc.leaveRemainingAccess(ctx, s, id, projectID, time.Now())
+	require.NoError(t, err)
+	assert.NotEqual(t, leaveRemainingGroup, remaining)
+	admitted := svc.userAdmitted
+	svc.userAdmitted = nil
+	t.Cleanup(func() { svc.userAdmitted = admitted })
+	remaining, err = svc.leaveRemainingAccess(ctx, s, id, projectID, time.Now())
+	require.NoError(t, err)
+	assert.Equal(t, leaveRemainingNone, remaining)
+
+	// A leave then revokes the identity's project-bound token.
+	tokID := generateID()
+	require.NoError(t, s.CreateUserAccessToken(ctx, &store.UserAccessToken{
+		ID: tokID, UserID: id, Name: "t", Prefix: tokID[:8], KeyHash: "hash-" + tokID,
+		BoundaryKind: "project", ProjectID: projectID, Scopes: []string{"project:read"},
+	}))
+	ident := NewAuthenticatedUser(id, u.Email, "", store.UserRoleMember, string(ClientTypeAPI))
+	leaveCtx := contextWithCredentialContext(contextWithIdentity(ctx, ident), CredentialContext{Kind: CredentialKindInteractive})
+	res, decision := svc.LeaveProject(leaveCtx, ident, projectID, false)
+	require.Nil(t, decision, "leave refused: %+v", decision)
+	require.NotNil(t, res)
+	assert.Equal(t, leaveRemainingNone, res.RemainingAccess)
+	assert.Equal(t, 1, res.ProjectBoundTokens.Revoked)
+	tok, err := s.GetUserAccessToken(ctx, tokID)
+	require.NoError(t, err)
+	assert.True(t, tok.Revoked, "the project-bound token is revoked")
+	assert.Empty(t, directProjectBindings(t, s, id, projectID))
+}

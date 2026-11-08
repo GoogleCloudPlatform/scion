@@ -309,7 +309,7 @@ func (svc *ProjectMembershipService) LeaveProject(ctx context.Context, actor Use
 		if len(bindings) == 0 {
 			// Not a direct member: group-derived when an active group
 			// binding admits the caller, otherwise not found.
-			groups, err := activeGroupProjectBindingGroups(ctx, tx, actorID, projectID, svc.nowFunc())
+			groups, err := activeGroupProjectBindingGroups(ctx, tx, svc.authz, actorID, projectID, svc.nowFunc())
 			if err != nil {
 				return err
 			}
@@ -446,6 +446,9 @@ func leaveAuditSummary(actorID string, res *LeaveResult) string {
 // project, read through st. A binding leaveBindingClass cannot classify is
 // a fail-closed refusal (decision non-nil); a store error is err.
 func (svc *ProjectMembershipService) leaveBindingsFromStore(ctx context.Context, st store.Store, userID, projectID string) ([]leaveBinding, *MembershipDecision, error) {
+	// Unclamped on purpose: the leave removes the caller's own bindings, and
+	// removal must see every one of them. The test identity clamps could
+	// hide a binding, which the leave would then leave in place.
 	all, err := st.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("list bindings of the caller: %w", err)
@@ -512,8 +515,13 @@ func (svc *ProjectMembershipService) readableLeaveGroups(ctx context.Context, ac
 
 // activeGroupProjectBindingGroups returns the IDs of the caller's
 // effective groups (direct or nested) that hold an active, membership
-// conferring binding on the project, sorted.
-func activeGroupProjectBindingGroups(ctx context.Context, st store.Store, userID, projectID string, now time.Time) ([]string, error) {
+// conferring binding on the project, sorted. The group bindings pass the
+// test identity clamps (clampBindingsForUser, with authz's wiring), so the
+// group-derived refusal, the remaining access after a leave and the leave
+// capability see the access the authorization service grants: a binding
+// the clamps drop does not count as remaining access, and the leave then
+// revokes the project tokens (fail closed).
+func activeGroupProjectBindingGroups(ctx context.Context, st store.Store, authz *AuthzService, userID, projectID string, now time.Time) ([]string, error) {
 	groupIDs, err := st.GetEffectiveGroups(ctx, userID)
 	if err != nil {
 		return nil, fmt.Errorf("effective groups of the caller: %w", err)
@@ -528,6 +536,9 @@ func activeGroupProjectBindingGroups(ctx context.Context, st store.Store, userID
 	bindings, err := st.ListRoleBindingsForPrincipals(ctx, refs, nil, nil)
 	if err != nil {
 		return nil, fmt.Errorf("group bindings of the caller: %w", err)
+	}
+	if bindings, err = clampBindingsForUser(ctx, st, authz, userID, bindings); err != nil {
+		return nil, fmt.Errorf("clamp group bindings of the caller: %w", err)
 	}
 	seen := map[string]bool{}
 	var out []string
@@ -554,7 +565,7 @@ func activeGroupProjectBindingGroups(ctx context.Context, st store.Store, userID
 // when an active group binding on the project admits them, hub otherwise
 // (hub-level authority).
 func (svc *ProjectMembershipService) leaveRemainingAccess(ctx context.Context, tx store.Store, userID, projectID string, now time.Time) (string, error) {
-	groups, err := activeGroupProjectBindingGroups(ctx, tx, userID, projectID, now)
+	groups, err := activeGroupProjectBindingGroups(ctx, tx, svc.authz, userID, projectID, now)
 	if err != nil {
 		return "", err
 	}
@@ -652,7 +663,7 @@ func (svc *ProjectMembershipService) leaveCapabilities(ctx context.Context, user
 	}
 	now := svc.nowFunc()
 	if len(bindings) == 0 {
-		groups, err := activeGroupProjectBindingGroups(ctx, svc.store, userID, projectID, now)
+		groups, err := activeGroupProjectBindingGroups(ctx, svc.store, svc.authz, userID, projectID, now)
 		if err == nil && len(groups) > 0 {
 			return false, leaveBlockedGroupDerived
 		}
