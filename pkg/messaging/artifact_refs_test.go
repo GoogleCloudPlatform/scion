@@ -185,3 +185,24 @@ func TestStripReservedMetadata_StripsSenderTimezone(t *testing.T) {
 		t.Errorf("unrelated key lost: %v", out)
 	}
 }
+
+// The choice response keys are hub-set only: a client-supplied value is
+// stripped before delivery (design choices v4, 4.4).
+func TestStripReservedMetadata_StripsChoiceKeys(t *testing.T) {
+	md := map[string]string{
+		"foo":                             "bar",
+		messages.MetadataChoiceKey:        "D1",
+		messages.MetadataChoiceVersion:    "1",
+		messages.MetadataChoiceID:         "yes",
+		messages.MetadataChoiceProvenance: "direct",
+	}
+	out := StripReservedMetadata(md)
+	for _, k := range []string{messages.MetadataChoiceKey, messages.MetadataChoiceVersion, messages.MetadataChoiceID, messages.MetadataChoiceProvenance} {
+		if _, ok := out[k]; ok {
+			t.Errorf("%s survived the strip: %v", k, out)
+		}
+	}
+	if out["foo"] != "bar" {
+		t.Errorf("unrelated key lost: %v", out)
+	}
+}

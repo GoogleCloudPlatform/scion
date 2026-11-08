@@ -52,6 +52,16 @@ const (
 // human user.
 const MetadataSenderTimezone = "sender_timezone"
 
+// Choice response metadata (design choices v4, 4.4): the hub sets these on
+// the choice-response message it delivers to the asking agent and strips
+// any client-supplied value (messaging.StripReservedMetadata).
+const (
+	MetadataChoiceKey        = "choice_key"
+	MetadataChoiceVersion    = "choice_version"
+	MetadataChoiceID         = "choice_id"
+	MetadataChoiceProvenance = "choice_provenance"
+)
+
 // deliveryMetadataAllowlist defines the metadata keys that are forwarded to
 // agents during delivery. Platform-specific keys (e.g. telegram_chat_id) are
 // excluded to avoid leaking implementation details.
@@ -81,6 +91,11 @@ var deliveryMetadataAllowlist = map[string]bool{
 	MetadataSenderDisplay: true,
 	// Hub-set only (see MetadataSenderTimezone).
 	MetadataSenderTimezone: true,
+	// Hub-set only (see MetadataChoiceKey).
+	MetadataChoiceKey:        true,
+	MetadataChoiceVersion:    true,
+	MetadataChoiceID:         true,
+	MetadataChoiceProvenance: true,
 }
 
 // deliveryMessage is the subset of StructuredMessage fields delivered to the agent.
