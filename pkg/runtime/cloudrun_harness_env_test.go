@@ -324,7 +324,20 @@ func TestCloudRunRun_HarnessEnvDeniedNames(t *testing.T) {
 		{"SCION_METADATA_MODE", metadataCases},
 		{"SCION_METADATA_SA_EMAIL", metadataCases},
 		{"SCION_METADATA_PROJECT_ID", metadataCases},
+		{"GCE_METADATA_HOST", metadataCases},
+		{"GCE_METADATA_IP", metadataCases},
+		{"SCION_TRANSPORT_TOKEN", metadataCases},
+		{"SCION_TRANSPORT_TOKEN_EXPIRY", metadataCases},
+		{"SCION_TRANSPORT_TOKEN_FILE", metadataCases},
+		{"SCION_EXTRA_PATH", metadataCases},
+		{"SCION_NATIVE_TELEMETRY_POLICY", metadataCases},
+		{"PORT", metadataCases},
+		{harnessSecretsDirEnvVar, stagedCases},
 	}
+	// runtimeOwned names are set on the instance by the runtime itself (the
+	// harness secrets dir on the in-memory volume), so their presence is
+	// expected; only the harness value must never arrive.
+	runtimeOwned := map[string]bool{stagedsecrets.EnvVar: true, harnessSecretsDirEnvVar: true}
 	for _, n := range names {
 		for _, source := range []string{"getenv", "telemetry"} {
 			for _, ec := range n.cases {
@@ -345,7 +358,7 @@ func TestCloudRunRun_HarnessEnvDeniedNames(t *testing.T) {
 					switch {
 					case ok && got == canary:
 						t.Errorf("%s: the harness value reached the instance", n.key)
-					case ec.cfgEnv == nil && ok && n.key != stagedsecrets.EnvVar:
+					case ec.cfgEnv == nil && ok && !runtimeOwned[n.key]:
 						t.Errorf("%s reached the instance although no source but the harness set it", n.key)
 					case ec.exact && (!ok || got != *ec.cfgEnv):
 						t.Errorf("%s = %q (present %v), want the cfg.Env value %q", n.key, got, ok, *ec.cfgEnv)
@@ -550,5 +563,63 @@ func TestHarnessEnvEntries(t *testing.T) {
 	want = []string{"A=env", "B=env", "D=env"}
 	if !slices.Equal(got, want) {
 		t.Errorf("telemetry disabled: %v, want %v", got, want)
+	}
+}
+
+// With a broker-resolved identity (RunConfig.CloudRunIdentity), the harness
+// env never sets GOOGLE_APPLICATION_CREDENTIALS, CLOUDSDK_CONFIG or
+// NO_GCE_CHECK, from GetEnv or GetTelemetryEnv, and the denied names are
+// logged without their values. Without one, those names reach the instance
+// as before. GOOGLE_CLOUD_PROJECT from the harness reaches the instance in
+// both cases.
+func TestCloudRunRun_NativeIdentityHarnessEnvDenied(t *testing.T) {
+	const canary = "native-identity-denied-canary"
+	names := []string{"GOOGLE_APPLICATION_CREDENTIALS", "CLOUDSDK_CONFIG", "NO_GCE_CHECK"}
+	for _, native := range []bool{true, false} {
+		for _, source := range []string{"getenv", "telemetry"} {
+			label := "identity-unset"
+			if native {
+				label = "identity-set"
+			}
+			t.Run(label+"/"+source, func(t *testing.T) {
+				supplied := map[string]string{"GOOGLE_CLOUD_PROJECT": "example-project"}
+				for _, name := range names {
+					supplied[name] = canary
+				}
+				h := newCREnvHarness(supplied, nil)
+				if source == "telemetry" {
+					h = newCREnvHarness(nil, supplied)
+				}
+				cfg := crEnvCfg(h)
+				cfg.TelemetryEnabled = true
+				if native {
+					cfg.CloudRunIdentity = &api.CloudRunIdentity{ServiceAccount: "agent-sa@example-project.iam.gserviceaccount.com", Mode: "assign"}
+				}
+				plain, staged, logs := crEnvRun(t, cfg)
+
+				for _, name := range names {
+					got, ok := plain[name]
+					if native {
+						if ok {
+							t.Errorf("%s reached the instance under a native identity (value present: %v)", name, got == canary)
+						}
+						if !strings.Contains(logs, "harness env names not applied") || !strings.Contains(logs, name) {
+							t.Errorf("the log does not name the denied name %s (log length %d)", name, len(logs))
+						}
+					} else if !ok || got != canary {
+						t.Errorf("%s: without a native identity the harness value must reach the instance (present %v)", name, ok)
+					}
+					if staged[name] == canary {
+						t.Errorf("%s: the harness value reached the staged entries", name)
+					}
+				}
+				if native && strings.Contains(logs, canary) {
+					t.Error("the log carries a denied value")
+				}
+				if plain["GOOGLE_CLOUD_PROJECT"] != "example-project" {
+					t.Errorf("GOOGLE_CLOUD_PROJECT = %q, want the harness value", plain["GOOGLE_CLOUD_PROJECT"])
+				}
+			})
+		}
 	}
 }

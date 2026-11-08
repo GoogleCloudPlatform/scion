@@ -28,6 +28,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -61,9 +62,19 @@ func contentHostServer(t *testing.T, contentURL string) (*Server, store.Store) {
 	return srv, s
 }
 
-// setContentURLForTest applies contentURL as ApplySnapshot does.
+// setContentURLForTest applies contentURL as ApplySnapshot does, keeping
+// the live same-site override.
 func setContentURLForTest(srv *Server, contentURL string) {
-	srv.contentURLLive.Store(&contentURL)
+	cur := srv.contentURLLiveState()
+	srv.contentURLLive.Store(newContentURLLiveState(contentURL, cur.AllowSameSite, hubEndpointsFromConfig(srv.config).Public, srv.config.AgentEndpoint))
+}
+
+// setContentURLAllowSameSiteForTest applies
+// server.hub.content_url_allow_same_site as ApplySnapshot does, keeping the
+// live content URL.
+func setContentURLAllowSameSiteForTest(srv *Server, allow bool) {
+	cur := srv.contentURLLiveState()
+	srv.contentURLLive.Store(newContentURLLiveState(cur.URL, allow, hubEndpointsFromConfig(srv.config).Public, srv.config.AgentEndpoint))
 }
 
 // assertContentHostHeaders checks the content host's fixed response
@@ -289,7 +300,9 @@ func TestArtifactsContentHostSessionCookie(t *testing.T) {
 		mu.Unlock()
 		w.WriteHeader(http.StatusOK)
 	}), func(context.Context) error { return nil })
-	ws.SetContentHostGuard(artifacts.ContentHostGuard(func() string { return loTestOrigin }, servesOnContentHost, nil, nil))
+	loHost, ok := artifacts.ParseContentHost(loTestOrigin)
+	require.True(t, ok)
+	ws.SetContentHostGuard(artifacts.ContentHostGuard(func(*http.Request) artifacts.ContentHost { return loHost }, servesOnContentHost, nil, nil))
 	cookies := devSignIn(t, ws)
 	require.NotEmpty(t, cookies)
 	h := ws.Handler()
@@ -320,7 +333,9 @@ func TestArtifactsContentHostSessionCookie(t *testing.T) {
 // TestArtifactsContentHostFallbacks: an empty or invalid content_url, or
 // one on the hub's own host name at any scheme or port, leaves links on the
 // hub origin (no shareUrl), gives HubEndpoints().Content "" and confines
-// nothing. A same-site value is used, with a warning. Condition 5, K21.
+// nothing. So does a value on the hub's registrable domain without the
+// override (phase B item 1; TestArtifactsContentHostSameSite). Condition 5,
+// K21.
 func TestArtifactsContentHostFallbacks(t *testing.T) {
 	for _, v := range []string{
 		"",
@@ -330,6 +345,7 @@ func TestArtifactsContentHostFallbacks(t *testing.T) {
 		"https://hub.example.com:8443",
 		"https://HUB.example.com",
 		"http://hub.example.com",
+		"https://links.example.com",
 	} {
 		t.Run(v, func(t *testing.T) {
 			srv, s := contentHostServer(t, v)
@@ -342,9 +358,128 @@ func TestArtifactsContentHostFallbacks(t *testing.T) {
 			assert.Equal(t, http.StatusOK, rec.Code)
 		})
 	}
-	// A same-site value is used (with a warning).
-	srv, _ := contentHostServer(t, "https://links.example.com")
-	assert.Equal(t, "https://links.example.com", srv.HubEndpoints().Content)
+}
+
+// captureContentHostLogs sends slog output at debug level to a buffer for
+// the rest of the test and returns a function that reads it.
+func captureContentHostLogs(t *testing.T) func() string {
+	t.Helper()
+	var buf bytes.Buffer
+	var mu sync.Mutex
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&contentHostLockedWriter{w: &buf, mu: &mu}, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return func() string {
+		mu.Lock()
+		defer mu.Unlock()
+		return buf.String()
+	}
+}
+
+// TestArtifactsContentHostSameSite: at runtime a content URL on the hub's
+// registrable domain is ignored, with an error log, unless
+// server.hub.content_url_allow_same_site is set; with the override it is
+// used and the reworded warning is logged. Two hosts under a public suffix
+// are not the same registrable domain, so such a value is used with no
+// override and no warning. A value on the hub's own host name stays ignored
+// with the override (ptone/scion#7107 phase B item 1, tests a-d at runtime).
+func TestArtifactsContentHostSameSite(t *testing.T) {
+	const sameSite = "https://links.example.com"
+
+	t.Run("refused without the override", func(t *testing.T) {
+		logs := captureContentHostLogs(t)
+		srv, s := contentHostServer(t, sameSite)
+		assert.Empty(t, srv.HubEndpoints().Content)
+		_, _, created := contentHostFixture(t, srv, s, "ch-ss-off")
+		assert.Empty(t, created.ShareURL, "a refused content host was offered")
+		out := logs()
+		assert.Contains(t, out, "level=ERROR")
+		assert.Contains(t, out, config.ContentURLKey+" is ignored because it shares the hub's registrable domain")
+		assert.Contains(t, out, config.ContentURLAllowSameSiteKey)
+	})
+
+	t.Run("accepted with the override", func(t *testing.T) {
+		logs := captureContentHostLogs(t)
+		srv, s := contentHostServer(t, sameSite)
+		setContentURLAllowSameSiteForTest(srv, true)
+		assert.Equal(t, sameSite, srv.HubEndpoints().Content)
+		_, _, created := contentHostFixture(t, srv, s, "ch-ss-on")
+		assert.True(t, strings.HasPrefix(created.ShareURL, sameSite+artifacts.RouteShared), "shareUrl %q", created.ShareURL)
+		out := logs()
+		assert.Contains(t, out, "level=WARN")
+		assert.Contains(t, out, "is not a separate security origin for cookies")
+		assert.Contains(t, out, "(accepted because "+config.ContentURLAllowSameSiteKey+" is set)")
+		assert.NotContains(t, out, "level=ERROR")
+
+		// Turning the override off again ignores the value at once.
+		setContentURLAllowSameSiteForTest(srv, false)
+		assert.Empty(t, srv.HubEndpoints().Content)
+	})
+
+	t.Run("public suffix tenants are different sites", func(t *testing.T) {
+		logs := captureContentHostLogs(t)
+		srv, _ := contentHostServer(t, "https://b.github.io")
+		srv.config.HubEndpoints = &HubEndpoints{Operator: "https://a.github.io", Public: "https://a.github.io"}
+		assert.Equal(t, "https://b.github.io", srv.HubEndpoints().Content)
+		assert.NotContains(t, logs(), config.ContentURLKey, "a different site was warned about")
+	})
+
+	t.Run("same host stays ignored with the override", func(t *testing.T) {
+		for _, v := range []string{loTestHubOrigin, "https://hub.example.com:8443"} {
+			srv, _ := contentHostServer(t, v)
+			setContentURLAllowSameSiteForTest(srv, true)
+			assert.Empty(t, srv.HubEndpoints().Content, v)
+		}
+	})
+}
+
+// TestArtifactsContentHostSameSiteIgnoredIsUnset: a content URL on the
+// hub's registrable domain ignored for want of the override serves exactly
+// as an unset content URL: no content host in effect, no shareUrl, the same
+// share redirect and view responses (status, Location form, CSP and the
+// other headers) on the hub origin, and no confinement on the ignored host
+// (sec 83ba8027 item 1; ptone/scion#7107 phase B item 1).
+func TestArtifactsContentHostSameSiteIgnoredIsUnset(t *testing.T) {
+	type served struct {
+		Content, ShareURL                              string
+		SharedCode, ViewCode, IgnoredHostCode          int
+		LocationIsView                                 bool
+		CSP, Referrer, CacheControl, AllowOrigin, XCTO string
+	}
+	serve := func(contentURL, slug string) served {
+		srv, s := contentHostServer(t, contentURL)
+		owner, id, created := contentHostFixture(t, srv, s, slug)
+		var out served
+		out.Content = srv.HubEndpoints().Content
+		out.ShareURL = created.ShareURL
+		shared := hostRequest(srv, http.MethodGet, loTestHubHost, created.URL, nil, nil)
+		out.SharedCode = shared.Code
+		loc := shared.Header().Get("Location")
+		out.LocationIsView = strings.HasPrefix(loc, artifacts.RouteView)
+		view := hostRequest(srv, http.MethodGet, loTestHubHost, loc, nil, nil)
+		out.ViewCode = view.Code
+		// The capability differs per link; the rest of the CSP must not.
+		capability := strings.SplitN(strings.TrimPrefix(loc, artifacts.RouteView), "/", 2)[0]
+		out.CSP = strings.ReplaceAll(view.Header().Get("Content-Security-Policy"), capability, "CAPABILITY")
+		out.Referrer = view.Header().Get("Referrer-Policy")
+		out.CacheControl = view.Header().Get("Cache-Control")
+		out.AllowOrigin = view.Header().Get("Access-Control-Allow-Origin")
+		out.XCTO = view.Header().Get("X-Content-Type-Options")
+		ignored := hostRequest(srv, http.MethodGet, "links.example.com", "/api/v1/artifacts/"+id, nil,
+			map[string]string{"Authorization": bearerFor(t, srv, owner)})
+		out.IgnoredHostCode = ignored.Code
+		return out
+	}
+	unset := serve("", "ch-ss-unset")
+	ignored := serve("https://links.example.com", "ch-ss-ignored")
+	assert.Empty(t, unset.Content)
+	assert.Empty(t, unset.ShareURL)
+	assert.Equal(t, http.StatusSeeOther, unset.SharedCode)
+	assert.Equal(t, http.StatusOK, unset.ViewCode)
+	assert.True(t, unset.LocationIsView)
+	assert.Equal(t, http.StatusOK, unset.IgnoredHostCode, "an unset content URL confines no host")
+	assert.Contains(t, unset.CSP, "script-src "+loTestHubHost+artifacts.RouteView)
+	assert.Equal(t, unset, ignored, "an ignored same-site content URL does not serve as an unset one")
 }
 
 // TestArtifactsContentHostStartupValue: before any settings apply, the
@@ -527,4 +662,135 @@ func TestArtifactsContentHostAgentEndpointConflict(t *testing.T) {
 	assert.Empty(t, srv.HubEndpoints().Content, "a content URL on the agent endpoint host is used")
 	rec := hostRequest(srv, http.MethodGet, "agents.example.net:9810", "/api/v1/agents", nil, nil)
 	assert.NotEqual(t, http.StatusNotFound, rec.Code, "the agent endpoint host is confined")
+}
+
+// TestContentURLLive_NoTornRead: content_url and its same-site override are
+// applied and read as one value, so a reader never sees a same-site URL with
+// the override of a different apply (ptone/scion#7107 sec S2). The writer
+// alternates between a same-site URL with the override and a URL on another
+// site without it; both are in effect, so every read must return a content
+// host and none may log the same-site refusal. Run with -race.
+func TestContentURLLive_NoTornRead(t *testing.T) {
+	const (
+		sameSite  = "https://links.example.com"
+		otherSite = "https://links.example.net"
+	)
+	logs := captureContentHostLogs(t)
+	srv := &Server{maintenance: NewMaintenanceState(false, "")}
+	ApplySnapshot(srv, Layer1Snapshot{ContentURL: sameSite, ContentURLAllowSameSite: true})
+
+	const iterations = 2000
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < iterations; i++ {
+			if i%2 == 0 {
+				ApplySnapshot(srv, Layer1Snapshot{ContentURL: otherSite})
+			} else {
+				ApplySnapshot(srv, Layer1Snapshot{ContentURL: sameSite, ContentURLAllowSameSite: true})
+			}
+		}
+	}()
+
+	torn := 0
+	for reading := true; reading; {
+		select {
+		case <-done:
+			reading = false
+		default:
+		}
+		live := srv.contentURLLiveState()
+		if live.URL == sameSite && !live.AllowSameSite {
+			torn++
+		}
+		if srv.contentURLInEffect(loTestHubOrigin) == "" {
+			torn++
+		}
+	}
+	assert.Zero(t, torn, "a reader saw content_url without the override applied with it")
+	assert.NotContains(t, logs(), "level=ERROR", "the same-site refusal was logged for a value applied with its override")
+}
+
+// TestContentURLLive_ParsedOncePerApply: the content URL and the hub's host
+// name are parsed once per settings apply (newContentURLLiveState), not per
+// request: requests through the guard read the applied state without
+// replacing it, and a later apply is seen on the very next request, with the
+// old content host no longer confined (ptone/scion#7107 PB1 F8).
+func TestContentURLLive_ParsedOncePerApply(t *testing.T) {
+	const (
+		first  = "https://links.example.net"
+		second = "https://share.example.org"
+	)
+	srv := &Server{maintenance: NewMaintenanceState(false, "")}
+	srv.config.HubEndpoints = &HubEndpoints{Operator: loTestHubOrigin, Public: loTestHubOrigin}
+	ApplySnapshot(srv, Layer1Snapshot{ContentURL: first})
+	applied := srv.contentURLLive.Load()
+	require.NotNil(t, applied)
+	assert.True(t, applied.host.IsSet(), "the content host was not parsed at apply")
+	assert.Equal(t, "hub.example.com", applied.hubHost, "the hub host was not parsed at apply")
+
+	guarded := srv.ContentHostGuard(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTeapot)
+	}))
+	serve := func(host string) int {
+		r := httptest.NewRequest(http.MethodGet, "http://"+host+"/api/v1/agents", nil)
+		r.Host = host
+		rec := httptest.NewRecorder()
+		guarded.ServeHTTP(rec, r)
+		return rec.Code
+	}
+	for i := 0; i < 3; i++ {
+		assert.Equal(t, http.StatusNotFound, serve("links.example.net"), "a route the content host does not serve")
+		assert.Equal(t, http.StatusTeapot, serve("hub.example.com"))
+		assert.Equal(t, http.StatusTeapot, serve("share.example.org"))
+	}
+	assert.Same(t, applied, srv.contentURLLive.Load(), "a request re-derived the applied state")
+
+	ApplySnapshot(srv, Layer1Snapshot{ContentURL: second})
+	assert.Equal(t, http.StatusTeapot, serve("links.example.net"), "the previous content host is still confined")
+	assert.Equal(t, http.StatusNotFound, serve("share.example.org"), "the new content host is not confined on the next request")
+
+	ApplySnapshot(srv, Layer1Snapshot{})
+	assert.Equal(t, http.StatusTeapot, serve("share.example.org"), "a cleared content URL still confines")
+}
+
+// TestContentHostGuard_OneSnapshotPerRequest: ContentHostGuard loads the
+// content URL snapshot once per request and decides both its fast path and
+// the artifacts guard from that one value, handed on in the request's
+// context. An apply in the middle of a request does not change what that
+// request sees. A request that reaches guardContentHost without the value
+// gets one snapshot load of its own, so a mis-wiring fails closed (the
+// content host stays confined) (ptone/scion#7107 PB1 round 2 O1; sec option b).
+// That the fast path and the guard share one load is pinned by construction
+// (ContentHostGuard's wrapper makes a single contentURLView call), not by a
+// load counter in this test.
+func TestContentHostGuard_OneSnapshotPerRequest(t *testing.T) {
+	const (
+		first  = "https://links.example.net"
+		second = "https://share.example.org"
+	)
+	srv := &Server{maintenance: NewMaintenanceState(false, "")}
+	srv.config.HubEndpoints = &HubEndpoints{Operator: loTestHubOrigin, Public: loTestHubOrigin}
+	ApplySnapshot(srv, Layer1Snapshot{ContentURL: first})
+	want, ok := artifacts.ParseContentHost(first)
+	require.True(t, ok)
+	assert.Equal(t, want, srv.guardContentHost(httptest.NewRequest(http.MethodGet, "/", nil)),
+		"a request without the guard's value must fail closed to the content host in effect")
+
+	var seen []artifacts.ContentHost
+	guarded := srv.ContentHostGuard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, srv.guardContentHost(r))
+		// A settings apply while the request is in flight.
+		ApplySnapshot(srv, Layer1Snapshot{ContentURL: second})
+		seen = append(seen, srv.guardContentHost(r))
+		w.WriteHeader(http.StatusTeapot)
+	}))
+	r := httptest.NewRequest(http.MethodGet, "http://links.example.net"+artifacts.RouteShared+"x", nil)
+	r.Host = "links.example.net"
+	rec := httptest.NewRecorder()
+	guarded.ServeHTTP(rec, r)
+	require.Equal(t, http.StatusTeapot, rec.Code, "a served route on the content host reaches the handler")
+	require.Len(t, seen, 2)
+	assert.Equal(t, want, seen[0], "the guard's value is the applied content host")
+	assert.Equal(t, want, seen[1], "an apply during the request changed what the request sees")
 }

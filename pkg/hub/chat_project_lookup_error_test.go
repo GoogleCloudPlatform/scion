@@ -113,3 +113,227 @@ func TestRequireChatActions_ProjectLookupErrors(t *testing.T) {
 		})
 	}
 }
+
+// TestAuthorizeChatConversation_ProjectLookupErrors: when the topic's
+// project lookup in authorizeChatSend, authorizeChatSendRead or
+// authorizeConversationAccess fails, a missing project answers "Thread not
+// found" (404), and any other store error answers the generic 500 with no
+// store error text.
+func TestAuthorizeChatConversation_ProjectLookupErrors(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want int
+		msg  string
+	}{
+		{name: "store error", err: errChatProjectLookup, want: http.StatusInternalServerError, msg: "Internal server error"},
+		{name: "missing project", err: store.ErrNotFound, want: http.StatusNotFound, msg: "Thread not found"},
+	}
+	user := NewAuthenticatedUser("chat-lookup-user", "chat-lookup@example.com", "Chat Lookup", "member", "cli")
+	key := "chat-lookup-topic"
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			srv, _, _, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *chatProjectLookupStore {
+				return &chatProjectLookupStore{Store: inner, fault: f, err: c.err}
+			})
+			wcs := chatTopicStore{topic: &WebChatTopic{ID: key, ProjectID: "chat-lookup-project"}}
+			srv.mu.Lock()
+			srv.webChatStore = wcs
+			srv.mu.Unlock()
+			fault.Arm()
+			ctx := contextWithIdentity(context.Background(), user)
+
+			for name, authorize := range map[string]func(context.Context, UserIdentity, string) (*chatSendTarget, *chatSendError){
+				"authorizeChatSend":     srv.authorizeChatSend,
+				"authorizeChatSendRead": srv.authorizeChatSendRead,
+			} {
+				t.Run(name, func(t *testing.T) {
+					target, serr := authorize(ctx, user, key)
+					assert.Nil(t, target)
+					if !assert.NotNil(t, serr) {
+						return
+					}
+					assert.Equal(t, c.want, serr.Status)
+					assert.Equal(t, c.msg, serr.Message)
+					assert.False(t, serr.accessRefused)
+
+					rec := httptest.NewRecorder()
+					serr.write(rec)
+					assert.Equal(t, c.want, rec.Code)
+					assert.Contains(t, rec.Body.String(), c.msg)
+					assert.NotContains(t, rec.Body.String(), "connection refused")
+				})
+			}
+			t.Run("authorizeConversationAccess", func(t *testing.T) {
+				req := httptest.NewRequest(http.MethodPost, "/", nil)
+				req = req.WithContext(ctx)
+				rec := httptest.NewRecorder()
+				ok := srv.authorizeConversationAccess(rec, req, wcs, key, user.ID(), "")
+				assert.False(t, ok)
+				assert.Equal(t, c.want, rec.Code, rec.Body.String())
+				assert.Contains(t, rec.Body.String(), c.msg)
+				assert.NotContains(t, rec.Body.String(), "connection refused")
+			})
+		})
+	}
+}
+
+// chatTopicErrStore answers GetTopic with (nil, err); no other method is used.
+type chatTopicErrStore struct {
+	WebChatStore
+	err error
+}
+
+func (s chatTopicErrStore) GetTopic(ctx context.Context, id string) (*WebChatTopic, error) {
+	return nil, s.err
+}
+
+// TestChatKeyReadAudience_TopicLookupErrors: a topic that does not exist
+// (a nil topic, or store.ErrNotFound) is no audience with no error, and
+// answers "Thread not found" as before; any other GetTopic error is
+// returned, and the send authorization and the conversation access check
+// answer it with the generic 500 and no store error text.
+func TestChatKeyReadAudience_TopicLookupErrors(t *testing.T) {
+	cases := []struct {
+		name    string
+		err     error
+		wantErr bool
+		want    int
+		msg     string
+	}{
+		{name: "store error", err: errChatProjectLookup, wantErr: true, want: http.StatusInternalServerError, msg: "Internal server error"},
+		{name: "not found error", err: store.ErrNotFound, want: http.StatusNotFound, msg: "Thread not found"},
+		{name: "missing topic", err: nil, want: http.StatusNotFound, msg: "Thread not found"},
+	}
+	user := NewAuthenticatedUser("chat-lookup-user", "chat-lookup@example.com", "Chat Lookup", "member", "cli")
+	key := "chat-lookup-topic"
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			wcs := chatTopicErrStore{err: c.err}
+			ctx := contextWithIdentity(context.Background(), user)
+
+			aud, topic, err := chatKeyReadAudience(ctx, wcs, key)
+			assert.Equal(t, chatAudienceNone, aud)
+			assert.Nil(t, topic)
+			if c.wantErr {
+				assert.ErrorIs(t, err, c.err)
+			} else {
+				assert.NoError(t, err)
+			}
+
+			srv, _ := testServer(t)
+			srv.mu.Lock()
+			srv.webChatStore = wcs
+			srv.mu.Unlock()
+
+			t.Run("authorizeChatSend", func(t *testing.T) {
+				target, serr := srv.authorizeChatSend(ctx, user, key)
+				assert.Nil(t, target)
+				if !assert.NotNil(t, serr) {
+					return
+				}
+				assert.Equal(t, c.want, serr.Status)
+				assert.Equal(t, c.msg, serr.Message)
+				rec := httptest.NewRecorder()
+				serr.write(rec)
+				assert.Equal(t, c.want, rec.Code)
+				assert.NotContains(t, rec.Body.String(), "connection refused")
+			})
+			t.Run("authorizeConversationAccess", func(t *testing.T) {
+				req := httptest.NewRequest(http.MethodPost, "/", nil)
+				req = req.WithContext(ctx)
+				rec := httptest.NewRecorder()
+				ok := srv.authorizeConversationAccess(rec, req, wcs, key, user.ID(), "")
+				assert.False(t, ok)
+				assert.Equal(t, c.want, rec.Code, rec.Body.String())
+				assert.Contains(t, rec.Body.String(), c.msg)
+				assert.NotContains(t, rec.Body.String(), "connection refused")
+			})
+			// A fail-closed guard, not a regression check: the projection
+			// answers false for every case here with or without the change
+			// (a missing topic and a store fault both mean no copy).
+			t.Run("projectionAudienceIsProject", func(t *testing.T) {
+				assert.False(t, srv.projectionAudienceIsProject(ctx, key, "chat-lookup-project"))
+			})
+		})
+	}
+}
+
+// chatTopicCallStore records whether GetTopic was called and answers it
+// with err; no other method is used.
+type chatTopicCallStore struct {
+	WebChatStore
+	called *bool
+	err    error
+}
+
+func (s chatTopicCallStore) GetTopic(ctx context.Context, id string) (*WebChatTopic, error) {
+	*s.called = true
+	return nil, s.err
+}
+
+// TestChatKeyReadAudience_InvalidTopicKey: a topic key that is not valid
+// UTF-8 or contains a NUL names no topic. It is answered as a missing topic
+// ("Thread not found") without a store lookup, so a store that would reject
+// it (Postgres refuses NUL and invalid UTF-8 in text) cannot turn it into a
+// 500. A store fault on a valid key still answers the 500 when the client
+// has gone away (it is only logged at Debug then).
+func TestChatKeyReadAudience_InvalidTopicKey(t *testing.T) {
+	user := NewAuthenticatedUser("chat-lookup-user", "chat-lookup@example.com", "Chat Lookup", "member", "cli")
+	for name, key := range map[string]string{
+		"invalid utf8": "chat-lookup-topic-\xff",
+		"nul":          "chat-lookup\x00topic",
+	} {
+		t.Run(name, func(t *testing.T) {
+			called := false
+			wcs := chatTopicCallStore{called: &called, err: errChatProjectLookup}
+			ctx := contextWithIdentity(context.Background(), user)
+
+			aud, topic, err := chatKeyReadAudience(ctx, wcs, key)
+			assert.Equal(t, chatAudienceNone, aud)
+			assert.Nil(t, topic)
+			assert.NoError(t, err)
+			assert.False(t, called, "the key must not reach the store")
+
+			srv, _ := testServer(t)
+			srv.mu.Lock()
+			srv.webChatStore = wcs
+			srv.mu.Unlock()
+
+			_, serr := srv.authorizeChatSend(ctx, user, key)
+			if assert.NotNil(t, serr) {
+				assert.Equal(t, http.StatusNotFound, serr.Status)
+				assert.Equal(t, "Thread not found", serr.Message)
+			}
+
+			req := httptest.NewRequest(http.MethodPost, "/", nil)
+			req = req.WithContext(ctx)
+			rec := httptest.NewRecorder()
+			assert.False(t, srv.authorizeConversationAccess(rec, req, wcs, key, user.ID(), ""))
+			assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+			assert.Contains(t, rec.Body.String(), "Thread not found")
+
+			assert.False(t, srv.projectionAudienceIsProject(ctx, key, "chat-lookup-project"))
+			assert.False(t, called, "no caller sends the key to the store")
+		})
+	}
+
+	t.Run("store fault after the client went away", func(t *testing.T) {
+		called := false
+		wcs := chatTopicCallStore{called: &called, err: errChatProjectLookup}
+		ctx, cancel := context.WithCancel(contextWithIdentity(context.Background(), user))
+		cancel()
+
+		srv, _ := testServer(t)
+		srv.mu.Lock()
+		srv.webChatStore = wcs
+		srv.mu.Unlock()
+
+		_, serr := srv.authorizeChatSend(ctx, user, "chat-lookup-topic")
+		assert.True(t, called)
+		if assert.NotNil(t, serr) {
+			assert.Equal(t, http.StatusInternalServerError, serr.Status)
+			assert.Equal(t, "Internal server error", serr.Message)
+		}
+	})
+}

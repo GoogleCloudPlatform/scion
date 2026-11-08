@@ -185,7 +185,9 @@ func publicURLInEffectDoc(doc json.RawMessage, saved, operator string) json.RawM
 }
 
 // auditEndpointURLChange records a change to a stored endpoint URL setting
-// (key: server.hub.public_url or server.hub.content_url) before it is
+// (key: server.hub.public_url, server.hub.content_url or
+// server.hub.content_url_allow_same_site, whose values are "true" and
+// "false") before it is
 // written, through the hub settings audit path the GCP permission-check
 // settings use: a hub_setting_update mutation audit record naming the key,
 // the old and new values, and the actor. If the record cannot be written,

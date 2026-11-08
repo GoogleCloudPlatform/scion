@@ -334,7 +334,11 @@ func (s *Server) authorizeChatConversation(ctx context.Context, user UserIdentit
 	}
 
 	target := &chatSendTarget{Key: key, wcs: wcs}
-	audience, topic := chatKeyReadAudience(ctx, wcs, key)
+	audience, topic, err := chatKeyReadAudience(ctx, wcs, key)
+	if err != nil {
+		logChatStoreFault(ctx, slog.Default(), "chat send: topic lookup failed", "key", key, "error", err)
+		return nil, newChatSendError(http.StatusInternalServerError, ErrCodeInternalError, "Internal server error", nil)
+	}
 	if audience == chatAudienceParticipants {
 		target.IsDM = true
 		if serr := authorizeDMKeyParticipant(ctx, user, key, chatSendPath(key)); serr != nil {
@@ -355,8 +359,15 @@ func (s *Server) authorizeChatConversation(ctx context.Context, user UserIdentit
 	}
 	project, err := s.store.GetProject(ctx, topic.ProjectID)
 	if err != nil {
-		logReferenceRefused(ctx, chatSendPath(key), "topic project lookup failed: "+err.Error(), user)
-		return nil, chatSendNotFound("Thread")
+		// A missing project is answered as a missing thread, so the answer
+		// reveals nothing; any other store error is the generic 500, with
+		// the error in the server log only.
+		if errors.Is(err, store.ErrNotFound) {
+			logReferenceRefused(ctx, chatSendPath(key), "topic project lookup failed: "+err.Error(), user)
+			return nil, chatSendNotFound("Thread")
+		}
+		logChatStoreFault(ctx, slog.Default(), "chat send: topic project lookup failed", "key", key, "error", err)
+		return nil, newChatSendError(http.StatusInternalServerError, ErrCodeInternalError, "Internal server error", nil)
 	}
 	resource := projectResource(project)
 	// The single chat decision point for a topic (chatThreadAccess). A user
@@ -397,7 +408,8 @@ func (s *Server) authorizeChatConversation(ctx context.Context, user UserIdentit
 type chatKeyAudience int
 
 const (
-	// chatAudienceNone: no such conversation (or the lookup failed).
+	// chatAudienceNone: no such conversation, or a key that cannot name a
+	// topic (see validChatTopicKey).
 	chatAudienceNone chatKeyAudience = iota
 	// chatAudienceParticipants: a DM key, read by its participants only.
 	chatAudienceParticipants
@@ -414,19 +426,49 @@ const (
 // (authorizeConversationAccess) and the attachment projection decision
 // (projectionAudienceIsProject), so those three cannot disagree. Other
 // handlers still test the "dm:" prefix for their own key-shape handling.
-// A topic that cannot be loaded is chatAudienceNone.
-func chatKeyReadAudience(ctx context.Context, wcs WebChatStore, key string) (chatKeyAudience, *WebChatTopic) {
+// A topic that does not exist is chatAudienceNone with a nil error, and so
+// is a key that cannot name one (validChatTopicKey), which is never sent to
+// the store. Any other failure to load the topic is returned as the error
+// (with chatAudienceNone), so callers answer a store fault as a fault rather
+// than as a missing conversation.
+func chatKeyReadAudience(ctx context.Context, wcs WebChatStore, key string) (chatKeyAudience, *WebChatTopic, error) {
 	if strings.HasPrefix(key, "dm:") {
-		return chatAudienceParticipants, nil
+		return chatAudienceParticipants, nil, nil
 	}
-	if wcs == nil || key == "" {
-		return chatAudienceNone, nil
+	if wcs == nil || !validChatTopicKey(key) {
+		return chatAudienceNone, nil, nil
 	}
 	topic, err := wcs.GetTopic(ctx, key)
-	if err != nil || topic == nil {
-		return chatAudienceNone, nil
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return chatAudienceNone, nil, nil
+		}
+		return chatAudienceNone, nil, err
 	}
-	return chatAudienceProject, topic
+	if topic == nil {
+		return chatAudienceNone, nil, nil
+	}
+	return chatAudienceProject, topic, nil
+}
+
+// validChatTopicKey reports whether key can name a topic: non-empty, valid
+// UTF-8 and free of NUL. Topic IDs are generated strings, so a key that fails
+// this names no topic; it is answered as a missing one instead of being sent
+// to the store, which may reject it with an error (Postgres refuses NUL and
+// invalid UTF-8 in text) that would otherwise become a 500.
+func validChatTopicKey(key string) bool {
+	return key != "" && utf8.ValidString(key) && !strings.ContainsRune(key, 0)
+}
+
+// logChatStoreFault logs a store fault on a chat lookup with l: at Debug when
+// ctx is already done (the client went away, so the fault is expected), at
+// Warn otherwise. The caller still answers the fault (a 500).
+func logChatStoreFault(ctx context.Context, l *slog.Logger, msg string, args ...any) {
+	if ctx.Err() != nil {
+		l.DebugContext(ctx, msg, args...)
+		return
+	}
+	l.WarnContext(ctx, msg, args...)
 }
 
 // authorizeDMKeyParticipant runs the first two DM steps of

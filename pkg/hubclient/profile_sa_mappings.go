@@ -21,7 +21,11 @@ package hubclient
 // plus runtime entry) and from ServiceAccount annotation discovery in the
 // profile's namespace (ptone/scion#3329 phases 2 and 4).
 //
-// The broker sends the full report of every Kubernetes profile when any
+// From report version 3 a Cloud Run profile has a report too: the
+// accounts the broker may run its instances as (see
+// CloudRunNativeIdentity), with no KSA or namespace.
+//
+// The broker sends the full report of every reported profile when any
 // profile's report changes, and when the Hub asks for it
 // (BrokerHeartbeatResponse.ProfileSAMappingsRequested). Every heartbeat
 // carries the hash of each profile's report
@@ -55,6 +59,20 @@ type ProfileSAMappingsState struct {
 	// ReportVersion is api.BrokerSAReportVersion from a broker that sets
 	// it; zero (omitted) from an older broker.
 	ReportVersion int `json:"reportVersion,omitempty"`
+	// CloudRunNativeIdentity is true for a Cloud Run profile whose runtime
+	// entry has the runtimes.<entry>.cloudrun form, so the broker can run
+	// an instance as the identity in its dispatch while the
+	// hub.cloudrun_native_identity experiment is on. Its
+	// ServiceAccountMappings are then the entry's
+	// cloudrun.assignable_service_accounts (Source
+	// api.BrokerSASourceCloudRunAllowlist, GSA only). False, with no
+	// entries, for a cloudrun-instances entry, and for every Kubernetes
+	// profile.
+	CloudRunNativeIdentity bool `json:"cloudRunNativeIdentity,omitempty"`
+	// CloudRunBlockAccount is true when such a profile's runtime entry has
+	// a block service account configured. Only presence is reported, never
+	// the account.
+	CloudRunBlockAccount bool `json:"cloudRunBlockAccount,omitempty"`
 }
 
 // ProfileSAMappingsHash is the hash of one profile's ProfileSAMappingsState,

@@ -197,6 +197,10 @@ type Layer1Snapshot struct {
 	// means unset (shared artifacts stay on the hub origin). Every snapshot
 	// constructor sets it.
 	ContentURL string
+	// ContentURLAllowSameSite is server.hub.content_url_allow_same_site, the
+	// override that lets ContentURL be on the hub's registrable domain;
+	// false means such a value is refused. Every snapshot constructor sets it.
+	ContentURLAllowSameSite bool
 
 	// GitHub App (non-secret fields only)
 	GitHubAppID           int64
@@ -1392,6 +1396,7 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 	snap.ImageRegistry = k.String("image_registry")
 	snap.MonitoringDashboardURL = k.String(config.MonitoringDashboardURLKey)
 	snap.ContentURL = k.String(config.ContentURLKey)
+	snap.ContentURLAllowSameSite = k.Bool(config.ContentURLAllowSameSiteKey)
 
 	// GitHub App
 	snap.GitHubAppID = k.Int64("server.github_app.app_id")
@@ -1492,6 +1497,8 @@ func BuildLayer1SnapshotFromFile(gc *config.GlobalConfig) Layer1Snapshot {
 		MonitoringDashboardURL: gc.Hub.MonitoringDashboardURL,
 		// Applied live in file mode too, like the monitoring link.
 		ContentURL: gc.Hub.ContentURL,
+		// Applied live with the content host it governs.
+		ContentURLAllowSameSite: gc.Hub.ContentURLAllowSameSite,
 	}
 
 	if gc.TelemetryConfig != nil {
@@ -1920,11 +1927,19 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 	// read it on every request through HubEndpoints().Content, which
 	// ignores (and logs once) a value that is invalid or on the hub's own
 	// host name (contentURLInEffect).
-	if s.contentURLLiveValue() != snap.ContentURL {
+	// The same-site override is stored with it in one pointer, so a change
+	// of either takes effect together (contentURLInEffect).
+	// The parsed content host and the classification are derived here, once
+	// per apply (newContentURLLiveState), so no request parses either URL.
+	prevContent := s.contentURLLiveState()
+	nextContent := newContentURLLiveState(snap.ContentURL, snap.ContentURLAllowSameSite, hubEndpointsFromConfig(s.config).Public, s.config.AgentEndpoint)
+	if prevContent.URL != nextContent.URL {
 		applied = append(applied, "content_url")
 	}
-	contentURL := snap.ContentURL
-	s.contentURLLive.Store(&contentURL)
+	if prevContent.AllowSameSite != nextContent.AllowSameSite {
+		applied = append(applied, "content_url_allow_same_site")
+	}
+	s.contentURLLive.Store(nextContent)
 
 	// image_registry is not applied here: every hub read resolves it from
 	// the operational settings when it needs it (hubScopeImageRegistry,

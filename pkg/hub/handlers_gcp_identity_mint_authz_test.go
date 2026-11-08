@@ -56,6 +56,14 @@ type gcpMintFixture struct {
 func newGCPMintFixture(t *testing.T, name string) *gcpMintFixture {
 	t.Helper()
 	srv, s := testServer(t)
+	return newGCPMintFixtureOn(t, name, srv, s)
+}
+
+// newGCPMintFixtureOn is newGCPMintFixture on a server the caller built,
+// for example one with a store fault wrapper installed (installStoreFault)
+// before this setup runs. s is the raw store the setup writes through.
+func newGCPMintFixtureOn(t *testing.T, name string, srv *Server, s store.Store) *gcpMintFixture {
+	t.Helper()
 	srv.SetGCPTokenGenerator(&mockGCPTokenGenerator{email: "hub-sa@test-hub-project.iam.gserviceaccount.com"})
 	ctx := context.Background()
 

@@ -592,14 +592,27 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// uses the instance's own metadata server instead of the sciontool
 	// metadata emulator, so, as for Kubernetes Workload Identity above, the
 	// mode is rewritten to "passthrough" and the account and project are
-	// set as informational env in the passthrough arm below. The emulator
-	// and its env plumbing are unchanged for every other dispatch.
-	crIdentity, sce := s.resolveCloudRunIdentity(ctx, in, dispatchRuntimeType, gcpMetadataMode, gcpIdentityProfile)
+	// set as informational env in the passthrough arm below. "block" keeps
+	// the emulator in block mode as a second layer: the mode is set to
+	// "block", which also covers a hub-default passthrough the resolver
+	// mapped to block. The emulator and its env plumbing stay in place for
+	// every other dispatch.
+	// requireLocalRuntime marks a passthrough granted by the hub's default
+	// rung. hubDefaultPassthrough is its only reading (the create request's
+	// GCPIdentity, else the resolved env overlaid by the config env); the
+	// Cloud Run resolver and the env re-stamp below both use this value.
+	requireLocalRuntime := hubDefaultPassthrough(in)
+	crIdentity, sce := s.resolveCloudRunIdentity(ctx, in, dispatchRuntimeType, gcpMetadataMode, gcpIdentityProfile, requireLocalRuntime)
 	if sce != nil {
 		return nil, sce
 	}
-	if crIdentity.Identity != nil && crIdentity.Identity.Mode == store.GCPMetadataModeAssign {
-		gcpMetadataMode = store.GCPMetadataModePassthrough
+	if crIdentity.Identity != nil {
+		switch crIdentity.Identity.Mode {
+		case store.GCPMetadataModeAssign:
+			gcpMetadataMode = store.GCPMetadataModePassthrough
+		case store.GCPMetadataModeBlock:
+			gcpMetadataMode = store.GCPMetadataModeBlock
+		}
 	}
 
 	// --- Build merged environment ---
@@ -635,10 +648,14 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		env[k] = v
 	}
 
-	// 2. Config.Env (takes precedence)
+	// 2. Config.Env (takes precedence). The native Cloud Run marker is never
+	// taken from it: only the hub sets that key (cloudRunNativeMarked).
 	if in.Config != nil {
 		for _, e := range in.Config.Env {
 			parts := strings.SplitN(e, "=", 2)
+			if len(parts) == 2 && parts[0] == cloudRunNativeMarkerEnv {
+				continue
+			}
 			if len(parts) == 2 {
 				env[parts[0]] = parts[1]
 				classifyBrokerEnv(parts[0], api.EnvKindPlain)
@@ -825,16 +842,10 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	//
 	// gcpMetadataMode itself was already resolved earlier in this function
 	// (effectiveGCPMetadataMode) and validated against the Kubernetes/"block"
-	// check above. requireLocalRuntime follows the identical struct-or-env
-	// precedence — see downgradeUnverifiedHubDefaultPassthrough's doc comment
-	// for what it means and how it's used below and in
-	// recheckHubDefaultPassthrough.
-	requireLocalRuntime := false
-	if in.Config != nil && in.Config.GCPIdentity != nil {
-		requireLocalRuntime = in.Config.GCPIdentity.RequireLocalRuntime
-	} else if v := env["SCION_METADATA_REQUIRE_LOCAL_RUNTIME"]; v != "" {
-		requireLocalRuntime = v == "true"
-	}
+	// check above. requireLocalRuntime (set above, from hubDefaultPassthrough)
+	// follows the identical struct-or-env precedence — see
+	// downgradeUnverifiedHubDefaultPassthrough's doc comment for what it means
+	// and how it's used below and in recheckHubDefaultPassthrough.
 	// Allow-list, not a deny-list. The previous form tested for the two modes
 	// that need the redirect and let everything else fall through untouched,
 	// which meant an unrecognised mode — a typo, a value from a newer hub, an
@@ -918,6 +929,17 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	if requireLocalRuntime {
 		env["SCION_METADATA_REQUIRE_LOCAL_RUNTIME"] = "true"
 		classifyBrokerEnv("SCION_METADATA_REQUIRE_LOCAL_RUNTIME", api.EnvKindPlain)
+	}
+
+	// The init firewall on a native Cloud Run "assign" dispatch, an
+	// unsupported combination, checked on the merged env: the hub's
+	// resolved env and the config env (steps 1 and 2) are both in it, and
+	// the identity above is resolved. No later step writes
+	// SCION_INIT_FIREWALL. The settings, harness-config and harness env
+	// sources are refused by the Cloud Run runtime check
+	// (checkCloudRunInitFirewall).
+	if refusal := refuseCloudRunInitFirewall(in.Name, crIdentity.Identity, env); refusal != nil {
+		return nil, refusal
 	}
 
 	// Debug log final env

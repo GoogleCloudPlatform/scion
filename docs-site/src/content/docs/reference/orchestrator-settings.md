@@ -37,7 +37,7 @@ Files without `schema_version` are treated as legacy format. Run `scion config m
 | `default_harness_config` | string | Default harness config to use. |
 | `default_harness_auth` | string | Default authentication type for new agents (e.g., `api-key`, `vertex-ai`, `none`). |
 | `image_registry` | string | Registry prefix for all standard harness images. Rewrites the registry portion of `scion-*` images (e.g., `ghcr.io/myorg`). See [Building Custom Images](/scion/local/custom-images/). |
-| `image_tag` | string | Experimental (`hub.image_tag_setting`). Tag of the standard `scion-*` images whose tag is `latest` or absent: `version` for the Hub binary's version, or a literal tag (e.g., `v0.3.0-preview.5`). Unset leaves images unchanged. Applied only while the experiment is on. See [Image tag](/scion/reference/settings-precedence/#image-tag-experimental). |
+| `image_tag` | string | Experimental (`hub.image_tag_setting`). Tag of the standard `scion-*` images whose tag is `latest` or absent: `version` for the Hub binary's release version, or a literal tag (e.g., `v0.3.0-preview.5`; `latest` opts out of the version default). A set value applies only while the experiment is on. Unset: a release build of the Hub uses its own version (`hub.image_tag_version_default`, on by default); other builds leave images unchanged. See [Image tag](/scion/reference/settings-precedence/#image-tag-experimental). |
 | `default_max_turns` | int | Default maximum number of turns an agent can take before termination. |
 | `default_max_model_calls` | int | Default maximum number of LLM model calls an agent can make. |
 | `default_max_duration` | string | Default maximum execution time (e.g., `"2h"`, `"45m"`) for an agent. |

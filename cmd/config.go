@@ -184,10 +184,12 @@ is named from the host), and makes it the current hub. In a project,
 instead.
 
 image_tag (experimental, hub.image_tag_setting) selects the tag of the bundled
-scion-* agent images: "version" for the hub binary's version, or a literal tag
-such as v0.3.0-preview.5. A value that is not a valid image tag is refused. The
-hub applies it to agent images only while the experiment is on; while it is
-off, the value is ignored and the hub warns at startup.`,
+scion-* agent images: "version" for the hub binary's release version, or a
+literal tag such as v0.3.0-preview.5. A value that is not a valid image tag is
+refused. The hub applies a set value only while the experiment is on; while it
+is off, the value is ignored and the hub warns at startup. Unset, a release
+build of the hub uses its own version (hub.image_tag_version_default, on by
+default); "image_tag latest" opts out.`,
 	Args: cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		key := args[0]

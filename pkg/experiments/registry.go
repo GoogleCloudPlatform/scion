@@ -408,6 +408,16 @@ const UserDeleteForceCascade = "hub.user_delete_force_cascade"
 // dispatch, so the Runtime Broker applies it to the images it resolves.
 const ImageTagSetting = "hub.image_tag_setting"
 
+// ImageTagVersionDefault gates the version default of image_tag
+// (ptone/scion#6625): while it is on and image_tag is unset, a release
+// build of the hub (vX.Y.Z, vX.Y.Z-preview.N or vX.Y.Z-rc.N) applies its
+// own version as the tag of the bundled scion-* agent images, as if
+// image_tag were "version"; any other build leaves images at :latest. It
+// ships on. A set image_tag always wins, and suppresses the default even
+// while hub.image_tag_setting is off. The hub checks it; while it is off,
+// an unset image_tag leaves every image reference unchanged.
+const ImageTagVersionDefault = "hub.image_tag_version_default"
+
 // compiled is the production experiment list. It is reachable only through
 // Default(); there is no package-level Lookup/All, so hub code cannot bypass
 // the Registry instance it was given (ptone/scion#2217).
@@ -774,6 +784,17 @@ var compiled = []Experiment{
 		Title:       "Image tag setting",
 		Description: "Lets the image_tag setting choose the tag of the bundled scion-* agent images whose tag is latest or absent: \"version\" selects the hub binary's version (latest for a development build), any other value is a literal tag. Images with another tag, a digest, or a registry host are left alone, except exactly <image_registry>/scion-<name> (latest or untagged), the form the image_registry rewrite produces, which is retagged too. While it is off, image_tag is ignored and image references are unchanged; a hub save that sets image_tag is refused, and a settings-file or environment value is reported at startup. Maintenance builds and the system image build keep latest. Agents need images built for that tag (image-build/README.md, \"Build images for a release\").",
 		Default:     false,
+		Layers:      []Layer{LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#6625",
+		Owner:       "hub",
+		ReviewBy:    "2027-02-05",
+	},
+	{
+		Name:        ImageTagVersionDefault,
+		Title:       "Image tag version default",
+		Description: "When image_tag is unset, a release build of the hub (vX.Y.Z, vX.Y.Z-preview.N or vX.Y.Z-rc.N) uses its own version as the tag of the bundled scion-* agent images whose tag is latest or absent, so agents run the images published for that release; development, nightly and other builds keep latest. Any set image_tag wins (image_tag: latest opts out), even while hub.image_tag_setting is off. While it is off, an unset image_tag leaves image references unchanged.",
+		Default:     true,
 		Layers:      []Layer{LayerServer},
 		Stage:       StageAlpha,
 		Issue:       "ptone/scion#6625",
