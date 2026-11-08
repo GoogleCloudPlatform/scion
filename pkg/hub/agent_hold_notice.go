@@ -51,7 +51,8 @@ type agentHoldChecker interface {
 // lookup fault withholds the notice). Each withheld notice is logged on log
 // (slog.Default() when nil) with the agent ID and the notice kind, never
 // the notice text, as an event line (logging.LogKindEvent): it is not a
-// message record.
+// message record. A held drop is logged at Warn, as the send paths log a
+// refused send to a held agent (ptone/scion#6859).
 func heldNoticeWithheld(ctx context.Context, holds agentHoldChecker, log *slog.Logger, agent *store.Agent, kind string) bool {
 	if log == nil {
 		log = slog.Default()
@@ -77,7 +78,9 @@ func heldNoticeWithheld(ctx context.Context, holds agentHoldChecker, log *slog.L
 	return false
 }
 
-// noticeLogger returns primary when it is set, else fallback.
+// noticeLogger returns primary when it is set, else fallback. Callers pass
+// the dedicated message log and their own logger; the Server's sites use
+// recordLog, which makes the same choice.
 func noticeLogger(primary, fallback *slog.Logger) *slog.Logger {
 	if primary != nil {
 		return primary

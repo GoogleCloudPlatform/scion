@@ -25,6 +25,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
@@ -139,7 +140,8 @@ func TestHeldNotice_BroadcastDeliveryFailed(t *testing.T) {
 }
 
 // heldNoticeWithheld fails closed: a hold lookup fault withholds the notice
-// and logs the agent and the notice kind, as does a missing hold checker.
+// and logs the agent and the notice kind, as do a missing hold checker and a
+// missing agent.
 // Through the paths, a sender whose hold cannot be read gets no
 // DELIVERY_FAILED notice from the message broker and no broadcast
 // DELIVERY_FAILED notice.
@@ -156,6 +158,13 @@ func TestHeldNotice_LookupFaultWithholds(t *testing.T) {
 		"an agent that is not held, with a readable hold, gets the notice")
 	assert.True(t, heldNoticeWithheld(ctx, nil, log, sender, heldNoticeDeliveryFailed),
 		"no hold checker withholds the notice")
+	assert.True(t, heldNoticeWithheld(ctx, faulty, log, nil, heldNoticeDeliveryFailed),
+		"no agent withholds the notice")
+	unchecked := buf.String()
+	assert.Equal(t, 2, strings.Count(unchecked, "the recipient's hold could not be checked"),
+		"each unchecked notice is logged")
+	assert.Contains(t, unchecked, "notice_kind="+heldNoticeDeliveryFailed)
+	assert.Contains(t, unchecked, "log_kind=event")
 
 	sw.Arm()
 	assert.True(t, heldNoticeWithheld(ctx, faulty, log, sender, heldNoticeDeliveryFailed),
@@ -174,4 +183,52 @@ func TestHeldNotice_LookupFaultWithholds(t *testing.T) {
 
 	assert.Zero(t, heldNoticeCount(dispatcher, sender.Slug), "no broadcast notice when the hold cannot be read")
 	assert.Zero(t, heldNoticeCount(proxyDispatcher, sender.Slug), "no broker notice when the hold cannot be read")
+}
+
+// The held drop is logged once per notice, on the message record log, as a
+// Warn event line naming the agent and the notice kind; no line carries the
+// notice text, the original message or the delivery error.
+func TestHeldNotice_HeldDropLogLine(t *testing.T) {
+	srv, s, projectID, a, dispatcher := fanoutHoldFixture(t, "notice-log", "notice-log-held", "notice-log-target")
+	held, target := a["notice-log-held"], a["notice-log-target"]
+	holdAgentFor(t, s, held.ID, projectID, tid("notice-log-root"))
+	ctx := context.Background()
+	const body = "notice-log-body-7145"
+	const errText = "notice-log-broker-error-7145"
+	msg := heldNoticeSenderMessage(held.Slug, held.ID, target.Slug)
+	msg.Msg = body
+
+	var srvBuf syncBuffer
+	srv.SetMessageLogger(slog.New(slog.NewTextHandler(&srvBuf, nil)))
+	srv.publishBroadcastDeliveryFailed(ctx, target, msg, errors.New(errText))
+
+	var proxyBuf syncBuffer
+	proxy, proxyDispatcher := heldBrokerProxy(t, s)
+	proxy.messageLog = slog.New(slog.NewTextHandler(&proxyBuf, nil))
+	proxy.publishDeliveryFailed(ctx, projectID, target.Slug, msg, errors.New(errText))
+	proxy.publishDeliveryDeferred(ctx, target.Slug, msg)
+
+	assert.Zero(t, heldNoticeCount(dispatcher, held.Slug))
+	assert.Zero(t, heldNoticeCount(proxyDispatcher, held.Slug))
+
+	for name, c := range map[string]struct {
+		out   string
+		kinds []string
+	}{
+		"server": {srvBuf.String(), []string{heldNoticeBroadcastFailed}},
+		"proxy":  {proxyBuf.String(), []string{heldNoticeDeliveryFailed, heldNoticeDeliveryDeferred}},
+	} {
+		lines := strings.Split(strings.TrimSpace(c.out), "\n")
+		require.Len(t, lines, len(c.kinds), "%s: one log line per withheld notice", name)
+		for i, line := range lines {
+			assert.Contains(t, line, "level=WARN", name)
+			assert.Contains(t, line, "recipient agent is held", name)
+			assert.Contains(t, line, "agent_id="+held.ID, name)
+			assert.Contains(t, line, "notice_kind="+c.kinds[i], name)
+			assert.Contains(t, line, "log_kind=event", name)
+			for _, leak := range []string{body, errText, "delivery failed", "reincarnating"} {
+				assert.NotContains(t, line, leak, "%s: the log line carries no notice text", name)
+			}
+		}
+	}
 }

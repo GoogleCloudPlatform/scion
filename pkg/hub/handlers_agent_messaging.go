@@ -4365,7 +4365,7 @@ func (s *Server) publishBroadcastDeliveryFailed(ctx context.Context, targetAgent
 		return
 	}
 	// A held sender gets no notice (ptone/scion#7145).
-	if heldNoticeWithheld(ctx, s.store, s.messageLog, senderAgent, heldNoticeBroadcastFailed) {
+	if heldNoticeWithheld(ctx, s.store, s.recordLog(), senderAgent, heldNoticeBroadcastFailed) {
 		return
 	}
 

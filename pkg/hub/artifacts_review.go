@@ -81,8 +81,8 @@ func (s *Server) deliverArtifactReview(ctx context.Context, n artifacts.ReviewNo
 		return fmt.Errorf("owner agent is reincarnating")
 	}
 	// A held owner gets no notice (ptone/scion#7145); the drop is logged
-	// there.
-	if heldNoticeWithheld(ctx, s.store, s.messageLog, agent, heldNoticeArtifactReview) {
+	// on the message record log.
+	if heldNoticeWithheld(ctx, s.store, s.recordLog(), agent, heldNoticeArtifactReview) {
 		return nil
 	}
 	dispatcher := s.GetDispatcher()

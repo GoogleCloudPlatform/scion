@@ -24,30 +24,15 @@ package hub
 
 import (
 	"context"
-	"errors"
 	"log/slog"
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// notifHoldFaultStore fails the hold lookup for one agent while its fault
-// switch is armed.
-type notifHoldFaultStore struct {
-	store.Store
-	fault   *storeFaultSwitch
-	agentID string
-}
-
-func (h *notifHoldFaultStore) HasActiveAgentHold(ctx context.Context, agentID string) (bool, error) {
-	if h.fault.Active() && agentID == h.agentID {
-		return false, errors.New("injected hold lookup fault")
-	}
-	return h.Store.HasActiveAgentHold(ctx, agentID)
-}
 
 // holdSubscriber places an active hold on env's (running) subscriber.
 func holdSubscriber(t *testing.T, env *notificationTestEnv) {
@@ -66,6 +51,29 @@ func TestHeldNotice_NotificationDispatchParked(t *testing.T) {
 
 	assert.Empty(t, env.dispatcher.getCalls(), "a held subscriber must not be sent anything")
 	assertPendingUntouched(t, env, id)
+}
+
+// A held subscriber in the stopped phase (neither running nor suspended) is
+// parked too: the primary dispatch makes no attempt, and the sweep neither
+// selects nor attempts its notification.
+func TestHeldNotice_NotificationStoppedSubscriberParked(t *testing.T) {
+	env := setupNotificationTest(t)
+	ctx := context.Background()
+	setAgentPhase(t, env, env.subscriber, state.PhaseStopped)
+	holdSubscriber(t, env)
+
+	primary := createUndispatchedNotification(t, env, env.sub, 0)
+	env.nd.dispatchToAgent(ctx, env.sub, getNotification(t, env, primary), env.watched.ID, env.watched.Slug)
+
+	swept := createUndispatchedNotification(t, env, env.sub, 2*time.Minute)
+	notifs, err := env.store.GetUndispatchedAgentNotifications(ctx, "")
+	require.NoError(t, err)
+	assert.Empty(t, notifs, "the sweep query leaves a held, stopped subscriber out")
+	sweepServer(env).notificationDispatchSweepHandler()(ctx)
+
+	assert.Empty(t, env.dispatcher.getCalls(), "a held, stopped subscriber must not be sent anything")
+	assertPendingUntouched(t, env, primary)
+	assertPendingUntouched(t, env, swept)
 }
 
 // The sweep neither claims nor attempts a held subscriber's notification;
@@ -119,7 +127,7 @@ func TestHeldNotice_NotificationLookupFaultParks(t *testing.T) {
 	env := setupRetryTest(t)
 	ctx := context.Background()
 	sw := &storeFaultSwitch{}
-	nd := NewNotificationDispatcher(&notifHoldFaultStore{Store: env.store, fault: sw, agentID: env.subscriber.ID},
+	nd := NewNotificationDispatcher(&targetHoldFaultStore{Store: env.store, fault: sw, agentID: env.subscriber.ID},
 		env.pub, func() AgentDispatcher { return env.dispatcher }, slog.Default())
 
 	notifs, err := env.store.GetUndispatchedAgentNotifications(ctx, "")
