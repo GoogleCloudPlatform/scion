@@ -370,6 +370,10 @@ func TestChatKeyLogArgs(t *testing.T) {
 		{name: "over the bound", key: long, want: long[:maxLoggedChatKeyBytes]},
 		{name: "cut would split a rune", key: straddle, want: straddle[:maxLoggedChatKeyBytes-1]},
 		{name: "control bytes", key: "chat\ntopic\r\x1b", want: "chat\ntopic\r\x1b"},
+		// A four-byte rune starts at byte 127, so the cut backs off to it.
+		{name: "four-byte rune at the bound", key: long[:maxLoggedChatKeyBytes-1] + "\U0001F600", want: long[:maxLoggedChatKeyBytes-1]},
+		// Invalid UTF-8, all continuation bytes: no rune start, so nothing is kept.
+		{name: "continuation bytes only", key: strings.Repeat("\x80", 200), want: ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
