@@ -61,8 +61,6 @@ type fakeHost struct {
 	// admins lists "userRef scope" pairs for which AdministersScope
 	// answers yes.
 	admins map[string]bool
-	// subjectErr, when set, makes ReviewSubjectAuthorize fail.
-	subjectErr error
 	// stewards maps "userRef ownerAgentID homeScope" to the clause
 	// StewardClause answers; stewardAll, when set, is answered for every
 	// other question (a host that would make anyone a steward).
@@ -71,21 +69,6 @@ type fakeHost struct {
 	// sponsorArgs records the sponsorRef argument of every StewardClause
 	// question, as "<method> <ownerAgentID> <sponsorRef>".
 	sponsorArgs []string
-}
-
-// ReviewSubjectAuthorize answers from the same table as Authorize, for
-// the named user rather than the caller of ctx.
-func (h *fakeHost) ReviewSubjectAuthorize(_ context.Context, kind, ref, scope, perm string) (bool, error) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.calls = append(h.calls, "subject "+PrincipalRef(kind, ref)+" "+scope+" "+perm)
-	if h.subjectErr != nil {
-		return false, h.subjectErr
-	}
-	if kind != PrincipalKindUser || scope == "" {
-		return false, nil
-	}
-	return h.perms[PrincipalRef(kind, ref)][scope][perm], nil
 }
 
 // allowAdmin makes AdministersScope answer yes for u in scope.

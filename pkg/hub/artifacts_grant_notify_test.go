@@ -540,15 +540,14 @@ func TestGrantNoticeLabelEmail(t *testing.T) {
 // that build or use it puts any identity into a context.
 func TestNamedUserSubjectNeverEntersAContext(t *testing.T) {
 	allowed := map[string]bool{
-		"artifacts_review_subject.go:ReviewSubjectAuthorize": true,
-		"artifacts_grant_notify.go:MayNotifyGrant":           true,
-		"artifacts_grant_notify.go:grantNoticeLabel":         true,
+		"artifacts_grant_notify.go:MayNotifyGrant":   true,
+		"artifacts_grant_notify.go:grantNoticeLabel": true,
 	}
 	forbidden := map[string]bool{
 		"WithValue": true, "contextWithIdentity": true, "contextWithCredentialContext": true,
 		"WithIdentity": true, "withIdentity": true, "ContextWithIdentity": true,
 	}
-	files := map[string]bool{"artifacts_subject_user.go": true, "artifacts_review_subject.go": true, "artifacts_grant_notify.go": true}
+	files := map[string]bool{"artifacts_subject_user.go": true, "artifacts_grant_notify.go": true}
 	callers := map[string]bool{}
 	scanned := 0
 	forEachHubFile(t, func(name string, _ *token.FileSet, file *ast.File) {

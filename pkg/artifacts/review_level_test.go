@@ -421,58 +421,6 @@ func TestAdminGrantRouteReview(t *testing.T) {
 	}
 }
 
-// TestReviewSubjectIsGetWithoutOwnGrant: the review subject check (the
-// notice rule of grantNotifyDecision until review reads) answers what a real GET by the same user answers once that user's own
-// principal grant is left out (the review grant would take its row).
-// A home member and a member of a project with a scope grant: both allow.
-// An outsider: both refuse. A user holding only a review grant: GET reads
-// (the ladder), and the subject check, which leaves the user's own grant
-// out, refuses.
-// A user whose only read is a principal read grant: GET allows, the
-// subject check refuses.
-func TestReviewSubjectIsGetWithoutOwnGrant(t *testing.T) {
-	f, id := newReviewGrantFixture(t)
-	f.host.crossScope = true
-	homeMember := principal{PrincipalKindUser, "user-home", ""}
-	readGrantee := principal{PrincipalKindUser, "user-granted", ""}
-	scopeMember := principal{PrincipalKindUser, "user-scope", ""}
-	stranger := principal{PrincipalKindUser, "user-stranger", ""}
-	reviewOnly := principal{PrincipalKindUser, "user-review-only", ""}
-	f.host.allow(homeMember, "project-1", PermissionRead)
-	f.grantPrincipal(id, readGrantee)
-	f.host.allow(scopeMember, "project-2", PermissionRead)
-	insertGrant(f, id, SubjectScope, "project-2", GrantRead, nil)
-	insertGrant(f, id, SubjectPrincipal, PrincipalRef(reviewOnly.kind, reviewOnly.ref), GrantReview, nil)
-	for _, tc := range []struct {
-		p                 principal
-		wantGet, wantSubj bool
-	}{
-		{homeMember, true, true}, {scopeMember, true, true},
-		{stranger, false, false}, {reviewOnly, true, false},
-		{readGrantee, true, false},
-	} {
-		t.Run(tc.p.ref, func(t *testing.T) {
-			get := f.do(&tc.p, http.MethodGet, "/api/v1/artifacts/"+id, nil, nil)
-			reads := get.Code == http.StatusOK
-			if !reads && get.Code != http.StatusNotFound {
-				t.Fatalf("GET: %d", get.Code)
-			}
-			b, _ := f.svc.backend()
-			a, err := f.store.GetArtifact(context.Background(), id)
-			if err != nil {
-				t.Fatal(err)
-			}
-			subject, err := f.svc.reviewSubjectCanRead(context.Background(), b, a, PrincipalRef(tc.p.kind, tc.p.ref))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if reads != tc.wantGet || subject != tc.wantSubj {
-				t.Errorf("GET reads=%v, subject check=%v, want %v %v", reads, subject, tc.wantGet, tc.wantSubj)
-			}
-		})
-	}
-}
-
 // TestWriteDecisionReviewGrantReads: the write decision gives a review
 // grantee review access through the grant itself, also without another
 // read path (the ladder).

@@ -410,9 +410,6 @@ func isUserPrincipal(kind, ref string) bool {
 //   - the grant names the caller: skipped "self";
 //   - the host's GrantNotifier.MayNotifyGrant (no notifier: "unavailable";
 //     a refusal: "not_permitted"; a fault: "unavailable");
-//   - for review, until review reads (phase 3): the user must already read
-//     the artifact some other way (reviewSubjectCanRead): "not_permitted",
-//     or "unavailable" on a lookup fault;
 //   - the grant must raise the user's current level: "not_raised";
 //   - the notify limiter, per requester and in all: "rate_limited".
 //
@@ -440,20 +437,6 @@ func (s *Service) grantNotifyDecision(r *http.Request, b backend, a *Artifact, r
 	if !allowed {
 		s.logNotifySkipped(r, a, logReasonNotifyNotPermitted, req.SubjectRef, req.Permission)
 		return false, NotifySkippedNotPermitted
-	}
-	if req.Permission == GrantReview {
-		// Phase 2 only: a review grant does not read, so the review notice
-		// goes only to a user who can already open the artifact (Q1).
-		readable, err := s.reviewSubjectCanRead(ctx, b, a, req.SubjectRef)
-		if err != nil {
-			slog.WarnContext(ctx, "artifacts: grant notify: subject read check failed", "error", err)
-			s.logNotifySkipped(r, a, logReasonNotifyUnavailable, req.SubjectRef, req.Permission)
-			return false, NotifySkippedUnavailable
-		}
-		if !readable {
-			s.logNotifySkipped(r, a, logReasonNotifyNotPermitted, req.SubjectRef, req.Permission)
-			return false, NotifySkippedNotPermitted
-		}
 	}
 	grants, err := b.store.ListGrants(ctx, a.ID)
 	if err != nil {

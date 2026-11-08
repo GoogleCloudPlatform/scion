@@ -204,12 +204,12 @@ func strs(ss []string) string { return strings.Join(ss, " | ") }
 // TestGrantNotifyOrder (condition B2, spec amendment A1 C4): the send
 // check runs before the store write and the limiter, and NotifyGrant only
 // after a committed write recorded notified. On every refusal and fault
-// path (not permitted, check fault, review read fault, review subject
-// cannot read, not raised, grants unreadable, rate limited) the grant is
-// made, the store is asked with notify=false, nothing is sent, and the
-// event carries no notified; the refusals before the limiter do not charge
-// it (the one-token limiter still lets the passing request through). A
-// failed put never notifies (K12). No notifier: TestGrantNotifyWithoutNotifier.
+// path (not permitted, check fault, not raised, grants unreadable, rate
+// limited) the grant is made, the store is asked with notify=false,
+// nothing is sent, and the event carries no notified; the refusals before
+// the limiter do not charge it (the one-token limiter still lets the
+// passing request through). A failed put never notifies (K12). No
+// notifier: TestGrantNotifyWithoutNotifier.
 func TestGrantNotifyOrder(t *testing.T) {
 	f := newNotifyFixture(t)
 	logs := captureLog(f.fixture, slog.LevelInfo)
@@ -236,11 +236,6 @@ func TestGrantNotifyOrder(t *testing.T) {
 			GrantRead, NotifySkippedNotPermitted, logReasonNotifyNotPermitted, http.StatusCreated},
 		{"check fault", "", func(t *testing.T, sub string) { existing(t, sub, GrantRead); f.n.mayErr = errors.New("store down") },
 			GrantWrite, NotifySkippedUnavailable, logReasonNotifyUnavailable, http.StatusOK},
-		{"review subject read fault", notifySubjectID, func(*testing.T, string) { f.host.subjectErr = errors.New("lookup failed") },
-			GrantReview, NotifySkippedUnavailable, logReasonNotifyUnavailable, http.StatusCreated},
-		// The subject reads nothing in the home project (Q1).
-		{"review subject cannot read", "user:order-unreadable", func(*testing.T, string) {},
-			GrantReview, NotifySkippedNotPermitted, logReasonNotifyNotPermitted, http.StatusCreated},
 		{"not raised", "", func(t *testing.T, sub string) { existing(t, sub, GrantWrite) },
 			GrantRead, NotifySkippedNotRaised, "", http.StatusOK},
 		// The raise pre-check cannot read the grants: the grant is still
@@ -250,7 +245,7 @@ func TestGrantNotifyOrder(t *testing.T) {
 	}
 	for _, tc := range refusals {
 		t.Run(tc.name, func(t *testing.T) {
-			f.n.deny, f.n.mayErr, f.host.subjectErr = false, nil, nil
+			f.n.deny, f.n.mayErr = false, nil
 			defer f.svc.SetStore(base)
 			subject := tc.subject
 			if subject == "" {
@@ -296,7 +291,7 @@ func TestGrantNotifyOrder(t *testing.T) {
 			}
 		})
 	}
-	f.n.deny, f.n.mayErr, f.host.subjectErr = false, nil, nil
+	f.n.deny, f.n.mayErr = false, nil
 
 	t.Run("passing request sends after the commit", func(t *testing.T) {
 		f.take()
@@ -676,34 +671,20 @@ type sponsorNotifyHost struct {
 	*recNotifier
 }
 
-// TestGrantNotifyReviewNeedsRead (section 2.5 step 5, Q1 default, K30n):
-// until review reads (phase 3), a review grant with notify to a user who
-// cannot read the artifact some other way is made (inert, as today) and
-// answers not_permitted, sending nothing; to a home-project reader it
-// sends.
-func TestGrantNotifyReviewNeedsRead(t *testing.T) {
+// TestGrantNotifyReviewToNonReader: a review grant reads under the ladder,
+// so Ask for review notifies a user with no other access to the artifact,
+// like every other level: the grant is made and the notice is sent.
+func TestGrantNotifyReviewToNonReader(t *testing.T) {
 	f := newNotifyFixture(t)
 	rec, resp := f.notifyGrant(userU, f.id, SubjectPrincipal, notifySubjectID, GrantReview)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
-	}
-	if resp.Notified || resp.NotifySkipped != NotifySkippedNotPermitted {
-		t.Errorf("non-reader: notified=%v skipped=%q, want not_permitted", resp.Notified, resp.NotifySkipped)
+	if rec.Code != http.StatusCreated || !resp.Notified || resp.NotifySkipped != "" {
+		t.Fatalf("non-reader: %d notified=%v skipped=%q, want a notice", rec.Code, resp.Notified, resp.NotifySkipped)
 	}
 	if g := f.grantOf(f.id, notifySubjectID); g == nil || g.Permission != GrantReview {
 		t.Errorf("review grant not made: %+v", g)
 	}
-	if len(f.n.sent()) != 0 {
-		t.Errorf("notice sent to a non-reader")
-	}
-
-	reader := principal{PrincipalKindUser, "user-home-reader", ""}
-	f.host.allow(reader, "project-1", PermissionRead)
-	rec, resp = f.notifyGrant(userU, f.id, SubjectPrincipal, PrincipalRef(reader.kind, reader.ref), GrantReview)
-	if rec.Code != http.StatusCreated || !resp.Notified {
-		t.Fatalf("home reader: %d notified=%v skipped=%q", rec.Code, resp.Notified, resp.NotifySkipped)
-	}
-	if sent := f.n.sent(); len(sent) != 1 || sent[0].SubjectUserID != reader.ref || sent[0].Permission != GrantReview {
+	subjectID := strings.TrimPrefix(notifySubjectID, PrincipalKindUser+":")
+	if sent := f.n.sent(); len(sent) != 1 || sent[0].SubjectUserID != subjectID || sent[0].Permission != GrantReview {
 		t.Errorf("notices %+v", sent)
 	}
 }
