@@ -97,6 +97,7 @@ func TestValidateChoiceFlags(t *testing.T) {
 		agent   bool
 		group   bool
 		noAgent bool
+		human   bool
 		wantErr string
 	}{
 		{name: "no choices", setup: func() {}},
@@ -108,7 +109,13 @@ func TestValidateChoiceFlags(t *testing.T) {
 		{name: "group recipient", setup: func() { msgChoices = "[]" }, group: true, wantErr: "not to an agent or a group"},
 		{name: "scheduled", setup: func() { msgChoices = "[]"; msgIn = "5m" }, wantErr: "--in or --at"},
 		{name: "attachments", setup: func() { msgChoices = "[]"; msgAttach = []string{"f"} }, wantErr: "--attach"},
+		{name: "artifact", setup: func() { msgChoices = "[]"; msgArtifacts = []string{"scion://artifact/a"} }, wantErr: "--artifact"},
+		{name: "wake", setup: func() { msgChoices = "[]"; msgWake = true }, wantErr: "--wake"},
+		{name: "cc", setup: func() { msgChoices = "[]"; msgCC = []string{"agent:x"} }, wantErr: "--cc"},
+		{name: "channel", setup: func() { msgChoices = "[]"; msgChannel = "web" }, wantErr: "--channel"},
+		{name: "thread id", setup: func() { msgChoices = "[]"; msgThreadID = "t1" }, wantErr: "--thread-id"},
 		{name: "not an agent", setup: func() { msgChoices = "[]" }, noAgent: true, wantErr: "only by an agent"},
+		{name: "agent name in human mode", setup: func() { msgChoices = "[]" }, human: true, wantErr: "only by an agent"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -117,6 +124,9 @@ func TestValidateChoiceFlags(t *testing.T) {
 				sender = ""
 			}
 			choicesState(t, sender)
+			if tc.human {
+				t.Setenv("SCION_CLI_MODE", string(ModeHuman))
+			}
 			origBody := msgBodyFile
 			t.Cleanup(func() { msgBodyFile = origBody })
 			tc.setup()
@@ -174,6 +184,19 @@ func TestChoicesSummary(t *testing.T) {
 	s := choicesSummary(json.RawMessage(`[{"question":"` + long + `","choices":["a","b"]}]`))
 	assert.Equal(t, 120, len([]rune(strings.TrimPrefix(s, "Decision needed: "))))
 	assert.True(t, strings.HasSuffix(s, "…"))
+
+	// Markers go only where they mark: inside a word, or not followed by a
+	// space at a line start, they are text.
+	for q, want := range map[string]string{
+		"Deploy ship_now to PR #12?":          "Deploy ship_now to PR #12?",
+		"# Release\nShip **v2** _today_?":     "Release Ship v2 today?",
+		"> quoted `code` and ~~struck~~ text": "quoted code and struck text",
+		"Use snake_case_name (or **bold**).":  "Use snake_case_name (or bold).",
+	} {
+		raw, err := json.Marshal([]map[string]interface{}{{"question": q, "choices": []string{"a", "b"}}})
+		require.NoError(t, err)
+		assert.Equal(t, "Decision needed: "+want, choicesSummary(raw), q)
+	}
 }
 
 func TestChoiceDecisionLine(t *testing.T) {
@@ -182,6 +205,8 @@ func TestChoiceDecisionLine(t *testing.T) {
 		Key: "D1", Version: 2, Replaced: &hubclient.ChoiceReplacedDecision{Version: 1, Status: "pending"}}))
 	assert.Equal(t, "D1 v3 (replaced v2, decided: yes)", choiceDecisionLine(hubclient.ChoiceDecisionResult{
 		Key: "D1", Version: 3, Replaced: &hubclient.ChoiceReplacedDecision{Version: 2, Status: "decided", Answer: "yes"}}))
+	assert.Equal(t, "D1 v3 (replaced v2, decided by Pat: yes)", choiceDecisionLine(hubclient.ChoiceDecisionResult{
+		Key: "D1", Version: 3, Replaced: &hubclient.ChoiceReplacedDecision{Version: 2, Status: "decided", Answer: "yes", AnsweredBy: "Pat"}}))
 }
 
 // A choice prompt to a user sends the decisions and --update, prints the
@@ -231,6 +256,23 @@ func TestSendOutboundChoices_ConversationJSON(t *testing.T) {
 	require.Len(t, res.Decisions, 2)
 	assert.Equal(t, "D234", res.Decisions[0].Key)
 	assert.Len(t, *asked, 1)
+}
+
+// The decisions are printed whatever the send status (here: deferred).
+func TestSendOutboundChoices_NonSentStatusPrintsDecisions(t *testing.T) {
+	choicesState(t, "asker")
+	msgChoicesPayload = json.RawMessage(choicesTwoDecisions)
+	body := choicesSentBody()
+	body["status"] = "deferred"
+	hubCtx := newChoicesHub(t, http.StatusOK, body, nil)
+
+	ref := &messaging.Reference{Kind: messaging.RefConversation, Value: "11111111-1111-1111-1111-111111111111", Raw: "conv:11111111-1111-1111-1111-111111111111"}
+	var err error
+	out := captureStdout(t, func() { err = sendMessageViaConversation(hubCtx, ref, "Two calls", false, false, nil) })
+	require.NoError(t, err)
+	assert.Contains(t, out, "saved to history")
+	assert.Contains(t, out, "D234 v1 (new)\n")
+	assert.Contains(t, out, "D1 v2 (replaced v1, pending)\n")
 }
 
 // A refused send (400 experiment_disabled) fails and leaves the agent's

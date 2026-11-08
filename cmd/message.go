@@ -135,6 +135,11 @@ the recipient argument (agent:x or user:x for one, group[...] for several).
 In the JSON, an accepted recipient has status "delivered" and is counted
 under "delivered".
 
+Choice prompts (--choices or --choices-file, from an agent to a user or a
+conversation) print one line per decision with its key and version. With
+--format json the output is the Hub's full send result: message_id and
+decisions, plus every other field of an ordinary send.
+
 Exit codes:
   0  Sent. For a group, every recipient was accepted or deferred.
   1  Not sent. For a group, no recipient received the message, so the whole
@@ -886,7 +891,6 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 		switch result.Status {
 		case "sent":
 			fmt.Printf("Message sent to %s%s.\n", ref.Raw, receiptSuffix(result.MessageID, result.ConversationID))
-			printChoiceDecisions(result)
 		case "deferred":
 			// Design agent-reincarnate §3.7: the recipient is mid-`scion
 			// reincarnate`. The message was saved to history, not dropped.
@@ -894,6 +898,8 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 		default:
 			fmt.Printf("Message dispatched to %s%s (status: %s).\n", ref.Raw, receiptSuffix(result.MessageID, result.ConversationID), result.Status)
 		}
+		// A choice prompt's decisions, whatever the status.
+		printChoiceDecisions(result)
 		printAttachmentWarnings(result.AttachmentWarnings)
 		return nil
 	}

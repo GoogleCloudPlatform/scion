@@ -81,13 +81,38 @@ func validateChoiceFlags(agentTarget, group bool) error {
 	if msgIn != "" || msgAt != "" {
 		return newUsageError("--choices cannot be combined with --in or --at")
 	}
-	if len(msgAttach) > 0 {
-		return newUsageError("--choices cannot be combined with --attach")
+	// The hub refuses these too (attachments) or ignores them for a choice
+	// prompt; refuse them here, before anything is read or sent.
+	for _, f := range []struct {
+		name string
+		set  bool
+	}{
+		{"--attach", len(msgAttach) > 0},
+		{"--artifact", len(msgArtifacts) > 0},
+		{"--wake", msgWake},
+		{"--cc", len(msgCC) > 0},
+		{"--channel", msgChannel != ""},
+		{"--thread-id", msgThreadID != ""},
+	} {
+		if f.set {
+			return newUsageError("--choices cannot be combined with %s", f.name)
+		}
 	}
-	if os.Getenv("SCION_AGENT_NAME") == "" {
-		return fmt.Errorf("choices can be sent only by an agent; it works inside an agent container where SCION_AGENT_NAME is set")
+	if !choicesSenderIsAgent() {
+		return fmt.Errorf("choices can be sent only by an agent; it works inside an agent container (agent mode, with SCION_AGENT_NAME set)")
 	}
 	return nil
+}
+
+// choicesSenderIsAgent is the one test for "an agent sends this choice
+// prompt", used both to refuse a send (validateChoiceFlags) and to run the
+// ask_user side effect after one (afterChoicesSent). It needs both: agent
+// mode, which the side effect is for, and SCION_AGENT_NAME, the agent
+// identity the prompt is sent as (the hub records it as the asker). Agent
+// mode alone would let a send through that has no sender identity; the
+// identity alone would mark a non-agent CLI waiting for input.
+func choicesSenderIsAgent() bool {
+	return resolveMode() == ModeAgent && os.Getenv("SCION_AGENT_NAME") != ""
 }
 
 // loadChoicesPayload reads the decisions JSON and checks only that it is a
@@ -122,8 +147,14 @@ func loadChoicesPayload() (json.RawMessage, error) {
 }
 
 var (
-	mdLinkRe  = regexp.MustCompile(`\[([^\]]*)\]\([^)]*\)`)
-	mdCharsRe = regexp.MustCompile("[*_`~#>]+")
+	mdLinkRe = regexp.MustCompile(`\[([^\]]*)\]\([^)]*\)`)
+	// mdHeadingRe is a heading or quote marker at the start of a line.
+	mdHeadingRe = regexp.MustCompile(`(?m)^[ \t]*(?:#{1,6}|>+)[ \t]+`)
+	// mdEmphasisRe is a run of emphasis or code markers at a word
+	// boundary: after the start, a space or an opening bracket, or before
+	// the end, a space or punctuation. A marker inside a word (ship_now)
+	// is text.
+	mdEmphasisRe = regexp.MustCompile("(^|[\\s(\\[])[*_`~]+|[*_`~]+($|[\\s).,:;!?\\]])")
 )
 
 // choicesSummary is the ask_user message after a choice prompt is sent:
@@ -138,9 +169,7 @@ func choicesSummary(payload json.RawMessage) string {
 	if len(decisions) > 0 {
 		first = decisions[0].Question
 	}
-	first = mdLinkRe.ReplaceAllString(first, "$1")
-	first = mdCharsRe.ReplaceAllString(first, "")
-	first = strings.Join(strings.Fields(first), " ")
+	first = plainSummaryText(first)
 	if utf8.RuneCountInString(first) > choicesSummaryMax {
 		first = string([]rune(first)[:choicesSummaryMax-1]) + "…"
 	}
@@ -151,15 +180,31 @@ func choicesSummary(payload json.RawMessage) string {
 	return summary
 }
 
-// choiceDecisionLine is one decision in the text output:
+// plainSummaryText is markdown text as one plain line: links become their
+// text, and heading, quote, emphasis and code markers go where they mark
+// (line starts and word boundaries), so "ship_now" and "PR #12" stay.
+func plainSummaryText(s string) string {
+	s = mdLinkRe.ReplaceAllString(s, "$1")
+	s = mdHeadingRe.ReplaceAllString(s, "")
+	// Twice: a marker run can end where the next one starts ("**`x`**").
+	for i := 0; i < 2; i++ {
+		s = mdEmphasisRe.ReplaceAllString(s, "$1$2")
+	}
+	return strings.Join(strings.Fields(s), " ")
+}
+
+// choiceDecisionLine is one decision in the text output (design 4.2):
 // "D234 v1 (new)", "D1 v2 (replaced v1, pending)" or
-// "D1 v2 (replaced v1, decided: yes)".
+// "D1 v2 (replaced v1, decided by Pat: yes)".
 func choiceDecisionLine(d hubclient.ChoiceDecisionResult) string {
 	if d.Replaced == nil {
 		return fmt.Sprintf("%s v%d (new)", d.Key, d.Version)
 	}
 	state := d.Replaced.Status
-	if d.Replaced.Answer != "" {
+	switch {
+	case d.Replaced.Answer != "" && d.Replaced.AnsweredBy != "":
+		state += " by " + d.Replaced.AnsweredBy + ": " + d.Replaced.Answer
+	case d.Replaced.Answer != "":
 		state += ": " + d.Replaced.Answer
 	}
 	return fmt.Sprintf("%s v%d (replaced v%d, %s)", d.Key, d.Version, d.Replaced.Version, state)
@@ -191,7 +236,7 @@ func applyChoicesToOutbound(out *hubclient.OutboundMessageRequest) {
 // its own failures and never fails the send; a refused send (for example
 // 400 experiment_disabled) never reaches here.
 func afterChoicesSent() {
-	if msgChoicesPayload == nil || resolveMode() != ModeAgent {
+	if msgChoicesPayload == nil || !choicesSenderIsAgent() {
 		return
 	}
 	runChoicesAskUser(choicesSummary(msgChoicesPayload))

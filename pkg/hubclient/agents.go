@@ -1068,10 +1068,13 @@ type ChoiceDecisionResult struct {
 }
 
 // ChoiceReplacedDecision is the version a choice prompt replaced.
+// For a decided version, Answer is the effective answer's label and
+// AnsweredBy who gave it (the name, else the email).
 type ChoiceReplacedDecision struct {
-	Version int    `json:"version"`
-	Status  string `json:"status"`
-	Answer  string `json:"answer,omitempty"`
+	Version    int    `json:"version"`
+	Status     string `json:"status"`
+	Answer     string `json:"answer,omitempty"`
+	AnsweredBy string `json:"answered_by,omitempty"`
 }
 
 // OutboundMessageResult is the parsed response from a successful outbound
