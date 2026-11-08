@@ -503,7 +503,7 @@ func deleteProjectDecisions(ctx context.Context, client *ent.Client, projectID u
 // clearDecisionAnswerUser clears answered_by_user_id on a deleted user's
 // answers; the name and email snapshots stay (design choices v4, O2).
 func clearDecisionAnswerUser(ctx context.Context, client *ent.Client, userID string) error {
-	if _, err := client.DecisionAnswer.Update().
+	if err := client.DecisionAnswer.Update().
 		Where(decisionanswer.AnsweredByUserID(userID)).
 		ClearAnsweredByUserID().Exec(ctx); err != nil {
 		return mapError(err)

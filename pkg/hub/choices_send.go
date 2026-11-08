@@ -192,14 +192,6 @@ func (s *Server) storeChoicePrompt(ctx context.Context, cp *choicePromptSend, ag
 	return nil
 }
 
-// agentDisplayName is the name snapshot stored on a decision.
-func agentDisplayName(a *store.Agent) string {
-	if a.Name != "" {
-		return a.Name
-	}
-	return a.Slug
-}
-
 // ChoiceDecisionResult is one decision in a choice prompt send response.
 type ChoiceDecisionResult struct {
 	Key      string                  `json:"key"`

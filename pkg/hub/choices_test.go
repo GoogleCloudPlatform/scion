@@ -89,17 +89,6 @@ func (f *choicesFixture) sendAsAgent(t *testing.T, req OutboundMessageRequest) *
 	return rr
 }
 
-func errorCode(t *testing.T, rr *httptest.ResponseRecorder) string {
-	t.Helper()
-	var body struct {
-		Error struct {
-			Code string `json:"code"`
-		} `json:"error"`
-	}
-	_ = json.Unmarshal(rr.Body.Bytes(), &body)
-	return body.Error.Code
-}
-
 type choiceSendResponse struct {
 	MessageID string                 `json:"message_id"`
 	Decisions []ChoiceDecisionResult `json:"decisions"`
