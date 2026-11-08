@@ -1308,8 +1308,9 @@ Notes:
 - While `hub.image_tag_setting` is off, a set `image_tag` is not applied: image references keep
   their tags, and the set value suppresses the version default. A Hub settings save that sets or changes a profile's `image_tag`, in
   database or settings-file mode, is refused with `412 experiment_disabled` naming the experiment
-  (saving the stored value back, or clearing it, still works), and a value in the environment, a
-  settings file or a saved Hub profile is reported with a warning at startup.
+  (saving the stored value back, or clearing it, still works), and a value other than `latest` in
+  the environment, a settings file or a saved Hub profile is reported with a startup warning
+  (`latest`, the opt-out, is logged at Info).
 - The Hub logs the Hub-scope value and its source (`env`, `settings_file` or `unset`), the
   experiment state and the tag applied, plus, for every profile that sets its own `image_tag`, that
   profile's value, source (`env`, `hub_settings_profile` or `settings_file_profile`) and tag. It
