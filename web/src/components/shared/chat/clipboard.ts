@@ -14,20 +14,5 @@
  * limitations under the License.
  */
 
-/**
- * Writes `text` to the clipboard and resolves to whether it succeeded.
- *
- * Never throws: the Clipboard API is absent outside a secure context (a
- * plain-http host) and in some older browsers, and `writeText` rejects when
- * the browser denies the write. Each of those resolves to `false`.
- */
-export async function copyToClipboard(text: string): Promise<boolean> {
-  try {
-    const clipboard = (navigator as Partial<Navigator>).clipboard;
-    if (typeof clipboard?.writeText !== 'function') return false;
-    await clipboard.writeText(text);
-    return true;
-  } catch {
-    return false;
-  }
-}
+/** The chat copy helper moved to the shared web utilities; this keeps the chat imports working. */
+export { copyToClipboard } from '../../../utils/clipboard.js';

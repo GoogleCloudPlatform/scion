@@ -62,7 +62,10 @@ vi.mock('../../../client/api.js', () => ({
   apiFetch: (path: string, options?: RequestInit) => apiFetchMock(path, options),
 }));
 
+vi.mock('../../../utils/toast.js', () => ({ showToast: vi.fn() }));
+
 await import('./chat-message.js');
+const { showToast } = await import('../../../utils/toast.js');
 type ScionChatMessage = import('./chat-message.js').ScionChatMessage;
 type AttachmentRefInfo = import('./chat-message.js').AttachmentRefInfo;
 
@@ -1861,5 +1864,53 @@ describe('scion-chat-message More actions dots (ptone/scion#6556)', () => {
     expect(declarationsFor(top, '.msg-actions:focus-visible').outline).toMatch(
       /^2px solid var\(--scion-primary/
     );
+  });
+});
+
+describe('scion-chat-message code block copy (ptone/scion#7555)', () => {
+  const originalClipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+
+  function setClipboard(value: unknown): void {
+    Object.defineProperty(navigator, 'clipboard', { value, configurable: true });
+  }
+
+  beforeEach(() => {
+    document.body.innerHTML = '';
+    vi.mocked(showToast).mockClear();
+  });
+
+  afterEach(() => {
+    if (originalClipboard) Object.defineProperty(navigator, 'clipboard', originalClipboard);
+    else delete (navigator as unknown as Record<string, unknown>).clipboard;
+    document.body.innerHTML = '';
+  });
+
+  async function copyButton(): Promise<HTMLButtonElement> {
+    const el = await mount('run ```make fixture``` now');
+    let btn: HTMLButtonElement | null = null;
+    await vi.waitFor(() => {
+      btn = el.shadowRoot!.querySelector<HTMLButtonElement>('.md-content pre .copy-btn');
+      expect(btn).not.toBeNull();
+    });
+    return btn!;
+  }
+
+  it('copies the code and shows "Copied!" on the button, with no toast', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    setClipboard({ writeText });
+    const btn = await copyButton();
+    btn.click();
+    await vi.waitFor(() => expect(btn.textContent).toBe('Copied!'));
+    expect(writeText).toHaveBeenCalledWith('make fixture');
+    expect(showToast).not.toHaveBeenCalled();
+  });
+
+  it('shows "Could not copy" and keeps the button label when the clipboard is unavailable', async () => {
+    setClipboard(undefined);
+    const btn = await copyButton();
+    expect(() => btn.click()).not.toThrow();
+    await vi.waitFor(() => expect(showToast).toHaveBeenCalledWith('Could not copy', 'danger'));
+    expect(showToast).toHaveBeenCalledTimes(1);
+    expect(btn.textContent).toBe('Copy');
   });
 });
