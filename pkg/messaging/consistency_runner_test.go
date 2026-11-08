@@ -239,3 +239,14 @@ func TestConsistencyRunner_ReleasesAfterPanic(t *testing.T) {
 	assert.True(t, ran)
 	assert.Equal(t, int64(0), DivergenceMetrics.ConsistencySkipped())
 }
+
+// A nil Log is defaulted before fn runs, so fn and the check never see nil.
+func TestConsistencyRunner_DefaultsNilLog(t *testing.T) {
+	swapDivergenceMetrics(t)
+	r := NewConsistencyRunner(1, time.Minute)
+	var got *slog.Logger
+	require.True(t, r.Go(ConsistencyInput{ConversationID: "c", SenderID: "a", RecipientID: "b"},
+		func(_ context.Context, in ConsistencyInput) { got = in.Log }))
+	r.Wait()
+	assert.NotNil(t, got)
+}

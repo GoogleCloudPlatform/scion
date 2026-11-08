@@ -105,8 +105,12 @@ func GoConsistencyCheck(in ConsistencyInput, fn func(ctx context.Context, in Con
 // key is already running; the skip is counted in DivergenceMetrics. It also
 // returns false, uncounted and without taking a slot, when the input has
 // nothing to check (no conversation, or neither a thread nor a pair):
-// CheckConversationConsistency would return at once for it.
+// CheckConversationConsistency would return at once for it. A nil in.Log is
+// replaced with slog.Default() before fn sees it.
 func (r *ConsistencyRunner) Go(in ConsistencyInput, fn func(ctx context.Context, in ConsistencyInput)) bool {
+	if in.Log == nil {
+		in.Log = slog.Default()
+	}
 	key := in.key()
 	if key == "" || in.ConversationID == "" {
 		return false
@@ -127,11 +131,7 @@ func (r *ConsistencyRunner) Go(in ConsistencyInput, fn func(ctx context.Context,
 		defer r.release(key)
 		defer func() {
 			if p := recover(); p != nil {
-				log := in.Log
-				if log == nil {
-					log = slog.Default()
-				}
-				log.Error("conversation consistency check panicked; skipped",
+				in.Log.Error("conversation consistency check panicked; skipped",
 					"message_id", in.MessageID, "panic", p)
 			}
 		}()
