@@ -55,6 +55,7 @@ import { navigateTo, stateManager } from '../../../client/main.js';
 import { agentIndexOf, agentStore } from '../../../client/agent-store.js';
 import { openTerminal, agentGraphHref } from '../../../client/open-terminal.js';
 import { showToast } from '../../../utils/toast.js';
+import { copyToClipboard } from './clipboard.js';
 import {
   ChatStarsController,
   conversationSupportsStars,
@@ -5289,11 +5290,7 @@ export class ScionChatThread extends LitElement {
       icon: 'link',
       run: (): void => {
         this.closeContextMenu();
-        // The Clipboard API is absent outside a secure context and in some
-        // older browsers; the item then does nothing rather than throwing.
-        navigator.clipboard?.writeText(href).catch(() => {
-          // Fallback: ignore clipboard failure silently.
-        });
+        void this.copyWithToast(href);
       },
     };
   }
@@ -6240,9 +6237,7 @@ export class ScionChatThread extends LitElement {
     const msg = this.contextMenuMessage;
     this.closeContextMenu();
     if (!msg) return;
-    navigator.clipboard.writeText(msg.msg).catch(() => {
-      // Fallback: ignore clipboard failure silently.
-    });
+    void this.copyWithToast(msg.msg);
   }
 
   /** Context menu: Copy link to message. */
@@ -6251,9 +6246,17 @@ export class ScionChatThread extends LitElement {
     this.closeContextMenu();
     if (!msg) return;
     const url = `${window.location.origin}${window.location.pathname}#msg-${encodeURIComponent(msg.id)}`;
-    navigator.clipboard.writeText(url).catch(() => {
-      // Fallback: ignore clipboard failure silently.
-    });
+    void this.copyWithToast(url);
+  }
+
+  /**
+   * Copies `text` for a message menu item and reports the outcome in a toast.
+   * The Clipboard API is absent on a plain-http host; that shows the failure
+   * toast rather than throwing.
+   */
+  private async copyWithToast(text: string): Promise<void> {
+    if (await copyToClipboard(text)) showToast('Copied', 'success');
+    else showToast('Could not copy', 'danger');
   }
 
   /** Context menu: Set the sender agent as the thread default. */
@@ -7696,10 +7699,9 @@ export class ScionChatThread extends LitElement {
       showToast('Conversation copied to clipboard.', 'success');
     } catch {
       // Fallback: plain text copy.
-      try {
-        await navigator.clipboard.writeText(plainText);
+      if (await copyToClipboard(plainText)) {
         showToast('Conversation copied to clipboard (plain text).', 'success');
-      } catch {
+      } else {
         showToast('Failed to copy to clipboard.', 'danger');
       }
     }
