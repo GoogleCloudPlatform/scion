@@ -17,8 +17,11 @@ package maintenance
 import (
 	"bytes"
 	"context"
+	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -129,5 +132,50 @@ func TestSQLiteSnapshotter_StatusWithoutFreeSpace(t *testing.T) {
 	injected := NewSQLiteSnapshotter(SQLiteSnapshotOptions{Dir: "/x", FreeSpace: func(string) (uint64, error) { return 1, nil }})
 	if !injected.SnapshotStatus().Supported {
 		t.Fatal("an injected free-space reader must count as supported")
+	}
+}
+
+func TestSnapshotSourceDSN(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("no snapshot is taken on Windows (freeDiskSpace fails closed)")
+	}
+	got := snapshotSourceDSN("/data/a b/hub?#%.db")
+	want := "file:/data/a%20b/hub%3F%23%25.db?mode=ro&cache=private&_pragma=busy_timeout(5000)"
+	if got != want {
+		t.Fatalf("DSN = %q, want %q", got, want)
+	}
+	// Never in the hub's shared cache, and never writable.
+	if strings.Contains(got, "cache=shared") || strings.Contains(got, "mode=rw") {
+		t.Fatalf("DSN = %q", got)
+	}
+	if rel := snapshotSourceDSN("hub.db"); !strings.HasPrefix(rel, "file:/") {
+		t.Fatalf("relative path not made absolute: %q", rel)
+	}
+}
+
+func TestSQLiteSnapshotter_OpenFailure(t *testing.T) {
+	dir := t.TempDir()
+	openErr := errors.New("open refused")
+	var opened string
+	s := NewSQLiteSnapshotter(SQLiteSnapshotOptions{File: "/data/hub.db", Dir: dir,
+		FreeSpace: func(string) (uint64, error) { return 1 << 40, nil },
+		OpenDB:    func(file string) (*sql.DB, error) { opened = file; return nil, openErr }})
+	_, err := s.Snapshot(context.Background(), "nightly-20261023", &bytes.Buffer{})
+	if !errors.Is(err, openErr) || !strings.Contains(err.Error(), "open the database for the snapshot") {
+		t.Fatalf("err = %v", err)
+	}
+	if opened != "/data/hub.db" {
+		t.Fatalf("opened %q, want the configured file", opened)
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 0 {
+		t.Fatalf("files written despite the failed open: %v", entries)
+	}
+}
+
+func TestSQLiteSnapshotter_NotConfigured(t *testing.T) {
+	s := NewSQLiteSnapshotter(SQLiteSnapshotOptions{Dir: t.TempDir(),
+		FreeSpace: func(string) (uint64, error) { return 1 << 40, nil }})
+	if _, err := s.Snapshot(context.Background(), "", &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "not configured") {
+		t.Fatalf("err = %v", err)
 	}
 }

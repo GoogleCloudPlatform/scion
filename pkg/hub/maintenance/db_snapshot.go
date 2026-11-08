@@ -20,11 +20,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
 
 // SnapshotsDirName is the directory under the install root that holds the
@@ -98,8 +101,15 @@ func (u unsupportedDBSnapshotter) Snapshot(context.Context, string, io.Writer) (
 
 // SQLiteSnapshotOptions configures a SQLiteSnapshotter.
 type SQLiteSnapshotOptions struct {
-	// DB is the hub's SQLite database.
-	DB *sql.DB
+	// File is the path of the hub's SQLite database file. The snapshot
+	// reads it through a private connection (OpenDB), never through the
+	// hub's own single-connection handle (ptone/scion#7360).
+	File string
+	// OpenDB opens the private connection the snapshot reads File
+	// through, and the snapshot closes it when done; default
+	// openSnapshotSource (read-only, private cache, busy timeout). Tests
+	// inject it.
+	OpenDB func(file string) (*sql.DB, error)
 	// Dir is the snapshot directory; it is created (0700) when missing.
 	Dir string
 	// SettingsPath is the settings.yaml copied next to each snapshot. ""
@@ -116,10 +126,13 @@ type SQLiteSnapshotOptions struct {
 	Now func() time.Time
 }
 
-// SQLiteSnapshotter snapshots a SQLite database with VACUUM INTO, which is
-// consistent while the hub keeps running and takes no file locks.
+// SQLiteSnapshotter snapshots a SQLite database with VACUUM INTO on a
+// private read-only connection, which is consistent while the hub keeps
+// running: in WAL mode the copy is one read transaction, so the hub's
+// writer is never blocked.
 type SQLiteSnapshotter struct {
-	db        *sql.DB
+	file      string
+	openDB    func(string) (*sql.DB, error)
 	dir       string
 	settings  string
 	keep      int
@@ -133,7 +146,8 @@ type SQLiteSnapshotter struct {
 // NewSQLiteSnapshotter returns a SQLiteSnapshotter configured from opts.
 func NewSQLiteSnapshotter(opts SQLiteSnapshotOptions) *SQLiteSnapshotter {
 	s := &SQLiteSnapshotter{
-		db:          opts.DB,
+		file:        opts.File,
+		openDB:      opts.OpenDB,
 		dir:         opts.Dir,
 		settings:    opts.SettingsPath,
 		keep:        opts.Keep,
@@ -150,7 +164,53 @@ func NewSQLiteSnapshotter(opts SQLiteSnapshotOptions) *SQLiteSnapshotter {
 	if s.now == nil {
 		s.now = time.Now
 	}
+	if s.openDB == nil {
+		s.openDB = openSnapshotSource
+	}
 	return s
+}
+
+// snapshotBusyTimeout is how long the snapshot connection waits on a lock
+// the hub holds briefly (a WAL checkpoint) before failing.
+const snapshotBusyTimeout = 5 * time.Second
+
+// openSnapshotSource opens the private connection a snapshot reads the
+// database file through (ptone/scion#7360). It never shares the hub's
+// connection: the hub's pool has a single connection, and a copy of a
+// large database on it stalled every request for tens of seconds.
+//
+//   - mode=ro: the snapshot cannot write the hub's database. VACUUM INTO
+//     still writes its target, which SQLite opens read-write regardless.
+//     Not PRAGMA query_only: it refuses every write transaction on the
+//     connection, including VACUUM INTO's writes to its target. A
+//     read-only reader of a WAL database needs the -wal and -shm files
+//     (or a writable directory); a running hub keeps both.
+//   - cache=private: the hub opens its connection with cache=shared. A
+//     connection in the same shared cache would take table locks against
+//     the hub's writer instead of reading a WAL snapshot.
+//   - busy_timeout: wait out a checkpoint rather than fail at once.
+//
+// The driver ("sqlite", modernc.org/sqlite) is registered by pkg/ent/entc,
+// which opens the hub's database. The DSN is never logged.
+func openSnapshotSource(file string) (*sql.DB, error) {
+	db, err := sql.Open("sqlite", snapshotSourceDSN(file))
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(1)
+	return db, nil
+}
+
+// snapshotSourceDSN is the read-only SQLite URI of file for
+// openSnapshotSource. The path is made absolute and percent-escaped, so a
+// '?', '#' or '%' in it is part of the path, not of the URI's query.
+func snapshotSourceDSN(file string) string {
+	if abs, err := filepath.Abs(file); err == nil {
+		file = abs
+	}
+	path := (&url.URL{Path: filepath.ToSlash(file)}).EscapedPath()
+	return fmt.Sprintf("file:%s?mode=ro&cache=private&_pragma=busy_timeout(%d)",
+		path, snapshotBusyTimeout.Milliseconds())
 }
 
 // SnapshotStatus implements DBSnapshotter. Snapshots are unsupported on a
@@ -170,11 +230,10 @@ func (s *SQLiteSnapshotter) SnapshotStatus() DBSnapshotStatus {
 // settings-<ts>.yaml the same way, then keeps only the newest Keep of each.
 // Files are created 0600: the database and settings hold secrets.
 //
-// VACUUM INTO runs on the hub's own database handle, whose SQLite pool has
-// a single connection: every other database call of the hub waits until
-// the copy completes (roughly seconds per 100 MB, more on slow disks). The
-// run log states the database size before it starts. The hub restarts
-// right after an update, so the stall is bounded by the copy.
+// The size check and VACUUM INTO run on a private read-only connection
+// (OpenDB), closed when the snapshot returns, so the hub keeps serving
+// requests during the copy (ptone/scion#7360). The start, duration, size
+// and outcome of the copy go to the run log and to the server log.
 //
 // Leftover ".partial" files of a killed snapshot are removed first
 // (pruneStalePartials), so they do not count against the free space.
@@ -184,7 +243,7 @@ func (s *SQLiteSnapshotter) SnapshotStatus() DBSnapshotStatus {
 // no snapshot is ever written on Windows: freeDiskSpace fails closed there
 // and SnapshotStatus reports snapshots unsupported.
 func (s *SQLiteSnapshotter) Snapshot(ctx context.Context, fromVersion string, logger io.Writer) (string, error) {
-	if s.db == nil || s.dir == "" {
+	if s.file == "" || s.dir == "" {
 		return "", errors.New("database snapshot is not configured")
 	}
 	if err := os.MkdirAll(s.dir, 0o700); err != nil {
@@ -200,7 +259,12 @@ func (s *SQLiteSnapshotter) Snapshot(ctx context.Context, fromVersion string, lo
 	if err != nil {
 		_, _ = fmt.Fprintf(logger, "Warning: removing leftover partial snapshots failed: %v\n", err)
 	}
-	size, err := sqliteDatabaseSize(ctx, s.db)
+	db, err := s.openDB(s.file)
+	if err != nil {
+		return "", fmt.Errorf("open the database for the snapshot: %w", err)
+	}
+	defer func() { _ = db.Close() }()
+	size, err := sqliteDatabaseSize(ctx, db)
 	if err != nil {
 		return "", err
 	}
@@ -216,20 +280,27 @@ func (s *SQLiteSnapshotter) Snapshot(ctx context.Context, fromVersion string, lo
 
 	ts := now.UTC().Format(snapshotTimeFormat)
 	dbPath := filepath.Join(s.dir, dbSnapshotPrefix+snapshotVersionLabel(fromVersion)+"-"+ts+dbSnapshotSuffix)
-	_, _ = fmt.Fprintf(logger, "Writing a database snapshot of %d bytes; the hub's database is busy until it completes.\n", size)
+	log := logging.Subsystem("hub.maintenance.db-snapshot")
+	_, _ = fmt.Fprintf(logger, "Writing a database snapshot of %d bytes; the hub keeps serving requests meanwhile.\n", size)
+	log.Info("Database snapshot started", "bytes", size, "path", dbPath)
 	start := time.Now()
 	// writeAtomically hands VACUUM INTO an existing, empty .partial file.
 	// SQLite allows that: "The file named by the INTO clause must not
 	// previously exist, or else it must be an empty file"
 	// (https://www.sqlite.org/lang_vacuum.html).
-	if err := writeAtomically(dbPath, func(tmp string) error {
-		_, err := s.db.ExecContext(ctx, "VACUUM INTO ?", tmp)
+	err = writeAtomically(dbPath, func(tmp string) error {
+		_, err := db.ExecContext(ctx, "VACUUM INTO ?", tmp)
 		return err
-	}); err != nil {
+	})
+	elapsed := time.Since(start).Round(time.Millisecond)
+	if err != nil {
+		log.Warn("Database snapshot failed", "outcome", "failed", "bytes", size, "duration", elapsed,
+			"path", dbPath, "error", err)
 		return "", fmt.Errorf("database snapshot %s: %w", dbPath, err)
 	}
+	log.Info("Database snapshot written", "outcome", "ok", "bytes", size, "duration", elapsed, "path", dbPath)
 	_, _ = fmt.Fprintf(logger, "Database snapshot written: %s (%d bytes in the database, %s)\n",
-		dbPath, size, time.Since(start).Round(time.Millisecond))
+		dbPath, size, elapsed)
 
 	if s.settings != "" {
 		settingsPath := filepath.Join(s.dir, settingsSnapshotPrefix+ts+settingsSnapshotSuffix)
