@@ -1050,6 +1050,28 @@ type OutboundMessageRequest struct {
 	// AttachmentIDs names attachments the sending agent uploaded, by id
 	// (ptone/scion#4596). Attachments keeps meaning staged paths.
 	AttachmentIDs []string `json:"attachment_ids,omitempty"`
+	// Choices makes the message a choice prompt: the decisions as the JSON
+	// array scion message --choices takes. The hub validates them (the
+	// web.chat_choices experiment); Msg is then the optional intro.
+	Choices json.RawMessage `json:"choices,omitempty"`
+	// ChoicesUpdate lets Choices replace decisions whose keys exist.
+	ChoicesUpdate bool `json:"choices_update,omitempty"`
+}
+
+// ChoiceDecisionResult is one decision of a sent choice prompt.
+type ChoiceDecisionResult struct {
+	Key      string                  `json:"key"`
+	Version  int                     `json:"version"`
+	Ref      string                  `json:"ref"`
+	RowID    string                  `json:"row_id,omitempty"`
+	Replaced *ChoiceReplacedDecision `json:"replaced"`
+}
+
+// ChoiceReplacedDecision is the version a choice prompt replaced.
+type ChoiceReplacedDecision struct {
+	Version int    `json:"version"`
+	Status  string `json:"status"`
+	Answer  string `json:"answer,omitempty"`
 }
 
 // OutboundMessageResult is the parsed response from a successful outbound
@@ -1096,6 +1118,10 @@ type OutboundMessageResult struct {
 	// message, which was still sent without them. Empty when every
 	// attachment was recorded, or on hubs that predate this field.
 	AttachmentWarnings []AttachmentWarning `json:"attachment_warnings,omitempty"`
+
+	// Decisions lists the decisions of a choice prompt, one per decision
+	// sent; empty for any other message.
+	Decisions []ChoiceDecisionResult `json:"decisions,omitempty"`
 }
 
 // SendOutboundMessage sends a message from an agent via the outbound endpoint.
