@@ -107,8 +107,9 @@ can delete it directly or explicit human instruction is required.
    cleanup does not constitute user permission to delete it. Only a human can authorize
    deletion of leads.
 
-4. **"Clean up the agents" means workers.** When a human says "clean up agents" or "check
-   with leads about cleanup," they mean completed **task-bounded** agents. They do **not** mean delete the leads themselves.
+4. **"Clean up the agents" means task-bounded agents.** When a human says "clean up
+   agents" or "check with leads about cleanup," they mean completed **task-bounded**
+   agents. They do **not** mean delete the leads themselves.
 
    | Human phrase | Means |
    |---|---|
