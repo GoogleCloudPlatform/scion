@@ -184,7 +184,7 @@ Revocation requires governance (actor/target relationship) but not delegation.
 | **Governance**      | self only: the caller's own direct user bindings that `leaveBindingClass` classifies removable (an allow-list that fails closed). Never another principal, group, agent or visitor binding. The matrix and the hub-level role-binding override do not apply. |
 | **Invariants**      | `last-owner-guard`, `constraint-admin-lockout` (security, fail-closed) |
 | **Audit**           | `project_member_leave` — context: actor_id, project_id; before: principalId, roles, remainingAccess, agentCount, revokedTokenIds; atomic. The membership loss check carries trigger `member_leave`. |
-| **Denial codes**    | `not_found` (no direct binding, or no such project: the same 404), `membership_group_derived` (409), `last_owner` (409), `constraint_admin_lockout`, `credential_insufficient` (403), `leave_binding_unclassified` (500, nothing changes) |
+| **Denial codes**    | `not_found` (no direct binding, or no such project: the same 404), `membership_group_derived` (409), `last_owner` (409), `constraint_admin_lockout`, `credential_insufficient` (403), `leave_binding_unclassified` (500, nothing changes), `conflict` (409, nothing changes) |
 | **Tests**           | `pkg/hub:TestProjectLeave_*`, `pkg/hub:TestLeaveBindingClass_*` |
 
 ## 4. Approved Semantics

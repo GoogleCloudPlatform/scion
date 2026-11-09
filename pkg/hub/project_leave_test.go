@@ -554,7 +554,6 @@ func TestProjectLeave_RevokesProjectBoundTokensInTx(t *testing.T) {
 // second group read. Admission through the caller's own membership after
 // the leave is refused with a conflict and changes nothing.
 func TestProjectLeave_RemainingAccessFromAdmissionSource(t *testing.T) {
-	ctx := context.Background()
 	for _, tc := range []struct {
 		name string
 		adm  ProjectAdmissionResult
@@ -575,31 +574,46 @@ func TestProjectLeave_RemainingAccessFromAdmissionSource(t *testing.T) {
 		})
 	}
 
-	t.Run("own membership remains: conflict, nothing changed", func(t *testing.T) {
-		f := setupMMRFixture(t)
-		enableProjectLeave(t, f.srv)
-		f.srv.membershipService.onMembershipLoss = nil
-		f.srv.membershipService.userAdmitted = func(context.Context, store.Store, string, string) (ProjectAdmissionResult, error) {
-			return ProjectAdmissionResult{Admitted: true, Source: ProjectAccessSourceMembership}, nil
-		}
-		projTok := mtMint(t, f.srv, f.member.ID, projectBoundary(f.projectID), "project:read")
-		before := directProjectBindings(t, f.store, f.member.ID, f.projectID)
+	for name, source := range map[string]ProjectAccessSource{
+		"own membership remains": ProjectAccessSourceMembership,
+		// Review round 2: a source the leave does not know fails closed too.
+		"unknown source": ProjectAccessSource("future_source"),
+	} {
+		t.Run(name+": conflict, nothing changed", func(t *testing.T) {
+			leaveRefusedForSource(t, source)
+		})
+	}
+}
 
-		rec := leaveAs(t, f.srv, f.member, f.projectID, false)
-		require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
-		code, _ := leaveErrorBody(t, rec)
-		assert.Equal(t, ErrCodeConflict, code)
-		assert.NotContains(t, rec.Body.String(), "remainingAccess", "a refusal carries no remaining-access label")
-		assert.Equal(t, before, directProjectBindings(t, f.store, f.member.ID, f.projectID))
-		assert.Zero(t, countAudits(t, f.store, "project_member_leave", f.projectID))
-		assert.Empty(t, lossChecksFor(t, f.store, f.member.ID))
-		_, err := f.srv.uatService.ValidateToken(ctx, projTok)
-		assert.NoError(t, err, "no token is revoked by a refused leave")
+// leaveRefusedForSource checks that a leave whose post-state admission has
+// the given Source is refused with 409 conflict and changes nothing, for a
+// real leave and a dry run.
+func leaveRefusedForSource(t *testing.T, source ProjectAccessSource) {
+	t.Helper()
+	ctx := context.Background()
+	f := setupMMRFixture(t)
+	enableProjectLeave(t, f.srv)
+	f.srv.membershipService.onMembershipLoss = nil
+	f.srv.membershipService.userAdmitted = func(context.Context, store.Store, string, string) (ProjectAdmissionResult, error) {
+		return ProjectAdmissionResult{Admitted: true, Source: source}, nil
+	}
+	projTok := mtMint(t, f.srv, f.member.ID, projectBoundary(f.projectID), "project:read")
+	before := directProjectBindings(t, f.store, f.member.ID, f.projectID)
 
-		// The dry run gives the same refusal.
-		rec = leaveAs(t, f.srv, f.member, f.projectID, true)
-		require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
-	})
+	rec := leaveAs(t, f.srv, f.member, f.projectID, false)
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	code, _ := leaveErrorBody(t, rec)
+	assert.Equal(t, ErrCodeConflict, code)
+	assert.NotContains(t, rec.Body.String(), "remainingAccess", "a refusal carries no remaining-access label")
+	assert.Equal(t, before, directProjectBindings(t, f.store, f.member.ID, f.projectID))
+	assert.Zero(t, countAudits(t, f.store, "project_member_leave", f.projectID))
+	assert.Empty(t, lossChecksFor(t, f.store, f.member.ID))
+	_, err := f.srv.uatService.ValidateToken(ctx, projTok)
+	assert.NoError(t, err, "no token is revoked by a refused leave")
+
+	// The dry run gives the same refusal.
+	rec = leaveAs(t, f.srv, f.member, f.projectID, true)
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
 }
 
 // TestProjectLeave_CatalogListsConflictDenial (review O2): the leave's
@@ -1096,7 +1110,7 @@ func TestProjectLeave_ClampedGroupBindingIsNotRemainingAccess(t *testing.T) {
 	// the group read alone decides).
 	remaining, err := svc.leaveRemainingAccess(ctx, s, id, projectID, time.Now())
 	require.NoError(t, err)
-	assert.NotEqual(t, leaveRemainingGroup, remaining)
+	assert.Equal(t, leaveRemainingNone, remaining)
 	admitted := svc.userAdmitted
 	svc.userAdmitted = nil
 	t.Cleanup(func() { svc.userAdmitted = admitted })

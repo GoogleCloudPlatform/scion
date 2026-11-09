@@ -103,6 +103,8 @@ type LeaveResult struct {
 
 // leaveAgents is the capped agent list of a LeaveResult.
 type leaveAgents struct {
+	// Count is exact up to descendantQueryBounds; Truncated is set when the
+	// bound was reached.
 	Count     int              `json:"count"`
 	Truncated bool             `json:"truncated"`
 	Items     []leaveAgentItem `json:"items"`

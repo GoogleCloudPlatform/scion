@@ -201,21 +201,49 @@ func TestLeaveBindingClass_GuardUnclassified(t *testing.T) {
 		"a principal-type, scope-type or project-role constant changed in pkg/store: classify it in leaveBindingClass, then update the golden list")
 }
 
-// TestRemoveProjectBindingsTx_CallersPinned (review O7): the governed
-// remove step is exempt in the mutation classification because exactly two
-// callers run their governance and take the membership locks before it.
-// Every reference to it in pkg/hub must be in RemoveMember or LeaveProject,
-// so a new caller fails here until it is reviewed and classified.
+// TestRemoveProjectBindingsTx_CallersPinned (review O7, round 2): the
+// governed remove step is exempt in the mutation classification because
+// exactly two callers run their governance and take the membership locks
+// before it. Every identifier naming it in the non-test files of pkg/hub is
+// recorded, in any declaration: a function body ("file:Func"), the
+// function's own name ("file:decl"), or a package-level var, const or type
+// declaration ("file:package-level", so an alias such as
+// "var x = removeProjectBindingsTx" is seen). Only its declaration and the
+// two known call sites are allowed, so a new caller or alias fails here
+// until it is added to the pin.
 func TestRemoveProjectBindingsTx_CallersPinned(t *testing.T) {
+	const target = "removeProjectBindingsTx"
 	var refs []string
-	walkPkgHubFuncs(t, func(file string, fn *ast.FuncDecl, _ *token.FileSet) {
-		ast.Inspect(fn.Body, func(n ast.Node) bool {
-			if id, ok := n.(*ast.Ident); ok && id.Name == "removeProjectBindingsTx" {
-				refs = append(refs, file+":"+fn.Name.Name)
+	fset := token.NewFileSet()
+	entries, err := readGuardScanDirs(".")
+	require.NoError(t, err)
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, filepath.Join(".", name), nil, 0)
+		require.NoError(t, err)
+		for _, decl := range f.Decls {
+			where := name + ":package-level"
+			var node ast.Node = decl
+			if fn, ok := decl.(*ast.FuncDecl); ok {
+				if fn.Name.Name == target {
+					refs = append(refs, name+":decl")
+				}
+				if fn.Body == nil {
+					continue
+				}
+				where, node = name+":"+fn.Name.Name, fn.Body
 			}
-			return true
-		})
-	})
+			ast.Inspect(node, func(n ast.Node) bool {
+				if id, ok := n.(*ast.Ident); ok && id.Name == target {
+					refs = append(refs, where)
+				}
+				return true
+			})
+		}
+	}
 	sort.Strings(refs)
-	assert.Equal(t, []string{"project_leave.go:LeaveProject", "project_membership_service.go:RemoveMember"}, refs)
+	assert.Equal(t, []string{"project_leave.go:LeaveProject", "project_leave.go:decl", "project_membership_service.go:RemoveMember"}, refs)
 }
