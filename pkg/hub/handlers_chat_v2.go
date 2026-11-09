@@ -5228,8 +5228,13 @@ func (s *Server) handleChatSearch(w http.ResponseWriter, r *http.Request) {
 		ValidationError(w, "q is required", nil)
 		return
 	}
-	if len([]rune(query)) < 2 {
+	termLen := len([]rune(query))
+	if termLen < 2 {
 		ValidationError(w, "q must be at least 2 characters", nil)
+		return
+	}
+	if termLen > ChatSearchMaxQueryRunes {
+		ValidationError(w, fmt.Sprintf("q must be at most %d characters", ChatSearchMaxQueryRunes), nil)
 		return
 	}
 
@@ -5241,6 +5246,29 @@ func (s *Server) handleChatSearch(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, chatSearchResponse{Results: []ChatSearchResult{}})
 		return
 	}
+
+	// Gate before cost (design v3 section 9 item 7): after authentication
+	// and the validation of q, before project enumeration and the query.
+	// The caller gets a slot at once or a 429; nothing queues.
+	shape := chatSearchShape{
+		backend:   chatSearchBackend(wcs),
+		path:      "like",
+		scope:     "all",
+		termLen:   termLen,
+		hasCursor: q.Get("cursor") != "",
+	}
+	searchStart := time.Now()
+	release, ok := s.chatSearchGateFor(wcs).tryAcquire(user.ID())
+	if !ok {
+		shape.outcome = chatSearchOutcomeBusy
+		shape.duration = time.Since(searchStart)
+		s.recordChatSearch(ctx, slog.Default(), shape)
+		w.Header().Set("Retry-After", "1")
+		writeError(w, http.StatusTooManyRequests, "SEARCH_BUSY",
+			"Another search is still running. Try again in a moment.", nil)
+		return
+	}
+	defer release()
 
 	// Parse limit.
 	limit := 50
@@ -5300,6 +5328,7 @@ func (s *Server) handleChatSearch(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		filter.ConversationKey = conversationKey
+		shape.scope = "conversation"
 	} else if projectID != "" {
 		// Scope to one project — authorize access.
 		project, err := s.store.GetProject(ctx, projectID)
@@ -5311,6 +5340,8 @@ func (s *Server) handleChatSearch(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		filter.ProjectID = projectID
+		shape.scope = "project"
+		shape.projectCount = 1
 	} else {
 		// Search all visible projects. Filter by user's accessible projects.
 		allProjects, err := s.store.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{Limit: 1000})
@@ -5337,15 +5368,36 @@ func (s *Server) handleChatSearch(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		filter.ProjectIDs = visibleIDs
+		shape.projectCount = len(visibleIDs)
 	}
 
-	results, nextCursor, err := wcs.SearchChatMessages(ctx, filter)
-	if errors.Is(err, ErrInvalidSearchCursor) {
-		writeInvalidCursor(w)
-		return
-	}
+	// The time limit ends the statement itself: SQLite is interrupted when
+	// searchCtx ends, and Postgres runs under SET LOCAL statement_timeout
+	// derived from the same deadline.
+	searchCtx, cancel := context.WithTimeout(ctx, s.chatSearchTimeout())
+	results, nextCursor, err := wcs.SearchChatMessages(searchCtx, filter)
+	cancel()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "search failed", nil)
+		switch {
+		case errors.Is(err, ErrInvalidSearchCursor):
+			shape.outcome = chatSearchOutcomeError
+		case isChatSearchTimeout(err):
+			shape.outcome = chatSearchOutcomeTimeout
+		default:
+			shape.outcome = chatSearchOutcomeError
+		}
+		shape.duration = time.Since(searchStart)
+		s.recordChatSearch(ctx, slog.Default(), shape)
+		switch {
+		case errors.Is(err, ErrInvalidSearchCursor):
+			writeInvalidCursor(w)
+		case shape.outcome == chatSearchOutcomeTimeout:
+			// No partial results: the whole search is refused.
+			writeError(w, http.StatusServiceUnavailable, "SEARCH_TIMEOUT",
+				"Search took too long. Try a longer phrase or search one space.", nil)
+		default:
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "search failed", nil)
+		}
 		return
 	}
 	results = filterSearchDMs(results, filter)
@@ -5370,6 +5422,11 @@ func (s *Server) handleChatSearch(w http.ResponseWriter, r *http.Request) {
 	if results == nil {
 		results = []ChatSearchResult{}
 	}
+
+	shape.outcome = chatSearchOutcomeOK
+	shape.results = len(results)
+	shape.duration = time.Since(searchStart)
+	s.recordChatSearch(ctx, slog.Default(), shape)
 
 	writeJSON(w, http.StatusOK, chatSearchResponse{
 		Results:    results,
