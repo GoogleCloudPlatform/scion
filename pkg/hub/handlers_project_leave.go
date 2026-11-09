@@ -128,10 +128,16 @@ func (s *Server) leaveProject(w http.ResponseWriter, r *http.Request, projectID 
 // project while hub.project_self_leave is on: canLeave, and the reason a
 // leave is blocked when there is one. With the experiment off, or without
 // a membership service, it returns nil and "", and the fields are left
-// out of the response.
+// out of the response. A leave needs an interactive session, so a caller
+// on any other credential (an access token, for example) gets
+// canLeave=false with no reason, whatever their bindings.
 func (s *Server) projectLeaveCapabilities(ctx context.Context, userID, projectID string) (*bool, string) {
 	if s.membershipService == nil || !s.experimentEnabled(experiments.ProjectSelfLeave) {
 		return nil, ""
+	}
+	if !sessionCredentialAllowed(ctx) {
+		can := false
+		return &can, ""
 	}
 	can, reason := s.membershipService.leaveCapabilities(ctx, userID, projectID)
 	return &can, reason

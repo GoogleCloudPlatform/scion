@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"sort"
@@ -860,6 +861,73 @@ func TestProjectLeave_Capabilities(t *testing.T) {
 	require.NotNil(t, c.CanLeave)
 	assert.False(t, *c.CanLeave)
 	assert.Equal(t, leaveBlockedGroupDerived, c.LeaveBlockedReason)
+
+	// Review O4: a leave needs an interactive session, so the same member
+	// reading through an access token is told canLeave=false, no reason.
+	key := mtMint(t, f.srv, f.member.ID, projectBoundary(f.projectID), "project:read")
+	rec := doRequestWithUAT(t, f.srv, key, http.MethodGet, "/api/v1/projects/"+f.projectID, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var tokBody struct {
+		Caps caps `json:"_capabilities"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &tokBody))
+	require.NotNil(t, tokBody.Caps.CanLeave, "the field is reported for a token caller too")
+	assert.False(t, *tokBody.Caps.CanLeave, "a token caller cannot leave")
+	assert.Empty(t, tokBody.Caps.LeaveBlockedReason)
+	sess := projectCaps(f.member)
+	require.NotNil(t, sess.CanLeave)
+	assert.True(t, *sess.CanLeave, "control: the same member on a session can leave")
+}
+
+// TestProjectLeave_CapabilityPathDoesNotWarn (review O5): an unclassified
+// binding makes the capability read report "cannot leave" without writing
+// a warning; only the leave itself logs the fail-closed refusal.
+func TestProjectLeave_CapabilityPathDoesNotWarn(t *testing.T) {
+	f := setupMMRFixture(t)
+	enableProjectLeave(t, f.srv)
+	f.srv.membershipService.onMembershipLoss = nil
+	var logBuf bytes.Buffer
+	var logMu sync.Mutex
+	f.srv.membershipService.logger = slog.New(slog.NewTextHandler(&leaveLogWriter{mu: &logMu, w: &logBuf}, nil))
+	logged := func() string {
+		logMu.Lock()
+		defer logMu.Unlock()
+		return logBuf.String()
+	}
+
+	orig := leaveBindingClassFunc
+	leaveBindingClassFunc = func(*store.RoleBinding, *store.RoleDefinition, string, string) leaveClass {
+		return leaveClassUnclassified
+	}
+	t.Cleanup(func() { leaveBindingClassFunc = orig })
+
+	rec := doRequestAsUser(t, f.srv, f.member, http.MethodGet, "/api/v1/projects/"+f.projectID, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var body struct {
+		Caps struct {
+			CanLeave *bool `json:"canLeave"`
+		} `json:"_capabilities"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	require.NotNil(t, body.Caps.CanLeave)
+	assert.False(t, *body.Caps.CanLeave)
+	assert.NotContains(t, logged(), "binding kind not classified", "the capability path does not warn")
+
+	rec = leaveAs(t, f.srv, f.member, f.projectID, false)
+	require.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+	assert.Contains(t, logged(), "binding kind not classified", "the leave path logs the refusal")
+}
+
+// leaveLogWriter serializes writes to w under mu.
+type leaveLogWriter struct {
+	mu *sync.Mutex
+	w  *bytes.Buffer
+}
+
+func (l *leaveLogWriter) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.w.Write(p)
 }
 
 // TestProjectLeave_SelfOnlyCannotTargetAnother: the leave route acts only

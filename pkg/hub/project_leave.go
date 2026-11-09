@@ -270,7 +270,7 @@ func (svc *ProjectMembershipService) LeaveProject(ctx context.Context, actor Use
 	// Pre-read outside the lock: a constraint-admin binding needs the
 	// admin-guard lock, which is taken before the project lock (the order
 	// RemoveMember and user delete use).
-	pre, decision, err := svc.leaveBindingsFromStore(ctx, svc.store, actorID, projectID)
+	pre, decision, err := svc.leaveBindingsFromStore(ctx, svc.store, actorID, projectID, true)
 	if err != nil {
 		return nil, leaveDecision(http.StatusInternalServerError, ErrCodeInternalError, err.Error(), nil)
 	}
@@ -299,7 +299,7 @@ func (svc *ProjectMembershipService) LeaveProject(ctx context.Context, actor Use
 		}
 
 		// Re-read under the lock.
-		bindings, decision, err := svc.leaveBindingsFromStore(ctx, tx, actorID, projectID)
+		bindings, decision, err := svc.leaveBindingsFromStore(ctx, tx, actorID, projectID, true)
 		if err != nil {
 			return err
 		}
@@ -444,8 +444,10 @@ func leaveAuditSummary(actorID string, res *LeaveResult) string {
 
 // leaveBindingsFromStore returns the caller's removable bindings on the
 // project, read through st. A binding leaveBindingClass cannot classify is
-// a fail-closed refusal (decision non-nil); a store error is err.
-func (svc *ProjectMembershipService) leaveBindingsFromStore(ctx context.Context, st store.Store, userID, projectID string) ([]leaveBinding, *MembershipDecision, error) {
+// a fail-closed refusal (decision non-nil); a store error is err. logRefusal
+// logs that refusal: the leave path sets it, the capability path does not,
+// so reading capabilities never writes a warning.
+func (svc *ProjectMembershipService) leaveBindingsFromStore(ctx context.Context, st store.Store, userID, projectID string, logRefusal bool) ([]leaveBinding, *MembershipDecision, error) {
 	// Unclamped on purpose: the leave removes the caller's own bindings, and
 	// removal must see every one of them. The test identity clamps could
 	// hide a binding, which the leave would then leave in place.
@@ -467,8 +469,10 @@ func (svc *ProjectMembershipService) leaveBindingsFromStore(ctx context.Context,
 			out = append(out, leaveBinding{binding: rb, role: rd})
 		case leaveClassExcluded:
 		default:
-			svc.logger.Warn("project leave refused: binding kind not classified (fail-closed)",
-				"project_id", projectID, "user_id", userID, "binding_id", rb.ID)
+			if logRefusal {
+				svc.logger.Warn("project leave refused: binding kind not classified (fail-closed)",
+					"project_id", projectID, "user_id", userID, "binding_id", rb.ID)
+			}
 			return nil, leaveUnclassifiedDecision(), nil
 		}
 	}
@@ -681,7 +685,7 @@ func removeProjectBindingsTx(ctx context.Context, tx store.Store, projectID stri
 // group_derived) when there is one. The dry run is the final authority.
 // Errors fail closed (cannot leave, no reason).
 func (svc *ProjectMembershipService) leaveCapabilities(ctx context.Context, userID, projectID string) (bool, string) {
-	bindings, decision, err := svc.leaveBindingsFromStore(ctx, svc.store, userID, projectID)
+	bindings, decision, err := svc.leaveBindingsFromStore(ctx, svc.store, userID, projectID, false)
 	if err != nil || decision != nil {
 		return false, ""
 	}
