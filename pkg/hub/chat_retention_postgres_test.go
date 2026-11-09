@@ -140,8 +140,9 @@ func TestChatRetention_Postgres_CascadeAndReplicaRace(t *testing.T) {
 // against the real tables (TIMESTAMPTZ topic times, uuid conversation
 // IDs): with no window, the messages of a conversation, of a legacy topic
 // and of a linked topic (by conversation and by thread_id) deleted more
-// than the grace ago are purged with their dependent rows; an attachment left unlinked loses its bytes and then its row, and
-// one whose byte delete fails keeps its row. It also checks that an unread
+// than the grace ago are purged with their dependent rows; an attachment
+// left unlinked loses its bytes and then its row, and one whose byte
+// delete fails keeps its row. It also checks that an unread
 // mention after a purged read watermark still counts (design §8.5).
 func TestChatRetention_Postgres_DeletedConversationsAndAttachments(t *testing.T) {
 	requirePG(t)
@@ -261,4 +262,82 @@ func TestChatRetention_Postgres_DeletedConversationsAndAttachments(t *testing.T)
 	mentions, err := wcs.UnreadMentionKeys(ctx, "u1", []string{topicKey})
 	require.NoError(t, err)
 	assert.True(t, mentions[topicKey])
+}
+
+// TestChatRetention_Postgres_PreviewEqualsPurge: on Postgres the preview
+// counts exactly what a manual sweep then deletes, per project and phase,
+// on a fixture with old and new messages of live and deleted
+// conversations, a deleted legacy topic and pending rows, and deletes
+// nothing itself.
+func TestChatRetention_Postgres_PreviewEqualsPurge(t *testing.T) {
+	requirePG(t)
+	ctx := context.Background()
+	dsn := enttest.NewSchemaURL(t)
+	_ = stdlib.GetDefaultDriver() // registers the "pgx" driver
+	client, err := entc.OpenPostgres(dsn, entc.PoolConfig{MaxOpenConns: 5, MaxIdleConns: 2})
+	require.NoError(t, err)
+	cs := entadapter.NewCompositeStore(client)
+	t.Cleanup(func() { _ = cs.Close() })
+	require.NoError(t, cs.Migrate(ctx))
+	db := cs.DB()
+	require.NoError(t, NewWebChatStore(db, "postgres").Init())
+
+	p1, p2 := api.NewUUID(), api.NewUUID()
+	now := time.Now().UTC()
+	day := 24 * time.Hour
+	old := now.Add(-40 * day)
+	recent := now.Add(-time.Hour)
+	seed := func(project string, created time.Time, state, conv, thread string) {
+		m := &store.Message{ID: api.NewUUID(), ProjectID: project, Sender: "user:a", Recipient: "agent:b", Msg: "hello",
+			Type: "chat", Channel: "web", ConversationID: conv, ThreadID: thread, DispatchState: state, CreatedAt: created}
+		require.NoError(t, cs.CreateMessage(ctx, m))
+	}
+	count := func(q string) int {
+		var n int
+		require.NoError(t, db.QueryRowContext(ctx, q).Scan(&n), q)
+		return n
+	}
+	pid := p1
+	deleted := now.Add(-40 * day)
+	gone := &store.Conversation{ID: api.NewUUID(), ProjectID: &pid, Kind: "group", Surface: "native",
+		DriftState: "active", LastActivityAt: deleted, CreatedAt: deleted.Add(-time.Hour), DeletedAt: &deleted}
+	require.NoError(t, cs.CreateConversation(ctx, gone))
+	legacy := api.NewUUID()
+	_, err = db.ExecContext(ctx, `INSERT INTO webchat_topic (id, project_id, name, is_general, created_by, created_at, deleted_at) VALUES ($1, $2, 'legacy', FALSE, 'u1', $3, $4)`,
+		legacy, p2, now.Add(-400*day), now.Add(-31*day))
+	require.NoError(t, err)
+	live := api.NewUUID()
+	for i := 0; i < 30; i++ {
+		at := old.Add(time.Duration(i) * time.Second)
+		seed(p1, at, store.MessageDispatchDispatched, live, "")
+		seed(p2, at, store.MessageDispatchDispatched, "", "")
+		seed(p1, at, store.MessageDispatchDispatched, gone.ID, "")
+		seed(p2, recent, store.MessageDispatchDispatched, gone.ID, "")
+		seed(p2, at, store.MessageDispatchDispatched, "", legacy)
+	}
+	seed(p1, old, store.MessageDispatchPending, live, "")
+	seed(p1, old, store.MessageDispatchDeferred, gone.ID, "")
+	seed(p1, recent, store.MessageDispatchDispatched, live, "")
+	total := count(`SELECT COUNT(*) FROM messages`)
+
+	cfg := opsettings.DefaultChatRetentionConfig()
+	cfg.Enabled, cfg.MessagesRetentionDays, cfg.ChunkSize, cfg.PauseMS = true, 30, 25, 0
+	p := newChatRetentionPolicy(true, cfg, now)
+	sw := newChatRetentionSweeper(cs.ChatRetention())
+
+	preview, err := sw.Preview(ctx, p)
+	require.NoError(t, err)
+	assert.Equal(t, total, count(`SELECT COUNT(*) FROM messages`), "the preview deletes nothing")
+	assert.Equal(t, store.ChatRetentionCounts{Main: 30, DeletedConv: 30}, preview.ByProject[p1])
+	assert.Equal(t, store.ChatRetentionCounts{Main: 30, DeletedConv: 60}, preview.ByProject[p2])
+
+	run := &store.ChatRetentionRun{Trigger: store.ChatRetentionTriggerManual, StartedAt: now}
+	var res chatRetentionTickResult
+	start := time.Now()
+	require.NoError(t, sw.sweepAndRecord(ctx, p, run, &res, start, start.Add(chatRetentionOpMaxDuration), chatRetentionSweepManual))
+	for project, want := range preview.ByProject {
+		assert.Equal(t, want.Main, run.Counts[project].Main, "project %s main", project)
+		assert.Equal(t, want.DeletedConv, run.Counts[project].DeletedConv, "project %s deleted_conv", project)
+	}
+	assert.Equal(t, 3, count(`SELECT COUNT(*) FROM messages`), "pending, deferred and recent messages are kept")
 }

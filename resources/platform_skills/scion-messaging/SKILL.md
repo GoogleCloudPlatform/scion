@@ -1,297 +1,243 @@
 ---
 name: scion-messaging
-description: How to use the scion message command effectively. Use this for communication with other agents or users. Covers recipient types, message timing, content best practices, and special message flags.
+description: Use when sending messages to users or agents with scion message, choosing conversations and mentions, or interpreting incoming messages. Covers user-facing formatting, agent delivery, and reading conversation history.
 ---
 
 # Scion Messaging
 
-## Overview
+Use `scion message` to communicate with users and agents. Use `scion conversation`
+to read history and recover context. Terminal control belongs to agent management,
+not messaging.
 
-In this multi-agent orchestration environment, the primary way to communicate is via the `scion message` command. This skill codifies the patterns required for reliable, high-signal communication within the Scion ecosystem.
+## Choose the destination
 
-## When to Use
+| Destination | Use |
+|---|---|
+| `conv:<id>` | An existing conversation, identified by the incoming message's `conversation.id` or the task brief |
+| `@<email>` | A separate direct message to a user |
+| `@<agent-name>` | A direct message to an agent |
+| `group[a,b,...]` | A separate exchange with a specified group of recipients |
 
-- When starting a task that requires coordination with other agents.
-- When you need to provide a status update or ask a question to a user.
-- When forwarding feedback or unblocking another agent.
-- When you need to send literal keystrokes to an agent's terminal (via `scion keys`).
-- When scheduling messages for the future (via `scion schedule create`).
+### Messages to users
 
-**When NOT to use:** For internal cognitive work or logging that doesn't need to be seen by others. Never use messaging for banter or repetitive, low-signal status updates.
+**Always reply in the conversation the user's message came from.** Read
+`conversation.id` from the envelope and send to `conv:<id>`, rather than addressing
+the sender by email. This applies to both direct and group conversations, including
+the first message. Addressing the sender instead sends a DM message and leaves
+the original conversation unanswered.
 
-## Recipient Types
+For a new user-facing message about an existing issue or workstream, use its
+conversation when one exists. Leads give their teams that conversation ID in their
+briefs. Use a separate user DM only for a deliberately separate exchange.
 
-Choosing the right recipient is critical to avoid spam and ensure the message reaches the intended target.
+### Messages to agents
 
-- **`@<agent-name>`**: Send a message to a specific agent (e.g., `scion message @tech-lead "..."`). This addresses the agent's conversation directly.
-- **`@<email>`**: Send a global DM to a user by email address (e.g., `scion message @preston@example.com "..."`).
-- **`group[a,b,...]`**: Group messaging to a specific list of recipients (Hub mode only).
-- **`conv:<uuid>`**: Address a conversation by ID. **This is the preferred and
-  usually correct way to reply to any message you received** — pass the
-  `conversation.id` field from the inbound message envelope. Prefer this over
-  addressing the sender directly (`@<email>`) when replying, especially in a
-  group conversation: addressing a user directly opens (or continues) that
-  user's native-surface DM conversation, a *different* conversation from the
-  one the message came from. Reply with `@<email>` only when you are
-  deliberately starting a new, separate DM — not when replying to something
-  you were addressed in. View its details with
-  `scion conversation get conv:<uuid>`; see the `scion-conversation` skill.
+Agent-to-agent coordination often uses direct messages. Put the agent recipient
+immediately after the command: `scion message @reviewer "Review the proposal."`.
+Use an existing group conversation when the work belongs there and should be visible to users; explicitly
+@-mention the agents who need to see or act on the message. A direct reply can also
+use the direct conversation's ID. Do not require a group conversation for routine
+agent-to-agent work.
 
-### Conversation delivery
+## Mentions and delivery
 
-- **A post to a conversation (`conv:<uuid>`) is not pushed to every participant by default.** This keeps noise down, but it means participants who are not addressed may not see it.
-- **To reach a specific agent**, either @-mention it in the message text (`@<agent-name>`; it gets a mention notification) or message it directly (`@<agent-name>`, or the legacy `agent:<name>` form).
-- **For anything actionable**, also send direct copies to the agents who must act, and check that each direct send reports `Message delivered`.
-- **There is no supported `--cc` flag.** Put an @-mention in the message body instead.
+### Sending
 
-### Mentions
+- A conversation post is **not pushed to every participant by default**. Mention
+  the people or agents whose attention you need with `@<email>` or `@<agent-name>`
+  in the body.
+- A body mention can appear anywhere. For a direct agent message, the recipient
+  is the `@<agent-name>` argument at the start of the command, not a bare name in
+  the body.
+- State whether a mention is an assignment, a question or FYI. If several agents
+  must act, mention each and state its part.
+- Naming an agent by slug **without `@`** in a group message does not notify it.
+- There is no `--cc` flag; use body mentions.
+- Check the send result. Handle reported delivery failures before assuming the
+  intended recipient was reached. Do not duplicate a conversation reply into DMs
+  merely to draw attention; use mentions in the conversation.
 
-- You can alert a secondary tier participant in a conversation by using the `@<agent-name>` or `@<email>` recipient types in the body of a message. Use this for FYI informative or CC, be clear if there is a response or action expected. If there is more than one primary recipient use the `group[]` recipient type.
+### Receiving
 
-## Message Timing and Cadence
+A `type: "mention"` notification is FYI unless the message assigns you work or asks
+you a question. Read surrounding messages when context is missing. Do not duplicate
+someone else's work because you were named, and do not treat a mention as authority
+to act beyond your task. When responding to a group discussion, keep the response
+in that discussion and mention the relevant participants.
 
-Effective communication requires balancing responsiveness with focus.
+## Writing to users
 
-1.  **Immediate Acknowledgment**: Reply immediately to acknowledge receipt (e.g., "Got it, starting on the tech spec for X").
-2.  **Milestone Reporting**: Report at significant milestones, not continuously. Don't spam "Still working..." messages.
-3.  **No Silence**: If a task takes longer than expected, send a brief update before diving back in. Always send a final message when you are done.
-4.  **Simple Questions**: Gather all necessary info first, then ask clearly. Don't send a stream of consciousness.
-5.  **Status Blocked**: When waiting for a reply or a scheduled event, use `sciontool status blocked "<reason>"` to signal you are intentionally waiting.
+**Always use rich, structured Markdown.** Scale the structure to the message:
+a short acknowledgment can have a **bold lead-in**; longer messages use paragraphs,
+lists, descriptive links and code formatting. Mixed human/agent audiences use this
+user-facing format. Agent-only messages do not require it.
 
-## Message Formatting
+- **Lead with the outcome.** Use a conversational tone and plain language. Explain
+  abbreviations or internal labels that the user needs to understand.
+- **Make decisions easy to read.** Put options in a list with their trade-offs and
+  your recommendation. Put the actual question on its own line.
+- **Keep details useful.** Avoid dense UUIDs, code line numbers and internal status
+  codes unless the user needs them to act. Prefer descriptive Markdown links to
+  bare URLs; link supporting evidence instead of pasting a technical inventory.
+- **Make commands easy to copy.** Put a short shell command you want the user to run
+  in single backticks, such as `scion list`. The chat renders inline code with a
+  copy button, so the user can copy it into a terminal. Use a fenced `bash` or `sh`
+  block for multiline commands. Keep explanation outside the code.
+- **Acknowledge, update, finish.** Acknowledge a user's task promptly, report
+  meaningful milestones during longer work, and send the result when done. Avoid
+  repeated status-only messages.
 
-The `scion message` CLI delivers the body argument **verbatim** — it performs no escape expansion, and no character substitution. Whatever bytes you pass are exactly what the recipient sees. Markdown is rendered in chat surfaces.
-
-### Use structured markdown
-
-Any message longer than a sentence or two **must** use structured markdown. Dense single paragraphs are hard to scan and act on in a chat surface.
-
-- **Headline first**: start with a short **bold** one-line summary of the message.
-- **Bullets for facts**: put status, findings and blockers in bullets, each starting with a short bold label (e.g. `**Status:**`, `**Blocker:**`, `**Found:**`, `**Cause:**`).
-- **Choices are always a list**: one option per bulleted or numbered item, each with its trade-off. Mark the recommended option, or add a separate `**Recommendation:**` line. Never write options inline in a paragraph ("A) ... B) ... C) ...").
-- **Ask on its own line**: end with the explicit question or decision needed, set apart from the rest (e.g. `**Ask:** ...`).
-- **Code formatting**: use `code` for identifiers, commands, branch names and paths. Put a command the reader should run in its own fenced block.
-- **Short paragraphs**: one idea per paragraph or bullet.
-
-A one-line reply or acknowledgment needs no structure — "Got it, starting on #42." is fine as is.
-
-Bad — one paragraph, options inline, the ask buried at the end:
-
-```text
-I looked into the flaky TestSync failure and it seems to be caused by the
-shared temp dir between parallel subtests, which I could fix by A) giving
-each subtest its own t.TempDir(), which is the cleanest but touches 12
-tests, B) removing t.Parallel() from the suite, which is a one-line change
-but slows CI by about 40s, or C) adding a mutex around the dir setup, which
-is quick but hides the real problem. Which do you want me to do?
-```
-
-Good — the same content, structured:
+Example:
 
 ```markdown
-**Flaky `TestSync` traced to a shared temp dir**
+**The proposal is ready for review.**
 
-- **Cause:** parallel subtests share one temp dir in `pkg/sync/sync_test.go`.
-- **Status:** reproduced locally; no fix applied yet.
+- **Changed:** replies stay in the issue conversation.
+- **Review:** [Messaging proposal](https://example.com/proposal).
 
-**Options:**
-1. Give each subtest its own `t.TempDir()`. Cleanest; touches 12 tests.
-2. Remove `t.Parallel()` from the suite. One-line change; CI ~40s slower.
-3. Add a mutex around dir setup. Quick; hides the real problem.
-
-**Recommendation:** option 1.
-
-**Ask:** OK to proceed with option 1?
+**Decision:** should agent-only updates use the same layout, or stay plain text?
+My recommendation is plain text for agent-only updates.
 ```
 
-### Newlines and quoting
+### Use the user's timezone
 
-To include newlines, use real newlines inside shell quoted strings or heredocs. Do **not** use JSON-encoded bodies or literal backslash-n sequences — those will appear as literal characters in the delivered message.
+Express times, dates and deadlines in the user's timezone, **using the timezone
+provided in messages to you**. Do not substitute the agent container's timezone.
+Include the local date and zone when useful, accounting for daylight saving time
+on that date. Preserve original timestamps in quoted evidence; give a local-time
+explanation alongside them when needed.
 
-**Backticks and `$(...)` are executed by the shell.** Inside a double-quoted argument, the shell runs anything in backticks or `$(...)` *before* `scion` starts and splices the output into the body. Markdown inline code like `` `make test` `` in a double-quoted body therefore runs `make test` and sends its output (often empty) instead of the text. `scion` cannot detect this. Whenever a body contains backticks, `$`, or code, send it through stdin or a file:
+If no timezone was provided, do not guess. Label any necessary timestamp explicitly
+as UTC and ask for the timezone only when a time-dependent decision needs it.
+Messages without times need no timezone question.
 
-- `scion message <recipient> -` reads the body from stdin.
-- `scion message <recipient> --body-file <path>` reads it from a file. `--body-file -` also reads stdin.
-- For stdin and `--body-file`, trailing CR/LF characters are trimmed; everything else is sent exactly as read.
+## Writing to agents
 
-Correct — quoted heredoc on stdin (the `'EOF'` quotes stop all expansion; preferred for anything with markdown or code):
-```bash
-scion message --non-interactive @reviewer - <<'EOF'
-PR #42 is ready for review.
+Use concise, actionable text. Rich Markdown and conversational framing are optional.
+Include the technical details the recipient needs: exact paths, revisions, relevant
+message IDs, error text, evidence locations and the requested next action. Distinguish
+an assignment from FYI.
 
-Branch: fix/auth-bug
-CI: all green. Run `make test` to reproduce.
-EOF
-```
+An immediate acknowledgment is useful when the sender needs receipt confirmed or
+handoff coordination depends on it; it is not required for every agent message.
+Report completion, a blocker, or a result that unblocks the next step.
 
-Correct — body from a file:
-```bash
-scion message --non-interactive @reviewer --body-file /tmp/review-notes.md
-```
+## Practices for every audience
 
-Correct — plain text only (no backticks or `$`) in a double-quoted string with real newlines:
-```bash
-scion message --non-interactive @reviewer "PR #42 is ready for review.
+- **Do not introduce yourself.** The recipient already sees you as the sender.
+  Omit openings such as “Hi, this is agent-X.”
+- Keep each message purposeful and concise: outcome, necessary evidence, and next
+  action or decision. Avoid filler and repeated briefs.
+- Avoid being a relay. Let the responsible agent communicate with the user in the
+  relevant conversation; “directly” means without an intermediary, not necessarily
+  by DM.
+- When intentionally waiting for input or another agent, signal
+  `sciontool status blocked "<reason>"`. Do not poll agents with sleep loops. For
+  external work without completion notifications, follow `scion-scheduler` guidance
+  on scheduled callbacks.
 
-Branch: fix/auth-bug
-CI: all green"
-```
+## Preserve Markdown when sending
 
-Wrong — backticks inside double quotes (the shell runs `make test`):
-```bash
-# BAD: `make test` executes in your shell; its output replaces it in the body
-scion message --non-interactive @reviewer "CI is green. Run `make test` to reproduce."
-```
+The CLI sends the body **verbatim**, including real newlines. Do not JSON-encode the
+body or send literal `\n` sequences as paragraph breaks.
 
-Wrong — JSON-encoded body with literal \n:
-```bash
-# BAD: literal \n chars appear in the delivered message
-scion message --non-interactive @reviewer "PR #42 is ready for review.\n\nBranch: fix/auth-bug\nCI: all green"
-```
-
-## Message Content Best Practices
-
-Every message should move work forward. High-signal messages are functional and concrete.
-
-- **Be Functional**: No banter, cheerleading, or "Ready to help!" filler.
-- **Keep tone conversational and short.** Messages should be functional but not robotic — write like a colleague. Conversational wording still goes inside the structured layout above.
-- **You are identified as a sender** — the system already shows your identity with every message. Don't open with "Hi, this is agent-X" or restate who you are.
-- **Include Concrete Details**: Reference file paths, branch names, URLs, and specific error messages.
-- **Surface Decisions**: When asking a sender for input, provide 2-3 concrete options as a list, state your recommendation, and include the timing impact of each. See [Use structured markdown](#use-structured-markdown).
-- **Keep it Concise**: Focus on key findings and links rather than lengthy narratives.
-- **Confirm receipt, then report completion.** When you receive a task, respond immediately to confirm you got it. Then report again when the work is done. Don't leave a sender wondering whether their message was received.
-
-
-## Special Message Flags
-
-The `scion message` command provides the following flags:
-
-- **`--wake`**: Resumes a suspended agent before delivering the message.
-- **`--interrupt`**: Interrupts the target agent's harness before sending the message (use with caution).
-- **`--attach <file>`**: Attaches one or more file paths to the message. Repeatable.
-- **`--body-file <path>`**: Reads the message body from a file instead of a positional argument (`--body-file -` reads stdin). A positional body of `-` also reads stdin.
-**Capabilities that exist as separate commands:**
-- **Literal keystrokes**: Use `scion keys <agent> <keys>` to send input to an agent's tmux terminal, with no envelope and no automatic Enter. One call sends exactly one tmux argument — there is no sequence syntax, so `scion keys <agent> "Up Up Enter"` types eleven literal characters, not three key presses; send each key press as a separate call. Works for container-backed agents in local and Hub mode; not supported for managed-runtime agents. As an agent, you can only target agents in your own project — cross-project targets are refused. **Authority:** in Hub mode, `scion keys` is authorized like terminal attach, not like messaging — being able to message an agent does not mean you can send it keys, and as an agent caller you also need a live attach relationship on the target, not just shared project membership. Each call reports `dispatched`, `rejected`, or `unknown`; on `unknown`, check with `scion look` before resending.
-- **Scheduled messages**: Use `scion schedule create` to schedule messages for future delivery. See the `scion-scheduler` skill.
-- **Notifications**: Use `scion notifications subscribe` to subscribe to agent state changes.
-
-## Agent-to-Agent Coordination Patterns
-
-- **Coordinator**: Workers often collaborate on shared work through the coordinator rather than directly with each other. This guidance may be set by the coordinator on startup.
-- **Avoid being a relay.** If an agent needs to communicate something to a user, have them message the user directly rather than relaying through you. Relay adds latency, risks reframing the message in transit, and wastes context.
-- **Self-Callback Heartbeat**: For very long external tasks, use `scion schedule create` to send yourself a reminder to check on the process or provide a status update. (during long blocked periods)
-
-## Conversation Management
-
-In projects with multiple users:
-- Reply to direct messages from each user independently.
-- Do not repeat messages in a group for each user you've interacted with in that group, assume they can see it, use mentions if you want to draw a specific user's attention to a message.
-- Handle each user's requests within their own context.
-
-For managing conversation metadata, participants, and message history, see the
-`scion-conversation` skill. The `scion conversation` command handles reading
-and administration; `scion message` handles sending.
-
-## Message Length Limit
-
-Messages to **users** (agent-to-human-inbox path) are limited to **2000
-characters** (counted as Unicode runes, not bytes — CJK and emoji each
-count as one character). Agent-to-agent messages have **no enforced cap
-in code** and are not subject to this limit, but remember to keep message content focused. Longer findings can be written to a shared file and sent as a reference.
-
-When the limit is exceeded, the command returns a non-zero exit code and
-prints the error (`validation_error: message exceeds 2000 character limit`)
-to `stderr`. Redirect `stderr` (e.g., `2>&1`) to see it.
-
-If your user-directed message is long:
-- Split it into two or more messages, each under ~1800 characters.
-- Or write the content to a shared file and send as an attachment.
-
-## Inbound Message Types
-
-Messages arrive wrapped in `---BEGIN SCION MESSAGE---` / `---END SCION MESSAGE---`
-markers as a JSON envelope containing sender, type, and conversation metadata.
-
-### Direct vs group conversations
-
-**Check the `conversation.kind` field first.** It tells you the shape of the conversation you are in:
-
-- **`"direct"`** — a one-to-one conversation between you and the sender. Messages here are addressed to you. The `to` field is usually omitted (your identity is implicit).
-- **`"group"`** — a multi-participant conversation. The `to` field lists all addressees who were named explicitly but does NOT contain every entity in the group who sees messages in that conversation. Read the message, but be aware others received it too — avoid duplicate work unless the message specifically assigns you a task.
-
-When `conversation` is absent, the message predates the conversation model. Treat it like a direct message unless other context suggests otherwise.
-
-### The `type` field
-
-Within a conversation, the `type` field classifies how the message reached you:
-
-- **`"message"`** — a text message addressed to you (directly or as part of a group). Read and act on it as appropriate.
-- **`"event"`** — a lifecycle notification about another agent or the system. Check the `event.type` subfield for the specific event:
-  - `agent.state-changed` — an agent changed state (e.g., completed, stalled). No reply needed. Action is situational.
-  - `agent.input-needed` — an agent is waiting for input. See [Handling `input-needed`](#handling-input-needed) below.
-  - `delivery.failed` — a message you sent could not be delivered.
-  - `schedule.fired` — a scheduled event fired (see the `scion-scheduler` skill).
-  - `port.exposed` — an auto-exposed port notification.
-- **`"mention"`** — you were @-mentioned in a message primarily addressed to someone else. **Default to treating this as FYI — no action required.** Only act if the message text explicitly directs you to do something (e.g., "@agent-X, please review this PR"). Being CC'd or name-dropped in passing is not a request. When in doubt, do nothing.
-
-### Conversation routing
-
-**Default: reply to the conversation.** When a message arrived through a conversation, reply to that conversation (`conv:<uuid>`), not with a direct message to the sender. This applies to the first conversation message you receive, too: answering it with a direct message splits the thread.
-
-Inbound messages carry a `conversation` field with an `id` that identifies the conversation. When replying, use `conv:<id>` addressing so the reply stays in the same conversation:
+Markdown backticks make commands copyable in chat. Separately, **your shell treats
+backticks inside a double-quoted command argument as command substitution**, before
+`scion` receives the text. This is shell behavior, not a chat feature. Use a quoted
+heredoc or a body file to preserve backticks and `$` characters safely:
 
 ```bash
-scion message conv:<conversation-id> "your reply"
+scion message "conv:<conversation-id>" - <<'EOF_MESSAGE'
+**Next step:** run `scion list` and share the result here.
+EOF_MESSAGE
 ```
 
-An agent that omits the conversation ID sends a proactive DM instead of a reply — correct for starting new conversations, wrong for replies. Always read the `conversation.id` from the message you are replying to and route your reply into it.
+Or write the body to a file and use
+`scion message "conv:<conversation-id>" --body-file /tmp/message.md`.
+A positional `-` or `--body-file -` reads stdin. Trailing CR/LF characters are trimmed;
+other body bytes are preserved.
 
-**Do not reply by addressing the sender instead.** `@<email>` (or
-`@<agent-name>`) opens a *direct* conversation with that principal — on a
-different surface/thread than a group conversation you were addressed in. If
-you received a message with `conversation.kind: "group"` and you reply with
-`@<sender-email>` instead of `conv:<id>`, your reply goes to that user's
-native DM, not back into the group conversation they were watching — to them,
-it looks exactly like you never replied. This is the single most common
-addressing mistake: when in doubt about how to reply, use `conv:<id>` from the
-message you're responding to, not the sender's identity.
+For example, in the shell expression `` "Run `printf substituted`" ``, the shell
+runs `printf` and produces `Run substituted`. The same text inside a quoted heredoc
+is literal. Do not embed user-facing Markdown commands in double-quoted shell
+arguments and expect the backticks to survive.
 
-### Handling `input-needed`
+## Read older messages and catch up
 
-When an agent calls `sciontool status ask_user`, the hub dispatches the question as an event (`type: "event"`, `event.type: "agent.input-needed"`) to that agent's subscribers.
+Use `scion conversation` before asking someone to repeat context:
 
-**Decision tree when you receive one:**
+```bash
+# Catch up on recent activity.
+scion conversation catch-up "conv:<conversation-id>" --since 2h --json
 
-1. **Am I the parent that created this agent?** → You are likely the intended respondent. Read the question and reply with `scion message @<agent-name> "your answer"`.
-2. **Am I a peer or unrelated subscriber?** → Ignore it. The agent is waiting for its parent or a human, and your reply will not unblock it. Repeated appearances are status re-signals, not impatience.
+# Read older messages; move the cutoff back for earlier pages.
+scion conversation messages "conv:<conversation-id>" --before "<RFC3339-time>" --limit 50 --json
 
-**Why ignoring matters when you are not the parent:**
-- Wasted tokens — the reply goes nowhere useful.
-- False loop signals — repeated echoes look like a stuck agent.
-- **Scope violations** — answering a question meant for someone else can make a recommendation look ratified.
+# Read a cited message.
+scion conversation get-message "conv:<conversation-id>" "<message-id>" --json
 
-**To request a peer's input, send a direct message** via `scion message @<agent-name>`. Do not rely on your `ask_user` status signal to reach them — it is a broadcast to subscribers, not a delivery to an addressee.
+# Inspect conversation details and participants.
+scion conversation get "conv:<conversation-id>"
+```
 
-## Anti-Patterns and Red Flags
+A limited page or lookback is not the full history. Widen the window or fetch by ID
+when an expected message is missing. If access is refused, report that limitation
+rather than claiming the message does not exist. See `scion-conversation` for
+conversation and participant management.
 
-- **Red Flag**: Attempting to broadcast. Broadcasting is not available in agent mode; address recipients explicitly.
-- **Red Flag**: An agent goes silent for >30 minutes without a milestone update or "blocked" status.
-- **Anti-Pattern**: Sending "I'm still here" or other low-signal filler messages.
-- **Anti-Pattern**: Using `sleep` to wait for something; use `sciontool status blocked` instead. For external processes that emit no notification (CI, builds, deploys), pair `status blocked` with a scheduled self-callback — see the `scion-scheduler` skill → **Waiting on external processes**.
-- **Anti-Pattern**: Sending a multi-sentence message as one dense paragraph, or listing choices inline ("A) ... B) ... Which?") instead of as a list.
-- **Anti-Pattern**: Repeating the entire original brief in a follow-up message (exhausts context).
-- **Anti-Pattern**: JSON-encoding or escaping the message body before passing to `scion message`. The CLI delivers the body verbatim — use real newlines in shell strings or heredocs.
-- **Anti-Pattern**: Replying to a group-conversation message by addressing the
-  sender directly (`@<email>`) instead of the conversation (`conv:<id>`). This
-  silently reroutes the reply to a DM the original watchers never see.
+## Inbound messages and events
 
-## Verification Checklist
+Messages arrive in `---BEGIN SCION MESSAGE---` / `---END SCION MESSAGE---` envelopes.
+Read the sender, `conversation.id`, `conversation.kind`, message type and body.
 
-- [ ] Does the message have a clear recipient (`@<agent>`, `@<email>`, `agent:`, `user:`, or `group[]`)?
-- [ ] Is the preferred `@<agent-name>` form used (rather than legacy `agent:<name>`)?
-- [ ] Is the message functional and free of filler/banter?
-- [ ] Does it include concrete references (paths, IDs, errors)?
-- [ ] If the message is more than a sentence or two, does it start with a bold headline and use bullets?
-- [ ] If a decision is needed, are the options a list (one per item) with a marked recommendation, and is the ask on its own line?
-- [ ] For long tasks, has a milestone reporting cadence been established?
-- [ ] If this is a reply to an inbound message, am I using `conv:<id>` from that message's `conversation.id` — not addressing the sender directly?
+- **`conversation.kind: "direct"`:** a one-to-one exchange. The recipient is implicit
+  and `to` is usually omitted.
+- **`conversation.kind: "group"`:** a multi-participant conversation. The `to` list
+  names explicit addressees, not everyone who can see the conversation. Check which
+  work is yours before acting.
+- **`type: "message"`:** a message addressed to you; act on its content as appropriate.
+- **`type: "mention"`:** follow the receiving-mentions guidance above.
+- **`type: "event"`:** inspect `event.type`; a notification does not automatically
+  require a reply or action.
+
+Common events include `agent.state-changed`, `agent.input-needed`, `delivery.failed`,
+`schedule.fired` and `port.exposed`. Use the event's content to decide whether you
+own the next action. A state change alone does not require an acknowledgment.
+
+### Handling `agent.input-needed`
+
+If you created the agent and own its work, you are likely the intended respondent:
+read the question and answer through the appropriate agent conversation or direct
+message. If you are a peer or unrelated subscriber, do not answer on the parent's
+or human's behalf. Repeated notifications are status signals, not new requests to
+you. To ask a peer for input, message or @-mention that peer explicitly; do not rely
+on `ask_user` status notifications to deliver the request.
+
+## Flags and related commands
+
+- `--body-file <path>` reads the message body from a file; `--body-file -` reads stdin.
+- `--attach <file>` attaches a file; repeat it for multiple files.
+- `--wake` resumes a suspended target before delivery.
+- `--interrupt` interrupts the target harness before delivery; use with caution.
+- `scion schedule create` schedules messages; see `scion-scheduler`.
+- `scion notifications subscribe` subscribes to agent state changes.
+
+## Message length
+
+Messages to users through the human inbox are limited to **2000 characters**
+(Unicode runes, not bytes). The CLI exits nonzero and reports a validation error
+when the limit is exceeded. Check the error rather than assuming delivery.
+
+For longer content, send a short summary with a link to a published artifact, or
+attach a file. Split into a few messages only when each part remains useful on its
+own. Agent-to-agent messages have no enforced cap, but still keep them focused.
+
+## Before sending
+
+- Is the destination appropriate for the audience and conversation?
+- Are required participants @-mentioned, with action or FYI clear?
+- For users: is the message readable Markdown, with descriptive links, copyable
+  commands and times in the timezone supplied in their messages?
+- For agents: are the necessary technical details and next action present?
+- Have you omitted unnecessary self-identification and preserved literal Markdown?
+- Did the send succeed, or does a delivery failure need attention?

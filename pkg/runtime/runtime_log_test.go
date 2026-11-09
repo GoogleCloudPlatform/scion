@@ -15,6 +15,7 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
 	"log"
 	"log/slog"
@@ -37,6 +38,14 @@ func setRuntimeLogHandler(t *testing.T, h slog.Handler) {
 		log.SetOutput(origWriter)
 		log.SetFlags(origFlags)
 	})
+}
+
+// captureRuntimeLog sends runtime log lines to a buffer for the rest of the test.
+func captureRuntimeLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var logs bytes.Buffer
+	setRuntimeLogHandler(t, slog.NewTextHandler(&logs, nil))
+	return &logs
 }
 
 // recordedLog is one record seen by recordingHandler, with the handler's

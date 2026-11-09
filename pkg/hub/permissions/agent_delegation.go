@@ -24,7 +24,11 @@ package permissions
 //
 // A key enters this table in the same change that admits its first route
 // for a delegated credential, so every key has an admitting catalog
-// operation (pinned by tests in pkg/hub).
+// operation (pinned by tests in pkg/hub): either an admitted operation
+// whose base permission is the key, or an admitted list route whose item
+// filter is the key. An item-filter-only key (skill.read, template.read)
+// decides list items and admits no route of its own: a single read, a
+// download or a resolve with it is refused at the route gate.
 var AgentDelegableRegistry = map[string][]BoundaryKind{
 	"agent.read":    {BoundaryKindProject, BoundaryKindHub},
 	"project.read":  {BoundaryKindProject, BoundaryKindHub},
@@ -32,10 +36,21 @@ var AgentDelegableRegistry = map[string][]BoundaryKind{
 	// Admitted on the PTY handshake only; the lifecycle operations that
 	// share it (exec, env, resetauth, keys) are not admitted.
 	"agent.attach": {BoundaryKindProject, BoundaryKindHub},
-	// Admitted on the hub agent list (GET /api/v1/agents) only. Each listed
-	// item is also decided for agent.read, so a grant without agent.read
-	// lists nothing.
+	// Admitted on the hub agent list (GET /api/v1/agents) and the project
+	// agent list (GET /api/v1/projects/{id}/agents). Each listed item is
+	// also decided for agent.read, so a grant without agent.read lists
+	// nothing.
 	"agent.list": {BoundaryKindProject, BoundaryKindHub},
+	// Admitted on the skill list (GET /api/v1/skills). Each listed skill is
+	// also decided for skill.read.
+	"skill.list": {BoundaryKindProject, BoundaryKindHub},
+	// Admitted on the template list (GET /api/v1/templates). Each listed
+	// template is also decided for template.read.
+	"template.list": {BoundaryKindProject, BoundaryKindHub},
+	// Item-filter-only keys: the item permission of the skill and template
+	// lists. They admit no route of their own.
+	"skill.read":    {BoundaryKindProject, BoundaryKindHub},
+	"template.read": {BoundaryKindProject, BoundaryKindHub},
 }
 
 // AgentDelegationSharedKeyExemption names a catalog operation whose base

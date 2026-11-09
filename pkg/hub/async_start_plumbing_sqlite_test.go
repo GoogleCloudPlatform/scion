@@ -25,6 +25,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -228,10 +229,29 @@ func TestAsyncStartGuard0f_RunlessSelfReportDuringStartLaunch(t *testing.T) {
 	assert.Equal(t, string(state.PhaseStarting), got.Phase, "an old container's report does not end the start launch")
 	assert.Equal(t, store.LaunchStateActive, got.LaunchState)
 
+	// With no start launch, Guard 0f does not apply: a report from the
+	// row's run applies. (The token is signed for the row's run: a run-less
+	// agent token against a row with a minted run is dropped, case below.)
 	plain := mk("g0f-plain", string(state.PhaseStarting))
-	rec = postAgentStatusAsAgent(t, srv, plain, report)
+	runTok, _, err := srv.GetAgentTokenService().SignAgentToken(AgentTokenGrant{AgentID: plain.ID, ProjectID: plain.ProjectID,
+		Scopes: []AgentTokenScope{ScopeAgentStatusUpdate}}, "run-new")
+	require.NoError(t, err)
+	req, err := http.NewRequest(http.MethodPost, "/api/v1/agents/"+plain.ID+"/status", strings.NewReader(report))
+	require.NoError(t, err)
+	req.Header.Set("X-Scion-Agent-Token", runTok)
+	req.Header.Set("Content-Type", "application/json")
+	runRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(runRec, req)
+	require.Equal(t, http.StatusOK, runRec.Code, runRec.Body.String())
+	assert.Equal(t, string(state.PhaseStopped), getAgent(t, s, plain.ID).Phase, "no start launch: the run's report applies")
+
+	// A run-less agent token (no run claim) against a row with a minted run
+	// belongs to no run of the row: its status fields are dropped (the
+	// restart-window rule, ptone/scion#1956 item 5b).
+	runless := mk("g0f-runless", string(state.PhaseStarting))
+	rec = postAgentStatusAsAgent(t, srv, runless, report)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	assert.Equal(t, string(state.PhaseStopped), getAgent(t, s, plain.ID).Phase, "no start launch: the report applies as before")
+	assert.Equal(t, string(state.PhaseStarting), getAgent(t, s, runless.ID).Phase, "a run-less agent token does not move a minted row")
 }
 
 // TestAsyncStartMemory_CreateEndpointBranches pins the create endpoint's

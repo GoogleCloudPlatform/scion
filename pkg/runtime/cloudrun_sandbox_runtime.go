@@ -2382,6 +2382,8 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 		env[k] = v
 	}
 
+	// A reserved name never reaches the sandbox, whatever its source.
+	dropReservedAgentEnv(env)
 	// Environment variables via --env flags (repeatable, confirmed by AC-0 retest).
 	for _, e := range envArgs(env) {
 		args = append(args, "--env", e)

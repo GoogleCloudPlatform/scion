@@ -30,7 +30,7 @@ import (
 //     no SentinelDir: the workspace's parent, the project root), which the
 //     hub-side Cloud Run provisioner locks;
 //   - the project state directory (ProjectStateDir), which the Kubernetes
-//     provisioning init container locks (after its legacy workspace lock).
+//     provisioning init container and the broker lock.
 //
 // No provisioner takes both, so taking them in this fixed order cannot
 // form a cycle with any of them.

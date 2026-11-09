@@ -195,6 +195,56 @@ func TestRealize_InlineNFS(t *testing.T) {
 	}
 }
 
+// TestUserVolumeMount pins the Mount of a `volumes:` entry: agent-scoped,
+// user-owned (design OQ-R2), named by its target.
+func TestUserVolumeMount(t *testing.T) {
+	got := UserVolumeMount("/host/data", "/data", true)
+	want := Mount{Kind: KindVolume, Name: "/data", Scope: ScopeAgent, Owner: OwnerUser, Provision: ProvisionNone, Target: "/data", ReadOnly: true, UserSource: "/host/data"}
+	if got != want {
+		t.Errorf("UserVolumeMount = %+v, want %+v", got, want)
+	}
+}
+
+// TestRealize_UserVolume: a `volumes:` entry resolves to its own source on
+// any Layout and is realized exactly as declared, a bind of the source or
+// a claimless pod mount at the target (ptone/scion#5837, no behaviour
+// change).
+func TestRealize_UserVolume(t *testing.T) {
+	layouts := map[string]Layout{
+		"zero":  {},
+		"local": {Backend: BackendLocal, HostBase: "/home/u/.scion"},
+		"nfs":   {Backend: BackendNFS, HostBase: "/mnt/nfs/a", SubPathRoot: "projects", Share: Share{ID: "a", PVName: "a-pv"}},
+	}
+	for name, l := range layouts {
+		for _, ro := range []bool{false, true} {
+			r, err := l.Resolve(Project{}, "", UserVolumeMount("/host/data", "/data", ro))
+			if err != nil {
+				t.Fatalf("%s: Resolve: %v", name, err)
+			}
+			if r.HostPath != "/host/data" || r.Target != "/data" || r.ReadOnly != ro || r.Kind != KindVolume || r.SubPath != "" || r.ClaimName != "" {
+				t.Errorf("%s: Resolve = %+v", name, r)
+			}
+			bind, err := l.Realize(r, RuntimeBind)
+			if err != nil {
+				t.Fatalf("%s: Realize bind: %v", name, err)
+			}
+			if want := (Realized{Source: "/host/data", Target: "/data", ReadOnly: ro}); bind != want {
+				t.Errorf("%s: bind = %+v, want %+v", name, bind, want)
+			}
+			pod, err := l.Realize(r, RuntimePod)
+			if err != nil {
+				t.Fatalf("%s: Realize pod: %v", name, err)
+			}
+			if want := (Realized{Target: "/data", ReadOnly: ro}); pod != want {
+				t.Errorf("%s: pod = %+v, want %+v", name, pod, want)
+			}
+			if _, err := l.Realize(r, RuntimeKind("other")); err == nil {
+				t.Errorf("%s: unknown runtime kind realized", name)
+			}
+		}
+	}
+}
+
 // TestProjectLeaf: a leaf strictly under <root>/<pid>/ resolves with the
 // same server path Resolve gives; the project root, another project's
 // tree, the export root and unclean paths are refused.
@@ -227,5 +277,39 @@ func TestProjectLeaf(t *testing.T) {
 	}
 	if _, err := (Layout{Backend: BackendLocal}).ProjectLeaf(testPID, base+"/workspace", "/t", false); err == nil {
 		t.Error("the local backend has no project tree on a share")
+	}
+}
+
+// TestRealize_UserVolumeVerbatim: an entry the runtimes accepted before
+// (an empty source or target included) is never refused by Resolve or
+// Realize; the entry's own checks are api.VolumeMount.Validate's.
+func TestRealize_UserVolumeVerbatim(t *testing.T) {
+	for _, m := range []Mount{UserVolumeMount("", "/t", false), UserVolumeMount("/s", "", false), UserVolumeMount("rel/dir", "~/x", false)} {
+		r, err := Layout{}.Resolve(Project{}, "", m)
+		if err != nil {
+			t.Fatalf("%+v: Resolve: %v", m, err)
+		}
+		got, err := Layout{}.Realize(r, RuntimeBind)
+		if err != nil {
+			t.Fatalf("%+v: Realize: %v", m, err)
+		}
+		if got.Source != m.UserSource || got.Target != m.Target {
+			t.Errorf("%+v: realized %+v", m, got)
+		}
+	}
+}
+
+// TestResolve_VolumeMustBeUserAgentScoped: a volume Mount that is not
+// Owner=user, Scope=agent is refused.
+func TestResolve_VolumeMustBeUserAgentScoped(t *testing.T) {
+	m := UserVolumeMount("/s", "/t", false)
+	m.Owner = OwnerScion
+	if _, err := (Layout{}).Resolve(Project{}, "", m); err == nil {
+		t.Error("scion-owned volume resolved")
+	}
+	m = UserVolumeMount("/s", "/t", false)
+	m.Scope = ScopeProject
+	if _, err := (Layout{}).Resolve(Project{}, "", m); err == nil {
+		t.Error("project-scoped volume resolved")
 	}
 }

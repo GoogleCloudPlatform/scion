@@ -85,10 +85,14 @@ func TestOwnerPartition_StartPreCleanNeverRemovesForeignObject(t *testing.T) {
 // afterwards; a legacy manager takes none.
 func TestOwnerPartition_ProvisionTakesWorkspaceLockOnRepo(t *testing.T) {
 	mockRuntimeForTest(t)
-	t.Setenv("SCION_HOST_UID", "")
+	// Hermetic: no SCION_* settings from the environment running the test,
+	// and the working directory is the temporary directory before any
+	// config initialisation resolves a project from it.
+	isolateTestEnv(t)
 	tmpDir := t.TempDir()
 	oldWd, _ := os.Getwd()
 	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+	require.NoError(t, os.Chdir(tmpDir))
 	t.Setenv("HOME", tmpDir)
 	require.NoError(t, config.InitMachine(getTestHarnesses()))
 	projectDir := filepath.Join(tmpDir, "project")

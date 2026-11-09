@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
@@ -541,11 +542,14 @@ func leafHasEntries(ws string) bool {
 // applySharedSignedBootstrap is case B, the signed bootstrap of a
 // hub-managed project's shared workspace leaf (rel below the Layout's host
 // base). Under the provisioning locks it first removes any stale stage of
-// the leaf, then leaves an in-use leaf alone (skipped). A leaf holding only
-// provisioning artifacts fails closed with leaf_busy, touching nothing.
-// Otherwise it creates the stage with the leaf's owner, mode and default
-// ACL, downloads into it, re-checks that the leaf is still empty, renames
-// the stage over the empty leaf and writes the sentinel last.
+// the leaf, then leaves an in-use leaf alone (skipped): one with the
+// state-directory sentinel or with any entry at all
+// (sharedWorkspaceProvisioned). A skipped leaf is existing content and the
+// bootstrap never writes into it. Otherwise it creates the stage with the
+// leaf's owner, mode and default ACL, downloads into it, re-checks that the
+// leaf is still empty (an entry that appears meanwhile fails closed with
+// leaf_busy or skips), renames the stage over the empty leaf and writes the
+// sentinel last.
 func (s *Server) applySharedSignedBootstrap(ctx context.Context, req CreateAgentRequest, rel string) (skipped bool, err error) {
 	base, err := filepath.EvalSymlinks(s.config.StorageLayout.HostBase)
 	if err != nil {
@@ -565,6 +569,11 @@ func (s *Server) applySharedSignedBootstrap(ctx context.Context, req CreateAgent
 		if _, err := removeStaleBootstrapStages(parent, leaf); err != nil {
 			return err
 		}
+		// Provisioning bookkeeping is kept only in the project state
+		// directory. A sentinel or lock an older image left in the
+		// workspace root is not bookkeeping but content, like any other
+		// entry: such a leaf is skipped as existing content, and nothing
+		// below writes into it (no stage over it, no download, no sentinel).
 		if sharedWorkspaceProvisioned(wsPath) {
 			skipped = true
 			return nil
@@ -577,7 +586,7 @@ func (s *Server) applySharedSignedBootstrap(ctx context.Context, req CreateAgent
 			return &signedCommitError{Class: signedCommitStage}
 		}
 		stageRel := filepath.Join(filepath.Dir(rel), stage)
-		fd, existed, err := shareddirs.EnsureLeafOwned(base, stageRel, owner)
+		fd, existed, err := projectfs.EnsureSharedLeafOwned(base, stageRel, owner)
 		if err != nil {
 			return &signedCommitError{Class: signedCommitStage}
 		}

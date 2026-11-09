@@ -68,6 +68,15 @@ export class ScionReviewNoteDialog extends LitElement {
       color: var(--sl-input-color, #0f172a);
       resize: vertical;
     }
+    /* 16px or more on a touch screen: iOS Safari zooms in on a field
+       under 16px when it takes focus and keeps the zoom after the keyboard
+       closes, leaving the pinned review toolbar above the visible area
+       (viewport.ts stands down while the page is zoomed). */
+    @media (pointer: coarse) {
+      textarea {
+        font-size: max(16px, 0.875rem);
+      }
+    }
     textarea:focus {
       outline: none;
       border-color: var(--sl-color-primary-600, #0284c7);

@@ -895,11 +895,11 @@ export class ScionChatComposer extends LitElement {
       align-items: center;
       gap: 0.5rem;
       padding: calc(0.375rem - 0.25rem * var(--scion-chat-kb-open, 0)) 0.75rem;
-      background: var(--scion-surface-50, #f8fafc);
+      background: var(--scion-bg, #f8fafc);
       border-left: 3px solid var(--scion-primary-400, #60a5fa);
       border-radius: 0 0.25rem 0.25rem 0;
       font-size: var(--chat-fs-base);
-      color: var(--scion-neutral-600, #475569);
+      color: var(--scion-text-secondary, #475569);
     }
 
     /* The sender and a one-line excerpt: on two lines normally, side by
@@ -915,10 +915,11 @@ export class ScionChatComposer extends LitElement {
 
     /* While the keyboard is open the sender takes at most half the bar and
        is cut with an ellipsis, so a long name never wraps the bar back to
-       two lines. */
+       two lines. Its colour is primary-600 in the light theme and
+       primary-300 in the dark one, for AA contrast on the bar in both. */
     .reply-bar .reply-sender {
       font-weight: 600;
-      color: var(--scion-primary-600, #2563eb);
+      color: var(--scion-primary-hover, #2563eb);
       max-width: calc(100% - 50% * var(--scion-chat-kb-open, 0));
       min-width: 0;
       overflow: hidden;

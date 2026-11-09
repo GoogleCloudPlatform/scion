@@ -432,6 +432,7 @@ func startFlatRuntimeBrokerHost(ctx context.Context, p flatHostParams) error {
 	hostServices = append(hostServices, caches)
 	if p.hubSrv != nil {
 		shared.colocatedStorage = p.hubSrv.GetStorage()
+		shared.colocatedHubID = p.hubSrv.HubID()
 	}
 	buildServer := func(ic brokerhost.InstanceContext) (*runtimebroker.Server, error) {
 		rhCfg := flatInstanceServerConfig(shared, ic)
@@ -535,16 +536,20 @@ func flatOwnershipPreflight(ctx context.Context, c brokerhost.Candidate) error {
 		return err
 	}
 	records := runtimebroker.NewOwnershipStore(dir, c.Identity.RuntimeBrokerID)
+	// Labels are read under the keys the runtime stores them under (Cloud
+	// Run rewrites label keys), so an owned object is never read as
+	// unlabeled.
+	label := func(o api.AgentInfo, key string) string { return o.Labels[runtime.LabelKey(c.Runtime, key)] }
 	var unresolved []string
 	for _, o := range objects {
-		switch owner := o.Labels[api.LabelRuntimeBrokerID]; owner {
+		switch owner := label(o, api.LabelRuntimeBrokerID); owner {
 		case "":
 			// below: unattributable
 		case c.Identity.RuntimeBrokerID:
 			// This instance's object: make sure its record exists
 			// (reconstruction needs the complete project, agent, run and
 			// object identity; anything less is unresolved).
-			if err := records.Reconstruct(o); err != nil {
+			if err := records.Reconstruct(o, c.Runtime); err != nil {
 				unresolved = append(unresolved, fmt.Sprintf("%s (%v)", o.Name, err))
 			}
 			continue
@@ -552,7 +557,7 @@ func flatOwnershipPreflight(ctx context.Context, c brokerhost.Candidate) error {
 			continue // another instance's object
 		}
 		name := o.Name
-		if p := o.Labels["scion.project_id"]; p != "" {
+		if p := label(o, "scion.project_id"); p != "" {
 			name = p + "/" + name
 		}
 		unresolved = append(unresolved, name)
@@ -660,6 +665,8 @@ type flatServerShared struct {
 	// colocatedStorage is the co-located Hub's storage (nil without one);
 	// only a co-located (in-memory credentials) instance uses it.
 	colocatedStorage storage.Storage
+	// colocatedHubID is the co-located Hub's instance ID (empty without one).
+	colocatedHubID string
 }
 
 // flatInstanceServerConfig is one activated flat instance's Runtime Broker
@@ -722,6 +729,7 @@ func flatInstanceServerConfig(sh flatServerShared, ic brokerhost.InstanceContext
 	}
 	if ic.Activation.InMemoryCredentials != nil && sh.colocatedStorage != nil {
 		rhCfg.ColocatedStorage = sh.colocatedStorage
+		rhCfg.ColocatedHubID = sh.colocatedHubID
 	}
 	// The host's single NFS mount owner: host-bind instances
 	// register with it instead of mounting themselves.

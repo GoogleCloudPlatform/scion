@@ -214,33 +214,64 @@ func (s *Server) handleConversationScheduledRoutes(w http.ResponseWriter, r *htt
 // local dev) session, and scoped access tokens, federated identities,
 // broker requests on behalf of a user and agents are refused. A message is
 // sent later as the user, and only such a session matches that. action is
-// the route's action, for the denial log.
+// the route's action, for the denial log. The decision is
+// interactiveUserSessionCheck, shared with the Ask-for-review send check
+// (ptone/scion#5145, F6).
 func scheduledSendCaller(w http.ResponseWriter, r *http.Request, action Action) UserIdentity {
 	ctx := r.Context()
-	identity := GetIdentityFromContext(ctx)
-	user := GetUserIdentityFromContext(ctx)
-	if user == nil || user.ID() == "" {
+	user, refusal := interactiveUserSessionCheck(ctx)
+	switch refusal {
+	case "":
+		return user
+	case sessionRefusalNoUser:
 		Forbidden(w)
 		return nil
 	}
-	deny := func(reason string) UserIdentity {
-		logAuthzDenial(r, identity, Resource{Type: "chat_scheduled_message"}, action, reason)
-		writeError(w, http.StatusForbidden, ErrCodeForbidden,
-			"scheduled messages require a signed-in session", nil)
-		return nil
+	logAuthzDenial(r, GetIdentityFromContext(ctx), Resource{Type: "chat_scheduled_message"}, action, refusal)
+	writeError(w, http.StatusForbidden, ErrCodeForbidden,
+		"scheduled messages require a signed-in session", nil)
+	return nil
+}
+
+// sessionRefusalNoUser is interactiveUserSessionCheck's refusal of a
+// context without a user caller.
+const sessionRefusalNoUser = "no user caller"
+
+// interactiveUserSessionCheck decides whether the caller of ctx is an
+// interactive, unscoped user session (F6, ptone/scion#5145): a user whose
+// credential is an interactive or local dev session, and not a scoped
+// access token or a federated identity. Broker requests on behalf of a
+// user, agents and every other credential kind are refused. It returns the
+// user and "" when it is, and the refusal reason otherwise
+// (sessionRefusalNoUser when there is no user caller; the other reasons are
+// the denial-log text of scheduledSendCaller).
+func interactiveUserSessionCheck(ctx context.Context) (UserIdentity, string) {
+	user := GetUserIdentityFromContext(ctx)
+	if user == nil || user.ID() == "" {
+		return nil, sessionRefusalNoUser
 	}
 	switch GetCredentialContextFromContext(ctx).Kind {
 	case CredentialKindInteractive, CredentialKindDev:
 	default:
-		return deny("credential kind may not schedule chat messages")
+		return nil, "credential kind may not schedule chat messages"
 	}
 	if IsScopedUserIdentity(user) {
-		return deny("scoped user access token")
+		return nil, "scoped user access token"
 	}
 	if _, federated := user.(FederatedIdentity); federated {
-		return deny("federated identity")
+		return nil, "federated identity"
 	}
-	return user
+	return user, ""
+}
+
+// interactiveUserSession is the F6 predicate: the caller of ctx when it is
+// an interactive, unscoped user session (interactiveUserSessionCheck), and
+// false otherwise. scheduledSendCaller and the Ask-for-review send check
+// (artifactHost.MayNotifyGrant) decide through it, so the two gates are
+// the same gate (TestInteractiveUserSessionMatchesScheduledSendCaller).
+func interactiveUserSession(ctx context.Context) (UserIdentity, bool) {
+	user, refusal := interactiveUserSessionCheck(ctx)
+	return user, refusal == ""
 }
 
 // handleScheduledCreate implements POST …/{key}/scheduled.
@@ -1098,8 +1129,8 @@ func (s *Server) checkScheduledFire(ctx context.Context, m *ScheduledChatMessage
 }
 
 // checkScheduledTopicFire runs the topic checks of a claimed row: the
-// topic exists, and its current project exists, grants the sender read
-// access and lets the sender's account post (chatMayPost). done is false
+// topic exists, its current project exists, and chatThreadAccess lets the
+// sender post in it (which needs read access). done is false
 // when every check passed.
 func (s *Server) checkScheduledTopicFire(ctx context.Context, user UserIdentity, m *ScheduledChatMessage) (scheduledFireCheck, bool) {
 	s.mu.RLock()
@@ -1122,10 +1153,13 @@ func (s *Server) checkScheduledTopicFire(ctx context.Context, user UserIdentity,
 	if err != nil || project == nil {
 		return scheduledFireCheck{transient: true}, true
 	}
-	if !s.authzService.CheckAccess(ctx, user, projectResource(project), ActionRead).Allowed {
-		return scheduledFireCheck{reason: ScheduledFailureNoAccess}, true
+	// The same decision point as a live send (chatThreadAccess): the sender
+	// must still read the topic and may still post in it.
+	access, err := s.chatThreadAccess(ctx, user, chatThreadRef{Key: m.ConversationKey, Project: project})
+	if err != nil {
+		return scheduledFireCheck{transient: true}, true
 	}
-	if !s.chatMayPost(ctx, user, project).Allowed {
+	if !access.Can(ChatActionPost) {
 		return scheduledFireCheck{reason: ScheduledFailureNoAccess}, true
 	}
 	return scheduledFireCheck{}, false

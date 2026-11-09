@@ -425,7 +425,7 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 	// it never writes. Any store writes happen only below this point, and
 	// only for a non-dry-run request.
 	resolveRegistry := reincarnateImageRegistry(dispatcher, agent.RuntimeBrokerID)
-	fresh, warnings, err := s.buildPatchedAppliedConfig(ctx, agent, project, resolveRegistry, patch)
+	fresh, warnings, err := s.buildPatchedAppliedConfig(ctx, agent, project, resolveRegistry, reincarnateImageTag(dispatcher, agent.RuntimeBrokerID), patch)
 	if err != nil {
 		if writeWorkspaceStorageUnavailable(w, err) {
 			return
@@ -720,7 +720,7 @@ func (s *Server) planReincarnateMove(w http.ResponseWriter, r *http.Request, req
 	// The new generation runs on dst: resolve its registry there, for the
 	// new profile (ptone/scion#3916).
 	resolveRegistry := reincarnateImageRegistry(dispatcher, dst.ID)
-	fresh, warnings, err := s.buildPatchedAppliedConfig(ctx, agent, project, resolveRegistry, patch)
+	fresh, warnings, err := s.buildPatchedAppliedConfig(ctx, agent, project, resolveRegistry, reincarnateImageTag(dispatcher, dst.ID), patch)
 	if err != nil {
 		if writeWorkspaceStorageUnavailable(w, err) {
 			return

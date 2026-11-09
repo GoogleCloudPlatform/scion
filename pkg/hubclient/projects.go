@@ -16,6 +16,7 @@ package hubclient
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/url"
 
@@ -75,6 +76,18 @@ type ProjectService interface {
 	// GetResolvedSettings retrieves the per-setting report of project
 	// annotations and hub defaults (GET /settings/resolved).
 	GetResolvedSettings(ctx context.Context, projectID string) (*ResolvedProjectSettings, error)
+
+	// GetSettingsBody and GetResolvedSettingsBody make the same reads as
+	// GetSettings and GetResolvedSettings and return the Hub's response
+	// body unchanged, for output that must show the response as received.
+	GetSettingsBody(ctx context.Context, projectID string) (json.RawMessage, error)
+	GetResolvedSettingsBody(ctx context.Context, projectID string) (json.RawMessage, error)
+
+	// UpdateSettingsFields sends a settings PUT whose body is exactly
+	// fields: only those keys change (the Hub merges per key), and an
+	// explicit null or "" is sent as given, so it can clear a field.
+	// Refusals are returned as *SettingsError.
+	UpdateSettingsFields(ctx context.Context, projectID string, fields map[string]interface{}) (*ProjectSettingsSaveResult, error)
 
 	// UpdateGCPIdentityDefaults writes only the default GCP identity fields
 	// of the project settings; every other setting keeps its stored value.
@@ -424,6 +437,49 @@ func (s *projectService) GetResolvedSettings(ctx context.Context, projectID stri
 		return nil, err
 	}
 	return apiclient.DecodeRequired[ResolvedProjectSettings](resp)
+}
+
+// GetSettingsBody retrieves project settings as the Hub's response body.
+func (s *projectService) GetSettingsBody(ctx context.Context, projectID string) (json.RawMessage, error) {
+	return s.getBody(ctx, "/api/v1/projects/"+url.PathEscape(projectID)+"/settings")
+}
+
+// GetResolvedSettingsBody retrieves the resolved settings report as the
+// Hub's response body.
+func (s *projectService) GetResolvedSettingsBody(ctx context.Context, projectID string) (json.RawMessage, error) {
+	return s.getBody(ctx, "/api/v1/projects/"+url.PathEscape(projectID)+"/settings/resolved")
+}
+
+// getBody reads path and returns its JSON body byte for byte.
+func (s *projectService) getBody(ctx context.Context, path string) (json.RawMessage, error) {
+	resp, err := s.c.get(ctx, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	body, err := apiclient.DecodeRequired[json.RawMessage](resp)
+	if err != nil {
+		return nil, err
+	}
+	return *body, nil
+}
+
+// ProjectSettingsSaveResult is the Hub's answer to a project settings save:
+// the settings as stored, and advisory warnings about the saved values.
+type ProjectSettingsSaveResult struct {
+	ProjectSettings
+	Warnings []string `json:"warnings,omitempty"`
+}
+
+// UpdateSettingsFields sends a settings PUT whose body is exactly fields.
+func (s *projectService) UpdateSettingsFields(ctx context.Context, projectID string, fields map[string]interface{}) (*ProjectSettingsSaveResult, error) {
+	if len(fields) == 0 {
+		return nil, fmt.Errorf("no project settings to change")
+	}
+	resp, err := s.c.put(ctx, "/api/v1/projects/"+url.PathEscape(projectID)+"/settings", fields, nil)
+	if err != nil {
+		return nil, err
+	}
+	return decodeSettingsResponse[ProjectSettingsSaveResult](resp)
 }
 
 // UpdateGCPIdentityDefaults sends a settings PUT whose body carries only the

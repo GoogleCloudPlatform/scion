@@ -51,7 +51,7 @@ func seedConfigVar(key, value string) gitConfigVar {
 // marker (a distinctive substring of the refused value).
 func mustRefuseSeed(t *testing.T, raw, wantKey, marker string) *RepoConfigRefusedError {
 	t.Helper()
-	out, _, err := PrepareSeededGitConfig([]byte(raw), RepoPolicyLinked, seedTestStrip)
+	out, _, _, err := PrepareSeededGitConfig([]byte(raw), RepoPolicyLinked, seedTestStrip, false)
 	if err == nil {
 		t.Fatalf("seed accepted a base setting %s; output:\n%s", wantKey, out)
 	}
@@ -141,7 +141,7 @@ func TestPrepareSeededGitConfig_EarlierBaseSeeds(t *testing.T) {
 		"\tauto = false",
 		"",
 	}, "\n")
-	out, stripped, err := PrepareSeededGitConfig([]byte(raw), RepoPolicyLinked, seedTestStrip)
+	out, stripped, _, err := PrepareSeededGitConfig([]byte(raw), RepoPolicyLinked, seedTestStrip, false)
 	if err != nil {
 		t.Fatalf("earlier base refused: %v", err)
 	}
@@ -194,7 +194,7 @@ func TestPrepareSeededGitConfig_DroppedKeysExemptAndRemoved(t *testing.T) {
 		"\tsmtpPass = credmarker-a5",
 		"",
 	}, "\n")
-	out, stripped, err := PrepareSeededGitConfig([]byte(raw), RepoPolicyLinked, seedTestStrip)
+	out, stripped, _, err := PrepareSeededGitConfig([]byte(raw), RepoPolicyLinked, seedTestStrip, false)
 	if err != nil {
 		t.Fatalf("a base with dropped keys must seed, got: %v", err)
 	}
@@ -296,7 +296,7 @@ func TestPrepareSeededGitConfig_SubsectionedUnpinnedKeysRefuse(t *testing.T) {
 			}
 			raw := "[" + r.Section + " \"x\"]\n\t" + r.Name + " = /tmp/subpinmarker-j1\n"
 			refused := mustRefuseSeed(t, raw, key, "subpinmarker-j1")
-			if refused.Reason == "a setting that runs a command in the agent's git" {
+			if refused.Reason == neverCarryReason {
 				t.Errorf("%s refused by the seed table, want allowVar: %q", key, refused.Reason)
 			}
 		})
@@ -315,7 +315,7 @@ func TestPrepareSeededGitConfig_UnpinnedSafeKeysSeed(t *testing.T) {
 		key := r.Section + "." + r.Name
 		t.Run(key, func(t *testing.T) {
 			raw := "[" + r.Section + "]\n\t" + r.Name + " = true\n"
-			out, _, err := PrepareSeededGitConfig([]byte(raw), RepoPolicyLinked, seedTestStrip)
+			out, _, _, err := PrepareSeededGitConfig([]byte(raw), RepoPolicyLinked, seedTestStrip, false)
 			if err != nil {
 				t.Fatalf("seed refused %s: %v", key, err)
 			}
@@ -477,7 +477,7 @@ func TestPrepareSeededGitConfig_WritesTheCheckedParse(t *testing.T) {
 		checked = append([]gitConfigVar(nil), vars...)
 		return vars, err
 	}
-	out, _, err := prepareSeededGitConfig([]byte(raw), countingParse, RepoPolicyLinked, seedTestStrip)
+	out, _, _, err := prepareSeededGitConfig([]byte(raw), countingParse, RepoPolicyLinked, seedTestStrip, false)
 	if err != nil {
 		t.Fatalf("prepareSeededGitConfig: %v", err)
 	}
@@ -667,7 +667,7 @@ func TestPrepareSeededGitConfig_SafeRowConditions(t *testing.T) {
 		"\tsigningKey = ~/.ssh/id_ed25519.pub",
 		"",
 	}, "\n")
-	if _, _, err := PrepareSeededGitConfig([]byte(raw), RepoPolicyLinked, seedTestStrip); err != nil {
+	if _, _, _, err := PrepareSeededGitConfig([]byte(raw), RepoPolicyLinked, seedTestStrip, false); err != nil {
 		t.Errorf("value-checked submodule and signing settings refused: %v", err)
 	}
 }
@@ -697,7 +697,7 @@ func TestPrepareSeededGitConfig_ExemptVarsAreDropped(t *testing.T) {
 	if len(kept) != 0 {
 		t.Errorf("exempt vars survived redaction: %+v", kept)
 	}
-	out, _, err := PrepareSeededGitConfig(serializeGitConfig(vars), RepoPolicyLinked, nil)
+	out, _, _, err := PrepareSeededGitConfig(serializeGitConfig(vars), RepoPolicyLinked, nil, false)
 	if err != nil || len(out) != 0 {
 		t.Errorf("seed of only exempt keys = %q, %v; want empty output and no error", out, err)
 	}
@@ -809,7 +809,7 @@ func TestCheckRepoConfigPolicy_RefusalRedactsSubsectionUserinfo(t *testing.T) {
 
 // A base that does not parse fails closed with the parse error, not a refusal.
 func TestPrepareSeededGitConfig_ParseErrorFailsClosed(t *testing.T) {
-	out, stripped, err := PrepareSeededGitConfig([]byte("[core\n\tbare = false\n"), RepoPolicyLinked, seedTestStrip)
+	out, stripped, _, err := PrepareSeededGitConfig([]byte("[core\n\tbare = false\n"), RepoPolicyLinked, seedTestStrip, false)
 	if err == nil {
 		t.Fatalf("malformed base accepted; output:\n%s", out)
 	}

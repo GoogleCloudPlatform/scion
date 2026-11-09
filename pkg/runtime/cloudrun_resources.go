@@ -17,6 +17,7 @@ package runtime
 import (
 	"fmt"
 	"strconv"
+	"unicode/utf8"
 
 	"cloud.google.com/go/run/apiv2/runpb"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -36,6 +37,45 @@ const (
 
 	cloudRunMiB = 1 << 20
 )
+
+// ResourceLimitsError is a resource spec a runtime refuses before it
+// creates anything: a CPU or memory value it cannot parse, or one outside
+// what the platform offers. It is a request the caller must fix, so the
+// runtime broker answers it as a validation error with PublicMessage
+// (ptone/scion#7103).
+//
+// PublicMessage is built only from the spec's field names, the caller's
+// own values (quoted and length-capped, see quoteResourceValue) and the
+// platform's fixed rules. It never names a project, region, instance or
+// agent, so it is safe to pass to the caller as is.
+type ResourceLimitsError struct {
+	msg string
+}
+
+// NewResourceLimitsError returns a ResourceLimitsError with the formatted
+// message, which must follow PublicMessage's rules.
+func NewResourceLimitsError(format string, args ...any) *ResourceLimitsError {
+	return &ResourceLimitsError{msg: fmt.Sprintf(format, args...)}
+}
+
+func (e *ResourceLimitsError) Error() string { return e.msg }
+
+// PublicMessage returns the text the caller may see.
+func (e *ResourceLimitsError) PublicMessage() string { return e.msg }
+
+// maxEchoedResourceValue is how many characters of a caller's resource
+// value an error repeats.
+const maxEchoedResourceValue = 64
+
+// quoteResourceValue quotes a caller's resource value for an error
+// message, cut to maxEchoedResourceValue characters ("..." marks a cut),
+// so an oversized value cannot bloat responses and logs.
+func quoteResourceValue(v string) string {
+	if utf8.RuneCountInString(v) > maxEchoedResourceValue {
+		v = string([]rune(v)[:maxEchoedResourceValue]) + "..."
+	}
+	return strconv.Quote(v)
+}
 
 // cloudRunCPUMemoryBands maps each supported vCPU count to the memory range
 // (in MiB, inclusive) the platform accepts with it.
@@ -89,26 +129,26 @@ func cloudRunContainerResources(spec *api.ResourceSpec) (*runpb.ResourceRequirem
 	limits := map[string]string{}
 	cpu := int64(cloudRunDefaultCPU)
 	if cpuValue != "" {
-		q, err := parseResourceSafe(cpuValue, cpuField)
+		q, err := resource.ParseQuantity(cpuValue)
 		if err != nil {
-			return nil, fmt.Errorf("cloudrun: %w", err)
+			return nil, NewResourceLimitsError("cloudrun: invalid %s resource value %s: %v", cpuField, quoteResourceValue(cpuValue), err)
 		}
 		cpu, err = cloudRunCPU(q)
 		if err != nil {
-			return nil, fmt.Errorf("cloudrun: %s %q: %w", cpuField, cpuValue, err)
+			return nil, NewResourceLimitsError("cloudrun: %s %s: %v", cpuField, quoteResourceValue(cpuValue), err)
 		}
 		limits["cpu"] = strconv.FormatInt(cpu, 10)
 	}
 
 	memBytes, memShown := int64(cloudRunDefaultMemoryMiB)*cloudRunMiB, strconv.Itoa(cloudRunDefaultMemoryMiB)+"Mi"
 	if memValue != "" {
-		q, err := parseResourceSafe(memValue, memField)
+		q, err := resource.ParseQuantity(memValue)
 		if err != nil {
-			return nil, fmt.Errorf("cloudrun: %w", err)
+			return nil, NewResourceLimitsError("cloudrun: invalid %s resource value %s: %v", memField, quoteResourceValue(memValue), err)
 		}
 		memBytes, memShown, err = cloudRunMemory(q)
 		if err != nil {
-			return nil, fmt.Errorf("cloudrun: %s %q: %w", memField, memValue, err)
+			return nil, NewResourceLimitsError("cloudrun: %s %s: %v", memField, quoteResourceValue(memValue), err)
 		}
 		limits["memory"] = memShown
 	}
@@ -118,7 +158,7 @@ func cloudRunContainerResources(spec *api.ResourceSpec) (*runpb.ResourceRequirem
 			continue
 		}
 		if memBytes < b.minMiB*cloudRunMiB || memBytes > b.maxMiB*cloudRunMiB {
-			return nil, fmt.Errorf("cloudrun: %d vCPU (%s) allows memory %dMi to %dMi, got %s (%s); set resources.limits.cpu or resources.limits.memory",
+			return nil, NewResourceLimitsError("cloudrun: %d vCPU (%s) allows memory %dMi to %dMi, got %s (%s); set resources.limits.cpu or resources.limits.memory",
 				cpu, cloudRunResourceSource(cpuValue, cpuField), b.minMiB, b.maxMiB, memShown, cloudRunResourceSource(memValue, memField))
 		}
 		break

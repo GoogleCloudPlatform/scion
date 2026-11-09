@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -284,6 +285,12 @@ func (s *Server) handleRuntimeBrokerRoutes(w http.ResponseWriter, r *http.Reques
 	// row and gives a clean per-key authorization point (design.md §5.4).
 	if subPath == "settings" {
 		s.handleBrokerSettings(w, r, brokerID)
+		return
+	}
+
+	// The legacy Runtime Broker's conversion plan (read-only).
+	if subPath == "conversion-plan" {
+		s.handleBrokerConversionPlan(w, r, brokerID)
 		return
 	}
 
@@ -931,6 +938,13 @@ type brokerHeartbeatRequest struct {
 	PresentationTargetID      string                         `json:"presentationTargetId,omitempty"`
 	PresentationEpoch         int64                          `json:"presentationEpoch,omitempty"`
 	PresentationSeq           int64                          `json:"presentationSeq,omitempty"`
+	// ConversionPlanPresentation is a legacy broker's conversion plan
+	// snapshot (see hubclient.BrokerHeartbeat.ConversionPlanPresentation),
+	// kept as the bytes received so its size cap is checked before any
+	// decode. It is stored only when the request identity is the broker
+	// itself (ApplyConversionPlan). Omitted by an older broker or a flat
+	// one, in which case the stored value is left unchanged.
+	ConversionPlanPresentation json.RawMessage `json:"conversionPlanPresentation,omitempty"`
 }
 
 // brokerStartInFlight mirrors hubclient.StartInFlight.
@@ -983,6 +997,8 @@ type brokerProfileSAMappings struct {
 	IncompleteReason       string                         `json:"incompleteReason,omitempty"`
 	AmbiguousGSAs          []string                       `json:"ambiguousGSAs,omitempty"`
 	ReportVersion          int                            `json:"reportVersion,omitempty"`
+	CloudRunNativeIdentity bool                           `json:"cloudRunNativeIdentity,omitempty"`
+	CloudRunBlockAccount   bool                           `json:"cloudRunBlockAccount,omitempty"`
 }
 
 // brokerProfileSAMappingsHash is one profile's report hash in a heartbeat
@@ -1018,7 +1034,8 @@ const profileSAReportConfirmInterval = 5 * time.Minute
 //     profileSAReportConfirmInterval. A hash that does not match (or no
 //     stored hash) leaves the stored report as is, to age, and asks for the
 //     full report.
-//   - The reports and hashes name every Kubernetes profile of the broker,
+//   - The reports and hashes name every Kubernetes and (from report
+//     version 3) Cloud Run profile of the broker,
 //     so a stored profile named in neither (for example one switched from
 //     Kubernetes to docker) has its report cleared.
 //
@@ -1070,6 +1087,8 @@ func applyProfileSAMappings(profiles []store.BrokerProfile, reported []brokerPro
 			}
 			p.MappingsHash = hash
 			p.MappingsReportVersion = r.ReportVersion
+			p.CloudRunNativeIdentity = r.CloudRunNativeIdentity
+			p.CloudRunBlockAccount = r.CloudRunBlockAccount
 			p.MappingsReportedAt = timePtr(now)
 			changed = true
 		case inHashes:
@@ -1099,6 +1118,8 @@ func profileSAReportEqual(p *store.BrokerProfile, r brokerProfileSAMappings, has
 		p.MappingsComplete == r.Complete &&
 		p.MappingsIncompleteReason == reason &&
 		p.MappingsReportVersion == r.ReportVersion &&
+		p.CloudRunNativeIdentity == r.CloudRunNativeIdentity &&
+		p.CloudRunBlockAccount == r.CloudRunBlockAccount &&
 		slices.Equal(p.ServiceAccountMappings, r.ServiceAccountMappings) &&
 		slices.Equal(p.AmbiguousGSAs, r.AmbiguousGSAs)
 }
@@ -1113,6 +1134,8 @@ func clearProfileSAReport(p *store.BrokerProfile) {
 	p.MappingsHash = ""
 	p.MappingsReportedAt = nil
 	p.MappingsReportVersion = 0
+	p.CloudRunNativeIdentity = false
+	p.CloudRunBlockAccount = false
 }
 
 // timePtr returns a pointer to a copy of t.
@@ -1440,6 +1463,19 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 	} else if _, err := s.ApplyRuntimeTargetPresentation(ctx, id, heartbeat.PresentationTargetID,
 		heartbeat.RuntimeTargetPresentation, heartbeat.PresentationEpoch, heartbeat.PresentationSeq, time.Now()); err != nil {
 		s.agentLifecycleLog.Warn("heartbeat: failed to store runtime target presentation",
+			"broker_id", id, "error", err)
+	}
+
+	// A legacy broker's conversion plan is stored on the same rule: only
+	// from the broker's own credentials. Caps, the experiment, the schema
+	// version and the legacy-row check are ApplyConversionPlan's.
+	if !brokerSelf {
+		if len(heartbeat.ConversionPlanPresentation) > 0 {
+			s.agentLifecycleLog.Warn("heartbeat: ignoring conversionPlanPresentation sent with a request identity other than the broker itself",
+				"broker_id", id)
+		}
+	} else if _, err := s.ApplyConversionPlan(ctx, id, heartbeat.ConversionPlanPresentation, time.Now()); err != nil {
+		s.agentLifecycleLog.Warn("heartbeat: failed to store the conversion plan",
 			"broker_id", id, "error", err)
 	}
 
@@ -1922,6 +1958,16 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 			if s.heartbeatPhaseGuarded(agent, statusUpdate.Phase) {
 				statusUpdate.Phase = ""
 			}
+			// Restart window: before a restart has recorded its new run, a
+			// report of the current run (or of none) comes from the run
+			// being replaced. The store drops its status fields on the
+			// locked row; this mirror drops them before the reservation
+			// reconcile below as well, as defence in depth. The reconcile
+			// does not depend on it: a heartbeat cannot move a stopped,
+			// error, halted or suspended row to a counted phase, and the
+			// releases it calls refuse a row that holds a restart claim
+			// (NoStartKindClaim).
+			guardRestartWindowReport(agent, &statusUpdate, statusUpdate)
 
 			// Reconcile the max_agents_per_broker reservation against the
 			// phase this heartbeat will actually persist — e.g. release on an

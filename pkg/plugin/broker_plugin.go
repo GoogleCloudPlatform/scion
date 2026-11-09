@@ -16,10 +16,13 @@ package plugin
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/rpc"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
@@ -268,6 +271,57 @@ type BrokerRPCClient struct {
 	// channel for HostCallbacks. The manager reads this flag to include
 	// the _host_callbacks key in the config map passed to Configure.
 	hostCallbacksAvailable bool
+
+	// onTransportError, when set (by the Manager), is called after a call
+	// fails with a transport error: the session or connection is gone or
+	// broken, as opposed to an error the plugin returned. method is the
+	// RPC method; for Publish, topic and recipient identify the dropped
+	// message. stale is true when the client was already discarded: the
+	// failure then says nothing new about the plugin's session, but a
+	// failed Publish is still a dropped message.
+	onTransportError func(method, topic, recipient string, stale bool, err error)
+
+	// stale is set by discard: the connection was closed locally because
+	// the client was replaced or abandoned.
+	stale atomic.Bool
+}
+
+// discard closes the connection locally (no RPC is sent to the plugin) and
+// marks the client stale: pending and later calls fail with
+// rpc.ErrShutdown, Close becomes a no-op, and its transport errors are
+// reported as stale (counted as drops, no supervisor check).
+func (c *BrokerRPCClient) discard() {
+	if c.stale.Swap(true) {
+		return
+	}
+	_ = c.client.Close()
+}
+
+// isTransportError reports whether err from an RPC call means the
+// connection to the plugin failed (rpc.ErrShutdown, io.EOF,
+// io.ErrUnexpectedEOF, yamux session errors, ...), as opposed to an error
+// returned by the plugin itself (rpc.ServerError) or a caller ctx ending.
+// A local encoding error of the request also counts: it is rare, and costs
+// one dropped-publish count and one supervisor Ping, never a restart by
+// itself.
+func isTransportError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var serverErr rpc.ServerError
+	if errors.As(err, &serverErr) {
+		return false
+	}
+	return !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)
+}
+
+// observe reports a transport error of a call to onTransportError and
+// returns err unchanged.
+func (c *BrokerRPCClient) observe(method, topic, recipient string, err error) error {
+	if c.onTransportError != nil && isTransportError(err) {
+		c.onTransportError(method, topic, recipient, c.stale.Load(), err)
+	}
+	return err
 }
 
 // NewBrokerRPCClient creates a BrokerRPCClient wrapping the given RPC client.
@@ -277,28 +331,72 @@ func NewBrokerRPCClient(client *rpc.Client) *BrokerRPCClient {
 }
 
 func (c *BrokerRPCClient) Configure(config map[string]string) error {
-	return c.client.Call("Plugin.Configure", &ConfigureArgs{Config: config}, &struct{}{})
+	return c.observe("Configure", "", "", c.client.Call("Plugin.Configure", &ConfigureArgs{Config: config}, &struct{}{}))
 }
 
-func (c *BrokerRPCClient) Publish(_ context.Context, topic string, msg *messages.StructuredMessage) error {
-	return c.client.Call("Plugin.Publish", &PublishArgs{Topic: topic, Msg: msg}, &struct{}{})
+// configureWithin is Configure, giving up after timeout (the RPC itself is
+// not cancelled; its late reply is discarded).
+func (c *BrokerRPCClient) configureWithin(config map[string]string, timeout time.Duration) error {
+	call := c.client.Go("Plugin.Configure", &ConfigureArgs{Config: config}, &struct{}{}, make(chan *rpc.Call, 1))
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-call.Done:
+		return c.observe("Configure", "", "", call.Error)
+	case <-timer.C:
+		return fmt.Errorf("plugin Configure did not answer within %v", timeout)
+	}
+}
+
+// Publish sends msg to the plugin. It returns ctx.Err() when ctx ends
+// before the plugin answers; the RPC itself is not cancelled (net/rpc has
+// no cancellation) and its late reply is discarded. Each call has its own
+// one-slot Done channel, so a reply is never dropped by net/rpc and an
+// abandoned call leaves nothing behind once the plugin answers.
+func (c *BrokerRPCClient) Publish(ctx context.Context, topic string, msg *messages.StructuredMessage) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	call := c.client.Go("Plugin.Publish", &PublishArgs{Topic: topic, Msg: msg}, &struct{}{}, make(chan *rpc.Call, 1))
+	var err error
+	select {
+	case <-call.Done:
+		err = call.Error
+	case <-ctx.Done():
+		select {
+		case <-call.Done: // the reply arrived together with ctx ending
+			err = call.Error
+		default:
+			return ctx.Err()
+		}
+	}
+	recipient := ""
+	if msg != nil {
+		recipient = msg.Recipient
+	}
+	return c.observe("Publish", topic, recipient, err)
 }
 
 func (c *BrokerRPCClient) Subscribe(pattern string) error {
-	return c.client.Call("Plugin.Subscribe", &SubscribeArgs{Pattern: pattern}, &struct{}{})
+	return c.observe("Subscribe", "", "", c.client.Call("Plugin.Subscribe", &SubscribeArgs{Pattern: pattern}, &struct{}{}))
 }
 
 func (c *BrokerRPCClient) Unsubscribe(pattern string) error {
-	return c.client.Call("Plugin.Unsubscribe", &UnsubscribeArgs{Pattern: pattern}, &struct{}{})
+	return c.observe("Unsubscribe", "", "", c.client.Call("Plugin.Unsubscribe", &UnsubscribeArgs{Pattern: pattern}, &struct{}{}))
 }
 
+// Close asks the plugin to close. On a stale (discarded) client it does
+// nothing: the plugin instance is shared with its replacement connection.
 func (c *BrokerRPCClient) Close() error {
+	if c.stale.Load() {
+		return nil
+	}
 	return c.client.Call("Plugin.Close", struct{}{}, &struct{}{})
 }
 
 func (c *BrokerRPCClient) GetInfo() (*PluginInfo, error) {
 	var resp GetInfoResponse
-	err := c.client.Call("Plugin.GetInfo", struct{}{}, &resp)
+	err := c.observe("GetInfo", "", "", c.client.Call("Plugin.GetInfo", struct{}{}, &resp))
 	if err != nil {
 		return nil, err
 	}
@@ -310,7 +408,7 @@ func (c *BrokerRPCClient) GetInfo() (*PluginInfo, error) {
 // "unknown" status is returned instead of an error.
 func (c *BrokerRPCClient) HealthCheck() (*HealthStatus, error) {
 	var resp HealthCheckResponse
-	err := c.client.Call("Plugin.HealthCheck", struct{}{}, &resp)
+	err := c.observe("HealthCheck", "", "", c.client.Call("Plugin.HealthCheck", struct{}{}, &resp))
 	if err != nil {
 		// Gracefully handle plugins that don't implement HealthCheck.
 		// net/rpc returns an error for unknown methods.
@@ -367,8 +465,8 @@ func (a *BrokerPluginAdapter) Close() error {
 }
 
 // unsubscribePattern sends the RPC unsubscribe call and removes the pattern
-// from the adapter's tracking map. Both pluginSubscription and
-// reconnectingSub use this to avoid leaking entries in the subs map.
+// from the adapter's tracking map, so pluginSubscription does not leak
+// entries in the subs map.
 func (a *BrokerPluginAdapter) unsubscribePattern(pattern string) error {
 	err := a.rpcClient.Unsubscribe(pattern)
 	a.mu.Lock()
@@ -385,132 +483,4 @@ type pluginSubscription struct {
 
 func (s *pluginSubscription) Unsubscribe() error {
 	return s.adapter.unsubscribePattern(s.pattern)
-}
-
-// --- Reconnecting adapter for self-managed broker plugins ---
-
-// reconnectingBrokerAdapter wraps a BrokerPluginAdapter for self-managed broker
-// plugins and automatically reconnects when RPC calls fail. This handles the
-// case where the external plugin process restarts while the Hub is still running.
-type reconnectingBrokerAdapter struct {
-	manager    *Manager
-	name       string
-	logger     *slog.Logger
-	mu         sync.Mutex
-	current    *BrokerPluginAdapter
-	activeSubs map[string]eventbus.EventHandler // tracked for re-subscribe after reconnect
-	closed     bool
-}
-
-func newReconnectingBrokerAdapter(manager *Manager, name string, initial *BrokerPluginAdapter, logger *slog.Logger) *reconnectingBrokerAdapter {
-	return &reconnectingBrokerAdapter{
-		manager:    manager,
-		name:       name,
-		logger:     logger.With("component", "reconnecting-broker", "plugin", name),
-		current:    initial,
-		activeSubs: make(map[string]eventbus.EventHandler),
-	}
-}
-
-// tryReconnect re-establishes the connection to the self-managed plugin and
-// re-subscribes to all active subscription patterns.
-func (a *reconnectingBrokerAdapter) tryReconnect() error {
-	a.logger.Info("Attempting reconnect to broker plugin")
-
-	if err := a.manager.Reconnect(PluginTypeBroker, a.name); err != nil {
-		return fmt.Errorf("reconnect failed: %w", err)
-	}
-
-	raw, err := a.manager.Get(PluginTypeBroker, a.name)
-	if err != nil {
-		return fmt.Errorf("get after reconnect failed: %w", err)
-	}
-	rpcClient, ok := raw.(*BrokerRPCClient)
-	if !ok {
-		return fmt.Errorf("reconnected plugin is not a BrokerRPCClient")
-	}
-
-	a.current = NewBrokerPluginAdapter(rpcClient)
-
-	// Re-establish subscriptions on the new connection.
-	for pattern, handler := range a.activeSubs {
-		if _, err := a.current.Subscribe(pattern, handler); err != nil {
-			a.logger.Warn("Failed to re-subscribe after reconnect",
-				"pattern", pattern, "error", err)
-		}
-	}
-
-	a.logger.Info("Successfully reconnected to broker plugin",
-		"resubscribed", len(a.activeSubs))
-	return nil
-}
-
-func (a *reconnectingBrokerAdapter) Publish(ctx context.Context, topic string, msg *messages.StructuredMessage) error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.closed {
-		return fmt.Errorf("adapter is closed")
-	}
-
-	err := a.current.Publish(ctx, topic, msg)
-	if err == nil {
-		return nil
-	}
-
-	a.logger.Warn("Publish failed, attempting reconnect", "topic", topic, "error", err)
-	if reconnErr := a.tryReconnect(); reconnErr != nil {
-		return fmt.Errorf("publish failed: %w (reconnect also failed: %v)", err, reconnErr)
-	}
-	return a.current.Publish(ctx, topic, msg)
-}
-
-func (a *reconnectingBrokerAdapter) Subscribe(pattern string, handler eventbus.EventHandler) (eventbus.Subscription, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.closed {
-		return nil, fmt.Errorf("adapter is closed")
-	}
-
-	_, err := a.current.Subscribe(pattern, handler)
-	if err == nil {
-		a.activeSubs[pattern] = handler
-		return &reconnectingSub{adapter: a, pattern: pattern}, nil
-	}
-
-	a.logger.Warn("Subscribe failed, attempting reconnect", "pattern", pattern, "error", err)
-	if reconnErr := a.tryReconnect(); reconnErr != nil {
-		return nil, fmt.Errorf("subscribe failed: %w (reconnect also failed: %v)", err, reconnErr)
-	}
-	sub, err := a.current.Subscribe(pattern, handler)
-	if err != nil {
-		return nil, err
-	}
-	a.activeSubs[pattern] = handler
-	_ = sub // tracked by current adapter internally
-	return &reconnectingSub{adapter: a, pattern: pattern}, nil
-}
-
-func (a *reconnectingBrokerAdapter) Close() error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.closed = true
-	return a.current.Close()
-}
-
-// reconnectingSub implements eventbus.Subscription and tracks unsubscribes in
-// the reconnecting adapter's activeSubs map.
-type reconnectingSub struct {
-	adapter *reconnectingBrokerAdapter
-	pattern string
-}
-
-func (s *reconnectingSub) Unsubscribe() error {
-	s.adapter.mu.Lock()
-	defer s.adapter.mu.Unlock()
-	delete(s.adapter.activeSubs, s.pattern)
-	// Best-effort unsubscribe on current connection; if it's dead, the
-	// subscription is already gone. Uses unsubscribePattern to also clean
-	// up the BrokerPluginAdapter's subs map, preventing leaked entries.
-	_ = s.adapter.current.unsubscribePattern(s.pattern)
-	return nil
 }

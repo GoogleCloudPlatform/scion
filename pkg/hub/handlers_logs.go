@@ -158,6 +158,10 @@ func (s *Server) handleAgentCloudLogs(w http.ResponseWriter, r *http.Request, ag
 	if !s.authorize(w, r, agentResource(agent), ActionRead) {
 		return
 	}
+	severity, ok := logSeverityParam(w, r.URL.Query())
+	if !ok {
+		return
+	}
 
 	if s.logQueryService == nil {
 		writeError(w, http.StatusNotImplemented, "not_implemented",
@@ -166,7 +170,7 @@ func (s *Server) handleAgentCloudLogs(w http.ResponseWriter, r *http.Request, ag
 	}
 
 	// Parse query parameters
-	opts := agentCloudLogListOptions(s.config.HubName, agent, r.URL.Query())
+	opts := agentCloudLogListOptions(s.config.HubName, agent, severity, r.URL.Query())
 
 	result, err := s.logQueryService.Query(ctx, opts)
 	if err != nil {
@@ -179,6 +183,23 @@ func (s *Server) handleAgentCloudLogs(w http.ResponseWriter, r *http.Request, ag
 	writeJSON(w, http.StatusOK, result)
 }
 
+// logSeverityParam reads the optional severity query parameter of the cloud
+// log endpoints. An empty value means no severity filter. Any other value must
+// name a Cloud Logging severity (logSeverityNames, ASCII case ignored);
+// otherwise it writes 400 validation_error and returns false.
+func logSeverityParam(w http.ResponseWriter, query url.Values) (string, bool) {
+	v := query.Get("severity")
+	if v == "" {
+		return "", true
+	}
+	sev, ok := normalizeLogSeverity(v)
+	if !ok {
+		ValidationError(w, errInvalidLogSeverity.Error(), map[string]interface{}{"field": "severity"})
+		return "", false
+	}
+	return sev, true
+}
+
 // agentCloudLogQueryOptions builds the filter options shared by the
 // agent cloud-logs query and stream endpoints, so both select the same
 // set of entries for an agent.
@@ -186,13 +207,14 @@ func (s *Server) handleAgentCloudLogs(w http.ResponseWriter, r *http.Request, ag
 // It deliberately does not set ProjectID: many server log entries carry
 // agent_id without a project_id label, so a project_id clause would drop
 // them. Agent IDs are UUIDs, so the agent_id clause alone is selective.
-func agentCloudLogQueryOptions(hubName string, agent *store.Agent, query url.Values) LogQueryOptions {
+//
+// severity is the value logSeverityParam returned: a canonical severity
+// name, or "" for no severity filter.
+func agentCloudLogQueryOptions(hubName string, agent *store.Agent, severity string, query url.Values) LogQueryOptions {
 	opts := LogQueryOptions{
-		HubName: hubName,
-		AgentID: agent.ID,
-	}
-	if v := query.Get("severity"); v != "" {
-		opts.Severity = v
+		HubName:  hubName,
+		AgentID:  agent.ID,
+		Severity: severity,
 	}
 	if v := query.Get("broker_id"); v != "" {
 		opts.BrokerID = v
@@ -202,8 +224,8 @@ func agentCloudLogQueryOptions(hubName string, agent *store.Agent, query url.Val
 
 // agentCloudLogListOptions builds the options for the non-streaming
 // agent cloud-logs endpoint: the shared filter plus paging and time range.
-func agentCloudLogListOptions(hubName string, agent *store.Agent, query url.Values) LogQueryOptions {
-	opts := agentCloudLogQueryOptions(hubName, agent, query)
+func agentCloudLogListOptions(hubName string, agent *store.Agent, severity string, query url.Values) LogQueryOptions {
+	opts := agentCloudLogQueryOptions(hubName, agent, severity, query)
 
 	if v := query.Get("tail"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
@@ -261,6 +283,10 @@ func (s *Server) handleAgentCloudLogsStream(w http.ResponseWriter, r *http.Reque
 	if !s.authorize(w, r, agentResource(agent), ActionRead) {
 		return
 	}
+	severity, ok := logSeverityParam(w, r.URL.Query())
+	if !ok {
+		return
+	}
 
 	if s.logQueryService == nil {
 		writeError(w, http.StatusNotImplemented, "not_implemented",
@@ -275,7 +301,7 @@ func (s *Server) handleAgentCloudLogsStream(w http.ResponseWriter, r *http.Reque
 	}
 
 	// Parse query filters
-	opts := agentCloudLogQueryOptions(s.config.HubName, agent, r.URL.Query())
+	opts := agentCloudLogQueryOptions(s.config.HubName, agent, severity, r.URL.Query())
 
 	// Set SSE headers
 	w.Header().Set("Content-Type", "text/event-stream")

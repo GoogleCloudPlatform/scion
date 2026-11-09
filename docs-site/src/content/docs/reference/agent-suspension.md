@@ -78,7 +78,21 @@ the audit log (`agent_hold_set` records).
 
 Starting, restarting, waking or reincarnating a held agent returns
 `409 conflict` with "This agent is suspended. A hub admin can lift the hold."
-See [Resuming](#resuming).
+Every message send to a held agent is also refused before any wake, store write,
+or Runtime Broker dispatch (even if the agent's container is still `running`):
+direct sends from a user or an agent (with or without `wake`) and inbound
+chat-integration messages routed to a held primary agent return
+`409 agent_not_running` (message `agent "<slug>" is suspended. A hub admin can lift the hold.`);
+`@`-mentions of a held agent on a user or routed message report `not_running` /
+`error` for that mention while unheld recipients still receive the message; topic
+messages and project broadcasts skip held agents without storing or dispatching to
+them (and notify an agent sender with `DELIVERY_FAILED`); and `group[...]` sends
+report `failed` for a held member without storing or dispatching to it while
+delivering to unheld members (while a held agent is actively reincarnating,
+`group[...]` and `@`-mention fan-out save its copy as `deferred` for catch-up
+without dispatching). If the hold lookup itself fails for a recipient, the send
+to that recipient is refused (`500 internal_error`, `"could not verify the target agent's status"`)
+before any wake, store write, or dispatch. See [Resuming](#resuming).
 
 ## Resuming
 

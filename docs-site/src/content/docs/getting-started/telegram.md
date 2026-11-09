@@ -14,10 +14,14 @@ already finished [installation](/scion/getting-started/install/) and the
 dashboard at `http://127.0.0.1:8080`.
 
 :::note[Already installed the plugin?]
-The Homebrew install includes `scion-plugin-telegram` automatically — no separate build or
-download is needed. If you installed from source instead, see the
-[plugin README](https://github.com/GoogleCloudPlatform/scion/tree/main/extras/scion-telegram)
-for build instructions, then rejoin this guide at [Step 2](#step-2-configure-the-plugin-from-the-hub-admin-ui).
+Plugins are not bundled with the Homebrew formula. On Linux, download
+`scion-plugin-telegram-linux-amd64.tar.gz` or `-arm64.tar.gz` from the same [GitHub
+release](https://github.com/GoogleCloudPlatform/scion/releases) as your Scion version, verify
+it against that release's `SHA256SUMS`, and put the `scion-plugin-telegram` binary on your
+`$PATH` or in `~/.scion/plugins/broker/`. No plugin build is published for macOS: build it from
+source with the [plugin
+README](https://github.com/GoogleCloudPlatform/scion/tree/main/extras/scion-telegram). Then
+rejoin this guide at [Step 2](#step-2-configure-the-plugin-from-the-hub-admin-ui).
 :::
 
 At a glance, you will:

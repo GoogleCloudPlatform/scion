@@ -118,6 +118,9 @@ type grantsService struct {
 	put     *hubclient.ArtifactGrantRequest
 	removed string
 	listed  bool
+	// notified and skipped answer a request with notify.
+	notified bool
+	skipped  string
 }
 
 func (s *grantsService) ListGrants(_ context.Context, id string) (*hubclient.ArtifactGrantList, error) {
@@ -128,9 +131,13 @@ func (s *grantsService) ListGrants(_ context.Context, id string) (*hubclient.Art
 	}}, nil
 }
 
-func (s *grantsService) PutGrant(_ context.Context, id string, req *hubclient.ArtifactGrantRequest) (*hubclient.ArtifactGrant, error) {
+func (s *grantsService) PutGrant(_ context.Context, id string, req *hubclient.ArtifactGrantRequest) (*hubclient.ArtifactGrantResult, error) {
 	s.put = req
-	return &hubclient.ArtifactGrant{ID: "g9", SubjectKind: req.SubjectKind, SubjectRef: req.SubjectRef, Permission: req.Permission}, nil
+	res := &hubclient.ArtifactGrantResult{Grant: hubclient.ArtifactGrant{ID: "g9", SubjectKind: req.SubjectKind, SubjectRef: req.SubjectRef, Permission: req.Permission}}
+	if req.Notify {
+		res.Notified, res.NotifySkipped = s.notified, s.skipped
+	}
+	return res, nil
 }
 
 func (s *grantsService) DeleteGrant(_ context.Context, id, grantID string) error {
@@ -250,4 +257,49 @@ func (evilGrantsService) ListGrants(context.Context, string) (*hubclient.Artifac
 	return &hubclient.ArtifactGrantList{Grants: []hubclient.ArtifactGrant{
 		{ID: "g1\x1b]8;;https://example.com\x07", SubjectKind: "principal", SubjectRef: "user:u1\x1b[31m", Permission: "read"},
 	}}, nil
+}
+
+// TestArtifactGrantsNotifyFlag (ptone/scion#5145): --notify sends notify
+// with --add for a user and prints whether the user was told; it is a usage
+// error without --add or for an agent or project subject, refused before
+// any call; without --notify the request and output are as before.
+func TestArtifactGrantsNotifyFlag(t *testing.T) {
+	svc := &grantsService{notified: true}
+	var out bytes.Buffer
+	require.NoError(t, artifactGrants(context.Background(), svc, &out, testArtifactRef, grantsOptions{Add: "user:u7", Permission: "review", Notify: true}))
+	require.NotNil(t, svc.put)
+	assert.Equal(t, hubclient.ArtifactGrantRequest{SubjectKind: "principal", SubjectRef: "user:u7", Permission: "review", Notify: true}, *svc.put)
+	assert.Equal(t, "Granted user:u7 review on scion://artifact/"+testArtifactUUID+" (grant g9)\nnotified\n", out.String())
+
+	svc = &grantsService{skipped: "not_permitted\x1b[2J"}
+	out.Reset()
+	require.NoError(t, artifactGrants(context.Background(), svc, &out, testArtifactRef, grantsOptions{Add: "user:u7", Permission: "read", Notify: true}))
+	assert.Contains(t, out.String(), "not notified (not_permitted")
+	assert.NotContains(t, out.String(), "\x1b")
+
+	out.Reset()
+	svc = &grantsService{skipped: "rate_limited"}
+	require.NoError(t, artifactGrants(context.Background(), svc, &out, testArtifactRef, grantsOptions{Add: "user:u7", Permission: "read", Notify: true, JSON: true}))
+	var res hubclient.ArtifactGrantResult
+	require.NoError(t, json.Unmarshal(out.Bytes(), &res))
+	assert.Equal(t, "rate_limited", res.NotifySkipped)
+	assert.Equal(t, "g9", res.Grant.ID)
+
+	fresh := &grantsService{}
+	for _, opts := range []grantsOptions{
+		{Notify: true},
+		{Notify: true, Remove: "g1"},
+		{Add: "agent:a1", Permission: "read", Notify: true},
+		{Add: "project:p1", Permission: "read", Notify: true},
+	} {
+		assert.Error(t, artifactGrants(context.Background(), fresh, &out, testArtifactRef, opts), "%+v", opts)
+	}
+	assert.Nil(t, fresh.put)
+	assert.Empty(t, fresh.removed)
+
+	out.Reset()
+	plain := &grantsService{}
+	require.NoError(t, artifactGrants(context.Background(), plain, &out, testArtifactRef, grantsOptions{Add: "user:u7", Permission: "read"}))
+	assert.False(t, plain.put.Notify)
+	assert.NotContains(t, out.String(), "notified")
 }

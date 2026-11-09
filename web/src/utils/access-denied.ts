@@ -40,6 +40,7 @@ const ACTION_LABELS: Record<string, string> = {
   promote: 'promote',
   suspend: 'suspend',
   assign: 'assign',
+  chat_post: 'post in chat',
 };
 
 /**

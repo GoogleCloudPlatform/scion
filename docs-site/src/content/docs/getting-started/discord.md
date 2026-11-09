@@ -8,7 +8,7 @@ description: An end-to-end walkthrough for Workstation-mode users — create a D
 This guide is for [Workstation mode](/scion/choosing-a-mode/): you installed Scion with Homebrew and run the combo server locally with `scion server start`. It assumes you have already finished [installation](/scion/getting-started/install/) and the [Onboarding Wizard](/scion/getting-started/onboarding/), and that you can open the web dashboard at `http://127.0.0.1:8080`.
 
 :::note[Already installed the plugin?]
-The Homebrew install includes `scion-plugin-discord` automatically — no separate build or download is needed. If you installed from source instead, see the [plugin README](https://github.com/GoogleCloudPlatform/scion/tree/main/extras/scion-discord) for build instructions, then rejoin this guide at [Step 2](#step-2-configure-the-plugin-from-the-hub-admin-ui).
+Plugins are not bundled with the Homebrew formula. On Linux, download `scion-plugin-discord-linux-amd64.tar.gz` or `-arm64.tar.gz` from the same [GitHub release](https://github.com/GoogleCloudPlatform/scion/releases) as your Scion version, verify it against that release's `SHA256SUMS`, and put the `scion-plugin-discord` binary on your `$PATH` or in `~/.scion/plugins/broker/`. No plugin build is published for macOS: build it from source with the [plugin README](https://github.com/GoogleCloudPlatform/scion/tree/main/extras/scion-discord). Then rejoin this guide at [Step 2](#step-2-configure-the-plugin-from-the-hub-admin-ui).
 :::
 
 At a glance, you will:

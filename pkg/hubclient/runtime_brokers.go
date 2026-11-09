@@ -144,6 +144,17 @@ type AgentLaunchReportInfo struct {
 	// WorkspacePlacement is where the launch's start placed the agent's
 	// workspace (api.WorkspacePlacementExport or WorkspacePlacementLocal).
 	WorkspacePlacement string `json:"workspacePlacement,omitempty"`
+	// The broker's effective configuration of the start (WP1 slice 3
+	// addendum v13 section 5): the template content hash, the harness and
+	// the effective model Start resolved, the harness-config revision, and
+	// the broker build (sent only when the start resolved the
+	// configuration). Older brokers omit them, and the hub then records
+	// nothing.
+	TemplateHash          string `json:"templateHash,omitempty"`
+	Harness               string `json:"harness,omitempty"`
+	Model                 string `json:"model,omitempty"`
+	HarnessConfigRevision string `json:"harnessConfigRevision,omitempty"`
+	BrokerBuild           string `json:"brokerBuild,omitempty"`
 }
 
 // AgentLaunchReportResult is ApplyLaunchReport's answer (design §3.2),
@@ -325,6 +336,13 @@ type BrokerHeartbeat struct {
 	// older process can never overwrite a newer one's snapshot.
 	PresentationEpoch int64 `json:"presentationEpoch,omitempty"`
 	PresentationSeq   int64 `json:"presentationSeq,omitempty"`
+	// ConversionPlanPresentation is a legacy Runtime Broker's publishable
+	// plan for moving to flat Runtime Broker instances
+	// (brokerconvert.Presentation), sent on every heartbeat as a snapshot
+	// of the plan last computed from the broker's settings. The Hub stores
+	// it read-only, only from the broker's own credentials. A flat instance
+	// and an older broker omit it; the Hub then keeps the stored value.
+	ConversionPlanPresentation *api.ConversionPlanPresentation `json:"conversionPlanPresentation,omitempty"`
 }
 
 // StartInFlight identifies one agent start running on a broker.

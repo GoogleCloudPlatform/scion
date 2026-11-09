@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
 	"golang.org/x/sys/unix"
 )
@@ -31,19 +32,21 @@ func isNFSLeafPermissionError(err error) bool {
 	return errors.Is(err, unix.EACCES) || errors.Is(err, unix.EPERM) || errors.Is(err, unix.EROFS)
 }
 
-// ensureNFSLeaf creates rel under hostBase via shareddirs.EnsureLeaf and
-// reports whether the leaf was created now or already carries
-// nfsLeafGroupAccessBits.
-func ensureNFSLeaf(hostBase, rel string) (prepared bool, err error) {
-	prepared, _, err = ensureNFSLeafClaim(hostBase, rel)
+// ensureNFSLeaf creates rel under hostBase via projectfs.EnsureSharedLeafExpecting
+// and reports whether the leaf was created now or already carries
+// nfsLeafGroupAccessBits. expected is the share's configured nfs uid and
+// gid (resolvedLeafOwner): existing upper directories with that shared
+// layout are not warned about. Nothing is chowned.
+func ensureNFSLeaf(hostBase, rel string, expected shareddirs.Owner) (prepared bool, err error) {
+	prepared, _, err = ensureNFSLeafClaim(hostBase, rel, expected)
 	return prepared, err
 }
 
 // ensureNFSLeafClaim is ensureNFSLeaf that also reports whether this call
-// created the leaf directory (shareddirs.EnsureLeaf's own report, not a
-// separate check).
-func ensureNFSLeafClaim(hostBase, rel string) (prepared, created bool, err error) {
-	leafFd, existed, err := shareddirs.EnsureLeaf(hostBase, rel)
+// created the leaf directory (projectfs.EnsureSharedLeafExpecting's own
+// report, not a separate check).
+func ensureNFSLeafClaim(hostBase, rel string, expected shareddirs.Owner) (prepared, created bool, err error) {
+	leafFd, existed, err := projectfs.EnsureSharedLeafExpecting(hostBase, rel, expected)
 	if err != nil {
 		return false, false, err
 	}

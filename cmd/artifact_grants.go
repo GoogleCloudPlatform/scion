@@ -34,6 +34,7 @@ var (
 	artifactGrantsAdd        string
 	artifactGrantsPermission string
 	artifactGrantsRemove     string
+	artifactGrantsNotify     bool
 )
 
 var artifactGrantsCmd = &cobra.Command{
@@ -53,11 +54,16 @@ for a user who can already read it. Agents cannot manage grants.
 Subjects are written user:<id>, agent:<id> or project:<id>. Adding a grant
 for a subject that already has one changes its permission.
 
+With --notify, the hub also tells a user subject about the grant (Ask for
+review) when it raises their access. The grant is made either way; the
+output says whether the user was told.
+
 Examples:
   scion artifact grants scion://artifact/5f1c2d3e-...
   scion artifact grants scion://artifact/5f1c2d3e-... --add user:<id> --permission read
   scion artifact grants scion://artifact/5f1c2d3e-... --add project:<id> --permission write
   scion artifact grants scion://artifact/5f1c2d3e-... --add user:<id> --permission review
+  scion artifact grants scion://artifact/5f1c2d3e-... --add user:<id> --permission review --notify
   scion artifact grants scion://artifact/5f1c2d3e-... --remove <grant-id>`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -71,6 +77,7 @@ Examples:
 			Add:        artifactGrantsAdd,
 			Permission: artifactGrantsPermission,
 			Remove:     artifactGrantsRemove,
+			Notify:     artifactGrantsNotify,
 			JSON:       isJSONOutput(),
 		})
 	},
@@ -80,6 +87,7 @@ func init() {
 	artifactGrantsCmd.Flags().StringVar(&artifactGrantsAdd, "add", "", "Add or change the grant of this subject (user:<id>, agent:<id> or project:<id>)")
 	artifactGrantsCmd.Flags().StringVar(&artifactGrantsPermission, "permission", "", "Permission for --add: read, review (users only), write or admin")
 	artifactGrantsCmd.Flags().StringVar(&artifactGrantsRemove, "remove", "", "Remove the grant with this id")
+	artifactGrantsCmd.Flags().BoolVar(&artifactGrantsNotify, "notify", false, "With --add for a user: tell the user about the grant")
 	artifactCmd.AddCommand(artifactGrantsCmd)
 }
 
@@ -88,6 +96,7 @@ type grantsOptions struct {
 	Add        string
 	Permission string
 	Remove     string
+	Notify     bool
 	JSON       bool
 }
 
@@ -138,23 +147,39 @@ func artifactGrants(ctx context.Context, svc hubclient.ArtifactService, out io.W
 		return errors.New("--add and --remove cannot be used together")
 	case opts.Permission != "" && opts.Add == "":
 		return errors.New("--permission goes with --add")
+	case opts.Notify && opts.Add == "":
+		return errors.New("--notify goes with --add")
 	case opts.Add != "":
 		kind, subject, err := parseGrantSubject(opts.Add)
 		if err != nil {
 			return err
 		}
+		if opts.Notify && !strings.HasPrefix(subject, "user:") {
+			return errors.New("--notify is for a user subject (user:<id>)")
+		}
 		perm := strings.ToLower(strings.TrimSpace(opts.Permission))
 		if !slices.Contains(grantPermissions, perm) {
 			return fmt.Errorf("--permission must be one of %s", strings.Join(grantPermissions, ", "))
 		}
-		g, err := svc.PutGrant(ctx, id, &hubclient.ArtifactGrantRequest{SubjectKind: kind, SubjectRef: subject, Permission: perm})
+		res, err := svc.PutGrant(ctx, id, &hubclient.ArtifactGrantRequest{SubjectKind: kind, SubjectRef: subject, Permission: perm, Notify: opts.Notify})
 		if err != nil {
 			return fmt.Errorf("add grant: %w%s", err, grantsErrorHint(err))
 		}
+		g := &res.Grant
 		if opts.JSON {
+			if opts.Notify {
+				return writeJSONTo(out, res)
+			}
 			return writeJSONTo(out, g)
 		}
 		_, _ = fmt.Fprintf(out, "Granted %s %s on %s (grant %s)\n", safeText(grantSubjectText(*g)), safeText(g.Permission), artifacts.FormatRef(id, 0), safeText(g.ID))
+		if opts.Notify {
+			if res.Notified {
+				_, _ = fmt.Fprintln(out, "notified")
+			} else {
+				_, _ = fmt.Fprintf(out, "not notified (%s)\n", safeText(res.NotifySkipped))
+			}
+		}
 		return nil
 	case opts.Remove != "":
 		if err := svc.DeleteGrant(ctx, id, opts.Remove); err != nil {

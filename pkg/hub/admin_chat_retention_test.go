@@ -81,7 +81,7 @@ func TestAdminChatRetention_AdminRoundTrip(t *testing.T) {
 
 	rec := doRequestAsUser(t, srv, admin, http.MethodGet, chatRetentionAdminPath, nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	assert.JSONEq(t, `{"enabled":false,"messages_retention_days":null,"deleted_conversation_grace_days":30,"sweep":{"chunk_size":200,"pause_ms":500,"tick_budget_seconds":30,"tick_interval_minutes":10},"last_applied_cutoff":null,"revision":0}`, rec.Body.String())
+	assert.JSONEq(t, `{"enabled":false,"messages_retention_days":null,"deleted_conversation_grace_days":30,"sweep":{"chunk_size":200,"pause_ms":500,"tick_budget_seconds":30,"tick_interval_minutes":10},"last_applied_cutoff":null,"revision":0,"runs":[],"last_preview":null,"purged_since_preview":0}`, rec.Body.String())
 
 	got := decodeChatRetention(t, doRequestAsUser(t, srv, admin, http.MethodPut, chatRetentionAdminPath, map[string]any{
 		"enabled": true, "messages_retention_days": 30, "sweep": map[string]any{"chunk_size": 100}, "expected_revision": 0,

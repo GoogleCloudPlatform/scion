@@ -220,13 +220,13 @@ func labelledObject(labels map[string]string) api.AgentInfo {
 // unresolved; a terminal run is never revived.
 func TestOwnershipStore_Reconstruct(t *testing.T) {
 	s := NewOwnershipStore(t.TempDir(), "broker-a")
-	require.NoError(t, s.Reconstruct(labelledObject(nil)))
+	require.NoError(t, s.Reconstruct(labelledObject(nil), nil))
 	rec, ok, err := s.Get("proj-1", "agent-1")
 	require.NoError(t, err)
 	require.True(t, ok)
 	assert.Equal(t, OwnershipStateCreated, rec.Run("run-1").State)
 	assert.True(t, rec.OwnsUID("cid-1"))
-	require.NoError(t, s.Reconstruct(labelledObject(nil)), "idempotent")
+	require.NoError(t, s.Reconstruct(labelledObject(nil), nil), "idempotent")
 
 	for name, labels := range map[string]map[string]string{
 		"owner label alone": {"scion.project_id": "", "agent_id": "", "scion.name": "", api.LabelRunID: ""},
@@ -236,14 +236,14 @@ func TestOwnershipStore_Reconstruct(t *testing.T) {
 		"slug contradicts":  {"scion.name": "other"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			assert.Error(t, s.Reconstruct(labelledObject(labels)))
+			assert.Error(t, s.Reconstruct(labelledObject(labels), nil))
 		})
 	}
 
 	require.NoError(t, s.SetRunState("proj-1", "agent-1", "run-1", OwnershipStateDeleted))
 	o := labelledObject(nil)
 	o.ContainerID = "cid-new"
-	assert.Error(t, s.Reconstruct(o), "a terminal run is never revived")
+	assert.Error(t, s.Reconstruct(o, nil), "a terminal run is never revived")
 }
 
 // TestOwnershipStore_ConflictingKeysRefused: a key another configured
@@ -432,21 +432,21 @@ func TestOwnershipStore_ReconstructPodAndNewUID(t *testing.T) {
 	labels := map[string]string{api.LabelRuntimeBrokerID: "broker-a", "scion.project_id": "proj-1", "agent_id": "agent-1",
 		"scion.name": "worker", api.LabelRunID: "run-1"}
 	pod := api.AgentInfo{Name: "worker", ContainerID: "proj-1--worker", Runtime: "kubernetes", Labels: labels}
-	require.NoError(t, s.Reconstruct(pod))
+	require.NoError(t, s.Reconstruct(pod, nil))
 	rec, ok, err := s.Get("proj-1", "agent-1")
 	require.NoError(t, err)
 	require.True(t, ok)
 	require.NotNil(t, rec.Run("run-1"))
 	assert.Equal(t, OwnershipStateCreated, rec.Run("run-1").State)
 	assert.Empty(t, rec.Run("run-1").Resources, "no handle from a pod name")
-	require.NoError(t, s.Reconstruct(pod), "repeating is a no-op")
+	require.NoError(t, s.Reconstruct(pod, nil), "repeating is a no-op")
 
 	labels2 := map[string]string{api.LabelRuntimeBrokerID: "broker-a", "scion.project_id": "proj-1", "agent_id": "agent-2",
 		"scion.name": "helper", api.LabelRunID: "run-1"}
-	require.NoError(t, s.Reconstruct(api.AgentInfo{Name: "helper", ContainerID: "cid-old", Labels: labels2}))
-	require.NoError(t, s.Reconstruct(api.AgentInfo{Name: "helper", ContainerID: "cid-new", Labels: labels2}))
+	require.NoError(t, s.Reconstruct(api.AgentInfo{Name: "helper", ContainerID: "cid-first", Labels: labels2}, nil))
+	require.NoError(t, s.Reconstruct(api.AgentInfo{Name: "helper", ContainerID: "cid-new", Labels: labels2}, nil))
 	rec, _, _ = s.Get("proj-1", "agent-2")
-	assert.True(t, rec.OwnsUID("cid-old"), "the old object is kept until its absence is established")
+	assert.True(t, rec.OwnsUID("cid-first"), "the first object is kept until its absence is confirmed")
 	assert.True(t, rec.OwnsUID("cid-new"), "the new object is recorded separately")
 	assert.Len(t, rec.Run("run-1").Resources, 2)
 }
@@ -461,7 +461,7 @@ func TestOwnershipStore_ReconstructPodWithUID(t *testing.T) {
 		Kubernetes: &api.AgentK8sMetadata{Namespace: "agents", PodName: "proj-1--worker", UID: "pod-uid-1"},
 		Labels: map[string]string{api.LabelRuntimeBrokerID: "broker-a", "scion.project_id": "proj-1", "agent_id": "agent-1",
 			"scion.name": "worker", api.LabelRunID: "run-1"}}
-	require.NoError(t, s.Reconstruct(pod))
+	require.NoError(t, s.Reconstruct(pod, nil))
 	rec, _, err := s.Get("proj-1", "agent-1")
 	require.NoError(t, err)
 	res := rec.Run("run-1").Resources
@@ -619,7 +619,7 @@ func TestOwnershipStore_ReconstructKnowsObjectsOfAnUnfinishedDelete(t *testing.T
 			s := NewOwnershipStore(t.TempDir(), "rb-a")
 			require.NoError(t, s.BeginRun("p", "a", "worker", "run-1"))
 			tc.set(s)
-			err := s.Reconstruct(obj)
+			err := s.Reconstruct(obj, nil)
 			if tc.wantErr {
 				require.Error(t, err)
 				return

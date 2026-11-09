@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"errors"
 	"flag"
+	"go/ast"
 	"go/parser"
 	"go/token"
 	"io/fs"
@@ -25,6 +26,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -765,6 +767,464 @@ func TestOutsideRefs(t *testing.T) {
 	}
 }
 
+// outRefTree is the tree of TestRewriteOutRefs: pkg/hub/authorize.go moves
+// to pkg/hub/authorize, exporting authorizeAgentCreate (staying code calls
+// it) and the method gate.check, while the package func check stays
+// unexported. Outside references cover each form -rewrite-outrefs rewrites
+// and each it leaves report-only.
+func outRefTree() map[string]string {
+	return map[string]string{
+		"go.mod": "module example.com/fx\n\ngo 1.26\n",
+		"pkg/hub/authorize.go": "package hub\n\n" +
+			"func authorizeAgentCreate() bool { return authorizeHelper() && check() }\n\n" +
+			"func authorizeHelper() bool { return true }\n\n" +
+			"func check() bool { return true }\n\n" +
+			"type gate struct{}\n\n" +
+			"func (gate) check() bool { return true }\n\n" +
+			"// extraCheckFor is only text here: authorize.go does not use extraCheck.\n",
+		"pkg/hub/stay.go": "package hub\n\n" +
+			"func create() bool { return authorizeAgentCreate() }\n\n" +
+			"func useGate() bool { var g gate; return g.check() }\n\n" +
+			"var authorizeFile = \"pkg/hub/authorize.go\"\n\n" + // line 7: staying source file
+			"func extra() bool { return extraCheck() }\n",
+		"pkg/hub/authorize_extra.go": "package hub\n\nfunc extraCheck() bool { return true }\n",
+		// A moved file asset (not Go).
+		"pkg/hub/authorize_rules.json": "{}\n",
+		// An outside Go file whose alignment depends on the literal's length.
+		"pkg/other/table.go": "package other\n\nvar (\n\ta  = \"pkg/hub/authorize.go\" // moved\n\tbb = \"x\"                    // kept\n)\n",
+		// A moved file outside the type-checked unit (an external test).
+		"pkg/hub/authorize_ext_test.go": "package hub_test\n\n// extraCheckFor is only text here.\nfunc neverFn() bool { return true }\n",
+		// The permissions registry shape: "path" and "path:symbol".
+		"pkg/hub/permissions/registry.go": "package permissions\n\n" +
+			"var Enforcement = []string{\n" +
+			"\t\"pkg/hub/authorize.go:authorizeAgentCreate\",\n" + // line 4: renamed symbol
+			"\t\"pkg/hub/authorize.go:authorizeHelper\",\n" + // line 5: symbol kept
+			"\t\"pkg/hub/authorize.go\",\n" + // line 6
+			"\t`pkg/hub/authorize.go:authorizeAgentCreate`,\n" + // line 7: raw literal
+			"\t\"pkg/hub/authorize.go:check\",\n" + // line 8: ambiguous (method renamed, func kept)
+			"\t\"pkg/hub/authorize.go:extraCheck\",\n" + // line 9: renamed only in authorize_extra.go
+			"\t\"pkg/hub/authorize_ext_test.go:extraCheck\",\n" + // line 10: named file not type-checked
+			"\t\"pkg/hub/authorize_ext_test.go:neverFn\",\n" + // line 11: not type-checked, renamed nowhere: kept
+			"\t\"pkg/hub/authorize.go:extraCheckFor\",\n" + // line 12: not used in the file, renamed nowhere: kept
+			"}\n",
+		// The authzop catalog shape: File and Scope are repo paths; Function
+		// names a function of File, rewritten only when the move renames it there.
+		"pkg/hub/authzop/catalog.go": "package authzop\n\n" +
+			"type MutationClassification struct{ File, Function, Symbol, Scope string }\n\n" +
+			"const otherName = \"authorizeAgentCreate\"\n\n" +
+			"var MutationClassifications = []MutationClassification{\n" +
+			"\t{File: \"pkg/hub/authorize.go\", Function: \"authorizeHelper\", Symbol: \"GetSecretValue\", Scope: \"pkg/hub/authorize.go\"},\n" + // line 8: not renamed
+			"\t{File: \"pkg/hub/authorize.go\", Function: `authorizeAgentCreate`, Symbol: \"CreateX\"},\n" + // line 9: renamed in File (raw literal)
+			"\t{File: \"pkg/hub/authorize.go\", Function: otherName, Symbol: \"CreateX\"},\n" + // line 10: not a literal
+			"\t{File: \"pkg/hub/authorize.go\", Function: \"extraCheck\", Symbol: \"CreateX\"},\n" + // line 11: renamed in another file
+			"\t{File: \"pkg/hub/authorize.go\", Function: \"check\", Symbol: \"CreateX\"},\n" + // line 12: ambiguous
+			"\t{File: \"pkg/hub/authorize_ext_test.go\", Function: \"neverFn\", Symbol: \"CreateX\"},\n" + // line 13: not type-checked
+			"\t{File: \"pkg/hub/authorize_rules.json\", Function: \"authorizeAgentCreate\", Symbol: \"CreateX\"},\n" + // line 14: File is a moved asset
+			"}\n",
+		// Negatives in Go: base name, path elements, a longer literal, a
+		// second colon, a ref-ok'd literal.
+		"pkg/other/other.go": "package other\n\nimport \"path/filepath\"\n\n" +
+			"var base = \"authorize.go\"\n" + // line 5
+			"var elems = filepath.Join(\"pkg\", \"hub\", \"authorize.go\")\n" + // line 6
+			"var longer = \"../../pkg/hub/authorize.go\"\n" + // line 7
+			"var census = \"pkg/hub/authorize.go:authorizeAgentCreate:GetSecretValue\"\n" + // line 8
+			"// pkgmove:ref-ok the history table keeps the old path.\n" +
+			"var history = \"pkg/hub/authorize.go\"\n", // line 10
+		// hack/**/*.txt: the baseline shapes, a ref-ok line and negatives.
+		"hack/hub-store-reassign-baseline.txt": "# Baseline for hack/check.sh.\n" +
+			"#   <file> | <count>\n" +
+			"# see pkg/hub/authorize.go\n" + // line 3: not at line start
+			"pkg/hub/authorize.go | 2\n" + // line 4
+			"pkg/hub/zz.go | 1\n",
+		"hack/winsec-unprotected.txt": "pkg/hub/authorize.go unprotected\r\n" + // line 1: CRLF kept
+			"pkg/hub/authorize.go:authorizeAgentCreate allowed\n" + // line 2
+			"pkg/hub/authorize.go\n" + // line 3: path alone
+			"pkg/hub/authorize.go\r\n", // line 4: path alone, CRLF
+		"hack/sub/allow.txt": "# pkgmove:ref-ok kept on purpose for the self-test.\n" +
+			"pkg/hub/authorize.go | 1\n" + // line 2: accepted
+			"pkg/hub/authorize.go:12 x\n" + // line 3: not an identifier
+			"pkg/hub/authorize.go|3\n" + // line 4: no blank after the path
+			"# pkgmove:ref-ok\n" + // line 5: a marker without a reason
+			"pkg/hub/authorize.go pkg/hub/authorize.go\n", // line 6: named twice
+		// A function column: rewritten only when the move keeps that name.
+		"hack/store-delete-callers-allowlist.txt": "pkg/hub/authorize.go | authorizeAgentCreate | 1\n" + // line 1: renamed, HIGH
+			"pkg/hub/authorize.go | authorizeHelper | 1\n", // line 2: kept, rewritten
+		// Text under testdata is out of scope (golden files cannot take a marker).
+		"hack/tool/testdata/case/want/report.txt": "pkg/hub/authorize.go | 1\n",
+		// Shell lines stay report-only, even at line start.
+		"hack/check.sh": "pkg/hub/authorize.go | 9\n",
+	}
+}
+
+// outRefFiles are the files TestRewriteOutRefs moves.
+var outRefFiles = []string{"authorize.go", "authorize_extra.go", "authorize_ext_test.go", "authorize_rules.json"}
+
+// enforcementOK mirrors assertEnforcementReferenceExists in
+// pkg/hub/permission_registry_test.go: the file part of each entry must
+// exist (relative to the module root) and contain the symbol part.
+func enforcementOK(t *testing.T, root string) []string {
+	t.Helper()
+	src, err := os.ReadFile(filepath.Join(root, "pkg/hub/permissions/registry.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := parser.ParseFile(token.NewFileSet(), "registry.go", src, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var bad []string
+	ast.Inspect(f, func(n ast.Node) bool {
+		bl, ok := n.(*ast.BasicLit)
+		if !ok || bl.Kind != token.STRING {
+			return true
+		}
+		v, _ := strconv.Unquote(bl.Value)
+		file, sym, _ := strings.Cut(v, ":")
+		content, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(file)))
+		if err != nil || !strings.Contains(string(content), sym) {
+			bad = append(bad, v)
+		}
+		return true
+	})
+	return bad
+}
+
+// TestRewriteOutRefs checks -rewrite-outrefs: the exact repo-path forms are
+// rewritten to the new path (and a renamed symbol to its new name) in Go
+// string literals and at the start of hack/**/*.txt lines; base names, path
+// elements, longer literals, ref-ok'd references, shell lines and ambiguous
+// symbols stay report-only. The registry check passes before and after.
+func TestRewriteOutRefs(t *testing.T) {
+	requireGo(t)
+	dir := t.TempDir()
+	writeTree(t, dir, outRefTree())
+	cfg := func(dryRun, strict bool, out *bytes.Buffer) *Config {
+		return &Config{
+			SrcDir: filepath.Join(dir, "pkg", "hub"), DstDir: filepath.Join(dir, "pkg", "hub", "authorize"),
+			Files: outRefFiles, NoGit: true, DryRun: dryRun, Strict: strict, Typecheck: true,
+			RewriteOutRefs: true, Stdout: out,
+		}
+	}
+	if bad := enforcementOK(t, dir); len(bad) != 0 {
+		t.Fatalf("registry check fails before the move: %v", bad)
+	}
+	before := readTree(t, dir)
+
+	// Dry run: the plan lists the rewrites, nothing changes.
+	var buf bytes.Buffer
+	if err := run(cfg(true, false, &buf)); err != nil {
+		t.Fatalf("dry run: %v\n%s", err, buf.String())
+	}
+	dry := buf.String()
+	compareTrees(t, readTree(t, dir), before)
+
+	const newPath = "pkg/hub/authorize/authorize.go"
+	rewritten := []string{
+		`pkg/hub/stay.go:7: "pkg/hub/authorize.go" -> "` + newPath + `"`,
+		`pkg/hub/permissions/registry.go:4: "pkg/hub/authorize.go:authorizeAgentCreate" -> "` + newPath + `:AuthorizeAgentCreate"`,
+		`pkg/hub/permissions/registry.go:5: "pkg/hub/authorize.go:authorizeHelper" -> "` + newPath + `:authorizeHelper"`,
+		`pkg/hub/permissions/registry.go:6: "pkg/hub/authorize.go" -> "` + newPath + `"`,
+		"pkg/hub/permissions/registry.go:7: `pkg/hub/authorize.go:authorizeAgentCreate` -> `" + newPath + ":AuthorizeAgentCreate`",
+		`pkg/hub/authzop/catalog.go:8: "pkg/hub/authorize.go" -> "` + newPath + `"`,
+		`pkg/hub/authzop/catalog.go:9: "pkg/hub/authorize.go" -> "` + newPath + `"`,
+		"pkg/hub/authzop/catalog.go:9: `authorizeAgentCreate` -> `AuthorizeAgentCreate`",
+		`pkg/hub/authzop/catalog.go:10: "pkg/hub/authorize.go" -> "` + newPath + `"`,
+		`pkg/hub/authzop/catalog.go:11: "pkg/hub/authorize.go" -> "` + newPath + `"`,
+		`pkg/hub/authzop/catalog.go:12: "pkg/hub/authorize.go" -> "` + newPath + `"`,
+		`hack/hub-store-reassign-baseline.txt:4: "pkg/hub/authorize.go | 2" -> "` + newPath + ` | 2"`,
+		`hack/winsec-unprotected.txt:1: "pkg/hub/authorize.go unprotected" -> "` + newPath + ` unprotected"`,
+		`hack/winsec-unprotected.txt:2: "pkg/hub/authorize.go:authorizeAgentCreate allowed" -> "` + newPath + `:AuthorizeAgentCreate allowed"`,
+		`hack/winsec-unprotected.txt:3: "pkg/hub/authorize.go" -> "` + newPath + `"`,
+		`hack/winsec-unprotected.txt:4: "pkg/hub/authorize.go" -> "` + newPath + `"`,
+		`hack/store-delete-callers-allowlist.txt:2: "pkg/hub/authorize.go | authorizeHelper | 1" -> "` + newPath + ` | authorizeHelper | 1"`,
+		`pkg/hub/authzop/catalog.go:13: "pkg/hub/authorize_ext_test.go" -> "pkg/hub/authorize/authorize_ext_test.go"`,
+		`pkg/hub/authzop/catalog.go:14: "pkg/hub/authorize_rules.json" -> "pkg/hub/authorize/authorize_rules.json"`,
+		`pkg/hub/permissions/registry.go:11: "pkg/hub/authorize_ext_test.go:neverFn" -> "pkg/hub/authorize/authorize_ext_test.go:neverFn"`,
+		`pkg/hub/permissions/registry.go:12: "pkg/hub/authorize.go:extraCheckFor" -> "` + newPath + `:extraCheckFor"`,
+		`pkg/other/table.go:4: "pkg/hub/authorize.go" -> "` + newPath + `"`,
+	}
+	// The first catalog entry has two path literals, so 23 rewrites in all.
+	if !strings.Contains(dry, "\nOutside references to moved files rewritten (-rewrite-outrefs) (23):\n") {
+		t.Errorf("want 23 rewrites in the plan:\n%s", dry)
+	}
+	for _, w := range rewritten {
+		if !strings.Contains(dry, "  "+w+"\n") {
+			t.Errorf("plan is missing rewrite %q:\n%s", w, dry)
+		}
+	}
+	high := []string{
+		`pkg/hub/permissions/registry.go:8: Go string literal "pkg/hub/authorize.go:check" names moved pkg/hub/authorize.go by its repo path: after the move it no longer matches the file - update it to ` + newPath + ", or accept it with a pkgmove:ref-ok <reason> comment on the line above (not rewritten: check is ambiguous after the move, it becomes Check or check)",
+		`pkg/other/other.go:5: Go string literal "authorize.go" names moved pkg/hub/authorize.go by its base name`,
+		`pkg/other/other.go:6: Go string literals "pkg", "hub", "authorize.go" names moved pkg/hub/authorize.go by its path elements`,
+		`pkg/other/other.go:7: Go string literal "../../pkg/hub/authorize.go" names moved pkg/hub/authorize.go by its repo path`,
+		`pkg/other/other.go:8: Go string literal "pkg/hub/authorize.go:authorizeAgentCreate:GetSecretValue" names moved pkg/hub/authorize.go by its repo path`,
+		`hack/hub-store-reassign-baseline.txt:3: line "# see pkg/hub/authorize.go" names moved pkg/hub/authorize.go by its repo path`,
+		`hack/sub/allow.txt:3: line "pkg/hub/authorize.go:12 x" names moved`,
+		`hack/sub/allow.txt:4: line "pkg/hub/authorize.go|3" names moved`,
+		`hack/sub/allow.txt:6: line "pkg/hub/authorize.go pkg/hub/authorize.go" names moved pkg/hub/authorize.go by its repo path: after the move it no longer matches the file - update it to ` + newPath + ", or accept it with a pkgmove:ref-ok <reason> comment on the line above (not rewritten: the line names the path more than once) (the pkgmove:ref-ok marker at hack/sub/allow.txt:5 has no reason, so it accepts nothing)\n",
+		`hack/check.sh:1: line "pkg/hub/authorize.go | 9" names moved`,
+		`pkg/hub/permissions/registry.go:9: Go string literal "pkg/hub/authorize.go:extraCheck" names moved pkg/hub/authorize.go by its repo path: after the move it no longer matches the file - update it to ` + newPath + ", or accept it with a pkgmove:ref-ok <reason> comment on the line above (not rewritten: extraCheck is renamed in pkg/hub/authorize_extra.go, not in pkg/hub/authorize.go)",
+		`pkg/hub/permissions/registry.go:10: Go string literal "pkg/hub/authorize_ext_test.go:extraCheck" names moved pkg/hub/authorize_ext_test.go by its repo path: after the move it no longer matches the file - update it to pkg/hub/authorize/authorize_ext_test.go, or accept it with a pkgmove:ref-ok <reason> comment on the line above (not rewritten: pkg/hub/authorize_ext_test.go was not type-checked, and the move renames extraCheck in pkg/hub/authorize_extra.go)`,
+		`hack/store-delete-callers-allowlist.txt:1: line "pkg/hub/authorize.go | authorizeAgentCreate | 1" names moved pkg/hub/authorize.go by its repo path: after the move it no longer matches the file - update it to ` + newPath + ", or accept it with a pkgmove:ref-ok <reason> comment on the line above (not rewritten: the line also names authorizeAgentCreate, which the move renames to AuthorizeAgentCreate)",
+	}
+	for _, w := range high {
+		if !strings.Contains(dry, w) {
+			t.Errorf("missing HIGH %q:\n%s", w, dry)
+		}
+	}
+	if got := strings.Count(dry, "after the move it no longer matches the file"); got != len(high) {
+		t.Errorf("got %d HIGH outside references, want %d:\n%s", got, len(high), dry)
+	}
+	for _, w := range []string{
+		`pkg/other/other.go:10: Go string literal "pkg/hub/authorize.go" names moved pkg/hub/authorize.go by its repo path; ref-ok: "the history table keeps the old path."`,
+		`hack/sub/allow.txt:2: line "pkg/hub/authorize.go | 1" names moved pkg/hub/authorize.go by its repo path; ref-ok: "kept on purpose for the self-test."`,
+		"\n== INFO: outside reference to a moved file rewritten (-rewrite-outrefs) ==\n",
+		`pkg/hub/permissions/registry.go:4: Go string literal "pkg/hub/authorize.go:authorizeAgentCreate" names moved pkg/hub/authorize.go by its repo path; rewritten to "` + newPath + `:AuthorizeAgentCreate"`,
+	} {
+		if !strings.Contains(dry, w) {
+			t.Errorf("missing INFO %q:\n%s", w, dry)
+		}
+	}
+	// Identical findings print once: the first catalog entry's File and
+	// Scope literals share one INFO line.
+	if got := strings.Count(dry, "; rewritten to "); got != 22 {
+		t.Errorf("got %d rewritten INFO lines, want 22:\n%s", got, dry)
+	}
+	if strings.Contains(dry, "testdata/case/want/report.txt") {
+		t.Errorf("a .txt file under testdata is scanned:\n%s", dry)
+	}
+	// Function fields that may go stale and are not rewritten: HIGH.
+	const fnCat = "Function field next to a rewritten File field not rewritten (-rewrite-outrefs)"
+	fnHigh := []string{
+		`pkg/hub/authzop/catalog.go:10: Function otherName of the entry whose File names moved pkg/hub/authorize.go: the value is not a string literal; check it by hand`,
+		`pkg/hub/authzop/catalog.go:11: Function "extraCheck" of the entry whose File names moved pkg/hub/authorize.go: extraCheck is not declared in pkg/hub/authorize.go; the move renames it in pkg/hub/authorize_extra.go; check it by hand`,
+		`pkg/hub/authzop/catalog.go:12: Function "check" of the entry whose File names moved pkg/hub/authorize.go: check is ambiguous after the move, it becomes Check or check; check it by hand`,
+		`pkg/hub/authzop/catalog.go:13: Function "neverFn" of the entry whose File names moved pkg/hub/authorize_ext_test.go: neverFn in pkg/hub/authorize_ext_test.go was not type-checked (build tags or an external test), so its rename is unknown; check it by hand`,
+	}
+	for _, w := range append(fnHigh, "\n== HIGH: "+fnCat+" ==\n", "pkg/hub/authzop/catalog.go:9: Function `authorizeAgentCreate` of the entry whose File names moved pkg/hub/authorize.go; rewritten to `AuthorizeAgentCreate` (renamed by the move)") {
+		if !strings.Contains(dry, w) {
+			t.Errorf("missing %q:\n%s", w, dry)
+		}
+	}
+	if got := strings.Count(dry, "check it by hand"); got != len(fnHigh) {
+		t.Errorf("got %d Function HIGH lines, want %d:\n%s", got, len(fnHigh), dry)
+	}
+	if strings.Contains(dry, `Function "authorizeHelper"`) {
+		t.Errorf("a Function the move does not rename is reported:\n%s", dry)
+	}
+	// Next to a File naming a moved asset (no Go declarations), Function is
+	// neither rewritten nor reported.
+	if strings.Contains(dry, "catalog.go:14: Function") {
+		t.Errorf("the Function next to a moved asset is reported or rewritten:\n%s", dry)
+	}
+
+	// Under -strict the rewritten references are no errors; the rest are.
+	buf.Reset()
+	if err := run(cfg(true, true, &buf)); !errors.Is(err, errPlan) {
+		t.Fatalf("want errPlan under -strict, got %v\n%s", err, buf.String())
+	}
+	if got := strings.Count(buf.String(), ": -strict: outside reference to a moved file: "); got != len(high) {
+		t.Errorf("got %d -strict outside-reference errors, want %d:\n%s", got, len(high), buf.String())
+	}
+	if got := strings.Count(buf.String(), ": -strict: "+fnCat+": "); got != len(fnHigh) {
+		t.Errorf("got %d -strict Function errors, want %d:\n%s", got, len(fnHigh), buf.String())
+	}
+
+	// The real run: the plan equals the dry run's, and the files change as listed.
+	buf.Reset()
+	if err := run(cfg(false, false, &buf)); err != nil {
+		t.Fatalf("run: %v\n%s", err, buf.String())
+	}
+	if gen := buf.String(); !strings.HasPrefix(gen, dry) {
+		t.Errorf("the run's plan differs from the dry run's:\n--- dry run\n%s\n--- run\n%s", dry, gen)
+	}
+	got := readTree(t, dir)
+	want := map[string]string{
+		// The move renames g.check (exported method); -rewrite-outrefs the literal.
+		"pkg/hub/stay.go": strings.Replace(strings.Replace(before["pkg/hub/stay.go"], `"pkg/hub/authorize.go"`, `"`+newPath+`"`, 1), "g.check()", "g.Check()", 1),
+		"pkg/hub/permissions/registry.go": "package permissions\n\n" +
+			"var Enforcement = []string{\n" +
+			"\t\"" + newPath + ":AuthorizeAgentCreate\",\n" +
+			"\t\"" + newPath + ":authorizeHelper\",\n" +
+			"\t\"" + newPath + "\",\n" +
+			"\t`" + newPath + ":AuthorizeAgentCreate`,\n" +
+			"\t\"pkg/hub/authorize.go:check\",\n" +
+			"\t\"pkg/hub/authorize.go:extraCheck\",\n" +
+			"\t\"pkg/hub/authorize_ext_test.go:extraCheck\",\n" +
+			"\t\"pkg/hub/authorize/authorize_ext_test.go:neverFn\",\n" +
+			"\t\"" + newPath + ":extraCheckFor\",\n" +
+			"}\n",
+		"pkg/hub/authzop/catalog.go": strings.NewReplacer(`"pkg/hub/authorize.go"`, `"`+newPath+`"`, `"pkg/hub/authorize_ext_test.go"`, `"pkg/hub/authorize/authorize_ext_test.go"`, `"pkg/hub/authorize_rules.json"`, `"pkg/hub/authorize/authorize_rules.json"`,
+			"Function: `authorizeAgentCreate`", "Function: `AuthorizeAgentCreate`").Replace(before["pkg/hub/authzop/catalog.go"]),
+		"hack/hub-store-reassign-baseline.txt": strings.Replace(before["hack/hub-store-reassign-baseline.txt"], "pkg/hub/authorize.go | 2", newPath+" | 2", 1),
+		"hack/winsec-unprotected.txt": newPath + " unprotected\r\n" +
+			newPath + ":AuthorizeAgentCreate allowed\n" +
+			newPath + "\n" +
+			newPath + "\r\n",
+		"hack/store-delete-callers-allowlist.txt": "pkg/hub/authorize.go | authorizeAgentCreate | 1\n" + newPath + " | authorizeHelper | 1\n",
+		// gofmt realigns the comments to the longer literal.
+		"pkg/other/table.go": "package other\n\nvar (\n\ta  = \"" + newPath + "\" // moved\n\tbb = \"x\"                              // kept\n)\n",
+	}
+	for name, w := range want {
+		if got[name] != w {
+			t.Errorf("%s:\n got %q\nwant %q", name, got[name], w)
+		}
+	}
+	for _, name := range []string{"pkg/other/other.go", "hack/sub/allow.txt", "hack/check.sh", "hack/tool/testdata/case/want/report.txt", "go.mod"} {
+		if got[name] != before[name] {
+			t.Errorf("%s changed:\n got %q\nwant %q", name, got[name], before[name])
+		}
+	}
+	if !strings.Contains(got["pkg/hub/authorize/authorize.go"], "func AuthorizeAgentCreate() bool") {
+		t.Fatalf("authorizeAgentCreate was not exported:\n%s", got["pkg/hub/authorize/authorize.go"])
+	}
+	// The registry check passes as before, except the three entries left as
+	// HIGH findings for the reviewer (ambiguous, renamed in another file,
+	// named file not type-checked).
+	if bad := enforcementOK(t, dir); strings.Join(bad, ",") != "pkg/hub/authorize.go:check,pkg/hub/authorize.go:extraCheck,pkg/hub/authorize_ext_test.go:extraCheck" {
+		t.Errorf("registry check after the move: failing entries %v, want only the three HIGH ones", bad)
+	}
+}
+
+// TestRewriteOutRefsOffByDefault proves the flag is opt-in: without it the
+// run rewrites no outside reference (every outside file keeps its bytes),
+// prints no rewrite section, and reports the references (the hack/**/*.txt
+// lines included) as before.
+func TestRewriteOutRefsOffByDefault(t *testing.T) {
+	requireGo(t)
+	dir := t.TempDir()
+	writeTree(t, dir, outRefTree())
+	before := readTree(t, dir)
+	var buf bytes.Buffer
+	err := run(&Config{
+		SrcDir: filepath.Join(dir, "pkg", "hub"), DstDir: filepath.Join(dir, "pkg", "hub", "authorize"),
+		Files: outRefFiles, NoGit: true, Typecheck: true, Stdout: &buf,
+	})
+	if err != nil {
+		t.Fatalf("run: %v\n%s", err, buf.String())
+	}
+	out := buf.String()
+	got := readTree(t, dir)
+	for name, content := range before {
+		if strings.HasPrefix(name, "pkg/hub/") && !strings.HasPrefix(name, "pkg/hub/permissions/") && !strings.HasPrefix(name, "pkg/hub/authzop/") {
+			continue // the source package itself is rewritten by the move
+		}
+		if got[name] != content {
+			t.Errorf("%s changed without -rewrite-outrefs:\n got %q\nwant %q", name, got[name], content)
+		}
+	}
+	if !strings.Contains(got["pkg/hub/stay.go"], `var authorizeFile = "pkg/hub/authorize.go"`) {
+		t.Errorf("staying literal rewritten without -rewrite-outrefs:\n%s", got["pkg/hub/stay.go"])
+	}
+	for _, w := range []string{"-rewrite-outrefs", "rewritten to", "not rewritten", "Function"} {
+		if strings.Contains(out, w) {
+			t.Errorf("unexpected %q without -rewrite-outrefs:\n%s", w, out)
+		}
+	}
+	// 13 HIGH in the dry-run list, plus the 21 lines of rewritable path
+	// references (the first catalog entry's two literals print once).
+	if got := strings.Count(out, "after the move it no longer matches the file"); got != 34 {
+		t.Errorf("got %d HIGH outside references, want 34:\n%s", got, out)
+	}
+	for _, w := range []string{
+		`hack/hub-store-reassign-baseline.txt:4: line "pkg/hub/authorize.go | 2" names moved pkg/hub/authorize.go by its repo path: after the move it no longer matches the file - update it to pkg/hub/authorize/authorize.go, or accept it with a pkgmove:ref-ok <reason> comment on the line above` + "\n",
+		`hack/sub/allow.txt:2: line "pkg/hub/authorize.go | 1" names moved pkg/hub/authorize.go by its repo path; ref-ok: "kept on purpose for the self-test."`,
+	} {
+		if !strings.Contains(out, w) {
+			t.Errorf("missing %q:\n%s", w, out)
+		}
+	}
+	// The registry entries now point at a missing file: -rewrite-outrefs is
+	// what keeps the check passing.
+	if bad := enforcementOK(t, dir); len(bad) != 9 {
+		t.Errorf("registry check after a move without -rewrite-outrefs: %d failing entries %v, want 9", len(bad), bad)
+	}
+
+	// -rewrite-outrefs does not combine with -rewrite-aliases.
+	if err := run(&Config{SrcDir: filepath.Join(dir, "pkg", "hub"), RewriteAliases: true, RewriteOutRefs: true, Stdout: &buf}); err == nil || !strings.Contains(err.Error(), "-rewrite-outrefs does not apply to -rewrite-aliases") {
+		t.Errorf("-rewrite-outrefs with -rewrite-aliases: got %v", err)
+	}
+}
+
+// TestRewriteOutRefsRollback checks that a failed move restores the outside
+// files -rewrite-outrefs edited (and, with git, unstages them), and that a
+// staged change to an outside file it would edit stops the move before
+// anything is touched.
+func TestRewriteOutRefsRollback(t *testing.T) {
+	requireGo(t)
+	cfg := func(dir string, git bool, out *bytes.Buffer) *Config {
+		return &Config{
+			SrcDir: filepath.Join(dir, "pkg", "hub"), DstDir: filepath.Join(dir, "pkg", "hub", "authorize"),
+			Files: outRefFiles, NoGit: !git, Typecheck: true, RewriteOutRefs: true, Stdout: out,
+		}
+	}
+	for _, git := range []bool{false, true} {
+		name := "no-git"
+		if git {
+			name = "git"
+		}
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeTree(t, dir, outRefTree())
+			if git {
+				if _, err := exec.LookPath("git"); err != nil {
+					t.Skip("git not in PATH")
+				}
+				gitRun(t, dir, "init", "-q")
+				gitRun(t, dir, "add", "-A")
+				gitRun(t, dir, "commit", "-q", "-m", "fixture")
+			}
+			before := readTree(t, dir)
+			testHookBeforeStage = func() error { return errors.New("injected failure") }
+			defer func() { testHookBeforeStage = nil }()
+			var buf bytes.Buffer
+			err := run(cfg(dir, git, &buf))
+			if err == nil || !strings.Contains(err.Error(), "injected failure (all changes rolled back)") {
+				t.Fatalf("want a rolled-back failure, got %v\n%s", err, buf.String())
+			}
+			// The edits were planned (so the rollback had outside files to restore).
+			if !strings.Contains(buf.String(), "Outside references to moved files rewritten (-rewrite-outrefs) (23):") {
+				t.Fatalf("no outside rewrites planned:\n%s", buf.String())
+			}
+			compareTrees(t, readTree(t, dir), before)
+			if git {
+				cmd := exec.Command("git", "status", "--porcelain")
+				cmd.Dir = dir
+				b, err := cmd.Output()
+				if err != nil || len(b) != 0 {
+					t.Fatalf("git status not clean after rollback: %v\n%s", err, b)
+				}
+			}
+		})
+	}
+	t.Run("staged outside file", func(t *testing.T) {
+		if _, err := exec.LookPath("git"); err != nil {
+			t.Skip("git not in PATH")
+		}
+		dir := t.TempDir()
+		writeTree(t, dir, outRefTree())
+		gitRun(t, dir, "init", "-q")
+		gitRun(t, dir, "add", "-A")
+		gitRun(t, dir, "commit", "-q", "-m", "fixture")
+		reg := filepath.Join(dir, "pkg", "hub", "permissions", "registry.go")
+		b, err := os.ReadFile(reg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(reg, append(b, []byte("\n// staged edit\n")...), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		gitRun(t, dir, "add", "pkg/hub/permissions/registry.go")
+		before := readTree(t, dir)
+		var buf bytes.Buffer
+		err = run(cfg(dir, true, &buf))
+		if err == nil || !strings.Contains(err.Error(), "files touched by the move have staged changes") {
+			t.Fatalf("want the staged-changes refusal, got %v\n%s", err, buf.String())
+		}
+		compareTrees(t, readTree(t, dir), before)
+	})
+}
+
 // TestTruncateUTF8 checks that the report truncation (shortenRef, shorten)
 // never splits a multi-byte UTF-8 sequence, keeps its byte limit, and cuts
 // ASCII exactly at the limit.
@@ -1281,4 +1741,881 @@ func TestCommentHelpers(t *testing.T) {
 			t.Errorf("codeContext(%q) = %v, want %v", tc.text, got, tc.want)
 		}
 	}
+}
+
+// extractFixture is a module whose package hub has the alias files that
+// hack/hubshard/extract export generates (its marker, its wrapper shapes).
+// zz_alias_hubtestutil_chatdb_test.go mirrors pkg/hub's file of that name.
+var extractFixture = map[string]string{
+	"go.mod": "module example.com/fx\n\ngo 1.26\n",
+	"hubtestutil/chatdb.go": `package hubtestutil
+
+import (
+	"database/sql"
+	"testing"
+	"time"
+)
+
+const ConversationsTableDDL = "CREATE TABLE conversations (id TEXT)"
+
+var EnvKeys = []string{"GOOGLE_CLOUD_PROJECT"}
+
+func GetTopicConvID(t *testing.T, db *sql.DB, topicID string) string {
+	t.Helper()
+	_ = db
+	return "conv-" + topicID
+}
+
+func RawText(t *testing.T, db *sql.DB, query string, args ...any) string {
+	t.Helper()
+	_, _ = db, args
+	return query
+}
+
+func RequirePostgresDSN(t *testing.T) string {
+	t.Helper()
+	return "dsn"
+}
+
+func RequireUTCInstant(t *testing.T, got, want time.Time) {
+	t.Helper()
+	if !got.Equal(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
+func Seed(tb testing.TB, n int) {
+	tb.Helper()
+	_ = n
+}
+
+func NoHelper(t testing.TB) string { return t.Name() }
+
+func Pair(t, u *testing.T) {
+	t.Helper()
+	_ = u
+}
+
+func Extra(t *testing.T) string {
+	t.Helper()
+	return t.Name()
+}
+
+func Reassign(t *testing.T) string {
+	t.Helper()
+	t = nil
+	return "r"
+}
+
+// FakeTB has a Helper method but is not a testing type.
+type FakeTB struct{}
+
+func (FakeTB) Helper() {}
+
+func Fake(f FakeTB) { f.Helper() }
+
+func Bench(b *testing.B) { b.Helper() }
+
+func Cond(t *testing.T, ok bool) {
+	if ok {
+		t.Helper()
+	}
+}
+
+// T and TB have the names of the testing types but are not them.
+type T struct{}
+
+func (*T) Helper() {}
+
+func FakeT(t *T) { t.Helper() }
+
+type TB struct{}
+
+func (TB) Helper() {}
+
+func FakeTBValue(tb TB) { tb.Helper() }
+
+func Unnamed(*testing.T) {}
+
+func Marked(t *testing.T) { t.Helper() }
+
+// SafeGo calls recover() only inside a func literal, which a wrapper does
+// not affect.
+func SafeGo(f func()) {
+	func() {
+		defer func() { _ = recover() }()
+		f()
+	}()
+}
+
+// Ping and pong recurse into each other with no hazard behind them.
+func Ping(n int) int {
+	if n <= 0 {
+		return 0
+	}
+	return pong(n - 1)
+}
+
+func pong(n int) int { return Ping(n) }
+
+// Deferred recovers only through a callee, which a wrapper does not affect.
+func Deferred(f func()) {
+	defer handle()
+	f()
+}
+
+func handle() { _ = recover() }
+
+// GitStub and StubGit mirror hubtestutil's GitLsRemoteStub and
+// StubGitLsRemote: the alias file aliases the type, and the wrapper's
+// signature uses that alias.
+type GitStub struct{ Output string }
+
+func StubGit(t *testing.T) *GitStub {
+	t.Helper()
+	return &GitStub{}
+}
+
+// FarCaller reaches a stack inspection in another file of the package,
+// which imports runtime under another name.
+func FarCaller(t *testing.T) string {
+	t.Helper()
+	return locateFar()
+}
+`,
+	"hubtestutil/where2.go": `package hubtestutil
+
+import rt "runtime"
+
+func locateFar() string {
+	_, file, _, _ := rt.Caller(2)
+	return file
+}
+`,
+	// A dot-import of runtime, in its own package (a dot-import in
+	// hubtestutil would clash with its Caller).
+	"dotrt/dotrt.go": `package dotrt
+
+import . "runtime"
+
+func DotRT() string {
+	_, file, _, _ := Caller(1)
+	return file
+}
+`,
+	// Targets a wrapper frame would change (recover, call-stack inspection).
+	"hubtestutil/hazard.go": `package hubtestutil
+
+import (
+	"log"
+	"runtime"
+	"testing"
+)
+
+func Recover(t *testing.T) {
+	t.Helper()
+	if r := recover(); r != nil {
+		t.Log(r)
+	}
+}
+
+func Caller(t *testing.T) string {
+	t.Helper()
+	_, file, _, _ := runtime.Caller(1)
+	return file
+}
+
+func Transitive(t *testing.T) string {
+	t.Helper()
+	return where()
+}
+
+func where() string {
+	_, file, _, _ := runtime.Caller(2)
+	return file
+}
+
+func LogOut() { _ = log.Output(2, "x") }
+
+func LoggerOut(l *log.Logger) { _ = l.Output(2, "x") }
+
+func InLit(t *testing.T) {
+	t.Helper()
+	func() { _, _, _, _ = runtime.Caller(1) }()
+}
+
+func DefaultOut() { _ = log.Default().Output(2, "x") }
+
+func CallerValue() int {
+	f := runtime.Callers
+	return f(0, nil)
+}
+
+func Deep(t *testing.T) int {
+	t.Helper()
+	return deep1()
+}
+
+func deep1() int { return deep2() }
+
+func deep2() int {
+	pc := make([]uintptr, 4)
+	return runtime.Callers(1, pc)
+}
+
+func Cyc(t *testing.T) {
+	t.Helper()
+	cycA(2)
+}
+
+func cycA(n int) {
+	if n > 0 {
+		cycB(n - 1)
+	}
+}
+
+func cycB(n int) {
+	cycA(n)
+	cycC()
+}
+
+func cycC() { _, _, _, _ = runtime.Caller(0) }
+
+type rec struct{}
+
+func (rec) locate() string {
+	_, file, _, _ := runtime.Caller(2)
+	return file
+}
+
+// rec2 has a hazard-free method of the same name, declared after rec's, so
+// every same-name method is followed, not only the last.
+type rec2 struct{}
+
+func (rec2) locate() string { return "" }
+
+func ViaMethod(t *testing.T) string {
+	t.Helper()
+	var r rec
+	return r.locate()
+}
+
+func ViaValue(t *testing.T) {
+	t.Helper()
+	apply(where)
+}
+
+func apply(f func() string) { _ = f() }
+`,
+	"hubtestutil/aliased.go": `package hubtestutil
+
+import (
+	rt "runtime"
+	"testing"
+)
+
+func Aliased(t *testing.T) string {
+	t.Helper()
+	_, file, _, _ := rt.Caller(1)
+	return file
+}
+`,
+	"hubtestutil/dot.go": `package hubtestutil
+
+import . "log"
+
+func DotLog() { _ = Output(2, "x") }
+`,
+	// A hand-edited Helper wrapper in a pkgmove alias file (pkgmove never
+	// generates one): checked like an extract wrapper.
+	"hub/zz_alias_pm_test.go": `package hub
+
+// Aliases for symbols moved to
+// example.com/fx/hubtestutil
+// by hack/pkgmove, so existing references in package hub keep compiling.
+
+import (
+	"testing"
+
+	"example.com/fx/hubtestutil"
+)
+
+func pmCaller(t *testing.T) string {
+	t.Helper()
+	return hubtestutil.Caller(t)
+}
+`,
+	"hub/hub.go":     "package hub\n",
+	"hub/sub/sub.go": "package sub\n",
+	"hub/zz_alias_hubtestutil_chatdb_test.go": `package hub
+
+import (
+	"database/sql"
+	"testing"
+	"time"
+
+	"example.com/fx/hubtestutil"
+)
+
+// The declarations below keep the names of test helpers that moved to
+// example.com/fx/hubtestutil
+// (generated by hack/hubshard/extract export), so the tests of this
+// package need no edits. Code outside this package uses hubtestutil directly.
+
+const conversationsTableDDL = hubtestutil.ConversationsTableDDL
+
+func getTopicConvID(t *testing.T, db *sql.DB, topicID string) string {
+	t.Helper()
+	return hubtestutil.GetTopicConvID(t, db, topicID)
+}
+
+func rawText(t *testing.T, db *sql.DB, query string, args ...any) string {
+	t.Helper()
+	return hubtestutil.RawText(t, db, query, args...)
+}
+
+func requirePostgresDSN(t *testing.T) string {
+	t.Helper()
+	return hubtestutil.RequirePostgresDSN(t)
+}
+
+func requireUTCInstant(t *testing.T, got, want time.Time) {
+	t.Helper()
+	hubtestutil.RequireUTCInstant(t, got, want)
+}
+`,
+	"hub/zz_alias_hubtestutil_more_test.go": `package hub
+
+import (
+	"log"
+	"testing"
+
+	"example.com/fx/dotrt"
+	"example.com/fx/hubtestutil"
+)
+
+// The declarations below keep the names of test helpers that moved to
+// example.com/fx/hubtestutil
+// (generated by hack/hubshard/extract export), so the tests of this
+// package need no edits. Code outside this package uses hubtestutil directly.
+
+var envKeys = hubtestutil.EnvKeys
+
+// gitStub is referenced only by the signature of the wrapper stubGit, so
+// -rewrite-aliases may remove it only together with stubGit.
+type gitStub = hubtestutil.GitStub
+
+func stubGit(t *testing.T) *gitStub {
+	t.Helper()
+	return hubtestutil.StubGit(t)
+}
+
+func seed(tb testing.TB, n int) {
+	tb.Helper()
+	hubtestutil.Seed(tb, n)
+}
+
+func noHelperTarget(t testing.TB) string {
+	t.Helper()
+	return hubtestutil.NoHelper(t)
+}
+
+func otherParam(t, u *testing.T) {
+	u.Helper()
+	hubtestutil.Pair(t, u)
+}
+
+func extraStmt(t *testing.T) string {
+	t.Helper()
+	t.Log("extra")
+	return hubtestutil.Extra(t)
+}
+
+func reassigned(t *testing.T) string {
+	t.Helper()
+	return hubtestutil.Reassign(t)
+}
+
+func fake(f hubtestutil.FakeTB) {
+	f.Helper()
+	hubtestutil.Fake(f)
+}
+
+func bench(b *testing.B) {
+	b.Helper()
+	hubtestutil.Bench(b)
+}
+
+func cond(t *testing.T, ok bool) {
+	t.Helper()
+	hubtestutil.Cond(t, ok)
+}
+
+func seedFirst(tb testing.TB, n int) {
+	_ = n
+	hubtestutil.Seed(tb, n)
+}
+
+func fakeT(t *hubtestutil.T) {
+	t.Helper()
+	hubtestutil.FakeT(t)
+}
+
+func fakeTB(tb hubtestutil.TB) {
+	tb.Helper()
+	hubtestutil.FakeTBValue(tb)
+}
+
+func unnamed(t *testing.T) {
+	t.Helper()
+	hubtestutil.Unnamed(t)
+}
+
+func recoverW(t *testing.T) {
+	t.Helper()
+	hubtestutil.Recover(t)
+}
+
+func callerW(t *testing.T) string {
+	t.Helper()
+	return hubtestutil.Caller(t)
+}
+
+func transitiveW(t *testing.T) string {
+	t.Helper()
+	return hubtestutil.Transitive(t)
+}
+
+func logOut() {
+	hubtestutil.LogOut()
+}
+
+func loggerOut(l *log.Logger) {
+	hubtestutil.LoggerOut(l)
+}
+
+func marked(t *testing.T) {
+	hubtestutil.Marked(t)
+}
+
+func safeGo(f func()) {
+	hubtestutil.SafeGo(f)
+}
+
+func pingW(n int) int {
+	return hubtestutil.Ping(n)
+}
+
+func deferredW(f func()) {
+	hubtestutil.Deferred(f)
+}
+
+func aliasedW(t *testing.T) string {
+	t.Helper()
+	return hubtestutil.Aliased(t)
+}
+
+func deepW(t *testing.T) int {
+	t.Helper()
+	return hubtestutil.Deep(t)
+}
+
+func cycW(t *testing.T) {
+	t.Helper()
+	hubtestutil.Cyc(t)
+}
+
+func viaMethodW(t *testing.T) string {
+	t.Helper()
+	return hubtestutil.ViaMethod(t)
+}
+
+func viaValueW(t *testing.T) {
+	t.Helper()
+	hubtestutil.ViaValue(t)
+}
+
+func inLitW(t *testing.T) {
+	t.Helper()
+	hubtestutil.InLit(t)
+}
+
+func defaultOutW() {
+	hubtestutil.DefaultOut()
+}
+
+func callerValueW() int {
+	return hubtestutil.CallerValue()
+}
+
+func dotLogW() {
+	hubtestutil.DotLog()
+}
+
+func farW(t *testing.T) string {
+	t.Helper()
+	return hubtestutil.FarCaller(t)
+}
+
+func dotRTW() string {
+	return dotrt.DotRT()
+}
+
+func condPlain(t *testing.T, ok bool) {
+	hubtestutil.Cond(t, ok)
+}
+`,
+	// Not generated: the marker is only quoted in a string literal.
+	"hub/zz_alias_quoted_test.go": `package hub
+
+import (
+	"testing"
+
+	"example.com/fx/hubtestutil"
+)
+
+const quotedMarker = "(generated by hack/hubshard/extract export)"
+
+func quoted(t *testing.T) string {
+	t.Helper()
+	return hubtestutil.RequirePostgresDSN(t)
+}
+`,
+	// Not generated: a hand-written file (no zz_alias_ prefix).
+	"hub/handwritten_test.go": `package hub
+
+import (
+	"testing"
+
+	"example.com/fx/hubtestutil"
+)
+
+func handSeed(tb testing.TB, n int) {
+	tb.Helper()
+	hubtestutil.Seed(tb, n)
+}
+`,
+	"hub/chat_test.go": `package hub
+
+import (
+	"testing"
+	"time"
+)
+
+func TestChat(t *testing.T) {
+	_ = requirePostgresDSN(t)
+	_ = conversationsTableDDL
+	_ = getTopicConvID(t, nil, "topic")
+	_ = rawText(t, nil, "select 1", 1)
+	now := time.Now().UTC()
+	requireUTCInstant(t, now, now)
+}
+`,
+	// A staying user of stubGit (the move subtests never move it).
+	"hub/stub_test.go": `package hub
+
+import "testing"
+
+func TestStub(t *testing.T) { _ = stubGit(t) }
+`,
+	"hub/seed_test.go": `package hub
+
+import "testing"
+
+func TestSeed(t *testing.T) { seed(t, 1) }
+`,
+	"hub/safe_test.go": `package hub
+
+import "testing"
+
+func TestSafe(t *testing.T) {
+	safeGo(func() {})
+	_ = pingW(3)
+	deferredW(func() {})
+}
+`,
+	"hub/neg_test.go": `package hub
+
+import (
+	"log"
+	"testing"
+
+	"example.com/fx/hubtestutil"
+)
+
+func TestNeg(t *testing.T) {
+	_ = noHelperTarget(t)
+	otherParam(t, t)
+	_ = extraStmt(t)
+	_ = reassigned(t)
+	_ = envKeys
+	fake(hubtestutil.FakeTB{})
+	cond(t, true)
+	seedFirst(t, 1)
+	_ = quoted(t)
+	_ = quotedMarker
+	handSeed(t, 1)
+	fakeT(&hubtestutil.T{})
+	fakeTB(hubtestutil.TB{})
+	unnamed(t)
+	recoverW(t)
+	_ = callerW(t)
+	_ = transitiveW(t)
+	logOut()
+	loggerOut(log.Default())
+	marked(t)
+	_ = aliasedW(t)
+	_ = deepW(t)
+	cycW(t)
+	_ = viaMethodW(t)
+	viaValueW(t)
+	inLitW(t)
+	defaultOutW()
+	_ = callerValueW()
+	dotLogW()
+	_ = pmCaller(t)
+	_ = farW(t)
+	_ = dotRTW()
+	condPlain(t, true)
+}
+
+func BenchmarkNeg(b *testing.B) { bench(b) }
+`,
+}
+
+// TestExtractAliasWrappers checks that references to the alias files of
+// hack/hubshard/extract export resolve to their targets, including wrappers
+// that start with p.Helper() when the target calls Helper() on the same
+// parameter, that every other shape stays unresolved, and that
+// -rewrite-aliases prunes those files like pkgmove's own.
+func TestExtractAliasWrappers(t *testing.T) {
+	requireGo(t)
+	setup := func(t *testing.T, extra map[string]string) string {
+		t.Helper()
+		dir := t.TempDir()
+		files := map[string]string{}
+		for k, v := range extractFixture {
+			files[k] = v
+		}
+		for k, v := range extra {
+			files[k] = v
+		}
+		writeTree(t, dir, files)
+		return dir
+	}
+	move := func(t *testing.T, files ...string) (string, error) {
+		t.Helper()
+		dir := setup(t, nil)
+		var buf bytes.Buffer
+		err := run(&Config{SrcDir: filepath.Join(dir, "hub"), DstDir: filepath.Join(dir, "hub", "sub"),
+			Files: files, NoGit: true, DryRun: true, Stdout: &buf})
+		return buf.String(), err
+	}
+	rewrite := func(t *testing.T, extra map[string]string) (string, string) {
+		t.Helper()
+		dir := setup(t, extra)
+		var buf bytes.Buffer
+		if err := run(&Config{SrcDir: filepath.Join(dir, "hub"), RewriteAliases: true, NoGit: true, Typecheck: true, Stdout: &buf}); err != nil {
+			t.Fatalf("run: %v\n%s", err, buf.String())
+		}
+		return dir, buf.String()
+	}
+	wantAll := func(t *testing.T, out string, wants ...string) {
+		t.Helper()
+		for _, want := range wants {
+			if !strings.Contains(out, want) {
+				t.Errorf("output lacks %q:\n%s", want, out)
+			}
+		}
+	}
+
+	t.Run("resolved", func(t *testing.T) {
+		out, err := move(t, "chat_test.go", "seed_test.go", "safe_test.go")
+		if err != nil {
+			t.Fatalf("run: %v\n%s", err, out)
+		}
+		// All 5 declarations of the chatdb alias file (1 const, 4 Helper
+		// wrappers, 3 return and 1 statement shape), a testing.TB wrapper,
+		// and plain wrappers whose targets recover only in a func literal
+		// or only through a callee, or recurse with no hazard behind them.
+		wantAll(t, out,
+			"Alias references resolved to their targets (9):",
+			"hub/chat_test.go:9: requirePostgresDSN -> hubtestutil.RequirePostgresDSN",
+			"hub/chat_test.go:10: conversationsTableDDL -> hubtestutil.ConversationsTableDDL",
+			"hub/chat_test.go:11: getTopicConvID -> hubtestutil.GetTopicConvID",
+			"hub/chat_test.go:12: rawText -> hubtestutil.RawText",
+			"hub/chat_test.go:14: requireUTCInstant -> hubtestutil.RequireUTCInstant",
+			"hub/seed_test.go:5: seed -> hubtestutil.Seed",
+			"hub/safe_test.go:6: safeGo -> hubtestutil.SafeGo",
+			"hub/safe_test.go:7: pingW -> hubtestutil.Ping",
+			"hub/safe_test.go:8: deferredW -> hubtestutil.Deferred",
+		)
+	})
+
+	t.Run("unresolved", func(t *testing.T) {
+		out, err := move(t, "neg_test.go")
+		if !errors.Is(err, errPlan) {
+			t.Fatalf("want a plan error, got %v\n%s", err, out)
+		}
+		uses := func(kind, name, file string) string {
+			return "moved test file uses " + kind + " " + name + " declared in the staying test file " + file + ";"
+		}
+		const more = "zz_alias_hubtestutil_more_test.go"
+		wantAll(t, out,
+			uses("func", "noHelperTarget", more),
+			"func noHelperTarget calls Helper() on a parameter before forwarding to example.com/fx/hubtestutil.NoHelper, but the target does not call t.Helper() as a top-level statement of its body",
+			uses("func", "otherParam", more),
+			"but the target does not call u.Helper() as a top-level statement of its body",
+			uses("func", "extraStmt", more),
+			uses("func", "reassigned", more),
+			"but the target assigns its parameter t (or takes its address)",
+			uses("var", "envKeys", more),
+			// Helper on a parameter that is not testing.TB or *testing.T.
+			uses("func", "fake", more),
+			uses("func", "bench", more),
+			// Helper only inside a nested block of the target.
+			uses("func", "cond", more),
+			"func cond calls Helper() on a parameter before forwarding to example.com/fx/hubtestutil.Cond, but the target does not call t.Helper() as a top-level statement of its body",
+			// Two statements, the first not Helper().
+			uses("func", "seedFirst", more),
+			// The marker quoted in a string literal does not make a file generated.
+			uses("func", "quoted", "zz_alias_quoted_test.go"),
+			"func quoted forwards to example.com/fx/hubtestutil.RequirePostgresDSN but is not in a generated alias file (pkgmove or hubshard extract) (a hand-written wrapper is not resolved",
+			// A hand-written Helper wrapper.
+			uses("func", "handSeed", "handwritten_test.go"),
+			"func handSeed forwards to example.com/fx/hubtestutil.Seed but is not in a generated alias file (pkgmove or hubshard extract) (a hand-written wrapper is not resolved",
+			// Helper on look-alikes of testing.T and testing.TB from another package.
+			uses("func", "fakeT", more),
+			uses("func", "fakeTB", more),
+			// The target's parameter that receives p is unnamed.
+			uses("func", "unnamed", more),
+			"func unnamed calls Helper() on a parameter before forwarding to example.com/fx/hubtestutil.Unnamed, but the target's parameter that receives it is unnamed",
+			// Targets a wrapper frame would change.
+			uses("func", "recoverW", more),
+			"func recoverW (a hubshard extract wrapper) forwards to example.com/fx/hubtestutil.Recover, but the target calls recover() directly",
+			uses("func", "callerW", more),
+			"func callerW (a hubshard extract wrapper) forwards to example.com/fx/hubtestutil.Caller, but the target inspects its call stack (runtime.Caller;",
+			uses("func", "transitiveW", more),
+			"func transitiveW (a hubshard extract wrapper) forwards to example.com/fx/hubtestutil.Transitive, but the target reaches where, which inspects its call stack (runtime.Caller;",
+			uses("func", "logOut", more),
+			"func logOut (a hubshard extract wrapper) forwards to example.com/fx/hubtestutil.LogOut, but the target uses log.Output call depth",
+			uses("func", "loggerOut", more),
+			"func loggerOut (a hubshard extract wrapper) forwards to example.com/fx/hubtestutil.LoggerOut, but the target may call (*log.Logger).Output",
+			uses("func", "marked", more),
+			"func marked (a hubshard extract wrapper) forwards to example.com/fx/hubtestutil.Marked, but the target calls Helper() but the wrapper does not",
+			// An aliased runtime import, a chain of depth 2 (runtime.Callers),
+			// a cycle with a hazard behind it, a method, a func value, a func
+			// literal, a Logger from a call, a runtime.Callers value, a
+			// dot-import of log.
+			"func aliasedW (a hubshard extract wrapper) forwards to example.com/fx/hubtestutil.Aliased, but the target inspects its call stack (runtime.Caller;",
+			"func deepW (a hubshard extract wrapper) forwards to example.com/fx/hubtestutil.Deep, but the target reaches deep2, which inspects its call stack (runtime.Callers;",
+			"func cycW (a hubshard extract wrapper) forwards to example.com/fx/hubtestutil.Cyc, but the target reaches cycC, which inspects its call stack (runtime.Caller;",
+			"func viaMethodW (a hubshard extract wrapper) forwards to example.com/fx/hubtestutil.ViaMethod, but the target reaches method locate, which inspects its call stack (runtime.Caller;",
+			"func viaValueW (a hubshard extract wrapper) forwards to example.com/fx/hubtestutil.ViaValue, but the target reaches where, which inspects its call stack (runtime.Caller;",
+			"func inLitW (a hubshard extract wrapper) forwards to example.com/fx/hubtestutil.InLit, but the target inspects its call stack (runtime.Caller;",
+			"func defaultOutW (a hubshard extract wrapper) forwards to example.com/fx/hubtestutil.DefaultOut, but the target may call (*log.Logger).Output",
+			"func callerValueW (a hubshard extract wrapper) forwards to example.com/fx/hubtestutil.CallerValue, but the target inspects its call stack (runtime.Callers;",
+			"func dotLogW (a hubshard extract wrapper) forwards to example.com/fx/hubtestutil.DotLog, but the target is in a file that dot-imports log",
+			// A hand-edited Helper wrapper in a pkgmove alias file.
+			uses("func", "pmCaller", "zz_alias_pm_test.go"),
+			"func pmCaller (a Helper wrapper in a pkgmove alias file) forwards to example.com/fx/hubtestutil.Caller, but the target inspects its call stack (runtime.Caller;",
+			// A callee in another file, which imports runtime under another
+			// name; a dot-import of runtime; Helper() only in a nested block
+			// of the target of a wrapper without Helper().
+			"func farW (a hubshard extract wrapper) forwards to example.com/fx/hubtestutil.FarCaller, but the target reaches locateFar, which inspects its call stack (runtime.Caller;",
+			"func dotRTW (a hubshard extract wrapper) forwards to example.com/fx/dotrt.DotRT, but the target is in a file that dot-imports runtime",
+			"func condPlain (a hubshard extract wrapper) forwards to example.com/fx/hubtestutil.Cond, but the target calls Helper() but the wrapper does not",
+		)
+		if strings.Contains(out, "Alias references resolved") {
+			t.Errorf("no reference should resolve:\n%s", out)
+		}
+		// These are not alias-shaped at all, so they get no reason.
+		for _, line := range strings.Split(out, "\n") {
+			for _, name := range []string{"extraStmt", "envKeys", "fake", "bench", "seedFirst", "fakeT", "fakeTB"} {
+				if strings.Contains(line, "uses func "+name+" ") || strings.Contains(line, "uses var "+name+" ") {
+					if strings.Contains(line, "not resolved as an alias") {
+						t.Errorf("%s is not alias-shaped, so it needs no reason: %s", name, line)
+					}
+				}
+			}
+		}
+	})
+
+	t.Run("unmovable", func(t *testing.T) {
+		out, err := move(t, "chat_test.go", "zz_alias_hubtestutil_chatdb_test.go")
+		wantAll(t, out, "hub/zz_alias_hubtestutil_chatdb_test.go is a generated alias file (pkgmove or hubshard extract); it cannot be moved")
+		if !errors.Is(err, errPlan) {
+			t.Fatalf("want a plan error, got %v\n%s", err, out)
+		}
+	})
+
+	// A reference from a file the analysis tags exclude keeps its entry, and
+	// an entry used by a kept entry is kept too (stubGit keeps gitStub).
+	t.Run("rewrite-prune", func(t *testing.T) {
+		dir, out := rewrite(t, map[string]string{
+			"hub/integ_test.go": "//go:build integration\n\npackage hub\n\nimport \"testing\"\n\nfunc TestInteg(t *testing.T) { _ = rawText(t, nil, \"q\"); _ = stubGit(t) }\n",
+		})
+		wantAll(t, out,
+			"Alias references resolved to their targets (10):",
+			"hub/chat_test.go:11: getTopicConvID -> hubtestutil.GetTopicConvID",
+			"hub/seed_test.go:5: seed -> hubtestutil.Seed",
+			"hub/safe_test.go:6: safeGo -> hubtestutil.SafeGo",
+			"hub/stub_test.go:5: stubGit -> hubtestutil.StubGit",
+			"Alias entries removed (8):",
+			// stubGit is named in the tag-excluded file, so it stays, and so
+			// does gitStub, which only stubGit uses.
+			"their entries are kept): rawText, stubGit",
+			"gitStub: used by the kept alias entry stubGit",
+			"const conversationsTableDDL = example.com/fx/hubtestutil.ConversationsTableDDL",
+			"func getTopicConvID = example.com/fx/hubtestutil.GetTopicConvID",
+			"func requirePostgresDSN = example.com/fx/hubtestutil.RequirePostgresDSN",
+			"func requireUTCInstant = example.com/fx/hubtestutil.RequireUTCInstant",
+			"func seed = example.com/fx/hubtestutil.Seed",
+			"func safeGo = example.com/fx/hubtestutil.SafeGo",
+			"func pingW = example.com/fx/hubtestutil.Ping",
+			"func deferredW = example.com/fx/hubtestutil.Deferred",
+			"their entries are kept): rawText",
+		)
+		if strings.Contains(out, "func rawText = ") || strings.Contains(out, "Files deleted") {
+			t.Errorf("rawText (named in a tag-excluded file) must be kept, and no file deleted:\n%s", out)
+		}
+		if strings.Contains(out, "func stubGit = ") || strings.Contains(out, "type gitStub = ") {
+			t.Errorf("stubGit (named in a tag-excluded file) and gitStub (used by stubGit) must be kept:\n%s", out)
+		}
+		b, err := os.ReadFile(filepath.Join(dir, "hub", "zz_alias_hubtestutil_chatdb_test.go"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := string(b)
+		if !strings.Contains(got, "func rawText(") || strings.Contains(got, "func getTopicConvID(") || strings.Contains(got, "\"time\"") {
+			t.Errorf("chatdb alias file should keep only rawText, with the unused time import dropped:\n%s", got)
+		}
+	})
+
+	t.Run("rewrite-delete", func(t *testing.T) {
+		dir, out := rewrite(t, nil)
+		wantAll(t, out,
+			"Alias entries removed (11):",
+			"func rawText = example.com/fx/hubtestutil.RawText",
+			"type gitStub = example.com/fx/hubtestutil.GitStub",
+			"Files deleted (1):\n  hub/zz_alias_hubtestutil_chatdb_test.go",
+		)
+		if _, err := os.Stat(filepath.Join(dir, "hub", "zz_alias_hubtestutil_chatdb_test.go")); !os.IsNotExist(err) {
+			t.Errorf("chatdb alias file not deleted: %v", err)
+		}
+		b, err := os.ReadFile(filepath.Join(dir, "hub", "zz_alias_hubtestutil_more_test.go"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, gone := range []string{"func seed(", "func safeGo(", "func pingW(", "func deferredW(", "func stubGit(", "type gitStub ="} {
+			if strings.Contains(string(b), gone) {
+				t.Errorf("more alias file still has the resolved entry %q:\n%s", gone, b)
+			}
+		}
+		for _, kept := range []string{"func noHelperTarget(", "func recoverW(", "func cycW("} {
+			if !strings.Contains(string(b), kept) {
+				t.Errorf("more alias file lost the unresolved entry %q:\n%s", kept, b)
+			}
+		}
+	})
 }

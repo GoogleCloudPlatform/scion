@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -152,11 +153,15 @@ func TestSignedCaseB_LateContentSkips(t *testing.T) {
 	}
 }
 
-// TestSignedCaseB_ArtifactsOnlyLeafIsBusy: a leaf holding only provisioning
-// artifacts (a legacy in-leaf lock and a satellite) fails closed with
-// leaf_busy; the artifacts are untouched, nothing is downloaded and no
-// stage is left.
-func TestSignedCaseB_ArtifactsOnlyLeafIsBusy(t *testing.T) {
+// TestSignedCaseB_ArtifactsOnlyLeafIsExistingContent: a leaf holding only
+// what an older image left in the workspace root (a lock and a satellite)
+// is skipped as existing content. This test used to expect leaf_busy; the
+// expectation changed because provisioning bookkeeping is now kept only in
+// the project state directory, so a workspace-root lock is not bookkeeping
+// but content, like any other entry, and an in-use leaf is skipped. The
+// entries are untouched, nothing is downloaded, no sentinel is written and
+// no stage is left.
+func TestSignedCaseB_ArtifactsOnlyLeafIsExistingContent(t *testing.T) {
 	f := newCaseBFixture(t, map[string]string{"a.txt": "A"})
 	if err := os.MkdirAll(f.ws, 0o755); err != nil {
 		t.Fatal(err)
@@ -169,16 +174,12 @@ func TestSignedCaseB_ArtifactsOnlyLeafIsBusy(t *testing.T) {
 	if err := os.WriteFile(satellite, []byte("pid"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	_, err := f.run()
-	var ce *signedCommitError
-	if !errors.As(err, &ce) || ce.Class != signedCommitLeafBusy {
-		t.Fatalf("err = %v, want leaf_busy", err)
-	}
-	if op := signedBootstrapOp(err); op != opApplySharedWorkspaceBusy {
-		t.Fatalf("op = %q", op)
+	skipped, err := f.run()
+	if err != nil || !skipped {
+		t.Fatalf("run = (skipped %v, err %v), want a skip", skipped, err)
 	}
 	if _, err := os.Stat(lock); err != nil {
-		t.Fatal("the lock artifact must be untouched")
+		t.Fatal("the lock entry must be untouched")
 	}
 	if b, err := os.ReadFile(satellite); err != nil || string(b) != "pid" {
 		t.Fatal("the satellite must be untouched")
@@ -189,6 +190,108 @@ func TestSignedCaseB_ArtifactsOnlyLeafIsBusy(t *testing.T) {
 	if s := stagesOf(t, f.ws); len(s) != 0 {
 		t.Fatalf("stages left: %v", s)
 	}
+}
+
+// TestSignedCaseB_SkippedLeafNeverWritten: a leaf holding only an older
+// image's workspace-root lock or sentinel is skipped as existing content
+// and the bootstrap writes nothing into it: the leaf's listing (names,
+// modes, sizes, modification times and file contents, the leaf itself
+// included) is byte-identical before and after, nothing is downloaded and
+// no state-directory sentinel is written.
+func TestSignedCaseB_SkippedLeafNeverWritten(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, ws string)
+	}{
+		{name: "workspace-root lock", setup: func(t *testing.T, ws string) {
+			if err := os.Mkdir(filepath.Join(ws, ".scion-provision.lock"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(ws, ".scion-provision.lock", "owner"), []byte("old-pod"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "workspace-root sentinel", setup: func(t *testing.T, ws string) {
+			if err := os.WriteFile(filepath.Join(ws, provision.ProvisionSentinelFile), []byte("old"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "workspace-root lock and sentinel", setup: func(t *testing.T, ws string) {
+			if err := os.Mkdir(filepath.Join(ws, ".scion-provision.lock"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(ws, provision.ProvisionSentinelFile), []byte("old"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newCaseBFixture(t, map[string]string{"a.txt": "A", "d/b.txt": "B"})
+			if err := os.MkdirAll(f.ws, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			tc.setup(t, f.ws)
+			// Older times make a write show even within one clock tick.
+			old := time.Now().Add(-time.Hour)
+			if err := filepath.WalkDir(f.ws, func(p string, _ os.DirEntry, err error) error {
+				if err != nil {
+					return err
+				}
+				return os.Chtimes(p, old, old)
+			}); err != nil {
+				t.Fatal(err)
+			}
+			before := leafListing(t, f.ws)
+			skipped, err := f.run()
+			if err != nil || !skipped {
+				t.Fatalf("run = (skipped %v, err %v), want a skip", skipped, err)
+			}
+			if after := leafListing(t, f.ws); after != before {
+				t.Fatalf("the skipped leaf was written:\nbefore:\n%s\nafter:\n%s", before, after)
+			}
+			if f.h.pageCalls != 0 || f.sentinelPresent() {
+				t.Fatalf("page calls %d, sentinel %v", f.h.pageCalls, f.sentinelPresent())
+			}
+			if s := stagesOf(t, f.ws); len(s) != 0 {
+				t.Fatalf("stages left: %v", s)
+			}
+		})
+	}
+}
+
+// leafListing renders every entry below and including ws (name, mode,
+// size, modification time and, for a regular file, its content), in
+// lexical walk order, for a byte comparison.
+func leafListing(t *testing.T, ws string) string {
+	t.Helper()
+	var b strings.Builder
+	err := filepath.WalkDir(ws, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		info, err := os.Lstat(p)
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(ws, p)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(&b, "%s %v %d %d", rel, info.Mode(), info.Size(), info.ModTime().UnixNano())
+		if info.Mode().IsRegular() {
+			data, err := os.ReadFile(p)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(&b, " %q", data)
+		}
+		b.WriteByte('\n')
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b.String()
 }
 
 // TestSignedCaseB_RecoveryOnlyUnderProvisioningLocks: a stage another

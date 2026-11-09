@@ -116,6 +116,20 @@ interface ProjectSettings {
   defaultAgentRole?: string | undefined;
 }
 
+/**
+ * The tooltip of the hub fallback indicator (ptone/scion#3925). The hub
+ * value is the last fallback, not the value an agent is sure to get: a
+ * template or harness config can set its own, which wins, so the page never
+ * calls it the value in effect.
+ */
+export function hubFallbackTooltip(displayValue: string): string {
+  return `Hub fallback: ${displayValue}. A template or harness config can set its own value, which wins over it.`;
+}
+
+/** The tooltip when the hub does not report its fallback (hubDefault "unknown"). */
+export const HUB_FALLBACK_UNKNOWN_TOOLTIP =
+  'This hub could not report its fallback for this setting; it may still have one. A template or harness config can also set its own value.';
+
 interface ResolvedHubSetting {
   projectSet: boolean;
   projectValue: string | null;
@@ -1505,7 +1519,7 @@ export class ScionPageProjectSettings extends LitElement {
   }
 
   /**
-   * Returns a formatted hub default hint string for a given annotation key,
+   * Returns a formatted hub fallback hint string for a given annotation key,
    * or null if no hub value is available for display.
    *
    * Used to populate placeholder text on text/number inputs and to label the
@@ -1516,17 +1530,17 @@ export class ScionPageProjectSettings extends LitElement {
     if (!entry || entry.hubDefault !== 'present' || entry.hubValue == null) {
       return null;
     }
-    return `Hub default: ${entry.hubValue}`;
+    return `Hub fallback: ${entry.hubValue}`;
   }
 
   /**
-   * Returns a select-option label incorporating the hub default value,
+   * Returns a select-option label incorporating the hub fallback value,
    * or a generic fallback label when no hub value is available.
    */
   private hubSelectLabel(annotationKey: string, fallbackLabel: string): string {
     const entry = this.resolvedSettings[annotationKey];
     if (entry?.hubDefault === 'present' && entry.hubValue != null) {
-      return `Use hub default (${entry.hubValue})`;
+      return `Use hub fallback (${entry.hubValue})`;
     }
     return fallbackLabel;
   }
@@ -1606,6 +1620,13 @@ export class ScionPageProjectSettings extends LitElement {
    */
   private renderHubIndicator(annotationKey: string) {
     const entry = this.resolvedSettings[annotationKey];
+    if (entry && !entry.projectSet && entry.hubDefault === 'unknown') {
+      return html`
+        <sl-tooltip content=${HUB_FALLBACK_UNKNOWN_TOOLTIP}>
+          <sl-icon name="building" class="hub-indicator-icon hub-fallback-unknown"></sl-icon>
+        </sl-tooltip>
+      `;
+    }
     if (!entry || entry.projectSet || entry.hubDefault !== 'present') {
       return nothing;
     }
@@ -1618,7 +1639,7 @@ export class ScionPageProjectSettings extends LitElement {
       }
     }
     return html`
-      <sl-tooltip content="Hub default: ${displayValue}">
+      <sl-tooltip content=${hubFallbackTooltip(displayValue)}>
         <sl-icon name="building" class="hub-indicator-icon"></sl-icon>
       </sl-tooltip>
     `;

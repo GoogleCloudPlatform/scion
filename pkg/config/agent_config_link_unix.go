@@ -12,27 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package hub
+//go:build unix
 
-// itoa is a minimal int-to-string without importing strconv.
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	var buf [20]byte
-	i := len(buf)
-	neg := n < 0
-	if neg {
-		n = -n
-	}
-	for n > 0 {
-		i--
-		buf[i] = byte('0' + n%10)
-		n /= 10
-	}
-	if neg {
-		i--
-		buf[i] = '-'
-	}
-	return string(buf[i:])
+package config
+
+import (
+	"os"
+	"syscall"
+)
+
+// agentConfigSingleLink reports whether info (from os.Lstat) has exactly one
+// link, as the scion-agent config reader requires on this platform
+// (dirfd.ErrNotSingleLinkRegular).
+func agentConfigSingleLink(info os.FileInfo) bool {
+	st, ok := info.Sys().(*syscall.Stat_t)
+	return ok && st.Nlink == 1
 }

@@ -135,7 +135,7 @@ func TestStartNFSWorktree_LaterStartCreatesWorktreeDir(t *testing.T) {
 	mountRoot := filepath.Join(t.TempDir(), "nfs")
 	ws := nfsTestWorkspaceDir(mountRoot)
 	require.NoError(t, os.MkdirAll(ws, 0o770))
-	require.NoError(t, os.WriteFile(filepath.Join(ws, provision.ProvisionSentinelFile), []byte("x"), 0o644))
+	writeStateSentinel(t, ws)
 
 	cfg, wtAtRun, err := startNFSWorktreeAgent(t, "kubernetes", mountRoot, "worktree-per-agent")
 	require.NoError(t, err)
@@ -156,7 +156,7 @@ func TestStartNFSWorktree_OtherModesUnchanged(t *testing.T) {
 			mountRoot := filepath.Join(t.TempDir(), "nfs")
 			ws := nfsTestWorkspaceDir(mountRoot)
 			require.NoError(t, os.MkdirAll(ws, 0o770))
-			require.NoError(t, os.WriteFile(filepath.Join(ws, provision.ProvisionSentinelFile), []byte("x"), 0o644))
+			writeStateSentinel(t, ws)
 
 			cfg, wtAtRun, err := startNFSWorktreeAgent(t, "kubernetes", mountRoot, mode)
 			require.NoError(t, err)
@@ -176,7 +176,7 @@ func TestStartNFSWorktree_NonKubernetesUnaffected(t *testing.T) {
 	mountRoot := filepath.Join(t.TempDir(), "nfs")
 	ws := nfsTestWorkspaceDir(mountRoot)
 	require.NoError(t, os.MkdirAll(ws, 0o770))
-	require.NoError(t, os.WriteFile(filepath.Join(ws, provision.ProvisionSentinelFile), []byte("x"), 0o644))
+	writeStateSentinel(t, ws)
 
 	cfg, wtAtRun, err := startNFSWorktreeAgent(t, "docker", mountRoot, "worktree-per-agent")
 	require.NoError(t, err)
@@ -209,7 +209,7 @@ func TestEnsureNFSWorktreeLeaf(t *testing.T) {
 	_, statErr := os.Stat(filepath.Join(resolved.HostPath, "worktrees"))
 	assert.True(t, os.IsNotExist(statErr), "nothing is created before the shared checkout is provisioned")
 
-	require.NoError(t, os.WriteFile(filepath.Join(resolved.HostPath, provision.ProvisionSentinelFile), []byte("x"), 0o644))
+	writeStateSentinel(t, resolved.HostPath)
 	ok, err = ensureNFSWorktreeLeaf("kubernetes", resolved, runtime.NFSPodShare{ClaimName: "ws-pv"}, "agent-1")
 	require.NoError(t, err)
 	assert.True(t, ok)
@@ -255,6 +255,7 @@ func setupNFSWorktreeRemoval(t *testing.T) (sharedDirStorageRunFixture, string) 
 	require.NoError(t, os.WriteFile(filepath.Join(origin, "README.md"), []byte("hi\n"), 0o644))
 	nfsWorktreeGit(t, origin, "add", ".")
 	nfsWorktreeGit(t, origin, "commit", "-m", "init")
+	provision.AllowLocalCloneFixture(t, origin)
 
 	ws := nfsTestWorkspaceDir(mountRoot)
 	for _, agent := range []string{"test-agent", "other-agent"} {
@@ -266,7 +267,7 @@ func setupNFSWorktreeRemoval(t *testing.T) (sharedDirStorageRunFixture, string) 
 			GitClone:        &api.GitCloneConfig{URL: origin},
 			NFSUID:          os.Getuid(),
 			NFSGID:          os.Getgid(),
-			SentinelDir:     ws,
+			SentinelDir:     provision.ProjectStateDir(ws),
 			MountedWorktree: true,
 		}))
 		require.True(t, provision.IsRealWorktreeDir(provision.WorktreePath(ws, agent), ws))
@@ -421,4 +422,13 @@ func TestRemoveNFSWorktree_RefusesPathOutsideExport(t *testing.T) {
 		assert.FileExists(t, filepath.Join(outside, "worktrees", "test-agent", "keep"), name)
 		assert.True(t, provision.IsRealWorktreeDir(provision.WorktreePath(ws, "test-agent"), ws), name)
 	}
+}
+
+// writeStateSentinel marks the shared checkout at ws provisioned: the
+// sentinel in its provisioning state directory, the only place it is read.
+func writeStateSentinel(t *testing.T, ws string) {
+	t.Helper()
+	dir := provision.ProjectStateDir(ws)
+	require.NoError(t, os.MkdirAll(dir, 0o770))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, provision.ProvisionSentinelFile), []byte("x"), 0o644))
 }

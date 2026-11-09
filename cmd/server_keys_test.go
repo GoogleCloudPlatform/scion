@@ -52,9 +52,11 @@ func keysTestEnv(t *testing.T) string {
 	require.NoError(t, os.MkdirAll(filepath.Join(home, ".scion"), 0o755))
 	oldCfg, oldFile, oldWR := keysConfigPath, keysKeyringFile, keysAllowWorldReadable
 	oldDB, oldNoStore, oldFormat := keysStatusDB, keysStatusNoStore, outputFormat
+	oldVerifyDB, oldReport := keysVerifyDB, keysVerifyReportFile
 	t.Cleanup(func() {
 		keysConfigPath, keysKeyringFile, keysAllowWorldReadable = oldCfg, oldFile, oldWR
 		keysStatusDB, keysStatusNoStore, outputFormat = oldDB, oldNoStore, oldFormat
+		keysVerifyDB, keysVerifyReportFile = oldVerifyDB, oldReport
 	})
 	return home
 }
@@ -69,7 +71,9 @@ func keysTestTree() *cobra.Command {
 	check := &cobra.Command{Use: "check", Args: cobra.NoArgs, RunE: runServerKeysCheck}
 	status := &cobra.Command{Use: "status", Args: cobra.NoArgs, RunE: runServerKeysStatus}
 	addKeysStatusFlags(status.Flags())
-	keys.AddCommand(check, status)
+	verify := &cobra.Command{Use: "verify", Args: cobra.NoArgs, RunE: runServerKeysVerify}
+	addKeysVerifyFlags(verify.Flags())
+	keys.AddCommand(check, status, verify)
 	server.AddCommand(keys)
 	root.AddCommand(server)
 	return root
@@ -108,6 +112,7 @@ func TestServerKeys_CLIModeCensus(t *testing.T) {
 	}
 	assert.True(t, names["status"], "server keys status is registered")
 	assert.True(t, names["check"], "server keys check is registered")
+	assert.True(t, names["verify"], "server keys verify is registered")
 	assert.Equal(t, serverCmd, serverKeysCmd.Parent())
 
 	paths := []string{"server", "server.keys"}

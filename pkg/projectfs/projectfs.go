@@ -113,6 +113,9 @@ type Kind string
 const (
 	KindWorkspace Kind = "workspace"
 	KindSharedDir Kind = "shared-dir"
+	// KindVolume is a `volumes:` entry: an Owner=user, Scope=agent Mount
+	// (design OQ-R2), outside the project tree.
+	KindVolume Kind = "volume"
 )
 
 // Mode is a workspace sharing mode. The values equal
@@ -202,6 +205,25 @@ func SharedDirMount(sd api.SharedDir, containerWorkspace string) Mount {
 		Provision: ProvisionEmpty,
 		Target:    SharedDirTarget(sd.Name, sd.InWorkspace, containerWorkspace),
 		ReadOnly:  sd.ReadOnly,
+	}
+}
+
+// UserVolumeMount returns the Mount of a `volumes:` entry: always
+// Scope=agent and Owner=user (design OQ-R2), so Scion never creates,
+// deletes, migrates or browses it. source is the host path the user
+// supplies (for a gcs volume, the bucket) and target the container path,
+// both as the runtime expanded them; the Mount is named by its target,
+// since a `volumes:` entry has no name of its own.
+func UserVolumeMount(source, target string, readOnly bool) Mount {
+	return Mount{
+		Kind:       KindVolume,
+		Name:       target,
+		Scope:      ScopeAgent,
+		Owner:      OwnerUser,
+		Provision:  ProvisionNone,
+		Target:     target,
+		ReadOnly:   readOnly,
+		UserSource: source,
 	}
 }
 
@@ -451,6 +473,8 @@ func (l Layout) shared(rel string, m Mount) Resolved {
 // the agent's own directory, or pass the agent).
 func (l Layout) Resolve(p Project, agent string, m Mount) (Resolved, error) {
 	switch m.Kind {
+	case KindVolume:
+		return resolveUserVolume(m)
 	case KindWorkspace, KindSharedDir:
 	default:
 		return Resolved{}, fmt.Errorf("projectfs: unsupported mount kind %q", m.Kind)
@@ -482,6 +506,24 @@ func (l Layout) Resolve(p Project, agent string, m Mount) (Resolved, error) {
 	default:
 		return Resolved{}, fmt.Errorf("projectfs: unsupported backend %q", l.Backend)
 	}
+}
+
+// resolveUserVolume resolves a `volumes:` entry: it lives where the user
+// put it (UserSource), on no backend of the Layout. Its fields are checked
+// where the entry is loaded (api.VolumeMount.Validate) and its source by the
+// runtime (checkVolumeSource), not here: resolving never refuses an entry a
+// runtime accepted before the entries went through Realize (#5837).
+func resolveUserVolume(m Mount) (Resolved, error) {
+	if m.Owner != OwnerUser || m.Scope != ScopeAgent {
+		return Resolved{}, fmt.Errorf("projectfs: a volume is an agent-scoped, user-owned mount, not %s/%s", m.Scope, m.Owner)
+	}
+	return Resolved{
+		HostPath: m.UserSource,
+		Target:   m.Target,
+		Kind:     KindVolume,
+		Name:     m.Name,
+		ReadOnly: m.ReadOnly,
+	}, nil
 }
 
 func (l Layout) resolveShared(p Project, agent string, m Mount) (Resolved, error) {

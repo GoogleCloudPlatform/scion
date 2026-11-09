@@ -27,6 +27,7 @@ Each user picks a zone with the **Display timezone** card on the profile setting
 - **Auto**, the default, follows the browser's zone.
 - The value is stored as the `timezone` user preference, an IANA name; empty means Auto. `PATCH /api/v1/users/:id` with an invalid name returns `400` (see the [Users API](/scion/reference/api/)).
 - The display zone never changes an agent's `TZ`.
+- When a user with a non-empty `timezone` preference sends a message to an agent, the Hub attaches `sender_timezone` to the message's `metadata` (see [Inbound Message Type Discrimination](/scion/hosted/user/messaging/#3-inbound-message-type-discrimination)).
 
 ### Metrics dashboard day buckets
 
@@ -68,6 +69,8 @@ For an agent dispatched by a Hub, the Hub is the only source of `TZ`. On create,
 | 3 | An ancestor agent's user-scope `TZ` variable shared with progeny. | `progeny` |
 | 4 | The Hub default timezone, `agent_defaults.default_timezone`. | `hub-default` |
 | 5 | Nothing. No `TZ` is sent, and the container uses the image default (UTC). | `none` |
+
+If the Hub cannot read the environment-variable store for steps 2 or 3, it does not move on to a later step. Create, start and restart fail with `503` and the agent is not changed. Provision sends no `TZ` (or the placeholder `UTC`, with source `none`, when an older Runtime Broker asks for one), and the next start reads the store again. The agent `GET` and `PATCH` responses, which report the resolved zone, return `503` with the message `environment settings unavailable`, and the `PATCH` writes nothing. A restore, which has already completed when it answers, returns the agent without `resolvedTimezone` and `timezoneSource`. The env-gather response leaves out the `TZ` source label. Retry once the store is reachable.
 
 ### Hub default timezone
 

@@ -196,6 +196,10 @@ func (s *Service) handlePublish(w http.ResponseWriter, r *http.Request) {
 		OwnerKind: kind, OwnerRef: ref, Title: title, CurrentSeq: 1,
 		CreatedAt: now, UpdatedAt: now, ExpiresAt: retentionExpiry(b.currentLimits(ctx), now),
 	}
+	// The delegating user of an agent creating the artifact, resolved by
+	// the host from the agent's delegation chain (ptone/scion#6028); never
+	// from the request.
+	a.SponsorRef = s.sponsorFor(ctx, kind, ref, a.ScopeKind)
 	v := &Version{
 		ID: versionID, ArtifactID: a.ID, Seq: 1, Kind: VersionKindPublish, EntryPath: name,
 		TotalBytes: totalBytes, FileCount: len(files), CreatedByKind: kind, CreatedByRef: ref,
@@ -207,13 +211,20 @@ func (s *Service) handlePublish(w http.ResponseWriter, r *http.Request) {
 	}
 	// A failure here can leave an unreferenced blob behind; blobs are
 	// content-addressed, so a retry reuses it and the blob sweep reclaims it.
-	if err := b.store.CreatePublished(ctx, a, v, files, []Grant{g}); err != nil {
+	grants := []Grant{g}
+	// The automatic review grant for the delegating user commits with the
+	// artifact, or not at all (ptone/scion#7134).
+	if sg, ok := s.sponsorReviewGrant(r, a, now); ok {
+		grants = append(grants, sg)
+	}
+	if err := b.store.CreatePublished(ctx, a, v, files, grants); err != nil {
 		slog.ErrorContext(ctx, "artifacts: publish failed", "error", err)
 		s.logVersionError(r, a, 1, logReasonStoreError)
 		writeError(w, http.StatusInternalServerError, "internal", "could not record the artifact")
 		return
 	}
 	s.logAllowed(r, logEntry{action: logActionPublished, artifact: a, seq: 1, authority: logAuthorityOwner})
+	s.logSponsorReviewGrants(r, a, grants)
 	writeJSON(w, http.StatusCreated, ArtifactResponse{Artifact: artifactInfo(a), Version: versionInfo(v, files), Warnings: warnings})
 }
 

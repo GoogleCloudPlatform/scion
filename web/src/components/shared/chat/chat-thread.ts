@@ -55,6 +55,7 @@ import { navigateTo, stateManager } from '../../../client/main.js';
 import { agentIndexOf, agentStore } from '../../../client/agent-store.js';
 import { openTerminal, agentGraphHref } from '../../../client/open-terminal.js';
 import { showToast } from '../../../utils/toast.js';
+import { copyToClipboard } from './clipboard.js';
 import {
   ChatStarsController,
   conversationSupportsStars,
@@ -80,6 +81,11 @@ import {
   WAKE_RETRY_DELAY_MS,
   errorMessageFromBody,
   isChatPostDeniedBody,
+  chatPostDeniedReason,
+  postStateFromHistory,
+  readOnlyNoticeText,
+  type ChatCapabilities,
+  type ChatPostDeniedReason,
   WakeOutcomeUnknownError,
   isAnswerAboutThisSend,
   isGatewayDrop,
@@ -138,6 +144,7 @@ import { PinOnResizeController } from './pin-on-resize.js';
 import { focusElement } from '../focus-moved.js';
 import { findDefaultAgent } from './default-agent.js';
 import { replyToContent } from './message-text.js';
+import { copyableLinkHref } from './message-link.js';
 import { coalescedRefresh, type CoalescedRefresh } from '../../../client/coalesced-refresh.js';
 
 /** Result from server-side mention fan-out. */
@@ -160,6 +167,12 @@ const HISTORY_MAX_PAGE_SIZE = 200;
 
 /** How many around targets a deep starred-only refresh tries before the newest window. */
 const FILTER_AROUND_TRIES = 5;
+
+/** The code of the history around jump's 404 for a message that cannot be shown. */
+const MESSAGE_UNAVAILABLE_CODE = 'message_unavailable';
+
+/** The toast of a jump to a message that is no longer available. */
+export const MESSAGE_UNAVAILABLE_TOAST = 'That message is no longer available.';
 
 /**
  * Detail of `chat-message-filter-change`: the thread asks the page to show
@@ -315,6 +328,14 @@ const JUMP_SCROLL_MAX_RECHECKS = 2;
 
 /** The hub rejects agent names longer than this many runes. */
 const MAX_AGENT_NAME_LENGTH = 63;
+
+/**
+ * How long after a press on a link in a message (its last pointer event) a
+ * menu opening on that message still counts as raised on the link. Covers
+ * menu opens whose event does not target the anchor (the reported iOS
+ * long-press case is expected to be one; not verified on a device).
+ */
+const PRESS_LINK_WINDOW_MS = 1000;
 
 /** Length of the random suffix in a default /spawn name. */
 const SPAWN_SUFFIX_LENGTH = 4;
@@ -766,6 +787,8 @@ export class ScionChatThread extends LitElement {
    * read-only notice. DMs never set it.
    */
   @state() private canPost = true;
+  /** Why the caller may not post (`canPost` false), from the hub; '' if unknown. */
+  @state() private postDeniedReason: ChatPostDeniedReason = '';
   /**
    * Conversation whose wake-and-send is in flight, or ''. Its composer is
    * blocked meanwhile (up to the hub's wake budget), so text typed during
@@ -913,6 +936,12 @@ export class ScionChatThread extends LitElement {
 
   /** The open message menu is the mobile bottom sheet, not the popup. */
   @state() private contextMenuAsSheet = false;
+
+  /** The address of the HTML link the open menu was raised on, if any. */
+  @state() private contextMenuLinkHref: string | null = null;
+
+  /** The link under the last press inside a message, and when that press last moved. */
+  private _pressLink: { messageId: string; href: string; at: number } | null = null;
 
   /** The message a popup menu follows, and its last viewport top. */
   private _menuAnchor: { messageId: string; top: number | null } | null = null;
@@ -1511,7 +1540,7 @@ export class ScionChatThread extends LitElement {
         padding: 0.625rem 1rem calc(0.625rem + env(safe-area-inset-bottom, 0px));
         font-size: var(--chat-fs-base);
         border-top: 1px solid var(--scion-border, #e2e8f0);
-        background: var(--scion-surface-2, #f8fafc);
+        background: var(--scion-bg, #f8fafc);
       }
 
       .star-filter-banner > sl-icon {
@@ -1533,6 +1562,20 @@ export class ScionChatThread extends LitElement {
 
       .star-filter-show-all {
         flex-shrink: 0;
+      }
+
+      /* The theme maps Shoelace's neutral scale to the same slate values in
+         both themes, so a default button's label (neutral-700) would sit
+         on a neutral-800 button in the dark theme. Theme tokens keep the
+         label, border and fill readable in both. */
+      .star-filter-show-all::part(base) {
+        background: var(--scion-surface, #ffffff);
+        border-color: var(--scion-border-hover, #cbd5e1);
+        color: var(--scion-text, #1e293b);
+      }
+
+      .star-filter-show-all::part(base):hover {
+        color: var(--scion-primary-hover, #2563eb);
       }
 
       /* A 44 px touch target on a phone or tablet; Shoelace centres the
@@ -1964,6 +2007,7 @@ export class ScionChatThread extends LitElement {
     this.error = null;
     this.sendError = null;
     this.canPost = true;
+    this.postDeniedReason = '';
     // A send still in flight belongs to the conversation we just left; its
     // completion will not touch `sending` (fetchId guard), so release the
     // composer here.
@@ -2569,12 +2613,17 @@ export class ScionChatThread extends LitElement {
         replyPreviews?: Record<string, ReplyPreviewInfo>;
         retention?: HistoryRetention;
         canPost?: boolean;
+        _capabilities?: ChatCapabilities;
       };
 
       // The body can still be arriving after the headers; a conversation
       // switch in the meantime must not merge this page into the new one.
       if (currentId !== this.fetchId) return false;
-      if (typeof data?.canPost === 'boolean') this.canPost = data.canPost;
+      const postState = data ? postStateFromHistory(data) : undefined;
+      if (postState) {
+        this.canPost = postState.canPost;
+        this.postDeniedReason = postState.reason;
+      }
       if (!shouldMerge()) return true;
 
       const items = data?.items ?? data?.messages ?? [];
@@ -3619,6 +3668,7 @@ export class ScionChatThread extends LitElement {
           if (isChatPostDeniedBody(data) && !threadMovedOn()) {
             // The notice says it; no separate send error.
             this.canPost = false;
+            this.postDeniedReason = chatPostDeniedReason(data);
             this.sendError = null;
           }
         } else {
@@ -4611,7 +4661,7 @@ export class ScionChatThread extends LitElement {
     // the thread shows a spinner, not the scroll container.
     let msgEl = this.shadowRoot?.getElementById(`msg-${messageId}`) ?? null;
     if (!msgEl) {
-      await this.fetchAroundMessage(messageId, isCurrent);
+      await this.fetchAroundMessage(messageId, isCurrent, true);
       await this.updateComplete;
       if (!isCurrent()) return;
       msgEl = this.shadowRoot?.getElementById(`msg-${messageId}`) ?? null;
@@ -4892,10 +4942,15 @@ export class ScionChatThread extends LitElement {
    * `isCurrent`, when given, is re-checked once the response arrives: a
    * caller superseded in the meantime (a restore overtaken by a jump) must
    * not replace the window that the newer request loaded.
+   *
+   * With `notifyUnavailable`, a 404 with code message_unavailable (the
+   * message was removed, for example by the hub's retention policy) shows
+   * the toast "That message is no longer available."
    */
   private async fetchAroundMessage(
     messageId: string,
-    isCurrent: () => boolean = () => true
+    isCurrent: () => boolean = () => true,
+    notifyUnavailable = false
   ): Promise<void> {
     if (!this.conversationKey) return;
 
@@ -4908,7 +4963,22 @@ export class ScionChatThread extends LitElement {
 
     try {
       const res = await apiFetch(this.historyUrl(params));
-      if (currentId !== this.fetchId || !res.ok || !isCurrent()) return;
+      if (currentId !== this.fetchId || !isCurrent()) return;
+      if (!res.ok) {
+        if (notifyUnavailable && res.status === 404) {
+          const body = (await res.json().catch(() => null)) as {
+            error?: { code?: string };
+          } | null;
+          if (
+            body?.error?.code === MESSAGE_UNAVAILABLE_CODE &&
+            currentId === this.fetchId &&
+            isCurrent()
+          ) {
+            showToast(MESSAGE_UNAVAILABLE_TOAST, 'warning');
+          }
+        }
+        return;
+      }
 
       const data = (await res.json()) as HistoryWindow;
       if (currentId !== this.fetchId || !isCurrent()) return;
@@ -5190,11 +5260,14 @@ export class ScionChatThread extends LitElement {
       },
       {
         id: 'copy-link',
-        label: 'Copy link',
+        label: 'Copy link to msg',
         icon: 'link-45deg',
         run: () => this.handleContextMenuCopyLink(),
       }
     );
+    if (this.contextMenuLinkHref) {
+      actions.push(this.copyLinkAddressAction(this.contextMenuLinkHref));
+    }
     // An unsent local row has no server ID yet, so it cannot be starred.
     if (this.starsActive && isStarrableMessageId(msg.id)) actions.push(this.starMenuAction(msg));
     if (this.isSenderAgent(msg) && !this.isDM && !this.isDefaultAgentSender(msg)) {
@@ -5207,6 +5280,19 @@ export class ScionChatThread extends LitElement {
     }
     if (this.isSenderAgent(msg)) actions.push(...this.agentMenuActions(msg));
     return actions;
+  }
+
+  /** "Copy link address": copies the address of the link the menu was raised on. */
+  private copyLinkAddressAction(href: string): MenuAction {
+    return {
+      id: 'copy-link-address',
+      label: 'Copy link address',
+      icon: 'link',
+      run: (): void => {
+        this.closeContextMenu();
+        void this.copyWithToast(href);
+      },
+    };
   }
 
   /**
@@ -5589,11 +5675,14 @@ export class ScionChatThread extends LitElement {
       },
       {
         id: 'copy-link',
-        label: 'Copy link',
+        label: 'Copy link to msg',
         icon: 'link-45deg',
         run: () => this.handleContextMenuCopyLink(),
       }
     );
+    if (this.contextMenuLinkHref) {
+      actions.push(this.copyLinkAddressAction(this.contextMenuLinkHref));
+    }
     if (this.starsActive && isStarrableMessageId(msg.id)) actions.push(this.starMenuAction(msg));
     if (this.isSenderAgent(msg)) actions.push(...this.agentMenuActions(msg));
     return actions;
@@ -5736,20 +5825,57 @@ export class ScionChatThread extends LitElement {
     );
   }
 
+  /**
+   * Remember the link (if any) under a press inside a message. A press on
+   * another message element replaces it (presses outside messages are not
+   * seen; the message-id check and the window bound that case), and the
+   * end of the press restarts its window.
+   */
+  private handleMessagePress(e: PointerEvent, msg: Message): void {
+    if (e.type !== 'pointerdown') {
+      if (this._pressLink?.messageId === msg.id) this._pressLink.at = Date.now();
+      return;
+    }
+    const href = copyableLinkHref(e.composedPath(), e.currentTarget);
+    this._pressLink = href ? { messageId: msg.id, href, at: Date.now() } : null;
+  }
+
+  /** The remembered press link for `messageId` if still fresh. Always forgets it. */
+  private takePressLink(messageId: string): string | null {
+    const press = this._pressLink;
+    this._pressLink = null;
+    if (!press || press.messageId !== messageId) return null;
+    return Date.now() - press.at <= PRESS_LINK_WINDOW_MS ? press.href : null;
+  }
+
   /** Handle right-click on a message to show context menu. */
   private handleMessageContextMenu(e: MouseEvent, msg: Message): void {
     e.preventDefault();
     // A context menu the keyboard raised (the ContextMenu key on a focused
-    // message) carries no pointer position: anchor it to the message.
+    // message) may carry no pointer position: anchor it to the message.
+    const noPosition = e.clientX === 0 && e.clientY === 0;
+    // Chromium raises the keyboard context menu as a PointerEvent with an
+    // empty pointerType (a touch long-press has 'touch', a mouse 'mouse').
+    // Only a contextmenu counts: the tap path passes its click event here.
+    const fromKeyboard =
+      noPosition ||
+      (e.type === 'contextmenu' &&
+        typeof PointerEvent !== 'undefined' &&
+        e instanceof PointerEvent &&
+        e.pointerType === '');
     let at = { x: e.clientX, y: e.clientY };
-    if (e.clientX === 0 && e.clientY === 0) {
+    if (noPosition) {
       const el = this.shadowRoot?.getElementById(`msg-${msg.id}`);
       if (el) {
         const r = el.getBoundingClientRect();
         at = { x: r.left + 16, y: r.top + 16 };
       }
     }
-    this.openMessageMenu(msg, at);
+    // The event's own target wins; otherwise a fresh press on a link in this
+    // message (for menu opens whose event does not target the anchor).
+    const own = copyableLinkHref(e.composedPath(), e.currentTarget);
+    const pressed = this.takePressLink(msg.id);
+    this.openMessageMenu(msg, at, own ?? (fromKeyboard ? null : pressed));
   }
 
   /**
@@ -5757,10 +5883,15 @@ export class ScionChatThread extends LitElement {
    * (pointer or keyboard alike), and its More actions button is where
    * Escape returns focus.
    */
-  private openMessageMenu(msg: Message, at: { x: number; y: number }): void {
+  private openMessageMenu(
+    msg: Message,
+    at: { x: number; y: number },
+    linkHref: string | null = null
+  ): void {
     // Star states whose request failed are retried when a menu opens.
     if (this.starsActive) void this.stars.retryFailed();
     this.contextMenuMessage = msg;
+    this.contextMenuLinkHref = linkHref;
     this.contextMenuPosition = at;
     this.contextMenuAsSheet = shouldUseMenuSheet();
     document.addEventListener('keydown', this.handleContextMenuKeydown);
@@ -6041,6 +6172,7 @@ export class ScionChatThread extends LitElement {
   /** Close the context menu. */
   private closeContextMenu(): void {
     this.contextMenuMessage = null;
+    this.contextMenuLinkHref = null;
     document.removeEventListener('keydown', this.handleContextMenuKeydown);
     this.untrackMenuAnchor();
   }
@@ -6105,9 +6237,7 @@ export class ScionChatThread extends LitElement {
     const msg = this.contextMenuMessage;
     this.closeContextMenu();
     if (!msg) return;
-    navigator.clipboard.writeText(msg.msg).catch(() => {
-      // Fallback: ignore clipboard failure silently.
-    });
+    void this.copyWithToast(msg.msg);
   }
 
   /** Context menu: Copy link to message. */
@@ -6116,9 +6246,17 @@ export class ScionChatThread extends LitElement {
     this.closeContextMenu();
     if (!msg) return;
     const url = `${window.location.origin}${window.location.pathname}#msg-${encodeURIComponent(msg.id)}`;
-    navigator.clipboard.writeText(url).catch(() => {
-      // Fallback: ignore clipboard failure silently.
-    });
+    void this.copyWithToast(url);
+  }
+
+  /**
+   * Copies `text` for a message menu item and reports the outcome in a toast.
+   * The Clipboard API is absent on a plain-http host; that shows the failure
+   * toast rather than throwing.
+   */
+  private async copyWithToast(text: string): Promise<void> {
+    if (await copyToClipboard(text)) showToast('Copied', 'success');
+    else showToast('Could not copy', 'danger');
   }
 
   /** Context menu: Set the sender agent as the thread default. */
@@ -6945,11 +7083,12 @@ export class ScionChatThread extends LitElement {
 
   /**
    * Shown in place of the composer in a thread the caller may read but not
-   * post in (no project.chat_post on its project).
+   * post in (no post action in its _capabilities); the text follows the
+   * hub's reason.
    */
   private renderReadOnlyNotice() {
     return html`<div class="read-only-notice" role="status">
-      You can read this thread, but you don't have permission to post in it.
+      ${readOnlyNoticeText(this.postDeniedReason)}
     </div>`;
   }
 
@@ -7337,6 +7476,9 @@ export class ScionChatThread extends LitElement {
         tpl: html`
           <scion-chat-message
             @contextmenu=${(e: MouseEvent) => this.handleMessageContextMenu(e, msg)}
+            @pointerdown=${(e: PointerEvent) => this.handleMessagePress(e, msg)}
+            @pointerup=${(e: PointerEvent) => this.handleMessagePress(e, msg)}
+            @pointercancel=${(e: PointerEvent) => this.handleMessagePress(e, msg)}
             @keydown=${(e: KeyboardEvent) => this.handleMessageHostKeydown(e, msg)}
             @click=${(e: MouseEvent) => this.handleMessageTap(e, msg)}
             id="msg-${msg.id}"
@@ -7557,10 +7699,9 @@ export class ScionChatThread extends LitElement {
       showToast('Conversation copied to clipboard.', 'success');
     } catch {
       // Fallback: plain text copy.
-      try {
-        await navigator.clipboard.writeText(plainText);
+      if (await copyToClipboard(plainText)) {
         showToast('Conversation copied to clipboard (plain text).', 'success');
-      } catch {
+      } else {
         showToast('Failed to copy to clipboard.', 'danger');
       }
     }

@@ -202,6 +202,43 @@ func TestProjectStorageMigrate_NFSMovesAndIsIdempotent(t *testing.T) {
 	assert.Contains(t, log, "moves=0")
 }
 
+// A workspace the storage migration moves in may hold an older image's
+// workspace-root provisioning marker (lock-drop note §3.4). A real run
+// promotes it at once, without a hub restart: afterwards the state-directory
+// sentinel exists and the workspace-root marker is gone. A dry run promotes
+// nothing.
+func TestProjectStorageMigrate_PromotesMigratedWorkspaceMarker(t *testing.T) {
+	f := newStorageMigrateFixture(t)
+	share := f.useNFS(t)
+	writeFiles(t, legacyHubProjects(t, share), map[string]string{
+		"migrate-me/README.md":                          "readme",
+		"migrate-me/" + provision.ProvisionSentinelFile: "provisioned by an older image\n",
+		"migrate-me/.scion/settings.yaml":               seedSettings(f.project.ID),
+	})
+	root := filepath.Join(share, "projects", f.project.ID)
+	stateSentinel := filepath.Join(root, provision.ProvisionStateDirName, provision.ProvisionSentinelFile)
+	rootMarker := filepath.Join(root, "workspace", provision.ProvisionSentinelFile)
+
+	log, err := runStorageMigrate(t, f.srv, true)
+	require.NoError(t, err, log)
+	assert.NoFileExists(t, stateSentinel, "a dry run promotes nothing")
+	assert.NotContains(t, log, "provisioning state promotion")
+
+	log, err = runStorageMigrate(t, f.srv, false)
+	require.NoError(t, err, log)
+	got, err := os.ReadFile(filepath.Join(root, "workspace", "README.md"))
+	require.NoError(t, err, log)
+	assert.Equal(t, "readme", string(got))
+	assert.FileExists(t, stateSentinel, "the migrated workspace is promoted without a restart\n%s", log)
+	assert.NoFileExists(t, rootMarker, "the workspace-root marker is removed")
+	assert.Contains(t, log, "provisioning state promotion: project "+f.project.ID+": promoted")
+	for _, line := range strings.Split(log, "\n") {
+		if strings.Contains(line, "provisioning state promotion") {
+			assert.NotContains(t, line, share, "the promotion's log line names no host path")
+		}
+	}
+}
+
 // the object-storage cleanup through the hub's object storage: the project's legacy copy goes once
 // the migration succeeded; per-agent objects stay.
 func TestProjectStorageMigrate_M3DeletesOnlyLegacyCopy(t *testing.T) {

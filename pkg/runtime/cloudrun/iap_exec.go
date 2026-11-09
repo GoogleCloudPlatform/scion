@@ -10,9 +10,11 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -23,9 +25,11 @@ import (
 	"sync"
 	"time"
 
+	"cloud.google.com/go/auth"
 	"cloud.google.com/go/auth/credentials"
 	resourcemanager "cloud.google.com/go/resourcemanager/apiv3"
 	resourcemanagerpb "cloud.google.com/go/resourcemanager/apiv3/resourcemanagerpb"
+	"cloud.google.com/go/run/apiv2/runpb"
 	"github.com/gorilla/websocket"
 	"golang.org/x/crypto/ssh"
 )
@@ -38,7 +42,68 @@ type IAPExecConnector struct {
 	StrictHostKeyChecking string
 	UserKnownHostsFile    string
 	SSHDebug              bool
+
+	// newInstancesClient overrides how the Instances API client used to look
+	// up the instance's service account is constructed. Nil in production
+	// (NewInstancesClient); tests inject a fake.
+	newInstancesClient func(ctx context.Context) (InstancesAPI, error)
+	// detectCredentials overrides how the token source is built. Nil in
+	// production (Application Default Credentials); tests inject a fake.
+	detectCredentials func() (tokenSource, error)
+	// lookupProjectNumber overrides how a project ID is resolved to its
+	// number. Nil in production (fetchProjectNumber); tests inject a fake.
+	lookupProjectNumber func(ctx context.Context, projectID string) (string, error)
+	// now overrides the clock used for signed key expiry. Nil in production
+	// (time.Now).
+	now func() time.Time
+	// sshRunner overrides one ssh run. Nil in production (runSSH); tests
+	// inject a fake to observe the authentication retry.
+	sshRunner func(ctx context.Context, project, location, instanceName string, cmdArgs []string, stdin io.Reader, stdout io.Writer, stderr io.Writer) error
+
+	credsMu sync.Mutex
+	creds   tokenSource
+
+	// instancesClient is created on first use and kept for the connector's
+	// lifetime; see Close.
+	clientMu        sync.Mutex
+	instancesClient InstancesAPI
+
+	mu             sync.Mutex
+	projectNumbers map[string]string
+	signedKeys     map[string]*signedKey
 }
+
+// tokenSource yields OAuth2 access tokens. *auth.Credentials implements it
+// and caches and refreshes its token internally.
+type tokenSource interface {
+	Token(ctx context.Context) (*auth.Token, error)
+}
+
+// signedKey is an SSH key pair and its OS Login certificate for one instance.
+type signedKey struct {
+	instanceUID    string
+	serviceAccount string
+	privKeyPEM     []byte
+	cert           string
+	reuseUntil     time.Time
+}
+
+const (
+	// signedKeyMinRemaining is how much validity a cached certificate must
+	// have left to be reused.
+	signedKeyMinRemaining = 60 * time.Second
+	// signedKeyDefaultValidity is assumed when the certificate's expiry
+	// cannot be read.
+	signedKeyDefaultValidity = 4 * time.Minute
+)
+
+// errSSHAuthFailed marks an ssh run rejected during public key
+// authentication.
+var errSSHAuthFailed = errors.New("SSH authentication failed")
+
+// osLoginBaseURL is the OS Login API endpoint. Tests point it at a local
+// server.
+var osLoginBaseURL = "https://oslogin.googleapis.com"
 
 func NewIAPExecConnector(iapTunnelUrlOverride string) *IAPExecConnector {
 	return &IAPExecConnector{
@@ -47,12 +112,17 @@ func NewIAPExecConnector(iapTunnelUrlOverride string) *IAPExecConnector {
 }
 
 func (c *IAPExecConnector) Connect(ctx context.Context, project, location, instanceName string) error {
-	return c.runSSH(ctx, project, location, instanceName, nil, os.Stdin, os.Stdout, os.Stderr)
+	return c.runWithAuthRetry(project, location, instanceName, true, func() error {
+		return c.runOnce(ctx, project, location, instanceName, nil, os.Stdin, os.Stdout, os.Stderr)
+	})
 }
 
 func (c *IAPExecConnector) Exec(ctx context.Context, project, location, instanceName string, cmd []string) ([]byte, error) {
 	var outBuf bytes.Buffer
-	err := c.runSSH(ctx, project, location, instanceName, cmd, nil, &outBuf, &outBuf)
+	err := c.runWithAuthRetry(project, location, instanceName, true, func() error {
+		outBuf.Reset()
+		return c.runOnce(ctx, project, location, instanceName, cmd, nil, &outBuf, &outBuf)
+	})
 	return outBuf.Bytes(), err
 }
 
@@ -60,13 +130,56 @@ func (c *IAPExecConnector) Exec(ctx context.Context, project, location, instance
 // stdin so callers can deliver secrets without putting them in cmd (which
 // becomes part of the remote command line). See #1355.
 func (c *IAPExecConnector) ExecWithStdin(ctx context.Context, project, location, instanceName string, cmd []string, stdin io.Reader) ([]byte, error) {
+	// The stdin reader cannot be replayed, so an authentication failure drops
+	// the cached key without retrying.
 	var outBuf bytes.Buffer
-	err := c.runSSH(ctx, project, location, instanceName, cmd, stdin, &outBuf, &outBuf)
+	err := c.runWithAuthRetry(project, location, instanceName, false, func() error {
+		return c.runOnce(ctx, project, location, instanceName, cmd, stdin, &outBuf, &outBuf)
+	})
 	return outBuf.Bytes(), err
 }
 
+// runOnce runs one ssh session through sshRunner, or runSSH by default.
+func (c *IAPExecConnector) runOnce(ctx context.Context, project, location, instanceName string, cmdArgs []string, stdin io.Reader, stdout io.Writer, stderr io.Writer) error {
+	if c.sshRunner != nil {
+		return c.sshRunner(ctx, project, location, instanceName, cmdArgs, stdin, stdout, stderr)
+	}
+	return c.runSSH(ctx, project, location, instanceName, cmdArgs, stdin, stdout, stderr)
+}
+
+// runWithAuthRetry runs attempt. When it fails SSH authentication, the
+// instance's cached signed key is dropped and, if retry is set, attempt runs
+// once more with a freshly signed key.
+//
+// Authentication failure is recognised from ssh's exit status 255 and
+// sshAuthFailureMarker on stderr, which the remote command shares. A remote
+// command that prints the marker and exits 255 therefore makes Connect or
+// Exec run it once more; ExecWithStdin never re-runs. Exec callers whose
+// commands are not idempotent: tmux key and paste delivery to an agent
+// (pkg/agent manager message delivery), the broker's exec endpoint, which
+// runs a caller-supplied command, and the broker's "kill -USR2 1" reload
+// signal (pkg/runtimebroker handlers).
+func (c *IAPExecConnector) runWithAuthRetry(project, location, instanceName string, retry bool, attempt func() error) error {
+	err := attempt()
+	if !errors.Is(err, errSSHAuthFailed) {
+		return err
+	}
+	c.Forget(project, location, instanceName)
+	if !retry {
+		return err
+	}
+	return attempt()
+}
+
+// Forget drops the cached signed key for the named instance.
+func (c *IAPExecConnector) Forget(project, location, instanceName string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.signedKeys, instanceResourceName(project, location, instanceShortID(instanceName)))
+}
+
 func (c *IAPExecConnector) runSSH(ctx context.Context, project, location, instanceName string, cmdArgs []string, stdin io.Reader, stdout io.Writer, stderr io.Writer) error {
-	authCreds, err := credentials.DetectDefault(&credentials.DetectOptions{})
+	authCreds, err := c.tokenSource()
 	if err != nil {
 		return fmt.Errorf("failed to detect credentials: %v", err)
 	}
@@ -75,19 +188,16 @@ func (c *IAPExecConnector) runSSH(ctx context.Context, project, location, instan
 		return fmt.Errorf("failed to retrieve auth token: %v", err)
 	}
 
-	projectNumber, err := fetchProjectNumber(ctx, project)
+	projectNumber, err := c.projectNumber(ctx, project)
 	if err != nil {
 		return fmt.Errorf("failed to resolve project number: %v", err)
 	}
 
-	shortID := instanceName
-	if idx := strings.LastIndex(instanceName, "/"); idx != -1 {
-		shortID = instanceName[idx+1:]
-	}
+	shortID := instanceShortID(instanceName)
 
-	privKeyPEM, pubKeyOpenSSH, err := generateSSHKeyPair()
+	key, err := c.signedKeyForInstance(ctx, project, location, shortID, tok.Value)
 	if err != nil {
-		return fmt.Errorf("failed to generate SSH keys: %v", err)
+		return err
 	}
 
 	tempDir, err := os.MkdirTemp("", "run-ssh-*")
@@ -97,19 +207,13 @@ func (c *IAPExecConnector) runSSH(ctx context.Context, project, location, instan
 	defer func() { _ = os.RemoveAll(tempDir) }()
 
 	privKeyPath := filepath.Join(tempDir, "id_rsa")
-	err = os.WriteFile(privKeyPath, privKeyPEM, 0600)
+	err = os.WriteFile(privKeyPath, key.privKeyPEM, 0600)
 	if err != nil {
 		return fmt.Errorf("failed to write private key: %v", err)
 	}
 
-	serviceAccount := fmt.Sprintf("%s-compute@developer.gserviceaccount.com", projectNumber)
-	signedCert, err := requestSignedCertificate(ctx, project, location, shortID, serviceAccount, string(pubKeyOpenSSH), tok.Value)
-	if err != nil {
-		return fmt.Errorf("failed to sign SSH key: %v", err)
-	}
-
 	certPath := filepath.Join(tempDir, "id_rsa-cert.pub")
-	err = os.WriteFile(certPath, []byte(signedCert), 0644)
+	err = os.WriteFile(certPath, []byte(key.cert), 0644)
 	if err != nil {
 		return fmt.Errorf("failed to write SSH certificate: %v", err)
 	}
@@ -221,16 +325,126 @@ func (c *IAPExecConnector) runSSH(ctx context.Context, project, location, instan
 	sshCmd := exec.CommandContext(ctx, "ssh", sshArgs...)
 	sshCmd.Stdin = stdin
 	sshCmd.Stdout = stdout
-	sshCmd.Stderr = stderr
+	authDetector := &authFailureDetector{}
+	sshCmd.Stderr = io.MultiWriter(stderr, authDetector)
 
 	slog.Debug("running SSH command", "user", sshUser, "host", sshHost, "port", localPort, "command_args", len(cmdArgs))
 	err = sshCmd.Run()
 	slog.Debug("SSH command finished", "error", err)
 	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 255 && authDetector.Seen() {
+			return fmt.Errorf("SSH command failed: %w: %w", errSSHAuthFailed, err)
+		}
 		return fmt.Errorf("SSH command failed: %w", err)
 	}
 
 	return nil
+}
+
+// sshAuthFailureMarker is what ssh prints to stderr when the server rejects
+// public key authentication.
+const sshAuthFailureMarker = "Permission denied (publickey"
+
+// authFailureDetector watches ssh's stderr for sshAuthFailureMarker, keeping
+// only enough trailing bytes to match it across write boundaries.
+type authFailureDetector struct {
+	mu   sync.Mutex
+	tail []byte
+	seen bool
+}
+
+func (d *authFailureDetector) Write(p []byte) (int, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.seen {
+		return len(p), nil
+	}
+	buf := append(d.tail, p...)
+	if bytes.Contains(buf, []byte(sshAuthFailureMarker)) {
+		d.seen = true
+		d.tail = nil
+		return len(p), nil
+	}
+	if keep := len(sshAuthFailureMarker) - 1; len(buf) > keep {
+		buf = buf[len(buf)-keep:]
+	}
+	d.tail = append([]byte(nil), buf...)
+	return len(p), nil
+}
+
+// Seen reports whether the marker was written.
+func (d *authFailureDetector) Seen() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.seen
+}
+
+// tokenSource returns the connector's token source, building it on first
+// use. A failed build is not cached.
+func (c *IAPExecConnector) tokenSource() (tokenSource, error) {
+	c.credsMu.Lock()
+	defer c.credsMu.Unlock()
+	if c.creds != nil {
+		return c.creds, nil
+	}
+	detect := c.detectCredentials
+	if detect == nil {
+		detect = detectDefaultCredentials
+	}
+	creds, err := detect()
+	if err != nil {
+		return nil, err
+	}
+	c.creds = creds
+	return creds, nil
+}
+
+func detectDefaultCredentials() (tokenSource, error) {
+	creds, err := credentials.DetectDefault(&credentials.DetectOptions{})
+	if err != nil {
+		return nil, err
+	}
+	return creds, nil
+}
+
+// projectNumber resolves projectID to its project number, caching successful
+// lookups per project ID.
+func (c *IAPExecConnector) projectNumber(ctx context.Context, projectID string) (string, error) {
+	c.mu.Lock()
+	number, ok := c.projectNumbers[projectID]
+	c.mu.Unlock()
+	if ok {
+		return number, nil
+	}
+
+	lookup := c.lookupProjectNumber
+	if lookup == nil {
+		lookup = fetchProjectNumber
+	}
+	number, err := lookup(ctx, projectID)
+	if err != nil {
+		return "", err
+	}
+
+	c.mu.Lock()
+	if c.projectNumbers == nil {
+		c.projectNumbers = make(map[string]string)
+	}
+	c.projectNumbers[projectID] = number
+	c.mu.Unlock()
+	return number, nil
+}
+
+func instanceShortID(instanceName string) string {
+	if idx := strings.LastIndex(instanceName, "/"); idx != -1 {
+		return instanceName[idx+1:]
+	}
+	return instanceName
+}
+
+func instanceResourceName(project, location, shortID string) string {
+	return fmt.Sprintf("projects/%s/locations/%s/instances/%s", project, location, shortID)
 }
 
 // appendRemoteCommand appends the remote command to run as a single trailing
@@ -314,8 +528,161 @@ func generateSSHKeyPair() ([]byte, []byte, error) {
 	return privKeyPEM, pubKeyOpenSSH, nil
 }
 
+// signedKeyForInstance returns an SSH key pair with an OS Login certificate
+// for the named instance, signed for the service account the instance runs
+// as. Expired signed keys are swept and the instance is looked up on every
+// call; the call fails, and drops any signed key cached for the instance,
+// when its service account cannot be determined. A signed key is reused for the same
+// instance (name and uid) and service account while its certificate has at
+// least signedKeyMinRemaining validity left.
+func (c *IAPExecConnector) signedKeyForInstance(ctx context.Context, project, location, shortID, token string) (*signedKey, error) {
+	name := instanceResourceName(project, location, shortID)
+	now := c.clock()
+	c.mu.Lock()
+	c.sweepExpiredLocked(now)
+	c.mu.Unlock()
+
+	serviceAccount, uid, err := c.instanceServiceAccount(ctx, project, location, shortID)
+	if err != nil {
+		c.mu.Lock()
+		delete(c.signedKeys, name)
+		c.mu.Unlock()
+		return nil, fmt.Errorf("failed to determine service account of instance %q: %w", shortID, err)
+	}
+
+	// The lookup takes time, so expiry is checked again against a fresh
+	// clock reading.
+	c.mu.Lock()
+	if k, ok := c.signedKeys[name]; ok && k.instanceUID == uid && k.serviceAccount == serviceAccount && c.clock().Before(k.reuseUntil) {
+		c.mu.Unlock()
+		return k, nil
+	}
+	c.mu.Unlock()
+
+	privKeyPEM, pubKeyOpenSSH, err := generateSSHKeyPair()
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate SSH keys: %v", err)
+	}
+	signedCert, err := requestSignedCertificate(ctx, project, location, shortID, serviceAccount, string(pubKeyOpenSSH), token)
+	if err != nil {
+		return nil, fmt.Errorf("failed to sign SSH key: %v", err)
+	}
+
+	now = c.clock()
+	k := &signedKey{
+		instanceUID:    uid,
+		serviceAccount: serviceAccount,
+		privKeyPEM:     privKeyPEM,
+		cert:           signedCert,
+		reuseUntil:     certExpiry(signedCert, now).Add(-signedKeyMinRemaining),
+	}
+	if k.reuseUntil.After(now) {
+		c.mu.Lock()
+		if c.signedKeys == nil {
+			c.signedKeys = make(map[string]*signedKey)
+		}
+		c.signedKeys[name] = k
+		c.mu.Unlock()
+	}
+	return k, nil
+}
+
+// instanceServiceAccount returns the service account and uid of the named
+// instance, read from the Instances API. It fails when the instance reports
+// no service account.
+func (c *IAPExecConnector) instanceServiceAccount(ctx context.Context, project, location, shortID string) (string, string, error) {
+	inst, err := c.getInstance(ctx, project, location, shortID)
+	if err != nil {
+		return "", "", err
+	}
+	if inst.GetServiceAccount() == "" {
+		return "", "", errors.New("instance reports no service account")
+	}
+	return inst.GetServiceAccount(), inst.GetUid(), nil
+}
+
+// getInstance reads the named instance from the Instances API.
+func (c *IAPExecConnector) getInstance(ctx context.Context, project, location, shortID string) (*runpb.Instance, error) {
+	client, err := c.instancesAPI(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create Instances API client: %w", err)
+	}
+
+	inst, err := client.GetInstance(ctx, &runpb.GetInstanceRequest{Name: instanceResourceName(project, location, shortID)})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get instance: %w", err)
+	}
+	return inst, nil
+}
+
+// instancesAPI returns the connector's Instances API client, creating it on
+// first use. The client outlives the call that creates it, so it is created
+// with ctx's values but without its cancellation. A failed creation is not
+// cached.
+func (c *IAPExecConnector) instancesAPI(ctx context.Context) (InstancesAPI, error) {
+	c.clientMu.Lock()
+	defer c.clientMu.Unlock()
+	if c.instancesClient != nil {
+		return c.instancesClient, nil
+	}
+	newClient := c.newInstancesClient
+	if newClient == nil {
+		newClient = NewInstancesClient
+	}
+	client, err := newClient(context.WithoutCancel(ctx))
+	if err != nil {
+		return nil, err
+	}
+	c.instancesClient = client
+	return client, nil
+}
+
+// Close releases the connector's Instances API client, if one was created.
+// The cached client lives as long as the connector, which for the Cloud Run
+// runtime is the lifetime of the process. Close exists for callers that own a
+// shorter-lived connector.
+func (c *IAPExecConnector) Close() error {
+	c.clientMu.Lock()
+	defer c.clientMu.Unlock()
+	if c.instancesClient == nil {
+		return nil
+	}
+	err := c.instancesClient.Close()
+	c.instancesClient = nil
+	return err
+}
+
+// sweepExpiredLocked drops cached signed keys that may no longer be reused.
+// c.mu must be held.
+func (c *IAPExecConnector) sweepExpiredLocked(now time.Time) {
+	for name, k := range c.signedKeys {
+		if !now.Before(k.reuseUntil) {
+			delete(c.signedKeys, name)
+		}
+	}
+}
+
+func (c *IAPExecConnector) clock() time.Time {
+	if c.now != nil {
+		return c.now()
+	}
+	return time.Now()
+}
+
+// certExpiry returns when the OpenSSH certificate stops being valid, or
+// signedKeyDefaultValidity after now when that cannot be read.
+func certExpiry(cert string, now time.Time) time.Time {
+	pub, _, _, _, err := ssh.ParseAuthorizedKey([]byte(cert))
+	if err == nil {
+		if sshCert, ok := pub.(*ssh.Certificate); ok && sshCert.ValidBefore != ssh.CertTimeInfinity && sshCert.ValidBefore <= math.MaxInt64 {
+			return time.Unix(int64(sshCert.ValidBefore), 0)
+		}
+	}
+	return now.Add(signedKeyDefaultValidity)
+}
+
 func requestSignedCertificate(ctx context.Context, projectID, region, instanceID, serviceAccount, publicKey, token string) (string, error) {
-	url := fmt.Sprintf("https://oslogin.googleapis.com/v1beta/projects/%s/locations/%s:signSshPublicKey", projectID, region)
+	url := fmt.Sprintf("%s/v1beta/projects/%s/locations/%s:signSshPublicKey", osLoginBaseURL, projectID, region)
 
 	bodyData := map[string]string{
 		"sshPublicKey":     publicKey,

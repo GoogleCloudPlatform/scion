@@ -659,6 +659,26 @@ func (_u *AgentUpdate) ClearAppliedConfig() *AgentUpdate {
 	return _u
 }
 
+// SetEffectiveConfig sets the "effective_config" field.
+func (_u *AgentUpdate) SetEffectiveConfig(v string) *AgentUpdate {
+	_u.mutation.SetEffectiveConfig(v)
+	return _u
+}
+
+// SetNillableEffectiveConfig sets the "effective_config" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableEffectiveConfig(v *string) *AgentUpdate {
+	if v != nil {
+		_u.SetEffectiveConfig(*v)
+	}
+	return _u
+}
+
+// ClearEffectiveConfig clears the value of the "effective_config" field.
+func (_u *AgentUpdate) ClearEffectiveConfig() *AgentUpdate {
+	_u.mutation.ClearEffectiveConfig()
+	return _u
+}
+
 // SetPendingConfig sets the "pending_config" field.
 func (_u *AgentUpdate) SetPendingConfig(v string) *AgentUpdate {
 	_u.mutation.SetPendingConfig(v)
@@ -898,6 +918,26 @@ func (_u *AgentUpdate) SetNillableLaunchID(v *string) *AgentUpdate {
 // ClearLaunchID clears the value of the "launch_id" field.
 func (_u *AgentUpdate) ClearLaunchID() *AgentUpdate {
 	_u.mutation.ClearLaunchID()
+	return _u
+}
+
+// SetLaunchRunID sets the "launch_run_id" field.
+func (_u *AgentUpdate) SetLaunchRunID(v string) *AgentUpdate {
+	_u.mutation.SetLaunchRunID(v)
+	return _u
+}
+
+// SetNillableLaunchRunID sets the "launch_run_id" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableLaunchRunID(v *string) *AgentUpdate {
+	if v != nil {
+		_u.SetLaunchRunID(*v)
+	}
+	return _u
+}
+
+// ClearLaunchRunID clears the value of the "launch_run_id" field.
+func (_u *AgentUpdate) ClearLaunchRunID() *AgentUpdate {
+	_u.mutation.ClearLaunchRunID()
 	return _u
 }
 
@@ -2145,6 +2185,12 @@ func (_u *AgentUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	if _u.mutation.AppliedConfigCleared() {
 		_spec.ClearField(agent.FieldAppliedConfig, field.TypeString)
 	}
+	if value, ok := _u.mutation.EffectiveConfig(); ok {
+		_spec.SetField(agent.FieldEffectiveConfig, field.TypeString, value)
+	}
+	if _u.mutation.EffectiveConfigCleared() {
+		_spec.ClearField(agent.FieldEffectiveConfig, field.TypeString)
+	}
 	if value, ok := _u.mutation.PendingConfig(); ok {
 		_spec.SetField(agent.FieldPendingConfig, field.TypeString, value)
 	}
@@ -2219,6 +2265,12 @@ func (_u *AgentUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if _u.mutation.LaunchIDCleared() {
 		_spec.ClearField(agent.FieldLaunchID, field.TypeString)
+	}
+	if value, ok := _u.mutation.LaunchRunID(); ok {
+		_spec.SetField(agent.FieldLaunchRunID, field.TypeString, value)
+	}
+	if _u.mutation.LaunchRunIDCleared() {
+		_spec.ClearField(agent.FieldLaunchRunID, field.TypeString)
 	}
 	if value, ok := _u.mutation.RunID(); ok {
 		_spec.SetField(agent.FieldRunID, field.TypeString, value)
@@ -3320,6 +3372,26 @@ func (_u *AgentUpdateOne) ClearAppliedConfig() *AgentUpdateOne {
 	return _u
 }
 
+// SetEffectiveConfig sets the "effective_config" field.
+func (_u *AgentUpdateOne) SetEffectiveConfig(v string) *AgentUpdateOne {
+	_u.mutation.SetEffectiveConfig(v)
+	return _u
+}
+
+// SetNillableEffectiveConfig sets the "effective_config" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableEffectiveConfig(v *string) *AgentUpdateOne {
+	if v != nil {
+		_u.SetEffectiveConfig(*v)
+	}
+	return _u
+}
+
+// ClearEffectiveConfig clears the value of the "effective_config" field.
+func (_u *AgentUpdateOne) ClearEffectiveConfig() *AgentUpdateOne {
+	_u.mutation.ClearEffectiveConfig()
+	return _u
+}
+
 // SetPendingConfig sets the "pending_config" field.
 func (_u *AgentUpdateOne) SetPendingConfig(v string) *AgentUpdateOne {
 	_u.mutation.SetPendingConfig(v)
@@ -3559,6 +3631,26 @@ func (_u *AgentUpdateOne) SetNillableLaunchID(v *string) *AgentUpdateOne {
 // ClearLaunchID clears the value of the "launch_id" field.
 func (_u *AgentUpdateOne) ClearLaunchID() *AgentUpdateOne {
 	_u.mutation.ClearLaunchID()
+	return _u
+}
+
+// SetLaunchRunID sets the "launch_run_id" field.
+func (_u *AgentUpdateOne) SetLaunchRunID(v string) *AgentUpdateOne {
+	_u.mutation.SetLaunchRunID(v)
+	return _u
+}
+
+// SetNillableLaunchRunID sets the "launch_run_id" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableLaunchRunID(v *string) *AgentUpdateOne {
+	if v != nil {
+		_u.SetLaunchRunID(*v)
+	}
+	return _u
+}
+
+// ClearLaunchRunID clears the value of the "launch_run_id" field.
+func (_u *AgentUpdateOne) ClearLaunchRunID() *AgentUpdateOne {
+	_u.mutation.ClearLaunchRunID()
 	return _u
 }
 
@@ -4836,6 +4928,12 @@ func (_u *AgentUpdateOne) sqlSave(ctx context.Context) (_node *Agent, err error)
 	if _u.mutation.AppliedConfigCleared() {
 		_spec.ClearField(agent.FieldAppliedConfig, field.TypeString)
 	}
+	if value, ok := _u.mutation.EffectiveConfig(); ok {
+		_spec.SetField(agent.FieldEffectiveConfig, field.TypeString, value)
+	}
+	if _u.mutation.EffectiveConfigCleared() {
+		_spec.ClearField(agent.FieldEffectiveConfig, field.TypeString)
+	}
 	if value, ok := _u.mutation.PendingConfig(); ok {
 		_spec.SetField(agent.FieldPendingConfig, field.TypeString, value)
 	}
@@ -4910,6 +5008,12 @@ func (_u *AgentUpdateOne) sqlSave(ctx context.Context) (_node *Agent, err error)
 	}
 	if _u.mutation.LaunchIDCleared() {
 		_spec.ClearField(agent.FieldLaunchID, field.TypeString)
+	}
+	if value, ok := _u.mutation.LaunchRunID(); ok {
+		_spec.SetField(agent.FieldLaunchRunID, field.TypeString, value)
+	}
+	if _u.mutation.LaunchRunIDCleared() {
+		_spec.ClearField(agent.FieldLaunchRunID, field.TypeString)
 	}
 	if value, ok := _u.mutation.RunID(); ok {
 		_spec.SetField(agent.FieldRunID, field.TypeString, value)

@@ -23,11 +23,13 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/version"
 	yamlv3 "gopkg.in/yaml.v3"
@@ -119,6 +121,13 @@ type ServerConfigResponse struct {
 	// it cannot be shown safely) and whether the hub runs with that value.
 	// Additive: EnvOverrides is unchanged.
 	EnvValues map[string]EnvKeyValue `json:"env_values,omitempty"`
+
+	// RunningValues maps the server keys that start-up sets after the
+	// settings load (a workstation default or a command-line flag) to the
+	// value this node runs with, where it differs from the value shown
+	// (ptone/scion#3722). Read-only; a secret key never has an entry. See
+	// startupRunningValues.
+	RunningValues map[string]RunningKeyValue `json:"running_values,omitempty"`
 
 	// StorageOverrideErrors lists, read-only, the removed per-runtime or
 	// per-profile storage overrides the settings file (as read at startup)
@@ -361,11 +370,42 @@ func (s *Server) handleAdminServerConfigSectionReset(w http.ResponseWriter, r *h
 	// before the reset like a GCP permission-check change, and the reset is
 	// not made if the record cannot be written. A seeded row holds no saved
 	// value, so resetting it records nothing.
-	publicURLBefore := ""
+	// A failure records every change already recorded as not applied
+	// (endpointURLAudits).
+	endpointAudits := &endpointURLAudits{s: s, ctx: r.Context(), surface: gcpIAMSurfaceReset}
 	if sectionName == "endpoints" {
-		if publicURLBefore = storedManagedPublicURL(ops); publicURLBefore != "" {
-			if err := s.auditPublicURLChange(r.Context(), gcpIAMSurfaceReset, publicURLBefore, ""); err != nil {
+		if publicURLBefore := storedManagedPublicURL(ops); publicURLBefore != "" {
+			if err := endpointAudits.record(config.PublicURLKey, publicURLBefore, ""); err != nil {
 				slog.Error("Failed to record public URL change", "error", err)
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+					"Failed to reset section", nil)
+				return
+			}
+		}
+	}
+
+	// It changes the content host in effect when the row sets one other
+	// than the bootstrap value: recorded before the reset in the same way
+	// (ptone/scion#7107 phase A).
+	if sectionName == "endpoints" {
+		contentURLBefore, contentURLAfter := ops.Snapshot().ContentURL, ops.bootstrapContentURL()
+		if contentURLBefore != contentURLAfter {
+			if err := endpointAudits.record(config.ContentURLKey, contentURLForAudit(contentURLBefore), contentURLForAudit(contentURLAfter)); err != nil {
+				slog.Error("Failed to record content URL change", "error", err)
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+					"Failed to reset section", nil)
+				return
+			}
+		}
+	}
+
+	// So does a change to the same-site override in effect (phase B item 1).
+	if sectionName == "endpoints" {
+		allowSameSiteBefore := strconv.FormatBool(ops.Snapshot().ContentURLAllowSameSite)
+		allowSameSiteAfter := strconv.FormatBool(ops.bootstrapContentURLAllowSameSite())
+		if allowSameSiteBefore != allowSameSiteAfter {
+			if err := endpointAudits.record(config.ContentURLAllowSameSiteKey, allowSameSiteBefore, allowSameSiteAfter); err != nil {
+				slog.Error("Failed to record content URL same-site override change", "error", err)
 				writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 					"Failed to reset section", nil)
 				return
@@ -383,8 +423,8 @@ func (s *Server) handleAdminServerConfigSectionReset(w http.ResponseWriter, r *h
 	} else {
 		err = ops.DeleteSection(r.Context(), sectionName)
 	}
-	if publicURLBefore != "" && err != nil {
-		s.auditPublicURLNotApplied(r.Context(), gcpIAMSurfaceReset, publicURLBefore, "", err)
+	if err != nil {
+		endpointAudits.notApplied(err)
 	}
 	if gcpIAMChange {
 		// The approval covers only this reset's own self-apply.
@@ -456,6 +496,7 @@ func buildServerConfigFileResponse(startup *config.V1ServerConfig) (*ServerConfi
 				resp.EnvOverrides = envOverrides
 			}
 			resp.EnvValues = fileTierEnvValues(envK, resp.EnvOverrides, startup, nil)
+			resp.RunningValues = startupRunningValues(envK, startup, &resp)
 			return &resp, nil
 		}
 		return nil, &serverConfigReadError{"Failed to read settings file", err}
@@ -486,6 +527,8 @@ func buildServerConfigFileResponse(startup *config.V1ServerConfig) (*ServerConfi
 		resp.EnvOverrides = envOverrides
 	}
 	resp.EnvValues = fileTierEnvValues(envK, resp.EnvOverrides, startup, stored)
+	// Compared with the unmasked view, so before the masking below.
+	resp.RunningValues = startupRunningValues(envK, startup, &resp)
 
 	maskSensitiveFields(&resp)
 	return &resp, nil
@@ -593,6 +636,11 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 	if !validateMonitoringDashboardURLRequest(w, &req) {
 		return
 	}
+	// The content host: the same check as the DB path, against the running
+	// agent endpoint and the one this save sends (S2).
+	if !validateContentURLRequest(w, &req, s.HubEndpoints().Public, contentURLAllowSameSiteAfter(&req, s.contentURLAllowSameSiteLiveValue()), s.config.AgentEndpoint, requestAgentEndpoint(&req)) {
+		return
+	}
 
 	// server.auth.default_user_role must be one of the schema enum values
 	// (design D6). The DB path validates section docs against the schema;
@@ -683,7 +731,11 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 		Runtimes map[string]config.V1RuntimeConfig `yaml:"runtimes"`
 		Profiles map[string]config.V1ProfileConfig `yaml:"profiles"`
 	}
+	// The file as read, before the merge: the content URL audit below
+	// compares its content_url with the merged file's (S1).
+	var settingsBefore []byte
 	if data, err := os.ReadFile(settingsPath); err == nil {
+		settingsBefore = data
 		if err := yamlv3.Unmarshal(data, &raw); err != nil {
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to parse existing settings", nil)
 			return
@@ -692,6 +744,15 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	if raw == nil {
 		raw = make(map[string]interface{})
+	}
+
+	// image_tag is refused while its experiment is off, as on the database
+	// path: a save that sets or changes a profile's image_tag against the
+	// stored settings.yaml gets 412 experiment_disabled (ptone/scion#6625).
+	// An echo of the stored value, or a clear, passes.
+	if req.Profiles != nil && !s.experimentEnabled(experiments.ImageTagSetting) && profileMapsSetImageTag(req.Profiles, stored.Profiles) {
+		writeImageTagExperimentDisabled(w)
+		return
 	}
 
 	// GET masks secrets and clients send the GET body back on save: restore
@@ -766,18 +827,31 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Validate the effective hub default GCP identity (the merged result, so
-	// a PUT that changes only one of the pair is checked against the other's
-	// stored value). Same checks as the DB-mode handler.
-	if req.DefaultGCPIdentityMode != nil || req.DefaultGCPIdentityServiceAccountID != nil {
-		mode, _ := raw["default_gcp_identity_mode"].(string)
-		saID, _ := raw["default_gcp_identity_service_account_id"].(string)
-		if !s.validateHubDefaultGCPIdentity(w, r.Context(), opsettings.AgentDefaultsSettings{
-			DefaultGCPIdentityMode:             mode,
-			DefaultGCPIdentityServiceAccountID: saID,
-		}) {
+	// Start-claim timing (server.hub.start_*): the same check, ranges and 422
+	// as the DB-mode handler (validateStartClaimSettingStrings, against the
+	// startup value), on the merged settings.yaml values, whenever the save
+	// sends any of the keys. Without it an out-of-range value would be
+	// written and listed as applied while the hub keeps the default
+	// (ptone/scion#3925).
+	if startClaimKeysSent(rawBody) {
+		if err := validateStartClaimSettingStrings(s.config.StartClaim, fileStartClaimLifecycle(raw)); err != nil {
+			writeSettingsFieldError(w, startClaimErrorField(err), err.Error())
 			return
 		}
+	}
+
+	// Validate the effective hub default GCP identity: the merged result, so
+	// a PUT that changes only one of the pair is checked against the other's
+	// stored value, with each key the environment sets taken from the
+	// environment, because in this mode the environment value is the one in
+	// effect (ptone/scion#3071). Same checks as the DB-mode handler.
+	var gcpIdentityWarning string
+	if req.DefaultGCPIdentityMode != nil || req.DefaultGCPIdentityServiceAccountID != nil {
+		envK := config.LoadEnvKoanf()
+		if !s.validateHubDefaultGCPIdentity(w, r.Context(), effectiveFileGCPIdentity(envK, raw)) {
+			return
+		}
+		gcpIdentityWarning = s.storedGCPIdentityPinWarning(r.Context(), envK, raw)
 	}
 
 	// Validate the hub default timezone (IANA name check) before writing.
@@ -830,8 +904,41 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	saveWarnings = append(saveWarnings, resourceQuantityWarnings(qWarnings)...)
 	saveWarnings = append(saveWarnings, runtimeMergeWarnings...)
+	if gcpIdentityWarning != "" {
+		saveWarnings = append(saveWarnings, gcpIdentityWarning)
+	}
+
+	// A change to the content host in effect is recorded before the write,
+	// as in database mode; if the record cannot be written, nothing is
+	// written (ptone/scion#7107 phase A, SEC-A1).
+	// The values compared are the file's content_url before the merge and
+	// the merged file's, so a clear through null or a "hub": null is
+	// recorded too, whatever the request names (SEC-A2), and a value that
+	// comes only from the environment never looks like a change (S1).
+	// A failure records every change already recorded as not applied
+	// (endpointURLAudits).
+	fileAudits := &endpointURLAudits{s: s, ctx: r.Context(), surface: gcpIAMSurfaceSave}
+	fileContentURLBefore, fileContentURLAfter := contentURLFileChange(settingsBefore, newData)
+	if fileContentURLBefore != fileContentURLAfter {
+		if err := fileAudits.record(config.ContentURLKey, contentURLForAudit(fileContentURLBefore), contentURLForAudit(fileContentURLAfter)); err != nil {
+			slog.Error("PUT server-config: failed to record content URL change", "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to write settings file", nil)
+			return
+		}
+	}
+
+	// And the same-site override, compared in the file the same way.
+	fileAllowSameSiteBefore, fileAllowSameSiteAfter := fileContentURLAllowSameSite(settingsBefore), fileContentURLAllowSameSite(newData)
+	if fileAllowSameSiteBefore != fileAllowSameSiteAfter {
+		if err := fileAudits.record(config.ContentURLAllowSameSiteKey, fileAllowSameSiteBefore, fileAllowSameSiteAfter); err != nil {
+			slog.Error("PUT server-config: failed to record content URL same-site override change", "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to write settings file", nil)
+			return
+		}
+	}
 
 	if err := config.WriteSettingsFileLocked(settingsLock, settingsPath, newData); err != nil {
+		fileAudits.notApplied(err)
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to write settings file", nil)
 		return
 	}

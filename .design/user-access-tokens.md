@@ -193,8 +193,8 @@ The plaintext `token` value is shown **only once** in the create response.
 ### CLI Commands
 
 ```
-scion hub token create --grove <grove> --name <name> --scopes <scope,...> [--expires <duration|date>]
-scion hub token list [--grove <grove>]
+scion hub token create --project <project> --name <name> --scopes <scope,...> [--expires <duration|date>]
+scion hub token list [--project <project>]
 scion hub token revoke <token-id>
 scion hub token delete <token-id>
 ```
@@ -204,7 +204,7 @@ scion hub token delete <token-id>
 ```bash
 # Create a token for CI that can dispatch and monitor agents, expires in 90 days
 scion hub token create \
-  --grove my-project \
+  --project my-project \
   --name "github-actions" \
   --scopes agent:dispatch,agent:read,agent:stop \
   --expires 90d
@@ -217,7 +217,7 @@ scion hub token revoke tok_abc123
 
 # Use the token in CI
 export SCION_HUB_TOKEN=scion_pat_...
-scion hub agent dispatch --grove my-project --template default --task "Run tests"
+scion hub agent dispatch --project my-project --template default --task "Run tests"
 ```
 
 ### Web UI

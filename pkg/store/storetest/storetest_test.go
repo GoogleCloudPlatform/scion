@@ -132,6 +132,14 @@ func TestCompositeStore_RuntimeBrokerPresentation(t *testing.T) {
 	storetest.RuntimeBrokerPresentationConformance(t, compositeFactory)
 }
 
+// TestCompositeStore_RuntimeBrokerConversionPlan runs the conversion plan
+// write conformance check (SetRuntimeBrokerConversionPlan, and the full-row
+// writers that must not touch its columns) on whichever backend
+// compositeFactory selects.
+func TestCompositeStore_RuntimeBrokerConversionPlan(t *testing.T) {
+	storetest.RuntimeBrokerConversionPlanConformance(t, compositeFactory)
+}
+
 // TestCompositeStore_RuntimeBrokerCursorPagination is a targeted conformance
 // case, not part of the generic CRUD-parity oracle above: the oracle's
 // pagination category (storetest's internal testPaginate) only checks a

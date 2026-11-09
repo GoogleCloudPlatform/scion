@@ -339,11 +339,10 @@ runtime_broker  <  hub  <  project  <  user
 ```
 
 The order is stated in one place in the code, the `envScopePrecedence` list, and **every consumer**
-derives its order from it: the resolver (`resolveEnvFromStorage`), the provenance reporter that
-tells `scion hub env list` where a value came from (`buildEnvSources`), the startup shadow warning
-(`WarnOutrankedBrokerEnvKeys`), and the env-gather provenance reporter
-(`Server.buildEnvGatherResponse`). Changing the list is the only edit needed to change the
-**resolution** order and both provenance labels.
+derives its order from it: the resolver (`resolveEnvFromStorage`), the storage step of the agent
+`TZ` chain (`resolveStorageTZ`), the startup shadow warning (`WarnOutrankedBrokerEnvKeys`), and the
+env-gather provenance reporter (`Server.buildEnvGatherResponse`). Changing the list is the only edit
+needed to change the **resolution** order and the provenance label.
 
 The env-gather reporter labels each key the Hub supplied with the source whose value won the
 dispatch merge:
@@ -1239,6 +1238,97 @@ that echoes the value it shows, stores nothing. At the top level, the field show
 or else this Hub replica's settings-file value, and never an environment value. Saving the value
 shown does not pin it; change it once to pin it. A profile's field shows only a saved value, so
 typing any value into it saves that value.
+
+### Image tag (experimental)
+
+A set `image_tag` is behind the `hub.image_tag_setting` [experiment](/scion/reference/experiments/)
+(off by default). The bundled agent images are tagged `latest`. When `image_tag` is unset, a
+release build of the Hub (`vX.Y.Z`, `vX.Y.Z-preview.N` or `vX.Y.Z-rc.N`) uses its own version as
+the tag instead (the `hub.image_tag_version_default` experiment, on by default), so a Homebrew or
+release install runs the images published for its release. `image_tag` selects another tag (see
+"Build images for a release" in `image-build/README.md`):
+
+| Value | Effect |
+| :--- | :--- |
+| unset or `""` | The version default: a release build of the Hub uses its own version (for example `v0.3.0-preview.5`); any other build (development, nightly, or a build without a release version) makes no change. Off while `hub.image_tag_version_default` is off. |
+| `version` | The Hub binary's release version; `latest` for any other build. |
+| `latest` | Keeps `latest`: the opt-out from the version default. |
+| any other value | That literal tag. It must be a valid image tag: letters, digits, `_`, `.` and `-`, at most 128 characters, not starting with `.` or `-`, with no surrounding spaces. `scion config set image_tag` refuses anything else and leaves the settings file unchanged. |
+
+The tag applies only to a short-form `scion-*` image (no registry host) whose tag is `latest` or
+absent. An image with another explicit tag, a digest, or a registry host is left alone, with one
+exception: an image that is exactly `<image_registry>/scion-<name>`, tagged `latest` or untagged
+(the form the image registry rewrite produces), is retagged too. The tag is applied before the
+[image registry](#image-registry-order) prefix, so with both set, `scion-claude:latest` becomes
+`<image_registry>/scion-claude:<tag>`.
+
+Its order follows the image registry order, with two differences: the environment layer is the
+Hub's own, and the Hub stores `image_tag` only per profile, so there is no Hub top-level layer:
+
+| Rank | Layer | Where it comes from |
+| :--- | :--- | :--- |
+| 1 | Hub env | `SCION_IMAGE_TAG` of the Hub process |
+| 2 | Hub profile | `profiles.<name>.image_tag` saved in the Hub's settings |
+| 3 | File profile | `profiles.<name>.image_tag` in the settings file |
+| 4 | File top level | `image_tag` in the settings file |
+| 5 | Default | unset: the version default on a release build, else images keep their tag |
+
+An agent resolves the layers for its profile; an agent with no profile uses its Runtime Broker's
+default profile (when that profile is in the Hub's profile catalog). If the catalog holds a single
+profile, that profile is used even when the broker's default differs or is empty. An agent on a flat Runtime
+Broker, which has no profiles, uses the Hub-scope value and receives the tag with each dispatch.
+Image checks and pulls the Hub runs itself (the harness-config image status, check and pull, and
+the system image pull) use the Hub-scope value: the Hub env, then the file top level.
+
+Where the tag is applied:
+
+- The Hub applies it, then the image registry, to an image the user chose explicitly (`--image`),
+  and sends the resolved tag with every create, start, resume and restart. The Runtime Broker
+  applies it to the image it resolves from the template, harness config or settings, before its
+  local-image check (so a locally built `scion-<name>:<tag>` is used) and before the registry
+  rewrite.
+- A reincarnated agent records the tagged image. Its reincarnation plan shows the move from
+  `latest` to the tag as an image change.
+- Maintenance image builds and `POST /api/v1/system/images/build` keep `latest`.
+
+Notes:
+
+- Unlike `SCION_IMAGE_REGISTRY`, a Runtime Broker's own `SCION_IMAGE_TAG` is not a layer. The Hub
+  resolves the tag, expanding `version` to its own version, and sends the result with each
+  dispatch, so the Hub alone decides which images its agents run. A Runtime Broker older than
+  this setting ignores the tag it is sent: explicit images still arrive tagged by the Hub, and
+  the images it resolves itself keep their tag.
+- The version default applies the same rules: an image named explicitly with
+  `--image scion-claude:latest`, or a bare `scion-claude`, is retagged to `scion-claude:<version>`.
+  To keep `latest`, set `image_tag: latest` (`scion config set --global image_tag latest`, then
+  restart the server). To turn the default off for the whole Hub, run
+  `scion hub experiments disable hub.image_tag_version_default`, or switch it off under
+  **Admin → Server Config → Experiments**. The release version comes from the build's version
+  stamp only: a build of a tagged commit with local changes counts as that release.
+- While `hub.image_tag_setting` is off, a set `image_tag` is not applied: image references keep
+  their tags, and the set value suppresses the version default. A Hub settings save that sets or changes a profile's `image_tag`, in
+  database or settings-file mode, is refused with `412 experiment_disabled` naming the experiment
+  (saving the stored value back, or clearing it, still works), and a value other than `latest` in
+  the environment, a settings file or a saved Hub profile is reported with a startup warning
+  (`latest`, the opt-out, is logged at Info).
+- The Hub logs the Hub-scope value and its source (`env`, `settings_file` or `unset`), the
+  experiment state and the tag applied, plus, for every profile that sets its own `image_tag`, that
+  profile's value, source (`env`, `hub_settings_profile` or `settings_file_profile`) and tag. It
+  logs once at startup (`image_tag resolved`) and again whenever any of these changes
+  (`image_tag changed`), a save of one profile's value included.
+- `SCION_IMAGE_TAG` is also a variable of `scripts/cloudrun/deploy.sh` (and the Terraform HA
+  runbook), where it selects the tag of the Hub's own image (`hub:${SCION_IMAGE_TAG:-latest}`).
+  The script does not pass it to the Hub process, so setting it there does not set the Hub's
+  `image_tag`, and the Hub's `image_tag` does not change which Hub image the script deploys. To
+  run agents on images that match the deployed Hub, set `image_tag: version`.
+- Saved Hub profiles show and keep only values saved in the Hub. As with `image_registry`, a
+  profile `image_tag` copied from the settings file is never shown in the Hub's profile settings,
+  and saving the profiles does not turn it into a saved Hub value, so a later edit of the settings
+  file still applies.
+- A flat Runtime Broker instance has no `image_tag`; converting a profile that sets one reports
+  it as not converted.
+- With `version`, moving the Hub to a new version makes new agents request images with that
+  version's tag. Missing images are reported by the image check; build them first.
 
 ---
 

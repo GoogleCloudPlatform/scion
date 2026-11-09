@@ -237,11 +237,14 @@ func (c *listFilterCollector) summary() (store.DecisionAuditListFilter, string, 
 // runs the route, chain and permission checks of a delegated request for
 // permissionID (the operation's primary permission), resolves the
 // authorizing user's own list scope for it and intersects that with the
-// grant boundary. It writes the request's primary decision record and sets
-// the request's list admission. Any failure, and an empty scope, is a
+// grant boundary. When narrowProject is set (the project form of a list,
+// GET /api/v1/projects/{p}/agents), the scope is further intersected with
+// that one project before its mode is decided, so it is Explicit {P} or
+// None. It writes the request's primary decision record and sets the
+// request's list admission. Any failure, and an empty scope, is a
 // delegatedListNone scope with a deny record; err is set only for a server
 // error, after which the caller still answers with an empty list.
-func (s *Server) delegatedListScope(ctx context.Context, d *DelegatedAgentIdentity, resourceType, permissionID string) (delegatedListScope, error) {
+func (s *Server) delegatedListScope(ctx context.Context, d *DelegatedAgentIdentity, resourceType, permissionID, narrowProject string) (delegatedListScope, error) {
 	a := s.authzService
 	none := delegatedListScope{Mode: delegatedListNone}
 	request := AuthzRequest{
@@ -288,6 +291,17 @@ func (s *Server) delegatedListScope(ctx context.Context, d *DelegatedAgentIdenti
 	default:
 		deny(agentDelegationCodeGrantBoundaryInvalid)
 		return none, nil
+	}
+	if narrowProject != "" {
+		// When the issuer's own scope holds the project but the grant boundary
+		// removes it, the boundary is the reason, not the issuer's authority.
+		issuerHolds := !issuerScope.Scopes.Intersection(ScopeSetExplicit(narrowProject)).IsNone() &&
+			!slices.Contains(issuerScope.ExcludedProjectIDs, narrowProject)
+		scopes = scopes.Intersection(ScopeSetExplicit(narrowProject))
+		if scopes.IsNone() && issuerHolds {
+			deny(agentDelegationCodeOutsideBoundary)
+			return none, nil
+		}
 	}
 
 	scope := delegatedListScope{Mode: delegatedListExplicit}
@@ -517,7 +531,7 @@ func (s *Server) listAgentsDelegated(w http.ResponseWriter, r *http.Request, d *
 	// empty list plus the arm's deny record (.design/agent-delegation.md
 	// §11.8: any error denies, an empty list plus a decision audit), never a
 	// 403 that would tell the caller which check failed.
-	scope, err := s.delegatedListScope(ctx, d, "agent", "agent.list")
+	scope, err := s.delegatedListScope(ctx, d, "agent", "agent.list", "")
 	if err != nil {
 		slog.WarnContext(ctx, "listAgentsDelegated: list scope failed; answering an empty list", "error", err)
 	}

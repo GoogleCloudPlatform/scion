@@ -33,13 +33,15 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 // hubInstanceListStore serves ListHubInstances from rows (or err), counts
-// the reads, and blocks each read until release is closed when set.
+// the reads, blocks each read until release is closed when set, and panics
+// on the next read when panicNext is set.
 type hubInstanceListStore struct {
 	store.Store
 	mu      sync.Mutex
@@ -48,10 +50,15 @@ type hubInstanceListStore struct {
 	err     error
 	reads   atomic.Int32
 	release chan struct{}
+	// panicNext makes the next read panic (once).
+	panicNext atomic.Bool
 }
 
 func (s *hubInstanceListStore) ListHubInstances(_ context.Context, _ time.Duration) ([]store.HubInstance, time.Time, error) {
 	s.reads.Add(1)
+	if s.panicNext.CompareAndSwap(true, false) {
+		panic("registry read exploded")
+	}
 	s.mu.Lock()
 	release := s.release
 	s.mu.Unlock()
@@ -209,9 +216,9 @@ func TestAsyncStartGate_CachedAndRefreshedInBackground(t *testing.T) {
 }
 
 // TestAsyncStartGate_ExpiredAnswerNotUsed pins that an answer
-// older than asyncStartGateMaxAge (an idle gate) is not used. The start
-// reads false while the refresh runs, and the refreshed answer is used once
-// it lands.
+// older than asyncStartGateMaxAge is not used when nothing refreshed it
+// (no refresh loop, as when refreshes stall). The start reads false while
+// the refresh runs, and the refreshed answer is used once it lands.
 func TestAsyncStartGate_ExpiredAnswerNotUsed(t *testing.T) {
 	now := time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
 	clock := now
@@ -226,7 +233,7 @@ func TestAsyncStartGate_ExpiredAnswerNotUsed(t *testing.T) {
 	assert.False(t, srv.allLiveHubsHaveAsyncStart())
 	require.Eventually(t, srv.allLiveHubsHaveAsyncStart, 5*time.Second, 5*time.Millisecond)
 
-	// Idle past the bound, with the next read held.
+	// No refresh past the bound, with the next read held.
 	release := make(chan struct{})
 	st.mu.Lock()
 	st.release = release
@@ -240,13 +247,518 @@ func TestAsyncStartGate_ExpiredAnswerNotUsed(t *testing.T) {
 }
 
 // TestAsyncStartAllowed_ExperimentFirst pins that the registry is not read
-// while hub.async_agent_start is off (its registry default).
+// while hub.async_agent_start resolves off. The test turns it off through
+// the test registry's default (it is on by default since
+// ptone/scion#7250); TestAsyncStartAllowed_OverrideOffRollback covers a
+// real admin override.
 func TestAsyncStartAllowed_ExperimentFirst(t *testing.T) {
 	st := &hubInstanceListStore{now: time.Now()}
 	srv := &Server{store: st}
+	setAsyncStartExperiment(t, srv, false)
 	assert.False(t, srv.asyncStartAllowed())
 	time.Sleep(20 * time.Millisecond)
 	assert.Equal(t, int32(0), st.reads.Load(), "no registry read while the experiment is off")
+}
+
+// setAsyncStartExperiment sets hub.async_agent_start's default on srv's
+// registry.
+func setAsyncStartExperiment(t *testing.T, srv *Server, on bool) {
+	t.Helper()
+	var active []experiments.Experiment
+	for _, e := range experiments.Default().All() {
+		if e.Name == experiments.AsyncAgentStart {
+			e.Default = on
+		}
+		active = append(active, e)
+	}
+	reg, err := experiments.NewRegistry(active, nil)
+	require.NoError(t, err)
+	srv.experiments = reg
+	require.Equal(t, on, srv.experimentEnabled(experiments.AsyncAgentStart))
+}
+
+// fakeAsyncStartGateClock replaces the gate's clock with one starting at
+// now and returns the function that advances it.
+func fakeAsyncStartGateClock(t *testing.T, now time.Time) func(time.Duration) {
+	t.Helper()
+	clock := now
+	var mu sync.Mutex
+	prev := asyncStartGateNow
+	asyncStartGateNow = func() time.Time { mu.Lock(); defer mu.Unlock(); return clock }
+	t.Cleanup(func() { asyncStartGateNow = prev })
+	return func(d time.Duration) { mu.Lock(); clock = clock.Add(d); mu.Unlock() }
+}
+
+// TestAsyncStartGate_StartAfterPauseIsAsync pins ptone/scion#7250: with
+// the experiment on and the refresh loop ticking, a start that arrives
+// long after the previous one (90 s, then 10 minutes) answers async on its
+// first read, without needing a refresh of its own.
+func TestAsyncStartGate_StartAfterPauseIsAsync(t *testing.T) {
+	now := time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
+	advance := fakeAsyncStartGateClock(t, now)
+	st := &hubInstanceListStore{now: now, rows: []store.HubInstance{
+		hubRow(t, "a", now, time.Second, false, api.HubInstanceFeatureAsyncStartV1),
+		hubRow(t, "b", now, 2*time.Second, false, api.HubInstanceFeatureAsyncStartV1),
+	}}
+	srv := &Server{store: st}
+	setAsyncStartExperiment(t, srv, true)
+	ctx := context.Background()
+
+	srv.asyncStartGateRefreshTick(ctx) // the loop's first tick at start-up
+	for _, pause := range []time.Duration{90 * time.Second, 10 * time.Minute} {
+		for elapsed := time.Duration(0); elapsed < pause; elapsed += asyncStartGateRefreshInterval {
+			advance(asyncStartGateRefreshInterval)
+			srv.asyncStartGateRefreshTick(ctx)
+		}
+		advance(asyncStartGateRefreshInterval / 2) // the start lands between ticks
+		reads := st.reads.Load()
+		assert.True(t, srv.asyncStartAllowed(), "a start %v after the previous one answers async", pause)
+		time.Sleep(20 * time.Millisecond)
+		assert.Equal(t, reads, st.reads.Load(), "the start needed no refresh of its own")
+	}
+}
+
+// TestAsyncStartGate_LoopFailClosed pins that the refresh loop keeps the
+// fail-closed answers: after a passing tick, a tick that sees a live node
+// without async_start_v1, a read error, unreadable stats or no live row
+// makes the next start synchronous; so does a loop that stops ticking, once
+// the answer is older than asyncStartGateMaxAge.
+func TestAsyncStartGate_LoopFailClosed(t *testing.T) {
+	now := time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
+	f := api.HubInstanceFeatureAsyncStartV1
+	good := func() []store.HubInstance { return []store.HubInstance{hubRow(t, "a", now, time.Second, false, f)} }
+	cases := []struct {
+		name  string
+		rows  []store.HubInstance
+		err   error
+		stall bool
+	}{
+		{name: "a live node lacks the feature", rows: []store.HubInstance{hubRow(t, "a", now, time.Second, false, f), hubRow(t, "old", now, time.Second, false)}},
+		{name: "read error", err: errors.New("db down")},
+		{name: "unreadable stats", rows: []store.HubInstance{{ID: "x", Label: "bad", Version: "v", LastSeen: now, Stats: json.RawMessage(`{"features":`)}}},
+		{name: "no live row", rows: []store.HubInstance{hubRow(t, "gone", now, hubInstanceStaleAfter+time.Second, false, f)}},
+		{name: "loop stalled past the max age", rows: good(), stall: true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			advance := fakeAsyncStartGateClock(t, now)
+			st := &hubInstanceListStore{now: now, rows: good()}
+			srv := &Server{store: st}
+			setAsyncStartExperiment(t, srv, true)
+			ctx := context.Background()
+			srv.asyncStartGateRefreshTick(ctx)
+			require.True(t, srv.asyncStartAllowed(), "passing before the fault")
+
+			st.set(c.rows, c.err)
+			if c.stall {
+				advance(asyncStartGateMaxAge + time.Second)
+			} else {
+				advance(asyncStartGateRefreshInterval)
+				srv.asyncStartGateRefreshTick(ctx)
+				advance(time.Second)
+			}
+			assert.False(t, srv.asyncStartAllowed(), "the start runs synchronously")
+			if c.stall {
+				// Let the start's own background refresh land before the
+				// clock is restored.
+				require.Eventually(t, srv.asyncStartAllowed, 5*time.Second, time.Millisecond)
+			}
+		})
+	}
+}
+
+// TestAsyncStartGate_NoRefreshWhileExperimentOff pins that the refresh
+// loop does no registry work while hub.async_agent_start is off, and
+// starts reading once it is on.
+func TestAsyncStartGate_NoRefreshWhileExperimentOff(t *testing.T) {
+	now := time.Now()
+	st := &hubInstanceListStore{now: now, rows: []store.HubInstance{hubRow(t, "a", now, time.Second, false, api.HubInstanceFeatureAsyncStartV1)}}
+	srv := &Server{store: st}
+	setAsyncStartExperiment(t, srv, false)
+
+	for range 10 {
+		srv.asyncStartGateRefreshTick(context.Background())
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := srv.startAsyncStartGateRefresherEvery(ctx, func() time.Duration { return time.Millisecond })
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	<-done
+	assert.Equal(t, int32(0), st.reads.Load(), "no registry read while the experiment is off")
+
+	setAsyncStartExperiment(t, srv, true)
+	srv.asyncStartGateRefreshTick(context.Background())
+	assert.Equal(t, int32(1), st.reads.Load(), "a tick reads once the experiment is on")
+	assert.True(t, srv.asyncStartAllowed())
+}
+
+// TestAsyncStartGate_RefresherStopsOnCancel pins that the refresh loop
+// runs on its own and exits when its context is cancelled, with no read
+// after it has exited.
+func TestAsyncStartGate_RefresherStopsOnCancel(t *testing.T) {
+	now := time.Now()
+	st := &hubInstanceListStore{now: now, rows: []store.HubInstance{hubRow(t, "a", now, time.Second, false, api.HubInstanceFeatureAsyncStartV1)}}
+	srv := &Server{store: st}
+	setAsyncStartExperiment(t, srv, true)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := srv.startAsyncStartGateRefresherEvery(ctx, func() time.Duration { return time.Millisecond })
+	require.Eventually(t, func() bool { return st.reads.Load() >= 3 }, 5*time.Second, time.Millisecond, "the loop ticks on its own")
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the refresh loop did not exit after its context was cancelled")
+	}
+	reads := st.reads.Load()
+	time.Sleep(20 * time.Millisecond)
+	assert.Equal(t, reads, st.reads.Load(), "no read after the loop exited")
+}
+
+// TestAsyncStartGate_RecoveryAfterLoggedFailureIsLogged pins that once a
+// failed read has been logged, the return to the last logged answer is
+// logged again (once), so the log never ends on "disabled" while the gate
+// is enabled.
+func TestAsyncStartGate_RecoveryAfterLoggedFailureIsLogged(t *testing.T) {
+	now := time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
+	advance := fakeAsyncStartGateClock(t, now)
+	good := []store.HubInstance{hubRow(t, "a", now, time.Second, false, api.HubInstanceFeatureAsyncStartV1)}
+	h := &countingHandler{substr: "async start"}
+	st := &hubInstanceListStore{now: now, rows: good}
+	srv := &Server{store: st, agentLifecycleLog: slog.New(h)}
+	setAsyncStartExperiment(t, srv, true)
+	ctx := context.Background()
+
+	srv.asyncStartGateRefreshTick(ctx)
+	warns, infos := h.counts()
+	require.Equal(t, 0, warns)
+	require.Equal(t, 1, infos, "enabled is logged")
+
+	st.set(nil, errors.New("db down"))
+	advance(asyncStartGateRefreshInterval)
+	srv.asyncStartGateRefreshTick(ctx)
+	warns, infos = h.counts()
+	require.Equal(t, 1, warns, "the failed read is logged")
+	require.Equal(t, 1, infos)
+
+	st.set(good, nil)
+	for range 3 {
+		advance(asyncStartGateRefreshInterval)
+		srv.asyncStartGateRefreshTick(ctx)
+	}
+	warns, infos = h.counts()
+	assert.Equal(t, 1, warns)
+	assert.Equal(t, 2, infos, "the recovery is logged once, then nothing")
+	assert.True(t, srv.asyncStartAllowed())
+}
+
+// TestAsyncStartGate_NoStartAfterStop pins the cleanup-before-startup
+// race: once stopAsyncStartGateRefresher has run, a later
+// startAsyncStartGateRefresher starts no loop (it would never be joined).
+func TestAsyncStartGate_NoStartAfterStop(t *testing.T) {
+	now := time.Now()
+	st := &hubInstanceListStore{now: now, rows: []store.HubInstance{hubRow(t, "a", now, time.Second, false, api.HubInstanceFeatureAsyncStartV1)}}
+	srv := &Server{store: st}
+	setAsyncStartExperiment(t, srv, true)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	srv.stopAsyncStartGateRefresher()
+	srv.startAsyncStartGateRefresher(ctx)
+	srv.mu.RLock()
+	h := srv.asyncStartGateRefresherStop
+	srv.mu.RUnlock()
+	assert.Nil(t, h, "no loop is started after the stop")
+	time.Sleep(50 * time.Millisecond)
+	assert.Equal(t, int32(0), st.reads.Load(), "no tick ran")
+}
+
+// TestAsyncStartGate_StopCancelsLoopOwnContext pins that the refresh loop
+// runs on its own child context: stopAsyncStartGateRefresher ends it while
+// the server context is still live (CleanupBackgroundResources stops it
+// before the registry row is marked stopped), takes the handle, and is a
+// no-op the second time.
+func TestAsyncStartGate_StopCancelsLoopOwnContext(t *testing.T) {
+	now := time.Now()
+	st := &hubInstanceListStore{now: now, rows: []store.HubInstance{hubRow(t, "a", now, time.Second, false, api.HubInstanceFeatureAsyncStartV1)}}
+	srv := &Server{store: st}
+	setAsyncStartExperiment(t, srv, true)
+
+	serverCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	srv.startAsyncStartGateRefresher(serverCtx)
+	require.Eventually(t, func() bool { return st.reads.Load() >= 1 }, 5*time.Second, time.Millisecond, "the first tick ran")
+	srv.mu.RLock()
+	h := srv.asyncStartGateRefresherStop
+	srv.mu.RUnlock()
+	require.NotNil(t, h)
+
+	stopped := make(chan struct{})
+	go func() { srv.stopAsyncStartGateRefresher(); close(stopped) }()
+	select {
+	case <-stopped:
+	case <-time.After(asyncStartGateStopWait - time.Second):
+		t.Fatal("stopAsyncStartGateRefresher waited: the loop did not stop on its own context")
+	}
+	select {
+	case <-h.done:
+	default:
+		t.Fatal("the loop had not exited when stopAsyncStartGateRefresher returned")
+	}
+	require.NoError(t, serverCtx.Err(), "the server context was never cancelled")
+	srv.mu.RLock()
+	assert.Nil(t, srv.asyncStartGateRefresherStop)
+	srv.mu.RUnlock()
+	srv.stopAsyncStartGateRefresher() // a second call is a no-op
+}
+
+// TestAsyncStartGate_ReadErrorWarnRateLimited pins that a persistent read
+// failure, whose error text differs on every read, warns once per
+// hubInstanceWarnEvery rather than on every refresh, that recovery is
+// logged once, and that a registry flapping between failed and good reads
+// logs at most one recovery per emitted warning: a suppressed failed read
+// does not make the next good read log again.
+func TestAsyncStartGate_ReadErrorWarnRateLimited(t *testing.T) {
+	now := time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
+	advance := fakeAsyncStartGateClock(t, now)
+	h := &countingHandler{substr: "async start"}
+	st := &hubInstanceListStore{now: now}
+	srv := &Server{store: st, agentLifecycleLog: slog.New(h)}
+	setAsyncStartExperiment(t, srv, true)
+	ctx := context.Background()
+
+	for i := range 10 {
+		st.set(nil, fmt.Errorf("db down (attempt %d)", i))
+		srv.asyncStartGateRefreshTick(ctx)
+		assert.False(t, srv.asyncStartAllowed())
+		advance(asyncStartGateRefreshInterval)
+	}
+	g := &srv.asyncStartGate
+	g.mu.Lock()
+	assert.Equal(t, asyncStartGateReadFailed, g.reason, "a read error stores the reason class, not the error text")
+	g.mu.Unlock()
+	warns, infos := h.counts()
+	assert.Equal(t, 1, warns, "10 failing refreshes warn once")
+	assert.Equal(t, 0, infos)
+
+	advance(hubInstanceWarnEvery)
+	st.set(nil, errors.New("db still down"))
+	srv.asyncStartGateRefreshTick(ctx)
+	warns, _ = h.counts()
+	assert.Equal(t, 2, warns, "warned again after hubInstanceWarnEvery")
+
+	st.set([]store.HubInstance{hubRow(t, "a", now, time.Second, false, api.HubInstanceFeatureAsyncStartV1)}, nil)
+	advance(asyncStartGateRefreshInterval)
+	srv.asyncStartGateRefreshTick(ctx)
+	srv.asyncStartGateRefreshTick(ctx)
+	warns, infos = h.counts()
+	assert.Equal(t, 2, warns)
+	assert.Equal(t, 1, infos, "recovery is logged once")
+	assert.True(t, srv.asyncStartAllowed())
+
+	// Flapping: failed and good reads alternate, inside one warn window.
+	good := []store.HubInstance{hubRow(t, "a", now, time.Second, false, api.HubInstanceFeatureAsyncStartV1)}
+	for i := range 10 {
+		advance(asyncStartGateRefreshInterval)
+		st.set(nil, fmt.Errorf("db blip %d", i))
+		srv.asyncStartGateRefreshTick(ctx)
+		advance(asyncStartGateRefreshInterval)
+		st.set(good, nil)
+		srv.asyncStartGateRefreshTick(ctx)
+		assert.True(t, srv.asyncStartAllowed())
+	}
+	warns, infos = h.counts()
+	assert.Equal(t, 3, warns, "the flapping reads warn once more, when the 5-minute window reopens (the 10th failed read)")
+	assert.Equal(t, 2, infos, "one recovery is logged, after the one failed read that warned; none after the suppressed ones")
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	assert.Equal(t, "", g.reason)
+}
+
+// gateLogRecorder keeps the level, message and attributes of every record.
+type gateLogRecorder struct {
+	mu      sync.Mutex
+	records []slog.Record
+}
+
+func (h *gateLogRecorder) Enabled(context.Context, slog.Level) bool { return true }
+func (h *gateLogRecorder) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.records = append(h.records, r.Clone())
+	return nil
+}
+func (h *gateLogRecorder) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *gateLogRecorder) WithGroup(string) slog.Handler      { return h }
+
+// at returns the attributes (plus "msg") of every record at exactly level.
+func (h *gateLogRecorder) at(level slog.Level) []map[string]string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	var out []map[string]string
+	for _, r := range h.records {
+		if r.Level != level {
+			continue
+		}
+		m := map[string]string{"msg": r.Message}
+		r.Attrs(func(a slog.Attr) bool { m[a.Key] = a.Value.String(); return true })
+		out = append(out, m)
+	}
+	return out
+}
+
+// TestAsyncStartGate_RefreshPanicFailsClosed pins that a panic in a
+// registry read, on the loop or on a start's background refresh, does not
+// stop the process, turns the answer false and clears inFlight, so the
+// next refresh runs. The panic is logged at error with a stack cut to
+// hubInstancePanicStackBytes, once per hubInstanceWarnEvery, and a read
+// error warned just before does not suppress it (separate rate limits).
+func TestAsyncStartGate_RefreshPanicFailsClosed(t *testing.T) {
+	now := time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
+	advance := fakeAsyncStartGateClock(t, now)
+	good := []store.HubInstance{hubRow(t, "a", now, time.Second, false, api.HubInstanceFeatureAsyncStartV1)}
+	st := &hubInstanceListStore{now: now, rows: good}
+	rec := &gateLogRecorder{}
+	srv := &Server{store: st, agentLifecycleLog: slog.New(rec)}
+	setAsyncStartExperiment(t, srv, true)
+	ctx := context.Background()
+	srv.asyncStartGateRefreshTick(ctx)
+	require.True(t, srv.asyncStartAllowed())
+
+	// A read error warns first.
+	st.set(nil, errors.New("db down"))
+	advance(asyncStartGateRefreshInterval)
+	srv.asyncStartGateRefreshTick(ctx)
+	require.Len(t, rec.at(slog.LevelWarn), 1)
+	st.set(good, nil)
+	advance(asyncStartGateRefreshInterval)
+	srv.asyncStartGateRefreshTick(ctx)
+	require.True(t, srv.asyncStartAllowed())
+	require.Len(t, rec.at(slog.LevelInfo), 2, "enabled, then the recovery after the logged read error")
+
+	// A panic on the loop.
+	st.panicNext.Store(true)
+	advance(asyncStartGateRefreshInterval)
+	srv.asyncStartGateRefreshTick(ctx)
+	assert.False(t, srv.asyncStartAllowed(), "a panicked refresh fails closed")
+	errs := rec.at(slog.LevelError)
+	require.Len(t, errs, 1, "the panic is logged at error, not suppressed by the read-error warning")
+	assert.Contains(t, errs[0]["msg"], "panicked")
+	assert.Equal(t, "registry read exploded", errs[0]["panic"])
+	assert.NotEmpty(t, errs[0]["stack"])
+	assert.LessOrEqual(t, len(errs[0]["stack"]), hubInstancePanicStackBytes)
+	assert.Len(t, rec.at(slog.LevelWarn), 1, "the panic is not logged as a read error")
+	advance(asyncStartGateRefreshInterval)
+	srv.asyncStartGateRefreshTick(ctx)
+	assert.True(t, srv.asyncStartAllowed(), "the next tick refreshed: inFlight was cleared")
+	assert.Len(t, rec.at(slog.LevelInfo), 3, "the recovery after the logged panic is logged")
+
+	// A panic on a start's background refresh (no loop tick), within
+	// hubInstanceWarnEvery of the first: not logged again.
+	st.panicNext.Store(true)
+	advance(asyncStartGateTTL)
+	assert.True(t, srv.asyncStartAllowed(), "the cached answer while the background refresh runs")
+	require.Eventually(t, func() bool { return !srv.asyncStartAllowed() }, 5*time.Second, time.Millisecond, "the panicked background refresh fails closed")
+	assert.Len(t, rec.at(slog.LevelError), 1, "a second panic within the window is suppressed")
+	advance(asyncStartGateRefreshInterval)
+	srv.asyncStartGateRefreshTick(ctx)
+	assert.True(t, srv.asyncStartAllowed(), "inFlight was cleared after the background panic")
+	assert.Len(t, rec.at(slog.LevelInfo), 3, "no recovery line after a suppressed panic")
+
+	// After the window, a panic is logged again with the suppressed count.
+	advance(hubInstanceWarnEvery)
+	st.panicNext.Store(true)
+	srv.asyncStartGateRefreshTick(ctx)
+	errs = rec.at(slog.LevelError)
+	require.Len(t, errs, 2)
+	assert.Equal(t, "1", errs[1]["suppressed_since_last_log"])
+}
+
+// TestAsyncStartGate_CancelledRefreshClearsInFlight pins the shutdown
+// path: a refresh whose context is cancelled stores and logs nothing, but
+// clears inFlight, so the gate is never left wedged.
+func TestAsyncStartGate_CancelledRefreshClearsInFlight(t *testing.T) {
+	now := time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
+	fakeAsyncStartGateClock(t, now)
+	st := &hubInstanceListStore{now: now, rows: []store.HubInstance{hubRow(t, "a", now, time.Second, false, api.HubInstanceFeatureAsyncStartV1)}}
+	rec := &gateLogRecorder{}
+	srv := &Server{store: st, agentLifecycleLog: slog.New(rec)}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	g := &srv.asyncStartGate
+	g.mu.Lock()
+	g.inFlight = true
+	g.mu.Unlock()
+	srv.refreshAsyncStartGate(ctx)
+
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	assert.False(t, g.inFlight, "inFlight is cleared on a cancelled refresh")
+	assert.True(t, g.refreshedAt.IsZero(), "nothing is stored")
+	assert.False(t, g.value)
+	assert.Empty(t, rec.records, "nothing is logged")
+}
+
+// TestAsyncStartAllowed_DefaultOn pins the default-on of
+// hub.async_agent_start (ptone/scion#7250): with no override (the registry
+// default), both experiment checks see it on. A start consults the registry
+// and answers async once the refresh lands, and a refresh-loop tick reads
+// the registry.
+func TestAsyncStartAllowed_DefaultOn(t *testing.T) {
+	now := time.Now()
+	st := &hubInstanceListStore{now: now, rows: []store.HubInstance{hubRow(t, "a", now, time.Second, false, api.HubInstanceFeatureAsyncStartV1)}}
+	srv := &Server{store: st}
+	require.True(t, srv.experimentEnabled(experiments.AsyncAgentStart), "on by default")
+
+	assert.False(t, srv.asyncStartAllowed(), "false until the first refresh lands")
+	require.Eventually(t, srv.asyncStartAllowed, 5*time.Second, 5*time.Millisecond, "the default-on start check reads the registry and answers async")
+	reads := st.reads.Load()
+	require.GreaterOrEqual(t, reads, int32(1))
+
+	srv.asyncStartGateRefreshTick(context.Background())
+	assert.Equal(t, reads+1, st.reads.Load(), "a refresh-loop tick reads the registry under the default")
+}
+
+// TestAsyncStartAllowed_OverrideOffRollback pins the rollback path of the
+// default-on (ptone/scion#7250), following hub.async_agent_launch's toggle
+// test: on with no stored override, with the gate refreshed to a fresh true;
+// an admin override to false then makes starts synchronous at once (the
+// cached true is not used) and stops the loop's registry reads, without a
+// restart; an override back to true turns them on again.
+func TestAsyncStartAllowed_OverrideOffRollback(t *testing.T) {
+	now := time.Now()
+	st := &hubInstanceListStore{now: now, rows: []store.HubInstance{hubRow(t, "a", now, time.Second, false, api.HubInstanceFeatureAsyncStartV1)}}
+	srv := &Server{store: st}
+	settings := newFakeHubSettingStore()
+	ops := NewOperationalSettings(settings, emptyKoanf(), emptyKoanf())
+	seed := func(doc string) {
+		t.Helper()
+		settings.seed("experiments", json.RawMessage(doc))
+		_, err := ops.Refresh(context.Background())
+		require.NoError(t, err)
+	}
+	seed(`{"overrides":{}}`)
+	srv.SetOperationalSettings(ops)
+	require.True(t, srv.experimentEnabled(experiments.AsyncAgentStart), "on with no stored override (the default)")
+	srv.asyncStartGateRefreshTick(context.Background())
+	require.Equal(t, int32(1), st.reads.Load())
+	require.True(t, srv.asyncStartAllowed(), "a fresh true while on")
+
+	seed(fmt.Sprintf(`{"overrides":{%q:false}}`, experiments.AsyncAgentStart))
+	require.False(t, srv.experimentEnabled(experiments.AsyncAgentStart), "off once an admin turns it off")
+	assert.False(t, srv.asyncStartAllowed(), "starts are synchronous at once: the cached true is not used while off")
+	srv.asyncStartGateRefreshTick(context.Background())
+	assert.Equal(t, int32(1), st.reads.Load(), "no registry read while an admin has it off")
+
+	// Same Server, no restart: the next read sees the change.
+	seed(fmt.Sprintf(`{"overrides":{%q:true}}`, experiments.AsyncAgentStart))
+	require.True(t, srv.experimentEnabled(experiments.AsyncAgentStart), "on again once the admin turns it back on")
+	srv.asyncStartGateRefreshTick(context.Background())
+	assert.Equal(t, int32(2), st.reads.Load(), "the loop reads the registry again")
+	assert.True(t, srv.asyncStartAllowed(), "and starts answer async")
 }
 
 // TestStartAgentURL_AgentID pins design R1: both transports send the hub's

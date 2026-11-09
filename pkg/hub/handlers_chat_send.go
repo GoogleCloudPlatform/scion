@@ -141,27 +141,151 @@ func chatSendPath(key string) string {
 	return "/api/v1/chat/conversations/" + key + "/messages"
 }
 
-// chatPostAction is the project action a user's account needs to post
-// into the chat threads of a project (ptone/scion#5518). Read access to
-// the project reads its threads; it does not post in them. These chat
-// writes do not check it yet: thread create; thread rename, default-agent
-// change and delete; project attachment upload; message edit and delete;
-// thread posts sent through the agent message endpoint's thread key. They
-// are tracked in ptone/scion#5519.
-const chatPostAction = ActionChatPost
-
 // chatSendPostDenied is the refusal for a sender who may read a thread
-// but may not post in it. It is a 403, not "Thread not found": the
-// sender can already see the thread.
-func chatSendPostDenied() *chatSendError {
+// but may not post in it (chatThreadAccess). It is a 403, not "Thread not
+// found": the sender can already see the thread. details.reason is the
+// resolver's reason: read_only (the account lacks project.chat_post) or
+// token_scope (the access token may not write chat in the project).
+func chatSendPostDenied(reason string) *chatSendError {
+	details := map[string]interface{}{
+		"resource_type": "project",
+		"denied_action": string(ActionChatPost),
+	}
+	if reason != "" {
+		details["reason"] = reason
+	}
 	return newChatSendError(http.StatusForbidden, ErrCodeChatPostDenied,
-		"You can read this thread but not post in it", map[string]interface{}{
-			"resource_type": "project",
-			"denied_action": string(chatPostAction),
-		})
+		"You can read this thread but not post in it", details)
 }
 
-// chatPostIdentity is the identity whose account decides chatPostAction:
+// chatActionDenied is the refusal for a caller who may read a thread (or a
+// chat space) but may not take action in it (chatThreadAccess,
+// chatSpaceAccess): 403 chat_post_denied, the
+// shape of chatSendPostDenied, with the refused action in
+// details.chat_action and the resolver's reason. Every thread write needs
+// project.chat_post, so on the routes that use it the reason is read_only:
+// each of them refuses a user access token without inbox:write for the
+// project with its own token check (plain 403) before the resolver runs,
+// so token_scope does not reach this refusal in Phase 1.
+func chatActionDenied(action, reason string) *chatSendError {
+	details := map[string]interface{}{
+		"resource_type": "project",
+		"denied_action": string(ActionChatPost),
+		"chat_action":   action,
+	}
+	if reason != "" {
+		details["reason"] = reason
+	}
+	message := "You can read this thread but not change it"
+	if action == ChatActionCreateThread || action == ChatActionCreateGroup {
+		message = "You can read this project's chat but not create threads or groups in it"
+	}
+	return newChatSendError(http.StatusForbidden, ErrCodeChatPostDenied, message, details)
+}
+
+// requireChatThreadAction decides with chatThreadAccess whether user may
+// take every one of actions in thread, and writes the refusal when not: a
+// caller who may not read the thread gets 404 notFound (the reason is
+// logged), one who may read it but not take an action 403
+// chat_post_denied (chatActionDenied). A resolver error fails closed.
+// Callers run it before any mutation or event, so a refused request
+// changes nothing.
+func (s *Server) requireChatThreadAction(w http.ResponseWriter, r *http.Request, user UserIdentity, thread chatThreadRef, notFound string, actions ...string) bool {
+	access, err := s.chatThreadAccess(r.Context(), user, thread)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return false
+	}
+	if !access.Can(ChatActionRead) {
+		if thread.Project != nil {
+			logAuthzDenial(r, user, projectResource(thread.Project), ActionRead, access.readDenial.Reason)
+		}
+		NotFound(w, notFound)
+		return false
+	}
+	for _, action := range actions {
+		if !access.Can(action) {
+			logAuthzDenial(r, user, projectResource(thread.Project), ActionChatPost, access.postDenial.Reason)
+			chatActionDenied(action, access.Reason).write(w)
+			return false
+		}
+	}
+	return true
+}
+
+// requireChatSpaceAction decides with chatSpaceAccess whether user may
+// take every one of actions in project's chat space (create_thread,
+// create_group), and writes the refusal when not: a caller who may not read
+// the project gets 404 notFound (the reason is logged), one who may read it
+// but not take an action 403 chat_post_denied naming the action. Callers run
+// it before any write or event. The routes that use it refuse a user access
+// token without inbox:write for the project with their own token check
+// first, so the reason here is read_only.
+func (s *Server) requireChatSpaceAction(w http.ResponseWriter, r *http.Request, user UserIdentity, project *store.Project, notFound string, actions ...string) bool {
+	access := s.chatSpaceAccess(r.Context(), user, project)
+	if !access.Can(ChatActionRead) {
+		logAuthzDenial(r, user, projectResource(project), ActionRead, access.readDenial.Reason)
+		NotFound(w, notFound)
+		return false
+	}
+	for _, action := range actions {
+		if !access.Can(action) {
+			logAuthzDenial(r, user, projectResource(project), ActionChatPost, access.postDenial.Reason)
+			chatActionDenied(action, access.Reason).write(w)
+			return false
+		}
+	}
+	return true
+}
+
+// requireChatMessageAction applies requireChatThreadAction to a message of
+// the conversation key: a topic message needs action in the topic. It runs
+// after the route's token re-check (authorizeChatTokenMessageTarget), which
+// refuses a user access token with a plain 403 when the topic is missing
+// or deleted, or when the token lacks project read or inbox:write for the
+// topic's project. So the missing-thread answer here (404, nothing
+// changed) reaches sessions: a session sender who can no longer read the
+// topic's project, or whose message is in a deleted topic or under a key
+// that is no topic. A DM message passes: a DM is not decided by the chat
+// resolvers (its sender and key participation decide it).
+func (s *Server) requireChatMessageAction(w http.ResponseWriter, r *http.Request, user UserIdentity, wcs WebChatStore, key, action string) bool {
+	if strings.HasPrefix(key, "dm:") {
+		return true
+	}
+	ctx := r.Context()
+	topic, err := wcs.GetTopic(ctx, key)
+	if err != nil || topic == nil {
+		NotFound(w, "Thread")
+		return false
+	}
+	project, err := s.store.GetProject(ctx, topic.ProjectID)
+	if err != nil {
+		// A missing project answers as a missing thread does, so the
+		// status and text do not tell the two apart.
+		writeStoreErr(w, err, "Thread")
+		return false
+	}
+	return s.requireChatThreadAction(w, r, user, chatThreadRef{Key: key, Project: project}, "Thread", action)
+}
+
+// requireChatConversationAction applies requireChatThreadAction to a user
+// caller on a project conversation (a topic's row or a project group).
+// Agents and legacy groups with no project are not decided by the chat
+// resolvers in Phase 1 and pass unchanged (ptone/scion#5519 Phase 2).
+func (s *Server) requireChatConversationAction(w http.ResponseWriter, r *http.Request, conv *store.Conversation, action string) bool {
+	user := GetUserIdentityFromContext(r.Context())
+	if user == nil || conv.ProjectID == nil || *conv.ProjectID == "" {
+		return true
+	}
+	project, err := s.store.GetProject(r.Context(), *conv.ProjectID)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return false
+	}
+	return s.requireChatThreadAction(w, r, user, chatThreadRef{Project: project, ConversationID: conv.ID}, "Conversation", action)
+}
+
+// chatPostIdentity is the identity whose account decides project.chat_post:
 // the holder of a user access token, the caller otherwise. A token keeps
 // needing only inbox:write for a send; the post permission is a property
 // of the account the token acts for, so it is checked on that account and
@@ -175,29 +299,24 @@ func chatPostIdentity(user UserIdentity) UserIdentity {
 	return user
 }
 
-// chatMayPost decides whether user's account may post into the chat
-// threads of project.
-func (s *Server) chatMayPost(ctx context.Context, user UserIdentity, project *store.Project) Decision {
-	return s.authzService.CheckAccess(ctx, chatPostIdentity(user), projectResource(project), chatPostAction)
-}
-
 // authorizeChatSend runs the conversation access checks of a chat send:
 // for a DM, a well-formed key naming the sender as a participant; for a
-// topic, an existing topic whose current project exists, grants the
-// sender read access and lets the sender's account post (chatMayPost).
-// It needs no request, so every caller of sendChatMessage runs the same
-// checks.
+// topic, an existing topic whose current project exists and on which
+// chatThreadAccess allows the sender to post. It needs no request, so
+// every caller of sendChatMessage runs the same checks.
 //
-// A sender who may not use the conversation gets the same answer as for a
+// A sender who may not read the topic gets the same answer as for a
 // conversation that does not exist ("Thread not found"); the reason is
 // written to the server log only. A sender who may read a topic but not
-// post in it gets 403 chat_post_denied.
+// post in it gets 403 chat_post_denied with the resolver's reason
+// (read_only, or token_scope for an access token without inbox:write for
+// the topic's project).
 func (s *Server) authorizeChatSend(ctx context.Context, user UserIdentity, key string) (*chatSendTarget, *chatSendError) {
 	return s.authorizeChatConversation(ctx, user, key, true)
 }
 
-// authorizeChatSendRead runs the checks of authorizeChatSend without the
-// post check, for routes that act only on the sender's own rows of a
+// authorizeChatSendRead runs the checks of authorizeChatSend but needs only
+// chatThreadAccess's read action, for routes that act only on the sender's own rows of a
 // conversation it can read (listing its scheduled messages).
 func (s *Server) authorizeChatSendRead(ctx context.Context, user UserIdentity, key string) (*chatSendTarget, *chatSendError) {
 	return s.authorizeChatConversation(ctx, user, key, false)
@@ -215,7 +334,11 @@ func (s *Server) authorizeChatConversation(ctx context.Context, user UserIdentit
 	}
 
 	target := &chatSendTarget{Key: key, wcs: wcs}
-	audience, topic := chatKeyReadAudience(ctx, wcs, key)
+	audience, topic, err := chatKeyReadAudience(ctx, wcs, key)
+	if err != nil {
+		logChatStoreFault(ctx, slog.Default(), "chat send: topic lookup failed", key, err)
+		return nil, newChatSendError(http.StatusInternalServerError, ErrCodeInternalError, "Internal server error", nil)
+	}
 	if audience == chatAudienceParticipants {
 		target.IsDM = true
 		if serr := authorizeDMKeyParticipant(ctx, user, key, chatSendPath(key)); serr != nil {
@@ -236,12 +359,28 @@ func (s *Server) authorizeChatConversation(ctx context.Context, user UserIdentit
 	}
 	project, err := s.store.GetProject(ctx, topic.ProjectID)
 	if err != nil {
-		logReferenceRefused(ctx, chatSendPath(key), "topic project lookup failed: "+err.Error(), user)
-		return nil, chatSendNotFound("Thread")
+		// A missing project is answered as a missing thread, so the answer
+		// reveals nothing; any other store error is the generic 500, with
+		// the error in the server log only.
+		if errors.Is(err, store.ErrNotFound) {
+			logReferenceRefused(ctx, chatSendPath(key), "topic project lookup failed: "+err.Error(), user)
+			return nil, chatSendNotFound("Thread")
+		}
+		logChatStoreFault(ctx, slog.Default(), "chat send: topic project lookup failed", key, err)
+		return nil, newChatSendError(http.StatusInternalServerError, ErrCodeInternalError, "Internal server error", nil)
 	}
 	resource := projectResource(project)
-	decision := s.authzService.CheckAccess(ctx, user, resource, ActionRead)
-	if !decision.Allowed {
+	// The single chat decision point for a topic (chatThreadAccess). A user
+	// caller is never refused with an error.
+	access, err := s.chatThreadAccess(ctx, user, chatThreadRef{Key: key, Project: project})
+	if err != nil {
+		// An internal caller error (errChatThreadUnresolved) or a store
+		// fault: the common error path's 500, as writeErrorFromErr answers.
+		slog.WarnContext(ctx, "chat send: thread access check failed", "key", key, "error", err)
+		return nil, newChatSendError(http.StatusInternalServerError, ErrCodeInternalError, "Internal server error", nil)
+	}
+	if !access.Can(ChatActionRead) {
+		decision := access.readDenial
 		logReq := (&http.Request{URL: &url.URL{Path: chatSendPath(key)}}).WithContext(ctx)
 		logAuthzDenial(logReq, user, resource, ActionRead, decision.Reason)
 		// The details a 403 used to carry stay in the log only.
@@ -255,12 +394,10 @@ func (s *Server) authorizeChatConversation(ctx context.Context, user UserIdentit
 		slog.InfoContext(ctx, "chat send refused as not found", logAttrs...)
 		return nil, chatSendRefusedAsNotFound("Thread")
 	}
-	if requirePost {
-		if post := s.chatMayPost(ctx, user, project); !post.Allowed {
-			logReq := (&http.Request{URL: &url.URL{Path: chatSendPath(key)}}).WithContext(ctx)
-			logAuthzDenial(logReq, user, resource, chatPostAction, post.Reason)
-			return nil, chatSendPostDenied()
-		}
+	if requirePost && !access.Can(ChatActionPost) {
+		logReq := (&http.Request{URL: &url.URL{Path: chatSendPath(key)}}).WithContext(ctx)
+		logAuthzDenial(logReq, user, resource, ActionChatPost, access.postDenial.Reason)
+		return nil, chatSendPostDenied(access.Reason)
 	}
 	target.ProjectID = topic.ProjectID
 	target.Topic = topic
@@ -271,7 +408,8 @@ func (s *Server) authorizeChatConversation(ctx context.Context, user UserIdentit
 type chatKeyAudience int
 
 const (
-	// chatAudienceNone: no such conversation (or the lookup failed).
+	// chatAudienceNone: no such conversation, or a key that cannot name a
+	// topic (see validChatTopicKey).
 	chatAudienceNone chatKeyAudience = iota
 	// chatAudienceParticipants: a DM key, read by its participants only.
 	chatAudienceParticipants
@@ -288,19 +426,63 @@ const (
 // (authorizeConversationAccess) and the attachment projection decision
 // (projectionAudienceIsProject), so those three cannot disagree. Other
 // handlers still test the "dm:" prefix for their own key-shape handling.
-// A topic that cannot be loaded is chatAudienceNone.
-func chatKeyReadAudience(ctx context.Context, wcs WebChatStore, key string) (chatKeyAudience, *WebChatTopic) {
+// A topic that does not exist is chatAudienceNone with a nil error, and so
+// is a key that cannot name one (validChatTopicKey), which is never sent to
+// the store. Any other failure to load the topic is returned as the error
+// (with chatAudienceNone), so callers answer a store fault as a fault rather
+// than as a missing conversation.
+func chatKeyReadAudience(ctx context.Context, wcs WebChatStore, key string) (chatKeyAudience, *WebChatTopic, error) {
 	if strings.HasPrefix(key, "dm:") {
-		return chatAudienceParticipants, nil
+		return chatAudienceParticipants, nil, nil
 	}
-	if wcs == nil || key == "" {
-		return chatAudienceNone, nil
+	if wcs == nil || !validChatTopicKey(key) {
+		return chatAudienceNone, nil, nil
 	}
 	topic, err := wcs.GetTopic(ctx, key)
-	if err != nil || topic == nil {
-		return chatAudienceNone, nil
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return chatAudienceNone, nil, nil
+		}
+		return chatAudienceNone, nil, err
 	}
-	return chatAudienceProject, topic
+	if topic == nil {
+		return chatAudienceNone, nil, nil
+	}
+	return chatAudienceProject, topic, nil
+}
+
+// validChatTopicKey reports whether key can name a topic: non-empty, valid
+// UTF-8 and free of NUL. Topic IDs are generated strings, so a key that fails
+// this names no topic; it is answered as a missing one instead of being sent
+// to the store, which may reject it with an error (Postgres refuses NUL and
+// invalid UTF-8 in text) that would otherwise become a 500.
+func validChatTopicKey(key string) bool {
+	return key != "" && utf8.ValidString(key) && !strings.ContainsRune(key, 0)
+}
+
+// logChatStoreFault logs a store fault on a chat lookup keyed by the
+// caller-supplied key with l: at Debug when ctx is already done (the client
+// went away, so the fault is expected), at Warn otherwise. The key is logged
+// bounded (chatKeyLogArgs). The caller still answers the fault (a 500).
+func logChatStoreFault(ctx context.Context, l *slog.Logger, msg, key string, err error) {
+	args := append(chatKeyLogArgs(key), "error", err)
+	if ctx.Err() != nil {
+		l.DebugContext(ctx, msg, args...)
+		return
+	}
+	l.WarnContext(ctx, msg, args...)
+}
+
+// maxLoggedChatKeyBytes bounds the caller-supplied chat key in a log line.
+const maxLoggedChatKeyBytes = 128
+
+// chatKeyLogArgs returns the log attributes of a caller-supplied chat key:
+// "key", at most its first maxLoggedChatKeyBytes bytes cut on a rune
+// boundary (truncateUTF8), and "key_len", its full length in bytes. The
+// route accepts a key of any length, so the key's length must not decide the
+// size of this store-fault log line.
+func chatKeyLogArgs(key string) []any {
+	return []any{"key", truncateUTF8(key, maxLoggedChatKeyBytes), "key_len", len(key)}
 }
 
 // authorizeDMKeyParticipant runs the first two DM steps of

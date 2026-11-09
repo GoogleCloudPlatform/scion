@@ -19,7 +19,7 @@ spec:
     - -c
     - |
       set -e
-      SENTINEL="/workspace/.scion-provisioned"
+      SENTINEL="/scion-provision/.scion-provisioned"
       if [ -f "$SENTINEL" ]; then
         echo "PROVISION: sentinel found at $(cat $SENTINEL), skipping clone"
         exit 0
@@ -32,6 +32,9 @@ spec:
     - name: workspace
       mountPath: /workspace
       subPath: projects/test-project-beta/workspace
+    - name: workspace
+      mountPath: /scion-provision
+      subPath: projects/test-project-beta/provision
     resources:
       requests:
         cpu: 250m
@@ -46,7 +49,7 @@ spec:
       echo "=== AGENT B1 WORKSPACE ==="
       ls -la /workspace/
       echo "=== SENTINEL ==="
-      cat /workspace/.scion-provisioned
+      test -e /workspace/.scion-provisioned && echo "SENTINEL: in the workspace root (unexpected)" || echo "SENTINEL: not in the workspace"
       echo "=== go.mod (identity check) ==="
       head -3 /workspace/go.mod 2>/dev/null || echo "go.mod not found"
       echo "=== TEST COMPLETE (b1) ==="

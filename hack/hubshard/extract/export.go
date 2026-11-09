@@ -35,20 +35,23 @@ type exportSpec struct {
 	names   []string                     // requested top-level names, in file order
 	renames map[string]string            // explicit export names (tid=TID)
 	fields  map[string]map[string]string // type -> unexported field -> exported name
+	maps    map[string]string            // staying func -> existing target func (pvStrPtr=StrPtr)
 }
 
 // readExportSpec parses an export family file. Blank lines and #-comments
 // are ignored. "rename old=New" sets the exported name of a top-level
 // declaration (default: first letter upper-cased). "field T.f=F" exports
-// field f of moved struct type T as F. Every other line is one top-level
-// name to move.
+// field f of moved struct type T as F. "map old=New" rewrites references in
+// moved code to the staying func old into references to the existing func
+// New of the target package (nothing moves; see checkMapping). Every other
+// line is one top-level name to move.
 func readExportSpec(path string) (exportSpec, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return exportSpec{}, err
 	}
 	defer func() { _ = f.Close() }()
-	spec := exportSpec{renames: map[string]string{}, fields: map[string]map[string]string{}}
+	spec := exportSpec{renames: map[string]string{}, fields: map[string]map[string]string{}, maps: map[string]string{}}
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
 		line := sc.Text()
@@ -65,6 +68,17 @@ func readExportSpec(path string) (exportSpec, error) {
 				return exportSpec{}, fmt.Errorf("%s: bad rename %q, want old=New", path, rest)
 			}
 			spec.renames[o] = n
+			continue
+		}
+		if rest, ok := strings.CutPrefix(line, "map "); ok {
+			o, n, ok := strings.Cut(strings.TrimSpace(rest), "=")
+			if !ok || !token.IsIdentifier(o) || !token.IsIdentifier(n) || !token.IsExported(n) {
+				return exportSpec{}, fmt.Errorf("%s: bad map %q, want old=New", path, rest)
+			}
+			if _, dup := spec.maps[o]; dup {
+				return exportSpec{}, fmt.Errorf("%s: map %s given twice", path, o)
+			}
+			spec.maps[o] = n
 			continue
 		}
 		if rest, ok := strings.CutPrefix(line, "field "); ok {
@@ -110,21 +124,27 @@ func (k aliasKind) String() string {
 
 // exportPlan is the computed export.
 type exportPlan struct {
-	p          *pkgInfo
-	spec       exportSpec
-	targetPkg  string // package name of the target
-	importPath string
-	aliasFile  string
-	selected   map[*declInfo]bool
-	order      []*declInfo       // selected, in package order
-	exported   map[string]string // staying-visible key -> exported name
-	aliased    map[string]bool   // exported keys that get an alias in the staying package
-	kinds      map[string]aliasKind
-	helperCall map[string]string // func key -> receiver of the t.Helper call it makes ("" = none)
-	fieldSites []fieldSite       // staying selectors rewritten for field exports
-	notes      []string          // review notes
-	targetSrc  map[string][]byte // target file base name -> content
-	changed    map[string][]byte // source package file -> new content (nil = delete)
+	p            *pkgInfo
+	spec         exportSpec
+	targetPkg    string // package name of the target
+	importPath   string
+	srcImport    string // import path of the source package (locates subpackages; see locate)
+	aliasFile    string
+	selected     map[*declInfo]bool
+	order        []*declInfo       // selected, in package order
+	exported     map[string]string // staying-visible key -> exported name
+	aliased      map[string]bool   // exported keys that get an alias in the staying package
+	kinds        map[string]aliasKind
+	helperCall   map[string]string              // func key -> receiver of the t.Helper call it makes ("" = none)
+	fieldSites   []fieldSite                    // staying selectors rewritten for field exports
+	resolved     map[string]*resolution         // staying aliases used by moved code -> their targets
+	mappings     map[string]*mapping            // map-to-existing entries, by staying name
+	located      map[string]*pkgInfo            // parsed subpackages, by import path
+	hazards      map[*pkgInfo]map[string]string // wrapper hazards per package (see hazardOf)
+	movedHazards map[string]string              // wrapper hazards with the moved set as scope
+	notes        []string                       // review notes
+	targetSrc    map[string][]byte              // target file base name -> content
+	changed      map[string][]byte              // source package file -> new content (nil = delete)
 }
 
 // fieldSite is one staying selector x.f rewritten to x.F.
@@ -159,9 +179,14 @@ func upperFirst(s string) string {
 
 // planExport selects the declarations, computes the exports and aliases, and
 // renders every output file without writing anything.
-func planExport(p *pkgInfo, spec exportSpec, targetDir, importPath, aliasFile string) (*exportPlan, error) {
+//
+// srcImport is the source package's import path. Subpackages under it (the
+// target, and packages that generated aliases forward to) are read from the
+// matching directories under p.dir, so that alias wrappers and mappings can
+// be checked against their targets' source.
+func planExport(p *pkgInfo, spec exportSpec, targetDir, importPath, srcImport, aliasFile string) (*exportPlan, error) {
 	ep := &exportPlan{
-		p: p, spec: spec, importPath: importPath, aliasFile: aliasFile,
+		p: p, spec: spec, importPath: importPath, srcImport: srcImport, aliasFile: aliasFile,
 		targetPkg:  filepath.Base(targetDir),
 		selected:   map[*declInfo]bool{},
 		exported:   map[string]string{},
@@ -170,6 +195,9 @@ func planExport(p *pkgInfo, spec exportSpec, targetDir, importPath, aliasFile st
 		helperCall: map[string]string{},
 		targetSrc:  map[string][]byte{},
 		changed:    map[string][]byte{},
+		resolved:   map[string]*resolution{},
+		mappings:   map[string]*mapping{},
+		located:    map[string]*pkgInfo{},
 	}
 	if !token.IsIdentifier(ep.targetPkg) {
 		return nil, fmt.Errorf("target directory %q is not a valid package name", targetDir)
@@ -227,15 +255,41 @@ func planExport(p *pkgInfo, spec exportSpec, targetDir, importPath, aliasFile st
 		}
 	}
 
-	// 3. Moved code may use only moved declarations of the package.
+	// 3. Moved code may use only moved declarations of the package, plus
+	// staying names it can spell another way: explicit mappings to existing
+	// funcs of the target, and generated aliases resolved to their targets
+	// (see resolveAlias). Anything else stays a refusal.
+	for _, k := range sortedKeys(spec.maps) {
+		if err := ep.checkMapping(k, spec.maps[k]); err != nil {
+			return nil, err
+		}
+		ep.mappings[k] = &mapping{from: k, to: spec.maps[k]}
+	}
 	for _, d := range ep.order {
 		for _, r := range sortedKeys(p.refs(d)) {
+			if _, ok := ep.mappings[r]; ok {
+				continue
+			}
 			for _, rd := range p.byKey[r] {
-				if !ep.selected[rd] {
-					return nil, fmt.Errorf("%s uses %s (%s), which stays; request it too or leave %s in place", d.key, r, rd.file.name, d.key)
+				if ep.selected[rd] {
+					continue
 				}
+				if len(p.byKey[r]) == 1 {
+					res, why := ep.resolveAlias(rd)
+					if res != nil {
+						ep.resolved[r] = res
+						break
+					}
+					if why != "" {
+						return nil, fmt.Errorf("%s uses %s (%s), which stays and is not a resolvable alias (%s); request it too or leave %s in place", d.key, r, rd.file.name, why, d.key)
+					}
+				}
+				return nil, fmt.Errorf("%s uses %s (%s), which stays; request it too or leave %s in place", d.key, r, rd.file.name, d.key)
 			}
 		}
+	}
+	if err := ep.checkSpellings(); err != nil {
+		return nil, err
 	}
 
 	// 4. Exports: every moved top-level name a staying declaration uses,
@@ -270,7 +324,7 @@ func planExport(p *pkgInfo, spec exportSpec, targetDir, importPath, aliasFile st
 			if _, ok := d.node.(*ast.FuncDecl); !ok {
 				continue
 			}
-			for _, n := range signatureRefs(p, d) {
+			for _, n := range signatureRefs(p, d, ep.selected) {
 				if !ep.aliased[n] {
 					ep.aliased[n] = true
 					changed = true
@@ -284,7 +338,7 @@ func planExport(p *pkgInfo, spec exportSpec, targetDir, importPath, aliasFile st
 			if _, ok := ep.exported[d.key]; !ok || d.recv != "" {
 				continue
 			}
-			for _, n := range signatureRefs(p, d) {
+			for _, n := range signatureRefs(p, d, ep.selected) {
 				if _, ok := ep.exported[n]; !ok {
 					ep.exported[n] = ""
 					changed = true
@@ -386,7 +440,7 @@ func planExport(p *pkgInfo, spec exportSpec, targetDir, importPath, aliasFile st
 // declared type; and, for a type, in the types of its exported fields and in
 // the signatures of its exported methods (GitSparseCheckoutStub.Calls returns
 // []gitSparseCheckoutCall, so that type is exported as well).
-func signatureRefs(p *pkgInfo, d *declInfo) []string {
+func signatureRefs(p *pkgInfo, d *declInfo, moved map[*declInfo]bool) []string {
 	var nodes []ast.Node
 	switch n := d.node.(type) {
 	case *ast.FuncDecl:
@@ -431,10 +485,10 @@ func signatureRefs(p *pkgInfo, d *declInfo) []string {
 	for _, n := range nodes {
 		ast.Inspect(n, func(m ast.Node) bool {
 			if se, ok := m.(*ast.SelectorExpr); ok {
-				ast.Inspect(se.X, func(x ast.Node) bool { addSigRef(p, x, seen, &out); return true })
+				ast.Inspect(se.X, func(x ast.Node) bool { addSigRef(p, x, moved, seen, &out); return true })
 				return false
 			}
-			addSigRef(p, m, seen, &out)
+			addSigRef(p, m, moved, seen, &out)
 			return true
 		})
 	}
@@ -442,12 +496,15 @@ func signatureRefs(p *pkgInfo, d *declInfo) []string {
 	return out
 }
 
-func addSigRef(p *pkgInfo, n ast.Node, seen map[string]bool, out *[]string) {
+// addSigRef records a moved type named by n. A staying type (a resolved
+// alias such as TokenBoundary) is not exported: moved code spells it as its
+// target.
+func addSigRef(p *pkgInfo, n ast.Node, moved map[*declInfo]bool, seen map[string]bool, out *[]string) {
 	id, ok := n.(*ast.Ident)
 	if !ok || seen[id.Name] {
 		return
 	}
-	if ds := p.byKey[id.Name]; len(ds) == 1 && ds[0].recv == "" && isType(ds[0]) {
+	if ds := p.byKey[id.Name]; len(ds) == 1 && ds[0].recv == "" && isType(ds[0]) && moved[ds[0]] {
 		seen[id.Name] = true
 		*out = append(*out, id.Name)
 	}
@@ -462,7 +519,10 @@ func hasName(ids []*ast.Ident, n string) bool {
 	return false
 }
 
-// classify picks the alias form for an exported declaration. A var alias is
+// classify picks the alias form for an exported declaration. A func that
+// staying code calls gets a wrapper, so it is refused when calling it
+// through one would change behaviour (see hazardOf: a direct recover(),
+// call-stack or call-depth inspection, own-stack capture). A var alias is
 // a copy, so it behaves like the original only if nobody ever assigns the
 // var: whole-var assignment, element assignment, ++/--, or taking its
 // address are refused anywhere in the package. A var declared with a type
@@ -476,6 +536,13 @@ func (ep *exportPlan) classify(d *declInfo) (aliasKind, error) {
 		h, err := helperReceiver(n)
 		if err != nil {
 			return 0, err
+		}
+		// Every exported func gets a wrapper in the staying package (export
+		// names are exactly the names staying code uses). A moved func that
+		// staying code does not name is not exported and is called directly
+		// from the target either way, so it is never checked here.
+		if why := ep.hazardOfMoved(d.key); why != "" {
+			return 0, fmt.Errorf("%s %s; a wrapper in the staying package would change its behaviour, so it is not exported", d.key, why)
 		}
 		ep.helperCall[d.key] = h
 		return aliasFunc, nil
@@ -902,10 +969,20 @@ func (ep *exportPlan) renamedText(d *declInfo) (string, error) {
 			if _, ok := ep.exported[id.Name]; ok {
 				err = fmt.Errorf("%s: composite literal key %s matches an exported name; cannot tell a field key from a value reference", d.key, id.Name)
 			}
+			if _, ok := ep.replacement(id.Name); ok {
+				err = fmt.Errorf("%s: composite literal key %s matches a resolved or mapped name; cannot tell a field key from a value reference", d.key, id.Name)
+			}
 			return true
 		}
 		if id.Obj != nil && !top[id.Obj] {
 			return true // local
+		}
+		if rep, ok := ep.replacement(id.Name); ok {
+			if m := ep.mappings[id.Name]; m != nil {
+				m.uses++
+			}
+			addIdent(id, rep)
+			return true
 		}
 		if nn, ok := ep.exported[id.Name]; ok {
 			if ds := ep.p.byKey[id.Name]; len(ds) == 1 && ep.selected[ds[0]] {
@@ -977,6 +1054,14 @@ func (ep *exportPlan) renderTargets(targetDir string) error {
 			for _, s := range imps {
 				imports[specKey(s)] = true
 			}
+			for _, r := range sortedKeys(ep.p.refs(d)) {
+				if res := ep.resolved[r]; res != nil && !res.same {
+					imports[res.imp] = true
+				}
+			}
+		}
+		if err := checkImportNames(name, imports); err != nil {
+			return err
 		}
 		var b bytes.Buffer
 		b.WriteString(licenseHeader)
@@ -1278,6 +1363,17 @@ func (ep *exportPlan) report(w *bytes.Buffer) {
 	}
 	for _, s := range ep.fieldSites {
 		fmt.Fprintf(w, "  call site %s:%d .%s -> .%s\n", s.file, s.line, s.old, s.new)
+	}
+	if len(ep.resolved) > 0 {
+		fmt.Fprintf(w, "resolved aliases (staying names moved code uses, spelled as their targets): %d\n", len(ep.resolved))
+		for _, k := range sortedKeys(ep.resolved) {
+			r := ep.resolved[k]
+			fmt.Fprintf(w, "  %-36s -> %-36s %s\n", k, r.text(), r.describe())
+		}
+	}
+	for _, k := range sortedKeys(ep.mappings) {
+		m := ep.mappings[k]
+		fmt.Fprintf(w, "map %s -> %s.%s: equivalent (signature, parameter names, Helper() shape, body); %d reference(s) in moved code rewritten; %s left as is\n", m.from, ep.targetPkg, m.to, m.uses, m.from)
 	}
 	for _, name := range sortedKeys(ep.changed) {
 		if ep.changed[name] == nil {

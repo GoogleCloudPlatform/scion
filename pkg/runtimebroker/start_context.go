@@ -97,6 +97,13 @@ type startContext struct {
 	// nil when the dispatch is not one. Compared the same way as
 	// AssignSelection.
 	BlockSelection *dispatchProfileSelection
+
+	// CloudRunSelection is the profile and runtime entry a Cloud Run
+	// dispatch with the hub.cloudrun_native_identity experiment read its
+	// allow-list from, or nil when no Cloud Run identity was resolved.
+	// Compared the same way as AssignSelection
+	// (rejectCloudRunIdentityRuntimeChange).
+	CloudRunSelection *dispatchProfileSelection
 }
 
 // startContextInputs captures the handler-specific fields that vary across
@@ -579,6 +586,35 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		gcpMetadataMode = store.GCPMetadataModePassthrough
 	}
 
+	// Cloud Run Instances with the hub.cloudrun_native_identity experiment
+	// on: the instance itself runs as the identity (gcp_identity_cloudrun.go),
+	// or the dispatch is refused here, before any provisioning. "assign"
+	// uses the instance's own metadata server instead of the sciontool
+	// metadata emulator, so, as for Kubernetes Workload Identity above, the
+	// mode is rewritten to "passthrough" and the account and project are
+	// set as informational env in the passthrough arm below. "block" keeps
+	// the emulator in block mode as a second layer: the mode is set to
+	// "block", which also covers a hub-default passthrough the resolver
+	// mapped to block. The emulator and its env plumbing stay in place for
+	// every other dispatch.
+	// requireLocalRuntime marks a passthrough granted by the hub's default
+	// rung. hubDefaultPassthrough is its only reading (the create request's
+	// GCPIdentity, else the resolved env overlaid by the config env); the
+	// Cloud Run resolver and the env re-stamp below both use this value.
+	requireLocalRuntime := hubDefaultPassthrough(in)
+	crIdentity, sce := s.resolveCloudRunIdentity(ctx, in, dispatchRuntimeType, gcpMetadataMode, gcpIdentityProfile, requireLocalRuntime)
+	if sce != nil {
+		return nil, sce
+	}
+	if crIdentity.Identity != nil {
+		switch crIdentity.Identity.Mode {
+		case store.GCPMetadataModeAssign:
+			gcpMetadataMode = store.GCPMetadataModePassthrough
+		case store.GCPMetadataModeBlock:
+			gcpMetadataMode = store.GCPMetadataModeBlock
+		}
+	}
+
 	// --- Build merged environment ---
 	env := make(map[string]string)
 
@@ -612,10 +648,14 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		env[k] = v
 	}
 
-	// 2. Config.Env (takes precedence)
+	// 2. Config.Env (takes precedence). The native Cloud Run marker is never
+	// taken from it: only the hub sets that key (cloudRunNativeMarked).
 	if in.Config != nil {
 		for _, e := range in.Config.Env {
 			parts := strings.SplitN(e, "=", 2)
+			if len(parts) == 2 && parts[0] == cloudRunNativeMarkerEnv {
+				continue
+			}
 			if len(parts) == 2 {
 				env[parts[0]] = parts[1]
 				classifyBrokerEnv(parts[0], api.EnvKindPlain)
@@ -802,16 +842,10 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	//
 	// gcpMetadataMode itself was already resolved earlier in this function
 	// (effectiveGCPMetadataMode) and validated against the Kubernetes/"block"
-	// check above. requireLocalRuntime follows the identical struct-or-env
-	// precedence — see downgradeUnverifiedHubDefaultPassthrough's doc comment
-	// for what it means and how it's used below and in
-	// recheckHubDefaultPassthrough.
-	requireLocalRuntime := false
-	if in.Config != nil && in.Config.GCPIdentity != nil {
-		requireLocalRuntime = in.Config.GCPIdentity.RequireLocalRuntime
-	} else if v := env["SCION_METADATA_REQUIRE_LOCAL_RUNTIME"]; v != "" {
-		requireLocalRuntime = v == "true"
-	}
+	// check above. requireLocalRuntime (set above, from hubDefaultPassthrough)
+	// follows the identical struct-or-env precedence — see
+	// downgradeUnverifiedHubDefaultPassthrough's doc comment for what it means
+	// and how it's used below and in recheckHubDefaultPassthrough.
 	// Allow-list, not a deny-list. The previous form tested for the two modes
 	// that need the redirect and let everything else fall through untouched,
 	// which meant an unrecognised mode — a typo, a value from a newer hub, an
@@ -874,6 +908,14 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 			env["SCION_METADATA_PROJECT_ID"] = assignIdentity.ProjectID
 			classifyBrokerEnv("SCION_METADATA_PROJECT_ID", api.EnvKindPlain)
 		}
+		// The same informational env for a Cloud Run "assign" dispatch that
+		// was rewritten to passthrough above.
+		if crIdentity.SAEmail != "" {
+			env["SCION_METADATA_SA_EMAIL"] = crIdentity.SAEmail
+			classifyBrokerEnv("SCION_METADATA_SA_EMAIL", api.EnvKindPlain)
+			env["SCION_METADATA_PROJECT_ID"] = crIdentity.ProjectID
+			classifyBrokerEnv("SCION_METADATA_PROJECT_ID", api.EnvKindPlain)
+		}
 	default:
 		return nil, &startContextError{
 			Status: http.StatusBadRequest,
@@ -887,6 +929,17 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	if requireLocalRuntime {
 		env["SCION_METADATA_REQUIRE_LOCAL_RUNTIME"] = "true"
 		classifyBrokerEnv("SCION_METADATA_REQUIRE_LOCAL_RUNTIME", api.EnvKindPlain)
+	}
+
+	// The init firewall on a native Cloud Run "assign" dispatch, an
+	// unsupported combination, checked on the merged env: the hub's
+	// resolved env and the config env (steps 1 and 2) are both in it, and
+	// the identity above is resolved. No later step writes
+	// SCION_INIT_FIREWALL. The settings, harness-config and harness env
+	// sources are refused by the Cloud Run runtime check
+	// (checkCloudRunInitFirewall).
+	if refusal := refuseCloudRunInitFirewall(in.Name, crIdentity.Identity, env); refusal != nil {
+		return nil, refusal
 	}
 
 	// Debug log final env
@@ -958,6 +1011,9 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// Recomputed on every dispatch and never persisted, like the field
 	// above; see api.StartOptions.KubernetesBlockIdentity.
 	opts.KubernetesBlockIdentity = blockIdentity.Identity
+	// Recomputed on every dispatch and never persisted; see
+	// api.StartOptions.CloudRunIdentity.
+	opts.CloudRunIdentity = crIdentity.Identity
 
 	if len(in.SharedDirs) > 0 {
 		opts.SharedDirs = in.SharedDirs
@@ -1177,7 +1233,9 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// the host BEFORE the container starts, then dual-mount it. This avoids
 	// the full in-container clone. Falls through to clone-per-agent on error
 	// or if git is too old (< 2.48) — but only when this call has not yet
-	// created the agent's own worktree; see tryProvisionWorktree.
+	// created the agent's own worktree, and never when provisioning refuses
+	// the clone URL; see tryProvisionWorktree. (A refused URL is normally
+	// refused before this, by the project clone URL check above.)
 	worktreeProvisioned := false
 	var provisionedWorktreeRoot string
 	if !linkedCheckout && in.Config != nil && in.Config.GitClone != nil && in.WorkspaceMode == store.WorkspaceModeWorktreePerAgent {
@@ -1418,6 +1476,10 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	if blockIdentity.Identity != nil {
 		sel := blockIdentity.Selection
 		sc.BlockSelection = &sel
+	}
+	if crIdentity.Identity != nil {
+		sel := crIdentity.Selection
+		sc.CloudRunSelection = &sel
 	}
 	return sc, nil
 }
@@ -1817,8 +1879,8 @@ func validateMountedWorktree(workspacePath, base string) error {
 // worktree can exist yet under the shared base.
 //
 // The sentinel is looked for in exactly the directories ProvisionShared
-// checks (in.SentinelDirs: the sentinel directory, the base's parent by
-// default, and LegacyDir when set), so the two never disagree.
+// checks (in.SentinelDirs: the sentinel directory alone, the base's parent
+// by default), so the two never disagree.
 func worktreeBaseIsProvisioned(in provision.ProvisionInput) bool {
 	if !provision.SentinelPresent(in.SentinelDirs()...) {
 		return false
@@ -1829,6 +1891,11 @@ func worktreeBaseIsProvisioned(in provision.ProvisionInput) bool {
 	return true
 }
 
+// provisionSharedWorktree runs the broker's host-side shared-base
+// provisioning (provision.ProvisionShared). A variable so tests can observe
+// the input.
+var provisionSharedWorktree = provision.ProvisionShared
+
 // tryProvisionWorktree attempts to provision a per-agent worktree on the host
 // for worktree-per-agent mode. On success it sets opts.Workspace to the
 // worktree path and returns (true, repoRoot, nil), where repoRoot is the
@@ -1837,9 +1904,10 @@ func worktreeBaseIsProvisioned(in provision.ProvisionInput) bool {
 // ordinary fallback condition (git too old, no valid worktree-per-agent
 // input) it logs a warning and returns (false, "", nil) so the caller falls
 // through to clone-per-agent. On a condition that must not silently fall
-// back (missing agent identity on a start dispatch, or a pre-existing
-// worktree this call must not touch or replace), it returns a non-nil error
-// instead so the caller fails the dispatch.
+// back (missing agent identity on a start dispatch, a pre-existing
+// worktree this call must not touch or replace, or a clone URL that
+// provisioning refuses), it returns a non-nil error instead so the caller
+// fails the dispatch.
 //
 // The caller threads repoRoot onto ctx via
 // api.ContextWithProvisionedWorktreeRepoRoot; see that function's doc for why.
@@ -1968,7 +2036,16 @@ func (s *Server) tryProvisionWorktree(ctx context.Context, in startContextInputs
 		return false, "", fmt.Errorf("worktree-per-agent: the existing worktree for agent %q is missing its provisioning marker or the shared base's .git; refusing to provision to avoid replacing it", in.AgentID)
 	}
 
-	if err := provision.ProvisionShared(result.ProvisionInput); err != nil {
+	if err := provisionSharedWorktree(result.ProvisionInput); err != nil {
+		// A clone URL that provisioning refuses fails the dispatch, with
+		// the refusal as its error. It never falls back to the in-container
+		// clone: the agent would start in another workspace mode than the
+		// project's, from the same URL.
+		if errors.Is(err, provision.ErrHostCloneURLRefused) {
+			slog.Warn("worktree-per-agent: the project's clone URL is not accepted for a host-side clone; failing the dispatch",
+				"agent_id", in.AgentID)
+			return false, "", fmt.Errorf("worktree-per-agent: %w", provision.ErrHostCloneURLRefused)
+		}
 		cloneURL := ""
 		rawCloneURL := ""
 		if result.ProvisionInput.GitClone != nil {
@@ -2222,6 +2299,9 @@ func resolveWorktreeProvision(in worktreeProvisionInput) worktreeProvisionResult
 			ProjectID: in.ProjectID,
 			AgentID:   in.AgentID,
 			AgentName: agentName,
+			// The clone runs on the broker host from a project-supplied
+			// URL: https, ssh and git transports only.
+			HostGitHardened: true,
 		},
 		WorktreePath: worktreePath,
 		ProjectRoot:  resolved.HostPath,

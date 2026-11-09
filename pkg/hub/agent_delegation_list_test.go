@@ -796,15 +796,6 @@ func TestAgentsCollectionRoute_ResolvesOnlyTheExactPath(t *testing.T) {
 	}
 }
 
-// TestAgentDelegatedAgentList_ProjectFormStillRefused: the project form of
-// the agent list is not admitted for a delegated credential yet.
-func TestAgentDelegatedAgentList_ProjectFormStillRefused(t *testing.T) {
-	w := newADTListWorld(t, "adt-list-pform")
-	cred := w.delegated(t, w.adtIssueGrant(t, map[string]string{"kind": "hub"}, "agent:list", "agent:read").ID)
-	rec := w.do(t, http.MethodGet, "/api/v1/projects/"+w.proj.ID+"/agents", nil, adtBearer(cred.Token))
-	adtAssertAPIError(t, rec, http.StatusForbidden, errCodeCredentialNotAdmitted)
-}
-
 // TestResolveListScopesForPrincipal_UserOnly: the issuer list scope is
 // resolved only for a user principal.
 func TestResolveListScopesForPrincipal_UserOnly(t *testing.T) {

@@ -43,6 +43,31 @@ func TestRequireImageRegistryForBroker_NoRegistry(t *testing.T) {
 	assert.Contains(t, err.Error(), "SCION_IMAGE_REGISTRY")
 }
 
+// TestBrokerRegistryMissingError_ActionableHint: the error, shared by the
+// server and the standalone broker, names the setting and the env var, how
+// to set the env var in a shell and for a service, the local-store value
+// and a restart (ptone/scion#7183). It pins tokens, not line wraps.
+func TestBrokerRegistryMissingError_ActionableHint(t *testing.T) {
+	t.Setenv("SCION_MAINTENANCE_IMAGE_REGISTRY", "")
+
+	msg := brokerRegistryMissingError().Error()
+	for _, want := range []string{
+		"image_registry is not configured, but the runtime broker requires it.",
+		"image_registry in settings.yaml",
+		"scion config set --global image_registry <your-registry>",
+		"export SCION_IMAGE_REGISTRY=<your-registry>",
+		"SCION_IMAGE_REGISTRY=<your-registry> to its environment file",
+		"hub.env",
+		"localhost/scion",
+		"restart",
+		"server or broker",
+		"See image-build/README.md",
+	} {
+		assert.Contains(t, msg, want)
+	}
+	assert.NotContains(t, msg, "wizard")
+}
+
 func TestRequireImageRegistryForBroker_EnvVar(t *testing.T) {
 	t.Setenv("SCION_IMAGE_REGISTRY", "ghcr.io/test")
 

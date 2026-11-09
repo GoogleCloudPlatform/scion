@@ -156,7 +156,9 @@ func ksServer(t *testing.T, st store.Store, k *keyring.Keyring, clk *krClock) *S
 	cfg.HubID = encTestHubID
 	cfg.Keyring = k
 	cfg.KeyringConfigured = k != nil
-	cfg.SharedSigningSecret = krLegacySecret
+	if k == nil {
+		cfg.SharedSigningSecret = krLegacySecret
+	}
 	cfg.KeyringNow = clk.now
 	srv, err := newTestHubServer(t, cfg, st)
 	require.NoError(t, err)
@@ -231,7 +233,7 @@ func TestKeyStatus_GoldenLegacyReport(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-	  "report_version": 1,
+	  "report_version": 2,
 	  "instance": {"id": "inst-a", "hostname": "host-a", "source": "endpoint"},
 	  "keyring": {"source": "legacy", "revision": null},
 	  "signing": {
@@ -248,7 +250,7 @@ func TestKeyStatus_GoldenLegacyReport(t *testing.T) {
 	  "migration": null,
 	  "audit": {
 	    "ran": false, "scope": "startup", "completed_at": null, "scanned": 0, "reference_only": 0, "readable": 0, "unreadable": 0,
-	    "by_format": {}, "by_kid": {}, "unreadable_by_kind": {}, "backup_unreadable": 0
+	    "empty_no_ref": 0, "by_format": {}, "by_kid": {}, "unreadable_by_kind": {}, "backup_unreadable": 0
 	  },
 	  "readiness": {"reasons": []},
 	  "material_digest": null,
@@ -302,7 +304,7 @@ func TestKeyStatus_GoldenFieldSet(t *testing.T) {
 	}
 	sort.Strings(paths)
 	assert.Equal(t, []string{
-		"audit", "audit.backup_unreadable", "audit.by_format", "audit.by_kid", "audit.completed_at", "audit.ran",
+		"audit", "audit.backup_unreadable", "audit.by_format", "audit.by_kid", "audit.completed_at", "audit.empty_no_ref", "audit.ran",
 		"audit.readable", "audit.reference_only", "audit.scanned", "audit.scope", "audit.unreadable", "audit.unreadable_by_kind",
 		"encryption", "encryption.accepted_ids", "encryption.active_id", "encryption.legacy_v1_read_ids", "encryption.write_format",
 		"instance", "instance.hostname", "instance.id", "instance.source",
@@ -730,7 +732,6 @@ func TestCheckKeyringFile_ParityWithValidateKeyringConfig(t *testing.T) {
 				cfg := DefaultServerConfig()
 				cfg.KeyringConfigured = true
 				cfg.Keyring = k
-				cfg.SharedSigningSecret = krLegacySecret
 				startupErr := validateKeyringConfig(cfg)
 				checkErr := CheckKeyringFile(k)
 				assert.Equal(t, startupErr == nil, checkErr == nil, "startup: %v; check: %v", startupErr, checkErr)

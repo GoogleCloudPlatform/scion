@@ -53,6 +53,7 @@ func TestFlatRuntimeBrokerErrorCodes_FrozenValues(t *testing.T) {
 		ErrCodeRuntimeBrokerNotLinked:           "runtime_broker_not_linked",
 		ErrCodeRuntimeBrokerLinkPathUnsupported: "runtime_broker_link_path_unsupported",
 		ErrCodeExperimentDisabled:               "experiment_disabled",
+		ErrCodeRuntimeTargetTypeUnsupported:     "runtime_target_type_unsupported",
 	}
 	for got, w := range want {
 		if got != w {

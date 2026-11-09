@@ -14,7 +14,10 @@ Authorization is `ActionRead` on the project — the same as
 `GET /api/v1/projects/{projectId}/settings`. It is deliberately not admin-gated,
 because the point is to let non-admin project owners see that hub defaults
 exist. Only the presence of `agent_defaults` entries is exposed, never the
-server configuration itself. The endpoint is read-only; there is no `PUT`.
+server configuration itself. The endpoint is read-only; there is no `PUT`. From
+the CLI, [`scion project settings get --resolved`](/scion/reference/cli/#scion-project)
+reads this endpoint (`scion project settings get`, `set`, and `unset` read and
+update `/api/v1/projects/{projectId}/settings`).
 
 ## This endpoint does not resolve anything
 
@@ -134,3 +137,7 @@ statement the third state exists to prevent.
 
 Settings with no hub-level counterpart at all — the hub simply has no such field
 — report `absent`, which is a measured structural fact rather than a guess.
+
+## How the project settings page uses it
+
+The project settings page shows a `present` hub value as a fallback, never as the value in effect: the placeholder reads *Hub fallback: …*, a select offers *Use hub fallback (…)*, and the building icon's tooltip adds that a template or harness config can set its own value, which wins over it. For `unknown`, the icon's tooltip says that the hub could not report its fallback and may still have one. It names no value and does not say that no hub value exists. `absent` shows no icon.

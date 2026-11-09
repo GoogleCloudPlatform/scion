@@ -459,7 +459,7 @@ func TestDispatchDelivery_LegacyFallbackKeepsRealDenials(t *testing.T) {
 				for k := range env {
 					got[k] = true
 				}
-				secrets, err := m.d.selectDeliverySecrets(context.Background(), newDeliverySelector(m.authz, m.agent, purpose), m.agent)
+				secrets, _, err := m.d.selectDeliverySecrets(context.Background(), newDeliverySelector(m.authz, m.agent, purpose), m.agent)
 				require.NoError(t, err)
 				for _, rs := range secrets {
 					got[rs.Name] = true

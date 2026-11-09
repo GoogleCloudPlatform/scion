@@ -188,6 +188,7 @@ func TestMain(m *testing.M) {
 	// not depend on the caller's SCION_LOG_LEVEL / SCION_DEBUG.
 	envVarsToClear := append(testutil.HubEnvKeys(),
 		"SCION_HOST_UID", "SCION_HOST_GID", "SCION_KEEPID_UID",
+		initFirewallEnv,
 		loglevel.EnvLogLevel, loglevel.EnvDebug)
 	for _, v := range envVarsToClear {
 		_ = os.Unsetenv(v)
@@ -200,6 +201,10 @@ func TestMain(m *testing.M) {
 		return nil, errScionUserLookupDisabledInTests
 	}
 	startReaper = func() {}
+	// The real drop would strip CAP_NET_ADMIN from this test binary itself
+	// whenever it runs as root with that capability. Tests that check the
+	// drop install their own recorder (withRunDropNetAdmin).
+	runDropNetAdmin = func() error { return nil }
 
 	// Captured before HOME is redirected below — see realHomeDir's own doc
 	// comment for why some fixtures need the real one instead.

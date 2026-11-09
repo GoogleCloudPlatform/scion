@@ -38,6 +38,7 @@ import (
 // yet (an area that has not moved); guardScanDirs skips it until it exists.
 var guardScanSubdirs = []string{
 	"apierr",
+	"internal/hubtestutil",
 	"internal/principal",
 	"maintenance",
 	"oidckeys",

@@ -52,6 +52,10 @@ func (r *KubernetesRuntime) RunDiagnostics(opts DiagnosticOpts) DiagnosticReport
 	report.Checks = append(report.Checks, r.checkNamespaceAccess(namespace))
 	report.Checks = append(report.Checks, r.checkPodPermissions(namespace))
 	report.Checks = append(report.Checks, r.checkSecretPermissions(namespace))
+	report.Checks = append(report.Checks, r.checkSharedDirStorageClass(opts))
+	if c, ok := r.checkSharedDirClaimClasses(namespace, opts); ok {
+		report.Checks = append(report.Checks, c)
+	}
 
 	if opts.GKEMode || r.GKEMode {
 		report.Checks = append(report.Checks, r.checkSecretProviderClassCRD())

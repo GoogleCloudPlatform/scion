@@ -115,6 +115,61 @@ func TestArtifactShareCreateListRevoke(t *testing.T) {
 	assert.Error(t, shareArtifact(ctx, svc, &out, base, "not-a-ref", "", false, ""))
 }
 
+// TestShareLinkText: the CLI prints the hub's shareUrl when the hub has a
+// content host, and the hub-relative url on the hub endpoint
+// otherwise (ptone/scion#7107 phase A, condition 6).
+func TestShareLinkText(t *testing.T) {
+	rel := artifacts.RouteShared + "tok"
+	for _, tc := range []struct {
+		created  hubclient.ArtifactLinkCreated
+		endpoint string
+		want     string
+	}{
+		{hubclient.ArtifactLinkCreated{URL: rel, ShareURL: "https://links.example.net" + rel}, "https://hub.example.com/", "https://links.example.net" + rel},
+		{hubclient.ArtifactLinkCreated{URL: rel, ShareURL: "https://links.example.net" + rel}, "", "https://links.example.net" + rel},
+		{hubclient.ArtifactLinkCreated{URL: rel}, "https://hub.example.com/", "https://hub.example.com" + rel},
+		{hubclient.ArtifactLinkCreated{URL: rel}, "https://hub.example.com", "https://hub.example.com" + rel},
+		{hubclient.ArtifactLinkCreated{URL: rel}, "", rel},
+	} {
+		if got := shareLinkText(&tc.created, tc.endpoint); got != tc.want {
+			t.Errorf("shareLinkText(%+v, %q) = %q, want %q", tc.created, tc.endpoint, got, tc.want)
+		}
+	}
+}
+
+// TestArtifactSharePrintsShareURL: with a content host on the
+// hub, scion artifact share prints the link on it.
+func TestArtifactSharePrintsShareURL(t *testing.T) {
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(t.TempDir(), "a.db")+"?_pragma=busy_timeout(5000)")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	st := artifacts.NewStore(db, "sqlite")
+	require.NoError(t, st.Init(context.Background()))
+	blobs, err := storage.NewLocal(storage.Config{Provider: storage.ProviderLocal, Bucket: "b", LocalPath: t.TempDir()})
+	require.NoError(t, err)
+	svc := artifacts.NewService(oneUserHost{})
+	svc.SetStore(st)
+	svc.SetBlobStorage(blobs, "hub-1")
+	svc.SetLimits(func(context.Context) artifacts.Limits {
+		return artifacts.Limits{ContentURL: "https://links.example.net"}
+	})
+	srv := httptest.NewServer(svc)
+	t.Cleanup(srv.Close)
+	c, err := hubclient.New(srv.URL)
+	require.NoError(t, err)
+	client := c.Artifacts()
+
+	ctx := context.Background()
+	body := "# shared"
+	pub, err := client.Publish(ctx, &hubclient.PublishArtifactRequest{Name: "s.md", Scope: "project-1",
+		Content: strings.NewReader(body), Size: int64(len(body))})
+	require.NoError(t, err)
+	var out bytes.Buffer
+	require.NoError(t, shareArtifact(ctx, client, &out, srv.URL, pub.Artifact.Ref, "", false, ""))
+	link := strings.Split(out.String(), "\n")[0]
+	assert.True(t, strings.HasPrefix(link, "https://links.example.net"+artifacts.RouteShared), out.String())
+}
+
 // TestArtifactShareRefusedForAgents: the hub refuses links to agents,
 // whatever the CLI allows.
 func TestArtifactShareRefusedForAgents(t *testing.T) {

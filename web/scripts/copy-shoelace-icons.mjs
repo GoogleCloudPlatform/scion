@@ -154,6 +154,7 @@ const USED_ICONS = [
   'keyboard',
   'lightbulb',
   'lightning-charge',
+  'link',
   'link-45deg',
   'list',
   'lock',

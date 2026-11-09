@@ -19,6 +19,7 @@ package relayserver
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -128,12 +129,15 @@ func TestServerGrantKeysChangedHintsTargets(t *testing.T) {
 	cfg := testConfig(t, w, newFakeExperiment(expAnswer{on: true}))
 	ev := &grantKeyEvents{keys: make(chan string, 1)}
 	cfg.Events = ev
+	logs := &hintLogRecorder{}
+	cfg.Logger = slog.New(logs)
 	s := startServer(t, cfg)
 	var hints atomic.Int32
 	dialV2Agent(t, s, &hints)
 
 	ev.keys <- GrantKeysChangedSubject
 	waitHints(t, &hints, 1, "after a grant key change notice")
+	logs.want(t, "1", "notice")
 }
 
 // TestServerHintsTargetsOnListenReconnect: through Start's wiring, the
@@ -144,6 +148,8 @@ func TestServerHintsTargetsOnListenReconnect(t *testing.T) {
 	cfg := testConfig(t, w, newFakeExperiment(expAnswer{on: true}))
 	ev := &grantKeyEvents{keys: make(chan string)}
 	cfg.Events = ev
+	logs := &hintLogRecorder{}
+	cfg.Logger = slog.New(logs)
 	s := startServer(t, cfg)
 	var hints atomic.Int32
 	dialV2Agent(t, s, &hints)
@@ -155,6 +161,7 @@ func TestServerHintsTargetsOnListenReconnect(t *testing.T) {
 	}
 	ev.listen() // a reconnect after a drop
 	waitHints(t, &hints, 1, "after a LISTEN reconnect")
+	logs.want(t, "1", "reconnect")
 }
 
 // cleanupEvents is an Events that records each subscription's unsubscribe
@@ -235,5 +242,46 @@ func TestStartFailureReleasesEventRegistrations(t *testing.T) {
 			t.Fatalf("after the failed start: %s; want each exactly once (2 hooks)", desc)
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// hintLogRecorder records the sessions and trigger fields of each "grant
+// key change hinted to targets" log record.
+type hintLogRecorder struct {
+	mu   sync.Mutex
+	recs [][2]string
+}
+
+func (h *hintLogRecorder) Enabled(context.Context, slog.Level) bool { return true }
+func (h *hintLogRecorder) Handle(_ context.Context, r slog.Record) error {
+	if r.Message != "Conduit relay: grant key change hinted to targets" || r.Level != slog.LevelInfo {
+		return nil
+	}
+	var sessions, trigger string
+	r.Attrs(func(a slog.Attr) bool {
+		switch a.Key {
+		case "sessions":
+			sessions = a.Value.String()
+		case "trigger":
+			trigger = a.Value.String()
+		}
+		return true
+	})
+	h.mu.Lock()
+	h.recs = append(h.recs, [2]string{sessions, trigger})
+	h.mu.Unlock()
+	return nil
+}
+func (h *hintLogRecorder) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *hintLogRecorder) WithGroup(string) slog.Handler      { return h }
+
+// want checks that exactly one hint line was logged, at info, with these
+// fields.
+func (h *hintLogRecorder) want(t *testing.T, sessions, trigger string) {
+	t.Helper()
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(h.recs) != 1 || h.recs[0] != [2]string{sessions, trigger} {
+		t.Fatalf("hint log lines %v, want exactly one with sessions=%s trigger=%s", h.recs, sessions, trigger)
 	}
 }

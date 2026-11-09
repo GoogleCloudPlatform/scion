@@ -734,7 +734,7 @@ func TestHostGitCheckers_SeedListingsPinGitDir(t *testing.T) {
 	f.git(f.super, "config", "submodule.libs/a.url", "https://example.invalid/sub.git")
 	log := fakeGitOnPath(t)
 	plantInheritedGitEnv(t)
-	if err := CheckSeedRepoConfigLayers(context.Background(), f.commonDir, ""); err != nil {
+	if err := CheckSeedRepoConfigLayers(context.Background(), f.commonDir, "", false); err != nil {
 		t.Fatalf("CheckSeedRepoConfigLayers: %v", err)
 	}
 	if err := CheckSeedSubmodules(context.Background(), f.commonDir, f.super, ""); err != nil {

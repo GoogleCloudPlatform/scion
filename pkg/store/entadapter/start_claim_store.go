@@ -591,20 +591,32 @@ func (s *AgentStore) ClaimAgentReincarnation(ctx context.Context, agentID string
 	// One conditional update, so the claim is atomic on its own and also
 	// inside a caller's transaction (it opens none of its own).
 	newVersion := expectedVersion + 1
-	n, err := s.client.Agent.Update().
-		Where(
-			agent.IDEQ(uid),
-			agent.StateVersionEQ(expectedVersion),
-			agent.StartClaimIDIsNil(),
-			agent.ReincarnationStateIn(store.ReincarnationStateNone, store.ReincarnationStateFailed),
-		).
-		SetReincarnationState(store.ReincarnationStatePending).
-		SetReincarnationUpdatedAt(at).
-		SetStateVersion(newVersion).
-		SetUpdated(time.Now()).
-		Save(ctx)
+	claim := func(ac *ent.AgentClient) (int, error) {
+		n, err := ac.Update().
+			Where(
+				agent.IDEQ(uid),
+				agent.StateVersionEQ(expectedVersion),
+				agent.StartClaimIDIsNil(),
+				agent.ReincarnationStateIn(store.ReincarnationStateNone, store.ReincarnationStateFailed),
+			).
+			SetReincarnationState(store.ReincarnationStatePending).
+			SetReincarnationUpdatedAt(at).
+			SetStateVersion(newVersion).
+			SetUpdated(time.Now()).
+			Save(ctx)
+		return n, mapError(err)
+	}
+	var n int
+	if obs := s.lifecycle.load(); obs != nil {
+		// Observed (design 2.7, r2 N2): derives nothing, records the
+		// reincarnation base run in the cursor.
+		n, err = s.observedAgentWrite(ctx, obs, uid, store.AgentWriteReincarnationClaim, store.AgentWriteHints{},
+			func(c *ent.Client) (int, error) { return claim(c.Agent) })
+	} else {
+		n, err = claim(s.client.Agent)
+	}
 	if err != nil {
-		return 0, mapError(err)
+		return 0, err
 	}
 	if n == 1 {
 		return newVersion, nil

@@ -277,7 +277,7 @@ func TestProjectMembersGrouped_NoGroupByIsByteCompatiblePlusRoleKind(t *testing.
 		require.NoError(t, err)
 		// Re-marshal both through a map so key order does not matter.
 		assert.JSONEq(t, string(want), string(withoutRoleKind), "flat item minus roleKind equals the legacy item")
-		assert.Equal(t, projectRoleKind(rd.Name), kind)
+		assert.Equal(t, projectRoleKind(rd), kind)
 	}
 }
 

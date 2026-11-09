@@ -109,18 +109,24 @@ type ImageRegistryFileTier struct {
 // (top-level image_registry and profiles.<name>.image_registry). A nil
 // koanf gives an empty tier.
 func ImageRegistryFileTierFromKoanf(k *koanf.Koanf) ImageRegistryFileTier {
+	return fileTierFromKoanf(k, "image_registry")
+}
+
+// fileTierFromKoanf reads the top-level key and profiles.<name>.<key> from a
+// bootstrap koanf, trimmed; blank values are omitted.
+func fileTierFromKoanf(k *koanf.Koanf, key string) ImageRegistryFileTier {
 	t := ImageRegistryFileTier{}
 	if k == nil {
 		return t
 	}
-	t.Top = strings.TrimSpace(k.String("image_registry"))
+	t.Top = strings.TrimSpace(k.String(key))
 	if profiles, ok := k.Get("profiles").(map[string]interface{}); ok {
 		for name, raw := range profiles {
 			p, ok := raw.(map[string]interface{})
 			if !ok {
 				continue
 			}
-			if v, ok := p["image_registry"].(string); ok && strings.TrimSpace(v) != "" {
+			if v, ok := p[key].(string); ok && strings.TrimSpace(v) != "" {
 				if t.Profiles == nil {
 					t.Profiles = map[string]string{}
 				}

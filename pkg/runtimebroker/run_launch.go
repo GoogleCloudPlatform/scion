@@ -28,6 +28,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
 // gateAction classifies a claim/checkpoint/keepalive answer (design
@@ -512,13 +513,25 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 
 			HarnessConfigSource: sr.info.HarnessConfigSource,
 			WorkspacePlacement:  sr.info.WorkspacePlacement,
+
+			TemplateHash:          sr.info.TemplateHash,
+			Harness:               sr.info.Harness,
+			Model:                 sr.info.Model,
+			HarnessConfigRevision: sr.info.HarnessConfigRevision,
+			BrokerBuild:           effectiveBrokerBuild(*sr.info),
 		}
 	}
 	// Journalled before it is sent (design wave 3 §1 C-a write 3): a
 	// restarted broker resends it unchanged and never turns it into a
 	// failure.
-	rec.journal.terminal(journalTerminal{Succeeded: true, AgentInfo: info})
-	result, err := sender.SendTerminal(terminalCtx, true, "", "", "", "", info)
+	// The start's notice (for example the repository git config keys left
+	// out of the agent's private copy) becomes the agent's status message.
+	notice := ""
+	if sr.info != nil {
+		notice = sr.info.StartNotice
+	}
+	rec.journal.terminal(journalTerminal{Succeeded: true, Message: notice, AgentInfo: info})
+	result, err := sender.SendTerminal(terminalCtx, true, "", "", notice, "", info)
 	if err != nil {
 		// No definitive answer by the TTL: no cleanup (same rule as a
 		// failed report, design §3.8.2 step 7); the journal record is kept so
@@ -937,6 +950,7 @@ var launchFailureText = map[string]string{
 	api.LaunchCodeContainerConfig:     "the agent container could not be configured",
 	api.LaunchCodeCrashLoop:           "the agent container keeps crashing on start",
 	api.LaunchCodeInitContainerFailed: "an init container of the agent pod failed",
+	api.LaunchCodeVolumeMountFailed:   "an agent volume could not be mounted",
 	api.LaunchCodeUnschedulable:       "the agent pod cannot be scheduled",
 	api.LaunchCodePodDisrupted:        "the agent pod was preempted, evicted or deleted while starting",
 	api.LaunchCodeLaunchTimeout:       "launch timed out waiting for the agent pod to be ready",
@@ -1041,6 +1055,21 @@ func classifyStartErrorCode(err error, templateSlug, op string) (code, message s
 	}
 	if se, ok := storageMigrationRequiredFrom(err); ok {
 		return ErrCodeStorageMigrationRequired, se.PublicMessage()
+	}
+	if text, ok := util.StartRefusalText(err); ok {
+		// The repository's git config sets keys agents may not be given.
+		// The refusal's own text names every refused key and its remedy,
+		// never a value or a host path; what wraps it can name the agent
+		// directory, so only the refusal is reported.
+		return api.LaunchCodeGitConfigRefused, text
+	}
+	// The runtime refused the resource spec before creating anything
+	// (ptone/scion#7103): container_config, with the public message, which
+	// names only the fields, the caller's values and the platform rule.
+	// This and the git config refusal above match disjoint error types, so
+	// their order does not change behaviour.
+	if re, ok := resourceLimitsErrorFrom(err); ok {
+		return api.LaunchCodeContainerConfig, re.PublicMessage()
 	}
 	var skillErr *agent.SkillResolutionError
 	switch {

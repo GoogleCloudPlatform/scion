@@ -96,7 +96,8 @@ func profileAgentHubContext() (*HubContext, error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	project, err := resolveProjectNameOrID(ctx, client, ref)
+	// A hub profile mints its own tokens, never a user access token.
+	project, err := resolveProjectNameOrID(ctx, client, ref, false)
 	if err != nil {
 		return nil, fmt.Errorf("project %q on the target hub of profile %q: %w", ref, hubProfileName(), err)
 	}

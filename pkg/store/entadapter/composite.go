@@ -234,7 +234,7 @@ func (c *CompositeStore) WithTx(ctx context.Context, fn func(tx store.Store) err
 	if err != nil {
 		return markTransient(fmt.Errorf("begin transaction: %w", err))
 	}
-	txStore := newTxCompositeStore(tx)
+	txStore := c.newTxStore(tx)
 
 	defer func() {
 		// Safety net: if Commit was not called (i.e. fn panicked or returned
@@ -374,10 +374,28 @@ func (c *CompositeStore) DeleteAgent(ctx context.Context, id string) error {
 	return c.deleteAgentDependents(ctx, id)
 }
 
+// refuseNilAgentIDs returns store.ErrInvalidInput when ids holds the nil
+// UUID. The agent cascades delete notifications by agent_id, and
+// notifications that are not about an agent (a notification with a Kind,
+// some older rows) carry the nil UUID there, so a cascade keyed on it would
+// delete them. No agent has the nil UUID as its id; this is defence in
+// depth.
+func refuseNilAgentIDs(ids ...uuid.UUID) error {
+	for _, id := range ids {
+		if id == uuid.Nil {
+			return fmt.Errorf("%w: the nil UUID is not an agent id", store.ErrInvalidInput)
+		}
+	}
+	return nil
+}
+
 // deleteAgentDependents removes the records DeleteAgent cascades to.
 func (c *CompositeStore) deleteAgentDependents(ctx context.Context, id string) error {
 	uid, err := parseUUID(id)
 	if err != nil {
+		return err
+	}
+	if err := refuseNilAgentIDs(uid); err != nil {
 		return err
 	}
 	if _, err := c.client.Notification.Delete().
@@ -460,6 +478,19 @@ func (c *CompositeStore) DeleteProject(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
+	if err := refuseNilAgentIDs(agentIDs...); err != nil {
+		return err
+	}
+	obs := c.lifecycle.load()
+	var lifecycleBefore []*ent.Agent
+	if obs != nil && len(agentIDs) > 0 {
+		// The rows are already locked; read them whole for the deleted
+		// events' before snapshots (WP1 design 2.6, B1).
+		if lifecycleBefore, err = c.client.Agent.Query().
+			Where(agent.IDIn(agentIDs...)).Order(ent.Asc(agent.FieldID)).All(ctx); err != nil {
+			return err
+		}
+	}
 	if len(agentIDs) > 0 {
 		if _, err := c.client.Notification.Delete().
 			Where(notification.AgentIDIn(agentIDs...)).Exec(ctx); err != nil {
@@ -484,6 +515,19 @@ func (c *CompositeStore) DeleteProject(ctx context.Context, id string) error {
 		}
 		if _, err := c.client.Agent.Delete().
 			Where(agent.ProjectIDEQ(uid)).Exec(ctx); err != nil {
+			return err
+		}
+	}
+	if obs != nil {
+		now := time.Now()
+		for _, row := range lifecycleBefore {
+			if err := observeAgentWrite(ctx, obs, c.client, c.entTx, store.AgentWrite{
+				Op: store.AgentWriteProjectDelete, Before: entAgentToStore(row), Now: now,
+			}); err != nil {
+				return err
+			}
+		}
+		if err := deleteProjectLifecycleCursors(ctx, c.client, uid); err != nil {
 			return err
 		}
 	}
@@ -617,6 +661,7 @@ func (c *CompositeStore) ListSoftDeletedAgentsBefore(ctx context.Context, cutoff
 // candidates.
 func (c *CompositeStore) purgeDeletedAgents(ctx context.Context, cutoff time.Time, only []uuid.UUID, restrict bool) (int, error) {
 	useLock := c.AgentStore.usesRowLocks()
+	obs := c.lifecycle.load()
 	tx, err := c.client.Tx(ctx)
 	if err != nil {
 		return 0, err
@@ -640,7 +685,7 @@ func (c *CompositeStore) purgeDeletedAgents(ctx context.Context, cutoff time.Tim
 		return 0, err
 	}
 
-	txStore := newTxCompositeStore(tx)
+	txStore := c.newTxStore(tx)
 	// One deactivation record for every row this purge deactivates.
 	now := time.Now()
 	deactivation := store.Deactivation{
@@ -670,6 +715,16 @@ func (c *CompositeStore) purgeDeletedAgents(ctx context.Context, cutoff time.Tim
 		eligibleIDs, err := eligibleQuery.IDs(ctx)
 		if err != nil {
 			return 0, err
+		}
+		lifecycleBefore := map[uuid.UUID]*ent.Agent{}
+		if obs != nil && len(eligibleIDs) > 0 {
+			rows, err := tx.Agent.Query().Where(agent.IDIn(eligibleIDs...)).All(ctx)
+			if err != nil {
+				return 0, err
+			}
+			for _, r := range rows {
+				lifecycleBefore[r.ID] = r
+			}
 		}
 		if len(eligibleIDs) > 0 {
 			eligible := make([]string, 0, len(eligibleIDs))
@@ -718,6 +773,15 @@ func (c *CompositeStore) purgeDeletedAgents(ctx context.Context, cutoff time.Tim
 			}
 			if err := deactivatePurgedAgentAuthority(ctx, txStore, removed, deactivation); err != nil {
 				return 0, err
+			}
+			for _, id := range removedIDs {
+				if row := lifecycleBefore[id]; row != nil {
+					if err := observeAgentWrite(ctx, obs, tx.Client(), tx, store.AgentWrite{
+						Op: store.AgentWritePurge, Before: entAgentToStore(row), Now: now,
+					}); err != nil {
+						return 0, err
+					}
+				}
 			}
 		}
 	}
@@ -902,6 +966,56 @@ func (c *CompositeStore) Migrate(ctx context.Context) error {
 	return c.SeedMaintenanceOperations(ctx)
 }
 
+// backfillAgentRoleAttempts bounds the re-reads of backfillAgentRole when
+// the agent's applied config changes between its read and its write. A
+// variable so a test can lower it.
+var backfillAgentRoleAttempts = 5
+
+// backfillAgentRole sets the grandfathered full role on agent a when its
+// applied config names no role, and reports whether it wrote. The write
+// starts from the row's own document, keeps its recorded native Cloud Run
+// decision (marshalAppliedConfigNative with rowNativeCloudRun), and applies
+// only while the row still holds the document read; otherwise the row is
+// read again.
+func (c *CompositeStore) backfillAgentRole(ctx context.Context, a *ent.Agent) (bool, error) {
+	for attempt := 0; attempt < backfillAgentRoleAttempts; attempt++ {
+		cfg := &store.AgentAppliedConfig{}
+		if a.AppliedConfig != "" {
+			parsed, err := parseAppliedConfig(a.AppliedConfig)
+			if err != nil {
+				return false, fmt.Errorf("parse applied_config for agent %s: %w", a.ID, err)
+			}
+			if parsed != nil {
+				cfg = parsed
+			}
+		}
+		if cfg.AgentRole != "" {
+			return false, nil
+		}
+		cfg.AgentRole = "full"
+		cfg.AgentRoleGrandfathered = true
+		n, err := c.client.Agent.Update().
+			Where(agent.IDEQ(a.ID), appliedConfigUnchanged(a.AppliedConfig)).
+			SetAppliedConfig(marshalAppliedConfigNative(cfg, rowNativeCloudRun(a.AppliedConfig))).
+			Save(ctx)
+		if err != nil {
+			return false, err
+		}
+		if n == 1 {
+			return true, nil
+		}
+		fresh, err := c.client.Agent.Get(ctx, a.ID)
+		if ent.IsNotFound(err) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		a = fresh
+	}
+	return false, fmt.Errorf("backfill agent role for agent %s: applied config kept changing", a.ID)
+}
+
 // BackfillEmptyAgentRoles preserves access for pre-role agents before missing
 // roles start resolving to the least-privileged role at runtime.
 func (c *CompositeStore) BackfillEmptyAgentRoles(ctx context.Context) error {
@@ -918,27 +1032,13 @@ func (c *CompositeStore) BackfillEmptyAgentRoles(ctx context.Context) error {
 
 	var updated int
 	for _, a := range agents {
-		cfg := &store.AgentAppliedConfig{}
-		if a.AppliedConfig != "" {
-			parsed, err := parseAppliedConfig(a.AppliedConfig)
-			if err != nil {
-				return fmt.Errorf("parse applied_config for agent %s: %w", a.ID, err)
-			}
-			if parsed != nil {
-				cfg = parsed
-			}
-		}
-		if cfg.AgentRole != "" {
-			continue
-		}
-		cfg.AgentRole = "full"
-		cfg.AgentRoleGrandfathered = true
-		if err := c.client.Agent.UpdateOneID(a.ID).
-			SetAppliedConfig(marshalAppliedConfig(cfg)).
-			Exec(ctx); err != nil {
+		done, err := c.backfillAgentRole(ctx, a)
+		if err != nil {
 			return err
 		}
-		updated++
+		if done {
+			updated++
+		}
 	}
 	if updated > 0 {
 		slog.Info("backfilled empty agent roles before role default change", "rows_updated", updated)

@@ -124,3 +124,29 @@ func TestTemplateContentLocalAndInlineStillWork(t *testing.T) {
 		t.Errorf("missing template dir = %q, %v; want inline", got, err)
 	}
 }
+
+// IsPlaceholderSystemPrompt matches empty content and the default
+// template's placeholder exactly (trimmed, case-insensitive), the rule of
+// _is_meaningful_system_prompt in harnesses/gemini-cli/provision.py.
+func TestIsPlaceholderSystemPrompt(t *testing.T) {
+	tests := []struct {
+		content string
+		want    bool
+	}{
+		{"", true},
+		{" \n\t", true},
+		{"# Placeholder", true},
+		{"# Placeholder\n", true},
+		{"  # placeholder  \n", true},
+		{"# PLACEHOLDER", true},
+		{"# Placeholder\nYou are a reviewer.", false},
+		{"Placeholder", false},
+		{"#Placeholder", false},
+		{"You are a reviewer.", false},
+	}
+	for _, tc := range tests {
+		if got := IsPlaceholderSystemPrompt([]byte(tc.content)); got != tc.want {
+			t.Errorf("IsPlaceholderSystemPrompt(%q) = %v, want %v", tc.content, got, tc.want)
+		}
+	}
+}

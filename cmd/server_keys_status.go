@@ -42,7 +42,9 @@ var serverKeysStatusCmd = &cobra.Command{
 ring IDs, emit and write formats, legacy reader lists, signing deadlines,
 the formats this binary reads, the database encryption policy and
 migration, an authenticated audit of every stored payload (counts only) and
-the key-related readiness reasons.
+the key-related readiness reasons. The audit's formats and key IDs are those
+of the key that actually authenticated each readable payload; unreadable
+payloads are counted by failure kind only.
 
 It builds the same report as GET /api/v1/admin/keys/status, from the
 keyring file and database configured on this host instead of a running
@@ -172,8 +174,8 @@ func printKeyStatus(w io.Writer, r hub.KeyStatusReport) {
 	if !r.Audit.Ran {
 		p("Audit: not run (no database)")
 	} else {
-		p("Audit (%s, completed %s): %d scanned, %d reference-only, %d readable, %d unreadable (%d infrastructure backups)",
-			r.Audit.Scope, keysDeadline(r.Audit.CompletedAt), r.Audit.Scanned, r.Audit.ReferenceOnly, r.Audit.Readable, r.Audit.Unreadable, r.Audit.BackupUnreadable)
+		p("Audit (%s, completed %s): %d scanned, %d reference-only, %d readable, %d unreadable (%d infrastructure backups), %d empty without a reference",
+			r.Audit.Scope, keysDeadline(r.Audit.CompletedAt), r.Audit.Scanned, r.Audit.ReferenceOnly, r.Audit.Readable, r.Audit.Unreadable, r.Audit.BackupUnreadable, r.Audit.EmptyNoRef)
 		p("  by format: %s; by key ID: %s; unreadable by kind: %s",
 			keysCounts(r.Audit.ByFormat), keysCounts(r.Audit.ByKID), keysCounts(r.Audit.UnreadableByKind))
 	}

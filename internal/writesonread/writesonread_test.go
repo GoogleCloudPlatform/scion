@@ -64,6 +64,22 @@ func TestIsolateForTest_NestedRestoresParent(t *testing.T) {
 	}
 }
 
+// cmdNoWriteTestFiles are the cmd test files that may call IsolateForTest.
+// The intent is one choke point for resetting the process-wide switch in
+// cmd: server_preflight_test.go (runPreflightForTest and the root-hook
+// test). runtime-broker convert is a second no-write command, and its tests
+// cannot reach a helper there: that file is //go:build !no_sqlite, while
+// the convert tests, and the outside-project gate test that runs the root
+// hook for convert, are untagged and also run under -tags no_sqlite. They
+// are named here instead. Every other cmd test file still may not call it.
+// They are matched by their path from the module root, so a file with the
+// same name in a cmd subdirectory is not allowed.
+var cmdNoWriteTestFiles = map[string]bool{
+	filepath.Join("cmd", "server_preflight_test.go"): true,
+	filepath.Join("cmd", "broker_convert_test.go"):   true,
+	filepath.Join("cmd", "project_gate_test.go"):     true,
+}
+
 // isolateCallRE matches a call of IsolateForTest, qualified or not.
 var isolateCallRE = regexp.MustCompile(`\bIsolateForTest\(`)
 
@@ -116,11 +132,11 @@ func TestIsolateForTest_NoProductionCallers(t *testing.T) {
 				callers = append(callers, fmt.Sprintf("%s (%d matches, want only the declaration)", path, n))
 			}
 		case strings.HasSuffix(path, "_test.go"):
-			// Tests: in cmd, only through runPreflightForTest and the hook
-			// test, both in server_preflight_test.go.
+			// Tests: in cmd, only in the tests of the no-write commands
+			// (cmdNoWriteTestFiles).
 			rel, _ := filepath.Rel(root, path)
-			if n > 0 && strings.HasPrefix(rel, "cmd"+string(filepath.Separator)) && filepath.Base(path) != "server_preflight_test.go" {
-				callers = append(callers, path+" (a cmd test outside server_preflight_test.go)")
+			if n > 0 && strings.HasPrefix(rel, "cmd"+string(filepath.Separator)) && !cmdNoWriteTestFiles[rel] {
+				callers = append(callers, path+" (a cmd test outside the no-write command tests)")
 			}
 		default:
 			scanned++
@@ -137,6 +153,6 @@ func TestIsolateForTest_NoProductionCallers(t *testing.T) {
 		t.Fatalf("scanned only %d non-test Go files under %s; the walk is not looking at the module", scanned, root)
 	}
 	if len(callers) > 0 {
-		t.Errorf("IsolateForTest is for tests only (in cmd, only through server_preflight_test.go), but these call it: %v", callers)
+		t.Errorf("IsolateForTest is for tests only (in cmd, only in the no-write command tests: cmdNoWriteTestFiles), but these call it: %v", callers)
 	}
 }

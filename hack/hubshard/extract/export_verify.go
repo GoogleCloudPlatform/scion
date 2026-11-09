@@ -74,20 +74,50 @@ func (r *exportReport) write(w io.Writer) {
 //   - every moved declaration (with its doc comment) has the same token
 //     stream in the target, comments included, except identifiers that the
 //     rename map allows to change (old -> new, nothing else);
-//   - the target has no other declarations in its non-test files;
+//   - the target has no other declarations in its non-test files, except
+//     in files that already existed in the before tree's copy of the
+//     target package (located under -before) and are byte-identical;
+//   - references to resolved aliases and mapped funcs differ only as a
+//     fresh plan on the before tree spells them (see resolveAlias and
+//     checkMapping, which re-check each alias and mapping there);
 //   - in the source package, every other declaration is byte-identical,
 //     except field-export call sites, whose tokens may differ only by the
 //     field renames; the test entry points and free-floating comments are
 //     unchanged;
 //   - the alias file and the target files are exactly what a fresh run of
 //     the generator on the before tree produces (no hand edits).
-func verifyExport(before, after *pkgInfo, targetDir, importPath string, spec exportSpec, aliasFile string) (*exportReport, error) {
-	ep, err := planExport(before, spec, filepath.Join(os.TempDir(), "extract-verify-no-such-dir", filepath.Base(targetDir)), importPath, aliasFile)
+func verifyExport(before, after *pkgInfo, targetDir, importPath, srcImport string, spec exportSpec, aliasFile string) (*exportReport, error) {
+	ep, err := planExport(before, spec, filepath.Join(os.TempDir(), "extract-verify-no-such-dir", filepath.Base(targetDir)), importPath, srcImport, aliasFile)
 	if err != nil {
 		return nil, fmt.Errorf("re-planning on the before tree: %w", err)
 	}
 	r := &exportReport{}
 	renames := ep.renameMap()
+	subst := map[string][]tok{}
+	for k, m := range ep.mappings {
+		renames[k] = m.to
+	}
+	for k, res := range ep.resolved {
+		if res.same {
+			renames[k] = res.name
+		} else {
+			subst[k] = res.tokens()
+		}
+	}
+	existing := map[string][]byte{} // pre-existing target files (before tree)
+	if dir, ok := ep.locate(importPath); ok {
+		names, err := filepath.Glob(filepath.Join(dir, "*.go"))
+		if err != nil {
+			return nil, err
+		}
+		for _, n := range names {
+			b, err := os.ReadFile(n)
+			if err != nil {
+				return nil, err
+			}
+			existing[filepath.Base(n)] = b
+		}
+	}
 
 	// Moved declarations against the target.
 	target, err := loadPackage(targetDir)
@@ -122,13 +152,23 @@ func verifyExport(before, after *pkgInfo, targetDir, importPath string, spec exp
 		if want := targetFileName(d.file.name); td.file.name != want {
 			r.unmatched = append(r.unmatched, fmt.Sprintf("%s: in target file %s, want %s", d.key, td.file.name, want))
 		}
-		if diff := tokenDiff(d.text(before.fset), td.text(target.fset), renames); diff != "" {
+		if diff := tokenDiffSubst(d.text(before.fset), td.text(target.fset), renames, subst); diff != "" {
 			r.tokenDiffs = append(r.tokenDiffs, fmt.Sprintf("%s (%s -> %s): %s", d.key, d.file.name, td.file.name, diff))
 		}
 	}
 	for _, td := range target.decls {
-		if !td.file.isTest && !matched[td.node] {
-			r.unmatched = append(r.unmatched, fmt.Sprintf("target declaration %s (%s) has no moved origin", td.key, td.file.name))
+		if td.file.isTest || matched[td.node] {
+			continue
+		}
+		if b, ok := existing[td.file.name]; ok && bytes.Equal(b, td.file.src) {
+			continue // unchanged pre-existing target file
+		}
+		r.unmatched = append(r.unmatched, fmt.Sprintf("target declaration %s (%s) has no moved origin", td.key, td.file.name))
+	}
+	for _, name := range sortedKeys(existing) {
+		got, err := os.ReadFile(filepath.Join(targetDir, name))
+		if err != nil || !bytes.Equal(got, existing[name]) {
+			r.unmatched = append(r.unmatched, "pre-existing target file "+name+" changed or missing")
 		}
 	}
 
@@ -254,6 +294,13 @@ func scanTokens(src string) ([]tok, error) {
 // tokenDiff returns "" when b and a have the same token stream, where an
 // identifier may differ only as renames allows (old -> renames[old]).
 func tokenDiff(b, a string, renames map[string]string) string {
+	return tokenDiffSubst(b, a, renames, nil)
+}
+
+// tokenDiffSubst is tokenDiff where, in addition, an identifier old may be
+// replaced by exactly the token sequence subst[old] (a resolved alias spelled
+// pkg.Name).
+func tokenDiffSubst(b, a string, renames map[string]string, subst map[string][]tok) string {
 	bt, err := scanTokens(b)
 	if err != nil {
 		return err.Error()
@@ -262,19 +309,65 @@ func tokenDiff(b, a string, renames map[string]string) string {
 	if err != nil {
 		return err.Error()
 	}
-	if len(bt) != len(at) {
+	// A longer spelling (pkg.Name) can make gofmt expand a one-line body,
+	// which adds a semicolon before its closing brace; such a semicolon is
+	// optional in Go, so it is not a difference.
+	bt, at = elideClosingSemis(bt), elideClosingSemis(at)
+	j := 0
+	for i := range bt {
+		if j >= len(at) {
+			return fmt.Sprintf("%d tokens before, %d after", len(bt), len(at))
+		}
+		if bt[i] == at[j] {
+			j++
+			continue
+		}
+		if bt[i].t == token.IDENT && at[j].t == token.IDENT && renames[bt[i].lit] == at[j].lit {
+			j++
+			continue
+		}
+		if seq, ok := subst[bt[i].lit]; ok && bt[i].t == token.IDENT && hasTokens(at[j:], seq) {
+			j += len(seq)
+			continue
+		}
+		return fmt.Sprintf("token %d: %s %q -> %s %q", i, bt[i].t, bt[i].lit, at[j].t, at[j].lit)
+	}
+	if j != len(at) {
 		return fmt.Sprintf("%d tokens before, %d after", len(bt), len(at))
 	}
-	for i := range bt {
-		if bt[i] == at[i] {
-			continue
-		}
-		if bt[i].t == token.IDENT && at[i].t == token.IDENT && renames[bt[i].lit] == at[i].lit {
-			continue
-		}
-		return fmt.Sprintf("token %d: %s %q -> %s %q", i, bt[i].t, bt[i].lit, at[i].t, at[i].lit)
-	}
 	return ""
+}
+
+// elideClosingSemis drops a semicolon (explicit or automatic) directly
+// before a closing ")" or "}": the Go spec lets it be omitted there, so
+// "{ return x }" and "{\n\treturn x\n}" are the same code.
+func elideClosingSemis(ts []tok) []tok {
+	var out []tok
+	for i, t := range ts {
+		if t.t == token.SEMICOLON {
+			j := i + 1
+			for j < len(ts) && ts[j].t == token.COMMENT {
+				j++
+			}
+			if j < len(ts) && (ts[j].t == token.RBRACE || ts[j].t == token.RPAREN) {
+				continue
+			}
+		}
+		out = append(out, t)
+	}
+	return out
+}
+
+func hasTokens(ts, seq []tok) bool {
+	if len(ts) < len(seq) {
+		return false
+	}
+	for i := range seq {
+		if ts[i] != seq[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // commentOnlyDiff compares the .go files of two directories and returns one

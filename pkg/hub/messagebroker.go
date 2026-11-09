@@ -982,11 +982,17 @@ func (p *MessageBrokerProxy) resolveUserMessageConversation(ctx context.Context,
 			Reason:     reason,
 		})
 	}
-	// DEF-3: Independent consistency check against prior messages.
-	if consistent := messaging.CheckConversationConsistency(ctx, p.store, storeMsg.ID, storeMsg.ConversationID, msg.ThreadID, msg.SenderID, msg.RecipientID, p.log); !consistent {
-		p.log.Warn("DEF-3: conversation consistency mismatch (user message from broker)",
-			"message_id", storeMsg.ID, "conversation_id", storeMsg.ConversationID)
-	}
+	// DEF-3: Independent consistency check against prior messages, run off
+	// the delivery path with its own deadline.
+	messaging.GoConsistencyCheck(messaging.ConsistencyInput{
+		Store: p.store, Log: p.log, MessageID: storeMsg.ID, ConversationID: storeMsg.ConversationID,
+		ThreadID: msg.ThreadID, SenderID: msg.SenderID, RecipientID: msg.RecipientID,
+	}, func(ctx context.Context, in messaging.ConsistencyInput) {
+		if consistent := messaging.CheckConversationConsistency(ctx, in.Store, in.MessageID, in.ConversationID, in.ThreadID, in.SenderID, in.RecipientID, in.Log); !consistent {
+			in.Log.Warn("DEF-3: conversation consistency mismatch (user message from broker)",
+				"message_id", in.MessageID, "conversation_id", in.ConversationID)
+		}
+	})
 	return true
 }
 
@@ -1128,6 +1134,20 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 			p.publishDeliveryFailed(ctx, projectID, agentSlug, msg, errors.New(phaseErr.Message))
 			return
 		}
+		// A held agent (ptone/scion#3433) is refused like a suspended one,
+		// for a topic message and a broadcast alike (ptone/scion#6859); a
+		// lookup fault refuses. The same predicate as Server.agentHeld.
+		held, holdErr := p.store.HasActiveAgentHold(ctx, agent.ID)
+		if holdErr != nil || held {
+			refusal := heldTargetDMError(agent)
+			if holdErr != nil {
+				refusal = heldLookupFaultDMError()
+			}
+			p.log.Warn("Rejecting broker message to held agent",
+				"agentSlug", agentSlug, "projectID", projectID, "error", holdErr)
+			p.publishDeliveryFailed(ctx, projectID, agentSlug, msg, errors.New(refusal.Message))
+			return
+		}
 	}
 
 	// Persist to message store before delivery attempt (no pending rows).
@@ -1218,11 +1238,17 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 			Match:      match,
 			Reason:     reason,
 		})
-		// DEF-3: Independent consistency check against prior messages.
-		if consistent := messaging.CheckConversationConsistency(ctx, p.store, storeMsg.ID, convID, msg.ThreadID, msg.SenderID, agent.ID, p.log); !consistent {
-			p.log.Warn("DEF-3: conversation consistency mismatch (agent message from broker)",
-				"message_id", storeMsg.ID, "conversation_id", convID, "agent_id", agent.ID)
-		}
+		// DEF-3: Independent consistency check against prior messages, run
+		// off the delivery path with its own deadline.
+		messaging.GoConsistencyCheck(messaging.ConsistencyInput{
+			Store: p.store, Log: p.log, MessageID: storeMsg.ID, ConversationID: convID,
+			ThreadID: msg.ThreadID, SenderID: msg.SenderID, RecipientID: agent.ID,
+		}, func(ctx context.Context, in messaging.ConsistencyInput) {
+			if consistent := messaging.CheckConversationConsistency(ctx, in.Store, in.MessageID, in.ConversationID, in.ThreadID, in.SenderID, in.RecipientID, in.Log); !consistent {
+				in.Log.Warn("DEF-3: conversation consistency mismatch (agent message from broker)",
+					"message_id", in.MessageID, "conversation_id", in.ConversationID, "agent_id", in.RecipientID)
+			}
+		})
 	}
 	if err := p.store.CreateMessage(ctx, storeMsg); err != nil {
 		p.log.Error("Failed to persist broker message to store", "agentSlug", agentSlug, "error", err)

@@ -177,15 +177,18 @@ default, so it works unchanged on a `git archive` of a commit
 (`-after /tmp/gen/pkg/hub`); pass `-to`/`-import` for another target.
 
 The family file lists the names to move, plus optional `rename old=New`
-(export name; the default upper-cases the first letter) and
-`field T.f=F` (export a field of a moved struct) lines.
+(export name; the default upper-cases the first letter),
+`field T.f=F` (export a field of a moved struct) and `map old=New`
+(map-to-existing, below) lines.
 
 What `export` does:
 
 - Takes the requested declarations (only from `*_helpers_test.go` files)
   and the methods of requested types. It refuses a test entry point, part
   of a grouped declaration, and any moved declaration that uses a
-  declaration that stays (request that one too, or leave both in place).
+  declaration that stays (request that one too, or leave both in place),
+  except a staying name it can spell another way: a resolvable alias or a
+  mapped func (both below).
 - Exports only the names that staying code uses, plus the moved types that
   staying code can reach through them: types in an exported func's or typed
   var's signature, in an exported type's exported fields, and in its exported
@@ -202,7 +205,56 @@ What `export` does:
     arguments. If the original calls `t.Helper()` (as a top-level statement),
     the wrapper does too, so failures are still reported at the test's line.
     A `Helper()` call anywhere else in the body (a nested block, a closure,
-    a non-parameter receiver) is refused, since a wrapper could not mirror it;
+    a non-parameter receiver) is refused, since a wrapper could not mirror it.
+    A func whose behaviour depends on its caller's frame is refused too,
+    because the wrapper adds a frame: a direct `recover()` (outside a func
+    literal; under `defer w()` it would no longer stop the panic), or a
+    frame selected by depth: `runtime.Caller`/`runtime.Callers` (called or
+    referenced as a value: `f := runtime.Caller`, `use(runtime.Callers)`),
+    `log.Output`, or any `.Output(...)` call (call depth;
+    `(*log.Logger).Output` cannot be told apart without types). A call or
+    reference by name to a moved func or a moved package-level var (whose
+    initializer, func literals included, is checked the same way: `var c =
+    runtime.Caller`, `var f = func() { ... runtime.Caller(2) ... }`; a var
+    also inherits the hazard of every func or var that assigns it directly
+    (the whole var, an element, a slice or a field, also through a
+    dereference, parentheses or a type assertion), takes its address or
+    ranges into it, as in `func set() { c = runtime.Caller }`), or a call by
+    name to a method of a moved type, that selects a frame counts as well.
+    Build-tag variants of a name (the same func or var in several
+    constrained files) all count, since any may run. As in hack/pkgmove,
+    propagation runs only through the moved set (for a resolved wrapper's
+    target: through its whole package; for a mapped staying func: that func
+    alone). Moved code cannot name any other staying declaration directly:
+    export refuses that, except for resolved aliases, which are checked on
+    their own. Three limits can miss a real hazard, as hack/pkgmove's
+    wrapperHazard can: a staying type's stack-inspecting method reached by
+    dynamic dispatch through an interface parameter (a test store passed as
+    `store.Store`, say); a call into another package whose callee selects a
+    frame above its own caller (a logger that skips frames with
+    `runtime.Callers(2)`, such as pkg/hub/auditevent's `SlogSink.Emit`); and
+    a write that reaches a var other than directly: through a local copy of
+    a map, slice, pointer or channel var (`m := hooks; m["k"] =
+    runtime.Caller`), a setter method, a channel send, a call argument, or a
+    call, conversion or composite-literal root (`get().f`, `(*T)(p).f`,
+    `[]*T{p}[0].f = runtime.Caller`). Methods are followed by name, whatever
+    the receiver; a non-call `x.m` is not followed, since syntax cannot tell
+    a method value from a field read such as `user.ID`; propagation runs to
+    a fixpoint, so cycles terminate. Stack inspection inside a func literal
+    counts, and a file that dot-imports `runtime` or `log` makes every func
+    in it a hazard, since its calls are bare identifiers (`runtime/debug`
+    has only stack dumps, see below). A `recover()` reached only through a
+    callee is not direct and does not count. Stack dumps (`debug.Stack()`,
+    `runtime.Stack` for one goroutine or all, `pprof.Lookup`) select nothing
+    by depth: a wrapper only adds a frame to diagnostic text, so they stay a
+    WARN note. A non-call `x.Output` is not counted: syntax cannot tell a
+    stored `Logger.Output` method value from a field read such as
+    `result.Output`: pkg/hub has real `Output` fields, and counting them
+    would refuse helpers through name-based method edges. A stored method
+    value called later is therefore not caught (a documented limit). The
+    same check applies to the target of a resolved wrapper and to both funcs
+    of a mapping. A moved func that no staying code calls gets no wrapper
+    and is not checked;
   - var: a value alias (`var x = pkg.X`) only for a slice or map literal,
     which shares its backing store; a pointer alias (`var x = &pkg.X`) for a
     var declared with a type and no value (a state holder such as
@@ -224,12 +276,75 @@ What `export` does:
   view; check that none of them matched it) and moved code that captures
   stacks or names.
 
+### Alias references in moved code
+
+Moved code may use a staying name that is only an alias, declared in a
+generated alias file: a `zz_alias_*.go` file that carries the
+`(generated by hack/hubshard/extract export)` marker or hack/pkgmove's
+marker. Hand-written forwarding declarations in other files are never seen
+through (a hand-written wrapper or var may be a hook). A hand edit inside a
+marked generated file is trusted as generated; it is still checked for its
+shape, signature, `Helper()` shape and hazards. In the moved copy, each such
+reference is spelled as the alias's target, with the import added
+(`TokenBoundary` -> `principal.TokenBoundary`); a target in the export
+target package itself is spelled bare (`tid` -> `TID`). Resolved shapes:
+
+- a type alias `type x = pkg.X` (no type parameters);
+- a const alias `const x = pkg.X` (one name, no type, one value);
+- a wrapper `func x(p0 T0, ...) R { return pkg.F(p0, ...) }` (no `return`
+  without results) that forwards exactly its parameters in order (`p...`
+  for a variadic one), to a package-level func whose source the tool can
+  read (a subpackage of the source package, found under `-dir`, or under
+  `-before` for `verify-export`; `-src-import` sets the source package's
+  import path, and is needed when `-dir` is not the repository-relative
+  `pkg/hub`, for example an archive under /tmp, since `export` derives its
+  default from `-dir`) and whose signature is the same once aliases are
+  resolved.
+  The extract-generated shape with `p.Helper()` first is accepted only when
+  the target calls `Helper()` as a top-level statement on the same
+  parameter; a target that calls `Helper()` behind a wrapper that does not
+  is refused as well, since failure attribution would change. (A
+  Helper-marked wrapper calling a Helper-marked target attributes a failure
+  to the wrapper's caller, as a direct call from that caller does.)
+
+Everything else stays a refusal, with the reason in the message: var
+aliases (`var x = pkg.X`, `var x = &pkg.X`, func values), which are a copy
+and not an alias; generic aliases and wrappers; a wrapper with an extra
+statement, reordered or altered arguments, or a signature that differs from
+its target's; and any staying name outside a generated alias file. A new
+spelling must mean its target in the moved code: a local, a moved export
+or an import of a moved declaration's file that has the same name is
+refused.
+
+### Mapping to an existing helper (`map old=New`)
+
+`map pvStrPtr=StrPtr` rewrites references in moved code to the staying func
+`pvStrPtr` into references to the existing func `StrPtr` of the target
+package. Nothing moves: the staying declaration is left as it is, which is
+behaviour-identical by construction, and gets no alias. The mapping is
+accepted only when the two funcs are interchangeable: the same signature
+once aliases are resolved, the same parameter and result names, the same
+`Helper()` shape, and token-identical bodies (comments aside) that use no
+package-level declaration of either package. Anything else is refused,
+including a missing target and a mismatched signature. The report lists
+each mapping with the number of references it rewrote (0 is not an error:
+the equivalence is still checked).
+
 What `verify-export` checks, independently of the rendering:
 
 - every moved declaration, with its doc comment, has the same Go token
   stream (comments included) in the target, except identifiers that the
-  rename map changes (old -> new, nothing else), and the target's non-test
-  files declare nothing else;
+  rename map changes (old -> new, nothing else), and references to resolved
+  aliases and mapped funcs, which may be spelled only as a fresh plan on the
+  before tree spells them (that plan re-checks every alias and mapping
+  against the before tree's sources); and the target is baseline-aware: the
+  after target must equal the before tree's copy of the target package
+  (found under `-before` when the target's import path is under
+  `-src-import`) plus exactly the moved set. Every file of that baseline
+  must still be there, byte-identical (so a modified or deleted
+  pre-existing declaration fails), and no other declaration may appear in
+  the target's non-test files. With an empty or absent baseline this is the
+  plain rule: the target declares nothing but the moved set;
 - every other declaration of the source package is byte-identical, except
   field-export call sites, whose tokens differ only by the field renames;
   the test entry points (so `go test -list` under every tag set) and the

@@ -157,6 +157,10 @@ func (b *webChannelBus) Subscribe(_ string, _ eventbus.EventHandler) (eventbus.S
 	return webNoopSubscription{}, nil
 }
 
+// InProcessSpoke marks the web spoke as in-process: the fan-out always
+// waits for its state writes, so they never outlive the Publish call.
+func (b *webChannelBus) InProcessSpoke() {}
+
 // Close releases resources. The store handle is owned by the caller.
 func (b *webChannelBus) Close() error {
 	return nil

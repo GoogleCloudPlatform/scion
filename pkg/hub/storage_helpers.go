@@ -96,7 +96,10 @@ func generateUploadURLs(ctx context.Context, stor storage.Storage, basePath stri
 
 // verifyAndFinalizeFiles verifies a skill version's files exist in storage
 // and returns their content hash (computeSkillContentHash). Manifest paths
-// are validated with validateManifestFilePaths before any storage call.
+// are validated with validateManifestFilePaths before any storage call. A
+// missing file is a fileNotFoundError (400); a storage error while checking
+// is returned wrapped, so the caller answers 500 rather than "file not
+// found" (ptone/scion#5075).
 func verifyAndFinalizeFiles(ctx context.Context, stor storage.Storage, basePath string, files []store.TemplateFile) (string, error) {
 	if err := validateManifestFilePaths(files); err != nil {
 		return "", err
@@ -104,7 +107,10 @@ func verifyAndFinalizeFiles(ctx context.Context, stor storage.Storage, basePath 
 	for _, file := range files {
 		objectPath := basePath + "/" + file.Path
 		exists, err := stor.Exists(ctx, objectPath)
-		if err != nil || !exists {
+		if err != nil {
+			return "", fmt.Errorf("check file %q in storage: %w", file.Path, err)
+		}
+		if !exists {
 			return "", &fileNotFoundError{path: file.Path}
 		}
 	}

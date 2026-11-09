@@ -204,8 +204,10 @@ func (d *HTTPAgentDispatcher) asyncStartEligible(ctx context.Context, agent *sto
 // row a delete holds returns ErrLaunchInvalidPhase wrapping
 // store.ErrDeleteInProgress, as for a create; any other store error is
 // returned. revokeOnFail is this call's synchronous revoke decision
-// (DispatchAgentStart's rule); a restart's launch never revokes.
-func (d *HTTPAgentDispatcher) beginStartLaunch(ctx context.Context, agent *store.Agent, endpoint string, opts StartDispatchOptions, revokeOnFail bool) (string, AsyncLaunchSettings, time.Time, error) {
+// (DispatchAgentStart's rule); a restart's launch never revokes. runID is
+// the run beginRun minted for this dispatch, bound as the launch's
+// launch_run_id (WP1 slice 3 addendum section 1).
+func (d *HTTPAgentDispatcher) beginStartLaunch(ctx context.Context, agent *store.Agent, endpoint string, opts StartDispatchOptions, revokeOnFail bool, runID string) (string, AsyncLaunchSettings, time.Time, error) {
 	settings, eligible := d.asyncStartEligible(ctx, agent, opts)
 	if !eligible {
 		return "", settings, time.Time{}, nil
@@ -220,6 +222,7 @@ func (d *HTTPAgentDispatcher) beginStartLaunch(ctx context.Context, agent *store
 	launchID, err := d.store.BeginStartLaunch(ctx, agent.ID, kind, settings.Timeout, store.BeginLaunchOptions{
 		PriorPhase:   opts.PriorPhase,
 		RevokeOnFail: kind == store.LaunchKindStart && revokeOnFail,
+		RunID:        runID,
 	})
 	if err != nil {
 		if errors.Is(err, store.ErrInvalidPhase) {
@@ -298,7 +301,10 @@ func (d *HTTPAgentDispatcher) dispatchLaunching(
 	// The timer starts immediately before BeginLaunch, so the remaining
 	// budget sent to the broker never exceeds the stored deadline.
 	began := time.Now()
-	launchID, err := d.store.BeginLaunch(ctx, agent.ID, store.LaunchKindCreate, settings.Timeout)
+	// req.RunID is the run beginRun minted for this dispatch (set by the
+	// caller before the send); the launch binds it as launch_run_id.
+	launchID, err := d.store.BeginLaunchWithOptions(ctx, agent.ID, store.LaunchKindCreate, settings.Timeout,
+		store.BeginLaunchOptions{RunID: req.RunID})
 	if err != nil {
 		if errors.Is(err, store.ErrInvalidPhase) {
 			// A delete that claimed the row after beginRun moved it out of
@@ -488,7 +494,7 @@ func (s *Server) persistAcceptedLaunch(ctx context.Context, dispatched *store.Ag
 		}
 		result = latest
 		mergeDispatchedConfig(latest, dispatched)
-		lastErr = s.store.UpdateAgent(ctx, latest)
+		lastErr = s.store.UpdateAgent(lifecycleConfigResolution(ctx), latest)
 		if lastErr == nil {
 			if fresh, err := s.store.GetAgent(ctx, dispatched.ID); err == nil {
 				return fresh, nil

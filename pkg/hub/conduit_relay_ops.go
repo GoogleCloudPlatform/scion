@@ -190,7 +190,7 @@ func (s *Server) relayUserIdentity(ctx context.Context, c conduitAdmissionClaims
 		return nil, conduitAuthzDenied, accountRefusalReason(refusal)
 	}
 	if devToken {
-		return NewDevUser(s.authConfig.DevUserCfg), conduitAuthzAllowed, ""
+		return s.authConfig.currentDevUser(), conduitAuthzAllowed, ""
 	}
 	base := NewAuthenticatedUser(u.ID, u.Email, u.DisplayName, u.Role, string(ClientTypeAPI))
 	if c.AuthType != AuthTypeUAT {

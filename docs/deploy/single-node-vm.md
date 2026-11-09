@@ -253,7 +253,17 @@ call:
   cannot be put back, its old binary is kept in a
   `.scion-update-*/old/` directory inside the plugin directory, and the
   error says so. The next update removes such directories, with a warning
-  in the run log.
+  in the run log. If such a directory cannot have its applied marker
+  removed, it is renamed to `.scion-plugins-kept-<timestamp>`, which no
+  cleanup removes: the error names it, and you remove it once the plugins
+  work. If that rename fails too, the directory stays marked as applied,
+  and the error asks you to move its backups aside before you restart the
+  Hub; otherwise the next start removes them.
+- After a successful update, the downloads in the temporary directory are
+  removed before the restart. The previous plugin builds stay in a
+  `.scion-update-*/old/` directory, marked as applied, so a failure to
+  record or request the restart can still roll back. Whichever comes first
+  removes it: the update run, or the restarted Hub at startup.
 - Each release keeps a copy of the plugins installed with it in
   `/opt/scion/releases/<tag>/plugins/`. After the boot-failure guard rolls
   back, the restored Hub copies its own plugins back at startup, before
@@ -463,6 +473,20 @@ last row:
 | As above, but `migrated` is `true` and `previous_safe` is `false`, missing or not a boolean | Leaves the Hub stopped: restore the snapshot |
 | `target` or `from` does not match the links | Leaves the Hub stopped: the links were changed by something other than that update |
 | Missing or unreadable (not a regular file, a symlink, over 4 KiB, not a JSON object with string `target` and `from` and boolean `verified` and `migrated`) | Rolls back only if `current` was switched within the last 1800 seconds (the age of the symlink itself; every switch creates a new link), otherwise leaves the Hub stopped |
+
+**Updates performed by a release that predates the guard.** Only releases
+that include the guard write `update-state.json` when they update. When a
+release that predates the guard performs an update (for example, updating
+back up after a downgrade to a pre-guard release), the file is not
+rewritten, so it still describes the earlier update (if no update-state
+file exists yet, the missing-file row above applies instead). A crash loop
+of the newly installed release in that window is therefore **not** rolled
+back automatically: `target` and `from` no longer match the links, so the guard
+refuses on the mismatch and leaves the Hub stopped. It never swaps to a
+wrong release. The next update performed by a release that includes the
+guard (or the next `deploy.sh` switch) rewrites the file. To recover in
+that window, follow
+[Restoring after a failed update](#restoring-after-a-failed-update).
 
 To start a Hub that the guard left stopped, fix the cause shown in
 `journalctl -u scion-hub`, then run

@@ -26,6 +26,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
 	"github.com/spf13/cobra"
 )
 
@@ -149,7 +150,7 @@ func resolveProjectHookClient(ctx context.Context, projectArg string) (hubclient
 	}
 	var projectID string
 	if projectArg != "" {
-		project, err := resolveProjectByNameOrID(ctx, hubCtx.Client, projectArg)
+		project, err := resolveProjectByNameOrID(ctx, hubCtx.Client, projectArg, hubsync.UsesUserAccessToken(hubCtx.CredentialKind))
 		if err != nil {
 			return nil, fmt.Errorf("could not resolve project %q: %w", projectArg, err)
 		}

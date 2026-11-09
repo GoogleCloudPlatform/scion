@@ -25,7 +25,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 
 import type { User } from '../../shared/types.js';
 import { loadAdminStatus } from '../../client/admin-status.js';
-import { ARTIFACTS_FLAG } from '../../client/artifacts.js';
+import { ARTIFACTS_FLAG } from '../../client/artifacts-flag.js';
 import { isFeatureEnabled } from '../../utils/feature-flags.js';
 import {
   type AdminStatus,

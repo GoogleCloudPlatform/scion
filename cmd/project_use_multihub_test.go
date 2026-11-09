@@ -1154,6 +1154,10 @@ func TestUseMultiHub_KnownProjectHubRefusesLogin(t *testing.T) {
 func TestUseMultiHub_NotFoundSkippedHubsWording(t *testing.T) {
 	prod, staging := setupTwoHubs(t)
 	prod.setProjects()
+	// Started before staging closes, so it cannot be given staging's freed
+	// port, which AddHub would refuse as already registered.
+	dev := newFakeProjectHub(t, hubclient.Project{ID: "d-foo", Slug: "foo", Name: "Foo"})
+	dev.refuse.Store(true)
 	staging.srv.Close()
 
 	_, _, err := runScion(t, "use", "foo")
@@ -1161,8 +1165,6 @@ func TestUseMultiHub_NotFoundSkippedHubsWording(t *testing.T) {
 	want := "project 'foo' not found on the hubs searched (prod); it may be on the hub that could not be searched (staging: unreachable: "
 	assert.True(t, strings.HasPrefix(err.Error(), want), err.Error())
 
-	dev := newFakeProjectHub(t, hubclient.Project{ID: "d-foo", Slug: "foo", Name: "Foo"})
-	dev.refuse.Store(true)
 	storeTestLogin(t, dev.URL())
 	require.NoError(t, config.UpdateCLIContext(func(c *config.CLIContext) error {
 		return c.AddHub("dev", dev.URL())

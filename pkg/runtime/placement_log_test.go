@@ -74,7 +74,7 @@ func TestWaitForPodReady_UnschedulableLogNamesPlacement_F1(t *testing.T) {
 				Status:     *status.DeepCopy(),
 			}, nil
 		})
-		err := rt.waitForPodReady(context.Background(), "default", "p", launchHooks{})
+		err := rt.waitForPodReady(context.Background(), "default", "p", launchHooks{}, podMountWatch{})
 		slog.SetDefault(old)
 		if err == nil {
 			t.Fatalf("gke=%v: waitForPodReady succeeded, want a failure", gke)

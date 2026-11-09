@@ -21,7 +21,10 @@ import (
 	"path/filepath"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
+
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 )
 
 // nfsClaimGoldenConfig is a shared-plain agent on an NFS workspace claim,
@@ -70,6 +73,34 @@ func nfsClaimGoldenConfig(t *testing.T) (RunConfig, string) {
 // root set (as production sets them) and without them; both must match the
 // same snapshot.
 func TestBuildPod_NFSClaimPodGolden(t *testing.T) {
+	checkNFSClaimPodGolden(t, nil)
+}
+
+// TestBuildPod_NFSClaimPodGolden_HostGIDIsNFSGID runs the NFS claim goldens
+// as on a host whose gid is the NFS default owner gid (1000), for example a
+// pod running as 1000:1000. The pod FSGroup is that same gid and must match
+// the snapshot, not the host-gid placeholder.
+func TestBuildPod_NFSClaimPodGolden_HostGIDIsNFSGID(t *testing.T) {
+	nfsGID := provision.DefaultOwnerID(0)
+	orig := hostGIDForGolden
+	hostGIDForGolden = func() int { return nfsGID }
+	t.Cleanup(func() { hostGIDForGolden = orig })
+	checkNFSClaimPodGolden(t, func(t *testing.T, pod *corev1.Pod) {
+		sc := pod.Spec.SecurityContext
+		if sc == nil || sc.FSGroup == nil {
+			t.Fatalf("pod has no FSGroup, want the simulated host gid %d", nfsGID)
+		}
+		if *sc.FSGroup != int64(nfsGID) {
+			t.Fatalf("pod FSGroup = %d, want the simulated host gid %d", *sc.FSGroup, nfsGID)
+		}
+	})
+}
+
+// checkNFSClaimPodGolden builds every NFS claim case in both share-address
+// shapes and compares it with its snapshot. A non-nil checkPod also runs on
+// each built pod before normalisation.
+func checkNFSClaimPodGolden(t *testing.T, checkPod func(*testing.T, *corev1.Pod)) {
+	t.Helper()
 	withoutShareAddress := func(c *RunConfig) {
 		c.NFSShareServer, c.NFSShareExport = "", ""
 		sd := *c.SharedDirStorage
@@ -101,7 +132,10 @@ func TestBuildPod_NFSClaimPodGolden(t *testing.T) {
 				if err != nil {
 					t.Fatalf("buildPod: %v", err)
 				}
-				normalizeHostIDs(pod)
+				if checkPod != nil {
+					checkPod(t, pod)
+				}
+				normalizeHostIDs(pod, cfg)
 				got, err := json.MarshalIndent(pod, "", "  ")
 				if err != nil {
 					t.Fatalf("marshal: %v", err)
