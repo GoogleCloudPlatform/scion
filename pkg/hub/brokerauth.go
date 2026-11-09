@@ -949,6 +949,43 @@ func (s *BrokerAuthService) GenerateAndStoreSecret(ctx context.Context, brokerID
 	return base64.StdEncoding.EncodeToString(secretKey), nil
 }
 
+// ReplaceBrokerSecret generates a new HMAC secret for brokerID and installs
+// it in place of any stored one, in one transaction: before the commit only
+// the prior secret verifies, after it only the new one, and a failed
+// replacement rolls back and leaves the prior secret as it was. Unlike
+// GenerateAndStoreSecret it never returns a stored secret. The co-located
+// flat Runtime Broker calls it on every activation, so a secret saved
+// earlier stops verifying from the first co-located start.
+// Returns the base64-encoded new secret key.
+func (s *BrokerAuthService) ReplaceBrokerSecret(ctx context.Context, brokerID string) (string, error) {
+	if brokerID == "" {
+		return "", errors.New("brokerId is required")
+	}
+
+	secretKey := make([]byte, s.config.SecretKeyLength)
+	if _, err := rand.Read(secretKey); err != nil {
+		return "", fmt.Errorf("failed to generate secret key: %w", err)
+	}
+
+	err := s.store.WithTx(ctx, func(tx store.Store) error {
+		if err := tx.DeleteBrokerSecret(ctx, brokerID); err != nil && !errors.Is(err, store.ErrNotFound) {
+			return fmt.Errorf("failed to remove prior broker secret: %w", err)
+		}
+		return tx.CreateBrokerSecret(ctx, &store.BrokerSecret{
+			BrokerID:  brokerID,
+			SecretKey: secretKey,
+			Algorithm: store.BrokerSecretAlgorithmHMACSHA256,
+			CreatedAt: time.Now(),
+			Status:    store.BrokerSecretStatusActive,
+		})
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to replace broker secret: %w", err)
+	}
+
+	return base64.StdEncoding.EncodeToString(secretKey), nil
+}
+
 // MintSecretIfAbsent generates and stores a new HMAC secret for brokerID
 // only when the broker has no stored secret. It returns the new
 // base64-encoded secret and minted=true when it stored one, or "" and
