@@ -1492,6 +1492,21 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Classification: RouteWorkstation,
 		Permission:     "hub.config.update", Resource: "hub", Action: "update",
 	},
+	"/api/v1/system/welcome/preview": {
+		Pattern: "/api/v1/system/welcome/preview", RouteID: "system.welcome.preview",
+		Classification: RouteWorkstation,
+		Permission:     "hub.config.update", Resource: "hub", Action: "update",
+	},
+	"/api/v1/system/welcome/install": {
+		Pattern: "/api/v1/system/welcome/install", RouteID: "system.welcome.install",
+		Classification: RouteWorkstation,
+		Permission:     "hub.config.update", Resource: "hub", Action: "update",
+	},
+	"/api/v1/system/welcome/skip": {
+		Pattern: "/api/v1/system/welcome/skip", RouteID: "system.welcome.skip",
+		Classification: RouteWorkstation,
+		Permission:     "hub.config.update", Resource: "hub", Action: "update",
+	},
 	"/api/v1/system/fs/list": {
 		Pattern: "/api/v1/system/fs/list", RouteID: "system.fs.list",
 		Classification: RouteWorkstation,

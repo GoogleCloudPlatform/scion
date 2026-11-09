@@ -1214,3 +1214,189 @@ func ValidateRemoteURI(uri string) error {
 		return fmt.Errorf("unsupported remote URI type: %s", uri)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Pinned GitHub resolution (ls-remote by ref, archive by commit sha)
+// ---------------------------------------------------------------------------
+
+// GitLsRemoteRefFunc runs `git ls-remote <repoURL> <ref>` anonymously and
+// returns its stdout. It is the signature of the by-ref ls-remote seam used
+// by ResolveGitHubRefSHA.
+type GitLsRemoteRefFunc func(ctx context.Context, repoURL, ref string) ([]byte, error)
+
+// gitLsRemoteRef is the by-ref ls-remote runner. It is a package-level
+// variable only so tests can replace it (SetGitLsRemoteRefForTest).
+var gitLsRemoteRef GitLsRemoteRefFunc = execGitLsRemoteRef
+
+// gitHTTPSOnlyArgs restrict a remote git command to the https transport.
+var gitHTTPSOnlyArgs = []string{"-c", "protocol.allow=never", "-c", "protocol.https.allow=always"}
+
+// execGitLsRemoteRef is the production by-ref ls-remote runner. Like
+// execGitLsRemote it runs host-side git with the remote authentication layer
+// and no token, so git offers no credential and no credential helper runs;
+// it also allows the https transport only. The call is bounded by
+// gitLsRemoteTimeout.
+func execGitLsRemoteRef(ctx context.Context, repoURL, ref string) ([]byte, error) {
+	if !strings.HasPrefix(repoURL, "https://") {
+		return nil, fmt.Errorf("git ls-remote: only https repositories are supported")
+	}
+	tctx, cancel := context.WithTimeout(ctx, gitLsRemoteTimeout)
+	defer cancel()
+
+	args := append(append(util.HostGitArgs(), gitHTTPSOnlyArgs...), "ls-remote", "--", repoURL, ref)
+	cmd := exec.CommandContext(tctx, "git", args...)
+	cmd.Env = util.HostGitRemoteEnv(util.HostGitEnv(os.Environ()), repoURL, "")
+	cmd.WaitDelay = gitLsRemoteWaitDelay
+	out, err := cmd.Output()
+	if err != nil && ctx.Err() == nil && errors.Is(tctx.Err(), context.DeadlineExceeded) {
+		return out, fmt.Errorf("git ls-remote for %s timed out after %s: %w",
+			redactedRepoName(repoURL), gitLsRemoteTimeout, context.DeadlineExceeded)
+	}
+	return out, err
+}
+
+// SetGitLsRemoteRefForTest replaces the by-ref ls-remote runner and returns
+// a func that restores the previous one.
+//
+// TEST-ONLY: never call this from production code. It mutates package-global
+// state and is not safe for use from parallel tests.
+func SetGitLsRemoteRefForTest(fn GitLsRemoteRefFunc) (restore func()) {
+	prev := gitLsRemoteRef
+	gitLsRemoteRef = fn
+	return func() { gitLsRemoteRef = prev }
+}
+
+var (
+	fullGitSHARe    = regexp.MustCompile(`^[0-9a-fA-F]{40}$`)
+	gitRefNameRe    = regexp.MustCompile(`^[A-Za-z0-9._/+-]{1,255}$`)
+	githubOwnerIDRe = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,38})$`)
+	githubRepoIDRe  = regexp.MustCompile(`^[a-z0-9._-]{1,100}$`)
+)
+
+// IsFullGitSHA reports whether s is a full 40-hex commit id.
+func IsFullGitSHA(s string) bool { return fullGitSHARe.MatchString(s) }
+
+// ErrGitRefUnresolvable reports a ref that names no commit on the remote.
+var ErrGitRefUnresolvable = errors.New("ref does not resolve on the remote")
+
+// ErrGitRefAmbiguous reports a ref that names more than one commit (for
+// example a branch and a tag of the same name pointing at different commits).
+var ErrGitRefAmbiguous = errors.New("ref is ambiguous on the remote")
+
+// ResolveGitHubRefSHA resolves ref on github.com/<owner>/<repo> to a full
+// commit sha with no GitHub API call:
+//   - a full 40-hex sha is returned as is (lower case), without a remote call;
+//   - "" means HEAD;
+//   - any other ref is resolved by `git ls-remote <repo> <ref>` for that ref:
+//     an exact refs/heads/<ref> or refs/tags/<ref> match (a peeled tag wins
+//     over its tag object), or a full refs/... name. No match fails with
+//     ErrGitRefUnresolvable and two different commits with
+//     ErrGitRefAmbiguous.
+//
+// owner and repo must already be canonical (CanonicalGitHubRepo).
+func ResolveGitHubRefSHA(ctx context.Context, owner, repo, ref string) (string, error) {
+	if !githubOwnerIDRe.MatchString(owner) || !githubRepoIDRe.MatchString(repo) || repo == "." || repo == ".." {
+		return "", fmt.Errorf("invalid GitHub repository")
+	}
+	if IsFullGitSHA(ref) {
+		return strings.ToLower(ref), nil
+	}
+	if ref == "" {
+		ref = "HEAD"
+	}
+	if !gitRefNameRe.MatchString(ref) || strings.HasPrefix(ref, "-") || strings.Contains(ref, "..") {
+		return "", fmt.Errorf("invalid ref: %w", ErrGitRefUnresolvable)
+	}
+	repoURL := "https://github.com/" + owner + "/" + repo + ".git"
+	out, err := gitLsRemoteRef(ctx, repoURL, ref)
+	if err != nil {
+		return "", fmt.Errorf("git ls-remote for %s/%s failed: %w", owner, repo, err)
+	}
+	return matchLsRemoteRef(out, ref)
+}
+
+// matchLsRemoteRef picks the commit ref names from `git ls-remote` output.
+func matchLsRemoteRef(out []byte, ref string) (string, error) {
+	shas := map[string]string{} // ref name -> sha
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimRight(line, "\r")
+		sha, name, ok := strings.Cut(line, "\t")
+		if !ok || !IsFullGitSHA(sha) {
+			continue
+		}
+		shas[name] = strings.ToLower(sha)
+	}
+	var candidates []string
+	if ref == "HEAD" || strings.HasPrefix(ref, "refs/") {
+		candidates = []string{ref}
+	} else {
+		candidates = []string{"refs/heads/" + ref, "refs/tags/" + ref}
+	}
+	found := map[string]bool{}
+	for _, name := range candidates {
+		if peeled, ok := shas[name+"^{}"]; ok {
+			found[peeled] = true
+			continue
+		}
+		if sha, ok := shas[name]; ok {
+			found[sha] = true
+		}
+	}
+	switch len(found) {
+	case 0:
+		return "", ErrGitRefUnresolvable
+	case 1:
+		for sha := range found {
+			return sha, nil
+		}
+	}
+	return "", ErrGitRefAmbiguous
+}
+
+// CanonicalGitHubRepo returns the canonical identity owner/repo of a GitHub
+// repository URL: owner and repo lower-cased, a ".git" suffix stripped. Only
+// https://github.com/<owner>/<repo>[.git][/] is accepted: no other scheme or
+// host, no userinfo, no port, no query or fragment and no further path.
+func CanonicalGitHubRepo(raw string) (owner, repo string, err error) {
+	u, perr := url.Parse(raw)
+	if perr != nil {
+		return "", "", fmt.Errorf("invalid repository URL")
+	}
+	// u.Host carries any port, so "github.com:443" is refused here too.
+	if u.Scheme != "https" || !strings.EqualFold(u.Host, "github.com") || u.User != nil ||
+		u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.Opaque != "" {
+		return "", "", fmt.Errorf("repository must be an https://github.com URL with no credentials, port, query or fragment")
+	}
+	p := strings.TrimSuffix(strings.TrimPrefix(u.Path, "/"), "/")
+	parts := strings.Split(p, "/")
+	if len(parts) != 2 {
+		return "", "", fmt.Errorf("repository URL must name exactly one owner and repository")
+	}
+	return CanonicalGitHubOwnerRepo(parts[0], parts[1])
+}
+
+// CanonicalGitHubOwnerRepo canonicalizes an owner and repository name pair:
+// lower case, ".git" suffix stripped, GitHub name rules enforced.
+func CanonicalGitHubOwnerRepo(owner, repo string) (string, string, error) {
+	owner = strings.ToLower(owner)
+	repo = strings.TrimSuffix(strings.ToLower(repo), ".git")
+	if !githubOwnerIDRe.MatchString(owner) || !githubRepoIDRe.MatchString(repo) || repo == "." || repo == ".." {
+		return "", "", fmt.Errorf("invalid GitHub owner or repository name")
+	}
+	return owner, repo, nil
+}
+
+// GitHubArchiveURLBySHA returns the public archive URL of a GitHub
+// repository at a commit: https://github.com/<owner>/<repo>/archive/<sha>.tar.gz.
+// It is the by-sha sibling of the branch tarball fetchGitHubTarball
+// downloads; sha must be a full 40-hex commit id.
+func GitHubArchiveURLBySHA(owner, repo, sha string) (string, error) {
+	if !IsFullGitSHA(sha) {
+		return "", fmt.Errorf("archive by sha needs a full commit id")
+	}
+	owner, repo, err := CanonicalGitHubOwnerRepo(owner, repo)
+	if err != nil {
+		return "", err
+	}
+	return "https://github.com/" + owner + "/" + repo + "/archive/" + strings.ToLower(sha) + ".tar.gz", nil
+}

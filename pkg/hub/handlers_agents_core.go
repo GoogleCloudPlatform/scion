@@ -2447,6 +2447,10 @@ func (s *Server) createAgentInProject(
 	// It fails only when workspace storage did not respond; that is answered
 	// with 503 here, before any quota reservation or agent row exists.
 	if err := s.deriveAgentConfig(ctx, agent, project, resolvedTemplate); err != nil {
+		if errors.Is(err, errNoAuthFallbackRefused) {
+			writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, errNoAuthFallbackRefused.Error(), nil)
+			return
+		}
 		if !writeWorkspaceStorageUnavailable(w, err) {
 			InternalError(w)
 		}

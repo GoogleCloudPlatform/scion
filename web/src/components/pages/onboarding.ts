@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import { LitElement, html, css, nothing } from 'lit';
+import { LitElement, html, css, nothing, type TemplateResult } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import {
@@ -28,6 +28,7 @@ import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchMembershipChanged } from '../../utils/membership-events.js';
 import { loadPage } from '../../client/navigation.js';
 import type { HarnessConfig } from '../../shared/types.js';
+import { isFeatureEnabled, WELCOME_PROJECT_FLAG } from '../../utils/feature-flags.js';
 import '../shared/dir-browser.js';
 
 const ONBOARDING_STATUS_KEY = 'onboardingStatus';
@@ -85,6 +86,65 @@ export function registryPrefill(
     input: saveable || DEFAULT_REGISTRY_SUGGESTION,
     fromNodeEnv: status?.imageRegistrySource === 'node_env',
   };
+}
+
+/** One vendored skill pin of the welcome project manifest. */
+export interface WelcomeSkillPin {
+  repo: string;
+  ref: string;
+  sha: string;
+}
+
+/** The welcome project manifest: every installed byte traces to these shas. */
+export interface WelcomeManifest {
+  agent_team_repo: string;
+  agent_team_sha: string;
+  skills: WelcomeSkillPin[];
+  templates: string[];
+  files_sha256: string;
+}
+
+/** POST /api/v1/system/welcome/preview response. */
+export interface WelcomePreview {
+  preview_id: string;
+  expires_at: string;
+  source: { repo: string; path: string; sha: string };
+  manifest: WelcomeManifest;
+  file_count: number;
+}
+
+/** POST /api/v1/system/welcome/install and /skip response. */
+export interface WelcomeResult {
+  state: string;
+  project_id?: string;
+  /** The project as actually created ("welcome-1" when "welcome" is taken). */
+  project_slug?: string;
+  project_name?: string;
+  agent_id?: string;
+}
+
+/** The name to show for the created welcome project. */
+export function welcomeProjectLabel(result: WelcomeResult | null): string {
+  return result?.project_name || result?.project_slug || 'welcome';
+}
+
+/**
+ * Phases of the Welcome project step: off (not shown), loading (preview
+ * running), preview (shas shown, Continue or Skip), installing, failed
+ * (reason shown, only Next) and done (the workspace step follows).
+ */
+export type WelcomePhase = 'off' | 'loading' | 'preview' | 'installing' | 'failed' | 'done';
+
+/** The sentence shown after install for a coordinator that was not started. */
+export function welcomeResultNote(result: WelcomeResult | null): string {
+  switch (result?.state) {
+    case 'pending_credentials':
+      return 'The coordinator was not started: no credentials are set up for its harness yet.';
+    case 'pending_broker':
+      return 'The coordinator was not started: no runtime broker is running.';
+    default:
+      return '';
+  }
 }
 
 interface DiagnosticResult {
@@ -157,6 +217,12 @@ export class ScionPageOnboarding extends LitElement {
   @state() private autoInjectGcloudADC = false;
   private imageEventSource: EventSource | null = null;
   private imageJobTimeoutId: number | null = null;
+
+  // Step 5: Welcome project (hub.welcome_project), shown before the workspace
+  @state() private welcomePhase: WelcomePhase = 'off';
+  @state() private welcomePreview: WelcomePreview | null = null;
+  @state() private welcomeError: string | null = null;
+  @state() private welcomeResult: WelcomeResult | null = null;
 
   // Step 6: Workspace
   @state() private workspaceMode: 'choose' | 'hub' | 'linked' = 'choose';
@@ -265,6 +331,18 @@ export class ScionPageOnboarding extends LitElement {
       padding: 0.75rem 1rem;
       margin-bottom: 1rem;
       font-size: 0.875rem;
+    }
+
+    .welcome-manifest {
+      font-size: 0.875rem;
+      color: var(--scion-text, #1e293b);
+      margin: 0 0 1.5rem 0;
+      padding-left: 1.25rem;
+    }
+
+    .welcome-manifest code {
+      font-size: 0.8rem;
+      word-break: break-all;
     }
 
     .warning-banner {
@@ -671,7 +749,9 @@ export class ScionPageOnboarding extends LitElement {
       case 4:
         return this.renderHarnessesAndImages();
       case 5:
-        return this.renderWorkspacePlaceholder();
+        return this.welcomeStepActive()
+          ? this.renderWelcomeProject()
+          : this.renderWorkspacePlaceholder();
       case 6:
         return this.renderDone();
       default:
@@ -1221,7 +1301,7 @@ export class ScionPageOnboarding extends LitElement {
             variant="default"
             @click=${() => {
               this.cleanupImageEvents();
-              this.currentStep = 5;
+              void this.enterStepAfterHarnesses();
             }}
           >
             Skip for now
@@ -1362,10 +1442,163 @@ export class ScionPageOnboarding extends LitElement {
         }
       }
       this.cleanupImageEvents();
-      this.currentStep = 5;
+      await this.enterStepAfterHarnesses();
     } finally {
       this.stepLoading = false;
     }
+  }
+
+  // ── Step 5: Welcome project ──
+
+  /**
+   * Moves past the harness step. With hub.welcome_project on, the Welcome
+   * project step runs first: its preview downloads and pins the templates.
+   */
+  private async enterStepAfterHarnesses(): Promise<void> {
+    this.currentStep = 5;
+    if (this.welcomePhase !== 'off' || !isFeatureEnabled(WELCOME_PROJECT_FLAG)) return;
+    await this.loadWelcomePreview();
+  }
+
+  private welcomeStepActive(): boolean {
+    return this.welcomePhase !== 'off' && this.welcomePhase !== 'done';
+  }
+
+  private async loadWelcomePreview(): Promise<void> {
+    this.welcomePhase = 'loading';
+    this.welcomeError = null;
+    try {
+      const res = await apiFetch('/api/v1/system/welcome/preview', { method: 'POST' });
+      if (res.ok) {
+        this.welcomePreview = (await res.json()) as WelcomePreview;
+        this.welcomePhase = 'preview';
+        return;
+      }
+      if (res.status === 409 || res.status === 404) {
+        // Already run (or not offered by this hub): go on to the workspace.
+        this.welcomePhase = 'done';
+        return;
+      }
+      this.welcomeError = await extractApiError(res, 'The welcome project could not be prepared');
+      this.welcomePhase = 'failed';
+    } catch {
+      this.welcomeError = 'The welcome project could not be prepared';
+      this.welcomePhase = 'failed';
+    }
+  }
+
+  private async handleWelcomeContinue(): Promise<void> {
+    if (!this.welcomePreview) return;
+    this.welcomePhase = 'installing';
+    this.welcomeError = null;
+    try {
+      const res = await apiFetch('/api/v1/system/welcome/install', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ preview_id: this.welcomePreview.preview_id }),
+      });
+      if (!res.ok) {
+        this.welcomeError = await extractApiError(
+          res,
+          'The welcome project could not be installed'
+        );
+        this.welcomePhase = 'failed';
+        return;
+      }
+      this.welcomeResult = (await res.json()) as WelcomeResult;
+      if (this.welcomeResult.project_id) {
+        dispatchMembershipChanged({ kind: 'project', id: this.welcomeResult.project_id });
+      }
+      this.welcomePhase = 'done';
+    } catch {
+      this.welcomeError = 'The welcome project could not be installed';
+      this.welcomePhase = 'failed';
+    }
+  }
+
+  private async handleWelcomeSkip(): Promise<void> {
+    this.welcomeError = null;
+    try {
+      const res = await apiFetch('/api/v1/system/welcome/skip', { method: 'POST' });
+      if (!res.ok && res.status !== 409) {
+        this.welcomeError = await extractApiError(res, 'Skipping the welcome project failed');
+        return;
+      }
+      this.welcomePhase = 'done';
+    } catch {
+      this.welcomeError = 'Skipping the welcome project failed';
+    }
+  }
+
+  private renderWelcomeProject(): TemplateResult {
+    const pv = this.welcomePreview;
+    return html`
+      <h2>Welcome project</h2>
+      <p>
+        Scion can set up a "welcome" project with the latest agent-team templates and a coordinator
+        agent that greets you in chat.
+      </p>
+      ${this.welcomePhase === 'loading'
+        ? html`<div class="loading-state">
+            <sl-spinner></sl-spinner>
+            <p>Downloading and checking the templates...</p>
+          </div>`
+        : nothing}
+      ${this.welcomePhase === 'failed'
+        ? html`<div class="error-banner">
+            ${this.welcomeError ?? 'The welcome project could not be set up'}
+          </div>`
+        : nothing}
+      ${pv && (this.welcomePhase === 'preview' || this.welcomePhase === 'installing')
+        ? html`
+            <p>These exact versions will be installed:</p>
+            <ul class="welcome-manifest">
+              <li>
+                Templates from ${pv.source.repo}/${pv.source.path} at
+                <code>${pv.source.sha}</code>: ${pv.manifest.templates.join(', ')}
+              </li>
+              ${pv.manifest.skills.map(
+                (s) =>
+                  html`<li>
+                    Skill from ${s.repo}${s.ref ? html` (${s.ref})` : nothing} at
+                    <code>${s.sha}</code>
+                  </li>`
+              )}
+            </ul>
+            ${this.welcomeError
+              ? html`<div class="error-banner">${this.welcomeError}</div>`
+              : nothing}
+          `
+        : nothing}
+      <div class="footer">
+        <div></div>
+        <div class="footer-right">
+          ${this.welcomePhase === 'failed'
+            ? html`<sl-button
+                variant="primary"
+                @click=${(): void => {
+                  this.welcomePhase = 'done';
+                }}
+                >Next</sl-button
+              >`
+            : html`
+                <sl-button
+                  variant="default"
+                  ?disabled=${this.welcomePhase === 'loading' || this.welcomePhase === 'installing'}
+                  @click=${this.handleWelcomeSkip}
+                  >Skip</sl-button
+                >
+                <sl-button
+                  variant="primary"
+                  ?disabled=${this.welcomePhase !== 'preview'}
+                  ?loading=${this.welcomePhase === 'installing'}
+                  @click=${this.handleWelcomeContinue}
+                  >Continue</sl-button
+                >
+              `}
+        </div>
+      </div>
+    `;
   }
 
   private async handlePullSelected(): Promise<void> {
@@ -1899,6 +2132,24 @@ export class ScionPageOnboarding extends LitElement {
         <sl-icon name="check-circle"></sl-icon>
         <h1>You're All Set</h1>
         <p>Your workstation is configured and ready to use.</p>
+        ${this.welcomeResult?.project_id
+          ? html`
+              ${welcomeResultNote(this.welcomeResult)
+                ? html`<p>${welcomeResultNote(this.welcomeResult)}</p>`
+                : html`<p>
+                    The coordinator's greeting is waiting in the chat of project
+                    "${welcomeProjectLabel(this.welcomeResult)}".
+                  </p>`}
+              <sl-button
+                variant="default"
+                @click=${(): void => {
+                  loadPage(`/projects/${this.welcomeResult?.project_id ?? ''}`);
+                }}
+              >
+                Open project "${welcomeProjectLabel(this.welcomeResult)}"
+              </sl-button>
+            `
+          : nothing}
         <sl-button
           variant="primary"
           size="large"

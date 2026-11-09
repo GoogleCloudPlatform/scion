@@ -420,10 +420,29 @@ const ImageTagSetting = "hub.image_tag_setting"
 // an unset image_tag leaves every image reference unchanged.
 const ImageTagVersionDefault = "hub.image_tag_version_default"
 
+// WelcomeProject gates the welcome project (ptone/scion#7534): a one-time
+// onboarding step that installs the latest agent-team templates, pinned to
+// commit shas, into a "welcome" project and starts a coordinator that greets
+// its owner. Server layer: the hub refuses the welcome preview, install and
+// skip routes (404) while it is off. Web layer: shows the Welcome project
+// step in the setup wizard.
+const WelcomeProject = "hub.welcome_project"
+
 // compiled is the production experiment list. It is reachable only through
 // Default(); there is no package-level Lookup/All, so hub code cannot bypass
 // the Registry instance it was given (ptone/scion#2217).
 var compiled = []Experiment{
+	{
+		Name:        WelcomeProject,
+		Title:       "Welcome project",
+		Description: "Adds a Welcome project step to the workstation setup wizard. It downloads the latest agent-team templates and the skills they use, pinned to commit shas and shown before install, installs them into a new \"welcome\" project and starts a coordinator agent that greets the owner once in chat. It runs at most once per hub: Skip, a failure or deleting the project never re-creates it. Server layer: the welcome preview, install and skip routes answer 404 while it is off. Web layer: shows the wizard step.",
+		Default:     false,
+		Layers:      []Layer{LayerWeb, LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#7534",
+		Owner:       "onboarding",
+		ReviewBy:    "2027-05-08",
+	},
 	{
 		Name:        LifecycleEvents,
 		Title:       "Agent lifecycle events",
