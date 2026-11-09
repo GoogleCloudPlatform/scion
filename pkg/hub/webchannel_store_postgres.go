@@ -1293,7 +1293,7 @@ func (s *pgWebChatStore) SearchChatMessages(ctx context.Context, filter ChatSear
 	query := fmt.Sprintf(`
 SELECT m.id, m.project_id, COALESCE(m.thread_id, ''), m.sender, m.msg, m.created
   FROM %s m
-  LEFT JOIN %s x ON x.message_id = m.id
+  LEFT JOIN %s x ON x.message_id = m.id::text
  WHERE %s
  ORDER BY m.created DESC, m.id DESC
  LIMIT $%d

@@ -32,7 +32,8 @@ type HubChatSearchConfig struct {
 	// default, 3s).
 	Timeout string `json:"timeout,omitempty" yaml:"timeout,omitempty" koanf:"timeout"`
 	// MaxConcurrent caps the searches running hub-wide at once (0 = the
-	// backend default: 2 on SQLite, 8 on Postgres).
+	// default, 2). On Postgres the hub clamps it to a quarter of the main pool,
+	// at least 1.
 	MaxConcurrent int `json:"maxConcurrent,omitempty" yaml:"maxConcurrent,omitempty" koanf:"maxConcurrent"`
 }
 

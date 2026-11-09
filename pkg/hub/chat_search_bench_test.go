@@ -375,8 +375,9 @@ func TestChatSearchBench_L1WriterIsolation(t *testing.T) {
 	require.Zero(t, otherErr.Load(), "searches end in success or a timeout only")
 	require.True(t, within10(ins.quantile(0.99), baseIns.quantile(0.99)), "insert p99 within 10%% of baseline")
 	require.True(t, within10(reads.quantile(0.99), baseReads.quantile(0.99)), "read p99 within 10%% of baseline")
-	// Proxy for "no db_tx_long_hold over 1 s on the main handle" (design 11 L1): the fixture's main handle runs
-	// without txdiag, so the slowest single main-handle operation during the searches stands in for the hold.
+	// Second line for "no db_tx_long_hold over 1 s on the main handle" (design 11 L1), next to the txdiag
+	// measure above: the slowest single main-handle operation during the searches, timed from before the
+	// connection is acquired, so a queue behind one holder shows here too.
 	slowest := ins.max()
 	if r := reads.max(); r > slowest {
 		slowest = r
@@ -430,11 +431,12 @@ func TestChatSearchBench_L3IncidentReplay(t *testing.T) {
 	var wg sync.WaitGroup
 	durs := make([]time.Duration, len(terms))
 	errs := make([]error, len(terms))
-	gate := newSearchGate(DefaultChatSearchMaxConcurrentSQLite)
+	gate := newSearchGate(DefaultChatSearchMaxConcurrent)
 	busy := make([]bool, len(terms))
+	// Add every search before launching any, so wg.Wait cannot race an Add.
+	wg.Add(len(terms))
 	go func() {
 		for i, term := range terms {
-			wg.Add(1)
 			go func(i int, term string) {
 				defer wg.Done()
 				release, ok := gate.tryAcquire(fmt.Sprintf("user-%d", i))

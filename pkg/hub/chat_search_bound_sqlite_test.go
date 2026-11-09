@@ -24,15 +24,18 @@ import (
 	"log/slog"
 	"math/rand"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -360,7 +363,9 @@ func TestChatSearch_TimeoutIs503(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), "SEARCH_TIMEOUT")
 	assert.Contains(t, rec.Body.String(), "Search took too long. Try a longer phrase or search one space.")
 	assert.NotContains(t, rec.Body.String(), "results")
-	assert.Less(t, elapsed, 50*time.Millisecond+200*time.Millisecond)
+	// A loose bound for default CI (loaded runners, -race); the tight
+	// limit-plus-200-ms check is L2 in the chatsearchbench harness.
+	assert.Less(t, elapsed, 50*time.Millisecond+2*time.Second)
 
 	srv.SetWebChatStore(wcs)
 	rec = doRequestAsUser(t, srv, alice, http.MethodGet, "/api/v1/chat/search?q=needle&projectId="+project.ID, nil)
@@ -397,14 +402,184 @@ func TestChatSearch_SlowLogCarriesNoTermOrIdentifier(t *testing.T) {
 }
 
 // TestRecordChatSearch_OKFastIsSilent checks that a fast successful search
-// writes no log line, and a busy refusal writes none either.
+// writes no log line, nor do a busy refusal or a canceled search (a debug
+// line at most), and that a slow search does.
 func TestRecordChatSearch_OKFastIsSilent(t *testing.T) {
 	srv, _ := testServer(t)
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&buf, nil))
 	srv.recordChatSearch(context.Background(), logger, chatSearchShape{outcome: chatSearchOutcomeOK, duration: time.Millisecond})
-	srv.recordChatSearch(context.Background(), logger, chatSearchShape{outcome: chatSearchOutcomeBusy})
+	srv.recordChatSearchBusy(context.Background(), chatSearchShape{backend: "sqlite"})
+	srv.recordChatSearch(context.Background(), logger, chatSearchShape{outcome: chatSearchOutcomeCanceled, duration: 5 * time.Second})
 	assert.Empty(t, buf.String())
 	srv.recordChatSearch(context.Background(), logger, chatSearchShape{outcome: chatSearchOutcomeOK, duration: time.Second})
 	assert.Contains(t, buf.String(), "chat search slow")
+}
+
+// TestRecordChatSearch_SlowLineCarriesNoRequestID checks round-1 item R1-08:
+// the slow-search line carries no request id even when the request context
+// has one and the logger is the hub's request-id handler. A positive control
+// shows that handler does add the id to a line logged with the context.
+func TestRecordChatSearch_SlowLineCarriesNoRequestID(t *testing.T) {
+	srv, _ := testServer(t)
+	var buf bytes.Buffer
+	logger := slog.New(logging.NewRequestIDHandler(slog.NewJSONHandler(&buf, nil)))
+	ctx := logging.ContextWithRequestMeta(context.Background(), &logging.RequestMeta{RequestID: "req-zq-7586"})
+
+	logger.WarnContext(ctx, "control")
+	require.Contains(t, buf.String(), "req-zq-7586", "control: the handler adds the request id to a line with the context")
+	buf.Reset()
+
+	srv.recordChatSearch(ctx, logger, chatSearchShape{outcome: chatSearchOutcomeTimeout, duration: 3 * time.Second})
+	out := buf.String()
+	require.Contains(t, out, "chat search slow")
+	assert.NotContains(t, out, "req-zq-7586")
+	assert.NotContains(t, out, logging.AttrRequestID)
+}
+
+func TestEffectiveChatSearchCap(t *testing.T) {
+	for _, tc := range []struct {
+		configured int
+		backend    string
+		pool       int
+		want       int
+		clamped    bool
+	}{
+		{2, "postgres", 5, 1, true},
+		{2, "postgres", 8, 2, false},
+		{2, "postgres", 20, 2, false},
+		{8, "postgres", 20, 5, true},
+		{0, "postgres", 5, 1, true}, // the default (2) clamped at the default pool
+		{0, "postgres", 0, 1, true}, // an unknown pool reads as the default 5
+		{2, "postgres", 3, 1, true}, // never below 1
+		{0, "sqlite", 0, 2, false},  // the default on SQLite
+		{8, "sqlite", 1, 8, false},  // no clamp on SQLite
+	} {
+		got, clamped := EffectiveChatSearchCap(tc.configured, tc.backend, tc.pool)
+		assert.Equal(t, tc.want, got, "%+v", tc)
+		assert.Equal(t, tc.clamped, clamped, "%+v", tc)
+	}
+}
+
+func TestChatSearchCapStartupLine(t *testing.T) {
+	line, ok := ChatSearchCapStartupLine(2, "postgres", 5)
+	require.True(t, ok)
+	assert.Equal(t, "Chat search: max_concurrent 2 lowered to 1 (a quarter of the Postgres pool of 5)", line)
+	_, ok = ChatSearchCapStartupLine(2, "postgres", 8)
+	assert.False(t, ok, "no line when the clamp does not lower the value")
+	_, ok = ChatSearchCapStartupLine(8, "sqlite", 1)
+	assert.False(t, ok, "no clamp on SQLite")
+}
+
+// TestChatSearchGate_PostgresPoolFive checks design v4 erratum E1 on the
+// gate: with the default Postgres pool of 5 the hub-wide cap is 1, so while
+// one principal holds the slot a second principal is refused (429).
+func TestChatSearchGate_PostgresPoolFive(t *testing.T) {
+	srv, _ := testServer(t)
+	srv.config.DatabaseMaxOpenConns = 5
+	g := srv.chatSearchGateFor(&pgWebChatStore{})
+	assert.Equal(t, 1, cap(g.slots))
+	release, ok := g.tryAcquire("alice")
+	require.True(t, ok)
+	_, ok = g.tryAcquire("bob")
+	assert.False(t, ok, "a second principal is refused while the one Postgres slot is held")
+	release()
+	_, ok = g.tryAcquire("bob")
+	assert.True(t, ok)
+}
+
+// stallingListStore makes ListProjects wait for its context to end while
+// armed, as an enumeration that crosses the search deadline does.
+type stallingListStore struct {
+	store.Store
+	fault *storeFaultSwitch
+}
+
+func (s stallingListStore) ListProjects(ctx context.Context, f store.ProjectFilter, o store.ListOptions) (*store.ListResult[store.Project], error) {
+	if s.fault.Active() {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	return s.Store.ListProjects(ctx, f, o)
+}
+
+// countingSearchStore counts SearchChatMessages calls.
+type countingSearchStore struct {
+	WebChatStore
+	calls *atomic.Int64
+}
+
+func (c countingSearchStore) SearchChatMessages(ctx context.Context, f ChatSearchFilter) ([]ChatSearchResult, string, error) {
+	c.calls.Add(1)
+	return c.WebChatStore.SearchChatMessages(ctx, f)
+}
+
+// TestChatSearch_EnumerationDeadlineIs503 checks design v4 erratum E1: the
+// limit covers project enumeration, and a deadline hit there answers 503
+// SEARCH_TIMEOUT (never 500) without calling the store.
+func TestChatSearch_EnumerationDeadlineIs503(t *testing.T) {
+	srv, s, alice, _, _, _, fault := setupDemoPolicyTestWithFault(t, func(inner store.Store, f *storeFaultSwitch) stallingListStore {
+		return stallingListStore{Store: inner, fault: f}
+	})
+	dbp, ok := s.(interface{ DB() *sql.DB })
+	require.True(t, ok)
+	wcs := NewWebChatStore(dbp.DB(), "sqlite")
+	require.NoError(t, wcs.Init())
+	var calls atomic.Int64
+	srv.SetWebChatStore(countingSearchStore{WebChatStore: wcs, calls: &calls})
+	srv.config.ChatSearchTimeout = 50 * time.Millisecond
+	fault.Arm()
+
+	rec := doRequestAsUser(t, srv, alice, http.MethodGet, "/api/v1/chat/search?q=needle", nil)
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "SEARCH_TIMEOUT")
+	assert.NotContains(t, rec.Body.String(), "failed to list projects")
+	assert.Zero(t, calls.Load(), "the store is not called after an enumeration timeout")
+}
+
+// stallingTopicStore returns one topic result fast, then makes GetTopic (the
+// name enrichment) wait for its context to end.
+type stallingTopicStore struct {
+	WebChatStore
+	projectID string
+}
+
+func (s stallingTopicStore) SearchChatMessages(context.Context, ChatSearchFilter) ([]ChatSearchResult, string, error) {
+	return []ChatSearchResult{{MessageID: "m1", ConversationKey: "topic-slow", ProjectID: s.projectID, Content: "needle"}}, "", nil
+}
+
+func (s stallingTopicStore) GetTopic(ctx context.Context, _ string) (*WebChatTopic, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// TestChatSearch_EnrichmentDeadlineKeepsResults checks design v4 erratum
+// E1: name enrichment is best-effort, so a deadline that passes there answers
+// 200 with the results (the names that did not resolve stay empty).
+func TestChatSearch_EnrichmentDeadlineKeepsResults(t *testing.T) {
+	srv, wcs, alice, _, project := setupSearchServer(t)
+	srv.config.ChatSearchTimeout = 50 * time.Millisecond
+	srv.SetWebChatStore(stallingTopicStore{WebChatStore: wcs, projectID: project.ID})
+	rec := doRequestAsUser(t, srv, alice, http.MethodGet, "/api/v1/chat/search?q=needle&projectId="+project.ID, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), `"messageId":"m1"`)
+}
+
+// TestChatSearch_ClientAbortIsCanceled checks round-1 item R1-04: a search
+// whose client goes away is recorded as canceled, writes no slow line and no
+// error body.
+func TestChatSearch_ClientAbortIsCanceled(t *testing.T) {
+	srv, wcs, alice, _, project := setupSearchServer(t)
+	srv.SetWebChatStore(blockingSearchStore{wcs})
+	buf := captureSlog(t)
+	token, _, _, err := srv.userTokenService.GenerateTokenPair(alice.ID, alice.Email, alice.DisplayName, alice.Role, ClientTypeWeb)
+	require.NoError(t, err)
+	reqCtx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/chat/search?q=needle&projectId="+project.ID, nil).WithContext(reqCtx)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	time.AfterFunc(50*time.Millisecond, cancel)
+	srv.Handler().ServeHTTP(rec, req)
+	assert.Empty(t, rec.Body.String(), "no error body for a client that went away")
+	assert.NotContains(t, buf.String(), "chat search slow")
 }

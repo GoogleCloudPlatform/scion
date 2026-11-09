@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -34,14 +35,12 @@ const (
 	// DefaultChatSearchTimeout bounds one search when server config
 	// hub.chat.search.timeout is unset.
 	DefaultChatSearchTimeout = 3 * time.Second
-	// DefaultChatSearchMaxConcurrentSQLite is the hub-wide cap on a SQLite
-	// hub. It matches the search reader's connection cap
-	// (entc.SQLiteSearchReaderMaxOpen), so a search never queues for a
-	// connection.
-	DefaultChatSearchMaxConcurrentSQLite = 2
-	// DefaultChatSearchMaxConcurrentPostgres is the hub-wide cap on a
-	// Postgres hub, which searches on its shared pool.
-	DefaultChatSearchMaxConcurrentPostgres = 8
+	// DefaultChatSearchMaxConcurrent is the configured default of the
+	// hub-wide cap, on both backends (design v4 erratum E1). On SQLite it is
+	// also the search reader's connection cap (entc.SQLiteSearchReaderMaxOpen),
+	// so a search never queues for a connection. On Postgres the effective
+	// cap is clamped to a quarter of the shared pool (EffectiveChatSearchCap).
+	DefaultChatSearchMaxConcurrent = 2
 	// ChatSearchMaxQueryRunes is the longest accepted search term.
 	ChatSearchMaxQueryRunes = 256
 	// chatSearchSlowThreshold is the duration from which a search that
@@ -52,12 +51,13 @@ const (
 	pgQueryCanceled = "57014"
 )
 
-// Chat search outcomes, the metric's outcome attribute.
+// Chat search outcomes, the metric's outcome attribute. A busy refusal ran
+// no search and is counted in its own counter, not in the duration histogram.
 const (
-	chatSearchOutcomeOK      = "ok"
-	chatSearchOutcomeTimeout = "timeout"
-	chatSearchOutcomeBusy    = "busy"
-	chatSearchOutcomeError   = "error"
+	chatSearchOutcomeOK       = "ok"
+	chatSearchOutcomeTimeout  = "timeout"
+	chatSearchOutcomeCanceled = "canceled" // the client went away (the UI aborts superseded searches)
+	chatSearchOutcomeError    = "error"
 )
 
 // searchGate bounds concurrent chat searches: at most cap searches hub-wide,
@@ -118,17 +118,54 @@ func chatSearchBackend(wcs WebChatStore) string {
 	return "sqlite"
 }
 
+// EffectiveChatSearchCap returns the hub-wide search cap for a backend
+// ("sqlite" or "postgres"), and whether the Postgres clamp lowered the
+// configured value (design v4 erratum E1). configured <= 0 means the default
+// (DefaultChatSearchMaxConcurrent). On Postgres, search shares the hub's main
+// pool of poolMaxOpen connections, so the cap is
+// max(1, min(configured, floor(poolMaxOpen / 4))): searches hold at most a
+// quarter of the pool and always at least one connection. poolMaxOpen <= 0
+// (unknown) is read as the hub's default Postgres pool of 5. On SQLite search
+// has its own read-only handle, so there is no clamp.
+func EffectiveChatSearchCap(configured int, backend string, poolMaxOpen int) (effective int, clamped bool) {
+	if configured <= 0 {
+		configured = DefaultChatSearchMaxConcurrent
+	}
+	if backend != "postgres" {
+		return configured, false
+	}
+	if poolMaxOpen <= 0 {
+		poolMaxOpen = 5
+	}
+	limit := poolMaxOpen / 4
+	if limit < 1 {
+		limit = 1
+	}
+	if configured > limit {
+		return limit, true
+	}
+	return configured, false
+}
+
+// ChatSearchCapStartupLine returns the one startup log line for a clamped
+// Postgres search cap (numbers only), and false when the clamp did not lower
+// the configured value.
+func ChatSearchCapStartupLine(configured int, backend string, poolMaxOpen int) (string, bool) {
+	effective, clamped := EffectiveChatSearchCap(configured, backend, poolMaxOpen)
+	if !clamped {
+		return "", false
+	}
+	if configured <= 0 {
+		configured = DefaultChatSearchMaxConcurrent
+	}
+	return fmt.Sprintf("Chat search: max_concurrent %d lowered to %d (a quarter of the Postgres pool of %d)", configured, effective, poolMaxOpen), true
+}
+
 // chatSearchGateFor returns the hub's search gate, built on first use with
-// the configured cap or the backend default.
+// the effective cap for the store's backend.
 func (s *Server) chatSearchGateFor(wcs WebChatStore) *searchGate {
 	s.chatSearchGateOnce.Do(func() {
-		capacity := s.config.ChatSearchMaxConcurrent
-		if capacity <= 0 {
-			capacity = DefaultChatSearchMaxConcurrentSQLite
-			if chatSearchBackend(wcs) == "postgres" {
-				capacity = DefaultChatSearchMaxConcurrentPostgres
-			}
-		}
+		capacity, _ := EffectiveChatSearchCap(s.config.ChatSearchMaxConcurrent, chatSearchBackend(wcs), s.config.DatabaseMaxOpenConns)
 		s.chatSearchGate = newSearchGate(capacity)
 	})
 	return s.chatSearchGate
@@ -169,10 +206,12 @@ type chatSearchShape struct {
 }
 
 // OTelChatSearchMetrics records hub_chat_search_duration_seconds, a
-// histogram of every search's duration with the attributes backend, path,
-// scope and outcome.
+// histogram of every search that ran (attributes backend, path, scope and
+// outcome: ok, timeout, canceled or error), and hub_chat_search_busy_total, a
+// counter of searches refused by the gate (attribute backend).
 type OTelChatSearchMetrics struct {
 	duration metric.Float64Histogram
+	busy     metric.Int64Counter
 }
 
 // NewOTelChatSearchMetrics creates the histogram. The OTel name
@@ -189,7 +228,13 @@ func NewOTelChatSearchMetrics(mp metric.MeterProvider) (*OTelChatSearchMetrics, 
 	if err != nil {
 		return nil, err
 	}
-	return &OTelChatSearchMetrics{duration: h}, nil
+	b, err := mp.Meter(instrumentationScope).Int64Counter("hub.chat.search.busy",
+		metric.WithUnit("{search}"),
+		metric.WithDescription("Web chat searches refused because the search gate was full."))
+	if err != nil {
+		return nil, err
+	}
+	return &OTelChatSearchMetrics{duration: h, busy: b}, nil
 }
 
 // SetChatSearchMetrics wires the search histogram. Until it is set, searches
@@ -198,9 +243,24 @@ func (s *Server) SetChatSearchMetrics(m *OTelChatSearchMetrics) {
 	s.chatSearchMetrics.Store(m)
 }
 
+// recordChatSearchBusy counts a search the gate refused. It ran no query,
+// so it stays out of the duration histogram and writes no log line.
+func (s *Server) recordChatSearchBusy(ctx context.Context, sh chatSearchShape) {
+	if m := s.chatSearchMetrics.Load(); m != nil {
+		m.busy.Add(ctx, 1, metric.WithAttributes(attribute.String("backend", sh.backend)))
+	}
+}
+
 // recordChatSearch records a search in the histogram and, when it was slow,
-// timed out or failed, writes one log line with its shape. A busy refusal
-// ran no query and is counted in the histogram only.
+// timed out or failed, writes one log line with its shape. A canceled search
+// (the client went away) writes a debug line at most, so the aborts the UI
+// sends on every superseded keystroke do not drown the slow and timeout
+// signal.
+//
+// The log line is written WITHOUT the request context: the default handler
+// adds the request id to any record whose context carries one, which would let
+// an operator join the search shape to the request's access-log line. Design
+// 6.5 allows no identifier on this line (round-1 item R1-08).
 func (s *Server) recordChatSearch(ctx context.Context, logger *slog.Logger, sh chatSearchShape) {
 	if m := s.chatSearchMetrics.Load(); m != nil {
 		m.duration.Record(ctx, sh.duration.Seconds(), metric.WithAttributes(
@@ -210,13 +270,14 @@ func (s *Server) recordChatSearch(ctx context.Context, logger *slog.Logger, sh c
 			attribute.String("outcome", sh.outcome),
 		))
 	}
-	if sh.outcome == chatSearchOutcomeBusy {
+	if sh.outcome == chatSearchOutcomeCanceled {
+		logger.Debug("chat search canceled", "duration_ms", sh.duration.Milliseconds(), "backend", sh.backend, "scope", sh.scope)
 		return
 	}
 	if sh.outcome == chatSearchOutcomeOK && sh.duration < chatSearchSlowThreshold {
 		return
 	}
-	logger.WarnContext(ctx, "chat search slow",
+	logger.Warn("chat search slow",
 		"duration_ms", sh.duration.Milliseconds(),
 		"timed_out", sh.outcome == chatSearchOutcomeTimeout,
 		"outcome", sh.outcome,

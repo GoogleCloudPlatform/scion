@@ -820,10 +820,13 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 					log.Printf("Artifact store initialized")
 				}
 
-				ws := hub.NewWebChatStore(rawDB, cfg.Database.Driver, webChatSearchOptions(cfg)...)
+				searchOpts, closeSearch := webChatSearchOptions(cfg)
+				ws := hub.NewWebChatStore(rawDB, cfg.Database.Driver, searchOpts...)
 				if err := ws.Init(); err != nil {
+					closeSearch()
 					log.Printf("Warning: failed to initialize webchat store: %v", err)
 				} else {
+					defer closeSearch()
 					webStore = ws
 					hubSrv.SetWebChatStore(webStore)
 					log.Printf("Web chat store initialized")
@@ -2899,6 +2902,7 @@ func buildHubServerConfig(cfg *config.GlobalConfig, hubEndpoint, devAuthToken st
 		SoftDeleteRetainFiles:        cfg.Hub.SoftDeleteRetainFiles,
 		ChatSearchTimeout:            chatSearchTimeout(cfg),
 		ChatSearchMaxConcurrent:      cfg.Hub.Chat.Search.MaxConcurrent,
+		DatabaseMaxOpenConns:         cfg.Database.MaxOpenConns,
 		PerfTrace:                    cfg.Hub.PerfTrace,
 		CSPReportRawSamples:          cfg.Hub.CSPReportRawSamples,
 		MembershipSweepReportOnly:    cfg.Hub.MembershipSweepReportOnly,

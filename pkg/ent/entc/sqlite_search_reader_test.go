@@ -106,7 +106,10 @@ func TestSQLiteSearchReaderCancelsOnDeadline(t *testing.T) {
 		// The deadline expired while the statement was running, not before
 		// it started.
 		require.GreaterOrEqual(t, elapsed, 45*time.Millisecond, "round %d", round)
-		require.Less(t, elapsed, 150*time.Millisecond,
+		// A loose upper bound for default CI (loaded runners, -race). The
+		// design's "about 100 ms" was measured in the gate run (51.5 to 51.9
+		// ms) and is held by L2 in the pkg/hub chatsearchbench harness.
+		require.Less(t, elapsed, 50*time.Millisecond+time.Second,
 			"round %d: the statement was not stopped near the 50 ms deadline", round)
 
 		// The same connection serves the next statement normally.

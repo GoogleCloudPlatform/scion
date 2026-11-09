@@ -718,7 +718,9 @@ WEBCHAT_POSTGRES_TESTS := TestListTopicsByProjects_Postgres \
 	TestChatSearchLiteralWildcards_Postgres \
 	TestChatSearchDeletedAndEdited_Postgres \
 	TestChatSearchDifferential_Postgres \
-	TestChatSearchStatementTimeout_Postgres
+	TestChatSearchStatementTimeout_Postgres \
+	TestChatSearchVisibility_Postgres \
+	TestChatSearchStoreTimeoutStopsStatement_Postgres
 
 test-webchat-postgres:
 	@if [ -z "$$SCION_TEST_POSTGRES_DSN" ]; then \

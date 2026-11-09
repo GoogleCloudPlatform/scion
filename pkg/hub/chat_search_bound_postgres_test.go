@@ -249,3 +249,100 @@ func TestChatSearchStatementTimeout_Postgres(t *testing.T) {
 	assert.True(t, isChatSearchTimeout(err))
 	assert.Less(t, time.Since(start), time.Second)
 }
+
+// TestChatSearchVisibility_Postgres checks acceptance 15.5 on Postgres for the
+// rewritten query (round-1 item R1-03): DM bounds for a participant and a
+// non-participant, the project-ID set, conversation scope, and a term ending
+// in a backslash under DM scope.
+func TestChatSearchVisibility_Postgres(t *testing.T) {
+	wcs, db := newPGSearchStore(t)
+	projA, projB, projC := api.NewUUID(), api.NewUUID(), api.NewUUID()
+	now := time.Now().UTC()
+	ids := map[string]string{}
+	add := func(name, proj, thread, text string, i int) {
+		id := api.NewUUID()
+		ids[id] = name
+		pgInsertMessage(t, db, id, proj, thread, text, now.Add(time.Duration(i)*time.Second))
+	}
+	add("a-topic", projA, "topic-a", "needle in A", 0)
+	add("b-topic", projB, "topic-b", "needle in B", 1)
+	add("c-topic", projC, "topic-c", "needle in C", 2)
+	add("my-dm", projA, "dm:user:me:user:other", `needle in my dm ab\`, 3)
+	add("their-dm", projA, "dm:user:x:user:y", "needle in their dm", 4)
+	add("a-other-topic", projA, "topic-a2", "needle elsewhere in A", 5)
+	names := func(f ChatSearchFilter) []string {
+		got := searchIDs(t, wcs, f)
+		out := make([]string, len(got))
+		for i, id := range got {
+			out[i] = ids[id]
+		}
+		sort.Strings(out)
+		return out
+	}
+	// Project set, as the participant: the participant's DM, never another's.
+	assert.Equal(t, []string{"a-other-topic", "a-topic", "b-topic", "my-dm"},
+		names(ChatSearchFilter{Query: "needle", ProjectIDs: []string{projA, projB}, DMParticipantUserID: "me"}))
+	// Project set, as a non-participant: no DM at all.
+	assert.Equal(t, []string{"a-other-topic", "a-topic", "b-topic"},
+		names(ChatSearchFilter{Query: "needle", ProjectIDs: []string{projA, projB}, DMParticipantUserID: "nobody"}))
+	// One project.
+	assert.Equal(t, []string{"a-other-topic", "a-topic", "my-dm"},
+		names(ChatSearchFilter{Query: "needle", ProjectID: projA, DMParticipantUserID: "me"}))
+	// Conversation scope.
+	assert.Equal(t, []string{"a-topic"},
+		names(ChatSearchFilter{Query: "needle", ConversationKey: "topic-a"}))
+	// A term ending in a backslash, under DM scope, matches literally.
+	assert.Equal(t, []string{"my-dm"},
+		names(ChatSearchFilter{Query: `ab\`, ConversationKey: "dm:user:me:user:other"}))
+	assert.Empty(t, names(ChatSearchFilter{Query: `ab\`, ConversationKey: "dm:user:x:user:y"}))
+}
+
+// TestChatSearchStoreTimeoutStopsStatement_Postgres checks acceptance 15.2 on
+// Postgres through the store (round-1 item R1-05): a store search that really
+// runs long is stopped on the server by its statement_timeout, ends near its
+// deadline as a timeout, and leaves no active backend behind.
+func TestChatSearchStoreTimeoutStopsStatement_Postgres(t *testing.T) {
+	wcs, db := newPGSearchStore(t)
+	ctx := context.Background()
+	proj := api.NewUUID()
+	base := time.Now().UTC()
+	for i := 0; i < 2000; i++ {
+		pgInsertMessage(t, db, api.NewUUID(), proj, "topic-slow", "haystack", base.Add(time.Duration(i)*time.Millisecond))
+	}
+	// Swap messages for a view whose msg column sleeps 10 ms per row, so a
+	// rare-term search over 2000 rows would run for about 20 s.
+	var schema string
+	require.NoError(t, db.QueryRowContext(ctx, "SELECT current_schema()").Scan(&schema))
+	for _, stmt := range []string{
+		`ALTER TABLE messages RENAME TO messages_base`,
+		`CREATE FUNCTION slow_text(t text) RETURNS text LANGUAGE plpgsql VOLATILE AS $$ BEGIN PERFORM pg_sleep(0.01); RETURN t; END $$`,
+		`CREATE VIEW messages AS SELECT id, project_id, created, channel, thread_id, slow_text(msg) AS msg, sender, sender_id, recipient, recipient_id FROM messages_base`,
+	} {
+		_, err := db.ExecContext(ctx, stmt)
+		require.NoError(t, err, stmt)
+	}
+
+	const limit = 200 * time.Millisecond
+	searchCtx, cancel := context.WithTimeout(ctx, limit)
+	defer cancel()
+	start := time.Now()
+	_, _, err := wcs.SearchChatMessages(searchCtx, ChatSearchFilter{Query: "zq-rare", ProjectID: proj})
+	elapsed := time.Since(start)
+	require.Error(t, err)
+	assert.True(t, isChatSearchTimeout(err), "the search must end as a timeout: %v", err)
+	assert.Less(t, elapsed, limit+time.Second, "the statement is stopped near the deadline, not after the 20 s scan")
+
+	// The server stopped the statement: no active backend is left running a
+	// query on this test's schema.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		var active int
+		require.NoError(t, db.QueryRowContext(ctx, `SELECT count(*) FROM pg_stat_activity
+ WHERE state = 'active' AND pid <> pg_backend_pid() AND query LIKE '%' || $1 || '%' AND query LIKE '%ILIKE%'`, schema).Scan(&active))
+		if active == 0 {
+			break
+		}
+		require.True(t, time.Now().Before(deadline), "%d backend(s) still running the search after it returned", active)
+		time.Sleep(50 * time.Millisecond)
+	}
+}

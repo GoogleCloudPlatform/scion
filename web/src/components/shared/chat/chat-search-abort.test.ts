@@ -141,6 +141,53 @@ describe('scion-chat-search request lifecycle', () => {
     expect(el.loading).toBe(false);
   });
 
+  it('retries a 429 once after Retry-After and shows the results', async () => {
+    vi.useFakeTimers();
+    try {
+      apiFetch
+        .mockResolvedValueOnce(new Response('{}', { status: 429, headers: { 'Retry-After': '1' } }))
+        .mockResolvedValueOnce(
+          new Response(JSON.stringify({ results: [], nextCursor: '' }), { status: 200 })
+        );
+      const el = makeSearch();
+      const run = el.performSearch();
+      await vi.advanceTimersByTimeAsync(1000);
+      await run;
+      expect(apiFetch).toHaveBeenCalledTimes(2);
+      expect(apiFetch.mock.calls[1][1]?.signal).toBe(apiFetch.mock.calls[0][1]?.signal);
+      expect(el.errorMsg).toBe('');
+      expect(el.noResults).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('shows the busy message when the retry is refused too', async () => {
+    vi.useFakeTimers();
+    try {
+      apiFetch.mockResolvedValue(new Response('{}', { status: 429 }));
+      const el = makeSearch();
+      const run = el.performSearch();
+      await vi.advanceTimersByTimeAsync(1000);
+      await run;
+      expect(apiFetch).toHaveBeenCalledTimes(2);
+      expect(el.errorMsg).toBe(mod.SEARCH_BUSY_MESSAGE);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps the results on screen when "load more" fails', async () => {
+    const el = makeSearch();
+    el.results = [{ messageId: 'm1' }];
+    el.nextCursor = 'c1';
+    apiFetch.mockResolvedValueOnce(new Response('{}', { status: 503 }));
+    await el.performSearch(true);
+    expect(el.results).toEqual([{ messageId: 'm1' }]);
+    expect(el.errorMsg).toBe('');
+    expect(el.loadMoreError).toBe(mod.SEARCH_TIMEOUT_MESSAGE);
+  });
+
   it('clears the message on a successful search', async () => {
     apiFetch.mockResolvedValueOnce(new Response('{}', { status: 503 }));
     const el = makeSearch();

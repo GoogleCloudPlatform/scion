@@ -36,29 +36,36 @@ func chatSearchTimeout(cfg *config.GlobalConfig) time.Duration {
 }
 
 // webChatSearchOptions returns the web chat store options for chat search
-// (ptone/scion#7586). On a SQLite hub it opens the separate read-only search
-// handle, so a slow search cannot hold the main handle's single connection.
-// An in-memory database cannot be shared by a second pool, and an open
-// failure must not stop the hub: both fall back to searching on the main
-// handle, with a log line. A Postgres hub needs no option: its store bounds
-// each search with a READ ONLY transaction and statement_timeout.
-func webChatSearchOptions(cfg *config.GlobalConfig) []hub.WebChatStoreOption {
+// (ptone/scion#7586) and a func that closes what it opened (a no-op when it
+// opened nothing). On a SQLite hub it opens the separate read-only search
+// handle, so a slow search cannot hold the main handle's single connection;
+// its pool size is the effective search cap. An in-memory database cannot be
+// shared by a second pool, and an open failure must not stop the hub: both
+// fall back to searching on the main handle, with a log line. A Postgres hub
+// needs no option: its store bounds each search with a READ ONLY transaction
+// and statement_timeout, and the search cap is clamped to a quarter of the
+// shared pool, with one startup line when that lowers the configured value.
+func webChatSearchOptions(cfg *config.GlobalConfig) ([]hub.WebChatStoreOption, func()) {
+	noop := func() {}
+	configured := cfg.Hub.Chat.Search.MaxConcurrent
 	switch cfg.Database.Driver {
 	case "postgres", "pgx":
-		return nil
+		if line, ok := hub.ChatSearchCapStartupLine(configured, "postgres", cfg.Database.MaxOpenConns); ok {
+			log.Print(line)
+		}
+		return nil, noop
 	}
 	if entc.SQLiteDSNIsMemory(cfg.Database.URL) {
 		log.Printf("Chat search: in-memory SQLite database, searching on the main handle")
-		return nil
+		return nil, noop
 	}
 	db, err := entc.OpenSQLiteSearchReader(cfg.Database.URL)
 	if err != nil {
 		log.Printf("Warning: chat search: opening the read-only search handle failed, searching on the main handle: %v", err)
-		return nil
+		return nil, noop
 	}
-	if n := cfg.Hub.Chat.Search.MaxConcurrent; n > 0 {
-		db.SetMaxOpenConns(n)
-	}
+	effective, _ := hub.EffectiveChatSearchCap(configured, "sqlite", 0)
+	db.SetMaxOpenConns(effective)
 	log.Printf("Chat search: read-only search handle opened")
-	return []hub.WebChatStoreOption{hub.WithSearchDB(db)}
+	return []hub.WebChatStoreOption{hub.WithSearchDB(db)}, func() { _ = db.Close() }
 }

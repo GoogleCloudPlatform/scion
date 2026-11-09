@@ -2743,7 +2743,6 @@ type V1SecretsConfig struct {
 	GCPReplicationLocations []string `json:"gcp_replication_locations,omitempty" yaml:"gcp_replication_locations,omitempty" koanf:"gcp_replication_locations"`
 }
 
-// V1CORSConfig holds CORS settings for server endpoints.
 // V1ServerHubChatConfig holds web chat server limits (server.hub.chat).
 type V1ServerHubChatConfig struct {
 	// Search bounds web chat search (server.hub.chat.search).
@@ -2756,10 +2755,12 @@ type V1ServerHubChatSearchConfig struct {
 	// Timeout bounds one search (e.g. "3s"). Empty means the hub default, 3s.
 	Timeout string `json:"timeout,omitempty" yaml:"timeout,omitempty" koanf:"timeout"`
 	// MaxConcurrent caps the searches running hub-wide at once. Zero or unset
-	// means the backend default: 2 on SQLite, 8 on Postgres.
+	// means the default, 2. On Postgres the hub clamps it to a quarter of the
+	// main pool (at least 1).
 	MaxConcurrent *int `json:"max_concurrent,omitempty" yaml:"max_concurrent,omitempty" koanf:"max_concurrent"`
 }
 
+// V1CORSConfig holds CORS settings for server endpoints.
 type V1CORSConfig struct {
 	Enabled        bool     `json:"enabled,omitempty" yaml:"enabled,omitempty" koanf:"enabled"`
 	AllowedOrigins []string `json:"allowed_origins,omitempty" yaml:"allowed_origins,omitempty" koanf:"allowed_origins"`

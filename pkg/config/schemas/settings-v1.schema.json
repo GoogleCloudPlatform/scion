@@ -1510,7 +1510,7 @@
                 "max_concurrent": {
                   "type": "integer",
                   "minimum": 0,
-                  "description": "Searches running hub-wide at once (default 2 on SQLite, 8 on Postgres; 0 means the default). Each user runs at most one search at a time.",
+                  "description": "Searches running hub-wide at once (default 2; 0 means the default). On Postgres, where search shares the main pool, the hub lowers it to a quarter of database max_open_conns (at least 1) and logs the effective value. Each user runs at most one search at a time.",
                   "x-env-var": "SCION_SERVER_HUB_CHAT_SEARCH_MAXCONCURRENT",
                   "x-since": "1"
                 }
