@@ -65,6 +65,14 @@ describe('searchErrorMessage', () => {
     expect(mod.searchErrorMessage(500)).toBe(mod.SEARCH_FAILED_MESSAGE);
   });
 
+  it('maps the body error code first and falls back to the status', () => {
+    expect(mod.searchErrorMessage(503, 'SEARCH_TIMEOUT')).toBe(mod.SEARCH_TIMEOUT_MESSAGE);
+    expect(mod.searchErrorMessage(429, 'SEARCH_BUSY')).toBe(mod.SEARCH_BUSY_MESSAGE);
+    // A maintenance or proxy 503 with another code is a plain failure.
+    expect(mod.searchErrorMessage(503, 'MAINTENANCE')).toBe(mod.SEARCH_FAILED_MESSAGE);
+    expect(mod.searchErrorMessage(400, 'VALIDATION_ERROR')).toBe(mod.SEARCH_FAILED_MESSAGE);
+  });
+
   it('uses the exact timeout text from the design', () => {
     expect(mod.SEARCH_TIMEOUT_MESSAGE).toBe(
       'Search took too long. Try a longer phrase or search one space.'
@@ -122,6 +130,39 @@ describe('scion-chat-search request lifecycle', () => {
     await run;
     expect(el.errorMsg).toBe('');
     expect(el.loading).toBe(false);
+  });
+
+  it('aborts the running request when the element is disconnected', async () => {
+    apiFetch.mockImplementation(pendingUntilAborted);
+    const el = makeSearch();
+    const run = el.performSearch();
+    const signal = apiFetch.mock.calls[0][1]?.signal as AbortSignal;
+    el.disconnectedCallback();
+    expect(signal.aborted).toBe(true);
+    await run;
+    expect(el.errorMsg).toBe('');
+  });
+
+  it('shows a plain failure for a 503 whose body code is not SEARCH_TIMEOUT', async () => {
+    apiFetch.mockResolvedValue(
+      new Response(JSON.stringify({ error: { code: 'MAINTENANCE', message: 'down' } }), {
+        status: 503,
+      })
+    );
+    const el = makeSearch();
+    await el.performSearch();
+    expect(el.errorMsg).toBe(mod.SEARCH_FAILED_MESSAGE);
+  });
+
+  it('limits the input to the hub maximum of 256 characters', async () => {
+    const el = makeSearch('') as any;
+    document.body.appendChild(el);
+    el.searchActive = true;
+    await el.updateComplete;
+    const input = el.shadowRoot?.querySelector('.search-input') as HTMLInputElement | null;
+    expect(input?.getAttribute('maxlength')).toBe(String(mod.SEARCH_MAX_QUERY_CHARS));
+    expect(mod.SEARCH_MAX_QUERY_CHARS).toBe(256);
+    el.remove();
   });
 
   it('shows the timeout message on 503', async () => {

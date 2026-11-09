@@ -583,3 +583,15 @@ func TestChatSearch_ClientAbortIsCanceled(t *testing.T) {
 	assert.Empty(t, rec.Body.String(), "no error body for a client that went away")
 	assert.NotContains(t, buf.String(), "chat search slow")
 }
+
+// TestChatSearch_InvalidCursorWritesNoSlowLine checks round-2 item R2-02: an
+// invalid cursor is a client error that ran no query, so it answers 400 and
+// writes no "chat search slow" line.
+func TestChatSearch_InvalidCursorWritesNoSlowLine(t *testing.T) {
+	srv, _, alice, _, project := setupSearchServer(t)
+	buf := captureSlog(t)
+	rec := doRequestAsUser(t, srv, alice, http.MethodGet,
+		"/api/v1/chat/search?q=needle&projectId="+project.ID+"&cursor="+url.QueryEscape("not-a-time|x"), nil)
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	assert.NotContains(t, buf.String(), "chat search slow")
+}

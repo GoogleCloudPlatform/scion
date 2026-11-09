@@ -19,11 +19,14 @@ package entc
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -147,8 +150,25 @@ func TestSQLiteSearchReaderIsReadOnly(t *testing.T) {
 		require.NoError(t, c.Close())
 	}
 
+	// mode=ro holds on its own: with query_only turned off on one reader
+	// connection, a write still fails as a read-only database (round-2 item
+	// R2-05; query_only alone would hide a dropped mode=ro).
+	c, err := reader.Conn(ctx)
+	require.NoError(t, err)
+	_, err = c.ExecContext(ctx, "PRAGMA query_only = 0")
+	require.NoError(t, err)
+	var qo int
+	require.NoError(t, c.QueryRowContext(ctx, "PRAGMA query_only").Scan(&qo))
+	require.Equal(t, 0, qo, "fixture: query_only is off on this connection")
+	_, err = c.ExecContext(ctx, `INSERT INTO messages (id, channel, msg, created) VALUES ('ro', 'web', 'x', 0)`)
+	require.Error(t, err, "mode=ro must refuse the write without query_only")
+	assert.Contains(t, strings.ToLower(err.Error()), "readonly")
+	// Discard this connection rather than return it with query_only off.
+	require.ErrorIs(t, c.Raw(func(any) error { return driver.ErrBadConn }), driver.ErrBadConn)
+	require.ErrorIs(t, c.Close(), sql.ErrConnDone)
+
 	// The reader sees rows the main handle commits.
-	_, err := main.Exec(`INSERT INTO messages (id, channel, msg, created) VALUES ('new', 'web', 'fresh', 99)`)
+	_, err = main.Exec(`INSERT INTO messages (id, channel, msg, created) VALUES ('new', 'web', 'fresh', 99)`)
 	require.NoError(t, err)
 	var n int
 	require.NoError(t, reader.QueryRowContext(ctx, `SELECT count(*) FROM messages WHERE id = 'new'`).Scan(&n))

@@ -25,6 +25,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // Chat search bounds (ptone/scion#7586, chat search design v3 section 6.2).
@@ -125,8 +126,9 @@ func chatSearchBackend(wcs WebChatStore) string {
 // pool of poolMaxOpen connections, so the cap is
 // max(1, min(configured, floor(poolMaxOpen / 4))): searches hold at most a
 // quarter of the pool and always at least one connection. poolMaxOpen <= 0
-// (unknown) is read as the hub's default Postgres pool of 5. On SQLite search
-// has its own read-only handle, so there is no clamp.
+// (unknown) is read as the hub's default Postgres pool of 5, the value
+// config.applyDatabasePoolDefaults sets. On SQLite search has its own
+// read-only handle, so there is no clamp.
 func EffectiveChatSearchCap(configured int, backend string, poolMaxOpen int) (effective int, clamped bool) {
 	if configured <= 0 {
 		configured = DefaultChatSearchMaxConcurrent
@@ -247,8 +249,16 @@ func (s *Server) SetChatSearchMetrics(m *OTelChatSearchMetrics) {
 // so it stays out of the duration histogram and writes no log line.
 func (s *Server) recordChatSearchBusy(ctx context.Context, sh chatSearchShape) {
 	if m := s.chatSearchMetrics.Load(); m != nil {
-		m.busy.Add(ctx, 1, metric.WithAttributes(attribute.String("backend", sh.backend)))
+		m.busy.Add(spanFreeContext(ctx), 1, metric.WithAttributes(attribute.String("backend", sh.backend)))
 	}
+}
+
+// spanFreeContext returns ctx without its trace span. The search metric
+// records use it so the SDK's trace-based exemplars cannot attach a sampled
+// request's trace and span ids to the metric points: design 6.5 allows no
+// identifier on the search signal (round-2 item R2-S1).
+func spanFreeContext(ctx context.Context) context.Context {
+	return trace.ContextWithSpanContext(ctx, trace.SpanContext{})
 }
 
 // recordChatSearch records a search in the histogram and, when it was slow,
@@ -263,7 +273,7 @@ func (s *Server) recordChatSearchBusy(ctx context.Context, sh chatSearchShape) {
 // 6.5 allows no identifier on this line (round-1 item R1-08).
 func (s *Server) recordChatSearch(ctx context.Context, logger *slog.Logger, sh chatSearchShape) {
 	if m := s.chatSearchMetrics.Load(); m != nil {
-		m.duration.Record(ctx, sh.duration.Seconds(), metric.WithAttributes(
+		m.duration.Record(spanFreeContext(ctx), sh.duration.Seconds(), metric.WithAttributes(
 			attribute.String("backend", sh.backend),
 			attribute.String("path", sh.path),
 			attribute.String("scope", sh.scope),

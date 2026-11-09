@@ -63,11 +63,33 @@ export const SEARCH_BUSY_MESSAGE = 'Another search is still running. Try again i
 /** Shown for any other failed search. */
 export const SEARCH_FAILED_MESSAGE = 'Search failed. Try again.';
 
-/** The message for a search refused with the given HTTP status (0: no response). */
-export function searchErrorMessage(status: number): string {
+/** The hub's longest accepted search term, in characters. */
+export const SEARCH_MAX_QUERY_CHARS = 256;
+
+/**
+ * The message for a refused search. The error code in the response body
+ * decides (SEARCH_TIMEOUT, SEARCH_BUSY); any other code is a plain failure, so
+ * a maintenance or proxy 503 does not read as a slow search. The HTTP status
+ * is a fallback only when there is no code (0: no response).
+ */
+export function searchErrorMessage(status: number, code = ''): string {
+  if (code === 'SEARCH_TIMEOUT') return SEARCH_TIMEOUT_MESSAGE;
+  if (code === 'SEARCH_BUSY') return SEARCH_BUSY_MESSAGE;
+  if (code) return SEARCH_FAILED_MESSAGE;
   if (status === 503) return SEARCH_TIMEOUT_MESSAGE;
   if (status === 429) return SEARCH_BUSY_MESSAGE;
   return SEARCH_FAILED_MESSAGE;
+}
+
+/** The error code of an API error body ({ error: { code } }), or '' if none. */
+async function errorCode(res: Response): Promise<string> {
+  try {
+    const body = (await res.json()) as { error?: { code?: unknown } };
+    const code = body?.error?.code;
+    return typeof code === 'string' ? code : '';
+  } catch {
+    return '';
+  }
 }
 
 /** Whether err is the rejection of an aborted fetch. */
@@ -466,12 +488,13 @@ export class ScionChatSearch extends LitElement {
         res = await apiFetch(url, { signal: controller.signal });
       }
       if (!res.ok) {
+        const msg = searchErrorMessage(res.status, await errorCode(res));
         if (append) {
           // Keep the results already on screen; show the error below them.
-          this.loadMoreError = searchErrorMessage(res.status);
+          this.loadMoreError = msg;
         } else {
           this.noResults = false;
-          this.errorMsg = searchErrorMessage(res.status);
+          this.errorMsg = msg;
         }
         return;
       }
@@ -567,6 +590,7 @@ export class ScionChatSearch extends LitElement {
             class="search-input"
             type="text"
             placeholder="Search messages..."
+            maxlength=${SEARCH_MAX_QUERY_CHARS}
             .value=${this.query}
             @input=${this.handleInput}
             @keydown=${this.handleKeydown}

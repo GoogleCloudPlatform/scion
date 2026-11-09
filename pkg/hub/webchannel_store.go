@@ -1696,12 +1696,14 @@ func (s *sqliteWebChatStore) SearchChatMessages(ctx context.Context, filter Chat
 		filter.Limit = 200
 	}
 
-	// Check if the messages table exists.
-	tableExists, err := s.tableExists(ctx, "messages")
-	if err != nil {
-		return nil, "", err
+	// Check if the messages table exists, through the search handle, so a
+	// search never queues for the main handle's connection (round-2 R2-03).
+	var tables int
+	if err := s.searchHandle().QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name = 'messages'").Scan(&tables); err != nil {
+		return nil, "", searchError(ctx, "check table messages exists", err)
 	}
-	if !tableExists {
+	if tables == 0 {
 		return nil, "", nil
 	}
 

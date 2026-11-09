@@ -5419,9 +5419,8 @@ func (s *Server) handleChatSearch(w http.ResponseWriter, r *http.Request) {
 	results, nextCursor, err := wcs.SearchChatMessages(searchCtx, filter)
 	if err != nil {
 		if errors.Is(err, ErrInvalidSearchCursor) {
-			shape.outcome = chatSearchOutcomeError
-			shape.duration = time.Since(searchStart)
-			s.recordChatSearch(ctx, slog.Default(), shape)
+			// A client error that ran no query: no metric sample and no
+			// slow line, so it cannot drown the 6.5 signal (round-2 R2-02).
 			writeInvalidCursor(w)
 			return
 		}
