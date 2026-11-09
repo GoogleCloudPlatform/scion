@@ -234,10 +234,10 @@ However, to prevent premature deletion of agents with active or pending tasks, s
 
 | Agent Role | Authorized to Delete | Allowed Timing |
 |---|---|---|
-| **Worker** (Developer, Reviewer) | The agent's creator or supervisor. | Immediately once the output has been accepted and verified. |
-| **Investigator / Architect** | The agent's creator or supervisor. | **Only after all questions to humans are answered** and the investigation is explicitly concluded. |
-| **Project Initiator** (The very first agent in a project) | **Explicit human instruction only.** | Initiators carry project continuity from inception through closure and must survive worker cycles. |
-| **Project Lead / Coordinator** | **Explicit human instruction naming the workstream.** | Only when a human operator commands to close down that specific workstream. |
+| **Task-bounded agent** | The agent's creator or supervisor. | Immediately once the output has been accepted and verified. |
+| **Agent with an open human question** | The agent's creator or supervisor. | **Only after all questions to humans are answered** and the conversation is explicitly concluded. |
+| Lead — the first agent on a project or workstream, an agent coordinating that project or workstream, or an agent explicitly designated by a human as its lead | **Only on explicit human instruction naming the workstream** | It carries continuity from the initial request through closure, including non-code and non-repository projects |
+| Delegated supervisor with a bounded assignment, not a lead | Its creator or authorized supervisor, subject to the assigned workflow; a human where that workflow requires it | After its deliverable is accepted, verified and durable, its subtree is torn down, and its human questions are resolved |
 
 ### 2. Hierarchical (Bottom-Up) Teardown
 
