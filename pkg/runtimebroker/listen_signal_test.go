@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -42,7 +43,9 @@ func TestServerStart_ListeningClosesAfterBind(t *testing.T) {
 	t.Cleanup(func() {
 		cancel()
 		select {
-		case <-done:
+		case err := <-done:
+			// Start returns Shutdown's result; an idle server drains to nil.
+			assert.NoError(t, err, "Start returns nil after a clean cancel")
 		case <-time.After(30 * time.Second):
 			t.Error("Start did not return")
 		}

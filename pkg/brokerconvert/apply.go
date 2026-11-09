@@ -159,7 +159,7 @@ func Apply(ctx context.Context, env *Env, in ApplyInput) (*Report, error) {
 	if err != nil {
 		return refused(ModeApply, j, refuse(RefuseSettingsWrite))
 	}
-	if len(current) > 0 && !(resuming && j.Settings.State != StepPending && config.InstancesEqual(current, insts)) {
+	if len(current) > 0 && (!resuming || j.Settings.State == StepPending || !config.InstancesEqual(current, insts)) {
 		return refused(ModeApply, j, refuse(RefuseAlreadyFlat))
 	}
 	if resuming && j.State == JournalApplied {
@@ -533,7 +533,6 @@ func (r *run) repointProjects(p *Plan, legacyDefaultProfile string, projects []p
 		it := items[f.id]
 		if it == nil {
 			r.j.Projects = append(r.j.Projects, ProjectItem{ProjectID: f.id, OldDefault: f.defaultID, Linked: []string{}, ItemStatus: ItemStatus{State: StepPending}})
-			it = &r.j.Projects[len(r.j.Projects)-1]
 			// The append may move the slice; rebuild the index.
 			items = map[string]*ProjectItem{}
 			for i := range r.j.Projects {
