@@ -44,6 +44,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
+	"github.com/GoogleCloudPlatform/scion/pkg/observability/txdiag"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
@@ -60,7 +61,35 @@ const (
 	benchP99Floor = 2 * time.Millisecond
 )
 
+// holdRecorder is a txdiag.Recorder that keeps the longest transaction or
+// connection hold on the main handle: the measure db_tx_long_hold reports.
+type holdRecorder struct {
+	mu    sync.Mutex
+	maxMS float64
+}
+
+func (r *holdRecorder) RecordTxHold(_ context.Context, ms float64, _, _, _ string) {
+	r.mu.Lock()
+	if ms > r.maxMS {
+		r.maxMS = ms
+	}
+	r.mu.Unlock()
+}
+func (r *holdRecorder) RecordTxCommit(context.Context, float64, string, string) {}
+func (r *holdRecorder) RecordLockWait(context.Context, float64, string, string) {}
+func (r *holdRecorder) IncDiagDropped(context.Context, int64)                   {}
+
+// takeMax returns the longest hold recorded since the last call, and resets it.
+func (r *holdRecorder) takeMax() time.Duration {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	d := time.Duration(r.maxMS * float64(time.Millisecond))
+	r.maxMS = 0
+	return d
+}
+
 type benchFixture struct {
+	holds    *holdRecorder
 	main     *sql.DB
 	reader   *sql.DB
 	wcs      WebChatStore
@@ -123,9 +152,15 @@ func openBenchFixture(t *testing.T) *benchFixture {
 	_, statErr := os.Stat(path)
 	reuse := statErr == nil
 
-	client, err := entc.OpenSQLite("file:"+path+"?cache=shared", entc.PoolConfig{MaxOpenConns: 1})
+	// The main handle goes through txdiag, as the hub's does, so the bench
+	// reads the same hold measure db_tx_long_hold reports.
+	client, err := entc.OpenSQLite("file:"+path+"?cache=shared", entc.PoolConfig{MaxOpenConns: 1, Diag: txdiag.QuietConfig()})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = client.Close() })
+	mon, ok := entc.DiagMonitor(client)
+	require.True(t, ok, "the main handle must be opened through txdiag")
+	holds := &holdRecorder{}
+	mon.SetRecorder(holds)
 	ctx := context.Background()
 	if !reuse {
 		require.NoError(t, entc.AutoMigrate(ctx, client))
@@ -166,12 +201,15 @@ func openBenchFixture(t *testing.T) *benchFixture {
 		t.Logf("BENCH fixture n=%d built in %v", n, time.Since(start).Round(time.Millisecond))
 	}
 
+	// The search reader is opened WITHOUT txdiag (OpenSQLiteSearchReader uses a
+	// plain sql.Open), so it shares no monitor with the main handle: a search
+	// connection's hold, which the design allows, never reaches holds.
 	reader, err := entc.OpenSQLiteSearchReader(path)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = reader.Close() })
 	wcs := NewWebChatStore(main, "sqlite", WithSearchDB(reader))
 	require.NoError(t, wcs.Init())
-	return &benchFixture{main: main, reader: reader, wcs: wcs, projects: projects, n: n}
+	return &benchFixture{holds: holds, main: main, reader: reader, wcs: wcs, projects: projects, n: n}
 }
 
 // latencies collects durations and reports quantiles.
@@ -195,6 +233,11 @@ func (l *latencies) quantile(q float64) time.Duration {
 	s := append([]time.Duration(nil), l.d...)
 	sort.Slice(s, func(i, j int) bool { return s[i] < s[j] })
 	return s[int(math.Ceil(q*float64(len(s))))-1]
+}
+
+// max returns the longest duration recorded.
+func (l *latencies) max() time.Duration {
+	return l.quantile(1)
 }
 
 func (l *latencies) count() int {
@@ -287,6 +330,17 @@ func TestChatSearchBench_L1WriterIsolation(t *testing.T) {
 	const d = 20 * time.Second
 	baseIns, baseReads, baseFail := f.mainHandleLoad(t, d)
 
+	// Planted control: a transaction held about 1.5 s on the main handle must
+	// show as a hold of at least 1 s, so a quiet result cannot mean a blind probe.
+	f.holds.takeMax()
+	tx, err := f.main.Begin()
+	require.NoError(t, err)
+	time.Sleep(1500 * time.Millisecond)
+	require.NoError(t, tx.Commit())
+	planted := f.holds.takeMax()
+	t.Logf("BENCH L1 n=%d planted_hold=%v (control; want >= 1s)", f.n, planted)
+	require.GreaterOrEqual(t, planted, time.Second, "the planted 1.5 s hold must register")
+
 	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
 	var searches, timeouts, otherErr atomic.Int64
@@ -311,6 +365,7 @@ func TestChatSearchBench_L1WriterIsolation(t *testing.T) {
 	ins, reads, fail := f.mainHandleLoad(t, d)
 	cancel()
 	wg.Wait()
+	longestHold := f.holds.takeMax()
 
 	t.Logf("BENCH L1 n=%d baseline insert_p99=%v read_p99=%v (ops %d/%d, failed %d)",
 		f.n, baseIns.quantile(0.99), baseReads.quantile(0.99), baseIns.count(), baseReads.count(), baseFail)
@@ -320,6 +375,16 @@ func TestChatSearchBench_L1WriterIsolation(t *testing.T) {
 	require.Zero(t, otherErr.Load(), "searches end in success or a timeout only")
 	require.True(t, within10(ins.quantile(0.99), baseIns.quantile(0.99)), "insert p99 within 10%% of baseline")
 	require.True(t, within10(reads.quantile(0.99), baseReads.quantile(0.99)), "read p99 within 10%% of baseline")
+	// Proxy for "no db_tx_long_hold over 1 s on the main handle" (design 11 L1): the fixture's main handle runs
+	// without txdiag, so the slowest single main-handle operation during the searches stands in for the hold.
+	slowest := ins.max()
+	if r := reads.max(); r > slowest {
+		slowest = r
+	}
+	t.Logf("BENCH L1 n=%d db_tx_long_hold_max=%v (txdiag, main handle, during searches; limit 1s)", f.n, longestHold)
+	t.Logf("BENCH L1 n=%d main_handle_slowest_op=%v (second line: timed from before connection acquisition; limit 1s)", f.n, slowest)
+	require.Less(t, longestHold, time.Second, "no main-handle transaction or connection held over 1 s while searches ran")
+	require.Less(t, slowest, time.Second, "no main-handle operation took over 1 s while searches ran")
 }
 
 // TestChatSearchBench_L2Cancellation: a search stopped by its deadline, or
