@@ -18,6 +18,7 @@ package cmd
 
 import (
 	"context"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -707,6 +708,15 @@ func plantSecret(t *testing.T, s store.Store, id string, key []byte) string {
 type secretWriteFailStore struct {
 	store.Store
 	fail *atomic.Bool
+}
+
+// DB exposes the wrapped store's database: hub.New installs its indexes
+// through it and refuses a store that hides it.
+func (f *secretWriteFailStore) DB() *sql.DB {
+	if dbp, ok := f.Store.(interface{ DB() *sql.DB }); ok {
+		return dbp.DB()
+	}
+	return nil
 }
 
 func (f *secretWriteFailStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
