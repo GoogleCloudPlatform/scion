@@ -152,7 +152,7 @@ var projectOperations = []OperationSpec{
 			BeforeFields:  []string{"target_principal_id", "target_roles"},
 			Atomic:        true,
 		},
-		DenialCodes: []DenialCode{DenialForbidden, DenialResourceNotFound, DenialLastOwner, DenialMembershipGroupDerived, DenialConstraintAdminLockout, DenialCredentialInsufficient, DenialLeaveBindingUnclassified},
+		DenialCodes: []DenialCode{DenialForbidden, DenialResourceNotFound, DenialLastOwner, DenialMembershipGroupDerived, DenialConstraintAdminLockout, DenialCredentialInsufficient, DenialLeaveBindingUnclassified, DenialConflict},
 		TestRefs: []TestRef{
 			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
 			{Package: "pkg/hub", Function: "TestProjectLeave_TokenRefusedSessionOnly"},

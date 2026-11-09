@@ -561,28 +561,52 @@ func activeGroupProjectBindingGroups(ctx context.Context, st store.Store, authz 
 }
 
 // leaveRemainingAccess computes the caller's access after the bindings are
-// deleted, on the transaction's post-state: none when not admitted, group
-// when an active group binding on the project admits them, hub otherwise
-// (hub-level authority).
+// deleted, on the transaction's post-state, from the live admission and
+// the Source of the evidence that admits the caller: none when not
+// admitted, group for a group binding on the project, hub for system
+// authority. Admission through the caller's own membership after every
+// direct binding was deleted is not a state a leave may commit: it fails
+// closed with a conflict refusal, and the transaction rolls back.
+//
+// Without an admission check (userAdmitted unset) only the clamped group
+// view counts: group when one admits the caller, none otherwise.
 func (svc *ProjectMembershipService) leaveRemainingAccess(ctx context.Context, tx store.Store, userID, projectID string, now time.Time) (string, error) {
-	groups, err := activeGroupProjectBindingGroups(ctx, tx, svc.authz, userID, projectID, now)
-	if err != nil {
-		return "", err
-	}
-	admitted := len(groups) > 0
-	if svc.userAdmitted != nil {
-		if admitted, err = svc.userAdmitted(ctx, tx, userID, projectID); err != nil {
-			return "", fmt.Errorf("admission after leave: %w", err)
+	if svc.userAdmitted == nil {
+		groups, err := activeGroupProjectBindingGroups(ctx, tx, svc.authz, userID, projectID, now)
+		if err != nil {
+			return "", err
 		}
-	}
-	switch {
-	case !admitted:
+		if len(groups) > 0 {
+			return leaveRemainingGroup, nil
+		}
 		return leaveRemainingNone, nil
-	case len(groups) > 0:
-		return leaveRemainingGroup, nil
-	default:
-		return leaveRemainingHub, nil
 	}
+	adm, err := svc.userAdmitted(ctx, tx, userID, projectID)
+	if err != nil {
+		return "", fmt.Errorf("admission after leave: %w", err)
+	}
+	if !adm.Admitted {
+		return leaveRemainingNone, nil
+	}
+	switch adm.Source {
+	case ProjectAccessSourceGroup:
+		return leaveRemainingGroup, nil
+	case ProjectAccessSourceSystemRole:
+		return leaveRemainingHub, nil
+	default:
+		// ProjectAccessSourceMembership (or a source this function does not
+		// know): the caller still holds direct access, so the leave did not
+		// end their membership. Refuse rather than report a hub label.
+		return "", &leaveDecisionError{decision: leaveMembershipRemainsDecision()}
+	}
+}
+
+// leaveMembershipRemainsDecision is the refusal for a leave after which the
+// caller is still admitted through their own membership. Nothing is
+// changed.
+func leaveMembershipRemainsDecision() *MembershipDecision {
+	return leaveDecision(http.StatusConflict, ErrCodeConflict,
+		"You still have direct access to this project after leaving, so nothing was changed. Try again, or contact a project owner.", nil)
 }
 
 // leaveRootedAgents lists the agents userID roots in projectID with the

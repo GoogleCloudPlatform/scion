@@ -59,12 +59,12 @@ type ProjectMembershipService struct {
 	// the check regardless.
 	onMembershipLoss func()
 
-	// userAdmitted, when set, reports whether userID is admitted to
-	// projectID, reading through st (a transaction inside one). The hub
-	// server sets it to its live admission check (userAdmittedByIDOn);
-	// LeaveProject uses it for the remaining access after a leave
+	// userAdmitted, when set, returns userID's admission to projectID with
+	// its Source, reading through st (a transaction inside one). The hub
+	// server sets it to its live admission check (userAdmissionByIDOn);
+	// LeaveProject takes the remaining access after a leave from it
 	// (ptone/scion#7494). Unset, a leave counts only group bindings.
-	userAdmitted func(ctx context.Context, st store.Store, userID, projectID string) (bool, error)
+	userAdmitted func(ctx context.Context, st store.Store, userID, projectID string) (ProjectAdmissionResult, error)
 }
 
 // notifyMembershipLoss runs the post-commit membership loss callback.

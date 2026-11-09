@@ -1790,7 +1790,7 @@
 - **Before Fields:** target_principal_id, target_roles
 - **Atomic:** Yes
 
-**Denial Codes:** `forbidden`, `not_found`, `last_owner`, `membership_group_derived`, `constraint_admin_lockout`, `credential_insufficient`, `leave_binding_unclassified`
+**Denial Codes:** `forbidden`, `not_found`, `last_owner`, `membership_group_derived`, `constraint_admin_lockout`, `credential_insufficient`, `leave_binding_unclassified`, `conflict`
 
 ### Tests
 

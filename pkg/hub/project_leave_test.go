@@ -33,6 +33,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -542,6 +543,78 @@ func TestProjectLeave_RevokesProjectBoundTokensInTx(t *testing.T) {
 		_, err := f.srv.uatService.ValidateToken(ctx, projTok)
 		assert.NoError(t, err, "the token revocation rolled back with the leave")
 	})
+}
+
+// TestProjectLeave_RemainingAccessFromAdmissionSource (review O1): the
+// remaining access after a leave comes from the live admission's Source:
+// not admitted is none, group is group, system_role is hub. The group case
+// has no group binding at all, so the label is the admission's, not a
+// second group read. Admission through the caller's own membership after
+// the leave is refused with a conflict and changes nothing.
+func TestProjectLeave_RemainingAccessFromAdmissionSource(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name string
+		adm  ProjectAdmissionResult
+		want string
+	}{
+		{"not admitted", ProjectAdmissionResult{}, leaveRemainingNone},
+		{"group", ProjectAdmissionResult{Admitted: true, Source: ProjectAccessSourceGroup}, leaveRemainingGroup},
+		{"system role", ProjectAdmissionResult{Admitted: true, Source: ProjectAccessSourceSystemRole}, leaveRemainingHub},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := setupMMRFixture(t)
+			enableProjectLeave(t, f.srv)
+			f.srv.membershipService.userAdmitted = func(context.Context, store.Store, string, string) (ProjectAdmissionResult, error) {
+				return tc.adm, nil
+			}
+			res := decodeLeaveResult(t, leaveAs(t, f.srv, f.member, f.projectID, false))
+			assert.Equal(t, tc.want, res.RemainingAccess)
+		})
+	}
+
+	t.Run("own membership remains: conflict, nothing changed", func(t *testing.T) {
+		f := setupMMRFixture(t)
+		enableProjectLeave(t, f.srv)
+		f.srv.membershipService.onMembershipLoss = nil
+		f.srv.membershipService.userAdmitted = func(context.Context, store.Store, string, string) (ProjectAdmissionResult, error) {
+			return ProjectAdmissionResult{Admitted: true, Source: ProjectAccessSourceMembership}, nil
+		}
+		projTok := mtMint(t, f.srv, f.member.ID, projectBoundary(f.projectID), "project:read")
+		before := directProjectBindings(t, f.store, f.member.ID, f.projectID)
+
+		rec := leaveAs(t, f.srv, f.member, f.projectID, false)
+		require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+		code, _ := leaveErrorBody(t, rec)
+		assert.Equal(t, ErrCodeConflict, code)
+		assert.NotContains(t, rec.Body.String(), "remainingAccess", "a refusal carries no remaining-access label")
+		assert.Equal(t, before, directProjectBindings(t, f.store, f.member.ID, f.projectID))
+		assert.Zero(t, countAudits(t, f.store, "project_member_leave", f.projectID))
+		assert.Empty(t, lossChecksFor(t, f.store, f.member.ID))
+		_, err := f.srv.uatService.ValidateToken(ctx, projTok)
+		assert.NoError(t, err, "no token is revoked by a refused leave")
+
+		// The dry run gives the same refusal.
+		rec = leaveAs(t, f.srv, f.member, f.projectID, true)
+		require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	})
+}
+
+// TestProjectLeave_CatalogListsConflictDenial (review O2): the leave's
+// catalog entry lists the conflict denial, the code of both conflict
+// refusals (a constraint-admin binding that appeared after the pre-read,
+// and admission through the caller's own membership after the leave).
+func TestProjectLeave_CatalogListsConflictDenial(t *testing.T) {
+	assert.Equal(t, string(authzop.DenialConflict), ErrCodeConflict)
+	found := false
+	for _, spec := range authzop.Catalog {
+		if spec.ID != "project.membership.leave" {
+			continue
+		}
+		found = true
+		assert.Contains(t, spec.DenialCodes, authzop.DenialConflict)
+	}
+	assert.True(t, found, "the leave operation is in the catalog")
 }
 
 // TestProjectLeave_UnclassifiedFailsClosed (R3, 6a): a caller binding the
