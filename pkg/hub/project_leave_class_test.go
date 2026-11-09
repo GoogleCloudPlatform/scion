@@ -200,3 +200,22 @@ func TestLeaveBindingClass_GuardUnclassified(t *testing.T) {
 	assert.Equal(t, want, got,
 		"a principal-type, scope-type or project-role constant changed in pkg/store: classify it in leaveBindingClass, then update the golden list")
 }
+
+// TestRemoveProjectBindingsTx_CallersPinned (review O7): the governed
+// remove step is exempt in the mutation classification because exactly two
+// callers run their governance and take the membership locks before it.
+// Every reference to it in pkg/hub must be in RemoveMember or LeaveProject,
+// so a new caller fails here until it is reviewed and classified.
+func TestRemoveProjectBindingsTx_CallersPinned(t *testing.T) {
+	var refs []string
+	walkPkgHubFuncs(t, func(file string, fn *ast.FuncDecl, _ *token.FileSet) {
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			if id, ok := n.(*ast.Ident); ok && id.Name == "removeProjectBindingsTx" {
+				refs = append(refs, file+":"+fn.Name.Name)
+			}
+			return true
+		})
+	})
+	sort.Strings(refs)
+	assert.Equal(t, []string{"project_leave.go:LeaveProject", "project_membership_service.go:RemoveMember"}, refs)
+}

@@ -670,6 +670,59 @@ func TestProjectLeave_ConstraintAdminLockout(t *testing.T) {
 	assert.Len(t, directProjectBindings(t, s, users[0], projectID), 2)
 }
 
+// TestProjectLeave_ConstraintAdminAfterPreReadConflicts (review O3): a
+// constraint-admin binding the pre-read did not see, found by the re-read
+// under the project lock, refuses the leave with 409 conflict. The admin
+// guard lock is never taken (it would be out of order after the project
+// lock), and nothing changes.
+func TestProjectLeave_ConstraintAdminAfterPreReadConflicts(t *testing.T) {
+	ctx := context.Background()
+	srv, s := testServer(t)
+	enableProjectLeave(t, srv)
+	srv.membershipService.onMembershipLoss = nil
+	projectID, users, bindings := lockoutProjectAdmins(t, s, "leave-late-guard", 2)
+	memberRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	require.NoError(t, err)
+	grpBind(t, s, store.RoleBindingPrincipalUser, users[0], memberRD.ID, projectID)
+	u, err := s.GetUser(ctx, users[0])
+	require.NoError(t, err)
+	before := directProjectBindings(t, s, users[0], projectID)
+	require.Len(t, before, 2)
+
+	// The pre-read does not see the constraint-admin binding (it reads as
+	// excluded the first time); the re-read under the lock does.
+	reads := 0
+	origClass := leaveBindingClassFunc
+	leaveBindingClassFunc = func(rb *store.RoleBinding, rd *store.RoleDefinition, pid, cid string) leaveClass {
+		if rb != nil && rb.ID == bindings[0].ID {
+			reads++
+			if reads == 1 {
+				return leaveClassExcluded
+			}
+		}
+		return origClass(rb, rd, pid, cid)
+	}
+	t.Cleanup(func() { leaveBindingClassFunc = origClass })
+	locks := 0
+	origLock := leaveLockAdminGuard
+	leaveLockAdminGuard = func(ctx context.Context, st store.Store) error {
+		locks++
+		return origLock(ctx, st)
+	}
+	t.Cleanup(func() { leaveLockAdminGuard = origLock })
+
+	rec := leaveAs(t, srv, u, projectID, false)
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	code, _ := leaveErrorBody(t, rec)
+	assert.Equal(t, ErrCodeConflict, code)
+	assert.Equal(t, 2, reads, "the binding was classified by the pre-read and by the re-read")
+	assert.Zero(t, locks, "no admin guard lock is taken after the project lock")
+	assert.Equal(t, before, directProjectBindings(t, s, users[0], projectID))
+	requireBindingExists(t, s, bindings[0].ID, true)
+	assert.Zero(t, countAudits(t, s, "project_member_leave", projectID))
+	assert.Empty(t, lossChecksFor(t, s, users[0]))
+}
+
 // TestProjectLeave_DryRunAgentsCapped (R4): with more than 50 rooted
 // agents the dry run lists exactly 50 items, sets truncated and keeps the
 // count exact; each item has exactly the keys id, name and phase.

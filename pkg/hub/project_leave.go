@@ -287,7 +287,7 @@ func (svc *ProjectMembershipService) LeaveProject(ctx context.Context, actor Use
 	var result *LeaveResult
 	txErr := svc.store.WithTx(ctx, func(tx store.Store) error {
 		if len(guarded) > 0 {
-			if err := lockConstraintAdminGuard(ctx, tx); err != nil {
+			if err := leaveLockAdminGuard(ctx, tx); err != nil {
 				return err
 			}
 		}
@@ -482,6 +482,12 @@ func (svc *ProjectMembershipService) leaveBindingsFromStore(ctx context.Context,
 // leaveBindingClassFunc is the classifier LeaveProject uses; a variable so
 // a test can inject an unclassified binding (TestProjectLeave_UnclassifiedFailsClosed).
 var leaveBindingClassFunc = leaveBindingClass
+
+// leaveLockAdminGuard takes the constraint admin guard lock for a leave
+// whose pre-read found a constraint-admin binding (lockConstraintAdminGuard).
+// A variable so a test can see that a binding appearing after the pre-read
+// is refused without taking the lock out of order.
+var leaveLockAdminGuard = lockConstraintAdminGuard
 
 // leaveGroupRef is one group of a group-derived refusal.
 type leaveGroupRef struct {
