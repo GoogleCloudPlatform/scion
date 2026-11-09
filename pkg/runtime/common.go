@@ -1810,21 +1810,106 @@ func isImageNotFoundOutput(output string) bool {
 		strings.Contains(lower, "image not found")
 }
 
+// runSimpleCommand runs command and returns its trimmed standard output.
+// Standard error is captured apart, so a warning the CLI writes there (for
+// example podman's "The input device is not a TTY" under "run -t") never
+// becomes part of a value a caller parses, such as a container ID. On
+// failure the returned string is standard output followed by standard
+// error, for callers that classify the failure by its text, and the error
+// carries the tail of standard error (commandError).
 func runSimpleCommand(ctx context.Context, command string, args ...string) (string, error) {
 	// Log the command name and argument count only — never the argument values.
 	// On this tier, secrets travel in argv (--env KEY=VALUE), so logging the
 	// full command string would write credentials to logs.  See #127 / P5.
 	runtimeLog().Debug("Executing command", "cmd", command, "argc", len(args))
+	return runCommand(ctx, commandIO{}, command, args...)
+}
+
+// runCombinedCommand runs command and returns its trimmed standard output
+// and standard error interleaved, as written. It is for output shown to a
+// person rather than parsed: container logs, and an exec's output.
+func runCombinedCommand(ctx context.Context, command string, args ...string) (string, error) {
+	runtimeLog().Debug("Executing command", "cmd", command, "argc", len(args))
+	return runCommand(ctx, commandIO{combined: true}, command, args...)
+}
+
+// commandIO is how runCommand connects a child: stdin (nil for none),
+// extra environment entries, and whether stdout and stderr share one
+// buffer (combined) or are captured apart.
+type commandIO struct {
+	stdin    io.Reader
+	env      []string
+	combined bool
+}
+
+// commandStderrInErrorMax bounds the standard error a returned error
+// carries. The end is kept: a CLI prints its reason last.
+const commandStderrInErrorMax = 2048
+
+// runCommand is the shared body of the run*Command helpers. The caller
+// logs the start; runCommand logs completion or failure.
+func runCommand(ctx context.Context, cio commandIO, command string, args ...string) (string, error) {
 	start := time.Now()
 	cmd := exec.CommandContext(ctx, command, args...)
-	out, err := cmd.CombinedOutput()
+	if cio.stdin != nil {
+		cmd.Stdin = cio.stdin
+	}
+	if len(cio.env) > 0 {
+		// exec keeps the last entry of a repeated name, so these win.
+		cmd.Env = append(os.Environ(), cio.env...)
+	}
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	if cio.combined {
+		cmd.Stderr = &stdout
+	} else {
+		cmd.Stderr = &stderr
+	}
+	err := cmd.Run()
 	elapsed := time.Since(start)
 	if err != nil {
+		out := joinCommandOutput(stdout.Bytes(), stderr.Bytes())
 		logCommandFailure(ctx, command, len(args), elapsed, out)
-		return string(out), fmt.Errorf("%s failed: %w", command, err)
+		// combined output (logs, exec) is the caller's to show; its error
+		// stays the plain one, as runSandboxExec's does
+		return string(out), commandError(ctx, command, err, stderr.Bytes())
 	}
 	runtimeLog().Debug("Command completed", "cmd", command, "argc", len(args), "duration", elapsed)
-	return strings.TrimSpace(string(out)), nil
+	return strings.TrimSpace(stdout.String()), nil
+}
+
+// joinCommandOutput is stdout followed by stderr, with a newline between
+// them when stdout does not end in one.
+func joinCommandOutput(stdout, stderr []byte) []byte {
+	if len(stdout) == 0 {
+		return stderr
+	}
+	if len(stderr) == 0 {
+		return stdout
+	}
+	out := make([]byte, 0, len(stdout)+len(stderr)+1)
+	out = append(out, stdout...)
+	if stdout[len(stdout)-1] != '\n' {
+		out = append(out, '\n')
+	}
+	return append(out, stderr...)
+}
+
+// commandError wraps a failed command's error. It names the command, never
+// its arguments (see runSimpleCommand), and appends the tail of its
+// standard error, so the reason reaches the caller rather than only the
+// debug log. Standard error is left out under WithSensitiveExec, whose
+// callers' output must not reach returned errors.
+func commandError(ctx context.Context, command string, err error, stderr []byte) error {
+	trimmed := bytes.TrimSpace(stderr)
+	if len(trimmed) == 0 || IsSensitiveExec(ctx) {
+		return fmt.Errorf("%s failed: %w", command, err)
+	}
+	msg := string(trimmed)
+	if len(trimmed) > commandStderrInErrorMax {
+		msg = "..." + strings.ToValidUTF8(string(trimmed[len(trimmed)-commandStderrInErrorMax:]), "")
+	}
+	return fmt.Errorf("%s failed: %w: %s", command, err, msg)
 }
 
 // stdoutCommandTimeout bounds runStdoutCommand. A variable so tests can
@@ -1882,22 +1967,13 @@ func logCommandFailure(ctx context.Context, command string, argc int, elapsed ti
 // runSimpleCommandWithStdin is runSimpleCommand's counterpart for callers
 // that need to deliver data to the child process over stdin rather than
 // argv (see #1355 — secrets embedded in argv leak via /proc/<pid>/cmdline
-// for the lifetime of the exec). It never logs the piped content.
+// for the lifetime of the exec). It never logs the piped content. Output
+// is handled as in runSimpleCommand.
 func runSimpleCommandWithStdin(ctx context.Context, stdin io.Reader, command string, args ...string) (string, error) {
 	// Log the command name and argument count only — see runSimpleCommand
 	// comment above. The stdin payload is never logged.
 	runtimeLog().Debug("Executing command with stdin", "cmd", command, "argc", len(args))
-	start := time.Now()
-	cmd := exec.CommandContext(ctx, command, args...)
-	cmd.Stdin = stdin
-	out, err := cmd.CombinedOutput()
-	elapsed := time.Since(start)
-	if err != nil {
-		logCommandFailure(ctx, command, len(args), elapsed, out)
-		return string(out), fmt.Errorf("%s failed: %w", command, err)
-	}
-	runtimeLog().Debug("Command completed", "cmd", command, "argc", len(args), "duration", elapsed)
-	return strings.TrimSpace(string(out)), nil
+	return runCommand(ctx, commandIO{stdin: stdin}, command, args...)
 }
 
 // rollbackCancelledCreate best-effort removes a container that the daemon
@@ -2170,9 +2246,8 @@ func DockerSupportsHostGateway(ctx context.Context, command string) bool {
 
 // parseDockerServerVersion parses the leading "major.minor" of a Docker server
 // version string (e.g. "24.0.7" or "20.10.21"). It tolerates a leading "v"/"V"
-// prefix and scans line-by-line so daemon warnings or other noise mixed into the
-// command output (runSimpleCommand combines stdout and stderr) do not defeat the
-// probe.
+// prefix and scans line-by-line so noise in the command output does not defeat
+// the probe.
 func parseDockerServerVersion(v string) (major, minor int, ok bool) {
 	for _, line := range strings.Split(v, "\n") {
 		line = strings.TrimLeft(strings.TrimSpace(line), "vV")
@@ -2319,13 +2394,15 @@ func resolvedAuthEnvEntries(ra *api.ResolvedAuth, taken func(name string) bool) 
 //     so an empty telemetry value leaves a GetEnv value in place.
 //
 // It is nil without a harness. Reserved names are not filtered here: the
-// caller emits these entries before the runtime's reserved-name drop,
-// which covers every source.
+// caller emits these entries before the runtime's reserved-name drop
+// (reservedAgentEnvName, the staged blob markers; not
+// secret.IsReservedEnvTarget), which covers every source.
 //
 // A runtime may call it more than once per start: GetEnv and
-// GetTelemetryEnv are called twice per Cloud Run start (cloudRunHarnessEnv);
-// this assumes they are deterministic and side-effect free, as every
-// in-tree harness is.
+// GetTelemetryEnv are called twice per Cloud Run start (cloudRunHarnessEnv),
+// three times on a native "assign" start, which builds the instance once
+// more for its init firewall check; this assumes they are deterministic and
+// side-effect free, as every in-tree harness is.
 func harnessEnvEntries(cfg RunConfig, agentHome string) []string {
 	if cfg.Harness == nil {
 		return nil

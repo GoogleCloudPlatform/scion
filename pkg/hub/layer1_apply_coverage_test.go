@@ -261,7 +261,9 @@ func layer1LiveProbes(t *testing.T) map[string]layer1LiveProbe {
 		"server.hub.monitoring_dashboard_url": {section: "endpoints", doc: `{"monitoring_dashboard_url":"https://monitoring.example.com/d/1"}`,
 			observe: observeLocked(func(s *Server) any { return s.config.MonitoringDashboardURL })},
 		"server.hub.content_url": {section: "endpoints", doc: `{"content_url":"https://content.example.net"}`,
-			observe: func(s *Server, _ *OperationalSettings) any { return s.contentURLLiveValue() }},
+			observe: func(s *Server, _ *OperationalSettings) any { return s.contentURLLiveState().URL }},
+		"server.hub.content_url_allow_same_site": {section: "endpoints", doc: `{"content_url_allow_same_site":true}`,
+			observe: func(s *Server, _ *OperationalSettings) any { return s.contentURLAllowSameSiteLiveValue() }},
 
 		// github_app
 		"server.github_app":                  {section: "github_app", base: ghBase + `}`, doc: ghBase + `,"api_base_url":"https://ghe.example.com/api/v3"}`, observe: observeGitHubApp},

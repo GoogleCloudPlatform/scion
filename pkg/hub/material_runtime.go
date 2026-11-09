@@ -102,7 +102,8 @@ func (s *Server) materialRuntimePrecheck(ctx context.Context, ident AgentIdentit
 
 	// Check 5: root human live authority. Admission is project membership
 	// (CheckEffectiveMembership: any active project-scoped binding, built-in
-	// or custom, direct or group-derived) OR target-applicable system
+	// or custom, direct or group-derived, other than the
+	// project-viewer role alone) OR target-applicable system
 	// authority for the exact secret.use permission (SystemAuthorityProof).
 	// Membership is admission only: the check-7 project.secret_read
 	// permission still gates every read, so a custom-only member without
@@ -127,7 +128,8 @@ func (s *Server) materialRuntimePrecheck(ctx context.Context, ident AgentIdentit
 	if m.Err != nil {
 		return nil, ReasonBackendError, http.StatusInternalServerError
 	}
-	admitted := m.IsMember
+	// The project-viewer role alone does not admit (ptone/scion#5519).
+	admitted := m.AdmitsBeyondViewer()
 	if !admitted {
 		if s.authzService == nil {
 			return nil, ReasonBackendError, http.StatusInternalServerError

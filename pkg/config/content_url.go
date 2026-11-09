@@ -31,6 +31,14 @@ import (
 // key through this constant.
 const ContentURLKey = "server.hub.content_url"
 
+// ContentURLAllowSameSiteKey is the settings key of the override that lets
+// server.hub.content_url be on the hub's registrable domain (ptone/scion#7107
+// phase B item 1). Without it such a value is refused on save and ignored at
+// runtime, because a content host on the hub's registrable domain is not a
+// separate security origin for cookies; the supported setup is a content host
+// on a different registrable domain.
+const ContentURLAllowSameSiteKey = "server.hub.content_url_allow_same_site"
+
 // ValidateContentURL checks a server.hub.content_url value and returns it
 // normalized, or "" for an empty value (no content host).
 //
@@ -158,9 +166,13 @@ func ParseContentURL(raw string) (ContentURLParts, bool) {
 // hub would confine its own host to the content routes, and a second port
 // on the same host gives no cookie isolation. sameSite is true when both
 // hosts share a registrable domain (eTLD+1, best effort from the public
-// suffix list): such a value is accepted with a warning, because a content
-// host under the hub's site isolates little. An invalid content URL, or a
-// hub URL with no host, conflicts with nothing.
+// suffix list): such a value is refused unless ContentURLAllowSameSiteKey is
+// set; with the override it is accepted and logs a warning, because a content
+// host on the hub's registrable domain is not a separate security origin for
+// cookies; the supported setup is a different registrable domain. Two hosts
+// under a public suffix (a.github.io and b.github.io) are not the same
+// registrable domain. An invalid content URL, or a hub URL with no host,
+// conflicts with nothing.
 func ContentURLHubConflict(contentURL, hubPublicURL string) (sameHost, sameSite bool) {
 	c, ok := ParseContentURL(contentURL)
 	if !ok {

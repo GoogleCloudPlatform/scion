@@ -974,8 +974,8 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 	authzIn := a.inputsFor(ctx, principal.Identity)
 	principals, err := authzIn.Principals()
 	if err != nil {
-		a.logger.Warn("failed to resolve authorization principals",
-			"principal_id", principal.ID, "error", err)
+		logAuthzCheckFault(ctx, a.logger, "principals", "failed to resolve authorization principals", err,
+			"principal_id", principal.ID)
 		errMsg := "principal resolution error: " + err.Error()
 		if request.Explain {
 			resolutionErrors = append(resolutionErrors, errMsg)
@@ -1017,8 +1017,8 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 	// ── Step 3: Load active role bindings (batched) ───────────────────
 	bindings, err := authzIn.Bindings()
 	if err != nil {
-		a.logger.Warn("failed to load role bindings",
-			"principal_id", principal.ID, "error", err)
+		logAuthzCheckFault(ctx, a.logger, "role_bindings", "failed to load role bindings", err,
+			"principal_id", principal.ID)
 		errMsg := "binding resolution error: " + err.Error()
 		if request.Explain {
 			resolutionErrors = append(resolutionErrors, errMsg)
@@ -1041,8 +1041,8 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 	// ── Step 4: Load role definitions ─────────────────────────────────
 	roleDefs, err := authzIn.RoleDefs()
 	if err != nil {
-		a.logger.Warn("failed to load role definitions",
-			"principal_id", principal.ID, "error", err)
+		logAuthzCheckFault(ctx, a.logger, "role_definitions", "failed to load role definitions", err,
+			"principal_id", principal.ID)
 		errMsg := "role resolution error: " + err.Error()
 		if request.Explain {
 			resolutionErrors = append(resolutionErrors, errMsg)
@@ -2901,7 +2901,9 @@ func activeDirectProjectRoles(ctx context.Context, st store.Store, authz *AuthzS
 		// Callers decide membership and ownership from these names, so a
 		// role that does not confer membership (project-visitor) is left
 		// out.
-		if rd.ConfersProjectMembership() {
+		// Only built-in membership roles (system rows) are named: a custom
+		// role that holds a built-in name is not one (ptone/scion#5519).
+		if rd.ConfersProjectMembership() && store.IsBuiltInProjectMembershipRoleDef(rd) {
 			roles[rd.Name] = true
 		}
 	}
@@ -2956,7 +2958,7 @@ func (a *AuthzService) isProjectOwnerOrAdmin(ctx context.Context, userID, projec
 		if err != nil {
 			continue
 		}
-		if rd.Name == store.ProjectRoleOwner || rd.Name == store.ProjectRoleAdmin {
+		if rd.System && (rd.Name == store.ProjectRoleOwner || rd.Name == store.ProjectRoleAdmin) {
 			return true
 		}
 	}

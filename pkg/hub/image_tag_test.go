@@ -44,6 +44,16 @@ func setImageTagExperiment(t *testing.T, ops *OperationalSettings, on bool) {
 	require.NoError(t, err)
 }
 
+// setImageTagOverrides stores exactly these experiment overrides; every
+// other experiment follows its registry default.
+func setImageTagOverrides(t *testing.T, ops *OperationalSettings, overrides map[string]bool) {
+	t.Helper()
+	doc, err := json.Marshal(map[string]map[string]bool{"overrides": overrides})
+	require.NoError(t, err)
+	_, err = ops.Update(context.Background(), "experiments", json.RawMessage(doc), "test", ops.SectionRevision("experiments"), "managed")
+	require.NoError(t, err)
+}
+
 // setTestImageTagFileTier sets this replica's settings-file tier of
 // image_tag (its bootstrap merge) on ops.
 func setTestImageTagFileTier(t *testing.T, ops *OperationalSettings, top string, profiles map[string]string) {
@@ -180,6 +190,66 @@ func TestDispatchImageTagFor_Profile(t *testing.T) {
 	assert.Equal(t, "file-top", srv.dispatchImageTagFor("colocated", ""), "a default profile outside the catalog has no profile layers")
 }
 
+// TestImageTag_VersionDefault: with image_tag unset, a release build of the
+// hub applies its own version (hub.image_tag_version_default, on by
+// default), even while hub.image_tag_setting is off; any other build
+// leaves images unchanged.
+func TestImageTag_VersionDefault(t *testing.T) {
+	srv, _, ops := newTestDBServer(t)
+
+	for _, v := range []string{"v0.3.0", "v0.3.0-preview.5", "v0.3.0-rc.1"} {
+		setTestVersion(t, v)
+		assert.Equal(t, v, srv.hubScopeImageTag(), "a release build uses its version: %s", v)
+		assert.Equal(t, v, srv.dispatchImageTagFor("", ""), "dispatch carries the version: %s", v)
+	}
+	setTestVersion(t, "v0.3.0-preview.5")
+	short, resolved := srv.hubScopeImageRefs("scion-claude:latest", "ghcr.io/homebrew-scion")
+	assert.Equal(t, "scion-claude:v0.3.0-preview.5", short)
+	assert.Equal(t, "ghcr.io/homebrew-scion/scion-claude:v0.3.0-preview.5", resolved)
+
+	for _, v := range []string{"", "dev", "nightly-20261105", "v0.3.0-dirty", "v0.0.0-20261108002803-39f9e3d31e76"} {
+		setTestVersion(t, v)
+		assert.Equal(t, "", srv.hubScopeImageTag(), "not a release build, images keep latest: %q", v)
+		assert.Equal(t, "", srv.dispatchImageTagFor("", ""), "no dispatch tag: %q", v)
+	}
+
+	setTestVersion(t, "v0.3.0")
+	setImageTagOverrides(t, ops, map[string]bool{experiments.ImageTagVersionDefault: false})
+	assert.Equal(t, "", srv.hubScopeImageTag(), "the version default can be turned off")
+	assert.Equal(t, "", srv.dispatchImageTagFor("", ""), "off: no dispatch tag")
+}
+
+// TestImageTag_ExplicitValueWinsOverVersionDefault: a set image_tag always
+// wins over the version default; with hub.image_tag_setting off it applies
+// nothing and suppresses the default, so image_tag latest opts out.
+func TestImageTag_ExplicitValueWinsOverVersionDefault(t *testing.T) {
+	srv, _, ops := newTestDBServer(t)
+	setTestVersion(t, "v0.3.0")
+	setTestImageTagFileTier(t, ops, "latest", nil)
+	assert.Equal(t, "", srv.hubScopeImageTag(), "a set value suppresses the default while the setting is off")
+	assert.Equal(t, "", srv.dispatchImageTagFor("", ""))
+
+	setImageTagExperiment(t, ops, true)
+	assert.Equal(t, "latest", srv.hubScopeImageTag(), "the explicit value applies")
+
+	srv.config.NodeImageTag = "v0.2.9"
+	assert.Equal(t, "v0.2.9", srv.hubScopeImageTag(), "an explicit older tag wins over the version")
+}
+
+// TestLogImageTag_VersionDefault: the startup line records the version
+// default and the tag it applies, with no warning.
+func TestLogImageTag_VersionDefault(t *testing.T) {
+	buf := captureImageRegistrySlog(t)
+	srv, _, _ := newTestDBServer(t)
+	setTestVersion(t, "v0.3.0-preview.5")
+	srv.LogImageTag()
+	out := buf.String()
+	assert.Contains(t, out, "source=unset")
+	assert.Contains(t, out, "version_default=true")
+	assert.Contains(t, out, "tag=v0.3.0-preview.5")
+	assert.NotContains(t, out, "experiment is off")
+}
+
 // TestLogImageTag_StartupAndChange (R6-F1): the hub logs the resolved
 // value and its source once at startup, then only when a settings apply
 // changes it; nothing is logged for a change before the startup line.
@@ -243,6 +313,53 @@ func TestLogImageTag_InvalidValueWarns(t *testing.T) {
 	assert.Contains(t, buf.String(), "level=WARN")
 	assert.Contains(t, buf.String(), "the value is invalid and is ignored")
 	assert.Equal(t, "", srv.hubScopeImageTag())
+}
+
+// TestLogImageTag_ExperimentOffLevel (ptone/scion#7541): with
+// hub.image_tag_setting off, image_tag latest everywhere it is set, the
+// documented opt-out from the version default, is logged at Info; any
+// other set value, alone or next to latest, keeps the warning.
+func TestLogImageTag_ExperimentOffLevel(t *testing.T) {
+	const optOut = `level=INFO msg="image_tag is latest, the opt-out from the version default: agent images keep their tags (latest); hub.image_tag_setting is off"`
+	const warn = `level=WARN msg="image_tag is set but the hub.image_tag_setting experiment is off; the value is ignored`
+	tests := []struct {
+		name     string
+		env      string
+		top      string
+		profiles map[string]string
+		managed  string // a saved hub profiles section, stored as a managed row
+		optOut   bool
+	}{
+		{name: "file top latest", top: "latest", optOut: true},
+		{name: "env latest", env: "latest", optOut: true},
+		{name: "file profile latest", profiles: map[string]string{"k8s": "latest"}, optOut: true},
+		{name: "file top non-latest", top: "v0.3.0"},
+		{name: "latest next to a non-latest profile", top: "latest", profiles: map[string]string{"k8s": "v1"}},
+		{name: "file top latest next to a saved hub profile v1", top: "latest", managed: `{"k8s":{"runtime":"kubernetes","image_tag":"v1"}}`},
+		{name: "saved hub profile latest only", managed: `{"k8s":{"runtime":"kubernetes","image_tag":"latest"}}`, optOut: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			buf := captureImageRegistrySlog(t)
+			srv, _, ops := newTestDBServer(t)
+			setTestImageTagFileTier(t, ops, tt.top, tt.profiles)
+			if tt.managed != "" {
+				_, err := ops.Update(context.Background(), "profiles", json.RawMessage(tt.managed), "admin", -1, "managed")
+				require.NoError(t, err)
+			}
+			srv.config.NodeImageTag = tt.env
+			srv.LogImageTag()
+			out := buf.String()
+			if tt.optOut {
+				assert.Contains(t, out, optOut)
+				assert.NotContains(t, out, "level=WARN")
+				assert.NotContains(t, out, "experiment is off")
+				return
+			}
+			assert.Contains(t, out, warn)
+			assert.NotContains(t, out, "the opt-out")
+		})
+	}
 }
 
 // TestProfilesSaveSetsImageTag: a save sets image_tag when a profile's

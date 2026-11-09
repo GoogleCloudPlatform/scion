@@ -376,7 +376,9 @@ func (s *Server) resolveSenderAgent(ctx context.Context, msg *store.Message) *st
 // an account whose email no longer matches the assignment answer
 // GCSLinkReasonNoSA; an unverified account or a hub-scoped account without
 // the enforce check mode answer GCSLinkReasonSANotAdmissible; a store error
-// answers GCSLinkReasonSALookupFailed. The caller answers every one of them
+// answers GCSLinkReasonSALookupFailed. A natively assigned Cloud Run agent
+// (agentCloudRunNativelyAssigned) answers GCSLinkReasonNativeIdentity: the
+// hub mints nothing with its account. The caller answers every one of them
 // with the same not-found response.
 func (s *Server) resolveCurrentSA(ctx context.Context, agent *store.Agent) (*store.GCPServiceAccount, GCSLinkFetchReason) {
 	if agent.AppliedConfig == nil || agent.AppliedConfig.GCPIdentity == nil {
@@ -385,6 +387,15 @@ func (s *Server) resolveCurrentSA(ctx context.Context, agent *store.Agent) (*sto
 	gcpID := agent.AppliedConfig.GCPIdentity
 	if gcpID.MetadataMode != store.GCPMetadataModeAssign || gcpID.ServiceAccountID == "" || gcpID.ServiceAccountEmail == "" {
 		return nil, GCSLinkReasonNoSA
+	}
+	native, err := s.agentCloudRunNativelyAssigned(ctx, agent)
+	if err != nil {
+		slog.WarnContext(ctx, "gcs link: checking the agent's Cloud Run identity failed",
+			"agent_id", agent.ID, "error", err)
+		return nil, GCSLinkReasonSALookupFailed
+	}
+	if native {
+		return nil, GCSLinkReasonNativeIdentity
 	}
 	sa, err := s.admissibleGCPServiceAccount(ctx, gcpID, agent.ProjectID, agent.RuntimeBrokerID)
 	switch {

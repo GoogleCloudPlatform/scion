@@ -41,6 +41,7 @@ import type { BrokerSettingsResponse, RuntimeBroker } from '../../shared/types.j
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { showConfirm } from '../shared/confirm-dialog.js';
 import { showToast } from '../../utils/toast.js';
+import { copyWithToast } from '../../utils/clipboard.js';
 import { navigateTo } from '../../client/navigation.js';
 import { brokerAreaStyles } from '../shared/broker-area-styles.js';
 import { effectiveLimitText, limitSourceLabel } from '../../shared/broker-capacity.js';
@@ -446,7 +447,7 @@ export class ScionBrokerAreaConfigure extends LitElement {
           <sl-icon-button
             name="clipboard"
             label="Copy the instance key"
-            @click=${() => void navigator.clipboard?.writeText(key)}
+            @click=${(): void => void copyWithToast(key)}
           ></sl-icon-button>
         </p>
       </div>

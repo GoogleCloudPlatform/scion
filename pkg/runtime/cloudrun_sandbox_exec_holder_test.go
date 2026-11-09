@@ -209,10 +209,11 @@ esac`, pidFile))
 }
 
 // TestSandboxExecHolder_NoHolderParity checks that, with no holder,
-// runSandboxExec returns exactly what the shared helpers return
-// (runSimpleCommand without stdin, runSimpleCommandWithStdin with it):
-// trimmed output on success, raw output and the same error text on
-// failure, stderr merged into the output in order, stdin delivered.
+// runSandboxExec returns exactly what the shared combined-output helper
+// returns (runCommand with commandIO.combined, as the Docker-family logs
+// and exec paths use): trimmed output on success, raw output and the same
+// error text on failure, stderr merged into the output in order, stdin
+// delivered.
 func TestSandboxExecHolder_NoHolderParity(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -236,9 +237,9 @@ func TestSandboxExecHolder_NoHolderParity(t *testing.T) {
 			var wantErr error
 			if tc.piped {
 				stdin = strings.NewReader(tc.stdin)
-				wantOut, wantErr = runSimpleCommandWithStdin(ctx, strings.NewReader(tc.stdin), bin, args...)
+				wantOut, wantErr = runCommand(ctx, commandIO{stdin: strings.NewReader(tc.stdin), combined: true}, bin, args...)
 			} else {
-				wantOut, wantErr = runSimpleCommand(ctx, bin, args...)
+				wantOut, wantErr = runCombinedCommand(ctx, bin, args...)
 			}
 			gotOut, gotErr := runSandboxExec(ctx, bin, stdin, args...)
 			if gotOut != wantOut {

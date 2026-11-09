@@ -85,17 +85,18 @@ Both environment variables and secrets support **Injection Modes**, which contro
 - **Always**: The variable or secret is injected into *every* agent started within that scope, regardless of whether it is explicitly requested.
 
 :::note[GITHUB_TOKEN and the Always mode]
-When you enter a GitHub token while creating a git-backed project in the web UI, the Hub saves it as a project-scoped `GITHUB_TOKEN` secret with `always` injection mode. The token has to be present in the first environment-resolution pass so that `sciontool init` can clone the repository in **Clone-per-agent** and **Worktree-per-agent** sharing modes. On startup, the Hub also runs a one-time migration that moves any existing `GITHUB_TOKEN` secret from `as_needed` to `always`. Secrets you set after that migration keep the mode you give them, so pass `--always` when you set `GITHUB_TOKEN` yourself.
+When you enter a GitHub token while creating a git-backed project in the web UI, the Hub saves it as a project-scoped `GITHUB_TOKEN` secret with `always` injection mode. The token has to be present in the first environment-resolution pass so that `sciontool init` can clone the repository in **Clone-per-agent** and **Worktree-per-agent** sharing modes. On startup, the Hub also runs a one-time migration that moves any existing `GITHUB_TOKEN` secret from `as_needed` to `always`. Secrets you set after that migration keep the mode you give them, so after you set `GITHUB_TOKEN` yourself, set its mode to `always` (for example, `scion hub secret update --project GITHUB_TOKEN --injection-mode always`).
 :::
 
-You can set the injection mode via the CLI using the `--always` flag:
+You can set the injection mode via the CLI using the `--always` flag of `scion hub env set` or the `--injection-mode` flag of `scion hub secret update`:
 
 ```bash
 # Set a variable to be always injected in a project
 scion hub env set --project --always LOG_LEVEL=debug
 
 # Set a secret to be always injected for a user
-scion hub secret set --always MY_GLOBAL_TOKEN secret-value
+scion hub secret set MY_GLOBAL_TOKEN secret-value
+scion hub secret update MY_GLOBAL_TOKEN --injection-mode always
 ```
 
 ### Propagation to Descendant Agents (Progeny)
@@ -104,19 +105,16 @@ When an agent creates child/sub-agents (referred to as **progeny**), they do not
 
 You can enable progeny propagation in two ways:
 
-1. **Per-secret**: Use the `--allow-progeny` flag when setting an individual secret or environment variable.
+1. **Per-secret**: Use the `--allow-progeny` flag when setting or updating an individual secret.
 2. **Hub-wide default**: Hub administrators can configure a hub-wide default so that newly created user-scoped secrets default to progeny-enabled. Individual secrets can still override this default. When no hub-wide default is set, `AllowProgeny` defaults to `false`.
 
-To explicitly enable propagation on a specific secret or variable, use the `--allow-progeny` flag:
+To explicitly enable propagation on a specific secret, use the `--allow-progeny` flag:
 
 * **User-Scoped Secrets**: Can be marked for progeny propagation at any time.
   ```bash
   scion hub secret set --allow-progeny MY_PERSONAL_TOKEN token-value
   ```
-* **User-Scoped Environment Variables**: Can only be marked for progeny propagation if their injection mode is set to `always`.
-  ```bash
-  scion hub env set --always --allow-progeny PERSONAL_ENV=value
-  ```
+* **User-Scoped Environment Variables**: Can only be marked for progeny propagation if their injection mode is set to `always`. Progeny propagation for environment variables cannot currently be set from the CLI: `scion hub env set` has no `--allow-progeny` flag.
 
 #### How it Works Under the Hood
 Enabling progeny propagation dynamically registers implicit access policies (e.g. `progeny-secret-access:<id>` or `progeny-envvar-access:<id>`) on the Scion Hub. When an agent starts, restarts, or resumes (including `as_needed` secret resolution) or reads secrets at runtime, Scion walks the calling agent's ancestry and delegation chain: if the secret's owner is at the root of that ancestry tree and has enabled progeny permission, and — when the agent's delegation chain carries recorded provenance — every recorded delegation hop on the chain allows `secret.use`, every agent delegator on the chain is live and holds `project:secret:read`, and the root user is active, admitted to the project, not restricted from `secret.use` by an access constraint, and the recorded author of the secret, then the agent inherits the secret (if a user-scoped secret is withheld at start by this check, a lower-precedence project, Runtime Broker, or Hub secret with the same key still applies; see [Security & Audit Logging](#security--audit-logging)).
@@ -428,7 +426,8 @@ Convention-keyed GitHub secrets support the standard injection modes:
 - **Always**: The credential is also injected into the agent container as an environment variable (`GH_ACME_CORP__PRIVATE_SKILLS`). Use this when agents need runtime access to the same private repo.
 
   ```bash
-  scion hub secret set --project --always GH_ACME_CORP__PRIVATE_SKILLS github_pat_...
+  scion hub secret set --project GH_ACME_CORP__PRIVATE_SKILLS github_pat_...
+  scion hub secret update --project GH_ACME_CORP__PRIVATE_SKILLS --injection-mode always
   ```
 
 For more on injection modes, see [Injection Modes](#injection-modes) above.

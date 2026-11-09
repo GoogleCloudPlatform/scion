@@ -361,15 +361,59 @@ Other behaviour:
   never merged). Podman pushes record
   the registry digest (via `skopeo` when installed, else `podman push
   --digestfile`).
-- **`--channel-tag preview|stable`** is reserved for registry publishing and
-  is not implemented yet; passing it exits with an error.
+- **`--channel-tag preview|stable`** also points the channel tag at exactly
+  the images this run pushed: each `<image>:preview` or `<image>:stable` gets
+  the digest of that image's `:<version>`. The flag never touches `:latest`
+  and is refused together with `--also-tag latest`.
+  - It needs a registry path of the form `<host>[:<port>]/<path>` and pushed
+    images. Image names from the build's step list must be plain image names;
+    anything else stops the run, with nothing moved.
+  - The tag must match the channel: `preview` follows the preview channel
+    and needs `vX.Y.Z-preview.N` or `vX.Y.Z-rc.N`, and `stable` needs
+    `vX.Y.Z`. Nightly tags and `--ref` builds are refused before anything is
+    cloned.
+  - Every digest is verified, and each channel tag's current digest is read
+    and recorded, before the first channel tag moves. Only a lookup that
+    reports "not found" (or "manifest unknown") records "none"; any other
+    lookup failure stops the run with nothing moved. Docker uses `imagetools
+    create` from `<image>@<digest>`. Podman uses `tag` and `push`, and needs
+    `skopeo`, which reads every registry digest of a channel run (never a
+    push). Each moved tag is read back. Podman pushes the channel tags one
+    image at a time, so a failure at a later image leaves the earlier channel
+    tags moved: the recovery file below applies.
+  - A registry cannot move several tags at once. If a tag move or a
+    read-back fails part-way, the run stops and lists the tags already
+    moved. It writes the commands that point each of them back to its
+    recorded digest (for a tag that did not exist: a `tags delete` with
+    cloud-build, and a note for docker and podman) to
+    `<src-dir>/channel-recovery.XXXXXX`, which the driver never runs. No
+    `build-manifest.json` is written then.
+  - With `--builder cloud-build`, the registry must be an Artifact Registry
+    path, `<location>-docker.pkg.dev/<project>/<repository>`, where
+    `<location>` is `us`, `europe`, `asia` or a region such as `us-central1`.
+    The driver waits for the submitted builds with `gcloud builds describe`
+    (`--build-timeout`, default 14400s per build; `--wait-timeout`, default
+    21600s in total; both count 30s poll intervals only, so a `gcloud` call
+    that hangs is not bounded by them).
+  - It takes each digest from the builds' own results: `results.images`, or a
+    `<ref> sha256:<hex>` line per image in `results.buildStepOutputs`. It
+    requires `:<version>` to point to that digest, then runs `gcloud
+    artifacts docker tags add <image>@<digest> <image>:<channel>`.
+  - A failed build, a timeout or a missing result stops the run before any
+    channel tag moves. A release tree whose `cloudbuild*.yaml` files report
+    neither result stops at "no build-result digest".
+  - `build-manifest.json` then also records, per image, `tag_digest` (what
+    `:<version>` pointed to when checked) and `channel_ref`.
 
 ### Making agents use release images: `--also-tag latest`
 
-Agents run `scion-<harness>:latest` unless the `image_tag` setting (behind
-the `hub.image_tag_setting` experiment) selects another tag; `image_tag:
-version` selects the Hub's own version. Without it, add `--also-tag latest`
-so the release images are also tagged `:latest`:
+A release build of the Hub (`vX.Y.Z`, `vX.Y.Z-preview.N` or `vX.Y.Z-rc.N`)
+runs `scion-<harness>:<its version>` when `image_tag` is unset (the
+`hub.image_tag_version_default` experiment, on by default). Development and
+nightly builds run `scion-<harness>:latest`, unless the `image_tag` setting
+(behind the `hub.image_tag_setting` experiment) selects another tag. For
+those, or with `image_tag: latest`, add `--also-tag latest` so the release
+images are also tagged `:latest`:
 
 ```bash
 image-build/scripts/build-release-images.sh v0.3.0-preview.5 --also-tag latest

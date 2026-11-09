@@ -4687,6 +4687,107 @@ describe('scion-page-admin-server-config', () => {
     });
   });
 
+  // ── Content URL status row (ptone/scion#7107) ──
+
+  describe('Content URL status row (ptone/scion#7107)', () => {
+    function withContentUrl(contentUrl: string, status: Record<string, unknown> | undefined) {
+      const cfg = makeBaseConfig({ settings_tier: 'db', content_url_status: status }) as any;
+      cfg.server.hub.content_url = contentUrl;
+      return cfg;
+    }
+
+    function row(el: HTMLElement): Element | null {
+      const label = queryAll(el, 'label').find((l) => l.textContent?.trim() === 'Content URL');
+      return label ? label.closest('.form-field') : null;
+    }
+
+    it.each([
+      ['unset', '', {}, 'Not set', 'No content host'],
+      [
+        'in_effect',
+        'https://links.example.net',
+        { effective: 'https://links.example.net' },
+        'In effect',
+        'Shared artifacts are served from https://links.example.net.',
+      ],
+      ['ignored_invalid', 'ftp://links.example.net', {}, 'Ignored', 'The value is invalid'],
+      [
+        'refused_same_host',
+        'https://hub.example.com:8443',
+        {},
+        'Refused',
+        "on the hub's own host name",
+      ],
+      [
+        'ignored_same_site',
+        'https://links.example.com',
+        { override_key: 'server.hub.content_url_allow_same_site' },
+        'Ignored',
+        'or set server.hub.content_url_allow_same_site.',
+      ],
+      [
+        'ignored_agent_endpoint_host',
+        'https://agents.example.net',
+        {},
+        'Ignored',
+        'on the host name of server.hub.agent_endpoint',
+      ],
+    ])(
+      'shows the stored value, badge and reason for %s',
+      async (state, value, extra, badge, reason) => {
+        element = await createComponent(
+          createFetchHandler(withContentUrl(value, { state, ...extra }))
+        );
+        const f = row(element);
+        expect(f).not.toBeNull();
+        expect(f!.querySelector('sl-input')).toBeNull();
+        expect(f!.querySelector('.read-only-value')?.textContent).toContain(value || '—');
+        expect(f!.querySelector('sl-badge')?.textContent?.trim()).toBe(badge);
+        expect(f!.querySelector('.content-url-status-reason')?.textContent).toContain(reason);
+      }
+    );
+
+    it('is not shown when the hub reports no status', async () => {
+      element = await createComponent(createFetchHandler(withContentUrl('', undefined)));
+      expect(row(element)).toBeNull();
+    });
+
+    it('never sends content_url on save', async () => {
+      let captured: Record<string, unknown> | null = null;
+      element = await createComponent(
+        createFetchHandler(
+          withContentUrl('https://links.example.net', {
+            state: 'in_effect',
+            effective: 'https://links.example.net',
+          }),
+          {
+            putHandler: (body) => {
+              captured = body;
+              return { status: 200, body: { reload: { applied: [] } } };
+            },
+          }
+        )
+      );
+      (element as any).hubMonitoringDashboardUrl = 'https://dash.example.com/d';
+      (element as any).monitoringDashboardUrlTouched = true;
+      await (element as any).updateComplete;
+      await markDirty(element);
+      const saveBtn = queryAll(element, 'sl-button[variant="primary"]').find(
+        (b) => b.textContent?.trim() === 'Save & Reload'
+      );
+      (saveBtn as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      const body = captured as Record<string, unknown> | null;
+      expect(body).not.toBeNull();
+      expect(body).not.toHaveProperty('content_url_status');
+      const hub = ((body!.server as Record<string, unknown> | undefined)?.hub ?? {}) as Record<
+        string,
+        unknown
+      >;
+      expect(hub).not.toHaveProperty('content_url');
+    });
+  });
+
   // ── Public URL pinned state (ptone/scion#3905) ──
 
   describe('Public URL field (ptone/scion#3905)', () => {

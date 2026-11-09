@@ -558,6 +558,15 @@ type GCPIdentityConfig struct {
 	// behavior is unaffected. The JSON tag must match
 	// hub.RemoteGCPIdentityConfig's field of the same name.
 	RequireLocalRuntime bool `json:"require_local_runtime,omitempty"`
+
+	// NativeCloudRun is set by the hub on a create when it decides that the
+	// agent's Cloud Run instance runs natively as the assigned account
+	// (hub.cloudrun_native_identity). With the experiment on, a Cloud Run
+	// "assign" create without it is refused (cloudRunNativeMarked). It is
+	// read only on a create: start and restart carry the same decision as
+	// the resolved env key SCION_METADATA_NATIVE_CLOUDRUN. native_cloud_run
+	// is its wire name in the create request.
+	NativeCloudRun bool `json:"native_cloud_run,omitempty"`
 }
 
 // CreateAgentResponse is the response for creating an agent.

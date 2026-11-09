@@ -524,6 +524,7 @@ var testAdminSettingsKeyPolicy = map[string]testAdminPolicy{
 	"server.hub.public_url":                    testAdminPolicyDeny,
 	"server.hub.hub_name":                      testAdminPolicyDeny,
 	"server.hub.content_url":                   testAdminPolicyDeny,
+	"server.hub.content_url_allow_same_site":   testAdminPolicyDeny,
 	"image_registry":                           testAdminPolicyDeny,
 	"server.hub.monitoring_dashboard_url":      testAdminPolicyDeny,
 	"server.github_app":                        testAdminPolicyDeny,
@@ -589,6 +590,7 @@ var testAdminExperimentPolicy = map[string]testAdminPolicy{
 	experiments.UserDeleteForceCascade:       testAdminPolicyDeny,
 	experiments.ArtifactArchive:              testAdminPolicyDeny,
 	experiments.ImageTagSetting:              testAdminPolicyDeny,
+	experiments.ImageTagVersionDefault:       testAdminPolicyDeny,
 }
 
 // testAdminPolicyInputs are the vocabularies the classification must cover.
@@ -932,7 +934,9 @@ func (d *HTTPAgentDispatcher) testAdminRootScopes(ctx context.Context, agent *st
 	if agent.OwnerID == root {
 		allowed[store.ScopeUser] = true
 	}
-	if m := checkEffectiveMembership(ctx, d.store, d.authzService, root, agent.ProjectID); m.Err == nil && m.IsMember {
+	// Project-scope secrets are material: the project-viewer role
+	// alone does not admit them (ptone/scion#5519, AdmitsBeyondViewer).
+	if m := checkEffectiveMembership(ctx, d.store, d.authzService, root, agent.ProjectID); m.Err == nil && m.AdmitsBeyondViewer() {
 		allowed[store.ScopeProject] = true
 	}
 	return true, allowed, root

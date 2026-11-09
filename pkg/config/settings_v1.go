@@ -708,35 +708,58 @@ func readProjectOwnSettings(projectPath string) ([]byte, bool) {
 // read only from the broker's global settings. Best-effort: an unreadable
 // file returns false.
 func ProjectSettingsHasCloudRunAssignableServiceAccounts(projectPath, runtimeEntryName string) bool {
+	cr := projectOwnCloudRunBlock(projectPath, runtimeEntryName)
+	return cr != nil && len(cr.AssignableServiceAccounts) > 0
+}
+
+// ProjectSettingsHasCloudRunBlockServiceAccount reports whether a project's
+// OWN settings.yaml sets cloudrun.block_service_account on the named
+// runtime entry. Like ProjectSettingsHasCloudRunAssignableServiceAccounts it
+// exists only so a caller can warn that the setting has no effect there:
+// the block account is read only from the broker's global settings.
+// Best-effort: an unreadable file returns false.
+func ProjectSettingsHasCloudRunBlockServiceAccount(projectPath, runtimeEntryName string) bool {
+	cr := projectOwnCloudRunBlock(projectPath, runtimeEntryName)
+	return cr != nil && strings.TrimSpace(cr.BlockServiceAccount) != ""
+}
+
+// projectCloudRunProbe is the part of a runtime entry's cloudrun block that
+// the project-level probes read.
+type projectCloudRunProbe struct {
+	AssignableServiceAccounts []string `yaml:"assignable_service_accounts" json:"assignable_service_accounts"`
+	BlockServiceAccount       string   `yaml:"block_service_account" json:"block_service_account"`
+}
+
+// projectOwnCloudRunBlock returns the cloudrun block of the named runtime
+// entry in a project's OWN settings file (readProjectOwnSettings), or nil
+// when there is none or the file cannot be read or parsed.
+func projectOwnCloudRunBlock(projectPath, runtimeEntryName string) *projectCloudRunProbe {
 	if runtimeEntryName == "" {
-		return false
+		return nil
 	}
 	raw, ok := readProjectOwnSettings(projectPath)
 	if !ok {
-		return false
+		return nil
 	}
 	var probe struct {
 		Runtimes map[string]struct {
-			CloudRun *struct {
-				AssignableServiceAccounts []string `yaml:"assignable_service_accounts" json:"assignable_service_accounts"`
-			} `yaml:"cloudrun" json:"cloudrun"`
+			CloudRun *projectCloudRunProbe `yaml:"cloudrun" json:"cloudrun"`
 		} `yaml:"runtimes" json:"runtimes"`
 	}
 	if err := unmarshalSettingsYAML(raw, &probe); err != nil {
-		return false
+		return nil
 	}
-	rt, ok := probe.Runtimes[runtimeEntryName]
-	return ok && rt.CloudRun != nil && len(rt.CloudRun.AssignableServiceAccounts) > 0
+	return probe.Runtimes[runtimeEntryName].CloudRun
 }
 
 // CloudRunAssignableServiceAccountWarnings returns a warning for each entry
 // of runtimes.<runtimeEntryName>.cloudrun.assignable_service_accounts in vs
 // that, lower-cased and trimmed, does not match gsaEmailPattern (a Cloud
 // Run instance can only run as a service account), so a typo or a pasted
-// user email is reported where the list is read rather than only as a
-// refused dispatch. Each warning names the entry's position, never its
-// value. Entries are still compared case-insensitively and trimmed where
-// they are used.
+// user email is reported where the list is read. Such an entry still
+// matches an equal assigned value at the broker; the instance create then
+// fails. Each warning names the entry's position, never its value.
+// Entries are compared case-insensitively and trimmed where they are used.
 func CloudRunAssignableServiceAccountWarnings(vs *VersionedSettings, runtimeEntryName string) []string {
 	if vs == nil {
 		return nil
@@ -754,6 +777,27 @@ func CloudRunAssignableServiceAccountWarnings(vs *VersionedSettings, runtimeEntr
 		}
 	}
 	return warnings
+}
+
+// CloudRunBlockServiceAccountWarnings returns a warning when
+// runtimes.<runtimeEntryName>.cloudrun.block_service_account in vs is set
+// but, lower-cased and trimmed, does not match gsaEmailPattern. The warning
+// names the setting only, never its value.
+func CloudRunBlockServiceAccountWarnings(vs *VersionedSettings, runtimeEntryName string) []string {
+	if vs == nil {
+		return nil
+	}
+	entry, ok := vs.Runtimes[runtimeEntryName]
+	if !ok || entry.CloudRun == nil {
+		return nil
+	}
+	v := strings.ToLower(strings.TrimSpace(entry.CloudRun.BlockServiceAccount))
+	if v == "" || gsaEmailPattern.MatchString(v) {
+		return nil
+	}
+	return []string{fmt.Sprintf(
+		"runtimes.%s.cloudrun.block_service_account is not a service account email; a Cloud Run instance cannot run as it",
+		runtimeEntryName)}
 }
 
 // gsaEmailPattern matches a syntactically well-formed, lowercase GCP service
@@ -1711,6 +1755,11 @@ type V1ServerHubConfig struct {
 	// artifacts are served. Empty, the default, serves them on PublicURL.
 	// See ValidateContentURL.
 	ContentURL string `json:"content_url,omitempty" yaml:"content_url,omitempty" koanf:"content_url"`
+	// ContentURLAllowSameSite is server.hub.content_url_allow_same_site
+	// (ContentURLAllowSameSiteKey): the override that lets ContentURL be on
+	// PublicURL's registrable domain, which is refused without it. See
+	// ContentURLHubConflict.
+	ContentURLAllowSameSite *bool `json:"content_url_allow_same_site,omitempty" yaml:"content_url_allow_same_site,omitempty" koanf:"content_url_allow_same_site"`
 	// HubClass is server.hub.class (see HubServerConfig.HubClass). It is
 	// file/env only: the server-config API refuses it in every mode.
 	HubClass string `json:"class,omitempty" yaml:"class,omitempty" koanf:"class"`
@@ -2837,6 +2886,17 @@ type CloudRunConfig struct {
 	// ProjectSettingsHasCloudRunAssignableServiceAccounts). Empty or unset
 	// means no account is attachable, so "assign" is refused.
 	AssignableServiceAccounts []string `json:"assignable_service_accounts,omitempty" yaml:"assignable_service_accounts,omitempty" koanf:"assignable_service_accounts"`
+
+	// BlockServiceAccount is the service account, holding no roles, that
+	// this Runtime Broker runs a Cloud Run instance as for GCP identity mode
+	// "block" (and for an unset mode, which is block on Cloud Run) while the
+	// hub.cloudrun_native_identity experiment is on. It is read from the
+	// broker's global settings only: the same key in a project's own
+	// settings.yaml is ignored (see
+	// ProjectSettingsHasCloudRunBlockServiceAccount). Empty or unset means
+	// such a dispatch is refused; the runtime's own service_account is never
+	// used in its place.
+	BlockServiceAccount string `json:"block_service_account,omitempty" yaml:"block_service_account,omitempty" koanf:"block_service_account"`
 }
 
 // V1CloudRunInstancesConfig holds Cloud Run Instances runtime settings.
@@ -4319,6 +4379,9 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		if v1.Hub.ContentURL != "" {
 			gc.Hub.ContentURL = v1.Hub.ContentURL
 		}
+		if v1.Hub.ContentURLAllowSameSite != nil {
+			gc.Hub.ContentURLAllowSameSite = *v1.Hub.ContentURLAllowSameSite
+		}
 		if v1.Hub.AgentEndpoint != "" {
 			gc.Hub.AgentEndpoint = v1.Hub.AgentEndpoint
 		}
@@ -4882,6 +4945,10 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	}
 	if gc.Hub.StartCreateUnconfirmedHold > 0 {
 		v1Hub.StartCreateUnconfirmedHold = gc.Hub.StartCreateUnconfirmedHold.String()
+	}
+	if gc.Hub.ContentURLAllowSameSite {
+		allowSameSite := true
+		v1Hub.ContentURLAllowSameSite = &allowSameSite
 	}
 	if gc.Hub.SoftDeleteRetainFiles {
 		retainFiles := true

@@ -191,7 +191,7 @@ func resolveSeedGitlink(workspace, p string, dirs []seedAdminDir) (target, wt st
 	comps := strings.Split(p, "/")
 	cur := workspace
 	for _, c := range comps {
-		if c == "" || c == "." || c == ".." || isDotGitComponent(c) {
+		if c == "" || c == "." || c == ".." || IsDotGitComponent(c) {
 			return "", "", refuseGitlink(p, "a submodule git link with an unsafe path component")
 		}
 		cur = filepath.Join(cur, c)
@@ -388,7 +388,7 @@ func checkSeedModuleWorktree(d seedAdminDir, value, ref string, referenced bool,
 			return false
 		}
 		for _, c := range strings.Split(filepath.ToSlash(rel), "/") {
-			if isDotGitComponent(c) {
+			if IsDotGitComponent(c) {
 				return false
 			}
 		}
@@ -418,9 +418,9 @@ func checkSeedModuleWorktree(d seedAdminDir, value, ref string, referenced bool,
 	return true
 }
 
-// isDotGitComponent reports whether a path component names .git, ignoring
-// case and trailing dots and spaces.
-func isDotGitComponent(c string) bool {
+// IsDotGitComponent reports whether a single path component names .git,
+// ignoring case and trailing dots and spaces.
+func IsDotGitComponent(c string) bool {
 	return strings.EqualFold(strings.TrimRight(c, ". "), ".git")
 }
 

@@ -569,6 +569,37 @@ the ordinary env rules on this page.
   explicit value and to the project annotation, and it beats the hub default.
 :::
 
+### A7. The runtime adds its own sources around the merged environment
+
+The variables resolved above reach the Runtime Broker as the agent's merged environment. The
+runtime then adds its own sources. On Docker, Podman, Apple containers and Kubernetes it applies
+them in this order, and for a name set by more than one source the later source wins:
+
+1. resolved-auth env, the values the harness-config's auth method resolves;
+2. the harness env, then the harness telemetry env when telemetry is enabled;
+3. the merged environment;
+4. environment-type secrets, except for a name the merged environment sets (see
+   [A5](#a5-secrets-use-the-same-scope-order-variables-beat-environment-type-secrets));
+5. the runtime's own keys, for example `SCION_HOST_UID`, `SCION_HOST_GID`, `HOME`, `USER` and
+   `LOGNAME` on Kubernetes.
+
+An empty value from resolved auth, the harness env or the telemetry env is not applied, so it does
+not clear a value an earlier source set. [Template env](#template-env-is-a-lowest-precedence-fallback)
+then fills only names that no source set.
+
+The runtimes differ in their own keys and in when they apply resolved-auth env:
+
+- Docker, Podman and Apple containers set `SCION_HOST_UID`, `SCION_HOST_GID`, `SCION_PROJECT`,
+  `SCION_PROJECT_ID` and `SCION_WORKSPACE_BACKEND` before the merged environment, so a
+  merged-environment value for one of those names is used. Only the runtime sets
+  `SCION_METADATA_INTERCEPTION` and `SCION_SUPPLEMENTAL_GIDS`; a merged-environment or secret value
+  for them is dropped. These runtimes apply resolved-auth env only when the agent has a harness.
+- Kubernetes sets `SCION_HOST_UID`, `SCION_HOST_GID`, `HOME`, `USER`, `LOGNAME`,
+  `SCION_OTEL_GCP_CREDENTIALS` (when a telemetry credential is configured), the NFS-home directory
+  keys and, for NFS worktree agents, `SCION_WORKSPACE_PATH` after the merged environment, so it
+  keeps the runtime's value for those names. Only the runtime sets `SCION_SUPPLEMENTAL_GIDS`.
+  Kubernetes applies resolved-auth env with or without a harness.
+
 ### `Changed in this release` — template env is a fallback below every other source
 
 **Before:** template env was merged into the agent's config. For hub-dispatched (broker-mode)
@@ -1241,15 +1272,18 @@ typing any value into it saves that value.
 
 ### Image tag (experimental)
 
-Behind the `hub.image_tag_setting` [experiment](/scion/reference/experiments/) (off by default).
-The bundled agent images are tagged `latest` by default. `image_tag` selects another tag, so
-agents can run images built for a release (see "Build images for a release" in
-`image-build/README.md`):
+A set `image_tag` is behind the `hub.image_tag_setting` [experiment](/scion/reference/experiments/)
+(off by default). The bundled agent images are tagged `latest`. When `image_tag` is unset, a
+release build of the Hub (`vX.Y.Z`, `vX.Y.Z-preview.N` or `vX.Y.Z-rc.N`) uses its own version as
+the tag instead (the `hub.image_tag_version_default` experiment, on by default), so a Homebrew or
+release install runs the images published for its release. `image_tag` selects another tag (see
+"Build images for a release" in `image-build/README.md`):
 
 | Value | Effect |
 | :--- | :--- |
-| unset or `""` | No change: image references are exactly as without the setting. |
-| `version` | The Hub binary's version (for example `v0.3.0-preview.5`); `latest` for a development build. |
+| unset or `""` | The version default: a release build of the Hub uses its own version (for example `v0.3.0-preview.5`); any other build (development, nightly, or a build without a release version) makes no change. Off while `hub.image_tag_version_default` is off. |
+| `version` | The Hub binary's release version; `latest` for any other build. |
+| `latest` | Keeps `latest`: the opt-out from the version default. |
 | any other value | That literal tag. It must be a valid image tag: letters, digits, `_`, `.` and `-`, at most 128 characters, not starting with `.` or `-`, with no surrounding spaces. `scion config set image_tag` refuses anything else and leaves the settings file unchanged. |
 
 The tag applies only to a short-form `scion-*` image (no registry host) whose tag is `latest` or
@@ -1268,7 +1302,7 @@ Hub's own, and the Hub stores `image_tag` only per profile, so there is no Hub t
 | 2 | Hub profile | `profiles.<name>.image_tag` saved in the Hub's settings |
 | 3 | File profile | `profiles.<name>.image_tag` in the settings file |
 | 4 | File top level | `image_tag` in the settings file |
-| 5 | Default | none: images keep their tag |
+| 5 | Default | unset: the version default on a release build, else images keep their tag |
 
 An agent resolves the layers for its profile; an agent with no profile uses its Runtime Broker's
 default profile (when that profile is in the Hub's profile catalog). If the catalog holds a single
@@ -1295,11 +1329,19 @@ Notes:
   dispatch, so the Hub alone decides which images its agents run. A Runtime Broker older than
   this setting ignores the tag it is sent: explicit images still arrive tagged by the Hub, and
   the images it resolves itself keep their tag.
-- While the experiment is off, `image_tag` is ignored everywhere and image references are exactly
-  as without the setting. A Hub settings save that sets or changes a profile's `image_tag`, in
+- The version default applies the same rules: an image named explicitly with
+  `--image scion-claude:latest`, or a bare `scion-claude`, is retagged to `scion-claude:<version>`.
+  To keep `latest`, set `image_tag: latest` (`scion config set --global image_tag latest`, then
+  restart the server). To turn the default off for the whole Hub, run
+  `scion hub experiments disable hub.image_tag_version_default`, or switch it off under
+  **Admin → Server Config → Experiments**. The release version comes from the build's version
+  stamp only: a build of a tagged commit with local changes counts as that release.
+- While `hub.image_tag_setting` is off, a set `image_tag` is not applied: image references keep
+  their tags, and the set value suppresses the version default. A Hub settings save that sets or changes a profile's `image_tag`, in
   database or settings-file mode, is refused with `412 experiment_disabled` naming the experiment
-  (saving the stored value back, or clearing it, still works), and a value in the environment, a
-  settings file or a saved Hub profile is reported with a warning at startup.
+  (saving the stored value back, or clearing it, still works), and a value other than `latest` in
+  the environment, a settings file or a saved Hub profile is reported with a startup warning
+  (`latest`, the opt-out, is logged at Info).
 - The Hub logs the Hub-scope value and its source (`env`, `settings_file` or `unset`), the
   experiment state and the tag applied, plus, for every profile that sets its own `image_tag`, that
   profile's value, source (`env`, `hub_settings_profile` or `settings_file_profile`) and tag. It

@@ -232,6 +232,37 @@ func TestWorkspaceHasContent(t *testing.T) {
 		require.NoError(t, err)
 		assert.True(t, has, name)
 	}
+
+	// A cased marker name is a different entry on a case-sensitive
+	// filesystem, so it is content there.
+	t.Run("cased marker name on a case-sensitive filesystem is content", func(t *testing.T) {
+		cased := t.TempDir()
+		probe := filepath.Join(cased, "case-probe")
+		require.NoError(t, os.Mkdir(probe, 0o755))
+		_, statErr := os.Lstat(filepath.Join(cased, "CASE-PROBE"))
+		require.NoError(t, os.Remove(probe))
+		if statErr == nil {
+			t.Skip("the temp filesystem is case-insensitive")
+		}
+		require.NoError(t, os.Mkdir(filepath.Join(cased, ".SCION"), 0o755))
+		has, err := WorkspaceHasContent(cased)
+		require.NoError(t, err)
+		assert.True(t, has, ".SCION on a case-sensitive filesystem")
+	})
+
+	// A workspace whose only entry is an exact-name ".agents" SYMLINK has
+	// content: a symlink is never a marker, even one that points at a
+	// directory.
+	t.Run("exact-name .agents symlink only is content", func(t *testing.T) {
+		ws := t.TempDir()
+		target := t.TempDir()
+		if err := os.Symlink(target, filepath.Join(ws, ".agents")); err != nil {
+			t.Skipf("cannot create symlink: %v", err)
+		}
+		has, err := WorkspaceHasContent(ws)
+		require.NoError(t, err)
+		assert.True(t, has, ".agents symlink")
+	})
 }
 
 // A populated workspace without a record (an older image prepared the agent

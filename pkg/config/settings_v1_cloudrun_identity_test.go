@@ -152,3 +152,96 @@ func TestCloudRunAssignableServiceAccountWarnings(t *testing.T) {
 		t.Errorf("nil settings: warnings = %q, want none", got)
 	}
 }
+
+// block_service_account is read into CloudRunConfig.BlockServiceAccount
+// and passes the settings schema.
+func TestCloudRunBlockServiceAccount_Loads(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeCloudRunTestSettings(t, filepath.Join(home, ".scion"), `schema_version: "1"
+runtimes:
+    cr:
+        type: cloudrun
+        cloudrun:
+            block_service_account: block-sa@example-project.iam.gserviceaccount.com
+`)
+	vs, _, err := LoadGlobalSettingsWithOverlay()
+	if err != nil {
+		t.Fatalf("LoadGlobalSettingsWithOverlay: %v", err)
+	}
+	if vs == nil || vs.Runtimes["cr"].CloudRun == nil {
+		t.Fatalf("runtime entry cr has no cloudrun block: %+v", vs)
+	}
+	if got := vs.Runtimes["cr"].CloudRun.BlockServiceAccount; got != "block-sa@example-project.iam.gserviceaccount.com" {
+		t.Errorf("BlockServiceAccount = %q", got)
+	}
+}
+
+func TestProjectSettingsHasCloudRunBlockServiceAccount(t *testing.T) {
+	const withBlock = `schema_version: "1"
+runtimes:
+    cr:
+        type: cloudrun
+        cloudrun:
+            block_service_account: block-sa@example-project.iam.gserviceaccount.com
+`
+	setup := func(t *testing.T, projectYAML string) string {
+		t.Helper()
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		// The global settings set it too: it must not be mistaken for one
+		// the project set itself.
+		writeCloudRunTestSettings(t, filepath.Join(home, ".scion"), withBlock)
+		projectDir := t.TempDir()
+		writeCloudRunTestSettings(t, filepath.Join(projectDir, ".scion"), projectYAML)
+		return projectDir
+	}
+	if !ProjectSettingsHasCloudRunBlockServiceAccount(setup(t, withBlock), "cr") {
+		t.Error("expected true: the project's own settings.yaml sets the block account")
+	}
+	if ProjectSettingsHasCloudRunBlockServiceAccount(setup(t, cloudRunAllowListSettingsYAML), "cr") {
+		t.Error("expected false: the project sets only the allow-list")
+	}
+	if ProjectSettingsHasCloudRunBlockServiceAccount(setup(t, `schema_version: "1"
+runtimes:
+    cr:
+        type: cloudrun
+        cloudrun:
+            block_service_account: "  "
+`), "cr") {
+		t.Error("expected false: a blank value sets nothing")
+	}
+	if ProjectSettingsHasCloudRunBlockServiceAccount(setup(t, withBlock), "other") {
+		t.Error("expected false: another runtime entry")
+	}
+	if ProjectSettingsHasCloudRunAssignableServiceAccounts(setup(t, withBlock), "cr") {
+		t.Error("expected false: the project sets only the block account")
+	}
+}
+
+// A block account that is not a service account email is reported by
+// setting name only; a well-formed one in any case, an empty one or a
+// missing entry gives no warning.
+func TestCloudRunBlockServiceAccountWarnings(t *testing.T) {
+	vs := &VersionedSettings{Runtimes: map[string]V1RuntimeConfig{
+		"bad":   {CloudRun: &CloudRunConfig{BlockServiceAccount: "person@example.com"}},
+		"good":  {CloudRun: &CloudRunConfig{BlockServiceAccount: " Block-SA@Example-Project.iam.gserviceaccount.com "}},
+		"empty": {CloudRun: &CloudRunConfig{}},
+		"plain": {},
+	}}
+	got := CloudRunBlockServiceAccountWarnings(vs, "bad")
+	if len(got) != 1 || !strings.Contains(got[0], "runtimes.bad.cloudrun.block_service_account") {
+		t.Fatalf("warnings = %q, want one naming the setting", got)
+	}
+	if strings.Contains(got[0], "person") || strings.Contains(got[0], "example") {
+		t.Errorf("warning %q names the value", got[0])
+	}
+	for _, entry := range []string{"good", "empty", "plain", "absent"} {
+		if w := CloudRunBlockServiceAccountWarnings(vs, entry); w != nil {
+			t.Errorf("entry %s: warnings = %q, want none", entry, w)
+		}
+	}
+	if w := CloudRunBlockServiceAccountWarnings(nil, "bad"); w != nil {
+		t.Errorf("nil settings: warnings = %q, want none", w)
+	}
+}
