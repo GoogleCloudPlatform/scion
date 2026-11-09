@@ -194,7 +194,7 @@ This command will:
 
 Use --broker-only to only remove the broker record without affecting project providers.
 
-Local state: deregister removes this hub's credentials file, its
+Local state: deregister removes this hub's credentials file, any legacy
 hub_connections entry and (when no connections remain) the empty
 hub-credentials/ directory. Broker-local state stays: the broker daemon log
 (broker.log), the broker's state directory and the broker template cache
@@ -647,7 +647,7 @@ func runBrokerRegister(cmd *cobra.Command, args []string) error {
 	if globalDirErr != nil {
 		fmt.Printf("Warning: failed to get global directory: %v\n", globalDirErr)
 	} else {
-		persistBrokerHubSettings(os.Stdout, globalDir, endpoint, brokerID, hubName)
+		persistBrokerHubSettings(os.Stdout, globalDir, endpoint, brokerID)
 		if brokerNameSet {
 			persistBrokerName(os.Stdout, brokerName)
 		}

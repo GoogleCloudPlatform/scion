@@ -5833,13 +5833,6 @@ func updateVersionedSettingLocked(lock *SettingsLock, dir string, key string, va
 	if err != nil {
 		return err
 	}
-	if edit.noop {
-		// hub_connections.* is accepted and left unchanged (see
-		// versionedSettingEditFor). Loading still runs the legacy-key
-		// migration and surfaces a malformed file, as before.
-		_, err := loadSingleFileVersioned(lock, dir)
-		return err
-	}
 	err = updateVersionedSettingYAML(lock, dir, settingsPath, edit)
 	if errors.Is(err, errYAMLEditThroughAlias) {
 		slog.Debug("settings: alias, anchor or key the edit cannot match by name on the edited path; rewriting the whole file from the struct (comments and unknown keys are lost)",
@@ -5851,12 +5844,10 @@ func updateVersionedSettingLocked(lock *SettingsLock, dir string, key string, va
 
 // versionedSettingEdit is the v1 YAML edit that UpdateVersionedSetting makes
 // for one key: set path to value, or delete path when value is nil (an empty
-// string for an omitempty field). noop marks hub_connections.* keys, which
-// are accepted and left unchanged.
+// string for an omitempty field).
 type versionedSettingEdit struct {
 	path  []string
 	value *yamlv3.Node
-	noop  bool
 }
 
 // versionedSettingKey describes where a settable key lives in the v1 file.
@@ -5900,12 +5891,6 @@ func versionedSettingEditFor(key, value string) (versionedSettingEdit, error) {
 	switch {
 	case projectkeys.IsProjectIDConfigKey(key) || projectkeys.IsHubProjectIDConfigKey(key):
 		k = versionedSettingKey{path: []string{"hub", "project_id"}}
-	case strings.HasPrefix(key, "hub_connections."):
-		// Not written in v1: accepted and left unchanged. "config set"
-		// rejects these keys itself (ValidateConfigSetKey). Keys with no
-		// place in a v1 file at all are rejected before this point
-		// (ValidateSettingWrite).
-		return versionedSettingEdit{noop: true}, nil
 	default:
 		var ok bool
 		if k, ok = versionedSettingKeys[key]; !ok {
@@ -6322,11 +6307,6 @@ func updateVersionedSettingStruct(lock *SettingsLock, dir string, key string, va
 		vs.Server.Auth.Username = value
 
 	default:
-		// hub_connections.* keys are left unchanged, as on the YAML path
-		// (versionedSettingEditFor).
-		if strings.HasPrefix(key, "hub_connections.") {
-			return nil
-		}
 		return fmt.Errorf("unknown or complex setting key: %s (manual edit recommended for registries)", key)
 	}
 
