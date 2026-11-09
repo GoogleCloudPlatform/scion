@@ -28,7 +28,9 @@ import {
   requestLeave,
   LEAVE_BLOCKED_GROUP_DERIVED,
   LEAVE_BLOCKED_LAST_OWNER,
+  LEAVE_EXPERIMENT_OFF_MESSAGE,
   LEAVE_SESSION_REQUIRED_MESSAGE,
+  LEAVE_UNSUPPORTED_MESSAGE,
   type LeaveAgentDeleter,
   type LeaveResult,
 } from './project-leave.js';
@@ -124,6 +126,26 @@ describe('readLeaveResponse', () => {
 
   it('404 is not a member', async () => {
     expect(await readLeaveResponse(apiError(404, 'not_found', 'Project not found.'))).toEqual({
+      kind: 'not_member',
+    });
+  });
+
+  it('404 "route not found" (the experiment off) is unavailable, not not-a-member', async () => {
+    expect(await readLeaveResponse(apiError(404, 'not_found', 'route not found'))).toEqual({
+      kind: 'unavailable',
+      message: LEAVE_EXPERIMENT_OFF_MESSAGE,
+    });
+  });
+
+  it('404 "Project route not found" (a hub without the route) is unavailable', async () => {
+    expect(await readLeaveResponse(apiError(404, 'not_found', 'Project route not found'))).toEqual({
+      kind: 'unavailable',
+      message: LEAVE_UNSUPPORTED_MESSAGE,
+    });
+  });
+
+  it('a 404 with no JSON body is not a member', async () => {
+    expect(await readLeaveResponse(new Response('nope', { status: 404 }))).toEqual({
       kind: 'not_member',
     });
   });

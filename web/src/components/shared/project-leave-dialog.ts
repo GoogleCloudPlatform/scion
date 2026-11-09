@@ -162,8 +162,16 @@ export class ScionProjectLeaveDialog extends LitElement {
     }
   `;
 
-  /** Open the dialog and run the dry run. */
+  /**
+   * Set after a not-a-member answer: the project was dropped from the cached
+   * lists, and closing the dialog goes to /projects.
+   */
+  private leaveOnClose = false;
+
+  /** Open the dialog and run the dry run (a no-op while a delete or the leave runs). */
   async show(): Promise<void> {
+    if (this.busy) return;
+    this.leaveOnClose = false;
     this.result = null;
     this.refusal = null;
     this.deleteAgents = false;
@@ -177,8 +185,7 @@ export class ScionProjectLeaveDialog extends LitElement {
       this.result = outcome.result;
       this.phase = 'preview';
     } else {
-      this.refusal = outcome;
-      this.phase = 'refused';
+      this.refuse(outcome);
     }
   }
 
@@ -186,6 +193,24 @@ export class ScionProjectLeaveDialog extends LitElement {
   close(): void {
     if (this.busy) return;
     this.phase = 'closed';
+    if (this.leaveOnClose) {
+      this.leaveOnClose = false;
+      navigateTo('/projects');
+    }
+  }
+
+  /**
+   * Show a refusal. A not-a-member answer means this session can no longer
+   * read the project: it is dropped from the cached lists at once, and
+   * closing the dialog goes to /projects.
+   */
+  private refuse(outcome: Exclude<LeaveOutcome, { kind: 'ok' }>): void {
+    this.refusal = outcome;
+    this.phase = 'refused';
+    if (outcome.kind === 'not_member') {
+      stateManager.forgetProject(this.projectId);
+      this.leaveOnClose = true;
+    }
   }
 
   private get busy(): boolean {
@@ -210,7 +235,14 @@ export class ScionProjectLeaveDialog extends LitElement {
 
   private async confirm(): Promise<void> {
     if (!this.result || this.busy) return;
-    if (this.deleteAgents && this.canDeleteAgents) {
+    // A delete was asked for on a list that cannot be deleted in full (the
+    // checkbox is disabled then, but its state is not trusted): never leave.
+    if (this.deleteAgents && !this.canDeleteAgents) {
+      this.failure = null;
+      this.phase = 'delete_failed';
+      return;
+    }
+    if (this.deleteAgents) {
       this.remaining = [...this.result.agents.items];
       if (!(await this.runDeletes())) return;
     }
@@ -256,8 +288,7 @@ export class ScionProjectLeaveDialog extends LitElement {
     this.phase = 'leaving';
     const outcome = await requestLeave(this.projectId, false);
     if (outcome.kind !== 'ok') {
-      this.refusal = outcome;
-      this.phase = 'refused';
+      this.refuse(outcome);
       return;
     }
     this.phase = 'closed';
@@ -293,7 +324,7 @@ export class ScionProjectLeaveDialog extends LitElement {
             e.preventDefault();
             return;
           }
-          this.phase = 'closed';
+          this.close();
         }}
       >
         ${this.renderBody()} ${this.renderFooter()}
@@ -416,6 +447,8 @@ export class ScionProjectLeaveDialog extends LitElement {
         return html`<p data-leave-refusal="session_required">${f.message}</p>`;
       case 'not_member':
         return html`<p data-leave-refusal="not_member">${LEAVE_NOT_MEMBER_MESSAGE}</p>`;
+      case 'unavailable':
+        return html`<p data-leave-refusal="unavailable">${f.message}</p>`;
       default:
         return html`<p class="error" data-leave-refusal="error">${f.message}</p>`;
     }

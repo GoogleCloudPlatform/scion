@@ -45,8 +45,10 @@ import {
   accessKeptLine,
 } from './project-leave-dialog.js';
 import {
+  LEAVE_EXPERIMENT_OFF_MESSAGE,
   LEAVE_NOT_MEMBER_MESSAGE,
   LEAVE_SESSION_REQUIRED_MESSAGE,
+  LEAVE_UNSUPPORTED_MESSAGE,
   type LeaveAgentDeleter,
   type LeaveResult,
 } from '../../client/project-leave.js';
@@ -489,5 +491,146 @@ describe('after leaving', () => {
     expect(navigateTo).not.toHaveBeenCalled();
     expect(sm.forgetProject).not.toHaveBeenCalled();
     expect((left.mock.calls[0][0] as CustomEvent).detail.result.remainingAccess).toBe('group');
+  });
+});
+
+describe('round-1 review: a truncated list, Retry after a failed leave, not a member, busy', () => {
+  it('a checked box on a truncated list (state forced past the disabled control) sends no leave', async () => {
+    const calls = routeFetch({
+      dryRun: json(200, result({ agents: agentsOf(50, { truncated: true, count: 57 }) })),
+      leave: json(200, result({ dryRun: false })),
+    });
+    const el = await openDialog();
+    const deleter = vi.fn<LeaveAgentDeleter>();
+    el.deleter = deleter;
+    await checkDeleteAgents(el);
+    await confirm(el);
+    expect(leavePosts(calls)).toHaveLength(0);
+    expect(deleter).not.toHaveBeenCalled();
+    expect(q(el, '[data-leave-delete-failed]')?.textContent).toContain(LEAVE_TRUNCATED_NOTE);
+    expect(q(el, '[data-leave-retry]')).toBeNull();
+  });
+
+  it('planted positive beside it: the same flow on a whole list sends exactly one leave', async () => {
+    const calls = routeFetch({
+      dryRun: json(200, result({ agents: agentsOf(2) })),
+      leave: json(200, result({ dryRun: false })),
+    });
+    const el = await openDialog();
+    el.deleter = (() => Promise.resolve({ kind: 'confirmed' })) as LeaveAgentDeleter;
+    await checkDeleteAgents(el);
+    await confirm(el);
+    expect(leavePosts(calls)).toHaveLength(1);
+  });
+
+  it('a leave that fails, then Retry: a fresh dry run, one leave after confirming again, no repeat deletes', async () => {
+    let leaveCount = 0;
+    let dryCount = 0;
+    const calls = routeFetch({
+      dryRun: () => {
+        dryCount++;
+        // After the deletes, the hub lists no agents.
+        return json(200, result(dryCount === 1 ? {} : { agents: agentsOf(0), willBeHeld: false }));
+      },
+      leave: () => {
+        leaveCount++;
+        return leaveCount === 1
+          ? json(500, { error: { code: 'internal_error', message: 'boom' } })
+          : json(200, result({ dryRun: false, agents: agentsOf(0) }));
+      },
+    });
+    const el = await openDialog();
+    const deleter = vi.fn<LeaveAgentDeleter>(() => Promise.resolve({ kind: 'confirmed' }));
+    el.deleter = deleter;
+    await checkDeleteAgents(el);
+    await confirm(el);
+    expect(q(el, '[data-leave-refusal="error"]')).not.toBeNull();
+    expect(deleter).toHaveBeenCalledTimes(2);
+    const before = calls.length;
+
+    q(el, '[data-leave-retry]')!.click();
+    await vi.waitFor(() => expect(q(el, '[data-leave-confirm]')).not.toBeNull());
+    const next = calls[before];
+    expect(next).toEqual({
+      method: 'POST',
+      url: '/api/v1/projects/p-1/leave',
+      body: { dryRun: true },
+    });
+
+    await confirm(el);
+    const after = calls.slice(before);
+    expect(after.filter((c) => (c.body as { dryRun: boolean }).dryRun === false)).toHaveLength(1);
+    expect(deleter).toHaveBeenCalledTimes(2);
+    expect(navigateTo).toHaveBeenCalledWith('/projects');
+  });
+
+  it('not a member on the dry run: the project is dropped from the cache and closing goes to /projects', async () => {
+    routeFetch({
+      dryRun: json(404, { error: { code: 'not_found', message: 'Project not found.' } }),
+    });
+    const el = await openDialog();
+    expect(q(el, '[data-leave-refusal="not_member"]')?.textContent).toContain(
+      LEAVE_NOT_MEMBER_MESSAGE
+    );
+    expect(sm.forgetProject).toHaveBeenCalledWith('p-1');
+    expect(navigateTo).not.toHaveBeenCalled();
+    q(el, '[data-leave-cancel]')!.click();
+    await el.updateComplete;
+    expect(navigateTo).toHaveBeenCalledWith('/projects');
+    expect(q(el, 'sl-dialog')).toBeNull();
+  });
+
+  it('not a member on the real leave: the same', async () => {
+    routeFetch({
+      dryRun: json(200, result({ agents: agentsOf(0) })),
+      leave: json(404, { error: { code: 'not_found', message: 'Project not found.' } }),
+    });
+    const el = await openDialog();
+    await confirm(el);
+    expect(sm.forgetProject).toHaveBeenCalledWith('p-1');
+    q(el, '[data-leave-cancel]')!.click();
+    expect(navigateTo).toHaveBeenCalledWith('/projects');
+  });
+
+  it('the experiment off (the router 404) is not "not a member": no cache drop, no navigation', async () => {
+    routeFetch({ dryRun: json(404, { error: { code: 'not_found', message: 'route not found' } }) });
+    const el = await openDialog();
+    expect(q(el, '[data-leave-refusal="unavailable"]')?.textContent).toContain(
+      LEAVE_EXPERIMENT_OFF_MESSAGE
+    );
+    q(el, '[data-leave-cancel]')!.click();
+    expect(sm.forgetProject).not.toHaveBeenCalled();
+    expect(navigateTo).not.toHaveBeenCalled();
+  });
+
+  it('a hub without the leave route is not "not a member" either', async () => {
+    routeFetch({
+      dryRun: json(404, { error: { code: 'not_found', message: 'Project route not found' } }),
+    });
+    const el = await openDialog();
+    expect(q(el, '[data-leave-refusal="unavailable"]')?.textContent).toContain(
+      LEAVE_UNSUPPORTED_MESSAGE
+    );
+    expect(sm.forgetProject).not.toHaveBeenCalled();
+  });
+
+  it('show() while a delete runs sends no new dry run', async () => {
+    const calls = routeFetch({ dryRun: json(200, result()), leave: json(200, result()) });
+    const el = await openDialog();
+    let release!: () => void;
+    el.deleter = (() =>
+      new Promise((resolve) => {
+        release = () => resolve({ kind: 'failed', reason: 'timed_out', message: 'slow' });
+      })) as LeaveAgentDeleter;
+    await checkDeleteAgents(el);
+    q(el, '[data-leave-confirm]')!.click();
+    await vi.waitFor(() => expect(q(el, '[data-leave-deleting]')).not.toBeNull());
+    const before = calls.length;
+    await el.show();
+    expect(calls.length).toBe(before);
+    expect(q(el, '[data-leave-deleting]')).not.toBeNull();
+    release();
+    await vi.waitFor(() => expect(q(el, '[data-leave-delete-failed]')).not.toBeNull());
+    expect(leavePosts(calls)).toHaveLength(0);
   });
 });

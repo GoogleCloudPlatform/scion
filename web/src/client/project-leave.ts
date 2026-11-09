@@ -64,6 +64,11 @@ export type LeaveOutcome =
   | { kind: 'session_required'; message: string }
   /** 404: the caller has no binding in the project (or it does not exist). */
   | { kind: 'not_member' }
+  /**
+   * 404 from the router rather than the leave handler: the hub's
+   * project-self-leave experiment is off, or the hub has no leave route.
+   */
+  | { kind: 'unavailable'; message: string }
   /** Any other refusal or a network failure. */
   | { kind: 'error'; status: number | null; code: string; message: string };
 
@@ -71,6 +76,18 @@ export const LEAVE_SESSION_REQUIRED_MESSAGE =
   'Leaving a project needs a signed-in browser session. Sign in again and retry.';
 export const LEAVE_NOT_MEMBER_MESSAGE =
   "You're no longer a member of this project, or it doesn't exist.";
+export const LEAVE_EXPERIMENT_OFF_MESSAGE = "Leaving a project isn't enabled on this Hub.";
+export const LEAVE_UNSUPPORTED_MESSAGE = "This Hub doesn't support leaving a project.";
+
+/**
+ * The 404 messages that do not mean "not a member". The hub's router answers
+ * "route not found" while the experiment is off (requireExperiment,
+ * pkg/hub/experiments.go) and "Project route not found" for a project
+ * sub-route it does not have (an older hub); the leave handler itself answers
+ * "Project not found". The CLI reads them the same way.
+ */
+const LEAVE_404_EXPERIMENT_OFF = 'route not found';
+const LEAVE_404_UNSUPPORTED = 'Project route not found';
 
 interface ErrorBody {
   error?: {
@@ -95,7 +112,6 @@ export async function readLeaveResponse(res: Response): Promise<LeaveOutcome> {
   if (res.ok) {
     return { kind: 'ok', result: (await res.json()) as LeaveResult };
   }
-  if (res.status === 404) return { kind: 'not_member' };
   let body: ErrorBody | null = null;
   try {
     body = (await res.json()) as ErrorBody;
@@ -105,6 +121,15 @@ export async function readLeaveResponse(res: Response): Promise<LeaveOutcome> {
   const code = body?.error?.code ?? '';
   const message = body?.error?.message || `HTTP ${res.status}`;
   const details = body?.error?.details;
+  if (res.status === 404) {
+    if (body?.error?.message === LEAVE_404_EXPERIMENT_OFF) {
+      return { kind: 'unavailable', message: LEAVE_EXPERIMENT_OFF_MESSAGE };
+    }
+    if (body?.error?.message === LEAVE_404_UNSUPPORTED) {
+      return { kind: 'unavailable', message: LEAVE_UNSUPPORTED_MESSAGE };
+    }
+    return { kind: 'not_member' };
+  }
   if (res.status === 409 && code === 'last_owner') {
     const guidance = typeof details?.guidance === 'string' ? details.guidance : '';
     return { kind: 'last_owner', message, guidance };
