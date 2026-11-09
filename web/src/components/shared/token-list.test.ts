@@ -25,6 +25,9 @@
 
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 import { requestUrl } from '../../client/__fixtures__/request-url.js';
+
+vi.mock('../../utils/toast.js', () => ({ showToast: vi.fn() }));
+const { showToast } = await import('../../utils/toast.js');
 import type { ScionTokenList } from './token-list.js';
 import type * as TokenListModule from './token-list.js';
 
@@ -1016,5 +1019,55 @@ describe('scion-token-list — hub boundary, purpose and labels (ptone/scion#212
     const dialog = el.shadowRoot!.querySelector('sl-dialog[label="Token Created"]')!;
     dialog.dispatchEvent(new CustomEvent('sl-after-hide', { bubbles: true, composed: true }));
     expect((el as any).revealToken).toBe('');
+  });
+});
+
+describe('scion-token-list — copy the revealed token (ptone/scion#7555)', () => {
+  const originalClipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+
+  beforeAll(async () => {
+    await import('./token-list.js');
+  });
+
+  afterEach(() => {
+    if (originalClipboard) Object.defineProperty(navigator, 'clipboard', originalClipboard);
+    else delete (navigator as unknown as Record<string, unknown>).clipboard;
+    document.body.innerHTML = '';
+    vi.mocked(showToast).mockClear();
+  });
+
+  async function revealed(): Promise<InstanceType<typeof ScionTokenList>> {
+    const el = await createComponent(baseFetch());
+    (el as any).openCreateDialog();
+    (el as any).handleBoundaryChange('hub');
+    (el as any).createName = 'reveal';
+    (el as any).createScopes = new Set(['agent:read']);
+    await (el as any).handleCreate(new Event('submit'));
+    await el.updateComplete;
+    vi.mocked(showToast).mockClear();
+    return el;
+  }
+
+  it('copies the token and marks it copied, with no toast', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+    const el = await revealed();
+    await (el as any).copyToken();
+    expect(writeText).toHaveBeenCalledWith('scion_pat_x');
+    expect((el as any).revealCopied).toBe(true);
+    expect(showToast).not.toHaveBeenCalled();
+  });
+
+  it('selects the token and shows exactly one failure toast when the clipboard is unavailable', async () => {
+    Object.defineProperty(navigator, 'clipboard', { value: undefined, configurable: true });
+    const el = await revealed();
+    await expect((el as any).copyToken()).resolves.toBeUndefined();
+    expect((el as any).revealCopied).toBe(false);
+    expect(showToast).toHaveBeenCalledTimes(1);
+    expect(showToast).toHaveBeenCalledWith(
+      'Could not copy. The token is selected: press Ctrl/Cmd+C.',
+      'danger'
+    );
+    expect(window.getSelection()?.toString()).toContain('scion_pat_x');
   });
 });

@@ -1913,4 +1913,15 @@ describe('scion-chat-message code block copy (ptone/scion#7555)', () => {
     expect(showToast).toHaveBeenCalledTimes(1);
     expect(btn.textContent).toBe('Copy');
   });
+
+  it('shows "Could not copy" and keeps the button label when the write is rejected', async () => {
+    const writeText = vi.fn().mockRejectedValue(new Error('denied'));
+    setClipboard({ writeText });
+    const btn = await copyButton();
+    btn.click();
+    await vi.waitFor(() => expect(showToast).toHaveBeenCalledWith('Could not copy', 'danger'));
+    expect(writeText).toHaveBeenCalledWith('make fixture');
+    expect(showToast).toHaveBeenCalledTimes(1);
+    expect(btn.textContent).toBe('Copy');
+  });
 });

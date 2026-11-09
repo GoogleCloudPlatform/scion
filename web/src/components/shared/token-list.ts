@@ -1887,7 +1887,7 @@ export class ScionTokenList extends LitElement {
       }, 2000);
       return;
     }
-    // Fallback: select the text so it can be copied by hand.
+    // Fallback: select the text so it can be copied by hand, and say so.
     const el = this.shadowRoot?.querySelector('.token-value') as HTMLElement | null;
     if (!el) {
       showCopyFailedToast();
@@ -1898,6 +1898,7 @@ export class ScionTokenList extends LitElement {
     const sel = window.getSelection();
     sel?.removeAllRanges();
     sel?.addRange(range);
+    showToast('Could not copy. The token is selected: press Ctrl/Cmd+C.', 'danger');
   }
 
   // ── Formatting ─────────────────────────────────────────────────────
