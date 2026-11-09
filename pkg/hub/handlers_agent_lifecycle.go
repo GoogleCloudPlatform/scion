@@ -655,11 +655,19 @@ func (s *Server) revokeSuspendedCredentials(ctx context.Context, agentID string)
 		slog.Warn("Failed to revoke agent credentials on suspend", "agent_id", agentID, "error", err)
 		return
 	}
-	s.emitMutationAudit(ctx, &store.MutationAuditRecord{
+	record := &store.MutationAuditRecord{
 		MutationType: "agent_credential_revoke",
 		TargetType:   "agent_credential",
 		TargetID:     agentID,
-	})
+	}
+	auditActorFromContext(ctx).ApplyActor(record)
+	if record.ActorPrincipalKind == "" {
+		// The scheduler's auto-suspend runs with no request principal; the
+		// record needs an actor, as for a hub-initiated mint.
+		record.ActorPrincipalKind = mintAuditSystemActorKind
+		record.ActorPrincipalID = mintAuditSystemActorID
+	}
+	s.emitMutationAudit(ctx, record)
 }
 
 // recordRunIntent sets the agent's run intent in the store and mirrors the
