@@ -34,7 +34,9 @@ import (
 //  1. the opt-in egress firewall (SCION_INIT_FIREWALL, runInitFirewall);
 //  2. the metadata server start, which installs the interception rules
 //     (metadata.Server.Start);
-//  3. the drop of CAP_NET_ADMIN (dropNetAdminForMetadata).
+//  3. the drop of CAP_NET_ADMIN (dropNetAdmin), whenever a metadata
+//     server was configured (assign or block mode) or the firewall was
+//     installed.
 //
 // Only then do the git clone, pre-start hooks, sidecar services and the
 // harness run, none of which need network administration. Because the
@@ -61,7 +63,7 @@ const initFirewallTimeout = 2 * time.Minute
 // causes RunInit hands to reportInitFailure.
 var (
 	errInitFirewallFailed = errors.New("opt-in init firewall (" + initFirewallEnv + ") failed; refusing to start the harness")
-	errNetAdminDropFailed = errors.New("could not drop " + netcap.CapabilityName + " after installing metadata interception; refusing to start the harness")
+	errNetAdminDropFailed = errors.New("could not drop " + netcap.CapabilityName + " after installing network controls; refusing to start the harness")
 
 	// errMetadataProtectionUnavailable is the Hub-visible refusal when
 	// the metadata interception is required but cannot be set up. The
@@ -107,22 +109,23 @@ var runInitFirewall = func() error {
 	return nil
 }
 
-// setupInitFirewall runs the firewall when requested. A non-nil return is
-// fatal: RunInit must not start anything.
-func setupInitFirewall() error {
+// setupInitFirewall runs the firewall when requested and reports whether
+// it was installed. A non-nil error is fatal: RunInit must not start
+// anything.
+func setupInitFirewall() (installed bool, err error) {
 	on, err := initFirewallRequested()
 	if err != nil {
 		log.Error("%v", err)
-		return errInitFirewallFailed
+		return false, errInitFirewallFailed
 	}
 	if !on {
-		return nil
+		return false, nil
 	}
 	if err := runInitFirewall(); err != nil {
 		log.Error("Opt-in init firewall failed: %v", err)
-		return errInitFirewallFailed
+		return false, errInitFirewallFailed
 	}
-	return nil
+	return true, nil
 }
 
 // runDropNetAdmin is netcap.DropNetAdmin behind a seam for tests. The
@@ -134,29 +137,30 @@ var runDropNetAdmin = netcap.DropNetAdmin
 // would always report false there.
 var metadataInterceptionInstalled = (*metadata.Server).InterceptionInstalled
 
-// dropNetAdminForMetadata drops CAP_NET_ADMIN from init and everything it
-// starts later. RunInit calls it whenever the metadata mode is assign or
-// block (passthrough never reaches it), after the metadata server start.
+// dropNetAdmin drops CAP_NET_ADMIN from init and everything it starts
+// later. RunInit calls it after network setup whenever a metadata server
+// was configured (assign or block mode) or the opt-in firewall was
+// installed.
 //
 // netcap.DropNetAdmin is a no-op when no thread holds the capability, so a
 // start that was never granted it (gVisor, Cloud Run, restricted pods)
 // passes here without making any prctl or capset call.
 //
-// If interception rules were installed, a failed drop is fatal, keeping
-// interception setup and the drop all-or-nothing. If interception was
-// legitimately skipped (non-root, host networking), the drop is still
-// attempted as hardening, but a failure only warns, which keeps today's
-// start behaviour for that case.
-func dropNetAdminForMetadata(interceptionInstalled bool) error {
+// required is true when init installed network controls: interception
+// rules or the firewall. Then a failed drop is fatal, keeping that setup
+// and the drop all-or-nothing. Otherwise (interception legitimately
+// skipped for non-root or host networking, and no firewall) the drop is
+// still attempted as hardening, but a failure only warns.
+func dropNetAdmin(required bool) error {
 	err := runDropNetAdmin()
 	if err == nil {
 		return nil
 	}
-	if interceptionInstalled {
-		log.Error("Metadata interception is installed but %v", err)
+	if required {
+		log.Error("Network controls are installed but %v", err)
 		return errNetAdminDropFailed
 	}
-	log.Warn("Could not drop %s (metadata interception is not installed; continuing): %v", netcap.CapabilityName, err)
+	log.Warn("Could not drop %s (no network controls are installed; continuing): %v", netcap.CapabilityName, err)
 	return nil
 }
 

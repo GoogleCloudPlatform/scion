@@ -853,7 +853,8 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// Opt-in egress firewall. It runs before the metadata server start
 	// because the script resets the nat and filter tables, which would
 	// remove the interception rules installed below.
-	if err := setupInitFirewall(); err != nil {
+	firewallInstalled, err := setupInitFirewall()
+	if err != nil {
 		reportInitFailure(agentHome, err)
 		return 1
 	}
@@ -931,9 +932,12 @@ func RunInit(args []string, opts InitRunOptions) int {
 
 	// Network setup is complete: drop CAP_NET_ADMIN before anything else
 	// starts (clone, pre-start hooks, services, the harness). Passthrough
-	// never runs a metadata server and is unchanged.
-	if metadataServer != nil {
-		if err := dropNetAdminForMetadata(metadataInterceptionInstalled(metadataServer)); err != nil {
+	// runs no metadata server, so it drops only when the firewall was
+	// installed. The drop is required (fatal on failure) whenever init
+	// installed network controls.
+	required := firewallInstalled || (metadataServer != nil && metadataInterceptionInstalled(metadataServer))
+	if metadataServer != nil || firewallInstalled {
+		if err := dropNetAdmin(required); err != nil {
 			reportInitFailure(agentHome, err)
 			return 1
 		}
