@@ -15,8 +15,9 @@
 package hub
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
-	"log/slog"
 	"net/http"
 )
 
@@ -33,38 +34,23 @@ import (
 const membershipChangedSubject = "hub.membership.changed"
 
 // membershipChangedSubjectFor returns userID's membership-changed subject,
-// or "" when userID cannot be one subject token. It is an allow-list: every
-// rune must be a subject character (isAllowedSubjectChar: letters, digits,
-// '-' and '_') other than a wildcard, so a separator, a wildcard, a space,
-// a tab, a newline or any other control character gives no subject.
+// or "" for an empty userID. The last token is the lowercase hex SHA-256
+// of userID: a fixed-length token of subject characters for every user ID,
+// federated IDs (<issuer>:<sub>) included, with no ID text in the subject.
+// The publisher and every stream subscriber use this one function.
 func membershipChangedSubjectFor(userID string) string {
 	if userID == "" {
 		return ""
 	}
-	for _, c := range userID {
-		if !isAllowedSubjectChar(c) || c == '*' || c == '>' {
-			return ""
-		}
-	}
-	return membershipChangedSubject + "." + userID
-}
-
-// warnMembershipSubjectRejected logs that a non-empty user ID got no
-// membership-changed subject, so its streams are not re-checked by a
-// membership change. The ID itself is never logged.
-func warnMembershipSubjectRejected(where string) {
-	slog.Warn("membership-changed subject: user ID is not a valid subject token; no per-user membership re-check",
-		"where", where)
+	sum := sha256.Sum256([]byte(userID))
+	return membershipChangedSubject + "." + hex.EncodeToString(sum[:])
 }
 
 // subscribeMembershipChanged subscribes to userID's membership-changed
-// subject. With no valid subject it returns a nil channel, which never
-// becomes ready in a select, and a no-op unsubscribe.
+// subject. With an empty userID or no publisher it returns a nil channel,
+// which never becomes ready in a select, and a no-op unsubscribe.
 func subscribeMembershipChanged(events EventPublisher, userID string) (<-chan Event, func()) {
 	subject := membershipChangedSubjectFor(userID)
-	if subject == "" && userID != "" {
-		warnMembershipSubjectRejected("subscribe")
-	}
 	if subject == "" || events == nil {
 		return nil, func() {}
 	}
@@ -93,7 +79,7 @@ type membershipChangedEvent struct {
 
 // publishMembershipChanged publishes userID's membership-changed subject
 // for projectID. It does not depend on any experiment. With no event
-// publisher, or a userID that is no valid subject token, it does nothing.
+// publisher, or an empty userID, it does nothing.
 func (s *Server) publishMembershipChanged(userID, projectID string) {
 	if s == nil {
 		return
@@ -102,9 +88,6 @@ func (s *Server) publishMembershipChanged(userID, projectID string) {
 	events := s.events
 	s.mu.RUnlock()
 	subject := membershipChangedSubjectFor(userID)
-	if subject == "" && userID != "" {
-		warnMembershipSubjectRejected("publish")
-	}
 	if events == nil || subject == "" {
 		return
 	}

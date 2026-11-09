@@ -2188,21 +2188,6 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 	if su := getWebSessionUser(r.Context()); su != nil {
 		streamUserID = su.UserID
 	}
-	// Fail closed: a session user whose ID gives no membership-changed
-	// subject could not be re-checked on a membership change, so the stream
-	// is refused, as an authorization denial is. (With no session user the
-	// subject authorization below denies every subject.)
-	if streamUserID != "" && membershipChangedSubjectFor(streamUserID) == "" {
-		warnMembershipSubjectRejected(streamKindWebEvents)
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusForbidden)
-		body, _ := json.Marshal(map[string]interface{}{
-			"error":           "access denied for one or more subjects",
-			"denied_subjects": subjects,
-		})
-		_, _ = w.Write(body)
-		return
-	}
 	membershipCh, unsubscribeMembership := subscribeMembershipChanged(ws.events, streamUserID)
 	defer unsubscribeMembership()
 

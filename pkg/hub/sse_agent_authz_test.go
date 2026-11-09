@@ -41,13 +41,15 @@ func (p *sseCountingPublisher) Subscribe(patterns ...string) (<-chan Event, func
 	return p.ChannelEventPublisher.Subscribe(patterns...)
 }
 
-// clientSubscriptions returns the subscriptions other than the internal
-// per-user membership-changed one, which a stream installs before it
+// clientSubscriptions returns the subscriptions other than userID's own
+// membership-changed subscription, which a stream installs before it
 // authorizes (ptone/scion#7494) and so holds even on a refused request.
-func (p *sseCountingPublisher) clientSubscriptions() [][]string {
+// Only that exact subject is skipped.
+func (p *sseCountingPublisher) clientSubscriptions(userID string) [][]string {
+	own := membershipChangedSubjectFor(userID)
 	var out [][]string
 	for _, pat := range p.patterns {
-		if len(pat) == 1 && strings.HasPrefix(pat[0], membershipChangedSubject+".") {
+		if len(pat) == 1 && pat[0] == own {
 			continue
 		}
 		out = append(out, pat)
@@ -55,13 +57,13 @@ func (p *sseCountingPublisher) clientSubscriptions() [][]string {
 	return out
 }
 
-// assertRefusedSubscriptions: a refused stream subscribed to no client
-// subject, held at most its internal membership subscription, and
+// assertRefusedSubscriptions: a stream refused for userID subscribed to no
+// client subject, held at most userID's own membership subscription, and
 // released everything before returning.
-func assertRefusedSubscriptions(t *testing.T, pub *sseCountingPublisher) {
+func assertRefusedSubscriptions(t *testing.T, pub *sseCountingPublisher, userID string) {
 	t.Helper()
-	assert.Empty(t, pub.clientSubscriptions(), "denied requests must never subscribe to a client subject")
-	assert.LessOrEqual(t, pub.subscriptions, 1, "at most the internal membership subscription")
+	assert.Empty(t, pub.clientSubscriptions(userID), "denied requests must never subscribe to a client subject")
+	assert.LessOrEqual(t, pub.subscriptions, 1, "at most the caller's own membership subscription")
 	assertNoSSESubscribers(t, pub.ChannelEventPublisher)
 }
 
@@ -77,7 +79,7 @@ func TestSSEHandler_AgentUnauthorized(t *testing.T) {
 	w := serveSSELive(t, ws, func(ctx context.Context) *http.Request { return sseAgentRequest(ctx, "user-1", "user", subject) })
 	assert.Equal(t, http.StatusForbidden, w.Code)
 	assert.False(t, w.Flushed)
-	assertRefusedSubscriptions(t, pub)
+	assertRefusedSubscriptions(t, pub, "user-1")
 	var body struct {
 		Denied []string `json:"denied_subjects"`
 	}
@@ -206,7 +208,7 @@ func TestSSEHandler_AgentMixedBatch(t *testing.T) {
 			if deny {
 				assert.Equal(t, http.StatusForbidden, w.Code)
 				assert.False(t, w.Flushed)
-				assertRefusedSubscriptions(t, pub)
+				assertRefusedSubscriptions(t, pub, "user-1")
 				var body struct {
 					Denied []string `json:"denied_subjects"`
 				}

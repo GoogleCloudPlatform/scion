@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -84,6 +85,12 @@ func (r *leaveStreamRecorder) isFlushed() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.flushed
+}
+
+func (r *leaveStreamRecorder) status() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.code
 }
 
 func (r *leaveStreamRecorder) String() string {
@@ -367,7 +374,8 @@ func TestSSE_InternalMembershipSubjectRefused(t *testing.T) {
 	x := newLeaveSSEFixture(t)
 	for _, subject := range []string{
 		membershipChangedSubject, membershipChangedSubjectFor(x.f.member.ID), membershipChangedSubjectFor(x.f.admin.ID),
-		"hub.membership.changed.*", "hub.membership.>", "hub.>",
+		membershipChangedSubject + "." + strings.Repeat("0123456789abcdef", 4),
+		"hub.membership.changed.*", "hub.membership.changed.>", "hub.membership.>", "hub.>",
 	} {
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
@@ -382,12 +390,52 @@ func TestSSE_InternalMembershipSubjectRefused(t *testing.T) {
 		[]string{own}), "the caller's own per-user subject is refused too")
 }
 
-// TestMembershipChangedSubjectFor: one token per user; an ID that cannot
-// be one subject token gets no subject (and so no publish or subscribe).
+// TestSSE_NoSessionDeniedWithNoMembershipSubscription (review round 4):
+// with no session user the web events stream has no membership subject;
+// it subscribes to nothing and denies every subject.
+func TestSSE_NoSessionDeniedWithNoMembershipSubscription(t *testing.T) {
+	x := newLeaveSSEFixture(t)
+	pub := &sseCountingPublisher{ChannelEventPublisher: NewChannelEventPublisher()}
+	t.Cleanup(pub.Close)
+	ws := &WebServer{store: x.f.store, events: pub, authzService: x.f.srv.authzService}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	req := httptest.NewRequest(http.MethodGet, "/events?sub="+x.subject, nil).WithContext(ctx)
+	rec := httptest.NewRecorder()
+	ws.handleSSE(rec, req)
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	var body struct {
+		Denied []string `json:"denied_subjects"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	assert.Equal(t, []string{x.subject}, body.Denied)
+	assert.Zero(t, pub.subscriptions, "no subscription, the membership one included")
+}
+
+// TestMembershipChangedSubjectFor: every non-empty user ID, federated
+// (<issuer>:<sub>) and awkward ones included, gets one deterministic
+// subject whose last token is the 64-hex SHA-256 of the ID, so it is a
+// single valid token with no ID text; distinct IDs get distinct subjects;
+// an empty ID gets none.
 func TestMembershipChangedSubjectFor(t *testing.T) {
-	assert.Equal(t, membershipChangedSubject+".u-1", membershipChangedSubjectFor("u-1"))
-	for _, bad := range []string{"", "a.b", "a*", "a>", "a b", "a\tb", "a\nb", "a\rb", "a\x00b", "a\x7fb", "a/b", "a\u00e9b"} {
-		assert.Empty(t, membershipChangedSubjectFor(bad), "%q", bad)
+	assert.Empty(t, membershipChangedSubjectFor(""))
+	ids := []string{"u-1", "U-1", "a.b", "a*", "a>", "a b", "a\tb", "a\nb", "a\rb", "a\x00b", "a\x7fb", "a/b", "a\u00e9b",
+		"https://issuer.example:sub", "https://issuer.example:sub/a.b\tc"}
+	seen := map[string]string{}
+	for _, id := range ids {
+		subject := membershipChangedSubjectFor(id)
+		assert.Equal(t, subject, membershipChangedSubjectFor(id), "%q: deterministic", id)
+		require.True(t, strings.HasPrefix(subject, membershipChangedSubject+"."), "%q: %q", id, subject)
+		token := strings.TrimPrefix(subject, membershipChangedSubject+".")
+		assert.Len(t, token, 64, "%q", id)
+		for _, c := range token {
+			assert.True(t, (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'), "%q: token %q is lowercase hex", id, token)
+		}
+		assert.NotContains(t, subject, id, "%q: no ID text in the subject", id)
+		if prev, dup := seen[subject]; dup {
+			t.Errorf("%q and %q share a subject", prev, id)
+		}
+		seen[subject] = id
 	}
 }
 
@@ -652,11 +700,14 @@ func TestProjectLeave_LeaveDuringAgentStreamSetupClosesStream(t *testing.T) {
 	x := newLeaveSSEFixture(t)
 	x.f.srv.membershipService.onMembershipLoss = nil
 	agent := leaveOrderAgent(t, x)
+	// A real leave. The request is prepared here, on the test goroutine;
+	// the hook runs only the returned func on the handler's goroutine, and
+	// that func makes no assertion.
+	leave := leaveRequestFunc(t, x.f.srv, x.f.member, x.f.projectID)
 	leaveCode := 0
 	streamAuthorizedHook = func(kind string) {
 		if kind == streamKindAgentMessages {
-			// A real leave, on the handler's goroutine: no t.Fatal here.
-			leaveCode = leaveAs(t, x.f.srv, x.f.member, x.f.projectID, false).Code
+			leaveCode = leave()
 		}
 	}
 	t.Cleanup(func() { streamAuthorizedHook = nil })
@@ -682,44 +733,124 @@ func TestProjectLeave_LeaveDuringAgentStreamSetupClosesStream(t *testing.T) {
 	assert.Contains(t, rec.String(), "stream ended")
 }
 
-// TestSSE_UserIDWithNoMembershipSubjectRefused (review round 3, fail
-// closed): a session user whose ID gives no membership-changed subject (a
-// tab here) is refused with the stream's authorization-denial response,
-// because its stream could not be re-checked on a membership change; no
-// subscription is installed or left behind.
-func TestSSE_UserIDWithNoMembershipSubjectRefused(t *testing.T) {
-	x := newLeaveSSEFixture(t)
-	bad := "user\tbad"
-	require.Empty(t, membershipChangedSubjectFor(bad))
+// leaveOddUserID is a user ID that is no single subject token: it holds
+// ':', '/', '.' and a tab, as a federated <issuer>:<sub> ID can.
+const leaveOddUserID = "https://issuer.example:sub/a.b\tc"
+
+// TestSSE_OddUserIDStreamFollowsItsMembershipSubject (review round 4): a
+// session user whose ID is no single subject token opens the web events
+// stream and holds exactly one membership subscription, on
+// membershipChangedSubjectFor(its ID). A membership change published for
+// a different ID leaves the stream open; one published for its own ID,
+// through the publisher the leave uses, re-checks and closes it.
+func TestSSE_OddUserIDStreamFollowsItsMembershipSubject(t *testing.T) {
+	other := leaveOddUserID + "x"
+	own := membershipChangedSubjectFor(leaveOddUserID)
+	require.NotEqual(t, own, membershipChangedSubjectFor(other))
+	projectID, agentID := tid("sse-odd-project"), tid("sse-odd-agent")
+	s := &sseAgentStore{mockAuthzStore: sseAgentProjectAccess(leaveOddUserID, projectID), agents: map[string]*store.Agent{
+		agentID: {ID: agentID, ProjectID: projectID, OwnerID: leaveOddUserID},
+	}}
 	pub := &sseCountingPublisher{ChannelEventPublisher: NewChannelEventPublisher()}
 	t.Cleanup(pub.Close)
-	ws := &WebServer{store: x.f.store, events: pub, authzService: x.f.srv.authzService}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	rec := httptest.NewRecorder()
-	ws.handleSSE(rec, sseAgentRequest(ctx, bad, "user", x.subject))
-	assert.Equal(t, http.StatusForbidden, rec.Code)
-	assert.Contains(t, rec.Body.String(), "denied_subjects")
-	assert.Zero(t, pub.subscriptions, "no subscription for a refused stream")
-	assertNoSSESubscribers(t, pub.ChannelEventPublisher)
+	ws := &WebServer{store: s, events: pub, authzService: NewAuthzService(s, slog.Default())}
+	srv := &Server{events: pub}
+	orig := sseStreamStillAuthorized
+	sseStreamStillAuthorized = func(*WebServer, *http.Request, []string) bool { return false }
+	t.Cleanup(func() { sseStreamStillAuthorized = orig })
+
+	stream := openLeaveSSE(t, ws, leaveOddUserID, "agent."+agentID+".>")
+	// The subscriptions are installed before the flush openLeaveSSE waited
+	// for, under the recorder's lock, so reading them here is ordered.
+	var mine int
+	for _, p := range pub.patterns {
+		if len(p) == 1 && strings.HasPrefix(p[0], membershipChangedSubject) {
+			assert.Equal(t, own, p[0], "the only membership subscription is the caller's own")
+			mine++
+		}
+	}
+	assert.Equal(t, 1, mine, "exactly one membership subscription")
+	assert.Len(t, pub.clientSubscriptions(leaveOddUserID), 1, "exactly one client subscription")
+
+	srv.publishMembershipChanged(other, projectID)
+	assert.Never(t, stream.closed, 300*time.Millisecond, 10*time.Millisecond, "another ID's change closed the stream")
+
+	srv.publishMembershipChanged(leaveOddUserID, projectID)
+	require.Eventually(t, stream.closed, 5*time.Second, 10*time.Millisecond, "the caller's own change did not close the stream")
+	assert.Contains(t, stream.rec.String(), "event: reconnect")
 }
 
-// TestAgentMessagesStream_UserIDWithNoMembershipSubjectRefused (review round
-// 3, fail closed): the agent messages stream refuses a caller whose ID
-// gives no membership-changed subject with its authorization-denial
-// response, before any subscription.
-func TestAgentMessagesStream_UserIDWithNoMembershipSubjectRefused(t *testing.T) {
-	x := newLeaveSSEFixture(t)
-	agent := leaveOrderAgent(t, x)
-	bad := "user\tbad"
-	identity := NewAuthenticatedUser(bad, "bad@test.com", "Bad", "member", "web")
+// openFedAgentStream opens the agent messages stream of agentID for fed,
+// as the /api/v1 middleware would after a federated token, and waits for
+// the headers. It returns the recorder and a channel closed when the
+// handler returns.
+func openFedAgentStream(t *testing.T, srv *Server, fed *FederatedUserIdentity, agentID string) (*leaveStreamRecorder, chan struct{}) {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	rctx := contextWithCredentialContext(context.WithValue(contextWithIdentity(ctx, identity), userContextKey{}, identity),
-		CredentialContext{Kind: CredentialKindInteractive, ID: "test-session"})
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/agents/"+agent.ID+"/messages/stream", nil).WithContext(rctx)
-	rec := httptest.NewRecorder()
-	x.f.srv.handleAgentMessagesStream(rec, req, agent.ID)
-	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
-	assertNoSSESubscribers(t, x.pub)
+	rctx := contextWithCredentialContext(contextWithIdentity(ctx, fed), credentialContextForIdentity(fed))
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/agents/"+agentID+"/messages/stream", nil).WithContext(rctx)
+	rec := newLeaveStreamRecorder()
+	done := make(chan struct{})
+	t.Cleanup(func() { cancel(); <-done })
+	go func() {
+		defer close(done)
+		srv.handleAgentMessagesStream(rec, req, agentID)
+	}()
+	require.Eventually(t, func() bool {
+		select {
+		case <-done:
+			return true
+		default:
+			return rec.isFlushed()
+		}
+	}, 5*time.Second, 10*time.Millisecond)
+	return rec, done
+}
+
+// TestAgentMessagesStream_FederatedUserOpensAndFollowsMembership (review
+// round 4): a federated user (<issuer>:<sub>, here with '/', '.' and a tab
+// in the subject) holding read on an agent through a project binding opens
+// /api/v1/agents/{id}/messages/stream: 200 and the event stream. A
+// membership change published for a different ID leaves the stream open.
+// After the binding is removed, a change published for the federated ID
+// re-checks the stream and ends it.
+func TestAgentMessagesStream_FederatedUserOpensAndFollowsMembership(t *testing.T) {
+	f := newFedFixture(t, "stream")
+	pub := NewChannelEventPublisher()
+	t.Cleanup(pub.Close)
+	f.srv.SetEventPublisher(pub)
+	fed := NewFederatedUserIdentity(fedTestIssuer, "sub/a.b\tc", "fed-stream@idp.example", "Fed", "viewer", nil)
+	require.Contains(t, fed.ID(), ":")
+	binding := f.grantFed(t, fed.ID(), f.projectID, nil)
+	agent := f.agent(t, "fedstream", fed.ID())
+	require.True(t, decidePerm(f.srv.authzService, fed, agentResource(agent), ActionRead, "agent.read", false).Allowed,
+		"the federated user holds agent.read")
+
+	rec, done := openFedAgentStream(t, f.srv, fed, agent.ID)
+	select {
+	case <-done:
+		t.Fatalf("the stream was refused: %d %s", rec.status(), rec.String())
+	default:
+	}
+	assert.Equal(t, http.StatusOK, rec.status())
+	assert.Equal(t, "text/event-stream", rec.Header().Get("Content-Type"))
+
+	f.srv.publishMembershipChanged(fed.ID()+"x", f.projectID)
+	assert.Never(t, func() bool {
+		select {
+		case <-done:
+			return true
+		default:
+			return false
+		}
+	}, 300*time.Millisecond, 10*time.Millisecond, "another ID's change ended the stream")
+
+	f.fed.removeBinding(binding.ID)
+	f.srv.publishMembershipChanged(fed.ID(), f.projectID)
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the federated user's own change did not end the stream")
+	}
+	assert.Contains(t, rec.String(), "stream ended")
 }
