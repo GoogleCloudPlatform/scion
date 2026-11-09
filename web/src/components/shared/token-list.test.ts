@@ -25,11 +25,11 @@
 
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 import { requestUrl } from '../../client/__fixtures__/request-url.js';
-
-vi.mock('../../utils/toast.js', () => ({ showToast: vi.fn() }));
-const { showToast } = await import('../../utils/toast.js');
+import { showToast } from '../../utils/toast.js';
 import type { ScionTokenList } from './token-list.js';
 import type * as TokenListModule from './token-list.js';
+
+vi.mock('../../utils/toast.js', () => ({ showToast: vi.fn() }));
 
 let formatEligibilityReason: (reason?: string) => string;
 let relationshipBadgeText: (scope: string) => string;
@@ -1039,7 +1039,7 @@ describe('scion-token-list — copy the revealed token (ptone/scion#7555)', () =
   /** The private members of the token list that this block drives. */
   interface TokenListInternals {
     openCreateDialog(): void;
-    handleBoundaryChange(kind: string): void;
+    handleBoundaryChange(kind: TokenListModule.TokenBoundaryKind): void;
     createName: string;
     createScopes: Set<string>;
     handleCreate(e: Event): Promise<void>;
@@ -1074,6 +1074,21 @@ describe('scion-token-list — copy the revealed token (ptone/scion#7555)', () =
     Object.defineProperty(navigator, 'clipboard', { value: undefined, configurable: true });
     const el = await revealed();
     await expect(el.copyToken()).resolves.toBeUndefined();
+    expect(el.revealCopied).toBe(false);
+    expect(showToast).toHaveBeenCalledTimes(1);
+    expect(showToast).toHaveBeenCalledWith(
+      'Could not copy. The token is selected: press Ctrl/Cmd+C.',
+      'danger'
+    );
+    expect(window.getSelection()?.toString()).toContain('scion_pat_x');
+  });
+
+  it('selects the token and shows exactly one failure toast when the write is rejected', async () => {
+    const writeText = vi.fn().mockRejectedValue(new Error('denied'));
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+    const el = await revealed();
+    await expect(el.copyToken()).resolves.toBeUndefined();
+    expect(writeText).toHaveBeenCalledWith('scion_pat_x');
     expect(el.revealCopied).toBe(false);
     expect(showToast).toHaveBeenCalledTimes(1);
     expect(showToast).toHaveBeenCalledWith(
