@@ -483,6 +483,47 @@ type OnboardingStatus struct {
 	ImageRegistrySaveable string `json:"imageRegistrySaveable,omitempty"`
 }
 
+// harnessesSeeded reports whether at least one active global harness config
+// exists: the rows the setup wizard's harness step lists, the same query as
+// its request (GET /api/v1/harness-configs?scope=global&status=active). A
+// directory under globalDir/harness-configs with no row does not count when
+// bootstrap could have created one.
+//
+// Where no row can be created for the directory, the directory counts (a
+// subdirectory holding config.yaml), so the onboarding status is never held
+// incomplete on a hub that cannot seed: without a store, without a storage
+// backend (bootstrap skips) and after a bootstrap, workstation or hosted,
+// that could not load the built-in seed ledger. A store error also falls
+// back to the directory rather than reading as not seeded.
+func (s *Server) harnessesSeeded(ctx context.Context, globalDir string) bool {
+	hcDir := filepath.Join(globalDir, "harness-configs")
+	if s.store == nil {
+		return countHarnessConfigDirs(hcDir) > 0
+	}
+	result, err := s.store.ListHarnessConfigs(ctx, store.HarnessConfigFilter{
+		Scope:  store.HarnessConfigScopeGlobal,
+		Status: store.HarnessConfigStatusActive,
+	}, store.ListOptions{Limit: 1, SkipTotalCount: true})
+	if err != nil {
+		// The UI polls this status: WARN once per failure streak.
+		logf := s.resourceLog.Debug
+		if !s.harnessListWarned.Swap(true) {
+			logf = s.resourceLog.Warn
+		}
+		logf("onboarding status: listing harness configs failed; counting the harness-configs directory",
+			"dir", hcDir, "error", err)
+		return countHarnessConfigDirs(hcDir) > 0
+	}
+	s.harnessListWarned.Store(false)
+	if result != nil && len(result.Items) > 0 {
+		return true
+	}
+	if s.GetStorage() == nil || s.harnessSeedLedgerFailed.Load() {
+		return countHarnessConfigDirs(hcDir) > 0
+	}
+	return false
+}
+
 func (s *Server) computeOnboardingStatus(ctx context.Context) OnboardingStatus {
 	var status OnboardingStatus
 
@@ -509,16 +550,7 @@ func (s *Server) computeOnboardingStatus(ctx context.Context) OnboardingStatus {
 	_, detectErr := config.DetectLocalRuntime()
 	status.RuntimeOK = detectErr == nil
 
-	// HarnessesSeeded: at least one harness-config exists
-	harnessConfigsDir := filepath.Join(globalDir, "harness-configs")
-	if entries, err := os.ReadDir(harnessConfigsDir); err == nil {
-		for _, e := range entries {
-			if e.IsDir() {
-				status.HarnessesSeeded = true
-				break
-			}
-		}
-	}
+	status.HarnessesSeeded = s.harnessesSeeded(ctx, globalDir)
 
 	// HasWorkspace: at least one project in the store
 	if s.store != nil {

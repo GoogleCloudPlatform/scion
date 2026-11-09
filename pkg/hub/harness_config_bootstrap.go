@@ -39,7 +39,10 @@ func (s *Server) BootstrapHarnessConfigsFromDir(ctx context.Context, harnessConf
 	}
 
 	if s.GetStorage() == nil {
-		s.resourceLog.Warn("harness config bootstrap: no storage backend configured, skipping")
+		// Name what is skipped: these directories get no rows, so the setup
+		// wizard lists no harness configs (ptone/scion#7462).
+		s.resourceLog.Warn("harness config bootstrap: no storage backend configured, skipping",
+			"dir", harnessConfigsDir, "skipped", countHarnessConfigDirs(harnessConfigsDir))
 		return nil
 	}
 
@@ -53,7 +56,7 @@ func (s *Server) BootstrapHarnessConfigsFromDir(ctx context.Context, harnessConf
 	// If the ledger cannot be loaded, fail closed for built-ins only: no
 	// missing built-in is created, but user dirs are still imported and
 	// existing rows still synced. The load error is returned at the end.
-	ledger, loadErr := s.loadBuiltinSeedLedger(ctx)
+	ledger, loadErr := s.loadSeedLedgerForBootstrap(ctx)
 	if loadErr != nil {
 		loadErr = fmt.Errorf("harness config bootstrap: %w", loadErr)
 		s.resourceLog.Error("harness config bootstrap: cannot load built-in seed ledger; not creating missing built-ins this run",
@@ -207,4 +210,36 @@ func (s *Server) currentTemplateHash(ctx context.Context, id string) string {
 		return ""
 	}
 	return t.ContentHash
+}
+
+// countHarnessConfigDirs returns how many subdirectories of dir hold a
+// config.yaml, the directories bootstrap imports as harness configs. A
+// missing or unreadable dir counts 0.
+func countHarnessConfigDirs(dir string) int {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		if info, err := os.Stat(filepath.Join(dir, e.Name(), "config.yaml")); err == nil && info.Mode().IsRegular() {
+			n++
+		}
+	}
+	return n
+}
+
+// loadSeedLedgerForBootstrap loads the built-in seed ledger for a bootstrap
+// that creates harness-config rows, and records whether the load failed
+// (harnessSeedLedgerFailed), so the onboarding status knows that no
+// built-in row was created. Every such bootstrap (the workstation
+// BootstrapHarnessConfigsFromDir and the hosted BootstrapBundledResources)
+// loads the ledger through it.
+func (s *Server) loadSeedLedgerForBootstrap(ctx context.Context) (*builtinSeedLedger, error) {
+	ledger, err := s.loadBuiltinSeedLedger(ctx)
+	s.harnessSeedLedgerFailed.Store(err != nil)
+	return ledger, err
 }
