@@ -110,6 +110,10 @@ const (
 	NoteNoop         = "Nothing to do: this plan is already applied."
 	NoteRolledBack   = "Rollback is complete. The next 'scion server start' serves the legacy Runtime Broker again. The flat identity directories were moved aside, not deleted."
 	NoteLegacyLinks  = "The legacy Runtime Broker stays linked to its projects (offline) until it is retired; nothing is re-created on a rollback."
+	// NoteNoIdentity is followed by an instance key: its registration
+	// started but recorded no Runtime Broker ID, and its identity file
+	// holds none, so no row could be named for deregistration.
+	NoteNoIdentity = "No Runtime Broker ID is recorded for an instance whose registration started, and its identity file holds none, so no row was deregistered for it. Check the Hub for a row of that name. Instance key:"
 )
 
 // Refusal is a refused operation. It is an error whose text is fixed.

@@ -70,10 +70,8 @@ func runBrokerConvertWriteModes(cmd *cobra.Command) error {
 	case brokerConvertStatus:
 		rep, err = brokerconvert.Status(ctx, env)
 	case brokerConvertRollback:
-		if !isJSONOutput() || !autoConfirm {
-			if !convertConfirmTo(cmd.ErrOrStderr(), "Roll back the recorded convert run on this host? The flat instance is deregistered and its identity moved aside.") {
-				return errors.New("rollback not confirmed")
-			}
+		if !convertConfirmTo(cmd.ErrOrStderr(), "Roll back the recorded convert run on this host? The flat instance is deregistered and its identity moved aside.") {
+			return errors.New("rollback not confirmed")
 		}
 		rep, err = brokerconvert.Rollback(ctx, env)
 	default:

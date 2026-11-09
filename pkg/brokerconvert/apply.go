@@ -56,6 +56,10 @@ type Env struct {
 	// config.RemoveRuntimeBrokerInstances on GlobalDir).
 	WriteInstances  func([]config.V1RuntimeBrokerInstanceConfig) error
 	RemoveInstances func(expected []config.V1RuntimeBrokerInstanceConfig) error
+	// BeforeMove, if set, runs for each instance after its row is
+	// deregistered (or confirmed absent) and before its directory is
+	// moved aside. An error stops the rollback before that move.
+	BeforeMove func(globalDir, key string) error
 	// Now is the clock.
 	Now func() time.Time
 }
@@ -330,7 +334,11 @@ func (r *run) checkNames(insts []config.V1RuntimeBrokerInstanceConfig) *Refusal 
 			if own[b.ID] {
 				continue
 			}
-			if strings.EqualFold(b.Name, inst.Name) || strings.EqualFold(b.Slug, inst.Name) || strings.EqualFold(b.Slug, inst.Key) {
+			// The list is filtered by name only (the API has no slug
+			// filter), so a slug collision on a row of another name is not
+			// seen here: the Hub refuses it at registration (R2), in step 1,
+			// before the settings change.
+			if strings.EqualFold(b.Name, inst.Name) {
 				conflicts = append(conflicts, inst.Key)
 				break
 			}
@@ -457,6 +465,12 @@ func (r *run) register(it *RegisterItem, insts []config.V1RuntimeBrokerInstanceC
 	if err != nil {
 		ref := refuseHub(RefuseRegister, err)
 		it.Error = fixedError(ref)
+		// The Hub may hold a row for this instance already (registered, then
+		// join, an acknowledgement or the credential save failed): record
+		// the ID the identity file carries, so rollback deregisters it.
+		if id, ok, ierr := identityBrokerID(r.env.GlobalDir, it.Key); ierr == nil && ok {
+			it.BrokerID = id
+		}
 		if sref := r.save(); sref != nil {
 			return sref
 		}
@@ -471,6 +485,18 @@ func (r *run) register(it *RegisterItem, insts []config.V1RuntimeBrokerInstanceC
 func (r *run) writeSettings(insts []config.V1RuntimeBrokerInstanceConfig) *Refusal {
 	if r.j.Settings.State == StepDone {
 		return nil
+	}
+	// The instances copy is what rollback compares the settings against,
+	// so it must equal what this step writes: a resume may carry a changed
+	// list (a rotated env value leaves the plan digest equal).
+	if r.j.InstancesFile != "" {
+		data, err := yamlv3.Marshal(insts)
+		if err != nil {
+			return refuse(RefuseLocalWrite)
+		}
+		if err := ReplaceInstancesCopy(r.env.GlobalDir, r.j.InstancesFile, data); err != nil {
+			return refuse(RefuseLocalWrite)
+		}
 	}
 	r.j.Settings = ItemStatus{State: StepStarted}
 	if ref := r.save(); ref != nil {

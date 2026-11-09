@@ -349,6 +349,21 @@ func WriteInstancesCopy(globalDir, runID string, data []byte) (string, error) {
 	return writeRunCopy(globalDir, InstancesFilePrefix+runID+".yaml", data)
 }
 
+// ReplaceInstancesCopy replaces the instances copy name with data, owner-
+// only and atomically, so it equals what step 2 writes even when a resumed
+// run carries a changed list (the plan digest leaves env values out). The
+// evidence copy is never replaced.
+func ReplaceInstancesCopy(globalDir, name string, data []byte) error {
+	if !validRunCopyName(name) || !strings.HasPrefix(name, InstancesFilePrefix) {
+		return fmt.Errorf("%w: invalid file name", ErrJournalUnreadable)
+	}
+	tree, err := openConvertTree(globalDir, true)
+	if err != nil {
+		return fmt.Errorf("opening the convert directory: %w", err)
+	}
+	return replacePrivate(tree, convertRel, name, data)
+}
+
 // ReadRunCopy reads the owner-only file name from the convert directory.
 func ReadRunCopy(globalDir, name string) ([]byte, error) {
 	if !validRunCopyName(name) {

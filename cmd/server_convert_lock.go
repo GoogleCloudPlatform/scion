@@ -32,6 +32,8 @@ var acquireConvertStartLock = brokerconvert.AcquireServerStartLock
 // instance host). The convert host lock taken at server start is released
 // only once every one of them is closed: the release follows this
 // process's own bind, never a network probe another process could answer.
+// It is a process global that is only appended to, never reset: that
+// holds because a process runs at most one server start.
 var brokerListeners listenerSet
 
 type listenerSet struct {

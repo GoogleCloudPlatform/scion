@@ -147,11 +147,6 @@ func editRuntimeBrokerInstances(dir string, decide func([]V1RuntimeBrokerInstanc
 	if err := lock.checkFor(path); err != nil {
 		return err
 	}
-	tree, err := privatefs.OpenTree(dir, privatefs.TreeOptions{})
-	if err != nil {
-		return err
-	}
-	name := filepath.Base(path)
 	mode, before, err := checkInstancesWriteTarget(path)
 	if err != nil {
 		return err
@@ -189,21 +184,12 @@ func editRuntimeBrokerInstances(dir string, decide func([]V1RuntimeBrokerInstanc
 	if bytes.Equal(out, orig) {
 		return nil
 	}
-	tmpRel, err := writeSettingsTempKeepingMode(tree, name, out, mode)
-	if err != nil {
-		return err
-	}
-	// The one settings-file write (listed in settingsBypassAllowed): a
-	// rename within the directory, which replaces whatever is at path
-	// itself and never writes through a link.
-	if err := os.Rename(filepath.Join(dir, tmpRel), path); err != nil {
-		_ = tree.Remove(tmpRel)
-		return err
-	}
-	if err := syncDir(dir); err != nil {
-		return fmt.Errorf("%w: %w", errAtomicNotDurable, err)
-	}
-	return nil
+	// The one settings-file write (listed in settingsBypassAllowed): the
+	// platform atomic writer renames a temporary file from the same
+	// directory over path, which replaces whatever is at path itself and
+	// never writes through a link, keeps the file's mode and syncs the
+	// directory.
+	return writeFileAtomicMode(path, out, mode)
 }
 
 // checkInstancesWriteTarget refuses a settings path that is a symlink, not
@@ -226,37 +212,6 @@ func checkInstancesWriteTarget(path string) (fs.FileMode, fs.FileInfo, error) {
 		return 0, nil, fmt.Errorf("refusing to write %s: %w", path, err)
 	}
 	return fi.Mode().Perm(), fi, nil
-}
-
-// writeSettingsTempKeepingMode writes data to a new owner-only temporary
-// file next to name in tree, syncs it, gives it mode and returns its name.
-// The file stays 0600 until it is complete. On error nothing is left.
-func writeSettingsTempKeepingMode(tree *privatefs.Tree, name string, data []byte, mode fs.FileMode) (string, error) {
-	f, tmpRel, err := tree.CreateTemp("", "."+name+".tmp-*", privatefs.Private)
-	if err != nil {
-		return "", err
-	}
-	ok := false
-	defer func() {
-		_ = f.Close()
-		if !ok {
-			_ = tree.Remove(tmpRel)
-		}
-	}()
-	if _, err := f.Write(data); err != nil {
-		return "", err
-	}
-	if err := f.Sync(); err != nil {
-		return "", err
-	}
-	if err := f.Chmod(mode); err != nil {
-		return "", err
-	}
-	if err := f.Close(); err != nil {
-		return "", err
-	}
-	ok = true
-	return tmpRel, nil
 }
 
 // editInstancesYAML returns orig with server.broker.instances set to set
@@ -361,7 +316,14 @@ func InstancesEqual(a, b []V1RuntimeBrokerInstanceConfig) bool {
 	if len(a) == 0 && len(b) == 0 {
 		return true
 	}
-	return reflect.DeepEqual(a, b)
+	// Compared through one encoding, so a nil and an empty field (from
+	// two decode paths, the strict loader and a plain decode) are equal.
+	ab, aerr := yamlv3.Marshal(a)
+	bb, berr := yamlv3.Marshal(b)
+	if aerr != nil || berr != nil {
+		return reflect.DeepEqual(a, b)
+	}
+	return bytes.Equal(ab, bb)
 }
 
 // differingKeys lists the instance keys whose entries differ between a

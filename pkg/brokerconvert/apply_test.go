@@ -656,6 +656,123 @@ func TestRollback_RefusesChangedInstances(t *testing.T) {
 	assert.NotContains(t, err.Error(), "PLANTED")
 }
 
+// registerThenFail is a Register that creates the row and the identity (as
+// the real one does before join) and then fails.
+func registerThenFail(f *applyFixture) func(context.Context, config.V1RuntimeBrokerInstanceConfig) (string, string, error) {
+	ok := f.env.Register
+	return func(ctx context.Context, inst config.V1RuntimeBrokerInstanceConfig) (string, string, error) {
+		_, _, err := ok(ctx, inst)
+		require.NoError(f.t, err)
+		return "", "", errors.New("join failed PLANTED-HUB-MSG")
+	}
+}
+
+// B2: registration failed after the Hub created the row. Apply records the
+// row's ID from the identity file; rollback deregisters it before the move,
+// and a fresh apply then succeeds.
+func TestRollback_RegisterFailedAfterRowCreated_Deregisters(t *testing.T) {
+	f := newApplyFixture(t)
+	key := f.instanceKey()
+	okRegister := f.env.Register
+	f.env.Register = registerThenFail(f)
+	_, err := f.apply()
+	require.Error(t, err)
+	assert.Equal(t, RefuseRegister, refusalCode(t, err))
+	j, err := LoadJournal(f.g)
+	require.NoError(t, err)
+	assert.Equal(t, StepStarted, j.Register[0].State)
+	assert.Equal(t, applyInstanceID, j.Register[0].BrokerID, "the ID is recorded from the identity file")
+	require.NotNil(t, f.hub.instance, "the row exists")
+
+	rep, err := Rollback(context.Background(), f.env)
+	require.NoError(t, err)
+	assert.Equal(t, JournalRolledBack, rep.State)
+	assert.Nil(t, f.hub.instance, "the row is deregistered")
+	assert.Contains(t, f.hub.order, "deregister")
+	_, err = os.Lstat(filepath.Join(ConvertDir(f.g), RolledBackDirName, rep.RunID, key, "identity.json"))
+	require.NoError(t, err, "the identity moved aside after the deregister")
+
+	f.env.Register = okRegister
+	rep, err = f.apply()
+	require.NoError(t, err, "a fresh apply finds no orphan row")
+	assert.Equal(t, JournalApplied, rep.State)
+}
+
+// B2 (crash form): a register item left started with no ID (the run was cut
+// short after the Hub created the row) is named from the identity file at
+// rollback, and the row is deregistered.
+func TestRollback_StartedItemWithoutIDIsNamedFromIdentity(t *testing.T) {
+	f := newApplyFixture(t)
+	f.env.Register = registerThenFail(f)
+	_, err := f.apply()
+	require.Error(t, err)
+	j, err := LoadJournal(f.g)
+	require.NoError(t, err)
+	j.Register[0].BrokerID = "" // the crash: the ID was never saved
+	require.NoError(t, SaveJournal(f.g, j, testNow))
+	require.NotNil(t, f.hub.instance)
+
+	_, err = Rollback(context.Background(), f.env)
+	require.NoError(t, err)
+	assert.Nil(t, f.hub.instance, "no row is left")
+}
+
+// B2 (sec): a deregister failure other than 404 stops the rollback before
+// the move, so the credentials are never moved aside while the row lives.
+func TestRollback_DeregisterFailureKeepsDirectory(t *testing.T) {
+	f := newApplyFixture(t)
+	key := f.instanceKey()
+	f.env.Register = registerThenFail(f)
+	_, err := f.apply()
+	require.Error(t, err)
+	f.hub.failNext["DELETE /api/v1/runtime-brokers/"+applyInstanceID] = http.StatusInternalServerError
+
+	_, err = Rollback(context.Background(), f.env)
+	require.Error(t, err)
+	assert.Equal(t, RefuseHubRequest, refusalCode(t, err))
+	fi, err := os.Lstat(filepath.Join(f.g, "runtime-brokers", key, "identity.json"))
+	require.NoError(t, err, "the directory stays in place")
+	assert.True(t, fi.Mode().IsRegular())
+	j, err := LoadJournal(f.g)
+	require.NoError(t, err)
+	require.Len(t, j.Rollback.Moved, 1)
+	assert.Equal(t, StepPending, j.Rollback.Moved[0].State, "the move did not start")
+}
+
+// B2 (sec): a started registration with no ID and no identity file is
+// reported (the key only), not skipped silently.
+func TestRollback_ReportsStartedItemWithoutIdentity(t *testing.T) {
+	f := newApplyFixture(t)
+	key := f.instanceKey()
+	f.regErr = errors.New("refused before any identity")
+	_, err := f.apply()
+	require.Error(t, err)
+
+	rep, err := Rollback(context.Background(), f.env)
+	require.NoError(t, err)
+	assert.Contains(t, rep.Notes, NoteNoIdentity+" "+key)
+}
+
+// B3: a resume after a step 1 failure with a rotated env value (the plan
+// digest leaves values out) writes the new list, and the instances copy
+// follows it, so rollback succeeds.
+func TestRollback_AfterResumeWithRotatedEnvValue(t *testing.T) {
+	f := newApplyFixture(t)
+	f.regErr = errors.New("transient")
+	_, err := f.apply()
+	require.Error(t, err)
+	data := strings.Replace(string(settingsBytes(t, f.g)), plantedApplyEnv, "PLANTED-ROTATED-VALUE", 1)
+	require.NoError(t, os.WriteFile(filepath.Join(f.g, "settings.yaml"), []byte(data), 0o640))
+	f.regErr = nil
+	rep, err := f.apply()
+	require.NoError(t, err)
+	assert.Equal(t, JournalApplied, rep.State)
+
+	rep, err = Rollback(context.Background(), f.env)
+	require.NoError(t, err, "the instances copy equals what step 2 wrote")
+	assert.Equal(t, JournalRolledBack, rep.State)
+}
+
 func TestRollback_RefusesWhileInstanceHasAgent(t *testing.T) {
 	f := newApplyFixture(t)
 	_, err := f.apply()

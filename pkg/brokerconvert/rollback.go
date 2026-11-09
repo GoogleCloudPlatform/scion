@@ -63,6 +63,14 @@ func Rollback(ctx context.Context, env *Env) (*Report, error) {
 	if env.ServerRunning != nil && env.ServerRunning(ctx) {
 		return refused(ModeRollback, j, refuse(RefuseServerRunning))
 	}
+	// 0. A registration that started but recorded no Runtime Broker ID
+	// (it failed, or the run was cut short, after the Hub may have created
+	// the row) is named from the instance identity file, so that row is
+	// deregistered before the directory moves.
+	notes, ref := r.fillRegisteredIDs()
+	if ref != nil {
+		return refused(ModeRollback, j, ref)
+	}
 	// 1. No flat instance may have a non-terminal agent.
 	for _, it := range j.Register {
 		if it.BrokerID == "" {
@@ -76,6 +84,7 @@ func Rollback(ctx context.Context, env *Env) (*Report, error) {
 	if j.Rollback == nil {
 		j.Rollback = newRollbackRecord(j)
 	}
+	ensureDeregisterItems(j)
 	j.State = JournalRollingBack
 	if ref := r.save(); ref != nil {
 		return refused(ModeRollback, j, ref)
@@ -107,8 +116,59 @@ func Rollback(ctx context.Context, env *Env) (*Report, error) {
 		return refused(ModeRollback, j, ref)
 	}
 	rep := reportFrom(ModeRollback, j)
+	rep.Notes = append(rep.Notes, notes...)
 	rep.Notes = append(rep.Notes, NoteRolledBack)
 	return rep, nil
+}
+
+// fillRegisteredIDs records, for each register item that is not pending
+// and has no Runtime Broker ID, the ID its identity file carries. It
+// returns a note (the key only) for each such item whose identity file is
+// absent or records no ID, so the operator learns that no row could be
+// named for it.
+func (r *run) fillRegisteredIDs() ([]string, *Refusal) {
+	var notes []string
+	changed := false
+	for i := range r.j.Register {
+		it := &r.j.Register[i]
+		if it.State == StepPending || it.BrokerID != "" {
+			continue
+		}
+		id, ok, err := identityBrokerID(r.env.GlobalDir, it.Key)
+		if err != nil {
+			return nil, refuse(RefuseLocalWrite)
+		}
+		if !ok {
+			notes = append(notes, NoteNoIdentity+" "+it.Key)
+			continue
+		}
+		it.BrokerID = id
+		changed = true
+	}
+	if changed {
+		if ref := r.save(); ref != nil {
+			return nil, ref
+		}
+	}
+	return notes, nil
+}
+
+// ensureDeregisterItems adds a deregister item for each register item
+// that is not pending and names a Runtime Broker ID the rollback record
+// does not list yet (an ID filled from an identity file on a resumed
+// rollback).
+func ensureDeregisterItems(j *Journal) {
+	listed := map[string]bool{}
+	for _, d := range j.Rollback.Deregister {
+		listed[d.BrokerID] = true
+	}
+	for _, it := range j.Register {
+		if it.State == StepPending || it.BrokerID == "" || listed[it.BrokerID] {
+			continue
+		}
+		j.Rollback.Deregister = append(j.Rollback.Deregister, DeregisterItem{BrokerID: it.BrokerID, ItemStatus: ItemStatus{State: StepPending}})
+		listed[it.BrokerID] = true
+	}
 }
 
 // newRollbackRecord lists the rollback items for the apply items the
@@ -269,12 +329,31 @@ func (r *run) moveAside(it *MovedItem) *Refusal {
 	if it.State == StepDone {
 		return nil
 	}
-	// The row must be gone first, so the credentials inside are dead.
-	for _, d := range r.j.Rollback.Deregister {
-		for _, reg := range r.j.Register {
-			if reg.Key == it.Key && reg.BrokerID == d.BrokerID && d.State != StepDone {
-				return refuse(RefuseHubRequest)
+	// The row must be gone first, so the credentials inside are dead: a
+	// key that names a Runtime Broker ID moves only once that ID's
+	// deregister item is done.
+	for _, reg := range r.j.Register {
+		if reg.Key != it.Key || reg.BrokerID == "" {
+			continue
+		}
+		deregistered := false
+		for _, d := range r.j.Rollback.Deregister {
+			if d.BrokerID == reg.BrokerID && d.State == StepDone {
+				deregistered = true
 			}
+		}
+		if !deregistered {
+			return refuse(RefuseHubRequest)
+		}
+	}
+	if r.env.BeforeMove != nil {
+		if err := r.env.BeforeMove(r.env.GlobalDir, it.Key); err != nil {
+			ref := refuse(RefuseLocalWrite)
+			it.Error = fixedError(ref)
+			if sref := r.save(); sref != nil {
+				return sref
+			}
+			return ref
 		}
 	}
 	it.ItemStatus = ItemStatus{State: StepStarted}

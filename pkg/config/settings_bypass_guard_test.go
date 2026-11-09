@@ -42,9 +42,9 @@ var settingsBypassAllowed = map[string]string{
 	// (WriteRuntimeBrokerInstances, RemoveRuntimeBrokerInstances; design
 	// sections 4.3 and 5.4, erratum E1). It holds the settings lock, but
 	// refuses a link at the settings path instead of following it, so it
-	// cannot use writeSettingsFileAtomic, which follows one; it renames an
-	// owner-only temporary file from the same directory over the file and
-	// keeps the file's mode.
+	// cannot use writeSettingsFileAtomic, which follows one; it writes
+	// through writeFileAtomicMode, which renames a temporary file from the
+	// same directory over the file, keeping the file's mode.
 	"editRuntimeBrokerInstances": "convert-apply instances writer (no link followed; design 4.3 / 5.4)",
 }
 
