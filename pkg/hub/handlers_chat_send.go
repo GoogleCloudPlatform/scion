@@ -336,7 +336,7 @@ func (s *Server) authorizeChatConversation(ctx context.Context, user UserIdentit
 	target := &chatSendTarget{Key: key, wcs: wcs}
 	audience, topic, err := chatKeyReadAudience(ctx, wcs, key)
 	if err != nil {
-		logChatStoreFault(ctx, slog.Default(), "chat send: topic lookup failed", "key", key, "error", err)
+		logChatStoreFault(ctx, slog.Default(), "chat send: topic lookup failed", key, err)
 		return nil, newChatSendError(http.StatusInternalServerError, ErrCodeInternalError, "Internal server error", nil)
 	}
 	if audience == chatAudienceParticipants {
@@ -366,7 +366,7 @@ func (s *Server) authorizeChatConversation(ctx context.Context, user UserIdentit
 			logReferenceRefused(ctx, chatSendPath(key), "topic project lookup failed: "+err.Error(), user)
 			return nil, chatSendNotFound("Thread")
 		}
-		logChatStoreFault(ctx, slog.Default(), "chat send: topic project lookup failed", "key", key, "error", err)
+		logChatStoreFault(ctx, slog.Default(), "chat send: topic project lookup failed", key, err)
 		return nil, newChatSendError(http.StatusInternalServerError, ErrCodeInternalError, "Internal server error", nil)
 	}
 	resource := projectResource(project)
@@ -460,15 +460,29 @@ func validChatTopicKey(key string) bool {
 	return key != "" && utf8.ValidString(key) && !strings.ContainsRune(key, 0)
 }
 
-// logChatStoreFault logs a store fault on a chat lookup with l: at Debug when
-// ctx is already done (the client went away, so the fault is expected), at
-// Warn otherwise. The caller still answers the fault (a 500).
-func logChatStoreFault(ctx context.Context, l *slog.Logger, msg string, args ...any) {
+// logChatStoreFault logs a store fault on a chat lookup keyed by the
+// caller-supplied key with l: at Debug when ctx is already done (the client
+// went away, so the fault is expected), at Warn otherwise. The key is logged
+// bounded (chatKeyLogArgs). The caller still answers the fault (a 500).
+func logChatStoreFault(ctx context.Context, l *slog.Logger, msg, key string, err error) {
+	args := append(chatKeyLogArgs(key), "error", err)
 	if ctx.Err() != nil {
 		l.DebugContext(ctx, msg, args...)
 		return
 	}
 	l.WarnContext(ctx, msg, args...)
+}
+
+// maxLoggedChatKeyBytes bounds the caller-supplied chat key in a log line.
+const maxLoggedChatKeyBytes = 128
+
+// chatKeyLogArgs returns the log attributes of a caller-supplied chat key:
+// "key", at most its first maxLoggedChatKeyBytes bytes cut on a rune
+// boundary (truncateUTF8), and "key_len", its full length in bytes. The
+// route accepts a key of any length, so the key's length must not decide the
+// size of this store-fault log line.
+func chatKeyLogArgs(key string) []any {
+	return []any{"key", truncateUTF8(key, maxLoggedChatKeyBytes), "key_len", len(key)}
 }
 
 // authorizeDMKeyParticipant runs the first two DM steps of

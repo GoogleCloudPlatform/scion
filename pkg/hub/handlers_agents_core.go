@@ -1379,6 +1379,11 @@ const (
 	createRowRemoveFailedMessage = "Create failed and the agent record could not be removed; delete the agent to retry."
 )
 
+// errWorkspaceUploadURLs is the rollback cause recorded when the workspace
+// bootstrap's signed upload URLs could not be generated. It is fixed text:
+// the object-store detail is logged, never persisted in the audit record.
+var errWorkspaceUploadURLs = errors.New("failed to generate workspace upload URLs")
+
 // writeCreateFailure writes a create-failure response. When the create's
 // compensation failed (correlationID != ""), it writes a 500 that carries the
 // correlation ID, because the create's records may be left behind;
@@ -2636,7 +2641,10 @@ func (s *Server) createAgentInProject(
 			storagePath := storage.WorkspaceStoragePath(s.HubID(), agent.ProjectID, agent.ID)
 			uploadURLs, existingFiles, err := generateWorkspaceUploadURLs(ctx, stor, storagePath, req.WorkspaceFiles)
 			if err != nil {
-				failCreate(createRollback{Stage: createStageUploadURL, Cause: err}, func() { RuntimeError(w, "Failed to generate upload URLs: "+err.Error()) })
+				// The object-store detail goes to the server log only; the
+				// response and the persisted rollback record carry fixed text.
+				slog.ErrorContext(ctx, "agent create: workspace upload URLs failed", "agent_id", agent.ID, "error", upstreamText(err.Error()))
+				failCreate(createRollback{Stage: createStageUploadURL, Cause: errWorkspaceUploadURLs}, func() { RuntimeError(w, "Failed to generate upload URLs") })
 				return
 			}
 
@@ -4309,7 +4317,10 @@ func (s *Server) agentEditAccessFor(ctx context.Context, identity Identity, agen
 	}
 	access := agentEditAccess{CanUpdate: slices.Contains(caps.Actions, string(ActionUpdate))}
 	if access.CanUpdate {
-		access.Broker = s.agentBrokerStartSupport(ctx, agent)
+		// The GET does not fail on an unreadable broker record: the
+		// editability then shows the conservative disposition, and a
+		// PATCH that depends on the record answers 503 (ptone/scion#7544).
+		access.Broker, _ = s.agentBrokerStartSupport(ctx, agent)
 	}
 	if !access.CanUpdate || !slices.Contains(caps.Actions, string(ActionLifecycle)) || s.authzService == nil {
 		return access
@@ -4545,7 +4556,13 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 			if !s.validateAgentConfigPatch(ctx, w, agent, updates.Config, false) {
 				return
 			}
-			res := s.applyAgentConfigPatch(ctx, agent, configPatch{cfg: updates.Config, raw: rawFields, present: presentConfigKeys}, canViewAgentEnv(ctx, s, agent))
+			res, err := s.applyAgentConfigPatch(ctx, agent, configPatch{cfg: updates.Config, raw: rawFields, present: presentConfigKeys}, canViewAgentEnv(ctx, s, agent),
+				func() (brokerStartSupport, error) { return s.agentBrokerStartSupport(ctx, agent) })
+			if err != nil {
+				// The in-memory writes are discarded: nothing is persisted.
+				writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, brokerUnavailableMessage, nil)
+				return
+			}
 			warnings = append(warnings, res.warnings...)
 			configApplied, configHeldForReincarnate = res.applied, res.heldForReincarnate
 			// A pending value stored while held edits were on must not be

@@ -24,7 +24,9 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
@@ -36,6 +38,65 @@ type sseAgentStore struct {
 	agents    map[string]*store.Agent
 	lookupErr error
 	authzErr  error
+}
+
+// sseStatusWriter is an httptest.ResponseRecorder that reports, once, when
+// the handler has written its status: an explicit WriteHeader, a first body
+// write or a flush (each of which fixes the status).
+type sseStatusWriter struct {
+	*httptest.ResponseRecorder
+	once    sync.Once
+	written chan struct{}
+}
+
+func (w *sseStatusWriter) signal() { w.once.Do(func() { close(w.written) }) }
+
+func (w *sseStatusWriter) WriteHeader(code int) {
+	w.ResponseRecorder.WriteHeader(code)
+	w.signal()
+}
+
+func (w *sseStatusWriter) Write(b []byte) (int, error) {
+	n, err := w.ResponseRecorder.Write(b)
+	w.signal()
+	return n, err
+}
+
+func (w *sseStatusWriter) Flush() {
+	w.ResponseRecorder.Flush()
+	w.signal()
+}
+
+// serveSSELive runs ws.handleSSE on a request built by mkReq with a LIVE
+// context, so the authorization decision runs on a context that has not
+// ended. Once the handler has written its status (or returned), the context
+// is cancelled to end the stream, and serveSSELive waits for the handler to
+// return before handing back the recorder. Only the end of the stream is
+// driven by the cancellation.
+func serveSSELive(t *testing.T, ws *WebServer, mkReq func(ctx context.Context) *http.Request) *httptest.ResponseRecorder {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w := &sseStatusWriter{ResponseRecorder: httptest.NewRecorder(), written: make(chan struct{})}
+	req := mkReq(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ws.handleSSE(w, req)
+	}()
+	select {
+	case <-w.written:
+	case <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("handleSSE wrote no status within 30s")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("handleSSE did not return within 30s of the cancellation")
+	}
+	return w.ResponseRecorder
 }
 
 func sseAgentRequest(ctx context.Context, userID, role string, subjects ...string) *http.Request {

@@ -2012,8 +2012,16 @@ func runSimpleCommandWithStdin(ctx context.Context, stdin io.Reader, command str
 // asynchronous and the container may not be immediately ready for removal.
 // Docker/Podman support "rm -f" directly.
 func rollbackCancelledCreate(command, containerName, runID string) {
+	_ = rollbackCreate(command, containerName, runID)
+}
+
+// rollbackCreate is rollbackCancelledCreate that also returns what it could
+// not do: a failed listing of the run's containers, or a failed removal.
+// Each is logged as before. On Apple it returns nil, since the kill and
+// remove there are best effort and report nothing.
+func rollbackCreate(command, containerName, runID string) error {
 	if containerName == "" && runID == "" {
-		return
+		return nil
 	}
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -2025,15 +2033,16 @@ func rollbackCancelledCreate(command, containerName, runID string) {
 		if err != nil {
 			runtimeLog().Warn("Failed to roll back cancelled create: could not list the run's containers; nothing removed",
 				"cmd", command, "container", containerName, "run_id", runID, "error", err)
-			return
+			return fmt.Errorf("list the containers of run %s: %w", runID, err)
 		}
 		if len(ids) == 0 {
 			runtimeLog().Debug("Cancelled create left no container of its run", "cmd", command, "container", containerName, "run_id", runID)
-			return
+			return nil
 		}
 		targets = ids
 	}
 
+	var errs []error
 	for _, target := range targets {
 		if apple {
 			appleKillAndRemove(cleanupCtx, command, target)
@@ -2041,8 +2050,10 @@ func rollbackCancelledCreate(command, containerName, runID string) {
 		}
 		if out, err := runSimpleCommand(cleanupCtx, command, "rm", "-f", target); err != nil {
 			runtimeLog().Warn("Failed to roll back cancelled create", "cmd", command, "container", target, "run_id", runID, "error", err, "output", strings.TrimSpace(out))
+			errs = append(errs, fmt.Errorf("remove %s: %w", target, err))
 		}
 	}
+	return errors.Join(errs...)
 }
 
 // containersWithRunID lists every container (running or not) labelled with

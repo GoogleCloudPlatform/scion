@@ -235,8 +235,13 @@ func (r *PodmanRuntime) Run(ctx context.Context, config RunConfig) (string, erro
 	// remove what this run may have created, as for a cancelled create.
 	id := strings.TrimSpace(out)
 	if !podmanContainerIDPattern.MatchString(id) {
-		rollbackCancelledCreate(r.Command, config.Name, config.Labels[api.LabelRunID])
-		return "", fmt.Errorf("container run printed no container ID: got %q, want 64 lowercase hex characters", truncateForError(id))
+		err := fmt.Errorf("container run printed no container ID: got %q, want 64 lowercase hex characters", truncateForError(id))
+		// The run exited 0, so a container almost certainly exists: say so
+		// when it could not be removed.
+		if rbErr := rollbackCreate(r.Command, config.Name, config.Labels[api.LabelRunID]); rbErr != nil {
+			return "", fmt.Errorf("%w; a container from this run may still exist: %v", err, rbErr)
+		}
+		return "", err
 	}
 	reportContainerCreated(hooks, config.Name, id)
 	return id, nil

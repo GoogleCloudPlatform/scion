@@ -131,7 +131,7 @@ func TestUserVolumes_RunArgsGolden(t *testing.T) {
 					Task:         "hello",
 					Volumes:      tc.volumes,
 				}
-				os.Remove(argvLog)
+				_ = os.Remove(argvLog)
 				out, err := rc.rt.Run(context.Background(), cfg)
 				var got []byte
 				switch {

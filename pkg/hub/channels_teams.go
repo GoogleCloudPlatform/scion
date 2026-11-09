@@ -269,7 +269,7 @@ func (tp *teamsTokenProvider) refresh(ctx context.Context) (string, error) {
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return "", fmt.Errorf("token endpoint returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return "", fmt.Errorf("token endpoint returned %d: %s", resp.StatusCode, upstreamText(strings.TrimSpace(string(body))))
 	}
 
 	var result teamsTokenResponse

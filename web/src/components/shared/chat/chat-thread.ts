@@ -55,6 +55,7 @@ import { navigateTo, stateManager } from '../../../client/main.js';
 import { agentIndexOf, agentStore } from '../../../client/agent-store.js';
 import { openTerminal, agentGraphHref } from '../../../client/open-terminal.js';
 import { showToast } from '../../../utils/toast.js';
+import { copyRichToClipboard, copyToClipboard, copyWithToast } from '../../../utils/clipboard.js';
 import {
   ChatStarsController,
   conversationSupportsStars,
@@ -5289,11 +5290,7 @@ export class ScionChatThread extends LitElement {
       icon: 'link',
       run: (): void => {
         this.closeContextMenu();
-        // The Clipboard API is absent outside a secure context and in some
-        // older browsers; the item then does nothing rather than throwing.
-        navigator.clipboard?.writeText(href).catch(() => {
-          // Fallback: ignore clipboard failure silently.
-        });
+        void copyWithToast(href);
       },
     };
   }
@@ -6240,9 +6237,7 @@ export class ScionChatThread extends LitElement {
     const msg = this.contextMenuMessage;
     this.closeContextMenu();
     if (!msg) return;
-    navigator.clipboard.writeText(msg.msg).catch(() => {
-      // Fallback: ignore clipboard failure silently.
-    });
+    void copyWithToast(msg.msg);
   }
 
   /** Context menu: Copy link to message. */
@@ -6251,9 +6246,7 @@ export class ScionChatThread extends LitElement {
     this.closeContextMenu();
     if (!msg) return;
     const url = `${window.location.origin}${window.location.pathname}#msg-${encodeURIComponent(msg.id)}`;
-    navigator.clipboard.writeText(url).catch(() => {
-      // Fallback: ignore clipboard failure silently.
-    });
+    void copyWithToast(url);
   }
 
   /** Context menu: Set the sender agent as the thread default. */
@@ -7305,6 +7298,7 @@ export class ScionChatThread extends LitElement {
     const rows: Array<{ key: string; tpl: unknown }> = [];
     let lastDate = '';
     let prevSender = '';
+    let prevRoutedTo = '';
     let prevTimestamp = 0;
 
     // Inter-agent messages are sorted at ingest (fetchInteragentExchanges).
@@ -7366,6 +7360,7 @@ export class ScionChatThread extends LitElement {
         });
         // Reset grouping after a marker so the next message shows its header.
         prevSender = '';
+        prevRoutedTo = '';
         prevTimestamp = 0;
         groupStart = i;
         if (i < msgs.length) groupDateStr = this.rowTime(msgs[i]).dateLabel;
@@ -7396,6 +7391,7 @@ export class ScionChatThread extends LitElement {
       if (dateStr !== lastDate) {
         lastDate = dateStr;
         prevSender = '';
+        prevRoutedTo = '';
         prevTimestamp = 0;
         rows.push({ key: `day:${dateStr}`, tpl: renderDateDivider(dateStr) });
       }
@@ -7413,12 +7409,14 @@ export class ScionChatThread extends LitElement {
         });
         // Reset grouping so the first unread message shows its header.
         prevSender = '';
+        prevRoutedTo = '';
         prevTimestamp = 0;
       }
 
       // System/state-change messages
       if (SYSTEM_MESSAGE_TYPES.has(msg.type)) {
         prevSender = '';
+        prevRoutedTo = '';
         prevTimestamp = 0;
         rows.push({
           key: `msg:${msg.id}`,
@@ -7432,13 +7430,6 @@ export class ScionChatThread extends LitElement {
         });
         continue;
       }
-
-      // Grouping: consecutive *visible* messages from same sender within GROUP_WINDOW_MS
-      const sameSender = msg.sender === prevSender;
-      const withinWindow = msgTime - prevTimestamp < GROUP_WINDOW_MS;
-      // In the starred-only center every message stands alone, with its own
-      // author and time: neighbours there need not have been consecutive.
-      const showHeader = this.filtered || !sameSender || !withinWindow;
 
       // In v2 mode, use currentUserId to determine own vs. others' messages.
       // Own messages (fromAgent=false): right-aligned, no header/avatar.
@@ -7457,6 +7448,15 @@ export class ScionChatThread extends LitElement {
         !isAgentSender && msg.recipient && msg.recipient.startsWith('agent:')
           ? msg.recipient.slice(6)
           : '';
+      // Grouping: consecutive *visible* messages from the same sender to the
+      // same shown recipient within GROUP_WINDOW_MS. A recipient change
+      // starts a new group so each header names the agent its run went to.
+      const sameSender = msg.sender === prevSender;
+      const sameRecipient = msgRoutedTo === prevRoutedTo;
+      const withinWindow = msgTime - prevTimestamp < GROUP_WINDOW_MS;
+      // In the starred-only center every message stands alone, with its own
+      // author and time: neighbours there need not have been consecutive.
+      const showHeader = this.filtered || !sameSender || !sameRecipient || !withinWindow;
       const senderDisplayName = this.isV2
         ? this.getSenderDisplayName(msg)
         : isFromAgent
@@ -7542,6 +7542,7 @@ export class ScionChatThread extends LitElement {
       }
 
       prevSender = msg.sender;
+      prevRoutedTo = msgRoutedTo;
       prevTimestamp = msgTime;
     }
 
@@ -7686,22 +7687,13 @@ export class ScionChatThread extends LitElement {
       .map((m) => `${m.sender} (${this.formatExportTimestamp(m.createdAt)})\n${m.msg}`)
       .join('\n\n---\n\n');
 
-    try {
-      await navigator.clipboard.write([
-        new ClipboardItem({
-          'text/html': new Blob([htmlContent], { type: 'text/html' }),
-          'text/plain': new Blob([plainText], { type: 'text/plain' }),
-        }),
-      ]);
+    if (await copyRichToClipboard({ 'text/html': htmlContent, 'text/plain': plainText })) {
       showToast('Conversation copied to clipboard.', 'success');
-    } catch {
+    } else if (await copyToClipboard(plainText)) {
       // Fallback: plain text copy.
-      try {
-        await navigator.clipboard.writeText(plainText);
-        showToast('Conversation copied to clipboard (plain text).', 'success');
-      } catch {
-        showToast('Failed to copy to clipboard.', 'danger');
-      }
+      showToast('Conversation copied to clipboard (plain text).', 'success');
+    } else {
+      showToast('Failed to copy to clipboard.', 'danger');
     }
   }
 }

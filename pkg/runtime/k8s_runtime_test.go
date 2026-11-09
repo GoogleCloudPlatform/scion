@@ -318,9 +318,10 @@ func TestKubernetesRuntime_BuildPod_Env(t *testing.T) {
 // the built pod spec's container env, even though they are legitimately
 // contributed by two different sources (harness env / config.Env for
 // SCION_AGENT_NAME; config.Env / resolved auth for the GCP vars). It also
-// asserts every env name in the pod is unique, and that the three vars keep
-// the value Kubernetes would already select today for duplicate env names:
-// the last entry appended wins.
+// asserts every env name in the pod is unique, and that each of the three
+// vars takes the config.Env value: buildPod emits the sources in the Docker
+// order (resolved auth, the harness env, then config.Env) and dedupeEnvVars
+// keeps the last entry for a name.
 func TestKubernetesRuntime_BuildPod_DedupesEnv(t *testing.T) {
 	rt, _, _ := newTestK8sRuntime()
 
@@ -363,13 +364,13 @@ func TestKubernetesRuntime_BuildPod_DedupesEnv(t *testing.T) {
 		}
 	}
 
-	// The two sources for these vars disagree on purpose; the effective
-	// value must match what Kubernetes already picks today for duplicate
-	// env names — the last one appended.
+	// The sources for these vars disagree on purpose. The effective value
+	// follows the Docker order: config.Env wins over the harness env and
+	// over resolved auth.
 	wantEffective := map[string]string{
 		"SCION_AGENT_NAME":     "agent-from-config-env",
-		"GOOGLE_CLOUD_PROJECT": "project-from-resolved-auth",
-		"GOOGLE_CLOUD_REGION":  "region-from-resolved-auth",
+		"GOOGLE_CLOUD_PROJECT": "project-from-config-env",
+		"GOOGLE_CLOUD_REGION":  "region-from-config-env",
 	}
 	for name, want := range wantEffective {
 		if got := values[name]; got != want {

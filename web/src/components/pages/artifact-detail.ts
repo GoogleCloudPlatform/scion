@@ -60,6 +60,7 @@ import {
 } from '../../utils/feature-flags.js';
 import { formatInstant } from '../../utils/time.js';
 import { showToast } from '../../utils/toast.js';
+import { copyToClipboard, copyWithToast, showCopyFailedToast } from '../../utils/clipboard.js';
 import {
   ARTIFACTS_FLAG,
   MAX_INLINE_TEXT_BYTES,
@@ -1227,12 +1228,12 @@ export class ScionPageArtifactDetail extends LitElement {
   private async copyRef(): Promise<void> {
     const ref = this.data?.artifact.ref;
     if (!ref) return;
-    try {
-      await navigator.clipboard.writeText(ref);
+    if (await copyToClipboard(ref)) {
       this.copied = true;
       setTimeout(() => (this.copied = false), 1500);
-    } catch {
-      // Clipboard unavailable; the ref is visible on the page.
+    } else {
+      // Clipboard unavailable; the ref stays visible on the page.
+      showCopyFailedToast();
     }
   }
 
@@ -1762,11 +1763,8 @@ export class ScionPageArtifactDetail extends LitElement {
 
   private async copyDiscarded(): Promise<void> {
     if (this.discardedReview === null) return;
-    try {
-      await navigator.clipboard.writeText(this.discardedReview);
-    } catch {
-      // Clipboard unavailable; the text is visible and selectable.
-    }
+    // On failure the text stays visible and selectable.
+    await copyWithToast(this.discardedReview);
   }
 
   /** Records an edit of the review text; the preview follows after a pause. */

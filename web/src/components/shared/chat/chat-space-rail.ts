@@ -49,6 +49,7 @@ import {
 } from '../../../client/chat-list-cache.js';
 import { showConfirm } from '../confirm-dialog.js';
 import { showToast } from '../../../utils/toast.js';
+import { copyToClipboard } from '../../../utils/clipboard.js';
 import { formatInstantWithZone } from '../../../utils/time.js';
 import { touchMenuItemStyles } from '../touch-styles.js';
 import { TouchPrimaryController } from '../../../utils/input-modality.js';
@@ -4028,10 +4029,9 @@ export class ScionChatSpaceRail extends LitElement {
     const messages = await this.fetchThreadMessages(thread.id);
     const markdown = this.formatThreadAsMarkdown(thread, messages);
 
-    try {
-      await navigator.clipboard.writeText(markdown);
+    if (await copyToClipboard(markdown)) {
       this.showExportToast('Copied to clipboard');
-    } catch {
+    } else {
       // Fallback: if clipboard fails, still offer the download
       this.showExportToast('Clipboard unavailable — use Download instead');
     }

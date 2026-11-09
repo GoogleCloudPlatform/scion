@@ -48,6 +48,7 @@ vi.mock('../../../client/api.js', () => ({
 vi.mock('../../../utils/toast.js', () => ({ showToast: vi.fn() }));
 
 await import('./chat-thread.js');
+const { showToast } = await import('../../../utils/toast.js');
 type ScionChatThread = import('./chat-thread.js').ScionChatThread;
 
 const DOCS = 'https://example.com/docs?q=1';
@@ -62,6 +63,7 @@ let writeText: ReturnType<typeof vi.fn>;
 const originalClipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
 
 beforeEach(() => {
+  vi.mocked(showToast).mockClear();
   sheet = false;
   touch = false;
   apiFetch.mockReset();
@@ -201,7 +203,7 @@ describe('message menu link items', () => {
     expect(popupRows(el)).toHaveLength(0);
   });
 
-  it('does nothing, without throwing, when the Clipboard API is absent', async () => {
+  it('shows the failure toast, without throwing, when the Clipboard API is absent', async () => {
     const el = await mount();
     Object.defineProperty(navigator, 'clipboard', { value: undefined, configurable: true });
     const internals = el as unknown as {
@@ -214,6 +216,8 @@ describe('message menu link items', () => {
     rows[labels(rows).indexOf('Copy link address')].click();
     await el.updateComplete;
     expect(popupRows(el)).toHaveLength(0);
+    await vi.waitFor(() => expect(showToast).toHaveBeenCalledWith('Could not copy', 'danger'));
+    expect(showToast).not.toHaveBeenCalledWith('Copied', 'success');
   });
 
   it('still copies the message link from a menu raised on a link', async () => {
@@ -403,5 +407,48 @@ describe('message menu link items: a press on a link, then another open path', (
     await el.updateComplete;
     await el.updateComplete;
     expect(labels(popupRows(el))).not.toContain('Copy link address');
+  });
+});
+
+describe('message menu copy items: feedback toasts', () => {
+  const MSG_LINK = `${window.location.origin}${window.location.pathname}#msg-m2`;
+  const ITEMS: Array<[string, string]> = [
+    ['Copy text', `see [the docs](${DOCS}) here`],
+    ['Copy link to msg', MSG_LINK],
+    ['Copy link address', DOCS],
+  ];
+
+  async function clickItem(el: ScionChatThread, label: string): Promise<void> {
+    await rightClick(el, body(el, 'm2').querySelector(`a[href="${DOCS}"]`)!);
+    const rows = popupRows(el);
+    const index = labels(rows).indexOf(label);
+    expect(index).toBeGreaterThanOrEqual(0);
+    expect(() => rows[index].click()).not.toThrow();
+    await el.updateComplete;
+    expect(popupRows(el)).toHaveLength(0);
+  }
+
+  it.each(ITEMS)('"%s" copies and shows "Copied"', async (label, text) => {
+    const el = await mount();
+    await clickItem(el, label);
+    expect(writeText).toHaveBeenCalledWith(text);
+    await vi.waitFor(() => expect(showToast).toHaveBeenCalledWith('Copied', 'success'));
+    expect(showToast).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(ITEMS)('"%s" shows "Could not copy" when the Clipboard API is absent', async (label) => {
+    const el = await mount();
+    Object.defineProperty(navigator, 'clipboard', { value: undefined, configurable: true });
+    await clickItem(el, label);
+    await vi.waitFor(() => expect(showToast).toHaveBeenCalledWith('Could not copy', 'danger'));
+    expect(showToast).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(ITEMS)('"%s" shows "Could not copy" when the write is rejected', async (label) => {
+    const el = await mount();
+    writeText.mockRejectedValue(new Error('denied'));
+    await clickItem(el, label);
+    await vi.waitFor(() => expect(showToast).toHaveBeenCalledWith('Could not copy', 'danger'));
+    expect(showToast).toHaveBeenCalledTimes(1);
   });
 });

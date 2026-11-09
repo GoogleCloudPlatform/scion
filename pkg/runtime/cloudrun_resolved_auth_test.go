@@ -130,6 +130,40 @@ func k8sEnvFor(t *testing.T, cfg RunConfig) map[string]string {
 	return env
 }
 
+// k8sEffectiveEnvFor is k8sEnvFor with a secretKeyRef entry resolved to the
+// value of the cfg.ResolvedSecrets entry its key names, so a test can compare
+// the effective value of every source with Docker's.
+func k8sEffectiveEnvFor(t *testing.T, cfg RunConfig) map[string]string {
+	t.Helper()
+	secretValues := make(map[string]string, len(cfg.ResolvedSecrets))
+	for _, s := range cfg.ResolvedSecrets {
+		secretValues[s.Name] = s.Value
+	}
+	cfg.Name = "resolved-auth"
+	cfg.Image = "example.com/image:v1"
+	cfg.UnixUsername = "scion"
+	cfg.Harness = &EnvHarness{}
+	rt, _, _ := newTestK8sRuntime()
+	pod, err := rt.buildPod("default", cfg)
+	if err != nil {
+		t.Fatalf("buildPod: %v", err)
+	}
+	env := map[string]string{}
+	for _, c := range pod.Spec.Containers {
+		if c.Name != agentContainerName {
+			continue
+		}
+		for _, ev := range c.Env {
+			if ev.ValueFrom != nil && ev.ValueFrom.SecretKeyRef != nil {
+				env[ev.Name] = secretValues[ev.ValueFrom.SecretKeyRef.Key]
+				continue
+			}
+			env[ev.Name] = ev.Value
+		}
+	}
+	return env
+}
+
 // cloudRunRunFor runs cfg's settings through CloudRunRuntime.Run against a
 // fake Instances API and returns the created instance's plain env
 // (crInstanceEnv fails on a duplicate name) and the resolved-auth entries
@@ -187,11 +221,9 @@ func cloudRunEffective(plain, staged map[string]string, name string) (string, bo
 
 // The same resolved auth gives the same effective env on Docker,
 // Kubernetes and Cloud Run. On Cloud Run the discovery names are plain env
-// and every other entry is in the staged blob. Cloud Run follows Docker's
-// rules, so the colliding and empty-value cases are checked for those two;
-// Kubernetes lets resolved auth win over config.Env and keeps empty
-// values, so it is checked only for the vertex names, which no other
-// source sets.
+// and every other entry is in the staged blob. Cloud Run, Docker and
+// Kubernetes follow the same order, so the colliding and empty-value cases
+// are checked on all three.
 func TestResolvedAuthEnv_ParityAcrossRuntimes(t *testing.T) {
 	t.Run("claude-vertex-ai", func(t *testing.T) {
 		ra := claudeVertexResolvedAuth(t)
@@ -250,7 +282,7 @@ func TestResolvedAuthEnv_ParityAcrossRuntimes(t *testing.T) {
 		}
 	})
 
-	t.Run("docker-cloudrun-config-env-and-secret-win", func(t *testing.T) {
+	t.Run("docker-cloudrun-kubernetes-config-env-and-secret-win", func(t *testing.T) {
 		cfg := RunConfig{
 			Env: []string{"GOOGLE_CLOUD_PROJECT=from-config-env", "EXAMPLE_CFG_NAME=from-config-env"},
 			ResolvedAuth: &api.ResolvedAuth{EnvVars: map[string]string{
@@ -274,12 +306,16 @@ func TestResolvedAuthEnv_ParityAcrossRuntimes(t *testing.T) {
 		}
 		docker := dockerEnvFor(t, cfg)
 		plain, staged := cloudRunRunFor(t, cfg)
+		k8s := k8sEffectiveEnvFor(t, cfg)
 		for name, w := range want {
 			if docker[name] != w {
 				t.Errorf("docker: %s = %q, want %q", name, docker[name], w)
 			}
 			if got, ok := plain[name]; !ok || got != w {
 				t.Errorf("cloudrun: %s = %q (present %v), want %q", name, got, ok, w)
+			}
+			if got, ok := k8s[name]; !ok || got != w {
+				t.Errorf("kubernetes: %s = %q (present %v), want %q", name, got, ok, w)
 			}
 		}
 		// A name config.Env or an env-type secret set is not staged either.
@@ -290,14 +326,15 @@ func TestResolvedAuthEnv_ParityAcrossRuntimes(t *testing.T) {
 		}
 	})
 
-	t.Run("docker-cloudrun-empty-value-skipped", func(t *testing.T) {
+	t.Run("docker-cloudrun-kubernetes-empty-value-skipped", func(t *testing.T) {
 		cfg := RunConfig{ResolvedAuth: &api.ResolvedAuth{EnvVars: map[string]string{
 			"CLOUD_ML_REGION":        "",
 			"CLAUDE_CODE_USE_VERTEX": "1",
 		}}}
 		for runtimeName, env := range map[string]map[string]string{
-			"docker":   dockerEnvFor(t, cfg),
-			"cloudrun": cloudRunEnvFor(t, cfg),
+			"docker":     dockerEnvFor(t, cfg),
+			"cloudrun":   cloudRunEnvFor(t, cfg),
+			"kubernetes": k8sEnvFor(t, cfg),
 		} {
 			if _, ok := env["CLOUD_ML_REGION"]; ok {
 				t.Errorf("%s: an empty resolved-auth value reached the container env", runtimeName)

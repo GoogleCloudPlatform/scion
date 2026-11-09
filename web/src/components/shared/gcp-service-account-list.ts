@@ -59,6 +59,7 @@ import {
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { resourceStyles } from './resource-styles.js';
 import { showToast } from '../../utils/toast.js';
+import { copyToClipboard, showCopyFailedToast } from '../../utils/clipboard.js';
 import { showConfirm } from './confirm-dialog.js';
 import { deleteGCPServiceAccount } from '../../shared/gcp-service-account-delete.js';
 import { formatRelative } from '../../utils/time.js';
@@ -675,15 +676,14 @@ export class ScionGCPServiceAccountList extends LitElement {
   }
 
   private async copyEmail(email: string): Promise<void> {
-    try {
-      await navigator.clipboard.writeText(email);
-      this.copiedEmail = email;
-      setTimeout(() => {
-        this.copiedEmail = null;
-      }, 1500);
-    } catch {
-      // Clipboard unavailable
+    if (!(await copyToClipboard(email))) {
+      showCopyFailedToast();
+      return;
     }
+    this.copiedEmail = email;
+    setTimeout(() => {
+      this.copiedEmail = null;
+    }, 1500);
   }
 
   private renderRow(account: GCPServiceAccount) {

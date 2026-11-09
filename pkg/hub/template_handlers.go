@@ -843,7 +843,8 @@ func (s *Server) handleTemplateUpload(w http.ResponseWriter, r *http.Request, id
 		if writeInvalidFilePathError(w, err) {
 			return
 		}
-		RuntimeError(w, "Failed to generate upload URLs: "+err.Error())
+		slog.ErrorContext(ctx, "template upload URLs failed", "template_id", id, "error", upstreamText(err.Error()))
+		RuntimeError(w, "Failed to generate upload URLs")
 		return
 	}
 	if len(uploadURLs) == 0 && len(req.Files) > 0 {
@@ -966,7 +967,8 @@ func (s *Server) handleTemplateDownload(w http.ResponseWriter, r *http.Request, 
 	// lands while the client downloads.
 	downloadURLs, manifestURL, expires, err := s.generateTemplateDownloadURLs(ctx, stor, template)
 	if err != nil {
-		RuntimeError(w, fmt.Sprintf("template %q: %s — run 'scion template validate %s' to diagnose", template.Name, err, template.Name))
+		slog.ErrorContext(ctx, "template download URLs failed", "template_id", id, "error", upstreamText(err.Error()))
+		RuntimeError(w, fmt.Sprintf("template %q: failed to generate download URLs — run 'scion template validate %s' to diagnose", template.Name, template.Name))
 		return
 	}
 

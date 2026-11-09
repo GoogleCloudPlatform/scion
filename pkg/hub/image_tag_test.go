@@ -315,6 +315,53 @@ func TestLogImageTag_InvalidValueWarns(t *testing.T) {
 	assert.Equal(t, "", srv.hubScopeImageTag())
 }
 
+// TestLogImageTag_ExperimentOffLevel (ptone/scion#7541): with
+// hub.image_tag_setting off, image_tag latest everywhere it is set, the
+// documented opt-out from the version default, is logged at Info; any
+// other set value, alone or next to latest, keeps the warning.
+func TestLogImageTag_ExperimentOffLevel(t *testing.T) {
+	const optOut = `level=INFO msg="image_tag is latest, the opt-out from the version default: agent images keep their tags (latest); hub.image_tag_setting is off"`
+	const warn = `level=WARN msg="image_tag is set but the hub.image_tag_setting experiment is off; the value is ignored`
+	tests := []struct {
+		name     string
+		env      string
+		top      string
+		profiles map[string]string
+		managed  string // a saved hub profiles section, stored as a managed row
+		optOut   bool
+	}{
+		{name: "file top latest", top: "latest", optOut: true},
+		{name: "env latest", env: "latest", optOut: true},
+		{name: "file profile latest", profiles: map[string]string{"k8s": "latest"}, optOut: true},
+		{name: "file top non-latest", top: "v0.3.0"},
+		{name: "latest next to a non-latest profile", top: "latest", profiles: map[string]string{"k8s": "v1"}},
+		{name: "file top latest next to a saved hub profile v1", top: "latest", managed: `{"k8s":{"runtime":"kubernetes","image_tag":"v1"}}`},
+		{name: "saved hub profile latest only", managed: `{"k8s":{"runtime":"kubernetes","image_tag":"latest"}}`, optOut: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			buf := captureImageRegistrySlog(t)
+			srv, _, ops := newTestDBServer(t)
+			setTestImageTagFileTier(t, ops, tt.top, tt.profiles)
+			if tt.managed != "" {
+				_, err := ops.Update(context.Background(), "profiles", json.RawMessage(tt.managed), "admin", -1, "managed")
+				require.NoError(t, err)
+			}
+			srv.config.NodeImageTag = tt.env
+			srv.LogImageTag()
+			out := buf.String()
+			if tt.optOut {
+				assert.Contains(t, out, optOut)
+				assert.NotContains(t, out, "level=WARN")
+				assert.NotContains(t, out, "experiment is off")
+				return
+			}
+			assert.Contains(t, out, warn)
+			assert.NotContains(t, out, "the opt-out")
+		})
+	}
+}
+
 // TestProfilesSaveSetsImageTag: a save sets image_tag when a profile's
 // non-empty value is new or different; an echo and a clear do not.
 func TestProfilesSaveSetsImageTag(t *testing.T) {
