@@ -222,10 +222,13 @@ func (r *PodmanRuntime) Run(ctx context.Context, config RunConfig) (string, erro
 	// (catatonit -P) hands it its own environment, and the pause process
 	// outlives the run: the secret values would stay in its
 	// /proc/<pid>/environ. An env-free "podman unshare true" first starts
-	// the pause process if none runs, and "run" then joins it.
+	// the pause process if none runs, and "run" then joins it. A remote
+	// client has no "unshare", and its pause process belongs to the podman
+	// service, not to this environment, so a failure is logged at debug
+	// level only.
 	if r.Rootless && len(secretEnv) > 0 {
-		if uout, uerr := runSimpleCommand(ctx, r.Command, "unshare", "true"); uerr != nil {
-			runtimeLog().Warn("Could not start podman's pause process before a launch with secret env; it may keep the values in its environment",
+		if uout, uerr := runSimpleCommand(ctx, r.Command, "unshare", "true"); uerr != nil && ctx.Err() == nil {
+			runtimeLog().Debug("podman unshare before a launch with secret env failed; a pause process this run starts keeps podman's environment",
 				"error", uerr, "output", strings.TrimSpace(uout))
 		}
 	}
