@@ -81,6 +81,7 @@ Controls the central Hub API server.
 | `cors` | object | | CORS configuration (see below). |
 | `conduit` | object | | Conduit relay settings (see [Conduit](#conduit-serverhubconduit)). |
 | `port_proxy` | object | | Agent port proxy settings (see [Port proxy](#port-proxy-serverhubport_proxy)). |
+| `chat` | object | | Web chat limits (see [Chat search](#chat-search-serverhubchatsearch)). |
 
 #### CORS (`server.hub.cors`)
 
@@ -148,6 +149,15 @@ Settings for the agent port proxy (`/api/v1/agents/{id}/ports/{port}/...`) when 
 | :--- | :--- | :--- | :--- |
 | `response_header_timeout` | duration | `"60s"` | How long the proxy waits for the service on the agent port to send its response headers, counted from when the request has been sent. This includes the WebSocket handshake. If the headers do not arrive in time, the proxy cancels the upstream request, answers `504` (code `runtime_error`; a browser gets the proxy error page) and counts it in `scion.hub.port_proxy.upstream_timeout`. The response body has no time limit: server-sent events, downloads, chunked responses and upgraded WebSockets keep flowing once the headers have arrived. Between `"5s"` and `"10m"`; `0` is not accepted. Env: `SCION_SERVER_HUB_PORTPROXY_RESPONSEHEADERTIMEOUT`. |
 | `view_ttl` | duration | `"2h"` | With the `hub.port_view` [experiment](/scion/reference/experiments/) on, how long a page link stays valid. The hub creates one when a user opens an exposed port from the hub. Opening the port's link from the hub again creates a new one. The lifetime is fixed when the link is created; using the link does not extend it. Between `"15m"` and `"24h"`. Env: `SCION_SERVER_HUB_PORTPROXY_VIEWTTL`. |
+
+#### Chat search (`server.hub.chat.search`)
+
+Bounds on web chat search, so one search cannot stall the hub. Each search runs with a time limit; a search that reaches it is stopped in the database and answered with `503` (code `SEARCH_TIMEOUT`). Each user runs at most one search at a time, and a hub-wide cap applies; a search over either limit is answered at once with `429` (code `SEARCH_BUSY`, `Retry-After: 1`), never queued. On a SQLite hub, searches read through a separate read-only connection, so a slow search does not hold the connection other requests use. A search that takes 500 ms or more, times out or fails writes one `chat search slow` log line with its shape (duration, backend, scope, term length, result count), never the search text or an identifier, and every search is counted in the histogram `hub_chat_search_duration_seconds` (attributes `backend`, `path`, `scope`, `outcome`). Read at startup; restart required to change.
+
+| Field | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `timeout` | duration | `"3s"` | Time limit of one search. Env: `SCION_SERVER_HUB_CHAT_SEARCH_TIMEOUT`. |
+| `max_concurrent` | int | `2` on SQLite, `8` on Postgres | Searches running hub-wide at once. `0` means the default. On SQLite it is also the size of the read-only search connection pool. Env: `SCION_SERVER_HUB_CHAT_SEARCH_MAXCONCURRENT`. |
 
 #### Observability export (`server.hub.observability`)
 
@@ -1754,6 +1764,7 @@ Settings required before the database connection exists, or that are restart-bou
 | Conduit relay | `hub.conduit.*` |
 | Separate relay | `relay.*` |
 | Port proxy | `hub.port_proxy.*` |
+| Chat search | `hub.chat.*` |
 
 ### Layer 1 — Operational (`hub_settings` table)
 
