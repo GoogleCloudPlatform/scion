@@ -511,6 +511,10 @@ describe('round-1 review: a truncated list, Retry after a failed leave, not a me
     expect(q(el, '[data-leave-delete-failed]')?.textContent).toContain(LEAVE_TRUNCATED_NOTE);
     // The way on is to close and leave without deleting; Cancel is the only action.
     expect(q(el, '[data-leave-truncated-hint]')?.textContent).toContain(LEAVE_TRUNCATED_CLOSE_HINT);
+    // The hint names the dialog's own Cancel, whichever entry point opened it.
+    expect(LEAVE_TRUNCATED_CLOSE_HINT).toContain(
+      'choose Cancel, then open Leave again with the box cleared'
+    );
     expect(q(el, '[data-leave-retry]')).toBeNull();
     expect(q(el, '[data-leave-confirm]')).toBeNull();
     expect(q(el, '[data-leave-cancel]')).not.toBeNull();

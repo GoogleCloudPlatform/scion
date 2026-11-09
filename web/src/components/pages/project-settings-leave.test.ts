@@ -216,6 +216,17 @@ describe('project-settings: Danger Zone Leave row (ptone/scion#7494)', () => {
     expect(projectGets()).toBe(n2);
   });
 
+  it('an enabled Leave Project button opens the dialog (the planted positive for the blocked case)', async () => {
+    element = await createComponent({
+      actions: ['read', 'update', 'delete', 'manage'],
+      canLeave: true,
+    });
+    const dialog = dialogOf(element) as HTMLElement & { show: () => Promise<void> };
+    const show = vi.spyOn(dialog, 'show').mockResolvedValue();
+    leaveRow(element)!.querySelector<HTMLElement>('[data-leave-project]')!.click();
+    expect(show).toHaveBeenCalledTimes(1);
+  });
+
   it('a disabled (blocked) Leave Project button does not open the dialog', async () => {
     element = await createComponent({
       actions: ['read', 'update', 'delete', 'manage'],
