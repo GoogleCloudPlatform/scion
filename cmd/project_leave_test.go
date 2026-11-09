@@ -19,6 +19,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -82,6 +84,7 @@ type leaveHarness struct {
 	out       bytes.Buffer
 	errOut    bytes.Buffer
 	prompts   []string
+	allowDel  []bool
 	answer    leaveAgentChoice
 	confirms  []string
 	confirmed bool
@@ -96,16 +99,20 @@ func (h *leaveHarness) io() leaveIO {
 	return leaveIO{
 		out:    &h.out,
 		errOut: &h.errOut,
-		prompt: func(q string) (leaveAgentChoice, error) {
+		prompt: func(q string, allowDelete bool) (leaveAgentChoice, error) {
 			h.prompts = append(h.prompts, q)
+			h.allowDel = append(h.allowDel, allowDelete)
 			return h.answer, nil
 		},
 		confirm: func(q string) bool {
 			h.confirms = append(h.confirms, q)
 			return h.confirmed
 		},
-		deleteAgent: func(_ context.Context, id string) (hubDeleteOutcome, error) {
+		deleteAgent: func(_ context.Context, id string, onAccepted func()) (hubDeleteOutcome, error) {
 			h.deletes = append(h.deletes, id)
+			if h.outcomes[id].Accepted && onAccepted != nil {
+				onAccepted()
+			}
 			return h.outcomes[id], h.deleteErr[id]
 		},
 	}
@@ -386,6 +393,8 @@ func TestProjectLeave_DryRun404IsNotNotAMember(t *testing.T) {
 			"experiment_disabled", "cannot leave My Project: project self-leave (hub.project_self_leave) is not enabled on this Hub", "hub.project_self_leave"},
 		"no direct role": {&apiclient.APIError{StatusCode: 404, Code: "not_found", Message: "Project not found"},
 			"not_found", "cannot leave My Project: you have no direct role on it", "no direct role"},
+		"hub without the route": {&apiclient.APIError{StatusCode: 404, Code: "not_found", Message: "Project route not found"},
+			"unsupported", "cannot leave My Project: this Hub does not support project leave (it may be an older version)", "does not support"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			svc := &fakeLeaveProjects{dryErr: tc.apiErr}
@@ -529,26 +538,28 @@ func (errReader) Read([]byte) (int, error) { return 0, errors.New("broken input"
 // and is returned; an answer with no final newline counts.
 func TestProjectLeave_AgentPromptInput(t *testing.T) {
 	var out bytes.Buffer
-	got, err := promptLeaveAgentChoice(strings.NewReader(""), &out, "Q?")
+	got, err := promptLeaveAgentChoice(strings.NewReader(""), &out, "Q?", true)
 	require.NoError(t, err)
 	assert.Equal(t, leaveAgentsCancel, got, "EOF with no answer cancels")
 	assert.Contains(t, out.String(), "Q? [d]elete / [k]eep / [c]ancel: ")
 
-	got, err = promptLeaveAgentChoice(errReader{}, &out, "Q?")
+	got, err = promptLeaveAgentChoice(errReader{}, &out, "Q?", true)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "broken input")
 	assert.Equal(t, leaveAgentsCancel, got, "a read error cancels")
 
-	got, err = promptLeaveAgentChoice(strings.NewReader("k\n"), &out, "Q?")
+	got, err = promptLeaveAgentChoice(strings.NewReader("k\n"), &out, "Q?", true)
 	require.NoError(t, err)
 	assert.Equal(t, leaveAgentsKeep, got)
-	got, err = promptLeaveAgentChoice(strings.NewReader("d"), &out, "Q?")
+	got, err = promptLeaveAgentChoice(strings.NewReader("d"), &out, "Q?", true)
 	require.NoError(t, err)
 	assert.Equal(t, leaveAgentsDelete, got, "an answer at EOF without a newline counts")
 
 	svc := &fakeLeaveProjects{dryRes: leaveResult(true, []string{"project-member"}, "none", leaveTestAgents, 0)}
 	lio := (&leaveHarness{}).io()
-	lio.prompt = func(q string) (leaveAgentChoice, error) { return promptLeaveAgentChoice(errReader{}, &out, q) }
+	lio.prompt = func(q string, allowDelete bool) (leaveAgentChoice, error) {
+		return promptLeaveAgentChoice(errReader{}, &out, q, allowDelete)
+	}
 	err = runProjectLeave(context.Background(), svc, leaveTestProject, leaveOptions{interactive: true}, lio)
 	require.Error(t, err)
 	assert.Equal(t, []bool{true}, svc.dry, "a read error never leaves")
@@ -565,6 +576,122 @@ func TestProjectLeave_SingularCounts(t *testing.T) {
 	assert.Contains(t, h.out.String(), "Your 1 agent in the project will be stopped")
 	assert.Contains(t, h.out.String(), "1 access token limited to this project will be revoked")
 	assert.Equal(t, "2 agents", countNoun(2, "agent"))
+}
+
+// TestProjectLeave_JSONFlagConfirmShowsConsequences (round 2 F1): with
+// --json, an agent flag and a terminal, the yes/no prompt is still shown,
+// so the consequences (with the agent list) go to stderr first.
+func TestProjectLeave_JSONFlagConfirmShowsConsequences(t *testing.T) {
+	svc := &fakeLeaveProjects{
+		dryRes: leaveResult(true, []string{"project-member"}, "none", leaveTestAgents, 0),
+		res:    leaveResult(false, []string{"project-member"}, "none", nil, 0),
+	}
+	h := &leaveHarness{confirmed: true}
+	require.NoError(t, runProjectLeave(context.Background(), svc, leaveTestProject,
+		leaveOptions{interactive: true, json: true, agents: leaveAgentsDelete}, h.io()))
+	assert.Equal(t, []string{`Leave project "My Project"?`}, h.confirms)
+	assert.Contains(t, h.errOut.String(), "Leaving My Project:")
+	assert.Contains(t, h.errOut.String(), "- alpha")
+	assert.Equal(t, []string{"a-1", "a-2"}, h.deletes)
+	var got hubclient.LeaveProjectResult
+	require.NoError(t, json.Unmarshal(h.out.Bytes(), &got), "stdout is the result alone: %s", h.out.String())
+}
+
+// TestProjectLeave_SessionOnlyRefusal (round 2 F2): the session-only gate
+// refuses an access token with 403 forbidden and details.credential
+// session_required; the CLI says a login session is needed, and --json
+// keeps the hub's code.
+func TestProjectLeave_SessionOnlyRefusal(t *testing.T) {
+	gate := &apiclient.APIError{StatusCode: 403, Code: "forbidden",
+		Message: `this operation requires an interactive session; credential kind "uat" is not allowed`,
+		Details: map[string]interface{}{"credential": "session_required", "reason": "x"}}
+	svc := &fakeLeaveProjects{dryErr: gate}
+	err := runProjectLeave(context.Background(), svc, leaveTestProject, leaveOptions{yes: true}, (&leaveHarness{}).io())
+	require.Error(t, err)
+	assert.Equal(t, "cannot leave My Project: leaving needs an interactive login session (scion hub auth login); access tokens are refused", err.Error())
+	assert.Equal(t, []bool{true}, svc.dry)
+
+	var out bytes.Buffer
+	require.True(t, isReportedInJSON(reportLeaveErrorJSON(&out, err)))
+	var d struct {
+		Error struct {
+			Code    string                 `json:"code"`
+			Details map[string]interface{} `json:"details"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(out.Bytes(), &d))
+	assert.Equal(t, "forbidden", d.Error.Code)
+	assert.Equal(t, "session_required", d.Error.Details["credential"])
+
+	other := &apiclient.APIError{StatusCode: 403, Code: "forbidden", Message: "nope"}
+	err = runProjectLeave(context.Background(), &fakeLeaveProjects{dryErr: other}, leaveTestProject, leaveOptions{yes: true}, (&leaveHarness{}).io())
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "interactive login", "only the session-only gate's 403 gets that message")
+}
+
+// TestProjectLeave_AcceptedDeletePrintsProgress (round 2 N1): a delete the
+// hub accepted prints a waiting line on stderr before the poll.
+func TestProjectLeave_AcceptedDeletePrintsProgress(t *testing.T) {
+	confirmed := hubDeleteOutcome{Accepted: true, Wait: hubclient.DeletionWaitResult{Outcome: hubclient.DeletionConfirmed}}
+	svc := &fakeLeaveProjects{
+		dryRes: leaveResult(true, []string{"project-member"}, "none", leaveTestAgents, 0),
+		res:    leaveResult(false, []string{"project-member"}, "none", nil, 0),
+	}
+	h := &leaveHarness{outcomes: map[string]hubDeleteOutcome{"a-2": confirmed}}
+	require.NoError(t, runProjectLeave(context.Background(), svc, leaveTestProject, leaveOptions{yes: true, agents: leaveAgentsDelete}, h.io()))
+	assert.Equal(t, "Waiting for the Hub to delete beta...\n", h.errOut.String(), "only the accepted delete waits")
+}
+
+// TestProjectLeave_ProductionDeleteWaitsForConfirmation (round 2 N4): the
+// production seam (leaveAgentDeleter) polls a 202. Against a hub whose
+// delete is accepted and then fails, the outcome is not confirmed and the
+// leave is never sent.
+func TestProjectLeave_ProductionDeleteWaitsForConfirmation(t *testing.T) {
+	fastDeletionWait(t)
+	hub := &asyncDeleteHub{projectID: "proj-1", agentName: "a-1", replies: []getReply{{body: replyRuntime}}}
+	srv := httptest.NewServer(http.HandlerFunc(hub.serve))
+	t.Cleanup(srv.Close)
+	client, err := hubclient.New(srv.URL)
+	require.NoError(t, err)
+	del := leaveAgentDeleter(client.ProjectAgents(hub.projectID))
+
+	accepted := false
+	outcome, err := del(context.Background(), "a-1", func() { accepted = true })
+	require.NoError(t, err)
+	assert.True(t, accepted, "a 202 runs onAccepted")
+	assert.False(t, outcome.Confirmed())
+	assert.Equal(t, hubclient.DeletionFailed, outcome.Wait.Outcome)
+
+	svc := &fakeLeaveProjects{dryRes: leaveResult(true, []string{"project-member"}, "none",
+		[]hubclient.LeaveProjectAgentItem{{ID: "a-1", Name: "alpha", Phase: "running"}}, 0)}
+	lio := (&leaveHarness{}).io()
+	lio.deleteAgent = del
+	err = runProjectLeave(context.Background(), svc, leaveTestProject, leaveOptions{yes: true, agents: leaveAgentsDelete}, lio)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to delete agent alpha, so the project was not left")
+	assert.Contains(t, err.Error(), "runtime_error")
+	assert.Equal(t, []bool{true}, svc.dry, "never leaves")
+}
+
+// TestProjectLeave_CutListPromptOffersNoDelete (round 2 N5): when the hub
+// cut the agent list, the prompt says delete is unavailable and offers keep
+// or cancel; a delete answer cancels.
+func TestProjectLeave_CutListPromptOffersNoDelete(t *testing.T) {
+	dry := leaveResult(true, []string{"project-member"}, "none", leaveTestAgents, 0)
+	dry.Agents.Count, dry.Agents.Truncated = 120, true
+	svc := &fakeLeaveProjects{dryRes: dry}
+	h := &leaveHarness{answer: leaveAgentsCancel}
+	require.ErrorIs(t, runProjectLeave(context.Background(), svc, leaveTestProject, leaveOptions{interactive: true}, h.io()), errProjectLeaveCancelled)
+	require.Len(t, h.prompts, 1)
+	assert.Contains(t, h.prompts[0], "cannot be deleted here; keep them on hold, or cancel?")
+	assert.Equal(t, []bool{false}, h.allowDel)
+
+	var out bytes.Buffer
+	got, err := promptLeaveAgentChoice(strings.NewReader("d\n"), &out, "Q?", false)
+	require.NoError(t, err)
+	assert.Equal(t, leaveAgentsCancel, got, "delete is not offered, so a delete answer cancels")
+	assert.Contains(t, out.String(), "Q? [k]eep / [c]ancel: ")
+	assert.NotContains(t, out.String(), "[d]elete")
 }
 
 // TestProjectLeave_ConfirmationWithoutAgents: with no agents to hold, -y

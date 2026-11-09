@@ -69,8 +69,8 @@ The last owner of a project cannot leave (transfer ownership first), and
 membership through a group cannot be left here.
 
 Leaving needs an interactive login session: a user access token is refused
-(403 credential_insufficient). Requires Hub connectivity and the
-hub.project_self_leave experiment.`,
+(403 forbidden). Requires Hub connectivity and the hub.project_self_leave
+experiment.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		opts := leaveOptions{
@@ -116,15 +116,23 @@ func runProjectLeaveCommand(ctx context.Context, projectRef string, opts leaveOp
 	lio := leaveIO{
 		out:    out,
 		errOut: errOut,
-		prompt: func(q string) (leaveAgentChoice, error) {
-			return promptLeaveAgentChoice(os.Stdin, os.Stderr, q)
+		prompt: func(q string, allowDelete bool) (leaveAgentChoice, error) {
+			return promptLeaveAgentChoice(os.Stdin, os.Stderr, q, allowDelete)
 		},
-		confirm: func(q string) bool { return hubsync.ConfirmAction(q, false, false) },
-		deleteAgent: func(ctx context.Context, agentID string) (hubDeleteOutcome, error) {
-			return deleteViaHubAndWait(ctx, agents, agentID, &hubclient.DeleteAgentOptions{DeleteFiles: true, RemoveBranch: true}, nil)
-		},
+		confirm:     func(q string) bool { return hubsync.ConfirmAction(q, false, false) },
+		deleteAgent: leaveAgentDeleter(agents),
 	}
 	return runProjectLeave(ctx, client.Projects(), project, opts, lio)
+}
+
+// leaveAgentDeleter is the production delete seam: scion delete's path
+// (deleteViaHubAndWait), so a delete the hub accepted (202) is polled and
+// counts only once it is confirmed. onAccepted runs on a 202, before the
+// poll.
+func leaveAgentDeleter(agents hubclient.AgentService) func(ctx context.Context, agentID string, onAccepted func()) (hubDeleteOutcome, error) {
+	return func(ctx context.Context, agentID string, onAccepted func()) (hubDeleteOutcome, error) {
+		return deleteViaHubAndWait(ctx, agents, agentID, &hubclient.DeleteAgentOptions{DeleteFiles: true, RemoveBranch: true}, onAccepted)
+	}
 }
 
 // leaveError is an error with a code for the --json output: the code, a
@@ -229,9 +237,9 @@ type leaveOptions struct {
 type leaveIO struct {
 	out         io.Writer
 	errOut      io.Writer
-	prompt      func(question string) (leaveAgentChoice, error)
+	prompt      func(question string, allowDelete bool) (leaveAgentChoice, error)
 	confirm     func(question string) bool
-	deleteAgent func(ctx context.Context, agentID string) (hubDeleteOutcome, error)
+	deleteAgent func(ctx context.Context, agentID string, onAccepted func()) (hubDeleteOutcome, error)
 }
 
 // errProjectLeaveCancelled is returned when the user declines or cancels
@@ -268,7 +276,9 @@ func runProjectLeave(ctx context.Context, svc hubclient.ProjectService, project 
 
 	holdsAgents := dry.WillBeHeld
 	choice := opts.agents
-	prompts := !opts.yes && opts.interactive && (!holdsAgents || choice == leaveAgentsUnset)
+	// Every run that asks something on a terminal (the agent choice or the
+	// yes/no) shows the consequences first.
+	prompts := !opts.yes && opts.interactive
 	switch {
 	case !opts.json:
 		printLeaveConsequences(lio.out, project, dry)
@@ -284,7 +294,12 @@ func runProjectLeave(ctx context.Context, svc hubclient.ProjectService, project 
 		if opts.yes || !opts.interactive {
 			return newUsageError("you have %s in %s that would be put on hold; pass --delete-agents or --keep-agents", countNoun(dry.Agents.Count, "agent"), project.Name)
 		}
-		choice, err = lio.prompt(fmt.Sprintf("Leave project %q: delete your %s first, keep them on hold, or cancel?", project.Name, countNoun(dry.Agents.Count, "agent")))
+		listed := !dry.Agents.Truncated && len(dry.Agents.Items) >= dry.Agents.Count
+		q := fmt.Sprintf("Leave project %q: delete your %s first, keep them on hold, or cancel?", project.Name, countNoun(dry.Agents.Count, "agent"))
+		if !listed {
+			q = fmt.Sprintf("Leave project %q: your %s are more than can be listed, so they cannot be deleted here; keep them on hold, or cancel?", project.Name, countNoun(dry.Agents.Count, "agent"))
+		}
+		choice, err = lio.prompt(q, listed)
 		if err != nil {
 			return err
 		}
@@ -343,7 +358,11 @@ func deleteLeaveAgents(ctx context.Context, agents hubclient.LeaveProjectAgents,
 	for _, a := range agents.Items {
 		label := leaveAgentLabel(a)
 		callCtx, cancel := context.WithTimeout(ctx, leaveCallTimeout)
-		outcome, err := lio.deleteAgent(callCtx, a.ID)
+		outcome, err := lio.deleteAgent(callCtx, a.ID, func() {
+			if lio.errOut != nil {
+				_, _ = fmt.Fprintf(lio.errOut, "Waiting for the Hub to delete %s...\n", label)
+			}
+		})
 		cancel()
 		var cause error
 		switch {
@@ -389,7 +408,10 @@ func leaveAgentLabel(a hubclient.LeaveProjectAgentItem) string {
 // leaveFailure maps a failed leave request (dry run or real). The project
 // was already resolved, so a 404 here is not "it doesn't exist": the hub's
 // leave route answers "route not found" while hub.project_self_leave is
-// off, and "Project not found" to a caller with no direct role on it. A 409
+// off, "Project not found" to a caller with no direct role on it, and a hub
+// without the route answers "Project route not found". A 403 whose
+// details.credential is session_required is the session-only gate refusing
+// an access token. A 409
 // keeps the hub's code and message (last_owner gets the way out added; a
 // group-only refusal lists the readable groups).
 func leaveFailure(project *hubclient.Project, err error) error {
@@ -398,6 +420,12 @@ func leaveFailure(project *hubclient.Project, err error) error {
 		return fmt.Errorf("failed to leave project: %w", err)
 	}
 	switch {
+	case apiErr.StatusCode == 403 && apiErr.Details["credential"] == "session_required":
+		return &leaveError{code: apiErr.Code, details: apiErr.Details, cause: err,
+			msg: fmt.Sprintf("cannot leave %s: leaving needs an interactive login session (scion hub auth login); access tokens are refused", project.Name)}
+	case apiErr.StatusCode == 404 && apiErr.Message == "Project route not found":
+		return &leaveError{code: "unsupported", cause: err,
+			msg: fmt.Sprintf("cannot leave %s: this Hub does not support project leave (it may be an older version)", project.Name)}
 	case apiErr.StatusCode == 404 && apiErr.Message == "route not found":
 		return &leaveError{code: "experiment_disabled", cause: err,
 			msg: fmt.Sprintf("cannot leave %s: project self-leave (hub.project_self_leave) is not enabled on this Hub", project.Name)}
@@ -491,20 +519,28 @@ func printLeaveResult(out io.Writer, project *hubclient.Project, res *hubclient.
 
 // promptLeaveAgentChoice asks whether to delete the agents, keep them on
 // hold, or cancel, reading the answer from in and writing the question to
-// out. An end of input with no answer, or an unknown answer, cancels. A
-// read error cancels and is returned, so the command exits non-zero
-// without leaving.
-func promptLeaveAgentChoice(in io.Reader, out io.Writer, question string) (leaveAgentChoice, error) {
-	_, _ = fmt.Fprintf(out, "%s [d]elete / [k]eep / [c]ancel: ", question)
+// out. Without allowDelete the choices are keep and cancel, and a delete
+// answer cancels. An end of input with no answer, or an unknown answer,
+// cancels. A read error cancels and is returned, so the command exits
+// non-zero without leaving.
+func promptLeaveAgentChoice(in io.Reader, out io.Writer, question string, allowDelete bool) (leaveAgentChoice, error) {
+	choices := "[d]elete / [k]eep / [c]ancel"
+	if !allowDelete {
+		choices = "[k]eep / [c]ancel"
+	}
+	_, _ = fmt.Fprintf(out, "%s %s: ", question, choices)
 	input, err := bufio.NewReader(in).ReadString('\n')
 	if err != nil {
 		_, _ = fmt.Fprintln(out)
-		if errors.Is(err, io.EOF) {
-			return parseLeaveAgentAnswer(input), nil
+		if !errors.Is(err, io.EOF) {
+			return leaveAgentsCancel, fmt.Errorf("reading the answer: %w", err)
 		}
-		return leaveAgentsCancel, fmt.Errorf("reading the answer: %w", err)
 	}
-	return parseLeaveAgentAnswer(input), nil
+	choice := parseLeaveAgentAnswer(input)
+	if choice == leaveAgentsDelete && !allowDelete {
+		return leaveAgentsCancel, nil
+	}
+	return choice, nil
 }
 
 // parseLeaveAgentAnswer reads an answer to the agent prompt.
