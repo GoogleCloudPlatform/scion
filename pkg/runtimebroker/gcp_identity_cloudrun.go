@@ -104,7 +104,8 @@ func cloudRunNativeIdentityEnabled(ctx context.Context, in startContextInputs) b
 }
 
 // hubDefaultPassthrough reports whether a passthrough mode came from the
-// hub's default rung (the RequireLocalRuntime flag): on a create, the
+// hub's default rung or a confined project-default grant (the
+// RequireLocalRuntime flag): on a create, the
 // create request's GCPIdentity when present; otherwise, and on every start
 // or restart, the env (resolved env, overridden by the config env). A
 // GCPIdentity on a start or restart request is not consulted, as for the
@@ -150,13 +151,13 @@ func hubDefaultPassthrough(in startContextInputs) bool {
 //     native and deleting it otherwise.
 //
 // GCP identity mode "block", an unset mode (block is the default on Cloud
-// Run) and a hub-default passthrough run the instance as
-// cloudrun.block_service_account of the selected runtime entry in the
-// broker's global settings. Without one the dispatch is refused; the
+// Run) and a hub-default or confined project-default passthrough run the
+// instance as cloudrun.block_service_account of the selected runtime entry
+// in the broker's global settings. Without one the dispatch is refused; the
 // runtime's own service account is never used in its place.
 //
-// Explicit and project-default passthrough are refused
-// (cloudRunPassthroughRefusal).
+// Explicit passthrough, and a project-default passthrough without the
+// RequireLocalRuntime flag, are refused (cloudRunPassthroughRefusal).
 //
 // A project's own settings.yaml value for either setting is ignored with a
 // warning. A flat Runtime Broker instance and a runtime entry whose

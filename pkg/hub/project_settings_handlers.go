@@ -362,6 +362,17 @@ func (s *Server) validateDefaultGCPIdentity(w http.ResponseWriter, ctx context.C
 		return changedProfileDefaults, true
 	}
 
+	// Setting a passthrough default needs the setter's own passthrough
+	// authority. Agent create and scheduled dispatch re-check it for the
+	// agent's creator (projectDefaultPassthroughAllowed), but a project
+	// owner must not be able to save a default that hands out a broker
+	// identity they could not use themselves.
+	if present[projectSettingsFieldGCPIdentityMode] &&
+		merged.DefaultGCPIdentityMode == store.GCPMetadataModePassthrough &&
+		!s.authorizeProjectDefaultPassthrough(w, ctx, project) {
+		return nil, false
+	}
+
 	// mode=assign with no service account is the same defect wearing different
 	// clothes: the consumption path falls straight through to block.
 	if merged.DefaultGCPIdentityMode == store.GCPMetadataModeAssign && merged.DefaultGCPIdentityServiceAccountID == "" {
@@ -396,6 +407,33 @@ func (s *Server) validateDefaultGCPIdentity(w http.ResponseWriter, ctx context.C
 		return nil, false
 	}
 	return changedProfileDefaults, true
+}
+
+// authorizeProjectDefaultPassthrough checks the caller on ctx may set a
+// passthrough project default. A project default only ever grants
+// passthrough on the hub's embedded broker (hubDefaultPassthroughAllowed), so
+// the caller's passthrough authority (evaluatePassthroughIdentity) is checked
+// against that broker. A hub without exactly one embedded broker cannot apply
+// the default at all, and refuses it. It writes the error response itself and
+// returns false when the caller must stop.
+func (s *Server) authorizeProjectDefaultPassthrough(w http.ResponseWriter, ctx context.Context, project *store.Project) bool {
+	state := s.waitForEmbeddedBroker(ctx)
+	if state.id == "" {
+		BadRequest(w, "default GCP identity mode 'passthrough' is only available on a hub with an embedded broker; choose another mode")
+		return false
+	}
+	broker, err := s.store.GetRuntimeBroker(ctx, state.id)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return false
+	}
+	if d := s.evaluatePassthroughIdentity(ctx, nil, broker, SurfacePassthroughProjectDefault); d != nil {
+		slog.Info("project-default GCP passthrough refused at save: caller lacks passthrough authority",
+			"surface", SurfacePassthroughProjectDefault, "project_id", project.ID, "broker", broker.ID)
+		d.write(w)
+		return false
+	}
+	return true
 }
 
 // validateProjectDefaultSAID checks that saID names a service account that

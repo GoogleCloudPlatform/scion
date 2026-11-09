@@ -425,10 +425,16 @@ func TestGCPIdentityConfig_JSONRoundTrip(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Passthrough default mode should still work without authorization gate
+// Passthrough default mode is held to the passthrough checks
 // ---------------------------------------------------------------------------
 
-func TestProjectDefaultGate_PassthroughDefaultNoGate(t *testing.T) {
+// TestProjectDefaultGate_PassthroughDefaultNotAppliedOutsideConfinement: a
+// project-default passthrough is confined like the hub default and needs the
+// caller's passthrough authority (projectDefaultPassthroughAllowed). This
+// server's broker is not the embedded one, so the default is not applied and
+// the identity is left unset. project_default_passthrough_gate_test.go covers
+// the grant and each refusal.
+func TestProjectDefaultGate_PassthroughDefaultNotAppliedOutsideConfinement(t *testing.T) {
 	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
 	srv, s, project := setupCreateAgentServer(t, disp)
 
@@ -439,18 +445,13 @@ func TestProjectDefaultGate_PassthroughDefaultNoGate(t *testing.T) {
 	project.Annotations[projectSettingDefaultGCPIdentityMode] = store.GCPMetadataModePassthrough
 	require.NoError(t, s.UpdateProject(ctx, project))
 
-	// Note: Passthrough default does not have a SA to gate on.
-	// authorizePassthroughIdentity is only called for explicit passthrough
-	// requests, not for the project default passthrough mode. The project
-	// default just sets the mode; the passthrough actAs check (P8) runs
-	// separately when a broker is involved.
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:      "p10-passthrough-default",
 		ProjectID: project.ID,
 		Task:      "passthrough test",
 	})
 	require.Equal(t, http.StatusCreated, rec.Code,
-		"passthrough default should succeed without SA gate; got: %s", rec.Body.String())
+		"an unapplied passthrough default must not fail the create; got: %s", rec.Body.String())
 
 	var resp CreateAgentResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
@@ -459,6 +460,5 @@ func TestProjectDefaultGate_PassthroughDefaultNoGate(t *testing.T) {
 	got, err := s.GetAgent(ctx, resp.Agent.ID)
 	require.NoError(t, err)
 	require.NotNil(t, got.AppliedConfig)
-	require.NotNil(t, got.AppliedConfig.GCPIdentity)
-	assert.Equal(t, store.GCPMetadataModePassthrough, got.AppliedConfig.GCPIdentity.MetadataMode)
+	assert.Nil(t, got.AppliedConfig.GCPIdentity)
 }

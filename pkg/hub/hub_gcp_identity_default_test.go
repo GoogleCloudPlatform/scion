@@ -530,12 +530,16 @@ func TestHubDefaultGCPIdentity_PassthroughSurvivesSettingsReload(t *testing.T) {
 	assert.Equal(t, store.GCPMetadataModePassthrough, identity.MetadataMode)
 }
 
-// TestHubDefaultGCPIdentity_ProjectPassthroughUnaffectedByBrokerRole confirms
-// the embedded-broker restriction is specific to the hub rung: a project's own
-// passthrough default keeps its existing behaviour on any broker.
-func TestHubDefaultGCPIdentity_ProjectPassthroughUnaffectedByBrokerRole(t *testing.T) {
-	f := bypassAgentsSetup(t)
+// projectPassthroughWithAuthority stores a project passthrough default and
+// gives the caller everything the passthrough authority needs (hub admin,
+// host SA registered; caller-permission checking is off), so only the
+// confinement decides.
+func projectPassthroughWithAuthority(t *testing.T, f *bypassAgentsFixture) {
+	t.Helper()
 	ctx := context.Background()
+	_, err := f.store.SetRuntimeBrokerGCPHost(ctx, f.broker.ID, "broker-host@hub-default-pt.iam.gserviceaccount.com", "hub-default-pt")
+	require.NoError(t, err)
+	grantSuperAdmin(t, f.store, f.owner.ID)
 	proj, err := f.store.GetProject(ctx, f.proj.ID)
 	require.NoError(t, err)
 	if proj.Annotations == nil {
@@ -543,32 +547,32 @@ func TestHubDefaultGCPIdentity_ProjectPassthroughUnaffectedByBrokerRole(t *testi
 	}
 	proj.Annotations[projectSettingDefaultGCPIdentityMode] = store.GCPMetadataModePassthrough
 	require.NoError(t, f.store.UpdateProject(ctx, proj))
-
-	identity := createdAgentIdentity(t, f, "project-passthrough-remote-agent")
-	assert.Equal(t, store.GCPMetadataModePassthrough, identity.MetadataMode)
 }
 
-// TestHubDefaultGCPIdentity_ProjectPassthroughUnaffectedByKubernetesRuntime
-// confirms the runtime gate is specific to the hub-default rung: a project's
-// own passthrough default is a deliberate operator choice, not a default,
-// and keeps applying regardless of the resolved runtime — including on a
-// kubernetes-type profile, where the hub default falls to block.
-func TestHubDefaultGCPIdentity_ProjectPassthroughUnaffectedByKubernetesRuntime(t *testing.T) {
+// TestHubDefaultGCPIdentity_ProjectPassthroughConfinedToEmbeddedBroker: a
+// project's own passthrough default is confined to the embedded broker like
+// the hub default (projectDefaultPassthroughAllowed), even for a caller with
+// the passthrough authority.
+func TestHubDefaultGCPIdentity_ProjectPassthroughConfinedToEmbeddedBroker(t *testing.T) {
 	f := bypassAgentsSetup(t)
-	ctx := context.Background()
+	markBrokerRuntimeProfile(t, f, "docker")
+	projectPassthroughWithAuthority(t, f)
+
+	assert.Nil(t, createdAgentIdentityOrNil(t, f, "project-passthrough-remote-agent"),
+		"a project-level passthrough default must not apply on a non-embedded broker")
+}
+
+// TestHubDefaultGCPIdentity_ProjectPassthroughConfinedToLocalRuntime: the
+// hub default's runtime rule applies to a project passthrough default too, so
+// a kubernetes-type profile on the embedded broker leaves the identity unset.
+func TestHubDefaultGCPIdentity_ProjectPassthroughConfinedToLocalRuntime(t *testing.T) {
+	f := bypassAgentsSetup(t)
 	markBrokerEmbedded(t, f)
 	markBrokerRuntimeProfile(t, f, "kubernetes")
-	proj, err := f.store.GetProject(ctx, f.proj.ID)
-	require.NoError(t, err)
-	if proj.Annotations == nil {
-		proj.Annotations = map[string]string{}
-	}
-	proj.Annotations[projectSettingDefaultGCPIdentityMode] = store.GCPMetadataModePassthrough
-	require.NoError(t, f.store.UpdateProject(ctx, proj))
+	projectPassthroughWithAuthority(t, f)
 
-	identity := createdAgentIdentity(t, f, "project-passthrough-k8s-agent")
-	assert.Equal(t, store.GCPMetadataModePassthrough, identity.MetadataMode,
-		"a project-level passthrough default must not be gated by the hub-default runtime check")
+	assert.Nil(t, createdAgentIdentityOrNil(t, f, "project-passthrough-k8s-agent"),
+		"a project-level passthrough default must be held to the hub-default runtime check")
 }
 
 // TestHubDefaultGCPIdentity_AssignProjectScopedSAFromOtherProjectFails covers
@@ -614,11 +618,11 @@ func TestHubDefaultGCPIdentity_ProjectExplicitBlockWinsOverHubPassthrough(t *tes
 		"an explicit project-level \"block\" must not fall through to the hub default")
 }
 
-// TestHubDefaultGCPIdentity_ProjectDefaultTakesPrecedenceOverHubDefault
+// TestHubDefaultGCPIdentity_RefusedProjectPassthroughDoesNotFallThroughToHubDefault
 // confirms the ladder order: a project default answers the question before
 // the hub default is ever consulted, regardless of what the hub default
 // would have produced.
-func TestHubDefaultGCPIdentity_ProjectDefaultTakesPrecedenceOverHubDefault(t *testing.T) {
+func TestHubDefaultGCPIdentity_RefusedProjectPassthroughDoesNotFallThroughToHubDefault(t *testing.T) {
 	f := bypassAgentsSetup(t)
 	// A hub default that would produce a completely different, and
 	// unreachable-from-nowhere, outcome if it were ever consulted.
@@ -636,8 +640,11 @@ func TestHubDefaultGCPIdentity_ProjectDefaultTakesPrecedenceOverHubDefault(t *te
 	proj.Annotations[projectSettingDefaultGCPIdentityMode] = store.GCPMetadataModePassthrough
 	require.NoError(t, f.store.UpdateProject(ctx, proj))
 
-	identity := createdAgentIdentity(t, f, "project-over-hub-agent")
-	assert.Equal(t, store.GCPMetadataModePassthrough, identity.MetadataMode,
+	// The project passthrough default is not granted here (the fixture
+	// broker is not the embedded one; see projectDefaultPassthroughAllowed),
+	// and a refused project default leaves the identity unset rather than
+	// falling through to the hub default.
+	assert.Nil(t, createdAgentIdentityOrNil(t, f, "project-over-hub-agent"),
 		"the project default must win, and the hub default's unusable SA must never be looked up")
 }
 
@@ -822,12 +829,10 @@ func TestHubDefaultGCPIdentity_PinnedProfileSurvivesReincarnateAfterProjectActiv
 // covers the broker-side re-check's own scope boundary from the hub side:
 // RequireLocalRuntime — the flag that tells the broker to re-verify a
 // passthrough grant against the runtime it actually resolves — must be true
-// on a hub-default grant and false (unset) on every other passthrough
-// source. The hub resolves an agent's runtime from the broker's
-// registration-time data, which can disagree with the broker's own
-// dispatch-time settings; project-level and explicit passthrough are
-// deliberate operator/caller choices, not defaults, and must not pay that
-// re-check.
+// on a hub-default or project-default grant, the two rungs confined by
+// hubDefaultPassthroughAllowed, and false (unset) on explicit passthrough.
+// The hub resolves an agent's runtime from the broker's registration-time
+// data, which can disagree with the broker's own dispatch-time settings.
 func TestHubDefaultGCPIdentity_RequireLocalRuntimeSetOnlyOnHubDefaultGrant(t *testing.T) {
 	t.Run("hub-default grant sets the flag", func(t *testing.T) {
 		f := bypassAgentsSetup(t)
@@ -843,27 +848,23 @@ func TestHubDefaultGCPIdentity_RequireLocalRuntimeSetOnlyOnHubDefaultGrant(t *te
 			"a hub-default passthrough grant must set RequireLocalRuntime")
 	})
 
-	t.Run("project-level passthrough does not set the flag", func(t *testing.T) {
+	t.Run("project-default grant sets the flag", func(t *testing.T) {
 		f := bypassAgentsSetup(t)
-		ctx := context.Background()
-		proj, err := f.store.GetProject(ctx, f.proj.ID)
-		require.NoError(t, err)
-		if proj.Annotations == nil {
-			proj.Annotations = map[string]string{}
-		}
-		proj.Annotations[projectSettingDefaultGCPIdentityMode] = store.GCPMetadataModePassthrough
-		require.NoError(t, f.store.UpdateProject(ctx, proj))
+		markBrokerEmbedded(t, f)
+		markBrokerRuntimeProfile(t, f, "docker")
+		projectPassthroughWithAuthority(t, f)
 
 		identity := createdAgentIdentity(t, f, "project-passthrough-flag-agent")
 		assert.Equal(t, store.GCPMetadataModePassthrough, identity.MetadataMode)
-		assert.False(t, identity.RequireLocalRuntime,
-			"a project-level passthrough default must never set RequireLocalRuntime")
+		assert.True(t, identity.RequireLocalRuntime,
+			"a project-default passthrough grant must set RequireLocalRuntime")
 	})
 
 	// Explicit request passthrough is covered by TestPassthrough_* in
 	// passthrough_gate_test.go, which exercises the broker-owner/actAs
 	// authorization path this fixture does not set up. Those construct
 	// store.GCPIdentityConfig without RequireLocalRuntime (it defaults to
-	// false), and a repo-wide check confirms only the two hub-default call
-	// sites (handlers_agents_core.go, server.go) ever set it to true.
+	// false), and a repo-wide check confirms only the hub-default and
+	// project-default grants (handlers_agents_core.go, server.go) ever set it
+	// to true.
 }

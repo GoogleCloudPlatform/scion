@@ -372,6 +372,47 @@ func (s *Server) hubDefaultPassthroughAllowed(ctx context.Context, runtimeBroker
 	return false, ""
 }
 
+// projectDefaultPassthroughAllowed reports whether a project-default
+// "passthrough" may be applied to an agent named agentName, dispatched to
+// runtimeBrokerID under profileName (the effective profile; see
+// effectiveRuntimeProfileName). It applies the hub-default confinement
+// unchanged (hubDefaultPassthroughAllowed: the embedded broker, on a local
+// container runtime), then the passthrough authority
+// (evaluatePassthroughIdentity) for the identity on ctx: the requesting user
+// on agent create, the schedule's principal on scheduled dispatch. Both must
+// hold. Confinement runs first so a broker outside it costs no permission
+// check.
+//
+// A project default is checked here at consume time as well as when it is
+// saved (validateDefaultGCPIdentity), so a default saved before that check
+// existed, or copied in with a project, still cannot grant passthrough to a
+// caller without the authority. On denial the caller leaves
+// AppliedConfig.GCPIdentity unset, as the hub-default rung does. On a grant
+// the second return value is the profile to pin, as for the hub default.
+func (s *Server) projectDefaultPassthroughAllowed(ctx context.Context, r *http.Request, runtimeBrokerID, projectID, agentName, profileName string) (bool, string) {
+	allowed, resolvedProfile := s.hubDefaultPassthroughAllowed(ctx, runtimeBrokerID, projectID, agentName, profileName)
+	if !allowed {
+		slog.Info("project-default GCP passthrough denied: outside the passthrough default confinement",
+			"surface", SurfacePassthroughProjectDefault, "project_id", projectID, "agent", agentName,
+			"broker", runtimeBrokerID)
+		return false, ""
+	}
+	broker, err := s.store.GetRuntimeBroker(ctx, runtimeBrokerID)
+	if err != nil || broker == nil {
+		slog.Info("project-default GCP passthrough denied: runtime broker unavailable",
+			"surface", SurfacePassthroughProjectDefault, "project_id", projectID, "agent", agentName,
+			"broker", runtimeBrokerID, "error", err)
+		return false, ""
+	}
+	if d := s.evaluatePassthroughIdentity(ctx, r, broker, SurfacePassthroughProjectDefault); d != nil {
+		slog.Info("project-default GCP passthrough denied: caller lacks passthrough authority",
+			"surface", SurfacePassthroughProjectDefault, "project_id", projectID, "agent", agentName,
+			"broker", runtimeBrokerID, "reason", d.msg)
+		return false, ""
+	}
+	return true, resolvedProfile
+}
+
 // hubDefaultPassthroughRuntimeTypes are the runtime profile types the
 // hub-default passthrough rung may apply to: local container runtimes that
 // run on the broker's own host and therefore share its metadata server.

@@ -3386,9 +3386,9 @@ type GCPIdentityConfig struct {
 	ProjectID           string `json:"projectId,omitempty"`           // Denormalized
 
 	// RequireLocalRuntime marks a "passthrough" mode as granted by the
-	// hub-default rung specifically (hubDefaultRuntimeAllowed,
-	// default_gcp_identity.go), never by an explicit request or a
-	// project-level default. The hub resolves the runtime this agent will
+	// hub-default or project-default rung, both confined by
+	// hubDefaultPassthroughAllowed (default_gcp_identity.go), never by an
+	// explicit request. The hub resolves the runtime this agent will
 	// dispatch under from the broker's own registration data, which can
 	// differ from what the broker resolves at dispatch time against
 	// project-effective settings. The broker re-checks this flag once it
