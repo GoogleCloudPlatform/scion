@@ -68,9 +68,10 @@ flags is required.
 The last owner of a project cannot leave (transfer ownership first), and
 membership through a group cannot be left here.
 
-Leaving needs an interactive login session: a user access token is refused
-(403 forbidden). Requires Hub connectivity and the hub.project_self_leave
-experiment.`,
+Leaving needs an interactive login session: a user access token is refused.
+The Hub answers 403 forbidden when the token reaches the leave route; a token
+that cannot read the project fails at the project lookup instead. Requires
+Hub connectivity and the hub.project_self_leave experiment.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		opts := leaveOptions{
@@ -112,8 +113,14 @@ func runProjectLeaveCommand(ctx context.Context, projectRef string, opts leaveOp
 		return projectLeaveResolveError(projectRef, err)
 	}
 
-	agents := client.ProjectAgents(project.ID)
-	lio := leaveIO{
+	return runProjectLeave(ctx, client.Projects(), project, opts, newLeaveIO(client.ProjectAgents(project.ID), out, errOut))
+}
+
+// newLeaveIO is the production leaveIO: prompts on the terminal, and agent
+// deletes through leaveAgentDeleter (scion delete's path) on agents, the
+// project's agent service.
+func newLeaveIO(agents hubclient.AgentService, out, errOut io.Writer) leaveIO {
+	return leaveIO{
 		out:    out,
 		errOut: errOut,
 		prompt: func(q string, allowDelete bool) (leaveAgentChoice, error) {
@@ -122,7 +129,6 @@ func runProjectLeaveCommand(ctx context.Context, projectRef string, opts leaveOp
 		confirm:     func(q string) bool { return hubsync.ConfirmAction(q, false, false) },
 		deleteAgent: leaveAgentDeleter(agents),
 	}
-	return runProjectLeave(ctx, client.Projects(), project, opts, lio)
 }
 
 // leaveAgentDeleter is the production delete seam: scion delete's path

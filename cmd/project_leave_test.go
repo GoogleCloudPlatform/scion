@@ -642,10 +642,12 @@ func TestProjectLeave_AcceptedDeletePrintsProgress(t *testing.T) {
 	assert.Equal(t, "Waiting for the Hub to delete beta...\n", h.errOut.String(), "only the accepted delete waits")
 }
 
-// TestProjectLeave_ProductionDeleteWaitsForConfirmation (round 2 N4): the
-// production seam (leaveAgentDeleter) polls a 202. Against a hub whose
-// delete is accepted and then fails, the outcome is not confirmed and the
-// leave is never sent.
+// TestProjectLeave_ProductionDeleteWaitsForConfirmation (round 2 N4, round 3
+// O1): the production leaveIO (newLeaveIO, which runProjectLeaveCommand
+// uses) deletes through leaveAgentDeleter, which polls a 202. Against a hub
+// whose delete is accepted and then fails, the outcome is not confirmed and
+// the leave is never sent. Reverting either the wiring or the deleter fails
+// this test.
 func TestProjectLeave_ProductionDeleteWaitsForConfirmation(t *testing.T) {
 	fastDeletionWait(t)
 	hub := &asyncDeleteHub{projectID: "proj-1", agentName: "a-1", replies: []getReply{{body: replyRuntime}}}
@@ -653,7 +655,9 @@ func TestProjectLeave_ProductionDeleteWaitsForConfirmation(t *testing.T) {
 	t.Cleanup(srv.Close)
 	client, err := hubclient.New(srv.URL)
 	require.NoError(t, err)
-	del := leaveAgentDeleter(client.ProjectAgents(hub.projectID))
+	var out, errOut bytes.Buffer
+	prod := newLeaveIO(client.ProjectAgents(hub.projectID), &out, &errOut)
+	del := prod.deleteAgent
 
 	accepted := false
 	outcome, err := del(context.Background(), "a-1", func() { accepted = true })
@@ -664,10 +668,9 @@ func TestProjectLeave_ProductionDeleteWaitsForConfirmation(t *testing.T) {
 
 	svc := &fakeLeaveProjects{dryRes: leaveResult(true, []string{"project-member"}, "none",
 		[]hubclient.LeaveProjectAgentItem{{ID: "a-1", Name: "alpha", Phase: "running"}}, 0)}
-	lio := (&leaveHarness{}).io()
-	lio.deleteAgent = del
-	err = runProjectLeave(context.Background(), svc, leaveTestProject, leaveOptions{yes: true, agents: leaveAgentsDelete}, lio)
+	err = runProjectLeave(context.Background(), svc, leaveTestProject, leaveOptions{yes: true, agents: leaveAgentsDelete}, prod)
 	require.Error(t, err)
+	assert.Contains(t, errOut.String(), "Waiting for the Hub to delete alpha...")
 	assert.Contains(t, err.Error(), "failed to delete agent alpha, so the project was not left")
 	assert.Contains(t, err.Error(), "runtime_error")
 	assert.Equal(t, []bool{true}, svc.dry, "never leaves")
