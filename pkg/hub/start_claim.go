@@ -1150,6 +1150,12 @@ func (s *Server) writeStartClaimError(ctx context.Context, w http.ResponseWriter
 		// authorization fault): nothing was dropped, written or sent.
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "start not sent: "+pendingReauthUnavailableMessage, nil)
 		return true
+	case errors.Is(err, errPendingConfigFold) && errors.Is(err, errBrokerLookup):
+		// The fold could not read the broker record that decides which
+		// held edits a start applies (ptone/scion#7544): nothing was
+		// written or sent.
+		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, "start not sent: "+pendingFoldBrokerUnavailableMessage, nil)
+		return true
 	case errors.Is(err, errStartClaimLost):
 		// A delete that won while the start was dispatching (a hard delete
 		// also loses the claim at the next renewal) answers as a delete

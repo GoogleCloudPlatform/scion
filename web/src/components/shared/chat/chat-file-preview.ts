@@ -67,6 +67,7 @@ import '../code-editor.js';
 import '../markdown-preview.js';
 import '../artifact-markdown-frame.js';
 import { renderUntrustedViewFrame, untrustedViewFrameStyles } from '../untrusted-view-frame.js';
+import { copyToClipboard, showCopyFailedToast } from '../../../utils/clipboard.js';
 
 /** An attachment target, addressed by its opaque attachment ID. */
 export interface AttachmentPreviewTarget {
@@ -887,17 +888,7 @@ export class ScionChatFilePreview extends LitElement {
 
   /** Copies the artifact's reference (scion://artifact/<id>[@<seq>]). */
   private async copyArtifactRef(target: ArtifactPreviewTarget): Promise<void> {
-    try {
-      await navigator.clipboard.writeText(formatArtifactRef(target.id, target.seq));
-      this.copied = true;
-      this.clearCopyTimer();
-      this.copyTimer = setTimeout(() => {
-        this.copied = false;
-        this.copyTimer = null;
-      }, 1500);
-    } catch {
-      // Clipboard write may fail in insecure contexts; silently ignore.
-    }
+    await this.copyText(formatArtifactRef(target.id, target.seq));
   }
 
   private retry(): void {
@@ -940,17 +931,24 @@ export class ScionChatFilePreview extends LitElement {
   private async copyContent(): Promise<void> {
     const text = this.loadState.content;
     if (text === undefined) return;
-    try {
-      await navigator.clipboard.writeText(text);
-      this.copied = true;
-      this.clearCopyTimer();
-      this.copyTimer = setTimeout(() => {
-        this.copied = false;
-        this.copyTimer = null;
-      }, 1500);
-    } catch {
-      // Clipboard write may fail in insecure contexts; silently ignore.
+    await this.copyText(text);
+  }
+
+  /**
+   * Copies `text`, then shows the brief "copied" state, or the failure toast
+   * when the clipboard is unavailable (an insecure context) or denies the write.
+   */
+  private async copyText(text: string): Promise<void> {
+    if (!(await copyToClipboard(text))) {
+      showCopyFailedToast();
+      return;
     }
+    this.copied = true;
+    this.clearCopyTimer();
+    this.copyTimer = setTimeout(() => {
+      this.copied = false;
+      this.copyTimer = null;
+    }, 1500);
   }
 
   private renderBody() {

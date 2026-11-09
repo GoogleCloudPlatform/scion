@@ -259,8 +259,12 @@ func stripConfigEnvTZ(cfg *api.ScionConfig) bool {
 // edit applied later (foldPendingConfig). p must have passed
 // validateAgentConfigPatch. canAttachEnv is whether the caller who sent the
 // edit could read the agent's env (canViewAgentEnv): it gates the env
-// removal rules.
-func (s *Server) applyAgentConfigPatch(ctx context.Context, agent *store.Agent, p configPatch, canAttachEnv bool) configPatchResult {
+// removal rules. supFor yields the agent's broker start support; it is
+// called only when the disposition depends on the broker (a
+// provision-rendered key, a clear or a removal changes), and its error is
+// returned with the agent's in-memory writes left for the caller to
+// discard.
+func (s *Server) applyAgentConfigPatch(ctx context.Context, agent *store.Agent, p configPatch, canAttachEnv bool, supFor brokerSupportSource) (configPatchResult, error) {
 	var res configPatchResult
 	if agent.AppliedConfig == nil {
 		agent.AppliedConfig = &store.AgentAppliedConfig{}
@@ -373,15 +377,22 @@ func (s *Server) applyAgentConfigPatch(ctx context.Context, agent *store.Agent, 
 	cleared = withDroppedResourcesSubField(cleared, old.InlineConfig, cfg, p.present)
 	// A broker with clearedFields applies the clears recorded above at
 	// the next start (ptone/scion#4890), so only the rest are held.
-	// What is reported applied follows what was recorded above.
-	sup := s.agentBrokerStartSupport(ctx, agent)
+	// What is reported applied follows what was recorded above. With
+	// none of these, the disposition does not depend on the broker.
+	var sup brokerStartSupport
+	if len(provision) > 0 || len(cleared) > 0 || len(removed) > 0 {
+		var err error
+		if sup, err = supFor(); err != nil {
+			return res, err
+		}
+	}
 	provision = sup.heldProvisionEdits(provision, old.InlineConfig, cfg, merged.ClearedFields)
 	cleared = sup.heldClearEdits(cleared, merged.ClearedFields, droppedEnvKeys(old.InlineConfig, cfg, p.present), resDropped)
 	removed = sup.heldRemovals(removed, merged.ClearedFields)
 	res.warnings = append(res.warnings, sup.reincarnateOnlyEditWarnings(provision, cleared)...)
 	res.warnings = append(res.warnings, removedEntriesWarnings(removed)...)
 	res.applied, res.heldForReincarnate = configEditDisposition(p.raw, cfg, old.InlineConfig, provision, cleared, removed)
-	return res
+	return res, nil
 }
 
 // unlimitedCheckBase is the base validateUnlimitedCounts compares a request

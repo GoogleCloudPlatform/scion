@@ -63,7 +63,7 @@ var ErrAgentBranchMismatch = errors.New("the agent's kept workspace was created 
 //   - creates the workspace directory (<agent dir>/workspace) when it is
 //     missing; an existing one must be a plain directory;
 //   - checks the branch record (AgentBranchFile): when the workspace holds
-//     files other than marker entries (see api.IsWorkspaceMarker) and the
+//     files other than marker entries (see api.IsWorkspaceMarkerEntry) and the
 //     record names another branch, it returns
 //     ErrAgentBranchMismatch and changes nothing; otherwise it records the
 //     requested branch;
@@ -314,7 +314,7 @@ func purgePrefixedEntries(dir, prefix string) error {
 }
 
 // WorkspaceHasContent reports whether dir holds any entry other than the
-// marker entries api.IsWorkspaceMarker names, the same rule as the clone
+// marker entries api.IsWorkspaceMarkerEntry accepts, the same rule as the clone
 // step. A missing dir has no content.
 func WorkspaceHasContent(dir string) (bool, error) {
 	entries, err := os.ReadDir(dir)
@@ -325,7 +325,7 @@ func WorkspaceHasContent(dir string) (bool, error) {
 		return false, err
 	}
 	for _, e := range entries {
-		if !api.IsWorkspaceMarker(e.Name()) {
+		if !api.IsWorkspaceMarkerEntry(dir, e.Name()) {
 			return true, nil
 		}
 	}

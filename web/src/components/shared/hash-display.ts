@@ -25,6 +25,7 @@
 
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
+import { copyToClipboard, showCopyFailedToast } from '../../utils/clipboard.js';
 
 @customElement('scion-hash-display')
 export class ScionHashDisplay extends LitElement {
@@ -96,16 +97,15 @@ export class ScionHashDisplay extends LitElement {
   private async copy(e: Event): Promise<void> {
     e.stopPropagation();
     if (!this.hash) return;
-    try {
-      await navigator.clipboard.writeText(this.hash);
-      this.copied = true;
-      setTimeout(() => {
-        this.copied = false;
-      }, 1500);
-    } catch {
-      // Clipboard unavailable; silently fail. The full hash remains
-      // selectable in the DOM via the title tooltip.
+    if (!(await copyToClipboard(this.hash))) {
+      // The full hash remains selectable in the DOM via the title tooltip.
+      showCopyFailedToast();
+      return;
     }
+    this.copied = true;
+    setTimeout(() => {
+      this.copied = false;
+    }, 1500);
   }
 
   override render(): unknown {

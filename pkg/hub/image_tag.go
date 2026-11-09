@@ -246,7 +246,8 @@ type imageTagLogState struct {
 // LogImageTag logs, once at hub startup, the hub-scope image_tag: the
 // setting, its source, the experiment state and the tag applied, plus the
 // profiles that set their own value. With the experiment off and a value
-// set anywhere, it warns that the value is ignored. Later changes are
+// set anywhere, it warns that the value is ignored, or, when every set
+// value is latest (the opt-out), logs that at Info. Later changes are
 // logged by logImageTagIfChanged.
 func (s *Server) LogImageTag() {
 	s.logImageTag(true)
@@ -333,7 +334,9 @@ func (s *Server) imageTagProfiles() []string {
 // unchanged, and the version default does not apply. A hub save is refused
 // in that state (412
 // experiment_disabled), but a settings file or the environment cannot see
-// the experiment.
+// the experiment. When every set value is latest, the opt-out from the
+// version default, which has exactly its documented effect in that state,
+// it logs the opt-out at Info instead.
 func (s *Server) warnImageTagWithoutExperiment() {
 	if s.experimentEnabled(experiments.ImageTagSetting) {
 		return
@@ -361,8 +364,38 @@ func (s *Server) warnImageTagWithoutExperiment() {
 	if len(sources) == 0 {
 		return
 	}
+	if imageTagValuesAllLatest(nodeEnv, in) {
+		slog.Info("image_tag is latest, the opt-out from the version default: agent images keep their tags (latest); "+experiments.ImageTagSetting+" is off",
+			"sources", sources, "profiles", s.imageTagProfiles())
+		return
+	}
 	slog.Warn("image_tag is set but the "+experiments.ImageTagSetting+" experiment is off; the value is ignored, agent images keep their tags and the version default does not apply",
 		"sources", sources, "profiles", s.imageTagProfiles())
+}
+
+// imageTagValuesAllLatest reports whether every set image_tag value (the
+// hub env, the settings-file top level and profiles, and the saved hub
+// profiles) is latest, the documented opt-out from the version default,
+// and at least one is set.
+func imageTagValuesAllLatest(nodeEnv string, in config.ImageRegistryHubInputs) bool {
+	values := []string{nodeEnv, in.FileTier.Top}
+	for _, v := range in.FileTier.Profiles {
+		values = append(values, v)
+	}
+	for _, v := range in.ManagedProfiles {
+		values = append(values, v)
+	}
+	set := false
+	for _, v := range values {
+		switch strings.TrimSpace(v) {
+		case "":
+		case config.ImageTagLatest:
+			set = true
+		default:
+			return false
+		}
+	}
+	return set
 }
 
 // profilesSaveSetsImageTag reports whether a profiles section save (doc)

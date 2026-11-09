@@ -304,6 +304,20 @@ func TestIsWorkspaceEmpty(t *testing.T) {
 		}
 	})
 
+	// A workspace whose only entry is an exact-name ".agents" SYMLINK is
+	// not empty: a symlink is never a marker, even one that points at a
+	// directory.
+	t.Run("directory with only an exact-name .agents symlink", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		target := t.TempDir()
+		if err := os.Symlink(target, filepath.Join(tmpDir, ".agents")); err != nil {
+			t.Skipf("cannot create symlink: %v", err)
+		}
+		if isWorkspaceEmpty(tmpDir) {
+			t.Error("expected false when the workspace's only entry is a .agents symlink")
+		}
+	})
+
 	t.Run("directory with only .scion-volumes", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		_ = os.MkdirAll(filepath.Join(tmpDir, ".scion-volumes"), 0755)
@@ -318,6 +332,23 @@ func TestIsWorkspaceEmpty(t *testing.T) {
 		_ = os.MkdirAll(filepath.Join(tmpDir, ".scion-volumes"), 0755)
 		if !isWorkspaceEmpty(tmpDir) {
 			t.Error("expected true when workspace contains only .scion and .scion-volumes")
+		}
+	})
+
+	t.Run("cased marker name on a case-sensitive filesystem is content", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		probe := filepath.Join(tmpDir, "case-probe")
+		if err := os.Mkdir(probe, 0755); err != nil {
+			t.Fatal(err)
+		}
+		_, statErr := os.Lstat(filepath.Join(tmpDir, "CASE-PROBE"))
+		_ = os.Remove(probe)
+		if statErr == nil {
+			t.Skip("the temp filesystem is case-insensitive")
+		}
+		_ = os.MkdirAll(filepath.Join(tmpDir, ".SCION"), 0755)
+		if isWorkspaceEmpty(tmpDir) {
+			t.Error("expected false: .SCION is a different entry on a case-sensitive filesystem")
 		}
 	})
 

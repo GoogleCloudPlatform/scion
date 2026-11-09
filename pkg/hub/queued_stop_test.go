@@ -81,7 +81,17 @@ func TestQueuedStop_LaterStartSupersedesQueuedStop(t *testing.T) {
 	require.Equal(t, 200, code, body)
 
 	f.heartbeat(completeInventory(), a.Slug)
-	require.Eventually(t, func() bool { return pendingStops(t, f) == 0 }, 5*time.Second, 10*time.Millisecond)
+	// The row leaves pending when the drain claims it, before the drain
+	// decides; it is settled only after the decision, so wait for that.
+	id := tid("qs-" + a.Slug)
+	var row *store.BrokerDispatch
+	require.Eventually(t, func() bool {
+		var err error
+		row, err = f.s.GetBrokerDispatch(context.Background(), id)
+		return err == nil && (row.State == store.DispatchStateDone || row.State == store.DispatchStateFailed)
+	}, 5*time.Second, 10*time.Millisecond)
+	assert.Equal(t, store.DispatchStateDone, row.State, row.Error)
+	assert.Equal(t, stopSupersededResult, row.Result, "the drain records the queued stop as superseded")
 	assert.Equal(t, int32(0), d.stops.Load(), "the queued stop is not applied over the newer start")
 	assert.Equal(t, store.RunIntentRunning, getAgent(t, f.s, a.ID).RunIntent)
 }
@@ -367,7 +377,9 @@ func TestQueuedStop_OneHeartbeatDrainPerBroker(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	assert.Equal(t, before+1, lists.Load(), "only the second heartbeat's own read: no second drain")
 	close(release) // the first drain then applies the second stop too
-	require.Eventually(t, func() bool { return pendingStops(t, f) == 0 }, 5*time.Second, 10*time.Millisecond)
+	// A row leaves pending when the drain claims it, before the stop is
+	// dispatched, so wait for the counter as well.
+	require.Eventually(t, func() bool { return base.stops.Load() == 2 && pendingStops(t, f) == 0 }, 5*time.Second, 10*time.Millisecond)
 	assert.Equal(t, int32(2), base.stops.Load(), "each queued stop applied once")
 }
 

@@ -25,6 +25,9 @@ import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 import type { AdminUser } from '../../shared/types.js';
 import { requestBodyText, requestUrl } from '../../client/__fixtures__/request-url.js';
 
+vi.mock('../../utils/toast.js', () => ({ showToast: vi.fn() }));
+const { showToast } = await import('../../utils/toast.js');
+
 const SELF_ID = 'u-self';
 
 function makeUser(overrides: Partial<AdminUser> = {}): AdminUser {
@@ -1840,5 +1843,76 @@ describe('scion-page-admin-users — forced delete and deletion panel', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe('scion-page-admin-users — copy invite link (ptone/scion#7555)', () => {
+  type InvitePage = HTMLElement & {
+    updateComplete: Promise<boolean>;
+    createdInviteResult: { inviteUrl: string } | null;
+    inviteCopied: boolean;
+    copyInviteLink(): Promise<void>;
+  };
+  const originalClipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+  const originalExecCommand = Object.getOwnPropertyDescriptor(document, 'execCommand');
+  let element: InvitePage | null = null;
+
+  beforeAll(async () => {
+    vi.stubGlobal('fetch', vi.fn(createFetchHandler([])));
+    mod = await import('./admin-users.js');
+  });
+
+  afterEach(() => {
+    element?.remove();
+    element = null;
+    if (originalClipboard) Object.defineProperty(navigator, 'clipboard', originalClipboard);
+    else delete (navigator as unknown as Record<string, unknown>).clipboard;
+    if (originalExecCommand) Object.defineProperty(document, 'execCommand', originalExecCommand);
+    else delete (document as unknown as Record<string, unknown>).execCommand;
+    vi.mocked(showToast).mockClear();
+  });
+
+  async function pageWithInvite(): Promise<InvitePage> {
+    const el = (await createComponent([])) as InvitePage;
+    element = el;
+    el.createdInviteResult = { inviteUrl: 'https://hub.example.test/invite/CODE' };
+    vi.mocked(showToast).mockClear();
+    return el;
+  }
+
+  function setExecCommand(result: boolean): ReturnType<typeof vi.fn> {
+    const exec = vi.fn(() => result);
+    Object.defineProperty(document, 'execCommand', { value: exec, configurable: true });
+    return exec;
+  }
+
+  it('copies with the Clipboard API and marks the link copied, with no toast', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+    const el = await pageWithInvite();
+    await el.copyInviteLink();
+    expect(writeText).toHaveBeenCalledWith('https://hub.example.test/invite/CODE');
+    expect(el.inviteCopied).toBe(true);
+    expect(showToast).not.toHaveBeenCalled();
+  });
+
+  it('falls back to execCommand when the clipboard is unavailable, with no toast', async () => {
+    Object.defineProperty(navigator, 'clipboard', { value: undefined, configurable: true });
+    const exec = setExecCommand(true);
+    const el = await pageWithInvite();
+    await el.copyInviteLink();
+    expect(exec).toHaveBeenCalledWith('copy');
+    expect(el.inviteCopied).toBe(true);
+    expect(showToast).not.toHaveBeenCalled();
+  });
+
+  it('shows one "Could not copy" toast when the clipboard and the fallback both fail', async () => {
+    Object.defineProperty(navigator, 'clipboard', { value: undefined, configurable: true });
+    setExecCommand(false);
+    const el = await pageWithInvite();
+    await expect(el.copyInviteLink()).resolves.toBeUndefined();
+    expect(el.inviteCopied).toBe(false);
+    expect(showToast).toHaveBeenCalledTimes(1);
+    expect(showToast).toHaveBeenCalledWith('Could not copy', 'danger');
   });
 });
