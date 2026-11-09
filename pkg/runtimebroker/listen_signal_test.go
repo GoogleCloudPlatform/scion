@@ -27,7 +27,10 @@ import (
 // has bound its listener, and not before.
 func TestServerStart_ListeningClosesAfterBind(t *testing.T) {
 	srv := newTestServer(t)
-	srv.httpServer.Addr = "127.0.0.1:0"
+	// Start builds its listener address from the config; port 0 binds a
+	// kernel-chosen loopback port, never the default.
+	srv.config.Host = "127.0.0.1"
+	srv.config.Port = 0
 	select {
 	case <-srv.Listening():
 		t.Fatal("Listening closed before Start")
@@ -51,6 +54,11 @@ func TestServerStart_ListeningClosesAfterBind(t *testing.T) {
 	case <-time.After(20 * time.Second):
 		t.Fatal("Listening not closed after the bind")
 	}
+	srv.mu.RLock()
+	hs := srv.httpServer
+	srv.mu.RUnlock()
+	require.NotNil(t, hs)
+	require.Equal(t, "127.0.0.1:0", hs.Addr, "the configured address, not the default port")
 }
 
 // TestServerStart_ListeningNeverClosesOnBindError: a Start whose bind fails
@@ -61,7 +69,8 @@ func TestServerStart_ListeningNeverClosesOnBindError(t *testing.T) {
 	t.Cleanup(func() { _ = busy.Close() })
 
 	srv := newTestServer(t)
-	srv.httpServer.Addr = busy.Addr().String()
+	srv.config.Host = "127.0.0.1"
+	srv.config.Port = busy.Addr().(*net.TCPAddr).Port
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	require.Error(t, srv.Start(ctx))
