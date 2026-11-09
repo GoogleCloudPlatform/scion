@@ -55,42 +55,24 @@ the current project is never used by default.
 The command first asks the Hub what leaving would change and prints it: the
 roles removed, whether you keep access through a group or your hub role, your
 agents in the project, and your access tokens limited to the project, which
-are revoked. To come back, a project owner or admin must add you again.
+are revoked when you keep no access. To come back, a project owner or admin
+must add you again.
 
 When you keep no access and have agents in the project, those agents are
 stopped and put on hold. Choose what happens to them: --delete-agents deletes
-them before leaving (nothing is left if a delete fails), --keep-agents leaves
-them on hold. A terminal session asks; with -y or without a terminal, one of
-the two flags is required.
+them before leaving and waits until the Hub confirms each delete (nothing is
+left if a delete fails or cannot be confirmed), --keep-agents leaves them on
+hold. A terminal session asks; with -y or without a terminal, one of the two
+flags is required.
 
 The last owner of a project cannot leave (transfer ownership first), and
 membership through a group cannot be left here.
 
-Requires Hub connectivity and the hub.project_self_leave experiment.`,
+Leaving needs an interactive login session: a user access token is refused
+(403 credential_insufficient). Requires Hub connectivity and the
+hub.project_self_leave experiment.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		projectRef := args[0]
-
-		resolvedPath, _, err := config.ResolveProjectPath(projectPath)
-		if err != nil {
-			return fmt.Errorf("failed to resolve project path: %w", err)
-		}
-		settings, err := config.LoadSettings(resolvedPath)
-		if err != nil {
-			return fmt.Errorf("failed to load settings: %w", err)
-		}
-		client, uat, err := getHubClientUAT(settings)
-		if err != nil {
-			return err
-		}
-
-		resolveCtx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
-		defer cancel()
-		project, err := resolveProjectByNameOrID(resolveCtx, client, projectRef, uat)
-		if err != nil {
-			return projectLeaveResolveError(projectRef, err)
-		}
-
 		opts := leaveOptions{
 			dryRun:      leaveDryRun,
 			json:        leaveJSON || isJSONOutput(),
@@ -98,24 +80,69 @@ Requires Hub connectivity and the hub.project_self_leave experiment.`,
 			yes:         autoConfirm,
 			interactive: projectLeaveStdinIsTerminal(),
 		}
-		agents := client.ProjectAgents(project.ID)
-		lio := leaveIO{
-			out:     cmd.OutOrStdout(),
-			prompt:  promptLeaveAgentChoice,
-			confirm: func(q string) bool { return hubsync.ConfirmAction(q, false, false) },
-			deleteAgent: func(ctx context.Context, agentID string) error {
-				return agents.Delete(ctx, agentID, &hubclient.DeleteAgentOptions{DeleteFiles: true, RemoveBranch: true})
-			},
+		out := cmd.OutOrStdout()
+		err := runProjectLeaveCommand(cmd.Context(), args[0], opts, out, cmd.ErrOrStderr())
+		if err != nil && opts.json {
+			return reportLeaveErrorJSON(out, err)
 		}
-		return runProjectLeave(cmd.Context(), client.Projects(), project, opts, lio)
+		return err
 	},
 }
 
+// runProjectLeaveCommand resolves the project and runs the leave. Every
+// error it returns is reported by the caller, as JSON with --json.
+func runProjectLeaveCommand(ctx context.Context, projectRef string, opts leaveOptions, out, errOut io.Writer) error {
+	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
+	if err != nil {
+		return fmt.Errorf("failed to resolve project path: %w", err)
+	}
+	settings, err := config.LoadSettings(resolvedPath)
+	if err != nil {
+		return fmt.Errorf("failed to load settings: %w", err)
+	}
+	client, uat, err := getHubClientUAT(settings)
+	if err != nil {
+		return err
+	}
+
+	resolveCtx, cancel := context.WithTimeout(ctx, leaveCallTimeout)
+	defer cancel()
+	project, err := resolveProjectByNameOrID(resolveCtx, client, projectRef, uat)
+	if err != nil {
+		return projectLeaveResolveError(projectRef, err)
+	}
+
+	agents := client.ProjectAgents(project.ID)
+	lio := leaveIO{
+		out:    out,
+		errOut: errOut,
+		prompt: func(q string) (leaveAgentChoice, error) {
+			return promptLeaveAgentChoice(os.Stdin, os.Stderr, q)
+		},
+		confirm: func(q string) bool { return hubsync.ConfirmAction(q, false, false) },
+		deleteAgent: func(ctx context.Context, agentID string) (hubDeleteOutcome, error) {
+			return deleteViaHubAndWait(ctx, agents, agentID, &hubclient.DeleteAgentOptions{DeleteFiles: true, RemoveBranch: true}, nil)
+		},
+	}
+	return runProjectLeave(ctx, client.Projects(), project, opts, lio)
+}
+
+// leaveError is an error with a code for the --json output: the code, a
+// message and optional details.
+type leaveError struct {
+	code    string
+	msg     string
+	details map[string]interface{}
+	cause   error
+}
+
+func (e *leaveError) Error() string { return e.msg }
+func (e *leaveError) Unwrap() error { return e.cause }
+
 // projectLeaveNotMember is the error for a project the caller cannot
-// leave because they are not a member, or it does not exist: the hub gives
-// one answer for both.
+// resolve: the hub gives non-members the same answer as a missing project.
 func projectLeaveNotMember(ref string) error {
-	return fmt.Errorf("not a member of %s (or it doesn't exist)", ref)
+	return &leaveError{code: "not_found", msg: fmt.Sprintf("not a member of %s (or it doesn't exist)", ref)}
 }
 
 // projectLeaveResolveError maps a failure to resolve ref. Only a project
@@ -130,6 +157,30 @@ func projectLeaveResolveError(ref string, err error) error {
 		return projectLeaveNotMember(ref)
 	}
 	return fmt.Errorf("failed to resolve project %s: %w", ref, err)
+}
+
+// reportLeaveErrorJSON writes err as {"error": {"code", "message",
+// "details"}} on out and returns a jsonReportedError, so the command exits
+// non-zero with nothing else printed.
+func reportLeaveErrorJSON(out io.Writer, err error) error {
+	body := map[string]interface{}{"code": "error", "message": err.Error()}
+	var le *leaveError
+	var ue *usageError
+	switch {
+	case errors.As(err, &le):
+		body["code"] = le.code
+		if len(le.details) > 0 {
+			body["details"] = le.details
+		}
+	case errors.As(err, &ue):
+		body["code"] = "usage"
+	case errors.Is(err, errProjectLeaveCancelled):
+		body["code"] = "cancelled"
+	}
+	if werr := writeJSONTo(out, map[string]interface{}{"error": body}); werr != nil {
+		return werr
+	}
+	return &jsonReportedError{msg: err.Error()}
 }
 
 // projectLeaveStdinIsTerminal reports whether stdin is a terminal, so a
@@ -173,12 +224,14 @@ type leaveOptions struct {
 }
 
 // leaveIO is what runProjectLeave talks to besides the hub's project
-// service, so tests can drive it.
+// service, so tests can drive it. errOut takes the consequences under
+// --json when a prompt is shown.
 type leaveIO struct {
 	out         io.Writer
+	errOut      io.Writer
 	prompt      func(question string) (leaveAgentChoice, error)
 	confirm     func(question string) bool
-	deleteAgent func(ctx context.Context, agentID string) error
+	deleteAgent func(ctx context.Context, agentID string) (hubDeleteOutcome, error)
 }
 
 // errProjectLeaveCancelled is returned when the user declines or cancels
@@ -189,13 +242,21 @@ var errProjectLeaveCancelled = errors.New("leave cancelled")
 // leaveCallTimeout bounds each hub call; prompts are not under it.
 const leaveCallTimeout = 30 * time.Second
 
+// countNoun is "1 agent" or "2 agents".
+func countNoun(n int, noun string) string {
+	if n == 1 {
+		return "1 " + noun
+	}
+	return fmt.Sprintf("%d %ss", n, noun)
+}
+
 // runProjectLeave runs the dry run, prints its consequences, settles the
 // agents, and leaves project through svc. Nothing is deleted or left until
 // the leave is confirmed; with dryRun nothing changes at all.
 func runProjectLeave(ctx context.Context, svc hubclient.ProjectService, project *hubclient.Project, opts leaveOptions, lio leaveIO) error {
 	dry, err := leaveCall(ctx, svc, project.ID, true)
 	if err != nil {
-		return leaveFailure(project, err, opts.json, lio.out)
+		return leaveFailure(project, err)
 	}
 	if opts.dryRun {
 		if opts.json {
@@ -204,19 +265,26 @@ func runProjectLeave(ctx context.Context, svc hubclient.ProjectService, project 
 		printLeaveConsequences(lio.out, project, dry)
 		return nil
 	}
-	if !opts.json {
+
+	holdsAgents := dry.WillBeHeld
+	choice := opts.agents
+	prompts := !opts.yes && opts.interactive && (!holdsAgents || choice == leaveAgentsUnset)
+	switch {
+	case !opts.json:
 		printLeaveConsequences(lio.out, project, dry)
+	case prompts && lio.errOut != nil:
+		// The JSON on stdout stays the result alone; whoever answers the
+		// prompt sees what leaving changes.
+		printLeaveConsequences(lio.errOut, project, dry)
 	}
 
-	holdsAgents := dry.RemainingAccess == "none" && dry.Agents.Count > 0
-	choice := opts.agents
 	question := fmt.Sprintf("Leave project %q?", project.Name)
 	switch {
 	case holdsAgents && choice == leaveAgentsUnset:
 		if opts.yes || !opts.interactive {
-			return newUsageError("you have %d agents in %s that would be put on hold; pass --delete-agents or --keep-agents", dry.Agents.Count, project.Name)
+			return newUsageError("you have %s in %s that would be put on hold; pass --delete-agents or --keep-agents", countNoun(dry.Agents.Count, "agent"), project.Name)
 		}
-		choice, err = lio.prompt(fmt.Sprintf("Leave project %q: delete your %d agents first, keep them on hold, or cancel?", project.Name, dry.Agents.Count))
+		choice, err = lio.prompt(fmt.Sprintf("Leave project %q: delete your %s first, keep them on hold, or cancel?", project.Name, countNoun(dry.Agents.Count, "agent")))
 		if err != nil {
 			return err
 		}
@@ -244,7 +312,7 @@ func runProjectLeave(ctx context.Context, svc hubclient.ProjectService, project 
 
 	res, err := leaveCall(ctx, svc, project.ID, false)
 	if err != nil {
-		return leaveFailure(project, err, opts.json, lio.out)
+		return leaveFailure(project, err)
 	}
 	if opts.json {
 		return writeJSONTo(lio.out, res)
@@ -261,24 +329,53 @@ func leaveCall(ctx context.Context, svc hubclient.ProjectService, projectID stri
 }
 
 // deleteLeaveAgents deletes every agent of a dry run's list, in order, and
-// stops at the first failure. An agent already gone counts as deleted. A
-// list the hub cut short cannot be deleted in full, so it is refused
-// before any delete.
+// stops at the first agent whose delete is not confirmed. A 202 counts only
+// once the poll confirms it; a failed, not-taken, unobservable or timed-out
+// delete stops the leave. A 404 on the DELETE is an agent already gone. A
+// list the hub cut short cannot be deleted in full, so it is refused before
+// any delete.
 func deleteLeaveAgents(ctx context.Context, agents hubclient.LeaveProjectAgents, lio leaveIO) ([]string, error) {
 	if agents.Truncated || len(agents.Items) < agents.Count {
-		return nil, fmt.Errorf("you have %d agents in the project, more than can be listed here; delete them first, or pass --keep-agents", agents.Count)
+		return nil, &leaveError{code: "agent_delete_refused",
+			msg: fmt.Sprintf("you have %s in the project, more than can be listed here; delete them first, or pass --keep-agents", countNoun(agents.Count, "agent"))}
 	}
 	deleted := make([]string, 0, len(agents.Items))
 	for _, a := range agents.Items {
+		label := leaveAgentLabel(a)
 		callCtx, cancel := context.WithTimeout(ctx, leaveCallTimeout)
-		err := lio.deleteAgent(callCtx, a.ID)
+		outcome, err := lio.deleteAgent(callCtx, a.ID)
 		cancel()
-		if err != nil && !apiclient.IsNotFoundError(err) {
-			return deleted, fmt.Errorf("failed to delete agent %s, so the project was not left: %w", leaveAgentLabel(a), err)
+		var cause error
+		switch {
+		case err != nil && apiclient.IsNotFoundError(err):
+		case err != nil:
+			cause = err
+		case !outcome.Confirmed():
+			if cause = hubDeleteFailure(label, outcome, "the agent was kept"); cause == nil {
+				cause = errors.New(hubDeletePendingMessage(outcome, ""))
+			}
 		}
-		deleted = append(deleted, leaveAgentLabel(a))
+		if cause != nil {
+			return deleted, leaveDeleteError(deleted, label, cause)
+		}
+		deleted = append(deleted, label)
 	}
 	return deleted, nil
+}
+
+// leaveDeleteError is the agent_delete_failed error: it names the agents
+// already deleted and the one that was not, and says the project was not
+// left.
+func leaveDeleteError(deleted []string, failed string, cause error) error {
+	msg := fmt.Sprintf("failed to delete agent %s, so the project was not left: %v", failed, cause)
+	if len(deleted) > 0 {
+		msg = fmt.Sprintf("deleted %s; %s", strings.Join(deleted, ", "), msg)
+	}
+	if deleted == nil {
+		deleted = []string{}
+	}
+	return &leaveError{code: "agent_delete_failed", msg: msg, cause: cause,
+		details: map[string]interface{}{"deleted": deleted, "failed": failed}}
 }
 
 // leaveAgentLabel names an agent of a leave result: its name, else its ID.
@@ -289,32 +386,25 @@ func leaveAgentLabel(a hubclient.LeaveProjectAgentItem) string {
 	return a.ID
 }
 
-// leaveFailure reports a failed leave request. A 404 is "not a member";
-// any other hub refusal keeps its code and message (the 409s carry the
-// guidance: transfer ownership, or leave the group). With JSON output the
-// error is written as {"error": {...}} and the command exits non-zero.
-func leaveFailure(project *hubclient.Project, err error, asJSON bool, out io.Writer) error {
+// leaveFailure maps a failed leave request (dry run or real). The project
+// was already resolved, so a 404 here is not "it doesn't exist": the hub's
+// leave route answers "route not found" while hub.project_self_leave is
+// off, and "Project not found" to a caller with no direct role on it. A 409
+// keeps the hub's code and message (last_owner gets the way out added; a
+// group-only refusal lists the readable groups).
+func leaveFailure(project *hubclient.Project, err error) error {
 	var apiErr *apiclient.APIError
-	isAPI := errors.As(err, &apiErr)
-	if asJSON {
-		body := map[string]interface{}{"code": "error", "message": err.Error()}
-		if apiclient.IsNotFoundError(err) {
-			body = map[string]interface{}{"code": "not_found", "message": projectLeaveNotMember(project.Name).Error()}
-		} else if isAPI {
-			body = map[string]interface{}{"code": apiErr.Code, "message": apiErr.Message}
-			if len(apiErr.Details) > 0 {
-				body["details"] = apiErr.Details
-			}
-		}
-		if werr := writeJSONTo(out, map[string]interface{}{"error": body}); werr != nil {
-			return werr
-		}
-		return &jsonReportedError{msg: fmt.Sprintf("%v", body["message"])}
+	if !errors.As(err, &apiErr) {
+		return fmt.Errorf("failed to leave project: %w", err)
 	}
-	if apiclient.IsNotFoundError(err) {
-		return projectLeaveNotMember(project.Name)
-	}
-	if isAPI && apiErr.StatusCode == 409 {
+	switch {
+	case apiErr.StatusCode == 404 && apiErr.Message == "route not found":
+		return &leaveError{code: "experiment_disabled", cause: err,
+			msg: fmt.Sprintf("cannot leave %s: project self-leave (hub.project_self_leave) is not enabled on this Hub", project.Name)}
+	case apiErr.StatusCode == 404:
+		return &leaveError{code: "not_found", cause: err,
+			msg: fmt.Sprintf("cannot leave %s: you have no direct role on it", project.Name)}
+	case apiErr.StatusCode == 409:
 		msg := fmt.Sprintf("cannot leave %s: %s", project.Name, apiErr.Message)
 		if apiErr.Code == "last_owner" {
 			msg += ". Transfer ownership to another member first, or delete the project."
@@ -322,9 +412,10 @@ func leaveFailure(project *hubclient.Project, err error, asJSON bool, out io.Wri
 		if groups := leaveGroupNames(apiErr.Details); len(groups) > 0 {
 			msg += " Groups: " + strings.Join(groups, ", ")
 		}
-		return errors.New(msg)
+		return &leaveError{code: apiErr.Code, msg: msg, details: apiErr.Details, cause: err}
+	default:
+		return &leaveError{code: apiErr.Code, msg: fmt.Sprintf("failed to leave project: %v", err), details: apiErr.Details, cause: err}
 	}
-	return fmt.Errorf("failed to leave project: %w", err)
 }
 
 // leaveGroupNames reads the group names of a membership_group_derived
@@ -364,8 +455,8 @@ func printLeaveConsequences(out io.Writer, project *hubclient.Project, dry *hubc
 	default:
 		_, _ = fmt.Fprintln(out, "  You lose access to the project, its agents, chat and files. To come back, an owner or admin must add you again.")
 	}
-	if dry.RemainingAccess == "none" && dry.Agents.Count > 0 {
-		_, _ = fmt.Fprintf(out, "  %d of your agents in the project will be stopped and put on hold, and stay on hold if you are added back:\n", dry.Agents.Count)
+	if dry.WillBeHeld {
+		_, _ = fmt.Fprintf(out, "  Your %s in the project will be stopped and put on hold, and stay on hold if you are added back:\n", countNoun(dry.Agents.Count, "agent"))
 		for _, a := range dry.Agents.Items {
 			_, _ = fmt.Fprintf(out, "    - %s (%s)\n", leaveAgentLabel(a), a.Phase)
 		}
@@ -374,14 +465,14 @@ func printLeaveConsequences(out io.Writer, project *hubclient.Project, dry *hubc
 		}
 	}
 	if n := dry.ProjectBoundTokens.Revoked; n > 0 {
-		_, _ = fmt.Fprintf(out, "  %d access tokens limited to this project will be revoked.\n", n)
+		_, _ = fmt.Fprintf(out, "  %s limited to this project will be revoked.\n", countNoun(n, "access token"))
 	}
 }
 
 // printLeaveResult prints the outcome of the real leave.
 func printLeaveResult(out io.Writer, project *hubclient.Project, res *hubclient.LeaveProjectResult, deleted []string) {
 	if len(deleted) > 0 {
-		_, _ = fmt.Fprintf(out, "Deleted %d agents: %s\n", len(deleted), strings.Join(deleted, ", "))
+		_, _ = fmt.Fprintf(out, "Deleted %s: %s\n", countNoun(len(deleted), "agent"), strings.Join(deleted, ", "))
 	}
 	_, _ = fmt.Fprintf(out, "Left project %s\n", project.Name)
 	switch res.RemainingAccess {
@@ -391,22 +482,27 @@ func printLeaveResult(out io.Writer, project *hubclient.Project, res *hubclient.
 		_, _ = fmt.Fprintln(out, "You keep access through your hub role; only your direct roles were removed.")
 	}
 	if res.WillBeHeld {
-		_, _ = fmt.Fprintf(out, "%d of your agents in the project will be stopped and put on hold.\n", res.Agents.Count)
+		_, _ = fmt.Fprintf(out, "Your %s in the project will be stopped and put on hold.\n", countNoun(res.Agents.Count, "agent"))
 	}
 	if n := res.ProjectBoundTokens.Revoked; n > 0 {
-		_, _ = fmt.Fprintf(out, "%d access tokens limited to this project were revoked.\n", n)
+		_, _ = fmt.Fprintf(out, "%s limited to this project were revoked.\n", countNoun(n, "access token"))
 	}
 }
 
-// promptLeaveAgentChoice asks on a terminal whether to delete the agents,
-// keep them on hold, or cancel. The prompt goes to stderr. An end of input
-// or an unknown answer cancels.
-func promptLeaveAgentChoice(question string) (leaveAgentChoice, error) {
-	_, _ = fmt.Fprintf(os.Stderr, "%s [d]elete / [k]eep / [c]ancel: ", question)
-	input, err := bufio.NewReader(os.Stdin).ReadString('\n')
-	if err != nil && (input == "" || !errors.Is(err, io.EOF)) {
-		_, _ = fmt.Fprintln(os.Stderr)
-		return leaveAgentsCancel, nil
+// promptLeaveAgentChoice asks whether to delete the agents, keep them on
+// hold, or cancel, reading the answer from in and writing the question to
+// out. An end of input with no answer, or an unknown answer, cancels. A
+// read error cancels and is returned, so the command exits non-zero
+// without leaving.
+func promptLeaveAgentChoice(in io.Reader, out io.Writer, question string) (leaveAgentChoice, error) {
+	_, _ = fmt.Fprintf(out, "%s [d]elete / [k]eep / [c]ancel: ", question)
+	input, err := bufio.NewReader(in).ReadString('\n')
+	if err != nil {
+		_, _ = fmt.Fprintln(out)
+		if errors.Is(err, io.EOF) {
+			return parseLeaveAgentAnswer(input), nil
+		}
+		return leaveAgentsCancel, fmt.Errorf("reading the answer: %w", err)
 	}
 	return parseLeaveAgentAnswer(input), nil
 }
@@ -425,10 +521,10 @@ func parseLeaveAgentAnswer(input string) leaveAgentChoice {
 
 func init() {
 	projectLeaveCmd.Flags().BoolVarP(&autoConfirm, "yes", "y", false, "Answer Yes to the confirmation prompt (required to confirm when stdin is not a terminal)")
-	projectLeaveCmd.Flags().BoolVar(&leaveDeleteAgents, "delete-agents", false, "Delete your agents in the project before leaving")
+	projectLeaveCmd.Flags().BoolVar(&leaveDeleteAgents, "delete-agents", false, "Delete your agents in the project before leaving (waits until the Hub confirms each delete)")
 	projectLeaveCmd.Flags().BoolVar(&leaveKeepAgents, "keep-agents", false, "Leave your agents in the project stopped and on hold")
 	projectLeaveCmd.Flags().BoolVar(&leaveDryRun, "dry-run", false, "Show what leaving would change, and change nothing")
-	projectLeaveCmd.Flags().BoolVar(&leaveJSON, "json", false, "Output the leave result as JSON")
+	projectLeaveCmd.Flags().BoolVar(&leaveJSON, "json", false, "Output the leave result, or the error, as JSON")
 	projectLeaveCmd.MarkFlagsMutuallyExclusive("delete-agents", "keep-agents")
 	projectCmd.AddCommand(projectLeaveCmd)
 }

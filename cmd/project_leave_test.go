@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -79,17 +80,22 @@ var leaveTestAgents = []hubclient.LeaveProjectAgentItem{
 // and deletes.
 type leaveHarness struct {
 	out       bytes.Buffer
+	errOut    bytes.Buffer
 	prompts   []string
 	answer    leaveAgentChoice
 	confirms  []string
 	confirmed bool
 	deletes   []string
 	deleteErr map[string]error
+	// outcomes are the delete outcomes by agent ID; an agent with no entry
+	// gets a 204 (confirmed).
+	outcomes map[string]hubDeleteOutcome
 }
 
 func (h *leaveHarness) io() leaveIO {
 	return leaveIO{
-		out: &h.out,
+		out:    &h.out,
+		errOut: &h.errOut,
 		prompt: func(q string) (leaveAgentChoice, error) {
 			h.prompts = append(h.prompts, q)
 			return h.answer, nil
@@ -98,9 +104,9 @@ func (h *leaveHarness) io() leaveIO {
 			h.confirms = append(h.confirms, q)
 			return h.confirmed
 		},
-		deleteAgent: func(_ context.Context, id string) error {
+		deleteAgent: func(_ context.Context, id string) (hubDeleteOutcome, error) {
 			h.deletes = append(h.deletes, id)
-			return h.deleteErr[id]
+			return h.outcomes[id], h.deleteErr[id]
 		},
 	}
 }
@@ -161,7 +167,7 @@ func TestProjectLeave_DryRunFlagChangesNothing(t *testing.T) {
 	assert.Equal(t, []bool{true}, svc.dry, "only the dry run")
 	out := h.out.String()
 	assert.Contains(t, out, "Removes your direct roles: project-viewer")
-	assert.Contains(t, out, "2 of your agents in the project will be stopped and put on hold")
+	assert.Contains(t, out, "Your 2 agents in the project will be stopped and put on hold")
 	assert.Contains(t, out, "- alpha (running)")
 	assert.Contains(t, out, "- beta (stopped)")
 	assert.NotContains(t, out, "Left project")
@@ -258,7 +264,7 @@ func TestProjectLeave_DeleteFailureAbortsBeforeLeave(t *testing.T) {
 	}}
 	err := runProjectLeave(context.Background(), svc, leaveTestProject, leaveOptions{yes: true, agents: leaveAgentsDelete}, h.io())
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to delete agent beta, so the project was not left")
+	assert.Contains(t, err.Error(), "deleted alpha; failed to delete agent beta, so the project was not left")
 	assert.Equal(t, []string{"a-1", "a-2"}, h.deletes, "stops at the first failure")
 	assert.Equal(t, []bool{true}, svc.dry, "never leaves after a failed delete")
 
@@ -299,7 +305,7 @@ func TestProjectLeave_KeepAgentsFlag(t *testing.T) {
 	require.NoError(t, runProjectLeave(context.Background(), svc, leaveTestProject, leaveOptions{yes: true, agents: leaveAgentsKeep}, h.io()))
 	assert.Empty(t, h.deletes)
 	assert.Equal(t, []bool{true, false}, svc.dry)
-	assert.Contains(t, h.out.String(), "2 of your agents in the project will be stopped and put on hold.")
+	assert.Contains(t, h.out.String(), "Your 2 agents in the project will be stopped and put on hold.")
 }
 
 // TestProjectLeave_RemainingAccessHoldsNothing: with access kept through a
@@ -349,7 +355,8 @@ func TestProjectLeave_RefusalsKeepGuidance(t *testing.T) {
 	h = &leaveHarness{}
 	err = runProjectLeave(context.Background(), svc, leaveTestProject, leaveOptions{yes: true, json: true}, h.io())
 	require.Error(t, err)
-	assert.True(t, isReportedInJSON(err), "the error is already in the JSON output")
+	err = reportLeaveErrorJSON(&h.out, err)
+	assert.True(t, isReportedInJSON(err), "the error is in the JSON output")
 	var got struct {
 		Error struct {
 			Code    string                 `json:"code"`
@@ -359,22 +366,205 @@ func TestProjectLeave_RefusalsKeepGuidance(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(h.out.Bytes(), &got), h.out.String())
 	assert.Equal(t, "membership_group_derived", got.Error.Code)
-	assert.Equal(t, groupOnly.Message, got.Error.Message)
+	assert.Contains(t, got.Error.Message, groupOnly.Message)
 	assert.NotEmpty(t, got.Error.Details["groups"])
 }
 
-func TestProjectLeave_NotFoundMessage(t *testing.T) {
-	svc := &fakeLeaveProjects{dryErr: &apiclient.APIError{StatusCode: 404, Code: "not_found", Message: "Project not found"}}
-	err := runProjectLeave(context.Background(), svc, leaveTestProject, leaveOptions{yes: true}, (&leaveHarness{}).io())
-	require.Error(t, err)
-	assert.Equal(t, "not a member of My Project (or it doesn't exist)", err.Error())
-	assert.Equal(t, []bool{true}, svc.dry)
+// TestProjectLeave_DryRun404IsNotNotAMember (R2): the project was already
+// resolved, so a 404 from the leave route never reads "not a member (or it
+// doesn't exist)". The experiment gate's "route not found" names
+// hub.project_self_leave (code experiment_disabled); the handler's
+// "Project not found" says there is no direct role.
+func TestProjectLeave_DryRun404IsNotNotAMember(t *testing.T) {
+	for name, tc := range map[string]struct {
+		apiErr   *apiclient.APIError
+		code     string
+		message  string
+		mentions string
+	}{
+		"experiment off": {&apiclient.APIError{StatusCode: 404, Code: "not_found", Message: "route not found"},
+			"experiment_disabled", "cannot leave My Project: project self-leave (hub.project_self_leave) is not enabled on this Hub", "hub.project_self_leave"},
+		"no direct role": {&apiclient.APIError{StatusCode: 404, Code: "not_found", Message: "Project not found"},
+			"not_found", "cannot leave My Project: you have no direct role on it", "no direct role"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			svc := &fakeLeaveProjects{dryErr: tc.apiErr}
+			err := runProjectLeave(context.Background(), svc, leaveTestProject, leaveOptions{yes: true}, (&leaveHarness{}).io())
+			require.Error(t, err)
+			assert.Equal(t, tc.message, err.Error())
+			assert.NotContains(t, err.Error(), "not a member")
+			assert.Contains(t, err.Error(), tc.mentions)
+			assert.Equal(t, []bool{true}, svc.dry)
 
-	svc = &fakeLeaveProjects{dryErr: &apiclient.APIError{StatusCode: 404, Code: "not_found", Message: "Project not found"}}
-	h := &leaveHarness{}
-	err = runProjectLeave(context.Background(), svc, leaveTestProject, leaveOptions{yes: true, json: true}, h.io())
+			var out bytes.Buffer
+			assert.True(t, isReportedInJSON(reportLeaveErrorJSON(&out, err)))
+			assert.JSONEq(t, `{"error":{"code":"`+tc.code+`","message":"`+tc.message+`"}}`, out.String())
+		})
+	}
+}
+
+// TestProjectLeave_JSONReportsEveryCLIError (R1): with --json every error
+// the command returns is one {"error": {...}} document on stdout and a
+// jsonReportedError: a resolve miss (not_found), a usage error, a cancel,
+// and a failed agent delete (agent_delete_failed, naming the agents
+// already deleted and the one that failed).
+func TestProjectLeave_JSONReportsEveryCLIError(t *testing.T) {
+	type doc struct {
+		Error struct {
+			Code    string                 `json:"code"`
+			Message string                 `json:"message"`
+			Details map[string]interface{} `json:"details"`
+		} `json:"error"`
+	}
+	report := func(err error) doc {
+		var out bytes.Buffer
+		rerr := reportLeaveErrorJSON(&out, err)
+		require.True(t, isReportedInJSON(rerr))
+		assert.Equal(t, err.Error(), rerr.Error())
+		var d doc
+		require.NoError(t, json.Unmarshal(out.Bytes(), &d), out.String())
+		return d
+	}
+
+	d := report(projectLeaveResolveError("my-project", &apiclient.APIError{StatusCode: 404, Code: "not_found", Message: "Project not found"}))
+	assert.Equal(t, "not_found", d.Error.Code)
+	assert.Equal(t, "not a member of my-project (or it doesn't exist)", d.Error.Message)
+
+	svc := &fakeLeaveProjects{dryRes: leaveResult(true, []string{"project-member"}, "none", leaveTestAgents, 0)}
+	err := runProjectLeave(context.Background(), svc, leaveTestProject, leaveOptions{yes: true, json: true}, (&leaveHarness{}).io())
+	d = report(err)
+	assert.Equal(t, "usage", d.Error.Code)
+	assert.Contains(t, d.Error.Message, "--delete-agents or --keep-agents")
+
+	svc = &fakeLeaveProjects{dryRes: leaveResult(true, []string{"project-member"}, "none", nil, 0)}
+	err = runProjectLeave(context.Background(), svc, leaveTestProject, leaveOptions{interactive: true, json: true}, (&leaveHarness{confirmed: false}).io())
+	assert.Equal(t, "cancelled", report(err).Error.Code)
+
+	svc = &fakeLeaveProjects{dryRes: leaveResult(true, []string{"project-member"}, "none", leaveTestAgents, 0)}
+	h := &leaveHarness{deleteErr: map[string]error{"a-2": &apiclient.APIError{StatusCode: 500, Code: "internal_error", Message: "boom"}}}
+	err = runProjectLeave(context.Background(), svc, leaveTestProject, leaveOptions{yes: true, json: true, agents: leaveAgentsDelete}, h.io())
+	d = report(err)
+	assert.Equal(t, "agent_delete_failed", d.Error.Code)
+	assert.Equal(t, []interface{}{"alpha"}, d.Error.Details["deleted"])
+	assert.Equal(t, "beta", d.Error.Details["failed"])
+	assert.Equal(t, []bool{true}, svc.dry, "never leaves after a failed delete")
+	assert.Empty(t, h.out.String(), "nothing but the error document is written on stdout")
+}
+
+// TestProjectLeave_AcceptedDeleteCountsOnlyWhenConfirmed (B1): a delete the
+// hub accepted (202) counts as done only when the poll confirms it. A
+// failed, not-taken, unobservable or timed-out delete stops before the
+// leave, and the error names what was already deleted.
+func TestProjectLeave_AcceptedDeleteCountsOnlyWhenConfirmed(t *testing.T) {
+	accepted := func(o hubclient.DeletionWaitOutcome) hubDeleteOutcome {
+		return hubDeleteOutcome{Accepted: true, Wait: hubclient.DeletionWaitResult{Outcome: o}}
+	}
+
+	svc := &fakeLeaveProjects{
+		dryRes: leaveResult(true, []string{"project-member"}, "none", leaveTestAgents, 0),
+		res:    leaveResult(false, []string{"project-member"}, "none", nil, 0),
+	}
+	h := &leaveHarness{outcomes: map[string]hubDeleteOutcome{
+		"a-1": accepted(hubclient.DeletionConfirmed), "a-2": accepted(hubclient.DeletionConfirmed),
+	}}
+	require.NoError(t, runProjectLeave(context.Background(), svc, leaveTestProject, leaveOptions{yes: true, agents: leaveAgentsDelete}, h.io()))
+	assert.Equal(t, []bool{true, false}, svc.dry, "202 then confirmed: leaves")
+	assert.Contains(t, h.out.String(), "Deleted 2 agents: alpha, beta")
+
+	for name, tc := range map[string]struct {
+		outcome hubDeleteOutcome
+		says    string
+	}{
+		"failed": {hubDeleteOutcome{Accepted: true, Wait: hubclient.DeletionWaitResult{
+			Outcome: hubclient.DeletionFailed, Deletion: &hubclient.DeletionInfo{Code: "runtime_error", Error: "runtime unavailable"}}},
+			"delete failed on the Hub (runtime_error)"},
+		"not taken":    {accepted(hubclient.DeletionNotTaken), "did not take effect"},
+		"unobservable": {accepted(hubclient.DeletionUnobservable), "cannot observe completion"},
+		"timed out":    {accepted(hubclient.DeletionTimedOut), "still running when the wait ended"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			svc := &fakeLeaveProjects{dryRes: leaveResult(true, []string{"project-member"}, "none", leaveTestAgents, 0)}
+			h := &leaveHarness{outcomes: map[string]hubDeleteOutcome{"a-2": tc.outcome}}
+			err := runProjectLeave(context.Background(), svc, leaveTestProject, leaveOptions{yes: true, agents: leaveAgentsDelete}, h.io())
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "deleted alpha; failed to delete agent beta, so the project was not left")
+			assert.Contains(t, err.Error(), tc.says)
+			assert.Equal(t, []bool{true}, svc.dry, "never leaves")
+			assert.NotContains(t, h.out.String(), "Deleted")
+		})
+	}
+}
+
+// TestProjectLeave_JSONPromptShowsConsequencesOnStderr (O2): with --json
+// and a prompt to answer, the consequences go to stderr, and stdout keeps
+// only the result document.
+func TestProjectLeave_JSONPromptShowsConsequencesOnStderr(t *testing.T) {
+	svc := &fakeLeaveProjects{
+		dryRes: leaveResult(true, []string{"project-member"}, "none", leaveTestAgents, 0),
+		res:    leaveResult(false, []string{"project-member"}, "none", leaveTestAgents, 0),
+	}
+	h := &leaveHarness{answer: leaveAgentsKeep}
+	require.NoError(t, runProjectLeave(context.Background(), svc, leaveTestProject, leaveOptions{interactive: true, json: true}, h.io()))
+	assert.Contains(t, h.errOut.String(), "Leaving My Project:")
+	assert.Contains(t, h.errOut.String(), "- alpha (running)")
+	var got hubclient.LeaveProjectResult
+	require.NoError(t, json.Unmarshal(h.out.Bytes(), &got), "stdout is the result alone: %s", h.out.String())
+
+	svc = &fakeLeaveProjects{
+		dryRes: leaveResult(true, []string{"project-member"}, "none", nil, 0),
+		res:    leaveResult(false, []string{"project-member"}, "none", nil, 0),
+	}
+	h = &leaveHarness{}
+	require.NoError(t, runProjectLeave(context.Background(), svc, leaveTestProject, leaveOptions{yes: true, json: true}, h.io()))
+	assert.Empty(t, h.errOut.String(), "no prompt, so nothing on stderr")
+}
+
+// errReader fails every read.
+type errReader struct{}
+
+func (errReader) Read([]byte) (int, error) { return 0, errors.New("broken input") }
+
+// TestProjectLeave_AgentPromptInput (O3): the agent prompt reads from the
+// given input. An end of input with no answer cancels; a read error cancels
+// and is returned; an answer with no final newline counts.
+func TestProjectLeave_AgentPromptInput(t *testing.T) {
+	var out bytes.Buffer
+	got, err := promptLeaveAgentChoice(strings.NewReader(""), &out, "Q?")
+	require.NoError(t, err)
+	assert.Equal(t, leaveAgentsCancel, got, "EOF with no answer cancels")
+	assert.Contains(t, out.String(), "Q? [d]elete / [k]eep / [c]ancel: ")
+
+	got, err = promptLeaveAgentChoice(errReader{}, &out, "Q?")
 	require.Error(t, err)
-	assert.JSONEq(t, `{"error":{"code":"not_found","message":"not a member of My Project (or it doesn't exist)"}}`, h.out.String())
+	assert.Contains(t, err.Error(), "broken input")
+	assert.Equal(t, leaveAgentsCancel, got, "a read error cancels")
+
+	got, err = promptLeaveAgentChoice(strings.NewReader("k\n"), &out, "Q?")
+	require.NoError(t, err)
+	assert.Equal(t, leaveAgentsKeep, got)
+	got, err = promptLeaveAgentChoice(strings.NewReader("d"), &out, "Q?")
+	require.NoError(t, err)
+	assert.Equal(t, leaveAgentsDelete, got, "an answer at EOF without a newline counts")
+
+	svc := &fakeLeaveProjects{dryRes: leaveResult(true, []string{"project-member"}, "none", leaveTestAgents, 0)}
+	lio := (&leaveHarness{}).io()
+	lio.prompt = func(q string) (leaveAgentChoice, error) { return promptLeaveAgentChoice(errReader{}, &out, q) }
+	err = runProjectLeave(context.Background(), svc, leaveTestProject, leaveOptions{interactive: true}, lio)
+	require.Error(t, err)
+	assert.Equal(t, []bool{true}, svc.dry, "a read error never leaves")
+}
+
+// TestProjectLeave_SingularCounts (O5): a count of 1 reads in the singular.
+func TestProjectLeave_SingularCounts(t *testing.T) {
+	one := []hubclient.LeaveProjectAgentItem{{ID: "a-1", Name: "alpha", Phase: "running"}}
+	svc := &fakeLeaveProjects{dryRes: leaveResult(true, []string{"project-member"}, "none", one, 1)}
+	h := &leaveHarness{}
+	err := runProjectLeave(context.Background(), svc, leaveTestProject, leaveOptions{yes: true}, h.io())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "you have 1 agent in My Project")
+	assert.Contains(t, h.out.String(), "Your 1 agent in the project will be stopped")
+	assert.Contains(t, h.out.String(), "1 access token limited to this project will be revoked")
+	assert.Equal(t, "2 agents", countNoun(2, "agent"))
 }
 
 // TestProjectLeave_ConfirmationWithoutAgents: with no agents to hold, -y
