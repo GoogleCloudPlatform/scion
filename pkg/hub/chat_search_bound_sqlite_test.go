@@ -595,3 +595,56 @@ func TestChatSearch_InvalidCursorWritesNoSlowLine(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 	assert.NotContains(t, buf.String(), "chat search slow")
 }
+
+func TestChatSearchScope(t *testing.T) {
+	assert.Equal(t, "conversation", chatSearchScope("topic-1", "proj-1"))
+	assert.Equal(t, "project", chatSearchScope("", "proj-1"))
+	assert.Equal(t, "all", chatSearchScope("", ""))
+}
+
+// TestChatSearch_ScopeLookupDeadlineKeepsScope checks round-3 item R3-01: a
+// conversation-scoped search whose deadline passes inside the topic lookup
+// answers 503 and is recorded with scope=conversation, not scope=all.
+func TestChatSearch_ScopeLookupDeadlineKeepsScope(t *testing.T) {
+	srv, wcs, alice, _, project := setupSearchServer(t)
+	srv.config.ChatSearchTimeout = 50 * time.Millisecond
+	srv.SetWebChatStore(stallingTopicStore{WebChatStore: wcs, projectID: project.ID})
+	buf := captureSlog(t)
+	rec := doRequestAsUser(t, srv, alice, http.MethodGet, "/api/v1/chat/search?q=needle&key=topic-slow", nil)
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+	out := buf.String()
+	require.Contains(t, out, "chat search slow")
+	assert.Contains(t, out, "scope=conversation")
+	assert.NotContains(t, out, "scope=all")
+}
+
+// TestSearchChatMessages_ReaderPagesWithCursor checks round-3 item R3-02: the
+// keyset cursor (bound as a time.Time against messages.created) pages through
+// every row on the read-only search handle, whose DSN entc rebuilds, including
+// rows that share a timestamp, newest first.
+func TestSearchChatMessages_ReaderPagesWithCursor(t *testing.T) {
+	wcs, main := newReaderBackedSearchStore(t)
+	require.NotNil(t, wcs.(*sqliteWebChatStore).searchDB, "the store must search on the reader")
+	base := time.Date(2026, 11, 9, 12, 0, 0, 123456789, time.UTC)
+	for i := 0; i < 7; i++ {
+		insertTestMessage(t, main, fmt.Sprintf("m%d", i), "proj-1", "topic-1", "user:a", "needle", base.Add(time.Duration(i)*time.Second))
+	}
+	insertTestMessage(t, main, "m3b", "proj-1", "topic-1", "user:a", "needle", base.Add(3*time.Second))
+	want := []string{"m6", "m5", "m4", "m3b", "m3", "m2", "m1", "m0"}
+
+	var got []string
+	cursor := ""
+	for page := 0; page < 10; page++ {
+		res, next, err := wcs.SearchChatMessages(context.Background(),
+			ChatSearchFilter{Query: "needle", ProjectID: "proj-1", Limit: 3, Cursor: cursor})
+		require.NoError(t, err)
+		for _, r := range res {
+			got = append(got, r.MessageID)
+		}
+		if next == "" {
+			break
+		}
+		cursor = next
+	}
+	assert.Equal(t, want, got)
+}

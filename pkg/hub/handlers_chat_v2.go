@@ -5253,7 +5253,7 @@ func (s *Server) handleChatSearch(w http.ResponseWriter, r *http.Request) {
 	shape := chatSearchShape{
 		backend:   chatSearchBackend(wcs),
 		path:      "like",
-		scope:     "all",
+		scope:     chatSearchScope(q.Get("key"), q.Get("projectId")),
 		termLen:   termLen,
 		hasCursor: q.Get("cursor") != "",
 	}
@@ -5362,7 +5362,6 @@ func (s *Server) handleChatSearch(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		filter.ConversationKey = conversationKey
-		shape.scope = "conversation"
 	} else if projectID != "" {
 		// Scope to one project — authorize access.
 		project, err := s.store.GetProject(searchCtx, projectID)
@@ -5377,7 +5376,6 @@ func (s *Server) handleChatSearch(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		filter.ProjectID = projectID
-		shape.scope = "project"
 		shape.projectCount = 1
 	} else {
 		// Search all visible projects. Filter by user's accessible projects.

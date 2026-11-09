@@ -253,6 +253,21 @@ func (s *Server) recordChatSearchBusy(ctx context.Context, sh chatSearchShape) {
 	}
 }
 
+// chatSearchScope is the scope label of a search, taken from its request
+// parameters (key, then projectId, as the handler scopes), so a search that
+// ends inside the scope lookups is still recorded under the scope it asked
+// for (round-3 item R3-01).
+func chatSearchScope(conversationKey, projectID string) string {
+	switch {
+	case conversationKey != "":
+		return "conversation"
+	case projectID != "":
+		return "project"
+	default:
+		return "all"
+	}
+}
+
 // spanFreeContext returns ctx without its trace span. The search metric
 // records use it so the SDK's trace-based exemplars cannot attach a sampled
 // request's trace and span ids to the metric points: design 6.5 allows no

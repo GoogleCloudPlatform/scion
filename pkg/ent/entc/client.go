@@ -456,7 +456,10 @@ func OpenSQLiteSearchReader(dsn string) (*sql.DB, error) {
 	if SQLiteDSNIsMemory(dsn) {
 		return nil, fmt.Errorf("opening sqlite search reader: in-memory DSN has no separate reader")
 	}
-	ro := withSQLiteURIParams(withUTCTimezone(dsn), map[string]string{"mode": "ro", "cache": "private"})
+	ro, err := withSQLiteURIParams(withUTCTimezone(dsn), map[string]string{"mode": "ro", "cache": "private"})
+	if err != nil {
+		return nil, fmt.Errorf("opening sqlite search reader: %w", err)
+	}
 	db, err := sql.Open("sqlite", sqliteDSNPragmas(ro, "query_only(1)", "busy_timeout(2000)"))
 	if err != nil {
 		return nil, fmt.Errorf("opening sqlite search reader: %w", err)
@@ -491,11 +494,13 @@ func SQLiteDSNIsMemory(dsn string) bool {
 // withSQLiteURIParams returns dsn as a "file:" URI with each of params set,
 // replacing a caller value for the same key. modernc opens the name with
 // SQLITE_OPEN_URI, so mode and cache are honoured only on a "file:" name.
-func withSQLiteURIParams(dsn string, params map[string]string) string {
+// A query that cannot be parsed is an error, never the DSN unchanged: that
+// would drop the params silently (round-3 item R3-03).
+func withSQLiteURIParams(dsn string, params map[string]string) (string, error) {
 	base, rawQuery, _ := strings.Cut(dsn, "?")
 	values, err := url.ParseQuery(rawQuery)
 	if err != nil {
-		return dsn
+		return "", fmt.Errorf("parse sqlite DSN query: %w", err)
 	}
 	if !strings.HasPrefix(base, "file:") {
 		base = "file:" + base
@@ -503,7 +508,7 @@ func withSQLiteURIParams(dsn string, params map[string]string) string {
 	for k, v := range params {
 		values.Set(k, v)
 	}
-	return base + "?" + values.Encode()
+	return base + "?" + values.Encode(), nil
 }
 
 // OpenPostgres creates an Ent client backed by PostgreSQL.

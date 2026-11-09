@@ -216,7 +216,19 @@ func TestOpenSQLiteSearchReaderRefusesMemoryDSN(t *testing.T) {
 }
 
 func TestWithSQLiteURIParams(t *testing.T) {
-	got := withSQLiteURIParams("/data/hub.db?cache=shared&_timezone=UTC",
+	got, err := withSQLiteURIParams("/data/hub.db?cache=shared&_timezone=UTC",
 		map[string]string{"mode": "ro", "cache": "private"})
+	require.NoError(t, err)
 	require.Equal(t, "file:/data/hub.db?_timezone=UTC&cache=private&mode=ro", got)
+}
+
+// TestOpenSQLiteSearchReaderRefusesUnparsableDSN checks round-3 item R3-03:
+// a DSN query that cannot be parsed is refused, so the reader never opens
+// without mode=ro and cache=private.
+func TestOpenSQLiteSearchReaderRefusesUnparsableDSN(t *testing.T) {
+	_, err := withSQLiteURIParams("/data/hub.db?bad=%zz", map[string]string{"mode": "ro"})
+	require.Error(t, err)
+	db, err := OpenSQLiteSearchReader(filepath.Join(t.TempDir(), "hub.db") + "?bad=%zz")
+	require.Error(t, err)
+	assert.Nil(t, db)
 }
