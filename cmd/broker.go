@@ -2285,12 +2285,22 @@ func resolveProjectByNameOrID(ctx context.Context, client hubclient.Client, name
 		if uat {
 			return nil, hubsync.ScopedTokenProjectLookupEmptyError(nameOrID)
 		}
-		return nil, fmt.Errorf("project '%s' not found", nameOrID)
+		return nil, &projectNotFoundError{ref: nameOrID}
 	case 1:
 		return &resp.Projects[0], nil
 	default:
 		return nil, fmt.Errorf("multiple projects found with name '%s' - please use the project ID instead", nameOrID)
 	}
+}
+
+// projectNotFoundError is resolveProjectByNameOrID's answer when no
+// project matches the reference (by ID, slug or name). Its message is the
+// resolver's plain not-found text; callers that must tell a missing
+// project from other failures check for it with errors.As.
+type projectNotFoundError struct{ ref string }
+
+func (e *projectNotFoundError) Error() string {
+	return fmt.Sprintf("project '%s' not found", e.ref)
 }
 
 // resolveBrokerByNameOrID resolves a broker identifier (name or ID) to a broker.
