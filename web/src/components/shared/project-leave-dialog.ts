@@ -63,6 +63,9 @@ export const LEAVE_LAST_OWNER_GUIDANCE =
   "You're the last owner of this project. Transfer ownership to another member, or delete the project, before you leave.";
 export const LEAVE_GROUP_DERIVED_GUIDANCE =
   "You're a member of this project through a group, and leaving removes only direct roles. Leave the group, or ask a group admin to remove you.";
+/** The way on from the truncated delete-first refusal: leave without the delete. */
+export const LEAVE_TRUNCATED_CLOSE_HINT =
+  "You haven't left the project. To leave without deleting your agents, close this dialog and choose Leave project again with the box cleared.";
 export const LEAVE_TRUNCATED_NOTE =
   "You have more agents than can be listed here, so they can't be deleted from this dialog. Delete them first, or leave them on hold.";
 
@@ -456,7 +459,8 @@ export class ScionProjectLeaveDialog extends LitElement {
 
   private renderDeleteFailure(): TemplateResult {
     if (!this.failure) {
-      return html`<p class="error" data-leave-delete-failed>${LEAVE_TRUNCATED_NOTE}</p>`;
+      return html`<p class="error" data-leave-delete-failed>${LEAVE_TRUNCATED_NOTE}</p>
+        <p class="note" data-leave-truncated-hint>${LEAVE_TRUNCATED_CLOSE_HINT}</p>`;
     }
     const name = this.failure.agent.name || this.failure.agent.id;
     return html`<p class="error" data-leave-delete-failed>

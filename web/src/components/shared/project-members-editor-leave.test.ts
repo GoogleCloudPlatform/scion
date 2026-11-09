@@ -202,6 +202,18 @@ describe('members editor: self row Leave', () => {
     );
   });
 
+  it('a disabled (blocked) self-row Leave does not open the dialog', async () => {
+    const el = await mount(
+      [ALICE, DAVE],
+      { ...OWNER_CAPS, canLeave: false, leaveBlockedReason: 'last_owner' },
+      { currentUserId: 'u-alice' }
+    );
+    const dialog = el.shadowRoot!.querySelector('scion-project-leave-dialog')!;
+    const show = vi.spyOn(dialog, 'show').mockResolvedValue();
+    row(el, 'u-alice').querySelector<HTMLElement>('[data-self-leave]')!.click();
+    expect(show).not.toHaveBeenCalled();
+  });
+
   it('canLeave false without a reason hides Leave', async () => {
     const el = await mount(
       [ALICE, DAVE],

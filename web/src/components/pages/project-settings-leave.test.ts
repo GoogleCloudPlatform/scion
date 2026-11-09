@@ -193,18 +193,39 @@ describe('project-settings: Danger Zone Leave row (ptone/scion#7494)', () => {
         bubbles: true,
         composed: true,
       });
+    // After a reload the page has rendered again: loading done, dialog and editor back.
+    const page = element;
+    const settled = async (): Promise<void> => {
+      await vi.waitFor(() => {
+        expect((page as unknown as { loading: boolean }).loading).toBe(false);
+        expect(page.shadowRoot!.querySelector('scion-project-leave-dialog')).not.toBeNull();
+        expect(page.shadowRoot!.querySelector('scion-project-members-editor')).not.toBeNull();
+      });
+    };
     const n0 = projectGets();
     dialogOf(element).dispatchEvent(ev('group'));
     await vi.waitFor(() => expect(projectGets()).toBe(n0 + 1));
-    await new Promise((resolve) => setTimeout(resolve, 450));
+    await settled();
     const n1 = projectGets();
     editorOf(element).dispatchEvent(ev('hub'));
     await vi.waitFor(() => expect(projectGets()).toBe(n1 + 1));
-    await new Promise((resolve) => setTimeout(resolve, 450));
+    await settled();
     const n2 = projectGets();
     dialogOf(element).dispatchEvent(ev('none'));
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(projectGets()).toBe(n2);
+  });
+
+  it('a disabled (blocked) Leave Project button does not open the dialog', async () => {
+    element = await createComponent({
+      actions: ['read', 'update', 'delete', 'manage'],
+      canLeave: false,
+      leaveBlockedReason: 'last_owner',
+    });
+    const dialog = dialogOf(element) as HTMLElement & { show: () => Promise<void> };
+    const show = vi.spyOn(dialog, 'show').mockResolvedValue();
+    leaveRow(element)!.querySelector<HTMLElement>('[data-leave-project]')!.click();
+    expect(show).not.toHaveBeenCalled();
   });
 
   it("the Danger Zone dialog's Transfer ownership link opens the members editor's transfer dialog", async () => {

@@ -40,6 +40,7 @@ import {
   LEAVE_GROUP_DERIVED_GUIDANCE,
   LEAVE_LAST_OWNER_GUIDANCE,
   LEAVE_TRANSFER_OWNERSHIP_EVENT,
+  LEAVE_TRUNCATED_CLOSE_HINT,
   LEAVE_TRUNCATED_NOTE,
   PROJECT_LEFT_EVENT,
   accessKeptLine,
@@ -508,7 +509,11 @@ describe('round-1 review: a truncated list, Retry after a failed leave, not a me
     expect(leavePosts(calls)).toHaveLength(0);
     expect(deleter).not.toHaveBeenCalled();
     expect(q(el, '[data-leave-delete-failed]')?.textContent).toContain(LEAVE_TRUNCATED_NOTE);
+    // The way on is to close and leave without deleting; Cancel is the only action.
+    expect(q(el, '[data-leave-truncated-hint]')?.textContent).toContain(LEAVE_TRUNCATED_CLOSE_HINT);
     expect(q(el, '[data-leave-retry]')).toBeNull();
+    expect(q(el, '[data-leave-confirm]')).toBeNull();
+    expect(q(el, '[data-leave-cancel]')).not.toBeNull();
   });
 
   it('planted positive beside it: the same flow on a whole list sends exactly one leave', async () => {
