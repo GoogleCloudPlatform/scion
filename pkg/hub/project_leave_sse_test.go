@@ -386,7 +386,7 @@ func TestSSE_InternalMembershipSubjectRefused(t *testing.T) {
 // be one subject token gets no subject (and so no publish or subscribe).
 func TestMembershipChangedSubjectFor(t *testing.T) {
 	assert.Equal(t, membershipChangedSubject+".u-1", membershipChangedSubjectFor("u-1"))
-	for _, bad := range []string{"", "a.b", "a*", "a>", "a b"} {
+	for _, bad := range []string{"", "a.b", "a*", "a>", "a b", "a\tb", "a\nb", "a\rb", "a\x00b", "a\x7fb", "a/b", "a\u00e9b"} {
 		assert.Empty(t, membershipChangedSubjectFor(bad), "%q", bad)
 	}
 }
@@ -604,4 +604,80 @@ func leaveAgentMessageOrderRounds(t *testing.T, x *leaveSSEFixture, agent *store
 		require.Contains(t, body, "stream ended", "round %d", i)
 		require.NotContains(t, body, after, "round %d: a message published after the membership change reached the leaver", i)
 	}
+}
+
+// TestProjectLeave_ChangeDuringWebStreamSetupClosesStream (review round 3,
+// SR-1): a membership change published after the web events stream
+// authorized its subjects, but before its loop starts, is not missed. The
+// stream subscribes to the caller's membership subject before it
+// authorizes, so the change is queued, re-checked when the loop starts,
+// and the stream closes with the reconnect hint. Had the subscription come
+// after the authorization, the change would be lost and the stream would
+// stay open.
+func TestProjectLeave_ChangeDuringWebStreamSetupClosesStream(t *testing.T) {
+	x := newLeaveSSEFixture(t)
+	orig := sseStreamStillAuthorized
+	sseStreamStillAuthorized = func(*WebServer, *http.Request, []string) bool { return false }
+	t.Cleanup(func() { sseStreamStillAuthorized = orig })
+	streamAuthorizedHook = func(kind string) {
+		if kind == streamKindWebEvents {
+			x.f.srv.publishMembershipChanged(x.f.member.ID, x.f.projectID)
+		}
+	}
+	t.Cleanup(func() { streamAuthorizedHook = nil })
+
+	rec := newLeaveStreamRecorder()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		x.ws.handleSSE(rec, sseAgentRequest(ctx, x.f.member.ID, "user", x.subject))
+	}()
+	t.Cleanup(func() { cancel(); <-done })
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the stream stayed open: the change published during setup was missed")
+	}
+	assert.Contains(t, rec.String(), "event: reconnect")
+}
+
+// TestProjectLeave_LeaveDuringAgentStreamSetupClosesStream (review round 3,
+// SR-1): a leave made after the agent messages stream authorized the
+// caller, but before its loop starts, is not missed. The stream subscribes
+// to the caller's membership subject before it authorizes, so the leave's
+// change is queued, re-checked when the loop starts, and the stream ends
+// with the credential error.
+func TestProjectLeave_LeaveDuringAgentStreamSetupClosesStream(t *testing.T) {
+	x := newLeaveSSEFixture(t)
+	x.f.srv.membershipService.onMembershipLoss = nil
+	agent := leaveOrderAgent(t, x)
+	leaveCode := 0
+	streamAuthorizedHook = func(kind string) {
+		if kind == streamKindAgentMessages {
+			// A real leave, on the handler's goroutine: no t.Fatal here.
+			leaveCode = leaveAs(t, x.f.srv, x.f.member, x.f.projectID, false).Code
+		}
+	}
+	t.Cleanup(func() { streamAuthorizedHook = nil })
+
+	identity := NewAuthenticatedUser(x.f.member.ID, x.f.member.Email, x.f.member.DisplayName, x.f.member.Role, "web")
+	sctx, cancel := context.WithCancel(context.Background())
+	rctx := contextWithCredentialContext(context.WithValue(contextWithIdentity(sctx, identity), userContextKey{}, identity),
+		CredentialContext{Kind: CredentialKindInteractive, ID: "test-session"})
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/agents/"+agent.ID+"/messages/stream", nil).WithContext(rctx)
+	rec := newLeaveStreamRecorder()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		x.f.srv.mux.ServeHTTP(rec, req)
+	}()
+	t.Cleanup(func() { cancel(); <-done })
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the stream stayed open: the leave made during setup was missed")
+	}
+	assert.Equal(t, http.StatusOK, leaveCode, "the leave in the setup window succeeded")
+	assert.Contains(t, rec.String(), "stream ended")
 }

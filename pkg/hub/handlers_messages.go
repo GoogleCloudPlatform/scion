@@ -496,6 +496,14 @@ func (s *Server) handleAgentMessagesStream(w http.ResponseWriter, r *http.Reques
 		Forbidden(w)
 		return
 	}
+	// A membership change of the caller re-checks the stream for every
+	// credential, sessions included (ptone/scion#7494). Only the caller's
+	// own per-user subject is subscribed, and it is subscribed BEFORE the
+	// authorization below: a change published while the stream is being set
+	// up is queued and re-checked when the loop starts, instead of being
+	// missed. The deferred unsubscribe releases it on every return.
+	membershipCh, unsubscribeMembership := subscribeMembershipChanged(ep, user.ID())
+	defer unsubscribeMembership()
 
 	agent, err := s.store.GetAgent(ctx, agentID)
 	if err != nil {
@@ -513,6 +521,9 @@ func (s *Server) handleAgentMessagesStream(w http.ResponseWriter, r *http.Reques
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Access denied", nil)
 			return
 		}
+	}
+	if streamAuthorizedHook != nil {
+		streamAuthorizedHook(streamKindAgentMessages)
 	}
 
 	// With the conversation setting on, REST's default path (no thread_id,
@@ -556,14 +567,17 @@ func (s *Server) handleAgentMessagesStream(w http.ResponseWriter, r *http.Reques
 		slog.Debug("Failed to clear write deadline for messages stream", "error", err)
 	}
 
+	// Install the message subscription before flushing headers, as the web
+	// events stream does: a client that publishes as soon as it sees the
+	// stream open must not race the subscribe.
+	ch, unsubscribe := ep.Subscribe("agent." + agent.ID + ".message")
+	defer unsubscribe()
+
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
 	flusher.Flush()
-
-	ch, unsubscribe := ep.Subscribe("agent." + agent.ID + ".message")
-	defer unsubscribe()
 
 	// Callers holding agent.attach on the agent see all messages; others
 	// only see messages where they are a participant.
@@ -580,11 +594,6 @@ func (s *Server) handleAgentMessagesStream(w http.ResponseWriter, r *http.Reques
 	}
 	recheck, stopRecheck := streamTokenRecheck(ctx)
 	defer stopRecheck()
-	// A membership change of the caller re-checks the stream for every
-	// credential, sessions included (ptone/scion#7494). Only the caller's
-	// own per-user subject is subscribed.
-	membershipCh, unsubscribeMembership := subscribeMembershipChanged(ep, userID)
-	defer unsubscribeMembership()
 
 	// Server-side timeout matching handlers_logs.go: tell the client to
 	// reconnect after 10 minutes so long-lived connections don't accumulate.

@@ -2175,6 +2175,22 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 		defer logPerfTraceLine(perfTraceLogger(), r, trace.Snapshot, slog.String("sse_stage", "close"))
 	}
 
+	// Membership changes of the caller (an internal per-user subject, never
+	// written to the client) re-run the subject authorization in the loop,
+	// so a stream does not outlive the access it was opened with
+	// (ptone/scion#7494). Only the caller's own subject is subscribed, and
+	// it is subscribed BEFORE the expansion and authorization below: a
+	// membership change published while the stream is being set up is then
+	// queued and re-checked when the loop starts, instead of being missed.
+	// The deferred unsubscribe releases it on every return, refusals
+	// included.
+	streamUserID := ""
+	if su := getWebSessionUser(r.Context()); su != nil {
+		streamUserID = su.UserID
+	}
+	membershipCh, unsubscribeMembership := subscribeMembershipChanged(ws.events, streamUserID)
+	defer unsubscribeMembership()
+
 	// Expand NATS-style wildcards (e.g. project.>) into specific
 	// resource-scoped subjects before authorization. This ensures the
 	// subscription only covers resources the caller can actually access,
@@ -2210,6 +2226,9 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(body)
 		return
 	}
+	if streamAuthorizedHook != nil {
+		streamAuthorizedHook(streamKindWebEvents)
+	}
 
 	// Disable the server's WriteTimeout for this long-lived SSE connection.
 	// Without this, the global WriteTimeout (e.g. 60s) kills the stream,
@@ -2223,16 +2242,6 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 	// its metadata snapshot as soon as the client observes the open stream.
 	ch, unsubscribe := ws.events.Subscribe(subjects...)
 	defer unsubscribe()
-	// Membership changes of the caller (an internal per-user subject, never
-	// written to the client) re-run the subject authorization below, so a
-	// stream does not outlive the access it was opened with
-	// (ptone/scion#7494). Only the caller's own subject is subscribed.
-	streamUserID := ""
-	if su := getWebSessionUser(r.Context()); su != nil {
-		streamUserID = su.UserID
-	}
-	membershipCh, unsubscribeMembership := subscribeMembershipChanged(ws.events, streamUserID)
-	defer unsubscribeMembership()
 
 	// Register the stream (ptone/scion#5227) and close it on every exit
 	// path below, with the reason set where the loop returns. A panic is
