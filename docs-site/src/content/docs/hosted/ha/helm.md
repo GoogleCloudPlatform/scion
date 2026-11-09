@@ -99,12 +99,12 @@ From the repository root:
 ```bash
 gcloud builds submit \
   --config=image-build/cloudbuild-hub-gke.yaml \
-  --ignore-file=image-build/gcloudignore-hub-gke \
+  --ignore-file=image-build/gcloudignore-omni \
   --substitutions=_REGISTRY=<registry>,_SHORT_SHA=$(git rev-parse --short HEAD) \
   .
 ```
 
-`--ignore-file=image-build/gcloudignore-hub-gke` is required. The reasons are in
+`--ignore-file=image-build/gcloudignore-omni` is required. The reasons are in
 [`image-build/README.md`](https://github.com/GoogleCloudPlatform/scion/blob/main/image-build/README.md#gke-hub-image-cloudbuild-hub-gkeyaml).
 
 Pin the image by digest with `image.digest`. `image.tag` is accepted, but a tag
