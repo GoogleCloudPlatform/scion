@@ -1,0 +1,157 @@
+/**
+ * Copyright 2026 Google LLC
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+/**
+ * Chat search is bounded (ptone/scion#7586, design v3 section 14 step 6):
+ * every request has its own AbortController, new input and closing the
+ * panel abort the running request, a 503 or 429 shows its message instead
+ * of failing silently, and an aborted request is not an error.
+ */
+
+import { describe, it, expect, vi, beforeAll, beforeEach } from 'vitest';
+
+vi.mock('../../../client/main.js', () => import('../../../client/__fixtures__/main-stub.js'));
+
+const apiFetch = vi.fn<(path: string, init?: { signal?: AbortSignal }) => Promise<Response>>();
+vi.mock('../../../client/api.js', () => ({
+  apiFetch: (path: string, init?: { signal?: AbortSignal }) => apiFetch(path, init),
+  extractApiError: vi.fn(() => 'error'),
+}));
+
+/* eslint-disable @typescript-eslint/no-explicit-any */
+
+let mod: typeof import('./chat-search.js');
+
+beforeAll(async () => {
+  mod = await import('./chat-search.js');
+});
+
+beforeEach(() => {
+  apiFetch.mockReset();
+});
+
+/** A fetch that never settles until its signal aborts, then rejects like fetch. */
+function pendingUntilAborted(_path: string, init?: { signal?: AbortSignal }): Promise<Response> {
+  return new Promise((_resolve, reject) => {
+    init?.signal?.addEventListener('abort', () =>
+      reject(new DOMException('The operation was aborted.', 'AbortError'))
+    );
+  });
+}
+
+function makeSearch(query = 'needle'): any {
+  const el = document.createElement('scion-chat-search') as any;
+  el.query = query;
+  return el;
+}
+
+describe('searchErrorMessage', () => {
+  it('maps 503 to the timeout message and 429 to the busy message', () => {
+    expect(mod.searchErrorMessage(503)).toBe(mod.SEARCH_TIMEOUT_MESSAGE);
+    expect(mod.searchErrorMessage(429)).toBe(mod.SEARCH_BUSY_MESSAGE);
+    expect(mod.searchErrorMessage(500)).toBe(mod.SEARCH_FAILED_MESSAGE);
+  });
+
+  it('uses the exact timeout text from the design', () => {
+    expect(mod.SEARCH_TIMEOUT_MESSAGE).toBe(
+      'Search took too long. Try a longer phrase or search one space.'
+    );
+  });
+});
+
+describe('scion-chat-search request lifecycle', () => {
+  it('passes an AbortSignal and aborts the previous request on a new search', async () => {
+    apiFetch.mockImplementation(pendingUntilAborted);
+    const el = makeSearch();
+    const first = el.performSearch();
+    const firstSignal = apiFetch.mock.calls[0][1]?.signal as AbortSignal;
+    expect(firstSignal).toBeInstanceOf(AbortSignal);
+    expect(firstSignal.aborted).toBe(false);
+
+    const second = el.performSearch();
+    expect(firstSignal.aborted).toBe(true);
+    const secondSignal = apiFetch.mock.calls[1][1]?.signal as AbortSignal;
+    expect(secondSignal).not.toBe(firstSignal);
+    expect(secondSignal.aborted).toBe(false);
+
+    await first;
+    // The superseded request's abort is not an error, and the newer
+    // request still owns the loading state.
+    expect(el.errorMsg).toBe('');
+    expect(el.loading).toBe(true);
+
+    el.close();
+    await second;
+    expect(secondSignal.aborted).toBe(true);
+  });
+
+  it('aborts the running request when the user types again', async () => {
+    apiFetch.mockImplementation(pendingUntilAborted);
+    const el = makeSearch();
+    const run = el.performSearch();
+    const signal = apiFetch.mock.calls[0][1]?.signal as AbortSignal;
+
+    el.handleInput({ target: { value: 'needles' } } as unknown as Event);
+    expect(signal.aborted).toBe(true);
+    await run;
+    expect(el.errorMsg).toBe('');
+    el.disconnectedCallback();
+  });
+
+  it('aborts the running request when the panel closes', async () => {
+    apiFetch.mockImplementation(pendingUntilAborted);
+    const el = makeSearch();
+    const run = el.performSearch();
+    const signal = apiFetch.mock.calls[0][1]?.signal as AbortSignal;
+
+    el.close();
+    expect(signal.aborted).toBe(true);
+    await run;
+    expect(el.errorMsg).toBe('');
+    expect(el.loading).toBe(false);
+  });
+
+  it('shows the timeout message on 503', async () => {
+    apiFetch.mockResolvedValue(new Response('{}', { status: 503 }));
+    const el = makeSearch();
+    await el.performSearch();
+    expect(el.errorMsg).toBe(mod.SEARCH_TIMEOUT_MESSAGE);
+    expect(el.results).toEqual([]);
+    expect(el.loading).toBe(false);
+  });
+
+  it('shows the busy message on 429', async () => {
+    apiFetch.mockResolvedValue(new Response('{}', { status: 429 }));
+    const el = makeSearch();
+    await el.performSearch();
+    expect(el.errorMsg).toBe(mod.SEARCH_BUSY_MESSAGE);
+    expect(el.loading).toBe(false);
+  });
+
+  it('clears the message on a successful search', async () => {
+    apiFetch.mockResolvedValueOnce(new Response('{}', { status: 503 }));
+    const el = makeSearch();
+    await el.performSearch();
+    expect(el.errorMsg).toBe(mod.SEARCH_TIMEOUT_MESSAGE);
+
+    apiFetch.mockResolvedValueOnce(
+      new Response(JSON.stringify({ results: [], nextCursor: '' }), { status: 200 })
+    );
+    await el.performSearch();
+    expect(el.errorMsg).toBe('');
+    expect(el.noResults).toBe(true);
+  });
+});

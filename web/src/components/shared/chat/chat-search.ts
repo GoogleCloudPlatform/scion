@@ -55,6 +55,26 @@ interface SearchResponse {
   nextCursor?: string;
 }
 
+/** Shown when the hub stopped a search at its time limit (503 SEARCH_TIMEOUT). */
+export const SEARCH_TIMEOUT_MESSAGE =
+  'Search took too long. Try a longer phrase or search one space.';
+/** Shown when another search by the same user is still running (429 SEARCH_BUSY). */
+export const SEARCH_BUSY_MESSAGE = 'Another search is still running. Try again in a moment.';
+/** Shown for any other failed search. */
+export const SEARCH_FAILED_MESSAGE = 'Search failed. Try again.';
+
+/** The message for a search refused with the given HTTP status (0: no response). */
+export function searchErrorMessage(status: number): string {
+  if (status === 503) return SEARCH_TIMEOUT_MESSAGE;
+  if (status === 429) return SEARCH_BUSY_MESSAGE;
+  return SEARCH_FAILED_MESSAGE;
+}
+
+/** Whether err is the rejection of an aborted fetch. */
+function isAbortError(err: unknown): boolean {
+  return err instanceof DOMException && err.name === 'AbortError';
+}
+
 @customElement('scion-chat-search')
 export class ScionChatSearch extends LitElement {
   /** Re-renders absolute result dates when the display zone changes. */
@@ -80,8 +100,12 @@ export class ScionChatSearch extends LitElement {
   @state() private nextCursor = '';
   @state() private loadingMore = false;
   @state() private noResults = false;
+  /** Message shown when the hub refused the search (timeout or busy). */
+  @state() private errorMsg = '';
 
   private _debounceTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Aborts the in-flight search request; one per request. */
+  private _abort: AbortController | null = null;
 
   static override styles = css`
     :host {
@@ -295,10 +319,27 @@ export class ScionChatSearch extends LitElement {
       clearTimeout(this._debounceTimer);
       this._debounceTimer = null;
     }
+    this.abortSearch();
+  }
+
+  /**
+   * Abort the in-flight search request, if any. The hub stops the
+   * database statement when the request goes away, so a superseded
+   * search does not keep running.
+   */
+  private abortSearch(): void {
+    if (this._abort) {
+      this._abort.abort();
+      this._abort = null;
+    }
   }
 
   /** Close the search panel and reset state. */
   close(): void {
+    this.abortSearch();
+    this.loading = false;
+    this.loadingMore = false;
+    this.errorMsg = '';
     this.searchActive = false;
     this.query = '';
     this.results = [];
@@ -325,11 +366,15 @@ export class ScionChatSearch extends LitElement {
     if (this._debounceTimer) {
       clearTimeout(this._debounceTimer);
     }
+    // New input supersedes the running search.
+    this.abortSearch();
+    this.errorMsg = '';
 
     if (this.query.trim().length < 2) {
       this.results = [];
       this.nextCursor = '';
       this.noResults = false;
+      this.loading = false;
       return;
     }
 
@@ -347,6 +392,11 @@ export class ScionChatSearch extends LitElement {
   private async performSearch(append = false): Promise<void> {
     const q = this.query.trim();
     if (q.length < 2) return;
+
+    this.abortSearch();
+    const controller = new AbortController();
+    this._abort = controller;
+    this.errorMsg = '';
 
     if (append) {
       this.loadingMore = true;
@@ -371,8 +421,14 @@ export class ScionChatSearch extends LitElement {
 
       params.set('limit', '20');
 
-      const res = await apiFetch(`/api/v1/chat/search?${params.toString()}`);
-      if (!res.ok) return;
+      const res = await apiFetch(`/api/v1/chat/search?${params.toString()}`, {
+        signal: controller.signal,
+      });
+      if (!res.ok) {
+        this.noResults = false;
+        this.errorMsg = searchErrorMessage(res.status);
+        return;
+      }
 
       const data = (await res.json()) as SearchResponse;
 
@@ -384,11 +440,17 @@ export class ScionChatSearch extends LitElement {
 
       this.nextCursor = data.nextCursor || '';
       this.noResults = this.results.length === 0 && !append;
-    } catch {
-      // Silently fail
+    } catch (err) {
+      // An aborted request was superseded or the panel closed: not an error.
+      if (isAbortError(err)) return;
+      this.errorMsg = searchErrorMessage(0);
     } finally {
-      this.loading = false;
-      this.loadingMore = false;
+      // A newer request owns the loading state once this one is superseded.
+      if (this._abort === controller) {
+        this._abort = null;
+        this.loading = false;
+        this.loadingMore = false;
+      }
     }
   }
 
@@ -493,11 +555,13 @@ export class ScionChatSearch extends LitElement {
         ${
           this.loading
             ? html`<div class="status-msg"><sl-spinner></sl-spinner></div>`
-            : this.noResults
-              ? html`<div class="status-msg">No messages found</div>`
-              : this.results.length === 0 && this.query.trim().length < 2
-                ? html`<div class="status-msg">Type at least 2 characters to search</div>`
-                : this.results.map((r) => this.renderResult(r))
+            : this.errorMsg
+              ? html`<div class="status-msg search-error" role="alert">${this.errorMsg}</div>`
+              : this.noResults
+                ? html`<div class="status-msg">No messages found</div>`
+                : this.results.length === 0 && this.query.trim().length < 2
+                  ? html`<div class="status-msg">Type at least 2 characters to search</div>`
+                  : this.results.map((r) => this.renderResult(r))
         }
         ${
           this.nextCursor && !this.loading
