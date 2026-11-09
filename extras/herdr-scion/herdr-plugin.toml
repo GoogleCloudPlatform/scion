@@ -1,0 +1,60 @@
+id = "scion.herdr-integration"
+name = "Scion Agent Integration"
+version = "0.1.0"
+min_herdr_version = "0.6.10"
+platforms = ["linux", "macos"]
+
+# Auto-discover and attach to running scion agents on startup
+[[startup]]
+command = ["bash", "scion-discover.sh"]
+
+# Plugin panes: scion-pick-agent.sh and scion-start-agent.sh are interactive
+# (fzf / read -rp). Plugin actions run with piped stdout/stderr and no
+# controlling terminal, so they can't be actions directly — they're opened
+# as overlay panes (via the launcher actions below), which do get a real
+# terminal, and close automatically when the script exits.
+[[panes]]
+id = "pick"
+title = "Attach to Scion Agent"
+command = ["bash", "scion-pick-agent.sh"]
+
+[[panes]]
+id = "start"
+title = "Start Scion Agent"
+command = ["bash", "scion-start-agent.sh"]
+
+# Overlay that shows one plugin message to the user (scion-common.sh
+# open_notice): no project selected, no running agents, a dashboard that
+# could not read herdr's tab list. Closes on Enter or after 30 s.
+[[panes]]
+id = "notice"
+title = "Scion"
+command = ["bash", "scion-notice.sh"]
+
+# Action: open the agent picker as an overlay pane
+[[actions]]
+id = "attach-agent"
+title = "Attach to Scion Agent"
+contexts = ["workspace"]
+command = ["bash", "scion-open-pane.sh", "pick"]
+
+# Action: open the start-agent flow as an overlay pane
+[[actions]]
+id = "start-agent"
+title = "Start Scion Agent"
+contexts = ["workspace"]
+command = ["bash", "scion-open-pane.sh", "start"]
+
+# Action: refresh the agent pane list (re-run discovery)
+[[actions]]
+id = "refresh-agents"
+title = "Refresh Scion Agents"
+contexts = ["workspace"]
+command = ["bash", "scion-discover.sh"]
+
+# Action: open a tiled dashboard of all agents
+[[actions]]
+id = "dashboard"
+title = "Scion Agent Dashboard"
+contexts = ["workspace"]
+command = ["bash", "scion-dashboard.sh"]
