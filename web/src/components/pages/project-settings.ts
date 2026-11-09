@@ -83,6 +83,7 @@ import '../shared/resource-import.js';
 import '../shared/injected-skills-panel.js';
 import '../shared/pre-start-hook-list.js';
 import { showToast } from '../../utils/toast.js';
+import { copyToClipboard, showCopyFailedToast } from '../../utils/clipboard.js';
 import { showConfirm } from '../shared/confirm-dialog.js';
 import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
@@ -3161,17 +3162,17 @@ export class ScionPageProjectSettings extends LitElement {
                                     const sa = this.gcpServiceAccounts.find(
                                       (s) => s.id === this.configDefaultGCPIdentitySAID
                                     );
-                                    if (sa && navigator.clipboard) {
-                                      void navigator.clipboard
-                                        .writeText(sa.email)
-                                        .then(() => {
-                                          this.copiedDefaultSAEmail = true;
-                                          setTimeout(() => {
-                                            this.copiedDefaultSAEmail = false;
-                                          }, 1500);
-                                        })
-                                        .catch(() => {});
-                                    }
+                                    if (!sa) return;
+                                    void copyToClipboard(sa.email).then((ok) => {
+                                      if (!ok) {
+                                        showCopyFailedToast();
+                                        return;
+                                      }
+                                      this.copiedDefaultSAEmail = true;
+                                      setTimeout(() => {
+                                        this.copiedDefaultSAEmail = false;
+                                      }, 1500);
+                                    });
                                   }}
                                 ></sl-icon-button>
                               </sl-tooltip>

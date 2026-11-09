@@ -55,7 +55,7 @@ import { navigateTo, stateManager } from '../../../client/main.js';
 import { agentIndexOf, agentStore } from '../../../client/agent-store.js';
 import { openTerminal, agentGraphHref } from '../../../client/open-terminal.js';
 import { showToast } from '../../../utils/toast.js';
-import { copyToClipboard } from './clipboard.js';
+import { copyRichToClipboard, copyToClipboard, copyWithToast } from '../../../utils/clipboard.js';
 import {
   ChatStarsController,
   conversationSupportsStars,
@@ -5290,7 +5290,7 @@ export class ScionChatThread extends LitElement {
       icon: 'link',
       run: (): void => {
         this.closeContextMenu();
-        void this.copyWithToast(href);
+        void copyWithToast(href);
       },
     };
   }
@@ -6237,7 +6237,7 @@ export class ScionChatThread extends LitElement {
     const msg = this.contextMenuMessage;
     this.closeContextMenu();
     if (!msg) return;
-    void this.copyWithToast(msg.msg);
+    void copyWithToast(msg.msg);
   }
 
   /** Context menu: Copy link to message. */
@@ -6246,17 +6246,7 @@ export class ScionChatThread extends LitElement {
     this.closeContextMenu();
     if (!msg) return;
     const url = `${window.location.origin}${window.location.pathname}#msg-${encodeURIComponent(msg.id)}`;
-    void this.copyWithToast(url);
-  }
-
-  /**
-   * Copies `text` for a message menu item and reports the outcome in a toast.
-   * The Clipboard API is absent on a plain-http host; that shows the failure
-   * toast rather than throwing.
-   */
-  private async copyWithToast(text: string): Promise<void> {
-    if (await copyToClipboard(text)) showToast('Copied', 'success');
-    else showToast('Could not copy', 'danger');
+    void copyWithToast(url);
   }
 
   /** Context menu: Set the sender agent as the thread default. */
@@ -7697,21 +7687,13 @@ export class ScionChatThread extends LitElement {
       .map((m) => `${m.sender} (${this.formatExportTimestamp(m.createdAt)})\n${m.msg}`)
       .join('\n\n---\n\n');
 
-    try {
-      await navigator.clipboard.write([
-        new ClipboardItem({
-          'text/html': new Blob([htmlContent], { type: 'text/html' }),
-          'text/plain': new Blob([plainText], { type: 'text/plain' }),
-        }),
-      ]);
+    if (await copyRichToClipboard({ 'text/html': htmlContent, 'text/plain': plainText })) {
       showToast('Conversation copied to clipboard.', 'success');
-    } catch {
+    } else if (await copyToClipboard(plainText)) {
       // Fallback: plain text copy.
-      if (await copyToClipboard(plainText)) {
-        showToast('Conversation copied to clipboard (plain text).', 'success');
-      } else {
-        showToast('Failed to copy to clipboard.', 'danger');
-      }
+      showToast('Conversation copied to clipboard (plain text).', 'success');
+    } else {
+      showToast('Failed to copy to clipboard.', 'danger');
     }
   }
 }

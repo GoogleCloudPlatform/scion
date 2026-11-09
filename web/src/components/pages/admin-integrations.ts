@@ -33,6 +33,7 @@ import {
   renderSectionErrorSummary,
   settingsErrorStyles,
 } from '../shared/settings-error-views.js';
+import { copyWithToast } from '../../utils/clipboard.js';
 
 // ── Type definitions matching the Go API response ──
 
@@ -1973,7 +1974,7 @@ export class ScionPageAdminIntegrations extends LitElement {
           <sl-button
             size="small"
             @click=${() => {
-              void navigator.clipboard.writeText(messagingEndpoint);
+              void copyWithToast(messagingEndpoint);
             }}
           >
             <sl-icon slot="prefix" name="clipboard"></sl-icon>
