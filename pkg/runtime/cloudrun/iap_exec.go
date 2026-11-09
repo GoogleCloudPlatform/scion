@@ -32,6 +32,7 @@ import (
 	"cloud.google.com/go/run/apiv2/runpb"
 	"github.com/gorilla/websocket"
 	"golang.org/x/crypto/ssh"
+	"google.golang.org/api/option"
 )
 
 type IAPExecConnector struct {
@@ -108,6 +109,27 @@ var osLoginBaseURL = "https://oslogin.googleapis.com"
 func NewIAPExecConnector(iapTunnelUrlOverride string) *IAPExecConnector {
 	return &IAPExecConnector{
 		IapTunnelUrlOverride: iapTunnelUrlOverride,
+	}
+}
+
+// NewIAPExecConnectorWithCredentials returns a connector whose every call
+// uses creds and opts only (a flat Cloud Run instance's own credentials):
+// the OAuth token, the Instances API client and the project-number lookup.
+// It never detects Application Default Credentials.
+func NewIAPExecConnectorWithCredentials(creds *auth.Credentials, opts ...option.ClientOption) *IAPExecConnector {
+	return &IAPExecConnector{
+		detectCredentials: func() (tokenSource, error) {
+			if creds == nil {
+				return nil, errors.New("no credentials configured for this connector")
+			}
+			return creds, nil
+		},
+		newInstancesClient: func(ctx context.Context) (InstancesAPI, error) {
+			return NewInstancesClient(ctx, opts...)
+		},
+		lookupProjectNumber: func(ctx context.Context, projectID string) (string, error) {
+			return fetchProjectNumberWith(ctx, projectID, opts...)
+		},
 	}
 }
 
@@ -486,7 +508,12 @@ func shellQuote(s string) string {
 }
 
 func fetchProjectNumber(ctx context.Context, projectID string) (string, error) {
-	client, err := resourcemanager.NewProjectsClient(ctx)
+	return fetchProjectNumberWith(ctx, projectID)
+}
+
+// fetchProjectNumberWith is fetchProjectNumber with client options.
+func fetchProjectNumberWith(ctx context.Context, projectID string, opts ...option.ClientOption) (string, error) {
+	client, err := resourcemanager.NewProjectsClient(ctx, opts...)
 	if err != nil {
 		return "", err
 	}
@@ -627,7 +654,7 @@ func (c *IAPExecConnector) instancesAPI(ctx context.Context) (InstancesAPI, erro
 	}
 	newClient := c.newInstancesClient
 	if newClient == nil {
-		newClient = NewInstancesClient
+		newClient = func(ctx context.Context) (InstancesAPI, error) { return NewInstancesClient(ctx) }
 	}
 	client, err := newClient(context.WithoutCancel(ctx))
 	if err != nil {
