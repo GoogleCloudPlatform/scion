@@ -2223,15 +2223,16 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 	// its metadata snapshot as soon as the client observes the open stream.
 	ch, unsubscribe := ws.events.Subscribe(subjects...)
 	defer unsubscribe()
-	// Membership changes of the caller (internal subject, never written to
-	// the client) re-run the subject authorization below, so a stream does
-	// not outlive the access it was opened with (ptone/scion#7494).
-	membershipCh, unsubscribeMembership := ws.events.Subscribe(membershipChangedSubject)
-	defer unsubscribeMembership()
+	// Membership changes of the caller (an internal per-user subject, never
+	// written to the client) re-run the subject authorization below, so a
+	// stream does not outlive the access it was opened with
+	// (ptone/scion#7494). Only the caller's own subject is subscribed.
 	streamUserID := ""
 	if su := getWebSessionUser(r.Context()); su != nil {
 		streamUserID = su.UserID
 	}
+	membershipCh, unsubscribeMembership := subscribeMembershipChanged(ws.events, streamUserID)
+	defer unsubscribeMembership()
 
 	// Register the stream (ptone/scion#5227) and close it on every exit
 	// path below, with the reason set where the loop returns. A panic is

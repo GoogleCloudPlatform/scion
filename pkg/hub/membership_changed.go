@@ -17,16 +17,41 @@ package hub
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 )
 
-// membershipChangedSubject is an internal event subject: a user's project
-// membership changed, so the long-lived streams that user holds re-run
-// their authorization (the web events stream and the agent messages
-// stream). It travels on the shared EventPublisher, so streams on other
-// hub instances receive it too. It is never a client subscription
-// (authorizeSSESubjects refuses the hub namespace) and is never written to
-// a client. A project leave publishes it after commit (ptone/scion#7494).
+// membershipChangedSubject is the prefix of an internal event subject: a
+// user's project membership changed, so the long-lived streams that user
+// holds re-run their authorization (the web events stream and the agent
+// messages stream). Each user has their own subject,
+// membershipChangedSubjectFor(userID), and a stream subscribes only to its
+// own user's, so other users' changes never queue on it. It travels on the
+// shared EventPublisher, so streams on other hub instances receive it too.
+// It is never a client subscription (authorizeSSESubjects refuses the hub
+// namespace) and is never written to a client. A project leave publishes it
+// after commit (ptone/scion#7494).
 const membershipChangedSubject = "hub.membership.changed"
+
+// membershipChangedSubjectFor returns userID's membership-changed subject,
+// or "" when userID cannot be one subject token (empty, or holding a
+// subject separator or wildcard).
+func membershipChangedSubjectFor(userID string) string {
+	if userID == "" || strings.ContainsAny(userID, ".*> ") {
+		return ""
+	}
+	return membershipChangedSubject + "." + userID
+}
+
+// subscribeMembershipChanged subscribes to userID's membership-changed
+// subject. With no valid subject it returns a nil channel, which never
+// becomes ready in a select, and a no-op unsubscribe.
+func subscribeMembershipChanged(events EventPublisher, userID string) (<-chan Event, func()) {
+	subject := membershipChangedSubjectFor(userID)
+	if subject == "" || events == nil {
+		return nil, func() {}
+	}
+	return events.Subscribe(subject)
+}
 
 // membershipChangedEvent is the payload of membershipChangedSubject.
 type membershipChangedEvent struct {
@@ -34,9 +59,9 @@ type membershipChangedEvent struct {
 	ProjectID string `json:"projectId"`
 }
 
-// publishMembershipChanged publishes membershipChangedSubject for userID
-// and projectID. It does not depend on any experiment. With no event
-// publisher it does nothing.
+// publishMembershipChanged publishes userID's membership-changed subject
+// for projectID. It does not depend on any experiment. With no event
+// publisher, or a userID that is no valid subject token, it does nothing.
 func (s *Server) publishMembershipChanged(userID, projectID string) {
 	if s == nil {
 		return
@@ -44,15 +69,17 @@ func (s *Server) publishMembershipChanged(userID, projectID string) {
 	s.mu.RLock()
 	events := s.events
 	s.mu.RUnlock()
-	if events == nil {
+	subject := membershipChangedSubjectFor(userID)
+	if events == nil || subject == "" {
 		return
 	}
-	events.PublishRaw(membershipChangedSubject, membershipChangedEvent{UserID: userID, ProjectID: projectID})
+	events.PublishRaw(subject, membershipChangedEvent{UserID: userID, ProjectID: projectID})
 }
 
-// membershipChangedNames reports whether a membershipChangedSubject event
-// concerns userID. A payload that does not decode, or names no user,
-// concerns every stream: the stream re-checks rather than skip a change.
+// membershipChangedNames reports whether a membership-changed event concerns
+// userID. The per-user subject already selects the user; this checks the
+// payload as well. A payload that does not decode, or names no user,
+// concerns the stream: it re-checks rather than skip a change.
 func membershipChangedNames(evt Event, userID string) bool {
 	var m membershipChangedEvent
 	if err := json.Unmarshal(evt.Data, &m); err != nil || m.UserID == "" {

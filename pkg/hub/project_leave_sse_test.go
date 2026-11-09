@@ -358,10 +358,14 @@ func TestProjectLeave_MembershipEventOfOtherUserKeepsStream(t *testing.T) {
 }
 
 // TestSSE_InternalMembershipSubjectRefused: a client cannot subscribe to
-// the internal membership subject, nor to the hub namespace.
+// the internal membership subjects (its own per-user subject, another
+// user's, or the prefix), nor to the hub namespace.
 func TestSSE_InternalMembershipSubjectRefused(t *testing.T) {
 	x := newLeaveSSEFixture(t)
-	for _, subject := range []string{membershipChangedSubject, "hub.membership.>", "hub.>"} {
+	for _, subject := range []string{
+		membershipChangedSubject, membershipChangedSubjectFor(x.f.member.ID), membershipChangedSubjectFor(x.f.admin.ID),
+		"hub.membership.changed.*", "hub.membership.>", "hub.>",
+	} {
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
 		rec := httptest.NewRecorder()
@@ -370,6 +374,64 @@ func TestSSE_InternalMembershipSubjectRefused(t *testing.T) {
 	}
 	assert.NotEmpty(t, x.ws.authorizeSSESubjects(sseAgentRequest(context.Background(), x.f.member.ID, "user", membershipChangedSubject),
 		[]string{membershipChangedSubject}))
+	own := membershipChangedSubjectFor(x.f.member.ID)
+	assert.NotEmpty(t, x.ws.authorizeSSESubjects(sseAgentRequest(context.Background(), x.f.member.ID, "user", own),
+		[]string{own}), "the caller's own per-user subject is refused too")
+}
+
+// TestMembershipChangedSubjectFor: one token per user; an ID that cannot
+// be one subject token gets no subject (and so no publish or subscribe).
+func TestMembershipChangedSubjectFor(t *testing.T) {
+	assert.Equal(t, membershipChangedSubject+".u-1", membershipChangedSubjectFor("u-1"))
+	for _, bad := range []string{"", "a.b", "a*", "a>", "a b"} {
+		assert.Empty(t, membershipChangedSubjectFor(bad), "%q", bad)
+	}
+}
+
+// TestProjectLeave_OtherUsersChangesDoNotCrowdOutLeaver (review round 2,
+// security note): each stream subscribes only to its own user's
+// membership subject, so a burst of other users' membership changes never
+// fills the leaver's queue. The leaver's stream is held inside a write
+// while more other-user changes than the subscription buffer holds are
+// published, then the leaver's own change; on release the stream still
+// re-checks and ends. With one shared subject the burst would fill the
+// buffer and the leaver's change would be dropped.
+func TestProjectLeave_OtherUsersChangesDoNotCrowdOutLeaver(t *testing.T) {
+	x := newLeaveSSEFixture(t)
+	orig := sseStreamStillAuthorized
+	sseStreamStillAuthorized = func(*WebServer, *http.Request, []string) bool { return false }
+	t.Cleanup(func() { sseStreamStillAuthorized = orig })
+
+	g := newGatedLeaveRecorder()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	t.Cleanup(func() { cancel(); <-done })
+	go func() {
+		defer close(done)
+		x.ws.handleSSE(g, sseAgentRequest(ctx, x.f.member.ID, "user", x.subject))
+	}()
+	require.Eventually(t, g.isFlushed, 5*time.Second, 10*time.Millisecond)
+
+	g.arm()
+	x.chat("hold")
+	select {
+	case <-g.blocked:
+	case <-time.After(5 * time.Second):
+		g.release()
+		t.Fatal("the stream never started writing the held event")
+	}
+	for i := 0; i < 100; i++ { // more than the 64-event subscription buffer
+		x.f.srv.publishMembershipChanged(tid(fmt.Sprintf("%s-other-%d", t.Name(), i)), x.f.projectID)
+	}
+	x.f.srv.publishMembershipChanged(x.f.member.ID, x.f.projectID)
+	g.release()
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the leaver's stream was not closed: its membership change was crowded out")
+	}
+	assert.Contains(t, g.String(), "event: reconnect")
 }
 
 // TestProjectLeave_AgentMessagesStreamEndsOnLeave: the leaver's session

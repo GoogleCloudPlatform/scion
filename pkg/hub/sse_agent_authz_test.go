@@ -192,12 +192,12 @@ func TestSSEHandler_AgentMixedBatch(t *testing.T) {
 				assert.Equal(t, http.StatusOK, w.Code)
 				assert.True(t, w.Flushed)
 				// One subscription for the whole authorized batch, plus the
-				// internal membership-change subscription every stream
-				// holds (ptone/scion#7494).
+				// internal subscription to the caller's own membership-change
+				// subject every stream holds (ptone/scion#7494).
 				assert.Equal(t, 2, pub.subscriptions)
 				var client, internal [][]string
 				for _, p := range pub.patterns {
-					if len(p) == 1 && p[0] == membershipChangedSubject {
+					if len(p) == 1 && p[0] == membershipChangedSubjectFor("user-1") {
 						internal = append(internal, p)
 					} else {
 						client = append(client, p)

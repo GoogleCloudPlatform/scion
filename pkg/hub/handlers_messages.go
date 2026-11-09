@@ -581,8 +581,9 @@ func (s *Server) handleAgentMessagesStream(w http.ResponseWriter, r *http.Reques
 	recheck, stopRecheck := streamTokenRecheck(ctx)
 	defer stopRecheck()
 	// A membership change of the caller re-checks the stream for every
-	// credential, sessions included (ptone/scion#7494).
-	membershipCh, unsubscribeMembership := ep.Subscribe(membershipChangedSubject)
+	// credential, sessions included (ptone/scion#7494). Only the caller's
+	// own per-user subject is subscribed.
+	membershipCh, unsubscribeMembership := subscribeMembershipChanged(ep, userID)
 	defer unsubscribeMembership()
 
 	// Server-side timeout matching handlers_logs.go: tell the client to
