@@ -87,13 +87,6 @@ export interface ArtifactResponse {
    */
   canReview?: boolean;
   /**
-   * On a GET: the caller may not manage the artifact but may give a user
-   * review access (a review grant): the delegating user of the agent that
-   * owns it, the project owners and admins of its home project, and
-   * super-admins. Never set with canManage.
-   */
-  canGrantReview?: boolean;
-  /**
    * On a GET: the caller may share the artifact: canManage, or a steward of
    * an artifact owned by an agent (design D25, ptone/scion#5144), who may
    * change its expiry, revoke its links, remove grants and delete it, but
@@ -1061,9 +1054,10 @@ export interface CreateLinkResponse {
 }
 
 /**
- * Grant permissions. Review (a user only) lets someone who can already read
- * the artifact publish reviews of it, and nothing else; it gives no read
- * access (ptone/scion#4538).
+ * Grant permissions. The levels form a ladder, read, review, write, admin:
+ * each includes the ones before it. Review (a user only) lets someone read
+ * the artifact and publish reviews of it (ptone/scion#4538,
+ * ptone/scion#5145).
  */
 export type GrantPermission = 'read' | 'review' | 'write' | 'admin';
 
@@ -1153,7 +1147,7 @@ export const PERMISSION_LABELS: Record<GrantPermission, string> = {
 
 /**
  * The permissions the Share dialog's permission menus offer, weakest first.
- * Review is given through Grant review access, and a review grant is shown
+ * Review is given from a steward's add row, and a review grant is shown
  * with its label only.
  */
 export const SELECTABLE_PERMISSIONS: readonly GrantPermission[] = ['read', 'write', 'admin'];

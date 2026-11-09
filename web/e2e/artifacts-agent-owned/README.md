@@ -71,8 +71,9 @@ Environment:
   every later row is `not run` with that cause. No workaround of any kind.
 - The UI observation decides each row, and the UI and the API must agree.
   An absent (omitempty) capability flag counts as false.
-- R1B-08b is graded on the API (`403 review_subject_cannot_read`); the
-  dialog is recorded.
+- R1B-08a and R1B-08b are graded on the API: a steward's review grant
+  answers `201`, and a project admin's `403 forbidden`. The page has no
+  Grant review access dialog.
 - R1B-12, and aowner's leg of R1B-16, are observations while the product
   question on the delegating user after the agent's delete is open.
 - R1B-06 and R1B-15 compare the outsider's answers with a missing id
