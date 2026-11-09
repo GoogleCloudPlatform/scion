@@ -4338,9 +4338,9 @@ func isWorkspaceEmpty(path string) bool {
 	}
 	// Filter out known marker entries that don't indicate a real workspace
 	// (provisioning markers and shared-dir mount points; see
-	// api.IsWorkspaceMarker).
+	// api.IsWorkspaceMarkerEntry).
 	for _, e := range entries {
-		if api.IsWorkspaceMarker(e.Name()) {
+		if api.IsWorkspaceMarkerEntry(path, e.Name()) {
 			continue
 		}
 		log.Debug("Workspace not empty: found %q in %s", e.Name(), path)
