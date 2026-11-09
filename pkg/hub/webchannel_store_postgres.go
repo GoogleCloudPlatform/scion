@@ -1231,10 +1231,13 @@ func (s *pgWebChatStore) SearchChatMessages(ctx context.Context, filter ChatSear
 	var args []interface{}
 	argIdx := 1
 
-	conditions = append(conditions, "channel = 'web'")
-	conditions = append(conditions, fmt.Sprintf("msg ILIKE '%%' || $%d || '%%'", argIdx))
-	args = append(args, filter.Query)
+	conditions = append(conditions, "m.channel = 'web'")
+	// The term is matched literally (escapeLikeTerm; design v3 section 9 item 3).
+	conditions = append(conditions, fmt.Sprintf(`m.msg ILIKE '%%' || $%d || '%%' ESCAPE '\'`, argIdx))
+	args = append(args, escapeLikeTerm(filter.Query))
 	argIdx++
+	// A soft-deleted message is never a result (design v3 section 9 item 4).
+	conditions = append(conditions, "x.deleted_at IS NULL")
 
 	if filter.ConversationKey != "" {
 		conditions = append(conditions, fmt.Sprintf("thread_id = $%d", argIdx))
@@ -1283,18 +1286,36 @@ func (s *pgWebChatStore) SearchChatMessages(ctx context.Context, filter ChatSear
 		}
 	}
 
+	extTable, err := s.table(ctx, "webchat_message_ext")
+	if err != nil {
+		return nil, "", err
+	}
 	query := fmt.Sprintf(`
-SELECT id, project_id, COALESCE(thread_id, ''), sender, msg, created
-  FROM %s
+SELECT m.id, m.project_id, COALESCE(m.thread_id, ''), m.sender, m.msg, m.created
+  FROM %s m
+  LEFT JOIN %s x ON x.message_id = m.id
  WHERE %s
- ORDER BY created DESC, id DESC
+ ORDER BY m.created DESC, m.id DESC
  LIMIT $%d
-`, messagesTable, strings.Join(conditions, " AND "), argIdx)
+`, messagesTable, extTable, strings.Join(conditions, " AND "), argIdx)
 	args = append(args, filter.Limit+1)
 
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	// A READ ONLY transaction with SET LOCAL statement_timeout: the server
+	// cancels a runaway statement (57014) even if the client stops waiting,
+	// and SET LOCAL ends with the transaction, so the timeout never leaks to
+	// the next user of the pooled connection (design v3 section 6.1).
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
-		return nil, "", fmt.Errorf("webchat store: search messages: %w", err)
+		return nil, "", searchError(ctx, "search begin", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf("SET LOCAL statement_timeout = %d", pgSearchStatementTimeoutMS(ctx))); err != nil {
+		return nil, "", searchError(ctx, "search statement_timeout", err)
+	}
+
+	rows, err := tx.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, "", searchError(ctx, "search messages", err)
 	}
 	defer func() { _ = rows.Close() }()
 
@@ -1312,7 +1333,7 @@ SELECT id, project_id, COALESCE(thread_id, ''), sender, msg, created
 		results = append(results, r)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, "", fmt.Errorf("webchat store: search rows: %w", err)
+		return nil, "", searchError(ctx, "search rows", err)
 	}
 
 	// Determine next cursor.
@@ -1324,6 +1345,22 @@ SELECT id, project_id, COALESCE(thread_id, ''), sender, msg, created
 	}
 
 	return results, nextCursor, nil
+}
+
+// pgSearchStatementTimeoutMS returns the statement_timeout, in whole
+// milliseconds, for a search under ctx: the time left before ctx's deadline
+// (at least 1 ms, since 0 would disable the timeout), or
+// DefaultChatSearchTimeout when ctx has no deadline.
+func pgSearchStatementTimeoutMS(ctx context.Context) int64 {
+	d := DefaultChatSearchTimeout
+	if deadline, ok := ctx.Deadline(); ok {
+		d = time.Until(deadline)
+	}
+	ms := d.Milliseconds()
+	if ms < 1 {
+		ms = 1
+	}
+	return ms
 }
 
 // ---------------------------------------------------------------------------
