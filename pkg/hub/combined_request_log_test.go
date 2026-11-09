@@ -46,6 +46,11 @@ func TestCombinedServer_RequestLoggedOnce(t *testing.T) {
 	ws := newTestWebServer(t, WebServerConfig{})
 	ws.SetRequestLogger(logger)
 	ws.MountHubAPI(srv.Handler(), func(context.Context) error { return nil })
+	// Production sets the hub as the access settings provider, and
+	// contentHostGuardFor then applies srv.ContentHostGuard outermost; set
+	// that guard here so the test pins the production composition. With no
+	// content URL configured, the guard passes every request through.
+	ws.SetContentHostGuard(srv.ContentHostGuard)
 
 	for _, tc := range []struct {
 		name          string
