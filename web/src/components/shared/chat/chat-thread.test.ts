@@ -243,6 +243,9 @@ describe('scion-chat-thread route-to-agent indicator', () => {
             // only the tighter "grouped" spacing is dropped.
             own('m4', 3),
             own('m5', 4),
+            // Back to a routed message after the recipient-less run: its
+            // header must show again, naming the agent.
+            own('m6', 5, 'agent:alpha'),
           ],
         }),
     } as unknown as Response);
@@ -259,7 +262,7 @@ describe('scion-chat-thread route-to-agent indicator', () => {
     await el.updateComplete;
 
     await vi.waitFor(() => {
-      expect(el.shadowRoot?.querySelectorAll('scion-chat-message').length).toBe(5);
+      expect(el.shadowRoot?.querySelectorAll('scion-chat-message').length).toBe(6);
     });
 
     const msgs = Array.from(
@@ -267,10 +270,18 @@ describe('scion-chat-thread route-to-agent indicator', () => {
         'scion-chat-message'
       ) ?? []
     );
-    expect(msgs.map((m) => m.getAttribute('routedTo'))).toEqual(['alpha', 'beta', 'beta', '', '']);
+    expect(msgs.map((m) => m.getAttribute('routedTo'))).toEqual([
+      'alpha',
+      'beta',
+      'beta',
+      '',
+      '',
+      'alpha',
+    ]);
     // A, then B, then B: two headers, and the B pair shares one. The
-    // recipient-less run after it is its own group (edge case above).
-    expect(msgs.map((m) => m.showHeader)).toEqual([true, true, false, true, false]);
+    // recipient-less run after it is its own group (edge case above), and
+    // the routed message after that run shows its header again.
+    expect(msgs.map((m) => m.showHeader)).toEqual([true, true, false, true, false, true]);
 
     // Only the routed headers render visible "→ agent" text.
     for (const m of msgs)
@@ -278,7 +289,7 @@ describe('scion-chat-thread route-to-agent indicator', () => {
     const headers = msgs
       .map((m) => m.shadowRoot?.querySelector('.bubble-header .routed-to')?.textContent?.trim())
       .filter((t): t is string => !!t);
-    expect(headers).toEqual(['→ alpha', '→ beta']);
+    expect(headers).toEqual(['→ alpha', '→ beta', '→ alpha']);
   });
 });
 
