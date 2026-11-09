@@ -1324,7 +1324,8 @@ func (s *Server) publishSkillVersionMultipart(w http.ResponseWriter, r *http.Req
 	}
 	if err := g.Wait(); err != nil {
 		_ = s.store.DeleteSkillVersion(ctx, sv.ID)
-		RuntimeError(w, "Failed to upload files: "+err.Error())
+		slog.ErrorContext(ctx, "skill file upload failed", "skill_id", skill.ID, "version", version, "error", upstreamText(err.Error()))
+		RuntimeError(w, "Failed to upload files")
 		return
 	}
 
@@ -1415,7 +1416,8 @@ func (s *Server) handleSkillUpload(w http.ResponseWriter, r *http.Request, skill
 		if writeInvalidFilePathError(w, err) {
 			return
 		}
-		RuntimeError(w, "Failed to generate upload URLs: "+err.Error())
+		slog.ErrorContext(ctx, "skill upload URLs failed", "skill_id", skill.ID, "version", req.Version, "error", upstreamText(err.Error()))
+		RuntimeError(w, "Failed to generate upload URLs")
 		return
 	}
 
@@ -1612,7 +1614,8 @@ func (s *Server) handleSkillDownload(w http.ResponseWriter, r *http.Request, ski
 	versionPath := skill.StoragePath + "/" + sv.Version
 	downloadURLs, manifestURL, expires, err := generateDownloadURLs(ctx, stor, versionPath, s.legacyFallbackPath(versionPath), sv.Files)
 	if err != nil {
-		RuntimeError(w, fmt.Sprintf("skill %q version %q: %s", skill.Name, sv.Version, err))
+		slog.ErrorContext(ctx, "skill download URLs failed", "skill_id", skill.ID, "version", sv.Version, "error", upstreamText(err.Error()))
+		RuntimeError(w, fmt.Sprintf("skill %q version %q: failed to generate download URLs", skill.Name, sv.Version))
 		return
 	}
 
