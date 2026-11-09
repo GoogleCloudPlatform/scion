@@ -362,6 +362,67 @@ func TestBuildPod_StartCmdWinsOverSecret(t *testing.T) {
 	}
 }
 
+// SCION_START_CMD stays the runtime's value when the merged environment
+// (config.Env) sets it, as on Docker, including a value that references
+// the name itself.
+func TestBuildPod_StartCmdWinsOverConfigEnv(t *testing.T) {
+	base := RunConfig{
+		Name:         "test-agent",
+		Image:        "test:latest",
+		UnixUsername: "scion",
+		Harness:      &EnvHarness{},
+	}
+	rt, _, _ := newTestK8sRuntime()
+	basePod, err := rt.buildPod("default", base)
+	if err != nil {
+		t.Fatalf("buildPod (no config env): %v", err)
+	}
+	want, ok := effectiveEnvEntry(agentEnvEntries(t, basePod), "SCION_START_CMD")
+	requirePremise(t, ok && strings.Contains(want.Value, "tmux"),
+		"buildPod without config env emits the runtime's tmux start command")
+
+	for _, tc := range []struct {
+		name  string
+		entry string
+	}{
+		{name: "plain value", entry: "SCION_START_CMD=from-config-env"},
+		{name: "self-reference", entry: "SCION_START_CMD=$(SCION_START_CMD) extra"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := base
+			cfg.Env = []string{tc.entry, "FOO=bar"}
+			conflicting := false
+			for _, e := range cfg.Env {
+				if name, value, ok := strings.Cut(e, "="); ok && name == "SCION_START_CMD" && value != want.Value {
+					conflicting = true
+				}
+			}
+			requirePremise(t, conflicting,
+				"cfg.Env holds a SCION_START_CMD entry whose value differs from the runtime's")
+			pod, err := rt.buildPod("default", cfg)
+			if err != nil {
+				t.Fatalf("buildPod: %v", err)
+			}
+			entries := agentEnvEntries(t, pod)
+			var got []corev1.EnvVar
+			for _, ev := range entries {
+				if ev.Name == "SCION_START_CMD" {
+					got = append(got, ev)
+				}
+			}
+			if ev, ok := effectiveEnvEntry(entries, "FOO"); !ok || ev.Value != "bar" {
+				t.Errorf("FOO = %q (present %v), want the config.Env value %q", ev.Value, ok, "bar")
+			}
+			if len(got) != 1 {
+				t.Fatalf("SCION_START_CMD entries = %+v, want exactly one", got)
+			}
+			if got[0].ValueFrom != nil || got[0].Value != want.Value {
+				t.Errorf("SCION_START_CMD = %+v, want the runtime's start command %q", got[0], want.Value)
+			}
+		})
+	}
+}
+
 func TestBuildPod_ResolvedAuth_NoHostPath(t *testing.T) {
 	rt, _, _ := newTestK8sRuntime()
 
