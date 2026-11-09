@@ -27,6 +27,7 @@ import (
 	"context"
 	"errors"
 	"go/ast"
+	"go/token"
 	"log/slog"
 	"strings"
 	"sync"
@@ -1343,17 +1344,19 @@ func TestUserSecretParentCeiling_HubDeliveryStopsBeforeStep10(t *testing.T) {
 // behaviour in TestUserSecretWriters_RecordScopeOwnerAsCreator. This test
 // keeps that list complete: every secret.SetSecretInput literal in the
 // pkg/hub production sources either names a fixed non-user scope or sits in
-// a function reviewed here. The other modules that write secrets
+// a function reviewed here, keyed by receiver and name (declReceiverName),
+// so a new method of the same name on another type is not taken for a
+// reviewed one. The other modules that write secrets
 // (cmd/hub_secret_migrate.go, pkg/secretmigration) copy an existing row's
 // CreatedBy unchanged, as SecretMigrationExecutor.Run does.
 func TestUserSecretWriters_Inventory(t *testing.T) {
 	reviewed := map[string]string{
-		"setEnvVar":               "user scope: scope ID and creator are both the calling user (resolveEnvSecretAccess)",
-		"setSecret":               "user scope: scope ID and creator are both the calling user (resolveEnvSecretAccess)",
-		"handleAgentSecrets":      "user scope: the creator is set to the scope ID (the agent's origin user)",
-		"handleScopedEnvVarByKey": "called with the project and runtime broker scopes only",
-		"handleScopedSecretByKey": "called with the project and runtime broker scopes only",
-		"Run":                     "SecretMigrationExecutor.Run copies an existing row's scope and CreatedBy",
+		"Server.setEnvVar":               "user scope: scope ID and creator are both the calling user (resolveEnvSecretAccess)",
+		"Server.setSecret":               "user scope: scope ID and creator are both the calling user (resolveEnvSecretAccess)",
+		"Server.handleAgentSecrets":      "user scope: the creator is set to the scope ID (the agent's origin user)",
+		"Server.handleScopedEnvVarByKey": "called with the project and runtime broker scopes only (TestUserSecretWriters_ScopedByKeyCallers)",
+		"Server.handleScopedSecretByKey": "called with the project and runtime broker scopes only (TestUserSecretWriters_ScopedByKeyCallers)",
+		"SecretMigrationExecutor.Run":    "copies an existing row's scope and CreatedBy",
 	}
 	fixedScope := func(e ast.Expr) bool {
 		sel, ok := e.(*ast.SelectorExpr)
@@ -1394,16 +1397,80 @@ func TestUserSecretWriters_Inventory(t *testing.T) {
 				if scope != nil && fixedScope(scope) {
 					return true
 				}
-				found[fn.Name.Name] = true
-				_, ok = reviewed[fn.Name.Name]
+				name := declReceiverName(fn)
+				found[name] = true
+				_, ok = reviewed[name]
 				assert.True(t, ok, "%s: %s writes a secret whose scope is not a fixed non-user scope; review its CreatedBy and add it here and to TestUserSecretWriters_RecordScopeOwnerAsCreator",
-					fset.Position(lit.Pos()), fn.Name.Name)
+					fset.Position(lit.Pos()), name)
 				return true
 			})
 		}
 	}
-	for _, name := range []string{"setEnvVar", "setSecret", "handleAgentSecrets"} {
+	for _, name := range []string{"Server.setEnvVar", "Server.setSecret", "Server.handleAgentSecrets"} {
 		assert.True(t, found[name], "the user-scope writer %s is still found", name)
+	}
+}
+
+// TestUserSecretWriters_ScopedByKeyCallers keeps the inventory's reason for
+// handleScopedEnvVarByKey and handleScopedSecretByKey true: every production
+// call passes the project or the runtime broker scope constant, never the
+// user scope or a computed value, and no production code takes either
+// method as a value (which would escape the call check).
+func TestUserSecretWriters_ScopedByKeyCallers(t *testing.T) {
+	fset, files := parseHubProduction(t)
+	targets := map[string]bool{"handleScopedEnvVarByKey": true, "handleScopedSecretByKey": true}
+	for _, file := range files {
+		called := map[ast.Node]bool{}
+		ast.Inspect(file, func(n ast.Node) bool {
+			if call, ok := n.(*ast.CallExpr); ok {
+				called[call.Fun] = true
+			}
+			return true
+		})
+		ast.Inspect(file, func(n ast.Node) bool {
+			if fn, ok := n.(*ast.FuncDecl); ok && targets[fn.Name.Name] {
+				// The declaration itself: inspect its body only.
+				if fn.Body != nil {
+					ast.Inspect(fn.Body, func(m ast.Node) bool {
+						checkScopedByKeyRef(t, fset, m, targets, called)
+						return true
+					})
+				}
+				return false
+			}
+			checkScopedByKeyRef(t, fset, n, targets, called)
+			return true
+		})
+	}
+	for _, name := range []string{"handleScopedEnvVarByKey", "handleScopedSecretByKey"} {
+		calls := callsIn(files, name)
+		n := 0
+		for caller, list := range calls {
+			for _, call := range list {
+				n++
+				require.Len(t, call.Args, 5, "%s calls %s with (w, r, key, scope, scopeID)", caller, name)
+				sel, ok := call.Args[3].(*ast.SelectorExpr)
+				scope := ""
+				if ok {
+					if pkg, isIdent := sel.X.(*ast.Ident); isIdent && pkg.Name == "store" {
+						scope = sel.Sel.Name
+					}
+				}
+				assert.Contains(t, []string{"ScopeProject", "ScopeRuntimeBroker"}, scope,
+					"%s calls %s with a scope other than store.ScopeProject or store.ScopeRuntimeBroker", caller, name)
+			}
+		}
+		assert.Positive(t, n, "the callers of %s are still found", name)
+	}
+}
+
+// checkScopedByKeyRef fails on a selector reference to one of targets (the
+// methods are only reachable through a selector) that is not the function
+// of a call: a method value or method expression.
+func checkScopedByKeyRef(t *testing.T, fset *token.FileSet, n ast.Node, targets map[string]bool, called map[ast.Node]bool) {
+	t.Helper()
+	if x, ok := n.(*ast.SelectorExpr); ok && targets[x.Sel.Name] && !called[x] {
+		assert.Fail(t, "method value", "%s: %s is referenced without being called", fset.Position(x.Pos()), x.Sel.Name)
 	}
 }
 

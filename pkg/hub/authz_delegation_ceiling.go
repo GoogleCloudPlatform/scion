@@ -242,7 +242,7 @@ func (a *AuthzService) checkUserSecretParentCeiling(
 		setCause(DenyCauseCeilingError)
 		return false, "user secret parent ceiling: invalid principal", errUserSecretParentCeiling
 	}
-	d, hop := a.evaluateUserSecretParentCeiling(ctx, principal, req.Resource, explain)
+	d, hop := a.evaluateUserSecretParentCeilingWithChain(ctx, principal, req.Resource, explain, req.userSecretChain)
 	if d.Allowed {
 		if d.uatIntrinsic {
 			a.recordUATIntrinsic(ctx, secretUsePermission, uatIntrinsicPathStep10)

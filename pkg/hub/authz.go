@@ -224,6 +224,12 @@ type AuthzRequest struct {
 	// grants nothing, and callers of Decide leave it nil.
 	bearerRun *bearerGateRun
 
+	// userSecretChain carries a user-scope secret chain verdict the caller
+	// already computed for the principal (the runtime read), so step 10
+	// does not compute it again. It is set only by in-package callers and
+	// grants nothing; step 10 ignores it unless it names the principal.
+	userSecretChain *precomputedUserSecretChain
+
 	// AlwaysAudit forces Decide's single audit exit to emit a decision audit
 	// record for this request regardless of the allow-sampling rate
 	// (AuthzService.DecisionAuditSampleRate). Deny decisions are always
@@ -565,10 +571,11 @@ type AuthzService struct {
 	// exports them.
 	uatIntrinsicUses    atomic.Int64
 	uatIntrinsicMetrics uatIntrinsicMetrics
-
-	// relationshipResolver handles progeny relationship grants. Lazily
-	// initialized on first use.
-	relationshipResolver *RelationshipGrantResolver
+	// ownerChainWithheld counts start-time owner rows the owner material
+	// chain rule withheld (start_owner_material_chain.go);
+	// ownerChainMetrics, when set, exports the rule's outcomes.
+	ownerChainWithheld atomic.Int64
+	ownerChainMetrics  ownerMaterialChainMetrics
 
 	// progenyAdapters holds progeny sharing-source adapters registered
 	// through RegisterProgenyAdapter.
@@ -617,7 +624,6 @@ func NewAuthzService(s store.Store, logger *slog.Logger) *AuthzService {
 		store:                   wrapAuthzStoreWithTestFixtureClamp(s),
 		logger:                  logger,
 		DecisionAuditSampleRate: 1.0,
-		relationshipResolver:    NewRelationshipGrantResolver(s),
 		legacyDeliveryLog:       newDeliveryLogDedup(legacyDeliveryLogDedupSize, legacyDeliveryLogDedupWindow),
 	}
 	// ptone/scion#2128: personal (user-scoped) skills are a progeny sharing

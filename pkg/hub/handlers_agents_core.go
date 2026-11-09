@@ -3336,6 +3336,9 @@ func isTerminalAgentPhase(phase string) bool {
 // buildEnvGatherResponse converts a broker's env requirements into the Hub-level
 // response format, enriching it with scope information from the dispatcher.
 func (s *Server) buildEnvGatherResponse(ctx context.Context, agent *store.Agent, brokerReqs *RemoteEnvRequirementsResponse) *EnvGatherResponse {
+	// One owner material chain verdict for the whole response: the row
+	// check below and the TZ label (agentTZ) share it.
+	ctx = withOwnerChainMemo(ctx)
 	// TZ is never gathered: never forward it to the CLI as a need, even if
 	// an older broker reported one the dispatcher did not already remove.
 	takeTZGatherNeed(brokerReqs)
@@ -3351,6 +3354,11 @@ func (s *Server) buildEnvGatherResponse(ctx context.Context, agent *store.Agent,
 	// single envScopePrecedence list. Both the hubHas labels and the needs
 	// cross-check below walk it, so neither can drift from resolution.
 	envFilters := envScopeFilters(agent, s.HubID())
+	// An owner's user row the owner material chain rule withholds at start
+	// neither labels a key "user" or "secret" nor counts as stored (decided
+	// without a report; start_owner_material_chain.go). The check decides
+	// the agent's chain once for the whole response.
+	ownerRows := newOwnerChainCheck(s.authzService, agent)
 
 	// Label each key the Hub provided with the source whose value won.
 	for _, key := range brokerReqs.HubHas {
@@ -3368,7 +3376,7 @@ func (s *Server) buildEnvGatherResponse(ctx context.Context, agent *store.Agent,
 			resp.HubHas = append(resp.HubHas, EnvSource{Key: key, Scope: tz.Source})
 			continue
 		}
-		resp.HubHas = append(resp.HubHas, EnvSource{Key: key, Scope: s.envGatherSourceLabel(ctx, agent, envFilters, key)})
+		resp.HubHas = append(resp.HubHas, EnvSource{Key: key, Scope: s.envGatherSourceLabel(ctx, agent, envFilters, ownerRows, key)})
 	}
 
 	// Relay SecretInfo from broker
@@ -3391,19 +3399,16 @@ func (s *Server) buildEnvGatherResponse(ctx context.Context, agent *store.Agent,
 		// Check env_vars table, highest-precedence scope first.
 		// as_needed rows count here: they are the usual reason a stored key
 		// was left out of the first dispatch pass.
-		if label, ok := s.envGatherStoredScope(ctx, envFilters, key, false); ok {
+		if label, ok := s.envGatherStoredScope(ctx, envFilters, ownerRows, key, false); ok {
 			resp.HubWarnings = append(resp.HubWarnings, envGatherNotDispatchedWarning(key, label))
 			continue
 		}
 		// Check secret backend
 		if s.secretBackend != nil {
-			if agent.OwnerID != "" {
-				metas, err := s.secretBackend.List(ctx, secret.Filter{Scope: "user", ScopeID: agent.OwnerID, Name: key})
-				if err == nil && len(metas) > 0 {
-					resp.HubWarnings = append(resp.HubWarnings,
-						fmt.Sprintf("%s is stored in Hub secrets (user scope) but was not included in the dispatch — this may indicate a resolution issue", key))
-					continue
-				}
+			if s.envGatherUserSecretStored(ctx, agent, ownerRows, key) {
+				resp.HubWarnings = append(resp.HubWarnings,
+					fmt.Sprintf("%s is stored in Hub secrets (user scope) but was not included in the dispatch — this may indicate a resolution issue", key))
+				continue
 			}
 			if agent.ProjectID != "" {
 				metas, err := s.secretBackend.List(ctx, secret.Filter{Scope: "project", ScopeID: agent.ProjectID, Name: key})
@@ -3445,28 +3450,29 @@ func (s *Server) buildEnvGatherResponse(ctx context.Context, agent *store.Agent,
 //  4. "hub" when none of the above matched (an empty config value with no
 //     stored value, for instance). This fallback is not a lookup result.
 //
+// In 2 and 3 an owner's user-scope row that the owner material chain rule
+// withholds at start (ownerRows; nil allows every row) is not counted, so a
+// key is never labelled with a value the agent was not given.
+//
 // It deliberately does not apply the admin-kind test identity scope filter
 // (envScopesForDispatch): it labels keys the broker already reported as
 // supplied by the Hub, and decides nothing about what is dispatched.
 //
 // A nil agent gets the "hub" fallback. buildEnvGatherResponse, the only
 // caller, reads agent.ID first, so this is defensive only.
-func (s *Server) envGatherSourceLabel(ctx context.Context, agent *store.Agent, envFilters []store.EnvVarFilter, key string) string {
+func (s *Server) envGatherSourceLabel(ctx context.Context, agent *store.Agent, envFilters []store.EnvVarFilter, ownerRows *ownerChainCheck, key string) string {
 	if agent == nil {
 		return "hub"
 	}
 	if agent.AppliedConfig != nil && agent.AppliedConfig.Env[key] != "" {
 		return "config"
 	}
-	if label, ok := s.envGatherStoredScope(ctx, envFilters, key, true); ok {
+	if label, ok := s.envGatherStoredScope(ctx, envFilters, ownerRows, key, true); ok {
 		return label
 	}
 	if s.secretBackend != nil {
-		if agent.OwnerID != "" {
-			metas, err := s.secretBackend.List(ctx, secret.Filter{Scope: "user", ScopeID: agent.OwnerID, Name: key})
-			if err == nil && len(metas) > 0 {
-				return "secret"
-			}
+		if s.envGatherUserSecretStored(ctx, agent, ownerRows, key) {
+			return "secret"
 		}
 		if agent.ProjectID != "" {
 			metas, err := s.secretBackend.List(ctx, secret.Filter{Scope: "project", ScopeID: agent.ProjectID, Name: key})
@@ -3481,10 +3487,12 @@ func (s *Server) envGatherSourceLabel(ctx context.Context, agent *store.Agent, e
 // envGatherStoredScope returns the label of the highest-precedence env var
 // storage scope in envFilters (lowest precedence first) that holds key, and
 // whether any does. With skipAsNeeded, a scope holding the key only as an
-// as_needed row does not count. A scope whose read fails is logged and
+// as_needed row does not count, nor does an owner's user-scope row that the
+// owner material chain rule withholds at start (ownerRows; nil allows every
+// row). A scope whose read fails is logged and
 // skipped: provenance is advisory, so a failed read only costs the label
 // (or the warning) for that scope, never the response.
-func (s *Server) envGatherStoredScope(ctx context.Context, envFilters []store.EnvVarFilter, key string, skipAsNeeded bool) (string, bool) {
+func (s *Server) envGatherStoredScope(ctx context.Context, envFilters []store.EnvVarFilter, ownerRows *ownerChainCheck, key string, skipAsNeeded bool) (string, bool) {
 	for i := len(envFilters) - 1; i >= 0; i-- {
 		filter := envFilters[i]
 		filter.Key = key
@@ -3498,10 +3506,33 @@ func (s *Server) envGatherStoredScope(ctx context.Context, envFilters []store.En
 			if skipAsNeeded && v.InjectionMode == store.InjectionModeAsNeeded {
 				continue
 			}
+			if filter.Scope == store.ScopeUser && !ownerRows.allowsRow(ctx, v.AllowProgeny, envRowOwner(filter, v)) {
+				continue
+			}
 			return envScopeSourceLabel(filter.Scope), true
 		}
 	}
 	return "", false
+}
+
+// envGatherUserSecretStored reports whether agent's owner has a user-scope
+// secret named key that start delivers to agent, shared with progeny or not
+// (ownerRows.allowsSecretRow; nil allows every row). A failed list counts as
+// none.
+func (s *Server) envGatherUserSecretStored(ctx context.Context, agent *store.Agent, ownerRows *ownerChainCheck, key string) bool {
+	if agent == nil || agent.OwnerID == "" || s.secretBackend == nil {
+		return false
+	}
+	metas, err := s.secretBackend.List(ctx, secret.Filter{Scope: "user", ScopeID: agent.OwnerID, Name: key})
+	if err != nil {
+		return false
+	}
+	for _, m := range metas {
+		if ownerRows.allowsSecretRow(ctx, m.AllowProgeny, ownerRowScope(m.ScopeID, agent.OwnerID)) {
+			return true
+		}
+	}
+	return false
 }
 
 // envGatherNotDispatchedWarning is the hub warning for a key the broker
@@ -4205,7 +4236,9 @@ func (s *Server) writeAgentResponseAfterWrite(w http.ResponseWriter, r *http.Req
 // writeAgentResponse implements writeAgentGetResponse (unavailableOnTZError
 // true) and writeAgentResponseAfterWrite (false).
 func (s *Server) writeAgentResponse(w http.ResponseWriter, r *http.Request, agent *store.Agent, unavailableOnTZError bool) {
-	ctx := r.Context()
+	// One owner material chain verdict for the whole response (the TZ view
+	// and any other owner-row view share it).
+	ctx := withOwnerChainMemo(r.Context())
 
 	// Show a TZ that an older hub persisted in the env records as the legacy
 	// pin it becomes, so the configure page never round-trips it as an env

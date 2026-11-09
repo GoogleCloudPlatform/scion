@@ -25,7 +25,9 @@
 //   - the owner path (an agent created by a user, whose OwnerID is that
 //     user): for a row shared with progeny, start delivery equals the
 //     user-scope secret parent ceiling verdict (the read's step 10); a row
-//     not shared with progeny is unchanged.
+//     not shared with progeny is held to the owner material chain rule
+//     (start_owner_material_chain_test.go), so it is withheld only where
+//     the agent's chain ends at another user.
 //
 // The two residual cases are a terminal user whose access constraint allows
 // project.secret_read but not secret.use (S4b), and a chain whose terminal
@@ -360,10 +362,10 @@ func TestStartDelivery_OwnerRowDeniedFallsBackToLowerScope(t *testing.T) {
 // start equals the read. On the owner path start equals the ceiling verdict
 // (the read's step 10) for a recorded chain; where the read is narrower
 // than the ceiling (the agent's own access constraint, which only Decide
-// applies) the case says so. A chain without recorded provenance keeps its
-// legacy behaviour on both paths (ptone-gated, not changed here): progeny
-// start refuses it (project.secret_read needs recorded provenance) while
-// the read applies the progeny rule; owner start delivers it.
+// applies) the case says so. A chain without recorded provenance: progeny
+// start refuses it (project.secret_read needs recorded provenance), owner
+// start withholds the shared row (chain_unrecorded), and the read refuses
+// it (chain_unrecorded).
 func TestStartDelivery_ParityWithRuntimeRead(t *testing.T) {
 	type built struct{ agentID, token string }
 	cases := []struct {
@@ -433,7 +435,28 @@ func TestStartDelivery_ParityWithRuntimeRead(t *testing.T) {
 			createDCEdge(t, f.Store, store.DelegationPrincipalUser, f.UserID, store.DelegationPrincipalAgent, id,
 				store.RoleScopeProject, f.ProjectID, string(AgentRoleFull))
 			return built{id, tok}
-		}, true, true, false},
+		}, false, false, false},
+		// LEGACY DATA: further owner-path chains without recorded
+		// provenance. Start withholds the shared row and the read refuses
+		// it, both chain_unrecorded.
+		{"owner/no edge (legacy)", true, func(t *testing.T, f *sdFixture) built {
+			id, tok := f.direct(t, "pm-o-noedge", false)
+			return built{id, tok}
+		}, false, false, false},
+		{"owner/migration sentinel (legacy)", true, func(t *testing.T, f *sdFixture) built {
+			id, tok := f.direct(t, "pm-o-sentinel", false)
+			f.recordEdge(t, store.DelegationPrincipalUser, migrationDelegatorID, id, store.EffectCeiling{Kind: store.EffectCeilingUnrecorded}, func(e *store.DelegationEdge) {
+				e.ProvenanceVersion = 0
+			})
+			return built{id, tok}
+		}, false, false, false},
+		{"owner/recorded principal does not type-check (legacy)", true, func(t *testing.T, f *sdFixture) built {
+			id, tok := f.direct(t, "pm-o-badprincipal", false)
+			f.recordEdge(t, store.DelegationPrincipalUser, f.UserID, id, store.EffectCeiling{Kind: store.EffectCeilingPrincipal}, func(e *store.DelegationEdge) {
+				e.SourcePrincipalKind = store.DelegationPrincipalAgent
+			})
+			return built{id, tok}
+		}, false, false, false},
 		// Progeny path.
 		{"progeny/clean", false, func(t *testing.T, f *sdFixture) built {
 			c, tok, _ := f.progeny(t, "pm-p-clean", true)
@@ -471,7 +494,17 @@ func TestStartDelivery_ParityWithRuntimeRead(t *testing.T) {
 			createDCEdge(t, f.Store, store.DelegationPrincipalAgent, p, store.DelegationPrincipalAgent, c,
 				store.RoleScopeProject, f.ProjectID, string(AgentRoleFull))
 			return built{c, tok}
-		}, false, true, false},
+		}, false, false, false},
+	}
+	// The owner-path cases whose chain is not recorded to the owner (it
+	// ends at another user, or its own edge has no recorded provenance):
+	// the owner material chain rule withholds the unshared row too.
+	privateWithheld := map[string]bool{
+		"owner/edge from another user (S8)":                     true,
+		"owner/edge without provenance (legacy)":                true,
+		"owner/no edge (legacy)":                                true,
+		"owner/migration sentinel (legacy)":                     true,
+		"owner/recorded principal does not type-check (legacy)": true,
 	}
 	for i, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -482,7 +515,8 @@ func TestStartDelivery_ParityWithRuntimeRead(t *testing.T) {
 			assert.Equal(t, tc.wantStart, got.always, "resolveSecrets")
 			assert.Equal(t, tc.wantStart, got.asNeeded, "resolveAsNeededForKeys")
 			assert.Equal(t, got.always, got.asNeeded, "the two start sites agree")
-			assert.Equal(t, tc.owner, got.private, "the unshared row is delivered on the owner path only, unchanged")
+			assert.Equal(t, tc.owner && !privateWithheld[tc.name], got.private,
+				"the unshared row is delivered on the owner path only, where the chain is recorded to the owner")
 
 			readAlways := f.read(t, b.agentID, b.token, sdAlwaysKey)
 			readAsNeeded := f.read(t, b.agentID, b.token, sdAsNeededKey)
@@ -604,8 +638,8 @@ func TestStartDelivery_CrossUserReincarnation(t *testing.T) {
 		require.False(t, d.Allowed)
 		assert.Equal(t, DenyCauseCeilingSourceNotAllowed, d.DenyCause, "S8 denies; reason %q", d.Reason)
 		assert.False(t, r.readAllows(t, agent.ID, sdAlwaysKey, []AgentTokenScope{ScopeProjectSecretRead}), "the runtime read refuses")
-		assert.Equal(t, sdDelivery{always: false, asNeeded: false, private: true}, sdStartDelivery(t, r.disp, r.s, agent.ID),
-			"start refuses the shared secret at both sites; the unshared row is unchanged")
+		assert.Equal(t, sdDelivery{always: false, asNeeded: false, private: false}, sdStartDelivery(t, r.disp, r.s, agent.ID),
+			"start refuses the shared secret at both sites, and the owner material chain rule the unshared row")
 	})
 
 	t.Run("progeny path", func(t *testing.T) {

@@ -82,9 +82,17 @@ func repairAssignmentDenied(_ http.ResponseWriter, auth *reincarnateAuthority, d
 	return true
 }
 
-// addAuthorityToPlan adds the authority re-record's plan warning, if any.
+// addAuthorityToPlan adds the authority re-record's plan warnings, if any:
+// the assignment not re-recorded, the owner material notice and the
+// runtime read notice.
 func addAuthorityToPlan(plan *ReincarnationPlan, auth *reincarnateAuthority) {
 	if auth != nil && auth.AssignmentNotRecorded != "" {
 		plan.Warnings = append(plan.Warnings, auth.AssignmentNotRecorded)
+	}
+	if auth != nil && auth.OwnerMaterialNotice != "" {
+		plan.Warnings = append(plan.Warnings, auth.OwnerMaterialNotice)
+	}
+	if auth != nil && auth.RuntimeReadNotice != "" {
+		plan.Warnings = append(plan.Warnings, auth.RuntimeReadNotice)
 	}
 }

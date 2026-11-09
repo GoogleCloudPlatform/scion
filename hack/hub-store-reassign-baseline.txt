@@ -90,7 +90,7 @@ pkg/hub/lifecycle_landed_delete_test.go | 3
 pkg/hub/lifecycle_post_reload_delete_test.go | 5
 pkg/hub/material_precheck_test.go | 2
 pkg/hub/material_user_scope_test.go | 1
-pkg/hub/material_value_audit_test.go | 2
+pkg/hub/material_value_audit_test.go | 1
 pkg/hub/offload_integration_test.go | 1
 pkg/hub/offload_route_authz_test.go | 4
 pkg/hub/platform_skills_seed_test.go | 1
