@@ -229,7 +229,7 @@ func TestSkillStore_VersionCRUD(t *testing.T) {
 	assert.Equal(t, "sha256:abc123", got.ContentHash)
 
 	// List versions
-	result, err := cs.ListSkillVersions(ctx, skillID, store.ListOptions{})
+	result, err := cs.ListSkillVersions(ctx, skillID, store.SkillVersionFilter{}, store.ListOptions{})
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.TotalCount)
 }
@@ -819,4 +819,88 @@ func TestSkillStore_ListAccessScope_UserAndProjectCombineWithScopeFilter(t *test
 	require.NoError(t, err)
 	require.Len(t, userOnly.Items, 1)
 	assert.Equal(t, mine.ID, userOnly.Items[0].ID)
+}
+
+// TestSkillStore_ListSkillVersions_StatusFilter: a status filter restricts
+// the rows and TotalCount in the query, before LIMIT; an empty filter lists
+// every status; an unknown status is invalid input. It runs on whichever
+// backend enttest selects (SQLite by default, Postgres with -tags
+// integration).
+func TestSkillStore_ListSkillVersions_StatusFilter(t *testing.T) {
+	cs := newTestCompositeStore(t)
+	ctx := context.Background()
+
+	skillID := uuid.New().String()
+	require.NoError(t, cs.CreateSkill(ctx, &store.Skill{
+		ID:     skillID,
+		Name:   "list-status",
+		Slug:   "list-status",
+		Scope:  "global",
+		Status: "active",
+	}))
+
+	// Newest first in the list, so the filtered-out rows are created last
+	// and would fill a small page if the filter ran after LIMIT.
+	base := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	for i, r := range []struct {
+		version string
+		status  entskillversion.Status
+	}{
+		{"1.0.0", entskillversion.StatusPublished},
+		{"1.1.0", entskillversion.StatusDeprecated},
+		{"1.2.0", entskillversion.StatusDraft},
+		{"1.3.0", entskillversion.StatusArchived},
+	} {
+		_, err := cs.client.SkillVersion.Create().
+			SetSkillID(skillID).
+			SetVersion(r.version).
+			SetStatus(r.status).
+			SetCreated(base.Add(time.Duration(i) * time.Hour)).
+			Save(ctx)
+		require.NoError(t, err)
+	}
+
+	versions := func(items []store.SkillVersion) []string {
+		out := make([]string, 0, len(items))
+		for _, sv := range items {
+			out = append(out, sv.Version)
+		}
+		return out
+	}
+
+	t.Run("no filter", func(t *testing.T) {
+		result, err := cs.ListSkillVersions(ctx, skillID, store.SkillVersionFilter{}, store.ListOptions{})
+		require.NoError(t, err)
+		assert.Equal(t, 4, result.TotalCount)
+		assert.Equal(t, []string{"1.3.0", "1.2.0", "1.1.0", "1.0.0"}, versions(result.Items))
+	})
+
+	t.Run("published and deprecated", func(t *testing.T) {
+		filter := store.SkillVersionFilter{Statuses: []string{
+			store.SkillVersionStatusPublished, store.SkillVersionStatusDeprecated,
+		}}
+		result, err := cs.ListSkillVersions(ctx, skillID, filter, store.ListOptions{})
+		require.NoError(t, err)
+		assert.Equal(t, 2, result.TotalCount)
+		assert.Equal(t, []string{"1.1.0", "1.0.0"}, versions(result.Items))
+
+		result, err = cs.ListSkillVersions(ctx, skillID, filter, store.ListOptions{Limit: 2})
+		require.NoError(t, err)
+		assert.Equal(t, 2, result.TotalCount)
+		assert.Equal(t, []string{"1.1.0", "1.0.0"}, versions(result.Items))
+	})
+
+	t.Run("single status", func(t *testing.T) {
+		result, err := cs.ListSkillVersions(ctx, skillID,
+			store.SkillVersionFilter{Statuses: []string{store.SkillVersionStatusDraft}}, store.ListOptions{})
+		require.NoError(t, err)
+		assert.Equal(t, 1, result.TotalCount)
+		assert.Equal(t, []string{"1.2.0"}, versions(result.Items))
+	})
+
+	t.Run("unknown status", func(t *testing.T) {
+		_, err := cs.ListSkillVersions(ctx, skillID,
+			store.SkillVersionFilter{Statuses: []string{"bogus"}}, store.ListOptions{})
+		assert.ErrorIs(t, err, store.ErrInvalidInput)
+	})
 }
