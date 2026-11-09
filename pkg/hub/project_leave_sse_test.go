@@ -75,9 +75,15 @@ func (r *leaveStreamRecorder) Write(p []byte) (int, error) {
 	return r.body.Write(p)
 }
 
+// Flush commits the headers with an implicit 200 when no status was
+// written yet, as net/http's response writer does: a stream handler sets
+// its headers and flushes without calling WriteHeader.
 func (r *leaveStreamRecorder) Flush() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.code == 0 {
+		r.code = http.StatusOK
+	}
 	r.flushed = true
 }
 
