@@ -17,8 +17,10 @@
 package entadapter
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"sync"
 	"testing"
 	"time"
@@ -455,6 +457,68 @@ func TestAbortRunningMaintenanceOps_KeepsResultWrittenMeanwhile(t *testing.T) {
 	assert.Equal(t, "true", string(obj["aborted"]))
 	assert.Len(t, obj, 4)
 }
+
+// A run whose Result changes again after the abort's re-read is left running
+// (both compare-and-swap updates miss, nothing is overwritten), not counted,
+// and logged at Warn with its id only. Runs on SQLite, and on Postgres under
+// -tags integration.
+func TestAbortRunningMaintenanceOps_LeavesRunChangedTwice(t *testing.T) {
+	var logs bytes.Buffer
+	prevLog := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(prevLog) })
+
+	s := newTestMaintenanceStore(t)
+	ctx := context.Background()
+	require.NoError(t, s.SeedMaintenanceOperations(ctx))
+	racing := createRunWithResult(t, s, store.MaintenanceStatusRunning, `{"commit":"abc"}`)
+
+	// Before each of the abort's first two updates, the still-running run
+	// records a new Result, so both compare-and-swap updates miss.
+	writes := []string{`{"commit":"abc","step":"2"}`, `{"commit":"abc","step":"3"}`}
+	var mu sync.Mutex
+	s.client.MaintenanceOperationRun.Use(func(next ent.Mutator) ent.Mutator {
+		return ent.MutateFunc(func(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+			if m.Op().Is(ent.OpUpdate) {
+				mu.Lock()
+				var w string
+				if len(writes) > 0 {
+					w, writes = writes[0], writes[1:]
+				}
+				mu.Unlock()
+				if w != "" {
+					if err := s.client.MaintenanceOperationRun.UpdateOneID(uuid.MustParse(racing)).SetResult(w).Exec(ctx); err != nil {
+						return nil, err
+					}
+				}
+			}
+			return next.Mutate(ctx, m)
+		})
+	})
+
+	runs, _, err := s.AbortRunningMaintenanceOps(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), runs, "a run that changed twice is not counted")
+
+	got, err := s.GetMaintenanceRun(ctx, racing)
+	require.NoError(t, err)
+	assert.Equal(t, store.MaintenanceStatusRunning, got.Status, "it is left for the next start")
+	assert.Equal(t, `{"commit":"abc","step":"3"}`, got.Result, "the Result written last is kept")
+	out := logs.String()
+	assert.Contains(t, out, "level=WARN")
+	assert.Contains(t, out, "maintenance run changed while being aborted")
+	assert.Contains(t, out, "run_id="+racing)
+	assert.NotContains(t, out, "step", "no Result value is logged")
+	// Planted positive: the same check over a buffer that holds "step" fails.
+	probe := &failProbe{}
+	assert.NotContains(probe, out+"step", "step")
+	assert.True(t, probe.failed, "the NotContains check catches a Result value in the log")
+}
+
+// failProbe is an assert.TestingT that records whether a check failed.
+type failProbe struct{ failed bool }
+
+func (p *failProbe) Errorf(string, ...interface{}) { p.failed = true }
 
 // A running run with no Result (NULL in the column) and one with an empty
 // Result are both aborted: the update's Result check matches either. Runs

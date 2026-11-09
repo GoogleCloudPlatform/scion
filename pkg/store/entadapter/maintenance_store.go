@@ -17,6 +17,7 @@ package entadapter
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"time"
 
 	entsql "entgo.io/ent/dialect/sql"
@@ -457,7 +458,8 @@ func (s *MaintenanceStore) ListMaintenanceRuns(ctx context.Context, operationKey
 // abort text alone. Each run is updated on its own, only while it is still
 // running and its Result is the one read, so a Result written in between is
 // never overwritten: the run is then read again and updated once more if it
-// is still running. The returned run count is the number of those updates
+// is still running (a run that changes again is left for the next start, with
+// a warning). The returned run count is the number of those updates
 // that matched.
 func (s *MaintenanceStore) AbortRunningMaintenanceOps(ctx context.Context) (int64, int64, error) {
 	now := time.Now()
@@ -492,6 +494,11 @@ func (s *MaintenanceStore) AbortRunningMaintenanceOps(ctx context.Context) (int6
 			default:
 				if n, err = s.abortRunningRun(ctx, cur.ID, cur.Result, now); err != nil {
 					return runs, 0, err
+				}
+				if n == 0 {
+					// Changed again after the re-read: left running for the
+					// next start to abort.
+					slog.Warn("maintenance run changed while being aborted; left for the next start", "run_id", r.ID.String())
 				}
 			}
 		}
