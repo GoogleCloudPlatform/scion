@@ -502,6 +502,14 @@ func (s *Server) handleAgentMessagesStream(w http.ResponseWriter, r *http.Reques
 	// authorization below: a change published while the stream is being set
 	// up is queued and re-checked when the loop starts, instead of being
 	// missed. The deferred unsubscribe releases it on every return.
+	// Fail closed: a caller whose ID gives no membership-changed subject
+	// could not be re-checked on a membership change, so the stream is
+	// refused, as an authorization denial is.
+	if membershipChangedSubjectFor(user.ID()) == "" {
+		warnMembershipSubjectRejected(streamKindAgentMessages)
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, "Access denied", nil)
+		return
+	}
 	membershipCh, unsubscribeMembership := subscribeMembershipChanged(ep, user.ID())
 	defer unsubscribeMembership()
 

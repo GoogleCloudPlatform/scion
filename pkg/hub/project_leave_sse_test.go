@@ -681,3 +681,45 @@ func TestProjectLeave_LeaveDuringAgentStreamSetupClosesStream(t *testing.T) {
 	assert.Equal(t, http.StatusOK, leaveCode, "the leave in the setup window succeeded")
 	assert.Contains(t, rec.String(), "stream ended")
 }
+
+// TestSSE_UserIDWithNoMembershipSubjectRefused (review round 3, fail
+// closed): a session user whose ID gives no membership-changed subject (a
+// tab here) is refused with the stream's authorization-denial response,
+// because its stream could not be re-checked on a membership change; no
+// subscription is installed or left behind.
+func TestSSE_UserIDWithNoMembershipSubjectRefused(t *testing.T) {
+	x := newLeaveSSEFixture(t)
+	bad := "user\tbad"
+	require.Empty(t, membershipChangedSubjectFor(bad))
+	pub := &sseCountingPublisher{ChannelEventPublisher: NewChannelEventPublisher()}
+	t.Cleanup(pub.Close)
+	ws := &WebServer{store: x.f.store, events: pub, authzService: x.f.srv.authzService}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	rec := httptest.NewRecorder()
+	ws.handleSSE(rec, sseAgentRequest(ctx, bad, "user", x.subject))
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Contains(t, rec.Body.String(), "denied_subjects")
+	assert.Zero(t, pub.subscriptions, "no subscription for a refused stream")
+	assertNoSSESubscribers(t, pub.ChannelEventPublisher)
+}
+
+// TestAgentMessagesStream_UserIDWithNoMembershipSubjectRefused (review round
+// 3, fail closed): the agent messages stream refuses a caller whose ID
+// gives no membership-changed subject with its authorization-denial
+// response, before any subscription.
+func TestAgentMessagesStream_UserIDWithNoMembershipSubjectRefused(t *testing.T) {
+	x := newLeaveSSEFixture(t)
+	agent := leaveOrderAgent(t, x)
+	bad := "user\tbad"
+	identity := NewAuthenticatedUser(bad, "bad@test.com", "Bad", "member", "web")
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	rctx := contextWithCredentialContext(context.WithValue(contextWithIdentity(ctx, identity), userContextKey{}, identity),
+		CredentialContext{Kind: CredentialKindInteractive, ID: "test-session"})
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/agents/"+agent.ID+"/messages/stream", nil).WithContext(rctx)
+	rec := httptest.NewRecorder()
+	x.f.srv.handleAgentMessagesStream(rec, req, agent.ID)
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assertNoSSESubscribers(t, x.pub)
+}
