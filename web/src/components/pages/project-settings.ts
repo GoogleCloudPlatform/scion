@@ -87,7 +87,7 @@ import { copyToClipboard, showCopyFailedToast } from '../../utils/clipboard.js';
 import { showConfirm } from '../shared/confirm-dialog.js';
 import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
-import { navigateTo } from '../../client/navigation.js';
+import { navigateTo, replaceSearch } from '../../client/navigation.js';
 import {
   leaveVisibility,
   PROJECT_NO_ACCESS_MESSAGE,
@@ -221,7 +221,11 @@ export class ScionPageProjectSettings extends LitElement {
   @state()
   private noAccess = false;
 
-  /** `?transfer=1`: open the members editor's transfer ownership dialog once loaded. */
+  /**
+   * `?transfer=1`: open the members editor's transfer ownership dialog once
+   * loaded. Cleared after that first open, so it never opens again.
+   */
+  @state()
   private openTransferOnLoad = false;
 
   @state()
@@ -1046,7 +1050,13 @@ export class ScionPageProjectSettings extends LitElement {
         this.activeResourcesTab = tab;
       }
       // The leave dialog's Transfer ownership link from the project page.
-      this.openTransferOnLoad = params.get('transfer') === '1';
+      // Only that param is removed from the URL once read, so a reload or
+      // Back does not open the dialog again.
+      if (params.has('transfer')) {
+        this.openTransferOnLoad = params.get('transfer') === '1';
+        params.delete('transfer');
+        replaceSearch(params);
+      }
     }
     void this.loadProject();
     void this.loadHubPreStartHook();
@@ -1214,6 +1224,9 @@ export class ScionPageProjectSettings extends LitElement {
           sectionTitle="Members"
           sectionDescription=${description}
           @scion-project-left=${(e: CustomEvent<ProjectLeftDetail>) => this.onProjectLeft(e)}
+          @scion-transfer-opened-on-load=${() => {
+            this.openTransferOnLoad = false;
+          }}
         ></scion-project-members-editor>
       `;
     }
@@ -1240,6 +1253,9 @@ export class ScionPageProjectSettings extends LitElement {
               sectionTitle="Members"
               sectionDescription=${description}
               @scion-project-left=${(e: CustomEvent<ProjectLeftDetail>) => this.onProjectLeft(e)}
+              @scion-transfer-opened-on-load=${() => {
+                this.openTransferOnLoad = false;
+              }}
             ></scion-project-members-editor>
           </sl-tab-panel>
           <sl-tab-panel name="visitors">
@@ -3903,6 +3919,7 @@ export class ScionPageProjectSettings extends LitElement {
   }
 
   private openLeaveDialog(): void {
+    if (leaveVisibility(this.project?._capabilities).kind !== 'enabled') return;
     const dialog = this.shadowRoot?.querySelector<ScionProjectLeaveDialog>(
       'scion-project-leave-dialog'
     );

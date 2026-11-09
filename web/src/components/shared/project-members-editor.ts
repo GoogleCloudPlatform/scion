@@ -536,6 +536,9 @@ function principalLabel(group: Pick<ProjectMemberGroup, 'principalDisplayName' |
   return group.principalDisplayName || group.principalId;
 }
 
+/** Event the editor dispatches after it opened the transfer dialog for `openTransferOnLoad`. */
+export const TRANSFER_OPENED_ON_LOAD_EVENT = 'scion-transfer-opened-on-load';
+
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
@@ -1100,6 +1103,10 @@ export class ScionProjectMembersEditor extends LitElement {
     if (this.openTransferOnLoad && !this.transferOpenedOnLoad && this.capabilities?.canTransfer) {
       this.transferOpenedOnLoad = true;
       this.openTransferDialog();
+      // Tell the host the one-time open happened, so it clears its flag.
+      this.dispatchEvent(
+        new CustomEvent(TRANSFER_OPENED_ON_LOAD_EVENT, { bubbles: true, composed: true })
+      );
     }
   }
 
@@ -1663,6 +1670,7 @@ export class ScionProjectMembersEditor extends LitElement {
   }
 
   private openLeaveDialog(): void {
+    if (this.selfLeave.kind !== 'enabled') return;
     const dialog = this.shadowRoot?.querySelector<ScionProjectLeaveDialog>(
       'scion-project-leave-dialog'
     );

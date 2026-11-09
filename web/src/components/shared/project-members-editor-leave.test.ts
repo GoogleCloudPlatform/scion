@@ -252,6 +252,25 @@ describe('members editor: self row Leave', () => {
     expect((el as unknown as { transferDialogOpen: boolean }).transferDialogOpen).toBe(true);
   });
 
+  it('openTransferOnLoad tells the host once, after the one-time open', async () => {
+    const seen = vi.fn();
+    window.addEventListener('scion-transfer-opened-on-load', seen);
+    try {
+      const el = await mount([ALICE, DAVE], OWNER_CAPS, {
+        currentUserId: 'u-alice',
+        openTransferOnLoad: true,
+      });
+      expect(seen).toHaveBeenCalledTimes(1);
+      // A reload of the members list does not open it again.
+      (el as unknown as { transferDialogOpen: boolean }).transferDialogOpen = false;
+      await (el as unknown as { loadData: () => Promise<void> }).loadData();
+      expect((el as unknown as { transferDialogOpen: boolean }).transferDialogOpen).toBe(false);
+      expect(seen).toHaveBeenCalledTimes(1);
+    } finally {
+      window.removeEventListener('scion-transfer-opened-on-load', seen);
+    }
+  });
+
   it('openTransferOnLoad does nothing without transfer authority', async () => {
     const el = await mount([ALICE, DAVE], MEMBER_CAPS, {
       currentUserId: 'u-dave',

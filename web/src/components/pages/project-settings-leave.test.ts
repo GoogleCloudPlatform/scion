@@ -140,4 +140,83 @@ describe('project-settings: Danger Zone Leave row (ptone/scion#7494)', () => {
     );
     expect(element.shadowRoot?.textContent).not.toContain('Failed to Load Settings');
   });
+
+  /** GETs of the project itself (the page load and any reload). */
+  function projectGets(): number {
+    return vi
+      .mocked(fetch)
+      .mock.calls.filter(([u]) => /\/api\/v1\/projects\/proj-1(\?|$)/.test(requestPath(u))).length;
+  }
+
+  type EditorHandle = HTMLElement & {
+    openTransferOnLoad: boolean;
+    openTransferOwnership: () => void;
+  };
+  const editorOf = (el: HTMLElement): EditorHandle =>
+    el.shadowRoot!.querySelector('scion-project-members-editor') as EditorHandle;
+  const dialogOf = (el: HTMLElement): HTMLElement =>
+    el.shadowRoot!.querySelector('scion-project-leave-dialog') as HTMLElement;
+
+  it('?transfer=1 is read once: the editor is asked to open transfer, and only that param leaves the URL', async () => {
+    window.history.replaceState(null, '', '/projects/proj-1/settings?transfer=1&tab=templates');
+    try {
+      element = await createComponent({ actions: ['read', 'update', 'delete', 'manage'] });
+      expect(editorOf(element).openTransferOnLoad).toBe(true);
+      expect(window.location.search).toBe('?tab=templates');
+      // After the editor's one-time open, the flag is cleared.
+      editorOf(element).dispatchEvent(
+        new CustomEvent('scion-transfer-opened-on-load', { bubbles: true, composed: true })
+      );
+      await (element as HTMLElement & { updateComplete: Promise<boolean> }).updateComplete;
+      expect(editorOf(element).openTransferOnLoad).toBe(false);
+    } finally {
+      window.history.replaceState(null, '', '/');
+    }
+  });
+
+  it('without ?transfer the editor is not asked to open transfer', async () => {
+    window.history.replaceState(null, '', '/projects/proj-1/settings?tab=templates');
+    try {
+      element = await createComponent({ actions: ['read', 'update', 'delete', 'manage'] });
+      expect(editorOf(element).openTransferOnLoad).toBe(false);
+      expect(window.location.search).toBe('?tab=templates');
+    } finally {
+      window.history.replaceState(null, '', '/');
+    }
+  });
+
+  it('a leave that kept access (from the Danger Zone or the members editor) reloads the project', async () => {
+    element = await createComponent({ actions: ['read', 'update', 'manage'], canLeave: true });
+    const ev = (remainingAccess: string) =>
+      new CustomEvent('scion-project-left', {
+        detail: { projectId: 'proj-1', result: { remainingAccess } },
+        bubbles: true,
+        composed: true,
+      });
+    const n0 = projectGets();
+    dialogOf(element).dispatchEvent(ev('group'));
+    await vi.waitFor(() => expect(projectGets()).toBe(n0 + 1));
+    await new Promise((resolve) => setTimeout(resolve, 450));
+    const n1 = projectGets();
+    editorOf(element).dispatchEvent(ev('hub'));
+    await vi.waitFor(() => expect(projectGets()).toBe(n1 + 1));
+    await new Promise((resolve) => setTimeout(resolve, 450));
+    const n2 = projectGets();
+    dialogOf(element).dispatchEvent(ev('none'));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(projectGets()).toBe(n2);
+  });
+
+  it("the Danger Zone dialog's Transfer ownership link opens the members editor's transfer dialog", async () => {
+    element = await createComponent({
+      actions: ['read', 'update', 'delete', 'manage'],
+      canLeave: false,
+      leaveBlockedReason: 'last_owner',
+    });
+    const open = vi.spyOn(editorOf(element), 'openTransferOwnership').mockImplementation(() => {});
+    dialogOf(element).dispatchEvent(
+      new CustomEvent('scion-leave-transfer-ownership', { bubbles: true, composed: true })
+    );
+    expect(open).toHaveBeenCalledTimes(1);
+  });
 });

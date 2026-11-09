@@ -23,6 +23,12 @@
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 
 import type { Capabilities, PageData } from '../../shared/types.js';
+import { navigateTo } from '../../client/navigation.js';
+
+vi.mock('../../client/navigation.js', async (orig) => ({
+  ...(await orig<typeof import('../../client/navigation.js')>()),
+  navigateTo: vi.fn(),
+}));
 import { resetHubProjectCapabilitiesCache } from '../../client/hub-capabilities.js';
 import {
   LEAVE_BLOCKED_GROUP_DERIVED,
@@ -189,5 +195,68 @@ describe('scion-page-project-detail — Leave project in the header overflow', (
     const state = element.shadowRoot?.querySelector('[data-project-no-access]');
     expect(state?.textContent).toContain(PROJECT_NO_ACCESS_TITLE);
     expect(element.shadowRoot?.textContent).not.toContain('Failed to Load Project');
+  });
+
+  /** GETs of the project itself (the page load and any reload). */
+  function projectGets(): number {
+    return vi.mocked(fetch).mock.calls.filter(([u]) => {
+      const path = typeof u === 'string' ? u : u instanceof URL ? u.href : u.url;
+      return path.endsWith(`/api/v1/projects/${PROJECT_ID}`);
+    }).length;
+  }
+
+  function leaveDialog(el: HTMLElement): HTMLElement & { show: () => Promise<void> } {
+    return el.shadowRoot!.querySelector('scion-project-leave-dialog')! as HTMLElement & {
+      show: () => Promise<void>;
+    };
+  }
+
+  function left(remainingAccess: string): CustomEvent {
+    return new CustomEvent('scion-project-left', {
+      detail: { projectId: PROJECT_ID, result: { remainingAccess } },
+      bubbles: true,
+      composed: true,
+    });
+  }
+
+  it('a leave that kept access reloads the project; a leave with no access does not', async () => {
+    element = await createComponent({ actions: ['read'], canLeave: true });
+    const before = projectGets();
+    leaveDialog(element).dispatchEvent(left('group'));
+    await vi.waitFor(() => expect(projectGets()).toBe(before + 1));
+
+    // The reload shows the loading state; wait for the page (and its dialog) to render again.
+    const page = element;
+    await vi.waitFor(() =>
+      expect(page.shadowRoot!.querySelector('scion-project-leave-dialog')).not.toBeNull()
+    );
+    const mid = projectGets();
+    leaveDialog(element).dispatchEvent(left('none'));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(projectGets()).toBe(mid);
+  });
+
+  it("the dialog's Transfer ownership link goes to settings with ?transfer=1", async () => {
+    element = await createComponent({
+      actions: ['read', 'update', 'delete', 'manage'],
+      canLeave: false,
+      leaveBlockedReason: 'last_owner',
+    });
+    vi.mocked(navigateTo).mockClear();
+    leaveDialog(element).dispatchEvent(
+      new CustomEvent('scion-leave-transfer-ownership', { bubbles: true, composed: true })
+    );
+    expect(navigateTo).toHaveBeenCalledWith(`/projects/${PROJECT_ID}/settings?transfer=1`);
+  });
+
+  it('a disabled (blocked) Leave project item does not open the dialog', async () => {
+    element = await createComponent({
+      actions: ['read'],
+      canLeave: false,
+      leaveBlockedReason: 'group_derived',
+    });
+    const show = vi.spyOn(leaveDialog(element), 'show').mockResolvedValue();
+    leaveItem(element)!.click();
+    expect(show).not.toHaveBeenCalled();
   });
 });

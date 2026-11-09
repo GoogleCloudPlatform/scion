@@ -3268,6 +3268,7 @@ export class ScionPageProjectDetail extends LitElement {
   }
 
   private openLeaveDialog(): void {
+    if (leaveVisibility(this.project?._capabilities).kind !== 'enabled') return;
     const dialog = this.shadowRoot?.querySelector<ScionProjectLeaveDialog>(
       'scion-project-leave-dialog'
     );
