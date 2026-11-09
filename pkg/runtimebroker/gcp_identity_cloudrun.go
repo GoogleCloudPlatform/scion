@@ -19,8 +19,10 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync/atomic"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/brokeridentity"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
@@ -103,6 +105,77 @@ func cloudRunNativeIdentityEnabled(ctx context.Context, in startContextInputs) b
 	return in.Config != nil && in.Config.HubAgentDefaults.ExperimentEnabled(experiments.CloudRunNativeIdentity)
 }
 
+// callCounter counts calls of one function, safe for concurrent use. The
+// zero value is ready.
+type callCounter struct{ n atomic.Int64 }
+
+func (c *callCounter) add()         { c.n.Add(1) }
+func (c *callCounter) count() int64 { return c.n.Load() }
+
+// flatCloudRunGCPIdentityRefusalText is the refusal of a per-agent GCP
+// identity on a flat cloudrun instance, after the agent's name.
+const flatCloudRunGCPIdentityRefusalText = "flat Cloud Run instances do not support per-agent GCP identities"
+
+// flatCloudRunTarget reports whether this server hosts a flat Runtime
+// Broker instance whose runtime target type is cloudrun. It reads only the
+// instance configuration (s.config.FlatInstance): the configured target
+// and the persisted identity's target, either of which is enough.
+func (s *Server) flatCloudRunTarget() bool {
+	fi := s.config.FlatInstance
+	if fi == nil {
+		return false
+	}
+	if fi.Instance.RuntimeTarget != nil && fi.Instance.RuntimeTarget.Type == config.RuntimeTargetTypeCloudRun {
+		return true
+	}
+	return fi.Identity != nil && fi.Identity.RuntimeTarget.Type == brokeridentity.TargetTypeCloudRun
+}
+
+// perAgentGCPIdentityRequested reports whether a dispatch carries a GCP
+// identity request or a Hub default that applies to it, from request fields
+// only: the request's GCPIdentity in any mode; a hub-default passthrough
+// (hubDefaultPassthrough); or a GCP identity mode in the resolved env or the
+// config env. A dispatch with none of these is not a request.
+func perAgentGCPIdentityRequested(in startContextInputs) bool {
+	if in.Config != nil && in.Config.GCPIdentity != nil {
+		return true
+	}
+	if hubDefaultPassthrough(in) {
+		return true
+	}
+	if in.ResolvedEnv["SCION_METADATA_MODE"] != "" {
+		return true
+	}
+	if in.Config != nil {
+		for _, e := range in.Config.Env {
+			if k, v, ok := strings.Cut(e, "="); ok && k == "SCION_METADATA_MODE" && v != "" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// flatCloudRunGCPIdentityRefusal refuses a per-agent GCP identity request
+// on a flat cloudrun instance (amendment P5-CR, CR3 credentials: per-agent
+// GCP identity, E-10). The agent runs only as the instance's
+// runtime_target.service_account, so a request is refused in every mode
+// (assign, block, passthrough, and an unset mode resolving to the Hub-default
+// passthrough), with the experiment on or off. buildStartContext calls it
+// first, right after the operation check: before the run is recorded, before
+// any project file is written and before any identity work. The refusal
+// names the agent only, never an account, a project or any other identity
+// value, and nothing is logged.
+func (s *Server) flatCloudRunGCPIdentityRefusal(in startContextInputs) *startContextError {
+	if !s.flatCloudRunTarget() || !perAgentGCPIdentityRequested(in) {
+		return nil
+	}
+	return &startContextError{
+		Status:  http.StatusBadRequest,
+		Message: fmt.Sprintf("agent %q: %s", in.Name, flatCloudRunGCPIdentityRefusalText),
+	}
+}
+
 // hubDefaultPassthrough reports whether a passthrough mode came from the
 // hub's default rung (the RequireLocalRuntime flag): on a create, the
 // create request's GCPIdentity when present; otherwise, and on every start
@@ -173,6 +246,7 @@ func hubDefaultPassthrough(in startContextInputs) bool {
 //
 // hubDefault is hubDefaultPassthrough(in), computed once by the caller.
 func (s *Server) resolveCloudRunIdentity(ctx context.Context, in startContextInputs, dispatchRuntimeType, gcpMetadataMode, profile string, hubDefault bool) (cloudRunIdentity, *startContextError) {
+	s.cloudRunIdentityResolves.add()
 	if dispatchRuntimeType != cloudRunRuntimeType || !cloudRunNativeIdentityEnabled(ctx, in) {
 		return cloudRunIdentity{}, nil
 	}

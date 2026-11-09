@@ -455,6 +455,9 @@ type Server struct {
 	// ownership is a flat instance's durable ownership record store
 	// (ownership.go); nil for a legacy Runtime Broker.
 	ownership *OwnershipStore
+	// cloudRunIdentityResolves counts resolveCloudRunIdentity calls, so a
+	// test can show that a refusal returned before any identity work.
+	cloudRunIdentityResolves callCounter
 	// ownedStarts maps a run ID to its in-flight ownership mirror
 	// (installOwnedStart / completeOwnedStart).
 	ownedStarts sync.Map

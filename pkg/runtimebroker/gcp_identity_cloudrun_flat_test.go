@@ -81,10 +81,11 @@ func requireNoFlatTokenStep(t *testing.T, logs *bytes.Buffer) {
 	}
 }
 
-// The probe's control: with the experiment off, the same flat Cloud Run
-// dispatch passes the identity resolution and reaches the agent token step,
-// which writes both probe lines, so their absence in the refusal tests
-// shows a return before that step.
+// The probe's control: with the experiment off, a flat Cloud Run dispatch
+// with no GCP identity request (any request is refused first, E-10) passes
+// the identity resolution and reaches the agent token step, which writes
+// both probe lines, so their absence in the refusal tests shows a return
+// before that step.
 func TestBuildStartContext_CloudRunFlatTokenProbeControl(t *testing.T) {
 	srv := newFlatCloudRunStartServer(t)
 	logs := probeFlatTokenStep(srv)
@@ -93,7 +94,7 @@ func TestBuildStartContext_CloudRunFlatTokenProbeControl(t *testing.T) {
 	in := withFlatTokenProbe(startContextInputs{
 		Name:        "agent-cr-flat-probe",
 		ProjectPath: projectDir,
-		Config:      &CreateAgentConfig{GCPIdentity: &GCPIdentityConfig{MetadataMode: "passthrough"}},
+		Config:      &CreateAgentConfig{},
 		HTTPRequest: httptest.NewRequest("POST", "/api/v1/agents", nil),
 		Operation:   opCreate,
 	})
