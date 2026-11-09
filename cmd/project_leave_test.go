@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -643,11 +644,11 @@ func TestProjectLeave_AcceptedDeletePrintsProgress(t *testing.T) {
 }
 
 // TestProjectLeave_ProductionDeleteWaitsForConfirmation (round 2 N4, round 3
-// O1): the production leaveIO (newLeaveIO, which runProjectLeaveCommand
-// uses) deletes through leaveAgentDeleter, which polls a 202. Against a hub
-// whose delete is accepted and then fails, the outcome is not confirmed and
-// the leave is never sent. Reverting either the wiring or the deleter fails
-// this test.
+// O1): the production leaveIO (newLeaveIO) deletes through
+// leaveAgentDeleter, which polls a 202. Against a hub whose delete is
+// accepted and then fails, the outcome is not confirmed and the leave is
+// never sent. This pins newLeaveIO and its deleter; the command's use of
+// them is pinned by TestProjectLeave_CommandDeleteWaitsForConfirmation.
 func TestProjectLeave_ProductionDeleteWaitsForConfirmation(t *testing.T) {
 	fastDeletionWait(t)
 	hub := &asyncDeleteHub{projectID: "proj-1", agentName: "a-1", replies: []getReply{{body: replyRuntime}}}
@@ -674,6 +675,100 @@ func TestProjectLeave_ProductionDeleteWaitsForConfirmation(t *testing.T) {
 	assert.Contains(t, err.Error(), "failed to delete agent alpha, so the project was not left")
 	assert.Contains(t, err.Error(), "runtime_error")
 	assert.Equal(t, []bool{true}, svc.dry, "never leaves")
+}
+
+// leaveCommandHub is a hub stub for runProjectLeaveCommand: it serves the
+// project lookup and the leave route, and hands every other request to an
+// asyncDeleteHub. It records the dryRun value of each leave POST.
+type leaveCommandHub struct {
+	*asyncDeleteHub
+	project hubclient.Project
+	agent   hubclient.LeaveProjectAgentItem
+
+	leaveMu sync.Mutex
+	leaves  []bool
+}
+
+func (h *leaveCommandHub) serve(w http.ResponseWriter, r *http.Request) {
+	base := "/api/v1/projects/" + h.project.ID
+	switch {
+	case r.Method == http.MethodGet && r.URL.Path == base:
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(h.project)
+	case r.Method == http.MethodPost && r.URL.Path == base+"/leave":
+		var body struct {
+			DryRun bool `json:"dryRun"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		h.leaveMu.Lock()
+		h.leaves = append(h.leaves, body.DryRun)
+		h.leaveMu.Unlock()
+		var agents []hubclient.LeaveProjectAgentItem
+		if body.DryRun {
+			agents = []hubclient.LeaveProjectAgentItem{h.agent}
+		}
+		res := leaveResult(body.DryRun, []string{"project-member"}, "none", agents, 0)
+		res.ProjectID = h.project.ID
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(res)
+	default:
+		h.asyncDeleteHub.serve(w, r)
+	}
+}
+
+func (h *leaveCommandHub) leavePosts() []bool {
+	h.leaveMu.Lock()
+	defer h.leaveMu.Unlock()
+	return append([]bool(nil), h.leaves...)
+}
+
+// TestProjectLeave_CommandDeleteWaitsForConfirmation (round 4 N1): the
+// command itself, runProjectLeaveCommand, against a hub stub selected with
+// SCION_HUB_ENDPOINT. When the hub accepts an agent delete (202) and the
+// delete then fails, no real leave reaches the hub; when the delete is
+// confirmed, exactly one does. A command that built its own leaveIO with a
+// delete that does not wait fails the first case.
+func TestProjectLeave_CommandDeleteWaitsForConfirmation(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		replies   []getReply
+		wantErr   string
+		wantLeave []bool
+	}{
+		{"accepted then failed", []getReply{{body: replyRuntime}}, "failed to delete agent alpha, so the project was not left", []bool{true}},
+		{"confirmed", []getReply{{body: replyDeleting}, {status: http.StatusNotFound}}, "", []bool{true, false}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateJoinEnv(t)
+			t.Setenv("SCION_PROJECT_ID", "")
+			t.Setenv("SCION_AGENT_ID", "")
+			fastDeletionWait(t)
+			home, _ := brokerTestHome(t)
+
+			hub := &leaveCommandHub{
+				asyncDeleteHub: &asyncDeleteHub{projectID: leaveTestProject.ID, agentName: "a-1", replies: tc.replies},
+				project:        *leaveTestProject,
+				agent:          hubclient.LeaveProjectAgentItem{ID: "a-1", Name: "alpha", Phase: "running"},
+			}
+			srv := httptest.NewServer(http.HandlerFunc(hub.serve))
+			t.Cleanup(srv.Close)
+			projectPath = setupSecretProject(t, home, srv.URL)
+			t.Setenv("SCION_HUB_ENDPOINT", srv.URL)
+
+			var out, errOut bytes.Buffer
+			err := runProjectLeaveCommand(context.Background(), leaveTestProject.ID,
+				leaveOptions{yes: true, agents: leaveAgentsDelete}, &out, &errOut)
+			if tc.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tc.wantErr)
+			} else {
+				require.NoError(t, err)
+			}
+			assert.Equal(t, 1, hub.deletes, "one agent delete")
+			assert.Contains(t, errOut.String(), "Waiting for the Hub to delete alpha...")
+			assert.Equal(t, tc.wantLeave, hub.leavePosts(), "leave POSTs by dryRun")
+		})
+	}
 }
 
 // TestProjectLeave_CutListPromptOffersNoDelete (round 2 N5): when the hub
