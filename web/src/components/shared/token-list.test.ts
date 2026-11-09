@@ -1036,33 +1036,45 @@ describe('scion-token-list — copy the revealed token (ptone/scion#7555)', () =
     vi.mocked(showToast).mockClear();
   });
 
-  async function revealed(): Promise<InstanceType<typeof ScionTokenList>> {
+  /** The private members of the token list that this block drives. */
+  interface TokenListInternals {
+    openCreateDialog(): void;
+    handleBoundaryChange(kind: string): void;
+    createName: string;
+    createScopes: Set<string>;
+    handleCreate(e: Event): Promise<void>;
+    copyToken(): Promise<void>;
+    revealCopied: boolean;
+  }
+
+  async function revealed(): Promise<TokenListInternals> {
     const el = await createComponent(baseFetch());
-    (el as any).openCreateDialog();
-    (el as any).handleBoundaryChange('hub');
-    (el as any).createName = 'reveal';
-    (el as any).createScopes = new Set(['agent:read']);
-    await (el as any).handleCreate(new Event('submit'));
+    const list = el as unknown as TokenListInternals;
+    list.openCreateDialog();
+    list.handleBoundaryChange('hub');
+    list.createName = 'reveal';
+    list.createScopes = new Set(['agent:read']);
+    await list.handleCreate(new Event('submit'));
     await el.updateComplete;
     vi.mocked(showToast).mockClear();
-    return el;
+    return list;
   }
 
   it('copies the token and marks it copied, with no toast', async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
     const el = await revealed();
-    await (el as any).copyToken();
+    await el.copyToken();
     expect(writeText).toHaveBeenCalledWith('scion_pat_x');
-    expect((el as any).revealCopied).toBe(true);
+    expect(el.revealCopied).toBe(true);
     expect(showToast).not.toHaveBeenCalled();
   });
 
   it('selects the token and shows exactly one failure toast when the clipboard is unavailable', async () => {
     Object.defineProperty(navigator, 'clipboard', { value: undefined, configurable: true });
     const el = await revealed();
-    await expect((el as any).copyToken()).resolves.toBeUndefined();
-    expect((el as any).revealCopied).toBe(false);
+    await expect(el.copyToken()).resolves.toBeUndefined();
+    expect(el.revealCopied).toBe(false);
     expect(showToast).toHaveBeenCalledTimes(1);
     expect(showToast).toHaveBeenCalledWith(
       'Could not copy. The token is selected: press Ctrl/Cmd+C.',
