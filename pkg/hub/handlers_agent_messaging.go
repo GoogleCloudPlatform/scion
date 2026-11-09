@@ -1779,7 +1779,13 @@ func (s *Server) handleAgentGitHubTokenRefresh(w http.ResponseWriter, r *http.Re
 		// not 500 (our server is broken).
 		statusCode := http.StatusBadGateway
 		errCode := ErrCodeRuntimeError
+		// The client gets fixed text: the TokenMintError's Message is fixed
+		// per code; any other error answers a generic line. The error and
+		// GitHub's text are logged once, rendered, by mintGitHubAppToken,
+		// the choke point every mint passes (ptone/scion#7498).
+		message := "failed to mint GitHub token"
 		if mintErr, ok := err.(*githubapp.TokenMintError); ok {
+			message = "failed to mint GitHub token: " + mintErr.Message
 			switch mintErr.ErrorCode {
 			case githubapp.ErrCodePrivateKeyInvalid, githubapp.ErrCodeAppNotFound:
 				statusCode = http.StatusBadGateway
@@ -1792,8 +1798,7 @@ func (s *Server) handleAgentGitHubTokenRefresh(w http.ResponseWriter, r *http.Re
 				errCode = ErrCodeForbidden
 			}
 		}
-		writeError(w, statusCode, errCode,
-			"failed to mint GitHub token: "+err.Error(), nil)
+		writeError(w, statusCode, errCode, message, nil)
 		return
 	}
 

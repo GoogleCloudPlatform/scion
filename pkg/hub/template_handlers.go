@@ -1012,7 +1012,11 @@ func (s *Server) handleTemplateValidate(w http.ResponseWriter, r *http.Request, 
 	rs := s.templateStore()
 	report, err := rs.ValidateStorage(ctx, rec)
 	if err != nil {
-		RuntimeError(w, fmt.Sprintf("validation failed: %v", err))
+		// The error can carry the storage object path and the wrapped
+		// backend error: log it rendered, answer fixed text
+		// (ptone/scion#7498).
+		slog.ErrorContext(ctx, "template validation failed", "template_id", template.ID, "error", upstreamText(err.Error()))
+		RuntimeError(w, "validation failed")
 		return
 	}
 

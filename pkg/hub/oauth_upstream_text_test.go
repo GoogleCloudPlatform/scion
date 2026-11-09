@@ -156,6 +156,42 @@ func TestOAuthGitHubNoAccessTokenNamesError(t *testing.T) {
 	}
 }
 
+// githubTokenErrorText joins only the non-empty error fields, and falls back
+// to the rendered raw body when the answer is not JSON or carries neither
+// field (ptone/scion#7498).
+func TestGitHubTokenErrorText(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{name: "both fields", body: `{"error":"bad_verification_code","error_description":"The code is wrong."}`, want: "bad_verification_code: The code is wrong."},
+		{name: "only error", body: `{"error":"bad_verification_code"}`, want: "bad_verification_code"},
+		{name: "only error_description", body: `{"error_description":"The code is wrong."}`, want: "The code is wrong."},
+		{name: "neither field", body: `{"error_uri":"https://docs.github.example/oauth"}`, want: `{"error_uri":"https://docs.github.example/oauth"}`},
+		{name: "not JSON", body: "<html>502 Bad Gateway</html>", want: "<html>502 Bad Gateway</html>"},
+		{name: "empty body", body: "", want: ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := githubTokenErrorText([]byte(tc.body)); got != tc.want {
+				t.Errorf("githubTokenErrorText(%q) = %q, want %q", tc.body, got, tc.want)
+			}
+		})
+	}
+}
+
+// A non-JSON 200 answer to a GitHub code exchange (a proxy error page)
+// carries the raw body in the error, rendered.
+func TestOAuthGitHubNoAccessTokenNonJSONBodyRendered(t *testing.T) {
+	s := oauthServiceAnswering(http.StatusOK, upstreamMarkerBody)
+	_, err := s.exchangeGitHubCodeForTokenWithConfig(context.Background(), OAuthProviderConfig{ClientID: "client-id"}, "code", "https://hub.example/cb")
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	assertUpstreamTextRendered(t, err.Error())
+}
+
 // A successful GitHub code exchange still returns the token: reading the
 // body once before decoding does not change the success path.
 func TestOAuthGitHubExchangeSuccess(t *testing.T) {
@@ -190,4 +226,62 @@ func TestCLIDeviceAuthorize_UpstreamBodyLoggedNotReturned(t *testing.T) {
 	assert.NotContains(t, rec.Body.String(), upstreamMarker)
 	assertLoggedOnceRendered(t, logs, "Device code request failed")
 	assert.Equal(t, 1, strings.Count(logs.String(), upstreamMarker), "the marker reaches exactly one log record")
+}
+
+// A 200 token response whose body carries a credential must never put that
+// credential in an error: a form-encoded success body (GitHub answers that
+// way when it does not honour the Accept header) gets a fixed text at every
+// decode site, and a JSON body with a credential but no error field is not
+// rendered raw (ptone/scion#7498).
+func TestOAuthTokenBodyCredentialNeverInError(t *testing.T) {
+	const fake = "FAKE-TOKEN-7498-VALUE"
+	ctx := context.Background()
+	cfg := OAuthProviderConfig{ClientID: "client-id", ClientSecret: "client-secret"}
+	formBody := "access_token=" + fake + "&scope=read%3Auser&token_type=bearer"
+	jsonBody := `{"refresh_token":"` + fake + `","token_type":"bearer"}`
+	tests := []struct {
+		name   string
+		body   string
+		call   func(*OAuthService) error
+		banned string
+	}{
+		{"github code exchange, form body", formBody, func(s *OAuthService) error {
+			_, err := s.exchangeGitHubCodeForTokenWithConfig(ctx, cfg, "code", "https://hub.example/cb")
+			return err
+		}, "access_token"},
+		{"code exchange, form body", formBody, func(s *OAuthService) error {
+			_, err := s.exchangeCodeForToken(ctx, "https://idp.example/token", "client-id", "client-secret", "code", "https://hub.example/cb")
+			return err
+		}, "access_token"},
+		{"google device poll, form body", formBody, func(s *OAuthService) error {
+			_, err := s.pollGoogleDeviceToken(ctx, cfg, "device-code")
+			return err
+		}, "access_token"},
+		{"github device poll, form body", formBody, func(s *OAuthService) error {
+			_, err := s.pollGitHubDeviceToken(ctx, cfg, "device-code")
+			return err
+		}, "access_token"},
+		{"github code exchange, JSON refresh token only", jsonBody, func(s *OAuthService) error {
+			_, err := s.exchangeGitHubCodeForTokenWithConfig(ctx, cfg, "code", "https://hub.example/cb")
+			return err
+		}, "refresh_token"},
+		{"github device poll, JSON refresh token only", jsonBody, func(s *OAuthService) error {
+			_, err := s.pollGitHubDeviceToken(ctx, cfg, "device-code")
+			return err
+		}, "refresh_token"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.call(oauthServiceAnswering(http.StatusOK, tc.body))
+			if err == nil {
+				t.Fatal("expected an error")
+			}
+			if strings.Contains(err.Error(), fake) {
+				t.Errorf("error carries the credential value: %q", err.Error())
+			}
+			if strings.Contains(err.Error(), tc.banned) {
+				t.Errorf("error carries %q: %q", tc.banned, err.Error())
+			}
+		})
+	}
 }

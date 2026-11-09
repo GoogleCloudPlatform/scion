@@ -462,7 +462,7 @@ func (s *Server) handleWorkspaceSyncToFinalize(w http.ResponseWriter, r *http.Re
 		objectPath := storagePath + "/files/" + file.Path
 		exists, err := stor.Exists(ctx, objectPath)
 		if err != nil {
-			slog.ErrorContext(ctx, "workspace file verify failed", "agent_id", agentID, "error", upstreamText(err.Error()))
+			slog.ErrorContext(ctx, "workspace file verify failed", "agent_id", agent.ID, "error", upstreamText(err.Error()))
 			RuntimeError(w, "Failed to verify file")
 			return
 		}
