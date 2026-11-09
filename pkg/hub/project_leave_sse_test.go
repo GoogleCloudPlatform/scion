@@ -418,3 +418,82 @@ func TestProjectLeave_AgentMessagesStreamEndsOnLeave(t *testing.T) {
 	case <-time.After(200 * time.Millisecond):
 	}
 }
+
+// TestProjectLeave_AgentMessageAfterMembershipChangeNeverReachesLeaver
+// (review round 2, the agent messages twin of
+// TestProjectLeave_EventAfterMembershipChangeNeverReachesLeaver): the
+// leaver's agent messages stream is held inside the write of one message
+// while the leave publishes its membership change and a second message is
+// published behind it. On release, the stream re-checks the queued
+// membership change before writing the second message, so the second
+// message is never written and the stream ends with the credential
+// error. A real leave each round (the member is added back between
+// rounds); 20 rounds, so a random pick between the two ready cases would
+// fail it.
+func TestProjectLeave_AgentMessageAfterMembershipChangeNeverReachesLeaver(t *testing.T) {
+	x := newLeaveSSEFixture(t)
+	x.f.srv.membershipService.onMembershipLoss = nil
+	ctx := context.Background()
+	agent := &store.Agent{
+		ID: tid(t.Name() + "-agent"), Slug: "leave-order-agent", Name: "Leave Order Agent",
+		ProjectID: x.f.projectID, OwnerID: x.f.owner.ID, CreatedBy: x.f.owner.ID, Ancestry: []string{x.f.owner.ID},
+		Phase: "running", RuntimeBrokerID: tid(t.Name() + "-broker"), StateVersion: 1,
+		Created: time.Now(), Updated: time.Now(),
+	}
+	require.NoError(t, x.f.store.CreateAgent(ctx, agent))
+	// A message to the member: visible on their stream without agent.attach.
+	message := func(marker string) {
+		x.pub.PublishRaw("agent."+agent.ID+".message", UserMessageEvent{
+			ID: marker, ProjectID: x.f.projectID, SenderID: x.f.owner.ID, RecipientID: x.f.member.ID,
+			Msg: marker, AgentID: agent.ID, Type: "instruction",
+		})
+	}
+
+	for i := 0; i < 20; i++ {
+		if i > 0 {
+			grpBind(t, x.f.store, store.RoleBindingPrincipalUser, x.f.member.ID, x.f.memberRD.ID, x.f.projectID)
+		}
+		identity := NewAuthenticatedUser(x.f.member.ID, x.f.member.Email, x.f.member.DisplayName, x.f.member.Role, "web")
+		sctx, cancel := context.WithCancel(ctx)
+		rctx := contextWithCredentialContext(context.WithValue(contextWithIdentity(sctx, identity), userContextKey{}, identity),
+			CredentialContext{Kind: CredentialKindInteractive, ID: "test-session"})
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/agents/"+agent.ID+"/messages/stream", nil).WithContext(rctx)
+		g := newGatedLeaveRecorder()
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			x.f.srv.mux.ServeHTTP(g, req)
+		}()
+		require.Eventually(t, g.isFlushed, 5*time.Second, 10*time.Millisecond, "round %d: stream not opened", i)
+
+		g.arm()
+		hold, after := fmt.Sprintf("hold-%d", i), fmt.Sprintf("after-%d", i)
+		message(hold)
+		select {
+		case <-g.blocked:
+		case <-time.After(5 * time.Second):
+			g.release()
+			cancel()
+			<-done
+			t.Fatalf("round %d: the stream never started writing the held message", i)
+		}
+		// Both queued behind the held write: the leave's membership change,
+		// then a message published right after it.
+		decodeLeaveResult(t, leaveAs(t, x.f.srv, x.f.member, x.f.projectID, false))
+		message(after)
+		g.release()
+
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			cancel()
+			<-done
+			t.Fatalf("round %d: the leaver's agent messages stream did not end", i)
+		}
+		cancel()
+		body := g.String()
+		require.Contains(t, body, hold, "round %d", i)
+		require.Contains(t, body, "stream ended", "round %d", i)
+		require.NotContains(t, body, after, "round %d: a message published after the membership change reached the leaver", i)
+	}
+}
