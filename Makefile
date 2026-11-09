@@ -714,7 +714,11 @@ WEBCHAT_POSTGRES_TESTS := TestListTopicsByProjects_Postgres \
 	TestWebChatStore_Postgres_ThreadMigrationsWaitForMessagesTable \
 	TestWebChatStore_Postgres_ThreadMigrationsRunOnce \
 	TestUserPrefsThreadGroupsMarker_Postgres \
-	TestUserPrefsThreadGroupsMigratedAt_Postgres_PreExistingDB
+	TestUserPrefsThreadGroupsMigratedAt_Postgres_PreExistingDB \
+	TestChatSearchLiteralWildcards_Postgres \
+	TestChatSearchDeletedAndEdited_Postgres \
+	TestChatSearchDifferential_Postgres \
+	TestChatSearchStatementTimeout_Postgres
 
 test-webchat-postgres:
 	@if [ -z "$$SCION_TEST_POSTGRES_DSN" ]; then \
