@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -296,7 +297,8 @@ func (s *Server) handleWorkspaceSyncFrom(w http.ResponseWriter, r *http.Request,
 			Expires: SignedURLExpiry,
 		})
 		if err != nil {
-			RuntimeError(w, "Failed to generate download URL: "+err.Error())
+			slog.ErrorContext(ctx, "workspace download URL failed", "agent_id", agent.ID, "error", upstreamText(err.Error()))
+			RuntimeError(w, "Failed to generate download URL")
 			return
 		}
 
@@ -380,7 +382,8 @@ func (s *Server) handleWorkspaceSyncTo(w http.ResponseWriter, r *http.Request, a
 			ContentType: "application/octet-stream",
 		})
 		if err != nil {
-			RuntimeError(w, "Failed to generate upload URL: "+err.Error())
+			slog.ErrorContext(ctx, "workspace upload URL failed", "agent_id", agent.ID, "error", upstreamText(err.Error()))
+			RuntimeError(w, "Failed to generate upload URL")
 			return
 		}
 
@@ -459,7 +462,8 @@ func (s *Server) handleWorkspaceSyncToFinalize(w http.ResponseWriter, r *http.Re
 		objectPath := storagePath + "/files/" + file.Path
 		exists, err := stor.Exists(ctx, objectPath)
 		if err != nil {
-			RuntimeError(w, "Failed to verify file: "+err.Error())
+			slog.ErrorContext(ctx, "workspace file verify failed", "agent_id", agentID, "error", upstreamText(err.Error()))
+			RuntimeError(w, "Failed to verify file")
 			return
 		}
 		if !exists {

@@ -2880,11 +2880,17 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			Reason:     reason,
 		})
 		messaging.RecordStep(ctx, "divergence_logged")
-		// DEF-3: Independent consistency check against prior messages.
-		if consistent := messaging.CheckConversationConsistency(ctx, s.store, storeMsg.ID, convID, structuredMsg.ThreadID, structuredMsg.SenderID, agent.ID, s.messageLog); !consistent {
-			s.messageLog.Warn("DEF-3: conversation consistency mismatch (structured agent message)",
-				"message_id", storeMsg.ID, "conversation_id", convID, "agent_id", agent.ID)
-		}
+		// DEF-3: Independent consistency check against prior messages, run
+		// off the request path with its own deadline.
+		messaging.GoConsistencyCheck(messaging.ConsistencyInput{
+			Store: s.store, Log: s.messageLog, MessageID: storeMsg.ID, ConversationID: convID,
+			ThreadID: structuredMsg.ThreadID, SenderID: structuredMsg.SenderID, RecipientID: agent.ID,
+		}, func(ctx context.Context, in messaging.ConsistencyInput) {
+			if consistent := messaging.CheckConversationConsistency(ctx, in.Store, in.MessageID, in.ConversationID, in.ThreadID, in.SenderID, in.RecipientID, in.Log); !consistent {
+				in.Log.Warn("DEF-3: conversation consistency mismatch (structured agent message)",
+					"message_id", in.MessageID, "conversation_id", in.ConversationID, "agent_id", in.RecipientID)
+			}
+		})
 		// Propagate GroupID from metadata so CLI-originated group[] messages
 		// preserve correlation in the store.
 		groupID := ""
@@ -3602,11 +3608,17 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 				Match:      match,
 				Reason:     reason,
 			})
-			// DEF-3: Independent consistency check against prior messages.
-			if consistent := messaging.CheckConversationConsistency(ctx, s.store, storeMsg.ID, convID, "", agentMsg.SenderID, agent.ID, s.messageLog); !consistent {
-				s.messageLog.Warn("DEF-3: conversation consistency mismatch (agent-to-agent DM)",
-					"message_id", storeMsg.ID, "conversation_id", convID, "agent_id", agent.ID)
-			}
+			// DEF-3: Independent consistency check against prior messages,
+			// run off the request path with its own deadline.
+			messaging.GoConsistencyCheck(messaging.ConsistencyInput{
+				Store: s.store, Log: s.messageLog, MessageID: storeMsg.ID, ConversationID: convID,
+				SenderID: agentMsg.SenderID, RecipientID: agent.ID,
+			}, func(ctx context.Context, in messaging.ConsistencyInput) {
+				if consistent := messaging.CheckConversationConsistency(ctx, in.Store, in.MessageID, in.ConversationID, "", in.SenderID, in.RecipientID, in.Log); !consistent {
+					in.Log.Warn("DEF-3: conversation consistency mismatch (agent-to-agent DM)",
+						"message_id", in.MessageID, "conversation_id", in.ConversationID, "agent_id", in.RecipientID)
+				}
+			})
 			persisted := false
 			if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
 				s.messageLog.Error("Failed to persist set message", "recipient", recipStr, "error", err)
@@ -3815,11 +3827,17 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 				Match:      match,
 				Reason:     reason,
 			})
-			// DEF-3: Independent consistency check against prior messages.
-			if consistent := messaging.CheckConversationConsistency(ctx, s.store, storeMsg.ID, convID, "", userMsg.SenderID, userID, s.messageLog); !consistent {
-				s.messageLog.Warn("DEF-3: conversation consistency mismatch (user-to-agent DM)",
-					"message_id", storeMsg.ID, "conversation_id", convID)
-			}
+			// DEF-3: Independent consistency check against prior messages,
+			// run off the request path with its own deadline.
+			messaging.GoConsistencyCheck(messaging.ConsistencyInput{
+				Store: s.store, Log: s.messageLog, MessageID: storeMsg.ID, ConversationID: convID,
+				SenderID: userMsg.SenderID, RecipientID: userID,
+			}, func(ctx context.Context, in messaging.ConsistencyInput) {
+				if consistent := messaging.CheckConversationConsistency(ctx, in.Store, in.MessageID, in.ConversationID, "", in.SenderID, in.RecipientID, in.Log); !consistent {
+					in.Log.Warn("DEF-3: conversation consistency mismatch (user-to-agent DM)",
+						"message_id", in.MessageID, "conversation_id", in.ConversationID)
+				}
+			})
 			persisted := true
 			if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
 				persisted = false
@@ -4614,7 +4632,8 @@ func (s *Server) processMentions(ctx context.Context, mentionSlugs []string, pri
 // (messaging.DeriveConversationKey, with the same inputs the conversation
 // resolution uses). A direct key is decided by the DM key ownership check.
 // For a group (thread) key, a user must be able to read the recipient
-// agent's project; an agent goes on, and its message mode decides before
+// agent's project and post in its chat (decideUserThreadPost, the decision
+// of a chat send); an agent goes on, and its message mode decides before
 // the thread conversation is resolved (precheckThreadGroupPost); any other
 // sender is refused. A key kind with no rule here is refused. A refusal is
 // written to w and ok is false.
@@ -4654,11 +4673,11 @@ func (s *Server) decideKeyedPostSender(w http.ResponseWriter, r *http.Request, m
 	case "group":
 		switch authKind {
 		case "user":
-			if !s.senderCanReadGroup(ctx, agent.ProjectID) {
-				s.refuseKeyedPostAsNotFound(w, r, agent.ProjectID, "thread post: sender cannot read the project")
-				return false
-			}
-			return true
+			// The same decision point as a chat send (chatThreadAccess):
+			// a user who cannot read the project gets the unknown-agent
+			// answer; one who reads it but may not post gets 403
+			// chat_post_denied. Both come before any row or wake.
+			return s.decideUserThreadPost(w, r, agent.ProjectID)
 		case "agent":
 			return true
 		default:
@@ -4669,6 +4688,54 @@ func (s *Server) decideKeyedPostSender(w http.ResponseWriter, r *http.Request, m
 		s.refuseKeyedPostAsNotFound(w, r, agent.ProjectID, "post by key: unsupported conversation kind")
 		return false
 	}
+}
+
+// decideUserThreadPost decides, with chatThreadAccess, whether the user
+// sender of a post by thread key may post into a thread of projectID, the
+// recipient agent's project. A sender who may not read the project, and a
+// project that cannot be loaded, get the unknown-agent answer
+// (refuseKeyedPostAsNotFound) with the reason logged. A sender who reads
+// the project but may not post gets 403 chat_post_denied with reason
+// read_only; the denial is logged.
+// ok reports whether the post may go on.
+func (s *Server) decideUserThreadPost(w http.ResponseWriter, r *http.Request, projectID string) bool {
+	refuseAsNotFound := func(reason string) { s.refuseKeyedPostAsNotFound(w, r, projectID, reason) }
+	ctx := r.Context()
+	user := GetUserIdentityFromContext(ctx)
+	if user == nil || projectID == "" {
+		refuseAsNotFound("thread post: no user sender or no project")
+		return false
+	}
+	project, err := s.store.GetProject(ctx, projectID)
+	if err != nil || project == nil {
+		reason := "thread post: project not found"
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			reason = "thread post: project lookup failed: " + err.Error()
+		}
+		refuseAsNotFound(reason)
+		return false
+	}
+	// The thread conversation may not exist yet; a user is decided by the
+	// project alone. The token-scope step is skipped: in Phase 1 a user
+	// access token on this route keeps the route's own checks (design
+	// section 8.3 item 4), and only the post decision is added. Phase 2
+	// decides whether to unify it with chat sends (ptone/scion#5519).
+	access, err := s.chatThreadAccess(ctx, user, chatThreadRef{Project: project, skipTokenScope: true})
+	if err != nil {
+		// An internal caller error or a store fault: the common 500.
+		writeErrorFromErr(w, err, "")
+		return false
+	}
+	if !access.Can(ChatActionRead) {
+		refuseAsNotFound("thread post: sender cannot read the project")
+		return false
+	}
+	if !access.Can(ChatActionPost) {
+		logAuthzDenial(r, user, projectResource(project), ActionChatPost, access.postDenial.Reason)
+		chatSendPostDenied(access.Reason).write(w)
+		return false
+	}
+	return true
 }
 
 // refuseKeyedPostAsNotFound refuses a post by conversation key from a sender

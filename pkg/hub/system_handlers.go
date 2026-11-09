@@ -780,7 +780,7 @@ func (s *Server) handleSystemImagesPull(w http.ResponseWriter, r *http.Request) 
 
 	registry := s.resolveImageRegistry()
 	// The harness images take the hub-scope image_tag (ptone/scion#6625);
-	// "" while hub.image_tag_setting is off.
+	// "" when none applies (imageTagStateOf).
 	imageTag := s.hubScopeImageTag()
 	if registry == "" {
 		s.imagePullActive.Store(false)

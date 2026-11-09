@@ -883,7 +883,8 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	}
 
 	// image_tag (ptone/scion#6625): the hub sends the resolved tag only
-	// while hub.image_tag_setting is on. It is applied to the short form
+	// when one applies (a set value while hub.image_tag_setting is on, or
+	// the version default of a release build). It is applied to the short form
 	// first, so the local-image check below looks for the tagged image and
 	// the registry rewrite qualifies the tagged name; RewriteImageRef then
 	// also retags the registry rewrite's own output form. With no tag both

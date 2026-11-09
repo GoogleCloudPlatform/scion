@@ -66,6 +66,7 @@ scion hub test-identity issue --admin-role hub-admin \
   | `super-admin` | default 10m, at most 15m | default and at most 30m |
 
 - The token is never re-issued. If it is lost, remove the identity with `scion hub test-identity delete <id> --purge` and issue a new one.
+- An agent whose originating user is a test identity with an admin role receives project-scoped secrets and environment variables only in projects where that identity holds active membership beyond `project-viewer`.
 - A plain `scion hub test-identity delete <id>` does not remove an identity with an admin role: the hub answers it as not found, and the CLI's notice points to `delete <id> --purge`.
 
 The hub also limits issuance:

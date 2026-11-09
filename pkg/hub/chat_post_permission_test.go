@@ -127,7 +127,9 @@ func TestChatSendTopic_ChatPostCheckedOnTokenHolder(t *testing.T) {
 // TestChatSendTopic_ChatPostSelectorDoesNotPost: the project:chat_post
 // selector only keeps project.chat_post in a token's ceiling for
 // delegation; it does not let a token post. A member's token with it but
-// without inbox:write is refused by the token's inbox.write check.
+// without inbox:write reads the thread, so it is refused by the resolver's
+// token-scope step: 403 chat_post_denied with reason token_scope
+// (ptone/scion#5519).
 func TestChatSendTopic_ChatPostSelectorDoesNotPost(t *testing.T) {
 	f := newChatFixture(t)
 	topicMessages := func() int {
@@ -142,10 +144,8 @@ func TestChatSendTopic_ChatPostSelectorDoesNotPost(t *testing.T) {
 	rec := f.call(t, selectorOnly, http.MethodPost, chatConversationPath(f.topicA, "messages"), map[string]string{"content": "selector only"})
 	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 	code, details := errorCodeAndDetails(t, rec)
-	assert.Equal(t, ErrCodeForbidden, code, "refused by the token check, not chat_post_denied")
-	wantResource, wantAction := selfPermissionResourceAction(permInboxWrite)
-	assert.Equal(t, wantResource, details["resource_type"])
-	assert.Equal(t, string(wantAction), details["denied_action"])
+	assert.Equal(t, ErrCodeChatPostDenied, code, "refused by the token-scope step")
+	assert.Equal(t, ChatReasonTokenScope, details["reason"])
 	assert.Equal(t, before, topicMessages(), "a refused send writes no message")
 
 	// With inbox:write as well the same member posts, and the message is
@@ -279,7 +279,8 @@ func TestScheduledSend_SenderLosesChatPost_FailsNoAccess(t *testing.T) {
 
 // TestBuiltInRoles_ChatPost pins who holds project.chat_post among the
 // seeded roles: project owner, admin and member, hub admin and super
-// admin. The project-visitor, hub-member and hub-viewer roles do not.
+// admin. The project-visitor, project-viewer, hub-member and hub-viewer
+// roles do not.
 func TestBuiltInRoles_ChatPost(t *testing.T) {
 	holders := map[string]bool{
 		store.ProjectRoleOwner:              true,
@@ -288,6 +289,7 @@ func TestBuiltInRoles_ChatPost(t *testing.T) {
 		store.SystemRoleHubAdmin:            true,
 		store.SystemRoleSuperAdmin:          true,
 		store.ProjectRoleVisitor:            false,
+		store.ProjectRoleViewer:             false,
 		store.SystemRoleHubMember:           false,
 		store.SystemRoleHubViewer:           false,
 		store.SystemRoleGlobalCatalogAuthor: false,

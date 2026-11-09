@@ -15,9 +15,10 @@
  */
 
 /**
- * A thread the caller may read but not post in: the history's `canPost`
- * false (no project.chat_post on the thread's project), or a send refused
- * with chat_post_denied, replaces the composer with a read-only notice.
+ * A thread the caller may read but not post in: the history's
+ * `_capabilities` without a post action (or, without them, `canPost`
+ * false), or a send refused with chat_post_denied, replaces the composer
+ * with a read-only notice whose text follows the hub's reason.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
@@ -174,5 +175,62 @@ describe('read-only thread', () => {
 
     expect(composer(el)).not.toBeNull();
     expect(notice(el)).toBeNull();
+  });
+
+  it('shows the notice when _capabilities has no post action, overriding canPost', async () => {
+    history = {
+      messages: [],
+      canPost: true,
+      _capabilities: { actions: ['read', 'delete_own'], reason: 'read_only' },
+    };
+    const el = await open('topic-caps-read-only');
+
+    expect(composer(el)).toBeNull();
+    expect(notice(el)?.textContent).toContain("don't have permission to post");
+  });
+
+  it('shows the composer when _capabilities lists post', async () => {
+    history = { messages: [], canPost: false, _capabilities: { actions: ['read', 'post'] } };
+    const el = await open('topic-caps-writer');
+
+    expect(composer(el)).not.toBeNull();
+    expect(notice(el)).toBeNull();
+  });
+
+  it('names the access token when the reason is token_scope', async () => {
+    history = { messages: [], _capabilities: { actions: ['read'], reason: 'token_scope' } };
+    const el = await open('topic-caps-token');
+
+    expect(composer(el)).toBeNull();
+    expect(notice(el)?.textContent).toContain('access token');
+  });
+
+  it('takes the reason from a chat_post_denied refusal', async () => {
+    history = { messages: [], _capabilities: { actions: ['read', 'post'] } };
+    sendResponse = json(
+      {
+        error: {
+          code: 'chat_post_denied',
+          message: 'Read only',
+          details: { reason: 'token_scope' },
+        },
+      },
+      403
+    );
+    const el = await open('topic-caps-revoked');
+    const onError = vi.fn();
+    composer(el)?.dispatchEvent(
+      new CustomEvent('chat-send', {
+        detail: { text: 'hello', onSuccess: vi.fn(), onError },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await vi.waitFor(() => expect(onError).toHaveBeenCalled());
+    await settle();
+    await el.updateComplete;
+
+    expect(composer(el)).toBeNull();
+    expect(notice(el)?.textContent).toContain('access token');
   });
 });

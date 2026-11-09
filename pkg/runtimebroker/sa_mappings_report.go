@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -38,7 +39,9 @@ import (
 // sends on its heartbeat (ptone/scion#3329 phase 4): for each Kubernetes
 // profile, the GSAs it can serve in GCP identity mode "assign" and the
 // Kubernetes ServiceAccount (KSA) each would run as, from the explicit
-// kubernetes_service_account_mappings and from annotation discovery.
+// kubernetes_service_account_mappings and from annotation discovery. Cloud
+// Run profiles report the accounts the broker may run an instance as
+// (cloudRunProfileSAReport); they have no discovery.
 //
 // Discovery never runs on the heartbeat path. Each (profile, namespace)
 // has a cached result that a background lookup refreshes every
@@ -55,10 +58,11 @@ const (
 )
 
 // heartbeatProfileSAMappings returns, sorted by profile name, the report of
-// each Kubernetes profile (by resolved runtime type) in the broker's global
-// settings, for the heartbeat's ProfileSAMappings field. Nil when the
-// settings cannot be read, so the hub keeps what it has; an empty result
-// when there are no Kubernetes profiles.
+// each Kubernetes and Cloud Run profile (by resolved runtime type) in the
+// broker's global settings, for the heartbeat's ProfileSAMappings field
+// (cloudRunProfileSAReport for Cloud Run). Nil when the settings cannot be
+// read, so the hub keeps what it has; an empty result when there are no
+// such profiles.
 func (s *Server) heartbeatProfileSAMappings() []hubclient.ProfileSAMappingsState {
 	vs, err := s.loadHeartbeatMappingSettings()
 	if err != nil || vs == nil {
@@ -73,6 +77,10 @@ func (s *Server) heartbeatProfileSAMappings() []hubclient.ProfileSAMappingsState
 	forced := s.config.ForceRuntime != ""
 	out := []hubclient.ProfileSAMappingsState{}
 	for _, name := range names {
+		if state, ok := cloudRunProfileSAReport(vs, name, forced); ok {
+			out = append(out, state)
+			continue
+		}
 		if _, isKubernetes, _ := vs.ProfileKubernetesSAMappings(name); !isKubernetes {
 			continue
 		}
@@ -105,6 +113,74 @@ func (s *Server) heartbeatProfileSAMappings() []hubclient.ProfileSAMappingsState
 		out = append(out, state)
 	}
 	return out
+}
+
+// cloudRunProfileSAReport returns the report of profile name when its
+// runtime entry in the broker's global settings vs resolves to a Cloud Run
+// Instances type ("cloudrun" or "cloudrun-instances"), with ok true; ok is
+// false for any other profile, including one with no runtime entry.
+//
+// A "cloudrun" entry (the runtimes.<entry>.cloudrun form) can run an
+// instance as the identity in its dispatch, so the report has
+// CloudRunNativeIdentity set, one entry per account in the entry's
+// cloudrun.assignable_service_accounts (lower-cased, trimmed, without
+// empty or repeated values, sorted; GSA only, Source
+// api.BrokerSASourceCloudRunAllowlist) and, as CloudRunBlockAccount,
+// whether cloudrun.block_service_account is set. It reads the same global
+// setting the dispatch checks (cloudRunAccountAssignable), and the report
+// is complete: the list is the whole of what the broker attaches. The
+// block account itself is never reported.
+//
+// A "cloudrun-instances" entry has no such settings: its report is complete
+// with no entries and CloudRunNativeIdentity false. With ForceRuntime set,
+// dispatch ignores the profile, so the report is incomplete
+// (api.BrokerSAReportForceRuntime) with no entries.
+func cloudRunProfileSAReport(vs *config.VersionedSettings, name string, forced bool) (hubclient.ProfileSAMappingsState, bool) {
+	profile, ok := vs.Profiles[name]
+	if !ok || profile.Runtime == "" {
+		return hubclient.ProfileSAMappingsState{}, false
+	}
+	entry, hasEntry := vs.Runtimes[profile.Runtime]
+	rtType := profile.Runtime
+	if hasEntry && entry.Type != "" {
+		rtType = entry.Type
+	}
+	if rtType != "cloudrun" && rtType != "cloudrun-instances" {
+		return hubclient.ProfileSAMappingsState{}, false
+	}
+	state := hubclient.ProfileSAMappingsState{
+		Name:                   name,
+		ServiceAccountMappings: []hubclient.BrokerProfileSAMapping{},
+		ReportVersion:          api.BrokerSAReportVersion,
+	}
+	if forced {
+		state.IncompleteReason = api.BrokerSAReportForceRuntime
+		return state, true
+	}
+	state.Complete = true
+	if rtType != "cloudrun" {
+		return state, true
+	}
+	state.CloudRunNativeIdentity = true
+	if !hasEntry || entry.CloudRun == nil {
+		return state, true
+	}
+	seen := map[string]bool{}
+	for _, listed := range entry.CloudRun.AssignableServiceAccounts {
+		gsa := strings.ToLower(strings.TrimSpace(listed))
+		if gsa == "" || seen[gsa] {
+			continue
+		}
+		seen[gsa] = true
+		state.ServiceAccountMappings = append(state.ServiceAccountMappings, hubclient.BrokerProfileSAMapping{
+			GSA: gsa, Source: api.BrokerSASourceCloudRunAllowlist,
+		})
+	}
+	sort.Slice(state.ServiceAccountMappings, func(i, j int) bool {
+		return state.ServiceAccountMappings[i].GSA < state.ServiceAccountMappings[j].GSA
+	})
+	state.CloudRunBlockAccount = strings.TrimSpace(entry.CloudRun.BlockServiceAccount) != ""
+	return state, true
 }
 
 // buildProfileSAReport builds one profile's report from its explicit

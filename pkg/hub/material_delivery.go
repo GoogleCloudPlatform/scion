@@ -133,18 +133,49 @@ func (a *AuthzService) newLaunchDeliveryIdentity(ctx context.Context, agentID st
 	return h, nil
 }
 
+// deliveryDecisionTimeout bounds one start or restart delivery decision,
+// which runs on a context detached from the request's cancellation
+// (deliverySelector.decisionContext).
+const deliveryDecisionTimeout = 30 * time.Second
+
+// decisionContext returns the context one delivery decision of s runs on,
+// and its cancel.
+//
+// For a start or restart (PurposeDispatch, PurposeRestart) it is ctx
+// detached from cancellation (context.WithoutCancel keeps ctx's values)
+// with its own bound, deliveryDecisionTimeout. A start or restart selects
+// and delivers its launch material even when the request that began it
+// has ended (only the Warns go quiet), so its authorization decisions must
+// run in full on complete store reads rather than stop at the request's
+// end: the credential is minted and every check is evaluated on its merits,
+// a revoked, suspended or constraint-excluded principal is still refused,
+// and a store fault, or the bound running out, still fails closed with its
+// WARN. Nothing is skipped or defaulted to allow. The request-end refusal
+// of ptone/scion#6012 stays for every request-scoped check, including the
+// availability probe, which keeps ctx.
+func (s *deliverySelector) decisionContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if s.purpose != PurposeDispatch && s.purpose != PurposeRestart {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(context.WithoutCancel(ctx), deliveryDecisionTimeout)
+}
+
 // authorize decides one associated item. It returns an error only when the
-// credential cannot be minted; a denial is (false, nil).
+// credential cannot be minted; a denial is (false, nil). The credential and
+// the decision use s.decisionContext(ctx); whether the request has ended
+// (the quiet Warns below) is read from ctx itself.
 func (s *deliverySelector) authorize(ctx context.Context, kind MaterialKind, record materialRecordKind, id, key, scope, scopeID string) (bool, error) {
 	grant, ok := grantForDeliveryScope(scope)
 	if !ok {
 		return false, nil
 	}
-	if err := s.mint(ctx); err != nil {
+	dctx, cancel := s.decisionContext(ctx)
+	defer cancel()
+	if err := s.mint(dctx); err != nil {
 		return false, err
 	}
 	res := materialDeliveryResource(kind, record, id, key, scope, scopeID, s.agent.ID, grant, s.purpose)
-	d := s.authz.Decide(ctx, deliveryAuthzRequest(s.ident, kind, res))
+	d := s.authz.Decide(dctx, deliveryAuthzRequest(s.ident, kind, res))
 	if !d.Allowed {
 		s.denied++
 		// A launch item the delivery decision refuses is withheld from the

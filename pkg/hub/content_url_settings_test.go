@@ -19,13 +19,16 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/urlredact"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -192,17 +195,17 @@ func TestServerConfigContentURL_Validation(t *testing.T) {
 	}
 	assert.Empty(t, contentURLAudits(t, st, gcpIAMAuditMutation), "a refused save was audited")
 
-	rr := putServerConfigDB(t, srv, ops, `{"server":{"hub":{"content_url":"https://links.example.com"}}}`)
+	rr := putServerConfigDB(t, srv, ops, `{"server":{"hub":{"content_url":"https://links.example.org"}}}`)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	got, _ := storedContentURL(t, fake)
-	assert.Equal(t, "https://links.example.com", got)
+	assert.Equal(t, "https://links.example.org", got)
 
 	srv.config.HubEndpoints = &HubEndpoints{Operator: "http://localhost:8080", Public: "http://localhost:8080"}
 	for _, v := range []string{"https://localhost:8080", "http://localhost:9000", "http://LOCALHOST:8080"} {
 		rr := putServerConfigDB(t, srv, ops, `{"server":{"hub":{"content_url":"`+v+`"}}}`)
 		assert.Equal(t, http.StatusUnprocessableEntity, rr.Code, "%s: %s", v, rr.Body.String())
 		got, _ := storedContentURL(t, fake)
-		assert.Equal(t, "https://links.example.com", got, "%s: written", v)
+		assert.Equal(t, "https://links.example.org", got, "%s: written", v)
 	}
 	rr = putServerConfigDB(t, srv, ops, `{"server":{"hub":{"content_url":"http://127.0.0.1:9000"}}}`)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
@@ -226,7 +229,7 @@ func TestServerConfigContentURL_Validation(t *testing.T) {
 func TestServerConfigContentURL_FileModeValidated(t *testing.T) {
 	srv, _, _ := fileModeGCPIdentityServer(t)
 	srv.config.HubEndpoints = &HubEndpoints{Operator: loTestHubOrigin, Public: loTestHubOrigin}
-	for _, v := range []string{"https://links.example.net/x", loTestHubOrigin, "https://hub.example.com:8443"} {
+	for _, v := range []string{"https://links.example.net/x", loTestHubOrigin, "https://hub.example.com:8443", "https://links.example.com"} {
 		rr := httptest.NewRecorder()
 		srv.handlePutServerConfig(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config", `{"server":{"hub":{"content_url":"`+v+`"}}}`))
 		assert.Equal(t, http.StatusUnprocessableEntity, rr.Code, "%s: %s", v, rr.Body.String())
@@ -347,6 +350,90 @@ func TestServerConfigContentURL_FileModeAudited(t *testing.T) {
 	})
 }
 
+// TestServerConfigContentURL_FileModeAuditRedactsStoredValue: a content_url
+// stored in settings.yaml by hand, never validated, reaches neither the
+// audit record nor the audit's log line raw when a save replaces it. A
+// value that parses is recorded as its scheme and host only (no user info,
+// path or query); a value that does not parse is recorded as urlredact.Mask.
+func TestServerConfigContentURL_FileModeAuditRedactsStoredValue(t *testing.T) {
+	const secret, token, pathToken = "s3cr3t-tok", "q-tok-123", "t-abc123"
+	for _, tc := range []struct {
+		name, stored, wantBefore string
+	}{
+		{"parses", "https://ops:" + secret + "@links.example.net/?token=" + token, "https://links.example.net"},
+		{"token in path", "https://ops:" + secret + "@links.example.net/" + pathToken + "?token=" + token, "https://links.example.net"},
+		{"does not parse", "https://ops:" + secret + "@links example.net/" + pathToken + "?token=" + token, urlredact.Mask},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, st, settingsPath := fileModeGCPIdentityServer(t)
+			srv.config.HubEndpoints = &HubEndpoints{Operator: loTestHubOrigin, Public: loTestHubOrigin}
+			require.NoError(t, os.WriteFile(settingsPath, []byte(
+				"schema_version: \"1\"\ndefault_timezone: UTC\nserver:\n  hub:\n    port: 9810\n    content_url: \""+tc.stored+"\"\n"), 0o644))
+			logs := captureSlogDefault(t)
+
+			rr := httptest.NewRecorder()
+			srv.handlePutServerConfig(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config",
+				`{"server":{"hub":{"content_url":"https://other.example.net"}}}`))
+			require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+			recs := contentURLAudits(t, st, gcpIAMAuditMutation)
+			require.Len(t, recs, 1)
+			assert.Equal(t, tc.wantBefore, recs[0].BeforeSummary)
+			assert.Equal(t, "https://other.example.net", recs[0].AfterSummary)
+			var auditLine string
+			for _, line := range strings.Split(logs.String(), "\n") {
+				if strings.Contains(line, "Hub endpoint setting changed") {
+					auditLine = line
+					break
+				}
+			}
+			require.NotEmpty(t, auditLine, "the audit's log line")
+			assert.Contains(t, auditLine, "old="+tc.wantBefore, "the audit's log line shows the summarized value")
+			whole, err := json.Marshal(recs[0])
+			require.NoError(t, err)
+			for _, raw := range []string{secret, token, pathToken, tc.stored} {
+				assert.NotContains(t, string(whole), raw, "the audit record holds the stored value raw")
+				assert.NotContains(t, logs.String(), raw, "the log holds the stored value raw")
+			}
+		})
+	}
+}
+
+// TestContentURLForAudit: the audit summary of a content URL value is its
+// scheme, host and port for an http or https URL with a host, "" for an
+// empty value, and urlredact.Mask for anything else; no user info, query,
+// path or other raw text of the value survives.
+func TestContentURLForAudit(t *testing.T) {
+	const secret, token, pathToken = "s3cr3t-tok", "q-tok-123", "t-abc123"
+	for _, tc := range []struct{ name, raw, want string }{
+		{"empty", "", ""},
+		{"origin", "https://links.example.net", "https://links.example.net"},
+		{"port", "https://links.example.net:8443", "https://links.example.net:8443"},
+		{"loopback http", "http://localhost:9810", "http://localhost:9810"},
+		{"IPv6 literal", "https://[2001:db8::1]:8443", "https://[2001:db8::1]:8443"},
+		{"user info and query", "https://ops:" + secret + "@links.example.net/?token=" + token, "https://links.example.net"},
+		{"token in path", "https://links.example.net/" + pathToken, "https://links.example.net"},
+		{"scheme-less", "links.example.net/" + pathToken, urlredact.Mask},
+		{"opaque", "https:links.example.net/" + pathToken, urlredact.Mask},
+		{"word:rest", "token:" + secret, urlredact.Mask},
+		{"upper-case scheme", "HTTPS://Host.Example:8443/p?q", "https://Host.Example:8443"},
+		{"other scheme", "ftp://host.example", urlredact.Mask},
+		{"other scheme with path", "ftp://links.example.net/" + pathToken, urlredact.Mask},
+		{"empty host", "https:///" + pathToken, urlredact.Mask},
+		{"protocol-relative", "//links.example.net/" + pathToken, urlredact.Mask},
+		{"at sign after the path", "https://links.example.net/" + pathToken + "@" + secret, urlredact.Mask},
+		{"does not parse", "https://ops:" + secret + "@links example.net/?token=" + token, urlredact.Mask},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := contentURLForAudit(tc.raw)
+			assert.Equal(t, tc.want, got)
+			for _, raw := range []string{secret, token, pathToken} {
+				assert.NotContains(t, got, raw)
+			}
+		})
+	}
+}
+
 // TestServerConfigContentURL_FileModeAuditFailureBlocksWrite: when the audit
 // record of a file-mode change cannot be written, settings.yaml and the
 // value in effect stay as they were. SEC-A1 (round-2 P3).
@@ -419,4 +506,399 @@ func TestServerConfigContentURL_FileModeEnvValueNotAudited(t *testing.T) {
 	srv.handlePutServerConfig(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config", `{"default_timezone":"Europe/Paris"}`))
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	assert.Empty(t, contentURLAudits(t, st, gcpIAMAuditMutation), "an unrelated save wrote a content_url record")
+}
+
+// TestServerConfigContentURL_SameSite: on save, a content URL on the hub's
+// registrable domain is refused unless server.hub.content_url_allow_same_site
+// is in effect after the save (sent with it, or already set). With the
+// override it is stored, applied and logs the reworded warning, and the
+// override's own change is audited. A value under a public suffix shared
+// with the hub (a.github.io / b.github.io) is a different site, accepted
+// with no override; a value on the hub's own host name stays refused with
+// the override (ptone/scion#7107 phase B item 1, tests a-d on save).
+func TestServerConfigContentURL_SameSite(t *testing.T) {
+	const sameSite = "https://links.example.com"
+	srv, fake, ops, st, _ := contentURLSettingsFixture(t)
+	logs := captureContentHostLogs(t)
+
+	// (a) Refused without the override, in DB mode and in file mode.
+	rr := putServerConfigDB(t, srv, ops, `{"server":{"hub":{"content_url":"`+sameSite+`"}}}`)
+	assert.Equal(t, http.StatusUnprocessableEntity, rr.Code, rr.Body.String())
+	assert.Contains(t, rr.Body.String(), config.ContentURLKey)
+	assert.Contains(t, rr.Body.String(), config.ContentURLAllowSameSiteKey)
+	_, ok := storedContentURL(t, fake)
+	assert.False(t, ok, "a refused value was written")
+	assert.Empty(t, srv.HubEndpoints().Content)
+
+	// (d) The hub's own host name stays refused even with the override.
+	for _, v := range []string{loTestHubOrigin, "https://hub.example.com:8443"} {
+		rr = putServerConfigDB(t, srv, ops, `{"server":{"hub":{"content_url":"`+v+`","content_url_allow_same_site":true}}}`)
+		assert.Equal(t, http.StatusUnprocessableEntity, rr.Code, "%s: %s", v, rr.Body.String())
+		_, ok = storedContentURL(t, fake)
+		assert.False(t, ok, "%s: written", v)
+	}
+
+	// (b) Accepted with the override sent in the same save: stored,
+	// applied, warned about, and the override change audited.
+	rr = putServerConfigDB(t, srv, ops, `{"server":{"hub":{"content_url":"`+sameSite+`","content_url_allow_same_site":true}}}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	got, _ := storedContentURL(t, fake)
+	assert.Equal(t, sameSite, got)
+	assert.Equal(t, sameSite, srv.HubEndpoints().Content)
+	out := logs()
+	assert.Contains(t, out, "is not a separate security origin for cookies")
+	assert.Contains(t, out, "(accepted because "+config.ContentURLAllowSameSiteKey+" is set)")
+
+	recs, _, err := st.ListMutationAudits(context.Background(), store.MutationAuditFilter{MutationType: gcpIAMAuditMutation})
+	require.NoError(t, err)
+	var overrideChanges [][2]string
+	for _, r := range recs {
+		if r.TargetID == config.ContentURLAllowSameSiteKey {
+			assert.NotEmpty(t, r.ActorPrincipalID, "the actor is recorded")
+			overrideChanges = append(overrideChanges, [2]string{r.BeforeSummary, r.AfterSummary})
+		}
+	}
+	assert.Equal(t, [][2]string{{"false", "true"}}, overrideChanges)
+
+	// With the override already in effect, a later save of another
+	// same-site value needs no override in the request.
+	rr = putServerConfigDB(t, srv, ops, `{"server":{"hub":{"content_url":"https://share.example.com"}}}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	assert.Equal(t, "https://share.example.com", srv.HubEndpoints().Content)
+
+	// Turning the override off leaves the stored value ignored at runtime.
+	rr = putServerConfigDB(t, srv, ops, `{"server":{"hub":{"content_url_allow_same_site":false}}}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	assert.Empty(t, srv.HubEndpoints().Content, "a same-site value was used without the override")
+
+	// (c) Public suffix tenants are different sites: no override needed.
+	srv.config.HubEndpoints = &HubEndpoints{Operator: "https://a.github.io", Public: "https://a.github.io"}
+	rr = putServerConfigDB(t, srv, ops, `{"server":{"hub":{"content_url":"https://b.github.io"}}}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	assert.Equal(t, "https://b.github.io", srv.HubEndpoints().Content)
+}
+
+// TestServerConfigContentURL_SameSiteTokensRefused: a user access token
+// cannot write server.hub.content_url_allow_same_site.
+func TestServerConfigContentURL_SameSiteTokensRefused(t *testing.T) {
+	srv, s := testServerWithOps(t, nil)
+	admin := hubConfigTokenUser(t, s, "cu-ss-super", store.SystemRoleSuperAdmin)
+	key := mintHubConfigToken(t, srv, admin, hubBoundary(), "hub_config:read", "hub_config:update")
+	for _, body := range []string{
+		`{"server":{"hub":{"content_url_allow_same_site":true}}}`,
+		`{"server":{"hub":{"content_url_allow_same_site":false}}}`,
+	} {
+		rec := doRequestWithToken(t, srv, key, http.MethodPut, "/api/v1/admin/server-config", json.RawMessage(body))
+		requireTokenRefusedKeys(t, rec, config.ContentURLAllowSameSiteKey)
+	}
+}
+
+// TestServerConfigContentURL_AllowSameSiteEchoNotPinned: GET always shows
+// content_url_allow_same_site (false while the stored row leaves it unset).
+// A save that sends that value back is an echo, so the key is neither
+// written into the row nor reported nor audited; an explicit change is
+// still stored (ptone/scion#7107 PB1 F2).
+func TestServerConfigContentURL_AllowSameSiteEchoNotPinned(t *testing.T) {
+	srv, fake, ops, st, _ := contentURLSettingsFixture(t)
+	rr := putServerConfigDB(t, srv, ops, `{"server":{"hub":{"content_url":"https://links.example.net"}}}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	get := getServerConfigDB(t, srv, ops)
+	require.NotNil(t, get.Server.Hub.ContentURLAllowSameSite)
+	require.False(t, *get.Server.Hub.ContentURLAllowSameSite)
+
+	rr = putServerConfigDB(t, srv, ops, `{"server":{"hub":{"admin_emails":["new@example.com"],"content_url":"https://links.example.net","content_url_allow_same_site":false}}}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	doc, _ := rowDoc(t, fake, "endpoints")
+	assert.NotContains(t, doc, "content_url_allow_same_site", "the echoed override was pinned into the row")
+	applied, _ := savedKeys(t, rr.Body.Bytes())
+	assert.NotContains(t, applied, config.ContentURLAllowSameSiteKey)
+	recs, _, err := st.ListMutationAudits(context.Background(), store.MutationAuditFilter{})
+	require.NoError(t, err)
+	for _, r := range recs {
+		assert.NotEqual(t, config.ContentURLAllowSameSiteKey, r.TargetID, "an echo was audited")
+	}
+
+	// An explicit change is stored.
+	rr = putServerConfigDB(t, srv, ops, `{"server":{"hub":{"content_url_allow_same_site":true}}}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	doc, _ = rowDoc(t, fake, "endpoints")
+	assert.Equal(t, true, doc["content_url_allow_same_site"])
+}
+
+// failOneKeyAuditStore fails the change record of one key and passes every
+// other audit write, so a write that records two changes fails on the
+// second.
+type failOneKeyAuditStore struct {
+	store.Store
+	key string
+}
+
+func (f *failOneKeyAuditStore) CreateMutationAudit(ctx context.Context, rec *store.MutationAuditRecord) error {
+	if rec.TargetID == f.key && rec.MutationType == gcpIAMAuditMutation {
+		return errors.New("injected audit failure")
+	}
+	return f.Store.CreateMutationAudit(ctx, rec)
+}
+
+// TestServerConfigContentURL_SecondAuditFailureMarksFirstNotApplied: when
+// one write changes content_url and its same-site override and the
+// override's record cannot be written, nothing is written and the
+// content_url change already recorded gets a not-applied record, on a DB
+// save, a section reset and a file-mode save (ptone/scion#7107 sec S1).
+func TestServerConfigContentURL_SecondAuditFailureMarksFirstNotApplied(t *testing.T) {
+	const sameSite = "https://links.example.com"
+	failOverride := func(t *testing.T, srv *Server) {
+		t.Helper()
+		installStoreFault(t, srv, func(inner store.Store, _ *storeFaultSwitch) *failOneKeyAuditStore {
+			return &failOneKeyAuditStore{Store: inner, key: config.ContentURLAllowSameSiteKey}
+		})
+	}
+	notApplied := func(t *testing.T, st store.Store) [][2]string {
+		t.Helper()
+		var out [][2]string
+		for _, r := range contentURLAudits(t, st, gcpIAMNotAppliedMutation) {
+			out = append(out, [2]string{r.BeforeSummary, r.AfterSummary})
+		}
+		return out
+	}
+
+	t.Run("db save", func(t *testing.T) {
+		srv, fake, ops, st, _ := contentURLSettingsFixture(t)
+		failOverride(t, srv)
+		rr := putServerConfigDB(t, srv, ops, `{"server":{"hub":{"content_url":"`+sameSite+`","content_url_allow_same_site":true}}}`)
+		require.Equal(t, http.StatusInternalServerError, rr.Code, rr.Body.String())
+		_, ok := storedContentURL(t, fake)
+		assert.False(t, ok, "written without the override's record")
+		assert.Equal(t, [][2]string{{"", sameSite}}, notApplied(t, st))
+	})
+
+	t.Run("section reset", func(t *testing.T) {
+		srv, fake, ops, st, _ := contentURLSettingsFixture(t)
+		rr := putServerConfigDB(t, srv, ops, `{"server":{"hub":{"content_url":"`+sameSite+`","content_url_allow_same_site":true}}}`)
+		require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+		failOverride(t, srv)
+		rr = resetEndpoints(t, srv)
+		require.Equal(t, http.StatusInternalServerError, rr.Code, rr.Body.String())
+		got, _ := storedContentURL(t, fake)
+		assert.Equal(t, sameSite, got, "reset without the override's record")
+		assert.Equal(t, [][2]string{{sameSite, ""}}, notApplied(t, st))
+	})
+
+	t.Run("file mode save", func(t *testing.T) {
+		srv, st, settingsPath := fileModeGCPIdentityServer(t)
+		srv.config.HubEndpoints = &HubEndpoints{Operator: loTestHubOrigin, Public: loTestHubOrigin}
+		before, err := os.ReadFile(settingsPath)
+		require.NoError(t, err)
+		failOverride(t, srv)
+		rr := httptest.NewRecorder()
+		srv.handlePutServerConfig(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config",
+			`{"server":{"hub":{"content_url":"`+sameSite+`","content_url_allow_same_site":true}}}`))
+		require.Equal(t, http.StatusInternalServerError, rr.Code, rr.Body.String())
+		after, err := os.ReadFile(settingsPath)
+		require.NoError(t, err)
+		assert.Equal(t, string(before), string(after), "settings.yaml written without the override's record")
+		assert.Equal(t, [][2]string{{"", sameSite}}, notApplied(t, st))
+	})
+}
+
+// TestServerConfigContentURL_AgentAndBrokerRefused: an agent or broker
+// credential cannot write server.hub.content_url or its same-site override,
+// by a DB save, a reset of the endpoints section or a file-mode save; the
+// request is refused naming the key (or the section), nothing is written
+// and nothing is audited (ptone/scion#7107 PB1 F5a).
+func TestServerConfigContentURL_AgentAndBrokerRefused(t *testing.T) {
+	creds := []struct {
+		name     string
+		identity Identity
+		kind     CredentialKind
+	}{
+		{"agent", &agentIdentityWrapper{&AgentTokenClaims{ProjectID: "p1"}}, CredentialKindAgentJWT},
+		{"broker", NewBrokerIdentity(tid("b1")), CredentialKindBroker},
+	}
+	bodies := []struct{ key, body string }{
+		{config.ContentURLKey, `{"server":{"hub":{"content_url":"https://links.example.net"}}}`},
+		{config.ContentURLAllowSameSiteKey, `{"server":{"hub":{"content_url_allow_same_site":true}}}`},
+	}
+	for _, c := range creds {
+		ctx := contextWithCredentialContext(contextWithIdentity(context.Background(), c.identity), CredentialContext{Kind: c.kind})
+		for _, b := range bodies {
+			t.Run(c.name+" db save "+b.key, func(t *testing.T) {
+				srv, fake, ops, st, _ := contentURLSettingsFixture(t)
+				rr := httptest.NewRecorder()
+				srv.handlePutServerConfigDB(rr, httptest.NewRequest(http.MethodPut, "/api/v1/admin/server-config", strings.NewReader(b.body)).WithContext(ctx), ops)
+				requireTokenRefusedKeys(t, rr, b.key)
+				_, err := fake.GetHubSetting(context.Background(), "endpoints")
+				assert.ErrorIs(t, err, store.ErrNotFound, "the endpoints section was written")
+				recs, _, err := st.ListMutationAudits(context.Background(), store.MutationAuditFilter{})
+				require.NoError(t, err)
+				assert.Empty(t, recs, "a refused save was audited")
+			})
+			t.Run(c.name+" file mode "+b.key, func(t *testing.T) {
+				srv, st, settingsPath := fileModeGCPIdentityServer(t)
+				srv.config.HubEndpoints = &HubEndpoints{Operator: loTestHubOrigin, Public: loTestHubOrigin}
+				before, err := os.ReadFile(settingsPath)
+				require.NoError(t, err)
+				rr := httptest.NewRecorder()
+				srv.handlePutServerConfig(rr, httptest.NewRequest(http.MethodPut, "/api/v1/admin/server-config", strings.NewReader(b.body)).WithContext(ctx))
+				requireTokenRefusedKeys(t, rr, b.key)
+				after, err := os.ReadFile(settingsPath)
+				require.NoError(t, err)
+				assert.Equal(t, string(before), string(after), "settings.yaml was written")
+				recs, _, err := st.ListMutationAudits(context.Background(), store.MutationAuditFilter{})
+				require.NoError(t, err)
+				assert.Empty(t, recs, "a refused save was audited")
+			})
+		}
+		t.Run(c.name+" section reset", func(t *testing.T) {
+			srv, fake, ops, st, _ := contentURLSettingsFixture(t)
+			rr := putServerConfigDB(t, srv, ops, `{"server":{"hub":{"content_url":"https://links.example.com","content_url_allow_same_site":true}}}`)
+			require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+			auditsBefore, _, err := st.ListMutationAudits(context.Background(), store.MutationAuditFilter{})
+			require.NoError(t, err)
+			rr = httptest.NewRecorder()
+			srv.handleAdminServerConfigSectionReset(rr, httptest.NewRequest(http.MethodDelete, "/api/v1/admin/server-config/sections/endpoints", nil).WithContext(ctx))
+			requireTokenRefusedKeys(t, rr, "endpoints")
+			doc, _ := rowDoc(t, fake, "endpoints")
+			assert.Equal(t, "https://links.example.com", doc["content_url"], "the reset was made")
+			assert.Equal(t, true, doc["content_url_allow_same_site"], "the reset was made")
+			auditsAfter, _, err := st.ListMutationAudits(context.Background(), store.MutationAuditFilter{})
+			require.NoError(t, err)
+			assert.Len(t, auditsAfter, len(auditsBefore), "a refused reset was audited")
+		})
+	}
+}
+
+// TestServerConfigContentURL_TokenResetKeepsSection: a user access token
+// cannot reset the endpoints section, so a stored content_url and override
+// stay stored and in effect, and no reset is audited (ptone/scion#7107 PB1
+// F5b).
+func TestServerConfigContentURL_TokenResetKeepsSection(t *testing.T) {
+	const sameSite = "https://links.example.com"
+	srv, fake, ops, st, _ := contentURLSettingsFixture(t)
+	rr := putServerConfigDB(t, srv, ops, `{"server":{"hub":{"content_url":"`+sameSite+`","content_url_allow_same_site":true}}}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", store.UserRoleAdmin, "cli")
+	ctx := contextWithCredentialContext(contextWithIdentity(context.Background(), admin), CredentialContext{Kind: CredentialKindUAT})
+	rr = httptest.NewRecorder()
+	srv.handleAdminServerConfigSectionReset(rr, httptest.NewRequest(http.MethodDelete, "/api/v1/admin/server-config/sections/endpoints", nil).WithContext(ctx))
+	requireTokenRefusedKeys(t, rr, "endpoints")
+
+	doc, _ := rowDoc(t, fake, "endpoints")
+	assert.Equal(t, sameSite, doc["content_url"])
+	assert.Equal(t, true, doc["content_url_allow_same_site"])
+	assert.Equal(t, sameSite, srv.HubEndpoints().Content, "the content host in effect changed")
+	recs := contentURLAudits(t, st, gcpIAMAuditMutation)
+	require.Len(t, recs, 1, "a refused reset was audited")
+	assert.Equal(t, gcpIAMSurfaceSave, recs[0].ExecutorID, "a refused reset was audited")
+}
+
+// TestServerConfigContentURL_FileModeAcceptsWithOverride: in file mode a
+// same-site content_url sent with the override is written to settings.yaml
+// and both changes are audited (ptone/scion#7107 PB1 F5c).
+func TestServerConfigContentURL_FileModeAcceptsWithOverride(t *testing.T) {
+	const sameSite = "https://links.example.com"
+	srv, st, settingsPath := fileModeGCPIdentityServer(t)
+	srv.config.HubEndpoints = &HubEndpoints{Operator: loTestHubOrigin, Public: loTestHubOrigin}
+	rr := httptest.NewRecorder()
+	srv.handlePutServerConfig(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config",
+		`{"server":{"hub":{"content_url":"`+sameSite+`","content_url_allow_same_site":true}}}`))
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	raw := readSettingsYAML(t, settingsPath)
+	hub, _ := raw["server"].(map[string]interface{})["hub"].(map[string]interface{})
+	assert.Equal(t, sameSite, hub["content_url"])
+	assert.Equal(t, true, hub["content_url_allow_same_site"])
+
+	recs, _, err := st.ListMutationAudits(context.Background(), store.MutationAuditFilter{MutationType: gcpIAMAuditMutation})
+	require.NoError(t, err)
+	got := map[string][2]string{}
+	for _, r := range recs {
+		assert.Equal(t, gcpIAMSurfaceSave, r.ExecutorID)
+		assert.NotEmpty(t, r.ActorPrincipalID, "the actor is recorded")
+		got[r.TargetID] = [2]string{r.BeforeSummary, r.AfterSummary}
+	}
+	assert.Equal(t, map[string][2]string{
+		config.ContentURLKey:              {"", sameSite},
+		config.ContentURLAllowSameSiteKey: {"false", "true"},
+	}, got)
+	assert.Empty(t, contentURLAudits(t, st, gcpIAMNotAppliedMutation))
+}
+
+// TestServerConfigContentURL_Status: GET reports content_url_status for the
+// value as applied, naming the override key when a same-site value waits
+// for it; a PUT body that sends the status back has it dropped, so an
+// echoed (or stale) status neither fails the save nor is stored
+// (ptone/scion#7107 PB1 F1).
+func TestServerConfigContentURL_Status(t *testing.T) {
+	srv, fake, ops, _, _ := contentURLSettingsFixture(t)
+	status := func() ContentURLStatus {
+		t.Helper()
+		resp := getServerConfigDB(t, srv, ops)
+		require.NotNil(t, resp.ContentURLStatus)
+		return *resp.ContentURLStatus
+	}
+	assert.Equal(t, ContentURLStatus{State: ContentURLStateUnset}, status())
+
+	rr := putServerConfigDB(t, srv, ops, `{"server":{"hub":{"content_url":"https://links.example.net"}}}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	assert.Equal(t, ContentURLStatus{State: ContentURLStateInEffect, Effective: "https://links.example.net"}, status())
+
+	// A stale status sent back is dropped: the save succeeds, the status is
+	// not stored, and GET still reports the state as applied.
+	rr = putServerConfigDB(t, srv, ops, `{"content_url_status":{"state":"unset"},"server":{"hub":{"monitoring_dashboard_url":"https://dash.example.com"}}}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	doc, _ := rowDoc(t, fake, "endpoints")
+	assert.NotContains(t, doc, "content_url_status")
+	assert.Equal(t, ContentURLStateInEffect, status().State)
+
+	// A same-site value with the override, then without it.
+	rr = putServerConfigDB(t, srv, ops, `{"server":{"hub":{"content_url":"https://links.example.com","content_url_allow_same_site":true}}}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	assert.Equal(t, ContentURLStatus{State: ContentURLStateInEffect, Effective: "https://links.example.com"}, status())
+	rr = putServerConfigDB(t, srv, ops, `{"server":{"hub":{"content_url_allow_same_site":false}}}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	assert.Equal(t, ContentURLStatus{State: ContentURLStateSameSite, OverrideKey: config.ContentURLAllowSameSiteKey}, status())
+
+	// The other states, as applied (saves refuse these values).
+	for value, want := range map[string]string{
+		"https://hub.example.com:8443": ContentURLStateSameHost,
+		"ftp://links.example.net":      ContentURLStateInvalid,
+		"https://agents.example.net":   ContentURLStateAgentEndpointHost,
+	} {
+		srv.config.AgentEndpoint = "https://agents.example.net"
+		setContentURLForTest(srv, value)
+		assert.Equal(t, ContentURLStatus{State: want}, status(), value)
+	}
+}
+
+// TestWarnContentURLNotInEffect: at startup, a stored same-site value
+// without the override logs the one ERROR line naming the override key, and
+// a value in effect logs nothing (ptone/scion#7107 PB1 F1).
+func TestWarnContentURLNotInEffect(t *testing.T) {
+	t.Run("same site without override", func(t *testing.T) {
+		logs := captureContentHostLogs(t)
+		srv := &Server{maintenance: NewMaintenanceState(false, "")}
+		srv.config.HubEndpoints = &HubEndpoints{Operator: loTestHubOrigin, Public: loTestHubOrigin}
+		ApplySnapshot(srv, Layer1Snapshot{ContentURL: "https://links.example.com"})
+		srv.WarnContentURLNotInEffect()
+		var lines []string
+		for _, l := range strings.Split(logs(), "\n") {
+			if strings.Contains(l, config.ContentURLKey+" is ignored") {
+				lines = append(lines, l)
+			}
+		}
+		require.Len(t, lines, 1, "the warning is one line, logged once")
+		assert.Contains(t, lines[0], "level=ERROR")
+		assert.Contains(t, lines[0], config.ContentURLAllowSameSiteKey)
+	})
+	t.Run("in effect", func(t *testing.T) {
+		logs := captureContentHostLogs(t)
+		srv := &Server{maintenance: NewMaintenanceState(false, "")}
+		srv.config.HubEndpoints = &HubEndpoints{Operator: loTestHubOrigin, Public: loTestHubOrigin}
+		ApplySnapshot(srv, Layer1Snapshot{ContentURL: "https://links.example.net"})
+		srv.WarnContentURLNotInEffect()
+		assert.NotContains(t, logs(), config.ContentURLKey)
+	})
 }

@@ -2319,13 +2319,15 @@ func resolvedAuthEnvEntries(ra *api.ResolvedAuth, taken func(name string) bool) 
 //     so an empty telemetry value leaves a GetEnv value in place.
 //
 // It is nil without a harness. Reserved names are not filtered here: the
-// caller emits these entries before the runtime's reserved-name drop,
-// which covers every source.
+// caller emits these entries before the runtime's reserved-name drop
+// (reservedAgentEnvName, the staged blob markers; not
+// secret.IsReservedEnvTarget), which covers every source.
 //
 // A runtime may call it more than once per start: GetEnv and
-// GetTelemetryEnv are called twice per Cloud Run start (cloudRunHarnessEnv);
-// this assumes they are deterministic and side-effect free, as every
-// in-tree harness is.
+// GetTelemetryEnv are called twice per Cloud Run start (cloudRunHarnessEnv),
+// three times on a native "assign" start, which builds the instance once
+// more for its init firewall check; this assumes they are deterministic and
+// side-effect free, as every in-tree harness is.
 func harnessEnvEntries(cfg RunConfig, agentHome string) []string {
 	if cfg.Harness == nil {
 		return nil

@@ -18,7 +18,6 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -105,10 +104,7 @@ func TestSSEHandler_ThreadGroupSubjectOnlyForProjectReaders(t *testing.T) {
 			pub := NewChannelEventPublisher()
 			defer pub.Close()
 			ws := &WebServer{store: s, events: pub, authzService: NewAuthzService(s, nil)}
-			ctx, cancel := context.WithCancel(context.Background())
-			cancel() // only the initial authorization decision matters here
-			w := httptest.NewRecorder()
-			ws.handleSSE(w, sseAgentRequest(ctx, userID, "user", tc.subject))
+			w := serveSSELive(t, ws, func(ctx context.Context) *http.Request { return sseAgentRequest(ctx, userID, "user", tc.subject) })
 			assert.Equal(t, tc.want, w.Code, "subject %q", tc.subject)
 		})
 	}

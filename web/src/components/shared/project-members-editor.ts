@@ -55,6 +55,8 @@ import { showConfirm } from './confirm-dialog.js';
 import './principal-picker.js';
 import {
   BUILT_IN_PROJECT_MEMBERSHIP_ROLES,
+  builtInRoleLabel,
+  PROJECT_VIEWER_ROLE_NAME,
   getPrincipalIcon,
   getRoleTier,
   type RoleTier,
@@ -282,14 +284,17 @@ export function customRoleState(
   return { disabled: false, reason: '' };
 }
 
-/** Built-in roles from the catalog, in tier order (owner, admin, member). */
+/** Built-in roles from the catalog, in tier order (owner, admin, member),
+ *  with the viewer role last. */
 export function builtInCatalog(
   assignable: readonly AssignableProjectRole[]
 ): AssignableProjectRole[] {
   const rank: Record<RoleTier, number> = { owner: 0, admin: 1, member: 2 };
+  const order = (name: string): number =>
+    rank[getRoleTier(name)] + (name === PROJECT_VIEWER_ROLE_NAME ? 1 : 0);
   return assignable
     .filter((r) => (r.roleKind ? r.roleKind === 'builtin' : !isCustomProjectRole(r.name)))
-    .sort((a, b) => rank[getRoleTier(a.name)] - rank[getRoleTier(b.name)]);
+    .sort((a, b) => order(a.name) - order(b.name));
 }
 
 /** Whether a catalog role is custom: its roleKind when the hub sent one,
@@ -321,7 +326,9 @@ export function defaultBuiltInForAdd(
   };
   const builtIns = builtInCatalog(assignable);
   for (const tier of ['admin', 'member'] as const) {
-    const role = builtIns.find((r) => getRoleTier(r.name) === tier);
+    const role = builtIns.find(
+      (r) => getRoleTier(r.name) === tier && r.name !== PROJECT_VIEWER_ROLE_NAME
+    );
     if (role && !builtInOptionState(role, ctx).disabled) return role.id;
   }
   return NO_PROJECT_ROLE;
@@ -1935,7 +1942,6 @@ export class ScionProjectMembersEditor extends LitElement {
     const locked = !!this.dlgLockedReason;
     const optionState = (role: AssignableProjectRole | null): OptionState =>
       locked ? { disabled: true, reason: '' } : builtInOptionState(role, ctx);
-    const labels: Record<RoleTier, string> = { owner: 'Owner', admin: 'Admin', member: 'Member' };
     const option = (value: string, label: string, state: OptionState, description = '') => html`
       <sl-radio
         class="role-option ${this.dlgErrorRoleId === value ? 'option-error' : ''}"
@@ -1961,7 +1967,7 @@ export class ScionProjectMembersEditor extends LitElement {
           }}
         >
           ${builtIns.map((role) =>
-            option(role.id, labels[getRoleTier(role.name)], optionState(role), role.description)
+            option(role.id, builtInRoleLabel(role.name), optionState(role), role.description)
           )}
           ${this.noProjectRoleShown
             ? option(

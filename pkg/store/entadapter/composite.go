@@ -966,6 +966,56 @@ func (c *CompositeStore) Migrate(ctx context.Context) error {
 	return c.SeedMaintenanceOperations(ctx)
 }
 
+// backfillAgentRoleAttempts bounds the re-reads of backfillAgentRole when
+// the agent's applied config changes between its read and its write. A
+// variable so a test can lower it.
+var backfillAgentRoleAttempts = 5
+
+// backfillAgentRole sets the grandfathered full role on agent a when its
+// applied config names no role, and reports whether it wrote. The write
+// starts from the row's own document, keeps its recorded native Cloud Run
+// decision (marshalAppliedConfigNative with rowNativeCloudRun), and applies
+// only while the row still holds the document read; otherwise the row is
+// read again.
+func (c *CompositeStore) backfillAgentRole(ctx context.Context, a *ent.Agent) (bool, error) {
+	for attempt := 0; attempt < backfillAgentRoleAttempts; attempt++ {
+		cfg := &store.AgentAppliedConfig{}
+		if a.AppliedConfig != "" {
+			parsed, err := parseAppliedConfig(a.AppliedConfig)
+			if err != nil {
+				return false, fmt.Errorf("parse applied_config for agent %s: %w", a.ID, err)
+			}
+			if parsed != nil {
+				cfg = parsed
+			}
+		}
+		if cfg.AgentRole != "" {
+			return false, nil
+		}
+		cfg.AgentRole = "full"
+		cfg.AgentRoleGrandfathered = true
+		n, err := c.client.Agent.Update().
+			Where(agent.IDEQ(a.ID), appliedConfigUnchanged(a.AppliedConfig)).
+			SetAppliedConfig(marshalAppliedConfigNative(cfg, rowNativeCloudRun(a.AppliedConfig))).
+			Save(ctx)
+		if err != nil {
+			return false, err
+		}
+		if n == 1 {
+			return true, nil
+		}
+		fresh, err := c.client.Agent.Get(ctx, a.ID)
+		if ent.IsNotFound(err) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		a = fresh
+	}
+	return false, fmt.Errorf("backfill agent role for agent %s: applied config kept changing", a.ID)
+}
+
 // BackfillEmptyAgentRoles preserves access for pre-role agents before missing
 // roles start resolving to the least-privileged role at runtime.
 func (c *CompositeStore) BackfillEmptyAgentRoles(ctx context.Context) error {
@@ -982,27 +1032,13 @@ func (c *CompositeStore) BackfillEmptyAgentRoles(ctx context.Context) error {
 
 	var updated int
 	for _, a := range agents {
-		cfg := &store.AgentAppliedConfig{}
-		if a.AppliedConfig != "" {
-			parsed, err := parseAppliedConfig(a.AppliedConfig)
-			if err != nil {
-				return fmt.Errorf("parse applied_config for agent %s: %w", a.ID, err)
-			}
-			if parsed != nil {
-				cfg = parsed
-			}
-		}
-		if cfg.AgentRole != "" {
-			continue
-		}
-		cfg.AgentRole = "full"
-		cfg.AgentRoleGrandfathered = true
-		if err := c.client.Agent.UpdateOneID(a.ID).
-			SetAppliedConfig(marshalAppliedConfig(cfg)).
-			Exec(ctx); err != nil {
+		done, err := c.backfillAgentRole(ctx, a)
+		if err != nil {
 			return err
 		}
-		updated++
+		if done {
+			updated++
+		}
 	}
 	if updated > 0 {
 		slog.Info("backfilled empty agent roles before role default change", "rows_updated", updated)
