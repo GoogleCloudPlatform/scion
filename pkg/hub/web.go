@@ -2279,12 +2279,60 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 	reconnectTimer := time.NewTimer(maxAge)
 	defer reconnectTimer.Stop()
 
+	// recheckMembership handles one membership-changed event; it reports
+	// whether the stream must end (closeReason is then set).
+	recheckMembership := func(evt Event, ok bool) bool {
+		if !ok {
+			// The publisher closed the subscription: end the stream as
+			// for the event subscription, so no change can be missed.
+			closeReason = eventstreams.ClosePublisher
+			return true
+		}
+		if !membershipChangedNames(evt, streamUserID) {
+			return false
+		}
+		// Fail closed: a subject the caller may no longer read, or a
+		// re-check that cannot decide, ends the stream with a reconnect
+		// hint, so the client reconnects and is authorized afresh.
+		if !sseStreamStillAuthorized(ws, r, subjects) {
+			n, _ := fmt.Fprintf(w, "event: reconnect\ndata: {}\n\n")
+			flusher.Flush()
+			stream.RecordBytes(n)
+			closeReason = eventstreams.CloseAccessChanged
+			return true
+		}
+		// Still authorized: drop cached per-agent decisions so the message
+		// rules are decided again.
+		viewer = ws.newSSEMessageViewer(r)
+		return false
+	}
+	// drainMembership handles every membership-changed event already
+	// queued, without blocking. The event case runs it before writing, so
+	// a membership change published before an event is re-checked before
+	// that event is written: select picks among ready cases at random, and
+	// would otherwise let the event through first.
+	drainMembership := func() bool {
+		for {
+			select {
+			case evt, ok := <-membershipCh:
+				if recheckMembership(evt, ok) {
+					return true
+				}
+			default:
+				return false
+			}
+		}
+	}
+
 	for {
 		select {
 		case evt, ok := <-ch:
 			if !ok {
 				// Publisher closed
 				closeReason = eventstreams.ClosePublisher
+				return
+			}
+			if drainMembership() {
 				return
 			}
 			if !viewer.visible(evt) {
@@ -2308,29 +2356,9 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 				trace.addSSEEvent(time.Since(writeStart))
 			}
 		case evt, ok := <-membershipCh:
-			if !ok {
-				// The publisher closed the subscription: end the stream as
-				// for the event subscription, so no change can be missed.
-				closeReason = eventstreams.ClosePublisher
+			if recheckMembership(evt, ok) {
 				return
 			}
-			if !membershipChangedNames(evt, streamUserID) {
-				continue
-			}
-			// Fail closed: a subject the caller may no longer read, or a
-			// re-check that cannot decide, ends the stream with a
-			// reconnect hint, so the client reconnects and is authorized
-			// afresh.
-			if !sseStreamStillAuthorized(ws, r, subjects) {
-				n, _ := fmt.Fprintf(w, "event: reconnect\ndata: {}\n\n")
-				flusher.Flush()
-				stream.RecordBytes(n)
-				closeReason = eventstreams.CloseAccessChanged
-				return
-			}
-			// Still authorized: drop cached per-agent decisions so the
-			// message rules are decided again.
-			viewer = ws.newSSEMessageViewer(r)
 		case <-heartbeat.C:
 			if tiSession && !ws.sseTestIdentitySessionStillValid(r) {
 				closeReason = eventstreams.CloseSessionEnded

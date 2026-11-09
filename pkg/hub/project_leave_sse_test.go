@@ -19,6 +19,7 @@ package hub
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -239,6 +240,105 @@ func TestProjectLeave_ChatStreamReauthFailsClosed(t *testing.T) {
 		t.Fatal("the stream was not closed")
 	}
 	assert.Contains(t, s.rec.String(), "event: reconnect")
+}
+
+// gatedLeaveRecorder is a leaveStreamRecorder whose Write blocks while the
+// gate is armed, so a test can hold the handler inside a write while it
+// queues more events behind it.
+type gatedLeaveRecorder struct {
+	*leaveStreamRecorder
+	gateMu  sync.Mutex
+	armed   bool
+	gate    chan struct{}
+	blocked chan struct{}
+}
+
+func newGatedLeaveRecorder() *gatedLeaveRecorder {
+	return &gatedLeaveRecorder{leaveStreamRecorder: newLeaveStreamRecorder(), blocked: make(chan struct{}, 1)}
+}
+
+func (g *gatedLeaveRecorder) Write(p []byte) (int, error) {
+	g.gateMu.Lock()
+	armed, gate := g.armed, g.gate
+	g.gateMu.Unlock()
+	if armed {
+		select {
+		case g.blocked <- struct{}{}:
+		default:
+		}
+		<-gate
+	}
+	return g.leaveStreamRecorder.Write(p)
+}
+
+// arm makes every later Write block until release.
+func (g *gatedLeaveRecorder) arm() {
+	g.gateMu.Lock()
+	defer g.gateMu.Unlock()
+	g.armed, g.gate = true, make(chan struct{})
+}
+
+// release unblocks the held Write and every later one.
+func (g *gatedLeaveRecorder) release() {
+	g.gateMu.Lock()
+	defer g.gateMu.Unlock()
+	g.armed = false
+	close(g.gate)
+}
+
+// TestProjectLeave_EventAfterMembershipChangeNeverReachesLeaver (review
+// S1): when the membership-changed event and a later event are both
+// queued, the stream re-checks the membership first, so the later event
+// is never written to the leaver. The handler is held inside the write of
+// an earlier event while both are queued behind it, which is where
+// select's random choice could otherwise let the later event through; the
+// round is repeated so a random pick would fail it.
+func TestProjectLeave_EventAfterMembershipChangeNeverReachesLeaver(t *testing.T) {
+	x := newLeaveSSEFixture(t)
+	orig := sseStreamStillAuthorized
+	sseStreamStillAuthorized = func(*WebServer, *http.Request, []string) bool { return false }
+	t.Cleanup(func() { sseStreamStillAuthorized = orig })
+
+	for i := 0; i < 20; i++ {
+		g := newGatedLeaveRecorder()
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			x.ws.handleSSE(g, sseAgentRequest(ctx, x.f.member.ID, "user", x.subject))
+		}()
+		require.Eventually(t, func() bool { return g.isFlushed() }, 5*time.Second, 10*time.Millisecond)
+
+		g.arm()
+		hold, after := fmt.Sprintf("hold-%d", i), fmt.Sprintf("after-%d", i)
+		x.chat(hold)
+		select {
+		case <-g.blocked:
+		case <-time.After(5 * time.Second):
+			g.release()
+			cancel()
+			<-done
+			t.Fatalf("round %d: the stream never started writing the held event", i)
+		}
+		// Both queued behind the held write: the leaver's membership change,
+		// then a chat message published right after it.
+		x.f.srv.publishMembershipChanged(x.f.member.ID, x.f.projectID)
+		x.chat(after)
+		g.release()
+
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			cancel()
+			<-done
+			t.Fatalf("round %d: the leaver's stream was not closed", i)
+		}
+		cancel()
+		body := g.String()
+		require.Contains(t, body, hold, "round %d", i)
+		require.Contains(t, body, "event: reconnect", "round %d", i)
+		require.NotContains(t, body, after, "round %d: an event published after the membership change reached the leaver", i)
+	}
 }
 
 // TestProjectLeave_MembershipEventOfOtherUserKeepsStream: an event naming

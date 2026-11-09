@@ -590,10 +590,46 @@ func (s *Server) handleAgentMessagesStream(w http.ResponseWriter, r *http.Reques
 	timeout := time.NewTimer(10 * time.Minute)
 	defer timeout.Stop()
 
+	// recheckMembership handles one membership-changed event; it reports
+	// whether the stream must end.
+	recheckMembership := func(mevt Event, ok bool) bool {
+		if !ok {
+			return true
+		}
+		if !membershipChangedNames(mevt, userID) {
+			return false
+		}
+		if !s.streamTokenStillAuthorized(ctx, res, recheckAction, recheckPermission) ||
+			!s.agentMessagesStreamStillAuthorized(ctx, user, agent.ID, fullHistory.Allowed) {
+			endStreamForCredential(ctx, w, flusher)
+			return true
+		}
+		return false
+	}
+	// drainMembership handles every membership-changed event already
+	// queued, without blocking, before a message is written: a membership
+	// change published before the message is re-checked first, rather than
+	// left to select's random choice among ready cases.
+	drainMembership := func() bool {
+		for {
+			select {
+			case mevt, ok := <-membershipCh:
+				if recheckMembership(mevt, ok) {
+					return true
+				}
+			default:
+				return false
+			}
+		}
+	}
+
 	for {
 		select {
 		case evt, ok := <-ch:
 			if !ok {
+				return
+			}
+			if drainMembership() {
 				return
 			}
 			if filterStream || conv.enabled {
@@ -620,15 +656,7 @@ func (s *Server) handleAgentMessagesStream(w http.ResponseWriter, r *http.Reques
 				return
 			}
 		case mevt, ok := <-membershipCh:
-			if !ok {
-				return
-			}
-			if !membershipChangedNames(mevt, userID) {
-				continue
-			}
-			if !s.streamTokenStillAuthorized(ctx, res, recheckAction, recheckPermission) ||
-				!s.agentMessagesStreamStillAuthorized(ctx, user, agent.ID, fullHistory.Allowed) {
-				endStreamForCredential(ctx, w, flusher)
+			if recheckMembership(mevt, ok) {
 				return
 			}
 		case <-timeout.C:
