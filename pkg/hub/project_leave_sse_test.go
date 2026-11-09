@@ -19,6 +19,7 @@ package hub
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -30,6 +31,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -492,22 +495,65 @@ func TestProjectLeave_AgentMessagesStreamEndsOnLeave(t *testing.T) {
 // error. A real leave each round (the member is added back between
 // rounds); 20 rounds, so a random pick between the two ready cases would
 // fail it.
+//
+// The stream drains the queued membership change before any filter
+// (handlers_messages.go, the drain precedes the participant and
+// conversation filters), so the result does not depend on the
+// conversation envelope switch. The main case runs the default config
+// (switch on) with the messages on the leaver's DM conversation with the
+// agent, as real users send them; a second case turns the switch off,
+// where the participant filter alone decides.
 func TestProjectLeave_AgentMessageAfterMembershipChangeNeverReachesLeaver(t *testing.T) {
-	x := newLeaveSSEFixture(t)
-	x.f.srv.membershipService.onMembershipLoss = nil
-	ctx := context.Background()
+	t.Run("default config, DM conversation", func(t *testing.T) {
+		x := newLeaveSSEFixture(t)
+		agent := leaveOrderAgent(t, x)
+		dmKey, err := messages.DMConversationKey("agent", agent.ID, "user", x.f.member.ID)
+		require.NoError(t, err)
+		conv, err := x.f.store.UpsertConversationByExternalRef(context.Background(), &store.Conversation{
+			Kind: "direct", Surface: "native", ExternalRef: dmKey, DriftState: "active",
+		})
+		require.NoError(t, err)
+		leaveAgentMessageOrderRounds(t, x, agent, conv.ID)
+	})
+	t.Run("envelope switch off, participant filter only", func(t *testing.T) {
+		x := newLeaveSSEFixture(t)
+		settings := newFakeHubSettingStore()
+		overrides, err := json.Marshal(map[string]map[string]bool{"overrides": {experiments.ProjectSelfLeave: true}})
+		require.NoError(t, err)
+		settings.seed("experiments", json.RawMessage(overrides))
+		settings.seed("messaging", json.RawMessage(`{"conversation_envelope_switch":false}`))
+		ops := NewOperationalSettings(settings, emptyKoanf(), emptyKoanf())
+		_, err = ops.Refresh(context.Background())
+		require.NoError(t, err)
+		x.f.srv.SetOperationalSettings(ops)
+		leaveAgentMessageOrderRounds(t, x, leaveOrderAgent(t, x), "")
+	})
+}
+
+// leaveOrderAgent creates the owner's running agent in the fixture project.
+func leaveOrderAgent(t *testing.T, x *leaveSSEFixture) *store.Agent {
+	t.Helper()
 	agent := &store.Agent{
 		ID: tid(t.Name() + "-agent"), Slug: "leave-order-agent", Name: "Leave Order Agent",
 		ProjectID: x.f.projectID, OwnerID: x.f.owner.ID, CreatedBy: x.f.owner.ID, Ancestry: []string{x.f.owner.ID},
 		Phase: "running", RuntimeBrokerID: tid(t.Name() + "-broker"), StateVersion: 1,
 		Created: time.Now(), Updated: time.Now(),
 	}
-	require.NoError(t, x.f.store.CreateAgent(ctx, agent))
-	// A message to the member: visible on their stream without agent.attach.
+	require.NoError(t, x.f.store.CreateAgent(context.Background(), agent))
+	return agent
+}
+
+// leaveAgentMessageOrderRounds runs the held-write rounds of the agent
+// messages ordering test. Each message is to the member, on convID when
+// it is set.
+func leaveAgentMessageOrderRounds(t *testing.T, x *leaveSSEFixture, agent *store.Agent, convID string) {
+	t.Helper()
+	x.f.srv.membershipService.onMembershipLoss = nil
+	ctx := context.Background()
 	message := func(marker string) {
 		x.pub.PublishRaw("agent."+agent.ID+".message", UserMessageEvent{
 			ID: marker, ProjectID: x.f.projectID, SenderID: x.f.owner.ID, RecipientID: x.f.member.ID,
-			Msg: marker, AgentID: agent.ID, Type: "instruction",
+			Msg: marker, AgentID: agent.ID, Type: "instruction", ConversationID: convID,
 		})
 	}
 
