@@ -16,6 +16,7 @@ package hubclient
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -81,4 +82,33 @@ func TestRuntimeBrokerGetSettings_Forbidden(t *testing.T) {
 	_, err = c.RuntimeBrokers().(RuntimeBrokerSettingsGetter).GetSettings(context.Background(), "b-1")
 	require.Error(t, err)
 	assert.True(t, apiclient.IsForbiddenError(err))
+}
+
+func TestRuntimeBrokerPutMaxAgents_SendsValueAndRevision(t *testing.T) {
+	var method, path string
+	var body map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		method, path = r.Method, r.URL.Path
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"brokerId":"b-1","settings":{"maxAgents":0},"effective":{"maxAgents":{"value":0,"source":"broker","inherited":{"value":25,"source":"default"}}},"revision":4,"_capabilities":{"update":true}}`))
+	}))
+	t.Cleanup(srv.Close)
+	c, err := New(srv.URL)
+	require.NoError(t, err)
+
+	putter, ok := c.RuntimeBrokers().(RuntimeBrokerSettingsPutter)
+	require.True(t, ok, "the package's RuntimeBrokerService implements RuntimeBrokerSettingsPutter")
+	zero := int64(0)
+	got, err := putter.PutMaxAgents(context.Background(), "b-1", &zero, 3)
+	require.NoError(t, err)
+
+	assert.Equal(t, http.MethodPut, method)
+	assert.Equal(t, "/api/v1/runtime-brokers/b-1/settings", path)
+	assert.Equal(t, map[string]any{"maxAgents": float64(0)}, body["settings"], "an explicit 0 is sent, not omitted")
+	assert.Equal(t, float64(3), body["expectedRevision"])
+	require.NotNil(t, got.Settings.MaxAgents)
+	assert.Equal(t, int64(0), *got.Settings.MaxAgents)
+	assert.True(t, got.Capabilities.Update)
+	assert.Equal(t, int64(4), got.Revision)
 }

@@ -17,6 +17,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"time"
 
@@ -86,22 +87,41 @@ func runBrokerRegisterInstance(cmd *cobra.Command, key string) error {
 	ctx, cancel := context.WithTimeout(cmd.Context(), 2*time.Minute)
 	defer cancel()
 
+	creds, id, err := registerConfiguredFlatInstance(ctx, settings, globalDir, endpoint, *inst, os.Stdout)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Registered flat Runtime Broker instance %q as Runtime Broker %s (%s), runtime target %s\n",
+		key, creds.BrokerID, inst.Name, id.RuntimeTarget.ID)
+	fmt.Printf("Instance credentials saved to %s\n", brokerregistration.InstanceCredentialsDir(globalDir, key))
+	return nil
+}
+
+// registerConfiguredFlatInstance is steps 2 and 3 of
+// runBrokerRegisterInstance for the instance inst: run the shared
+// activation precheck, load or create its identity with a verified
+// execution scope, then register and join it, check both
+// acknowledgements and only then save its credentials. It
+// writes the Hub's kept-settings notes to out (nil: none). 'runtime-broker
+// convert --apply' calls it with the planned instance.
+func registerConfiguredFlatInstance(ctx context.Context, settings *config.Settings, globalDir, endpoint string, inst config.V1RuntimeBrokerInstanceConfig, out io.Writer) (*brokercredentials.BrokerCredentials, *brokeridentity.Identity, error) {
+	key := inst.Key
 	// Step 2: identity with a verified execution scope, after the shared
 	// precheck the host applies (amendment P5-CR): this is the remote
 	// registration flow, so a cloudrun instance is refused outright (P1),
 	// and an instance the host would refuse for its default volumes mints
 	// nothing.
 	activation := newFlatInstanceActivation(flatPrecheckHost{mode: brokerhost.ModeRemote})
-	if err := activation.precondition(ctx, *inst); err != nil {
-		return fmt.Errorf("flat Runtime Broker instance %q not registered: %w", key, err)
+	if err := activation.precondition(ctx, inst); err != nil {
+		return nil, nil, fmt.Errorf("flat Runtime Broker instance %q not registered: %w", key, err)
 	}
-	rt, err := activation.newRuntime(ctx, *inst)
+	rt, err := activation.newRuntime(ctx, inst)
 	if err != nil {
-		return fmt.Errorf("flat Runtime Broker instance %q: %w", key, err)
+		return nil, nil, fmt.Errorf("flat Runtime Broker instance %q: %w", key, err)
 	}
-	scope, err := flatScopeProber(ctx, *inst, rt)
+	scope, err := flatScopeProber(ctx, inst, rt)
 	if err != nil {
-		return fmt.Errorf("flat Runtime Broker instance %q: %w", key, err)
+		return nil, nil, fmt.Errorf("flat Runtime Broker instance %q: %w", key, err)
 	}
 	var vsBroker *config.V1BrokerConfig
 	if vs, _, vsErr := config.LoadEffectiveSettings(""); vsErr == nil && vs != nil && vs.Server != nil {
@@ -110,12 +130,12 @@ func runBrokerRegisterInstance(cmd *cobra.Command, key string) error {
 	id, err := brokeridentity.LoadOrCreate(brokeridentity.InstanceDir(globalDir, key), key, inst.RuntimeTarget.Type, scope,
 		legacyRuntimeBrokerIDs(nil, settings, vsBroker, globalDir))
 	if err != nil {
-		return fmt.Errorf("flat Runtime Broker instance %q: %w", key, err)
+		return nil, nil, fmt.Errorf("flat Runtime Broker instance %q: %w", key, err)
 	}
 
 	client, err := getHubClient(settings)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 	hubName := brokerHubName
 	if hubName == "" {
@@ -134,7 +154,7 @@ func runBrokerRegisterInstance(cmd *cobra.Command, key string) error {
 	}
 	hostname, _ := os.Hostname()
 
-	creds, err := registerFlatInstance(ctx, client, *inst, id, hubName, brokerregistration.InstanceCredentialsDir(globalDir, key), brokerregistration.Options{
+	creds, err := registerFlatInstance(ctx, client, inst, id, hubName, brokerregistration.InstanceCredentialsDir(globalDir, key), brokerregistration.Options{
 		Hostname:          hostname,
 		Version:           version.Short(),
 		Capabilities:      runtimebroker.StaticCapabilityNames(rt),
@@ -144,15 +164,12 @@ func runBrokerRegisterInstance(cmd *cobra.Command, key string) error {
 		TransportMode:     transportMode,
 		TransportAudience: transportAudience,
 		HubEndpoint:       endpoint,
-		Out:               os.Stdout,
+		Out:               out,
 	})
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
-	fmt.Printf("Registered flat Runtime Broker instance %q as Runtime Broker %s (%s), runtime target %s\n",
-		key, creds.BrokerID, inst.Name, id.RuntimeTarget.ID)
-	fmt.Printf("Instance credentials saved to %s\n", brokerregistration.InstanceCredentialsDir(globalDir, key))
-	return nil
+	return creds, id, nil
 }
 
 // registerFlatInstance is brokerregistration.RegisterInstance; a variable so

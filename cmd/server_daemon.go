@@ -237,6 +237,17 @@ func runServerStartOrDaemon(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("no server components enabled; use --enable-hub, --enable-runtime-broker, or --enable-web")
 	}
 
+	// The convert host lock check (convert-apply design section 4.7), run
+	// here too so a refusal is reported directly instead of as a failed
+	// daemon start. The foreground server process takes the lock itself.
+	if enableRuntimeBroker {
+		lock, err := acquireConvertStartLock(globalDir)
+		if err != nil {
+			return err
+		}
+		lock.Release()
+	}
+
 	// Find the scion executable
 	executable, err := os.Executable()
 	if err != nil {

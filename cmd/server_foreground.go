@@ -45,6 +45,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
+	"github.com/GoogleCloudPlatform/scion/pkg/brokerconvert"
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
@@ -357,6 +358,21 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	}
 	if err := validateBrokerStateDir(cfg); err != nil {
 		return err
+	}
+
+	// 5b. The convert host lock (convert-apply design section 4.7): a
+	// process that hosts the Runtime Broker refuses to start while a
+	// 'runtime-broker convert' operation holds the lock or left a step
+	// "started". The take is a refusing try-lock, never a wait. It holds
+	// the lock from here until its broker listener is bound (step 13),
+	// then releases it, so a convert that starts later finds the running
+	// server. On a failed start the deferred release frees it.
+	var convertLock *brokerconvert.HostLock
+	if cfg.RuntimeBroker.Enabled || registryDecisionDeferred {
+		if convertLock, err = acquireConvertStartLock(globalDir); err != nil {
+			return err
+		}
+		defer convertLock.Release()
 	}
 
 	// 6. Check ports
@@ -802,6 +818,12 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		if brokerErr != nil {
 			return shutdownSeq.startupErr(ctx, brokerErr)
 		}
+	}
+	// The convert host lock taken at step 5b is released once every broker
+	// listener this process started is bound (its own Listening signal);
+	// without a broker there is nothing to wait for.
+	if convertLock != nil {
+		go releaseConvertLockWhenListening(ctx, convertLock, brokerListeners.snapshot())
 	}
 	// Phase 2 item 5: one, centralized call site for the shared_dir_storage
 	// startup summary, gated by sharedDirStorageStartupLogWanted so a
@@ -4658,6 +4680,7 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 	log.Printf("Starting Runtime Broker API server on %s:%d",
 		cfg.RuntimeBroker.Host, cfg.RuntimeBroker.Port)
 
+	brokerListeners.add(rhSrv.Listening())
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
