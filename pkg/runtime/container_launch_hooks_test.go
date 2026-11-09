@@ -361,6 +361,54 @@ func TestPodmanRun_RequiresFullContainerID(t *testing.T) {
 	}
 }
 
+// TestPodmanRun_BadIDRollbackByRunID: with a scion.run_id label, the
+// rollback after a refused ID removes the run's containers found by that
+// label, not the name; when a removal fails, the error says a container
+// from this run may still exist.
+func TestPodmanRun_BadIDRollbackByRunID(t *testing.T) {
+	const leftID = "b3f1c2d4e5b60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90"
+	for _, tc := range []struct {
+		name     string
+		rmBody   string
+		wantLeft bool
+	}{
+		{"removed", `true`, false},
+		{"removal fails", `echo "Error: container is in use" >&2; exit 1`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			cli := filepath.Join(dir, "mock-cli")
+			logPath := filepath.Join(dir, "calls.log")
+			script := fmt.Sprintf(`#!/bin/sh
+echo "$@" >> %q
+case "$1" in
+  run) echo "not an id" ;;
+  ps) echo %s ;;
+  rm) %s ;;
+esac
+`, logPath, leftID, tc.rmBody)
+			if err := os.WriteFile(cli, []byte(script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			config := containerHookConfig()
+			config.Labels = map[string]string{api.LabelRunID: "run-123"}
+
+			_, err := (&PodmanRuntime{Command: cli}).Run(context.Background(), config)
+			if err == nil {
+				t.Fatal("Run succeeded, want an error for output that is not a container ID")
+			}
+			calls := readCalls(t, logPath)
+			wantList := "ps -a -q --no-trunc --filter label=" + api.LabelRunID + "=run-123"
+			if len(calls) < 3 || calls[len(calls)-2] != wantList || calls[len(calls)-1] != "rm -f "+leftID {
+				t.Fatalf("calls = %q, want the run's containers listed by label, then removed by ID", calls)
+			}
+			if got := strings.Contains(err.Error(), "may still exist"); got != tc.wantLeft {
+				t.Fatalf("error %q: mentions a container left = %v, want %v", err, got, tc.wantLeft)
+			}
+		})
+	}
+}
+
 // TestAppleContainerRun_HandleIsPrintedName: Apple's container CLI prints
 // the container name, not a hex ID; the handle carries that printed value
 // and Run returns it unchanged.
