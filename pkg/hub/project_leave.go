@@ -184,7 +184,7 @@ func leaveBindingClass(rb *store.RoleBinding, rd *store.RoleDefinition, projectI
 		return leaveClassUnclassified
 	}
 	switch rd.Name {
-	case store.ProjectRoleOwner, store.ProjectRoleAdmin, store.ProjectRoleMember:
+	case store.ProjectRoleOwner, store.ProjectRoleAdmin, store.ProjectRoleMember, store.ProjectRoleViewer:
 		if rd.System {
 			return leaveClassRemovable
 		}
@@ -335,7 +335,7 @@ func (svc *ProjectMembershipService) LeaveProject(ctx context.Context, actor Use
 		roles := make([]string, 0, len(bindings))
 		for _, lb := range bindings {
 			toRemove = append(toRemove, lb.binding)
-			if lb.role.Name == store.ProjectRoleOwner {
+			if builtInRoleName(lb.role) == store.ProjectRoleOwner {
 				owners = append(owners, lb.binding)
 			}
 			roles = append(roles, lb.role.Name)
@@ -707,7 +707,7 @@ func (svc *ProjectMembershipService) leaveCapabilities(ctx context.Context, user
 	}
 	var owners []*store.RoleBinding
 	for _, lb := range bindings {
-		if lb.role.Name == store.ProjectRoleOwner {
+		if builtInRoleName(lb.role) == store.ProjectRoleOwner {
 			owners = append(owners, lb.binding)
 		}
 	}

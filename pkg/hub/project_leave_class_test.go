@@ -76,6 +76,7 @@ func TestLeaveBindingClass_Table(t *testing.T) {
 		{"owner", direct(sysRole(store.ProjectRoleOwner), nil), sysRole(store.ProjectRoleOwner), leaveClassRemovable},
 		{"admin", direct(sysRole(store.ProjectRoleAdmin), nil), sysRole(store.ProjectRoleAdmin), leaveClassRemovable},
 		{"member", direct(sysRole(store.ProjectRoleMember), nil), sysRole(store.ProjectRoleMember), leaveClassRemovable},
+		{"viewer", direct(sysRole(store.ProjectRoleViewer), nil), sysRole(store.ProjectRoleViewer), leaveClassRemovable},
 		{"custom project role", direct(custom, nil), custom, leaveClassRemovable},
 		{"expired", direct(custom, func(rb *store.RoleBinding) { rb.ExpiresAt = &past }), custom, leaveClassRemovable},
 		{"scheduled", direct(custom, func(rb *store.RoleBinding) { rb.NotBefore = &future }), custom, leaveClassRemovable},
@@ -115,6 +116,7 @@ var (
 		"ProjectRoleAdmin":          store.ProjectRoleAdmin,
 		"ProjectRoleMember":         store.ProjectRoleMember,
 		"ProjectRoleOwner":          store.ProjectRoleOwner,
+		"ProjectRoleViewer":         store.ProjectRoleViewer,
 		"ProjectRoleVisitor":        store.ProjectRoleVisitor,
 		"RoleBindingPrincipalAgent": store.RoleBindingPrincipalAgent,
 		"RoleBindingPrincipalGroup": store.RoleBindingPrincipalGroup,
@@ -122,7 +124,7 @@ var (
 		"RoleScopeProject":          store.RoleScopeProject,
 		"RoleScopeSystem":           store.RoleScopeSystem,
 	}
-	leaveClassGoldenBuiltInRoles = []string{store.ProjectRoleAdmin, store.ProjectRoleMember, store.ProjectRoleOwner}
+	leaveClassGoldenBuiltInRoles = []string{store.ProjectRoleAdmin, store.ProjectRoleMember, store.ProjectRoleOwner, store.ProjectRoleViewer}
 )
 
 // TestLeaveBindingClass_GuardUnclassified (R3, 6a) is a reflection guard:

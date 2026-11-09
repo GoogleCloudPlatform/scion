@@ -213,6 +213,24 @@ func TestProjectLeave_MemberLeaves(t *testing.T) {
 	assert.Equal(t, 1, countAudits(t, f.store, "project_member_leave", f.projectID))
 }
 
+// TestProjectLeave_ViewerLeaves: a direct project viewer (a built-in
+// membership role, ptone/scion#5519) leaves like a member: the binding is
+// gone and the removed role is reported.
+func TestProjectLeave_ViewerLeaves(t *testing.T) {
+	f := setupMMRFixture(t)
+	enableProjectLeave(t, f.srv)
+	f.srv.membershipService.onMembershipLoss = nil
+	viewerID := tid(t.Name() + "-viewer")
+	createRS1UserWithRole(t, f.store, viewerID, viewerID+"@test.com", f.projectID, store.ProjectRoleViewer)
+	viewer, err := f.store.GetUser(context.Background(), viewerID)
+	require.NoError(t, err)
+
+	res := decodeLeaveResult(t, leaveAs(t, f.srv, viewer, f.projectID, false))
+	assert.Equal(t, []string{store.ProjectRoleViewer}, res.RemovedRoles)
+	assert.Equal(t, leaveRemainingNone, res.RemainingAccess)
+	assert.Empty(t, directProjectBindings(t, f.store, viewerID, f.projectID))
+}
+
 // TestProjectLeave_RemovesEveryDirectRole: an admin who also holds a
 // custom role leaves in one step; both bindings go, other principals'
 // bindings stay.

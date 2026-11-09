@@ -383,10 +383,9 @@ func TestSSE_InternalMembershipSubjectRefused(t *testing.T) {
 		membershipChangedSubject + "." + strings.Repeat("0123456789abcdef", 4),
 		"hub.membership.changed.*", "hub.membership.changed.>", "hub.membership.>", "hub.>",
 	} {
-		ctx, cancel := context.WithCancel(context.Background())
-		cancel()
-		rec := httptest.NewRecorder()
-		x.ws.handleSSE(rec, sseAgentRequest(ctx, x.f.member.ID, "user", subject))
+		rec := serveSSELive(t, x.ws, func(ctx context.Context) *http.Request {
+			return sseAgentRequest(ctx, x.f.member.ID, "user", subject)
+		})
 		assert.Equal(t, http.StatusForbidden, rec.Code, "subject %q: %s", subject, rec.Body.String())
 	}
 	assert.NotEmpty(t, x.ws.authorizeSSESubjects(sseAgentRequest(context.Background(), x.f.member.ID, "user", membershipChangedSubject),
@@ -404,11 +403,9 @@ func TestSSE_NoSessionDeniedWithNoMembershipSubscription(t *testing.T) {
 	pub := &sseCountingPublisher{ChannelEventPublisher: NewChannelEventPublisher()}
 	t.Cleanup(pub.Close)
 	ws := &WebServer{store: x.f.store, events: pub, authzService: x.f.srv.authzService}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	req := httptest.NewRequest(http.MethodGet, "/events?sub="+x.subject, nil).WithContext(ctx)
-	rec := httptest.NewRecorder()
-	ws.handleSSE(rec, req)
+	rec := serveSSELive(t, ws, func(ctx context.Context) *http.Request {
+		return httptest.NewRequest(http.MethodGet, "/events?sub="+x.subject, nil).WithContext(ctx)
+	})
 	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 	var body struct {
 		Denied []string `json:"denied_subjects"`
