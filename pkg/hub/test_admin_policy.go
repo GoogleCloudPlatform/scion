@@ -942,21 +942,13 @@ func (d *HTTPAgentDispatcher) testAdminRootScopes(ctx context.Context, agent *st
 	return true, allowed, root
 }
 
-// restrictTestAdminRootedSecrets applies testAdminRootScopes to the secrets
-// secretBackend.Resolve returned (both dispatch paths call it:
-// resolveSecrets for the first pass and resolveAsNeededForKeys for the
-// as_needed pass).
-func (d *HTTPAgentDispatcher) restrictTestAdminRootedSecrets(ctx context.Context, agent *store.Agent, resolved []secret.SecretWithValue) []secret.SecretWithValue {
-	if len(resolved) == 0 {
-		return resolved
-	}
-	restricted, allowed, root := d.testAdminRootScopes(ctx, agent)
-	return d.applyTestAdminSecretScopes(ctx, agent, resolved, restricted, allowed, root)
-}
-
-// applyTestAdminSecretScopes is restrictTestAdminRootedSecrets with the
-// testAdminRootScopes result supplied by the caller (launch selection
-// decides it once, before it fetches any value): when restricted, it keeps
+// applyTestAdminSecretScopes applies a testAdminRootScopes result, supplied
+// by the caller, to the secrets secretBackend.Resolve returned. Every
+// start-time site evaluates testAdminRootScopes once (testAdminScopesFor)
+// and passes the same result here and to the owner material chain rule's
+// keep decision (resolveSecrets for the first pass, resolveAsNeededForKeys
+// for the as_needed pass; the launch selection applies it before it
+// fetches any value): when restricted, it keeps
 // only secrets of an allowed scope and reports the withheld scopes.
 func (d *HTTPAgentDispatcher) applyTestAdminSecretScopes(ctx context.Context, agent *store.Agent, resolved []secret.SecretWithValue, restricted bool, allowed map[string]bool, root string) []secret.SecretWithValue {
 	if !restricted || len(resolved) == 0 {

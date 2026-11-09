@@ -496,6 +496,10 @@ func TestPatchAgent_ExplicitTimezone(t *testing.T) {
 
 	t.Run("unrelated PATCH still reports the zone", func(t *testing.T) {
 		srv, s, agent := tzPatchServer(t, string(state.PhaseRunning), nil)
+		// The owner's user-scope TZ row is owner material: it reaches the agent
+		// only along a delegation chain recorded to the owner, so record the
+		// owner's principal edge to the agent in its project.
+		hdEdge(t, s, store.DelegationPrincipalUser, agent.OwnerID, agent.ID, agent.ProjectID, nil)
 		tzTestEnvVar(t, s, store.EnvVar{Scope: store.ScopeUser, ScopeID: agent.OwnerID, Value: "Europe/Lisbon"})
 		code, resp := patchAgentTZ(t, srv, agent.ID, map[string]interface{}{"taskSummary": "hello"})
 		require.Equal(t, http.StatusOK, code)

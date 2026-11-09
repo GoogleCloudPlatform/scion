@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
@@ -261,6 +262,9 @@ func TestReincarnateByUserRepairsUnrecordedOwnEdge(t *testing.T) {
 
 	f.reincarnateAs(t, f.session())
 	f.assertReRecordedByUser(t, old.ID)
+	sum := auditSummary(t, f.s, mutationTypeAgentReincarnateClaim, f.target.ID)
+	assert.NotContains(t, sum, "owner_reclaim", "a repair is not an owner reclaim")
+	assert.NotContains(t, sum, "prior_delegator")
 	f.assertRealSAAssignCreate(t)
 }
 
@@ -338,8 +342,13 @@ func TestReincarnateByUserRepairsUnrecordedAncestorUnderDevLocalHop(t *testing.T
 // T's own edge is recorded and the hop directly above it is recorded with
 // local development provenance on a server without dev auth (dev -> P
 // dev_local, P -> T recorded): no unrecorded hop lies below the hop that
-// is not accepted, so a user's same-role reincarnate keeps T's edge; only a
-// recreate replaces such a chain.
+// is not accepted, so the same-role reincarnate of a user other than T's
+// owner keeps T's edge; only a recreate replaces such a chain. (T's owner
+// reclaims it instead: TestReincarnateByOwnerReclaimsChainUnderDevLocalHop.)
+// The requester is a second project owner, so it passes CanDelegate and its
+// credential ceiling covers the role (the reincarnate is accepted): the
+// edge is kept because the requester is not T's owner, not because a check
+// refused it.
 func TestReincarnateByUserKeepsRecordedEdgeUnderDevLocalHop(t *testing.T) {
 	f := newRepairFixture(t)
 	parent := f.devLocalRootedAgent(t, "repair-devlocal-keep", store.EffectCeilingPrincipal)
@@ -349,8 +358,182 @@ func TestReincarnateByUserKeepsRecordedEdgeUnderDevLocalHop(t *testing.T) {
 	require.False(t, d.Allowed, "fixture: reason %q", d.Reason)
 	assert.Equal(t, DenyCauseCeilingSourceNotAllowed, d.DenyCause, "reason %q", d.Reason)
 
-	f.reincarnateAs(t, f.session())
+	// A project owner who is not T's owner.
+	otherID := tid("repair-other-" + t.Name())
+	otherEmail := "other-" + tidSlugSafe(t.Name()) + "@repair.test"
+	createDCUser(t, f.s, otherID, otherEmail, f.project.ID, store.ProjectRoleOwner)
+	f.reincarnateAs(t, NewAuthenticatedUser(otherID, otherEmail, otherEmail, store.UserRoleMember, "web"))
 	assertEdgeKept(t, f.s, f.target.ID, old, f.targetEdge(t))
+	assert.NotContains(t, auditSummary(t, f.s, mutationTypeAgentReincarnateClaim, f.target.ID), "owner_reclaim")
+}
+
+// reclaimChain seeds the chain of the owner reclaim tests (dev -> P
+// dev_local, P -> T recorded) on a server without dev auth, and returns P
+// and T's own edge.
+func (f *repairFixture) reclaimChain(t *testing.T) (*store.Agent, *store.DelegationEdge) {
+	t.Helper()
+	parent := f.devLocalRootedAgent(t, "repair-devlocal-reclaim", store.EffectCeilingPrincipal)
+	old := seedFullAgentEdge(t, f.s, store.DelegationPrincipalAgent, parent.ID, f.target)
+	f.srv.authzService.setDevLocalAuthorityEnabled(false)
+	return parent, old
+}
+
+// reincarnateRefused runs a dry and a real reincarnation of T by identity,
+// requires both to answer code with a body containing msg, and asserts
+// nothing is claimed and T keeps old.
+func (f *repairFixture) reincarnateRefused(t *testing.T, identity Identity, old *store.DelegationEdge, code int, msg string) {
+	t.Helper()
+	target := mustGetAgent(t, f.s, f.target.ID)
+	for _, dryRun := range []bool{true, false} {
+		rec := httptest.NewRecorder()
+		body := ReincarnateAgentRequest{Handoff: "h", DryRun: dryRun}
+		f.srv.handleReincarnateAgent(rec, reincarnateRequest(t, f.target.ID, identity, body), f.target.ID)
+		require.Equal(t, code, rec.Code, "dryRun=%v: %s", dryRun, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), msg, "dryRun=%v", dryRun)
+	}
+	assertNothingClaimed(t, f.s, target, old)
+}
+
+// ownerVerdictFaultStore fails the delegation edge reads of one delegate
+// while armed is set, counting each failed read in fired; every other read
+// is the store's.
+type ownerVerdictFaultStore struct {
+	store.Store
+	failID string
+	armed  *atomic.Bool
+	fired  *atomic.Int32
+}
+
+func (s *ownerVerdictFaultStore) GetDelegationEdgesForDelegate(ctx context.Context, delegateType, delegateID string) ([]*store.DelegationEdge, error) {
+	if delegateID == s.failID && s.armed.Load() {
+		s.fired.Add(1)
+		return nil, errInjectedLookup
+	}
+	return s.Store.GetDelegationEdgesForDelegate(ctx, delegateType, delegateID)
+}
+
+// The same chain as TestReincarnateByUserKeepsRecordedEdgeUnderDevLocalHop,
+// reincarnated with the same role by T's owner: T's recorded chain ends at
+// another user (dev), so the owner reclaims T. The edge is re-recorded with
+// the owner as the recorded delegator, from the owner's own session and
+// bounded by the owner's right to delegate and credential ceiling, as a
+// recreate by the owner would record it: the frozen ceiling and provenance
+// are the owner's (assertReRecordedByUser). The claim audit reports the
+// reclaim and the replaced edge's delegator.
+//
+// Each control leaves T's edge as it was: the owner's credential ceiling
+// does not cover the role (403), the owner fails CanDelegate (403), the
+// owner's own agent requests (the agent path keeps the edge), and a fault
+// reading T's chain for the reclaim (503).
+func TestReincarnateByOwnerReclaimsChainUnderDevLocalHop(t *testing.T) {
+	t.Run("reclaimed", func(t *testing.T) {
+		f := newRepairFixture(t)
+		parent, old := f.reclaimChain(t)
+
+		f.reincarnateAs(t, f.session())
+		f.assertReRecordedByUser(t, old.ID)
+		sum := auditSummary(t, f.s, mutationTypeAgentReincarnateClaim, f.target.ID)
+		assert.Equal(t, true, sum["owner_reclaim"])
+		assert.Equal(t, store.DelegationPrincipalAgent+":"+parent.ID, sum["prior_delegator"])
+	})
+
+	t.Run("credential ceiling does not cover the role", func(t *testing.T) {
+		f := newRepairFixture(t)
+		_, old := f.reclaimChain(t)
+		owner := NewScopedUserIdentity(f.session().(*AuthenticatedUser), f.project.ID,
+			[]string{"agent:lifecycle", "agent:create"})
+		f.reincarnateRefused(t, owner, old, http.StatusForbidden, "do not cover the agent's role")
+	})
+
+	t.Run("CanDelegate denied", func(t *testing.T) {
+		f := newRepairFixture(t)
+		_, old := f.reclaimChain(t)
+		owner := NewScopedUserIdentity(f.session().(*AuthenticatedUser), f.project.ID,
+			[]string{"agent:lifecycle"})
+		f.reincarnateRefused(t, owner, old, http.StatusForbidden, "Cannot delegate agent authority")
+	})
+
+	t.Run("owner's own agent requests", func(t *testing.T) {
+		f := newRepairFixture(t)
+		_, old := f.reclaimChain(t)
+		own := f.otherAgent(t, "repair-owner-agent")
+		seedFullAgentEdge(t, f.s, store.DelegationPrincipalUser, f.userID, own)
+		require.Equal(t, f.userID, own.OwnerID, "fixture: the requester is the owner's agent")
+
+		f.reincarnateAs(t, fullRequesterFor(own.ID, f.project.ID))
+		assertEdgeKept(t, f.s, f.target.ID, old, f.targetEdge(t))
+		assert.NotContains(t, auditSummary(t, f.s, mutationTypeAgentReincarnateClaim, f.target.ID), "owner_reclaim")
+	})
+
+	t.Run("chain lookup fault", func(t *testing.T) {
+		f := newRepairFixture(t)
+		_, old := f.reclaimChain(t)
+		target := mustGetAgent(t, f.s, f.target.ID)
+		// The fault is armed when the reclaim's owner chain walk of T
+		// starts, so every earlier read of T's edges in the pass succeeds
+		// (reincarnateChainUnrecorded among them). It is disarmed and its
+		// count reset before each pass, so each pass faults at that walk.
+		var armed atomic.Bool
+		var fired atomic.Int32
+		observe := func(agentID string) {
+			if agentID == f.target.ID {
+				armed.Store(true)
+			}
+		}
+		ownerChainVerdictObserver.Store(&observe)
+		t.Cleanup(func() { ownerChainVerdictObserver.Store(nil) })
+		f.srv.authzService.store = &ownerVerdictFaultStore{Store: f.s, failID: f.target.ID, armed: &armed, fired: &fired}
+
+		for _, dryRun := range []bool{true, false} {
+			armed.Store(false)
+			fired.Store(0)
+			rec := httptest.NewRecorder()
+			body := ReincarnateAgentRequest{Handoff: "h", DryRun: dryRun}
+			f.srv.handleReincarnateAgent(rec, reincarnateRequest(t, f.target.ID, f.session(), body), f.target.ID)
+			require.Equal(t, http.StatusServiceUnavailable, rec.Code, "dryRun=%v: %s", dryRun, rec.Body.String())
+			assert.Contains(t, rec.Body.String(), "agent's delegation chain", "dryRun=%v", dryRun)
+			assert.True(t, armed.Load(), "dryRun=%v: the reclaim walked T's owner chain", dryRun)
+			assert.EqualValues(t, 1, fired.Load(), "dryRun=%v: the pass faults once, at the reclaim walk", dryRun)
+		}
+		assertNothingClaimed(t, f.s, target, old)
+	})
+}
+
+// A child C of T recorded before the owner reclaim does not regain authority
+// beyond the owner's: before the reclaim C's chain is refused (the dev_local
+// hop above T), and after it C's chain folds through T's re-recorded edge,
+// so C's ceiling is C's own edge ceiling folded with T's chain, which is the
+// owner's frozen ceiling (chainEffectCeiling, foldWithChain), and C's chain
+// ends at the owner.
+func TestOwnerReclaimBoundsChildOfReclaimedAgent(t *testing.T) {
+	f := newRepairFixture(t)
+	ctx := context.Background()
+	_, old := f.reclaimChain(t)
+	child := f.otherAgent(t, "repair-reclaim-child", f.userID, f.target.ID)
+	childEdge := seedFullAgentEdge(t, f.s, store.DelegationPrincipalAgent, f.target.ID, child)
+	_, err := f.srv.authzService.chainEffectCeiling(ctx, mustGetAgent(t, f.s, child.ID))
+	require.ErrorIs(t, err, errSourceNotAllowed, "fixture: C's chain is refused before the reclaim")
+
+	f.reincarnateAs(t, f.session())
+	f.assertReRecordedByUser(t, old.ID)
+
+	ownerCeiling, _, err := f.srv.authzService.sourceEffectCeiling(ctx, f.session())
+	require.NoError(t, err)
+	targetChain, err := f.srv.authzService.chainEffectCeiling(ctx, mustGetAgent(t, f.s, f.target.ID))
+	require.NoError(t, err)
+	assert.Zero(t, targetChain.UnrecordedHops)
+	assert.True(t, effectCeilingsEqual(ownerCeiling, targetChain.Ceiling),
+		"T's chain is the owner's ceiling: owner %+v, T %+v", ownerCeiling, targetChain.Ceiling)
+
+	childChain, err := f.srv.authzService.chainEffectCeiling(ctx, mustGetAgent(t, f.s, child.ID))
+	require.NoError(t, err)
+	assert.Zero(t, childChain.UnrecordedHops)
+	assert.True(t, effectCeilingsEqual(foldWithChain(childEdge, childEdge.EffectCeiling, targetChain), childChain.Ceiling),
+		"C's chain is its edge folded with T's chain: %+v", childChain.Ceiling)
+
+	v := f.srv.authzService.ownerChainVerdict(ctx, mustGetAgent(t, f.s, child.ID))
+	assert.Equal(t, ownerChainEndsAtUser, v.outcome, "reason %q", v.reason)
+	assert.Equal(t, f.userID, v.terminalUserID, "C's chain ends at the owner")
 }
 
 // edgeRewriteStore rewrites, on read, every delegation edge of one delegate,

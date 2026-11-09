@@ -265,6 +265,7 @@ func TestAgentSecretFetch_RecordChangedIsUnavailable(t *testing.T) {
 // project-scope secret would exercise instead.
 func TestAgentSecretRead_SharingDisabledBetweenMetaAndGetNotDelivered(t *testing.T) {
 	f := newMaterialFixture(t, "sharing-disabled-race")
+	f.recordAgentEdge(t)
 	ctx := context.Background()
 	_, _, err := f.Server.secretBackend.Set(ctx, &secret.SetSecretInput{
 		Name: "RACE_SHARING_KEY", Value: "v", SecretType: store.SecretTypeEnvironment, Target: "RACE_SHARING_KEY",
@@ -408,6 +409,7 @@ func TestMaterialSelection_NoValueAccessBeforeAuthorization(t *testing.T) {
 // grant.
 func TestMaterialSelection_NoProjectPermissionOnSecretResource(t *testing.T) {
 	f := newMaterialFixture(t, "no-project-permission-secret-resource")
+	f.recordAgentEdge(t)
 	ctx := context.Background()
 
 	_, _, err := f.Server.secretBackend.Set(ctx, &secret.SetSecretInput{
@@ -441,6 +443,7 @@ func TestMaterialSelection_NoProjectPermissionOnSecretResource(t *testing.T) {
 // user secrets, and no secrets authored outside the agent's lineage.
 func TestAgentListSecrets_OnlyReadableKeysListed(t *testing.T) {
 	f := newMaterialFixture(t, "only-readable-keys")
+	f.recordAgentEdge(t)
 	ctx := context.Background()
 
 	seedSecret(t, f.Server.secretBackend, "PROJECT_VISIBLE", "v", "", "", f.ProjectID)
@@ -501,15 +504,15 @@ func TestAgentListSecrets_OnlyReadableKeysListed(t *testing.T) {
 	}
 }
 
-// TestAgentListSecrets_ProgenyFilterMatchesPerItemCheck pins parity between
-// the list's progeny filter (ListProgenySecrets eligibility, lineage
-// containment and source liveness) and the per-item check
-// (authorizeRuntimeUserItem) on a fixture that exercises every filter where
-// the two paths could diverge: a shared row authored outside the target's
-// lineage, a shared row authored by a soft-deleted lineage agent, and a
-// shared row authored by a live lineage agent (included), alongside a
-// shared and an unshared row authored directly by the root.
-func TestAgentListSecrets_ProgenyFilterMatchesPerItemCheck(t *testing.T) {
+// TestAgentListSecrets_UnrecordedChainMatchesPerItemCheck pins parity
+// between the list and the per-item check (authorizeRuntimeUserItem) for a
+// chain without recorded provenance, on rows that once took different
+// progeny filters: a shared row authored outside the target's lineage, a
+// shared row authored by a soft-deleted lineage agent, a shared row
+// authored by a live lineage agent, and a shared and an unshared row
+// authored directly by the root. Such a chain reads no user-scope secret,
+// so the list is empty and every per-item read is refused.
+func TestAgentListSecrets_UnrecordedChainMatchesPerItemCheck(t *testing.T) {
 	f := newMaterialFixture(t, "progeny-filter-parity")
 	ctx := context.Background()
 
@@ -585,14 +588,8 @@ func TestAgentListSecrets_ProgenyFilterMatchesPerItemCheck(t *testing.T) {
 		listed[s.Key] = true
 	}
 
-	if !listed["PARITY_LIVE_LINEAGE_AUTHOR"] {
-		t.Errorf("expected PARITY_LIVE_LINEAGE_AUTHOR (live lineage author) to be listed")
-	}
-	if listed["PARITY_OUTSIDE_LINEAGE"] {
-		t.Errorf("PARITY_OUTSIDE_LINEAGE (authored outside the lineage) must not be listed")
-	}
-	if listed["PARITY_SOFT_DELETED_LINEAGE_AUTHOR"] {
-		t.Errorf("PARITY_SOFT_DELETED_LINEAGE_AUTHOR (soft-deleted author) must not be listed")
+	if len(listed) != 0 {
+		t.Errorf("a chain without recorded provenance lists no user-scope key, got %v", listed)
 	}
 
 	for _, key := range keys {
@@ -705,45 +702,6 @@ func TestAgentListSecrets_ProjectListErrorEmitsAudit(t *testing.T) {
 	}
 }
 
-// TestAgentListSecrets_ProgenyEligibleIDsErrorEmitsAudit covers the list's
-// progenyEligibleSecretIDs error exit: it still emits the request's
-// MaterialSelectionEvent with a request-level backend_error item, rather
-// than exiting silently, and answers with the fixed message rather than the
-// backend error text.
-func TestAgentListSecrets_ProgenyEligibleIDsErrorEmitsAudit(t *testing.T) {
-	f := newMaterialFixture(t, "list-progeny-eligible-error")
-	seedSecret(t, f.Server.secretBackend, "LIST_PROGENY_ELIGIBLE_ERROR_KEY", "v", "", "", f.ProjectID)
-	f.Server.store = &materialFailingStore{
-		Store:                 f.Store,
-		listProgenySecretsErr: errors.New("injected progeny list failure"),
-	}
-
-	auditor := newRecordingMaterialAuditor()
-	f.Server.SetAuditLogger(auditor)
-
-	rec := doRequestWithAgentToken(t, f.Server, http.MethodGet, "/api/v1/agents/"+f.AgentID+"/secrets?scope=user", nil, f.Token)
-	if rec.Code != http.StatusInternalServerError {
-		t.Fatalf("expected 500, got %d: %s", rec.Code, rec.Body.String())
-	}
-	if !strings.Contains(rec.Body.String(), "failed to list secrets") {
-		t.Fatalf("expected the fixed error message, got: %s", rec.Body.String())
-	}
-	if strings.Contains(rec.Body.String(), "injected progeny list failure") {
-		t.Fatalf("backend error text leaked into the response body: %s", rec.Body.String())
-	}
-	if len(auditor.events) != 1 {
-		t.Fatalf("expected 1 material selection event, got %d", len(auditor.events))
-	}
-	e := auditor.events[0]
-	if len(e.Items) != 1 {
-		t.Fatalf("expected 1 item, got %d", len(e.Items))
-	}
-	item := e.Items[0]
-	if item.Reason != ReasonBackendError || item.Grant != GrantProgeny || item.Scope != store.ScopeUser {
-		t.Fatalf("expected a user-scope backend_error item, got %+v", item)
-	}
-}
-
 // TestAgentListSecrets_UserListErrorEmitsAudit covers the list's user
 // backend.List error exit: it still emits the request's
 // MaterialSelectionEvent with a request-level backend_error item, rather
@@ -751,6 +709,7 @@ func TestAgentListSecrets_ProgenyEligibleIDsErrorEmitsAudit(t *testing.T) {
 // backend error text.
 func TestAgentListSecrets_UserListErrorEmitsAudit(t *testing.T) {
 	f := newMaterialFixture(t, "list-user-list-error")
+	f.recordAgentEdge(t)
 	seedSecret(t, f.Server.secretBackend, "LIST_USER_LIST_ERROR_KEY", "v", "", "", f.ProjectID)
 	f.Server.SetSecretBackend(&erroringListBackend{
 		SecretBackend: f.Server.secretBackend,
@@ -829,6 +788,7 @@ func TestAgentListSecrets_ProjectDenialCarriesDetail(t *testing.T) {
 // skipped row.
 func TestAgentListSecrets_LivenessErrorRecordsAuditItem(t *testing.T) {
 	f := newMaterialFixture(t, "list-liveness-error")
+	f.recordAgentEdge(t)
 	ctx := context.Background()
 
 	_, _, err := f.Server.secretBackend.Set(ctx, &secret.SetSecretInput{
@@ -837,17 +797,14 @@ func TestAgentListSecrets_LivenessErrorRecordsAuditItem(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// The request precheck already calls GetUser four times for the
-	// root user (check 5, the test identity clamp's kind read in check 5's
-	// membership check, ptone/scion#4240, then the agent standing check's
-	// ancestry-root lookup and admission check, ptone/scion#3433) and must
-	// succeed; only the per-row liveness check's own GetUser call, made
-	// after them, is made to fail.
-	f.Server.store = &materialFailingStore{
-		Store:                f.Store,
-		getUserErr:           errors.New("injected liveness lookup failure"),
-		getUserErrAfterCalls: 4,
+	// Only the per-row liveness check's own GetUser call fails: the request
+	// precheck and the chain checks read the same user and must succeed.
+	failing := &materialFailingStore{
+		Store:            f.Store,
+		getUserErr:       errors.New("injected liveness lookup failure"),
+		getUserErrCaller: "progenySourceLive",
 	}
+	f.Server.store = failing
 
 	auditor := newRecordingMaterialAuditor()
 	f.Server.SetAuditLogger(auditor)
@@ -860,6 +817,9 @@ func TestAgentListSecrets_LivenessErrorRecordsAuditItem(t *testing.T) {
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 	if len(resp.Secrets) != 0 {
 		t.Fatalf("expected the row to be skipped from the list, got %+v", resp.Secrets)
+	}
+	if failing.getUserErrCallerFired != 1 {
+		t.Fatalf("expected the liveness check's user read to fail exactly once, got %d", failing.getUserErrCallerFired)
 	}
 	if len(auditor.events) != 1 {
 		t.Fatalf("expected 1 material selection event, got %d", len(auditor.events))
@@ -887,6 +847,7 @@ func TestAgentListSecrets_LivenessErrorRecordsAuditItem(t *testing.T) {
 // as project_association.
 func TestMaterialAudit_SeparatesActorTargetAndSource(t *testing.T) {
 	f := newMaterialFixture(t, "audit-separates-fields")
+	f.recordAgentEdge(t)
 	ctx := context.Background()
 
 	seedSecret(t, f.Server.secretBackend, "AUDIT_PROJECT_KEY", "v", "", "", f.ProjectID)

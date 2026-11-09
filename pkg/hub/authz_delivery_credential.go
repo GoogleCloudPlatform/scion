@@ -106,9 +106,6 @@ type hubDeliveryAdmissionOutcome struct {
 	// legacyCohort is set when the outcome is an allow by the legacy
 	// fallback: the cohort (legacyDeliveryCohort*) of the first legacy hop.
 	legacyCohort string
-	// deniedCohort is set on a deny the fallback returned for a chain of
-	// that cohort (uat_descendant_legacy whose root user is not admitted).
-	deniedCohort string
 	// uatIntrinsic is set on an allow whose walk passed a hop recorded from
 	// a user access token only through the intrinsic rule
 	// (uatIntrinsicDecides).
@@ -579,14 +576,6 @@ func (a *AuthzService) hubDeliveryWalkObserved(ctx context.Context, startAgentID
 
 	visited := make(map[string]bool, maxDelegationDepth+1)
 	delegateID := startAgentID
-	// pendingUAT (tolerant walk only) is set by an agent-recorded hop whose
-	// ceiling lacks the permission because an ancestor was created from a
-	// user access token (legacyInheritsUATGap): the uat_descendant_legacy
-	// cohort. The next hops must reach a hop recorded from a user access
-	// token whose uatHopEffectCeiling allows the permission, through hops
-	// of the same kind, or the walk denies with pendingReason, the first
-	// such hop's own deny.
-	pendingUAT, pendingReason := false, ""
 	intrinsic := false
 	for depth := 0; ; depth++ {
 		if depth > maxDelegationDepth {
@@ -618,9 +607,6 @@ func (a *AuthzService) hubDeliveryWalkObserved(ctx context.Context, startAgentID
 		if len(active) == 0 {
 			addStep("delegation_ceiling_delivery_hop", fmt.Sprintf("agent:%s has no active edge in project %s", delegateID, scopeProjectID))
 			if legacy != nil {
-				if pendingUAT {
-					return deny(pendingReason, DenyCauseCeilingEffectExceeded)
-				}
 				legacy.note(legacyDeliveryCohortNoEdge, depth)
 				return a.hubDeliveryLegacyAncestry(ctx, delegateID, deny, failClosed)
 			}
@@ -637,9 +623,6 @@ func (a *AuthzService) hubDeliveryWalkObserved(ctx context.Context, startAgentID
 
 		if isMigrationSentinel(edge) {
 			if legacy != nil {
-				if pendingUAT {
-					return deny(pendingReason, DenyCauseCeilingEffectExceeded)
-				}
 				legacy.note(legacyDeliveryCohortSentinelEdge, depth)
 				return a.hubDeliveryLegacyAncestry(ctx, delegateID, deny, failClosed)
 			}
@@ -654,11 +637,8 @@ func (a *AuthzService) hubDeliveryWalkObserved(ctx context.Context, startAgentID
 			}
 		}
 		// hopCohort is the legacy cohort the tolerant walk lets this hop
-		// through under; inherits marks an agent-recorded hop that only
-		// inherits a UAT-created ancestor's gap. Both stay unset on the
-		// strict walk. uatHop marks a hop recorded from a user access token
-		// whose uatHopEffectCeiling allows the permission.
-		hopCohort, inherits, uatHop := "", false, false
+		// through under. It stays unset on the strict walk.
+		hopCohort := ""
 		switch {
 		case !knownProvenanceVersion(edge.ProvenanceVersion) || (edge.Kind != store.EffectCeilingPrincipal && edge.Kind != store.EffectCeilingBounded):
 			if legacy == nil {
@@ -671,35 +651,16 @@ func (a *AuthzService) hubDeliveryWalkObserved(ctx context.Context, startAgentID
 			exceeded := fmt.Sprintf("delegation ceiling: %s is outside the frozen effect ceiling", permissionID)
 			if legacy != nil {
 				hopCohort = legacyBoundedEdgeCohort(edge, permissionID)
-				inherits = hopCohort == "" && legacyInheritsUATGap(edge, permissionID)
 			}
-			if hopCohort == "" && !inherits {
+			if hopCohort == "" {
 				return deny(exceeded, DenyCauseCeilingEffectExceeded)
 			}
-			if inherits && !pendingUAT {
-				pendingReason = exceeded
-				hopCohort = legacyDeliveryCohortUATDescendant
-			}
 		case uatRecordedHop(edge.DelegatorType, edge.DelegatorID, edge.AuthorityProvenance, edge.EffectCeiling):
-			uatHop = true
 			if uatIntrinsicDecides(edge.DelegatorType, edge.DelegatorID, edge.AuthorityProvenance, edge.EffectCeiling, permissionID) {
 				addStep("delegation_ceiling_delivery_uat_intrinsic",
 					fmt.Sprintf("edge %s: recorded from a user access token; %s is intrinsic to the hop", edge.ID, permissionID))
 				intrinsic = true
 			}
-		}
-		if pendingUAT {
-			switch {
-			case uatHop:
-				pendingUAT = false
-			case inherits:
-			default:
-				// The ancestor that should explain the missing permission
-				// is not a UAT-created hop: the hop below narrowed it.
-				return deny(pendingReason, DenyCauseCeilingEffectExceeded)
-			}
-		} else if inherits {
-			pendingUAT = true
 		}
 		if hopCohort != "" {
 			legacy.note(hopCohort, depth)
@@ -725,10 +686,6 @@ func (a *AuthzService) hubDeliveryWalkObserved(ctx context.Context, startAgentID
 		}
 
 		if edge.DelegatorType == store.DelegationPrincipalUser {
-			if pendingUAT {
-				// Unreachable: an inheriting hop has an agent delegator.
-				return deny(pendingReason, DenyCauseCeilingEffectExceeded)
-			}
 			if obs != nil {
 				obs.uatIntrinsic = intrinsic
 			}

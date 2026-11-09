@@ -98,6 +98,7 @@ func TestBuildEnvGatherResponse_ProvenanceFollowsDispatch(t *testing.T) {
 		scopes []string          // env var scopes holding the key (always)
 		config map[string]string // agent applied config env
 		secret string            // scope of a secret of that name ("" for none)
+		noEdge bool              // no recorded delegation edge from the owner
 		want   string
 	}{
 		{name: "broker only", scopes: []string{store.ScopeRuntimeBroker}, want: "broker"},
@@ -111,6 +112,10 @@ func TestBuildEnvGatherResponse_ProvenanceFollowsDispatch(t *testing.T) {
 		{name: "empty config with nothing stored falls back to hub", config: map[string]string{"K": ""}, want: "hub"},
 		{name: "env storage beats secret", scopes: []string{store.ScopeRuntimeBroker}, secret: store.ScopeUser, want: "broker"},
 		{name: "user secret only", secret: store.ScopeUser, want: "secret"},
+		// Without a delegation chain recorded to the owner, the owner's
+		// user-scope rows label nothing: the label falls to the next scope.
+		{name: "user beats project only on a recorded chain", scopes: []string{store.ScopeProject, store.ScopeUser}, noEdge: true, want: "project"},
+		{name: "user secret labels nothing without a recorded chain", secret: store.ScopeUser, noEdge: true, want: "hub"},
 		{name: "project secret only", secret: store.ScopeProject, want: "secret"},
 		{name: "nothing stored", want: "hub"},
 	}
@@ -118,6 +123,12 @@ func TestBuildEnvGatherResponse_ProvenanceFollowsDispatch(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, st := testServer(t)
 			ctx := context.Background()
+			// The owner's user-scope rows label a key only for an agent whose
+			// delegation chain is recorded to that owner, so record the
+			// owner's principal edge to the agent in its project.
+			if !tc.noEdge {
+				hdEdge(t, st, store.DelegationPrincipalUser, provenanceOwner, provenanceAgent(nil).ID, provenanceProject, nil)
+			}
 			for _, scope := range tc.scopes {
 				putProvenanceEnv(t, st, "K", scope, always)
 			}
@@ -230,7 +241,7 @@ func TestEnvScopeID_NilAgent(t *testing.T) {
 // A nil agent gets the "hub" fallback label rather than a panic.
 func TestEnvGatherSourceLabel_NilAgent(t *testing.T) {
 	srv, _ := testServer(t)
-	if got := srv.envGatherSourceLabel(context.Background(), nil, nil, "K"); got != "hub" {
+	if got := srv.envGatherSourceLabel(context.Background(), nil, nil, nil, "K"); got != "hub" {
 		t.Errorf("label for a nil agent = %q, want %q", got, "hub")
 	}
 }

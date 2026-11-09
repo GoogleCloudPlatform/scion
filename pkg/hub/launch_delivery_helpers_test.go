@@ -37,7 +37,11 @@ import (
 // in. It returns the service d uses.
 //
 // The root is the agent's first ancestry entry, else its owner; when that
-// is empty or not a UUID, a user derived from the agent ID.
+// is empty or not a UUID, a user derived from the agent ID. For a non-UUID
+// OwnerID (a plain label, which the store cannot keep) the recorded chain
+// therefore ends at the derived root user, not at the owner, so the owner
+// material chain rule withholds the owner's user-scope rows not shared with
+// progeny; a test that expects them must use a UUID owner.
 func grantLaunchDelivery(t *testing.T, s store.Store, d *HTTPAgentDispatcher, agent *store.Agent) *AuthzService {
 	t.Helper()
 	ctx := context.Background()
