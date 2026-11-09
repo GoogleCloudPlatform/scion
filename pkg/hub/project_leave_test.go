@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -954,6 +955,17 @@ func TestProjectLeave_SelfOnlyCannotTargetAnother(t *testing.T) {
 			rec := doRequestAsUser(t, f.srv, actor, http.MethodPost, leavePath(f.projectID), body)
 			assert.Equal(t, http.StatusBadRequest, rec.Code, "%s %v: %s", name, body, rec.Body.String())
 		}
+		// Review O6: a second JSON value after the first is refused, so a
+		// target cannot ride behind a valid body.
+		for _, raw := range []string{
+			`{"dryRun":false} {"userId":"` + f.member.ID + `"}`,
+			`{} {"bindingId":"` + binding + `"}`,
+			`{"dryRun":true}{}`,
+			`{"dryRun":false} x`,
+		} {
+			rec := leaveRawAs(t, f.srv, actor, f.projectID, raw)
+			assert.Equal(t, http.StatusBadRequest, rec.Code, "%s %q: %s", name, raw, rec.Body.String())
+		}
 	}
 	assert.Equal(t, memberBefore, directProjectBindings(t, f.store, f.member.ID, f.projectID))
 	assert.Equal(t, ownerBefore, directProjectBindings(t, f.store, f.owner.ID, f.projectID))
@@ -965,6 +977,19 @@ func TestProjectLeave_SelfOnlyCannotTargetAnother(t *testing.T) {
 	assert.Equal(t, []string{store.ProjectRoleMember}, res.RemovedRoles)
 	assert.Empty(t, directProjectBindings(t, f.store, peer.ID, f.projectID))
 	assert.Equal(t, memberBefore, directProjectBindings(t, f.store, f.member.ID, f.projectID))
+}
+
+// leaveRawAs posts raw as the leave body, unparsed, on user's session.
+func leaveRawAs(t *testing.T, srv *Server, user *store.User, projectID, raw string) *httptest.ResponseRecorder {
+	t.Helper()
+	token, _, _, err := srv.userTokenService.GenerateTokenPair(user.ID, user.Email, user.DisplayName, user.Role, ClientTypeWeb)
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, leavePath(projectID), strings.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	return rec
 }
 
 // TestProjectLeave_ClampedGroupBindingIsNotRemainingAccess (sec ruling on

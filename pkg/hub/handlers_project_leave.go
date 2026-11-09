@@ -76,13 +76,19 @@ func (s *Server) leaveProject(w http.ResponseWriter, r *http.Request, projectID 
 	// Self only: the leaving member is always the caller. The body names
 	// no target; any field other than dryRun (a user, principal or binding
 	// ID, for example) is refused, so no request can aim a leave at
-	// another principal.
+	// another principal. The body is at most one JSON value: anything after
+	// it (a second object naming a target, for example) is refused too.
 	var req leaveProjectRequest
 	if r.Body != nil {
 		dec := json.NewDecoder(r.Body)
 		dec.DisallowUnknownFields()
 		if err := dec.Decode(&req); err != nil && !errors.Is(err, io.EOF) {
 			BadRequest(w, "invalid request body: "+err.Error())
+			return
+		}
+		var extra json.RawMessage
+		if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+			BadRequest(w, "invalid request body: unexpected data after the JSON value")
 			return
 		}
 	}
