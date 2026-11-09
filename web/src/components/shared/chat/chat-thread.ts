@@ -7308,6 +7308,7 @@ export class ScionChatThread extends LitElement {
     const rows: Array<{ key: string; tpl: unknown }> = [];
     let lastDate = '';
     let prevSender = '';
+    let prevRoutedTo = '';
     let prevTimestamp = 0;
 
     // Inter-agent messages are sorted at ingest (fetchInteragentExchanges).
@@ -7369,6 +7370,7 @@ export class ScionChatThread extends LitElement {
         });
         // Reset grouping after a marker so the next message shows its header.
         prevSender = '';
+        prevRoutedTo = '';
         prevTimestamp = 0;
         groupStart = i;
         if (i < msgs.length) groupDateStr = this.rowTime(msgs[i]).dateLabel;
@@ -7399,6 +7401,7 @@ export class ScionChatThread extends LitElement {
       if (dateStr !== lastDate) {
         lastDate = dateStr;
         prevSender = '';
+        prevRoutedTo = '';
         prevTimestamp = 0;
         rows.push({ key: `day:${dateStr}`, tpl: renderDateDivider(dateStr) });
       }
@@ -7416,12 +7419,14 @@ export class ScionChatThread extends LitElement {
         });
         // Reset grouping so the first unread message shows its header.
         prevSender = '';
+        prevRoutedTo = '';
         prevTimestamp = 0;
       }
 
       // System/state-change messages
       if (SYSTEM_MESSAGE_TYPES.has(msg.type)) {
         prevSender = '';
+        prevRoutedTo = '';
         prevTimestamp = 0;
         rows.push({
           key: `msg:${msg.id}`,
@@ -7435,13 +7440,6 @@ export class ScionChatThread extends LitElement {
         });
         continue;
       }
-
-      // Grouping: consecutive *visible* messages from same sender within GROUP_WINDOW_MS
-      const sameSender = msg.sender === prevSender;
-      const withinWindow = msgTime - prevTimestamp < GROUP_WINDOW_MS;
-      // In the starred-only center every message stands alone, with its own
-      // author and time: neighbours there need not have been consecutive.
-      const showHeader = this.filtered || !sameSender || !withinWindow;
 
       // In v2 mode, use currentUserId to determine own vs. others' messages.
       // Own messages (fromAgent=false): right-aligned, no header/avatar.
@@ -7460,6 +7458,15 @@ export class ScionChatThread extends LitElement {
         !isAgentSender && msg.recipient && msg.recipient.startsWith('agent:')
           ? msg.recipient.slice(6)
           : '';
+      // Grouping: consecutive *visible* messages from the same sender to the
+      // same shown recipient within GROUP_WINDOW_MS. A recipient change
+      // starts a new group so each header names the agent its run went to.
+      const sameSender = msg.sender === prevSender;
+      const sameRecipient = msgRoutedTo === prevRoutedTo;
+      const withinWindow = msgTime - prevTimestamp < GROUP_WINDOW_MS;
+      // In the starred-only center every message stands alone, with its own
+      // author and time: neighbours there need not have been consecutive.
+      const showHeader = this.filtered || !sameSender || !sameRecipient || !withinWindow;
       const senderDisplayName = this.isV2
         ? this.getSenderDisplayName(msg)
         : isFromAgent
@@ -7545,6 +7552,7 @@ export class ScionChatThread extends LitElement {
       }
 
       prevSender = msg.sender;
+      prevRoutedTo = msgRoutedTo;
       prevTimestamp = msgTime;
     }
 
