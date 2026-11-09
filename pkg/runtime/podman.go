@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"regexp"
 	"strconv"
@@ -204,7 +205,7 @@ func (r *PodmanRuntime) Run(ctx context.Context, config RunConfig) (string, erro
 
 	// Secret values go to podman through its environment, not argv
 	// (moveSecretEnvOutOfArgv).
-	newArgs, secretEnv, err := moveSecretEnvOutOfArgv(newArgs, config.Image, podmanSecretEnvNames(config))
+	newArgs, secretEnv, err := moveSecretEnvOutOfArgv(newArgs, config.Image, podmanSecretEnvNames(config), os.LookupEnv)
 	if err != nil {
 		return "", err
 	}
@@ -216,6 +217,17 @@ func (r *PodmanRuntime) Run(ctx context.Context, config RunConfig) (string, erro
 	hooks := config.launchHooks()
 	if err := hooks.checkpoint(ctx, CheckpointStepLaunching); err != nil {
 		return "", err
+	}
+	// Rootless podman that starts its user namespace's pause process
+	// (catatonit -P) hands it its own environment, and the pause process
+	// outlives the run: the secret values would stay in its
+	// /proc/<pid>/environ. An env-free "podman unshare true" first starts
+	// the pause process if none runs, and "run" then joins it.
+	if r.Rootless && len(secretEnv) > 0 {
+		if uout, uerr := runSimpleCommand(ctx, r.Command, "unshare", "true"); uerr != nil {
+			runtimeLog().Warn("Could not start podman's pause process before a launch with secret env; it may keep the values in its environment",
+				"error", uerr, "output", strings.TrimSpace(uout))
+		}
 	}
 	out, err := runSimpleCommandWithEnv(ctx, secretEnv, r.Command, newArgs...)
 	if err != nil {

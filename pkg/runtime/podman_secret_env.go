@@ -64,11 +64,12 @@ func podmanOwnEnvName(name string) bool {
 		"REGISTRY_AUTH_FILE", "STORAGE_DRIVER", "STORAGE_OPTS", "NOTIFY_SOCKET",
 		"DBUS_SESSION_BUS_ADDRESS", "SSH_AUTH_SOCK",
 		"GODEBUG", "GOGC", "GOMAXPROCS", "GOMEMLIMIT", "GOTRACEBACK",
+		"DOCKER_CONFIG", "SSL_CERT_FILE", "SSL_CERT_DIR",
 		// podman's own registry and network calls read these
 		"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "no_proxy", "all_proxy":
 		return true
 	}
-	for _, prefix := range []string{"XDG_", "CONTAINERS_", "PODMAN_", "BUILDAH_", "LD_", "LC_"} {
+	for _, prefix := range []string{"XDG_", "CONTAINERS_", "_CONTAINERS_", "PODMAN_", "BUILDAH_", "LD_", "LC_"} {
 		if strings.HasPrefix(name, prefix) {
 			return true
 		}
@@ -84,41 +85,64 @@ func podmanOwnEnvName(name string) bool {
 // as buildCommonRunArgs builds them; any other shape is refused rather
 // than run with the values in argv.
 //
-// What the container receives is unchanged. Podman keeps the last "-e"
-// for a name, so the value of the last occurrence is the one given; when
-// that occurrence is already bare, podman's inherited value is the one
-// used, as before, and nothing is added.
-func moveSecretEnvOutOfArgv(args []string, image string, names map[string]bool) ([]string, []string, error) {
+// What the container receives is unchanged. Podman reads the "-e" flags in
+// order: "NAME=VALUE" sets the value, and a bare "NAME" sets it to podman's
+// own NAME when podman has one and otherwise leaves the earlier value. The
+// rewrite follows the same steps with lookupEnv (podman's environment
+// before the entries returned here, os.LookupEnv in production) and gives
+// podman the value that results. When that is podman's inherited value,
+// nothing is added. A secret whose name podman reads itself keeps its value
+// in argv, with a warning that names it.
+func moveSecretEnvOutOfArgv(args []string, image string, names map[string]bool, lookupEnv func(string) (string, bool)) ([]string, []string, error) {
 	end := len(args) - 4
 	if end < 0 || args[end] != image || args[end+1] != "sh" || args[end+2] != "-c" {
 		return nil, nil, fmt.Errorf("podman run arguments do not end with the image and its command; refusing to start with secret env in argv")
 	}
 	out := append([]string(nil), args...)
-	type final struct {
-		value string
-		set   bool
+	// result is the container's value for a name after the flags so far:
+	// one given in argv (value), podman's own (inherited), or none.
+	type result struct {
+		value     string
+		given     bool
+		inherited bool
 	}
-	last := map[string]final{}
+	results := map[string]result{}
 	var order []string
+	warned := map[string]bool{}
 	for i := 0; i < end-1; i++ {
 		if out[i] != "-e" && out[i] != "--env" {
 			continue
 		}
 		i++
 		name, value, set := strings.Cut(out[i], "=")
-		if !names[name] || !podmanEnvNamePattern.MatchString(name) || podmanOwnEnvName(name) {
+		if !names[name] {
+			continue
+		}
+		if !podmanEnvNamePattern.MatchString(name) || podmanOwnEnvName(name) {
+			if set && !warned[name] {
+				warned[name] = true
+				runtimeLog().Warn("Secret env value stays in podman's argv: podman reads this name itself or takes it as a pattern", "name", name)
+			}
 			continue
 		}
 		out[i] = name
-		if _, seen := last[name]; !seen {
+		if _, seen := results[name]; !seen {
 			order = append(order, name)
 		}
-		last[name] = final{value: value, set: set}
+		switch {
+		case set:
+			results[name] = result{value: value, given: true}
+		default:
+			if _, ok := lookupEnv(name); ok {
+				results[name] = result{inherited: true}
+			}
+			// Unset in podman's environment: podman keeps the earlier value.
+		}
 	}
 	var env []string
 	for _, name := range order {
-		if f := last[name]; f.set {
-			env = append(env, name+"="+f.value)
+		if r := results[name]; r.given {
+			env = append(env, name+"="+r.value)
 		}
 	}
 	return out, env, nil

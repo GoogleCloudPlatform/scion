@@ -16,6 +16,7 @@ package runtime
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -125,6 +126,46 @@ func TestPodmanRun_SecretEnvNotInArgv(t *testing.T) {
 	}
 }
 
+// Rootless, the pause process podman starts keeps podman's environment for
+// its whole life, so it must already run, started without the secret env,
+// before "podman run" gets the values. Rootful podman has no pause process.
+func TestPodmanRun_PauseProcessStartedWithoutSecretEnv(t *testing.T) {
+	for _, rootless := range []bool{true, false} {
+		t.Run(fmt.Sprintf("rootless=%v", rootless), func(t *testing.T) {
+			dir := t.TempDir()
+			bin := filepath.Join(dir, "mock-podman")
+			log := filepath.Join(dir, "calls")
+			// One line per call: the subcommand, then "secret" when the
+			// call's environment carries the sentinel.
+			script := "#!/bin/sh\nif env | grep -q '" + podmanSecretSentinel + "'; then s=secret; else s=clean; fi\n" +
+				"echo \"$1 $s\" >> '" + log + "'\nif [ \"$1\" = run ]; then echo " + mockPodmanID + "; fi\n"
+			if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			cfg := RunConfig{
+				Harness:      &harness.Generic{},
+				Name:         "test-agent",
+				UnixUsername: "scion",
+				Image:        "scion-agent:latest",
+				Task:         "hello",
+				ResolvedSecrets: []api.ResolvedSecret{
+					{Name: "api", Type: "environment", Target: "FAKE_API_KEY", Value: podmanSecretSentinel},
+				},
+			}
+			if _, err := (&PodmanRuntime{Command: bin, Rootless: rootless}).Run(context.Background(), cfg); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			want := []string{"unshare clean", "run secret"}
+			if !rootless {
+				want = []string{"run secret"}
+			}
+			if got := readRecordedLines(t, log); !slices.Equal(got, want) {
+				t.Fatalf("podman calls = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
 // hasEnvArg reports whether argv has "-e" followed by value.
 func hasEnvArg(argv []string, value string) bool {
 	for i := 0; i+1 < len(argv); i++ {
@@ -136,8 +177,8 @@ func hasEnvArg(argv []string, value string) bool {
 }
 
 // podmanContainerEnv is the container env podman derives from argv and its
-// own environment: "-e"/"--env" before the image, the last one for a name
-// winning, a bare name copying podman's value when it has one.
+// own environment: "-e"/"--env" before the image, in order, a bare name
+// copying podman's value when it has one and otherwise changing nothing.
 func podmanContainerEnv(args []string, image string, procEnv []string) map[string]string {
 	proc := map[string]string{}
 	for _, e := range procEnv {
@@ -154,14 +195,25 @@ func podmanContainerEnv(args []string, image string, procEnv []string) map[strin
 		if !set {
 			pv, ok := proc[k]
 			if !ok {
-				delete(got, k)
-				continue
+				continue // podman keeps the earlier value
 			}
 			v = pv
 		}
 		got[k] = v
 	}
 	return got
+}
+
+// lookupIn is os.LookupEnv over procEnv.
+func lookupIn(procEnv []string) func(string) (string, bool) {
+	return func(name string) (string, bool) {
+		for _, e := range procEnv {
+			if k, v, _ := strings.Cut(e, "="); k == name {
+				return v, true
+			}
+		}
+		return "", false
+	}
 }
 
 func TestMoveSecretEnvOutOfArgv(t *testing.T) {
@@ -172,6 +224,7 @@ func TestMoveSecretEnvOutOfArgv(t *testing.T) {
 		"SECRET": true, "HOSTED": true, "TWICE": true, "BARE_LAST": true,
 		"PATH": true, "XDG_RUNTIME_DIR": true, "GLOB*": true, "NOT_A_FLAG": true, "EMPTY": true,
 		"HTTPS_PROXY": true, "no_proxy": true,
+		"DOCKER_CONFIG": true, "SSL_CERT_FILE": true, "_CONTAINERS_USERNS_CONFIGURED": true,
 	}
 	for _, tc := range []struct {
 		name     string
@@ -204,9 +257,27 @@ func TestMoveSecretEnvOutOfArgv(t *testing.T) {
 			wantEnv:  nil,
 		},
 		{
-			name:     "bare and unset stays unset",
+			name:     "bare and unset keeps the earlier value",
 			flags:    []string{"run", "-e", "BARE_LAST=v", "-e", "BARE_LAST"},
 			wantArgv: []string{"run", "-e", "BARE_LAST", "-e", "BARE_LAST"},
+			wantEnv:  []string{"BARE_LAST=v"},
+		},
+		{
+			name:     "bare and unset alone stays unset",
+			flags:    []string{"run", "-e", "BARE_LAST"},
+			wantArgv: []string{"run", "-e", "BARE_LAST"},
+			wantEnv:  nil,
+		},
+		{
+			name:     "a value after an inherited one wins",
+			flags:    []string{"run", "-e", "HOSTED", "-e", "HOSTED=v"},
+			wantArgv: []string{"run", "-e", "HOSTED", "-e", "HOSTED"},
+			wantEnv:  []string{"HOSTED=v"},
+		},
+		{
+			name:     "names podman reads for registries and TLS stay in argv",
+			flags:    []string{"run", "-e", "DOCKER_CONFIG=/c", "-e", "SSL_CERT_FILE=/f", "-e", "_CONTAINERS_USERNS_CONFIGURED=1"},
+			wantArgv: []string{"run", "-e", "DOCKER_CONFIG=/c", "-e", "SSL_CERT_FILE=/f", "-e", "_CONTAINERS_USERNS_CONFIGURED=1"},
 			wantEnv:  nil,
 		},
 		{
@@ -243,7 +314,7 @@ func TestMoveSecretEnvOutOfArgv(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			args := append(append([]string(nil), tc.flags...), tail...)
 			orig := append([]string(nil), args...)
-			got, env, err := moveSecretEnvOutOfArgv(args, image, names)
+			got, env, err := moveSecretEnvOutOfArgv(args, image, names, lookupIn(procEnv))
 			if err != nil {
 				t.Fatalf("moveSecretEnvOutOfArgv: %v", err)
 			}
@@ -280,7 +351,7 @@ func TestMoveSecretEnvOutOfArgv_RefusesUnknownShape(t *testing.T) {
 		{"run", "-e", "SECRET=s1", "img:1", "bash", "-c", "x"},
 		{},
 	} {
-		if _, _, err := moveSecretEnvOutOfArgv(args, "img:1", map[string]bool{"SECRET": true}); err == nil {
+		if _, _, err := moveSecretEnvOutOfArgv(args, "img:1", map[string]bool{"SECRET": true}, lookupIn(nil)); err == nil {
 			t.Errorf("moveSecretEnvOutOfArgv(%q) accepted an unknown argv shape", args)
 		}
 	}
