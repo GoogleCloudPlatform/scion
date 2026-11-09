@@ -239,6 +239,9 @@ func TestOAuthTokenBodyCredentialNeverInError(t *testing.T) {
 	cfg := OAuthProviderConfig{ClientID: "client-id", ClientSecret: "client-secret"}
 	formBody := "access_token=" + fake + "&scope=read%3Auser&token_type=bearer"
 	jsonBody := `{"refresh_token":"` + fake + `","token_type":"bearer"}`
+	cutJSON := `{"access_token":"` + fake
+	trailingJSON := `{"access_token":"` + fake + `","token_type":"bearer"} trailing`
+	semicolonForm := "Access_Token=" + fake + ";token_type=bearer"
 	tests := []struct {
 		name   string
 		body   string
@@ -269,6 +272,18 @@ func TestOAuthTokenBodyCredentialNeverInError(t *testing.T) {
 			_, err := s.pollGitHubDeviceToken(ctx, cfg, "device-code")
 			return err
 		}, "refresh_token"},
+		{"github code exchange, JSON cut mid-value", cutJSON, func(s *OAuthService) error {
+			_, err := s.exchangeGitHubCodeForTokenWithConfig(ctx, cfg, "code", "https://hub.example/cb")
+			return err
+		}, "access_token"},
+		{"code exchange, JSON with trailing bytes", trailingJSON, func(s *OAuthService) error {
+			_, err := s.exchangeCodeForToken(ctx, "https://idp.example/token", "client-id", "client-secret", "code", "https://hub.example/cb")
+			return err
+		}, "access_token"},
+		{"google device poll, form body with a semicolon pair", semicolonForm, func(s *OAuthService) error {
+			_, err := s.pollGoogleDeviceToken(ctx, cfg, "device-code")
+			return err
+		}, "access_token"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

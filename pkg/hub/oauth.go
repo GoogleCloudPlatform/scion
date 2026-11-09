@@ -509,6 +509,12 @@ func githubTokenErrorText(body []byte) string {
 		if err == nil && (e.AccessToken != "" || e.RefreshToken != "" || e.IDToken != "") {
 			return "token response without an error field"
 		}
+		// A body that names a credential field in any other shape (JSON cut
+		// short or with trailing bytes, a malformed form body) is not
+		// rendered either.
+		if hasCredentialKey(body) {
+			return "token response naming a credential field"
+		}
 		return upstreamText(string(body))
 	}
 	switch {
@@ -537,7 +543,19 @@ func tokenDecodeError(err error, body []byte) error {
 	if formTokenBody(body) {
 		return errors.New("failed to decode token response: unexpected form-encoded body")
 	}
+	if hasCredentialKey(body) {
+		return errors.New("failed to decode token response: body names a credential field")
+	}
 	return fmt.Errorf("failed to decode token response: %w: %s", err, githubTokenErrorText(body))
+}
+
+// hasCredentialKey reports whether body names a credential field anywhere,
+// in any case and any format: JSON cut short by the read cap or followed by
+// trailing bytes, and form bodies that url.ParseQuery rejects, all fail the
+// decoders but can still carry a token.
+func hasCredentialKey(body []byte) bool {
+	b := strings.ToLower(string(body))
+	return strings.Contains(b, "access_token") || strings.Contains(b, "refresh_token") || strings.Contains(b, "id_token")
 }
 
 // googleUserInfo represents the response from Google's userinfo endpoint.
