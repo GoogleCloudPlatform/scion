@@ -50,6 +50,7 @@ func flatTestHub(t *testing.T, s store.Store, experimentOn bool) *hub.Server {
 	require.NoError(t, err)
 	srv, err := hub.New(hub.ServerConfig{BrokerAuthConfig: hub.DefaultBrokerAuthConfig()}, s)
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 	ops := hub.NewOperationalSettings(s, koanf.New("."), koanf.New("."))
 	_, err = ops.Refresh(ctx)
 	require.NoError(t, err)

@@ -684,7 +684,7 @@ func hubSelfReadStatus(t *testing.T, hubURL, id, secretB64 string) int {
 	req, err := http.NewRequest(http.MethodGet, hubURL+"/api/v1/runtime-brokers/"+id, nil)
 	require.NoError(t, err)
 	require.NoError(t, (&apiclient.HMACAuth{BrokerID: id, SecretKey: key}).ApplyAuth(req))
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
 	require.NoError(t, err)
 	_ = resp.Body.Close()
 	return resp.StatusCode
@@ -745,11 +745,11 @@ func (w *syncBuffer) String() string {
 func captureProcessLogs(t *testing.T) *syncBuffer {
 	t.Helper()
 	buf := &syncBuffer{}
-	prevFlags, prevSlog := log.Flags(), slog.Default()
+	prevOut, prevFlags, prevSlog := log.Writer(), log.Flags(), slog.Default()
 	log.SetOutput(buf)
 	slog.SetDefault(slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	t.Cleanup(func() {
-		log.SetOutput(os.Stderr)
+		log.SetOutput(prevOut)
 		log.SetFlags(prevFlags)
 		slog.SetDefault(prevSlog)
 	})

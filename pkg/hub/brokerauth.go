@@ -911,9 +911,10 @@ func applyBrokerJoinRequest(broker *store.RuntimeBroker, req BrokerJoinRequest, 
 
 // GenerateAndStoreSecret returns the broker's stored HMAC secret, or
 // generates and stores one when there is none. Its callers are in-process
-// (the co-located, flat-host and plugin brokers), which share one key
-// across restarts and instances; a response to a remote caller uses MintSecretIfAbsent
-// instead, which never returns a stored secret.
+// (the co-located and plugin brokers), which share one key across
+// restarts and instances; the co-located flat Runtime Broker activation
+// uses ReplaceBrokerSecret instead, and a response to a remote caller uses
+// MintSecretIfAbsent, which never returns a stored secret.
 // Returns the base64-encoded secret key.
 func (s *BrokerAuthService) GenerateAndStoreSecret(ctx context.Context, brokerID string) (string, error) {
 	if brokerID == "" {
