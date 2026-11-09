@@ -41,8 +41,8 @@ The <project> argument is required and can be a project name, slug, or ID;
 the current project is never used by default.
 
 After you leave, your agents in the project are stopped and put on hold
-unless you keep access through a group, and your access tokens limited to
-this project are revoked. To come back, a project owner or admin must add
+unless you keep access through a group or your hub role, and your access
+tokens limited to this project are revoked. To come back, a project owner or admin must add
 you again.
 
 The last owner of a project cannot leave (transfer ownership first), and
