@@ -2005,7 +2005,7 @@ export class ScionProjectMembersEditor extends LitElement {
                       </sl-tooltip>
                     `
                   : nothing}
-                ${lastOwner && !this.effectiveReadOnly
+                ${lastOwner && !this.effectiveReadOnly && !selfLeave
                   ? html`<sl-tooltip content=${LAST_OWNER_REMOVE_REASON}>
                       <sl-icon
                         name="shield-lock"

@@ -28,7 +28,7 @@ import type {
   MembershipCapabilities,
   ProjectMemberGroup,
 } from '../../shared/types.js';
-import { ScionProjectMembersEditor } from './project-members-editor.js';
+import { LAST_OWNER_REMOVE_REASON, ScionProjectMembersEditor } from './project-members-editor.js';
 import { LEAVE_TRANSFER_OWNERSHIP_EVENT } from './project-leave-dialog.js';
 import { LEAVE_BLOCKED_LAST_OWNER } from '../../client/project-leave.js';
 
@@ -197,9 +197,20 @@ describe('members editor: self row Leave', () => {
     const self = row(el, 'u-alice');
     const leave = self.querySelector('[data-self-leave]')!;
     expect(leave.hasAttribute('disabled')).toBe(true);
-    expect(self.querySelector('sl-tooltip')?.getAttribute('content')).toBe(
-      LEAVE_BLOCKED_LAST_OWNER
-    );
+    // Exactly one tooltip on the row, the Leave guidance; no last-owner shield-lock,
+    // whose text is about a Remove this row does not offer.
+    const tips = Array.from(self.querySelectorAll('sl-tooltip'));
+    expect(tips.map((t) => t.getAttribute('content'))).toEqual([LEAVE_BLOCKED_LAST_OWNER]);
+    expect(self.querySelector('sl-icon[name="shield-lock"]')).toBeNull();
+  });
+
+  it('planted positive: with Leave hidden (experiment off) the last-owner row keeps its shield-lock', async () => {
+    const el = await mount([ALICE, DAVE], OWNER_CAPS, { currentUserId: 'u-alice' });
+    const self = row(el, 'u-alice');
+    expect(self.querySelector('[data-self-leave]')).toBeNull();
+    const shield = self.querySelector('sl-icon[name="shield-lock"]');
+    expect(shield).not.toBeNull();
+    expect(shield!.closest('sl-tooltip')?.getAttribute('content')).toBe(LAST_OWNER_REMOVE_REASON);
   });
 
   it('a disabled (blocked) self-row Leave does not open the dialog', async () => {
