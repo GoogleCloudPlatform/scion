@@ -64,6 +64,7 @@ const (
 	RefuseNothingToRollBack  = "nothing_to_roll_back"
 	RefuseDefaultUnknown     = "default_instance_unknown"
 	RefuseInstanceDrained    = "instance_not_drained"
+	RefuseIdentityUnreadable = "identity_unreadable"
 )
 
 var refusalTexts = map[string]string{
@@ -93,6 +94,7 @@ var refusalTexts = map[string]string{
 	RefuseNothingToRollBack:  "the recorded convert run is already rolled back",
 	RefuseDefaultUnknown:     "a project's default instance cannot be chosen from the plan",
 	RefuseInstanceDrained:    "non-terminal agents are bound to a flat instance; finish or delete them, then run the rollback again",
+	RefuseIdentityUnreadable: "an instance identity file could not be read; it must be an owner-only regular file holding valid JSON; fix it, then run the rollback again",
 }
 
 // RefusalText returns the fixed text for a refusal code.

@@ -753,6 +753,69 @@ func TestRollback_ReportsStartedItemWithoutIdentity(t *testing.T) {
 	assert.Contains(t, rep.Notes, NoteNoIdentity+" "+key)
 }
 
+// D2: an identity file that cannot be read (here, not valid JSON) refuses
+// the rollback with its own code, naming the instance key only, before
+// anything is done.
+func TestRollback_UnreadableIdentityRefusesWithKey(t *testing.T) {
+	f := newApplyFixture(t)
+	key := f.instanceKey()
+	f.env.Register = registerThenFail(f)
+	_, err := f.apply()
+	require.Error(t, err)
+	j, err := LoadJournal(f.g)
+	require.NoError(t, err)
+	j.Register[0].BrokerID = ""
+	require.NoError(t, SaveJournal(f.g, j, testNow))
+	require.NoError(t, os.WriteFile(filepath.Join(f.g, "runtime-brokers", key, "identity.json"), []byte("not json"), 0o600))
+
+	_, err = Rollback(context.Background(), f.env)
+	require.Error(t, err)
+	assert.Equal(t, RefuseIdentityUnreadable, refusalCode(t, err))
+	var ref *Refusal
+	require.ErrorAs(t, err, &ref)
+	assert.Equal(t, []string{key}, ref.Keys)
+	assert.NotNil(t, f.hub.instance, "nothing was deregistered")
+	j, err = LoadJournal(f.g)
+	require.NoError(t, err)
+	assert.Nil(t, j.Rollback, "the rollback did not start")
+}
+
+// D1: a BeforeMove error stops the rollback before that instance's move:
+// the row is deregistered, the directory stays in place and the move item
+// stays pending. A later rollback, without the error, resumes and finishes.
+func TestRollback_BeforeMoveErrorStopsBeforeMove(t *testing.T) {
+	f := newApplyFixture(t)
+	key := f.instanceKey()
+	_, err := f.apply()
+	require.NoError(t, err)
+	var calls []string
+	f.env.BeforeMove = func(globalDir, k string) error {
+		calls = append(calls, k)
+		assert.Equal(t, f.g, globalDir)
+		assert.Nil(t, f.hub.instance, "the row is deregistered before the hook")
+		return errors.New("PLANTED-HOOK-ERROR")
+	}
+
+	_, err = Rollback(context.Background(), f.env)
+	require.Error(t, err)
+	assert.Equal(t, RefuseLocalWrite, refusalCode(t, err))
+	assert.NotContains(t, err.Error(), "PLANTED-HOOK-ERROR", "the refusal text is fixed")
+	assert.Equal(t, []string{key}, calls)
+	fi, err := os.Lstat(filepath.Join(f.g, "runtime-brokers", key, "identity.json"))
+	require.NoError(t, err, "the directory stays in place")
+	assert.True(t, fi.Mode().IsRegular())
+	j, err := LoadJournal(f.g)
+	require.NoError(t, err)
+	require.Len(t, j.Rollback.Moved, 1)
+	assert.Equal(t, StepPending, j.Rollback.Moved[0].State, "the move did not start")
+	assert.NotEmpty(t, j.Rollback.Moved[0].Error)
+
+	f.env.BeforeMove = nil
+	rep, err := Rollback(context.Background(), f.env)
+	require.NoError(t, err, "the rollback resumes")
+	assert.Equal(t, JournalRolledBack, rep.State)
+}
+
 // B3: a resume after a step 1 failure with a rotated env value (the plan
 // digest leaves values out) writes the new list, and the instances copy
 // follows it, so rollback succeeds.

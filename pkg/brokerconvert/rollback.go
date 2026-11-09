@@ -136,7 +136,9 @@ func (r *run) fillRegisteredIDs() ([]string, *Refusal) {
 		}
 		id, ok, err := identityBrokerID(r.env.GlobalDir, it.Key)
 		if err != nil {
-			return nil, refuse(RefuseLocalWrite)
+			ref := refuse(RefuseIdentityUnreadable)
+			ref.Keys = []string{it.Key}
+			return nil, ref
 		}
 		if !ok {
 			notes = append(notes, NoteNoIdentity+" "+it.Key)
