@@ -741,10 +741,10 @@ const sandboxExecStdinWaitDelay = 2 * time.Second
 
 // runSandboxExec runs `sandbox <args>` for the log retrieval and exec
 // paths (GetLogs, Attach's window-size step, Exec, ExecWithStdin) and
-// returns what runSimpleCommandWithStdin would: the same log lines
-// (argument count only, output omitted under WithSensitiveExec), the
-// error wrapped as "<bin> failed: %w", the raw output on error and the
-// trimmed output on success. stdin may be nil.
+// returns what runCommand with combined output (runCombinedCommand) would:
+// the same log lines (argument count only, output omitted under
+// WithSensitiveExec), the error wrapped as "<bin> failed: %w", the raw
+// output on error and the trimmed output on success. stdin may be nil.
 //
 // The output is captured in an unlinked temporary file
 // (newSandboxCommandOutput), never a pipe (ptone/scion#5040), as the
