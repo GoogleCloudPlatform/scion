@@ -169,6 +169,16 @@ func TestRemoteOwnerRepo(t *testing.T) {
 		{"https://x-access-token:abc@github.com/acme/widgets.git", "github.com", "acme", "widgets", true},
 		{"https://ghe.example.com/acme/widgets.git", "ghe.example.com", "acme", "widgets", true},
 
+		// The .git suffix is trimmed in any letter case, so the remote's
+		// owner/repo letter case is still recovered.
+		{"https://github.com/Acme/Widgets.Git", "github.com", "Acme", "Widgets", true},
+		{"git@github.com:Acme/Widgets.gIt", "github.com", "Acme", "Widgets", true},
+		{"ssh://git@github.com/Acme/Widgets.GIT", "github.com", "Acme", "Widgets", true},
+		{"https://github.com/Acme/Widgets.Git/", "github.com", "Acme", "Widgets", true},
+		// A name merely ending in "git" (no dot) is not a suffix to trim.
+		{"https://github.com/Acme/MyGit", "github.com", "Acme", "MyGit", true},
+		{"https://github.com/Acme/mygit.git", "github.com", "Acme", "mygit", true},
+
 		// Host mismatch: never associate or mint.
 		{"https://gitlab.com/acme/widgets.git", "github.com", "", "", false},
 		{"https://other.example/acme/widgets.git", "github.com", "", "", false},
