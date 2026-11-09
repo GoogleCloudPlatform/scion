@@ -21,10 +21,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net/url"
 	"os"
-	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
@@ -183,7 +180,7 @@ func preflightRun(ctx context.Context, o preflightOptions) (preflight.Report, er
 
 	client, err := openPreflightClient(driver, dsn)
 	if err != nil {
-		return preflight.Report{}, fmt.Errorf("opening the %s hub database read only: %s", driver, redactDSNIn(err.Error(), driver, dsn))
+		return preflight.Report{}, fmt.Errorf("opening the %s hub database read only: %s", driver, config.RedactDSNIn(err.Error(), driver, dsn))
 	}
 	defer func() { _ = client.Close() }()
 
@@ -193,12 +190,12 @@ func preflightRun(ctx context.Context, o preflightOptions) (preflight.Report, er
 			return preflight.Report{}, fmt.Errorf("the restarted hub would refuse to start: PostgreSQL schema %q, which has no hub tables, is ahead of schema %q on the search_path; fix the search_path or set server.database.allow_shadowed_schema",
 				shadow.CurrentSchema, shadow.ShadowedSchema)
 		}
-		return preflight.Report{}, fmt.Errorf("checking the PostgreSQL search_path: %s", redactDSNIn(err.Error(), driver, dsn))
+		return preflight.Report{}, fmt.Errorf("checking the PostgreSQL search_path: %s", config.RedactDSNIn(err.Error(), driver, dsn))
 	}
 
 	tx, err := client.BeginTx(ctx, snapshotTxOptions(client.Driver().Dialect()))
 	if err != nil {
-		return preflight.Report{}, fmt.Errorf("starting the read-only snapshot: %s", redactDSNIn(err.Error(), driver, dsn))
+		return preflight.Report{}, fmt.Errorf("starting the read-only snapshot: %s", config.RedactDSNIn(err.Error(), driver, dsn))
 	}
 	defer func() { _ = tx.Rollback() }() // read only: never committed
 
@@ -279,52 +276,6 @@ func snapshotTxOptions(d string) *sql.TxOptions {
 		return &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true}
 	}
 	return nil
-}
-
-// dsnPasswordRE finds a libpq keyword/value credential (password= or
-// sslpassword=), quoted or not.
-var dsnPasswordRE = regexp.MustCompile(`(?i)\b(?:ssl)?password\s*=\s*('(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"|\S+)`)
-
-// dsnSecrets returns the credentials dsn carries: a postgres:// URL's
-// userinfo password and password/sslpassword query parameters (also with
-// an empty host, as in a Unix-socket URL such as
-// "postgres://u:p@/db?host=/cloudsql/..."), or a keyword-form DSN's
-// password values.
-func dsnSecrets(dsn string) []string {
-	var out []string
-	if u, err := url.Parse(dsn); err == nil && (strings.EqualFold(u.Scheme, "postgres") || strings.EqualFold(u.Scheme, "postgresql")) {
-		if pw, ok := u.User.Password(); ok {
-			out = append(out, pw)
-		}
-		for k, vs := range u.Query() {
-			if strings.EqualFold(k, "password") || strings.EqualFold(k, "sslpassword") {
-				out = append(out, vs...)
-			}
-		}
-		return out
-	}
-	for _, m := range dsnPasswordRE.FindAllStringSubmatch(dsn, -1) {
-		v := m[1]
-		if len(v) >= 2 && (v[0] == '\'' || v[0] == '"') && v[len(v)-1] == v[0] {
-			v = strings.NewReplacer(`\'`, `'`, `\"`, `"`, `\\`, `\`).Replace(v[1 : len(v)-1])
-		}
-		out = append(out, v)
-	}
-	return out
-}
-
-// redactDSNIn returns text with dsn replaced by its redacted form and every
-// credential it carries masked in every rendering (redactSecretForms).
-func redactDSNIn(text, driver, dsn string) string {
-	if dsn == "" {
-		return text
-	}
-	text = strings.ReplaceAll(text, dsn, config.RedactDatabaseURL(driver, dsn))
-	text = strings.ReplaceAll(text, quotedBody(strconv.Quote(dsn)), config.RedactDatabaseURL(driver, dsn))
-	for _, s := range dsnSecrets(dsn) {
-		text = redactSecretForms(text, s)
-	}
-	return text
 }
 
 // preflightExit is the error of a run whose report has blocking findings:

@@ -1103,6 +1103,43 @@ func TestWorkstation_PutServerConfig_LegacyServerYAMLSources(t *testing.T) {
 	}
 }
 
+// scion server start now hands the hub an absolute --config path (here a
+// directory holding a server.yaml). After the server changes directory (as
+// with --global), the legacy server.yaml guard still finds that file and
+// refuses a save that would add a server block, and a settings reload still
+// reads it.
+func TestWorkstation_AbsoluteConfigPathSurvivesChdir(t *testing.T) {
+	isolateLogLevelState(t)
+	settingsPath := tempSettingsHome(t)
+	settings := "schema_version: \"1\"\nactive_profile: local\n"
+	if err := os.WriteFile(settingsPath, []byte(settings), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	configDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(configDir, "server.yaml"), []byte("logLevel: debug\nhub:\n  port: 7000\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srv, _, _ := newSQLiteHubInMode(t, true, nil)
+	srv.config.ConfigPath = configDir
+	t.Chdir(t.TempDir())
+
+	rr := putServerConfig(t, srv, `{"server":{"log_level":"info"}}`)
+	if rr.Code != http.StatusConflict || !strings.Contains(rr.Body.String(), "legacy_server_yaml") {
+		t.Fatalf("expected 409 legacy_server_yaml, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if after := readFileString(t, settingsPath); after != settings {
+		t.Errorf("settings.yaml changed:\n%s", after)
+	}
+
+	results := srv.reloadSettings()
+	if errText, ok := results["error"]; ok {
+		t.Fatalf("reload failed: %v", errText)
+	}
+	if applied, _ := results["applied"].([]string); !slices.Contains(applied, "log_level") {
+		t.Errorf("the reload must read the server.yaml next to --config (log_level), applied = %v", results["applied"])
+	}
+}
+
 // With a server.yaml present but a settings.yaml that already
 // has a server key, the loader reads settings.yaml, so the PUT edits it.
 func TestWorkstation_PutServerConfig_ServerYAMLWithServerKeyAllowed(t *testing.T) {
