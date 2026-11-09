@@ -396,7 +396,7 @@ func (s *Server) projectionAudienceIsProject(ctx context.Context, key, projectID
 	audience, topic, err := chatKeyReadAudience(ctx, wcs, key)
 	if err != nil {
 		// Fail closed: no copy into the scratchpad.
-		logChatStoreFault(ctx, s.projectsLogger(), "attachment projection: topic lookup failed", "key", key, "error", err)
+		logChatStoreFault(ctx, s.projectsLogger(), "attachment projection: topic lookup failed", key, err)
 		return false
 	}
 	return audience == chatAudienceProject && topic.ProjectID == projectID

@@ -41,6 +41,7 @@ import (
 	"time"
 
 	"cloud.google.com/go/compute/metadata"
+	resourcemanagerpb "cloud.google.com/go/resourcemanager/apiv3/resourcemanagerpb"
 	"cloud.google.com/go/run/apiv2/runpb"
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -54,6 +55,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/googleapis/gax-go/v2"
 	"google.golang.org/api/iterator"
+	"google.golang.org/api/option"
 	googleapi "google.golang.org/genproto/googleapis/api"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -101,6 +103,22 @@ type CloudRunRuntime struct {
 	// can be retried on subsequent calls.
 	resolveMu sync.Mutex
 	resolved  bool
+
+	// clientOpts are the client options every Cloud Run Admin, Cloud
+	// Logging and Resource Manager client of this runtime is built with:
+	// a flat instance's own credentials (NewFlatCloudRunRuntime). Nil for
+	// the legacy constructors, whose clients use Application Default
+	// Credentials.
+	clientOpts []option.ClientOption
+	// getProject overrides the Resource Manager read of the flat scope
+	// probe (ProbeProject). Nil in production; tests inject a fake.
+	getProject func(ctx context.Context, name string) (*resourcemanagerpb.Project, error)
+	// projectNumber is the probed project number BindProjectNumber set
+	// (amendment P5-CR, CR3). It is read only by parent(), so every Cloud
+	// Run Admin resource name targets the probed scope; config.ProjectID
+	// keeps the configured project ID, which Cloud Logging, the exec
+	// connector and its key cache use. Guarded by resolveMu.
+	projectNumber string
 }
 
 func NewCloudRunRuntime(cfg *config.CloudRunConfig) (*CloudRunRuntime, error) {
@@ -245,7 +263,7 @@ func (r *CloudRunRuntime) client(ctx context.Context) (cloudrun.InstancesAPI, er
 	if r.newClient != nil {
 		return r.newClient(ctx)
 	}
-	return cloudrun.NewInstancesClient(ctx)
+	return cloudrun.NewInstancesClient(ctx, r.clientOpts...)
 }
 
 // cloudRunMaxEnvValueBytes is Cloud Run's size cap for a single environment
@@ -1298,8 +1316,7 @@ func cloudRunShortInstanceID(id string) string {
 // accepting either a short ID or an already-qualified name so that qualifying
 // an ID twice is impossible.
 func (r *CloudRunRuntime) instanceResourceName(id string) string {
-	return fmt.Sprintf("projects/%s/locations/%s/instances/%s",
-		r.config.ProjectID, r.config.Location, cloudRunShortInstanceID(id))
+	return r.parent() + "/instances/" + cloudRunShortInstanceID(id)
 }
 
 func cloudRunInstanceID(agentID string) string {
@@ -2062,7 +2079,7 @@ func (r *CloudRunRuntime) GetLogs(ctx context.Context, id string) (string, error
 	if err := r.resolveConfig(ctx); err != nil {
 		return "", fmt.Errorf("failed to resolve Cloud Run config: %w", err)
 	}
-	logClient, err := cloudrun.NewLogClient(ctx, r.config.ProjectID)
+	logClient, err := cloudrun.NewLogClient(ctx, r.config.ProjectID, r.clientOpts...)
 	if err != nil {
 		return "", fmt.Errorf("initializing log client: %w", err)
 	}
@@ -2152,7 +2169,7 @@ func (r *CloudRunRuntime) StreamLogs(ctx context.Context, instanceName string, o
 	if err := r.resolveConfig(ctx); err != nil {
 		return nil, fmt.Errorf("failed to resolve Cloud Run config: %w", err)
 	}
-	logClient, err := cloudrun.NewLogClient(ctx, r.config.ProjectID)
+	logClient, err := cloudrun.NewLogClient(ctx, r.config.ProjectID, r.clientOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("initializing log client: %w", err)
 	}

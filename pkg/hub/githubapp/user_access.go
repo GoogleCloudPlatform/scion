@@ -238,8 +238,10 @@ func RemoteOwnerRepo(remote, wantHost string) (owner, repo string, ok bool) {
 
 	// Recover the original letter case from the tail of the raw remote.
 	raw := strings.TrimRight(strings.TrimSpace(remote), "/")
-	raw = strings.TrimSuffix(raw, ".git")
-	raw = strings.TrimSuffix(strings.TrimSuffix(raw, ".GIT"), "/")
+	if len(raw) >= len(".git") && strings.EqualFold(raw[len(raw)-len(".git"):], ".git") {
+		raw = raw[:len(raw)-len(".git")]
+	}
+	raw = strings.TrimSuffix(raw, "/")
 	rawSegs := strings.FieldsFunc(raw, func(r rune) bool { return r == '/' || r == ':' })
 	if len(rawSegs) >= 2 {
 		o, r := rawSegs[len(rawSegs)-2], rawSegs[len(rawSegs)-1]

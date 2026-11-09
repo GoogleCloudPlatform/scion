@@ -6,7 +6,8 @@ Scion release notes are published for each preview and stable release. Earlier n
 
 ## Releases
 
-- [v0.3.0-preview.7](/scion/release-notes/v0-3-0-preview-7/) (in preparation)
+- [v0.3.0](/scion/release-notes/v0-3-0/)
+- [v0.3.0-preview.7](/scion/release-notes/v0-3-0-preview-7/)
 - [v0.3.0-preview.6](/scion/release-notes/v0-3-0-preview-6/)
 
 ## Weekly notes (through November 1, 2026)

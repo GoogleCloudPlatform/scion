@@ -162,7 +162,7 @@ func (s *Server) handleSkillFileRead(w http.ResponseWriter, r *http.Request, ski
 		return
 	}
 
-	s.serveSkillFile(w, r, skill, version, filePath)
+	s.serveSkillFile(w, r, skill, version, filePath, signed)
 }
 
 // authorizeSkillFileRead applies principal authorization to an unsigned skill
@@ -184,11 +184,19 @@ func (s *Server) authorizeSkillFileRead(w http.ResponseWriter, r *http.Request, 
 }
 
 // serveSkillFile streams filePath of skill@version once the read is authorized.
-func (s *Server) serveSkillFile(w http.ResponseWriter, r *http.Request, skill *store.Skill, version, filePath string) {
+// An unsigned read applies the version status filter (skillVersionVisible),
+// and a filtered-out version gets the same response as a missing one. A
+// signed read is bound by its signature to the version it was issued for and
+// skips the filter.
+func (s *Server) serveSkillFile(w http.ResponseWriter, r *http.Request, skill *store.Skill, version, filePath string, signed bool) {
 	ctx := r.Context()
 	sv, err := s.store.GetSkillVersionByNumber(ctx, skill.ID, version)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
+		return
+	}
+	if !signed && !s.skillVersionVisible(ctx, GetIdentityFromContext(ctx), skill, sv) {
+		writeErrorFromErr(w, store.ErrNotFound, "")
 		return
 	}
 

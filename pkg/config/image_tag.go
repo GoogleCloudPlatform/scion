@@ -64,9 +64,10 @@ const EnvImageTag = "SCION_IMAGE_TAG"
 // version.
 const ImageTagVersion = "version"
 
-// imageTagLatest is the tag the bundled images carry by default, and the
-// fallback of ImageTagVersion for a development build.
-const imageTagLatest = "latest"
+// ImageTagLatest is the tag the bundled images carry by default, the
+// fallback of ImageTagVersion for any non-release build, and, as a set
+// image_tag, the opt-out from the version default.
+const ImageTagLatest = "latest"
 
 // ImageTagSettingPattern is the JSON schema pattern of an image_tag
 // setting value: empty, "version", or a docker tag. The settings schema
@@ -156,7 +157,7 @@ func EffectiveImageTag(setting, binaryVersion string) (string, error) {
 	if setting == "" {
 		return "", nil
 	}
-	return imageTagLatest, nil
+	return ImageTagLatest, nil
 }
 
 // RewriteImageTag sets the tag of a short-form scion-* image reference to
@@ -198,7 +199,7 @@ func retagBasename(image, tag string) string {
 		prefix, base = image[:i+1], image[i+1:]
 	}
 	name, current, hasTag := strings.Cut(base, ":")
-	if !strings.HasPrefix(name, "scion-") || (hasTag && current != imageTagLatest) {
+	if !strings.HasPrefix(name, "scion-") || (hasTag && current != ImageTagLatest) {
 		return image
 	}
 	return prefix + name + ":" + tag

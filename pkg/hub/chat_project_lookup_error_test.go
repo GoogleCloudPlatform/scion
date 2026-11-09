@@ -17,13 +17,19 @@
 package hub
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -336,4 +342,93 @@ func TestChatKeyReadAudience_InvalidTopicKey(t *testing.T) {
 			assert.Equal(t, "Internal server error", serr.Message)
 		}
 	})
+}
+
+// loggedChatKeyRecord is the part of a JSON log record chatKeyLogArgs
+// writes.
+type loggedChatKeyRecord struct {
+	Msg    string `json:"msg"`
+	Key    string `json:"key"`
+	KeyLen int    `json:"key_len"`
+}
+
+// TestChatKeyLogArgs: the caller-supplied chat key is logged whole when it
+// fits, cut to at most maxLoggedChatKeyBytes bytes on a rune boundary
+// otherwise, always with its full length as key_len; a control byte in it
+// cannot split the log entry.
+func TestChatKeyLogArgs(t *testing.T) {
+	long := strings.Repeat("k", 300)
+	// A two-byte rune straddles the 128-byte cut.
+	straddle := strings.Repeat("k", maxLoggedChatKeyBytes-1) + strings.Repeat("é", 10)
+	cases := []struct {
+		name string
+		key  string
+		want string
+	}{
+		{name: "short key", key: "chat-topic", want: "chat-topic"},
+		{name: "exactly the bound", key: long[:maxLoggedChatKeyBytes], want: long[:maxLoggedChatKeyBytes]},
+		{name: "over the bound", key: long, want: long[:maxLoggedChatKeyBytes]},
+		{name: "cut would split a rune", key: straddle, want: straddle[:maxLoggedChatKeyBytes-1]},
+		{name: "control bytes", key: "chat\ntopic\r\x1b", want: "chat\ntopic\r\x1b"},
+		// A four-byte rune starts at byte 127, so the cut backs off to it.
+		{name: "four-byte rune at the bound", key: long[:maxLoggedChatKeyBytes-1] + "\U0001F600", want: long[:maxLoggedChatKeyBytes-1]},
+		// Invalid UTF-8, all continuation bytes: no rune start, so nothing is kept.
+		{name: "continuation bytes only", key: strings.Repeat("\x80", 200), want: ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			slog.New(slog.NewJSONHandler(&buf, nil)).Warn("m", chatKeyLogArgs(c.key)...)
+			var rec loggedChatKeyRecord
+			require.NoError(t, json.Unmarshal(buf.Bytes(), &rec), buf.String())
+			assert.Equal(t, c.want, rec.Key)
+			assert.LessOrEqual(t, len(rec.Key), maxLoggedChatKeyBytes)
+			assert.True(t, utf8.ValidString(rec.Key))
+			assert.Equal(t, len(c.key), rec.KeyLen)
+
+			// One log entry is one line, in either handler.
+			var text bytes.Buffer
+			slog.New(slog.NewTextHandler(&text, nil)).Warn("m", chatKeyLogArgs(c.key)...)
+			for _, out := range []string{buf.String(), text.String()} {
+				assert.Equal(t, 1, strings.Count(out, "\n"), out)
+				assert.True(t, strings.HasSuffix(out, "\n"), out)
+			}
+		})
+	}
+}
+
+// TestChatStoreFault_LogsBoundedKey: a store fault on the topic lookup of
+// an over-long caller-supplied key logs the key bounded, with its full
+// length as key_len. Not parallel: it swaps slog.Default.
+func TestChatStoreFault_LogsBoundedKey(t *testing.T) {
+	user := NewAuthenticatedUser("chat-lookup-user", "chat-lookup@example.com", "Chat Lookup", "member", "cli")
+	key := strings.Repeat("k", maxLoggedChatKeyBytes-1) + strings.Repeat("é", 500)
+	wcs := chatTopicErrStore{err: errChatProjectLookup}
+	srv, _ := testServer(t)
+	srv.mu.Lock()
+	srv.webChatStore = wcs
+	srv.mu.Unlock()
+
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	_, serr := srv.authorizeChatSend(contextWithIdentity(context.Background(), user), user, key)
+	slog.SetDefault(prev)
+	require.NotNil(t, serr)
+	assert.Equal(t, http.StatusInternalServerError, serr.Status)
+
+	var found bool
+	for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+		var rec loggedChatKeyRecord
+		if json.Unmarshal([]byte(line), &rec) != nil || rec.Msg != "chat send: topic lookup failed" {
+			continue
+		}
+		found = true
+		assert.Equal(t, key[:maxLoggedChatKeyBytes-1], rec.Key)
+		assert.Equal(t, len(key), rec.KeyLen)
+		assert.NotContains(t, line, key)
+	}
+	assert.True(t, found, "no topic lookup fault was logged: %s", buf.String())
 }

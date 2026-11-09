@@ -452,6 +452,25 @@ describe('share dialog', () => {
     expect(writeText).toHaveBeenCalledWith(shareUrl);
   });
 
+  it('keeps its own copy-failure message, without throwing, when the clipboard is unavailable (ptone/scion#7555)', async () => {
+    mockServer();
+    const original = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+    Object.defineProperty(navigator, 'clipboard', { value: undefined, configurable: true });
+    try {
+      const el = await mount();
+      button(el, 'Create link').click();
+      await settle(el);
+      button(el, 'Copy').click();
+      await settle(el);
+      expect($(el, 'sl-alert[variant="danger"]')!.textContent).toContain(
+        'Could not copy. Select the link and copy it yourself.'
+      );
+    } finally {
+      if (original) Object.defineProperty(navigator, 'clipboard', original);
+      else delete (navigator as unknown as Record<string, unknown>).clipboard;
+    }
+  });
+
   it('forgets a created link when Done closes the dialog', async () => {
     mockServer();
     const el = await mount();

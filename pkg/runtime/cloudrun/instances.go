@@ -20,6 +20,7 @@ import (
 	runapi "cloud.google.com/go/run/apiv2"
 	"cloud.google.com/go/run/apiv2/runpb"
 	"github.com/googleapis/gax-go/v2"
+	"google.golang.org/api/option"
 )
 
 // InstancesAPI is the subset of the Cloud Run Instances Admin API that the
@@ -60,9 +61,11 @@ type googleInstancesClient struct {
 }
 
 // NewInstancesClient returns an InstancesAPI backed by the real Cloud Run
-// Instances API. The caller is responsible for closing it.
-func NewInstancesClient(ctx context.Context) (InstancesAPI, error) {
-	client, err := runapi.NewInstancesClient(ctx)
+// Instances API. The caller is responsible for closing it. opts are the
+// client options (a flat instance's own credentials); without any the
+// client uses Application Default Credentials.
+func NewInstancesClient(ctx context.Context, opts ...option.ClientOption) (InstancesAPI, error) {
+	client, err := runapi.NewInstancesClient(ctx, opts...)
 	if err != nil {
 		return nil, err
 	}

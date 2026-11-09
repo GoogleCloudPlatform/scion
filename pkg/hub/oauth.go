@@ -417,8 +417,8 @@ func (s *OAuthService) exchangeCodeForToken(ctx context.Context, tokenURL, clien
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("token exchange failed: %s - %s", resp.Status, string(body))
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, upstreamErrorBodyReadLimit))
+		return nil, fmt.Errorf("token exchange failed: %d - %s", resp.StatusCode, upstreamText(string(body)))
 	}
 
 	var tokenResp tokenResponse
@@ -452,22 +452,45 @@ func (s *OAuthService) exchangeGitHubCodeForTokenWithConfig(ctx context.Context,
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("token exchange failed: %s - %s", resp.Status, string(body))
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, upstreamErrorBodyReadLimit))
+		return nil, fmt.Errorf("token exchange failed: %d - %s", resp.StatusCode, upstreamText(string(body)))
+	}
+
+	// Read the body once: GitHub answers a failed exchange with 200 and the
+	// error in the body, which the decoder would otherwise have consumed.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, oauthResponseMaxBytes))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read token response: %w", err)
 	}
 
 	var tokenResp tokenResponse
-	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
+	if err := json.Unmarshal(body, &tokenResp); err != nil {
 		return nil, fmt.Errorf("failed to decode token response: %w", err)
 	}
 
 	if tokenResp.AccessToken == "" {
-		// GitHub sometimes returns error in the body
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("no access token in response: %s", string(body))
+		return nil, fmt.Errorf("no access token in response: %s", githubTokenErrorText(body))
 	}
 
 	return &tokenResp, nil
+}
+
+// oauthResponseMaxBytes bounds a successful OAuth token endpoint response
+// the hub reads into memory.
+const oauthResponseMaxBytes = 1 << 20
+
+// githubTokenErrorText renders the error fields of a GitHub token response
+// that carried no access token, through upstreamText. Only the error and
+// error_description fields are rendered, never the rest of the body.
+func githubTokenErrorText(body []byte) string {
+	var e struct {
+		Error            string `json:"error"`
+		ErrorDescription string `json:"error_description"`
+	}
+	if err := json.Unmarshal(body, &e); err != nil || (e.Error == "" && e.ErrorDescription == "") {
+		return "no error field"
+	}
+	return upstreamText(e.Error + ": " + e.ErrorDescription)
 }
 
 // googleUserInfo represents the response from Google's userinfo endpoint.
@@ -496,8 +519,8 @@ func (s *OAuthService) getGoogleUserInfo(ctx context.Context, accessToken string
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("failed to get user info: %s - %s", resp.Status, string(body))
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, upstreamErrorBodyReadLimit))
+		return nil, fmt.Errorf("failed to get user info: %d - %s", resp.StatusCode, upstreamText(string(body)))
 	}
 
 	var userInfo googleUserInfo
@@ -552,8 +575,8 @@ func (s *OAuthService) getGitHubUserInfo(ctx context.Context, accessToken string
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("failed to get user info: %s - %s", resp.Status, string(body))
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, upstreamErrorBodyReadLimit))
+		return nil, fmt.Errorf("failed to get user info: %d - %s", resp.StatusCode, upstreamText(string(body)))
 	}
 
 	var user githubUser
@@ -607,8 +630,8 @@ func (s *OAuthService) getGitHubEmails(ctx context.Context, accessToken string) 
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("failed to get emails: %s - %s", resp.Status, string(body))
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, upstreamErrorBodyReadLimit))
+		return nil, fmt.Errorf("failed to get emails: %d - %s", resp.StatusCode, upstreamText(string(body)))
 	}
 
 	var emails []githubEmail
@@ -729,8 +752,8 @@ func (s *OAuthService) requestGoogleDeviceCode(ctx context.Context, cfg OAuthPro
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("device code request failed: %s - %s", resp.Status, string(body))
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, upstreamErrorBodyReadLimit))
+		return nil, fmt.Errorf("device code request failed: %d - %s", resp.StatusCode, upstreamText(string(body)))
 	}
 
 	// Google returns "verification_url" instead of the RFC 8628 "verification_uri"
@@ -773,8 +796,8 @@ func (s *OAuthService) requestGitHubDeviceCode(ctx context.Context, cfg OAuthPro
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("device code request failed: %s - %s", resp.Status, string(body))
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, upstreamErrorBodyReadLimit))
+		return nil, fmt.Errorf("device code request failed: %d - %s", resp.StatusCode, upstreamText(string(body)))
 	}
 
 	var result DeviceCodeResponse
@@ -826,7 +849,7 @@ func (s *OAuthService) pollGoogleDeviceToken(ctx context.Context, cfg OAuthProvi
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, oauthResponseMaxBytes))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read device token response: %w", err)
 	}
@@ -842,14 +865,14 @@ func (s *OAuthService) pollGoogleDeviceToken(ctx context.Context, cfg OAuthProvi
 	// Parse error response
 	var errResp deviceTokenErrorResponse
 	if err := json.Unmarshal(body, &errResp); err != nil {
-		return nil, fmt.Errorf("device token poll failed: %s - %s", resp.Status, string(body))
+		return nil, fmt.Errorf("device token poll failed: %d - %s", resp.StatusCode, upstreamText(string(body)))
 	}
 
 	switch errResp.Error {
 	case "authorization_pending", "slow_down", "expired_token":
 		return nil, &DeviceAuthError{Code: errResp.Error, Interval: errResp.Interval}
 	default:
-		return nil, fmt.Errorf("device token poll failed: %s", errResp.Error)
+		return nil, fmt.Errorf("device token poll failed: %s", upstreamText(errResp.Error))
 	}
 }
 
@@ -873,7 +896,7 @@ func (s *OAuthService) pollGitHubDeviceToken(ctx context.Context, cfg OAuthProvi
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, oauthResponseMaxBytes))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read device token response: %w", err)
 	}
@@ -885,7 +908,7 @@ func (s *OAuthService) pollGitHubDeviceToken(ctx context.Context, cfg OAuthProvi
 		case "authorization_pending", "slow_down", "expired_token":
 			return nil, &DeviceAuthError{Code: errCheck.Error, Interval: errCheck.Interval}
 		default:
-			return nil, fmt.Errorf("device token poll failed: %s", errCheck.Error)
+			return nil, fmt.Errorf("device token poll failed: %s", upstreamText(errCheck.Error))
 		}
 	}
 
@@ -895,12 +918,12 @@ func (s *OAuthService) pollGitHubDeviceToken(ctx context.Context, cfg OAuthProvi
 			return nil, fmt.Errorf("failed to decode token response: %w", err)
 		}
 		if tokenResp.AccessToken == "" {
-			return nil, fmt.Errorf("no access token in response: %s", string(body))
+			return nil, fmt.Errorf("no access token in response: %s", githubTokenErrorText(body))
 		}
 		return &tokenResp, nil
 	}
 
-	return nil, fmt.Errorf("device token poll failed: %s - %s", resp.Status, string(body))
+	return nil, fmt.Errorf("device token poll failed: %d - %s", resp.StatusCode, upstreamText(string(body)))
 }
 
 // --- OIDC Login Methods ---
@@ -997,7 +1020,7 @@ func (s *OAuthService) getOIDCUserInfo(ctx context.Context, accessToken, userinf
 	if resp.StatusCode != http.StatusOK {
 		// Limit error body to 1 KB to avoid OOM on malicious responses.
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<10))
-		return nil, fmt.Errorf("OIDC userinfo endpoint returned %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("OIDC userinfo endpoint returned %d: %s", resp.StatusCode, upstreamText(string(body)))
 	}
 
 	var userInfo oidcUserInfoResponse

@@ -90,6 +90,7 @@ import {
 } from './artifact-access-sections.js';
 import type { AccessCapabilities, SectionStates } from './artifact-access-sections.js';
 import { formatInstant, formatRelative } from '../../utils/time.js';
+import { copyToClipboard } from '../../utils/clipboard.js';
 
 /** Delay before the subject search runs. */
 const SEARCH_DELAY_MS = 250;
@@ -529,10 +530,9 @@ export class ScionArtifactShareDialog extends LitElement {
 
   private async copyCreated(): Promise<void> {
     if (!this.created) return;
-    try {
-      await navigator.clipboard.writeText(createdLinkUrl(this.created, window.location.origin));
+    if (await copyToClipboard(createdLinkUrl(this.created, window.location.origin))) {
       this.copied = true;
-    } catch {
+    } else {
       this.error = 'Could not copy. Select the link and copy it yourself.';
     }
   }

@@ -413,9 +413,20 @@ func (s *SkillStore) GetSkillVersionByNumber(ctx context.Context, skillID, versi
 	return entSkillVersionToStore(e), nil
 }
 
-func (s *SkillStore) ListSkillVersions(ctx context.Context, skillID string, opts store.ListOptions) (*store.ListResult[store.SkillVersion], error) {
+func (s *SkillStore) ListSkillVersions(ctx context.Context, skillID string, filter store.SkillVersionFilter, opts store.ListOptions) (*store.ListResult[store.SkillVersion], error) {
 	query := s.client.SkillVersion.Query().
 		Where(entskillversion.SkillIDEQ(skillID))
+	if len(filter.Statuses) > 0 {
+		statuses := make([]entskillversion.Status, 0, len(filter.Statuses))
+		for _, st := range filter.Statuses {
+			status := entskillversion.Status(st)
+			if err := entskillversion.StatusValidator(status); err != nil {
+				return nil, fmt.Errorf("%w: unknown skill version status %q", store.ErrInvalidInput, st)
+			}
+			statuses = append(statuses, status)
+		}
+		query = query.Where(entskillversion.StatusIn(statuses...))
+	}
 
 	totalCount, err := query.Clone().Count(ctx)
 	if err != nil {
