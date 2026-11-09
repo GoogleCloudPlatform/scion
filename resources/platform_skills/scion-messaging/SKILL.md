@@ -129,13 +129,13 @@ Report completion, a blocker, or a result that unblocks the next step.
 - Keep each message purposeful and concise: outcome, necessary evidence, and next
   action or decision, naming its owner when follow-up is needed. Avoid filler and
   repeated briefs.
-- Send questions to the person who can answer or decide. Let the responsible agent
-  communicate with the user in the relevant conversation; “directly” means without
-  an intermediary, not necessarily by DM.
-- The original sender owns follow-up on its request unless responsibility is
+- Send questions to the user or agent who can answer or decide. Let the responsible
+  agent communicate with the user in the relevant conversation; “directly” means
+  without an intermediary, not necessarily by DM.
+- The original sender owns follow-up on the request unless responsibility is
   explicitly handed off. A delayed reply is not a reason to ask another agent to
   relay the request, create a multi-hop relay chain, or duplicate the same
-  escalation to the human.
+  escalation to the user.
 - When intentionally waiting for input or another agent, signal
   `sciontool status blocked "<reason>"`. Do not poll agents with sleep loops. For
   external work without completion notifications, follow `scion-scheduler` guidance
