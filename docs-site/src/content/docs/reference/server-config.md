@@ -83,6 +83,7 @@ Controls the central Hub API server.
 | `port_proxy` | object | | Agent port proxy settings (see [Port proxy](#port-proxy-serverhubport_proxy)). |
 | `sse` | object | | Browser events stream settings (see [Events streams](#events-streams-serverhubsse)). |
 | `platform_request_timeout` | duration | | Request timeout of the platform in front of the Hub, for example the Cloud Run service timeout. No default. When set, the events stream maximum age and the conduit `lifetime_cap` are lowered to 0.8 of it (see [Platform request timeout](#platform-request-timeout)). Between `"150s"` and `"24h"`. Startup-only: restart required to change. Env: `SCION_SERVER_HUB_PLATFORMREQUESTTIMEOUT`. |
+| `chat` | object | | Web chat limits (see [Chat search](#chat-search-serverhubchatsearch)). |
 
 #### CORS (`server.hub.cors`)
 
@@ -178,6 +179,15 @@ server:
 ```
 
 When the Hub runs on a Cloud Run service (`K_SERVICE` is set) and `platform_request_timeout` is not set, it logs one warning at startup that names the setting. Startup continues.
+
+#### Chat search (`server.hub.chat.search`)
+
+Bounds on web chat search, so one search cannot stall the hub. Each search runs with a time limit that starts when it takes its slot and covers finding the caller's visible projects, the database query and the direct-message filters; a search that reaches it is stopped in the database and answered with `503` (code `SEARCH_TIMEOUT`), never `500`. Each user runs at most one search at a time, and a hub-wide cap applies; a search over either limit is answered at once with `429` (code `SEARCH_BUSY`, `Retry-After: 1`), never queued. On a SQLite hub, searches read through a separate read-only connection, so a slow search does not hold the connection other requests use. On a Postgres hub, searches share the main connection pool, so the hub-wide cap is lowered to a quarter of `database.max_open_conns` (at least 1). A search that takes 500 ms or more, times out or fails writes one `chat search slow` log line with its shape (duration, backend, scope, term length, result count), never the search text, a request id or any other identifier; a search the client abandons writes no line at the default log level (only a debug line). Every search that runs is counted in the histogram `hub_chat_search_duration_seconds` (attributes `backend`, `path`, `scope`, `outcome`: `ok`, `timeout`, `canceled` or `error`), and refused searches in the counter `hub_chat_search_busy_total`. Read at startup; restart required to change.
+
+| Field | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `timeout` | duration | `"3s"` | Time limit of one search; a positive Go duration. The admin settings update refuses an invalid value with `422`; at startup an invalid value is logged and the default used. Env: `SCION_SERVER_HUB_CHAT_SEARCH_TIMEOUT`. |
+| `max_concurrent` | int | `2` | Searches running hub-wide at once. `0` means the default. On SQLite it is also the size of the read-only search connection pool. On Postgres, where search shares the main connection pool, the hub lowers it to a quarter of `database.max_open_conns` (at least 1; 1 with the default pool of 5) and logs one startup line with the configured and effective values. Env: `SCION_SERVER_HUB_CHAT_SEARCH_MAXCONCURRENT`. |
 
 #### Observability export (`server.hub.observability`)
 
@@ -1784,6 +1794,7 @@ Settings required before the database connection exists, or that are restart-bou
 | Separate relay | `relay.*` |
 | Port proxy | `hub.port_proxy.*` |
 | Long-lived requests | `hub.sse.*`, `hub.platform_request_timeout` |
+| Chat search | `hub.chat.*` |
 
 ### Layer 1 — Operational (`hub_settings` table)
 

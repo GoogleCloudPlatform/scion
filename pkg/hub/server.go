@@ -320,6 +320,18 @@ type ServerConfig struct {
 	SoftDeleteRetention time.Duration
 	// SoftDeleteRetainFiles controls whether workspace files are preserved during soft-delete.
 	SoftDeleteRetainFiles bool
+	// ChatSearchTimeout bounds one GET /api/v1/chat/search (server config
+	// hub.chat.search.timeout). Zero means DefaultChatSearchTimeout.
+	ChatSearchTimeout time.Duration
+	// ChatSearchMaxConcurrent caps the chat searches running hub-wide at once
+	// (server config hub.chat.search.max_concurrent). Zero means
+	// DefaultChatSearchMaxConcurrent. On Postgres the effective cap is
+	// clamped to a quarter of DatabaseMaxOpenConns (EffectiveChatSearchCap).
+	ChatSearchMaxConcurrent int
+	// DatabaseMaxOpenConns is the hub's main pool size (server config
+	// database.max_open_conns after the driver defaults). It bounds the
+	// Postgres chat search cap. Zero means unknown (read as the default pool).
+	DatabaseMaxOpenConns int
 	// PerfTrace turns on per-request performance tracing
 	// (server.hub.perf_trace): phase timings, authorization store-call and
 	// decision-audit counts, and DB pool waits, logged per request and
@@ -2006,6 +2018,13 @@ type Server struct {
 	// terminating hub ingress (conduit_ingress_drain.go); nil until
 	// SetConduitIngressDrainMetrics.
 	conduitIngressDrainMetrics atomic.Pointer[OTelConduitIngressDrainMetrics]
+	// chatSearchMetrics records hub_chat_search_duration_seconds
+	// (chat_search_bound.go); nil until SetChatSearchMetrics.
+	chatSearchMetrics atomic.Pointer[OTelChatSearchMetrics]
+	// chatSearchGate bounds concurrent chat searches (chat_search_bound.go),
+	// built on first use from the config and the web chat store's backend.
+	chatSearchGateOnce sync.Once
+	chatSearchGate     *searchGate
 	// conduitBrokerRPCMetrics counts routed broker requests that fell back
 	// because of a hub-side fault (conduit_broker_routed_metrics.go); nil
 	// until SetConduitBrokerRPCMetrics.

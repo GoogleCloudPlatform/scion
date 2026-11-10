@@ -180,6 +180,7 @@
     "server.hub.port_proxy",
     "server.hub.sse",
     "server.hub.platform_request_timeout",
+    "server.hub.chat",
     "server.relay"
   ],
   "file_keys": [

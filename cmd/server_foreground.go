@@ -869,10 +869,13 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 					log.Printf("Artifact store initialized")
 				}
 
-				ws := hub.NewWebChatStore(rawDB, cfg.Database.Driver)
+				searchOpts, closeSearch := webChatSearchOptions(cfg)
+				ws := hub.NewWebChatStore(rawDB, cfg.Database.Driver, searchOpts...)
 				if err := ws.Init(); err != nil {
+					closeSearch()
 					log.Printf("Warning: failed to initialize webchat store: %v", err)
 				} else {
+					defer closeSearch()
 					webStore = ws
 					hubSrv.SetWebChatStore(webStore)
 					log.Printf("Web chat store initialized")
@@ -2950,6 +2953,9 @@ func buildHubServerConfig(cfg *config.GlobalConfig, hubEndpoint, devAuthToken st
 		MissingAgentGrace:            cfg.Hub.MissingAgentGrace,
 		SoftDeleteRetention:          cfg.Hub.SoftDeleteRetention,
 		SoftDeleteRetainFiles:        cfg.Hub.SoftDeleteRetainFiles,
+		ChatSearchTimeout:            chatSearchTimeout(cfg),
+		ChatSearchMaxConcurrent:      cfg.Hub.Chat.Search.MaxConcurrent,
+		DatabaseMaxOpenConns:         cfg.Database.MaxOpenConns,
 		PerfTrace:                    cfg.Hub.PerfTrace,
 		CSPReportRawSamples:          cfg.Hub.CSPReportRawSamples,
 		MembershipSweepReportOnly:    cfg.Hub.MembershipSweepReportOnly,
@@ -3163,6 +3169,12 @@ func wireHubCoreMetrics(hubSrv *hub.Server, mp metric.MeterProvider) dbmetrics.R
 		log.Printf("WARNING: hub conduit ingress drain metrics disabled: %v", err)
 	} else {
 		hubSrv.SetConduitIngressDrainMetrics(drainRec)
+	}
+
+	if searchRec, err := hub.NewOTelChatSearchMetrics(mp); err != nil {
+		log.Printf("WARNING: hub chat search metrics disabled: %v", err)
+	} else {
+		hubSrv.SetChatSearchMetrics(searchRec)
 	}
 
 	if refreshRec, err := hub.NewOTelConduitAgentRefreshMetrics(mp); err != nil {

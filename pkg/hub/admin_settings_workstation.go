@@ -683,7 +683,10 @@ func (e *serverConfigFileFieldError) Error() string { return e.msg }
 
 // startupCheckedFileBlocks are file-only blocks the hub validates at startup
 // (validateServerPreflight in cmd/server_foreground.go), in the same order,
-// with the same Validate methods.
+// with the same Validate methods. server.hub.chat is the one block startup
+// reads leniently (an invalid value is logged and the default used): it is
+// listed so the PUT refuses a value the hub would ignore, instead of writing
+// it unnoticed.
 var startupCheckedFileBlocks = []struct {
 	path     []string
 	validate func(*config.GlobalConfig) error
@@ -694,6 +697,7 @@ var startupCheckedFileBlocks = []struct {
 	{[]string{"server", "hub", "platform_request_timeout"}, func(gc *config.GlobalConfig) error {
 		return config.ValidatePlatformRequestTimeout(gc.Hub.PlatformRequestTimeout)
 	}},
+	{[]string{"server", "hub", "chat"}, func(gc *config.GlobalConfig) error { return gc.Hub.Chat.Search.Validate() }},
 	{[]string{"server", "relay"}, func(gc *config.GlobalConfig) error { return gc.Relay.Validate() }},
 }
 
