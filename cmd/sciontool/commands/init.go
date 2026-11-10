@@ -1725,11 +1725,11 @@ waitLoop:
 
 	outcome := classifyExit(result.code, result.err, harnessCode, limitsExceeded, requestedShutdown.Load())
 	finalCode := outcome.exitCode
-	// Clean for the staged token file also requires that this process exits
-	// 0 (the supervised child's own code, which RunInit returns below) or
-	// that a stop was requested: when the harness exit-code file says 0 but
-	// the child exits non-zero, the container exits non-zero and is
-	// restarted with the same payload, so the file is kept.
+	// Clean for the staged token file also requires that the child exited 0
+	// or that a stop was requested (RunInit then exits 0, see initExitCode):
+	// when the harness exit-code file says 0 but the child exits non-zero,
+	// the container exits non-zero and is restarted with the same payload,
+	// so the file is kept.
 	stagedTokenCleanExit = finalCode == 0 && !outcome.isCrash && !outcome.limitsExceeded && result.err == nil &&
 		(result.code == 0 || outcome.signaled)
 	limitsExceeded = outcome.limitsExceeded
@@ -1828,7 +1828,21 @@ waitLoop:
 	}
 
 	log.Info("Child exited with code %d", result.code)
-	return result.code
+	return initExitCode(outcome, result.code)
+}
+
+// initExitCode is the process exit code RunInit returns once classifyExit has
+// ruled out a crash, limits and a supervisor error. A requested stop exits 0:
+// a child killed by the stop signal reports -1, which os.Exit would turn into
+// 255 and leave the container at Exited (255) after a clean stop. Otherwise
+// the child's own code is kept, so a child that exits non-zero while the
+// harness exit-code file says 0 still exits non-zero (and keeps its staged
+// token file, see stagedTokenCleanExit).
+func initExitCode(outcome exitOutcome, childCode int) int {
+	if outcome.signaled {
+		return 0
+	}
+	return childCode
 }
 
 // loadHarnessEnvOverlay loads the env overlay produced by the pre-start

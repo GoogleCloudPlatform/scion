@@ -231,7 +231,8 @@ func (r *PodmanRuntime) Run(ctx context.Context, config RunConfig) (string, erro
 // Stop stops the container ref.ID. The engine container ID is already
 // unique per run, so ref.RunID needs no further check here.
 func (r *PodmanRuntime) Stop(ctx context.Context, ref RunRef) error {
-	out, err := runSimpleCommand(ctx, r.Command, "stop", ref.ID)
+	args := append([]string{"stop"}, stopTimeoutArgs(ref)...)
+	out, err := runSimpleCommand(ctx, r.Command, append(args, ref.ID)...)
 	if err != nil && out != "" {
 		// Include podman's stderr output in the error so callers can match
 		// on messages like "not running" (which runSimpleCommand's error
