@@ -129,9 +129,16 @@ func (s *Server) hubAdmit(w http.ResponseWriter, r *http.Request, peer string, b
 // before the middleware chain does (tests).
 var conduitRelayAdmitObserve func(*http.Request)
 
+// conduitRelayAdmissionObserve, when set, sees each admitted request as
+// writeRelayAdmission receives it, after the middleware chain (tests).
+var conduitRelayAdmissionObserve func(*http.Request)
+
 // writeRelayAdmission answers an admitted dialer: its principal and the
 // admission token for the relay's session.
 func (s *Server) writeRelayAdmission(w http.ResponseWriter, r *http.Request, a conduitAdmission, req relay.HubAdmitRequest, peer string) {
+	if h := conduitRelayAdmissionObserve; h != nil {
+		h(r)
+	}
 	now := conduitRelayNow()
 	p := a.principal
 	c := conduitAdmissionClaims{

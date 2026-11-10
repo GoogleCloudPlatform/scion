@@ -1495,6 +1495,35 @@
           "x-env-var": "SCION_SERVER_HUB_SOFTDELETERETAINFILES",
           "x-since": "1"
         },
+        "chat": {
+          "type": "object",
+          "description": "Web chat server limits. Read at startup; restart required to change.",
+          "additionalProperties": false,
+          "properties": {
+            "search": {
+              "type": "object",
+              "description": "Web chat search bounds, so one search cannot stall the hub.",
+              "additionalProperties": false,
+              "properties": {
+                "timeout": {
+                  "type": "string",
+                  "description": "Time limit of one search, as a Go duration (default '3s'). A search that reaches it is stopped and answered with 503 SEARCH_TIMEOUT.",
+                  "x-env-var": "SCION_SERVER_HUB_CHAT_SEARCH_TIMEOUT",
+                  "x-since": "1"
+                },
+                "max_concurrent": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "Searches running hub-wide at once (default 2; 0 means the default). On Postgres, where search shares the main pool, the hub lowers it to a quarter of database max_open_conns (at least 1) and logs the effective value. Each user runs at most one search at a time.",
+                  "x-env-var": "SCION_SERVER_HUB_CHAT_SEARCH_MAXCONCURRENT",
+                  "x-since": "1"
+                }
+              },
+              "x-since": "1"
+            }
+          },
+          "x-since": "1"
+        },
         "gcp_iam_check_mode": {
           "type": "string",
           "description": "Whether the IAM actAs permission is checked when a GCP service account is bound to an agent: 'off' (default) or 'enforce'. Any other non-empty value is treated as 'enforce', with a warning."

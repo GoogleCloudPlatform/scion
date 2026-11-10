@@ -1798,6 +1798,8 @@ type V1ServerHubConfig struct {
 	SoftDeleteRetention string `json:"soft_delete_retention,omitempty" yaml:"soft_delete_retention,omitempty" koanf:"soft_delete_retention"`
 	// SoftDeleteRetainFiles controls whether workspace files are preserved during soft-delete.
 	SoftDeleteRetainFiles *bool `json:"soft_delete_retain_files,omitempty" yaml:"soft_delete_retain_files,omitempty" koanf:"soft_delete_retain_files"`
+	// Chat holds web chat server limits (server.hub.chat).
+	Chat *V1ServerHubChatConfig `json:"chat,omitempty" yaml:"chat,omitempty" koanf:"chat"`
 	// GCPIAMCheckMode controls whether IAM actAs permission is checked when
 	// binding a GCP service account to an agent.
 	// "off" (default) or "enforce".
@@ -2819,6 +2821,23 @@ type V1SecretsConfig struct {
 	GCPProjectID            string   `json:"gcp_project_id,omitempty" yaml:"gcp_project_id,omitempty" koanf:"gcp_project_id"`
 	GCPCredentials          string   `json:"gcp_credentials,omitempty" yaml:"gcp_credentials,omitempty" koanf:"gcp_credentials"`
 	GCPReplicationLocations []string `json:"gcp_replication_locations,omitempty" yaml:"gcp_replication_locations,omitempty" koanf:"gcp_replication_locations"`
+}
+
+// V1ServerHubChatConfig holds web chat server limits (server.hub.chat).
+type V1ServerHubChatConfig struct {
+	// Search bounds web chat search (server.hub.chat.search).
+	Search *V1ServerHubChatSearchConfig `json:"search,omitempty" yaml:"search,omitempty" koanf:"search"`
+}
+
+// V1ServerHubChatSearchConfig bounds web chat search (ptone/scion#7586).
+// These are operator limits, not user settings.
+type V1ServerHubChatSearchConfig struct {
+	// Timeout bounds one search (e.g. "3s"). Empty means the hub default, 3s.
+	Timeout string `json:"timeout,omitempty" yaml:"timeout,omitempty" koanf:"timeout"`
+	// MaxConcurrent caps the searches running hub-wide at once. Zero or unset
+	// means the default, 2. On Postgres the hub clamps it to a quarter of the
+	// main pool (at least 1).
+	MaxConcurrent *int `json:"max_concurrent,omitempty" yaml:"max_concurrent,omitempty" koanf:"max_concurrent"`
 }
 
 // V1CORSConfig holds CORS settings for server endpoints.
@@ -4520,6 +4539,13 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		if v1.Hub.SoftDeleteRetainFiles != nil {
 			gc.Hub.SoftDeleteRetainFiles = *v1.Hub.SoftDeleteRetainFiles
 		}
+		if v1.Hub.Chat != nil && v1.Hub.Chat.Search != nil {
+			cs := v1.Hub.Chat.Search
+			gc.Hub.Chat.Search.Timeout = cs.Timeout
+			if cs.MaxConcurrent != nil && *cs.MaxConcurrent > 0 {
+				gc.Hub.Chat.Search.MaxConcurrent = *cs.MaxConcurrent
+			}
+		}
 		if v1.Hub.GCPIAMCheckMode != "" {
 			gc.Hub.GCPIAMCheckMode = v1.Hub.GCPIAMCheckMode
 		}
@@ -4982,6 +5008,14 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	}
 	if gc.Hub.SoftDeleteRetention > 0 {
 		v1Hub.SoftDeleteRetention = gc.Hub.SoftDeleteRetention.String()
+	}
+	if c := gc.Hub.Chat.Search; !c.IsZero() {
+		cs := &V1ServerHubChatSearchConfig{Timeout: c.Timeout}
+		if c.MaxConcurrent > 0 {
+			n := c.MaxConcurrent
+			cs.MaxConcurrent = &n
+		}
+		v1Hub.Chat = &V1ServerHubChatConfig{Search: cs}
 	}
 	if gc.Hub.StalledThreshold > 0 {
 		v1Hub.StalledThreshold = gc.Hub.StalledThreshold.String()
