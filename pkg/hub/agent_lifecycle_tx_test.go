@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
@@ -591,6 +592,128 @@ func TestIncompleteCreateHardDeleteAudit(t *testing.T) {
 	n, err := s.ReactivateDelegationEdgesForDelegate(context.Background(), store.DelegationPrincipalAgent, agent.ID, store.EdgeDeactivationAgentHardDelete, opID)
 	require.NoError(t, err)
 	assert.Equal(t, 1, n, "the edge was deactivated with the hard-delete cause under the audit's operation ID")
+}
+
+// failedCreateLaunchAgent returns a broker agent whose create launch ended
+// with a broker's failed report carrying code: an incomplete create in
+// phase error, end reason failed.
+func failedCreateLaunchAgent(t *testing.T, s store.Store, suffix, code string) *store.Agent {
+	t.Helper()
+	agent, launchID := launchingAgent(t, s, suffix, state.PhaseProvisioning, 5*time.Minute)
+	_, _, err := s.ApplyLaunchReport(context.Background(), agent.ID, agent.RuntimeBrokerID, store.LaunchReport{
+		LaunchID: launchID, InstanceID: "inst-1", Seq: 1, State: store.LaunchReportStateFailed,
+		Step: "provision", Message: "refused", ErrorCode: code,
+	})
+	require.NoError(t, err)
+	agent = mustGetAgent(t, s, agent.ID)
+	require.Equal(t, string(state.PhaseError), agent.Phase)
+	require.Equal(t, store.LaunchStateEnded, agent.LaunchState)
+	require.Equal(t, store.LaunchEndReasonFailed, agent.LaunchEndReason)
+	require.Equal(t, code, agent.LaunchError)
+	return agent
+}
+
+// A create the broker refused before it created any container (its failed
+// launch report carries harness_config_unusable) dispatches best-effort, so
+// a failing broker delete does not keep the row.
+func TestAgentDelete_IncompleteCreateBestEffort(t *testing.T) {
+	srv, s, _, disp := engineTestServer(t)
+	disp.fn = func(context.Context, *store.Agent) error { return errors.New("broker delete failed") }
+	agent := failedCreateLaunchAgent(t, s, "never-provisioned", harnessConfigUnusableErrorCode)
+	require.True(t, agent.IsIncompleteCreate())
+	require.True(t, deleteNeverProvisioned(agent))
+
+	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/agents/"+agent.ID, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+	assert.True(t, agentGone(t, s, agent.ID))
+	disp.mu.Lock()
+	defer disp.mu.Unlock()
+	assert.Equal(t, 1, disp.calls, "the broker is reachable, so the best-effort delete is still sent")
+}
+
+// Every other incomplete create may have a container on the broker, so its
+// delete keeps the mandatory dispatch: with a failing broker delete it
+// answers the runtime error (502), and the row is kept with the delete
+// failed.
+func TestAgentDelete_IncompleteCreateKeepsMandatoryDispatch(t *testing.T) {
+	cases := []struct {
+		name  string
+		setup func(t *testing.T, s store.Store) *store.Agent
+		code  string
+		phase state.Phase
+	}{{
+		// A stop during the launch: the next report on the stopped row
+		// ends the launch launch_stopped (end reason failed).
+		name: "stopped during launch", code: store.LaunchErrorLaunchStopped, phase: state.PhaseStopped,
+		setup: func(t *testing.T, s store.Store) *store.Agent {
+			agent, launchID := launchingAgent(t, s, "mand-stopped", state.PhaseProvisioning, 5*time.Minute)
+			require.NoError(t, s.UpdateAgentStatus(context.Background(), agent.ID, store.AgentStatusUpdate{Phase: string(state.PhaseStopped)}))
+			ans := launchReport(t, s, agent, launchID, store.LaunchReportStateProgress, 1)
+			require.Equal(t, http.StatusConflict, ans.HTTPStatus)
+			return mustGetAgent(t, s, agent.ID)
+		},
+	}, {
+		// An error row whose launch a non-failed report ended: agent_error
+		// (end reason failed), with no broker failure behind it.
+		name: "error row ended by a non-failed report", code: store.LaunchErrorAgentError, phase: state.PhaseError,
+		setup: func(t *testing.T, s store.Store) *store.Agent {
+			agent, launchID := launchingAgent(t, s, "mand-agenterr", state.PhaseProvisioning, 5*time.Minute)
+			require.NoError(t, s.UpdateAgentStatus(context.Background(), agent.ID, store.AgentStatusUpdate{Phase: string(state.PhaseError)}))
+			launchReport(t, s, agent, launchID, store.LaunchReportStateProgress, 1)
+			return mustGetAgent(t, s, agent.ID)
+		},
+	}, {
+		// The reaper's staleness end: the store writes the same fields the
+		// reaper does (phase error, broker_lost, end reason lost).
+		name: "broker lost", code: store.LaunchErrorBrokerLost, phase: state.PhaseError,
+		setup: func(t *testing.T, s store.Store) *store.Agent {
+			agent, launchID := launchingAgent(t, s, "mand-lost", state.PhaseProvisioning, 5*time.Minute)
+			ctx := context.Background()
+			require.NoError(t, s.EndLaunchWithCode(ctx, agent.ID, launchID, store.LaunchEndReasonLost, store.LaunchErrorBrokerLost))
+			require.NoError(t, s.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{Phase: string(state.PhaseError)}))
+			return mustGetAgent(t, s, agent.ID)
+		},
+	}, {
+		// The reaper's deadline end, through RunLaunchReaperTick.
+		name: "launch timeout by the reaper", code: store.LaunchErrorLaunchTimeout, phase: state.PhaseError,
+		setup: func(t *testing.T, s store.Store) *store.Agent {
+			agent, _ := launchingAgent(t, s, "mand-timeout", state.PhaseProvisioning, 10*time.Millisecond)
+			time.Sleep(30 * time.Millisecond) // past the launch deadline
+			_, err := s.RunLaunchReaperTick(context.Background(), store.ReaperParams{
+				KeepaliveInterval: 15 * time.Second, ReaperInterval: 15 * time.Second,
+			})
+			require.NoError(t, err)
+			return mustGetAgent(t, s, agent.ID)
+		},
+	}, {
+		// A broker failed report whose code can follow a created container.
+		name: "broker runtime error", code: api.LaunchCodeRuntimeError, phase: state.PhaseError,
+		setup: func(t *testing.T, s store.Store) *store.Agent {
+			return failedCreateLaunchAgent(t, s, "mand-runtime", api.LaunchCodeRuntimeError)
+		},
+	}}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, s, _, disp := engineTestServer(t)
+			disp.fn = func(context.Context, *store.Agent) error { return errors.New("broker delete failed") }
+			agent := tc.setup(t, s)
+			require.Equal(t, string(tc.phase), agent.Phase)
+			require.Equal(t, store.LaunchStateEnded, agent.LaunchState)
+			require.Equal(t, tc.code, agent.LaunchError)
+			require.True(t, agent.IsIncompleteCreate(), "precondition: an incomplete create")
+			require.False(t, deleteNeverProvisioned(agent))
+
+			rec := doRequest(t, srv, http.MethodDelete, "/api/v1/agents/"+agent.ID, nil)
+			require.Equal(t, http.StatusBadGateway, rec.Code, "the failed mandatory dispatch answers the runtime error: %s", rec.Body.String())
+			got := mustGetAgent(t, s, agent.ID)
+			assert.Equal(t, store.DeletionStateFailed, got.DeletionState, "the row is kept, not finalized")
+			assert.Equal(t, store.DeletionCodeRuntimeError, got.DeletionCode)
+			assert.True(t, got.DeletedAt.IsZero())
+			disp.mu.Lock()
+			defer disp.mu.Unlock()
+			assert.Equal(t, 1, disp.calls)
+		})
+	}
 }
 
 // The env-gather recreate hard-deletes the existing provisioning agent as a

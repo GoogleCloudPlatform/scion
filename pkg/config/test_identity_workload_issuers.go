@@ -52,6 +52,14 @@ type TestIdentitiesConfig struct {
 	// through the API, and is refused at startup unless --test-mode is
 	// admin or super-admin.
 	AdminWebSessions string `json:"adminWebSessions,omitempty" yaml:"adminWebSessions,omitempty" koanf:"adminWebSessions"`
+	// OfflineAdminDelegations lets the offline host command
+	// `scion server test-infra delegate --scope hub-admin` delegate test
+	// hub-admin issuance to one allow-listed workload. Its value is the hub
+	// id the setting is bound to, and it must equal this hub's resolved
+	// (persistent) hub id; empty means off. It is read once at startup, is
+	// never writable through the API, and is refused at startup unless
+	// --test-mode is admin or super-admin.
+	OfflineAdminDelegations string `json:"offlineAdminDelegations,omitempty" yaml:"offlineAdminDelegations,omitempty" koanf:"offlineAdminDelegations"`
 }
 
 // TestIdentityWorkloadIssuer is one workload_issuers entry: a pinned Google
@@ -111,6 +119,22 @@ func (h HubServerConfig) TestIdentityAdminWebSessions() string {
 		return ""
 	}
 	return h.TestIdentities.AdminWebSessions
+}
+
+// TestIdentityOfflineAdminDelegationsKey is the settings key of the
+// offline hub-admin delegation binding
+// (TestIdentitiesConfig.OfflineAdminDelegations).
+const TestIdentityOfflineAdminDelegationsKey = TestIdentitiesKey + ".offline_admin_delegations"
+
+// TestIdentityOfflineAdminDelegations returns the hub id the offline
+// hub-admin delegation setting
+// (server.hub.test_identities.offline_admin_delegations) is bound to, or ""
+// when it is not set.
+func (h HubServerConfig) TestIdentityOfflineAdminDelegations() string {
+	if h.TestIdentities == nil {
+		return ""
+	}
+	return h.TestIdentities.OfflineAdminDelegations
 }
 
 // TestIdentityWorkloadIssuers returns the hub's workload_issuers allowlist

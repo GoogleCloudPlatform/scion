@@ -34,11 +34,25 @@ import (
 // configuration is not server.hub.class: test.
 var ErrTestInfraDelegateHubClass = errors.New(`test-infra delegate: server.hub.class must be "test"`)
 
+// ErrTestInfraDelegateAdminOptIn refuses an offline hub-admin delegation
+// when the configuration does not carry
+// server.hub.test_identities.offline_admin_delegations set to --hub-id.
+var ErrTestInfraDelegateAdminOptIn = errors.New("test-infra delegate: --scope hub-admin requires " + config.TestIdentityOfflineAdminDelegationsKey + " set to --hub-id in the hub configuration")
+
+// Offline delegation scopes accepted by --scope.
+const (
+	testInfraDelegateScopeMember   = "member"
+	testInfraDelegateScopeHubAdmin = "hub-admin"
+)
+
 var (
 	testInfraDelegateHubID       string
 	testInfraDelegateWorkloadSub string
 	testInfraDelegateTTL         time.Duration
 	testInfraDelegateMemberCap   int
+	testInfraDelegateScope       string
+	testInfraDelegateAdminCap    int
+	testInfraDelegateAcknowledge bool
 	testInfraDelegateLabel       string
 	testInfraDelegateOperator    string
 	testInfraDelegateConfigPath  string
@@ -55,14 +69,20 @@ var (
 // delegation (ptone/scion#4240, phase DL).
 var serverTestInfraDelegateCmd = &cobra.Command{
 	Use:   "delegate",
-	Short: "Delegate member-tier test identity issuance to one allow-listed workload (offline)",
-	Long: `Create a member-tier workload issuer delegation directly in the configured hub
-database, for a test-designated hub, without a human grantor.
+	Short: "Delegate member or hub-admin test identity issuance to one allow-listed workload (offline)",
+	Long: `Create a workload issuer delegation directly in the configured hub database, for
+a test-designated hub, without a human grantor.
 
 The delegation lets ONE workload identity (a Google service account subject on
-server.hub.test_identities.workload_issuers) issue member and viewer test
-identities on this hub. It never covers an admin tier: test hub-admin and test
-super-admin delegations still require a live human super-admin session.
+server.hub.test_identities.workload_issuers) issue test identities on this hub:
+  - --scope member (the default): member and viewer test identities
+  - --scope hub-admin: test hub-admin identities only. This also requires
+    server.hub.test_identities.offline_admin_delegations set to --hub-id in the
+    hub configuration, a subject with max_tier admin, and --` + testInfraMarkAcknowledgeFlag + `.
+    At most one live hub-admin delegation per hub, for at most 8h (default 4h),
+    with --admin-cap 1 or 2 live identities (default 1).
+Test super-admin issuance is never delegable offline: it always requires a live
+human super-admin session.
 
 The command refuses, writing nothing, unless:
   - the hub id is pinned (server.hub.hub_id or SCION_SERVER_HUB_HUBID) and
@@ -70,9 +90,9 @@ The command refuses, writing nothing, unless:
   - server.hub.class is "test"
   - the test infrastructure marker is present and names --hub-id
   - --workload-sub is on server.hub.test_identities.workload_issuers with a
-    max_tier covering member
-  - --ttl and --member-cap are within bounds, and the hub holds fewer than the
-    maximum number of live offline delegations
+    max_tier covering the scope's tier
+  - --ttl and the cap are within the scope's bounds, and the hub holds fewer
+    than the maximum number of live offline delegations (of that scope)
 
 It writes one delegation row, bound to --hub-id and to the current marker, and
 a test_identity_delegation_create_offline audit row (operator, host, time) in
@@ -82,12 +102,17 @@ token.
 The running hub honours the delegation only while ALL of these hold, checked on
 every request: the marker is still the one the delegation was bound to and
 names the hub's own pinned hub id, the hub runs with --test-mode at member or
-above, and the delegation is neither revoked nor expired. Unmarking (or
+above (admin or above for hub-admin, with the offline admin delegation setting
+on), and the delegation is neither revoked nor expired. Unmarking (or
 re-marking) the database, restarting the hub with --test-mode off, or revoking
-the delegation ends it at the next request.
+the delegation ends it at the next request. A hub that starts without the
+offline admin delegation setting ends every hub-admin delegation and revokes
+the identities it issued.
 
-Example:
-  scion server test-infra delegate --hub-id <hub-id> --workload-sub <subject> --ttl 8h`,
+Examples:
+  scion server test-infra delegate --hub-id <hub-id> --workload-sub <subject> --ttl 8h
+  scion server test-infra delegate --hub-id <hub-id> --workload-sub <subject> \
+    --scope hub-admin --ttl 4h --admin-cap 1 --` + testInfraMarkAcknowledgeFlag,
 	Args: testInfraDelegateArgs,
 	RunE: runTestInfraDelegate,
 }
@@ -95,7 +120,7 @@ Example:
 // serverTestInfraDelegateRevokeCmd revokes an offline delegation.
 var serverTestInfraDelegateRevokeCmd = &cobra.Command{
 	Use:   "revoke",
-	Short: "Revoke an offline member-tier workload issuer delegation (offline)",
+	Short: "Revoke an offline workload issuer delegation (offline)",
 	Long: `Revoke an offline workload issuer delegation in the configured hub database.
 
 The delegation must be an offline delegation bound to --hub-id; delegations
@@ -117,10 +142,17 @@ func init() {
 	f := serverTestInfraDelegateCmd.Flags()
 	f.StringVar(&testInfraDelegateHubID, "hub-id", "", "Hub id the delegation is bound to (the hub's pinned, resolved hub id)")
 	f.StringVar(&testInfraDelegateWorkloadSub, "workload-sub", "", "Google subject (decimal unique id) of the allow-listed workload service account")
-	f.DurationVar(&testInfraDelegateTTL, "ttl", store.TestInfraOfflineDelegationDefaultTTL,
-		fmt.Sprintf("Delegation lifetime (%s to %s)", store.TestInfraOfflineDelegationMinTTL, store.TestInfraOfflineDelegationMaxTTL))
-	f.IntVar(&testInfraDelegateMemberCap, "member-cap", store.TestInfraOfflineDelegationMaxMemberCap,
-		fmt.Sprintf("Live member or viewer test identities the delegation may hold at once (1 to %d)", store.TestInfraOfflineDelegationMaxMemberCap))
+	f.StringVar(&testInfraDelegateScope, "scope", testInfraDelegateScopeMember,
+		"Delegation scope: member (member and viewer test identities) or hub-admin (test hub-admin identities; needs "+config.TestIdentityOfflineAdminDelegationsKey+")")
+	f.DurationVar(&testInfraDelegateTTL, "ttl", 0,
+		fmt.Sprintf("Delegation lifetime: member %s to %s (default %s); hub-admin %s to %s (default %s)",
+			store.TestInfraOfflineDelegationMinTTL, store.TestInfraOfflineDelegationMaxTTL, store.TestInfraOfflineDelegationDefaultTTL,
+			store.TestInfraOfflineDelegationMinTTL, store.TestInfraOfflineAdminDelegationMaxTTL, store.TestInfraOfflineAdminDelegationDefaultTTL))
+	f.IntVar(&testInfraDelegateMemberCap, "member-cap", 0,
+		fmt.Sprintf("--scope member: live member or viewer test identities the delegation may hold at once (1 to %d; default %d)", store.TestInfraOfflineDelegationMaxMemberCap, store.TestInfraOfflineDelegationMaxMemberCap))
+	f.IntVar(&testInfraDelegateAdminCap, "admin-cap", 0,
+		fmt.Sprintf("--scope hub-admin: live test hub-admins the delegation may hold at once (1 to %d; default %d)", store.TestInfraOfflineAdminDelegationMaxAdminCap, store.TestInfraOfflineAdminDelegationDefaultAdminCap))
+	f.BoolVar(&testInfraDelegateAcknowledge, testInfraMarkAcknowledgeFlag, false, "Required acknowledgement for --scope hub-admin")
 	f.StringVar(&testInfraDelegateLabel, "label", "", "Optional short label for the test window")
 	f.StringVar(&testInfraDelegateOperator, "operator", "", "Operator identity for the audit record (defaults to $USER@hostname)")
 	f.StringVar(&testInfraDelegateConfigPath, "config", "", "Path to server configuration file")
@@ -149,13 +181,47 @@ func testInfraDelegateArgs(_ *cobra.Command, args []string) error {
 	if testInfraDelegateWorkloadSub == "" {
 		return errors.New("--workload-sub is required")
 	}
-	if testInfraDelegateTTL < store.TestInfraOfflineDelegationMinTTL || testInfraDelegateTTL > store.TestInfraOfflineDelegationMaxTTL {
-		return fmt.Errorf("--ttl must be between %s and %s", store.TestInfraOfflineDelegationMinTTL, store.TestInfraOfflineDelegationMaxTTL)
+	maxTTL := store.TestInfraOfflineDelegationMaxTTL
+	switch {
+	case store.IsSuperAdminIssueVariant(testInfraDelegateScope):
+		return errors.New("--scope: test super-admin issuance is never delegable offline")
+	case testInfraDelegateScope == testInfraDelegateScopeMember:
+		if testInfraDelegateAdminCap != 0 {
+			return errors.New("--admin-cap applies only to --scope hub-admin")
+		}
+		if testInfraDelegateMemberCap != 0 && (testInfraDelegateMemberCap < 1 || testInfraDelegateMemberCap > store.TestInfraOfflineDelegationMaxMemberCap) {
+			return fmt.Errorf("--member-cap must be between 1 and %d", store.TestInfraOfflineDelegationMaxMemberCap)
+		}
+	case testInfraDelegateScope == testInfraDelegateScopeHubAdmin:
+		if !testInfraDelegateAcknowledge {
+			return fmt.Errorf("--scope hub-admin requires --%s", testInfraMarkAcknowledgeFlag)
+		}
+		if testInfraDelegateMemberCap != 0 {
+			return errors.New("--member-cap applies only to --scope member; use --admin-cap")
+		}
+		if testInfraDelegateAdminCap != 0 && (testInfraDelegateAdminCap < 1 || testInfraDelegateAdminCap > store.TestInfraOfflineAdminDelegationMaxAdminCap) {
+			return fmt.Errorf("--admin-cap must be between 1 and %d", store.TestInfraOfflineAdminDelegationMaxAdminCap)
+		}
+		maxTTL = store.TestInfraOfflineAdminDelegationMaxTTL
+	default:
+		return fmt.Errorf("--scope must be %q or %q", testInfraDelegateScopeMember, testInfraDelegateScopeHubAdmin)
 	}
-	if testInfraDelegateMemberCap < 1 || testInfraDelegateMemberCap > store.TestInfraOfflineDelegationMaxMemberCap {
-		return fmt.Errorf("--member-cap must be between 1 and %d", store.TestInfraOfflineDelegationMaxMemberCap)
+	if testInfraDelegateTTL != 0 && (testInfraDelegateTTL < store.TestInfraOfflineDelegationMinTTL || testInfraDelegateTTL > maxTTL) {
+		return fmt.Errorf("--ttl must be between %s and %s", store.TestInfraOfflineDelegationMinTTL, maxTTL)
 	}
 	return nil
+}
+
+// testInfraDelegateStoreScope maps --scope to the stored delegation scope.
+// Only the two accepted values map; anything else is "".
+func testInfraDelegateStoreScope(scope string) string {
+	switch scope {
+	case testInfraDelegateScopeMember:
+		return store.TestInfraOfflineDelegationScope
+	case testInfraDelegateScopeHubAdmin:
+		return store.TestInfraOfflineAdminDelegationScope
+	}
+	return ""
 }
 
 // testInfraDelegateRevokeArgs validates the revoke flags before anything is
@@ -178,14 +244,20 @@ func testInfraDelegateRevokeArgs(_ *cobra.Command, args []string) error {
 
 // checkTestInfraDelegateConfig applies the configuration-side guards of an
 // offline delegation before the database is opened: the MK-h hub id guards
-// (pinned, equal to --hub-id) and server.hub.class: test. The marker and
-// allowlist are checked by testinfra.Delegate.
-func checkTestInfraDelegateConfig(cfg *config.GlobalConfig, hubID string) error {
+// (pinned, equal to --hub-id), server.hub.class: test, and for --scope
+// hub-admin the offline admin delegation setting bound to --hub-id. The
+// marker and allowlist are checked by testinfra.Delegate.
+func checkTestInfraDelegateConfig(cfg *config.GlobalConfig, hubID, scope string) error {
 	if err := checkTestInfraMarkHubID(cfg, hubID); err != nil {
 		return err
 	}
 	if !config.IsTestHubClass(cfg.Hub.HubClass) {
 		return fmt.Errorf("%w (%s is %q); nothing was written", ErrTestInfraDelegateHubClass, config.HubClassKey, cfg.Hub.HubClass)
+	}
+	if scope != testInfraDelegateScopeMember {
+		if got := cfg.Hub.TestIdentityOfflineAdminDelegations(); got != hubID {
+			return fmt.Errorf("%w (%s is %q); nothing was written", ErrTestInfraDelegateAdminOptIn, config.TestIdentityOfflineAdminDelegationsKey, got)
+		}
 	}
 	return nil
 }
@@ -198,7 +270,7 @@ func runTestInfraDelegate(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	if err := checkTestInfraDelegateConfig(cfg, testInfraDelegateHubID); err != nil {
+	if err := checkTestInfraDelegateConfig(cfg, testInfraDelegateHubID, testInfraDelegateScope); err != nil {
 		return err
 	}
 	client, err := openTestInfraClient(ctx, cfg)
@@ -213,8 +285,12 @@ func runTestInfraDelegate(cmd *cobra.Command, _ []string) error {
 // delegateTestInfra re-checks the configuration guards, creates the
 // delegation through pkg/testinfra and reports it. It prints no token.
 func delegateTestInfra(ctx context.Context, client *ent.Client, cfg *config.GlobalConfig, out io.Writer) error {
-	if err := checkTestInfraDelegateConfig(cfg, testInfraDelegateHubID); err != nil {
+	if err := checkTestInfraDelegateConfig(cfg, testInfraDelegateHubID, testInfraDelegateScope); err != nil {
 		return err
+	}
+	scope := testInfraDelegateStoreScope(testInfraDelegateScope)
+	if scope == "" {
+		return fmt.Errorf("--scope must be %q or %q; nothing was written", testInfraDelegateScopeMember, testInfraDelegateScopeHubAdmin)
 	}
 	operator := testInfraDelegateOperator
 	if operator == "" {
@@ -224,9 +300,12 @@ func delegateTestInfra(ctx context.Context, client *ent.Client, cfg *config.Glob
 	d, err := testinfra.Delegate(ctx, client, testinfra.DelegateInput{
 		HubID:           testInfraDelegateHubID,
 		WorkloadSub:     testInfraDelegateWorkloadSub,
+		Scope:           scope,
+		AdminOptIn:      cfg.Hub.TestIdentityOfflineAdminDelegations(),
 		WorkloadIssuers: cfg.Hub.TestIdentityWorkloadIssuers(),
 		TTL:             testInfraDelegateTTL,
 		MemberCap:       testInfraDelegateMemberCap,
+		AdminCap:        testInfraDelegateAdminCap,
 		Label:           testInfraDelegateLabel,
 		Operator:        operator,
 		Host:            host,
@@ -237,6 +316,12 @@ func delegateTestInfra(ctx context.Context, client *ent.Client, cfg *config.Glob
 			return fmt.Errorf("%w; run \"scion server test-infra mark\" for this hub first; nothing was written", err)
 		}
 		return fmt.Errorf("%w; nothing was written", err)
+	}
+	if d.Scope == store.TestInfraOfflineAdminDelegationScope {
+		_, _ = fmt.Fprintf(out, "Offline issuer delegation created: id=%s hub_id=%s workload_sub=%s scope=%s admin_cap=%d expires_at=%s\n",
+			d.ID, d.HubID, d.WorkloadSub, d.Scope, d.MemberCap, d.ExpiresAt.UTC().Format(time.RFC3339))
+		_, _ = fmt.Fprintf(out, "The hub honours it only while the marker is unchanged, the hub runs with --test-mode at admin or above, and %s is set to this hub id.\n", config.TestIdentityOfflineAdminDelegationsKey)
+		return nil
 	}
 	_, _ = fmt.Fprintf(out, "Offline issuer delegation created: id=%s hub_id=%s workload_sub=%s scope=%s member_cap=%d expires_at=%s\n",
 		d.ID, d.HubID, d.WorkloadSub, d.Scope, d.MemberCap, d.ExpiresAt.UTC().Format(time.RFC3339))

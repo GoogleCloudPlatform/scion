@@ -421,10 +421,12 @@ The A2A bridge forwards Google credentials under the `hubBearer` auth scheme (`a
 | No Google trust configured, or the token isn't a shape this path recognizes | Falls through unchanged to whichever other authentication check applies to that credential | — |
 | Per-client-IP rate limit exceeded (checked only on a credential-cache miss) | 429, with `Retry-After` | `rate_limited` |
 | Verification failed, unverified email, a service account presented as an access token, or its project/domain isn't listed | 401 | `unauthorized` (message `invalid external bearer token`; the specific reason is logged, never returned) |
-| Google's token-verification endpoints are unreachable | 503 | `upstream_unavailable` |
+| Google's token-verification endpoints are unreachable or return an undecodable response | 503 | `upstream_unavailable` (message `external identity provider unavailable`; the upstream error is logged once, never returned) |
 | An internal fault while resolving the verified identity to a Hub user (store error) | 503 | `store_error` |
 | The resolved user is suspended | 403 | `user_suspended` |
 | The Hub sign-in policy denies the user, or the identity fails auto-link checks | 403 | `forbidden` |
+
+Upstream response text and decoder errors from Google's `tokeninfo`, `userinfo`, and JWKS endpoints (as well as OAuth token, userinfo, and device-flow endpoints and the Teams token endpoint) are sanitized before reaching error values or server log lines: control, format, and line-separator runes and invalid UTF-8 are replaced with `U+FFFD`, and the rendered text is capped at 512 bytes on a UTF-8 rune boundary (`…` when cut).
 
 :::note[Every unrecognized opaque token is sent to Google]
 Once a Google issuer is trusted, the Hub does not sniff a bearer token's prefix (e.g. `ya29.`) to decide whether it might be a Google access token — that prefix isn't part of Google's contract. Any bearer credential that reaches this path without being a JWT is treated as a candidate Google access token and introspected against Google's `tokeninfo` endpoint. A non-JWT credential intended for some other purpose will still just fail verification (401), but it does cost a Google round trip.

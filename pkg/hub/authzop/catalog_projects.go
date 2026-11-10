@@ -1369,6 +1369,38 @@ var projectOperations = []OperationSpec{
 		Bearer: artifactVersionBearer,
 	},
 	{
+		ID:          "artifact.review.session.write",
+		Domain:      "artifact",
+		Description: "Record or end the caller's own review session of an artifact (the heartbeat of a review tab, ptone/scion#6849); 404 while the hub.artifacts_open_review_check experiment is off; any caller who may start a review version passes (the write check of artifact.version.create); rate limited per principal after authorization; the row is always the caller's own; a DELETE that deletes the caller's session row writes a review_session_ended decision-log entry; the Hub keeps the row until the reaper deletes it, at least an hour after its last beat, so this includes a session that no longer counts as open; a DELETE when no such row exists writes none (both answer 204)",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts/{id}/review-sessions/{sid}", Method: "PUT"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts/{id}/review-sessions/{sid}", Method: "DELETE"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
+		ResourceResolver: "artifact-home-project",
+		BasePermission:   "artifact.create",
+		Effects:          []SecurityEffect{EffectCreateResource, EffectDeleteResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		AuditObligation: &AuditObligation{
+			EventType:     "artifact decision log (review_session_ended)",
+			ContextFields: []string{"route", "principal_kind", "principal_id", "project_id"},
+			BeforeFields:  []string{"artifact_id"},
+			Atomic:        false,
+			NonAtomicJustification: "The entry is written after the store deletes the session row, outside its transaction, as for every artifact decision-log entry. " +
+				"The row is the caller's own presence signal: it stops counting as open at most five minutes after its last beat (sooner for an idle or outdated review) and is kept until the reaper deletes it, at least an hour after its last beat, so a lost entry loses no authority or data. " +
+				"The decision log rather than a durable artifact_event record is a deliberate choice for this ephemeral row only; it is not a precedent for an operation that deletes a durable resource",
+		},
+		DenialCodes: []DenialCode{DenialResourceNotFound, DenialForbidden, "rate_limited", "too_many_review_sessions"},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestArtifactsOpenReviewOnRoutes"},
+			{Package: "pkg/artifacts", Function: "TestReviewSessionAuthorization"},
+			{Package: "pkg/artifacts", Function: "TestReviewSessionEndLogged"},
+		},
+		Bearer: artifactVersionBearer,
+	},
+	{
 		ID:          "artifact.version.upload",
 		Domain:      "artifact",
 		Description: "Upload one manifest file of a pending version; only the principal that started the version may upload to it",

@@ -399,6 +399,8 @@ Other behaviour:
     `<ref> sha256:<hex>` line per image in `results.buildStepOutputs`. It
     requires `:<version>` to point to that digest, then runs `gcloud
     artifacts docker tags add <image>@<digest> <image>:<channel>`.
+  - Each `cloudbuild*.yaml` push step runs `scripts/buildx-record-digest.sh`,
+    which writes that line for its `:<version>` ref from `buildx --metadata-file`.
   - A failed build, a timeout or a missing result stops the run before any
     channel tag moves. A release tree whose `cloudbuild*.yaml` files report
     neither result stops at "no build-result digest".

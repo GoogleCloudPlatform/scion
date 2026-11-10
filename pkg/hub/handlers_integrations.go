@@ -1623,20 +1623,29 @@ func releasePluginBuildLock(name string) {
 	}
 }
 
+// errPluginBrokerRow marks a failure to confirm the plugin's runtime broker
+// row. The error text is fixed: store errors are not carried, so neither the
+// returned error nor the log echoes store internals.
+var errPluginBrokerRow = errors.New("plugin broker row")
+
 // ensurePluginBroker creates the runtime broker row for the named broker
 // plugin when it does not exist, with the same fields server startup
 // (cmd/server_foreground.go) uses. A plugin activated or reconfigured
 // without a restart, or whose row was deleted, then has the live row its
-// HMAC secret authenticates against. A failure is logged, as at startup.
-func (s *Server) ensurePluginBroker(ctx context.Context, name, brokerID string) {
+// HMAC secret authenticates against. It reports a failed look-up (other
+// than not found) or create (other than already exists), wrapping
+// errPluginBrokerRow.
+func (s *Server) ensurePluginBroker(ctx context.Context, name, brokerID string) error {
 	if s.store == nil {
-		return
+		return nil
 	}
-	if _, err := s.store.GetRuntimeBroker(ctx, brokerID); err == nil || !errors.Is(err, store.ErrNotFound) {
-		if err != nil {
-			slog.WarnContext(ctx, "Failed to look up plugin broker", "plugin", name, "brokerId", brokerID, "error", err)
-		}
-		return
+	_, err := s.store.GetRuntimeBroker(ctx, brokerID)
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, store.ErrNotFound) {
+		slog.WarnContext(ctx, "Failed to look up plugin broker row", "plugin", name, "brokerId", brokerID)
+		return fmt.Errorf("%w look-up failed", errPluginBrokerRow)
 	}
 	now := time.Now()
 	b := &store.RuntimeBroker{
@@ -1651,8 +1660,10 @@ func (s *Server) ensurePluginBroker(ctx context.Context, name, brokerID string) 
 		Updated:         now,
 	}
 	if err := s.store.CreateRuntimeBrokerClearingCredentials(ctx, b); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
-		slog.WarnContext(ctx, "Failed to register broker entity for plugin", "plugin", name, "brokerId", brokerID, "error", err)
+		slog.WarnContext(ctx, "Failed to create plugin broker row", "plugin", name, "brokerId", brokerID)
+		return fmt.Errorf("%w create failed", errPluginBrokerRow)
 	}
+	return nil
 }
 
 // getPluginHubCreds reconstructs the hub wiring credentials for a broker
@@ -1666,8 +1677,8 @@ func (s *Server) getPluginHubCreds(ctx context.Context, name string) map[string]
 }
 
 // getPluginHubCredsChecked is getPluginHubCreds that also reports a failure
-// to read the HMAC key or the project list (the map then lacks hmac_key or
-// project_slug_map).
+// to confirm the plugin's broker row, read the HMAC key or read the project
+// list (the map then lacks hmac_key or project_slug_map).
 func (s *Server) getPluginHubCredsChecked(ctx context.Context, name string) (map[string]string, error) {
 	var credsErr error
 	creds := make(map[string]string)
@@ -1684,10 +1695,12 @@ func (s *Server) getPluginHubCredsChecked(ctx context.Context, name string) (map
 
 	// hmac_key: from BrokerAuthService (idempotent — returns existing key).
 	// A broker secret authenticates only a live broker row, so the plugin's
-	// row is ensured first, as startup does.
+	// row is ensured first, as startup does; without a confirmed row no
+	// secret is generated or rotated.
 	if authSvc := s.GetBrokerAuthService(); authSvc != nil {
-		s.ensurePluginBroker(ctx, name, brokerID)
-		if secretKey, err := authSvc.GenerateAndStoreSecret(ctx, brokerID); err != nil {
+		if err := s.ensurePluginBroker(ctx, name, brokerID); err != nil {
+			credsErr = fmt.Errorf("hmac key: %w", err)
+		} else if secretKey, err := authSvc.GenerateAndStoreSecret(ctx, brokerID); err != nil {
 			slog.Error("Failed to generate or retrieve HMAC key", "plugin", name, "error", err)
 			credsErr = fmt.Errorf("hmac key: %w", err)
 		} else {

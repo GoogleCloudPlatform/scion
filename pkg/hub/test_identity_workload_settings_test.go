@@ -104,3 +104,55 @@ func TestNeverAPIWritable_GetDoesNotEchoWorkloadIssuers(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, string(data), "100000000000000000001")
 }
+
+// the offline hub-admin delegation setting
+// (server.hub.test_identities.offline_admin_delegations) is startup config
+// only, like the rest of server.hub.test_identities: every settings write
+// path refuses it, in file, DB and workstation mode, and no DB section can
+// hold it.
+
+var offlineAdminDelegationBodies = map[string]string{
+	"nested":        `{"server":{"hub":{"test_identities":{"offline_admin_delegations":"x2-test-hub"}}}}`,
+	"flat dotted":   `{"server.hub.test_identities.offline_admin_delegations":"x2-test-hub"}`,
+	"partly dotted": `{"server.hub":{"test_identities":{"offline_admin_delegations":"x2-test-hub"}}}`,
+	"case folded":   `{"Server":{"HUB":{"Test_Identities":{"Offline_Admin_Delegations":"x2-test-hub"}}}}`,
+	"empty value":   `{"server":{"hub":{"test_identities":{"offline_admin_delegations":""}}}}`,
+	"with others":   `{"default_model":"m1","server":{"hub":{"test_identities":{"offline_admin_delegations":"x2-test-hub"},"auto_suspend_stalled":true}}}`,
+}
+
+func TestNeverAPIWritable_OfflineAdminDelegationsRefusedInFileMode(t *testing.T) {
+	for name, body := range offlineAdminDelegationBodies {
+		t.Run(name, func(t *testing.T) {
+			srv := &Server{}
+			rr, settingsPath := fileModePutServerConfig(t, srv, body)
+			assert.Equal(t, []string{config.TestIdentitiesKey}, tiaErrorKeys(t, rr))
+			_, err := os.Stat(settingsPath)
+			assert.True(t, os.IsNotExist(err), "a refused PUT writes no settings file")
+		})
+	}
+}
+
+func TestNeverAPIWritable_OfflineAdminDelegationsRefusedInDBAndWorkstationMode(t *testing.T) {
+	for _, workstation := range []bool{false, true} {
+		for name, body := range offlineAdminDelegationBodies {
+			t.Run(map[bool]string{false: "db", true: "workstation"}[workstation]+"/"+name, func(t *testing.T) {
+				settingsPath := workstationHome(t)
+				srv, st, _ := newSQLiteHubInMode(t, workstation, nil)
+				before := hubSettingRevisions(t, st)
+				rr := putServerConfig(t, srv, body)
+				assert.Equal(t, []string{config.TestIdentitiesKey}, tiaErrorKeys(t, rr))
+				data, err := os.ReadFile(settingsPath)
+				require.NoError(t, err)
+				assert.NotContains(t, string(data), "offline_admin_delegations")
+				assert.Equal(t, before, hubSettingRevisions(t, st), "a refused PUT writes no DB row")
+			})
+		}
+	}
+}
+
+func TestNeverAPIWritable_OfflineAdminDelegationsHaveNoDBSection(t *testing.T) {
+	key := config.TestIdentityOfflineAdminDelegationsKey
+	layer1, layer0, _ := opsettings.ClassifyKeys([]string{key})
+	assert.Empty(t, layer1, "no Layer-1 section can store the offline admin delegation setting")
+	assert.Equal(t, []string{key}, layer0)
+}

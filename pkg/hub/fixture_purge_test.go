@@ -20,6 +20,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -45,11 +46,13 @@ import (
 // store (or the CI Postgres store for the _Postgres variant).
 
 // purgeRecDispatcher is createAgentDispatcher recording each agent delete
-// dispatch in order, with its deleteFiles and soft flags.
+// dispatch in order, with its deleteFiles and soft flags. Each dispatch
+// returns err (nil by default).
 type purgeRecDispatcher struct {
 	createAgentDispatcher
 	mu      sync.Mutex
 	deletes []purgeRecDelete
+	err     error
 }
 
 type purgeRecDelete struct {
@@ -62,7 +65,7 @@ func (d *purgeRecDispatcher) DispatchAgentDelete(_ context.Context, a *store.Age
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.deletes = append(d.deletes, purgeRecDelete{agentID: a.ID, deleteFiles: deleteFiles, soft: soft})
-	return nil
+	return d.err
 }
 
 func (d *purgeRecDispatcher) order() []string {
@@ -487,6 +490,121 @@ func TestFixturePurge_BrokerUnavailableThenRerun(t *testing.T) {
 	assert.Equal(t, TestIdentityPurgeCounts{Agents: 1, Projects: 1}, r.Deleted)
 	assert.False(t, fpAgentExists(t, e.store, agent.ID))
 	assert.False(t, fpUserExists(t, e.store, fxID))
+}
+
+// fpNeverProvisionedAgentRow writes a stamped agent whose create launch the
+// broker reported failed with harness_config_unusable, before any
+// container existed: an incomplete create with an ended launch.
+func fpNeverProvisionedAgentRow(t *testing.T, e fpEnv, brokerID, slug string) *store.Agent {
+	t.Helper()
+	ctx := context.Background()
+	fxID := e.fx.Identity.ID
+	agent := fpStampedAgentRow(t, e.store, e.project, brokerID, slug, fxID, []string{fxID}, e.stamp(), state.PhaseProvisioning)
+	launchID, err := e.store.BeginLaunch(ctx, agent.ID, store.LaunchKindCreate, 5*time.Minute)
+	require.NoError(t, err)
+	_, _, err = e.store.ApplyLaunchReport(ctx, agent.ID, brokerID, store.LaunchReport{
+		LaunchID: launchID, InstanceID: "inst-1", Seq: 1, State: store.LaunchReportStateFailed,
+		Step: "provision", Message: "refused", ErrorCode: harnessConfigUnusableErrorCode,
+	})
+	require.NoError(t, err)
+	got, err := e.store.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	require.True(t, got.IsIncompleteCreate(), "precondition: a failed create launch, phase %s", got.Phase)
+	require.Equal(t, store.LaunchStateEnded, got.LaunchState)
+	require.True(t, deleteNeverProvisioned(got), "precondition: refused before any container")
+	return got
+}
+
+// A create the broker refused before any container existed is removed by
+// one purge even while its broker is offline: there is nothing on the
+// broker to wait for, so it is not reported broker_unavailable, and no
+// delete is sent to the offline broker.
+func TestFixturePurge_IncompleteCreateBrokerOffline(t *testing.T) {
+	e := newFPEnv(t, "fpp-never-offline")
+	disp := &purgeRecDispatcher{}
+	e.srv.SetDispatcher(disp)
+	ctx := context.Background()
+	fxID := e.fx.Identity.ID
+	brokerID := fpProjectBrokerID(t, e.store, e.project)
+	agent := fpNeverProvisionedAgentRow(t, e, brokerID, "fpp-never-offline-agent")
+
+	broker, err := e.store.GetRuntimeBroker(ctx, brokerID)
+	require.NoError(t, err)
+	broker.Status = store.BrokerStatusOffline
+	require.NoError(t, e.store.UpdateRuntimeBroker(ctx, broker))
+
+	rec := tiPurge(t, e.srv, e.issuerTok, fxID, "", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	r := fpPurgeReport(t, rec)
+	assert.True(t, r.Complete)
+	assert.Empty(t, r.NotDone)
+	assert.Equal(t, 1, r.Deleted.Agents)
+	assert.False(t, fpAgentExists(t, e.store, agent.ID))
+	assert.False(t, fpUserExists(t, e.store, fxID))
+	assert.Empty(t, disp.order(), "nothing is sent to an offline broker")
+}
+
+// A create the broker refused before any container existed is removed by
+// one purge even when the broker's delete fails: the dispatch is
+// best-effort, as for a created row.
+func TestFixturePurge_IncompleteCreateDispatchFails(t *testing.T) {
+	e := newFPEnv(t, "fpp-never-failing")
+	disp := &purgeRecDispatcher{err: errors.New("broker delete failed")}
+	e.srv.SetDispatcher(disp)
+	fxID := e.fx.Identity.ID
+	brokerID := fpProjectBrokerID(t, e.store, e.project)
+	agent := fpNeverProvisionedAgentRow(t, e, brokerID, "fpp-never-failing-agent")
+
+	rec := tiPurge(t, e.srv, e.issuerTok, fxID, "", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	r := fpPurgeReport(t, rec)
+	assert.True(t, r.Complete)
+	assert.Empty(t, r.NotDone)
+	assert.Equal(t, 1, r.Deleted.Agents)
+	assert.False(t, fpAgentExists(t, e.store, agent.ID))
+	assert.False(t, fpUserExists(t, e.store, fxID))
+	assert.Equal(t, []string{agent.ID}, disp.order(), "the reachable broker still gets the best-effort delete")
+}
+
+// A create stopped during its launch (launch_stopped) may have a container
+// on the broker, so on an offline broker the purge reports it
+// broker_unavailable and deletes nothing, as for any live agent.
+func TestFixturePurge_StoppedLaunchBrokerOffline(t *testing.T) {
+	e := newFPEnv(t, "fpp-stopped-offline")
+	disp := &purgeRecDispatcher{}
+	e.srv.SetDispatcher(disp)
+	ctx := context.Background()
+	fxID := e.fx.Identity.ID
+	brokerID := fpProjectBrokerID(t, e.store, e.project)
+	agent := fpStampedAgentRow(t, e.store, e.project, brokerID, "fpp-stopped-offline-agent", fxID, []string{fxID}, e.stamp(), state.PhaseProvisioning)
+	launchID, err := e.store.BeginLaunch(ctx, agent.ID, store.LaunchKindCreate, 5*time.Minute)
+	require.NoError(t, err)
+	require.NoError(t, e.store.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{Phase: string(state.PhaseStopped)}))
+	ans, _, err := e.store.ApplyLaunchReport(ctx, agent.ID, brokerID, store.LaunchReport{
+		LaunchID: launchID, InstanceID: "inst-1", Seq: 1, State: store.LaunchReportStateProgress, Step: "pulling",
+	})
+	require.NoError(t, err)
+	require.Equal(t, http.StatusConflict, ans.HTTPStatus)
+	got, err := e.store.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	require.Equal(t, store.LaunchErrorLaunchStopped, got.LaunchError)
+	require.True(t, got.IsIncompleteCreate(), "precondition: an incomplete create")
+	require.False(t, deleteNeverProvisioned(got))
+
+	broker, err := e.store.GetRuntimeBroker(ctx, brokerID)
+	require.NoError(t, err)
+	broker.Status = store.BrokerStatusOffline
+	require.NoError(t, e.store.UpdateRuntimeBroker(ctx, broker))
+
+	rec := tiPurge(t, e.srv, e.issuerTok, fxID, "", nil)
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	r := fpPurgeReport(t, rec)
+	require.NotEmpty(t, r.NotDone)
+	assert.Equal(t, TestIdentityPurgeItem{Type: "agent", ID: agent.ID, ProjectID: e.project, Status: "broker_unavailable"}, r.NotDone[0])
+	assert.Equal(t, 0, r.Deleted.Agents)
+	assert.True(t, fpAgentExists(t, e.store, agent.ID))
+	assert.True(t, fpUserExists(t, e.store, fxID))
+	assert.Empty(t, disp.order(), "nothing is sent to an offline broker")
 }
 
 // AC 3b-4 (in_doubt): a delete whose broker intent is still outstanding

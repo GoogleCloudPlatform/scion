@@ -1832,6 +1832,10 @@ func validateServerPreflight(cfg *config.GlobalConfig) error {
 	if err := cfg.Hub.PortProxy.Validate(); err != nil {
 		return err
 	}
+	if err := validateLongLivedRequestSettings(cfg); err != nil {
+		return err
+	}
+	warnUndeclaredPlatformTimeout(cfg, os.Getenv, nil)
 	if err := cfg.Relay.Validate(); err != nil {
 		return err
 	}
@@ -3372,6 +3376,7 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 	hubCfg.TestAdminGate = testMode.TestAdminGate
 	hubCfg.TestMode = testMode.TestMode
 	hubCfg.TestAdminWebSessions = testMode.TestAdminWebSessions
+	hubCfg.OfflineAdminDelegations = testMode.OfflineAdminDelegations
 	if testMode.EnableTestIdentities {
 		slog.Warn("Test identity issuance is ENABLED (--test-mode). Holders of test_identity.issue can create short-lived synthetic users on this hub. Use on test hubs only; MUST NOT be enabled in production!",
 			"test_mode", string(testMode.TestMode.Level), "preconditions", testMode.TestMode.Preconditions)
@@ -3581,6 +3586,12 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 	// Test admin tier G8, second half: no federation in the stored
 	// operational settings either.
 	if err := hubSrv.VerifyTestAdminFederationOff(); err != nil {
+		return nil, err
+	}
+	// A hub that starts without the offline hub-admin delegation setting
+	// ends every offline hub-admin delegation and revokes the identities
+	// they issued. Nothing listens yet; a failure refuses startup.
+	if err := hubSrv.EndOfflineAdminDelegationsWhenOff(ctx); err != nil {
 		return nil, err
 	}
 	// A keyring file needs the server.secret_rotation experiment, read
@@ -4089,6 +4100,11 @@ func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 		PlatformAuthSA:       webPlatformAuthSA,
 		SlowRequestThreshold: cfg.SlowRequestThreshold,
 		PerfTrace:            cfg.Hub.PerfTrace,
+		// Events stream bounds (ptone/scion#5230): the maximum age is
+		// clamped to the declared platform request timeout here and
+		// jittered per stream by the web server.
+		SSEMaxConnectionAge:  sseMaxConnectionAgeSetting(cfg),
+		SSEHeartbeatInterval: sseHeartbeatIntervalSetting(cfg),
 
 		ProxyDriverPrincipals:    webProxyDrivers,
 		ProxyDriverTokenAudience: cfg.Auth.Proxy.ProxyDriverTokenAudience(),
@@ -4113,7 +4129,7 @@ func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 	if hubSrv != nil {
 		hubSrv.SetEventPublisher(eventPub)
 		startSettingsPropagation(ctx, hubSrv, eventPub)
-		webSrv.SetEventStreamMetrics(hubSrv.EventStreamMetrics())
+		wireWebEventStreamMetrics(webSrv, hubSrv)
 		webSrv.SetAccessSettingsProvider(hubSrv)
 		webSrv.SetProfilingSettingsProvider(hubSrv)
 		webSrv.SetOAuthService(hubSrv.GetOAuthService())

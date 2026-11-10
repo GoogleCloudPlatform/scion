@@ -1734,6 +1734,10 @@ type V1TestIdentitiesConfig struct {
 	// AdminWebSessions is server.hub.test_identities.admin_web_sessions
 	// (see TestIdentitiesConfig.AdminWebSessions).
 	AdminWebSessions string `json:"admin_web_sessions,omitempty" yaml:"admin_web_sessions,omitempty" koanf:"admin_web_sessions"`
+	// OfflineAdminDelegations is
+	// server.hub.test_identities.offline_admin_delegations (see
+	// TestIdentitiesConfig.OfflineAdminDelegations).
+	OfflineAdminDelegations string `json:"offline_admin_delegations,omitempty" yaml:"offline_admin_delegations,omitempty" koanf:"offline_admin_delegations"`
 }
 
 // V1TestIdentityWorkloadIssuer is one server.hub.test_identities.workload_issuers
@@ -1844,6 +1848,14 @@ type V1ServerHubConfig struct {
 	// PortProxy holds the agent port proxy settings. Read at startup;
 	// changes need a restart.
 	PortProxy *V1ServerHubPortProxyConfig `json:"port_proxy,omitempty" yaml:"port_proxy,omitempty" koanf:"port_proxy"`
+	// SSE holds the browser events stream settings. Read at startup;
+	// restart required to change.
+	SSE *V1ServerHubSSEConfig `json:"sse,omitempty" yaml:"sse,omitempty" koanf:"sse"`
+	// PlatformRequestTimeout is the request timeout of the platform in
+	// front of the hub (e.g. "900s"; no default, 150s-24h). When set, the
+	// events stream maximum age and the conduit session lifetime cap are
+	// clamped to 0.8 of it. Read at startup.
+	PlatformRequestTimeout string `json:"platform_request_timeout,omitempty" yaml:"platform_request_timeout,omitempty" koanf:"platform_request_timeout"`
 	// Observability holds the hub's own metrics and trace export switches
 	// (server.hub.observability). Read at startup; changes need a restart.
 	Observability *V1ServerHubObservabilityConfig `json:"observability,omitempty" yaml:"observability,omitempty" koanf:"observability"`
@@ -1858,6 +1870,20 @@ type V1ServerHubObservabilityConfig struct {
 	MetricsEnabled *bool `json:"metrics_enabled,omitempty" yaml:"metrics_enabled,omitempty" koanf:"metrics_enabled"`
 	// TracingEnabled turns the hub trace exporter on or off.
 	TracingEnabled *bool `json:"tracing_enabled,omitempty" yaml:"tracing_enabled,omitempty" koanf:"tracing_enabled"`
+}
+
+// V1ServerHubSSEConfig holds the browser events stream settings of the hub
+// server (server.hub.sse). Validated at startup (HubSSEConfig.Validate); an
+// invalid value is a startup error.
+type V1ServerHubSSEConfig struct {
+	// MaxConnectionAge is the maximum age of an events stream before the
+	// hub sends a reconnect hint and closes it (e.g. "10m"; default "10m",
+	// 1m-24h). Jittered by +/-20% per stream; clamped to 0.8 of
+	// platform_request_timeout when that is set.
+	MaxConnectionAge string `json:"max_connection_age,omitempty" yaml:"max_connection_age,omitempty" koanf:"max_connection_age"`
+	// HeartbeatInterval is the interval between events stream heartbeats
+	// (e.g. "30s"; default "30s", 5s-1m).
+	HeartbeatInterval string `json:"heartbeat_interval,omitempty" yaml:"heartbeat_interval,omitempty" koanf:"heartbeat_interval"`
 }
 
 // V1ServerHubPortProxyConfig holds the agent port proxy settings of the
@@ -4395,7 +4421,10 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 			gc.Hub.GCPProjectID = v1.Hub.GCPProjectID
 		}
 		if v1.Hub.TestIdentities != nil {
-			ti := &TestIdentitiesConfig{AdminWebSessions: v1.Hub.TestIdentities.AdminWebSessions}
+			ti := &TestIdentitiesConfig{
+				AdminWebSessions:        v1.Hub.TestIdentities.AdminWebSessions,
+				OfflineAdminDelegations: v1.Hub.TestIdentities.OfflineAdminDelegations,
+			}
 			for _, e := range v1.Hub.TestIdentities.WorkloadIssuers {
 				ti.WorkloadIssuers = append(ti.WorkloadIssuers, TestIdentityWorkloadIssuer(e))
 			}
@@ -4523,6 +4552,10 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		if p := v1.Hub.PortProxy; p != nil {
 			gc.Hub.PortProxy = HubPortProxyConfig{ResponseHeaderTimeout: p.ResponseHeaderTimeout, ViewTTL: p.ViewTTL}
 		}
+		if c := v1.Hub.SSE; c != nil {
+			gc.Hub.SSE = HubSSEConfig{MaxConnectionAge: c.MaxConnectionAge, HeartbeatInterval: c.HeartbeatInterval}
+		}
+		gc.Hub.PlatformRequestTimeout = v1.Hub.PlatformRequestTimeout
 		if o := v1.Hub.Observability; o != nil {
 			gc.Hub.Observability = HubObservabilityConfig{
 				MetricsEnabled: copyBoolPtr(o.MetricsEnabled),
@@ -4882,7 +4915,10 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 		},
 	}
 	if gc.Hub.TestIdentities != nil {
-		ti := &V1TestIdentitiesConfig{AdminWebSessions: gc.Hub.TestIdentities.AdminWebSessions}
+		ti := &V1TestIdentitiesConfig{
+			AdminWebSessions:        gc.Hub.TestIdentities.AdminWebSessions,
+			OfflineAdminDelegations: gc.Hub.TestIdentities.OfflineAdminDelegations,
+		}
 		for _, e := range gc.Hub.TestIdentities.WorkloadIssuers {
 			ti.WorkloadIssuers = append(ti.WorkloadIssuers, V1TestIdentityWorkloadIssuer(e))
 		}
@@ -4928,6 +4964,10 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	if p := gc.Hub.PortProxy; !p.IsZero() {
 		v1Hub.PortProxy = &V1ServerHubPortProxyConfig{ResponseHeaderTimeout: p.ResponseHeaderTimeout, ViewTTL: p.ViewTTL}
 	}
+	if c := gc.Hub.SSE; !c.IsZero() {
+		v1Hub.SSE = &V1ServerHubSSEConfig{MaxConnectionAge: c.MaxConnectionAge, HeartbeatInterval: c.HeartbeatInterval}
+	}
+	v1Hub.PlatformRequestTimeout = gc.Hub.PlatformRequestTimeout
 	if o := gc.Hub.Observability; !o.IsZero() {
 		v1Hub.Observability = &V1ServerHubObservabilityConfig{
 			MetricsEnabled: copyBoolPtr(o.MetricsEnabled),
