@@ -245,10 +245,23 @@ describe('project-settings: Danger Zone Leave row (ptone/scion#7494)', () => {
       canLeave: false,
       leaveBlockedReason: 'last_owner',
     });
-    const open = vi.spyOn(editorOf(element), 'openTransferOwnership').mockImplementation(() => {});
+    // Start from another members tab, so the link has a tab switch to render first.
+    const page = element as HTMLElement & {
+      activeMembersTab: string;
+      isUpdatePending: boolean;
+      updateComplete: Promise<boolean>;
+    };
+    page.activeMembersTab = 'visitors';
+    await page.updateComplete;
+    const seen: Array<{ tab: string; pending: boolean }> = [];
+    const open = vi.spyOn(editorOf(element), 'openTransferOwnership').mockImplementation(() => {
+      seen.push({ tab: page.activeMembersTab, pending: page.isUpdatePending });
+    });
     dialogOf(element).dispatchEvent(
       new CustomEvent('scion-leave-transfer-ownership', { bubbles: true, composed: true })
     );
-    expect(open).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(open).toHaveBeenCalledTimes(1));
+    // The members tab is active and rendered before the transfer dialog opens.
+    expect(seen).toEqual([{ tab: 'members', pending: false }]);
   });
 });

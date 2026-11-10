@@ -3887,7 +3887,7 @@ export class ScionPageProjectSettings extends LitElement {
         projectName=${this.project?.name ?? ''}
         ?transferAvailable=${can(this.project?._capabilities, 'manage')}
         @scion-project-left=${(e: CustomEvent<ProjectLeftDetail>) => this.onProjectLeft(e)}
-        @scion-leave-transfer-ownership=${() => this.openTransferFromLeave()}
+        @scion-leave-transfer-ownership=${() => void this.openTransferFromLeave()}
       ></scion-project-leave-dialog>
     `;
   }
@@ -3932,8 +3932,10 @@ export class ScionPageProjectSettings extends LitElement {
   }
 
   /** The leave dialog's Transfer ownership link: the members editor's transfer dialog. */
-  private openTransferFromLeave(): void {
+  private async openTransferFromLeave(): Promise<void> {
     this.activeMembersTab = 'members';
+    // Let the members tab render and become visible before scrolling to it.
+    await this.updateComplete;
     const editor = this.shadowRoot?.querySelector<ScionProjectMembersEditor>(
       'scion-project-members-editor'
     );
