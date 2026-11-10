@@ -256,6 +256,20 @@ func (s *Server) handleDecisionAnswer(w http.ResponseWriter, r *http.Request, ro
 	}
 
 	asker, _ := s.store.GetAgent(ctx, d.AskerAgentID)
+	// The choice-response is a message from the user to the asking agent:
+	// it gets the messaging check of a chat send to an agent
+	// (sendAgentRouted), before anything is recorded. A confirm is not
+	// delivered, so it needs none.
+	if asker != nil && outcome != store.DecisionOutcomeConfirm {
+		if allowed, reason, _ := s.authorizeAgentMessage(ctx, user, asker, false); !allowed {
+			writeError(w, http.StatusForbidden, ErrCodeMessageDenied, "Message delivery denied", map[string]interface{}{
+				"reason":        mapReasonToCode(reason),
+				"senderMode":    "user",
+				"recipientMode": asker.MessageMode,
+			})
+			return
+		}
+	}
 	responseMsg := choiceResponseStoreMessage(user, d, prompt, choice, asker)
 
 	// Step 5: record the answer and store the response, in one transaction.

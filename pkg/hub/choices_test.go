@@ -50,7 +50,15 @@ type choicesFixture struct {
 
 func newChoicesFixture(t *testing.T) *choicesFixture {
 	t.Helper()
-	f := newScheduledSendFixture(t)
+	srv, s, alice, bob, project := setupDemoPolicyTest(t)
+	return newChoicesFixtureOn(t, srv, s, alice, bob, project)
+}
+
+// newChoicesFixtureOn builds the choices fixture on a server from
+// setupDemoPolicyTest or setupDemoPolicyTestWithFault.
+func newChoicesFixtureOn(t *testing.T, srv *Server, s store.Store, alice, bob *store.User, project *store.Project) *choicesFixture {
+	t.Helper()
+	f := newScheduledSendFixtureOn(t, srv, s, alice, bob, project)
 	setChoicesExperiment(t, f.srv, true)
 	ctx := context.Background()
 	outsider := &store.User{
@@ -801,15 +809,17 @@ func TestChoicesSend_IntroGetsMentionRewrite(t *testing.T) {
 }
 
 // interpretedFirstStore records an agent_interpreted answer just before
-// the next RecordAnswer, as one landing between the answer endpoint's
-// state check and its write would.
+// the next RecordAnswer once armed, as one landing between the answer
+// endpoint's state check and its write would. It is installed with
+// setupDemoPolicyTestWithFault, before the fixture's audited setup.
 type interpretedFirstStore struct {
 	store.Store
+	fault  *storeFaultSwitch
 	before func()
 }
 
 func (s *interpretedFirstStore) RecordAnswer(ctx context.Context, in *store.RecordAnswerInput) (*store.DecisionAnswer, bool, error) {
-	if b := s.before; b != nil {
+	if b := s.before; b != nil && s.fault.Active() {
 		s.before = nil
 		b()
 	}
@@ -820,13 +830,15 @@ func (s *interpretedFirstStore) RecordAnswer(ctx context.Context, in *store.Reco
 // the decision makes the store refuse the direct answer's outcome; the
 // user gets 409 with the current decision, not a validation error.
 func TestDecisionAnswer_InterpretedAfterStateCheck409(t *testing.T) {
-	f := newChoicesFixture(t)
+	srv, st, alice, bob, project, first, fault := setupDemoPolicyTestWithFault(t, func(inner store.Store, f *storeFaultSwitch) *interpretedFirstStore {
+		return &interpretedFirstStore{Store: inner, fault: f}
+	})
+	f := newChoicesFixtureOn(t, srv, st, alice, bob, project)
 	_, res := f.topicPrompt(t, twoDecisions, false)
 	row := res.Decisions[0].RowID
 
-	real := f.srv.store
-	f.srv.store = &interpretedFirstStore{Store: real, before: func() { f.recordInterpreted(t, f.alice, row, "1") }}
-	t.Cleanup(func() { f.srv.store = real })
+	first.before = func() { f.recordInterpreted(t, f.alice, row, "1") }
+	fault.Arm()
 
 	rr := f.answer(t, f.alice, row, map[string]interface{}{"choice_id": "1"})
 	require.Equal(t, http.StatusConflict, rr.Code, "body: %s", rr.Body.String())
@@ -839,12 +851,44 @@ func TestDecisionAnswer_InterpretedAfterStateCheck409(t *testing.T) {
 	require.True(t, ok, "the current decision has the interpreted answer")
 	assert.Equal(t, "1", eff["choiceId"])
 
-	d, err := real.GetDecision(context.Background(), row)
+	d, err := f.store.GetDecision(context.Background(), row)
 	require.NoError(t, err)
 	require.Len(t, d.Answers, 1, "only the interpreted answer is stored")
 	assert.Equal(t, store.DecisionProvenanceAgentInterpreted, d.Answers[0].Provenance)
 
 	// Control: the same answer now, as a confirm, is recorded.
 	rr = f.answer(t, f.alice, row, map[string]interface{}{"choice_id": "1"})
+	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+}
+
+// An answer is a message from the user to the asking agent: when the
+// agent takes no messages from the user, the answer is refused with
+// the chat send's MESSAGE_DENIED before anything is recorded.
+func TestDecisionAnswer_AskerRefusesMessages(t *testing.T) {
+	f := newChoicesFixture(t)
+	_, res := f.topicPrompt(t, twoDecisions, false)
+	row := res.Decisions[0].RowID
+	ctx := context.Background()
+
+	agent, err := f.store.GetAgent(ctx, f.agent.ID)
+	require.NoError(t, err)
+	mode := agent.MessageMode
+	agent.MessageMode = store.MessageModeNone
+	require.NoError(t, f.store.UpdateAgent(ctx, agent))
+
+	rr := f.answer(t, f.bob, row, map[string]interface{}{"choice_id": "1"})
+	require.Equal(t, http.StatusForbidden, rr.Code, "body: %s", rr.Body.String())
+	assert.Equal(t, ErrCodeMessageDenied, errorCode(t, rr))
+	d, err := f.store.GetDecision(ctx, row)
+	require.NoError(t, err)
+	assert.Empty(t, d.Answers, "a refused answer stores nothing")
+	assert.Equal(t, store.DecisionStatusPending, d.Status)
+
+	// Control: with the agent taking messages again, the same answer is recorded.
+	agent, err = f.store.GetAgent(ctx, f.agent.ID)
+	require.NoError(t, err)
+	agent.MessageMode = mode
+	require.NoError(t, f.store.UpdateAgent(ctx, agent))
+	rr = f.answer(t, f.bob, row, map[string]interface{}{"choice_id": "1"})
 	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
 }
