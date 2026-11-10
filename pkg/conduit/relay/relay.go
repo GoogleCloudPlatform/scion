@@ -228,6 +228,13 @@ type Config struct {
 	// sends (lifetime, shutdown, supersede) ends by the cap. Must exceed
 	// LifetimeGoAwayLead.
 	LifetimeCap time.Duration
+	// JitterLifetimeCap, when set, maps LifetimeCap to the relay cap of
+	// one session, called once per session at the start of Serve, so
+	// sessions opened together do not all reach their cap together
+	// (ptone/scion#5245). A principal's own cap is applied after it and
+	// still only lowers the result. A result at or below
+	// LifetimeGoAwayLead is ignored (LifetimeCap is used).
+	JitterLifetimeCap func(time.Duration) time.Duration
 	// DeleteAttempts bounds DeleteSessionCAS retries (default 5).
 	DeleteAttempts int
 	// RPCTimeout caps internal RPCs (default 120s).
@@ -705,6 +712,20 @@ func sessionLifetimeCap(relayCap, principalCap time.Duration) time.Duration {
 	return relayCap
 }
 
+// sessionRelayCap is the relay's lifetime cap for one new session:
+// Config.LifetimeCap, passed through Config.JitterLifetimeCap when both are
+// set and the jittered value still exceeds LifetimeGoAwayLead.
+func (r *Relay) sessionRelayCap() time.Duration {
+	c := r.cfg.LifetimeCap
+	if c <= 0 || r.cfg.JitterLifetimeCap == nil {
+		return c
+	}
+	if j := r.cfg.JitterLifetimeCap(c); j > LifetimeGoAwayLead {
+		return j
+	}
+	return c
+}
+
 // lifetimeHint is Welcome.lifetime_hint_s for e: with a cap, the whole
 // seconds until its lifetime GoAway; otherwise Config.LifetimeHint.
 func (r *Relay) lifetimeHint(e *entry) time.Duration {
@@ -747,7 +768,7 @@ func (r *Relay) Serve(ctx context.Context, conn transport.Conn, p Principal) err
 		defer r.serves.Done()
 	}
 	e := &entry{principal: p, readyCh: make(chan struct{})}
-	if lifetimeCap := sessionLifetimeCap(r.cfg.LifetimeCap, p.LifetimeCap); lifetimeCap > 0 {
+	if lifetimeCap := sessionLifetimeCap(r.sessionRelayCap(), p.LifetimeCap); lifetimeCap > 0 {
 		e.capAt = r.clk.Now().Add(lifetimeCap)
 	}
 	adm := &admitter{r: r, p: p, transport: conn.Transport(), e: e}

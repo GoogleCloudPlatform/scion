@@ -221,10 +221,12 @@ Rules:
 4. **Never auto-merge, never generate templates.**
 5. No-effect legacy fields (`runtimes.<r>.host`, `.env`, `.sync`, `profiles.<p>.default_template`) → notice `legacy_field_no_effect`. `profiles.<p>.env` in raw input → notice `legacy_field_removed`.
 6. `list_all_namespaces: true` → blocking `flat_target_scope_violation`. A runtime type without a flat target (podman, container, cloudrun, cloudrun-instances, cloudrun-sandbox, substrate) → blocking `unsupported_flat_target_type`.
+   - **Amendment (P5-CR):** this rule is replaced by CR10 in `p5-cloudrun-amendment.md`, which is authoritative: `cloudrun` and `cloudrun-instances` convert to a `cloudrun` instance, and `cloudrun-sandbox` and `substrate` stay blocking.
 7. Unknown keys under `profiles.<p>` / `runtimes.<r>` → blocking `unknown_settings_key`.
 8. Secret declarations are copied; no secret value is ever read, resolved or emitted, and the converter has no secret-backend dependency.
 
 **Frozen finding codes:** `unsupported_flat_target_type`, `flat_target_scope_violation`, `profile_conflict`, `profile_conflict_resolved`, `legacy_field_no_effect`, `legacy_field_removed`, `unknown_settings_key`, `field_not_valid_for_target_type`.
+- **Amendment (P5-CR):** CR11 in `p5-cloudrun-amendment.md` adds `flat_target_field_required` and `flat_target_operator_input_required` to this list.
 
 `ProfileMap` is the explicit, unambiguous migration mapping that P4.1 uses to translate an old `profile` request field or `defaultProfile` preference. A profile with a blocking finding, or with no `ProfileMap` entry, has no translation; P4.1 returns its actionable error.
 
@@ -289,3 +291,14 @@ Binding points for the release:
 ## Not frozen
 
 P4 is free to choose: the Hub transport of FC4, web and CLI presentation, flat-awareness of `/api/v1/info`, health-summary and GCP service-account status display of the runtime target, and the `hub.*` → `server.broker.*` key move. Sequence P4 settings-file edits after the P3.1 schema changes merge, to avoid schema conflicts.
+
+## Change log
+
+### Amendment (P5-CR) (2026-11-04; ptone/scion#7308)
+
+`p5-cloudrun-amendment.md` is authoritative for these changes; the frozen text above carries a pointer at rule 6.
+- **FC1 (CR7):** `runtime_target` admits the six Cloud Run fields for `type: cloudrun`.
+- **FC4-a (CR8):** new rows. `runtime_target.region` is published as is; `project_id`, `service_account`, `network`, `subnetwork` and `credentials_file` are never published.
+- **FC6 rule 1 (CR9):** Cloud Run groups by type plus `project_id` and `region`; errata instance keys are `cloudrun` plus project and region.
+- **FC6 rule 6 (CR10):** replacement text. `cloudrun` and `cloudrun-instances` convert to a `cloudrun` instance.
+- **Frozen finding codes (CR11):** add `flat_target_field_required` (always blocking) and `flat_target_operator_input_required` (always a notice; `convert --plan` exits 3 for it).

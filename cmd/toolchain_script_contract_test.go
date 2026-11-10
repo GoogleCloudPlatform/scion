@@ -212,3 +212,64 @@ func TestToolchainScriptStillRunsWhenExecuted(t *testing.T) {
 		t.Errorf("executing the script with an unknown step: err %v, output:\n%s", err, out)
 	}
 }
+
+// TestToolchainPlaywrightDeps: the playwright-deps step installs Playwright's
+// WebKit/Firefox library list only on a suite it has a list for, uses the real
+// trixie ALSA package name, and skips any other suite without touching apt.
+func TestToolchainPlaywrightDeps(t *testing.T) {
+	e := newToolchainEnv(t)
+	osRelease := func(body string) string {
+		p := filepath.Join(t.TempDir(), "os-release")
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	// apt-get is stubbed: every call is logged on fd 3, which the step does
+	// not redirect, so the simulate pre-flight (run with its output sent to
+	// /dev/null) is visible too. The pre-flight succeeds unless APT_SIM_FAIL
+	// names a package in the set. apt_cleanup is stubbed too, so the test
+	// never removes /var/lib/apt/lists even as root.
+	const stubs = `exec 3>&1
+apt-get() {
+  echo "APT $*" >&3
+  if [ "$1" = install ] && [ "$2" = -s ] && [ -n "${APT_SIM_FAIL:-}" ]; then
+    case " $* " in *" $APT_SIM_FAIL "*) return 100 ;; esac
+  fi
+  return 0
+}
+apt_cleanup() { echo "APT-CLEANUP"; }
+`
+	trixie := osRelease("PRETTY_NAME=\"Debian GNU/Linux 13 (trixie)\"\nID=debian\nVERSION_ID=\"13\"\n")
+	noble := osRelease("PRETTY_NAME=\"Ubuntu 24.04.3 LTS\"\nID=ubuntu\nVERSION_ID=\"24.04\"\n")
+
+	out, code := e.run(systemPath, stubs+`OS_RELEASE_FILE="`+trixie+`"; step_playwright_deps`)
+	expectOutput(t, "debian 13", out, code, 0,
+		"installing Playwright WebKit and Firefox system libraries",
+		"APT install -s --no-install-recommends",
+		"APT install -y --no-install-recommends",
+		" libasound2t64 ", " libgtk-4-1 ", " gstreamer1.0-plugins-bad ", " libicu76 ", " libavcodec61 ",
+		"APT-CLEANUP")
+	if strings.Contains(out, " libasound2 ") {
+		t.Errorf("debian 13: installs the virtual libasound2 instead of libasound2t64; output:\n%s", out)
+	}
+
+	out, code = e.run(systemPath, stubs+`OS_RELEASE_FILE="`+noble+`"; step_playwright_deps`)
+	expectOutput(t, "ubuntu 24.04", out, code, 0, "skip: no Playwright WebKit/Firefox library list for Ubuntu 24.04.3 LTS")
+	if strings.Contains(out, "APT ") {
+		t.Errorf("ubuntu 24.04: touched apt on a suite with no list; output:\n%s", out)
+	}
+
+	out, code = e.run(systemPath, stubs+`OS_RELEASE_FILE="`+filepath.Join(t.TempDir(), "missing")+`"; step_playwright_deps`)
+	expectOutput(t, "missing os-release", out, code, 0, "skip: no Playwright WebKit/Firefox library list for unknown")
+	if strings.Contains(out, "APT ") {
+		t.Errorf("missing os-release: touched apt; output:\n%s", out)
+	}
+
+	out, code = e.run(systemPath, stubs+`APT_SIM_FAIL=libicu76; apt_installable() { [ "$1" != libicu76 ]; }
+OS_RELEASE_FILE="`+trixie+`"; step_playwright_deps`)
+	expectOutput(t, "renamed package", out, code, 1, "FAIL: apt cannot install these Playwright libraries: libicu76")
+	if strings.Contains(out, "APT install -y") {
+		t.Errorf("renamed package: installed despite a failed pre-flight; output:\n%s", out)
+	}
+}

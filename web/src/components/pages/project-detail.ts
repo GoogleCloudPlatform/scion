@@ -112,6 +112,13 @@ import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
 import { formatNumber } from '../../utils/format-number.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 import { navigateTo } from '../../client/navigation.js';
+import {
+  leaveVisibility,
+  PROJECT_NO_ACCESS_MESSAGE,
+  PROJECT_NO_ACCESS_TITLE,
+} from '../../client/project-leave.js';
+import '../shared/project-leave-dialog.js';
+import type { ProjectLeftDetail, ScionProjectLeaveDialog } from '../shared/project-leave-dialog.js';
 import { AGENT_BADGES_FLAG, isFeatureEnabled } from '../../utils/feature-flags.js';
 import { agentBadges } from '../shared/agent-badges.js';
 import { ARTIFACTS_FLAG } from '../../client/artifacts.js';
@@ -237,6 +244,13 @@ export class ScionPageProjectDetail extends LitElement {
    */
   @state()
   private error: string | null = null;
+
+  /**
+   * The project answered 404: it is gone, or the user no longer has access
+   * (left it, or was removed). Rendered as a no-access state.
+   */
+  @state()
+  private noAccess = false;
 
   /**
    * Loading state for actions
@@ -945,6 +959,13 @@ export class ScionPageProjectDetail extends LitElement {
       margin-bottom: 1rem;
     }
 
+    .leave-blocked-reason {
+      max-width: 18rem;
+      white-space: normal;
+      font-size: var(--sl-font-size-x-small, 0.75rem);
+      color: var(--sl-color-neutral-600, #4b5563);
+    }
+
     .error-state {
       text-align: center;
       padding: 3rem 2rem;
@@ -1525,6 +1546,7 @@ export class ScionPageProjectDetail extends LitElement {
    */
   private async loadData(): Promise<void> {
     this.error = null;
+    this.noAccess = false;
     const agentsLoad = this.loadPageAgents();
 
     const offered = this.hydrationOffered
@@ -1542,6 +1564,11 @@ export class ScionPageProjectDetail extends LitElement {
     try {
       const projectResponse = await apiFetch(`/api/v1/projects/${this.projectId}`);
 
+      if (projectResponse.status === 404) {
+        this.noAccess = true;
+        this.project = null;
+        return;
+      }
       if (!projectResponse.ok) {
         throw new Error(
           await extractApiError(
@@ -2776,6 +2803,7 @@ export class ScionPageProjectDetail extends LitElement {
                 </a>
               `
             : nothing}
+          ${this.renderHeaderOverflow()}
         </div>
       </scion-detail-header>
 
@@ -3200,7 +3228,69 @@ export class ScionPageProjectDetail extends LitElement {
     `;
   }
 
+  /**
+   * The header overflow menu. Its only item is Leave project, offered as the
+   * project's capabilities say (ptone/scion#7494): every member can reach the
+   * header, while Settings needs update, delete or manage.
+   */
+  private renderHeaderOverflow(): TemplateResult | typeof nothing {
+    const leave = leaveVisibility(this.project?._capabilities);
+    if (leave.kind === 'hidden') return nothing;
+    return html`
+      <sl-dropdown placement="bottom-end" data-header-overflow>
+        <sl-icon-button
+          slot="trigger"
+          name="three-dots-vertical"
+          label="More project actions"
+        ></sl-icon-button>
+        <sl-menu>
+          <sl-menu-item
+            data-leave-project
+            ?disabled=${leave.kind === 'blocked'}
+            @click=${() => this.openLeaveDialog()}
+          >
+            <sl-icon slot="prefix" name="box-arrow-right"></sl-icon>
+            Leave project
+            ${leave.kind === 'blocked'
+              ? html`<div class="leave-blocked-reason" data-leave-blocked>${leave.reason}</div>`
+              : nothing}
+          </sl-menu-item>
+        </sl-menu>
+      </sl-dropdown>
+      <scion-project-leave-dialog
+        projectId=${this.projectId}
+        projectName=${this.project?.name ?? ''}
+        ?transferAvailable=${can(this.project?._capabilities, 'manage')}
+        @scion-project-left=${(e: CustomEvent<ProjectLeftDetail>) => {
+          if (e.detail.result.remainingAccess !== 'none') void this.loadData();
+        }}
+        @scion-leave-transfer-ownership=${() => {
+          navigateTo(`/projects/${this.projectId}/settings?transfer=1`);
+        }}
+      ></scion-project-leave-dialog>
+    `;
+  }
+
+  private openLeaveDialog(): void {
+    if (leaveVisibility(this.project?._capabilities).kind !== 'enabled') return;
+    const dialog = this.shadowRoot?.querySelector<ScionProjectLeaveDialog>(
+      'scion-project-leave-dialog'
+    );
+    void dialog?.show();
+  }
+
   private renderError() {
+    if (this.noAccess) {
+      return html`
+        <scion-back-link href="/projects">Back to Projects</scion-back-link>
+
+        <div class="error-state" data-project-no-access>
+          <sl-icon name="exclamation-triangle"></sl-icon>
+          <h2>${PROJECT_NO_ACCESS_TITLE}</h2>
+          <p>${PROJECT_NO_ACCESS_MESSAGE}</p>
+        </div>
+      `;
+    }
     return html`
       <scion-back-link href="/projects">Back to Projects</scion-back-link>
 

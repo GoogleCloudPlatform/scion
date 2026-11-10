@@ -1702,6 +1702,18 @@ export interface Notification {
   dispatched: boolean;
   acknowledged: boolean;
   createdAt: string;
+  /** What produced the notification (for example "artifact_grant"); absent when not classified. */
+  kind?: string;
+  /** The kind of thing the notification is about (for example "artifact"); absent otherwise. */
+  resourceType?: string;
+  /** The id of the thing the notification is about; absent otherwise. */
+  resourceId?: string;
+  /**
+   * Text another principal wrote, kept apart from `message`: for an
+   * "artifact_review_summary" row, the start of the reviewer's summary note.
+   * Render it as plain text only; absent for other kinds.
+   */
+  excerpt?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -1741,7 +1753,22 @@ export interface Subscription {
  */
 export interface Capabilities {
   actions: string[];
+  /**
+   * Project self-leave (ptone/scion#7494): on a project's `_capabilities`
+   * only, and only while the hub's project-self-leave experiment is on.
+   * True when a leave would remove at least one of the caller's direct
+   * bindings. Absent means the action is not offered.
+   */
+  canLeave?: boolean;
+  /**
+   * Why a leave is blocked, when `canLeave` is false: a {@link LeaveBlockedReason}
+   * (an unknown value is treated as no reason).
+   */
+  leaveBlockedReason?: string;
 }
+
+/** Values of `leaveBlockedReason` on project and membership capabilities. */
+export type LeaveBlockedReason = 'last_owner' | 'group_derived';
 
 /**
  * Membership-specific capabilities returned in the project members API
@@ -1761,6 +1788,10 @@ export interface MembershipCapabilities {
    * Optional: absent means false.
    */
   canManageCustomRoles?: boolean;
+  /** Project self-leave; same meaning as on {@link Capabilities}. */
+  canLeave?: boolean;
+  /** Why a leave is blocked; same meaning as on {@link Capabilities}. */
+  leaveBlockedReason?: string;
 }
 
 /**

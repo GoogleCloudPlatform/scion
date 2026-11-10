@@ -101,6 +101,8 @@ When the deletion succeeds, Scion also removes all of the user's role bindings (
 
 Schedules do not block a user delete. Once it succeeds, every active recurring schedule whose recorded authority is the user (the user last created, changed or resumed it; it may have been created by someone else), in any project, is paused with status reason `creator_deleted`, because none of its fires could be authorized. Anyone allowed to resume such a schedule who resumes it records their own authority, and it then runs as them (see [Schedules paused by the Hub](/scion/hosted/user/scheduling/#schedules-paused-by-the-hub)). This step is best effort: a schedule it misses, or one whose user was removed through the deprecated allow-list delete, is paused the next time it comes due. A schedule whose recorded authority is an agent is not affected by the user delete; it is paused when that agent is deleted.
 
+Answers the user gave to agent choice prompts (the `web.chat_choices` [experiment](/scion/reference/experiments/)) are kept in the decision log after the user is deleted. The delete clears the user's id from each answer, but the **name and email recorded with the answer stay**, so the log still shows who decided. This is personal data the Hub retains on purpose. Chat retention never removes answers; deleting the project they belong to does.
+
 After a user is deleted, that user's tokens stop working immediately. Requests that present a web or CLI sign-in token get `401` with the error code `user_not_found`. Requests that present one of the user's access tokens (`scion_pat_`) are also refused, with `401` and the error code `unauthorized`.
 
 ### Force-deleting a user who has agents
@@ -231,30 +233,44 @@ Users whose only email address is unverified at their provider can no longer sig
 
 ## Domain Authorization
 
-You can restrict authentication to specific email domains using the `server.auth.authorized_domains` setting. This provides an additional layer of access control beyond OAuth authentication. See also [Who can sign in](#who-can-sign-in-user-access-mode).
+You can restrict authentication to specific email domains using the `server.auth.authorized_domains` setting. This provides an additional layer of access control beyond OAuth authentication. See also [Who can sign in](#who-can-sign-in-user-access-mode) and [`server.auth.authorized_domains`: environment first](/scion/reference/admin-settings/#serverauthauthorized_domains-environment-first).
 
 ### Configuration
 
-Set the environment variable with a comma-separated list of allowed domains:
-
-```bash
-# Allow only users from these domains
-export SCION_SEED_SERVER_AUTH_AUTHORIZEDDOMAINS="example.com,mycompany.org"
-```
-
-Or configure in `server.yaml`:
+Configure in `settings.yaml`:
 
 ```yaml
-auth:
-  authorizedDomains:
-    - example.com
-    - mycompany.org
+server:
+  auth:
+    authorized_domains:
+      - example.com
+      - mycompany.org
 ```
+
+Or set the seed or environment pin with a comma-separated list of allowed domains:
+
+```bash
+# Seed the initial list when no list is saved in the database
+export SCION_SEED_SERVER_AUTH_AUTHORIZEDDOMAINS="example.com,mycompany.org"
+
+# Or pin the list on this node (overrides any list saved in the database)
+export SCION_SERVER_AUTH_AUTHORIZEDDOMAINS="example.com,mycompany.org"
+```
+
+### Precedence and Live Updates
+
+`server.auth.authorized_domains` resolves in environment-first order so a deployment pin cannot be widened from the UI:
+
+1. **Environment pin (`SCION_SERVER_AUTH_AUTHORIZEDDOMAINS`)**: When set on the node, its list is always enforced on that node; a database save is stored for unpinned nodes, and on the pinned node the save report (`reload`) lists `server.auth.authorized_domains` in `skipped` (not `applied_keys`) with reason `"Saved; a deployment setting on this Hub pins this value."`
+2. **Database (`hub_settings`)**: Otherwise, a list saved through the Web UI (**Admin -> Server Config -> Access Control**), `PUT /api/v1/admin/server-config`, or `scion hub settings set` is loaded at startup and applied live across replicas without a restart. Clearing the saved list (an empty `authorized_domains` in the stored `access` row) uses the startup value (`settings.yaml` and `SCION_SERVER_AUTH_AUTHORIZEDDOMAINS`), so a save never allows more domains than the deployment does.
+3. **File and seed**: Otherwise, the list in `settings.yaml` (`server.auth.authorized_domains`) or `SCION_SEED_SERVER_AUTH_AUTHORIZEDDOMAINS` is used.
+
+A save of `authorized_domains` or `admin_emails` (or a reset of the `access` section via `DELETE /api/v1/admin/server-config/sections/access`) that would leave the saving administrator's own email rejected is refused with `422 validation_error` (`"This authorized_domains list would refuse sign-in for your account. Include your email domain, or add your email to admin_emails."`).
 
 ### Behavior
 
 - **Empty list (default)**: All email domains are allowed.
-- **Non-empty list**: Only emails from listed domains can authenticate.
+- **Non-empty list**: Only emails from listed domains (or addresses in `server.auth.admin_emails`) can authenticate.
 - **Case insensitive**: `Example.COM` matches `example.com`.
 - **Exact match**: Subdomains must be listed explicitly.
 
@@ -380,7 +396,7 @@ server:
 - **Identity Types**:
   - `hub`: Identifies requests originating from federated partner Hubs. A partner Hub marks each credential it signs with `scion_token_kind`: `agent` for agent identity tokens, `user` for user access credentials. Agent identity tokens, and credentials without the claim from Hubs that predate it, are read as agents, as before. A user access credential is accepted only when the issuer has `accept_user_tokens: true` and the `federation.project_visitors` experiment is on; it must carry a verified email and no agent claims, and must pass `allowed_emails` and `allowed_domains`. Any other `scion_token_kind` value is refused. A refused credential gets the same `401` as any other credential that fails verification.
   - `service_account`: Authenticates automated workloads via GCP Service Accounts.
-  - `user`: Maps OIDC tokens to standard user identities, with domain restrictions using wildcards (e.g. `allowed_emails: ["*@example.com"]`). The `default_role` key is deprecated: it is accepted and has no effect on what a federated user can do (it is also separate from `server.auth.default_user_role`, which applies to users who sign in through OAuth, OIDC login or an auth proxy).
+  - `user`: Maps OIDC tokens to standard user identities, with email and domain restrictions (`allowed_emails` supports wildcards such as `*@example.com`; `allowed_domains` requires an exact, case-insensitive match on the verified email's domain, with no wildcards or subdomain matching, on both the OIDC federation token path and the Google external bearer token path). The `default_role` key is deprecated: it is accepted and has no effect on what a federated user can do (it is also separate from `server.auth.default_user_role`, which applies to users who sign in through OAuth, OIDC login or an auth proxy).
 - **Write limits for federated callers**: A federated caller keeps visitor rights on the resources it has been granted (and may read its own User-scope environment variables and secret metadata), but the Hub refuses its writes to profile and other non-agent resources (user-scope templates, skills and harness configs, imports, env vars and secrets, chat preferences, presence, and attachments outside a project) and refuses all Hub-scope (`scope=hub`) environment variable and secret operations. Federated callers also cannot redeem invites.
 
 ### External Bearer Tokens (Google credential pass-through)
@@ -431,10 +447,12 @@ The A2A bridge forwards Google credentials under the `hubBearer` auth scheme (`a
 | No Google trust configured, or the token isn't a shape this path recognizes | Falls through unchanged to whichever other authentication check applies to that credential | — |
 | Per-client-IP rate limit exceeded (checked only on a credential-cache miss) | 429, with `Retry-After` | `rate_limited` |
 | Verification failed, unverified email, a service account presented as an access token, or its project/domain isn't listed | 401 | `unauthorized` (message `invalid external bearer token`; the specific reason is logged, never returned) |
-| Google's token-verification endpoints are unreachable | 503 | `upstream_unavailable` |
+| Google's token-verification endpoints are unreachable or return an undecodable response | 503 | `upstream_unavailable` (message `external identity provider unavailable`; the upstream error is logged once, never returned) |
 | An internal fault while resolving the verified identity to a Hub user (store error) | 503 | `store_error` |
 | The resolved user is suspended | 403 | `user_suspended` |
 | The Hub sign-in policy denies the user, or the identity fails auto-link checks | 403 | `forbidden` |
+
+Upstream response text and decoder errors from Google's `tokeninfo`, `userinfo`, and JWKS endpoints (as well as OAuth token, userinfo, and device-flow endpoints and the Teams token endpoint) are sanitized before reaching error values or server log lines: control, format, and line-separator runes and invalid UTF-8 are replaced with `U+FFFD`, and the rendered text is capped at 512 bytes on a UTF-8 rune boundary (`…` when cut).
 
 :::note[Every unrecognized opaque token is sent to Google]
 Once a Google issuer is trusted, the Hub does not sniff a bearer token's prefix (e.g. `ya29.`) to decide whether it might be a Google access token — that prefix isn't part of Google's contract. Any bearer credential that reaches this path without being a JWT is treated as a candidate Google access token and introspected against Google's `tokeninfo` endpoint. A non-JWT credential intended for some other purpose will still just fail verification (401), but it does cost a Google round trip.
@@ -556,7 +574,9 @@ Administrators can manage available Service Accounts through the **Service Accou
 
 ### Security & Auditing
 
+- **Metadata Protection Preflight (`SCION_METADATA_INTERCEPTION`)**: When Docker or Podman grants `NET_ADMIN` for `block` or `assign` mode, the runtime sets `SCION_METADATA_INTERCEPTION` to `required`. Before writing or staging any credential, `sciontool init` checks that it is running as root, the container does not use `host` networking, `iptables` resolves in a root-owned system directory, and `CAP_NET_ADMIN` is in both the effective and bounding capability sets of every OS thread. If any check fails, `sciontool init` refuses agent start before credentials are staged ("agent start refused: the configured metadata protection could not be set up in this container. Provide the required host capabilities, or set the metadata mode to passthrough explicitly to opt out."). If metadata interception setup fails after staging (fatal in `assign` mode, in `block` mode outside `host` networking, or whenever `SCION_METADATA_INTERCEPTION` is `required`), `sciontool init` removes the staged transport and hub tokens without starting the harness.
 - **Iptables Interception**: Scion uses `iptables` (when `NET_ADMIN` capability is available) to redirect traffic from `169.254.169.254:80` to the local sidecar.
+- **Network Setup Ordering & Capability Drop**: Every step that needs `CAP_NET_ADMIN` runs while `sciontool init` is still root, before workspace git clone, pre-start hooks, sidecar services, or the harness: (1) opt-in egress firewall (`SCION_INIT_FIREWALL`, executing `init-firewall.sh` from a root-owned system directory with a 2-minute timeout; an invalid boolean value or script failure refuses start), (2) metadata server startup and `iptables` redirection, and (3) whenever a metadata server or the opt-in egress firewall was configured, dropping `CAP_NET_ADMIN` from the ambient, effective, permitted, inheritable, and bounding capability sets across all OS threads and verifying via `/proc/self/task` that no thread retains `CAP_NET_ADMIN`. No process in the agent has `CAP_NET_ADMIN` after that point (so `sciontool metadata status` reports the `iptables` rule check as not verifiable once the capability is gone). If the capability cannot be removed after `sciontool init` installed network controls (`iptables` interception or the opt-in firewall), `sciontool init` refuses to start the harness (`could not drop CAP_NET_ADMIN after installing network controls; refusing to start the harness`). In `passthrough` mode without the opt-in firewall, the agent container does not need the capability.
 - **Authorization Checks**: Administrative actions for GCP Service Account management require `project-owner` (`ActionManage`) permissions to enforce strict authorization boundaries. Every agent token request (`POST /api/v1/agent/gcp-token` and `POST /api/v1/agent/gcp-identity-token`, as well as `gs://` link fetches in chat) also verifies both the agent's live `gcp_service_account.use` authority and the recorded assigner's live `gcp_service_account.assign` authority on the assigned Service Account (see [Token-Request Authority](/scion/hosted/ha/permissions/#token-request-authority)).
 - **Rate Limiting**: Token requests are rate-limited per-agent to prevent abuse.
 - **Audit Logging**: All token issuance events are logged at the Hub level with the requesting `agent_id` and `user_id`.
@@ -573,7 +593,7 @@ Scion supports native GitHub App integration for secure, automated agent authent
 - **Admin Management**: Global monitoring of installations, rate limits, and status via the "GitHub App" tab in the Admin Server Config UI.
 
 ### Project Association
-Projects can be linked to specific GitHub App installations. The system automatically associates GitHub App installations at project creation time, streamlining the authentication flow for private repositories. On agent create, start, and restart, the Hub mints GitHub App installation tokens only for the agent's own project; an agent whose project has no installation configured receives no App token. Project settings provide visual indicators and permission badges for real-time feedback on integration health.
+Projects can be linked to specific GitHub App installations when the association is authorized (checked when the association is recorded and at every token mint): the project's git remote must be on the configured GitHub host (`github.com`, or the host of `github_app.api_base_url`), the installation must be active and its account must match the remote's owner, and either an active Hub admin binds the installation to that remote (`PUT /api/v1/projects/{id}/github-installation`, recorded in `scion.dev/github-installation-binding` with `installation_id`, `remote`, `bound_by`, and `bound_at`) or the project creator's user-scope `GITHUB_TOKEN` secret has at least `pull` access to the repository on GitHub (`pull`-only proof caps the minted token to read-only, whereas `push` access allows write permissions). On agent create, start, restart, and token refresh, the Hub mints GitHub App installation tokens from the agent's own project, or, when the agent's project has no installation configured, from the project named by the `scion.dev/github-token-source-project` label only when the agent's authoritative source user is active and holds `agent.create` in that source project (and that source project's installation association is authorized). Administrators can inspect project installation associations across the Hub at `GET /api/v1/github-app/installations/association-report` (with optional `?refresh=true`). Project settings provide visual indicators and permission badges for real-time feedback on integration health.
 
 ### Webhook Secret
 GitHub App webhook deliveries must be signed. Set the webhook secret in the "GitHub App" tab of the Admin Server Config UI; the Hub stores it as a hub-scoped secret. Use the same value as the webhook secret in your GitHub App's settings. If no webhook secret is configured, the Hub rejects every webhook event with `503 Service Unavailable` instead of processing it unsigned.

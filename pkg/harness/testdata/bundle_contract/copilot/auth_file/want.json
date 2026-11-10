@@ -1,0 +1,9 @@
+{
+  "exit_code": 0,
+  "resolved_auth": {
+    "method": "auth-file",
+    "harness": "copilot"
+  },
+  "env": {},
+  "env_absent": ["COPILOT_GITHUB_TOKEN", "DBUS_SESSION_BUS_ADDRESS"]
+}

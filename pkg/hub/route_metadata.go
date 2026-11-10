@@ -707,6 +707,14 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Classification: RoutePolicy,
 		Permission:     "project.read", Resource: "project", Action: "read",
 	},
+	// decisions.byId reads and answers a choice prompt decision; the
+	// handler authorizes per conversation (read or send rights on the
+	// prompt's thread or DM). 404 while web.chat_choices is off.
+	"/api/v1/decisions/": {
+		Pattern: "/api/v1/decisions/", RouteID: "decisions.byId",
+		Classification: RoutePolicy,
+		Permission:     "project.read", Resource: "project", Action: "read",
+	},
 	"/api/v1/chat/search": {
 		Pattern: "/api/v1/chat/search", RouteID: "chat.search",
 		Classification: RoutePolicy,
@@ -1416,6 +1424,14 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/broker/inbound/routed", RouteID: "broker.inbound.routed",
 		Classification: RouteBrokerHMAC,
 	},
+	"/api/v1/broker/inbound/attachments": {
+		Pattern: "/api/v1/broker/inbound/attachments", RouteID: "broker.inbound.attachments",
+		Classification: RouteBrokerHMAC,
+	},
+	"/api/v1/broker/inbound/attachments/check": {
+		Pattern: "/api/v1/broker/inbound/attachments/check", RouteID: "broker.inbound.attachments.check",
+		Classification: RouteBrokerHMAC,
+	},
 	"/api/v1/broker/callback": {
 		Pattern: "/api/v1/broker/callback", RouteID: "broker.callback",
 		Classification: RouteBrokerHMAC,
@@ -1498,6 +1514,21 @@ var routeMetadataTable = map[string]RouteMetadata{
 	},
 	"/api/v1/system/workstation-settings": {
 		Pattern: "/api/v1/system/workstation-settings", RouteID: "system.workstationSettings",
+		Classification: RouteWorkstation,
+		Permission:     "hub.config.update", Resource: "hub", Action: "update",
+	},
+	"/api/v1/system/welcome/preview": {
+		Pattern: "/api/v1/system/welcome/preview", RouteID: "system.welcome.preview",
+		Classification: RouteWorkstation,
+		Permission:     "hub.config.update", Resource: "hub", Action: "update",
+	},
+	"/api/v1/system/welcome/install": {
+		Pattern: "/api/v1/system/welcome/install", RouteID: "system.welcome.install",
+		Classification: RouteWorkstation,
+		Permission:     "hub.config.update", Resource: "hub", Action: "update",
+	},
+	"/api/v1/system/welcome/skip": {
+		Pattern: "/api/v1/system/welcome/skip", RouteID: "system.welcome.skip",
 		Classification: RouteWorkstation,
 		Permission:     "hub.config.update", Resource: "hub", Action: "update",
 	},

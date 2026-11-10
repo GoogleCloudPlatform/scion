@@ -98,7 +98,7 @@ func TestFlatInstanceServerConfig_ContainerHubAndColocatedStorage(t *testing.T) 
 	st, err := storage.NewLocal(storage.Config{LocalPath: t.TempDir()})
 	require.NoError(t, err)
 	var asked []string
-	sh := flatServerShared{cfg: &config.GlobalConfig{}, mode: brokerhost.ModeColocated, colocatedStorage: st,
+	sh := flatServerShared{cfg: &config.GlobalConfig{}, mode: brokerhost.ModeColocated, colocatedStorage: st, colocatedHubID: "hub-1",
 		containerHub: func(rtName string) containerHubEndpointResult {
 			asked = append(asked, rtName)
 			return containerHubEndpointResult{Endpoint: "http://hub-for-" + rtName, ColocatedPublicHubEndpoint: "https://public", HubListenPort: 8080}
@@ -114,6 +114,7 @@ func TestFlatInstanceServerConfig_ContainerHubAndColocatedStorage(t *testing.T) 
 	assert.Equal(t, "https://public", colocated.ColocatedPublicHubEndpoint)
 	assert.Equal(t, 8080, colocated.HubListenPort)
 	assert.Same(t, st, colocated.ColocatedStorage)
+	assert.Equal(t, "hub-1", colocated.ColocatedHubID)
 	withDir := flatInstanceServerConfig(sh, brokerhost.InstanceContext{Instance: inst, Identity: id, Runtime: rt, StateDir: "/state/rb-a",
 		Activation: &brokerhost.Activation{InMemoryCredentials: &brokercredentials.BrokerCredentials{BrokerID: "rb-a"}}})
 	assert.Equal(t, "/state/rb-a", withDir.StateDir, "the server uses the state root the host resolved")
@@ -121,4 +122,5 @@ func TestFlatInstanceServerConfig_ContainerHubAndColocatedStorage(t *testing.T) 
 	remote := flatInstanceServerConfig(sh, brokerhost.InstanceContext{Instance: inst, Identity: id, Runtime: rt,
 		Activation: &brokerhost.Activation{RemoteCredentials: []brokercredentials.BrokerCredentials{{BrokerID: "rb-a"}}}})
 	assert.Nil(t, remote.ColocatedStorage, "a remote instance never uses the co-located Hub's storage")
+	assert.Empty(t, remote.ColocatedHubID)
 }

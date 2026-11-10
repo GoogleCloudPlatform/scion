@@ -93,9 +93,17 @@ type AgentDefaultsSettings struct {
 
 // EndpointsSettings holds Layer-1 endpoint configuration.
 type EndpointsSettings struct {
-	PublicURL     string `json:"public_url,omitempty"`
-	HubName       string `json:"hub_name,omitempty"`
-	ImageRegistry string `json:"image_registry,omitempty"`
+	PublicURL string `json:"public_url,omitempty"`
+	HubName   string `json:"hub_name,omitempty"`
+	// ContentURL is server.hub.content_url, the hub's content host
+	// (config.ValidateContentURL); it applies without a restart.
+	ContentURL string `json:"content_url,omitempty"`
+	// ContentURLAllowSameSite is server.hub.content_url_allow_same_site, the
+	// override that lets ContentURL be on public_url's registrable domain
+	// (refused without it); it applies without a restart. A pointer, so a
+	// stored false can override a true from settings.yaml or the environment.
+	ContentURLAllowSameSite *bool  `json:"content_url_allow_same_site,omitempty"`
+	ImageRegistry           string `json:"image_registry,omitempty"`
 	// MonitoringDashboardURL is the optional link to an external monitoring
 	// dashboard shown on the Health page (config.ValidateMonitoringDashboardURL).
 	MonitoringDashboardURL string `json:"monitoring_dashboard_url,omitempty"`
@@ -493,6 +501,12 @@ type MessagingSettings struct {
 	// (ptone/scion#4596). Compiled default 7; values below 1 are treated
 	// as the default.
 	AttachmentInboxRetentionDays *int `json:"attachment_inbox_retention_days,omitempty"`
+
+	// FailedMessageRetentionDays is how long a message to an agent whose
+	// dispatch failed is kept before the failed-message purge deletes it,
+	// with its dependent rows. Compiled default 7; values below 1 are
+	// treated as the default.
+	FailedMessageRetentionDays *int `json:"failed_message_retention_days,omitempty"`
 
 	// Stale fields — kept for backward-compatible deserialization only.
 	// New code must not read or write these.

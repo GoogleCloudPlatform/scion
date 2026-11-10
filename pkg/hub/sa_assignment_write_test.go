@@ -226,17 +226,15 @@ func TestSAParentCeiling_ScheduledCreateAssignmentInSameTx(t *testing.T) {
 	assert.ErrorIs(t, err, store.ErrNotFound)
 }
 
-// TestSAParentCeiling_ScheduledHostPassthroughRecordsRevisionPrincipal: a
-// project-default passthrough on a sandbox broker is translated to the
-// broker's host account by the scheduled ladder. The scheduled create
-// succeeds and records the assignment with the revision principal as its
-// source, under the edge's scheduler provenance and ceiling.
-func TestSAParentCeiling_ScheduledHostPassthroughRecordsRevisionPrincipal(t *testing.T) {
+// TestSAParentCeiling_ScheduledProjectPassthroughOnSandboxRecordsNothing: a
+// project-default passthrough is confined like the hub default (embedded
+// broker, local container runtime), so on a remote sandbox broker the
+// scheduled ladder neither applies nor translates it, and no service-account
+// assignment is recorded.
+func TestSAParentCeiling_ScheduledProjectPassthroughOnSandboxRecordsNothing(t *testing.T) {
 	hostSAEmail := "broker-host@sa-rec-sched-pt.iam.gserviceaccount.com"
 	owner := ptUser(tid("user-sa-rec-sched-pt"), "sa-rec-sched-pt@test.com", store.UserRoleMember)
 	srv, s, project, _ := setupPassthroughSandboxServer(t, owner, hostSAEmail, "sa-rec-sched-pt")
-	// Translation needs enforce mode and actAs for the revision principal,
-	// who owns the broker.
 	enforceSAAssign(srv, store.NewFakeCallerPermissionChecker().AllowTarget(hostSAEmail))
 	ctx := context.Background()
 	proj, err := s.GetProject(ctx, project.ID)
@@ -257,27 +255,8 @@ func TestSAParentCeiling_ScheduledHostPassthroughRecordsRevisionPrincipal(t *tes
 	require.NoError(t, srv.dispatchAgentEventHandler()(ctx, evt), "the scheduled create on a sandbox broker succeeds")
 
 	agent := agentBySlug(t, s, project.ID, "sa-rec-sched-pt")
-	saID := agentAssignedServiceAccountID(agent)
-	require.NotEmpty(t, saID, "the passthrough default is translated to an assign-mode identity")
-	hostSA, err := s.GetGCPServiceAccount(ctx, saID)
-	require.NoError(t, err)
-	assert.Equal(t, hostSAEmail, hostSA.Email, "precondition: the account is the broker's host account")
-
-	rows := activeAssignments(t, s, agent.ID)
-	require.Len(t, rows, 1)
-	row := rows[0]
-	assert.Equal(t, store.SAAssignmentOriginHostPassthroughTranslation, row.Origin)
-	assert.Equal(t, saID, row.ServiceAccountID)
-	assert.Equal(t, store.SourceCredentialScheduler, row.SourceCredentialKind)
-	assert.Equal(t, store.DelegationPrincipalUser, row.SourcePrincipalKind)
-	assert.Equal(t, owner.ID, row.SourcePrincipalID, "the revision principal is the source")
-	assert.NotEqual(t, saID, row.SourcePrincipalID, "the host account is never the source")
-	assert.NotEqual(t, hostSAEmail, row.SourcePrincipalID)
-	assert.Equal(t, evt.ID, row.SourceEventID)
-	edges := activeEdgesFor(t, s, agent.ID)
-	require.Len(t, edges, 1)
-	assert.Equal(t, edges[0].AuthorityProvenance, row.AuthorityProvenance, "the assignment records the edge's provenance")
-	assert.Equal(t, edges[0].EffectCeiling, row.EffectCeiling)
+	assert.Nil(t, agent.AppliedConfig.GCPIdentity, "the project default is not applied on this broker")
+	assert.Empty(t, activeAssignments(t, s, agent.ID))
 }
 
 // TestSAParentCeiling_ProfileDefaultOrigins: the per-profile rung records

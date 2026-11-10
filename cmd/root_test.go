@@ -433,7 +433,6 @@ func TestExecuteUsageOnError_ArgsValidatorsKeepUsage(t *testing.T) {
 		{"hub secret migrate: old --project hint", []string{"hub", "secret", "migrate", "--project", "my-gcp"}, gcpProjectFlagHint},
 		{"hub secret migrate-names: old --project hint", []string{"hub", "secret", "migrate-names", "--project", "my-gcp"}, gcpProjectFlagHint},
 		{"project service-accounts add: old --project hint", []string{"project", "service-accounts", "add", "sa@example.iam.gserviceaccount.com", "--project", "my-gcp"}, gcpProjectFlagHint},
-		{"hub secret migrate: no flags -> required-flag error", []string{"hub", "secret", "migrate"}, `required flag(s) "gcp-project" not set`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

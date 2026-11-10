@@ -34,6 +34,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub"
+	"github.com/GoogleCloudPlatform/scion/pkg/keyring"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/cloudrunenv"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -180,15 +181,26 @@ func warnConduitTargetStreamDeadlines(c config.HubConduitConfig) {
 		"user streams to renewal-capable agents are refused (503 stream_renewal_unavailable) until relay renewals land")
 }
 
-// conduitLifetimeCapSetting returns the configured conduit session lifetime
-// cap (default 3500s). validateServerPreflight has already rejected a
+// conduitLifetimeCapSetting returns the conduit session lifetime cap
+// before the per-session jitter: the configured cap (default 3500s),
+// clamped to 0.8 of the declared platform request timeout
+// (ptone/scion#5245). validateServerPreflight has already rejected a
 // malformed or out-of-range value.
 func conduitLifetimeCapSetting(cfg *config.GlobalConfig) time.Duration {
 	d, err := cfg.Hub.Conduit.LifetimeCapDuration()
 	if err != nil {
-		return config.ConduitDefaultLifetimeCap
+		d = config.ConduitDefaultLifetimeCap
 	}
-	return d
+	return config.EffectiveConduitLifetimeCap(d, platformRequestTimeoutSetting(cfg))
+}
+
+// conduitIngressLifetimeCapSetting returns the lifetime cap a hub in
+// external relay mode sends on the ingress leg: the top of the per-session
+// jitter range of conduitLifetimeCapSetting (ptone/scion#5245). The relay
+// is the one side that jitters; sending the unjittered cap would lower
+// every session above it back to that single value.
+func conduitIngressLifetimeCapSetting(cfg *config.GlobalConfig) time.Duration {
+	return config.ConduitLifetimeCapCeiling(conduitLifetimeCapSetting(cfg), platformRequestTimeoutSetting(cfg) > 0)
 }
 
 // conduitUserStreamAuthzMaxSetting returns the configured authorization
@@ -471,19 +483,24 @@ func conduitPeerAuthOptions(ctx context.Context, cfg *config.GlobalConfig, selfI
 // secret (design §3.9): it is required in external relay mode and, with
 // relayRole, on --role relay; when set, a hub refuses one equal to its
 // session secret (a relay never resolves the session secret and passes
-// ""). Strength is checked by HubConduitConfig.Validate. Errors name the
-// setting, never the value.
-func validateConduitPeerSecret(c config.HubConduitConfig, relayRole bool, sessionSecret string) error {
+// ""). In managed ring mode (ring is the keyring file's signing ring) it
+// must also differ from the secret of every signing generation
+// (relay.CheckPeerSecretNotInRing); a relay passes a nil ring. Strength is
+// checked by HubConduitConfig.Validate. Errors name the setting, never the
+// value.
+func validateConduitPeerSecret(c config.HubConduitConfig, relayRole bool, sessionSecret string, ring *keyring.SigningRing) error {
 	secret := c.PeerSecretValue() // a value that is only a newline is unset
 	switch {
 	case secret == "" && relayRole:
 		return errors.New("server.hub.conduit.peer_secret is required on --role relay")
 	case secret == "" && c.ExternalRelay():
 		return errors.New("server.hub.conduit.peer_secret is required when server.hub.conduit.relay_mode is external")
-	case secret != "" && sessionSecret != "" && secret == sessionSecret:
+	case secret == "":
+		return nil
+	case sessionSecret != "" && secret == sessionSecret:
 		return errors.New("server.hub.conduit.peer_secret must differ from the session secret")
 	}
-	return nil
+	return relay.CheckPeerSecretNotInRing(secret, ring)
 }
 
 // conduitInternalRelayAPIServed reports whether this node serves the
@@ -638,6 +655,8 @@ func startConduitRelay(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hu
 		HopTLS:           hopClientTLS,
 		ReconnectWindow:  conduitReconnectWindowSetting(cfg),
 		LifetimeCap:      conduitLifetimeCapSetting(cfg),
+		// Per-session jitter of the cap (ptone/scion#5245).
+		JitterLifetimeCap: conduitLifetimeJitter(cfg),
 	}); err != nil {
 		return err
 	}
@@ -679,6 +698,11 @@ func startConduitExternal(ctx context.Context, cfg *config.GlobalConfig, hubSrv 
 	if opts.PeerSecret == "" {
 		return errors.New("server.hub.conduit.peer_secret is required when server.hub.conduit.relay_mode is external")
 	}
+	// Enrolled relay peers and this hub's own key (opt-in): with a key
+	// file the hub signs with it; enrolled peers' key signatures verify.
+	if opts.Peers, opts.PeerKey, err = relay.PeerKeyOptions(cfg.Hub.Conduit); err != nil {
+		return err
+	}
 	auth, mode, err := hub.NewConduitPeerAuth(opts)
 	if err != nil {
 		return err
@@ -695,14 +719,7 @@ func startConduitExternal(ctx context.Context, cfg *config.GlobalConfig, hubSrv 
 		slog.Warn("Conduit ingress proxy is off: it requires HMAC relay-peer authentication; conduit dials get 503 conduit_not_serving",
 			"cause", ingressOff, "peer_auth", mode, "fix", "set server.hub.conduit.peer_auth to hmac, or upgrade to the release with the relay-peer ingress header")
 	}
-	if err := hubSrv.StartConduitExternal(ctx, hub.ConduitExternalOptions{
-		InstanceID:      id,
-		PeerAuth:        auth,
-		HopTLS:          hopClientTLS,
-		Ingress:         cfg.Hub.Conduit.IngressValue(),
-		IngressOffCause: ingressOff,
-		LifetimeCap:     conduitLifetimeCapSetting(cfg),
-	}); err != nil {
+	if err := hubSrv.StartConduitExternal(ctx, conduitExternalOptions(cfg, id, auth, hopClientTLS, ingressOff)); err != nil {
 		return err
 	}
 	addr, _, err := serveConduitInternalListenerFn(ctx, cfg.Hub.Conduit.InternalListen, hopServerTLS, hubSrv.ConduitInternalHandler(), wg, errCh)
@@ -711,6 +728,20 @@ func startConduitExternal(ctx context.Context, cfg *config.GlobalConfig, hubSrv 
 	}
 	slog.Info("Conduit external relay mode started: this hub runs no relay", "instance_id", id, "peer_auth", mode, "internal_listen", addr.String())
 	return nil
+}
+
+// conduitExternalOptions builds the options of external relay mode. The
+// lifetime cap is the ingress cap, the top of the relays' per-session
+// jitter range (conduitIngressLifetimeCapSetting; ptone/scion#5245).
+func conduitExternalOptions(cfg *config.GlobalConfig, id string, auth relay.PeerAuth, hopClientTLS *tls.Config, ingressOff string) hub.ConduitExternalOptions {
+	return hub.ConduitExternalOptions{
+		InstanceID:      id,
+		PeerAuth:        auth,
+		HopTLS:          hopClientTLS,
+		Ingress:         cfg.Hub.Conduit.IngressValue(),
+		IngressOffCause: ingressOff,
+		LifetimeCap:     conduitIngressLifetimeCapSetting(cfg),
+	}
 }
 
 // validateConduitIngress applies the startup rules of the conduit ingress

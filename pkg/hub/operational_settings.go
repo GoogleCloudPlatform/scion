@@ -24,6 +24,7 @@ import (
 	"math/rand"
 	"reflect"
 	"slices"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -192,6 +193,14 @@ type Layer1Snapshot struct {
 	// MonitoringDashboardURL is server.hub.monitoring_dashboard_url; ""
 	// means unset (no Health page link). Every snapshot constructor sets it.
 	MonitoringDashboardURL string
+	// ContentURL is server.hub.content_url, the hub's content host; ""
+	// means unset (shared artifacts stay on the hub origin). Every snapshot
+	// constructor sets it.
+	ContentURL string
+	// ContentURLAllowSameSite is server.hub.content_url_allow_same_site, the
+	// override that lets ContentURL be on the hub's registrable domain;
+	// false means such a value is refused. Every snapshot constructor sets it.
+	ContentURLAllowSameSite bool
 
 	// GitHub App (non-secret fields only)
 	GitHubAppID           int64
@@ -224,6 +233,13 @@ type Layer1Snapshot struct {
 
 	// HarnessConfigs — map of named harness configurations (DB > bootstrap fallback)
 	HarnessConfigs map[string]config.HarnessConfigEntry
+
+	// PlacementErrors and PlacementWarnings are the Kubernetes placement
+	// findings of Runtimes and Profiles (config.OverlaySections): paths
+	// whose placement is malformed or invalid, which make the co-located
+	// Runtime Broker refuse Kubernetes starts, and ignored unknown keys.
+	PlacementErrors   []string
+	PlacementWarnings []string
 
 	// EnvOverrides lists Layer-1 koanf keys that are overridden by env vars
 	// on this node — used for drift warnings.
@@ -786,6 +802,16 @@ func (o *OperationalSettings) populateMapSections(snap *Layer1Snapshot, dbSectio
 	}
 	if !failed["harness_configs"] {
 		snap.HarnessConfigs = sections.HarnessConfigs
+	}
+	snap.PlacementErrors, snap.PlacementWarnings = sections.PlacementErrors, sections.Warnings
+	if failed["runtimes"] || failed["profiles"] {
+		// A section that does not decode cannot be checked: fail closed.
+		for _, sec := range []string{"profiles", "runtimes"} {
+			if failed[sec] && !slices.Contains(snap.PlacementErrors, sec) {
+				snap.PlacementErrors = append(slices.Clone(snap.PlacementErrors), sec)
+			}
+		}
+		sort.Strings(snap.PlacementErrors)
 	}
 }
 
@@ -1369,6 +1395,8 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 	snap.HubName = k.String("server.hub.hub_name")
 	snap.ImageRegistry = k.String("image_registry")
 	snap.MonitoringDashboardURL = k.String(config.MonitoringDashboardURLKey)
+	snap.ContentURL = k.String(config.ContentURLKey)
+	snap.ContentURLAllowSameSite = k.Bool(config.ContentURLAllowSameSiteKey)
 
 	// GitHub App
 	snap.GitHubAppID = k.Int64("server.github_app.app_id")
@@ -1467,6 +1495,10 @@ func BuildLayer1SnapshotFromFile(gc *config.GlobalConfig) Layer1Snapshot {
 		// Applied live in file mode too, so a settings.yaml edit followed
 		// by a reload changes the Health page link without a restart.
 		MonitoringDashboardURL: gc.Hub.MonitoringDashboardURL,
+		// Applied live in file mode too, like the monitoring link.
+		ContentURL: gc.Hub.ContentURL,
+		// Applied live with the content host it governs.
+		ContentURLAllowSameSite: gc.Hub.ContentURLAllowSameSite,
 	}
 
 	if gc.TelemetryConfig != nil {
@@ -1610,6 +1642,25 @@ func (a *settingsApplyState) recordLocked(snap Layer1Snapshot) {
 		a.lastSeq = snap.Seq
 	} else if snap.Revision == a.lastRevision && snap.Seq > a.lastSeq {
 		a.lastSeq = snap.Seq
+	}
+}
+
+// UpdateSettingsOverlay applies snap's runtimes, profiles and harness
+// configs (nil: no change) and their Kubernetes placement findings to
+// overlay under one lock (config.SettingsOverlay.UpdateWithPlacementFindings),
+// and logs the findings when they change. ApplySnapshot and the co-located
+// Runtime Broker's overlay install both use it, so a snapshot's findings are
+// recorded the same way from the first dispatch on.
+func UpdateSettingsOverlay(overlay *config.SettingsOverlay, snap Layer1Snapshot) {
+	if !overlay.UpdateWithPlacementFindings(snap.Runtimes, snap.Profiles, snap.HarnessConfigs, snap.PlacementErrors, snap.PlacementWarnings) {
+		return
+	}
+	for _, w := range snap.PlacementWarnings {
+		slog.Warn("Stored runtimes and profiles: " + w)
+	}
+	if len(snap.PlacementErrors) > 0 {
+		slog.Error("Stored runtimes and profiles have invalid Kubernetes placement; the co-located Runtime Broker refuses Kubernetes starts until they are fixed",
+			"paths", snap.PlacementErrors)
 	}
 }
 
@@ -1871,6 +1922,25 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 		applied = append(applied, "monitoring_dashboard_url")
 	}
 
+	// Content host: written unconditionally so that clearing the key ends
+	// the confinement and shareUrl. The guard, the view CSP and shareUrl
+	// read it on every request through HubEndpoints().Content, which
+	// ignores (and logs once) a value that is invalid or on the hub's own
+	// host name (contentURLInEffect).
+	// The same-site override is stored with it in one pointer, so a change
+	// of either takes effect together (contentURLInEffect).
+	// The parsed content host and the classification are derived here, once
+	// per apply (newContentURLLiveState), so no request parses either URL.
+	prevContent := s.contentURLLiveState()
+	nextContent := newContentURLLiveState(snap.ContentURL, snap.ContentURLAllowSameSite, hubEndpointsFromConfig(s.config).Public, s.config.AgentEndpoint)
+	if prevContent.URL != nextContent.URL {
+		applied = append(applied, "content_url")
+	}
+	if prevContent.AllowSameSite != nextContent.AllowSameSite {
+		applied = append(applied, "content_url_allow_same_site")
+	}
+	s.contentURLLive.Store(nextContent)
+
 	// image_registry is not applied here: every hub read resolves it from
 	// the operational settings when it needs it (hubScopeImageRegistry,
 	// dispatchImageRegistryFor; ptone/scion#3916), and the co-located
@@ -1988,9 +2058,21 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 	if snap.FromOperationalSettings {
 		feedImageRegistryOverlay(s.GetOperationalSettings())
 	}
-	if snap.Runtimes != nil || snap.Profiles != nil || snap.HarnessConfigs != nil {
+	// image_tag (ptone/scion#6625): log the hub-scope value and every
+	// profile value, with their sources, when a save, an experiment toggle
+	// or another replica's change moved any of them. Nothing is logged
+	// before the startup line (LogImageTag).
+	s.logImageTagIfChanged()
+	// The placement findings are recorded with the maps under one lock,
+	// and for every DB-backed snapshot even when no map changed: a stored
+	// runtimes document that does not decode leaves the runtimes map nil
+	// but is still a finding.
+	mapsChanged := snap.Runtimes != nil || snap.Profiles != nil || snap.HarnessConfigs != nil
+	if overlay := config.GetGlobalSettingsOverlay(); overlay != nil && (mapsChanged || snap.FromOperationalSettings) {
+		UpdateSettingsOverlay(overlay, snap)
+	}
+	if mapsChanged {
 		if overlay := config.GetGlobalSettingsOverlay(); overlay != nil {
-			overlay.Update(snap.Runtimes, snap.Profiles, snap.HarnessConfigs)
 			// Recount the built-in profile references the overlay retains
 			// (ptone/scion#5113); never blocks.
 			s.triggerProfileReferences()
@@ -2088,6 +2170,9 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 		"oauth",
 		"secrets.backend",
 	}
+
+	// hub.lifecycle_events is read on every apply (WP1).
+	s.reconcileLifecycleEvents(context.Background())
 
 	return map[string]interface{}{
 		"applied":          applied,
@@ -2519,6 +2604,10 @@ const DefaultAttachmentDeliveryMaxBytes int64 = 32 << 20
 // messaging.attachment_inbox_retention_days (ptone/scion#4596).
 const DefaultAttachmentInboxRetentionDays = 7
 
+// DefaultFailedMessageRetentionDays is the compiled default of
+// messaging.failed_message_retention_days.
+const DefaultFailedMessageRetentionDays = 7
+
 // messagingSection returns the cached messaging section, and false when it
 // is absent or unreadable.
 func (o *OperationalSettings) messagingSection() (opsettings.MessagingSettings, bool) {
@@ -2561,6 +2650,20 @@ func (o *OperationalSettings) AttachmentInboxRetentionDays() int {
 		return DefaultAttachmentInboxRetentionDays
 	}
 	return *ms.AttachmentInboxRetentionDays
+}
+
+// FailedMessageRetentionDays returns how many days a failed message to an
+// agent is kept before the failed-message purge deletes it. The compiled
+// default applies when the section or field is absent or unreadable, or
+// the value is below 1.
+//
+// Hot-reloadable: reads from the DB-backed cache.
+func (o *OperationalSettings) FailedMessageRetentionDays() int {
+	ms, ok := o.messagingSection()
+	if !ok || ms.FailedMessageRetentionDays == nil || *ms.FailedMessageRetentionDays < 1 {
+		return DefaultFailedMessageRetentionDays
+	}
+	return *ms.FailedMessageRetentionDays
 }
 
 // ChatRetention returns the resolved chat retention settings (the

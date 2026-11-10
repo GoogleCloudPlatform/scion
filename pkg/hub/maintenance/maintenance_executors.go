@@ -35,6 +35,7 @@ import (
 	cloudbuildpb "cloud.google.com/go/cloudbuild/apiv1/v2/cloudbuildpb"
 	gcstorage "cloud.google.com/go/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/rebuildpreflight"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/unitdrift"
 	"github.com/GoogleCloudPlatform/scion/pkg/preflight"
 	scionruntime "github.com/GoogleCloudPlatform/scion/pkg/runtime"
@@ -54,6 +55,30 @@ type MaintenanceExecutor interface {
 	Run(ctx context.Context, logger io.Writer, params map[string]string) error
 }
 
+// ResultReporter is an optional MaintenanceExecutor interface: an executor
+// that records a structured result for its run. The hub calls RunResult
+// once Run has returned (or panicked) and stores it as the run's Result,
+// with the run's error added under "error" (rebuildpreflight.MergeFinal).
+// RunResult returns a copy and never sets "error" itself.
+type ResultReporter interface {
+	RunResult() map[string]any
+}
+
+// Checkpointer is an optional MaintenanceExecutor interface: an executor
+// that writes its run's Result while it runs. The hub hands it the
+// checkpoint function before Run. Run, the checkpoint and RunResult all run
+// in the one goroutine that runs the operation, so no lock is needed.
+type Checkpointer interface {
+	SetCheckpoint(func(result map[string]any) error)
+}
+
+// ForceGrantee is an optional MaintenanceExecutor interface: an executor
+// that accepts a force grant. The hub hands the grant over directly, never
+// through the request parameters, and only when the handler built one.
+type ForceGrantee interface {
+	SetForceGrant(*rebuildpreflight.ForceGrant)
+}
+
 // HubSettingSectionUpdateAvailable is the hub_settings section key used to
 // store the latest detected release update for the admin UI.
 const HubSettingSectionUpdateAvailable = "system.update_available"
@@ -62,19 +87,26 @@ const HubSettingSectionUpdateAvailable = "system.update_available"
 // last systemd unit check of Rebuild from git (UnitDriftStatus).
 const HubSettingSectionUnitDrift = "system.unit_drift"
 
-// SecretMigrationExecutor migrates hub-scoped secrets from the legacy fixed "hub" scope ID
-// to the per-instance hub ID namespace in GCP Secret Manager.
+// SecretMigrationExecutor moves secrets whose value is stored in the Hub
+// database into GCP Secret Manager (secret.MigrateLocalToGCP): each value
+// is decoded through the local backend's decode path, written, and read
+// back before the row is switched to its Secret Manager reference. A run
+// that leaves any secret unverified returns an error, so the migration is
+// not marked complete and can be run again.
 type SecretMigrationExecutor struct {
 	store         store.Store
 	secretBackend secret.SecretBackend
+	cipher        *secret.ValueCipher
 }
 
 // NewSecretMigrationExecutor returns a SecretMigrationExecutor that reads
-// secrets from s and migrates them in backend.
-func NewSecretMigrationExecutor(s store.Store, backend secret.SecretBackend) *SecretMigrationExecutor {
+// secrets from s, decodes their stored values with cipher (the Hub's
+// local value cipher) and migrates them into backend.
+func NewSecretMigrationExecutor(s store.Store, backend secret.SecretBackend, cipher *secret.ValueCipher) *SecretMigrationExecutor {
 	return &SecretMigrationExecutor{
 		store:         s,
 		secretBackend: backend,
+		cipher:        cipher,
 	}
 }
 
@@ -93,81 +125,8 @@ func (e *SecretMigrationExecutor) Run(ctx context.Context, logger io.Writer, par
 	if !ok {
 		return fmt.Errorf("secret migration requires GCP Secret Manager backend; current backend is not GCP SM")
 	}
-
-	// List all secrets from the database (no scope filter = all secrets).
-	allSecrets, err := e.store.ListSecrets(ctx, store.SecretFilter{})
-	if err != nil {
-		return fmt.Errorf("failed to list secrets: %w", err)
-	}
-
-	if len(allSecrets) == 0 {
-		_, _ = fmt.Fprintln(logger, "No secrets found to migrate.")
-		return nil
-	}
-
-	_, _ = fmt.Fprintf(logger, "Found %d secret(s) to process.\n", len(allSecrets))
-	if dryRun {
-		_, _ = fmt.Fprintln(logger, "DRY RUN: No changes will be made.")
-	}
-
-	migrated := 0
-	skipped := 0
-
-	for _, s := range allSecrets {
-		// Skip secrets that already have a GCP SM reference.
-		if s.SecretRef != "" {
-			_, _ = fmt.Fprintf(logger, "  SKIP  %s (scope: %s/%s) - already has ref: %s\n", s.Key, s.Scope, s.ScopeID, s.SecretRef)
-			skipped++
-			continue
-		}
-
-		if dryRun {
-			_, _ = fmt.Fprintf(logger, "  WOULD MIGRATE  %s (scope: %s/%s, type: %s)\n", s.Key, s.Scope, s.ScopeID, s.SecretType)
-			migrated++
-			continue
-		}
-
-		// Read value from the database.
-		value, err := e.store.GetSecretValue(ctx, s.Key, s.Scope, s.ScopeID)
-		if err != nil {
-			_, _ = fmt.Fprintf(logger, "  WARN  %s (scope: %s/%s) - failed to get value: %v\n", s.Key, s.Scope, s.ScopeID, err)
-			skipped++
-			continue
-		}
-
-		// Force-migrate: read the value from the existing GCP SM reference if present.
-		// (This path is only reached for secrets without a ref, so no force logic needed here —
-		// the CLI --force flag handles re-migration of already-migrated secrets.)
-
-		input := &secret.SetSecretInput{
-			Name:        s.Key,
-			Value:       value,
-			SecretType:  s.SecretType,
-			Target:      s.Target,
-			Scope:       s.Scope,
-			ScopeID:     s.ScopeID,
-			Description: s.Description,
-			CreatedBy:   s.CreatedBy,
-			UpdatedBy:   s.UpdatedBy,
-		}
-
-		if _, _, err := gcpBackend.Set(ctx, input); err != nil {
-			_, _ = fmt.Fprintf(logger, "  ERROR  %s (scope: %s/%s) - %v\n", s.Key, s.Scope, s.ScopeID, err)
-			skipped++
-			continue
-		}
-
-		_, _ = fmt.Fprintf(logger, "  MIGRATED  %s (scope: %s/%s, type: %s)\n", s.Key, s.Scope, s.ScopeID, s.SecretType)
-		migrated++
-	}
-
-	status := "complete"
-	if dryRun {
-		status = "dry run complete"
-	}
-	_, _ = fmt.Fprintf(logger, "\nMigration %s: %d migrated, %d skipped\n", status, migrated, skipped)
-
-	return nil
+	_, err := secret.MigrateLocalToGCP(ctx, e.store, e.cipher, gcpBackend, dryRun, logger)
+	return err
 }
 
 // ResultJSON returns the migration result as a JSON string.
@@ -437,6 +396,11 @@ func (e *RebuildServerExecutor) RunWithBeforeRestart(ctx context.Context, logger
 		"repo_path", repoPath, "branch", branch,
 		"installer", e.installer.Name(), "service_name", e.serviceName)
 
+	// Refuse a branch git would not accept before anything runs (#6987).
+	if err := validateBranchName(ctx, repoPath, branch); err != nil {
+		return err
+	}
+
 	// ── Preflight: before anything is fetched or built ──────────────────
 	_, _ = fmt.Fprintf(logger, "==> Preflight (installer: %s)\n", e.installer.Name())
 	preCtx, cancelPre := context.WithTimeout(ctx, e.preflightTimeout)
@@ -455,7 +419,9 @@ func (e *RebuildServerExecutor) RunWithBeforeRestart(ctx context.Context, logger
 
 	// ── Update the checkout ─────────────────────────────────────────────
 	plan := rebuildPlan{repoPath: repoPath, branch: branch}
-	if branch == "" {
+	if branch != "" {
+		plan.endOfOptions = gitSupportsEndOfOptions(ctx, repoPath)
+	} else {
 		// Determine the current branch to reset against its remote tracking ref.
 		out, err := gitOutput(ctx, repoPath, "rev-parse", "--abbrev-ref", "HEAD")
 		if err != nil {
@@ -642,6 +608,7 @@ type rebuildPlan struct {
 	repoPath      string
 	branch        string // configured or requested branch; "" = currentBranch
 	currentBranch string // the checkout's branch, when branch is ""
+	endOfOptions  bool   // pass --end-of-options before branch (git >= 2.24)
 	bin           string // build output (rebuildBuild)
 	ldflags       string // -ldflags value (rebuildBuild)
 }
@@ -657,8 +624,8 @@ func runRebuildSteps(ctx context.Context, logger io.Writer, phase rebuildPhase, 
 	case rebuildCheckout:
 		steps = append(steps, rebuildStep{"Fetching latest code", "git", []string{"fetch", "origin"}, p.repoPath})
 		if p.branch != "" {
-			steps = append(steps, rebuildStep{"Checking out branch " + p.branch, "git", []string{"checkout", p.branch}, p.repoPath})
-			steps = append(steps, rebuildStep{"Resetting to origin/" + p.branch, "git", []string{"reset", "--hard", "origin/" + p.branch}, p.repoPath})
+			steps = append(steps, rebuildStep{"Checking out branch " + p.branch, "git", branchArgs(p.endOfOptions, p.branch, "checkout"), p.repoPath})
+			steps = append(steps, rebuildStep{"Resetting to origin/" + p.branch, "git", branchArgs(p.endOfOptions, "origin/"+p.branch, "reset", "--hard"), p.repoPath})
 		} else {
 			steps = append(steps, rebuildStep{"Resetting to origin/" + p.currentBranch, "git", []string{"reset", "--hard", "origin/" + p.currentBranch}, p.repoPath})
 		}
@@ -715,13 +682,29 @@ func gitOutput(ctx context.Context, dir string, args ...string) (string, error) 
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		if detail := strings.TrimSpace(stderr.String()); detail != "" {
-			return "", fmt.Errorf("git %s: %s", strings.Join(args, " "), detail)
-		}
-		return "", fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
+		return "", &gitOutputError{args: args, detail: strings.TrimSpace(stderr.String()), err: err}
 	}
 	return strings.TrimSpace(stdout.String()), nil
 }
+
+// gitOutputError is a failed gitOutput run. Its text is unchanged ("git
+// <args>: <stderr>", or the run error when stderr is empty); Unwrap exposes
+// the run error so callers can tell a non-zero exit (*exec.ExitError) from a
+// git that could not start.
+type gitOutputError struct {
+	args   []string
+	detail string
+	err    error
+}
+
+func (e *gitOutputError) Error() string {
+	if e.detail != "" {
+		return fmt.Sprintf("git %s: %s", strings.Join(e.args, " "), e.detail)
+	}
+	return fmt.Sprintf("git %s: %v", strings.Join(e.args, " "), e.err)
+}
+
+func (e *gitOutputError) Unwrap() error { return e.err }
 
 // UnitDriftStatus is the stored result of the last systemd unit check,
 // shown on Admin -> Maintenance. Only "match" and "drift" are stored.
@@ -830,6 +813,11 @@ func (e *RebuildWebExecutor) Run(ctx context.Context, logger io.Writer, params m
 
 	log.Debug("Starting rebuild-web", "repo_path", repoPath, "branch", branch)
 
+	// Refuse a branch git would not accept before anything runs (#6987).
+	if err := validateBranchName(ctx, repoPath, branch); err != nil {
+		return err
+	}
+
 	type step struct {
 		name string
 		cmd  string
@@ -839,8 +827,9 @@ func (e *RebuildWebExecutor) Run(ctx context.Context, logger io.Writer, params m
 	var steps []step
 	steps = append(steps, step{"Fetching latest code", "git", []string{"fetch", "origin"}})
 	if branch != "" {
-		steps = append(steps, step{"Checking out branch " + branch, "git", []string{"checkout", branch}})
-		steps = append(steps, step{"Resetting to origin/" + branch, "git", []string{"reset", "--hard", "origin/" + branch}})
+		endOfOptions := gitSupportsEndOfOptions(ctx, repoPath)
+		steps = append(steps, step{"Checking out branch " + branch, "git", branchArgs(endOfOptions, branch, "checkout")})
+		steps = append(steps, step{"Resetting to origin/" + branch, "git", branchArgs(endOfOptions, "origin/"+branch, "reset", "--hard")})
 	} else {
 		branchCmd := exec.CommandContext(ctx, "git", "rev-parse", "--abbrev-ref", "HEAD")
 		branchCmd.Dir = repoPath

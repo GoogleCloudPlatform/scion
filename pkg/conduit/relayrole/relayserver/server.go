@@ -138,6 +138,9 @@ type Config struct {
 	RecheckInterval time.Duration
 	ReconnectWindow time.Duration
 	LifetimeCap     time.Duration
+	// JitterLifetimeCap is relay.Config.JitterLifetimeCap: the per-session
+	// jitter of LifetimeCap (nil: none; ptone/scion#5245).
+	JitterLifetimeCap func(time.Duration) time.Duration
 	// RequireSelfCheck makes the relay probe its own internal endpoint at
 	// start (HA deployments).
 	RequireSelfCheck bool
@@ -360,7 +363,9 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		ReconnectWindow: cfg.ReconnectWindow,
 		LifetimeCap:     cfg.LifetimeCap,
 		Clock:           cfg.Clock,
-		Logger:          log,
+		// Per-session jitter of the cap (ptone/scion#5245).
+		JitterLifetimeCap: cfg.JitterLifetimeCap,
+		Logger:            log,
 	})
 	if err != nil {
 		_ = s.internal.Close()
@@ -394,7 +399,7 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		removeHook := cfg.Events.AddOnListen(listenReconnectHook(reconnected))
 		keysCtx, cancel := context.WithCancel(ctx)
 		cancelKeys = cancel
-		go followGrantKeys(keysCtx, keys, reconnected, r.NotifyGrantKeysChanged, func() { cancel(); unsubscribeKeys(); removeHook() })
+		go followGrantKeys(keysCtx, log, keys, reconnected, r.NotifyGrantKeysChanged, func() { cancel(); unsubscribeKeys(); removeHook() })
 	}
 	if cfg.StartEvents != nil {
 		cfg.StartEvents()
@@ -550,11 +555,13 @@ func listenReconnectHook(reconnected chan<- struct{}) func() {
 
 // followGrantKeys calls notify (the relay's NotifyGrantKeysChanged) on every
 // grant key change event and on every LISTEN reconnect, until ctx ends or
-// the event channel closes. Targets rate-limit the key fetches a hint
-// triggers.
-func followGrantKeys(ctx context.Context, keys <-chan string, reconnected <-chan struct{}, notify func() int, stop func()) {
+// the event channel closes, and logs each hint with the number of target
+// sessions it was sent to and its trigger (notice or reconnect). Targets
+// rate-limit the key fetches a hint triggers.
+func followGrantKeys(ctx context.Context, log *slog.Logger, keys <-chan string, reconnected <-chan struct{}, notify func() int, stop func()) {
 	defer stop()
 	for {
+		trigger := "notice"
 		select {
 		case <-ctx.Done():
 			return
@@ -563,7 +570,9 @@ func followGrantKeys(ctx context.Context, keys <-chan string, reconnected <-chan
 				return
 			}
 		case <-reconnected:
+			trigger = "reconnect"
 		}
-		notify()
+		n := notify()
+		log.Info("Conduit relay: grant key change hinted to targets", "sessions", n, "trigger", trigger)
 	}
 }

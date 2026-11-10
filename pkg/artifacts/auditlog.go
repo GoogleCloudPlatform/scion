@@ -61,6 +61,9 @@ const (
 	logKeyOwnersChecked   = "owners_checked"
 	logKeyOrphanedCount   = "orphaned_count"
 	logKeyUnorphanedCount = "unorphaned_count"
+	// logKeyNotified is set on a grant entry whose request asked for
+	// notify (Ask for review): whether the subject was told.
+	logKeyNotified = "notified"
 )
 
 // Log outcomes.
@@ -78,6 +81,7 @@ const (
 	logActionVersionCreated   = "version_created"   // pending version appended
 	logActionVersionFinalized = "version_finalized" // version made ready
 	logActionVersionFailed    = "version_failed"    // version could not be recorded or finalized, or was discarded
+	logActionVersionForced    = "version_forced"    // publish version started over open reviews (count only)
 	logActionGrantCreated     = "grant_created"
 	logActionGrantChanged     = "grant_changed"
 	logActionGrantRemoved     = EventGrantRemoved
@@ -100,6 +104,13 @@ const (
 	logActionMove       = "move"
 	logActionShare      = "share"
 )
+
+// logActionReviewEnded is the entry of a caller deleting its own review
+// session row (ptone/scion#6849): the row is kept until the reaper deletes
+// it, at least ReviewSessionRetention after its last beat, so a session
+// that no longer counts as open is logged too. Heartbeats, and a DELETE
+// that finds no row, are not logged.
+const logActionReviewEnded = "review_session_ended"
 
 // Log reasons: why a refusal or a failure happened. Never free text.
 const (
@@ -125,6 +136,17 @@ const (
 	// artifact moved or transferred since its authority was decided
 	// (ErrStewardPrecondition), and answered 404.
 	logReasonStewardPreconditionFailed = "steward_precondition_failed"
+	// logReasonSponsorNoRole: the automatic review grant of a new artifact
+	// (ptone/scion#7134) was skipped because the delegating user holds no
+	// active role that reads in the artifact's home project.
+	logReasonSponsorNoRole = "sponsor_no_role_in_home"
+	// Ask for review (ptone/scion#5145): why a grant's notification was not
+	// sent. The grant itself is not refused. notify_failed is logged after
+	// the grant committed, when the notice could not be written.
+	logReasonNotifyRateLimited  = "notify_rate_limited"
+	logReasonNotifyNotPermitted = "notify_not_permitted"
+	logReasonNotifyUnavailable  = "notify_unavailable"
+	logReasonNotifyFailed       = "notify_failed"
 )
 
 // Log authorities: why the actor was allowed. They are the artifact_event
@@ -133,7 +155,8 @@ const (
 // custodian_project_admin. A review grant given on the review-grant path
 // (design D24) is logged with the authority its event records
 // (reviewGrantAuthority). The maintenance pass logs the event authorities
-// retention and reconciler.
+// retention and reconciler. The automatic review grant of a new artifact
+// (ptone/scion#7134) is logged with authority sponsor_review.
 const (
 	logAuthorityOwner                 = AuthorityOwner
 	logAuthorityAdminGrant            = AuthorityAdminGrant
@@ -182,6 +205,8 @@ type logEntry struct {
 	subjectRef  string
 	permission  string
 	count       int
+	// notified, when set, is logged as logKeyNotified.
+	notified *bool
 }
 
 // logDecision writes e for the request r, as its caller.
@@ -246,6 +271,9 @@ func writeDecision(ctx context.Context, l *slog.Logger, level slog.Level, route,
 	if e.count > 0 {
 		attrs = append(attrs, slog.Int(logKeyCount, e.count))
 	}
+	if e.notified != nil {
+		attrs = append(attrs, slog.Bool(logKeyNotified, *e.notified))
+	}
 	l.LogAttrs(ctx, level, "artifacts: "+e.action, attrs...)
 }
 
@@ -296,11 +324,13 @@ func routeTemplate(r *http.Request) string {
 		return base + "/links"
 	case sub[0] == "links" && len(sub) == 2:
 		return base + "/links/{linkId}"
+	case sub[0] == reviewSessionsSegment && len(sub) == 2:
+		return base + "/" + reviewSessionsSegment + "/{sid}"
 	case sub[0] == "versions" && len(sub) == 1:
 		return base + "/versions"
 	case sub[0] == "versions" && len(sub) == 2:
 		return base + "/versions/{seq}"
-	case sub[0] == "versions" && len(sub) == 3 && (sub[2] == "finalize" || sub[2] == "view"):
+	case sub[0] == "versions" && len(sub) == 3 && (sub[2] == "finalize" || sub[2] == "view" || sub[2] == "archive"):
 		return base + "/versions/{seq}/" + sub[2]
 	case sub[0] == "versions" && len(sub) >= 4 && sub[2] == "files":
 		return base + "/versions/{seq}/files/{path}"
@@ -337,6 +367,12 @@ func (s *Service) adminRefusalReason(ctx context.Context, a *Artifact) string {
 // the caller of r, which acted by authority. A put that changed nothing is
 // not logged, as it records no event.
 func (s *Service) logGrantPut(r *http.Request, a *Artifact, g *Grant, put GrantPut, authority string) {
+	s.logGrantPutNotify(r, a, g, put, authority, nil)
+}
+
+// logGrantPutNotify is logGrantPut for a request that asked for notify:
+// notified, when not nil, is logged as whether the subject was told.
+func (s *Service) logGrantPutNotify(r *http.Request, a *Artifact, g *Grant, put GrantPut, authority string, notified *bool) {
 	var action string
 	switch put {
 	case GrantPutCreated:
@@ -347,7 +383,15 @@ func (s *Service) logGrantPut(r *http.Request, a *Artifact, g *Grant, put GrantP
 		return
 	}
 	s.logAllowed(r, logEntry{action: action, artifact: a, authority: authority,
-		subjectKind: g.SubjectKind, subjectRef: g.SubjectRef, permission: g.Permission})
+		subjectKind: g.SubjectKind, subjectRef: g.SubjectRef, permission: g.Permission, notified: notified})
+}
+
+// logNotifySkipped writes, at WARN, why the notification a grant request
+// asked for was not sent (a logReasonNotify* reason). It names the subject
+// and the permission, never a message or a title.
+func (s *Service) logNotifySkipped(r *http.Request, a *Artifact, reason, subjectRef, permission string) {
+	s.logDecision(r, slog.LevelWarn, logEntry{action: logActionShare, outcome: logOutcomeRefused, reason: reason,
+		artifact: a, subjectKind: SubjectPrincipal, subjectRef: subjectRef, permission: permission})
 }
 
 // grantForLog returns grant grantID of a, read before it is removed so its
@@ -481,7 +525,9 @@ func (s *Service) logWriteRefusal(r *http.Request, a *Artifact) {
 
 // logVersion writes a version of a created or finalized by the caller of
 // r, which writes it with access: as its owner (authority owner) or
-// through a write or review grant (logged as the grant's permission).
+// through a write or review grant (logged as the grant's permission). It
+// also writes the deletion of the caller's review session row of a
+// (seq 0), with the access the caller deleted it with.
 func (s *Service) logVersion(r *http.Request, action string, a *Artifact, seq int, access writeAccess) {
 	e := logEntry{action: action, artifact: a, seq: seq}
 	switch access {

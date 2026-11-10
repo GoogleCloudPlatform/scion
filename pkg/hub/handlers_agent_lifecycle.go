@@ -27,7 +27,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
-	"github.com/GoogleCloudPlatform/scion/pkg/hub/eventstreams"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 )
@@ -104,6 +103,18 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 	// exit-only POST is subject to the same reincarnation-sticky Guard 0b as
 	// a phase report (ptone/scion#2267). Fields the guards never touch
 	// (heartbeat, tool name, task summary, limits, ...) skip the extra read.
+	//
+	// The report descriptor is set first, from the caller's identity (never
+	// from the body), so the restart-window guard below and the store read
+	// the same values. The report is the agent's own: it is subject to the
+	// run check and halted's stickiness, and never halts. ReportRunID is the
+	// run of the token that sent it (the store drops a report of another
+	// run, ptone/scion#4853). Only the agent's own token marks a run-less
+	// report as an agent's: a user or service with update access sends no
+	// run either. statusUpdateIsEmpty ignores all three.
+	status.ReportSource = store.StatusReportSourceAgent
+	status.ReportRunID = presentedAgentTokenRunID(ctx)
+	_, status.ReportAgentToken = identity.(AgentIdentity)
 	if statusUpdateTouchesGuardedFields(status) {
 		agent, err := s.store.GetAgent(ctx, id)
 		if err != nil {
@@ -147,8 +158,14 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 		// Guard 0f applies to the agent's own reports only; a user or
 		// service with update access is not a container of some run.
 		startLaunchGuarded := false
-		if _, isAgent := identity.(AgentIdentity); isAgent {
-			startLaunchGuarded = guardStartLaunchSelfReport(agent, &status, presentedAgentTokenRunID(ctx))
+		restartWindowGuarded := false
+		if status.ReportAgentToken {
+			startLaunchGuarded = guardStartLaunchSelfReport(agent, &status, status.ReportRunID)
+			// Restart window: the store drops these fields on the locked
+			// row (store.RestartPreMint, store.RunlessAgentTokenReport);
+			// dropped here too, so the reservation reconcile below never
+			// acts on a phase the store will not write.
+			restartWindowGuarded = guardRestartWindowReport(agent, &status, status)
 		}
 		// Guarded no-op: when a guard that owns the agent's status (Guard 0c,
 		// a delete in progress or a soft-deleted row; Guard 0b, an in-flight
@@ -180,6 +197,12 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 			writeJSON(w, http.StatusOK, statusUpdateResult{Applied: false, Reason: statusUpdateReasonStartLaunchOtherRun})
 			return
 		}
+		// The same for the restart window: a report the window dropped,
+		// with nothing else to persist, is answered as not applied.
+		if restartWindowGuarded && statusUpdateIsEmpty(status) {
+			writeJSON(w, http.StatusOK, statusUpdateResult{Applied: false, Reason: statusUpdateReasonRestartWindow})
+			return
+		}
 		// Reconcile the max_agents_per_broker reservation against the phase
 		// this self-reported status update will actually persist (post-guard,
 		// since the guard may clear status.Phase on a regression or while
@@ -192,7 +215,7 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 		// as it does for the deletion guard's equivalent window. A report of
 		// another run changes nothing (the store's run check), so it is
 		// skipped here too.
-		if !reportOfOtherRun(presentedAgentTokenRunID(ctx), agent.RunID) {
+		if !reportOfOtherRun(status.ReportRunID, agent.RunID) {
 			s.reconcileBrokerQuotaOnPhaseChange(ctx, agent, oldPhase, status.Phase)
 			s.reconcileProjectQuotaOnPhaseChange(ctx, agent, oldPhase, status.Phase)
 		}
@@ -201,14 +224,17 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 	// A reincarnation that starts after the read above must still win: the
 	// store re-checks Guard 0b on the row it locks (ptone/scion#2887).
 	status.GuardReincarnation = true
-	// The report is the agent's own (set here, never from the body): it is
-	// subject to the run check and halted's stickiness, and never halts.
-	status.ReportSource = store.StatusReportSourceAgent
-	// The run of the token that sent this report: the store drops a report
-	// of another run (ptone/scion#4853).
-	status.ReportRunID = presentedAgentTokenRunID(ctx)
 	if err := s.store.UpdateAgentStatus(ctx, id, status); err != nil {
 		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	// A heartbeat-only report writes only last_seen, which no status event
+	// carries, so it publishes nothing and skips the re-read
+	// (ptone/scion#5233). Freshness reaches clients with the next real
+	// change, a resync, or the agent list's own refresh.
+	if statusUpdateIsHeartbeatOnly(status) {
+		writeJSON(w, http.StatusOK, statusUpdateResult{Applied: true})
 		return
 	}
 
@@ -217,13 +243,7 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 	// and a late report from its container must not resurrect it in clients.
 	if agent, err := s.store.GetAgent(ctx, id); err == nil {
 		if agent.DeletedAt.IsZero() {
-			pubCtx := ctx
-			if statusUpdateIsHeartbeatOnly(status) {
-				// Counted as trigger=heartbeat (ptone/scion#5228); the
-				// publish itself is unchanged.
-				pubCtx = eventstreams.WithHeartbeatTrigger(ctx)
-			}
-			s.events.PublishAgentStatus(pubCtx, agent)
+			s.events.PublishAgentStatus(ctx, agent)
 		}
 	} else {
 		s.agentLifecycleLog.Warn("Failed to fetch agent for status event", "agent_id", id, "error", err)
@@ -245,6 +265,11 @@ const (
 	// restart launch is active and the report's agent token names no run,
 	// or another run than the one being launched (Guard 0f).
 	statusUpdateReasonStartLaunchOtherRun = "start_launch_other_run"
+	// statusUpdateReasonRestartWindow: the report falls in the restart
+	// window (store.RestartPreMint, store.RunlessAgentTokenReport): it is of
+	// the run being replaced, or an agent token naming no run on a row with
+	// a recorded run.
+	statusUpdateReasonRestartWindow = "restart_window"
 )
 
 // statusGuardNoopReason returns the statusUpdateResult.Reason for the guard
@@ -288,10 +313,10 @@ func statusUpdateTouchesGuardedFields(su store.AgentStatusUpdate) bool {
 // POST never sets (ClearExit, ClearMessageIf, ClearTerminalRemnants):
 // erring towards "not empty" only means the store write runs.
 // The exceptions are the preconditions IfPhase, IfRunID, StartWrite,
-// GuardReincarnation, ReportSource, ReportRunID and Restore, and the output
+// GuardReincarnation, ReportSource, ReportRunID, ReportAgentToken and Restore, and the output
 // Result: they only condition the write (StartWrite selects the delete
 // guard; GuardReincarnation turns on the store's reincarnation guard;
-// ReportSource and ReportRunID select the report rules; Restore only
+// ReportSource, ReportRunID and ReportAgentToken select the report rules; Restore only
 // qualifies a Phase) or report on it,
 // and persist nothing themselves, so they deliberately do not count.
 // TestStatusUpdateIsEmpty_EveryFieldCounts catches a field missing here.
@@ -306,8 +331,7 @@ func statusUpdateIsEmpty(su store.AgentStatusUpdate) bool {
 
 // statusUpdateIsHeartbeatOnly reports whether su carries the heartbeat flag
 // and nothing else statusUpdateIsEmpty counts: the agent's periodic
-// heartbeat report. Its status event counts as trigger=heartbeat on
-// scion.hub.events.published (ptone/scion#5228).
+// heartbeat report. It publishes no status event (ptone/scion#5233).
 func statusUpdateIsHeartbeatOnly(su store.AgentStatusUpdate) bool {
 	if !su.Heartbeat {
 		return false
@@ -441,6 +465,23 @@ func guardAgentPhaseTransition(agent *store.Agent, status *store.AgentStatusUpda
 			status.Phase = string(state.PhaseRunning)
 		}
 	}
+}
+
+// guardRestartWindowReport drops status's Phase, Activity, ExitCode,
+// ExitReason and Message when the report (described by report: its source,
+// agent-token flag and run) falls in the restart window on agent's
+// snapshot: a report of the current run, or of none, while a restart has
+// not yet recorded its new run (store.RestartPreMint), or a run-less agent
+// token against a row with a minted run (store.RunlessAgentTokenReport).
+// It mirrors the store's check on the locked row, which stays
+// authoritative, and reports whether it dropped the fields.
+func guardRestartWindowReport(agent *store.Agent, status *store.AgentStatusUpdate, report store.AgentStatusUpdate) bool {
+	preMint := store.RestartPreMint(agent.StartClaimID != "", agent.StartClaimKind, agent.RunID, agent.RunIDUpdatedAt, agent.StartClaimAt)
+	if (preMint && store.RestartPreMintReport(report, agent.RunID)) || store.RunlessAgentTokenReport(report, agent.RunIDUpdatedAt) {
+		store.DropReportedStatus(status)
+		return true
+	}
+	return false
 }
 
 // guardStartLaunchSelfReport is Guard 0f (design wave 3 D-e, there named
@@ -589,8 +630,9 @@ func (s *Server) suspendAgent(ctx context.Context, agent *store.Agent) error {
 	s.revokeSuspendedCredentials(ctx, agent.ID)
 	// The agent's delegation grants end with the suspension, best effort:
 	// exchange and use already deny a suspended agent
-	// (.design/agent-delegation.md §16.3).
-	s.revokeAgentDelegationGrantsBestEffort(ctx, store.AgentDelegationGrantFilter{AgentID: agent.ID}, revokeReasonAgentSuspended)
+	// (.design/agent-delegation.md §16.3). A newer run started since the
+	// status write keeps its own grants (ptone/scion#6403).
+	s.revokeSuspendedRunDelegationGrantsBestEffort(ctx, agent.ID, stopRunID)
 
 	agent.Phase = newPhase
 	agent.ContainerStatus = "stopped"
@@ -606,16 +648,27 @@ func (s *Server) suspendAgent(ctx context.Context, agent *store.Agent) error {
 }
 
 // revokeSuspendedCredentials revokes every credential of a suspended agent
-// and audits it (best-effort, Phase 1H).
+// (best-effort, Phase 1H). The agent_credential_revoke mutation audit is
+// recorded only after the revoke succeeds: a failed revoke is logged and
+// leaves no record claiming the credentials were revoked (ptone/scion#2403).
 func (s *Server) revokeSuspendedCredentials(ctx context.Context, agentID string) {
 	if _, err := s.store.RevokeAgentCredentialsByAgent(ctx, agentID, "system", "agent_suspended"); err != nil {
 		slog.Warn("Failed to revoke agent credentials on suspend", "agent_id", agentID, "error", err)
+		return
 	}
-	s.emitMutationAudit(ctx, &store.MutationAuditRecord{
+	record := &store.MutationAuditRecord{
 		MutationType: "agent_credential_revoke",
 		TargetType:   "agent_credential",
 		TargetID:     agentID,
-	})
+	}
+	auditActorFromContext(ctx).ApplyActor(record)
+	if record.ActorPrincipalKind == "" {
+		// The scheduler's auto-suspend runs with no request principal; the
+		// record needs an actor, as for a hub-initiated mint.
+		record.ActorPrincipalKind = mintAuditSystemActorKind
+		record.ActorPrincipalID = mintAuditSystemActorID
+	}
+	s.emitMutationAudit(ctx, record)
 }
 
 // recordRunIntent sets the agent's run intent in the store and mirrors the
@@ -1087,6 +1140,9 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 				slog.Info("Restart: agent not running on broker, proceeding with start",
 					"agent_id", id, "error", stopErr)
 			}
+			// The stop leg is confirmed: close the old run's lifecycle
+			// segment before the start leg mints the next run (WP1 r5 B1).
+			s.recordRestartStopLeg(ctx, agent.ID, agent.RunID)
 			// The dying container's own status report (phase stopped)
 			// may have released the slot during the stop leg; the restart
 			// held it throughout, so put it back without the cap check.
@@ -1520,7 +1576,7 @@ func restartStoppedRecordable(runID string) bool {
 
 func (s *Server) recordRestartStopped(ctx context.Context, id, runID string) bool {
 	zero := 0
-	recorded, err := s.recordStopStatus(ctx, id, runID, "restart", store.AgentStatusUpdate{
+	recorded, err := s.recordStopStatus(lifecycleRestartFailed(ctx), id, runID, "restart", store.AgentStatusUpdate{
 		Phase:           string(state.PhaseStopped),
 		ContainerStatus: "stopped",
 		ExitCode:        &zero,

@@ -496,6 +496,14 @@ func (s *Server) handleAgentMessagesStream(w http.ResponseWriter, r *http.Reques
 		Forbidden(w)
 		return
 	}
+	// A membership change of the caller re-checks the stream for every
+	// credential, sessions included (ptone/scion#7494). Only the caller's
+	// own per-user subject is subscribed, and it is subscribed BEFORE the
+	// authorization below: a change published while the stream is being set
+	// up is queued and re-checked when the loop starts, instead of being
+	// missed. The deferred unsubscribe releases it on every return.
+	membershipCh, unsubscribeMembership := subscribeMembershipChanged(ep, user.ID())
+	defer unsubscribeMembership()
 
 	agent, err := s.store.GetAgent(ctx, agentID)
 	if err != nil {
@@ -513,6 +521,9 @@ func (s *Server) handleAgentMessagesStream(w http.ResponseWriter, r *http.Reques
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Access denied", nil)
 			return
 		}
+	}
+	if streamAuthorizedHook != nil {
+		streamAuthorizedHook(streamKindAgentMessages)
 	}
 
 	// With the conversation setting on, REST's default path (no thread_id,
@@ -556,14 +567,17 @@ func (s *Server) handleAgentMessagesStream(w http.ResponseWriter, r *http.Reques
 		slog.Debug("Failed to clear write deadline for messages stream", "error", err)
 	}
 
+	// Install the message subscription before flushing headers, as the web
+	// events stream does: a client that publishes as soon as it sees the
+	// stream open must not race the subscribe.
+	ch, unsubscribe := ep.Subscribe("agent." + agent.ID + ".message")
+	defer unsubscribe()
+
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
 	flusher.Flush()
-
-	ch, unsubscribe := ep.Subscribe("agent." + agent.ID + ".message")
-	defer unsubscribe()
 
 	// Callers holding agent.attach on the agent see all messages; others
 	// only see messages where they are a participant.
@@ -586,10 +600,46 @@ func (s *Server) handleAgentMessagesStream(w http.ResponseWriter, r *http.Reques
 	timeout := time.NewTimer(10 * time.Minute)
 	defer timeout.Stop()
 
+	// recheckMembership handles one membership-changed event; it reports
+	// whether the stream must end.
+	recheckMembership := func(mevt Event, ok bool) bool {
+		if !ok {
+			return true
+		}
+		if !membershipChangedNames(mevt, userID) {
+			return false
+		}
+		if !s.streamTokenStillAuthorized(ctx, res, recheckAction, recheckPermission) ||
+			!s.agentMessagesStreamStillAuthorized(ctx, user, agent.ID, fullHistory.Allowed) {
+			endStreamForCredential(ctx, w, flusher)
+			return true
+		}
+		return false
+	}
+	// drainMembership handles every membership-changed event already
+	// queued, without blocking, before a message is written: a membership
+	// change published before the message is re-checked first, rather than
+	// left to select's random choice among ready cases.
+	drainMembership := func() bool {
+		for {
+			select {
+			case mevt, ok := <-membershipCh:
+				if recheckMembership(mevt, ok) {
+					return true
+				}
+			default:
+				return false
+			}
+		}
+	}
+
 	for {
 		select {
 		case evt, ok := <-ch:
 			if !ok {
+				return
+			}
+			if drainMembership() {
 				return
 			}
 			if filterStream || conv.enabled {
@@ -613,6 +663,10 @@ func (s *Server) handleAgentMessagesStream(w http.ResponseWriter, r *http.Reques
 		case <-recheck:
 			if !s.streamTokenStillAuthorized(ctx, res, recheckAction, recheckPermission) {
 				endStreamForCredential(ctx, w, flusher)
+				return
+			}
+		case mevt, ok := <-membershipCh:
+			if recheckMembership(mevt, ok) {
 				return
 			}
 		case <-timeout.C:
@@ -651,4 +705,22 @@ func (c *agentStreamConversation) includes(msgConvID string, participant bool) b
 		c.id = id
 	}
 	return c.id != "" && msgConvID == c.id
+}
+
+// agentMessagesStreamStillAuthorized re-runs the check that admitted an
+// agent messages stream, after a membership change of its caller
+// (ptone/scion#7494): agent.attach for a full-history stream, agent.read
+// otherwise, on the agent as stored now. A lookup error fails the check.
+func (s *Server) agentMessagesStreamStillAuthorized(ctx context.Context, user UserIdentity, agentID string, fullHistory bool) bool {
+	if s.authzService == nil || s.store == nil {
+		return false
+	}
+	agent, err := s.store.GetAgent(ctx, agentID)
+	if err != nil || agent == nil {
+		return false
+	}
+	if fullHistory {
+		return s.agentFullHistoryDecision(ctx, user, agent).Allowed
+	}
+	return s.authzService.CheckAccess(ctx, user, agentResource(agent), ActionRead).Allowed
 }

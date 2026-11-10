@@ -31,6 +31,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs/provisioner"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -345,18 +347,16 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 				// later dispatches are built from this row.
 			default:
 				// On a shared backend the workspace leaf is created here
-				// if missing (the same O_NOFOLLOW EnsureLeaf the brokers
-				// use), so the co-located broker given this path finds
-				// it. The hub used to create its own copy at project
-				// create.
+				// if missing, through the layout authority's Provisioner
+				// (the same leaf contract the brokers use), so the
+				// co-located broker given this path finds it. The hub
+				// used to create its own copy at project create.
 				if resolved.Backend.Shared() {
-					root, openErr := resolved.Open(true)
-					if openErr != nil {
+					if _, leafErr := (provisioner.Provisioner{}).EnsureLeaf(resolved); leafErr != nil {
 						s.projectsLogger().Warn("failed to create the project workspace on shared storage",
-							"project_id", project.ID, "error", openErr)
+							"project_id", project.ID, "error", leafErr)
 						return fmt.Errorf("project workspace: %w", errWorkspaceStorageUnavailable)
 					}
-					_ = root.Close()
 				}
 				agent.AppliedConfig.Workspace = resolved.HostPath
 			}
@@ -374,7 +374,34 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 	}
 
 	s.resolveDerivedConfig(ctx, agent, project, resolvedTemplate)
+	if guard := noAuthFallbackGuardFrom(ctx); guard != nil && guard.refused {
+		return errNoAuthFallbackRefused
+	}
 	return nil
+}
+
+// errNoAuthFallbackRefused reports an agent create refused because it would
+// have fallen back to no credentials (NoAuth) while the caller forbade that
+// fallback (withNoAuthFallbackForbidden).
+var errNoAuthFallbackRefused = errors.New("the agent has no credentials for its harness, and the no-auth fallback is not allowed for this create")
+
+type noAuthFallbackGuardKey struct{}
+
+// noAuthFallbackGuard records whether a create carrying it was refused.
+type noAuthFallbackGuard struct{ refused bool }
+
+// withNoAuthFallbackForbidden marks ctx so that an agent create on it never
+// takes the auto no-auth fallback (drop-to-shell with no credentials): the
+// create fails with errNoAuthFallbackRefused before any agent is stored. It
+// is internal to the hub; no request field reaches it. The welcome project's
+// coordinator uses it.
+func withNoAuthFallbackForbidden(ctx context.Context) context.Context {
+	return context.WithValue(ctx, noAuthFallbackGuardKey{}, &noAuthFallbackGuard{})
+}
+
+func noAuthFallbackGuardFrom(ctx context.Context) *noAuthFallbackGuard {
+	g, _ := ctx.Value(noAuthFallbackGuardKey{}).(*noAuthFallbackGuard)
+	return g
 }
 
 // remoteBrokerWithoutProjectPath reports whether brokerID names a remote
@@ -468,13 +495,21 @@ func sharedWorkspaceCloneConfig(project *store.Project) *api.GitCloneConfig {
 func (s *Server) deriveAgentConfig(ctx context.Context, agent *store.Agent, project *store.Project, resolvedTemplate *store.Template) error {
 	// Harness-config resolution: request (already on AppliedConfig.HarnessConfig
 	// from the explicit-inputs setup) > project annotation > template default.
+	// A default that is not a harness-config name is dropped with a warning
+	// naming its tier (dropUnusableDefaultHarnessConfig), so it is never
+	// stored or dispatched. So is an explicit value replayed from an agent's
+	// recorded create inputs (reincarnate) that predates the request check.
+	dropUnusableDefaultHarnessConfig(ctx, agent, harnessConfigTierRecorded)
 	if agent.AppliedConfig.HarnessConfig == "" && project != nil && project.Annotations != nil {
 		agent.AppliedConfig.HarnessConfig = project.Annotations[projectSettingDefaultHarnessConfig]
+		dropUnusableDefaultHarnessConfig(ctx, agent, harnessConfigTierProject)
 	}
 	if agent.AppliedConfig.HarnessConfig == "" {
 		if name := templateHarnessConfigName(resolvedTemplate); name != "" {
 			agent.AppliedConfig.HarnessConfig = name
-			ctx = withTemplateDefaultHarnessConfig(ctx)
+			if !dropUnusableDefaultHarnessConfig(ctx, agent, harnessConfigTierTemplate) {
+				ctx = withTemplateDefaultHarnessConfig(ctx)
+			}
 		}
 	}
 
@@ -482,7 +517,9 @@ func (s *Server) deriveAgentConfig(ctx context.Context, agent *store.Agent, proj
 	// HarnessAuth/Model/ThinkingLevel/Profile the rungs above left empty. Its
 	// own harness-config fill is a no-op here in practice (the rung above
 	// already applied the same annotation), kept for parity with the
-	// non-harness-config fields it also fills.
+	// non-harness-config fields it also fills. It never fills a value that
+	// is not a harness-config name, so a project default the rung above
+	// dropped stays dropped.
 	// A pinned (flat) agent takes no default Runtime Broker Profile: the
 	// project active profile is dropped with a dispatch warning.
 	priorProfile := agent.AppliedConfig.Profile
@@ -526,7 +563,9 @@ func (s *Server) deriveAgentConfig(ctx context.Context, agent *store.Agent, proj
 	// running it before the template rungs above would let the hub default
 	// beat the template for HarnessConfig, Model and ThinkingLevel.
 	if applyHubAgentDefaults(agent.AppliedConfig, s.hubAgentDefaults()) {
-		ctx = withHubDefaultHarnessConfig(ctx)
+		if !dropUnusableDefaultHarnessConfig(ctx, agent, harnessConfigTierHub) {
+			ctx = withHubDefaultHarnessConfig(ctx)
+		}
 	}
 
 	return s.populateAgentConfig(ctx, agent, project, resolvedTemplate)
@@ -682,7 +721,11 @@ func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, p
 	hcFromTemplateDefault := hcName != "" && !hcFromProjectAnnotation && !hcFromHubDefault &&
 		templateDefaultHarnessConfigFromContext(ctx)
 	if hcName == "" && resolvedTemplate != nil {
-		hcName = templateHarnessConfigName(resolvedTemplate)
+		// A template default that is not a harness-config name was dropped
+		// by deriveAgentConfig; it is not looked up here either.
+		if name := templateHarnessConfigName(resolvedTemplate); harnessConfigNameAllowed(name) {
+			hcName = name
+		}
 		hcFromTemplateDefault = hcName != ""
 	}
 	// resolvedHC is the hub harness config resolved below, if any; the
@@ -718,7 +761,13 @@ func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, p
 				hc.Config != nil &&
 				hc.Config.NoAuthBehavior == "drop-to-shell" {
 				hasCreds, err := s.hasRequiredAuthCredentials(ctx, agent, hc.Harness, hc.Config.AuthMeta)
-				if err != nil {
+				if guard := noAuthFallbackGuardFrom(ctx); guard != nil && (err != nil || !hasCreds) {
+					// The caller forbade the fallback: refuse the create
+					// instead of starting the agent with no credentials.
+					guard.refused = true
+					s.agentLifecycleLog.Info("Auto no-auth fallback refused by the caller: no credentials found",
+						"agent_id", agent.ID, "harness", hc.Harness)
+				} else if err != nil {
 					s.agentLifecycleLog.Error("Failed to check auth credentials for fallback", "agent_id", agent.ID, "error", err)
 				} else if !hasCreds {
 					agent.AppliedConfig.NoAuth = true
@@ -1804,7 +1853,7 @@ func (s *Server) handleExistingAgent(
 		// failed delete, or a deleting row whose lease lapsed, does not hold
 		// the row, so it is removed as before.
 		actor := auditActorFromContext(ctx)
-		n, err := s.store.FinalizeAgentDeletion(ctx, existingAgent.ID, createRowCompensable(), store.DeletionFinalizeHard, store.DeletionFields{},
+		n, err := s.store.FinalizeAgentDeletion(lifecycleCreateRollback(ctx, "env_gather_recreate"), existingAgent.ID, createRowCompensable(), store.DeletionFinalizeHard, store.DeletionFields{},
 			createRowHeldCheck(func(tx store.Store) error {
 				return s.hardDeleteAgentTx(ctx, tx, existingAgent, actor)
 			}))
@@ -2607,6 +2656,9 @@ func agentHasGCPIdentityAssigned(agent *store.Agent) bool {
 // SkippedWhenGCPServiceAccountAssigned are treated as satisfied when the
 // agent's project has at least one verified GCP service account.
 func (s *Server) hasRequiredAuthCredentials(ctx context.Context, agent *store.Agent, harnessType string, authMeta *config.HarnessAuthMetadata) (bool, error) {
+	// One owner material chain verdict for the whole probe: every hasAnyKey
+	// call below decides the agent's chain on it.
+	ctx = withOwnerChainMemo(ctx)
 	// When authMeta defines auth types and no explicit type was selected,
 	// check ALL config-defined auth types and return true if ANY is fully
 	// satisfiable. This prevents the compiled default (api-key) from
@@ -2772,6 +2824,13 @@ func (s *Server) projectHasVerifiedGCPSA(ctx context.Context, projectID string) 
 // read; deliverySelector.probe). Before that (the create-time probe)
 // there is no target to authorize against and the record counts by
 // existence, as the start still authorizes every item before delivery.
+// An owner's user-scope row not shared with progeny counts only when the
+// owner material chain rule would deliver it (start_owner_material_chain.go).
+// An owner's secret shared with progeny, and an ancestor's progeny secret,
+// count only when start delivers them too (ownerChainCheck.allowsSecretRow
+// and sharedChainWithheld).
+// A hub-scope secret counts only if secret.HubSecretDeliverable admits it,
+// at either time, since no other hub-scope secret is ever delivered.
 func (s *Server) hasAnyKey(ctx context.Context, agent *store.Agent, keys []string) (bool, error) {
 	var sel *deliverySelector
 	selReady := false
@@ -2786,6 +2845,9 @@ func (s *Server) hasAnyKey(ctx context.Context, agent *store.Agent, keys []strin
 		}
 		return sel.probe(ctx, kind, record, id, key, scope, scopeID)
 	}
+	// An owner's user row the owner material chain rule withholds at start
+	// does not count as present (decided without a report).
+	ownerRows := newOwnerChainCheck(s.authzService, agent)
 	for _, key := range keys {
 		if agent.AppliedConfig != nil && agent.AppliedConfig.Env != nil {
 			if _, ok := agent.AppliedConfig.Env[key]; ok {
@@ -2797,14 +2859,14 @@ func (s *Server) hasAnyKey(ctx context.Context, agent *store.Agent, keys []strin
 			if err != nil && !errors.Is(err, store.ErrNotFound) {
 				return false, err
 			}
-			if ev != nil {
+			if ev != nil && ownerRows.allowsRow(ctx, ev.AllowProgeny, ownerRowScope(ev.ScopeID, agent.OwnerID)) {
 				return true, nil
 			}
 			sec, err := s.store.GetSecret(ctx, key, "user", agent.OwnerID)
 			if err != nil && !errors.Is(err, store.ErrNotFound) {
 				return false, err
 			}
-			if sec != nil {
+			if sec != nil && ownerRows.allowsSecretRow(ctx, sec.AllowProgeny, ownerRowScope(sec.ScopeID, agent.OwnerID)) {
 				return true, nil
 			}
 		}
@@ -2832,6 +2894,13 @@ func (s *Server) hasAnyKey(ctx context.Context, agent *store.Agent, keys []strin
 			if err != nil && !errors.Is(err, store.ErrNotFound) {
 				return false, err
 			}
+			if sec != nil && sc.scope == store.ScopeHub {
+				meta := secretMetaFromStore(sec)
+				meta.Scope = store.ScopeHub
+				if !secret.HubSecretDeliverable(*meta) {
+					sec = nil
+				}
+			}
 			if sec != nil {
 				ok, err := probe(MaterialKindSecret, materialRecordSecret, sec.ID, sec.Key, sc.scope, sc.scopeID)
 				if err != nil {
@@ -2854,13 +2923,18 @@ func (s *Server) hasAnyKey(ctx context.Context, agent *store.Agent, keys []strin
 			keySet[k] = struct{}{}
 		}
 
-		progenySecrets, err := s.store.ListProgenySecrets(ctx, agent.Ancestry)
-		if err != nil {
-			return false, err
-		}
-		for _, ps := range progenySecrets {
-			if _, ok := keySet[ps.Key]; ok {
-				return true, nil
+		// Start refuses every progeny secret to an agent whose chain is
+		// not recorded or cannot be evaluated (the runtime chain verdict;
+		// sharedChainWithheld), so none of them counts as present then.
+		if !ownerRows.sharedChainWithheld(ctx) {
+			progenySecrets, err := s.store.ListProgenySecrets(ctx, agent.Ancestry)
+			if err != nil {
+				return false, err
+			}
+			for _, ps := range progenySecrets {
+				if _, ok := keySet[ps.Key]; ok {
+					return true, nil
+				}
 			}
 		}
 

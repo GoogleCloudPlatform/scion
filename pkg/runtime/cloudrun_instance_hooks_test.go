@@ -149,7 +149,7 @@ func ciCleanup(rt *CloudRunRuntime) (time.Duration, error) {
 func TestCloudRunInstanceHooks_CheckpointAbort(t *testing.T) {
 	cases := []struct {
 		step           string
-		setup          func(f *fakeInstancesClient, cfg *RunConfig)
+		setup          func(t *testing.T, f *fakeInstancesClient, cfg *RunConfig)
 		wantSteps      []string
 		wantGets       int
 		wantProvisions int
@@ -158,21 +158,21 @@ func TestCloudRunInstanceHooks_CheckpointAbort(t *testing.T) {
 			// Provisioning is counted below: an abort here must not
 			// reach it.
 			step:           CheckpointStepWorkspaceProvision,
-			setup:          func(f *fakeInstancesClient, _ *RunConfig) { f.getErr = notFoundErr() },
+			setup:          func(_ *testing.T, f *fakeInstancesClient, _ *RunConfig) { f.getErr = notFoundErr() },
 			wantSteps:      []string{CheckpointStepWorkspaceProvision},
 			wantGets:       0,
 			wantProvisions: 0,
 		},
 		{
 			step:           CheckpointStepInstanceCreate,
-			setup:          func(f *fakeInstancesClient, _ *RunConfig) { f.getErr = notFoundErr() },
+			setup:          func(_ *testing.T, f *fakeInstancesClient, _ *RunConfig) { f.getErr = notFoundErr() },
 			wantSteps:      []string{CheckpointStepWorkspaceProvision, CheckpointStepInstanceCreate},
 			wantGets:       1,
 			wantProvisions: 1,
 		},
 		{
 			step:           CheckpointStepInstanceStart,
-			setup:          func(f *fakeInstancesClient, _ *RunConfig) { f.getInstance = ciInstance(ciRunA) },
+			setup:          func(t *testing.T, f *fakeInstancesClient, cfg *RunConfig) { f.getInstance = ciComputedInstance(t, cfg) },
 			wantSteps:      []string{CheckpointStepWorkspaceProvision, CheckpointStepInstanceStart},
 			wantGets:       1,
 			wantProvisions: 1,
@@ -188,7 +188,7 @@ func TestCloudRunInstanceHooks_CheckpointAbort(t *testing.T) {
 			}
 			rec := &sandboxHookRecorder{abortAt: tc.step}
 			cfg := ciCfg(ciRunA, rec)
-			tc.setup(fake, &cfg)
+			tc.setup(t, fake, &cfg)
 
 			_, err := rt.Run(context.Background(), cfg)
 			if !errors.Is(err, errTestAbort) {
@@ -241,34 +241,53 @@ func TestCloudRunInstanceHooks_HandleBeforeCreate(t *testing.T) {
 	}
 }
 
-// C5: on the existing-instance path the handle is reported only for this
-// run's own instance; a legacy instance with no run label is started but
-// not reported.
+// C5: on the existing-instance path the handle is reported for this run's
+// own matching instance, which is started. A legacy instance with no run
+// label is not this run's: it is deleted and this run's instance created,
+// so the handle is the created one's.
 func TestCloudRunInstanceHooks_StartHandleOwnRunOnly(t *testing.T) {
-	for _, tc := range []struct {
-		name  string
-		label string
-		want  []api.ResourceHandle
-	}{
-		{"own_run", ciRunA, []api.ResourceHandle{ciHandle(ciRunA)}},
-		{"legacy", "", nil},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			fake, rt := ciSetup(t)
-			fake.getInstance = ciInstance(tc.label)
-			rec := &sandboxHookRecorder{}
+	t.Run("own_run", func(t *testing.T) {
+		fake, rt := ciSetup(t)
+		rec := &sandboxHookRecorder{}
+		cfg := ciCfg(ciRunA, rec)
+		fake.getInstance = ciComputedInstance(t, &cfg)
 
-			if _, err := rt.Run(context.Background(), ciCfg(ciRunA, rec)); err != nil {
-				t.Fatalf("Run: %v", err)
-			}
-			if len(fake.startReqs) != 1 {
-				t.Fatalf("StartInstance called %d times, want 1", len(fake.startReqs))
-			}
-			if got := rec.gotHandles(); !reflect.DeepEqual(got, tc.want) {
-				t.Errorf("handles = %+v, want %+v", got, tc.want)
-			}
-		})
-	}
+		if _, err := rt.Run(context.Background(), cfg); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		if len(fake.startReqs) != 1 || len(fake.createReqs) != 0 {
+			t.Fatalf("start/create = %d/%d, want 1/0", len(fake.startReqs), len(fake.createReqs))
+		}
+		if got, want := rec.gotHandles(), []api.ResourceHandle{ciHandle(ciRunA)}; !reflect.DeepEqual(got, want) {
+			t.Errorf("handles = %+v, want %+v", got, want)
+		}
+	})
+	t.Run("legacy", func(t *testing.T) {
+		fake, rt := ciSetup(t)
+		fake.getSeq = []fakeGetResult{{inst: ciInstance("")}, {inst: ciInstance("")}, ciNotFound()}
+		fake.getErr = notFoundErr()
+		rec := &sandboxHookRecorder{}
+
+		if _, err := rt.Run(context.Background(), ciCfg(ciRunA, rec)); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		if len(fake.startReqs) != 0 || len(fake.deleteReqs) != 1 || len(fake.createReqs) != 1 {
+			t.Fatalf("start/delete/create = %d/%d/%d, want 0/1/1", len(fake.startReqs), len(fake.deleteReqs), len(fake.createReqs))
+		}
+		if got, want := rec.gotHandles(), []api.ResourceHandle{ciHandle(ciRunA)}; !reflect.DeepEqual(got, want) {
+			t.Errorf("handles = %+v, want %+v", got, want)
+		}
+	})
+}
+
+// ciComputedInstance is the instance run A's start computes for cfg (on
+// ciSetup's stub provisioning), named ciInstanceName.
+func ciComputedInstance(t *testing.T, cfg *RunConfig) *runpb.Instance {
+	t.Helper()
+	rt := newFakeCloudRunRuntime(t, &fakeInstancesClient{})
+	inst := computedCloudRunInstance(t, rt, *cfg)
+	inst.Name = ciInstanceName
+	return inst
 }
 
 // An async create whose operation succeeds is observed: its mark is

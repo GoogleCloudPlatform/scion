@@ -105,7 +105,11 @@ var legacyAgentWorkspaces sync.Map
 // project-scoped workspace is never admitted from the legacy tree, nor is
 // another agent's directory. It ends for each agent when that agent is
 // deleted, which removes the legacy directory (ptone/scion#5835); the code
-// path is removed in a later release (ptone/scion#5839).
+// path is removed in a later release (ptone/scion#5839). The admission is
+// the workspace source guard's only: on a local container runtime with the
+// nfs backend, Start then refuses such an agent-scoped agent, whose
+// workspace is not its directory on the share
+// (checkLocalRuntimeAgentWorkspace).
 func legacyAgentWorkspaceRoot(projectDir, agentName, agentDir string, sharedOrExplicit bool) string {
 	if sharedOrExplicit || agentDir == "" {
 		return ""

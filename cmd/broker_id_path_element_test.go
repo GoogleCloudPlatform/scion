@@ -259,7 +259,7 @@ func TestPersistBrokerHubSettings_BrokerIDPathElement(t *testing.T) {
 			before, err := os.ReadFile(path)
 			require.NoError(t, err)
 			var w bytes.Buffer
-			persistBrokerHubSettings(&w, globalDir, "https://hub.example.com", id, "hub-example-com")
+			persistBrokerHubSettings(&w, globalDir, "https://hub.example.com", id)
 			after, err := os.ReadFile(path)
 			require.NoError(t, err)
 			assert.Equal(t, string(before), string(after), "settings were written for broker ID %q", id)

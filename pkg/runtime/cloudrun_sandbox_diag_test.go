@@ -58,37 +58,6 @@ func watchRegistered(path, name string) (sandboxWatchReg, bool) {
 	return reg, ok
 }
 
-// stopWatchersOnCleanup cancels the exit watchers of each runtime when the
-// test ends and waits up to 10 s for their registrations on statePath to
-// be released, so no watcher outlives the test.
-func stopWatchersOnCleanup(t *testing.T, statePath string, rts ...*CloudRunSandboxRuntime) {
-	t.Helper()
-	t.Cleanup(func() {
-		for _, rt := range rts {
-			rt.watchMu.Lock()
-			for name, cancel := range rt.watchCancels {
-				cancel()
-				delete(rt.watchCancels, name)
-			}
-			rt.watchMu.Unlock()
-		}
-		deadline := time.Now().Add(10 * time.Second)
-		for time.Now().Before(deadline) {
-			held := false
-			sandboxWatchersMu.Lock()
-			for k := range sandboxWatchers {
-				held = held || k.path == statePath
-			}
-			sandboxWatchersMu.Unlock()
-			if !held {
-				return
-			}
-			time.Sleep(10 * time.Millisecond)
-		}
-		t.Errorf("watchers on %s still registered 10 s after cancel", statePath)
-	})
-}
-
 // waitLines returns the sandbox names `wait` was invoked for.
 func waitLines(t *testing.T, waits string) []string {
 	t.Helper()

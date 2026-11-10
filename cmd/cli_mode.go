@@ -38,6 +38,11 @@ func warnRemovedMode(source string) {
 // Uses dot-separated command paths: "notifications.ack", "schedule.list", etc.
 // Every entry — including parent commands — must be listed explicitly;
 // parents are NOT implicitly allowed when a child is listed.
+//
+// Deliberately absent: "runtime-broker.convert" in every mode (--plan,
+// --apply, --status, --rollback). It is human mode only: it acts on this
+// host's Runtime Broker identity, settings and Hub rows, which an agent in
+// a container must not change. cmd/platform_gate.go keeps it off Windows.
 var agentAllowed = map[string]bool{
 	"create":                      true,
 	"delete":                      true,
@@ -144,6 +149,7 @@ var agentAllowed = map[string]bool{
 	"artifact.versions":             true,
 	"artifact.list":                 true,
 	"artifact.view":                 true,
+	"artifact.comments":             true,
 	// artifact share, artifact grants and artifact delete are human-only
 	// and deliberately absent (ptone/scion#4529, ptone/scion#4579): agents
 	// may not share or delete artifacts, or manage their grants.

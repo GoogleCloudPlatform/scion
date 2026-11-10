@@ -427,7 +427,7 @@ alertPolicies:
         handler is configured (not on Cloud Run, and not for the request log
         while Cloud Logging is on); see server-config 'Log delivery
         guarantees'. Check Cloud Logging availability and the metadata
-        server. /healthz cloud_logging reads "degraded: circuit open".
+        server. /healthz cloud_logging starts with "degraded: circuit open".
     severity: WARNING
     metric: "workload.googleapis.com/scion.logging.writer.circuit_open"
     conditionType: THRESHOLD

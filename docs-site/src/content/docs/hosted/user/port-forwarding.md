@@ -146,6 +146,8 @@ To share a page that works whether or not page view is on, build it as one self-
 
 The page cannot load data from the app after it opens, so include everything it needs at build time.
 
+For the Hub-wide content host, a separate origin for untrusted content, see [Content host](/scion/reference/security/#6-content-host). It serves shared artifacts only.
+
 ### Full fidelity: `scion tunnel`
 
 For a multi-file app, an app that talks to its own backend, or a dev server with live reload, use [`scion tunnel`](#tunnels-from-your-machine-scion-tunnel) from your machine. It needs the `scion` CLI and the `hub.conduit` experiment:
@@ -216,7 +218,8 @@ Scion includes an **Auto-Expose** engine that can automatically detect listening
 2. **State Filtering**: It identifies all sockets in the `TCP_LISTEN` state (hex code `0A`), resolving their local IP addresses and port numbers.
 3. **Policy Evaluation**: The scanned ports are filtered against configured minimums, allowlists, or denylists.
 4. **Hub Registration**: Any eligible newly discovered ports are registered with the Hub using the label **`auto-scan`** (allowing operators and users to distinguish them from manually registered ports).
-5. **Reconciliation & Unexposure**: If a port was auto-exposed but the service subsequently stops listening (is no longer found in `procfs` scans), `sciontool` automatically deregisters and unexposes the port from the Hub.
+5. **Reconciliation & Unexposure**: If a port was auto-exposed but the service subsequently stops listening (is no longer found in `procfs` scans), `sciontool` automatically deregisters and unexposes the port from the Hub. `sciontool` fetches the Hub's port list only on its first pass, after it registers or removes a port itself, and after a failed pass. It does not poll the list while nothing changes.
+   - If you unexpose an auto-exposed port (for example with `scion unexpose`) while it is still listening, it stays unexposed until the agent restarts, even if the service stops and listens again.
 6. **System Notifications**: When a port is auto-exposed, the reconciler optionally sends a platform event message to the agent channel with category `system_category: agent:port:forward`, generating a notification. This notification suggests sharing the proxy URL with collaborating users so they can collaborate on the exposed service.
 
 :::note[Manual Exclude]

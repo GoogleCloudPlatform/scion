@@ -35,6 +35,9 @@ var nonLocalHomePaths = map[string]string{
 	"home itself":     ".",
 	"cleans to home":  "a/..",
 	"trailing parent": "a/b/../..",
+	// Stays inside the home once cleaned, but a raw ".." element is
+	// refused, as pkg/agenthome refuses it below a home.
+	"raw parent inside": "a/../b",
 }
 
 // A harness-config whose agent-home path field is not a local relative path
@@ -125,6 +128,51 @@ func TestValidateHarnessHomePathsOnBuiltEntry(t *testing.T) {
 			if err := ValidateHarnessHomePaths(e); err != nil {
 				t.Errorf("%s %q refused: %v", field, val, err)
 			}
+		}
+	}
+}
+
+// IsHomeRelPath accepts a path strictly below a directory and refuses an
+// absolute path, the directory itself and any raw ".." element.
+func TestIsHomeRelPath(t *testing.T) {
+	for _, v := range []string{"skills", ".claude/skills", "./.decl", "a/b/c"} {
+		if !IsHomeRelPath(v) {
+			t.Errorf("IsHomeRelPath(%q) = false, want true", v)
+		}
+	}
+	for _, v := range []string{"", ".", "./", "..", "../x", "a/../b", "a/..", "/abs", "a/b/../../.."} {
+		if IsHomeRelPath(v) {
+			t.Errorf("IsHomeRelPath(%q) = true, want false", v)
+		}
+	}
+}
+
+// IsHomeRelPath and isTemplateContentFileName are one rule: every accept
+// and refuse class gives the same answer through both names.
+func TestIsHomeRelPathIsTemplateContentRule(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		want  bool
+	}{
+		{"agents.md", true},
+		{"prompts/system.md", true},
+		{"./prompts/system.md", true},
+		{"a/b/c.md", true},
+		{"", false},
+		{".", false},
+		{"./", false},
+		{"..", false},
+		{"../outside.md", false},
+		{"a/../b.md", false},
+		{"a/..", false},
+		{"a/b/../../..", false},
+		{"/etc/outside.md", false},
+	} {
+		if got := IsHomeRelPath(tc.value); got != tc.want {
+			t.Errorf("IsHomeRelPath(%q) = %v, want %v", tc.value, got, tc.want)
+		}
+		if got := isTemplateContentFileName(tc.value); got != tc.want {
+			t.Errorf("isTemplateContentFileName(%q) = %v, want %v", tc.value, got, tc.want)
 		}
 	}
 }

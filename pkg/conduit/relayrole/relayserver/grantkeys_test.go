@@ -16,6 +16,7 @@ package relayserver
 
 import (
 	"context"
+	"log/slog"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -59,7 +60,7 @@ func TestFollowGrantKeys(t *testing.T) {
 	stopped := make(chan struct{})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go followGrantKeys(ctx, keys, reconnected, notify, func() { close(stopped) })
+	go followGrantKeys(ctx, slog.New(slog.DiscardHandler), keys, reconnected, notify, func() { close(stopped) })
 
 	wait := func(what string) {
 		t.Helper()
@@ -87,7 +88,7 @@ func TestFollowGrantKeys(t *testing.T) {
 	// A cancelled context stops it too.
 	ctx2, cancel2 := context.WithCancel(context.Background())
 	stopped2 := make(chan struct{})
-	go followGrantKeys(ctx2, make(chan string), make(chan struct{}), notify, func() { close(stopped2) })
+	go followGrantKeys(ctx2, slog.New(slog.DiscardHandler), make(chan string), make(chan struct{}), notify, func() { close(stopped2) })
 	cancel2()
 	select {
 	case <-stopped2:

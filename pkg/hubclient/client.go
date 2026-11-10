@@ -193,6 +193,10 @@ type client struct {
 	testIdentities        *testIdentityService
 	testIdentityDelegs    *testIdentityDelegationService
 	agentDelegations      *agentDelegationService
+
+	// pluginName, when set (WithPluginName), is sent as
+	// X-Scion-Plugin-Name on the broker attachment requests.
+	pluginName string
 }
 
 // New creates a new Hub API client.

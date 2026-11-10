@@ -1,0 +1,5 @@
+leaf        l
+area        a
+area        b   a
+testsupport ts
+testsupport mislabelled

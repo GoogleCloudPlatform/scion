@@ -133,18 +133,49 @@ func (a *AuthzService) newLaunchDeliveryIdentity(ctx context.Context, agentID st
 	return h, nil
 }
 
+// deliveryDecisionTimeout bounds one start or restart delivery decision,
+// which runs on a context detached from the request's cancellation
+// (deliverySelector.decisionContext).
+const deliveryDecisionTimeout = 30 * time.Second
+
+// decisionContext returns the context one delivery decision of s runs on,
+// and its cancel.
+//
+// For a start or restart (PurposeDispatch, PurposeRestart) it is ctx
+// detached from cancellation (context.WithoutCancel keeps ctx's values)
+// with its own bound, deliveryDecisionTimeout. A start or restart selects
+// and delivers its launch material even when the request that began it
+// has ended (only the Warns go quiet), so its authorization decisions must
+// run in full on complete store reads rather than stop at the request's
+// end: the credential is minted and every check is evaluated on its merits,
+// a revoked, suspended or constraint-excluded principal is still refused,
+// and a store fault, or the bound running out, still fails closed with its
+// WARN. Nothing is skipped or defaulted to allow. The request-end refusal
+// of ptone/scion#6012 stays for every request-scoped check, including the
+// availability probe, which keeps ctx.
+func (s *deliverySelector) decisionContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if s.purpose != PurposeDispatch && s.purpose != PurposeRestart {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(context.WithoutCancel(ctx), deliveryDecisionTimeout)
+}
+
 // authorize decides one associated item. It returns an error only when the
-// credential cannot be minted; a denial is (false, nil).
+// credential cannot be minted; a denial is (false, nil). The credential and
+// the decision use s.decisionContext(ctx); whether the request has ended
+// (the quiet Warns below) is read from ctx itself.
 func (s *deliverySelector) authorize(ctx context.Context, kind MaterialKind, record materialRecordKind, id, key, scope, scopeID string) (bool, error) {
 	grant, ok := grantForDeliveryScope(scope)
 	if !ok {
 		return false, nil
 	}
-	if err := s.mint(ctx); err != nil {
+	dctx, cancel := s.decisionContext(ctx)
+	defer cancel()
+	if err := s.mint(dctx); err != nil {
 		return false, err
 	}
 	res := materialDeliveryResource(kind, record, id, key, scope, scopeID, s.agent.ID, grant, s.purpose)
-	d := s.authz.Decide(ctx, deliveryAuthzRequest(s.ident, kind, res))
+	d := s.authz.Decide(dctx, deliveryAuthzRequest(s.ident, kind, res))
 	if !d.Allowed {
 		s.denied++
 		// A launch item the delivery decision refuses is withheld from the
@@ -224,7 +255,8 @@ func envVarDeliveryKind(v store.EnvVar) MaterialKind {
 // as_needed and reserved-target skips, the progeny pass and the error
 // contract are resolveEnvFromStorage's; TZ rows, which buildStartEnv
 // discards, are skipped. A credential that cannot be minted is an error,
-// like a store read error.
+// like a store read error. The owner's user-scope rows not shared with
+// progeny are held to the owner material chain rule, as there.
 func (d *HTTPAgentDispatcher) selectDeliveryEnv(ctx context.Context, sel *deliverySelector, agent *store.Agent) (map[string]string, map[string]bool, error) {
 	result := make(map[string]string)
 	plain := make(map[string]bool)
@@ -232,6 +264,16 @@ func (d *HTTPAgentDispatcher) selectDeliveryEnv(ctx context.Context, sel *delive
 		return result, plain, nil
 	}
 
+	// The owner material chain rule for the owner's rows not shared with
+	// progeny (start_owner_material_chain.go). Its chain lookups, and the
+	// dispatch memo they fill, run on the selection's decision context
+	// (sel.decisionContext), as authorize's decisions do: for a start or
+	// restart they complete after the request has ended, and a lookup
+	// fault still withholds the row. The counts are reported on ctx.
+	gctx, gcancel := sel.decisionContext(ctx)
+	defer gcancel()
+	gate := d.newOwnerMaterialGate(agent)
+	defer gate.flush(ctx, ownerMaterialSiteLaunchEnv)
 	for _, filter := range d.envScopesForDispatch(ctx, agent) {
 		vars, err := d.store.ListEnvVars(ctx, filter)
 		if err != nil {
@@ -250,7 +292,11 @@ func (d *HTTPAgentDispatcher) selectDeliveryEnv(ctx context.Context, sel *delive
 			if v.Key == agentTZEnvKey {
 				continue
 			}
-			if filter.Scope != store.ScopeUser {
+			if filter.Scope == store.ScopeUser {
+				if !gate.allowEnvRow(gctx, filter, v) {
+					continue
+				}
+			} else {
 				allowed, err := sel.authorize(ctx, envVarDeliveryKind(v), materialRecordEnvVar, v.ID, v.Key, filter.Scope, filter.ScopeID)
 				if err != nil {
 					return nil, nil, err
@@ -304,8 +350,13 @@ type secretDeliveryCandidate struct {
 //   - values are fetched only for the kept secrets, by recorded metadata,
 //     after every authorization, and not for a scope the test-admin
 //     restriction withholds. An item whose record is gone since it was
-//     listed (store.ErrNotFound), or whose Secret Manager read fails
-//     (secret.ErrValueAccess), is skipped, as Resolve skips it. Any other
+//     listed (store.ErrNotFound), whose Secret Manager read fails
+//     (secret.ErrValueAccess), or for which the backend returned no
+//     result, is skipped, as Resolve skips it, and returned in skipped
+//     (classes not_found, access and missing) so the caller can warn
+//     that the agent goes without it. An item the test-admin restriction
+//     withholds or the delivery decision refuses is never in skipped:
+//     that is policy, not a read failure. Any other
 //     fetch failure fails the selection, as it fails Resolve: stored
 //     values that cannot be decrypted are reported together as one
 //     *secret.ResolveDecryptError (errors.Is secret.ErrResolveDecrypt),
@@ -321,10 +372,10 @@ type secretDeliveryCandidate struct {
 //     then the highest scope wins per type and target.
 //
 // A list error, a credential that cannot be minted or a fetch failure other
-// than the two skipped above is an error.
-func (d *HTTPAgentDispatcher) selectDeliverySecrets(ctx context.Context, sel *deliverySelector, agent *store.Agent) ([]ResolvedSecret, error) {
+// than the ones skipped above is an error; skipped is then nil.
+func (d *HTTPAgentDispatcher) selectDeliverySecrets(ctx context.Context, sel *deliverySelector, agent *store.Agent) ([]ResolvedSecret, []skippedSecret, error) {
 	if d.secretBackend == nil || agent == nil {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	type scopeEntry struct{ scope, scopeID string }
@@ -340,24 +391,45 @@ func (d *HTTPAgentDispatcher) selectDeliverySecrets(ctx context.Context, sel *de
 		scopes = append(scopes, scopeEntry{store.ScopeUser, agent.OwnerID})
 	}
 
+	// The test-admin scope restriction, evaluated once: the start-time
+	// checks' keep decision and the withholding below use this one result.
+	ta := d.testAdminScopesFor(ctx, agent)
+
 	// The start-time owner-path and progeny checks resolveSecrets applies
 	// through the backend's Resolve. Nil without an authorization service.
-	startOpts := d.startSecretResolveOpts(ctx, agent)
+	// They run on the selection's decision context (sel.decisionContext),
+	// as authorize's decisions do: the owner material chain lookups, the
+	// dispatch memo they fill, the parent ceiling and the progeny decision
+	// complete after the request of a start or restart has ended, and a
+	// fault still withholds the secret. The counts are reported on ctx.
+	gctx, gcancel := sel.decisionContext(ctx)
+	defer gcancel()
+	startOpts, gate := d.startSecretResolveOpts(gctx, agent, &ta)
+	defer gate.flush(ctx, ownerMaterialSiteLaunchSecrets)
 
 	var kept []secretDeliveryCandidate
 	for _, sc := range scopes {
 		metas, err := d.secretBackend.List(ctx, secret.Filter{Scope: sc.scope, ScopeID: sc.scopeID})
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		for _, m := range metas {
 			if m.SecretType == store.SecretTypeInternal {
 				continue
 			}
+			// The same hub-scope rule as the backends' Resolve, applied
+			// before authorization and before any value is read, so an
+			// excluded hub row never shadows a broker-scope row.
+			if sc.scope == store.ScopeHub {
+				m.Scope = store.ScopeHub
+				if !secret.HubSecretDeliverable(m) {
+					continue
+				}
+			}
 			if sc.scope != store.ScopeUser {
 				allowed, err := sel.authorize(ctx, MaterialKindSecret, materialRecordSecret, m.ID, m.Name, sc.scope, sc.scopeID)
 				if err != nil {
-					return nil, err
+					return nil, nil, err
 				}
 				if !allowed {
 					continue
@@ -377,7 +449,7 @@ func (d *HTTPAgentDispatcher) selectDeliverySecrets(ctx context.Context, sel *de
 	if startOpts != nil && startOpts.AuthzCheck != nil {
 		progeny, err := d.store.ListProgenySecrets(ctx, agent.Ancestry)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		check := startOpts.AuthzCheck
 		for i := range progeny {
@@ -397,7 +469,7 @@ func (d *HTTPAgentDispatcher) selectDeliverySecrets(ctx context.Context, sel *de
 		d.log.WarnContext(ctx, "launch material withheld: items not authorized for delivery", "agent_id", agent.ID, "purpose", string(sel.purpose), "count", sel.denied)
 	}
 	if len(kept) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	// The test-admin scope restriction is decided before the fetch, so no
@@ -407,7 +479,7 @@ func (d *HTTPAgentDispatcher) selectDeliverySecrets(ctx context.Context, sel *de
 	// name or target, and the restriction then drops it. The one
 	// difference is fail-closed: a withheld item whose value could not
 	// have been read still outranks that lower-scope item.
-	restricted, allowedScopes, testAdminRoot := d.testAdminRootScopes(ctx, agent)
+	restricted, allowedScopes, testAdminRoot := ta.restricted, ta.allowed, ta.root
 	withheld := func(scope string) bool { return restricted && !allowedScopes[scope] }
 
 	metas := make([]secret.SecretMeta, 0, len(kept))
@@ -422,11 +494,12 @@ func (d *HTTPAgentDispatcher) selectDeliverySecrets(ctx context.Context, sel *de
 		var err error
 		values, err = d.secretBackend.FetchValues(ctx, metas)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 
 	merged := make(map[string]secret.SecretWithValue)
+	var skipped []skippedSecret
 	var decryptFailures []secret.ResolveFailure
 	for _, c := range kept {
 		// A progeny secret fills only names no scope set (kept lists every
@@ -440,7 +513,8 @@ func (d *HTTPAgentDispatcher) selectDeliverySecrets(ctx context.Context, sel *de
 		sv := secret.SecretWithValue{SecretMeta: c.meta}
 		if !withheld(c.meta.Scope) {
 			r, ok := values[c.meta.ID]
-			if !ok || errors.Is(r.Err, store.ErrNotFound) || errors.Is(r.Err, secret.ErrValueAccess) {
+			if class := deliverySkipClass(r, ok); class != "" {
+				skipped = append(skipped, skippedSecret{Name: c.meta.Name, Scope: c.meta.Scope, Class: class})
 				continue
 			}
 			if r.Err != nil {
@@ -449,7 +523,7 @@ func (d *HTTPAgentDispatcher) selectDeliverySecrets(ctx context.Context, sel *de
 					decryptFailures = append(decryptFailures, rde.Failures...)
 					continue
 				}
-				return nil, fmt.Errorf("fetching secret %s (%s scope): %w", c.meta.Name, c.meta.Scope, r.Err)
+				return nil, nil, fmt.Errorf("fetching secret %s (%s scope): %w", c.meta.Name, c.meta.Scope, r.Err)
 			}
 			sv.Value = r.Value
 			// The backend's external reference for the value it read, in
@@ -466,7 +540,7 @@ func (d *HTTPAgentDispatcher) selectDeliverySecrets(ctx context.Context, sel *de
 		merged[c.meta.Name] = sv
 	}
 	if len(decryptFailures) > 0 {
-		return nil, &secret.ResolveDecryptError{Failures: decryptFailures}
+		return nil, nil, &secret.ResolveDecryptError{Failures: decryptFailures}
 	}
 	names := make([]string, 0, len(merged))
 	for n := range merged {
@@ -502,7 +576,22 @@ func (d *HTTPAgentDispatcher) selectDeliverySecrets(ctx context.Context, sel *de
 			Ref:    sv.SecretRef,
 		})
 	}
-	return result, nil
+	return result, skipped, nil
+}
+
+// deliverySkipClass is the skip class of a fetch result r (ok is false when
+// the backend returned none), or "" when the item is not skipped: its value
+// was read, or its error fails the selection.
+func deliverySkipClass(r secret.FetchResult, ok bool) string {
+	switch {
+	case !ok:
+		return skipClassMissing
+	case errors.Is(r.Err, store.ErrNotFound):
+		return skipClassNotFound
+	case errors.Is(r.Err, secret.ErrValueAccess):
+		return skipClassAccess
+	}
+	return ""
 }
 
 // secretMetaFromStore converts a stored secret row to backend metadata,

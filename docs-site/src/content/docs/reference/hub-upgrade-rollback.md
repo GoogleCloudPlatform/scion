@@ -60,6 +60,13 @@ loopback request, or a request from a TLS-terminating proxy it trusts. See
      `conduit`) check unhealthy. The Hub's health summary then shows the
      broker as online but unable to receive commands.
 
+### `hub.async_agent_start` (multi-node upgrade and downgrade)
+
+The `hub.async_agent_start` [experiment](/scion/reference/experiments/#server-experiments-with-notes) is on by default (see [Asynchronous agent start](/scion/reference/server-config/#asynchronous-agent-start)). During a rolling upgrade between versions that write the `hub_instances` registry, starts stay synchronous automatically while any live Hub replica lacks `async_start_v1`.
+
+- **Multi-node upgrade from a version before the `hub_instances` registry:** replicas on a version that does not register in `hub_instances` are not visible to that capability check. Set an explicit override turning `hub.async_agent_start` **off** before upgrading the first replica (`scion hub experiments disable hub.async_agent_start` or in **Admin -> Server Config -> Experiments**), upgrade every Hub replica, and then reset the override (`scion hub experiments reset hub.async_agent_start`). Single-node Hubs need no extra step.
+- **Before downgrading a Hub node:** turn `hub.async_agent_start` **off** and wait `launch_timeout` (`server.hub.async_launch.launch_timeout`, default `2m` or `5m` for Kubernetes) plus 15 seconds so every in-flight asynchronous start settles before an older binary runs.
+
 ## What a newer build rewrites one way
 
 | Stored data | What startup does | Effect on an older binary |
@@ -68,6 +75,7 @@ loopback request, or a request from a TLS-terminating proxy it trusts. See
 | Project members group marker (group annotation) | A one-time migration rewrites the old key `scion.io/system-project-members-group` to `scion.io/project-members-group`, and records completion in the `hub_settings` key `migration_legacy_project_members_group_marker_v1`. | A build from before the marker change recognises only the old key, so it does not recognise the rewritten groups as project members groups. |
 | Settings files (`settings.yaml`, global and per project) | When the file is loaded, a legacy `hub.grove_id` key is rewritten in place to `hub.project_id`. | A build that reads only `hub.grove_id` no longer finds the project link. |
 | `.scion` project marker files | When a marker file is read, legacy `grove-id`, `grove-name` and `grove-slug` keys are rewritten in place to `project-id`, `project-name` and `project-slug`. | A build that reads only the `grove-*` keys no longer finds them. |
+| Provisioning sentinel of shared workspaces (`<subpath_root>/<project-id>/workspace/.scion-provisioned`) | On a shared project storage backend, the Hub moves a workspace-root sentinel to the project's provisioning state directory (`provision/.scion-provisioned`) and removes the workspace-root file and its git exclude line, at every Hub start and right after a project storage migration run for the workspaces that run moved. See [Upgrading from releases that kept the sentinel in the workspace](/scion/hosted/ha/kubernetes/#upgrading-from-releases-that-kept-the-sentinel-in-the-workspace). | An older build, and an agent image from before the provisioning state directory, look for the sentinel in the workspace root only, so they provision the workspace again on every start. |
 | `templates` table (`config` and `image` columns) | After schema migration, startup drops the retired `templates.config` and `templates.image` columns on SQLite and PostgreSQL (`templates.agent_config` is kept). | An older build that queries or writes `templates.config` or `templates.image` fails against the migrated schema. |
 
 Other one-time data migrations record their completion in `hub_settings` keys

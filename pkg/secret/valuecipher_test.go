@@ -174,6 +174,72 @@ func TestValueCipher_V1BoundedCandidates(t *testing.T) {
 	}
 }
 
+// TestValueCipher_DecryptWriter: only the active key in the configured
+// write format opens a value, even where Decrypt would open it with
+// another candidate.
+func TestValueCipher_DecryptWriter(t *testing.T) {
+	writerOK := func(name string, c *secret.ValueCipher, stored string) {
+		t.Helper()
+		pt, ok := c.DecryptWriter(stored)
+		if !ok || pt != goldenPlaintext {
+			t.Fatalf("%s: DecryptWriter = %q, %v; want the plaintext", name, pt, ok)
+		}
+	}
+	notWriter := func(name string, c *secret.ValueCipher, stored string, decryptable bool) {
+		t.Helper()
+		if pt, ok := c.DecryptWriter(stored); ok || pt != "" {
+			t.Fatalf("%s: DecryptWriter = %q, %v; want not the writer", name, pt, ok)
+		}
+		// The control: Decrypt opens the value, so only the writer
+		// restriction refused it.
+		if decryptable {
+			if pt, err := c.Decrypt(stored); err != nil || pt != goldenPlaintext {
+				t.Fatalf("%s: control Decrypt = %q, %v", name, pt, err)
+			}
+		}
+	}
+
+	writerOK("legacy v1 writer", ciphertest.Legacy(), goldenV1)
+	writerOK("v2 writer", ciphertest.Cipher(t, v2Ring("k2", "k2")), goldenV2)
+	writerOK("v1 writer in a managed ring", ciphertest.Cipher(t, ciphertest.Ring{Active: keyring.LegacyID,
+		IDs: []string{keyring.LegacyID, "k2"}, WriteFormat: keyring.WriteV1, V1Readers: []string{keyring.LegacyID}}), goldenV1)
+
+	// v1 under a non-active legacy reader.
+	notWriter("v1 other reader", ciphertest.Cipher(t, ciphertest.Ring{Active: "old", IDs: []string{"old", keyring.LegacyID},
+		WriteFormat: keyring.WriteV1, V1Readers: []string{"old", keyring.LegacyID}}), goldenV1, true)
+	// v2 under another key the ring holds.
+	notWriter("v2 other kid", ciphertest.Cipher(t, v2Ring("k1", "k1", "k2")), goldenV2, true)
+	// The writer's key, but the other format.
+	notWriter("v1 value, v2 writer", ciphertest.Cipher(t, ciphertest.Ring{Active: keyring.LegacyID,
+		IDs: []string{keyring.LegacyID}, WriteFormat: keyring.WriteV2, V1Readers: []string{keyring.LegacyID}}), goldenV1, true)
+	notWriter("v2 value, v1 writer", ciphertest.Cipher(t, ciphertest.Ring{Active: "k2",
+		IDs: []string{"k2"}, WriteFormat: keyring.WriteV1, V1Readers: []string{"k2"}}), goldenV2, true)
+	// Same key ID, other key bytes.
+	notWriter("v2 foreign bytes", ciphertest.Cipher(t, ciphertest.Ring{Active: "k2", IDs: []string{"k2"},
+		Keys: map[string][]byte{"k2": ciphertest.FakeKey("k9")}}), goldenV2, false)
+
+	raw, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(goldenV2, "enc:v2:k2:"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw[len(raw)-1] ^= 0x01
+	tampered := "enc:v2:k2:" + base64.StdEncoding.EncodeToString(raw)
+	v2 := ciphertest.Cipher(t, v2Ring("k2", "k2"))
+	for name, v := range map[string]string{"tampered": tampered, "malformed": "enc:v2:k2:", "empty": "", "plaintext": goldenPlaintext} {
+		notWriter(name, v2, v, false)
+	}
+	// Legacy mode passes plaintext through Decrypt; it is still not a
+	// writer value.
+	notWriter("legacy plaintext", ciphertest.Legacy(), goldenPlaintext, true)
+
+	var nilCipher *secret.ValueCipher
+	for name, c := range map[string]*secret.ValueCipher{"nil": nilCipher, "zero": {}, "disabled": secret.NewLegacyValueCipher("")} {
+		for _, v := range []string{goldenV1, goldenV2, goldenPlaintext} {
+			notWriter(name, c, v, false)
+		}
+	}
+}
+
 func TestValueCipher_MalformedAndTampered(t *testing.T) {
 	c := ciphertest.Cipher(t, ciphertest.Ring{Active: "k2", IDs: []string{"k2", keyring.LegacyID}, V1Readers: []string{keyring.LegacyID}})
 	raw, _ := base64.StdEncoding.DecodeString(strings.TrimPrefix(goldenV2, "enc:v2:k2:"))
@@ -383,5 +449,90 @@ func assertNoLeak(t *testing.T, msg, stored string) {
 	}
 	if len(stored) > 12 && strings.Contains(msg, stored[7:]) {
 		t.Fatal("error text echoes the stored value")
+	}
+}
+
+// DecryptAuthenticated reports the key whose authenticated decryption
+// succeeded, not the envelope label: for v1 (no label) the legacy reader
+// that opened it, whatever its position in legacy_v1_read_ids.
+func TestValueCipher_DecryptAuthenticatedReportsOpeningKey(t *testing.T) {
+	tests := []struct {
+		name   string
+		c      *secret.ValueCipher
+		in     string
+		format secretenvelope.Format
+		kid    string
+	}{
+		{"v1 under the second legacy reader",
+			ciphertest.Cipher(t, ciphertest.Ring{Active: "k2", IDs: []string{"k2", "old", keyring.LegacyID}, V1Readers: []string{"old", keyring.LegacyID}}),
+			goldenV1, secretenvelope.FormatV1, keyring.LegacyID},
+		{"v1 under the first legacy reader",
+			ciphertest.Cipher(t, ciphertest.Ring{Active: "k2", IDs: []string{"k2", "old", keyring.LegacyID}, V1Readers: []string{keyring.LegacyID, "old"}}),
+			goldenV1, secretenvelope.FormatV1, keyring.LegacyID},
+		{"v2 under its named key", ciphertest.Cipher(t, v2Ring("k1", "k1", "k2")), goldenV2, secretenvelope.FormatV2, "k2"},
+		{"legacy plaintext", ciphertest.Legacy(), "fake-legacy-plaintext", secretenvelope.FormatPlaintext, ""},
+		{"disabled plaintext", secret.NewLegacyValueCipher(""), "fake-legacy-plaintext", secretenvelope.FormatPlaintext, ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			pt, auth, err := tc.c.DecryptAuthenticated(tc.in)
+			if err != nil {
+				t.Fatalf("DecryptAuthenticated: %v", err)
+			}
+			if auth.Format != tc.format || auth.KID != tc.kid {
+				t.Fatalf("authentication = {%s %q}, want {%s %q}", auth.Format, auth.KID, tc.format, tc.kid)
+			}
+			want, err := tc.c.Decrypt(tc.in)
+			if err != nil || pt != want {
+				t.Fatal("DecryptAuthenticated and Decrypt disagree on the plaintext")
+			}
+		})
+	}
+}
+
+// Every failure of DecryptAuthenticated is Decrypt's typed failure, with
+// no value and a zero Authentication. A value labelled with a held key
+// but sealed under another one (a key-ID label lie) fails: no other key
+// is tried.
+func TestValueCipher_DecryptAuthenticatedFailsLikeDecrypt(t *testing.T) {
+	// The ring holds at most three keys; v1 is readable only by "old",
+	// which did not seal goldenV1.
+	c := ciphertest.Cipher(t, ciphertest.Ring{Active: "k1", IDs: []string{"k1", "k2", "old"}, V1Readers: []string{"old"}})
+	raw, _ := base64.StdEncoding.DecodeString(strings.TrimPrefix(goldenV2, "enc:v2:k2:"))
+	tampered := append([]byte{}, raw...)
+	tampered[len(tampered)-1] ^= 0x01
+	tests := []struct {
+		name string
+		in   string
+		want error
+	}{
+		{"label lie", strings.Replace(goldenV2, "enc:v2:k2:", "enc:v2:k1:", 1), secret.ErrDecrypt},
+		{"unknown label", strings.Replace(goldenV2, "enc:v2:k2:", "enc:v2:k9:", 1), secret.ErrUnknownKeyID},
+		{"tampered tag", secretenvelope.FormatV2Value("k2", tampered), secret.ErrDecrypt},
+		{"truncated", "enc:v2:k2:" + base64.StdEncoding.EncodeToString(raw[:10]), secretenvelope.ErrMalformed},
+		{"v1 under a key that is not a legacy reader", goldenV1, secret.ErrDecrypt},
+		{"managed plaintext", "fake-legacy-plaintext", secret.ErrPlaintextNotAdmitted},
+		{"managed empty", "", secret.ErrPlaintextNotAdmitted},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			pt, auth, err := c.DecryptAuthenticated(tc.in)
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("err = %v, want %v", err, tc.want)
+			}
+			if pt != "" || auth != (secret.Authentication{}) {
+				t.Fatal("a failure returned a value or an authentication")
+			}
+			_, derr := c.Decrypt(tc.in)
+			if derr == nil || derr.Error() != err.Error() {
+				t.Fatalf("Decrypt err = %v, DecryptAuthenticated err = %v", derr, err)
+			}
+			assertNoLeak(t, err.Error(), tc.in)
+		})
+	}
+	var unconfigured *secret.ValueCipher
+	_, auth, err := unconfigured.DecryptAuthenticated(goldenV2)
+	if !errors.Is(err, secret.ErrCipherNotConfigured) || auth != (secret.Authentication{}) {
+		t.Fatalf("nil cipher: %v, %+v", err, auth)
 	}
 }

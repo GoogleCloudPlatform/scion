@@ -993,6 +993,14 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A request's template is a template slug or ID, never a host directory
+	// or a remote source: the broker resolves an absolute template directory
+	// only for the templates it hydrated itself (requestTemplateAllowed).
+	if req.Config != nil && !requestTemplateAllowed(req.Config.Template) {
+		ValidationError(w, requestTemplateRefusal, nil)
+		return
+	}
+
 	// ProjectSlug is joined onto the global projects directory below (to
 	// resolve req.ProjectPath) and again later to compute the GCS-bootstrap
 	// workspace directory, in both cases as a single path segment: a value
@@ -1794,7 +1802,13 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		// profile was refused (422) before the attempt, buildStartContext
 		// resolves only the instance's runtime, and checkFlatCreatePlacement
 		// already checked the policy and its target before the attempt.
+		// On a legacy Runtime Broker the request's own kubernetes blocks are
+		// checked here against the operator-owned placement, before the
+		// agent is provisioned or started and before any 201.
 		rp, perr := s.placementForStart(ctx, sc.Resolution, opts.ProjectPath)
+		if perr == nil {
+			perr = s.checkCreatePlacement(req, rp)
+		}
 		if perr != nil {
 			span.SetStatus(codes.Error, perr.Error())
 			status := s.writeStartContextError(w, perr, "create agent", "agent_id", req.ID, "profile", createRequestProfile(req))
@@ -2156,6 +2170,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		policyDecision, isPolicyErr := harnessPolicyRefusalFrom(err)
 		unusableErr, isUnusable := unusableProvisionerFrom(err)
 		storageErr, isStorageRefusal := storageMigrationRequiredFrom(err)
+		resourceErr, isResourceRefusal := resourceLimitsErrorFrom(err)
 		switch {
 		case isPolicyErr:
 			markAttemptFailed(policyDecision.HTTPStatus, policyDecision.detail())
@@ -2163,6 +2178,8 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			markAttemptFailed(http.StatusUnprocessableEntity, unusableErr.PublicMessage())
 		case isStorageRefusal:
 			markAttemptFailed(http.StatusUnprocessableEntity, storageErr.PublicMessage())
+		case isResourceRefusal:
+			markAttemptFailed(resourceLimitsStatus, resourceErr.PublicMessage())
 		case notFoundErr:
 			markAttemptFailed(http.StatusNotFound, "failed to create agent")
 		case isSkillErr:
@@ -2243,6 +2260,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			}()
 		}
 		span.SetStatus(codes.Error, spanErrorText(err))
+		gitRefusal, isGitRefusal := util.StartRefusalText(err)
 		switch {
 		case isPolicyErr:
 			s.writeHarnessPolicyRefusal(w, policyDecision, "create agent", req.ID, nil)
@@ -2250,6 +2268,10 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			s.writeUnusableProvisioner(w, unusableErr, "create agent", req.ID, nil)
 		case isStorageRefusal:
 			s.writeStorageMigrationRequired(w, storageErr, "create agent", req.ID, nil)
+		case isResourceRefusal:
+			// The runtime refused the resource spec before creating
+			// anything (ptone/scion#7103). The full error is logged above.
+			writeResourceLimitsRefused(w, resourceErr, opCreateAgent, nil)
 		case errors.Is(err, agent.ErrContainerNameInUse):
 			// Fixed text, as restart and the async launch give: a wrapped
 			// error can carry runtime detail. The full error is logged above.
@@ -2265,6 +2287,9 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, ErrCodeNotFound, notFoundMessage(opCreateAgent, err, opts.TemplateName), nil)
 		case isSkillErr:
 			SkillResolutionFailed(w, skillErr, createSkill.ref)
+		case isGitRefusal:
+			// The repository's git config sets keys agents may not be given.
+			writeGitConfigRefusalText(w, gitRefusal, nil)
 		case errors.Is(err, agent.ErrProjectPathNotInitialized):
 			writeError(w, http.StatusConflict, ErrCodeProjectPathNotInitialized, err.Error(), nil)
 		case config.IsAgentStateConflict(err):
@@ -3601,18 +3626,16 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 	// kept, whatever removeBranch says.
 	if filesToDelete && !localOnly && agentProjectID != "" {
 		if remover, ok := target.mgr.(nfsAgentFilesRemover); ok {
-			if paths, rmErr := remover.RemoveNFSAgentFiles(ctx, projectPath, agentProjectID, target.name); rmErr != nil {
+			// Each removal is audited with what it did: deleted, absent
+			// (nothing was there) or failed. A workspace moved aside is
+			// purged in the background, which audits its own result.
+			ds, rmErr := remover.RemoveNFSAgentFiles(agent.WithStorageAuditLogger(ctx, s.agentLifecycleLog), projectPath, agentProjectID, target.name)
+			if rmErr != nil {
 				s.agentLifecycleLog.Warn("Agent delete: could not remove the agent's files on the NFS workspace; left in place",
-					"agent_id", id, "project_id", agentProjectID, "paths", paths, "error", rmErr)
-				projectfs.Audit(ctx, s.agentLifecycleLog, projectfs.DeleterBroker, agentProjectID, target.name, projectfs.Deletion{
-					Tree: projectfs.TreeAgentWorkspace, Path: strings.Join(paths, ","), Outcome: projectfs.OutcomeFailed, Err: rmErr,
-				})
-			} else {
-				for _, p := range paths {
-					projectfs.Audit(ctx, s.agentLifecycleLog, projectfs.DeleterBroker, agentProjectID, target.name, projectfs.Deletion{
-						Tree: projectfs.TreeAgentWorkspace, Path: p, Outcome: projectfs.OutcomeDeleted,
-					})
-				}
+					"agent_id", id, "project_id", agentProjectID, "error", rmErr)
+			}
+			for _, d := range ds {
+				projectfs.Audit(ctx, s.agentLifecycleLog, projectfs.DeleterBroker, agentProjectID, target.name, d)
 			}
 		}
 	}
@@ -3905,6 +3928,13 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 
 	s.agentLifecycleLog.Debug("startAgent called", "agent_id", id, "task", startReq.Task, "projectPath", startReq.ProjectPath, "projectSlug", startReq.ProjectSlug, "harnessConfig", startReq.HarnessConfig, "resolvedEnvCount", len(startReq.ResolvedEnv))
 
+	// The start's template name is used for naming (and recorded with the
+	// agent); like create's template it must be a template slug or ID.
+	if !requestTemplateAllowed(startReq.TemplateName) {
+		ValidationError(w, requestTemplateRefusal, nil)
+		return
+	}
+
 	// Build config for buildStartContext (startAgent uses a subset of CreateAgentConfig)
 	var cfg *CreateAgentConfig
 	if startReq.Task != "" || startReq.HarnessConfig != "" || startReq.HarnessConfigID != "" || startReq.HarnessConfigHash != "" || len(startReq.SharedDirs) > 0 || startReq.SharedWorkspace || startReq.SharedWorkspaceClone != nil || startReq.GitClone != nil || startReq.Branch != "" || startReq.Image != "" {
@@ -4100,6 +4130,17 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		s.writeStartContextError(w, sce, "start agent", "agent_id", id, "runtime", resolvedRuntimeType, "profile", runtimeOpts.Profile)
 		return
 	}
+	// Start resolves through settings only (resolveManagerForOptsStrict),
+	// never the pin, so there is no pinned entry to check.
+	if sce := rejectCloudRunIdentityRuntimeChange(ctx, runtimeOpts, sc.CloudRunSelection, resolvedRuntimeType, func() dispatchProfileSelection {
+		return s.resolveDispatchProfileSelection(runtimeOpts)
+	}, nil); sce != nil {
+		if s.refuseCancelledStart(w, span, ss, id, projectID, trackedRunID) {
+			return
+		}
+		s.writeStartContextError(w, sce, "start agent", "agent_id", id, "runtime", resolvedRuntimeType, "profile", runtimeOpts.Profile)
+		return
+	}
 	// Belt and braces: the preliminary classification (buildStartContext)
 	// must agree with this authoritative runtime; the specific rejections
 	// above report their own, more actionable errors first.
@@ -4242,12 +4283,17 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		details := s.startFailureDetails(ctx, mgr, id, projectID, opts.RunID)
 		var skillErr *agent.SkillResolutionError
 		ue, unusable := unusableProvisionerFrom(err)
+		gitRefusal, isGitRefusal := util.StartRefusalText(err)
 		storageErr, isStorageRefusal := storageMigrationRequiredFrom(err)
+		resourceErr, isResourceRefusal := resourceLimitsErrorFrom(err)
 		switch {
 		case unusable:
 			s.writeUnusableProvisioner(w, ue, "start agent", id, details)
 		case isStorageRefusal:
 			s.writeStorageMigrationRequired(w, storageErr, "start agent", id, details)
+		case isResourceRefusal:
+			// As on create (ptone/scion#7103); logged above.
+			writeResourceLimitsRefused(w, resourceErr, "start agent", details)
 		case errors.Is(err, agent.ErrContainerNameInUse):
 			// Fixed text, as restart and the async launch give: a wrapped
 			// error can carry runtime detail. The full error is logged above.
@@ -4259,6 +4305,9 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 			writeError(w, http.StatusConflict, ErrCodeConflict, scionrt.ErrRunConflict.Error(), details)
 		case errors.As(err, &skillErr):
 			skillResolutionFailedWithDetails(w, skillErr, startSkill.ref, details)
+		case isGitRefusal:
+			// The repository's git config sets keys agents may not be given.
+			writeGitConfigRefusalText(w, gitRefusal, details)
 		case errors.Is(err, agent.ErrProjectPathNotInitialized):
 			writeError(w, http.StatusConflict, ErrCodeProjectPathNotInitialized, err.Error(), details)
 		case config.IsAgentStateConflict(err):
@@ -4332,7 +4381,9 @@ func readAgentScionConfig(agentName, projectPath string, sharedWorkspace bool) (
 		return loadedAgentConfig{stage: "resolve"}, err
 	}
 	cfgPath := filepath.Join(config.GetAgentDir(projectDir, agentName, sharedWorkspace), "scion-agent.json")
-	data, err := os.ReadFile(cfgPath)
+	// Read without following a symbolic link (a plain single-link regular
+	// file only); the write back goes through agent.WriteAgentConfigFile.
+	data, err := agent.ReadAgentConfigFile(filepath.Dir(cfgPath))
 	if err != nil {
 		return loadedAgentConfig{projectDir: projectDir, path: cfgPath, stage: "read"}, err
 	}
@@ -4404,7 +4455,7 @@ func (s *Server) applyInlineConfigUpdate(ctx context.Context, agentName, project
 		s.agentLifecycleLog.Warn("applyInlineConfigUpdate: failed to marshal updated config", "agent", agentName, "error", err)
 		return
 	}
-	if err := os.WriteFile(cfgPath, updated, 0644); err != nil {
+	if err := agent.WriteAgentConfigFile(filepath.Dir(cfgPath), updated); err != nil {
 		s.agentLifecycleLog.Warn("applyInlineConfigUpdate: failed to write scion-agent.json", "agent", agentName, "error", err)
 		return
 	}
@@ -5139,6 +5190,11 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 			s.agentLifecycleLog.Debug("No resolvedEnv in restart request body (ignoring decode error)", "agent_id", id, "error", err)
 		}
 	}
+	// As on start: the template name must be a template slug or ID.
+	if !requestTemplateAllowed(restartReq.TemplateName) {
+		ValidationError(w, requestTemplateRefusal, nil)
+		return
+	}
 	// Checked before the stop leg and any runtime call, as on start.
 	if refusal := s.expectedTargetRefusal(restartReq.ExpectedRuntimeTargetID, false); refusal != nil {
 		refusal.write(w)
@@ -5339,6 +5395,12 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		s.writeStartContextError(w, sce, "restart agent", "agent_id", id, "runtime", resolvedRuntimeType, "profile", runtimeOpts.Profile)
 		return
 	}
+	if sce := rejectCloudRunIdentityRuntimeChange(ctx, runtimeOpts, sc.CloudRunSelection, resolvedRuntimeType, func() dispatchProfileSelection {
+		return s.resolveDispatchProfileSelection(runtimeOpts)
+	}, s.pinnedCloudRunEntry(runtimeOpts, pin)); sce != nil {
+		s.writeStartContextError(w, sce, "restart agent", "agent_id", id, "runtime", resolvedRuntimeType, "profile", runtimeOpts.Profile)
+		return
+	}
 	// Belt and braces: the preliminary classification (buildStartContext)
 	// must agree with this authoritative runtime; the specific rejections
 	// above report their own, more actionable errors first.
@@ -5461,6 +5523,11 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 			s.writeStorageMigrationRequired(w, se, "restart agent", id, details)
 			return
 		}
+		// As on create (ptone/scion#7103); logged above.
+		if re, ok := resourceLimitsErrorFrom(err); ok {
+			writeResourceLimitsRefused(w, re, "restart agent", details)
+			return
+		}
 		// Start can re-provision the agent: a required skill reference that
 		// cannot be resolved gets the same typed response as on start, and
 		// is checked before the "not found" text match so a skill cause
@@ -5468,6 +5535,9 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		var skillErr *agent.SkillResolutionError
 		if errors.As(err, &skillErr) {
 			skillResolutionFailedWithDetails(w, skillErr, restartSkill.ref, details)
+			return
+		}
+		if writeGitConfigRefusal(w, err, details) {
 			return
 		}
 		if errors.Is(err, agent.ErrProjectPathNotInitialized) {
@@ -6546,7 +6616,7 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedTemplate
 		if templateForChain == "" && req.Config != nil {
 			templateForChain = req.Config.Template
 		}
-		harnessConfigTemplatePaths := templateChainPaths(templateForChain, harnessConfigSearchPath)
+		harnessConfigTemplatePaths := templateChainPaths(context.Background(), templateForChain, harnessConfigSearchPath)
 		// Resolve through the shared resolver launch uses
 		// (config.ResolveHarnessConfigDir, via resolveHarnessConfigDir in
 		// pkg/agent/provision.go and harness.Resolve): a hydrated hub-managed
@@ -6647,7 +6717,7 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedTemplate
 		// the same template launch uses: the hydrated copy for a hub
 		// template, never a local template of the same slug
 		// (ptone/scion#4218, P6).
-		if tmpl := envGatherTemplate(req, hydratedTemplatePath); tmpl != nil {
+		if tmpl := envGatherTemplate(context.Background(), req, hydratedTemplatePath); tmpl != nil {
 			if cfg, err := tmpl.LoadConfig(); err == nil && cfg != nil && cfg.AuthSelectedType != "" {
 				authType = cfg.AuthSelectedType
 			}
@@ -6937,7 +7007,7 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedTemplate
 	// Also load the template's own config. For a hub template this is the
 	// hydrated copy launch uses: the broker's local project may have no
 	// template of that slug, or a different one (ptone/scion#4218, P6).
-	if tmpl := envGatherTemplate(req, hydratedTemplatePath); tmpl != nil {
+	if tmpl := envGatherTemplate(context.Background(), req, hydratedTemplatePath); tmpl != nil {
 		if cfg, err := tmpl.LoadConfig(); err == nil && cfg != nil {
 			for _, sec := range cfg.Secrets {
 				required[sec.Key] = struct{}{}
@@ -7676,12 +7746,35 @@ func (s *Server) restartPin(match agentMatch) pinnedRuntime {
 // registered runtime; one that resolves to none is ignored by
 // resolveManagerForOptsStrict, so it does not drop the pin either.
 func (s *Server) resolveExistingAgentManager(opts api.StartOptions, mode profileResolution, pin pinnedRuntime) (runtimeResolution, error) {
-	if opts.Profile == "" && pin.mgr != nil && pin.name != "" {
-		if _, forced := s.forcedRuntime(); !forced {
-			return runtimeResolution{Manager: pin.mgr, Runtime: pin.rt, Record: pin.record, RuntimeType: pin.name, How: resolutionUnrecorded}, nil
-		}
+	if s.existingAgentUsesPin(opts, pin) {
+		return runtimeResolution{Manager: pin.mgr, Runtime: pin.rt, Record: pin.record, RuntimeType: pin.name, How: resolutionUnrecorded}, nil
 	}
 	return s.resolveManagerForOptsStrict(opts, mode)
+}
+
+// existingAgentUsesPin reports whether resolveExistingAgentManager returns
+// the pinned runtime for opts: no profile, a pin, and no forced runtime.
+func (s *Server) existingAgentUsesPin(opts api.StartOptions, pin pinnedRuntime) bool {
+	if opts.Profile != "" || pin.mgr == nil || pin.name == "" {
+		return false
+	}
+	_, forced := s.forcedRuntime()
+	return !forced
+}
+
+// pinnedCloudRunEntry returns, for rejectCloudRunIdentityRuntimeChange, the
+// global runtime entry the pinned runtime was built from when
+// resolveExistingAgentManager runs opts on the pin ("" when the pin records
+// none), or nil when it does not use the pin.
+func (s *Server) pinnedCloudRunEntry(opts api.StartOptions, pin pinnedRuntime) *string {
+	if !s.existingAgentUsesPin(opts, pin) {
+		return nil
+	}
+	entry := ""
+	if pin.record.Present {
+		entry = pin.record.EntryName
+	}
+	return &entry
 }
 
 // profileResolution selects how resolveManagerForOptsStrict treats a
@@ -8751,7 +8844,7 @@ var errDeleteTargetUnknown = errors.New("could not list agents to resolve delete
 // agent's worktree or own workspace from the NFS workspace export on
 // delete.
 type nfsAgentFilesRemover interface {
-	RemoveNFSAgentFiles(ctx context.Context, projectPath, projectID, agentName string) (paths []string, err error)
+	RemoveNFSAgentFiles(ctx context.Context, projectPath, projectID, agentName string) ([]projectfs.Deletion, error)
 }
 
 var _ nfsAgentFilesRemover = (*agent.AgentManager)(nil)
@@ -9772,14 +9865,14 @@ func preResolvedHubEndpoint(conn *HubConnection, advertised string) string {
 // path. In each of those cases buildStartContext also leaves opts.Template
 // as the slug and provisioning resolves it locally. A hydration error fails
 // the create before this point.
-func envGatherTemplate(req CreateAgentRequest, hydratedTemplatePath string) *config.Template {
+func envGatherTemplate(ctx context.Context, req CreateAgentRequest, hydratedTemplatePath string) *config.Template {
 	if hydratedTemplatePath != "" {
 		return &config.Template{Name: filepath.Base(hydratedTemplatePath), Path: hydratedTemplatePath}
 	}
 	if req.Config == nil || req.Config.Template == "" || req.ProjectPath == "" {
 		return nil
 	}
-	tmpl, err := config.FindTemplateInProjectPath(req.Config.Template, req.ProjectPath)
+	tmpl, err := config.FindTemplateInProjectPath(ctx, req.Config.Template, req.ProjectPath)
 	if err != nil {
 		return nil
 	}

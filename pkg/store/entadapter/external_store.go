@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -816,6 +817,49 @@ func (s *ExternalStore) RevokeUserAccessTokensForUser(ctx context.Context, userI
 		return 0, mapError(err)
 	}
 	return n, nil
+}
+
+// RevokeUserAccessTokensForUserProject revokes every unrevoked
+// "project"-boundary token of a user scoped to projectID and returns the
+// IDs it revoked (ptone/scion#7494). The boundary_kind predicate states the
+// rule explicitly: a hub-boundary token is never revoked here. The IDs are
+// read and then revoked by ID with the same predicates, so a token revoked
+// concurrently is not reported twice; inside the caller's transaction the
+// two statements see the same rows.
+func (s *ExternalStore) RevokeUserAccessTokensForUserProject(ctx context.Context, userID, projectID string) ([]string, error) {
+	uid, err := parseUUID(userID)
+	if err != nil {
+		return nil, err
+	}
+	pid, err := parseUUID(projectID)
+	if err != nil {
+		return nil, err
+	}
+	match := []predicate.UserAccessToken{
+		useraccesstoken.UserIDEQ(uid),
+		useraccesstoken.ProjectIDEQ(pid),
+		useraccesstoken.BoundaryKindEQ(string(permissions.BoundaryKindProject)),
+		useraccesstoken.RevokedEQ(false),
+	}
+	ids, err := s.client.UserAccessToken.Query().Where(match...).IDs(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	if len(ids) == 0 {
+		return []string{}, nil
+	}
+	if _, err := s.client.UserAccessToken.Update().
+		Where(append(match, useraccesstoken.IDIn(ids...))...).
+		SetRevoked(true).
+		Save(ctx); err != nil {
+		return nil, mapError(err)
+	}
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, id.String())
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 // DeleteUserAccessTokensByProject permanently removes all "project"-boundary

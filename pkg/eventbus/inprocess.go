@@ -163,6 +163,9 @@ func (b *InProcessEventBus) Subscribe(pattern string, handler EventHandler) (Sub
 	return &inProcessSubscription{bus: b, sub: sub}, nil
 }
 
+// InProcessSpoke marks the bus as in-process for FanOutEventBus.
+func (b *InProcessEventBus) InProcessSpoke() {}
+
 // Close shuts down the event bus and all subscriber goroutines.
 func (b *InProcessEventBus) Close() error {
 	b.mu.Lock()

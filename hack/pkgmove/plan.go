@@ -38,6 +38,7 @@ type Config struct {
 	TestMainSupport  string            // import path of a package providing RunTestMain(*testing.M) int
 	RewriteAliases   bool              // rewrite references to aliases instead of moving files (rewritealiases.go)
 	RenameOverrides  map[string]string // -rename overrides: unexported name -> exported name (instead of upper-casing)
+	RewriteOutRefs   bool              // rewrite exact repo-path outside references to moved files (outrefs.go)
 	ReportPath       string
 	Stdout           io.Writer
 }
@@ -97,6 +98,7 @@ type Plan struct {
 	VarRewrites          []varRewrite
 	AliasRewrites        []varRewrite // alias references resolved to their targets
 	CommentRewrites      []varRewrite // renamed identifiers rewritten in comments
+	OutRefRewrites       []varRewrite // outside references to moved files rewritten (-rewrite-outrefs)
 	IntoExisting         bool         // test-only move into an existing package
 	RewriteAliases       bool         // -rewrite-aliases run (no files move)
 	Reused               []string     // staying helpers whose target equivalents are used
@@ -307,6 +309,12 @@ func writeOptional(w *strings.Builder, p *Plan) {
 	if len(p.CommentRewrites) > 0 {
 		fmt.Fprintf(w, "\nComment rewrites (renamed identifiers) (%d):\n", len(p.CommentRewrites))
 		for _, v := range p.CommentRewrites {
+			fmt.Fprintf(w, "  %s: %s -> %s\n", v.Pos, v.Old, v.New)
+		}
+	}
+	if len(p.OutRefRewrites) > 0 {
+		fmt.Fprintf(w, "\nOutside references to moved files rewritten (-rewrite-outrefs) (%d):\n", len(p.OutRefRewrites))
+		for _, v := range p.OutRefRewrites {
 			fmt.Fprintf(w, "  %s: %s -> %s\n", v.Pos, v.Old, v.New)
 		}
 	}

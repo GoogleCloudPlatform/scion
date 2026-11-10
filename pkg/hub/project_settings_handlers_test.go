@@ -669,9 +669,10 @@ func TestProjectSettings_ClearDefaultGCPIdentity(t *testing.T) {
 	srv, s := testServer(t)
 	project := createTestProjectForSettings(t, s)
 
-	// Set values first
+	// Set values first. (Saving a passthrough default needs an embedded
+	// broker and the setter's passthrough authority; block needs neither.)
 	putBody := hubclient.ProjectSettings{
-		DefaultGCPIdentityMode:             "passthrough",
+		DefaultGCPIdentityMode:             "block",
 		DefaultGCPIdentityServiceAccountID: "",
 	}
 	rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings", putBody)
@@ -1212,7 +1213,10 @@ func TestProjectSettings_PartialPutDoesNotRevalidateStoredIdentity(t *testing.T)
 // stored service account that has gone unverified since it was saved: the
 // account no longer applies once the mode is not assign.
 func TestProjectSettings_ModeOnlyPutSkipsStaleStoredSA(t *testing.T) {
-	for _, mode := range []string{"passthrough", ""} {
+	// block, not passthrough: saving a passthrough default needs an
+	// embedded broker and the setter's passthrough authority, which this
+	// server does not have.
+	for _, mode := range []string{"block", ""} {
 		t.Run("mode="+mode, func(t *testing.T) {
 			srv, s := testServer(t)
 			project := createTestProjectForSettings(t, s)

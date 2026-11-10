@@ -95,7 +95,20 @@ const (
 	// what was replied to. Mapped to text/request in the envelope taxonomy
 	// (same as TypeInstruction — a reply to an agent is still a request).
 	TypeReply = "reply"
+
+	// TypeChoicePrompt is an agent message that carries one or more
+	// decisions (choices.go). TypeChoiceResponse records an answer to one
+	// of them. Both are hub-minted: see IsHubMintedType.
+	TypeChoicePrompt   = "choice-prompt"
+	TypeChoiceResponse = "choice-response"
 )
+
+// IsHubMintedType reports whether t is a message type only the hub may set.
+// Every client send path must reject a caller-supplied type for which it
+// returns true.
+func IsHubMintedType(t string) bool {
+	return t == TypeChoicePrompt || t == TypeChoiceResponse
+}
 
 // System message category constants identify the origin of a system message.
 const (
@@ -123,6 +136,8 @@ var validTypes = map[string]bool{
 	TypeSystem:         true,
 	TypeChat:           true,
 	TypeReply:          true,
+	TypeChoicePrompt:   true,
+	TypeChoiceResponse: true,
 }
 
 // StructuredMessage represents a formatted Scion message.

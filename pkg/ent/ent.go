@@ -21,6 +21,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentdelegationgrant"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agenthold"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentidentitykey"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentlifecyclecursor"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentlifecycleoutbox"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentrecovery"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentreincarnation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentserviceaccountassignment"
@@ -40,6 +42,9 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conduitsession"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conversation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conversationparticipant"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/decision"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/decisionanswer"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/decisionkeycounter"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/delegationadoption"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/delegationedge"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entitlementbinding"
@@ -171,6 +176,8 @@ func checkColumn(t, c string) error {
 			agentdelegationgrant.Table:          agentdelegationgrant.ValidColumn,
 			agenthold.Table:                     agenthold.ValidColumn,
 			agentidentitykey.Table:              agentidentitykey.ValidColumn,
+			agentlifecyclecursor.Table:          agentlifecyclecursor.ValidColumn,
+			agentlifecycleoutbox.Table:          agentlifecycleoutbox.ValidColumn,
 			agentrecovery.Table:                 agentrecovery.ValidColumn,
 			agentreincarnation.Table:            agentreincarnation.ValidColumn,
 			agentserviceaccountassignment.Table: agentserviceaccountassignment.ValidColumn,
@@ -190,6 +197,9 @@ func checkColumn(t, c string) error {
 			conduitsession.Table:                conduitsession.ValidColumn,
 			conversation.Table:                  conversation.ValidColumn,
 			conversationparticipant.Table:       conversationparticipant.ValidColumn,
+			decision.Table:                      decision.ValidColumn,
+			decisionanswer.Table:                decisionanswer.ValidColumn,
+			decisionkeycounter.Table:            decisionkeycounter.ValidColumn,
 			delegationadoption.Table:            delegationadoption.ValidColumn,
 			delegationedge.Table:                delegationedge.ValidColumn,
 			entitlementbinding.Table:            entitlementbinding.ValidColumn,

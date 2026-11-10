@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
 )
 
@@ -50,7 +51,7 @@ func (m *fencingManager) List(ctx context.Context, filter map[string]string) ([]
 	return m.cleanupRecordingManager.List(ctx, filter)
 }
 
-func (m *fencingManager) RemoveNFSAgentFiles(_ context.Context, _, _, _ string) ([]string, error) {
+func (m *fencingManager) RemoveNFSAgentFiles(_ context.Context, _, _, _ string) ([]projectfs.Deletion, error) {
 	m.nfsMu.Lock()
 	defer m.nfsMu.Unlock()
 	m.nfsCalls++

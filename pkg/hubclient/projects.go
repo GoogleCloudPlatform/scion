@@ -16,6 +16,7 @@ package hubclient
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/url"
 
@@ -42,6 +43,11 @@ type ProjectService interface {
 	// Delete removes a project and its agent records. Without opts.Force
 	// the hub refuses (409) while the project has agents not yet deleted.
 	Delete(ctx context.Context, projectID string, opts *DeleteProjectOptions) error
+
+	// Leave removes the caller's own direct roles on the project
+	// (POST /api/v1/projects/{id}/leave). With dryRun the hub computes the
+	// result and changes nothing.
+	Leave(ctx context.Context, projectID string, dryRun bool) (*LeaveProjectResult, error)
 
 	// AssignableRoles lists the project-scoped membership roles with
 	// whether the caller could grant each one through the members PUT
@@ -75,6 +81,18 @@ type ProjectService interface {
 	// GetResolvedSettings retrieves the per-setting report of project
 	// annotations and hub defaults (GET /settings/resolved).
 	GetResolvedSettings(ctx context.Context, projectID string) (*ResolvedProjectSettings, error)
+
+	// GetSettingsBody and GetResolvedSettingsBody make the same reads as
+	// GetSettings and GetResolvedSettings and return the Hub's response
+	// body unchanged, for output that must show the response as received.
+	GetSettingsBody(ctx context.Context, projectID string) (json.RawMessage, error)
+	GetResolvedSettingsBody(ctx context.Context, projectID string) (json.RawMessage, error)
+
+	// UpdateSettingsFields sends a settings PUT whose body is exactly
+	// fields: only those keys change (the Hub merges per key), and an
+	// explicit null or "" is sent as given, so it can clear a field.
+	// Refusals are returned as *SettingsError.
+	UpdateSettingsFields(ctx context.Context, projectID string, fields map[string]interface{}) (*ProjectSettingsSaveResult, error)
 
 	// UpdateGCPIdentityDefaults writes only the default GCP identity fields
 	// of the project settings; every other setting keeps its stored value.
@@ -251,7 +269,7 @@ func (s *projectService) List(ctx context.Context, opts *ListProjectsOptions) (*
 
 // Get returns a single project by ID.
 func (s *projectService) Get(ctx context.Context, projectID string) (*Project, error) {
-	resp, err := s.c.get(ctx, "/api/v1/projects/"+projectID, nil)
+	resp, err := s.c.get(ctx, "/api/v1/projects/"+url.PathEscape(projectID), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -278,7 +296,7 @@ func (s *projectService) Create(ctx context.Context, req *CreateProjectRequest) 
 
 // Update updates project metadata.
 func (s *projectService) Update(ctx context.Context, projectID string, req *UpdateProjectRequest) (*Project, error) {
-	resp, err := s.c.patch(ctx, "/api/v1/projects/"+projectID, req, nil)
+	resp, err := s.c.patch(ctx, "/api/v1/projects/"+url.PathEscape(projectID), req, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -296,7 +314,7 @@ type DeleteProjectOptions struct {
 // Delete removes a project and its agent records. Without opts.Force the
 // hub refuses while the project has agents that are not deleted yet.
 func (s *projectService) Delete(ctx context.Context, projectID string, opts *DeleteProjectOptions) error {
-	path := "/api/v1/projects/" + projectID
+	path := "/api/v1/projects/" + url.PathEscape(projectID)
 	if opts != nil && opts.Force {
 		path += "?force=true"
 	}
@@ -305,6 +323,50 @@ func (s *projectService) Delete(ctx context.Context, projectID string, opts *Del
 		return err
 	}
 	return apiclient.CheckResponse(resp)
+}
+
+// LeaveProjectResult is the response of POST /api/v1/projects/{id}/leave.
+type LeaveProjectResult struct {
+	ProjectID          string                  `json:"projectId"`
+	DryRun             bool                    `json:"dryRun"`
+	RemovedRoles       []string                `json:"removedRoles"`
+	RemainingAccess    string                  `json:"remainingAccess"`
+	Agents             LeaveProjectAgents      `json:"agents"`
+	ProjectBoundTokens LeaveProjectTokenCounts `json:"projectBoundTokens"`
+	WillBeHeld         bool                    `json:"willBeHeld"`
+}
+
+// LeaveProjectAgents lists the agents the caller roots in the project. The
+// hub caps Items; Count is exact and Truncated reports a cut list.
+type LeaveProjectAgents struct {
+	Count     int                     `json:"count"`
+	Truncated bool                    `json:"truncated"`
+	Items     []LeaveProjectAgentItem `json:"items"`
+}
+
+// LeaveProjectAgentItem is one agent of a LeaveProjectResult.
+type LeaveProjectAgentItem struct {
+	ID    string `json:"id"`
+	Name  string `json:"name"`
+	Phase string `json:"phase"`
+}
+
+// LeaveProjectTokenCounts counts the caller's access tokens limited to the
+// project that the leave revoked (dry run: would revoke).
+type LeaveProjectTokenCounts struct {
+	Revoked int `json:"revoked"`
+}
+
+// Leave removes the caller's own direct roles on the project. A caller who
+// is not a direct member of the project, or a project that does not exist,
+// gets the same 404.
+func (s *projectService) Leave(ctx context.Context, projectID string, dryRun bool) (*LeaveProjectResult, error) {
+	body := map[string]bool{"dryRun": dryRun}
+	resp, err := s.c.post(ctx, "/api/v1/projects/"+url.PathEscape(projectID)+"/leave", body, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[LeaveProjectResult](resp)
 }
 
 // ListAgents returns agents in a project.
@@ -338,7 +400,7 @@ func (s *projectService) ListAgents(ctx context.Context, projectID string, opts 
 		opts.Page.ToQuery(query)
 	}
 
-	resp, err := s.c.getWithQuery(ctx, "/api/v1/projects/"+projectID+"/agents", query, nil)
+	resp, err := s.c.getWithQuery(ctx, "/api/v1/projects/"+url.PathEscape(projectID)+"/agents", query, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -365,7 +427,7 @@ func (s *projectService) ListAgents(ctx context.Context, projectID string, opts 
 
 // ListProviders returns runtime brokers providing services to a project.
 func (s *projectService) ListProviders(ctx context.Context, projectID string) (*ListProvidersResponse, error) {
-	resp, err := s.c.get(ctx, "/api/v1/projects/"+projectID+"/providers", nil)
+	resp, err := s.c.get(ctx, "/api/v1/projects/"+url.PathEscape(projectID)+"/providers", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -374,7 +436,7 @@ func (s *projectService) ListProviders(ctx context.Context, projectID string) (*
 
 // AddProvider adds a broker as a provider to a project.
 func (s *projectService) AddProvider(ctx context.Context, projectID string, req *AddProviderRequest) (*AddProviderResponse, error) {
-	resp, err := s.c.post(ctx, "/api/v1/projects/"+projectID+"/providers", req, nil)
+	resp, err := s.c.post(ctx, "/api/v1/projects/"+url.PathEscape(projectID)+"/providers", req, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -383,7 +445,7 @@ func (s *projectService) AddProvider(ctx context.Context, projectID string, req 
 
 // RemoveProvider removes a broker from a project.
 func (s *projectService) RemoveProvider(ctx context.Context, projectID, brokerID string) error {
-	resp, err := s.c.delete(ctx, "/api/v1/projects/"+projectID+"/providers/"+brokerID, nil)
+	resp, err := s.c.delete(ctx, "/api/v1/projects/"+url.PathEscape(projectID)+"/providers/"+url.PathEscape(brokerID), nil)
 	if err != nil {
 		return err
 	}
@@ -392,7 +454,7 @@ func (s *projectService) RemoveProvider(ctx context.Context, projectID, brokerID
 
 // GetSettings retrieves project settings.
 func (s *projectService) GetSettings(ctx context.Context, projectID string) (*ProjectSettings, error) {
-	resp, err := s.c.get(ctx, "/api/v1/projects/"+projectID+"/settings", nil)
+	resp, err := s.c.get(ctx, "/api/v1/projects/"+url.PathEscape(projectID)+"/settings", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -408,7 +470,7 @@ func (s *projectService) GetSettings(ctx context.Context, projectID string) (*Pr
 // can be cleared; other fields cannot be cleared, and the tri-state fields
 // cannot be reset to inherit.
 func (s *projectService) UpdateSettings(ctx context.Context, projectID string, settings *ProjectSettings) (*ProjectSettings, error) {
-	resp, err := s.c.put(ctx, "/api/v1/projects/"+projectID+"/settings", settings, nil)
+	resp, err := s.c.put(ctx, "/api/v1/projects/"+url.PathEscape(projectID)+"/settings", settings, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -419,11 +481,54 @@ func (s *projectService) UpdateSettings(ctx context.Context, projectID string, s
 // annotations and hub defaults. It reports which layers carry a value; it
 // does not say which one wins.
 func (s *projectService) GetResolvedSettings(ctx context.Context, projectID string) (*ResolvedProjectSettings, error) {
-	resp, err := s.c.get(ctx, "/api/v1/projects/"+projectID+"/settings/resolved", nil)
+	resp, err := s.c.get(ctx, "/api/v1/projects/"+url.PathEscape(projectID)+"/settings/resolved", nil)
 	if err != nil {
 		return nil, err
 	}
 	return apiclient.DecodeRequired[ResolvedProjectSettings](resp)
+}
+
+// GetSettingsBody retrieves project settings as the Hub's response body.
+func (s *projectService) GetSettingsBody(ctx context.Context, projectID string) (json.RawMessage, error) {
+	return s.getBody(ctx, "/api/v1/projects/"+url.PathEscape(projectID)+"/settings")
+}
+
+// GetResolvedSettingsBody retrieves the resolved settings report as the
+// Hub's response body.
+func (s *projectService) GetResolvedSettingsBody(ctx context.Context, projectID string) (json.RawMessage, error) {
+	return s.getBody(ctx, "/api/v1/projects/"+url.PathEscape(projectID)+"/settings/resolved")
+}
+
+// getBody reads path and returns its JSON body byte for byte.
+func (s *projectService) getBody(ctx context.Context, path string) (json.RawMessage, error) {
+	resp, err := s.c.get(ctx, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	body, err := apiclient.DecodeRequired[json.RawMessage](resp)
+	if err != nil {
+		return nil, err
+	}
+	return *body, nil
+}
+
+// ProjectSettingsSaveResult is the Hub's answer to a project settings save:
+// the settings as stored, and advisory warnings about the saved values.
+type ProjectSettingsSaveResult struct {
+	ProjectSettings
+	Warnings []string `json:"warnings,omitempty"`
+}
+
+// UpdateSettingsFields sends a settings PUT whose body is exactly fields.
+func (s *projectService) UpdateSettingsFields(ctx context.Context, projectID string, fields map[string]interface{}) (*ProjectSettingsSaveResult, error) {
+	if len(fields) == 0 {
+		return nil, fmt.Errorf("no project settings to change")
+	}
+	resp, err := s.c.put(ctx, "/api/v1/projects/"+url.PathEscape(projectID)+"/settings", fields, nil)
+	if err != nil {
+		return nil, err
+	}
+	return decodeSettingsResponse[ProjectSettingsSaveResult](resp)
 }
 
 // UpdateGCPIdentityDefaults sends a settings PUT whose body carries only the
@@ -433,7 +538,7 @@ func (s *projectService) UpdateGCPIdentityDefaults(ctx context.Context, projectI
 	if update == nil {
 		update = &ProjectGCPIdentityDefaultsUpdate{}
 	}
-	resp, err := s.c.put(ctx, "/api/v1/projects/"+projectID+"/settings", update, nil)
+	resp, err := s.c.put(ctx, "/api/v1/projects/"+url.PathEscape(projectID)+"/settings", update, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -442,7 +547,7 @@ func (s *projectService) UpdateGCPIdentityDefaults(ctx context.Context, projectI
 
 // GetAgent returns an agent by ID or slug within a project.
 func (s *projectService) GetAgent(ctx context.Context, projectID, agentID string) (*Agent, error) {
-	resp, err := s.c.get(ctx, "/api/v1/projects/"+projectID+"/agents/"+agentID, nil)
+	resp, err := s.c.get(ctx, "/api/v1/projects/"+url.PathEscape(projectID)+"/agents/"+url.PathEscape(agentID), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -451,7 +556,7 @@ func (s *projectService) GetAgent(ctx context.Context, projectID, agentID string
 
 // DeleteAgent removes an agent by ID or slug within a project.
 func (s *projectService) DeleteAgent(ctx context.Context, projectID, agentID string, opts *DeleteAgentOptions) error {
-	path := withDeleteAgentQuery("/api/v1/projects/"+projectID+"/agents/"+agentID, opts)
+	path := withDeleteAgentQuery("/api/v1/projects/"+url.PathEscape(projectID)+"/agents/"+url.PathEscape(agentID), opts)
 
 	resp, err := s.c.delete(ctx, path, nil)
 	if err != nil {
@@ -462,7 +567,7 @@ func (s *projectService) DeleteAgent(ctx context.Context, projectID, agentID str
 
 // Clone creates a new project seeded from an existing project's configuration.
 func (s *projectService) Clone(ctx context.Context, sourceID string, req CloneProjectRequest) (*Project, error) {
-	resp, err := s.c.post(ctx, "/api/v1/projects/"+sourceID+"/clone", req, nil)
+	resp, err := s.c.post(ctx, "/api/v1/projects/"+url.PathEscape(sourceID)+"/clone", req, nil)
 	if err != nil {
 		return nil, err
 	}

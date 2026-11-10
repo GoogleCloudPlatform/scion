@@ -253,3 +253,78 @@ func TestUserEnvSecret_ProjectBoundaryTokenRefused(t *testing.T) {
 	rec = doRequestAsUser(t, f.srv, user, http.MethodGet, "/api/v1/secrets?scope=user", nil)
 	require.Equal(t, http.StatusOK, rec.Code, "the holder's session keeps user-level access: %s", rec.Body.String())
 }
+
+// TestUserEnvSecret_HubBoundaryProjectScopedTokenRefused pins current
+// behaviour: a hub-boundary token carrying project:read and project:update
+// does not reach the holder's user-level env and secret material. Every read
+// and write is refused with the session-only denial (credential management),
+// nothing changes, and the holder's session still reads and writes it.
+func TestUserEnvSecret_HubBoundaryProjectScopedTokenRefused(t *testing.T) {
+	f := newEnvSecretTokenFixture(t, "est-uh")
+	user, err := f.s.GetUser(context.Background(), f.admin)
+	require.NoError(t, err)
+	asSession := func(method, path string, body interface{}) *httptest.ResponseRecorder {
+		return doRequestAsUser(t, f.srv, user, method, path, body)
+	}
+
+	// Seed user-level material through the session, so a wrongly admitted
+	// read answers 200 and a wrongly admitted write shows as a change.
+	rec := asSession(http.MethodPut, "/api/v1/env/EST_USER_VAR", SetEnvVarRequest{Value: "seed", Scope: "user"})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	rec = asSession(http.MethodPut, "/api/v1/secrets/EST_USER_SECRET", SetSecretRequest{Value: "c2VlZA==", Scope: "user"})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	// The secret's value is never returned, so a wrongly admitted PUT shows
+	// only as a new version.
+	rec = asSession(http.MethodGet, "/api/v1/secrets/EST_USER_SECRET?scope=user", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var seeded store.Secret
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&seeded))
+
+	key := mintHubConfigToken(t, f.srv, f.admin, hubBoundary(), "project:read", "project:update")
+	requests := []struct {
+		name   string
+		method string
+		path   string
+		body   interface{}
+	}{
+		{"env list", http.MethodGet, "/api/v1/env?scope=user", nil},
+		{"env get", http.MethodGet, "/api/v1/env/EST_USER_VAR?scope=user", nil},
+		{"env set", http.MethodPut, "/api/v1/env/EST_USER_VAR", SetEnvVarRequest{Value: "changed", Scope: "user"}},
+		{"env set new", http.MethodPut, "/api/v1/env/EST_USER_NEW", SetEnvVarRequest{Value: "new", Scope: "user"}},
+		{"env delete", http.MethodDelete, "/api/v1/env/EST_USER_VAR?scope=user", nil},
+		{"secret list", http.MethodGet, "/api/v1/secrets?scope=user", nil},
+		{"secret get", http.MethodGet, "/api/v1/secrets/EST_USER_SECRET?scope=user", nil},
+		{"secret set", http.MethodPut, "/api/v1/secrets/EST_USER_SECRET", SetSecretRequest{Value: "Y2hhbmdlZA==", Scope: "user"}},
+		{"secret patch", http.MethodPatch, "/api/v1/secrets/EST_USER_SECRET?scope=user", map[string]string{"description": "changed"}},
+		{"secret delete", http.MethodDelete, "/api/v1/secrets/EST_USER_SECRET?scope=user", nil},
+	}
+	for _, tc := range requests {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := doRequestWithToken(t, f.srv, key, tc.method, tc.path, tc.body)
+			require.Equal(t, http.StatusForbidden, rec.Code, "%s %s: %s", tc.method, tc.path, rec.Body.String())
+			var resp ErrorResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+			require.Equal(t, ErrCodeForbidden, resp.Error.Code, "%s %s", tc.method, tc.path)
+			require.NotNil(t, resp.Error.Details, "%s %s: %s", tc.method, tc.path, rec.Body.String())
+			require.Equal(t, "CREDENTIAL_MANAGEMENT", resp.Error.Details["reason"], "%s %s", tc.method, tc.path)
+			require.Equal(t, "session_required", resp.Error.Details["credential"], "%s %s", tc.method, tc.path)
+		})
+	}
+
+	// Nothing changed, and the session keeps full user-level access.
+	rec = asSession(http.MethodGet, "/api/v1/env/EST_USER_VAR?scope=user", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var ev store.EnvVar
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&ev))
+	require.Equal(t, "seed", ev.Value, "user variable value must be unchanged")
+	rec = asSession(http.MethodGet, "/api/v1/env/EST_USER_NEW?scope=user", nil)
+	require.Equal(t, http.StatusNotFound, rec.Code, "a refused request must not create a user variable: %s", rec.Body.String())
+	rec = asSession(http.MethodGet, "/api/v1/secrets/EST_USER_SECRET?scope=user", nil)
+	require.Equal(t, http.StatusOK, rec.Code, "user secret must survive refused requests: %s", rec.Body.String())
+	var sec store.Secret
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&sec))
+	require.Empty(t, sec.Description, "a refused patch must not change the user secret")
+	require.Equal(t, seeded.Version, sec.Version, "a refused PUT must not write a new version of the user secret")
+	rec = asSession(http.MethodPut, "/api/v1/env/EST_USER_VAR", SetEnvVarRequest{Value: "by-session", Scope: "user"})
+	require.Equal(t, http.StatusOK, rec.Code, "the holder's session keeps user-level write access: %s", rec.Body.String())
+}

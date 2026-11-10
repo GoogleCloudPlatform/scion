@@ -33,6 +33,12 @@ type AgentHold func(*sql.Selector)
 // AgentIdentityKey is the predicate function for agentidentitykey builders.
 type AgentIdentityKey func(*sql.Selector)
 
+// AgentLifecycleCursor is the predicate function for agentlifecyclecursor builders.
+type AgentLifecycleCursor func(*sql.Selector)
+
+// AgentLifecycleOutbox is the predicate function for agentlifecycleoutbox builders.
+type AgentLifecycleOutbox func(*sql.Selector)
+
 // AgentRecovery is the predicate function for agentrecovery builders.
 type AgentRecovery func(*sql.Selector)
 
@@ -89,6 +95,15 @@ type Conversation func(*sql.Selector)
 
 // ConversationParticipant is the predicate function for conversationparticipant builders.
 type ConversationParticipant func(*sql.Selector)
+
+// Decision is the predicate function for decision builders.
+type Decision func(*sql.Selector)
+
+// DecisionAnswer is the predicate function for decisionanswer builders.
+type DecisionAnswer func(*sql.Selector)
+
+// DecisionKeyCounter is the predicate function for decisionkeycounter builders.
+type DecisionKeyCounter func(*sql.Selector)
 
 // DelegationAdoption is the predicate function for delegationadoption builders.
 type DelegationAdoption func(*sql.Selector)

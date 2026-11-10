@@ -42,6 +42,7 @@ COPY proto/ ./proto/
 COPY resources/ ./resources/
 COPY third_party/ ./third_party/
 COPY web/*.go ./web/
+COPY image-build/lib/assert-no-cgo.sh /opt/scion-image-build/lib/assert-no-cgo.sh
 
 # Build with version info injected via ldflags
 # VCS stamping is disabled since .git is not in the build context;
@@ -49,6 +50,15 @@ COPY web/*.go ./web/
 # VERSION build args (the same values hack/version.sh derives on the host:
 # VERSION is only non-empty on an exact git tag, otherwise both binaries
 # fall back to "dev" at runtime, same as a local `make build`).
+#
+# sciontool is built with CGO_ENABLED=0 (this stage's CGO_ENABLED=1 applies
+# to scion only). sciontool init drops the network administration capability
+# on every thread with syscall.AllThreadsSyscall, which returns ENOTSUP in a
+# binary that links cgo; init would then refuse to start agents that use
+# metadata interception. assert-no-cgo.sh fails this build if the sciontool
+# that ships here ever links cgo again. This is the sciontool every agent
+# image built on scion-base runs as PID 1; the Makefile's container-sciontool
+# target (a development path) builds it the same way and runs the same check.
 RUN BUILD_TIME="${BUILD_TIME:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}" && \
     SCION_PKG="github.com/GoogleCloudPlatform/scion/pkg/version" && \
     SCIONTOOL_PKG="github.com/GoogleCloudPlatform/scion/cmd/sciontool/commands" && \
@@ -63,7 +73,8 @@ RUN BUILD_TIME="${BUILD_TIME:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}" && \
         SCIONTOOL_LDFLAGS="${SCIONTOOL_LDFLAGS} -X ${SCIONTOOL_PKG}.Version=${VERSION}"; \
     fi && \
     go build -buildvcs=false -tags no_embed_web -ldflags="${SCION_LDFLAGS}" -o /usr/local/bin/scion ./cmd/scion/ && \
-    go build -buildvcs=false -tags no_embed_web -ldflags="${SCIONTOOL_LDFLAGS}" -o /usr/local/bin/sciontool ./cmd/sciontool/
+    CGO_ENABLED=0 go build -buildvcs=false -tags no_embed_web -ldflags="${SCIONTOOL_LDFLAGS}" -o /usr/local/bin/sciontool ./cmd/sciontool/ && \
+    bash /opt/scion-image-build/lib/assert-no-cgo.sh /usr/local/bin/sciontool
 
 # Final stage
 FROM base
@@ -80,6 +91,11 @@ USER root
 # needed for the label to show up there too.
 ARG GIT_COMMIT
 LABEL org.opencontainers.image.revision="${GIT_COMMIT}"
+# The release next to the commit: the VERSION build arg, i.e. the git tag
+# HEAD is exactly on (empty off-tag, the same rule as the ldflags above).
+# Inherited by the same images as the revision label.
+ARG VERSION
+LABEL org.opencontainers.image.version="${VERSION}"
 
 # Copy scion and sciontool from builder
 COPY --from=builder /usr/local/bin/scion /usr/local/bin/scion

@@ -94,6 +94,21 @@ export const SELECTORS = {
   shareGrantRow: 'scion-artifact-share-dialog section[aria-labelledby="people-heading"] .grant',
   /** Footer buttons: a div[slot="footer"] holds them (artifact-share-dialog.ts:1010-1036). */
   shareFooterButton: 'scion-artifact-share-dialog sl-dialog[open] [slot="footer"] sl-button',
+  /**
+   * Manage access (experiment web.artifact_manage_access): the header button
+   * (artifact-detail.ts, class manage-access) and its dialog, the share
+   * dialog in mode manage (class access-dialog).
+   */
+  manageAccessButton:
+    'scion-page-artifact-detail scion-detail-header .header-actions > sl-button.manage-access',
+  accessDialogHost: 'scion-artifact-share-dialog.access-dialog',
+  accessDialog: 'scion-artifact-share-dialog.access-dialog sl-dialog[open]',
+  accessLinksSection:
+    'scion-artifact-share-dialog.access-dialog section[aria-labelledby="links-heading"]',
+  /** The link just created, shown once (artifact-share-dialog.ts renderCreated). */
+  accessCreatedLink: 'scion-artifact-share-dialog.access-dialog sl-alert.created sl-input',
+  /** Any share dialog's buttons, open or not: the Create link absence checks. */
+  anyShareDialogButton: 'scion-artifact-share-dialog sl-button',
   /** Artifacts list page (components/pages/artifacts.ts:490). */
   artifactsPage: 'scion-page-artifacts',
   artifactsRow: 'scion-page-artifacts tbody tr.clickable',
@@ -254,4 +269,38 @@ export function artifactsRow(page: Page, title: string): Locator {
 /** The access badge cell of an /artifacts row (artifacts.ts:498, 511-517). */
 export function artifactsRowAccess(row: Locator): Locator {
   return row.locator('td').nth(1);
+}
+
+/** The Manage access header button. */
+export function manageAccessButton(page: Page): Locator {
+  return page.locator(SELECTORS.manageAccessButton);
+}
+
+/** The open Manage access dialog. */
+export function accessDialog(page: Page): Locator {
+  return page.locator(SELECTORS.accessDialog);
+}
+
+/** Create link inside the Manage access dialog's Link sharing section. */
+export function accessCreateLinkButton(page: Page): Locator {
+  return page
+    .locator(`${SELECTORS.accessLinksSection} sl-button`)
+    .filter({ hasText: exact('Create link') });
+}
+
+/** Revoke buttons of the Manage access dialog's link list. */
+export function accessRevokeButtons(page: Page): Locator {
+  return page
+    .locator(`${SELECTORS.accessLinksSection} tbody sl-button`)
+    .filter({ hasText: exact('Revoke') });
+}
+
+/** Rows of the Manage access dialog's active-link list. */
+export function accessLinkRows(page: Page): Locator {
+  return page.locator(`${SELECTORS.accessLinksSection} tbody tr`);
+}
+
+/** A Create link button in any share dialog on the page, open or closed. */
+export function anyCreateLinkButton(page: Page): Locator {
+  return page.locator(SELECTORS.anyShareDialogButton).filter({ hasText: exact('Create link') });
 }

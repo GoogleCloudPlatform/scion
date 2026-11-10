@@ -53,7 +53,8 @@ func TestHubUAT_MemberDeletesOnlyAgentsInProjectsWithAccess(t *testing.T) {
 
 // TestHubUAT_UserWithoutProjectAccessCannotMintOrRead pins that a hub
 // boundary grants nothing by itself: a user who is a hub member with no
-// project access cannot mint a hub token carrying agent:read.
+// project access cannot mint a hub token carrying agent:read, and the
+// refusal names the selector and authority_required.
 func TestHubUAT_UserWithoutProjectAccessCannotMintOrRead(t *testing.T) {
 	f := newBearerFixture(t, "matrix-nonmember")
 	ctx := context.Background()
@@ -67,7 +68,11 @@ func TestHubUAT_UserWithoutProjectAccessCannotMintOrRead(t *testing.T) {
 		UserID: user, Name: "matrix-nonmember", Boundary: hubBoundary(), Scopes: []string{"agent:read"},
 	})
 	require.Error(t, err, "a user with no project access cannot mint a hub token for agent:read")
-	assert.ErrorIs(t, err, ErrUATProjectForbidden)
+	assert.NotErrorIs(t, err, ErrUATProjectForbidden)
+	var violation *UATScopeViolationError
+	require.ErrorAs(t, err, &violation)
+	assert.Equal(t, "agent:read", violation.Selector)
+	assert.Equal(t, MintDenialAuthorityRequired, violation.Reason)
 
 	// The same holder's token, had it been issued, reaches no project
 	// target: current access decides, not the boundary.

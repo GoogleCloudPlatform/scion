@@ -138,7 +138,7 @@ export A2A_API_KEY="your-secure-static-api-key"
 ```
 
 ### Step 4: Verify Connection
-Return to the Hub **Admin > Integrations** page. Click **Reconnect** on the A2A Bridge integration card. Once the Hub successfully dials the bridge's RPC server on port `9090`, the status badge will update to **Connected**.
+Return to the Hub **Admin > Integrations** page. Click **Reconnect** on the A2A Bridge integration card. Once the Hub successfully dials the bridge's RPC server on port `9090`, the status badge will update to **Connected**. If the bridge restarts or loses its RPC connection later, the Hub's plugin supervisor automatically re-dials it with exponential backoff and replays topic subscriptions; see [Message-Bus Plugin Supervision](/scion/hosted/user/external-channels/#message-bus-plugin-supervision).
 
 ### Dev-Mode Rebuild
 When running the Scion Hub in development mode (`MaintenanceConfig.RepoPath` is configured in `settings.yaml`), clicking **Update** inside the A2A integration detail page triggers an automatic compilation of the bridge binary directly from your local repository. The Hub will output instructions for you to restart the process manually to apply the new binary.
@@ -307,10 +307,10 @@ To secure and isolate desktop client sessions, Scion uses **User Access Token (U
 To authorize your desktop application, generate a Scion Personal Access Token scoped to the project you wish to target:
 
 ```bash
-scion token create \
+scion hub token create \
   --name "claude-desktop-integration" \
   --project "my-coding-project" \
-  --scope agent:message,agent:read \
+  --scopes agent:message,agent:read \
   --expires 365d
 ```
 

@@ -1,0 +1,25 @@
+schema_version: "1"
+runtimes:
+  cluster:
+    type: kubernetes
+    context: PLANTED-CONTEXT-c55
+    namespace: agents
+    env:
+      KUBECONFIG: /home/operator/PLANTED-KUBECONFIG-c56
+profiles:
+  alpha:
+    runtime: cluster
+    shared_dir_size: 731Gi
+    harness_overrides:
+      claude:
+        image: reg.example/planted-image-a-c53:v1
+        env:
+          API_TOKEN: PLANTED-ENV-TOKEN-A-c57
+  beta:
+    runtime: cluster
+    shared_dir_size: 739Gi
+    harness_overrides:
+      claude:
+        image: reg.example/planted-image-b-c54:v1
+        env:
+          API_TOKEN: PLANTED-ENV-TOKEN-B-c58

@@ -235,30 +235,28 @@ func (p *pkgInfo) refs(d *declInfo) map[string]bool {
 		}
 		return false
 	}
-	ast.Inspect(d.node, func(n ast.Node) bool {
+	// A selector's Sel is a field, method or qualified name, never a
+	// package-level reference of this package; only its X is walked. The
+	// same walk applies inside field types (ptone/scion#7176: a parameter of
+	// type pkg.Name counted Name as a reference).
+	var visit func(n ast.Node) bool
+	visit = func(n ast.Node) bool {
 		switch n := n.(type) {
 		case *ast.SelectorExpr:
-			ast.Inspect(n.X, func(m ast.Node) bool {
-				if id, ok := m.(*ast.Ident); ok {
-					p.addRef(out, id, top, isOwn)
-				}
-				return true
-			})
+			ast.Inspect(n.X, visit)
 			return false
 		case *ast.Field:
 			// Field, parameter and result names declare locals.
-			ast.Inspect(n.Type, func(m ast.Node) bool {
-				if id, ok := m.(*ast.Ident); ok {
-					p.addRef(out, id, top, isOwn)
-				}
-				return true
-			})
+			if n.Type != nil {
+				ast.Inspect(n.Type, visit)
+			}
 			return false
 		case *ast.Ident:
 			p.addRef(out, n, top, isOwn)
 		}
 		return true
-	})
+	}
+	ast.Inspect(d.node, visit)
 	return out
 }
 

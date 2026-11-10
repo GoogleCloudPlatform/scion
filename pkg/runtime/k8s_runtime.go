@@ -27,6 +27,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -122,6 +123,17 @@ type KubernetesRuntime struct {
 	// that it cannot read claims, or events, and so checks less.
 	claimReadFallbackLogged   atomic.Bool
 	claimEventsFallbackLogged atomic.Bool
+
+	// mountFailGrace and mountEventReadInterval, when non-zero, replace
+	// the NFS mount check's 60s grace and 10s Events read interval (see
+	// k8s_mount_check.go). Tests shorten them.
+	mountFailGrace         time.Duration
+	mountEventReadInterval time.Duration
+
+	// mountEventsFallbackLogged makes the NFS mount check of
+	// waitForPodReady log only once per runtime that it cannot read
+	// events, and so waits as it would without the check.
+	mountEventsFallbackLogged atomic.Bool
 }
 
 // agentContainerName is the name of the primary scion agent container in
@@ -887,7 +899,7 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 
 	// Wait for Ready
 	runtimeLog().Info("Waiting for pod ready", "agent", config.Name, "namespace", namespace, "phase", "wait-schedule")
-	if err := r.waitForPodReady(ctx, namespace, createdPod.Name, hooks); err != nil {
+	if err := r.waitForPodReady(ctx, namespace, createdPod.Name, hooks, newPodMountWatch(pod, config)); err != nil {
 		return createdPod.Name, err
 	}
 
@@ -1982,21 +1994,31 @@ func (r *KubernetesRuntime) createSharedDirPVCs(ctx context.Context, namespace s
 // warning makes that visible, with the phase when the claim is still Pending
 // (for example because its class cannot provision ReadWriteMany volumes).
 func warnOnStorageClassMismatch(pvc *corev1.PersistentVolumeClaim, requested string) {
-	if pvc == nil || requested == "" {
-		return
-	}
-	existing := ""
-	if pvc.Spec.StorageClassName != nil {
-		existing = *pvc.Spec.StorageClassName
-	}
-	if existing == requested {
+	existing, pending, differs := storageClassMismatch(pvc, requested)
+	if !differs {
 		return
 	}
 	args := []any{"pvc", pvc.Name, "existing_storage_class", existing, "requested_storage_class", requested}
-	if pvc.Status.Phase == corev1.ClaimPending {
-		args = append(args, "phase", string(pvc.Status.Phase))
+	if pending {
+		args = append(args, "phase", string(corev1.ClaimPending))
 	}
 	runtimeLog().Warn("Reusing existing shared-dir PVC whose storage class differs from the requested class; existing claims are not changed", args...)
+}
+
+// storageClassMismatch reports whether claim pvc's storage class differs
+// from the requested (non-empty) class, with the claim's class (empty when
+// it names none) and whether the claim is still Pending. A nil claim or an
+// empty requested class never differs. It is the comparison both the
+// start-time warning (warnOnStorageClassMismatch) and the doctor's
+// shared-dir-claim-classes check use.
+func storageClassMismatch(pvc *corev1.PersistentVolumeClaim, requested string) (existing string, pending, differs bool) {
+	if pvc == nil || requested == "" {
+		return "", false, false
+	}
+	if pvc.Spec.StorageClassName != nil {
+		existing = *pvc.Spec.StorageClassName
+	}
+	return existing, pvc.Status.Phase == corev1.ClaimPending, existing != requested
 }
 
 // ensureProjectRWXClaim is the idempotent get-or-create core for project-scoped
@@ -2163,24 +2185,30 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	gateCmd := `while [ ! -f /tmp/.scion-home-ready ]; do sleep 0.2; done; exec sciontool init -- sh -c "$SCION_START_CMD"`
 	cmd = []string{"sh", "-c", gateCmd}
 
-	// Env Resolution — match local runtimes by including harness env + telemetry env.
-	envVars := []corev1.EnvVar{
-		// The real startup command, consumed by the gate script above.
-		{Name: "SCION_START_CMD", Value: tmuxCmd},
+	// Env Resolution follows the Docker order (buildCommonRunArgs).
+	// Kubernetes keeps the last entry for a duplicated name (dedupeEnvVars
+	// below), so for a name set by more than one source the later source
+	// in this list wins: resolved auth, the harness env, config.Env, then
+	// the env-type secrets. The runtime keys set further down win over all
+	// of them, and the template fallback fills only names none of them set.
+	var envVars []corev1.EnvVar
+
+	// Resolved auth env is the lowest source (resolvedAuthEnvEntries: sorted,
+	// an empty value skipped).
+	for _, e := range resolvedAuthEnvEntries(config.ResolvedAuth, nil) {
+		k, v, _ := strings.Cut(e, "=")
+		envVars = append(envVars, corev1.EnvVar{Name: k, Value: v})
 	}
 
-	// Harness env (system prompt, agent name, etc.) — parity with buildCommonRunArgs.
-	if config.Harness != nil {
-		for k, v := range config.Harness.GetEnv(config.Name, config.HomeDir, config.UnixUsername) {
-			if v != "" {
-				envVars = append(envVars, corev1.EnvVar{Name: k, Value: v})
-			}
-		}
-		if config.TelemetryEnabled {
-			for k, v := range config.Harness.GetTelemetryEnv() {
-				envVars = append(envVars, corev1.EnvVar{Name: k, Value: v})
-			}
-		}
+	// The real startup command, consumed by the gate script above.
+	envVars = append(envVars, corev1.EnvVar{Name: "SCION_START_CMD", Value: tmuxCmd})
+
+	// Harness env (system prompt, agent name, etc.) with the Docker rules
+	// (harnessEnvEntries): GetTelemetryEnv wins over GetEnv when telemetry
+	// is enabled, and an empty value is skipped.
+	for _, e := range harnessEnvEntries(config, config.HomeDir) {
+		k, v, _ := strings.Cut(e, "=")
+		envVars = append(envVars, corev1.EnvVar{Name: k, Value: v})
 	}
 
 	for _, e := range config.Env {
@@ -2191,13 +2219,15 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		}
 	}
 
-	// System env set above always wins: track the names already present so
-	// the secret-injection loops below can skip any secret whose target
-	// collides with one. Symmetric with the docker/podman/apple_container
-	// runtime's equivalent check in buildCommonRunArgs.
-	envVarNames := make(map[string]struct{}, len(envVars))
-	for _, ev := range envVars {
-		envVarNames[ev.Name] = struct{}{}
+	// An env-type secret is skipped for a name config.Env sets, as in
+	// buildCommonRunArgs, and for SCION_START_CMD, so a secret never
+	// replaces the pod's start command. It wins over resolved auth and the
+	// harness env, which are therefore not in this set.
+	envVarNames := map[string]struct{}{"SCION_START_CMD": {}}
+	for _, e := range config.Env {
+		if name, _, ok := strings.Cut(e, "="); ok {
+			envVarNames[name] = struct{}{}
+		}
 	}
 
 	// Secret and auth-file mounting. Every file these volumes deliver comes
@@ -2280,7 +2310,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 
 			for _, s := range config.ResolvedSecrets {
 				if s.Type == "environment" {
-					if _, collides := envVarNames[s.Target]; collides {
+					if _, collides := envVarNames[s.Target]; collides || reservedAgentEnvName(s.Target) {
 						continue
 					}
 					envVars = append(envVars, corev1.EnvVar{
@@ -2307,7 +2337,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 			// volume projects only the file keys, not the env values.
 			for _, s := range config.ResolvedSecrets {
 				if s.Type == "environment" {
-					if _, collides := envVarNames[s.Target]; collides {
+					if _, collides := envVarNames[s.Target]; collides || reservedAgentEnvName(s.Target) {
 						continue
 					}
 					envVars = append(envVars, corev1.EnvVar{
@@ -2348,12 +2378,10 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		}
 	}
 
-	// ResolvedAuth is always applied when present (composes with ResolvedSecrets).
-	// Auth files are injected via a K8s Secret rather than hostPath for portability.
+	// ResolvedAuth files are applied when present (they compose with
+	// ResolvedSecrets; its env entries are emitted first, above). Auth files
+	// are injected via a K8s Secret rather than hostPath for portability.
 	if config.ResolvedAuth != nil {
-		for k, v := range config.ResolvedAuth.EnvVars {
-			envVars = append(envVars, corev1.EnvVar{Name: k, Value: v})
-		}
 		if len(config.ResolvedAuth.Files) > 0 {
 			extraVolumes = append(extraVolumes, corev1.Volume{
 				Name: k8sAuthFilesVolume,
@@ -2472,10 +2500,13 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	// here; the variable only drives the umask.
 	envVars = withSupplementalGIDsEnv(envVars, sharedDirGroups(config))
 
-	// The template env fallback (ptone/scion#4524) is the LAST env step:
-	// only names no source above set (plain or secret-backed), never a
-	// suppressed key.
+	// The template env fallback (ptone/scion#4524) is the last env step that
+	// adds entries: only names no source above set (plain or secret-backed),
+	// never a suppressed key.
 	envVars = appendK8sFallbackEnv(envVars, config.FallbackEnv, config.SuppressedFallbackKeys)
+	// A reserved name never reaches the container, whatever its source: the
+	// drop runs after every step that adds entries.
+	envVars = slices.DeleteFunc(envVars, func(ev corev1.EnvVar) bool { return reservedAgentEnvName(ev.Name) })
 
 	// Determine image pull policy
 	pullPolicy := corev1.PullIfNotPresent
@@ -2975,6 +3006,12 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	for i, v := range config.Volumes {
 		switch v.Type {
 		case "gcs":
+			// The entry is a user-owned Mount: Realize gives its target and
+			// read-only flag, the GCS FUSE CSI driver its volume.
+			realized, err := realizeUserVolume(v.Bucket, v.Target, v.ReadOnly, projectfs.RuntimePod)
+			if err != nil {
+				return nil, err
+			}
 			volName := fmt.Sprintf("gcs-vol-%d", i)
 			attrs := map[string]string{
 				"bucketName": v.Bucket,
@@ -2996,8 +3033,8 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 			})
 			pod.Spec.Containers[0].VolumeMounts = append(pod.Spec.Containers[0].VolumeMounts, corev1.VolumeMount{
 				Name:      volName,
-				MountPath: v.Target,
-				ReadOnly:  v.ReadOnly,
+				MountPath: realized.Target,
+				ReadOnly:  realized.ReadOnly,
 			})
 
 			pod.Annotations = ensureAnnotations(pod.Annotations)
@@ -3411,7 +3448,10 @@ func logPodLifecycleTimings(namespace, podName string, waitMs int64, t podLifecy
 // receives a progress step (podLaunchStep) each time the step changes.
 // Terminal failures are *LaunchFailure errors; so is the end of its own time
 // budget while ctx is still live (launch_timeout, in the last step seen).
-func (r *KubernetesRuntime) waitForPodReady(ctx context.Context, namespace, podName string, hooks launchHooks) error {
+// watch is the pod's NFS volumes: a mount failure on one of them that lasts
+// fails the start with volume_mount_failed (checkMounts). A zero watch
+// reads no Events.
+func (r *KubernetesRuntime) waitForPodReady(ctx context.Context, namespace, podName string, hooks launchHooks, watch podMountWatch) error {
 	waitStart := time.Now()
 	parentCtx := ctx
 	timeout := r.podReadyTimeout
@@ -3435,6 +3475,7 @@ func (r *KubernetesRuntime) waitForPodReady(ctx context.Context, namespace, podN
 	// last pod read, so a pod that is gone by the next poll is still
 	// reported as preempted or evicted.
 	lastDisruption := ""
+	mounts := r.newMountCheck(watch)
 
 	fmt.Printf("Waiting for pod '%s' to be ready...\n", podName)
 	for {
@@ -3591,6 +3632,12 @@ func (r *KubernetesRuntime) waitForPodReady(ctx context.Context, namespace, podN
 				if lastDisruption != "" {
 					return podDisruptionStartError(podName, failStep(lastStep), lastDisruption, err)
 				}
+				return err
+			}
+
+			// A pod still waiting for its volumes: fail a lasting mount
+			// failure on an NFS volume now rather than at the timeout.
+			if err := r.checkMounts(ctx, namespace, mounts, pod); err != nil {
 				return err
 			}
 		}

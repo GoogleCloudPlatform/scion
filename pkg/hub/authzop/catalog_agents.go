@@ -260,7 +260,7 @@ var agentOperations = []OperationSpec{
 	{
 		ID:          "agent.list",
 		Domain:      "agent",
-		Description: "List agents within the caller's authorized project scope. A user access token needs agent:list on either boundary: a project token lists only its boundary project's agents. The project form lists one project's agents and decides agent.list on that project. An agent delegated credential is admitted on the hub form only: its scope is the authorizing user's list scope within the grant boundary, and each item is also decided for agent.read",
+		Description: "List agents within the caller's authorized project scope. A user access token needs agent:list on either boundary: a project token lists only its boundary project's agents. The project form lists one project's agents and decides agent.list on that project. An agent delegated credential is admitted on the hub and project forms: its scope is the authorizing user's list scope within the grant boundary (on the project form, within that one project), and each item is also decided for agent.read",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/agents", Method: "GET"},
@@ -300,6 +300,7 @@ var agentOperations = []OperationSpec{
 			{Package: "pkg/hub", Function: "TestListFilters_CannotEnlargeTokenResults"},
 			{Package: "pkg/hub", Function: "TestAgentDelegatedAgentList_ExplicitScopeAcrossProjects"},
 			{Package: "pkg/hub", Function: "TestAgentDelegatedAgentList_MixedItemsAndCounts"},
+			{Package: "pkg/hub", Function: "TestDelegatedProjectAgentList_ScopeAndBinding"},
 		},
 		Bearer: AdmitOn(BearerTargetListScope, BearerBoundaryProject, BearerBoundaryHub),
 	},
@@ -512,7 +513,7 @@ var agentOperations = []OperationSpec{
 	{
 		ID:          "agent.action.message",
 		Domain:      "agent",
-		Description: "Send a message to an agent through its message action",
+		Description: "Send a message to an agent through its message action. A user's post into a thread by thread key also needs the post action of chat-thread-access on the agent's project (project:read, then project.chat_post; 403 chat_post_denied with reason read_only), decided before any wake or row",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/message", Method: "POST"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/agents/{id}/message", Method: "POST"},

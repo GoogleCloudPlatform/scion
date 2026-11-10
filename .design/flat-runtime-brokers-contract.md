@@ -175,6 +175,7 @@ The code lives in a new package, `pkg/brokeridentity`, with no runtime or Hub de
 **Frozen Go types** (`pkg/brokeridentity`):
 - `type Identity struct { SchemaVersion int; InstanceKey string; RuntimeBrokerID string; RuntimeTarget api.RuntimeTargetDescriptor; ExecutionScope ExecutionScope; CreatedAt time.Time }`. Its JSON is the file shape shown above; the target's `displayName` is not stored.
 - `type ExecutionScope struct { Type string; Docker *DockerScope; Kubernetes *KubernetesScope }`, `type DockerScope struct { DaemonID, Endpoint string }`, `type KubernetesScope struct { ClusterUID, Namespace, APIServer string }`, with JSON keys as in section 5.
+- **P5-CR Cloud Run amendment (CR3a):** `ExecutionScope` gains `CloudRun *CloudRunScope` (JSON `cloudrun`), with `type CloudRunScope struct { ProjectNumber, Region, ProjectID string }`. `schemaVersion` stays 1. The authoritative text, including the rollback rule for older binaries, is in `flat-runtime-brokers/p5-cloudrun-amendment.md`.
 - `func LoadOrCreate(dir, key, targetType string, observed ExecutionScope, legacyBrokerIDs []string) (*Identity, error)`
 - `func VerifyScope(recorded, observed ExecutionScope) error`
 - `type AckBinding struct { RuntimeBrokerID string; RuntimeTarget *api.RuntimeTargetDescriptor }`
@@ -242,6 +243,9 @@ Target identity is the runtime target ID **bound to a normalized execution-scope
 - **P2.1-K local client selection:** optional `runtime_target.kubeconfig` (Go `Kubeconfig` in both config families; json/yaml/koanf `kubeconfig`) is one absolute local file path, never target identity or remote Hub metadata. Preserve it in conversions, strict loading, startup mapping and schema. No tilde/environment expansion or explicit path list. Explicit-file load/context failures refuse only that instance, with no fallback to defaults or in-cluster credentials. Omitted/empty uses normal process default kubeconfig loading, including KUBECONFIG path lists; never mutate process environment, cwd or current-context. Context is optional; explicit namespace wins, otherwise preserve the runtime namespace fallback chain. Normal credential refresh remains supported; no proactive credential polling is introduced.
 - **P2.1-K binding amendment and acceptance criteria:** `flat-runtime-brokers/p2-kubernetes-amendment.md` records K1/K2/K3, exact loading/fallback semantics, the required namespace-read permission, real-constructor and isolation tests, schema/conversion parity, and exclusion of kubeconfig paths/credentials from registration, heartbeat, inventory, saved placement and identity. The real Kubernetes slice remains a prerequisite of the P2 gate.
 
+### Cloud Run (P5-CR amendment)
+
+- **Binding amendment and acceptance criteria:** `flat-runtime-brokers/p5-cloudrun-amendment.md` (CR3) is authoritative for the `cloudrun` target: the record `{ "type": "cloudrun", "cloudrun": { "projectNumber", "region", "projectId" } }`, the identity fields `projectNumber` + `region` with the scope identity string `cloudrun:<projectNumber>/<region>`, the required per-instance credentials file, the activation order and its refusals, and the required acceptance coverage.
 
 A scope change always means a new target. That requires a new identity, either a new instance key or the directory removed (section 4), and therefore a new Runtime Broker ID.
 
@@ -946,6 +950,18 @@ If dispatch authorization fails, its error is returned and no flat check is eval
 **Forward rule.** ptone/scion#3340 phase 1 changes dispatch authorization in one place, the body of `canDispatchToBroker` (or a successor that `checkBrokerDispatchAccess` and the resolver's selection filter call in its place), and changes link creation in the explicit link paths. The flat checks, their order after authorization, and their codes need no change. **The co-located auto-link convenience in ptone/scion#3340 does not apply to flat rows.** Its link paths must exclude every row with a stored runtime target, including the embedded flat instance that R7 records with `SetEmbeddedBrokerID`. They must not key the convenience on the embedded-Runtime Broker identity alone.
 
 ## Change log
+
+- **P5-CR Cloud Run amendment (2026-11-04; ptone/scion#7308):** add `cloudrun` as a flat target type, co-located only. Sections 2, 4, 5, 6, 14 and 15 amended: six Cloud-Run-only fields in both config shapes with their validation (CR1, CR2), `CloudRunScope` in the identity file (CR3a), the Cloud Run identity record, credentials and activation order (CR3), the never-sent fields (CR4), the `hub.flat_cloudrun_target` experiment (CR5), ownership label keys and values (CR6), and the cloudrun acceptance expectation replacing the unsupported-type one. The authoritative text and the required acceptance coverage are in `flat-runtime-brokers/p5-cloudrun-amendment.md`; appendix-p3 carries the matching Amendment (P5-CR) block. This does not permit remote-mode `cloudrun` hosting, an ADC fallback for this target, or skipping scope verification.
+  - CR12 (§6 R1): a new flat row's descriptor type must be a canonical type (`docker`, `kubernetes`, `cloudrun`), byte for byte; anything else gets 422 `runtime_target_type_unsupported`. One shared type-matching function serves every type-keyed Hub policy.
+  - Errata (1c): E-1 the default-account refusal text quoted exactly as in CR2; E-2 P6 is unix-only, its non-unix counterpart fails closed; E-3 the convert --plan acceptance test is named.
+  - Errata (1c): E-4 `service_account` must be a user-managed account (`name@project.iam.gserviceaccount.com`); service agents and other Google-managed addresses are refused; the default-account check runs first.
+  - Errata (1c): E-5 Google-managed service agents that match the user-managed shape (`service-<digits>@…`, `@gcp-sa-…`) are refused explicitly.
+  - OQ1 (CR6): an unlabeled agent instance on a Cloud Run project and region, from this Hub or another, blocks activation of every flat instance there; the `ownership_unresolved` refusal names the drain step and instance names only. OQ4: no reachability probe in `scion doctor` in this amendment.
+  - Errata (1c): E-6 an impersonated credential with a non-empty `delegates` chain is refused.
+  - Errata (1c): E-7 credential token endpoints are pinned to `https://oauth2.googleapis.com/token`, and a non-default `universe_domain` is refused.
+  - Errata (1c): E-8 the credential-contents acceptance test covers every Runtime Broker-side body in phase 1; its admin server-config GET half is a follow-up gated before the experiment leaves alpha.
+  - Errata (1c): E-9 the agent fully holds the instance's service_account; grant it only what agents need.
+  - Errata (1c): E-10 per-agent GCP identity requests are refused on flat Cloud Run instances in every mode; the agent runs only as the instance's service_account.
 
 - **P2.3 S1 frozen-fixture amendment (2026-10-09; architecture approved):** section 15 permits narrowly scoped F-arrange/helper and raw-request fixture changes for valid immutable IDs and existing-agent ownership records. Frozen assertions and precedence remain unchanged; true creates must create their own record. ID-less/singleton ownership exceptions are rejected. Additional ownership-negative and real Hub dispatch evidence is required.
 

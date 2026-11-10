@@ -736,7 +736,7 @@ func TestDispatchDelivery_MintBeforeFetch(t *testing.T) {
 	m.secret(t, "MD_ORDER_BROKER", "b", store.SecretTypeEnvironment, store.ScopeRuntimeBroker, m.broker.ID)
 	hdWithStore(t, m.authz, &ldOrderStore{Store: m.store, target: m.agent.ID, log: &log})
 
-	_, err := m.d.selectDeliverySecrets(context.Background(), newDeliverySelector(m.authz, m.agent, PurposeRestart), m.agent)
+	_, _, err := m.d.selectDeliverySecrets(context.Background(), newDeliverySelector(m.authz, m.agent, PurposeRestart), m.agent)
 	require.NoError(t, err)
 
 	firstAgent, lastEdges, firstFetch := -1, -1, -1
@@ -859,7 +859,7 @@ func TestDispatchDelivery_PreservedFilters(t *testing.T) {
 		ScopeID: m.agent.ProjectID, InjectionMode: store.InjectionModeAsNeeded,
 	}))
 
-	secrets, err := m.d.selectDeliverySecrets(ctx, newDeliverySelector(m.authz, m.agent, PurposeDispatch), m.agent)
+	secrets, _, err := m.d.selectDeliverySecrets(ctx, newDeliverySelector(m.authz, m.agent, PurposeDispatch), m.agent)
 	require.NoError(t, err)
 	byName := map[string]ResolvedSecret{}
 	for _, s := range secrets {
@@ -1050,9 +1050,9 @@ func TestDispatchDelivery_GCPSecretRefMatchesResolve(t *testing.T) {
 
 	// set stores a file secret through the GCP backend and returns its
 	// record as written, with the gcpsm: ref Set records.
-	set := func(name, scope string) *store.Secret {
+	setAt := func(name, scope, target string) *store.Secret {
 		_, meta, err := gcp.Set(ctx, &secret.SetSecretInput{
-			Name: name, Value: "v-" + name, SecretType: store.SecretTypeFile, Target: "/etc/md/" + strings.ToLower(name),
+			Name: name, Value: "v-" + name, SecretType: store.SecretTypeFile, Target: target,
 			Scope: scope, ScopeID: m.scopeID(scope), InjectionMode: store.InjectionModeAlways, CreatedBy: m.projectOwnerID,
 		})
 		require.NoError(t, err)
@@ -1061,13 +1061,17 @@ func TestDispatchDelivery_GCPSecretRefMatchesResolve(t *testing.T) {
 		require.NoError(t, err)
 		return rec
 	}
+	set := func(name, scope string) *store.Secret {
+		return setAt(name, scope, "/etc/md/"+strings.ToLower(name))
+	}
 	repoint := func(rec *store.Secret, ref string) {
 		applied, err := m.store.UpdateSecretRefIfMatches(ctx, rec.Key, rec.Scope, rec.ScopeID, rec.SecretRef, rec.Version, ref)
 		require.NoError(t, err)
 		require.True(t, applied)
 	}
 	project := set("MD_GCP_PREFIXED", store.ScopeProject)
-	hub := set("MD_GCP_LEGACY_EMPTY", store.ScopeHub)
+	// The only hub-scope file secret either path delivers.
+	hub := setAt("scion-telemetry-gcp-credentials", store.ScopeHub, "~/.scion/telemetry-gcp-credentials.json")
 	repoint(hub, "")
 	broker := set("MD_GCP_UNPREFIXED", store.ScopeRuntimeBroker)
 	repoint(broker, smPrefix+"unprefixed-ref")
@@ -1081,7 +1085,7 @@ func TestDispatchDelivery_GCPSecretRefMatchesResolve(t *testing.T) {
 		want[rec.Key] = strings.TrimPrefix(rec.SecretRef, "gcpsm:")
 	}
 
-	got, err := m.d.selectDeliverySecrets(ctx, newDeliverySelector(m.authz, m.agent, PurposeRestart), m.agent)
+	got, _, err := m.d.selectDeliverySecrets(ctx, newDeliverySelector(m.authz, m.agent, PurposeRestart), m.agent)
 	require.NoError(t, err)
 	old, _, err := m.d.resolveSecrets(ctx, m.agent)
 	require.NoError(t, err)
@@ -1218,16 +1222,30 @@ func TestDispatchDelivery_TestAdminWithheldScopeNotFetched(t *testing.T) {
 	own := userSecret(root, "MD_TA_ROOT_OWNED")
 	other := userSecret(issuer.ID, "MD_TA_ISSUER_OWNED")
 
-	got, err := d.selectDeliverySecrets(ctx, newDeliverySelector(srv.authzService, agentOwnedBy(root), PurposeRestart), agentOwnedBy(root))
+	// The root's own user scope is delivered only along a delegation chain
+	// recorded to the root, so record the root's principal edge to the
+	// control agent.
+	control := agentOwnedBy(root)
+	hdEdge(t, s, store.DelegationPrincipalUser, root, control.ID, projectID, nil)
+	got, _, err := d.selectDeliverySecrets(ctx, newDeliverySelector(srv.authzService, control, PurposeRestart), control)
 	require.NoError(t, err)
 	require.Len(t, got, 1, "control: the root's own user scope is allowed")
 	assert.Equal(t, "v-MD_TA_ROOT_OWNED", got[0].Value)
 	require.Len(t, rec.fetched, 1)
 	assert.Equal(t, own.ID, rec.fetched[0].ID)
 
+	// Without a delegation chain recorded to the root, the root's own user
+	// scope is withheld as well.
+	rec.fetched = nil
+	unrecorded := agentOwnedBy(root)
+	got, _, err = d.selectDeliverySecrets(ctx, newDeliverySelector(srv.authzService, unrecorded, PurposeRestart), unrecorded)
+	require.NoError(t, err)
+	assert.Empty(t, got, "no recorded chain: the root's own user scope is withheld")
+	assert.Empty(t, rec.fetched, "no recorded chain: the root's own secret value is not fetched")
+
 	rec.fetched = nil
 	withheldAgent := agentOwnedBy(issuer.ID)
-	got, err = d.selectDeliverySecrets(ctx, newDeliverySelector(srv.authzService, withheldAgent, PurposeRestart), withheldAgent)
+	got, _, err = d.selectDeliverySecrets(ctx, newDeliverySelector(srv.authzService, withheldAgent, PurposeRestart), withheldAgent)
 	require.NoError(t, err)
 	assert.Empty(t, got, "a withheld scope delivers nothing")
 	for _, meta := range rec.fetched {
@@ -1358,7 +1376,7 @@ func TestDeliverySelection_DefensiveBranches(t *testing.T) {
 		require.NoError(t, err)
 		assert.Empty(t, env)
 		assert.Empty(t, plain)
-		secrets, err := m.d.selectDeliverySecrets(ctx, restartSel(m, nil), nil)
+		secrets, _, err := m.d.selectDeliverySecrets(ctx, restartSel(m, nil), nil)
 		require.NoError(t, err)
 		assert.Empty(t, secrets)
 	})
@@ -1366,21 +1384,21 @@ func TestDeliverySelection_DefensiveBranches(t *testing.T) {
 		m := newLDFixture(t, "df-nobackend", ldOptions{})
 		m.secret(t, "MD_DF_NOBACKEND", "v", store.SecretTypeEnvironment, store.ScopeProject, m.agent.ProjectID)
 		m.d.secretBackend = nil
-		secrets, err := m.d.selectDeliverySecrets(ctx, restartSel(m, m.agent), m.agent)
+		secrets, _, err := m.d.selectDeliverySecrets(ctx, restartSel(m, m.agent), m.agent)
 		require.NoError(t, err)
 		assert.Empty(t, secrets)
 	})
 	t.Run("secret_list_error", func(t *testing.T) {
 		m := newLDFixture(t, "df-secretlist", ldOptions{})
 		m.d.SetSecretBackend(&ldFaultSecretBackend{SecretBackend: m.backend, listErr: injected})
-		_, err := m.d.selectDeliverySecrets(ctx, restartSel(m, m.agent), m.agent)
+		_, _, err := m.d.selectDeliverySecrets(ctx, restartSel(m, m.agent), m.agent)
 		assert.ErrorIs(t, err, injected)
 	})
 	t.Run("progeny_secret_list_error", func(t *testing.T) {
 		m := newLDFixture(t, "df-progenysecret", ldOptions{})
 		m.d.store = &ldListFaultStore{Store: m.store, listProgenySecretsErr: injected}
 		a := withProgenyAncestry(m)
-		_, err := m.d.selectDeliverySecrets(ctx, restartSel(m, a), a)
+		_, _, err := m.d.selectDeliverySecrets(ctx, restartSel(m, a), a)
 		assert.ErrorIs(t, err, injected)
 	})
 	t.Run("fetch_error_fails_selection", func(t *testing.T) {
@@ -1388,7 +1406,7 @@ func TestDeliverySelection_DefensiveBranches(t *testing.T) {
 		sm := m.secret(t, "MD_DF_FETCH", "v", store.SecretTypeEnvironment, store.ScopeProject, m.agent.ProjectID)
 		fb := &ldFaultSecretBackend{SecretBackend: m.backend, fetchErr: injected}
 		m.d.SetSecretBackend(fb)
-		_, err := m.d.selectDeliverySecrets(ctx, restartSel(m, m.agent), m.agent)
+		_, _, err := m.d.selectDeliverySecrets(ctx, restartSel(m, m.agent), m.agent)
 		assert.ErrorIs(t, err, injected)
 		var ids []string
 		for _, meta := range fb.fetched {
@@ -1409,7 +1427,7 @@ func TestDeliverySelection_DefensiveBranches(t *testing.T) {
 			missing := m.secret(t, "MD_DF_ITEM_MISSING", "m", store.SecretTypeEnvironment, store.ScopeHub, m.hubID)
 			m.secret(t, "MD_DF_ITEM_OK", "ok", store.SecretTypeEnvironment, store.ScopeRuntimeBroker, m.broker.ID)
 			m.d.SetSecretBackend(&ldFaultSecretBackend{SecretBackend: m.backend, itemErrID: failed.ID, itemErr: tc.itemErr, dropID: missing.ID})
-			secrets, err := m.d.selectDeliverySecrets(ctx, restartSel(m, m.agent), m.agent)
+			secrets, _, err := m.d.selectDeliverySecrets(ctx, restartSel(m, m.agent), m.agent)
 			require.NoError(t, err)
 			require.Len(t, secrets, 1)
 			assert.Equal(t, "MD_DF_ITEM_OK", secrets[0].Name)
@@ -1421,7 +1439,7 @@ func TestDeliverySelection_DefensiveBranches(t *testing.T) {
 		failed := m.secret(t, "MD_DF_ITEM_FAILED", "f", store.SecretTypeEnvironment, store.ScopeProject, m.agent.ProjectID)
 		m.secret(t, "MD_DF_ITEM_OK", "ok", store.SecretTypeEnvironment, store.ScopeRuntimeBroker, m.broker.ID)
 		m.d.SetSecretBackend(&ldFaultSecretBackend{SecretBackend: m.backend, itemErrID: failed.ID, itemErr: injected})
-		secrets, err := m.d.selectDeliverySecrets(ctx, restartSel(m, m.agent), m.agent)
+		secrets, _, err := m.d.selectDeliverySecrets(ctx, restartSel(m, m.agent), m.agent)
 		assert.ErrorIs(t, err, injected)
 		assert.NotErrorIs(t, err, secret.ErrResolveDecrypt)
 		assert.Nil(t, secrets)
@@ -1436,7 +1454,7 @@ func TestDeliverySelection_DefensiveBranches(t *testing.T) {
 		m.secret(t, "MD_DF_PLAIN", "p", store.SecretTypeEnvironment, store.ScopeProject, m.agent.ProjectID)
 		fb := &ldFaultSecretBackend{SecretBackend: m.backend}
 		m.d.SetSecretBackend(fb)
-		secrets, err := m.d.selectDeliverySecrets(ctx, restartSel(m, m.agent), m.agent)
+		secrets, _, err := m.d.selectDeliverySecrets(ctx, restartSel(m, m.agent), m.agent)
 		require.NoError(t, err)
 		require.Len(t, secrets, 1, "control: the plain project secret is delivered")
 		assert.Equal(t, "MD_DF_PLAIN", secrets[0].Name)
@@ -1500,12 +1518,16 @@ func TestDispatchDelivery_LocalSelectionMatchesResolve(t *testing.T) {
 		})
 		require.NoError(t, err)
 	}
-	got, err := m.d.selectDeliverySecrets(ctx, newDeliverySelector(m.authz, m.agent, PurposeRestart), m.agent)
+	got, _, err := m.d.selectDeliverySecrets(ctx, newDeliverySelector(m.authz, m.agent, PurposeRestart), m.agent)
 	require.NoError(t, err)
 	old, _, err := m.d.resolveSecrets(ctx, m.agent)
 	require.NoError(t, err)
-	require.Len(t, got, 8)
+	// The hub-scope file secret is not delivered by either path.
+	require.Len(t, got, 7)
 	assert.ElementsMatch(t, old, got)
+	for _, r := range got {
+		assert.NotEqual(t, "md-lp-file-"+store.ScopeHub, r.Name)
+	}
 }
 
 // TestMaterialAssociation_FactDefensiveBranches: the association fact's
@@ -1671,14 +1693,14 @@ func TestDispatchDelivery_TestAdminPlaceholderMasksLowerScope(t *testing.T) {
 		}
 		return out
 	}
-	got, err := d.selectDeliverySecrets(ctx, newDeliverySelector(srv.authzService, agent, PurposeRestart), agent)
+	got, _, err := d.selectDeliverySecrets(ctx, newDeliverySelector(srv.authzService, agent, PurposeRestart), agent)
 	require.NoError(t, err)
 	assert.Equal(t, map[string]string{"MD_TAM_SHARED": "from-project", "MD_TAM_PROJECT_ONLY": "project-only"}, values(got),
 		"control: the root is a member of the project, so its project secrets are authorized and allowed")
 
 	withheld := set("MD_TAM_SHARED", "from-user", store.ScopeUser, issuer.ID)
 	rec.fetched = nil
-	got, err = d.selectDeliverySecrets(ctx, newDeliverySelector(srv.authzService, agent, PurposeRestart), agent)
+	got, _, err = d.selectDeliverySecrets(ctx, newDeliverySelector(srv.authzService, agent, PurposeRestart), agent)
 	require.NoError(t, err)
 	assert.Equal(t, map[string]string{"MD_TAM_PROJECT_ONLY": "project-only"}, values(got),
 		"the withheld user secret masks the project secret of the same name, and is itself dropped")
@@ -1735,7 +1757,7 @@ func TestDispatchDelivery_UndecryptableSecretFailsStart(t *testing.T) {
 
 				// The selection itself reports the decrypt failure and
 				// returns nothing.
-				secrets, err := m.d.selectDeliverySecrets(ctx, newDeliverySelector(m.authz, m.agent, PurposeRestart), m.agent)
+				secrets, _, err := m.d.selectDeliverySecrets(ctx, newDeliverySelector(m.authz, m.agent, PurposeRestart), m.agent)
 				require.ErrorIs(t, err, secret.ErrResolveDecrypt)
 				assert.Nil(t, secrets)
 

@@ -221,18 +221,37 @@ func (s *Server) profileRuntimeHealthChecks() map[string]string {
 			break
 		}
 		base := profileRuntimeCheckName(name)
-		check := base
-		for n := 2; checks[check] != ""; n++ {
-			suffix := fmt.Sprintf("-%d", n)
-			if len(base)+len(suffix) > api.BrokerHealthMaxNameChars {
-				check = base[:api.BrokerHealthMaxNameChars-len(suffix)] + suffix
-			} else {
-				check = base + suffix
-			}
+		check, ok := base, true
+		for n := 2; ok && checks[check] != ""; n++ {
+			check, ok = suffixedCheckName(base, fmt.Sprintf("-%d", n), api.BrokerHealthMaxNameChars)
+		}
+		if !ok {
+			// No distinct name fits: report the profile under the first
+			// entry of that name only.
+			continue
 		}
 		checks[check] = api.BrokerHealthUnavailable
 	}
 	return checks
+}
+
+// suffixedCheckName returns base with suffix appended, cutting base so the
+// result is at most max bytes. When the suffix leaves no room for any of
+// base (the suffix alone is max bytes or more) it cannot be used: the
+// result is base cut to max, without the suffix, and ok is false, so the
+// caller does not loop on the same name.
+func suffixedCheckName(base, suffix string, max int) (string, bool) {
+	if len(base)+len(suffix) <= max {
+		return base + suffix, true
+	}
+	limit := max - len(suffix)
+	if limit <= 0 {
+		if len(base) > max {
+			base = base[:max]
+		}
+		return base, false
+	}
+	return base[:limit] + suffix, true
 }
 
 // profileRuntimeCheckName is the self-health check name for profileName:

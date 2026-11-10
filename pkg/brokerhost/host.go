@@ -91,6 +91,13 @@ const (
 // environment switches.
 type RuntimeFactory func(ctx context.Context, inst config.V1RuntimeBrokerInstanceConfig) (runtime.Runtime, error)
 
+// Precondition checks an instance's local preconditions before its runtime
+// is built (amendment P5-CR, CR3 activation step 1): it reads only local
+// configuration, the environment and local files, never the cloud or a
+// metadata server. A non-nil error refuses that instance; its reason code
+// (WithReason) reaches Status.
+type Precondition func(ctx context.Context, inst config.V1RuntimeBrokerInstanceConfig) error
+
 // ScopeProber probes the execution scope of an instance's runtime (Docker:
 // the daemon ID through the runtime's own CLI).
 type ScopeProber func(ctx context.Context, inst config.V1RuntimeBrokerInstanceConfig, rt runtime.Runtime) (brokeridentity.ExecutionScope, error)
@@ -170,13 +177,17 @@ type Config struct {
 	GlobalDir string
 	// Instances are the strictly loaded and validated
 	// server.broker.instances, in configuration order.
-	Instances   []config.V1RuntimeBrokerInstanceConfig
-	Mode        Mode
-	LegacyIDs   []string
-	NewRuntime  RuntimeFactory
-	ProbeScope  ScopeProber
-	Activator   Activator
-	BuildServer ServerBuilder
+	Instances []config.V1RuntimeBrokerInstanceConfig
+	Mode      Mode
+	LegacyIDs []string
+	// Precondition, when set, runs first for every instance in pass 1,
+	// before NewRuntime: a refused instance's runtime is never built, its
+	// scope never probed and its identity never read or minted.
+	Precondition Precondition
+	NewRuntime   RuntimeFactory
+	ProbeScope   ScopeProber
+	Activator    Activator
+	BuildServer  ServerBuilder
 	// OwnershipPreflight, when set, runs in pass 1 for every candidate
 	// after its scope and identity are established and before any Hub
 	// activation: it inspects the instance's scope and refuses (returns an
@@ -250,8 +261,21 @@ type Host struct {
 	prepared  bool
 	httpSrv   *http.Server
 	addr      string
+	// listening is closed once Run's listener is bound (Listening).
+	listenInit  sync.Once
+	listenClose sync.Once
+	listenCh    chan struct{}
 	// servicesStop stops the host services once.
 	servicesStop sync.Once
+}
+
+// Listening returns a channel that is closed once Run has bound the
+// process-wide listener. It is never closed when the bind fails. A server
+// start uses it to release the 'runtime-broker convert' host lock only
+// after its own listener is up.
+func (h *Host) Listening() <-chan struct{} {
+	h.listenInit.Do(func() { h.listenCh = make(chan struct{}) })
+	return h.listenCh
 }
 
 // New validates cfg and returns a Host. Invalid instance configuration
@@ -328,6 +352,12 @@ func (h *Host) Prepare(ctx context.Context) error {
 	// ownership on it is unresolved.
 	unresolvedScopes := map[string][]string{}
 	for _, in := range h.instances {
+		if h.cfg.Precondition != nil {
+			if err := h.cfg.Precondition(ctx, in.cfg); err != nil {
+				h.refuse(in, fmt.Errorf("flat Runtime Broker instance %q not activated: %w", in.cfg.Key, err))
+				continue
+			}
+		}
 		rt, err := h.cfg.NewRuntime(ctx, in.cfg)
 		if err != nil {
 			h.refuse(in, &runtimeBuildError{err: fmt.Errorf("flat Runtime Broker instance %q: building its runtime: %w", in.cfg.Key, err)})
@@ -350,7 +380,7 @@ func (h *Host) Prepare(ctx context.Context) error {
 		}
 		if h.cfg.OwnershipPreflight != nil {
 			if err := h.cfg.OwnershipPreflight(ctx, Candidate{Instance: in.cfg, Identity: id, Runtime: rt, StateDir: stateDir}); err != nil {
-				h.refuse(in, WithReason("ownership_unresolved", fmt.Errorf("flat Runtime Broker instance %q: %w", in.cfg.Key, err)))
+				h.refuse(in, WithReason("ownership_unresolved", fmt.Errorf("flat Runtime Broker instance %q not activated: %w", in.cfg.Key, err)))
 				unresolvedScopes[ScopeKey(scope)] = append(unresolvedScopes[ScopeKey(scope)], in.cfg.Key)
 				continue
 			}
@@ -378,10 +408,7 @@ func (h *Host) Prepare(ctx context.Context) error {
 	for _, in := range candidates {
 		if blocked := unresolvedScopes[ScopeKey(in.scope)]; len(blocked) > 0 {
 			sort.Strings(blocked)
-			h.refuse(in, WithReason("ownership_unresolved", fmt.Errorf(
-				"flat Runtime Broker instance %q not activated: ownership on its execution scope %s is unresolved (instances %s); "+
-					"drain or recreate the unresolved agents through the Runtime Broker that created them",
-				in.cfg.Key, ScopeKey(in.scope), strings.Join(blocked, ", "))))
+			h.refuse(in, WithReason("ownership_unresolved", scopeUnresolvedError(in.cfg.Key, in.scope, blocked)))
 			continue
 		}
 		eligible = append(eligible, in)
@@ -448,17 +475,31 @@ func (h *Host) Prepare(ctx context.Context) error {
 	return nil
 }
 
-// ScopeKey is the identity part of an execution scope (contract section 5):
-// the Docker daemon ID, or the Kubernetes cluster UID plus namespace.
+// ScopeKey is the identity part of an execution scope (contract section 5
+// and amendment P5-CR, CR3): brokeridentity.ScopeIdentity, the one source of
+// the scope identity for every target type. A scope without an identity
+// gives "<type>:"; Prepare only groups scopes that passed LoadOrCreate,
+// which verified their identity.
 func ScopeKey(s brokeridentity.ExecutionScope) string {
-	switch {
-	case s.Docker != nil:
-		return "docker:" + s.Docker.DaemonID
-	case s.Kubernetes != nil:
-		return "kubernetes:" + s.Kubernetes.ClusterUID + "/" + s.Kubernetes.Namespace
-	default:
-		return s.Type + ":"
+	if id, err := brokeridentity.ScopeIdentity(s); err == nil {
+		return id
 	}
+	return s.Type + ":"
+}
+
+// scopeUnresolvedError is the refusal of an instance whose execution scope
+// has unresolved ownership found by the instances blocked. A Cloud Run
+// scope is named by its kind only, never by its identity (which carries
+// the project number), and the refusal names the drain step (amendment
+// P5-CR, CR6: the drain step).
+func scopeUnresolvedError(key string, scope brokeridentity.ExecutionScope, blocked []string) error {
+	if scope.Type == brokeridentity.TargetTypeCloudRun {
+		return fmt.Errorf("flat Runtime Broker instance %q not activated: Cloud Run agent instances in its project and region have unresolved ownership (found by instances %s); "+
+			"drain them through the Runtime Broker that created them, then restart", key, strings.Join(blocked, ", "))
+	}
+	return fmt.Errorf("flat Runtime Broker instance %q not activated: ownership on its execution scope %s is unresolved (instances %s); "+
+		"drain or recreate the unresolved agents through the Runtime Broker that created them",
+		key, ScopeKey(scope), strings.Join(blocked, ", "))
 }
 
 // Status returns every configured instance's state, in configuration order.
@@ -716,6 +757,8 @@ func (h *Host) Run(ctx context.Context) error {
 		h.shutdownInstances(ctx)
 		return err
 	}
+	h.Listening()
+	h.listenClose.Do(func() { close(h.listenCh) })
 	handler := h.Handler()
 	h.mu.Lock()
 	h.httpSrv = &http.Server{
@@ -898,23 +941,35 @@ func ReasonCode(err error) string {
 // instance's agent_defaults volumes and harness override volumes.
 func checkInstanceDefaultVolumes(instances []config.V1RuntimeBrokerInstanceConfig) error {
 	for i, inst := range instances {
-		d := inst.AgentDefaults
-		if d == nil {
-			continue
+		if err := CheckInstanceDefaultVolumesAt(fmt.Sprintf("server.broker.instances[%d]", i), inst); err != nil {
+			return err
 		}
-		p := fmt.Sprintf("server.broker.instances[%d].agent_defaults", i)
-		if err := runtime.CheckVolumeSources(d.Volumes); err != nil {
-			return fmt.Errorf("%s.%w", p, err)
-		}
-		names := make([]string, 0, len(d.HarnessOverrides))
-		for name := range d.HarnessOverrides {
-			names = append(names, name)
-		}
-		sort.Strings(names)
-		for _, name := range names {
-			if err := runtime.CheckVolumeSources(d.HarnessOverrides[name].Volumes); err != nil {
-				return fmt.Errorf("%s.harness_overrides.%s.%w", p, name, err)
-			}
+	}
+	return nil
+}
+
+// CheckInstanceDefaultVolumesAt applies runtime.CheckVolumeSources to one
+// instance's agent_defaults volumes and harness override volumes; path is
+// the instance's settings path, used in the error. It is the per-instance
+// check New applies to every instance, for callers that activate a single
+// instance without a Host ('scion broker register --instance').
+func CheckInstanceDefaultVolumesAt(path string, inst config.V1RuntimeBrokerInstanceConfig) error {
+	d := inst.AgentDefaults
+	if d == nil {
+		return nil
+	}
+	p := path + ".agent_defaults"
+	if err := runtime.CheckVolumeSources(d.Volumes); err != nil {
+		return fmt.Errorf("%s.%w", p, err)
+	}
+	names := make([]string, 0, len(d.HarnessOverrides))
+	for name := range d.HarnessOverrides {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if err := runtime.CheckVolumeSources(d.HarnessOverrides[name].Volumes); err != nil {
+			return fmt.Errorf("%s.harness_overrides.%s.%w", p, name, err)
 		}
 	}
 	return nil

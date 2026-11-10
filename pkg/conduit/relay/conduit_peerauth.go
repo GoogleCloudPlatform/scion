@@ -16,6 +16,7 @@ package relay
 
 import (
 	"context"
+	"crypto/ed25519"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -74,8 +75,10 @@ type ConduitPeerAuthOptions struct {
 	// SigningRing is the hub's signing ring in managed ring mode (a
 	// keyring file; ptone/scion#1530 Phase 5). When set and PeerSecret is
 	// unset, the HMAC keys are derived from its generations
-	// (NewHMACPeerAuthFromRing) instead of from SharedSecret. A relay role
-	// never sets it: it never loads the keyring.
+	// (NewHMACPeerAuthFromRing) instead of from SharedSecret. When set and
+	// PeerSecret is set, PeerSecret must differ from every generation's
+	// secret (CheckPeerSecretNotInRing). A relay role never sets it: it
+	// never loads the keyring.
 	SigningRing *keyring.SigningRing
 	// Audience is the OIDC audience ("" = DefaultConduitPeerAudience).
 	Audience string
@@ -88,6 +91,15 @@ type ConduitPeerAuthOptions struct {
 	TokenSource transportauth.TokenSource
 	// Validate validates an ID token (nil: idtoken.Validate).
 	Validate func(ctx context.Context, token, audience string) (*idtoken.Payload, error)
+	// Peers is the enrolled relay peers (server.hub.conduit.peers). When
+	// set, per-peer key signatures are verified against it, and a peer's
+	// enrolled role is checked where a call needs one role.
+	Peers []PeerEnrollment
+	// PeerKey is this node's enrolled private key
+	// (server.hub.conduit.peer_key_file), or nil. When set, this node
+	// signs with it, and SelfID must be enrolled in Peers with its public
+	// key.
+	PeerKey ed25519.PrivateKey
 }
 
 // Settings named by SettingError.
@@ -97,6 +109,8 @@ const (
 	peerServiceAccountsSetting = "server.hub.conduit.peer_service_accounts"
 	sessionSecretSetting       = "--session-secret (SCION_SERVER_SESSION_SECRET)"
 	keyringFileSetting         = "server.keyring_file"
+	peersSetting               = "server.hub.conduit.peers"
+	peerKeyFileSetting         = "server.hub.conduit.peer_key_file"
 )
 
 // SettingError is a relay startup refusal caused by one setting. Key names
@@ -149,6 +163,11 @@ func NewConduitPeerAuth(o ConduitPeerAuthOptions) (PeerAuth, string, error) {
 		if o.SharedSecret != "" && o.SharedSecret == peerSecret {
 			return nil, mode, &SettingError{Key: peerSecretSetting, Err: fmt.Errorf("conduit peer auth (%s): server.hub.conduit.peer_secret must differ from the session secret", mode)}
 		}
+		// Managed ring mode: the peer secret must differ from every
+		// generation's secret, not only the session secret.
+		if err := CheckPeerSecretNotInRing(peerSecret, o.SigningRing); err != nil {
+			return nil, mode, &SettingError{Key: peerSecretSetting, Err: fmt.Errorf("conduit peer auth (%s): %w", mode, err)}
+		}
 		signer, err = NewHMACPeerAuthFromPeerSecret(HMACPeerAuthConfig{Secret: []byte(peerSecret), SelfID: o.SelfID})
 		if err != nil {
 			return nil, mode, &SettingError{Key: peerSecretSetting, Err: fmt.Errorf("conduit peer auth (%s): server.hub.conduit.peer_secret: %w", mode, err)}
@@ -166,21 +185,41 @@ func NewConduitPeerAuth(o ConduitPeerAuthOptions) (PeerAuth, string, error) {
 	default:
 		return nil, mode, &SettingError{Key: sessionSecretSetting, Err: fmt.Errorf("conduit peer auth (%s): no shared signing secret; set --session-secret or SCION_SERVER_SESSION_SECRET on every hub node", mode)}
 	}
+	var base PeerAuth = signer
+	if len(o.Peers) > 0 || o.PeerKey != nil {
+		dir, err := NewPeerDirectory(o.Peers)
+		if err != nil {
+			return nil, mode, &SettingError{Key: peersSetting, Err: err}
+		}
+		keyed, err := NewKeyedPeerAuth(KeyedPeerAuthConfig{Legacy: signer, Directory: dir, Key: o.PeerKey})
+		if err != nil {
+			return nil, mode, &SettingError{Key: peerKeyFileSetting, Err: err}
+		}
+		base = keyed
+	}
 	if mode == config.ConduitPeerAuthHMAC {
-		return signer, mode, nil
+		return base, mode, nil
 	}
 	id, err := newOIDCPeerAuth(o)
 	if err != nil {
 		return nil, mode, err
 	}
-	return &signedOIDCPeerAuth{signer: signer, oidc: id}, mode, nil
+	return &signedOIDCPeerAuth{signer: base, oidc: id}, mode, nil
 }
 
-// signedOIDCPeerAuth requires both the HMAC request signature and the
-// OIDC ID token on every request.
+// signedOIDCPeerAuth requires both the request signature and the OIDC ID
+// token on every request.
 type signedOIDCPeerAuth struct {
-	signer *HMACPeerAuth
+	signer PeerAuth
 	oidc   *oidcPeerAuth
+}
+
+// PeerRole implements PeerRoleResolver when the signer does.
+func (a *signedOIDCPeerAuth) PeerRole(peer string) (PeerRole, bool) {
+	if r, ok := a.signer.(PeerRoleResolver); ok {
+		return r.PeerRole(peer)
+	}
+	return "", false
 }
 
 // Sign implements PeerAuth.

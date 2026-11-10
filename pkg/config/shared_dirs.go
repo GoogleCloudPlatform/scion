@@ -66,10 +66,15 @@ func GetSharedDirPath(projectDir, name string) (string, error) {
 	return res.HostPath, nil
 }
 
-// EnsureSharedDirs creates the host-side directories for all declared shared dirs.
+// EnsureSharedDirs creates the host-side directories for all declared shared
+// dirs. Every name is checked with api.ValidateSharedDirs first; if any fails,
+// it returns that error and creates nothing.
 func EnsureSharedDirs(projectDir string, dirs []api.SharedDir) error {
 	if len(dirs) == 0 {
 		return nil
+	}
+	if err := api.ValidateSharedDirs(dirs); err != nil {
+		return fmt.Errorf("shared dirs: %w", err)
 	}
 
 	basePath, err := GetSharedDirsBasePath(projectDir)

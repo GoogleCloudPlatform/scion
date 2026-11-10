@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 
@@ -108,14 +109,35 @@ func chooseAgentTZ(ac *store.AgentAppliedConfig, storage agentTZ, hubDefault str
 // resolveStorageTZ and the hub default is read live from
 // hubAgentDefaultsProvider, so an edit to either reaches every unpinned
 // agent at its next start.
-func (d *HTTPAgentDispatcher) resolveAgentTZ(ctx context.Context, agent *store.Agent, forGatherAnswer bool) agentTZ {
+//
+// A storage read error is returned, never skipped: a lower-precedence rung
+// (a lower scope, the hub default or none) must not stand in for a TZ the
+// hub could not read. The error carries the backend detail for the hub log
+// only; callers answer with a fixed message (a *secretResolutionError on a
+// dispatch, EnvSettingsUnavailableText on a handler).
+func (d *HTTPAgentDispatcher) resolveAgentTZ(ctx context.Context, agent *store.Agent, forGatherAnswer bool) (agentTZ, error) {
+	return d.resolveAgentTZFor(ctx, agent, forGatherAnswer, true)
+}
+
+// viewAgentTZ is resolveAgentTZ for a read-only view of the agent's TZ
+// (the agent view and edit responses, the env source and env-gather
+// labels): the owner material chain rule is applied to the owner's user
+// TZ row without counting or logging, since nothing is delivered.
+func (d *HTTPAgentDispatcher) viewAgentTZ(ctx context.Context, agent *store.Agent) (agentTZ, error) {
+	return d.resolveAgentTZFor(ctx, agent, false, false)
+}
+
+// resolveAgentTZFor is resolveAgentTZ; report says whether the owner
+// material chain rule reports the TZ row it withholds (dispatch) or decides
+// silently (views).
+func (d *HTTPAgentDispatcher) resolveAgentTZFor(ctx context.Context, agent *store.Agent, forGatherAnswer, report bool) (agentTZ, error) {
 	var ac *store.AgentAppliedConfig
 	if agent != nil {
 		ac = agent.AppliedConfig
 	}
 	if ac != nil && ac.ExplicitTimezone != "" {
 		// Rung 1 wins outright; skip the storage and settings reads.
-		return chooseAgentTZ(ac, agentTZ{}, "", forGatherAnswer)
+		return chooseAgentTZ(ac, agentTZ{}, "", forGatherAnswer), nil
 	}
 	if legacy := legacyEnvTZ(ac); legacy != "" {
 		// Every caller must adopt a legacy env TZ first. The result is
@@ -124,17 +146,29 @@ func (d *HTTPAgentDispatcher) resolveAgentTZ(ctx context.Context, agent *store.A
 		d.warnTZ("unadopted legacy TZ in agent env; adoptLegacyTZ must run before resolveAgentTZ",
 			"agentID", agent.ID, "tz", legacy)
 	}
-	storage := d.resolveStorageTZ(ctx, agent)
+	storage, err := d.resolveStorageTZFor(ctx, agent, report)
+	if err != nil {
+		return agentTZ{}, err
+	}
 	hubDefault := ""
 	if storage.TZ == "" && d.hubAgentDefaultsProvider != nil {
 		hubDefault = d.hubAgentDefaultsProvider().DefaultTimezone
 	}
-	return chooseAgentTZ(ac, storage, hubDefault, forGatherAnswer)
+	return chooseAgentTZ(ac, storage, hubDefault, forGatherAnswer), nil
+}
+
+// finalizeEnvTZError logs a TZ storage read error on the finalize-env pass
+// and returns the *secretResolutionError that fails it, so the caller
+// answers with the fixed env-settings message and the agent is not created.
+func (d *HTTPAgentDispatcher) finalizeEnvTZError(ctx context.Context, agent *store.Agent, err error) error {
+	d.log.WarnContext(ctx, "DispatchFinalizeEnv: failed to read stored TZ settings; agent not created",
+		"agent_id", agent.ID, "scope", tzReadScope(err))
+	return &secretResolutionError{Verb: "created", Source: resolutionSourceEnvSettings, Err: err}
 }
 
 // warnTZ logs a TZ resolution warning. The resolver also runs on
 // dispatchers built without a logger, so a nil log is skipped rather than
-// dereferenced; a failed read still falls through to the next rung.
+// dereferenced.
 func (d *HTTPAgentDispatcher) warnTZ(msg string, args ...any) {
 	if d.log != nil {
 		d.log.Warn(msg, args...)
@@ -167,44 +201,101 @@ func legacyEnvTZ(ac *store.AgentAppliedConfig) string {
 // one), then falls back to progeny vars. It differs in one way: an
 // empty-valued entry never wins, because the TZ chain takes the first
 // non-empty rung. as_needed entries are skipped: they are not a rung of the
-// TZ chain.
-func (d *HTTPAgentDispatcher) resolveStorageTZ(ctx context.Context, agent *store.Agent) agentTZ {
+// TZ chain. The owner's user-scope row not shared with progeny counts only
+// when the owner material chain rule delivers it.
+//
+// A read error on any scope, or on the progeny list, is returned rather than
+// skipped, so a lower-precedence value never wins because a higher scope
+// could not be read. The error is a *tzStorageReadError: its text is a fixed
+// reason and the scope kind, never the backend error, a key or a value.
+func (d *HTTPAgentDispatcher) resolveStorageTZ(ctx context.Context, agent *store.Agent) (agentTZ, error) {
+	return d.resolveStorageTZFor(ctx, agent, true)
+}
+
+// resolveStorageTZFor is resolveStorageTZ; report says whether the owner
+// material chain rule reports what it withholds (dispatch) or decides
+// silently (read-only views).
+func (d *HTTPAgentDispatcher) resolveStorageTZFor(ctx context.Context, agent *store.Agent, report bool) (agentTZ, error) {
 	var result agentTZ
 	if agent == nil || d.store == nil {
-		return result
+		return result, nil
 	}
 
+	// The owner's user-scope TZ row not shared with progeny is held to the
+	// owner material chain rule (start_owner_material_chain.go); when it is
+	// withheld, a lower scope or the hub default supplies TZ.
+	var gate *ownerMaterialGate
+	var check *ownerChainCheck
+	if report {
+		gate = d.newOwnerMaterialGate(agent)
+		defer gate.flush(ctx, ownerMaterialSiteTZ)
+	} else {
+		check = newOwnerChainCheck(d.authzService, agent)
+	}
+	allowRow := func(filter store.EnvVarFilter, v store.EnvVar) bool {
+		if report {
+			return gate.allowEnvRow(ctx, filter, v)
+		}
+		return filter.Scope != store.ScopeUser || check.allowsRow(ctx, v.AllowProgeny, envRowOwner(filter, v))
+	}
 	for _, filter := range d.envScopesInPrecedenceOrder(agent) {
 		filter.Key = agentTZEnvKey
 		vars, err := d.store.ListEnvVars(ctx, filter)
 		if err != nil {
-			d.warnTZ("resolveStorageTZ: failed to list env vars", "scope", filter.Scope, "scope_id", filter.ScopeID, "error", err)
-			continue
+			return agentTZ{}, &tzStorageReadError{Scope: filter.Scope, Err: err}
 		}
 		for _, v := range vars {
 			if v.Key != agentTZEnvKey || v.Value == "" || v.InjectionMode == store.InjectionModeAsNeeded {
+				continue
+			}
+			if !allowRow(filter, v) {
 				continue
 			}
 			result = agentTZ{TZ: v.Value, Source: envScopeSourceLabel(filter.Scope)}
 		}
 	}
 	if result.TZ != "" {
-		return result
+		return result, nil
 	}
 
 	if len(agent.Ancestry) > 1 {
 		progenyVars, err := d.store.ListProgenyEnvVars(ctx, agent.Ancestry)
 		if err != nil {
-			d.warnTZ("resolveStorageTZ: failed to list progeny env vars", "agent_id", agent.ID, "error", err)
-			return result
+			return agentTZ{}, &tzStorageReadError{Scope: TZSourceProgeny, Err: err}
 		}
 		for _, v := range progenyVars {
 			if v.Key == agentTZEnvKey && v.Value != "" {
-				return agentTZ{TZ: v.Value, Source: TZSourceProgeny}
+				return agentTZ{TZ: v.Value, Source: TZSourceProgeny}, nil
 			}
 		}
 	}
-	return result
+	return result, nil
+}
+
+// tzStorageReadError is a failed TZ storage read in resolveStorageTZ. Error()
+// is a fixed reason plus the scope kind ("user", "project", "hub",
+// "runtime_broker" or "progeny"), so it is safe in a log line or a wrapped
+// error message: the backend error, which could carry scope IDs or values,
+// is reachable only through Unwrap (errors.Is/As), never printed.
+type tzStorageReadError struct {
+	Scope string
+	Err   error
+}
+
+func (e *tzStorageReadError) Error() string {
+	return "stored TZ settings could not be read (" + e.Scope + " scope)"
+}
+
+func (e *tzStorageReadError) Unwrap() error { return e.Err }
+
+// tzReadScope returns the scope kind of the *tzStorageReadError in err's
+// chain, for a log attribute that carries no backend detail.
+func tzReadScope(err error) string {
+	var e *tzStorageReadError
+	if errors.As(err, &e) {
+		return e.Scope
+	}
+	return "unknown"
 }
 
 // setResolvedAgentTZ makes env carry exactly the resolver's TZ: it removes
@@ -335,16 +426,18 @@ func (d *HTTPAgentDispatcher) withoutCallerTZ(ctx context.Context, agent *store.
 // PATCH response, the env-gather response). It uses the server's HTTP
 // dispatcher when one is installed, so the result matches what a dispatch
 // would send, and otherwise an equivalent resolver over the server's store,
-// hub ID and live hub agent defaults.
-func (s *Server) agentTZ(ctx context.Context, agent *store.Agent) agentTZ {
+// hub ID and live hub agent defaults. A storage read error is returned (see
+// resolveAgentTZ); handlers answer it with writeEnvSettingsUnavailable.
+func (s *Server) agentTZ(ctx context.Context, agent *store.Agent) (agentTZ, error) {
 	if d, ok := s.GetDispatcher().(*HTTPAgentDispatcher); ok && d != nil {
-		return d.resolveAgentTZ(ctx, agent, false)
+		return d.viewAgentTZ(ctx, agent)
 	}
 	r := &HTTPAgentDispatcher{
 		store:                    s.store,
 		hubID:                    s.HubID(),
 		hubAgentDefaultsProvider: s.hubAgentDefaults,
 		log:                      slog.Default(),
+		authzService:             s.authzService,
 	}
-	return r.resolveAgentTZ(ctx, agent, false)
+	return r.viewAgentTZ(ctx, agent)
 }

@@ -82,7 +82,6 @@ var hostGitDoorAllowlist = map[string]hostGitDoorEntry{
 	"pkg/util/git.go:BaseRepoGitCommand":              {1, "migrates in phase 2"},
 	"pkg/util/git.go:hardenedGitCommand":              {1, "migrates in phase 2"},
 	"pkg/util/git_host.go:hostGit":                    {1, "migrates in phase 2"},
-	"pkg/agent/run.go:boundedRevParse":                {1, "migrates in phase 2"},
 	"pkg/agent/provision.go:worktreeConfigEnabled":    {1, "migrates in phase 2"},
 	"pkg/provision/provision.go:sharedCheckoutGitCmd": {1, "migrates in phase 2"},
 	"pkg/provision/provision.go:runGitClone":          {1, "migrates in phase 2"},
@@ -98,7 +97,9 @@ var hostGitDoorAllowlist = map[string]hostGitDoorEntry{
 	// rebuild-server builds its table and starts it in runRebuildSteps (4 git
 	// step literals + the dynamic start); its rev-parse reads, and
 	// CheckForUpdates' rev-parse and log reads, go through gitOutput (one git
-	// literal), so CheckForUpdates itself starts only git fetch.
+	// literal), so CheckForUpdates itself starts only git fetch. Both Rebuild
+	// executors' branch checks (check-ref-format, version; branch_param.go,
+	// ptone/scion#6987) also go through gitOutput and add no literal.
 	"pkg/hub/unitdrift/check.go:GitRevision":                              {1, hostGitDoorReasonHub},
 	"pkg/hub/maintenance/maintenance_executors.go:runRebuildSteps":        {5, hostGitDoorReasonHub},
 	"pkg/hub/maintenance/maintenance_executors.go:gitOutput":              {1, hostGitDoorReasonHub},
@@ -141,6 +142,7 @@ var hostGitCeilingOffAllowlist = map[string]hostGitDoorEntry{
 	// never "not git". rev-parse runs no configured command, and hooks and
 	// fsmonitor are off through the door's HostGitArgs.
 	"pkg/runtimebroker/workspace_git.go:workspaceGitProbe": {1, "fail-closed guard probe: \"not git\" must cover an enclosing repository; host- or broker-owned ancestors; an enclosing repository can only yield git or an error (unknown), never \"not git\"; hooks and fsmonitor off via the door"},
+	"pkg/agent/run.go:boundedRevParse":                     {1, "agent-start layout probe (rev-parse only): the caller bounds discovery with GIT_CEILING_DIRECTORIES at the parent of the project's repository, or the workspace's parent, so git finds at most the project's own repository; a door refusal or timeout refuses the start where the probe decides the workspace's own layout (the project-directory fallback gives a plain mount, except a policy refusal, which is returned); only git's own non-zero exit or a missing git binary reads as not a repository; hooks and fsmonitor off via the door; ancestors up to the ceiling are the user's checkout, not host-owned: tolerated because rev-parse runs no configured command and the bound stops at the project's own repository"},
 }
 
 // TestHostGitGoesThroughOneDoor: host-side git runs through RunHostGit or

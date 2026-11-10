@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
@@ -269,6 +270,13 @@ type RunConfig struct {
 	// manager has already set to the block ServiceAccount or cleared.
 	// Ignored by other runtimes.
 	KubernetesBlockIdentity bool
+	// CloudRunIdentity is the broker-resolved Cloud Run instance identity
+	// for this dispatch (api.StartOptions.CloudRunIdentity). Nil: the Cloud
+	// Run runtime uses its configured service account, as before. Non-nil:
+	// the instance runs as its ServiceAccount, an empty ServiceAccount is
+	// refused before any create, and an existing instance is never started
+	// in place. Ignored by other runtimes.
+	CloudRunIdentity *api.CloudRunIdentity
 
 	// FallbackEnv is the template env layer (ptone/scion#4524): every
 	// runtime applies it with FallbackEnvEntries as the LAST step of its
@@ -507,12 +515,17 @@ func (r *SharedDirRealization) Shared() bool {
 // to stop or remove; it is empty for legacy entries created before run IDs
 // existed.
 //
+// StopTimeout bounds how long Stop lets the entry shut down before it is
+// killed; zero means the backend's default (30s on Docker and Podman).
+// Backends without a stop timeout ignore it, and Delete ignores it.
+//
 // The signature change is deliberate (ptone/scion#2550): every backend must
 // decide how it honours RunID, rather than silently falling back to name
 // semantics through an optional side interface.
 type RunRef struct {
-	ID    string
-	RunID string
+	ID          string
+	RunID       string
+	StopTimeout time.Duration
 }
 
 // ErrRunMismatch is returned (wrapped) by a Delete whose RunRef names a run

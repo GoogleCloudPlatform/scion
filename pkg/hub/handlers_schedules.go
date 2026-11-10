@@ -268,6 +268,10 @@ func (s *Server) createSchedule(w http.ResponseWriter, r *http.Request, projectI
 			ValidationError(w, "agentName is required for dispatch_agent schedules", nil)
 			return
 		}
+		if !templateRefAllowed(req.Template) {
+			ValidationError(w, templateRefRefusal, nil)
+			return
+		}
 		p := DispatchAgentEventPayload{
 			AgentName: req.AgentName,
 			Template:  req.Template,

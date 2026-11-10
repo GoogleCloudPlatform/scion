@@ -110,6 +110,7 @@ type idFixtures struct {
 	integrationName         string
 	lifecycleHook           string
 	hubPreStartHook         string
+	hubPreStartHookDel      string
 	chatTopic               string
 	agentLifecycle          string
 	agentRestore            string
@@ -685,6 +686,18 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	})
 	require.NoError(t, err)
 	f.hubPreStartHook = hubHook.ID
+	// A disposable second hub hook for the update and delete routes, so the
+	// fixture hook above is never deleted and stays readable by GET
+	// /api/v1/pre-start-hooks/{id}. Creating it archives the fixture hook
+	// (a new hub hook archives the active one in the same scope); the walk's
+	// POST /api/v1/pre-start-hooks/{id}/activate entry re-activates the
+	// fixture hook before the DELETE, and the GET reads either state.
+	hubHookDel, err := s.CreateHubPreStartHook(ctx, &store.ProjectPreStartHook{
+		Scope: store.PreStartHookScopeHub, Name: "li-hub-pre-start-hook-del", Slug: "li-hub-pre-start-hook-del",
+		Script: "#!/bin/sh\necho li-del\n", CreatedBy: "li@test.com", UpdatedBy: "li@test.com",
+	})
+	require.NoError(t, err)
+	f.hubPreStartHookDel = hubHookDel.ID
 
 	// Artifact service: on (experiment, store, blob storage) with one
 	// single-file artifact owned by the dev user, homed in f.project.
@@ -692,15 +705,20 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	f.artifact = seedLiveInventoryArtifact(t, ctx, artStore, artBlobs, f.project)
 	seedLiveInventoryCatalogFiles(t, ctx, s, artBlobs, &f)
 
-	// hub.conduit, hub.agent_delegation, federation.project_visitors and
-	// hub.agent_edit_held on too, so their experiment-gated routes are
-	// live: the registry above with all four also defaulting on (no
+	// hub.conduit, hub.agent_delegation, federation.project_visitors,
+	// web.chat_starred_messages, hub.agent_edit_held,
+	// hub.user_delete_force_cascade, hub.artifact_archive,
+	// hub.artifacts_open_review_check and hub.project_self_leave on too, so
+	// their experiment-gated
+	// routes are live: the registry above with them also defaulting on (no
 	// operational settings, which the other entries rely on, are replaced).
 	var active []experiments.Experiment
 	for _, e := range srv.experimentRegistry().All() {
 		if e.Name == conduitExperiment || e.Name == experiments.AgentDelegation || e.Name == experiments.FederationProjectVisitors ||
 			e.Name == experiments.ChatStarredMessages || e.Name == experiments.AgentEditHeld ||
-			e.Name == experiments.UserDeleteForceCascade {
+			e.Name == experiments.UserDeleteForceCascade || e.Name == experiments.ArtifactArchive ||
+			e.Name == experiments.ArtifactsOpenReviewCheck ||
+			e.Name == experiments.ProjectSelfLeave {
 			e.Default = true
 		}
 		active = append(active, e)
@@ -715,6 +733,9 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	require.True(t, srv.experimentEnabled(experiments.ChatStarredMessages))
 	require.True(t, srv.experimentEnabled(experiments.AgentEditHeld))
 	require.True(t, srv.experimentEnabled(experiments.UserDeleteForceCascade))
+	require.True(t, srv.experimentEnabled(experiments.ArtifactArchive))
+	require.True(t, srv.experimentEnabled(experiments.ArtifactsOpenReviewCheck))
+	require.True(t, srv.experimentEnabled(experiments.ProjectSelfLeave))
 	// POST /api/v1/auth/federation-token also answers 404 while the OIDC
 	// provider is off: install a test key manager and allow the audience
 	// that bodyOverrides sends, so the route reaches its caller checks.
@@ -858,6 +879,7 @@ func opPatternOverrides(f idFixtures) map[overrideKey]map[string]string {
 		{"agent.lifecycle.delete", "/api/v1/projects/{projectId}/agents/{id}"}:          {"projectId": f.project, "id": f.agentDelProject},
 		{"agent.port.register", "/api/v1/agents/{id}/ports"}:                            {"id": f.agentPorts},
 		{"project.lifecycle.delete", "/api/v1/projects/{id}"}:                           {"id": f.projectDel},
+		{"hub.lifecyclehooks.update", "/api/v1/pre-start-hooks/{id}"}:                   {"id": f.hubPreStartHookDel},
 		{"group.delete", "/api/v1/groups/{id}"}:                                         {"id": f.groupDel},
 		{"user.admin.delete", "/api/v1/users/{id}"}:                                     {"id": f.userDel},
 		{"testidentity.delete", "/api/v1/test-identities/{id}"}:                         {"id": f.testIdentityDel},
@@ -931,6 +953,8 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/artifacts/{id}/versions/{seq}":              {"id": f.artifact, "seq": "1"},
 		"/api/v1/artifacts/{id}/versions/{seq}/finalize":     {"id": f.artifact, "seq": "1"},
 		"/api/v1/artifacts/{id}/versions/{seq}/view":         {"id": f.artifact, "seq": "1"},
+		"/api/v1/artifacts/{id}/versions/{seq}/archive":      {"id": f.artifact, "seq": "1"},
+		"/api/v1/artifacts/{id}/review-sessions/{sid}":       {"id": f.artifact, "sid": "AAAAAAAAAAAAAAAAAAAAAA"},
 
 		// --- test identity family ---
 		"/api/v1/test-identities/{id}/token":          {"id": f.testIdentity},
@@ -1005,6 +1029,7 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/projects/{id}/members":              {"id": f.project},
 		"/api/v1/projects/{id}/members/{memberId}":   {"id": f.project, "memberId": f.projectMembership},
 		"/api/v1/projects/{id}/transfer-ownership":   {"id": f.project},
+		"/api/v1/projects/{id}/leave":                {"id": f.project},
 		"/api/v1/projects/{id}/visitors":             {"id": f.project},
 		"/api/v1/projects/{id}/visitors/{visitorId}": {"id": f.project, "visitorId": f.projectVisitor},
 		// Visitor rules (the item pattern addresses the rule remove takes).
@@ -1161,6 +1186,7 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/runtime-brokers/{id}/settings":                            {"id": f.runtimeBroker},
 		"/api/v1/runtime-brokers/{id}/heartbeat":                           {"id": f.runtimeBroker},
 		"/api/v1/runtime-brokers/{id}/projects":                            {"id": f.runtimeBroker},
+		"/api/v1/runtime-brokers/{id}/conversion-plan":                     {"id": f.runtimeBroker},
 		"/api/v1/runtime-brokers/{id}/env":                                 {"id": f.runtimeBroker},
 		"/api/v1/runtime-brokers/{id}/env/{key}":                           {"id": f.runtimeBroker, "key": f.brokerEnvKey},
 		"/api/v1/runtime-brokers/{id}/secrets":                             {"id": f.runtimeBroker},

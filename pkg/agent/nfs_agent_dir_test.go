@@ -18,18 +18,22 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -335,7 +339,7 @@ func TestStartNFSAgentDir_OtherModesUnchanged(t *testing.T) {
 			mountRoot := filepath.Join(t.TempDir(), "nfs")
 			ws := nfsTestWorkspaceDir(mountRoot)
 			require.NoError(t, os.MkdirAll(ws, 0o770))
-			require.NoError(t, os.WriteFile(filepath.Join(ws, provision.ProvisionSentinelFile), []byte("x"), 0o644))
+			writeStateSentinel(t, ws)
 			env := map[string]string{}
 			if tc.mode != "" {
 				env["SCION_WORKSPACE_MODE"] = tc.mode
@@ -356,9 +360,15 @@ func TestEnsureNFSAgentWorkspaceLeaf(t *testing.T) {
 	resolved := resolveTestNFSWorkspace(t, mountRoot)
 	ws := filepath.Join(nfsTestAgentDir(mountRoot, "agent-1"), provision.AgentWorkspaceDir)
 
-	ok, err := ensureNFSAgentWorkspaceLeaf("docker", testNFSWorkspaceProjectID, resolved, runtime.NFSPodShare{ClaimName: "ws-pv"}, nil, "agent-1")
-	require.NoError(t, err)
+	// A local container runtime creates the agent's own directory through
+	// the same helper (no pod share needed), so an export that is not
+	// mounted on the broker refuses it, with the local remedy.
+	ok, err := ensureNFSAgentWorkspaceLeaf("docker", testNFSWorkspaceProjectID, resolved, runtime.NFSPodShare{}, nil, "agent-1")
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrProjectShareNotMounted), "err = %v", err)
+	assert.Contains(t, ProjectShareClientText(err), "auto_mount")
 	assert.False(t, ok)
+	assert.NoDirExists(t, mountRoot)
 
 	require.NoError(t, os.MkdirAll(filepath.Join(mountRoot, "share-1"), 0o755))
 	ok, err = ensureNFSAgentWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, resolved, runtime.NFSPodShare{ClaimName: "ws-pv"}, nil, "agent-1")
@@ -406,13 +416,34 @@ func TestEnsureNFSAgentWorkspaceLeaf_ExistingAgentDirWithoutGroupWrite(t *testin
 	assert.Equal(t, uint32(unix.S_ISGID|0o755), statMode(t, agentDir).Mode&0o7777)
 }
 
+// deletionPaths returns the paths of ds.
+func deletionPaths(ds []projectfs.Deletion) []string {
+	var out []string
+	for _, d := range ds {
+		out = append(out, d.Path)
+	}
+	return out
+}
+
+// outcomeOf returns the outcome of the Deletion of path in ds.
+func outcomeOf(t *testing.T, ds []projectfs.Deletion, path string) projectfs.Outcome {
+	t.Helper()
+	for _, d := range ds {
+		if d.Path == path {
+			return d.Outcome
+		}
+	}
+	t.Fatalf("no deletion of %s in %+v", path, ds)
+	return ""
+}
+
 // runAgentWorkspacePurgeInline makes RemoveNFSAgentFiles delete the
 // moved-aside workspace before it returns.
 func runAgentWorkspacePurgeInline(t *testing.T) *[]string {
 	t.Helper()
 	var purged []string
 	orig := purgeRemovedAgentWorkspaces
-	purgeRemovedAgentWorkspaces = func(dir string) {
+	purgeRemovedAgentWorkspaces = func(dir, _, _ string, _ *slog.Logger) {
 		purged = append(purged, dir)
 		require.NoError(t, provision.PurgeRemovedAgentWorkspaces(dir))
 	}
@@ -481,9 +512,11 @@ func TestRemoveNFSAgentFiles_RemovesAgentWorkspace(t *testing.T) {
 	otherDir := provisionTestAgentDir(t, mountRoot, "other-agent")
 	purged := runAgentWorkspacePurgeInline(t)
 
-	paths, err := kubernetesTestManager("kubernetes").RemoveNFSAgentFiles(context.Background(), f.projectScionDir, testNFSWorkspaceProjectID, "test-agent")
+	ds, err := kubernetesTestManager("kubernetes").RemoveNFSAgentFiles(context.Background(), f.projectScionDir, testNFSWorkspaceProjectID, "test-agent")
 	require.NoError(t, err)
-	assert.Contains(t, paths, agentDir)
+	assert.Equal(t, projectfs.OutcomeDeleted, outcomeOf(t, ds, filepath.Join(agentDir, provision.AgentWorkspaceDir)))
+	assert.Equal(t, projectfs.OutcomeAbsent, outcomeOf(t, ds, filepath.Join(filepath.Dir(filepath.Dir(agentDir)), "workspace", "worktrees", "test-agent")),
+		"there was no worktree")
 	assert.Equal(t, []string{agentDir}, *purged)
 	var left []string
 	for _, name := range nfsDirNames(t, agentDir) {
@@ -520,9 +553,81 @@ func TestRemoveNFSAgentFiles_NoFiles(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Join(mountRoot, "share-1"), 0o755))
 	before := treeSnapshot(t, mountRoot, "")
 
-	_, err := kubernetesTestManager("kubernetes").RemoveNFSAgentFiles(context.Background(), f.projectScionDir, testNFSWorkspaceProjectID, "test-agent")
+	ds, err := kubernetesTestManager("kubernetes").RemoveNFSAgentFiles(context.Background(), f.projectScionDir, testNFSWorkspaceProjectID, "test-agent")
 	require.NoError(t, err)
 	assert.Equal(t, before, treeSnapshot(t, mountRoot, ""))
+	// Nothing was there, so nothing is reported deleted (ptone/scion#7100).
+	require.NotEmpty(t, ds)
+	for _, d := range ds {
+		assert.Equal(t, projectfs.OutcomeAbsent, d.Outcome, d.Path)
+	}
+}
+
+// An agent directory without a workspace reports the workspace absent, not
+// deleted.
+func TestRemoveNFSAgentFiles_NoWorkspaceAbsent(t *testing.T) {
+	f := newSharedDirStorageRunFixture(t)
+	mountRoot := filepath.Join(t.TempDir(), "nfs")
+	f.writeGlobalSettings(t, fmt.Sprintf(nfsWorkspaceStartYAML, mountRoot))
+	agentDir := provisionTestAgentDir(t, mountRoot, "test-agent")
+	require.NoError(t, os.RemoveAll(filepath.Join(agentDir, provision.AgentWorkspaceDir)))
+	purged := runAgentWorkspacePurgeInline(t)
+
+	ds, err := kubernetesTestManager("kubernetes").RemoveNFSAgentFiles(context.Background(), f.projectScionDir, testNFSWorkspaceProjectID, "test-agent")
+	require.NoError(t, err)
+	assert.Equal(t, projectfs.OutcomeAbsent, outcomeOf(t, ds, filepath.Join(agentDir, provision.AgentWorkspaceDir)))
+	assert.Empty(t, *purged, "no purge when nothing was moved aside")
+}
+
+// The background purge of a moved-aside workspace audits its own result,
+// for the workspace's path, to the log it is given.
+func TestPurgeRemovedAgentWorkspaces_Audits(t *testing.T) {
+	var buf syncBuffer
+	agentDir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(agentDir, ".removing-workspace-x", "f"), 0o755))
+
+	purgeRemovedAgentWorkspaces(agentDir, testNFSWorkspaceProjectID, "test-agent", slog.New(slog.NewTextHandler(&buf, nil)))
+	require.Eventually(t, func() bool { return strings.Contains(buf.String(), "storage_delete") }, 10*time.Second, 20*time.Millisecond)
+	l := buf.String()
+	for _, want := range []string{"deleter=broker", "tree=agent-workspace", "outcome=deleted", "agent=test-agent", "background purge",
+		"path=" + filepath.Join(agentDir, provision.AgentWorkspaceDir)} {
+		assert.Contains(t, l, want)
+	}
+	assert.NoDirExists(t, filepath.Join(agentDir, ".removing-workspace-x"))
+}
+
+// RemoveNFSAgentFiles audits the background purge to the log its context
+// carries (the broker's lifecycle log), not the process default.
+func TestRemoveNFSAgentFiles_PurgeAuditsToContextLogger(t *testing.T) {
+	f := newSharedDirStorageRunFixture(t)
+	mountRoot := filepath.Join(t.TempDir(), "nfs")
+	f.writeGlobalSettings(t, fmt.Sprintf(nfsWorkspaceStartYAML, mountRoot))
+	agentDir := provisionTestAgentDir(t, mountRoot, "test-agent")
+	var buf syncBuffer
+	ctx := WithStorageAuditLogger(context.Background(), slog.New(slog.NewTextHandler(&buf, nil)))
+
+	_, err := kubernetesTestManager("kubernetes").RemoveNFSAgentFiles(ctx, f.projectScionDir, testNFSWorkspaceProjectID, "test-agent")
+	require.NoError(t, err)
+	require.Eventually(t, func() bool { return strings.Contains(buf.String(), "background purge") }, 10*time.Second, 20*time.Millisecond)
+	assert.Contains(t, buf.String(), "path="+filepath.Join(agentDir, provision.AgentWorkspaceDir))
+}
+
+// syncBuffer is a bytes.Buffer safe for a background writer.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 // Mode switch, clone-per-agent then shared-plain: the project's shared
@@ -542,7 +647,7 @@ func TestRemoveNFSAgentFiles_AfterSwitchToSharedPlain(t *testing.T) {
 		Mode:        store.SharingModeSharedPlain,
 		NFSUID:      os.Getuid(),
 		NFSGID:      os.Getgid(),
-		SentinelDir: ws,
+		SentinelDir: provision.ProjectStateDir(ws),
 	}))
 	require.NoError(t, os.WriteFile(filepath.Join(ws, "shared.txt"), []byte("x"), 0o644))
 	sharedBefore := treeSnapshot(t, ws, "")
@@ -573,7 +678,7 @@ func TestRemoveNFSAgentFiles_RefusedStickyAgent_LeavesSharedCheckout(t *testing.
 		Mode:        store.SharingModeSharedPlain,
 		NFSUID:      os.Getuid(),
 		NFSGID:      os.Getgid(),
-		SentinelDir: ws,
+		SentinelDir: provision.ProjectStateDir(ws),
 	}))
 	require.NoError(t, os.WriteFile(filepath.Join(ws, "unpushed.txt"), []byte("work"), 0o644))
 
@@ -610,10 +715,10 @@ func TestRemoveNFSAgentFiles_AfterSwitchToClonePerAgent(t *testing.T) {
 	before := treeSnapshot(t, filepath.Join(projectRoot, "agents"), "")
 	require.Equal(t, []string{"other-agent"}, nfsDirNames(t, filepath.Join(projectRoot, "agents")))
 
-	paths, err := kubernetesTestManager("kubernetes").RemoveNFSAgentFiles(context.Background(), f.projectScionDir, testNFSWorkspaceProjectID, "test-agent")
+	ds, err := kubernetesTestManager("kubernetes").RemoveNFSAgentFiles(context.Background(), f.projectScionDir, testNFSWorkspaceProjectID, "test-agent")
 	require.NoError(t, err)
-	assert.Contains(t, paths, worktree)
-	assert.Contains(t, paths, nfsTestAgentDir(mountRoot, "test-agent"))
+	assert.Contains(t, deletionPaths(ds), worktree)
+	assert.Contains(t, deletionPaths(ds), filepath.Join(nfsTestAgentDir(mountRoot, "test-agent"), provision.AgentWorkspaceDir))
 	assert.NoDirExists(t, worktree)
 	assert.NoDirExists(t, nfsTestAgentDir(mountRoot, "test-agent"), "no agent directory is created")
 	assert.Equal(t, before, treeSnapshot(t, filepath.Join(projectRoot, "agents"), ""))
@@ -647,9 +752,9 @@ func TestRemoveNFSAgentFiles_NoOpAndBadNames(t *testing.T) {
 	runAgentWorkspacePurgeInline(t)
 	readme := filepath.Join(agentDir, provision.AgentWorkspaceDir, "README.md")
 
-	paths, err := kubernetesTestManager("docker").RemoveNFSAgentFiles(context.Background(), f.projectScionDir, testNFSWorkspaceProjectID, "test-agent")
+	ds, err := kubernetesTestManager("docker").RemoveNFSAgentFiles(context.Background(), f.projectScionDir, testNFSWorkspaceProjectID, "test-agent")
 	require.NoError(t, err)
-	assert.Empty(t, paths)
+	assert.Empty(t, ds)
 	assert.FileExists(t, readme)
 
 	m := kubernetesTestManager("kubernetes")

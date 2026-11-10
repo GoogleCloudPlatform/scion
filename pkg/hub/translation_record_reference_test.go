@@ -156,12 +156,22 @@ func TestTranslationRecord_PersistedProjectDefault_RefusedWhenConsumed(t *testin
 }
 
 // TestTranslationRecord_TranslationStillUsesIt: the translation path accepts
-// (and reuses) the record that an explicit reference is refused.
+// (and reuses) the record that an explicit reference is refused. Translation
+// is driven by explicit passthrough creates, which the broker owner is
+// authorized for; a project-default passthrough is not applied on this
+// remote sandbox broker.
 func TestTranslationRecord_TranslationStillUsesIt(t *testing.T) {
 	f := setupPTG(t, "trr-translation", trrEmail)
 	enforceSAAssign(f.srv, store.NewFakeCallerPermissionChecker().AllowTarget(trrEmail))
+	createPassthrough := func(name string) (int, string) {
+		rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+			Name: name, ProjectID: f.project.ID, Task: "test",
+			GCPIdentity: &GCPIdentityAssignment{MetadataMode: "passthrough"},
+		})
+		return rec.Code, rec.Body.String()
+	}
 
-	code, body := f.createDefault(t, "trr-translation-1")
+	code, body := createPassthrough("trr-translation-1")
 	require.Equal(t, http.StatusCreated, code, "body: %s", body)
 	first := agentBySlug(t, f.store, f.project.ID, "trr-translation-1")
 	require.Equal(t, store.GCPMetadataModeAssign, first.AppliedConfig.GCPIdentity.MetadataMode)
@@ -170,7 +180,7 @@ func TestTranslationRecord_TranslationStillUsesIt(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, store.IsHostSATranslationRecord(record))
 
-	code, body = f.createDefault(t, "trr-translation-2")
+	code, body = createPassthrough("trr-translation-2")
 	require.Equal(t, http.StatusCreated, code, "body: %s", body)
 	assert.Equal(t, recordID, agentBySlug(t, f.store, f.project.ID, "trr-translation-2").AppliedConfig.GCPIdentity.ServiceAccountID,
 		"translation reuses the record")

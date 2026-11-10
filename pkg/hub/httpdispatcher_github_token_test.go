@@ -18,6 +18,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"testing"
 
@@ -30,12 +31,26 @@ import (
 type recordingGitHubAppMinter struct {
 	projectID string
 	called    bool
+	// allowSource makes AuthorizeGitHubTokenSourceProject authorize every
+	// token-source project. It is false by default, so a label is refused
+	// (fail closed) unless a test opts in.
+	allowSource bool
 }
 
 func (m *recordingGitHubAppMinter) MintGitHubAppTokenForProject(_ context.Context, project *store.Project) (string, string, error) {
 	m.called = true
 	m.projectID = project.ID
 	return "github-app-token", "2026-09-14T09:00:00Z", nil
+}
+
+// AuthorizeGitHubTokenSourceProject refuses every source unless allowSource
+// is set; the real gate is covered by
+// TestGitHubTokenSourceLabel_RequiresAuthorization.
+func (m *recordingGitHubAppMinter) AuthorizeGitHubTokenSourceProject(context.Context, *store.Agent, *store.Project) error {
+	if m.allowSource {
+		return nil
+	}
+	return errors.New("token source project not authorized")
 }
 
 func TestInjectLifecycleGitHubToken(t *testing.T) {

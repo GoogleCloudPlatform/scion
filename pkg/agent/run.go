@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -230,6 +231,13 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 						a.Detached = *opts.Detached
 					}
 					a.Phase = "running"
+					// This start resolved no configuration, so it reports
+					// none: the effective fields stay unset and
+					// ConfigResolved stays false (WP1 slice 3 addendum v14
+					// section 5), so the broker sends no brokerBuild and
+					// the hub records nothing, as for an older broker.
+					a.Harness, a.Model, a.TemplateHash = "", "", ""
+					a.ConfigResolved = false
 					return &a, nil
 				}
 			}
@@ -499,7 +507,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	var templatePaths []string
 	var templateChain []*config.Template
 	if templateName != "" {
-		if chain, err := config.GetTemplateChainInProject(templateName, opts.ProjectPath); err == nil {
+		if chain, err := config.GetTemplateChainInProject(ctx, templateName, opts.ProjectPath); err == nil {
 			templateChain = chain
 			for _, tpl := range chain {
 				templatePaths = append(templatePaths, tpl.Path)
@@ -740,7 +748,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// opts.TemplateEnvSource for the template env only.
 	envChain := templateChain
 	if envChain == nil && opts.TemplateEnvSource != "" {
-		if chain, err := config.GetTemplateChainInProject(opts.TemplateEnvSource, opts.ProjectPath); err == nil {
+		if chain, err := config.GetTemplateChainInProject(ctx, opts.TemplateEnvSource, opts.ProjectPath); err == nil {
 			envChain = chain
 		} else {
 			util.Debugf("template env: source %q could not be resolved: %v", opts.TemplateEnvSource, err)
@@ -875,6 +883,21 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 			templateName, strings.Join(fields, " and ")))
 	}
 
+	// image_tag (ptone/scion#6625): the hub sends the resolved tag only
+	// when one applies (a set value while hub.image_tag_setting is on, or
+	// the version default of a release build). It is applied to the short form
+	// first, so the local-image check below looks for the tagged image and
+	// the registry rewrite qualifies the tagged name; RewriteImageRef then
+	// also retags the registry rewrite's own output form. With no tag both
+	// rewrites are byte-identical to the image_registry rewrite alone.
+	imageTag := api.HubAgentDefaultsFromContext(ctx).ResolvedImageTag()
+	if imageTag != "" && resolvedImage != "" {
+		if tagged := config.RewriteImageTag(resolvedImage, imageTag); tagged != resolvedImage {
+			util.Debugf("image resolution: image_tag rewrite %s -> %s", resolvedImage, tagged)
+			resolvedImage = tagged
+		}
+	}
+
 	// Two-phase image resolution: for short-form (bare) images, prefer a
 	// locally-built image over the registry version. If no local image
 	// exists, fall back to the registry rewrite.
@@ -912,14 +935,14 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 			if localExists {
 				util.Debugf("image resolution: using local short-form image %s", resolvedImage)
 			} else {
-				rewritten := config.RewriteImageRegistry(resolvedImage, imageRegistry)
+				rewritten := config.RewriteImageRef(resolvedImage, imageRegistry, imageTag)
 				if rewritten != resolvedImage {
 					util.Debugf("image resolution: image_registry rewrite %s -> %s", resolvedImage, config.RedactImageRegistry(rewritten))
 					resolvedImage = rewritten
 				}
 			}
 		} else if imageRegistry != "" {
-			rewritten := config.RewriteImageRegistry(resolvedImage, imageRegistry)
+			rewritten := config.RewriteImageRef(resolvedImage, imageRegistry, imageTag)
 			if rewritten != resolvedImage {
 				util.Debugf("image resolution: image_registry rewrite %s -> %s", resolvedImage, config.RedactImageRegistry(rewritten))
 				resolvedImage = rewritten
@@ -977,11 +1000,20 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 					if provenance.Template != "" {
 						tplName = provenance.Template
 					}
-				case finalScionCfg != nil && finalScionCfg.Info != nil && finalScionCfg.Info.Template != "":
+				case finalScionCfg != nil && finalScionCfg.Info != nil && config.IsTemplateSlug(finalScionCfg.Info.Template):
+					// agent-info.json's template (agent-writable) is used
+					// only when it is a template slug: a live, fail-closed
+					// check for the harness-config choice. GetAgent
+					// (provision.go) is the primary control for the
+					// template chain and already replaces a non-slug
+					// agent-info template before finalScionCfg reaches
+					// here; this check keeps a Start path that builds its
+					// config without GetAgent from choosing an
+					// agent-written path.
 					tplName = finalScionCfg.Info.Template
 				}
 			}
-			if chain, err := config.GetTemplateChainInProject(tplName, opts.ProjectPath); err == nil {
+			if chain, err := config.GetTemplateChainInProject(ctx, tplName, opts.ProjectPath); err == nil {
 				for _, tpl := range chain {
 					resolveTemplatePaths = append(resolveTemplatePaths, tpl.Path)
 				}
@@ -1057,7 +1089,10 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 				// The carry-over is logged in summary form: the number of
 				// skills copied, or a fixed warning with the failed step
 				// and the error class.
-				if copied, cpErr := carryOverSkillsDir(agentHome, prevSkillsDir, h.SkillsDir()); cpErr != nil {
+				// An invalid skills_dir was refused by harness.Resolve;
+				// harnessSkillsDir checks it again, and "" copies nothing.
+				newSkillsDir, _ := harnessSkillsDir(h)
+				if copied, cpErr := carryOverSkillsDir(agentHome, prevSkillsDir, newSkillsDir); cpErr != nil {
 					stage, class := carryOverFailureSummary(cpErr)
 					slog.WarnContext(ctx, "Start: skills carry-over after the harness-config switch failed")
 					slog.DebugContext(ctx, "Start: skills carry-over failure", "stage", stage, "class", class)
@@ -1069,6 +1104,16 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	} else {
 		h = harness.New(harnessName)
 		harnessConfigSource = string(config.HarnessConfigSourceUnresolved)
+	}
+	// launchedHarness is the name of the harness implementation this start
+	// resolved and launches with (harness.Resolve's, the error fallback's,
+	// or harness.New's Generic), captured once here. It is the effective
+	// harness the hub records (WP1 slice 3 addendum v14 section 5), not the
+	// stored harnessName, which a harness-config switch or a legacy config
+	// can leave stale or empty.
+	launchedHarness := ""
+	if h != nil {
+		launchedHarness = h.Name()
 	}
 
 	// Clear the staged provisioning state (wrapper and whole bundle) before
@@ -1681,7 +1726,7 @@ authDone:
 			return nil, fmt.Errorf("failed to marshal agent config: %w", marshalErr)
 		}
 		configPath := filepath.Join(agentDir, "scion-agent.json")
-		if writeErr := os.WriteFile(configPath, cfgData, 0644); writeErr != nil {
+		if writeErr := WriteAgentConfigFile(agentDir, cfgData); writeErr != nil {
 			return nil, fmt.Errorf("failed to write agent config %s: %w", configPath, writeErr)
 		}
 	} else if finalScionCfg != nil && harness.IsHarnessImplementationName(finalScionCfg.AuthSelectedType) {
@@ -1692,7 +1737,7 @@ authDone:
 			return nil, fmt.Errorf("failed to marshal repaired agent config: %w", marshalErr)
 		}
 		configPath := filepath.Join(agentDir, "scion-agent.json")
-		if writeErr := os.WriteFile(configPath, cfgData, 0644); writeErr != nil {
+		if writeErr := WriteAgentConfigFile(agentDir, cfgData); writeErr != nil {
 			return nil, fmt.Errorf("failed to write agent config %s: %w", configPath, writeErr)
 		}
 	}
@@ -1968,8 +2013,10 @@ authDone:
 
 	// Validate that the workspace directory exists before attempting to mount
 	// it (checkStartWorkspaceExists; skipped for a Kubernetes start through
-	// the nfs workspace backend).
-	if err := checkStartWorkspaceExists(m.Runtime.Name(), effectiveWorkspace, settings, opts, emptyPerAgent); err != nil {
+	// the nfs workspace backend, and for an agent-scoped workspace on the
+	// share of a local container runtime start, which the NFS leaf helpers
+	// create below).
+	if err := checkStartWorkspaceExists(m.Runtime.Name(), projectDir, effectiveWorkspace, settings, opts, emptyPerAgent); err != nil {
 		return nil, err
 	}
 
@@ -2047,6 +2094,15 @@ authDone:
 			}
 			sdLayout, sdSplit = l, split
 		}
+	}
+	// On the local layout, a shared-dir name that fails
+	// api.ValidateSharedDirs is skipped (logged, no directory) here, before
+	// resolveSharedDirs, so RunConfig.SharedDirs carries only valid names
+	// too: a runtime that creates directories from those names (the Cloud
+	// Run sandbox's /scion/shared/<name>) never sees an invalid one. On a
+	// shared backend, resolveSharedDirs refuses the start instead (design G5).
+	if usesLocalSharedDirLayout(sdLayout, sdSplit, m.Runtime.Name()) {
+		effectiveSharedDirs = validLocalSharedDirs(effectiveSharedDirs)
 	}
 	// A shared-backend Layout keys its tree on hubDispatchedProjectID,
 	// snapshotted above at Start entry — NOT the general projectID variable
@@ -2138,7 +2194,7 @@ authDone:
 		// dispatched in clone-per-agent mode on Kubernetes, with a
 		// workspace the agent container clones into. Paths are still
 		// resolved from the project's workspace path (shared-plain).
-		emptyAgentDirName, agentDirName, agentBranch, selErr := nfsOwnAgentDirSelection(m.Runtime.Name(), settings.Server.EffectiveWorkspaceStorage(), emptyPerAgent, opts.Env, opts.GitClone, opts.Name)
+		emptyAgentDirName, agentDirName, agentBranch, selErr := nfsOwnAgentDirSelection(m.Runtime.Name(), projectDir, settings.Server.EffectiveWorkspaceStorage(), emptyPerAgent, opts.Env, opts.GitClone, opts.Name)
 		if selErr != nil {
 			return nil, selErr
 		}
@@ -2204,7 +2260,12 @@ authDone:
 			// dirs are created by resolveSharedDirs above, on the shared-dir
 			// Layout, never here, so no shared-dir names are passed to the
 			// workspace leaf helpers.
-			if agentDirName != "" && podShare.Mountable() {
+			// Kubernetes only: this keeps the pre-#3998 Kubernetes layout.
+			// A local container runtime's agent whose workspace is not its
+			// directory on the share is refused below instead
+			// (checkLocalRuntimeAgentWorkspace), whichever tree its work is
+			// in.
+			if isKubernetesRuntime(m.Runtime.Name()) && agentDirName != "" && podShare.Mountable() {
 				if keep, reason := nfsKeepSharedCheckout(opts.FreshProvision, agentDir, resolvedWorkspace, agentDirName); keep {
 					// The agent keeps the layout and mode it had before
 					// ptone/scion#3998, so its work stays where it is.
@@ -2233,20 +2294,36 @@ authDone:
 			// helper): a forced move's start marks it as the move's only
 			// then (markMoveExportAgentDir).
 			ownDirName, ownDirCreated := "", false
+			// A local container runtime bind-mounts the agent's own
+			// directory from the broker's mount of the share, with no pod
+			// share; before anything is created there, the workspace Start
+			// validated must be that directory's workspace, and an agent
+			// whose work is still in its broker-local workspace is refused
+			// (checkLocalRuntimeAgentWorkspace).
+			localOwnDir := isLocalContainerRuntime(m.Runtime.Name()) && (emptyAgentDirName != "" || agentDirName != "")
+			if localOwnDir {
+				name := agentDirName
+				if emptyAgentDirName != "" {
+					name = emptyAgentDirName
+				}
+				if err := checkLocalRuntimeAgentWorkspace(opts.Name, effectiveWorkspace, agentDir, resolvedWorkspace, name); err != nil {
+					return nil, err
+				}
+			}
 			if emptyAgentDirName != "" {
 				// Empty-per-agent: only the agent's own directory is ever
 				// mounted, never the project's workspace path resolved
 				// above. When the pod cannot mount the share (no claim and
 				// no inline server and export), stop instead of falling
 				// back to the project's path.
-				if !podShare.Mountable() {
+				if !localOwnDir && !podShare.Mountable() {
 					return nil, errEmptyPerAgentNFSNoClaim
 				}
 				nfsWorkspacePreCreated, ownDirCreated, err = ensureNFSAgentWorkspaceLeafClaim(m.Runtime.Name(), projectID, resolvedWorkspace, podShare, nil, emptyAgentDirName)
 				ownDirName = emptyAgentDirName
 				nfsAgentDirName = emptyAgentDirName
 				nfsAgentDirEmpty = true
-			} else if agentDirName != "" && podShare.Mountable() {
+			} else if agentDirName != "" && (localOwnDir || podShare.Mountable()) {
 				nfsWorkspacePreCreated, ownDirCreated, err = ensureNFSAgentWorkspaceLeafClaim(m.Runtime.Name(), projectID, resolvedWorkspace, podShare, nil, agentDirName)
 				ownDirName = agentDirName
 				nfsAgentDirName = agentDirName
@@ -2287,8 +2364,13 @@ authDone:
 			// source (on a shared Layout, its directory on the share,
 			// sharedLayoutAgentWorkspace; otherwise its private node-local
 			// path): mount.HostPath is the project's shared workspace,
-			// which this agent must never see.
-			if mount.HostPath != "" && !nfsAgentDirEmpty {
+			// which this agent must never see. A clone-per-agent agent of a
+			// local container runtime keeps its own workspace too: the
+			// runtime bind-mounts it (the agent's directory on the share,
+			// checked by checkLocalRuntimeAgentWorkspace), where Kubernetes
+			// derives the agent's mounts from the project's path and
+			// NFSAgentDirName.
+			if mount.HostPath != "" && !nfsAgentDirEmpty && !localOwnDir {
 				effectiveWorkspace = mount.HostPath
 			}
 			if mount.Target != "" {
@@ -2450,6 +2532,14 @@ authDone:
 	// value any merged layer added is removed (see dispatchWorkspaceGit).
 	agentEnv = enforceWorkspaceGitEnv(agentEnv, dispatchWorkspaceGit, dispatchWorkspaceGitSet)
 
+	// In no-auth mode the harness-config's no-auth env (its bundle's
+	// no-auth-env.yaml) joins the container env; api-key and auth-file
+	// starts never carry it.
+	noAuthActive := noAuthModeActive(opts.NoAuth, noAuthConfig)
+	var noAuthEnvWarnings []string
+	agentEnv, noAuthEnvWarnings = applyNoAuthEnv(agentEnv, noAuthConfig, noAuthActive, opts.Name)
+	warnings = append(warnings, noAuthEnvWarnings...)
+
 	// The template env layer is never part of agentEnv: it travels as
 	// RunConfig.FallbackEnv, which every runtime applies as the LAST step
 	// of its own env assembly, after auth env, harness env, telemetry env
@@ -2488,6 +2578,7 @@ authDone:
 	// (k8sSharedRepoShapeRefusal). clone-per-agent and empty-per-agent have no
 	// shared .git to protect.
 	privateGitConfigSource := ""
+	startNotice := ""
 	switch m.Runtime.Name() {
 	case "docker", "podman", "container", "apple-container":
 		if repoRoot != "" {
@@ -2501,11 +2592,21 @@ authDone:
 				if seedBranch == "" {
 					seedBranch = api.Slugify(opts.Name)
 				}
-				src, seedErr := seedCheckedPrivateGitConfig(ctx, repoRoot, effectiveWorkspace, agentDir, seedBranch)
+				// Keys that name a command or a hook location are left out of
+				// the private copy only where the runtime binds that copy over
+				// .git/config (docker, podman); the Apple runtime reads the
+				// repository config directly, so there they are refused.
+				stripNeverCarry := bindsPrivateGitConfig(m.Runtime.Name())
+				src, neverCarried, seedErr := seedCheckedPrivateGitConfigStrip(ctx, repoRoot, effectiveWorkspace, agentDir, seedBranch, stripNeverCarry)
 				if seedErr != nil {
 					return nil, fmt.Errorf("seed private git config for agent %q: %w", opts.Name, seedErr)
 				}
 				privateGitConfigSource = src
+				if notice := util.NeverCarriedNotice(neverCarried); notice != "" {
+					startNotice = notice
+					warnings = append(warnings, notice)
+					relayedWarnings = append(relayedWarnings, notice)
+				}
 			}
 		}
 	}
@@ -2627,6 +2728,7 @@ authDone:
 			return nil
 		}(),
 		KubernetesBlockIdentity: opts.KubernetesBlockIdentity != nil,
+		CloudRunIdentity:        opts.CloudRunIdentity,
 		Kubernetes: func() *api.KubernetesConfig {
 			// Start from the template/agent config's Kubernetes settings
 			// (namespace, resources, node selector, etc.), then ALWAYS
@@ -2696,8 +2798,7 @@ authDone:
 		HomeStorageBackend: homeStorageBackend,
 		HomeStorage:        homeStorage,
 		BrokerMode:         opts.BrokerMode,
-		NoAuth: opts.NoAuth && noAuthConfig != nil &&
-			(noAuthConfig.Behavior == "drop-to-shell" || noAuthConfig.Behavior == "allow"),
+		NoAuth:             noAuthActive,
 		NoAuthMessage: func() string {
 			if opts.NoAuth && noAuthConfig != nil && noAuthConfig.Behavior == "drop-to-shell" {
 				return noAuthConfig.Message
@@ -2862,6 +2963,14 @@ authDone:
 	allAgents, err := m.listRuntime(ctx, map[string]string{"scion.name": slug})
 	if err == nil {
 		for _, a := range allAgents {
+			// An entry of another run is never this start's container, so
+			// it is neither reported, failed nor deleted here
+			// (ptone/scion#7289): a runtime with a deterministic instance
+			// name (Cloud Run) can still list the previous run's stopped
+			// or soft-deleted entry under the same name and ID.
+			if !postRunEntryOfRun(a, runID) {
+				continue
+			}
 			matched := a.ContainerID == id || strings.EqualFold(a.Name, opts.Name)
 			// An owned (flat instance) manager matches by name only within
 			// the agent's project, never another project's same-named agent.
@@ -2892,10 +3001,18 @@ authDone:
 				a.Warnings = warnings
 				a.HubOnlyEnvWarnings = hubOnlyEnvWarnings
 				a.RelayedWarnings = relayedWarnings
+				a.StartNotice = startNotice
 				a.Phase = successPhase
 				a.HarnessConfig = harnessConfigName
 				a.HarnessConfigRevision = harnessConfigRevision
 				a.HarnessConfigSource = harnessConfigSource
+				// The effective configuration the hub records (WP1 slice 3).
+				a.Harness = launchedHarness
+				a.Model = effectiveModel
+				a.ConfigResolved = true
+				if th := startedTemplateHash(provenance, finalScionCfg); th != "" {
+					a.TemplateHash = th
+				}
 				a.HarnessAuth = opts.HarnessAuth
 				a.Profile = profileName
 				a.WorkspacePlacement = workspacePlacement
@@ -2915,9 +3032,14 @@ authDone:
 		Warnings:              warnings,
 		HubOnlyEnvWarnings:    hubOnlyEnvWarnings,
 		RelayedWarnings:       relayedWarnings,
+		StartNotice:           startNotice,
 		HarnessConfig:         harnessConfigName,
 		HarnessConfigRevision: harnessConfigRevision,
 		HarnessConfigSource:   harnessConfigSource,
+		Harness:               launchedHarness,
+		Model:                 effectiveModel,
+		TemplateHash:          startedTemplateHash(provenance, finalScionCfg),
+		ConfigResolved:        true,
 		HarnessAuth:           opts.HarnessAuth,
 		Profile:               profileName,
 		WorkspacePlacement:    workspacePlacement,
@@ -3217,8 +3339,8 @@ func detectRepoRootFrom(effectiveWorkspace, projectDir, projectRoot string) (str
 		}
 		if hasOwnGitDir {
 			// A .git directory git rejects gives a plain mount (a probe
-			// that does not finish refuses): it never falls through to a
-			// wider root.
+			// that does not finish, or that the door refuses, refuses): it
+			// never falls through to a wider root.
 			isRepo, err := checkOwnCommonDir(effectiveWorkspace)
 			if err != nil {
 				return "", err
@@ -3228,20 +3350,35 @@ func detectRepoRootFrom(effectiveWorkspace, projectDir, projectRoot string) (str
 			}
 			return effectiveWorkspace, nil
 		}
-		projectRepo := projectRepoRoot(projectRoot)
-		ceiling := filepath.Dir(effectiveWorkspace)
-		if projectRepo != "" && resolvedPathWithin(effectiveWorkspace, projectRepo) {
-			ceiling = filepath.Dir(projectRepo)
-		}
-		commonDir, err := boundedCommonGitDir(effectiveWorkspace, ceiling)
-		if errors.Is(err, errGitProbeTimeout) {
-			return "", gitProbeTimeoutError(effectiveWorkspace, err)
-		}
-		if err == nil {
-			if projectCommon := projectCommonDir(projectRepo); projectCommon != "" && samePath(commonDir, projectCommon) {
-				return filepath.Dir(projectCommon), nil
+		// A workspace that does not exist yet (created later in Start, for
+		// example by the NFS leaf helpers), or whose .git file is in git's
+		// exact pointer format and names a gitdir that, resolved as git
+		// resolves it, does not exist (a leftover from a removed worktree), is
+		// not probed: it falls through as git's "not a repository" does, so it
+		// is never refused here and never mounts wider than the fallback
+		// allows.
+		_, lstatErr := os.Lstat(effectiveWorkspace)
+		skipProbe := errors.Is(lstatErr, fs.ErrNotExist) || danglingGitfile(effectiveWorkspace)
+		if !skipProbe {
+			projectRepo := projectRepoRoot(projectRoot)
+			ceiling := filepath.Dir(effectiveWorkspace)
+			if projectRepo != "" && resolvedPathWithin(effectiveWorkspace, projectRepo) {
+				ceiling = filepath.Dir(projectRepo)
 			}
-			return "", workspaceCommonDirError(effectiveWorkspace, commonDir)
+			commonDir, err := boundedCommonGitDir(effectiveWorkspace, ceiling)
+			// A timeout or a door refusal (for example a workspace with no
+			// .git but a HEAD entry) refuses the start: it never falls through
+			// to the project-dir fallback, which could mount the whole
+			// repository.
+			if refusal := gitProbeRefusal(effectiveWorkspace, err); refusal != nil {
+				return "", refusal
+			}
+			if err == nil {
+				if projectCommon := projectCommonDir(projectRepo); projectCommon != "" && samePath(commonDir, projectCommon) {
+					return filepath.Dir(projectCommon), nil
+				}
+				return "", workspaceCommonDirError(effectiveWorkspace, commonDir)
+			}
 		}
 	}
 	// The project-dir fallback names a root only for a workspace inside the
@@ -3256,10 +3393,15 @@ func detectRepoRootFrom(effectiveWorkspace, projectDir, projectRoot string) (str
 			"workspace", effectiveWorkspace, "repository", projectRepo)
 		return "", nil
 	}
-	// Any failure here, a timeout included, gives a plain mount, never the
-	// project's repository.
+	// Any failure here, a timeout or a door refusal included, gives a plain
+	// mount, never the project's repository, except a repository config
+	// policy refusal, which is returned so the user sees its remedy.
 	top, err := boundedRevParse(projectDir, filepath.Dir(projectRepo), "--show-toplevel")
 	if err != nil {
+		var refused *util.RepoConfigRefusedError
+		if errors.As(err, &refused) {
+			return "", fmt.Errorf("project %s: %w", projectDir, err)
+		}
 		return "", nil
 	}
 	if samePath(top, projectRepo) {
@@ -3268,16 +3410,62 @@ func detectRepoRootFrom(effectiveWorkspace, projectDir, projectRoot string) (str
 	return "", fmt.Errorf("git reports repository root %s for project %s, which is not the project's own repository; refusing to start: check the repository's git configuration", top, projectDir)
 }
 
+// danglingGitfile reports whether ws/.git is a regular file in git's exact
+// pointer format whose target, resolved as git resolves it, does not exist.
+// The file must be at most 4096 bytes and start with "gitdir: "; the rest,
+// with trailing CR and LF stripped (as git strips them), must be a non-empty
+// path with no CR, LF or NUL and no leading or trailing whitespace. A
+// relative path is joined to the workspace's physical path without any
+// lexical cleaning, so the kernel resolves ".." and symlinks as it does for
+// git. Only a target that does not exist reports true; anything else (a
+// different format, a .git symlink, a read error, or a target that exists or
+// cannot be checked) reports false, so the workspace is still probed.
+func danglingGitfile(ws string) bool {
+	gitPath := filepath.Join(ws, ".git")
+	info, err := os.Lstat(gitPath)
+	if err != nil || !info.Mode().IsRegular() {
+		return false
+	}
+	f, err := os.Open(gitPath)
+	if err != nil {
+		return false
+	}
+	defer func() { _ = f.Close() }()
+	data, err := io.ReadAll(io.LimitReader(f, 4096+1))
+	if err != nil || len(data) > 4096 {
+		return false
+	}
+	rest, ok := strings.CutPrefix(string(data), "gitdir: ")
+	if !ok {
+		return false
+	}
+	path := strings.TrimRight(rest, "\r\n")
+	if path == "" || strings.ContainsAny(path, "\r\n\x00") || path != strings.TrimSpace(path) {
+		return false
+	}
+	if !filepath.IsAbs(path) {
+		wsReal, err := filepath.EvalSymlinks(ws)
+		if err != nil {
+			return false
+		}
+		path = wsReal + string(filepath.Separator) + path
+	}
+	_, err = os.Lstat(path)
+	return errors.Is(err, fs.ErrNotExist)
+}
+
 // checkOwnCommonDir checks a workspace with its own .git directory. It
 // reports false when git does not treat the workspace as a repository at all
 // (for example an empty .git directory), and refuses with an error when git
-// does, but with a common dir other than that .git directory, or when the
-// probe does not finish in time.
+// does, but with a common dir other than that .git directory, when the probe
+// does not finish in time, or when the host-side git door refuses it. For a
+// .git directory, the door refuses a root-level commondir or gitdir file
+// first, so the common-dir mismatch below is a defence-in-depth check.
 func checkOwnCommonDir(workspace string) (bool, error) {
 	ownGitDir := filepath.Join(workspace, ".git")
 	commonDir, err := boundedCommonGitDir(workspace, filepath.Dir(workspace))
-	if errors.Is(err, errGitProbeTimeout) {
-		return false, gitProbeTimeoutError(workspace, err)
+	if refusal := gitProbeRefusal(workspace, err); refusal != nil {
+		return false, refusal
 	}
 	if err != nil {
 		return false, nil
@@ -3294,27 +3482,55 @@ func workspaceCommonDirError(workspace, commonDir string) error {
 	return fmt.Errorf("git common dir %s of workspace %s is outside the project's own repository; refusing to start: check the workspace's .git metadata", commonDir, workspace)
 }
 
-// boundedRevParse runs git rev-parse with args in dir, with ceiling as
-// GIT_CEILING_DIRECTORIES: git checks dir and its ancestors below ceiling for
-// a repository, never ceiling itself or anything above it. The environment
-// is worktreeGitEnv's, so an inherited GIT_DIR or similar cannot override
+// boundedRevParse runs git rev-parse with args in dir through util.RunHostGit
+// with the linked-checkout policy, with ceiling as GIT_CEILING_DIRECTORIES:
+// git checks dir and its ancestors below ceiling for a repository, never
+// ceiling itself or anything above it. The environment is worktreeGitEnv's
+// with HostGitEnv applied, so an inherited GIT_DIR or similar cannot override
 // the search. Like the package's other git calls in agent-writable
-// directories, it is bounded by worktreeGitTimeout.
+// directories, git itself is bounded by worktreeGitTimeout; the door's
+// after-run check runs under its own bound. A refusal by the door wraps
+// errGitProbeRefused and a probe that does not finish in time wraps
+// errGitProbeTimeout; any other error is git's own non-zero exit, or git
+// missing.
 func boundedRevParse(dir, ceiling string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), worktreeGitTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", append([]string{"-c", "core.fsmonitor=false", "rev-parse"}, args...)...)
-	cmd.WaitDelay = 5 * time.Second
-	cmd.Dir = dir
-	cmd.Env = append(worktreeGitEnv(), "GIT_CEILING_DIRECTORIES="+ceiling)
-	out, err := cmd.Output()
-	if err != nil {
-		if ctx.Err() != nil {
-			return "", fmt.Errorf("git rev-parse %s in %s: %w after %s", strings.Join(args, " "), dir, errGitProbeTimeout, worktreeGitTimeout)
-		}
-		return "", fmt.Errorf("git rev-parse %s in %s: %w", strings.Join(args, " "), dir, err)
+	// The probe runs in the user's checkout, a Scion worktree of it, or a
+	// workspace whose layout is not known here, so it uses the linked list,
+	// the wider one, which accepts every config the managed list accepts.
+	// The environment starts from HostGitEnv over worktreeGitEnv (of the
+	// GIT_* variables only GIT_CONFIG_NOSYSTEM and GIT_CONFIG_GLOBAL are
+	// kept), and the ceiling is appended last, so an inherited
+	// GIT_CEILING_DIRECTORIES cannot replace it. The callers need a bound
+	// wider than CeilingOn, which stops at dir's parent: a probe may have to
+	// find the project's repository several levels up and no further. Under
+	// CeilingOff the door leaves GIT_CEILING_DIRECTORIES as the caller set
+	// it, so this bound is the one git applies; with a .git at dir it also
+	// bounds the door's own config listings. HostGitArgs pins
+	// core.fsmonitor=false.
+	res := util.RunHostGit(ctx, dir, util.HostGitOptions{
+		Policy:  util.RepoPolicyLinked,
+		Ceiling: util.CeilingOff,
+		Env:     append(util.HostGitEnv(worktreeGitEnv()), "GIT_CEILING_DIRECTORIES="+ceiling),
+	}, append([]string{"rev-parse"}, args...)...)
+	joined := strings.Join(args, " ")
+	switch {
+	case res.Err == nil && res.ExitCode == 0:
+		return strings.TrimSpace(string(res.Stdout)), nil
+	case ctx.Err() != nil:
+		return "", fmt.Errorf("git rev-parse %s in %s: %w after %s", joined, dir, errGitProbeTimeout, worktreeGitTimeout)
+	case errors.Is(res.Err, exec.ErrNotFound):
+		// Without git there is no repository to widen to: read as git's own
+		// failure ("not a repository"), not as a refusal.
+		return "", fmt.Errorf("git rev-parse %s in %s: %w", joined, dir, res.Err)
+	case res.Err != nil:
+		return "", fmt.Errorf("git rev-parse %s in %s: %w: %w", joined, dir, errGitProbeRefused, res.Err)
 	}
-	return strings.TrimSpace(string(out)), nil
+	if stderr := strings.TrimSpace(string(res.Stderr)); stderr != "" {
+		return "", fmt.Errorf("git rev-parse %s in %s: git exited with code %d: %s", joined, dir, res.ExitCode, stderr)
+	}
+	return "", fmt.Errorf("git rev-parse %s in %s: git exited with code %d", joined, dir, res.ExitCode)
 }
 
 // errGitProbeTimeout marks a boundedRevParse call that did not finish in
@@ -3323,10 +3539,36 @@ func boundedRevParse(dir, ceiling string, args ...string) (string, error) {
 // layout than the workspace's own git metadata allows.
 var errGitProbeTimeout = errors.New("git probe timed out")
 
+// errGitProbeRefused marks a boundedRevParse call the host-side git door
+// refused, before or after git ran (for example a repository config the
+// policy refuses, a directory that may itself be a git directory, a config
+// change while git ran), or that failed to wait for git (exec.ErrWaitDelay).
+// A missing git binary is not one. It is never read as "not a repository".
+var errGitProbeRefused = errors.New("git probe refused")
+
 // gitProbeTimeoutError is detectRepoRoot's refusal for a git probe in the
 // workspace that did not finish in time.
 func gitProbeTimeoutError(workspace string, err error) error {
 	return fmt.Errorf("cannot check the git metadata of workspace %s: %w; refusing to start: check the workspace's .git metadata and the filesystem", workspace, err)
+}
+
+// gitProbeRefusedError is detectRepoRoot's refusal for a git probe in the
+// workspace that the host-side git door refused.
+func gitProbeRefusedError(workspace string, err error) error {
+	return fmt.Errorf("cannot check the git metadata of workspace %s: %w; refusing to start: check the workspace's .git metadata and its git config", workspace, err)
+}
+
+// gitProbeRefusal returns the start refusal for a workspace probe error that
+// must not be read as "not a repository" (a timeout or a door refusal), or
+// nil otherwise (no error, git's own non-zero exit, or git missing).
+func gitProbeRefusal(workspace string, err error) error {
+	switch {
+	case errors.Is(err, errGitProbeTimeout):
+		return gitProbeTimeoutError(workspace, err)
+	case errors.Is(err, errGitProbeRefused):
+		return gitProbeRefusedError(workspace, err)
+	}
+	return nil
 }
 
 // boundedCommonGitDir returns dir's git common dir as an absolute path, with
@@ -3551,7 +3793,14 @@ func workspaceSourceRoots(explicitWorkspace bool, effectiveWorkspace string, set
 		}
 		roots := []string{projectRepoRoot}
 		if effectiveWorkspace != "" {
-			if ok, err := util.IsRegisteredWorktree(projectRepoRoot, effectiveWorkspace); err == nil && ok {
+			ok, err := util.IsRegisteredWorktree(projectRepoRoot, effectiveWorkspace)
+			// A policy refusal carries its remedy, so it is returned instead
+			// of narrowing silently.
+			var refused *util.RepoConfigRefusedError
+			if errors.As(err, &refused) {
+				return nil, fmt.Errorf("workspace %q: cannot check its worktree registration in %q: %w", effectiveWorkspace, projectRepoRoot, err)
+			}
+			if err == nil && ok {
 				if workspaceSharesProjectRepo(projectDir, effectiveWorkspace) {
 					roots = append(roots, effectiveWorkspace)
 				}
@@ -3680,6 +3929,15 @@ func filterWorkspaceVolume(volumes []api.VolumeMount) []api.VolumeMount {
 		}
 	}
 	return filtered
+}
+
+// postRunEntryOfRun reports whether a, an entry Start lists right after
+// Run, may be the container of run runID: an entry of runID, or a legacy
+// entry that carries no run ID (it matches by name and ID alone). An entry
+// of any other run belongs to an earlier start and is skipped. It reads
+// only the entry, so it applies the same to every runtime.
+func postRunEntryOfRun(a api.AgentInfo, runID string) bool {
+	return a.RunID == "" || a.RunID == runID
 }
 
 // matchAgentProject reports whether the agent belongs to the given project.
@@ -4342,6 +4600,20 @@ func isEmptyPerAgentStart(opts api.StartOptions) bool {
 // loaded from a content-addressed cache (see api.AgentInfo.TemplateHash).
 func infoTemplateHydrated(cfg *api.ScionConfig) bool {
 	return cfg != nil && cfg.Info != nil && cfg.Info.TemplateHash != ""
+}
+
+// startedTemplateHash is the content hash of the template a start ran
+// with: from the image provenance record for an agent with one, otherwise
+// from agent info. "" when the template was resolved by name (no hash is
+// known), so the hub records the effective template hash as unknown.
+func startedTemplateHash(provenance *imageProvenance, cfg *api.ScionConfig) string {
+	if provenance != nil {
+		return provenance.TemplateHash
+	}
+	if cfg != nil && cfg.Info != nil {
+		return cfg.Info.TemplateHash
+	}
+	return ""
 }
 
 // templateHydrated reports whether the agent's template was loaded from a

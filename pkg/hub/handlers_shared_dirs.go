@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"os"
@@ -22,6 +23,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs/provisioner"
 	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -99,15 +101,18 @@ func (s *Server) handleProjectSharedDirRoutes(w http.ResponseWriter, r *http.Req
 // loaded and authorized by handleProjectSharedDirRoutes; the checks below
 // are additional to that gate, not a replacement for it.
 //
-// Backing-directory contract (ptone/scion#2879): POST records the
-// declaration only and does not create a directory on any host. The
-// backing directory is created on first use: by each Runtime Broker when an
-// agent of the project starts there (pkg/agent resolveSharedDirs, local
-// layout or NFS export), or by the hub on the first file write/upload
-// through the shared-dir file routes (openSharedDirRoot with
-// createIfMissing). Reads never create it: listing a declared but not yet
-// created shared dir answers 200 with an empty list, and reading a file in
-// it answers 404.
+// Backing-directory contract (ptone/scion#2879, ptone/scion#5834): POST
+// records the declaration and then creates the leaf wherever the hub can
+// resolve it (createSharedDirLeaf: the shared tree, or the hub host's local
+// layout), through the layout authority's Provisioner with the brokers'
+// leaf contract. A leaf the hub cannot resolve or create is logged and the
+// declaration still stands: the backing directory is then created on first
+// use, by each Runtime Broker when an agent of the project starts there
+// (pkg/agent resolveSharedDirs, local layout or NFS export), or by the hub
+// on the first file write/upload through the shared-dir file routes
+// (openSharedDirRoot with createIfMissing). Reads never create it: listing
+// a declared but not yet created shared dir answers 200 with an empty
+// list, and reading a file in it answers 404.
 //
 // A hub write only reaches storage the hub itself can resolve
 // (resolveSharedDirPath): the NFS export, a hub-managed project's local
@@ -181,11 +186,32 @@ func (s *Server) handleProjectSharedDirs(w http.ResponseWriter, r *http.Request,
 			return
 		}
 
+		s.createSharedDirLeaf(ctx, project, newDir)
 		s.events.PublishProjectUpdated(ctx, project)
 		writeJSON(w, http.StatusCreated, newDir)
 
 	default:
 		MethodNotAllowed(w, http.MethodGet, http.MethodPost)
+	}
+}
+
+// createSharedDirLeaf creates the backing directory of the shared dir sd
+// just declared on project, where the hub can resolve it
+// (resolveSharedDirPath), through provisioner.Provisioner.EnsureLeaf: on a
+// shared backend the confined leaf walk with mode 2775 and the default ACL,
+// on the local layout the directory created as the brokers create it. Best
+// effort: a shared dir the hub cannot resolve (a git project with no
+// co-located broker) or create is logged, and first use creates it.
+func (s *Server) createSharedDirLeaf(ctx context.Context, project *store.Project, sd api.SharedDir) {
+	resolution, err := s.resolveSharedDirPath(ctx, project, sd.Name)
+	if err != nil {
+		s.projectsLogger().Debug("shared dir leaf not created at declaration; it is created on first use",
+			"project_id", project.ID, "shared_dir", sd.Name, "error", sanitizedStorageError(err))
+		return
+	}
+	if _, err := (provisioner.Provisioner{}).EnsureLeaf(resolution.Resolved); err != nil {
+		s.projectsLogger().Warn("failed to create the shared dir leaf at declaration; it is created on first use",
+			"project_id", project.ID, "shared_dir", sd.Name, "error", sanitizedStorageError(err))
 	}
 }
 

@@ -1510,3 +1510,114 @@ func TestResolveSharedDirs_NFS_InlineControlPathCheck(t *testing.T) {
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, brokercontrol.ErrControlPathMount), "got %v", err)
 }
+
+// treeOf lists every path under root (relative, in lexical order), so a test
+// can show that nothing was created anywhere except the paths it expects.
+func treeOf(t *testing.T, root string) []string {
+	t.Helper()
+	var out []string
+	require.NoError(t, filepath.WalkDir(root, func(p string, _ fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(root, p)
+		if err != nil {
+			return err
+		}
+		out = append(out, rel)
+		return nil
+	}))
+	return out
+}
+
+// captureSlogText sends the default slog output to a buffer for the test.
+func captureSlogText(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(old) })
+	return &buf
+}
+
+const skipInvalidSharedDirMsg = "shared dirs: skipping an invalid shared-dir name; no directory is created for it"
+
+// On the local layout, a shared-dir name that fails api.ValidateSharedDirs
+// is skipped with one log line naming it (never a host path) and gets no
+// directory anywhere, while the valid names are still created and mounted
+// exactly as before (ptone/scion#6881).
+func TestResolveSharedDirs_LocalBranch_InvalidNamesSkipped(t *testing.T) {
+	projectDir := newTestProjectDir(t)
+	root := filepath.Dir(filepath.Dir(filepath.Dir(projectDir)))
+	before := treeOf(t, root)
+	logs := captureSlogText(t)
+
+	invalid := []string{"..", "../escape", "../../outside", "a/b", "/abs", "", "Upper", "-x"}
+	dirs := []api.SharedDir{{Name: "build-cache"}}
+	for _, n := range invalid {
+		dirs = append(dirs, api.SharedDir{Name: n})
+	}
+
+	volumes, realization, err := resolveSharedDirs(localSharedDirLayout, false, projectDir, "pid-1", "docker", dirs, "/workspace")
+	require.NoError(t, err)
+	assert.Nil(t, realization)
+
+	after := treeOf(t, root)
+	var added []string
+	seen := make(map[string]bool, len(before))
+	for _, p := range before {
+		seen[p] = true
+	}
+	for _, p := range after {
+		if !seen[p] {
+			added = append(added, p)
+		}
+	}
+	base := filepath.Join("project-configs", "test__abc12345", config.SharedDirsSubdir)
+	assert.Equal(t, []string{base, filepath.Join(base, "build-cache")}, added,
+		"only the valid shared dir (and its shared-dirs parent) may be created")
+
+	want, err := config.SharedDirsToVolumeMounts(projectDir, []api.SharedDir{{Name: "build-cache"}}, "/workspace")
+	require.NoError(t, err)
+	assert.Equal(t, want, volumes, "the valid shared dir is still mounted")
+
+	out := logs.String()
+	assert.Equal(t, len(invalid), strings.Count(out, skipInvalidSharedDirMsg), "one log line per skipped name")
+	assert.NotContains(t, out, root, "the log names the entry, never a host path")
+	// The index is the entry's position in the project's list ("-x" is the
+	// 9th entry, after 7 skipped ones), and the reason carries no
+	// kept-list index of its own.
+	assert.Contains(t, out, `index=8 name=-x reason="invalid name \"-x\"`)
+	assert.NotContains(t, out, "shared_dirs[")
+}
+
+// A repeated name is skipped after its first occurrence (logged), so it is
+// created and mounted once.
+func TestResolveSharedDirs_LocalBranch_DuplicateNameKeptOnce(t *testing.T) {
+	projectDir := newTestProjectDir(t)
+	logs := captureSlogText(t)
+	dirs := []api.SharedDir{{Name: "data"}, {Name: "data", ReadOnly: true}}
+
+	volumes, _, err := resolveSharedDirs(localSharedDirLayout, false, projectDir, "pid-1", "docker", dirs, "/workspace")
+	require.NoError(t, err)
+	want, err := config.SharedDirsToVolumeMounts(projectDir, dirs[:1], "/workspace")
+	require.NoError(t, err)
+	assert.Equal(t, want, volumes)
+	assert.Equal(t, 1, strings.Count(logs.String(), skipInvalidSharedDirMsg))
+	assert.Contains(t, logs.String(), `index=1 name=data reason="duplicate name \"data\""`)
+}
+
+// When every name is invalid, nothing is created and no volume is returned.
+func TestResolveSharedDirs_LocalBranch_AllInvalid_NoDirsNoVolumes(t *testing.T) {
+	projectDir := newTestProjectDir(t)
+	root := filepath.Dir(filepath.Dir(filepath.Dir(projectDir)))
+	before := treeOf(t, root)
+	_ = captureSlogText(t)
+
+	volumes, realization, err := resolveSharedDirs(localSharedDirLayout, false, projectDir, "pid-1", "docker",
+		[]api.SharedDir{{Name: ".."}, {Name: "../x"}}, "/workspace")
+	require.NoError(t, err)
+	assert.Nil(t, volumes)
+	assert.Nil(t, realization)
+	assert.Equal(t, before, treeOf(t, root), "nothing is created")
+}

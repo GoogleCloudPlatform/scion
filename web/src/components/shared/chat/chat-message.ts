@@ -64,6 +64,7 @@ import './chat-file-preview.js';
 import type { PreviewTarget } from './chat-file-preview.js';
 import '../code-editor.js';
 import '../markdown-preview.js';
+import { copyToClipboard, showCopyFailedToast } from '../../../utils/clipboard.js';
 
 /** Structured attachment reference from the W7 API. */
 export interface AttachmentRefInfo {
@@ -1698,17 +1699,17 @@ export class ScionChatMessage extends LitElement {
       padding: 0.25rem 0.5rem;
       margin-bottom: 0.25rem;
       border-left: 3px solid var(--scion-primary-400, #60a5fa);
-      background: var(--scion-surface-50, #f8fafc);
+      background: var(--scion-bg, #f8fafc);
       border-radius: 0 0.25rem 0.25rem 0;
       cursor: pointer;
       font-size: var(--chat-fs-base);
-      color: var(--scion-neutral-500, #64748b);
+      color: var(--scion-text-muted, #64748b);
       max-width: 100%;
       overflow: hidden;
     }
 
     .reply-preview:hover {
-      background: var(--scion-surface-100, #f1f5f9);
+      background: var(--scion-bg-subtle, #f1f5f9);
     }
 
     .reply-preview.unavailable {
@@ -1719,12 +1720,14 @@ export class ScionChatMessage extends LitElement {
     }
 
     .reply-preview.unavailable:hover {
-      background: var(--scion-surface-50, #f8fafc);
+      background: var(--scion-bg, #f8fafc);
     }
 
+    /* primary-600 in the light theme and primary-300 in the dark one, so the
+       name keeps AA contrast on the reply background in both. */
     .reply-preview .reply-sender {
       font-weight: 600;
-      color: var(--scion-primary-600, #2563eb);
+      color: var(--scion-primary-hover, #2563eb);
       white-space: nowrap;
     }
 
@@ -2153,14 +2156,19 @@ export class ScionChatMessage extends LitElement {
       btn.textContent = 'Copy';
       btn.addEventListener('click', () => {
         const code = pre.querySelector('code')?.textContent ?? pre.textContent ?? '';
-        void navigator.clipboard.writeText(code);
-        btn.textContent = 'Copied!';
-        const prev = (btn as CopyButton)._copyTimer;
-        if (prev) clearTimeout(prev);
-        (btn as CopyButton)._copyTimer = setTimeout(() => {
-          if (!this.isConnected) return;
-          btn.textContent = 'Copy';
-        }, 1500);
+        void copyToClipboard(code).then((ok) => {
+          if (!ok) {
+            showCopyFailedToast();
+            return;
+          }
+          btn.textContent = 'Copied!';
+          const prev = (btn as CopyButton)._copyTimer;
+          if (prev) clearTimeout(prev);
+          (btn as CopyButton)._copyTimer = setTimeout(() => {
+            if (!this.isConnected) return;
+            btn.textContent = 'Copy';
+          }, 1500);
+        });
       });
       pre.appendChild(btn);
     });
@@ -3016,24 +3024,23 @@ export class ScionChatMessage extends LitElement {
   private async copyAttachmentText(id: string): Promise<void> {
     const state = this.previews.get(id);
     if (!state || state.status !== 'ready' || !state.text) return;
-    try {
-      await navigator.clipboard.writeText(state.text);
-      const next = new Set(this.copiedIds);
-      next.add(id);
-      this.copiedIds = next;
-      const existing = this.copyTimers.get(id);
-      if (existing) clearTimeout(existing);
-      const timer = setTimeout(() => {
-        if (!this.isConnected) return;
-        const after = new Set(this.copiedIds);
-        after.delete(id);
-        this.copiedIds = after;
-        this.copyTimers.delete(id);
-      }, 1500);
-      this.copyTimers.set(id, timer);
-    } catch {
-      // Clipboard write may fail in insecure contexts; silently ignore.
+    if (!(await copyToClipboard(state.text))) {
+      showCopyFailedToast();
+      return;
     }
+    const next = new Set(this.copiedIds);
+    next.add(id);
+    this.copiedIds = next;
+    const existing = this.copyTimers.get(id);
+    if (existing) clearTimeout(existing);
+    const timer = setTimeout(() => {
+      if (!this.isConnected) return;
+      const after = new Set(this.copiedIds);
+      after.delete(id);
+      this.copiedIds = after;
+      this.copyTimers.delete(id);
+    }, 1500);
+    this.copyTimers.set(id, timer);
   }
 
   /** Rendered markdown body for a markdown attachment preview. */

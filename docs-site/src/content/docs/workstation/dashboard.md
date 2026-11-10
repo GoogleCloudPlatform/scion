@@ -5,6 +5,8 @@ description: Using the Scion Web Dashboard for visualization and control.
 
 The Scion Web Dashboard provides a visual interface for managing your agents, projects, and runtime brokers. It complements the CLI by providing real-time status updates and easier management of complex environments.
 
+Open the dashboard on the URL the server prints at start (`http://localhost:<port>`). HTML artifacts are served with a policy that names that URL, so one opened through another host name, such as `127.0.0.1`, shows its page without its own scripts, styles and images (see [HTML artifacts](/scion/reference/artifacts/#html-artifacts)). On a Hub with a separate content host ([`server.hub.content_url`](/scion/reference/admin-settings/#serverhubcontent_url-the-content-host)), shared artifact links (`shareUrl`) and HTML artifact views opened from a shared link are served on that content host instead.
+
 ## Overview
 
 The dashboard is organized into several key areas:
@@ -215,7 +217,7 @@ Centralized views for managing the Scion infrastructure and access control (avai
 
   #### Integrations across Hub instances
 
-  Each Hub instance also writes the health of the chat plugins it runs to its row, on the same 15-second schedule: at most 32 plugins, each with its name, health (`healthy`, `degraded`, `unhealthy` or `unknown`), whether it is connected, and its version. The plugin's own health message and details are never stored. A plugin that does not answer within 2 seconds is stored as `unknown`. These health queries run only in this background write, so opening more Health pages adds no plugin calls; the summary itself queries no plugin.
+  Each Hub instance also writes the health of the chat plugins it runs to its row, on the same 15-second schedule: at most 32 plugins, each with its name, health (`healthy`, `degraded`, `unhealthy` or `unknown`), whether it is connected, and its version. When the plugin supervisor detects a lost RPC session, the instance reports `connected: false` with health `degraded` (`State: "restarting"`, attempts 1–4) or `unhealthy` (`State: "failing"`, after 5 consecutive failed attempts); a `degraded` integration adds the warning `"Integration <name> is degraded"` to **Needs attention**, and an `unhealthy` integration adds `"Integration <name> is unhealthy"` and degrades the overall summary status (see [Message-Bus Plugin Supervision](/scion/hosted/user/external-channels/#message-bus-plugin-supervision)). The plugin's own health message and details are never stored. A plugin that does not answer within 2 seconds is stored as `unknown`. These health queries run only in this background write, so opening more Health pages adds no plugin calls; the summary itself queries no plugin.
 
   The summary merges the reports of the **live** instances for each plugin:
 
@@ -228,8 +230,8 @@ Centralized views for managing the Scion infrastructure and access control (avai
 
   On Cloud Run, keep CPU always allocated (`--no-cpu-throttling`, which the shipped deploy script sets) so each instance keeps writing its row between requests. With CPU throttling, an idle instance stops writing and shows as stale.
 - **Metrics Dashboard**: View infrastructure health and agent telemetry metrics. Access requires the `hub.metrics.read` permission scope. For details on the metrics collected, see [Metrics & OpenTelemetry](/scion/hosted/single-node/metrics/). Daily charts group days by calendar day in your display zone, and their headings name that zone (see [Metrics dashboard day buckets](/scion/reference/times-and-timezones/#metrics-dashboard-day-buckets)).
-- **Server Configuration Editor**: A full-featured settings editor at `/admin/server-config`. Restructured the **General** settings tab into three dedicated cards (General, Agent Defaults with sub-tabs, and Project Default Settings). Adds `DefaultModel`, `DefaultThinkingLevel`, and `DefaultHarnessAuth` fields to the defaults pipeline, moves the Telemetry toggle to Agent Defaults, and groups the Message Broker configuration in the Hub Server tab.
-- **Maintenance Mode**: Toggle maintenance mode for the Hub and Web servers to facilitate safe infrastructure updates.
+- **Server Configuration Editor**: A full-featured settings editor at `/admin/server-config`. The **General** settings tab is organized into dedicated cards (General, Agent Defaults with sub-tabs, and Project Default Settings) with `DefaultModel`, `DefaultThinkingLevel`, `DefaultHarnessAuth`, and the Telemetry toggle under Agent Defaults, and the **Hub Server** tab groups the Message Broker configuration and the editable agent start claim timing fields (`start_claim_lease_ttl`, `start_max_duration`, `start_unconfirmed_hold`, `start_create_unconfirmed_hold`; see [Admin Settings](/scion/reference/admin-settings/#admin-ui)).
+- **Maintenance Mode**: Toggle maintenance mode and edit the maintenance banner message on `/admin/maintenance` for the Hub and Web servers to facilitate safe infrastructure updates.
 
 ## Authentication
 

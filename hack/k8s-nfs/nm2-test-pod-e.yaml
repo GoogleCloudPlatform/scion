@@ -19,7 +19,7 @@ spec:
     - -c
     - |
       set -e
-      SENTINEL="/workspace/.scion-provisioned"
+      SENTINEL="/scion-provision/.scion-provisioned"
       if [ -f "$SENTINEL" ]; then
         echo "PROVISION: sentinel found, skipping clone"
         exit 0
@@ -32,6 +32,9 @@ spec:
     - name: workspace
       mountPath: /workspace
       subPath: projects/test-project-epsilon/workspace
+    - name: workspace
+      mountPath: /scion-provision
+      subPath: projects/test-project-epsilon/provision
     resources:
       requests:
         cpu: 250m

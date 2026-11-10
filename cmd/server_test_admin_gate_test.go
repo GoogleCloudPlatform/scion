@@ -124,6 +124,8 @@ func TestValidateTestAdminIdentities_EachConditionRefused(t *testing.T) {
 				return &testinfra.Marker{HubID: tiaCmdHubID, Class: "prod"}, nil
 			}
 		}, hub.ErrTestAdminMarkerClassNotTest},
+		{"G7 keyring signing", func(in *testModeInputs) { in.KeyringSigning = true }, hub.ErrTestAdminKeyringSigning},
+		{"G7 keyring signing is decided before the shared secret", func(in *testModeInputs) { in.KeyringSigning, in.SharedSigningSecret = true, true }, hub.ErrTestAdminKeyringSigning},
 		{"G7 shared signing secret", func(in *testModeInputs) { in.SharedSigningSecret = true }, hub.ErrTestAdminSharedSigningSecret},
 		{"G7 pre-configured signing key", func(in *testModeInputs) { in.PreconfiguredSigningKey = true }, hub.ErrTestAdminPreconfiguredSigningKey},
 		{"G8 federation enabled", func(in *testModeInputs) { in.Federation.Enabled = true }, hub.ErrTestAdminFederationConfigured},

@@ -626,21 +626,25 @@ func TestChatKeyReadAudience(t *testing.T) {
 	ctx := context.Background()
 	group := seedGroupConversation(t, f.st, f.projA.ID, "classify")
 
-	aud, topic := chatKeyReadAudience(ctx, f.wcs, f.topicA)
+	aud, topic, err := chatKeyReadAudience(ctx, f.wcs, f.topicA)
+	require.NoError(t, err)
 	assert.Equal(t, chatAudienceProject, aud)
 	require.NotNil(t, topic)
 	assert.Equal(t, f.projA.ID, topic.ProjectID)
 
-	aud, topic = chatKeyReadAudience(ctx, f.wcs, dmKeyFor(t, "user", f.ua.ID, "agent", f.aa.ID))
+	aud, topic, err = chatKeyReadAudience(ctx, f.wcs, dmKeyFor(t, "user", f.ua.ID, "agent", f.aa.ID))
+	require.NoError(t, err)
 	assert.Equal(t, chatAudienceParticipants, aud)
 	assert.Nil(t, topic)
 
 	for _, key := range []string{group, "group:" + f.projA.ID + ":classify", uuid.NewString(), ""} {
-		aud, topic = chatKeyReadAudience(ctx, f.wcs, key)
+		aud, topic, err = chatKeyReadAudience(ctx, f.wcs, key)
+		require.NoError(t, err, key)
 		assert.Equal(t, chatAudienceNone, aud, key)
 		assert.Nil(t, topic, key)
 	}
-	aud, _ = chatKeyReadAudience(ctx, nil, f.topicA)
+	aud, _, err = chatKeyReadAudience(ctx, nil, f.topicA)
+	require.NoError(t, err)
 	assert.Equal(t, chatAudienceNone, aud, "no chat store")
 }
 
@@ -996,7 +1000,7 @@ func TestDeliverToUser_RepublishCarriesNoArtifactAttachments(t *testing.T) {
 	logger, logBuf := newCapturingMessageLogger()
 	proxy.messageLog = logger
 	var fanned [][]AttachmentRef
-	proxy.memberFanout = func(_ context.Context, _ *store.Message, refs []AttachmentRef, _ []artifacts.MessageRef) {
+	proxy.memberFanout = func(_ context.Context, _ *store.Message, refs []AttachmentRef, _ []artifacts.MessageRef, _ ...ChatEventOption) {
 		fanned = append(fanned, refs)
 	}
 

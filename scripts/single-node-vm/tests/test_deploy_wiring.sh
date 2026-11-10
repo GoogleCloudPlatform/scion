@@ -1122,16 +1122,17 @@ test_deploy_sh_registers_a_single_exit_trap() {
   # their remote --command string (it runs in the VM's shell, not in
   # deploy.sh) to remove their private download dir; those are written
   # with escaped quotes (\"\$SCION_EXTRACT_DIR\"), which only appear
-  # inside such double-quoted strings. The hub.env install does the same
-  # for its private staging dir (${HUB_ENV_REMOTE_DIR}, expanded locally
-  # into the remote command). Every other trap line is deploy.sh's own,
+  # inside such double-quoted strings. The hub.env install and the image
+  # driver install do the same for their private staging dirs
+  # (${HUB_ENV_REMOTE_DIR} and ${IMAGE_DRIVER_STAGE}, expanded locally into
+  # the remote command). Every other trap line is deploy.sh's own,
   # and there must be exactly one.
   # shellcheck disable=SC2016 # a regex for literal text in deploy.sh
-  remote='trap .rm -rf (\\"\\\$(SCION|PLUGIN)_EXTRACT_DIR\\"|\$\{HUB_ENV_REMOTE_DIR\}). EXIT'
+  remote='trap .rm -rf (\\"\\\$(SCION|PLUGIN)_EXTRACT_DIR\\"|\$\{(HUB_ENV_REMOTE_DIR|IMAGE_DRIVER_STAGE)\}). EXIT'
   count="$(grep -E '^[[:space:]]*trap .* EXIT[[:space:]]*$' "$DEPLOY_SH" | grep -cvE "$remote" || true)"
   assert_eq "1" "$count" "deploy.sh must register exactly one EXIT trap"
-  assert_eq "3" "$(grep -cE "$remote" "$DEPLOY_SH" || true)" \
-    "the remote install commands (binary, plugin, hub.env) must each clean up their private dir with an EXIT trap"
+  assert_eq "4" "$(grep -cE "$remote" "$DEPLOY_SH" || true)" \
+    "the remote install commands (binary, plugin, hub.env, image driver) must each clean up their private dir with an EXIT trap"
 }
 
 # =====================================================================

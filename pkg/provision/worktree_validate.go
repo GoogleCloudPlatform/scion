@@ -122,7 +122,10 @@ func ValidateWorktreeForBase(base, candidate string) error {
 	if err != nil || cgInfo.IsDir() {
 		return fmt.Errorf("worktree relationship: %s/.git is not a regular gitfile", resolvedCandidate)
 	}
-	gitfileContent, err := os.ReadFile(candidateGitPath)
+	// Read without following a symlink, as a regular file of at most
+	// gitPointerMaxBytes: the candidate is agent-writable, and git writes a
+	// worktree's .git as a regular "gitdir:" file.
+	gitfileContent, err := readSmallFileNoFollow(candidateGitPath, gitPointerMaxBytes)
 	if err != nil {
 		return fmt.Errorf("worktree relationship: read gitfile: %w", err)
 	}
@@ -155,7 +158,7 @@ func ValidateWorktreeForBase(base, candidate string) error {
 
 	// The admin dir's own back-link must resolve back to the candidate's
 	// gitfile. git writes this relative to the admin dir itself.
-	backLinkContent, err := os.ReadFile(filepath.Join(adminDir, "gitdir"))
+	backLinkContent, err := readSmallFileNoFollow(filepath.Join(adminDir, "gitdir"), gitPointerMaxBytes)
 	if err != nil {
 		return fmt.Errorf("worktree relationship: read admin back-link: %w", err)
 	}

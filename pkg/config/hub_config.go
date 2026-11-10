@@ -112,6 +112,16 @@ type HubServerConfig struct {
 	// through the settings API in any mode.
 	TestIdentities *TestIdentitiesConfig `json:"testIdentities,omitempty" yaml:"testIdentities,omitempty" koanf:"testIdentities"`
 
+	// ContentURL is server.hub.content_url (ContentURLKey): the hub's content
+	// host, a second public origin on which shared artifacts are served.
+	// Empty serves them on the hub endpoint. See ValidateContentURL.
+	ContentURL string `json:"contentUrl,omitempty" yaml:"contentUrl,omitempty" koanf:"contentUrl"`
+
+	// ContentURLAllowSameSite is server.hub.content_url_allow_same_site
+	// (ContentURLAllowSameSiteKey): the override that lets ContentURL be on
+	// the hub endpoint's registrable domain, which is refused without it.
+	ContentURLAllowSameSite bool `json:"contentUrlAllowSameSite,omitempty" yaml:"contentUrlAllowSameSite,omitempty" koanf:"contentUrlAllowSameSite"`
+
 	// MonitoringDashboardURL is an optional absolute http(s) URL of an
 	// external monitoring dashboard for this hub. The Health page links to
 	// it when set. See ValidateMonitoringDashboardURL.
@@ -212,6 +222,18 @@ type HubServerConfig struct {
 	// HubPortProxyConfig.Validate at startup).
 	PortProxy HubPortProxyConfig `json:"portProxy" yaml:"portProxy" koanf:"portProxy"`
 
+	// SSE holds the browser events stream settings (validated by
+	// HubSSEConfig.Validate at startup; ptone/scion#5230).
+	SSE HubSSEConfig `json:"sse" yaml:"sse" koanf:"sse"`
+
+	// PlatformRequestTimeout is the request timeout of the platform in
+	// front of the hub, for example the Cloud Run service timeout ("" =
+	// none declared). When set it clamps the events stream maximum age and
+	// the conduit session lifetime cap to PlatformTimeoutShare of it
+	// (validated by ValidatePlatformRequestTimeout at startup;
+	// ptone/scion#5230, ptone/scion#5245).
+	PlatformRequestTimeout string `json:"platformRequestTimeout,omitempty" yaml:"platformRequestTimeout,omitempty" koanf:"platformRequestTimeout"`
+
 	// Observability holds the hub's own metrics and trace export switches
 	// (server.hub.observability). Read at startup; changes need a restart.
 	Observability HubObservabilityConfig `json:"observability" yaml:"observability" koanf:"observability"`
@@ -231,6 +253,21 @@ func DefaultHubID() string {
 // hubIDFileName is the name of the file used to persist the derived hub ID
 // across restarts in workstation mode.
 const hubIDFileName = "hub-id"
+
+// ReadPersistedHubID returns the hub ID persisted in the global directory's
+// hub-id file (what PersistentHubID reads and writes), or "" when there is
+// none or it cannot be read. It never writes.
+func ReadPersistedHubID() string {
+	globalDir, err := GetGlobalDir()
+	if err != nil {
+		return ""
+	}
+	data, err := os.ReadFile(filepath.Join(globalDir, hubIDFileName))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
 
 // PersistentHubID returns the hub instance ID, persisting the derived value to
 // disk on first call so that subsequent startups use the same ID even if the
@@ -756,6 +793,13 @@ type RuntimeTargetConfig struct {
 	SharedDirStorageBackends         map[string]string   `json:"sharedDirStorageBackends,omitempty" yaml:"sharedDirStorageBackends,omitempty" koanf:"sharedDirStorageBackends"`
 	HomeStorageBackend               string              `json:"homeStorageBackend,omitempty" yaml:"homeStorageBackend,omitempty" koanf:"homeStorageBackend"`
 	HomeStorageLeaf                  string              `json:"homeStorageLeaf,omitempty" yaml:"homeStorageLeaf,omitempty" koanf:"homeStorageLeaf"`
+	// Cloud Run only. See V1RuntimeTargetConfig.
+	ProjectID       string `json:"projectId,omitempty" yaml:"projectId,omitempty" koanf:"projectId"`
+	Region          string `json:"region,omitempty" yaml:"region,omitempty" koanf:"region"`
+	ServiceAccount  string `json:"serviceAccount,omitempty" yaml:"serviceAccount,omitempty" koanf:"serviceAccount"`
+	Network         string `json:"network,omitempty" yaml:"network,omitempty" koanf:"network"`
+	Subnetwork      string `json:"subnetwork,omitempty" yaml:"subnetwork,omitempty" koanf:"subnetwork"`
+	CredentialsFile string `json:"credentialsFile,omitempty" yaml:"credentialsFile,omitempty" koanf:"credentialsFile"`
 }
 
 // DatabaseConfig holds database connection settings.

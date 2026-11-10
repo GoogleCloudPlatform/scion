@@ -23,9 +23,39 @@ import (
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/internal/principal"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
+
+// apiLogDetailCap caps the error text WriteErrorFromErr logs for a 5xx. It
+// equals the hub's upstreamTextMaxBytes (pkg/hub/upstream_text.go); keep the
+// two in step. The error can carry upstream or backend text
+// (ptone/scion#7498).
+const apiLogDetailCap = 512
+
+// renderLogDetail renders error text for the 5xx log: s is sliced to
+// 4*apiLogDetailCap bytes first, so a large error is never fully scanned
+// (every input byte renders to at least one output byte, so the rendered
+// prefix and the cut marker are the same as for the full input; a rune split
+// by the slice renders as U+FFFD and is past the cap anyway), then
+// principal.SanitizeForLog replaces control, format and line separator runes
+// and cuts to apiLogDetailCap.
+func renderLogDetail(s string) string {
+	if limit := 4 * apiLogDetailCap; len(s) > limit {
+		s = s[:limit]
+	}
+	return principal.SanitizeForLog(s, apiLogDetailCap)
+}
+
+// errLogDetail renders err for the 5xx log through renderLogDetail. A nil
+// err, which WriteErrorFromErr maps to the fallback 500, logs as "<nil>".
+func errLogDetail(err error) string {
+	if err == nil {
+		return "<nil>"
+	}
+	return renderLogDetail(err.Error())
+}
 
 // APIError represents a standardized error response.
 type APIError struct {
@@ -130,6 +160,7 @@ const (
 	ErrCodeRuntimeTargetPinStale            = "runtime_target_pin_stale"             // 409
 	ErrCodeRuntimeBrokerNotLinked           = "runtime_broker_not_linked"            // 422
 	ErrCodeRuntimeBrokerLinkPathUnsupported = "runtime_broker_link_path_unsupported" // 409
+	ErrCodeRuntimeTargetTypeUnsupported     = "runtime_target_type_unsupported"      // 422
 	ErrCodeExperimentDisabled               = "experiment_disabled"                  // 412
 
 	// ErrCodeDeleteInProgress is returned (409) by start, restart,
@@ -525,7 +556,7 @@ func WriteErrorFromErr(w http.ResponseWriter, err error, requestID string) {
 			"status", statusCode,
 			"code", code,
 			"requestID", requestID,
-			"error", err,
+			"error", errLogDetail(err),
 		)
 	case elevatedClientErrorStatus(statusCode):
 		slog.Info("API client error from Go error",

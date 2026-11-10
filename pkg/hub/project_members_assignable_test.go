@@ -164,12 +164,15 @@ func TestAssignableRoles_SystemRolesNeverListedAndOrdered(t *testing.T) {
 		assert.Equal(t, store.RoleScopeProject, rd.ScopeType, "system role %s must not be listed", rd.Name)
 	}
 
-	// Built-ins first, in tier order; then custom roles by name.
-	require.GreaterOrEqual(t, len(body.Items), 3)
+	// Built-ins first, in tier order (project-viewer last, ptone/scion#5519);
+	// then custom roles by name.
+	require.GreaterOrEqual(t, len(body.Items), 4)
 	assert.Equal(t, store.ProjectRoleOwner, body.Items[0].Name)
 	assert.Equal(t, store.ProjectRoleAdmin, body.Items[1].Name)
 	assert.Equal(t, store.ProjectRoleMember, body.Items[2].Name)
-	for i := 4; i < len(body.Items); i++ {
+	assert.Equal(t, store.ProjectRoleViewer, body.Items[3].Name)
+	assert.Equal(t, roleKindBuiltIn, body.Items[3].RoleKind)
+	for i := 5; i < len(body.Items); i++ {
 		assert.Equal(t, roleKindCustom, body.Items[i].RoleKind)
 		assert.LessOrEqual(t, body.Items[i-1].Name, body.Items[i].Name)
 	}

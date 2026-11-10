@@ -187,7 +187,7 @@ The Windows build runs these commands, and nothing else. The list is an allowlis
 - **Agents over the Hub:** `list`, `ssh`, `ssh-config`, `vscode`, `tunnel`, `tunnel status`
 - **Messages:** `message`, `message channels`, `messages`, `messages read`
 - **Conversations:** `conversation` and `conversation list`, `messages`, `create`, `get`, `get-message`, `set-default`, `participants`, `join`, `leave`, `catch-up`; `conversation group` and its `list`, `get`, `create`, `rename`, `delete`, `add`, `remove`
-- **Project selection:** `use` and `project use` (`use` is an alias of `project use`). The `project` command itself and its other subcommands are not supported, so `scion project` on its own is refused.
+- **Project selection and settings:** `use` and `project use` (`use` is an alias of `project use`), and `project settings` with `get`, `set` and `unset` (Hub API calls only). The `project` command itself and its other subcommands are not supported, so `scion project` on its own is refused.
 - **Configuration:** `config` and `config list`, `set`, `get`, `unset`, `validate`, `migrate`, `dir`, `cd-config`, `cd-project`, `schema`
 - **Hub list and login:** `hub`, `hub add`, `hub list`, `hub rename`, `hub remove`, `hub status`, `hub auth`, `hub auth login`, `hub auth logout`, `hub auth federation-token`
 - **Hub projects and linking:** `hub projects`, `hub projects info`, `create`, `delete`; `hub link`, `hub unlink`, `hub enable`, `hub disable`
@@ -211,7 +211,7 @@ The error names the command by its canonical name, so `scion broker join` report
 
 **Shell completion.** Completion for the supported commands works as on other platforms, in PowerShell (`scion completion powershell`), bash, zsh and fish. Unsupported commands are not offered, and completing one returns no suggestions, not even file names.
 
-Because `project` itself is not supported, `scion project <TAB>` offers no subcommands on Windows. `scion project use` (the same as `scion use`) still works when you type it in full.
+Because `project` itself is not supported, `scion project <TAB>` offers no subcommands on Windows. `scion project use` (the same as `scion use`) and `scion project settings` still work when you type them in full.
 
 The unsupported commands fall into these groups:
 

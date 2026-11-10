@@ -37,7 +37,7 @@ import { setDocumentTitle, PAGE_TITLE_EVENT } from '../client/page-title.js';
 import type { PageTitleDetail } from '../client/page-title.js';
 import { enterAppFrame, exitAppFrame } from './shared/app-frame.js';
 import { isFeatureEnabled } from '../utils/feature-flags.js';
-import { ARTIFACTS_FLAG } from '../client/artifacts.js';
+import { ARTIFACTS_FLAG } from '../client/artifacts-flag.js';
 import {
   TestHubBannerController,
   renderTestHubBanner,

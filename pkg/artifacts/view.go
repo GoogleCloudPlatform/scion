@@ -15,6 +15,7 @@
 package artifacts
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
@@ -74,27 +75,42 @@ const (
 	viewCapabilityV2Prefix = "v2."
 )
 
-// viewCSP returns the Content-Security-Policy of a view response served
-// for host under capability. Scripts and styles of the bundle run, in an
-// opaque origin (sandbox without allow-same-origin); scripts, styles,
-// images, fonts and media load only from this view's own path on the hub
-// (inline scripts and styles and data: images and fonts are allowed); the
-// document cannot connect, frame, embed, submit forms, open popups or
+// viewCSP returns the Content-Security-Policy of a view response under
+// capability, whose sources are on sourceHost. Scripts and styles of the
+// bundle run, in an opaque origin (sandbox without allow-same-origin);
+// scripts, styles, images, fonts and media load only from this view's own
+// path (inline scripts and styles and data: images and fonts are allowed);
+// the document cannot connect, frame, embed, submit forms, open popups or
 // navigate the page that frames it, and only the hub may frame it.
+//
+// sourceHost comes from configuration only, never from the request (security
+// review condition 1): viewSourceHost picks the configured content host on a
+// content-host request and the hub's configured public origin otherwise.
 //
 // The source is a host-source with a path: no scheme, so it takes the
 // response's own, and a trailing '/', so it matches every file under the
-// view. A host that is not a plain host[:port] yields no source at all,
-// which blocks every load.
-func viewCSP(host, capability string) string {
+// view. A sourceHost that is not a plain host[:port] (or is empty) yields
+// no source at all, which blocks every load.
+func viewCSP(sourceHost, capability string) string {
 	src := "'none'"
-	if validCSPHost(host) {
-		src = host + RouteView + capability + "/"
+	if validCSPHost(sourceHost) {
+		src = sourceHost + RouteView + capability + "/"
 	}
 	return "sandbox allow-scripts; default-src 'none'; script-src " + src + " 'unsafe-inline'; " +
 		"style-src " + src + " 'unsafe-inline'; img-src " + src + " data:; font-src " + src + " data:; media-src " + src + "; " +
 		"connect-src 'none'; frame-src 'none'; worker-src 'none'; object-src 'none'; form-action 'none'; " +
 		"base-uri 'none'; frame-ancestors 'self'"
+}
+
+// viewSourceHost returns the host the view CSP names, from configuration
+// only: the content host when ContentHostGuard marked the request as a
+// content-host request, otherwise the hub's configured public
+// origin (Limits.PublicOrigin), or "" when neither can be named.
+func (b backend) viewSourceHost(ctx context.Context) string {
+	if h, ok := contentHostCSPHost(ctx); ok {
+		return h
+	}
+	return hubCSPHost(b.currentLimits(ctx).PublicOrigin)
 }
 
 // validCSPHost accepts host[:port] made of letters, digits, '.' and '-',
@@ -383,7 +399,7 @@ func (s *Service) handleView(w http.ResponseWriter, r *http.Request, segs []stri
 	h := w.Header()
 	h.Set("Content-Type", responseContentType(f.MediaType))
 	h.Set("Content-Length", strconv.FormatInt(f.Size, 10))
-	h.Set("Content-Security-Policy", viewCSP(r.Host, segs[0]))
+	h.Set("Content-Security-Policy", viewCSP(b.viewSourceHost(ctx), segs[0]))
 	h.Set("X-Content-Type-Options", "nosniff")
 	h.Set("Referrer-Policy", "no-referrer")
 	h.Set("Cache-Control", "private, no-store")

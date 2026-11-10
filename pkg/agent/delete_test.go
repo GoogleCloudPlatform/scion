@@ -313,6 +313,7 @@ func initBareRepo(t *testing.T) string {
 	run("-C", wc, "add", "-A")
 	run("-C", wc, "commit", "-m", "init")
 	run("-C", wc, "push", "origin", "main")
+	provision.AllowLocalCloneFixture(t, bare)
 	return bare
 }
 

@@ -44,7 +44,7 @@ func (s *Server) BootstrapBundledResources(ctx context.Context, opts BootstrapOp
 	// The seeded-built-ins ledger (ptone/scion#3544) keeps a built-in the
 	// user deleted from being re-created. The policy lives here, not in
 	// BootstrapSource, so the generic ResourceStore stays policy-free.
-	ledger, err := s.loadBuiltinSeedLedger(ctx)
+	ledger, err := s.loadSeedLedgerForBootstrap(ctx)
 	if err != nil {
 		return fmt.Errorf("bundled resource bootstrap: %w", err)
 	}
@@ -208,8 +208,7 @@ func (s *Server) ArchiveObsoleteBundledHarnessConfigs(ctx context.Context) error
 // checkAndUpdateImageStatus resolves the image registry, checks image
 // availability, and persists the result.
 func (s *Server) checkAndUpdateImageStatus(ctx context.Context, hcID, image string) {
-	registry := s.resolveImageRegistry()
-	resolvedImage := config.RewriteImageRegistry(image, registry)
+	_, resolvedImage := s.hubScopeImageRefs(image, s.resolveImageRegistry())
 
 	result := s.imageChecker.CheckRemoteOnly(ctx, resolvedImage)
 	if result.Error != "" {

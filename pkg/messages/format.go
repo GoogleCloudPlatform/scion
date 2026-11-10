@@ -43,6 +43,25 @@ const (
 	MetadataSenderDisplay = "sender_display"
 )
 
+// MetadataSenderTimezone is the IANA time zone name from a human sender's
+// user profile, as stored, so the recipient agent can read times the
+// sender mentions in the sender's own zone. Only the hub sets it: the hub
+// strips any client-supplied value (messaging.StripReservedMetadata) and
+// sets it on a message from a human user whose profile has a time zone.
+// It is absent when the profile has none and when the sender is not a
+// human user.
+const MetadataSenderTimezone = "sender_timezone"
+
+// Choice response metadata (design choices v4, 4.4): the hub sets these on
+// the choice-response message it delivers to the asking agent and strips
+// any client-supplied value (messaging.StripReservedMetadata).
+const (
+	MetadataChoiceKey        = "choice_key"
+	MetadataChoiceVersion    = "choice_version"
+	MetadataChoiceID         = "choice_id"
+	MetadataChoiceProvenance = "choice_provenance"
+)
+
 // deliveryMetadataAllowlist defines the metadata keys that are forwarded to
 // agents during delivery. Platform-specific keys (e.g. telegram_chat_id) are
 // excluded to avoid leaking implementation details.
@@ -70,6 +89,13 @@ var deliveryMetadataAllowlist = map[string]bool{
 	MetadataSenderEmail:   true,
 	MetadataSenderIssuer:  true,
 	MetadataSenderDisplay: true,
+	// Hub-set only (see MetadataSenderTimezone).
+	MetadataSenderTimezone: true,
+	// Hub-set only (see MetadataChoiceKey).
+	MetadataChoiceKey:        true,
+	MetadataChoiceVersion:    true,
+	MetadataChoiceID:         true,
+	MetadataChoiceProvenance: true,
 }
 
 // deliveryMessage is the subset of StructuredMessage fields delivered to the agent.

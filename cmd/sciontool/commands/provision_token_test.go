@@ -45,7 +45,7 @@ func runProvisionCaptureRemote(t *testing.T, cloneURL, token, tokenRemote string
 	t.Setenv("SCION_CLONE_URL", cloneURL)
 	t.Setenv("SCION_CLONE_BRANCH", "main")
 	t.Setenv("SCION_WORKSPACE_MODE", "")
-	t.Setenv("SCION_PROVISION_STATE_DIR", "")
+	t.Setenv("SCION_PROVISION_STATE_DIR", testStateDir(t, wsDir))
 	t.Setenv("SCION_PROJECT_ID", "test-proj")
 	t.Setenv(provision.GitTokenEnv, token)
 	t.Setenv(api.EnvGitTokenRemote, tokenRemote)

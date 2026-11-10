@@ -35,9 +35,13 @@
  * access) for canGrantReview without canManage. Retention… (the Retention
  * and access dialog: expiry, revoke links, remove grants) is shown for
  * canShare without canManage (a steward), and Delete… for canRetire
- * (ptone/scion#4535). An artifact whose owner was deleted has the Owner
- * deleted badge and its owner struck through; the meta row shows when it
- * expires.
+ * (ptone/scion#4535). With the experiment web.artifact_manage_access on
+ * (ptone/scion#7107), one Manage access button, shown for canShare or
+ * canGrantReview, replaces Share, Grant review access and Retention…; it
+ * opens the Share dialog in manage mode, with each section decided from the
+ * same flags. Move… and Delete… are unchanged. An artifact whose owner
+ * was deleted has the Owner deleted badge and its owner struck through;
+ * the meta row shows when it expires.
  * Route: /projects/{projectId}/artifacts/{artifactId}[/v/{seq}]
  */
 
@@ -49,12 +53,20 @@ import type { PageData } from '../../shared/types.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import { navigateTo, stripBasePath } from '../../client/navigation.js';
-import { ARTIFACT_REVIEW_EDITOR_FLAG, isFeatureEnabled } from '../../utils/feature-flags.js';
-import { formatInstant } from '../../utils/time.js';
+import {
+  ARTIFACT_MANAGE_ACCESS_FLAG,
+  ARTIFACT_REVIEW_EDITOR_FLAG,
+  ARTIFACTS_OPEN_REVIEW_CHECK_FLAG,
+  isFeatureEnabled,
+} from '../../utils/feature-flags.js';
+import { formatInstant, formatRelative } from '../../utils/time.js';
+import { ReviewHeartbeat } from '../../client/review-heartbeat.js';
 import { showToast } from '../../utils/toast.js';
+import { copyToClipboard, copyWithToast, showCopyFailedToast } from '../../utils/clipboard.js';
 import {
   ARTIFACTS_FLAG,
   MAX_INLINE_TEXT_BYTES,
+  artifactArchiveUrl,
   artifactFileUrl,
   artifactOriginOf,
   artifactPagePath,
@@ -71,6 +83,7 @@ import {
   publishErrorMessage,
   publishFiles,
   rendererFor,
+  ReviewOpenError,
 } from '../../client/artifacts.js';
 import type {
   Artifact,
@@ -82,6 +95,7 @@ import type {
   DiscardedVersion,
   PendingPublish,
   PublishFile,
+  ReviewOpenEntry,
   ViewResponse,
 } from '../../client/artifacts.js';
 import { principalLabel, principalName, shortId } from '../../client/principal-names.js';
@@ -105,6 +119,8 @@ import '../shared/detail-header.js';
 import '../shared/artifact-publish-dialog.js';
 import '../shared/artifact-move-dialog.js';
 import '../shared/artifact-share-dialog.js';
+import { capabilitiesFrom, showManageAccess } from '../shared/artifact-access-sections.js';
+import type { AccessCapabilities } from '../shared/artifact-access-sections.js';
 import '../shared/artifact-delete-dialog.js';
 import { ownerDeletedBadge, ownerDeletedStyles } from '../shared/artifact-owner-deleted.js';
 import '../shared/code-editor.js';
@@ -396,12 +412,21 @@ export class ScionPageArtifactDetail extends LitElement {
   @state() private editNote = '';
   @state() private editBusy = false;
   @state() private editError: string | null = null;
+  /**
+   * The open reviews an edit publish was refused over (409 review_open,
+   * ptone/scion#6849); while set, the Wait / Publish anyway dialog is open.
+   */
+  @state() private reviewOpen: { reviews: ReviewOpenEntry[]; truncated: boolean } | null = null;
+  /** The heartbeat of the open review, while Review mode is open. */
+  private heartbeat: ReviewHeartbeat | null = null;
   @state() private publishOpen = false;
   @state() private shareOpen = false;
   /** The Move dialog is open (ptone/scion#4583). */
   @state() private moveOpen = false;
   /** The Retention and access dialog is open. */
   @state() private retentionOpen = false;
+  /** The Manage access dialog is open (experiment web.artifact_manage_access). */
+  @state() private accessOpen = false;
   /** The Delete artifact confirmation is open. */
   @state() private deleteOpen = false;
   /**
@@ -588,6 +613,20 @@ export class ScionPageArtifactDetail extends LitElement {
         font-size: 0.8125rem;
         color: var(--sl-color-neutral-600);
         margin: 0.5rem 0;
+      }
+      .files-header {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.5rem;
+      }
+      .archive {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        font-size: 0.8125rem;
+        color: var(--sl-color-neutral-600);
       }
       .single-version {
         text-align: center;
@@ -1095,6 +1134,8 @@ export class ScionPageArtifactDetail extends LitElement {
   override disconnectedCallback(): void {
     document.removeEventListener('visibilitychange', this.onVisibility);
     super.disconnectedCallback();
+    this.heartbeat?.stop();
+    this.heartbeat = null;
     if (this.viewTimer) clearTimeout(this.viewTimer);
     this.viewTimer = null;
     if (this.previewTimer) clearTimeout(this.previewTimer);
@@ -1112,6 +1153,37 @@ export class ScionPageArtifactDetail extends LitElement {
   override updated(changed: PropertyValues<this>): void {
     super.updated(changed);
     this.observeSticky();
+    // reviewing and artifactId are private state, so they are not keys of
+    // PropertyValues<this>. A new artifactId moves a running heartbeat.
+    const c = changed as PropertyValues;
+    if (c.has('reviewing') || c.has('artifactId')) this.syncHeartbeat();
+  }
+
+  /**
+   * Starts the review heartbeat when Review mode opens and stops it (ending
+   * the session on the hub) when it closes, whichever way it closes: Save,
+   * Cancel, a reload, or leaving the page. Only while the open-review
+   * check is on (ptone/scion#6849); the hub decides the check itself.
+   */
+  private syncHeartbeat(): void {
+    const want =
+      this.reviewing && isFeatureEnabled(ARTIFACTS_OPEN_REVIEW_CHECK_FLAG) && !!this.artifactId;
+    // A heartbeat for another artifact (the page was reused for a new one
+    // while reviewing) ends its session before a new one starts.
+    if (this.heartbeat && this.heartbeat.artifactId !== this.artifactId) {
+      this.heartbeat.stop();
+      this.heartbeat = null;
+    }
+    if (want && !this.heartbeat) {
+      this.heartbeat = new ReviewHeartbeat({
+        artifactId: this.artifactId,
+        state: () => ({ base: this.data?.version?.seq ?? 0, text: this.reviewText }),
+      });
+      this.heartbeat.start();
+    } else if (!want && this.heartbeat) {
+      this.heartbeat.stop();
+      this.heartbeat = null;
+    }
   }
 
   /** Measures the sticky review block whenever a new one renders. */
@@ -1200,12 +1272,12 @@ export class ScionPageArtifactDetail extends LitElement {
   private async copyRef(): Promise<void> {
     const ref = this.data?.artifact.ref;
     if (!ref) return;
-    try {
-      await navigator.clipboard.writeText(ref);
+    if (await copyToClipboard(ref)) {
       this.copied = true;
       setTimeout(() => (this.copied = false), 1500);
-    } catch {
-      // Clipboard unavailable; the ref is visible on the page.
+    } else {
+      // Clipboard unavailable; the ref stays visible on the page.
+      showCopyFailedToast();
     }
   }
 
@@ -1283,6 +1355,19 @@ export class ScionPageArtifactDetail extends LitElement {
    */
   private get canRetention(): boolean {
     return !!this.data?.canShare && !this.data?.canManage;
+  }
+
+  /**
+   * One Manage access button and dialog replace Share, Grant review access
+   * and Retention… (experiment web.artifact_manage_access, ptone/scion#7107).
+   */
+  private get manageAccess(): boolean {
+    return isFeatureEnabled(ARTIFACT_MANAGE_ACCESS_FLAG);
+  }
+
+  /** The capability flags the Manage access dialog reads. */
+  private get accessCaps(): AccessCapabilities {
+    return capabilitiesFrom(this.data);
   }
 
   /**
@@ -1683,6 +1768,8 @@ export class ScionPageArtifactDetail extends LitElement {
     this.reviewText = lfText(this.text);
     this.reviewPreview = this.reviewText;
     this.discardedReview = discarded;
+    // The review restarted on the current version: the heartbeat follows.
+    this.heartbeat?.rebase();
     // The current version may be larger: size it as a new review does.
     if (this.reviewGraphical) {
       this.reviewSize = null;
@@ -1722,11 +1809,8 @@ export class ScionPageArtifactDetail extends LitElement {
 
   private async copyDiscarded(): Promise<void> {
     if (this.discardedReview === null) return;
-    try {
-      await navigator.clipboard.writeText(this.discardedReview);
-    } catch {
-      // Clipboard unavailable; the text is visible and selectable.
-    }
+    // On failure the text stays visible and selectable.
+    await copyWithToast(this.discardedReview);
   }
 
   /** Records an edit of the review text; the preview follows after a pause. */
@@ -1761,12 +1845,13 @@ export class ScionPageArtifactDetail extends LitElement {
     this.editing = true;
   };
 
-  private async publishEdit(): Promise<void> {
+  private async publishEdit(force = false): Promise<void> {
     const v = this.data?.version;
     const f = this.entry;
     if (!v || !f) return;
     this.editBusy = true;
     this.editError = null;
+    this.reviewOpen = null;
     try {
       const files: PublishFile[] = v.files
         .filter((x) => !isRemoteFile(x))
@@ -1775,16 +1860,24 @@ export class ScionPageArtifactDetail extends LitElement {
             ? { path: x.path, data: new Blob([this.editText], { type: f.mediaType }) }
             : { path: x.path, size: x.size, sha256: x.sha256 }
         );
-      await publishFiles({
+      const res = await publishFiles({
         artifactId: this.artifactId,
         entry: v.entryPath,
         note: this.editNote.trim() || undefined,
         files,
         resume: this.editPending,
+        force,
       });
       this.editPending = null;
+      for (const w of res.warnings ?? []) showToast(w, 'warning');
       this.showCurrentVersion();
     } catch (err) {
+      if (err instanceof ReviewOpenError) {
+        // Nothing was created: ask whether to wait or publish anyway. The
+        // edit stays in the editor while the dialog is open.
+        this.reviewOpen = { reviews: err.reviews, truncated: err.truncated };
+        return;
+      }
       this.editError = publishErrorMessage(err);
       if (err instanceof PublishError) this.editPending = err.pending;
     } finally {
@@ -1858,7 +1951,23 @@ export class ScionPageArtifactDetail extends LitElement {
           this.publishOpen = false;
         }}
       ></scion-artifact-publish-dialog>
-      ${this.data?.canManage || this.canGrantReview
+      ${this.manageAccess && showManageAccess(this.accessCaps)
+        ? html`<scion-artifact-share-dialog
+            class="access-dialog"
+            .artifact=${this.data.artifact}
+            .currentUserId=${this.pageData?.user?.id ?? ''}
+            .mode=${'manage'}
+            .capabilities=${this.accessCaps}
+            ?open=${this.accessOpen}
+            @artifact-changed=${(e: CustomEvent<Artifact>): void => {
+              if (this.data) this.data = { ...this.data, artifact: e.detail };
+            }}
+            @artifact-share-closed=${(): void => {
+              this.accessOpen = false;
+            }}
+          ></scion-artifact-share-dialog>`
+        : nothing}
+      ${!this.manageAccess && (this.data?.canManage || this.canGrantReview)
         ? html`<scion-artifact-share-dialog
             .artifact=${this.data.artifact}
             .currentUserId=${this.pageData?.user?.id ?? ''}
@@ -1872,7 +1981,7 @@ export class ScionPageArtifactDetail extends LitElement {
             }}
           ></scion-artifact-share-dialog>`
         : nothing}
-      ${this.canRetention
+      ${!this.manageAccess && this.canRetention
         ? html`<scion-artifact-share-dialog
             class="retention-dialog"
             .artifact=${this.data.artifact}
@@ -1989,16 +2098,13 @@ export class ScionPageArtifactDetail extends LitElement {
     // Every action needs a version, edit rights or (for Share and Grant
     // review access) the right to manage the artifact or give review
     // access; all are hidden while editing or reviewing.
+    const accessActions = this.manageAccess
+      ? showManageAccess(this.accessCaps)
+      : !!this.data?.canManage || this.canGrantReview || this.canRetention;
     const hasActions =
       !this.editing &&
       !this.reviewing &&
-      (!!v ||
-        this.canEdit ||
-        this.canReview ||
-        !!this.data?.canManage ||
-        this.canGrantReview ||
-        this.canRetention ||
-        this.canRetire);
+      (!!v || this.canEdit || this.canReview || accessActions || this.canRetire);
     // A deleted home project has no page: go back to the artifacts list
     // instead (ptone/scion#4588).
     const back = this.backTarget;
@@ -2072,17 +2178,21 @@ export class ScionPageArtifactDetail extends LitElement {
                       Review
                     </sl-button>`
                   : nothing}
-                ${this.data!.canManage
+                ${this.manageAccess && showManageAccess(this.accessCaps)
                   ? html`<sl-button
                       size="small"
+                      class="manage-access"
                       @click=${(): void => {
-                        this.shareOpen = true;
+                        this.accessOpen = true;
                       }}
                     >
-                      <sl-icon slot="prefix" name="person-plus"></sl-icon>
-                      Share
+                      <sl-icon slot="prefix" name="shield-lock"></sl-icon>
+                      Manage access
                     </sl-button>`
-                  : this.canGrantReview
+                  : nothing}
+                ${this.manageAccess
+                  ? nothing
+                  : this.data!.canManage
                     ? html`<sl-button
                         size="small"
                         @click=${(): void => {
@@ -2090,10 +2200,20 @@ export class ScionPageArtifactDetail extends LitElement {
                         }}
                       >
                         <sl-icon slot="prefix" name="person-plus"></sl-icon>
-                        Grant review access
+                        Share
                       </sl-button>`
-                    : nothing}
-                ${this.canRetention
+                    : this.canGrantReview
+                      ? html`<sl-button
+                          size="small"
+                          @click=${(): void => {
+                            this.shareOpen = true;
+                          }}
+                        >
+                          <sl-icon slot="prefix" name="person-plus"></sl-icon>
+                          Grant review access
+                        </sl-button>`
+                      : nothing}
+                ${!this.manageAccess && this.canRetention
                   ? html`<sl-button
                       size="small"
                       class="retention"
@@ -2310,15 +2430,18 @@ export class ScionPageArtifactDetail extends LitElement {
     const fetched = remote.filter((x) => x.fetchStatus === 'ok').length;
     const total = own.reduce((n, x) => n + x.size, 0);
     return html`
-      <div class="summary">
-        ${own.length} ${own.length === 1 ? 'file' : 'files'} · ${formatBytes(total)} · version
-        ${v.seq}
-        ${remote.length > 0
-          ? html` · remote images fetched when published: ${fetched}
-            ${remote.length > fetched
-              ? html`, could not be fetched: ${remote.length - fetched}`
-              : nothing}`
-          : nothing}
+      <div class="files-header">
+        <div class="summary">
+          ${own.length} ${own.length === 1 ? 'file' : 'files'} · ${formatBytes(total)} · version
+          ${v.seq}
+          ${remote.length > 0
+            ? html` · remote images fetched when published: ${fetched}
+              ${remote.length > fetched
+                ? html`, could not be fetched: ${remote.length - fetched}`
+                : nothing}`
+            : nothing}
+        </div>
+        ${this.renderArchive(v.seq)}
       </div>
       <table>
         <thead>
@@ -2371,6 +2494,36 @@ export class ScionPageArtifactDetail extends LitElement {
         </tbody>
       </table>
     `;
+  }
+
+  /**
+   * Download all (.zip) on the Files tab (ptone/scion#7106). It is shown
+   * only when the hub's version response says whether the zip is
+   * available, so the hub alone decides; the browser's download manager
+   * shows progress and allows cancel.
+   */
+  private renderArchive(seq: number): TemplateResult | typeof nothing {
+    const archive = this.data?.archive;
+    if (!archive) return nothing;
+    if (!archive.available) {
+      const why =
+        archive.reason === 'unsupported_name'
+          ? 'A file name cannot be stored in a zip; download files individually'
+          : 'Too large for one archive; download files individually';
+      return html`<div class="archive">
+        <sl-button size="small" disabled>
+          <sl-icon slot="prefix" name="download"></sl-icon>
+          Download all (.zip)
+        </sl-button>
+        <span class="archive-note">${why}</span>
+      </div>`;
+    }
+    return html`<div class="archive">
+      <sl-button size="small" href=${artifactArchiveUrl(this.artifactId, seq)} download="">
+        <sl-icon slot="prefix" name="download"></sl-icon>
+        Download all (.zip)
+      </sl-button>
+    </div>`;
   }
 
   private createdBy(v: ArtifactVersion): string {
@@ -3096,6 +3249,70 @@ export class ScionPageArtifactDetail extends LitElement {
           >Publish new version</sl-button
         >
       </div>
+      ${this.renderReviewOpenDialog()}
+    `;
+  }
+
+  /**
+   * The dialog shown when the hub refused an edit publish because someone
+   * is reviewing the current version (ptone/scion#6849). Wait closes it and
+   * keeps the edit; Publish anyway publishes with force.
+   */
+  private renderReviewOpenDialog(): TemplateResult | typeof nothing {
+    const open = this.reviewOpen;
+    if (!open) return nothing;
+    const [first, ...rest] = open.reviews;
+    const others = rest.length + (open.truncated ? 1 : 0);
+    const who = !first
+      ? 'Someone is'
+      : others === 0
+        ? `${first.reviewer} is`
+        : `${first.reviewer} and ${open.truncated ? 'others' : `${others} ${others === 1 ? 'other' : 'others'}`} are`;
+    const wait = (): void => {
+      this.reviewOpen = null;
+    };
+    return html`
+      <sl-dialog
+        class="review-open-dialog"
+        label="Publish over an open review?"
+        open
+        @sl-request-close=${(e: Event): void => {
+          // Escape and the overlay mean Wait, unless a publish is running.
+          if (this.editBusy) e.preventDefault();
+          else wait();
+        }}
+      >
+        <p class="review-open-who">
+          <sl-icon name="exclamation-triangle"></sl-icon>
+          <strong>${who} reviewing this version.</strong>
+        </p>
+        <ul class="review-open-list">
+          ${open.reviews.map(
+            (r) =>
+              html`<li>
+                ${r.reviewer}${r.lastActivityAt
+                  ? html` — last active ${formatRelative(r.lastActivityAt)}`
+                  : nothing}${r.unsavedChanges ? ', unsaved changes' : ''}
+              </li>`
+          )}
+          ${open.truncated ? html`<li>and others</li>` : nothing}
+        </ul>
+        <p>
+          If you publish now, their review can't be saved on this version. They keep their text.
+          Your edit stays in the editor if you wait.
+        </p>
+        <sl-button slot="footer" class="review-open-wait" variant="primary" autofocus @click=${wait}
+          >Wait</sl-button
+        >
+        <sl-button
+          slot="footer"
+          class="review-open-force"
+          variant="warning"
+          ?loading=${this.editBusy}
+          @click=${(): void => void this.publishEdit(true)}
+          >Publish anyway</sl-button
+        >
+      </sl-dialog>
     `;
   }
 }

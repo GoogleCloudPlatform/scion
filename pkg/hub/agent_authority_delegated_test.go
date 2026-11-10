@@ -52,8 +52,7 @@ func authorityRawListItems(t *testing.T, rec *httptest.ResponseRecorder) []map[s
 // with an agent delegated credential carries no "authority" key on any
 // item, even with include=authority, while the same request on the
 // authorizing user's session carries it on every item. The sorted form
-// answers 400 before any list runs, and the project form is not admitted
-// for a delegated credential.
+// answers 400 before any list runs, and the project form omits it too.
 func TestAgentAuthority_DelegatedListOmitsAuthority(t *testing.T) {
 	w := newADTListWorld(t, "adt-auth-list")
 	cred := w.delegated(t, w.adtIssueGrant(t, map[string]string{"kind": "hub"}, "agent:list", "agent:read").ID)
@@ -77,7 +76,11 @@ func TestAgentAuthority_DelegatedListOmitsAuthority(t *testing.T) {
 	adtAssertAPIError(t, w.listAgents(t, cred.Token, sorted), http.StatusBadRequest, errCodeDelegatedListSortUnsupported)
 
 	rec := w.do(t, http.MethodGet, "/api/v1/projects/"+w.proj.ID+"/agents?include=authority", nil, adtBearer(cred.Token))
-	adtAssertAPIError(t, rec, http.StatusForbidden, errCodeCredentialNotAdmitted)
+	projItems := authorityRawListItems(t, rec)
+	require.NotEmpty(t, projItems, "the delegated project list returns agents")
+	for _, it := range projItems {
+		assert.NotContains(t, it, "authority", "delegated project list item %v", it["id"])
+	}
 }
 
 // TestAgentAuthority_DelegatedGetOmitsAuthority: the single-agent GET made

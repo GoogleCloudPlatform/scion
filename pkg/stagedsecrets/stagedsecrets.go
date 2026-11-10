@@ -31,6 +31,12 @@ import (
 // a base64-encoded JSON blob decoded by sciontool init.
 const EnvVar = "SCION_STAGED_SECRETS"
 
+// HubTokenStagedEnvVar is set by sciontool init, across its environ-purge
+// re-exec, when it wrote the agent token file from Staged.HubToken, so it
+// removes the file again at a clean exit. It carries no credential. The
+// runtimes reserve the name: an environment-type secret never supplies it.
+const HubTokenStagedEnvVar = "SCION_HUB_TOKEN_STAGED"
+
 // FileSecret describes a single file-type secret in the staged blob.
 type FileSecret struct {
 	Name   string `json:"name"`
@@ -42,7 +48,43 @@ type FileSecret struct {
 type Staged struct {
 	FileSecrets     []FileSecret      `json:"file_secrets,omitempty"`
 	VariableSecrets map[string]string `json:"variable_secrets,omitempty"`
+	// HubToken is the agent's hub-issued credential, set only by runtimes
+	// whose instance cannot see the broker-written token file (Cloud Run).
+	// It is a dedicated field rather than a FileSecret so the payload
+	// cannot choose where it is written: sciontool init writes it to the
+	// canonical token file. Write ignores it.
+	HubToken string `json:"hub_token,omitempty"`
+	// HarnessSecrets are the files of the harness bundle's staged secrets
+	// directory, set only by runtimes whose instance home is on shared
+	// storage (Cloud Run), where they must not be written. sciontool init
+	// writes them into the in-memory directory SCION_HARNESS_SECRETS_DIR
+	// names (WriteHarnessSecrets); Write ignores them.
+	HarnessSecrets []HarnessSecret `json:"harness_secrets,omitempty"`
+	// ResolvedAuthEnv are resolved-auth environment entries, set only by
+	// runtimes that deliver the instance environment in plain form (Cloud
+	// Run), for the entries that are not discovery settings. sciontool
+	// init hands them to the harness process environment only
+	// (WriteResolvedAuthEnv, TakeResolvedAuthEnv); Write ignores them.
+	ResolvedAuthEnv map[string]string `json:"resolved_auth_env,omitempty"`
 }
+
+// HarnessSecret is one file of the harness bundle's staged secrets. Name is
+// a plain file name (ValidHarnessSecretName); Value is the base64-encoded
+// file content.
+type HarnessSecret struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
+// String withholds every value, so formatting a Staged never prints a
+// secret or the hub credential.
+func (s Staged) String() string {
+	return fmt.Sprintf("stagedsecrets.Staged{files:%d variables:%d hub_token:%t harness_secrets:%d resolved_auth_env:%d}",
+		len(s.FileSecrets), len(s.VariableSecrets), s.HubToken != "", len(s.HarnessSecrets), len(s.ResolvedAuthEnv))
+}
+
+// GoString is String, for %#v.
+func (s Staged) GoString() string { return s.String() }
 
 // Decode decodes the SCION_STAGED_SECRETS env var value
 // (base64 → JSON) and returns the structured secrets. This is called
@@ -93,7 +135,13 @@ func Decode(encoded string) (*Staged, error) {
 // through ordinary system aliases still works while a workload-plantable
 // redirection still fails closed.
 func Write(homeDir string, staged *Staged) error {
-	var uid, gid int
+	uid, gid := workloadIDs()
+	return writeAs(homeDir, staged, uid, gid)
+}
+
+// workloadIDs returns the workload uid and gid from SCION_HOST_UID and
+// SCION_HOST_GID when init runs as root, and 0, 0 (no chown) otherwise.
+func workloadIDs() (uid, gid int) {
 	if os.Getuid() == 0 {
 		if uidStr := os.Getenv("SCION_HOST_UID"); uidStr != "" {
 			if id, err := rootexec.ValidWorkloadID(uidStr, true); err == nil {
@@ -106,7 +154,7 @@ func Write(homeDir string, staged *Staged) error {
 			}
 		}
 	}
-	return writeAs(homeDir, staged, uid, gid)
+	return uid, gid
 }
 
 // writeAs is Write with its resolved workload uid/gid as parameters, so a

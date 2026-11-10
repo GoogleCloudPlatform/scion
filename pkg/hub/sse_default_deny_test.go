@@ -119,10 +119,7 @@ func TestSSEHandler_LegacyAndUnknownSubjectsDenied(t *testing.T) {
 			pub := NewChannelEventPublisher()
 			defer pub.Close()
 			ws := &WebServer{store: s, events: pub, authzService: NewAuthzService(s, nil)}
-			ctx, cancel := context.WithCancel(context.Background())
-			cancel() // bounds the streaming loop; only the initial authz decision matters here
-			w := httptest.NewRecorder()
-			ws.handleSSE(w, sseAgentRequest(ctx, userID, "user", sub))
+			w := serveSSELive(t, ws, func(ctx context.Context) *http.Request { return sseAgentRequest(ctx, userID, "user", sub) })
 			assert.Equal(t, http.StatusForbidden, w.Code, "subject %q must be denied", sub)
 		})
 	}
@@ -155,10 +152,9 @@ func TestSSEHandler_MixedUnknownAndAllowedSubjectDenied(t *testing.T) {
 			pub := NewChannelEventPublisher()
 			defer pub.Close()
 			ws := &WebServer{store: s, events: pub, authzService: NewAuthzService(s, nil)}
-			ctx, cancel := context.WithCancel(context.Background())
-			cancel()
-			w := httptest.NewRecorder()
-			ws.handleSSE(w, sseAgentRequest(ctx, userID, "user", tc.unknown, "project."+ownProject+".>"))
+			w := serveSSELive(t, ws, func(ctx context.Context) *http.Request {
+				return sseAgentRequest(ctx, userID, "user", tc.unknown, "project."+ownProject+".>")
+			})
 			assert.Equal(t, http.StatusForbidden, w.Code,
 				"an unknown subject alongside an allowed one must deny the whole request")
 
@@ -191,10 +187,7 @@ func TestSSEHandler_AdminWildcardRequiresAdminRole(t *testing.T) {
 			pub := NewChannelEventPublisher()
 			defer pub.Close()
 			ws := &WebServer{store: s, events: pub, authzService: NewAuthzService(s, nil)}
-			ctx, cancel := context.WithCancel(context.Background())
-			cancel()
-			w := httptest.NewRecorder()
-			ws.handleSSE(w, sseAgentRequest(ctx, userID, tc.role, "admin.>"))
+			w := serveSSELive(t, ws, func(ctx context.Context) *http.Request { return sseAgentRequest(ctx, userID, tc.role, "admin.>") })
 			if tc.denied {
 				assert.Equal(t, http.StatusForbidden, w.Code, "admin.> must be denied for a non-admin session")
 			} else {
@@ -246,10 +239,7 @@ func TestSSEHandler_InventorySubjectsAllowed(t *testing.T) {
 			pub := NewChannelEventPublisher()
 			defer pub.Close()
 			ws := &WebServer{store: s, events: pub, authzService: NewAuthzService(s, nil)}
-			ctx, cancel := context.WithCancel(context.Background())
-			cancel()
-			w := httptest.NewRecorder()
-			ws.handleSSE(w, sseAgentRequest(ctx, userID, "user", sub))
+			w := serveSSELive(t, ws, func(ctx context.Context) *http.Request { return sseAgentRequest(ctx, userID, "user", sub) })
 			assert.Equal(t, http.StatusOK, w.Code, "legitimate subject %q must remain allowed", sub)
 		})
 	}

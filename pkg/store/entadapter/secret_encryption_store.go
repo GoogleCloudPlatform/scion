@@ -45,6 +45,20 @@ import (
 // SQLite serializes write transactions (one connection), so the policy
 // read, the row read and the write in one transaction cannot interleave
 // with a transition or with each other.
+//
+// Transitions in a caller-supplied transaction. A transition's lock does
+// not wait for a fenced write made earlier in its own transaction, which
+// was checked against the policy being replaced. So a transition
+// (UpdateEncryptionPolicy, CreateEncryptionMigration,
+// UpdateEncryptionMigration) in a WithTx transaction that has already run
+// a fenced write is refused with store.ErrPolicyTransitionAfterFencedWrite.
+// A transition may still precede fenced writes or other transitions in
+// the same transaction, which then see the new policy. Transitions are
+// not refused in every caller-supplied transaction, because a policy
+// change and its migration record must be able to commit together (for
+// example creating the migration in the same short transition, or marking
+// the migration and the policy verified at once). Refusing only after a
+// fenced write closes the hazard above and keeps that possible.
 
 // encryptionPolicyID is the singleton policy row's ID.
 const encryptionPolicyID = 1
@@ -99,8 +113,9 @@ func lockSecretRowForWrite(ctx context.Context, c *ent.Client, key, scope, scope
 // the existing row (key, scope, scopeID), taking the policy lock and then
 // the row lock. newRef is the SecretRef the write leaves on the row (nil:
 // the existing one is kept). An unchanged value is not a payload change
-// and is not fenced. It returns store.ErrNotFound when the row does not
-// exist.
+// and is not fenced by key ID, but under a policy the row must still keep
+// a non-empty value or ref (a ref cleared on an empty-value row is
+// refused). It returns store.ErrNotFound when the row does not exist.
 func fenceValueChange(ctx context.Context, c *ent.Client, key, scope, scopeID, newValue string, newRef *string) error {
 	policy, err := loadEncryptionPolicyForWrite(ctx, c)
 	if err != nil {
@@ -110,15 +125,35 @@ func fenceValueChange(ctx context.Context, c *ent.Client, key, scope, scopeID, n
 	if err != nil {
 		return err
 	}
-	if existing.EncryptedValue == newValue {
-		return nil
-	}
 	ref := existing.SecretRef
 	if newRef != nil {
 		ref = *newRef
 	}
+	if existing.EncryptedValue == newValue {
+		if !policy.AllowsRowPayload(newValue, ref) {
+			return store.ErrEncryptionPolicyMismatch
+		}
+		return nil
+	}
 	if !policy.AllowsWrite(newValue, ref) {
 		return store.ErrEncryptionPolicyMismatch
+	}
+	return nil
+}
+
+// runTransition runs fn, an encryption policy or migration transition, in
+// its own transaction or the ambient one. In the ambient one it is refused
+// once a fenced write has run there (see the locking notes above).
+func (s *SecretStore) runTransition(ctx context.Context, fn func(c *ent.Client) error) error {
+	if err := s.checkTransitionAllowed(); err != nil {
+		return err
+	}
+	return runInEntTx(ctx, s.client, s.inTx, fn)
+}
+
+func (s *SecretStore) checkTransitionAllowed() error {
+	if s.inTx && s.txFencedWrite.Load() {
+		return store.ErrPolicyTransitionAfterFencedWrite
 	}
 	return nil
 }
@@ -186,7 +221,7 @@ func (s *SecretStore) ReplaceSecretCiphertext(ctx context.Context, id string, ex
 		return false, fmt.Errorf("%w: a ciphertext replacement must not be empty", store.ErrInvalidInput)
 	}
 	applied := false
-	err = runInEntTx(ctx, s.client, s.inTx, func(c *ent.Client) error {
+	err = s.runFencedWrite(ctx, func(c *ent.Client) error {
 		// Lock order: policy, then the secret row.
 		policy, err := loadEncryptionPolicyForWrite(ctx, c)
 		if err != nil {
@@ -271,7 +306,7 @@ func (s *SecretStore) UpdateEncryptionPolicy(ctx context.Context, expectedGenera
 		}
 	}
 	applied := false
-	err := runInEntTx(ctx, s.client, s.inTx, func(c *ent.Client) error {
+	err := s.runTransition(ctx, func(c *ent.Client) error {
 		if err := lockEncryptionPolicyTable(ctx, c); err != nil {
 			return err
 		}
@@ -367,6 +402,9 @@ func (s *SecretStore) CreateEncryptionMigration(ctx context.Context, m *store.En
 	if err := m.Validate(); err != nil {
 		return err
 	}
+	if err := s.checkTransitionAllowed(); err != nil {
+		return err
+	}
 	uid, err := parseUUID(m.ID)
 	if err != nil {
 		return err
@@ -422,7 +460,7 @@ func (s *SecretStore) UpdateEncryptionMigration(ctx context.Context, m *store.En
 	}
 	admitted := m.PlaintextReadAdmitted && m.State != store.EncryptionMigrationVerified
 	applied := false
-	err = runInEntTx(ctx, s.client, s.inTx, func(c *ent.Client) error {
+	err = s.runTransition(ctx, func(c *ent.Client) error {
 		row, err := c.HubEncryptionMigration.UpdateOneID(uid).
 			Where(enthubencryptionmigration.StateEQ(enthubencryptionmigration.State(expectedState))).
 			SetState(enthubencryptionmigration.State(m.State)).

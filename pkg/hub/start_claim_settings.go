@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -245,4 +246,58 @@ func startClaimErrorField(err error) string {
 		return settingsKoanfField("lifecycle", fe.name)
 	}
 	return settingsKoanfField("lifecycle", "")
+}
+
+// startClaimSettingKeys are the start-claim keys under server.hub, in the
+// order validateStartClaimSettingStrings checks them.
+var startClaimSettingKeys = []string{
+	"start_claim_lease_ttl",
+	"start_max_duration",
+	"start_unconfirmed_hold",
+	"start_create_unconfirmed_hold",
+}
+
+// startClaimKeysSent reports whether a server-config PUT body sends any
+// start-claim key under server.hub (any value, "" and null included).
+func startClaimKeysSent(rawBody []byte) bool {
+	var body struct {
+		Server *struct {
+			Hub map[string]json.RawMessage `json:"hub"`
+		} `json:"server"`
+	}
+	if err := json.Unmarshal(rawBody, &body); err != nil || body.Server == nil {
+		return false
+	}
+	for _, k := range startClaimSettingKeys {
+		if _, ok := body.Server.Hub[k]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// fileStartClaimLifecycle returns the start-claim keys of a merged
+// settings.yaml document (raw, as the settings.yaml PUT writes it) as a
+// lifecycle document for validateStartClaimSettingStrings. A missing value
+// is unset; a non-string value (for example a YAML integer) is passed as
+// its text, so the validator refuses it instead of silently skipping it.
+func fileStartClaimLifecycle(raw map[string]any) opsettings.LifecycleSettings {
+	var d opsettings.LifecycleSettings
+	server, _ := raw["server"].(map[string]any)
+	hub, _ := server["hub"].(map[string]any)
+	get := func(k string) string {
+		switch v := hub[k].(type) {
+		case nil:
+			return ""
+		case string:
+			return v
+		default:
+			return fmt.Sprint(v)
+		}
+	}
+	d.StartClaimLeaseTTL = get("start_claim_lease_ttl")
+	d.StartMaxDuration = get("start_max_duration")
+	d.StartUnconfirmedHold = get("start_unconfirmed_hold")
+	d.StartCreateUnconfirmedHold = get("start_create_unconfirmed_hold")
+	return d
 }

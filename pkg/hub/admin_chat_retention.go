@@ -49,13 +49,133 @@ type chatRetentionSweepJSON struct {
 type chatRetentionResponse struct {
 	Enabled bool `json:"enabled"`
 	// MessagesRetentionDays is null when no window is set (keep forever).
-	MessagesRetentionDays *int                   `json:"messages_retention_days"`
-	Sweep                 chatRetentionSweepJSON `json:"sweep"`
+	MessagesRetentionDays *int `json:"messages_retention_days"`
+	// DeletedConversationGraceDays is how long after a conversation or
+	// topic is deleted its messages are purged (while enabled), whatever
+	// the window.
+	DeletedConversationGraceDays int                    `json:"deleted_conversation_grace_days"`
+	Sweep                        chatRetentionSweepJSON `json:"sweep"`
 	// LastAppliedCutoff is the cutoff the sweep last reached (every
 	// eligible message older than it is gone); null until it reaches one.
 	LastAppliedCutoff *time.Time `json:"last_applied_cutoff"`
 	// Revision is the section revision, for expected_revision.
 	Revision int64 `json:"revision"`
+	// Runs are the most recent chat_retention_runs rows, newest first
+	// (sweep, manual and preview runs).
+	Runs []chatRetentionRunJSON `json:"runs"`
+	// LastPreview is the most recent preview, or null when none was run
+	// (or none is kept).
+	LastPreview *chatRetentionRunJSON `json:"last_preview"`
+	// PurgedSincePreview is how many messages the sweep and manual runs
+	// that finished after the last preview started deleted; the panel's
+	// "backlog draining" estimate is the preview's messages minus this.
+	// 0 without a preview.
+	PurgedSincePreview int64 `json:"purged_since_preview"`
+}
+
+// chatRetentionRunJSON is one chat_retention_runs row in the admin API: its
+// totals, never per-project detail, a message ID or content.
+type chatRetentionRunJSON struct {
+	ID         string     `json:"id"`
+	Trigger    string     `json:"trigger"`
+	DryRun     bool       `json:"dry_run"`
+	StartedAt  time.Time  `json:"started_at"`
+	FinishedAt *time.Time `json:"finished_at"`
+	Status     string     `json:"status"`
+	// Actor is the user ID of the administrator who started a manual run
+	// or a preview; "" for a sweep.
+	Actor string `json:"actor,omitempty"`
+	Error string `json:"error,omitempty"`
+	// Messages is the messages deleted (or, for a preview, that would be
+	// deleted): by the window plus of deleted conversations, plus failed
+	// agent messages for a sweep run.
+	Messages int64 `json:"messages"`
+	// Projects counts the projects with at least one such message.
+	Projects int `json:"projects"`
+	// Totals are the run's counts summed over every project.
+	Totals store.ChatRetentionCounts `json:"totals"`
+	// MessagesRetentionDays is the window the run applied (0 = none) and
+	// DeletedConversationGraceDays its grace.
+	MessagesRetentionDays        int `json:"messages_retention_days"`
+	DeletedConversationGraceDays int `json:"deleted_conversation_grace_days"`
+}
+
+// chatRetentionHistoryRuns is how many runs the admin response lists.
+const chatRetentionHistoryRuns = 10
+
+// chatRetentionRunMessages is the messages a run counted: by the window,
+// of deleted conversations and failed agent messages.
+func chatRetentionRunMessages(c store.ChatRetentionCounts) int64 {
+	return c.Main + c.DeletedConv + c.Failed
+}
+
+func chatRetentionRunJSONFor(r store.ChatRetentionRun) chatRetentionRunJSON {
+	out := chatRetentionRunJSON{
+		ID: r.ID, Trigger: r.Trigger, DryRun: r.DryRun, StartedAt: r.StartedAt.UTC(), Status: r.Status,
+		Actor: r.Actor, Error: r.Error,
+		MessagesRetentionDays:        r.Policy.MessagesRetentionDays,
+		DeletedConversationGraceDays: r.Policy.DeletedConversationGraceDays,
+	}
+	if r.FinishedAt != nil {
+		t := r.FinishedAt.UTC()
+		out.FinishedAt = &t
+	}
+	for _, c := range r.Counts {
+		out.Totals.Add(c)
+		if chatRetentionRunMessages(c) > 0 {
+			out.Projects++
+		}
+	}
+	out.Messages = chatRetentionRunMessages(out.Totals)
+	return out
+}
+
+// chatRetentionHistory fills the run history, the last preview and the
+// messages purged since it. It reads at most a few small indexed pages of
+// chat_retention_runs (about one row a day), never the messages. A failed
+// read is logged and leaves the history empty.
+func (s *Server) chatRetentionHistory(ctx context.Context, resp *chatRetentionResponse) {
+	resp.Runs = []chatRetentionRunJSON{}
+	st := s.chatRetentionStore()
+	if st == nil {
+		return
+	}
+	runs, err := st.ListChatRetentionRuns(ctx, store.ChatRetentionRunFilter{Limit: chatRetentionHistoryRuns})
+	if err != nil {
+		slog.Warn("chat retention: read run history", "error", err)
+		return
+	}
+	for _, r := range runs {
+		resp.Runs = append(resp.Runs, chatRetentionRunJSONFor(r))
+	}
+	previews, err := st.ListChatRetentionRuns(ctx, store.ChatRetentionRunFilter{Trigger: store.ChatRetentionTriggerPreview, Limit: 1})
+	if err != nil {
+		slog.Warn("chat retention: read last preview", "error", err)
+		return
+	}
+	if len(previews) == 0 {
+		return
+	}
+	last := chatRetentionRunJSONFor(previews[0])
+	resp.LastPreview = &last
+	// Runs that finished after the preview started: a sweep run open
+	// since before it counts whole, so the estimate errs towards a
+	// smaller backlog.
+	since, err := st.ListChatRetentionRuns(ctx, store.ChatRetentionRunFilter{FinishedAfter: previews[0].StartedAt})
+	if err != nil {
+		slog.Warn("chat retention: read runs since the last preview", "error", err)
+		return
+	}
+	for _, r := range since {
+		if r.DryRun {
+			continue
+		}
+		var t store.ChatRetentionCounts
+		for _, c := range r.Counts {
+			t.Add(c)
+		}
+		resp.PurgedSincePreview += t.Main + t.DeletedConv
+	}
 }
 
 // chatRetentionSweepPut is the sweep part of a PUT: omitted = unchanged,
@@ -69,10 +189,11 @@ type chatRetentionSweepPut struct {
 
 // chatRetentionPutRequest is the body of PUT /api/v1/admin/chat-retention.
 type chatRetentionPutRequest struct {
-	Enabled               *bool                  `json:"enabled,omitempty"`
-	MessagesRetentionDays *int                   `json:"messages_retention_days,omitempty"`
-	Sweep                 *chatRetentionSweepPut `json:"sweep,omitempty"`
-	ExpectedRevision      *int64                 `json:"expected_revision,omitempty"`
+	Enabled                      *bool                  `json:"enabled,omitempty"`
+	MessagesRetentionDays        *int                   `json:"messages_retention_days,omitempty"`
+	DeletedConversationGraceDays *int                   `json:"deleted_conversation_grace_days,omitempty"`
+	Sweep                        *chatRetentionSweepPut `json:"sweep,omitempty"`
+	ExpectedRevision             *int64                 `json:"expected_revision,omitempty"`
 }
 
 // handleAdminChatRetention handles GET/PUT /api/v1/admin/chat-retention,
@@ -83,10 +204,11 @@ type chatRetentionPutRequest struct {
 //
 // PUT semantics:
 //   - omitted field = unchanged; explicit null = compiled default (enabled
-//     false, no window, default sweep tuning; "sweep": null resets all of
-//     the tuning);
-//   - changing enabled or messages_retention_days (both decide what is
-//     deleted) requires expected_revision; a stale one is a 409;
+//     false, no window, a 30-day grace, default sweep tuning; "sweep": null
+//     resets all of the tuning);
+//   - changing enabled, messages_retention_days or
+//     deleted_conversation_grace_days (each decides what is deleted)
+//     requires expected_revision; a stale one is a 409;
 //   - every save is written with a compare-and-set on the read revision and
 //     is recorded in the mutation audit before it is written.
 func (s *Server) handleAdminChatRetention(w http.ResponseWriter, r *http.Request) {
@@ -109,7 +231,8 @@ func (s *Server) handleAdminChatRetention(w http.ResponseWriter, r *http.Request
 
 func chatRetentionResponseFor(cfg opsettings.ChatRetentionConfig, revision int64, cutoff *time.Time) chatRetentionResponse {
 	resp := chatRetentionResponse{
-		Enabled: cfg.Enabled,
+		Enabled:                      cfg.Enabled,
+		DeletedConversationGraceDays: cfg.DeletedConversationGraceDays,
 		Sweep: chatRetentionSweepJSON{
 			ChunkSize:           cfg.ChunkSize,
 			PauseMS:             cfg.PauseMS,
@@ -136,7 +259,9 @@ func (s *Server) writeChatRetentionResponse(ctx context.Context, w http.Response
 		cfg = ops.ChatRetention()
 		rev = ops.SectionRevision(opsettings.ChatRetentionSectionName)
 	}
-	writeJSON(w, http.StatusOK, chatRetentionResponseFor(cfg, rev, s.chatRetentionLastAppliedCutoff(ctx, time.Now())))
+	resp := chatRetentionResponseFor(cfg, rev, s.chatRetentionLastAppliedCutoff(ctx, time.Now()))
+	s.chatRetentionHistory(ctx, &resp)
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handlePutChatRetention(w http.ResponseWriter, r *http.Request) {
@@ -167,12 +292,13 @@ func (s *Server) handlePutChatRetention(w http.ResponseWriter, r *http.Request) 
 	cur := ops.ChatRetention()
 	curRev := ops.SectionRevision(opsettings.ChatRetentionSectionName)
 
-	// enabled and messages_retention_days decide what is deleted: a change
-	// to either must name the revision it was made against.
-	if fp.has("enabled") || fp.has("messages_retention_days") {
+	// enabled, messages_retention_days and deleted_conversation_grace_days
+	// decide what is deleted: a change to any of them must name the
+	// revision it was made against.
+	if fp.has("enabled") || fp.has("messages_retention_days") || fp.has("deleted_conversation_grace_days") {
 		if body.ExpectedRevision == nil {
 			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
-				"expected_revision is required when changing enabled or messages_retention_days", nil)
+				"expected_revision is required when changing enabled, messages_retention_days or deleted_conversation_grace_days", nil)
 			return
 		}
 	}
@@ -199,6 +325,18 @@ func (s *Server) handlePutChatRetention(w http.ResponseWriter, r *http.Request) 
 		next.MessagesRetentionDays = d
 	} else if fp.has("messages_retention_days") {
 		next.MessagesRetentionDays = 0
+	}
+	if body.DeletedConversationGraceDays != nil {
+		g := *body.DeletedConversationGraceDays
+		if g < opsettings.ChatRetentionMinGraceDays || g > opsettings.ChatRetentionMaxDays {
+			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+				fmt.Sprintf("deleted_conversation_grace_days must be between %d and %d",
+					opsettings.ChatRetentionMinGraceDays, opsettings.ChatRetentionMaxDays), nil)
+			return
+		}
+		next.DeletedConversationGraceDays = g
+	} else if fp.has("deleted_conversation_grace_days") {
+		next.DeletedConversationGraceDays = opsettings.ChatRetentionDefaultGraceDays
 	}
 	if fp.has("sweep") {
 		def := opsettings.DefaultChatRetentionConfig()
@@ -282,8 +420,8 @@ func chatRetentionAuditSummary(c opsettings.ChatRetentionConfig) string {
 	if c.HasWindow() {
 		days = strconv.Itoa(c.MessagesRetentionDays)
 	}
-	return fmt.Sprintf("enabled=%t,messages_retention_days=%s,chunk_size=%d,pause_ms=%d,tick_budget_seconds=%d,tick_interval_minutes=%d",
-		c.Enabled, days, c.ChunkSize, c.PauseMS, c.TickBudgetSeconds, c.TickIntervalMinutes)
+	return fmt.Sprintf("enabled=%t,messages_retention_days=%s,deleted_conversation_grace_days=%d,chunk_size=%d,pause_ms=%d,tick_budget_seconds=%d,tick_interval_minutes=%d",
+		c.Enabled, days, c.DeletedConversationGraceDays, c.ChunkSize, c.PauseMS, c.TickBudgetSeconds, c.TickIntervalMinutes)
 }
 
 // auditChatRetentionChange writes one mutation audit record for a change of

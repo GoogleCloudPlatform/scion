@@ -183,7 +183,7 @@ func TestRunInit_ResolveWorkingDirError_ReturnsExitCode18AndNeverStartsHarness(t
 }
 
 // testAuthToken and testStagedSecretKey are the credential and secret-key
-// name TestRunInit_ResolveWorkingDirError_NeverStartsSidecarsMetadataOrSecretFetch
+// name TestRunInit_ResolveWorkingDirError_NeverStartsSidecarsOrSecretFetch_StopsMetadata
 // stages, so its assertion that neither one crosses into the Hub failure
 // report checks the exact values the test itself set rather than a
 // separately hand-typed literal.
@@ -192,22 +192,25 @@ const (
 	testStagedSecretKey = "some-key"
 )
 
-// TestRunInit_ResolveWorkingDirError_NeverStartsSidecarsMetadataOrSecretFetch
+// TestRunInit_ResolveWorkingDirError_NeverStartsSidecarsOrSecretFetch_StopsMetadata
 // covers the other half of the fail-closed contract: not just that the
-// harness child never starts (the previous test), but that none of the
-// three components RunInit can start on its behalf before building the
-// supervisor config — sidecar services, the metadata server, and the hub
-// secret fetch — start either. All three preconditions are satisfied here
-// (a staged scion-services.yaml, SCION_METADATA_MODE, and a configured hub
-// client plus SCION_SECRET_KEYS), so if a regression moved ResolveWorkingDir
-// to run after any of them, this test would see that one's seam called
-// despite the resolver error. The hub client is pointed at a local
+// harness child never starts (the previous test), but that no long-running
+// component survives the resolver error. Sidecar services and the hub
+// secret fetch must never start. The metadata server is network setup that
+// deliberately starts before the clone (so CAP_NET_ADMIN is dropped before
+// any workload-controlled step, see init_netadmin.go), so it is already
+// running when the resolver is called; it must be stopped before RunInit
+// returns. All preconditions are satisfied here (a staged
+// scion-services.yaml, SCION_METADATA_MODE, and a configured hub client
+// plus SCION_SECRET_KEYS), so if a regression moved ResolveWorkingDir to run
+// after the sidecars or the secret fetch, or left the metadata server
+// running, this test would see it. The hub client is pointed at a local
 // httptest server rather than a closed port, so the test also pins what
 // reportInitFailure's best-effort Hub report actually sends on this path:
 // exactly one request, to the agent's status endpoint, carrying the error
 // phase and the resolver's own message, and neither the requested secret
 // key name nor the auth token value.
-func TestRunInit_ResolveWorkingDirError_NeverStartsSidecarsMetadataOrSecretFetch(t *testing.T) {
+func TestRunInit_ResolveWorkingDirError_NeverStartsSidecarsOrSecretFetch_StopsMetadata(t *testing.T) {
 	agentHome := t.TempDir()
 	setupRunInitAsRootlessScion(t, agentHome)
 	writeServicesYAML(t, agentHome)
@@ -233,14 +236,19 @@ func TestRunInit_ResolveWorkingDirError_NeverStartsSidecarsMetadataOrSecretFetch
 
 	withRunGitCloneWorkspace(t, func(uid, gid int, home string, requirePrivilegeDrop bool) error { return nil })
 
-	var sidecarsRan, metadataRan, secretsRan bool
+	var sidecarsRan, secretsRan bool
+	var order []string
 	withRunServicesStart(t, func(context.Context, *services.Manager, []api.ServiceSpec, int, int, string, bool) error {
 		sidecarsRan = true
 		return nil
 	})
 	withRunMetadataServerStart(t, func(context.Context, *metadata.Server) error {
-		metadataRan = true
+		order = append(order, "metadata-start")
 		return nil
+	})
+	withRunMetadataServerStop(t, func(s *metadata.Server) {
+		order = append(order, "metadata-stop")
+		s.Stop()
 	})
 	withRunFetchSecretOverrides(t, func(*hub.Client, []string) map[string]string {
 		secretsRan = true
@@ -251,6 +259,7 @@ func TestRunInit_ResolveWorkingDirError_NeverStartsSidecarsMetadataOrSecretFetch
 	opts := InitRunOptions{
 		DisableTermSignalForwarding: true,
 		ResolveWorkingDir: func() (string, error) {
+			order = append(order, "resolve")
 			return "", resolverErr
 		},
 	}
@@ -262,8 +271,8 @@ func TestRunInit_ResolveWorkingDirError_NeverStartsSidecarsMetadataOrSecretFetch
 	if sidecarsRan {
 		t.Error("sidecar services started despite a ResolveWorkingDir error; they must never start")
 	}
-	if metadataRan {
-		t.Error("the metadata server started despite a ResolveWorkingDir error; it must never start")
+	if want := []string{"metadata-start", "resolve", "metadata-stop"}; !reflect.DeepEqual(order, want) {
+		t.Errorf("metadata/resolver order = %v, want %v (the metadata server starts before the resolver and must be stopped before RunInit returns)", order, want)
 	}
 	if secretsRan {
 		t.Error("the hub secret fetch ran despite a ResolveWorkingDir error; it must never run")

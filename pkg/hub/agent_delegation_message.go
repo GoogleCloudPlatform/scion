@@ -114,12 +114,8 @@ func (s *Server) delegatedDeliveryRefusal(ctx context.Context, target *store.Age
 	if deferred {
 		return nil
 	}
-	held, err := s.agentHeld(ctx, target.ID)
-	if err != nil {
-		return heldLookupFaultDMError()
-	}
-	if held {
-		return heldTargetDMError(target)
+	if dmErr := s.heldTargetRefusal(ctx, target); dmErr != nil {
+		return dmErr
 	}
 	return validateAgentDeliverable(target)
 }

@@ -17,6 +17,7 @@ package secret
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -318,8 +319,49 @@ func (b *GCPBackend) Set(ctx context.Context, input *SetSecretInput) (bool, *Sec
 	if err := b.ensureSecretAndAddVersion(ctx, smName, []byte(input.Value), buildLabels(input, target, b.resolveHubName())); err != nil {
 		return false, nil, err
 	}
+	return b.storeRefMetadata(ctx, input, fullName)
+}
 
-	// Store metadata in Hub DB (with a reference instead of the value)
+// ErrSecretVerify reports that a value written to Secret Manager could not
+// be confirmed by reading it back: the read-back failed or returned a
+// different value. Errors wrapping it name the secret key and scope only.
+var ErrSecretVerify = errors.New("secret manager read-back did not confirm the written value")
+
+// SetVerified is Set for a value whose only other copy is the Hub
+// database's local payload (the secret-backend migration). It adds the
+// Secret Manager version, reads the latest version back and compares it
+// with input.Value in constant time. Only on a match does it write the Hub
+// metadata row (the Secret Manager reference, with the local payload
+// cleared exactly as Set does). On a mismatch or a failed read-back it
+// returns an error wrapping ErrSecretVerify and leaves the Hub row as it
+// was, so the local payload stays readable under the local key and a later
+// run can retry. No error it returns carries a value.
+func (b *GCPBackend) SetVerified(ctx context.Context, input *SetSecretInput) (bool, *SecretMeta, error) {
+	smName := b.gcpSecretName(input.Name, input.Scope, input.ScopeID)
+	fullName := fmt.Sprintf("projects/%s/secrets/%s", b.projectID, smName)
+
+	target := input.Target
+	if target == "" {
+		target = input.Name
+	}
+
+	if err := b.ensureSecretAndAddVersion(ctx, smName, []byte(input.Value), buildLabels(input, target, b.resolveHubName())); err != nil {
+		return false, nil, err
+	}
+	got, err := b.accessLatestVersion(ctx, smName)
+	if err != nil {
+		return false, nil, fmt.Errorf("secret %q (scope %s): reading back from Secret Manager failed (%s): %w",
+			input.Name, input.Scope, status.Code(err), ErrSecretVerify)
+	}
+	if subtle.ConstantTimeCompare([]byte(got), []byte(input.Value)) != 1 {
+		return false, nil, fmt.Errorf("secret %q (scope %s): %w", input.Name, input.Scope, ErrSecretVerify)
+	}
+	return b.storeRefMetadata(ctx, input, fullName)
+}
+
+// storeRefMetadata writes the Hub metadata row for a value just stored in
+// Secret Manager under fullName: a reference instead of the value.
+func (b *GCPBackend) storeRefMetadata(ctx context.Context, input *SetSecretInput, fullName string) (bool, *SecretMeta, error) {
 	secret := toStoreSecret(input)
 	secret.EncryptedValue = "" // Don't store value in DB
 	secret.SecretRef = "gcpsm:" + fullName
@@ -548,6 +590,12 @@ func (b *GCPBackend) Resolve(ctx context.Context, userID, projectID, brokerID st
 			// Never project hub-internal infrastructure secrets (e.g. signing keys)
 			// into agent environments.
 			if s.SecretType == store.SecretTypeInternal {
+				continue
+			}
+			// Hub-scope rows are held to HubSecretDeliverable before their
+			// value is read, so an excluded row never shadows a broker-scope
+			// row of the same key.
+			if sc.scope == store.ScopeHub && !hubRowDeliverable(&s) {
 				continue
 			}
 			// The owner path: a user-scope row of userID is held to the

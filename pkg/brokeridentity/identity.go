@@ -25,6 +25,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -55,6 +56,7 @@ const (
 const (
 	TargetTypeDocker     = "docker"
 	TargetTypeKubernetes = "kubernetes"
+	TargetTypeCloudRun   = "cloudrun"
 )
 
 // Errors returned by LoadOrCreate and VerifyScope. They are never followed
@@ -94,12 +96,25 @@ type KubernetesScope struct {
 	APIServer  string `json:"apiServer,omitempty"`
 }
 
+// CloudRunScope is the normalized execution scope of a Cloud Run target
+// (contract amendment P5-CR, CR3a): the Cloud Run Instances collection
+// projects/<ProjectNumber>/locations/<Region>. ProjectNumber (the Resource
+// Manager project number) and Region are the identity fields; ProjectID is
+// informational and keeps its first-boot value. Service accounts, networks,
+// credentials and their paths are never recorded.
+type CloudRunScope struct {
+	ProjectNumber string `json:"projectNumber"`
+	Region        string `json:"region"`
+	ProjectID     string `json:"projectId,omitempty"`
+}
+
 // ExecutionScope is the normalized execution-scope record a runtime target
 // ID is bound to.
 type ExecutionScope struct {
 	Type       string           `json:"type"`
 	Docker     *DockerScope     `json:"docker,omitempty"`
 	Kubernetes *KubernetesScope `json:"kubernetes,omitempty"`
+	CloudRun   *CloudRunScope   `json:"cloudrun,omitempty"`
 }
 
 // Identity is the persisted identity of one flat Runtime Broker instance.
@@ -179,6 +194,13 @@ func LoadOrCreate(dir, key, targetType string, observed ExecutionScope, legacyBr
 	if err := VerifyScope(id.ExecutionScope, observed); err != nil {
 		return nil, err
 	}
+	if rec, obs := id.ExecutionScope.CloudRun, observed.CloudRun; rec != nil && obs != nil && rec.ProjectID != obs.ProjectID {
+		// Same project number and region under another project ID: the same
+		// target, and the recorded project ID is kept. The line names the
+		// instance; project IDs are never logged at info level.
+		slog.Info("Cloud Run project ID alias accepted: the project number and region match the recorded identity; the recorded project ID is kept",
+			slog.String("instance", key))
+	}
 	return id, nil
 }
 
@@ -207,14 +229,14 @@ func isFirstBoot(dir string) (bool, error) {
 }
 
 func mint(dir, path, key, targetType string, observed ExecutionScope) (*Identity, error) {
-	if targetType != TargetTypeDocker && targetType != TargetTypeKubernetes {
+	if targetType != TargetTypeDocker && targetType != TargetTypeKubernetes && targetType != TargetTypeCloudRun {
 		return nil, fmt.Errorf("unsupported runtime target type %q", targetType)
 	}
 	if observed.Type != targetType {
 		return nil, fmt.Errorf("%w: observed scope type %q does not match target type %q",
 			ErrExecutionScopeUnidentified, observed.Type, targetType)
 	}
-	if _, err := scopeIdentity(observed); err != nil {
+	if _, err := ScopeIdentity(observed); err != nil {
 		return nil, err
 	}
 	id := &Identity{
@@ -281,7 +303,7 @@ func readIdentity(path string) (*Identity, error) {
 		id.RuntimeTarget.Type == "" || id.ExecutionScope.Type == "" {
 		return nil, fmt.Errorf("%w: %s: a required field is empty", ErrIdentityCorrupt, path)
 	}
-	if _, err := scopeIdentity(id.ExecutionScope); err != nil {
+	if _, err := ScopeIdentity(id.ExecutionScope); err != nil {
 		return nil, fmt.Errorf("%w: %s: %v", ErrIdentityCorrupt, path, err)
 	}
 	return &id, nil

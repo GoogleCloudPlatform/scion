@@ -54,3 +54,11 @@ func readSharedDirRecord(path string) ([]byte, error) {
 	}
 	return raw, nil
 }
+
+// openRetiredSharedDirRecord opens the retired record at path for reading
+// with O_NOFOLLOW|O_NONBLOCK: a symlink at the last component, even one
+// swapped in after readRetiredSharedDirRecord's Lstat, is refused, and a
+// FIFO does not block the open.
+func openRetiredSharedDirRecord(path string) (*os.File, error) {
+	return os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+}

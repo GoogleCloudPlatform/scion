@@ -123,6 +123,11 @@ func TestPersistedRowEffectEnumeration(t *testing.T) {
 		// dispatch_state=failed for that row (also returns false on error).
 		// The publish mirrors that committed write onto the in-memory copy;
 		// it is not gating persistence, persistence already happened.
+		// publishChoiceResponse: called by handleDecisionAnswer only after
+		// RecordAnswer stored the choice-response row in the answer's
+		// transaction; any RecordAnswer error returns before it.
+		"choices_answer.go:publishChoiceResponse": "Called only after RecordAnswer stored the response row; a RecordAnswer error returns before it",
+
 		"message_delivery_failures.go:applyBrokerMessageFailure": "Acts on an already-persisted row (confirmed via GetMessage) after markFailed has already committed; publish mirrors the committed write, not a pending one",
 	}
 
@@ -439,8 +444,10 @@ const (
 // classifyPublishUserMessageCall classifies every call named
 // PublishUserMessage. The event publish is a method call on an `events`
 // field or variable (s.events, p.events, nd.events, events) with the event
-// publish signature's 4 arguments (ctx, msg, attachments, artifactRefs).
-// Every other PublishUserMessage call, whatever its receiver or arity, is
+// publish signature's 4 arguments (ctx, msg, attachments, artifactRefs),
+// optionally followed by ChatEventOptions (a choice prompt's or response's
+// chat payload). Every other PublishUserMessage call, whatever its receiver
+// or arity, is
 // publishCallOther: the broker proxy's PublishUserMessage (ctx, projectID,
 // userID, msg) on bp, p or nd.brokerProxy, but equally an event publisher
 // held under another name (ep), which the scanner then reports as
@@ -456,7 +463,7 @@ func classifyPublishUserMessageCall(call *ast.CallExpr) publishCallKind {
 		if fn.Sel.Name != "PublishUserMessage" {
 			return publishCallNone
 		}
-		if len(call.Args) == 4 {
+		if len(call.Args) >= 4 {
 			switch recv := fn.X.(type) {
 			case *ast.SelectorExpr:
 				if recv.Sel.Name == "events" {
@@ -513,6 +520,7 @@ func TestMemberFanoutFollowsPublish(t *testing.T) {
 		"handlers_chat_v2.go:sendHumanToHuman":                   true,
 		"handlers_agent_messaging.go:handleAgentOutboundMessage": true,
 		"messagebroker.go:deliverToUser":                         true,
+		"choices_answer.go:publishChoiceResponse":                true,
 	}
 	isFanoutCall := func(call *ast.CallExpr) bool {
 		sel, ok := call.Fun.(*ast.SelectorExpr)
@@ -606,6 +614,8 @@ func TestClassifyPublishUserMessageCall(t *testing.T) {
 		`s.events.PublishUserMessage(ctx, msg, attachments, refs)`:                     publishCallEvent,
 		`p.events.PublishUserMessage(ctx, msg, refs, artifactRefs)`:                    publishCallEvent,
 		`nd.events.PublishUserMessage(ctx, msg, nil, nil)`:                             publishCallEvent,
+		`s.events.PublishUserMessage(ctx, msg, nil, nil, opt)`:                         publishCallEvent,
+		`s.events.PublishUserMessage(ctx, msg, refs, artifactRefs, opts...)`:           publishCallEvent,
 		`events.PublishUserMessage(ctx, msg, nil, nil)`:                                publishCallEvent,
 		`bp.PublishUserMessage(ctx, agent.ProjectID, result.RecipientID, msg)`:         publishCallOther,
 		`p.PublishUserMessage(ctx, projectID, r.Name, &recipMsg)`:                      publishCallOther,

@@ -45,6 +45,7 @@ var floorOnlyNames = map[string]string{
 	"system_prompt.md":               "agent-home prompt (inside an agent)",
 	"telemetry-gcp-credentials.json": "agent-home telemetry credentials (inside an agent; the agent's own)",
 	"scion-services.yaml":            "agent-home services file (inside an agent)",
+	"welcome-staging":                "Hub welcome-project staging dirs (downloaded template trees awaiting install; hub-private, 0700)",
 }
 
 // legacyLayoutConsts are the pkg/config constants naming the pre-rename

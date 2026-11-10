@@ -143,6 +143,13 @@ func Spec() []TableFixture {
 				"applied_config": nestedConfigJSON,
 				"created_at":     baseTime, "updated_at": baseTime,
 				"phase": "running", "state_version": 1,
+				// WP1 slice 3: the bound launch run and the broker's
+				// effective-configuration echo.
+				"launch_id": "44444444-4444-4444-4444-4444444444aa", "launch_run_id": "55555555-5555-5555-5555-5555555555aa",
+				"run_id": "55555555-5555-5555-5555-5555555555aa",
+				"effective_config": `{"runId":"55555555-5555-5555-5555-5555555555aa","template":"claude",` +
+					`"templateHash":"sha256:ab","harness":"claude","model":"claude-opus","brokerId":"` + brokerID + `",` +
+					`"brokerBuild":"v1.2.3","source":"sync","reportedAt":"2026-01-01T00:00:00Z"}`,
 			},
 			{ // soft-deleted agent (deleted_at populated)
 				"id": "33333333-3333-3333-3333-3333333333aa", "agent_id": "33333333-3333-3333-3333-3333333333aa",
@@ -322,6 +329,41 @@ func Spec() []TableFixture {
 				"recipient_id": agentID, "msg": "do the thing — café ☕", "type": "instruction",
 				"agent_id": agentID, "created_at": baseTime,
 			},
+		}},
+		// ---- Choice prompt decisions ----
+		{Table: "decisions", Rows: []row{
+			{ // decided version of a hub-numbered key, in a conversation, with a default and an intro
+				"id": "dc000000-0000-0000-0000-000000000002", "project_id": projectID,
+				"conversation_id": conversationID, "message_id": messageID, "position": 0,
+				"asker_agent_id": agentID, "asker_agent_name": "worker",
+				"key": "1", "key_norm": "1", "key_source": "hub", "version": 2,
+				"question":          "Ship the feature now? — café ☕",
+				"choices":           `[{"id":"1","label":"yes"},{"id":"2","label":"no — später"}]`,
+				"default_choice_id": "1", "intro_length": 12, "status": "decided",
+				"created_at": baseTime, "decided_at": baseTime.Add(time.Minute),
+			},
+			{ // replaced version 1 of the same key: nullable conversation and default left NULL
+				"id": "dc000000-0000-0000-0000-000000000001", "project_id": projectID,
+				"message_id": messageID, "position": 1,
+				"asker_agent_id": agentID, "asker_agent_name": "worker",
+				"key": "1", "key_norm": "1", "key_source": "hub", "version": 1,
+				"question": "Ship the feature?", "choices": `[{"id":"1","label":"yes"},{"id":"2","label":"no"}]`,
+				"status": "replaced", "replaced_by_id": "dc000000-0000-0000-0000-000000000002",
+				"created_at": baseTime, "replaced_at": baseTime,
+			},
+		}},
+		{Table: "decision_answers", Rows: []row{
+			{ // a direct answer recorded from the web session
+				"id": "da000000-0000-0000-0000-000000000001", "decision_row_id": "dc000000-0000-0000-0000-000000000002",
+				"project_id": projectID, "asker_agent_id": agentID, "key": "1", "version": 2,
+				"question_text": "Ship the feature now? — café ☕", "choice_id": "2", "choice_label": "no — später",
+				"answered_by_user_id": userID, "answered_by_name": "Alice", "answered_by_email": "alice@example.com",
+				"provenance": "direct", "outcome": "answer", "surface": "native",
+				"response_message_id": messageID, "idempotency_key": "web-1", "created_at": baseTime.Add(time.Minute),
+			},
+		}},
+		{Table: "decision_key_counters", Rows: []row{
+			{"agent_id": agentID, "next": 2},
 		}},
 
 		// ---- Schedules ----
@@ -588,6 +630,40 @@ func Spec() []TableFixture {
 				"previous_applied_config": nestedConfigJSON,
 				"new_applied_config":      nestedConfigJSON,
 				"handoff":                 "handoff notes: naïve café 北京 🚀",
+			},
+		}},
+
+		// ---- Agent lifecycle event sequencing and outbox (WP1) ----
+		{Table: "agent_lifecycle_cursors", Rows: []row{
+			{
+				"agent_id": agentID, "project_id": projectID,
+				"transition_revision": 3, "metadata_revision": 2,
+				"metadata_digest": strings.Repeat("d", 64), "last_fingerprint": strings.Repeat("f", 64),
+				"last_deleted": false, "open_run": "", "open_run_generation": "",
+				"open_run_metadata_revision": 0, "pending_run_change_at": nil,
+				"reincarnation_base_run_id": "", "pending_adopted_from": "",
+				"pending_adopted_at": nil, "pending_adoption_source": "", "pending_adopted_to": "",
+				"creator_principal_type": "user", "creator_principal_id": userID,
+				"requested_template": "claude",
+				"updated_at":         baseTime,
+				// Persistent run attribution (WP1 attribution design v2.8):
+				// a clear cursor whose stamp equals updated_at.
+				"attribution_state": "clear", "attribution_stamp": baseTime,
+				"last_run": "", "last_generation": "1",
+				"attributed_run": "", "attributed_generation": "",
+				"quarantined_runs": "", "quarantine_mode": "complete",
+				"reincarnation_mint_run": "", "untrusted_open_run": "",
+				"untrusted_open_run_generation": "", "untrusted_open_run_rev": 0,
+			},
+		}},
+		{Table: "agent_lifecycle_outbox", Rows: []row{
+			{
+				"seq": 1, "event_id": "e1000000-0000-4000-8000-000000000001", "agent_id": agentID,
+				"transition_revision": 1,
+				"payload":             `{"schema_version":1,"event_type":"agent.lifecycle","event_id":"e1000000-0000-4000-8000-000000000001","transition":"created","metadata":{"name":"naïve café 北京 🚀","labels":[]}}`,
+				"created_at":          baseTime, "attempts": 2, "permanent_failures": 0,
+				"next_attempt_at": baseTime.Add(time.Minute), "lease_owner": "", "lease_until": nil,
+				"last_error": "unavailable: fixture",
 			},
 		}},
 

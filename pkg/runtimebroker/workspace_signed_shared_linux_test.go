@@ -20,8 +20,10 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -151,11 +153,15 @@ func TestSignedCaseB_LateContentSkips(t *testing.T) {
 	}
 }
 
-// TestSignedCaseB_ArtifactsOnlyLeafIsBusy: a leaf holding only provisioning
-// artifacts (a legacy in-leaf lock and a satellite) fails closed with
-// leaf_busy; the artifacts are untouched, nothing is downloaded and no
-// stage is left.
-func TestSignedCaseB_ArtifactsOnlyLeafIsBusy(t *testing.T) {
+// TestSignedCaseB_ArtifactsOnlyLeafIsExistingContent: a leaf holding only
+// what an older image left in the workspace root (a lock and a satellite)
+// is skipped as existing content. This test used to expect leaf_busy; the
+// expectation changed because provisioning bookkeeping is now kept only in
+// the project state directory, so a workspace-root lock is not bookkeeping
+// but content, like any other entry, and an in-use leaf is skipped. The
+// entries are untouched, nothing is downloaded, no sentinel is written and
+// no stage is left.
+func TestSignedCaseB_ArtifactsOnlyLeafIsExistingContent(t *testing.T) {
 	f := newCaseBFixture(t, map[string]string{"a.txt": "A"})
 	if err := os.MkdirAll(f.ws, 0o755); err != nil {
 		t.Fatal(err)
@@ -168,16 +174,12 @@ func TestSignedCaseB_ArtifactsOnlyLeafIsBusy(t *testing.T) {
 	if err := os.WriteFile(satellite, []byte("pid"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	_, err := f.run()
-	var ce *signedCommitError
-	if !errors.As(err, &ce) || ce.Class != signedCommitLeafBusy {
-		t.Fatalf("err = %v, want leaf_busy", err)
-	}
-	if op := signedBootstrapOp(err); op != opApplySharedWorkspaceBusy {
-		t.Fatalf("op = %q", op)
+	skipped, err := f.run()
+	if err != nil || !skipped {
+		t.Fatalf("run = (skipped %v, err %v), want a skip", skipped, err)
 	}
 	if _, err := os.Stat(lock); err != nil {
-		t.Fatal("the lock artifact must be untouched")
+		t.Fatal("the lock entry must be untouched")
 	}
 	if b, err := os.ReadFile(satellite); err != nil || string(b) != "pid" {
 		t.Fatal("the satellite must be untouched")
@@ -188,6 +190,108 @@ func TestSignedCaseB_ArtifactsOnlyLeafIsBusy(t *testing.T) {
 	if s := stagesOf(t, f.ws); len(s) != 0 {
 		t.Fatalf("stages left: %v", s)
 	}
+}
+
+// TestSignedCaseB_SkippedLeafNeverWritten: a leaf holding only an older
+// image's workspace-root lock or sentinel is skipped as existing content
+// and the bootstrap writes nothing into it: the leaf's listing (names,
+// modes, sizes, modification times and file contents, the leaf itself
+// included) is byte-identical before and after, nothing is downloaded and
+// no state-directory sentinel is written.
+func TestSignedCaseB_SkippedLeafNeverWritten(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, ws string)
+	}{
+		{name: "workspace-root lock", setup: func(t *testing.T, ws string) {
+			if err := os.Mkdir(filepath.Join(ws, ".scion-provision.lock"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(ws, ".scion-provision.lock", "owner"), []byte("old-pod"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "workspace-root sentinel", setup: func(t *testing.T, ws string) {
+			if err := os.WriteFile(filepath.Join(ws, provision.ProvisionSentinelFile), []byte("old"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "workspace-root lock and sentinel", setup: func(t *testing.T, ws string) {
+			if err := os.Mkdir(filepath.Join(ws, ".scion-provision.lock"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(ws, provision.ProvisionSentinelFile), []byte("old"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newCaseBFixture(t, map[string]string{"a.txt": "A", "d/b.txt": "B"})
+			if err := os.MkdirAll(f.ws, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			tc.setup(t, f.ws)
+			// Older times make a write show even within one clock tick.
+			old := time.Now().Add(-time.Hour)
+			if err := filepath.WalkDir(f.ws, func(p string, _ os.DirEntry, err error) error {
+				if err != nil {
+					return err
+				}
+				return os.Chtimes(p, old, old)
+			}); err != nil {
+				t.Fatal(err)
+			}
+			before := leafListing(t, f.ws)
+			skipped, err := f.run()
+			if err != nil || !skipped {
+				t.Fatalf("run = (skipped %v, err %v), want a skip", skipped, err)
+			}
+			if after := leafListing(t, f.ws); after != before {
+				t.Fatalf("the skipped leaf was written:\nbefore:\n%s\nafter:\n%s", before, after)
+			}
+			if f.h.pageCalls != 0 || f.sentinelPresent() {
+				t.Fatalf("page calls %d, sentinel %v", f.h.pageCalls, f.sentinelPresent())
+			}
+			if s := stagesOf(t, f.ws); len(s) != 0 {
+				t.Fatalf("stages left: %v", s)
+			}
+		})
+	}
+}
+
+// leafListing renders every entry below and including ws (name, mode,
+// size, modification time and, for a regular file, its content), in
+// lexical walk order, for a byte comparison.
+func leafListing(t *testing.T, ws string) string {
+	t.Helper()
+	var b strings.Builder
+	err := filepath.WalkDir(ws, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		info, err := os.Lstat(p)
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(ws, p)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(&b, "%s %v %d %d", rel, info.Mode(), info.Size(), info.ModTime().UnixNano())
+		if info.Mode().IsRegular() {
+			data, err := os.ReadFile(p)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(&b, " %q", data)
+		}
+		b.WriteByte('\n')
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b.String()
 }
 
 // TestSignedCaseB_RecoveryOnlyUnderProvisioningLocks: a stage another
@@ -311,4 +415,76 @@ func TestSignedCaseB_CommittedAttributesMatchDirectCreation(t *testing.T) {
 			t.Errorf("%s: committed attributes %+v, direct creation %+v", p, got, want)
 		}
 	}
+}
+
+// TestSignedCaseB_LogsOneInfoLine: a committed case B bootstrap logs exactly
+// one Info line with the file count, byte total and duration, and the log
+// carries no signed URL, object path, stage name or workspace path.
+func TestSignedCaseB_LogsOneInfoLine(t *testing.T) {
+	f := newCaseBFixture(t, map[string]string{"a.txt": "A", "d/b.txt": "BB"})
+	logs := captureLifecycleJSONLog(f.srv)
+	if skipped, err := f.run(); err != nil || skipped {
+		t.Fatalf("run = (skipped %v, err %v)", skipped, err)
+	}
+	requireOneSignedBootstrapDone(t, logs.String(), f.req.Name, 2, 3)
+	if leaks := bootstrapLogLeaks(logs.String(), f.h, []string{f.ws, f.root}); len(leaks) != 0 {
+		t.Errorf("broker log leaks %v:\n%s", leaks, logs.String())
+	}
+}
+
+// TestSignedCaseB_NoSuccessLineWithoutCompletion: a case B bootstrap that is
+// skipped, fails after its final rename, or fails to write the provisioned
+// marker logs no success line.
+func TestSignedCaseB_NoSuccessLineWithoutCompletion(t *testing.T) {
+	t.Run("sentinel already present", func(t *testing.T) {
+		f := newCaseBFixture(t, map[string]string{"a.txt": "A"})
+		if err := os.MkdirAll(filepath.Dir(f.sentinel), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(f.sentinel, []byte("provisioned_at=x\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		logs := captureLifecycleJSONLog(f.srv)
+		if skipped, err := f.run(); err != nil || !skipped {
+			t.Fatalf("run = (skipped %v, err %v), want a skip", skipped, err)
+		}
+		requireNoSignedBootstrapDone(t, logs.String())
+	})
+	t.Run("failure after the final rename", func(t *testing.T) {
+		f := newCaseBFixture(t, map[string]string{"a.txt": "A"})
+		logs := captureLifecycleJSONLog(f.srv)
+		crashAt(t, "after_rename")
+		if _, err := f.run(); !errors.Is(err, errSignedBootstrapCrash) {
+			t.Fatalf("err = %v, want the injected failure", err)
+		}
+		requireNoSignedBootstrapDone(t, logs.String())
+	})
+	t.Run("provisioned marker write fails", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("a read-only directory does not stop root from writing")
+		}
+		f := newCaseBFixture(t, map[string]string{"a.txt": "A"})
+		stateDir := filepath.Dir(f.sentinel)
+		logs := captureLifecycleJSONLog(f.srv)
+		// After the commit, the state directory is made read-only, so the
+		// provisioned marker cannot be written.
+		testHookSignedBootstrap = func(step string) error {
+			if step == "after_rename" {
+				return os.Chmod(stateDir, 0o555)
+			}
+			return nil
+		}
+		t.Cleanup(func() {
+			testHookSignedBootstrap = nil
+			_ = os.Chmod(stateDir, 0o755)
+		})
+		_, err := f.run()
+		if err == nil || !strings.Contains(err.Error(), "create temp sentinel") {
+			t.Fatalf("err = %v, want the marker write failure", err)
+		}
+		if f.sentinelPresent() {
+			t.Fatal("the marker must not have been written")
+		}
+		requireNoSignedBootstrapDone(t, logs.String())
+	})
 }

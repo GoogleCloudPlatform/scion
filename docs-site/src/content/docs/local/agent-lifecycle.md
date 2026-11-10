@@ -159,7 +159,7 @@ Only one start of an agent runs at a time. If you start, resume, or restart an a
 
 #### Reincarnating an Agent
 
-To move an existing agent onto the current template, image, and harness config without losing its identity, use [`scion reincarnate`](/scion/reference/cli/#scion-reincarnate). It keeps the agent ID and slug, clears the previous run's `exitCode` and `exitReason` when the migration begins, starts a new generation with a freshly resolved config, and hands it the task you supply with `--handoff-file`. Use `--dry-run` to preview the changes first. Reincarnation requires a Hub, and works for agents in clone-per-agent, shared-workspace, and Hub-managed workspaces. An agent in an empty-per-agent project can be reincarnated on its current Runtime Broker only if that Runtime Broker is up to date and uses a local-disk runtime (Docker, Podman, or Apple `container`). Agents in worktree-per-agent projects are not yet supported: the Hub rejects the request, and the Runtime Broker also refuses such a reprovision on its own.
+To move an existing agent onto the current template, image, and harness config without losing its identity, use [`scion reincarnate`](/scion/reference/cli/#scion-reincarnate). It keeps the agent ID and slug, clears the previous run's `exitCode` and `exitReason` when the migration begins, starts a new generation with a freshly resolved config, and hands it the task you supply with `--handoff-file`. Use `--dry-run` to preview the changes first. Reincarnation requires a Hub, and works for agents in clone-per-agent, shared-workspace, and Hub-managed workspaces. An agent in an empty-per-agent project can be reincarnated on its current Runtime Broker when that Runtime Broker is up to date and uses a local-disk runtime (Docker, Podman, or Apple `container`) or shared (`nfs`) workspace storage. Agents in worktree-per-agent projects are not yet supported: the Hub rejects the request, and the Runtime Broker also refuses such a reprovision on its own.
 
 Reincarnating is also how an existing agent picks up changed harness dotfiles (including hook registrations kept in them, such as Claude's `.claude/settings.json`) and changed template skills, which are otherwise copied only when the agent is created. Harnesses whose provisioner writes its hook configuration at start, such as Copilot, Antigravity and Grok Build, pick up provisioner changes on the next start. See [Changing a harness config affects new agents only](/scion/reference/harness-settings/#changing-a-harness-config-affects-new-agents-only).
 
@@ -182,7 +182,8 @@ session resume. Agents already `stalled` when you turn auto-suspend on are not
 suspended unless they become active and stall again.
 
 Auto-suspend uses the same machinery as a manual `scion suspend`, so the agent's
-phase becomes `suspended` and its harness session is preserved. The agent
+phase becomes `suspended`, its harness session is preserved, and its Hub
+credentials and active delegation grants are revoked. The agent
 resumes, continuing where it left off, when someone sends it a message with wake
 (`scion message --wake`, or the web UI's wake prompt) or starts it.
 
@@ -234,10 +235,10 @@ However, to prevent premature deletion of agents with active or pending tasks, s
 
 | Agent Role | Authorized to Delete | Allowed Timing |
 |---|---|---|
-| **Worker** (Developer, Reviewer) | The agent's creator or supervisor. | Immediately once the output has been accepted and verified. |
-| **Investigator / Architect** | The agent's creator or supervisor. | **Only after all questions to humans are answered** and the investigation is explicitly concluded. |
-| **Project Initiator** (The very first agent in a project) | **Explicit human instruction only.** | Initiators carry project continuity from inception through closure and must survive worker cycles. |
-| **Project Lead / Coordinator** | **Explicit human instruction naming the workstream.** | Only when a human operator commands to close down that specific workstream. |
+| **Task-bounded agent** | The agent's creator or supervisor. | Immediately once the output has been accepted and verified. |
+| **Agent with an open human question** | The agent's creator or supervisor. | **Only after all questions to humans are answered** and the conversation is explicitly concluded. |
+| **Lead** — the first agent on a project or workstream, an agent coordinating that project or workstream, or an agent explicitly designated by a human as its lead | **Only on explicit human instruction naming the workstream** | It carries continuity from the initial request through closure, including non-code and non-repository projects |
+| **Delegated supervisor** with a bounded assignment, not a lead | Its creator or authorized supervisor, subject to the assigned workflow; a human where that workflow requires it | After its deliverable is accepted, verified and durable, its subtree is torn down, and its human questions are resolved |
 
 ### 2. Hierarchical (Bottom-Up) Teardown
 

@@ -185,7 +185,39 @@ func TestUpdateTemplate(t *testing.T) {
 	got, err := ts.GetTemplate(ctx, tmpl.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "new", got.Name)
-	assert.Equal(t, store.TemplateStatusArchived, got.Status)
+	// Status is written by the commit path (UpdateTemplateContent), not by
+	// the metadata update (ptone/scion#4967).
+	assert.Equal(t, store.TemplateStatusActive, got.Status)
+}
+
+// TestTemplateMetadataUpdate_KeepsSourceURLAndStatus: a metadata write from
+// a stale read does not revert a concurrent commit's source URL or status
+// (ptone/scion#4967).
+func TestTemplateMetadataUpdate_KeepsSourceURLAndStatus(t *testing.T) {
+	ts := newTestTemplateStore(t)
+	ctx := context.Background()
+
+	tmpl := &store.Template{
+		ID: uuid.New().String(), Name: "src", Slug: "src", Harness: "claude", Scope: "global",
+		Status: store.TemplateStatusPending, SourceURL: "https://example.com/source/v1",
+	}
+	require.NoError(t, ts.CreateTemplate(ctx, tmpl))
+	stale := *tmpl
+
+	content := *tmpl
+	content.SourceURL = "https://example.com/source/v2"
+	content.Status = store.TemplateStatusActive
+	content.ContentHash = "sha256:h1"
+	require.NoError(t, ts.UpdateTemplateContent(ctx, &content, store.TemplateContentPrecondition{}))
+
+	stale.Name = "renamed"
+	require.NoError(t, ts.UpdateTemplate(ctx, &stale))
+
+	got, err := ts.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "renamed", got.Name)
+	assert.Equal(t, "https://example.com/source/v2", got.SourceURL, "metadata write must not revert the commit's source URL")
+	assert.Equal(t, store.TemplateStatusActive, got.Status, "metadata write must not revert the commit's status")
 }
 
 // TestTemplateAgentConfigRoundTrip covers the derived agent_config column

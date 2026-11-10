@@ -73,3 +73,22 @@ func reconcilePluginsAfterRollback(installRoot string) {
 		slog.Warn("Failed to restore the broker plugins after a rollback", "install_root", installRoot, "error", err)
 	}
 }
+
+// removeAppliedPluginStaging removes the plugin staging directories a
+// successful update left behind (maintenance.RemoveAppliedPluginStaging):
+// they kept the previous builds for a rollback until the restart that
+// started this process. Best-effort: a failure is logged and startup goes
+// on (ptone/scion#7177).
+func removeAppliedPluginStaging() {
+	pluginsDir, err := scionplugin.DefaultPluginsDir()
+	if err != nil {
+		return
+	}
+	removed, err := maintenance.RemoveAppliedPluginStaging(filepath.Join(pluginsDir, scionplugin.PluginTypeBroker))
+	for _, p := range removed {
+		slog.Info("Removed the plugin staging of the previous successful update", "path", p)
+	}
+	if err != nil {
+		slog.Warn("Failed to remove the plugin staging of the previous update", "error", err)
+	}
+}

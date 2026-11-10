@@ -52,16 +52,15 @@ func stateDirInput(workspace, stateDir, origin string, mode store.WorkspaceShari
 		ProjectID:   "proj-state-dir",
 		Mode:        mode,
 		SentinelDir: stateDir,
-		LegacyDir:   workspace,
 		NFSUID:      os.Getuid(),
 		NFSGID:      os.Getgid(),
 		GitClone:    &api.GitCloneConfig{URL: origin, Branch: "main"},
 	}
 }
 
-// assertWorkspaceClean checks that the workspace root holds no sentinel and
-// no live lock, that nothing but the clone and transient lock litter (which
-// is git-excluded) is in it, and that git status is clean.
+// assertWorkspaceClean checks that the workspace root holds nothing of the
+// provisioning bookkeeping (AC-L1, AC-L3): no sentinel, no lock and no lock
+// litter, nothing but the clone, and that git status is clean.
 func assertWorkspaceClean(t *testing.T, workspace string) {
 	t.Helper()
 	assert.NoFileExists(t, filepath.Join(workspace, ProvisionSentinelFile))
@@ -70,7 +69,7 @@ func assertWorkspaceClean(t *testing.T, workspace string) {
 	require.NoError(t, err)
 	for _, e := range entries {
 		name := e.Name()
-		if name == ".git" || name == "README.md" || name == "worktrees" || strings.HasPrefix(name, provisionFileLockName+".") {
+		if name == ".git" || name == "README.md" || name == "worktrees" {
 			continue
 		}
 		t.Errorf("unexpected entry in the workspace root: %s", name)
@@ -131,72 +130,49 @@ func TestProvisionShared_StateDir_WorktreePerAgent(t *testing.T) {
 	assertWorkspaceClean(t, workspace)
 }
 
-// A workspace provisioned before the state directory existed has its
-// sentinel in the workspace root. It still counts as provisioned (nothing is
-// cloned; the clone URL here does not exist), the new sentinel is not
-// written, and the legacy sentinel is added to the git excludes.
-func TestProvisionShared_StateDir_LegacySentinelHonoured(t *testing.T) {
+// AC-L4 (flipped): a provisioner of an image from before the state
+// directory takes only the workspace-root lock and checks only the
+// workspace-root sentinel. Against a workspace current code provisioned it
+// finds no sentinel, so it would provision again: the documented upgrade
+// behaviour (such images must be rebuilt).
+func TestProvisionShared_StateDir_PreStateDirProvisionerSeesUnprovisioned(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
 	origin := initBareGitRepo(t)
 	workspace, stateDir := stateDirLayout(t)
-	legacy := ProvisionInput{
-		Resolved:    ResolvedWorkspace{HostPath: workspace, Backend: "nfs"},
-		ProjectID:   "proj-state-dir",
-		Mode:        store.SharingModeSharedPlain,
-		SentinelDir: workspace,
-		GitClone:    &api.GitCloneConfig{URL: origin, Branch: "main"},
-	}
-	require.NoError(t, ProvisionShared(legacy))
-	require.FileExists(t, filepath.Join(workspace, ProvisionSentinelFile))
+	require.NoError(t, ProvisionShared(stateDirInput(workspace, stateDir, origin, store.SharingModeSharedPlain)))
+	require.FileExists(t, filepath.Join(stateDir, ProvisionSentinelFile))
 
-	for _, mode := range []store.WorkspaceSharingMode{store.SharingModeSharedPlain, store.SharingModeWorktreePerAgent} {
-		t.Run(string(mode), func(t *testing.T) {
-			in := stateDirInput(workspace, stateDir, filepath.Join(t.TempDir(), "missing.git"), mode)
-			if mode == store.SharingModeWorktreePerAgent {
-				in.AgentID = "agent-1"
-				in.AgentName = "agent-1"
-				in.MountedWorktree = true
-			}
-			require.NoError(t, ProvisionShared(in))
-			assert.NoFileExists(t, filepath.Join(stateDir, ProvisionSentinelFile), "no re-provisioning")
-
-			exclude, err := os.ReadFile(filepath.Join(workspace, ".git", "info", "exclude"))
-			require.NoError(t, err)
-			assert.Contains(t, strings.Split(string(exclude), "\n"), "/"+ProvisionSentinelFile)
-			out, err := exec.Command("git", "-C", workspace, "status", "--porcelain", "--ignored=no").CombinedOutput()
-			require.NoError(t, err, string(out))
-			assert.NotContains(t, string(out), ProvisionSentinelFile)
-		})
-	}
-}
-
-// An init container without the state-directory mount (an older runtime)
-// keeps the sentinel in the workspace, and a new clone excludes it from git.
-func TestProvisionShared_SentinelInWorkspace_ExcludedFromGit(t *testing.T) {
-	t.Setenv("SCION_HOST_UID", "")
-	origin := initBareGitRepo(t)
-	workspace := t.TempDir()
-	require.NoError(t, ProvisionShared(ProvisionInput{
-		Resolved:    ResolvedWorkspace{HostPath: workspace, Backend: "nfs"},
-		ProjectID:   "proj-legacy-layout",
-		Mode:        store.SharingModeSharedPlain,
-		SentinelDir: workspace,
-		GitClone:    &api.GitCloneConfig{URL: origin, Branch: "main"},
-	}))
-	exclude, err := os.ReadFile(filepath.Join(workspace, ".git", "info", "exclude"))
-	require.NoError(t, err)
-	assert.Contains(t, strings.Split(string(exclude), "\n"), "/"+ProvisionSentinelFile)
-	out, err := exec.Command("git", "-C", workspace, "status", "--porcelain", "--ignored=no").CombinedOutput()
-	require.NoError(t, err, string(out))
-	assert.Empty(t, strings.TrimSpace(string(out)))
-}
-
-// The legacy lock is taken first: while an older provisioner holds it, the
-// ordered acquisition does not take (or even create) the state-directory
-// lock; once it is released, both are taken.
-func TestAcquireOrderedFileLocks_LegacyFirst(t *testing.T) {
-	workspace, stateDir := stateDirLayout(t)
+	// The simulated old provisioner: its lock in the workspace root, its
+	// sentinel check there too.
 	old, err := acquireFileLock(t.Context(), workspace)
+	require.NoError(t, err, "nothing of the current provisioning holds the workspace-root lock")
+	oldSeesProvisioned := SentinelPresent(workspace)
+	require.NoError(t, old.release())
+	assert.False(t, oldSeesProvisioned, "a pre-state-dir provisioner must see the workspace as unprovisioned")
+}
+
+// A sentinel directory that is the workspace, or inside it, is refused
+// before anything is created or locked: the provisioning bookkeeping is
+// never kept in the workspace root (AC-L8).
+func TestProvisionShared_SentinelDirInWorkspaceRefused(t *testing.T) {
+	origin := initBareGitRepo(t)
+	for _, sub := range []string{"", "provision"} {
+		workspace := filepath.Join(t.TempDir(), "workspace")
+		in := stateDirInput(workspace, filepath.Join(workspace, sub), origin, store.SharingModeSharedPlain)
+		err := ProvisionShared(in)
+		require.ErrorContains(t, err, "outside the workspace")
+		assert.NoDirExists(t, workspace, "nothing is created")
+	}
+}
+
+// The first lock is taken first: while another holder has it, the ordered
+// acquisition (WithWorkspaceProvisionLocks: the project root, then the
+// state directory) does not take (or even create) the second lock; once it
+// is released, both are taken.
+func TestAcquireOrderedFileLocks_FirstFirst(t *testing.T) {
+	workspace, stateDir := stateDirLayout(t)
+	projectRoot := filepath.Dir(workspace)
+	other, err := acquireFileLock(t.Context(), projectRoot)
 	require.NoError(t, err)
 
 	type result struct {
@@ -205,44 +181,46 @@ func TestAcquireOrderedFileLocks_LegacyFirst(t *testing.T) {
 	}
 	done := make(chan result, 1)
 	go func() {
-		h, err := acquireOrderedFileLocks(context.Background(), []string{workspace, stateDir}, 30*time.Second)
+		h, err := acquireOrderedFileLocks(context.Background(), []string{projectRoot, stateDir}, 30*time.Second)
 		done <- result{h, err}
 	}()
 
 	time.Sleep(1500 * time.Millisecond)
 	select {
 	case r := <-done:
-		t.Fatalf("acquired while the legacy lock was held (err=%v)", r.err)
+		t.Fatalf("acquired while the first lock was held (err=%v)", r.err)
 	default:
 	}
-	assert.NoDirExists(t, filepath.Join(stateDir, provisionFileLockName), "the state lock must not be taken before the legacy lock")
+	assert.NoDirExists(t, filepath.Join(stateDir, provisionFileLockName), "the second lock must not be taken before the first")
 
-	require.NoError(t, old.release())
+	require.NoError(t, other.release())
 	r := <-done
 	require.NoError(t, r.err)
-	assert.DirExists(t, filepath.Join(workspace, provisionFileLockName))
+	assert.DirExists(t, filepath.Join(projectRoot, provisionFileLockName))
 	assert.DirExists(t, filepath.Join(stateDir, provisionFileLockName))
 	assert.True(t, r.held.stillOwned())
 	require.NoError(t, r.held.release())
-	assert.NoDirExists(t, filepath.Join(workspace, provisionFileLockName))
+	assert.NoDirExists(t, filepath.Join(projectRoot, provisionFileLockName))
 	assert.NoDirExists(t, filepath.Join(stateDir, provisionFileLockName))
+	assert.NoDirExists(t, filepath.Join(workspace, provisionFileLockName))
 }
 
 // When the second lock cannot be taken, the first one is released again.
 func TestAcquireOrderedFileLocks_ReleasesFirstOnFailure(t *testing.T) {
 	workspace, stateDir := stateDirLayout(t)
+	projectRoot := filepath.Dir(workspace)
 	other, err := acquireFileLock(t.Context(), stateDir)
 	require.NoError(t, err)
 	defer func() { _ = other.release() }()
 
-	_, err = acquireOrderedFileLocks(t.Context(), []string{workspace, stateDir}, 1500*time.Millisecond)
+	_, err = acquireOrderedFileLocks(t.Context(), []string{projectRoot, stateDir}, 1500*time.Millisecond)
 	require.Error(t, err)
-	assert.NoDirExists(t, filepath.Join(workspace, provisionFileLockName), "the legacy lock is released")
+	assert.NoDirExists(t, filepath.Join(projectRoot, provisionFileLockName), "the first lock is released")
 }
 
-// A removal with the state directory takes its lock too: while another
-// holder has the state-directory lock, the removal gives up and leaves the
-// worktree, and releases the legacy lock it took first.
+// A removal takes the state-directory lock, and only that one (AC-L1):
+// while another holder has it, the removal gives up and leaves the
+// worktree, and nothing is created in the workspace root.
 func TestRemoveMountedWorktree_StateDirLock(t *testing.T) {
 	workspace := provisionTwoMountedWorktrees(t)
 	stateDir := ProjectStateDir(workspace)
@@ -257,6 +235,26 @@ func TestRemoveMountedWorktree_StateDirLock(t *testing.T) {
 	require.NoError(t, held.release())
 	require.NoError(t, RemoveMountedWorktree(t.Context(), workspace, stateDir, "agent-1", testLockWait))
 	assert.NoDirExists(t, WorktreePath(workspace, "agent-1"))
+	assert.NoDirExists(t, filepath.Join(workspace, provisionFileLockName))
+}
+
+// An empty stateDir means ProjectStateDir(base): a holder of that lock
+// blocks the removal. A stateDir in the workspace is refused.
+func TestRemoveMountedWorktree_DefaultStateDirAndRefusal(t *testing.T) {
+	workspace := provisionTwoMountedWorktrees(t)
+	held, err := acquireFileLock(t.Context(), ProjectStateDir(workspace))
+	require.NoError(t, err)
+	err = RemoveMountedWorktree(t.Context(), workspace, "", "agent-1", 1500*time.Millisecond)
+	require.Error(t, err)
+	assert.True(t, IsRealWorktreeDir(WorktreePath(workspace, "agent-1"), workspace))
+	require.NoError(t, held.release())
+
+	for _, dir := range []string{workspace, filepath.Join(workspace, "provision")} {
+		err := RemoveMountedWorktree(t.Context(), workspace, dir, "agent-1", testLockWait)
+		require.ErrorContains(t, err, "outside the workspace")
+		assert.True(t, IsRealWorktreeDir(WorktreePath(workspace, "agent-1"), workspace))
+	}
+	assert.NoDirExists(t, filepath.Join(workspace, provisionFileLockName))
 }
 
 // The recursive chown skips the lock artifacts in every lock directory it is
@@ -290,19 +288,17 @@ func TestSentinelPresent(t *testing.T) {
 }
 
 // A state directory that cannot be searched (EACCES) counts as "no
-// sentinel", and the check falls through to the legacy directory.
-func TestSentinelPresent_UnreadableDirFallsBackToLegacy(t *testing.T) {
+// sentinel".
+func TestSentinelPresent_UnreadableDirIsAbsent(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root bypasses directory permissions")
 	}
-	stateDir, legacy := t.TempDir(), t.TempDir()
+	stateDir := t.TempDir()
 	require.NoError(t, writeSentinel(filepath.Join(stateDir, ProvisionSentinelFile)))
 	require.NoError(t, os.Chmod(stateDir, 0))
 	t.Cleanup(func() { _ = os.Chmod(stateDir, 0o755) })
 
-	assert.False(t, SentinelPresent(stateDir, legacy))
-	require.NoError(t, writeSentinel(filepath.Join(legacy, ProvisionSentinelFile)))
-	assert.True(t, SentinelPresent(stateDir, legacy))
+	assert.False(t, SentinelPresent(stateDir))
 }
 
 func TestProjectStateDir(t *testing.T) {
@@ -371,9 +367,10 @@ func TestPrepareStateDir(t *testing.T) {
 	})
 }
 
-// N4: an older pod can write the legacy sentinel back into the workspace
-// root after the state directory has its own; it is still git-excluded.
-func TestProvisionShared_StateDir_RecreatedLegacySentinelExcluded(t *testing.T) {
+// An older pod can still write a sentinel into the workspace root after the
+// state directory has its own. Current code neither reads it nor adds a git
+// exclude for it (AC-L8); the hub's one-shot promotion removes it.
+func TestProvisionShared_StateDir_WorkspaceRootSentinelNotExcluded(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
 	origin := initBareGitRepo(t)
 	workspace, stateDir := stateDirLayout(t)
@@ -384,22 +381,20 @@ func TestProvisionShared_StateDir_RecreatedLegacySentinelExcluded(t *testing.T) 
 	require.NoError(t, ProvisionShared(stateDirInput(workspace, stateDir, origin, store.SharingModeSharedPlain)))
 	exclude, err := os.ReadFile(filepath.Join(workspace, ".git", "info", "exclude"))
 	require.NoError(t, err)
-	assert.Contains(t, strings.Split(string(exclude), "\n"), "/"+ProvisionSentinelFile)
-	out, err := exec.Command("git", "-C", workspace, "status", "--porcelain", "--ignored=no").CombinedOutput()
-	require.NoError(t, err, string(out))
-	assert.Empty(t, strings.TrimSpace(string(out)))
+	assert.NotContains(t, strings.Split(string(exclude), "\n"), "/"+ProvisionSentinelFile)
+	assert.FileExists(t, filepath.Join(workspace, ProvisionSentinelFile), "left for the promotion step")
 }
 
-// SentinelDirs lists what ProvisionShared checks.
+// SentinelDirs lists what ProvisionShared checks: the sentinel directory
+// alone (AC-L7).
 func TestProvisionInput_SentinelDirs(t *testing.T) {
 	ws := "/p/workspace"
 	assert.Equal(t, []string{"/p"}, ProvisionInput{Resolved: ResolvedWorkspace{HostPath: ws}}.SentinelDirs())
-	assert.Equal(t, []string{"/s", ws}, ProvisionInput{Resolved: ResolvedWorkspace{HostPath: ws}, SentinelDir: "/s", LegacyDir: ws}.SentinelDirs())
-	assert.Equal(t, []string{ws}, ProvisionInput{Resolved: ResolvedWorkspace{HostPath: ws}, SentinelDir: ws, LegacyDir: ws}.SentinelDirs())
+	assert.Equal(t, []string{"/s"}, ProvisionInput{Resolved: ResolvedWorkspace{HostPath: ws}, SentinelDir: "/s"}.SentinelDirs())
 }
 
-// N5: the combined lock depends on the first (legacy) lock as well: when it
-// is lost, the combined ctx is cancelled and stillOwned reports false, even
+// N5: the combined lock depends on the first lock as well: when it is
+// lost, the combined ctx is cancelled and stillOwned reports false, even
 // though the second lock is still held.
 func TestAcquireOrderedFileLocks_LosingFirstLockCancels(t *testing.T) {
 	origHeartbeat := provisionLockHeartbeatInterval
@@ -407,24 +402,25 @@ func TestAcquireOrderedFileLocks_LosingFirstLockCancels(t *testing.T) {
 	t.Cleanup(func() { provisionLockHeartbeatInterval = origHeartbeat })
 
 	workspace, stateDir := stateDirLayout(t)
-	held, err := acquireOrderedFileLocks(context.Background(), []string{workspace, stateDir}, 30*time.Second)
+	projectRoot := filepath.Dir(workspace)
+	held, err := acquireOrderedFileLocks(context.Background(), []string{projectRoot, stateDir}, 30*time.Second)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = held.release() })
 	require.True(t, held.stillOwned())
 
-	legacyLock := filepath.Join(workspace, provisionFileLockName)
-	require.NoError(t, os.RemoveAll(legacyLock)) // force-evict the legacy lock
-	_, err = tryCreateFileLock(legacyLock)       // a successor acquires it
+	firstLock := filepath.Join(projectRoot, provisionFileLockName)
+	require.NoError(t, os.RemoveAll(firstLock)) // force-evict the first lock
+	_, err = tryCreateFileLock(firstLock)       // a successor acquires it
 	require.NoError(t, err)
 
 	select {
 	case <-held.ctx.Done():
 	case <-time.After(2 * time.Second):
-		t.Fatal("losing the legacy lock did not cancel the combined ctx")
+		t.Fatal("losing the first lock did not cancel the combined ctx")
 	}
 	assert.False(t, held.stillOwned())
 	assert.DirExists(t, filepath.Join(stateDir, provisionFileLockName), "the second lock is still held")
 	require.NoError(t, held.release())
 	assert.NoDirExists(t, filepath.Join(stateDir, provisionFileLockName))
-	assert.DirExists(t, legacyLock, "the successor's lock is untouched")
+	assert.DirExists(t, firstLock, "the successor's lock is untouched")
 }

@@ -31,6 +31,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/maintenance"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/rebuildpreflight"
 	"github.com/GoogleCloudPlatform/scion/pkg/preflight"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
@@ -65,6 +66,12 @@ func (s *Server) handleAdminMaintenanceOps(w http.ResponseWriter, r *http.Reques
 	// Parse: {key}, {key}/run, {key}/runs, {key}/runs/{runId}
 	parts := strings.SplitN(subPath, "/", 3)
 	key := parts[0]
+
+	// An operation of an experiment that is off does not exist.
+	if !s.maintenanceOperationAvailable(key) {
+		writeError(w, http.StatusNotFound, ErrCodeNotFound, "Operation not found", nil)
+		return
+	}
 
 	if len(parts) == 1 {
 		if r.Method != http.MethodGet {
@@ -331,12 +338,12 @@ func (s *Server) resolveMaintenanceExecutor(key string) (MaintenanceExecutor, er
 	log := s.maintenanceLog
 
 	switch key {
-	case "secret-hub-id-migration":
+	case entadapter.SecretHubIDMigrationKey:
 		backend := s.GetSecretBackend()
 		if backend == nil {
 			return nil, fmt.Errorf("no secret backend configured; cannot run secret migration")
 		}
-		return NewSecretMigrationExecutor(s.store, backend), nil
+		return NewSecretMigrationExecutor(s.store, backend, s.cipher), nil
 	case "applied-config-env-cleanup":
 		return &AppliedConfigEnvCleanupExecutor{
 			Store:         s.store,
@@ -359,6 +366,10 @@ func (s *Server) resolveMaintenanceExecutor(key string) (MaintenanceExecutor, er
 		return &ProjectStorageMigrateExecutor{srv: s}, nil
 	case entadapter.ChatStarReconcileKey:
 		return &ChatStarReconcileExecutor{srv: s}, nil
+	case entadapter.ChatRetentionPreviewKey:
+		return &ChatRetentionPreviewExecutor{srv: s}, nil
+	case entadapter.ChatRetentionRunKey:
+		return &ChatRetentionRunExecutor{srv: s}, nil
 	case "pull-images":
 		log.Debug("Resolved pull-images executor",
 			"runtime_bin", mc.RuntimeBin, "registry", config.RedactImageRegistry(s.maintenanceImageRegistry()),
@@ -489,12 +500,30 @@ func (s *Server) executeOperation(w http.ResponseWriter, r *http.Request, key st
 		defer func() { _ = r.Body.Close() }()
 		_ = json.NewDecoder(r.Body).Decode(&body)
 	}
+	// Check the request as sent, before the parameter parser trims or
+	// drops anything (for example the branch of a Rebuild from git).
+	if _, rej := rebuildpreflight.CheckRunRequest(key, body); rej != nil {
+		log.Debug("Rejected: invalid run request",
+			maintenanceLogAttrs(key, "status", rej.Status, "reason", rej.Message, "user", user.Email())...)
+		code := ErrCodeInvalidRequest
+		if rej.Status == http.StatusConflict {
+			code = ErrCodeConflict
+		}
+		writeError(w, rej.Status, code, rej.Message, nil)
+		return
+	}
 	params := parseMigrationParams(body) // reuse same param parser
 
 	// Operations with a parameter allowlist refuse anything else, whatever
 	// its JSON type, before a run is created.
 	if allowed, ok := operationParamAllowlist[key]; ok {
 		if err := maintenance.CheckAllowedParams(rawRequestParams(body), allowed); err != nil {
+			writeMaintenanceRequestError(w, err)
+			return
+		}
+	}
+	if stringParamOperations[key] {
+		if err := checkStringParams(body); err != nil {
 			writeMaintenanceRequestError(w, err)
 			return
 		}
@@ -507,6 +536,13 @@ func (s *Server) executeOperation(w http.ResponseWriter, r *http.Request, key st
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), nil)
 		return
 	}
+	// An ordinary run has no force grant. No checkpoint writes the run row
+	// yet, so the checkpoint records nothing.
+	if err := wireMaintenanceExecutor(executor, nil, func(map[string]any) error { return nil }); err != nil {
+		log.Error("Failed to prepare executor", maintenanceLogAttrs(key, "error", err)...)
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to prepare the operation", nil)
+		return
+	}
 
 	if v, ok := executor.(maintenance.ParamValidator); ok {
 		if err := v.ValidateParams(params); err != nil {
@@ -514,6 +550,11 @@ func (s *Server) executeOperation(w http.ResponseWriter, r *http.Request, key st
 			writeMaintenanceRequestError(w, err)
 			return
 		}
+	}
+
+	// Executors that record who started them get the caller's user ID.
+	if a, ok := executor.(maintenanceActorSetter); ok {
+		a.setMaintenanceActor(user.ID())
 	}
 
 	// Checks that need a release lookup (cross-channel order, the floor of
@@ -566,6 +607,69 @@ func (s *Server) executeOperation(w http.ResponseWriter, r *http.Request, key st
 		"runId":  runID,
 		"status": "running",
 	})
+}
+
+// wireMaintenanceExecutor hands an executor what its run needs before Run:
+// the force grant, only when the handler built one (an executor that cannot
+// take it is an error, so a forced run never runs unforced), then the
+// checkpoint, to an executor that takes one.
+func wireMaintenanceExecutor(executor MaintenanceExecutor, grant *rebuildpreflight.ForceGrant, checkpoint func(map[string]any) error) error {
+	if grant != nil {
+		fg, ok := executor.(maintenance.ForceGrantee)
+		if !ok {
+			return fmt.Errorf("internal: the %T executor does not take a force grant", executor)
+		}
+		fg.SetForceGrant(grant)
+	}
+	if cp, ok := executor.(maintenance.Checkpointer); ok {
+		cp.SetCheckpoint(checkpoint)
+	}
+	return nil
+}
+
+// reportedRunResult is the executor's RunResult, or nil when it does not
+// report one.
+func reportedRunResult(executor MaintenanceExecutor) map[string]any {
+	if rr, ok := executor.(maintenance.ResultReporter); ok {
+		return rr.RunResult()
+	}
+	return nil
+}
+
+// resultErrorKey marks a run Result the hub could not assemble in full.
+const resultErrorKey = "resultError"
+
+// panicRunResult is the Result of a run whose executor panicked. RunResult
+// is called inside its own recover, so a panic there cannot crash the hub:
+// the Result then keeps only the error, with resultError "internal", and
+// the recovered value is returned for the caller to log.
+func panicRunResult(executor MaintenanceExecutor, errText string) (result map[string]any, resultPanic any) {
+	defer func() {
+		if r := recover(); r != nil {
+			result = map[string]any{rebuildpreflight.ErrorKey: errText, resultErrorKey: "internal"}
+			resultPanic = r
+		}
+	}()
+	return rebuildpreflight.MergeFinal(reportedRunResult(executor), errText), nil
+}
+
+// encodeRunResult is a run Result as stored: "" for none, else its JSON. A
+// Result that cannot be encoded keeps only its error, with resultError
+// "internal", and the encoding error is returned for the caller to log.
+func encodeRunResult(result map[string]any) (string, error) {
+	if result == nil {
+		return "", nil
+	}
+	b, err := json.Marshal(result)
+	if err != nil {
+		fallback := map[string]any{resultErrorKey: "internal"}
+		if errText, ok := result[rebuildpreflight.ErrorKey].(string); ok {
+			fallback[rebuildpreflight.ErrorKey] = errText
+		}
+		// The fallback holds only strings, so it always encodes.
+		b, _ = json.Marshal(fallback)
+	}
+	return string(b), err
 }
 
 // listOperationRuns returns the run history for a given operation key.
@@ -636,6 +740,9 @@ func (s *Server) listMaintenanceOperations(w http.ResponseWriter, r *http.Reques
 	devBinaries := os.Getenv("SCION_DEV_BINARIES") != ""
 	for _, op := range ops {
 		if op.Key == "rebuild-container-binaries" && !devBinaries {
+			continue
+		}
+		if !s.maintenanceOperationAvailable(op.Key) {
 			continue
 		}
 		if op.Category == store.MaintenanceCategoryMigration {

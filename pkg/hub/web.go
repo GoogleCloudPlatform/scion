@@ -26,6 +26,7 @@ import (
 	"io/fs"
 	"log"
 	"log/slog"
+	mathrand "math/rand/v2"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -237,12 +238,19 @@ type WebServerConfig struct {
 	// happens.
 	ProxyDriverTokenAudience string
 	// SSEMaxConnectionAge is the maximum lifetime of an SSE connection before
-	// the server proactively closes it so the client can reconnect cleanly.
-	// Defaults to defaultSSEMaxConnectionAge (3500s) when zero.
+	// the server proactively closes it so the client can reconnect cleanly,
+	// already clamped to the declared platform request timeout
+	// (config.EffectiveSSEMaxAge). Each stream gets a +/-20% jitter on top
+	// (ptone/scion#5230). Defaults to config.SSEDefaultMaxConnectionAge
+	// (10m) when zero or negative.
 	SSEMaxConnectionAge time.Duration
+	// SSEMaxAgeJitter returns the point u in [0, 1) of a stream's maximum
+	// age jitter range (config.JitterLifetime). Nil: math/rand/v2. Tests
+	// pin it.
+	SSEMaxAgeJitter func() float64
 	// SSEHeartbeatInterval is how often the events stream sends a heartbeat
-	// event. Defaults to defaultSSEHeartbeatInterval (30s) when zero or
-	// negative.
+	// event. Defaults to config.SSEDefaultHeartbeatInterval (30s) when zero
+	// or negative.
 	SSEHeartbeatInterval time.Duration
 
 	// PerfTrace turns on performance tracing for the SSE endpoint
@@ -283,6 +291,10 @@ type WebServer struct {
 	hasAssets      bool                        // cached result of asset detection
 	startTime      time.Time
 	log            *slog.Logger // subsystem logger for hub.web
+
+	// contentHostGuard is the mounted hub's content host guard, applied
+	// outermost by buildHandler (SetContentHostGuard), or nil.
+	contentHostGuard func(http.Handler) http.Handler
 
 	// sessionCodecs are sessionStore's codecs, active generation first.
 	sessionCodecs []securecookie.Codec
@@ -2078,19 +2090,25 @@ func (ws *WebServer) tryServeStaticFile(w http.ResponseWriter, r *http.Request) 
 	return true
 }
 
+// sseMaxAge returns the maximum age of one new events stream: the
+// configured age (default config.SSEDefaultMaxConnectionAge) with a
+// per-stream +/-20% jitter, so streams that connected together do not all
+// reconnect together (ptone/scion#5230).
+func (ws *WebServer) sseMaxAge() time.Duration {
+	base := ws.config.SSEMaxConnectionAge
+	if base <= 0 {
+		base = config.SSEDefaultMaxConnectionAge
+	}
+	u := ws.config.SSEMaxAgeJitter
+	if u == nil {
+		u = mathrand.Float64
+	}
+	return config.JitterLifetime(base, 1, u())
+}
+
 // handleSSE serves the Server-Sent Events endpoint. It subscribes to the
 // configured EventPublisher and streams matching events to the browser.
-// defaultSSEMaxConnectionAge is the default maximum lifetime of an SSE
-// connection. Cloud Run hard-kills connections at 3600s (producing
-// FAILED_PRECONDITION / error code 9); closing at 3500s gives the client a
-// clean EOF so it auto-reconnects per the SSE spec.
-const defaultSSEMaxConnectionAge = 3500 * time.Second
-
-// defaultSSEHeartbeatInterval is the default interval between events stream
-// heartbeats. Keep it well below the web client's stale-stream threshold
-// (75s).
-const defaultSSEHeartbeatInterval = 30 * time.Second
-
+//
 // Route: GET /events?sub=<pattern>&sub=<pattern>...
 func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 	if ws.events == nil {
@@ -2157,6 +2175,22 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 		defer logPerfTraceLine(perfTraceLogger(), r, trace.Snapshot, slog.String("sse_stage", "close"))
 	}
 
+	// Membership changes of the caller (an internal per-user subject, never
+	// written to the client) re-run the subject authorization in the loop,
+	// so a stream does not outlive the access it was opened with
+	// (ptone/scion#7494). Only the caller's own subject is subscribed, and
+	// it is subscribed BEFORE the expansion and authorization below: a
+	// membership change published while the stream is being set up is then
+	// queued and re-checked when the loop starts, instead of being missed.
+	// The deferred unsubscribe releases it on every return, refusals
+	// included.
+	streamUserID := ""
+	if su := getWebSessionUser(r.Context()); su != nil {
+		streamUserID = su.UserID
+	}
+	membershipCh, unsubscribeMembership := subscribeMembershipChanged(ws.events, streamUserID)
+	defer unsubscribeMembership()
+
 	// Expand NATS-style wildcards (e.g. project.>) into specific
 	// resource-scoped subjects before authorization. This ensures the
 	// subscription only covers resources the caller can actually access,
@@ -2191,6 +2225,9 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 		})
 		_, _ = w.Write(body)
 		return
+	}
+	if streamAuthorizedHook != nil {
+		streamAuthorizedHook(streamKindWebEvents)
 	}
 
 	// Disable the server's WriteTimeout for this long-lived SSE connection.
@@ -2239,19 +2276,63 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 	// Each tick also re-checks a test identity web session.
 	heartbeatInterval := ws.config.SSEHeartbeatInterval
 	if heartbeatInterval <= 0 {
-		heartbeatInterval = defaultSSEHeartbeatInterval
+		heartbeatInterval = config.SSEDefaultHeartbeatInterval
 	}
 	heartbeat := time.NewTicker(heartbeatInterval)
 	defer heartbeat.Stop()
 
-	// Proactively close before Cloud Run's 3600s hard kill so the client
-	// gets a clean EOF and auto-reconnects per the SSE spec.
-	maxAge := ws.config.SSEMaxConnectionAge
-	if maxAge == 0 {
-		maxAge = defaultSSEMaxConnectionAge
-	}
+	// Close at the stream's jittered maximum age, before the platform's
+	// request timeout, with a reconnect hint so the client reconnects
+	// cleanly (ptone/scion#5230). The age is recorded on the stream.
+	maxAge := ws.sseMaxAge()
+	stream.SetMaxAge(maxAge)
 	reconnectTimer := time.NewTimer(maxAge)
 	defer reconnectTimer.Stop()
+
+	// recheckMembership handles one membership-changed event; it reports
+	// whether the stream must end (closeReason is then set).
+	recheckMembership := func(evt Event, ok bool) bool {
+		if !ok {
+			// The publisher closed the subscription: end the stream as
+			// for the event subscription, so no change can be missed.
+			closeReason = eventstreams.ClosePublisher
+			return true
+		}
+		if !membershipChangedNames(evt, streamUserID) {
+			return false
+		}
+		// Fail closed: a subject the caller may no longer read, or a
+		// re-check that cannot decide, ends the stream with a reconnect
+		// hint, so the client reconnects and is authorized afresh.
+		if !sseStreamStillAuthorized(ws, r, subjects) {
+			n, _ := fmt.Fprintf(w, "event: reconnect\ndata: {}\n\n")
+			flusher.Flush()
+			stream.RecordBytes(n)
+			closeReason = eventstreams.CloseAccessChanged
+			return true
+		}
+		// Still authorized: drop cached per-agent decisions so the message
+		// rules are decided again.
+		viewer = ws.newSSEMessageViewer(r)
+		return false
+	}
+	// drainMembership handles every membership-changed event already
+	// queued, without blocking. The event case runs it before writing, so
+	// a membership change published before an event is re-checked before
+	// that event is written: select picks among ready cases at random, and
+	// would otherwise let the event through first.
+	drainMembership := func() bool {
+		for {
+			select {
+			case evt, ok := <-membershipCh:
+				if recheckMembership(evt, ok) {
+					return true
+				}
+			default:
+				return false
+			}
+		}
+	}
 
 	for {
 		select {
@@ -2259,6 +2340,9 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				// Publisher closed
 				closeReason = eventstreams.ClosePublisher
+				return
+			}
+			if drainMembership() {
 				return
 			}
 			if !viewer.visible(evt) {
@@ -2280,6 +2364,10 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 			stream.RecordEvent(n)
 			if trace != nil {
 				trace.addSSEEvent(time.Since(writeStart))
+			}
+		case evt, ok := <-membershipCh:
+			if recheckMembership(evt, ok) {
+				return
 			}
 		case <-heartbeat.C:
 			if tiSession && !ws.sseTestIdentitySessionStillValid(r) {
@@ -2666,11 +2754,13 @@ func (ws *WebServer) expandProjectWildcard(r *http.Request, tokens []string) []s
 	// List every project, a page at a time, and keep those the caller can
 	// read. Every page is drained (ptone/scion#1741): a single page would
 	// silently drop the projects beyond the store's page cap. Any list
-	// error fails closed for the whole expansion.
+	// error fails closed for the whole expansion. Summaries carry every
+	// authorization input (ID, owner, labels) without the per-project
+	// computed fields, which this expansion never reads.
 	var result []string
 	opts := store.ListOptions{Limit: sseProjectWildcardPageSize, SkipTotalCount: true}
 	for {
-		page, err := ws.store.ListProjects(r.Context(), store.ProjectFilter{}, opts)
+		page, err := ws.store.ListProjectSummaries(r.Context(), store.ProjectFilter{}, opts)
 		if err != nil {
 			ws.logger().Warn("expandProjectWildcard: failed to list projects", "error", err)
 			return nil // fail-closed
@@ -2876,6 +2966,10 @@ func (ws *WebServer) authorizeSSESubjects(r *http.Request, subjects []string) []
 			if len(tokens) != 3 || tokens[1] != "images" || isNATSWildcard(tokens[2]) {
 				denied = append(denied, sub)
 			}
+		case "hub":
+			// Internal hub events (membershipChangedSubject): never a client
+			// subscription.
+			denied = append(denied, sub)
 		case "admin":
 			// Admin-only namespace. No web client subscribes to this today.
 			if sessionUser.Role != "admin" {
@@ -4399,14 +4493,54 @@ func (ws *WebServer) buildHandler() http.Handler {
 	// Security headers
 	handler = ws.securityHeadersMiddleware(handler)
 
-	// Request logging (outermost)
+	// Request logging
 	if ws.requestLogger != nil {
 		handler = logging.RequestLogMiddleware(ws.requestLogger, "web", nil, ws.config.SlowRequestThreshold)(handler)
 	} else {
 		handler = ws.loggingMiddleware(handler)
 	}
 
+	// Outermost: the mounted hub's content host guard, so a request on
+	// server.hub.content_url reaches neither the web app nor the session
+	// bridge unless it is a share or view read, and never with a
+	// credential. It comes from SetContentHostGuard, or else from the access
+	// settings provider when that is the hub (contentHostGuardSource), so a
+	// combined server that wires the hub as its provider cannot leave it out.
+	if guard := ws.contentHostGuardFor(); guard != nil {
+		handler = guard(handler)
+	}
+
 	return handler
+}
+
+// errContentHostGuardMissing refuses to start a web server that mounts the
+// hub API without the hub's content host guard.
+var errContentHostGuardMissing = errors.New("web server: the hub API is mounted but no content host guard is set (set the hub as the access settings provider, or SetContentHostGuard)")
+
+// contentHostGuardSource is implemented by the hub Server: its content host
+// guard.
+type contentHostGuardSource interface {
+	ContentHostGuard(http.Handler) http.Handler
+}
+
+// contentHostGuardFor returns the guard buildHandler applies outermost: the
+// one SetContentHostGuard set, else the access settings provider's when it
+// is a contentHostGuardSource (the hub), else nil.
+func (ws *WebServer) contentHostGuardFor() func(http.Handler) http.Handler {
+	if ws.contentHostGuard != nil {
+		return ws.contentHostGuard
+	}
+	if src, ok := ws.accessSettings.(contentHostGuardSource); ok {
+		return src.ContentHostGuard
+	}
+	return nil
+}
+
+// SetContentHostGuard sets the middleware buildHandler applies outermost,
+// overriding the access settings provider's (contentHostGuardFor). Call it
+// before Start.
+func (ws *WebServer) SetContentHostGuard(guard func(http.Handler) http.Handler) {
+	ws.contentHostGuard = guard
 }
 
 // Start starts the web frontend HTTP server.
@@ -4416,6 +4550,12 @@ func (ws *WebServer) buildHandler() http.Handler {
 // long-lived SSE streams. When deployed behind a TLS-terminating reverse
 // proxy (e.g. Caddy), the proxy negotiates HTTP/2 with the browser natively.
 func (ws *WebServer) Start(ctx context.Context) error {
+	// A mounted hub API is served only behind the hub's content host guard
+	// (contentHostGuardFor): fail closed rather than serve the web app and
+	// the session bridge unguarded.
+	if ws.hubHandler != nil && ws.contentHostGuardFor() == nil {
+		return errContentHostGuardMissing
+	}
 	handler := ws.buildHandler()
 
 	// Wrap the handler with h2c to support HTTP/2 cleartext upgrades.

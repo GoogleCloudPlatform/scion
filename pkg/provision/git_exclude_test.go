@@ -109,15 +109,3 @@ func TestAppendGitExclude_RefusesNonRegularExclude(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Join(ws2, ".git", "info", "exclude"), 0o755))
 	require.Error(t, appendGitExclude(ws2, "/x"))
 }
-
-// excludeLegacySentinel, reached from the root init container, does not
-// write through a symlinked .git/info either.
-func TestExcludeLegacySentinel_DoesNotFollowSymlinks(t *testing.T) {
-	ws, target := t.TempDir(), t.TempDir()
-	require.NoError(t, os.Mkdir(filepath.Join(ws, ".git"), 0o755))
-	require.NoError(t, os.Symlink(target, filepath.Join(ws, ".git", "info")))
-	require.NoError(t, writeSentinel(filepath.Join(ws, ProvisionSentinelFile)))
-
-	excludeLegacySentinel(ProvisionInput{Resolved: ResolvedWorkspace{HostPath: ws}, LegacyDir: ws})
-	assert.NoFileExists(t, filepath.Join(target, "exclude"))
-}

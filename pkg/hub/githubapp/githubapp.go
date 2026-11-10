@@ -81,11 +81,19 @@ type InstallationToken struct {
 }
 
 // TokenMintError classifies GitHub API errors during token minting.
+//
+// Message is fixed text for the error code: it never carries text received
+// from GitHub, so it is safe to return to API callers and to store as a
+// project status. GitHub's own text (its "message" field, an error body, or
+// a transport error) is kept apart and read through UpstreamDetail, for the
+// hub to log once, capped and sanitised (ptone/scion#7498).
 type TokenMintError struct {
 	ErrorCode  string // One of the error codes below
 	StatusCode int    // HTTP status from GitHub API
-	Message    string // Human-readable error message
+	Message    string // Fixed, human-readable error message (no upstream text)
 	Err        error  // Underlying error
+
+	upstream string // text received from GitHub or the transport; see UpstreamDetail
 }
 
 func (e *TokenMintError) Error() string {
@@ -95,6 +103,19 @@ func (e *TokenMintError) Error() string {
 func (e *TokenMintError) Unwrap() error {
 	return e.Err
 }
+
+// UpstreamDetail returns the text GitHub or the transport sent with the
+// failure, unrendered. It is for the server log only: callers render it
+// (the hub's upstreamText) and never return it to a client, store it, or use
+// it as a metrics label.
+func (e *TokenMintError) UpstreamDetail() string {
+	return e.upstream
+}
+
+// upstreamBodyReadLimit bounds how much of a GitHub API response body this
+// package reads. It equals the hub's upstreamErrorBodyReadLimit
+// (pkg/hub/upstream_text.go); keep the two in step.
+const upstreamBodyReadLimit = 4 << 10
 
 // Error codes for token minting failures.
 const (
@@ -331,6 +352,16 @@ func (c *Client) MintInstallationToken(ctx context.Context, installationID int64
 		permMap["actions"] = perms.Actions
 	}
 
+	// A request without permissions gets every permission the installation
+	// has. Callers always name the permissions they need; refuse rather
+	// than send an empty set.
+	if len(permMap) == 0 {
+		return nil, &TokenMintError{
+			ErrorCode: ErrCodeTokenMintFailed,
+			Message:   "refusing to request an installation token without explicit permissions",
+		}
+	}
+
 	reqBody := accessTokenRequest{
 		Repositories: repos,
 		Permissions:  permMap,
@@ -356,13 +387,14 @@ func (c *Client) MintInstallationToken(ctx context.Context, installationID int64
 	if err != nil {
 		return nil, &TokenMintError{
 			ErrorCode: ErrCodeTokenMintFailed,
-			Message:   fmt.Sprintf("HTTP request failed: %v", err),
+			Message:   "GitHub API request failed",
 			Err:       err,
+			upstream:  err.Error(),
 		}
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, upstreamBodyReadLimit))
 	if err != nil {
 		return nil, &TokenMintError{
 			ErrorCode: ErrCodeTokenMintFailed,
@@ -400,77 +432,54 @@ func (c *Client) MintInstallationToken(ctx context.Context, installationID int64
 }
 
 // classifyGitHubError maps a GitHub API error response to a TokenMintError with
-// an appropriate error code.
+// an appropriate error code. GitHub's "message" field only chooses the code;
+// the returned Message is fixed text for that code, and GitHub's text (the
+// field, or the body when the field is absent) is kept for UpstreamDetail.
 func classifyGitHubError(statusCode int, body []byte) *TokenMintError {
 	var ghErr githubErrorResponse
 	_ = json.Unmarshal(body, &ghErr) // best effort
 
-	msg := ghErr.Message
-	if msg == "" {
-		msg = fmt.Sprintf("GitHub API returned status %d", statusCode)
+	detail := ghErr.Message
+	if detail == "" {
+		detail = string(body)
+	}
+	lower := strings.ToLower(ghErr.Message)
+	mintErr := func(code, message string) *TokenMintError {
+		return &TokenMintError{ErrorCode: code, StatusCode: statusCode, Message: message, upstream: detail}
 	}
 
 	switch statusCode {
 	case http.StatusUnauthorized:
 		// 401: JWT is invalid (bad app ID, expired key, etc.)
-		if strings.Contains(strings.ToLower(msg), "app not found") ||
-			strings.Contains(strings.ToLower(msg), "integration not found") {
-			return &TokenMintError{
-				ErrorCode:  ErrCodeAppNotFound,
-				StatusCode: statusCode,
-				Message:    fmt.Sprintf("GitHub App not found — verify the App ID in Admin > Server Config > GitHub App. GitHub says: %s", msg),
-			}
+		if strings.Contains(lower, "app not found") || strings.Contains(lower, "integration not found") {
+			return mintErr(ErrCodeAppNotFound,
+				"GitHub App not found — verify the App ID in Admin > Server Config > GitHub App.")
 		}
-		return &TokenMintError{
-			ErrorCode:  ErrCodePrivateKeyInvalid,
-			StatusCode: statusCode,
-			Message:    fmt.Sprintf("GitHub rejected the JWT — the private key likely doesn't match the App. Regenerate the key in GitHub App settings and re-upload it in Admin > Server Config. GitHub says: %s", msg),
-		}
+		return mintErr(ErrCodePrivateKeyInvalid,
+			"GitHub rejected the JWT — the private key likely doesn't match the App. Regenerate the key in GitHub App settings and re-upload it in Admin > Server Config.")
 
 	case http.StatusForbidden:
 		// 403: Installation suspended or permission issue
-		if strings.Contains(strings.ToLower(msg), "suspended") {
-			return &TokenMintError{
-				ErrorCode:  ErrCodeInstallationSuspended,
-				StatusCode: statusCode,
-				Message:    fmt.Sprintf("Installation is suspended: %s", msg),
-			}
+		if strings.Contains(lower, "suspended") {
+			return mintErr(ErrCodeInstallationSuspended, "The GitHub App installation is suspended.")
 		}
-		return &TokenMintError{
-			ErrorCode:  ErrCodePermissionDenied,
-			StatusCode: statusCode,
-			Message:    fmt.Sprintf("Permission denied: %s", msg),
-		}
+		return mintErr(ErrCodePermissionDenied, "GitHub denied the GitHub App permission for this request.")
 
 	case http.StatusNotFound:
 		// 404: Installation doesn't exist (revoked/deleted)
-		return &TokenMintError{
-			ErrorCode:  ErrCodeInstallationRevoked,
-			StatusCode: statusCode,
-			Message:    fmt.Sprintf("Installation not found (may have been revoked): %s", msg),
-		}
+		return mintErr(ErrCodeInstallationRevoked,
+			"The GitHub App installation was not found; it may have been revoked.")
 
 	case http.StatusUnprocessableEntity:
 		// 422: Typically repo not accessible or invalid permissions
-		if strings.Contains(strings.ToLower(msg), "repository") {
-			return &TokenMintError{
-				ErrorCode:  ErrCodeRepoNotAccessible,
-				StatusCode: statusCode,
-				Message:    fmt.Sprintf("Repository not accessible: %s", msg),
-			}
+		if strings.Contains(lower, "repository") {
+			return mintErr(ErrCodeRepoNotAccessible,
+				"The repository is not accessible to the GitHub App installation.")
 		}
-		return &TokenMintError{
-			ErrorCode:  ErrCodePermissionDenied,
-			StatusCode: statusCode,
-			Message:    fmt.Sprintf("Invalid request: %s", msg),
-		}
+		return mintErr(ErrCodePermissionDenied, "GitHub rejected the token request as invalid.")
 
 	default:
-		return &TokenMintError{
-			ErrorCode:  ErrCodeTokenMintFailed,
-			StatusCode: statusCode,
-			Message:    fmt.Sprintf("GitHub API error (status %d): %s", statusCode, msg),
-		}
+		return mintErr(ErrCodeTokenMintFailed, fmt.Sprintf("GitHub API error (status %d).", statusCode))
 	}
 }
 
@@ -518,7 +527,7 @@ func (c *Client) GetInstallation(ctx context.Context, installationID int64) (*In
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, upstreamBodyReadLimit))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
@@ -563,7 +572,7 @@ func (c *Client) ListInstallations(ctx context.Context) ([]Installation, error) 
 			return nil, fmt.Errorf("HTTP request failed: %w", err)
 		}
 
-		body, err := io.ReadAll(resp.Body)
+		body, err := io.ReadAll(io.LimitReader(resp.Body, upstreamBodyReadLimit))
 		_ = resp.Body.Close()
 		if err != nil {
 			return nil, fmt.Errorf("failed to read response: %w", err)
@@ -619,7 +628,7 @@ func (c *Client) ListInstallationRepos(ctx context.Context, installationID int64
 			return nil, fmt.Errorf("HTTP request failed: %w", err)
 		}
 
-		body, err := io.ReadAll(resp.Body)
+		body, err := io.ReadAll(io.LimitReader(resp.Body, upstreamBodyReadLimit))
 		_ = resp.Body.Close()
 		if err != nil {
 			return nil, fmt.Errorf("failed to read response: %w", err)
@@ -628,7 +637,8 @@ func (c *Client) ListInstallationRepos(ctx context.Context, installationID int64
 		c.trackRateLimit(resp)
 
 		if resp.StatusCode != http.StatusOK {
-			return nil, fmt.Errorf("failed to list repos (status %d): %s", resp.StatusCode, string(body))
+			// GitHub's body is not part of the error (ptone/scion#7498).
+			return nil, fmt.Errorf("failed to list repos (status %d)", resp.StatusCode)
 		}
 
 		var result struct {

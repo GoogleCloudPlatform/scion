@@ -150,26 +150,36 @@ func TestPassthroughTranslation_Patch_ProbeFailure502(t *testing.T) {
 	assert.Equal(t, store.GCPMetadataModeBlock, mustGetAgent(t, f.store, id).AppliedConfig.GCPIdentity.MetadataMode)
 }
 
-func TestPassthroughTranslation_Scheduled_RecordConflictFailsDispatch(t *testing.T) {
-	f := setupPTE(t, "pte-sched-409", nil)
-	hsrSeed(t, f.store, "pte-sched-409-proj", store.ScopeProject, tid("pte-other-project"), tid("someone"), false)
+// TestPassthroughTranslation_Scheduled_ProjectDefaultNotAppliedOnSandbox: a
+// project-default passthrough is confined like the hub default (embedded
+// broker, local container runtime), so on this remote cloudrun-sandbox
+// broker it is never applied and never reaches translation. A conflicting
+// record or a failing probe, which would fail a translation, cannot fail the
+// dispatch; the identity is left unset.
+func TestPassthroughTranslation_Scheduled_ProjectDefaultNotAppliedOnSandbox(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		verifyErr error
+		conflict  bool
+	}{
+		{name: "pte-sched-409", conflict: true},
+		{name: "pte-sched-502", verifyErr: errors.New("permission denied")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := setupPTE(t, tc.name, tc.verifyErr)
+			if tc.conflict {
+				hsrSeed(t, f.store, tc.name+"-proj", store.ScopeProject, tid("pte-other-project"), tid("someone"), false)
+			}
 
-	err := f.dispatchDefault(t, "pte-sched-409-agent")
+			require.NoError(t, f.dispatchDefault(t, tc.name+"-agent"))
 
-	require.Error(t, err)
-	assert.ErrorIs(t, err, errHostSARecordConflict)
-	_, getErr := f.store.GetAgentBySlug(context.Background(), f.project.ID, "pte-sched-409-agent")
-	assert.ErrorIs(t, getErr, store.ErrNotFound)
-}
-
-func TestPassthroughTranslation_Scheduled_ProbeFailureFailsDispatch(t *testing.T) {
-	f := setupPTE(t, "pte-sched-502", errors.New("permission denied"))
-
-	err := f.dispatchDefault(t, "pte-sched-502-agent")
-
-	require.Error(t, err)
-	assert.ErrorIs(t, err, errHostSARecordUnverifiable)
-	assert.Empty(t, hsrHubRecords(t, f.store))
+			got, err := f.store.GetAgentBySlug(context.Background(), f.project.ID, tc.name+"-agent")
+			require.NoError(t, err)
+			require.NotNil(t, got.AppliedConfig)
+			assert.Nil(t, got.AppliedConfig.GCPIdentity)
+			assert.Empty(t, hsrHubRecords(t, f.store))
+		})
+	}
 }
 
 // TestPassthroughTranslation_UnverifiedOwnRecord_Create400: a reused

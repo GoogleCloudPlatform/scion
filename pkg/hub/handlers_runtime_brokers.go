@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -29,7 +30,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
-	"github.com/GoogleCloudPlatform/scion/pkg/hub/eventstreams"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	scionruntime "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -284,6 +284,12 @@ func (s *Server) handleRuntimeBrokerRoutes(w http.ResponseWriter, r *http.Reques
 	// row and gives a clean per-key authorization point (design.md §5.4).
 	if subPath == "settings" {
 		s.handleBrokerSettings(w, r, brokerID)
+		return
+	}
+
+	// The legacy Runtime Broker's conversion plan (read-only).
+	if subPath == "conversion-plan" {
+		s.handleBrokerConversionPlan(w, r, brokerID)
 		return
 	}
 
@@ -931,6 +937,13 @@ type brokerHeartbeatRequest struct {
 	PresentationTargetID      string                         `json:"presentationTargetId,omitempty"`
 	PresentationEpoch         int64                          `json:"presentationEpoch,omitempty"`
 	PresentationSeq           int64                          `json:"presentationSeq,omitempty"`
+	// ConversionPlanPresentation is a legacy broker's conversion plan
+	// snapshot (see hubclient.BrokerHeartbeat.ConversionPlanPresentation),
+	// kept as the bytes received so its size cap is checked before any
+	// decode. It is stored only when the request identity is the broker
+	// itself (ApplyConversionPlan). Omitted by an older broker or a flat
+	// one, in which case the stored value is left unchanged.
+	ConversionPlanPresentation json.RawMessage `json:"conversionPlanPresentation,omitempty"`
 }
 
 // brokerStartInFlight mirrors hubclient.StartInFlight.
@@ -983,6 +996,8 @@ type brokerProfileSAMappings struct {
 	IncompleteReason       string                         `json:"incompleteReason,omitempty"`
 	AmbiguousGSAs          []string                       `json:"ambiguousGSAs,omitempty"`
 	ReportVersion          int                            `json:"reportVersion,omitempty"`
+	CloudRunNativeIdentity bool                           `json:"cloudRunNativeIdentity,omitempty"`
+	CloudRunBlockAccount   bool                           `json:"cloudRunBlockAccount,omitempty"`
 }
 
 // brokerProfileSAMappingsHash is one profile's report hash in a heartbeat
@@ -1018,7 +1033,8 @@ const profileSAReportConfirmInterval = 5 * time.Minute
 //     profileSAReportConfirmInterval. A hash that does not match (or no
 //     stored hash) leaves the stored report as is, to age, and asks for the
 //     full report.
-//   - The reports and hashes name every Kubernetes profile of the broker,
+//   - The reports and hashes name every Kubernetes and (from report
+//     version 3) Cloud Run profile of the broker,
 //     so a stored profile named in neither (for example one switched from
 //     Kubernetes to docker) has its report cleared.
 //
@@ -1070,6 +1086,8 @@ func applyProfileSAMappings(profiles []store.BrokerProfile, reported []brokerPro
 			}
 			p.MappingsHash = hash
 			p.MappingsReportVersion = r.ReportVersion
+			p.CloudRunNativeIdentity = r.CloudRunNativeIdentity
+			p.CloudRunBlockAccount = r.CloudRunBlockAccount
 			p.MappingsReportedAt = timePtr(now)
 			changed = true
 		case inHashes:
@@ -1099,6 +1117,8 @@ func profileSAReportEqual(p *store.BrokerProfile, r brokerProfileSAMappings, has
 		p.MappingsComplete == r.Complete &&
 		p.MappingsIncompleteReason == reason &&
 		p.MappingsReportVersion == r.ReportVersion &&
+		p.CloudRunNativeIdentity == r.CloudRunNativeIdentity &&
+		p.CloudRunBlockAccount == r.CloudRunBlockAccount &&
 		slices.Equal(p.ServiceAccountMappings, r.ServiceAccountMappings) &&
 		slices.Equal(p.AmbiguousGSAs, r.AmbiguousGSAs)
 }
@@ -1113,6 +1133,8 @@ func clearProfileSAReport(p *store.BrokerProfile) {
 	p.MappingsHash = ""
 	p.MappingsReportedAt = nil
 	p.MappingsReportVersion = 0
+	p.CloudRunNativeIdentity = false
+	p.CloudRunBlockAccount = false
 }
 
 // timePtr returns a pointer to a copy of t.
@@ -1440,6 +1462,19 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 	} else if _, err := s.ApplyRuntimeTargetPresentation(ctx, id, heartbeat.PresentationTargetID,
 		heartbeat.RuntimeTargetPresentation, heartbeat.PresentationEpoch, heartbeat.PresentationSeq, time.Now()); err != nil {
 		s.agentLifecycleLog.Warn("heartbeat: failed to store runtime target presentation",
+			"broker_id", id, "error", err)
+	}
+
+	// A legacy broker's conversion plan is stored on the same rule: only
+	// from the broker's own credentials. Caps, the experiment, the schema
+	// version and the legacy-row check are ApplyConversionPlan's.
+	if !brokerSelf {
+		if len(heartbeat.ConversionPlanPresentation) > 0 {
+			s.agentLifecycleLog.Warn("heartbeat: ignoring conversionPlanPresentation sent with a request identity other than the broker itself",
+				"broker_id", id)
+		}
+	} else if _, err := s.ApplyConversionPlan(ctx, id, heartbeat.ConversionPlanPresentation, time.Now()); err != nil {
+		s.agentLifecycleLog.Warn("heartbeat: failed to store the conversion plan",
 			"broker_id", id, "error", err)
 	}
 
@@ -1841,6 +1876,22 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 				}
 			}
 
+			// A heartbeat whose phase change is held (the agent is in a
+			// terminal phase or suspended) must not store a container
+			// status that reports a live container either: the list would
+			// show phase stopped next to containerStatus running
+			// (ptone/scion#3607). A heartbeat confirming the held phase, or
+			// reporting an exited container, still updates it. With run
+			// intent running a start is under way, so the live container
+			// is the intended one and its status applies (it also replaces
+			// a stale stop_queued). Only the stored status is held: the
+			// heartbeat's observation (report.observed above) still records
+			// a live container, so an agent whose stop did not take effect
+			// is stopped again by stopAgentsRunningWithIntentStopped.
+			if heartbeatContainerStatusHeld(heartbeatAgentHeld(agent), agentHB.Phase, agentHB.ContainerStatus) {
+				statusUpdate.ContainerStatus = ""
+			}
+
 			// If the broker didn't send a ContainerStatus but we have structured
 			// fields, render a display string for backward-compatible clients.
 			if statusUpdate.ContainerStatus == "" && agentHB.ContainerStatus == "" {
@@ -1922,6 +1973,16 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 			if s.heartbeatPhaseGuarded(agent, statusUpdate.Phase) {
 				statusUpdate.Phase = ""
 			}
+			// Restart window: before a restart has recorded its new run, a
+			// report of the current run (or of none) comes from the run
+			// being replaced. The store drops its status fields on the
+			// locked row; this mirror drops them before the reservation
+			// reconcile below as well, as defence in depth. The reconcile
+			// does not depend on it: a heartbeat cannot move a stopped,
+			// error, halted or suspended row to a counted phase, and the
+			// releases it calls refuse a row that holds a restart claim
+			// (NoStartKindClaim).
+			guardRestartWindowReport(agent, &statusUpdate, statusUpdate)
 
 			// Reconcile the max_agents_per_broker reservation against the
 			// phase this heartbeat will actually persist — e.g. release on an
@@ -1946,10 +2007,35 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 				// Publish SSE event so the frontend receives activity updates.
 				// A row soft-deleted between the slug lookup and this re-read
 				// (a delete finishing concurrently) publishes nothing.
-				// Counted as trigger=heartbeat (ptone/scion#5228); the
-				// publish itself is unchanged.
+				// Only a write that changed a field subscribers see publishes
+				// (ptone/scion#5233): a heartbeat that only bumped last_seen
+				// is silent, and one that carries a real change (a phase,
+				// activity, exit or message) publishes as trigger=change.
+				//
+				// The comparison is against agent, the row read before this
+				// write, not against what clients last received. Two limits
+				// follow. (1) Lost update window: if another writer changed
+				// the row (and published) between that read and this write,
+				// and this write puts the visible fields back to the values
+				// read, the comparison sees no change and clients keep the
+				// other writer's value until the next real change, a resync
+				// or the agent list's own refresh. (2) agent was mutated in
+				// place above by three writers: the AppliedConfig backfill of
+				// HarnessAuth and Profile; store.ApplyBrokerAgentConfig
+				// (Template, Runtime, and AppliedConfig HarnessConfig,
+				// HarnessAuth, HarnessConfigSource, Image and Profile); and
+				// recordHeartbeatRuntimeTarget (AppliedConfig RuntimeTarget and
+				// RuntimeTargetCandidate; it may also create a nil
+				// AppliedConfig). None of those fields is in the status event
+				// or feeds its badges (agentEventBadges reads AppliedConfig
+				// Harness, InlineConfig and ModelSize), so the mutation does
+				// not affect the comparison.
+				// TestAgentStatusEventIgnoresHeartbeatConfigWrites fails if
+				// that stops being true.
 				if updated, err := s.store.GetAgent(ctx, agent.ID); err == nil && updated.DeletedAt.IsZero() {
-					s.events.PublishAgentStatus(eventstreams.WithHeartbeatTrigger(ctx), updated)
+					if agentStatusVisiblyChanged(agent, updated) {
+						s.events.PublishAgentStatus(ctx, updated)
+					}
 					if statusResult.Halted {
 						s.onAgentHalted(ctx, updated, statusResult.HaltedFrom)
 					}
@@ -2152,6 +2238,32 @@ func (s *Server) getBrokerProjects(w http.ResponseWriter, r *http.Request, broke
 // isValidExitReason reports whether reason is a valid ExitReason value.
 func isValidExitReason(reason string) bool {
 	return state.ExitReason(reason).IsValid()
+}
+
+// heartbeatAgentHeld reports whether a heartbeat may not store a live
+// container status for agent: its phase is at rest (store.PhaseAtRest) and
+// no start is under way (run intent is not running).
+func heartbeatAgentHeld(agent *store.Agent) bool {
+	return store.PhaseAtRest(agent.Phase) && agent.RunIntent != store.RunIntentRunning
+}
+
+// heartbeatContainerStatusHeld reports whether a heartbeat's container
+// status must not be stored. agentHeld is heartbeatAgentHeld. The status is
+// held when the heartbeat reports a live container: a structured phase that
+// is not at rest (store.PhaseAtRest) or, from an older broker without a
+// structured phase, a running container status.
+func heartbeatContainerStatusHeld(agentHeld bool, hbPhase, hbContainerStatus string) bool {
+	if !agentHeld {
+		return false
+	}
+	if hbPhase != "" {
+		return !store.PhaseAtRest(hbPhase)
+	}
+	// Only a confirmed live container is held: "Up ..." or "running". A
+	// "Restarting (...)" status is deliberately not held: the container is
+	// cycling rather than confirmed live, and the status records that.
+	cs := strings.ToLower(hbContainerStatus)
+	return strings.HasPrefix(cs, "up") || cs == "running"
 }
 
 // isGenericStopMessage reports whether msg is one of the stored agent.Message

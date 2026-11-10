@@ -98,7 +98,8 @@ capabilities:
 
 no_auth:
   behavior: drop-to-shell
-  command: copilot login
+  # No automatic sign-in: the agent starts a shell with the instructions
+  # below. no-auth-env.yaml sets the env for this mode.
   message: |
     This agent started without credentials.
     Run: copilot login

@@ -71,6 +71,10 @@ type ConduitRelayOptions struct {
 	// testHookAdmission, when set, runs during admission (before the
 	// session is registered). Tests only.
 	testHookAdmission func()
+	// testHookRevalidated, when set, runs each time a newly registered
+	// session's revalidation (conduitRevalidatePrincipal) has returned,
+	// whatever its result. Tests only.
+	testHookRevalidated func()
 	// sessionWriteWait, when positive, is the per-write deadline of every
 	// relay session (conduit.Config.WriteWait; 0 = conduit.DefaultWriteWait).
 	// It runs on Clock, so tests that advance a fake Clock set it above
@@ -98,6 +102,9 @@ type ConduitRelayOptions struct {
 	// deadline ends by it (server.hub.conduit.lifetime_cap; 0 = the
 	// default, 3500s).
 	LifetimeCap time.Duration
+	// JitterLifetimeCap is relay.Config.JitterLifetimeCap: the
+	// per-session jitter of LifetimeCap (nil: none; ptone/scion#5245).
+	JitterLifetimeCap func(time.Duration) time.Duration
 	// AuthzRecheckInterval overrides ServerConfig.ConduitAuthzRecheckInterval
 	// (0 = use it; negative disables the sweep, for tests).
 	AuthzRecheckInterval time.Duration
@@ -220,6 +227,14 @@ func (s *Server) StartConduitRelay(ctx context.Context, opts ConduitRelayOptions
 			return s.conduitWelcomeGrantKeys(ctx)
 		}
 	}
+	revalidate := s.conduitRevalidatePrincipal
+	if h := opts.testHookRevalidated; h != nil {
+		revalidate = func(ctx context.Context, p relay.Principal) error {
+			err := s.conduitRevalidatePrincipal(ctx, p)
+			h()
+			return err
+		}
+	}
 	lifetimeCap := opts.LifetimeCap
 	if lifetimeCap == 0 {
 		lifetimeCap = config.ConduitDefaultLifetimeCap
@@ -243,7 +258,7 @@ func (s *Server) StartConduitRelay(ctx context.Context, opts ConduitRelayOptions
 		Registry:         reg,
 		Store:            st,
 		GrantKeys:        grantKeys,
-		Revalidate:       s.conduitRevalidatePrincipal,
+		Revalidate:       revalidate,
 		Refresh:          s.conduitAgentRefresh,
 		PeerAuth:         opts.PeerAuth,
 		HTTPClient:       relayHTTPClient,
@@ -252,6 +267,8 @@ func (s *Server) StartConduitRelay(ctx context.Context, opts ConduitRelayOptions
 		Session:          conduit.Config{WriteWait: opts.sessionWriteWait},
 		ReconnectWindow:  opts.ReconnectWindow,
 		LifetimeCap:      lifetimeCap,
+		// Per-session jitter of the cap (ptone/scion#5245).
+		JitterLifetimeCap: opts.JitterLifetimeCap,
 		OnBrokerSessionsSuperseded: func(brokerID string, closed int) {
 			s.recordBrokerSessionsSuperseded(brokerID, brokerSupersededAtAdmission, closed)
 		},

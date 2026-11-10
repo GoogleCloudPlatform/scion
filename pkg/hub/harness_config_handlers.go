@@ -292,6 +292,9 @@ func (s *Server) createHarnessConfig(w http.ResponseWriter, r *http.Request) {
 		ValidationError(w, "name is required", nil)
 		return
 	}
+	if refuseNonComponentResourceName(w, req.Name) {
+		return
+	}
 	if req.Harness == "" {
 		ValidationError(w, "harness is required", nil)
 		return
@@ -635,6 +638,9 @@ func (s *Server) updateHarnessConfig(w http.ResponseWriter, r *http.Request, exi
 		BadRequest(w, "Invalid request body: "+err.Error())
 		return
 	}
+	if refuseNonComponentResourceName(w, req.Name) {
+		return
+	}
 
 	// A PUT replaces only the metadata. Everything else keeps its stored
 	// value: identity, scope and ownership, the files and what is derived
@@ -794,7 +800,8 @@ func (s *Server) handleHarnessConfigUpload(w http.ResponseWriter, r *http.Reques
 		if writeInvalidFilePathError(w, err) {
 			return
 		}
-		RuntimeError(w, "Failed to generate upload URLs: "+err.Error())
+		slog.ErrorContext(ctx, "harness-config upload URLs failed", "harness_config_id", hc.ID, "error", upstreamText(err.Error()))
+		RuntimeError(w, "Failed to generate upload URLs")
 		return
 	}
 	if len(uploadURLs) == 0 && len(req.Files) > 0 {
@@ -941,7 +948,7 @@ func (s *Server) handleHarnessConfigCheckImage(w http.ResponseWriter, r *http.Re
 	}
 
 	registry := s.resolveImageRegistry()
-	resolvedImage := config.RewriteImageRegistry(image, registry)
+	image, resolvedImage := s.hubScopeImageRefs(image, registry)
 	slog.Info("checking image status", "id", hc.ID, "image", image,
 		"resolved", config.RedactImageRegistry(resolvedImage), "registry", config.RedactImageRegistry(registry))
 
@@ -1102,7 +1109,8 @@ func (s *Server) handleHarnessConfigDownload(w http.ResponseWriter, r *http.Requ
 	// lands while the client downloads.
 	downloadURLs, manifestURL, expires, err := s.generateHarnessConfigDownloadURLs(ctx, stor, hc)
 	if err != nil {
-		RuntimeError(w, fmt.Sprintf("harness-config %q: %s — run 'scion harness-config validate %s' to diagnose", hc.Name, err, hc.Name))
+		slog.ErrorContext(ctx, "harness-config download URLs failed", "harness_config_id", hc.ID, "error", upstreamText(err.Error()))
+		RuntimeError(w, fmt.Sprintf("harness-config %q: failed to generate download URLs — run 'scion harness-config validate %s' to diagnose", hc.Name, hc.Name))
 		return
 	}
 
@@ -1137,7 +1145,11 @@ func (s *Server) handleHarnessConfigValidate(w http.ResponseWriter, r *http.Requ
 	rs := s.harnessConfigStore(hc.Harness)
 	report, err := rs.ValidateStorage(ctx, rec)
 	if err != nil {
-		RuntimeError(w, fmt.Sprintf("validation failed: %v", err))
+		// The error can carry the storage object path and the wrapped
+		// backend error: log it rendered, answer fixed text
+		// (ptone/scion#7498).
+		slog.ErrorContext(ctx, "harness-config validation failed", "harness_config_id", hc.ID, "error", upstreamText(err.Error()))
+		RuntimeError(w, "validation failed")
 		return
 	}
 
@@ -1161,6 +1173,9 @@ func (s *Server) handleHarnessConfigClone(w http.ResponseWriter, r *http.Request
 
 	if req.Name == "" {
 		ValidationError(w, "name is required", nil)
+		return
+	}
+	if refuseNonComponentResourceName(w, req.Name) {
 		return
 	}
 	if !isValidHarnessConfigScope(req.Scope) {
@@ -1503,7 +1518,7 @@ func (s *Server) handleHarnessConfigImageStatus(w http.ResponseWriter, r *http.R
 	}
 
 	registry := s.resolveImageRegistry()
-	longImage := config.RewriteImageRegistry(image, registry)
+	image, longImage := s.hubScopeImageRefs(image, registry)
 
 	shortImage := image
 	if !imagecheck.IsBareImageName(image) {
@@ -1758,7 +1773,7 @@ func (s *Server) handleHarnessConfigPullImage(w http.ResponseWriter, r *http.Req
 	}
 
 	registry := s.resolveImageRegistry()
-	pullImage := config.RewriteImageRegistry(image, registry)
+	_, pullImage := s.hubScopeImageRefs(image, registry)
 
 	brokerID := r.URL.Query().Get("broker_id")
 	if brokerID != "" {

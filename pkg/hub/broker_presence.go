@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -53,9 +54,9 @@ type brokerPresenceResult struct {
 // a live, current registry session counts (brokerRegistryLive), and so do
 // the legacy signals; with it off, only the legacy signals do. A registry
 // read that fails falls back to the legacy signals: it is logged and
-// counted (brokerPresenceRegistryFallbacks), never treated as offline on its
-// own. A read cut short by the caller's own context is not a registry
-// failure and is neither logged nor counted.
+// counted (brokerPresenceRegistryFallbacks, cause=registry_read), never
+// treated as offline on its own. A read cut short by the caller's own
+// context is not a registry failure and is neither logged nor counted.
 func (s *Server) brokerPresence(ctx context.Context, b *store.RuntimeBroker) brokerPresenceResult {
 	if b == nil {
 		return brokerPresenceResult{Source: brokerPresenceNone}
@@ -87,7 +88,7 @@ func (s *Server) brokerPresence(ctx context.Context, b *store.RuntimeBroker) bro
 // is returned, and the caller counts the broker as present (the startup
 // repair does not move its agents): this is the one log line for the
 // failure, at Warn, and it is counted in
-// brokerPresenceRegistryFallbacks, like a failed registry read. A read cut
+// brokerPresenceRecordReadFallbacks (cause=broker_record_read). A read cut
 // short by the caller's own context is returned without a log or a count.
 // At startup the conduit registry may not be open yet; the registry read is
 // then not live and the legacy signals decide, as they did before presence.
@@ -99,7 +100,7 @@ func (s *Server) BrokerPresent(ctx context.Context, brokerID string) (bool, erro
 	case err != nil && ctx.Err() != nil:
 		return false, err
 	case err != nil:
-		s.brokerPresenceRegistryFallbacks.Add(1)
+		s.brokerPresenceRecordReadFallbacks.Add(1)
 		slog.WarnContext(ctx, "Broker presence: the broker record could not be read; the error is returned and the caller counts the broker as present",
 			"broker_id", brokerID, "error", err)
 		return false, err
@@ -143,27 +144,41 @@ func (s *Server) brokerLegacyConnected(b *store.RuntimeBroker) bool {
 }
 
 // brokerPresenceFallbacksMetric is the exported count of broker presence
-// reads that failed and took a fallback answer
-// (brokerPresenceRegistryFallbacks): a conduit registry read that fell back
-// to the legacy signals, or a broker record read in BrokerPresent whose
-// broker counts as present.
+// reads that failed and took a fallback answer, with a cause attribute
+// telling the two kinds apart (ptone/scion#5479):
+//   - cause=registry_read (brokerPresenceRegistryFallbacks): a conduit
+//     registry read that fell back to the legacy signals;
+//   - cause=broker_record_read (brokerPresenceRecordReadFallbacks): a
+//     broker record read in BrokerPresent (the co-located broker's startup
+//     repair) whose broker counts as present.
 const brokerPresenceFallbacksMetric = "scion.hub.broker.presence_registry_fallbacks"
+
+// The values of the cause attribute on brokerPresenceFallbacksMetric.
+const (
+	brokerPresenceFallbackCauseRegistry = "registry_read"
+	brokerPresenceFallbackCauseRecord   = "broker_record_read"
+)
 
 // RegisterBrokerPresenceMetrics registers
 // scion.hub.broker.presence_registry_fallbacks, a cumulative count of broker
-// presence reads that failed and took a fallback answer: a conduit registry
-// read that fell back to the legacy signals, or a broker record read in
-// BrokerPresent whose broker counts as present. Reads cut short by the
-// caller's own context are not counted.
+// presence reads that failed and took a fallback answer, observed once per
+// cause (brokerPresenceFallbacksMetric): cause=registry_read for a conduit
+// registry read that fell back to the legacy signals, and
+// cause=broker_record_read for a broker record read in BrokerPresent whose
+// broker counts as present. Reads cut short by the caller's own context are
+// not counted.
 func (s *Server) RegisterBrokerPresenceMetrics(mp metric.MeterProvider) error {
 	if mp == nil {
 		return errors.New("broker presence metrics: nil MeterProvider")
 	}
+	registryCause := metric.WithAttributes(attribute.String("cause", brokerPresenceFallbackCauseRegistry))
+	recordCause := metric.WithAttributes(attribute.String("cause", brokerPresenceFallbackCauseRecord))
 	_, err := mp.Meter(instrumentationScope).Int64ObservableCounter(brokerPresenceFallbacksMetric,
 		metric.WithUnit("{read}"),
-		metric.WithDescription("Broker presence reads that failed and took a fallback answer: a conduit registry read that fell back to the legacy presence signals, or a broker record read whose broker counts as present"),
+		metric.WithDescription("Broker presence reads that failed and took a fallback answer, by cause: registry_read (a conduit registry read that fell back to the legacy presence signals) or broker_record_read (a broker record read whose broker counts as present)"),
 		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
-			o.Observe(s.brokerPresenceRegistryFallbacks.Load())
+			o.Observe(s.brokerPresenceRegistryFallbacks.Load(), registryCause)
+			o.Observe(s.brokerPresenceRecordReadFallbacks.Load(), recordCause)
 			return nil
 		}))
 	return err

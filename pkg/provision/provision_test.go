@@ -38,8 +38,19 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// initBareGitRepo creates a bare git repo at a temporary path for cloning from.
+// initBareGitRepo creates a bare git repo at a temporary path for cloning
+// from, registered as a local clone fixture (AllowLocalCloneFixture) so
+// ProvisionShared clones it.
 func initBareGitRepo(t *testing.T) string {
+	t.Helper()
+	bareDir := newBareGitRepo(t)
+	AllowLocalCloneFixture(t, bareDir)
+	return bareDir
+}
+
+// newBareGitRepo creates a bare git repo at a temporary path, not
+// registered as a clone fixture: ProvisionShared refuses it.
+func newBareGitRepo(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	bareDir := filepath.Join(dir, "bare.git")
@@ -218,7 +229,7 @@ func TestProvisionShared_SelfHeals_ExistingRootOwnedDirectory(t *testing.T) {
 		Mode:                store.SharingModeSharedPlain,
 		NFSUID:              os.Getuid(),
 		NFSGID:              os.Getgid(),
-		SentinelDir:         hostPath,
+		SentinelDir:         ProjectStateDir(hostPath),
 		RequireChownSuccess: true,
 	})
 	if err != nil {
@@ -228,7 +239,7 @@ func TestProvisionShared_SelfHeals_ExistingRootOwnedDirectory(t *testing.T) {
 	if _, err := os.Stat(marker); err != nil {
 		t.Errorf("pre-existing file was lost: %v (MkdirAll should be a no-op on an existing dir)", err)
 	}
-	if _, err := os.Stat(filepath.Join(hostPath, ProvisionSentinelFile)); err != nil {
+	if _, err := os.Stat(filepath.Join(ProjectStateDir(hostPath), ProvisionSentinelFile)); err != nil {
 		t.Errorf("sentinel not written after successful provisioning: %v", err)
 	}
 }
@@ -255,7 +266,7 @@ func TestProvisionShared_RequireChownSuccess_FailsOnChownError(t *testing.T) {
 		Mode:                store.SharingModeSharedPlain,
 		NFSUID:              os.Getuid() + 1, // guaranteed not our own uid
 		NFSGID:              os.Getgid(),
-		SentinelDir:         hostPath,
+		SentinelDir:         ProjectStateDir(hostPath),
 		RequireChownSuccess: true,
 	})
 	if err == nil {
@@ -264,7 +275,7 @@ func TestProvisionShared_RequireChownSuccess_FailsOnChownError(t *testing.T) {
 	if !strings.Contains(err.Error(), "chown") {
 		t.Errorf("error should mention chown, got: %v", err)
 	}
-	if _, statErr := os.Stat(filepath.Join(hostPath, ProvisionSentinelFile)); statErr == nil {
+	if _, statErr := os.Stat(filepath.Join(ProjectStateDir(hostPath), ProvisionSentinelFile)); statErr == nil {
 		t.Error("sentinel must NOT be written when a required chown fails")
 	}
 }
@@ -288,13 +299,13 @@ func TestProvisionShared_ChownFailure_NonFatal_ByDefault(t *testing.T) {
 		Mode:        store.SharingModeSharedPlain,
 		NFSUID:      os.Getuid() + 1,
 		NFSGID:      os.Getgid(),
-		SentinelDir: hostPath,
+		SentinelDir: ProjectStateDir(hostPath),
 		// RequireChownSuccess not set — defaults to false.
 	})
 	if err != nil {
 		t.Fatalf("ProvisionShared should tolerate a chown failure by default, got: %v", err)
 	}
-	if _, statErr := os.Stat(filepath.Join(hostPath, ProvisionSentinelFile)); statErr != nil {
+	if _, statErr := os.Stat(filepath.Join(ProjectStateDir(hostPath), ProvisionSentinelFile)); statErr != nil {
 		t.Errorf("sentinel should still be written when chown is non-fatal: %v", statErr)
 	}
 }
@@ -326,7 +337,7 @@ func TestProvisionShared_ChownsSharedDirsIndependently(t *testing.T) {
 		Mode:                store.SharingModeSharedPlain,
 		NFSUID:              os.Getuid(),
 		NFSGID:              os.Getgid(),
-		SentinelDir:         hostPath,
+		SentinelDir:         ProjectStateDir(hostPath),
 		RequireChownSuccess: true,
 	})
 	if err != nil {
@@ -2798,10 +2809,9 @@ func TestGitCloneWorkspace_MoveFailure_LeavesNoPartialClone(t *testing.T) {
 	t.Cleanup(func() { moveRenameFile = orig })
 
 	err := gitCloneWorkspace(context.Background(), ProvisionInput{
-		Resolved:    ResolvedWorkspace{HostPath: hostPath, Backend: "nfs"},
-		ProjectID:   "proj-move-fail",
-		SentinelDir: hostPath, // forces the temp-dir clone path
-		GitClone:    &api.GitCloneConfig{URL: bareRepo, Branch: "main"},
+		Resolved:  ResolvedWorkspace{HostPath: hostPath, Backend: "nfs"},
+		ProjectID: "proj-move-fail",
+		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main"},
 	}, func() bool { return true })
 
 	require.Error(t, err)
@@ -2836,11 +2846,11 @@ func TestProvisionShared_MoveFailure_WritesNoSentinel(t *testing.T) {
 		Resolved:    ResolvedWorkspace{HostPath: hostPath, Backend: "nfs"},
 		ProjectID:   "proj-move-fail-e2e",
 		Mode:        store.SharingModeSharedPlain,
-		SentinelDir: hostPath,
+		SentinelDir: ProjectStateDir(hostPath),
 		GitClone:    &api.GitCloneConfig{URL: bareRepo, Branch: "main"},
 	})
 	require.Error(t, err)
-	assert.NoFileExists(t, filepath.Join(hostPath, ProvisionSentinelFile))
+	assert.NoFileExists(t, filepath.Join(ProjectStateDir(hostPath), ProvisionSentinelFile))
 	assert.NoDirExists(t, filepath.Join(hostPath, ".git"))
 }
 
@@ -2858,7 +2868,7 @@ func TestProvisionShared_LostOwnershipDuringChown_WritesNoSentinel(t *testing.T)
 	t.Setenv("SCION_HOST_UID", "")
 	bareRepo := initBareGitRepo(t)
 	hostPath := t.TempDir()
-	lockPath := filepath.Join(hostPath, provisionFileLockName)
+	lockPath := filepath.Join(ProjectStateDir(hostPath), provisionFileLockName)
 
 	orig := lchownFile
 	var corrupted atomic.Bool
@@ -2876,11 +2886,11 @@ func TestProvisionShared_LostOwnershipDuringChown_WritesNoSentinel(t *testing.T)
 		Resolved:    ResolvedWorkspace{HostPath: hostPath, Backend: "nfs"},
 		ProjectID:   "proj-lost-ownership-during-chown",
 		Mode:        store.SharingModeSharedPlain,
-		SentinelDir: hostPath,
+		SentinelDir: ProjectStateDir(hostPath),
 		GitClone:    &api.GitCloneConfig{URL: bareRepo, Branch: "main"},
 	})
 	require.Error(t, err, "ProvisionShared must fail once it detects it lost the lock before writing the sentinel")
-	assert.NoFileExists(t, filepath.Join(hostPath, ProvisionSentinelFile),
+	assert.NoFileExists(t, filepath.Join(ProjectStateDir(hostPath), ProvisionSentinelFile),
 		"sentinel must not be written after losing the lock during chown")
 }
 
@@ -2895,10 +2905,9 @@ func TestGitCloneWorkspace_LostOwnershipBeforeMove_AbortsWithoutMoving(t *testin
 	hostPath := t.TempDir()
 
 	err := gitCloneWorkspace(context.Background(), ProvisionInput{
-		Resolved:    ResolvedWorkspace{HostPath: hostPath, Backend: "nfs"},
-		ProjectID:   "proj-lost-ownership",
-		SentinelDir: hostPath,
-		GitClone:    &api.GitCloneConfig{URL: bareRepo, Branch: "main"},
+		Resolved:  ResolvedWorkspace{HostPath: hostPath, Backend: "nfs"},
+		ProjectID: "proj-lost-ownership",
+		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main"},
 	}, func() bool { return false }) // simulate having lost the lock
 
 	require.Error(t, err)
@@ -2960,23 +2969,18 @@ func TestProvisionShared_ConcurrentSameProject_NoCorruption(t *testing.T) {
 	assert.NoDirExists(t, filepath.Join(projectDir, provisionFileLockName))
 }
 
-// TestProvisionShared_ConcurrentSameProject_SentinelInWorkspace
-// reproduces the actual k8s init container configuration: SentinelDir is
-// set equal to the workspace dir itself (cmd/sciontool/commands/provision.go
-// sets SentinelDir: workspace, because only the workspace dir is mounted —
-// its parent isn't visible in that container's filesystem view at all). The
-// fallback lock marker therefore lives INSIDE the exact directory `git
-// clone` targets, which is what gitCloneWorkspace exists to handle. This
-// test would fail without it: a naive lock-dir-inside-the-clone-target
-// would make every single `git clone` invocation hit git's "already exists
-// and is not an empty directory" refusal, and self-healing that by deleting
-// the lock out from under an in-progress holder is exactly the corruption
-// this mechanism exists to prevent.
-func TestProvisionShared_ConcurrentSameProject_SentinelInWorkspace(t *testing.T) {
+// TestProvisionShared_ConcurrentSameProject_StateDir reproduces the k8s
+// init container configuration: SentinelDir is the project's provisioning
+// state directory, mounted beside the workspace. Concurrent provisioners
+// serialize on the lock there alone (AC-L2), exactly one clones, and
+// nothing of the provisioning bookkeeping lands in the workspace (AC-L3):
+// no sentinel, no lock entry, no git exclude for either.
+func TestProvisionShared_ConcurrentSameProject_StateDir(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
 	bareRepo := initBareGitRepo(t)
 
-	hostPath := t.TempDir()
+	hostPath := filepath.Join(t.TempDir(), "workspace")
+	stateDir := ProjectStateDir(hostPath)
 
 	const n = 4
 	var wg sync.WaitGroup
@@ -2988,9 +2992,9 @@ func TestProvisionShared_ConcurrentSameProject_SentinelInWorkspace(t *testing.T)
 			defer wg.Done()
 			errs[idx] = ProvisionShared(ProvisionInput{
 				Resolved:    ResolvedWorkspace{HostPath: hostPath, Backend: "nfs"},
-				ProjectID:   "proj-no-locker-sentinel-in-ws",
+				ProjectID:   "proj-no-locker-state-dir",
 				Mode:        store.SharingModeSharedPlain,
-				SentinelDir: hostPath, // k8s init container: only the workspace dir is mounted.
+				SentinelDir: stateDir,
 				GitClone: &api.GitCloneConfig{
 					URL:    bareRepo,
 					Branch: "main",
@@ -3006,30 +3010,28 @@ func TestProvisionShared_ConcurrentSameProject_SentinelInWorkspace(t *testing.T)
 
 	assert.DirExists(t, filepath.Join(hostPath, ".git"))
 	assert.FileExists(t, filepath.Join(hostPath, "README.md"))
-	assert.FileExists(t, filepath.Join(hostPath, ProvisionSentinelFile))
-	assert.NoDirExists(t, filepath.Join(hostPath, provisionFileLockName))
+	assert.FileExists(t, filepath.Join(stateDir, ProvisionSentinelFile))
+	assert.NoDirExists(t, filepath.Join(stateDir, provisionFileLockName))
 
-	// No leftover scratch clone directories from gitCloneWorkspace.
+	// Nothing provisioning-related in the workspace root: no sentinel, no
+	// lock or lock litter, no leftover scratch clone directory.
 	entries, err := os.ReadDir(hostPath)
 	require.NoError(t, err)
 	for _, e := range entries {
+		assert.NotEqual(t, ProvisionSentinelFile, e.Name(), "sentinel written in the workspace root")
+		assert.False(t, strings.HasPrefix(e.Name(), provisionFileLockName), "lock entry in the workspace root: %s", e.Name())
 		assert.False(t, strings.HasPrefix(e.Name(), ".scion-clone-"), "leftover scratch clone dir: %s", e.Name())
 	}
 
-	// The lock's on-disk footprint must be excluded from git's view once a
-	// real clone exists there, so every later
-	// WorktreePerAgent agent's lock/unlock cycle for this same project never
-	// shows up in `git status` inside the shared checkout.
+	// No exclude is added for the sentinel or the lock any more.
 	excludeData, err := os.ReadFile(filepath.Join(hostPath, ".git", "info", "exclude"))
 	require.NoError(t, err)
-	assert.Contains(t, string(excludeData), provisionFileLockName)
-	assert.Contains(t, string(excludeData), provisionFileLockName+".*")
+	assert.NotContains(t, string(excludeData), provisionFileLockName)
+	assert.NotContains(t, string(excludeData), "/"+ProvisionSentinelFile)
 
-	// Nothing lock-related (including the
-	// clock-probe file) may show up in `git status` of the shared checkout.
 	out, gitErr := exec.Command("git", "-C", hostPath, "status", "--porcelain", "--ignored=no").CombinedOutput()
 	require.NoError(t, gitErr, string(out))
-	assert.NotContains(t, string(out), provisionFileLockName, "git status: %s", out)
+	assert.Empty(t, strings.TrimSpace(string(out)), "git status: %s", out)
 }
 
 // TestGitCloneWorkspace_SentinelIsParent_ClonesDirect proves
@@ -3170,10 +3172,9 @@ func TestGitCloneWorkspace_RefusesWhenWorktreesNonEmpty(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(worktreesDir, "sentinel-file"), []byte("agent work"), 0644))
 
 	err := gitCloneWorkspace(context.Background(), ProvisionInput{
-		Resolved:    ResolvedWorkspace{HostPath: hostPath, Backend: "nfs"},
-		ProjectID:   "proj-worktrees-nonempty",
-		SentinelDir: hostPath, // forces the temp-dir clone path
-		GitClone:    &api.GitCloneConfig{URL: bareRepo, Branch: "main"},
+		Resolved:  ResolvedWorkspace{HostPath: hostPath, Backend: "nfs"},
+		ProjectID: "proj-worktrees-nonempty",
+		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main"},
 	}, func() bool { return true })
 
 	require.Error(t, err)
@@ -3182,35 +3183,37 @@ func TestGitCloneWorkspace_RefusesWhenWorktreesNonEmpty(t *testing.T) {
 	assert.FileExists(t, filepath.Join(worktreesDir, "sentinel-file"))
 }
 
-// TestGitCloneWorkspace_PreClearSurvivesConcurrentStagingDir proves
-// the pre-clone workspace check must accept a concurrent caller's
-// in-progress staging directory. This builds its staging directory using
-// provisionLockStagingPattern — the SAME constant tryCreateFileLock itself
-// uses — rather than a separately-maintained literal copy of the pattern, so
-// a drift between the two is exactly what this test would catch.
-func TestGitCloneWorkspace_PreClearSurvivesConcurrentStagingDir(t *testing.T) {
+// TestGitCloneWorkspace_WorkspaceRootLockEntriesAreContent: the
+// provisioning lock is never in the workspace any more, so lock entries or a
+// sentinel left in the workspace root by images from before the provisioning
+// state directory are workspace content like any other (AC-L8): the clone
+// refuses the workspace and leaves them as they are.
+func TestGitCloneWorkspace_WorkspaceRootLockEntriesAreContent(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
 	bareRepo := initBareGitRepo(t)
-	hostPath := t.TempDir()
+	for _, name := range []string{provisionFileLockName, provisionFileLockName + ".stage-x", provisionFileLockName + ".evict-y", ProvisionSentinelFile} {
+		t.Run(name, func(t *testing.T) {
+			hostPath := t.TempDir()
+			entry := filepath.Join(hostPath, name)
+			if name == ProvisionSentinelFile {
+				require.NoError(t, os.WriteFile(entry, []byte("provisioned_at=x\n"), 0o644))
+			} else {
+				require.NoError(t, os.Mkdir(entry, 0o700))
+			}
 
-	// Simulate a concurrent caller's in-progress tryCreateFileLock staging
-	// directory sitting in dest at the moment this clone's pre-clear runs.
-	stagingDir, err := os.MkdirTemp(hostPath, provisionLockStagingPattern)
-	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(filepath.Join(stagingDir, provisionLockOwnerFile), []byte("concurrent-owner"), 0600))
+			err := gitCloneWorkspace(context.Background(), ProvisionInput{
+				Resolved:  ResolvedWorkspace{HostPath: hostPath, Backend: "nfs"},
+				ProjectID: "proj-root-lock-entries",
+				GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main"},
+			}, func() bool { return true })
 
-	err = gitCloneWorkspace(context.Background(), ProvisionInput{
-		Resolved:    ResolvedWorkspace{HostPath: hostPath, Backend: "nfs"},
-		ProjectID:   "proj-stage-survives-clear",
-		SentinelDir: hostPath, // forces the temp-dir clone path
-		GitClone:    &api.GitCloneConfig{URL: bareRepo, Branch: "main"},
-	}, func() bool { return true })
-
-	require.NoError(t, err)
-	assert.DirExists(t, stagingDir, "the pre-clone check must not remove a concurrent caller's staging directory")
-	current, readErr := os.ReadFile(filepath.Join(stagingDir, provisionLockOwnerFile))
-	require.NoError(t, readErr)
-	assert.Equal(t, "concurrent-owner", string(current))
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), name)
+			assert.NoDirExists(t, filepath.Join(hostPath, ".git"))
+			_, statErr := os.Lstat(entry)
+			assert.NoError(t, statErr, "the entry must be left as it is")
+		})
+	}
 }
 
 // TestMoveDirContentsUp_RollsBackOnPartialFailure proves that if a move fails partway through, every entry already moved

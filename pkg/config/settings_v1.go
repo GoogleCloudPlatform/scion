@@ -634,33 +634,8 @@ func (vs *VersionedSettings) ResolveKubernetesNamespace(runtimeEntryName string)
 // an error — this exists only to produce an operator-facing warning, not to
 // change any dispatch outcome.
 func ProjectSettingsHasKubernetesServiceAccountMappings(projectPath, runtimeEntryName, profileName string) bool {
-	// projectPath may be a project root (not yet resolved to its .scion
-	// directory) — GetResolvedProjectDir is the same first step every other
-	// caller in this codebase takes before LoadEffectiveSettings/
-	// LoadVersionedSettings (e.g. resolveDispatchProfileSelection in
-	// pkg/runtimebroker). resolveEffectiveProjectPath on its own does not do
-	// this: called with a non-empty, non-"global"/"home" path, it only
-	// applies the external-split-storage redirect (GetProjectConfigDir) on
-	// top of whatever was passed in, assuming it already points at a .scion
-	// directory.
-	resolvedProjectDir, err := GetResolvedProjectDir(projectPath)
-	if err != nil || resolvedProjectDir == "" {
-		return false
-	}
-	globalDir, _ := GetGlobalDir()
-	if resolvedProjectDir == globalDir {
-		return false
-	}
-	effectiveProjectPath := resolveEffectiveProjectPath(resolvedProjectDir)
-	if effectiveProjectPath == "" || effectiveProjectPath == globalDir {
-		return false
-	}
-	settingsPath := GetSettingsPath(effectiveProjectPath)
-	if settingsPath == "" {
-		return false
-	}
-	raw, err := os.ReadFile(settingsPath)
-	if err != nil {
+	raw, ok := readProjectOwnSettings(projectPath)
+	if !ok {
 		return false
 	}
 	var probe struct {
@@ -685,6 +660,144 @@ func ProjectSettingsHasKubernetesServiceAccountMappings(projectPath, runtimeEntr
 		}
 	}
 	return false
+}
+
+// readProjectOwnSettings returns the bytes of a project's OWN settings file,
+// never merged with the global settings, or false when projectPath is the
+// global directory or the file cannot be found or read. Best-effort, for
+// the operator warnings of ProjectSettingsHasKubernetesServiceAccountMappings
+// and ProjectSettingsHasCloudRunAssignableServiceAccounts.
+func readProjectOwnSettings(projectPath string) ([]byte, bool) {
+	// projectPath may be a project root (not yet resolved to its .scion
+	// directory) — GetResolvedProjectDir is the same first step every other
+	// caller in this codebase takes before LoadEffectiveSettings/
+	// LoadVersionedSettings (e.g. resolveDispatchProfileSelection in
+	// pkg/runtimebroker). resolveEffectiveProjectPath on its own does not do
+	// this: called with a non-empty, non-"global"/"home" path, it only
+	// applies the external-split-storage redirect (GetProjectConfigDir) on
+	// top of whatever was passed in, assuming it already points at a .scion
+	// directory.
+	resolvedProjectDir, err := GetResolvedProjectDir(projectPath)
+	if err != nil || resolvedProjectDir == "" {
+		return nil, false
+	}
+	globalDir, _ := GetGlobalDir()
+	if resolvedProjectDir == globalDir {
+		return nil, false
+	}
+	effectiveProjectPath := resolveEffectiveProjectPath(resolvedProjectDir)
+	if effectiveProjectPath == "" || effectiveProjectPath == globalDir {
+		return nil, false
+	}
+	settingsPath := GetSettingsPath(effectiveProjectPath)
+	if settingsPath == "" {
+		return nil, false
+	}
+	raw, err := os.ReadFile(settingsPath)
+	if err != nil {
+		return nil, false
+	}
+	return raw, true
+}
+
+// ProjectSettingsHasCloudRunAssignableServiceAccounts reports whether a
+// project's OWN settings.yaml sets cloudrun.assignable_service_accounts on
+// the named runtime entry. Like
+// ProjectSettingsHasKubernetesServiceAccountMappings it exists only so a
+// caller can warn that the setting has no effect there: the allow-list is
+// read only from the broker's global settings. Best-effort: an unreadable
+// file returns false.
+func ProjectSettingsHasCloudRunAssignableServiceAccounts(projectPath, runtimeEntryName string) bool {
+	cr := projectOwnCloudRunBlock(projectPath, runtimeEntryName)
+	return cr != nil && len(cr.AssignableServiceAccounts) > 0
+}
+
+// ProjectSettingsHasCloudRunBlockServiceAccount reports whether a project's
+// OWN settings.yaml sets cloudrun.block_service_account on the named
+// runtime entry. Like ProjectSettingsHasCloudRunAssignableServiceAccounts it
+// exists only so a caller can warn that the setting has no effect there:
+// the block account is read only from the broker's global settings.
+// Best-effort: an unreadable file returns false.
+func ProjectSettingsHasCloudRunBlockServiceAccount(projectPath, runtimeEntryName string) bool {
+	cr := projectOwnCloudRunBlock(projectPath, runtimeEntryName)
+	return cr != nil && strings.TrimSpace(cr.BlockServiceAccount) != ""
+}
+
+// projectCloudRunProbe is the part of a runtime entry's cloudrun block that
+// the project-level probes read.
+type projectCloudRunProbe struct {
+	AssignableServiceAccounts []string `yaml:"assignable_service_accounts" json:"assignable_service_accounts"`
+	BlockServiceAccount       string   `yaml:"block_service_account" json:"block_service_account"`
+}
+
+// projectOwnCloudRunBlock returns the cloudrun block of the named runtime
+// entry in a project's OWN settings file (readProjectOwnSettings), or nil
+// when there is none or the file cannot be read or parsed.
+func projectOwnCloudRunBlock(projectPath, runtimeEntryName string) *projectCloudRunProbe {
+	if runtimeEntryName == "" {
+		return nil
+	}
+	raw, ok := readProjectOwnSettings(projectPath)
+	if !ok {
+		return nil
+	}
+	var probe struct {
+		Runtimes map[string]struct {
+			CloudRun *projectCloudRunProbe `yaml:"cloudrun" json:"cloudrun"`
+		} `yaml:"runtimes" json:"runtimes"`
+	}
+	if err := unmarshalSettingsYAML(raw, &probe); err != nil {
+		return nil
+	}
+	return probe.Runtimes[runtimeEntryName].CloudRun
+}
+
+// CloudRunAssignableServiceAccountWarnings returns a warning for each entry
+// of runtimes.<runtimeEntryName>.cloudrun.assignable_service_accounts in vs
+// that, lower-cased and trimmed, does not match gsaEmailPattern (a Cloud
+// Run instance can only run as a service account), so a typo or a pasted
+// user email is reported where the list is read. Such an entry still
+// matches an equal assigned value at the broker; the instance create then
+// fails. Each warning names the entry's position, never its value.
+// Entries are compared case-insensitively and trimmed where they are used.
+func CloudRunAssignableServiceAccountWarnings(vs *VersionedSettings, runtimeEntryName string) []string {
+	if vs == nil {
+		return nil
+	}
+	entry, ok := vs.Runtimes[runtimeEntryName]
+	if !ok || entry.CloudRun == nil {
+		return nil
+	}
+	var warnings []string
+	for i, listed := range entry.CloudRun.AssignableServiceAccounts {
+		if !gsaEmailPattern.MatchString(strings.ToLower(strings.TrimSpace(listed))) {
+			warnings = append(warnings, fmt.Sprintf(
+				"runtimes.%s.cloudrun.assignable_service_accounts[%d] is not a service account email; a Cloud Run instance cannot run as it",
+				runtimeEntryName, i))
+		}
+	}
+	return warnings
+}
+
+// CloudRunBlockServiceAccountWarnings returns a warning when
+// runtimes.<runtimeEntryName>.cloudrun.block_service_account in vs is set
+// but, lower-cased and trimmed, does not match gsaEmailPattern. The warning
+// names the setting only, never its value.
+func CloudRunBlockServiceAccountWarnings(vs *VersionedSettings, runtimeEntryName string) []string {
+	if vs == nil {
+		return nil
+	}
+	entry, ok := vs.Runtimes[runtimeEntryName]
+	if !ok || entry.CloudRun == nil {
+		return nil
+	}
+	v := strings.ToLower(strings.TrimSpace(entry.CloudRun.BlockServiceAccount))
+	if v == "" || gsaEmailPattern.MatchString(v) {
+		return nil
+	}
+	return []string{fmt.Sprintf(
+		"runtimes.%s.cloudrun.block_service_account is not a service account email; a Cloud Run instance cannot run as it",
+		runtimeEntryName)}
 }
 
 // gsaEmailPattern matches a syntactically well-formed, lowercase GCP service
@@ -1173,6 +1286,7 @@ type VersionedSettings struct {
 	Runtimes             map[string]V1RuntimeConfig    `json:"runtimes,omitempty" yaml:"runtimes,omitempty" koanf:"runtimes"`
 	Runtime              *V1RuntimeDefaultsConfig      `json:"runtime,omitempty" yaml:"runtime,omitempty" koanf:"runtime"`
 	ImageRegistry        string                        `json:"image_registry,omitempty" yaml:"image_registry,omitempty" koanf:"image_registry"`
+	ImageTag             string                        `json:"image_tag,omitempty" yaml:"image_tag,omitempty" koanf:"image_tag"`
 	WorkspacePath        string                        `json:"workspace_path,omitempty" yaml:"workspace_path,omitempty" koanf:"workspace_path"`
 	HarnessConfigs       map[string]HarnessConfigEntry `json:"harness_configs,omitempty" yaml:"harness_configs,omitempty" koanf:"harness_configs"`
 	Profiles             map[string]V1ProfileConfig    `json:"profiles,omitempty" yaml:"profiles,omitempty" koanf:"profiles"`
@@ -1214,6 +1328,11 @@ type VersionedSettings struct {
 	// settings overlay; nil elsewhere. It is not serialized; see
 	// ImageRegistryLayers.
 	imageRegistryHub *ImageRegistryHubInputs
+	// placementErrors are the Kubernetes placement findings of the Hub's
+	// stored runtimes and profiles, copied by the settings overlay's Apply
+	// together with the maps it applied (one lock, one snapshot); nil
+	// elsewhere. It is not serialized; see PlacementErrors.
+	placementErrors []string
 
 	// Default agent limits (applied when no explicit value is set)
 	DefaultMaxTurns      int               `json:"default_max_turns,omitempty" yaml:"default_max_turns,omitempty" koanf:"default_max_turns"`
@@ -1615,6 +1734,10 @@ type V1TestIdentitiesConfig struct {
 	// AdminWebSessions is server.hub.test_identities.admin_web_sessions
 	// (see TestIdentitiesConfig.AdminWebSessions).
 	AdminWebSessions string `json:"admin_web_sessions,omitempty" yaml:"admin_web_sessions,omitempty" koanf:"admin_web_sessions"`
+	// OfflineAdminDelegations is
+	// server.hub.test_identities.offline_admin_delegations (see
+	// TestIdentitiesConfig.OfflineAdminDelegations).
+	OfflineAdminDelegations string `json:"offline_admin_delegations,omitempty" yaml:"offline_admin_delegations,omitempty" koanf:"offline_admin_delegations"`
 }
 
 // V1TestIdentityWorkloadIssuer is one server.hub.test_identities.workload_issuers
@@ -1631,6 +1754,16 @@ type V1ServerHubConfig struct {
 	HubID     string `json:"hub_id,omitempty" yaml:"hub_id,omitempty" koanf:"hub_id"`
 	HubName   string `json:"hub_name,omitempty" yaml:"hub_name,omitempty" koanf:"hub_name"`
 	PublicURL string `json:"public_url,omitempty" yaml:"public_url,omitempty" koanf:"public_url"`
+	// ContentURL is server.hub.content_url (ContentURLKey), the hub's content
+	// host: a second public origin, apart from PublicURL, on which shared
+	// artifacts are served. Empty, the default, serves them on PublicURL.
+	// See ValidateContentURL.
+	ContentURL string `json:"content_url,omitempty" yaml:"content_url,omitempty" koanf:"content_url"`
+	// ContentURLAllowSameSite is server.hub.content_url_allow_same_site
+	// (ContentURLAllowSameSiteKey): the override that lets ContentURL be on
+	// PublicURL's registrable domain, which is refused without it. See
+	// ContentURLHubConflict.
+	ContentURLAllowSameSite *bool `json:"content_url_allow_same_site,omitempty" yaml:"content_url_allow_same_site,omitempty" koanf:"content_url_allow_same_site"`
 	// HubClass is server.hub.class (see HubServerConfig.HubClass). It is
 	// file/env only: the server-config API refuses it in every mode.
 	HubClass string `json:"class,omitempty" yaml:"class,omitempty" koanf:"class"`
@@ -1715,6 +1848,14 @@ type V1ServerHubConfig struct {
 	// PortProxy holds the agent port proxy settings. Read at startup;
 	// changes need a restart.
 	PortProxy *V1ServerHubPortProxyConfig `json:"port_proxy,omitempty" yaml:"port_proxy,omitempty" koanf:"port_proxy"`
+	// SSE holds the browser events stream settings. Read at startup;
+	// restart required to change.
+	SSE *V1ServerHubSSEConfig `json:"sse,omitempty" yaml:"sse,omitempty" koanf:"sse"`
+	// PlatformRequestTimeout is the request timeout of the platform in
+	// front of the hub (e.g. "900s"; no default, 150s-24h). When set, the
+	// events stream maximum age and the conduit session lifetime cap are
+	// clamped to 0.8 of it. Read at startup.
+	PlatformRequestTimeout string `json:"platform_request_timeout,omitempty" yaml:"platform_request_timeout,omitempty" koanf:"platform_request_timeout"`
 	// Observability holds the hub's own metrics and trace export switches
 	// (server.hub.observability). Read at startup; changes need a restart.
 	Observability *V1ServerHubObservabilityConfig `json:"observability,omitempty" yaml:"observability,omitempty" koanf:"observability"`
@@ -1729,6 +1870,20 @@ type V1ServerHubObservabilityConfig struct {
 	MetricsEnabled *bool `json:"metrics_enabled,omitempty" yaml:"metrics_enabled,omitempty" koanf:"metrics_enabled"`
 	// TracingEnabled turns the hub trace exporter on or off.
 	TracingEnabled *bool `json:"tracing_enabled,omitempty" yaml:"tracing_enabled,omitempty" koanf:"tracing_enabled"`
+}
+
+// V1ServerHubSSEConfig holds the browser events stream settings of the hub
+// server (server.hub.sse). Validated at startup (HubSSEConfig.Validate); an
+// invalid value is a startup error.
+type V1ServerHubSSEConfig struct {
+	// MaxConnectionAge is the maximum age of an events stream before the
+	// hub sends a reconnect hint and closes it (e.g. "10m"; default "10m",
+	// 1m-24h). Jittered by +/-20% per stream; clamped to 0.8 of
+	// platform_request_timeout when that is set.
+	MaxConnectionAge string `json:"max_connection_age,omitempty" yaml:"max_connection_age,omitempty" koanf:"max_connection_age"`
+	// HeartbeatInterval is the interval between events stream heartbeats
+	// (e.g. "30s"; default "30s", 5s-1m).
+	HeartbeatInterval string `json:"heartbeat_interval,omitempty" yaml:"heartbeat_interval,omitempty" koanf:"heartbeat_interval"`
 }
 
 // V1ServerHubPortProxyConfig holds the agent port proxy settings of the
@@ -1840,6 +1995,60 @@ type V1ServerHubConduitConfig struct {
 	// database, returned by the server-config API or logged. Read at
 	// startup.
 	PeerSecret string `json:"peer_secret,omitempty" yaml:"peer_secret,omitempty" koanf:"peer_secret"`
+	// PeerKeyFile is this node's relay-peer private key file (PEM PKCS #8
+	// Ed25519). When set, the node signs relay-peer calls with it; its
+	// instance_id must be set and listed in peers with the matching public
+	// key. Read at startup.
+	PeerKeyFile string `json:"peer_key_file,omitempty" yaml:"peer_key_file,omitempty" koanf:"peer_key_file"`
+	// Peers lists the relay peers enrolled with their own keys. Read at
+	// startup.
+	Peers []V1ServerHubConduitPeer `json:"peers,omitempty" yaml:"peers,omitempty" koanf:"peers"`
+}
+
+// V1ServerHubConduitPeer is one enrolled relay peer
+// (server.hub.conduit.peers).
+type V1ServerHubConduitPeer struct {
+	ID   string                      `json:"id,omitempty" yaml:"id,omitempty" koanf:"id"`
+	Role string                      `json:"role,omitempty" yaml:"role,omitempty" koanf:"role"`
+	Keys []V1ServerHubConduitPeerKey `json:"keys,omitempty" yaml:"keys,omitempty" koanf:"keys"`
+}
+
+// V1ServerHubConduitPeerKey is one enrolled public key of a relay peer.
+type V1ServerHubConduitPeerKey struct {
+	KeyID     string `json:"key_id,omitempty" yaml:"key_id,omitempty" koanf:"key_id"`
+	PublicKey string `json:"public_key,omitempty" yaml:"public_key,omitempty" koanf:"public_key"`
+}
+
+// conduitPeersFromV1 converts server.hub.conduit.peers to HubConduitPeer.
+func conduitPeersFromV1(in []V1ServerHubConduitPeer) []HubConduitPeer {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]HubConduitPeer, 0, len(in))
+	for _, p := range in {
+		hp := HubConduitPeer{ID: p.ID, Role: p.Role}
+		for _, k := range p.Keys {
+			hp.Keys = append(hp.Keys, HubConduitPeerKey(k))
+		}
+		out = append(out, hp)
+	}
+	return out
+}
+
+// conduitPeersToV1 converts HubConduitPeer to server.hub.conduit.peers.
+func conduitPeersToV1(in []HubConduitPeer) []V1ServerHubConduitPeer {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]V1ServerHubConduitPeer, 0, len(in))
+	for _, p := range in {
+		vp := V1ServerHubConduitPeer{ID: p.ID, Role: p.Role}
+		for _, k := range p.Keys {
+			vp.Keys = append(vp.Keys, V1ServerHubConduitPeerKey(k))
+		}
+		out = append(out, vp)
+	}
+	return out
 }
 
 // V1ServerRelayConfig holds the settings of a separate relay process,
@@ -1892,8 +2101,10 @@ type V1BrokerConfig struct {
 	StateDir string `json:"state_dir,omitempty" yaml:"state_dir,omitempty" koanf:"state_dir"`
 	// Instances declares the flat (single-target) Runtime Broker instances
 	// this process hosts (.design/flat-runtime-brokers-contract.md section 2).
-	// Empty or absent means legacy hosting. P1 accepts exactly one entry and
-	// requires the Hub in the same process (CheckRuntimeBrokerInstanceHosting).
+	// Empty or absent means legacy hosting. Each key must be unique; there is
+	// no limit on the number of entries. Without the Hub in the same process
+	// the host needs a validated remote activation
+	// (CheckRuntimeBrokerInstanceHosting).
 	// Read only through LoadGlobalConfig / LoadRuntimeBrokerInstances; project
 	// settings never configure instances.
 	Instances []V1RuntimeBrokerInstanceConfig `json:"instances,omitempty" yaml:"instances,omitempty" koanf:"instances"`
@@ -1991,6 +2202,21 @@ type V1RuntimeTargetConfig struct {
 	SharedDirStorageBackends map[string]string `json:"shared_dir_storage_backends,omitempty" yaml:"shared_dir_storage_backends,omitempty" koanf:"shared_dir_storage_backends"`
 	HomeStorageBackend       string            `json:"home_storage_backend,omitempty" yaml:"home_storage_backend,omitempty" koanf:"home_storage_backend"`
 	HomeStorageLeaf          string            `json:"home_storage_leaf,omitempty" yaml:"home_storage_leaf,omitempty" koanf:"home_storage_leaf"`
+	// ProjectID, Region, ServiceAccount, Network, Subnetwork and
+	// CredentialsFile are a Cloud Run instance's target (contract amendment
+	// P5-CR, CR1). ProjectID selects the GCP project, whose probed project
+	// number plus Region is the target's identity. ServiceAccount (the
+	// identity agent instances run as), Network and Subnetwork (the VPC
+	// agents reach the NFS share over) are local operator policy.
+	// CredentialsFile is the absolute path of this instance's own GCP
+	// credentials file, its only credential source. None of them is sent to
+	// the Hub. Cloud Run only.
+	ProjectID       string `json:"project_id,omitempty" yaml:"project_id,omitempty" koanf:"project_id"`
+	Region          string `json:"region,omitempty" yaml:"region,omitempty" koanf:"region"`
+	ServiceAccount  string `json:"service_account,omitempty" yaml:"service_account,omitempty" koanf:"service_account"`
+	Network         string `json:"network,omitempty" yaml:"network,omitempty" koanf:"network"`
+	Subnetwork      string `json:"subnetwork,omitempty" yaml:"subnetwork,omitempty" koanf:"subnetwork"`
+	CredentialsFile string `json:"credentials_file,omitempty" yaml:"credentials_file,omitempty" koanf:"credentials_file"`
 }
 
 // KubernetesRuntimeConfig returns the runtime entry form of a Kubernetes
@@ -2731,6 +2957,26 @@ type CloudRunConfig struct {
 	Subnetwork     string `json:"subnetwork,omitempty" yaml:"subnetwork,omitempty" koanf:"subnetwork"`
 	NFSServer      string `json:"nfs_server,omitempty" yaml:"nfs_server,omitempty" koanf:"nfs_server"`
 	NFSExport      string `json:"nfs_export,omitempty" yaml:"nfs_export,omitempty" koanf:"nfs_export"`
+
+	// AssignableServiceAccounts lists the service accounts this Runtime
+	// Broker may run a Cloud Run instance as for GCP identity mode "assign"
+	// while the hub.cloudrun_native_identity experiment is on. It is read
+	// from the broker's global settings only: the same key in a project's
+	// own settings.yaml is ignored (see
+	// ProjectSettingsHasCloudRunAssignableServiceAccounts). Empty or unset
+	// means no account is attachable, so "assign" is refused.
+	AssignableServiceAccounts []string `json:"assignable_service_accounts,omitempty" yaml:"assignable_service_accounts,omitempty" koanf:"assignable_service_accounts"`
+
+	// BlockServiceAccount is the service account, holding no roles, that
+	// this Runtime Broker runs a Cloud Run instance as for GCP identity mode
+	// "block" (and for an unset mode, which is block on Cloud Run) while the
+	// hub.cloudrun_native_identity experiment is on. It is read from the
+	// broker's global settings only: the same key in a project's own
+	// settings.yaml is ignored (see
+	// ProjectSettingsHasCloudRunBlockServiceAccount). Empty or unset means
+	// such a dispatch is refused; the runtime's own service_account is never
+	// used in its place.
+	BlockServiceAccount string `json:"block_service_account,omitempty" yaml:"block_service_account,omitempty" koanf:"block_service_account"`
 }
 
 // V1CloudRunInstancesConfig holds Cloud Run Instances runtime settings.
@@ -3384,6 +3630,12 @@ type HarnessNoAuthConfig struct {
 	Behavior string `json:"behavior,omitempty" yaml:"behavior,omitempty" koanf:"behavior"`
 	Message  string `json:"message,omitempty" yaml:"message,omitempty" koanf:"message"`
 	Command  string `json:"command,omitempty" yaml:"command,omitempty" koanf:"command"`
+	// Env is read from the bundle's no-auth-env.yaml (NoAuthEnvSidecarFile),
+	// not from config.yaml. It is added to the container env only when the
+	// agent runs in no-auth mode; it never replaces env set by settings, the
+	// agent or the hub, and keys reserved for scion are ignored (see
+	// pkg/agent applyNoAuthEnv).
+	Env map[string]string `json:"-" yaml:"-" koanf:"-"`
 }
 
 // HarnessMCPConfig is the declarative mapping that lets a harness's
@@ -3432,6 +3684,7 @@ type V1ProfileConfig struct {
 	DefaultTemplate      string                       `json:"default_template,omitempty" yaml:"default_template,omitempty" koanf:"default_template"`
 	DefaultHarnessConfig string                       `json:"default_harness_config,omitempty" yaml:"default_harness_config,omitempty" koanf:"default_harness_config"`
 	ImageRegistry        string                       `json:"image_registry,omitempty" yaml:"image_registry,omitempty" koanf:"image_registry"`
+	ImageTag             string                       `json:"image_tag,omitempty" yaml:"image_tag,omitempty" koanf:"image_tag"`
 	Volumes              []api.VolumeMount            `json:"volumes,omitempty" yaml:"volumes,omitempty" koanf:"volumes"`
 	Resources            *api.ResourceSpec            `json:"resources,omitempty" yaml:"resources,omitempty" koanf:"resources"`
 	HarnessOverrides     map[string]V1HarnessOverride `json:"harness_overrides,omitempty" yaml:"harness_overrides,omitempty" koanf:"harness_overrides"`
@@ -3556,7 +3809,9 @@ func loadVersionedLayers(projectPath string, opts versionedLoadOptions) (*versio
 	// coming from label and the file's path.
 	fileLayer := func(label, dir string) (bool, error) {
 		touched = touched[:0]
-		migrated, err := loadSettingsFileConverting(k, dir, legacy)
+		// Only the project layer gates its settings file against a
+		// symbolic link (loadSettingsFileConverting's projectTier).
+		migrated, err := loadSettingsFileConverting(k, dir, legacy, label == "project")
 		if err == nil {
 			setSource(label+" "+GetSettingsPath(dir), touched)
 		}
@@ -3918,6 +4173,8 @@ func undecodableSettingsKeys(k *koanf.Koanf) []string {
 // every settings value (ptone/scion#3916). Folded into the top-level
 // image_registry it would rank below a profile value and could be written
 // back into a settings file, so it is read only by ImageRegistryFromEnv.
+// SCION_IMAGE_TAG is the env layer of image_tag, excluded for the same
+// reason and read only by ImageTagFromEnv.
 var settingsExcludedEnvVars = []string{
 	"SCION_AUTO_EXPOSE_PORTS",
 	"SCION_AUTO_EXPOSE_PORTS_LIST",
@@ -3925,6 +4182,7 @@ var settingsExcludedEnvVars = []string{
 	"SCION_HUB_PROFILE",
 	"SCION_HUB_RUN",
 	EnvImageRegistry,
+	EnvImageTag,
 }
 
 // isSettingsExcludedEnv reports whether name is in settingsExcludedEnvVars.
@@ -4198,6 +4456,12 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		if v1.Hub.PublicURL != "" {
 			gc.Hub.Endpoint = v1.Hub.PublicURL
 		}
+		if v1.Hub.ContentURL != "" {
+			gc.Hub.ContentURL = v1.Hub.ContentURL
+		}
+		if v1.Hub.ContentURLAllowSameSite != nil {
+			gc.Hub.ContentURLAllowSameSite = *v1.Hub.ContentURLAllowSameSite
+		}
 		if v1.Hub.AgentEndpoint != "" {
 			gc.Hub.AgentEndpoint = v1.Hub.AgentEndpoint
 		}
@@ -4211,7 +4475,10 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 			gc.Hub.GCPProjectID = v1.Hub.GCPProjectID
 		}
 		if v1.Hub.TestIdentities != nil {
-			ti := &TestIdentitiesConfig{AdminWebSessions: v1.Hub.TestIdentities.AdminWebSessions}
+			ti := &TestIdentitiesConfig{
+				AdminWebSessions:        v1.Hub.TestIdentities.AdminWebSessions,
+				OfflineAdminDelegations: v1.Hub.TestIdentities.OfflineAdminDelegations,
+			}
 			for _, e := range v1.Hub.TestIdentities.WorkloadIssuers {
 				ti.WorkloadIssuers = append(ti.WorkloadIssuers, TestIdentityWorkloadIssuer(e))
 			}
@@ -4331,6 +4598,8 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 				InternalTLSKeyFile:    c.InternalTLSKeyFile,
 				InternalTLSCAFile:     c.InternalTLSCAFile,
 				InternalTLSServerName: c.InternalTLSServerName,
+				PeerKeyFile:           c.PeerKeyFile,
+				Peers:                 conduitPeersFromV1(c.Peers),
 			}
 			if m := c.StreamAuthzMax; m != nil {
 				gc.Hub.Conduit.StreamAuthzMax = HubConduitStreamAuthzMax{User: m.User, Broker: m.Broker, Agent: m.Agent}
@@ -4339,6 +4608,10 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		if p := v1.Hub.PortProxy; p != nil {
 			gc.Hub.PortProxy = HubPortProxyConfig{ResponseHeaderTimeout: p.ResponseHeaderTimeout, ViewTTL: p.ViewTTL}
 		}
+		if c := v1.Hub.SSE; c != nil {
+			gc.Hub.SSE = HubSSEConfig{MaxConnectionAge: c.MaxConnectionAge, HeartbeatInterval: c.HeartbeatInterval}
+		}
+		gc.Hub.PlatformRequestTimeout = v1.Hub.PlatformRequestTimeout
 		if o := v1.Hub.Observability; o != nil {
 			gc.Hub.Observability = HubObservabilityConfig{
 				MetricsEnabled: copyBoolPtr(o.MetricsEnabled),
@@ -4681,6 +4954,7 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 		HubID:                  gc.Hub.HubID,
 		HubName:                gc.Hub.HubName,
 		PublicURL:              gc.Hub.Endpoint,
+		ContentURL:             gc.Hub.ContentURL,
 		AgentEndpoint:          gc.Hub.AgentEndpoint,
 		MonitoringDashboardURL: gc.Hub.MonitoringDashboardURL,
 		HubClass:               gc.Hub.HubClass,
@@ -4697,7 +4971,10 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 		},
 	}
 	if gc.Hub.TestIdentities != nil {
-		ti := &V1TestIdentitiesConfig{AdminWebSessions: gc.Hub.TestIdentities.AdminWebSessions}
+		ti := &V1TestIdentitiesConfig{
+			AdminWebSessions:        gc.Hub.TestIdentities.AdminWebSessions,
+			OfflineAdminDelegations: gc.Hub.TestIdentities.OfflineAdminDelegations,
+		}
 		for _, e := range gc.Hub.TestIdentities.WorkloadIssuers {
 			ti.WorkloadIssuers = append(ti.WorkloadIssuers, V1TestIdentityWorkloadIssuer(e))
 		}
@@ -4735,6 +5012,8 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 			InternalTLSKeyFile:    c.InternalTLSKeyFile,
 			InternalTLSCAFile:     c.InternalTLSCAFile,
 			InternalTLSServerName: c.InternalTLSServerName,
+			PeerKeyFile:           c.PeerKeyFile,
+			Peers:                 conduitPeersToV1(c.Peers),
 		}
 		if m := c.StreamAuthzMax; !m.IsZero() {
 			v1Hub.Conduit.StreamAuthzMax = &V1ServerHubConduitStreamAuthzMax{User: m.User, Broker: m.Broker, Agent: m.Agent}
@@ -4743,6 +5022,10 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	if p := gc.Hub.PortProxy; !p.IsZero() {
 		v1Hub.PortProxy = &V1ServerHubPortProxyConfig{ResponseHeaderTimeout: p.ResponseHeaderTimeout, ViewTTL: p.ViewTTL}
 	}
+	if c := gc.Hub.SSE; !c.IsZero() {
+		v1Hub.SSE = &V1ServerHubSSEConfig{MaxConnectionAge: c.MaxConnectionAge, HeartbeatInterval: c.HeartbeatInterval}
+	}
+	v1Hub.PlatformRequestTimeout = gc.Hub.PlatformRequestTimeout
 	if o := gc.Hub.Observability; !o.IsZero() {
 		v1Hub.Observability = &V1ServerHubObservabilityConfig{
 			MetricsEnabled: copyBoolPtr(o.MetricsEnabled),
@@ -4760,6 +5043,10 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	}
 	if gc.Hub.StartCreateUnconfirmedHold > 0 {
 		v1Hub.StartCreateUnconfirmedHold = gc.Hub.StartCreateUnconfirmedHold.String()
+	}
+	if gc.Hub.ContentURLAllowSameSite {
+		allowSameSite := true
+		v1Hub.ContentURLAllowSameSite = &allowSameSite
 	}
 	if gc.Hub.SoftDeleteRetainFiles {
 		retainFiles := true
@@ -5463,6 +5750,18 @@ func LoadGlobalSettings() (*VersionedSettings, []string, error) {
 	return loadGlobalSettingsOnly(globalDir)
 }
 
+// PlacementErrors returns a copy of the settings paths whose Kubernetes
+// placement is malformed or invalid in the Hub-stored runtimes and profiles
+// these settings were built from (SettingsOverlay.Apply): the findings
+// always belong to the same applied maps. Nil when there are none or no
+// overlay was applied.
+func (vs *VersionedSettings) PlacementErrors() []string {
+	if vs == nil {
+		return nil
+	}
+	return slices.Clone(vs.placementErrors)
+}
+
 // LoadGlobalSettingsWithOverlay is LoadGlobalSettings plus the
 // process-wide DB settings overlay (co-located hub and broker), which
 // replaces the runtimes, profiles, harness_configs and image_registry
@@ -5691,20 +5990,12 @@ func UpdateVersionedSetting(dir string, key string, value string) error {
 // updateVersionedSettingLocked is UpdateVersionedSetting for a caller that
 // already holds the settings lock for dir.
 func updateVersionedSettingLocked(lock *SettingsLock, dir string, key string, value string) error {
-
 	settingsPath := GetSettingsPath(dir)
 	if filepath.Ext(settingsPath) == ".json" {
 		return updateVersionedSettingStruct(lock, dir, key, value)
 	}
 	edit, err := versionedSettingEditFor(key, value)
 	if err != nil {
-		return err
-	}
-	if edit.noop {
-		// hub_connections.* is accepted and left unchanged (see
-		// versionedSettingEditFor). Loading still runs the legacy-key
-		// migration and surfaces a malformed file, as before.
-		_, err := loadSingleFileVersioned(lock, dir)
 		return err
 	}
 	err = updateVersionedSettingYAML(lock, dir, settingsPath, edit)
@@ -5718,12 +6009,10 @@ func updateVersionedSettingLocked(lock *SettingsLock, dir string, key string, va
 
 // versionedSettingEdit is the v1 YAML edit that UpdateVersionedSetting makes
 // for one key: set path to value, or delete path when value is nil (an empty
-// string for an omitempty field). noop marks hub_connections.* keys, which
-// are accepted and left unchanged.
+// string for an omitempty field).
 type versionedSettingEdit struct {
 	path  []string
 	value *yamlv3.Node
-	noop  bool
 }
 
 // versionedSettingKey describes where a settable key lives in the v1 file.
@@ -5742,6 +6031,7 @@ var versionedSettingKeys = map[string]versionedSettingKey{
 	"default_harness_config":   {path: []string{"default_harness_config"}},
 	"workspace_path":           {path: []string{"workspace_path"}},
 	"image_registry":           {path: []string{"image_registry"}},
+	"image_tag":                {path: []string{"image_tag"}},
 	"cli.autohelp":             {path: []string{"cli", "autohelp"}, isBool: true},
 	"cli.mode":                 {path: []string{"cli", "mode"}},
 	"hub.enabled":              {path: []string{"hub", "enabled"}, isBool: true},
@@ -5766,12 +6056,6 @@ func versionedSettingEditFor(key, value string) (versionedSettingEdit, error) {
 	switch {
 	case projectkeys.IsProjectIDConfigKey(key) || projectkeys.IsHubProjectIDConfigKey(key):
 		k = versionedSettingKey{path: []string{"hub", "project_id"}}
-	case strings.HasPrefix(key, "hub_connections."):
-		// Not written in v1: accepted and left unchanged. "config set"
-		// rejects these keys itself (ValidateConfigSetKey). Keys with no
-		// place in a v1 file at all are rejected before this point
-		// (ValidateSettingWrite).
-		return versionedSettingEdit{noop: true}, nil
 	default:
 		var ok bool
 		if k, ok = versionedSettingKeys[key]; !ok {
@@ -6093,6 +6377,8 @@ func updateVersionedSettingStruct(lock *SettingsLock, dir string, key string, va
 		vs.WorkspacePath = value
 	case "image_registry":
 		vs.ImageRegistry = value
+	case "image_tag":
+		vs.ImageTag = value
 	case "cli.autohelp":
 		if vs.CLI == nil {
 			vs.CLI = &V1CLIConfig{}
@@ -6186,11 +6472,6 @@ func updateVersionedSettingStruct(lock *SettingsLock, dir string, key string, va
 		vs.Server.Auth.Username = value
 
 	default:
-		// hub_connections.* keys are left unchanged, as on the YAML path
-		// (versionedSettingEditFor).
-		if strings.HasPrefix(key, "hub_connections.") {
-			return nil
-		}
 		return fmt.Errorf("unknown or complex setting key: %s (manual edit recommended for registries)", key)
 	}
 
@@ -6218,6 +6499,8 @@ func GetVersionedSettingValue(vs *VersionedSettings, key string) (string, error)
 		return vs.WorkspacePath, nil
 	case "image_registry":
 		return vs.ImageRegistry, nil
+	case "image_tag":
+		return vs.ImageTag, nil
 	case "cli.autohelp":
 		if vs.CLI != nil && vs.CLI.AutoHelp != nil {
 			if *vs.CLI.AutoHelp {

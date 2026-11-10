@@ -76,20 +76,3 @@ func attachmentFailureText(filename string, err error) string {
 // openAttachmentFile opens an outbound attachment on this host. Tests
 // replace it to check which paths are opened.
 var openAttachmentFile = os.Open
-
-// telegramAttachmentName returns a display name for the file attached to
-// tgMsg, for messages to the sender.
-func telegramAttachmentName(tgMsg *TGMessage) string {
-	switch {
-	case tgMsg == nil:
-	case tgMsg.Document != nil && tgMsg.Document.FileName != "":
-		return tgMsg.Document.FileName
-	case tgMsg.Audio != nil && tgMsg.Audio.FileName != "":
-		return tgMsg.Audio.FileName
-	case tgMsg.Video != nil && tgMsg.Video.FileName != "":
-		return tgMsg.Video.FileName
-	case len(tgMsg.Photo) > 0:
-		return "photo"
-	}
-	return "attachment"
-}

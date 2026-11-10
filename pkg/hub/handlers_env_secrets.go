@@ -425,7 +425,7 @@ func (s *Server) getEnvVar(w http.ResponseWriter, r *http.Request, key string) {
 		if errors.Is(err, store.ErrNotFound) && s.secretBackend != nil {
 			// Fallback: check if this key exists as an environment secret
 			meta, metaErr := s.secretBackend.GetMeta(ctx, key, scope, scopeID)
-			if metaErr == nil && meta.SecretType == "environment" {
+			if metaErr == nil && meta.SecretType == "environment" && !agentHiddenHubSecret(ctx, scope, *meta) {
 				ev := secretMetaToEnvVar(*meta)
 				writeJSON(w, http.StatusOK, &ev)
 				return
@@ -715,7 +715,35 @@ func (s *Server) mergeEnvironmentSecrets(ctx context.Context, envVars []store.En
 		s.envSecretLog.Warn(warning, "error", err)
 		return envVars
 	}
-	return mergeEnvironmentSecretMetadata(envVars, metas)
+	return mergeEnvironmentSecretMetadata(envVars, withoutAgentHiddenHubSecrets(ctx, filter.Scope, metas))
+}
+
+// agentHiddenHubSecret reports whether a hub-scope secret is hidden from the
+// caller: the caller is an agent and the secret is not one agents may see
+// (secret.HubSecretAgentVisible). Names, values and metadata of a hidden
+// secret are never returned to an agent. Other scopes and non-agent callers
+// are unaffected.
+func agentHiddenHubSecret(ctx context.Context, scope string, m secret.SecretMeta) bool {
+	if scope != store.ScopeHub {
+		return false
+	}
+	if _, isAgent := GetIdentityFromContext(ctx).(AgentIdentity); !isAgent {
+		return false
+	}
+	m.Scope = store.ScopeHub
+	return !secret.HubSecretAgentVisible(m)
+}
+
+// withoutAgentHiddenHubSecrets drops the secrets agentHiddenHubSecret hides.
+func withoutAgentHiddenHubSecrets(ctx context.Context, scope string, metas []secret.SecretMeta) []secret.SecretMeta {
+	out := make([]secret.SecretMeta, 0, len(metas))
+	for _, m := range metas {
+		if agentHiddenHubSecret(ctx, scope, m) {
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
 }
 
 func mergeEnvironmentSecretMetadata(envVars []store.EnvVar, metas []secret.SecretMeta) []store.EnvVar {
@@ -774,6 +802,7 @@ func (s *Server) listSecrets(w http.ResponseWriter, r *http.Request) {
 		writeErrorFromErr(w, err, "")
 		return
 	}
+	metas = withoutAgentHiddenHubSecrets(ctx, scope, metas)
 	// Convert to store.Secret for response compatibility
 	secrets := make([]store.Secret, len(metas))
 	for i, m := range metas {
@@ -823,6 +852,10 @@ func (s *Server) getSecret(w http.ResponseWriter, r *http.Request, key string) {
 	}
 
 	meta, err := s.secretBackend.GetMeta(ctx, key, scope, scopeID)
+	if err == nil && agentHiddenHubSecret(ctx, scope, *meta) {
+		// The same response as a key that does not exist.
+		err = store.ErrNotFound
+	}
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
@@ -1794,7 +1827,9 @@ func (s *Server) handleScopedEnvVarByKey(w http.ResponseWriter, r *http.Request,
 		if err != nil {
 			if errors.Is(err, store.ErrNotFound) && s.secretBackend != nil {
 				meta, metaErr := s.secretBackend.GetMeta(ctx, key, scope, scopeID)
-				if metaErr == nil && meta.SecretType == "environment" {
+				// Defence in depth: this handler serves project and broker
+				// scopes, but the hub-scope agent rule is applied here too.
+				if metaErr == nil && meta.SecretType == "environment" && !agentHiddenHubSecret(ctx, scope, *meta) {
 					ev := secretMetaToEnvVar(*meta)
 					writeJSON(w, http.StatusOK, &ev)
 					return

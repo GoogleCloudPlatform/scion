@@ -38,6 +38,7 @@ import '../shared/security-review-dialog.js';
 import { formatRelative } from '../../utils/time.js';
 import { apiFetch, extractApiError, parseApiError } from '../../client/api.js';
 import { isFeatureEnabled, USER_DELETE_FORCE_CASCADE_FLAG } from '../../utils/feature-flags.js';
+import { copyToClipboard, showCopyFailedToast } from '../../utils/clipboard.js';
 
 type SortField = 'name' | 'created';
 type SortDir = 'asc' | 'desc';
@@ -2021,24 +2022,34 @@ export class ScionPageAdminUsers extends LitElement {
 
   private async copyInviteLink(): Promise<void> {
     if (!this.createdInviteResult) return;
-    try {
-      await navigator.clipboard.writeText(this.createdInviteResult.inviteUrl);
-      this.inviteCopied = true;
-      setTimeout(() => {
-        this.inviteCopied = false;
-      }, 2000);
-    } catch {
-      const input = document.createElement('input');
-      input.value = this.createdInviteResult.inviteUrl;
-      document.body.appendChild(input);
-      input.select();
-      document.execCommand('copy');
-      document.body.removeChild(input);
-      this.inviteCopied = true;
-      setTimeout(() => {
-        this.inviteCopied = false;
-      }, 2000);
+    const url = this.createdInviteResult.inviteUrl;
+    if (!(await copyToClipboard(url)) && !this.copyViaSelection(url)) {
+      showCopyFailedToast();
+      return;
     }
+    this.inviteCopied = true;
+    setTimeout(() => {
+      this.inviteCopied = false;
+    }, 2000);
+  }
+
+  /**
+   * Fallback copy through a temporary input and execCommand, for browsers
+   * without the Clipboard API. Returns whether the browser reported a copy.
+   */
+  private copyViaSelection(text: string): boolean {
+    const input = document.createElement('input');
+    input.value = text;
+    document.body.appendChild(input);
+    input.select();
+    let ok: boolean;
+    try {
+      ok = typeof document.execCommand === 'function' && document.execCommand('copy');
+    } catch {
+      ok = false;
+    }
+    document.body.removeChild(input);
+    return ok;
   }
 
   // ==================== Render Methods ====================

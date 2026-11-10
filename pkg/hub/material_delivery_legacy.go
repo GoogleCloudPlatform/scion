@@ -63,23 +63,6 @@ package hub
 //     baseline); legacy_adopted_capped is a ceiling within the edge role's
 //     row that fits in neither.
 //
-//   - uat_descendant_legacy: an agent-recorded edge (agent delegator, agent
-//     credential) that lacks the deliver permission only because its
-//     parent chain did not allow it when the edge was recorded: an ancestor
-//     was created from a user access token, before the deliver permissions
-//     were intrinsic to such a hop (uatHopEffectCeiling), so the parent
-//     could not pass them down (legacyInheritsUATGap). It is let through
-//     when every hop above it, up to a hop recorded from a user access token
-//     whose uatHopEffectCeiling allows the permission, is of the same kind;
-//     a descendant hop whose parent's ceiling does allow the permission is a
-//     real narrowing and still denies. Edges recorded since carry the
-//     deliver permissions (parentDeliverEligibility) and need no exception.
-//     Unlike the other cohorts, it still requires the provenance root
-//     admission (uatDescendantRootDenied), as its token-created ancestor
-//     does on the strict walk.
-//     The census counts this cohort until it reads zero, and then it is
-//     removed.
-//
 // A hop recorded from a user access token is not a legacy hop: the deliver
 // permissions are intrinsic to it (uatIntrinsicPermissionIDs), so the strict
 // walk admits it, exactly as for a session-created agent.
@@ -91,8 +74,7 @@ package hub
 // and counted by the census), local-development provenance this server does
 // not admit, the depth bound and cycles, and every recorded non-legacy hop's
 // effect ceiling (an agent-recorded edge whose ceiling lacks the permission
-// still denies unless it only inherits a UAT-created ancestor's gap). A
-// chain with no legacy hop never takes the fallback, so its provenance
+// denies). A chain with no legacy hop never takes the fallback, so its provenance
 // root admission (ResolveProvenanceRoot) still applies.
 //
 // When the walk cannot follow edges any further (legacy_no_edge,
@@ -106,7 +88,6 @@ package hub
 import (
 	"container/list"
 	"context"
-	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -123,7 +104,6 @@ const (
 	legacyDeliveryCohortAdoptedBaseline = "legacy_adopted_baseline"
 	legacyDeliveryCohortAdoptedReadOnly = "legacy_adopted_readonly"
 	legacyDeliveryCohortAdoptedCapped   = "legacy_adopted_capped"
-	legacyDeliveryCohortUATDescendant   = "uat_descendant_legacy"
 )
 
 // Fallback Warn rate limit: one line per agent, cohort and item per window,
@@ -236,21 +216,6 @@ func withinCompatibilityV1Row(ids []string, role AgentRole) bool {
 	return true
 }
 
-// legacyInheritsUATGap reports whether a recorded bounded edge whose ceiling
-// does not allow permissionID, one of the deliver permissions, may only
-// inherit the gap a token-created ancestor left before the deliver
-// permissions were intrinsic to its hop (uat_descendant_legacy): it was
-// recorded by an agent delegator from an agent credential. The tolerant
-// walk admits such a hop only when the hops above reach a hop recorded from
-// a user access token whose uatHopEffectCeiling allows the permission,
-// through hops of the same kind (hubDeliveryWalk, pendingUAT); otherwise
-// its own deny stands.
-func legacyInheritsUATGap(edge *store.DelegationEdge, permissionID string) bool {
-	return legacyFallbackPermission(permissionID) &&
-		edge.SourceCredentialKind == store.SourceCredentialAgent &&
-		edge.DelegatorType == store.DelegationPrincipalAgent
-}
-
 // hubDeliveryLegacyAncestry ends a tolerant walk at agentID, whose chain
 // cannot be followed by edges: the agent's stored ancestry stands in for
 // the rest of the chain. The root user (position 0) must exist and be
@@ -312,28 +277,9 @@ func (a *AuthzService) hubDeliveryLegacyFallback(
 		note hubDeliveryLegacyNote
 		obs  hubDeliveryWalkObservation
 	)
-	ok, walkReason, walkCause := a.hubDeliveryWalkObserved(ctx, agentID, h.projectID, permissionID, nil, &note, &obs)
-	if !ok && note.cohort == legacyDeliveryCohortUATDescendant {
-		// The tolerant walk reached the token-created ancestor and refused a
-		// later check there (for example an inactive creating user). Return
-		// that deny, which names the cause, as the strict walk does for the
-		// token-created agent itself.
-		if explain != nil {
-			*explain = append(*explain, DecisionStep{Step: "delegation_ceiling_delivery_denied", Detail: walkReason})
-		}
-		return hubDeliveryAdmissionOutcome{reason: walkReason, cause: walkCause, deniedCohort: legacyDeliveryCohortUATDescendant}
-	}
+	ok, _, _ := a.hubDeliveryWalkObserved(ctx, agentID, h.projectID, permissionID, nil, &note, &obs)
 	if !ok || note.cohort == "" {
 		return strict
-	}
-	if note.cohort == legacyDeliveryCohortUATDescendant {
-		// A descendant of a token-created agent is admitted as its
-		// token-created ancestor is: the root user must still be admitted to
-		// the project (ResolveProvenanceRoot), as on the strict walk. The
-		// other legacy cohorts keep their behaviour from before the check.
-		if denied, ok := a.uatDescendantRootDenied(ctx, agentID, permissionID, explain); ok {
-			return denied
-		}
 	}
 	reason := "delivery legacy fallback: " + note.cohort
 	if note.depth > 0 {
@@ -343,31 +289,6 @@ func (a *AuthzService) hubDeliveryLegacyFallback(
 		*explain = append(*explain, DecisionStep{Step: "delegation_ceiling_delivery_legacy_fallback", Detail: reason})
 	}
 	return hubDeliveryAdmissionOutcome{ok: true, reason: reason, legacyCohort: note.cohort, uatIntrinsic: obs.uatIntrinsic}
-}
-
-// uatDescendantRootDenied applies the provenance root admission to a chain
-// the tolerant walk passed under uat_descendant_legacy, exactly as the strict
-// walk applies it to the token-created ancestor: any ResolveProvenanceRoot
-// error denies, with its cause (root user not admitted, inactive, a chain
-// mismatch, a lookup fault failing closed, and so on). It returns the deny and
-// true, or false when the admission passes.
-func (a *AuthzService) uatDescendantRootDenied(ctx context.Context, agentID, permissionID string, explain *[]DecisionStep) (hubDeliveryAdmissionOutcome, bool) {
-	_, err := a.ResolveProvenanceRoot(ctx, agentID, ResolveProvenanceOptions{PermissionID: permissionID})
-	if err == nil {
-		return hubDeliveryAdmissionOutcome{}, false
-	}
-	cause := DenyCauseForProvenanceError(err)
-	reason := "delivery provenance root denied: " + err.Error()
-	switch {
-	case errors.Is(err, ErrProvenanceNotAdmitted):
-		reason = deliveryRootNotAdmittedReason + ": " + err.Error()
-	case cause == DenyCauseCeilingError:
-		reason = "delivery ceiling check failed (fail-closed): " + err.Error()
-	}
-	if explain != nil {
-		*explain = append(*explain, DecisionStep{Step: "delegation_ceiling_delivery_denied", Detail: reason})
-	}
-	return hubDeliveryAdmissionOutcome{reason: reason, cause: cause, deniedCohort: legacyDeliveryCohortUATDescendant}, true
 }
 
 // deliveryLogDedup remembers recently logged keys for the fallback Warn: a

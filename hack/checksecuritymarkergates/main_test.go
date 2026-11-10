@@ -271,6 +271,7 @@ func prepareOverlayWorkspace(t *testing.T, root, relPath, mutatedContent string)
 		"pkg/hub/handlers_chat_v2.go",
 		"pkg/hub/messagebroker.go",
 		"pkg/hub/handlers_broker_inbound.go",
+		"pkg/hub/broker_inbound_sender.go",
 		"pkg/hub/notifications.go",
 		"pkg/hub/server.go",
 	}

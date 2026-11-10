@@ -1414,7 +1414,7 @@ var identityOperations = []OperationSpec{
 	{
 		ID:          "user.self.scopes",
 		Domain:      "user",
-		Description: "List the token selectors and, for a requested boundary, the caller's own mint eligibility for each. Any token reads it",
+		Description: "List the token selectors and, for a requested boundary, the caller's own mint eligibility for each. Any token reads the selector list. Eligibility needs an interactive session: a token request naming a boundary or project is refused",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/auth/scopes", Method: "GET"},
 		},
@@ -1427,6 +1427,7 @@ var identityOperations = []OperationSpec{
 		DenialCodes:      []DenialCode{DenialForbidden},
 		TestRefs: []TestRef{
 			{Package: "pkg/hub", Function: "TestSelfIdentityReadsToken_AnyTokenReads"},
+			{Package: "pkg/hub", Function: "TestAuthScopes_TokenCannotRequestBoundaryEligibility"},
 		},
 		Exemptions: []Exemption{{
 			Kind:   ExemptionAuthenticationOnly,

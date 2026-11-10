@@ -420,3 +420,12 @@ func (plainAuditLogger) LogAgentSecretReadEvent(context.Context, *AgentSecretRea
 func (plainAuditLogger) RecordSAAssignment(context.Context, *store.SAAssignmentEvent) error {
 	return nil
 }
+
+// recordAgentEdge records a principal edge from the fixture user to the
+// fixture agent, so the agent's chain has recorded provenance (a chain
+// without it reads no user-scope secret).
+func (f *materialFixture) recordAgentEdge(t *testing.T) {
+	t.Helper()
+	(&userScopeCeilingFixture{materialFixture: f}).recordEdge(t, store.DelegationPrincipalUser, f.UserID, f.AgentID,
+		store.EffectCeiling{Kind: store.EffectCeilingPrincipal}, nil)
+}

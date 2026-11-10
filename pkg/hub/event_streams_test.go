@@ -210,6 +210,8 @@ func TestEventStreamRegistry_MaxAge(t *testing.T) {
 	ws, _, ts, logs := newStreamTestServer(t, func(cfg *WebServerConfig) {
 		cfg.SSEHeartbeatInterval = 20 * time.Millisecond
 		cfg.SSEMaxConnectionAge = 300 * time.Millisecond
+		// The middle of the jitter range: exactly the configured age.
+		cfg.SSEMaxAgeJitter = func() float64 { return 0.5 }
 	})
 	const n = 3
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -518,6 +520,7 @@ func TestExpandProjectWildcard_DrainsEveryPage(t *testing.T) {
 	assert.Equal(t, "project.p-02502.>", got[2502])
 	assert.Equal(t, 3, st.listProjectsCalls, "three pages of at most 1000")
 	assert.Equal(t, sseProjectWildcardPageSize, st.lastListProjectsLimit)
+	assert.Zero(t, st.listProjectsFullCalls, "the expansion pages summaries, without the computed fields")
 }
 
 func TestExpandProjectWildcard_ErrorOnLaterPageFailsClosed(t *testing.T) {

@@ -503,7 +503,7 @@ func (s *Server) resolvePendingDevSaver(ctx context.Context) (pendingSaverIdenti
 	default:
 		return pendingSaverIdentity{out: saverAccountInactive, reason: accountRefusalReason(refusal)}, nil
 	}
-	identity := NewDevUser(s.authConfig.DevUserCfg)
+	identity := s.authConfig.currentDevUser()
 	return s.deferDuringMaintenance(pendingSaverIdentity{out: saverApply, identity: identity}, identity), nil
 }
 

@@ -58,6 +58,17 @@ func TestValidateLegacyMessage_EmptyMsg(t *testing.T) {
 	}
 }
 
+// A choice prompt may leave out its intro: its body is rendered from its
+// decisions, so an empty msg is accepted for that type only.
+func TestValidateLegacyMessage_ChoicePromptWithoutIntro(t *testing.T) {
+	msg := validLegacyMessage()
+	msg.Msg = ""
+	msg.Type = messages.TypeChoicePrompt
+	if err := ValidateLegacyMessage(msg); err != nil {
+		t.Fatalf("a choice prompt without an intro must be accepted: %v", err)
+	}
+}
+
 // TestValidateLegacyMessage_AttachmentOnlyMessage verifies that an
 // attachment-only message (Msg="" with Attachments present) passes
 // validation. The validator must consult Attachments before rejecting

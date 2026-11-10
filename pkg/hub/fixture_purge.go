@@ -23,7 +23,6 @@ import (
 	"sort"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
@@ -457,9 +456,8 @@ func (s *Server) purgeFixtureAgent(ctx context.Context, listed *store.Agent, req
 	if deletionActive(a) {
 		return notDone("deleting", "")
 	}
-	createdNoLaunch := a.Phase == string(state.PhaseCreated) && a.LaunchState != store.LaunchStateActive
 	finalizing := a.DeletionState == store.DeletionStateFinalizing
-	if !isManagedAgentRuntime(a.Runtime) && !createdNoLaunch && !finalizing && !s.brokerReachable(ctx, a) {
+	if !isManagedAgentRuntime(a.Runtime) && !deleteSkipsBrokerCheck(a) && !finalizing && !s.brokerReachable(ctx, a) {
 		return notDone("broker_unavailable", "")
 	}
 	plan, err := s.claimAgentDeletion(ctx, a.ID, agentDeleteParams{

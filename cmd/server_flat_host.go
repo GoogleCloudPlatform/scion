@@ -114,6 +114,11 @@ func newFlatInstanceRuntime(_ context.Context, inst config.V1RuntimeBrokerInstan
 				"the instance was not activated: %v", brokeridentity.ErrExecutionScopeUnidentified, err)
 		}
 		return rt, nil
+	case brokeridentity.TargetTypeCloudRun:
+		// A cloudrun runtime is built only by flatInstanceActivation, after
+		// its precondition (P1-P6) passed and from the bytes that check
+		// read; never from the credentials path here.
+		return nil, errors.New("a cloudrun runtime is built only through the flat activation checks")
 	default:
 		return nil, fmt.Errorf("runtime target type %q is not supported in this release", inst.RuntimeTarget.Type)
 	}
@@ -131,6 +136,14 @@ func probeFlatInstanceScope(ctx context.Context, inst config.V1RuntimeBrokerInst
 		return probeDockerExecutionScope(ctx, r.Command)
 	case *runtime.KubernetesRuntime:
 		return probeKubernetesExecutionScope(ctx, r)
+	case flatCloudRunScopeRuntime:
+		// Only a cloudrun instance is probed as a Cloud Run scope, whatever
+		// runtime it carries (construction is gated the same way:
+		// flatInstanceActivation.newRuntime).
+		if inst.RuntimeTarget == nil || inst.RuntimeTarget.Type != config.RuntimeTargetTypeCloudRun {
+			return brokeridentity.ExecutionScope{}, fmt.Errorf("%w: a Cloud Run runtime on a non-cloudrun instance is not probed", brokeridentity.ErrExecutionScopeUnidentified)
+		}
+		return probeCloudRunExecutionScope(ctx, inst, r)
 	default:
 		return brokeridentity.ExecutionScope{}, fmt.Errorf("%w: no scope probe for runtime %q", brokeridentity.ErrExecutionScopeUnidentified, rt.Name())
 	}
@@ -224,25 +237,28 @@ func (a *colocatedFlatActivator) Activate(ctx context.Context, c brokerhost.Cand
 		}
 		return nil, brokerhost.WithReason("registration_failed", err)
 	}
-	act := &brokerhost.Activation{}
+	// Every co-located start replaces the instance's secret, so a secret
+	// saved earlier (for example by an HTTP pre-registration) stops
+	// verifying. Without a fresh secret the instance is not activated:
+	// it could not sign its Hub requests, and nothing falls back to a
+	// stored secret.
 	authSvc := a.hubSrv.GetBrokerAuthService()
 	if authSvc == nil {
-		log.Printf("Warning: BrokerAuthService not available, skipping credentials for flat Runtime Broker instance %q", c.Instance.Key)
-		return act, nil
+		return nil, brokerhost.WithReason("credentials_unavailable",
+			fmt.Errorf("flat Runtime Broker instance %q: the Hub's broker authentication service is not available", c.Instance.Key))
 	}
-	secretKeyB64, err := authSvc.GenerateAndStoreSecret(ctx, row.ID)
+	secretKeyB64, err := authSvc.ReplaceBrokerSecret(ctx, row.ID)
 	if err != nil {
-		log.Printf("Warning: failed to generate/retrieve secret for flat Runtime Broker instance %q: %v", c.Instance.Key, err)
-		return act, nil
+		return nil, brokerhost.WithReason("credentials_failed",
+			fmt.Errorf("flat Runtime Broker instance %q: %w", c.Instance.Key, err))
 	}
-	act.InMemoryCredentials = &brokercredentials.BrokerCredentials{
+	return &brokerhost.Activation{InMemoryCredentials: &brokercredentials.BrokerCredentials{
 		Name:         "local",
 		BrokerID:     row.ID,
 		SecretKey:    secretKeyB64,
 		HubEndpoint:  a.hubEndpoint,
 		RegisteredAt: time.Now(),
-	}
-	return act, nil
+	}}, nil
 }
 
 func (a *colocatedFlatActivator) Refused(inst config.V1RuntimeBrokerInstanceConfig, err error) {
@@ -353,6 +369,13 @@ func startFlatRuntimeBrokerHost(ctx context.Context, p flatHostParams) error {
 		if r, ok := chResByRuntime[rtName]; ok {
 			return r
 		}
+		if rtName == brokeridentity.TargetTypeCloudRun {
+			// A flat cloudrun instance's agents get the P5-validated
+			// public endpoint only (the same function P5 checks).
+			r := flatCloudRunContainerHub(p.hubEndpoint, p.hubEndpointSrc)
+			chResByRuntime[rtName] = r
+			return r
+		}
 		r := brokerContainerHubConfig(cfg, brokerContainerHubParams{
 			RuntimeName:             rtName,
 			BrokerHubEndpoint:       hubEndpointForRH,
@@ -432,6 +455,7 @@ func startFlatRuntimeBrokerHost(ctx context.Context, p flatHostParams) error {
 	hostServices = append(hostServices, caches)
 	if p.hubSrv != nil {
 		shared.colocatedStorage = p.hubSrv.GetStorage()
+		shared.colocatedHubID = p.hubSrv.HubID()
 	}
 	buildServer := func(ic brokerhost.InstanceContext) (*runtimebroker.Server, error) {
 		rhCfg := flatInstanceServerConfig(shared, ic)
@@ -446,12 +470,23 @@ func startFlatRuntimeBrokerHost(ctx context.Context, p flatHostParams) error {
 		return srv, nil
 	}
 
+	// One activation per Prepare: the shared precheck (Precondition, before
+	// any runtime is built) and the runtime factory with the cloudrun
+	// credential checks, whose principal set follows configuration order.
+	activation := newFlatInstanceActivation(flatPrecheckHost{
+		mode:           mode,
+		layout:         brokerLayout,
+		storageErr:     brokerStorageErr,
+		hubEndpoint:    p.hubEndpoint,
+		hubEndpointSrc: p.hubEndpointSrc,
+	})
 	host, err := brokerhost.New(brokerhost.Config{
 		GlobalDir:          p.globalDir,
 		Instances:          p.instances,
 		Mode:               mode,
 		LegacyIDs:          legacyRuntimeBrokerIDs(cfg, p.settings, vsBroker, p.globalDir),
-		NewRuntime:         newFlatInstanceRuntime,
+		Precondition:       activation.precondition,
+		NewRuntime:         activation.newRuntime,
 		ProbeScope:         flatScopeProber,
 		Activator:          activator,
 		BuildServer:        buildServer,
@@ -483,6 +518,7 @@ func startFlatRuntimeBrokerHost(ctx context.Context, p flatHostParams) error {
 				st.Key, st.RuntimeBrokerID, st.Name, st.RuntimeTargetID)
 		}
 	}
+	logFlatCloudRunServiceAccounts(log.Printf, host.Active())
 
 	active := host.Active()
 	if mode == brokerhost.ModeColocated && len(active) > 0 {
@@ -507,6 +543,7 @@ func startFlatRuntimeBrokerHost(ctx context.Context, p flatHostParams) error {
 	}
 
 	log.Printf("Starting Runtime Broker API server on %s:%d", cfg.RuntimeBroker.Host, cfg.RuntimeBroker.Port)
+	brokerListeners.add(host.Listening())
 	p.wg.Add(1)
 	go func() {
 		defer p.wg.Done()
@@ -535,16 +572,26 @@ func flatOwnershipPreflight(ctx context.Context, c brokerhost.Candidate) error {
 		return err
 	}
 	records := runtimebroker.NewOwnershipStore(dir, c.Identity.RuntimeBrokerID)
-	var unresolved []string
+	// Labels are read under the keys the runtime stores them under (Cloud
+	// Run rewrites label keys), so an owned object is never read as
+	// unlabeled.
+	label := func(o api.AgentInfo, key string) string { return o.Labels[runtime.LabelKey(c.Runtime, key)] }
+	_, cloudRun := c.Runtime.(*runtime.CloudRunRuntime)
+	var unresolved, unlabeledCloudRun []string
 	for _, o := range objects {
-		switch owner := o.Labels[api.LabelRuntimeBrokerID]; owner {
+		switch owner := label(o, api.LabelRuntimeBrokerID); owner {
 		case "":
+			if cloudRun {
+				// Named by the Cloud Run instance name only.
+				unlabeledCloudRun = append(unlabeledCloudRun, o.ContainerID)
+				continue
+			}
 			// below: unattributable
 		case c.Identity.RuntimeBrokerID:
 			// This instance's object: make sure its record exists
 			// (reconstruction needs the complete project, agent, run and
 			// object identity; anything less is unresolved).
-			if err := records.Reconstruct(o); err != nil {
+			if err := records.Reconstruct(o, c.Runtime); err != nil {
 				unresolved = append(unresolved, fmt.Sprintf("%s (%v)", o.Name, err))
 			}
 			continue
@@ -552,10 +599,18 @@ func flatOwnershipPreflight(ctx context.Context, c brokerhost.Candidate) error {
 			continue // another instance's object
 		}
 		name := o.Name
-		if p := o.Labels["scion.project_id"]; p != "" {
+		if p := label(o, "scion.project_id"); p != "" {
 			name = p + "/" + name
 		}
 		unresolved = append(unresolved, name)
+	}
+	if len(unlabeledCloudRun) > 0 {
+		// Amendment P5-CR, CR6 (the drain step): unlabeled agent instances (for
+		// example created by a legacy Cloud Run Runtime Broker, of this Hub
+		// or another) block the scope until drained. Instance names only:
+		// never paths, credentials or the project number.
+		sort.Strings(unlabeledCloudRun)
+		return flatCloudRunUnlabeledError(unlabeledCloudRun)
 	}
 	if len(unresolved) > 0 {
 		sort.Strings(unresolved)
@@ -660,6 +715,8 @@ type flatServerShared struct {
 	// colocatedStorage is the co-located Hub's storage (nil without one);
 	// only a co-located (in-memory credentials) instance uses it.
 	colocatedStorage storage.Storage
+	// colocatedHubID is the co-located Hub's instance ID (empty without one).
+	colocatedHubID string
 }
 
 // flatInstanceServerConfig is one activated flat instance's Runtime Broker
@@ -722,6 +779,7 @@ func flatInstanceServerConfig(sh flatServerShared, ic brokerhost.InstanceContext
 	}
 	if ic.Activation.InMemoryCredentials != nil && sh.colocatedStorage != nil {
 		rhCfg.ColocatedStorage = sh.colocatedStorage
+		rhCfg.ColocatedHubID = sh.colocatedHubID
 	}
 	// The host's single NFS mount owner: host-bind instances
 	// register with it instead of mounting themselves.
@@ -776,7 +834,16 @@ func installColocatedSettingsOverlay(cfg *config.GlobalConfig, hubSrv *hub.Serve
 	config.SetGlobalSettingsOverlay(overlay)
 	if ops := hubSrv.GetOperationalSettings(); ops != nil {
 		snap := ops.Snapshot()
-		overlay.Update(snap.Runtimes, snap.Profiles, snap.HarnessConfigs)
+		// The stored runtimes and profiles, with their Kubernetes placement
+		// findings, so invalid stored placement refuses Kubernetes starts
+		// from the first dispatch (the startup ApplySnapshot ran before
+		// this install). A concurrent apply of a newer snapshot can be
+		// overwritten by this one until the next settings change, as for the
+		// maps before; maps and findings stay one snapshot, so it never
+		// fails open. The seed does not take the Hub's settings apply lock,
+		// which is unexported Hub state that only a new Hub API could
+		// expose.
+		hub.UpdateSettingsOverlay(overlay, snap)
 		// Removed storage overrides in the stored runtimes and profiles are
 		// reported, not refused: they are fixed through the admin settings
 		// API, which needs a running hub (ptone/scion#6371).

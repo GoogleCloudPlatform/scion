@@ -175,8 +175,7 @@ If a customized Codex `config.yaml` has no `thinking:` block, the provisioner lo
 A harness for GitHub's `copilot` CLI. Opt-in bundle.
 
 ### Authentication
-Copilot authenticates with a **GitHub token** (auth type `api-key`). Scion resolves the token
-from the following environment variables, in order:
+Copilot authenticates with a **GitHub token** (auth type `api-key`) or a saved **`~/.copilot/config.json` sign-in file** (auth type `auth-file`, secret `COPILOT_CONFIG`). For `api-key`, Scion resolves the token from the following environment variables, in order:
 
 1. `COPILOT_GITHUB_TOKEN`
 2. `GH_TOKEN`
@@ -184,9 +183,13 @@ from the following environment variables, in order:
 
 The token must be a **fine-grained Personal Access Token** with the "Copilot Requests"
 permission; classic (`ghp_...`) tokens are not supported. Scion re-exports the resolved token as
-`COPILOT_GITHUB_TOKEN` for the CLI. If no token is found, the agent drops to a shell — run
-`copilot login` interactively, then capture the credential with the container's
-`capture_auth.py` (see [Harness Authentication](/scion/local/agent-credentials/#capturing-credentials-from-a-running-agent)).
+`COPILOT_GITHUB_TOKEN` for the CLI. For `auth-file`, `~/.copilot/config.json` must contain a
+real sign-in (`copilot_tokens`, `copilot_hmac_key`, or `capi_hmac_key`), not
+settings only. If neither credential is present and no-auth mode is allowed, the agent drops to
+an interactive shell with `no-auth-env.yaml` (which sets `DBUS_SESSION_BUS_ADDRESS` to
+`unix:path=/home/scion/.scion/harness/no-session-bus` so `copilot login` writes its sign-in to
+`~/.copilot/config.json` instead of a desktop keyring) — run `copilot login` interactively, then
+capture the credential with `capture_auth.py` (see [Harness Authentication](/scion/local/agent-credentials/#capturing-credentials-from-a-running-agent)).
 
 An active GitHub Copilot subscription is required at runtime.
 

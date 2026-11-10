@@ -61,10 +61,15 @@ type CreateSkillResponse struct {
 
 // ListSkillsResponse is the response for listing skills.
 type ListSkillsResponse struct {
-	Skills       []SkillWithCapabilities `json:"skills"`
-	NextCursor   string                  `json:"nextCursor,omitempty"`
-	TotalCount   int                     `json:"totalCount"`
-	Capabilities *Capabilities           `json:"_capabilities,omitempty"`
+	Skills     []SkillWithCapabilities `json:"skills"`
+	NextCursor string                  `json:"nextCursor,omitempty"`
+	TotalCount int                     `json:"totalCount"`
+	// TotalCountApproximate marks TotalCount as a lower bound: set when a
+	// per-item list's candidate pool crossed authorizedListMaxCandidates
+	// before the count scan finished. Only the agent delegated
+	// credential's list sets it.
+	TotalCountApproximate bool          `json:"totalCountApproximate,omitempty"`
+	Capabilities          *Capabilities `json:"_capabilities,omitempty"`
 }
 
 // SkillWithCapabilities wraps a store.Skill with capability annotations.
@@ -257,6 +262,14 @@ func (s *Server) listSkills(w http.ResponseWriter, r *http.Request) {
 	}
 
 	identity := GetIdentityFromContext(ctx)
+
+	// An agent delegated credential takes its scope only from the delegated
+	// list arm; no project.list scope is resolved for it
+	// (.design/agent-delegation.md §11.8).
+	if d, ok := identity.(*DelegatedAgentIdentity); ok && d != nil {
+		s.listSkillsDelegated(w, r, d, filter)
+		return
+	}
 
 	// A user access token lists skills only when its ceiling carries
 	// skill.list and skill.list is eligible for its boundary kind. Without
@@ -898,7 +911,13 @@ func (s *Server) listSkillVersions(w http.ResponseWriter, r *http.Request, skill
 		return
 	}
 
-	result, err := s.store.ListSkillVersions(ctx, skillID, store.ListOptions{
+	// Version status filter (skill_version_status.go), applied in the store
+	// so the page and totalCount agree.
+	var filter store.SkillVersionFilter
+	if !s.skillVersionsAllStatuses(ctx, identity, skill) {
+		filter.Statuses = skillVersionListedStatuses
+	}
+	result, err := s.store.ListSkillVersions(ctx, skillID, filter, store.ListOptions{
 		Limit: 100,
 	})
 	if err != nil {
@@ -939,8 +958,11 @@ func (s *Server) getSkillVersion(w http.ResponseWriter, r *http.Request, skillID
 		return
 	}
 
-	if sv.SkillID != skillID {
-		NotFound(w, "SkillVersion")
+	// A version of another skill, and a version outside the status filter
+	// (skill_version_status.go), get the same response as a missing
+	// version ID.
+	if sv.SkillID != skillID || !s.skillVersionVisible(ctx, identity, skill, sv) {
+		writeErrorFromErr(w, store.ErrNotFound, "")
 		return
 	}
 
@@ -1311,7 +1333,8 @@ func (s *Server) publishSkillVersionMultipart(w http.ResponseWriter, r *http.Req
 	}
 	if err := g.Wait(); err != nil {
 		_ = s.store.DeleteSkillVersion(ctx, sv.ID)
-		RuntimeError(w, "Failed to upload files: "+err.Error())
+		slog.ErrorContext(ctx, "skill file upload failed", "skill_id", skill.ID, "version", version, "error", upstreamText(err.Error()))
+		RuntimeError(w, "Failed to upload files")
 		return
 	}
 
@@ -1402,7 +1425,8 @@ func (s *Server) handleSkillUpload(w http.ResponseWriter, r *http.Request, skill
 		if writeInvalidFilePathError(w, err) {
 			return
 		}
-		RuntimeError(w, "Failed to generate upload URLs: "+err.Error())
+		slog.ErrorContext(ctx, "skill upload URLs failed", "skill_id", skill.ID, "version", req.Version, "error", upstreamText(err.Error()))
+		RuntimeError(w, "Failed to generate upload URLs")
 		return
 	}
 
@@ -1525,7 +1549,12 @@ func (s *Server) handleSkillFinalize(w http.ResponseWriter, r *http.Request, ski
 		if writeInvalidFilePathError(w, err) {
 			return
 		}
-		ValidationError(w, err.Error(), nil)
+		var notFound *fileNotFoundError
+		if errors.As(err, &notFound) {
+			ValidationError(w, err.Error(), nil)
+			return
+		}
+		writeErrorFromErr(w, err, "")
 		return
 	}
 
@@ -1594,7 +1623,8 @@ func (s *Server) handleSkillDownload(w http.ResponseWriter, r *http.Request, ski
 	versionPath := skill.StoragePath + "/" + sv.Version
 	downloadURLs, manifestURL, expires, err := generateDownloadURLs(ctx, stor, versionPath, s.legacyFallbackPath(versionPath), sv.Files)
 	if err != nil {
-		RuntimeError(w, fmt.Sprintf("skill %q version %q: %s", skill.Name, sv.Version, err))
+		slog.ErrorContext(ctx, "skill download URLs failed", "skill_id", skill.ID, "version", sv.Version, "error", upstreamText(err.Error()))
+		RuntimeError(w, fmt.Sprintf("skill %q version %q: failed to generate download URLs", skill.Name, sv.Version))
 		return
 	}
 

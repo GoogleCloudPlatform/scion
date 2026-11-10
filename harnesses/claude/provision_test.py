@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import shutil
@@ -28,7 +29,7 @@ import stat
 import subprocess
 import tempfile
 import unittest
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stderr
 from typing import Any
 from unittest import mock
 
@@ -507,11 +508,32 @@ def _select_with_candidates(home: str, candidates: dict[str, Any]):
     return ctx, ctx.select_auth(provision.AUTH)
 
 
+def _vertex_env(**values: str | None) -> dict[str, str | None]:
+    """env_vars() arguments: every Vertex discovery name unset unless given."""
+    base: dict[str, str | None] = {k: None for k in provision._VERTEX_DISCOVERY_KEYS}
+    base.update(values)
+    return base
+
+
+def _write_secrets(home: str, values: dict[str, str]) -> dict[str, str]:
+    """Stage env secret files under home; returns name -> path."""
+    secrets = os.path.join(home, "secrets")
+    os.makedirs(secrets, exist_ok=True)
+    paths = {}
+    for key, value in values.items():
+        paths[key] = os.path.join(secrets, key)
+        with open(paths[key], "w", encoding="utf-8") as f:
+            f.write(value)
+    return paths
+
+
 class VertexAuthSelectionTest(unittest.TestCase):
     # config.yaml's vertex-ai region group accepts CLOUD_ML_REGION; the
     # provisioner must accept it too (ptone/scion#4623).
     def test_explicit_vertex_ai_accepts_cloud_ml_region(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
+        with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp), env_vars(
+            **_vertex_env(GOOGLE_CLOUD_PROJECT="proj-env", CLOUD_ML_REGION="us-east5"),
+        ):
             ctx, resolved = _select_with_candidates(tmp, {
                 "explicit_type": "vertex-ai",
                 "env_vars": ["GOOGLE_CLOUD_PROJECT", "CLOUD_ML_REGION"],
@@ -519,16 +541,16 @@ class VertexAuthSelectionTest(unittest.TestCase):
             self.assertEqual(resolved.method, "vertex-ai")
             self.assertEqual(resolved.env_key, "CLOUD_ML_REGION")
             env = provision._build_env_overlay(ctx, resolved)
-        self.assertEqual(env["CLOUD_ML_REGION"], "${CLOUD_ML_REGION}")
+        self.assertEqual(env["CLOUD_ML_REGION"], "us-east5")
         self.assertEqual(env["CLAUDE_CODE_USE_VERTEX"], "1")
 
-    def test_location_wins_over_region_placeholder_fallback(self) -> None:
-        # Both keys present, no staged secrets: the LOCATION key is chosen and
-        # the ${VAR} placeholder fallback is kept (ptone/scion#4719). The
-        # process env is cleared: the conflict check reads it for these keys.
-        with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp), env_vars(
-            GOOGLE_CLOUD_LOCATION=None, GOOGLE_CLOUD_REGION=None,
-        ):
+    def test_location_wins_and_unset_values_are_left_out(self) -> None:
+        # PROJECT, REGION and LOCATION are candidates with no staged secret
+        # and no process-env value: the LOCATION key is chosen
+        # (ptone/scion#4719) and neither value key is written. The overlay is
+        # applied literally, so a ${VAR} placeholder would reach Claude as
+        # text (ptone/scion#7290).
+        with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp), env_vars(**_vertex_env()):
             ctx, resolved = _select_with_candidates(tmp, {
                 "explicit_type": "vertex-ai",
                 "env_vars": ["GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_REGION", "GOOGLE_CLOUD_LOCATION"],
@@ -537,9 +559,50 @@ class VertexAuthSelectionTest(unittest.TestCase):
             ctx.warn = warnings.append
             env = provision._build_env_overlay(ctx, resolved)
         self.assertEqual(resolved.env_key, "GOOGLE_CLOUD_LOCATION")
-        self.assertEqual(env["CLOUD_ML_REGION"], "${GOOGLE_CLOUD_LOCATION}")
-        self.assertEqual(env["ANTHROPIC_VERTEX_PROJECT_ID"], "${GOOGLE_CLOUD_PROJECT}")
+        self.assertNotIn("CLOUD_ML_REGION", env)
+        self.assertNotIn("ANTHROPIC_VERTEX_PROJECT_ID", env)
+        self.assertEqual(env["CLAUDE_CODE_USE_VERTEX"], "1")
+        self.assertFalse([v for v in env.values() if "${" in v], env)
         self.assertEqual(warnings, [])
+
+    def test_env_only_values_are_written(self) -> None:
+        # Candidates with no staged secret: the process-env values are
+        # written, not ${VAR} placeholders (ptone/scion#7290).
+        with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp), env_vars(
+            **_vertex_env(GOOGLE_CLOUD_PROJECT="proj-env", GOOGLE_CLOUD_LOCATION="us-east5"),
+        ):
+            ctx, resolved = _select_with_candidates(tmp, {
+                "explicit_type": "vertex-ai",
+                "env_vars": ["GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_LOCATION"],
+            })
+            env = provision._build_env_overlay(ctx, resolved)
+        self.assertEqual(env["ANTHROPIC_VERTEX_PROJECT_ID"], "proj-env")
+        self.assertEqual(env["CLOUD_ML_REGION"], "us-east5")
+
+    def test_staged_secret_wins_over_process_env(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp), env_vars(
+            **_vertex_env(GOOGLE_CLOUD_PROJECT="proj-env", GOOGLE_CLOUD_LOCATION="loc-env"),
+        ):
+            paths = _write_secrets(tmp, {
+                "GOOGLE_CLOUD_PROJECT": "proj-staged",
+                "GOOGLE_CLOUD_LOCATION": "loc-staged",
+            })
+            ctx, resolved = _select_with_candidates(tmp, {
+                "explicit_type": "vertex-ai",
+                "env_vars": list(paths),
+                "env_secret_files": paths,
+            })
+            env = provision._build_env_overlay(ctx, resolved)
+        self.assertEqual(env["ANTHROPIC_VERTEX_PROJECT_ID"], "proj-staged")
+        self.assertEqual(env["CLOUD_ML_REGION"], "loc-staged")
+
+    def test_read_vertex_rejects_credential_names(self) -> None:
+        # The process-env fallback is limited to Vertex discovery names.
+        with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
+            ctx = make_ctx(tmp)
+            for name in ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"):
+                with self.subTest(name=name), self.assertRaises(ValueError):
+                    provision._read_vertex(ctx, name)
 
     def test_location_and_region_differ_location_wins_with_warning(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
@@ -568,10 +631,10 @@ class VertexAuthSelectionTest(unittest.TestCase):
         self.assertIn("GOOGLE_CLOUD_REGION", warnings[0])
 
     def _env_only_overlay(self, location: str | None, region: str | None):
-        # Both keys are candidates with no staged secrets, so Claude reads the
-        # env values at runtime through the ${VAR} placeholder.
+        # Both keys are candidates with no staged secrets, so the overlay
+        # carries the process-env values.
         with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp), env_vars(
-            GOOGLE_CLOUD_LOCATION=location, GOOGLE_CLOUD_REGION=region,
+            **_vertex_env(GOOGLE_CLOUD_LOCATION=location, GOOGLE_CLOUD_REGION=region),
         ):
             ctx, resolved = _select_with_candidates(tmp, {
                 "explicit_type": "vertex-ai",
@@ -585,7 +648,7 @@ class VertexAuthSelectionTest(unittest.TestCase):
     def test_env_only_location_and_region_differ_warns(self) -> None:
         # The conflict check reads the env, as Claude does (ptone/scion#4719).
         env, warnings = self._env_only_overlay("us-east5", "us-central1")
-        self.assertEqual(env["CLOUD_ML_REGION"], "${GOOGLE_CLOUD_LOCATION}")
+        self.assertEqual(env["CLOUD_ML_REGION"], "us-east5")
         self.assertEqual(len(warnings), 1, warnings)
         self.assertIn("GOOGLE_CLOUD_REGION", warnings[0])
 
@@ -644,7 +707,7 @@ class VertexAuthSelectionTest(unittest.TestCase):
             warnings: list[str] = []
             ctx.warn = warnings.append
             env = provision._build_env_overlay(ctx, resolved)
-        self.assertEqual(env["CLOUD_ML_REGION"], "${GOOGLE_CLOUD_REGION}")
+        self.assertEqual(env["CLOUD_ML_REGION"], "us-central1")
         self.assertEqual(warnings, [])
 
     def test_explicit_vertex_ai_without_region_is_rejected(self) -> None:
@@ -654,6 +717,60 @@ class VertexAuthSelectionTest(unittest.TestCase):
                     "explicit_type": "vertex-ai",
                     "env_vars": ["GOOGLE_CLOUD_PROJECT"],
                 })
+
+
+class CredentialEnvFallbackTest(unittest.TestCase):
+    """A credential present only in the process env is never written out.
+
+    The canaries are fake values; assertions report only whether they were
+    found, never the surrounding content.
+    """
+
+    CANARY = "canary-not-a-real-credential-7290"
+    CASES = (
+        ("api-key", "ANTHROPIC_API_KEY"),
+        ("oauth-token", "CLAUDE_CODE_OAUTH_TOKEN"),
+    )
+
+    def _candidates(self, method: str, key: str) -> dict[str, Any]:
+        return {"explicit_type": method, "env_vars": [key]}
+
+    def _env(self, key: str) -> dict[str, str | None]:
+        cleared = {k: None for _, k in self.CASES}
+        return {**cleared, key: self.CANARY, "SCION_MODEL": None, "ANTHROPIC_MODEL": None}
+
+    def test_overlay_keeps_placeholder_for_env_only_credential(self) -> None:
+        for method, key in self.CASES:
+            with self.subTest(method=method), tempfile.TemporaryDirectory() as tmp, \
+                    temporary_home(tmp), env_vars(**self._env(key)):
+                ctx, resolved = _select_with_candidates(tmp, self._candidates(method, key))
+                self.assertEqual(resolved.method, method)
+                env = provision._build_env_overlay(ctx, resolved)
+                # Boolean checks: a failure must not print the credential value.
+                self.assertTrue(env.get(key) == "${" + key + "}", f"{method}: {key} is not the placeholder")
+                self.assertFalse(self.CANARY in json.dumps(env), f"{method}: canary in overlay")
+
+    def test_provision_writes_no_env_only_credential(self) -> None:
+        # Drives provision() and scans every file it can write under HOME
+        # (outputs/, .claude.json, settings) for the canary.
+        for method, key in self.CASES:
+            with self.subTest(method=method), tempfile.TemporaryDirectory() as tmp, \
+                    temporary_home(tmp), env_vars(**self._env(key)):
+                ctx, _ = _select_with_candidates(tmp, self._candidates(method, key))
+                del ctx.info  # restore the real info() so its stderr output is checked too
+                buf = io.StringIO()
+                with redirect_stderr(buf):
+                    provision.provision(ctx)
+                self.assertFalse(self.CANARY in buf.getvalue(), f"{method}: canary in stderr")
+                self.assertTrue(os.path.isfile(os.path.join(tmp, ".scion", "harness", "outputs", "env.json")))
+                found = []
+                for root, _, files in os.walk(tmp):
+                    for name in files:
+                        path = os.path.join(root, name)
+                        with open(path, "rb") as f:
+                            if self.CANARY.encode() in f.read():
+                                found.append(os.path.relpath(path, tmp))
+                self.assertEqual(found, [], f"{method}: canary written to files")
 
 
 class ConfigYamlTest(unittest.TestCase):

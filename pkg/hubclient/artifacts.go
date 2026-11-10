@@ -103,8 +103,9 @@ type ArtifactService interface {
 	ListGrants(ctx context.Context, id string) (*ArtifactGrantList, error)
 
 	// PutGrant adds a grant or changes the permission of the subject's
-	// existing grant (POST /api/v1/artifacts/{id}/grants).
-	PutGrant(ctx context.Context, id string, req *ArtifactGrantRequest) (*ArtifactGrant, error)
+	// existing grant (POST /api/v1/artifacts/{id}/grants). With
+	// req.Notify, the result says whether the user was told.
+	PutGrant(ctx context.Context, id string, req *ArtifactGrantRequest) (*ArtifactGrantResult, error)
 
 	// DeleteGrant removes a grant (DELETE /api/v1/artifacts/{id}/grants/{grantId}).
 	DeleteGrant(ctx context.Context, id, grantID string) error
@@ -119,10 +120,13 @@ type ArtifactLink struct {
 }
 
 // ArtifactLinkCreated answers CreateLink. URL is the hub-relative path of
-// the link, the only place its token appears.
+// the link; ShareURL, present only when the hub has a content host
+// (server.hub.content_url), is the absolute link on it. They are the
+// only places its token appears.
 type ArtifactLinkCreated struct {
 	Link                    ArtifactLink `json:"link"`
 	URL                     string       `json:"url"`
+	ShareURL                string       `json:"shareUrl,omitempty"`
 	ClampedToArtifactExpiry bool         `json:"clampedToArtifactExpiry,omitempty"`
 }
 
@@ -255,6 +259,21 @@ type ArtifactGrantRequest struct {
 	SubjectKind string `json:"subjectKind"`
 	SubjectRef  string `json:"subjectRef"`
 	Permission  string `json:"permission"`
+	// Notify asks the hub to tell the user subject about the grant (Ask
+	// for review). It never blocks the grant.
+	Notify bool `json:"notify,omitempty"`
+}
+
+// ArtifactGrantResult is the response of POST /api/v1/artifacts/{id}/grants.
+type ArtifactGrantResult struct {
+	Grant ArtifactGrant `json:"grant"`
+	// Notified is true when the request asked for notify and the user was
+	// told.
+	Notified bool `json:"notified,omitempty"`
+	// NotifySkipped says why a request that asked for notify did not tell
+	// the user: self, not_permitted, unavailable, not_raised or
+	// rate_limited.
+	NotifySkipped string `json:"notifySkipped,omitempty"`
 }
 
 // ArtifactResponse mirrors the hub's artifact response body.
@@ -664,18 +683,12 @@ func (s *artifactService) ListGrants(ctx context.Context, id string) (*ArtifactG
 // PutGrant implements ArtifactService. Adding or changing a grant is
 // idempotent for the same subject and permission, but it is sent once, as
 // the other mutating artifact calls are.
-func (s *artifactService) PutGrant(ctx context.Context, id string, req *ArtifactGrantRequest) (*ArtifactGrant, error) {
+func (s *artifactService) PutGrant(ctx context.Context, id string, req *ArtifactGrantRequest) (*ArtifactGrantResult, error) {
 	resp, err := s.c.postNoRetry(ctx, artifactPath(id)+"/grants", req, nil)
 	if err != nil {
 		return nil, err
 	}
-	out, err := apiclient.DecodeRequired[struct {
-		Grant ArtifactGrant `json:"grant"`
-	}](resp)
-	if err != nil {
-		return nil, err
-	}
-	return &out.Grant, nil
+	return apiclient.DecodeRequired[ArtifactGrantResult](resp)
 }
 
 // DeleteGrant implements ArtifactService.

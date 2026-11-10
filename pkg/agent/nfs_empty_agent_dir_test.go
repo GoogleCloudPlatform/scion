@@ -56,7 +56,7 @@ func TestNFSEmptyAgentDirSelection(t *testing.T) {
 		{name: "nfs with a non-slug name", runtime: "kubernetes", cfg: nfs, agent: "My_Agent"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := nfsEmptyAgentDirSelection(tc.runtime, tc.cfg, tc.agent)
+			got, err := nfsEmptyAgentDirSelection(tc.runtime, "", tc.cfg, tc.agent)
 			switch {
 			case tc.wantErr != nil:
 				require.ErrorIs(t, err, tc.wantErr)
@@ -236,9 +236,9 @@ func TestRemoveNFSAgentFiles_EmptyPerAgentKeepsSiblings(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(home, ".profile"), []byte("x"), 0o644))
 	runAgentWorkspacePurgeInline(t)
 
-	paths, err := kubernetesTestManager("kubernetes").RemoveNFSAgentFiles(context.Background(), f.projectScionDir, testNFSWorkspaceProjectID, "test-agent")
+	ds, err := kubernetesTestManager("kubernetes").RemoveNFSAgentFiles(context.Background(), f.projectScionDir, testNFSWorkspaceProjectID, "test-agent")
 	require.NoError(t, err)
-	assert.Contains(t, paths, agentDir)
+	assert.Contains(t, deletionPaths(ds), filepath.Join(agentDir, provision.AgentWorkspaceDir))
 	assert.NoDirExists(t, ws)
 	assert.FileExists(t, filepath.Join(home, ".profile"), "a sibling of the workspace is kept")
 	assert.DirExists(t, agentDir)

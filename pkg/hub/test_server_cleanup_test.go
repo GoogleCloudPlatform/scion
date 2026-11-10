@@ -116,12 +116,53 @@ func parseGoroutine(block string) (goroutineInfo, bool) {
 // start (and that closeTestServerBackground used to stop). The vacuity guard
 // requires them to be observed, so the leak check provably exercises
 // something.
+//
+// The keys of package hub types carry no package qualifier on purpose: the
+// leading "." marks where the receiver type name starts, and a key keeps
+// matching when its type moves out of package hub into a subpackage.
 var expectedServerGoroutines = map[string]int{
-	"hub.(*chatLinkService).cleanupLoop(":  3, // telegram, discord, teams
-	"hub.(*NonceCache).cleanup(":           1, // broker auth nonce cache
-	"hub.(*PreviewService).cleanupNonces(": 1,
+	".(*chatLinkService).cleanupLoop(":  3, // telegram, discord, teams
+	".(*NonceCache).cleanup(":           1, // broker auth nonce cache
+	".(*PreviewService).cleanupNonces(": 1,
 	// The decision-log audit writer's single worker (remaining-audit P1).
+	// It keeps its qualifier: Writer lives in pkg/util/asyncwrite, outside
+	// pkg/hub.
 	"asyncwrite.(*Writer[...]).run(": 1,
+}
+
+// oidcServerGoroutineKey is the OIDC key manager's cleanup and refresh loops,
+// which only the OIDC-enabled variant of New() starts. It is unqualified like
+// the keys above, so it also keeps matching if pkg/hub/oidckeys is renamed or
+// moved.
+const oidcServerGoroutineKey = ".(*OIDCKeyManager).Start"
+
+// expectedGoroutinesWithoutSignature are the expectedServerGoroutines keys
+// that have no LeakGuardSignatures entry.
+var expectedGoroutinesWithoutSignature = map[string]bool{
+	"asyncwrite.(*Writer[...]).run(": true,
+}
+
+// requireExpectedKeysMatchSignatures fails t unless the server-loop keys of
+// expectedServerGoroutines (each without its trailing "(") plus
+// oidcServerGoroutineKey are exactly the server-loop entries of
+// hubtestutil.LeakGuardSignatures. A signature added to or dropped from that
+// list then needs a matching key here, so every signature stays pinned to a
+// live goroutine by the vacuity guard below. The keys stay literal because
+// their trailing "(" anchors each match at the method name, which the
+// signatures do not.
+func requireExpectedKeysMatchSignatures(t *testing.T) {
+	t.Helper()
+	keys := []string{oidcServerGoroutineKey}
+	for k := range expectedServerGoroutines {
+		if !expectedGoroutinesWithoutSignature[k] {
+			keys = append(keys, strings.TrimSuffix(k, "("))
+		}
+	}
+	sigs := append([]string(nil), leakedServerGoroutineSigs...)
+	sort.Strings(keys)
+	sort.Strings(sigs)
+	require.Equal(t, sigs, keys,
+		"expectedServerGoroutines keys (plus the OIDC key) must match the server-loop entries of hubtestutil.LeakGuardSignatures")
 }
 
 // TestTestServerCleanupStopsBackgroundGoroutines guards the removal of
@@ -149,6 +190,7 @@ var expectedServerGoroutines = map[string]int{
 // module-code rule to goroutines whose creator chain is attributed or
 // unknown.
 func TestTestServerCleanupStopsBackgroundGoroutines(t *testing.T) {
+	requireExpectedKeysMatchSignatures(t)
 	for name, tc := range map[string]struct {
 		newServer func(*testing.T) (*Server, store.Store)
 		// extra lists goroutines this variant starts on top of
@@ -162,7 +204,7 @@ func TestTestServerCleanupStopsBackgroundGoroutines(t *testing.T) {
 		// context.Background() and outlive Shutdown (ptone/scion#3641).
 		"newTestHubServer/oidc": {
 			newServer: func(t *testing.T) (*Server, store.Store) { return testOIDCServerWithRoutes(t), nil },
-			extra:     map[string]int{"oidckeys.(*OIDCKeyManager).Start": 2},
+			extra:     map[string]int{oidcServerGoroutineKey: 2},
 		},
 	} {
 		newServer := tc.newServer
@@ -325,6 +367,7 @@ func TestNewFailureStopsBackgroundGoroutines(t *testing.T) {
 	wantLoops := len(expectedServerGoroutines) + 2
 	awaitServerGoroutines(t, func(c *assert.CollectT) {
 		n, stacks := countServerLoopGoroutines(before)
+		counts := make(map[string]int, len(leakedServerGoroutineSigs))
 		perSig := make([]string, 0, len(leakedServerGoroutineSigs))
 		for _, sig := range leakedServerGoroutineSigs {
 			got := 0
@@ -333,11 +376,20 @@ func TestNewFailureStopsBackgroundGoroutines(t *testing.T) {
 					got++
 				}
 			}
+			counts[sig] = got
 			perSig = append(perSig, sig+"="+strconv.Itoa(got))
 		}
+		summary := strings.Join(perSig, ", ")
 		assert.GreaterOrEqual(c, n, wantLoops,
 			"vacuity guard: a working New started only %d background loops, want >= %d (%s)",
-			n, wantLoops, strings.Join(perSig, ", "))
+			n, wantLoops, summary)
+		// Every guard-derived signature must match a live loop, so no entry
+		// of hubtestutil.LeakGuardSignatures can stop matching unnoticed.
+		for _, sig := range leakedServerGoroutineSigs {
+			assert.GreaterOrEqual(c, counts[sig], 1,
+				"vacuity guard: signature %q matched no background loop of a working New (%s)",
+				sig, summary)
+		}
 	})
 	_ = ok.Shutdown(context.Background())
 
