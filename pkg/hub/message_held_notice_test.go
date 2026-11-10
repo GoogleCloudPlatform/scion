@@ -232,3 +232,36 @@ func TestHeldNotice_HeldDropLogLine(t *testing.T) {
 		}
 	}
 }
+
+// A hold lookup fault drops a one-off notice (it has no store to retry from):
+// an artifact review notice and a broker DELIVERY_DEFERRED notice are not
+// sent, and the fault Warn line is written for each.
+func TestHeldNotice_LookupFaultDropsOneOffNotices(t *testing.T) {
+	srv, _, _, a, dispatcher, faulty, sw := fanoutHoldFaultFixture(t, "notice-fault-oneoff",
+		"notice-fault-owner", "notice-fault-sender", "notice-fault-target")
+	owner, sender, target := a["notice-fault-owner"], a["notice-fault-sender"], a["notice-fault-target"]
+	ctx := context.Background()
+	sw.Arm()
+
+	var srvBuf syncBuffer
+	srv.SetMessageLogger(slog.New(slog.NewTextHandler(&srvBuf, nil)))
+	faulty.agentID = owner.ID
+	require.NoError(t, srv.deliverArtifactReview(ctx, artifacts.ReviewNotice{
+		ArtifactID: "a", Seq: 2, OwnerKind: artifacts.PrincipalKindAgent, OwnerRef: owner.ID,
+		ReviewerKind: artifacts.PrincipalKindUser, ReviewerRef: "u",
+	}))
+	assert.Zero(t, heldNoticeCount(dispatcher, owner.Slug), "no review notice when the hold cannot be read")
+	assert.Contains(t, srvBuf.String(), "recipient hold lookup failed")
+	assert.Contains(t, srvBuf.String(), "agent_id="+owner.ID)
+	assert.Contains(t, srvBuf.String(), "notice_kind="+heldNoticeArtifactReview)
+
+	faulty.agentID = sender.ID
+	var proxyBuf syncBuffer
+	proxy, proxyDispatcher := heldBrokerProxy(t, faulty)
+	proxy.messageLog = slog.New(slog.NewTextHandler(&proxyBuf, nil))
+	proxy.publishDeliveryDeferred(ctx, target.Slug, heldNoticeSenderMessage(sender.Slug, sender.ID, target.Slug))
+	assert.Zero(t, heldNoticeCount(proxyDispatcher, sender.Slug), "no DELIVERY_DEFERRED notice when the hold cannot be read")
+	assert.Contains(t, proxyBuf.String(), "recipient hold lookup failed")
+	assert.Contains(t, proxyBuf.String(), "agent_id="+sender.ID)
+	assert.Contains(t, proxyBuf.String(), "notice_kind="+heldNoticeDeliveryDeferred)
+}

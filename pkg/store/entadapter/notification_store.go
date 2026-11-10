@@ -826,14 +826,14 @@ const undispatchedGracePeriod = 60 * time.Second
 // per query to avoid loading unbounded rows into memory.
 const undispatchedBatchLimit = 100
 
-// writeNotSuspended appends a "phase is not suspended" condition to an
-// EXISTS subquery over the agents table. The phase column is nullable and a
-// NULL phase is not suspended, so it compares COALESCE(phase, empty
-// string). A suspended subscriber's notifications are parked: never claimed
-// or attempted, and selected again once the agent leaves the suspended
-// phase. ExpireStaleAgentNotifications bounds how long they can stay parked.
-func writeNotSuspended(b *entsql.Builder) {
-	b.WriteString(" AND COALESCE(")
+// writeNotSuspendedExpr appends a "phase is not suspended" expression over
+// the agents table. The phase column is nullable and a NULL phase is not
+// suspended, so it compares COALESCE(phase, empty string). An unheld
+// suspended subscriber's notifications are parked: never claimed or
+// attempted, and selected again once the agent leaves the suspended phase.
+// ExpireStaleAgentNotifications bounds how long they can stay parked.
+func writeNotSuspendedExpr(b *entsql.Builder) {
+	b.WriteString("COALESCE(")
 	b.Ident(agent.Table)
 	b.WriteString(".")
 	b.Ident(agent.FieldPhase)
@@ -841,12 +841,10 @@ func writeNotSuspended(b *entsql.Builder) {
 	b.Arg(string(state.PhaseSuspended))
 }
 
-// writeNotHeld appends a "has no active hold" condition to an EXISTS
-// subquery over the agents table (ptone/scion#7145). A held subscriber's
-// notifications are parked like a suspended one's, whatever its phase,
-// and selected again once its holds are cleared.
-func writeNotHeld(b *entsql.Builder) {
-	b.WriteString(" AND NOT EXISTS (SELECT 1 FROM ")
+// writeActiveHoldExpr appends a "has an active hold" expression over the
+// agents table (ptone/scion#7145).
+func writeActiveHoldExpr(b *entsql.Builder) {
+	b.WriteString("EXISTS (SELECT 1 FROM ")
 	b.Ident(agenthold.Table)
 	b.WriteString(" WHERE ")
 	b.Ident(agenthold.Table)
@@ -863,10 +861,28 @@ func writeNotHeld(b *entsql.Builder) {
 	b.WriteString(" IS NULL)")
 }
 
+// writeHeldOverridesSuspended appends, to an EXISTS subquery over the agents
+// table, " AND ((<not suspended>[ AND <extra>]) OR <has an active hold>)".
+// A held subscriber's notifications are selected whatever its phase (and
+// whatever extra requires), so the dispatcher drops them as subscriber_held
+// at once instead of leaving them parked (ptone/scion#7145).
+func writeHeldOverridesSuspended(b *entsql.Builder, extra func(*entsql.Builder)) {
+	b.WriteString(" AND ((")
+	writeNotSuspendedExpr(b)
+	if extra != nil {
+		b.WriteString(" AND ")
+		extra(b)
+	}
+	b.WriteString(") OR ")
+	writeActiveHoldExpr(b)
+	b.WriteString(")")
+}
+
 // GetUndispatchedAgentNotifications returns agent-targeted notifications with
 // dispatched=false, ordered oldest-first, limited to 100 rows. A
-// notification whose subscriber agent is suspended or held is never
-// returned.
+// notification whose subscriber agent is suspended is not returned, unless
+// the subscriber is held: a held subscriber's notifications are returned so
+// they can be dropped (ptone/scion#7145).
 //
 // When brokerID is empty (sweep mode), a 60s grace period is applied so the
 // sweep does not race with an in-flight primary dispatch. When brokerID is
@@ -918,13 +934,16 @@ func (s *NotificationStore) GetUndispatchedAgentNotifications(ctx context.Contex
 				b.Ident(agent.FieldProjectID)
 				b.WriteString(" = ")
 				b.WriteString(projIDCol)
-				writeNotSuspended(b)
-				writeNotHeld(b)
-				b.WriteString(" AND ")
-				b.Ident(agent.Table)
-				b.WriteString(".")
-				b.Ident(agent.FieldRuntimeBrokerID)
-				b.WriteString(" != '')")
+				// Held overrides both the suspended filter and the
+				// broker filter: a held subscriber's notifications are
+				// dropped without a broker (ptone/scion#7145).
+				writeHeldOverridesSuspended(b, func(b *entsql.Builder) {
+					b.Ident(agent.Table)
+					b.WriteString(".")
+					b.Ident(agent.FieldRuntimeBrokerID)
+					b.WriteString(" != ''")
+				})
+				b.WriteString(")")
 			}))
 		})
 	}
@@ -952,14 +971,13 @@ func (s *NotificationStore) GetUndispatchedAgentNotifications(ctx context.Contex
 				b.Ident(agent.FieldProjectID)
 				b.WriteString(" = ")
 				b.WriteString(projIDCol)
-				writeNotSuspended(b)
-				writeNotHeld(b)
 				b.WriteString(" AND ")
 				b.Ident(agent.Table)
 				b.WriteString(".")
 				b.Ident(agent.FieldRuntimeBrokerID)
 				b.WriteString(" = ")
 				b.Arg(brokerID)
+				writeHeldOverridesSuspended(b, nil)
 				b.WriteString(")")
 			}))
 		})

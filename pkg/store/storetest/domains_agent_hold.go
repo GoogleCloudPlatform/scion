@@ -419,11 +419,13 @@ func AgentHoldConformance(t *testing.T, factory Factory) {
 			assert.False(t, seen[f.agents[4]], "cleared holds are not listed")
 		})
 
-		t.Run("a held subscriber's notifications are parked", func(t *testing.T) {
-			// ptone/scion#7145: GetUndispatchedAgentNotifications leaves out
-			// a subscriber with an active hold, in sweep mode and in
-			// broker-connect mode, and selects it again once its holds are
-			// cleared.
+		t.Run("a held subscriber's notifications are selected to be dropped", func(t *testing.T) {
+			// ptone/scion#7145: GetUndispatchedAgentNotifications returns a
+			// held subscriber's notifications whatever its phase (so the
+			// dispatcher drops them instead of parking them), and in sweep
+			// mode whatever its RuntimeBrokerID. Once the holds are cleared,
+			// an unheld suspended subscriber is parked again and an unheld
+			// subscriber with no broker is left out of the sweep again.
 			s := factory(t)
 			const broker = "hold-notif-broker"
 			projectID := uuid.NewString()
@@ -432,9 +434,16 @@ func AgentHoldConformance(t *testing.T, factory Factory) {
 				Name: "hold-notif-project",
 				Slug: "hold-notif-project-" + projectID[:8],
 			}))
-			onBroker := func(a *store.Agent) { a.RuntimeBrokerID = broker }
-			held := seedProjectAgent(t, ctx, s, projectID, "hold-notif-held", onBroker)
-			free := seedProjectAgent(t, ctx, s, projectID, "hold-notif-free", onBroker)
+			seed := func(slug, phase, brokerID string) string {
+				return seedProjectAgent(t, ctx, s, projectID, slug, func(a *store.Agent) {
+					a.Phase = phase
+					a.RuntimeBrokerID = brokerID
+				})
+			}
+			heldSusp := seed("hold-notif-held-susp", "suspended", broker)
+			heldNoBroker := seed("hold-notif-held-nobroker", "running", "")
+			freeSusp := seed("hold-notif-free-susp", "suspended", broker)
+			free := seed("hold-notif-free", "running", broker)
 
 			notify := func(agentID string) string {
 				a, err := s.GetAgent(ctx, agentID)
@@ -454,7 +463,8 @@ func AgentHoldConformance(t *testing.T, factory Factory) {
 				}))
 				return id
 			}
-			heldNotif, freeNotif := notify(held), notify(free)
+			nHeldSusp, nHeldNoBroker := notify(heldSusp), notify(heldNoBroker)
+			nFreeSusp, nFree := notify(freeSusp), notify(free)
 			selected := func(mode string) map[string]bool {
 				got, err := s.GetUndispatchedAgentNotifications(ctx, mode)
 				require.NoError(t, err)
@@ -465,21 +475,30 @@ func AgentHoldConformance(t *testing.T, factory Factory) {
 				return ids
 			}
 
-			_, err := s.CreateAgentHolds(ctx, []*store.AgentHold{newHold(projectID, held, uuid.NewString())})
+			_, err := s.CreateAgentHolds(ctx, []*store.AgentHold{
+				newHold(projectID, heldSusp, uuid.NewString()),
+				newHold(projectID, heldNoBroker, uuid.NewString()),
+			})
 			require.NoError(t, err)
-			for _, mode := range []string{"", broker} {
-				got := selected(mode)
-				assert.False(t, got[heldNotif], "mode %q: a held subscriber's notification must be parked", mode)
-				assert.True(t, got[freeNotif], "mode %q: an unheld subscriber's notification is selected", mode)
-			}
+			sweep, drain := selected(""), selected(broker)
+			assert.True(t, sweep[nHeldSusp], "sweep: a held suspended subscriber's notification is selected")
+			assert.True(t, drain[nHeldSusp], "broker drain: a held suspended subscriber's notification is selected")
+			assert.True(t, sweep[nHeldNoBroker], "sweep: a held subscriber with no broker is selected")
+			assert.False(t, drain[nHeldNoBroker], "broker drain: only this broker's subscribers")
+			assert.False(t, sweep[nFreeSusp], "sweep: an unheld suspended subscriber stays parked")
+			assert.False(t, drain[nFreeSusp], "broker drain: an unheld suspended subscriber stays parked")
+			assert.True(t, sweep[nFree], "sweep: an unheld running subscriber is selected")
+			assert.True(t, drain[nFree], "broker drain: an unheld running subscriber is selected")
 
-			_, err = s.ClearAgentHolds(ctx, held, store.ClearActor{Kind: store.ClearActorUser, ID: uuid.NewString()}, "lifted")
-			require.NoError(t, err)
-			for _, mode := range []string{"", broker} {
-				got := selected(mode)
-				assert.True(t, got[heldNotif], "mode %q: a lifted subscriber's notification is selected again", mode)
-				assert.True(t, got[freeNotif], "mode %q: an unheld subscriber's notification is selected", mode)
+			for _, a := range []string{heldSusp, heldNoBroker} {
+				_, err = s.ClearAgentHolds(ctx, a, store.ClearActor{Kind: store.ClearActorUser, ID: uuid.NewString()}, "lifted")
+				require.NoError(t, err)
 			}
+			sweep, drain = selected(""), selected(broker)
+			assert.False(t, sweep[nHeldSusp], "sweep: once lifted, the suspended subscriber is parked again")
+			assert.False(t, drain[nHeldSusp], "broker drain: once lifted, the suspended subscriber is parked again")
+			assert.False(t, sweep[nHeldNoBroker], "sweep: once lifted, a subscriber with no broker is left out again")
+			assert.True(t, sweep[nFree], "sweep: the unheld running subscriber is still selected")
 		})
 
 		t.Run("create participates in WithTx", func(t *testing.T) {

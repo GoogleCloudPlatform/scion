@@ -2727,6 +2727,9 @@ const (
 	NotificationReasonSubscriberGone = "subscriber_gone"
 	// NotificationReasonWatchedAgentGone: the watched agent was deleted.
 	NotificationReasonWatchedAgentGone = "watched_agent_gone"
+	// NotificationReasonSubscriberHeld: the subscriber agent is held
+	// (ptone/scion#7145); the notification was dropped, not delivered.
+	NotificationReasonSubscriberHeld = "subscriber_held"
 )
 
 // ValidNotificationReason reports whether reason is a known
@@ -2734,7 +2737,8 @@ const (
 func ValidNotificationReason(reason string) bool {
 	switch reason {
 	case NotificationReasonExpired, NotificationReasonSubscriptionGone,
-		NotificationReasonSubscriberGone, NotificationReasonWatchedAgentGone:
+		NotificationReasonSubscriberGone, NotificationReasonWatchedAgentGone,
+		NotificationReasonSubscriberHeld:
 		return true
 	}
 	return false

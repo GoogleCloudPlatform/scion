@@ -206,6 +206,9 @@ func (nd *NotificationDispatcher) retryBatch(ctx context.Context, notifs []store
 				"remaining", len(notifs)-i)
 			return
 		}
+		// This RuntimeBrokerID read only skips brokers already found
+		// unreachable in this pass; it never delivers, so it does not break
+		// retryDispatch's hold-before-broker order (ptone/scion#7145).
 		if len(skipBrokers) > 0 && skipBrokers[nd.subscriberBrokerID(ctx, &notifs[i])] {
 			continue
 		}
@@ -294,8 +297,10 @@ func (nd *NotificationDispatcher) setOutcome(ctx context.Context, notificationID
 // is called before delivery to prevent double-dispatch when the sweep and hook
 // race on the same notification. If the claim fails (another caller already
 // claimed it), this is a no-op. If delivery cannot proceed (no dispatcher, no
-// broker, a suspended or held subscriber) the claim is reverted with no
-// attempt counted. If the delivery attempt fails, the claim is reverted with
+// broker, a suspended subscriber, a subscriber whose hold cannot be read) the
+// claim is reverted with no attempt counted. A held subscriber's notification
+// keeps the claim and is recorded as failed with reason subscriber_held
+// (ptone/scion#7145). If the delivery attempt fails, the claim is reverted with
 // a retry backoff (store.NotificationRetryBackoff) before which the sweep
 // does not claim it again. When it gives up instead (a failed delivery older than
 // notificationRetryMaxAge, or a subscription, subscriber or watched agent
@@ -399,6 +404,23 @@ func (nd *NotificationDispatcher) retryDispatch(ctx context.Context, notif *stor
 		return retryNotAttempted, ""
 	}
 
+	// A held subscriber gets no notice (ptone/scion#7145), whatever its
+	// phase. This check comes BEFORE the suspended check and before any use
+	// of the subscriber's runtime broker (the sweep query selects a held
+	// subscriber's notifications even when it is suspended or has no
+	// broker): the claim is kept and the notification is recorded as
+	// failed with reason subscriber_held, with no delivery attempt. When
+	// the hold cannot be read nothing is delivered and the claim is
+	// reverted, so a later pass checks it again.
+	switch noticeHoldOf(ctx, nd.store, noticeLogger(nd.messageLog, nd.log), subscriber, heldNoticeNotification) {
+	case noticeHeld:
+		nd.setOutcome(ctx, notif.ID, store.NotificationOutcomeFailed, store.NotificationReasonSubscriberHeld)
+		return retryNotAttempted, ""
+	case noticeHoldUnknown:
+		nd.revertClaim(ctx, notif.ID)
+		return retryNotAttempted, ""
+	}
+
 	// A suspended subscriber has no running agent to deliver to. Its
 	// notifications stay pending (parked) with no attempt counted: the sweep
 	// query leaves them out until the agent leaves the suspended phase, and
@@ -407,16 +429,6 @@ func (nd *NotificationDispatcher) retryDispatch(ctx context.Context, notif *stor
 	if subscriberSuspended(subscriber) {
 		nd.log.Debug("retry: subscriber is suspended, reverting claim",
 			"subscriberID", sub.SubscriberID, "notificationID", notif.ID)
-		nd.revertClaim(ctx, notif.ID)
-		return retryNotAttempted, ""
-	}
-
-	// A held subscriber gets no notice (ptone/scion#7145): its
-	// notifications are parked like a suspended subscriber's, whatever its
-	// phase, and the sweep query leaves them out while it is held. Reaching
-	// here means the hold was set after the query selected the row, or the
-	// hold could not be read (which parks it too).
-	if heldNoticeWithheld(ctx, nd.store, noticeLogger(nd.messageLog, nd.log), subscriber, heldNoticeNotification) {
 		nd.revertClaim(ctx, notif.ID)
 		return retryNotAttempted, ""
 	}

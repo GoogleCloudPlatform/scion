@@ -191,6 +191,25 @@ func TestSetNotificationDispatchOutcome_Reason(t *testing.T) {
 	assert.Empty(t, got.DispatchReason, "a delivered outcome has no reason")
 }
 
+// The subscriber_held reason (ptone/scion#7145) is a known reason: a failed
+// outcome with it is stored, so a dropped notification to a held subscriber
+// is terminal.
+func TestSetNotificationDispatchOutcome_SubscriberHeldReason(t *testing.T) {
+	ctx := context.Background()
+	s := newTestNotificationStore(t)
+
+	assert.True(t, store.ValidNotificationReason(store.NotificationReasonSubscriberHeld))
+	id := createAgentNotification(t, s)
+	applied, err := s.SetNotificationDispatchOutcome(ctx, id, store.NotificationOutcomeFailed, store.NotificationReasonSubscriberHeld)
+	require.NoError(t, err)
+	require.True(t, applied)
+	got, err := s.GetNotification(ctx, id)
+	require.NoError(t, err)
+	assert.True(t, got.Dispatched)
+	assert.Equal(t, store.NotificationOutcomeFailed, got.DispatchOutcome)
+	assert.Equal(t, store.NotificationReasonSubscriberHeld, got.DispatchReason)
+}
+
 func TestSetNotificationDispatchOutcome_RejectsBadReason(t *testing.T) {
 	ctx := context.Background()
 	s := newTestNotificationStore(t)

@@ -3099,15 +3099,17 @@ type NotificationStore interface {
 	// GetUndispatchedAgentNotifications returns agent-targeted notifications
 	// with dispatched=false.
 	//
-	// Notifications whose subscriber agent is suspended, or has an active
-	// hold (ptone/scion#7145), are never returned: they stay pending
-	// (parked) and become eligible again when the agent leaves the
-	// suspended phase and has no active hold.
+	// Notifications whose subscriber agent is suspended are not returned:
+	// they stay pending (parked) and become eligible again when the agent
+	// leaves the suspended phase. A subscriber with an active hold
+	// (ptone/scion#7145) is the exception: its notifications are returned
+	// whatever its phase, and in sweep mode whatever its RuntimeBrokerID,
+	// so the dispatcher drops them (failed, NotificationReasonSubscriberHeld).
 	//
 	// If brokerID is empty (sweep mode), a 60s grace period is applied so
 	// the sweep does not race with an in-flight primary dispatch, only
-	// notifications whose subscriber agent has a RuntimeBrokerID are
-	// returned, and a notification whose NextAttemptAt is in the future
+	// notifications whose subscriber agent has a RuntimeBrokerID (or is
+	// held) are returned, and a notification whose NextAttemptAt is in the future
 	// (retry backoff) is left out.
 	//
 	// If brokerID is non-empty (broker-connect fast-path), no grace period
