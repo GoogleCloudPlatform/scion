@@ -17,6 +17,7 @@ package harness
 import (
 	"io/fs"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 
@@ -183,4 +184,61 @@ func TestBuiltinCredentialEnvNames_APIKeyNamesWithheld(t *testing.T) {
 		assert.False(t, isNonSecretAuthEnvName(name), "%s is on the non-secret list", name)
 		assert.False(t, strings.TrimSpace(name) != name, "%q is exact", name)
 	}
+}
+
+// builtinCredentialEnvNamesWant is the exact credential name set each
+// built-in harness config yields. A config change that adds, drops or
+// renames a sign-in name, or a new built-in harness, fails here until this
+// table is updated, so the set an agent without credentials is held to
+// never changes silently.
+var builtinCredentialEnvNamesWant = map[string][]string{
+	"antigravity": {"AGY_TOKEN", "GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_APPLICATION_CREDENTIALS"},
+	"claude":      {"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "GOOGLE_APPLICATION_CREDENTIALS"},
+	"codex":       {"CODEX_API_KEY", "OPENAI_API_KEY"},
+	"copilot":     {"COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"},
+	"gemini-cli":  {"GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_APPLICATION_CREDENTIALS"},
+	"grok-build":  {"GOOGLE_APPLICATION_CREDENTIALS", "XAI_API_KEY"},
+	"hermes":      {"ANTHROPIC_API_KEY", "GOOGLE_API_KEY", "GOOGLE_APPLICATION_CREDENTIALS", "OPENAI_API_KEY"},
+	"muse-code":   {"META_API_KEY"},
+	"opencode":    {"ANTHROPIC_API_KEY", "OPENAI_API_KEY"},
+	"pi": {
+		"AI_GATEWAY_API_KEY", "ANTHROPIC_API_KEY", "ANT_LING_API_KEY", "BASETEN_API_KEY", "CEREBRAS_API_KEY",
+		"CLOUDFLARE_API_KEY", "DEEPSEEK_API_KEY", "FIREWORKS_API_KEY", "GEMINI_API_KEY", "GROQ_API_KEY",
+		"KIMI_API_KEY", "META_API_KEY", "MINIMAX_API_KEY", "MINIMAX_CN_API_KEY", "MISTRAL_API_KEY",
+		"MOONSHOT_API_KEY", "NVIDIA_API_KEY", "OPENAI_API_KEY", "OPENCODE_API_KEY", "OPENROUTER_API_KEY",
+		"QWEN_TOKEN_PLAN_API_KEY", "QWEN_TOKEN_PLAN_CN_API_KEY", "RADIUS_API_KEY", "TOGETHER_API_KEY",
+		"TYPESAFE_API_KEY", "XAI_API_KEY", "XIAOMI_API_KEY", "XIAOMI_TOKEN_PLAN_AMS_API_KEY",
+		"XIAOMI_TOKEN_PLAN_CN_API_KEY", "XIAOMI_TOKEN_PLAN_SGP_API_KEY", "ZAI_API_KEY", "ZAI_CODING_CN_API_KEY",
+	},
+}
+
+// TestBuiltinCredentialEnvNames_ExactPerHarness: every embedded harness
+// config parses and yields exactly its expected credential name set, the
+// built-in harness list is exactly the table's, and the built-in set is
+// exactly the union.
+func TestBuiltinCredentialEnvNames_ExactPerHarness(t *testing.T) {
+	var harnessNames []string
+	for name := range builtinCredentialEnvNamesWant {
+		harnessNames = append(harnessNames, name)
+	}
+	sort.Strings(harnessNames)
+	require.Equal(t, harnessNames, AllHarnessNames(), "the built-in harness list")
+
+	union := map[string]bool{}
+	for _, harnessName := range AllHarnessNames() {
+		data, err := fs.ReadFile(harnessesEmbed.FS, harnessName+"/config.yaml")
+		require.NoError(t, err, harnessName)
+		entry, err := config.ParseHarnessConfigYAML(data)
+		require.NoError(t, err, harnessName)
+		assert.Equal(t, builtinCredentialEnvNamesWant[harnessName], CredentialEnvNames(entry.Auth), harnessName)
+		for _, name := range builtinCredentialEnvNamesWant[harnessName] {
+			union[name] = true
+		}
+	}
+	var want []string
+	for name := range union {
+		want = append(want, name)
+	}
+	sort.Strings(want)
+	assert.Equal(t, want, BuiltinCredentialEnvNames(), "the built-in set is exactly the union")
 }

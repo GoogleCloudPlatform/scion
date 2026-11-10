@@ -332,3 +332,27 @@ func TestRestartAgent_NoAuthReprovision(t *testing.T) {
 		t.Error("the git token is kept")
 	}
 }
+
+// TestBuildStartContext_NoAuthDropsEveryResolvedSecret: with the intent, no
+// resolved secret reaches the agent manager, not even an environment-type
+// GITHUB_TOKEN (the hub sends the git token in the env, never as a resolved
+// secret, for an agent without credentials).
+func TestBuildStartContext_NoAuthDropsEveryResolvedSecret(t *testing.T) {
+	body := map[string]any{
+		"resolvedEnv":        map[string]string{"SCION_AGENT_ID": "hub-agent-id"},
+		"envClassifications": map[string]api.EnvKind{"SCION_AGENT_ID": api.EnvKindPlain},
+		"resolvedSecrets": []api.ResolvedSecret{
+			{Name: "GITHUB_TOKEN", Type: "environment", Target: "GITHUB_TOKEN", Value: naGitToken, Source: "project"},
+			{Name: "NA_SECRET_FILE", Type: "file", Target: "/home/scion/na-secret-file", Value: naSecretFile, Source: "project"},
+		},
+		"noAuth": true,
+	}
+	data, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := naPost(t, "/api/v1/agents/test-agent-2/start", string(data))
+	if len(opts.ResolvedSecrets) != 0 {
+		t.Errorf("resolved secrets reached the agent manager: %d", len(opts.ResolvedSecrets))
+	}
+}

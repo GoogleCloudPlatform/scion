@@ -956,3 +956,25 @@ func TestProvisionNoAuth_CredentialNamesUnreadableGitTokenScopes(t *testing.T) {
 		})
 	}
 }
+
+// TestStartNoAuth_NonOwnerStarterGitTokenNotDelivered: a project admin who is
+// not the owner starts an agent without credentials. The user-scope settings
+// read are the owner's, never the starter's: the owner's GITHUB_TOKEN
+// setting is delivered, and the starter's is not.
+func TestStartNoAuth_NonOwnerStarterGitTokenNotDelivered(t *testing.T) {
+	ctx := context.Background()
+	f := newSWFixture(t, "na-nonowner", swOptions{})
+	require.NotEqual(t, f.admin.ID, f.agent.OwnerID, "precondition: the starter is not the owner")
+	f.agent.AppliedConfig.NoAuth = true
+	require.NoError(t, f.store.UpdateAgent(ctx, f.agent))
+	f.env(t, noAuthGitTokenKey, "na-starter-git-token", store.ScopeUser, f.admin.ID, false)
+	f.env(t, noAuthGitTokenKey, "na-owner-git-token", store.ScopeUser, f.agent.OwnerID, false)
+
+	rec := f.lifecycle(t, f.admin, "start", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.True(t, f.client.startCalled, "precondition: the start reached the broker")
+	assert.Equal(t, "na-owner-git-token", f.client.lastResolvedEnv[noAuthGitTokenKey], "the owner's setting")
+	for k, v := range f.client.lastResolvedEnv {
+		assert.NotEqual(t, "na-starter-git-token", v, "the starter's setting reached the env as %s", k)
+	}
+}
