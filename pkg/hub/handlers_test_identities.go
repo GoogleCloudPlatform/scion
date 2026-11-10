@@ -816,7 +816,7 @@ func (s *Server) handleCreateTestIdentity(w http.ResponseWriter, r *http.Request
 		if err := s.testIdentities.hooks.syncGrants(ctx, tx, u.ID, u.Role, testIdentityGrantsCreatedBy); err != nil {
 			return fmt.Errorf("sync hub role grants: %w", err)
 		}
-		token, expiresIn, err = s.userTokenService.GenerateAccessTokenWithTTL(u.ID, u.Email, u.DisplayName, u.Role, ClientTypeAPI, tokenTTL)
+		token, expiresIn, err = s.userTokenService.MintAccessTokenWithTTL(u.ID, u.Email, u.DisplayName, u.Role, u.SessionGeneration, ClientTypeAPI, tokenTTL)
 		if err != nil {
 			return fmt.Errorf("issue token: %w", err)
 		}
@@ -1022,7 +1022,7 @@ func (s *Server) handleIssueTestIdentityToken(w http.ResponseWriter, r *http.Req
 				return err
 			}
 		}
-		token, expiresIn, err = s.userTokenService.GenerateAccessTokenWithTTL(u.ID, u.Email, u.DisplayName, u.Role, ClientTypeAPI, tokenTTL)
+		token, expiresIn, err = s.userTokenService.MintAccessTokenWithTTL(u.ID, u.Email, u.DisplayName, u.Role, u.SessionGeneration, ClientTypeAPI, tokenTTL)
 		if err != nil {
 			return fmt.Errorf("issue token: %w", err)
 		}

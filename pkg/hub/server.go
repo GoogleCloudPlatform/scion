@@ -8899,11 +8899,14 @@ func (s *Server) a2aBridgeSweepHandler(externalURL string) func(ctx context.Cont
 		// Mint a short-lived JWT with a service claim. The bridge's
 		// hubJWTAuthMiddleware pins on role=="service" — without this
 		// claim, any valid user token could trigger sweeps.
-		token, _, err := s.userTokenService.GenerateAccessToken(
+		// The synthetic identity has no users row, so its session
+		// generation is 0. Only the bridge consumes this token.
+		token, _, err := s.userTokenService.MintAccessToken(
 			"hub-scheduler",        // userID — synthetic service identity
 			"hub-scheduler@system", // email
 			"Hub Scheduler",        // displayName
 			"service",              // role — the pinned service claim
+			0,                      // sessionGeneration — no users row
 			ClientTypeAPI,          // clientType
 		)
 		if err != nil {

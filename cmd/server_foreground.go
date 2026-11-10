@@ -3287,6 +3287,12 @@ func wireCloudLoggingHealth(hubSrv *hub.Server, cs *logging.CloudWriteStats) {
 }
 
 func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store, entClient *ent.Client, endpoints hub.HubEndpoints, devAuthToken string, adminEmailList []string, adminMode bool, maintenanceMessage string, requestLogger, messageLogger, artifactLogger *slog.Logger, globalDir string, pluginMgr *scionplugin.Manager, secretBackend secret.SecretBackend) (*hub.Server, error) {
+	// A serving hub always has a store: the auth middleware's per-request
+	// user-row checks (account status, session generation) read it, and
+	// are skipped without one.
+	if s == nil {
+		return nil, errors.New("hub server initialization failed: no store configured")
+	}
 	hubCfg := buildHubServerConfig(cfg, endpoints.Operator, devAuthToken, adminEmailList, adminMode, maintenanceMessage, secretBackend)
 	hubCfg.HubEndpoints = &endpoints
 	hubCfg.MaintenanceConfig.Installer = detectUpdateInstaller(ctx, hubCfg.MaintenanceConfig)

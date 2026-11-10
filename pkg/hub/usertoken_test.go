@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"context"
 	"testing"
 	"time"
 )
@@ -116,22 +117,27 @@ func TestUserTokenService_CLITokenDuration(t *testing.T) {
 	}
 }
 
-func TestUserTokenService_RefreshTokens(t *testing.T) {
+// Fails if the web BFF refresh stops rotating a valid refresh token into a
+// new pair, or if the new pair stops carrying the presented refresh token's
+// session generation (for example if it is minted with 0 or a fresh value).
+func TestWebServer_RefreshHubTokens(t *testing.T) {
 	svc, err := NewUserTokenService(UserTokenConfig{})
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
+	ws := newTestWebServer(t, WebServerConfig{})
+	ws.SetUserTokenService(svc)
 
 	// Generate initial tokens
-	_, refreshToken, _, err := svc.GenerateTokenPair(
-		"user-123", "test@example.com", "Test User", "admin", ClientTypeWeb,
+	_, refreshToken, _, err := svc.MintTokenPair(
+		"user-123", "test@example.com", "Test User", "admin", 3, ClientTypeWeb,
 	)
 	if err != nil {
 		t.Fatalf("failed to generate tokens: %v", err)
 	}
 
 	// Refresh the tokens
-	newAccessToken, newRefreshToken, expiresIn, err := svc.RefreshTokens(refreshToken)
+	newAccessToken, newRefreshToken, expiresIn, err := ws.refreshHubTokens(context.Background(), refreshToken)
 	if err != nil {
 		t.Fatalf("failed to refresh tokens: %v", err)
 	}
@@ -157,6 +163,16 @@ func TestUserTokenService_RefreshTokens(t *testing.T) {
 	}
 	if claims.Role != "admin" {
 		t.Errorf("expected role 'admin', got %q", claims.Role)
+	}
+	if claims.SessionGeneration != 3 {
+		t.Errorf("expected session generation 3 on the new access token, got %d", claims.SessionGeneration)
+	}
+	refreshClaims, err := svc.ValidateRefreshToken(newRefreshToken)
+	if err != nil {
+		t.Fatalf("failed to validate new refresh token: %v", err)
+	}
+	if refreshClaims.SessionGeneration != 3 {
+		t.Errorf("expected session generation 3 on the new refresh token, got %d", refreshClaims.SessionGeneration)
 	}
 }
 
@@ -210,11 +226,15 @@ func TestUserTokenService_InvalidSignature(t *testing.T) {
 	}
 }
 
-func TestUserTokenService_RefreshWithAccessToken(t *testing.T) {
+// Fails if the web BFF refresh accepts an access token in place of a
+// refresh token.
+func TestWebServer_RefreshHubTokens_RejectsAccessToken(t *testing.T) {
 	svc, err := NewUserTokenService(UserTokenConfig{})
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
+	ws := newTestWebServer(t, WebServerConfig{})
+	ws.SetUserTokenService(svc)
 
 	// Generate tokens
 	accessToken, _, _, err := svc.GenerateTokenPair(
@@ -225,7 +245,7 @@ func TestUserTokenService_RefreshWithAccessToken(t *testing.T) {
 	}
 
 	// Try to use access token as refresh token - should fail
-	_, _, _, err = svc.RefreshTokens(accessToken)
+	_, _, _, err = ws.refreshHubTokens(context.Background(), accessToken)
 	if err == nil {
 		t.Error("expected error when using access token as refresh token, got nil")
 	}

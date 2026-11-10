@@ -385,11 +385,13 @@ func run(dbPath string, agentCount int, secret, projectSlug, projectName string,
 	if err != nil {
 		return fmt.Errorf("build user token service: %w", err)
 	}
-	ownerToken, _, err := tokenSvc.GenerateAccessToken(owner.ID, owner.Email, owner.DisplayName, owner.Role, hub.ClientTypeCLI)
+	// Session generation 0: these tokens work only for users whose sessions
+	// were never revoked (the hub refuses any other generation).
+	ownerToken, _, err := tokenSvc.MintAccessToken(owner.ID, owner.Email, owner.DisplayName, owner.Role, 0, hub.ClientTypeCLI)
 	if err != nil {
 		return fmt.Errorf("mint owner token: %w", err)
 	}
-	memberToken, _, err := tokenSvc.GenerateAccessToken(member.ID, member.Email, member.DisplayName, member.Role, hub.ClientTypeCLI)
+	memberToken, _, err := tokenSvc.MintAccessToken(member.ID, member.Email, member.DisplayName, member.Role, 0, hub.ClientTypeCLI)
 	if err != nil {
 		return fmt.Errorf("mint member token: %w", err)
 	}
