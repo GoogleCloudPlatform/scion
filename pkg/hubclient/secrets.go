@@ -59,6 +59,15 @@ type SecretService interface {
 
 	// RejectPending rejects the caller's pending secret id.
 	RejectPending(ctx context.Context, id string) (*PendingSecretDecision, error)
+
+	// RevealPending returns the held value of the caller's pending secret
+	// id. The hub audits every reveal.
+	RevealPending(ctx context.Context, id string) (*RevealedPendingSecret, error)
+
+	// ListWithPending returns the caller's approved user secrets and live
+	// pending secrets as one list, with a state per item. Values are never
+	// returned.
+	ListWithPending(ctx context.Context) (*ListSecretsWithPendingResponse, error)
 }
 
 // secretService is the implementation of SecretService.
@@ -336,4 +345,68 @@ func (s *secretService) RejectPending(ctx context.Context, id string) (*PendingS
 		return nil, err
 	}
 	return apiclient.DecodeRequired[PendingSecretDecision](resp)
+}
+
+// RevealedPendingSecret is the response of RevealPending. Value is
+// base64-encoded (Encoding "base64").
+type RevealedPendingSecret struct {
+	ID       string `json:"id"`
+	Key      string `json:"key"`
+	Type     string `json:"type"`
+	Target   string `json:"target"`
+	Value    string `json:"value"`
+	Encoding string `json:"encoding"`
+}
+
+// RevealPending returns the held value of the caller's pending secret id.
+func (s *secretService) RevealPending(ctx context.Context, id string) (*RevealedPendingSecret, error) {
+	resp, err := s.c.postNoRetry(ctx, "/api/v1/pending-secrets/"+url.PathEscape(id)+"/reveal", nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[RevealedPendingSecret](resp)
+}
+
+// SecretListItem is one entry of ListWithPending: State is "approved"
+// (Secret set) or "pending" (Pending set).
+type SecretListItem struct {
+	State   string             `json:"state"`
+	Key     string             `json:"key"`
+	Secret  *Secret            `json:"secret,omitempty"`
+	Pending *PendingSecretItem `json:"pending,omitempty"`
+}
+
+// PendingSecretItem is a pending secret in ListWithPending, with the
+// project secrets it would override once approved.
+type PendingSecretItem struct {
+	PendingSecret
+	OverridesProjectSecrets []ProjectSecretOverride `json:"overridesProjectSecrets"`
+}
+
+// ProjectSecretOverride names a project secret a pending user secret would
+// override.
+type ProjectSecretOverride struct {
+	ProjectID   string `json:"projectId"`
+	ProjectName string `json:"projectName"`
+}
+
+// ListSecretsWithPendingResponse is the response of ListWithPending.
+// Secrets holds the approved secrets; Items the merged list.
+type ListSecretsWithPendingResponse struct {
+	Secrets []Secret         `json:"secrets"`
+	Scope   string           `json:"scope"`
+	ScopeID string           `json:"scopeId"`
+	Items   []SecretListItem `json:"items"`
+}
+
+// ListWithPending returns the caller's merged user secret list.
+func (s *secretService) ListWithPending(ctx context.Context) (*ListSecretsWithPendingResponse, error) {
+	query := url.Values{}
+	query.Set("scope", "user")
+	query.Set("includePending", "true")
+	resp, err := s.c.getWithQuery(ctx, "/api/v1/secrets", query, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[ListSecretsWithPendingResponse](resp)
 }

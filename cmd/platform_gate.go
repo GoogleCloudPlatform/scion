@@ -124,6 +124,8 @@ var windowsAllowed = map[string]bool{
 	"hub.secret.pending.list":    true,
 	"hub.secret.pending.approve": true,
 	"hub.secret.pending.reject":  true,
+	"hub.secret.pending.show":    true,
+	"hub.secret.pending.reveal":  true,
 	// Hub administrative settings: Hub API calls only; the one local file
 	// access is reading a settings document (hub settings set --file).
 	"hub.settings":               true,
