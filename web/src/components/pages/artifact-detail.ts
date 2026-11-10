@@ -56,9 +56,11 @@ import { navigateTo, stripBasePath } from '../../client/navigation.js';
 import {
   ARTIFACT_MANAGE_ACCESS_FLAG,
   ARTIFACT_REVIEW_EDITOR_FLAG,
+  ARTIFACTS_OPEN_REVIEW_CHECK_FLAG,
   isFeatureEnabled,
 } from '../../utils/feature-flags.js';
-import { formatInstant } from '../../utils/time.js';
+import { formatInstant, formatRelative } from '../../utils/time.js';
+import { ReviewHeartbeat } from '../../client/review-heartbeat.js';
 import { showToast } from '../../utils/toast.js';
 import { copyToClipboard, copyWithToast, showCopyFailedToast } from '../../utils/clipboard.js';
 import {
@@ -81,6 +83,7 @@ import {
   publishErrorMessage,
   publishFiles,
   rendererFor,
+  ReviewOpenError,
 } from '../../client/artifacts.js';
 import type {
   Artifact,
@@ -92,6 +95,7 @@ import type {
   DiscardedVersion,
   PendingPublish,
   PublishFile,
+  ReviewOpenEntry,
   ViewResponse,
 } from '../../client/artifacts.js';
 import { principalLabel, principalName, shortId } from '../../client/principal-names.js';
@@ -408,6 +412,13 @@ export class ScionPageArtifactDetail extends LitElement {
   @state() private editNote = '';
   @state() private editBusy = false;
   @state() private editError: string | null = null;
+  /**
+   * The open reviews an edit publish was refused over (409 review_open,
+   * ptone/scion#6849); while set, the Wait / Publish anyway dialog is open.
+   */
+  @state() private reviewOpen: { reviews: ReviewOpenEntry[]; truncated: boolean } | null = null;
+  /** The heartbeat of the open review, while Review mode is open. */
+  private heartbeat: ReviewHeartbeat | null = null;
   @state() private publishOpen = false;
   @state() private shareOpen = false;
   /** The Move dialog is open (ptone/scion#4583). */
@@ -1123,6 +1134,8 @@ export class ScionPageArtifactDetail extends LitElement {
   override disconnectedCallback(): void {
     document.removeEventListener('visibilitychange', this.onVisibility);
     super.disconnectedCallback();
+    this.heartbeat?.stop();
+    this.heartbeat = null;
     if (this.viewTimer) clearTimeout(this.viewTimer);
     this.viewTimer = null;
     if (this.previewTimer) clearTimeout(this.previewTimer);
@@ -1140,6 +1153,37 @@ export class ScionPageArtifactDetail extends LitElement {
   override updated(changed: PropertyValues<this>): void {
     super.updated(changed);
     this.observeSticky();
+    // reviewing and artifactId are private state, so they are not keys of
+    // PropertyValues<this>. A new artifactId moves a running heartbeat.
+    const c = changed as PropertyValues;
+    if (c.has('reviewing') || c.has('artifactId')) this.syncHeartbeat();
+  }
+
+  /**
+   * Starts the review heartbeat when Review mode opens and stops it (ending
+   * the session on the hub) when it closes, whichever way it closes: Save,
+   * Cancel, a reload, or leaving the page. Only while the open-review
+   * check is on (ptone/scion#6849); the hub decides the check itself.
+   */
+  private syncHeartbeat(): void {
+    const want =
+      this.reviewing && isFeatureEnabled(ARTIFACTS_OPEN_REVIEW_CHECK_FLAG) && !!this.artifactId;
+    // A heartbeat for another artifact (the page was reused for a new one
+    // while reviewing) ends its session before a new one starts.
+    if (this.heartbeat && this.heartbeat.artifactId !== this.artifactId) {
+      this.heartbeat.stop();
+      this.heartbeat = null;
+    }
+    if (want && !this.heartbeat) {
+      this.heartbeat = new ReviewHeartbeat({
+        artifactId: this.artifactId,
+        state: () => ({ base: this.data?.version?.seq ?? 0, text: this.reviewText }),
+      });
+      this.heartbeat.start();
+    } else if (!want && this.heartbeat) {
+      this.heartbeat.stop();
+      this.heartbeat = null;
+    }
   }
 
   /** Measures the sticky review block whenever a new one renders. */
@@ -1724,6 +1768,8 @@ export class ScionPageArtifactDetail extends LitElement {
     this.reviewText = lfText(this.text);
     this.reviewPreview = this.reviewText;
     this.discardedReview = discarded;
+    // The review restarted on the current version: the heartbeat follows.
+    this.heartbeat?.rebase();
     // The current version may be larger: size it as a new review does.
     if (this.reviewGraphical) {
       this.reviewSize = null;
@@ -1799,12 +1845,13 @@ export class ScionPageArtifactDetail extends LitElement {
     this.editing = true;
   };
 
-  private async publishEdit(): Promise<void> {
+  private async publishEdit(force = false): Promise<void> {
     const v = this.data?.version;
     const f = this.entry;
     if (!v || !f) return;
     this.editBusy = true;
     this.editError = null;
+    this.reviewOpen = null;
     try {
       const files: PublishFile[] = v.files
         .filter((x) => !isRemoteFile(x))
@@ -1813,16 +1860,24 @@ export class ScionPageArtifactDetail extends LitElement {
             ? { path: x.path, data: new Blob([this.editText], { type: f.mediaType }) }
             : { path: x.path, size: x.size, sha256: x.sha256 }
         );
-      await publishFiles({
+      const res = await publishFiles({
         artifactId: this.artifactId,
         entry: v.entryPath,
         note: this.editNote.trim() || undefined,
         files,
         resume: this.editPending,
+        force,
       });
       this.editPending = null;
+      for (const w of res.warnings ?? []) showToast(w, 'warning');
       this.showCurrentVersion();
     } catch (err) {
+      if (err instanceof ReviewOpenError) {
+        // Nothing was created: ask whether to wait or publish anyway. The
+        // edit stays in the editor while the dialog is open.
+        this.reviewOpen = { reviews: err.reviews, truncated: err.truncated };
+        return;
+      }
       this.editError = publishErrorMessage(err);
       if (err instanceof PublishError) this.editPending = err.pending;
     } finally {
@@ -3194,6 +3249,70 @@ export class ScionPageArtifactDetail extends LitElement {
           >Publish new version</sl-button
         >
       </div>
+      ${this.renderReviewOpenDialog()}
+    `;
+  }
+
+  /**
+   * The dialog shown when the hub refused an edit publish because someone
+   * is reviewing the current version (ptone/scion#6849). Wait closes it and
+   * keeps the edit; Publish anyway publishes with force.
+   */
+  private renderReviewOpenDialog(): TemplateResult | typeof nothing {
+    const open = this.reviewOpen;
+    if (!open) return nothing;
+    const [first, ...rest] = open.reviews;
+    const others = rest.length + (open.truncated ? 1 : 0);
+    const who = !first
+      ? 'Someone is'
+      : others === 0
+        ? `${first.reviewer} is`
+        : `${first.reviewer} and ${open.truncated ? 'others' : `${others} ${others === 1 ? 'other' : 'others'}`} are`;
+    const wait = (): void => {
+      this.reviewOpen = null;
+    };
+    return html`
+      <sl-dialog
+        class="review-open-dialog"
+        label="Publish over an open review?"
+        open
+        @sl-request-close=${(e: Event): void => {
+          // Escape and the overlay mean Wait, unless a publish is running.
+          if (this.editBusy) e.preventDefault();
+          else wait();
+        }}
+      >
+        <p class="review-open-who">
+          <sl-icon name="exclamation-triangle"></sl-icon>
+          <strong>${who} reviewing this version.</strong>
+        </p>
+        <ul class="review-open-list">
+          ${open.reviews.map(
+            (r) =>
+              html`<li>
+                ${r.reviewer}${r.lastActivityAt
+                  ? html` — last active ${formatRelative(r.lastActivityAt)}`
+                  : nothing}${r.unsavedChanges ? ', unsaved changes' : ''}
+              </li>`
+          )}
+          ${open.truncated ? html`<li>and others</li>` : nothing}
+        </ul>
+        <p>
+          If you publish now, their review can't be saved on this version. They keep their text.
+          Your edit stays in the editor if you wait.
+        </p>
+        <sl-button slot="footer" class="review-open-wait" variant="primary" autofocus @click=${wait}
+          >Wait</sl-button
+        >
+        <sl-button
+          slot="footer"
+          class="review-open-force"
+          variant="warning"
+          ?loading=${this.editBusy}
+          @click=${(): void => void this.publishEdit(true)}
+          >Publish anyway</sl-button
+        >
+      </sl-dialog>
     `;
   }
 }
