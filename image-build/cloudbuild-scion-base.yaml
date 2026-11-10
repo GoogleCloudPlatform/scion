@@ -38,7 +38,10 @@ steps:
   # Build and push scion-base image (uses existing core-base:<_TAG>)
   - name: 'gcr.io/cloud-builders/docker'
     id: 'build-scion-base'
+    entrypoint: 'bash'
     args:
+      - '/workspace/image-build/scripts/buildx-record-digest.sh'
+      - '$_REGISTRY/scion-base:$_TAG'
       - 'buildx'
       - 'build'
       - '--platform'

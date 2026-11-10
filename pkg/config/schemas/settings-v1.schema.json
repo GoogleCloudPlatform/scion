@@ -65,7 +65,7 @@
     "image_tag": {
       "type": "string",
       "pattern": "^(version|[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?$",
-      "description": "Experimental (hub.image_tag_setting). Tag of the bundled scion-* agent images whose tag is latest or absent: \"version\" selects the hub binary's version (latest for a development build), any other value is a literal tag. Unset leaves images unchanged. Applied by the hub only while the experiment is on.",
+      "description": "Experimental (hub.image_tag_setting). Tag of the bundled scion-* agent images whose tag is latest or absent: \"version\" selects the hub binary's release version (latest for any other build), any other value is a literal tag (\"latest\" opts out of the version default). A set value is applied by the hub only while the experiment is on. Unset: a release build of the hub uses its own version (hub.image_tag_version_default, on by default); other builds leave images unchanged.",
       "x-env-var": "SCION_IMAGE_TAG",
       "x-scope": "any",
       "x-since": "1"
@@ -562,6 +562,10 @@
               "type": "array",
               "items": { "type": "string" },
               "description": "Global settings only. Service accounts this Runtime Broker may run a Cloud Run instance as for GCP identity mode \"assign\" while the hub.cloudrun_native_identity experiment is on. Empty or unset: assign is refused. Ignored in a project's settings.yaml."
+            },
+            "block_service_account": {
+              "type": "string",
+              "description": "Global settings only. Service account, holding no roles, that this Runtime Broker runs a Cloud Run instance as for GCP identity mode \"block\" (and an unset mode) while the hub.cloudrun_native_identity experiment is on. Empty or unset: block is refused. Ignored in a project's settings.yaml."
             }
           },
           "additionalProperties": false
@@ -1415,8 +1419,14 @@
           "type": "string",
           "format": "uri",
           "maxLength": 2048,
-          "description": "Optional content host: a second public origin, apart from public_url, on which shared artifact links and HTML artifact views are served. Must be https://host[:port] (http only for localhost or a loopback address), with no path, query, fragment or user credentials; IPv6 literals are refused. A value whose host name is public_url's host name, at any scheme or port, is refused on save and ignored at runtime. A value on public_url's registrable domain is accepted with a warning. On a request whose Host is this value the Hub serves only the artifact share and view routes and answers 404 to everything else, and it never sends or accepts the Hub session there. The content host must not sit behind an identity-aware proxy. Empty, the default, serves everything on public_url. Admins set it through the server-config API; user access tokens cannot.",
+          "description": "Optional content host: a second public origin, apart from public_url, on which shared artifact links and HTML artifact views are served. Must be https://host[:port] (http only for localhost or a loopback address), with no path, query, fragment or user credentials; IPv6 literals are refused. A value whose host name is public_url's host name, at any scheme or port, is refused on save and ignored at runtime. A value on public_url's registrable domain (for example content.example.com for a Hub at hub.example.com) is refused on save and ignored at runtime unless content_url_allow_same_site is set; with the override it is accepted and logs a warning, because it is not a separate security origin for cookies. The supported setup is a content host on a different registrable domain, such as example-content.net. On a request whose Host is this value the Hub serves only the artifact share and view routes and answers 404 to everything else, and it never sends or accepts the Hub session there. The content host must not sit behind an identity-aware proxy. Empty, the default, serves everything on public_url. Admins set it through the server-config API; user access tokens cannot.",
           "x-env-var": "SCION_SERVER_HUB_CONTENTURL",
+          "x-since": "1"
+        },
+        "content_url_allow_same_site": {
+          "type": "boolean",
+          "description": "Override that lets content_url be on public_url's registrable domain. Without it such a value is refused on save and ignored at runtime, because a content host on the Hub's registrable domain is not a separate security origin for cookies: the browser treats the two hosts as same-site and a cookie scoped to that domain reaches both. The supported setup is a content host on a different registrable domain. With the override the value is accepted and the Hub logs a warning. A value on public_url's own host name stays refused. Default false. Admins set it through the server-config API; user access tokens cannot.",
+          "x-env-var": "SCION_SERVER_HUB_CONTENTURLALLOWSAMESITE",
           "x-since": "1"
         },
         "agent_endpoint": {
@@ -1448,6 +1458,10 @@
             "admin_web_sessions": {
               "type": "string",
               "description": "Turns on browser web sessions for the admin test identity kinds. The value is the hub id the setting is bound to and must equal this hub's resolved hub id; unset means off. Read once at startup. The hub refuses to start when it is set and --test-mode is not admin or super-admin (the test super-admin kind also needs super-admin), or when the value is another hub id. Admin web sessions are for systemd test hubs only: the Helm chart renders only --test-mode=member, so a Helm hub with this setting refuses to start."
+            },
+            "offline_admin_delegations": {
+              "type": "string",
+              "description": "Lets the offline host command 'scion server test-infra delegate --scope hub-admin' delegate test hub-admin issuance (never test super-admin) to one allow-listed workload. The value is the hub id the setting is bound to and must equal this hub's resolved hub id; unset means off. Read once at startup. The hub refuses to start when it is set and --test-mode is not admin or super-admin, when the value is another hub id, or without the test admin audit sink. When the hub starts without it, delegations created under it and the identities they issued are ended."
             }
           },
           "additionalProperties": false
@@ -1765,6 +1779,31 @@
               "x-since": "1"
             }
           }
+        },
+        "sse": {
+          "type": "object",
+          "description": "Browser events stream (/events) settings. Read at startup; restart required to change. Invalid values are a startup error.",
+          "additionalProperties": false,
+          "properties": {
+            "max_connection_age": {
+              "type": "string",
+              "description": "Maximum age of an events stream. At that age the hub sends a reconnect event and closes the stream, and the browser reconnects. Each stream gets a +/-20% jitter so streams opened together do not end together. When platform_request_timeout is set, the age is first lowered to 0.8 of it (e.g. '10m'; default '10m', between '1m' and '24h').",
+              "x-env-var": "SCION_SERVER_HUB_SSE_MAXCONNECTIONAGE",
+              "x-since": "1"
+            },
+            "heartbeat_interval": {
+              "type": "string",
+              "description": "Interval between events stream heartbeats. The web client treats a stream that has been silent for 75s as dead (e.g. '30s'; default '30s', between '5s' and '1m').",
+              "x-env-var": "SCION_SERVER_HUB_SSE_HEARTBEATINTERVAL",
+              "x-since": "1"
+            }
+          }
+        },
+        "platform_request_timeout": {
+          "type": "string",
+          "description": "Request timeout of the platform in front of the hub, for example the Cloud Run service timeout. When set, the events stream maximum age (sse.max_connection_age) and the conduit session lifetime cap (conduit.lifetime_cap) are lowered to 0.8 of it, so the hub ends long-lived requests before the platform cuts them. On Cloud Run the hub logs a startup warning while it is unset. Read at startup (e.g. '900s'; no default, between '150s' and '24h').",
+          "x-env-var": "SCION_SERVER_HUB_PLATFORMREQUESTTIMEOUT",
+          "x-since": "1"
         },
         "observability": {
           "type": "object",

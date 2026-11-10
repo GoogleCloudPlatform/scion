@@ -45,6 +45,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
+	"github.com/GoogleCloudPlatform/scion/pkg/brokerconvert"
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
@@ -149,10 +150,37 @@ var (
 	initPluginManagerFn = initPluginManager
 )
 
+// absolutizeServerConfigPath resolves a relative --config once, against the
+// directory `scion server start` was run from. It runs before the server
+// changes directory (with --global, or when started from /) and before a
+// background start hands the path to the daemon child, which runs in the
+// global directory. Every later use then names the file the hub loaded: the
+// settings save's legacy server.yaml check, settings reloads, the bootstrap
+// reads, and the restart and status paths, which read the path back from
+// the saved daemon args (serverConfigPathFromArgs). An empty path stays
+// empty.
+func absolutizeServerConfigPath() error {
+	if serverConfigPath == "" {
+		return nil
+	}
+	abs, err := filepath.Abs(serverConfigPath)
+	if err != nil {
+		return fmt.Errorf("resolving the --config path: %w", err)
+	}
+	serverConfigPath = abs
+	return nil
+}
+
 func runServerStart(cmd *cobra.Command, args []string) error {
 	// Pin the process to UTC before anything else runs (log timestamps, cron
 	// parsing, ent's Default(time.Now), etc. all read time.Local).
 	pinProcessUTC()
+
+	// Resolve a relative --config before anything reads it and before the
+	// server changes directory.
+	if err := absolutizeServerConfigPath(); err != nil {
+		return err
+	}
 
 	// 1. Initialize logging
 	logCleanups, requestLogger, messageLogger, artifactLogger, err := initServerLoggingFn(cmd)
@@ -332,6 +360,21 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// 5b. The convert host lock (convert-apply design section 4.7): a
+	// process that hosts the Runtime Broker refuses to start while a
+	// 'runtime-broker convert' operation holds the lock or left a step
+	// "started". The take is a refusing try-lock, never a wait. It holds
+	// the lock from here until its broker listener is bound (step 13),
+	// then releases it, so a convert that starts later finds the running
+	// server. On a failed start the deferred release frees it.
+	var convertLock *brokerconvert.HostLock
+	if cfg.RuntimeBroker.Enabled || registryDecisionDeferred {
+		if convertLock, err = acquireConvertStartLock(globalDir); err != nil {
+			return err
+		}
+		defer convertLock.Release()
+	}
+
 	// 6. Check ports
 	if err := checkServerPorts(cfg); err != nil {
 		return err
@@ -440,6 +483,8 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		// Before the plugin manager loads plugins: after a boot-failure
 		// guard rollback, the plugins of the restored release.
 		reconcilePluginsAfterRollback(installRoot)
+		// The previous builds a successful update kept until its restart.
+		removeAppliedPluginStaging()
 		s, entClient, err = initStore(ctx, cfg)
 		if err != nil {
 			// A stop during the migrations is a clean exit, not a failed
@@ -773,6 +818,12 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		if brokerErr != nil {
 			return shutdownSeq.startupErr(ctx, brokerErr)
 		}
+	}
+	// The convert host lock taken at step 5b is released once every broker
+	// listener this process started is bound (its own Listening signal);
+	// without a broker there is nothing to wait for.
+	if convertLock != nil {
+		go releaseConvertLockWhenListening(ctx, convertLock, brokerListeners.snapshot())
 	}
 	// Phase 2 item 5: one, centralized call site for the shared_dir_storage
 	// startup summary, gated by sharedDirStorageStartupLogWanted so a
@@ -1781,6 +1832,10 @@ func validateServerPreflight(cfg *config.GlobalConfig) error {
 	if err := cfg.Hub.PortProxy.Validate(); err != nil {
 		return err
 	}
+	if err := validateLongLivedRequestSettings(cfg); err != nil {
+		return err
+	}
+	warnUndeclaredPlatformTimeout(cfg, os.Getenv, nil)
 	if err := cfg.Relay.Validate(); err != nil {
 		return err
 	}
@@ -2984,6 +3039,8 @@ func buildHubServerConfig(cfg *config.GlobalConfig, hubEndpoint, devAuthToken st
 		// ignores, with a warning, a value that is invalid or on its own
 		// host name (contentURLInEffect).
 		ContentURL: cfg.Hub.ContentURL,
+		// The override that lets it be on the hub's registrable domain.
+		ContentURLAllowSameSite: cfg.Hub.ContentURLAllowSameSite,
 		// Derive the agent/user JWT signing keys from the same shared session
 		// secret the web cookie store uses, so every replica behind the load
 		// balancer agrees on the signing key regardless of its host-derived
@@ -3173,6 +3230,12 @@ func wireHubCoreMetrics(hubSrv *hub.Server, mp metric.MeterProvider) dbmetrics.R
 		hubSrv.SetUATIntrinsicMetrics(uatIntrinsicRec)
 	}
 
+	if ownerChainRec, err := hub.NewOTelOwnerMaterialChainMetrics(mp); err != nil {
+		log.Printf("WARNING: hub owner material chain metrics disabled: %v", err)
+	} else {
+		hubSrv.SetOwnerMaterialChainMetrics(ownerChainRec)
+	}
+
 	// Decision logging (remaining-audit P1): the audit writer's
 	// scion.logging.* series and the decision-log disposition counter.
 	// The same instruments carry writer=cloud (P2): the Cloud Logging
@@ -3313,6 +3376,7 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 	hubCfg.TestAdminGate = testMode.TestAdminGate
 	hubCfg.TestMode = testMode.TestMode
 	hubCfg.TestAdminWebSessions = testMode.TestAdminWebSessions
+	hubCfg.OfflineAdminDelegations = testMode.OfflineAdminDelegations
 	if testMode.EnableTestIdentities {
 		slog.Warn("Test identity issuance is ENABLED (--test-mode). Holders of test_identity.issue can create short-lived synthetic users on this hub. Use on test hubs only; MUST NOT be enabled in production!",
 			"test_mode", string(testMode.TestMode.Level), "preconditions", testMode.TestMode.Preconditions)
@@ -3524,6 +3588,12 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 	if err := hubSrv.VerifyTestAdminFederationOff(); err != nil {
 		return nil, err
 	}
+	// A hub that starts without the offline hub-admin delegation setting
+	// ends every offline hub-admin delegation and revokes the identities
+	// they issued. Nothing listens yet; a failure refuses startup.
+	if err := hubSrv.EndOfflineAdminDelegationsWhenOff(ctx); err != nil {
+		return nil, err
+	}
 	// A keyring file needs the server.secret_rotation experiment, read
 	// from the operational settings just loaded; nothing listens yet.
 	if err := verifyKeyringExperiment(hubSrv); err != nil {
@@ -3674,11 +3744,14 @@ func initOperationalSettings(ctx context.Context, cfg *config.GlobalConfig, hubS
 	hubSrv.WarnShadowedImageRegistries(flatInstanceImageRegistries())
 	// image_tag (ptone/scion#6625): the resolved value and its source, once;
 	// later changes are logged as they are applied. Warns when a value is
-	// set while hub.image_tag_setting is off.
+	// set while hub.image_tag_setting is off (it then also suppresses the
+	// version default).
 	hubSrv.LogImageTag()
 	// A saved authorized_domains that differs from the deployment value
 	// (before ptone/scion#6000 a saved list was not enforced).
 	hubSrv.WarnAuthorizedDomainsDrift(snap)
+	// A stored content URL that is not in effect (ptone/scion#7107).
+	hubSrv.WarnContentURLNotInEffect()
 
 	if envKeys := ops.EnvOverriddenKeys(); len(envKeys) > 0 {
 		slog.Warn("Layer-1 settings overridden by SCION_SERVER_* env vars on this node — these values diverge from the shared DB",
@@ -4027,6 +4100,11 @@ func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 		PlatformAuthSA:       webPlatformAuthSA,
 		SlowRequestThreshold: cfg.SlowRequestThreshold,
 		PerfTrace:            cfg.Hub.PerfTrace,
+		// Events stream bounds (ptone/scion#5230): the maximum age is
+		// clamped to the declared platform request timeout here and
+		// jittered per stream by the web server.
+		SSEMaxConnectionAge:  sseMaxConnectionAgeSetting(cfg),
+		SSEHeartbeatInterval: sseHeartbeatIntervalSetting(cfg),
 
 		ProxyDriverPrincipals:    webProxyDrivers,
 		ProxyDriverTokenAudience: cfg.Auth.Proxy.ProxyDriverTokenAudience(),
@@ -4051,7 +4129,7 @@ func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 	if hubSrv != nil {
 		hubSrv.SetEventPublisher(eventPub)
 		startSettingsPropagation(ctx, hubSrv, eventPub)
-		webSrv.SetEventStreamMetrics(hubSrv.EventStreamMetrics())
+		wireWebEventStreamMetrics(webSrv, hubSrv)
 		webSrv.SetAccessSettingsProvider(hubSrv)
 		webSrv.SetProfilingSettingsProvider(hubSrv)
 		webSrv.SetOAuthService(hubSrv.GetOAuthService())
@@ -4618,6 +4696,7 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 	log.Printf("Starting Runtime Broker API server on %s:%d",
 		cfg.RuntimeBroker.Host, cfg.RuntimeBroker.Port)
 
+	brokerListeners.add(rhSrv.Listening())
 	wg.Add(1)
 	go func() {
 		defer wg.Done()

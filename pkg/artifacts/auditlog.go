@@ -81,6 +81,7 @@ const (
 	logActionVersionCreated   = "version_created"   // pending version appended
 	logActionVersionFinalized = "version_finalized" // version made ready
 	logActionVersionFailed    = "version_failed"    // version could not be recorded or finalized, or was discarded
+	logActionVersionForced    = "version_forced"    // publish version started over open reviews (count only)
 	logActionGrantCreated     = "grant_created"
 	logActionGrantChanged     = "grant_changed"
 	logActionGrantRemoved     = EventGrantRemoved
@@ -103,6 +104,13 @@ const (
 	logActionMove       = "move"
 	logActionShare      = "share"
 )
+
+// logActionReviewEnded is the entry of a caller deleting its own review
+// session row (ptone/scion#6849): the row is kept until the reaper deletes
+// it, at least ReviewSessionRetention after its last beat, so a session
+// that no longer counts as open is logged too. Heartbeats, and a DELETE
+// that finds no row, are not logged.
+const logActionReviewEnded = "review_session_ended"
 
 // Log reasons: why a refusal or a failure happened. Never free text.
 const (
@@ -316,6 +324,8 @@ func routeTemplate(r *http.Request) string {
 		return base + "/links"
 	case sub[0] == "links" && len(sub) == 2:
 		return base + "/links/{linkId}"
+	case sub[0] == reviewSessionsSegment && len(sub) == 2:
+		return base + "/" + reviewSessionsSegment + "/{sid}"
 	case sub[0] == "versions" && len(sub) == 1:
 		return base + "/versions"
 	case sub[0] == "versions" && len(sub) == 2:
@@ -515,7 +525,9 @@ func (s *Service) logWriteRefusal(r *http.Request, a *Artifact) {
 
 // logVersion writes a version of a created or finalized by the caller of
 // r, which writes it with access: as its owner (authority owner) or
-// through a write or review grant (logged as the grant's permission).
+// through a write or review grant (logged as the grant's permission). It
+// also writes the deletion of the caller's review session row of a
+// (seq 0), with the access the caller deleted it with.
 func (s *Service) logVersion(r *http.Request, action string, a *Artifact, seq int, access writeAccess) {
 	e := logEntry{action: action, artifact: a, seq: seq}
 	switch access {

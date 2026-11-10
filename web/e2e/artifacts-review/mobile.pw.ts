@@ -25,7 +25,9 @@
  * so there it runs with the phone's viewport and touch only. A desktop-width
  * case checks the same pinning, caret and focus clearance with a mouse.
  * Emulation shows no soft keyboard: how a pinned toolbar behaves with the
- * iOS keyboard open is a device check.
+ * iOS keyboard open is a device check. What emulation can check is that no
+ * field typed in during a review is under 16px on a touch screen, the size
+ * below which iOS zooms in on focus and leaves the toolbar out of view.
  */
 
 import { devices, expect, test } from '@playwright/test';
@@ -124,6 +126,133 @@ async function toolbarTop(page: Page): Promise<number> {
 /** The bottom edge of the pinned block, in viewport pixels. */
 async function stickyBottom(page: Page): Promise<number> {
   return sticky(page).evaluate((e) => e.getBoundingClientRect().bottom);
+}
+
+/** The computed font size, in px, of the element at selector in host's shadow root. */
+async function shadowFontPx(host: Locator, selector: string): Promise<number> {
+  return host.evaluate(
+    (e, sel) => Number.parseFloat(getComputedStyle(e.shadowRoot!.querySelector(sel)!).fontSize),
+    selector
+  );
+}
+
+/** Whether the page's primary pointer is coarse (a touch screen). */
+async function coarsePointer(page: Page): Promise<boolean> {
+  return page.evaluate(() => matchMedia('(pointer: coarse)').matches);
+}
+
+/**
+ * The page's visual viewport and where the pinned toolbar and its Comment
+ * button sit in it, in CSS px.
+ */
+async function pinnedInView(page: Page): Promise<{
+  scale: number;
+  offsetTop: number;
+  toolbarTop: number;
+  commentTop: number;
+  commentBottom: number;
+  viewportHeight: number;
+}> {
+  return toolbar(page).evaluate((bar) => {
+    const vv = window.visualViewport!;
+    const comment = bar.querySelector('sl-button.comment')!.getBoundingClientRect();
+    return {
+      scale: vv.scale,
+      offsetTop: vv.offsetTop,
+      // Layout-viewport coordinates, made relative to the visual viewport.
+      toolbarTop: bar.getBoundingClientRect().top - vv.offsetTop,
+      commentTop: comment.top - vv.offsetTop,
+      commentBottom: comment.bottom - vv.offsetTop,
+      viewportHeight: vv.height,
+    };
+  });
+}
+
+/**
+ * The keyboard flow of the pinned header bug: every place text is typed in
+ * a review is 16px or more on a touch screen, so iOS Safari never zooms in
+ * on focus (and so never leaves the page zoomed, with the toolbar out of
+ * view, once the keyboard closes); and after typing in the note dialog,
+ * closing it and scrolling on, the toolbar and Comment are still in view.
+ * Emulation shows no soft keyboard and does not zoom on focus: the font
+ * sizes are what decide whether iOS zooms.
+ */
+async function keyboardHideJourney(page: Page, title: string, engine: string): Promise<void> {
+  const a = await publish({
+    project,
+    title,
+    entry: 'index.md',
+    files: { 'index.md': Buffer.from(DOC) },
+  });
+  await openArtifact(page, project, a.id);
+  await startGraphicalReview(page);
+  const coarse = await coarsePointer(page);
+  // Chromium's phone emulation reports a coarse pointer, so there the 16px
+  // checks cannot pass vacuously. Firefox (no isMobile) and WebKit are not
+  // held to it here; where they report a fine pointer the floor does not
+  // apply and is not checked.
+  if (engine === 'chromium') expect(coarse, 'phone emulation has a coarse pointer').toBe(true);
+  const floor = (px: number, what: string): void => {
+    if (coarse) expect(px, what).toBeGreaterThanOrEqual(16);
+  };
+
+  floor(await shadowFontPx(page.locator('scion-review-editor'), '.ProseMirror'), 'review text');
+
+  // Select a word below the pinned block and open the note dialog.
+  await scrollUnderToolbar(page, 20);
+  const target = await firstClear(page, 21);
+  const word = await textBox(page, `Paragraph ${target} line.`);
+  await page.touchscreen.tap(word.x, word.y);
+  await expect(editor(page)).toBeFocused();
+  await settleAfterFocus(page);
+  await page.keyboard.press('Home');
+  for (let i = 0; i < 'Paragraph'.length; i++) await page.keyboard.press('Shift+ArrowRight');
+  await toolbar(page).locator('sl-button.comment').tap();
+  const dialog = page.locator('scion-review-note-dialog sl-dialog');
+  await expect(dialog).toHaveAttribute('open', '');
+  const note = page.locator('scion-review-note-dialog textarea');
+  await expect(note).toBeFocused();
+  floor(await shadowFontPx(page.locator('scion-review-note-dialog'), 'textarea'), 'note');
+  await page.keyboard.type('Keyboard');
+
+  // Save, which blurs the field and so hides the keyboard on a phone.
+  await page.keyboard.press('Enter');
+  await expect(dialog.locator('div.dialog[part="base"]')).toBeHidden();
+  await expect(note).not.toBeFocused();
+  expect(await editorText(page)).toContain(`{==Paragraph==}{>>Keyboard<<} ${target} line.`);
+
+  // Scroll on: the toolbar is pinned at the top of the visible area, not
+  // zoomed or panned above it, and Comment is fully in view.
+  await scrollUnderToolbar(page, 45);
+  await expect(toolbar(page)).toBeInViewport();
+  const view = await pinnedInView(page);
+  expect(view.scale).toBeCloseTo(1, 2);
+  expect(view.offsetTop).toBeCloseTo(0, 0);
+  expect(view.toolbarTop).toBeGreaterThanOrEqual(0);
+  expect(view.commentTop).toBeGreaterThanOrEqual(0);
+  expect(view.commentBottom).toBeLessThanOrEqual(view.viewportHeight);
+
+  // The Source view's editor is typed in too.
+  await page
+    .locator('scion-page-artifact-detail .view-toggle sl-radio-button[value="source"]')
+    .click();
+  const source = page.locator('scion-page-artifact-detail scion-code-editor.review-editor');
+  await expect(source).toBeVisible();
+  await expect
+    .poll(() => source.evaluate((e) => !!e.shadowRoot?.querySelector('.cm-content')))
+    .toBe(true);
+  // The element that takes focus, and so decides whether iOS zooms, is
+  // .cm-content, not the .cm-editor wrapper around it.
+  const typed = await source.evaluate((e) => {
+    const content = e.shadowRoot!.querySelector<HTMLElement>('.cm-content')!;
+    content.focus();
+    return {
+      focused: e.shadowRoot!.activeElement === content,
+      px: Number.parseFloat(getComputedStyle(content).fontSize),
+    };
+  });
+  expect(typed.focused, 'the source text takes focus').toBe(true);
+  floor(typed.px, 'source text');
 }
 
 let project = '';
@@ -335,6 +464,13 @@ for (const device of ['Pixel 7', 'iPhone 13']) {
       page,
     }) => {
       await pinnedJourney(page, `Mobile ${device}`, true);
+    });
+
+    test('the toolbar stays in view after typing a comment and hiding the keyboard', async ({
+      page,
+      browserName,
+    }) => {
+      await keyboardHideJourney(page, `Keyboard ${device}`, browserName);
     });
   });
 }

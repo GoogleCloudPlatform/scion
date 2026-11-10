@@ -352,7 +352,7 @@ func (s *Server) createRoleBindingScopeAware(w http.ResponseWriter, r *http.Requ
 			writeError(w, http.StatusInternalServerError, "internal_error", "failed to load role definition", nil)
 			return
 		}
-		if err == nil && !store.IsBuiltInProjectMembershipRole(roleDef.Name) {
+		if err == nil && !store.IsBuiltInProjectMembershipRoleDef(roleDef) {
 			// Custom project role — require hub-level auth.
 			requireHubAuth = true
 		}
@@ -889,6 +889,7 @@ var systemRoleNames = map[string]bool{
 	store.ProjectRoleOwner:     true,
 	store.ProjectRoleAdmin:     true,
 	store.ProjectRoleMember:    true,
+	store.ProjectRoleViewer:    true,
 	store.AgentRoleDefNone:     true,
 	store.AgentRoleDefReadonly: true,
 	store.AgentRoleDefBaseline: true,
@@ -1445,7 +1446,7 @@ func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request, user 
 			BadRequest(w, "role definition not found")
 			return
 		}
-		if store.IsBuiltInProjectMembershipRole(roleDef.Name) {
+		if store.IsBuiltInProjectMembershipRoleDef(roleDef) {
 			// Built-in project role — route through membership service.
 			if s.membershipService == nil {
 				writeError(w, http.StatusInternalServerError, "internal_error",

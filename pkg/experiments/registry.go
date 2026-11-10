@@ -388,6 +388,13 @@ const ArtifactSponsorReviewGrant = "hub.artifact_sponsor_review_grant"
 // is left out. It needs hub.artifacts.
 const ArtifactArchive = "hub.artifact_archive"
 
+// ArtifactsOpenReviewCheck gates the open-review check on artifact
+// publishes (ptone/scion#6849): review tabs report that they are open, and
+// a publish that would overtake an open review is refused with 409
+// review_open unless it is forced. While it is off the review-session routes
+// answer 404 and publishing behaves exactly as before.
+const ArtifactsOpenReviewCheck = "hub.artifacts_open_review_check"
+
 // UserDeleteForceCascade gates the forced user delete (ptone/scion#2143):
 // DELETE /api/v1/users/{id}?force=true, which revokes the user's authority,
 // records a deletion tombstone and stops the user's agents, the GET
@@ -399,14 +406,26 @@ const UserDeleteForceCascade = "hub.user_delete_force_cascade"
 
 // ImageTagSetting gates the image_tag setting (ptone/scion#6625), which
 // selects the tag of the bundled scion-* agent images ("version" for the
-// hub binary's own version, or a literal tag) instead of :latest. The hub
-// checks it: while it is off, image_tag is ignored and every image
-// reference is unchanged, a hub save that sets image_tag is refused (412
-// experiment_disabled), and a value from the environment or a settings
-// file is reported with a startup warning. While it is on, the hub applies
-// the tag to the images it sends and checks and sends it with each
-// dispatch, so the Runtime Broker applies it to the images it resolves.
+// hub binary's release version, latest for any non-release build, or a
+// literal tag) instead of :latest. The hub checks it: while it is off,
+// image_tag is ignored and every image reference is unchanged, a hub save
+// that sets image_tag is refused (412 experiment_disabled), and a value
+// from the environment or a settings file other than latest is reported
+// with a startup warning (latest, the opt-out, is logged at Info). While it
+// is on, the hub applies the tag to the images it sends and checks and
+// sends it with each dispatch, so the Runtime Broker applies it to the
+// images it resolves.
 const ImageTagSetting = "hub.image_tag_setting"
+
+// ImageTagVersionDefault gates the version default of image_tag
+// (ptone/scion#6625): while it is on and image_tag is unset, a release
+// build of the hub (vX.Y.Z, vX.Y.Z-preview.N or vX.Y.Z-rc.N) applies its
+// own version as the tag of the bundled scion-* agent images, as if
+// image_tag were "version"; any other build leaves images at :latest. It
+// ships on. A set image_tag always wins, and suppresses the default even
+// while hub.image_tag_setting is off. The hub checks it; while it is off,
+// an unset image_tag leaves every image reference unchanged.
+const ImageTagVersionDefault = "hub.image_tag_version_default"
 
 // compiled is the production experiment list. It is reachable only through
 // Default(); there is no package-level Lookup/All, so hub code cannot bypass
@@ -713,6 +732,17 @@ var compiled = []Experiment{
 		ReviewBy:    "2027-02-01",
 	},
 	{
+		Name:        ArtifactsOpenReviewCheck,
+		Title:       "Warn publishers about open reviews",
+		Description: "Review mode on the artifact page reports that a review is open, and a publish that would overtake an open review of the current version is refused with 409 review_open, naming the reviewers and their last activity, until the publisher publishes anyway (force). Needs hub.artifacts. While off, the review-session routes answer 404, force is ignored and publishing behaves as before. Do not turn it on, on any hub, before the filter that drops reviewers who lost access to the artifact has landed (ptone/scion#6849).",
+		Default:     false,
+		Layers:      []Layer{LayerServer, LayerWeb},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#6849",
+		Owner:       "artifacts",
+		ReviewBy:    "2027-02-04",
+	},
+	{
 		Name:        UserDeleteForceCascade,
 		Title:       "Force user delete",
 		Description: "Lets an admin delete a user who has agents: DELETE /api/v1/users/{id}?force=true revokes the user's authority at once (status deleting, role bindings, access tokens, delegations), stops the user's agents through the agent delete, and removes the user once every agent is stopped or removed by an operator. Needs agent.delete on every one of those agents. While off, force is ignored (a user with agents is refused as before) and the deletion resource answers 404; a deletion accepted while it was on runs to completion.",
@@ -772,8 +802,19 @@ var compiled = []Experiment{
 	{
 		Name:        ImageTagSetting,
 		Title:       "Image tag setting",
-		Description: "Lets the image_tag setting choose the tag of the bundled scion-* agent images whose tag is latest or absent: \"version\" selects the hub binary's version (latest for a development build), any other value is a literal tag. Images with another tag, a digest, or a registry host are left alone, except exactly <image_registry>/scion-<name> (latest or untagged), the form the image_registry rewrite produces, which is retagged too. While it is off, image_tag is ignored and image references are unchanged; a hub save that sets image_tag is refused, and a settings-file or environment value is reported at startup. Maintenance builds and the system image build keep latest. Agents need images built for that tag (image-build/README.md, \"Build images for a release\").",
+		Description: "Lets the image_tag setting choose the tag of the bundled scion-* agent images whose tag is latest or absent: \"version\" selects the hub binary's release version (latest for any non-release build, nightly included), any other value is a literal tag. Images with another tag, a digest, or a registry host are left alone, except exactly <image_registry>/scion-<name> (latest or untagged), the form the image_registry rewrite produces, which is retagged too. While it is off, image_tag is ignored and image references are unchanged; a hub save that sets image_tag is refused, and a settings-file or environment value is reported at startup. Maintenance builds and the system image build keep latest. Agents need images built for that tag (image-build/README.md, \"Build images for a release\").",
 		Default:     false,
+		Layers:      []Layer{LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#6625",
+		Owner:       "hub",
+		ReviewBy:    "2027-02-05",
+	},
+	{
+		Name:        ImageTagVersionDefault,
+		Title:       "Image tag version default",
+		Description: "When image_tag is unset, a release build of the hub (vX.Y.Z, vX.Y.Z-preview.N or vX.Y.Z-rc.N) uses its own version as the tag of the bundled scion-* agent images whose tag is latest or absent, so agents run the images published for that release; development, nightly and other builds keep latest. Any set image_tag wins (image_tag: latest opts out), even while hub.image_tag_setting is off. While it is off, an unset image_tag leaves image references unchanged.",
+		Default:     true,
 		Layers:      []Layer{LayerServer},
 		Stage:       StageAlpha,
 		Issue:       "ptone/scion#6625",

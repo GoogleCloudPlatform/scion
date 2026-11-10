@@ -97,6 +97,11 @@ type Service struct {
 	notifyLimiterOnce sync.Once
 	notifyLimiter     *rateLimiter
 
+	// principalLimiter rate-limits authenticated routes per principal and
+	// route family (principal_limiter.go).
+	principalLimOnce sync.Once
+	principalLimiter *principalLimiter
+
 	fetcherFactory func(RemoteImageLimits) ImageFetcher
 	// fetchFloor overrides the fetch floor in tests; zero means the
 	// fetcher's connect timeout.
@@ -412,6 +417,8 @@ func (s *Service) RegisterRoutes(mux Mux, guard Guard) {
 //	POST /api/v1/artifacts/{id}/links                       create a share link
 //	GET  /api/v1/artifacts/{id}/links                       the unexpired share links
 //	DELETE /api/v1/artifacts/{id}/links/{linkId}            revoke a share link
+//	PUT  /api/v1/artifacts/{id}/review-sessions/{sid}       heartbeat of an open review tab
+//	DELETE /api/v1/artifacts/{id}/review-sessions/{sid}     the review was closed, or its page left
 //	GET  /api/v1/artifacts/shared/{token}[/files/{path}]    a share-link read (303 to the view route)
 //
 // Everything else answers 404.
@@ -509,6 +516,12 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.handleRevokeLink(w, r, id, segs[2])
+	case len(segs) == 3 && segs[1] == reviewSessionsSegment:
+		if r.Method != http.MethodPut && r.Method != http.MethodDelete {
+			writeMethodNotAllowed(w, http.MethodPut, http.MethodDelete)
+			return
+		}
+		s.handleReviewSession(w, r, id, segs[2])
 	case len(segs) == 2 && segs[1] == "versions":
 		switch {
 		case isRead(r.Method):

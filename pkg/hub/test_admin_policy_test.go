@@ -1223,11 +1223,20 @@ func TestTestAdminPolicy_DispatchSecretsClamp(t *testing.T) {
 		require.NoError(t, s.CreateEnvVar(ctx, &store.EnvVar{ID: generateID(), Key: name, Value: "v-" + name, Scope: scope, ScopeID: scopeID,
 			InjectionMode: store.InjectionModeAlways}))
 	}
-	env, _, err := d.resolveEnvFromStorage(ctx, agentFor(root, otherProject))
+	// The root's own user env var is delivered only along a delegation
+	// chain recorded to the root, so record the root's principal edge.
+	rootAgent := agentFor(root, otherProject)
+	hdEdge(t, s, store.DelegationPrincipalUser, root, rootAgent.ID, otherProject, nil)
+	env, _, err := d.resolveEnvFromStorage(ctx, rootAgent)
 	require.NoError(t, err)
 	assert.Equal(t, "v-TSA_USER_ENV", env["TSA_USER_ENV"])
 	assert.NotContains(t, env, "TSA_HUB_ENV")
 	assert.NotContains(t, env, "TSA_PROJECT_ENV")
+	// Without a delegation chain recorded to the root, the root's own user
+	// env var is withheld as well.
+	env, _, err = d.resolveEnvFromStorage(ctx, agentFor(root, otherProject))
+	require.NoError(t, err)
+	assert.NotContains(t, env, "TSA_USER_ENV", "no recorded chain: the root's own user env var is withheld")
 	env, _, err = d.resolveEnvFromStorage(ctx, agentFor(issuer.ID, otherProject))
 	require.NoError(t, err)
 	assert.Equal(t, "v-TSA_HUB_ENV", env["TSA_HUB_ENV"], "a human root keeps hub env vars")

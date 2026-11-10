@@ -102,7 +102,8 @@ steps:
   - name: 'gcr.io/cloud-builders/docker'
     id: 'build-${step_id}'
     dir: 'harnesses/${harness_name}'
-    args: ['buildx', 'build', '--platform', 'linux/amd64,linux/arm64', '--build-arg', 'BASE_IMAGE=\$_REGISTRY/scion-base:\$_TAG', '-t', '\$_REGISTRY/${step_id}:\$_SHORT_SHA', '-t', '\$_REGISTRY/${step_id}:\$_TAG', '-f', 'Dockerfile', '--pull', '--push', '.']
+    entrypoint: 'bash'
+    args: ['/workspace/image-build/scripts/buildx-record-digest.sh', '\$_REGISTRY/${step_id}:\$_TAG', 'buildx', 'build', '--platform', 'linux/amd64,linux/arm64', '--build-arg', 'BASE_IMAGE=\$_REGISTRY/scion-base:\$_TAG', '-t', '\$_REGISTRY/${step_id}:\$_SHORT_SHA', '-t', '\$_REGISTRY/${step_id}:\$_TAG', '-f', 'Dockerfile', '--pull', '--push', '.']
     env:
       - 'DOCKER_CLI_EXPERIMENTAL=enabled'
 

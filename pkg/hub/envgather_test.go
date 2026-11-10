@@ -926,6 +926,24 @@ func TestEnvGather_BuildResponse_SecretScope(t *testing.T) {
 		ProjectID: tid("project-1"),
 	}
 
+	// The owner's user secret labels a key only for an agent whose
+	// delegation chain is recorded to that owner, so record the owner's
+	// principal edge to the agent in its project.
+	if err := st.CreateDelegationEdge(ctx, &store.DelegationEdge{
+		DelegatorType: store.DelegationPrincipalUser, DelegatorID: agent.OwnerID,
+		DelegateType: store.DelegationPrincipalAgent, DelegateID: agent.ID,
+		ScopeType: store.RoleScopeProject, ScopeID: agent.ProjectID, Role: string(AgentRoleFull), Active: true,
+		AuthorityProvenance: store.AuthorityProvenance{
+			ProvenanceVersion:    store.ProvenanceVersionV1,
+			SourcePrincipalKind:  store.DelegationPrincipalUser,
+			SourcePrincipalID:    agent.OwnerID,
+			SourceCredentialKind: store.SourceCredentialSession,
+		},
+		EffectCeiling: store.EffectCeiling{Kind: store.EffectCeilingPrincipal},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
 	brokerReqs := &RemoteEnvRequirementsResponse{
 		AgentID:  "agent-scope-test",
 		Required: []string{"API_KEY", "OTHER_KEY"},

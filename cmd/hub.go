@@ -26,7 +26,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -850,8 +849,8 @@ const redactedHubURL = "[redacted hub URL]"
 func redactUnparsedEndpointIn(text, endpoint string) string {
 	if endpoint != "" {
 		text = strings.ReplaceAll(text, endpoint, redactedHubURL)
-		text = strings.ReplaceAll(text, quotedBody(strconv.Quote(endpoint)), redactedHubURL)
-		text = redactSecretForms(text, endpointUserInfo(endpoint))
+		text = strings.ReplaceAll(text, config.QuotedBody(endpoint), redactedHubURL)
+		text = config.RedactSecretForms(text, endpointUserInfo(endpoint))
 	}
 	return urlredact.RedactUserInfoIn(text, urlredact.Mask)
 }
@@ -871,32 +870,6 @@ func endpointUserInfo(endpoint string) string {
 		return rest[:at]
 	}
 	return ""
-}
-
-// minSecretLen is the length below which a user info is not replaced on
-// its own: replacing a shorter string would rewrite unrelated text.
-const minSecretLen = 3
-
-// redactSecretForms replaces secret (a user info) everywhere in text: as
-// given, and as strconv.Quote, JSON, url.PathEscape and url.QueryEscape
-// write it, so no rendering of an error that quoted the endpoint shows it.
-func redactSecretForms(text, secret string) string {
-	if len(secret) < minSecretLen {
-		return text
-	}
-	forms := []string{secret, quotedBody(strconv.Quote(secret)), url.PathEscape(secret), url.QueryEscape(secret)}
-	if b, err := json.Marshal(secret); err == nil {
-		forms = append(forms, quotedBody(string(b)))
-	}
-	for _, f := range forms {
-		text = strings.ReplaceAll(text, f, "xxxxx")
-	}
-	return text
-}
-
-// quotedBody returns a strconv.Quote result without its outer quotes.
-func quotedBody(q string) string {
-	return q[1 : len(q)-1]
 }
 
 // hubLinkJSONResult is the --format json result of 'hub link'. The

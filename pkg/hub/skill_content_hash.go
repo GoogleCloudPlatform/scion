@@ -112,12 +112,12 @@ func (s *Server) resolveSkillVersion(ctx context.Context, skillID, constraint st
 
 // listAllSkillVersions returns every version of skillID, in any status.
 func (s *Server) listAllSkillVersions(ctx context.Context, skillID string) ([]store.SkillVersion, error) {
-	result, err := s.store.ListSkillVersions(ctx, skillID, store.ListOptions{})
+	result, err := s.store.ListSkillVersions(ctx, skillID, store.SkillVersionFilter{}, store.ListOptions{})
 	if err != nil {
 		return nil, err
 	}
 	if result.TotalCount > len(result.Items) {
-		result, err = s.store.ListSkillVersions(ctx, skillID, store.ListOptions{Limit: result.TotalCount})
+		result, err = s.store.ListSkillVersions(ctx, skillID, store.SkillVersionFilter{}, store.ListOptions{Limit: result.TotalCount})
 		if err != nil {
 			return nil, err
 		}

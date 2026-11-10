@@ -708,35 +708,58 @@ func readProjectOwnSettings(projectPath string) ([]byte, bool) {
 // read only from the broker's global settings. Best-effort: an unreadable
 // file returns false.
 func ProjectSettingsHasCloudRunAssignableServiceAccounts(projectPath, runtimeEntryName string) bool {
+	cr := projectOwnCloudRunBlock(projectPath, runtimeEntryName)
+	return cr != nil && len(cr.AssignableServiceAccounts) > 0
+}
+
+// ProjectSettingsHasCloudRunBlockServiceAccount reports whether a project's
+// OWN settings.yaml sets cloudrun.block_service_account on the named
+// runtime entry. Like ProjectSettingsHasCloudRunAssignableServiceAccounts it
+// exists only so a caller can warn that the setting has no effect there:
+// the block account is read only from the broker's global settings.
+// Best-effort: an unreadable file returns false.
+func ProjectSettingsHasCloudRunBlockServiceAccount(projectPath, runtimeEntryName string) bool {
+	cr := projectOwnCloudRunBlock(projectPath, runtimeEntryName)
+	return cr != nil && strings.TrimSpace(cr.BlockServiceAccount) != ""
+}
+
+// projectCloudRunProbe is the part of a runtime entry's cloudrun block that
+// the project-level probes read.
+type projectCloudRunProbe struct {
+	AssignableServiceAccounts []string `yaml:"assignable_service_accounts" json:"assignable_service_accounts"`
+	BlockServiceAccount       string   `yaml:"block_service_account" json:"block_service_account"`
+}
+
+// projectOwnCloudRunBlock returns the cloudrun block of the named runtime
+// entry in a project's OWN settings file (readProjectOwnSettings), or nil
+// when there is none or the file cannot be read or parsed.
+func projectOwnCloudRunBlock(projectPath, runtimeEntryName string) *projectCloudRunProbe {
 	if runtimeEntryName == "" {
-		return false
+		return nil
 	}
 	raw, ok := readProjectOwnSettings(projectPath)
 	if !ok {
-		return false
+		return nil
 	}
 	var probe struct {
 		Runtimes map[string]struct {
-			CloudRun *struct {
-				AssignableServiceAccounts []string `yaml:"assignable_service_accounts" json:"assignable_service_accounts"`
-			} `yaml:"cloudrun" json:"cloudrun"`
+			CloudRun *projectCloudRunProbe `yaml:"cloudrun" json:"cloudrun"`
 		} `yaml:"runtimes" json:"runtimes"`
 	}
 	if err := unmarshalSettingsYAML(raw, &probe); err != nil {
-		return false
+		return nil
 	}
-	rt, ok := probe.Runtimes[runtimeEntryName]
-	return ok && rt.CloudRun != nil && len(rt.CloudRun.AssignableServiceAccounts) > 0
+	return probe.Runtimes[runtimeEntryName].CloudRun
 }
 
 // CloudRunAssignableServiceAccountWarnings returns a warning for each entry
 // of runtimes.<runtimeEntryName>.cloudrun.assignable_service_accounts in vs
 // that, lower-cased and trimmed, does not match gsaEmailPattern (a Cloud
 // Run instance can only run as a service account), so a typo or a pasted
-// user email is reported where the list is read rather than only as a
-// refused dispatch. Each warning names the entry's position, never its
-// value. Entries are still compared case-insensitively and trimmed where
-// they are used.
+// user email is reported where the list is read. Such an entry still
+// matches an equal assigned value at the broker; the instance create then
+// fails. Each warning names the entry's position, never its value.
+// Entries are compared case-insensitively and trimmed where they are used.
 func CloudRunAssignableServiceAccountWarnings(vs *VersionedSettings, runtimeEntryName string) []string {
 	if vs == nil {
 		return nil
@@ -754,6 +777,27 @@ func CloudRunAssignableServiceAccountWarnings(vs *VersionedSettings, runtimeEntr
 		}
 	}
 	return warnings
+}
+
+// CloudRunBlockServiceAccountWarnings returns a warning when
+// runtimes.<runtimeEntryName>.cloudrun.block_service_account in vs is set
+// but, lower-cased and trimmed, does not match gsaEmailPattern. The warning
+// names the setting only, never its value.
+func CloudRunBlockServiceAccountWarnings(vs *VersionedSettings, runtimeEntryName string) []string {
+	if vs == nil {
+		return nil
+	}
+	entry, ok := vs.Runtimes[runtimeEntryName]
+	if !ok || entry.CloudRun == nil {
+		return nil
+	}
+	v := strings.ToLower(strings.TrimSpace(entry.CloudRun.BlockServiceAccount))
+	if v == "" || gsaEmailPattern.MatchString(v) {
+		return nil
+	}
+	return []string{fmt.Sprintf(
+		"runtimes.%s.cloudrun.block_service_account is not a service account email; a Cloud Run instance cannot run as it",
+		runtimeEntryName)}
 }
 
 // gsaEmailPattern matches a syntactically well-formed, lowercase GCP service
@@ -1690,6 +1734,10 @@ type V1TestIdentitiesConfig struct {
 	// AdminWebSessions is server.hub.test_identities.admin_web_sessions
 	// (see TestIdentitiesConfig.AdminWebSessions).
 	AdminWebSessions string `json:"admin_web_sessions,omitempty" yaml:"admin_web_sessions,omitempty" koanf:"admin_web_sessions"`
+	// OfflineAdminDelegations is
+	// server.hub.test_identities.offline_admin_delegations (see
+	// TestIdentitiesConfig.OfflineAdminDelegations).
+	OfflineAdminDelegations string `json:"offline_admin_delegations,omitempty" yaml:"offline_admin_delegations,omitempty" koanf:"offline_admin_delegations"`
 }
 
 // V1TestIdentityWorkloadIssuer is one server.hub.test_identities.workload_issuers
@@ -1711,6 +1759,11 @@ type V1ServerHubConfig struct {
 	// artifacts are served. Empty, the default, serves them on PublicURL.
 	// See ValidateContentURL.
 	ContentURL string `json:"content_url,omitempty" yaml:"content_url,omitempty" koanf:"content_url"`
+	// ContentURLAllowSameSite is server.hub.content_url_allow_same_site
+	// (ContentURLAllowSameSiteKey): the override that lets ContentURL be on
+	// PublicURL's registrable domain, which is refused without it. See
+	// ContentURLHubConflict.
+	ContentURLAllowSameSite *bool `json:"content_url_allow_same_site,omitempty" yaml:"content_url_allow_same_site,omitempty" koanf:"content_url_allow_same_site"`
 	// HubClass is server.hub.class (see HubServerConfig.HubClass). It is
 	// file/env only: the server-config API refuses it in every mode.
 	HubClass string `json:"class,omitempty" yaml:"class,omitempty" koanf:"class"`
@@ -1795,6 +1848,14 @@ type V1ServerHubConfig struct {
 	// PortProxy holds the agent port proxy settings. Read at startup;
 	// changes need a restart.
 	PortProxy *V1ServerHubPortProxyConfig `json:"port_proxy,omitempty" yaml:"port_proxy,omitempty" koanf:"port_proxy"`
+	// SSE holds the browser events stream settings. Read at startup;
+	// restart required to change.
+	SSE *V1ServerHubSSEConfig `json:"sse,omitempty" yaml:"sse,omitempty" koanf:"sse"`
+	// PlatformRequestTimeout is the request timeout of the platform in
+	// front of the hub (e.g. "900s"; no default, 150s-24h). When set, the
+	// events stream maximum age and the conduit session lifetime cap are
+	// clamped to 0.8 of it. Read at startup.
+	PlatformRequestTimeout string `json:"platform_request_timeout,omitempty" yaml:"platform_request_timeout,omitempty" koanf:"platform_request_timeout"`
 	// Observability holds the hub's own metrics and trace export switches
 	// (server.hub.observability). Read at startup; changes need a restart.
 	Observability *V1ServerHubObservabilityConfig `json:"observability,omitempty" yaml:"observability,omitempty" koanf:"observability"`
@@ -1809,6 +1870,20 @@ type V1ServerHubObservabilityConfig struct {
 	MetricsEnabled *bool `json:"metrics_enabled,omitempty" yaml:"metrics_enabled,omitempty" koanf:"metrics_enabled"`
 	// TracingEnabled turns the hub trace exporter on or off.
 	TracingEnabled *bool `json:"tracing_enabled,omitempty" yaml:"tracing_enabled,omitempty" koanf:"tracing_enabled"`
+}
+
+// V1ServerHubSSEConfig holds the browser events stream settings of the hub
+// server (server.hub.sse). Validated at startup (HubSSEConfig.Validate); an
+// invalid value is a startup error.
+type V1ServerHubSSEConfig struct {
+	// MaxConnectionAge is the maximum age of an events stream before the
+	// hub sends a reconnect hint and closes it (e.g. "10m"; default "10m",
+	// 1m-24h). Jittered by +/-20% per stream; clamped to 0.8 of
+	// platform_request_timeout when that is set.
+	MaxConnectionAge string `json:"max_connection_age,omitempty" yaml:"max_connection_age,omitempty" koanf:"max_connection_age"`
+	// HeartbeatInterval is the interval between events stream heartbeats
+	// (e.g. "30s"; default "30s", 5s-1m).
+	HeartbeatInterval string `json:"heartbeat_interval,omitempty" yaml:"heartbeat_interval,omitempty" koanf:"heartbeat_interval"`
 }
 
 // V1ServerHubPortProxyConfig holds the agent port proxy settings of the
@@ -2891,6 +2966,17 @@ type CloudRunConfig struct {
 	// ProjectSettingsHasCloudRunAssignableServiceAccounts). Empty or unset
 	// means no account is attachable, so "assign" is refused.
 	AssignableServiceAccounts []string `json:"assignable_service_accounts,omitempty" yaml:"assignable_service_accounts,omitempty" koanf:"assignable_service_accounts"`
+
+	// BlockServiceAccount is the service account, holding no roles, that
+	// this Runtime Broker runs a Cloud Run instance as for GCP identity mode
+	// "block" (and for an unset mode, which is block on Cloud Run) while the
+	// hub.cloudrun_native_identity experiment is on. It is read from the
+	// broker's global settings only: the same key in a project's own
+	// settings.yaml is ignored (see
+	// ProjectSettingsHasCloudRunBlockServiceAccount). Empty or unset means
+	// such a dispatch is refused; the runtime's own service_account is never
+	// used in its place.
+	BlockServiceAccount string `json:"block_service_account,omitempty" yaml:"block_service_account,omitempty" koanf:"block_service_account"`
 }
 
 // V1CloudRunInstancesConfig holds Cloud Run Instances runtime settings.
@@ -4373,6 +4459,9 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		if v1.Hub.ContentURL != "" {
 			gc.Hub.ContentURL = v1.Hub.ContentURL
 		}
+		if v1.Hub.ContentURLAllowSameSite != nil {
+			gc.Hub.ContentURLAllowSameSite = *v1.Hub.ContentURLAllowSameSite
+		}
 		if v1.Hub.AgentEndpoint != "" {
 			gc.Hub.AgentEndpoint = v1.Hub.AgentEndpoint
 		}
@@ -4386,7 +4475,10 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 			gc.Hub.GCPProjectID = v1.Hub.GCPProjectID
 		}
 		if v1.Hub.TestIdentities != nil {
-			ti := &TestIdentitiesConfig{AdminWebSessions: v1.Hub.TestIdentities.AdminWebSessions}
+			ti := &TestIdentitiesConfig{
+				AdminWebSessions:        v1.Hub.TestIdentities.AdminWebSessions,
+				OfflineAdminDelegations: v1.Hub.TestIdentities.OfflineAdminDelegations,
+			}
 			for _, e := range v1.Hub.TestIdentities.WorkloadIssuers {
 				ti.WorkloadIssuers = append(ti.WorkloadIssuers, TestIdentityWorkloadIssuer(e))
 			}
@@ -4516,6 +4608,10 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		if p := v1.Hub.PortProxy; p != nil {
 			gc.Hub.PortProxy = HubPortProxyConfig{ResponseHeaderTimeout: p.ResponseHeaderTimeout, ViewTTL: p.ViewTTL}
 		}
+		if c := v1.Hub.SSE; c != nil {
+			gc.Hub.SSE = HubSSEConfig{MaxConnectionAge: c.MaxConnectionAge, HeartbeatInterval: c.HeartbeatInterval}
+		}
+		gc.Hub.PlatformRequestTimeout = v1.Hub.PlatformRequestTimeout
 		if o := v1.Hub.Observability; o != nil {
 			gc.Hub.Observability = HubObservabilityConfig{
 				MetricsEnabled: copyBoolPtr(o.MetricsEnabled),
@@ -4875,7 +4971,10 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 		},
 	}
 	if gc.Hub.TestIdentities != nil {
-		ti := &V1TestIdentitiesConfig{AdminWebSessions: gc.Hub.TestIdentities.AdminWebSessions}
+		ti := &V1TestIdentitiesConfig{
+			AdminWebSessions:        gc.Hub.TestIdentities.AdminWebSessions,
+			OfflineAdminDelegations: gc.Hub.TestIdentities.OfflineAdminDelegations,
+		}
 		for _, e := range gc.Hub.TestIdentities.WorkloadIssuers {
 			ti.WorkloadIssuers = append(ti.WorkloadIssuers, V1TestIdentityWorkloadIssuer(e))
 		}
@@ -4923,6 +5022,10 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	if p := gc.Hub.PortProxy; !p.IsZero() {
 		v1Hub.PortProxy = &V1ServerHubPortProxyConfig{ResponseHeaderTimeout: p.ResponseHeaderTimeout, ViewTTL: p.ViewTTL}
 	}
+	if c := gc.Hub.SSE; !c.IsZero() {
+		v1Hub.SSE = &V1ServerHubSSEConfig{MaxConnectionAge: c.MaxConnectionAge, HeartbeatInterval: c.HeartbeatInterval}
+	}
+	v1Hub.PlatformRequestTimeout = gc.Hub.PlatformRequestTimeout
 	if o := gc.Hub.Observability; !o.IsZero() {
 		v1Hub.Observability = &V1ServerHubObservabilityConfig{
 			MetricsEnabled: copyBoolPtr(o.MetricsEnabled),
@@ -4940,6 +5043,10 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	}
 	if gc.Hub.StartCreateUnconfirmedHold > 0 {
 		v1Hub.StartCreateUnconfirmedHold = gc.Hub.StartCreateUnconfirmedHold.String()
+	}
+	if gc.Hub.ContentURLAllowSameSite {
+		allowSameSite := true
+		v1Hub.ContentURLAllowSameSite = &allowSameSite
 	}
 	if gc.Hub.SoftDeleteRetainFiles {
 		retainFiles := true

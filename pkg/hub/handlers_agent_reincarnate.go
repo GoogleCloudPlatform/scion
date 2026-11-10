@@ -908,6 +908,11 @@ func effectiveAgentRuntime(agent *store.Agent, broker *store.RuntimeBroker) stri
 // unrecorded hop further up that the chain walk reaches before any hop it
 // does not accept (reincarnateChainUnrecorded): the reincarnate then
 // repairs the chain as a recreate by that user would (ptone/scion#3948).
+// It is re-recorded as well, with the owner as the recorded delegator, when
+// the agent's owner keeps the role of an agent whose recorded chain ends at
+// another user (owner reclaim, reincarnateOwnerReclaims). A re-record after
+// which the owner's unshared material is not delivered carries a plan
+// warning (ownerMaterialReRecordNotice).
 // In every other case, including any self-reincarnation, an agent
 // requester's reincarnation that keeps the role, and a user's that keeps
 // the role of an agent with a recorded own edge and either a fully recorded
@@ -982,6 +987,7 @@ func (s *Server) reincarnateAuthorityFor(w http.ResponseWriter, r *http.Request,
 		// Decision D1: a self request does not re-record the edge.
 		return nil, true
 	}
+	ownerReclaim := false
 	if !roleChanged {
 		// ptone/scion#3762: another requester's reincarnate that keeps the
 		// role keeps the existing edge, so the agent keeps its delegator.
@@ -1002,7 +1008,22 @@ func (s *Server) reincarnateAuthorityFor(w http.ResponseWriter, r *http.Request,
 			return nil, false
 		}
 		if !unrecorded {
-			return nil, true
+			// Owner reclaim: the agent's owner keeping the role of an agent
+			// whose recorded chain ends at another user re-records the edge
+			// with the owner as delegator, so the owner's unshared material
+			// follows the chain again (start_owner_material_chain.go).
+			reclaim, err := s.reincarnateOwnerReclaims(ctx, identity, agent)
+			if err != nil {
+				s.agentLifecycleLog.Error("handleReincarnateAgent: delegation chain lookup failed",
+					"agent_id", agent.ID, "error", err)
+				writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
+					"Unable to evaluate the agent's delegation chain; retry later", nil)
+				return nil, false
+			}
+			if !reclaim {
+				return nil, true
+			}
+			ownerReclaim = true
 		}
 	}
 	if agentIdent != nil {
@@ -1027,12 +1048,108 @@ func (s *Server) reincarnateAuthorityFor(w http.ResponseWriter, r *http.Request,
 		delegatorType = store.DelegationPrincipalAgent
 	}
 	return &reincarnateAuthority{
-		DelegatorType: delegatorType,
-		DelegatorID:   identity.ID(),
-		Role:          string(role),
-		Ceiling:       ceiling,
-		Provenance:    prov,
+		DelegatorType:       delegatorType,
+		DelegatorID:         identity.ID(),
+		Role:                string(role),
+		Ceiling:             ceiling,
+		Provenance:          prov,
+		OwnerMaterialNotice: s.ownerMaterialReRecordNotice(ctx, agent, delegatorType, identity.ID()),
+		OwnerReclaim:        ownerReclaim,
+		RuntimeReadNotice:   s.runtimeReadReRecordNotice(ctx, agent, delegatorType, identity.ID()),
 	}, true
+}
+
+// reincarnateOwnerReclaims reports whether a user's same-role reincarnate of
+// agent re-records its edge as an owner reclaim: the requester is the
+// agent's owner, and the agent's recorded chain ends at another user. The
+// re-record is bounded as every other one is, by checks that run before
+// this: CanDelegate, and the requester's credential ceiling read as the hop
+// it records would apply it (uatHopEffectCeiling). Only a chain lookup
+// fault is an error.
+func (s *Server) reincarnateOwnerReclaims(ctx context.Context, identity Identity, agent *store.Agent) (bool, error) {
+	if identity == nil || agent.OwnerID == "" || identity.ID() != agent.OwnerID {
+		return false, nil
+	}
+	v := s.authzService.ownerChainVerdict(ctx, agent)
+	switch {
+	case v.outcome == ownerChainWithhold && v.reason == ownerChainReasonLookupError:
+		return false, fmt.Errorf("owner material chain lookup for agent %s failed", agent.ID)
+	case v.outcome == ownerChainEndsAtUser && v.terminalUserID != agent.OwnerID:
+		return true, nil
+	}
+	return false, nil
+}
+
+// ownerMaterialReRecordNoticeText is the plan warning of a re-record after
+// which the owner's unshared material is not delivered to the agent;
+// ownerMaterialReclaimClause is appended when the owner can restore it by
+// reincarnating the agent (its ancestry, if any, starts at the owner).
+const (
+	ownerMaterialReRecordNoticeText = "the agent's recorded delegation chain will not end at its owner, so the owner's user secrets and env vars that are not shared with progeny will not be delivered to it"
+	ownerMaterialReclaimClause      = "; the owner can restore them by reincarnating the agent"
+)
+
+// ownerMaterialReRecordNotice returns the notice for a re-record of agent's
+// edge with the given delegator, or "" when the owner's unshared rows are
+// still delivered after it: the new chain ends at the owner (a user
+// delegator equal to the owner, or an agent delegator whose own chain ends
+// there) and the agent's ancestry, if any, starts at the owner. A lookup
+// fault on an agent delegator's chain gives the notice. The remedy clause is added only when
+// the new chain is what withholds the rows (terminal_user_not_owner).
+func (s *Server) ownerMaterialReRecordNotice(ctx context.Context, agent *store.Agent, delegatorType, delegatorID string) string {
+	if agent == nil || agent.OwnerID == "" || s.authzService == nil {
+		return ""
+	}
+	var v ownerChainVerdict
+	switch delegatorType {
+	case store.DelegationPrincipalUser:
+		v = ownerChainVerdict{outcome: ownerChainEndsAtUser, terminalUserID: delegatorID}
+	case store.DelegationPrincipalAgent:
+		v = s.authzService.ownerChainVerdict(ctx, &store.Agent{ID: delegatorID, ProjectID: agent.ProjectID})
+		if v.outcome == ownerChainLegacy {
+			// The delegator's own hop is unrecorded: above the agent.
+			v = ownerChainVerdict{outcome: ownerChainWithhold, reason: ownerChainReasonUnrecordedAbove}
+		}
+	default:
+		return ownerMaterialReRecordNoticeText
+	}
+	deliver, _, reason := ownerRowDecision(v, agent.Ancestry, agent.OwnerID)
+	switch {
+	case deliver:
+		return ""
+	case reason == ownerChainReasonTerminalNotOwner:
+		return ownerMaterialReRecordNoticeText + ownerMaterialReclaimClause
+	default:
+		return ownerMaterialReRecordNoticeText
+	}
+}
+
+// runtimeReadReRecordNoticeText is the notice of a re-record after which
+// the agent's delegation chain is still unrecorded above its own edge, so
+// the runtime read and the agent secret list refuse the owner's shared
+// user secrets (chain_unrecorded), and start withholds them.
+const runtimeReadReRecordNoticeText = "runtime reads of the owner's shared secrets are refused until the agent's chain is recorded (reincarnate it as its owner)"
+
+// runtimeReadReRecordNotice returns the notice for a re-record of agent's
+// edge with the given delegator when the agent's chain stays unrecorded
+// above it: the delegator is an agent whose own edge, or a hop above it,
+// has no recorded provenance. It is "" for a user delegator (the chain then
+// ends at the agent's own edge), for an agent without ancestry (the runtime
+// read refuses it before the chain), and when the delegator's chain lookup
+// faults.
+func (s *Server) runtimeReadReRecordNotice(ctx context.Context, agent *store.Agent, delegatorType, delegatorID string) string {
+	if agent == nil || len(agent.Ancestry) == 0 || s.authzService == nil || delegatorType != store.DelegationPrincipalAgent {
+		return ""
+	}
+	v := s.authzService.ownerChainVerdict(ctx, &store.Agent{ID: delegatorID, ProjectID: agent.ProjectID})
+	switch {
+	case v.outcome == ownerChainLegacy:
+		// The delegator's own hop is unrecorded: above the agent.
+		return runtimeReadReRecordNoticeText
+	case v.outcome == ownerChainWithhold && v.reason == ownerChainReasonUnrecordedAbove:
+		return runtimeReadReRecordNoticeText
+	}
+	return ""
 }
 
 // reincarnateChainUnrecorded reports whether a user's same-role reincarnate

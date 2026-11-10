@@ -468,7 +468,7 @@ test.describe('Starred messages', () => {
       await expect(page.locator('scion-chat-message').first()).toBeVisible({ timeout: 20_000 });
       await expect(page.locator('scion-chat-starred-list')).toHaveCount(0);
       await page.locator('scion-chat-message').last().click({ button: 'right' });
-      await expect(menuItem(page, 'Copy link')).toBeVisible();
+      await expect(menuItem(page, 'Copy link to msg')).toBeVisible();
       await expect(menuItem(page, 'Star message')).toHaveCount(0);
     } finally {
       await setExperiment(env.devToken, true);

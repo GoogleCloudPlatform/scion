@@ -238,6 +238,53 @@ func TestGitCloneWorkspace_NoAgentHelperForUnboundRemote(t *testing.T) {
 	}
 }
 
+// The in-container clone reports an unparsable SCION_GIT_DEPTH, and a clone
+// URL that gets no credential, at WARN level, without a "WARNING:" prefix in
+// the message (the level carries it).
+func TestGitCloneWorkspace_NoticesLoggedAtWarn(t *testing.T) {
+	readLog := captureSciontoolLog(t)
+	root := t.TempDir()
+	bare := tokenRemoteBareRepo(t, root)
+	public := newTokenGitServer(t, bare, false)
+
+	agentHome := t.TempDir()
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", agentHome)
+	t.Setenv("SCION_GIT_CLONE_URL", public.url)
+	t.Setenv("SCION_WORKSPACE_PATH", workspace)
+	t.Setenv("SCION_GIT_BRANCH", "main")
+	t.Setenv("SCION_GIT_DEPTH", "not-a-number")
+	t.Setenv("SCION_AGENT_BRANCH", "")
+	t.Setenv("SCION_AGENT_NAME", "test-agent")
+	t.Setenv("SCION_GITHUB_APP_ENABLED", "")
+	t.Setenv("GITHUB_TOKEN", "")
+	t.Setenv(api.EnvGitTokenRemote, "")
+	if err := os.Unsetenv(api.EnvGitTokenRemote); err != nil {
+		t.Fatal(err)
+	}
+
+	// Both notices are logged before any git command runs, so the clone's
+	// own outcome (a shallow fetch over the dumb-http fixture) is not
+	// asserted here.
+	_ = gitCloneWorkspace(os.Getuid(), os.Getgid(), agentHome, false)
+
+	got := readLog()
+	for _, want := range []string{
+		`[WARN] SCION_GIT_DEPTH is not a valid integer ("not-a-number"), defaulting to 1`,
+		"[WARN] the clone URL does not name the project's recorded git remote; cloning without a git credential",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("agent.log is missing %q; got:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "WARNING:") {
+		t.Errorf("agent.log still carries a WARNING: prefix; got:\n%s", got)
+	}
+}
+
 // --- provision init container (sciontool provision) ---
 
 // provisionCloneWithTokenRemote runs runProvision (the real

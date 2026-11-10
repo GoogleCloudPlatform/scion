@@ -129,9 +129,10 @@ var agentWriterClasses = map[string]writerEntry{
 	"flat_placement_store.go:AgentStore.SetAgentPinnedRuntimeTarget":                                {classExempt, "placement pin"},
 	"agent_store.go:AgentStore.SetAgentRuntimeTarget":                                               {classExempt, "applied_config.RuntimeTarget* is not in the snapshot"},
 	"agent_store.go:AgentStore.clearRuntimeTargetOnce":                                              {classExempt, "applied_config.RuntimeTarget* is not in the snapshot"},
+	"agent_store.go:AgentStore.setAgentNativeCloudRunOnce":                                          {classExempt, "applied_config.nativeCloudRun is not in the snapshot"},
 	"agent_store.go:AgentStore.ReassignAgentsToBroker":                                              {classExempt, "broker_id is an envelope field of later events"},
 	"composite.go:CompositeStore.ReconcileHarnessConfigColumn":                                      {classExempt, "denormalized column; the snapshot reads applied_config (resync backstop)"},
-	"composite.go:CompositeStore.BackfillEmptyAgentRoles":                                           {classExempt, "role is not a snapshot input"},
+	"composite.go:CompositeStore.backfillAgentRole":                                                 {classExempt, "role is not a snapshot input"},
 }
 
 var (

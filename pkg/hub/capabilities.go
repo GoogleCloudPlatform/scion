@@ -299,6 +299,9 @@ func (a *AuthzService) ComputeCapabilitiesBatch(ctx context.Context, identity Id
 	if IsScopedUserIdentity(identity) {
 		caps := make([]*Capabilities, len(resources))
 		for i, resource := range resources {
+			if ctx.Err() != nil {
+				return denyRemainingCapabilities(caps, i)
+			}
 			caps[i] = a.computeCapabilitiesWithContext(ctx, identity, resource, actions)
 		}
 		return caps
@@ -309,6 +312,9 @@ func (a *AuthzService) ComputeCapabilitiesBatch(ctx context.Context, identity Id
 	// costs len(resources) × len(actions) decisions.
 	caps := make([]*Capabilities, len(resources))
 	for i, resource := range resources {
+		if ctx.Err() != nil {
+			return denyRemainingCapabilities(caps, i)
+		}
 		var allowed []string
 		for _, action := range actions {
 			decision := a.CheckAccess(ctx, identity, resource, action)
@@ -353,6 +359,9 @@ func (a *AuthzService) ComputeCapabilitiesForActions(ctx context.Context, identi
 	if IsScopedUserIdentity(identity) {
 		caps := make([]*Capabilities, len(resources))
 		for i, resource := range resources {
+			if ctx.Err() != nil {
+				return denyRemainingCapabilities(caps, i)
+			}
 			caps[i] = a.computeCapabilitiesWithContext(ctx, identity, resource, actions)
 		}
 		return caps
@@ -360,6 +369,9 @@ func (a *AuthzService) ComputeCapabilitiesForActions(ctx context.Context, identi
 
 	caps := make([]*Capabilities, len(resources))
 	for i, resource := range resources {
+		if ctx.Err() != nil {
+			return denyRemainingCapabilities(caps, i)
+		}
 		var allowed []string
 		for _, action := range actions {
 			decision := a.CheckAccess(ctx, identity, resource, action)
@@ -371,6 +383,18 @@ func (a *AuthzService) ComputeCapabilitiesForActions(ctx context.Context, identi
 			allowed = []string{}
 		}
 		caps[i] = &Capabilities{Actions: allowed}
+	}
+	return caps
+}
+
+// denyRemainingCapabilities fills caps from index from on with no actions
+// and returns caps. The capability loops call it once the request context
+// has ended (ptone/scion#6012) instead of running the remaining decisions:
+// the rest are denied, never allowed, and the response of an ended request
+// is not delivered.
+func denyRemainingCapabilities(caps []*Capabilities, from int) []*Capabilities {
+	for i := from; i < len(caps); i++ {
+		caps[i] = &Capabilities{Actions: []string{}}
 	}
 	return caps
 }

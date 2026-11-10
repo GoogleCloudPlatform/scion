@@ -1219,3 +1219,84 @@ func (h *artifactHost) PermitsUploadRead(ctx context.Context) bool {
 	}
 	return false
 }
+
+var _ artifacts.FeatureGate = (*artifactHost)(nil)
+
+// FeatureEnabled implements artifacts.FeatureGate with the hub's experiment
+// resolution. It fails closed: a name that is not a registered server-layer
+// experiment answers false, whatever is stored for it.
+func (h *artifactHost) FeatureEnabled(_ context.Context, name string) bool {
+	if h.server == nil {
+		return false
+	}
+	exp, ok := h.server.experimentRegistry().Lookup(name)
+	if !ok || !exp.HasLayer(experiments.LayerServer) {
+		return false
+	}
+	return h.server.experimentEnabled(name)
+}
+
+var _ artifacts.PrincipalNamer = (*artifactHost)(nil)
+
+// PrincipalDisplayNames implements artifacts.PrincipalNamer for the
+// open-review check: a user's display name, or an agent's name. It never
+// answers an email address or an id: a user without a display name, an
+// agent without a name, a ref that is not a known principal and any store
+// error are left out of the answer, and the service names them "a
+// reviewer". It costs at most two store queries.
+func (h *artifactHost) PrincipalDisplayNames(ctx context.Context, refs []string) map[string]string {
+	out := make(map[string]string, len(refs))
+	if h.server == nil || h.server.store == nil || len(refs) == 0 {
+		return out
+	}
+	// The answer is keyed by the refs as given; ids compare in lower case.
+	var agentIDs, userIDs []string
+	agentRefs, userRefs := map[string]string{}, map[string]string{}
+	for _, ref := range refs {
+		kind, id, ok := strings.Cut(ref, ":")
+		if _, err := uuid.Parse(id); !ok || err != nil {
+			continue
+		}
+		switch kind {
+		case artifacts.PrincipalKindAgent:
+			agentIDs = append(agentIDs, id)
+			agentRefs[strings.ToLower(id)] = ref
+		case artifacts.PrincipalKindUser:
+			userIDs = append(userIDs, id)
+			userRefs[strings.ToLower(id)] = ref
+		}
+	}
+	if len(agentIDs) > 0 {
+		res, err := h.server.store.ListAgents(ctx, store.AgentFilter{IDs: agentIDs},
+			store.ListOptions{Limit: len(agentIDs), SkipTotalCount: true})
+		if err != nil {
+			slog.WarnContext(ctx, "artifacts: reading reviewer agent names failed", "error", err)
+		} else {
+			for _, a := range res.Items {
+				if name := strings.TrimSpace(a.Name); name != "" && a.DeletedAt.IsZero() {
+					if ref, ok := agentRefs[strings.ToLower(a.ID)]; ok {
+						out[ref] = name
+					}
+				}
+			}
+		}
+	}
+	if len(userIDs) > 0 {
+		users, err := h.server.store.GetUsersByIDs(ctx, userIDs)
+		if err != nil {
+			slog.WarnContext(ctx, "artifacts: reading reviewer user names failed", "error", err)
+		} else {
+			for _, u := range users {
+				if u == nil {
+					continue
+				}
+				if name := strings.TrimSpace(u.DisplayName); name != "" && !strings.Contains(name, "@") {
+					if ref, ok := userRefs[strings.ToLower(u.ID)]; ok {
+						out[ref] = name
+					}
+				}
+			}
+		}
+	}
+	return out
+}

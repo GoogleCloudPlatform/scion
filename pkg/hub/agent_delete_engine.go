@@ -199,6 +199,46 @@ func deleteClaimStopping(a *store.Agent) bool {
 	return false
 }
 
+// deleteNeverProvisioned reports whether a is a create the broker refused
+// before it created any container. It is an allowlist; all of these hold:
+//   - a is an incomplete create (store.Agent.IsIncompleteCreate) in phase
+//     error;
+//   - its launch ended with end reason failed. For an error row, a
+//     broker's failed launch report writes it (launch_report.go:
+//     failedReportEndUpdate, and the error-phase branch for a failed
+//     report); the error-phase branch also writes it for a non-failed
+//     report, always with agent_error (excluded below). A stop during the
+//     launch (launch_stopped, phase stopped or stopping), the reaper's
+//     timed_out and lost ends (launch_timeout, broker_lost) and the
+//     dispatcher's not_launched end (dispatch_failed, including a broker
+//     that acknowledged a different launch) never pass;
+//   - its launch error is a broker refusal raised before Runtime.Run
+//     (store.IsBrokerPreContainerLaunchRefusal). agent_error, which the
+//     error-phase branch writes for a non-failed report and as the default
+//     of a failed report with no code, never passes.
+//
+// Any other row may have a container on the broker, so its delete keeps
+// the mandatory dispatch. The broker may still hold the refused launch's
+// files, so the delete still sends a best-effort dispatch to remove them,
+// as for a created row (deleteSkipsBrokerCheck).
+func deleteNeverProvisioned(a *store.Agent) bool {
+	return a.IsIncompleteCreate() &&
+		a.Phase == string(state.PhaseError) &&
+		a.LaunchState == store.LaunchStateEnded &&
+		a.LaunchEndReason == store.LaunchEndReasonFailed &&
+		store.IsBrokerPreContainerLaunchRefusal(a.LaunchError)
+}
+
+// deleteSkipsBrokerCheck reports whether a delete of a skips the Runtime
+// Broker reachability check before its claim, because the engine's dispatch
+// for it is best-effort: a created row with no launch in flight
+// (ptone/scion#2635), or a create the broker refused before it created any
+// container (deleteNeverProvisioned).
+func deleteSkipsBrokerCheck(a *store.Agent) bool {
+	createdNoLaunch := a.Phase == string(state.PhaseCreated) && a.LaunchState != store.LaunchStateActive
+	return createdNoLaunch || deleteNeverProvisioned(a)
+}
+
 // claimAgentDeletion runs the claim (design §2.1, without phase 2b's
 // live-force branch):
 //
@@ -879,8 +919,12 @@ func (e *deletionEngine) dispatch() (out deletionOutcome, ok bool) {
 	// sync start whose request timed out): the dispatch is best-effort —
 	// only when the broker looks reachable, and an error does not block
 	// removing the record (ptone/scion#2635). A created row WITH an active
-	// launch (T1, C1) takes the mandatory path below.
-	bestEffort := e.plan.prior.Phase == string(state.PhaseCreated) && e.plan.prior.LaunchID == ""
+	// launch (T1, C1) takes the mandatory path below. A create the broker
+	// refused before it created any container is best-effort too
+	// (deleteNeverProvisioned, read from the claim snapshot: the claim
+	// leaves an error row's phase and its launch fields alone).
+	bestEffort := (e.plan.prior.Phase == string(state.PhaseCreated) && e.plan.prior.LaunchID == "") ||
+		deleteNeverProvisioned(agent)
 	if bestEffort && !s.brokerReachable(ctx, agent) {
 		return deletionOutcome{}, true
 	}
@@ -955,8 +999,8 @@ func (e *deletionEngine) dispatch() (out deletionOutcome, ok bool) {
 	}
 	switch {
 	case bestEffort:
-		s.agentLifecycleLog.Warn("Failed to dispatch created-phase agent delete to broker (continuing)",
-			"agent_id", agent.ID, "error", err)
+		s.agentLifecycleLog.Warn("Failed to dispatch best-effort agent delete to broker (continuing)",
+			"agent_id", agent.ID, "prior_phase", e.plan.prior.Phase, "phase", agent.Phase, "error", err)
 		return deletionOutcome{}, true
 	case req.Force:
 		s.agentLifecycleLog.Warn("Failed to dispatch agent delete to broker (force=true, continuing)",

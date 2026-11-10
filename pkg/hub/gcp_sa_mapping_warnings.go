@@ -62,10 +62,14 @@ type projectSAMappingView struct {
 // isKubernetesBrokerProfile reports whether a stored profile p is a
 // Kubernetes profile for this check: its runtime key names Kubernetes
 // (isKubernetesRuntimeType), or it reported mappings. Brokers report
-// mappings only for Kubernetes profiles (by resolved runtime type), so a
-// custom runtime key such as "gke" with type kubernetes counts once its
-// broker reports.
+// mappings for Kubernetes profiles (by resolved runtime type), so a custom
+// runtime key such as "gke" with type kubernetes counts once its broker
+// reports. A Cloud Run profile (isCloudRunProfileType) reports its
+// assignable accounts in the same fields and is never counted.
 func isKubernetesBrokerProfile(p store.BrokerProfile) bool {
+	if isCloudRunProfileType(p.Type) {
+		return false
+	}
 	return isKubernetesRuntimeType(p.Type) || p.MappingsReported || len(p.ServiceAccountMappings) > 0
 }
 

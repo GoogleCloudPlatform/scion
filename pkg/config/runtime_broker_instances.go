@@ -396,6 +396,12 @@ func LoadRuntimeBrokerInstances(configPath string) ([]V1RuntimeBrokerInstanceCon
 	if !found {
 		return nil, nil
 	}
+	return instancesFromServerSection(raw)
+}
+
+// instancesFromServerSection strictly decodes and validates
+// server.broker.instances from the raw server section of a settings file.
+func instancesFromServerSection(raw map[string]interface{}) ([]V1RuntimeBrokerInstanceConfig, error) {
 	brokerVal, present := raw["broker"]
 	if !present || brokerVal == nil {
 		return nil, nil
@@ -692,6 +698,12 @@ func readServerSectionStrict(dir string) (map[string]interface{}, bool, error) {
 		}
 		return nil, false, fmt.Errorf("read %s: %w", path, err)
 	}
+	return parseServerSectionStrict(data, path)
+}
+
+// parseServerSectionStrict returns the raw server section of the settings
+// file data (named path in errors), as readServerSectionStrict does.
+func parseServerSectionStrict(data []byte, path string) (map[string]interface{}, bool, error) {
 	var doc map[string]interface{}
 	if err := yamlv3.Unmarshal(data, &doc); err != nil {
 		return nil, false, fmt.Errorf("parse %s: %w", path, err)

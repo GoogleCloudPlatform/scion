@@ -102,9 +102,9 @@ func startHubAgentDefaults(d opsettings.AgentDefaultsSettings, autoExposePorts *
 
 // withDispatchImageTag returns h with the hub-resolved image_tag set
 // (ptone/scion#6625), allocating the wire value when the hub has no other
-// default to send. An empty tag returns h unchanged, so with
-// hub.image_tag_setting off, or image_tag unset, the wire is byte-identical
-// to the one without the tag. Create, start (resume included) and restart
+// default to send. An empty tag returns h unchanged, so when no tag
+// applies (imageTagStateOf) the wire is byte-identical to the one without
+// the tag. Create, start (resume included) and restart
 // all send it, so the broker applies the tag on every path.
 func withDispatchImageTag(h *RemoteHubAgentDefaults, tag string) *RemoteHubAgentDefaults {
 	if tag == "" {

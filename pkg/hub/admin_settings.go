@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -369,10 +370,12 @@ func (s *Server) handleAdminServerConfigSectionReset(w http.ResponseWriter, r *h
 	// before the reset like a GCP permission-check change, and the reset is
 	// not made if the record cannot be written. A seeded row holds no saved
 	// value, so resetting it records nothing.
-	publicURLBefore := ""
+	// A failure records every change already recorded as not applied
+	// (endpointURLAudits).
+	endpointAudits := &endpointURLAudits{s: s, ctx: r.Context(), surface: gcpIAMSurfaceReset}
 	if sectionName == "endpoints" {
-		if publicURLBefore = storedManagedPublicURL(ops); publicURLBefore != "" {
-			if err := s.auditEndpointURLChange(r.Context(), config.PublicURLKey, gcpIAMSurfaceReset, publicURLBefore, ""); err != nil {
+		if publicURLBefore := storedManagedPublicURL(ops); publicURLBefore != "" {
+			if err := endpointAudits.record(config.PublicURLKey, publicURLBefore, ""); err != nil {
 				slog.Error("Failed to record public URL change", "error", err)
 				writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 					"Failed to reset section", nil)
@@ -384,13 +387,25 @@ func (s *Server) handleAdminServerConfigSectionReset(w http.ResponseWriter, r *h
 	// It changes the content host in effect when the row sets one other
 	// than the bootstrap value: recorded before the reset in the same way
 	// (ptone/scion#7107 phase A).
-	contentURLBefore, contentURLAfter := "", ""
-	contentURLChange := false
 	if sectionName == "endpoints" {
-		contentURLBefore, contentURLAfter = ops.Snapshot().ContentURL, ops.bootstrapContentURL()
-		if contentURLChange = contentURLBefore != contentURLAfter; contentURLChange {
-			if err := s.auditEndpointURLChange(r.Context(), config.ContentURLKey, gcpIAMSurfaceReset, contentURLBefore, contentURLAfter); err != nil {
+		contentURLBefore, contentURLAfter := ops.Snapshot().ContentURL, ops.bootstrapContentURL()
+		if contentURLBefore != contentURLAfter {
+			if err := endpointAudits.record(config.ContentURLKey, contentURLForAudit(contentURLBefore), contentURLForAudit(contentURLAfter)); err != nil {
 				slog.Error("Failed to record content URL change", "error", err)
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+					"Failed to reset section", nil)
+				return
+			}
+		}
+	}
+
+	// So does a change to the same-site override in effect (phase B item 1).
+	if sectionName == "endpoints" {
+		allowSameSiteBefore := strconv.FormatBool(ops.Snapshot().ContentURLAllowSameSite)
+		allowSameSiteAfter := strconv.FormatBool(ops.bootstrapContentURLAllowSameSite())
+		if allowSameSiteBefore != allowSameSiteAfter {
+			if err := endpointAudits.record(config.ContentURLAllowSameSiteKey, allowSameSiteBefore, allowSameSiteAfter); err != nil {
+				slog.Error("Failed to record content URL same-site override change", "error", err)
 				writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 					"Failed to reset section", nil)
 				return
@@ -408,11 +423,8 @@ func (s *Server) handleAdminServerConfigSectionReset(w http.ResponseWriter, r *h
 	} else {
 		err = ops.DeleteSection(r.Context(), sectionName)
 	}
-	if publicURLBefore != "" && err != nil {
-		s.auditEndpointURLNotApplied(r.Context(), config.PublicURLKey, gcpIAMSurfaceReset, publicURLBefore, "", err)
-	}
-	if contentURLChange && err != nil {
-		s.auditEndpointURLNotApplied(r.Context(), config.ContentURLKey, gcpIAMSurfaceReset, contentURLBefore, contentURLAfter, err)
+	if err != nil {
+		endpointAudits.notApplied(err)
 	}
 	if gcpIAMChange {
 		// The approval covers only this reset's own self-apply.
@@ -626,7 +638,7 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	// The content host: the same check as the DB path, against the running
 	// agent endpoint and the one this save sends (S2).
-	if !validateContentURLRequest(w, &req, s.HubEndpoints().Public, s.config.AgentEndpoint, requestAgentEndpoint(&req)) {
+	if !validateContentURLRequest(w, &req, s.HubEndpoints().Public, contentURLAllowSameSiteAfter(&req, s.contentURLAllowSameSiteLiveValue()), s.config.AgentEndpoint, requestAgentEndpoint(&req)) {
 		return
 	}
 
@@ -903,20 +915,30 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 	// the merged file's, so a clear through null or a "hub": null is
 	// recorded too, whatever the request names (SEC-A2), and a value that
 	// comes only from the environment never looks like a change (S1).
+	// A failure records every change already recorded as not applied
+	// (endpointURLAudits).
+	fileAudits := &endpointURLAudits{s: s, ctx: r.Context(), surface: gcpIAMSurfaceSave}
 	fileContentURLBefore, fileContentURLAfter := contentURLFileChange(settingsBefore, newData)
-	fileContentURLChange := false
-	if fileContentURLChange = fileContentURLBefore != fileContentURLAfter; fileContentURLChange {
-		if err := s.auditEndpointURLChange(r.Context(), config.ContentURLKey, gcpIAMSurfaceSave, fileContentURLBefore, fileContentURLAfter); err != nil {
+	if fileContentURLBefore != fileContentURLAfter {
+		if err := fileAudits.record(config.ContentURLKey, contentURLForAudit(fileContentURLBefore), contentURLForAudit(fileContentURLAfter)); err != nil {
 			slog.Error("PUT server-config: failed to record content URL change", "error", err)
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to write settings file", nil)
 			return
 		}
 	}
 
-	if err := config.WriteSettingsFileLocked(settingsLock, settingsPath, newData); err != nil {
-		if fileContentURLChange {
-			s.auditEndpointURLNotApplied(r.Context(), config.ContentURLKey, gcpIAMSurfaceSave, fileContentURLBefore, fileContentURLAfter, err)
+	// And the same-site override, compared in the file the same way.
+	fileAllowSameSiteBefore, fileAllowSameSiteAfter := fileContentURLAllowSameSite(settingsBefore), fileContentURLAllowSameSite(newData)
+	if fileAllowSameSiteBefore != fileAllowSameSiteAfter {
+		if err := fileAudits.record(config.ContentURLAllowSameSiteKey, fileAllowSameSiteBefore, fileAllowSameSiteAfter); err != nil {
+			slog.Error("PUT server-config: failed to record content URL same-site override change", "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to write settings file", nil)
+			return
 		}
+	}
+
+	if err := config.WriteSettingsFileLocked(settingsLock, settingsPath, newData); err != nil {
+		fileAudits.notApplied(err)
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to write settings file", nil)
 		return
 	}

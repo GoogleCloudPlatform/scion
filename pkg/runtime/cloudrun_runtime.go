@@ -41,6 +41,7 @@ import (
 	"time"
 
 	"cloud.google.com/go/compute/metadata"
+	resourcemanagerpb "cloud.google.com/go/resourcemanager/apiv3/resourcemanagerpb"
 	"cloud.google.com/go/run/apiv2/runpb"
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -54,6 +55,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/googleapis/gax-go/v2"
 	"google.golang.org/api/iterator"
+	"google.golang.org/api/option"
 	googleapi "google.golang.org/genproto/googleapis/api"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -101,6 +103,22 @@ type CloudRunRuntime struct {
 	// can be retried on subsequent calls.
 	resolveMu sync.Mutex
 	resolved  bool
+
+	// clientOpts are the client options every Cloud Run Admin, Cloud
+	// Logging and Resource Manager client of this runtime is built with:
+	// a flat instance's own credentials (NewFlatCloudRunRuntime). Nil for
+	// the legacy constructors, whose clients use Application Default
+	// Credentials.
+	clientOpts []option.ClientOption
+	// getProject overrides the Resource Manager read of the flat scope
+	// probe (ProbeProject). Nil in production; tests inject a fake.
+	getProject func(ctx context.Context, name string) (*resourcemanagerpb.Project, error)
+	// projectNumber is the probed project number BindProjectNumber set
+	// (amendment P5-CR, CR3). It is read only by parent(), so every Cloud
+	// Run Admin resource name targets the probed scope; config.ProjectID
+	// keeps the configured project ID, which Cloud Logging, the exec
+	// connector and its key cache use. Guarded by resolveMu.
+	projectNumber string
 }
 
 func NewCloudRunRuntime(cfg *config.CloudRunConfig) (*CloudRunRuntime, error) {
@@ -245,7 +263,7 @@ func (r *CloudRunRuntime) client(ctx context.Context) (cloudrun.InstancesAPI, er
 	if r.newClient != nil {
 		return r.newClient(ctx)
 	}
-	return cloudrun.NewInstancesClient(ctx)
+	return cloudrun.NewInstancesClient(ctx, r.clientOpts...)
 }
 
 // cloudRunMaxEnvValueBytes is Cloud Run's size cap for a single environment
@@ -292,7 +310,9 @@ func cloudRunResolvedAuthTaken(cfg RunConfig) func(name string) bool {
 // runtime own them (the staged blob, its markers and the telemetry
 // credential path), so harness env must never pre-empt the staged-secret
 // channel. Unlike Docker, a denied name is dropped even when no other
-// source sets it. reservedAgentEnvName names are denied too.
+// source sets it. reservedAgentEnvName names, the names sciontool init owns
+// (stagedsecrets.ReservedResolvedAuthEnvName) and the GCE_METADATA_
+// settings are denied too.
 var cloudRunHarnessEnvDeniedNames = map[string]bool{
 	stagedsecrets.EnvVar:               true,
 	stagedsecrets.HubTokenStagedEnvVar: true,
@@ -305,10 +325,108 @@ var cloudRunHarnessEnvDeniedNames = map[string]bool{
 // one, so a value the hub did not write can never reach the instance.
 const cloudRunHarnessEnvDeniedPrefix = "SCION_METADATA_"
 
+// cloudRunHarnessEnvDeniedGCEPrefix marks the GCE metadata server settings
+// (for example GCE_METADATA_HOST): the harness env never redirects the
+// instance's metadata server.
+const cloudRunHarnessEnvDeniedGCEPrefix = "GCE_METADATA_"
+
+// cloudRunNativeIdentityHarnessEnvDeniedNames are the names the harness env
+// never sets on an instance that runs as a broker-resolved identity
+// (RunConfig.CloudRunIdentity): each would point GCP clients away from the
+// instance's own identity. GOOGLE_CLOUD_PROJECT stays allowed: it is a
+// discovery setting, not a credential.
+var cloudRunNativeIdentityHarnessEnvDeniedNames = map[string]bool{
+	"GOOGLE_APPLICATION_CREDENTIALS": true,
+	"CLOUDSDK_CONFIG":                true,
+	"NO_GCE_CHECK":                   true,
+}
+
+// CloudRunInitFirewallEnv is the setting that turns on sciontool init's
+// opt-in firewall (initFirewallEnv in cmd/sciontool/commands/init_netadmin.go).
+const CloudRunInitFirewallEnv = "SCION_INIT_FIREWALL"
+
+// CloudRunInitFirewallRefusal is the refusal of the init firewall on a
+// Cloud Run Instances "assign" dispatch with native identity, an
+// unsupported combination. pkg/runtimebroker refuses it on the broker's
+// merged env and Run refuses it on the final instance env, both with this
+// text (CloudRunInitFirewallRefused).
+const CloudRunInitFirewallRefusal = "the init firewall (" + CloudRunInitFirewallEnv + ") is an unsupported combination with Cloud Run native identity (hub.cloudrun_native_identity); remove one of the two"
+
+// CloudRunInitFirewallRequested parses an SCION_INIT_FIREWALL value exactly
+// as sciontool init does (initFirewallRequested in
+// cmd/sciontool/commands/init_netadmin.go): surrounding space is trimmed,
+// an empty value means off, and anything else goes through
+// strconv.ParseBool. A value ParseBool rejects is an error, as init fails
+// the start on it. Keep the two in step; pkg/runtime does not import
+// cmd/sciontool.
+func CloudRunInitFirewallRequested(value string) (bool, error) {
+	raw := strings.TrimSpace(value)
+	if raw == "" {
+		return false, nil
+	}
+	on, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, fmt.Errorf("%s is not a boolean", CloudRunInitFirewallEnv)
+	}
+	return on, nil
+}
+
+// CloudRunInitFirewallRefused returns the refusal, without an agent
+// prefix, for an SCION_INIT_FIREWALL value on a native "assign" dispatch:
+// CloudRunInitFirewallRefusal when init would read it as on, the same
+// text after "the SCION_INIT_FIREWALL value is invalid; " when init cannot
+// parse it (CloudRunInitFirewallRequested), and "" for an off value. The
+// text never carries the value.
+func CloudRunInitFirewallRefused(value string) string {
+	on, err := CloudRunInitFirewallRequested(value)
+	if err != nil {
+		return "the " + CloudRunInitFirewallEnv + " value is invalid; " + CloudRunInitFirewallRefusal
+	}
+	if on {
+		return CloudRunInitFirewallRefusal
+	}
+	return ""
+}
+
+// cloudRunNativeAssign reports whether the instance runs as a
+// broker-resolved identity in mode "assign" (RunConfig.CloudRunIdentity).
+func cloudRunNativeAssign(cfg RunConfig) bool {
+	return cfg.CloudRunIdentity != nil && cfg.CloudRunIdentity.Mode == store.GCPMetadataModeAssign
+}
+
+// checkCloudRunInitFirewall refuses an instance env (the final env
+// buildCloudRunInstance computed) that carries SCION_INIT_FIREWALL on a
+// native "assign" instance (cloudRunNativeAssign) when init would read it
+// as on or cannot parse it (CloudRunInitFirewallRefused). It covers the
+// sources the broker's check cannot see, such as the settings and
+// harness-config env the agent manager adds to cfg.Env and the harness
+// env. Any other instance passes unchanged.
+func checkCloudRunInitFirewall(cfg RunConfig, env []*runpb.EnvVar) error {
+	if !cloudRunNativeAssign(cfg) {
+		return nil
+	}
+	for _, ev := range env {
+		if ev.GetName() != CloudRunInitFirewallEnv {
+			continue
+		}
+		if refusal := CloudRunInitFirewallRefused(ev.GetValue()); refusal != "" {
+			return fmt.Errorf("agent %q: %s", cfg.Labels["agent_id"], refusal)
+		}
+	}
+	return nil
+}
+
 // cloudRunHarnessEnvDenied reports whether the harness env may not set name
-// on a Cloud Run instance.
-func cloudRunHarnessEnvDenied(name string) bool {
-	return cloudRunHarnessEnvDeniedNames[name] || reservedAgentEnvName(name) || strings.HasPrefix(name, cloudRunHarnessEnvDeniedPrefix)
+// on a Cloud Run instance. nativeIdentity is set when the instance runs as
+// a broker-resolved identity (RunConfig.CloudRunIdentity).
+func cloudRunHarnessEnvDenied(name string, nativeIdentity bool) bool {
+	if nativeIdentity && cloudRunNativeIdentityHarnessEnvDeniedNames[name] {
+		return true
+	}
+	return cloudRunHarnessEnvDeniedNames[name] || reservedAgentEnvName(name) ||
+		stagedsecrets.ReservedResolvedAuthEnvName(name) ||
+		strings.HasPrefix(name, cloudRunHarnessEnvDeniedPrefix) ||
+		strings.HasPrefix(name, cloudRunHarnessEnvDeniedGCEPrefix)
 }
 
 // cloudRunHarnessEnv returns the harness env entries (harnessEnvEntries) a
@@ -319,10 +437,12 @@ func cloudRunHarnessEnvDenied(name string) bool {
 // sets is left out: those win over the harness env, as on Docker.
 //
 // It runs twice per start, once for Run's staged split
-// (cloudRunResolvedAuthTaken) and once in buildCloudRunInstance, so
-// GetEnv and GetTelemetryEnv are called twice per Cloud Run start; this
-// assumes they are deterministic and side-effect free, as every in-tree
-// harness is. Otherwise the two name sets could differ.
+// (cloudRunResolvedAuthTaken) and once in buildCloudRunInstance, and three
+// times on a native "assign" start, where Run's early init firewall check
+// builds the instance once more. So GetEnv and GetTelemetryEnv are called
+// two or three times per Cloud Run start; this assumes they are
+// deterministic and side-effect free, as every in-tree harness is.
+// Otherwise the name sets could differ.
 func cloudRunHarnessEnv(cfg RunConfig) (entries, denied []string) {
 	all := harnessEnvEntries(cfg, cfg.HomeDir)
 	if len(all) == 0 {
@@ -338,7 +458,7 @@ func cloudRunHarnessEnv(cfg RunConfig) (entries, denied []string) {
 	}
 	for _, e := range all {
 		k, _, _ := strings.Cut(e, "=")
-		if cloudRunHarnessEnvDenied(k) {
+		if cloudRunHarnessEnvDenied(k, cfg.CloudRunIdentity != nil) {
 			denied = append(denied, k)
 			continue
 		}
@@ -448,6 +568,19 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 
 	uid, gid := cloudRunOwnerIDs(cfg)
 
+	// The init firewall on a native "assign" instance, checked on the
+	// instance env (every source, harness env included) before anything
+	// is provisioned and before any Instances API call. Without NFS paths
+	// buildCloudRunInstance leaves out only the harness secrets and
+	// outputs directory settings and the volumes, so the setting reads the
+	// same as in the instance built below.
+	if cloudRunNativeAssign(cfg) {
+		env := r.buildCloudRunInstance(cfg, uid, gid, nil).Containers[0].GetEnv()
+		if err := checkCloudRunInitFirewall(cfg, env); err != nil {
+			return "", err
+		}
+	}
+
 	// Async-launch gate before the NFS workspace and agent directories
 	// are provisioned (ptone/scion#4761); a no-op on the
 	// synchronous path. Nothing has been written yet.
@@ -491,6 +624,15 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 	// existing instance is reused only when it matches (ptone/scion#7297).
 	inst := r.buildCloudRunInstance(cfg, uid, gid, nfsPaths)
 	inst.Containers[0].Resources = resources
+	// The init firewall on a native "assign" instance, checked on the
+	// final instance env (every source, harness env included) before any
+	// Instances API call; the agent directories this start created go
+	// again.
+	// Defense in depth: the early check above should already have refused.
+	if err := checkCloudRunInitFirewall(cfg, inst.Containers[0].GetEnv()); err != nil {
+		nfsPaths.rollbackCreated(err)
+		return "", err
+	}
 	secretEnv := map[string]bool{stagedsecrets.EnvVar: true}
 	for _, name := range secretEnvTargets {
 		secretEnv[name] = true
@@ -716,8 +858,8 @@ func (r *CloudRunRuntime) clearExistingForIdentity(ctx context.Context, c cloudr
 	short := cloudRunShortInstanceID(name)
 	agentID := cfg.Labels["agent_id"]
 	// run != want is reached only if Run's check of another run's live
-	// instance changes; dropping the cached exec key there is harmless (the
-	// key is fetched again when needed).
+	// instance changes; dropping the cached exec key there is harmless (a
+	// new key is signed when next needed).
 	if run == "" || want == "" || run != want {
 		runtimeLog().Info("Cloud Run instance that cannot be matched to this start's run holds the agent's instance ID; not replacing it under a native identity",
 			"instance", short, "agent_id", agentID, "run_id", want, "instance_run_id", run)
@@ -874,9 +1016,10 @@ func (r *CloudRunRuntime) deleteOwnAfterFailedWait(ctx context.Context, c cloudr
 //     (cloudRunRuntimeEnvKeys).
 //
 // The template fallback then fills only names no source set. A reserved
-// name (reservedAgentEnvName) never reaches the instance from any source,
+// name (reservedAgentEnvName, the staged blob markers; not
+// secret.IsReservedEnvTarget) never reaches the instance from any source,
 // and the harness env never sets a name cloudRunHarnessEnvDenied reports,
-// so the GCP metadata settings in cfg.Env are always the hub's.
+// so the SCION_METADATA_* settings in cfg.Env are always the hub's.
 func (r *CloudRunRuntime) buildCloudRunInstance(cfg RunConfig, uid, gid int, nfsPaths *cloudRunNFSProvisionPaths) *runpb.Instance {
 	var envVars []*runpb.EnvVar
 	for _, e := range cfg.Env {
@@ -1173,8 +1316,7 @@ func cloudRunShortInstanceID(id string) string {
 // accepting either a short ID or an already-qualified name so that qualifying
 // an ID twice is impossible.
 func (r *CloudRunRuntime) instanceResourceName(id string) string {
-	return fmt.Sprintf("projects/%s/locations/%s/instances/%s",
-		r.config.ProjectID, r.config.Location, cloudRunShortInstanceID(id))
+	return r.parent() + "/instances/" + cloudRunShortInstanceID(id)
 }
 
 func cloudRunInstanceID(agentID string) string {
@@ -1937,7 +2079,7 @@ func (r *CloudRunRuntime) GetLogs(ctx context.Context, id string) (string, error
 	if err := r.resolveConfig(ctx); err != nil {
 		return "", fmt.Errorf("failed to resolve Cloud Run config: %w", err)
 	}
-	logClient, err := cloudrun.NewLogClient(ctx, r.config.ProjectID)
+	logClient, err := cloudrun.NewLogClient(ctx, r.config.ProjectID, r.clientOpts...)
 	if err != nil {
 		return "", fmt.Errorf("initializing log client: %w", err)
 	}
@@ -2027,7 +2169,7 @@ func (r *CloudRunRuntime) StreamLogs(ctx context.Context, instanceName string, o
 	if err := r.resolveConfig(ctx); err != nil {
 		return nil, fmt.Errorf("failed to resolve Cloud Run config: %w", err)
 	}
-	logClient, err := cloudrun.NewLogClient(ctx, r.config.ProjectID)
+	logClient, err := cloudrun.NewLogClient(ctx, r.config.ProjectID, r.clientOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("initializing log client: %w", err)
 	}

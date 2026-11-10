@@ -19,6 +19,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -541,6 +543,18 @@ type reincarnateAuthority struct {
 	// did not pass that gate, is the plan warning; the agent keeps its
 	// existing assignment.
 	AssignmentNotRecorded string
+	// OwnerMaterialNotice, when set, is the plan warning that the owner's
+	// unshared material will not be delivered after this re-record
+	// (ownerMaterialReRecordNotice).
+	OwnerMaterialNotice string
+	// OwnerReclaim is set when the re-record is an owner reclaim
+	// (reincarnateOwnerReclaims). The claim audit then reports
+	// owner_reclaim and the replaced edges' delegators (prior_delegator).
+	OwnerReclaim bool
+	// RuntimeReadNotice, when set, is the plan warning that runtime reads
+	// of the owner's shared secrets are refused after this re-record
+	// (runtimeReadReRecordNotice).
+	RuntimeReadNotice string
 }
 
 // reincarnateClaimTx claims agent for a reincarnation in one transaction.
@@ -599,7 +613,14 @@ func (s *Server) reincarnateClaimTx(ctx context.Context, agent *store.Agent, rec
 			return err
 		}
 		replaced := 0
+		priorDelegator := ""
 		if auth != nil {
+			if auth.OwnerReclaim {
+				priorDelegator, err = activeDelegators(ctx, tx, row.ID)
+				if err != nil {
+					return fmt.Errorf("reincarnate: read delegation edges: %w", err)
+				}
+			}
 			n, err := tx.DeactivateDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, row.ID, store.Deactivation{
 				Cause: store.EdgeDeactivationReincarnateReplaced,
 				At:    &now,
@@ -669,7 +690,9 @@ func (s *Server) reincarnateClaimTx(ctx context.Context, agent *store.Agent, rec
 			EdgesReplaced        int    `json:"edges_replaced"`
 			ServiceAccountRecord *bool  `json:"service_account_recorded,omitempty"`
 			AssignmentRestorable bool   `json:"service_account_restorable,omitempty"`
-		}{opID, rec.ID, auth != nil, replaced, saRecorded, restorable})
+			OwnerReclaim         bool   `json:"owner_reclaim,omitempty"`
+			PriorDelegator       string `json:"prior_delegator,omitempty"`
+		}{opID, rec.ID, auth != nil, replaced, saRecorded, restorable, auth != nil && auth.OwnerReclaim, priorDelegator})
 		if err != nil {
 			return err
 		}
@@ -683,6 +706,23 @@ func (s *Server) reincarnateClaimTx(ctx context.Context, agent *store.Agent, rec
 	}
 	*agent = row
 	return nil
+}
+
+// activeDelegators returns the delegators of agentID's active delegation
+// edges as "type:id", sorted and comma-separated ("" when it has none).
+func activeDelegators(ctx context.Context, tx store.Store, agentID string) (string, error) {
+	edges, err := tx.GetDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, agentID)
+	if err != nil {
+		return "", err
+	}
+	var out []string
+	for _, e := range edges {
+		if e.Active {
+			out = append(out, e.DelegatorType+":"+e.DelegatorID)
+		}
+	}
+	sort.Strings(out)
+	return strings.Join(out, ","), nil
 }
 
 // claimChangesAssignedAccount reports whether a reincarnation claim that

@@ -289,12 +289,22 @@ func (s *testIdentityService) Delete(ctx context.Context, id string) error {
 	return apiclient.CheckResponse(resp)
 }
 
+// testIdentityPurgeRequestTimeout is the client timeout of a purge
+// request, in place of the transport's usual one: the hub waits for each
+// agent's delete on its broker (up to a few minutes per agent) before it
+// answers. The caller's context still bounds the request.
+const testIdentityPurgeRequestTimeout = 30 * time.Minute
+
 // Purge deletes a test identity and what it created. It is sent once,
-// never retried by the transport; running it again is safe.
+// never retried by the transport; running it again is safe. The request
+// is sent with testIdentityPurgeRequestTimeout as its client timeout, so
+// the transport's usual timeout does not cut a purge short while the hub
+// is still working on it.
 func (s *testIdentityService) Purge(ctx context.Context, id string) (*TestIdentityPurgeReport, error) {
 	if id == "" {
 		return nil, fmt.Errorf("test identity id is required")
 	}
+	ctx = apiclient.WithRequestTimeout(ctx, testIdentityPurgeRequestTimeout)
 	resp, err := s.c.delete(ctx, "/api/v1/test-identities/"+url.PathEscape(id)+"?purge=true", nil)
 	if err != nil {
 		return nil, err

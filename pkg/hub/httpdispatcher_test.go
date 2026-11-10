@@ -2184,6 +2184,9 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_ProjectSlugSetForGitRemoteWithou
 func TestHTTPAgentDispatcher_DispatchAgentStart_ResolvesEnvFromStorage(t *testing.T) {
 	ctx := context.Background()
 	memStore := createTestStore(t)
+	// The owner is a user ID, so the agent's recorded chain ends at the
+	// owner and the owner's own rows are delivered.
+	owner := tid("owner-1")
 
 	// Create a project
 	project := &store.Project{
@@ -2237,7 +2240,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_ResolvesEnvFromStorage(t *testin
 		Key:           "CUSTOM_VAR",
 		Value:         "user-value",
 		Scope:         "user",
-		ScopeID:       "owner-1",
+		ScopeID:       owner,
 		InjectionMode: store.InjectionModeAlways,
 	}); err != nil {
 		t.Fatalf("failed to set env var: %v", err)
@@ -2251,7 +2254,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_ResolvesEnvFromStorage(t *testin
 		Name:            "test-agent",
 		Slug:            "test-agent",
 		ProjectID:       tid("project-env"),
-		OwnerID:         "owner-1",
+		OwnerID:         owner,
 		RuntimeBrokerID: tid("broker-env"),
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "gemini",
@@ -5849,6 +5852,9 @@ func TestHTTPAgentDispatcher_DispatchAgentDelete_ForwardsLinkedProjectPath(t *te
 // environment secret (plus a non-environment secret that must not leak into
 // the env map on either path).
 func TestHTTPAgentDispatcher_BuildStartEnv_StartAndRestartProduceIdenticalEnv(t *testing.T) {
+	// The owner is a user ID, so the agent's recorded chain ends at the
+	// owner and the owner's own rows are delivered.
+	goldenOwner := tid("start-restart-golden-owner")
 	ctx := context.Background()
 	memStore := createTestStore(t)
 
@@ -5890,7 +5896,7 @@ func TestHTTPAgentDispatcher_BuildStartEnv_StartAndRestartProduceIdenticalEnv(t 
 		Key:           "USER_VAR",
 		Value:         "user-value",
 		Scope:         "user",
-		ScopeID:       "golden-owner",
+		ScopeID:       goldenOwner,
 		InjectionMode: store.InjectionModeAlways,
 	}); err != nil {
 		t.Fatalf("failed to set user env var: %v", err)
@@ -5914,8 +5920,8 @@ func TestHTTPAgentDispatcher_BuildStartEnv_StartAndRestartProduceIdenticalEnv(t 
 	// Owner-scope stored secrets: start and restart select secrets by
 	// stored metadata (material_delivery.go), not through Resolve.
 	dispatcher.SetSecretBackend(launchSecretBackend(t, memStore, "test-hub", []secret.SecretWithValue{
-		{SecretMeta: secret.SecretMeta{Name: "CLAUDE_AUTH", SecretType: "file", Target: "~/.claude/.credentials.json", Scope: "user", ScopeID: "golden-owner"}, Value: "file-secret-data"},
-		{SecretMeta: secret.SecretMeta{Name: "SECRET_API_KEY", SecretType: "environment", Target: "SECRET_API_KEY", Scope: "user", ScopeID: "golden-owner"}, Value: "secret-value"},
+		{SecretMeta: secret.SecretMeta{Name: "CLAUDE_AUTH", SecretType: "file", Target: "~/.claude/.credentials.json", Scope: "user", ScopeID: goldenOwner}, Value: "file-secret-data"},
+		{SecretMeta: secret.SecretMeta{Name: "SECRET_API_KEY", SecretType: "environment", Target: "SECRET_API_KEY", Scope: "user", ScopeID: goldenOwner}, Value: "secret-value"},
 	}))
 
 	agent := &store.Agent{
@@ -5923,7 +5929,7 @@ func TestHTTPAgentDispatcher_BuildStartEnv_StartAndRestartProduceIdenticalEnv(t 
 		Name:            "golden-agent",
 		Slug:            "golden-agent",
 		ProjectID:       tid("project-golden"),
-		OwnerID:         "golden-owner",
+		OwnerID:         goldenOwner,
 		RuntimeBrokerID: tid("broker-golden"),
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",

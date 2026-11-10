@@ -608,42 +608,17 @@ func TestUATIntrinsic_LaunchMaterialStrictWalk(t *testing.T) {
 // no longer admitted to the project is withheld its launch material. The
 // withheld Warn names the cause, and no fallback serves it.
 func TestUATIntrinsic_RootNotAdmittedWithheld(t *testing.T) {
-	const parentName = "ui-root-token-parent"
 	cases := []struct {
 		name string
 		opts ldOptions
-		// after builds the rest of the chain; nil for a direct agent.
-		after func(t *testing.T, m *ldFixture)
-		// fallback is true for a chain the strict walk refuses before the
-		// root admission and the fallback then refuses at it.
-		fallback bool
 	}{
 		{name: "token", opts: ldOptions{rootMemberNone: true, edge: uiUATEdge(uiTokenList...)}},
 		// The comparator: a session-created agent in the same state.
 		{name: "session", opts: ldOptions{rootMemberNone: true}},
-		// A child of a token-created agent, recorded before the deliver
-		// permissions were intrinsic to the token hop (uat_descendant_legacy):
-		// withheld like its parent.
-		{
-			name: "pre-existing child of a token-created agent",
-			opts: ldOptions{noEdge: true, rootMemberNone: true, ancestry: func(f *goldenFixture) []string {
-				return []string{f.memberNoneID, tid(parentName)}
-			}},
-			after: func(t *testing.T, m *ldFixture) {
-				p := tid(parentName)
-				hdAgent(t, m.store, p, m.agent.ProjectID, []string{m.memberNoneID})
-				hdEdge(t, m.store, store.DelegationPrincipalUser, m.memberNoneID, p, m.agent.ProjectID, uiUATEdge(uiTokenList...))
-				hdEdge(t, m.store, store.DelegationPrincipalAgent, p, m.agent.ID, m.agent.ProjectID, withBoundedCeiling("agent.read"))
-			},
-			fallback: true,
-		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			m := newLDFixture(t, "ui-root-"+strings.ReplaceAll(tc.name, " ", "-"), tc.opts)
-			if tc.after != nil {
-				tc.after(t, m)
-			}
 			m.env(t, "UI_ROOT_ENV", "ui-root-value", store.ScopeProject, m.agent.ProjectID, false)
 			buf := lgLogger(m)
 			ctx := context.Background()
@@ -651,15 +626,6 @@ func TestUATIntrinsic_RootNotAdmittedWithheld(t *testing.T) {
 			h := hdIdentity(t, m.authz, m.agent.ID)
 			o := m.authz.hubDeliveryChainAdmission(ctx, h, "env_var.deliver", m.agent.ID, nil)
 			require.False(t, o.ok)
-			if tc.fallback {
-				assert.Equal(t, DenyCauseCeilingEffectExceeded, o.cause, "the strict walk refuses the child's own edge; reason %q", o.reason)
-				lh := hdIdentity(t, m.authz, m.agent.ID)
-				lh.legacyFallback = true
-				o = m.authz.hubDeliveryAdmissionOutcomeFor(ctx, lh, "env_var.deliver", m.agent.ID, nil)
-				require.False(t, o.ok, "the fallback applies the root admission; reason %q", o.reason)
-				assert.Empty(t, o.legacyCohort)
-				assert.Equal(t, legacyDeliveryCohortUATDescendant, o.deniedCohort)
-			}
 			assert.Equal(t, DenyCauseCeilingDelegatorLacksPermission, o.cause)
 			assert.True(t, strings.HasPrefix(o.reason, deliveryRootNotAdmittedReason), "reason %q", o.reason)
 
@@ -676,70 +642,60 @@ func TestUATIntrinsic_RootNotAdmittedWithheld(t *testing.T) {
 				}
 			}
 			assert.True(t, named, "the withheld Warn names the cause; log: %s", buf.String())
-
-			if tc.fallback {
-				rep, err := m.authz.LaunchDeliveryCensus(ctx, false)
-				require.NoError(t, err)
-				for _, r := range rep.Rows {
-					if r.AgentID == m.agent.ID {
-						assert.Equal(t, launchDeliveryCohortUATRootNotAdmitted, r.Cohort, "the census lists it")
-					}
-				}
-			}
 		})
 	}
 }
 
-// TestUATIntrinsic_DescendantInactiveRootWithheld: a sub-agent of a
-// token-created agent, recorded before the deliver permissions were
-// intrinsic to the token hop, is withheld when the creating user is
-// suspended, as its token-created parent is on the strict walk. The deny
-// names the cause.
-func TestUATIntrinsic_DescendantInactiveRootWithheld(t *testing.T) {
-	const parentName = "ui-inactive-token-parent"
-	m := newLDFixture(t, "ui-inactive-child", ldOptions{noEdge: true, ancestry: func(f *goldenFixture) []string {
+// TestUATIntrinsic_PreExistingDescendantWithheld (LEGACY DATA): a sub-agent
+// of a token-created agent whose agent edge was recorded before the deliver
+// permissions were intrinsic to the token hop lacks them, so every launch
+// purpose withholds its launch material, with its creating user active and
+// admitted. No fallback cohort serves it. The remedy is a reincarnation or
+// re-create, which records an edge through parentDeliverEligibility.
+func TestUATIntrinsic_PreExistingDescendantWithheld(t *testing.T) {
+	const parentName = "ui-pre-token-parent"
+	m := newLDFixture(t, "ui-pre-child", ldOptions{noEdge: true, ancestry: func(f *goldenFixture) []string {
 		return []string{f.projectOwnerID, tid(parentName)}
 	}})
 	p := tid(parentName)
 	hdAgent(t, m.store, p, m.agent.ProjectID, []string{m.projectOwnerID})
 	hdEdge(t, m.store, store.DelegationPrincipalUser, m.projectOwnerID, p, m.agent.ProjectID, uiUATEdge(uiTokenList...))
 	hdEdge(t, m.store, store.DelegationPrincipalAgent, p, m.agent.ID, m.agent.ProjectID, withBoundedCeiling("agent.read"))
-	m.env(t, "UI_INACTIVE_ENV", "ui-inactive-value", store.ScopeProject, m.agent.ProjectID, false)
+	m.env(t, "UI_PRE_ENV", "ui-pre-value", store.ScopeProject, m.agent.ProjectID, false)
 	ctx := context.Background()
 
-	lh := hdIdentity(t, m.authz, m.agent.ID)
-	lh.legacyFallback = true
-	control := m.authz.hubDeliveryAdmissionOutcomeFor(ctx, lh, "env_var.deliver", m.agent.ID, nil)
-	require.True(t, control.ok, "control: served while the creator is active; reason %q", control.reason)
-	assert.Equal(t, legacyDeliveryCohortUATDescendant, control.legacyCohort)
-
-	setUserStatus(t, m.store, m.projectOwnerID, store.UserStatusSuspended)
-
 	parent := m.authz.hubDeliveryChainAdmission(ctx, hdIdentity(t, m.authz, p), "env_var.deliver", p, nil)
-	require.False(t, parent.ok, "the token-created parent is withheld on the strict walk")
+	require.True(t, parent.ok, "control: the token-created parent is delivered; reason %q", parent.reason)
 
-	lh = hdIdentity(t, m.authz, m.agent.ID)
-	lh.legacyFallback = true
-	o := m.authz.hubDeliveryAdmissionOutcomeFor(ctx, lh, "env_var.deliver", m.agent.ID, nil)
-	require.False(t, o.ok, "the descendant is withheld like its parent; reason %q", o.reason)
-	assert.Empty(t, o.legacyCohort)
-	assert.Equal(t, legacyDeliveryCohortUATDescendant, o.deniedCohort)
-	assert.Equal(t, parent.cause, o.cause, "parent and descendant agree")
-	assert.Contains(t, o.reason, string(store.UserStatusSuspended), "the deny names the cause")
+	for _, perm := range LaunchDeliveryCensusPermissions {
+		strict := m.authz.hubDeliveryChainAdmission(ctx, hdIdentity(t, m.authz, m.agent.ID), perm, m.agent.ID, nil)
+		require.False(t, strict.ok, "%s", perm)
+		assert.Equal(t, DenyCauseCeilingEffectExceeded, strict.cause, "%s: reason %q", perm, strict.reason)
+		lh := hdIdentity(t, m.authz, m.agent.ID)
+		lh.legacyFallback = true
+		o := m.authz.hubDeliveryAdmissionOutcomeFor(ctx, lh, perm, m.agent.ID, nil)
+		assert.False(t, o.ok, "%s: the fallback does not serve it; reason %q", perm, o.reason)
+		assert.Empty(t, o.legacyCohort, perm)
+		assert.Equal(t, strict.cause, o.cause, "%s: the fallback returns the strict deny", perm)
+	}
 
 	buf := lgLogger(m)
-	require.NoError(t, m.d.DispatchAgentRestart(ctx, m.agent))
-	assert.Empty(t, m.client.lastRestartResolvedEnv["UI_INACTIVE_ENV"], "withheld")
+	for _, purpose := range []MaterialPurpose{PurposeDispatch, PurposeRestart, PurposeProvisionCredential, PurposeAvailabilityProbe} {
+		env, _, err := m.d.selectDeliveryEnv(ctx, newDeliverySelector(m.authz, m.agent, purpose), m.agent)
+		require.NoError(t, err, purpose)
+		assert.Empty(t, env["UI_PRE_ENV"], "%s withholds the launch item", purpose)
+	}
 	assert.Empty(t, warnRecords(t, buf.Bytes(), lgFallbackMsg), "no fallback serves it")
 
-	rep, err := m.authz.LaunchDeliveryCensus(ctx, false)
-	require.NoError(t, err)
-	for _, r := range rep.Rows {
-		if r.AgentID == m.agent.ID {
-			v := r.Verdicts["env_var.deliver"]
-			assert.False(t, v.Allowed)
-			assert.Contains(t, v.Reason, string(store.UserStatusSuspended), "the census names the cause")
-		}
+	// The same shape recorded since: a sibling whose child edge carries
+	// deliver is delivered by the strict walk.
+	fresh := tid("ui-pre-fresh-child")
+	hdAgent(t, m.store, fresh, m.agent.ProjectID, []string{m.projectOwnerID, p})
+	hdEdge(t, m.store, store.DelegationPrincipalAgent, p, fresh, m.agent.ProjectID,
+		withBoundedCeiling("agent.read", "secret.deliver", "env_var.deliver", "skill_injection.deliver"))
+	for _, perm := range LaunchDeliveryCensusPermissions {
+		o := m.authz.hubDeliveryChainAdmission(ctx, hdIdentity(t, m.authz, fresh), perm, fresh, nil)
+		assert.True(t, o.ok, "%s: an edge that carries deliver is delivered; reason %q", perm, o.reason)
 	}
 }
 
@@ -783,36 +739,6 @@ func TestUATIntrinsic_InconsistentEdgeGetsNoIntrinsic(t *testing.T) {
 	assert.Equal(t, edge.EffectCeiling, uatHopEffectCeiling(edge.DelegatorType, edge.DelegatorID, edge.AuthorityProvenance, edge.EffectCeiling))
 	assert.Equal(t, edge.EffectCeiling, uatHopEffectCeiling(store.DelegationPrincipalUser, f.UserID, uiProv(other), edge.EffectCeiling),
 		"a requester other than the token's user gets the stored ceiling")
-}
-
-// TestUATIntrinsic_DescendantRootErrorWithheld: any provenance root error
-// withholds a uat_descendant_legacy chain, as the strict walk withholds its
-// token-created ancestor. Here the child's agent edge records a source kind
-// that does not match its delegator (a mismatch the tolerant walk does not
-// read but the root admission does).
-func TestUATIntrinsic_DescendantRootErrorWithheld(t *testing.T) {
-	const parentName = "ui-mismatch-token-parent"
-	m := newLDFixture(t, "ui-mismatch-child", ldOptions{noEdge: true, ancestry: func(f *goldenFixture) []string {
-		return []string{f.projectOwnerID, tid(parentName)}
-	}})
-	p := tid(parentName)
-	hdAgent(t, m.store, p, m.agent.ProjectID, []string{m.projectOwnerID})
-	hdEdge(t, m.store, store.DelegationPrincipalUser, m.projectOwnerID, p, m.agent.ProjectID, uiUATEdge(uiTokenList...))
-	hdEdge(t, m.store, store.DelegationPrincipalAgent, p, m.agent.ID, m.agent.ProjectID, func(e *store.DelegationEdge) {
-		withBoundedCeiling("agent.read")(e)
-		e.SourcePrincipalKind = store.DelegationPrincipalUser
-	})
-	ctx := context.Background()
-	_, rootErr := m.authz.ResolveProvenanceRoot(ctx, m.agent.ID, ResolveProvenanceOptions{PermissionID: "env_var.deliver"})
-	require.ErrorIs(t, rootErr, ErrProvenanceMismatch, "control: the root admission reads the mismatch")
-
-	lh := hdIdentity(t, m.authz, m.agent.ID)
-	lh.legacyFallback = true
-	o := m.authz.hubDeliveryAdmissionOutcomeFor(ctx, lh, "env_var.deliver", m.agent.ID, nil)
-	require.False(t, o.ok, "reason %q", o.reason)
-	assert.Equal(t, legacyDeliveryCohortUATDescendant, o.deniedCohort)
-	assert.Equal(t, DenyCauseCeilingOrphaned, o.cause)
-	assert.True(t, strings.HasPrefix(o.reason, "delivery provenance root denied"), "the deny names the cause: %q", o.reason)
 }
 
 // ---- not unlocked ---------------------------------------------------------------

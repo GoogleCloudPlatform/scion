@@ -1058,7 +1058,7 @@ export class ScionPageAdminRoles extends LitElement {
         <div class="form-group">
           <sl-input
             label="Name"
-            placeholder="e.g., project-viewer"
+            placeholder="e.g., project-agent-reader"
             .value=${this.formName}
             @sl-input=${(e: Event) => {
               this.formName = (e.target as HTMLInputElement).value;

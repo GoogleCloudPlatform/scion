@@ -380,6 +380,30 @@ type Store interface {
 	// how many it reaped.
 	ReapPending(ctx context.Context, cutoff time.Time, limit int) (int, error)
 
+	// TouchReviewSession records a heartbeat of review session rs
+	// (ptone/scion#6849): it inserts the row (started_at = now) or updates
+	// it, setting last_seen_at = now, base_seq and dirty from rs, and
+	// last_edit_at = now when edited. A beat that would create a new row
+	// while the principal already has maxPerPrincipal live sessions (seen
+	// within ReviewLiveWindow) on the artifact returns
+	// ErrTooManyReviewSessions and records nothing. A beat of an existing
+	// row is never refused, so a row that beats again after leaving the
+	// live window is not counted again.
+	TouchReviewSession(ctx context.Context, rs ReviewSession, edited bool, now time.Time, maxPerPrincipal int) error
+
+	// EndReviewSession deletes the caller's session and reports whether a
+	// row was deleted. It is idempotent: a missing row is not an error.
+	EndReviewSession(ctx context.Context, artifactID, kind, ref, sessionID string) (bool, error)
+
+	// ListOpenReviewSessions returns the sessions of the artifact seen at
+	// or after seenAfter, most recently seen first, at most
+	// maxListedReviewSessions of them.
+	ListOpenReviewSessions(ctx context.Context, artifactID string, seenAfter time.Time) ([]ReviewSession, error)
+
+	// ReapReviewSessions deletes at most limit sessions last seen before
+	// cutoff and returns how many it deleted.
+	ReapReviewSessions(ctx context.Context, cutoff time.Time, limit int) (int, error)
+
 	// GetArtifact returns the artifact with id unless it is absent or
 	// soft-deleted, in which case it returns ErrNotFound.
 	GetArtifact(ctx context.Context, id string) (*Artifact, error)

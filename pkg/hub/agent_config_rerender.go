@@ -75,23 +75,40 @@ func brokerStartSupportFrom(caps *store.BrokerCapabilities) brokerStartSupport {
 }
 
 // agentBrokerStartSupport is brokerStartSupportFrom for the agent's
-// assigned broker. An agent with no broker, or a broker lookup that fails,
-// gets the zero value, so edits are reported as waiting for a
-// reincarnation rather than promised at the next start.
-func (s *Server) agentBrokerStartSupport(ctx context.Context, agent *store.Agent) brokerStartSupport {
-	if agent == nil || agent.RuntimeBrokerID == "" || s.store == nil {
-		return brokerStartSupport{}
+// assigned broker. An agent with no broker, or whose broker record no
+// longer exists, gets the zero value: no start would re-render or clear
+// anything for it. A broker record that cannot be read is errBrokerLookup
+// (ptone/scion#7544): the zero value would report an edit the broker
+// applies at the next start as held for reincarnation, while the start
+// still asks the broker to apply it. The caller refuses with 503 and
+// writes nothing, as agentBrokerStartSupportStrict's callers do.
+func (s *Server) agentBrokerStartSupport(ctx context.Context, agent *store.Agent) (brokerStartSupport, error) {
+	sup, _, err := s.agentBrokerStartSupportStrict(ctx, agent)
+	if err != nil {
+		slog.WarnContext(ctx, "agent edit: runtime broker record could not be read; when the edit takes effect is not decided",
+			"agent", agent.ID, "broker", agent.RuntimeBrokerID, "error", err)
 	}
-	broker, err := s.store.GetRuntimeBroker(ctx, agent.RuntimeBrokerID)
-	if err != nil || broker == nil {
-		if err != nil {
-			slog.DebugContext(ctx, "agent edit: broker lookup failed; edits of provision-rendered keys reported as held for reincarnation",
-				"agent", agent.ID, "broker", agent.RuntimeBrokerID, "error", err)
-		}
-		return brokerStartSupport{}
-	}
-	return brokerStartSupportFrom(broker.Capabilities)
+	return sup, err
 }
+
+// brokerSupportSource yields the agent's broker start support for a
+// classification that needs it, so an edit whose disposition does not
+// depend on the broker never reads its record.
+type brokerSupportSource func() (brokerStartSupport, error)
+
+// knownBrokerSupport is a brokerSupportSource for support already read.
+func knownBrokerSupport(sup brokerStartSupport) brokerSupportSource {
+	return func() (brokerStartSupport, error) { return sup, nil }
+}
+
+// brokerUnavailableMessage is the 503 message of a config edit whose
+// disposition needs the agent's broker record when it cannot be read.
+const brokerUnavailableMessage = "The agent's runtime broker could not be read to decide when the edit takes effect; retry"
+
+// pendingFoldBrokerUnavailableMessage is the 503 message of a start whose
+// held edits could not be folded because the agent's broker record could
+// not be read.
+const pendingFoldBrokerUnavailableMessage = "the agent's runtime broker could not be read to apply its held edits; retry"
 
 // appliesAtStart reports whether the broker applies an edit of the field
 // with wire key key at the next start although its tier alone would hold

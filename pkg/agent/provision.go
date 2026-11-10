@@ -4915,17 +4915,15 @@ func resolveModelAliasForExistingAgent(ctx context.Context, cfg *api.ScionConfig
 }
 
 // isWorkspaceEmptyDir returns true if the directory is empty or contains only
-// provisioning artifacts (e.g. .scion/, .scion-volumes/).
+// workspace marker entries (api.IsWorkspaceMarkerEntry: .scion,
+// .scion-volumes, .agents), the same rule as the clone step.
 func isWorkspaceEmptyDir(path string) bool {
 	entries, err := os.ReadDir(path)
 	if err != nil {
 		return true
 	}
 	for _, e := range entries {
-		switch e.Name() {
-		case ".scion", ".scion-volumes":
-			continue
-		default:
+		if !api.IsWorkspaceMarkerEntry(path, e.Name()) {
 			return false
 		}
 	}

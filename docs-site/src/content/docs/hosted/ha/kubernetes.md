@@ -122,7 +122,7 @@ If none of them sets `shared_dir_size`, `10Gi` is used. If none of them sets `sh
 
 An empty value means "not set", so it does not override a lower source. Once a runtime entry or profile sets a class, an agent cannot reset it to the cluster default; name the class explicitly instead.
 
-`shared_dir_size` must be a positive Kubernetes quantity such as `10Gi` or `1Ti`. Settings validation and the admin settings API reject other values, and an agent start fails with an error naming the key that holds the bad value.
+`shared_dir_size` must be a positive Kubernetes quantity such as `10Gi` or `1Ti`. Settings validation and the admin settings API reject other values, and an agent start fails with an error naming the key that holds the bad value. In the Web Dashboard under **Admin → Server Config → Runtimes & Profiles**, **Shared dir storage class** (`shared_dir_storage_class`) and **Shared dir size** (`shared_dir_size`) are editable on `kubernetes` entries under `runtimes` and on entries under `profiles` whose runtime is not `docker`, `podman`, `container`, or `cloudrun`, with inline validation ("shared_dir_size must be a positive Kubernetes quantity, such as 10Gi or 1Ti.") that blocks **Save & Reload** until corrected.
 
 The settings values are read every time an agent starts. They apply only on the Kubernetes runtime.
 

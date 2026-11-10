@@ -117,6 +117,11 @@ type HubServerConfig struct {
 	// Empty serves them on the hub endpoint. See ValidateContentURL.
 	ContentURL string `json:"contentUrl,omitempty" yaml:"contentUrl,omitempty" koanf:"contentUrl"`
 
+	// ContentURLAllowSameSite is server.hub.content_url_allow_same_site
+	// (ContentURLAllowSameSiteKey): the override that lets ContentURL be on
+	// the hub endpoint's registrable domain, which is refused without it.
+	ContentURLAllowSameSite bool `json:"contentUrlAllowSameSite,omitempty" yaml:"contentUrlAllowSameSite,omitempty" koanf:"contentUrlAllowSameSite"`
+
 	// MonitoringDashboardURL is an optional absolute http(s) URL of an
 	// external monitoring dashboard for this hub. The Health page links to
 	// it when set. See ValidateMonitoringDashboardURL.
@@ -216,6 +221,18 @@ type HubServerConfig struct {
 	// PortProxy holds the agent port proxy settings (validated by
 	// HubPortProxyConfig.Validate at startup).
 	PortProxy HubPortProxyConfig `json:"portProxy" yaml:"portProxy" koanf:"portProxy"`
+
+	// SSE holds the browser events stream settings (validated by
+	// HubSSEConfig.Validate at startup; ptone/scion#5230).
+	SSE HubSSEConfig `json:"sse" yaml:"sse" koanf:"sse"`
+
+	// PlatformRequestTimeout is the request timeout of the platform in
+	// front of the hub, for example the Cloud Run service timeout ("" =
+	// none declared). When set it clamps the events stream maximum age and
+	// the conduit session lifetime cap to PlatformTimeoutShare of it
+	// (validated by ValidatePlatformRequestTimeout at startup;
+	// ptone/scion#5230, ptone/scion#5245).
+	PlatformRequestTimeout string `json:"platformRequestTimeout,omitempty" yaml:"platformRequestTimeout,omitempty" koanf:"platformRequestTimeout"`
 
 	// Observability holds the hub's own metrics and trace export switches
 	// (server.hub.observability). Read at startup; changes need a restart.

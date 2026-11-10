@@ -267,3 +267,38 @@ func TestMayReadMessage_ProjectIsNotAReadInput(t *testing.T) {
 		})
 	}
 }
+
+// cancelAfterListAttachmentStore ends the request right after the batched
+// attachment query has answered.
+type cancelAfterListAttachmentStore struct {
+	artifacts.Store
+	cancel context.CancelFunc
+}
+
+func (c *cancelAfterListAttachmentStore) ListMessageAttachments(ctx context.Context, ids []string) (map[string][]artifacts.AttachmentRow, error) {
+	rows, err := c.Store.ListMessageAttachments(ctx, ids)
+	c.cancel()
+	return rows, err
+}
+
+// TestHistory_StopsDecisionsAfterRequestEnds (ptone/scion#6012): when the
+// request ends after the batched attachment query, the per-message loop
+// stops: no message gets refs and no per-message decision runs.
+func TestHistory_StopsDecisionsAfterRequestEnds(t *testing.T) {
+	d := newDecisionFixture(t)
+	logs := captureRequestDoneDefaultLog(t)
+
+	liveBefore := d.faults.messageGets(d.dmMsg)
+	live := d.srv.mergeArtifactAttachments(d.sessionContext(d.ua), []string{d.dmMsg}, nil)
+	require.Len(t, live[d.dmMsg], 1, "a reader gets the ref while the request is live")
+	require.Positive(t, d.faults.messageGets(d.dmMsg)-liveBefore, "the live decision looks the message up")
+
+	ctx, cancel := context.WithCancel(d.sessionContext(d.ua))
+	defer cancel()
+	d.srv.SetArtifactStore(&cancelAfterListAttachmentStore{Store: d.art, cancel: cancel})
+	before := d.faults.messageGets(d.dmMsg)
+	merged := d.srv.mergeArtifactAttachments(ctx, []string{d.dmMsg}, nil)
+	require.Empty(t, merged[d.dmMsg], "no refs after the request ends")
+	require.Zero(t, d.faults.messageGets(d.dmMsg)-before, "no per-message decision after the request ends")
+	require.Empty(t, logs.find("artifacts: attachment message lookup failed"), "no message lookup failure is logged")
+}

@@ -28,6 +28,16 @@ type RuntimeBrokerSettings struct {
 	Settings  RuntimeBrokerSettingsValues    `json:"settings"`
 	Effective RuntimeBrokerSettingsEffective `json:"effective"`
 	Revision  int64                          `json:"revision"`
+	// Capabilities are what the caller may do with these settings.
+	Capabilities RuntimeBrokerSettingsCapabilities `json:"_capabilities"`
+}
+
+// RuntimeBrokerSettingsCapabilities are the caller's rights on a Runtime
+// Broker's settings.
+type RuntimeBrokerSettingsCapabilities struct {
+	// Update is true when the caller may write every settings key
+	// (maxAgents needs quota.update on the Hub).
+	Update bool `json:"update"`
 }
 
 // RuntimeBrokerSettingsValues are the broker's own stored settings.
@@ -72,6 +82,29 @@ type RuntimeBrokerSettingsGetter interface {
 // GET and nothing else.
 func (s *runtimeBrokerService) GetSettings(ctx context.Context, brokerID string) (*RuntimeBrokerSettings, error) {
 	resp, err := s.c.get(ctx, "/api/v1/runtime-brokers/"+url.PathEscape(brokerID)+"/settings", nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[RuntimeBrokerSettings](resp)
+}
+
+// RuntimeBrokerSettingsPutter is implemented by the RuntimeBrokerService
+// values this package returns. Like RuntimeBrokerSettingsGetter it is a
+// separate interface, so existing implementations keep compiling.
+type RuntimeBrokerSettingsPutter interface {
+	PutMaxAgents(ctx context.Context, brokerID string, maxAgents *int64, expectedRevision int64) (*RuntimeBrokerSettings, error)
+}
+
+// PutMaxAgents sets a Runtime Broker's own maxAgents setting (nil inherit,
+// 0 unlimited, >0 cap) with one PUT of its settings document.
+// expectedRevision is the revision the caller read; a stale one is
+// refused by the Hub with 409.
+func (s *runtimeBrokerService) PutMaxAgents(ctx context.Context, brokerID string, maxAgents *int64, expectedRevision int64) (*RuntimeBrokerSettings, error) {
+	body := map[string]any{
+		"settings":         map[string]any{"maxAgents": maxAgents},
+		"expectedRevision": expectedRevision,
+	}
+	resp, err := s.c.put(ctx, "/api/v1/runtime-brokers/"+url.PathEscape(brokerID)+"/settings", body, nil)
 	if err != nil {
 		return nil, err
 	}

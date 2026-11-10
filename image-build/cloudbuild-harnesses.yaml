@@ -51,7 +51,8 @@ steps:
   - name: 'gcr.io/cloud-builders/docker'
     id: 'build-scion-antigravity'
     dir: 'harnesses/antigravity'
-    args: ['buildx', 'build', '--platform', 'linux/amd64,linux/arm64', '--build-arg', 'BASE_IMAGE=$_REGISTRY/scion-base:$_TAG', '-t', '$_REGISTRY/scion-antigravity:$_SHORT_SHA', '-t', '$_REGISTRY/scion-antigravity:$_TAG', '-f', 'Dockerfile', '--pull', '--push', '.']
+    entrypoint: 'bash'
+    args: ['/workspace/image-build/scripts/buildx-record-digest.sh', '$_REGISTRY/scion-antigravity:$_TAG', 'buildx', 'build', '--platform', 'linux/amd64,linux/arm64', '--build-arg', 'BASE_IMAGE=$_REGISTRY/scion-base:$_TAG', '-t', '$_REGISTRY/scion-antigravity:$_SHORT_SHA', '-t', '$_REGISTRY/scion-antigravity:$_TAG', '-f', 'Dockerfile', '--pull', '--push', '.']
     env:
       - 'DOCKER_CLI_EXPERIMENTAL=enabled'
       - 'PATH=/builder/home/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
@@ -59,7 +60,8 @@ steps:
   - name: 'gcr.io/cloud-builders/docker'
     id: 'build-scion-claude'
     dir: 'harnesses/claude'
-    args: ['buildx', 'build', '--platform', 'linux/amd64,linux/arm64', '--build-arg', 'BASE_IMAGE=$_REGISTRY/scion-base:$_TAG', '-t', '$_REGISTRY/scion-claude:$_SHORT_SHA', '-t', '$_REGISTRY/scion-claude:$_TAG', '-f', 'Dockerfile', '--pull', '--push', '.']
+    entrypoint: 'bash'
+    args: ['/workspace/image-build/scripts/buildx-record-digest.sh', '$_REGISTRY/scion-claude:$_TAG', 'buildx', 'build', '--platform', 'linux/amd64,linux/arm64', '--build-arg', 'BASE_IMAGE=$_REGISTRY/scion-base:$_TAG', '-t', '$_REGISTRY/scion-claude:$_SHORT_SHA', '-t', '$_REGISTRY/scion-claude:$_TAG', '-f', 'Dockerfile', '--pull', '--push', '.']
     env:
       - 'DOCKER_CLI_EXPERIMENTAL=enabled'
       - 'PATH=/builder/home/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
@@ -67,7 +69,8 @@ steps:
   - name: 'gcr.io/cloud-builders/docker'
     id: 'build-scion-codex'
     dir: 'harnesses/codex'
-    args: ['buildx', 'build', '--platform', 'linux/amd64,linux/arm64', '--build-arg', 'BASE_IMAGE=$_REGISTRY/scion-base:$_TAG', '-t', '$_REGISTRY/scion-codex:$_SHORT_SHA', '-t', '$_REGISTRY/scion-codex:$_TAG', '-f', 'Dockerfile', '--pull', '--push', '.']
+    entrypoint: 'bash'
+    args: ['/workspace/image-build/scripts/buildx-record-digest.sh', '$_REGISTRY/scion-codex:$_TAG', 'buildx', 'build', '--platform', 'linux/amd64,linux/arm64', '--build-arg', 'BASE_IMAGE=$_REGISTRY/scion-base:$_TAG', '-t', '$_REGISTRY/scion-codex:$_SHORT_SHA', '-t', '$_REGISTRY/scion-codex:$_TAG', '-f', 'Dockerfile', '--pull', '--push', '.']
     env:
       - 'DOCKER_CLI_EXPERIMENTAL=enabled'
       - 'PATH=/builder/home/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
@@ -75,7 +78,8 @@ steps:
   - name: 'gcr.io/cloud-builders/docker'
     id: 'build-scion-copilot'
     dir: 'harnesses/copilot'
-    args: ['buildx', 'build', '--platform', 'linux/amd64,linux/arm64', '--build-arg', 'BASE_IMAGE=$_REGISTRY/scion-base:$_TAG', '-t', '$_REGISTRY/scion-copilot:$_SHORT_SHA', '-t', '$_REGISTRY/scion-copilot:$_TAG', '-f', 'Dockerfile', '--pull', '--push', '.']
+    entrypoint: 'bash'
+    args: ['/workspace/image-build/scripts/buildx-record-digest.sh', '$_REGISTRY/scion-copilot:$_TAG', 'buildx', 'build', '--platform', 'linux/amd64,linux/arm64', '--build-arg', 'BASE_IMAGE=$_REGISTRY/scion-base:$_TAG', '-t', '$_REGISTRY/scion-copilot:$_SHORT_SHA', '-t', '$_REGISTRY/scion-copilot:$_TAG', '-f', 'Dockerfile', '--pull', '--push', '.']
     env:
       - 'DOCKER_CLI_EXPERIMENTAL=enabled'
       - 'PATH=/builder/home/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
@@ -83,7 +87,8 @@ steps:
   - name: 'gcr.io/cloud-builders/docker'
     id: 'build-scion-gemini-cli'
     dir: 'harnesses/gemini-cli'
-    args: ['buildx', 'build', '--platform', 'linux/amd64,linux/arm64', '--build-arg', 'BASE_IMAGE=$_REGISTRY/scion-base:$_TAG', '-t', '$_REGISTRY/scion-gemini-cli:$_SHORT_SHA', '-t', '$_REGISTRY/scion-gemini-cli:$_TAG', '-f', 'Dockerfile', '--pull', '--push', '.']
+    entrypoint: 'bash'
+    args: ['/workspace/image-build/scripts/buildx-record-digest.sh', '$_REGISTRY/scion-gemini-cli:$_TAG', 'buildx', 'build', '--platform', 'linux/amd64,linux/arm64', '--build-arg', 'BASE_IMAGE=$_REGISTRY/scion-base:$_TAG', '-t', '$_REGISTRY/scion-gemini-cli:$_SHORT_SHA', '-t', '$_REGISTRY/scion-gemini-cli:$_TAG', '-f', 'Dockerfile', '--pull', '--push', '.']
     env:
       - 'DOCKER_CLI_EXPERIMENTAL=enabled'
       - 'PATH=/builder/home/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
@@ -91,7 +96,8 @@ steps:
   - name: 'gcr.io/cloud-builders/docker'
     id: 'build-scion-grok-build'
     dir: 'harnesses/grok-build'
-    args: ['buildx', 'build', '--platform', 'linux/amd64,linux/arm64', '--build-arg', 'BASE_IMAGE=$_REGISTRY/scion-base:$_TAG', '-t', '$_REGISTRY/scion-grok-build:$_SHORT_SHA', '-t', '$_REGISTRY/scion-grok-build:$_TAG', '-f', 'Dockerfile', '--pull', '--push', '.']
+    entrypoint: 'bash'
+    args: ['/workspace/image-build/scripts/buildx-record-digest.sh', '$_REGISTRY/scion-grok-build:$_TAG', 'buildx', 'build', '--platform', 'linux/amd64,linux/arm64', '--build-arg', 'BASE_IMAGE=$_REGISTRY/scion-base:$_TAG', '-t', '$_REGISTRY/scion-grok-build:$_SHORT_SHA', '-t', '$_REGISTRY/scion-grok-build:$_TAG', '-f', 'Dockerfile', '--pull', '--push', '.']
     env:
       - 'DOCKER_CLI_EXPERIMENTAL=enabled'
       - 'PATH=/builder/home/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
@@ -99,7 +105,8 @@ steps:
   - name: 'gcr.io/cloud-builders/docker'
     id: 'build-scion-hermes'
     dir: 'harnesses/hermes'
-    args: ['buildx', 'build', '--platform', 'linux/amd64,linux/arm64', '--build-arg', 'BASE_IMAGE=$_REGISTRY/scion-base:$_TAG', '-t', '$_REGISTRY/scion-hermes:$_SHORT_SHA', '-t', '$_REGISTRY/scion-hermes:$_TAG', '-f', 'Dockerfile', '--pull', '--push', '.']
+    entrypoint: 'bash'
+    args: ['/workspace/image-build/scripts/buildx-record-digest.sh', '$_REGISTRY/scion-hermes:$_TAG', 'buildx', 'build', '--platform', 'linux/amd64,linux/arm64', '--build-arg', 'BASE_IMAGE=$_REGISTRY/scion-base:$_TAG', '-t', '$_REGISTRY/scion-hermes:$_SHORT_SHA', '-t', '$_REGISTRY/scion-hermes:$_TAG', '-f', 'Dockerfile', '--pull', '--push', '.']
     env:
       - 'DOCKER_CLI_EXPERIMENTAL=enabled'
       - 'PATH=/builder/home/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
@@ -107,7 +114,8 @@ steps:
   - name: 'gcr.io/cloud-builders/docker'
     id: 'build-scion-muse-code'
     dir: 'harnesses/muse-code'
-    args: ['buildx', 'build', '--platform', 'linux/amd64,linux/arm64', '--build-arg', 'BASE_IMAGE=$_REGISTRY/scion-base:$_TAG', '-t', '$_REGISTRY/scion-muse-code:$_SHORT_SHA', '-t', '$_REGISTRY/scion-muse-code:$_TAG', '-f', 'Dockerfile', '--pull', '--push', '.']
+    entrypoint: 'bash'
+    args: ['/workspace/image-build/scripts/buildx-record-digest.sh', '$_REGISTRY/scion-muse-code:$_TAG', 'buildx', 'build', '--platform', 'linux/amd64,linux/arm64', '--build-arg', 'BASE_IMAGE=$_REGISTRY/scion-base:$_TAG', '-t', '$_REGISTRY/scion-muse-code:$_SHORT_SHA', '-t', '$_REGISTRY/scion-muse-code:$_TAG', '-f', 'Dockerfile', '--pull', '--push', '.']
     env:
       - 'DOCKER_CLI_EXPERIMENTAL=enabled'
       - 'PATH=/builder/home/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
@@ -115,7 +123,8 @@ steps:
   - name: 'gcr.io/cloud-builders/docker'
     id: 'build-scion-opencode'
     dir: 'harnesses/opencode'
-    args: ['buildx', 'build', '--platform', 'linux/amd64,linux/arm64', '--build-arg', 'BASE_IMAGE=$_REGISTRY/scion-base:$_TAG', '-t', '$_REGISTRY/scion-opencode:$_SHORT_SHA', '-t', '$_REGISTRY/scion-opencode:$_TAG', '-f', 'Dockerfile', '--pull', '--push', '.']
+    entrypoint: 'bash'
+    args: ['/workspace/image-build/scripts/buildx-record-digest.sh', '$_REGISTRY/scion-opencode:$_TAG', 'buildx', 'build', '--platform', 'linux/amd64,linux/arm64', '--build-arg', 'BASE_IMAGE=$_REGISTRY/scion-base:$_TAG', '-t', '$_REGISTRY/scion-opencode:$_SHORT_SHA', '-t', '$_REGISTRY/scion-opencode:$_TAG', '-f', 'Dockerfile', '--pull', '--push', '.']
     env:
       - 'DOCKER_CLI_EXPERIMENTAL=enabled'
       - 'PATH=/builder/home/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
@@ -123,7 +132,8 @@ steps:
   - name: 'gcr.io/cloud-builders/docker'
     id: 'build-scion-pi'
     dir: 'harnesses/pi'
-    args: ['buildx', 'build', '--platform', 'linux/amd64,linux/arm64', '--build-arg', 'BASE_IMAGE=$_REGISTRY/scion-base:$_TAG', '-t', '$_REGISTRY/scion-pi:$_SHORT_SHA', '-t', '$_REGISTRY/scion-pi:$_TAG', '-f', 'Dockerfile', '--pull', '--push', '.']
+    entrypoint: 'bash'
+    args: ['/workspace/image-build/scripts/buildx-record-digest.sh', '$_REGISTRY/scion-pi:$_TAG', 'buildx', 'build', '--platform', 'linux/amd64,linux/arm64', '--build-arg', 'BASE_IMAGE=$_REGISTRY/scion-base:$_TAG', '-t', '$_REGISTRY/scion-pi:$_SHORT_SHA', '-t', '$_REGISTRY/scion-pi:$_TAG', '-f', 'Dockerfile', '--pull', '--push', '.']
     env:
       - 'DOCKER_CLI_EXPERIMENTAL=enabled'
       - 'PATH=/builder/home/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'

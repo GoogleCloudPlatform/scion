@@ -22,6 +22,7 @@ import (
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 )
@@ -236,5 +237,42 @@ func TestTestIdentities_WebLoginCodeErrors(t *testing.T) {
 	}
 	if _, err := c.TestIdentities().WebLoginCode(context.Background(), ""); err == nil {
 		t.Error("an empty id must be refused before any request")
+	}
+}
+
+// A purge answer that takes longer than the transport's usual client
+// timeout still reaches the caller: Purge sends with its own request
+// timeout, because the hub waits for each agent's delete before answering.
+// A plain delete on the same client is still cut short.
+func TestTestIdentityPurge_RequestTimeout(t *testing.T) {
+	const delay = 300 * time.Millisecond
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(delay)
+		if r.Method != http.MethodDelete || r.URL.Path != "/api/v1/test-identities/fx-1" {
+			http.Error(w, "unexpected request", http.StatusBadRequest)
+			return
+		}
+		if r.URL.Query().Get("purge") == "true" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"identityId":"fx-1","complete":true,"identityDeleted":true,"deleted":{"agents":1}}`)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL, WithTimeout(delay/3))
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := c.TestIdentities().Purge(context.Background(), "fx-1")
+	if err != nil {
+		t.Fatalf("purge cut short by the transport's usual timeout: %v", err)
+	}
+	if report == nil || !report.Complete || report.IdentityID != "fx-1" {
+		t.Fatalf("purge report = %+v, want the complete report for fx-1", report)
+	}
+	if err := c.TestIdentities().Delete(context.Background(), "fx-1"); err == nil {
+		t.Error("a plain delete must keep the transport's usual timeout")
 	}
 }

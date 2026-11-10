@@ -441,6 +441,14 @@ type AgentAppliedConfig struct {
 	// together with RuntimeTarget.
 	RuntimeTargetCandidate string `json:"runtimeTargetCandidate,omitempty"`
 
+	// NativeCloudRun records the hub's own decision that a dispatch of this
+	// agent runs it on Cloud Run Instances as its own identity
+	// (hub.cloudrun_native_identity). The dispatcher sets it before the
+	// broker call, and only the hub's confirmed stop or delete of the agent
+	// removes it (Store.SetAgentNativeCloudRun). While it is set the hub
+	// issues the agent no GCP token. It is never taken from a client.
+	NativeCloudRun bool `json:"nativeCloudRun,omitempty"`
+
 	// Harness-config info for Runtime Broker hydration. When set, the broker
 	// fetches the harness-config from the Hub's storage backend instead of
 	// requiring it to exist on the broker's local filesystem.
@@ -1534,9 +1542,20 @@ type BrokerProfile struct {
 	MappingsReportedAt *time.Time `json:"mappingsReportedAt,omitempty"`
 	// MappingsReportVersion is the broker's report version
 	// (api.BrokerSAReportVersion); zero from a broker that predates it.
-	// The Hub refuses a dispatch from the report only at that version or
-	// later (ptone/scion#3329 phase 4b).
+	// The Hub refuses a Kubernetes dispatch from the report from version 2
+	// (ptone/scion#3329 phase 4b), and uses a Cloud Run report from
+	// version 3.
 	MappingsReportVersion int `json:"mappingsReportVersion,omitempty"`
+	// CloudRunNativeIdentity is true when the broker reports, for a Cloud
+	// Run profile, that it can run an instance as the identity in its
+	// dispatch (report version 3 or later). ServiceAccountMappings then
+	// lists the accounts it may attach (Source
+	// api.BrokerSASourceCloudRunAllowlist, GSA only).
+	CloudRunNativeIdentity bool `json:"cloudRunNativeIdentity,omitempty"`
+	// CloudRunBlockAccount is true when the broker reports a block service
+	// account configured for this Cloud Run profile. Only presence is
+	// reported, never the account.
+	CloudRunBlockAccount bool `json:"cloudRunBlockAccount,omitempty"`
 }
 
 // BrokerProfileSAMapping is one GCP service account a broker profile can
@@ -2071,8 +2090,9 @@ type TestIdentityDelegation struct {
 	RevokedBy *string
 	// GrantorKind is DelegationGrantorHuman (the API path) or
 	// DelegationGrantorTestInfraOffline (phase DL: written only by the
-	// offline host command, member scope only). An empty value reads as
-	// human (the column default).
+	// offline host command; the member scope, or the hub-admin scope
+	// behind the offline admin delegation setting). An empty value reads
+	// as human (the column default).
 	GrantorKind string
 	// HubID is the hub id an offline delegation is bound to; empty for a
 	// human grantor.
@@ -2120,6 +2140,45 @@ const (
 	// delegations one hub may hold at once (4 x 5 = the hub-wide cap of 20).
 	TestInfraOfflineMaxLiveDelegations = 4
 )
+
+// Bounds of an offline delegation of the hub-admin scope. The offline
+// writer creates one only when the hub's configuration carries
+// server.hub.test_identities.offline_admin_delegations for its hub id, and
+// the hub honours it only while the running hub has that setting on at
+// --test-mode=admin or above. The test super-admin scope is never
+// delegable offline.
+const (
+	// TestInfraOfflineAdminDelegationScope is the hub-admin scope an
+	// offline delegation may hold: test hub-admin issuance only.
+	TestInfraOfflineAdminDelegationScope = "test_identity:issue_admin"
+	// TestInfraOfflineAdminDelegationMaxTTL is the longest lifetime of an
+	// offline hub-admin delegation (the hub-admin delegation maximum age).
+	TestInfraOfflineAdminDelegationMaxTTL = 8 * time.Hour
+	// TestInfraOfflineAdminDelegationDefaultTTL is the default lifetime.
+	TestInfraOfflineAdminDelegationDefaultTTL = 4 * time.Hour
+	// TestInfraOfflineAdminDelegationMaxAdminCap is the largest number of
+	// live test hub-admins one offline hub-admin delegation may hold (the
+	// hub-admin delegation maximum; the hub-wide admin cap applies on top).
+	TestInfraOfflineAdminDelegationMaxAdminCap = 2
+	// TestInfraOfflineAdminDelegationDefaultAdminCap is the default cap.
+	TestInfraOfflineAdminDelegationDefaultAdminCap = 1
+	// TestInfraOfflineMaxLiveAdminDelegations is the most live offline
+	// hub-admin delegations one hub may hold at once. They count toward
+	// TestInfraOfflineMaxLiveDelegations too.
+	TestInfraOfflineMaxLiveAdminDelegations = 1
+)
+
+// IsSuperAdminIssueVariant reports whether s names test super-admin
+// issuance in any spelling: the permission or the scope form (either
+// separator), any letter case, surrounding whitespace, or "super-admin" /
+// "superadmin". Every offline delegation check (the offline writer and the
+// hub) refuses such a value before any other comparison; this is the one
+// shared normaliser.
+func IsSuperAdminIssueVariant(s string) bool {
+	n := strings.ToLower(strings.TrimSpace(s))
+	n = strings.NewReplacer("-", "", "_", "", ".", "", ":", "").Replace(n)
+	return strings.Contains(n, "superadmin")
+}
 
 // testInfraOfflineGrantorNamespace is the UUID namespace of the reserved
 // grantor id of an offline delegation (a fixed, random v4 UUID).
@@ -4328,6 +4387,10 @@ const (
 	ProjectRoleOwner  = "project-owner"
 	ProjectRoleAdmin  = "project-admin"
 	ProjectRoleMember = "project-member"
+	// ProjectRoleViewer is a built-in membership role (ptone/scion#5519):
+	// it reads the project, its agents and its chat, and cannot post
+	// messages, create agents or message them.
+	ProjectRoleViewer = "project-viewer"
 	// ProjectRoleVisitor is the seeded project role for a federated
 	// account granted visitor access to a project. It does not confer
 	// membership (RoleDefinition.ConfersMembership is false), and only
@@ -4357,12 +4420,22 @@ var BuiltInProjectMembershipRoles = map[string]bool{
 	ProjectRoleOwner:  true,
 	ProjectRoleAdmin:  true,
 	ProjectRoleMember: true,
+	ProjectRoleViewer: true,
 }
 
 // IsBuiltInProjectMembershipRole reports whether the given role name is
 // a built-in project membership role.
 func IsBuiltInProjectMembershipRole(roleName string) bool {
 	return BuiltInProjectMembershipRoles[roleName]
+}
+
+// IsBuiltInProjectMembershipRoleDef reports whether rd is a built-in project
+// membership role: a system role definition with one of the built-in names.
+// A custom (non-system) role that holds such a name is not one
+// (ptone/scion#5519). Prefer it to IsBuiltInProjectMembershipRole wherever
+// the definition is at hand.
+func IsBuiltInProjectMembershipRoleDef(rd *RoleDefinition) bool {
+	return rd != nil && rd.System && BuiltInProjectMembershipRoles[rd.Name]
 }
 
 // Agent role definition names (matching existing AgentRole constants)

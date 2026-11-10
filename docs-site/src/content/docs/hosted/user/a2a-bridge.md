@@ -307,10 +307,10 @@ To secure and isolate desktop client sessions, Scion uses **User Access Token (U
 To authorize your desktop application, generate a Scion Personal Access Token scoped to the project you wish to target:
 
 ```bash
-scion token create \
+scion hub token create \
   --name "claude-desktop-integration" \
   --project "my-coding-project" \
-  --scope agent:message,agent:read \
+  --scopes agent:message,agent:read \
   --expires 365d
 ```
 

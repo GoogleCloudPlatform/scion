@@ -711,8 +711,10 @@ func (s *Server) handleCreateConversation(w http.ResponseWriter, r *http.Request
 	}
 
 	// Verify the project exists when a project ID is provided.
+	var project *store.Project
 	if req.ProjectID != "" {
-		_, err := s.store.GetProject(ctx, req.ProjectID)
+		var err error
+		project, err = s.store.GetProject(ctx, req.ProjectID)
 		if err != nil {
 			if errors.Is(err, store.ErrNotFound) {
 				writeError(w, http.StatusNotFound, "not_found", "project not found", nil)
@@ -750,6 +752,22 @@ func (s *Server) handleCreateConversation(w http.ResponseWriter, r *http.Request
 	// A token also needs inbox:write for the conversation's project.
 	if cls == inboxCredentialToken && !s.authorizeSelfScoped(w, r, permInboxWrite, req.ProjectID) {
 		return
+	}
+	// Order for a user: project read (above), the token's inbox:write
+	// (above), then the create_group action of chatSpaceAccess
+	// (project.chat_post; 403 chat_post_denied without it), all before
+	// anything is minted. Agents are not decided by the chat resolvers here
+	// (ptone/scion#5519 Phase 2); their message-mode join check follows.
+	if user := GetUserIdentityFromContext(ctx); user != nil {
+		// A user's projectId comes from the body (only an agent defaults to
+		// its token project), so project was loaded and read-checked above.
+		if project == nil {
+			BadRequest(w, "projectId is required")
+			return
+		}
+		if !s.requireChatSpaceAction(w, r, user, project, "Project", ChatActionCreateGroup) {
+			return
+		}
 	}
 
 	// An agent creator becomes a participant below, so its message mode
@@ -882,16 +900,22 @@ func (s *Server) handleSetDefaultAgent(w http.ResponseWriter, r *http.Request, i
 		return
 	}
 
-	// Authorization: project membership is the gate (design doc §3.2),
-	// matching the web topic PATCH, which any project member may call. The
-	// separate check that the AGENT BEING SET belongs to conv's project
-	// (below) is unrelated and unchanged.
+	// Authorization: read access to the conversation's project first
+	// (design doc §3.2); a user then needs set_default_agent in the
+	// conversation (chatThreadAccess, below), as for the web topic PATCH.
+	// The separate check that the AGENT BEING SET belongs to conv's project
+	// (further below) is unrelated and unchanged.
 	if !s.authorizeGroupConversationAccess(w, r, conv, ActionRead) {
 		return
 	}
 	// A token also needs inbox:write for the conversation's project; a
 	// group with no project needs a hub boundary.
 	if cls == inboxCredentialToken && !s.authorizeTokenConversation(w, r, token, permInboxWrite, conv) {
+		return
+	}
+	// A user then needs set_default_agent in the conversation
+	// (chatThreadAccess), before the body is read.
+	if !s.requireChatConversationAction(w, r, conv, ChatActionSetDefaultAgent) {
 		return
 	}
 
@@ -1045,6 +1069,11 @@ func (s *Server) handleAddParticipant(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 	if !s.authorizeGroupConversationReadAsNotFound(w, r, conv) {
+		return
+	}
+	// A user then needs add_participant in the conversation
+	// (chatThreadAccess).
+	if !s.requireChatConversationAction(w, r, conv, ChatActionAddParticipant) {
 		return
 	}
 

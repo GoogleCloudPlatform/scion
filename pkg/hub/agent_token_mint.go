@@ -122,6 +122,13 @@ func (s *Server) AuthorizeAgentToken(ctx context.Context, agent *store.Agent) (A
 	}
 
 	candidates := s.authzService.mintCandidateScopes(agent)
+	// A natively assigned Cloud Run agent gets its GCP tokens from its
+	// instance, so its token carries no GCP token scope. A lookup fault
+	// grants nothing.
+	candidates, err := s.withoutNativeIdentityGCPScopes(ctx, agent, candidates)
+	if err != nil {
+		return AgentTokenGrant{}, fmt.Errorf("%w: %w", errMintLookup, err)
+	}
 	scopes, err := s.authzService.ceilingFilteredAgentScopes(ctx, agent, candidates)
 	if err != nil {
 		if isStructuralProvenanceError(err) {
