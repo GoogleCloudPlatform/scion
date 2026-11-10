@@ -617,3 +617,32 @@ func TestReplyPoll_VisitorNullPageIsRetried(t *testing.T) {
 		t.Errorf("conversation reads = %d, want 3 (preflight, null poll, poll)", n)
 	}
 }
+
+// TestReplyPoll_VisitorAgentKeyNotDerivedSendsNothing: with reply polling
+// on, when the federated user's conversation key cannot be derived because
+// the hub names the agent by a non-canonical ID, the call ends with the
+// uniform refusal before anything is sent or read; it never falls back to
+// the push path.
+func TestReplyPoll_VisitorAgentKeyNotDerivedSendsNothing(t *testing.T) {
+	token := fedUserToken(t)
+	hub := newFedUserHub(t, token)
+	hub.set(func(h *fedUserHub) {
+		h.adminAgents = []map[string]interface{}{
+			{"id": strings.ToUpper(fedUserAgentID), "name": "agent1", "slug": "agent1", "projectId": fedUserProjectID, "status": "running"},
+		}
+	})
+	_, _, ts := newFedUserTestServer(t, hub, visitorPollConfig)
+
+	code, body := awaitResult(t, sendAsync(t, ts, "agent1", token))
+	if code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body %s", code, body)
+	}
+	assertVisitorRefusal(t, body)
+	snap := hub.snapshot()
+	if n := len(snap.sent); n != 0 {
+		t.Errorf("%d sends reached the hub, want 0", n)
+	}
+	if n := len(snap.dmReadKeys); n != 0 {
+		t.Errorf("%d conversation reads reached the hub, want 0", n)
+	}
+}
