@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -343,4 +344,190 @@ func TestChoicesHistory_AnswerModeAndResponseSet(t *testing.T) {
 	h = history()
 	assert.Nil(t, h.MessageChoiceAnswerModes)
 	assert.Nil(t, h.MessageChoiceResponseSets)
+}
+
+// The idempotency key is scoped to the user and the prompt: in a group
+// topic, bob reusing alice's key gets the state result (409, the rows are
+// decided), not 422.
+func TestChoiceSetAnswer_IdempotencyKeyScopedToUser(t *testing.T) {
+	f := newChoicesFixture(t)
+	msg, res := f.topicPrompt(t, threeDecisions, false)
+	r := res.Decisions
+	rr := f.submitSet(t, f.alice, msg.ID, "k", r[0].RowID, "1", r[1].RowID, "a", r[2].RowID, "1")
+	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+
+	rr = f.submitSet(t, f.bob, msg.ID, "k", r[0].RowID, "2", r[1].RowID, "b", r[2].RowID, "2")
+	require.Equal(t, http.StatusConflict, rr.Code, "body: %s", rr.Body.String())
+	assert.Equal(t, ErrCodeAnswerSetChanged, errorCode(t, rr))
+}
+
+// Criterion 24: concurrent set submits of one prompt have exactly one
+// winner: one 200, the rest 409 answer_set_changed, one batch, one response
+// message and one delivery.
+func TestChoiceSetAnswer_ConcurrentOneWinner(t *testing.T) {
+	f := newChoicesFixture(t)
+	msg, res := f.topicPrompt(t, threeDecisions, false)
+	r := res.Decisions
+	before := len(f.dispatcher.getMessages())
+
+	const n = 4
+	var wg sync.WaitGroup
+	codes := make([]int, n)
+	errCodes := make([]string, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			u := []*store.User{f.alice, f.bob}[i%2]
+			choice := []string{"1", "2"}[i%2]
+			second := []string{"a", "b"}[i%2]
+			rec := f.submitSet(t, u, msg.ID, "", r[0].RowID, choice, r[1].RowID, second, r[2].RowID, choice)
+			codes[i] = rec.Code
+			if rec.Code != http.StatusOK {
+				var body struct {
+					Error struct {
+						Code string `json:"code"`
+					} `json:"error"`
+				}
+				_ = json.Unmarshal(rec.Body.Bytes(), &body)
+				errCodes[i] = body.Error.Code
+			}
+		}(i)
+	}
+	wg.Wait()
+	ok := 0
+	for i, c := range codes {
+		if c == http.StatusOK {
+			ok++
+			continue
+		}
+		assert.Equal(t, http.StatusConflict, c, "codes %v", codes)
+		assert.Equal(t, ErrCodeAnswerSetChanged, errCodes[i], "codes %v", codes)
+	}
+	assert.Equal(t, 1, ok, "codes %v", codes)
+
+	ctx := context.Background()
+	batches := map[string]bool{}
+	responses := map[string]bool{}
+	for _, d := range r {
+		got, err := f.store.GetDecision(ctx, d.RowID)
+		require.NoError(t, err)
+		require.Len(t, got.Answers, 1, "one answer per row")
+		batches[got.Answers[0].BatchID] = true
+		responses[got.Answers[0].ResponseMessageID] = true
+	}
+	assert.Len(t, batches, 1, "one batch")
+	assert.Len(t, responses, 1, "one response message")
+	assert.Len(t, f.dispatcher.getMessages(), before+1, "one delivery")
+}
+
+// Design v5 5.2: choice.updated is published once per answered row, in
+// position order, and the response row's chat event carries
+// choiceResponseSet.
+func TestChoiceSetAnswer_PublishesUpdatesAndResponseSet(t *testing.T) {
+	f := newChoicesFixture(t)
+	resp := f.sendSetToBob(t)
+	r := resp.Decisions
+	updates, unsubUpdates := f.srv.events.Subscribe("user." + f.bob.ID + ".choice.updated")
+	defer unsubUpdates()
+	chat, unsubChat := f.srv.events.Subscribe("user." + f.bob.ID + ".chat.dm")
+	defer unsubChat()
+
+	rr := f.submitSet(t, f.bob, resp.MessageID, "", r[0].RowID, "1", r[1].RowID, "a", r[2].RowID, "2")
+	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+	out := decodeSetResponse(t, rr)
+
+	evts := collectEvents(updates)
+	require.Len(t, evts, 3, "one choice.updated per row")
+	for i, e := range evts {
+		var got struct {
+			Decision DecisionView `json:"decision"`
+		}
+		require.NoError(t, json.Unmarshal(e.Data, &got))
+		assert.Equal(t, r[i].RowID, got.Decision.RowID, "position order")
+		assert.Equal(t, store.DecisionStatusDecided, got.Decision.Status)
+	}
+
+	var set *ChoiceResponseSetView
+	for _, e := range collectEvents(chat) {
+		var evt UserMessageEvent
+		require.NoError(t, json.Unmarshal(e.Data, &evt))
+		if evt.ID == out.ResponseMessageID {
+			set = evt.ChoiceResponseSet
+		}
+	}
+	require.NotNil(t, set, "the response row's chat event carries choiceResponseSet")
+	assert.Equal(t, out.BatchID, set.BatchID)
+	assert.Equal(t, resp.MessageID, set.PromptMessageID)
+	require.Len(t, set.Answers, 3)
+	assert.Equal(t, "D234", set.Answers[0].Key)
+}
+
+// The remaining set outcomes over HTTP: a mixed set's delivery lines, the
+// replaced and not_recorded_answerer reasons, MESSAGE_DENIED, and a chat
+// reader without send rights.
+func TestChoiceSetAnswer_Outcomes(t *testing.T) {
+	ctx := context.Background()
+	t.Run("mixed set delivery lines", func(t *testing.T) {
+		f := newChoicesFixture(t)
+		msg, res := f.topicPrompt(t, threeDecisions, false)
+		r := res.Decisions
+		f.recordInterpreted(t, f.alice, r[0].RowID, "1")
+		f.recordInterpreted(t, f.alice, r[1].RowID, "a")
+		before := len(f.dispatcher.getMessages())
+		rr := f.submitSet(t, f.alice, msg.ID, "", r[0].RowID, "1", r[1].RowID, "b", r[2].RowID, "2")
+		require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+		sent := f.dispatcher.getMessages()[before:]
+		require.Len(t, sent, 1)
+		text := sent[0].structured.Msg
+		assert.Contains(t, text, `D234 v1 ("Ship the feature now?") answer=yes (choice 1, recommended, confirmed)`)
+		assert.Contains(t, text, `answer=New type (choice b, overriding interpreted answer Extend)`)
+		assert.Contains(t, text, `ship-now v1 ("Deploy today?") answer=no (choice 2, recommended)`)
+	})
+	t.Run("replaced row", func(t *testing.T) {
+		f := newChoicesFixture(t)
+		msg, res := f.topicPrompt(t, threeDecisions, false)
+		r := res.Decisions
+		f.topicPrompt(t, `[{"id":"ship-now","question":"Deploy today, really?","choices":["yes","no"]}]`, true)
+		rr := f.submitSet(t, f.bob, msg.ID, "", r[0].RowID, "1", r[1].RowID, "a", r[2].RowID, "1")
+		require.Equal(t, http.StatusConflict, rr.Code, "body: %s", rr.Body.String())
+		_, details := errorCodeAndDetails(t, rr)
+		assert.Equal(t, store.AnswerSetReasonReplaced, details["reasons"].(map[string]interface{})[r[2].RowID])
+	})
+	t.Run("another user's interpreted row", func(t *testing.T) {
+		f := newChoicesFixture(t)
+		msg, res := f.topicPrompt(t, threeDecisions, false)
+		r := res.Decisions
+		f.recordInterpreted(t, f.alice, r[0].RowID, "1")
+		rr := f.submitSet(t, f.bob, msg.ID, "", r[0].RowID, "1", r[1].RowID, "a", r[2].RowID, "1")
+		require.Equal(t, http.StatusConflict, rr.Code, "body: %s", rr.Body.String())
+		_, details := errorCodeAndDetails(t, rr)
+		assert.Equal(t, store.AnswerSetReasonNotRecordedAnswerer, details["reasons"].(map[string]interface{})[r[0].RowID])
+	})
+	t.Run("asker takes no messages", func(t *testing.T) {
+		f := newChoicesFixture(t)
+		msg, res := f.topicPrompt(t, threeDecisions, false)
+		r := res.Decisions
+		agent, err := f.store.GetAgent(ctx, f.agent.ID)
+		require.NoError(t, err)
+		agent.MessageMode = store.MessageModeNone
+		require.NoError(t, f.store.UpdateAgent(ctx, agent))
+		rr := f.submitSet(t, f.bob, msg.ID, "", r[0].RowID, "1", r[1].RowID, "a", r[2].RowID, "1")
+		require.Equal(t, http.StatusForbidden, rr.Code, "body: %s", rr.Body.String())
+		assert.Equal(t, ErrCodeMessageDenied, errorCode(t, rr))
+		d, err := f.store.GetDecision(ctx, r[0].RowID)
+		require.NoError(t, err)
+		assert.Empty(t, d.Answers, "nothing stored")
+	})
+	t.Run("chat reader", func(t *testing.T) {
+		f := newChoicesFixture(t)
+		msg, res := f.topicPrompt(t, threeDecisions, false)
+		r := res.Decisions
+		f.makeChatReader(t, f.bob)
+		rr := f.submitSet(t, f.bob, msg.ID, "", r[0].RowID, "1", r[1].RowID, "a", r[2].RowID, "1")
+		assert.Contains(t, []int{http.StatusForbidden, http.StatusNotFound}, rr.Code, "body: %s", rr.Body.String())
+		d, err := f.store.GetDecision(ctx, r[0].RowID)
+		require.NoError(t, err)
+		assert.Empty(t, d.Answers)
+	})
 }

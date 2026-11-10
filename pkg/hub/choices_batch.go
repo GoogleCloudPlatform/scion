@@ -194,6 +194,12 @@ func (s *Server) handleChoiceSetAnswer(w http.ResponseWriter, r *http.Request, m
 	for _, d := range ds {
 		byID[d.ID] = d
 	}
+	// Per-user answer rate limit: the chat send limiter, once per submit,
+	// before the shape and state checks, so malformed and stale probes
+	// count too.
+	if !s.allowChatSend(w, user.ID(), chatSenderHuman) {
+		return
+	}
 
 	// Step 4: the shape. Every row is in the prompt once and names one of
 	// its choices; the labels are taken from the rows.
@@ -228,9 +234,10 @@ func (s *Server) handleChoiceSetAnswer(w http.ResponseWriter, r *http.Request, m
 	}
 
 	// Step 3: a replay of the key is answered before any state check; the
-	// key used for other answers is 422.
+	// key, scoped to the user and the prompt, used for other answers is
+	// 422. Another user's answers under the same key are not this user's.
 	if req.IdempotencyKey != "" {
-		if prior := setAnswersWithIdempotencyKey(ds, req.IdempotencyKey); len(prior) > 0 {
+		if prior := setAnswersWithIdempotencyKey(ds, req.IdempotencyKey, user.ID()); len(prior) > 0 {
 			if !sameSetAnswers(prior, user.ID(), choices) {
 				writeError(w, http.StatusUnprocessableEntity, ErrCodeIdempotencyMismatch,
 					"the idempotency key was used for other answers", nil)
@@ -274,10 +281,6 @@ func (s *Server) handleChoiceSetAnswer(w http.ResponseWriter, r *http.Request, m
 		items = append(items, store.AnswerSetItem{DecisionRowID: d.ID, ChoiceID: choice.ID, Outcome: outcome})
 	}
 
-	// Per-user answer rate limit: the chat send limiter, once per submit.
-	if !s.allowChatSend(w, user.ID(), chatSenderHuman) {
-		return
-	}
 	asker, _ := s.store.GetAgent(ctx, ds[0].AskerAgentID)
 	// The choice-response is a message from the user to the asking agent:
 	// the chat send's messaging check, unless nothing is delivered (an
@@ -360,13 +363,14 @@ func firstResponseID(res *store.AnswerSetResult) string {
 	return res.Answers[0].ResponseMessageID
 }
 
-// setAnswersWithIdempotencyKey returns the set answers recorded on ds under
-// key, in position order.
-func setAnswersWithIdempotencyKey(ds []*store.Decision, key string) []*store.DecisionAnswer {
+// setAnswersWithIdempotencyKey returns the set answers userID recorded on ds
+// under key, in position order (the key is scoped to the user and the
+// prompt).
+func setAnswersWithIdempotencyKey(ds []*store.Decision, key, userID string) []*store.DecisionAnswer {
 	var out []*store.DecisionAnswer
 	for _, d := range ds {
 		for _, a := range d.Answers {
-			if a.IdempotencyKey == key && a.BatchID != "" {
+			if a.IdempotencyKey == key && a.BatchID != "" && a.AnsweredByUserID == userID {
 				out = append(out, a)
 			}
 		}
