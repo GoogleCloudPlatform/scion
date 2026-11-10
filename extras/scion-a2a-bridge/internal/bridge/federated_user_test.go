@@ -1665,7 +1665,7 @@ func TestIsAgentCallerOwnerKey(t *testing.T) {
 // access credential from an identity issuer whose user has no project
 // visitor account on the hub is refused, with reply polling on. The hub
 // either refuses it (403 on GET /api/v1/auth/me,
-// GoogleCloudPlatform/scion#3577) or answers 200 with an ID that names no
+// upstream issue 3577) or answers 200 with an ID that names no
 // visitor account. Either way the bridge answers the JSON-RPC send with the
 // uniform refusal before any task starts: nothing is sent, no topic is
 // subscribed, and no access re-check or reply read is made.
