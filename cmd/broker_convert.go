@@ -100,10 +100,27 @@ Exactly one mode is required:
               'scion server start'. Re-running resumes an interrupted apply
               of the same plan; a changed plan is refused. This release
               applies a plan with exactly one instance.
+              On a co-located host (the server process runs the Hub and
+              embeds the Runtime Broker) --apply runs in two steps: with the
+              server running it registers the instance and re-points
+              projects; once you stop the server, a second --apply writes
+              the settings. Stopping a co-located server takes the whole
+              Hub down, so plan a maintenance window. After the next start,
+              a third --apply removes the unused instance credentials file.
+              With an external Hub database, the second step needs
+              --single-hub-replica (exactly one Hub process serves it).
+              The mode is read from the saved daemon launch: if neither the
+              server nor the Runtime Broker was ever started through the
+              daemon (foreground only), --apply and --rollback refuse
+              (colocated_mode_unknown) until one of them is.
   --status    show the recorded run: step states and IDs only (read-only)
   --rollback  undo an apply: restore defaults, remove the instance links,
               deregister the instance, remove server.broker.instances and
               move the instance identity aside. The server must be stopped.
+              On a co-located host it also runs in two steps: the Hub part
+              with the server running, the local part after the stop. Its
+              notes on a row named from an instance identity file appear
+              in the first step's output only.
 
 --apply and --rollback ask for confirmation unless --yes is given. They,
 and --status, print only step states, IDs and fixed texts; no settings
@@ -187,6 +204,17 @@ func runBrokerConvert(cmd *cobra.Command, _ []string) error {
 	if modes != 1 {
 		return errConvertOneMode
 	}
+	if brokerConvertSingleHubReplica && !brokerConvertApply {
+		return errConvertSingleHubFlag
+	}
+	if brokerConvertHostMode != "" {
+		if !brokerConvertApply && !brokerConvertRollback {
+			return errConvertHostModeFlag
+		}
+		if brokerConvertHostMode != brokerconvert.HostModeColocated && brokerConvertHostMode != brokerconvert.HostModeRemote {
+			return errConvertHostModeValue
+		}
+	}
 	if !brokerConvertPlan {
 		if brokerConvertSkipHub || brokerConvertShowEnv {
 			return errConvertPlanFlag
@@ -238,6 +266,11 @@ func runBrokerConvert(cmd *cobra.Command, _ []string) error {
 		err = brokerconvert.WriteJSON(out, plan)
 	} else {
 		err = brokerconvert.WriteHuman(out, plan, brokerconvert.HumanOptions{ShowEnvValues: brokerConvertShowEnv})
+		if err == nil {
+			if g, gerr := config.GetGlobalDir(); gerr == nil {
+				_, err = fmt.Fprintln(out, planHostModeLine(g))
+			}
+		}
 	}
 	if err != nil {
 		return err

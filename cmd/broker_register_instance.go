@@ -87,7 +87,8 @@ func runBrokerRegisterInstance(cmd *cobra.Command, key string) error {
 	ctx, cancel := context.WithTimeout(cmd.Context(), 2*time.Minute)
 	defer cancel()
 
-	creds, id, err := registerConfiguredFlatInstance(ctx, settings, globalDir, endpoint, *inst, os.Stdout)
+	// This is the remote registration flow (ModeRemote).
+	creds, id, err := registerConfiguredFlatInstance(ctx, settings, globalDir, endpoint, *inst, os.Stdout, flatPrecheckHost{mode: brokerhost.ModeRemote})
 	if err != nil {
 		return err
 	}
@@ -97,23 +98,38 @@ func runBrokerRegisterInstance(cmd *cobra.Command, key string) error {
 	return nil
 }
 
+// flatRegistrationActivation runs the shared activation precheck the host
+// applies (amendment P5-CR) before inst is registered, for the host hc. In
+// the remote registration flow (ModeRemote) a cloudrun instance is refused
+// outright (P1); on a co-located host (ModeColocated) the cloudrun
+// preconditions apply to the host's storage layout and Hub endpoint. An
+// instance the host would refuse, for these or for its default volumes,
+// mints nothing. The returned activation builds the instance's runtime.
+func flatRegistrationActivation(ctx context.Context, inst config.V1RuntimeBrokerInstanceConfig, hc flatPrecheckHost) (*flatInstanceActivation, error) {
+	activation := newFlatInstanceActivation(hc)
+	if err := activation.precondition(ctx, inst); err != nil {
+		return nil, fmt.Errorf("flat Runtime Broker instance %q not registered: %w", inst.Key, err)
+	}
+	return activation, nil
+}
+
 // registerConfiguredFlatInstance is steps 2 and 3 of
 // runBrokerRegisterInstance for the instance inst: run the shared
 // activation precheck, load or create its identity with a verified
 // execution scope, then register and join it, check both
 // acknowledgements and only then save its credentials. It
 // writes the Hub's kept-settings notes to out (nil: none). 'runtime-broker
-// convert --apply' calls it with the planned instance.
-func registerConfiguredFlatInstance(ctx context.Context, settings *config.Settings, globalDir, endpoint string, inst config.V1RuntimeBrokerInstanceConfig, out io.Writer) (*brokercredentials.BrokerCredentials, *brokeridentity.Identity, error) {
+// convert --apply' calls it with the planned instance. hc is the host the
+// shared precheck applies: ModeRemote for the remote registration flow,
+// ModeColocated (with the host's storage layout and Hub endpoint) for a
+// co-located host's convert.
+func registerConfiguredFlatInstance(ctx context.Context, settings *config.Settings, globalDir, endpoint string, inst config.V1RuntimeBrokerInstanceConfig, out io.Writer, hc flatPrecheckHost) (*brokercredentials.BrokerCredentials, *brokeridentity.Identity, error) {
 	key := inst.Key
 	// Step 2: identity with a verified execution scope, after the shared
-	// precheck the host applies (amendment P5-CR): this is the remote
-	// registration flow, so a cloudrun instance is refused outright (P1),
-	// and an instance the host would refuse for its default volumes mints
-	// nothing.
-	activation := newFlatInstanceActivation(flatPrecheckHost{mode: brokerhost.ModeRemote})
-	if err := activation.precondition(ctx, inst); err != nil {
-		return nil, nil, fmt.Errorf("flat Runtime Broker instance %q not registered: %w", key, err)
+	// precheck.
+	activation, err := flatRegistrationActivation(ctx, inst, hc)
+	if err != nil {
+		return nil, nil, err
 	}
 	rt, err := activation.newRuntime(ctx, inst)
 	if err != nil {
