@@ -33,6 +33,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
@@ -629,7 +630,10 @@ func TestDecisionAnswer_AskerGoneStoresFailedResponse(t *testing.T) {
 }
 
 // A user access token and a visitor get 403 on both decision routes;
-// answers come from a web session only.
+// answers come from a web session only. The token's refusal is the
+// session-only one the catalog records (reason INTERACTIVE_STATE,
+// credential session_required); the bearer disposition matrix cannot
+// reach it while web.chat_choices is off, so this test pins it.
 func TestDecisionRoutes_TokenAndVisitorForbidden(t *testing.T) {
 	f := newChoicesFixture(t)
 	_, res := f.topicPrompt(t, twoDecisions, false)
@@ -638,10 +642,18 @@ func TestDecisionRoutes_TokenAndVisitorForbidden(t *testing.T) {
 	uat := NewScopedUserIdentity(authUser(f.bob), f.project.ID, []string{"project:read"})
 	visitor := NewVisitorIdentity(tid("choices-visitor"), "https://issuer.choices.test", "choices-visitor", "visitor@choices.test", "Visitor")
 	for name, id := range map[string]Identity{"user access token": uat, "visitor": visitor} {
-		rec := requestAsIdentity(t, f.srv, id, http.MethodPost, "/api/v1/decisions/"+row+"/answer", map[string]interface{}{"choice_id": "1"})
-		assert.Equal(t, http.StatusForbidden, rec.Code, "%s answer: %s", name, rec.Body.String())
-		rec = requestAsIdentity(t, f.srv, id, http.MethodGet, "/api/v1/decisions/"+row, nil)
-		assert.Equal(t, http.StatusForbidden, rec.Code, "%s get: %s", name, rec.Body.String())
+		answer := requestAsIdentity(t, f.srv, id, http.MethodPost, "/api/v1/decisions/"+row+"/answer", map[string]interface{}{"choice_id": "1"})
+		get := requestAsIdentity(t, f.srv, id, http.MethodGet, "/api/v1/decisions/"+row, nil)
+		for route, rec := range map[string]*httptest.ResponseRecorder{"answer": answer, "get": get} {
+			require.Equal(t, http.StatusForbidden, rec.Code, "%s %s: %s", name, route, rec.Body.String())
+			_, details := errorCodeAndDetails(t, rec)
+			if name == "user access token" {
+				assert.Equal(t, string(authzop.ReasonInteractiveState), details["reason"], "%s %s", name, route)
+				assert.Equal(t, "session_required", details["credential"], "%s %s", name, route)
+			} else {
+				assert.Nil(t, details["credential"], "%s %s: a visitor gets the plain 403", name, route)
+			}
+		}
 	}
 	d, err := f.store.GetDecision(context.Background(), row)
 	require.NoError(t, err)

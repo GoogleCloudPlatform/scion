@@ -26,6 +26,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -91,8 +92,9 @@ func (s *Server) handleDecisionRoutes(w http.ResponseWriter, r *http.Request) {
 
 // decisionCaller returns the user calling a decision endpoint, or writes
 // the refusal: agents (an agent never answers directly, design 5 item 2),
-// visitors and user access tokens get 403. Phase 1 answers come from the
-// web session only.
+// visitors and user access tokens get 403, a token with the session-only
+// details (reason INTERACTIVE_STATE, credential session_required). Phase 1
+// answers come from the web session only.
 func decisionCaller(w http.ResponseWriter, r *http.Request) UserIdentity {
 	ctx := r.Context()
 	if GetAgentIdentityFromContext(ctx) != nil {
@@ -104,8 +106,14 @@ func decisionCaller(w http.ResponseWriter, r *http.Request) UserIdentity {
 		Unauthorized(w)
 		return nil
 	}
-	if isVisitorIdentity(user) || chatToken(ctx) != nil {
+	if isVisitorIdentity(user) {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "decisions are answered from a web session", nil)
+		return nil
+	}
+	if chatToken(ctx) != nil {
+		// A user access token gets the session-only refusal the catalog
+		// records for both decision routes.
+		writeSessionOnlyDenial(w, ErrCodeForbidden, "decisions are answered from a web session", authzop.ReasonInteractiveState)
 		return nil
 	}
 	return user
