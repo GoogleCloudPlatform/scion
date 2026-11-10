@@ -646,3 +646,89 @@ func TestReplyPoll_VisitorAgentKeyNotDerivedSendsNothing(t *testing.T) {
 		t.Errorf("%d conversation reads reached the hub, want 0", n)
 	}
 }
+
+// visitorDMRowsFor is the conversation of the visitor with hub account
+// accountID, newest first: the agent's reply, then the anchor.
+func visitorDMRowsFor(accountID, replyText string) []map[string]interface{} {
+	rows := visitorDMRows(replyText)
+	rows[1]["sender"] = "user:" + accountID
+	rows[1]["senderId"] = accountID
+	return rows
+}
+
+// TestExecutor_TwoFederatedUserPollersOnOneAgent: two visitor accounts
+// call agent1 at the same time with reply polling on. Each call's poll
+// reads only its own conversation, with its own credential, and returns
+// only the reply in that conversation.
+func TestExecutor_TwoFederatedUserPollersOnOneAgent(t *testing.T) {
+	const (
+		firstReplyText  = "the reply in the first visitor's conversation"
+		secondReplyText = "the reply in the second visitor's conversation"
+	)
+	token1, token2 := fedUserToken(t), fedUser2Token(t)
+	key1 := visitorDMKey(t)
+	key2, err := messages.DMConversationKey("agent", fedUserAgentID, "user", fedUser2AccountID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hub := newFedUserHub(t, token1)
+	hub.set(func(h *fedUserHub) {
+		h.otherUsers = map[string]string{token2: fedUser2AccountID}
+		h.dmMessagesByKey = map[string][]map[string]interface{}{}
+	})
+	b, _, ts := newFedUserTestServer(t, hub, visitorPollConfig)
+	aKey := agentKey(fedUserProjectID, "agent1")
+
+	done1 := sendAsync(t, ts, "agent1", token1)
+	waitForHubCalls(t, hub, "the first visitor's send", func(s fedUserHubCalls) bool { return sendsWith(s, token1) == 1 })
+	done2 := sendAsync(t, ts, "agent1", token2)
+	waitForHubCalls(t, hub, "the second visitor's send", func(s fedUserHubCalls) bool { return sendsWith(s, token2) == 1 })
+
+	_, entries := activeTasksOn(b, aKey)
+	pollers := map[string]bool{}
+	for _, e := range entries {
+		if e.userCaller && e.pollerLive {
+			pollers[e.callerUserID] = true
+		}
+	}
+	if !pollers[fedUserAccountID] || !pollers[fedUser2AccountID] {
+		t.Fatalf("task entries on agent1 %+v, want a live reply poller for each visitor account", entries)
+	}
+
+	hub.set(func(h *fedUserHub) {
+		h.dmMessagesByKey[key1] = visitorDMRowsFor(fedUserAccountID, firstReplyText)
+		h.dmMessagesByKey[key2] = visitorDMRowsFor(fedUser2AccountID, secondReplyText)
+	})
+	for _, c := range []struct {
+		name       string
+		done       <-chan [2]interface{}
+		own, other string
+	}{
+		{"first visitor", done1, firstReplyText, secondReplyText},
+		{"second visitor", done2, secondReplyText, firstReplyText},
+	} {
+		status, body := awaitResult(t, c.done)
+		if status != http.StatusOK {
+			t.Fatalf("%s: status = %d, want 200; body %s", c.name, status, body)
+		}
+		if !strings.Contains(body, c.own) || strings.Contains(body, c.other) {
+			t.Fatalf("%s: response %s, want only the reply in its own conversation", c.name, body)
+		}
+	}
+
+	snap := hub.snapshot()
+	wantKey := map[string]string{token1: key1, token2: key2}
+	reads := map[string]int{}
+	for i, key := range snap.dmReadKeys {
+		tok := snap.dmReadTokens[i]
+		want, ok := wantKey[tok]
+		if !ok || key != want {
+			t.Errorf("read %d: key %q with a credential of neither visitor or of the other visitor, want each visitor's own key with its own credential", i, key)
+			continue
+		}
+		reads[tok]++
+	}
+	if reads[token1] < 3 || reads[token2] < 3 {
+		t.Errorf("conversation reads per visitor = %d and %d, want at least the preflight, a poll and the access re-check for each", reads[token1], reads[token2])
+	}
+}

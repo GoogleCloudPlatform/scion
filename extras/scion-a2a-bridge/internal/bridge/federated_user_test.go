@@ -373,6 +373,10 @@ type fedUserHub struct {
 	dmReadSeq []int
 	// dmMessages is the conversation page the reads answer, newest first.
 	dmMessages []map[string]interface{}
+	// dmMessagesByKey, when not nil, answers each conversation read with
+	// the page of the conversation key read (none for a key it lacks), in
+	// place of dmMessages.
+	dmMessagesByKey map[string][]map[string]interface{}
 	// dmNullReads is the number of next conversation reads answered 200
 	// with a JSON null body, after the dmReadSeq and dmReadStatus answers.
 	dmNullReads int
@@ -519,7 +523,11 @@ func newFedUserHub(t *testing.T, userToken string) *fedUserHub {
 				_, _ = io.WriteString(w, "null")
 				return
 			}
-			page, next, ok := fedUserDMPage(h.dmMessages, r.URL.Query())
+			rows := h.dmMessages
+			if h.dmMessagesByKey != nil {
+				rows = h.dmMessagesByKey[key]
+			}
+			page, next, ok := fedUserDMPage(rows, r.URL.Query())
 			if !ok {
 				writeHubError(w, http.StatusBadRequest)
 				return
