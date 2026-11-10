@@ -715,3 +715,50 @@ func TestStartNoAuth_UserTokenStillChecked(t *testing.T) {
 	constrainAllBut(t, f.Store, "user", f.UserID, secretUsePermission)
 	assert.Empty(t, pick().value, "the owner's token refused by the owner-path check is not delivered")
 }
+
+// TestStartNoAuth_ProjectTokenKeepsTokenRemote (the project-bound
+// signal's killer): for an agent without credentials on a project whose
+// recorded remote is not on the GitHub host, the project's own git token
+// keeps the clone's token remote at start, as at create; the owner's token
+// alone does not.
+func TestStartNoAuth_ProjectTokenKeepsTokenRemote(t *testing.T) {
+	const remote = "https://gitlab.example.com/org/na-repo.git"
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name        string
+		project     bool
+		wantRemote  string
+		wantToken   string
+		description string
+	}{
+		{"project token", true, remote, naGitProject, "the project's own token keeps the token remote"},
+		{"owner token only", false, "", naGitUser, "a personal token is not offered to a remote off the GitHub host"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newLDFixture(t, "na-remote-"+strings.ReplaceAll(tc.name, " ", "-"), ldOptions{})
+			project, err := m.store.GetProject(ctx, m.agent.ProjectID)
+			require.NoError(t, err)
+			project.GitRemote = remote
+			require.NoError(t, m.store.UpdateProject(ctx, project))
+			if tc.project {
+				naSetSecret(t, m, noAuthGitTokenKey, naGitProject, store.SecretTypeEnvironment, store.ScopeProject, false)
+			}
+			naSetSecret(t, m, noAuthGitTokenKey, naGitUser, store.SecretTypeEnvironment, store.ScopeUser, false)
+			m.agent.AppliedConfig.NoAuth = true
+			m.agent.AppliedConfig.GitClone = &api.GitCloneConfig{URL: remote}
+			require.NoError(t, m.store.UpdateAgent(ctx, m.agent))
+
+			require.NoError(t, m.d.DispatchAgentStart(ctx, m.agent, "task", false))
+			require.Equal(t, tc.wantToken, m.client.lastResolvedEnv[noAuthGitTokenKey], "precondition: the token picked")
+			gc := m.client.lastStartExtras.Workspace.GitClone
+			require.NotNil(t, gc, "precondition: the start carries the clone settings")
+			assert.Equal(t, tc.wantRemote, gc.TokenRemote, tc.description)
+
+			req, err := m.d.buildCreateRequest(ctx, m.agent, "TestStartNoAuth_ProjectTokenKeepsTokenRemote")
+			require.NoError(t, err)
+			require.NotNil(t, req.Config)
+			require.NotNil(t, req.Config.GitClone)
+			assert.Equal(t, tc.wantRemote, req.Config.GitClone.TokenRemote, "create agrees")
+		})
+	}
+}
