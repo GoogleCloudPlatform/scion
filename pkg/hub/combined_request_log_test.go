@@ -93,3 +93,43 @@ func TestCombinedServer_RequestLoggedOnce(t *testing.T) {
 		})
 	}
 }
+
+// TestCombinedServer_ContentHostRefusalNotRequestLogged (ptone/scion#7367):
+// on the combined server with a content URL in effect, a request on the
+// content host for a route it does not serve is refused 404 by the content
+// host guard, which wraps the web request logger. The request logger writes
+// no line for it; the guard's own refusal line goes to the default logger.
+func TestCombinedServer_ContentHostRefusalNotRequestLogged(t *testing.T) {
+	srv, _ := contentHostServer(t, loTestOrigin)
+
+	capture := &capturingHandler{}
+	logger := slog.New(capture)
+	srv.SetRequestLogger(logger)
+	ws := newTestWebServer(t, WebServerConfig{})
+	ws.SetRequestLogger(logger)
+	ws.MountHubAPI(srv.Handler(), func(context.Context) error { return nil })
+	ws.SetContentHostGuard(srv.ContentHostGuard)
+
+	// The guard logs its refusal to the default logger; capture that apart
+	// from the request logger, so it cannot count as a request-log line.
+	guardCapture := &capturingHandler{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(guardCapture))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	before := len(capture.all())
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/projects", nil)
+	req.Host = loTestHost
+	rec := httptest.NewRecorder()
+	ws.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+
+	require.Empty(t, capture.all()[before:], "want no request-log line for a content host refusal")
+	var refusals int
+	for _, r := range guardCapture.all() {
+		if r.Message == "Content host: request refused (route not served on the content host)" {
+			refusals++
+		}
+	}
+	require.Equal(t, 1, refusals, "want the guard's own refusal line")
+}
