@@ -483,13 +483,24 @@ func (a *HMACPeerAuth) Verify(req *http.Request) (string, error) {
 	if !matched {
 		return "", ErrPeerUnauthenticated
 	}
+	if err := a.checkFreshAndRecord(peer, ts, nonce, now); err != nil {
+		return "", err
+	}
+	return peer, nil
+}
+
+// checkFreshAndRecord checks that ts is inside the skew window at now and
+// that peer has not used nonce within it, then records the nonce. Every
+// signature format of this authenticator shares the one replay cache, so a
+// nonce accepted in one format is refused in another.
+func (a *HMACPeerAuth) checkFreshAndRecord(peer, ts, nonce string, now time.Time) error {
 	sec, err := strconv.ParseInt(ts, 10, 64)
 	if err != nil {
-		return "", ErrPeerUnauthenticated
+		return ErrPeerUnauthenticated
 	}
 	at := time.Unix(sec, 0)
 	if d := now.Sub(at); d > a.cfg.MaxSkew || d < -a.cfg.MaxSkew {
-		return "", fmt.Errorf("%w: timestamp outside the allowed skew", ErrPeerUnauthenticated)
+		return fmt.Errorf("%w: timestamp outside the allowed skew", ErrPeerUnauthenticated)
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -498,14 +509,14 @@ func (a *HMACPeerAuth) Verify(req *http.Request) (string, error) {
 	}
 	key := peer + "\x00" + nonce
 	if _, seen := a.nonces[key]; seen {
-		return "", fmt.Errorf("%w: replayed nonce", ErrPeerUnauthenticated)
+		return fmt.Errorf("%w: replayed nonce", ErrPeerUnauthenticated)
 	}
 	if len(a.nonces) >= a.cfg.MaxNonces {
 		// Fail closed rather than forget nonces still inside the window.
-		return "", fmt.Errorf("%w: replay cache full", ErrPeerUnauthenticated)
+		return fmt.Errorf("%w: replay cache full", ErrPeerUnauthenticated)
 	}
 	exp := at.Add(2 * a.cfg.MaxSkew)
 	a.nonces[key] = exp
 	heap.Push(&a.expiry, nonceEntry{key: key, exp: exp})
-	return peer, nil
+	return nil
 }
