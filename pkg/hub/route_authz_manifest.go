@@ -361,6 +361,9 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/system/apple-dns":            "workstation",       // Apple DNS helper
 	"/api/v1/system/registry":             "workstation",       // System registry
 	"/api/v1/system/workstation-settings": "workstation-admin", // Workstation settings
+	"/api/v1/system/welcome/preview":      "workstation-admin", // Welcome project preview
+	"/api/v1/system/welcome/install":      "workstation-admin", // Welcome project install
+	"/api/v1/system/welcome/skip":         "workstation-admin", // Welcome project skip
 
 	// ── Workstation-only filesystem endpoints ──────────────────────────
 	"/api/v1/system/fs/list":          "workstation", // Filesystem listing

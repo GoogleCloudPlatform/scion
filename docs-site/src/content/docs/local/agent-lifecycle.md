@@ -182,7 +182,8 @@ session resume. Agents already `stalled` when you turn auto-suspend on are not
 suspended unless they become active and stall again.
 
 Auto-suspend uses the same machinery as a manual `scion suspend`, so the agent's
-phase becomes `suspended` and its harness session is preserved. The agent
+phase becomes `suspended`, its harness session is preserved, and its Hub
+credentials and active delegation grants are revoked. The agent
 resumes, continuing where it left off, when someone sends it a message with wake
 (`scion message --wake`, or the web UI's wake prompt) or starts it.
 

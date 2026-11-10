@@ -2545,6 +2545,10 @@ type Server struct {
 	// selects the default fetcher (newTemplateSourceFetcher); tests replace it.
 	templateSourceFetcher templateSourceFetcher
 
+	// welcome holds the welcome project flow's previews and test seams
+	// (welcome_project.go).
+	welcome welcomeRuntimeState
+
 	// Cached rate limit info from the most recent GitHub App API call
 	githubAppRateLimit *githubapp.RateLimitInfo
 
@@ -6197,10 +6201,24 @@ func (s *Server) applyScheduledProjectDefaultGCPIdentity(ctx context.Context, ag
 	projectSettings := projectSettingsFromAnnotations(project)
 	switch projectSettings.DefaultGCPIdentityMode {
 	case store.GCPMetadataModePassthrough:
-		agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
-			MetadataMode: store.GCPMetadataModePassthrough,
-		}
-		if agent.RuntimeBrokerID != "" {
+		// Project-default passthrough gets the hub default's confinement
+		// plus the passthrough authority of the schedule's principal, which
+		// the caller placed on ctx (see projectDefaultPassthroughAllowed).
+		// Effective profile, pin-back and RequireLocalRuntime mirror the
+		// hub-default arm below; on denial GCPIdentity is left unset, as
+		// there.
+		effectiveProfile := effectiveRuntimeProfileName(agent.AppliedConfig.Profile, project)
+		if allowed, resolvedProfile := s.projectDefaultPassthroughAllowed(ctx, nil, agent.RuntimeBrokerID, agent.ProjectID, agent.Name, effectiveProfile); allowed {
+			if agent.AppliedConfig.Profile == "" {
+				agent.AppliedConfig.Profile = resolvedProfile
+			}
+			if agent.AppliedConfig.CreateInputs != nil && agent.AppliedConfig.CreateInputs.Profile == "" {
+				agent.AppliedConfig.CreateInputs.Profile = resolvedProfile
+			}
+			agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
+				MetadataMode:        store.GCPMetadataModePassthrough,
+				RequireLocalRuntime: true,
+			}
 			if err := s.translatePassthroughForSandbox(ctx, nil, agent, agent.RuntimeBrokerID, project); err != nil {
 				return "", fmt.Errorf("failed to configure GCP identity for sandbox runtime: %w", err)
 			}
@@ -6269,9 +6287,9 @@ func (s *Server) applyScheduledProjectDefaultGCPIdentity(ctx context.Context, ag
 				agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
 					MetadataMode: store.GCPMetadataModePassthrough,
 					// RequireLocalRuntime: see the create path's twin in
-					// handlers_agents_core.go. Only ever set here, since this
-					// whole block only runs when hubDefaultPassthroughAllowed
-					// granted it.
+					// handlers_agents_core.go. Set only on a grant from this
+					// rung or the project-default rung above, both confined
+					// by hubDefaultPassthroughAllowed.
 					RequireLocalRuntime: true,
 				}
 				// The mode follows the pinned profile's type, as on every passthrough surface.
@@ -8067,6 +8085,9 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/system/apple-dns", s.guarded("/api/v1/system/apple-dns", s.handleAppleDNS))
 	s.mux.HandleFunc("/api/v1/system/registry", s.guarded("/api/v1/system/registry", s.handleSystemRegistry))
 	s.mux.HandleFunc("/api/v1/system/workstation-settings", s.guarded("/api/v1/system/workstation-settings", s.handleWorkstationSettings))
+	s.mux.HandleFunc("/api/v1/system/welcome/preview", s.guarded("/api/v1/system/welcome/preview", s.requireExperiment(experiments.WelcomeProject, s.handleWelcomePreview)))
+	s.mux.HandleFunc("/api/v1/system/welcome/install", s.guarded("/api/v1/system/welcome/install", s.requireExperiment(experiments.WelcomeProject, s.handleWelcomeInstall)))
+	s.mux.HandleFunc("/api/v1/system/welcome/skip", s.guarded("/api/v1/system/welcome/skip", s.requireExperiment(experiments.WelcomeProject, s.handleWelcomeSkip)))
 
 	// OIDC Identity Provider endpoints (unauthenticated — public metadata)
 	if s.oidcKeyManager != nil {

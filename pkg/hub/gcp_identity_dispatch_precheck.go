@@ -446,9 +446,10 @@ func isCloudRunProfileType(t string) bool {
 //     the report does not list; block, and an unset mode (block on Cloud
 //     Run), are refused when no block account is reported.
 //
-// A passthrough granted by the hub default (RequireLocalRuntime) is run as
-// block on Cloud Run by the broker, so it is decided as block. An assign
-// with no account is left to the broker and the start gate.
+// A passthrough granted by the hub default or by a confined project default
+// (RequireLocalRuntime) is run as block on Cloud Run by the broker, so it is
+// decided as block. An assign with no account is left to the broker and the
+// start gate.
 func cloudRunIdentityRefusal(broker *store.RuntimeBroker, profileName, agentName string, gcpID *store.GCPIdentityConfig, now time.Time) *identityNotMappedPrecheck {
 	if broker == nil {
 		return nil

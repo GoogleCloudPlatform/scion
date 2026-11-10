@@ -108,48 +108,46 @@ func (f *ptgFixture) agentMissing(t *testing.T, slug string) {
 	assert.ErrorIs(t, err, store.ErrNotFound, "a refused create stores no agent")
 }
 
-func TestPassthroughTranslation_ProjectDefault_NonOwnerDenied_Create(t *testing.T) {
-	f := setupPTG(t, "ptg-nonowner", ptgHostSA)
-	creator := f.nonOwnerCreator(t, "ptg-nonowner")
-	enforceSAAssign(f.srv, store.NewFakeCallerPermissionChecker().AllowTarget(ptgHostSA))
-
-	code, body := f.createDefaultAs(t, creator, "ptg-nonowner-agent")
-
-	assert.Equal(t, http.StatusForbidden, code, "body: %s", body)
-	assert.Contains(t, body, "requires broker ownership")
-	assert.Empty(t, f.hostSARecords(t, ptgHostSA), "a refused translation creates no record")
-	f.agentMissing(t, "ptg-nonowner-agent")
-}
-
-func TestPassthroughTranslation_ProjectDefault_OwnerLacksActAs_Denied_Create(t *testing.T) {
-	f := setupPTG(t, "ptg-noactas", ptgHostSA)
-	checker := store.NewFakeCallerPermissionChecker().DenyTarget(ptgHostSA, "no actAs grant")
-	enforceSAAssign(f.srv, checker)
-
-	code, body := f.createDefault(t, "ptg-noactas-agent")
-
-	assert.Equal(t, http.StatusForbidden, code, "body: %s", body)
-	assert.Contains(t, body, store.PermissionActAs)
-	assert.Equal(t, 1, checker.CallCount())
-	assert.Empty(t, f.hostSARecords(t, ptgHostSA))
-	f.agentMissing(t, "ptg-noactas-agent")
-}
-
-func TestPassthroughTranslation_ProjectDefault_OwnerWithActAs_Allowed_Create(t *testing.T) {
-	f := setupPTG(t, "ptg-allow", ptgHostSA)
-	checker := store.NewFakeCallerPermissionChecker().AllowTarget(ptgHostSA)
-	enforceSAAssign(f.srv, checker)
-
-	code, body := f.createDefault(t, "ptg-allow-agent")
-
+// assertDefaultNotApplied checks a create that relied on the project-default
+// passthrough succeeded with no GCP identity: a project default is confined
+// like the hub default (embedded broker, local container runtime), so on this
+// remote cloudrun-sandbox broker it is never applied and never translated.
+func (f *ptgFixture) assertDefaultNotApplied(t *testing.T, code int, body, slug string) {
+	t.Helper()
 	require.Equal(t, http.StatusCreated, code, "body: %s", body)
-	agent := agentBySlug(t, f.store, f.project.ID, "ptg-allow-agent")
-	require.NotNil(t, agent.AppliedConfig.GCPIdentity)
-	assert.Equal(t, store.GCPMetadataModeAssign, agent.AppliedConfig.GCPIdentity.MetadataMode)
-	assert.Equal(t, ptgHostSA, agent.AppliedConfig.GCPIdentity.ServiceAccountEmail)
-	calls := checker.Calls()
-	require.Len(t, calls, 1)
-	assert.Equal(t, f.owner.ID, calls[0].Caller.ID, "actAs is evaluated for the creator")
+	agent := agentBySlug(t, f.store, f.project.ID, slug)
+	assert.Nil(t, agent.AppliedConfig.GCPIdentity)
+	assert.Empty(t, f.hostSARecords(t, ptgHostSA), "an unapplied default creates no record")
+	assert.Empty(t, saEventsOnSurface(f.audit, SurfacePassthroughTranslation))
+}
+
+// TestPassthroughTranslation_ProjectDefault_NotAppliedOnSandbox_Create: the
+// project default is not applied on a sandbox broker, whoever creates and
+// whatever their actAs, so no permission check runs for it.
+func TestPassthroughTranslation_ProjectDefault_NotAppliedOnSandbox_Create(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		nonOwner bool
+		checker  *store.FakeCallerPermissionChecker
+	}{
+		{name: "ptg-nonowner", nonOwner: true, checker: store.NewFakeCallerPermissionChecker().AllowTarget(ptgHostSA)},
+		{name: "ptg-noactas", checker: store.NewFakeCallerPermissionChecker().DenyTarget(ptgHostSA, "no actAs grant")},
+		{name: "ptg-allow", checker: store.NewFakeCallerPermissionChecker().AllowTarget(ptgHostSA)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := setupPTG(t, tc.name, ptgHostSA)
+			as := f.owner
+			if tc.nonOwner {
+				as = f.nonOwnerCreator(t, tc.name)
+			}
+			enforceSAAssign(f.srv, tc.checker)
+
+			code, body := f.createDefaultAs(t, as, tc.name+"-agent")
+
+			f.assertDefaultNotApplied(t, code, body, tc.name+"-agent")
+			assert.Equal(t, 0, tc.checker.CallCount())
+		})
+	}
 }
 
 // TestPassthroughTranslation_ProjectDefault_AgentCreatorDenied_Create: an
@@ -183,7 +181,7 @@ func TestPassthroughTranslation_ProjectDefault_AgentCreatorDenied_Create(t *test
 	assert.Empty(t, f.hostSARecords(t, ptgHostSA))
 }
 
-func TestPassthroughTranslation_ProjectDefault_Scheduled_NonOwnerFailsDispatch(t *testing.T) {
+func TestPassthroughTranslation_ProjectDefault_Scheduled_NotAppliedOnSandbox(t *testing.T) {
 	f := setupPTG(t, "ptg-sched", ptgHostSA)
 	creator := f.nonOwnerCreator(t, "ptg-sched")
 	enforceSAAssign(f.srv, store.NewFakeCallerPermissionChecker().AllowTarget(ptgHostSA))
@@ -197,10 +195,10 @@ func TestPassthroughTranslation_ProjectDefault_Scheduled_NonOwnerFailsDispatch(t
 		CreatedBy: creator.ID,
 	}, creator.ID))
 
-	require.Error(t, err, "a scheduled translation by a non-owner fails the dispatch")
-	assert.Contains(t, err.Error(), "requires broker ownership")
+	require.NoError(t, err, "an unapplied project default does not fail the dispatch")
+	agent := agentBySlug(t, f.store, f.project.ID, "ptg-sched-agent")
+	assert.Nil(t, agent.AppliedConfig.GCPIdentity)
 	assert.Empty(t, f.hostSARecords(t, ptgHostSA))
-	f.agentMissing(t, "ptg-sched-agent")
 }
 
 func TestPassthroughTranslation_Explicit_CallerLacksActAs_Denied(t *testing.T) {
@@ -222,21 +220,20 @@ func TestPassthroughTranslation_Create_CheckModeOff_RefusedNoRecord(t *testing.T
 	f := setupPTG(t, "ptg-create-off", ptgHostSA)
 	require.Equal(t, SAAssignCheckOff, f.srv.saAssignCheckModeValue())
 
-	for _, explicit := range []bool{true, false} {
-		name := "ptg-create-off-default"
-		req := CreateAgentRequest{Name: name, ProjectID: f.project.ID, Task: "test"}
-		if explicit {
-			name = "ptg-create-off-explicit"
-			req.Name = name
-			req.GCPIdentity = &GCPIdentityAssignment{MetadataMode: "passthrough"}
-		}
-		rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPost, "/api/v1/agents", req)
+	const name = "ptg-create-off-explicit"
+	rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name: name, ProjectID: f.project.ID, Task: "test",
+		GCPIdentity: &GCPIdentityAssignment{MetadataMode: "passthrough"},
+	})
 
-		assert.Equal(t, http.StatusForbidden, rec.Code, "explicit=%v body: %s", explicit, rec.Body.String())
-		assert.Contains(t, rec.Body.String(), "gcpIamCheckMode=enforce")
-		f.agentMissing(t, name)
-	}
+	assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "gcpIamCheckMode=enforce")
+	f.agentMissing(t, name)
 	assert.Empty(t, f.hostSARecords(t, ptgHostSA), "off mode creates no hub-scoped record")
+
+	// The project default is not applied on this broker at all.
+	code, body := f.createDefault(t, "ptg-create-off-default")
+	f.assertDefaultNotApplied(t, code, body, "ptg-create-off-default")
 }
 
 func TestPassthroughTranslation_Patch_CheckModeOff_Refused(t *testing.T) {
@@ -263,9 +260,12 @@ func TestPassthroughTranslation_AuditSurface(t *testing.T) {
 	f := setupPTG(t, "ptg-audit", ptgHostSA)
 	enforceSAAssign(f.srv, store.NewFakeCallerPermissionChecker().AllowTarget(ptgHostSA))
 
-	code, body := f.createDefault(t, "ptg-audit-agent")
+	rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name: "ptg-audit-agent", ProjectID: f.project.ID, Task: "test",
+		GCPIdentity: &GCPIdentityAssignment{MetadataMode: "passthrough"},
+	})
 
-	require.Equal(t, http.StatusCreated, code, "body: %s", body)
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
 	evs := saEventsOnSurface(f.audit, SurfacePassthroughTranslation)
 	require.Len(t, evs, 1, "translation writes exactly one actAs decision record")
 	assert.Equal(t, ptgHostSA, evs[0].TargetSAEmail)
@@ -283,16 +283,12 @@ func saEventsOnSurface(audit *mockAuditLogger, surface string) []*store.SAAssign
 	return out
 }
 
-func TestPassthroughTranslation_NoHostSA_StaysPassthrough(t *testing.T) {
+func TestPassthroughTranslation_NoHostSA_DefaultNotApplied(t *testing.T) {
 	f := setupPTG(t, "ptg-nohost", "")
 
 	code, body := f.createDefault(t, "ptg-nohost-agent")
 
-	require.Equal(t, http.StatusCreated, code, "body: %s", body)
-	agent := agentBySlug(t, f.store, f.project.ID, "ptg-nohost-agent")
-	require.NotNil(t, agent.AppliedConfig.GCPIdentity)
-	assert.Equal(t, store.GCPMetadataModePassthrough, agent.AppliedConfig.GCPIdentity.MetadataMode)
-	assert.Empty(t, saEventsOnSurface(f.audit, SurfacePassthroughTranslation))
+	f.assertDefaultNotApplied(t, code, body, "ptg-nohost-agent")
 }
 
 // The hub-default scheduled rung reaches the same translatePassthroughForSandbox
