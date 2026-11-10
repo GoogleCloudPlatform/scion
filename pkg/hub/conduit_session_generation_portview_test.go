@@ -43,8 +43,9 @@ import (
 // runs as the link (contextWithPortViewLink) and is never captured.
 
 // Fails if the capture is missing on the page view path (for example moved
-// into the agent port route only): fix (2)'s track-time guard then denies
-// the link user's own credentialed request on the conduit transport. Also
+// into the agent port route only): the track-time guard
+// (authorizeConduitUserStream) then denies the link user's own credentialed
+// request on the conduit transport. Also
 // fails if a scoped page view identity is refused by the capture.
 func TestPortViewSessionGen_SameUserCurrentAllowed(t *testing.T) {
 	f := newPortViewFixture(t, nil)
@@ -85,7 +86,7 @@ func TestPortViewSessionGen_JWTWithoutGenerationRefused(t *testing.T) {
 // The documented limit: a credential-less page view link keeps working
 // after the link user's sessions are revoked, until the link expires
 // (view_ttl). Fails if a revoke-all starts cutting credential-less links
-// (a behaviour change this restack does not make) or if the link stops
+// (a behaviour change this code does not make) or if the link stops
 // being served at all.
 func TestPortViewSessionGen_SignedLinkSurvivesRevokeAll(t *testing.T) {
 	f := newPortViewFixture(t, nil)
@@ -154,7 +155,7 @@ func TestPortViewSessionGen_TrackTimeGuardAndMarker(t *testing.T) {
 }
 
 // Fails if the capture changes any scope field of a scoped identity, which
-// could widen what the page view identity may reach (spec (g)).
+// could widen what the page view identity may reach.
 func TestConduitCaptureSessionGeneration_ScopedPreservesScope(t *testing.T) {
 	user := NewAuthenticatedUser("u-1", "u1@example.test", "U1", store.UserRoleMember, "web")
 	scoped := NewScopedUserIdentity(user, "proj-1", []string{portViewScope})
@@ -176,7 +177,7 @@ func TestConduitCaptureSessionGeneration_ScopedPreservesScope(t *testing.T) {
 
 // Fails if a new AuthType constant is added to principal/identity.go
 // without an explicit case in conduitAuthTypeCapturesSessionGeneration, or
-// if any type other than AuthTypeJWT is classified as capturing (spec (f)).
+// if any type other than AuthTypeJWT is classified as capturing.
 func TestConduitAuthTypeClassification_Exhaustive(t *testing.T) {
 	declared := authTypeConstNames(t, filepath.Join("internal", "principal", "identity.go"))
 	require.NotEmpty(t, declared)
@@ -201,8 +202,8 @@ var authTypeValues = map[string]string{
 }
 
 // Fails if the capture moves out of proxyToAgentPort into one caller, or if
-// the page view link marker gets a second setter (spec: one place, after
-// portview.Parse).
+// the page view link marker gets a second setter (it is set in one place
+// only, after portview.Parse).
 func TestPortViewSessionGen_StaticPlacement(t *testing.T) {
 	assert.Equal(t, []string{"proxyToAgentPort"}, callerFuncs(t, "port_forward_handlers.go", "conduitCaptureSessionGeneration"),
 		"the capture is called only inside proxyToAgentPort")
