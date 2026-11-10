@@ -49,7 +49,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 )
 
-// The phase 1 project visitor slice end to end, in one process (ptone/scion#4603):
+// The phase 1 project visitor slice end to end, in one process (upstream issue 4603):
 //
 //   - hub A issues a user access credential for its signed-in user, signed
 //     with its own OIDC key and verified by hub B through hub A's published
@@ -325,7 +325,7 @@ func (e *fvEnv) fvDo(t *testing.T, method, url string, header map[string]string,
 	if err != nil {
 		t.Fatalf("%s %s: %v", method, url, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
 		t.Fatalf("%s %s: read body: %v", method, url, err)
@@ -453,7 +453,7 @@ func (e *fvEnv) fvSendAsync(ctx context.Context, agentSlug, token, text string) 
 			done <- fvSendResult{err: err}
 			return
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		body, err := io.ReadAll(resp.Body)
 		done <- fvSendResult{status: resp.StatusCode, body: body, err: err}
 	}()
