@@ -242,6 +242,33 @@ func TestCreateAgent_ProvisionOnlyWarningUsesIdentityMappingMessage(t *testing.T
 	assert.NotContains(t, warning, "broker operator text")
 }
 
+// A provision-only create whose broker answer carries a token-shaped message
+// warns with the generic text in its place (brokerRecordText), never with
+// the token or the raw body.
+func TestCreateAgent_ProvisionOnlyWarningDropsTokenShapedMessage(t *testing.T) {
+	disp := &skillFailDispatcher{provisionErr: &brokerStatusError{StatusCode: http.StatusInternalServerError,
+		Body: `{"error":{"code":"runtime_error","message":"auth failed with ` + testTokenShaped + `"}}`}}
+	srv, _, project := setupCreateAgentServer(t, disp)
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name:          "provision-only-token",
+		ProjectID:     project.ID,
+		ProvisionOnly: true,
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var resp CreateAgentResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	var warning string
+	for _, w := range resp.Warnings {
+		if strings.HasPrefix(w, api.ProvisionFailedWarningPrefix) {
+			warning = w
+		}
+	}
+	require.NotEmpty(t, warning, "warnings: %v", resp.Warnings)
+	assert.Contains(t, warning, "runtime broker returned error 500 (runtime_error): "+brokerErrorGenericMessage)
+	assert.NotContains(t, rec.Body.String(), testTokenShaped)
+	assert.NotContains(t, rec.Body.String(), "auth failed")
+}
+
 // Without a profile the message names the runtime entry, and without a
 // broker name it names the selected broker.
 func TestIdentityMappingScopeText(t *testing.T) {

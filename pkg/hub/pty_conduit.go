@@ -725,12 +725,16 @@ func ptyLeafCloseForStream(err error) error {
 // ptyLeafCloseCode maps a conduit close code (design §3.3.1) to the PTY
 // leaf close code (pkg/wsprotocol/pty_close.go). Codes both contracts
 // define keep their meaning and pass through; 0 is the normal close;
-// 4499 (open cancelled) is a retriable 4503; any other code is 1011 with
-// its reason kept for diagnosis.
+// 4499 (open cancelled) is a retriable 4503; any other code is 1011. The
+// reason reaches the client's close frame, so only a fixed protocol token
+// is passed on (relayableStreamCloseReason); any other reason goes to the
+// hub log.
 func ptyLeafCloseCode(code uint32, reason string) (int, string) {
-	switch code {
-	case conduit.CloseNormal:
+	if code == conduit.CloseNormal {
 		return wsprotocol.ClosePTYNormal, ""
+	}
+	reason = relayableStreamCloseReason("conduit", int(code), reason)
+	switch code {
 	case conduit.CloseUnauthenticated, conduit.CloseForbidden, uint32(wsprotocol.ClosePTYAgentNotFound),
 		conduit.CloseRelayRestart, conduit.CloseRelayTimeout, uint32(wsprotocol.ClosePTYInternalError):
 		return int(code), reason

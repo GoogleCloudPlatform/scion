@@ -6071,8 +6071,10 @@ func dispatchCreateErrorResponse(w http.ResponseWriter, err error, agentID strin
 		writeError(w, http.StatusNotFound, ErrCodeNotFound, "Failed to dispatch to runtime broker: "+message, nil)
 	default:
 		// A broker runtime_error may carry a fixed details.cause code (for
-		// example runtime_forbidden, ptone/scion#4555); relay only that.
-		writeError(w, http.StatusBadGateway, ErrCodeRuntimeError, "Failed to dispatch to runtime broker: "+err.Error(), brokerRuntimeCauseDetails(err))
+		// example runtime_forbidden, ptone/scion#4555), a template_error a
+		// missing file's base name, a local_worktree_refused a bounded
+		// reason; relay only those (brokerFailureDetails).
+		writeError(w, http.StatusBadGateway, ErrCodeRuntimeError, "Failed to dispatch to runtime broker: "+err.Error(), brokerFailureDetails(err))
 	}
 }
 

@@ -1278,7 +1278,7 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		if relayBrokerRefusal(w, dispatchErr) {
 			return
 		}
-		RuntimeError(w, "Failed to dispatch to runtime broker: "+dispatchErr.Error())
+		RuntimeError(w, "Failed to dispatch to runtime broker: "+dispatchFailureText(dispatchErr))
 		return
 	}
 

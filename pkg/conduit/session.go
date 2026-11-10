@@ -1239,7 +1239,7 @@ func (s *session) drainDeadline(code uint32, reason string) {
 	}
 	s.mu.Unlock()
 	if reason == "" {
-		reason = "drain deadline"
+		reason = CloseReasonDrainDeadline
 	}
 	for _, c := range cancels {
 		c()
