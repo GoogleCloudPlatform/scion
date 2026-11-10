@@ -60,6 +60,7 @@ import { GcpIdentityState } from '../../shared/gcp-identity-state.js';
 import { assignStatusTarget } from '../../shared/gcp-sa-assign-status.js';
 import { GCPServiceAccountsLoader } from '../../client/gcp-sa-accounts-loader.js';
 import { apiFetch, apiFetchAllPages, parseApiError } from '../../client/api.js';
+import { showPendingSecretsStartHint } from '../../client/pending-secrets.js';
 import { getPublicSettings } from '../../client/server-feature-flags.js';
 import { navigateTo } from '../../client/navigation.js';
 import { showToast } from '../../utils/toast.js';
@@ -919,6 +920,7 @@ export class ScionPageAgentCreate extends LitElement {
             startError = (await parseApiError(startResp, fallback)).message;
           } else {
             await showResponseBodyWarnings(startResp, shownWarnings);
+            void showPendingSecretsStartHint();
           }
         } catch (startErr) {
           startError =
