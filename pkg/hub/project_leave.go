@@ -458,13 +458,18 @@ func (svc *ProjectMembershipService) leaveBindingsFromStore(ctx context.Context,
 		return nil, nil, fmt.Errorf("list bindings of the caller: %w", err)
 	}
 	var out []leaveBinding
+	rdCache := make(map[string]*store.RoleDefinition)
 	for _, rb := range all {
 		if rb.ScopeType != store.RoleScopeProject || rb.ScopeID != projectID {
 			continue
 		}
-		rd, err := st.GetRoleDefinition(ctx, rb.RoleDefinitionID)
-		if err != nil {
-			return nil, nil, fmt.Errorf("resolve role definition %s: %w", rb.RoleDefinitionID, err)
+		rd, ok := rdCache[rb.RoleDefinitionID]
+		if !ok {
+			rd, err = st.GetRoleDefinition(ctx, rb.RoleDefinitionID)
+			if err != nil {
+				return nil, nil, fmt.Errorf("resolve role definition %s: %w", rb.RoleDefinitionID, err)
+			}
+			rdCache[rb.RoleDefinitionID] = rd
 		}
 		switch leaveBindingClassFunc(rb, rd, projectID, userID) {
 		case leaveClassRemovable:
@@ -554,13 +559,18 @@ func activeGroupProjectBindingGroups(ctx context.Context, st store.Store, authz 
 	}
 	seen := map[string]bool{}
 	var out []string
+	rdCache := make(map[string]*store.RoleDefinition)
 	for _, rb := range bindings {
 		if rb.ScopeType != store.RoleScopeProject || rb.ScopeID != projectID || !isBindingActive(rb, now) {
 			continue
 		}
-		rd, err := st.GetRoleDefinition(ctx, rb.RoleDefinitionID)
-		if err != nil {
-			return nil, fmt.Errorf("resolve role definition %s: %w", rb.RoleDefinitionID, err)
+		rd, ok := rdCache[rb.RoleDefinitionID]
+		if !ok {
+			rd, err = st.GetRoleDefinition(ctx, rb.RoleDefinitionID)
+			if err != nil {
+				return nil, fmt.Errorf("resolve role definition %s: %w", rb.RoleDefinitionID, err)
+			}
+			rdCache[rb.RoleDefinitionID] = rd
 		}
 		if !rd.ConfersProjectMembership() || seen[rb.PrincipalID] {
 			continue
