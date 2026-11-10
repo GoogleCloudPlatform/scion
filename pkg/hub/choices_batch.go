@@ -281,19 +281,8 @@ func (s *Server) handleChoiceSetAnswer(w http.ResponseWriter, r *http.Request, m
 		items = append(items, store.AnswerSetItem{DecisionRowID: d.ID, ChoiceID: choice.ID, Outcome: outcome})
 	}
 
-	// The asking agent. A stopped or deleted asker (design choices v4: the
-	// answers are still recorded, and dispatch follows the undeliverable
-	// semantics) is the explicit askerGone case: the response is stored
-	// failed and nothing is delivered. Any other store error ends the
-	// submit before anything is recorded.
-	asker, err := s.store.GetAgent(ctx, ds[0].AskerAgentID)
-	askerGone := errors.Is(err, store.ErrNotFound)
-	if err != nil && !askerGone {
-		writeErrorFromErr(w, err, "")
-		return
-	}
-	if !askerGone && asker == nil {
-		InternalError(w)
+	asker, askerGone, ok := s.choiceAsker(w, ctx, ds[0].AskerAgentID)
+	if !ok {
 		return
 	}
 	// The choice-response is a message from the user to the asking agent:
@@ -442,17 +431,16 @@ func choiceSetResponseStoreMessage(user UserIdentity, ds []*store.Decision, prom
 	}
 	if askerGone {
 		m.Recipient = "agent:" + ds[0].AskerAgentName
-	} else {
-		m.Recipient = "agent:" + asker.Slug
-	}
-	if askerGone {
 		reason := agentGoneReason
 		m.DispatchState = store.MessageDispatchFailed
 		m.DispatchFailureReason = &reason
-	} else if unreachable, why := isAgentUnreachable(asker); unreachable {
-		reason := agentUnreachableReason(why)
-		m.DispatchState = store.MessageDispatchFailed
-		m.DispatchFailureReason = &reason
+	} else {
+		m.Recipient = "agent:" + asker.Slug
+		if unreachable, why := isAgentUnreachable(asker); unreachable {
+			reason := agentUnreachableReason(why)
+			m.DispatchState = store.MessageDispatchFailed
+			m.DispatchFailureReason = &reason
+		}
 	}
 	return m
 }

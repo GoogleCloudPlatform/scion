@@ -124,6 +124,28 @@ func decisionCaller(w http.ResponseWriter, r *http.Request) UserIdentity {
 	return user
 }
 
+// choiceAsker reads the asking agent of a choice answer, before anything
+// is recorded; both answer endpoints use it. A stopped or deleted asker
+// (store.ErrNotFound) is the gone case (design choices v4: the answers are
+// still recorded, and dispatch follows the undeliverable semantics): the
+// response row is stored failed and nothing is delivered. Any other lookup
+// error, or no agent without an error, writes an error response and
+// returns ok false, so the messaging check never runs on a missing agent.
+func (s *Server) choiceAsker(w http.ResponseWriter, ctx context.Context, agentID string) (asker *store.Agent, gone bool, ok bool) {
+	a, err := s.store.GetAgent(ctx, agentID)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		return nil, true, true
+	case err != nil:
+		writeErrorFromErr(w, err, "")
+		return nil, false, false
+	case a == nil:
+		InternalError(w)
+		return nil, false, false
+	}
+	return a, false, true
+}
+
 // loadAuthorizedDecision reads the decision and its prompt message and
 // authorizes the caller on the prompt's conversation: authorizeChatSend to
 // answer (for a DM prompt that admits only the user in the DM key, the
@@ -265,19 +287,8 @@ func (s *Server) handleDecisionAnswer(w http.ResponseWriter, r *http.Request, ro
 		return
 	}
 
-	// The asking agent. A stopped or deleted asker (design choices v4: the
-	// answer is still recorded, and dispatch follows the undeliverable
-	// semantics) is the explicit askerGone case: the response is stored
-	// failed and nothing is delivered. Any other store error ends the
-	// answer before anything is recorded.
-	asker, err := s.store.GetAgent(ctx, d.AskerAgentID)
-	askerGone := errors.Is(err, store.ErrNotFound)
-	if err != nil && !askerGone {
-		writeErrorFromErr(w, err, "")
-		return
-	}
-	if !askerGone && asker == nil {
-		InternalError(w)
+	asker, askerGone, ok := s.choiceAsker(w, ctx, d.AskerAgentID)
+	if !ok {
 		return
 	}
 	// The choice-response is a message from the user to the asking agent:
@@ -422,17 +433,16 @@ func choiceResponseStoreMessage(user UserIdentity, d *store.Decision, prompt *st
 	}
 	if askerGone {
 		m.Recipient = "agent:" + d.AskerAgentName
-	} else {
-		m.Recipient = "agent:" + asker.Slug
-	}
-	if askerGone {
 		reason := agentGoneReason
 		m.DispatchState = store.MessageDispatchFailed
 		m.DispatchFailureReason = &reason
-	} else if unreachable, why := isAgentUnreachable(asker); unreachable {
-		reason := agentUnreachableReason(why)
-		m.DispatchState = store.MessageDispatchFailed
-		m.DispatchFailureReason = &reason
+	} else {
+		m.Recipient = "agent:" + asker.Slug
+		if unreachable, why := isAgentUnreachable(asker); unreachable {
+			reason := agentUnreachableReason(why)
+			m.DispatchState = store.MessageDispatchFailed
+			m.DispatchFailureReason = &reason
+		}
 	}
 	return m
 }

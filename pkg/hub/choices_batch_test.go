@@ -24,6 +24,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -563,14 +564,14 @@ type askerFaultStore struct {
 	store.Store
 	fault   *storeFaultSwitch
 	agentID string
-	hits    int
+	hits    atomic.Int32
 }
 
 var errAskerLookupFault = errors.New("injected asker lookup fault")
 
 func (s *askerFaultStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
 	if s.fault.Active() && id == s.agentID {
-		s.hits++
+		s.hits.Add(1)
 		return nil, errAskerLookupFault
 	}
 	return s.Store.GetAgent(ctx, id)
@@ -613,11 +614,17 @@ func TestChoiceSetAnswer_AskerGoneRecordsWithoutDelivery(t *testing.T) {
 	assert.Equal(t, messages.TypeChoiceResponse, m.Type)
 	assert.Equal(t, store.MessageDispatchFailed, m.DispatchState)
 	assert.Len(t, f.dispatcher.getMessages(), before, "nothing is sent to a gone asker")
+	// Positive control for assertNoChoiceResponse: the same thread filter
+	// finds this one response row.
+	rows, err := f.store.ListMessages(ctx, store.MessageFilter{ThreadID: f.topicID, Type: messages.TypeChoiceResponse}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	assert.Len(t, rows.Items, 1, "control: the thread filter sees the stored response row")
 }
 
 // A store fault on the asker lookup that is not "not found" ends the
-// submit with a 5xx before anything is recorded: no answer, no response
-// row, nothing sent, and no messaging check skipped.
+// submit with an error response before anything is recorded (500 for this
+// untyped fault): no answer, no response row, nothing sent, and no
+// messaging check skipped.
 func TestChoiceSetAnswer_AskerLookupFaultRecordsNothing(t *testing.T) {
 	f, wrapped, fault := newAskerFaultFixture(t)
 	ctx := context.Background()
@@ -629,18 +636,20 @@ func TestChoiceSetAnswer_AskerLookupFaultRecordsNothing(t *testing.T) {
 	rr := f.submitSet(t, f.bob, msg.ID, "", r[0].RowID, "1", r[1].RowID, "a", r[2].RowID, "1")
 	require.Equal(t, http.StatusInternalServerError, rr.Code, "body: %s", rr.Body.String())
 	assert.Equal(t, ErrCodeInternalError, errorCode(t, rr))
-	assert.Equal(t, 1, wrapped.hits, "the asker lookup was reached once")
+	assert.Equal(t, int32(1), wrapped.hits.Load(), "the asker lookup was reached once")
 	for _, d := range r {
 		got, err := f.store.GetDecision(ctx, d.RowID)
 		require.NoError(t, err)
 		assert.Empty(t, got.Answers, "nothing stored")
 	}
 	assert.Len(t, f.dispatcher.getMessages(), before, "nothing sent")
+	f.assertNoChoiceResponse(t)
 }
 
 // The per-decision endpoint (one-decision prompt) gets the same handling:
-// a non-not-found asker lookup fault is a 5xx with nothing recorded or
-// sent. The gone-asker case is TestDecisionAnswer_AskerGoneStoresFailedResponse.
+// a non-not-found asker lookup fault is an error response (500 for this
+// untyped fault) with nothing recorded or sent. The gone-asker case is
+// TestDecisionAnswer_AskerGoneStoresFailedResponse.
 func TestDecisionAnswer_AskerLookupFaultRecordsNothing(t *testing.T) {
 	f, wrapped, fault := newAskerFaultFixture(t)
 	ctx := context.Background()
@@ -652,9 +661,19 @@ func TestDecisionAnswer_AskerLookupFaultRecordsNothing(t *testing.T) {
 	rr := f.answer(t, f.bob, row, map[string]interface{}{"choice_id": "1"})
 	require.Equal(t, http.StatusInternalServerError, rr.Code, "body: %s", rr.Body.String())
 	assert.Equal(t, ErrCodeInternalError, errorCode(t, rr))
-	assert.Equal(t, 1, wrapped.hits, "the asker lookup was reached once")
+	assert.Equal(t, int32(1), wrapped.hits.Load(), "the asker lookup was reached once")
 	got, err := f.store.GetDecision(ctx, row)
 	require.NoError(t, err)
 	assert.Empty(t, got.Answers, "nothing stored")
 	assert.Len(t, f.dispatcher.getMessages(), before, "nothing sent")
+	f.assertNoChoiceResponse(t)
+}
+
+// assertNoChoiceResponse checks that the fixture's topic thread holds no
+// choice-response message.
+func (f *choicesFixture) assertNoChoiceResponse(t *testing.T) {
+	t.Helper()
+	rows, err := f.store.ListMessages(context.Background(), store.MessageFilter{ThreadID: f.topicID, Type: messages.TypeChoiceResponse}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	assert.Empty(t, rows.Items, "no choice-response row is stored")
 }
