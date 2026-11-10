@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"strings"
 	"sync"
 	"testing"
@@ -657,5 +658,31 @@ func TestNoAuthAgentTokenScopes_CreateEqualsStart(t *testing.T) {
 		withCreds := &store.Agent{ID: tid("na-token-" + string(role)), AppliedConfig: &store.AgentAppliedConfig{AgentRole: string(role)}}
 		noCreds := &store.Agent{ID: withCreds.ID, AppliedConfig: &store.AgentAppliedConfig{AgentRole: string(role), NoAuth: true, HarnessAuth: "none"}}
 		assert.Equal(t, a.mintCandidateScopes(withCreds), a.mintCandidateScopes(noCreds), "role %s", role)
+	}
+}
+
+// TestRestartNoAuth_CrossNode (T4): a start or restart routed to the hub
+// node that owns the agent's broker carries the no-credential intent, and
+// the owner node sends no stored secret: it runs the same selection.
+func TestRestartNoAuth_CrossNode(t *testing.T) {
+	ctx := context.Background()
+	for _, action := range []string{"start", "restart"} {
+		t.Run(action, func(t *testing.T) {
+			f := newSWFixture(t, "na-xn-"+action, swOptions{})
+			f.agent.AppliedConfig.NoAuth = true
+			require.NoError(t, f.store.UpdateAgent(ctx, f.agent))
+			c := newSWCrossNode(t, f)
+
+			rec := f.lifecycle(t, f.owner, action, nil)
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			require.True(t, c.ownerClient.startCalled, "precondition: the owner sent the start")
+			assert.True(t, c.ownerClient.lastStartExtras.NoAuth, "the owner's start carries the intent")
+			assert.Empty(t, c.ownerClient.lastStartResolvedSecrets)
+			assert.NotContains(t, c.ownerClient.lastResolvedEnv, swItemA)
+			assert.NotContains(t, c.ownerClient.lastResolvedEnv, swItemB)
+			for _, name := range c.ownerFB.fetchedNames() {
+				assert.Equal(t, noAuthGitTokenKey, name, "the owner reads no other value")
+			}
+		})
 	}
 }
