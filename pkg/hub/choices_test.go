@@ -195,7 +195,7 @@ func TestChoicesSend_UserDM(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, messages.TypeChoicePrompt, msg.Type)
 	assert.True(t, strings.HasPrefix(msg.Msg, "Two calls\n\n"))
-	assert.Contains(t, msg.Msg, "**2 decisions needed**")
+	assert.Contains(t, msg.Msg, "**2 decisions needed. Answer all of them together.**")
 	dmKey, err := messages.DMConversationKey("agent", f.agent.ID, "user", f.bob.ID)
 	require.NoError(t, err)
 	assert.Equal(t, dmKey, msg.ThreadID)

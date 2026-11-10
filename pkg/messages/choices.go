@@ -556,6 +556,11 @@ func EscapeMarkdownPlain(s string) string {
 // mentions neutralized; keys, choice ids and labels are escaped as plain
 // text. answerURL, when set, is the link to answer in Scion.
 //
+// A prompt with two or more decisions is a set (design choices v5,
+// section 6): its header asks for all answers together, and its closing
+// line links to the set card and shows the one-line-per-decision reply
+// form. A one-decision prompt keeps the v4 text.
+//
 // introLen is the byte offset in msg where the fallback block starts (0
 // with no intro). The hub stores it on the message's first decision row and
 // recovers the intro with ChoiceIntro.
@@ -567,10 +572,11 @@ func RenderChoiceFallback(intro string, decisions []Decision, answerURL string) 
 		b.WriteString("\n\n")
 		introLen = b.Len()
 	}
-	if len(decisions) == 1 {
-		b.WriteString("**1 decision needed**\n")
+	set := len(decisions) >= 2
+	if set {
+		fmt.Fprintf(&b, "**%d decisions needed. Answer all of them together.**\n", len(decisions))
 	} else {
-		fmt.Fprintf(&b, "**%d decisions needed**\n", len(decisions))
+		b.WriteString("**1 decision needed**\n")
 	}
 	for _, d := range decisions {
 		b.WriteString("\n**")
@@ -594,12 +600,35 @@ func RenderChoiceFallback(intro string, decisions []Decision, answerURL string) 
 		}
 	}
 	b.WriteString("\n")
-	if answerURL != "" {
+	switch {
+	case set && answerURL != "":
+		fmt.Fprintf(&b, "_Answer all in Scion: %s, or reply here with one line per decision (for example %s) and the agent will record your answers._", answerURL, setReplyExample(decisions))
+	case set:
+		fmt.Fprintf(&b, "_Reply here with one line per decision (for example %s) and the agent will record your answers._", setReplyExample(decisions))
+	case answerURL != "":
 		fmt.Fprintf(&b, "_Answer in Scion: %s, or reply here and the agent will record your answer._", answerURL)
-	} else {
+	default:
 		b.WriteString("_Reply here and the agent will record your answer._")
 	}
 	return b.String(), introLen
+}
+
+// setReplyExample is the reply hint of a set: the first two decisions, each
+// as "key: first choice id" in a code span, e.g. `D234: 1` and `17: a`. Keys
+// and choice ids are identifiers, so they need no escaping inside a code
+// span.
+func setReplyExample(decisions []Decision) string {
+	var parts []string
+	for _, d := range decisions {
+		if len(parts) == 2 {
+			break
+		}
+		if len(d.Choices) == 0 {
+			continue
+		}
+		parts = append(parts, "`"+d.Key+": "+d.Choices[0].ID+"`")
+	}
+	return strings.Join(parts, " and ")
 }
 
 // ChoiceIntro returns the intro of a choice prompt's msg, given the

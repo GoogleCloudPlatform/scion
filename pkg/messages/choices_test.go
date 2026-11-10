@@ -370,14 +370,14 @@ func TestRenderChoiceFallback_DesignExample(t *testing.T) {
 	}
 	msg, introLen := RenderChoiceFallback("Two things before I continue.\n", ds, "https://hub.example/chat/c1?message=m1")
 	want := "Two things before I continue.\n\n" +
-		"**2 decisions needed**\n" +
+		"**2 decisions needed. Answer all of them together.**\n" +
 		"\n**D234.** Ship the feature now?\n" +
 		"  1) yes _(recommended)_\n" +
 		"  2) no\n" +
 		"\n**17.** Which approach?\n" +
 		"  a) Extend input-needed: Reuse the `input-needed` type\n" +
 		"  b) New message type\n" +
-		"\n_Answer in Scion: https://hub.example/chat/c1?message=m1, or reply here and the agent will record your answer._"
+		"\n_Answer all in Scion: https://hub.example/chat/c1?message=m1, or reply here with one line per decision (for example `D234: 1` and `17: a`) and the agent will record your answers._"
 	if msg != want {
 		t.Errorf("msg =\n%s\nwant\n%s", msg, want)
 	}
@@ -387,8 +387,26 @@ func TestRenderChoiceFallback_DesignExample(t *testing.T) {
 	if got := ChoiceIntro(msg, introLen); got != "Two things before I continue." {
 		t.Errorf("ChoiceIntro = %q", got)
 	}
-	if !strings.HasPrefix(msg[introLen:], "**2 decisions needed**") {
+	if !strings.HasPrefix(msg[introLen:], "**2 decisions needed. Answer all of them together.**") {
 		t.Errorf("introLen does not point at the fallback block: %q", msg[introLen:])
+	}
+}
+
+// A set without an answer link keeps the one-line-per-decision reply
+// hint; the example names the first two decisions only.
+func TestRenderChoiceFallback_SetNoURL(t *testing.T) {
+	ds := []Decision{
+		{Key: "a1", Question: "One?", Choices: []Choice{{ID: "1", Label: "yes"}, {ID: "2", Label: "no"}}},
+		{Key: "b2", Question: "Two?", Choices: []Choice{{ID: "x", Label: "X"}, {ID: "y", Label: "Y"}}},
+		{Key: "c3", Question: "Three?", Choices: []Choice{{ID: "1", Label: "yes"}, {ID: "2", Label: "no"}}},
+	}
+	msg, _ := RenderChoiceFallback("", ds, "")
+	if !strings.HasPrefix(msg, "**3 decisions needed. Answer all of them together.**\n") {
+		t.Errorf("set header missing: %q", msg)
+	}
+	wantEnd := "_Reply here with one line per decision (for example `a1: 1` and `b2: x`) and the agent will record your answers._"
+	if !strings.HasSuffix(msg, wantEnd) {
+		t.Errorf("msg ends\n%q\nwant\n%q", msg[len(msg)-len(wantEnd):], wantEnd)
 	}
 }
 

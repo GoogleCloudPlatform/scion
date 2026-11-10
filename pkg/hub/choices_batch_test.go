@@ -374,10 +374,14 @@ func TestChoiceSetAnswer_ConcurrentOneWinner(t *testing.T) {
 	var wg sync.WaitGroup
 	codes := make([]int, n)
 	errCodes := make([]string, n)
+	// A start barrier: every goroutine waits until all are spawned, so the
+	// submits really overlap.
+	start := make(chan struct{})
 	for i := 0; i < n; i++ {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
+			<-start
 			u := []*store.User{f.alice, f.bob}[i%2]
 			choice := []string{"1", "2"}[i%2]
 			second := []string{"a", "b"}[i%2]
@@ -394,6 +398,7 @@ func TestChoiceSetAnswer_ConcurrentOneWinner(t *testing.T) {
 			}
 		}(i)
 	}
+	close(start)
 	wg.Wait()
 	ok := 0
 	for i, c := range codes {
@@ -489,20 +494,38 @@ func TestChoiceSetAnswer_Outcomes(t *testing.T) {
 		msg, res := f.topicPrompt(t, threeDecisions, false)
 		r := res.Decisions
 		f.topicPrompt(t, `[{"id":"ship-now","question":"Deploy today, really?","choices":["yes","no"]}]`, true)
+		before := len(f.dispatcher.getMessages())
 		rr := f.submitSet(t, f.bob, msg.ID, "", r[0].RowID, "1", r[1].RowID, "a", r[2].RowID, "1")
 		require.Equal(t, http.StatusConflict, rr.Code, "body: %s", rr.Body.String())
 		_, details := errorCodeAndDetails(t, rr)
 		assert.Equal(t, store.AnswerSetReasonReplaced, details["reasons"].(map[string]interface{})[r[2].RowID])
+		for _, d := range r {
+			got, err := f.store.GetDecision(ctx, d.RowID)
+			require.NoError(t, err)
+			assert.Empty(t, got.Answers, "nothing stored")
+		}
+		assert.Len(t, f.dispatcher.getMessages(), before, "nothing sent")
 	})
 	t.Run("another user's interpreted row", func(t *testing.T) {
 		f := newChoicesFixture(t)
 		msg, res := f.topicPrompt(t, threeDecisions, false)
 		r := res.Decisions
 		f.recordInterpreted(t, f.alice, r[0].RowID, "1")
+		before := len(f.dispatcher.getMessages())
 		rr := f.submitSet(t, f.bob, msg.ID, "", r[0].RowID, "1", r[1].RowID, "a", r[2].RowID, "1")
 		require.Equal(t, http.StatusConflict, rr.Code, "body: %s", rr.Body.String())
 		_, details := errorCodeAndDetails(t, rr)
 		assert.Equal(t, store.AnswerSetReasonNotRecordedAnswerer, details["reasons"].(map[string]interface{})[r[0].RowID])
+		for i, d := range r {
+			got, err := f.store.GetDecision(ctx, d.RowID)
+			require.NoError(t, err)
+			want := 0
+			if i == 0 {
+				want = 1 // alice's interpreted answer only
+			}
+			assert.Len(t, got.Answers, want, "nothing stored")
+		}
+		assert.Len(t, f.dispatcher.getMessages(), before, "nothing sent")
 	})
 	t.Run("asker takes no messages", func(t *testing.T) {
 		f := newChoicesFixture(t)
@@ -525,7 +548,7 @@ func TestChoiceSetAnswer_Outcomes(t *testing.T) {
 		r := res.Decisions
 		f.makeChatReader(t, f.bob)
 		rr := f.submitSet(t, f.bob, msg.ID, "", r[0].RowID, "1", r[1].RowID, "a", r[2].RowID, "1")
-		assert.Contains(t, []int{http.StatusForbidden, http.StatusNotFound}, rr.Code, "body: %s", rr.Body.String())
+		assert.Equal(t, http.StatusForbidden, rr.Code, "a reader may read the thread but not post in it: %s", rr.Body.String())
 		d, err := f.store.GetDecision(ctx, r[0].RowID)
 		require.NoError(t, err)
 		assert.Empty(t, d.Answers)
