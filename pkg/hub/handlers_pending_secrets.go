@@ -189,20 +189,7 @@ func (s *Server) agentWritePendingUserSecret(w http.ResponseWriter, r *http.Requ
 	if err != nil {
 		// The held value was never recorded; release it.
 		s.dropPendingValues(ctx, []string{ref})
-		if errors.Is(err, store.ErrTransient) {
-			writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
-				"The save conflicted with a concurrent save of the same name and stored nothing. Retry it.", nil)
-			return
-		}
-		if errors.Is(err, store.ErrPendingSecretHeldByOtherAgent) {
-			writeError(w, http.StatusConflict, ErrCodeSecretPendingHeldByOtherAgent,
-				pendingSecretHeldByOtherAgentMessage, map[string]interface{}{
-					"key":   key,
-					"scope": store.ScopeUser,
-				})
-			return
-		}
-		writeErrorFromErr(w, err, "")
+		writePendingSecretWriteError(w, key, err)
 		return
 	}
 	// The write has committed: release the values of the rows it removed
@@ -218,6 +205,26 @@ func (s *Server) agentWritePendingUserSecret(w http.ResponseWriter, r *http.Requ
 		ReplacesExisting: res.Secret.ReplacesSecretID != "",
 		Message:          "awaiting user approval",
 	})
+}
+
+// writePendingSecretWriteError answers a failed pending secret write: a
+// name another agent's pending secret holds is a 409 that names neither
+// that agent nor its project, and a write that kept losing to concurrent
+// writes of the same name is a retryable 503.
+func writePendingSecretWriteError(w http.ResponseWriter, key string, err error) {
+	switch {
+	case errors.Is(err, store.ErrPendingSecretHeldByOtherAgent):
+		writeError(w, http.StatusConflict, ErrCodeSecretPendingHeldByOtherAgent,
+			pendingSecretHeldByOtherAgentMessage, map[string]interface{}{
+				"key":   key,
+				"scope": store.ScopeUser,
+			})
+	case errors.Is(err, store.ErrTransient):
+		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
+			"The save conflicted with a concurrent save of the same name and stored nothing. Retry it.", nil)
+	default:
+		writeErrorFromErr(w, err, "")
+	}
 }
 
 // pendingSecretProvenanceNames returns the writing agent's slug and its

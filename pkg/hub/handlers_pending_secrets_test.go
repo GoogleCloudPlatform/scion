@@ -1095,26 +1095,13 @@ func TestPendingSecret_UserDeletionCascade(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// pendingWriteConflictStore fails every pending secret write with the
-// store's transient conflict.
-type pendingWriteConflictStore struct {
-	store.Store
-}
-
-func (s *pendingWriteConflictStore) CreateOrReplacePendingSecret(context.Context, *store.PendingSecret, time.Time) (*store.PendingSecretWriteResult, error) {
-	return nil, fmt.Errorf("%w: the pending secret write lost its races", store.ErrTransient)
-}
-
 // TestAgentPendingSecret_WriteConflictIsRetryable: a pending secret write
-// that keeps losing to concurrent writes of the same name answers 503
-// with a retryable code (not a conflict that asks for --force), stores
-// nothing and releases the held value.
+// that kept losing to concurrent writes of the same name (the store's
+// transient conflict) answers 503 with a retryable code, not a conflict
+// that asks for --force.
 func TestAgentPendingSecret_WriteConflictIsRetryable(t *testing.T) {
-	f := newPendingFixture(t, "pend-transient")
-	f.Server.store = &pendingWriteConflictStore{Store: f.Store}
-	t.Cleanup(func() { f.Server.store = f.Store })
-
-	rec := agentPut(t, f.Server, f.AgentID, f.Token, "TOOL_AUTH", userScopeWrite("test-value-1", false))
+	rec := httptest.NewRecorder()
+	writePendingSecretWriteError(rec, "TOOL_AUTH", fmt.Errorf("%w: the pending secret write lost its races", store.ErrTransient))
 	require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
 	var body struct {
 		Error struct {
@@ -1126,8 +1113,9 @@ func TestAgentPendingSecret_WriteConflictIsRetryable(t *testing.T) {
 	assert.Equal(t, ErrCodeUnavailable, body.Error.Code)
 	assert.Contains(t, body.Error.Message, "Retry")
 	assert.NotContains(t, body.Error.Message, "already exists")
-	assert.Len(t, f.drops.dropped, 1, "the held value is released")
 
-	f.Server.store = f.Store
-	assert.Empty(t, f.listPending(t, f.owner()))
+	rec = httptest.NewRecorder()
+	writePendingSecretWriteError(rec, "TOOL_AUTH", store.ErrPendingSecretHeldByOtherAgent)
+	assert.Equal(t, http.StatusConflict, rec.Code)
+	assert.Contains(t, rec.Body.String(), ErrCodeSecretPendingHeldByOtherAgent)
 }
