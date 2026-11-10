@@ -118,8 +118,9 @@ func TestWindowsGate_RefusesServerAndBroker(t *testing.T) {
 		{[]string{"expose"}, "expose"},
 		{[]string{"server"}, "server"},
 		// Commands with required flags or flag groups, given none: the
-		// refusal, not a required-flag error. The hub secret migrate tools
-		// also write the local hub database.
+		// refusal, not a required-flag error. hub secret migrate-names
+		// also writes the local hub database; hub secret migrate is
+		// disabled everywhere but stays gated.
 		{[]string{"hub", "secret", "migrate"}, "hub secret migrate"},
 		{[]string{"hub", "secret", "migrate-names"}, "hub secret migrate-names"},
 		{[]string{"server", "migrate"}, "server migrate"},
@@ -223,9 +224,9 @@ func TestWindowsGate_AllowsUseOnlyUnderProject(t *testing.T) {
 // shows the copied tree does carry those rules before gating.
 func TestWindowsGate_DropsFlagValidationOnGatedCommands(t *testing.T) {
 	root, _ := gateTestTree(t)
-	migrate := resolveCommandPath(root, "hub.secret.migrate")
+	migrate := resolveCommandPath(root, "hub.secret.migrate-names")
 	require.NotNil(t, migrate)
-	require.Error(t, migrate.ValidateRequiredFlags(), "control: hub secret migrate has required flags before gating")
+	require.Error(t, migrate.ValidateRequiredFlags(), "control: hub secret migrate-names has required flags before gating")
 	visitors := resolveCommandPath(root, "project.visitors.add")
 	require.NotNil(t, visitors)
 	require.Error(t, visitors.ValidateFlagGroups(), "control: project visitors add has a one-required group before gating")
@@ -248,7 +249,7 @@ func TestWindowsGate_DropsFlagValidationOnGatedCommands(t *testing.T) {
 	}
 	walk(root, "")
 	// The real tree keeps its rules: the copy's annotations were stripped.
-	assert.Error(t, resolveCommandPath(rootCmd, "hub.secret.migrate").ValidateRequiredFlags())
+	assert.Error(t, resolveCommandPath(rootCmd, "hub.secret.migrate-names").ValidateRequiredFlags())
 }
 
 // TestWindowsGate_RefusesBeforeProjectResolution: root's PersistentPreRunE

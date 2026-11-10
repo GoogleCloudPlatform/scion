@@ -556,3 +556,89 @@ func TestAbortRunningMaintenanceOps_AbortsNullAndEmptyResult(t *testing.T) {
 		assert.Equal(t, abortResult, got.Result)
 	}
 }
+
+// seedPreDecodeSecretMigration stores the secret-hub-id-migration row as a
+// release before the decoding migration seeded it, with status.
+func seedPreDecodeSecretMigration(t *testing.T, s *MaintenanceStore, status string) {
+	t.Helper()
+	ctx := context.Background()
+	c := s.client.MaintenanceOperation.Create().
+		SetKey(SecretHubIDMigrationKey).
+		SetTitle("Secret Hub ID Namespace Migration").
+		SetDescription(secretHubIDMigrationPreDecodeDescription).
+		SetCategory(store.MaintenanceCategoryMigration).
+		SetStatus(status)
+	if status == store.MaintenanceStatusCompleted {
+		now := time.Now().UTC()
+		c = c.SetStartedAt(now).SetCompletedAt(now).
+			SetStartedBy("admin@example.com").
+			SetResult(`{"log":"Migration complete: 1 migrated, 0 skipped\n"}`)
+	}
+	require.NoError(t, c.Exec(ctx))
+}
+
+// TestSeedMaintenanceOperations_ReopensPreDecodeSecretMigrationOnce: a
+// secret migration completed by a release that did not decode values is
+// moved back to pending the first time this release seeds, and only then.
+func TestSeedMaintenanceOperations_ReopensPreDecodeSecretMigrationOnce(t *testing.T) {
+	s := newTestMaintenanceStore(t)
+	ctx := context.Background()
+	seedPreDecodeSecretMigration(t, s, store.MaintenanceStatusCompleted)
+
+	require.NoError(t, s.SeedMaintenanceOperations(ctx))
+	op, err := s.GetMaintenanceOperation(ctx, SecretHubIDMigrationKey)
+	require.NoError(t, err)
+	assert.Equal(t, store.MaintenanceStatusPending, op.Status)
+	assert.Nil(t, op.StartedAt)
+	assert.Nil(t, op.CompletedAt)
+	assert.Empty(t, op.StartedBy, "the earlier run's starter must be cleared")
+	assert.Empty(t, op.Result, "the earlier run's result must be cleared")
+	assert.NotEqual(t, secretHubIDMigrationPreDecodeDescription, op.Description, "the one-time marker must be replaced")
+
+	// It completes again under this release; a later start leaves it alone.
+	now := time.Now().UTC()
+	op.Status = store.MaintenanceStatusCompleted
+	op.StartedAt, op.CompletedAt = &now, &now
+	require.NoError(t, s.UpdateMaintenanceOperation(ctx, op))
+	require.NoError(t, s.SeedMaintenanceOperations(ctx))
+	op, err = s.GetMaintenanceOperation(ctx, SecretHubIDMigrationKey)
+	require.NoError(t, err)
+	assert.Equal(t, store.MaintenanceStatusCompleted, op.Status, "a second start must not reopen it")
+}
+
+// TestSeedMaintenanceOperations_PreDecodeSecretMigrationNotCompleted: a
+// pre-decode row that is not completed keeps its status and only gets the
+// current description.
+func TestSeedMaintenanceOperations_PreDecodeSecretMigrationNotCompleted(t *testing.T) {
+	for _, status := range []string{store.MaintenanceStatusRunning, store.MaintenanceStatusFailed, store.MaintenanceStatusPending} {
+		t.Run(status, func(t *testing.T) {
+			s := newTestMaintenanceStore(t)
+			ctx := context.Background()
+			seedPreDecodeSecretMigration(t, s, status)
+
+			require.NoError(t, s.SeedMaintenanceOperations(ctx))
+			op, err := s.GetMaintenanceOperation(ctx, SecretHubIDMigrationKey)
+			require.NoError(t, err)
+			assert.Equal(t, status, op.Status)
+			assert.NotEqual(t, secretHubIDMigrationPreDecodeDescription, op.Description)
+		})
+	}
+}
+
+// TestSeedMaintenanceOperations_CurrentSecretMigrationNotReopened: a
+// secret migration seeded and completed under this release is never
+// reopened.
+func TestSeedMaintenanceOperations_CurrentSecretMigrationNotReopened(t *testing.T) {
+	s := newTestMaintenanceStore(t)
+	ctx := context.Background()
+	require.NoError(t, s.SeedMaintenanceOperations(ctx))
+	now := time.Now().UTC()
+	require.NoError(t, s.UpdateMaintenanceOperation(ctx, &store.MaintenanceOperation{
+		Key: SecretHubIDMigrationKey, Status: store.MaintenanceStatusCompleted, StartedAt: &now, CompletedAt: &now,
+	}))
+
+	require.NoError(t, s.SeedMaintenanceOperations(ctx))
+	op, err := s.GetMaintenanceOperation(ctx, SecretHubIDMigrationKey)
+	require.NoError(t, err)
+	assert.Equal(t, store.MaintenanceStatusCompleted, op.Status)
+}

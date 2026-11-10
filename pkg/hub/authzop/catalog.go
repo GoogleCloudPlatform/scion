@@ -740,11 +740,6 @@ var MutationClassifications = []MutationClassification{
 	{File: "pkg/hub/lifecycle_hook_executor.go", Function: "resolveIdentityAndToken", Symbol: "GenerateAccessToken", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Lifecycle hook: generates GCP token for hook execution after the fire-time writer authority check (Server.AuthorizeHookFire)", Scope: "pkg/hub/lifecycle_hook_executor.go"}},
 
 	// -----------------------------------------------------------------------
-	// pkg/hub/maintenance/maintenance_executors.go — maintenance operations
-	// -----------------------------------------------------------------------
-	{File: "pkg/hub/maintenance/maintenance_executors.go", Function: "Run", Symbol: "GetSecretValue", Exemption: &MutationExemption{Kind: ExemptionHubAdmin, Reason: "Maintenance executor reads secrets, hub-admin operation", Scope: "pkg/hub/maintenance/maintenance_executors.go"}},
-
-	// -----------------------------------------------------------------------
 	// pkg/hub/system_identity.go
 	// -----------------------------------------------------------------------
 	{File: "pkg/hub/system_identity.go", Function: "updateDevUserRecord", Symbol: "UpdateUser", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Dev mode user record update, system identity management", Scope: "pkg/hub/system_identity.go"}},

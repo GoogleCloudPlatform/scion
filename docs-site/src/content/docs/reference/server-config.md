@@ -580,7 +580,6 @@ Direct maintenance callers include:
 
 - `server recover-authz`: SQLite/PostgreSQL through `CompositeStore.Migrate`.
 - `hub secret migrate-names`: SQLite/PostgreSQL through `CompositeStore.Migrate`, except with `--dry-run`.
-- `hub secret migrate`: SQLite through `CompositeStore.Migrate`, including with `--dry-run`.
 - `server backfill` and `server migrate-dm-keys`: SQLite/PostgreSQL through `entc.AutoMigrate`, including their default dry-run mode.
 - `server migrate`: `entc.AutoMigrate` on the PostgreSQL destination only; the SQLite source is read-only and unaffected. Source decision-audit rows are not copied, as in the existing migration behavior.
 

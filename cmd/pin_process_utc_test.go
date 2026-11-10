@@ -28,8 +28,8 @@ import (
 // call the pinProcessUTC seam, as the first statement of their body.
 // runServerStart covers `scion server start` (foreground and daemon) and
 // `scion runtime-broker start --foreground`. The rest are offline
-// store-writing subcommands, including the two hub secret-migrate commands,
-// which open the hub database directly.
+// store-writing subcommands, including hub secret migrate-names, which
+// opens the hub database directly.
 var pinProcessUTCAllowedFuncs = map[string]bool{
 	"runServerStart":        true,
 	"runServerMigrate":      true,
@@ -37,7 +37,6 @@ var pinProcessUTCAllowedFuncs = map[string]bool{
 	"runServerDMMigration":  true,
 	"runServerBackfill":     true,
 	"runRecoverAuthz":       true,
-	"runSecretMigrate":      true,
 	"runSecretMigrateNames": true,
 }
 

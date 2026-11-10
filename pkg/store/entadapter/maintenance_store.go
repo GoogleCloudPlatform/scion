@@ -17,6 +17,7 @@ package entadapter
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -49,6 +50,18 @@ const abortText = "aborted: server was restarted while operation was running"
 
 // abortTextJSON is abortText as a JSON string.
 var abortTextJSON, _ = json.Marshal(abortText)
+
+// SecretHubIDMigrationKey is the maintenance migration key of the
+// migration of secrets stored in the Hub database into GCP Secret Manager.
+const SecretHubIDMigrationKey = "secret-hub-id-migration"
+
+// secretHubIDMigrationPreDecodeDescription is the description the
+// secret-hub-id-migration row was seeded with before the migration decoded
+// and verified values (ptone/scion#6989). A row that still carries it was
+// seeded by a release whose migration copied stored forms without
+// decoding them; reopenPreDecodeSecretMigration uses it as the one-time
+// marker.
+const secretHubIDMigrationPreDecodeDescription = `Migrates hub-scoped secrets from the legacy fixed "hub" scope ID to the per-instance hub ID. Required when upgrading a hub that was created before the hub ID namespacing feature. Only needed for GCP Secret Manager backend.`
 
 // AppliedConfigTZCleanupKey is the maintenance operation key of the
 // applied-config TZ cleanup.
@@ -93,9 +106,9 @@ const ChatRetentionRunKey = "chat-retention-run"
 // Ent schema default (uuid.New) — see SeedMaintenanceOperations.
 var defaultSeedOperations = []store.MaintenanceOperation{
 	{
-		Key:         "secret-hub-id-migration",
+		Key:         SecretHubIDMigrationKey,
 		Title:       "Secret Hub ID Namespace Migration",
-		Description: `Migrates hub-scoped secrets from the legacy fixed "hub" scope ID to the per-instance hub ID. Required when upgrading a hub that was created before the hub ID namespacing feature. Only needed for GCP Secret Manager backend.`,
+		Description: `Moves secrets whose value is stored in the Hub database into GCP Secret Manager, under the per-instance hub ID namespace. Each value is decoded with the Hub's local key, written, and read back before the secret is switched to Secret Manager; a secret that is not verified keeps its local copy. Secrets already in Secret Manager are checked, and a value that an earlier run copied in its encoded form is decoded and rewritten; this repair needs the local key that encoded it, so keep that key until the migration completes. A run that leaves any secret undecoded or unverified fails and can be run again. Values are never logged. Supports a dry run. Only needed for GCP Secret Manager backend.`,
 		Category:    store.MaintenanceCategoryMigration,
 	},
 	{
@@ -272,10 +285,60 @@ func (s *MaintenanceStore) SeedMaintenanceOperations(ctx context.Context) error 
 	// Must stay Exec, never Save: when DO NOTHING skips rows, RETURNING yields
 	// fewer ids than builders and ent assigns them to the nodes by position,
 	// so Save would hand back nodes carrying the wrong ids.
-	return s.client.MaintenanceOperation.CreateBulk(builders...).
+	if err := s.client.MaintenanceOperation.CreateBulk(builders...).
 		OnConflictColumns(maintenanceoperation.FieldKey).
 		DoNothing().
-		Exec(ctx)
+		Exec(ctx); err != nil {
+		return err
+	}
+	return s.reopenPreDecodeSecretMigration(ctx)
+}
+
+// reopenPreDecodeSecretMigration runs once per database, the first time a
+// release with the decoding secret-hub-id-migration starts on it. A row
+// still carrying secretHubIDMigrationPreDecodeDescription gets the current
+// description, and if that earlier migration had completed, the row is
+// also moved back to pending, without the earlier run's start, end,
+// starter and result: the earlier run may have left encoded values
+// in Secret Manager, so the panel must offer the migration (and its dry
+// run) again. Nothing runs automatically. A running or failed row keeps
+// its status. Once the description is replaced the marker is gone, so a
+// later start changes nothing.
+func (s *MaintenanceStore) reopenPreDecodeSecretMigration(ctx context.Context) error {
+	var current string
+	for _, op := range defaultSeedOperations {
+		if op.Key == SecretHubIDMigrationKey {
+			current = op.Description
+		}
+	}
+	if current == "" || current == secretHubIDMigrationPreDecodeDescription {
+		return nil
+	}
+	if _, err := s.client.MaintenanceOperation.Update().
+		Where(
+			maintenanceoperation.KeyEQ(SecretHubIDMigrationKey),
+			maintenanceoperation.DescriptionEQ(secretHubIDMigrationPreDecodeDescription),
+			maintenanceoperation.StatusEQ(store.MaintenanceStatusCompleted),
+		).
+		SetStatus(store.MaintenanceStatusPending).
+		ClearStartedAt().
+		ClearCompletedAt().
+		ClearStartedBy().
+		ClearResult().
+		SetDescription(current).
+		Save(ctx); err != nil {
+		return fmt.Errorf("reopening the secret migration: %w", mapError(err))
+	}
+	if _, err := s.client.MaintenanceOperation.Update().
+		Where(
+			maintenanceoperation.KeyEQ(SecretHubIDMigrationKey),
+			maintenanceoperation.DescriptionEQ(secretHubIDMigrationPreDecodeDescription),
+		).
+		SetDescription(current).
+		Save(ctx); err != nil {
+		return fmt.Errorf("updating the secret migration description: %w", mapError(err))
+	}
+	return nil
 }
 
 // ============================================================================
