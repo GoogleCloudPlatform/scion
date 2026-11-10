@@ -1682,6 +1682,18 @@ export class StateManager extends EventTarget {
     return this.state.brokers.get(id);
   }
 
+  /**
+   * Drop a project this session can no longer read (the user left it,
+   * ptone/scion#7494) from the cached project list. It is tombstoned like a
+   * `deleted` event, so list merges (the projects page) drop its row, and
+   * `projects-updated` is sent.
+   */
+  forgetProject(projectId: string): void {
+    this.state.projects.delete(projectId);
+    this.state.deletedProjectIds.add(projectId);
+    this.notify('projects-updated');
+  }
+
   getDeletedProjectIds(): Set<string> {
     return this.state.deletedProjectIds;
   }
