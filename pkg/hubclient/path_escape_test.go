@@ -261,6 +261,8 @@ func TestPathEscape_Projects(t *testing.T) {
 			func(ctx context.Context, c Client, id string) {
 				_ = p(c).Delete(ctx, id, &DeleteProjectOptions{Force: true})
 			}},
+		{"Leave", "/api/v1/projects/{id}/leave",
+			func(ctx context.Context, c Client, id string) { _, _ = p(c).Leave(ctx, id, false) }},
 		{"ListAgents", "/api/v1/projects/{id}/agents",
 			func(ctx context.Context, c Client, id string) { _, _ = p(c).ListAgents(ctx, id, nil) }},
 		{"ListProviders", "/api/v1/projects/{id}/providers",

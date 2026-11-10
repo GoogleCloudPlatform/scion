@@ -269,7 +269,9 @@ func (s *Server) memberListCapabilities(ctx context.Context, projectID string) *
 	if s.membershipService == nil {
 		return nil
 	}
-	return s.membershipService.ComputeCapabilities(ctx, user.ID(), projectID)
+	caps := s.membershipService.ComputeCapabilities(ctx, user.ID(), projectID)
+	caps.CanLeave, caps.LeaveBlockedReason = s.projectLeaveCapabilities(ctx, user.ID(), projectID)
+	return caps
 }
 
 // writeProjectMemberGroups writes GET …/members?groupBy=principal

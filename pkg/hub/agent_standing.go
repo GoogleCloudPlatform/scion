@@ -338,27 +338,33 @@ func (s *Server) userAdmittedToProjectOn(ctx context.Context, st store.Store, us
 
 // userAdmittedToProjectAs is userAdmittedToProjectOn for admission adm.
 func (s *Server) userAdmittedToProjectAs(ctx context.Context, st store.Store, user *store.User, projectID string, adm standingAdmission, memo *ProjectAdmissionCache) (bool, error) {
+	res, err := s.userAdmissionAs(ctx, st, user, projectID, adm, memo)
+	if err != nil {
+		return false, err
+	}
+	return res.Admitted, nil
+}
+
+// userAdmissionAs is userAdmittedToProjectAs returning the whole result,
+// with the Source of the evidence that admitted the user.
+func (s *Server) userAdmissionAs(ctx context.Context, st store.Store, user *store.User, projectID string, adm standingAdmission, memo *ProjectAdmissionCache) (ProjectAdmissionResult, error) {
 	// A hub test identity that can no longer authenticate (expired, no
 	// expiry, or the feature off: testFixtureRejection, the auth path's own
 	// rule) is admitted nowhere, so the agents it roots are held
 	// (ptone/scion#4240, Phase 3b).
 	if testFixtureRejection(user, s.testIdentities.enabled, s.testIdentities.clock()) != "" {
-		return false, nil
+		return ProjectAdmissionResult{}, nil
 	}
 	authz := s.authzFor(st)
 	if authz == nil {
-		return false, errors.New("project admission: authz service not available")
+		return ProjectAdmissionResult{}, errors.New("project admission: authz service not available")
 	}
 	pc := PrincipalContext{
 		Kind:     PrincipalKindUser,
 		ID:       user.ID,
 		Identity: NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, ""),
 	}
-	res, err := authz.ProjectAdmissionForClass(maskAuthzInputs(ctx), pc, projectID, adm.permissionID, adm.class, memo)
-	if err != nil {
-		return false, err
-	}
-	return res.Admitted, nil
+	return authz.ProjectAdmissionForClass(maskAuthzInputs(ctx), pc, projectID, adm.permissionID, adm.class, memo)
 }
 
 // resolveChainRoot returns the ID of the user at the root of the agent's
