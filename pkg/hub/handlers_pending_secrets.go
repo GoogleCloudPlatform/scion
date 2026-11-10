@@ -261,17 +261,36 @@ func (s *Server) pendingSecretProvenanceNames(ctx context.Context, agentID, proj
 // that referenced them are gone. It runs on a context that the request's
 // cancellation does not end, since the rows are already gone. A failure
 // is logged (never the value or its reference) and does not fail the
-// request.
+// request. With no secret backend configured nothing is released: a
+// warning with the number of values is logged.
 func (s *Server) dropPendingValues(ctx context.Context, refs []string) {
+	backend := s.secretBackend
+	if backend == nil {
+		if n := countNonEmpty(refs); n > 0 {
+			slog.Warn("pending secret: no secret backend configured; held values were not released", "count", n)
+		}
+		return
+	}
 	ctx = context.WithoutCancel(ctx)
 	for _, ref := range refs {
 		if ref == "" {
 			continue
 		}
-		if err := s.secretBackend.DropPending(ctx, ref); err != nil {
+		if err := backend.DropPending(ctx, ref); err != nil {
 			slog.Warn("pending secret: releasing a held value failed", "error", err)
 		}
 	}
+}
+
+// countNonEmpty returns the number of non-empty strings in refs.
+func countNonEmpty(refs []string) int {
+	n := 0
+	for _, ref := range refs {
+		if ref != "" {
+			n++
+		}
+	}
+	return n
 }
 
 // handlePendingSecrets serves the owner's pending secret endpoints:

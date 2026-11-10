@@ -1119,3 +1119,30 @@ func TestAgentPendingSecret_WriteConflictIsRetryable(t *testing.T) {
 	assert.Equal(t, http.StatusConflict, rec.Code)
 	assert.Contains(t, rec.Body.String(), ErrCodeSecretPendingHeldByOtherAgent)
 }
+
+// TestPendingSecret_DeletionWithoutSecretBackend: pending secrets written
+// while a secret backend was configured are handled when the hub later
+// runs without one. Deleting their project deletes the rows and releases
+// nothing; removing a deleted user's data keeps that user's rows for a
+// later sweep. Neither fails.
+func TestPendingSecret_DeletionWithoutSecretBackend(t *testing.T) {
+	f := newPendingFixture(t, "pend-no-backend")
+	ctx := context.Background()
+	a := decodePendingResponse(t, agentPut(t, f.Server, f.AgentID, f.Token, "KEY_A", userScopeWrite("test-value-a", false)))
+	b := decodePendingResponse(t, agentPut(t, f.Server, f.AgentB, f.TokenB, "KEY_B", userScopeWrite("test-value-b", false)))
+	f.Server.SetSecretBackend(nil)
+	t.Cleanup(func() { f.Server.SetSecretBackend(f.drops) })
+
+	rec := doRequest(t, f.Server, http.MethodDelete, "/api/v1/projects/"+f.ProjectID+"?force=true", nil)
+	require.Contains(t, []int{http.StatusOK, http.StatusNoContent}, rec.Code, rec.Body.String())
+	_, err := f.Store.GetPendingSecret(ctx, a.PendingID)
+	assert.ErrorIs(t, err, store.ErrNotFound, "the deleted project's pending secret is deleted")
+	assert.Empty(t, f.drops.dropped, "nothing is released without a backend")
+
+	assert.False(t, f.Server.removeUserScopedData(ctx, f.UserID), "the user's pending secret is left for a later sweep")
+	f.pendingRow(t, b.PendingID)
+	assert.Empty(t, f.drops.dropped)
+
+	f.Server.dropPendingValues(ctx, []string{"enc:v1:test-value-ref", ""})
+	assert.Empty(t, f.drops.dropped)
+}
