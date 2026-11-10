@@ -1205,6 +1205,7 @@ var chatOperations = []OperationSpec{
 			{Package: "pkg/hub", Function: "TestDecisionAnswer_Authorization"},
 			{Package: "pkg/hub", Function: "TestDecisionAnswer_ConcurrentOneWinner"},
 			{Package: "pkg/hub", Function: "TestDecisionAnswer_IdempotencyKeyKeepsChecks"},
+			{Package: "pkg/hub", Function: "TestDecisionAnswer_AskerRefusesMessages"},
 		},
 		Bearer: SessionOnly(ReasonInteractiveState),
 	},

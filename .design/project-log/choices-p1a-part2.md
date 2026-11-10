@@ -106,6 +106,11 @@ entry covers part 2 and the changes that followed its four reviews.
   the bearer disposition matrix can tell it from an authority denial.
   The handler checks the credential class itself, because the chat route
   gate also admits federated users.
+- Answers follow the asking agent's message mode: a refused answer gets
+  403 MESSAGE_DENIED and nothing is stored. A confirm is not delivered,
+  so it is not checked.
+- A choice prompt may leave out its body (the intro): the stored body is
+  the markdown fallback rendered from its decisions.
 - Orphan key counters of agents hard-deleted before a project delete are
   accepted (one small row per agent; agent IDs are not reused).
 - The agentstatus refusal logs rather than returns an error, because a

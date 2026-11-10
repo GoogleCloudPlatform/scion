@@ -336,7 +336,7 @@ func Spec() []TableFixture {
 				"id": "dc000000-0000-0000-0000-000000000002", "project_id": projectID,
 				"conversation_id": conversationID, "message_id": messageID, "position": 0,
 				"asker_agent_id": agentID, "asker_agent_name": "worker",
-				"key": "D1", "key_norm": "d1", "key_source": "hub", "version": 2,
+				"key": "1", "key_norm": "1", "key_source": "hub", "version": 2,
 				"question":          "Ship the feature now? — café ☕",
 				"choices":           `[{"id":"1","label":"yes"},{"id":"2","label":"no — später"}]`,
 				"default_choice_id": "1", "intro_length": 12, "status": "decided",
@@ -346,7 +346,7 @@ func Spec() []TableFixture {
 				"id": "dc000000-0000-0000-0000-000000000001", "project_id": projectID,
 				"message_id": messageID, "position": 1,
 				"asker_agent_id": agentID, "asker_agent_name": "worker",
-				"key": "D1", "key_norm": "d1", "key_source": "hub", "version": 1,
+				"key": "1", "key_norm": "1", "key_source": "hub", "version": 1,
 				"question": "Ship the feature?", "choices": `[{"id":"1","label":"yes"},{"id":"2","label":"no"}]`,
 				"status": "replaced", "replaced_by_id": "dc000000-0000-0000-0000-000000000002",
 				"created_at": baseTime, "replaced_at": baseTime,
@@ -355,7 +355,7 @@ func Spec() []TableFixture {
 		{Table: "decision_answers", Rows: []row{
 			{ // a direct answer recorded from the web session
 				"id": "da000000-0000-0000-0000-000000000001", "decision_row_id": "dc000000-0000-0000-0000-000000000002",
-				"project_id": projectID, "asker_agent_id": agentID, "key": "D1", "version": 2,
+				"project_id": projectID, "asker_agent_id": agentID, "key": "1", "version": 2,
 				"question_text": "Ship the feature now? — café ☕", "choice_id": "2", "choice_label": "no — später",
 				"answered_by_user_id": userID, "answered_by_name": "Alice", "answered_by_email": "alice@example.com",
 				"provenance": "direct", "outcome": "answer", "surface": "native",
