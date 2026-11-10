@@ -324,10 +324,15 @@ var materialOperations = []OperationSpec{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/pending-secrets/{id}/approve", Method: "POST"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/pending-secrets/{id}/reject", Method: "POST"},
 		}, []SecurityEffect{EffectCreateResource, EffectUpdateResource, EffectDeleteResource}),
-	pendingSecretOp("secret.user.pending.reveal", "Return the held value of one of the caller's own pending secrets, audited (secret_pending_reveal). Another user's or an expired pending secret is not found. Cross-site and non-JSON browser requests are refused. A federated caller is refused (requireProfileWriter)",
+	withTestRefs(pendingSecretOp("secret.user.pending.reveal", "Return the held value of one of the caller's own pending secrets, audited (secret_pending_reveal). Another user's or an expired pending secret is not found. Cross-site and non-JSON browser requests are refused. A federated caller is refused (requireProfileWriter)",
 		[]EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/pending-secrets/{id}/reveal", Method: "POST", Response: ResponseCredential},
 		}, []SecurityEffect{EffectReadSecret}),
+		TestRef{Package: "pkg/hub", Function: "TestPendingSecretsAPI_Reveal"},
+		TestRef{Package: "pkg/hub", Function: "TestPendingSecretsAPI_RevealRefusals"},
+		TestRef{Package: "pkg/hub", Function: "TestPendingSecretsAPI_RevealCrossSiteRefused"},
+		TestRef{Package: "pkg/hub", Function: "TestPendingSecretsAPI_RevealNoCORSHeaders"},
+		TestRef{Package: "pkg/hub", Function: "TestPendingSecretsAPI_RevealProxyModeCrossSite"}),
 	envSecretSessionOnlyOp("env.hub.read", "env", "Read one hub-level environment variable (scope=hub). Agents may read; a user must be an unscoped admin",
 		[]EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/env/{key}", Method: "GET", Variant: "scope=hub", Response: ResponseCredential},
@@ -449,6 +454,12 @@ func pendingSecretOp(id OperationID, description string, eps []EntryPoint, effec
 		{Package: "pkg/hub", Function: "TestPendingSecretsAPI_Refusals"},
 		{Package: "pkg/hub", Function: "TestPendingSecretsAPI_ListApproveReject"},
 	}
+	return op
+}
+
+// withTestRefs returns op with refs added to its test references.
+func withTestRefs(op OperationSpec, refs ...TestRef) OperationSpec {
+	op.TestRefs = append(append([]TestRef(nil), op.TestRefs...), refs...)
 	return op
 }
 

@@ -13741,6 +13741,11 @@
 - `pkg/hub/authzop:TestCatalogValidation`
 - `pkg/hub:TestPendingSecretsAPI_Refusals`
 - `pkg/hub:TestPendingSecretsAPI_ListApproveReject`
+- `pkg/hub:TestPendingSecretsAPI_Reveal`
+- `pkg/hub:TestPendingSecretsAPI_RevealRefusals`
+- `pkg/hub:TestPendingSecretsAPI_RevealCrossSiteRefused`
+- `pkg/hub:TestPendingSecretsAPI_RevealNoCORSHeaders`
+- `pkg/hub:TestPendingSecretsAPI_RevealProxyModeCrossSite`
 
 ### Exemptions
 
