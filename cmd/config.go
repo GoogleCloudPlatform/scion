@@ -170,10 +170,10 @@ var configSetCmd = &cobra.Command{
 settings (~/.scion/settings.yaml) with --global.
 
 A key the settings file would accept but never read is refused and the file is
-left unchanged: hub.token, hub.apiKey, hub.lastSyncedAt, bucket.* and
-hub_connections.* at either layer, and server.auth.* at the project layer (read
-only from the global settings). The value of a credential-like key (for example
-hub.brokerToken) is masked in the output.
+left unchanged: hub.token, hub.apiKey, hub.lastSyncedAt, bucket.*,
+hub_connections and hub_connections.* at either layer, and server.auth.* at the
+project layer (read only from the global settings). The value of a
+credential-like key (for example hub.brokerToken) is masked in the output.
 
 hub.endpoint is kept in the hub list (~/.scion/context.yaml); config set never
 writes it into a settings file, and the CLI does not read it from one. With
@@ -213,7 +213,7 @@ default); "image_tag latest" opts out.`,
 		if key == configHubEndpointKey {
 			return configSetHubEndpoint(cmd.OutOrStdout(), cmd.ErrOrStderr(), value, layerGlobal, targetPath)
 		}
-		if err := config.ValidateConfigSetKey(key, layerGlobal); err != nil {
+		if err := config.ValidateSettingWrite(key, layerGlobal); err != nil {
 			return err
 		}
 		if err := config.UpdateSetting(targetPath, key, value, configGlobal); err != nil {

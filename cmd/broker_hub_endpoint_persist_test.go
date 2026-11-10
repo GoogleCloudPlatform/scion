@@ -58,7 +58,7 @@ func TestPersistBrokerHubSettings_WritesServerBrokerHubEndpoint(t *testing.T) {
 	path := writeServerHubEndpointTestSettings(t, globalDir, "")
 
 	var w bytes.Buffer
-	persistBrokerHubSettings(&w, globalDir, "https://hub.example.com", persistTestBrokerID, "hub-example-com")
+	persistBrokerHubSettings(&w, globalDir, "https://hub.example.com", persistTestBrokerID)
 	assert.Empty(t, w.String(), "no warnings")
 
 	tree := readSettingsTree(t, path)
@@ -84,7 +84,7 @@ func TestPersistBrokerHubSettings_KeepsExistingServerBrokerHubEndpoint(t *testin
 	path := writeServerHubEndpointTestSettings(t, globalDir, "server:\n  broker:\n    hub_endpoint: https://first.example.com\n")
 
 	var w bytes.Buffer
-	persistBrokerHubSettings(&w, globalDir, "https://second.example.com", persistTestBrokerID, "second-example-com")
+	persistBrokerHubSettings(&w, globalDir, "https://second.example.com", persistTestBrokerID)
 	assert.Empty(t, w.String())
 
 	tree := readSettingsTree(t, path)
@@ -100,7 +100,7 @@ func TestPersistBrokerHubSettings_CoLocatedWorkstationHubSkipsWrite(t *testing.T
 	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "dev-token"), []byte("scion_dev_persist_test_token\n"), 0600))
 
 	var w bytes.Buffer
-	persistBrokerHubSettings(&w, globalDir, "https://hub.example.com", persistTestBrokerID, "hub-example-com")
+	persistBrokerHubSettings(&w, globalDir, "https://hub.example.com", persistTestBrokerID)
 	assert.Empty(t, w.String(), "the skip prints nothing")
 
 	tree := readSettingsTree(t, path)
@@ -122,7 +122,7 @@ func TestPersistBrokerHubSettings_LeavesHubEndpointAlone(t *testing.T) {
 	path := writeServerHubEndpointTestSettings(t, globalDir, "hub:\n  endpoint: https://cli.example.com\n")
 
 	var w bytes.Buffer
-	persistBrokerHubSettings(&w, globalDir, "https://hub.example.com", persistTestBrokerID, "hub-example-com")
+	persistBrokerHubSettings(&w, globalDir, "https://hub.example.com", persistTestBrokerID)
 	assert.Empty(t, w.String())
 
 	tree := readSettingsTree(t, path)
@@ -147,4 +147,47 @@ func TestPersistBrokerHubSettings_LeavesHubEndpointAlone(t *testing.T) {
 		"schema_version": "1",
 		"hub":            map[string]any{"endpoint": "https://cli.example.com"},
 	}, tree)
+}
+
+// TestPersistBrokerHubSettings_V1ChangesOnlyServerBroker checks that a
+// registration against a v1 global settings file changes only
+// server.broker.* and prints no warning: it writes no hub_connections entry
+// (ptone/scion#3493), and every other key is left as it was.
+func TestPersistBrokerHubSettings_V1ChangesOnlyServerBroker(t *testing.T) {
+	globalDir := isolateServerHubEndpointEnv(t)
+	path := writeServerHubEndpointTestSettings(t, globalDir,
+		"active_profile: local\nhub:\n  endpoint: https://cli.example.com\nimage_registry: example.com/images\n")
+	before := readSettingsTree(t, path)
+
+	var w bytes.Buffer
+	persistBrokerHubSettings(&w, globalDir, "https://hub.example.com", persistTestBrokerID)
+	assert.Empty(t, w.String(), "no warnings")
+
+	after := readSettingsTree(t, path)
+	assert.NotContains(t, after, "hub_connections")
+	got, ok := brokerHubEndpointIn(after)
+	require.True(t, ok, "server.broker.hub_endpoint is written: %v", after)
+	assert.Equal(t, "https://hub.example.com", got)
+
+	withoutServerBroker := func(tree map[string]any) map[string]any {
+		out := make(map[string]any, len(tree))
+		for k, v := range tree {
+			out[k] = v
+		}
+		if server, ok := out["server"].(map[string]any); ok {
+			rest := make(map[string]any, len(server))
+			for k, v := range server {
+				if k != "broker" {
+					rest[k] = v
+				}
+			}
+			if len(rest) == 0 {
+				delete(out, "server")
+			} else {
+				out["server"] = rest
+			}
+		}
+		return out
+	}
+	assert.Equal(t, withoutServerBroker(before), withoutServerBroker(after), "only server.broker.* changed")
 }
