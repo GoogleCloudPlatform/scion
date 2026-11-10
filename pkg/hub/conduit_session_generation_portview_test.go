@@ -22,6 +22,7 @@ import (
 	"go/parser"
 	"go/token"
 	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -42,11 +43,9 @@ import (
 // token request by the link's own user is captured; any other user's token
 // runs as the link (contextWithPortViewLink) and is never captured.
 
-// Fails if the capture is missing on the page view path (for example moved
-// into the agent port route only): the track-time guard
-// (authorizeConduitUserStream) then denies the link user's own credentialed
-// request on the conduit transport. Also
-// fails if a scoped page view identity is refused by the capture.
+// Fails if the capture refuses the link user's own scoped page view identity,
+// or stops serving it. The capture's presence on this path is pinned by
+// TestPortViewSessionGen_JWTWithoutGenerationRefused.
 func TestPortViewSessionGen_SameUserCurrentAllowed(t *testing.T) {
 	f := newPortViewFixture(t, nil)
 	f.startAgent(t)
@@ -60,27 +59,109 @@ func TestPortViewSessionGen_SameUserCurrentAllowed(t *testing.T) {
 // Fails if the page view path stops capturing (for example if the capture
 // moves into the agent port route only), on a hub JWT request that carries
 // no session generation (here: no user store, so the JWT arm sets none). The
-// capture's own refusal answers it with this exact body; without the capture
-// on this path the request would instead reach the conduit transport and be
-// denied there by the track-time guard, with a different answer. So this
-// also pins that the capture runs on the page view path.
+// capture is the only check that refuses such a request on the page view
+// path, with this exact body: the track-time guard is not a backstop here,
+// and without the capture the page is served. So this also pins that the
+// capture runs on the page view path.
+//
+// The auth middleware copies the auth configuration when the handler is
+// built, so every request here goes through a handler built after the store
+// is removed (serveFresh).
 func TestPortViewSessionGen_JWTWithoutGenerationRefused(t *testing.T) {
 	f := newPortViewFixture(t, nil)
 	f.startAgent(t)
+	// A token for a user that has no row: refused while the store is
+	// configured, admitted once it is not. The control below uses it to
+	// show that the handler the page view requests go through has no store.
+	rowless, _, _, err := f.srv.userTokenService.GenerateTokenPair(
+		"no-such-user", "nobody@conduit.test", "Nobody", store.UserRoleMember, ClientTypeWeb)
+	require.NoError(t, err)
+	before := f.serveFresh(t, "/api/v1/auth/me", withBearer(http.Header{}, rowless))
+	require.Equal(t, http.StatusUnauthorized, before.status, "a token without a user row is refused with the store: %s", before.body)
+
 	saved := f.srv.authConfig.UserStore
 	f.srv.authConfig.UserStore = nil
 	t.Cleanup(func() { f.srv.authConfig.UserStore = saved })
-	// Positive control, over the same server as the requests below: with no
-	// user store, the same token passes the auth middleware on an
-	// authenticated route that has no capture, so the 401 below comes from
-	// the capture and not from a middleware refusal.
-	me := f.send(t, http.MethodGet, f.base+"/api/v1/auth/me", withBearer(http.Header{}, f.userToken), nil)
+	// Positive control on a handler built the same way as the requests
+	// below: without the store the token without a user row now passes the
+	// auth middleware, so the 401 below comes from the capture and not from
+	// a middleware refusal.
+	me := f.serveFresh(t, "/api/v1/auth/me", withBearer(http.Header{}, rowless))
 	require.Equal(t, http.StatusOK, me.status, "the token passes the middleware without a store: %s", me.body)
 	for name, h := range map[string]http.Header{"navigation": navHeader(), "sub-request": subHeader()} {
-		res := f.send(t, http.MethodGet, f.viewURL(f.ownerCap(), "page.html"), withBearer(h, f.userToken), nil)
+		res := f.serveFresh(t, f.viewPath(f.ownerCap(), "page.html"), withBearer(h, f.userToken))
 		assert.Equal(t, http.StatusUnauthorized, res.status, "%s: %s", name, res.body)
 		assert.Equal(t, `{"error":{"code":"unauthorized","message":"invalid access token"}}`+"\n", res.body, name)
 	}
+}
+
+// Fails if a page view request with the link user's hub user token stops
+// being refused once that user's sessions are revoked, or if a token minted
+// at the new session generation stops being served. The refusal comes from
+// the auth middleware's session generation check, before the page view
+// route runs. A credential-less request on the same link is still served
+// (the documented limit, TestPortViewSessionGen_SignedLinkSurvivesRevokeAll).
+func TestPortViewSessionGen_RevokedTokenRefused(t *testing.T) {
+	f := newPortViewFixture(t, nil)
+	f.startAgent(t)
+	ctx := context.Background()
+	owner, err := f.store.GetUser(ctx, f.launched.OwnerID)
+	require.NoError(t, err)
+	mint := func(gen int64) string {
+		tok, _, _, err := f.srv.userTokenService.MintTokenPair(
+			owner.ID, owner.Email, owner.DisplayName, owner.Role, gen, ClientTypeWeb)
+		require.NoError(t, err)
+		return tok
+	}
+	link := f.viewPath(f.ownerCap(), "page.html")
+	headers := map[string]func() http.Header{"navigation": navHeader, "sub-request": subHeader}
+
+	oldToken := mint(owner.SessionGeneration)
+	for name, h := range headers {
+		res := f.serveFresh(t, link, withBearer(h(), oldToken))
+		require.Equal(t, http.StatusOK, res.status, "%s, token at the current generation: %s", name, res.body)
+		assert.Equal(t, "hello /page.html?", res.body, name)
+	}
+
+	revokeSessions(t, f.srv, owner.ID)
+	revoked, err := f.store.GetUser(ctx, owner.ID)
+	require.NoError(t, err)
+	require.Greater(t, revoked.SessionGeneration, owner.SessionGeneration, "the revoke advanced the session generation")
+
+	for name, h := range headers {
+		res := f.serveFresh(t, link, withBearer(h(), oldToken))
+		assert.Equal(t, http.StatusUnauthorized, res.status, "%s, token from before the revoke: %s", name, res.body)
+		assert.Equal(t, `{"error":{"code":"unauthorized","message":"invalid access token: session revoked"}}`+"\n", res.body, name)
+	}
+
+	newToken := mint(revoked.SessionGeneration)
+	for name, h := range headers {
+		res := f.serveFresh(t, link, withBearer(h(), newToken))
+		require.Equal(t, http.StatusOK, res.status, "%s, token at the new generation: %s", name, res.body)
+		assert.Equal(t, "hello /page.html?", res.body, name)
+	}
+
+	res := f.serveFresh(t, link, subHeader())
+	require.Equal(t, http.StatusOK, res.status, "the credential-less link is still served: %s", res.body)
+	assert.Equal(t, "hello /page.html?", res.body)
+}
+
+// viewPath is the page view path for capability and sub, without the host.
+func (f *portViewFixture) viewPath(capability, sub string) string {
+	return portview.Route + capability + "/" + sub
+}
+
+// serveFresh sends one GET for target (a path) through a handler built for
+// this request, so it sees the server's auth configuration as it is now.
+func (f *portViewFixture) serveFresh(t *testing.T, target string, header http.Header) pvResult {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, target, nil)
+	for k, v := range header {
+		req.Header[k] = v
+	}
+	rec := httptest.NewRecorder()
+	f.srv.Handler().ServeHTTP(rec, req)
+	return pvResult{status: rec.Code, header: rec.Header().Clone(), body: rec.Body.String()}
 }
 
 // The documented limit: a credential-less page view link keeps working
@@ -141,7 +222,7 @@ func TestPortViewSessionGen_TrackTimeGuardAndMarker(t *testing.T) {
 	_, set := conduitCapturedSessionGeneration(ident)
 	require.False(t, set, "the link user's identity carries no captured generation")
 	authz := func(ctx context.Context) error {
-		_, _, err := f.srv.authorizeConduitUserStream(ctx, conduitUserStreamAuthz{Identity: ident, Agent: f.agent, Kind: grant.StreamKindTCP})
+		_, _, err := f.srv.authorizeConduitUserStream(ctx, conduitUserStreamAuthz{Identity: ident, Agent: f.agent, Kind: grant.StreamKindTCP, Port: 3000})
 		return err
 	}
 	jwt := contextWithAuthType(context.Background(), AuthTypeJWT)
