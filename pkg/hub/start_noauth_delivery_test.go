@@ -959,8 +959,9 @@ func TestProvisionNoAuth_CredentialNamesUnreadableGitTokenScopes(t *testing.T) {
 
 // TestStartNoAuth_NonOwnerStarterGitTokenNotDelivered: a project admin who is
 // not the owner starts an agent without credentials. The user-scope settings
-// read are the owner's, never the starter's: the owner's GITHUB_TOKEN
-// setting is delivered, and the starter's is not.
+// and secrets read are the owner's, never the starter's: the owner's
+// GITHUB_TOKEN setting is delivered, and neither the starter's setting nor the
+// starter's secret-store GITHUB_TOKEN is.
 func TestStartNoAuth_NonOwnerStarterGitTokenNotDelivered(t *testing.T) {
 	ctx := context.Background()
 	f := newSWFixture(t, "na-nonowner", swOptions{})
@@ -969,8 +970,8 @@ func TestStartNoAuth_NonOwnerStarterGitTokenNotDelivered(t *testing.T) {
 	require.NoError(t, f.store.UpdateAgent(ctx, f.agent))
 	f.env(t, noAuthGitTokenKey, "na-starter-git-token", store.ScopeUser, f.admin.ID, false)
 	f.env(t, noAuthGitTokenKey, "na-owner-git-token", store.ScopeUser, f.agent.OwnerID, false)
-	// The starter's own secret-store git token too: never listed, fetched
-	// or delivered.
+	// The starter's own secret-store git token too: never fetched or
+	// delivered.
 	f.secret(t, noAuthGitTokenKey, "na-starter-secret-git-token", store.SecretTypeEnvironment, store.ScopeUser, f.admin.ID)
 
 	rec := f.lifecycle(t, f.admin, "start", nil)
@@ -984,6 +985,8 @@ func TestStartNoAuth_NonOwnerStarterGitTokenNotDelivered(t *testing.T) {
 	for _, s := range f.client.lastStartResolvedSecrets {
 		assert.NotEqual(t, "na-starter-git-token", s.Value, "the starter's setting reached the resolved secrets")
 		assert.NotEqual(t, "na-starter-secret-git-token", s.Value, "the starter's secret reached the resolved secrets")
+		assert.NotEqual(t, noAuthGitTokenKey, s.Name, "a git token reached the resolved secrets (target %s)", s.Target)
+		assert.NotEqual(t, noAuthGitTokenKey, s.Target, "a git token reached the resolved secrets (name %s)", s.Name)
 	}
 	assert.NotContains(t, f.fb.fetchedNames(), noAuthGitTokenKey, "no git token value was read (the owner has none in the secret store)")
 }
