@@ -969,6 +969,9 @@ func TestStartNoAuth_NonOwnerStarterGitTokenNotDelivered(t *testing.T) {
 	require.NoError(t, f.store.UpdateAgent(ctx, f.agent))
 	f.env(t, noAuthGitTokenKey, "na-starter-git-token", store.ScopeUser, f.admin.ID, false)
 	f.env(t, noAuthGitTokenKey, "na-owner-git-token", store.ScopeUser, f.agent.OwnerID, false)
+	// The starter's own secret-store git token too: never listed, fetched
+	// or delivered.
+	f.secret(t, noAuthGitTokenKey, "na-starter-secret-git-token", store.SecretTypeEnvironment, store.ScopeUser, f.admin.ID)
 
 	rec := f.lifecycle(t, f.admin, "start", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
@@ -976,5 +979,11 @@ func TestStartNoAuth_NonOwnerStarterGitTokenNotDelivered(t *testing.T) {
 	assert.Equal(t, "na-owner-git-token", f.client.lastResolvedEnv[noAuthGitTokenKey], "the owner's setting")
 	for k, v := range f.client.lastResolvedEnv {
 		assert.NotEqual(t, "na-starter-git-token", v, "the starter's setting reached the env as %s", k)
+		assert.NotEqual(t, "na-starter-secret-git-token", v, "the starter's secret reached the env as %s", k)
 	}
+	for _, s := range f.client.lastStartResolvedSecrets {
+		assert.NotEqual(t, "na-starter-git-token", s.Value, "the starter's setting reached the resolved secrets")
+		assert.NotEqual(t, "na-starter-secret-git-token", s.Value, "the starter's secret reached the resolved secrets")
+	}
+	assert.NotContains(t, f.fb.fetchedNames(), noAuthGitTokenKey, "no git token value was read (the owner has none in the secret store)")
 }
