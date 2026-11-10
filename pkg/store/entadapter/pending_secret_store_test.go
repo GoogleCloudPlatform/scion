@@ -230,3 +230,60 @@ func TestPendingSecretStore_ConcurrentFirstWrites(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, list, 1)
 }
+
+// TestPendingSecretStore_ConcurrentSameAgentReplaces: concurrent
+// replacements by the writing agent each succeed against the row the
+// previous one left. One row remains, it keeps the first write's created
+// time and expiry, and every replaced value ref is returned exactly once.
+func TestPendingSecretStore_ConcurrentSameAgentReplaces(t *testing.T) {
+	cs := newTestCompositeStore(t)
+	ctx := context.Background()
+	created := time.Now().UTC().Truncate(time.Second)
+
+	first := newPendingSecretInput("RACE_KEY", "owner-1", "agent-a", "ref-0")
+	_, err := cs.CreateOrReplacePendingSecret(ctx, first, created)
+	require.NoError(t, err)
+
+	const n = 6
+	results := make([]*store.PendingSecretWriteResult, n)
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			in := newPendingSecretInput("RACE_KEY", "owner-1", "agent-a", "ref-"+string(rune('1'+i)))
+			results[i], errs[i] = cs.CreateOrReplacePendingSecret(ctx, in, created.Add(time.Minute))
+		}(i)
+	}
+	wg.Wait()
+
+	dropped := map[string]int{}
+	written := map[string]bool{}
+	for i := 0; i < n; i++ {
+		require.NoError(t, errs[i])
+		assert.True(t, results[i].Replaced)
+		require.Len(t, results[i].DroppedValueRefs, 1)
+		dropped[results[i].DroppedValueRefs[0]]++
+		written[results[i].Secret.ValueRef] = true
+	}
+
+	list, err := cs.ListPendingSecretsByOwner(ctx, store.ScopeUser, "owner-1")
+	require.NoError(t, err)
+	require.Len(t, list, 1)
+	assert.True(t, list[0].Created.Equal(created), "created is kept")
+	assert.True(t, list[0].ExpiresAt.Equal(created.Add(store.PendingSecretTTL)), "the expiry is kept")
+	final, err := cs.GetPendingSecret(ctx, list[0].ID)
+	require.NoError(t, err)
+
+	// Every ref but the surviving one was dropped exactly once.
+	assert.Equal(t, 1, dropped["ref-0"])
+	for ref := range written {
+		if ref == final.ValueRef {
+			assert.Zero(t, dropped[ref], "the surviving value is not dropped")
+		} else {
+			assert.Equal(t, 1, dropped[ref], "replaced value %s is dropped once", ref)
+		}
+	}
+	assert.Len(t, dropped, n)
+}
