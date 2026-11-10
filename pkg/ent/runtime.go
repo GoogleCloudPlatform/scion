@@ -1263,8 +1263,12 @@ func init() {
 			return nil
 		}
 	}()
+	// decisionanswerDescMatchedDefault is the schema descriptor for matched_default field.
+	decisionanswerDescMatchedDefault := decisionanswerFields[22].Descriptor()
+	// decisionanswer.DefaultMatchedDefault holds the default value on creation for the matched_default field.
+	decisionanswer.DefaultMatchedDefault = decisionanswerDescMatchedDefault.Default.(bool)
 	// decisionanswerDescCreatedAt is the schema descriptor for created_at field.
-	decisionanswerDescCreatedAt := decisionanswerFields[21].Descriptor()
+	decisionanswerDescCreatedAt := decisionanswerFields[23].Descriptor()
 	// decisionanswer.DefaultCreatedAt holds the default value on creation for the created_at field.
 	decisionanswer.DefaultCreatedAt = decisionanswerDescCreatedAt.Default.(func() time.Time)
 	// decisionanswerDescID is the schema descriptor for id field.

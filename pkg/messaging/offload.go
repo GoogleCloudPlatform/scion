@@ -67,8 +67,9 @@ var offloadMetadataKeys = map[string]bool{
 //
 // messages.MetadataSenderTimezone is reserved for the same reason: the hub
 // sets it from a human sender's profile after this strip. So are the choice
-// response keys (messages.MetadataChoiceKey and the rest), which only the
-// hub sets, on the choice-response it delivers.
+// response keys (messages.MetadataChoiceKey and the rest, the set keys
+// messages.MetadataChoiceBatch and MetadataChoiceAnswers included), which
+// only the hub sets, on the choice-response it delivers.
 var reservedMetadataKeys = map[string]bool{
 	MetaBodyOffloaded:                 true,
 	MetaBodyChars:                     true,
@@ -83,6 +84,8 @@ var reservedMetadataKeys = map[string]bool{
 	messages.MetadataChoiceVersion:    true,
 	messages.MetadataChoiceID:         true,
 	messages.MetadataChoiceProvenance: true,
+	messages.MetadataChoiceBatch:      true,
+	messages.MetadataChoiceAnswers:    true,
 }
 
 // DefaultPreviewBudgetBytes is the compiled default preview byte budget

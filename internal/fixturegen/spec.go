@@ -360,6 +360,7 @@ func Spec() []TableFixture {
 				"answered_by_user_id": userID, "answered_by_name": "Alice", "answered_by_email": "alice@example.com",
 				"provenance": "direct", "outcome": "answer", "surface": "native",
 				"response_message_id": messageID, "idempotency_key": "web-1", "created_at": baseTime.Add(time.Minute),
+				"batch_id": "ba000000-0000-0000-0000-000000000001", "matched_default": false,
 			},
 		}},
 		{Table: "decision_key_counters", Rows: []row{

@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 381
+**Operations:** 382
 
 ## Table of Contents
 
@@ -201,6 +201,7 @@
 - [chat.conversation.promote](#chatconversationpromote) — Promote one of the caller's DMs with an agent into a thread of the agent's space. Needs DM participation, project:read on the agent's project, and the create_thread action of chat-space-access (project.chat_post; 403 chat_post_denied without it); a token also needs inbox:write under the DM rule, and project.chat_post is checked on its holder's account (the project:chat_post selector is not needed)
 - [chat.decision.read](#chatdecisionread) — Read one version of a choice prompt decision. Needs read access to the prompt's conversation (project:read for a thread; the caller in a user slot of a DM key). Agents, visitors and tokens get 403; a missing or unreadable decision is 404. 404 while web.chat_choices is off
 - [chat.decision.answer](#chatdecisionanswer) — Answer a choice prompt decision by choice id (the label is copied from the stored row). Needs the right to send in the prompt's conversation (project:read and project.chat_post for a thread; for a DM, only the user in its key). Agents, visitors and tokens get 403, and so does a user other than the one an agent-interpreted answer records, or a user the asking agent takes no messages from (MESSAGE_DENIED, the chat send's check; a confirm is not delivered, so it is not checked). A replaced version or an answered one is 409, as is an idempotency key reused for another answer; the first answer wins. Records the answer and a choice-response message, delivers it to the asking agent and publishes choice.updated. 404 while web.chat_choices is off
+- [chat.choiceprompt.answer](#chatchoicepromptanswer) — Answer every actionable decision of a choice prompt with two or more decisions as one set, by choice id (labels are copied from the stored rows). Needs the right to send in the prompt's conversation (project:read and project.chat_post for a thread; for a DM, only the user in its key). Agents and visitors get 403, tokens and other non-session credentials the session-only 403, and a user the asking agent takes no messages from 403 MESSAGE_DENIED (an all-confirm set is not delivered, so it is not checked). A missing or unreadable prompt is 404; a malformed set is 400; a set that does not equal the actionable set is 409 answer_set_changed with fresh views and a reason per row, and stores nothing; an idempotency key reused for other answers is 422. Records one answer per row with a shared batch id and one choice-response message in one transaction, delivers it to the asking agent and publishes choice.updated per row. 404 while web.chat_choices is off
 - [role.definition.create](#roledefinitioncreate) — Create a custom role definition (create, import, duplicate). A token needs role:create and role:read on a hub boundary and the holder's live role.create authority; the holder must hold every permission of the role within the token's selectors. A project-scoped definition can be bound in every project, so it is judged on the holder's system-scope authority; a system-scoped definition is refused to every token
 - [role.definition.update](#roledefinitionupdate) — Update a custom role definition. A token needs role:update and role:read on a hub boundary and the holder's live role.update authority; the holder must hold every permission of the updated role within the token's selectors, judged as for create
 - [role.definition.delete](#roledefinitiondelete) — Delete a custom role definition. A token needs role:delete and role:read on a hub boundary and the holder's live role.delete authority; system roles and roles that are still bound are kept
@@ -7608,6 +7609,56 @@
 - `pkg/hub:TestDecisionAnswer_ConcurrentOneWinner`
 - `pkg/hub:TestDecisionAnswer_IdempotencyKeyKeepsChecks`
 - `pkg/hub:TestDecisionAnswer_AskerRefusesMessages`
+
+---
+
+## chat.choiceprompt.answer
+
+**Domain:** chat
+
+**Description:** Answer every actionable decision of a choice prompt with two or more decisions as one set, by choice id (labels are copied from the stored rows). Needs the right to send in the prompt's conversation (project:read and project.chat_post for a thread; for a DM, only the user in its key). Agents and visitors get 403, tokens and other non-session credentials the session-only 403, and a user the asking agent takes no messages from 403 MESSAGE_DENIED (an all-confirm set is not delivered, so it is not checked). A missing or unreadable prompt is 404; a malformed set is 400; a set that does not equal the actionable set is 409 answer_set_changed with fresh views and a reason per row, and stores nothing; an idempotency key reused for other answers is 422. Records one answer per row with a shared batch id and one choice-response message in one transaction, delivers it to the asking agent and publishes choice.updated per row. 404 while web.chat_choices is off
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/choice-prompts/{messageId}/answers` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `INTERACTIVE_STATE`)
+
+**Base Permission:** `inbox.write`
+
+**Resource Resolver:** conversation-project
+
+**Effects:** `create-resource`, `emit-external-effect`
+
+### Audit
+
+- **Event Type:** `chat.choiceprompt.answer`
+- **Context Fields:** actor_id, prompt_message_id, batch_id
+- **After Fields:** response_message_id
+- **Atomic:** No
+- **Non-Atomic Justification:** The answers and their response message are stored in one transaction before agent delivery, which is fire-and-forget
+
+### External Effect Policy
+
+- **Delivery:** `fire_and_forget`
+- **Failure Mode:** `log_and_continue`
+- **Idempotency:** idempotency_key of the set
+- **Retry:** a client retry with the same idempotency key and answers replays the recorded set
+- **Auth Before Emit:** Yes
+
+**Denial Codes:** `forbidden`, `not_found`, `conflict`
+
+### Tests
+
+- `pkg/hub:TestChoiceSetAnswer_RecordsAndDeliversOneResponse`
+- `pkg/hub:TestChoiceSetAnswer_ChangedSet409`
+- `pkg/hub:TestChoiceSetAnswer_Authorization`
 
 ---
 

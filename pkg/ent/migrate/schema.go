@@ -1303,6 +1303,8 @@ var (
 		{Name: "authorizing_user_id", Type: field.TypeString, Nullable: true},
 		{Name: "delegation_grant_id", Type: field.TypeString, Nullable: true},
 		{Name: "idempotency_key", Type: field.TypeString, Nullable: true, Size: 128},
+		{Name: "batch_id", Type: field.TypeUUID, Nullable: true},
+		{Name: "matched_default", Type: field.TypeBool, Default: false},
 		{Name: "created_at", Type: field.TypeTime},
 	}
 	// DecisionAnswersTable holds the schema information for the "decision_answers" table.
@@ -1324,7 +1326,7 @@ var (
 			{
 				Name:    "decisionanswer_project_id_created_at",
 				Unique:  false,
-				Columns: []*schema.Column{DecisionAnswersColumns[2], DecisionAnswersColumns[21]},
+				Columns: []*schema.Column{DecisionAnswersColumns[2], DecisionAnswersColumns[23]},
 			},
 			{
 				Name:    "decisionanswer_response_message_id",
@@ -1335,6 +1337,11 @@ var (
 				Name:    "decisionanswer_answered_by_user_id",
 				Unique:  false,
 				Columns: []*schema.Column{DecisionAnswersColumns[9]},
+			},
+			{
+				Name:    "decisionanswer_batch_id",
+				Unique:  false,
+				Columns: []*schema.Column{DecisionAnswersColumns[21]},
 			},
 		},
 	}

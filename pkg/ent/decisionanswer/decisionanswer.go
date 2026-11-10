@@ -55,6 +55,10 @@ const (
 	FieldDelegationGrantID = "delegation_grant_id"
 	// FieldIdempotencyKey holds the string denoting the idempotency_key field in the database.
 	FieldIdempotencyKey = "idempotency_key"
+	// FieldBatchID holds the string denoting the batch_id field in the database.
+	FieldBatchID = "batch_id"
+	// FieldMatchedDefault holds the string denoting the matched_default field in the database.
+	FieldMatchedDefault = "matched_default"
 	// FieldCreatedAt holds the string denoting the created_at field in the database.
 	FieldCreatedAt = "created_at"
 	// Table holds the table name of the decisionanswer in the database.
@@ -84,6 +88,8 @@ var Columns = []string{
 	FieldAuthorizingUserID,
 	FieldDelegationGrantID,
 	FieldIdempotencyKey,
+	FieldBatchID,
+	FieldMatchedDefault,
 	FieldCreatedAt,
 }
 
@@ -110,6 +116,8 @@ var (
 	DefaultAnsweredByEmail string
 	// IdempotencyKeyValidator is a validator for the "idempotency_key" field. It is called by the builders before save.
 	IdempotencyKeyValidator func(string) error
+	// DefaultMatchedDefault holds the default value on creation for the "matched_default" field.
+	DefaultMatchedDefault bool
 	// DefaultCreatedAt holds the default value on creation for the "created_at" field.
 	DefaultCreatedAt func() time.Time
 	// DefaultID holds the default value on creation for the "id" field.
@@ -300,6 +308,16 @@ func ByDelegationGrantID(opts ...sql.OrderTermOption) OrderOption {
 // ByIdempotencyKey orders the results by the idempotency_key field.
 func ByIdempotencyKey(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldIdempotencyKey, opts...).ToFunc()
+}
+
+// ByBatchID orders the results by the batch_id field.
+func ByBatchID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldBatchID, opts...).ToFunc()
+}
+
+// ByMatchedDefault orders the results by the matched_default field.
+func ByMatchedDefault(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldMatchedDefault, opts...).ToFunc()
 }
 
 // ByCreatedAt orders the results by the created_at field.

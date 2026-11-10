@@ -83,6 +83,12 @@ func decisionInputs(t *testing.T, raw string) []messages.DecisionInput {
 	return in
 }
 
+// oneDecision is a one-decision prompt (the first decision of twoDecisions):
+// it is answered one click at a time on the per-decision endpoint. A
+// prompt with two or more decisions is a set (design choices v5) and is
+// answered with the set endpoint.
+const oneDecision = `[{"id":"D234","question":"Ship the **feature** now?","choices":["yes","no"],"default":"yes"}]`
+
 const twoDecisions = `[{"id":"D234","question":"Ship the **feature** now?","choices":["yes","no"],"default":"yes"},{"question":"Which approach?","choices":[{"id":"a","label":"Extend"},{"id":"b","label":"New type"}]}]`
 
 // sendAsAgent posts req to the agent's outbound-message handler.
@@ -189,7 +195,7 @@ func TestChoicesSend_UserDM(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, messages.TypeChoicePrompt, msg.Type)
 	assert.True(t, strings.HasPrefix(msg.Msg, "Two calls\n\n"))
-	assert.Contains(t, msg.Msg, "**2 decisions needed**")
+	assert.Contains(t, msg.Msg, "**2 decisions needed. Answer all of them together.**")
 	dmKey, err := messages.DMConversationKey("agent", f.agent.ID, "user", f.bob.ID)
 	require.NoError(t, err)
 	assert.Equal(t, dmKey, msg.ThreadID)
@@ -354,7 +360,7 @@ func TestHubMintedTypes_RefusedOnClientPaths(t *testing.T) {
 // Acceptance 1: both decision routes are 404 while the experiment is off.
 func TestDecisionRoutes_ExperimentOff404(t *testing.T) {
 	f := newChoicesFixture(t)
-	_, res := f.topicPrompt(t, twoDecisions, false)
+	_, res := f.topicPrompt(t, oneDecision, false)
 	row := res.Decisions[0].RowID
 	setChoicesExperiment(t, f.srv, false)
 	assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, f.srv, f.bob, http.MethodGet, "/api/v1/decisions/"+row, nil).Code)
@@ -384,7 +390,7 @@ func TestDecisionGet_ReadAccess(t *testing.T) {
 // in a DM only the addressee may answer.
 func TestDecisionAnswer_Authorization(t *testing.T) {
 	f := newChoicesFixture(t)
-	_, res := f.topicPrompt(t, twoDecisions, false)
+	_, res := f.topicPrompt(t, oneDecision, false)
 	row := res.Decisions[0].RowID
 
 	assert.Equal(t, http.StatusNotFound, f.answer(t, f.outsider, row, map[string]interface{}{"choice_id": "1"}).Code)
@@ -410,7 +416,7 @@ func TestDecisionAnswer_Authorization(t *testing.T) {
 // choice metadata to the asker.
 func TestDecisionAnswer_RecordsAndDelivers(t *testing.T) {
 	f := newChoicesFixture(t)
-	resp := f.sendPromptToBob(t, twoDecisions, false)
+	resp := f.sendPromptToBob(t, oneDecision, false)
 	row := resp.Decisions[0].RowID
 	before := len(f.dispatcher.getMessages())
 
@@ -457,8 +463,9 @@ func TestDecisionAnswer_RecordsAndDelivers(t *testing.T) {
 	assert.Equal(t, http.StatusConflict, rr.Code)
 	assert.Equal(t, ErrCodeDecisionAnswered, errorCode(t, rr))
 
-	// An unknown choice id is refused.
-	rr = f.answer(t, f.bob, resp.Decisions[1].RowID, map[string]interface{}{"choice_id": "zzz"})
+	// An unknown choice id is refused (on a second one-decision prompt).
+	second := f.sendPromptToBob(t, `[{"id":"D235","question":"Second?","choices":["yes","no"]}]`, false)
+	rr = f.answer(t, f.bob, second.Decisions[0].RowID, map[string]interface{}{"choice_id": "zzz"})
 	assert.Equal(t, http.StatusBadRequest, rr.Code)
 }
 
@@ -466,7 +473,7 @@ func TestDecisionAnswer_RecordsAndDelivers(t *testing.T) {
 // delivers nothing new.
 func TestDecisionAnswer_IdempotentReplay(t *testing.T) {
 	f := newChoicesFixture(t)
-	_, res := f.topicPrompt(t, twoDecisions, false)
+	_, res := f.topicPrompt(t, oneDecision, false)
 	row := res.Decisions[0].RowID
 	body := map[string]interface{}{"choice_id": "2", "idempotency_key": "click-1"}
 
@@ -488,7 +495,7 @@ func TestDecisionAnswer_IdempotentReplay(t *testing.T) {
 // gets 409.
 func TestDecisionAnswer_ConcurrentOneWinner(t *testing.T) {
 	f := newChoicesFixture(t)
-	_, res := f.topicPrompt(t, twoDecisions, false)
+	_, res := f.topicPrompt(t, oneDecision, false)
 	row := res.Decisions[0].RowID
 
 	var wg sync.WaitGroup
@@ -521,7 +528,7 @@ func TestDecisionAnswer_ConcurrentOneWinner(t *testing.T) {
 // version's view.
 func TestDecisionAnswer_Replaced409(t *testing.T) {
 	f := newChoicesFixture(t)
-	_, v1 := f.topicPrompt(t, twoDecisions, false)
+	_, v1 := f.topicPrompt(t, oneDecision, false)
 	_, v2 := f.topicPrompt(t, `[{"id":"D234","question":"Ship it?","choices":["yes","no"]}]`, true)
 	rr := f.answer(t, f.bob, v1.Decisions[0].RowID, map[string]interface{}{"choice_id": "1"})
 	require.Equal(t, http.StatusConflict, rr.Code, "body: %s", rr.Body.String())
@@ -534,7 +541,7 @@ func TestDecisionAnswer_PublishesChoiceUpdated(t *testing.T) {
 	f := newChoicesFixture(t)
 	events, unsub := f.srv.events.Subscribe("project." + f.project.ID + ".choice.updated")
 	defer unsub()
-	_, res := f.topicPrompt(t, twoDecisions, false)
+	_, res := f.topicPrompt(t, oneDecision, false)
 	rr := f.answer(t, f.bob, res.Decisions[0].RowID, map[string]interface{}{"choice_id": "1"})
 	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
 	evts := collectEvents(events)
@@ -555,7 +562,8 @@ func TestDecisionAnswer_PublishesChoiceUpdated(t *testing.T) {
 // experiment is off.
 func TestChoicesHistory_ViewsGatedByExperiment(t *testing.T) {
 	f := newChoicesFixture(t)
-	msg, res := f.topicPrompt(t, twoDecisions, false)
+	msg, _ := f.topicPrompt(t, twoDecisions, false)
+	single, res := f.topicPrompt(t, `[{"id":"D300","question":"Ship the **feature** now?","choices":["yes","no"],"default":"yes"}]`, false)
 	rr := f.answer(t, f.bob, res.Decisions[0].RowID, map[string]interface{}{"choice_id": "1"})
 	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
 	var ans DecisionAnswerResponse
@@ -575,7 +583,7 @@ func TestChoicesHistory_ViewsGatedByExperiment(t *testing.T) {
 	cr, ok := h.MessageChoiceResponses[ans.ResponseMessageID]
 	require.True(t, ok)
 	assert.Equal(t, "yes", cr.Label)
-	assert.Equal(t, msg.ID, cr.PromptMessageID)
+	assert.Equal(t, single.ID, cr.PromptMessageID)
 
 	setChoicesExperiment(t, f.srv, false)
 	h = history()
@@ -636,7 +644,7 @@ func TestDecisionAnswer_DMChoiceUpdatedOnlyToUser(t *testing.T) {
 func TestDecisionAnswer_AskerGoneStoresFailedResponse(t *testing.T) {
 	f := newChoicesFixture(t)
 	ctx := context.Background()
-	_, res := f.topicPrompt(t, twoDecisions, false)
+	_, res := f.topicPrompt(t, oneDecision, false)
 	require.NoError(t, f.store.DeleteAgent(ctx, f.agent.ID))
 	before := len(f.dispatcher.getMessages())
 
@@ -662,7 +670,7 @@ func TestDecisionAnswer_AskerGoneStoresFailedResponse(t *testing.T) {
 // selectors, which is why a project:read token covers the matrix rows.
 func TestDecisionRoutes_TokenAndVisitorForbidden(t *testing.T) {
 	f := newChoicesFixture(t)
-	_, res := f.topicPrompt(t, twoDecisions, false)
+	_, res := f.topicPrompt(t, oneDecision, false)
 	row := res.Decisions[0].RowID
 
 	uat := NewScopedUserIdentity(authUser(f.bob), f.project.ID, []string{"project:read"})
@@ -693,7 +701,7 @@ func TestDecisionRoutes_TokenAndVisitorForbidden(t *testing.T) {
 // another choice, or from another user, is 409 at the hub.
 func TestDecisionAnswer_IdempotencyKeyOtherAnswer409(t *testing.T) {
 	f := newChoicesFixture(t)
-	_, res := f.topicPrompt(t, twoDecisions, false)
+	_, res := f.topicPrompt(t, oneDecision, false)
 	row := res.Decisions[0].RowID
 	first := f.answer(t, f.bob, row, map[string]interface{}{"choice_id": "1", "idempotency_key": "k1"})
 	require.Equal(t, http.StatusOK, first.Code, "body: %s", first.Body.String())
@@ -715,7 +723,7 @@ func TestDecisionAnswer_IdempotencyKeyOtherAnswer409(t *testing.T) {
 // decision but not answer it.
 func TestDecisionAnswer_ReaderForbidden(t *testing.T) {
 	f := newChoicesFixture(t)
-	_, res := f.topicPrompt(t, twoDecisions, false)
+	_, res := f.topicPrompt(t, oneDecision, false)
 	row := res.Decisions[0].RowID
 	f.makeChatReader(t, f.bob)
 
@@ -753,7 +761,7 @@ func (f *choicesFixture) recordInterpreted(t *testing.T, u *store.User, row, cho
 // answers 200.
 func TestDecisionAnswer_IdempotencyKeyKeepsChecks(t *testing.T) {
 	f := newChoicesFixture(t)
-	_, res := f.topicPrompt(t, twoDecisions, false)
+	_, res := f.topicPrompt(t, oneDecision, false)
 	row := res.Decisions[0].RowID
 	f.recordInterpreted(t, f.alice, row, "1")
 
@@ -776,9 +784,10 @@ func TestDecisionAnswer_IdempotencyKeyKeepsChecks(t *testing.T) {
 	assert.Equal(t, ErrCodeDecisionAnswered, errorCode(t, rr))
 
 	// Replaced: a fresh key is 409 replaced.
-	other := res.Decisions[1].RowID
-	f.topicPrompt(t, `[{"id":"`+res.Decisions[1].Key+`","question":"Which?","choices":["a","b"]}]`, true)
-	rr = f.answer(t, f.bob, other, map[string]interface{}{"choice_id": "a", "idempotency_key": "bob-replaced"})
+	_, otherRes := f.topicPrompt(t, `[{"id":"Q1","question":"Which?","choices":["a","b"]}]`, false)
+	other := otherRes.Decisions[0].RowID
+	f.topicPrompt(t, `[{"id":"Q1","question":"Which, again?","choices":["a","b"]}]`, true)
+	rr = f.answer(t, f.bob, other, map[string]interface{}{"choice_id": "1", "idempotency_key": "bob-replaced"})
 	require.Equal(t, http.StatusConflict, rr.Code, "body: %s", rr.Body.String())
 	assert.Equal(t, ErrCodeDecisionReplaced, errorCode(t, rr))
 
@@ -850,7 +859,7 @@ func TestDecisionAnswer_InterpretedAfterStateCheck409(t *testing.T) {
 		return &interpretedFirstStore{Store: inner, fault: f}
 	})
 	f := newChoicesFixtureOn(t, srv, st, alice, bob, project)
-	_, res := f.topicPrompt(t, twoDecisions, false)
+	_, res := f.topicPrompt(t, oneDecision, false)
 	row := res.Decisions[0].RowID
 
 	first.before = func() { f.recordInterpreted(t, f.alice, row, "1") }
@@ -882,7 +891,7 @@ func TestDecisionAnswer_InterpretedAfterStateCheck409(t *testing.T) {
 // the chat send's MESSAGE_DENIED before anything is recorded.
 func TestDecisionAnswer_AskerRefusesMessages(t *testing.T) {
 	f := newChoicesFixture(t)
-	_, res := f.topicPrompt(t, twoDecisions, false)
+	_, res := f.topicPrompt(t, oneDecision, false)
 	row := res.Decisions[0].RowID
 	ctx := context.Background()
 

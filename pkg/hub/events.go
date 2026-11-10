@@ -375,6 +375,10 @@ type UserMessageEvent struct {
 	Decisions      []DecisionView      `json:"decisions,omitempty"`
 	ChoiceIntro    string              `json:"choiceIntro,omitempty"`
 	ChoiceResponse *ChoiceResponseView `json:"choiceResponse,omitempty"`
+	// AnswerMode is set with Decisions, and ChoiceResponseSet on the
+	// response row of a set submit (design choices v5, 5.1 and 5.2).
+	AnswerMode        string                 `json:"answerMode,omitempty"`
+	ChoiceResponseSet *ChoiceResponseSetView `json:"choiceResponseSet,omitempty"`
 }
 
 // UserMessageEventMetadata is the message metadata a live chat event
@@ -1014,8 +1018,10 @@ func withChatChoicePayload(evt UserMessageEvent, p *choiceEventPayload) UserMess
 	if p.Prompt != nil {
 		evt.Decisions = p.Prompt.Decisions
 		evt.ChoiceIntro = p.Prompt.Intro
+		evt.AnswerMode = p.Prompt.AnswerMode
 	}
 	evt.ChoiceResponse = p.Response
+	evt.ChoiceResponseSet = p.ResponseSet
 	return evt
 }
 
