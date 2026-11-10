@@ -181,6 +181,7 @@ export function buildFixture() {
           'web.agent_edit': true,
           'web.artifact_manage_access': false,
           'web.artifact_review_editor': false,
+          'web.chat_choices': false,
           'web.chat_scheduled_send': false,
           'web.chat_starred_messages': true,
           'web.gcs_links': false,
