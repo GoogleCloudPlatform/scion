@@ -298,7 +298,8 @@ func (s *MaintenanceStore) SeedMaintenanceOperations(ctx context.Context) error 
 // release with the decoding secret-hub-id-migration starts on it. A row
 // still carrying secretHubIDMigrationPreDecodeDescription gets the current
 // description, and if that earlier migration had completed, the row is
-// also moved back to pending: the earlier run may have left encoded values
+// also moved back to pending, without the earlier run's start, end,
+// starter and result: the earlier run may have left encoded values
 // in Secret Manager, so the panel must offer the migration (and its dry
 // run) again. Nothing runs automatically. A running or failed row keeps
 // its status. Once the description is replaced the marker is gone, so a
@@ -322,6 +323,8 @@ func (s *MaintenanceStore) reopenPreDecodeSecretMigration(ctx context.Context) e
 		SetStatus(store.MaintenanceStatusPending).
 		ClearStartedAt().
 		ClearCompletedAt().
+		ClearStartedBy().
+		ClearResult().
 		SetDescription(current).
 		Save(ctx); err != nil {
 		return fmt.Errorf("reopening the secret migration: %w", mapError(err))

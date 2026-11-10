@@ -234,10 +234,13 @@ func parsesAsEnvelope(stored string) bool {
 }
 
 // writeVerified writes value for row s with GCPBackend.SetVerified. On
-// failure it logs the row with kept (a fixed text saying what was kept,
-// never the value or the error text), counts it as unverified or failed,
-// and returns false; the row is left as it was.
-func writeVerified(ctx context.Context, gcp *GCPBackend, s store.Secret, value, kept string, logger io.Writer, report *MigrationReport) bool {
+// failure it logs the row (never the value or the error text), counts it
+// as unverified or failed, and returns false; the row is left as it was.
+// A failed read-back comes after a Secret Manager version was added, so
+// its line ends with unverifiedKept, a fixed text saying what was kept; a
+// failed write added no version, so its line says only that the row is
+// left as it was.
+func writeVerified(ctx context.Context, gcp *GCPBackend, s store.Secret, value, unverifiedKept string, logger io.Writer, report *MigrationReport) bool {
 	input := &SetSecretInput{
 		Name:          s.Key,
 		Value:         value,
@@ -253,11 +256,11 @@ func writeVerified(ctx context.Context, gcp *GCPBackend, s store.Secret, value, 
 	}
 	if _, _, err := gcp.SetVerified(ctx, input); err != nil {
 		if errors.Is(err, ErrSecretVerify) {
-			logf(logger, "  UNVERIFIED  %s (scope: %s/%s) - the Secret Manager read-back did not confirm the value; %s\n", s.Key, s.Scope, s.ScopeID, kept)
+			logf(logger, "  UNVERIFIED  %s (scope: %s/%s) - the Secret Manager read-back did not confirm the value; %s\n", s.Key, s.Scope, s.ScopeID, unverifiedKept)
 			report.Unverified++
 			return false
 		}
-		logf(logger, "  ERROR  %s (scope: %s/%s) - writing to Secret Manager failed (%s); %s\n", s.Key, s.Scope, s.ScopeID, status.Code(err), kept)
+		logf(logger, "  ERROR  %s (scope: %s/%s) - writing to Secret Manager failed (%s); the row is left as it was\n", s.Key, s.Scope, s.ScopeID, status.Code(err))
 		report.Failed++
 		return false
 	}

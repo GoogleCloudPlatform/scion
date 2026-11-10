@@ -570,7 +570,9 @@ func seedPreDecodeSecretMigration(t *testing.T, s *MaintenanceStore, status stri
 		SetStatus(status)
 	if status == store.MaintenanceStatusCompleted {
 		now := time.Now().UTC()
-		c = c.SetStartedAt(now).SetCompletedAt(now)
+		c = c.SetStartedAt(now).SetCompletedAt(now).
+			SetStartedBy("admin@example.com").
+			SetResult(`{"log":"Migration complete: 1 migrated, 0 skipped\n"}`)
 	}
 	require.NoError(t, c.Exec(ctx))
 }
@@ -589,6 +591,8 @@ func TestSeedMaintenanceOperations_ReopensPreDecodeSecretMigrationOnce(t *testin
 	assert.Equal(t, store.MaintenanceStatusPending, op.Status)
 	assert.Nil(t, op.StartedAt)
 	assert.Nil(t, op.CompletedAt)
+	assert.Empty(t, op.StartedBy, "the earlier run's starter must be cleared")
+	assert.Empty(t, op.Result, "the earlier run's result must be cleared")
 	assert.NotEqual(t, secretHubIDMigrationPreDecodeDescription, op.Description, "the one-time marker must be replaced")
 
 	// It completes again under this release; a later start leaves it alone.

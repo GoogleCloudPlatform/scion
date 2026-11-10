@@ -783,3 +783,34 @@ func TestMigrateLocalToGCP_KeepsInjectionModeAndAllowProgeny(t *testing.T) {
 		}
 	})
 }
+
+// TestMigrateLocalToGCP_RepairWriteFailureLine: when a repair's write
+// fails, no Secret Manager version was added, so the line says only that
+// the row is left as it was.
+func TestMigrateLocalToGCP_RepairWriteFailureLine(t *testing.T) {
+	f := newMigrationFixture(t)
+	const plain = "plain-value-repair-write-failure"
+	raw := f.seedOldRawCopy(t, "OLD_WRITE", plain)
+	f.sm.addErr[f.path("OLD_WRITE", store.ScopeUser, migScopeID)] = status.Error(codes.Internal, "write rejected")
+
+	report, log, err := f.run(t, false)
+	if !errors.Is(err, ErrMigrationIncomplete) {
+		t.Fatalf("err = %v, want ErrMigrationIncomplete", err)
+	}
+	if report.Failed != 1 || report.Repaired != 0 {
+		t.Fatalf("report = %+v, want 1 failed", report)
+	}
+	var line string
+	for _, l := range strings.Split(log, "\n") {
+		if strings.Contains(l, "ERROR  OLD_WRITE") {
+			line = l
+		}
+	}
+	if !strings.HasSuffix(line, "; the row is left as it was") {
+		t.Errorf("the write-failure line must end with the row being left as it was, got %q", line)
+	}
+	if strings.Contains(line, "previous Secret Manager version") {
+		t.Error("the write-failure line claims a kept previous version, but no version was added")
+	}
+	assertNoLeak(t, report, err, log, plain, raw)
+}
