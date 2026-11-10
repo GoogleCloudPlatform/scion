@@ -131,6 +131,17 @@ timeouts:
   # Maximum number of retries for push notification webhook delivery.
   push_retry_max: 3
 
+# Agent replies: while an A2A call waits, the bridge reads the agent's reply
+# from the caller's own conversation with the agent, with the caller's own
+# credential. See "Agent replies" in README.md.
+reply_poll:
+  # Default true. false waits on pushed broker messages only (no
+  # same-caller check, no conversation preflight, no reply poller).
+  enabled: true
+
+  # Cap on conversation reads in flight per bridge process.
+  concurrency: 64
+
 # Request rate limiting. Limits are applied per API key (or per remote
 # address when no key is provided).
 rate_limit:

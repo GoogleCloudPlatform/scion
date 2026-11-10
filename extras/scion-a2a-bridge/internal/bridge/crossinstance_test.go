@@ -333,7 +333,7 @@ func TestCrossInstanceWaitForTaskEvent(t *testing.T) {
 
 	// Instance A: start blocking wait.
 	go func() {
-		ev, err := b.waitForTaskEvent(ctx, taskID, 5*time.Second)
+		ev, err := b.waitForTaskEvent(ctx, taskID, 5*time.Second, waitOptions{})
 		resultCh <- result{ev, err}
 	}()
 
