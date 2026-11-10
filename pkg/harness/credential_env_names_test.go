@@ -103,7 +103,7 @@ var (
 	secretNameWords      = []string{"KEY", "TOKEN", "SECRET", "CREDENTIAL", "PASSWORD", "AUTH"}
 )
 
-// TestNonSecretAuthEnvNames_OnlyProjectAndRegion (T-NS1): every name on the
+// TestNonSecretAuthEnvNames_OnlyProjectAndRegion: every name on the
 // non-secret list names a project, region or location and none names a
 // credential.
 func TestNonSecretAuthEnvNames_OnlyProjectAndRegion(t *testing.T) {
@@ -116,10 +116,10 @@ func TestNonSecretAuthEnvNames_OnlyProjectAndRegion(t *testing.T) {
 	}
 }
 
-// TestCredentialEnvNames_AlternativeAndAutodetectWithheld (T-NS2'): every
+// TestCredentialEnvNames_AlternativeAndAutodetectWithheld: every
 // alternative_env_keys entry of every built-in config is a credential name
 // and is never on the non-secret list; every autodetect key is a credential
-// name unless it is on the non-secret list (which T-NS1 bounds).
+// name unless it is on the non-secret list (which TestNonSecretAuthEnvNames_OnlyProjectAndRegion bounds).
 func TestCredentialEnvNames_AlternativeAndAutodetectWithheld(t *testing.T) {
 	set := map[string]bool{}
 	for _, name := range BuiltinCredentialEnvNames() {
@@ -156,7 +156,7 @@ func TestCredentialEnvNames_AlternativeAndAutodetectWithheld(t *testing.T) {
 	assert.True(t, set["GOOGLE_APPLICATION_CREDENTIALS"])
 }
 
-// TestCredentialEnvNames_NewRequiredNameWithheld (T-NS3): a name a config
+// TestCredentialEnvNames_NewRequiredNameWithheld: a name a config
 // adds to required_env is a credential name without any list change.
 func TestCredentialEnvNames_NewRequiredNameWithheld(t *testing.T) {
 	meta := &config.HarnessAuthMetadata{Types: map[string]config.HarnessAuthTypeMetadata{

@@ -1869,11 +1869,11 @@ func redactCloneURL(rawURL string) string {
 
 // unparseableCloneURL is what redactCloneURL shows for a URL it cannot
 // show any part of.
+const unparseableCloneURL = "<unparseable>"
+
 // noAuthGitTokenEnvKey is the one secret-store value an agent without
 // credentials still receives: the git token (the hub's noAuthGitTokenKey).
 const noAuthGitTokenEnvKey = "GITHUB_TOKEN"
-
-const unparseableCloneURL = "<unparseable>"
 
 // sanitizeCloneErrorText strips a clone URL's credentials, query string, and
 // fragment from errText. provision.ProvisionShared's own clone errors embed

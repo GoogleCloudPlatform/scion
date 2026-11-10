@@ -179,7 +179,7 @@ func assertNoCanary(t *testing.T, sent naSent, canaries []naCanary) {
 	}
 }
 
-// TestStartNoAuth_DeliversNoStoredSecrets (T1, T2, T3, T5): start, resume
+// TestStartNoAuth_DeliversNoStoredSecrets: start, resume
 // and restart of an agent without credentials send no canary, no resolved
 // secret, the project's git token (over the owner's), the plain settings,
 // and the no-credential intent.
@@ -200,7 +200,7 @@ func TestStartNoAuth_DeliversNoStoredSecrets(t *testing.T) {
 	}
 }
 
-// TestStartNoAuth_OwnerScopeOnly (T1b, the owner-scope mutant's killer):
+// TestStartNoAuth_OwnerScopeOnly:
 // with canaries only in the owner's user scope, not shared with progeny
 // (the rows the owner-path check always passes), none reaches the broker.
 func TestStartNoAuth_OwnerScopeOnly(t *testing.T) {
@@ -228,7 +228,7 @@ func TestStartNoAuth_OwnerScopeOnly(t *testing.T) {
 	}
 }
 
-// TestStartWithAuth_Unchanged (T11): the same fixture for an agent with
+// TestStartWithAuth_Unchanged: the same fixture for an agent with
 // credentials delivers every canary as before, and no intent is sent.
 func TestStartWithAuth_Unchanged(t *testing.T) {
 	for _, op := range naOps {
@@ -256,7 +256,7 @@ func TestStartWithAuth_Unchanged(t *testing.T) {
 	}
 }
 
-// TestStartNoAuth_GitTokenFallthrough (T6): the owner's token stands in
+// TestStartNoAuth_GitTokenFallthrough: the owner's token stands in
 // when the project has none, when the project's token cannot be read (the
 // skip is reported), and when the project's token is not authorized for
 // delivery.
@@ -345,7 +345,7 @@ func (b *naRecordingBackend) FetchValues(ctx context.Context, metas []secret.Sec
 	return b.SecretBackend.FetchValues(ctx, metas)
 }
 
-// TestStartNoAuth_NoValueFetchedForSuppressed (T10): only the git token
+// TestStartNoAuth_NoValueFetchedForSuppressed: only the git token
 // candidates' values are read for an agent without credentials.
 func TestStartNoAuth_NoValueFetchedForSuppressed(t *testing.T) {
 	f := newNAFixture(t, "na-fetch", true, ldOptions{})
@@ -358,7 +358,7 @@ func TestStartNoAuth_NoValueFetchedForSuppressed(t *testing.T) {
 	}
 }
 
-// TestStartNoAuth_GitTokenOverwrites (T9): the picked git token replaces a
+// TestStartNoAuth_GitTokenOverwrites: the picked git token replaces a
 // GITHUB_TOKEN in the agent's config env, at create and at start alike.
 func TestStartNoAuth_GitTokenOverwrites(t *testing.T) {
 	ctx := context.Background()
@@ -374,7 +374,7 @@ func TestStartNoAuth_GitTokenOverwrites(t *testing.T) {
 	assert.Equal(t, naGitProject, f.client.lastResolvedEnv[noAuthGitTokenKey], "start")
 }
 
-// TestNoAuth_CreateStartParity (T8): for the canary fixture (including the
+// TestNoAuth_CreateStartParity: for the canary fixture (including the
 // credential-named plain settings and saved config env), create and start
 // deliver the same value, or none, for every fixture key, and agree on
 // whether the git token is the project's own.
@@ -413,7 +413,7 @@ func TestNoAuth_CreateStartParity(t *testing.T) {
 	assert.Equal(t, "na-explicit-gemini", start["GEMINI_API_KEY"], "a requester-set value still is")
 }
 
-// TestCreateNoAuth_SecretStoredEnvWithheld (T15): create leaves out stored
+// TestCreateNoAuth_SecretStoredEnvWithheld: create leaves out stored
 // settings marked secret for an agent without credentials and keeps plain
 // ones and a stored git token setting.
 func TestCreateNoAuth_SecretStoredEnvWithheld(t *testing.T) {
@@ -437,8 +437,7 @@ func TestCreateNoAuth_SecretStoredEnvWithheld(t *testing.T) {
 	assert.Equal(t, "na-canary-secret-setting", req.ResolvedEnv["NA_SECRET_SETTING"])
 }
 
-// TestNoAuth_CredentialNamedStoredEnvWithheld (T15b, the name mutant's
-// killer): plain settings named like a harness credential are left out at
+// TestNoAuth_CredentialNamedStoredEnvWithheld: plain settings named like a harness credential are left out at
 // create, start and restart; a plain git token setting and ordinary plain
 // settings are kept.
 func TestNoAuth_CredentialNamedStoredEnvWithheld(t *testing.T) {
@@ -485,7 +484,7 @@ func (s *naHCErrStore) ListHarnessConfigs(context.Context, store.HarnessConfigFi
 	return nil, errors.New("na harness config read failure")
 }
 
-// TestNoAuth_CredentialNamesFromMetadata (T15c): a stored harness config's
+// TestNoAuth_CredentialNamesFromMetadata: a stored harness config's
 // declared name is withheld, so the names come from metadata; a harness
 // config read error fails create and start with the fixed env settings
 // message.
@@ -532,7 +531,7 @@ func TestNoAuth_CredentialNamesFromMetadata(t *testing.T) {
 	require.ErrorAs(t, err, &sre)
 }
 
-// TestNoAuthCredentialEnvNames_BuiltinsOnlyNonEmpty (T15e): with no stored
+// TestNoAuthCredentialEnvNames_BuiltinsOnlyNonEmpty: with no stored
 // harness config the set holds the built-in names, exactly.
 func TestNoAuthCredentialEnvNames_BuiltinsOnlyNonEmpty(t *testing.T) {
 	m := newLDFixture(t, "na-builtins", ldOptions{})
@@ -546,9 +545,8 @@ func TestNoAuthCredentialEnvNames_BuiltinsOnlyNonEmpty(t *testing.T) {
 	assert.False(t, names.has("GOOGLE_CLOUD_PROJECT"), "a project setting is not a credential name")
 }
 
-// TestNoAuth_PersistedCredentialConfigEnvWithheld (T15d, the saved config
-// env mutant's killer) and TestNoAuth_RequesterExplicitCredentialEnvDelivered
-// (T15f) are the two sides of one rule: a credential-named key saved in the
+// TestNoAuth_PersistedCredentialConfigEnvWithheld and
+// TestNoAuth_RequesterExplicitCredentialEnvDelivered are the two sides of one rule: a credential-named key saved in the
 // agent's config env is not applied, the same key set by the requester at
 // create is.
 func TestNoAuth_PersistedCredentialConfigEnvWithheld(t *testing.T) {
@@ -604,7 +602,7 @@ func TestNoAuth_RequesterExplicitCredentialEnvDelivered(t *testing.T) {
 	})
 }
 
-// TestApplyStartExtras_NoAuth (T13): the intent is written under the key
+// TestApplyStartExtras_NoAuth: the intent is written under the key
 // create uses only when set.
 func TestApplyStartExtras_NoAuth(t *testing.T) {
 	payload := map[string]interface{}{}
@@ -623,7 +621,7 @@ type naOldBrokerStartBody struct {
 	ResolvedSecrets []api.ResolvedSecret `json:"resolvedSecrets,omitempty"`
 }
 
-// TestStartNoAuth_OldBrokerGetsNothing (T12): the body a broker without
+// TestStartNoAuth_OldBrokerGetsNothing: the body a broker without
 // the field decodes from a start of an agent without credentials carries no
 // canary; the field it does not know is ignored.
 func TestStartNoAuth_OldBrokerGetsNothing(t *testing.T) {
@@ -646,7 +644,7 @@ func TestStartNoAuth_OldBrokerGetsNothing(t *testing.T) {
 	assert.Equal(t, naGitProject, old.ResolvedEnv[noAuthGitTokenKey])
 }
 
-// TestNoAuthAgentTokenScopes_CreateEqualsStart (T14): create, start and
+// TestNoAuthAgentTokenScopes_CreateEqualsStart: create, start and
 // restart authorize the agent token through the same function, and the
 // no-credential intent is not one of its inputs: the candidate scopes of
 // an agent without credentials equal those of the same agent with
@@ -661,7 +659,7 @@ func TestNoAuthAgentTokenScopes_CreateEqualsStart(t *testing.T) {
 	}
 }
 
-// TestRestartNoAuth_CrossNode (T4): a start or restart routed to the hub
+// TestRestartNoAuth_CrossNode: a start or restart routed to the hub
 // node that owns the agent's broker carries the no-credential intent, and
 // the owner node sends no stored secret: it runs the same selection.
 func TestRestartNoAuth_CrossNode(t *testing.T) {
@@ -687,7 +685,7 @@ func TestRestartNoAuth_CrossNode(t *testing.T) {
 	}
 }
 
-// TestStartNoAuth_UserTokenStillChecked (T7): the owner's git token, shared
+// TestStartNoAuth_UserTokenStillChecked: the owner's git token, shared
 // with progeny, is still held to the start-time owner-path check for an
 // agent without credentials: refused, it is not delivered (start stays as
 // strict as for any agent).
@@ -716,8 +714,7 @@ func TestStartNoAuth_UserTokenStillChecked(t *testing.T) {
 	assert.Empty(t, pick().value, "the owner's token refused by the owner-path check is not delivered")
 }
 
-// TestStartNoAuth_ProjectTokenKeepsTokenRemote (the project-bound
-// signal's killer): for an agent without credentials on a project whose
+// TestStartNoAuth_ProjectTokenKeepsTokenRemote: for an agent without credentials on a project whose
 // recorded remote is not on the GitHub host, the project's own git token
 // keeps the clone's token remote at start, as at create; the owner's token
 // alone does not.
@@ -761,4 +758,113 @@ func TestStartNoAuth_ProjectTokenKeepsTokenRemote(t *testing.T) {
 			assert.Equal(t, tc.wantRemote, req.Config.GitClone.TokenRemote, "create agrees")
 		})
 	}
+}
+
+// TestProvisionNoAuth_CredentialNamesUnreadable: when the harness configs
+// cannot be read during a provision (which goes on after a settings read
+// error), no stored setting is judged by the built-in names alone. The
+// provision goes on without the stored settings and without the saved
+// config env, except the requester's own keys and a git token setting from
+// the project or the owner. A name only a stored harness config declares
+// therefore never reaches the request.
+func TestProvisionNoAuth_CredentialNamesUnreadable(t *testing.T) {
+	ctx := context.Background()
+	m := newLDFixture(t, "na-provision-unread", ldOptions{})
+	m.env(t, "ACME_KEY", "na-canary-acme", store.ScopeProject, m.agent.ProjectID, false)
+	m.env(t, naPlainKey, naPlainValue, store.ScopeProject, m.agent.ProjectID, false)
+	m.env(t, noAuthGitTokenKey, "na-git-token-setting", store.ScopeProject, m.agent.ProjectID, false)
+	require.NoError(t, m.store.CreateHarnessConfig(ctx, &store.HarnessConfig{
+		ID: tid("na-provision-unread-hc"), Name: "acme", Slug: "acme", Harness: "acme",
+		Scope: store.HarnessConfigScopeProject, ScopeID: m.agent.ProjectID, Status: store.HarnessConfigStatusActive,
+		Config: &store.HarnessConfigData{Harness: "acme", AuthMeta: &api.HarnessAuthMetadata{
+			Types: map[string]api.HarnessAuthTypeMetadata{
+				"api-key": {RequiredEnv: []api.HarnessAuthEnvRequirement{{AnyOf: []string{"ACME_KEY"}}}},
+			},
+		}},
+	}))
+	m.agent.AppliedConfig.NoAuth = true
+	m.agent.AppliedConfig.Env = map[string]string{
+		"ACME_KEY":          "na-canary-saved-acme",
+		"NA_SAVED_ORDINARY": "na-saved-ordinary",
+		"NA_EXPLICIT":       "na-explicit",
+	}
+	m.agent.AppliedConfig.InlineConfig = &api.ScionConfig{Env: map[string]string{"NA_EXPLICIT": "na-explicit"}}
+
+	d := NewHTTPAgentDispatcherWithClient(&naHCErrStore{Store: m.store}, &mockRuntimeBrokerClient{}, false, slog.Default())
+	d.SetAuthzService(m.authz)
+	d.SetHubID(m.hubID)
+	d.SetSecretBackend(m.backend)
+
+	req, err := d.buildCreateRequestFor(ctx, m.agent, "TestProvisionNoAuth_CredentialNamesUnreadable", continueOnSecretResolutionError)
+	require.NoError(t, err, "a provision goes on")
+	assert.NotContains(t, req.ResolvedEnv, "ACME_KEY")
+	assert.NotContains(t, req.ResolvedEnv, naPlainKey, "no stored setting without the credential names")
+	assert.NotContains(t, req.ResolvedEnv, "NA_SAVED_ORDINARY", "no saved config env key without the credential names")
+	assert.Equal(t, "na-explicit", req.ResolvedEnv["NA_EXPLICIT"], "the requester's own key")
+	assert.Equal(t, "na-git-token-setting", req.ResolvedEnv[noAuthGitTokenKey], "a project git token setting")
+
+	// Create fails instead.
+	_, err = d.buildCreateRequest(ctx, m.agent, "TestProvisionNoAuth_CredentialNamesUnreadable")
+	var sre *secretResolutionError
+	require.ErrorAs(t, err, &sre)
+}
+
+// TestNoAuth_GitTokenSettingScopes: a GITHUB_TOKEN stored setting reaches an
+// agent without credentials only from the project or the owner, as the
+// secret-store git token does, at create and at start; marked secret or
+// not makes no difference.
+func TestNoAuth_GitTokenSettingScopes(t *testing.T) {
+	ctx := context.Background()
+	for _, scope := range []string{store.ScopeRuntimeBroker, store.ScopeHub, store.ScopeProject, store.ScopeUser} {
+		for _, secretFlag := range []bool{false, true} {
+			name := fmt.Sprintf("%s/secret=%v", scope, secretFlag)
+			want := scope == store.ScopeProject || scope == store.ScopeUser
+			t.Run(name, func(t *testing.T) {
+				m := newLDFixture(t, fmt.Sprintf("na-gts-%s-%v", scope, secretFlag), ldOptions{})
+				m.env(t, noAuthGitTokenKey, "na-git-token-setting", scope, m.scopeID(scope), secretFlag)
+				m.agent.AppliedConfig.NoAuth = true
+				require.NoError(t, m.store.UpdateAgent(ctx, m.agent))
+
+				req, err := m.d.buildCreateRequest(ctx, m.agent, "TestNoAuth_GitTokenSettingScopes")
+				require.NoError(t, err)
+				require.NoError(t, m.d.DispatchAgentStart(ctx, m.agent, "task", false))
+				for where, env := range map[string]map[string]string{"create": req.ResolvedEnv, "start": m.client.lastResolvedEnv} {
+					if want {
+						assert.Equal(t, "na-git-token-setting", env[noAuthGitTokenKey], "%s: kept from %s", where, scope)
+					} else {
+						assert.NotContains(t, env, noAuthGitTokenKey, "%s: withheld from %s", where, scope)
+					}
+				}
+			})
+		}
+	}
+}
+
+// TestStartNoAuth_WithheldSettingNotAuthorized: a stored setting withheld
+// from an agent without credentials is skipped before any authorization
+// decision; the same setting for an agent with credentials is authorized.
+func TestStartNoAuth_WithheldSettingNotAuthorized(t *testing.T) {
+	ctx := context.Background()
+	m := newLDFixture(t, "na-no-authz", ldOptions{})
+	m.env(t, "NA_SECRET_SETTING", "na-canary-secret-setting", store.ScopeProject, m.agent.ProjectID, true)
+
+	m.agent.AppliedConfig.NoAuth = true
+	names, err := m.d.noAuthCredentialEnvNames(ctx, m.agent)
+	require.NoError(t, err)
+	sel := newDeliverySelector(m.authz, m.agent, PurposeRestart)
+	env, _, err := m.d.selectDeliveryEnv(ctx, sel, m.agent, names)
+	require.NoError(t, err)
+	assert.NotContains(t, env, "NA_SECRET_SETTING")
+	assert.Nil(t, sel.ident, "no authorization decision was made")
+
+	// The selection refuses to run for such an agent without the names.
+	_, _, err = m.d.selectDeliveryEnv(ctx, newDeliverySelector(m.authz, m.agent, PurposeRestart), m.agent, nil)
+	require.Error(t, err)
+
+	m.agent.AppliedConfig.NoAuth = false
+	sel = newDeliverySelector(m.authz, m.agent, PurposeRestart)
+	env, _, err = m.d.selectDeliveryEnv(ctx, sel, m.agent, nil)
+	require.NoError(t, err)
+	assert.Equal(t, "na-canary-secret-setting", env["NA_SECRET_SETTING"])
+	assert.NotNil(t, sel.ident, "control: the setting was authorized")
 }

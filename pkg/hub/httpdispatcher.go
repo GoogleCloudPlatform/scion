@@ -1099,10 +1099,13 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 	// (noauth_delivery.go): the credential names are read before any stored
 	// setting, and the saved config env keys noAuthKeepsConfigEnv withholds
 	// are dropped. A read error fails create, create-with-gather and
-	// finalize-env like a stored env settings read error; provision and
-	// reprovision continue with the built-in names only.
-	noAuth := agent.AppliedConfig != nil && agent.AppliedConfig.NoAuth
+	// finalize-env like a stored env settings read error. Provision and
+	// reprovision continue as they do on a stored env settings read error:
+	// without the stored settings, and with only the requester's saved
+	// config env keys (and the git token), since no name can be judged.
+	noAuth := launchesWithoutCredentials(agent)
 	var noAuthCredNames credentialEnvNames
+	noAuthNamesUnread := false
 	if noAuth {
 		names, nerr := d.noAuthCredentialEnvNames(ctx, agent)
 		if nerr != nil && secrets == failOnSecretResolutionError {
@@ -1111,13 +1114,18 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 			return nil, &secretResolutionError{Verb: "created", Source: resolutionSourceEnvSettings, Err: nerr}
 		}
 		if nerr != nil {
-			d.log.WarnContext(ctx, callerName+": failed to read harness credential names; using the built-in names",
+			// continueOnSecretResolutionError (provision, reprovision).
+			d.log.WarnContext(ctx, callerName+": failed to read harness credential names; provisioning without stored settings",
 				"agent_id", agent.ID, "error", nerr)
-			names = builtinCredentialEnvNameSet()
+			noAuthNamesUnread = true
 		}
 		noAuthCredNames = names
 		for k := range req.ResolvedEnv {
-			if !noAuthKeepsConfigEnv(k, requesterSetEnvKey(agent, k), noAuthCredNames) {
+			keep := noAuthKeepsConfigEnv(k, requesterSetEnvKey(agent, k), noAuthCredNames)
+			if noAuthNamesUnread {
+				keep = k == noAuthGitTokenKey || requesterSetEnvKey(agent, k)
+			}
+			if !keep {
 				delete(req.ResolvedEnv, k)
 				delete(req.EnvClassifications, k)
 			}
@@ -1151,7 +1159,7 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 	// resolution error below; provision and reprovision continue without
 	// the stored settings. The error names only the scope and the backend
 	// error, never a key or value, and stays in the hub log.
-	envFromStorage, envFromStoragePlain, err := d.resolveEnvFromStorage(ctx, agent)
+	envFromStorage, envFromStoragePlain, envFromStorageSource, err := d.resolveEnvFromStorageWithSource(ctx, agent)
 	if err != nil && secrets == failOnSecretResolutionError {
 		d.log.WarnContext(ctx, callerName+": failed to read stored env settings; agent not created",
 			"agent_id", agent.ID, "error", err)
@@ -1169,8 +1177,18 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 			if k == agentTZEnvKey {
 				continue // the resolver owns TZ
 			}
-			if noAuth && !noAuthKeepsStoredEnv(k, !envFromStoragePlain[k], noAuthCredNames) {
-				continue
+			if noAuth {
+				fromProjectOrOwner := noAuthStoredScopeAllowed(envFromStorageSource[k])
+				keep := noAuthKeepsStoredEnv(k, !envFromStoragePlain[k], fromProjectOrOwner, noAuthCredNames)
+				if noAuthNamesUnread {
+					// No other setting can be judged without the
+					// credential names: only the git token, from the
+					// project or the owner, is kept.
+					keep = k == noAuthGitTokenKey && fromProjectOrOwner
+				}
+				if !keep {
+					continue
+				}
 			}
 			if existing, exists := req.ResolvedEnv[k]; !exists || existing == "" {
 				req.ResolvedEnv[k] = v
@@ -3111,10 +3129,23 @@ func (d *HTTPAgentDispatcher) WarnOutrankedBrokerEnvKeys(ctx context.Context) er
 // (start_owner_material_chain.go): they are skipped when the agent's
 // recorded chain does not end at their owner.
 func (d *HTTPAgentDispatcher) resolveEnvFromStorage(ctx context.Context, agent *store.Agent) (map[string]string, map[string]bool, error) {
+	result, plain, _, err := d.resolveEnvFromStorageWithSource(ctx, agent)
+	return result, plain, err
+}
+
+// envSourceProgeny is the source resolveEnvFromStorageWithSource records for
+// a key filled from an ancestor's progeny-shared user-scope setting.
+const envSourceProgeny = "progeny"
+
+// resolveEnvFromStorageWithSource is resolveEnvFromStorage that also returns,
+// for each key, the scope of the setting that supplied its value
+// (envSourceProgeny for a progeny-shared setting).
+func (d *HTTPAgentDispatcher) resolveEnvFromStorageWithSource(ctx context.Context, agent *store.Agent) (map[string]string, map[string]bool, map[string]string, error) {
 	result := make(map[string]string)
 	plain := make(map[string]bool)
+	source := make(map[string]string)
 	if agent == nil {
-		return result, plain, nil
+		return result, plain, source, nil
 	}
 
 	// The owner material chain rule for the owner's rows not shared with
@@ -3124,7 +3155,7 @@ func (d *HTTPAgentDispatcher) resolveEnvFromStorage(ctx context.Context, agent *
 	for _, filter := range d.envScopesForDispatch(ctx, agent) {
 		vars, err := d.store.ListEnvVars(ctx, filter)
 		if err != nil {
-			return nil, nil, fmt.Errorf("list %s env vars: %w", filter.Scope, err)
+			return nil, nil, nil, fmt.Errorf("list %s env vars: %w", filter.Scope, err)
 		}
 		if d.debug {
 			keys := make([]string, 0, len(vars))
@@ -3149,6 +3180,7 @@ func (d *HTTPAgentDispatcher) resolveEnvFromStorage(ctx context.Context, agent *
 			}
 			result[v.Key] = v.Value
 			plain[v.Key] = !v.Secret
+			source[v.Key] = filter.Scope
 		}
 	}
 
@@ -3160,7 +3192,7 @@ func (d *HTTPAgentDispatcher) resolveEnvFromStorage(ctx context.Context, agent *
 	if agent != nil && len(agent.Ancestry) > 1 {
 		progenyVars, err := d.store.ListProgenyEnvVars(ctx, agent.Ancestry)
 		if err != nil {
-			return nil, nil, fmt.Errorf("list progeny env vars: %w", err)
+			return nil, nil, nil, fmt.Errorf("list progeny env vars: %w", err)
 		}
 		for _, v := range progenyVars {
 			if secret.IsReservedEnvTarget(v.Key) {
@@ -3171,10 +3203,11 @@ func (d *HTTPAgentDispatcher) resolveEnvFromStorage(ctx context.Context, agent *
 			}
 			result[v.Key] = v.Value
 			plain[v.Key] = !v.Secret
+			source[v.Key] = envSourceProgeny
 		}
 	}
 
-	return result, plain, nil
+	return result, plain, source, nil
 }
 
 // resolveAsNeededForKeys resolves as_needed env vars and environment-type
@@ -3555,7 +3588,7 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 	// resolved are admitted too, through the same selector
 	// (reprovisionGatheredEnv).
 	gathered := reprovisionGatheredEnvFrom(ctx)
-	envFromStorage, envFromStoragePlain, err := d.selectDeliveryEnvFor(ctx, sel, agent, credNames, gathered)
+	envFromStorage, envFromStoragePlain, err := d.selectDeliveryEnvWith(ctx, sel, agent, credNames, gathered)
 	if err != nil {
 		d.log.WarnContext(ctx, caller+": failed to read stored env settings; agent not "+startedVerb,
 			"agent_id", agent.ID, "error", err)

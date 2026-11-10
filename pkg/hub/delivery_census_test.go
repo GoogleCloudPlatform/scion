@@ -274,7 +274,7 @@ func TestLaunchDeliveryCensus_EquivalenceWithMain(t *testing.T) {
 
 		agent, err := f.store.GetAgent(ctx, id)
 		require.NoError(t, err)
-		env, _, err := m.d.selectDeliveryEnv(ctx, newDeliverySelector(f.authz, agent, PurposeRestart), agent)
+		env, _, err := m.d.selectDeliveryEnv(ctx, newDeliverySelector(f.authz, agent, PurposeRestart), agent, nil)
 		require.NoError(t, err)
 		assert.Equal(t, "eq-value", env["EQ_ENV"], "%s: the delivered item set is unchanged", id)
 	}
@@ -289,7 +289,7 @@ func TestLaunchDeliveryCensus_EquivalenceWithMain(t *testing.T) {
 		agent, err := f.store.GetAgent(ctx, id)
 		require.NoError(t, err)
 		for _, purpose := range []MaterialPurpose{PurposeDispatch, PurposeRestart} {
-			env, _, err := m.d.selectDeliveryEnv(ctx, newDeliverySelector(f.authz, agent, purpose), agent)
+			env, _, err := m.d.selectDeliveryEnv(ctx, newDeliverySelector(f.authz, agent, purpose), agent, nil)
 			require.NoError(t, err)
 			assert.Empty(t, env["EQ_ENV"], "%s: %s withholds the launch item", id, purpose)
 		}
@@ -302,12 +302,12 @@ func TestLaunchDeliveryCensus_EquivalenceWithMain(t *testing.T) {
 	narrowed := agentAt("narrowed", []string{owner, uat, carrying}, store.DelegationPrincipalAgent, carrying, withBoundedCeiling("agent.read"))
 	agent, err := f.store.GetAgent(ctx, carrying)
 	require.NoError(t, err)
-	env, _, err := m.d.selectDeliveryEnv(ctx, newDeliverySelector(f.authz, agent, PurposeRestart), agent)
+	env, _, err := m.d.selectDeliveryEnv(ctx, newDeliverySelector(f.authz, agent, PurposeRestart), agent, nil)
 	require.NoError(t, err)
 	assert.Equal(t, "eq-value", env["EQ_ENV"], "an edge that carries deliver is delivered")
 	agent, err = f.store.GetAgent(ctx, narrowed)
 	require.NoError(t, err)
-	env, _, err = m.d.selectDeliveryEnv(ctx, newDeliverySelector(f.authz, agent, PurposeRestart), agent)
+	env, _, err = m.d.selectDeliveryEnv(ctx, newDeliverySelector(f.authz, agent, PurposeRestart), agent, nil)
 	require.NoError(t, err)
 	assert.Empty(t, env["EQ_ENV"], "control: a real narrowing still denies")
 }

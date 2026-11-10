@@ -146,13 +146,24 @@ func (d *HTTPAgentDispatcher) noAuthCredentialEnvNames(ctx context.Context, agen
 	return names, nil
 }
 
+// noAuthStoredScopeAllowed reports whether a stored setting of scope (an
+// env var scope, or envSourceProgeny) may supply the git token to an agent
+// without credentials: the project scope or the owner's user scope, the
+// scopes the secret-store git token comes from. The env var storage's user
+// scope is always the owner's (envScopeFilters).
+func noAuthStoredScopeAllowed(scope string) bool {
+	return scope == store.ScopeProject || scope == store.ScopeUser
+}
+
 // noAuthKeepsStoredEnv reports whether a stored env setting reaches an agent
-// without credentials. The git token is kept. Any other setting is withheld
-// when it is marked secret or when its name is a credential name; other
-// plain settings are kept.
-func noAuthKeepsStoredEnv(key string, secretRow bool, credNames credentialEnvNames) bool {
+// without credentials. The git token is kept, marked secret or not, only
+// from the project or the owner (fromProjectOrOwner, see
+// noAuthStoredScopeAllowed). Any other setting is withheld when it is marked
+// secret or when its name is a credential name; other plain settings are
+// kept.
+func noAuthKeepsStoredEnv(key string, secretRow, fromProjectOrOwner bool, credNames credentialEnvNames) bool {
 	if key == noAuthGitTokenKey {
-		return true
+		return fromProjectOrOwner
 	}
 	if secretRow {
 		return false

@@ -786,7 +786,7 @@ func TestDispatchDelivery_MintFailureFailsStart(t *testing.T) {
 		m.env(t, "MD_MINT_ENV", "v", store.ScopeProject, m.agent.ProjectID, false)
 		softDeleteStoredAgent(t, m.store, m.agent.ID)
 
-		_, _, err := m.d.selectDeliveryEnv(context.Background(), newDeliverySelector(m.authz, m.agent, PurposeRestart), m.agent)
+		_, _, err := m.d.selectDeliveryEnv(context.Background(), newDeliverySelector(m.authz, m.agent, PurposeRestart), m.agent, nil)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "agent is deleted")
 	})
@@ -795,7 +795,7 @@ func TestDispatchDelivery_MintFailureFailsStart(t *testing.T) {
 		m.d.SetAuthzService(nil)
 		m.env(t, "MD_USER_ONLY", "u", store.ScopeUser, m.agent.OwnerID, false)
 		sel := newDeliverySelector(nil, m.agent, PurposeRestart)
-		env, _, err := m.d.selectDeliveryEnv(context.Background(), sel, m.agent)
+		env, _, err := m.d.selectDeliveryEnv(context.Background(), sel, m.agent, nil)
 		require.NoError(t, err)
 		assert.Equal(t, "u", env["MD_USER_ONLY"])
 		assert.Nil(t, sel.ident, "nothing needed the credential")
@@ -813,13 +813,13 @@ func TestDispatchDelivery_DeniedHigherScopeDoesNotMaskLower(t *testing.T) {
 	m.env(t, "MD_SHARED_KEY", "from-project", store.ScopeProject, m.agent.ProjectID, false)
 
 	sel := newDeliverySelector(m.authz, m.agent, PurposeRestart)
-	env, _, err := m.d.selectDeliveryEnv(context.Background(), sel, m.agent)
+	env, _, err := m.d.selectDeliveryEnv(context.Background(), sel, m.agent, nil)
 	require.NoError(t, err)
 	assert.Equal(t, "from-project", env["MD_SHARED_KEY"], "control: project outranks broker")
 
 	hdWithStore(t, m.authz, &ldProjectEnvHiddenStore{Store: m.store})
 	sel = newDeliverySelector(m.authz, m.agent, PurposeRestart)
-	env, _, err = m.d.selectDeliveryEnv(context.Background(), sel, m.agent)
+	env, _, err = m.d.selectDeliveryEnv(context.Background(), sel, m.agent, nil)
 	require.NoError(t, err)
 	assert.Equal(t, "from-broker", env["MD_SHARED_KEY"], "the refused project row does not mask the broker row")
 }
@@ -871,7 +871,7 @@ func TestDispatchDelivery_PreservedFilters(t *testing.T) {
 	assert.Equal(t, "file-body", byName["md-file"].Value)
 	assert.Equal(t, store.ScopeProject, byName["md-file"].Source)
 
-	env, _, err := m.d.selectDeliveryEnv(ctx, newDeliverySelector(m.authz, m.agent, PurposeDispatch), m.agent)
+	env, _, err := m.d.selectDeliveryEnv(ctx, newDeliverySelector(m.authz, m.agent, PurposeDispatch), m.agent, nil)
 	require.NoError(t, err)
 	assert.NotContains(t, env, "MD_ENV_AS_NEEDED")
 
@@ -879,7 +879,7 @@ func TestDispatchDelivery_PreservedFilters(t *testing.T) {
 		m := newLDFixture(t, "filters-nohub", ldOptions{})
 		m.env(t, "MD_HUB_ENV", "h", store.ScopeHub, m.hubID, false)
 		m.d.SetHubID("")
-		env, _, err := m.d.selectDeliveryEnv(context.Background(), newDeliverySelector(m.authz, m.agent, PurposeRestart), m.agent)
+		env, _, err := m.d.selectDeliveryEnv(context.Background(), newDeliverySelector(m.authz, m.agent, PurposeRestart), m.agent, nil)
 		require.NoError(t, err)
 		assert.NotContains(t, env, "MD_HUB_ENV")
 	})
@@ -895,7 +895,7 @@ func TestDispatchDelivery_SelectionRereadsEveryStart(t *testing.T) {
 	assert.Equal(t, "v", m.client.lastRestartResolvedEnv["MD_REREAD"])
 
 	holdAgentFor(t, m.store, m.agent.ID, m.agent.ProjectID, m.projectOwnerID)
-	env, _, err := m.d.selectDeliveryEnv(context.Background(), newDeliverySelector(m.authz, m.agent, PurposeRestart), m.agent)
+	env, _, err := m.d.selectDeliveryEnv(context.Background(), newDeliverySelector(m.authz, m.agent, PurposeRestart), m.agent, nil)
 	require.NoError(t, err)
 	assert.NotContains(t, env, "MD_REREAD", "a held agent receives no associated item")
 }
@@ -1360,19 +1360,19 @@ func TestDeliverySelection_DefensiveBranches(t *testing.T) {
 	t.Run("env_list_error", func(t *testing.T) {
 		m := newLDFixture(t, "df-envlist", ldOptions{})
 		m.d.store = &ldListFaultStore{Store: m.store, listEnvErr: injected}
-		_, _, err := m.d.selectDeliveryEnv(ctx, restartSel(m, m.agent), m.agent)
+		_, _, err := m.d.selectDeliveryEnv(ctx, restartSel(m, m.agent), m.agent, nil)
 		assert.ErrorIs(t, err, injected)
 	})
 	t.Run("progeny_env_list_error", func(t *testing.T) {
 		m := newLDFixture(t, "df-progenyenv", ldOptions{})
 		m.d.store = &ldListFaultStore{Store: m.store, listProgenyEnvErr: injected}
 		a := withProgenyAncestry(m)
-		_, _, err := m.d.selectDeliveryEnv(ctx, restartSel(m, a), a)
+		_, _, err := m.d.selectDeliveryEnv(ctx, restartSel(m, a), a, nil)
 		assert.ErrorIs(t, err, injected)
 	})
 	t.Run("nil_agent_selects_nothing", func(t *testing.T) {
 		m := newLDFixture(t, "df-nilagent", ldOptions{})
-		env, plain, err := m.d.selectDeliveryEnv(ctx, restartSel(m, nil), nil)
+		env, plain, err := m.d.selectDeliveryEnv(ctx, restartSel(m, nil), nil, nil)
 		require.NoError(t, err)
 		assert.Empty(t, env)
 		assert.Empty(t, plain)

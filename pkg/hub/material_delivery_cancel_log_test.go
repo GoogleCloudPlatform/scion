@@ -76,7 +76,7 @@ func TestDispatchDelivery_LegacyFallbackWarnQuietAfterRequestEnds(t *testing.T) 
 	buf := lgLogger(m)
 
 	ended := endedCtx{context.Background()}
-	env, _, err := m.d.selectDeliveryEnv(ended, newDeliverySelector(m.d.authzService, m.agent, PurposeRestart), m.agent)
+	env, _, err := m.d.selectDeliveryEnv(ended, newDeliverySelector(m.d.authzService, m.agent, PurposeRestart), m.agent, nil)
 	require.NoError(t, err)
 	assert.Equal(t, "v", env["LG_ENDED_ENV"], "the ended run reached the legacy fallback and delivered the item")
 	assert.Empty(t, warnRecords(t, buf.Bytes(), lgFallbackMsg), "no legacy Warn after the request ended")

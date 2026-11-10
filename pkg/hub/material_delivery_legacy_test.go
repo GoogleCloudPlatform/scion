@@ -451,7 +451,7 @@ func TestDispatchDelivery_LegacyFallbackKeepsRealDenials(t *testing.T) {
 			// precondition can stand in for the selection's own refusal.
 			for _, purpose := range []MaterialPurpose{PurposeDispatch, PurposeRestart} {
 				got := map[string]bool{}
-				env, _, err := m.d.selectDeliveryEnv(context.Background(), newDeliverySelector(m.authz, m.agent, purpose), m.agent)
+				env, _, err := m.d.selectDeliveryEnv(context.Background(), newDeliverySelector(m.authz, m.agent, purpose), m.agent, nil)
 				require.NoError(t, err)
 				for k := range env {
 					got[k] = true
@@ -503,7 +503,7 @@ func TestDispatchDelivery_DuplicateEdgesWithheldWithCause(t *testing.T) {
 	buf := lgLogger(m)
 	hdWithStore(t, m.authz, &lgDupEdgeStore{Store: m.store, agentID: m.agent.ID, projectID: m.agent.ProjectID, ownerID: m.projectOwnerID})
 
-	env, _, err := m.d.selectDeliveryEnv(context.Background(), newDeliverySelector(m.authz, m.agent, PurposeRestart), m.agent)
+	env, _, err := m.d.selectDeliveryEnv(context.Background(), newDeliverySelector(m.authz, m.agent, PurposeRestart), m.agent, nil)
 	require.NoError(t, err)
 	assert.NotContains(t, env, "LG_DUP_ENV")
 	assert.Empty(t, warnRecords(t, buf.Bytes(), lgFallbackMsg))
@@ -524,7 +524,7 @@ func TestDispatchDelivery_LegacyFallbackKeepsEarlierDenials(t *testing.T) {
 	hdWithStore(t, m.authz, &ldProjectEnvHiddenStore{Store: m.store})
 
 	sel := newDeliverySelector(m.authz, m.agent, PurposeRestart)
-	env, _, err := m.d.selectDeliveryEnv(context.Background(), sel, m.agent)
+	env, _, err := m.d.selectDeliveryEnv(context.Background(), sel, m.agent, nil)
 	require.NoError(t, err)
 	assert.NotContains(t, env, "LG_PROJECT_ENV", "an association refusal is not overridden")
 	assert.Equal(t, "h", env["LG_HUB_ENV"])
@@ -622,7 +622,7 @@ func TestDispatchDelivery_BootAdoptedFullEdgesWithoutDeliverServed(t *testing.T)
 
 		agent, err := m.store.GetAgent(ctx, id)
 		require.NoError(t, err)
-		env, _, err := m.d.selectDeliveryEnv(ctx, newDeliverySelector(m.authz, agent, PurposeRestart), agent)
+		env, _, err := m.d.selectDeliveryEnv(ctx, newDeliverySelector(m.authz, agent, PurposeRestart), agent, nil)
 		require.NoError(t, err)
 		assert.Equal(t, "boot-value", env["LG_BOOT_ENV"], "%s: served by the adopted cohort", id)
 	}

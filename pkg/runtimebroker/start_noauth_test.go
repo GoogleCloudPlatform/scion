@@ -103,8 +103,7 @@ func naPost(t *testing.T, path, body string) api.StartOptions {
 	return mgr.LastStartOpts()
 }
 
-// TestStartAgentHandler_CarriesNoAuth (B1, B2) and
-// TestBuildStartContext_NoAuthDropsSecretEnv (B3): a start, resume or
+// TestStartAgentHandler_CarriesNoAuth: a start, resume or
 // restart body with the intent reaches the agent manager as
 // StartOptions.NoAuth, without the resolved secrets and without the env
 // values the hub classified secret-fetchable, except the git token. Plain
@@ -146,7 +145,7 @@ func TestStartAgentHandler_CarriesNoAuth(t *testing.T) {
 	}
 }
 
-// TestBuildStartContext_WithAuthUnchanged (B5): without the intent the
+// TestBuildStartContext_WithAuthUnchanged: without the intent the
 // resolved secrets and every env value pass through as before.
 func TestBuildStartContext_WithAuthUnchanged(t *testing.T) {
 	for _, tc := range naPaths {
@@ -165,7 +164,7 @@ func TestBuildStartContext_WithAuthUnchanged(t *testing.T) {
 	}
 }
 
-// TestBuildStartContext_NoAuthNilClassifications (B4): without
+// TestBuildStartContext_NoAuthNilClassifications: without
 // classifications (an older hub) the env is copied as sent; the resolved
 // secrets are still left out.
 func TestBuildStartContext_NoAuthNilClassifications(t *testing.T) {
@@ -181,7 +180,7 @@ func TestBuildStartContext_NoAuthNilClassifications(t *testing.T) {
 	}
 }
 
-// TestBuildStartContext_NoAuthSkipsADC (B6): in workstation mode with the
+// TestBuildStartContext_NoAuthSkipsADC: in workstation mode with the
 // gcloud login file auto-inject turned on, an agent without credentials
 // does not get the file; an agent with credentials does.
 func TestBuildStartContext_NoAuthSkipsADC(t *testing.T) {
@@ -270,7 +269,7 @@ func naEnableADCAutoInject(t *testing.T, home string) {
 	}
 }
 
-// TestRestartAgent_NoAuthReprovision (B2): a restart of an agent with no
+// TestRestartAgent_NoAuthReprovision: a restart of an agent with no
 // container, which the broker starts again from the request's inputs (as
 // after its pod or directory is gone), carries the intent and leaves out
 // secret material the same way.
