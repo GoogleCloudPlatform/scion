@@ -573,10 +573,11 @@ func RenderChoiceFallback(intro string, decisions []Decision, answerURL string) 
 		introLen = b.Len()
 	}
 	set := len(decisions) >= 2
-	if set {
-		fmt.Fprintf(&b, "**%d decisions needed. Answer all of them together.**\n", len(decisions))
-	} else {
+	switch {
+	case len(decisions) == 1:
 		b.WriteString("**1 decision needed**\n")
+	case set:
+		fmt.Fprintf(&b, "**%d decisions needed. Answer all of them together.**\n", len(decisions))
 	}
 	for _, d := range decisions {
 		b.WriteString("\n**")

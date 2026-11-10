@@ -549,6 +549,7 @@ func TestChoiceSetAnswer_Outcomes(t *testing.T) {
 		f.makeChatReader(t, f.bob)
 		rr := f.submitSet(t, f.bob, msg.ID, "", r[0].RowID, "1", r[1].RowID, "a", r[2].RowID, "1")
 		assert.Equal(t, http.StatusForbidden, rr.Code, "a reader may read the thread but not post in it: %s", rr.Body.String())
+		assert.Equal(t, ErrCodeChatPostDenied, errorCode(t, rr))
 		d, err := f.store.GetDecision(ctx, r[0].RowID)
 		require.NoError(t, err)
 		assert.Empty(t, d.Answers)

@@ -406,7 +406,32 @@ func TestRenderChoiceFallback_SetNoURL(t *testing.T) {
 	}
 	wantEnd := "_Reply here with one line per decision (for example `a1: 1` and `b2: x`) and the agent will record your answers._"
 	if !strings.HasSuffix(msg, wantEnd) {
-		t.Errorf("msg ends\n%q\nwant\n%q", msg[len(msg)-len(wantEnd):], wantEnd)
+		t.Errorf("msg =\n%q\nwant it to end with\n%q", msg, wantEnd)
+	}
+}
+
+// The largest set (10 decisions) renders every decision, and keys with
+// "_" and "-" appear verbatim in the reply hint's code spans (no markdown
+// escaping inside a code span).
+func TestRenderChoiceFallback_TenDecisionsHintKeys(t *testing.T) {
+	ds := []Decision{
+		{Key: "ship_now", Question: "Ship?", Choices: []Choice{{ID: "1", Label: "yes"}, {ID: "2", Label: "no"}}},
+		{Key: "use-new", Question: "New?", Choices: []Choice{{ID: "a", Label: "A"}, {ID: "b", Label: "B"}}},
+	}
+	for i := 3; i <= MaxDecisionsPerMessage; i++ {
+		ds = append(ds, Decision{Key: fmt.Sprintf("k%d", i), Question: "More?", Choices: []Choice{{ID: "1", Label: "yes"}, {ID: "2", Label: "no"}}})
+	}
+	msg, _ := RenderChoiceFallback("", ds, "https://hub.example/chat/c1?message=m1")
+	if !strings.HasPrefix(msg, fmt.Sprintf("**%d decisions needed. Answer all of them together.**\n", MaxDecisionsPerMessage)) {
+		t.Errorf("set header missing: %q", msg)
+	}
+	for _, d := range ds {
+		if !strings.Contains(msg, "**"+EscapeMarkdownPlain(d.Key)+".** ") {
+			t.Errorf("decision %s missing: %q", d.Key, msg)
+		}
+	}
+	if !strings.Contains(msg, "(for example `ship_now: 1` and `use-new: a`)") {
+		t.Errorf("hint keys not verbatim in code spans: %q", msg)
 	}
 }
 
