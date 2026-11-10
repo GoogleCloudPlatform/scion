@@ -19,6 +19,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -26,6 +27,13 @@ import (
 // pending secret past its expiry as gone, so this sweep only removes the
 // rows and releases their held values. It runs hourly on one replica
 // (store.LockPendingSecretExpiry); a skipped tick is safe.
+//
+// The same tick releases held values no pending row references: a value
+// held for a write whose row was never inserted, or one whose row was
+// claimed by an approval that never finished. Only values the backend
+// lists as this hub's held pending values (ListHeldPending) are
+// considered, and only once they are older than pendingHeldValueGrace, so
+// a value held just before its row is inserted is never released.
 
 const (
 	// pendingSecretExpiryIntervalMinutes is how often the sweep runs.
@@ -34,6 +42,12 @@ const (
 	pendingSecretExpiryBatch = 200
 	// pendingSecretExpiryTimeout bounds one tick.
 	pendingSecretExpiryTimeout = 2 * time.Minute
+	// pendingHeldValueGrace is the minimum age of a held value no row
+	// references before it is released.
+	pendingHeldValueGrace = time.Hour
+	// pendingSecretOrphanedValue is the audit reason of a released held
+	// value no row referenced.
+	pendingSecretOrphanedValue = "unreferenced_value"
 )
 
 // registerPendingSecretExpiry registers the "pending-secret-expiry" sweep.
@@ -43,8 +57,12 @@ func (s *Server) registerPendingSecretExpiry(sched *Scheduler) {
 		store.LockPendingSecretExpiry, func(ctx context.Context) {
 			ctx, cancel := context.WithTimeout(ctx, pendingSecretExpiryTimeout)
 			defer cancel()
-			if _, err := s.expirePendingSecrets(ctx, time.Now()); err != nil {
+			now := time.Now()
+			if _, err := s.expirePendingSecrets(ctx, now); err != nil {
 				slog.Error("pending secret: expiry sweep failed", "error", err)
+			}
+			if _, err := s.releaseUnreferencedPendingValues(ctx, now); err != nil {
+				slog.Error("pending secret: releasing unreferenced held values failed", "error", err)
 			}
 		})
 }
@@ -72,4 +90,54 @@ func (s *Server) expirePendingSecrets(ctx context.Context, now time.Time) (int, 
 			return total, nil
 		}
 	}
+}
+
+// releaseUnreferencedPendingValues releases this hub's held pending values
+// that no pending row references and that were stored before now minus
+// pendingHeldValueGrace, logging a secret_pending_expire audit event
+// (actor system, reason unreferenced_value) for each. It returns how many
+// it released. A value with a row, a younger value, and anything the
+// backend does not list as a held pending value are left alone.
+func (s *Server) releaseUnreferencedPendingValues(ctx context.Context, now time.Time) (int, error) {
+	if s.secretBackend == nil {
+		return 0, nil
+	}
+	held, err := s.secretBackend.ListHeldPending(ctx)
+	if err != nil {
+		return 0, err
+	}
+	cutoff := now.Add(-pendingHeldValueGrace)
+	var candidates []secret.HeldPendingValue
+	for _, h := range held {
+		if h.Ref == "" || h.Created.IsZero() || h.Created.After(cutoff) {
+			continue
+		}
+		candidates = append(candidates, h)
+	}
+	if len(candidates) == 0 {
+		return 0, nil
+	}
+	refs := make([]string, len(candidates))
+	for i, h := range candidates {
+		refs[i] = h.Ref
+	}
+	inUse, err := s.store.PendingSecretValueRefsInUse(ctx, refs)
+	if err != nil {
+		return 0, err
+	}
+	released := 0
+	for _, h := range candidates {
+		if inUse[h.Ref] {
+			continue
+		}
+		if err := s.secretBackend.DropPending(ctx, h.Ref); err != nil {
+			slog.Warn("pending secret: releasing an unreferenced held value failed",
+				"pending_id", h.PendingID, "error", err)
+			continue
+		}
+		s.auditPendingSecret(ctx, PendingSecretEventExpire, &store.PendingSecret{ID: h.PendingID},
+			PendingSecretActorSystem, "", pendingSecretOrphanedValue)
+		released++
+	}
+	return released, nil
 }

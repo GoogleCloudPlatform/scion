@@ -267,3 +267,97 @@ func TestSecretsList_IncludePendingRefusals(t *testing.T) {
 		"/api/v1/secrets?scope=user&includePending=maybe", nil)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
+
+// heldValuesBackend wraps a secret backend with a fixed list of held
+// pending values (as a Secret Manager backend would list them) and records
+// the refs passed to DropPending.
+type heldValuesBackend struct {
+	secret.SecretBackend
+	held    []secret.HeldPendingValue
+	dropped []string
+}
+
+func (b *heldValuesBackend) ListHeldPending(context.Context) ([]secret.HeldPendingValue, error) {
+	return b.held, nil
+}
+
+func (b *heldValuesBackend) DropPending(_ context.Context, ref string) error {
+	b.dropped = append(b.dropped, ref)
+	return nil
+}
+
+// TestPendingSecretExpiry_ReleasesUnreferencedHeldValues: the sweep
+// releases a held value no row references once it is past the grace age:
+// a value held for a write whose row was never inserted, and a value whose
+// row an approval claimed but never finished. A value its row references
+// (however old) and an unreferenced value younger than the grace age are
+// kept. Each release is audited as secret_pending_expire by the system.
+func TestPendingSecretExpiry_ReleasesUnreferencedHeldValues(t *testing.T) {
+	f := newPendingFixture(t, "pend-orphan")
+	audit := recordPendingAudit(f.Server)
+	ctx := context.Background()
+	now := time.Now()
+
+	// A live row whose value was stored long ago: referenced, kept.
+	kept := decodePendingResponse(t, agentPut(t, f.Server, f.AgentID, f.Token, "ORPHAN_KEPT", userScopeWrite("test-value-kept", false)))
+	keptRef := f.pendingRow(t, kept.PendingID).ValueRef
+
+	// Crash window 2: an approval claimed the row (deleting it) and never
+	// wrote the approved secret, so the value is left with no row.
+	claimedResp := decodePendingResponse(t, agentPut(t, f.Server, f.AgentID, f.Token, "ORPHAN_CLAIMED", userScopeWrite("test-value-claimed", false)))
+	claimed, err := f.Store.ClaimPendingSecretForApproval(ctx, claimedResp.PendingID, store.ScopeUser, f.UserID, now)
+	require.NoError(t, err)
+	_, err = f.Server.secretBackend.GetMeta(ctx, "ORPHAN_CLAIMED", store.ScopeUser, f.UserID)
+	require.ErrorIs(t, err, store.ErrNotFound, "the approved secret was never written")
+
+	old := now.Add(-pendingHeldValueGrace - time.Minute)
+	young := now.Add(-pendingHeldValueGrace + time.Minute)
+	// Crash window 1: a value held for a write whose row was never inserted.
+	neverInserted := secret.HeldPendingValue{Ref: "gcpsm:test-never-inserted", PendingID: "pend-never-inserted", Created: old}
+	youngOrphan := secret.HeldPendingValue{Ref: "gcpsm:test-young", PendingID: "pend-young", Created: young}
+	backend := &heldValuesBackend{SecretBackend: f.Server.secretBackend, held: []secret.HeldPendingValue{
+		{Ref: keptRef, PendingID: kept.PendingID, Created: old},
+		{Ref: claimed.ValueRef, PendingID: claimed.ID, Created: old},
+		neverInserted,
+		youngOrphan,
+	}}
+	f.Server.SetSecretBackend(backend)
+
+	n, err := f.Server.releaseUnreferencedPendingValues(ctx, now)
+	require.NoError(t, err)
+	assert.Equal(t, 2, n)
+	assert.ElementsMatch(t, []string{claimed.ValueRef, neverInserted.Ref}, backend.dropped)
+	assert.NotContains(t, backend.dropped, keptRef, "a value its row references is kept")
+	assert.NotContains(t, backend.dropped, youngOrphan.Ref, "a value younger than the grace age is kept")
+	f.pendingRow(t, kept.PendingID)
+
+	expires := audit.ofType(PendingSecretEventExpire)
+	require.Len(t, expires, 2)
+	var ids []string
+	for _, e := range expires {
+		ids = append(ids, e.PendingID)
+		assert.Equal(t, PendingSecretActorSystem, e.ActorKind)
+		assert.Equal(t, pendingSecretOrphanedValue, e.Reason)
+	}
+	assert.ElementsMatch(t, []string{claimed.ID, neverInserted.PendingID}, ids)
+
+	// Once the young value is past the grace age it is released too.
+	backend.held = []secret.HeldPendingValue{youngOrphan}
+	backend.dropped = nil
+	n, err = f.Server.releaseUnreferencedPendingValues(ctx, now.Add(2*time.Minute))
+	require.NoError(t, err)
+	assert.Equal(t, 1, n)
+	assert.Equal(t, []string{youngOrphan.Ref}, backend.dropped)
+}
+
+// TestPendingSecretExpiry_LocalBackendHoldsNothingElsewhere: with the
+// local backend every value lives on its row, so nothing is released.
+func TestPendingSecretExpiry_LocalBackendHoldsNothingElsewhere(t *testing.T) {
+	f := newPendingFixture(t, "pend-orphan-local")
+	decodePendingResponse(t, agentPut(t, f.Server, f.AgentID, f.Token, "LOCAL_KEY", userScopeWrite("test-value-1", false)))
+	dropsBefore := len(f.drops.dropped)
+	n, err := f.Server.releaseUnreferencedPendingValues(context.Background(), time.Now().Add(48*time.Hour))
+	require.NoError(t, err)
+	assert.Zero(t, n)
+	assert.Len(t, f.drops.dropped, dropsBefore)
+}

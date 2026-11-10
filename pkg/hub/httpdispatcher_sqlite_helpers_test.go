@@ -314,6 +314,9 @@ func (m *mockGitTokenSecretBackend) ReadPending(context.Context, string) ([]byte
 }
 
 func (m *mockGitTokenSecretBackend) DropPending(context.Context, string) error { return nil }
+func (m *mockGitTokenSecretBackend) ListHeldPending(context.Context) ([]secret.HeldPendingValue, error) {
+	return nil, nil
+}
 
 func (m *mockGitTokenSecretBackend) FetchValues(_ context.Context, metas []secret.SecretMeta) (map[string]secret.FetchResult, error) {
 	results := make(map[string]secret.FetchResult, len(metas))
@@ -527,6 +530,9 @@ func (m *mockSecretBackend) ReadPending(context.Context, string) ([]byte, error)
 }
 
 func (m *mockSecretBackend) DropPending(context.Context, string) error { return nil }
+func (m *mockSecretBackend) ListHeldPending(context.Context) ([]secret.HeldPendingValue, error) {
+	return nil, nil
+}
 func (m *mockSecretBackend) FetchValues(ctx context.Context, metas []secret.SecretMeta) (map[string]secret.FetchResult, error) {
 	results := make(map[string]secret.FetchResult, len(metas))
 	for _, meta := range metas {

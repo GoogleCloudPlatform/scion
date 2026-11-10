@@ -225,4 +225,8 @@ type PendingSecretStore interface {
 	// so the caller can release the held values after the delete has
 	// committed. A row deleted concurrently is not returned.
 	DeleteExpiredPendingSecrets(ctx context.Context, now time.Time, limit int) ([]PendingSecret, error)
+
+	// PendingSecretValueRefsInUse returns the subset of refs that some
+	// pending secret's value ref equals.
+	PendingSecretValueRefsInUse(ctx context.Context, refs []string) (map[string]bool, error)
 }

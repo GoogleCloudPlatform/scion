@@ -586,3 +586,26 @@ func (s *PendingSecretStore) DeleteExpiredPendingSecrets(ctx context.Context, no
 	}
 	return out, nil
 }
+
+// pendingValueRefBatch bounds the refs one PendingSecretValueRefsInUse
+// query matches.
+const pendingValueRefBatch = 500
+
+// PendingSecretValueRefsInUse implements store.PendingSecretStore.
+func (s *PendingSecretStore) PendingSecretValueRefsInUse(ctx context.Context, refs []string) (map[string]bool, error) {
+	inUse := make(map[string]bool)
+	for start := 0; start < len(refs); start += pendingValueRefBatch {
+		end := min(start+pendingValueRefBatch, len(refs))
+		rows, err := s.client.PendingSecret.Query().
+			Where(entpendingsecret.ValueRefIn(refs[start:end]...)).
+			Select(entpendingsecret.FieldValueRef).
+			Strings(ctx)
+		if err != nil {
+			return nil, mapError(err)
+		}
+		for _, ref := range rows {
+			inUse[ref] = true
+		}
+	}
+	return inUse, nil
+}

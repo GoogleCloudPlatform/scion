@@ -91,6 +91,9 @@ func (m *migrationSecretBackend) ReadPending(context.Context, string) ([]byte, e
 }
 
 func (m *migrationSecretBackend) DropPending(context.Context, string) error { return nil }
+func (m *migrationSecretBackend) ListHeldPending(context.Context) ([]secret.HeldPendingValue, error) {
+	return nil, nil
+}
 
 // FetchValues is not exercised by the activation tests in this file; this
 // stub only satisfies secret.SecretBackend and reports every item not found,

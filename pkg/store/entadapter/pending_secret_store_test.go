@@ -773,3 +773,19 @@ func TestPendingSecretStore_DeleteExpired(t *testing.T) {
 	_, err = cs.GetPendingSecret(ctx, fresh.Secret.ID)
 	require.NoError(t, err, "a live row is kept")
 }
+
+func TestPendingSecretStore_ValueRefsInUse(t *testing.T) {
+	cs := newTestCompositeStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	_, err := cs.CreateOrReplacePendingSecret(ctx, newPendingSecretInput("IN_USE", "owner-1", "agent-a", "ref-in-use"), now)
+	require.NoError(t, err)
+
+	got, err := cs.PendingSecretValueRefsInUse(ctx, []string{"ref-in-use", "ref-orphan"})
+	require.NoError(t, err)
+	assert.Equal(t, map[string]bool{"ref-in-use": true}, got)
+
+	got, err = cs.PendingSecretValueRefsInUse(ctx, nil)
+	require.NoError(t, err)
+	assert.Empty(t, got)
+}
