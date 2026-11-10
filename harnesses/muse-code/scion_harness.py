@@ -2561,10 +2561,12 @@ _CA_EXIT_CONFLICT = 3
 SECRET_PENDING_HELD_BY_OTHER_AGENT = "secret_pending_held_by_other_agent"
 
 
-def secret_set_outcome(result: "subprocess.CompletedProcess[str]") -> str:
-    """Classify a finished ``sciontool secret set`` run.
+def secret_set_outcome(result: "subprocess.CompletedProcess[str]", scope: str = "") -> str:
+    """Classify a finished ``sciontool secret set`` run at the given scope.
 
-    Returns one of:
+    A successful user-scope save is always "pending": every user-scope
+    secret an agent saves waits for the owner's approval, whatever the
+    output says. Returns one of:
       - "pending": saved, waiting for the owner's approval in Scion (every
         user-scope write; it never conflicts with an existing secret);
       - "stored": stored directly (project scope);
@@ -2575,7 +2577,9 @@ def secret_set_outcome(result: "subprocess.CompletedProcess[str]") -> str:
     """
     output = f"{result.stdout or ''}\n{result.stderr or ''}"
     if result.returncode == 0:
-        return "pending" if "pending approval" in output.lower() else "stored"
+        if scope == "user" or "pending approval" in output.lower():
+            return "pending"
+        return "stored"
     if SECRET_PENDING_HELD_BY_OTHER_AGENT in output:
         return "held"
     if "already exists" in output.lower():
@@ -2727,7 +2731,7 @@ def _capture_one_cred(entry: dict[str, Any], force: bool, scope: str = "user") -
     except subprocess.TimeoutExpired:
         return "error", f"sciontool timed out for key {key}"
 
-    outcome = secret_set_outcome(result)
+    outcome = secret_set_outcome(result, scope)
     if outcome == "error":
         return outcome, f"sciontool failed for {key}: {result.stderr.strip()}"
     return outcome, None

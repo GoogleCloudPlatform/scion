@@ -3015,6 +3015,16 @@ class TestCaptureAuthPendingApproval(unittest.TestCase):
             with self.subTest(want=want):
                 self.assertEqual(sh.secret_set_outcome(result), want)
 
+    def test_user_scope_save_is_pending_without_output(self):
+        # sciontool at a warn or error log level prints no info line; a
+        # successful user-scope save still waits for the owner's approval.
+        cp = sh.subprocess.CompletedProcess
+        self.assertEqual(sh.secret_set_outcome(cp([], 0, "", ""), "user"), "pending")
+        self.assertEqual(sh.secret_set_outcome(cp([], 0, "", ""), "project"), "stored")
+        rc, _, out = self.run_capture([(0, "")])
+        self.assertEqual(rc, sh._CA_EXIT_OK)
+        self.assertIn("capture-auth: TOOL_AUTH: captured (pending approval in Scion)", out)
+
     def test_user_scope_reauth_completes_in_one_run(self):
         # Re-auth for a name that already has an approved secret: the Hub
         # accepts it for approval, so one run without --force succeeds.

@@ -62,7 +62,7 @@ def _capture_auth_json(quiet: bool = False, scope: str = "project") -> bool:
         print("capture-auth: sciontool timed out setting OPENCODE_AUTH", file=sys.stderr)
         return False
 
-    outcome = scion_harness.secret_set_outcome(result)
+    outcome = scion_harness.secret_set_outcome(result, scope)
     if outcome == "held":
         print(scion_harness.held_message("OPENCODE_AUTH"))
         return False

@@ -120,7 +120,7 @@ def _try_capture_token_file(force: bool, scope: str = "project") -> int | None:
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
         print(f"capture-auth: sciontool error: {exc}", file=sys.stderr)
         return _CA_EXIT_ERROR
-    outcome = scion_harness.secret_set_outcome(result)
+    outcome = scion_harness.secret_set_outcome(result, scope)
     if outcome in ("pending", "stored"):
         print(scion_harness.captured_message("AGY_TOKEN", _AGY_TOKEN_PATH, outcome))
         return _CA_EXIT_OK
@@ -180,7 +180,7 @@ def main() -> int:
         if force:
             cmd.append("--force")
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-        outcome = scion_harness.secret_set_outcome(result)
+        outcome = scion_harness.secret_set_outcome(result, known.scope)
         if outcome in ("pending", "stored"):
             print(scion_harness.captured_message("AGY_TOKEN", "gnome-keyring", outcome))
             return _CA_EXIT_OK

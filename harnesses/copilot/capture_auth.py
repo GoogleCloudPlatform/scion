@@ -63,7 +63,7 @@ def _capture_config_json(force: bool = False, scope: str = "user") -> str:
         print("capture-auth: sciontool timed out setting COPILOT_CONFIG", file=sys.stderr)
         return "failed"
 
-    outcome = scion_harness.secret_set_outcome(result)
+    outcome = scion_harness.secret_set_outcome(result, scope)
     if outcome == "held":
         print(scion_harness.held_message("COPILOT_CONFIG"))
         return "held"

@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -161,16 +162,24 @@ Examples:
 			os.Exit(1)
 		}
 
-		if resp.Pending() {
-			msg := fmt.Sprintf("Secret %q saved, pending approval in Scion (scope: %s)", resp.Key, resp.Scope)
-			if resp.ReplacesExisting {
-				msg += "; it replaces your existing secret once approved"
-			}
-			log.Info("%s", msg)
-			return
-		}
-		log.Info("Secret %q stored (scope: %s)", resp.Key, resp.Scope)
+		reportSetSecretResult(cmd.OutOrStdout(), resp)
 	},
+}
+
+// reportSetSecretResult reports a successful save. A pending result is
+// written to w directly, whatever the log level, because callers such as
+// capture-auth read it to tell the user that the secret waits for
+// approval in Scion.
+func reportSetSecretResult(w io.Writer, resp *hub.SetSecretResponse) {
+	if resp.Pending() {
+		msg := fmt.Sprintf("Secret %q saved, pending approval in Scion (scope: %s)", resp.Key, resp.Scope)
+		if resp.ReplacesExisting {
+			msg += "; it replaces your existing secret once approved"
+		}
+		_, _ = fmt.Fprintln(w, msg)
+		return
+	}
+	log.Info("Secret %q stored (scope: %s)", resp.Key, resp.Scope)
 }
 
 func init() {
