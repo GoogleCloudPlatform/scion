@@ -115,6 +115,9 @@ var compressBypassedUntagged = map[string]string{
 	"PUT /api/v1/secrets/{key} #scope=hub":     "env/secrets segment",
 	"PATCH /api/v1/secrets/{key} #scope=hub":   "env/secrets segment",
 	"DELETE /api/v1/secrets/{key} #scope=hub":  "env/secrets segment",
+	// The merged user secret list returns metadata and provenance only,
+	// never a value, like the plain user secret list.
+	"GET /api/v1/secrets #scope=user&includePending=true": "env/secrets segment",
 
 	// Auth routes: /api/v1/auth/ is bypassed as a whole. Token list and get
 	// return the token prefix only.

@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -330,4 +331,39 @@ func TestPendingSecretsAPI_RevealProxyModeCrossSite(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 	assert.NotContains(t, rec.Body.String(), "test-value")
 	f.pendingRow(t, resp.PendingID)
+}
+
+// TestPendingSecretsAPI_RevealNotCompressed: through the web server's
+// /api/v1 mount, a reveal asked with Accept-Encoding: gzip is answered
+// with a plain JSON body, never gzip, whatever its size.
+func TestPendingSecretsAPI_RevealNotCompressed(t *testing.T) {
+	f := newPendingFixture(t, "pend-reveal-gzip")
+	env := newCompressHubEnvOn(t, f.Server, f.Store, nil)
+	value := "test-value-" + strings.Repeat("g", 2048)
+	res, err := f.Store.CreateOrReplacePendingSecret(context.Background(), &store.PendingSecret{
+		Key: "KEY_GZIP", SecretType: store.SecretTypeEnvironment, Scope: store.ScopeUser, ScopeID: DevUserID,
+		ValueRef: mustHold(t, f.Server, value), ValueLen: len(value),
+		AgentID: f.AgentID, AgentSlug: "a", ProjectID: f.ProjectID, ProjectName: f.ProjectName,
+	}, time.Now())
+	require.NoError(t, err)
+
+	req, err := http.NewRequest(http.MethodPost, env.ts.URL+"/api/v1/pending-secrets/"+res.Secret.ID+"/reveal", nil)
+	require.NoError(t, err)
+	req.Header.Set("Accept-Encoding", "gzip")
+	req.Header.Set("Authorization", env.auth["Authorization"])
+	resp, err := compressClient().Do(req)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "%.300s", body)
+	requireNoEncoding(t, resp)
+	require.GreaterOrEqual(t, len(body), 1024, "the body is large enough to be compressed if it were wrapped")
+
+	var got RevealPendingSecretResponse
+	require.NoError(t, json.Unmarshal(body, &got), "the body is plain JSON")
+	decoded, err := base64.StdEncoding.DecodeString(got.Value)
+	require.NoError(t, err)
+	assert.Equal(t, value, string(decoded))
+	assert.Equal(t, "no-store", resp.Header.Get("Cache-Control"))
 }

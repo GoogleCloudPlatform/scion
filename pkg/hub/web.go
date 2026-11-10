@@ -3129,7 +3129,8 @@ func isProxyRoute(path string) bool {
 //     the agent-facing /api/v1/agent/ endpoints (minted tokens, secret
 //     fetch), agent token refresh, delegation exchange, broker registration,
 //     join and secret rotation, project registration, invite creation, test
-//     identities, and every env or secrets route;
+//     identities, every env or secrets route, and the pending secret
+//     reveal (/api/v1/pending-secrets/{id}/reveal);
 //   - responses with signed object-store or capability URLs: every agent
 //     workspace route (sync-from, sync-to; the status GET is included as a
 //     fail-safe), template, user template, harness-config and skill upload
@@ -3179,6 +3180,10 @@ func isCompressBypassPath(path string) bool {
 	}
 	segs := strings.Split(strings.TrimPrefix(trimmed, api), "/")
 	if isSignedURLPath(segs) {
+		return true
+	}
+	// The pending secret reveal returns a held secret value.
+	if len(segs) == 3 && segs[0] == "pending-secrets" && segs[2] == "reveal" {
 		return true
 	}
 	for i, seg := range segs {
