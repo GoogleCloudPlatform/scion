@@ -70,7 +70,8 @@ type ProjectSecretOverride struct {
 // for the merged view (includePending=true) and reports whether it did.
 // Only the secret list route calls it. includePending is valid only with
 // scope user; the merged list is served only to the owner's session (the
-// gate of the pending secret endpoints).
+// gate of the pending secret endpoints), and only when a secret backend is
+// configured.
 func (s *Server) serveSecretListWithPending(w http.ResponseWriter, r *http.Request, scope string) bool {
 	v := r.URL.Query().Get("includePending")
 	if v == "" {
@@ -90,6 +91,12 @@ func (s *Server) serveSecretListWithPending(w http.ResponseWriter, r *http.Reque
 	}
 	ownerID, ok := s.resolveEnvSecretAccess(w, r, store.ScopeUser, "", true)
 	if !ok {
+		return true
+	}
+	// Without a secret backend there is no approved list to merge with:
+	// answer with the error rather than a list of pending secrets alone.
+	if s.secretBackend == nil {
+		writeErrorFromErr(w, secret.ErrNoSecretBackend, "")
 		return true
 	}
 	s.listSecretsWithPending(w, r, ownerID)

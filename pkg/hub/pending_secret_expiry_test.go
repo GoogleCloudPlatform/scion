@@ -380,3 +380,21 @@ func TestSecretsList_IncludePendingOnlyOnTheList(t *testing.T) {
 		assert.NotContains(t, rec.Body.String(), "SINGLE_KEY\",\"state\"", path)
 	}
 }
+
+// TestSecretsList_IncludePendingWithoutSecretBackend: with no secret
+// backend configured, the merged list answers 501 and lists nothing, not
+// the pending secrets alone.
+func TestSecretsList_IncludePendingWithoutSecretBackend(t *testing.T) {
+	f := newPendingFixture(t, "pend-merged-nobackend")
+	decodePendingResponse(t, agentPut(t, f.Server, f.AgentID, f.Token, "NOBACKEND_KEY", userScopeWrite("test-value-1", false)))
+	f.Server.SetSecretBackend(nil)
+
+	rec := ownerRequest(t, f.Server, f.owner(), CredentialKindInteractive, http.MethodGet,
+		"/api/v1/secrets?scope=user&includePending=true", nil)
+	assert.Equal(t, http.StatusNotImplemented, rec.Code, rec.Body.String())
+	code, _ := decodePendingAPIError(t, rec.Body.Bytes())
+	assert.Equal(t, ErrCodeUnavailable, code)
+	assert.NotContains(t, rec.Body.String(), `"items"`)
+	assert.NotContains(t, rec.Body.String(), "NOBACKEND_KEY")
+	assert.NotContains(t, rec.Body.String(), "pending")
+}
