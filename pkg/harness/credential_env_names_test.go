@@ -119,7 +119,8 @@ func TestNonSecretAuthEnvNames_OnlyProjectAndRegion(t *testing.T) {
 // TestCredentialEnvNames_AlternativeAndAutodetectWithheld: every
 // alternative_env_keys entry of every built-in config is a credential name
 // and is never on the non-secret list; every autodetect key is a credential
-// name unless it is on the non-secret list (which TestNonSecretAuthEnvNames_OnlyProjectAndRegion bounds).
+// name unless it is on the non-secret list (which
+// TestNonSecretAuthEnvNames_OnlyProjectAndRegion bounds).
 func TestCredentialEnvNames_AlternativeAndAutodetectWithheld(t *testing.T) {
 	set := map[string]bool{}
 	for _, name := range BuiltinCredentialEnvNames() {

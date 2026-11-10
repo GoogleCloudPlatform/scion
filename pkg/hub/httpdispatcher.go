@@ -1181,9 +1181,10 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 				fromProjectOrOwner := noAuthStoredScopeAllowed(envFromStorageSource[k])
 				keep := noAuthKeepsStoredEnv(k, !envFromStoragePlain[k], fromProjectOrOwner, noAuthCredNames)
 				if noAuthNamesUnread {
-					// No other setting can be judged without the
-					// credential names: only the git token, from the
-					// project or the owner, is kept.
+					// No other setting can be judged
+					// without the credential names: only
+					// the git token, from the project or
+					// the owner, is kept.
 					keep = k == noAuthGitTokenKey && fromProjectOrOwner
 				}
 				if !keep {

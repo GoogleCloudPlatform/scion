@@ -37,10 +37,18 @@ import (
 //     first and then the owner's user scope (pickNoAuthGitToken) and written
 //     into the env over any existing value (applyNoAuthGitToken);
 //   - no stored env setting marked secret and none whose name a harness
-//     declares as a credential (noAuthKeepsStoredEnv);
+//     declares as a credential (noAuthKeepsStoredEnv); a GITHUB_TOKEN
+//     setting, marked secret or not, only from the project or the owner
+//     (noAuthStoredScopeAllowed);
 //   - no key of the agent's saved config env whose name a harness declares
 //     as a credential, unless the requester set it for this agent at create
 //     (noAuthKeepsConfigEnv).
+//
+// The credential names come from the harness configs
+// (noAuthCredentialEnvNames). When they cannot be read, create and start
+// fail; a provision, which goes on after a settings read error, goes on
+// without the stored settings and the saved config env, except the
+// requester's own keys and a project or owner GITHUB_TOKEN setting.
 //
 // Everything else (plain settings, the agent's hub token, the transport
 // token, a GitHub App token) is delivered as for any agent.
@@ -92,9 +100,9 @@ func builtinCredentialEnvNameSet() credentialEnvNames {
 // its own by ID). The names a config declares are harness.CredentialEnvNames
 // of its auth metadata.
 //
-// A store error is returned with a nil set, so the caller fails the
-// dispatch (or, where the dispatch continues on a read error, falls back to
-// builtinCredentialEnvNameSet); the set is never silently empty.
+// A store error is returned with a nil set: the caller fails the dispatch,
+// or, for a provision, goes on without the settings it cannot judge. The
+// set is never silently empty.
 func (d *HTTPAgentDispatcher) noAuthCredentialEnvNames(ctx context.Context, agent *store.Agent) (credentialEnvNames, error) {
 	names := builtinCredentialEnvNameSet()
 	if d.store == nil || agent == nil {

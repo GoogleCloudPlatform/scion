@@ -250,7 +250,8 @@ func TestStartWithAuth_Unchanged(t *testing.T) {
 				}
 				assert.Equal(t, c.value, delivered[c.key], "%s is delivered to an agent with credentials", c.key)
 			}
-			// The normal order: the owner's token outranks the project's.
+			// The normal order: the owner's token outranks the
+			// project's.
 			assert.Equal(t, naGitUser, sent.env[noAuthGitTokenKey])
 		})
 	}
@@ -437,9 +438,9 @@ func TestCreateNoAuth_SecretStoredEnvWithheld(t *testing.T) {
 	assert.Equal(t, "na-canary-secret-setting", req.ResolvedEnv["NA_SECRET_SETTING"])
 }
 
-// TestNoAuth_CredentialNamedStoredEnvWithheld: plain settings named like a harness credential are left out at
-// create, start and restart; a plain git token setting and ordinary plain
-// settings are kept.
+// TestNoAuth_CredentialNamedStoredEnvWithheld: plain settings named like a
+// harness credential are left out at create, start and restart; a plain git
+// token setting and ordinary plain settings are kept.
 func TestNoAuth_CredentialNamedStoredEnvWithheld(t *testing.T) {
 	ctx := context.Background()
 	build := func(t *testing.T, name string) *ldFixture {
@@ -546,9 +547,9 @@ func TestNoAuthCredentialEnvNames_BuiltinsOnlyNonEmpty(t *testing.T) {
 }
 
 // TestNoAuth_PersistedCredentialConfigEnvWithheld and
-// TestNoAuth_RequesterExplicitCredentialEnvDelivered are the two sides of one rule: a credential-named key saved in the
-// agent's config env is not applied, the same key set by the requester at
-// create is.
+// TestNoAuth_RequesterExplicitCredentialEnvDelivered are the two sides of one
+// rule: a credential-named key saved in the agent's config env is not
+// applied, the same key set by the requester at create is.
 func TestNoAuth_PersistedCredentialConfigEnvWithheld(t *testing.T) {
 	ctx := context.Background()
 	for _, op := range naOps {
@@ -714,10 +715,10 @@ func TestStartNoAuth_UserTokenStillChecked(t *testing.T) {
 	assert.Empty(t, pick().value, "the owner's token refused by the owner-path check is not delivered")
 }
 
-// TestStartNoAuth_ProjectTokenKeepsTokenRemote: for an agent without credentials on a project whose
-// recorded remote is not on the GitHub host, the project's own git token
-// keeps the clone's token remote at start, as at create; the owner's token
-// alone does not.
+// TestStartNoAuth_ProjectTokenKeepsTokenRemote: for an agent without
+// credentials on a project whose recorded remote is not on the GitHub host,
+// the project's own git token keeps the clone's token remote at start, as at
+// create; the owner's token alone does not.
 func TestStartNoAuth_ProjectTokenKeepsTokenRemote(t *testing.T) {
 	const remote = "https://gitlab.example.com/org/na-repo.git"
 	ctx := context.Background()
@@ -773,6 +774,7 @@ func TestProvisionNoAuth_CredentialNamesUnreadable(t *testing.T) {
 	m.env(t, "ACME_KEY", "na-canary-acme", store.ScopeProject, m.agent.ProjectID, false)
 	m.env(t, naPlainKey, naPlainValue, store.ScopeProject, m.agent.ProjectID, false)
 	m.env(t, noAuthGitTokenKey, "na-git-token-setting", store.ScopeProject, m.agent.ProjectID, false)
+	m.env(t, "NA_HUB_ORDINARY", "na-hub-ordinary", store.ScopeHub, m.hubID, false)
 	require.NoError(t, m.store.CreateHarnessConfig(ctx, &store.HarnessConfig{
 		ID: tid("na-provision-unread-hc"), Name: "acme", Slug: "acme", Harness: "acme",
 		Scope: store.HarnessConfigScopeProject, ScopeID: m.agent.ProjectID, Status: store.HarnessConfigStatusActive,
@@ -802,6 +804,7 @@ func TestProvisionNoAuth_CredentialNamesUnreadable(t *testing.T) {
 	assert.NotContains(t, req.ResolvedEnv, "NA_SAVED_ORDINARY", "no saved config env key without the credential names")
 	assert.Equal(t, "na-explicit", req.ResolvedEnv["NA_EXPLICIT"], "the requester's own key")
 	assert.Equal(t, "na-git-token-setting", req.ResolvedEnv[noAuthGitTokenKey], "a project git token setting")
+	assert.NotContains(t, req.ResolvedEnv, "NA_HUB_ORDINARY")
 
 	// Create fails instead.
 	_, err = d.buildCreateRequest(ctx, m.agent, "TestProvisionNoAuth_CredentialNamesUnreadable")
@@ -867,4 +870,89 @@ func TestStartNoAuth_WithheldSettingNotAuthorized(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "na-canary-secret-setting", env["NA_SECRET_SETTING"])
 	assert.NotNil(t, sel.ident, "control: the setting was authorized")
+}
+
+// TestNoAuthKeepsStoredEnv_Rules pins the stored setting rule for an agent
+// without credentials, including the git token's scopes: project and owner
+// only, never a hub, broker or progeny-shared setting.
+func TestNoAuthKeepsStoredEnv_Rules(t *testing.T) {
+	names := credentialEnvNames{"ACME_KEY": {}}
+	for _, tc := range []struct {
+		key    string
+		secret bool
+		scope  string
+		want   bool
+	}{
+		{noAuthGitTokenKey, false, store.ScopeProject, true},
+		{noAuthGitTokenKey, true, store.ScopeUser, true},
+		{noAuthGitTokenKey, false, store.ScopeHub, false},
+		{noAuthGitTokenKey, true, store.ScopeRuntimeBroker, false},
+		{noAuthGitTokenKey, false, envSourceProgeny, false},
+		{"ACME_KEY", false, store.ScopeProject, false},
+		{"NA_SECRET", true, store.ScopeProject, false},
+		{"NA_PLAIN", false, store.ScopeHub, true},
+		{"NA_PLAIN", false, envSourceProgeny, true},
+	} {
+		got := noAuthKeepsStoredEnv(tc.key, tc.secret, noAuthStoredScopeAllowed(tc.scope), names)
+		assert.Equal(t, tc.want, got, "%s secret=%v from %s", tc.key, tc.secret, tc.scope)
+	}
+}
+
+// TestNoAuth_ProgenyGitTokenSettingWithheld: a GITHUB_TOKEN setting shared
+// with progeny by another user in the agent's ancestry is withheld from an
+// agent without credentials at create and at start; an agent with
+// credentials still receives it.
+func TestNoAuth_ProgenyGitTokenSettingWithheld(t *testing.T) {
+	ctx := context.Background()
+	for _, noAuth := range []bool{true, false} {
+		t.Run(fmt.Sprintf("noAuth=%v", noAuth), func(t *testing.T) {
+			m := newLDFixture(t, fmt.Sprintf("na-progeny-git-%v", noAuth), ldOptions{
+				ancestry: func(f *goldenFixture) []string { return []string{f.projectOwnerID, f.memberNoneID} },
+			})
+			require.NoError(t, m.store.CreateEnvVar(ctx, &store.EnvVar{
+				ID: api.NewUUID(), Key: noAuthGitTokenKey, Value: "na-progeny-git-token",
+				Scope: store.ScopeUser, ScopeID: m.memberNoneID, InjectionMode: store.InjectionModeAlways,
+				AllowProgeny: true, CreatedBy: m.memberNoneID,
+			}))
+			m.agent.AppliedConfig.NoAuth = noAuth
+			require.NoError(t, m.store.UpdateAgent(ctx, m.agent))
+
+			req, err := m.d.buildCreateRequest(ctx, m.agent, "TestNoAuth_ProgenyGitTokenSettingWithheld")
+			require.NoError(t, err)
+			require.NoError(t, m.d.DispatchAgentStart(ctx, m.agent, "task", false))
+			for where, env := range map[string]map[string]string{"create": req.ResolvedEnv, "start": m.client.lastResolvedEnv} {
+				if noAuth {
+					assert.NotContains(t, env, noAuthGitTokenKey, "%s: withheld", where)
+				} else {
+					assert.Equal(t, "na-progeny-git-token", env[noAuthGitTokenKey], "%s: control", where)
+				}
+			}
+		})
+	}
+}
+
+// TestProvisionNoAuth_CredentialNamesUnreadableGitTokenScopes: in the same
+// provision, a GITHUB_TOKEN setting from the hub or a broker is withheld;
+// only the project's or the owner's is kept.
+func TestProvisionNoAuth_CredentialNamesUnreadableGitTokenScopes(t *testing.T) {
+	ctx := context.Background()
+	for _, scope := range []string{store.ScopeHub, store.ScopeRuntimeBroker, store.ScopeUser} {
+		t.Run(scope, func(t *testing.T) {
+			m := newLDFixture(t, "na-provision-unread-git-"+scope, ldOptions{})
+			m.env(t, noAuthGitTokenKey, "na-git-token-setting", scope, m.scopeID(scope), true)
+			m.agent.AppliedConfig.NoAuth = true
+			d := NewHTTPAgentDispatcherWithClient(&naHCErrStore{Store: m.store}, &mockRuntimeBrokerClient{}, false, slog.Default())
+			d.SetAuthzService(m.authz)
+			d.SetHubID(m.hubID)
+			d.SetSecretBackend(m.backend)
+
+			req, err := d.buildCreateRequestFor(ctx, m.agent, "TestProvisionNoAuth_CredentialNamesUnreadableGitTokenScopes", continueOnSecretResolutionError)
+			require.NoError(t, err)
+			if scope == store.ScopeUser {
+				assert.Equal(t, "na-git-token-setting", req.ResolvedEnv[noAuthGitTokenKey], "the owner's setting is kept")
+			} else {
+				assert.NotContains(t, req.ResolvedEnv, noAuthGitTokenKey, "withheld from %s", scope)
+			}
+		})
+	}
 }
