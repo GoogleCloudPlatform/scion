@@ -24,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -95,12 +96,17 @@ func TestHarnessesSeeded_NoStorageCountsTheDirectory(t *testing.T) {
 	assert.True(t, srv.harnessesSeeded(ctx, globalDir))
 }
 
-// harnessListFailingStore is a store whose harness config listing fails.
+// harnessListFailingStore is a store whose harness config listing fails
+// while failing is set, and delegates otherwise.
 type harnessListFailingStore struct {
 	store.Store
+	failing *atomic.Bool
 }
 
-func (harnessListFailingStore) ListHarnessConfigs(context.Context, store.HarnessConfigFilter, store.ListOptions) (*store.ListResult[store.HarnessConfig], error) {
+func (w harnessListFailingStore) ListHarnessConfigs(ctx context.Context, f store.HarnessConfigFilter, o store.ListOptions) (*store.ListResult[store.HarnessConfig], error) {
+	if !w.failing.Load() {
+		return w.Store.ListHarnessConfigs(ctx, f, o)
+	}
 	return nil, errors.New("database is locked")
 }
 
@@ -108,9 +114,13 @@ func (harnessListFailingStore) ListHarnessConfigs(context.Context, store.Harness
 // The polled status logs one WARN per failure streak, then Debug; a good
 // read ends the streak, so the next failure WARNs again.
 func TestHarnessesSeeded_StoreErrorCountsTheDirectory(t *testing.T) {
-	srv, s, _ := testTemplateBootstrapServer(t)
-	srv.store = harnessListFailingStore{Store: s}
-	t.Cleanup(func() { srv.store = s }) // before the server's shutdown
+	srv, _, _ := testTemplateBootstrapServer(t)
+	waitUserScopedDataSweep(t, srv)
+	var failing atomic.Bool
+	installStoreFault(t, srv, func(inner store.Store, _ *storeFaultSwitch) harnessListFailingStore {
+		return harnessListFailingStore{Store: inner, failing: &failing}
+	})
+	failing.Store(true)
 	h := &levelCapturingHandler{}
 	srv.resourceLog = slog.New(h)
 	ctx := context.Background()
@@ -122,9 +132,9 @@ func TestHarnessesSeeded_StoreErrorCountsTheDirectory(t *testing.T) {
 	assert.True(t, srv.harnessesSeeded(ctx, globalDir))
 	assert.Equal(t, 1, countHarnessListWarns(h), "one WARN for the failure streak, not one per poll")
 
-	srv.store = s
+	failing.Store(false)
 	srv.harnessesSeeded(ctx, globalDir)
-	srv.store = harnessListFailingStore{Store: s}
+	failing.Store(true)
 	assert.True(t, srv.harnessesSeeded(ctx, globalDir))
 	assert.Equal(t, 2, countHarnessListWarns(h), "a failure after a good read starts a new streak")
 }
@@ -206,9 +216,7 @@ func TestComputeOnboardingStatus_HarnessesSeededAndComplete(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("no store", func(t *testing.T) {
-		srv, s, _ := testTemplateBootstrapServer(t)
-		srv.store = nil
-		t.Cleanup(func() { srv.store = s }) // before the server's shutdown
+		srv := &Server{}
 		st := srv.computeOnboardingStatus(ctx)
 		assert.True(t, st.HarnessesSeeded)
 		assert.True(t, st.Complete)

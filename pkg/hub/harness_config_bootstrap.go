@@ -212,9 +212,10 @@ func (s *Server) currentTemplateHash(ctx context.Context, id string) string {
 	return t.ContentHash
 }
 
-// countHarnessConfigDirs returns how many subdirectories of dir hold a
-// config.yaml, the directories bootstrap imports as harness configs. A
-// missing or unreadable dir counts 0.
+// countHarnessConfigDirs returns how many subdirectories of dir are
+// harness-config directories (isHarnessConfigDir), the directories bootstrap
+// imports as harness configs; a linked config.yaml does not count. A missing
+// or unreadable dir counts 0.
 func countHarnessConfigDirs(dir string) int {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -225,7 +226,7 @@ func countHarnessConfigDirs(dir string) int {
 		if !e.IsDir() {
 			continue
 		}
-		if info, err := os.Stat(filepath.Join(dir, e.Name(), "config.yaml")); err == nil && info.Mode().IsRegular() {
+		if isHarnessConfigDir(filepath.Join(dir, e.Name())) {
 			n++
 		}
 	}
