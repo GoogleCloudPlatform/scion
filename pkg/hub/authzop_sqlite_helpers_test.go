@@ -707,8 +707,9 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 
 	// hub.conduit, hub.agent_delegation, federation.project_visitors,
 	// web.chat_starred_messages, hub.agent_edit_held,
-	// hub.user_delete_force_cascade, hub.artifact_archive and
-	// hub.artifacts_open_review_check on too, so their experiment-gated
+	// hub.user_delete_force_cascade, hub.artifact_archive,
+	// hub.artifacts_open_review_check and hub.project_self_leave on too, so
+	// their experiment-gated
 	// routes are live: the registry above with them also defaulting on (no
 	// operational settings, which the other entries rely on, are replaced).
 	var active []experiments.Experiment
@@ -716,7 +717,8 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 		if e.Name == conduitExperiment || e.Name == experiments.AgentDelegation || e.Name == experiments.FederationProjectVisitors ||
 			e.Name == experiments.ChatStarredMessages || e.Name == experiments.AgentEditHeld ||
 			e.Name == experiments.UserDeleteForceCascade || e.Name == experiments.ArtifactArchive ||
-			e.Name == experiments.ArtifactsOpenReviewCheck {
+			e.Name == experiments.ArtifactsOpenReviewCheck ||
+			e.Name == experiments.ProjectSelfLeave {
 			e.Default = true
 		}
 		active = append(active, e)
@@ -733,6 +735,7 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	require.True(t, srv.experimentEnabled(experiments.UserDeleteForceCascade))
 	require.True(t, srv.experimentEnabled(experiments.ArtifactArchive))
 	require.True(t, srv.experimentEnabled(experiments.ArtifactsOpenReviewCheck))
+	require.True(t, srv.experimentEnabled(experiments.ProjectSelfLeave))
 	// POST /api/v1/auth/federation-token also answers 404 while the OIDC
 	// provider is off: install a test key manager and allow the audience
 	// that bodyOverrides sends, so the route reaches its caller checks.
@@ -1026,6 +1029,7 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/projects/{id}/members":              {"id": f.project},
 		"/api/v1/projects/{id}/members/{memberId}":   {"id": f.project, "memberId": f.projectMembership},
 		"/api/v1/projects/{id}/transfer-ownership":   {"id": f.project},
+		"/api/v1/projects/{id}/leave":                {"id": f.project},
 		"/api/v1/projects/{id}/visitors":             {"id": f.project},
 		"/api/v1/projects/{id}/visitors/{visitorId}": {"id": f.project, "visitorId": f.projectVisitor},
 		// Visitor rules (the item pattern addresses the rule remove takes).

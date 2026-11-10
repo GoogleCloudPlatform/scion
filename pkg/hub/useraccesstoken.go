@@ -804,3 +804,19 @@ func revokeUserAccessTokensForUserTx(ctx context.Context, tx store.Store, userID
 	}
 	return n, nil
 }
+
+// revokeUserAccessTokensForUserProjectTx revokes, inside the caller's
+// transaction, every unrevoked access token of userID whose boundary is
+// projectID, and returns the revoked token IDs. A project leave
+// (LeaveProject, ptone/scion#7494) calls it in the transaction that removes
+// the leaver's bindings, when the leaver keeps no access to the project, so
+// a token issued before the leave is refused on its next use and stays
+// refused after a re-add. Hub-boundary tokens are not touched. Like every
+// UAT mutation it lives in this file.
+func revokeUserAccessTokensForUserProjectTx(ctx context.Context, tx store.Store, userID, projectID string) ([]string, error) {
+	ids, err := tx.RevokeUserAccessTokensForUserProject(ctx, userID, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("revoke project access tokens of user: %w", err)
+	}
+	return ids, nil
+}

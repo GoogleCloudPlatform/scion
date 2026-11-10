@@ -592,6 +592,7 @@ var testAdminExperimentPolicy = map[string]testAdminPolicy{
 	experiments.ImageTagSetting:              testAdminPolicyDeny,
 	experiments.ImageTagVersionDefault:       testAdminPolicyDeny,
 	experiments.ArtifactsOpenReviewCheck:     testAdminPolicyDeny,
+	experiments.ProjectSelfLeave:             testAdminPolicyDeny,
 	experiments.WelcomeProject:               testAdminPolicyDeny,
 }
 

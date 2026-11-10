@@ -2694,6 +2694,12 @@ func (s *Server) handleProjectRoutes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Project self-leave (ptone/scion#7494).
+	if subPath == "leave" {
+		s.handleProjectLeave(w, r, projectID)
+		return
+	}
+
 	// RS1: Atomic ownership transfer endpoint.
 	if subPath == "transfer-ownership" {
 		s.handleTransferOwnership(w, r, projectID)
@@ -3632,6 +3638,9 @@ func (s *Server) getProject(w http.ResponseWriter, r *http.Request, id string) {
 	resp := ProjectWithCapabilities{Project: *project, CloudLogging: s.logQueryService != nil}
 	if identity := GetIdentityFromContext(ctx); identity != nil {
 		resp.Cap = s.authzService.ComputeCapabilities(ctx, identity, projectResource(project))
+		if user, ok := identity.(UserIdentity); ok && resp.Cap != nil {
+			resp.Cap.CanLeave, resp.Cap.LeaveBlockedReason = s.projectLeaveCapabilities(ctx, user.ID(), project.ID)
+		}
 	}
 
 	writeJSON(w, http.StatusOK, resp)

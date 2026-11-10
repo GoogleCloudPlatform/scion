@@ -196,11 +196,11 @@ func TestValidateSettingWrite(t *testing.T) {
 		assert.NoError(t, ValidateSettingWrite(key, true), key)
 	}
 	// Writable keys, including ones that only look close to a rejected
-	// one, and hub_connections.* (left to UpdateSetting's internal callers).
+	// one.
 	for _, key := range []string{
 		"active_profile", "hub.endpoint", "hub.brokerToken", "hub.brokerId",
 		"project_id", "hub.project_id", "hub.tokenx", "bucket", "server.authx",
-		"hub_connections.prod.endpoint",
+		"hub_connectionsx",
 	} {
 		for _, global := range []bool{true, false} {
 			assert.NoError(t, ValidateSettingWrite(key, global), key)
@@ -208,16 +208,19 @@ func TestValidateSettingWrite(t *testing.T) {
 	}
 }
 
-// TestValidateConfigSetKey checks that "config set" also rejects
-// hub_connections.*, which UpdateSetting itself accepts.
-func TestValidateConfigSetKey(t *testing.T) {
+// TestValidateSettingWrite_HubConnections checks that hub_connections and
+// every key under it are refused at every layer: no writer stores them
+// (ptone/scion#3493). A key that only starts with the same letters is not.
+func TestValidateSettingWrite_HubConnections(t *testing.T) {
 	for _, global := range []bool{true, false} {
-		assertNotWritable(t, ValidateConfigSetKey("hub_connections.prod.endpoint", global), "hub_connections.prod.endpoint")
-		assertNotWritable(t, ValidateConfigSetKey("hub.token", global), "hub.token")
-		assert.NoError(t, ValidateConfigSetKey("hub.endpoint", global))
+		for _, key := range []string{"hub_connections", "hub_connections.prod.endpoint", "hub_connections.prod", "hub_connections.prod.other"} {
+			assertNotWritable(t, ValidateSettingWrite(key, global), key)
+		}
+		assert.NotErrorIs(t, ValidateSettingWrite("hub_connectionsx", global), ErrSettingNotWritable)
+		assert.NoError(t, ValidateSettingWrite("hub.endpoint", global))
 	}
-	assertNotWritable(t, ValidateConfigSetKey("server.auth.email", false), "server.auth.email")
-	assert.NoError(t, ValidateConfigSetKey("server.auth.email", true))
+	assertNotWritable(t, ValidateSettingWrite("server.auth.email", false), "server.auth.email")
+	assert.NoError(t, ValidateSettingWrite("server.auth.email", true))
 }
 
 // unknownGlobalOnlyKeys are server.auth keys that no writer accepts. They
@@ -236,10 +239,9 @@ func assertUnknownKey(t *testing.T, err error, key string) {
 	assert.NotContains(t, err.Error(), writePolicySecret, key)
 }
 
-func TestValidateConfigSetKey_UnknownGlobalOnlyKeys(t *testing.T) {
+func TestValidateSettingWrite_UnknownGlobalOnlyKeys(t *testing.T) {
 	for _, key := range unknownGlobalOnlyKeys {
 		for _, global := range []bool{true, false} {
-			assertUnknownKey(t, ValidateConfigSetKey(key, global), key)
 			assertUnknownKey(t, ValidateSettingWrite(key, global), key)
 		}
 	}

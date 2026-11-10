@@ -4958,6 +4958,9 @@ const (
 	// (ptone/scion#4240) passed its expiry, so it is no longer admitted
 	// anywhere and its agents are held until the expiry reaper purges them.
 	MembershipLossTriggerTestIdentityExpiry MembershipLossTrigger = "test_identity_expiry"
+	// MembershipLossTriggerMemberLeave: the user left the project
+	// (POST /api/v1/projects/{id}/leave, ptone/scion#7494).
+	MembershipLossTriggerMemberLeave MembershipLossTrigger = "member_leave"
 )
 
 // ValidMembershipLossTrigger reports whether t is a recognised trigger.
@@ -4973,7 +4976,8 @@ func ValidMembershipLossTrigger(t MembershipLossTrigger) bool {
 		MembershipLossTriggerSystemScopeChange,
 		MembershipLossTriggerRestoreCheck,
 		MembershipLossTriggerReconcile,
-		MembershipLossTriggerTestIdentityExpiry:
+		MembershipLossTriggerTestIdentityExpiry,
+		MembershipLossTriggerMemberLeave:
 		return true
 	}
 	return false

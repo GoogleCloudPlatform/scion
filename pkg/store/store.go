@@ -2863,6 +2863,13 @@ type UserAccessTokenStore interface {
 	// and returns how many it revoked (ptone/scion#2143).
 	RevokeUserAccessTokensForUser(ctx context.Context, userID string) (int, error)
 
+	// RevokeUserAccessTokensForUserProject revokes every unrevoked token of
+	// userID whose boundary is the project projectID, and returns the IDs
+	// it revoked. Hub-boundary tokens and tokens bounded to other projects
+	// are not touched. Used by a project leave, in its transaction
+	// (ptone/scion#7494).
+	RevokeUserAccessTokensForUserProject(ctx context.Context, userID, projectID string) ([]string, error)
+
 	// DeleteUserAccessTokensByProject permanently removes all "project"-boundary
 	// tokens scoped to projectID. A hub-boundary token belonging to one of the
 	// project's members is never removed by this call, even if that member

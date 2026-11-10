@@ -78,3 +78,12 @@ func IsTerminalPhase(phase string) bool {
 	}
 	return false
 }
+
+// PhaseAtRest reports whether phase has no live container: a terminal phase
+// (IsTerminalPhase) or suspended. The hub does not store a heartbeat's live
+// container status for an agent at rest, and the store clears the container
+// status of a phase write that crosses between at rest and live
+// (ptone/scion#3607); both use this one definition.
+func PhaseAtRest(phase string) bool {
+	return IsTerminalPhase(phase) || state.Phase(phase) == state.PhaseSuspended
+}

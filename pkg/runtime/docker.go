@@ -22,6 +22,7 @@ import (
 	"math/rand/v2"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -125,11 +126,39 @@ func (r *DockerRuntime) Run(ctx context.Context, config RunConfig) (string, erro
 	return id, nil
 }
 
+// defaultContainerStopTimeout is how long docker and podman stop wait after
+// SIGTERM before they kill the container, when the RunRef sets no
+// StopTimeout. The engines default to 10s, the same as sciontool init's
+// default grace period, which would kill init before it could end the child,
+// report the final status to the Hub (up to 5s) and exit. 30s covers init's
+// default 10s grace period and that report when the agent runs no sidecar
+// services. It does not cover a grace period raised with SCION_GRACE_PERIOD
+// or --grace-period, nor the sidecar shutdown, which init bounds by a second
+// grace period.
+const defaultContainerStopTimeout = 30 * time.Second
+
+// stopTimeoutArgs returns the stop timeout flag for docker and podman stop:
+// -t with whole seconds, rounded up. Both engines accept -t.
+func stopTimeoutArgs(ref RunRef) []string {
+	d := ref.StopTimeout
+	if d <= 0 {
+		d = defaultContainerStopTimeout
+	}
+	// Divide first, then round up: d + time.Second - 1 overflows for a d
+	// within a second of the largest Duration.
+	secs := int64(d / time.Second)
+	if d%time.Second > 0 {
+		secs++
+	}
+	return []string{"-t", strconv.FormatInt(secs, 10)}
+}
+
 // Stop stops the container ref.ID. As with Delete, the engine container ID
 // is already unique per run, so ref.RunID needs no further check here; run
 // targeting is enforced by the caller resolving the ID from List.
 func (r *DockerRuntime) Stop(ctx context.Context, ref RunRef) error {
-	out, err := runSimpleCommand(ctx, r.Command, "stop", ref.ID)
+	args := append([]string{"stop"}, stopTimeoutArgs(ref)...)
+	out, err := runSimpleCommand(ctx, r.Command, append(args, ref.ID)...)
 	if err != nil && out != "" {
 		// Include runtime's stderr output in the error so callers can match
 		// on messages like "not running" or "No such container".

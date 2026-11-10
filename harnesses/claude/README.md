@@ -51,12 +51,24 @@ set `SCION_INIT_FIREWALL=1` in the agent or template environment and
 script fails, the agent does not start. Unset, empty or a false value
 (`0`, `false`) means no firewall; any other value is an error.
 
+With native identity (the agent uses its runtime platform's own GCP
+identity, for example a Cloud Run service account) the metadata mode is
+passthrough. A requested init firewall then either fails, because the
+container lacks the network administration capability, and the agent does
+not start; or it installs and blocks the metadata server and Google APIs, so
+the native identity cannot be used. Nothing refuses this combination.
+
 The script changes iptables, so it needs the network administration
 capability, which the broker grants only when metadata interception is on
-(`assign` or `block` mode). With `passthrough` the container does not have
-it, the script fails, and the agent does not start. The script cannot be run
-later from inside the agent: in `assign` and `block` modes, init removes the
-network administration capability once network setup is done.
+(`assign` or `block` mode). With `passthrough` the broker does not grant it,
+so the script normally fails and the agent does not start; if the runtime
+grants it anyway, the firewall installs and init then removes the
+capability. After a successful removal, the script cannot be run later from
+inside the agent: init removes the network administration capability once
+network setup is done, in `assign` and `block` modes and whenever the
+firewall was installed, before any workload runs. If the firewall or
+metadata interception was installed and that removal fails, the agent does
+not start; otherwise a failed removal is only logged.
 
 The allow-list covers the host's /24 network but no other Hub address, so an
 agent whose Hub is elsewhere cannot reach it with the firewall on.

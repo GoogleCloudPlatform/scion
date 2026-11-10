@@ -2571,6 +2571,20 @@ type Server struct {
 
 	imageBuildActive atomic.Bool
 	imagePullActive  atomic.Bool
+
+	// harnessSeedLedgerFailed is true when the last bootstrap that creates
+	// harness-config rows (workstation or hosted, see
+	// loadSeedLedgerForBootstrap) could not load the built-in seed ledger,
+	// so it created no built-in row. The onboarding status then also counts
+	// the harness-configs directory (see harnessesSeeded). It covers only
+	// that case: other ways a bootstrap can leave a directory without a row
+	// (an import error, a lost advisory lock) are reported as errors and
+	// are not covered.
+	harnessSeedLedgerFailed atomic.Bool
+	// harnessListWarned is true while listing harness configs for the
+	// onboarding status keeps failing: the first failure of a streak logs a
+	// WARN, later ones Debug, and the next good read ends the streak.
+	harnessListWarned atomic.Bool
 	// systemImagePull pulls the harness images of POST
 	// /api/v1/system/images/pull; nil is runtime.PullImages. Tests
 	// replace it.
@@ -3323,6 +3337,7 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	// Process membership loss checks right after the removal commits
 	// (ptone/scion#3433).
 	srv.membershipService.onMembershipLoss = srv.kickMembershipLossChecks
+	srv.membershipService.userAdmitted = srv.userAdmissionByIDOn
 
 	// RS3: Initialize the project deletion domain service.
 	srv.deletionService = NewProjectDeletionService(

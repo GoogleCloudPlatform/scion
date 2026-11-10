@@ -427,6 +427,13 @@ const ImageTagSetting = "hub.image_tag_setting"
 // an unset image_tag leaves every image reference unchanged.
 const ImageTagVersionDefault = "hub.image_tag_version_default"
 
+// ProjectSelfLeave gates project self-leave (ptone/scion#7494): POST
+// /api/v1/projects/{id}/leave, with which a user removes their own direct
+// project bindings, and the canLeave and leaveBlockedReason capabilities.
+// The hub checks it on the route; while it is off the route answers 404
+// and the capabilities are left out.
+const ProjectSelfLeave = "hub.project_self_leave"
+
 // WelcomeProject gates the welcome project (ptone/scion#7534): a one-time
 // onboarding step that installs the latest agent-team templates, pinned to
 // commit shas, into a "welcome" project and starts a coordinator that greets
@@ -439,6 +446,17 @@ const WelcomeProject = "hub.welcome_project"
 // Default(); there is no package-level Lookup/All, so hub code cannot bypass
 // the Registry instance it was given (ptone/scion#2217).
 var compiled = []Experiment{
+	{
+		Name:        ProjectSelfLeave,
+		Title:       "Leave a project",
+		Description: "Lets a user leave a project they were added to directly: POST /api/v1/projects/{id}/leave removes the caller's own direct project roles in one step, and revokes their access tokens limited to that project when they keep no other access. The last usable direct owner and a member only through a group are refused. The user's agents in the project are held by the existing membership check. While off, the route answers 404 and the leave capabilities are not reported.",
+		Default:     false,
+		Layers:      []Layer{LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#7494",
+		Owner:       "authz",
+		ReviewBy:    "2027-02-05",
+	},
 	{
 		Name:        WelcomeProject,
 		Title:       "Welcome project",
