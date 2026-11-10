@@ -2615,11 +2615,12 @@ const (
 	// that waits for the owner's approval. The owner is the only
 	// recipient; AgentID and ProjectID are the writing agent and its
 	// project. ResourceType is NotificationResourcePendingSecret and
-	// ResourceID the latest pending secret's id. At most one is stored per
-	// owner and writing agent per hour, with the count of that agent's
-	// pending secrets; a write that would replace an approved secret is
-	// always announced, at most once per owner, agent and key per hour. It
-	// never carries a value.
+	// ResourceID the latest pending secret's id. One is stored per owner,
+	// writing agent and clock hour and updated in place by each later write
+	// in that hour, with the count of that agent's pending secrets; a write
+	// that would replace an approved secret is announced separately, at
+	// most once per owner, agent and key per hour. It never carries a
+	// value.
 	NotificationKindSecretPending = "secret_pending"
 )
 

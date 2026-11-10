@@ -3024,6 +3024,12 @@ type NotificationStore interface {
 	// Returns ErrNotFound if the notification doesn't exist.
 	AcknowledgeNotification(ctx context.Context, id string) error
 
+	// UpdateNotificationContent replaces a notification's Message and
+	// ResourceID and marks it unacknowledged, so an aggregated
+	// notification shows its latest state again. CreatedAt and everything
+	// else are kept. Returns ErrNotFound if the notification doesn't exist.
+	UpdateNotificationContent(ctx context.Context, id, message, resourceID string) error
+
 	// AcknowledgeAllNotifications marks all notifications for a subscriber as acknowledged.
 	// No error on zero rows affected.
 	AcknowledgeAllNotifications(ctx context.Context, subscriberType, subscriberID string) error

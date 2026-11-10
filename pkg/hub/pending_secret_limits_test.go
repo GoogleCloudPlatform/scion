@@ -61,8 +61,8 @@ func seedPendingRows(t *testing.T, f *pendingFixture, ownerID, agentID, prefix s
 }
 
 // TestAgentPendingSecret_AgentCap: an agent with PendingSecretAgentCap
-// pending secrets gets 429 secret_pending_cap for a new key, nothing is
-// stored and its held value is released; a replacement of its own key is
+// pending secrets gets 429 secret_pending_cap for a new key, and nothing is
+// held or stored; a replacement of its own key is
 // accepted; another agent is not affected.
 func TestAgentPendingSecret_AgentCap(t *testing.T) {
 	f := newPendingFixture(t, "pend-cap-agent")
@@ -80,7 +80,7 @@ func TestAgentPendingSecret_AgentCap(t *testing.T) {
 	assert.EqualValues(t, store.PendingSecretAgentCap, details["limit"])
 	assert.NotContains(t, rec.Body.String(), "test-value")
 	assert.Len(t, f.listPending(t, f.owner()), store.PendingSecretAgentCap)
-	assert.Len(t, f.drops.dropped, dropsBefore+1, "the held value of the refused write is released")
+	assert.Len(t, f.drops.dropped, dropsBefore, "a write over a cap holds no value, so none is released")
 
 	refused := audit.ofType(PendingSecretEventRefused)
 	require.Len(t, refused, 1)
@@ -232,20 +232,33 @@ func pendingNotifications(t *testing.T, f *pendingFixture) []store.Notification 
 	return out
 }
 
-// TestPendingSecretNotification_Aggregated: the first pending write of an
-// agent notifies the owner with the agent, its project, the key, the type
-// and the time, never the value; more writes by the same agent within the
-// hour add nothing; another agent gets its own notification.
+// pinPendingNotifyClock fixes the notification clock inside one clock
+// hour for the test.
+func pinPendingNotifyClock(t *testing.T) time.Time {
+	t.Helper()
+	at := time.Now().UTC().Truncate(time.Hour).Add(20 * time.Minute)
+	orig := pendingSecretNotifyNow
+	pendingSecretNotifyNow = func() time.Time { return at }
+	t.Cleanup(func() { pendingSecretNotifyNow = orig })
+	return at
+}
+
+// TestPendingSecretNotification_Aggregated: an agent's writes within one
+// hour share one notification. The first creates it; each later one
+// updates it in place with the latest key, type and time and the count of
+// the agent's waiting secrets, and shows it again if it was acknowledged.
+// The text names the agent and its project and never the value. Another
+// agent gets its own notification.
 func TestPendingSecretNotification_Aggregated(t *testing.T) {
 	f := newPendingFixture(t, "pend-notify")
+	pinPendingNotifyClock(t)
+	ctx := context.Background()
 	first := decodePendingResponse(t, agentPut(t, f.Server, f.AgentID, f.Token, "NOTE_A", userScopeWrite("test-value-n1", false)))
-	decodePendingResponse(t, agentPut(t, f.Server, f.AgentID, f.Token, "NOTE_B", userScopeWrite("test-value-n2", false)))
-	decodePendingResponse(t, agentPut(t, f.Server, f.AgentID, f.Token, "NOTE_A", userScopeWrite("test-value-n3", false)))
 
 	notes := pendingNotifications(t, f)
-	require.Len(t, notes, 1, "one notification per owner and writing agent per hour")
+	require.Len(t, notes, 1)
 	n := notes[0]
-	agent, err := f.Store.GetAgent(context.Background(), f.AgentID)
+	agent, err := f.Store.GetAgent(ctx, f.AgentID)
 	require.NoError(t, err)
 	assert.Equal(t, store.SubscriberTypeUser, n.SubscriberType)
 	assert.Equal(t, f.UserID, n.SubscriberID)
@@ -258,10 +271,24 @@ func TestPendingSecretNotification_Aggregated(t *testing.T) {
 	assert.Contains(t, n.Message, "in project "+f.ProjectName)
 	assert.Contains(t, n.Message, "saved secret NOTE_A (file) for your account at ")
 	assert.Contains(t, n.Message, "Approve or reject in Profile > Secrets.")
+	assert.NotContains(t, n.Message, "await your approval", "a single secret has no count")
 	assert.NotContains(t, n.Message, "test-value")
 	assert.Empty(t, n.Excerpt)
+	require.NoError(t, f.Store.AcknowledgeNotification(ctx, n.ID))
 
-	decodePendingResponse(t, agentPut(t, f.Server, f.AgentB, f.TokenB, "NOTE_C", userScopeWrite("test-value-n4", false)))
+	// Later writes in the hour update the same notification.
+	decodePendingResponse(t, agentPut(t, f.Server, f.AgentID, f.Token, "NOTE_B", userScopeWrite("test-value-n2", false)))
+	third := decodePendingResponse(t, agentPut(t, f.Server, f.AgentID, f.Token, "NOTE_C", userScopeWrite("test-value-n3", false)))
+	notes = pendingNotifications(t, f)
+	require.Len(t, notes, 1, "one notification per owner and writing agent per hour")
+	n = notes[0]
+	assert.Equal(t, third.PendingID, n.ResourceID, "it points at the latest pending secret")
+	assert.Contains(t, n.Message, "saved secret NOTE_C (file) for your account at ")
+	assert.Contains(t, n.Message, "3 secrets from this agent await your approval.")
+	assert.False(t, n.Acknowledged, "an updated notification shows again")
+	assert.NotContains(t, n.Message, "test-value")
+
+	decodePendingResponse(t, agentPut(t, f.Server, f.AgentB, f.TokenB, "NOTE_D", userScopeWrite("test-value-n4", false)))
 	assert.Len(t, pendingNotifications(t, f), 2, "another writing agent is notified separately")
 }
 
@@ -298,6 +325,7 @@ func TestPendingSecretNotification_CountsWaitingSecrets(t *testing.T) {
 // once per key and hour.
 func TestPendingSecretNotification_ReplacementAlwaysAnnounced(t *testing.T) {
 	f := newPendingFixture(t, "pend-notify-replace")
+	pinPendingNotifyClock(t)
 	rec := ownerRequest(t, f.Server, f.owner(), CredentialKindInteractive, http.MethodPut, "/api/v1/secrets/EXISTING_KEY",
 		SetSecretRequest{Value: "dGVzdC12YWx1ZS1hcHByb3ZlZA==", Scope: store.ScopeUser})
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
@@ -327,7 +355,48 @@ func TestPendingSecretNotification_ReplacementAlwaysAnnounced(t *testing.T) {
 	decodePendingResponse(t, agentPut(t, f.Server, f.AgentID, f.Token, "EXISTING_KEY", userScopeWrite("test-value-3", false)))
 	assert.Len(t, pendingNotifications(t, f), 2)
 
-	// A new key inside the window stays covered by the hourly notification.
-	decodePendingResponse(t, agentPut(t, f.Server, f.AgentID, f.Token, "NEW_KEY_2", userScopeWrite("test-value-4", false)))
-	assert.Len(t, pendingNotifications(t, f), 2)
+	// A new key inside the window updates the hourly notification.
+	latest := decodePendingResponse(t, agentPut(t, f.Server, f.AgentID, f.Token, "NEW_KEY_2", userScopeWrite("test-value-4", false)))
+	notes = pendingNotifications(t, f)
+	require.Len(t, notes, 2)
+	var hourly *store.Notification
+	for i := range notes {
+		if notes[i].ResourceID == latest.PendingID {
+			hourly = &notes[i]
+		}
+	}
+	require.NotNil(t, hourly)
+	assert.Contains(t, hourly.Message, "saved secret NEW_KEY_2 (file) for your account at ")
+	assert.Contains(t, hourly.Message, "3 secrets from this agent await your approval, 1 of them replaces an existing secret.")
+}
+
+// TestPendingSecretCapPrecheck: the check before the value is held counts
+// live rows only, treats the agent's own key as a replacement, and leaves
+// a key another agent holds to the store.
+func TestPendingSecretCapPrecheck(t *testing.T) {
+	now := time.Now()
+	live, expired := now.Add(time.Hour), now.Add(-time.Hour)
+	rows := func(n int, agent string, exp time.Time) []store.PendingSecret {
+		var out []store.PendingSecret
+		for i := 0; i < n; i++ {
+			out = append(out, store.PendingSecret{Key: fmt.Sprintf("%s_%d", agent, i), AgentID: agent, ExpiresAt: exp})
+		}
+		return out
+	}
+	agentFull := rows(store.PendingSecretAgentCap, "a", live)
+	got := pendingSecretCapPrecheck(agentFull, "a", "NEW", now)
+	require.NotNil(t, got)
+	assert.Equal(t, store.PendingSecretCapAgent, got.Cap)
+	assert.Nil(t, pendingSecretCapPrecheck(agentFull, "a", "a_3", now), "own key: a replacement")
+	assert.Nil(t, pendingSecretCapPrecheck(agentFull, "b", "NEW", now), "another agent has its own allowance")
+	assert.Nil(t, pendingSecretCapPrecheck(rows(store.PendingSecretAgentCap, "a", expired), "a", "NEW", now), "expired rows do not count")
+
+	var ownerFull []store.PendingSecret
+	for i := 0; i < store.PendingSecretOwnerCap/store.PendingSecretAgentCap; i++ {
+		ownerFull = append(ownerFull, rows(store.PendingSecretAgentCap, fmt.Sprintf("w%d", i), live)...)
+	}
+	got = pendingSecretCapPrecheck(ownerFull, "new-agent", "NEW", now)
+	require.NotNil(t, got)
+	assert.Equal(t, store.PendingSecretCapOwner, got.Cap)
+	assert.Nil(t, pendingSecretCapPrecheck(ownerFull, "new-agent", "w1_2", now), "a key already pending is left to the store")
 }

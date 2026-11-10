@@ -29,18 +29,22 @@ import (
 // Pending secret notifications. When an agent saves a user-scope secret
 // that waits for approval, the owner gets an in-app notification of kind
 // store.NotificationKindSecretPending, stored and published on the owner's
-// own subject like the artifact review summary. At most one is created per
-// (owner, writing agent) per pendingSecretNotifyInterval; a write inside
-// that window adds no notification, and the next one reports how many of
-// that agent's secrets await approval and how many of those replace an
-// existing secret. A write that would replace an approved secret always
-// notifies, outside that window, at most once per (owner, writing agent,
-// key) per interval, so no replacement goes unannounced. The text names
-// the agent, its project, the key, its type and the time; never the value.
+// own subject like the artifact review summary. One notification covers
+// each (owner, writing agent, clock hour): the first write of the hour
+// creates it, and every later write in that hour updates it in place, with
+// the latest key, type and time and the count of the agent's secrets that
+// await approval (and how many of those replace an existing secret), and
+// publishes it again. A write that would replace an approved secret gets
+// its own notification instead, at most once per (owner, writing agent,
+// key) per hour, so no replacement goes unannounced. The text names the
+// agent, its project, the key, its type and the time; never the value.
 
-// pendingSecretNotifyInterval is the minimum time between two pending
-// secret notifications for the same owner and writing agent.
+// pendingSecretNotifyInterval is the window one pending secret
+// notification covers per owner and writing agent (a clock hour).
 const pendingSecretNotifyInterval = time.Hour
+
+// pendingSecretNotifyNow is the notification clock. Tests replace it.
+var pendingSecretNotifyNow = time.Now
 
 // pendingSecretNotifyLabelMaxRunes caps each agent-chosen name (agent slug,
 // project name, key) in the message, ellipsis included.
@@ -51,31 +55,17 @@ const pendingSecretNotifyLabelMaxRunes = 64
 // notification.
 var pendingSecretNotifyNamespace = uuid.MustParse("6f1e3c0a-4b52-4d1e-9a39-2f6a8f0d5c11")
 
-// notifyPendingSecret notifies the owner of pending secret p, unless a
-// notification for the same owner and writing agent was created within
-// pendingSecretNotifyInterval. Every failure is logged and skipped: it
-// never changes the write's result.
+// notifyPendingSecret notifies the owner of pending secret p: it creates
+// the hour's notification for the writing agent, or updates it in place
+// when it exists; a replacement of an approved secret is announced once
+// per key and hour. Every failure is logged and skipped: it never changes
+// the write's result.
 func (s *Server) notifyPendingSecret(ctx context.Context, p *store.PendingSecret) {
 	if p == nil || p.Scope != store.ScopeUser || p.ScopeID == "" {
 		return
 	}
-	now := time.Now()
+	now := pendingSecretNotifyNow()
 	log := slog.With("pending_id", p.ID)
-
-	// A replacement of an approved secret is announced whatever the
-	// agent's hourly window says; its notification id is per key and hour.
-	if p.ReplacesSecretID == "" {
-		recent, err := s.store.GetNotificationsByAgent(ctx, p.AgentID, store.SubscriberTypeUser, p.ScopeID, false)
-		if err != nil {
-			log.WarnContext(ctx, "pending secret: notification skipped: listing notifications failed", "error", err)
-			return
-		}
-		for _, n := range recent {
-			if n.Kind == store.NotificationKindSecretPending && now.Sub(n.CreatedAt) < pendingSecretNotifyInterval {
-				return
-			}
-		}
-	}
 
 	counts := pendingSecretCounts{waiting: 1}
 	if p.ReplacesSecretID != "" {
@@ -97,20 +87,49 @@ func (s *Server) notifyPendingSecret(ctx context.Context, p *store.PendingSecret
 	}
 
 	notif := buildPendingSecretNotification(p, counts, now)
-	if p.ReplacesSecretID != "" {
-		if _, err := s.store.GetNotification(ctx, notif.ID); err == nil {
-			return // this key's replacement was announced within the hour
-		}
+	existing, err := s.store.GetNotification(ctx, notif.ID)
+	switch {
+	case err == nil && p.ReplacesSecretID != "":
+		return // this key's replacement was announced within the hour
+	case err == nil:
+		s.updatePendingSecretNotification(ctx, existing, notif)
+		return
+	case !errors.Is(err, store.ErrNotFound):
+		log.WarnContext(ctx, "pending secret: notification skipped: reading it failed", "error", err)
+		return
 	}
 	if err := s.store.CreateNotification(ctx, notif); err != nil {
-		if errors.Is(err, store.ErrAlreadyExists) {
-			return // a concurrent write in the same hour stored it
+		if errors.Is(err, store.ErrAlreadyExists) && p.ReplacesSecretID == "" {
+			// A concurrent write in the same hour created it: update it.
+			if existing, err := s.store.GetNotification(ctx, notif.ID); err == nil {
+				s.updatePendingSecretNotification(ctx, existing, notif)
+			}
+			return
 		}
-		log.ErrorContext(ctx, "pending secret: notification not stored", "error", err)
+		if !errors.Is(err, store.ErrAlreadyExists) {
+			log.ErrorContext(ctx, "pending secret: notification not stored", "error", err)
+		}
 		return
 	}
 	if s.events != nil {
 		s.events.PublishUserNotification(ctx, notif)
+	}
+}
+
+// updatePendingSecretNotification replaces the message and resource of
+// the hour's notification existing with those of latest, marks it
+// unacknowledged and publishes it again.
+func (s *Server) updatePendingSecretNotification(ctx context.Context, existing, latest *store.Notification) {
+	if err := s.store.UpdateNotificationContent(ctx, existing.ID, latest.Message, latest.ResourceID); err != nil {
+		slog.ErrorContext(ctx, "pending secret: notification not updated", "pending_id", latest.ResourceID, "error", err)
+		return
+	}
+	updated := *existing
+	updated.Message = latest.Message
+	updated.ResourceID = latest.ResourceID
+	updated.Acknowledged = false
+	if s.events != nil {
+		s.events.PublishUserNotification(ctx, &updated)
 	}
 }
 

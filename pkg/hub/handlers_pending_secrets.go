@@ -192,6 +192,28 @@ func (s *Server) agentWritePendingUserSecret(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	refused := &store.PendingSecret{
+		Key:          key,
+		SecretType:   secretType,
+		Target:       target,
+		Scope:        store.ScopeUser,
+		ScopeID:      ownerID,
+		AllowProgeny: allowProgeny,
+		ValueLen:     len(value),
+		AgentID:      agentID,
+		ProjectID:    projectID,
+	}
+
+	// A cheap check of the caps before the value is held, so a write over a
+	// cap stores and releases nothing. The store's check in the write
+	// transaction below is the authoritative one.
+	if rows, err := s.store.ListPendingSecretsByOwner(ctx, store.ScopeUser, ownerID); err == nil {
+		if capErr := pendingSecretCapPrecheck(rows, agentID, key, time.Now()); capErr != nil {
+			s.refusePendingSecretOverCap(w, ctx, refused, capErr)
+			return
+		}
+	}
+
 	pendingID := api.NewUUID()
 	ref, err := s.secretBackend.HoldPending(ctx, pendingID, value)
 	if err != nil {
@@ -219,17 +241,6 @@ func (s *Server) agentWritePendingUserSecret(w http.ResponseWriter, r *http.Requ
 	if err != nil {
 		// The held value was never recorded; release it.
 		s.dropPendingValues(ctx, []string{ref})
-		refused := &store.PendingSecret{
-			Key:          key,
-			SecretType:   secretType,
-			Target:       target,
-			Scope:        store.ScopeUser,
-			ScopeID:      ownerID,
-			AllowProgeny: allowProgeny,
-			ValueLen:     len(value),
-			AgentID:      agentID,
-			ProjectID:    projectID,
-		}
 		s.auditRefusedPendingWrite(ctx, refused, err)
 		writePendingSecretWriteError(w, key, err)
 		return
@@ -300,6 +311,42 @@ func (s *Server) auditRefusedPendingWrite(ctx context.Context, refused *store.Pe
 		s.auditPendingSecret(ctx, PendingSecretEventRefused, refused,
 			PendingSecretActorAgent, refused.AgentID, "cap_"+capErr.Cap)
 	}
+}
+
+// pendingSecretCapPrecheck returns the cap a new pending secret key by
+// agentID would exceed, judged from the owner's rows, or nil. A live row
+// of the same key by the same agent is a replacement, which never counts
+// again; any other live row of the key is left to the store to decide.
+// The result is advisory: the store checks the caps again in the write
+// transaction.
+func pendingSecretCapPrecheck(rows []store.PendingSecret, agentID, key string, now time.Time) *store.PendingSecretCapError {
+	agentCount, ownerCount := 0, 0
+	for _, row := range rows {
+		if row.Expired(now) {
+			continue
+		}
+		if row.Key == key {
+			return nil
+		}
+		ownerCount++
+		if row.AgentID == agentID {
+			agentCount++
+		}
+	}
+	if agentCount >= store.PendingSecretAgentCap {
+		return &store.PendingSecretCapError{Cap: store.PendingSecretCapAgent, Limit: store.PendingSecretAgentCap}
+	}
+	if ownerCount >= store.PendingSecretOwnerCap {
+		return &store.PendingSecretCapError{Cap: store.PendingSecretCapOwner, Limit: store.PendingSecretOwnerCap}
+	}
+	return nil
+}
+
+// refusePendingSecretOverCap audits and answers a write over a pending
+// secret cap (429 secret_pending_cap).
+func (s *Server) refusePendingSecretOverCap(w http.ResponseWriter, ctx context.Context, refused *store.PendingSecret, capErr *store.PendingSecretCapError) {
+	s.auditRefusedPendingWrite(ctx, refused, capErr)
+	writePendingSecretWriteError(w, refused.Key, capErr)
 }
 
 // pendingSecretProvenanceNames returns the writing agent's slug and its
