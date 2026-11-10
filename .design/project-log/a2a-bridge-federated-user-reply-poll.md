@@ -1,7 +1,7 @@
 # A2A bridge: a federated user's reply is read from its own conversation
 
 **Date:** 2026-10-18
-**Tracked in:** ptone/scion#4603
+**Tracked in:** upstream issue 4603
 
 ## What changed
 
