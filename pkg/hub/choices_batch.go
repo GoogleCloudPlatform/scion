@@ -281,11 +281,25 @@ func (s *Server) handleChoiceSetAnswer(w http.ResponseWriter, r *http.Request, m
 		items = append(items, store.AnswerSetItem{DecisionRowID: d.ID, ChoiceID: choice.ID, Outcome: outcome})
 	}
 
-	asker, _ := s.store.GetAgent(ctx, ds[0].AskerAgentID)
+	// The asking agent. A stopped or deleted asker (design choices v4: the
+	// answers are still recorded, and dispatch follows the undeliverable
+	// semantics) is the explicit askerGone case: the response is stored
+	// failed and nothing is delivered. Any other store error ends the
+	// submit before anything is recorded.
+	asker, err := s.store.GetAgent(ctx, ds[0].AskerAgentID)
+	askerGone := errors.Is(err, store.ErrNotFound)
+	if err != nil && !askerGone {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+	if !askerGone && asker == nil {
+		InternalError(w)
+		return
+	}
 	// The choice-response is a message from the user to the asking agent:
-	// the chat send's messaging check, unless nothing is delivered (an
-	// all-confirm set).
-	if asker != nil && !allConfirm {
+	// the chat send's messaging check, unless nothing is delivered (a gone
+	// asker or an all-confirm set).
+	if !askerGone && !allConfirm {
 		if allowed, reason, _ := s.authorizeAgentMessage(ctx, user, asker, false); !allowed {
 			writeError(w, http.StatusForbidden, ErrCodeMessageDenied, "Message delivery denied", map[string]interface{}{
 				"reason":        mapReasonToCode(reason),
@@ -295,7 +309,7 @@ func (s *Server) handleChoiceSetAnswer(w http.ResponseWriter, r *http.Request, m
 			return
 		}
 	}
-	responseMsg := choiceSetResponseStoreMessage(user, ds, m, requested, choices, asker)
+	responseMsg := choiceSetResponseStoreMessage(user, ds, m, requested, choices, asker, askerGone)
 
 	// Steps 5 to 7 in one transaction.
 	res, err := s.store.RecordAnswerSet(ctx, &store.RecordAnswerSetInput{
@@ -342,7 +356,7 @@ func (s *Server) handleChoiceSetAnswer(w http.ResponseWriter, r *http.Request, m
 	// position order.
 	setView := choiceResponseSetView(m.ID, res.BatchID, ds, res.Answers)
 	s.publishChoiceResponseSet(ctx, responseMsg, setView)
-	if !allConfirm {
+	if !askerGone && !allConfirm {
 		s.deliverChoiceSetResponse(ctx, asker, responseMsg, m.ID, res, overridden)
 	}
 	for _, v := range views {
@@ -397,9 +411,10 @@ func sameSetAnswers(prior []*store.DecisionAnswer, userID string, choices map[st
 // choiceSetResponseStoreMessage builds the one choice-response row of a set
 // submit (design v5 5.1): sender the answering user, recipient the asking
 // agent, in the prompt's conversation, its body one line per answer in
-// position order. An asker that is gone or cannot take a message gets the
-// row born failed, as for a one-click answer.
-func choiceSetResponseStoreMessage(user UserIdentity, ds []*store.Decision, prompt *store.Message, requested map[string]bool, choices map[string]messages.Choice, asker *store.Agent) *store.Message {
+// position order. A gone asker (askerGone; asker is then unused) or one
+// that cannot take a message gets the row born failed, as for a one-click
+// answer.
+func choiceSetResponseStoreMessage(user UserIdentity, ds []*store.Decision, prompt *store.Message, requested map[string]bool, choices map[string]messages.Choice, asker *store.Agent, askerGone bool) *store.Message {
 	var parts []string
 	for _, d := range ds {
 		if requested[d.ID] {
@@ -425,12 +440,12 @@ func choiceSetResponseStoreMessage(user UserIdentity, ds []*store.Decision, prom
 		DispatchState:  store.MessageDispatchDispatched,
 		CreatedAt:      time.Now().UTC(),
 	}
-	if asker != nil {
-		m.Recipient = "agent:" + asker.Slug
-	} else {
+	if askerGone {
 		m.Recipient = "agent:" + ds[0].AskerAgentName
+	} else {
+		m.Recipient = "agent:" + asker.Slug
 	}
-	if asker == nil {
+	if askerGone {
 		reason := agentGoneReason
 		m.DispatchState = store.MessageDispatchFailed
 		m.DispatchFailureReason = &reason

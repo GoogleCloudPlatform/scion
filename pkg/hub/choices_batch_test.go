@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -554,4 +555,106 @@ func TestChoiceSetAnswer_Outcomes(t *testing.T) {
 		require.NoError(t, err)
 		assert.Empty(t, d.Answers)
 	})
+}
+
+// askerFaultStore fails GetAgent for one agent id while its switch is
+// armed, and counts those armed lookups; every other call delegates.
+type askerFaultStore struct {
+	store.Store
+	fault   *storeFaultSwitch
+	agentID string
+	hits    int
+}
+
+var errAskerLookupFault = errors.New("injected asker lookup fault")
+
+func (s *askerFaultStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
+	if s.fault.Active() && id == s.agentID {
+		s.hits++
+		return nil, errAskerLookupFault
+	}
+	return s.Store.GetAgent(ctx, id)
+}
+
+// newAskerFaultFixture is a choices fixture whose store fails the asking
+// agent's lookup once armed (installed before the audited setup).
+func newAskerFaultFixture(t *testing.T) (*choicesFixture, *askerFaultStore, *storeFaultSwitch) {
+	t.Helper()
+	srv, s, alice, bob, project, wrapped, fault := setupDemoPolicyTestWithFault(t, func(inner store.Store, f *storeFaultSwitch) *askerFaultStore {
+		return &askerFaultStore{Store: inner, fault: f}
+	})
+	f := newChoicesFixtureOn(t, srv, s, alice, bob, project)
+	wrapped.agentID = f.agent.ID
+	return f, wrapped, fault
+}
+
+// A deleted asker (design choices v4: answers are still recorded, and
+// dispatch follows the undeliverable semantics): the set is recorded
+// (200), its one response row is stored failed, and nothing is sent.
+func TestChoiceSetAnswer_AskerGoneRecordsWithoutDelivery(t *testing.T) {
+	f := newChoicesFixture(t)
+	ctx := context.Background()
+	msg, res := f.topicPrompt(t, threeDecisions, false)
+	r := res.Decisions
+	require.NoError(t, f.store.DeleteAgent(ctx, f.agent.ID))
+	before := len(f.dispatcher.getMessages())
+
+	rr := f.submitSet(t, f.bob, msg.ID, "", r[0].RowID, "1", r[1].RowID, "a", r[2].RowID, "1")
+	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+	out := decodeSetResponse(t, rr)
+	for _, d := range r {
+		got, err := f.store.GetDecision(ctx, d.RowID)
+		require.NoError(t, err)
+		require.Len(t, got.Answers, 1, "the answer is recorded")
+		assert.Equal(t, out.BatchID, got.Answers[0].BatchID)
+	}
+	m, err := f.store.GetMessage(ctx, out.ResponseMessageID)
+	require.NoError(t, err)
+	assert.Equal(t, messages.TypeChoiceResponse, m.Type)
+	assert.Equal(t, store.MessageDispatchFailed, m.DispatchState)
+	assert.Len(t, f.dispatcher.getMessages(), before, "nothing is sent to a gone asker")
+}
+
+// A store fault on the asker lookup that is not "not found" ends the
+// submit with a 5xx before anything is recorded: no answer, no response
+// row, nothing sent, and no messaging check skipped.
+func TestChoiceSetAnswer_AskerLookupFaultRecordsNothing(t *testing.T) {
+	f, wrapped, fault := newAskerFaultFixture(t)
+	ctx := context.Background()
+	msg, res := f.topicPrompt(t, threeDecisions, false)
+	r := res.Decisions
+	before := len(f.dispatcher.getMessages())
+
+	fault.Arm()
+	rr := f.submitSet(t, f.bob, msg.ID, "", r[0].RowID, "1", r[1].RowID, "a", r[2].RowID, "1")
+	require.Equal(t, http.StatusInternalServerError, rr.Code, "body: %s", rr.Body.String())
+	assert.Equal(t, ErrCodeInternalError, errorCode(t, rr))
+	assert.Equal(t, 1, wrapped.hits, "the asker lookup was reached once")
+	for _, d := range r {
+		got, err := f.store.GetDecision(ctx, d.RowID)
+		require.NoError(t, err)
+		assert.Empty(t, got.Answers, "nothing stored")
+	}
+	assert.Len(t, f.dispatcher.getMessages(), before, "nothing sent")
+}
+
+// The per-decision endpoint (one-decision prompt) gets the same handling:
+// a non-not-found asker lookup fault is a 5xx with nothing recorded or
+// sent. The gone-asker case is TestDecisionAnswer_AskerGoneStoresFailedResponse.
+func TestDecisionAnswer_AskerLookupFaultRecordsNothing(t *testing.T) {
+	f, wrapped, fault := newAskerFaultFixture(t)
+	ctx := context.Background()
+	_, res := f.topicPrompt(t, oneDecision, false)
+	row := res.Decisions[0].RowID
+	before := len(f.dispatcher.getMessages())
+
+	fault.Arm()
+	rr := f.answer(t, f.bob, row, map[string]interface{}{"choice_id": "1"})
+	require.Equal(t, http.StatusInternalServerError, rr.Code, "body: %s", rr.Body.String())
+	assert.Equal(t, ErrCodeInternalError, errorCode(t, rr))
+	assert.Equal(t, 1, wrapped.hits, "the asker lookup was reached once")
+	got, err := f.store.GetDecision(ctx, row)
+	require.NoError(t, err)
+	assert.Empty(t, got.Answers, "nothing stored")
+	assert.Len(t, f.dispatcher.getMessages(), before, "nothing sent")
 }

@@ -265,12 +265,26 @@ func (s *Server) handleDecisionAnswer(w http.ResponseWriter, r *http.Request, ro
 		return
 	}
 
-	asker, _ := s.store.GetAgent(ctx, d.AskerAgentID)
+	// The asking agent. A stopped or deleted asker (design choices v4: the
+	// answer is still recorded, and dispatch follows the undeliverable
+	// semantics) is the explicit askerGone case: the response is stored
+	// failed and nothing is delivered. Any other store error ends the
+	// answer before anything is recorded.
+	asker, err := s.store.GetAgent(ctx, d.AskerAgentID)
+	askerGone := errors.Is(err, store.ErrNotFound)
+	if err != nil && !askerGone {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+	if !askerGone && asker == nil {
+		InternalError(w)
+		return
+	}
 	// The choice-response is a message from the user to the asking agent:
 	// it gets the messaging check of a chat send to an agent
-	// (sendAgentRouted), before anything is recorded. A confirm is not
-	// delivered, so it needs none.
-	if asker != nil && outcome != store.DecisionOutcomeConfirm {
+	// (sendAgentRouted), before anything is recorded. Nothing is delivered
+	// to a gone asker or for a confirm, so those need none.
+	if !askerGone && outcome != store.DecisionOutcomeConfirm {
 		if allowed, reason, _ := s.authorizeAgentMessage(ctx, user, asker, false); !allowed {
 			writeError(w, http.StatusForbidden, ErrCodeMessageDenied, "Message delivery denied", map[string]interface{}{
 				"reason":        mapReasonToCode(reason),
@@ -280,7 +294,7 @@ func (s *Server) handleDecisionAnswer(w http.ResponseWriter, r *http.Request, ro
 			return
 		}
 	}
-	responseMsg := choiceResponseStoreMessage(user, d, prompt, choice, asker)
+	responseMsg := choiceResponseStoreMessage(user, d, prompt, choice, asker, askerGone)
 
 	// Step 5: record the answer and store the response, in one transaction.
 	answer, replayed, err := s.store.RecordAnswer(ctx, &store.RecordAnswerInput{
@@ -339,7 +353,7 @@ func (s *Server) handleDecisionAnswer(w http.ResponseWriter, r *http.Request, ro
 	// confirmation: the agent already acted on that answer), and tell every
 	// open card.
 	s.publishChoiceResponse(ctx, responseMsg, cur, answer)
-	if outcome != store.DecisionOutcomeConfirm {
+	if !askerGone && outcome != store.DecisionOutcomeConfirm {
 		s.deliverChoiceResponse(ctx, asker, responseMsg, answer, overridden)
 	}
 	s.publishChoiceUpdated(ctx, prompt, view)
@@ -387,9 +401,10 @@ func (s *Server) writeDecisionAnswered(w http.ResponseWriter, ctx context.Contex
 
 // choiceResponseStoreMessage builds the choice-response row stored with the
 // answer: sender the answering user, recipient the asking agent, in the
-// prompt's conversation. An asker that is gone or cannot take a message
-// gets the row born failed, as a chat send to it would.
-func choiceResponseStoreMessage(user UserIdentity, d *store.Decision, prompt *store.Message, choice messages.Choice, asker *store.Agent) *store.Message {
+// prompt's conversation. A gone asker (askerGone; asker is then unused) or
+// one that cannot take a message gets the row born failed, as a chat send
+// to it would.
+func choiceResponseStoreMessage(user UserIdentity, d *store.Decision, prompt *store.Message, choice messages.Choice, asker *store.Agent, askerGone bool) *store.Message {
 	m := &store.Message{
 		ID:             api.NewUUID(),
 		ProjectID:      d.ProjectID,
@@ -405,12 +420,12 @@ func choiceResponseStoreMessage(user UserIdentity, d *store.Decision, prompt *st
 		DispatchState:  store.MessageDispatchDispatched,
 		CreatedAt:      time.Now().UTC(),
 	}
-	if asker != nil {
-		m.Recipient = "agent:" + asker.Slug
-	} else {
+	if askerGone {
 		m.Recipient = "agent:" + d.AskerAgentName
+	} else {
+		m.Recipient = "agent:" + asker.Slug
 	}
-	if asker == nil {
+	if askerGone {
 		reason := agentGoneReason
 		m.DispatchState = store.MessageDispatchFailed
 		m.DispatchFailureReason = &reason
