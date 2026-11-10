@@ -119,6 +119,11 @@ var windowsAllowed = map[string]bool{
 	"hub.secret.list":           true,
 	"hub.secret.clear":          true,
 	"hub.secret.update":         true,
+	// Pending user secrets: Hub API calls only, no local writes.
+	"hub.secret.pending":         true,
+	"hub.secret.pending.list":    true,
+	"hub.secret.pending.approve": true,
+	"hub.secret.pending.reject":  true,
 	// Hub administrative settings: Hub API calls only; the one local file
 	// access is reading a settings document (hub settings set --file).
 	"hub.settings":               true,

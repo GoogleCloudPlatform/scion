@@ -17,6 +17,7 @@ package hubclient
 import (
 	"context"
 	"net/url"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 )
@@ -46,6 +47,18 @@ type SecretService interface {
 
 	// Delete removes a secret.
 	Delete(ctx context.Context, key string, opts *SecretScopeOptions) error
+
+	// ListPending returns the caller's own pending secrets: user-scope
+	// secrets written by an agent that wait for the caller's approval.
+	// Metadata only; values are never returned.
+	ListPending(ctx context.Context) (*ListPendingSecretsResponse, error)
+
+	// ApprovePending approves the caller's pending secret id, writing it
+	// as the user-scope secret the agent asked for.
+	ApprovePending(ctx context.Context, id string, req *ApprovePendingSecretRequest) (*PendingSecretDecision, error)
+
+	// RejectPending rejects the caller's pending secret id.
+	RejectPending(ctx context.Context, id string) (*PendingSecretDecision, error)
 }
 
 // secretService is the implementation of SecretService.
@@ -249,4 +262,78 @@ func (s *secretService) Delete(ctx context.Context, key string, opts *SecretScop
 		return err
 	}
 	return apiclient.CheckResponse(resp)
+}
+
+// PendingSecret is a user-scope secret written by an agent that waits for
+// the owner's approval: metadata and provenance only, never the value.
+type PendingSecret struct {
+	ID               string    `json:"id"`
+	Key              string    `json:"key"`
+	Type             string    `json:"type"`
+	Target           string    `json:"target"`
+	Scope            string    `json:"scope"`
+	AllowProgeny     bool      `json:"allowProgeny"`
+	InjectionMode    string    `json:"injectionMode,omitempty"`
+	Description      string    `json:"description,omitempty"`
+	ValueLen         int       `json:"valueLen"`
+	AgentID          string    `json:"agentId"`
+	AgentSlug        string    `json:"agentSlug"`
+	ProjectID        string    `json:"projectId"`
+	ProjectName      string    `json:"projectName"`
+	Created          time.Time `json:"created"`
+	Updated          time.Time `json:"updated"`
+	ExpiresAt        time.Time `json:"expiresAt"`
+	ReplacesExisting bool      `json:"replacesExisting"`
+	ReplacesSecretID string    `json:"replacesSecretId,omitempty"`
+	ReplacesVersion  int       `json:"replacesVersion,omitempty"`
+	State            string    `json:"state"`
+}
+
+// ListPendingSecretsResponse is the response of ListPending.
+type ListPendingSecretsResponse struct {
+	PendingSecrets []PendingSecret `json:"pendingSecrets"`
+}
+
+// ApprovePendingSecretRequest is the optional body of ApprovePending. The
+// only change an approval can make is turning progeny access off.
+type ApprovePendingSecretRequest struct {
+	AllowProgeny *bool `json:"allowProgeny,omitempty"`
+}
+
+// PendingSecretDecision is the response of ApprovePending and RejectPending.
+type PendingSecretDecision struct {
+	ID    string `json:"id"`
+	Key   string `json:"key"`
+	Scope string `json:"scope"`
+	State string `json:"state"` // "approved" or "rejected"
+}
+
+// ListPending returns the caller's own pending secrets.
+func (s *secretService) ListPending(ctx context.Context) (*ListPendingSecretsResponse, error) {
+	resp, err := s.c.get(ctx, "/api/v1/pending-secrets", nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[ListPendingSecretsResponse](resp)
+}
+
+// ApprovePending approves the caller's pending secret id.
+func (s *secretService) ApprovePending(ctx context.Context, id string, req *ApprovePendingSecretRequest) (*PendingSecretDecision, error) {
+	if req == nil {
+		req = &ApprovePendingSecretRequest{}
+	}
+	resp, err := s.c.postNoRetry(ctx, "/api/v1/pending-secrets/"+url.PathEscape(id)+"/approve", req, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[PendingSecretDecision](resp)
+}
+
+// RejectPending rejects the caller's pending secret id.
+func (s *secretService) RejectPending(ctx context.Context, id string) (*PendingSecretDecision, error) {
+	resp, err := s.c.postNoRetry(ctx, "/api/v1/pending-secrets/"+url.PathEscape(id)+"/reject", nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[PendingSecretDecision](resp)
 }
