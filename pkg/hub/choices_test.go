@@ -90,6 +90,14 @@ func (f *choicesFixture) sendAsAgent(t *testing.T, req OutboundMessageRequest) *
 	t.Helper()
 	body, err := json.Marshal(req)
 	require.NoError(t, err)
+	return f.sendRawAsAgent(t, body)
+}
+
+// sendRawAsAgent posts a raw JSON body to the agent's outbound-message
+// handler, for fields a typed request cannot carry (DecisionInput marshals
+// its known fields only).
+func (f *choicesFixture) sendRawAsAgent(t *testing.T, body []byte) *httptest.ResponseRecorder {
+	t.Helper()
 	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+f.agent.ID+"/outbound-message", bytes.NewReader(body))
 	r.Header.Set("Content-Type", "application/json")
 	r = r.WithContext(agentCtx(r.Context(), f.agent))
@@ -120,9 +128,11 @@ func (f *choicesFixture) topicPrompt(t *testing.T, raw string, update bool) (*st
 	t.Helper()
 	decs, err := messages.NormalizeDecisions("choices", decisionInputs(t, raw))
 	require.NoError(t, err)
+	conv, err := f.store.GetConversationByExternalRef(context.Background(), "native", "thread:"+f.project.ID+":"+f.topicID)
+	require.NoError(t, err)
 	msg := &store.Message{
 		ID: api.NewUUID(), ProjectID: f.project.ID, Sender: "agent:" + f.agent.Slug, SenderID: f.agent.ID,
-		Recipient: "user:" + f.alice.Email, RecipientID: f.alice.ID,
+		Recipient: "user:" + f.alice.Email, RecipientID: f.alice.ID, ConversationID: conv.ID,
 		AgentID: f.agent.ID, Channel: "web", ThreadID: f.topicID, CreatedAt: time.Now().UTC(),
 		DispatchState: store.MessageDispatchDispatched,
 	}
@@ -220,7 +230,6 @@ func TestChoicesSend_Refusals(t *testing.T) {
 		{"update without choices", OutboundMessageRequest{Recipient: "user:" + f.bob.Email, Msg: "x", ChoicesUpdate: true}, ErrCodeValidationError},
 		{"attachments", OutboundMessageRequest{Recipient: "user:" + f.bob.Email, Choices: decisionInputs(t, twoDecisions), Attachments: []string{"/workspace/a"}}, ErrCodeValidationError},
 		{"one choice", OutboundMessageRequest{Recipient: "user:" + f.bob.Email, Choices: decisionInputs(t, `[{"question":"q","choices":["only"]}]`)}, ErrCodeValidationError},
-		{"reserved field", OutboundMessageRequest{Recipient: "user:" + f.bob.Email, Choices: decisionInputs(t, `[{"question":"q","choices":["a","b"],"multiple":true}]`)}, ErrCodeValidationError},
 		{"never issued number", OutboundMessageRequest{Recipient: "user:" + f.bob.Email, Choices: decisionInputs(t, `[{"id":"99","question":"q","choices":["a","b"]}]`)}, ErrCodeDecisionKeyNotIssue},
 	}
 	for _, tc := range cases {
@@ -230,6 +239,12 @@ func TestChoicesSend_Refusals(t *testing.T) {
 			assert.Equal(t, tc.code, errorCode(t, rr))
 		})
 	}
+	t.Run("reserved field", func(t *testing.T) {
+		// Raw JSON: a typed request drops the reserved field.
+		rr := f.sendRawAsAgent(t, []byte(`{"recipient":"user:`+f.bob.Email+`","choices":[{"question":"q","choices":["a","b"],"multiple":true}]}`))
+		require.Equal(t, http.StatusBadRequest, rr.Code, "body: %s", rr.Body.String())
+		assert.Equal(t, ErrCodeValidationError, errorCode(t, rr))
+	})
 	rows, err := f.store.ListMessages(context.Background(), store.MessageFilter{SenderID: f.agent.ID}, store.ListOptions{Limit: 10})
 	require.NoError(t, err)
 	assert.Empty(t, rows.Items, "no refused prompt is stored")

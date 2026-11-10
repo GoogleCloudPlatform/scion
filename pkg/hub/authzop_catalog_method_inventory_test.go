@@ -70,6 +70,8 @@ var positiveCheckExclusions = map[liveInventoryKey]string{
 // dispatch shape that makes a 405 control meaningless for that entry — not
 // merely that the control happens to fail today.
 var controlCheckExclusions = map[liveInventoryKey]string{
+	{OperationID: "chat.decision.read", Method: "GET", Pattern: "/api/v1/decisions/{rowId}"}:                                 "handleDecisionRoutes (choices_answer.go) answers 404 to every method while the web.chat_choices experiment is off, which is the case in this test server, so the undeclared method gets 404, not 405; TestDecisionGet_ReadAccess drives the route with it on",
+	{OperationID: "chat.decision.answer", Method: "POST", Pattern: "/api/v1/decisions/{rowId}/answer"}:                       "same as the GET /api/v1/decisions/{rowId} entry above: 404 to every method while web.chat_choices is off; TestDecisionAnswer_Authorization drives the route with it on",
 	{OperationID: "agent.portaccess", Method: "GET", Pattern: "/api/v1/agents/{id}/ports/{port}/proxy"}:                      "proxyAgentPort forwards every HTTP method to the tunnel (see the entry's own comment in catalog.go); the only method-based step is that GET and HEAD of the bare .../proxy URL get a 308 to .../proxy/ (ptone/scion#5566), so there is still no unsupported method to control against",
 	{OperationID: "agent.portaccess", Method: "POST", Pattern: "/api/v1/agents/{id}/ports/{port}/proxy"}:                     "same as the GET .../proxy entry above: proxyAgentPort accepts every method by design",
 	{OperationID: "agent.portaccess", Method: "PUT", Pattern: "/api/v1/agents/{id}/ports/{port}/proxy"}:                      "same as the GET .../proxy entry above: proxyAgentPort accepts every method by design",
