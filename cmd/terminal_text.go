@@ -24,9 +24,9 @@ import (
 	"golang.org/x/term"
 )
 
-// stdoutIsTerminal reports whether standard output is a terminal. Tests
+// textOutputIsTerminal reports whether standard output is a terminal. Tests
 // replace it.
-var stdoutIsTerminal = func() bool { return term.IsTerminal(int(os.Stdout.Fd())) }
+var textOutputIsTerminal = func() bool { return term.IsTerminal(int(os.Stdout.Fd())) }
 
 // escapeForTerminal returns s with every byte or character that a terminal
 // could interpret, rather than print, written as a visible escape: C0
@@ -67,7 +67,7 @@ func escapeForTerminal(s string, keepLines bool) string {
 // slug or project name) printed in text form; JSON output is encoded by
 // the JSON encoder instead.
 func terminalText(s string) string {
-	if stdoutIsTerminal() {
+	if textOutputIsTerminal() {
 		return escapeForTerminal(s, false)
 	}
 	return s

@@ -50,15 +50,6 @@ func (h *pendingMockHub) server(t *testing.T) *httptest.Server {
 		switch {
 		case r.URL.Path == "/healthz":
 			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/pending-secrets":
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"pendingSecrets": []map[string]interface{}{{
-				"id": "pend-1", "key": "TOOL_AUTH", "type": "file", "target": "~/.tool/creds.json", "scope": "user",
-				"allowProgeny": true, "valueLen": 12, "agentId": "agent-1", "agentSlug": "worker", "projectId": "proj-1",
-				"projectName": "Alpha", "created": "2026-01-01T00:00:00Z", "updated": "2026-01-01T00:00:00Z",
-				"expiresAt": "2026-01-08T00:00:00Z", "replacesExisting": true, "state": "pending",
-			}}})
-		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/pending-secrets/pend-1/approve":
-			_ = json.NewEncoder(w).Encode(map[string]string{"id": "pend-1", "key": "TOOL_AUTH", "scope": "user", "state": "approved"})
 		case h.controls && r.Method == http.MethodGet && r.URL.Path == "/api/v1/pending-secrets":
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"pendingSecrets": []map[string]interface{}{{
 				"id": "pend-1", "key": "TOOL\x1b[2KAUTH", "type": "file", "target": "~/.tool/creds\r.json", "scope": "user",
@@ -70,6 +61,15 @@ func (h *pendingMockHub) server(t *testing.T) *httptest.Server {
 			// "line1\n\x1b]52;c;evil\x07\rok\\" base64-encoded
 			_ = json.NewEncoder(w).Encode(map[string]string{"id": "pend-1", "key": "TOOL_AUTH", "type": "file",
 				"target": "~/.tool/creds.json", "value": base64.StdEncoding.EncodeToString([]byte("line1\n\x1b]52;c;evil\x07\rok\\")), "encoding": "base64"})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/pending-secrets":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"pendingSecrets": []map[string]interface{}{{
+				"id": "pend-1", "key": "TOOL_AUTH", "type": "file", "target": "~/.tool/creds.json", "scope": "user",
+				"allowProgeny": true, "valueLen": 12, "agentId": "agent-1", "agentSlug": "worker", "projectId": "proj-1",
+				"projectName": "Alpha", "created": "2026-01-01T00:00:00Z", "updated": "2026-01-01T00:00:00Z",
+				"expiresAt": "2026-01-08T00:00:00Z", "replacesExisting": true, "state": "pending",
+			}}})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/pending-secrets/pend-1/approve":
+			_ = json.NewEncoder(w).Encode(map[string]string{"id": "pend-1", "key": "TOOL_AUTH", "scope": "user", "state": "approved"})
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/pending-secrets/pend-1/reveal":
 			_ = json.NewEncoder(w).Encode(map[string]string{"id": "pend-1", "key": "TOOL_AUTH", "type": "file",
 				"target": "~/.tool/creds.json", "value": "dGVzdC12YWx1ZS1yZXZlYWw=", "encoding": "base64"})
@@ -142,9 +142,9 @@ func setupPendingSecretTest(t *testing.T) *pendingMockHub {
 	pendingSecretApproveNoProgeny = false
 	pendingSecretShowJSON = false
 	pendingSecretRevealRaw = false
-	origTTY := stdoutIsTerminal
-	t.Cleanup(func() { stdoutIsTerminal = origTTY })
-	stdoutIsTerminal = func() bool { return false }
+	origTTY := textOutputIsTerminal
+	t.Cleanup(func() { textOutputIsTerminal = origTTY })
+	textOutputIsTerminal = func() bool { return false }
 	secretOutputJSON = false
 	secretScope = ""
 	return hub
@@ -362,7 +362,7 @@ func TestRunSecretPendingReveal_TerminalEscapes(t *testing.T) {
 	assert.Equal(t, raw, out)
 
 	// On a terminal: controls shown as escapes, lines kept.
-	stdoutIsTerminal = func() bool { return true }
+	textOutputIsTerminal = func() bool { return true }
 	out = captureStdout(t, func() {
 		require.NoError(t, runSecretPendingReveal(hubSecretPendingRevealCmd, []string{"pend-1"}))
 	})
@@ -382,7 +382,7 @@ func TestRunSecretPendingReveal_TerminalEscapes(t *testing.T) {
 func TestRunSecretPendingList_TerminalEscapesAgentFields(t *testing.T) {
 	hub := setupPendingSecretTest(t)
 	hub.controls = true
-	stdoutIsTerminal = func() bool { return true }
+	textOutputIsTerminal = func() bool { return true }
 	out := captureStdout(t, func() {
 		require.NoError(t, runSecretPendingList(hubSecretPendingListCmd, nil))
 	})
@@ -409,7 +409,7 @@ func TestRunSecretPendingList_TerminalEscapesAgentFields(t *testing.T) {
 
 func TestRunSecretPendingShow_TerminalEscapesAgentFields(t *testing.T) {
 	setupPendingSecretTest(t)
-	stdoutIsTerminal = func() bool { return true }
+	textOutputIsTerminal = func() bool { return true }
 	out := captureStdout(t, func() {
 		require.NoError(t, runSecretPendingShow(hubSecretPendingShowCmd, []string{"pend-1"}))
 	})
@@ -423,7 +423,7 @@ func TestRunSecretPendingShow_TerminalEscapesAgentFields(t *testing.T) {
 func TestRunSecretList_UserScopeEscapesOnTerminal(t *testing.T) {
 	hub := setupPendingSecretTest(t)
 	hub.controls = true
-	stdoutIsTerminal = func() bool { return true }
+	textOutputIsTerminal = func() bool { return true }
 	out := captureStdout(t, func() {
 		require.NoError(t, runSecretList(hubSecretListCmd, nil))
 	})

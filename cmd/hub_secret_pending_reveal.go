@@ -70,7 +70,7 @@ func runSecretPendingReveal(_ *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to decode the revealed value: %w", err)
 	}
-	if !pendingSecretRevealRaw && stdoutIsTerminal() {
+	if !pendingSecretRevealRaw && textOutputIsTerminal() {
 		_, err = os.Stdout.WriteString(escapeForTerminal(string(value), true))
 		return err
 	}
