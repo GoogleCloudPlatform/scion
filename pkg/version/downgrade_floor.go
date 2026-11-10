@@ -26,4 +26,4 @@ package version
 //
 // The value is a release tag. A nightly tag carries its date, which orders
 // it against releases of other channels by their publish date.
-const DowngradeFloor = "nightly-20261009"
+const DowngradeFloor = "nightly-20261112"

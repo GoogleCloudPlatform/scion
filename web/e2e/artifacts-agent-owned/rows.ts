@@ -80,17 +80,17 @@ export const ROWS: Record<string, AgentRowSpec> = {
   },
   'R1B-02': {
     role: 'aowner',
-    title: 'delegating user: Grant review access, Retention, Delete; no Edit, Review, Share',
+    title: 'delegating user: Retention, Delete; no Edit, Review, Share, Grant review access',
     needsAgent: true,
   },
   'R1B-03': {
     role: 'powner',
-    title: 'project owner: Grant review access, Retention, Delete; no Edit, Review, Share',
+    title: 'project owner: Retention, Delete; no Edit, Review, Share, Grant review access',
     needsAgent: true,
   },
   'R1B-04': {
     role: 'padmin',
-    title: 'project admin: Grant review access, Delete; no Share, Retention',
+    title: 'project admin: Delete; no Share, Retention, Grant review access',
     needsAgent: true,
   },
   'R1B-05': {
@@ -111,12 +111,12 @@ export const ROWS: Record<string, AgentRowSpec> = {
   },
   'R1B-08a': {
     role: 'aowner -> member',
-    title: 'Grant review access dialog gives the member Can review',
+    title: 'steward gives the member review through the grants API: 201 (API)',
     needsAgent: true,
   },
   'R1B-08b': {
     role: 'padmin -> outsider',
-    title: 'review grant for a person who cannot read: 403 review_subject_cannot_read (API)',
+    title: 'project admin review grant to a person who cannot read: 403 forbidden (API)',
     needsAgent: true,
   },
   'R1B-09': {

@@ -296,15 +296,9 @@ func (s *Service) adminArtifact(w http.ResponseWriter, r *http.Request, id strin
 
 // adminForbiddenMessage is the text of every 403 for a user that may read
 // an artifact but not administer it. It states the rule, the same for every
-// artifact and every refusal, and never why this caller was refused. One
-// narrow exception (ptone/scion#5119): a caller that holds review-grant
-// authority on an artifact owned by an agent, asking for a well-formed
-// review grant, learns when the user cannot read the artifact
-// (CodeReviewSubjectCannotRead) or already holds a read, write or admin
-// grant (CodeReviewReplacesAccess); see putReviewGrant.
+// artifact and every refusal, and never why this caller was refused.
 const adminForbiddenMessage = "only the artifact's owner or a user with an admin grant may share or change it; " +
-	"on an artifact owned by an agent, the agent's delegating user and the owners of its home project may also share it, " +
-	"and an admin of the artifact's home project may grant review access"
+	"on an artifact owned by an agent, the agent's delegating user and the owners of its home project may also share it"
 
 // agentAdminForbiddenMessage is the same 403's text for an agent, which may
 // never administer an artifact, its own included (sharing is user-only), so
@@ -312,8 +306,7 @@ const adminForbiddenMessage = "only the artifact's owner or a user with an admin
 // It too is the same for every artifact and every refusal.
 const agentAdminForbiddenMessage = "agents cannot share artifacts or change an artifact's grants, share links, expiry or home project; " +
 	"users do that: the artifact's owner when the owner is a user, or a user with an admin grant; " +
-	"on an artifact owned by an agent, the agent's delegating user and the owners of its home project may also share it, " +
-	"and an admin of the artifact's home project may grant review access"
+	"on an artifact owned by an agent, the agent's delegating user and the owners of its home project may also share it"
 
 // writeAdminForbidden writes the 403 of a caller that may read an artifact
 // but not administer it: the agent text for an agent, the user text
@@ -358,10 +351,8 @@ func shareAuthorityOf(authority string) string {
 // grant), CanShare (CanManage or a steward) and ShareAuthority (the steward
 // clause) from adminAuthorityWith, CanRetire from the same authority
 // through retireAuthorityFrom (the delete route's decision),
-// CanPublish and CanReview from canWriteErr (reviewCapability), and
-// CanGrantReview from mayGrantReview (only when CanManage is false), the
-// decisions the management, write and grant routes make for the same
-// request. A failed grants read answers 500 and returns false.
+// and CanPublish and CanReview from canWriteErr (reviewCapability), the
+// decisions the management and write routes make for the same request. A failed grants read answers 500 and returns false.
 //
 // It must run only after readableArtifact: a caller that cannot read the
 // artifact gets the 404 of a missing one and learns none of these. The
@@ -383,7 +374,6 @@ func (s *Service) capabilities(w http.ResponseWriter, r *http.Request, b backend
 		return false
 	}
 	resp.CanPublish, resp.CanReview = reviewCapability(true, access)
-	resp.CanGrantReview = !resp.CanManage && s.mayGrantReview(r.Context(), a)
 	return true
 }
 

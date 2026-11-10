@@ -811,6 +811,7 @@ func TestRunReleaseUpdateCheck(t *testing.T) {
 		// created.
 		exec := maintenance.NewBinaryUpdateExecutor(maintenance.BinaryUpdateOptions{
 			CurrentVersion: "nightly-20261020", Installer: newTestInstaller(maintenance.StrategySymlink),
+			DowngradeFloor: downgradeFloor,
 		})
 		srv.autoApplyUpdate(ctx, "beta", exec)
 		if runs, _ := s.ListMaintenanceRuns(ctx, "update-binary", 5); len(runs) != 0 {

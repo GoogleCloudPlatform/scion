@@ -58,38 +58,17 @@ type fakeHost struct {
 	memberErr error
 	// crossScope is the answer of CrossScopeSharingAllowed.
 	crossScope bool
-	// reviewers lists "userRef ownerAgentID homeScope" triples for which
-	// MayGrantReview answers yes.
-	reviewers map[string]bool
 	// admins lists "userRef scope" pairs for which AdministersScope
 	// answers yes.
 	admins map[string]bool
-	// subjectErr, when set, makes ReviewSubjectAuthorize fail.
-	subjectErr error
 	// stewards maps "userRef ownerAgentID homeScope" to the clause
 	// StewardClause answers; stewardAll, when set, is answered for every
 	// other question (a host that would make anyone a steward).
 	stewards   map[string]string
 	stewardAll string
-	// sponsorArgs records the sponsorRef argument of every StewardClause,
-	// ReviewGrantClause and MayGrantReview question, as
-	// "<method> <ownerAgentID> <sponsorRef>".
+	// sponsorArgs records the sponsorRef argument of every StewardClause
+	// question, as "<method> <ownerAgentID> <sponsorRef>".
 	sponsorArgs []string
-}
-
-// ReviewSubjectAuthorize answers from the same table as Authorize, for
-// the named user rather than the caller of ctx.
-func (h *fakeHost) ReviewSubjectAuthorize(_ context.Context, kind, ref, scope, perm string) (bool, error) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.calls = append(h.calls, "subject "+PrincipalRef(kind, ref)+" "+scope+" "+perm)
-	if h.subjectErr != nil {
-		return false, h.subjectErr
-	}
-	if kind != PrincipalKindUser || scope == "" {
-		return false, nil
-	}
-	return h.perms[PrincipalRef(kind, ref)][scope][perm], nil
 }
 
 // allowAdmin makes AdministersScope answer yes for u in scope.
@@ -111,60 +90,6 @@ func (h *fakeHost) AdministersScope(ctx context.Context, scope string) bool {
 	defer h.mu.Unlock()
 	h.calls = append(h.calls, "administers "+scope)
 	return h.admins[PrincipalRef(kind, ref)+" "+scope]
-}
-
-// allowReview makes MayGrantReview answer yes for u on artifacts owned by
-// agent homed in scope; revokeReview takes that back.
-func (h *fakeHost) allowReview(u principal, agent, scope string) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if h.reviewers == nil {
-		h.reviewers = map[string]bool{}
-	}
-	h.reviewers[PrincipalRef(u.kind, u.ref)+" "+agent+" "+scope] = true
-}
-
-func (h *fakeHost) revokeReview(u principal, agent, scope string) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	delete(h.reviewers, PrincipalRef(u.kind, u.ref)+" "+agent+" "+scope)
-}
-
-func (h *fakeHost) MayGrantReview(ctx context.Context, ownerAgentID, homeScope, sponsorRef string) bool {
-	h.mu.Lock()
-	h.sponsorArgs = append(h.sponsorArgs, "review "+ownerAgentID+" "+sponsorRef)
-	h.mu.Unlock()
-	return h.mayGrantReview(ctx, ownerAgentID, homeScope)
-}
-
-func (h *fakeHost) mayGrantReview(ctx context.Context, ownerAgentID, homeScope string) bool {
-	kind, ref, _, ok := h.Principal(ctx)
-	if !ok {
-		return false
-	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.calls = append(h.calls, "review "+ownerAgentID+" "+homeScope)
-	return h.reviewers[PrincipalRef(kind, ref)+" "+ownerAgentID+" "+homeScope]
-}
-
-// ReviewGrantClause answers as MayGrantReview, naming project_admin when the
-// caller is also an admin of homeScope (allowAdmin) and delegating_user
-// otherwise.
-func (h *fakeHost) ReviewGrantClause(ctx context.Context, ownerAgentID, homeScope, sponsorRef string) string {
-	h.mu.Lock()
-	h.sponsorArgs = append(h.sponsorArgs, "clause "+ownerAgentID+" "+sponsorRef)
-	h.mu.Unlock()
-	if !h.mayGrantReview(ctx, ownerAgentID, homeScope) {
-		return ""
-	}
-	kind, ref, _, _ := h.Principal(ctx)
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if h.admins[PrincipalRef(kind, ref)+" "+homeScope] {
-		return ReviewClauseProjectAdmin
-	}
-	return ReviewClauseDelegatingUser
 }
 
 func (h *fakeHost) CrossScopeSharingAllowed(context.Context) bool {

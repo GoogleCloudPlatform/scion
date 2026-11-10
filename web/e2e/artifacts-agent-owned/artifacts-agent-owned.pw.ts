@@ -46,16 +46,11 @@ import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
-import { expect, request, test, type Page } from '@playwright/test';
+import { expect, request, test } from '@playwright/test';
 
 import { assertTestIdentity, redeemTestIdentity } from '../harness/auth.js';
 import { keepHubState, readHubState } from '../harness/hub.js';
-import {
-  createJourney,
-  errorCode,
-  isShown,
-  type RowRecord,
-} from '../artifacts-access/journey-core.js';
+import { createJourney, isShown, type RowRecord } from '../artifacts-access/journey-core.js';
 import {
   annotationsOf,
   classifyRead,
@@ -110,10 +105,6 @@ import {
   AO_SELECTORS as AO,
   deleteConfirmButton,
   headerControl,
-  openDialogSection,
-  openShareDialog,
-  reviewAdd,
-  reviewSuggestion,
   rowOwnerDeletedBadge,
   saveReviewButton,
   type AoHeaderControl,
@@ -189,7 +180,6 @@ interface Caps {
   canReview: boolean;
   canManage: boolean;
   canShare: boolean;
-  canGrantReview: boolean;
   canRetire: boolean;
   shareAuthority: string | null;
   ownerDeleted: boolean;
@@ -280,7 +270,6 @@ async function caps(key: IdentityKey, rec: RowRecord, label: string = key): Prom
     'canReview',
     'canManage',
     'canShare',
-    'canGrantReview',
     'canRetire',
     'shareAuthority',
   ]) {
@@ -293,7 +282,6 @@ async function caps(key: IdentityKey, rec: RowRecord, label: string = key): Prom
     canReview: b.canReview === true,
     canManage: b.canManage === true,
     canShare: b.canShare === true,
-    canGrantReview: b.canGrantReview === true,
     canRetire: b.canRetire === true,
     shareAuthority: typeof b.shareAuthority === 'string' ? b.shareAuthority : null,
     ownerDeleted: a.ownerDeleted === true,
@@ -492,27 +480,6 @@ async function grantsAsPowner(
     ((res.body ?? {}) as { grants?: Array<{ subjectRef: string; permission: string }> }).grants ??
     [];
   return items.map((g) => ({ subjectRef: g.subjectRef, permission: g.permission }));
-}
-
-/**
- * Types a query into the Grant review access dialog's people input and
- * returns the people-search answer for exactly that query (status, and
- * whether the user id is in it).
- */
-async function searchReviewPeople(
-  page: Page,
-  query: string,
-  userId: string
-): Promise<{ status: number; inAnswer: boolean }> {
-  const answer = page.waitForResponse((res) => {
-    if (res.request().method() !== 'GET') return false;
-    const u = new URL(res.url());
-    return u.pathname === '/api/v1/users' && u.searchParams.get('search') === query;
-  });
-  await page.locator(AO.reviewUserInput).fill(query);
-  const res = await answer;
-  const body = (await res.json().catch(() => ({}))) as { users?: Array<{ id: string }> };
-  return { status: res.status(), inAnswer: (body.users ?? []).some((u) => u.id === userId) };
 }
 
 // ---- Agent shell (fixture F3) ------------------------------------------
@@ -1045,8 +1012,8 @@ test.describe.serial('agent-owned artifact access per role (R1-B)', () => {
       const snap = await snapshot('aowner', 'R1B-02', { history: true });
       r.ui.snapshot = snap;
       expectControls(snap, {
-        visible: ['Grant review access', 'Retention…', 'Delete…', 'Download'],
-        hidden: ['Edit', 'Review', 'Share', 'Move…'],
+        visible: ['Retention…', 'Delete…', 'Download'],
+        hidden: ['Edit', 'Review', 'Share', 'Grant review access', 'Move…'],
         uploadVersion: false,
       });
       expect.soft(snap.historyEdit, 'History Edit hidden').toBe(false);
@@ -1063,7 +1030,6 @@ test.describe.serial('agent-owned artifact access per role (R1-B)', () => {
       expect.soft(c.canPublish, 'canPublish').toBe(false);
       expect.soft(c.canReview, 'canReview').toBe(false);
       expect.soft(c.canManage, 'canManage').toBe(false);
-      expect.soft(c.canGrantReview, 'canGrantReview').toBe(true);
       expect.soft(c.canShare, 'canShare').toBe(true);
       expect.soft(c.shareAuthority, 'shareAuthority').toBe('delegator');
       expect.soft(c.canRetire, 'canRetire').toBe(true);
@@ -1079,15 +1045,14 @@ test.describe.serial('agent-owned artifact access per role (R1-B)', () => {
       const snap = await snapshot('powner', 'R1B-03', { history: true });
       r.ui.snapshot = snap;
       expectControls(snap, {
-        visible: ['Grant review access', 'Retention…', 'Delete…', 'Download'],
-        hidden: ['Edit', 'Review', 'Share', 'Move…'],
+        visible: ['Retention…', 'Delete…', 'Download'],
+        hidden: ['Edit', 'Review', 'Share', 'Grant review access', 'Move…'],
         uploadVersion: false,
       });
       await expectOwnerLabel('powner', await expectedOwnerLabel('powner', r), r);
       const c = await caps('powner', r);
       expect.soft(c.canPublish, 'canPublish').toBe(false);
       expect.soft(c.canManage, 'canManage').toBe(false);
-      expect.soft(c.canGrantReview, 'canGrantReview').toBe(true);
       expect.soft(c.canShare, 'canShare').toBe(true);
       expect.soft(c.shareAuthority, 'shareAuthority').toBe('project_owner');
       expect.soft(c.canRetire, 'canRetire').toBe(true);
@@ -1097,8 +1062,8 @@ test.describe.serial('agent-owned artifact access per role (R1-B)', () => {
       const snap = await snapshot('padmin', 'R1B-04', { history: true });
       r.ui.snapshot = snap;
       expectControls(snap, {
-        visible: ['Grant review access', 'Delete…', 'Download'],
-        hidden: ['Edit', 'Review', 'Share', 'Retention…', 'Move…'],
+        visible: ['Delete…', 'Download'],
+        hidden: ['Edit', 'Review', 'Share', 'Grant review access', 'Retention…', 'Move…'],
         uploadVersion: false,
       });
       await expectOwnerLabel('padmin', await expectedOwnerLabel('padmin', r), r);
@@ -1107,7 +1072,6 @@ test.describe.serial('agent-owned artifact access per role (R1-B)', () => {
       expect.soft(c.canManage, 'canManage').toBe(false);
       expect.soft(c.canShare, 'canShare').toBe(false);
       expect.soft(c.shareAuthority, 'shareAuthority').toBeNull();
-      expect.soft(c.canGrantReview, 'canGrantReview').toBe(true);
       expect.soft(c.canRetire, 'canRetire').toBe(true);
       const grants = await api(
         'padmin',
@@ -1146,7 +1110,6 @@ test.describe.serial('agent-owned artifact access per role (R1-B)', () => {
         'canReview',
         'canManage',
         'canShare',
-        'canGrantReview',
         'canRetire',
       ] as const) {
         expect.soft(c[flag], `member ${flag}`).toBe(false);
@@ -1209,65 +1172,21 @@ test.describe.serial('agent-owned artifact access per role (R1-B)', () => {
     });
 
     // ---- Review access on an agent-owned artifact ------------------------
+    // Graded on the API: the page has no Grant review access dialog
+    // (ptone/scion#5145), and web.artifact_manage_access is off here.
     await row('R1B-08a', async (r) => {
-      const page = await pageOf('aowner');
-      await snapshot('aowner', 'R1B-08a');
-      await headerControl(page, 'Grant review access').click();
-      await expect(page.locator(AO.reviewSection), 'Grant review access dialog').toBeVisible();
-      // Exactly one share dialog is open, and it is Grant review access; its sections are counted
-      // in it alone (a steward's page also holds the closed Retention dialog).
-      await expect(openShareDialog(page), 'one open share dialog').toHaveCount(1);
-      r.ui.dialogLabel = await openShareDialog(page)
-        .locator('sl-dialog[open]')
-        .getAttribute('label');
-      expect
-        .soft(r.ui.dialogLabel, 'the open dialog is Grant review access')
-        .toBe('Grant review access');
-      r.ui.dialogSections = {
-        links: await openDialogSection(page, 'links-heading').count(),
-        people: await openDialogSection(page, 'people-heading').count(),
-        retention: await openDialogSection(page, 'retention-heading').count(),
-        review: await openDialogSection(page, 'review-heading').count(),
-      };
-      expect.soft(r.ui.dialogSections, 'only the review part').toEqual({
-        links: 0,
-        people: 0,
-        retention: 0,
-        review: 1,
-      });
-      r.ui.readNote = await page
-        .locator(AO.reviewSection)
-        .getByText('Review access is only for people who can already read this artifact')
-        .isVisible();
-      expect.soft(r.ui.readNote, 'note: only for people who can already read').toBe(true);
       const member = who('member');
-      r.ui.search = await searchReviewPeople(page, member.email, member.id);
-      const suggestion = reviewSuggestion(page, member.email);
-      await expect(suggestion, 'people search offers the member').toBeVisible();
-      await suggestion.click();
-      const granted = page.waitForResponse(
-        (q) =>
-          q.request().method() === 'POST' &&
-          new URL(q.url()).pathname === `/api/v1/artifacts/${artifactId()}/grants`
+      await snapshot('aowner', 'R1B-08a');
+      // A steward's review grant takes the manager path and answers 201
+      // (TestStewardReviewGrantTakesManagerPath, pkg/artifacts).
+      const res = await api(
+        'aowner',
+        'POST',
+        `/api/v1/artifacts/${artifactId()}/grants`,
+        { subjectKind: 'principal', subjectRef: `user:${member.id}`, permission: 'review' },
+        r
       );
-      await reviewAdd(page).click();
-      const g = await granted;
-      const gBody = (await g.json().catch(() => ({}))) as unknown;
-      r.api.push({
-        as: 'aowner',
-        method: 'POST',
-        path: `/api/v1/artifacts/${artifactId()}/grants`,
-        status: g.status(),
-        code: errorCode(gBody),
-      });
-      expect.soft(g.status(), 'review grant POST').toBe(201);
-      await expect
-        .soft(page.locator(AO.reviewGranted), 'the dialog confirms the person')
-        .toBeVisible();
-      r.ui.confirmation = ((await page.locator(AO.reviewGranted).first().textContent()) ?? '')
-        .replace(/\s+/g, ' ')
-        .trim();
-      await page.keyboard.press('Escape');
+      expect.soft(res.status, 'aowner (steward): review grant POST').toBe(201);
       const grants = await grantsAsPowner(r);
       r.ui.grants = grants;
       expect
@@ -1276,48 +1195,11 @@ test.describe.serial('agent-owned artifact access per role (R1-B)', () => {
     });
 
     await row('R1B-08b', async (r) => {
-      const page = await pageOf('padmin');
       const outsider = who('outsider');
       await snapshot('padmin', 'R1B-08b');
-      // UI (recorded): what the dialog does with a person who cannot read.
-      const ui: Record<string, unknown> = {};
-      r.ui.dialog = ui;
-      try {
-        await headerControl(page, 'Grant review access').click();
-        await expect(page.locator(AO.reviewSection)).toBeVisible();
-        // Decided from the people-search answer for this query, not a timeout.
-        const searched = await searchReviewPeople(page, outsider.email, outsider.id);
-        ui.search = searched;
-        const suggestion = reviewSuggestion(page, outsider.email);
-        if (searched.inAnswer) await expect(suggestion, 'the answer is rendered').toBeVisible();
-        ui.offered = (await suggestion.count()) > 0;
-        if (ui.offered) {
-          await suggestion.click();
-          const answer = page.waitForResponse(
-            (q) =>
-              q.request().method() === 'POST' &&
-              new URL(q.url()).pathname === `/api/v1/artifacts/${artifactId()}/grants`
-          );
-          await reviewAdd(page).click();
-          const a = await answer;
-          ui.postStatus = a.status();
-          ui.postCode = errorCode(await a.json().catch(() => null));
-          // After the answer, wait for one outcome, then record which appeared.
-          await expect(
-            page.locator(AO.dialogError).or(page.locator(AO.reviewGranted)).first(),
-            'the dialog shows an outcome'
-          ).toBeVisible();
-          ui.errorShown = await isShown(page.locator(AO.dialogError));
-          ui.errorText = ui.errorShown
-            ? ((await page.locator(AO.dialogError).first().textContent()) ?? '').trim()
-            : null;
-          ui.confirmationShown = await isShown(page.locator(AO.reviewGranted));
-        }
-        await page.keyboard.press('Escape');
-      } catch (err) {
-        ui.error = firstLine(err);
-      }
-      // API (graded).
+      // A project admin who is not a steward may not give grants: the
+      // uniform 403 (TestPutGrantNonAdministratorUniform403, pkg/artifacts),
+      // code forbidden (TestStewardUserOwnedNeverSteward, pkg/artifacts).
       const res = await api(
         'padmin',
         'POST',
@@ -1326,8 +1208,9 @@ test.describe.serial('agent-owned artifact access per role (R1-B)', () => {
         r
       );
       expect
-        .soft([res.status, res.code], 'padmin: review grant to a non-reader')
-        .toEqual([403, 'review_subject_cannot_read']);
+        .soft([res.status, res.code], 'padmin: review grant refused')
+        .toEqual([403, 'forbidden']);
+      // No grant is written, so the outsider stays a non-reader (R1B-06, R1B-15).
       const grants = await grantsAsPowner(r);
       r.ui.grants = grants;
       expect
@@ -1414,8 +1297,8 @@ test.describe.serial('agent-owned artifact access per role (R1-B)', () => {
         const snap = await snapshot(key, `R1B-10 (${key})`, { history: true });
         r.ui[`${key}Snapshot`] = snap;
         expectControls(snap, {
-          visible: ['Grant review access', 'Retention…', 'Delete…', 'Download'],
-          hidden: ['Edit', 'Review', 'Share', 'Move…'],
+          visible: ['Retention…', 'Delete…', 'Download'],
+          hidden: ['Edit', 'Review', 'Share', 'Grant review access', 'Move…'],
           uploadVersion: false,
         });
         expect.soft(snap.historyEdit, `${key}: History Edit hidden`).toBe(false);
@@ -1567,26 +1450,24 @@ test.describe.serial('agent-owned artifact access per role (R1-B)', () => {
         const powner = await snapshot('powner', 'R1B-16 (powner)', { history: true });
         r.ui.powner = powner;
         expectControls(powner, {
-          visible: ['Grant review access', 'Retention…', 'Delete…', 'Download'],
-          hidden: ['Edit', 'Review', 'Share', 'Move…'],
+          visible: ['Retention…', 'Delete…', 'Download'],
+          hidden: ['Edit', 'Review', 'Share', 'Grant review access', 'Move…'],
           uploadVersion: false,
         });
         expect.soft(powner.historyEdit, 'powner: History Edit hidden').toBe(false);
         const pc = await caps('powner', r);
         expect.soft(pc.canShare, 'powner canShare').toBe(true);
         expect.soft(pc.shareAuthority, 'powner shareAuthority').toBe('project_owner');
-        expect.soft(pc.canGrantReview, 'powner canGrantReview').toBe(true);
         expect.soft(pc.canRetire, 'powner canRetire').toBe(true);
         const padmin = await snapshot('padmin', 'R1B-16 (padmin)', { history: true });
         r.ui.padmin = padmin;
         expectControls(padmin, {
-          visible: ['Grant review access', 'Delete…', 'Download'],
-          hidden: ['Edit', 'Review', 'Share', 'Retention…', 'Move…'],
+          visible: ['Delete…', 'Download'],
+          hidden: ['Edit', 'Review', 'Share', 'Grant review access', 'Retention…', 'Move…'],
           uploadVersion: false,
         });
         expect.soft(padmin.historyEdit, 'padmin: History Edit hidden').toBe(false);
         const ac = await caps('padmin', r);
-        expect.soft(ac.canGrantReview, 'padmin canGrantReview').toBe(true);
         expect.soft(ac.canRetire, 'padmin canRetire').toBe(true);
         expect.soft(ac.canShare, 'padmin canShare').toBe(false);
         const member = await snapshot('member', 'R1B-16 (member)');

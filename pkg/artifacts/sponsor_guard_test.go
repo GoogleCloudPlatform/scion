@@ -47,8 +47,6 @@ import (
 // or the column, such as copying a whole Artifact value (*a = *other) into
 // a create; code review covers that case.
 var sponsorRefSites = []struct{ file, line, role string }{
-	{"pkg/artifacts/grants.go", "clause = clauser.ReviewGrantClause(ctx, a.OwnerRef, a.ScopeRef, a.SponsorRef)", "pass"},
-	{"pkg/artifacts/grants.go", "} else if authority, ok := s.host.(ReviewGrantAuthority); !ok || !authority.MayGrantReview(ctx, a.OwnerRef, a.ScopeRef, a.SponsorRef) {", "pass"},
 	{"pkg/artifacts/links.go", "switch st.StewardClause(ctx, a.OwnerRef, a.ScopeRef, a.SponsorRef, a.OrphanedAt != nil) {", "pass"},
 	{"pkg/artifacts/publish.go", "a.SponsorRef = s.sponsorFor(ctx, kind, ref, a.ScopeKind)", "write"},
 	{"pkg/artifacts/schema.go", "ALTER TABLE artifact ADD COLUMN IF NOT EXISTS sponsor_ref TEXT;", "ddl"},

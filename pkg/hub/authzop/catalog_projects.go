@@ -1175,7 +1175,7 @@ var projectOperations = []OperationSpec{
 	{
 		ID:          "artifact.grant.put",
 		Domain:      "artifact",
-		Description: "Give a user, agent or project read, write or admin on an artifact, or a user review, or change an existing grant's permission (POST); a steward (on an artifact owned by an agent: an owner of its home project, or the agent's delegating user who reads in the home project) gives read, review or write, and an admin grant from it is refused with 403 steward_action_not_allowed; a caller that may not manage the artifact may still give a user the review level on an artifact owned by an agent when it is that agent's delegating user or an admin of the artifact's home project (project.manage there; ReviewGrantClause), to a user who can already read it through the home project or a grant to one of the user's projects, never replacing a read, write or admin grant; a caller with that authority asking for a well-formed review grant is refused with 403 review_subject_cannot_read when the user cannot read the artifact and 403 review_replaces_access when the user holds a read, write or admin grant; every other request from such a caller is refused with the same 403, and an accepted one can still answer 409 too_many_grants, or 404 when the artifact went away meanwhile; with notify, may write one hub notification (artifact.grant.notify)",
+		Description: "Give a user, agent or project read, write or admin on an artifact, or a user review, or change an existing grant's permission (POST); a steward (on an artifact owned by an agent: an owner of its home project, or the agent's delegating user who reads in the home project) gives read, review or write, and an admin grant from it is refused with 403 steward_action_not_allowed; every other caller that can read the artifact is refused with the same 403 before its body is read, and an accepted request can still answer 409 too_many_grants, or 404 when the artifact went away meanwhile; with notify, may write one hub notification (artifact.grant.notify)",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts/{id}/grants", Method: "POST"},
 		},
@@ -1185,7 +1185,7 @@ var projectOperations = []OperationSpec{
 		BasePermission:        "artifact.manage",
 		Effects:               []SecurityEffect{EffectGrantAuthority},
 		DelegationKind:        DelegationNonAmplification,
-		DelegationDescription: "A manager (the owner or an admin grantee) grants at most admin, the level it holds, and admin is never given to the home project's grant; a steward grants at most write (no stored admin grant can outlive its computed authority), decided from roles, the delegating user recorded on the artifact and, when none is recorded, the delegation chain (StewardClause), never from grants the caller holds; the review path gives only the review level, which allows review versions and no read of its own, decided by the host's review-grant authority (MayGrantReview) rather than by grants the caller holds",
+		DelegationDescription: "A manager (the owner or an admin grantee) grants at most admin, the level it holds, and admin is never given to the home project's grant; a steward grants at most write (no stored admin grant can outlive its computed authority), decided from roles, the delegating user recorded on the artifact and, when none is recorded, the delegation chain (StewardClause), never from grants the caller holds",
 		AuthorityEval:         AuthorityEvalNone,
 		// grant_created and grant_changed are written in the same
 		// transaction as the grant (pkg/artifacts/store_grants.go).
@@ -1196,25 +1196,25 @@ var projectOperations = []OperationSpec{
 			AfterFields:   []string{"grantId", "subjectKind", "subjectRef", "permission", "newPermission"},
 			Atomic:        true,
 		},
-		DenialCodes: []DenialCode{DenialResourceNotFound, DenialForbidden, "cross_project_sharing_disabled", "review_subject_cannot_read", "review_replaces_access", "steward_action_not_allowed"},
+		DenialCodes: []DenialCode{DenialResourceNotFound, DenialForbidden, "cross_project_sharing_disabled", "steward_action_not_allowed"},
 		TestRefs: []TestRef{
 			{Package: "pkg/hub", Function: "TestArtifactsGrantsOnRoutes"},
-			{Package: "pkg/hub", Function: "TestArtifactCanGrantReviewOnRoutes"},
-			{Package: "pkg/hub", Function: "TestArtifactHostMayGrantReview_ScopedToken"},
 			{Package: "pkg/artifacts", Function: "TestGrantsAdminGate"},
-			{Package: "pkg/artifacts", Function: "TestReviewGrantAllowed"},
-			{Package: "pkg/artifacts", Function: "TestReviewGrantDenied"},
+			{Package: "pkg/artifacts", Function: "TestPutGrantNonAdministratorUniform403"},
 			{Package: "pkg/hub", Function: "TestArtifactStewardOnRoutes"},
 			{Package: "pkg/artifacts", Function: "TestStewardBoundedTable"},
 			{Package: "pkg/artifacts", Function: "TestStewardEvents"},
 			{Package: "pkg/artifacts", Function: "TestStoreCreationEvents"},
+			{Package: "pkg/artifacts", Function: "TestMigration0014ReviewLadder"},
+			{Package: "pkg/artifacts", Function: "TestGrantWritesAllowlist"},
+			{Package: "pkg/artifacts", Function: "TestPutGrantEventFaultRollsBack"},
 		},
 		Bearer: artifactManageBearer,
 	},
 	{
 		ID:          "artifact.grant.notify",
 		Domain:      "artifact",
-		Description: "Ask for review: with notify on an artifact grant to a user (POST, body notify true), write one hub notification to that user after the grant commits, naming the granter and the level, never the artifact's title or any request text; only an artifact manager or steward on an interactive, unscoped user session (the scheduled-send gate) sends it, only to an active user the caller may read, only when the grant raises the user's level and, for review until the review ladder lands, only to a user who can already read the artifact; at most 30 per hour per requester (burst 10) and 600 per hour in all (burst 60); a refusal never blocks the grant and answers notifySkipped (self, not_permitted, unavailable, not_raised, rate_limited); the review path for non-managers never notifies",
+		Description: "Ask for review: with notify on an artifact grant to a user (POST, body notify true), write one hub notification to that user after the grant commits, naming the granter and the level, never the artifact's title or any request text; only an artifact manager or steward on an interactive, unscoped user session (the scheduled-send gate) sends it, only to an active user the caller may read, only when the grant raises the user's level; at most 30 per hour per requester (burst 10) and 600 per hour in all (burst 60); a refusal never blocks the grant and answers notifySkipped (self, not_permitted, unavailable, not_raised, rate_limited)",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts/{id}/grants", Method: "POST", Variant: "notify"},
 		},

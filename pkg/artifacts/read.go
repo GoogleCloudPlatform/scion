@@ -174,13 +174,13 @@ func canReadAttachmentScope(ctx context.Context, host Host, a *Artifact, kind, r
 	return false
 }
 
-// Permission sets a grant must carry for each kind of access. A review
-// grant (ptone/scion#4538) is in none of the read sets: it never makes an
-// artifact readable. It lets a caller that can already read the artifact
-// another way append versions of kind review (grantsForReview; see
-// canWritePermittedErr), and only while that read lasts.
+// Permission sets a grant must carry for each kind of access. The levels
+// form a ladder (ptone/scion#5145): read ⊂ review ⊂ write ⊂ admin, so a
+// review grant reads, and it also lets its holder append versions of kind
+// review (grantsForReview; see canWritePermittedErr). The list query's SQL
+// pushdowns take the read set from grantsForRead (readGrantFilter).
 var (
-	grantsForRead   = []string{GrantRead, GrantWrite, GrantAdmin}
+	grantsForRead   = []string{GrantRead, GrantReview, GrantWrite, GrantAdmin}
 	grantsForReview = []string{GrantReview}
 	grantsForWrite  = []string{GrantWrite, GrantAdmin}
 	grantsForAdmin  = []string{GrantAdmin}

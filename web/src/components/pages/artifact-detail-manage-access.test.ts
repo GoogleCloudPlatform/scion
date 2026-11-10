@@ -17,9 +17,9 @@
 /**
  * Artifact page, Manage access (experiment web.artifact_manage_access,
  * ptone/scion#7107, approved mock v1): with the experiment on, one Manage
- * access button, shown exactly for canShare or canGrantReview, replaces
- * Share, Grant review access and Retention…, and opens one dialog in
- * manage mode with the page's capabilities. Move… and Delete… are
+ * access button, shown exactly for canShare, replaces Share and
+ * Retention…, and opens one dialog in manage mode with the page's
+ * capabilities. Move… and Delete… are
  * unchanged. With it off, the page is as before.
  */
 
@@ -157,23 +157,18 @@ const ROLES: Array<{
   },
   {
     role: 'R3 steward, project owner',
-    flags: {
-      canShare: true,
-      shareAuthority: 'project_owner',
-      canGrantReview: true,
-      canRetire: true,
-    },
+    flags: { canShare: true, shareAuthority: 'project_owner', canRetire: true },
     on: ['Manage access', 'Delete…'],
   },
   {
     role: 'R4 steward, delegator',
-    flags: { canShare: true, shareAuthority: 'delegator', canGrantReview: true, canRetire: true },
+    flags: { canShare: true, shareAuthority: 'delegator', canRetire: true },
     on: ['Manage access', 'Delete…'],
   },
   {
     role: 'R5 project admin, not owner',
-    flags: { canGrantReview: true, canRetire: true },
-    on: ['Manage access', 'Delete…'],
+    flags: { canRetire: true },
+    on: ['Delete…'],
   },
   {
     role: 'R5u custodian only',
@@ -181,7 +176,7 @@ const ROLES: Array<{
     art: { ownerKind: 'user', ownerRef: 'u-1' },
     on: ['Delete…'],
   },
-  { role: 'R6 delegator, review only', flags: { canGrantReview: true }, on: ['Manage access'] },
+  { role: 'R6 delegator, not a steward', flags: {}, on: [] },
   { role: 'R7 reviewer', flags: { canReview: true }, on: [] },
   { role: 'R8 viewer', flags: {}, on: [] },
 ];
@@ -218,21 +213,20 @@ describe('artifact page: Manage access (web.artifact_manage_access)', () => {
     });
   }
 
+  it('flag on: a canGrantReview flag, which the hub no longer sends, shows no access button', async () => {
+    mockFetch(meta({ canGrantReview: true } as unknown as Partial<ArtifactResponse>));
+    const el = await mount(true);
+    expect(accessButtons(el)).toEqual([]);
+    expect(dialogs(el)).toEqual([]);
+  });
+
   it('flag on: the one dialog receives the capabilities and opens from Manage access', async () => {
-    mockFetch(
-      meta({
-        canShare: true,
-        shareAuthority: 'delegator',
-        canGrantReview: true,
-        canRetire: true,
-      })
-    );
+    mockFetch(meta({ canShare: true, shareAuthority: 'delegator', canRetire: true }));
     const el = await mount(true);
     const [d] = dialogs(el);
     expect(d!.capabilities).toEqual({
       canManage: false,
       canShare: true,
-      canGrantReview: true,
       shareAuthority: 'delegator',
     });
     expect(d!.open).toBe(false);
@@ -249,19 +243,12 @@ describe('artifact page: Manage access (web.artifact_manage_access)', () => {
   });
 
   it('flag off: Manage access is absent and the earlier buttons stay', async () => {
-    mockFetch(
-      meta({
-        canShare: true,
-        shareAuthority: 'project_owner',
-        canGrantReview: true,
-        canRetire: true,
-      })
-    );
+    mockFetch(meta({ canShare: true, shareAuthority: 'project_owner', canRetire: true }));
     const el = await mount(false);
-    expect(accessButtons(el)).toEqual(['Grant review access', 'Retention…', 'Delete…']);
+    expect(accessButtons(el)).toEqual(['Retention…', 'Delete…']);
     expect(el.shadowRoot!.querySelector('.header-actions sl-button.manage-access')).toBeNull();
     expect(el.shadowRoot!.querySelector('scion-artifact-share-dialog.access-dialog')).toBeNull();
-    expect(dialogs(el).map((d) => d.mode)).toEqual(['review', 'retention']);
+    expect(dialogs(el).map((d) => d.mode)).toEqual(['retention']);
   });
 
   it('flag off: an owner keeps Share', async () => {
