@@ -151,11 +151,13 @@ func TestRequestLogMiddleware_NestedWithoutDefer_BothLog(t *testing.T) {
 	assert.Equal(t, "relay-peer", outerLine["user_id"])
 }
 
-// TestRequestLogMiddleware_DeferToNested_OneLevelOnly: deferral reaches
-// only the logger directly enclosing the one that logged. With a deferring
-// logger around the hub chain, and the hub chain re-entered inside itself,
-// the two hub lines stay and only the deferring logger is silent.
-func TestRequestLogMiddleware_DeferToNested_OneLevelOnly(t *testing.T) {
+// TestRequestLogMiddleware_DeferToNested_StopsAtNonDeferringLogger: a
+// logger built without DeferToNestedRequestLog stops deferral. With a
+// deferring logger around the hub chain, and the hub chain re-entered inside
+// itself, the middle (non-deferring) hub logger writes its own line although
+// the innermost one logged, so the two hub lines stay and only the deferring
+// logger is silent.
+func TestRequestLogMiddleware_DeferToNested_StopsAtNonDeferringLogger(t *testing.T) {
 	logger, buf := newNestedTestLogger()
 	innermost := RequestLogMiddleware(logger, "hub", nil, 0)(
 		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }),
@@ -232,11 +234,12 @@ func TestRequestLogMiddleware_DeferToNested_SingleLayerUnchanged(t *testing.T) {
 	}
 }
 
-// TestRequestLogMiddleware_DeferToNested_OneSlowRequestLine: the
-// slow-request line follows the request line. A deferring logger whose
-// nested logger has logged the request writes no slow-request line of its
-// own; the nested logger writes the only one. The outer chain strips a
-// path prefix, so the two loggers would report different paths.
+// TestRequestLogMiddleware_DeferToNested_OneSlowRequestLine: the nested
+// logger is slow and writes the only slow-request line. The deferring
+// logger, though its own elapsed time is over its threshold too, writes no
+// slow-request line of its own, because the nested logger already wrote
+// one. The outer chain strips a path prefix, so the two loggers would
+// report different paths.
 func TestRequestLogMiddleware_DeferToNested_OneSlowRequestLine(t *testing.T) {
 	var slowBuf bytes.Buffer
 	orig := slog.Default()
@@ -264,4 +267,132 @@ func TestRequestLogMiddleware_DeferToNested_OneSlowRequestLine(t *testing.T) {
 	}
 	require.Len(t, slow, 1, "want exactly one slow-request line: %s", slowBuf.String())
 	assert.Equal(t, "/api/v1/slow", slow[0]["path"], "the slow-request line must be the nested logger's")
+}
+
+// slowRequestLines captures the default logger (where "Slow request" goes)
+// for the test and returns a function that reads its slow-request lines.
+func slowRequestLines(t *testing.T) func() []map[string]any {
+	t.Helper()
+	var slowBuf bytes.Buffer
+	orig := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(orig) })
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&slowBuf, nil)))
+	return func() []map[string]any {
+		var slow []map[string]any
+		for _, line := range requestLogLines(t, &slowBuf) {
+			if line["msg"] == "Slow request" {
+				slow = append(slow, line)
+			}
+		}
+		return slow
+	}
+}
+
+// TestRequestLogMiddleware_DeferToNested_SlowRequestLines: one request-log
+// line in every case, and exactly one slow-request line when the request is
+// slow: from the deferring logger when only the outer chain was slow, from
+// the nested logger when it was slow itself, and none when nothing was.
+func TestRequestLogMiddleware_DeferToNested_SlowRequestLines(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		outerSleep bool          // the outer chain spends time before the nested logger
+		innerSleep bool          // the nested logger's handler spends time
+		innerSlow  time.Duration // the nested logger's threshold
+		outerSlow  time.Duration // the deferring logger's threshold
+		wantPath   string        // "" = no slow-request line
+	}{
+		{name: "outer chain slow only", outerSleep: true, innerSlow: time.Hour, outerSlow: time.Millisecond, wantPath: "/web/api/v1/slow"},
+		{name: "nested and outer slow", outerSleep: true, innerSleep: true, innerSlow: time.Nanosecond, outerSlow: time.Nanosecond, wantPath: "/api/v1/slow"},
+		{name: "fast", innerSlow: time.Hour, outerSlow: time.Hour},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			slowLines := slowRequestLines(t)
+			logger, buf := newNestedTestLogger()
+			inner := RequestLogMiddleware(logger, "hub", nil, tc.innerSlow)(
+				http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					if tc.innerSleep {
+						time.Sleep(2 * time.Millisecond)
+					}
+					w.WriteHeader(http.StatusOK)
+				}),
+			)
+			outerChain := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if tc.outerSleep {
+					time.Sleep(5 * time.Millisecond)
+				}
+				http.StripPrefix("/web", inner).ServeHTTP(w, r)
+			})
+			outer := RequestLogMiddleware(logger, "web", nil, tc.outerSlow, DeferToNestedRequestLog())(outerChain)
+
+			outer.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/web/api/v1/slow", nil))
+
+			lines := requestLogLines(t, buf)
+			require.Len(t, lines, 1, "want exactly one request-log line: %s", buf.String())
+			assert.Equal(t, "hub", lines[0]["component"])
+			slow := slowLines()
+			if tc.wantPath == "" {
+				require.Empty(t, slow)
+				return
+			}
+			require.Len(t, slow, 1, "want exactly one slow-request line")
+			assert.Equal(t, tc.wantPath, slow[0]["path"])
+		})
+	}
+}
+
+// TestRequestLogMiddleware_DeferToNested_TwoDeferringLevels: with two
+// deferring loggers around a nested one, the request is logged once, by the
+// innermost logger, and gets exactly one slow-request line when it is slow:
+// from the outermost logger when only the outer chain was slow, from the
+// innermost logger when it was slow itself (the middle logger passes that on,
+// so neither deferring logger writes a second one), and from the middle
+// logger when it was the first over its threshold. Each level strips its
+// own path prefix, so the slow-request line's path names the logger that
+// wrote it.
+func TestRequestLogMiddleware_DeferToNested_TwoDeferringLevels(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		outerSleep     bool          // the outer chain spends time before the middle logger
+		innermostSleep bool          // the innermost logger's handler spends time
+		innermostSlow  time.Duration // the innermost logger's threshold
+		middleSlow     time.Duration // the middle (deferring) logger's threshold
+		outerSlow      time.Duration // the outer (deferring) logger's threshold
+		wantPath       string
+	}{
+		{name: "outer chain slow", outerSleep: true, innermostSlow: time.Hour, middleSlow: time.Hour, outerSlow: time.Millisecond, wantPath: "/web/mid/api/v1/slow"},
+		{name: "innermost slow", innermostSleep: true, innermostSlow: time.Nanosecond, middleSlow: time.Nanosecond, outerSlow: time.Nanosecond, wantPath: "/api/v1/slow"},
+		{name: "middle slow", innermostSleep: true, innermostSlow: time.Hour, middleSlow: time.Nanosecond, outerSlow: time.Nanosecond, wantPath: "/mid/api/v1/slow"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			slowLines := slowRequestLines(t)
+			logger, buf := newNestedTestLogger()
+			innermost := RequestLogMiddleware(logger, "hub", nil, tc.innermostSlow)(
+				http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					if tc.innermostSleep {
+						time.Sleep(2 * time.Millisecond)
+					}
+					w.WriteHeader(http.StatusOK)
+				}),
+			)
+			middle := RequestLogMiddleware(logger, "mid", nil, tc.middleSlow, DeferToNestedRequestLog())(
+				http.StripPrefix("/mid", innermost),
+			)
+			outerChain := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if tc.outerSleep {
+					time.Sleep(5 * time.Millisecond)
+				}
+				http.StripPrefix("/web", middle).ServeHTTP(w, r)
+			})
+			outer := RequestLogMiddleware(logger, "web", nil, tc.outerSlow, DeferToNestedRequestLog())(outerChain)
+
+			outer.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/web/mid/api/v1/slow", nil))
+
+			lines := requestLogLines(t, buf)
+			require.Len(t, lines, 1, "want exactly one request-log line: %s", buf.String())
+			assert.Equal(t, "hub", lines[0]["component"])
+			slow := slowLines()
+			require.Len(t, slow, 1, "want exactly one slow-request line")
+			assert.Equal(t, tc.wantPath, slow[0]["path"])
+		})
+	}
 }

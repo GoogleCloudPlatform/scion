@@ -73,10 +73,14 @@ type RequestMeta struct {
 
 	// deferToNested is set when the RequestLogMiddleware that installed this
 	// record was built with DeferToNestedRequestLog. nestedLogged is set by
-	// a RequestLogMiddleware nested directly inside that one once it has
-	// written its own line, so the deferring logger writes none.
-	deferToNested bool
-	nestedLogged  bool
+	// a RequestLogMiddleware nested directly inside that one once this
+	// request's line has been written (by it, or below it through loggers
+	// that deferred in turn), so the deferring logger writes none.
+	// nestedSlowLogged is set the same way once a slow-request line has
+	// been written. All three are read and written under mu.
+	deferToNested    bool
+	nestedLogged     bool
+	nestedSlowLogged bool
 }
 
 // InstrumentedResponseWriter captures status code and bytes written.
@@ -328,16 +332,18 @@ type requestLogOptions struct {
 	deferToNested bool
 }
 
-// DeferToNestedRequestLog makes a RequestLogMiddleware write no line (and
-// no slow-request line) for a request that a RequestLogMiddleware nested
-// directly inside it has already logged. Use it on an outer chain that
-// mounts a handler with its own request logger (the web server mounting
-// the Hub API), so such a request is logged once, by the inner logger,
-// which sees the inner chain's auth attribution. A request the outer
-// chain answers without reaching an inner logger is still logged by the
-// outer one. Only the logger built with this option is ever suppressed,
-// and only by the logger directly inside it: two nested loggers without
-// it both log, each with its own request ID.
+// DeferToNestedRequestLog makes a RequestLogMiddleware write no line for a
+// request that a RequestLogMiddleware nested directly inside it has already
+// logged (itself, or below it through loggers that deferred in turn). Use
+// it on an outer chain that mounts a handler with its own request logger
+// (the web server mounting the Hub API), so such a request is logged once,
+// by the inner logger, which sees the inner chain's auth attribution. A
+// request the outer chain answers without reaching an inner logger is
+// still logged by the outer one. The deferring logger still writes the
+// slow-request line when its own elapsed time is over its threshold and no
+// nested logger wrote one, so time spent in the outer chain is not lost.
+// Only the logger built with this option is ever suppressed: two nested
+// loggers without it both log, each with its own request ID.
 func DeferToNestedRequestLog() RequestLogOption {
 	return func(o *requestLogOptions) { o.deferToNested = true }
 }
@@ -413,17 +419,36 @@ func RequestLogMiddleware(logger *slog.Logger, component string, patterns []Path
 			finalAuthType := meta.AuthType
 			finalAuthAttrs := append([]slog.Attr(nil), meta.AuthAttrs...)
 			nestedLogged := meta.nestedLogged
+			slowLogged := meta.nestedSlowLogged
 			meta.mu.Unlock()
+
+			duration := time.Since(start)
+
+			// Log slow requests via the default logger, exempting streaming
+			// responses. This runs for a deferring logger too, so time spent
+			// outside a nested logger still counts; a request a nested logger
+			// already logged as slow gets no second slow-request line.
+			contentType := strings.ToLower(wrapped.Header().Get("Content-Type"))
+			isStreaming := strings.HasPrefix(contentType, "text/event-stream")
+			isUpgrade := r.Header.Get("Upgrade") != ""
+			if !isStreaming && !isUpgrade && duration > slowThreshold && !slowLogged {
+				slog.Info("Slow request",
+					slog.String("method", r.Method),
+					slog.String("path", RequestPath(r)),
+					slog.Duration("elapsed", duration),
+					slog.Int("status", wrapped.statusCode),
+				)
+				slowLogged = true
+			}
 
 			// A nested request logger already wrote this request's line.
 			if nestedLogged {
+				tellEnclosingLogger(enclosing, slowLogged)
 				if aborted {
 					panic(http.ErrAbortHandler)
 				}
 				return
 			}
-
-			duration := time.Since(start)
 
 			// Build HttpRequest struct
 			httpReq := HttpRequest{
@@ -437,19 +462,6 @@ func RequestLogMiddleware(logger *slog.Logger, component string, patterns []Path
 				Referer:       RedactReferer(r.Referer()),
 				Latency:       fmt.Sprintf("%.3fs", duration.Seconds()),
 				Protocol:      r.Proto,
-			}
-
-			// Log slow requests via the default logger, exempting streaming responses.
-			contentType := strings.ToLower(wrapped.Header().Get("Content-Type"))
-			isStreaming := strings.HasPrefix(contentType, "text/event-stream")
-			isUpgrade := r.Header.Get("Upgrade") != ""
-			if !isStreaming && !isUpgrade && duration > slowThreshold {
-				slog.Info("Slow request",
-					slog.String("method", r.Method),
-					slog.String("path", RequestPath(r)),
-					slog.Duration("elapsed", duration),
-					slog.Int("status", wrapped.statusCode),
-				)
 			}
 
 			// Determine log level
@@ -495,18 +507,30 @@ func RequestLogMiddleware(logger *slog.Logger, component string, patterns []Path
 			}
 
 			logger.LogAttrs(ctx, level, "", attrs...)
-			if enclosing != nil {
-				enclosing.mu.Lock()
-				if enclosing.deferToNested {
-					enclosing.nestedLogged = true
-				}
-				enclosing.mu.Unlock()
-			}
+			tellEnclosingLogger(enclosing, slowLogged)
 			if aborted {
 				panic(http.ErrAbortHandler)
 			}
 		})
 	}
+}
+
+// tellEnclosingLogger records on enclosing, the record of the request
+// logger directly enclosing this one (nil if none), that this request's
+// line has been written and, if slowLogged, that a slow-request line has
+// been too. Only a logger built with DeferToNestedRequestLog is told.
+func tellEnclosingLogger(enclosing *RequestMeta, slowLogged bool) {
+	if enclosing == nil {
+		return
+	}
+	enclosing.mu.Lock()
+	if enclosing.deferToNested {
+		enclosing.nestedLogged = true
+		if slowLogged {
+			enclosing.nestedSlowLogged = true
+		}
+	}
+	enclosing.mu.Unlock()
 }
 
 // AttrAborted marks a request line whose response was aborted mid-way
