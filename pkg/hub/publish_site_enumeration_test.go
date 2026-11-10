@@ -128,6 +128,12 @@ func TestPersistedRowEffectEnumeration(t *testing.T) {
 		// transaction; any RecordAnswer error returns before it.
 		"choices_answer.go:publishChoiceResponse": "Called only after RecordAnswer stored the response row; a RecordAnswer error returns before it",
 
+		// publishChoiceResponseSet: called by handleChoiceSetAnswer only
+		// after RecordAnswerSet stored the set's one choice-response row in
+		// the submit's transaction; any RecordAnswerSet error returns
+		// before it, and a replay returns before it too.
+		"choices_batch.go:publishChoiceResponseSet": "Called only after RecordAnswerSet stored the response row; a RecordAnswerSet error or a replay returns before it",
+
 		"message_delivery_failures.go:applyBrokerMessageFailure": "Acts on an already-persisted row (confirmed via GetMessage) after markFailed has already committed; publish mirrors the committed write, not a pending one",
 	}
 
@@ -521,6 +527,7 @@ func TestMemberFanoutFollowsPublish(t *testing.T) {
 		"handlers_agent_messaging.go:handleAgentOutboundMessage": true,
 		"messagebroker.go:deliverToUser":                         true,
 		"choices_answer.go:publishChoiceResponse":                true,
+		"choices_batch.go:publishChoiceResponseSet":              true,
 	}
 	isFanoutCall := func(call *ast.CallExpr) bool {
 		sel, ok := call.Fun.(*ast.SelectorExpr)
