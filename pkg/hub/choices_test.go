@@ -893,3 +893,27 @@ func TestDecisionAnswer_AskerRefusesMessages(t *testing.T) {
 	rr = f.answer(t, f.bob, row, map[string]interface{}{"choice_id": "1"})
 	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
 }
+
+// A choice prompt may leave out its intro: the send is accepted and the
+// stored body is the markdown fallback rendered from the decisions.
+func TestChoicesSend_WithoutIntro(t *testing.T) {
+	f := newChoicesFixture(t)
+	rr := f.sendAsAgent(t, OutboundMessageRequest{
+		Recipient: "user:" + f.bob.Email,
+		Choices:   decisionInputs(t, `[{"id":"ship","question":"Ship it now?","choices":["yes","no"]}]`),
+	})
+	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+	var resp choiceSendResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	require.NotEmpty(t, resp.MessageID)
+	require.Len(t, resp.Decisions, 1)
+
+	m, err := f.store.GetMessage(context.Background(), resp.MessageID)
+	require.NoError(t, err)
+	assert.Equal(t, messages.TypeChoicePrompt, m.Type)
+	assert.Contains(t, m.Msg, "Ship it now?", "the stored body is the rendered fallback")
+	decs, err := f.store.GetDecisionsByMessageIDs(context.Background(), []string{resp.MessageID})
+	require.NoError(t, err)
+	require.Len(t, decs[resp.MessageID], 1)
+	assert.Equal(t, 0, decs[resp.MessageID][0].IntroLength, "no intro")
+}

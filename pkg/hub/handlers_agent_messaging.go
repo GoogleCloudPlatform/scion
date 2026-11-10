@@ -469,12 +469,6 @@ func (s *Server) resolveOutboundRouting(
 		Metadata:       stripClientAttachmentRefs(req.Metadata),
 		ConversationID: req.ConversationID,
 	}
-	if validationMsg.Msg == "" && len(req.Choices) > 0 {
-		// A choice prompt's intro is optional: the stored body is the
-		// markdown fallback the store renders from the decisions, so the
-		// envelope is checked with a stand-in body.
-		validationMsg.Msg = "choice prompt"
-	}
 	if err := messaging.ValidateLegacyMessage(validationMsg); err != nil {
 		ValidationError(w, err.Error(), nil)
 		return nil, err
