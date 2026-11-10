@@ -73,28 +73,28 @@ func withMetadataInterceptionInstalled(t *testing.T, installed bool) {
 // reach the log only, never the reported failure.
 var errDropDetail = errors.New("drop CAP_NET_ADMIN from bounding set: detail-that-must-not-be-reported")
 
-func TestDropNetAdminForMetadata(t *testing.T) {
+func TestDropNetAdmin(t *testing.T) {
 	tests := []struct {
-		name      string
-		installed bool
-		dropErr   error
-		wantErr   error
+		name     string
+		required bool
+		dropErr  error
+		wantErr  error
 	}{
-		{"installed, dropped", true, nil, nil},
-		{"installed, drop failed: fatal", true, errDropDetail, errNetAdminDropFailed},
-		{"skipped, dropped anyway", false, nil, nil},
-		{"skipped, drop failed: warn only", false, errDropDetail, nil},
+		{"required, dropped", true, nil, nil},
+		{"required, drop failed: fatal", true, errDropDetail, errNetAdminDropFailed},
+		{"not required, dropped anyway", false, nil, nil},
+		{"not required, drop failed: warn only", false, errDropDetail, nil},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var called bool
 			withRunDropNetAdmin(t, func() error { called = true; return tt.dropErr })
-			err := dropNetAdminForMetadata(tt.installed)
+			err := dropNetAdmin(tt.required)
 			if !called {
 				t.Fatal("drop not attempted")
 			}
 			if !errors.Is(err, tt.wantErr) || (tt.wantErr == nil && err != nil) {
-				t.Fatalf("dropNetAdminForMetadata(%v) = %v, want %v", tt.installed, err, tt.wantErr)
+				t.Fatalf("dropNetAdmin(%v) = %v, want %v", tt.required, err, tt.wantErr)
 			}
 		})
 	}
@@ -102,16 +102,17 @@ func TestDropNetAdminForMetadata(t *testing.T) {
 
 func TestSetupInitFirewall(t *testing.T) {
 	tests := []struct {
-		value      string
-		runErr     error
-		wantCalled bool
-		wantErr    bool
+		value         string
+		runErr        error
+		wantCalled    bool
+		wantInstalled bool
+		wantErr       bool
 	}{
 		{value: "", wantCalled: false},
 		{value: "0", wantCalled: false},
 		{value: "false", wantCalled: false},
-		{value: "1", wantCalled: true},
-		{value: "true", wantCalled: true},
+		{value: "1", wantCalled: true, wantInstalled: true},
+		{value: "true", wantCalled: true, wantInstalled: true},
 		{value: "1", runErr: errors.New("exit status 1"), wantCalled: true, wantErr: true},
 		{value: "yes please", wantCalled: false, wantErr: true}, // typo must not silently disable
 	}
@@ -120,9 +121,12 @@ func TestSetupInitFirewall(t *testing.T) {
 			t.Setenv(initFirewallEnv, tt.value)
 			var called bool
 			withRunInitFirewall(t, func() error { called = true; return tt.runErr })
-			err := setupInitFirewall()
+			installed, err := setupInitFirewall()
 			if called != tt.wantCalled {
 				t.Errorf("firewall run = %v, want %v", called, tt.wantCalled)
+			}
+			if installed != tt.wantInstalled {
+				t.Errorf("installed = %v, want %v", installed, tt.wantInstalled)
 			}
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("setupInitFirewall() = %v, wantErr %v", err, tt.wantErr)
@@ -156,6 +160,10 @@ func newNetAdminFixture(t *testing.T, mode string, installed bool, dropErr error
 	setupRunInitAsRootlessScion(t, f.agentHome)
 	writeServicesYAML(t, f.agentHome)
 	t.Setenv("SCION_METADATA_MODE", mode)
+	// Start from no firewall and no host networking, whatever the runner's
+	// environment holds; tests that need either set it after the fixture.
+	t.Setenv(initFirewallEnv, "")
+	t.Setenv("SCION_NETWORK_MODE", "")
 
 	scratch := t.TempDir()
 	f.droppedFile = filepath.Join(scratch, "dropped")
@@ -220,6 +228,8 @@ func netAdminPathExists(path string) bool {
 // firewall, then the metadata start, then the drop, and only then the
 // clone, pre-start hooks, sidecar services and harness. A mutant that
 // removes the drop call from RunInit fails here.
+// It also covers assign mode with the firewall installed and a successful
+// drop: the full order plus the hook-observed-drop check.
 func TestRunInit_NetAdminDrop_PrecedesWorkload(t *testing.T) {
 	f := newNetAdminFixture(t, "assign", true, nil)
 	t.Setenv(initFirewallEnv, "1")
@@ -344,6 +354,145 @@ func TestRunInit_Passthrough_NoDrop(t *testing.T) {
 	}
 	if !netAdminPathExists(f.harnessFile) {
 		t.Fatal("harness did not run")
+	}
+}
+
+// TestRunInit_Passthrough_FirewallDrops: passthrough runs no metadata
+// server, but an installed firewall is a network control too, so the drop
+// still runs before anything workload-controlled. A mutant that gates the
+// drop on the metadata server alone fails here.
+func TestRunInit_Passthrough_FirewallDrops(t *testing.T) {
+	f := newNetAdminFixture(t, "passthrough", false, nil)
+	t.Setenv(initFirewallEnv, "1")
+
+	if got := f.run(); got != 0 {
+		t.Fatalf("RunInit() = %d, want 0", got)
+	}
+	if want := []string{"firewall", "drop", "clone", "sidecars"}; !reflect.DeepEqual(f.order, want) {
+		t.Fatalf("order = %v, want %v", f.order, want)
+	}
+	if !netAdminPathExists(f.hookObservedFile) {
+		t.Fatal("pre-start hook ran before the CAP_NET_ADMIN drop")
+	}
+	if !netAdminPathExists(f.harnessFile) {
+		t.Fatal("harness did not run")
+	}
+}
+
+// TestRunInit_Passthrough_FirewallRequiredDropNilResult_Proceeds: RunInit
+// treats a nil drop result as success, so a required drop that reports
+// nothing to drop must not refuse the start. The real not-held no-op (Held
+// is false, so no prctl or capset runs) is pinned by netcap's
+// TestDropNetAdmin_NoopWhenAbsent; this test stubs only its result.
+func TestRunInit_Passthrough_FirewallRequiredDropNilResult_Proceeds(t *testing.T) {
+	f := newNetAdminFixture(t, "passthrough", false, nil)
+	t.Setenv(initFirewallEnv, "1")
+	withRunDropNetAdmin(t, func() error {
+		f.order = append(f.order, "drop")
+		return nil // not held: a successful no-op
+	})
+
+	if got := f.run(); got != 0 {
+		t.Fatalf("RunInit() = %d, want 0", got)
+	}
+	if want := []string{"firewall", "drop", "clone", "sidecars"}; !reflect.DeepEqual(f.order, want) {
+		t.Fatalf("order = %v, want %v", f.order, want)
+	}
+	if !netAdminPathExists(f.hookRanFile) {
+		t.Fatal("pre-start hook did not run after the drop")
+	}
+	if !netAdminPathExists(f.harnessFile) {
+		t.Fatal("harness did not run")
+	}
+}
+
+// TestRunInit_Passthrough_FirewallDropFailure_FailsClosed: with the
+// firewall installed, a failed drop refuses the start before anything
+// workload-controlled runs.
+func TestRunInit_Passthrough_FirewallDropFailure_FailsClosed(t *testing.T) {
+	f := newNetAdminFixture(t, "passthrough", false, errDropDetail)
+	t.Setenv(initFirewallEnv, "1")
+
+	if got := f.run(); got != 1 {
+		t.Fatalf("RunInit() = %d, want 1", got)
+	}
+	if want := []string{"firewall", "drop"}; !reflect.DeepEqual(f.order, want) {
+		t.Fatalf("order = %v, want %v (clone and sidecars must not run)", f.order, want)
+	}
+	if netAdminPathExists(f.hookRanFile) || netAdminPathExists(f.harnessFile) {
+		t.Error("workload ran after a failed drop")
+	}
+	if _, msg := readAgentInfoMessage(t, f.agentHome); msg != errNetAdminDropFailed.Error() {
+		t.Errorf("reported message = %q, want exactly %q", msg, errNetAdminDropFailed.Error())
+	}
+}
+
+// TestRunInit_FirewallSkippedInterception_DropFailure_FailsClosed: in
+// assign mode with interception legitimately skipped, a failed drop only
+// warns, unless the firewall was installed: then it is fatal.
+func TestRunInit_FirewallSkippedInterception_DropFailure_FailsClosed(t *testing.T) {
+	f := newNetAdminFixture(t, "assign", false, errDropDetail)
+	t.Setenv(initFirewallEnv, "1")
+
+	if got := f.run(); got != 1 {
+		t.Fatalf("RunInit() = %d, want 1", got)
+	}
+	if want := []string{"firewall", "metadata", "drop"}; !reflect.DeepEqual(f.order, want) {
+		t.Fatalf("order = %v, want %v (clone and sidecars must not run)", f.order, want)
+	}
+	if netAdminPathExists(f.hookRanFile) || netAdminPathExists(f.harnessFile) {
+		t.Error("workload ran after a failed drop")
+	}
+	if _, msg := readAgentInfoMessage(t, f.agentHome); msg != errNetAdminDropFailed.Error() {
+		t.Errorf("reported message = %q, want exactly %q", msg, errNetAdminDropFailed.Error())
+	}
+}
+
+// TestRunInit_FirewallSkippedInterception_BlockMode_DropFailure_FailsClosed:
+// the block-mode twin of the assign test above.
+func TestRunInit_FirewallSkippedInterception_BlockMode_DropFailure_FailsClosed(t *testing.T) {
+	f := newNetAdminFixture(t, "block", false, errDropDetail)
+	t.Setenv(initFirewallEnv, "1")
+
+	if got := f.run(); got != 1 {
+		t.Fatalf("RunInit() = %d, want 1", got)
+	}
+	if want := []string{"firewall", "metadata", "drop"}; !reflect.DeepEqual(f.order, want) {
+		t.Fatalf("order = %v, want %v (clone and sidecars must not run)", f.order, want)
+	}
+	if netAdminPathExists(f.hookRanFile) || netAdminPathExists(f.harnessFile) {
+		t.Error("workload ran after a failed drop")
+	}
+	if _, msg := readAgentInfoMessage(t, f.agentHome); msg != errNetAdminDropFailed.Error() {
+		t.Errorf("reported message = %q, want exactly %q", msg, errNetAdminDropFailed.Error())
+	}
+}
+
+// TestRunInit_FirewallNonFatalMetadataStart_DropFailure_FailsClosed: block
+// mode under host networking is the one case where a metadata start failure
+// does not stop init (metadata.Config.StartFailureIsFatal). The server is
+// still non-nil, so the drop runs, and with the firewall installed it is
+// required: a failed drop stops the start.
+func TestRunInit_FirewallNonFatalMetadataStart_DropFailure_FailsClosed(t *testing.T) {
+	f := newNetAdminFixture(t, "block", false, errDropDetail)
+	t.Setenv("SCION_NETWORK_MODE", "host")
+	t.Setenv(initFirewallEnv, "1")
+	withRunMetadataServerStart(t, func(context.Context, *metadata.Server) error {
+		f.order = append(f.order, "metadata")
+		return errors.New("listen tcp 127.0.0.1:18380: bind: address already in use")
+	})
+
+	if got := f.run(); got != 1 {
+		t.Fatalf("RunInit() = %d, want 1", got)
+	}
+	if want := []string{"firewall", "metadata", "drop"}; !reflect.DeepEqual(f.order, want) {
+		t.Fatalf("order = %v, want %v (clone and sidecars must not run)", f.order, want)
+	}
+	if netAdminPathExists(f.hookRanFile) || netAdminPathExists(f.harnessFile) {
+		t.Error("workload ran after a failed drop")
+	}
+	if _, msg := readAgentInfoMessage(t, f.agentHome); msg != errNetAdminDropFailed.Error() {
+		t.Errorf("reported message = %q, want exactly %q", msg, errNetAdminDropFailed.Error())
 	}
 }
 
