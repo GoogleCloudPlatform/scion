@@ -22,6 +22,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"io"
 	"strings"
 	"sync"
 	"testing"
@@ -815,4 +816,50 @@ func TestMigrateLocalToGCP_RepairWriteFailureLine(t *testing.T) {
 		t.Error("the write-failure line claims a kept previous version, but no version was added")
 	}
 	assertNoLeak(t, report, err, log, plain, raw)
+}
+
+// TestMigrateLocalToGCP_NilStoreAndLogger: a nil store is refused before
+// anything is read or written, and a nil logger runs to completion with
+// the log discarded.
+func TestMigrateLocalToGCP_NilStoreAndLogger(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		nilSt   bool
+		nilLog  bool
+		wantErr string
+	}{
+		{name: "nil store", nilSt: true, wantErr: "secret migration needs a secret store"},
+		{name: "nil logger", nilLog: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newMigrationFixture(t)
+			const plain = "plain-value-nil-guards"
+			f.seed(t, "NIL_KEY", plain)
+			var st store.SecretStore = f.st
+			if tc.nilSt {
+				st = nil
+			}
+			var log io.Writer = &bytes.Buffer{}
+			if tc.nilLog {
+				log = nil
+			}
+
+			report, err := MigrateLocalToGCP(context.Background(), st, f.cipher, f.gcp, false, log)
+			if tc.wantErr != "" {
+				if err == nil || err.Error() != tc.wantErr {
+					t.Fatalf("err = %v, want %q", err, tc.wantErr)
+				}
+				if f.addCount() != 0 {
+					t.Fatal("a refused run wrote to Secret Manager")
+				}
+				return
+			}
+			if err != nil || report.Migrated != 1 {
+				t.Fatalf("report = %+v, err = %v; want 1 migrated", report, err)
+			}
+			if got, _ := f.smValue("NIL_KEY"); got != plain {
+				t.Error("Secret Manager does not hold the decoded original")
+			}
+		})
+	}
 }

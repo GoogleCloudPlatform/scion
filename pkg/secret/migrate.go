@@ -94,11 +94,20 @@ func (r MigrationReport) incomplete() int { return r.DecodeFailed + r.Unverified
 // decodes and checks every row but writes nothing, and reports rather than
 // fails.
 //
+// A nil st is refused before anything is read or written; a nil logger
+// discards the log.
+//
 // Values never reach logger or the returned error: log lines and errors
 // name keys, scopes, row IDs and fixed reasons (with a gRPC code), never a
 // value or the text of a Secret Manager error.
 func MigrateLocalToGCP(ctx context.Context, st store.SecretStore, c *ValueCipher, gcp *GCPBackend, dryRun bool, logger io.Writer) (MigrationReport, error) {
 	report := MigrationReport{DryRun: dryRun}
+	if st == nil {
+		return report, errors.New("secret migration needs a secret store")
+	}
+	if logger == nil {
+		logger = io.Discard
+	}
 	if !c.configured() {
 		return report, fmt.Errorf("secret migration needs the local cipher to decode stored values: %w", ErrCipherNotConfigured)
 	}
