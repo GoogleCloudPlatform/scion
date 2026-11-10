@@ -58,6 +58,10 @@ type DecisionAnswer struct {
 	DelegationGrantID *string `json:"delegation_grant_id,omitempty"`
 	// IdempotencyKey holds the value of the "idempotency_key" field.
 	IdempotencyKey *string `json:"idempotency_key,omitempty"`
+	// BatchID holds the value of the "batch_id" field.
+	BatchID *uuid.UUID `json:"batch_id,omitempty"`
+	// MatchedDefault holds the value of the "matched_default" field.
+	MatchedDefault bool `json:"matched_default,omitempty"`
 	// CreatedAt holds the value of the "created_at" field.
 	CreatedAt    time.Time `json:"created_at,omitempty"`
 	selectValues sql.SelectValues
@@ -68,8 +72,10 @@ func (*DecisionAnswer) scanValues(columns []string) ([]any, error) {
 	values := make([]any, len(columns))
 	for i := range columns {
 		switch columns[i] {
-		case decisionanswer.FieldInterpretedByAgentID, decisionanswer.FieldSourceMessageID:
+		case decisionanswer.FieldInterpretedByAgentID, decisionanswer.FieldSourceMessageID, decisionanswer.FieldBatchID:
 			values[i] = &sql.NullScanner{S: new(uuid.UUID)}
+		case decisionanswer.FieldMatchedDefault:
+			values[i] = new(sql.NullBool)
 		case decisionanswer.FieldVersion:
 			values[i] = new(sql.NullInt64)
 		case decisionanswer.FieldKey, decisionanswer.FieldQuestionText, decisionanswer.FieldChoiceID, decisionanswer.FieldChoiceLabel, decisionanswer.FieldAnsweredByUserID, decisionanswer.FieldAnsweredByName, decisionanswer.FieldAnsweredByEmail, decisionanswer.FieldProvenance, decisionanswer.FieldOutcome, decisionanswer.FieldSurface, decisionanswer.FieldAuthorizingUserID, decisionanswer.FieldDelegationGrantID, decisionanswer.FieldIdempotencyKey:
@@ -225,6 +231,19 @@ func (_m *DecisionAnswer) assignValues(columns []string, values []any) error {
 				_m.IdempotencyKey = new(string)
 				*_m.IdempotencyKey = value.String
 			}
+		case decisionanswer.FieldBatchID:
+			if value, ok := values[i].(*sql.NullScanner); !ok {
+				return fmt.Errorf("unexpected type %T for field batch_id", values[i])
+			} else if value.Valid {
+				_m.BatchID = new(uuid.UUID)
+				*_m.BatchID = *value.S.(*uuid.UUID)
+			}
+		case decisionanswer.FieldMatchedDefault:
+			if value, ok := values[i].(*sql.NullBool); !ok {
+				return fmt.Errorf("unexpected type %T for field matched_default", values[i])
+			} else if value.Valid {
+				_m.MatchedDefault = value.Bool
+			}
 		case decisionanswer.FieldCreatedAt:
 			if value, ok := values[i].(*sql.NullTime); !ok {
 				return fmt.Errorf("unexpected type %T for field created_at", values[i])
@@ -338,6 +357,14 @@ func (_m *DecisionAnswer) String() string {
 		builder.WriteString("idempotency_key=")
 		builder.WriteString(*v)
 	}
+	builder.WriteString(", ")
+	if v := _m.BatchID; v != nil {
+		builder.WriteString("batch_id=")
+		builder.WriteString(fmt.Sprintf("%v", *v))
+	}
+	builder.WriteString(", ")
+	builder.WriteString("matched_default=")
+	builder.WriteString(fmt.Sprintf("%v", _m.MatchedDefault))
 	builder.WriteString(", ")
 	builder.WriteString("created_at=")
 	builder.WriteString(_m.CreatedAt.Format(time.ANSIC))

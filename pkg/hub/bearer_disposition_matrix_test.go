@@ -255,6 +255,10 @@ var bearerMatrixExclusions = map[liveInventoryKey]bearerMatrixExclusion{
 		Reason: "the route answers 404 while the web.chat_choices experiment is off, as in this fixture, so the session-only probe gets 404 before the credential check. The dedicated test enables the experiment and drives the route with a user access token and a visitor",
 		Pin:    "TestDecisionRoutes_TokenAndVisitorForbidden",
 	},
+	{OperationID: "chat.choiceprompt.answer", Method: "POST", Pattern: "/api/v1/choice-prompts/{messageId}/answers"}: {
+		Reason: "the route answers 404 while the web.chat_choices experiment is off, as in this fixture, so the session-only probe gets 404 before the credential check. The dedicated test enables the experiment and drives the route with a user access token, a federated user and a visitor",
+		Pin:    "TestChoiceSetAnswer_Authorization",
+	},
 	{OperationID: "chat.decision.answer", Method: "POST", Pattern: "/api/v1/decisions/{rowId}/answer"}: {
 		Reason: "the route answers 404 while the web.chat_choices experiment is off, as in this fixture, so the session-only probe gets 404 before the credential check. The dedicated test enables the experiment and drives the route with a user access token and a visitor",
 		Pin:    "TestDecisionRoutes_TokenAndVisitorForbidden",

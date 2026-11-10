@@ -109,6 +109,9 @@ func (_u *DecisionAnswerUpdate) sqlSave(ctx context.Context) (_node int, err err
 	if _u.mutation.IdempotencyKeyCleared() {
 		_spec.ClearField(decisionanswer.FieldIdempotencyKey, field.TypeString)
 	}
+	if _u.mutation.BatchIDCleared() {
+		_spec.ClearField(decisionanswer.FieldBatchID, field.TypeUUID)
+	}
 	if _node, err = sqlgraph.UpdateNodes(ctx, _u.driver, _spec); err != nil {
 		if _, ok := err.(*sqlgraph.NotFoundError); ok {
 			err = &NotFoundError{decisionanswer.Label}
@@ -240,6 +243,9 @@ func (_u *DecisionAnswerUpdateOne) sqlSave(ctx context.Context) (_node *Decision
 	}
 	if _u.mutation.IdempotencyKeyCleared() {
 		_spec.ClearField(decisionanswer.FieldIdempotencyKey, field.TypeString)
+	}
+	if _u.mutation.BatchIDCleared() {
+		_spec.ClearField(decisionanswer.FieldBatchID, field.TypeUUID)
 	}
 	_node = &DecisionAnswer{config: _u.config}
 	_spec.Assign = _node.assignValues
