@@ -434,7 +434,7 @@ func (e *rplEnv) rplDo(t *testing.T, method, url string, header map[string]strin
 	if err != nil {
 		t.Fatalf("%s %s: %v", method, url, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
 		t.Fatalf("%s %s: read body: %v", method, url, err)
@@ -759,7 +759,7 @@ func (e *rplEnv) rplLocalUser(t *testing.T, email string) rplUser {
 	if status != http.StatusCreated && status != http.StatusOK {
 		t.Fatalf("add %s to the project: status %d, want 201; body %s", email, status, body)
 	}
-	token, _, err := e.hub.GetUserTokenService().GenerateAccessToken(u.ID, u.Email, u.DisplayName, u.Role, hub.ClientTypeWeb)
+	token, _, err := e.hub.GetUserTokenService().MintAccessToken(u.ID, u.Email, u.DisplayName, u.Role, u.SessionGeneration, hub.ClientTypeWeb)
 	if err != nil {
 		t.Fatalf("user JWT for %s: %v", email, err)
 	}
@@ -807,7 +807,7 @@ func (e *rplEnv) rplSendAsync(ctx context.Context, replica int, token, text stri
 			done <- rplSendResult{err: err}
 			return
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		body, err := io.ReadAll(resp.Body)
 		done <- rplSendResult{status: resp.StatusCode, body: body, err: err}
 	}()

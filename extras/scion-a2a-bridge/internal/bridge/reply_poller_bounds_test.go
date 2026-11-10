@@ -411,7 +411,7 @@ func TestReplyPoller_StopWaitsForAppend(t *testing.T) {
 	if err != nil {
 		t.Fatalf("state store: %v", err)
 	}
-	t.Cleanup(func() { base.Close() })
+	t.Cleanup(func() { _ = base.Close() })
 	hold := &pushHoldStore{Store: base, entered: make(chan struct{}), release: make(chan struct{})}
 	cfg := &Config{Hub: HubConfig{User: "test-user"}, Timeouts: TimeoutConfig{SendMessage: 5 * time.Second}}
 	b := New(hold, nil, nil, cfg, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))

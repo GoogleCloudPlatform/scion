@@ -329,7 +329,7 @@ func newExecTestBridge(t *testing.T, f *fakeConvHub, mutate func(*Config)) (*Bri
 	if err != nil {
 		t.Fatalf("state store: %v", err)
 	}
-	t.Cleanup(func() { store.Close() })
+	t.Cleanup(func() { _ = store.Close() })
 	cfg := &Config{
 		Hub:      HubConfig{Endpoint: f.srv.URL, User: "admin@example.com", UserID: execTestAdminUserID},
 		Timeouts: TimeoutConfig{SendMessage: 4 * time.Second},
@@ -919,7 +919,7 @@ func TestAdminSubscriptionUsesAdminUserID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("state store: %v", err)
 	}
-	t.Cleanup(func() { store.Close() })
+	t.Cleanup(func() { _ = store.Close() })
 	cfg := &Config{Hub: HubConfig{User: "bridge-admin@example.com", UserID: "admin-user-id"}}
 	b := New(store, nil, nil, cfg, nil, slog.New(slog.NewTextHandler(&syncBuffer{}, nil)))
 	t.Cleanup(b.Shutdown)
