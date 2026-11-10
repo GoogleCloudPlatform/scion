@@ -100,3 +100,5 @@ users
   window: all steps pass, and the run without the operational settings
   install fails at step 3. CI on the pull request is the evidence for the
   full suite.
+  Superseded by `fed-p1-9-merge-forward-6cff673.md`, which records the
+  merge forward and the gate on the current base.

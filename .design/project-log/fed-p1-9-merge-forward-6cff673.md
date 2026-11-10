@@ -1,11 +1,11 @@
-# Federated project access, item 9: merge forward onto main 8ed09b1
+# Federated project access, item 9: merge forward onto main 6cff673
 
-Item 9 (`TestFederatedVisitorEndToEnd`, the end-to-end test of project visitors across two hubs) merged forward onto the new 10V head and main, and re-gated on that base. Earlier evidence for item 9, gathered on the old 10V head `db6de1e185e5`, is superseded by this entry.
+Item 9 (`TestFederatedVisitorEndToEnd`, the end-to-end test of project visitors across two hubs) merged forward onto the new 10V head and main, and re-gated on that base. The first merge was onto main `8ed09b1` (sections "Merge" to "Leftover-process check"). The second, onto 10V `aad2bdb2` and main `6cff6732`, is under "Merge onto item 10 on main" at the end. Earlier evidence for item 9, gathered on the old 10V head `db6de1e185e5`, is superseded by this entry.
 
 - Item 9 head before the merge: `2f32e457d5628a2e59656a6b78188b5ca4e0bc5d`.
 - 10V merged: `ecec559cc432b7bc056d7be770f1c62e017f0077` (on main `9e87b08984a6`, containing item 10 `2a335a1e`).
 - Main merged: `8ed09b1142ec62d349b2b2a522fc6fc1cb77ae7e`.
-- Merged head: see the branch tip. This entry is the last commit and changes no code. The gate ran on `caec903a1a4f` (window 1) and `7d08c54507d5` (window 2), as listed under "Gate".
+- Merged head: see the branch tip. This entry is the last commit and changes no code. The first gate ran on `caec903a1a4f` (window 1) and `7d08c54507d5` (window 2), as listed under "Gate". The gate on the current base ran on `b8b1ae6a052f` (window 3), as listed under "Merge onto item 10 on main".
 
 ## Merge
 
@@ -80,3 +80,32 @@ No sample reported "could not check". A search of item 9's test and its helpers 
 
 - No hub shards: the diff against main stays under `extras/scion-a2a-bridge/` and `.design/project-log/`.
 - `make ci` was not run. The diff touches no root-module code, and the root lint and tests do not cover the bridge module.
+
+## Merge onto item 10 on main
+
+Item 10 landed on main as `6cff6732222a` (upstream PR 4746, squashed), after upstream PR 4743. 10V was merged onto that main: `origin/scion/mmr-fed-p1-10v` is now `aad2bdb235d23e628d248becc234b85f50426fc7`, with parents `ecec559c` and main `6cff6732`.
+
+- Merged into the item 9 head `ce5226aa4a14` with `git merge --no-edit`: 10V `aad2bdb2`. No conflicts. Main was at `6cff6732222a02aba081583e17b2ef9db06e33f3`, already contained through 10V, so no separate main merge was needed. Merged head `b8b1ae6a052f`.
+- `git diff origin/scion/mmr-fed-p1-10v...HEAD` holds item 9's two files and this entry only.
+- `git diff origin/main...HEAD` touches only `extras/scion-a2a-bridge/` and `.design/project-log/`. Besides item 9's files and logs it still holds 10V's bridge files (`README.md`, `executor.go`, `federated_user.go`, `reply_poller.go`, `reply_poller_visitor.go` and their tests), because 10V is not on main yet.
+- No test change was needed.
+- Mutated production sites: the merge changed none of them. Of the eight files the mutants touch, only `pkg/hub/handlers_chat_v2.go` changed (upstream PR 4743 adds two fields to `chatHistoryResponse`, far from the DM participant check). All 11 mutant patches still apply unchanged. The mutants were not re-run.
+
+### Gate on main 6cff673
+
+Window 3, on `b8b1ae6a052f`, with the same private caches, PostgreSQL setup and leak check as above. PostgreSQL was stopped at the end of the window.
+
+| Check | Command | Result |
+|---|---|---|
+| e2e, repeated, in the leak check | `go test -count=3 -v -run '^TestFederatedVisitorEndToEnd$' ./integration/` | pass, 3 of 3 |
+| go vet | `go vet ./integration/ ./internal/bridge/` | clean |
+| gofmt | `gofmt -l .` | no files |
+| golangci-lint | `GOGC=40 golangci-lint run --new-from-rev=origin/main --concurrency=1 ./internal/bridge/... ./integration/...` | 0 issues |
+| A2A bridge module with PostgreSQL, in the leak check | `go test -count=1 -p 1 -v ./...` | pass: 982 PASS lines (562 top-level tests), 0 fail, 1 skip (`TestPostgresMigrationHelperProcess`, "migration helper only"). cmd, integration, internal/bridge and internal/state ok. `TestFederatedVisitorEndToEnd` passed in this run |
+
+| Run | Samples during | Max members during | Members after |
+|---|---|---|---|
+| `TestFederatedVisitorEndToEnd -count=3` | 33 | 3 | 0 |
+| A2A bridge module with PostgreSQL | 47 | 7 | 0 |
+
+No sample reported "could not check".
