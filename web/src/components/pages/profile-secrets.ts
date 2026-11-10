@@ -62,7 +62,7 @@ export class ScionPageProfileSecrets extends LitElement {
           <h1>Secrets</h1>
           <p>
             Manage encrypted secrets for your agents. Values are write-only and cannot be retrieved
-            after saving.
+            after saving. Secrets your agents save wait for your approval before they are delivered.
           </p>
         </div>
       </div>
