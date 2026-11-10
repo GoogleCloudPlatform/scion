@@ -28,6 +28,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -514,6 +515,10 @@ func (s *Server) deliverChoiceResponse(ctx context.Context, asker *store.Agent, 
 			messages.MetadataChoiceProvenance: a.Provenance,
 		},
 	}
+	// The metadata is hub-built (the four choice keys); strip the reserved
+	// keys anyway, as every dispatch site does, so a later field cannot
+	// carry one through.
+	sm.Metadata = messaging.StripReservedMetadata(sm.Metadata)
 	dctx, cancel := context.WithTimeout(withDispatchMessageID(context.WithoutCancel(ctx), m.ID), 30*time.Second)
 	defer cancel()
 	if err := dispatchWithBrokerRetry(dctx, s.recordLog(), dispatcher, asker, line, false, sm); err != nil {
