@@ -261,7 +261,8 @@ var resolvedGuardMarshalerExceptions = map[reflect.Type]bool{}
 //
 // MEASURED, NOT ASSUMED — this replaced a top-level-only check that was blind to
 // four real doors. Planting a pointer-receiver MarshalJSON on hubclient.BucketConfig
-// (reached at .Project.Bucket, depth 2) erased "provider" and "name" — both of
+// (then reached at .Project.Bucket, depth 2; the field and the type were removed
+// with ptone/scion#5360, and ctlDoorA keeps the shape) erased "provider" and "name" — both of
 // which are NOT omitempty, so mandatory keys set to real values vanished from the
 // wire — while every package in ./pkg/... stayed green under BOTH tag modes.
 // hubclient.ProjectResourceList at .Project.DefaultResources.Requests is three
@@ -269,8 +270,8 @@ var resolvedGuardMarshalerExceptions = map[reflect.Type]bool{}
 // is too.
 //
 // NO ADDRESSABILITY MITIGATION EXISTS ON THE CURRENT TYPES, and that is a fact
-// about these fields rather than about the class. .Project, .Bucket,
-// .DefaultResources, .Requests and .Limits are every one of them POINTER fields,
+// about these fields rather than about the class. .Project, .DefaultResources,
+// .Requests and .Limits are every one of them POINTER fields,
 // and a pointer field is reached through a pointer whatever the parent is, so the
 // marshaller fires on json.Marshal(T{}) exactly as it does on json.Marshal(&T{}).
 // Add a VALUE-typed struct field tomorrow and the mitigation returns along with
@@ -341,9 +342,10 @@ func walkMarshalerBan(t *testing.T, v any, judgeOutOfModule bool) {
 		}
 		if typ.Kind() != reflect.Struct {
 			// Interfaces land here. A dynamic type is not knowable statically,
-			// so .Project.Runtimes, .Harnesses and .Profiles are a PERMANENT
+			// so an interface-typed field reachable from a root is a PERMANENT
 			// residual of this approach, not an oversight. No reflective guard
-			// closes them.
+			// closes it. (hubclient.ProjectSettings had three, Runtimes,
+			// Harnesses and Profiles, until ptone/scion#5360 removed them.)
 			return
 		}
 		if pkg := typ.PkgPath(); pkg != "" && !strings.HasPrefix(pkg, resolvedGuardModulePrefix) && !judgeOutOfModule {
@@ -380,8 +382,8 @@ func walkMarshalerBan(t *testing.T, v any, judgeOutOfModule bool) {
 					"constructed value — stops being a bound on what real responses "+
 					"contain. This was measured, not theorised: a marshaller that emitted "+
 					"\"winner\" only for populated entries put that field on the wire with "+
-					"every guard in this file green, and one planted at depth 2 on "+
-					"hubclient.BucketConfig erased two NON-omitempty keys with all 54 "+
+					"every guard in this file green, and one planted at depth 2 on the "+
+					"since-removed hubclient.BucketConfig erased two NON-omitempty keys with all 54 "+
 					"packages green.\n"+
 					"If you need a custom marshaller here, this test needs rethinking "+
 					"first. If the type is genuinely allowed one, add it to "+
@@ -1424,7 +1426,10 @@ type ctlEmbeddedPtr struct {
 // ctlDoorA / ctlDoorB mirror the two doors that were measured OPEN against the
 // real types before the marshaller ban recursed: hubclient.BucketConfig reached
 // at .Project.Bucket (depth 2) and hubclient.ProjectResourceList reached at
-// .Project.DefaultResources.Requests (depth 3).
+// .Project.DefaultResources.Requests (depth 3). The Bucket field and
+// BucketConfig have since been removed (ptone/scion#5360); ctlDoorA keeps the
+// depth-2 shape as a control of the instrument, which must still catch a
+// marshaller two hops out.
 //
 // They are shape copies rather than the real types because the real ones carry
 // no marshaller and must not be given one to satisfy a test. The depths are the
@@ -1608,8 +1613,8 @@ func TestResolvedSettingsGuard_InstrumentControls(t *testing.T) {
 		{"pointer-receiver MarshalJSON", assertNoCustomMarshaler, marshalerCtrlPointer{}, true},
 
 		// REJECT rows: intervener 3 AT DEPTH. These are the two doors that were
-		// measured OPEN on the real types — BucketConfig at depth 2 and
-		// ProjectResourceList at depth 3 — with every package in ./pkg/... green
+		// measured OPEN on the real types — BucketConfig (since removed,
+		// ptone/scion#5360) at depth 2 and ProjectResourceList at depth 3 — with every package in ./pkg/... green
 		// under both tag modes. A top-level-only ban passes both of these rows,
 		// which is exactly why the acceptance criterion for the recursion was
 		// these two going red rather than the suite staying green.

@@ -222,6 +222,26 @@ func GCPServiceAccountDomain() Domain[store.GCPServiceAccount] {
 				},
 				WantCount: 1,
 			},
+			{
+				Name: "ByEmailFold",
+				Seed: func(t *testing.T, ctx context.Context, s store.Store) {
+					require.NoError(t, s.CreateGCPServiceAccount(ctx, &store.GCPServiceAccount{
+						ID: uuid.NewString(), Scope: "project", ScopeID: uuid.NewString(),
+						Email: "Fold-Case@p.iam.gserviceaccount.com", ProjectID: uuid.NewString(), CreatedBy: "t",
+					}))
+					require.NoError(t, s.CreateGCPServiceAccount(ctx, &store.GCPServiceAccount{
+						ID: uuid.NewString(), Scope: "project", ScopeID: uuid.NewString(),
+						Email: "other-case@p.iam.gserviceaccount.com", ProjectID: uuid.NewString(), CreatedBy: "t",
+					}))
+				},
+				List: func(ctx context.Context, s store.Store) (*store.ListResult[store.GCPServiceAccount], error) {
+					return listFrom(s.ListGCPServiceAccounts(ctx, store.GCPServiceAccountFilter{
+						EmailFold: "fold-case@P.iam.gserviceaccount.com",
+					}))
+				},
+				// Only the account whose email differs in letter case.
+				WantCount: 1,
+			},
 			// The next three pin IncludeHubScoped as one query with OR
 			// semantics, at the store boundary where every implementation has
 			// to honour it. Each seeds the same three accounts -- one in the

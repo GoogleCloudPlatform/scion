@@ -19,6 +19,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
@@ -42,8 +43,8 @@ func mergeTestStoredSettings() map[string]string {
 		DefaultThinkingLevel:   &thinking,
 		TelemetryEnabled:       &yes,
 		AutoExposePortsEnabled: &yes,
-		DefaultMaxTurns:        10,
-		DefaultMaxModelCalls:   20,
+		DefaultMaxTurns:        api.IntPtr(10),
+		DefaultMaxModelCalls:   api.IntPtr(20),
 		DefaultMaxDuration:     "1h",
 		DefaultResources: &hubclient.ProjectResourceSpec{
 			Requests: &hubclient.ProjectResourceList{CPU: "500m", Memory: "1Gi"},
@@ -65,8 +66,6 @@ func mergeTestStoredSettings() map[string]string {
 type putMergeField struct {
 	// name is the JSON field name.
 	name string
-	// ignored marks a field the endpoint accepts but does not store.
-	ignored bool
 	// setJSON is a new, non-empty value and setWant the annotations it writes.
 	setJSON string
 	setWant map[string]string
@@ -99,8 +98,9 @@ var putMergeFields = []putMergeField{
 	{name: "defaultModel", setJSON: `"model-b"`, setWant: map[string]string{projectSettingDefaultModel: "model-b"}, clearJSON: `""`, keys: []string{projectSettingDefaultModel}},
 	{
 		name: projectSettingsFieldThinkingLevel, setJSON: `70`, setWant: map[string]string{projectSettingDefaultThinkingLevel: "70"},
+		// No zero row: the handler refuses 0 before the merge result is
+		// stored (ptone/scion#4052).
 		clearJSON: `null`, keys: []string{projectSettingDefaultThinkingLevel}, nullClears: true,
-		zeroJSON: `0`, zeroWant: map[string]string{projectSettingDefaultThinkingLevel: "0"},
 	},
 	{
 		name: projectSettingsFieldTelemetryEnabled, setJSON: `false`, setWant: map[string]string{projectSettingTelemetryEnabled: "false"},
@@ -112,12 +112,18 @@ var putMergeFields = []putMergeField{
 		clearJSON: `null`, keys: []string{projectSettingAutoExposePortsEnabled}, nullClears: true,
 		zeroJSON: `false`, zeroWant: map[string]string{projectSettingAutoExposePortsEnabled: "false"},
 	},
-	{name: "bucket", ignored: true, setJSON: `{"provider":"gcs","bucket":"b"}`, clearJSON: `{}`},
-	{name: "runtimes", ignored: true, setJSON: `{"docker":{}}`, clearJSON: `{}`},
-	{name: "harnesses", ignored: true, setJSON: `{"claude":{}}`, clearJSON: `{}`},
-	{name: "profiles", ignored: true, setJSON: `{"p":{}}`, clearJSON: `{}`},
-	{name: "defaultMaxTurns", setJSON: `11`, setWant: map[string]string{projectSettingDefaultMaxTurns: "11"}, clearJSON: `0`, keys: []string{projectSettingDefaultMaxTurns}},
-	{name: "defaultMaxModelCalls", setJSON: `21`, setWant: map[string]string{projectSettingDefaultMaxModelCalls: "21"}, clearJSON: `0`, keys: []string{projectSettingDefaultMaxModelCalls}},
+	// The count limits are tri-state (ptone/scion#3925): null clears and 0
+	// is Unlimited, stored as "0".
+	{
+		name: projectSettingsFieldMaxTurns, setJSON: `11`, setWant: map[string]string{projectSettingDefaultMaxTurns: "11"},
+		clearJSON: `null`, keys: []string{projectSettingDefaultMaxTurns}, nullClears: true,
+		zeroJSON: `0`, zeroWant: map[string]string{projectSettingDefaultMaxTurns: "0"},
+	},
+	{
+		name: projectSettingsFieldMaxModelCalls, setJSON: `21`, setWant: map[string]string{projectSettingDefaultMaxModelCalls: "21"},
+		clearJSON: `null`, keys: []string{projectSettingDefaultMaxModelCalls}, nullClears: true,
+		zeroJSON: `0`, zeroWant: map[string]string{projectSettingDefaultMaxModelCalls: "0"},
+	},
 	{name: "defaultMaxDuration", setJSON: `"2h"`, setWant: map[string]string{projectSettingDefaultMaxDuration: "2h"}, clearJSON: `""`, keys: []string{projectSettingDefaultMaxDuration}},
 	{
 		// Object fields are replaced whole, not merged key by key.

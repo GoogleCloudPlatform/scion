@@ -44,6 +44,7 @@ type AgentLaunchReport struct {
 	Message    string           `json:"message,omitempty"`
 	ErrorCode  string           `json:"errorCode,omitempty"`
 	Cause      string           `json:"cause,omitempty"` // failed runtime_error only: an api.BrokerRuntimeCause code
+	RunID      string           `json:"runId,omitempty"` // failed only: the run the launch started (compared, never stored)
 	Agent      *RemoteAgentInfo `json:"agent,omitempty"` // succeeded only
 	At         time.Time        `json:"at,omitzero"`
 }
@@ -151,6 +152,7 @@ func (s *Server) handleAgentLaunchReport(w http.ResponseWriter, r *http.Request,
 		Message:    sanitizeFailureReason(req.Message),
 		ErrorCode:  sanitizeFailureReason(req.ErrorCode),
 		Cause:      launchReportCause(req),
+		RunID:      req.RunID,
 	}
 	if req.Cause != "" && sr.Cause == "" {
 		// The raw cause is untrusted broker text, so only its length is
@@ -188,22 +190,45 @@ func (s *Server) handleAgentLaunchReport(w http.ResponseWriter, r *http.Request,
 
 	// A "failed" report the store actually applied (HTTPStatus==0, not a
 	// conflict/stale-launch rejection, and Result==Applied rather than
-	// Completed) means this launch ended in a broker-confirmed failure before
-	// ever reaching running — see ApplyLaunchReportPreRunning/
-	// applyLaunchReportActive's Failed branches and the timed_out/lost+
-	// phase=error refine case in entadapter/launch_report.go. Revoke the
-	// credential the Hub minted for this create (ptone/scion#1956). This
-	// condition is deliberately narrower than "State==failed": a stray
+	// Completed) means this launch ended in a broker-confirmed failure — see
+	// applyLaunchReportPreRunning/applyLaunchReportActive's Failed branches,
+	// the timed_out/lost+phase=error refine case, and the failed report
+	// after running_observed in entadapter/launch_report.go. Revoke the
+	// credential the Hub minted for this create (ptone/scion#1956). The
+	// running_observed case applies only when the report names the agent's
+	// current run, the agent is in running or error with no live activity,
+	// no start claim for another launch, delete or reincarnation holds it,
+	// and the code is not broker_restarted (ptone/scion#5368). This
+	// condition is deliberately narrower than "State==failed": any other
 	// failed report once the agent is already Running returns
-	// Result=Completed (the agent did start; nothing to revoke), and a
-	// failed report arriving during a stop/suspend returns a Conflict
+	// Result=Completed (the agent may have started; nothing to revoke), and
+	// a failed report arriving during a stop/suspend returns a Conflict
 	// HTTPStatus — in both of those cases the agent may still be relying on
-	// its current credential.
+	// its current credential. The launch kind decides the rule
+	// (launchFailureRevokeReason).
+	// settled: the run-intent hook settled this report's start launch and
+	// published the settled row (settleFailedProvisionedStart publishes), so
+	// the handler's own publish of the pre-settle row is skipped.
+	settled := false
 	if sr.State == store.LaunchReportStateFailed && answer.HTTPStatus == 0 && answer.Result == store.LaunchReportResultApplied {
-		revokeAgentCredentialsBestEffort(ctx, s.store, agentID, agentCredentialRevokeReasonCreateFailed)
+		if reason := launchFailureRevokeReason(&updated); reason != "" {
+			revokeAgentCredentialsBestEffort(ctx, s.store, agentID, reason)
+		}
+		// A failed start of a provisioned agent returns it to rest, as a
+		// synchronous failed start does (ptone/scion#4669, design D-c "Run
+		// intent"). Only on the report that ended the launch (end reason
+		// failed): a failed report that refines a launch the reaper had
+		// already ended (timed_out/lost, settled then) must not settle
+		// again, since a newer start may hold the intent now; it only
+		// restores the message shape.
+		if updated.LaunchEndReason == store.LaunchEndReasonFailed {
+			settled = s.settleFailedStartLaunch(ctx, &updated)
+		} else {
+			s.reapplyStartLaunchFailureMessage(ctx, &updated)
+		}
 	}
 
-	// An applied succeeded report settles the run the launch started
+	// A succeeded report settles the run the launch started
 	// (ptone/scion#3176), as a synchronous dispatch that lands does
 	// (adoptBrokerRunID): the broker's Start removed every earlier entry of
 	// the name that was not running, so the previous runs are cleared. A
@@ -211,12 +236,41 @@ func (s *Server) handleAgentLaunchReport(w http.ResponseWriter, r *http.Request,
 	// run, which the hub then adopts (ptone/scion#2965), so a later delete
 	// names the run the runtime holds. A broker that reports no run ID gets
 	// no clear; a later delete then repeats the previous runs as run-scoped
-	// 404s. Only an applied report settles: a completed answer (a repeated
-	// terminal report, or the hub had already resolved the launch) is
-	// deliberately not settled; the conservative cost is extra 404s on a
-	// later delete.
-	if sr.State == store.LaunchReportStateSucceeded && answer.HTTPStatus == 0 && answer.Result == store.LaunchReportResultApplied {
-		s.settleLaunchedRun(ctx, &updated, req.Agent)
+	// 404s.
+	//
+	// An applied report always settles. A completed answer (the launch had
+	// already ended, for example when the agent was observed running before
+	// this report, or this is a resend after a settle that failed or never
+	// ran) settles only while the row still holds the run this launch
+	// dispatched (launch_run_id), and SettleLaunchedRun re-checks that
+	// fence in its write (WP1 slice 3b, ptone/scion#5927). A completed
+	// report for a launch whose run is unknown, or after a newer run, is
+	// not settled.
+	if sr.State == store.LaunchReportStateSucceeded && answer.HTTPStatus == 0 &&
+		(answer.Result == store.LaunchReportResultApplied || completedReportSettles(answer, &updated)) {
+		s.settleLaunchedRun(ctx, &updated, req.Agent, launchSettleReport{Result: answer.Result, LaunchID: sr.LaunchID, BrokerID: brokerID})
+	}
+
+	// The broker's effective configuration of the run (WP1 slice 3
+	// addendum v12 section 3), after the settle: for every succeeded
+	// report the store answered without an error, applied or completed,
+	// so a resent report recovers an echo a crash or failure lost (the
+	// writer is fenced and idempotent).
+	if sr.State == store.LaunchReportStateSucceeded && answer.HTTPStatus == 0 &&
+		(answer.Result == store.LaunchReportResultApplied || answer.Result == store.LaunchReportResultCompleted) {
+		s.recordLaunchReportEcho(ctx, agentID, brokerID, req.LaunchID, req.Agent)
+	}
+
+	// A write that changed the row (applied, or a 409 stale_launch that
+	// still ended the launch) may have released the launch's claim (a
+	// create, start or restart claim) with the agent already out of a
+	// counted phase: an exit observed during the launch skipped its release
+	// while the claim was held. Free the slot now if the agent holds no
+	// capacity and no start-kind claim; a no-op otherwise (a running agent,
+	// or a write that released quota itself).
+	if answer.Changed {
+		s.releaseSlotIfIdle(ctx, agentID)
+		s.releaseProjectSlotIfIdle(ctx, agentID)
 	}
 
 	if answer.HTTPStatus != 0 {
@@ -231,35 +285,62 @@ func (s *Server) handleAgentLaunchReport(w http.ResponseWriter, r *http.Request,
 
 	// design §3.7 step 7: publish after every applied change to step, phase,
 	// message or launch state. Keepalive-only writes (Changed == false) are
-	// not published.
-	if answer.Changed {
+	// not published. A settled start launch was published by the settle,
+	// with its settled intent and message.
+	if answer.Changed && !settled {
 		s.events.PublishAgentStatus(ctx, &updated)
 	}
 }
 
+// completedReportSettles reports whether a succeeded report answered
+// Completed may settle the launch's run: the row still holds the run the
+// launch dispatched (a known launch_run_id). It is only a pre-filter; the
+// store's SettleLaunchedRun fence is the authority.
+func completedReportSettles(answer store.LaunchReportAnswer, row *store.Agent) bool {
+	return answer.Result == store.LaunchReportResultCompleted &&
+		row.LaunchRunID != "" && row.RunID == row.LaunchRunID
+}
+
+// launchSettleReport is what settleLaunchedRun needs of the report: the
+// store's answer, the report's launch, and the authenticated reporting
+// broker (never the row's broker).
+type launchSettleReport struct {
+	Result   string
+	LaunchID string
+	BrokerID string
+}
+
 // settleLaunchedRun settles the run of a launch whose succeeded report the
-// store applied (see the caller). row is the agent as that report's
+// store answered (see the caller). row is the agent as that report's
 // transaction left it, so row.RunID is the run the hub recorded for the
-// launch when the report applied. The write is one guarded swap from
-// row.RunID to the run the broker reports (store.AdoptAgentRunID), which
-// also clears the previous runs:
+// launch when the report was answered. The write is one guarded swap from
+// row.RunID to the run the broker reports, which also clears the previous
+// runs:
 //   - the same run: a same-value swap that only clears the previous runs;
 //   - another run: the broker kept a running entry of the name and reports
 //     its run (agent.AgentManager.Start returns a running entry when the
 //     start has no task), and the hub adopts it (ptone/scion#2965).
 //
+// An applied report swaps with store.AdoptAgentRunID. A completed report
+// swaps with store.SettleLaunchedRun, which also requires the row's
+// launch, launch_run_id, broker (the authenticated reporting broker,
+// rep.BrokerID) and generation to be unchanged. Both are observed as a
+// run_adopt with adoption_source cas: the Applied path through the
+// context annotation, set only on the context passed to that call.
+//
 // The swap is checked in the same statement as the write. It never
-// overwrites a run recorded after the report applied (keyed on row.RunID,
-// and on row.RunIDUpdatedAt, so a run that changed and changed back is not
-// matched either), and it writes nothing while the row is soft-deleted or a
-// delete holds it, so a delete's claim snapshot never misses the settled
-// run. A row with no RunIDUpdatedAt (its run has not changed since the
-// column was added, so no dispatch recorded this launch's run) and a report
-// with no run ID change nothing. Best-effort: a failed write is logged and
-// leaves the row as it was, which costs a later delete only a run-scoped
-// refusal or extra 404s. On a swap, row's RunID and PreviousRunIDs are
-// updated to match.
-func (s *Server) settleLaunchedRun(ctx context.Context, row *store.Agent, info *RemoteAgentInfo) {
+// overwrites a run recorded after the report was answered (keyed on
+// row.RunID, and on row.RunIDUpdatedAt, so a run that changed and changed
+// back is not matched either), and it writes nothing while the row is
+// soft-deleted or a delete holds it, so a delete's claim snapshot never
+// misses the settled run. A row with no RunIDUpdatedAt (its run has not
+// changed since the column was added, so no dispatch recorded this
+// launch's run) and a report with no run ID change nothing. Best-effort: a
+// failed write is logged and leaves the row as it was, which costs a later
+// delete only a run-scoped refusal or extra 404s, and a completed resend of
+// the report can settle it later. On a swap, row's RunID and
+// PreviousRunIDs are updated to match.
+func (s *Server) settleLaunchedRun(ctx context.Context, row *store.Agent, info *RemoteAgentInfo, rep launchSettleReport) {
 	if info == nil || info.RunID == "" {
 		return
 	}
@@ -268,15 +349,29 @@ func (s *Server) settleLaunchedRun(ctx context.Context, row *store.Agent, info *
 			"agent_id", row.ID, "run_id", row.RunID, "broker_run_id", info.RunID)
 		return
 	}
-	swapped, err := s.store.AdoptAgentRunID(ctx, row.ID, row.RunID, info.RunID, *row.RunIDUpdatedAt)
+	var swapped bool
+	var err error
+	if rep.Result == store.LaunchReportResultCompleted {
+		swapped, err = s.store.SettleLaunchedRun(ctx, row.ID, store.LaunchSettleFence{
+			LaunchID:       rep.LaunchID,
+			FromRunID:      row.LaunchRunID,
+			ToRunID:        info.RunID,
+			BrokerID:       rep.BrokerID,
+			Generation:     row.Generation,
+			UnchangedSince: *row.RunIDUpdatedAt,
+		})
+	} else {
+		swapped, err = s.store.AdoptAgentRunID(store.WithRunAdoptionSource(ctx, store.AdoptionSourceCAS),
+			row.ID, row.RunID, info.RunID, *row.RunIDUpdatedAt)
+	}
 	if err != nil {
 		s.agentLifecycleLog.Warn("Launch report: failed to settle the launched run",
-			"agent_id", row.ID, "run_id", row.RunID, "broker_run_id", info.RunID, "error", err)
+			"agent_id", row.ID, "run_id", row.RunID, "broker_run_id", info.RunID, "result", rep.Result, "error", err)
 		return
 	}
 	if !swapped {
-		s.agentLifecycleLog.Debug("Launch report: another run is recorded or a delete holds the agent; not settling the launched run",
-			"agent_id", row.ID, "run_id", row.RunID, "broker_run_id", info.RunID)
+		s.agentLifecycleLog.Debug("Launch report: another run, launch or broker is recorded, or a delete holds the agent; not settling the launched run",
+			"agent_id", row.ID, "run_id", row.RunID, "broker_run_id", info.RunID, "result", rep.Result)
 		return
 	}
 	minted := row.RunID
@@ -284,6 +379,35 @@ func (s *Server) settleLaunchedRun(ctx context.Context, row *store.Agent, info *
 	row.PreviousRunIDs = nil
 	if info.RunID != minted {
 		s.agentLifecycleLog.Info("Launch report: adopted the broker's run ID",
-			"agent_id", row.ID, "agent", row.Slug, "minted_run_id", minted, "run_id", info.RunID)
+			"agent_id", row.ID, "agent", row.Slug, "minted_run_id", minted, "run_id", info.RunID, "result", rep.Result)
+	}
+}
+
+// launchFailureRevokeReason is the credential revoke an applied failed
+// launch report triggers, by launch kind (ptone/scion#4669, design D-c L6),
+// or "" for none:
+//   - a create (or a row from before launch kinds) revokes create_failed,
+//     as before;
+//   - a start revokes start_failed only when the hub decided so when it
+//     began the launch (LaunchRevokeOnFail: the same rule a synchronous
+//     DispatchAgentStart failure applies);
+//   - a restart never revokes: its stop leg tolerates a "not running" stop,
+//     so the hub cannot be sure no old container still holds the
+//     credential. This differs on purpose from a synchronous restart of a
+//     stopped agent, which can revoke through DispatchAgentStart.
+//
+// Start and restart launches exist once asynchronous start is on
+// (hub.async_agent_start).
+func launchFailureRevokeReason(a *store.Agent) string {
+	switch a.LaunchKind {
+	case store.LaunchKindStart:
+		if a.LaunchRevokeOnFail {
+			return agentCredentialRevokeReasonStartFailed
+		}
+		return ""
+	case store.LaunchKindRestart:
+		return ""
+	default:
+		return agentCredentialRevokeReasonCreateFailed
 	}
 }

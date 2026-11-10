@@ -50,6 +50,12 @@ func TestCreateAgent_ProjectMemberCannotAutoLinkBroker(t *testing.T) {
 // gate must not break the legitimate flow it was modeled on.
 func TestCreateAgent_OwnerAutoLinksBrokerWithDefault(t *testing.T) {
 	f := brokerLinkAuthzSetup(t)
+	// The auto-linked broker is remote and has no checkout of the project,
+	// so the project is a git project (clone-per-agent, the default): a
+	// hub-managed project's workspace cannot reach such a broker and that
+	// create is refused (ptone/scion#5813).
+	f.proj.GitRemote = "github.com/test/link-authz"
+	require.NoError(t, f.store.UpdateProject(context.Background(), f.proj))
 
 	rec := createAgentAsOwner(t, f.bypassAgentsFixture, CreateAgentRequest{
 		Name:            "owner-named-broker-agent",
@@ -89,6 +95,7 @@ func TestCreateAgent_MemberNamingExistingProviderUnaffected(t *testing.T) {
 		ProjectID:  f.proj.ID,
 		BrokerID:   f.broker.ID,
 		BrokerName: f.broker.Name,
+		LocalPath:  fixtureProviderCheckout(t),
 		Status:     store.BrokerStatusOnline,
 	}))
 

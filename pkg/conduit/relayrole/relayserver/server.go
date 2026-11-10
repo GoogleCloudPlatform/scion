@@ -24,6 +24,8 @@ package relayserver
 
 import (
 	"context"
+	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -32,11 +34,15 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/gorilla/websocket"
+	"go.opentelemetry.io/otel/metric"
+
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/clock"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relayrole"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
 )
 
@@ -45,6 +51,11 @@ import (
 // deletion and port changes, project deletion, and broker credential
 // changes. A hub test keeps this list equal to the hub's own.
 var RevocationSubjects = []string{"conduit.authz.changed", "agent.*.deleted", "agent.*.ports", "project.*.deleted", "conduit.broker.changed"}
+
+// GrantKeysChangedSubject is the hub event published after a grant key
+// rotation or revocation is stored. The relay sends GrantKeysChanged to its
+// stream_renewal.v2 target sessions on it, so they fetch keys at once.
+const GrantKeysChangedSubject = "conduit.grant_keys.changed"
 
 // SettingsUpdatedSubject is the hub event published after a settings
 // change. The relay re-reads hub.conduit on it, besides its periodic read.
@@ -83,15 +94,34 @@ type Config struct {
 	// PublicListener, when set, is the public listener, already bound
 	// (PublicListen is then unused).
 	PublicListener net.Listener
+	// TrustedProxies is server.trusted_proxies, parsed
+	// (config.ParseTrustedProxies): the TLS-terminating proxies whose
+	// forwarded protocol the public listener trusts. Empty (the default):
+	// none, so only a TLS or loopback arrival is admitted.
+	TrustedProxies []*net.IPNet
 	// Advertise returns the internal endpoint other nodes reach this relay
 	// at, given the internal listener's bound address (nil:
-	// http://<bound address>).
+	// https://<bound address> with InternalTLS, else http://<bound
+	// address>). The endpoint must pass config.CheckRelayTransport.
 	Advertise func(bound net.Addr) string
+	// InternalTLS, when set, is the TLS configuration the internal
+	// listener serves (relay.NewHopServerTLS). Without it InternalListen
+	// must be a loopback address (config.CheckRelayInternalListen).
+	InternalTLS *tls.Config
 	// PeerAuth signs this relay's calls to the hub and verifies relay-peer
 	// calls to it. Required.
 	PeerAuth relay.PeerAuth
 	// HTTPClient makes the hub and relay-peer calls (nil: default).
 	HTTPClient *http.Client
+	// WSDialer dials stream hops to other relays (nil: gorilla defaults,
+	// or relay.NewHopWSDialer(HopTLS)).
+	WSDialer *websocket.Dialer
+	// HopTLS is the TLS client configuration of the hub and relay-peer
+	// calls (relay.NewHopClientTLS: the operator CA and server name; nil:
+	// the system roots). It applies to the clients HTTPClient and WSDialer
+	// leave nil, which otherwise keep their defaults. Verification is
+	// never skipped.
+	HopTLS *tls.Config
 	// Registry is the conduit registry store. Required.
 	Registry registry.Store
 	// Experiment reads hub.conduit. Required.
@@ -108,9 +138,17 @@ type Config struct {
 	RecheckInterval time.Duration
 	ReconnectWindow time.Duration
 	LifetimeCap     time.Duration
+	// JitterLifetimeCap is relay.Config.JitterLifetimeCap: the per-session
+	// jitter of LifetimeCap (nil: none; ptone/scion#5245).
+	JitterLifetimeCap func(time.Duration) time.Duration
 	// RequireSelfCheck makes the relay probe its own internal endpoint at
 	// start (HA deployments).
 	RequireSelfCheck bool
+	// Singleton runs the relay as a non-HA singleton (relay.Config.Singleton).
+	Singleton bool
+	// MeterProvider, when set, exports the relay's metrics (metrics.go);
+	// nil: none.
+	MeterProvider metric.MeterProvider
 	// ExperimentPollPeriod is how often hub.conduit is re-read
 	// (DefaultExperimentPollPeriod).
 	ExperimentPollPeriod time.Duration
@@ -143,8 +181,19 @@ func (c *Config) validate() error {
 	case c.Experiment == nil:
 		return errors.New("conduit relay: no hub.conduit reader")
 	}
+	// The relay internal hop rule: the hub internal API and the internal
+	// listener carry user and agent credentials.
+	if err := config.CheckRelayTransport(c.HubInternalURL); err != nil {
+		return fmt.Errorf("server.relay.hub_internal_url: %w", err)
+	}
+	if err := config.CheckRelayInternalListen("server.hub.conduit.internal_listen", c.InternalListen, c.InternalTLS != nil); err != nil {
+		return err
+	}
 	if c.ExperimentPollPeriod <= 0 {
 		c.ExperimentPollPeriod = DefaultExperimentPollPeriod
+	}
+	if c.HopTLS != nil && c.WSDialer == nil {
+		c.WSDialer = relay.NewHopWSDialer(c.HopTLS)
 	}
 	if c.StartupDeadline <= 0 {
 		c.StartupDeadline = DefaultStartupDeadline
@@ -173,6 +222,11 @@ type Server struct {
 	// PublicAddr and InternalAddr are the bound listener addresses.
 	PublicAddr   net.Addr
 	InternalAddr net.Addr
+
+	// cancelRole ends the role's re-checks and releases its event
+	// registrations; a failed start calls it (on success the role runs
+	// until Start's context ends).
+	cancelRole context.CancelFunc
 
 	public   *http.Server
 	internal *http.Server
@@ -221,9 +275,18 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		return nil, err
 	}
 	log := cfg.Logger.With("subsystem", "relay")
+	// With HopTLS the hub and relay-peer clients verify peers with it, and
+	// keep the defaults they have without it otherwise (an untimed hub
+	// client; the relay's 10s client).
+	hubHTTP, relayHTTP := cfg.HTTPClient, cfg.HTTPClient
+	if cfg.HTTPClient == nil && cfg.HopTLS != nil {
+		hubHTTP = relay.NewHopHTTPClient(cfg.HopTLS)
+		relayHTTP = relay.NewHopHTTPClientWithTimeout(cfg.HopTLS, 10*time.Second)
+	}
 	role, err := relayrole.New(relayrole.Config{
-		Hub:             &relay.HubClient{BaseURL: cfg.HubInternalURL, HTTP: cfg.HTTPClient, Auth: cfg.PeerAuth},
+		Hub:             &relay.HubClient{BaseURL: cfg.HubInternalURL, HTTP: hubHTTP, Auth: cfg.PeerAuth},
 		RecheckInterval: cfg.RecheckInterval,
+		Clock:           cfg.Clock,
 		Events:          cfg.Events,
 		Subjects:        RevocationSubjects,
 		Logger:          log,
@@ -241,16 +304,43 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		return nil, fmt.Errorf("conduit internal listener %s: %w", cfg.InternalListen, err)
 	}
 	s.InternalAddr = internalLn.Addr()
+	scheme := "http://"
+	if cfg.InternalTLS != nil {
+		internalLn = tls.NewListener(internalLn, cfg.InternalTLS)
+		scheme = "https://"
+	}
+	// The internal listener also serves the conduit dials a hub ingress
+	// proxies (design §3.9 "Ingress"): GET /api/v1/conduit, after the same
+	// relay-peer checks as every internal-API call, except that a relay
+	// that no longer serves answers 503 relay_not_admitting, which the
+	// ingress may re-pick on (AuthenticateIngressPeer). It has the public
+	// listener's header timeout and size limit; admission is the same
+	// code path (relayrole.Role), with the ingress arrival.
+	var currentRole atomic.Pointer[relayrole.Role]
 	s.internal = &http.Server{ReadHeaderTimeout: 10 * time.Second, Handler: http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		if r := current.Load(); r != nil {
-			r.InternalHandler().ServeHTTP(w, req)
+		r := current.Load()
+		if r == nil {
+			http.Error(w, "conduit relay not running", http.StatusServiceUnavailable)
 			return
 		}
-		http.Error(w, "conduit relay not running", http.StatusServiceUnavailable)
+		if req.URL.Path == relayrole.ConduitPath {
+			ro := currentRole.Load()
+			if ro == nil {
+				http.Error(w, "conduit relay not running", http.StatusServiceUnavailable)
+				return
+			}
+			peer, ok := r.AuthenticateIngressPeer(w, req)
+			if !ok {
+				return
+			}
+			ro.ServeIngress(w, req, peer)
+			return
+		}
+		r.InternalHandler().ServeHTTP(w, req)
 	})}
 	go s.serve(s.internal, internalLn, "relay internal listener")
 
-	endpoint := "http://" + internalLn.Addr().String()
+	endpoint := scheme + internalLn.Addr().String()
 	if cfg.Advertise != nil {
 		endpoint = cfg.Advertise(internalLn.Addr())
 	}
@@ -259,6 +349,7 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		InternalEndpoint: endpoint,
 		PublicEndpoint:   cfg.PublicURL,
 		RequireSelfCheck: cfg.RequireSelfCheck,
+		Singleton:        cfg.Singleton,
 		Registry:         registry.New(cfg.Registry, registry.Config{}),
 		Store:            cfg.Registry,
 		Session:          conduit.Config{Clock: clock.Real()},
@@ -267,11 +358,14 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		},
 		Refresh:         role.Refresh,
 		PeerAuth:        cfg.PeerAuth,
-		HTTPClient:      cfg.HTTPClient,
+		HTTPClient:      relayHTTP,
+		WSDialer:        cfg.WSDialer,
 		ReconnectWindow: cfg.ReconnectWindow,
 		LifetimeCap:     cfg.LifetimeCap,
 		Clock:           cfg.Clock,
-		Logger:          log,
+		// Per-session jitter of the cap (ptone/scion#5245).
+		JitterLifetimeCap: cfg.JitterLifetimeCap,
+		Logger:            log,
 	})
 	if err != nil {
 		_ = s.internal.Close()
@@ -286,12 +380,26 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	}
 	s.Relay = r
 	role.Bind(r)
-	role.Start(ctx)
+	logRegisterRelayMetrics(log, cfg.MeterProvider, r, role, cfg.Singleton)
+	// Ingress dials are served only once the role is bound to the relay.
+	currentRole.Store(role)
+	roleCtx, cancelRole := context.WithCancel(ctx)
+	s.cancelRole = cancelRole
+	role.Start(roleCtx)
 	// Subscribed before the events start, like the role's hooks.
 	var changed <-chan string
 	unsubscribe := func() {}
+	// cancelKeys ends the grant key hint loop, which then removes its
+	// subscription and listen hook; a failed start calls it.
+	cancelKeys := func() {}
 	if cfg.Events != nil {
 		changed, unsubscribe = cfg.Events.Subscribe(SettingsUpdatedSubject)
+		keys, unsubscribeKeys := cfg.Events.Subscribe(GrantKeysChangedSubject)
+		reconnected := make(chan struct{}, 1)
+		removeHook := cfg.Events.AddOnListen(listenReconnectHook(reconnected))
+		keysCtx, cancel := context.WithCancel(ctx)
+		cancelKeys = cancel
+		go followGrantKeys(keysCtx, log, keys, reconnected, r.NotifyGrantKeysChanged, func() { cancel(); unsubscribeKeys(); removeHook() })
 	}
 	if cfg.StartEvents != nil {
 		cfg.StartEvents()
@@ -301,6 +409,13 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	if publicLn == nil {
 		publicLn, err = net.Listen("tcp", cfg.PublicListen)
 		if err != nil {
+			// Release what was registered above: the hint loop (which
+			// removes its subscription and hook), the settings
+			// subscription, and the role's re-checks (which release its
+			// subscription and hook).
+			cancelKeys()
+			unsubscribe()
+			s.cancelRole()
 			r.Kill()
 			_ = s.internal.Close()
 			return nil, fmt.Errorf("relay public listener %s: %w", cfg.PublicListen, err)
@@ -308,7 +423,9 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	}
 	s.PublicAddr = publicLn.Addr()
 	mux := http.NewServeMux()
-	mux.Handle(relayrole.ConduitPath, role)
+	mux.Handle(relayrole.ConduitPath, requireConfidentialArrival(role, cfg.TrustedProxies, log))
+	// /healthz carries no credential and no state, so it is served
+	// without the arrival check, for load balancer and platform probes.
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	s.public = &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	go s.serve(s.public, publicLn, "relay public listener")
@@ -386,4 +503,76 @@ func (s *Server) Shutdown(ctx context.Context, capDrain bool, drainCap time.Dura
 	_ = s.public.Shutdown(ctx)
 	_ = s.internal.Shutdown(ctx)
 	return err
+}
+
+// ErrCodeTransportNotConfidential is the error code of a public listener
+// dial refused because it did not arrive confidentially.
+const ErrCodeTransportNotConfidential = "transport_not_confidential"
+
+// requireConfidentialArrival serves next only for a dial that reached the
+// public listener over TLS, from this host, or from a trusted proxy that
+// terminated TLS (config.ConfidentialArrival with trusted). Every other
+// dial is refused with 403 before admission or upgrade, whatever the
+// principal: the dial carries the client's credentials (bearer tokens,
+// agent tokens, broker signature headers, cookies) and then its whole
+// session.
+func requireConfidentialArrival(next http.Handler, trusted []*net.IPNet, log *slog.Logger) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reason := config.ArrivalRefusal(r, trusted)
+		if reason == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		log.Warn("Conduit relay: refused a dial that did not arrive over TLS or from this host",
+			"reason", reason, "remote_addr", r.RemoteAddr, "trusted_proxies_configured", len(trusted) > 0)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{
+			"code": ErrCodeTransportNotConfidential,
+			"message": "Conduit dials must reach the relay over TLS or from this host. Use the relay's https:// URL. " +
+				"If TLS ends at a proxy in front of the relay, list the proxy's addresses in " + config.TrustedProxiesKey + ".",
+			"details": map[string]any{"reason": reason, "setting": config.TrustedProxiesKey},
+		}})
+	})
+}
+
+// listenReconnectHook returns an AddOnListen hook that signals reconnected
+// on every LISTEN (re)connect except the first: a notice missed while the
+// connection was down is covered by hinting again. It never blocks the
+// listener (one pending signal is enough).
+func listenReconnectHook(reconnected chan<- struct{}) func() {
+	var listened atomic.Bool
+	return func() {
+		if !listened.Swap(true) {
+			return
+		}
+		select {
+		case reconnected <- struct{}{}:
+		default:
+		}
+	}
+}
+
+// followGrantKeys calls notify (the relay's NotifyGrantKeysChanged) on every
+// grant key change event and on every LISTEN reconnect, until ctx ends or
+// the event channel closes, and logs each hint with the number of target
+// sessions it was sent to and its trigger (notice or reconnect). Targets
+// rate-limit the key fetches a hint triggers.
+func followGrantKeys(ctx context.Context, log *slog.Logger, keys <-chan string, reconnected <-chan struct{}, notify func() int, stop func()) {
+	defer stop()
+	for {
+		trigger := "notice"
+		select {
+		case <-ctx.Done():
+			return
+		case _, ok := <-keys:
+			if !ok {
+				return
+			}
+		case <-reconnected:
+			trigger = "reconnect"
+		}
+		n := notify()
+		log.Info("Conduit relay: grant key change hinted to targets", "sessions", n, "trigger", trigger)
+	}
 }

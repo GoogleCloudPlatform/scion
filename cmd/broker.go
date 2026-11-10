@@ -40,6 +40,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/daemon"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtimebroker"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth/adcsource"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
@@ -116,7 +117,8 @@ Commands:
   deregister   Remove this broker from the Hub
   hubs         List hub connections
   provide      Add this broker as a provider for a project
-  withdraw     Remove this broker as a provider from a project`,
+  withdraw     Remove this broker as a provider from a project
+  convert      Plan, apply or roll back a move to flat Runtime Brokers (experimental)`,
 }
 
 // brokerRegisterCmd registers this broker with the Hub
@@ -192,7 +194,7 @@ This command will:
 
 Use --broker-only to only remove the broker record without affecting project providers.
 
-Local state: deregister removes this hub's credentials file, its
+Local state: deregister removes this hub's credentials file, any legacy
 hub_connections entry and (when no connections remain) the empty
 hub-credentials/ directory. Broker-local state stays: the broker daemon log
 (broker.log), the broker's state directory and the broker template cache
@@ -645,7 +647,7 @@ func runBrokerRegister(cmd *cobra.Command, args []string) error {
 	if globalDirErr != nil {
 		fmt.Printf("Warning: failed to get global directory: %v\n", globalDirErr)
 	} else {
-		persistBrokerHubSettings(os.Stdout, globalDir, endpoint, brokerID, hubName)
+		persistBrokerHubSettings(os.Stdout, globalDir, endpoint, brokerID)
 		if brokerNameSet {
 			persistBrokerName(os.Stdout, brokerName)
 		}
@@ -1386,6 +1388,9 @@ func runBrokerProvide(cmd *cobra.Command, args []string) error {
 
 	// Load Hub client: use --hub flag if specified, otherwise fall back to project settings
 	var client hubclient.Client
+	// uat: the client sends a user access token. A named hub connection
+	// uses the broker's own credentials, never one.
+	uat := false
 	if brokerHubFlag != "" {
 		var err error
 		client, err = getHubClientForConnection(brokerHubFlag)
@@ -1402,7 +1407,7 @@ func runBrokerProvide(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("failed to load settings: %w", err)
 		}
 
-		client, err = getHubClient(settings)
+		client, uat, err = getHubClientUAT(settings)
 		if err != nil {
 			return err
 		}
@@ -1413,7 +1418,7 @@ func runBrokerProvide(cmd *cobra.Command, args []string) error {
 
 	// If we used --project flag, resolve project by name or ID
 	if brokerProjectID != "" {
-		project, err := resolveProjectByNameOrID(ctx, client, brokerProjectID)
+		project, err := resolveProjectByNameOrID(ctx, client, brokerProjectID, uat)
 		if err != nil {
 			return fmt.Errorf("failed to find project '%s': %w", brokerProjectID, err)
 		}
@@ -1640,6 +1645,9 @@ func runBrokerWithdraw(cmd *cobra.Command, args []string) error {
 
 	// Load Hub client: use --hub flag if specified, otherwise fall back to project settings
 	var client hubclient.Client
+	// uat: the client sends a user access token. A named hub connection
+	// uses the broker's own credentials, never one.
+	uat := false
 	if brokerHubFlag != "" {
 		var err error
 		client, err = getHubClientForConnection(brokerHubFlag)
@@ -1657,7 +1665,7 @@ func runBrokerWithdraw(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("failed to load settings: %w", err)
 		}
 
-		client, err = getHubClient(settings)
+		client, uat, err = getHubClientUAT(settings)
 		if err != nil {
 			return err
 		}
@@ -1668,7 +1676,7 @@ func runBrokerWithdraw(cmd *cobra.Command, args []string) error {
 
 	// If we used --project flag, resolve project by name or ID
 	if brokerProjectID != "" {
-		project, err := resolveProjectByNameOrID(ctx, client, brokerProjectID)
+		project, err := resolveProjectByNameOrID(ctx, client, brokerProjectID, uat)
 		if err != nil {
 			return fmt.Errorf("failed to find project '%s': %w", brokerProjectID, err)
 		}
@@ -1835,6 +1843,7 @@ func runBrokerStatus(cmd *cobra.Command, args []string) error {
 						status.BrokerName = broker.Name
 						status.BrokerStatus = broker.Status
 						status.LastHeartbeat = broker.LastHeartbeat
+						status.CommandPath = brokerStatusCommandPath(broker.Status, broker.Health)
 					} else if apiclient.IsNotFoundError(err) {
 						// Broker ID exists locally but not on Hub - not actually registered
 						status.Registered = false
@@ -1911,9 +1920,11 @@ func runBrokerStatus(cmd *cobra.Command, args []string) error {
 			liveStatus = queryBrokerHubConnections(port)
 		}
 		liveStatusMap := make(map[string]string)
+		liveInfo := make(map[string]BrokerHubConnectionInfo)
 		if liveStatus != nil {
 			for _, conn := range liveStatus.Connections {
 				liveStatusMap[conn.Name] = conn.Status
+				liveInfo[conn.Name] = conn
 			}
 		}
 
@@ -1932,20 +1943,26 @@ func runBrokerStatus(cmd *cobra.Command, args []string) error {
 			fmt.Printf("    Hub:         %s\n", config.RedactURL(conn.HubEndpoint))
 			fmt.Printf("    Auth:        %s\n", conn.AuthMode)
 			fmt.Printf("    Status:      %s\n", connStatus)
+			if info, ok := liveInfo[conn.Name]; ok {
+				if line := brokerConnectionCommandsText(info); line != "" {
+					fmt.Printf("    Commands:    %s\n", line)
+				}
+			}
 			if !conn.RegisteredAt.IsZero() {
 				fmt.Printf("    Registered:  %s\n", clitime.Format(conn.RegisteredAt, clitime.Date))
 			}
 		}
 		if status.HubConnected {
-			fmt.Printf("\n  Connected:   yes (%s)\n", status.HubStatus)
+			fmt.Printf("\n  Hub API:     reachable (%s)\n", status.HubStatus)
 			if status.BrokerStatus != "" {
 				fmt.Printf("  Status:      %s\n", status.BrokerStatus)
+				printBrokerCommandsLine(status.CommandPath)
 			}
 			if !status.LastHeartbeat.IsZero() {
 				fmt.Printf("  Last seen:   %s\n", clitime.Ago(status.LastHeartbeat))
 			}
 		} else if status.Registered {
-			fmt.Printf("\n  Connected:   no (Hub unreachable)\n")
+			fmt.Printf("\n  Hub API:     unreachable\n")
 		}
 	} else if status.Registered {
 		// Legacy single-connection display
@@ -1960,15 +1977,16 @@ func runBrokerStatus(cmd *cobra.Command, args []string) error {
 		}
 		fmt.Printf("  Hub:         %s\n", config.RedactURL(status.HubEndpoint))
 		if status.HubConnected {
-			fmt.Printf("  Connected:   yes (%s)\n", status.HubStatus)
+			fmt.Printf("  Hub API:     reachable (%s)\n", status.HubStatus)
 			if status.BrokerStatus != "" {
 				fmt.Printf("  Status:      %s\n", status.BrokerStatus)
+				printBrokerCommandsLine(status.CommandPath)
 			}
 			if !status.LastHeartbeat.IsZero() {
 				fmt.Printf("  Last seen:   %s\n", clitime.Ago(status.LastHeartbeat))
 			}
 		} else {
-			fmt.Printf("  Connected:   no (Hub unreachable)\n")
+			fmt.Printf("  Hub API:     unreachable\n")
 		}
 	} else {
 		fmt.Println("Hub Registration")
@@ -2101,6 +2119,7 @@ func runRemoteBrokerStatus(brokerID string) error {
 		LastHeartbeat: broker.LastHeartbeat,
 		HubEndpoint:   invocationHubEndpoint(),
 		HubConnected:  true, // We just connected successfully
+		CommandPath:   brokerStatusCommandPath(broker.Status, broker.Health),
 	}
 
 	// Get projects this broker provides for
@@ -2134,6 +2153,7 @@ func runRemoteBrokerStatus(brokerID string) error {
 		fmt.Printf("  Name:        %s\n", status.BrokerName)
 	}
 	fmt.Printf("  Status:      %s\n", status.BrokerStatus)
+	printBrokerCommandsLine(status.CommandPath)
 	if !status.LastHeartbeat.IsZero() {
 		fmt.Printf("  Last seen:   %s\n", clitime.Ago(status.LastHeartbeat))
 	}
@@ -2184,9 +2204,15 @@ type brokerStatusInfo struct {
 	CredentialsPath string `json:"credentialsPath,omitempty"`
 
 	// Hub connection
-	HubEndpoint   string    `json:"hubEndpoint,omitempty"`
-	HubConnected  bool      `json:"hubConnected"`
-	HubStatus     string    `json:"hubStatus,omitempty"`
+	HubEndpoint  string `json:"hubEndpoint,omitempty"`
+	HubConnected bool   `json:"hubConnected"`
+	HubStatus    string `json:"hubStatus,omitempty"`
+	// CommandPath is whether the Hub can send this broker commands, from
+	// the broker's last report as the Hub stored it: yes, no, pending or
+	// not_reported (brokerStatusCommandPath). Empty while the broker is not
+	// online, since its last report is stale then. HubConnected only says
+	// the Hub API answers.
+	CommandPath   string    `json:"commandPath,omitempty"`
 	HubVersion    string    `json:"hubVersion,omitempty"`
 	LastHeartbeat time.Time `json:"lastHeartbeat,omitempty"`
 
@@ -2219,7 +2245,11 @@ type brokerProjectStatus struct {
 // resolveProjectByNameOrID resolves a project identifier (name, slug, or ID) to a project.
 // It tries multiple strategies in order: direct ID lookup, slug, then name.
 // Returns the project if found, or an error if not found or multiple matches.
-func resolveProjectByNameOrID(ctx context.Context, client hubclient.Client, nameOrID string) (*hubclient.Project, error) {
+// uat reports that client sends a user access token (hubsync.UsesUserAccessToken,
+// or authSourceIsUserAccessToken for a getHubClient client): then a lookup
+// that finds nothing returns hubsync.ScopedTokenProjectLookupEmptyError,
+// which reads the same whether or not the project exists (ptone/scion#5294).
+func resolveProjectByNameOrID(ctx context.Context, client hubclient.Client, nameOrID string, uat bool) (*hubclient.Project, error) {
 	// First try to fetch by ID directly
 	project, err := client.Projects().Get(ctx, nameOrID)
 	if err == nil {
@@ -2252,12 +2282,25 @@ func resolveProjectByNameOrID(ctx context.Context, client hubclient.Client, name
 
 	switch len(resp.Projects) {
 	case 0:
-		return nil, fmt.Errorf("project '%s' not found", nameOrID)
+		if uat {
+			return nil, hubsync.ScopedTokenProjectLookupEmptyError(nameOrID)
+		}
+		return nil, &projectNotFoundError{ref: nameOrID}
 	case 1:
 		return &resp.Projects[0], nil
 	default:
 		return nil, fmt.Errorf("multiple projects found with name '%s' - please use the project ID instead", nameOrID)
 	}
+}
+
+// projectNotFoundError is resolveProjectByNameOrID's answer when no
+// project matches the reference (by ID, slug or name). Its message is the
+// resolver's plain not-found text; callers that must tell a missing
+// project from other failures check for it with errors.As.
+type projectNotFoundError struct{ ref string }
+
+func (e *projectNotFoundError) Error() string {
+	return fmt.Sprintf("project '%s' not found", e.ref)
 }
 
 // resolveBrokerByNameOrID resolves a broker identifier (name or ID) to a broker.
@@ -2343,10 +2386,11 @@ func getLocalBrokerID() string {
 // "reprovisionEmptyPerAgent" (in-place empty-per-agent reprovision,
 // miller79/scion#167); the hub checks runtime suitability separately.
 func brokerRegistrationCapabilities() []string {
-	// asyncLaunch matches the broker's heartbeat (runtimebroker.StaticCapabilities),
-	// so the Hub knows it from the join on, before the first heartbeat
-	// (ptone/scion#2918).
-	return []string{"sync", "attach", "reprovision", "asyncLaunch", "emptyPerAgentWorkspace", "agentMove", "reprovisionEmptyPerAgent"}
+	// asyncLaunch and asyncStart match the broker's heartbeat
+	// (runtimebroker.StaticCapabilities), so the Hub knows them from the
+	// join on, before the first heartbeat (ptone/scion#2918,
+	// ptone/scion#4669).
+	return []string{"sync", "attach", "reprovision", "asyncLaunch", "asyncStart", "emptyPerAgentWorkspace", "agentMove", "agentMoveRecreate", "reprovisionEmptyPerAgent"}
 }
 
 // buildBrokerProfiles builds BrokerProfile objects from settings.Profiles.
@@ -2485,11 +2529,17 @@ func getHubClientForConnection(name string) (hubclient.Client, error) {
 	if creds.HubEndpoint == "" {
 		return nil, fmt.Errorf("hub connection '%s' has no endpoint configured", name)
 	}
+	// The hub-broker transport rule (as for the broker process's own
+	// connections): stored credentials written before it existed may name a
+	// plain http network hub.
+	if err := config.CheckHubTransport(creds.HubEndpoint); err != nil {
+		return nil, fmt.Errorf("hub connection '%s': %w", name, err)
+	}
 
 	var opts []hubclient.Option
 	switch creds.AuthMode {
 	case brokercredentials.AuthModeDevAuth:
-		opts = append(opts, hubclient.WithAutoDevAuth())
+		opts = append(opts, runtimebroker.DevAuthHubOptions(creds.HubEndpoint, name)...)
 	default:
 		if creds.SecretKey != "" {
 			secretKey, err := base64.StdEncoding.DecodeString(creds.SecretKey)
@@ -2498,7 +2548,7 @@ func getHubClientForConnection(name string) (hubclient.Client, error) {
 			}
 			opts = append(opts, hubclient.WithHMACAuth(creds.BrokerID, secretKey))
 		} else {
-			opts = append(opts, hubclient.WithAutoDevAuth())
+			opts = append(opts, runtimebroker.DevAuthHubOptions(creds.HubEndpoint, name)...)
 		}
 	}
 
@@ -2519,8 +2569,8 @@ func getHubClientForConnection(name string) (hubclient.Client, error) {
 	return client, nil
 }
 
-// BrokerHubConnectionsResponse mirrors runtimebroker.HubConnectionStatusResponse
-// for CLI use without importing the runtimebroker package.
+// BrokerHubConnectionsResponse mirrors the wire shape of
+// runtimebroker.HubConnectionStatusResponse for CLI use.
 type BrokerHubConnectionsResponse struct {
 	Connections []BrokerHubConnectionInfo `json:"connections"`
 	Mode        string                    `json:"mode"`
@@ -2536,6 +2586,10 @@ type BrokerHubConnectionInfo struct {
 	IsColocated       bool   `json:"isColocated,omitempty"`
 	HasHeartbeat      bool   `json:"hasHeartbeat"`
 	HasControlChannel bool   `json:"hasControlChannel"`
+	// CommandPath and TransportRefused mirror the broker's fields (an
+	// older broker omits them).
+	CommandPath      string `json:"commandPath,omitempty"`
+	TransportRefused bool   `json:"transportRefused,omitempty"`
 }
 
 // queryBrokerHubConnections queries the local broker server for live hub connection status.
@@ -2620,9 +2674,15 @@ var (
 	removeBrokerRecordOnSignal = removeBrokerArgsIfOwned
 
 	// interruptSelf asks this process to shut down the way Ctrl+C does.
+	// The SIGINT is counted first (pendingSelfInterrupts), so the
+	// server's signal handler never takes it for a second signal that
+	// forces the shutdown (ptone/scion#5054).
 	interruptSelf = func() {
 		if p, err := os.FindProcess(os.Getpid()); err == nil {
-			_ = p.Signal(os.Interrupt)
+			pendingSelfInterrupts.Add(1)
+			if p.Signal(os.Interrupt) != nil {
+				pendingSelfInterrupts.Add(-1)
+			}
 		}
 	}
 )
@@ -2689,8 +2749,8 @@ func removeBrokerRecordOnSIGTERM(globalDir string, owned []string) (stop func())
 //     run-once shutdown, which runs once.
 //   - The server was subscribed when SIGTERM arrived, but not yet published
 //     at the load: the server's handler runs the shutdown from the SIGTERM;
-//     the SIGINT sent here is a second signal on that subscription and is
-//     swallowed.
+//     the SIGINT sent here is a second signal on that subscription, counted
+//     as self-sent (interruptSelf), so it does not force the shutdown.
 //   - SIGTERM arrived before the server subscribed, but the shutdown was
 //     published before the load here: the direct call runs it.
 //   - SIGTERM arrived before the server subscribed and nothing was

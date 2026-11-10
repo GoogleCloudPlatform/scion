@@ -66,6 +66,23 @@ type HubConfig struct {
 	Project          string `yaml:"project"`
 	SigningKey       string `yaml:"signing_key"`
 	SigningKeySecret string `yaml:"signing_key_secret"`
+	// AsyncCreate makes /scionAdmin create and thread opt in to an
+	// asynchronous agent create (default true when unset): the command
+	// replies at once and the outcome is posted when the launch ends. The
+	// Hub's async launch flag stays the real gate: a Hub without it answers
+	// synchronously. False always uses the synchronous create. It does not
+	// affect waiting before relaying a message to an agent that is
+	// already launching.
+	AsyncCreate *bool `yaml:"async_create"`
+}
+
+// AsyncCreateEnabled reports whether creates opt in to an asynchronous
+// launch: hub.async_create, true when unset.
+func (c *Config) AsyncCreateEnabled() bool {
+	if c == nil || c.Hub.AsyncCreate == nil {
+		return true
+	}
+	return *c.Hub.AsyncCreate
 }
 
 // PluginConfig holds broker plugin RPC server settings.

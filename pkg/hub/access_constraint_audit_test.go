@@ -34,21 +34,19 @@ import (
 // Test helpers
 // ---------------------------------------------------------------------------
 
-// auditTestSetup creates a GovernanceService with audit writer for testing.
-func auditTestSetup(t *testing.T) (*GovernanceService, *PreviewService, *AuthzService, store.Store, *BoundaryAuditWriter) {
+// auditTestSetup creates a GovernanceService for testing.
+func auditTestSetup(t *testing.T) (*GovernanceService, *PreviewService, *AuthzService, store.Store) {
 	t.Helper()
-	gs, ps, authz, s := govTestSetup(t)
-	// GovernanceService already has an auditWriter from NewGovernanceService.
-	return gs, ps, authz, s, gs.auditWriter
+	return govTestSetup(t)
 }
 
 // auditTestSetupWithEvents creates a full setup including event bus.
-func auditTestSetupWithEvents(t *testing.T) (*GovernanceService, *PreviewService, *AuthzService, store.Store, *BoundaryAuditWriter, *InvalidationEventBus) {
+func auditTestSetupWithEvents(t *testing.T) (*GovernanceService, *PreviewService, *AuthzService, store.Store, *InvalidationEventBus) {
 	t.Helper()
-	gs, ps, authz, s, aw := auditTestSetup(t)
+	gs, ps, authz, s := auditTestSetup(t)
 	eventBus := NewInvalidationEventBus(slog.Default())
 	gs.eventBus = eventBus
-	return gs, ps, authz, s, aw, eventBus
+	return gs, ps, authz, s, eventBus
 }
 
 // ---------------------------------------------------------------------------
@@ -56,7 +54,7 @@ func auditTestSetupWithEvents(t *testing.T) (*GovernanceService, *PreviewService
 // ---------------------------------------------------------------------------
 
 func TestAudit_CommitProducesAuditID(t *testing.T) {
-	gs, ps, _, s, _ := auditTestSetup(t)
+	gs, ps, _, s := auditTestSetup(t)
 	ctx := context.Background()
 
 	// Seed an admin user.
@@ -109,191 +107,11 @@ func TestAudit_CommitProducesAuditID(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// 2. Audit write failure rolls back the mutation conceptually
-// ---------------------------------------------------------------------------
-
-func TestAudit_LegacyWriterFailureDoesNotAffectTransactionalCreate(t *testing.T) {
-	gs, ps, _, s, aw := auditTestSetup(t)
-	ctx := context.Background()
-
-	adminID := govSeedAdminUser(t, s, "audit-fail-admin")
-	actor := PrincipalContext{Kind: "user", ID: adminID}
-
-	pType := "user"
-	pvSeedUser(t, s, "audit-fail-target")
-	draft := &store.AccessConstraint{
-		Name:                 "audit-fail-boundary",
-		SubjectKind:          store.ConstraintSubjectPrincipal,
-		SubjectPrincipalType: &pType,
-		SubjectPrincipalID:   strPtr(tid("audit-fail-target")),
-		ScopeType:            "system",
-		MaximumPermissions:   []string{"agent.read"},
-		Purpose:              "test audit failure",
-		CreatedBy:            adminID,
-	}
-
-	result, err := ps.GeneratePreview(ctx, PreviewRequest{
-		Operation: "create",
-		Draft:     draft,
-		Actor:     actor,
-	})
-	require.NoError(t, err)
-
-	// Inject a failure into the audit writer.
-	aw.failFunc = func() error {
-		return assert.AnError
-	}
-
-	// Commit should fail because audit write fails.
-	commitResult, err := gs.CommitBoundaryChange(ctx, CommitRequest{
-		Operation:    "create",
-		Draft:        draft,
-		PreviewToken: result.PreviewToken,
-		Actor:        actor,
-	})
-	require.NoError(t, err)
-	require.NotNil(t, commitResult.Constraint)
-	entries, err := s.ListConstraintHistory(ctx, commitResult.Constraint.ID)
-	require.NoError(t, err)
-	require.Len(t, entries, 1)
-	assert.Equal(t, commitResult.AuditID, entries[0].EventID)
-}
-
-// ---------------------------------------------------------------------------
-// 2b. Audit failure compensating action: create is rolled back
-// ---------------------------------------------------------------------------
-
-func TestAudit_LegacyWriterFailureDoesNotCompensateCommittedCreate(t *testing.T) {
-	gs, ps, _, s, aw := auditTestSetup(t)
-	ctx := context.Background()
-
-	adminID := govSeedAdminUser(t, s, "comp-create-admin")
-	actor := PrincipalContext{Kind: "user", ID: adminID}
-
-	pType := "user"
-	pvSeedUser(t, s, "comp-create-target")
-	draft := &store.AccessConstraint{
-		Name:                 "comp-create-boundary",
-		SubjectKind:          store.ConstraintSubjectPrincipal,
-		SubjectPrincipalType: &pType,
-		SubjectPrincipalID:   strPtr(tid("comp-create-target")),
-		ScopeType:            "system",
-		MaximumPermissions:   []string{"agent.read"},
-		Purpose:              "test compensating action on create",
-		CreatedBy:            adminID,
-	}
-
-	result, err := ps.GeneratePreview(ctx, PreviewRequest{
-		Operation: "create",
-		Draft:     draft,
-		Actor:     actor,
-	})
-	require.NoError(t, err)
-
-	// Inject audit failure.
-	aw.failFunc = func() error { return assert.AnError }
-
-	commitResult, err := gs.CommitBoundaryChange(ctx, CommitRequest{
-		Operation:    "create",
-		Draft:        draft,
-		PreviewToken: result.PreviewToken,
-		Actor:        actor,
-	})
-	require.NoError(t, err)
-	require.NotNil(t, commitResult.Constraint)
-
-	// CREATE no longer uses the legacy compensating writer. Its live row and
-	// history commit atomically before the structured sink is dispatched.
-	constraints, listErr := s.ListAccessConstraints(ctx, 100, 0)
-	require.NoError(t, listErr)
-	found := false
-	for _, c := range constraints {
-		if c.Name == "comp-create-boundary" {
-			found = true
-		}
-	}
-	assert.True(t, found)
-	entries, err := s.ListConstraintHistory(ctx, commitResult.Constraint.ID)
-	require.NoError(t, err)
-	require.Len(t, entries, 1)
-}
-
-// ---------------------------------------------------------------------------
-// 2c. Audit failure compensating action: update is restored
-// ---------------------------------------------------------------------------
-
-func TestAudit_CompensatingAction_UpdateRestored(t *testing.T) {
-	gs, ps, _, s, aw := auditTestSetup(t)
-	ctx := context.Background()
-
-	adminID := govSeedAdminUser(t, s, "comp-update-admin")
-	actor := PrincipalContext{Kind: "user", ID: adminID}
-
-	// Create a constraint first (with working audit).
-	pType := "user"
-	pvSeedUser(t, s, "comp-update-target")
-	draft := &store.AccessConstraint{
-		Name:                 "comp-update-boundary",
-		SubjectKind:          store.ConstraintSubjectPrincipal,
-		SubjectPrincipalType: &pType,
-		SubjectPrincipalID:   strPtr(tid("comp-update-target")),
-		ScopeType:            "system",
-		MaximumPermissions:   []string{"agent.read", "agent.create"},
-		Purpose:              "test compensating action on update",
-		CreatedBy:            adminID,
-	}
-	created := govCreateAndCommit(t, gs, ps, draft, actor)
-	require.NotNil(t, created)
-
-	// Now prepare an update.
-	updateDraft := &store.AccessConstraint{
-		ID:                   created.ID,
-		Name:                 "comp-update-boundary",
-		SubjectKind:          store.ConstraintSubjectPrincipal,
-		SubjectPrincipalType: &pType,
-		SubjectPrincipalID:   strPtr(tid("comp-update-target")),
-		ScopeType:            "system",
-		MaximumPermissions:   []string{"agent.read"}, // Removed agent.create.
-		Purpose:              "updated purpose",
-		CreatedBy:            adminID,
-	}
-
-	previewResult, err := ps.GeneratePreview(ctx, PreviewRequest{
-		Operation:    "update",
-		Draft:        updateDraft,
-		ConstraintID: created.ID,
-		BaseRevision: created.Revision,
-		Actor:        actor,
-	})
-	require.NoError(t, err)
-
-	// Inject audit failure.
-	aw.failFunc = func() error { return assert.AnError }
-
-	_, err = gs.CommitBoundaryChange(ctx, CommitRequest{
-		Operation:    "update",
-		Draft:        updateDraft,
-		ConstraintID: created.ID,
-		BaseRevision: created.Revision,
-		PreviewToken: previewResult.PreviewToken,
-		Actor:        actor,
-	})
-	require.Error(t, err, "commit must fail when audit write fails")
-	assert.Contains(t, err.Error(), "audit write failed")
-
-	// After audit failure, the constraint must be restored to its previous state.
-	restored, getErr := s.GetAccessConstraint(ctx, created.ID)
-	require.NoError(t, getErr)
-	assert.ElementsMatch(t, []string{"agent.read", "agent.create"}, restored.MaximumPermissions,
-		"constraint must be restored to before-state after audit failure on update")
-}
-
-// ---------------------------------------------------------------------------
 // 3. Audit entry contains no sensitive principal data (redaction test)
 // ---------------------------------------------------------------------------
 
 func TestAudit_RedactionNoSensitiveData(t *testing.T) {
-	gs, ps, _, s, _ := auditTestSetup(t)
+	gs, ps, _, s := auditTestSetup(t)
 	ctx := context.Background()
 	capture := auditevent.NewCaptureSink()
 	gs.auditSink = capture
@@ -339,7 +157,7 @@ func TestAudit_RedactionNoSensitiveData(t *testing.T) {
 
 	// ---------------------------------------------------------------------------
 	// Field-level sensitive data assertions (R2): verify that every field in
-	// BoundaryAuditEntry that could theoretically carry PII is safe.
+	// the CREATE history row that could theoretically carry PII is safe.
 	// ---------------------------------------------------------------------------
 
 	// Common PII patterns: email addresses, typical principal/group names.
@@ -373,124 +191,6 @@ func TestAudit_RedactionNoSensitiveData(t *testing.T) {
 	for _, sensitive := range []string{"redact-admin", "redact-target", draft.Name, draft.Purpose} {
 		assert.NotContains(t, structured, sensitive)
 	}
-}
-
-// ---------------------------------------------------------------------------
-// 4. Recovery audit: disable-all with atomic audit
-// ---------------------------------------------------------------------------
-
-func TestRecovery_DisableAllWithAudit(t *testing.T) {
-	gs, ps, _, s, _ := auditTestSetup(t)
-	ctx := context.Background()
-
-	adminID := govSeedAdminUser(t, s, "recovery-admin")
-	actor := PrincipalContext{Kind: "user", ID: adminID}
-
-	// Create two constraints.
-	for i, name := range []string{"recovery-boundary-1", "recovery-boundary-2"} {
-		pvSeedUser(t, s, name+"-user")
-		pType := "user"
-		draft := &store.AccessConstraint{
-			Name:                 name,
-			SubjectKind:          store.ConstraintSubjectPrincipal,
-			SubjectPrincipalType: &pType,
-			SubjectPrincipalID:   strPtr(tid(name + "-user")),
-			ScopeType:            "system",
-			MaximumPermissions:   []string{"agent.read", "agent.create"},
-			Purpose:              "test recovery",
-			CreatedBy:            adminID,
-		}
-		_ = i
-		govCreateAndCommit(t, gs, ps, draft, actor)
-	}
-
-	// Create recovery service with the same audit writer.
-	rs := NewRecoveryService(s, gs.auditWriter, nil, slog.Default())
-	rs.nowFunc = gs.nowFunc
-
-	result, err := rs.DisableAll(ctx, adminID)
-	require.NoError(t, err)
-	require.NotNil(t, result)
-	assert.Equal(t, 2, result.DisabledCount, "should disable both constraints")
-	assert.NotEmpty(t, result.AuditID, "disable-all must produce an audit ID")
-	assert.Len(t, result.DisabledIDs, 2)
-
-	// Verify the audit entry.
-	entries := gs.auditWriter.GetEntries()
-	var disableEntry *BoundaryAuditEntry
-	for i := range entries {
-		if entries[i].Operation == "disable_all" {
-			disableEntry = &entries[i]
-			break
-		}
-	}
-	require.NotNil(t, disableEntry, "must have a disable_all audit entry")
-	assert.Equal(t, "all", disableEntry.ConstraintID)
-	assert.Equal(t, adminID, disableEntry.ActorID)
-}
-
-// ---------------------------------------------------------------------------
-// 5. Recovery audit failure rolls back disable
-// ---------------------------------------------------------------------------
-
-func TestRecovery_AuditFailureRollsBackDisable(t *testing.T) {
-	_, _, _, s, _ := auditTestSetup(t)
-	ctx := context.Background()
-
-	adminID := govSeedAdminUser(t, s, "recovery-fail-admin")
-
-	// Create a constraint directly.
-	pvSeedUser(t, s, "recovery-fail-user")
-	pType := "user"
-	created, err := s.CreateAccessConstraint(ctx, &store.AccessConstraint{
-		Name:                 "recovery-fail-boundary",
-		SubjectKind:          store.ConstraintSubjectPrincipal,
-		SubjectPrincipalType: &pType,
-		SubjectPrincipalID:   strPtr(tid("recovery-fail-user")),
-		ScopeType:            "system",
-		MaximumPermissions:   []string{"agent.read"},
-		Purpose:              "test recovery audit failure",
-		CreatedBy:            adminID,
-	})
-	require.NoError(t, err)
-
-	// First, test that audit failure during disable rolls back.
-	failWriter := NewBoundaryAuditWriter(slog.Default())
-	failWriter.failFunc = func() error { return assert.AnError }
-	rsf := NewRecoveryService(s, failWriter, nil, slog.Default())
-
-	_, err = rsf.DisableAll(ctx, adminID)
-	require.Error(t, err, "disable should fail when audit write fails")
-	assert.Contains(t, err.Error(), "audit write failed")
-
-	// Verify constraint is still enabled (rollback happened).
-	c, lookupErr := s.GetAccessConstraint(ctx, created.ID)
-	require.NoError(t, lookupErr)
-	assert.False(t, c.Disabled, "constraint should still be enabled after audit failure rollback")
-
-	// Now test the normal disable/recover cycle with a working writer.
-	regularWriter := NewBoundaryAuditWriter(slog.Default())
-	rs2 := NewRecoveryService(s, regularWriter, nil, slog.Default())
-
-	result, err := rs2.DisableAll(ctx, adminID)
-	require.NoError(t, err)
-	assert.Equal(t, 1, result.DisabledCount)
-
-	// Verify constraint is now disabled.
-	c, err = s.GetAccessConstraint(ctx, created.ID)
-	require.NoError(t, err)
-	assert.True(t, c.Disabled, "constraint should be disabled")
-
-	// Now recover.
-	recoverResult, err := rs2.RecoverAll(ctx, adminID)
-	require.NoError(t, err)
-	assert.Equal(t, 1, recoverResult.RecoveredCount)
-	assert.NotEmpty(t, recoverResult.AuditID)
-
-	// Verify constraint is re-enabled.
-	c, err = s.GetAccessConstraint(ctx, created.ID)
-	require.NoError(t, err)
-	assert.False(t, c.Disabled, "constraint should be re-enabled after recovery")
 }
 
 // ---------------------------------------------------------------------------
@@ -548,19 +248,19 @@ func TestRecovery_ConcurrentExclusion(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRecovery_SQLiteExclusiveLock(t *testing.T) {
-	_, _, _, s, _ := auditTestSetup(t)
+	_, _, _, s := auditTestSetup(t)
 	ctx := context.Background()
 
 	adminID := govSeedAdminUser(t, s, "sqlite-lock-admin")
 
-	rs := NewRecoveryService(s, NewBoundaryAuditWriter(slog.Default()), nil, slog.Default())
+	rs := NewRecoveryService(s, nil, slog.Default())
 
 	// First recovery should succeed.
 	assert.True(t, rs.recoveryLock.TryAcquire(adminID))
 	rs.recoveryLock.Release()
 
 	// Running DisableAll acquires and releases the lock.
-	result, err := rs.DisableAll(ctx, adminID)
+	result, err := rs.DisableAll(ctx, pvTestActor(adminID))
 	require.NoError(t, err)
 	assert.Equal(t, 0, result.DisabledCount) // No constraints to disable.
 
@@ -719,7 +419,7 @@ func TestEvents_UnsubscribeWorks(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestEvents_PublishedOnCommit(t *testing.T) {
-	gs, ps, _, s, _, eventBus := auditTestSetupWithEvents(t)
+	gs, ps, _, s, eventBus := auditTestSetupWithEvents(t)
 	ctx := context.Background()
 
 	var received []InvalidationEvent
@@ -882,111 +582,11 @@ func TestMetrics_RecordLockoutCheck(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// 12. Audit writer: validation
-// ---------------------------------------------------------------------------
-
-func TestAudit_ValidateEntry(t *testing.T) {
-	tests := []struct {
-		name    string
-		entry   BoundaryAuditEntry
-		wantErr bool
-	}{
-		{
-			name: "valid entry",
-			entry: BoundaryAuditEntry{
-				ID:        "aud_test",
-				Operation: "create",
-				ActorID:   "user-1",
-				Timestamp: time.Now(),
-			},
-			wantErr: false,
-		},
-		{
-			name: "missing ID",
-			entry: BoundaryAuditEntry{
-				Operation: "create",
-				ActorID:   "user-1",
-				Timestamp: time.Now(),
-			},
-			wantErr: true,
-		},
-		{
-			name: "missing operation",
-			entry: BoundaryAuditEntry{
-				ID:        "aud_test",
-				ActorID:   "user-1",
-				Timestamp: time.Now(),
-			},
-			wantErr: true,
-		},
-		{
-			name: "invalid operation",
-			entry: BoundaryAuditEntry{
-				ID:        "aud_test",
-				Operation: "invalid",
-				ActorID:   "user-1",
-				Timestamp: time.Now(),
-			},
-			wantErr: true,
-		},
-		{
-			name: "missing actor",
-			entry: BoundaryAuditEntry{
-				ID:        "aud_test",
-				Operation: "create",
-				Timestamp: time.Now(),
-			},
-			wantErr: true,
-		},
-		{
-			name: "missing timestamp",
-			entry: BoundaryAuditEntry{
-				ID:        "aud_test",
-				Operation: "create",
-				ActorID:   "user-1",
-			},
-			wantErr: true,
-		},
-		{
-			name: "disable_all is valid",
-			entry: BoundaryAuditEntry{
-				ID:        "aud_test",
-				Operation: "disable_all",
-				ActorID:   "user-1",
-				Timestamp: time.Now(),
-			},
-			wantErr: false,
-		},
-		{
-			name: "recovery is valid",
-			entry: BoundaryAuditEntry{
-				ID:        "aud_test",
-				Operation: "recovery",
-				ActorID:   "user-1",
-				Timestamp: time.Now(),
-			},
-			wantErr: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := validateAuditEntry(&tt.entry)
-			if tt.wantErr {
-				assert.Error(t, err)
-			} else {
-				assert.NoError(t, err)
-			}
-		})
-	}
-}
-
-// ---------------------------------------------------------------------------
 // 13. Recovery: list recovery-disabled boundaries
 // ---------------------------------------------------------------------------
 
 func TestRecovery_ListRecoveryDisabled(t *testing.T) {
-	_, _, _, s, _ := auditTestSetup(t)
+	_, _, _, s := auditTestSetup(t)
 	ctx := context.Background()
 
 	adminID := govSeedAdminUser(t, s, "list-disabled-admin")
@@ -1009,7 +609,7 @@ func TestRecovery_ListRecoveryDisabled(t *testing.T) {
 	err = s.DisableAccessConstraint(ctx, created.ID)
 	require.NoError(t, err)
 
-	rs := NewRecoveryService(s, NewBoundaryAuditWriter(slog.Default()), nil, slog.Default())
+	rs := NewRecoveryService(s, nil, slog.Default())
 	disabled, err := rs.ListRecoveryDisabled(ctx)
 	require.NoError(t, err)
 	assert.Len(t, disabled, 1)
@@ -1027,43 +627,4 @@ func TestCorrelationIDFromContext(t *testing.T) {
 
 	ctx = context.WithValue(ctx, correlationIDKey, "req-123")
 	assert.Equal(t, "req-123", correlationIDFromContext(ctx))
-}
-
-// ---------------------------------------------------------------------------
-// 15. Audit entries for specific constraint
-// ---------------------------------------------------------------------------
-
-func TestAudit_GetEntriesForConstraint(t *testing.T) {
-	aw := NewBoundaryAuditWriter(slog.Default())
-	ctx := context.Background()
-
-	_, err := aw.WriteAuditEntry(ctx, AuditRequest{
-		ConstraintID: "c1",
-		Operation:    "create",
-		ActorID:      "user-1",
-	})
-	require.NoError(t, err)
-
-	_, err = aw.WriteAuditEntry(ctx, AuditRequest{
-		ConstraintID: "c2",
-		Operation:    "update",
-		ActorID:      "user-1",
-	})
-	require.NoError(t, err)
-
-	_, err = aw.WriteAuditEntry(ctx, AuditRequest{
-		ConstraintID: "c1",
-		Operation:    "delete",
-		ActorID:      "user-2",
-	})
-	require.NoError(t, err)
-
-	c1Entries := aw.GetEntriesForConstraint("c1")
-	assert.Len(t, c1Entries, 2)
-
-	c2Entries := aw.GetEntriesForConstraint("c2")
-	assert.Len(t, c2Entries, 1)
-
-	c3Entries := aw.GetEntriesForConstraint("c3")
-	assert.Len(t, c3Entries, 0)
 }

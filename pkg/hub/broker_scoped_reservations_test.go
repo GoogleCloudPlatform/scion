@@ -33,9 +33,10 @@ import (
 // The broker-scoped reservation views and the broker-quota reconcile read
 // every broker's reservations with one store query (ptone/scion#2314). These
 // tests pin the result set those views had with the former one-query-per-
-// broker loop: only listed brokers contribute (a reservation whose scope ID is
-// not a runtime broker, for example a deleted broker, is left out), and rows
-// are in broker-list order (newest broker first), created_at ascending
+// broker loop: only listed brokers count (a reservation whose scope ID is
+// not a listed runtime broker, for example a deleted broker, is not counted;
+// usage-by-limit shows it after the listed rows, flagged scopeUnlisted), and
+// rows are in broker-list order (newest broker first), created_at ascending
 // within a broker.
 
 type brokerScopedFixture struct {
@@ -113,10 +114,16 @@ func TestGetUsageByLimit_MaxAgentsPerBroker_ListedBrokersOnlyInBrokerOrder(t *te
 	assert.Equal(t, len(f.wantOrder), resp.TotalActive, "a reservation whose scope ID is not a listed broker is not counted")
 
 	got := make([]string, len(resp.Reservations))
+	var unlisted []string
 	for i, r := range resp.Reservations {
 		got[i] = r.ResourceID
+		if r.ScopeUnlisted {
+			unlisted = append(unlisted, r.ResourceID)
+		}
 	}
-	assert.Equal(t, f.wantOrder, got, "newest broker first, created_at ascending within a broker")
+	assert.Equal(t, append(append([]string(nil), f.wantOrder...), f.unlistedRows...), got,
+		"newest broker first, created_at ascending within a broker, then the unlisted rows")
+	assert.Equal(t, f.unlistedRows, unlisted, "only the unlisted rows are flagged scopeUnlisted")
 }
 
 func TestGetUsageSummary_MaxAgentsPerBroker_ListedBrokersOnly(t *testing.T) {
@@ -152,11 +159,12 @@ func TestListAndCountBrokerScopedActiveReservations_Agree(t *testing.T) {
 	assert.Equal(t, len(rows), n)
 }
 
-// TestBrokerQuota_ReconcileLeavesUnlistedScopeReservation pins that the
-// reconcile only visits listed brokers: a reservation scoped to an ID that is
-// not a runtime broker stays active even though its agent does not exist,
-// while a listed broker's reservation for a missing agent is released.
-func TestBrokerQuota_ReconcileLeavesUnlistedScopeReservation(t *testing.T) {
+// TestBrokerQuota_ReconcileReleasesUnlistedScopeOnlyWhenConfirmedDeleted
+// pins how the reconcile treats an unlisted scope: a reservation scoped to
+// an ID that is not a runtime broker is released only because a point
+// lookup confirms no broker has that ID (the deregistered-scope pass), and a
+// listed broker's reservation for a missing agent is released as before.
+func TestBrokerQuota_ReconcileReleasesUnlistedScopeOnlyWhenConfirmedDeleted(t *testing.T) {
 	srv, s := testServer(t)
 	f := seedBrokerScopedFixture(t, s)
 	ctx := context.Background()
@@ -166,12 +174,12 @@ func TestBrokerQuota_ReconcileLeavesUnlistedScopeReservation(t *testing.T) {
 
 	srv.ReconcileStaleBrokerQuotaReservations(ctx)
 
-	assert.EqualValues(t, 1, brokerReservationCount(t, s, f.unlistedID),
-		"reservation scoped to an unlisted ID must not be touched")
+	assert.EqualValues(t, 0, brokerReservationCount(t, s, f.unlistedID),
+		"a reservation on a scope confirmed deregistered is released")
 	for _, id := range f.unlistedRows {
 		has, err := s.HasActiveReservation(ctx, f.def.ID, id)
 		require.NoError(t, err)
-		assert.True(t, has)
+		assert.False(t, has)
 	}
 	assert.EqualValues(t, 0, brokerReservationCount(t, s, f.olderBroker.ID),
 		"listed broker's reservations for missing agents are released")
@@ -179,14 +187,17 @@ func TestBrokerQuota_ReconcileLeavesUnlistedScopeReservation(t *testing.T) {
 }
 
 // brokerScopedQueryCountingStore counts the reservation queries the
-// broker-scoped views and the reconcile issue, once its switch is armed.
+// broker-scoped views, the usage summary and the reconcile issue, once its
+// switch is armed.
 type brokerScopedQueryCountingStore struct {
 	store.Store
-	fault              *storeFaultSwitch
-	mu                 sync.Mutex
-	byScopeTypeCalls   int
-	countByScopeCalls  int
-	perBrokerListCalls int
+	fault               *storeFaultSwitch
+	mu                  sync.Mutex
+	byScopeTypeCalls    int
+	countByScopeCalls   int
+	perBrokerListCalls  int
+	perProjectListCalls int
+	ungroupedCountCalls int
 }
 
 func (c *brokerScopedQueryCountingStore) ListActiveReservationsByScopeType(ctx context.Context, limitDefinitionID, scopeType string) ([]*store.UsageReservation, error) {
@@ -207,10 +218,24 @@ func (c *brokerScopedQueryCountingStore) CountActiveReservationsByScope(ctx cont
 	return c.Store.CountActiveReservationsByScope(ctx, limitDefinitionID, scopeType)
 }
 
-func (c *brokerScopedQueryCountingStore) ListActiveReservations(ctx context.Context, limitDefinitionID, scopeType, scopeID string) ([]*store.UsageReservation, error) {
-	if c.fault.Active() && scopeType == store.QuotaScopeBroker {
+func (c *brokerScopedQueryCountingStore) CountActiveReservations(ctx context.Context, limitDefinitionID, subjectID, scopeType, scopeID string) (int64, error) {
+	if c.fault.Active() {
 		c.mu.Lock()
-		c.perBrokerListCalls++
+		c.ungroupedCountCalls++
+		c.mu.Unlock()
+	}
+	return c.Store.CountActiveReservations(ctx, limitDefinitionID, subjectID, scopeType, scopeID)
+}
+
+func (c *brokerScopedQueryCountingStore) ListActiveReservations(ctx context.Context, limitDefinitionID, scopeType, scopeID string) ([]*store.UsageReservation, error) {
+	if c.fault.Active() {
+		c.mu.Lock()
+		switch scopeType {
+		case store.QuotaScopeBroker:
+			c.perBrokerListCalls++
+		case store.QuotaScopeProject:
+			c.perProjectListCalls++
+		}
 		c.mu.Unlock()
 	}
 	return c.Store.ListActiveReservations(ctx, limitDefinitionID, scopeType, scopeID)
@@ -219,7 +244,7 @@ func (c *brokerScopedQueryCountingStore) ListActiveReservations(ctx context.Cont
 func (c *brokerScopedQueryCountingStore) reset() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.byScopeTypeCalls, c.countByScopeCalls, c.perBrokerListCalls = 0, 0, 0
+	c.byScopeTypeCalls, c.countByScopeCalls, c.perBrokerListCalls, c.perProjectListCalls, c.ungroupedCountCalls = 0, 0, 0, 0, 0
 }
 
 func (c *brokerScopedQueryCountingStore) counts() (byScopeType, countByScope, perBrokerList int) {
@@ -228,12 +253,30 @@ func (c *brokerScopedQueryCountingStore) counts() (byScopeType, countByScope, pe
 	return c.byScopeTypeCalls, c.countByScopeCalls, c.perBrokerListCalls
 }
 
+// perProjectLists returns the ListActiveReservations calls made at project
+// scope, one per project scope ID.
+func (c *brokerScopedQueryCountingStore) perProjectLists() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.perProjectListCalls
+}
+
+// ungroupedCounts returns the CountActiveReservations calls, which count one
+// subject's reservations in one scope.
+func (c *brokerScopedQueryCountingStore) ungroupedCounts() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.ungroupedCountCalls
+}
+
 // TestBrokerScopedReservations_OneReservationQueryPerCall pins the query
 // count, not just the result set (ptone/scion#2314): with two listed
 // brokers, usage-by-limit and the reconcile each read reservations with one
 // ListActiveReservationsByScopeType call and no per-broker
-// ListActiveReservations call, and the usage summary uses one
-// CountActiveReservationsByScope call.
+// ListActiveReservations call, and the usage summary uses one aggregate
+// CountActiveReservationsByScope call per scoped limit: one for
+// max_agents_per_broker and one for max_agents_per_project
+// (ptone/scion#6033), and none per broker or per project.
 func TestBrokerScopedReservations_OneReservationQueryPerCall(t *testing.T) {
 	srv, s, counting, fault := testServerWithStoreFault(t, func(inner store.Store, sw *storeFaultSwitch) *brokerScopedQueryCountingStore {
 		return &brokerScopedQueryCountingStore{Store: inner, fault: sw}
@@ -268,8 +311,10 @@ func TestBrokerScopedReservations_OneReservationQueryPerCall(t *testing.T) {
 		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 		byScopeType, countByScope, perBrokerList := counting.counts()
 		assert.Equal(t, 0, byScopeType)
-		assert.Equal(t, 1, countByScope)
+		assert.Equal(t, 2, countByScope, "one aggregate call each for max_agents_per_broker and max_agents_per_project")
 		assert.Equal(t, 0, perBrokerList)
+		assert.Equal(t, 0, counting.perProjectLists())
+		assert.Equal(t, 0, counting.ungroupedCounts())
 	})
 
 	t.Run("reconcile", func(t *testing.T) {
@@ -278,5 +323,45 @@ func TestBrokerScopedReservations_OneReservationQueryPerCall(t *testing.T) {
 		byScopeType, _, perBrokerList := counting.counts()
 		assert.Equal(t, 1, byScopeType)
 		assert.Equal(t, 0, perBrokerList)
+	})
+
+	// Scale guard: the usage summary's query count does not grow with the
+	// number of projects holding project-scope reservations.
+	t.Run("usage summary does not scale with projects", func(t *testing.T) {
+		projectDef, err := s.GetLimitDefinitionByName(ctx, store.LimitMaxAgentsPerProject)
+		require.NoError(t, err)
+		const projects = 3
+		for i := 0; i < projects; i++ {
+			projectID := uuid.New().String()
+			_, err := s.CreateUsageReservation(ctx, &store.UsageReservation{
+				LimitDefinitionID: projectDef.ID,
+				SubjectID:         projectID,
+				ScopeType:         store.QuotaScopeProject,
+				ScopeID:           projectID,
+				ResourceID:        uuid.New().String(),
+				Reserved:          1,
+			})
+			require.NoError(t, err)
+		}
+
+		counting.reset()
+		rec := doRequest(t, srv, http.MethodGet, "/api/v1/admin/usage", nil)
+		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+		byScopeType, countByScope, perBrokerList := counting.counts()
+		assert.Equal(t, 0, byScopeType)
+		assert.Equal(t, 2, countByScope, "one aggregate call each for max_agents_per_broker and max_agents_per_project")
+		assert.Equal(t, 0, perBrokerList)
+		assert.Equal(t, 0, counting.perProjectLists(), "no per-project reservation list")
+		assert.Equal(t, 0, counting.ungroupedCounts(), "no per-project reservation count")
+
+		var resp usageSummaryResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		var projectCount = -1
+		for _, item := range resp.Items {
+			if item.LimitDefinition != nil && item.LimitDefinition.Name == store.LimitMaxAgentsPerProject {
+				projectCount = item.ActiveCount
+			}
+		}
+		assert.Equal(t, projects, projectCount, "the summary sums every project's reservations")
 	})
 }

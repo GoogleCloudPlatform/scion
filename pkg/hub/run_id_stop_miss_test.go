@@ -145,9 +145,20 @@ func TestStopMissLeavesNewerRun_NoWriteNoQuotaNoPublish(t *testing.T) {
 	})
 	t.Run("auto-suspend", func(t *testing.T) {
 		srv, s, broker, a, ep := runSwapQuotaAgent(t, "miss-autosusp")
+		oldJTI, newJTI := "jti-old-"+a.ID, "jti-new-"+a.ID
+		insertRunTestAgentCredential(t, s, a.ID, a.ProjectID, oldJTI, "run-old")
+		insertRunTestAgentCredential(t, s, a.ID, a.ProjectID, newJTI, "run-new")
 		markAgentStalled(t, s, a.ID)
 		srv.autoSuspendStalledAgents(context.Background(), []store.Agent{*a})
 		assertNewerRunUntouched(t, s, broker, a, ep)
+		// Nothing is recorded, so no credential is revoked: the newer run
+		// keeps its own.
+		if cred := getTestAgentCredential(t, s, newJTI); cred.RevokedAt != nil {
+			t.Error("auto-suspend revoked the newer run's credential")
+		}
+		if cred := getTestAgentCredential(t, s, oldJTI); cred.RevokedAt != nil {
+			t.Error("auto-suspend revoked credentials for a suspension it did not record")
+		}
 	})
 	t.Run("queued stop", func(t *testing.T) {
 		srv, s, broker, a, ep := runSwapQuotaAgent(t, "miss-queued")
@@ -180,10 +191,11 @@ func (c runLandingStartClient) StartAgent(ctx context.Context, _, _, _, _, _, _,
 	return nil, errors.New("connection reset by peer")
 }
 
-// A restart whose stop leg succeeds and whose start leg fails while
-// keeping the run it minted (the broker attempted the start, or a transport
-// error) records the agent stopped under that run and releases its
-// reservation.
+// A restart whose stop leg succeeds and whose start leg fails definitely
+// while keeping the run it minted (the broker attempted the start and
+// answered with a coded error) records the agent stopped under that run and
+// releases its reservation. A transport error is an unknown outcome:
+// TestRestartStartLegAmbiguousKeepingMintedRunKeepsSlot.
 func TestRestartStartLegFailureKeepingMintedRunRecordsStopped(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -192,7 +204,6 @@ func TestRestartStartLegFailureKeepingMintedRunRecordsStopped(t *testing.T) {
 		{"start attempted", func(t *testing.T) error {
 			return brokerEnvelope(t, http.StatusInternalServerError, "runtime_error", startAttempted(""))
 		}},
-		{"transport error", func(*testing.T) error { return errors.New("connection reset by peer") }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, s, agent := restartQuotaAgent(t, "restart-minted-"+tc.name)
@@ -219,6 +230,36 @@ func TestRestartStartLegFailureKeepingMintedRunRecordsStopped(t *testing.T) {
 				t.Errorf("reservations = %d, want 0 (released)", n)
 			}
 		})
+	}
+}
+
+// A restart whose start leg fails with a transport error after minting its
+// run may have reached the runtime: the minted run is kept, nothing is
+// recorded stopped and the reservation is kept, until the start-claim
+// reaper settles the restart's claim (ptone/scion#5143, erratum E-33c-1).
+func TestRestartStartLegAmbiguousKeepingMintedRunKeepsSlot(t *testing.T) {
+	srv, s, agent := restartQuotaAgent(t, "restart-minted-transport")
+	mockClient := &mockRuntimeBrokerClient{}
+	d := NewHTTPAgentDispatcherWithClient(s, startErrClient{mockClient, errors.New("connection reset by peer")}, false, slog.Default())
+	d.SetTokenGenerator(staticTokenGenerator{token: "test-token"})
+	srv.SetDispatcher(d)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/restart", nil)
+	if rec.Code < 400 {
+		t.Fatalf("restart: status %d, want a failure: %s", rec.Code, rec.Body.String())
+	}
+	if !mockClient.stopCalled {
+		t.Fatal("the stop leg was not dispatched")
+	}
+	got := mustGetAgent(t, s, agent.ID)
+	if got.Phase == string(state.PhaseStopped) || got.ContainerStatus == "stopped" {
+		t.Errorf("phase=%q container=%q: an ambiguous start leg records nothing stopped", got.Phase, got.ContainerStatus)
+	}
+	if got.RunID == "" || got.RunID == "run-x" {
+		t.Errorf("run = %q, want the run the failed start leg minted", got.RunID)
+	}
+	if n := brokerReservationCount(t, s, agent.RuntimeBrokerID); n != 1 {
+		t.Errorf("reservations = %d, want 1 (an ambiguous restart keeps the reservation)", n)
 	}
 }
 
@@ -268,30 +309,49 @@ func (f *failSuspendWriteStore) UpdateAgentStatus(ctx context.Context, id string
 
 // When the suspended status write fails, the stopped container's
 // credentials are still revoked while the row holds the stopped run, and
-// left alone when the row moved to a newer run.
+// left alone when the row moved to a newer run, on both suspend paths.
 func TestSuspendWriteFailureRevokesOnlyForTheStoppedRun(t *testing.T) {
-	for _, tc := range []struct {
-		name        string
-		swapRun     bool
-		wantRevoked bool
-	}{
-		{"stopped run still current", false, true},
-		{"row moved to a newer run", true, false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			srv, s, _, a, _ := runSwapQuotaAgent(t, "suspend-fail-"+map[bool]string{true: "swap", false: "same"}[tc.swapRun])
-			srv.SetDispatcher(&quotaLifecycleDispatcher{})
-			insertTestAgentCredential(t, s, a.ID, a.ProjectID, "jti-"+a.ID)
-			srv.store = &failSuspendWriteStore{Store: s, swapRun: tc.swapRun}
+	for _, path := range []string{"suspend", "auto-suspend"} {
+		for _, tc := range []struct {
+			name        string
+			swapRun     bool
+			wantRevoked bool
+		}{
+			{"stopped run still current", false, true},
+			{"row moved to a newer run", true, false},
+		} {
+			t.Run(path+"/"+tc.name, func(t *testing.T) {
+				srv, s, _, a, _ := runSwapQuotaAgent(t, "suspend-fail-"+path+"-"+map[bool]string{true: "swap", false: "same"}[tc.swapRun])
+				srv.SetDispatcher(&quotaLifecycleDispatcher{})
+				oldJTI, newJTI := "jti-old-"+a.ID, "jti-new-"+a.ID
+				insertRunTestAgentCredential(t, s, a.ID, a.ProjectID, oldJTI, "run-old")
+				insertRunTestAgentCredential(t, s, a.ID, a.ProjectID, newJTI, "run-new")
+				if path == "auto-suspend" {
+					markAgentStalled(t, s, a.ID)
+				}
+				srv.store = &failSuspendWriteStore{Store: s, swapRun: tc.swapRun}
 
-			rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/suspend", nil)
-			if rec.Code < 400 {
-				t.Fatalf("suspend: status %d, want a failure: %s", rec.Code, rec.Body.String())
-			}
-			cred := getTestAgentCredential(t, s, "jti-"+a.ID)
-			if revoked := cred.RevokedAt != nil; revoked != tc.wantRevoked {
-				t.Errorf("credential revoked = %v, want %v", revoked, tc.wantRevoked)
-			}
-		})
+				switch path {
+				case "suspend":
+					rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/suspend", nil)
+					if rec.Code < 400 {
+						t.Fatalf("suspend: status %d, want a failure: %s", rec.Code, rec.Body.String())
+					}
+				case "auto-suspend":
+					if srv.autoSuspendStalledAgent(context.Background(), srv.GetDispatcher(), a) {
+						t.Fatal("auto-suspend reported the suspension recorded; want the failed write")
+					}
+				}
+				if revoked := getTestAgentCredential(t, s, oldJTI).RevokedAt != nil; revoked != tc.wantRevoked {
+					t.Errorf("stopped run's credential revoked = %v, want %v", revoked, tc.wantRevoked)
+				}
+				// run-new becomes the row's run only in the second row; in
+				// the first it is just another run's credential and goes
+				// with the rest.
+				if revoked := getTestAgentCredential(t, s, newJTI).RevokedAt != nil; revoked != tc.wantRevoked {
+					t.Errorf("run-new credential revoked = %v, want %v", revoked, tc.wantRevoked)
+				}
+			})
+		}
 	}
 }

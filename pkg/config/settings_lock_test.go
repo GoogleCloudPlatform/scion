@@ -161,7 +161,10 @@ func runSettingsHelper(mode string) int {
 	case "crash":
 		beforeAtomicRename = func(tmpName, targetPath string) error {
 			fmt.Println("tmp " + tmpName)
-			_ = syscall.Kill(os.Getpid(), syscall.SIGKILL)
+			// SIGKILL on unix, TerminateProcess on Windows.
+			if p, err := os.FindProcess(os.Getpid()); err == nil {
+				_ = p.Kill()
+			}
 			select {}
 		}
 		err := UpdateSetting(dir, "default_template", "crashed", false)

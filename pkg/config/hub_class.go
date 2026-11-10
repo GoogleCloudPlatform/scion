@@ -17,6 +17,13 @@ package config
 // HubClassKey is the settings key of the hub class (HubServerConfig.HubClass).
 const HubClassKey = "server.hub.class"
 
+// HubGCPProjectIDKey is the settings key of the hub's GCP project
+// (HubServerConfig.GCPProjectID). It selects the service-account minting
+// project, so like HubClassKey it is set only in the settings file or the
+// environment (SCION_SERVER_HUB_GCPPROJECTID): the server-config API
+// refuses it in every mode (ptone/scion#4942).
+const HubGCPProjectIDKey = "server.hub.gcp_project_id"
+
 // HubClassTest is the only recognised server.hub.class value. A hub whose
 // class is anything else, including unset, is not a test hub.
 const HubClassTest = "test"

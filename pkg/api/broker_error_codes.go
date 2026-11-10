@@ -30,10 +30,39 @@ const (
 	// it from (ptone/scion#3422).
 	BrokerErrCodeWorkspaceStorageUnconfigured = "workspace_storage_unconfigured"
 
+	// BrokerErrCodeWorkspaceDownloadModeUnsupported marks a create whose
+	// workspaceDownloadMode this broker does not know (422). The broker
+	// never falls back to another download for it.
+	BrokerErrCodeWorkspaceDownloadModeUnsupported = "workspace_download_mode_unsupported"
+
 	// BrokerErrCodeHarnessConfigUnusable marks a dispatch whose
 	// harness-config provisioner cannot run (422). It is a configuration
 	// error the caller must fix (ptone/scion#3132).
 	BrokerErrCodeHarnessConfigUnusable = "harness_config_unusable"
+	// BrokerErrCodeProjectPathNotInitialized marks a create, start or
+	// restart of a plain project whose explicit project path (a provider's
+	// LocalPath) holds no .scion directory or marker (409). The operator must
+	// initialize the path as a project (ptone/scion#6647).
+	BrokerErrCodeProjectPathNotInitialized = "project_path_not_initialized"
+	// BrokerErrCodeGitConfigRefused marks an agent create, start or restart
+	// the broker refuses (422) because the repository's git config sets keys
+	// agents may not be given. The message names every refused key and how
+	// to remove it, never a value or a host path (ptone/scion#6835).
+	BrokerErrCodeGitConfigRefused = LaunchCodeGitConfigRefused
+
+	// BrokerErrCodeStorageMigrationRequired marks an agent start the broker
+	// refuses (422) because its storage would be placed differently than
+	// configured before server.project_storage: its profile or runtime
+	// entry sets a removed storage override, or its per-agent shared-dir
+	// record pins nfs while the layout is not shared. The message names
+	// the keys and the migration (ptone/scion#6371).
+	BrokerErrCodeStorageMigrationRequired = "storage_migration_required"
+
+	// BrokerErrCodeProjectStorageUnavailable marks an agent create, start
+	// or restart the broker refuses (503) because it does not see the
+	// project storage share. The message names configuration fields, never
+	// the path, and gives the remedy (ptone/scion#5823).
+	BrokerErrCodeProjectStorageUnavailable = "project_storage_unavailable"
 
 	// BrokerErrCodeIdentityNotMapped marks a dispatch in GCP identity mode
 	// "assign" on the Kubernetes runtime whose GCP service account has no
@@ -73,6 +102,13 @@ const (
 	// (ptone/scion#4668).
 	BrokerErrCodeBrokerDraining = "broker_draining"
 
+	// BrokerErrCodeStorageInvalid marks an agent create, start or restart
+	// refused because the broker's project storage settings are invalid
+	// (422). The broker started without storage; the operator must fix
+	// server.project_storage on the broker host and restart it. Stop and
+	// delete keep working.
+	BrokerErrCodeStorageInvalid = "storage_invalid"
+
 	// BrokerErrCodeLocalWorktreeRefused marks a worktree-per-agent dispatch
 	// for a linked checkout that the co-located broker refused because the
 	// checkout failed verification (409). Nothing was created. The hub
@@ -95,7 +131,45 @@ const (
 	// (PurgeRetainedQueryParam) is running there (409, with Retry-After).
 	// Nothing was started or written. Retry after the removal ends.
 	BrokerErrCodeRetainedPurgeInProgress = "retained_purge_in_progress"
+
+	// BrokerErrCodeMoveTargetNotFresh marks a forced move's provision
+	// (moved-agent expectation "fresh-agent-dir") the broker refused before
+	// creating anything, because it has files for the agent or cannot
+	// confirm that it has none (409). The message names no host path. The
+	// hub then rolls the move back without removing anything on that
+	// broker: the files there were not created by the move
+	// (ptone/scion#5441).
+	BrokerErrCodeMoveTargetNotFresh = "move_target_not_fresh"
+
+	// BrokerErrCodeMoveMarkerMismatch marks a forced move's rollback delete
+	// (MoveReincarnationIDQueryParam) that removed nothing because an agent
+	// directory on the broker exists without that move's marker: the files
+	// were not created by the move (409). The message names no host path.
+	BrokerErrCodeMoveMarkerMismatch = "move_marker_mismatch"
+
+	// BrokerErrCodeReloadUnconfirmed marks a reset-auth that wrote the new
+	// credential into the agent container but could not deliver the reload
+	// signal to the agent's init process (502), so the running agent did not
+	// confirm the reload. The credential file is in place; the hub relays the
+	// code to the caller.
+	BrokerErrCodeReloadUnconfirmed = "reload_unconfirmed"
+
+	// BrokerErrCodeAgentSlugHeld marks a create, start or restart refused
+	// because the agent's slug is held in the project by another agent of a
+	// flat Runtime Broker instance: this instance, or another instance of the
+	// same host (409). The error details carry "slug", "holderAgentId" (the
+	// holding agent's ID) and "runtimeBrokerId" (the instance holding it). A
+	// slug still held by an unconfirmed delete, or a reservation that cannot
+	// be read, does not use this code.
+	BrokerErrCodeAgentSlugHeld = "agent_slug_held"
 )
+
+// ReloadUnconfirmedMessage is the caller-facing text for
+// BrokerErrCodeReloadUnconfirmed, shared by the broker, the hub and the CLI.
+// It must stay true whether or not the agent also reloads the credential on
+// its own (for example from a credential file watch, where present).
+const ReloadUnconfirmedMessage = "credential issued and written; the running agent did not confirm the reload. " +
+	"If it keeps failing to authenticate, restart the agent"
 
 // BrokerErrDetailReason is the details key of a
 // BrokerErrCodeLocalWorktreeRefused error (the client-facing message, with
@@ -161,6 +235,12 @@ const (
 	BrokerKSASourceDiscovered = "discovered"
 )
 
+// BrokerSASourceCloudRunAllowlist is the Source of a service account report
+// entry for a Cloud Run profile: the account is listed in the selected
+// runtime entry's cloudrun.assignable_service_accounts in the broker's
+// global settings. Such an entry carries only the GSA.
+const BrokerSASourceCloudRunAllowlist = "cloudrun_allowlist"
+
 // Values of BrokerErrDetailDiscovery.
 const (
 	// BrokerKSADiscoveryNoMatch: no ServiceAccount in the namespace carries
@@ -186,6 +266,14 @@ const (
 // account report (hubclient.ProfileSAMappingsState.ReportVersion). Version
 // 2 means the broker reports a profile incomplete whenever dispatch would
 // not use the profile's entries (BrokerSAReportForceRuntime). The Hub
-// refuses a dispatch from a report only at this version or later; a report
-// without it (an older broker) is unknown.
-const BrokerSAReportVersion = 2
+// refuses a Kubernetes dispatch from a report only at version 2 or later;
+// a report without a version is unknown.
+//
+// Version 3 adds a report for each Cloud Run profile: its
+// cloudrun.assignable_service_accounts as entries with Source
+// BrokerSASourceCloudRunAllowlist, whether the profile can run an instance
+// as a per-dispatch identity, and whether a block account is configured
+// (as a boolean only). With the hub.cloudrun_native_identity experiment
+// on, the Hub refuses a Cloud Run dispatch from a profile whose report is
+// missing or below version 3.
+const BrokerSAReportVersion = 3

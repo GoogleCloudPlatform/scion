@@ -392,9 +392,10 @@ func TestStewardCapabilities(t *testing.T) {
 }
 
 // TestStewardEvents: every grant creation, level change and link creation
-// by a steward writes an event naming the actor and the steward clause,
-// and neither the event nor the decision log carries the link token or
-// its hash.
+// by a steward writes an event naming the actor and the steward clause
+// (a link by each clause), and neither the event nor the decision log
+// carries the link token or its hash; the decision log carries no link id
+// either.
 func TestStewardEvents(t *testing.T) {
 	f := newStewardFixture(t)
 	c := captureLog(f.fixture, slog.LevelDebug)
@@ -420,15 +421,22 @@ func TestStewardEvents(t *testing.T) {
 	}
 	link := decodeInto[CreateLinkResponse](t, rec)
 	token := strings.TrimPrefix(link.URL, RouteShared)
+	rec = f.jsonDo(ownerSteward, http.MethodPost, linksPath(f.id), `{"ttlHours": 2}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("owner steward link: %d %s", rec.Code, rec.Body.String())
+	}
+	ownerLink := decodeInto[CreateLinkResponse](t, rec)
+	ownerToken := strings.TrimPrefix(ownerLink.URL, RouteShared)
 
 	evs := eventsOf(t, f.store, f.id)[before:]
-	if len(evs) != 3 {
-		t.Fatalf("events = %+v; want grant_created, grant_changed, link_created", evs)
+	if len(evs) != 4 {
+		t.Fatalf("events = %+v; want grant_created, grant_changed, link_created twice", evs)
 	}
 	want := []struct{ action, ref, authority string }{
 		{EventGrantCreated, delegSteward.ref, AuthorityStewardDelegator},
 		{EventGrantChanged, ownerSteward.ref, AuthorityStewardProjectOwner},
 		{EventLinkCreated, delegSteward.ref, AuthorityStewardDelegator},
+		{EventLinkCreated, ownerSteward.ref, AuthorityStewardProjectOwner},
 	}
 	for i, w := range want {
 		e := evs[i]
@@ -445,14 +453,33 @@ func TestStewardEvents(t *testing.T) {
 	if d := evs[2].Detail; d["linkId"] != link.Link.ID || d["expiresAt"] == nil || len(d) != 2 {
 		t.Errorf("link_created detail = %+v", d)
 	}
+	if d := evs[3].Detail; d["linkId"] != ownerLink.Link.ID || d["expiresAt"] == nil || len(d) != 2 {
+		t.Errorf("owner steward link_created detail = %+v", d)
+	}
 	raw, _ := json.Marshal(evs)
-	_, logged := c.take(t)
-	for _, secret := range []string{token, LinkTokenHash(token)} {
+	entries, logged := c.take(t)
+	var linkEntries int
+	for _, e := range entries {
+		if e["action"] == logActionLinkCreated {
+			linkEntries++
+		}
+	}
+	if linkEntries != 2 {
+		t.Errorf("the decision log has %d %s entries, want 2: %v", linkEntries, logActionLinkCreated, entries)
+	}
+	for _, secret := range []string{token, LinkTokenHash(token), ownerToken, LinkTokenHash(ownerToken)} {
 		if strings.Contains(string(raw), secret) {
-			t.Errorf("an event carries the link token or its hash: %s", raw)
+			t.Errorf("an event carries a link token or its hash: %s", raw)
 		}
 		if strings.Contains(logged, secret) {
-			t.Errorf("the decision log carries the link token or its hash: %s", logged)
+			t.Errorf("the decision log carries a link token or its hash: %s", logged)
+		}
+	}
+	// The link id is in the artifact's history (above), never in the
+	// decision log.
+	for _, id := range []string{link.Link.ID, ownerLink.Link.ID} {
+		if id == "" || strings.Contains(logged, id) {
+			t.Errorf("the decision log carries the link id %q: %s", id, logged)
 		}
 	}
 }
@@ -634,6 +661,10 @@ func laxActor(actor *Actor) *Actor {
 
 func (s laxStore) PutGrant(ctx context.Context, g *Grant, max int, cross bool, actor *Actor) (GrantPut, error) {
 	return s.Store.PutGrant(ctx, g, max, cross, laxActor(actor))
+}
+
+func (s laxStore) PutGrantNotify(ctx context.Context, g *Grant, max int, cross bool, actor *Actor, notify bool) (GrantPutResult, error) {
+	return s.Store.PutGrantNotify(ctx, g, max, cross, laxActor(actor), notify)
 }
 
 func (s laxStore) UpdateArtifact(ctx context.Context, id string, u ArtifactUpdate) (*Artifact, error) {

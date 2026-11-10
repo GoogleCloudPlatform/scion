@@ -140,6 +140,8 @@ func TestResolveDerivedConfig_GoldenCreatePath(t *testing.T) {
 
 	want := fmt.Sprintf(`{
   "model": "concrete-model-x",
+  "modelSize": "extra-large",
+  "harness": "claude",
   "workspace": "/tmp/golden-workspace",
   "gitClone": {
     "url": "https://example.com/golden/repo.git",

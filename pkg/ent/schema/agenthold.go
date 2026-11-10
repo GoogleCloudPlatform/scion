@@ -41,6 +41,7 @@ var membershipLossTriggers = []string{
 	"restore_check",
 	"reconcile",
 	"test_identity_expiry",
+	"member_leave",
 }
 
 // AgentHold holds the schema definition for the AgentHold entity: one row

@@ -29,6 +29,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -41,7 +42,7 @@ import (
 // joinWithToken redeems a join token with no Authorization header.
 func joinWithToken(t *testing.T, srv *Server, brokerID, token string) *httptest.ResponseRecorder {
 	t.Helper()
-	return doRequestNoAuth(t, srv, http.MethodPost, "/api/v1/brokers/join", BrokerJoinRequest{
+	return doRequestNoAuthLoopback(t, srv, http.MethodPost, "/api/v1/brokers/join", BrokerJoinRequest{
 		BrokerID:  brokerID,
 		JoinToken: token,
 		Hostname:  "headless-host",
@@ -181,7 +182,7 @@ func TestBrokerJoinToken_MintThenJoinWithoutUserAuth(t *testing.T) {
 	require.NoError(t, err)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/runtime-brokers/"+minted.BrokerID+"/heartbeat", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	require.NoError(t, srv.brokerAuthService.SignRequest(req, minted.BrokerID, key))
+	require.NoError(t, (&apiclient.HMACAuth{BrokerID: minted.BrokerID, SecretKey: key}).ApplyAuth(req))
 	hb := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(hb, req)
 	assert.Equal(t, http.StatusOK, hb.Code, "HMAC with the joined secret should authenticate; body: %s", hb.Body.String())
@@ -210,7 +211,7 @@ func TestBrokerJoinToken_PreserveSettingsLeavesBrokerUnchanged(t *testing.T) {
 	}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
 
-	rec := doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+	rec := doRequestAsUserLoopback(t, srv, owner, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
 		Name:             broker.Name,
 		PreserveSettings: true,
 		AutoProvide:      false,
@@ -230,7 +231,7 @@ func TestBrokerJoinToken_PreserveSettingsLeavesBrokerUnchanged(t *testing.T) {
 
 	// Without preserveSettings, re-registration applies AutoProvide and new
 	// label keys; existing label values and the GCP host pair are kept.
-	rec = doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+	rec = doRequestAsUserLoopback(t, srv, owner, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
 		Name:        broker.Name,
 		AutoProvide: false,
 		Labels:      map[string]string{"env": "requested", "zone": "z1"},
@@ -252,7 +253,7 @@ func TestBrokerJoinToken_PreserveSettingsNewBrokerIgnoresSettings(t *testing.T) 
 	srv, s := testServer(t)
 	minter := newHubMemberUser(t, s, "jt-preserve-new-minter")
 
-	rec := doRequestAsUser(t, srv, minter, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+	rec := doRequestAsUserLoopback(t, srv, minter, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
 		Name:                       "jt-preserve-new-broker",
 		PreserveSettings:           true,
 		AutoProvide:                true,
@@ -553,7 +554,7 @@ func TestBrokerJoinToken_MintRequiresBrokerCreate(t *testing.T) {
 		require.Equal(t, http.StatusCreated, mintJoinToken(t, srv, owner, "jt-uat-session-broker", 600).Code)
 
 		uat := mintScopedUAT(t, srv, ownerID, projectID, []string{"agent:read", "agent:create", "project:read"})
-		rec := doRequestWithToken(t, srv, uat, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+		rec := doRequestWithTokenLoopback(t, srv, uat, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
 			Name:                "jt-uat-broker",
 			JoinTokenTTLSeconds: 600,
 			PreserveSettings:    true,
@@ -578,7 +579,7 @@ func TestBrokerJoinToken_HubTokenMintsOnlyForOwnBroker(t *testing.T) {
 	key := mintHubBrokerUAT(t, srv, member.ID, "broker:create")
 
 	mintWithToken := func(name string) *httptest.ResponseRecorder {
-		return doRequestWithToken(t, srv, key, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+		return doRequestWithTokenLoopback(t, srv, key, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
 			Name:                name,
 			JoinTokenTTLSeconds: 600,
 			PreserveSettings:    true,

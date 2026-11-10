@@ -25,6 +25,7 @@ import (
 	"io"
 	"io/fs"
 	"net/http"
+	"net/url"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -32,7 +33,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"testing"
 	"time"
 
@@ -215,6 +215,24 @@ type Client struct {
 	// onKickWait, when set, is called by KickTokenRefreshWait once it has
 	// subscribed and kicked (test hook).
 	onKickWait func()
+	// credChanged is closed, and replaced by a fresh channel, each time the
+	// in-memory agent credential changes (see CredentialChanged). Guarded
+	// by tokenMu; created on first use.
+	credChanged chan struct{}
+	// transportFP is the fingerprint of the last transport token value this
+	// client wrote to, or adopted from, the transport token file, so a
+	// value written there by another process can be told apart from one
+	// written here. transportFPSet reports whether it has been recorded.
+	// Guarded by tokenMu.
+	transportFP    [32]byte
+	transportFPSet bool
+	// verifiedIAT is the newest issue time among agent credentials the hub
+	// has accepted from this client (see VerifiedIssuedAt). It only ever
+	// increases. Guarded by tokenMu.
+	verifiedIAT time.Time
+	// cstate is what this client knows about its own credential, for
+	// sciontool doctor (see credential_state.go).
+	cstate credState
 }
 
 // NewClient creates a new Hub client from environment variables.
@@ -261,13 +279,14 @@ func NewClient() *Client {
 			Timeout: DefaultTimeout,
 		},
 	}
+	c.recordCredential(token)
 	c.configureOIDCTransport()
 	return c
 }
 
 // NewClientWithConfig creates a new Hub client with explicit configuration.
 func NewClientWithConfig(hubURL, token, agentID string) *Client {
-	return &Client{
+	c := &Client{
 		hubURL:         hubURL,
 		token:          token,
 		agentID:        agentID,
@@ -278,6 +297,8 @@ func NewClientWithConfig(hubURL, token, agentID string) *Client {
 			Timeout: DefaultTimeout,
 		},
 	}
+	c.recordCredential(c.token)
+	return c
 }
 
 // IsConfigured returns true if the client is properly configured.
@@ -337,17 +358,24 @@ func GetAgentID() string {
 
 // UpdateStatus sends a status update to the Hub with automatic retry on transient failures.
 func (c *Client) UpdateStatus(ctx context.Context, status StatusUpdate) error {
+	_, err := c.updateStatus(ctx, status)
+	return err
+}
+
+// updateStatus is UpdateStatus that also returns how the final attempt
+// went.
+func (c *Client) updateStatus(ctx context.Context, status StatusUpdate) (writeResult, error) {
 	if !c.IsConfigured() {
-		return fmt.Errorf("hub client not configured")
+		return writeResult{}, fmt.Errorf("hub client not configured")
 	}
 
 	endpoint := fmt.Sprintf("%s/api/v1/agents/%s/status", strings.TrimSuffix(c.hubURL, "/"), c.agentID)
 
 	body, err := json.Marshal(status)
 	if err != nil {
-		return fmt.Errorf("failed to marshal status: %w", err)
+		return writeResult{}, fmt.Errorf("failed to marshal status: %w", err)
 	}
-	return c.postJSONWithRetry(ctx, endpoint, body)
+	return c.postJSONWithRetryResult(ctx, endpoint, body)
 }
 
 // ReportSSHHostKey sends the conduit SSH server's public host key
@@ -357,13 +385,30 @@ func (c *Client) ReportSSHHostKey(ctx context.Context, publicKey string) error {
 }
 
 func (c *Client) postJSONWithRetry(ctx context.Context, endpoint string, body []byte) error {
+	_, err := c.postJSONWithRetryResult(ctx, endpoint, body)
+	return err
+}
+
+// writeResult describes the final attempt of a status write: its HTTP
+// status (0 when none), the short fingerprint of the credential it
+// presented and, for a 401 or 403, who refused it.
+type writeResult struct {
+	status    int
+	fp        string
+	refusedBy string
+}
+
+// postJSONWithRetryResult is postJSONWithRetry that also returns how the
+// final attempt went.
+func (c *Client) postJSONWithRetryResult(ctx context.Context, endpoint string, body []byte) (res writeResult, err error) {
 	if err := c.writes.allow(); err != nil {
-		return err
+		return res, err
 	}
 	// Read token under lock to avoid data race with concurrent RefreshToken calls.
 	c.tokenMu.RLock()
 	currentToken := c.token
 	c.tokenMu.RUnlock()
+	res.fp = shortFP(currentToken)
 
 	var lastErr error
 	attempts := c.maxRetries + 1
@@ -373,7 +418,7 @@ func (c *Client) postJSONWithRetry(ctx context.Context, endpoint string, body []
 			delay := c.calculateBackoff(attempt)
 			select {
 			case <-ctx.Done():
-				return fmt.Errorf("context cancelled during retry: %w", ctx.Err())
+				return res, fmt.Errorf("context cancelled during retry: %w", ctx.Err())
 			case <-time.After(delay):
 				// Continue with retry
 			}
@@ -382,7 +427,7 @@ func (c *Client) postJSONWithRetry(ctx context.Context, endpoint string, body []
 		// Create a fresh request for each attempt (body reader needs to be recreated)
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 		if err != nil {
-			return fmt.Errorf("failed to create request: %w", err)
+			return res, fmt.Errorf("failed to create request: %w", err)
 		}
 
 		req.Header.Set("Content-Type", "application/json")
@@ -390,9 +435,10 @@ func (c *Client) postJSONWithRetry(ctx context.Context, endpoint string, body []
 
 		resp, err := c.client.Do(req)
 		if err != nil {
+			res.status, res.refusedBy = 0, RefusedByNone
 			// Check if context was cancelled - don't retry
 			if ctx.Err() != nil {
-				return fmt.Errorf("request failed (context cancelled): %w", ctx.Err())
+				return res, fmt.Errorf("request failed (context cancelled): %w", ctx.Err())
 			}
 			// Network error - retry
 			lastErr = fmt.Errorf("failed to send request: %w", err)
@@ -402,23 +448,25 @@ func (c *Client) postJSONWithRetry(ctx context.Context, endpoint string, body []
 		// Read response body
 		respBody, _ := io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
-		c.writes.observe(resp.StatusCode)
+		res.status = resp.StatusCode
+		res.refusedBy = ClassifyRejection(resp, respBody)
+		c.writes.observeFrom(resp.StatusCode, res.fp, res.refusedBy)
 
 		// Success
 		if resp.StatusCode < 400 {
-			return nil
+			return res, nil
 		}
 
 		// 4xx errors are client errors - don't retry
 		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
-			return fmt.Errorf("hub returned error %d: %s", resp.StatusCode, string(respBody))
+			return res, fmt.Errorf("hub returned error %d: %s", resp.StatusCode, string(respBody))
 		}
 
 		// 5xx errors are server errors - retry
 		lastErr = fmt.Errorf("hub returned error %d: %s", resp.StatusCode, string(respBody))
 	}
 
-	return fmt.Errorf("request failed after %d attempts: %w", attempts, lastErr)
+	return res, fmt.Errorf("request failed after %d attempts: %w", attempts, lastErr)
 }
 
 // calculateBackoff returns the delay for a retry attempt using exponential backoff.
@@ -438,10 +486,17 @@ func (c *Client) calculateBackoff(attempt int) time.Duration {
 // Heartbeat sends a heartbeat to the Hub.
 // Note: Heartbeat only updates last_seen timestamp, it does not change the agent's status.
 // This allows the actual status (working, busy, etc.) to be preserved between heartbeats.
+//
+// Its outcome is recorded in the client's credential state, including a
+// heartbeat that was not sent because status writes are paused.
 func (c *Client) Heartbeat(ctx context.Context) error {
-	return c.UpdateStatus(ctx, StatusUpdate{
+	res, err := c.updateStatus(ctx, StatusUpdate{
 		Heartbeat: true,
 	})
+	if c != nil && c.IsConfigured() {
+		c.recordHeartbeat(res, err)
+	}
+	return err
 }
 
 // ReportState sends a structured phase/activity update to the Hub.
@@ -577,9 +632,10 @@ func (c *Client) DeletePort(ctx context.Context, port int) error {
 	return nil
 }
 
-// StatusError is returned by the port API methods when the hub answers
-// with an unexpected HTTP status. Its message keeps the
-// "hub returned error <code>: <body>" form used by the other methods.
+// StatusError is returned by the port API methods and the GCP credential
+// fetches when the hub answers with an unexpected HTTP status. Its message
+// keeps the "hub returned error <code>: <body>" form used by the other
+// methods.
 type StatusError struct {
 	StatusCode int
 	Body       string
@@ -587,6 +643,17 @@ type StatusError struct {
 
 func (e *StatusError) Error() string {
 	return fmt.Sprintf("hub returned error %d: %s", e.StatusCode, e.Body)
+}
+
+// HTTPStatusCode returns the hub's HTTP status. Packages that cannot import
+// this one (the metadata server) classify hub errors through it.
+func (e *StatusError) HTTPStatusCode() int { return e.StatusCode }
+
+// IsForbidden reports whether err carries an HTTP 403 from the hub, meaning
+// the hub refused the request for this agent.
+func IsForbidden(err error) bool {
+	var se *StatusError
+	return errors.As(err, &se) && se.StatusCode == http.StatusForbidden
 }
 
 // IsUnauthorized reports whether err carries an HTTP 401 from the hub,
@@ -805,6 +872,15 @@ func (c *Client) RefreshToken(ctx context.Context) (string, time.Time, error) {
 	currentToken := c.token
 	c.tokenMu.RUnlock()
 
+	// Record the outcome in the credential state, for the credential
+	// presented.
+	var (
+		recStatus    int
+		recRefusedBy string
+		recOK        bool
+	)
+	defer func() { c.recordRefresh(shortFP(currentToken), recStatus, recRefusedBy, recOK) }()
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, nil)
 	if err != nil {
 		return "", time.Time{}, fmt.Errorf("failed to create request: %w", err)
@@ -819,6 +895,8 @@ func (c *Client) RefreshToken(ctx context.Context) (string, time.Time, error) {
 	defer func() { _ = resp.Body.Close() }()
 
 	respBody, _ := io.ReadAll(resp.Body)
+	recStatus = resp.StatusCode
+	recRefusedBy = ClassifyRejection(resp, respBody)
 
 	if resp.StatusCode != http.StatusOK {
 		// 401/403 mean the presented token is rejected (e.g. after a hub
@@ -847,10 +925,18 @@ func (c *Client) RefreshToken(ctx context.Context) (string, time.Time, error) {
 
 	// Update the client's token under write lock
 	c.tokenMu.Lock()
-	c.token = result.Token
+	c.setTokenLocked(result.Token)
 	chownUID, chownGID := c.tokenChownUID, c.tokenChownGID
 	c.tokenMu.Unlock()
 	c.writes.reset()
+	// A credential the hub issued in answer to this request counts as
+	// accepted, but only if the hub URL itself answered: resp.Request is
+	// the request that produced the response, and its Response field is set
+	// only when the client made that request on the hub's instruction to
+	// go elsewhere.
+	if resp.Request != nil && resp.Request.Response == nil {
+		c.noteVerified(result.Token, false)
+	}
 
 	// Persist the new token to a file so child processes can read it.
 	// Errors are non-fatal — the in-memory token is already updated.
@@ -869,7 +955,148 @@ func (c *Client) RefreshToken(ctx context.Context) (string, time.Time, error) {
 	}
 	c.recordTransportRefreshOutcome(result, chownUID, chownGID)
 
+	recOK = true
 	return result.Token, expiresAt, nil
+}
+
+// DelegatedTokenPrefix is the fixed prefix of a delegated credential
+// (.design/agent-delegation.md §9.1).
+const DelegatedTokenPrefix = "scion_adt_"
+
+// maxExchangeResponseBytes bounds the exchange response body read.
+const maxExchangeResponseBytes = 1 << 20
+
+// DelegatedCredential is a delegated credential returned by exchange. Its
+// Token is a bearer: keep it in memory only, and never log, persist or pass
+// it to another process. String and GoString redact it, so formatting the
+// value with %v or %#v does not print it.
+type DelegatedCredential struct {
+	Token        string    `json:"token"`
+	ExpiresAt    time.Time `json:"expiresAt"`
+	GrantID      string    `json:"grantId"`
+	CredentialID string    `json:"credentialId"`
+	Audience     string    `json:"audience"`
+	Permissions  []string  `json:"permissions"`
+}
+
+// String describes the credential without its token.
+func (d DelegatedCredential) String() string {
+	return fmt.Sprintf("delegated credential %s (grant %s, expires %s)",
+		d.CredentialID, d.GrantID, d.ExpiresAt.UTC().Format(time.RFC3339))
+}
+
+// GoString describes the credential without its token.
+func (d DelegatedCredential) GoString() string { return d.String() }
+
+// ExchangeError is a refused delegated credential exchange: the hub's HTTP
+// status and the code of its structured error body ("" when the body was
+// not one).
+type ExchangeError struct {
+	StatusCode int
+	Code       string
+	Message    string
+}
+
+func (e *ExchangeError) Error() string {
+	if e.Code == "" {
+		return fmt.Sprintf("delegation exchange failed with status %d", e.StatusCode)
+	}
+	return fmt.Sprintf("delegation exchange failed with status %d (%s): %s", e.StatusCode, e.Code, e.Message)
+}
+
+// Reauthenticate reports whether the hub refused the agent credential the
+// exchange was made with. Both 401 answers mean this (§8.2 step 2): the
+// middleware's unauthorized for a revoked agent credential, and the
+// handler's agent_credential_invalid for a missing or expired one. The
+// same agent credential must not be retried; exchange again only after the
+// agent credential changes.
+func (e *ExchangeError) Reauthenticate() bool {
+	return e.StatusCode == http.StatusUnauthorized
+}
+
+// Retryable reports whether the same exchange may be retried, after a
+// backoff, with the same agent credential: the hub answered 5xx (503
+// unavailable is a credential-status lookup fault).
+func (e *ExchangeError) Retryable() bool {
+	return e.StatusCode >= 500
+}
+
+// ExchangeDelegation exchanges the delegation grant grantID for a delegated
+// credential, authenticated with the agent's current credential
+// (POST /api/v1/agents/{agentId}/delegations/{grantId}/exchange). audience
+// must be the hub's delegated-credential audience ("scion-hub:<hub ID>",
+// or "scion-hub" for a hub without an ID). The request asks for the whole
+// grant ceiling and the grant's maximum lifetime.
+//
+// A refusal is an *ExchangeError. A delegated credential cannot be
+// refreshed: to extend it, call ExchangeDelegation again (re-exchange),
+// which the hub checks in full each time.
+func (c *Client) ExchangeDelegation(ctx context.Context, grantID, audience string) (*DelegatedCredential, error) {
+	if !c.IsConfigured() {
+		return nil, fmt.Errorf("hub client not configured")
+	}
+	if grantID == "" {
+		return nil, fmt.Errorf("delegation exchange: grant ID is required")
+	}
+	if audience == "" {
+		return nil, fmt.Errorf("delegation exchange: audience is required")
+	}
+
+	endpoint := fmt.Sprintf("%s/api/v1/agents/%s/delegations/%s/exchange",
+		strings.TrimSuffix(c.hubURL, "/"), url.PathEscape(c.agentID), url.PathEscape(grantID))
+	body, err := json.Marshal(struct {
+		Audience string `json:"audience"`
+	}{Audience: audience})
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode exchange request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	c.setAgentAuth(req.Header, c.AuthToken())
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("delegation exchange request failed: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxExchangeResponseBytes))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read exchange response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		xe := &ExchangeError{StatusCode: resp.StatusCode}
+		var hubErr struct {
+			Error struct {
+				Code    string `json:"code"`
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if json.Unmarshal(respBody, &hubErr) == nil {
+			xe.Code = hubErr.Error.Code
+			xe.Message = hubErr.Error.Message
+		}
+		return nil, xe
+	}
+
+	var cred DelegatedCredential
+	if err := json.Unmarshal(respBody, &cred); err != nil {
+		return nil, fmt.Errorf("failed to parse exchange response")
+	}
+	if !strings.HasPrefix(cred.Token, DelegatedTokenPrefix) || len(cred.Token) == len(DelegatedTokenPrefix) {
+		return nil, fmt.Errorf("exchange response carries no delegated credential")
+	}
+	if cred.GrantID != grantID {
+		return nil, fmt.Errorf("exchange response names grant %q, not %q", cred.GrantID, grantID)
+	}
+	if cred.ExpiresAt.IsZero() {
+		return nil, fmt.Errorf("exchange response has no expiry")
+	}
+	return &cred, nil
 }
 
 // applyRefreshTokens processes the tokens[] array from a refresh response,
@@ -898,6 +1125,8 @@ func (c *Client) applyRefreshTokens(tokens []RefreshTokenEntry, uid, gid int) {
 			}
 			if err := WriteTransportTokenFile(entry.Value, uid, gid); err != nil {
 				log.Error("Failed to persist refreshed transport token: %v", err)
+			} else {
+				c.noteTransportFile(entry.Value)
 			}
 			// app/scion_access is already handled via the legacy token field above
 		}
@@ -1327,9 +1556,39 @@ func (c *Client) GetToken() string {
 // auth reset to inject a freshly-issued token without restarting the client.
 func (c *Client) SetToken(token string) {
 	c.tokenMu.Lock()
-	c.token = token
+	c.setTokenLocked(token)
 	c.tokenMu.Unlock()
 	c.writes.reset()
+}
+
+// setTokenLocked stores token as the in-memory credential and wakes every
+// CredentialChanged waiter. It is the one place the in-memory credential
+// changes. The caller holds tokenMu for writing.
+func (c *Client) setTokenLocked(token string) {
+	c.token = token
+	c.recordCredential(token)
+	if c.credChanged != nil {
+		close(c.credChanged)
+	}
+	c.credChanged = make(chan struct{})
+}
+
+// CredentialChanged returns a channel that is closed the next time the
+// in-memory agent credential changes (SetToken, or a successful refresh).
+// A loop that backs off after the hub refuses the credential takes the
+// channel before its request and also waits on it, so it retries at once
+// with a new credential instead of waiting out its backoff. Take a fresh
+// channel for each wait: a closed channel stays closed.
+func (c *Client) CredentialChanged() <-chan struct{} {
+	if c == nil {
+		return nil
+	}
+	c.tokenMu.Lock()
+	defer c.tokenMu.Unlock()
+	if c.credChanged == nil {
+		c.credChanged = make(chan struct{})
+	}
+	return c.credChanged
 }
 
 // Environment variable and file path constants for GitHub App token refresh.
@@ -1524,7 +1783,7 @@ const githubTokenFileMode = 0600
 // uses. It is a package var purely so tests that don't run as root can
 // replace it with a fake and still exercise the call site; production code
 // never overrides it.
-var fchownFn = syscall.Fchown
+var fchownFn = dirfd.Fchown
 
 // enforceTokenFileOwnerChecks gates the extra "owner is root or the
 // containing directory's owner" check that ReadTokenFile and
@@ -1779,6 +2038,15 @@ func SetTokenHome(dir string) func() {
 	}
 }
 
+// TokenHomeIsolated reports whether the token home is safe to write under
+// `go test`: outside tests always, and in a test only after SetTokenHome.
+// Code that creates files next to the token file (for example the
+// delegation socket) checks it, so a test never touches a live agent's
+// ~/.scion.
+func TokenHomeIsolated() bool {
+	return !testing.Testing() || tokenHomeOverridden
+}
+
 // TokenFilePath returns the path to the canonical token file.
 // In agent containers it always resolves to the scion user's home
 // directory so that root (sciontool init) and scion (child processes)
@@ -1931,6 +2199,7 @@ func (c *Client) AdoptTransportTokenFile(uid, gid int) (bool, error) {
 	if err := WriteTransportTokenFile(tok, uid, gid); err != nil {
 		return false, err
 	}
+	c.noteTransportFile(tok)
 	c.oidcSource.SetToken(tok, expiry)
 	// Record the reset so doctor does not keep showing an earlier failed
 	// refresh next to the freshly installed credential.
@@ -1967,7 +2236,9 @@ func (c *Client) restoreTransportTokenFile(uid, gid int) {
 	}
 	if err := WriteTransportTokenFile(cur, uid, gid); err != nil {
 		log.Error("Failed to restore transport token file: %v", err)
+		return
 	}
+	c.noteTransportFile(cur)
 }
 
 // RemoveTransportTokenFile removes the transport token file and its refresh
@@ -1999,7 +2270,7 @@ func removeFileNoFollow(path string) (bool, error) {
 		}
 		return false, err
 	}
-	defer func() { _ = syscall.Close(dirFd) }()
+	defer func() { _ = dirfd.Close(dirFd) }()
 	if err := dirfd.UnlinkAt(dirFd, leaf); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return false, nil
@@ -2090,62 +2361,6 @@ func ReadTransportTokenFileGuarded(path string) (string, error) {
 	return readTokenFileGuarded(path)
 }
 
-// ChownTokenFile fixes the ownership of an already-written token file to
-// uid:gid — used when the token file was written by another process (the
-// host-side agent manager, before this container started) and this
-// (root) process only needs to hand it off to the scion user, not rewrite
-// its content.
-//
-// It resolves the token file's parent directory the same symlink-safe way
-// WriteFileNoFollowChown does (dirfd.OpenParentNoFollow), then opens the
-// leaf itself without following a symlink, and refuses to chown anything
-// but a single-link regular file — a hardlink to a root-owned file would
-// otherwise pass a bare "is this a regular file" check and hand that file
-// to the scion user. This check always applies, on every runtime. The
-// chown is fchown on that open fd, never a path-based chown that a symlink
-// swapped in afterwards could redirect.
-//
-// When EnforceTokenFileOwnerChecks(true) has been called (substrate only),
-// it additionally requires the file's current owner to be root or the
-// containing directory's own owner before chowning it — the same rule
-// readTokenFileGuarded applies, gated the same way and for the same
-// reason: it isn't provably safe to require on every runtime's
-// token-provisioning path, only on the one that requires privilege drop.
-func ChownTokenFile(uid, gid int) error {
-	path := TokenFilePath()
-	dirFd, leaf, err := dirfd.OpenParentNoFollow(path)
-	if err != nil {
-		return fmt.Errorf("failed to open parent directory of token file: %w", err)
-	}
-	defer func() { _ = syscall.Close(dirFd) }()
-
-	var dirSt syscall.Stat_t
-	if err := syscall.Fstat(dirFd, &dirSt); err != nil {
-		return fmt.Errorf("failed to stat parent directory of token file: %w", err)
-	}
-
-	f, err := dirfd.OpenAt(dirFd, leaf, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
-	if err != nil {
-		return fmt.Errorf("failed to open token file: %w", err)
-	}
-	defer func() { _ = f.Close() }()
-
-	var st syscall.Stat_t
-	if err := syscall.Fstat(int(f.Fd()), &st); err != nil {
-		return fmt.Errorf("failed to stat token file: %w", err)
-	}
-	if st.Mode&syscall.S_IFMT != syscall.S_IFREG || st.Nlink != 1 {
-		return fmt.Errorf("refusing to chown token file: not a single-link regular file")
-	}
-	if enforceTokenFileOwnerChecks.Load() && st.Uid != 0 && st.Uid != dirSt.Uid {
-		return fmt.Errorf("refusing to chown token file: unexpected owner")
-	}
-	if err := f.Chown(uid, gid); err != nil {
-		return fmt.Errorf("failed to chown token file: %w", err)
-	}
-	return nil
-}
-
 // tokenFileMaxBytes bounds readTokenFileGuarded's read: the agent token is
 // a compact JWT-style string, so anything longer already isn't a token
 // this process (or the host-side agent manager) wrote. A longer file is
@@ -2201,7 +2416,7 @@ func ReadTokenFileUnder(base, rel string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer func() { _ = syscall.Close(dirFd) }()
+	defer func() { _ = dirfd.Close(dirFd) }()
 	token, err := readTokenAt(dirFd, leaf, filepath.Join(base, rel))
 	if err != nil {
 		return "", err
@@ -2228,26 +2443,8 @@ func readTokenFileGuarded(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer func() { _ = syscall.Close(dirFd) }()
+	defer func() { _ = dirfd.Close(dirFd) }()
 	return readTokenAt(dirFd, leaf, path)
-}
-
-// readTokenAt applies the token-file checks to leaf, relative to the
-// already-resolved parent directory dirFd; path is used only in errors.
-func readTokenAt(dirFd int, leaf, path string) (string, error) {
-	var dirSt syscall.Stat_t
-	if err := syscall.Fstat(dirFd, &dirSt); err != nil {
-		return "", fmt.Errorf("failed to stat parent directory of %s: %w", path, err)
-	}
-
-	data, st, err := dirfd.ReadAtNoFollowStat(dirFd, leaf, tokenFileMaxBytes)
-	if err != nil {
-		return "", fmt.Errorf("%s: %w", path, err)
-	}
-	if enforceTokenFileOwnerChecks.Load() && st.Uid != 0 && st.Uid != dirSt.Uid {
-		return "", fmt.Errorf("refusing to read %s: unexpected owner", path)
-	}
-	return string(data), nil
 }
 
 // selfMessageRequest is the payload for delivering a message to the current agent
@@ -2387,7 +2584,7 @@ func (c *Client) FetchGCPToken(ctx context.Context, scopes []string) (*GCPAccess
 
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("hub returned %d: %s", resp.StatusCode, string(respBody))
+		return nil, &StatusError{StatusCode: resp.StatusCode, Body: string(respBody)}
 	}
 
 	var token GCPAccessTokenResponse
@@ -2431,7 +2628,7 @@ func (c *Client) FetchGCPIdentityToken(ctx context.Context, audience string) (st
 
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("hub returned %d: %s", resp.StatusCode, string(respBody))
+		return "", &StatusError{StatusCode: resp.StatusCode, Body: string(respBody)}
 	}
 
 	var result struct {

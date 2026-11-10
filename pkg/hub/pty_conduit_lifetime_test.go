@@ -170,8 +170,11 @@ func TestAgentPTY_LifetimeCapHandoff(t *testing.T) {
 
 	relayClock.Advance(30 * time.Second)
 	ce := readUntilClose(t, c)
-	assert.Equal(t, wsprotocol.ClosePTYUpstreamUnavailable, ce.Code)
-	assert.Equal(t, relay.ReasonRelayRestart, ce.Text)
+	// On a mismatch, the relay side of the agent's session says whether it
+	// ended at the drain deadline with its 4503 or for another reason first
+	// (ptone/scion#5045).
+	assert.Equal(t, wsprotocol.ClosePTYUpstreamUnavailable, ce.Code, "close %q; agent session (relay side): %s", ce.Text, conduitSessionState(ls))
+	assert.Equal(t, relay.ReasonRelayRestart, ce.Text, "agent session (relay side): %s", conduitSessionState(ls))
 	assert.True(t, relayClock.Now().Before(capAt), "the PTY close must come before the cap (at +%s)", relayClock.Now().Sub(t0))
 	waitClosedPTY(t, p)
 	select {

@@ -82,6 +82,21 @@ func assertInitGitTokenLikeAgent(t *testing.T, pod *corev1.Pod, wantKey string) 
 	assertTokenNotInPodSpec(t, pod)
 }
 
+// assertAgentGitTokenFromSecret checks the agent container reads GITHUB_TOKEN
+// through a secretKeyRef (not a plain value) with the given key. For
+// clone-per-agent the agent container clones, so the init container has no token
+// (assertInitHasNoGitToken covers that separately).
+func assertAgentGitTokenFromSecret(t *testing.T, pod *corev1.Pod, wantKey string) {
+	t.Helper()
+	agent := envEntry(pod.Spec.Containers[0].Env, provision.GitTokenEnv)
+	require.NotNil(t, agent, "agent container must have GITHUB_TOKEN")
+	assert.Empty(t, agent.Value, "no plain value")
+	require.NotNil(t, agent.ValueFrom)
+	require.NotNil(t, agent.ValueFrom.SecretKeyRef)
+	assert.Equal(t, wantKey, agent.ValueFrom.SecretKeyRef.Key)
+	assertTokenNotInPodSpec(t, pod)
+}
+
 func assertInitHasNoGitToken(t *testing.T, pod *corev1.Pod) {
 	t.Helper()
 	for _, ic := range pod.Spec.InitContainers {
@@ -163,11 +178,12 @@ func TestBuildPod_NFSGitToken_NoneConfigured(t *testing.T) {
 
 // A git token that arrives as a plain env value (a GitHub App token minted
 // at dispatch, or the NoAuth fallback) is moved into the per-agent Secret;
-// the agent container and the cloning init container both read it from
-// there, and the pod spec carries no value.
+// the agent container reads it from there via secretKeyRef (in clone-per-agent
+// the agent clones, so the init container carries no token), and the pod spec
+// carries no plain value.
 func TestRun_NFSGitToken_PlainEnvDivertedToSecret(t *testing.T) {
 	rt, clientset := newTransportTestRuntime(false)
-	cfg := nfsBaseConfig("gt-run")
+	cfg := nfsAgentDirConfig("gt-run")
 	cfg.Labels = map[string]string{"scion.agent": "true", "scion.name": "gt-run"}
 	cfg.Env = []string{"FOO=bar", "GITHUB_TOKEN=" + testGitToken}
 	// A resolved secret for the same variable loses to the env value, as
@@ -181,7 +197,8 @@ func TestRun_NFSGitToken_PlainEnvDivertedToSecret(t *testing.T) {
 	assert.Equal(t, testGitToken, string(secret.Data[gitCredentialSecretKey]))
 	_, kept := secret.Data["GITHUB_TOKEN"]
 	assert.False(t, kept, "the overridden resolved secret is dropped")
-	assertInitGitTokenLikeAgent(t, pod, gitCredentialSecretKey)
+	assertAgentGitTokenFromSecret(t, pod, gitCredentialSecretKey)
+	assertInitHasNoGitToken(t, pod)
 	var count int
 	for _, e := range pod.Spec.Containers[0].Env {
 		if e.Name == provision.GitTokenEnv {
@@ -199,7 +216,7 @@ func TestRun_NFSGitToken_PlainEnvDivertedToSecret(t *testing.T) {
 // created and no container gets GITHUB_TOKEN.
 func TestRun_NFSGitToken_NoneConfiguredUnchanged(t *testing.T) {
 	rt, clientset := newTransportTestRuntime(false)
-	cfg := nfsBaseConfig("gt-run-none")
+	cfg := nfsAgentDirConfig("gt-run-none")
 	cfg.Labels = map[string]string{"scion.agent": "true", "scion.name": "gt-run-none"}
 	cfg.Env = []string{"FOO=bar"}
 
@@ -247,26 +264,28 @@ func TestDivertGitCredential(t *testing.T) {
 }
 
 // A plain GITHUB_TOKEN with no resolved secrets at all: the per-agent
-// Secret is created for it alone, and the agent container and the cloning
-// init container both read it via secretKeyRef.
+// Secret is created for it alone; the agent container reads it via secretKeyRef
+// (the agent clones, so the init container carries no token).
 func TestRun_NFSGitToken_PlainEnvOnlyCreatesSecret(t *testing.T) {
 	rt, clientset := newTransportTestRuntime(false)
-	cfg := nfsBaseConfig("gt-run-only")
+	cfg := nfsAgentDirConfig("gt-run-only")
 	cfg.Labels = map[string]string{"scion.agent": "true", "scion.name": "gt-run-only"}
 	cfg.Env = []string{"GITHUB_TOKEN=" + testGitToken}
 
 	pod, secret := runUntilPodCreated(t, rt, clientset, cfg)
 	require.NotNil(t, secret, "the per-agent Secret is created for the git token")
 	assert.Equal(t, map[string][]byte{gitCredentialSecretKey: []byte(testGitToken)}, secret.Data)
-	assertInitGitTokenLikeAgent(t, pod, gitCredentialSecretKey)
+	assertAgentGitTokenFromSecret(t, pod, gitCredentialSecretKey)
+	assertInitHasNoGitToken(t, pod)
 }
 
 // GKE mode with a Secret Manager reference (the CSI path): the diverted
-// token is stored in the per-agent Kubernetes Secret, both containers read
-// it from there, and the SecretProviderClass does not reference it.
+// token is stored in the per-agent Kubernetes Secret; the agent container reads
+// it from there (the agent clones, so the init container carries no token), and
+// the SecretProviderClass does not reference it.
 func TestRun_NFSGitToken_GKEPathDiverted(t *testing.T) {
 	rt, clientset := newTransportTestRuntime(true)
-	cfg := nfsBaseConfig("gt-run-gke")
+	cfg := nfsAgentDirConfig("gt-run-gke")
 	cfg.Labels = map[string]string{"scion.agent": "true", "scion.name": "gt-run-gke"}
 	cfg.Env = []string{"GITHUB_TOKEN=" + testGitToken}
 	cfg.ResolvedSecrets = []api.ResolvedSecret{
@@ -296,7 +315,8 @@ func TestRun_NFSGitToken_GKEPathDiverted(t *testing.T) {
 	require.True(t, hasCSI, "expected the GKE CSI path")
 	require.NotNil(t, secret)
 	assert.Equal(t, testGitToken, string(secret.Data[gitCredentialSecretKey]))
-	assertInitGitTokenLikeAgent(t, pod, gitCredentialSecretKey)
+	assertAgentGitTokenFromSecret(t, pod, gitCredentialSecretKey)
+	assertInitHasNoGitToken(t, pod)
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -313,7 +333,7 @@ func TestRun_NFSGitToken_GKEPathDiverted(t *testing.T) {
 func TestRun_NFSGitToken_RunScopedSecretName(t *testing.T) {
 	const runID = "33333333-3333-4333-8333-333333333333"
 	rt, clientset := newTransportTestRuntime(false)
-	cfg := nfsBaseConfig("gt-run-scoped")
+	cfg := nfsAgentDirConfig("gt-run-scoped")
 	cfg.Labels = map[string]string{"scion.agent": "true", "scion.name": "gt-run-scoped", api.LabelRunID: runID}
 	cfg.Env = []string{"GITHUB_TOKEN=" + testGitToken}
 	runSecret := k8sAgentObjectNames(cfg.Name, runID).Secret
@@ -337,6 +357,7 @@ func TestRun_NFSGitToken_RunScopedSecretName(t *testing.T) {
 		cancel()
 		return false, nil, nil
 	})
+	seedConfigClaims(t, clientset, "default", cfg)
 	_, _ = rt.Run(ctx, cfg)
 
 	mu.Lock()
@@ -346,14 +367,15 @@ func TestRun_NFSGitToken_RunScopedSecretName(t *testing.T) {
 	assert.Equal(t, testGitToken, string(secret.Data[gitCredentialSecretKey]))
 
 	require.Len(t, pod.Spec.InitContainers, 1)
-	for _, env := range [][]corev1.EnvVar{pod.Spec.Containers[0].Env, pod.Spec.InitContainers[0].Env} {
-		e := envEntry(env, provision.GitTokenEnv)
-		require.NotNil(t, e)
-		assert.Empty(t, e.Value)
-		require.NotNil(t, e.ValueFrom)
-		require.NotNil(t, e.ValueFrom.SecretKeyRef)
-		assert.Equal(t, runSecret, e.ValueFrom.SecretKeyRef.Name)
-		assert.Equal(t, gitCredentialSecretKey, e.ValueFrom.SecretKeyRef.Key)
-	}
+	// Clone-per-agent: the agent container clones and reads the run-scoped
+	// Secret; the init container does not clone, so it carries no token.
+	e := envEntry(pod.Spec.Containers[0].Env, provision.GitTokenEnv)
+	require.NotNil(t, e)
+	assert.Empty(t, e.Value)
+	require.NotNil(t, e.ValueFrom)
+	require.NotNil(t, e.ValueFrom.SecretKeyRef)
+	assert.Equal(t, runSecret, e.ValueFrom.SecretKeyRef.Name)
+	assert.Equal(t, gitCredentialSecretKey, e.ValueFrom.SecretKeyRef.Key)
+	assertInitHasNoGitToken(t, pod)
 	assertTokenNotInPodSpec(t, pod)
 }

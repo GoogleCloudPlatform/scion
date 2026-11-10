@@ -50,7 +50,7 @@ const SCHEMA = {
 
 function createHandler(
   put: { status: number; body: unknown } | { raw: Response },
-  opts: { schemaStatus?: number } = {}
+  opts: { schemaStatus?: number; config?: Record<string, unknown> } = {}
 ): Handler {
   let gets = 0;
   let schemaGets = 0;
@@ -72,14 +72,19 @@ function createHandler(
           return Promise.resolve('raw' in put ? put.raw : json(put.body, put.status));
         }
         gets++;
-        return Promise.resolve(json(makeConfig()));
+        return Promise.resolve(json({ ...makeConfig(), ...(opts.config ?? {}) }));
       }
       return Promise.resolve(json({}));
     },
   };
 }
 
-async function createComponent(handler: Handler): Promise<HTMLElement> {
+/**
+ * Renders the page and, unless edit is false, changes the refresh interval:
+ * the page sends only changed fields (ptone/scion#3913), so a save with no
+ * edit sends no request.
+ */
+async function createComponent(handler: Handler, edit = true): Promise<HTMLElement> {
   vi.stubGlobal('fetch', vi.fn(handler.fetch));
   const el = document.createElement('scion-page-admin-federation') as InstanceType<
     typeof ScionPageAdminFederation
@@ -88,6 +93,10 @@ async function createComponent(handler: Handler): Promise<HTMLElement> {
   await el.updateComplete;
   await new Promise((resolve) => setTimeout(resolve, 100));
   await el.updateComplete;
+  if (edit) {
+    (el as any).refreshInterval = '2h';
+    await el.updateComplete;
+  }
   return el;
 }
 
@@ -227,6 +236,7 @@ describe('scion-page-admin-federation — structured save errors (ptone/scion#39
     element = await createComponent(
       createHandler({
         status: 422,
+        // The body as earlier hubs sent it: a fixed message and string entries.
         body: {
           error: {
             code: 'validation_error',
@@ -243,6 +253,63 @@ describe('scion-page-admin-federation — structured save errors (ptone/scion#39
     expect(summary).toContain('federation config validation failed');
     expect(summary).toContain('trusted_issuers[0]: issuer_url is required');
     expect(element.shadowRoot?.querySelectorAll('[data-field-error]').length).toBe(0);
+  });
+
+  it('a nested validation_error with field entries shows each at its field and issuer row (ptone/scion#4450)', async () => {
+    element = await createComponent(
+      createHandler({
+        status: 422,
+        body: {
+          error: {
+            code: 'validation_error',
+            message: 'server.federation.refresh_interval: invalid refresh_interval',
+            details: {
+              field: 'server.federation.refresh_interval',
+              errors: [
+                {
+                  section: 'federation',
+                  field: 'server.federation.refresh_interval',
+                  message: 'invalid refresh_interval',
+                },
+                {
+                  section: 'federation',
+                  field: 'server.federation.trusted_issuers[1].issuer_url',
+                  message: 'is required',
+                },
+              ],
+            },
+          },
+        },
+      })
+    );
+
+    await clickSave(element);
+
+    expect(text(query(element, '[data-field-error="refresh_interval"]'))).toBe(
+      'invalid refresh_interval'
+    );
+    expect(text(query(element, '[data-field-error="trusted_issuers.1"]'))).toBe('is required');
+    expect(query(element, '.status-message.error')).toBeNull();
+  });
+
+  it('a nested 409 revision_conflict shows the changed-since-loaded notice', async () => {
+    element = await createComponent(
+      createHandler({
+        status: 409,
+        body: {
+          error: {
+            code: 'revision_conflict',
+            message: 'One or more sections have been modified since the expected revision.',
+            details: {
+              conflicted: [{ section: 'federation', expected_revision: 1, current_revision: 2 }],
+            },
+          },
+        },
+      })
+    );
+
+    await clickSave(element);
+    expect(text(query(element, '[data-settings-conflict]'))).toContain('federation');
   });
 
   it('revision_conflict shows the changed-since-loaded notice; Reload refetches', async () => {
@@ -309,12 +376,92 @@ describe('scion-page-admin-federation — structured save errors (ptone/scion#39
     expect(text(query(element, '.status-message.error'))).toBe('Failed to save federation config');
   });
 
-  it('the save payload is unchanged', async () => {
+  it('the save payload carries only the changed field (ptone/scion#3913)', async () => {
     const handler = createHandler({ status: 200, body: {} });
     element = await createComponent(handler);
 
     await clickSave(element);
 
-    expect(handler.puts).toEqual([makeConfig()]);
+    expect(handler.puts).toEqual([{ federation: { refresh_interval: '2h' } }]);
+  });
+
+  it('a save with no change sends no request (ptone/scion#3913)', async () => {
+    const handler = createHandler({ status: 200, body: {} });
+    element = await createComponent(handler, false);
+
+    await clickSave(element);
+
+    expect(handler.puts).toEqual([]);
+    expect(text(query(element, '.status-message.success'))).toBe('No changes to save');
+  });
+});
+
+describe('scion-page-admin-federation — revision on save (ptone/scion#3922)', () => {
+  let element: HTMLElement | null = null;
+
+  afterEach(() => {
+    element?.remove();
+    element = null;
+    vi.restoreAllMocks();
+  });
+
+  const ok = { status: 200, body: { reload: { applied: [] } } };
+
+  it('sends the federation revision from section_metadata on a DB-backed hub', async () => {
+    const handler = createHandler(ok, {
+      config: {
+        settings_tier: 'db',
+        section_metadata: { federation: { source: 'db', revision: 6 } },
+      },
+    });
+    element = await createComponent(handler);
+    await clickSave(element);
+    expect(handler.puts).toHaveLength(1);
+    expect(handler.puts[0]!.expected_revisions).toEqual({ federation: 6 });
+    expect(handler.puts[0]).toHaveProperty('federation');
+  });
+
+  it('sends revision 0 when no federation row is stored', async () => {
+    const handler = createHandler(ok, {
+      config: { settings_tier: 'db', section_metadata: { federation: { source: 'file' } } },
+    });
+    element = await createComponent(handler);
+    await clickSave(element);
+    expect(handler.puts[0]!.expected_revisions).toEqual({ federation: 0 });
+  });
+
+  it('sends no revision on a file-tier hub', async () => {
+    const handler = createHandler(ok, { config: { settings_tier: 'file' } });
+    element = await createComponent(handler);
+    await clickSave(element);
+    expect(handler.puts).toHaveLength(1);
+    expect(handler.puts[0]).not.toHaveProperty('expected_revisions');
+  });
+
+  it('a stale federation section shows the changed-since-loaded notice', async () => {
+    const handler = createHandler(
+      {
+        status: 409,
+        body: {
+          error: {
+            code: 'revision_conflict',
+            message: 'One or more sections have been modified since the expected revision.',
+            details: {
+              conflicted: [{ section: 'federation', expected_revision: 6, current_revision: 7 }],
+            },
+          },
+        },
+      },
+      {
+        config: {
+          settings_tier: 'db',
+          section_metadata: { federation: { source: 'db', revision: 6 } },
+        },
+      }
+    );
+    element = await createComponent(handler);
+    await clickSave(element);
+    expect(handler.puts[0]!.expected_revisions).toEqual({ federation: 6 });
+    expect(text(query(element, '[data-settings-conflict]'))).toContain('federation');
   });
 });

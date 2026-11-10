@@ -102,7 +102,8 @@ steps:
   - name: 'gcr.io/cloud-builders/docker'
     id: 'build-${step_id}'
     dir: 'harnesses/${harness_name}'
-    args: ['buildx', 'build', '--platform', 'linux/amd64,linux/arm64', '--build-arg', 'BASE_IMAGE=\$_REGISTRY/scion-base:\$_TAG', '-t', '\$_REGISTRY/${step_id}:\$_SHORT_SHA', '-t', '\$_REGISTRY/${step_id}:\$_TAG', '-f', 'Dockerfile', '--pull', '--push', '.']
+    entrypoint: 'bash'
+    args: ['/workspace/image-build/scripts/buildx-record-digest.sh', '\$_REGISTRY/${step_id}:\$_TAG', 'buildx', 'build', '--platform', 'linux/amd64,linux/arm64', '--build-arg', 'BASE_IMAGE=\$_REGISTRY/scion-base:\$_TAG', '-t', '\$_REGISTRY/${step_id}:\$_SHORT_SHA', '-t', '\$_REGISTRY/${step_id}:\$_TAG', '-f', 'Dockerfile', '--pull', '--push', '.']
     env:
       - 'DOCKER_CLI_EXPERIMENTAL=enabled'
 
@@ -205,6 +206,7 @@ builder_run_target() {
   # Unlike short_sha/commit_sha, an empty VERSION is a normal, expected value
   # (off-tag builds), not a placeholder — same convention as hack/version.sh.
   local version_val="${VERSION:-}"
+  local build_time_val="${BUILD_TIME:-}"
 
   local subs="_TAG=${tag}"
   if grep -q '_SHORT_SHA' "${config}"; then
@@ -219,6 +221,11 @@ builder_run_target() {
   # works with BSD grep.
   if [[ -n "${version_val}" ]] && grep -qE '\$\{?_VERSION([^A-Za-z0-9_]|$)' "${config}"; then
     subs="${subs},_VERSION=${version_val}"
+  fi
+  # Same for _BUILD_TIME (the commit time): when empty, the yaml's
+  # `_BUILD_TIME: ''` default makes the Dockerfile use the build clock.
+  if [[ -n "${build_time_val}" ]] && grep -qE '\$\{?_BUILD_TIME([^A-Za-z0-9_]|$)' "${config}"; then
+    subs="${subs},_BUILD_TIME=${build_time_val}"
   fi
   if [[ -n "${registry}" ]]; then
     subs="${subs},_REGISTRY=${registry}"

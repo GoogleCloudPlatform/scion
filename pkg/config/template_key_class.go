@@ -63,6 +63,13 @@ const reservedTemplateEnvPrefix = "SCION_"
 // hub-dispatched agent. pkg/agent's IsHubOnlyEnvKey delegates here.
 var hubOnlyEnvKeys = map[string]struct{}{
 	"TZ": {},
+	// The project's recorded git remote the git token is bound to
+	// (api.EnvGitTokenRemote). Only the broker sets it, from the hub's
+	// GitClone; no settings, harness-config or agent config layer may.
+	api.EnvGitTokenRemote: {},
+	// The in-container clone URL. Only the broker sets it, from the hub's
+	// GitClone and after its clone URL check.
+	"SCION_GIT_CLONE_URL": {},
 }
 
 // IsHubOnlyEnvKey reports whether key may be supplied only by the hub for a

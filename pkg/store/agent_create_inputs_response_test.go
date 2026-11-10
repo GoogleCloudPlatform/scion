@@ -161,7 +161,7 @@ func TestAgentAppliedConfigResponseViewRedactsCreateInputs(t *testing.T) {
 func TestAgentAppliedConfigResponseViewDropsClearedFields(t *testing.T) {
 	for _, canAttach := range []bool{false, true} {
 		original := &AgentAppliedConfig{InlineConfig: &api.ScionConfig{
-			MaxTurns:      3,
+			MaxTurns:      api.IntPtr(3),
 			ClearedFields: []string{"env.SECRET_NAME", "max_turns"},
 		}}
 		view := original.ResponseView(canAttach)
@@ -172,11 +172,38 @@ func TestAgentAppliedConfigResponseViewDropsClearedFields(t *testing.T) {
 		if strings.Contains(string(data), "cleared_fields") || strings.Contains(string(data), "SECRET_NAME") {
 			t.Errorf("canAttach=%v: response carries cleared_fields: %s", canAttach, data)
 		}
-		if view.InlineConfig.MaxTurns != 3 {
+		if !api.IntPtrEqual(view.InlineConfig.MaxTurns, api.IntPtr(3)) {
 			t.Errorf("canAttach=%v: other inline fields must be kept, got %+v", canAttach, view.InlineConfig)
 		}
 		if len(original.InlineConfig.ClearedFields) != 2 {
 			t.Errorf("canAttach=%v: the stored list must be unchanged, got %v", canAttach, original.InlineConfig.ClearedFields)
+		}
+	}
+}
+
+// TestAgentAppliedConfigResponseViewDropsChangedFields: the inline config's
+// changed_fields is hub-internal bookkeeping (ptone/scion#3982), so no
+// viewer gets it, a GET echoed into a PATCH never carries it, and the
+// stored config keeps it.
+func TestAgentAppliedConfigResponseViewDropsChangedFields(t *testing.T) {
+	for _, canAttach := range []bool{false, true} {
+		original := &AgentAppliedConfig{InlineConfig: &api.ScionConfig{
+			SystemPrompt:  "p",
+			ChangedFields: []string{"system_prompt"},
+		}}
+		view := original.ResponseView(canAttach)
+		data, err := json.Marshal(view)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(data), "changed_fields") {
+			t.Errorf("canAttach=%v: response carries changed_fields: %s", canAttach, data)
+		}
+		if view.InlineConfig.SystemPrompt != "p" {
+			t.Errorf("canAttach=%v: other inline fields must be kept, got %+v", canAttach, view.InlineConfig)
+		}
+		if len(original.InlineConfig.ChangedFields) != 1 {
+			t.Errorf("canAttach=%v: the stored list must be unchanged, got %v", canAttach, original.InlineConfig.ChangedFields)
 		}
 	}
 }

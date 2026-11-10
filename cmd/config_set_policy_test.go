@@ -133,6 +133,43 @@ func TestConfigSet_ServerAuthGlobalStillWritable(t *testing.T) {
 	assert.Equal(t, "Dev User", vs.Server.Auth.DisplayName)
 }
 
+// TestConfigSet_UnknownServerAuthKeyNoGlobalHint checks the flow from
+// ptone/scion#5481: a server.auth key that config set cannot write (for
+// example dev_mode) fails as an unknown key at the project layer, with no
+// hint to use --global, and fails the same way with --global. No settings
+// file changes.
+func TestConfigSet_UnknownServerAuthKeyNoGlobalHint(t *testing.T) {
+	for _, key := range []string{"server.auth.dev_mode", "server.auth.authorized_domains"} {
+		for _, global := range []bool{false, true} {
+			name := "project/" + key
+			if global {
+				name = "global/" + key
+			}
+			t.Run(name, func(t *testing.T) {
+				root := setupProjectSettings(t, &config.VersionedSettings{SchemaVersion: "1", ActiveProfile: "local"})
+				origProjectPath := projectPath
+				t.Cleanup(func() { projectPath = origProjectPath })
+				projectPath = root
+				home, err := os.UserHomeDir()
+				require.NoError(t, err)
+				globalDir := filepath.Join(home, ".scion")
+				require.NoError(t, os.MkdirAll(globalDir, 0o755))
+				require.NoError(t, config.SaveVersionedSettings(globalDir, &config.VersionedSettings{SchemaVersion: "1"}))
+				projectDir := filepath.Join(root, ".scion")
+				beforeProject, beforeGlobal := readDirFiles(t, projectDir), readDirFiles(t, globalDir)
+
+				_, _, runErr := runConfigSet(t, global, key, "true")
+				require.Error(t, runErr)
+				assert.False(t, errors.Is(runErr, config.ErrSettingNotWritable), "error: %v", runErr)
+				assert.Contains(t, runErr.Error(), "unknown or complex setting key: "+key)
+				assert.NotContains(t, runErr.Error(), "--global")
+				assert.Equal(t, beforeProject, readDirFiles(t, projectDir), "project settings changed")
+				assert.Equal(t, beforeGlobal, readDirFiles(t, globalDir), "global settings changed")
+			})
+		}
+	}
+}
+
 // TestConfigSet_MasksSecretValueInOutput checks that a credential key's
 // value is written but shown masked, in text and JSON output, while a
 // non-credential value is shown as is.

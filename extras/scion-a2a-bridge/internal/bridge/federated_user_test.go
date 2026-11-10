@@ -24,6 +24,8 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -334,6 +336,9 @@ func TestCallerKey_FederatedUserIssuersOnOneHost(t *testing.T) {
 type fedUserHub struct {
 	*httptest.Server
 	userToken string
+	// otherUsers maps further user access credentials the hub accepts to
+	// their account IDs (other visitor accounts).
+	otherUsers map[string]string
 
 	mu           sync.Mutex
 	meStatus     int    // 0: 200 with the visitor account
@@ -353,6 +358,13 @@ type fedUserHub struct {
 	dmReadKeys   []string
 	dmReadTokens []string
 	createCalls  int
+	// agentGet is the agent GET /api/v1/agents/{id} answers with (404 when
+	// nil); agentGets records the IDs read.
+	agentGet  map[string]interface{}
+	agentGets []string
+	// order records, in arrival order, the caller's DM reads ("dm-read"),
+	// the admin agent reads ("agent-get") and the sends ("send").
+	order        []string
 	convRequests []fedUserHubConvRequest
 	// dmReadQueries records the query of every conversation read.
 	dmReadQueries []url.Values
@@ -419,7 +431,7 @@ func newFedUserHub(t *testing.T, userToken string) *fedUserHub {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/auth/me":
 			h.meCalls++
 			h.meFedTokens = append(h.meFedTokens, fedToken)
-			if fedToken != h.userToken {
+			if !h.knownUser(fedToken) {
 				writeHubError(w, http.StatusUnauthorized)
 				return
 			}
@@ -427,11 +439,15 @@ func newFedUserHub(t *testing.T, userToken string) *fedUserHub {
 				writeHubError(w, h.meStatus)
 				return
 			}
+			meID := h.meID
+			if fedToken != h.userToken {
+				meID = h.otherUsers[fedToken]
+			}
 			writeJSON(map[string]interface{}{
-				"id": h.meID, "email": "visitor+synthetic@hub-b.invalid", "display_name": "Alice", "role": h.meRole,
+				"id": meID, "email": "visitor+synthetic@hub-b.invalid", "display_name": "Alice", "role": h.meRole,
 			})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/users/me/visitor-grants":
-			if fedToken != h.userToken {
+			if !h.knownUser(fedToken) {
 				writeHubError(w, http.StatusForbidden)
 				return
 			}
@@ -439,7 +455,7 @@ func newFedUserHub(t *testing.T, userToken string) *fedUserHub {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/"+fedUserProjectID+"/agents":
 			h.listQueries = append(h.listQueries, r.URL.Query())
 			h.listTokens = append(h.listTokens, fedToken)
-			if fedToken != h.userToken {
+			if !h.knownUser(fedToken) {
 				writeHubError(w, http.StatusForbidden)
 				return
 			}
@@ -460,17 +476,28 @@ func newFedUserHub(t *testing.T, userToken string) *fedUserHub {
 			_ = json.NewDecoder(r.Body).Decode(&body)
 			agentID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/v1/agents/"), "/message")
 			h.sent = append(h.sent, fedUserHubSend{AgentID: agentID, Body: body, FedToken: fedToken, DMReadsBefore: len(h.dmReadKeys)})
+			h.order = append(h.order, "send")
 			if h.sendStatus != 0 {
 				writeHubError(w, h.sendStatus)
 				return
 			}
 			writeJSON(map[string]interface{}{"message_id": "msg-1", "status": "delivered"})
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/v1/agents/") && !strings.Contains(strings.TrimPrefix(r.URL.Path, "/api/v1/agents/"), "/"):
+			// Bridge admin agent read (the launch wait).
+			h.agentGets = append(h.agentGets, strings.TrimPrefix(r.URL.Path, "/api/v1/agents/"))
+			h.order = append(h.order, "agent-get")
+			if h.agentGet == nil {
+				writeHubError(w, http.StatusNotFound)
+				return
+			}
+			writeJSON(h.agentGet)
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/v1/chat/conversations/") && strings.HasSuffix(r.URL.Path, "/messages"):
 			key := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/v1/chat/conversations/"), "/messages")
 			h.dmReadKeys = append(h.dmReadKeys, key)
 			h.dmReadTokens = append(h.dmReadTokens, fedToken)
 			h.dmReadQueries = append(h.dmReadQueries, r.URL.Query())
-			if fedToken != h.userToken {
+			h.order = append(h.order, "dm-read")
+			if !h.knownUser(fedToken) {
 				writeHubError(w, http.StatusForbidden)
 				return
 			}
@@ -506,6 +533,16 @@ func newFedUserHub(t *testing.T, userToken string) *fedUserHub {
 	}))
 	t.Cleanup(h.Close)
 	return h
+}
+
+// knownUser reports whether the hub accepts fedToken as a visitor's user
+// access credential. The caller holds h.mu.
+func (h *fedUserHub) knownUser(fedToken string) bool {
+	if fedToken == h.userToken {
+		return true
+	}
+	_, ok := h.otherUsers[fedToken]
+	return ok
 }
 
 func (h *fedUserHub) set(fn func(h *fedUserHub)) {
@@ -551,6 +588,8 @@ type fedUserHubCalls struct {
 	dmReadKeys   []string
 	dmReadTokens []string
 	createCalls  int
+	agentGets    []string
+	order        []string
 	convRequests []fedUserHubConvRequest
 	// dmReadQueries is the query of every conversation read.
 	dmReadQueries []url.Values
@@ -568,6 +607,8 @@ func (h *fedUserHub) snapshot() fedUserHubCalls {
 		dmReadKeys:    append([]string(nil), h.dmReadKeys...),
 		dmReadTokens:  append([]string(nil), h.dmReadTokens...),
 		createCalls:   h.createCalls,
+		agentGets:     append([]string(nil), h.agentGets...),
+		order:         append([]string(nil), h.order...),
 		dmReadQueries: append([]url.Values(nil), h.dmReadQueries...),
 		convRequests:  append([]fedUserHubConvRequest(nil), h.convRequests...),
 	}
@@ -1872,5 +1913,470 @@ func TestDurableHandler_FederatedUserResubscribeEvents(t *testing.T) {
 	}
 	if after := len(hub.snapshot().dmReadKeys); after != before {
 		t.Errorf("agent caller: access re-checks %d -> %d, want none", before, after)
+	}
+}
+
+// --- an agent that is still launching ---
+
+// fedUserLaunchingAgent is agent1 in the bridge admin list while its launch
+// is still active.
+func fedUserLaunchingAgent() map[string]interface{} {
+	return map[string]interface{}{
+		"id": fedUserAgentID, "name": "agent1", "slug": "agent1", "projectId": fedUserProjectID,
+		"phase": "provisioning", "status": "provisioning",
+		"launch": map[string]interface{}{"id": "launch-1", "state": "active", "active": true, "kind": "create", "step": "pod_create"},
+	}
+}
+
+// fedUserTaskOutcome returns a JSON-RPC SendMessage answer's task state and
+// every text in the task, in order, so that two answers can be compared
+// without their task and context IDs.
+func fedUserTaskOutcome(t *testing.T, body string) (string, []string) {
+	t.Helper()
+	var resp struct {
+		Result map[string]interface{} `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(body), &resp); err != nil {
+		t.Fatalf("decode JSON-RPC answer: %v; body %s", err, body)
+	}
+	var texts []string
+	var walk func(v interface{})
+	walk = func(v interface{}) {
+		switch x := v.(type) {
+		case map[string]interface{}:
+			if text, ok := x["text"].(string); ok {
+				texts = append(texts, text)
+			}
+			for _, k := range sortedKeys(x) {
+				walk(x[k])
+			}
+		case []interface{}:
+			for _, e := range x {
+				walk(e)
+			}
+		}
+	}
+	walk(resp.Result)
+	state := ""
+	if task, ok := resp.Result["task"].(map[string]interface{}); ok {
+		if st, ok := task["status"].(map[string]interface{}); ok {
+			state, _ = st["state"].(string)
+		}
+	}
+	if st, ok := resp.Result["status"].(map[string]interface{}); ok && state == "" {
+		state, _ = st["state"].(string)
+	}
+	return state, texts
+}
+
+func sortedKeys(m map[string]interface{}) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// TestExecutor_FederatedUserLaunchingAgentRefusalIsUniform: a federated user
+// the hub refuses gets the same answer for an agent that is still launching
+// as for a running agent or one whose launch failed: the uniform refusal at
+// once, with no launch step or outcome, no wait (no read of the agent) and
+// nothing sent.
+func TestExecutor_FederatedUserLaunchingAgentRefusalIsUniform(t *testing.T) {
+	token := fedUserToken(t)
+	refusing := func(h *fedUserHub) {
+		h.sendStatus = http.StatusForbidden
+		h.dmReadStatus = http.StatusForbidden
+	}
+	cases := []struct {
+		name  string
+		agent map[string]interface{}
+	}{
+		{"launching", fedUserLaunchingAgent()},
+		{"running", map[string]interface{}{
+			"id": fedUserAgentID, "name": "agent1", "slug": "agent1", "projectId": fedUserProjectID, "phase": "running", "status": "running",
+		}},
+		{"launch failed", map[string]interface{}{
+			"id": fedUserAgentID, "name": "agent1", "slug": "agent1", "projectId": fedUserProjectID, "phase": "error", "status": "error",
+			"message": "image pull back-off",
+			"launch":  map[string]interface{}{"id": "launch-1", "state": "ended", "kind": "create", "error": "image_pull_failed", "endReason": "failed"},
+		}},
+	}
+	type outcome struct {
+		state string
+		texts []string
+	}
+	outcomes := map[string]outcome{}
+	for _, tc := range cases {
+		hub := newFedUserHub(t, token)
+		hub.set(refusing)
+		hub.set(func(h *fedUserHub) { h.adminAgents = []map[string]interface{}{tc.agent} })
+		b, _, ts := newFedUserTestServer(t, hub)
+		b.launchPollInterval = 5 * time.Millisecond
+
+		status, body := awaitResult(t, sendAsync(t, ts, "agent1", token))
+		if status != http.StatusOK {
+			t.Fatalf("%s: status = %d, want 200; body %s", tc.name, status, body)
+		}
+		if !strings.Contains(body, federatedUserRefusalText) {
+			t.Errorf("%s: response does not carry the uniform refusal; body %s", tc.name, body)
+		}
+		for _, banned := range []string{"provisioning agent", "Agent failed to start", "pod_create", "image_pull_failed", "image pull back-off"} {
+			if strings.Contains(body, banned) {
+				t.Errorf("%s: response contains %q; body %s", tc.name, banned, body)
+			}
+		}
+		snap := hub.snapshot()
+		if tc.name == "launching" && len(snap.sent) != 0 {
+			t.Errorf("%s: %d sends reached the hub, want 0", tc.name, len(snap.sent))
+		}
+		if len(snap.agentGets) != 0 {
+			t.Errorf("%s: the bridge read the agent %v (a launch wait), want no read", tc.name, snap.agentGets)
+		}
+		state, texts := fedUserTaskOutcome(t, body)
+		outcomes[tc.name] = outcome{state, texts}
+	}
+	want := outcomes["running"]
+	if want.state == "" {
+		t.Fatalf("running: no task state in the answer")
+	}
+	for _, name := range []string{"launching", "launch failed"} {
+		if got := outcomes[name]; got.state != want.state || strings.Join(got.texts, "\n") != strings.Join(want.texts, "\n") {
+			t.Errorf("%s: answer (%s, %q) differs from the running agent's (%s, %q)", name, got.state, got.texts, want.state, want.texts)
+		}
+	}
+}
+
+// TestExecutor_FederatedUserLaunchingAgentAllowedWaits: when the hub allows
+// the federated user to message an agent that is still launching, the
+// bridge asks the hub first (the caller's own read of its conversation with
+// the agent), then waits for the launch, then sends as the user.
+func TestExecutor_FederatedUserLaunchingAgentAllowedWaits(t *testing.T) {
+	token := fedUserToken(t)
+	hub := newFedUserHub(t, token)
+	hub.set(func(h *fedUserHub) {
+		h.adminAgents = []map[string]interface{}{fedUserLaunchingAgent()}
+		h.agentGet = map[string]interface{}{
+			"id": fedUserAgentID, "name": "agent1", "slug": "agent1", "projectId": fedUserProjectID, "phase": "running", "status": "running",
+			"launch": map[string]interface{}{"id": "launch-1", "state": "ended", "kind": "create"},
+		}
+	})
+	b, _, ts := newFedUserTestServer(t, hub)
+	b.launchPollInterval = 5 * time.Millisecond
+
+	done := sendAsync(t, ts, "agent1", token)
+	sent := waitForSend(t, hub)
+
+	snap := hub.snapshot()
+	wantKey, _ := messages.DMConversationKey("agent", fedUserAgentID, "user", fedUserAccountID)
+	if len(snap.dmReadKeys) != 1 || snap.dmReadKeys[0] != wantKey || snap.dmReadTokens[0] != token {
+		t.Errorf("access checks before the send = %v with %v, want one read of %q with the caller's credential", snap.dmReadKeys, snap.dmReadTokens, wantKey)
+	}
+	if len(snap.agentGets) == 0 {
+		t.Errorf("the bridge did not wait for the launch (no read of the agent)")
+	}
+	if dm, get := slices.Index(snap.order, "dm-read"), slices.Index(snap.order, "agent-get"); dm < 0 || get < 0 || dm > get {
+		t.Errorf("hub requests in order %v, want the caller's DM read before the first agent read", snap.order)
+	}
+	if sent.AgentID != fedUserAgentID {
+		t.Errorf("send went to agent %q, want %q", sent.AgentID, fedUserAgentID)
+	}
+	if sent.FedToken != token {
+		t.Errorf("send carried federation credential %q, want the caller's", sent.FedToken)
+	}
+	sm, _ := sent.Body["structured_message"].(map[string]interface{})
+	if got, want := sm["sender"], "user:"+fedUserAccountID; got != want {
+		t.Errorf("sender = %v, want %q", got, want)
+	}
+
+	deliverReply(t, b)
+	status, body := awaitResult(t, done)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body %s", status, body)
+	}
+	if !strings.Contains(body, fedUserReplyText) {
+		t.Fatalf("response does not carry the agent's reply; body %s", body)
+	}
+}
+
+// TestExecutor_FederatedUserLaunchingAgentSendRefusedAfterWait: the hub
+// allows the federated user at the check before the launch wait, the agent
+// starts, and the hub then refuses the send (for example, the grant was
+// revoked during the wait). The task ends with the uniform refusal, no reply
+// is forwarded, and no launch outcome is shown. The launch progress the
+// caller saw while the hub allowed it stays in the task history.
+func TestExecutor_FederatedUserLaunchingAgentSendRefusedAfterWait(t *testing.T) {
+	token := fedUserToken(t)
+	hub := newFedUserHub(t, token)
+	hub.set(func(h *fedUserHub) {
+		h.adminAgents = []map[string]interface{}{fedUserLaunchingAgent()}
+		h.agentGet = map[string]interface{}{
+			"id": fedUserAgentID, "name": "agent1", "slug": "agent1", "projectId": fedUserProjectID, "phase": "running", "status": "running",
+			"launch": map[string]interface{}{"id": "launch-1", "state": "ended", "kind": "create"},
+		}
+		h.sendStatus = http.StatusForbidden
+	})
+	b, _, ts := newFedUserTestServer(t, hub)
+	b.launchPollInterval = 5 * time.Millisecond
+
+	done := sendAsync(t, ts, "agent1", token)
+	waitForSend(t, hub)
+	deliverReply(t, b)
+
+	status, body := awaitResult(t, done)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body %s", status, body)
+	}
+	if state, texts := fedUserTaskOutcome(t, body); state != string(a2a.TaskStateFailed) || !slices.Contains(texts, federatedUserRefusalText) {
+		t.Errorf("answer (%s, %q), want failed with the uniform refusal %q", state, texts, federatedUserRefusalText)
+	}
+	if strings.Contains(body, fedUserReplyText) {
+		t.Errorf("reply forwarded although the hub refused the send; body %s", body)
+	}
+	for _, banned := range []string{"Agent failed to start", "Could not confirm that the agent started", "Request cancelled while waiting"} {
+		if strings.Contains(body, banned) {
+			t.Errorf("response contains launch text %q; body %s", banned, body)
+		}
+	}
+	snap := hub.snapshot()
+	if len(snap.dmReadKeys) == 0 || len(snap.agentGets) == 0 || len(snap.sent) != 1 {
+		t.Errorf("DM reads %v, agent reads %v, %d sends; want the check, the launch wait and one send", snap.dmReadKeys, snap.agentGets, len(snap.sent))
+	}
+}
+
+// TestExecutor_FederatedUserLaunchingAgentAccessCheckError: a hub error
+// other than a refusal on the check before the launch wait is a routing
+// failure, not a refusal, and nothing is waited for or sent.
+func TestExecutor_FederatedUserLaunchingAgentAccessCheckError(t *testing.T) {
+	token := fedUserToken(t)
+	hub := newFedUserHub(t, token)
+	hub.set(func(h *fedUserHub) {
+		h.adminAgents = []map[string]interface{}{fedUserLaunchingAgent()}
+		h.dmReadStatus = http.StatusInternalServerError
+	})
+	_, _, ts := newFedUserTestServer(t, hub)
+
+	status, body := awaitResult(t, sendAsync(t, ts, "agent1", token))
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body %s", status, body)
+	}
+	if !strings.Contains(body, "Failed to route message to agent") {
+		t.Errorf("response does not carry the routing failure; body %s", body)
+	}
+	if strings.Contains(body, federatedUserRefusalText) || strings.Contains(body, "provisioning agent") {
+		t.Errorf("response carries the refusal or launch progress; body %s", body)
+	}
+	snap := hub.snapshot()
+	if len(snap.sent) != 0 || len(snap.agentGets) != 0 {
+		t.Errorf("%d sends and agent reads %v, want none", len(snap.sent), snap.agentGets)
+	}
+}
+
+// TestExecutor_FederatedUserLaunchFailureShowsCodeOnly: a federated user the
+// hub allows, whose agent's launch fails, is told the launch outcome code
+// only; the agent's status message is not shown.
+func TestExecutor_FederatedUserLaunchFailureShowsCodeOnly(t *testing.T) {
+	token := fedUserToken(t)
+	hub := newFedUserHub(t, token)
+	hub.set(func(h *fedUserHub) {
+		h.adminAgents = []map[string]interface{}{fedUserLaunchingAgent()}
+		h.agentGet = map[string]interface{}{
+			"id": fedUserAgentID, "name": "agent1", "slug": "agent1", "projectId": fedUserProjectID, "phase": "error", "status": "error",
+			"message": "image pull back-off",
+			"launch":  map[string]interface{}{"id": "launch-1", "state": "ended", "kind": "create", "error": "image_pull_failed", "endReason": "failed"},
+		}
+	})
+	b, _, ts := newFedUserTestServer(t, hub)
+	b.launchPollInterval = 5 * time.Millisecond
+
+	status, body := awaitResult(t, sendAsync(t, ts, "agent1", token))
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body %s", status, body)
+	}
+	if !strings.Contains(body, "Agent failed to start (image_pull_failed)") {
+		t.Errorf("response does not carry the launch outcome code; body %s", body)
+	}
+	if strings.Contains(body, "image pull back-off") {
+		t.Errorf("response carries the agent's status message; body %s", body)
+	}
+	if n := len(hub.snapshot().sent); n != 0 {
+		t.Errorf("%d sends reached the hub, want 0", n)
+	}
+}
+
+func TestFederatedUserLaunchFailureText(t *testing.T) {
+	notRunning := &hubclient.LaunchNotRunningError{Outcome: hubclient.LaunchOutcome{Code: "image_pull_failed", Phase: "error", Message: "image pull back-off"}}
+	noCode := &hubclient.LaunchNotRunningError{Outcome: hubclient.LaunchOutcome{Phase: "stopped", Message: "stopped by user"}}
+	for _, tc := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"outcome code", notRunning, "Agent failed to start (image_pull_failed)"},
+		{"phase only", noCode, "Agent failed to start (phase: stopped)"},
+		{"cancelled", context.Canceled, "Request cancelled while waiting for the agent to start"},
+		{"read error", errors.New("GET /api/v1/agents/x: 500 internal detail"), "Could not confirm that the agent started"},
+	} {
+		if got := federatedUserLaunchFailureText(tc.err); got != tc.want {
+			t.Errorf("%s: federatedUserLaunchFailureText = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+	// Other callers keep the full text.
+	if got, want := launchFailureText(notRunning), "Agent failed to start (image_pull_failed): image pull back-off"; got != want {
+		t.Errorf("launchFailureText = %q, want %q", got, want)
+	}
+	if got, want := launchFailureText(noCode), "Agent failed to start (phase: stopped): stopped by user"; got != want {
+		t.Errorf("launchFailureText (phase only) = %q, want %q", got, want)
+	}
+}
+
+// Second visitor account of the per-account task tests.
+const (
+	fedUser2Subject   = "bob-on-hub-a"
+	fedUser2Email     = "bob@corp.example.com"
+	fedUser2AccountID = "22222222-3333-4444-8555-666666666666"
+)
+
+// fedUser2Token is the second visitor's user access credential, from the
+// same peer hub as fedUserToken.
+func fedUser2Token(t *testing.T) string {
+	t.Helper()
+	return buildTestJWT(t, map[string]interface{}{
+		"iss":              fedUserIssuer,
+		"sub":              fedUser2Subject,
+		"aud":              "https://hub-b.example.com",
+		"email":            fedUser2Email,
+		"email_verified":   true,
+		"scion_token_kind": "user",
+	})
+}
+
+// TestExecutor_FederatedUsersLaunchingAgentTasksKeptPerAccount: two
+// visitor accounts message agent1 while it is still launching. In the
+// default (plugin) mode, where replies without a2aTaskId are correlated
+// through the local cache, each task is registered for its own account
+// once the launch ends: each account's reply reaches only that account's
+// task, and the second account can neither read nor cancel the first
+// account's task.
+func TestExecutor_FederatedUsersLaunchingAgentTasksKeptPerAccount(t *testing.T) {
+	const (
+		firstReplyText  = "reply from agent1 to the first visitor"
+		secondReplyText = "reply from agent1 to the second visitor"
+	)
+	token1, token2 := fedUserToken(t), fedUser2Token(t)
+	hub := newFedUserHub(t, token1)
+	hub.set(func(h *fedUserHub) {
+		h.otherUsers = map[string]string{token2: fedUser2AccountID}
+		h.adminAgents = []map[string]interface{}{fedUserLaunchingAgent()}
+		h.agentGet = map[string]interface{}{
+			"id": fedUserAgentID, "name": "agent1", "slug": "agent1", "projectId": fedUserProjectID, "phase": "running", "status": "running",
+			"launch": map[string]interface{}{"id": "launch-1", "state": "ended", "kind": "create"},
+		}
+	})
+	b, _, ts := newFedUserTestServer(t, hub)
+	b.launchPollInterval = 5 * time.Millisecond
+
+	waitForSends := func(n int) []fedUserHubSend {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			if s := hub.snapshot(); len(s.sent) >= n {
+				return s.sent
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatalf("hub received fewer than %d message sends", n)
+		return nil
+	}
+
+	done1 := sendAsync(t, ts, "agent1", token1)
+	waitForSends(1)
+	done2 := sendAsync(t, ts, "agent1", token2)
+	sent := waitForSends(2)
+
+	if len(hub.snapshot().agentGets) == 0 {
+		t.Fatalf("the bridge did not wait for the launch (no read of the agent)")
+	}
+	for i, want := range []struct{ token, sender string }{
+		{token1, "user:" + fedUserAccountID},
+		{token2, "user:" + fedUser2AccountID},
+	} {
+		sm, _ := sent[i].Body["structured_message"].(map[string]interface{})
+		if sent[i].FedToken != want.token || sm["sender"] != want.sender {
+			t.Errorf("send %d: sender %v (own credential: %v), want %q with its own credential", i, sm["sender"], sent[i].FedToken == want.token, want.sender)
+		}
+	}
+
+	// Both tasks are active on agent1, the first account's first; each is
+	// registered for its own account.
+	aKey := agentKey(fedUserProjectID, "agent1")
+	b.tasksMu.RLock()
+	taskIDs := append([]string(nil), b.agentTasks[aKey]...)
+	owners := make([]string, len(taskIDs))
+	for i, id := range taskIDs {
+		if e := b.activeTasks[id]; e.userCaller {
+			owners[i] = e.callerUserID
+		}
+	}
+	b.tasksMu.RUnlock()
+	if len(taskIDs) != 2 {
+		t.Fatalf("active tasks on agent1 = %v, want the two visitors' tasks", taskIDs)
+	}
+	if owners[0] != fedUserAccountID || owners[1] != fedUser2AccountID {
+		t.Errorf("tasks registered for accounts %q, want [%q %q]", owners, fedUserAccountID, fedUser2AccountID)
+	}
+	firstTask := taskIDs[0]
+
+	// Each account's reply correlates to that account's task.
+	reply := &messages.StructuredMessage{Sender: "agent:agent1", Type: messages.TypeInstruction, Msg: "hi"}
+	for i, userID := range []string{fedUserAccountID, fedUser2AccountID} {
+		got, err := b.correlateToTask(context.Background(), fedUserProjectID, "agent1", projectkeys.UserTopic(fedUserProjectID, userID), reply)
+		if err != nil || got != taskIDs[i] {
+			t.Errorf("reply on account %s's topic correlated to (%q, %v), want its task %q", userID, got, err, taskIDs[i])
+		}
+	}
+
+	// The second account cannot read or cancel the first account's task.
+	path := "/projects/proj1/agents/agent1/jsonrpc"
+	auth2 := map[string]string{"Authorization": "Bearer " + token2}
+	for _, method := range []string{"GetTask", "CancelTask"} {
+		payload := `{"jsonrpc":"2.0","id":"other-account","method":"` + method + `","params":{"id":"` + firstTask + `"}}`
+		status, raw := doRPCRaw(t, ts, path, payload, auth2)
+		var resp map[string]interface{}
+		_ = json.Unmarshal(raw, &resp)
+		if status != http.StatusOK || resp["error"] == nil || resp["result"] != nil {
+			t.Errorf("%s by the second account on the first account's task: status %d, body %s; want a JSON-RPC error", method, status, raw)
+		}
+	}
+	b.tasksMu.RLock()
+	_, firstActive := b.activeTasks[firstTask]
+	b.tasksMu.RUnlock()
+	if !firstActive {
+		t.Errorf("the first account's task %q is no longer active after the second account's cancel", firstTask)
+	}
+
+	// The first account's reply arrives first, while both tasks are active.
+	deliverReplyTo(t, b, fedUserAccountID, firstReplyText)
+	deliverReplyTo(t, b, fedUser2AccountID, secondReplyText)
+
+	for _, tc := range []struct {
+		name       string
+		done       <-chan [2]interface{}
+		own, other string
+	}{
+		{"first account", done1, firstReplyText, secondReplyText},
+		{"second account", done2, secondReplyText, firstReplyText},
+	} {
+		status, body := awaitResult(t, tc.done)
+		if status != http.StatusOK {
+			t.Fatalf("%s: status = %d, want 200; body %s", tc.name, status, body)
+		}
+		if strings.Contains(body, tc.other) {
+			t.Errorf("%s: received the reply addressed to the other account; body %s", tc.name, body)
+		}
+		if !strings.Contains(body, tc.own) {
+			t.Errorf("%s: response does not carry its own reply; body %s", tc.name, body)
+		}
 	}
 }

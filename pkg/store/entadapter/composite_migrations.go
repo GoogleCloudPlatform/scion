@@ -20,9 +20,9 @@ import (
 	"log/slog"
 
 	"entgo.io/ent/dialect"
-	entsql "entgo.io/ent/dialect/sql"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 )
 
 // deduplicateAccessPolicies removes duplicate access_policies rows before the
@@ -169,7 +169,7 @@ func deduplicateAgentSessionMetrics(ctx context.Context, client *ent.Client) err
 // tableName is interpolated into the SQL (see tableExistsQuery), so it must be
 // a compile-time constant, never user or config input.
 func tableExists(ctx context.Context, client *ent.Client, db *sql.DB, tableName string) (bool, error) {
-	drv, ok := client.Driver().(*entsql.Driver)
+	drv, ok := entc.SQLDriver(client.Driver())
 	if !ok {
 		return false, nil
 	}
@@ -220,7 +220,7 @@ func accessPoliciesTableExists(ctx context.Context, client *ent.Client, db *sql.
 // clientDB returns the *sql.DB behind client, or nil if the client is not
 // backed by a database/sql driver.
 func clientDB(client *ent.Client) *sql.DB {
-	if drv, ok := client.Driver().(*entsql.Driver); ok {
+	if drv, ok := entc.SQLDriver(client.Driver()); ok {
 		return drv.DB()
 	}
 	return nil

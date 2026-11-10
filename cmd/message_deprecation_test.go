@@ -70,6 +70,11 @@ func resetMessageFlags() func() {
 	msgCC = nil
 	msgArtifacts = nil
 	msgArtifactRefs = nil
+	resetChoiceFlags()
+	for _, name := range []string{"choices", "choices-file", "update"} {
+		_ = messageCmd.Flags().Lookup(name).Value.Set(messageCmd.Flags().Lookup(name).DefValue)
+		messageCmd.Flags().Lookup(name).Changed = false
+	}
 	messageCmd.Flags().Lookup("broadcast").Changed = false
 	messageCmd.Flags().Lookup("all").Changed = false
 	_ = rawFlag.Value.Set("false")
@@ -88,6 +93,11 @@ func resetMessageFlags() func() {
 		msgCC = orig.cc
 		msgArtifacts = orig.artifacts
 		msgArtifactRefs = nil
+		resetChoiceFlags()
+		for _, name := range []string{"choices", "choices-file", "update"} {
+			_ = messageCmd.Flags().Lookup(name).Value.Set(messageCmd.Flags().Lookup(name).DefValue)
+			messageCmd.Flags().Lookup(name).Changed = false
+		}
 		messageCmd.Flags().Lookup("broadcast").Changed = bcastChanged
 		messageCmd.Flags().Lookup("all").Changed = allChanged
 		_ = rawFlag.Value.Set(rawValue)

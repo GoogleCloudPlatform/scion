@@ -128,7 +128,7 @@ func TestSaveVersionedSettings_CloudRunRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, errs, "the saved file should validate against the schema")
 
-	vs, err := loadVersionedSettingsFileOnly(dir)
+	vs, _, err := loadVersionedSettingsFileOnly(dir)
 	require.NoError(t, err)
 	require.NotNil(t, vs.Runtimes["cr"].CloudRun)
 	assert.Equal(t, want, *vs.Runtimes["cr"].CloudRun)
@@ -158,7 +158,7 @@ profiles:
         alternative_env_keys: [GOOGLE_APPLICATION_CREDENTIALS]
 `), 0o644))
 
-	vs, err := loadVersionedSettingsFileOnly(dir)
+	vs, _, err := loadVersionedSettingsFileOnly(dir)
 	require.NoError(t, err)
 	assert.Equal(t, []api.SharedDir{{Name: "cache", ReadOnly: true, InWorkspace: true}}, vs.SharedDirs)
 	p := vs.Profiles["local"]

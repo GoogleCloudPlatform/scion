@@ -568,8 +568,9 @@ func TestParity_D2_UnresolvablePermission(t *testing.T) {
 }
 
 // TestParity_D3_DeliveryGateZeroLoads is row D3: a deliver request is
-// denied at step 0 before any input load, for every credential kind,
-// because deliveryCredentialKinds is currently empty.
+// denied at step 0 before any input load for a user principal: the only
+// kind in deliveryCredentialKinds is the internal hub_delivery credential,
+// which no user identity derives.
 func TestParity_D3_DeliveryGateZeroLoads(t *testing.T) {
 	_, s := authzTestSetup(t)
 	f := newP1Fixture(t, s, "d3")
@@ -920,8 +921,9 @@ func TestParity_E5b_DocumentedDivergenceOnLaterTransient(t *testing.T) {
 // TestParity_E6_CancellationBothVariants is row E6: P1 and A1 (raw
 // loop), the ctx is cancelled between tuple j and j+1, under both H4 store
 // variants. Every decision after cancellation must deep-equal the reference,
-// including Reason, because the memo bypasses entirely on a done ctx and
-// issues today's store call. AuthorizeReadBatch, called with an
+// including Reason, because on a done ctx the memo is bypassed entirely and
+// both runs stop at the same point (ptone/scion#6012: principal resolution
+// refuses without a store call). AuthorizeReadBatch, called with an
 // already-cancelled ctx, must return ctx.Err() in both runs.
 func TestParity_E6_CancellationBothVariants(t *testing.T) {
 	for _, honour := range []bool{true, false} {
@@ -991,17 +993,15 @@ func TestParity_E6_CancellationBothVariants(t *testing.T) {
 						assertDecisionsEqual(t, refDecisions[i], candDecisions[i], "post-cancel tuple %d", i)
 					}
 
-					// The decision-equality assertion above cannot by itself
-					// catch a memo that silently served post-cancel
-					// decisions from a stale cache instead of bypassing to
-					// the store, because a mutant that drops the done-ctx
-					// bypass can still produce the same decisions in this
-					// fixture's shape. Assert directly that the candidate
-					// issues the SAME per-method store calls after
-					// cancellation as the reference: a working done-ctx
-					// bypass makes every post-cancel decision reach the
-					// store exactly like the reference does, so the
-					// post-cancel call-count DELTA must be equal per method.
+					// Assert that the candidate issues the SAME per-method
+					// store calls after cancellation as the reference. Since
+					// ptone/scion#6012 a decision on a done ctx refuses at
+					// principal resolution (or the user status gate) before
+					// any of these reads, in both runs, so every delta here
+					// is 0 == 0 and the decision-equality assertion above
+					// carries the guard; this check still catches a memo
+					// change that reads (or serves) inputs after the
+					// cancellation in one run only.
 					refCountsAfter := refSt.snapshotCounts()
 					candCountsAfter := candSt.snapshotCounts()
 					for _, method := range []string{"GetEffectiveGroups", "GetEffectiveGroupsForAgent", "ListRoleBindingsForPrincipals", "GetRoleDefinitionsByIDs", "ListAccessConstraints", "GetDelegationEdgesForDelegate"} {

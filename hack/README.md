@@ -29,6 +29,7 @@ Developer convenience scripts for local development, testing, and infrastructure
 | `go run ./hack/buildstats` | Measures compile/test cost (wall, user, peak RSS, actiongraph, compiler phases, test2json, dep counts) for refactor gates; see [`buildstats/README.md`](buildstats/README.md) |
 | `go run ./hack/hubshard` (or `hubshard/hubshard.sh`, which builds it once into a temp dir) | Splits the pkg/hub tests into build-tag shards, generated as a `go build -overlay` (no committed tags); `-parity` checks every test runs in exactly one shard; see [`hubshard/README.md`](hubshard/README.md) |
 | `go run ./hack/hubshard/extract` | Moves shared pkg/hub test helpers verbatim into `*_helpers_test.go` files and verifies the move (test sharding prep); see [`hubshard/extract/README.md`](hubshard/extract/README.md) |
+| `hack/check-areadag.sh` (builds `./hack/areadag`) | Checks the pkg/hub package DAG declared in [`areadag/dag.txt`](areadag/dag.txt) (leaf, area and testsupport packages; testsupport only imported by tests and linked by no binary, module-wide, across build tags) against `go list` metadata; `--self-test` runs its fixtures |
 
 ### Kubernetes Test Manifests
 

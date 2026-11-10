@@ -95,6 +95,11 @@ func Draining(v bool) predicate.RelayInstance {
 	return predicate.RelayInstance(sql.FieldEQ(FieldDraining, v))
 }
 
+// Features applies equality check predicate on the "features" field. It's identical to FeaturesEQ.
+func Features(v string) predicate.RelayInstance {
+	return predicate.RelayInstance(sql.FieldEQ(FieldFeatures, v))
+}
+
 // GenerationEQ applies the EQ predicate on the "generation" field.
 func GenerationEQ(v int64) predicate.RelayInstance {
 	return predicate.RelayInstance(sql.FieldEQ(FieldGeneration, v))
@@ -363,6 +368,81 @@ func DrainingEQ(v bool) predicate.RelayInstance {
 // DrainingNEQ applies the NEQ predicate on the "draining" field.
 func DrainingNEQ(v bool) predicate.RelayInstance {
 	return predicate.RelayInstance(sql.FieldNEQ(FieldDraining, v))
+}
+
+// FeaturesEQ applies the EQ predicate on the "features" field.
+func FeaturesEQ(v string) predicate.RelayInstance {
+	return predicate.RelayInstance(sql.FieldEQ(FieldFeatures, v))
+}
+
+// FeaturesNEQ applies the NEQ predicate on the "features" field.
+func FeaturesNEQ(v string) predicate.RelayInstance {
+	return predicate.RelayInstance(sql.FieldNEQ(FieldFeatures, v))
+}
+
+// FeaturesIn applies the In predicate on the "features" field.
+func FeaturesIn(vs ...string) predicate.RelayInstance {
+	return predicate.RelayInstance(sql.FieldIn(FieldFeatures, vs...))
+}
+
+// FeaturesNotIn applies the NotIn predicate on the "features" field.
+func FeaturesNotIn(vs ...string) predicate.RelayInstance {
+	return predicate.RelayInstance(sql.FieldNotIn(FieldFeatures, vs...))
+}
+
+// FeaturesGT applies the GT predicate on the "features" field.
+func FeaturesGT(v string) predicate.RelayInstance {
+	return predicate.RelayInstance(sql.FieldGT(FieldFeatures, v))
+}
+
+// FeaturesGTE applies the GTE predicate on the "features" field.
+func FeaturesGTE(v string) predicate.RelayInstance {
+	return predicate.RelayInstance(sql.FieldGTE(FieldFeatures, v))
+}
+
+// FeaturesLT applies the LT predicate on the "features" field.
+func FeaturesLT(v string) predicate.RelayInstance {
+	return predicate.RelayInstance(sql.FieldLT(FieldFeatures, v))
+}
+
+// FeaturesLTE applies the LTE predicate on the "features" field.
+func FeaturesLTE(v string) predicate.RelayInstance {
+	return predicate.RelayInstance(sql.FieldLTE(FieldFeatures, v))
+}
+
+// FeaturesContains applies the Contains predicate on the "features" field.
+func FeaturesContains(v string) predicate.RelayInstance {
+	return predicate.RelayInstance(sql.FieldContains(FieldFeatures, v))
+}
+
+// FeaturesHasPrefix applies the HasPrefix predicate on the "features" field.
+func FeaturesHasPrefix(v string) predicate.RelayInstance {
+	return predicate.RelayInstance(sql.FieldHasPrefix(FieldFeatures, v))
+}
+
+// FeaturesHasSuffix applies the HasSuffix predicate on the "features" field.
+func FeaturesHasSuffix(v string) predicate.RelayInstance {
+	return predicate.RelayInstance(sql.FieldHasSuffix(FieldFeatures, v))
+}
+
+// FeaturesIsNil applies the IsNil predicate on the "features" field.
+func FeaturesIsNil() predicate.RelayInstance {
+	return predicate.RelayInstance(sql.FieldIsNull(FieldFeatures))
+}
+
+// FeaturesNotNil applies the NotNil predicate on the "features" field.
+func FeaturesNotNil() predicate.RelayInstance {
+	return predicate.RelayInstance(sql.FieldNotNull(FieldFeatures))
+}
+
+// FeaturesEqualFold applies the EqualFold predicate on the "features" field.
+func FeaturesEqualFold(v string) predicate.RelayInstance {
+	return predicate.RelayInstance(sql.FieldEqualFold(FieldFeatures, v))
+}
+
+// FeaturesContainsFold applies the ContainsFold predicate on the "features" field.
+func FeaturesContainsFold(v string) predicate.RelayInstance {
+	return predicate.RelayInstance(sql.FieldContainsFold(FieldFeatures, v))
 }
 
 // HasSessions applies the HasEdge predicate on the "sessions" edge.

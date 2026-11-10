@@ -57,15 +57,14 @@ func (d *slowStopDispatcher) DispatchAgentExec(ctx context.Context, _ *store.Age
 	return "", 0, ctx.Err()
 }
 
-// The stop waits on three steps in turn: the workspace sync-back to the
-// broker, the ephemeral workspace check and the stop dispatch. The timeouts
-// are set so the three together outlast the one-dispatch budget but not the
-// stop's own: the stop site must pass stopWriteBudget.
+// The stop waits on two steps in turn: the ephemeral workspace check and
+// the stop dispatch. The timeouts are set so the two together outlast the
+// one-dispatch budget but not the stop's own: the stop site must pass
+// stopWriteBudget.
 func TestSlowLifecycleStop_AfterWriteTimeout_GetsResponse(t *testing.T) {
 	const (
-		uploadDelay = 350 * time.Millisecond
-		stopDelay   = 350 * time.Millisecond
-		checkBudget = 300 * time.Millisecond
+		stopDelay   = 450 * time.Millisecond
+		checkBudget = 600 * time.Millisecond
 	)
 	t.Setenv("HOME", t.TempDir())
 	disp := &slowStopDispatcher{slowLaunchDispatcher: slowLaunchDispatcher{delay: stopDelay}}
@@ -74,17 +73,11 @@ func TestSlowLifecycleStop_AfterWriteTimeout_GetsResponse(t *testing.T) {
 	setSyncDispatchWriteSlack(t, 50*time.Millisecond)
 	setWorkspaceCheckTimeout(t, checkBudget)
 	// The check exec runs until its share of the check budget runs out.
-	minWait := uploadDelay + checkBudget - workspaceRecordReserve() + stopDelay
+	minWait := checkBudget - workspaceRecordReserve() + stopDelay
 	require.Less(t, syncDispatchWriteBudget(), minWait, "fixture check: the one-dispatch budget must not cover the stop's steps")
-	require.Greater(t, stopWriteBudget(), minWait+500*time.Millisecond, "fixture check: the stop budget must cover the stop's steps")
+	require.Greater(t, stopWriteBudget(), minWait+250*time.Millisecond, "fixture check: the stop budget must cover the stop's steps")
 	setAgentQuotaLimits(t, s)
 
-	srv.SetStorage(newContentMockStorage("test-bucket"))
-	var downloaded atomic.Bool
-	srv.setHubWorkspaceDownloader(func(context.Context, string, string, string) error {
-		downloaded.Store(true)
-		return nil
-	})
 	agent := &store.Agent{
 		ID:              tid("agent-site-slow-stop"),
 		Slug:            "slow-stop",
@@ -100,34 +93,7 @@ func TestSlowLifecycleStop_AfterWriteTimeout_GetsResponse(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, s.SetAgentWorkspacePlacement(ctx, agent.ID, api.WorkspacePlacementLocal))
 
-	broker := connectFakeBroker(t, srv, agent.RuntimeBrokerID)
-	uploaded := make(chan string, 1)
-	go func() {
-		for {
-			var env wsprotocol.RequestEnvelope
-			if err := broker.ws.ReadJSON(&env); err != nil {
-				return
-			}
-			if env.Type != wsprotocol.TypeRequest {
-				continue
-			}
-			uploaded <- env.Path
-			time.Sleep(uploadDelay)
-			body, _ := json.Marshal(RuntimeBrokerWorkspaceUploadResponse{})
-			_ = broker.ws.WriteJSON(wsprotocol.NewResponseEnvelope(env.RequestID, http.StatusOK,
-				map[string]string{"Content-Type": "application/json"}, body))
-			return
-		}
-	}()
-
 	code, body := serveThroughSlowListener(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/stop", nil, minWait)
-	select {
-	case path := <-uploaded:
-		assert.Equal(t, "/api/v1/workspace/upload", path, "fixture check: the sync-back is tunneled")
-	default:
-		t.Fatal("fixture check: the sync-back never reached the broker")
-	}
-	assert.True(t, downloaded.Load(), "fixture check: the sync-back downloads into the hub workspace")
 	assert.Equal(t, int32(1), disp.execCalls.Load(), "fixture check: the workspace check runs")
 	assert.Equal(t, http.StatusOK, code, string(body))
 	got, err := s.GetAgent(ctx, agent.ID)

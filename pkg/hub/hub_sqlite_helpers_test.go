@@ -45,20 +45,6 @@ func setHubAgentDefaults(srv *Server, d opsettings.AgentDefaultsSettings) {
 	srv.config.AgentDefaults = d
 }
 
-// recordAttr reads a single attribute off a captured record.
-func recordAttr(r slog.Record, key string) (slog.Value, bool) {
-	var found slog.Value
-	var ok bool
-	r.Attrs(func(a slog.Attr) bool {
-		if a.Key == key {
-			found, ok = a.Value, true
-			return false
-		}
-		return true
-	})
-	return found, ok
-}
-
 // findMockAgent returns the agent with the given slug from the mock store.
 func findMockAgent(ms *mockScheduledEventStore, slug string) *store.Agent {
 	ms.mu.Lock()

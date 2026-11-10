@@ -24,6 +24,12 @@ import (
 // Capabilities represents the set of actions a user can perform on a resource.
 type Capabilities struct {
 	Actions []string `json:"actions"`
+
+	// CanLeave and LeaveBlockedReason are set only on a project's
+	// _capabilities, only while hub.project_self_leave is on
+	// (ptone/scion#7494); see MembershipCapabilities.
+	CanLeave           *bool  `json:"canLeave,omitempty"`
+	LeaveBlockedReason string `json:"leaveBlockedReason,omitempty"`
 }
 
 // ResourceActions maps resource types to the actions applicable to individual resources.
@@ -299,6 +305,9 @@ func (a *AuthzService) ComputeCapabilitiesBatch(ctx context.Context, identity Id
 	if IsScopedUserIdentity(identity) {
 		caps := make([]*Capabilities, len(resources))
 		for i, resource := range resources {
+			if ctx.Err() != nil {
+				return denyRemainingCapabilities(caps, i)
+			}
 			caps[i] = a.computeCapabilitiesWithContext(ctx, identity, resource, actions)
 		}
 		return caps
@@ -309,6 +318,9 @@ func (a *AuthzService) ComputeCapabilitiesBatch(ctx context.Context, identity Id
 	// costs len(resources) × len(actions) decisions.
 	caps := make([]*Capabilities, len(resources))
 	for i, resource := range resources {
+		if ctx.Err() != nil {
+			return denyRemainingCapabilities(caps, i)
+		}
 		var allowed []string
 		for _, action := range actions {
 			decision := a.CheckAccess(ctx, identity, resource, action)
@@ -353,6 +365,9 @@ func (a *AuthzService) ComputeCapabilitiesForActions(ctx context.Context, identi
 	if IsScopedUserIdentity(identity) {
 		caps := make([]*Capabilities, len(resources))
 		for i, resource := range resources {
+			if ctx.Err() != nil {
+				return denyRemainingCapabilities(caps, i)
+			}
 			caps[i] = a.computeCapabilitiesWithContext(ctx, identity, resource, actions)
 		}
 		return caps
@@ -360,6 +375,9 @@ func (a *AuthzService) ComputeCapabilitiesForActions(ctx context.Context, identi
 
 	caps := make([]*Capabilities, len(resources))
 	for i, resource := range resources {
+		if ctx.Err() != nil {
+			return denyRemainingCapabilities(caps, i)
+		}
 		var allowed []string
 		for _, action := range actions {
 			decision := a.CheckAccess(ctx, identity, resource, action)
@@ -371,6 +389,18 @@ func (a *AuthzService) ComputeCapabilitiesForActions(ctx context.Context, identi
 			allowed = []string{}
 		}
 		caps[i] = &Capabilities{Actions: allowed}
+	}
+	return caps
+}
+
+// denyRemainingCapabilities fills caps from index from on with no actions
+// and returns caps. The capability loops call it once the request context
+// has ended (ptone/scion#6012) instead of running the remaining decisions:
+// the rest are denied, never allowed, and the response of an ended request
+// is not delivered.
+func denyRemainingCapabilities(caps []*Capabilities, from int) []*Capabilities {
+	for i := from; i < len(caps); i++ {
+		caps[i] = &Capabilities{Actions: []string{}}
 	}
 	return caps
 }
@@ -437,6 +467,17 @@ func delegatedCapabilities(ctx context.Context, resource Resource) *Capabilities
 	if !ok {
 		return none
 	}
+	// On a list route, a listed item carries the item filter's action, and
+	// only when the item filter allowed that item in this request; no
+	// other resource carries any action.
+	if entry.ItemFilter != "" {
+		c := listFilterCollectorFromContext(ctx)
+		action, ok := registryActionFor(entry.ItemFilter)
+		if c == nil || !ok || action == ActionAttach || !c.allowedItem(resource) {
+			return none
+		}
+		return &Capabilities{Actions: []string{string(action)}}
+	}
 	spec, ok := catalogOperationByID(entry.Operation)
 	if !ok {
 		return none
@@ -445,8 +486,8 @@ func delegatedCapabilities(ctx context.Context, resource Resource) *Capabilities
 	if !ok || action == ActionAttach {
 		return none
 	}
-	route, ok := agentSubRouteFromContext(ctx)
-	if !ok || resource.Type != "agent" || resource.ID == "" || resource.ID != route.AgentID {
+	target, ok := delegatedTargetFromContext(ctx)
+	if !ok || resource.Type != target.Type || resource.ID == "" || resource.ID != target.ID {
 		return none
 	}
 	return &Capabilities{Actions: []string{string(action)}}

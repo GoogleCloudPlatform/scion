@@ -17,6 +17,7 @@ package hub
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
@@ -411,7 +412,7 @@ func (s *Server) resolvedProjectSettings(project *store.Project) *ResolvedProjec
 		}
 
 		if project.Annotations != nil {
-			if val, ok := project.Annotations[key]; ok {
+			if val, ok := project.Annotations[key]; ok && projectAnnotationInEffect(key, val) {
 				v := val
 				entry.ProjectSet = true
 				entry.ProjectValue = &v
@@ -434,6 +435,21 @@ func (s *Server) resolvedProjectSettings(project *store.Project) *ResolvedProjec
 		Project:  projectSettingsFromAnnotations(project),
 		Settings: settings,
 	}
+}
+
+// projectAnnotationInEffect reports whether a stored project annotation is
+// a project value: the same rule projectSettingsFromAnnotations applies,
+// so the resolved view and GET /settings agree. A stored thinking level
+// outside 1-100 (in practice a "0" written before ptone/scion#4052) reads
+// as unset: GET omits it, new agents inherit the hub default, and the next
+// save removes it (ptone/scion#5692). Every other key is in effect when
+// present, even as "".
+func projectAnnotationInEffect(key, val string) bool {
+	if key == projectSettingDefaultThinkingLevel {
+		n, err := strconv.Atoi(val)
+		return err == nil && validDefaultThinkingLevel(n)
+	}
+	return true
 }
 
 // hubDefaultFor answers the existence question for one descriptor and, when

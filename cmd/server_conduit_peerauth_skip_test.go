@@ -18,6 +18,7 @@ package cmd
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"log/slog"
 	"net"
@@ -52,9 +53,9 @@ func countInternalListeners(t *testing.T) *int {
 	t.Helper()
 	n := new(int)
 	prev := serveConduitInternalListenerFn
-	serveConduitInternalListenerFn = func(ctx context.Context, listen string, h http.Handler, wg *sync.WaitGroup, errCh chan<- error) (net.Addr, func(), error) {
+	serveConduitInternalListenerFn = func(ctx context.Context, listen string, tlsConfig *tls.Config, h http.Handler, wg *sync.WaitGroup, errCh chan<- error) (net.Addr, func(), error) {
 		*n++
-		return prev(ctx, listen, h, wg, errCh)
+		return prev(ctx, listen, tlsConfig, h, wg, errCh)
 	}
 	t.Cleanup(func() { serveConduitInternalListenerFn = prev })
 	return n
@@ -265,7 +266,7 @@ func TestStartConduit_FailureLogNamesTheKey(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
 	t.Cleanup(func() { cancel(); wg.Wait() })
-	require.NoError(t, startConduit(ctx, cancel, cfg, srv, skipTestHubEndpoint, &wg, make(chan error, 1)))
+	require.NoError(t, startConduit(ctx, newTestShutdown(cancel), cfg, srv, skipTestHubEndpoint, &wg, make(chan error, 1)))
 	assert.Nil(t, srv.ConduitRelayFatal(), "no relay is running")
 	out := logs.String()
 	assert.Contains(t, out, "setting=server.hub.conduit.peer_auth")
@@ -291,7 +292,7 @@ func TestStartConduit_NonSettingFailureRecordsNoKey(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
 	t.Cleanup(func() { cancel(); wg.Wait() })
-	require.NoError(t, startConduit(ctx, cancel, cfg, srv, skipTestHubEndpoint, &wg, make(chan error, 1)))
+	require.NoError(t, startConduit(ctx, newTestShutdown(cancel), cfg, srv, skipTestHubEndpoint, &wg, make(chan error, 1)))
 	assert.Nil(t, srv.ConduitRelayFatal(), "no relay is running")
 	assert.Equal(t, []string{""}, *recorded, "a failure not caused by one setting records no key")
 	out := logs.String()

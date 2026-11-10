@@ -55,6 +55,88 @@ interface SearchResponse {
   nextCursor?: string;
 }
 
+/** Shown when the hub stopped a search at its time limit (503 SEARCH_TIMEOUT). */
+export const SEARCH_TIMEOUT_MESSAGE =
+  'Search took too long. Try a longer phrase or search one space.';
+/** Shown when another search by the same user is still running (429 SEARCH_BUSY). */
+export const SEARCH_BUSY_MESSAGE = 'Another search is still running. Try again in a moment.';
+/** Shown for any other failed search. */
+export const SEARCH_FAILED_MESSAGE = 'Search failed. Try again.';
+
+/** The hub's longest accepted search term, in characters. */
+export const SEARCH_MAX_QUERY_CHARS = 256;
+
+/**
+ * The message for a refused search. The error code in the response body
+ * decides (SEARCH_TIMEOUT, SEARCH_BUSY); any other code is a plain failure, so
+ * a maintenance or proxy 503 does not read as a slow search. The HTTP status
+ * is a fallback only when there is no code (0: no response).
+ */
+export function searchErrorMessage(status: number, code = ''): string {
+  if (code === 'SEARCH_TIMEOUT') return SEARCH_TIMEOUT_MESSAGE;
+  if (code === 'SEARCH_BUSY') return SEARCH_BUSY_MESSAGE;
+  if (code) return SEARCH_FAILED_MESSAGE;
+  if (status === 503) return SEARCH_TIMEOUT_MESSAGE;
+  if (status === 429) return SEARCH_BUSY_MESSAGE;
+  return SEARCH_FAILED_MESSAGE;
+}
+
+/** The hub's shortest accepted search term, in characters. */
+export const SEARCH_MIN_QUERY_CHARS = 2;
+
+/**
+ * The length of a search term in characters as the hub counts them (Unicode
+ * code points, not UTF-16 units), so one emoji is one character.
+ */
+export function searchQueryChars(q: string): number {
+  return [...q.trim()].length;
+}
+
+/** The error code of an API error body ({ error: { code } }), or '' if none. */
+async function errorCode(res: Response): Promise<string> {
+  try {
+    const body = (await res.json()) as { error?: { code?: unknown } };
+    const code = body?.error?.code;
+    return typeof code === 'string' ? code : '';
+  } catch {
+    return '';
+  }
+}
+
+/** Whether err is the rejection of an aborted fetch. */
+function isAbortError(err: unknown): boolean {
+  return err instanceof DOMException && err.name === 'AbortError';
+}
+
+/**
+ * The wait a 429 asks for, from its Retry-After header in seconds, held to
+ * 1-5 s (1 s when absent or unreadable).
+ */
+export function retryAfterMs(res: Response): number {
+  const n = Number.parseInt(res.headers.get('Retry-After') ?? '', 10);
+  const secs = Number.isFinite(n) ? Math.min(Math.max(n, 1), 5) : 1;
+  return secs * 1000;
+}
+
+/** Wait ms, or reject with an AbortError as soon as signal aborts. */
+function sleepAbortable(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(new DOMException('Aborted', 'AbortError'));
+      return;
+    }
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      reject(new DOMException('Aborted', 'AbortError'));
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
 @customElement('scion-chat-search')
 export class ScionChatSearch extends LitElement {
   /** Re-renders absolute result dates when the display zone changes. */
@@ -80,8 +162,14 @@ export class ScionChatSearch extends LitElement {
   @state() private nextCursor = '';
   @state() private loadingMore = false;
   @state() private noResults = false;
+  /** Message shown when the hub refused the search (timeout or busy). */
+  @state() private errorMsg = '';
+  /** Message for a failed "Load more"; the results already shown stay. */
+  @state() private loadMoreError = '';
 
   private _debounceTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Aborts the in-flight search request; one per request. */
+  private _abort: AbortController | null = null;
 
   static override styles = css`
     :host {
@@ -194,7 +282,7 @@ export class ScionChatSearch extends LitElement {
       gap: 0.125rem;
       padding: 0.625rem 0.75rem;
       cursor: pointer;
-      border-bottom: 1px solid var(--scion-border-subtle, #f1f5f9);
+      border-bottom: 1px solid var(--scion-bg-subtle, #f1f5f9);
       transition: background 0.1s;
     }
 
@@ -257,8 +345,15 @@ export class ScionChatSearch extends LitElement {
 
     .load-more {
       display: flex;
-      justify-content: center;
+      flex-direction: column;
+      align-items: center;
+      gap: 0.5rem;
       padding: 0.75rem;
+    }
+
+    /* A failed "Load more" shows its message above the button, not beside it. */
+    .load-more .search-error {
+      padding: 0;
     }
 
     .load-more button {
@@ -295,10 +390,28 @@ export class ScionChatSearch extends LitElement {
       clearTimeout(this._debounceTimer);
       this._debounceTimer = null;
     }
+    this.abortSearch();
+  }
+
+  /**
+   * Abort the in-flight search request, if any. The hub stops the
+   * database statement when the request goes away, so a superseded
+   * search does not keep running.
+   */
+  private abortSearch(): void {
+    if (this._abort) {
+      this._abort.abort();
+      this._abort = null;
+    }
   }
 
   /** Close the search panel and reset state. */
   close(): void {
+    this.abortSearch();
+    this.loading = false;
+    this.loadingMore = false;
+    this.errorMsg = '';
+    this.loadMoreError = '';
     this.searchActive = false;
     this.query = '';
     this.results = [];
@@ -325,11 +438,16 @@ export class ScionChatSearch extends LitElement {
     if (this._debounceTimer) {
       clearTimeout(this._debounceTimer);
     }
+    // New input supersedes the running search.
+    this.abortSearch();
+    this.errorMsg = '';
+    this.loadMoreError = '';
 
-    if (this.query.trim().length < 2) {
+    if (searchQueryChars(this.query) < SEARCH_MIN_QUERY_CHARS) {
       this.results = [];
       this.nextCursor = '';
       this.noResults = false;
+      this.loading = false;
       return;
     }
 
@@ -346,7 +464,13 @@ export class ScionChatSearch extends LitElement {
 
   private async performSearch(append = false): Promise<void> {
     const q = this.query.trim();
-    if (q.length < 2) return;
+    if (searchQueryChars(q) < SEARCH_MIN_QUERY_CHARS) return;
+
+    this.abortSearch();
+    const controller = new AbortController();
+    this._abort = controller;
+    this.errorMsg = '';
+    this.loadMoreError = '';
 
     if (append) {
       this.loadingMore = true;
@@ -371,10 +495,34 @@ export class ScionChatSearch extends LitElement {
 
       params.set('limit', '20');
 
-      const res = await apiFetch(`/api/v1/chat/search?${params.toString()}`);
-      if (!res.ok) return;
+      const url = `/api/v1/chat/search?${params.toString()}`;
+      let res = await apiFetch(url, { signal: controller.signal });
+      if (res.status === 429) {
+        // The hub frees this user's slot only once it has seen the
+        // superseded request go away, so a fast typist's next search can
+        // meet their own previous one. Retry once after Retry-After, under
+        // the same controller (a newer search still aborts it).
+        await sleepAbortable(retryAfterMs(res), controller.signal);
+        res = await apiFetch(url, { signal: controller.signal });
+      }
+      if (!res.ok) {
+        const code = await errorCode(res);
+        // Reading the body can end with the request superseded; a superseded
+        // request writes no error (errorCode swallows its AbortError).
+        if (controller.signal.aborted) return;
+        const msg = searchErrorMessage(res.status, code);
+        if (append) {
+          // Keep the results already on screen; show the error below them.
+          this.loadMoreError = msg;
+        } else {
+          this.noResults = false;
+          this.errorMsg = msg;
+        }
+        return;
+      }
 
       const data = (await res.json()) as SearchResponse;
+      if (controller.signal.aborted) return;
 
       if (append) {
         this.results = [...this.results, ...data.results];
@@ -384,18 +532,28 @@ export class ScionChatSearch extends LitElement {
 
       this.nextCursor = data.nextCursor || '';
       this.noResults = this.results.length === 0 && !append;
-    } catch {
-      // Silently fail
+    } catch (err) {
+      // An aborted request was superseded or the panel closed: not an error.
+      if (isAbortError(err)) return;
+      if (append) {
+        this.loadMoreError = searchErrorMessage(0);
+      } else {
+        this.errorMsg = searchErrorMessage(0);
+      }
     } finally {
-      this.loading = false;
-      this.loadingMore = false;
+      // A newer request owns the loading state once this one is superseded.
+      if (this._abort === controller) {
+        this._abort = null;
+        this.loading = false;
+        this.loadingMore = false;
+      }
     }
   }
 
   private toggleScope(all: boolean): void {
     if (this.scopeAll === all) return;
     this.scopeAll = all;
-    if (this.query.trim().length >= 2) {
+    if (searchQueryChars(this.query) >= SEARCH_MIN_QUERY_CHARS) {
       void this.performSearch();
     }
   }
@@ -455,6 +613,7 @@ export class ScionChatSearch extends LitElement {
             class="search-input"
             type="text"
             placeholder="Search messages..."
+            maxlength=${SEARCH_MAX_QUERY_CHARS}
             .value=${this.query}
             @input=${this.handleInput}
             @keydown=${this.handleKeydown}
@@ -493,16 +652,25 @@ export class ScionChatSearch extends LitElement {
         ${
           this.loading
             ? html`<div class="status-msg"><sl-spinner></sl-spinner></div>`
-            : this.noResults
-              ? html`<div class="status-msg">No messages found</div>`
-              : this.results.length === 0 && this.query.trim().length < 2
-                ? html`<div class="status-msg">Type at least 2 characters to search</div>`
-                : this.results.map((r) => this.renderResult(r))
+            : this.errorMsg
+              ? html`<div class="status-msg search-error" role="alert">${this.errorMsg}</div>`
+              : this.noResults
+                ? html`<div class="status-msg">No messages found</div>`
+                : this.results.length === 0 && searchQueryChars(this.query) < SEARCH_MIN_QUERY_CHARS
+                  ? html`<div class="status-msg">Type at least 2 characters to search</div>`
+                  : this.results.map((r) => this.renderResult(r))
         }
         ${
           this.nextCursor && !this.loading
             ? html`
                 <div class="load-more">
+                  ${
+                    this.loadMoreError
+                      ? html`<div class="status-msg search-error" role="alert">
+                          ${this.loadMoreError}
+                        </div>`
+                      : nothing
+                  }
                   ${
                     this.loadingMore
                       ? html`<sl-spinner></sl-spinner>`

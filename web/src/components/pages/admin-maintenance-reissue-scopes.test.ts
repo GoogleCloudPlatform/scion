@@ -22,7 +22,7 @@ import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vite
 
 const RESET_AUTH_PATH = '/api/v1/admin/agents/reset-auth-all';
 
-function reissueResult(dryRun: boolean): Record<string, unknown> {
+function reissueResult(dryRun: boolean, reloadUnconfirmed = false): Record<string, unknown> {
   return {
     batch_op_id: 'batch-1',
     dry_run: dryRun,
@@ -42,6 +42,9 @@ function reissueResult(dryRun: boolean): Record<string, unknown> {
         removed: ['project.write'],
         role_before: 'editor',
         role_after: 'viewer',
+        ...(reloadUnconfirmed
+          ? { reload_unconfirmed: 'the running agent did not confirm the reload' }
+          : {}),
       },
       { id: 'b-1', name: 'beta', project_id: 'p-1', depth: 0, outcome: 'noop' },
       {
@@ -73,6 +76,8 @@ interface MountOpts {
   applyStatus?: number;
   /** When set, the apply response waits for this promise. */
   holdApply?: Promise<void>;
+  /** When set, the applied result marks alpha's reload as unconfirmed. */
+  reloadUnconfirmed?: boolean;
 }
 
 function makeHandler(
@@ -99,7 +104,7 @@ function makeHandler(
         status = opts.applyStatus;
         out = { error: { code: 'unavailable', message: 'agent list could not be read' } };
       } else {
-        out = reissueResult(req.dry_run !== false);
+        out = reissueResult(req.dry_run !== false, apply && !!opts.reloadUnconfirmed);
       }
     } else if (path === '/api/v1/admin/maintenance') {
       out = { enabled: false };
@@ -256,6 +261,28 @@ describe('admin maintenance reset auth: re-issue scopes', () => {
     );
     expect(q(page, '.reissue-dry-run-note')).toBeNull();
     expect(q(page, '.reissue-apply')).toBeNull();
+  });
+
+  it('warns about an agent whose reload was not confirmed', async () => {
+    const page = await mount({ superAdmin: true, reloadUnconfirmed: true });
+    q(page, '.reissue-dry-run')!.click();
+    await settle(page);
+    expect(q(page, '.reissue-warnings')).toBeNull();
+    q(page, '.reissue-apply')!.click();
+    await settle(page);
+    q(page, '.reissue-confirm-apply')!.click();
+    await settle(page);
+
+    expect(q(page, '.reissue-summary')?.textContent).toContain(
+      '3 agents: 1 changed, 1 unchanged, 1 refused, 0 token not delivered, 1 reload unconfirmed'
+    );
+    const log = q(page, '.reissue-agents')?.textContent ?? '';
+    expect(log).toContain('alpha (a-1) changed');
+    expect(log).toContain('  reload unconfirmed: the running agent did not confirm the reload');
+    expect(log).not.toContain('token not delivered');
+    const warnings = q(page, '.reissue-warnings')?.textContent ?? '';
+    expect(warnings).toContain('1 agents received their new token but did not confirm the reload');
+    expect(warnings).not.toContain('did not receive their new token');
   });
 
   it('renders an apply error and sends exactly one dry_run false request', async () => {

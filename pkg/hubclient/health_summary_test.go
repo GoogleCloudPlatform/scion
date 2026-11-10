@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 )
@@ -137,5 +138,39 @@ func TestHealthSummary_NullOrEmptyBodyIsAnError(t *testing.T) {
 				t.Errorf("summary = %+v, want nil", got)
 			}
 		})
+	}
+}
+
+func TestHealthSummary_DecodesHubPausedSchedules(t *testing.T) {
+	body := `{"status":"healthy","generated_at":"2026-10-12T10:00:00Z","attention":[],` +
+		`"schedules":{"failing":[],"total":0,"truncated":false,"scan_limited":false,` +
+		`"paused":[{"id":"s1","name":"nightly","project_id":"p1","project_slug":"alpha","event_type":"message",` +
+		`"target":"worker","reason":"creator_deleted","updated_at":"2026-10-12T09:00:00Z"}],` +
+		`"paused_total":3,"paused_truncated":true,"paused_scan_limited":true,"paused_unavailable":true}}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := c.HealthSummary(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sec := got.Schedules
+	if sec == nil || sec.PausedTotal != 3 || !sec.PausedTruncated || !sec.PausedScanLimited || !sec.PausedUnavailable || len(sec.Paused) != 1 {
+		t.Fatalf("unexpected schedules section %+v", sec)
+	}
+	p := sec.Paused[0]
+	if p.ID != "s1" || p.Name != "nightly" || p.ProjectID != "p1" || p.ProjectSlug != "alpha" ||
+		p.EventType != "message" || p.Target != "worker" || p.Reason != "creator_deleted" {
+		t.Errorf("unexpected paused row %+v", p)
+	}
+	if p.UpdatedAt == nil || !p.UpdatedAt.Equal(time.Date(2026, 10, 12, 9, 0, 0, 0, time.UTC)) {
+		t.Errorf("updated_at = %v", p.UpdatedAt)
 	}
 }

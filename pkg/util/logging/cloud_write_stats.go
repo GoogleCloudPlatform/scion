@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -76,7 +77,8 @@ type CloudHealthReason uint8
 const (
 	CloudHealthOK CloudHealthReason = iota
 	CloudHealthCircuitOpen
-	CloudHealthRecentFailures
+	CloudHealthFlushFailures
+	CloudHealthFailureRatio
 )
 
 // String returns a fixed, non-sensitive description.
@@ -86,11 +88,62 @@ func (r CloudHealthReason) String() string {
 		return "healthy"
 	case CloudHealthCircuitOpen:
 		return "circuit open"
-	case CloudHealthRecentFailures:
-		return "recent write failures"
+	case CloudHealthFlushFailures:
+		return "consecutive flush failures"
+	case CloudHealthFailureRatio:
+		return "write failure ratio above 1%"
 	default:
 		return "unknown"
 	}
+}
+
+// cloud_logging health thresholds. A single failed write is only counted;
+// the check degrades on a sustained problem (ptone/scion#7361).
+const (
+	// cloudHealthWindow is the span the failure ratio and the per-reason
+	// counts in the health message cover.
+	cloudHealthWindow = asyncwrite.DefaultFailureWindow
+	// cloudHealthSlotWidth is the window's granularity: the window covers
+	// the current slot and the previous cloudHealthSlots-1, so its
+	// effective span is between 4.5 and 5 minutes.
+	cloudHealthSlotWidth = 30 * time.Second
+	cloudHealthSlots     = int(cloudHealthWindow / cloudHealthSlotWidth)
+	// cloudHealthMaxFailureBasisPoints is the failure ratio, in basis points
+	// of the records handed to the client in the window, above which the
+	// check degrades: 100 = 1%.
+	cloudHealthMaxFailureBasisPoints = 100
+	// cloudHealthMinWrites is the number of records handed to the client in
+	// the window below which the ratio is not judged, so that a few failures
+	// on a quiet hub cannot trip it. At 1% it takes at least 6 failures. A
+	// total outage on a quiet hub still degrades through the circuit breaker.
+	cloudHealthMinWrites = 500
+	// cloudHealthMaxConsecutiveFlushFailures is the number of failed flushes
+	// in a row, with no successful flush between them, that degrades the
+	// check. It matches the circuit breaker's DefaultMaxFailures.
+	cloudHealthMaxConsecutiveFlushFailures = DefaultMaxFailures
+)
+
+// cloudWindowSlot holds the counts of one cloudHealthSlotWidth span. tick
+// is the span's time index (UnixNano / width); a slot whose tick is
+// outside the window is stale and reset before reuse.
+type cloudWindowSlot struct {
+	tick     atomic.Int64
+	writes   atomic.Uint64
+	failures [numCloudReasons]atomic.Uint64
+}
+
+// cloudWindowCounts is a snapshot of the windowed counts.
+type cloudWindowCounts struct {
+	writes   uint64
+	failures [numCloudReasons]uint64
+}
+
+// ratioFailures is the numerator of the failure ratio: the per-record and
+// per-batch client failures. flush_error is judged by the consecutive-flush
+// rule (a failed flush usually repeats errors already counted as error) and
+// circuit_open by the circuit state.
+func (c cloudWindowCounts) ratioFailures() uint64 {
+	return c.failures[CloudReasonError] + c.failures[CloudReasonQueueFull]
 }
 
 // CloudWriteStats holds the in-process counters of the direct Cloud Logging
@@ -99,11 +152,20 @@ func (r CloudHealthReason) String() string {
 // MeterProvider, so WriteMetrics reads these counters at every collection
 // (ObserveCloud) and nothing recorded before it is attached is lost.
 //
-// Counting never logs, never blocks and never calls back into slog.
+// Besides the cumulative counters it keeps a rolling window of writes and
+// failures for Health. Counting never logs and never calls back into slog;
+// it takes a mutex only to reset a stale window slot, at most once per
+// slot width.
 type CloudWriteStats struct {
 	failures            [numCloudReasons]atomic.Uint64
 	lastFailureUnixNano atomic.Int64
 	circuit             atomic.Pointer[func() bool]
+
+	// consecutiveFlushFailures counts flush_error since the last
+	// RecordFlushSuccess.
+	consecutiveFlushFailures atomic.Int64
+	window                   [cloudHealthSlots]cloudWindowSlot
+	windowMu                 sync.Mutex // serializes slot resets only
 
 	// now is the clock (nil means time.Now). Set only before first use.
 	now func() time.Time
@@ -134,19 +196,103 @@ func (s *CloudWriteStats) clock() time.Time {
 
 // RecordFailure counts one failure for reason. Order: timestamp sampled
 // first, then the counter, then the LastFailure monotonic max-store (the
-// same order as asyncwrite, design C3.2). An out-of-range reason is ignored.
+// same order as asyncwrite, design C3.2). The failure is also counted in the
+// health window, and a flush_error extends the consecutive-flush-failure run.
+// An out-of-range reason is ignored.
 func (s *CloudWriteStats) RecordFailure(r CloudFailureReason) {
 	if s == nil || r >= numCloudReasons {
 		return
 	}
 	n := s.clock().UnixNano()
 	s.failures[r].Add(1)
+	if b := s.slotFor(n); b != nil {
+		b.failures[r].Add(1)
+	}
+	if r == CloudReasonFlushError {
+		s.consecutiveFlushFailures.Add(1)
+	}
 	for {
 		old := s.lastFailureUnixNano.Load()
 		if n <= old || s.lastFailureUnixNano.CompareAndSwap(old, n) {
 			return
 		}
 	}
+}
+
+// RecordWrite counts one record handed to the Cloud Logging client in the
+// health window: the denominator of the failure ratio. A client buffer
+// accept is not ingestion, so there is no cumulative counter or metric.
+func (s *CloudWriteStats) RecordWrite() {
+	if s == nil {
+		return
+	}
+	if b := s.slotFor(s.clock().UnixNano()); b != nil {
+		b.writes.Add(1)
+	}
+}
+
+// RecordFlushSuccess ends a run of consecutive flush failures.
+func (s *CloudWriteStats) RecordFlushSuccess() {
+	if s == nil {
+		return
+	}
+	s.consecutiveFlushFailures.Store(0)
+}
+
+// slotFor returns the window slot for the time n (UnixNano), resetting it
+// first if it still holds an older tick. It returns nil for a sample older
+// than the slot's current tick (a clock read that lost a race by a whole
+// window), which is then left out of the window. A record racing a reset
+// may be lost from, or misattributed within, the window; the cumulative
+// counters are exact.
+func (s *CloudWriteStats) slotFor(n int64) *cloudWindowSlot {
+	tick := n / int64(cloudHealthSlotWidth)
+	idx := tick % int64(cloudHealthSlots)
+	if idx < 0 {
+		idx += int64(cloudHealthSlots)
+	}
+	b := &s.window[idx]
+	switch cur := b.tick.Load(); {
+	case cur == tick:
+		return b
+	case cur > tick:
+		return nil
+	}
+	s.windowMu.Lock()
+	defer s.windowMu.Unlock()
+	switch cur := b.tick.Load(); {
+	case cur == tick:
+		return b
+	case cur > tick:
+		return nil
+	}
+	b.writes.Store(0)
+	for i := range b.failures {
+		b.failures[i].Store(0)
+	}
+	b.tick.Store(tick)
+	return b
+}
+
+// windowCounts sums the slots inside the health window that ends at the
+// given time.
+func (s *CloudWriteStats) windowCounts(at time.Time) cloudWindowCounts {
+	var c cloudWindowCounts
+	if s == nil {
+		return c
+	}
+	cur := at.UnixNano() / int64(cloudHealthSlotWidth)
+	for i := range s.window {
+		b := &s.window[i]
+		if tick := b.tick.Load(); tick > cur || tick <= cur-int64(cloudHealthSlots) {
+			continue
+		}
+		c.writes += b.writes.Load()
+		for r := range b.failures {
+			c.failures[r] += b.failures[r].Load()
+		}
+	}
+	return c
 }
 
 // Failures returns the cumulative count for reason.
@@ -204,26 +350,62 @@ func (s *CloudWriteStats) Configured() bool {
 }
 
 // Health evaluates cloud_logging health at now. Precedence: circuit open
-// (including half-open), recent failures within
-// asyncwrite.DefaultFailureWindow (5 min), healthy.
+// (including half-open); cloudHealthMaxConsecutiveFlushFailures flushes in a
+// row failed, the latest inside the window; error plus queue_full above
+// cloudHealthMaxFailureBasisPoints of at least cloudHealthMinWrites records
+// in the window; healthy. Isolated failures are only counted.
 func (s *CloudWriteStats) Health(now time.Time) CloudHealthReason {
+	r, _ := s.evaluate(now)
+	return r
+}
+
+func (s *CloudWriteStats) evaluate(at time.Time) (CloudHealthReason, cloudWindowCounts) {
+	c := s.windowCounts(at)
 	if open, _ := s.CircuitOpen(); open {
-		return CloudHealthCircuitOpen
+		return CloudHealthCircuitOpen, c
 	}
-	if last := s.LastFailure(); !last.IsZero() && now.Sub(last) < asyncwrite.DefaultFailureWindow {
-		return CloudHealthRecentFailures
+	if s != nil && s.consecutiveFlushFailures.Load() >= cloudHealthMaxConsecutiveFlushFailures &&
+		c.failures[CloudReasonFlushError] > 0 {
+		return CloudHealthFlushFailures, c
 	}
-	return CloudHealthOK
+	if c.writes >= cloudHealthMinWrites &&
+		c.ratioFailures()*10000 > c.writes*cloudHealthMaxFailureBasisPoints {
+		return CloudHealthFailureRatio, c
+	}
+	return CloudHealthOK, c
 }
 
 // HealthStatus returns the /healthz value for the cloud_logging key:
-// "healthy", "degraded: circuit open" or "degraded: recent write failures".
+// "healthy", or "degraded: <reason> (<counts>)" where reason is a
+// CloudHealthReason string and counts are the window's records handed to the
+// client, failures by reason and the failure ratio, for example
+// "degraded: write failure ratio above 1% (window=5m0s writes=1200 error=9
+// queue_full=6 flush_error=0 circuit_open=0 ratio=1.25%)". The value holds
+// only fixed labels and integers, never error text or record content.
 func (s *CloudWriteStats) HealthStatus(now time.Time) string {
-	r := s.Health(now)
+	r, c := s.evaluate(now)
 	if r == CloudHealthOK {
 		return r.String()
 	}
-	return "degraded: " + r.String()
+	return "degraded: " + r.String() + " (" + c.summary() + ")"
+}
+
+// summary formats the window counts with fixed labels. The ratio is shown in
+// whole basis points rounded up, so a ratio above the threshold never prints
+// as 1.00%.
+func (c cloudWindowCounts) summary() string {
+	ratio := "n/a"
+	if c.writes > 0 {
+		bp := (c.ratioFailures()*10000 + c.writes - 1) / c.writes
+		ratio = fmt.Sprintf("%d.%02d%%", bp/100, bp%100)
+	}
+	return fmt.Sprintf("window=%s writes=%d %s=%d %s=%d %s=%d %s=%d ratio=%s",
+		cloudHealthWindow, c.writes,
+		CloudReasonError, c.failures[CloudReasonError],
+		CloudReasonQueueFull, c.failures[CloudReasonQueueFull],
+		CloudReasonFlushError, c.failures[CloudReasonFlushError],
+		CloudReasonCircuitOpen, c.failures[CloudReasonCircuitOpen],
+		ratio)
 }
 
 // classifyCloudError maps a Cloud Logging client error to its reason. Only

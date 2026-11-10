@@ -336,7 +336,7 @@ func TestRun_TooManyRequestsBacksOff(t *testing.T) {
 }
 
 func TestReconcileOnce_UnauthorizedDeregisterStopsPass(t *testing.T) {
-	client := &scriptedHubClient{deleteErr: errHub401}
+	client := &scriptedHubClient{deleteErr: errHub401, registered: map[int]bool{3000: true, 4000: true}}
 	r := newLoopReconciler(client)
 	r.autoExposed[3000] = true
 	r.autoExposed[4000] = true
@@ -351,12 +351,15 @@ func TestReconcileOnce_UnauthorizedDeregisterStopsPass(t *testing.T) {
 }
 
 func TestReconcileOnce_DeregisterNotFoundIsDone(t *testing.T) {
-	client := &scriptedHubClient{deleteErr: errHub404}
+	client := &scriptedHubClient{deleteErr: errHub404, registered: map[int]bool{3000: true}}
 	r := newLoopReconciler(client)
 	r.autoExposed[3000] = true
 
 	if err := r.reconcileOnce(context.Background()); err != nil {
 		t.Fatalf("reconcileOnce: %v", err)
+	}
+	if client.deleteCalls != 1 {
+		t.Fatalf("DeletePort calls = %d, want 1 (the 404 path is exercised)", client.deleteCalls)
 	}
 	if r.autoExposed[3000] {
 		t.Fatal("port 3000 should no longer be tracked after a 404 on delete")
@@ -387,7 +390,7 @@ func TestRun_LogsOnlyOnStateChange(t *testing.T) {
 // stop is deregistered straight away.
 func TestRun_RejectedDeregisterHeldBack(t *testing.T) {
 	errs, _ := countLogs(t)
-	client := &scriptedHubClient{deleteErr: errHub403}
+	client := &scriptedHubClient{deleteErr: errHub403, registered: map[int]bool{3000: true}}
 	r := newLoopReconciler(client)
 	r.autoExposed[3000] = true
 

@@ -125,10 +125,10 @@ func TestDropEmptyPeerSecret(t *testing.T) {
 		{"numbers kept", `{"max_turns":12345678901234567890,"server":{"hub":{"conduit":{"peer_secret":""}}}}`, `{"max_turns":12345678901234567890}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.JSONEq(t, tc.want, string(dropEmptyPeerSecret([]byte(tc.in))))
+			assert.JSONEq(t, tc.want, string(dropEmptySecretSettings([]byte(tc.in))))
 		})
 	}
-	assert.Contains(t, string(dropEmptyPeerSecret([]byte(`{"max_turns":12345678901234567890,"server.hub.conduit.peer_secret":""}`))),
+	assert.Contains(t, string(dropEmptySecretSettings([]byte(`{"max_turns":12345678901234567890,"server.hub.conduit.peer_secret":""}`))),
 		"12345678901234567890", "a number keeps its spelling")
 	for _, body := range []string{
 		`{"server":{"hub":{"conduit":{"peer_secret":"x"}}}}`,
@@ -136,7 +136,7 @@ func TestDropEmptyPeerSecret(t *testing.T) {
 		`{"default_model":"m1"}`,
 		`not json`,
 	} {
-		assert.Equal(t, body, string(dropEmptyPeerSecret([]byte(body))), "unchanged: %s", body)
+		assert.Equal(t, body, string(dropEmptySecretSettings([]byte(body))), "unchanged: %s", body)
 	}
 }
 

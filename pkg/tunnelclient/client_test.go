@@ -399,7 +399,8 @@ func TestExitCodeUsage(t *testing.T) {
 }
 
 func TestSignalExit(t *testing.T) {
-	if SignalExit(os.Interrupt) != ExitInterrupted || SignalExit(syscall.SIGTERM) != ExitTerminated || SignalExit(syscall.SIGHUP) != ExitError {
+	if SignalExit(os.Interrupt) != ExitInterrupted || SignalExit(syscall.SIGTERM) != ExitTerminated ||
+		SignalExit(syscall.SIGHUP) != ExitHangup || SignalExit(syscall.SIGQUIT) != ExitError {
 		t.Fatal("signal exit codes")
 	}
 	if CodeOf(nil) != ExitOK || CodeOf(errors.New("x")) != ExitError || CodeOf(Errorf(ExitCapReached, "x")) != ExitCapReached {

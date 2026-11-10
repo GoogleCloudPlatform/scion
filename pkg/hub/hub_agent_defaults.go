@@ -117,9 +117,10 @@ func resourceSpecEqual(a, b *api.ResourceSpec) bool {
 // Call it BEFORE populateAgentConfig, so the harness-config ID/hash stamping
 // there sees the name and the broker gets something to hydrate from. Called
 // before applyProjectDefaults it would beat the project; called before the
-// template rungs it would beat the template (design §5.2 risk (b)). There are
-// exactly two call sites — the agent-create path and the scheduler-dispatch
-// path — and each sits strictly between those two functions.
+// template rungs it would beat the template (design §5.2 risk (b)). There is
+// exactly one call site, in deriveAgentConfig, strictly between those two
+// functions; every path that builds an agent config (create, reincarnate and
+// scheduled dispatch) reaches it through deriveAgentConfig.
 //
 // Only default_harness_config, default_model and default_thinking_level are
 // handled here. default_template joins the template ladder further up each

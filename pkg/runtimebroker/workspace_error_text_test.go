@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -429,7 +430,7 @@ func TestWorkspaceHandlerErrors_FixedText(t *testing.T) {
 			NameFunc:             func() string { return "docker" },
 			GetWorkspacePathFunc: func(context.Context, string) (string, error) { return "", nil },
 		}
-		srv := New(cfg, &listErrManager{mockAgentManager: mgr, err: listErr}, rt)
+		srv := New(cfg, &listErrManager{mockAgentManager: mgr, err: listErr}, rt, config.RuntimeBuildRecord{})
 		return srv, ws
 	}
 	agentRequest := func(handler http.HandlerFunc, path string, body any) *httptest.ResponseRecorder {
@@ -516,58 +517,6 @@ func TestWorkspaceHandlerErrors_FixedText(t *testing.T) {
 				logs := captureLifecycleJSONLog(srv)
 				installWorkspaceTransfers(srv, fakeWorkspaceTransfers{fromErr: gcsErr})
 				return apply(srv), logs, bootstrapDetail
-			},
-		},
-		{
-			name: "project-upload/access", op: opAccessWorkspacePath, wantText: "Failed to access workspace path",
-			logKey: "project_id", logValue: bootstrapProjectID,
-			run: func(t *testing.T) (*httptest.ResponseRecorder, *syncBuffer, string) {
-				srv, _ := agentServer(t, nil)
-				logs := captureLifecycleJSONLog(srv)
-				installFailingWorkspaceTransfers(t, srv)
-				const statDetail = "stat /srv/broker-7/projects/secret: permission denied"
-				srv.setProjectWorkspaceStatter(func(string) (os.FileInfo, error) { return nil, errors.New(statDetail) })
-				return doProjectUploadRequest(t, srv, ProjectWorkspaceUploadRequest{
-					ProjectID: bootstrapProjectID, StoragePath: "workspaces/p/w", WorkspacePath: t.TempDir(),
-				}), logs, statDetail
-			},
-		},
-		{
-			name: "project-upload/manifest", op: opBuildWorkspaceManifest, wantText: "Failed to build workspace manifest",
-			logKey: "project_id", logValue: bootstrapProjectID,
-			run: func(t *testing.T) (*httptest.ResponseRecorder, *syncBuffer, string) {
-				srv, _ := agentServer(t, nil)
-				logs := captureLifecycleJSONLog(srv)
-				installFailingWorkspaceTransfers(t, srv)
-				ws := t.TempDir()
-				locked := unreadableSubdir(t, ws)
-				return doProjectUploadRequest(t, srv, ProjectWorkspaceUploadRequest{
-					ProjectID: bootstrapProjectID, StoragePath: "workspaces/p/w", WorkspacePath: ws,
-				}), logs, filepath.Base(locked)
-			},
-		},
-		{
-			name: "project-upload/gcs", op: opUploadWorkspace, wantText: "Failed to upload workspace to GCS",
-			logKey: "project_id", logValue: bootstrapProjectID,
-			run: func(t *testing.T) (*httptest.ResponseRecorder, *syncBuffer, string) {
-				srv, _ := agentServer(t, nil)
-				logs := captureLifecycleJSONLog(srv)
-				installWorkspaceTransfers(srv, fakeWorkspaceTransfers{toErr: gcsErr})
-				return doProjectUploadRequest(t, srv, ProjectWorkspaceUploadRequest{
-					ProjectID: bootstrapProjectID, StoragePath: "workspaces/p/w", WorkspacePath: t.TempDir(),
-				}), logs, bootstrapDetail
-			},
-		},
-		{
-			name: "project-upload/manifest-upload", op: opUploadManifest, wantText: "Failed to upload manifest",
-			logKey: "project_id", logValue: bootstrapProjectID,
-			run: func(t *testing.T) (*httptest.ResponseRecorder, *syncBuffer, string) {
-				srv, _ := agentServer(t, nil)
-				logs := captureLifecycleJSONLog(srv)
-				installWorkspaceTransfers(srv, fakeWorkspaceTransfers{manifestErr: gcsErr})
-				return doProjectUploadRequest(t, srv, ProjectWorkspaceUploadRequest{
-					ProjectID: bootstrapProjectID, StoragePath: "workspaces/p/w", WorkspacePath: t.TempDir(),
-				}), logs, bootstrapDetail
 			},
 		},
 	}
@@ -706,7 +655,7 @@ func TestCreateAgent_GlobalDirError_FixedText(t *testing.T) {
 // log with the project slug.
 func TestDeleteProject_GlobalDirError_FixedText(t *testing.T) {
 	cfg := DefaultServerConfig()
-	srv := New(cfg, &mockAgentManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }})
+	srv := New(cfg, &mockAgentManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
 	logs := captureLifecycleJSONLog(srv)
 	t.Setenv("HOME", "")
 

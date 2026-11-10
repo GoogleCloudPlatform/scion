@@ -115,7 +115,9 @@ func runMessagesList(cmd *cobra.Command, args []string) error {
 	fmt.Printf("%-12s  %-14s  %-14s  %-22s  %s\n", "ID", "AGENT", "TYPE", "TIME", "MESSAGE")
 	fmt.Printf("%-12s  %-14s  %-14s  %-22s  %s\n",
 		"------------", "--------------", "--------------", "----------------------", "-------")
-	for _, m := range msgs {
+	label := newUserLabeler(ctx, client)
+	for i := range msgs {
+		m := &msgs[i]
 		shortID := m.ID
 		if len(shortID) > 12 {
 			shortID = shortID[:12]
@@ -136,6 +138,11 @@ func runMessagesList(cmd *cobra.Command, args []string) error {
 				dispatchInfo += ": " + *m.DispatchFailureReason
 			}
 			dispatchInfo += "]"
+		}
+		// A message sent with an agent delegated credential names the
+		// user who authorized it; other messages print as before.
+		if authorizedBy := messageAuthorizedBy(m, label); authorizedBy != "" {
+			dispatchInfo += " [" + authorizedBy + "]"
 		}
 		fmt.Printf("%-12s  %-14s  %-14s  %-22s  %s%s\n",
 			shortID, agentDisplay, truncate(m.Type, 14), timeStr, msgText, dispatchInfo)

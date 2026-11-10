@@ -101,6 +101,12 @@ type listParams struct {
 	cursor        string
 }
 
+// invalidCursorMessage is the message of the 400 invalid_cursor answer for
+// a list cursor that cannot be used. It matches apierr.InvalidCursorMessage
+// (pkg/hub/apierr), so every hub list answers a bad cursor the same way
+// (ptone/scion#3062); this package does not import pkg/hub/apierr.
+const invalidCursorMessage = "invalid cursor: restart pagination from the first page"
+
 // binding is the normalized query a cursor is bound to. The page size is
 // left out: changing it mid-walk is harmless.
 func (p listParams) binding() string {
@@ -198,7 +204,7 @@ func (s *Service) handleList(w http.ResponseWriter, r *http.Request) {
 			after, err = parsePosition(pos)
 		}
 		if err != nil {
-			writeError(w, http.StatusBadRequest, "invalid_cursor", "invalid cursor")
+			writeError(w, http.StatusBadRequest, "invalid_cursor", invalidCursorMessage)
 			return
 		}
 	}

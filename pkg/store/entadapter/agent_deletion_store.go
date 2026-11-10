@@ -106,7 +106,7 @@ func (s *AgentStore) updateAgentDeletionOnce(ctx context.Context, uid uuid.UUID,
 		updateAgentDeletionHook(ctx, tx, uid.String())
 	}
 
-	n, err := applyAgentDeletionFields(ctx, tx, row, set)
+	n, err := applyAgentDeletionFields(ctx, tx, row, set, false)
 	if err != nil {
 		return 0, false, err
 	}
@@ -114,6 +114,20 @@ func (s *AgentStore) updateAgentDeletionOnce(ctx context.Context, uid uuid.UUID,
 		// The row changed between the read and the write (no row lock on
 		// this dialect). Re-read and re-evaluate.
 		return 0, true, nil
+	}
+	if obs := s.lifecycle.load(); obs != nil {
+		// Observed (design 2.6, r3 B1): the delete claim and rollback can
+		// write phase and deleted_at.
+		after, err := lifecycleAfterRow(ctx, tx.Client(), uid)
+		if err != nil {
+			return 0, false, err
+		}
+		if err := observeAgentWrite(ctx, obs, tx.Client(), tx, store.AgentWrite{
+			Op: store.AgentWriteDeletion, Before: current, After: after, Now: time.Now(),
+			Hints: store.AgentWriteHints{Kind: store.WriteKindDeletion},
+		}); err != nil {
+			return 0, false, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, false, err
@@ -123,7 +137,13 @@ func (s *AgentStore) updateAgentDeletionOnce(ctx context.Context, uid uuid.UUID,
 
 // applyAgentDeletionFields writes set onto row inside tx, conditional on the
 // state_version it read (bumped). n == 0 means the CAS missed.
-func applyAgentDeletionFields(ctx context.Context, tx *ent.Tx, row *ent.Agent, set store.DeletionFields) (int, error) {
+// softFinish allows set's run fields (DeletionFields.SoftFinishRunID); any
+// other caller passing them, directly or through Derive (which has already
+// run), gets ErrInvalidInput and nothing is written.
+func applyAgentDeletionFields(ctx context.Context, tx *ent.Tx, row *ent.Agent, set store.DeletionFields, softFinish bool) (int, error) {
+	if set.SetsSoftFinishRunIDs() && !softFinish {
+		return 0, fmt.Errorf("update agent deletion %s: %w: run IDs are written only by a soft finalize", row.ID, store.ErrInvalidInput)
+	}
 	now := time.Now()
 	upd := tx.Agent.Update().
 		Where(agent.IDEQ(row.ID), agent.StateVersionEQ(row.StateVersion)).
@@ -174,6 +194,19 @@ func applyAgentDeletionFields(ctx context.Context, tx *ent.Tx, row *ent.Agent, s
 	}
 	if set.DeletedAt != nil {
 		upd.SetDeletedAt(*set.DeletedAt)
+	}
+	if set.SoftFinishRunID != nil {
+		upd.SetRunID(*set.SoftFinishRunID)
+		if *set.SoftFinishRunID != row.RunID {
+			upd.SetRunIDUpdatedAt(now.UTC())
+		}
+	}
+	if set.SoftFinishPreviousRunIDs != nil {
+		if prev := *set.SoftFinishPreviousRunIDs; len(prev) > 0 {
+			upd.SetPreviousRunIds(prev)
+		} else {
+			upd.ClearPreviousRunIds()
+		}
 	}
 
 	n, err := upd.Save(ctx)

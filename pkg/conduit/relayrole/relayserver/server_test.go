@@ -380,7 +380,7 @@ func TestEventsStartAfterRegistration(t *testing.T) {
 		t.Fatal("no listen hook registered")
 	}
 	joined := strings.Join(ev.subscribed, " ")
-	for _, want := range append(append([]string(nil), RevocationSubjects...), SettingsUpdatedSubject) {
+	for _, want := range append(append([]string(nil), RevocationSubjects...), SettingsUpdatedSubject, GrantKeysChangedSubject) {
 		if !strings.Contains(joined, want) {
 			t.Errorf("no subscription to %s", want)
 		}
@@ -537,4 +537,27 @@ func TestWaitExperimentReturnsContextErrorWhenCancelled(t *testing.T) {
 			t.Fatalf("%d timers armed, want none", p)
 		}
 	})
+}
+
+// TestSingletonRegistersTheFeature (design §3.9 "Cloud Run singleton"):
+// Config.Singleton reaches the relay, whose relay_instances row lists the
+// feature singleton.
+func TestSingletonRegistersTheFeature(t *testing.T) {
+	w := relaytest.NewWorld(t)
+	cfg := testConfig(t, w, newFakeExperiment(expAnswer{on: true}))
+	cfg.Singleton = true
+	startServer(t, cfg)
+	all, err := w.Store.ListRelays(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ri := range all {
+		if ri.InstanceID == "relay-0" {
+			if !ri.HasFeature(registry.RelayFeatureSingleton) {
+				t.Fatalf("row features = %v, want singleton", ri.Features)
+			}
+			return
+		}
+	}
+	t.Fatal("relay-0 is not registered")
 }

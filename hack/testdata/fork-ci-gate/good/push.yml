@@ -1,0 +1,46 @@
+name: CI
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  changes:
+    name: Detect changes
+    if: ${{ (github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion' }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ok
+        if: always()
+
+  test:
+    needs: changes
+    if: ${{ ((github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion') && (!cancelled() && needs.changes.outputs.go == 'true') }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ok
+
+  result:
+    needs: [changes, test]
+    if: ${{ ((github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion') && (always()) }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ok
+
+  commented:
+    if: ${{ (github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion' }} # a trailing comment is not part of the expression
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ok
+
+  literal-parens:
+    if: ${{ ((github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion') && (startsWith(github.head_ref, 'a) || (b')) }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ok
+
+  doubled-quote:
+    if: ${{ ((github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion') && (github.head_ref != 'it''s ) || (x') }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ok

@@ -33,6 +33,8 @@ import { showConfirm } from './confirm-dialog.js';
 import { formatNumber } from '../../utils/format-number.js';
 import { formatInstant, zoneLabel } from '../../utils/time.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
+import './workspace-migration-notice.js';
+import type { WorkspaceMigrationNotice } from './workspace-migration-notice.js';
 
 // ────────────────────────────────────────────────────────────
 // Types
@@ -53,6 +55,8 @@ export interface FileListResult {
   totalCount: number;
   hasMore?: boolean;
   providerCount?: number;
+  /** Files tab banner while the project storage migration is pending. */
+  migrationNotice?: WorkspaceMigrationNotice | null;
 }
 
 // ────────────────────────────────────────────────────────────
@@ -563,6 +567,7 @@ export class ScionFileBrowser extends LitElement {
   @state() private loading = false;
   @state() private error: string | null = null;
   @state() private totalSize = 0;
+  @state() private migrationNotice: WorkspaceMigrationNotice | null = null;
   @state() private totalCount = 0;
   @state() private initialHasMore = false;
   @state() private providerCount = 0;
@@ -900,6 +905,7 @@ export class ScionFileBrowser extends LitElement {
         this._loadToken++;
         this.files = [];
         this.totalSize = 0;
+        this.migrationNotice = null;
         this.totalCount = 0;
         this.initialHasMore = false;
         this.providerCount = 0;
@@ -937,6 +943,7 @@ export class ScionFileBrowser extends LitElement {
       if (token !== this._loadToken) return;
       this.files = result.files || [];
       this.totalSize = result.totalSize || 0;
+      this.migrationNotice = result.migrationNotice ?? null;
       this.totalCount = result.totalCount || 0;
       this.initialHasMore = result.hasMore ?? false;
       this.providerCount = result.providerCount ?? 0;
@@ -1209,7 +1216,14 @@ export class ScionFileBrowser extends LitElement {
   // ── Render ──
 
   override render() {
-    return html` ${this.renderToolbar()} ${this.renderContent()} `;
+    return html`
+      ${this.migrationNotice
+        ? html`<scion-workspace-migration-notice
+            .notice=${this.migrationNotice}
+          ></scion-workspace-migration-notice>`
+        : nothing}
+      ${this.renderToolbar()} ${this.renderContent()}
+    `;
   }
 
   private renderToolbar() {

@@ -343,7 +343,7 @@ func tiWebAddProvider(t *testing.T, s store.Store, projectID string) {
 	ctx := context.Background()
 	broker := &store.RuntimeBroker{ID: tid("ti-web-broker-" + projectID), Name: "ti web broker", Slug: "ti-web-broker-" + projectID[:8], Status: store.BrokerStatusOnline, Endpoint: "http://localhost:9800"}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
-	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{ProjectID: projectID, BrokerID: broker.ID, BrokerName: broker.Name, Status: store.BrokerStatusOnline}))
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{ProjectID: projectID, BrokerID: broker.ID, BrokerName: broker.Name, LocalPath: fixtureProviderCheckout(t), Status: store.BrokerStatusOnline}))
 }
 
 // --- AC1: gate off ----------------------------------------------------------

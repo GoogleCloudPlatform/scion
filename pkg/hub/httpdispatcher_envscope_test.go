@@ -351,8 +351,8 @@ func TestWarnOutrankedBrokerEnvKeys_LogsShadowedKeys(t *testing.T) {
 // env — is seeded into ResolvedEnv first and storage fills only what it left
 // absent, so config outranks all four scopes including user. That relation is
 // not even a plain inequality: an EMPTY config value is a passthrough marker
-// that deliberately yields to storage. See TestBuildEnvSources_
-// ConfigOutranksStorageScopes for the config rung, and the settings-precedence
+// that deliberately yields to storage. See TestBuildEnvGatherResponse_
+// ProvenanceFollowsDispatch for the config rung, and the settings-precedence
 // reference doc for the templates, harness overrides, profiles and project
 // annotations that sit in between.
 //
@@ -463,143 +463,6 @@ func TestResolveEnvFromStorage_DropsReservedTarget(t *testing.T) {
 	}
 }
 
-// TestBuildEnvSources_ReportsBrokerScope covers the provenance reporter's
-// blind spot: a key defined ONLY in runtime_broker scope must be reported with
-// source "broker", not blank.
-func TestBuildEnvSources_ReportsBrokerScope(t *testing.T) {
-	ctx := context.Background()
-	d, _ := newEnvScopeDispatcher(t, "BROKER_ONLY_KEY", map[string]string{
-		store.ScopeRuntimeBroker: "from-broker",
-	})
-	agent := envScopeTestAgent()
-
-	resolved, _, err := d.resolveEnvFromStorage(ctx, agent)
-	if err != nil {
-		t.Fatalf("resolveEnvFromStorage: %v", err)
-	}
-	if got, want := resolved["BROKER_ONLY_KEY"], "from-broker"; got != want {
-		t.Fatalf("precondition: BROKER_ONLY_KEY resolved to %q, want %q", got, want)
-	}
-
-	sources := d.buildEnvSources(ctx, agent, resolved)
-	if got, want := sources["BROKER_ONLY_KEY"], "broker"; got != want {
-		t.Errorf("buildEnvSources reported source %q for BROKER_ONLY_KEY, want %q", got, want)
-	}
-}
-
-// TestEnvSources_AgreesWithResolver is a DRIFT GUARD. IT IS NOT A CORRECTNESS
-// CHECK, AND IT MUST NEVER BE COUNTED AS ONE.
-//
-// For every subset of scopes that may define a key, the source reported by
-// buildEnvSources must be the scope the winning value actually came from in
-// resolveEnvFromStorage. But it derives its expectation FROM the resolved
-// value, so resolver and reporter stay in agreement even when both are wrong
-// together — design Class F. `sp-rev2` confirmed this by mutation: all fifteen
-// subsets survived an ordering change that a correctness test must catch.
-//
-// It guards even LESS since the ordering was extracted into
-// envScopesInPrecedenceOrder, because both sides now range over the same list:
-// the drift it was written to detect is close to structurally impossible. That
-// is a reason to keep it cheap and to be honest about what it buys, not a
-// reason to delete it — it still catches a reporter that stops consulting the
-// shared helper, mislabels a scope, or applies the config rung in the wrong
-// place, none of which the ordering extraction prevents.
-//
-// The correctness of the ORDER is TestResolveEnvFromStorage_PairwisePrecedence
-// (criterion 18). If you are looking for the test that would fail if the ladder
-// were wrong, it is that one, not this one.
-func TestEnvSources_AgreesWithResolver(t *testing.T) {
-	ctx := context.Background()
-
-	// value written in each scope -> source label buildEnvSources must report.
-	sourceForValue := map[string]string{
-		"from-hub":     "hub",
-		"from-project": "project",
-		"from-user":    "user",
-		"from-broker":  "broker",
-	}
-	valueForScope := map[string]string{
-		store.ScopeHub:           "from-hub",
-		store.ScopeProject:       "from-project",
-		store.ScopeUser:          "from-user",
-		store.ScopeRuntimeBroker: "from-broker",
-	}
-	allScopes := []string{store.ScopeHub, store.ScopeProject, store.ScopeUser, store.ScopeRuntimeBroker}
-
-	// Enumerate every non-empty subset of the four scopes (15 cases).
-	for mask := 1; mask < 1<<len(allScopes); mask++ {
-		values := make(map[string]string)
-		name := ""
-		for i, scope := range allScopes {
-			if mask&(1<<i) != 0 {
-				values[scope] = valueForScope[scope]
-				if name != "" {
-					name += "+"
-				}
-				name += scope
-			}
-		}
-		t.Run(name, func(t *testing.T) {
-			d, _ := newEnvScopeDispatcher(t, "SHARED_KEY", values)
-			agent := envScopeTestAgent()
-
-			resolved, _, err := d.resolveEnvFromStorage(ctx, agent)
-			if err != nil {
-				t.Fatalf("resolveEnvFromStorage: %v", err)
-			}
-			winner, ok := resolved["SHARED_KEY"]
-			if !ok {
-				t.Fatalf("precondition: SHARED_KEY missing from resolved env")
-			}
-			wantSource, ok := sourceForValue[winner]
-			if !ok {
-				t.Fatalf("unexpected resolved value %q", winner)
-			}
-
-			sources := d.buildEnvSources(ctx, agent, resolved)
-			if got := sources["SHARED_KEY"]; got != wantSource {
-				t.Errorf("buildEnvSources reported source %q, but the value %q came from scope %q",
-					got, winner, wantSource)
-			}
-		})
-	}
-}
-
-// TestBuildEnvSources_ConfigOutranksStorageScopes pins the reporter's existing
-// behaviour for agent-config env: explicit agent config outranks all four
-// storage scopes, so config is what gets reported.
-func TestBuildEnvSources_ConfigOutranksStorageScopes(t *testing.T) {
-	ctx := context.Background()
-	d, _ := newEnvScopeDispatcher(t, "SHARED_KEY", map[string]string{
-		store.ScopeHub:           "from-hub",
-		store.ScopeProject:       "from-project",
-		store.ScopeUser:          "from-user",
-		store.ScopeRuntimeBroker: "from-broker",
-	})
-	agent := envScopeTestAgent()
-	agent.AppliedConfig = &store.AgentAppliedConfig{Env: map[string]string{"SHARED_KEY": "from-config"}}
-
-	resolved := map[string]string{"SHARED_KEY": "from-config"}
-	sources := d.buildEnvSources(ctx, agent, resolved)
-	if got, want := sources["SHARED_KEY"], "config"; got != want {
-		t.Errorf("buildEnvSources reported source %q, want %q", got, want)
-	}
-}
-
-// TestBuildEnvSources_SkipsKeysNotInResolvedEnv pins that the reporter only
-// labels keys that actually made it into the resolved env.
-func TestBuildEnvSources_SkipsKeysNotInResolvedEnv(t *testing.T) {
-	ctx := context.Background()
-	d, _ := newEnvScopeDispatcher(t, "UNUSED_KEY", map[string]string{
-		store.ScopeHub:           "from-hub",
-		store.ScopeRuntimeBroker: "from-broker",
-	})
-	sources := d.buildEnvSources(ctx, envScopeTestAgent(), map[string]string{})
-	if len(sources) != 0 {
-		t.Errorf("buildEnvSources returned %v, want no entries", sources)
-	}
-}
-
 // TestResolveEnvFromStorage_SkipsInapplicableScopes pins that scopes whose
 // scope ID is empty on the agent contribute nothing and cause no error.
 func TestResolveEnvFromStorage_SkipsInapplicableScopes(t *testing.T) {
@@ -621,10 +484,5 @@ func TestResolveEnvFromStorage_SkipsInapplicableScopes(t *testing.T) {
 	}
 	if got, want := resolved["SHARED_KEY"], "from-project"; got != want {
 		t.Errorf("SHARED_KEY resolved to %q, want %q", got, want)
-	}
-
-	sources := d.buildEnvSources(ctx, agent, resolved)
-	if got, want := sources["SHARED_KEY"], "project"; got != want {
-		t.Errorf("buildEnvSources reported source %q, want %q", got, want)
 	}
 }

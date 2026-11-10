@@ -765,21 +765,16 @@ func TestStartSharedDirStorage_MalformedGlobalSettings_NoKey_SucceedsAsMain(t *t
 	assertLegacyLocalSharedDirBehavior(t, capturedConfig, envMap, f.projectScionDir)
 }
 
-// TestStartSharedDirStorage_LegacyGlobalSettings_MentionsKey_FailsClosed is
-// round 4 review finding S-L1: a global settings.yaml with no
-// `schema_version: "1"` takes the LEGACY loader path, which silently drops
-// the entire `server` block — LoadGlobalSettings returns err == nil with
-// Server == nil, so the gErr != nil / GlobalSettingsMentions fail-closed
-// branch (6') never even runs. Without an explicit check, an operator's
-// shared_dir_storage=nfs config would vanish with only a generic
-// "unrecognized keys" WARN, which is a worse silent failure than the
-// malformed-YAML case 6' already covers. Start must error and Run must
-// never be called.
-func TestStartSharedDirStorage_LegacyGlobalSettings_MentionsKey_FailsClosed(t *testing.T) {
+// TestStartSharedDirStorage_LegacyGlobalSettings_MentionsKey_LoadedAndEnforced
+// (round 4 review finding S-L1, updated for ptone/scion#3919): a global
+// settings file without `schema_version: "1"` is converted at its
+// own layer, which keeps its server block (ptone/scion#3919): the operator's
+// shared_dir_storage=nfs config is loaded, not silently dropped, so Start
+// enforces it (here: the export is not mounted) and Run is never called.
+func TestStartSharedDirStorage_LegacyGlobalSettings_MentionsKey_LoadedAndEnforced(t *testing.T) {
 	f := newSharedDirStorageRunFixture(t)
 	// Well-formed YAML, but no schema_version/harnesses/v1-runtime
-	// indicators, so it takes the legacy path — which has no "server" field
-	// at all, silently dropping this whole block.
+	// indicators: a legacy-format file.
 	require.NoError(t, os.WriteFile(filepath.Join(f.globalScionDir, "settings.yaml"), []byte(`active_profile: local
 server:
   shared_dir_storage:
@@ -813,22 +808,22 @@ server:
 		SharedDirs: []api.SharedDir{{Name: "scratchpad"}},
 	})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "server.shared_dir_storage")
-	assert.Contains(t, err.Error(), "schema_version")
-	assert.Equal(t, 0, ranCount, "Run must never be called when a legacy global file silently dropped a configured shared_dir_storage")
+	assert.Contains(t, err.Error(), "require this broker to have the share mounted")
+	assert.Equal(t, 0, ranCount, "Run must never be called: the legacy global file's shared_dir_storage is loaded and enforced")
 }
 
-// TestStartSharedDirStorage_LegacyGlobalSettings_V1ProjectConfigsOverlay_StillFailsClosed
+// TestStartSharedDirStorage_LegacyGlobalSettings_V1ProjectConfigsOverlay_GlobalOnlyEnforced
 // is round 6 disposition item 1 (rev L1 = tst L2)'s Start-level half: the
 // same legacy-global-with-block scenario as
-// ..._LegacyGlobalSettings_MentionsKey_FailsClosed above, but with
+// ..._LegacyGlobalSettings_MentionsKey_LoadedAndEnforced above, but with
 // ~/.scion ALSO carrying a project-id file plus a v1-format
 // project-configs settings.yaml — the exact combination that made the
 // pre-fix detectHierarchyFormat-based gate see the global directory as
 // "versioned" (via the project layer) and skip the fail-closed check
-// entirely, silently dropping the operator's nfs config. Run must still
-// never be called.
-func TestStartSharedDirStorage_LegacyGlobalSettings_V1ProjectConfigsOverlay_StillFailsClosed(t *testing.T) {
+// entirely, silently dropping the operator's nfs config. The global file
+// alone is read (now with its server block, see above), so the nfs config
+// is enforced and Run is still never called.
+func TestStartSharedDirStorage_LegacyGlobalSettings_V1ProjectConfigsOverlay_GlobalOnlyEnforced(t *testing.T) {
 	f := newSharedDirStorageRunFixture(t)
 	require.NoError(t, os.WriteFile(filepath.Join(f.globalScionDir, "settings.yaml"), []byte(`active_profile: local
 server:
@@ -875,8 +870,7 @@ server:
 		SharedDirs: []api.SharedDir{{Name: "scratchpad"}},
 	})
 	require.Error(t, startErr)
-	assert.Contains(t, startErr.Error(), "server.shared_dir_storage")
-	assert.Contains(t, startErr.Error(), "schema_version")
+	assert.Contains(t, startErr.Error(), "require this broker to have the share mounted")
 	assert.Equal(t, 0, ranCount,
 		"Run must never be called: a v1 project-configs overlay must not make the global-only legacy gate think the global file is versioned")
 }
@@ -964,4 +958,84 @@ active_profile: local
 // sprintfServerYAML formats the sharedDirStorageNFSGlobalYAML template.
 func sprintfServerYAML(format, mountRoot, shareID, pvName string) string {
 	return fmt.Sprintf(format, mountRoot, shareID, pvName)
+}
+
+// writeProjectSharedDirs writes the project's settings.yaml with the given
+// shared_dirs names (the in-repo settings a cloned project can carry).
+func (f sharedDirStorageRunFixture) writeProjectSharedDirs(t *testing.T, names ...string) {
+	t.Helper()
+	content := "schema_version: \"1\"\nshared_dirs:\n"
+	for _, n := range names {
+		content += fmt.Sprintf("  - name: %q\n", n)
+	}
+	require.NoError(t, os.WriteFile(filepath.Join(f.projectScionDir, "settings.yaml"), []byte(content), 0644))
+}
+
+// startCapture starts one agent on a docker mock runtime and returns the
+// RunConfig the runtime received.
+func startCapture(t *testing.T, f sharedDirStorageRunFixture, opts api.StartOptions) runtime.RunConfig {
+	t.Helper()
+	var captured runtime.RunConfig
+	ran := 0
+	mockRT := &runtime.MockRuntime{
+		NameFunc: func() string { return "docker" },
+		RunFunc: func(ctx context.Context, cfg runtime.RunConfig) (string, error) {
+			ran++
+			captured = cfg
+			return "mock-id", nil
+		},
+	}
+	_, err := NewManager(mockRT).Start(context.Background(), opts)
+	require.NoError(t, err)
+	require.Equal(t, 1, ran)
+	return captured
+}
+
+// assertOnlyValidSharedDir checks that the start kept exactly the valid
+// shared dir: RunConfig.SharedDirs, the volumes and the disk all name only it,
+// and the escaping name created nothing outside the shared-dirs directory.
+func assertOnlyValidSharedDir(t *testing.T, f sharedDirStorageRunFixture, cfg runtime.RunConfig, valid, escaping string) {
+	t.Helper()
+	assert.Equal(t, []api.SharedDir{{Name: valid}}, cfg.SharedDirs, "RunConfig carries only the valid shared dir")
+	basePath, err := config.GetSharedDirsBasePath(f.projectScionDir)
+	require.NoError(t, err)
+	var targets []string
+	for _, v := range cfg.Volumes {
+		if filepath.Dir(v.Target) == "/scion-volumes" {
+			targets = append(targets, v.Target)
+			assert.Equal(t, filepath.Join(basePath, valid), v.Source)
+		}
+	}
+	assert.Equal(t, []string{"/scion-volumes/" + valid}, targets)
+	info, err := os.Stat(filepath.Join(basePath, valid))
+	require.NoError(t, err)
+	assert.True(t, info.IsDir())
+	_, err = os.Lstat(filepath.Join(basePath, escaping))
+	assert.ErrorIs(t, err, os.ErrNotExist, "no directory for the invalid name")
+}
+
+// A project setting with an invalid shared-dir name creates no directory at
+// start on the local layout, and the valid name still works (ptone/scion#6881).
+func TestStartSharedDirs_LocalLayout_InvalidSettingsNameSkipped(t *testing.T) {
+	f := newSharedDirStorageRunFixture(t)
+	f.writeGlobalSettings(t, "")
+	f.writeProjectSharedDirs(t, "data", "../escape")
+	cfg := startCapture(t, f, api.StartOptions{
+		Name: "test-agent", ProjectPath: f.projectScionDir, NoAuth: true,
+		Env: map[string]string{"SCION_AGENT_ID": "agent-6881", "SCION_PROJECT_ID": "pid-6881"},
+	})
+	assertOnlyValidSharedDir(t, f, cfg, "data", "../escape")
+}
+
+// The same holds for names in a hub-dispatched start request.
+func TestStartSharedDirs_LocalLayout_InvalidRequestNameSkipped(t *testing.T) {
+	f := newSharedDirStorageRunFixture(t)
+	f.writeGlobalSettings(t, "")
+	f.writeProjectSettings(t, "")
+	cfg := startCapture(t, f, api.StartOptions{
+		Name: "test-agent", ProjectPath: f.projectScionDir, NoAuth: true,
+		Env:        map[string]string{"SCION_AGENT_ID": "agent-6881r", "SCION_PROJECT_ID": "pid-6881"},
+		SharedDirs: []api.SharedDir{{Name: "data"}, {Name: "../../outside"}},
+	})
+	assertOnlyValidSharedDir(t, f, cfg, "data", "../../outside")
 }

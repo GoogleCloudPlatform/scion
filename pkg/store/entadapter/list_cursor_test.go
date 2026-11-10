@@ -53,6 +53,7 @@ func TestDecodeListCursor_ErrorsAreInvalidInput(t *testing.T) {
 			_, _, err := decodeListCursor(cursor, "")
 			require.Error(t, err)
 			assert.ErrorIs(t, err, store.ErrInvalidInput)
+			assert.ErrorIs(t, err, store.ErrInvalidCursor)
 		})
 	}
 
@@ -61,6 +62,7 @@ func TestDecodeListCursor_ErrorsAreInvalidInput(t *testing.T) {
 		_, _, err := decodeListCursor(cursor, "binding-b")
 		require.Error(t, err)
 		assert.ErrorIs(t, err, store.ErrInvalidInput)
+		assert.ErrorIs(t, err, store.ErrInvalidCursor)
 	})
 
 	t.Run("valid cursor round-trips", func(t *testing.T) {
@@ -89,6 +91,7 @@ func TestDecodeCursor_ErrorsAreInvalidInput(t *testing.T) {
 			_, _, err := decodeCursor(cursor)
 			require.Error(t, err)
 			assert.ErrorIs(t, err, store.ErrInvalidInput)
+			assert.ErrorIs(t, err, store.ErrInvalidCursor)
 		})
 	}
 
@@ -104,8 +107,9 @@ func TestDecodeCursor_ErrorsAreInvalidInput(t *testing.T) {
 
 // TestListStores_MalformedCursorIsInvalidInput hits every entadapter list
 // method that decodes an opaque cursor (decodeListCursor, decodeCursor,
-// decodeConstraintCursor or a UUID ID cursor) and asserts the error surfaces as store.ErrInvalidInput
-// (HTTP 400 at the hub), not a bare error (HTTP 500). ptone/scion#1957.
+// decodeConstraintCursor or a UUID ID cursor) and asserts the error surfaces as store.ErrInvalidCursor,
+// which wraps store.ErrInvalidInput (HTTP 400 invalid_cursor at the hub), not a bare error
+// (HTTP 500). ptone/scion#1957, ptone/scion#3062.
 // Not here: ListUsers, whose numeric offset cursor ignores unparseable input
 // by design, and sorted-mode ListAgents, whose cursor is
 // store.DecodeAgentCursor (tested in pkg/store).
@@ -168,6 +172,10 @@ func TestListStores_MalformedCursorIsInvalidInput(t *testing.T) {
 			_, err := cs.ListAllowListEntries(ctx, opts)
 			return err
 		},
+		"agent holds": func(opts store.ListOptions) error {
+			_, err := cs.ListActiveAgentHoldsByProject(ctx, uuid.NewString(), opts)
+			return err
+		},
 		// decodeConstraintCursor (pageToken). The default sort is by creation
 		// time, so "bad timestamp" also covers the sort-value check.
 		"access constraints": func(opts store.ListOptions) error {
@@ -184,6 +192,7 @@ func TestListStores_MalformedCursorIsInvalidInput(t *testing.T) {
 				err := list(store.ListOptions{Limit: 5, Cursor: cursor})
 				require.Error(t, err)
 				assert.ErrorIs(t, err, store.ErrInvalidInput)
+				assert.ErrorIs(t, err, store.ErrInvalidCursor)
 			})
 		}
 	}
@@ -201,10 +210,12 @@ func TestListStores_UnknownIDCursorIsInvalidInput(t *testing.T) {
 	_, err := cs.ListInviteCodes(ctx, opts)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, store.ErrInvalidInput)
+	assert.ErrorIs(t, err, store.ErrInvalidCursor)
 	assert.NotErrorIs(t, err, store.ErrNotFound)
 
 	_, err = cs.ListAllowListEntries(ctx, opts)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, store.ErrInvalidInput)
+	assert.ErrorIs(t, err, store.ErrInvalidCursor)
 	assert.NotErrorIs(t, err, store.ErrNotFound)
 }

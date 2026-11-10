@@ -17,7 +17,6 @@ package logging
 import (
 	"context"
 	"log/slog"
-	"os"
 
 	gcplog "cloud.google.com/go/logging"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/cloudrunenv"
@@ -88,13 +87,7 @@ func NewMessageLogger(cfg MessageLoggerConfig) (*slog.Logger, func(), error) {
 	// handler would produce duplicate entries — skip it in that case.
 	onCloudRun := cloudrunenv.IsService()
 	if !onCloudRun || cfg.CloudClient == nil {
-		if cfg.UseGCP {
-			handlers = append(handlers, NewGCPHandler(os.Stdout, opts, cfg.Component, cfg.HubName))
-		} else {
-			handlers = append(handlers, slog.NewJSONHandler(os.Stdout, opts).WithAttrs([]slog.Attr{
-				slog.String(AttrComponent, cfg.Component),
-			}))
-		}
+		handlers = append(handlers, newStdoutHandler(stdoutWriter(), opts, cfg.Component, cfg.HubName, cfg.UseGCP, true))
 	}
 
 	if len(handlers) == 0 {
@@ -187,6 +180,11 @@ func (h *messageCloudHandler) handleWithLabels(ctx context.Context, r slog.Recor
 		Timestamp: r.Time,
 	}
 
+	h.writeStats().RecordWrite()
+	if h.logHook != nil {
+		h.logHook(entry)
+		return nil
+	}
 	h.logger.Log(entry)
 	return nil
 }
@@ -210,6 +208,7 @@ func (h *messageCloudHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 			attrs:     newAttrs,
 			groups:    h.groups,
 			logHook:   h.logHook,
+			stats:     h.stats,
 		},
 	}
 }
@@ -233,6 +232,7 @@ func (h *messageCloudHandler) WithGroup(name string) slog.Handler {
 			attrs:     h.attrs,
 			groups:    newGroups,
 			logHook:   h.logHook,
+			stats:     h.stats,
 		},
 	}
 }

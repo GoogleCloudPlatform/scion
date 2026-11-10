@@ -69,6 +69,12 @@ describe('formatAccessDenied', () => {
     expect(result.secondary).toBe('Permission needed: manage on agent');
   });
 
+  it('labels a chat_post denial (chat_post_denied) as posting in chat', () => {
+    const detail: AccessDeniedDetail = { action: 'chat_post', resource: 'project' };
+    const result = formatAccessDenied(detail);
+    expect(result.secondary).toBe('Permission needed: post in chat on project');
+  });
+
   it('passes through unknown action codes as-is', () => {
     const detail: AccessDeniedDetail = { action: 'custom_action', resource: 'widget' };
     const result = formatAccessDenied(detail);

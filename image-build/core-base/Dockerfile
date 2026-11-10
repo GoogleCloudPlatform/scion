@@ -106,6 +106,10 @@ RUN /opt/scion-image-build/lib/install-core-toolchain.sh free-uid-1000
 
 RUN /opt/scion-image-build/lib/install-core-toolchain.sh apt-common
 RUN /opt/scion-image-build/lib/install-core-toolchain.sh chromium
+# System libraries for Playwright's WebKit and Firefox builds; agents run as
+# non-root and cannot install them later. The list and its provenance live in
+# the script (step_playwright_deps).
+RUN /opt/scion-image-build/lib/install-core-toolchain.sh playwright-deps
 RUN /opt/scion-image-build/lib/install-core-toolchain.sh gcsfuse
 RUN /opt/scion-image-build/lib/install-core-toolchain.sh gcloud
 
@@ -199,6 +203,7 @@ RUN --mount=type=secret,id=npmrc,target=/root/.npmrc,required=false \
 ARG TARGETARCH
 ARG BUILDARCH
 RUN GO_MIN_VERSION="${GO_MIN_VERSION}" \
+    HELM_VERSION="${HELM_VERSION}" \
     TARGETARCH="${TARGETARCH}" \
     BUILDARCH="${BUILDARCH}" \
     /opt/scion-image-build/lib/verify-base-contract.sh

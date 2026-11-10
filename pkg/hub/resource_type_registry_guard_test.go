@@ -989,12 +989,23 @@ func TestResourceTypeLiterals_AllInRegistry(t *testing.T) {
 // present when the pin was added; a new entry needs a review that the
 // value can only hold registry types. Keep it sorted.
 var unresolvedResourceTypeValues = []string{
+	// delegatedListScope and flushListFilter: resourceType is the item
+	// resource type of an admitted delegated list route, passed by its
+	// handler as a registry type ("agent" from listAgentsDelegated and
+	// listProjectAgentsDelegated, "skill" and "template" from the skill and
+	// template list handlers).
+	"agent_delegation_list.go: resourceType",
+	"agent_delegation_list.go: resourceType",
 	"audit_authz.go: req.Resource.Type",
 	"authorized_list.go: resourceType",
 	"authz_hub_target.go: meta.Resource",
 	"authz_hub_target.go: meta.Resource",
 	"authz_hub_target.go: resourceType",
 	"authz_relationship_rules.go: kind",
+	// materialDeliveryResource: kind is a MaterialKind, which launch
+	// selection sets only to MaterialKindSecret or MaterialKindEnvVar
+	// ("secret", "env_var"), both registry resource types.
+	"material_resources.go: string(kind)",
 }
 
 // TestResourceTypeLiterals_DetectsUnknownType proves the guard reports an

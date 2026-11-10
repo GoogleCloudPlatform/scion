@@ -39,7 +39,10 @@ steps:
   - name: 'gcr.io/cloud-builders/docker'
     id: 'build-scion-hub'
     dir: 'image-build/hub'
+    entrypoint: 'bash'
     args:
+      - '/workspace/image-build/scripts/buildx-record-digest.sh'
+      - '$_REGISTRY/scion-hub:$_TAG'
       - 'buildx'
       - 'build'
       - '--platform'

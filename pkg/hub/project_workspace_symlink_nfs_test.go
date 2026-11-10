@@ -58,6 +58,7 @@ func setupNFSSymlinkMatrix(t *testing.T) (srv *Server, outside *outsideTree, lea
 	hostBase := setNFSSharedDirStorageGlobalSettings(t)
 
 	srv, _ = testServer(t)
+	useNFSSharedDirStorage(srv, hostBase)
 	outside = newOutsideTree(t)
 	project := createTestGitProject(t, srv, "Symlink SD NFS", "github.com/test/symlink-sd-nfs")
 
@@ -290,7 +291,7 @@ func TestSymlinkNFS_Delete(t *testing.T) {
 // ============================================================================
 //
 // <pid> being a symlink in BOTH toggle states of a swap would let
-// resolveNFSSharedDirPath's own EvalSymlinks equality check refuse every
+// the shared-dir resolution's own symlink backstop (VerifyNoSymlinks) refuse every
 // request before OpenAnchoredRoot's dev/ino comparison is ever reached, so a
 // change disabling that comparison would pass untouched. The tests below
 // avoid that gap.
@@ -328,6 +329,7 @@ func setupNFSRenameExchangeRace(t *testing.T, dirName string) *nfsRenameExchange
 	t.Helper()
 	hostBase := setNFSSharedDirStorageGlobalSettings(t)
 	srv, _ := testServer(t)
+	useNFSSharedDirStorage(srv, hostBase)
 	project := createTestGitProject(t, srv, "Rename Exchange Race", "github.com/test/rename-exchange-race")
 
 	rec := doRequest(t, srv, http.MethodPost, fmt.Sprintf("/api/v1/projects/%s/shared-dirs", project.ID),

@@ -1,0 +1,3 @@
+leaf        l
+area        a
+area        b   a

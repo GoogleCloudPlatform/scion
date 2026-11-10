@@ -17,6 +17,7 @@ package entadapter
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
@@ -33,6 +34,22 @@ import (
 // mirroring the legacy SQLite implementation.
 type SecretStore struct {
 	client *ent.Client
+	// inTx is set when client wraps the ambient WithTx transaction
+	// (newTxCompositeStore), so fenced writes run on it directly.
+	inTx bool
+	// txFencedWrite records that a fenced secret write ran in the ambient
+	// transaction (inTx only); a later policy or migration transition in
+	// that transaction is refused (store.ErrPolicyTransitionAfterFencedWrite).
+	txFencedWrite atomic.Bool
+}
+
+// runFencedWrite runs fn, a fenced secret write, in its own transaction
+// or the ambient one, recording the latter for runTransition.
+func (s *SecretStore) runFencedWrite(ctx context.Context, fn func(c *ent.Client) error) error {
+	if s.inTx {
+		s.txFencedWrite.Store(true)
+	}
+	return runInEntTx(ctx, s.client, s.inTx, fn)
 }
 
 // NewSecretStore creates a new Ent-backed SecretStore.
@@ -75,8 +92,23 @@ func entSecretRowToStore(e *ent.Secret, includeValue bool) store.Secret {
 	return s
 }
 
-// CreateSecret creates a new secret.
+// CreateSecret creates a new secret. The value passes the encryption
+// policy fence (store.SecretEncryptionStore) in the same transaction.
 func (s *SecretStore) CreateSecret(ctx context.Context, secret *store.Secret) error {
+	return s.runFencedWrite(ctx, func(c *ent.Client) error {
+		policy, err := loadEncryptionPolicyForWrite(ctx, c)
+		if err != nil {
+			return err
+		}
+		if !policy.AllowsWrite(secret.EncryptedValue, secret.SecretRef) {
+			return store.ErrEncryptionPolicyMismatch
+		}
+		return createSecretRow(ctx, c, secret)
+	})
+}
+
+// createSecretRow inserts the row on c (no fence; callers fence).
+func createSecretRow(ctx context.Context, c *ent.Client, secret *store.Secret) error {
 	uid, err := parseUUID(secret.ID)
 	if err != nil {
 		return err
@@ -97,7 +129,7 @@ func (s *SecretStore) CreateSecret(ctx context.Context, secret *store.Secret) er
 		secret.InjectionMode = store.InjectionModeAsNeeded
 	}
 
-	create := s.client.Secret.Create().
+	create := c.Secret.Create().
 		SetID(uid).
 		SetKey(secret.Key).
 		SetEncryptedValue(secret.EncryptedValue).
@@ -133,7 +165,11 @@ func (s *SecretStore) CreateSecret(ctx context.Context, secret *store.Secret) er
 // GetSecret retrieves secret metadata (including the encrypted value) by key,
 // scope, and scopeID.
 func (s *SecretStore) GetSecret(ctx context.Context, key, scope, scopeID string) (*store.Secret, error) {
-	e, err := s.client.Secret.Query().
+	return getSecretRow(ctx, s.client, key, scope, scopeID)
+}
+
+func getSecretRow(ctx context.Context, c *ent.Client, key, scope, scopeID string) (*store.Secret, error) {
+	e, err := c.Secret.Query().
 		Where(
 			entsecret.KeyEQ(key),
 			entsecret.ScopeEQ(scope),
@@ -147,8 +183,21 @@ func (s *SecretStore) GetSecret(ctx context.Context, key, scope, scopeID string)
 	return &sec, nil
 }
 
-// UpdateSecret updates an existing secret, incrementing its version.
+// UpdateSecret updates an existing secret, incrementing its version. A
+// changed value passes the encryption policy fence in the same
+// transaction; an unchanged value (a metadata-only update) does not,
+// except that under a policy the row must keep a non-empty value or ref.
 func (s *SecretStore) UpdateSecret(ctx context.Context, secret *store.Secret) error {
+	return s.runFencedWrite(ctx, func(c *ent.Client) error {
+		if err := fenceValueChange(ctx, c, secret.Key, secret.Scope, secret.ScopeID, secret.EncryptedValue, &secret.SecretRef); err != nil {
+			return err
+		}
+		return updateSecretRow(ctx, c, secret)
+	})
+}
+
+// updateSecretRow updates the row on c (no fence; callers fence).
+func updateSecretRow(ctx context.Context, c *ent.Client, secret *store.Secret) error {
 	secret.Updated = time.Now()
 	secret.Version++ // Increment version on each update
 
@@ -162,7 +211,7 @@ func (s *SecretStore) UpdateSecret(ctx context.Context, secret *store.Secret) er
 		secret.InjectionMode = store.InjectionModeAsNeeded
 	}
 
-	update := s.client.Secret.Update().
+	update := c.Secret.Update().
 		Where(
 			entsecret.KeyEQ(secret.Key),
 			entsecret.ScopeEQ(secret.Scope),
@@ -200,6 +249,11 @@ func (s *SecretStore) UpdateSecret(ctx context.Context, secret *store.Secret) er
 // expectedVersion. See store.SecretStore for the full contract, including
 // why the version predicate is required, not merely the ref (ptone/scion#2152
 // round-4 review finding 1).
+//
+// The write is fenced (ptone/scion#1530 §6): it takes the policy lock and
+// then the row lock like every payload write, and under a policy it returns
+// store.ErrEncryptionPolicyMismatch instead of leaving a row with neither a
+// value nor a ref (newRef "" on a reference-only row).
 func (s *SecretStore) UpdateSecretRefIfMatches(ctx context.Context, key, scope, scopeID string, expectedRef string, expectedVersion int, newRef string) (bool, error) {
 	// secret_ref is an optional (nullable) column: a record that never had a
 	// ref set stores SQL NULL, not "". entsecret.SecretRefEQ("") compiles to
@@ -219,48 +273,95 @@ func (s *SecretStore) UpdateSecretRefIfMatches(ctx context.Context, key, scope, 
 	// to provide, purely to exercise a branch the API can't produce. It
 	// stays as defense in depth against a row imported or edited outside
 	// this store, not as a path this code is expected to exercise itself.
+	// (Exception: this method persists a literal "" when newRef is empty,
+	// which the reference-only conformance in pkg/store/storetest uses to
+	// reach the arm before a policy exists.)
 	refPredicate := entsecret.SecretRefEQ(expectedRef)
 	if expectedRef == "" {
 		refPredicate = entsecret.Or(entsecret.SecretRefIsNil(), entsecret.SecretRefEQ(""))
 	}
-	update := s.client.Secret.Update().
-		Where(
-			entsecret.KeyEQ(key),
-			entsecret.ScopeEQ(scope),
-			entsecret.ScopeIDEQ(scopeID),
-			refPredicate,
-			entsecret.VersionEQ(expectedVersion),
-		).
-		SetSecretRef(newRef).
-		AddVersion(1).
-		SetUpdated(time.Now())
-
-	n, err := update.Save(ctx)
+	applied := false
+	err := s.runFencedWrite(ctx, func(c *ent.Client) error {
+		// Lock order: policy, then the secret row. A reference-only row
+		// (empty value) holds its payload in the ref, so under a policy
+		// the ref must not be cleared from it.
+		policy, err := loadEncryptionPolicyForWrite(ctx, c)
+		if err != nil {
+			return err
+		}
+		existing, err := lockSecretRowForWrite(ctx, c, key, scope, scopeID)
+		if errors.Is(err, store.ErrNotFound) {
+			return nil // no row: not applied
+		}
+		if err != nil {
+			return err
+		}
+		if existing.SecretRef != expectedRef || existing.Version != expectedVersion {
+			return nil // the compare fails: not applied
+		}
+		if !policy.AllowsRowPayload(existing.EncryptedValue, newRef) {
+			return store.ErrEncryptionPolicyMismatch
+		}
+		n, err := c.Secret.Update().
+			Where(
+				entsecret.KeyEQ(key),
+				entsecret.ScopeEQ(scope),
+				entsecret.ScopeIDEQ(scopeID),
+				refPredicate,
+				entsecret.VersionEQ(expectedVersion),
+			).
+			SetSecretRef(newRef).
+			AddVersion(1).
+			SetUpdated(time.Now()).
+			Save(ctx)
+		if err != nil {
+			return mapError(err)
+		}
+		applied = n > 0
+		return nil
+	})
 	if err != nil {
-		return false, mapError(err)
+		return false, err
 	}
-	return n > 0, nil
+	return applied, nil
 }
 
 // UpdateSecretValueIfVersion conditionally replaces the encrypted value,
 // applying the change and incrementing Version only when the row's current
 // Version equals expectedVersion. Every other column is left untouched.
+//
+// A changed value passes the encryption policy fence in the same
+// transaction.
 func (s *SecretStore) UpdateSecretValueIfVersion(ctx context.Context, key, scope, scopeID string, expectedVersion int, newEncryptedValue string) (bool, error) {
-	n, err := s.client.Secret.Update().
-		Where(
-			entsecret.KeyEQ(key),
-			entsecret.ScopeEQ(scope),
-			entsecret.ScopeIDEQ(scopeID),
-			entsecret.VersionEQ(expectedVersion),
-		).
-		SetEncryptedValue(newEncryptedValue).
-		AddVersion(1).
-		SetUpdated(time.Now()).
-		Save(ctx)
+	applied := false
+	err := s.runFencedWrite(ctx, func(c *ent.Client) error {
+		if err := fenceValueChange(ctx, c, key, scope, scopeID, newEncryptedValue, nil); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return nil // no row: not applied
+			}
+			return err
+		}
+		n, err := c.Secret.Update().
+			Where(
+				entsecret.KeyEQ(key),
+				entsecret.ScopeEQ(scope),
+				entsecret.ScopeIDEQ(scopeID),
+				entsecret.VersionEQ(expectedVersion),
+			).
+			SetEncryptedValue(newEncryptedValue).
+			AddVersion(1).
+			SetUpdated(time.Now()).
+			Save(ctx)
+		if err != nil {
+			return mapError(err)
+		}
+		applied = n > 0
+		return nil
+	})
 	if err != nil {
-		return false, mapError(err)
+		return false, err
 	}
-	return n > 0, nil
+	return applied, nil
 }
 
 // UpdateSecretMeta updates only metadata columns of an existing secret without
@@ -320,34 +421,55 @@ func (s *SecretStore) UpdateSecretMeta(ctx context.Context, key, scope, scopeID 
 	return existing, nil
 }
 
-// UpsertSecret creates or updates a secret, keyed by (key, scope, scopeID).
+// UpsertSecret creates or updates a secret, keyed by (key, scope, scopeID),
+// in one transaction. A new or changed value passes the encryption policy
+// fence; re-writing the stored value unchanged does not, except that under
+// a policy the row must keep a non-empty value or ref.
 func (s *SecretStore) UpsertSecret(ctx context.Context, secret *store.Secret) (bool, error) {
-	now := time.Now()
-	secret.Updated = now
+	created := false
+	err := s.runFencedWrite(ctx, func(c *ent.Client) error {
+		now := time.Now()
+		secret.Updated = now
 
-	existing, err := s.GetSecret(ctx, secret.Key, secret.Scope, secret.ScopeID)
-	if err != nil && !errors.Is(err, store.ErrNotFound) {
-		return false, err
-	}
-
-	if existing != nil {
-		// Update existing: preserve identity/creation metadata. UpdateSecret
-		// increments the version from the existing baseline.
-		secret.ID = existing.ID
-		secret.Created = existing.Created
-		secret.CreatedBy = existing.CreatedBy
-		secret.Version = existing.Version
-		if err := s.UpdateSecret(ctx, secret); err != nil {
-			return false, err
+		// Lock order: policy, then the secret row.
+		policy, err := loadEncryptionPolicyForWrite(ctx, c)
+		if err != nil {
+			return err
 		}
-		return false, nil
-	}
+		existing, err := lockSecretRowForWrite(ctx, c, secret.Key, secret.Scope, secret.ScopeID)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return err
+		}
+		if existing != nil && existing.EncryptedValue == secret.EncryptedValue {
+			if !policy.AllowsRowPayload(secret.EncryptedValue, secret.SecretRef) {
+				return store.ErrEncryptionPolicyMismatch
+			}
+		} else if !policy.AllowsWrite(secret.EncryptedValue, secret.SecretRef) {
+			return store.ErrEncryptionPolicyMismatch
+		}
 
-	secret.Created = now
-	if err := s.CreateSecret(ctx, secret); err != nil {
+		if existing != nil {
+			// Update existing: preserve identity/creation metadata.
+			// updateSecretRow increments the version from the existing
+			// baseline.
+			secret.ID = existing.ID
+			secret.Created = existing.Created
+			secret.CreatedBy = existing.CreatedBy
+			secret.Version = existing.Version
+			return updateSecretRow(ctx, c, secret)
+		}
+
+		secret.Created = now
+		if err := createSecretRow(ctx, c, secret); err != nil {
+			return err
+		}
+		created = true
+		return nil
+	})
+	if err != nil {
 		return false, err
 	}
-	return true, nil
+	return created, nil
 }
 
 // DeleteSecret removes a secret by key, scope, and scopeID.
@@ -681,4 +803,52 @@ func (s *SecretStore) ListEnvVars(ctx context.Context, filter store.EnvVarFilter
 		envVars = append(envVars, entEnvVarToStore(e))
 	}
 	return envVars, nil
+}
+
+// AttributeUserSecretToOwner sets created_by to scope_id on the user-scope
+// row with id, while its created_by still matches. No other column changes:
+// the updated timestamp is written back unchanged and the version is not
+// incremented. The version is deliberately not part of the predicate (see
+// store.SecretStore).
+func (s *SecretStore) AttributeUserSecretToOwner(ctx context.Context, id string, expectedCreatedBy string) (bool, error) {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return false, err
+	}
+	applied := false
+	err = runInEntTx(ctx, s.client, s.inTx, func(c *ent.Client) error {
+		q := c.Secret.Query().Where(entsecret.IDEQ(uid))
+		if isPostgres(c) {
+			q = q.ForUpdate()
+		}
+		row, err := q.Only(ctx)
+		if ent.IsNotFound(err) {
+			return nil
+		}
+		if err != nil {
+			return mapError(err)
+		}
+		if row.Scope != store.ScopeUser || row.ScopeID == "" || row.CreatedBy != expectedCreatedBy {
+			return nil
+		}
+		n, err := c.Secret.Update().
+			Where(
+				entsecret.IDEQ(uid),
+				entsecret.ScopeEQ(store.ScopeUser),
+				entsecret.ScopeIDEQ(row.ScopeID),
+				entsecret.CreatedByEQ(expectedCreatedBy),
+			).
+			SetCreatedBy(row.ScopeID).
+			SetUpdated(row.Updated).
+			Save(ctx)
+		if err != nil {
+			return mapError(err)
+		}
+		applied = n == 1
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	return applied, nil
 }

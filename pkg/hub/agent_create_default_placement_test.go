@@ -84,6 +84,7 @@ func newAgentCreateDefaultsFixture(t *testing.T) *agentCreateDefaultsFixture {
 	require.NoError(t, f.store.CreateRuntimeBroker(ctx, other))
 	require.NoError(t, f.store.AddProjectProvider(ctx, &store.ProjectProvider{
 		ProjectID: f.proj.ID, BrokerID: other.ID, BrokerName: other.Name, Status: store.BrokerStatusOnline,
+		LocalPath: fixtureProviderCheckout(t),
 	}))
 
 	caller, err := f.store.GetAgent(ctx, f.caller.ID)

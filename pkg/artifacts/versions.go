@@ -144,13 +144,23 @@ func (s *Service) handleCreate(w http.ResponseWriter, r *http.Request) {
 		OwnerKind: kind, OwnerRef: ref, Key: key, Title: title, CreatedAt: now, UpdatedAt: now,
 		ExpiresAt: retentionExpiry(b.currentLimits(ctx), now),
 	}
+	// The delegating user of an agent creating the artifact, resolved by
+	// the host from the agent's delegation chain (ptone/scion#6028); never
+	// from the request.
+	a.SponsorRef = s.sponsorFor(ctx, kind, ref, a.ScopeKind)
 	v, files := pendingVersion(a.ID, req, kind, ref, now, nil)
 	v.Seq = 1
 	g := Grant{
 		ID: uuid.NewString(), ArtifactID: a.ID, SubjectKind: SubjectScope, SubjectRef: scope,
 		Permission: GrantRead, CreatedByRef: PrincipalRef(kind, ref), CreatedAt: now,
 	}
-	err := b.store.CreatePending(ctx, a, v, files, []Grant{g})
+	grants := []Grant{g}
+	// The automatic review grant for the delegating user commits with the
+	// artifact, or not at all (ptone/scion#7134).
+	if sg, ok := s.sponsorReviewGrant(r, a, now); ok {
+		grants = append(grants, sg)
+	}
+	err := b.store.CreatePending(ctx, a, v, files, grants)
 	if errors.Is(err, ErrConflict) {
 		// Another publish took the key first: append to its artifact.
 		existing, lookErr := b.store.GetArtifactByKey(ctx, ScopeKindProject, scope, kind, ref, key)
@@ -167,6 +177,7 @@ func (s *Service) handleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.logAllowed(r, logEntry{action: logActionCreated, artifact: a, seq: v.Seq, authority: logAuthorityOwner})
+	s.logSponsorReviewGrants(r, a, grants)
 	writePending(w, a, v, files)
 }
 
@@ -224,6 +235,15 @@ func (s *Service) appendVersion(w http.ResponseWriter, r *http.Request, b backen
 		writeError(w, http.StatusConflict, CodeNothingToReview, "a review needs an artifact with a published version")
 		return
 	}
+	// The open-review check runs after authorization and before the
+	// version number is taken (ptone/scion#6849); reviews are not checked.
+	var warnings []string
+	if versionKind(req.Kind) == VersionKindPublish {
+		var ok bool
+		if warnings, ok = s.checkOpenReviews(w, r, b, a, req.Force); !ok {
+			return
+		}
+	}
 	var current map[string]File
 	if a.CurrentSeq > 0 {
 		if cv, err := b.store.GetVersion(ctx, a.ID, a.CurrentSeq); err == nil {
@@ -257,7 +277,7 @@ func (s *Service) appendVersion(w http.ResponseWriter, r *http.Request, b backen
 		return
 	}
 	s.logVersion(r, logActionVersionCreated, a, v.Seq, access)
-	writePending(w, a, v, files)
+	writePending(w, a, v, files, warnings...)
 }
 
 // pendingVersion builds a pending version and its manifest rows. A file
@@ -292,8 +312,8 @@ func versionKind(k string) string {
 	return VersionKindPublish
 }
 
-func writePending(w http.ResponseWriter, a *Artifact, v *Version, files []File) {
-	resp := PendingVersionResponse{Artifact: artifactInfo(a), Version: versionInfo(v, files), Upload: UploadInfo{Required: []string{}}}
+func writePending(w http.ResponseWriter, a *Artifact, v *Version, files []File, warnings ...string) {
+	resp := PendingVersionResponse{Artifact: artifactInfo(a), Version: versionInfo(v, files), Upload: UploadInfo{Required: []string{}}, Warnings: warnings}
 	// One upload per digest: files with the same bytes share the stored
 	// object, and uploading one marks the others received.
 	seen := map[string]bool{}
@@ -866,7 +886,7 @@ func (s *Service) handleFinalize(w http.ResponseWriter, r *http.Request, id stri
 		return
 	}
 	if ready.Kind == VersionKindReview {
-		s.notifyReview(ctx, updated, ready)
+		s.notifyReview(ctx, updated, ready, access)
 	}
 	writeJSON(w, http.StatusOK, ArtifactResponse{Artifact: artifactInfo(updated), Version: versionInfo(ready, files), Warnings: warnings})
 }
@@ -1028,6 +1048,7 @@ func (s *Service) handleGetVersion(w http.ResponseWriter, r *http.Request, id st
 	if !s.capabilities(w, r, b, a, &resp) {
 		return
 	}
+	resp.Archive = s.archiveInfo(r.Context(), b, files)
 	writeJSON(w, http.StatusOK, resp)
 }
 

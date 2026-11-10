@@ -1,49 +1,21 @@
 {
-  "profile_map": {},
+  "profile_map": {
+    "fast": "k8s-agents-fast",
+    "slow": "k8s-agents-slow"
+  },
   "findings": [
     {
       "code": "profile_conflict",
-      "severity": "blocking",
-      "path": "profiles.*.harness_overrides.claude.env",
+      "severity": "notice",
+      "path": "profiles.*",
       "profiles": [
         "fast",
         "slow"
       ],
       "message_contains": [
-        "profiles fast, slow use target k8s-agents with different harness_overrides.claude.env",
-        "env keys TOKEN (values not shown)",
-        "template"
-      ]
-    },
-    {
-      "code": "profile_conflict",
-      "severity": "blocking",
-      "path": "profiles.*.harness_overrides.claude.image",
-      "profiles": [
-        "fast",
-        "slow"
-      ],
-      "message_contains": [
-        "different harness_overrides.claude.image",
-        "fast: claude:fast from profiles.fast.harness_overrides.claude.image",
-        "slow: claude:slow from profiles.slow.harness_overrides.claude.image",
-        "ranks above the template image: see ptone/scion#1799",
-        "separate instances on the same target scope"
-      ]
-    },
-    {
-      "code": "profile_conflict",
-      "severity": "blocking",
-      "path": "profiles.*.resources",
-      "profiles": [
-        "fast",
-        "slow"
-      ],
-      "message_contains": [
-        "different resources",
-        "from profiles.fast.resources",
-        "agent_defaults.resources",
-        "through a template"
+        "differ in harness_overrides.claude.env, harness_overrides.claude.image, resources;",
+        "k8s-agents-fast (fast), k8s-agents-slow (slow)",
+        "add a field choice for target k8s-agents"
       ]
     }
   ]

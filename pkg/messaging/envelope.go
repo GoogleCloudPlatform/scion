@@ -238,6 +238,10 @@ func (e *EventBody) Validate() error {
 type AttachmentRef struct {
 	Path string `json:"path"`
 	Name string `json:"name,omitempty"`
+	// Mount names the shared dir Path is in (for example "scratchpad"),
+	// for a path that is valid only in a container that mounts that shared
+	// dir. Empty for a path in the recipient's own home or workspace.
+	Mount string `json:"mount,omitempty"`
 }
 
 // ---------- Message (new envelope) ----------

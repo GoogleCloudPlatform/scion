@@ -30,7 +30,9 @@ import (
 // because it calls into the vendored scion_harness.py and must stay in step
 // with it. agent-plugins.yaml (AgentPluginsSidecarFile) is included because it
 // declares what the bundled provision.py can install and must not drift from
-// it. Like config.yaml, these scripts are refreshed from the bundled
+// it. no-auth-env.yaml (NoAuthEnvSidecarFile) is included for the same
+// reason as config.yaml: a fix to it must reach existing nodes. Like
+// config.yaml, these scripts are refreshed from the bundled
 // copy during non-force seeding so that provisioner fixes reach existing
 // nodes. Other user files are preserved.
 var provisionerOwnedFiles = map[string]bool{
@@ -38,6 +40,7 @@ var provisionerOwnedFiles = map[string]bool{
 	"scion_harness.py":      true,
 	"capture_auth.py":       true,
 	AgentPluginsSidecarFile: true,
+	NoAuthEnvSidecarFile:    true,
 }
 
 // isProvisionerOwnedFile reports whether relPath, relative to the

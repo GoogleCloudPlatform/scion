@@ -64,6 +64,9 @@ type groupDefaultWakeInput struct {
 	MentionResults []messages.MentionResult
 	// ParentMessageID is the persisted post's ID.
 	ParentMessageID string
+	// ParentAttachments are the attachments stored as artifacts bound to
+	// the post (ptone/scion#4596), delivered with the copy.
+	ParentAttachments []AttachmentRef
 	// Channel is the post's delivery channel.
 	Channel string
 }
@@ -122,6 +125,7 @@ func (s *Server) wakeGroupDefaultAgent(ctx context.Context, in groupDefaultWakeI
 		ParentConv:         parent,
 		ParentConvVerified: true,
 		ParentMessageID:    in.ParentMessageID,
+		ParentAttachments:  in.ParentAttachments,
 		Channel:            in.Channel,
 	}, def, "default_agent")
 	s.messageLog.Info("group default agent delivery",

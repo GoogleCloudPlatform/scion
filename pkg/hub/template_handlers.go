@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
@@ -230,6 +231,11 @@ type DownloadURLInfo struct {
 	URL  string `json:"url"`
 	Size int64  `json:"size"`
 	Hash string `json:"hash,omitempty"`
+	// Mode is the file's normalised mode, "0755" (executable) or "0644",
+	// so a client can write the file with its executable bit
+	// (ptone/scion#5652). Hubs before that do not send it; clients treat
+	// a missing mode as "0644".
+	Mode string `json:"mode,omitempty"`
 }
 
 // CloneTemplateRequest is the request for cloning a template.
@@ -280,6 +286,14 @@ func (s *Server) listTemplatesV2(w http.ResponseWriter, r *http.Request) {
 	filter.Scope = canonicalResourceScope(filter.Scope)
 	if filter.Status == "" {
 		filter.Status = store.TemplateStatusActive
+	}
+
+	// An agent delegated credential lists project-scoped templates only, with
+	// its scope from the delegated list arm (.design/agent-delegation.md
+	// §11.8). It is not a user: scope=user lists nothing for it.
+	if d, ok := GetIdentityFromContext(ctx).(*DelegatedAgentIdentity); ok && d != nil {
+		s.listTemplatesDelegated(w, r, d, filter)
+		return
 	}
 
 	// When listing without explicit scope, include user-scoped templates
@@ -360,6 +374,9 @@ func (s *Server) createTemplateV2(w http.ResponseWriter, r *http.Request) {
 	// Validate required fields
 	if req.Name == "" {
 		ValidationError(w, "name is required", nil)
+		return
+	}
+	if refuseNonComponentResourceName(w, req.Name) {
 		return
 	}
 	if !isValidTemplateScope(req.Scope) {
@@ -493,7 +510,7 @@ func (s *Server) createTemplateV2(w http.ResponseWriter, r *http.Request) {
 	// available. Finalize commits them.
 	if len(req.Files) > 0 && stor != nil {
 		uploadID := api.NewUUID()
-		uploadURLs, err := s.generateTemplateUploadURLs(ctx, stor, template, req.Files, uploadID, requestBaseURL(r))
+		uploadURLs, err := s.generateTemplateUploadURLs(ctx, stor, template, req.Files, uploadID, s.requestBaseURL(r))
 		if err == nil {
 			response.UploadURLs = uploadURLs
 			response.UploadID = uploadID
@@ -618,6 +635,9 @@ func (s *Server) updateTemplateV2(w http.ResponseWriter, r *http.Request, id str
 		return
 	}
 	if refuseTemplateConfigFields(w, req.Config, req.Image) {
+		return
+	}
+	if refuseNonComponentResourceName(w, req.Name) {
 		return
 	}
 
@@ -818,12 +838,13 @@ func (s *Server) handleTemplateUpload(w http.ResponseWriter, r *http.Request, id
 	// them and commits (ptone/scion#4221). Local-storage URLs point at the
 	// hub's raw file endpoint with ?uploadId=, which stages only.
 	uploadID := api.NewUUID()
-	uploadURLs, err := s.generateTemplateUploadURLs(ctx, stor, template, req.Files, uploadID, requestBaseURL(r))
+	uploadURLs, err := s.generateTemplateUploadURLs(ctx, stor, template, req.Files, uploadID, s.requestBaseURL(r))
 	if err != nil {
 		if writeInvalidFilePathError(w, err) {
 			return
 		}
-		RuntimeError(w, "Failed to generate upload URLs: "+err.Error())
+		slog.ErrorContext(ctx, "template upload URLs failed", "template_id", id, "error", upstreamText(err.Error()))
+		RuntimeError(w, "Failed to generate upload URLs")
 		return
 	}
 	if len(uploadURLs) == 0 && len(req.Files) > 0 {
@@ -946,13 +967,14 @@ func (s *Server) handleTemplateDownload(w http.ResponseWriter, r *http.Request, 
 	// lands while the client downloads.
 	downloadURLs, manifestURL, expires, err := s.generateTemplateDownloadURLs(ctx, stor, template)
 	if err != nil {
-		RuntimeError(w, fmt.Sprintf("template %q: %s — run 'scion template validate %s' to diagnose", template.Name, err, template.Name))
+		slog.ErrorContext(ctx, "template download URLs failed", "template_id", id, "error", upstreamText(err.Error()))
+		RuntimeError(w, fmt.Sprintf("template %q: failed to generate download URLs — run 'scion template validate %s' to diagnose", template.Name, template.Name))
 		return
 	}
 
 	// For local storage, rewrite file:// URLs to HTTP proxy URLs
 	if stor.Provider() == storage.ProviderLocal {
-		hubURL := requestBaseURL(r)
+		hubURL := s.requestBaseURL(r)
 		downloadURLs = rewriteLocalTemplateDownloadURLs(downloadURLs, hubURL, id, isBlobLayout(template))
 	}
 
@@ -990,7 +1012,11 @@ func (s *Server) handleTemplateValidate(w http.ResponseWriter, r *http.Request, 
 	rs := s.templateStore()
 	report, err := rs.ValidateStorage(ctx, rec)
 	if err != nil {
-		RuntimeError(w, fmt.Sprintf("validation failed: %v", err))
+		// The error can carry the storage object path and the wrapped
+		// backend error: log it rendered, answer fixed text
+		// (ptone/scion#7498).
+		slog.ErrorContext(ctx, "template validation failed", "template_id", template.ID, "error", upstreamText(err.Error()))
+		RuntimeError(w, "validation failed")
 		return
 	}
 
@@ -1036,6 +1062,9 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 
 	if req.Name == "" {
 		ValidationError(w, "name is required", nil)
+		return
+	}
+	if refuseNonComponentResourceName(w, req.Name) {
 		return
 	}
 	if !isValidTemplateScope(req.Scope) {
@@ -1290,15 +1319,83 @@ func (s *Server) authorizeTemplateReadRoute(w http.ResponseWriter, r *http.Reque
 	return s.authorizeRead(w, r, templateResource(template), "Template")
 }
 
-// computeContentHash computes the aggregate content hash for a set of resource
-// files. It is a thin adapter over transfer.ComputeContentHash — the single
-// canonical implementation also used by the broker-side hydrator, the transfer
-// collector, and the hubclient manifest builder. Routing every hub call site
-// through the same implementation guarantees the hub and the broker can never
-// compute divergent hashes for identical content (which would silently break
-// cache lookups). Per the resource-storage refactor (§7.3/§9), transfer owns
-// the canonical hash until a ResourceStore abstraction subsumes it.
-func computeContentHash(files []store.TemplateFile) string {
+// computeContentHash computes the content hash a template or harness-config
+// commit records for files. With the hub.content_hash_v2 experiment on it is
+// transfer.ComputeContentHashV2, which covers paths, normalised modes and
+// file hashes (ptone/scion#5658); while it is off (the default) it is
+// transfer.ComputeContentHashV1, which covers file hashes only, so a
+// rename-only or chmod-only re-upload is not visible to the expected-hash
+// check, as before. The experiment is read at every call, so toggling it
+// needs no restart. A nil server (no experiments) records v1.
+//
+// Rows keep the version they were last committed with until their next
+// commit rewrites it (no backfill). The commit compare-and-swap stays a
+// strict equality on the stored value, v1 or v2, so mixed rows are safe in
+// both directions; accepting a v1 value that matches the v1 hash of the
+// stored files would accept a stale commit over a rename-only or chmod-only
+// change, the change v2 exists to detect. Skill versions do not use this
+// hash: see computeSkillContentHash.
+func (s *Server) computeContentHash(files []store.TemplateFile) string {
+	return computeContentHashVersion(files, s != nil && s.experimentEnabled(experiments.ContentHashV2))
+}
+
+// computeContentHashVersion is the content hash of files: v2
+// (transfer.ComputeContentHashV2) when v2 is set, otherwise v1
+// (transfer.ComputeContentHashV1). It is a thin adapter over the canonical
+// transfer implementations, also used by the transfer collector and the
+// hubclient manifest builder, so the hub and its clients never compute
+// divergent hashes for identical content.
+func computeContentHashVersion(files []store.TemplateFile, v2 bool) string {
+	if v2 {
+		return transfer.ComputeContentHashV2(templateFileInfos(files))
+	}
+	return transfer.ComputeContentHashV1(templateFileInfos(files))
+}
+
+// computeSkillContentHash is the content hash of a skill version's files.
+// It stays transfer.ComputeContentHashV1, which ignores paths and modes:
+// published skill versions are immutable and pinned by this value (registry
+// pins, content-addressed version lookup), and brokers verify an installed
+// bundle by recomputing it. It is what skill_versions.content_hash records
+// and what every contentHash field carries; see computeSkillContentHashV2
+// for the hash that also covers paths and modes.
+func computeSkillContentHash(files []store.TemplateFile) string {
+	return transfer.ComputeContentHashV1(templateFileInfos(files))
+}
+
+// computeSkillContentHashV2 is skill content hash v2 (ptone/scion#5935):
+// transfer.ComputeContentHashV2 over a skill version's files, so a rename,
+// an executable-bit change and a content change each change it. It is
+// derived, never stored: a published version's file list is immutable, so
+// the value is stable, and versions published before v2 existed get one
+// too. A file with no recorded mode counts as "0644", the mode the broker
+// installs it with. The hub emits and accepts it only while the
+// hub.skill_content_hash_v2 experiment is on.
+func computeSkillContentHashV2(files []store.TemplateFile) string {
+	return transfer.ComputeContentHashV2(templateFileInfos(files))
+}
+
+// resolvedSkillContentHashes recomputes the v1 and v2 skill content hashes
+// of a resolved skill from its file list (path, per-file hash and mode),
+// the metadata the broker verifies the downloaded files against. ok is
+// false when there are no files or a file has no per-file hash, since the
+// bundle hashes then cannot be recomputed.
+func resolvedSkillContentHashes(files []DownloadURLInfo) (v1, v2 string, ok bool) {
+	if len(files) == 0 {
+		return "", "", false
+	}
+	infos := make([]transfer.FileInfo, len(files))
+	for i, f := range files {
+		if f.Hash == "" {
+			return "", "", false
+		}
+		infos[i] = transfer.FileInfo{Path: f.Path, Size: f.Size, Hash: f.Hash, Mode: f.Mode}
+	}
+	return transfer.ComputeContentHashV1(infos), transfer.ComputeContentHashV2(infos), true
+}
+
+// templateFileInfos converts manifest entries to transfer.FileInfo.
+func templateFileInfos(files []store.TemplateFile) []transfer.FileInfo {
 	fileInfos := make([]transfer.FileInfo, len(files))
 	for i, f := range files {
 		fileInfos[i] = transfer.FileInfo{
@@ -1308,5 +1405,5 @@ func computeContentHash(files []store.TemplateFile) string {
 			Mode: f.Mode,
 		}
 	}
-	return transfer.ComputeContentHash(fileInfos)
+	return fileInfos
 }

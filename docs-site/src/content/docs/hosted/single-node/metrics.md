@@ -44,6 +44,8 @@ telemetry:
     # Required when exporting to Google Cloud. The metrics dashboard queries
     # Cloud Monitoring for this project, so without it the export has no
     # destination and the dashboard stays empty with no error shown.
+    # Read at startup. See "Which GCP project the Hub uses" in the server
+    # configuration reference for the dashboard's fallbacks.
     gcp_project_id: "my-gcp-project"
     endpoint: "monitoring.googleapis.com:443"
     protocol: grpc
@@ -90,7 +92,7 @@ Environment variables override any settings file value and are the most convenie
 | Variable | Settings Path | Default | Description |
 |----------|--------------|---------|-------------|
 | `SCION_TELEMETRY_ENABLED` | `telemetry.enabled` | `true` | Enable/disable collection entirely |
-| `SCION_TELEMETRY_CLOUD_ENABLED` | `telemetry.cloud.enabled` | `true` | Enable forwarding to cloud backend |
+| `SCION_TELEMETRY_CLOUD_ENABLED` | `telemetry.cloud.enabled` | `true` | Enable forwarding to cloud backend. Under the default, with no destination configured (no endpoint, or no GCP project ID in GCP mode), cloud forwarding stays off and local collection still runs. Set explicitly to `true` with no destination, telemetry fails to start with `cloud telemetry enabled but destination is not configured`. |
 | `SCION_OTEL_ENDPOINT` | `telemetry.cloud.endpoint` | (required) | Cloud OTLP endpoint URL |
 | `SCION_OTEL_PROTOCOL` | `telemetry.cloud.protocol` | `grpc` | Protocol: `grpc` or `http` |
 | `SCION_OTEL_INSECURE` | `telemetry.cloud.tls.enabled` (inverted) | `false` | Use plaintext transport instead of TLS (dev only) |
@@ -167,7 +169,7 @@ On those runtimes, GCP export needs one of:
 - **A registered service account assigned to the agent.** Register it with `scion project service-accounts add <email> --gcp-project <id>` (or `mint`), check it with `scion project service-accounts verify <id>`, and start the agent with `--service-account <id>`. This sets mode `assign`, and the metadata server returns tokens for that account. The account needs the roles in [IAM Permissions](#3-iam-permissions). See [`scion project service-accounts`](/scion/reference/cli/) in the CLI reference.
 - **The telemetry credentials secret**, a GCP service account key file, described below.
 
-To check which one an agent has, run `echo $SCION_METADATA_MODE` and `echo $SCION_OTEL_GCP_CREDENTIALS` inside the agent. `assign` means a service account is assigned; `block` with an empty `SCION_OTEL_GCP_CREDENTIALS` and no key file at `~/.scion/telemetry-gcp-credentials.json` means export to GCP has no credentials. `sciontool metadata status` inside the agent also reports the mode and, in `assign` mode, the account and whether its token endpoint returns `200`.
+To check which one an agent has, run `echo $SCION_METADATA_MODE` and `echo $SCION_OTEL_GCP_CREDENTIALS` inside the agent. `assign` means a service account is assigned; `block` with an empty `SCION_OTEL_GCP_CREDENTIALS` and no key file at `~/.scion/telemetry-gcp-credentials.json` means export to GCP has no credentials. `sciontool metadata status` inside the agent also reports the mode and, in `assign` mode, the account and whether its token endpoint returns `200` (once `sciontool init` has dropped `CAP_NET_ADMIN`, `sciontool metadata status` reports the `iptables` rule check as not verifiable).
 
 Scion uses a **well-known secret** to provision the key file into every agent container automatically.
 
@@ -177,6 +179,8 @@ Scion uses a **well-known secret** to provision the key file into every agent co
 | **Secret type** | `file` |
 | **Target path** | `~/.scion/telemetry-gcp-credentials.json` |
 | **Env var set by broker** | `SCION_OTEL_GCP_CREDENTIALS` |
+
+At Hub scope, the Hub delivers this secret to agents only with exactly this name and type and a target path whose last two parts are `.scion/telemetry-gcp-credentials.json`, and it does not list it to agents; see [Hub-Scoped Secrets](/scion/hosted/user/secrets/#hub-scoped-secrets).
 
 Register the secret once via the Hub:
 
@@ -201,7 +205,7 @@ When an agent starts, the broker:
 
 Scion includes a native OTel metrics pipeline that captures operational data from agent sessions. This data is recorded as counters and histograms, providing a time-series view of agent performance. 
 
-To enable harness-aware telemetry, Scion injects the `SCION_HARNESS` environment variable into every agent container, and `SCION_MODEL` when the agent's configuration names a model. When a usage source reports no model of its own and `SCION_MODEL` is unset, the `model` label on `gen_ai.api.calls`, `gen_ai.api.duration` and `scion.usage.tokens` is `unknown`.
+To enable harness-aware telemetry, Scion injects the `SCION_HARNESS` environment variable into every agent container, and `SCION_MODEL` when the agent's configuration names a model. `SCION_HARNESS` names the harness the start launched (after a harness-config switch, the new one), and it selects which native usage-parsing rules apply. It sets the `harness` label on `gen_ai.api.calls` and `scion.usage.tokens` (one shared label set, described under the canonical point labels below) and the `harness` field of the `agent.usage` and `telemetry.health` events. When the plain Generic implementation runs, its value is `generic`: no usage rule exists for it, so native usage for that agent stays unknown rather than being parsed with another harness's rules, and with the native usage source `telemetry.health` reports usage collection `disabled` with the reason `no_harness_rule`. An explicit `SCION_HARNESS` in the start request's env or in the settings `harness_configs.<name>.env` still wins (see [settings precedence](/scion/reference/settings-precedence/)). When a usage source reports no model of its own and `SCION_MODEL` is unset, the `model` label on `gen_ai.api.calls`, `gen_ai.api.duration` and `scion.usage.tokens` is `unknown`.
 
 ### Enriched Resource Attributes
 
@@ -224,7 +228,7 @@ In addition to the resource attributes above, every exported metric **point** ca
 - `scion_project_id`
 - `scion_agent_slug` — a display-friendly form of `scion_agent_id`, 1:1 with it, and read straight off the series (no Hub database lookup, so it survives agent deletion)
 
-These are the labels the Hub dashboard filters and groups on (`metric.labels.scion_project_id` for the project view, `metric.labels.scion_agent_id` for agent grouping). A producer that sets one of these three keys itself is rejected. They are distinct from the pre-existing, non-canonical point labels `agent_id` and `project_id` that some hook metrics also carry for historical, descriptor-compatibility reasons; the dashboard does not read those.
+These are the labels the Hub dashboard filters and groups on (`metric.labels.scion_project_id` for the project view, `metric.labels.scion_agent_id` for agent grouping). A producer that sets one of these three keys itself is rejected. They are distinct from the pre-existing, non-canonical point labels `agent_id` and `project_id` that some hook metrics (tool calls and durations) still carry for historical, descriptor-compatibility reasons; the dashboard does not read those. The usage metrics `gen_ai.api.calls` and `scion.usage.tokens` do not carry them: `gen_ai.api.calls` dropped them so both usage metrics share one label set. Filter calls and tokens on `scion_agent_id` and `scion_project_id`; a query or alert on `gen_ai.api.calls` that filters on the unprefixed `agent_id` or `project_id` matches only series written before that change.
 
 ### Native Event Name Normalization
 
@@ -297,7 +301,7 @@ An unset `SCION_USAGE_SOURCE` means **no usage is published** from hooks for tha
 
 **Antigravity: calls-only.** Antigravity's `PreInvocation`/`PostInvocation` hooks (`model-start`/`model-end`) carry no usage or token field at all, in either direction, regardless of whether the underlying model response had one — confirmed against a real captured fixture (real `agy` 1.2.12 binary, mock model backend: `pkg/sciontool/hooks/dialects/testdata/antigravity/`). So `gen_ai.api.calls` is populated (one per main-loop model request — `PostInvocation` fires per request, not per turn) and `scion.usage.tokens` never gets a point from this harness. This is a deliberate, vetted outcome, not a gap: publishing a guessed token value would be worse than publishing none (D10's own principle). Known undercount: `agy`'s own auxiliary calls (for example conversation title generation) fire no Invocation hook at all, and failed or retried attempts were not captured, so their `PostInvocation`/`status` behavior is uncharacterized. The `model` label comes from the per-invocation payload's `modelName` (a display alias such as `gemini-3.1-pro-low`), then the agent's configured `SCION_MODEL`, then `unknown` — see the harness README.
 
-**Known gap: muse-code.** With `SCION_USAGE_SOURCE` unset, it publishes no usage at all until it lands its own fixture-backed `provision.py` PR. Codex, gemini-cli, opencode and antigravity are no longer in this list: codex and gemini-cli declare `SCION_USAGE_SOURCE=native`, deriving their calls and tokens from their own OTLP log events once `scion-base` is rebuilt; opencode declares `SCION_USAGE_SOURCE=hooks` (phase 3b, above); antigravity declares `SCION_USAGE_SOURCE=hooks` and publishes calls only (see above — it has no token source to report).
+**Known gap: muse-code and pi.** With `SCION_USAGE_SOURCE` unset, they publish no usage at all until each lands its own fixture-backed `provision.py` PR (pi's bridge maps no model or token events yet). Codex, gemini-cli, opencode and antigravity are no longer in this list: codex and gemini-cli declare `SCION_USAGE_SOURCE=native`, deriving their calls and tokens from their own OTLP log events once `scion-base` is rebuilt; opencode declares `SCION_USAGE_SOURCE=hooks` (phase 3b, above); antigravity declares `SCION_USAGE_SOURCE=hooks` and publishes calls only (see above — it has no token source to report).
 
 All of this — the deriver, the hook vetting gate, and the allowlist changes below — is sciontool-side value: it takes effect only after an operator rebuilds `scion-base` and then the harness images. An unrebuilt `scion-base` keeps today's behavior unchanged; it does not error, and it does not need a `provision.py` workaround.
 
@@ -346,7 +350,7 @@ For every significant lifecycle event (session start/end, tool use, model call),
 
 The Scion Hub maintains internal operational metrics for infrastructure monitoring. These are available via the `/api/v1/admin/metrics` endpoint (requires `hub-admin` role) and can be exported to standard monitoring tools.
 
-When Hub metrics export is on ([`server.hub.observability.metrics_enabled`](/scion/reference/server-config/#observability-export-serverhubobservability), or, when that switch is unset, `server.hub.gcp_project_id`), the Hub also exports its database pool, dispatch, notification and launch reaper metrics to Cloud Monitoring. To chart them per Hub instance, import the ready-made [Hub Monitoring Dashboard](/scion/hosted/single-node/hub-monitoring-dashboard/).
+When Hub metrics export is on ([`server.hub.observability.metrics_enabled`](/scion/reference/server-config/#observability-export-serverhubobservability), or, when that switch is unset, `server.hub.gcp_project_id`, set in `settings.yaml` or with `SCION_SERVER_HUB_GCPPROJECTID` and read at startup), the Hub also exports its database pool, dispatch, notification, launch reaper and events stream metrics to Cloud Monitoring. To chart them per Hub instance, import the ready-made [Hub Monitoring Dashboard](/scion/hosted/single-node/hub-monitoring-dashboard/).
 
 ### GCP Token Metrics
 
@@ -441,6 +445,8 @@ Harness hook events are automatically converted to OTLP spans:
 | `prompt-submit` | `agent.user.prompt` | prompt |
 | `model-start` | `gen_ai.api.request` | model (only when the hook payload names one) |
 | `model-end` | `gen_ai.api.response` | success, model (only when the hook payload names one) |
+
+Each hook event in the table, and the turn, notification, response-complete and container lifecycle (`agent.lifecycle.pre_start`, `agent.lifecycle.post_start`, `agent.lifecycle.pre_stop`) events, is also emitted as a correlated OpenTelemetry log record whose `event.name` is the span name. When the GCP exporter is configured, `sciontool` also writes normalized `agent.usage` events, delivered durably and deduplicated, and periodic `telemetry.health` snapshots of its usage-source selection and delivery diagnostics to the dedicated `scion-analytics` Cloud Logging log. Both carry the launched harness (`SCION_HARNESS`, see [Native Metrics Pipeline](#native-metrics-pipeline)) in their `harness` field, or `unknown` when it is unset.
 
 ### Session Metrics (Gemini)
 

@@ -131,13 +131,7 @@ func newSandboxSecretsHarness(t *testing.T) *sandboxSecretsHarness {
 		rootDir:      filepath.Join(tmpDir, "scion"),
 		watchCancels: make(map[string]context.CancelFunc),
 	}
-	t.Cleanup(func() {
-		h.rt.watchMu.Lock()
-		for _, cancel := range h.rt.watchCancels {
-			cancel()
-		}
-		h.rt.watchMu.Unlock()
-	})
+	stopWatchersOnCleanup(t, h.rt.state.path, h.rt)
 	h.cfg = RunConfig{
 		Name:         "secrets-agent",
 		HomeDir:      homeDir,
@@ -424,7 +418,9 @@ func TestCloudRunRun_OversizedSecretFailsWithName(t *testing.T) {
 		wantErr string
 	}{
 		{"environment", api.ResolvedSecret{Name: "big-env", Type: "environment", Target: "BIG_ENV", Value: big}, `"big-env"`},
-		{"file", api.ResolvedSecret{Name: "big-file", Type: "file", Target: "/home/scion/big.bin", Value: big}, `"big-file"`},
+		// The staged blob's error names only the largest field class, never
+		// a secret name, key or path.
+		{"file", api.ResolvedSecret{Name: "big-file", Type: "file", Target: "/home/scion/big.bin", Value: big}, "the largest part is the " + stagedClassFileSecrets},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -438,6 +434,9 @@ func TestCloudRunRun_OversizedSecretFailsWithName(t *testing.T) {
 			}
 			_, err := rt.Run(context.Background(), cfg)
 			checkSizeError(t, err, tc.wantErr, "xxxxxxxx")
+			if tc.name == "file" && err != nil && (strings.Contains(err.Error(), "big-file") || strings.Contains(err.Error(), "big.bin")) {
+				t.Error("the staged-blob error names a secret or its target")
+			}
 			if len(fake.createReqs) != 0 {
 				t.Errorf("CreateInstance called %d times, want 0", len(fake.createReqs))
 			}

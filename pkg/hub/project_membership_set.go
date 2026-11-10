@@ -117,7 +117,7 @@ func (p rolePlan) isEmpty() bool {
 // role binding.
 func (p rolePlan) hasCustomCreate() bool {
 	for _, d := range p.Create {
-		if !store.IsBuiltInProjectMembershipRole(d.Name) {
+		if !store.IsBuiltInProjectMembershipRoleDef(d) {
 			return true
 		}
 	}
@@ -128,7 +128,7 @@ func (p rolePlan) hasCustomCreate() bool {
 // defs maps the current bindings' role definition IDs to their definitions.
 func (p rolePlan) hasCustomRemove(defs map[string]*store.RoleDefinition) bool {
 	for _, b := range p.Remove {
-		if rd := defs[b.RoleDefinitionID]; rd != nil && !store.IsBuiltInProjectMembershipRole(rd.Name) {
+		if rd := defs[b.RoleDefinitionID]; rd != nil && !store.IsBuiltInProjectMembershipRoleDef(rd) {
 			return true
 		}
 	}
@@ -141,6 +141,9 @@ func (p rolePlan) hasCustomRemove(defs map[string]*store.RoleDefinition) bool {
 type planChange struct {
 	op       MembershipOp
 	roleName string
+	// builtIn reports whether the role is a built-in membership role
+	// (store.IsBuiltInProjectMembershipRoleDef of its definition).
+	builtIn bool
 }
 
 // changes enumerates the governance-relevant changes in the plan. defs maps
@@ -159,22 +162,23 @@ func (p rolePlan) changes(defs map[string]*store.RoleDefinition) []planChange {
 		if rd := defs[p.BuiltInChange.Old.RoleDefinitionID]; rd != nil {
 			oldName = rd.Name
 		}
-		out = append(out, planChange{op: MembershipOpUpdate, roleName: oldName})
-		out = append(out, planChange{op: MembershipOpUpdate, roleName: p.BuiltInChange.New.Name})
+		// Both halves of a built-in change are built-in roles.
+		out = append(out, planChange{op: MembershipOpUpdate, roleName: oldName, builtIn: true})
+		out = append(out, planChange{op: MembershipOpUpdate, roleName: p.BuiltInChange.New.Name, builtIn: true})
 	}
 	for _, b := range p.Remove {
 		if b.ID == builtInOldBindingID {
 			continue
 		}
 		if rd := defs[b.RoleDefinitionID]; rd != nil {
-			out = append(out, planChange{op: MembershipOpRemove, roleName: rd.Name})
+			out = append(out, planChange{op: MembershipOpRemove, roleName: rd.Name, builtIn: store.IsBuiltInProjectMembershipRoleDef(rd)})
 		}
 	}
 	for _, d := range p.Create {
 		if d.ID == builtInNewRoleID {
 			continue
 		}
-		out = append(out, planChange{op: MembershipOpAdd, roleName: d.Name})
+		out = append(out, planChange{op: MembershipOpAdd, roleName: d.Name, builtIn: store.IsBuiltInProjectMembershipRoleDef(d)})
 	}
 	return out
 }
@@ -251,14 +255,14 @@ func planRoleSet(current []*store.RoleBinding, currentDefs map[string]*store.Rol
 	// (ptone/scion#2529).
 	var oldBuiltIn *store.RoleBinding
 	for _, b := range plan.Remove {
-		if rd := currentDefs[b.RoleDefinitionID]; rd != nil && store.IsBuiltInProjectMembershipRole(rd.Name) {
+		if rd := currentDefs[b.RoleDefinitionID]; rd != nil && store.IsBuiltInProjectMembershipRoleDef(rd) {
 			oldBuiltIn = b
 			break
 		}
 	}
 	var newBuiltIn *store.RoleDefinition
 	for _, d := range plan.Create {
-		if store.IsBuiltInProjectMembershipRole(d.Name) {
+		if store.IsBuiltInProjectMembershipRoleDef(d) {
 			newBuiltIn = d
 			break
 		}
@@ -439,7 +443,7 @@ func refetchRoleDefinitionsTx(ctx context.Context, tx store.Store, defs []*store
 // governed separately and never carry custom permission lists.
 func checkNoRoleBindingPermissionInCreatedCustomRoles(creates []*store.RoleDefinition) *MembershipDecision {
 	for _, d := range creates {
-		if store.IsBuiltInProjectMembershipRole(d.Name) {
+		if store.IsBuiltInProjectMembershipRoleDef(d) {
 			continue
 		}
 		if roleContainsRoleBindingPermission(d) {
@@ -502,7 +506,7 @@ func (svc *ProjectMembershipService) checkBuiltInChangeGovernance(actorRole stri
 // it is computed once per phase (pre-transaction, then again under lock) by
 // the caller via customRoleAuthorityFromStore — never recomputed here.
 func (svc *ProjectMembershipService) governanceDecisionForChange(actorRole string, isDirectOwner, hubOverride bool, customAuth map[string]customRoleAuthority, ch planChange) *MembershipDecision {
-	if store.IsBuiltInProjectMembershipRole(ch.roleName) {
+	if ch.builtIn {
 		return svc.checkBuiltInChangeGovernance(actorRole, isDirectOwner, hubOverride, ch.op, ch.roleName)
 	}
 	perm := PermRoleBindingCreate
@@ -840,7 +844,7 @@ func (svc *ProjectMembershipService) resolveDesiredRoleDefs(ctx context.Context,
 				Details: map[string]interface{}{"roleDefinitionId": id, "roleName": rd.Name},
 			}
 		}
-		if store.IsBuiltInProjectMembershipRole(rd.Name) {
+		if store.IsBuiltInProjectMembershipRoleDef(rd) {
 			builtInCount++
 			if builtInCount > 1 {
 				return nil, &MembershipDecision{
@@ -930,7 +934,7 @@ func (svc *ProjectMembershipService) SetMemberRoles(ctx context.Context, req Set
 	// keeping a custom role an ineligible principal already holds is
 	// allowed (ptone/scion#2529 acceptance D1).
 	for _, d := range plan0.Create {
-		if !principalEligibleForRole(req.PrincipalType, d.Name) {
+		if !principalEligibleForRole(req.PrincipalType, d) {
 			return nil, &MembershipDecision{
 				Allowed: false, DenialCode: ErrCodePrincipalIneligible,
 				Reason:     fmt.Sprintf("role %q cannot be assigned to %s principals", d.Name, req.PrincipalType),
@@ -966,7 +970,7 @@ func (svc *ProjectMembershipService) SetMemberRoles(ctx context.Context, req Set
 	var oldBuiltInName string
 	if plan0.BuiltInChange != nil {
 		if rd := currentDefs0[plan0.BuiltInChange.Old.RoleDefinitionID]; rd != nil {
-			oldBuiltInName = rd.Name
+			oldBuiltInName = builtInRoleName(rd)
 		}
 	}
 	canDelegateReasons := make(map[string]string, len(plan0.Create))
@@ -983,7 +987,7 @@ func (svc *ProjectMembershipService) SetMemberRoles(ctx context.Context, req Set
 		for _, d := range plan0.Create {
 			needsCanDelegate := true
 			if plan0.BuiltInChange != nil && d.ID == plan0.BuiltInChange.New.ID {
-				needsCanDelegate = projectRoleLevel(d.Name) > projectRoleLevel(oldBuiltInName)
+				needsCanDelegate = projectRoleLevel(builtInRoleName(d)) > projectRoleLevel(oldBuiltInName)
 			}
 			if !needsCanDelegate {
 				continue
@@ -1127,7 +1131,7 @@ func (svc *ProjectMembershipService) SetMemberRoles(ctx context.Context, req Set
 		// plan is applied, whether it removes a usable owner binding.
 		var removedOwners []*store.RoleBinding
 		for _, b := range plan1.Remove {
-			if rd := currentDefs1[b.RoleDefinitionID]; rd != nil && rd.Name == store.ProjectRoleOwner {
+			if rd := currentDefs1[b.RoleDefinitionID]; rd != nil && builtInRoleName(rd) == store.ProjectRoleOwner {
 				removedOwners = append(removedOwners, b)
 			}
 		}
@@ -1203,11 +1207,11 @@ func (svc *ProjectMembershipService) SetMemberRoles(ctx context.Context, req Set
 				TargetID:     req.ProjectID,
 				BeforeSummary: marshalAuditJSON(map[string]string{
 					"principalType": req.PrincipalType, "principalId": req.PrincipalID,
-					"role": oldName, "roleKind": projectRoleKind(oldName),
+					"role": oldName, "roleKind": roleKindBuiltIn,
 				}),
 				AfterSummary: marshalAuditJSON(map[string]string{
 					"principalType": req.PrincipalType, "principalId": req.PrincipalID,
-					"role": plan1.BuiltInChange.New.Name, "roleKind": projectRoleKind(plan1.BuiltInChange.New.Name),
+					"role": plan1.BuiltInChange.New.Name, "roleKind": roleKindBuiltIn,
 				}),
 			}); aErr != nil {
 				return aErr
@@ -1221,7 +1225,7 @@ func (svc *ProjectMembershipService) SetMemberRoles(ctx context.Context, req Set
 			authVia := ""
 			if rd := currentDefs1[b.RoleDefinitionID]; rd != nil {
 				roleName = rd.Name
-				roleKind = projectRoleKind(rd.Name)
+				roleKind = projectRoleKind(rd)
 				if roleKind != roleKindBuiltIn {
 					authVia = customAuthTx[PermRoleBindingDelete].Via
 				}
@@ -1247,7 +1251,7 @@ func (svc *ProjectMembershipService) SetMemberRoles(ctx context.Context, req Set
 			if cb != nil && cb.ID == builtInNewBindingID {
 				continue
 			}
-			roleKind := projectRoleKind(d.Name)
+			roleKind := projectRoleKind(d)
 			summary := map[string]string{
 				"principalType": req.PrincipalType, "principalId": req.PrincipalID,
 				"role": d.Name, "roleKind": roleKind,

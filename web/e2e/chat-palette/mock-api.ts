@@ -123,6 +123,12 @@ export interface PaletteFixtureOverrides {
     Array<{ id: string; projectId: string; name: string; defaultAgent?: string }>
   >;
   users?: Array<{ id: string; displayName: string; email?: string; status?: string }>;
+  /**
+   * How many of `users` (in order, most recently seen first) the
+   * recent-users page returns; every user stays reachable through
+   * `?search=`. Defaults to all of them.
+   */
+  recentUsers?: number;
   membersByProjectId?: Record<
     string,
     { humans: Array<{ id: string; kind: 'user'; displayName: string }> }
@@ -279,7 +285,23 @@ export async function setupApiMocks(
       });
     }
     if (path === '/api/v1/users') {
-      return route.fulfill({ json: { users: overrides.users ?? [] } });
+      // The palette reads the recent-users page (`sort=lastSeen`, the first
+      // `recentUsers` of `users`) and, while typing, the hub's `?search=`
+      // (case-insensitive substring of display name or email) over every
+      // user, both bounded by `limit` and filtered by `status` when given.
+      const all = overrides.users ?? [];
+      const status = url.searchParams.get('status');
+      const search = url.searchParams.get('search')?.toLowerCase();
+      const matched = (search ? all : all.slice(0, overrides.recentUsers ?? all.length))
+        .filter((u) => !status || (u.status ?? 'active') === status)
+        .filter(
+          (u) =>
+            !search ||
+            u.displayName.toLowerCase().includes(search) ||
+            (u.email ?? '').toLowerCase().includes(search)
+        );
+      const limit = Number(url.searchParams.get('limit')) || matched.length;
+      return route.fulfill({ json: { users: matched.slice(0, limit) } });
     }
     if (path === '/api/v1/notifications') {
       // scion-notification-tray, mounted by the real header in the

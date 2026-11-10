@@ -35,8 +35,7 @@ import (
 
 // Project-scoped chat thread groups: scion conversation group ...
 // (ptone/scion#4424, design section 4). A thread group is a named set of a
-// project's group conversations (threads). The hub serves it behind the
-// hub.chat_thread_groups experiment.
+// project's group conversations (threads).
 
 var (
 	convGroupProject    string
@@ -64,8 +63,6 @@ var conversationGroupCmd = &cobra.Command{
 A thread group is a named set of a project's group conversations
 (threads), shared by every member of the project. A thread is in at most
 one group: adding it to another group moves it.
-
-Thread groups require the hub.chat_thread_groups experiment on the hub.
 
 Commands:
   scion conversation group list                      List the project's thread groups

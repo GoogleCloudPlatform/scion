@@ -58,10 +58,11 @@ const storedTelemetry = `{
 
 // pageTelemetryBody is the telemetry object the Server Config page sends
 // (buildLayer1Payload): cloud without headers, tls or batch, and no filter
-// or resource.
+// or resource. On a database-backed hub the page never sends
+// cloud.cloud_logging (ptone/scion#5664).
 const pageTelemetryBody = `{"telemetry": {
 	"enabled": true,
-	"cloud": {"enabled": true, "endpoint": "otel.example.com:4318", "protocol": "http", "provider": "generic", "gcp_project_id": null, "cloud_logging": false},
+	"cloud": {"enabled": true, "endpoint": "otel.example.com:4318", "protocol": "http", "provider": "generic", "gcp_project_id": null},
 	"hub": {"enabled": true, "report_interval": "60s"},
 	"local": {"enabled": false, "file": "", "console": false}
 }}`
@@ -216,7 +217,7 @@ func TestPutServerConfigDB_TelemetrySaveKeepsUnshownFields(t *testing.T) {
 	cloud := objAt(t, row, "cloud")
 	assert.Equal(t, "otel.example.com:4318", cloud["endpoint"])
 	assert.Equal(t, "http", cloud["protocol"])
-	assert.Equal(t, false, cloud["cloud_logging"])
+	assert.NotContains(t, cloud, "cloud_logging")
 	assert.Equal(t, map[string]interface{}{"x-api-key": "k1"}, cloud["headers"])
 	assert.Equal(t, map[string]interface{}{"enabled": true, "ca_file": "/etc/otel/ca.pem"}, cloud["tls"])
 	assert.Equal(t, map[string]interface{}{"max_size": float64(512), "timeout": "5s"}, cloud["batch"])

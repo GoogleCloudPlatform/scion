@@ -59,26 +59,111 @@ func TestUnrecordedEdgeDeniesSAAssign(t *testing.T) {
 	assertUnrecordedDeny(t, check(unrecorded))
 }
 
-// gcp_service_account.use: Decide for the exact SA token scope.
+// gcpUseDecision decides gcp_service_account.use for agentID on saID with an
+// agent token that names exactly saID.
+func gcpUseDecision(authz *AuthzService, agentID, projectID, saID string) Decision {
+	agent := newFullAgentIdentity(agentID, projectID, nil, []AgentTokenScope{GCPTokenScopeForSA(saID)})
+	return authz.Decide(context.Background(), AuthzRequest{
+		Principal:  principalContextForIdentity(agent),
+		Credential: credentialContextForIdentity(agent),
+		Resource:   gcpUseResource(saID),
+		Action:     ActionUse,
+		Permission: permissions.PermissionGCPServiceAccountUse,
+	})
+}
+
+// gcp_service_account.use: Decide for the exact SA token scope. Step 10 for
+// this permission is the account's parent ceiling, which reads the agent's
+// recorded assignment rather than its chain, but an unrecorded hop on the
+// agent's own chain still denies first. The agent here has an otherwise
+// valid, live assignment, recorded again by a project member who holds
+// assign, and a super-admin delegator; its own edge is unrecorded, so it is
+// denied with the unrecorded cause, as before the parent ceiling.
 func TestUnrecordedEdgeDeniesGCPServiceAccountUse(t *testing.T) {
 	authz, s := authzTestSetup(t)
-	ctx := context.Background()
 	saX := tid("unrec-use-sa")
 	agentID, projectID := tid("unrec-use-agent"), tid("unrec-use-project")
-	setBackfillCompleted(t, s)
+	seedUseParentProof(t, s, agentID, projectID, saX)
 	adminID := tid("unrec-use-admin")
 	createTestUserWithRole(t, s, adminID, adminID+"@test.com", "admin", store.SystemRoleSuperAdmin)
 	createDCEdge(t, s, store.DelegationPrincipalUser, adminID, store.DelegationPrincipalAgent, agentID,
 		store.RoleScopeProject, projectID, store.ProjectRoleOwner)
 
-	agent := newFullAgentIdentity(agentID, projectID, nil, []AgentTokenScope{GCPTokenScopeForSA(saX)})
-	assertUnrecordedDeny(t, authz.Decide(ctx, AuthzRequest{
-		Principal:  principalContextForIdentity(agent),
-		Credential: credentialContextForIdentity(agent),
-		Resource:   gcpUseResource(saX),
-		Action:     ActionUse,
-		Permission: permissions.PermissionGCPServiceAccountUse,
-	}))
+	assertUnrecordedDeny(t, gcpUseDecision(authz, agentID, projectID, saX))
+}
+
+// The control for TestUnrecordedEdgeDeniesGCPServiceAccountUse: the same
+// agent and assignment with a recorded edge is admitted, so only the edge
+// differs.
+func TestRecordedEdgeAdmitsGCPServiceAccountUseWithParentProof(t *testing.T) {
+	authz, s := authzTestSetup(t)
+	saX := tid("rec-use-sa")
+	agentID, projectID := tid("rec-use-agent"), tid("rec-use-project")
+	seedUseParentProof(t, s, agentID, projectID, saX)
+	adminID := tid("rec-use-admin")
+	createTestUserWithRole(t, s, adminID, adminID+"@test.com", "admin", store.SystemRoleSuperAdmin)
+	seedRecordedDelegationEdge(t, s, store.DelegationPrincipalUser, adminID, store.DelegationPrincipalAgent, agentID,
+		store.RoleScopeProject, projectID, store.ProjectRoleOwner)
+
+	d := gcpUseDecision(authz, agentID, projectID, saX)
+	require.True(t, d.Allowed, "cause=%q reason=%q", d.DenyCause, d.Reason)
+}
+
+// An unrecorded hop above the agent denies too: the agent's own edge is
+// recorded (from a parent agent), the parent's edge is not.
+func TestUnrecordedAncestorEdgeDeniesGCPServiceAccountUse(t *testing.T) {
+	authz, s := authzTestSetup(t)
+	saX := tid("unrec-anc-use-sa")
+	agentID, projectID := tid("unrec-anc-use-agent"), tid("unrec-anc-use-project")
+	parentID := tid("unrec-anc-use-parent")
+	seedUseParentProof(t, s, agentID, projectID, saX)
+	adminID := tid("unrec-anc-use-admin")
+	createTestUserWithRole(t, s, adminID, adminID+"@test.com", "admin", store.SystemRoleSuperAdmin)
+	seedRecordedDelegationEdge(t, s, store.DelegationPrincipalAgent, parentID, store.DelegationPrincipalAgent, agentID,
+		store.RoleScopeProject, projectID, store.ProjectRoleOwner)
+	createDCEdge(t, s, store.DelegationPrincipalUser, adminID, store.DelegationPrincipalAgent, parentID,
+		store.RoleScopeProject, projectID, store.ProjectRoleOwner)
+
+	assertUnrecordedDeny(t, gcpUseDecision(authz, agentID, projectID, saX))
+}
+
+// A recorded edge with no recorded assignment is denied by the parent
+// ceiling for missing provenance: the edge alone grants no use.
+func TestRecordedEdgeWithoutAssignmentDeniesGCPServiceAccountUse(t *testing.T) {
+	authz, s := authzTestSetup(t)
+	ctx := context.Background()
+	saX := tid("noassign-use-sa")
+	agentID, projectID := tid("noassign-use-agent"), tid("noassign-use-project")
+	seedUseParentProof(t, s, agentID, projectID, saX)
+	_, err := s.DeactivateAgentServiceAccountAssignments(ctx, agentID,
+		store.Deactivation{Cause: store.EdgeDeactivationSACleared, OpID: "op-legacy"})
+	require.NoError(t, err)
+	adminID := tid("noassign-use-admin")
+	createTestUserWithRole(t, s, adminID, adminID+"@test.com", "admin", store.SystemRoleSuperAdmin)
+	seedRecordedDelegationEdge(t, s, store.DelegationPrincipalUser, adminID, store.DelegationPrincipalAgent, agentID,
+		store.RoleScopeProject, projectID, store.ProjectRoleOwner)
+
+	d := gcpUseDecision(authz, agentID, projectID, saX)
+	require.False(t, d.Allowed, "reason %q", d.Reason)
+	require.Equal(t, DeniedByDelegationCeiling, d.DeniedBy, "reason %q", d.Reason)
+	require.Equal(t, DenyCauseCeilingProvenanceMissing, d.DenyCause, "reason %q", d.Reason)
+}
+
+// A migration-sentinel edge on the agent's chain denies with the cause the
+// chain check gives it for a permission that is not a registered read
+// (ceiling_orphaned), before the parent ceiling.
+func TestMigrationSentinelEdgeDeniesGCPServiceAccountUse(t *testing.T) {
+	authz, s := authzTestSetup(t)
+	saX := tid("sentinel-use-sa")
+	agentID, projectID := tid("sentinel-use-agent"), tid("sentinel-use-project")
+	seedUseParentProof(t, s, agentID, projectID, saX)
+	createDCEdge(t, s, store.DelegationPrincipalUser, migrationDelegatorID, store.DelegationPrincipalAgent, agentID,
+		store.RoleScopeProject, projectID, store.ProjectRoleOwner)
+
+	d := gcpUseDecision(authz, agentID, projectID, saX)
+	require.False(t, d.Allowed, "reason %q", d.Reason)
+	require.Equal(t, DeniedByDelegationCeiling, d.DeniedBy, "reason %q", d.Reason)
+	require.Equal(t, DenyCauseCeilingOrphaned, d.DenyCause, "reason %q", d.Reason)
 }
 
 // secret.use and project.secret_read: Decide, and the runtime project-secret

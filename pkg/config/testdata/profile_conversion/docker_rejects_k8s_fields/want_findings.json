@@ -4,14 +4,16 @@
   },
   "findings": [
     {
-      "code": "field_not_valid_for_target_type",
+      "code": "legacy_field_removed",
       "severity": "notice",
       "path": "profiles.dev.home_storage_backend",
       "profiles": [
         "dev"
       ],
       "message_contains": [
-        "profiles.dev.home_storage_backend is not valid for runtime target type docker"
+        "profiles.dev.home_storage_backend is no longer supported and is not converted",
+        "server.project_storage",
+        "volumes:"
       ]
     },
     {

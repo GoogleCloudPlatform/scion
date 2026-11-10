@@ -139,12 +139,14 @@ func TestHubShadowStub(t *testing.T) {
 // TestShadowDir_ListRoutesToHubProjectWithNotice: in a directory left by
 // the removed 'hub shadow', 'scion list' still lists the shadow's hub
 // project on the shadow's hub (its external settings' endpoint, imported
-// into a link entry once), and prints the cleanup notice once.
+// into a link entry once, the hub being in the hub list), and prints the
+// cleanup notice once.
 func TestShadowDir_ListRoutesToHubProjectWithNotice(t *testing.T) {
 	setupContextTest(t)
 	enableGlobalHubImport(t)
 	t.Setenv("SCION_DEV_TOKEN", "scion_dev_test")
 	srv, paths := shadowFakeHub(t)
+	listTestHub(t, "remote", srv.URL)
 	dir, _ := makeShadowDir(t, srv.URL)
 	t.Chdir(dir)
 

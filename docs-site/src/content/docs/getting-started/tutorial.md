@@ -28,7 +28,9 @@ On the first run your browser opens the [Onboarding Wizard](/scion/getting-start
 images. Its last step, **First workspace**, is optional. You can skip it, because the next step
 links your repository from the command line.
 
-If the browser does not open (over SSH, or with `SCION_NO_BROWSER` set), open the URL yourself.
+Scion opens it through a single-use sign-in link (printed on a terminal as `Sign in: http://127.0.0.1:8080/auth/dev-signin?code=...`),
+which signs your browser in. If the browser does not open (over SSH, or with `SCION_NO_BROWSER` set),
+open that link yourself within two minutes, or run `scion server open --print` for a new one.
 
 :::caution[macOS with Apple container]
 On macOS, Scion prefers Podman, then Docker, and uses the Apple `container` runtime only when

@@ -456,11 +456,11 @@ func TestAuthRefreshRoleReevaluation(t *testing.T) {
 		}
 	})
 
-	t.Run("store error degrades to config-only role", func(t *testing.T) {
+	t.Run("store error refuses the refresh", func(t *testing.T) {
 		// A transient store failure must not let the token's own role claim
-		// stand in for the stored role: the refresh chain rotates, so trusting
-		// claims.Role here would let a stale admin renew itself indefinitely.
-		// The handler falls back to config-only evaluation instead.
+		// stand in for the stored role, and without the users row the
+		// session generation cannot be compared: the handler refuses with
+		// 503 and mints nothing.
 		srv, s := testServer(t)
 		ctx := context.Background()
 
@@ -488,8 +488,13 @@ func TestAuthRefreshRoleReevaluation(t *testing.T) {
 		// rather than an offboarded user.
 		srv.store = &failingUserLookupStore{Store: s, err: errors.New("database is locked")}
 
-		if role := refresh(t, srv, refreshToken); role != "member" {
-			t.Errorf("expected refreshed token role 'member' (config-only fallback), got %q", role)
+		rec := doRequest(t, srv, http.MethodPost, "/api/v1/auth/refresh",
+			AuthRefreshRequest{RefreshToken: refreshToken})
+		if rec.Code != http.StatusServiceUnavailable {
+			t.Fatalf("expected status 503 on a user lookup fault, got %d: %s", rec.Code, rec.Body.String())
+		}
+		if strings.Contains(rec.Body.String(), "accessToken") {
+			t.Errorf("no token pair may be returned on a user lookup fault: %s", rec.Body.String())
 		}
 	})
 }

@@ -18,8 +18,10 @@ import (
 	"context"
 	"errors"
 	"io"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 )
 
 type RunConfig struct {
@@ -45,6 +47,19 @@ type RunConfig struct {
 	Resources          *api.ResourceSpec
 	Kubernetes         *api.KubernetesConfig
 	GitClone           *api.GitCloneConfig
+	// AgentOwnWorkspace marks Workspace as the agent's own directory
+	// (<agent dir>/workspace: its worktree or private checkout), as the
+	// broker decided from its own paths. That workspace's .scion is the
+	// agent's branch checkout, which stays writable; any other workspace's
+	// .scion is project configuration and is mounted read-only.
+	AgentOwnWorkspace bool
+	// ProjectConfigPath is the broker-side path of the project's .scion
+	// entry (a directory or marker file). When it lies in a SUBDIRECTORY of
+	// the bound workspace (not at <workspace>/.scion), that nested entry is
+	// bound read-only — with its agents/ masked when it exists — in the
+	// shared-plain, config-Workspace-only, non-own worktree, and registered
+	// outside-root fallback layouts.
+	ProjectConfigPath string
 	// TrustedHubEndpoint is the hub endpoint Substrate's egress allowlist
 	// trusts. In broker mode, this field arrives already resolved by the
 	// runtime broker from operator-controlled tiers only — the request's
@@ -71,13 +86,13 @@ type RunConfig struct {
 	// but must never widen the egress allowlist to match it.
 	TrustedHubEndpoint string
 	SharedDirs         []api.SharedDir
-	// SharedDirStorage holds the resolved shared-dir storage plan when
-	// server.shared_dir_storage.backend is "nfs" (design
-	// deploy-config-explore §3.2.3/§3.2.4). It is independent of
-	// WorkspaceBackendName/NFS* above, which describe workspace storage
-	// only. Nil means shared dirs use the default local layout (or, on K8s,
-	// fall back to the existing workspace_storage:nfs subPath branch or
-	// per-dir dynamic PVCs).
+	// SharedDirStorage holds the resolved shared-dir mounts when the
+	// broker's shared-dir Layout is on a shared backend (nfs,
+	// gke-shared-volume or cloudrun-volume; design fs-cleanup §P2): every
+	// shared dir is then mounted from that one volume by subPath. It is
+	// independent of WorkspaceBackendName/NFS* above, which describe
+	// workspace storage only. Nil means the local backend: shared dirs use
+	// the local layout (on Kubernetes, one claim per shared dir).
 	SharedDirStorage     *SharedDirRealization
 	BrokerMode           bool
 	NoAuth               bool
@@ -90,16 +105,35 @@ type RunConfig struct {
 	Project              string   // Project name (e.g., "global" or "my-project")
 	ProjectID            string   // Project ID (e.g., "550e8400-e29b-41d4-a716-446655440000")
 
+	// PrivateGitConfigSource is the host path to the per-agent private copy of
+	// the repository's .git/config, seeded by the broker into the agent's
+	// (broker-owned, agent-scoped) state dir. For git-backed worktree and
+	// shared-plain layouts on docker/podman it is bound as a single file,
+	// read-only, over the container's .git/config, so in-container git reads a
+	// credential-stripped config and never writes the host repository's or a
+	// sibling agent's config. The copy is pre-seeded with the agent's own branch
+	// upstream and push.autoSetupRemote so a bare `git push` finds the upstream
+	// already set and exits 0 without a config write; `git push -u` also exits 0
+	// but cannot persist the upstream and prints an error. Immediately before the
+	// bind the source is re-checked (regular file, not a symlink, link count 1,
+	// broker-owned); a missing or unsafe source refuses the start. The broker
+	// never reads this file back as configuration. Empty when the layout does not
+	// use a private config (clone-per-agent, empty-per-agent). On Apple it is
+	// seeded but not bound (the Apple read-only-.git layout cannot bind single
+	// files).
+	PrivateGitConfigSource string
+
 	// RuntimeName is set by the calling runtime adapter (docker/podman/apple)
 	// before invoking buildCommonRunArgs, e.g. via runtime.Name(). It gates
-	// runtime-specific mount narrowing in buildCommonRunArgs that cannot yet
-	// be applied uniformly across adapters — currently the narrowed read-only
-	// mount over the shared base repo's .git admin surface (config/hooks/info)
-	// for hub-native worktree-per-agent projects, which the broker-git
-	// worktree change currently applies to Docker only. Left empty by
-	// adapters that have not yet been extended (podman, apple); code gating on
-	// this field must fail closed (i.e. skip the mount narrowing) for any
-	// value it does not explicitly recognize.
+	// runtime-specific choices in buildCommonRunArgs that cannot yet be
+	// applied uniformly across adapters: the narrowed read-only mount over
+	// the shared base repo's .git admin surface (config/hooks/info) for
+	// hub-native worktree-per-agent projects, which the broker-git worktree
+	// change currently applies to Docker ("docker") only, and the form and
+	// condition of the shared workspace .scion/agents mask for Apple
+	// ("container"). Docker and Apple set it; Podman leaves it empty. Code
+	// gating on this field must fail closed (i.e. skip the mount narrowing)
+	// for any value it does not explicitly recognize.
 	RuntimeName string
 
 	// WorkspaceBackendName is the name of the backend chosen by the workspace
@@ -228,13 +262,21 @@ type RunConfig struct {
 	// resources.
 	ObserveResourceCreated func(api.ResourceHandle)
 	// KubernetesBlockIdentity marks a pod whose GCP identity mode is
-	// "block" (ptone/scion#4034). The Kubernetes runtime then sets
-	// automountServiceAccountToken false and adds the Workload Identity node
-	// selector (KubernetesWorkloadIdentityNodeLabel). The ServiceAccount
+	// "block" (ptone/scion#4034). The Kubernetes runtime then adds the
+	// Workload Identity node selector (KubernetesWorkloadIdentityNodeLabel).
+	// automountServiceAccountToken is false on every agent pod, in every
+	// GCP identity mode, not only under block. The ServiceAccount
 	// itself comes from Kubernetes.ServiceAccountName, which the agent
 	// manager has already set to the block ServiceAccount or cleared.
 	// Ignored by other runtimes.
 	KubernetesBlockIdentity bool
+	// CloudRunIdentity is the broker-resolved Cloud Run instance identity
+	// for this dispatch (api.StartOptions.CloudRunIdentity). Nil: the Cloud
+	// Run runtime uses its configured service account, as before. Non-nil:
+	// the instance runs as its ServiceAccount, an empty ServiceAccount is
+	// refused before any create, and an existing instance is never started
+	// in place. Ignored by other runtimes.
+	CloudRunIdentity *api.CloudRunIdentity
 
 	// FallbackEnv is the template env layer (ptone/scion#4524): every
 	// runtime applies it with FallbackEnvEntries as the LAST step of its
@@ -420,30 +462,38 @@ type HomeStorageRealization struct {
 	SkeletonMaxBytes int64
 }
 
-// SharedDirRealization holds the plan for realizing a project's shared
-// directories that use the "nfs" shared-dir storage backend (design
-// deploy-config-explore §3.2.3/§3.2.4). It is computed once (in
-// pkg/agent.resolveSharedDirs) and consumed by the K8s runtime's buildPod,
-// which mounts PVClaimName by subPath instead of creating per-dir dynamic
-// PVCs. Docker/Podman/Apple consume the equivalent bind-mount VolumeMounts
-// directly (from runtime.NFSSharedDirsToVolumeMounts) rather than this
-// struct.
+// SharedDirRealization holds the resolved mounts of a project's shared
+// directories on a shared backend: the broker's shared-dir Layout
+// (projectfs.Layout.SharedDirLayout), resolved once per start in
+// pkg/agent.resolveSharedDirs. The Kubernetes runtime's buildPod mounts
+// PVClaimName by each dir's subPath; Docker/Podman/Apple bind-mount the
+// resolved host paths, carried in the start's volume mounts, and read only
+// SupplementalGroups from it.
 type SharedDirRealization struct {
-	// Backend is "nfs" — the only realized backend today.
+	// Backend is the shared-dir Layout's backend ("nfs",
+	// "gke-shared-volume" or "cloudrun-volume"); never "local".
 	Backend string
-	// PVClaimName is the K8s PVC claim name holding the shared NFS export
-	// root. Empty means shared_dir_storage nfs is misconfigured (missing
-	// pv_name); buildPod must fail closed rather than fall back to EmptyDir
+	// PVClaimName is the claim holding the share (the nfs share's pv_name,
+	// or the gke-shared-volume pv_claim_name). Empty means the share has no
+	// claim; buildPod must then mount the dirs inline (Server, Export) or
+	// fail closed rather than fall back to per-dir claims or an EmptyDir
 	// (design G5).
 	PVClaimName string
-	// SubPaths maps each shared dir name served from the NFS export to its
-	// subPath within PVClaimName, e.g. "projects/<pid>/shared-dirs/<name>".
-	SubPaths map[string]string
-	// LocalDirs names the shared dirs that use the local backend instead
-	// (per-dir backends, shared_dir_storage_backends). Every other shared
-	// dir is served from the NFS export and must have a SubPaths entry;
+	// Server, Export and SubPathRoot are the nfs share's, set only when the
+	// shared dirs are on the Layout's own nfs share (not the transitional
+	// split). With no PVClaimName, buildPod then mounts each shared dir as
+	// an inline NFS volume of its server path; without them it fails
+	// closed.
+	Server      string
+	Export      string
+	SubPathRoot string
+	// ProjectID is the hub project ID the subPaths were resolved for;
+	// buildPod checks every subPath's project component against it.
+	ProjectID string
+	// SubPaths maps every shared dir name to its subPath within
+	// PVClaimName, "<subpath root>/<project ID>/shared-dirs/<name>".
 	// buildPod fails closed when one is missing.
-	LocalDirs map[string]bool
+	SubPaths map[string]string
 	// SupplementalGroups are the owning group ids of the shared-dir leaves,
 	// read from each leaf at every start (pkg/agent.sharedDirLeafGroups)
 	// and filtered by its guard. Kubernetes adds them to the pod's
@@ -452,27 +502,10 @@ type SharedDirRealization struct {
 	SupplementalGroups []int64
 }
 
-// Serves reports whether r serves the shared dir name from the NFS export:
-// r is an nfs realization and LocalDirs does not name name. It is false
-// for a nil r.
-func (r *SharedDirRealization) Serves(name string) bool {
-	if r == nil || r.Backend != "nfs" {
-		return false
-	}
-	return !r.LocalDirs[name]
-}
-
-// SharedDirClaimChecker is implemented by a runtime whose local shared-dir
-// storage can be a claim it looks up by name: on Kubernetes, the project's
-// shared-dir PersistentVolumeClaim. The start check that follows a shared
-// dir backend change back to local uses it to tell whether the local
-// storage exists. It never reads the claim's content.
-type SharedDirClaimChecker interface {
-	// SharedDirUsesClaim reports whether running cfg gives the shared dir
-	// dirName a claim of its own, created or reused by name.
-	SharedDirUsesClaim(cfg RunConfig, dirName string) bool
-	// SharedDirClaimExists reports whether that claim exists.
-	SharedDirClaimExists(ctx context.Context, cfg RunConfig, dirName string) (bool, error)
+// Shared reports whether r places the shared dirs on a shared backend. It
+// is false for a nil r (the local backend).
+func (r *SharedDirRealization) Shared() bool {
+	return r != nil && projectfs.Backend(r.Backend).Shared()
 }
 
 // RunRef identifies the runtime entry a Stop or Delete targets. ID is the
@@ -482,12 +515,17 @@ type SharedDirClaimChecker interface {
 // to stop or remove; it is empty for legacy entries created before run IDs
 // existed.
 //
+// StopTimeout bounds how long Stop lets the entry shut down before it is
+// killed; zero means the backend's default (30s on Docker and Podman).
+// Backends without a stop timeout ignore it, and Delete ignores it.
+//
 // The signature change is deliberate (ptone/scion#2550): every backend must
 // decide how it honours RunID, rather than silently falling back to name
 // semantics through an optional side interface.
 type RunRef struct {
-	ID    string
-	RunID string
+	ID          string
+	RunID       string
+	StopTimeout time.Duration
 }
 
 // ErrRunMismatch is returned (wrapped) by a Delete whose RunRef names a run

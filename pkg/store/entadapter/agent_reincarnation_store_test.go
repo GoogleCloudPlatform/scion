@@ -544,3 +544,41 @@ func TestAgentReincarnation_MoveFieldsRoundTrip(t *testing.T) {
 
 	assert.ErrorIs(t, s.SetAgentReincarnationSourceCleanup(ctx, "00000000-0000-0000-0000-000000000000", "done"), store.ErrNotFound)
 }
+
+// A move's transfer mode is written at creation and read back unchanged; a
+// record created without one (a plain reincarnation, or a move recorded
+// before the column existed) reads back "".
+func TestAgentReincarnation_TransferModeRoundTrip(t *testing.T) {
+	s := newTestAgentReincarnationStore(t)
+	ctx := context.Background()
+
+	forced := &store.AgentReincarnation{
+		AgentID: "agent-forced", FromGeneration: 1, ToGeneration: 2,
+		State:          store.AgentReincarnationStatePending,
+		SourceBrokerID: "broker-src", TargetBrokerID: "broker-dst",
+		TransferMode: store.TransferModeRecreate,
+	}
+	require.NoError(t, s.CreateAgentReincarnation(ctx, forced))
+	got, err := s.GetAgentReincarnation(ctx, forced.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.TransferModeRecreate, got.TransferMode)
+
+	got.State = store.AgentReincarnationStateCompleted
+	ok, err := s.TryAdvanceAgentReincarnation(ctx, got, store.AgentReincarnationStatePending, time.Time{})
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.NoError(t, s.SetAgentReincarnationSourceCleanup(ctx, forced.ID, store.SourceCleanupDone))
+	got, err = s.GetAgentReincarnation(ctx, forced.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.TransferModeRecreate, got.TransferMode, "later writes keep the transfer mode")
+
+	legacy := &store.AgentReincarnation{
+		AgentID: "agent-legacy", FromGeneration: 1, ToGeneration: 2,
+		State:          store.AgentReincarnationStatePending,
+		SourceBrokerID: "broker-src", TargetBrokerID: "broker-dst",
+	}
+	require.NoError(t, s.CreateAgentReincarnation(ctx, legacy))
+	got, err = s.GetAgentReincarnation(ctx, legacy.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "", got.TransferMode)
+}

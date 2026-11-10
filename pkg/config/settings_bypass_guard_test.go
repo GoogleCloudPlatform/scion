@@ -38,12 +38,14 @@ var settingsBypassScanRoots = []string{".", "../../cmd", "../hub", "../hubsync",
 // must be a known, tracked exception; an entry that no longer matches fails
 // the test, so the list cannot go stale.
 var settingsBypassAllowed = map[string]string{
-	// The legacy project-ID key migration: it runs from the settings
-	// loaders, sometimes while the caller already holds the settings lock,
-	// so it cannot take the (non-re-entrant) lock and uses compare-then-
-	// rename instead (see its comment). Retired with the legacy loader in
-	// ptone/scion#3919.
-	"migrateLegacyYAMLKeysLocked": "ptone/scion#3919",
+	// The convert-apply instances writer and its inverse
+	// (WriteRuntimeBrokerInstances, RemoveRuntimeBrokerInstances; design
+	// sections 4.3 and 5.4, erratum E1). It holds the settings lock, but
+	// refuses a link at the settings path instead of following it, so it
+	// cannot use writeSettingsFileAtomic, which follows one; it writes
+	// through writeFileAtomicMode, which renames a temporary file from the
+	// same directory over the file, keeping the file's mode.
+	"editRuntimeBrokerInstances": "convert-apply instances writer (no link followed; design 4.3 / 5.4)",
 }
 
 // settingsFileNames are the file names whose writes must use the writer.

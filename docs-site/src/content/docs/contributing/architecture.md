@@ -313,6 +313,8 @@ The Hub exposes a RESTful API under `/api/v1/`:
 | **Env Vars / Secrets** | CRUD for scoped environment variables and encrypted secrets |
 | **Groups / Policies** | RBAC: groups with nested membership, policies with conditional bindings |
 
+Every settings route (the Hub's server configuration, project defaults, experiments, messaging, profiling, chat retention and admin mode, a project's settings and messaging policy, a runtime broker's settings, and injected skills) needs a `scion` command or an explicit web-only exemption: `TestSettingsAPICoverage` (`cmd/settings_api_coverage_test.go`) selects these route families from the authorization operation catalogue and fails until a new route in them is listed there with one or the other.
+
 ### Authentication
 
 The Hub supports multiple authentication methods:
@@ -602,4 +604,4 @@ Agent records in the Hub use a `StateVersion` field for optimistic concurrency c
 
 ### Hub Database and Broker Files
 
-The Hub database is the source of truth for agent state. On the broker host, the per-agent files (`agents/<name>/scion-agent.json`, `agent-info.json`) hold the provisioned configuration and are what the broker reads when it starts, stops or reports an agent.
+The Hub database is the source of truth for agent state. On the broker host, the per-agent files in the broker-side agent dir (`agents/<name>/scion-agent.json` and the image provenance record) hold the provisioned configuration and are what the broker reads when it starts, stops or reports an agent. `agents/<name>/home/agent-info.json` lives in the agent home, which the agent can write: the broker reads its status from it, but does not take the agent's profile, harness config or runtime from it to start, stop or list the agent.

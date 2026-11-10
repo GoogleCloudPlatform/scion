@@ -105,6 +105,13 @@ func (s *Server) conduitUpgradeGateOn() bool {
 		s.conduitTargetStreamDeadlines() == config.ConduitTargetStreamDeadlinesEnforce
 }
 
+// conduitLegacyRouteRefusedFor reports whether conduitLegacyRouteRefused
+// refuses a legacy route for identity's stream. It logs and records
+// nothing, so a caller can ask before any route is tried.
+func (s *Server) conduitLegacyRouteRefusedFor(identity Identity) bool {
+	return s.conduitUpgradeGateOn() && conduitIsUserIdentity(identity)
+}
+
 // conduitIsUserIdentity reports whether identity opens user streams.
 func conduitIsUserIdentity(identity Identity) bool {
 	if isNilIdentity(identity) {
@@ -112,4 +119,51 @@ func conduitIsUserIdentity(identity Identity) bool {
 	}
 	_, user := identity.(UserIdentity)
 	return user
+}
+
+// No path without a target-side deadline (design §3.5 Q14 v2.21.46;
+// contracts §2 "No conduit session (6.6b-3d)"): in external relay mode with
+// enforce, decided independently of the hub.conduit flag, a user stream is
+// never served on a legacy route (the port-forward tunnel or the runtime
+// broker's terminal). The port proxy answers with its routing-unavailable
+// 503 and the web PTY with its temporary-failure 503, both retryable, and
+// no new caller-facing value. The cause is in logs and metrics only. Off
+// and in-process profiles keep the legacy fallback.
+
+// Causes of a legacy-route refusal (log and metric labels only).
+const (
+	// conduitCauseNoConduitSession: the agent has no conduit session
+	// (ErrNoSession). Without one the hub cannot tell an agent image
+	// without conduit from a session that is briefly reconnecting.
+	conduitCauseNoConduitSession = "no_conduit_session"
+	// conduitCauseLegacyOnlyPort: the exposed port is served only over the
+	// port-forward tunnel (a non-loopback host).
+	conduitCauseLegacyOnlyPort = "legacy_only_port"
+	// conduitCauseConduitNotRoutable: conduit is not routable on this hub
+	// node, or the hub.conduit flag is off at run time.
+	conduitCauseConduitNotRoutable = "conduit_not_routable"
+)
+
+// Client messages of the legacy-route refusals. They name no hub
+// configuration.
+const (
+	conduitNoSessionMessage   = "The agent has no conduit session right now; if this persists, restart the agent on a current image"
+	conduitLegacyOnlyMessage  = "This agent port is not reachable through conduit"
+	conduitNotRoutableMessage = "Conduit routing is unavailable"
+)
+
+// conduitLegacyRouteRefused reports whether a user stream open by identity
+// that only a legacy route could serve is refused instead, and if so logs
+// and counts it with route, reasonLabel (the caller-facing value: the
+// error code, or the PTY reason) and cause.
+func (s *Server) conduitLegacyRouteRefused(ctx context.Context, identity Identity, route, reasonLabel, cause, agentID string) bool {
+	if !s.conduitLegacyRouteRefusedFor(identity) {
+		return false
+	}
+	slog.WarnContext(ctx, "Conduit stream open refused: no legacy route is used for user streams",
+		"route", route, "agent_id", agentID, "reason", reasonLabel, "cause", cause)
+	if r := s.conduitOpenRefusedMetrics.Load(); r != nil {
+		(*r).RecordConduitOpenRefused(route, reasonLabel, cause)
+	}
+	return true
 }

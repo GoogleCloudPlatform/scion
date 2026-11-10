@@ -17,7 +17,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { readFileSync } from 'fs';
 import { join } from 'path';
-import { canGroup } from '../shared/groups';
+import { canGroup } from '../shared/groups.js';
 import {
   GroupsApiError,
   buildGroupsQuery,
@@ -30,7 +30,7 @@ import {
   listMembers,
   addMember,
   removeMember,
-} from './groups-api';
+} from './groups-api.js';
 
 /* -------------------------------------------------------------------------- */
 /* Helpers                                                                    */
@@ -312,7 +312,9 @@ describe('buildGroupsQuery()', () => {
   });
 
   it('omits undefined values', () => {
-    const url = buildGroupsQuery({ search: undefined, limit: undefined });
+    // Explicit undefined, as untyped callers may pass; the type forbids it.
+    const filter: unknown = { search: undefined, limit: undefined };
+    const url = buildGroupsQuery(filter as Parameters<typeof buildGroupsQuery>[0]);
     expect(url).toBe('/api/v1/groups');
   });
 
@@ -420,9 +422,11 @@ describe('deleteGroup()', () => {
     expect(opts.credentials).toBe('include');
   });
 
-  it('uses raw fetch (not apiFetch) — no scion:access-denied event', async () => {
-    // deleteGroup uses raw fetch with credentials:'include'
+  it("skips the global 403 handling (authErrors: 'caller') — no scion:access-denied event", async () => {
+    // deleteGroup has its own constraint-gate UX for a 403.
     fetchMock.mockResolvedValueOnce(fixtureResponse('error-constraint-gate.json', 403));
+    const denied = vi.fn();
+    window.addEventListener('scion:access-denied', denied);
 
     try {
       await deleteGroup('g-123');
@@ -430,7 +434,10 @@ describe('deleteGroup()', () => {
     } catch (err) {
       expect(err).toBeInstanceOf(GroupsApiError);
       expect((err as GroupsApiError).kind).toBe('constraint_gate');
+    } finally {
+      window.removeEventListener('scion:access-denied', denied);
     }
+    expect(denied).not.toHaveBeenCalled();
   });
 });
 

@@ -144,6 +144,7 @@ P3 also freezes the **maximum publishable set**: the Go type `config.FlatInstanc
 | `runtime_target.safe_to_evict` | as is, tri-state (unset / true / false) | scheduling default |
 | `runtime_target.shared_dir_storage_backend`, `shared_dir_storage_backends` (dir name → `local`/`nfs`), `home_storage_backend` | as is | backend choice only; NFS server addresses live in `server.shared_dir_storage.nfs`, not in the instance |
 | `runtime_target.home_storage_leaf` | **never** | a host path component |
+| `runtime_target.node_selector`, `tolerations` (`key`, `operator`, `value`, `effect`), `runtime_class_name` | as is, plus the marker `placement_reported` (wire `placementReported`), true when the instance reports placement (a Kubernetes target). Absent or false means not reported, not "no placement"; the Hub stores the marker as received and never sets it | scheduling placement for new agents (amendment: Kubernetes scheduling design v2, P1.1) |
 | `agent_defaults.default_harness_config`, `image_registry`, `clone_depth` | as is | names and values without credentials |
 | `agent_defaults.resources` | as is (requests / limits) | quantities |
 | `agent_defaults.volumes[]` (`api.VolumeMount`) | **`target`, `read_only`, `type` only**; `source`, `bucket`, `prefix`, `server`, `mode`, `volume_name` **never** | host paths and storage locations are node-local layout |
@@ -160,6 +161,7 @@ Normative: **each field keeps its own existing precedence chain, and the instanc
 | `safe_to_evict` | below the agent's own (inline or persisted) `kubernetes.safeToEvict`, which wins whether true or false (`ApplySafeToEvictDefault`); it stays an overridable default, never mandatory policy. Errata (P3.1-b): an earlier text said the template's value wins; a template's `kubernetes` block is not applied to the agent's job config (ptone/scion#4524), so the agent's own config is the outranking tier |
 | `priority_class_name` | below the agent's own (inline or persisted) `kubernetes.priorityClassName`. Errata (P3.1-b): an earlier text said a template's value wins; a template's `kubernetes` block is not applied to the agent's job config (ptone/scion#4524) |
 | `gke` | consumed when the instance runtime is built |
+| `node_selector`, `tolerations`, `runtime_class_name` | operator-owned, not a default (amendment: Kubernetes scheduling design v2, P1.1): the agent's own `kubernetes` block may add node selector keys, but cannot change a key the instance sets or the runtime class, and its tolerations must be among the instance's, so an agent toleration is refused when the instance sets none (`config.ApplyOperatorPlacement`) |
 | `shared_dir_storage_backend(s)` | between the agent's recorded backend (always kept) and `server.shared_dir_storage.backend`; flat order is instance per-dir, instance single, global |
 | `home_storage_backend`, `home_storage_leaf` | above `server.home_storage`; first start only, the recorded decision is kept afterwards |
 | `default_harness_config` | rung 6 of `ResolveHarnessConfigName`: below template and stored rungs, above top-level `default_harness_config` |
@@ -219,10 +221,12 @@ Rules:
 4. **Never auto-merge, never generate templates.**
 5. No-effect legacy fields (`runtimes.<r>.host`, `.env`, `.sync`, `profiles.<p>.default_template`) → notice `legacy_field_no_effect`. `profiles.<p>.env` in raw input → notice `legacy_field_removed`.
 6. `list_all_namespaces: true` → blocking `flat_target_scope_violation`. A runtime type without a flat target (podman, container, cloudrun, cloudrun-instances, cloudrun-sandbox, substrate) → blocking `unsupported_flat_target_type`.
+   - **Amendment (P5-CR):** this rule is replaced by CR10 in `p5-cloudrun-amendment.md`, which is authoritative: `cloudrun` and `cloudrun-instances` convert to a `cloudrun` instance, and `cloudrun-sandbox` and `substrate` stay blocking.
 7. Unknown keys under `profiles.<p>` / `runtimes.<r>` → blocking `unknown_settings_key`.
 8. Secret declarations are copied; no secret value is ever read, resolved or emitted, and the converter has no secret-backend dependency.
 
 **Frozen finding codes:** `unsupported_flat_target_type`, `flat_target_scope_violation`, `profile_conflict`, `profile_conflict_resolved`, `legacy_field_no_effect`, `legacy_field_removed`, `unknown_settings_key`, `field_not_valid_for_target_type`.
+- **Amendment (P5-CR):** CR11 in `p5-cloudrun-amendment.md` adds `flat_target_field_required` and `flat_target_operator_input_required` to this list.
 
 `ProfileMap` is the explicit, unambiguous migration mapping that P4.1 uses to translate an old `profile` request field or `defaultProfile` preference. A profile with a blocking finding, or with no `ProfileMap` entry, has no translation; P4.1 returns its actionable error.
 
@@ -232,6 +236,8 @@ Rules:
 - **Instance keys.** `TargetGroup` keys are derived from the scope only: `docker`, `k8s` plus the context and namespace that are set, and for a Split group the group's key plus its profiles, each part made key-safe. An 8-hex sha256 suffix of the scope (and Split members) is appended when a part is not key-safe, when the key would be too long, or when two groups of one conversion would share a key, so every group has its own key and the same input always gives the same keys.
 - **Harness override presence.** A harness override that only some profiles of a group set is reported for its presence only when none of its sub-fields conflicts; a sub-field conflict already names the override.
 - **Docker targets.** A Kubernetes-only key on a profile or runtime entry whose target is docker is not copied (a docker runtime ignores it) and is reported as the notice `field_not_valid_for_target_type`.
+
+**Errata (preserve by splitting).** This replaces rules 3 and 4 for representable fields; no frozen name, type or code changes. Profiles of one group that differ in a field a flat instance holds (placement included) are split into one instance per set of profiles with equal values, never blocked. Each split instance has the group key plus its profile names (the operator Split scheme). One notice, `profile_conflict` at `Path` `profiles.*`, names the differing fields (no values) and the new instances. A field choice for the group key consolidates that field on the chosen value, and `profile_conflict_resolved` still lists every dropped value. A profile pool that differs from its runtime entry's is kept, with a notice at `profiles.<p>.node_selector`. Runtime entries that may share a cluster and namespace but disagree on placement keep their own placement, with a notice at `runtimes.<r>`. Blocking findings remain only for details no flat instance can hold (rules 6 and 7, invalid choices).
 
 ## FC7. Zero, false and unknown-key rules
 
@@ -285,3 +291,14 @@ Binding points for the release:
 ## Not frozen
 
 P4 is free to choose: the Hub transport of FC4, web and CLI presentation, flat-awareness of `/api/v1/info`, health-summary and GCP service-account status display of the runtime target, and the `hub.*` → `server.broker.*` key move. Sequence P4 settings-file edits after the P3.1 schema changes merge, to avoid schema conflicts.
+
+## Change log
+
+### Amendment (P5-CR) (2026-11-04; ptone/scion#7308)
+
+`p5-cloudrun-amendment.md` is authoritative for these changes; the frozen text above carries a pointer at rule 6.
+- **FC1 (CR7):** `runtime_target` admits the six Cloud Run fields for `type: cloudrun`.
+- **FC4-a (CR8):** new rows. `runtime_target.region` is published as is; `project_id`, `service_account`, `network`, `subnetwork` and `credentials_file` are never published.
+- **FC6 rule 1 (CR9):** Cloud Run groups by type plus `project_id` and `region`; errata instance keys are `cloudrun` plus project and region.
+- **FC6 rule 6 (CR10):** replacement text. `cloudrun` and `cloudrun-instances` convert to a `cloudrun` instance.
+- **Frozen finding codes (CR11):** add `flat_target_field_required` (always blocking) and `flat_target_operator_input_required` (always a notice; `convert --plan` exits 3 for it).

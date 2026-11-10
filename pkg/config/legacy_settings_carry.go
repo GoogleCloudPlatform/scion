@@ -119,7 +119,7 @@ func legacyCarriedTopLevelKeys(data []byte, isJSON bool) (map[string]interface{}
 	if isJSON {
 		err = json.Unmarshal(data, &raw)
 	} else {
-		err = yamlv3.Unmarshal(data, &raw)
+		err = unmarshalSettingsYAML(data, &raw)
 	}
 	if err != nil {
 		return nil, err
@@ -229,12 +229,12 @@ func marshalMigratedSettings(vs *VersionedSettings, carried map[string]interface
 // checkMigratedSettingsDecode reports whether data, migrated v1 settings
 // YAML, loads the way the settings loaders read it: a yaml.v3 decode into
 // VersionedSettings (LoadSingleFileVersioned, UpdateVersionedSetting) and
-// the koanf/mapstructure decode (LoadSettingsKoanf, LoadGlobalSettings).
+// the koanf/mapstructure decode (LoadVersionedSettings, LoadGlobalSettings).
 // Unknown keys are not errors for either; a wrongly typed value (for
 // example "server: hello") is.
 func checkMigratedSettingsDecode(data []byte) error {
 	var vs VersionedSettings
-	if err := yamlv3.Unmarshal(data, &vs); err != nil {
+	if err := unmarshalSettingsYAML(data, &vs); err != nil {
 		return err
 	}
 	k := koanf.New(".")

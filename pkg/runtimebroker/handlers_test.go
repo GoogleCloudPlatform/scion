@@ -26,6 +26,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
@@ -90,6 +91,9 @@ func TestHostInfo(t *testing.T) {
 	}
 	if !resp.Capabilities.EmptyPerAgentWorkspace {
 		t.Error("expected capabilities.emptyPerAgentWorkspace to be true (design #2703 P2)")
+	}
+	if !resp.Capabilities.AsyncStart {
+		t.Error("expected capabilities.asyncStart to be true (ptone/scion#4669), as the heartbeat reports")
 	}
 }
 
@@ -491,9 +495,9 @@ func TestHealthEndpointsConcurrentSwapRuntime(t *testing.T) {
 		defer wg.Done()
 		for i := 0; i < 200; i++ {
 			if i%2 == 0 {
-				srv.SwapRuntime(bad)
+				srv.SwapRuntime(bad, config.RuntimeBuildRecord{})
 			} else {
-				srv.SwapRuntime(good)
+				srv.SwapRuntime(good, config.RuntimeBuildRecord{})
 			}
 		}
 	}()

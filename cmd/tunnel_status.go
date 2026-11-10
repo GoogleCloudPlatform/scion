@@ -32,7 +32,8 @@ var tunnelStatusCmd = &cobra.Command{
 	Short: "Show the open tunnels of this user's tunnel processes",
 	Long: `Show the open tunnels of this user's running scion tunnel processes:
 the hub endpoint, the credential identity (kind, subject and scope; never the
-secret), the session ids and the open tunnels. With --hub, only tunnels to
+secret), the session ids, the open --local-port listeners (LOCAL PORT is the
+port on 127.0.0.1) and the open tunnels. With --hub, only tunnels to
 that hub are shown. The command reads local state only and never prompts.`,
 	Args: func(cmd *cobra.Command, args []string) error {
 		if len(args) != 0 {
@@ -86,6 +87,9 @@ func writeTunnelStatus(w io.Writer, store tunnelclient.StateStore, endpoint stri
 		for _, id := range e.SessionIDs {
 			_, _ = fmt.Fprintf(w, "Session:    %s\n", id)
 		}
+		if len(e.Listeners) > 0 {
+			writeTunnelListeners(w, e.Listeners)
+		}
 		if len(e.Tunnels) == 0 {
 			_, _ = fmt.Fprintln(w, "No open tunnels.")
 			continue
@@ -106,4 +110,16 @@ func writeTunnelStatus(w io.Writer, store tunnelclient.StateStore, endpoint stri
 		_ = tw.Flush()
 	}
 	return nil
+}
+
+// writeTunnelListeners writes the open local listeners as a table. LOCAL
+// PORT is the port on 127.0.0.1, not the agent port.
+func writeTunnelListeners(w io.Writer, ls []tunnelclient.ListenerRecord) {
+	_, _ = fmt.Fprintln(w, "Listeners:")
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	_, _ = fmt.Fprintln(tw, "AGENT\tPROJECT\tKIND\tLOCAL PORT\tOPENED")
+	for _, l := range ls {
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%s\n", l.Agent, l.Project, l.Kind, l.LocalPort, clitime.Format(l.OpenedAt, clitime.Full))
+	}
+	_ = tw.Flush()
 }

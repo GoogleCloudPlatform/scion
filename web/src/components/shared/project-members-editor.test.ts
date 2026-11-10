@@ -51,6 +51,7 @@ import {
   REMOVES_ALL_ROLES,
   ROW_LOCKED_REASON,
   TIER_REASON,
+  builtInCatalog,
   builtInOptionState,
   canEditRow,
   addModeRoleReason,
@@ -2115,5 +2116,51 @@ describe('membership-changed event', () => {
     await el.handleTransferOwnership();
 
     expect(heard).toHaveBeenCalledWith({ kind: 'project', id: 'p-1' });
+  });
+});
+
+describe('project-viewer role', () => {
+  const VIEWER_DESCRIPTION =
+    'Can read the project and its chat; cannot post messages or create agents';
+  const R_VIEWER = role('r-viewer', 'project-viewer', 'builtin', {
+    description: VIEWER_DESCRIPTION,
+  });
+  const CATALOG = [R_VIEWER, R_OWNER, R_MEMBER, R_ADMIN, R_MSG];
+
+  it('orders the viewer after member in the built-in catalog', () => {
+    expect(builtInCatalog(CATALOG).map((r) => r.id)).toEqual([
+      'r-owner',
+      'r-admin',
+      'r-member',
+      'r-viewer',
+    ]);
+  });
+
+  it('never defaults to the viewer role', () => {
+    expect(defaultBuiltInForAdd(ADMIN_CAPS, 'user', [R_VIEWER, ...ADMIN_CATALOG])).toBe('r-member');
+    expect(defaultBuiltInForAdd(ADMIN_CAPS, 'user', [R_VIEWER])).toBe(NO_PROJECT_ROLE);
+  });
+
+  it('offers the viewer as its own radio with its description', async () => {
+    const el = await mountEditor(ALL_GROUPS, OWNER_CAPS, CATALOG);
+    el.openAddDialog();
+    await el.updateComplete;
+    const values = qa(el, 'sl-radio-group sl-radio').map((r) => r.getAttribute('value'));
+    expect(values).toEqual(['r-owner', 'r-admin', 'r-member', 'r-viewer', NO_PROJECT_ROLE]);
+    const viewer = radio(el, 'r-viewer');
+    expect(viewer.textContent).toContain('Viewer');
+    expect(viewer.textContent).toContain(VIEWER_DESCRIPTION);
+    expect(viewer.hasAttribute('disabled')).toBe(false);
+  });
+
+  it('lets an admin grant the viewer role (member tier)', () => {
+    const state = builtInOptionState(R_VIEWER, {
+      mode: 'add',
+      caps: ADMIN_CAPS,
+      principalType: 'user',
+      isLastOwner: false,
+      currentBuiltInId: NO_PROJECT_ROLE,
+    });
+    expect(state.disabled).toBe(false);
   });
 });

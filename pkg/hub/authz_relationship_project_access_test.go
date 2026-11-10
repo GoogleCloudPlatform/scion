@@ -241,9 +241,27 @@ func TestRelationshipProjectAccess(t *testing.T) {
 			f.counting.setFault(memberID)
 
 			after := f.evaluate(t, kind, memberID, res, "agent.attach", RelationshipRuleOwner)
-			assertProjectAccessDeny(t, kind, after, RelationshipRuleOwner, RelationshipRejectProjectAccessError)
+			// Decide denies at the account-status gate, before the
+			// relationship stage; the stage itself, called directly, still
+			// fails closed with its own reject kind.
+			assertAccountStatusLookupDeny(t, after.decision)
+			assert.Equal(t, RelationshipRejectProjectAccessError, after.stageKind)
+			if kind == rpaUAT {
+				require.NotNil(t, after.gateDecision)
+				assert.Equal(t, bearerReasonProjectAccessDenied, after.gateDecision.Reason)
+			}
 		})
 	}
+}
+
+// assertAccountStatusLookupDeny asserts d was denied by decide's
+// account-status gate on a users-row lookup fault.
+func assertAccountStatusLookupDeny(t *testing.T, d Decision) {
+	t.Helper()
+	require.False(t, d.Allowed, "decision must deny: %s", d.Reason)
+	assert.Equal(t, principalStatusLookupReason, d.Reason)
+	assert.Equal(t, DenyCauseResolutionError, d.DenyCause)
+	assert.True(t, d.IsIndeterminate())
 }
 
 // TestRelationshipProjectAccess_Invariants pins behaviour the stage must
@@ -370,7 +388,7 @@ func TestRelationshipProjectAccess_StagePlacement(t *testing.T) {
 		decision: Decision{Allowed: true},
 	}
 	var rejectedBy string
-	_, ok := f.srv.authzService.runRelationshipStages(ctx, principal, "user", res, "agent.attach", nil, c, access,
+	_, ok := f.srv.authzService.runRelationshipStages(ctx, principal, "user", res, ActionAttach, "agent.attach", nil, c, access,
 		func(kind, _ string) { rejectedBy = kind })
 	assert.False(t, ok)
 	assert.Equal(t, RelationshipRejectProjectAccess, rejectedBy)
@@ -379,7 +397,7 @@ func TestRelationshipProjectAccess_StagePlacement(t *testing.T) {
 	// A permission outside the relationship policy is rejected at stage 1,
 	// before the project-access stage reads anything.
 	before := f.counting.calls(userID)
-	_, ok = f.srv.authzService.runRelationshipStages(ctx, principal, "user", res, "project.delete", nil, c, access,
+	_, ok = f.srv.authzService.runRelationshipStages(ctx, principal, "user", res, ActionDelete, "project.delete", nil, c, access,
 		func(kind, _ string) { rejectedBy = kind })
 	assert.False(t, ok)
 	assert.Equal(t, RelationshipRejectPolicy, rejectedBy)

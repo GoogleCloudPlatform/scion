@@ -17,6 +17,7 @@ package entadapter
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -28,6 +29,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokerjointoken"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokersecret"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokersetting"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokertargetinventory"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
@@ -830,6 +833,15 @@ func entBrokerToStore(b *ent.RuntimeBroker) *store.RuntimeBroker {
 			DisplayName: b.RuntimeTargetDisplayName,
 		}
 	}
+	unmarshalRawJSON(b.RuntimeTargetPresentation, &sb.RuntimeTargetPresentation)
+	sb.RuntimeTargetPresentationHash = b.RuntimeTargetPresentationHash
+	sb.RuntimeTargetPresentationObservedAt = b.PresentationObservedAt
+	unmarshalRawJSON(b.ConversionPlanPresentation, &sb.ConversionPlanPresentation)
+	sb.ConversionPlanHash = b.ConversionPlanPresentationHash
+	sb.ConversionPlanObservedAt = b.ConversionPlanObservedAt
+	sb.PresentationEpoch = b.PresentationEpoch
+	sb.PresentationSeq = b.PresentationSeq
+	sb.PresentationFencedAt = b.PresentationFencedAt
 	return sb
 }
 
@@ -839,13 +851,59 @@ func (s *ProjectStore) CreateRuntimeBroker(ctx context.Context, b *store.Runtime
 	if err != nil {
 		return err
 	}
+	return createRuntimeBroker(ctx, s.client, uid, b)
+}
+
+// CreateRuntimeBrokerClearingCredentials creates a new runtime broker record
+// and, in the same transaction (the caller's, when called inside
+// store.WithTx), deletes any broker secret and join token stored for its ID
+// (broker_secrets and broker_join_tokens have no FK to runtime_brokers). A
+// row created with an ID that an earlier row had then starts without that
+// row's credential.
+func (s *ProjectStore) CreateRuntimeBrokerClearingCredentials(ctx context.Context, b *store.RuntimeBroker) error {
+	uid, err := parseUUID(b.ID)
+	if err != nil {
+		return err
+	}
+	tx, err := s.client.Tx(ctx)
+	if err != nil {
+		if !errors.Is(err, ent.ErrTxStarted) {
+			return fmt.Errorf("create runtime broker: begin tx: %w", err)
+		}
+		// Already inside store.WithTx: run on the caller's transaction.
+		return createRuntimeBrokerClearingCredentials(ctx, s.client, uid, b)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := createRuntimeBrokerClearingCredentials(ctx, tx.Client(), uid, b); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("create runtime broker: commit: %w", err)
+	}
+	return nil
+}
+
+func createRuntimeBrokerClearingCredentials(ctx context.Context, client *ent.Client, uid uuid.UUID, b *store.RuntimeBroker) error {
+	if err := createRuntimeBroker(ctx, client, uid, b); err != nil {
+		return err
+	}
+	if _, err := client.BrokerSecret.Delete().Where(brokersecret.IDEQ(uid)).Exec(ctx); err != nil {
+		return fmt.Errorf("create runtime broker: delete broker secret: %w", err)
+	}
+	if _, err := client.BrokerJoinToken.Delete().Where(brokerjointoken.IDEQ(uid)).Exec(ctx); err != nil {
+		return fmt.Errorf("create runtime broker: delete join token: %w", err)
+	}
+	return nil
+}
+
+func createRuntimeBroker(ctx context.Context, client *ent.Client, uid uuid.UUID, b *store.RuntimeBroker) error {
 
 	profiles, defaultProfile := b.Profiles, b.DefaultProfile
 	if b.IsFlat() {
 		// Profiles never persist on a flat Runtime Broker row.
 		profiles, defaultProfile = nil, ""
 	}
-	create := s.client.RuntimeBroker.Create().
+	create := client.RuntimeBroker.Create().
 		SetID(uid).
 		SetName(b.Name).
 		SetSlug(b.Slug).
@@ -858,6 +916,8 @@ func (s *ProjectStore) CreateRuntimeBroker(ctx context.Context, b *store.Runtime
 		SetHealth(marshalRawJSON(b.Health)).
 		SetLabels(b.Labels).
 		SetAnnotations(b.Annotations)
+	// The six presentation columns are never written at creation; only
+	// SetRuntimeBrokerPresentation writes them.
 	if b.IsFlat() {
 		create.SetRuntimeTargetID(b.RuntimeTarget.ID).
 			SetRuntimeTargetType(b.RuntimeTarget.Type).
@@ -957,7 +1017,14 @@ func (s *ProjectStore) UpdateRuntimeBroker(ctx context.Context, b *store.Runtime
 		// On a flat row (stored runtime target), profiles never persist:
 		// strip rather than reject, so a leftover written by an older binary
 		// cannot make later read-modify-writes fail. The runtime_target_*
-		// columns are never written here.
+		// columns are never written here, and neither are the six
+		// presentation columns (runtime_target_presentation, its hash,
+		// presentation_epoch, presentation_seq, presentation_fenced_at,
+		// presentation_observed_at): only SetRuntimeBrokerPresentation
+		// writes them, so a write-back of a copy read before a presentation
+		// write cannot roll it back. Do not add them to this list. The
+		// same holds for the three conversion plan columns, written only
+		// by SetRuntimeBrokerConversionPlan.
 		profiles, defaultProfile := b.Profiles, b.DefaultProfile
 		if cur.RuntimeTargetID != nil && *cur.RuntimeTargetID != "" {
 			if len(profiles) > 0 || defaultProfile != "" {
@@ -1013,6 +1080,52 @@ func (s *ProjectStore) UpdateRuntimeBroker(ctx context.Context, b *store.Runtime
 		}
 		// affected == 0: another writer advanced lock_version between our read
 		// and write — retry with the fresh value.
+	}
+	return store.ErrVersionConflict
+}
+
+// RefreshRuntimeBrokerState applies refresh to a fresh read of the broker
+// and writes back only the heartbeat-refreshed columns, conditioned on the
+// lock_version it read. Unlike UpdateRuntimeBroker, which writes the
+// caller's whole copy, a concurrent re-registration is never overwritten:
+// its write advances lock_version, the UPDATE matches no row, and refresh
+// is re-applied to the row the re-registration stored.
+func (s *ProjectStore) RefreshRuntimeBrokerState(ctx context.Context, id string, refresh func(b *store.RuntimeBroker) bool) error {
+	uid, err := parseGetID(id)
+	if err != nil {
+		return err
+	}
+	for attempt := 0; attempt < maxCASRetries; attempt++ {
+		cur, err := s.client.RuntimeBroker.Get(ctx, uid)
+		if err != nil {
+			return mapError(err)
+		}
+		b := entBrokerToStore(cur)
+		if !refresh(b) {
+			return nil
+		}
+		profiles, defaultProfile := b.Profiles, b.DefaultProfile
+		if b.IsFlat() {
+			// Profiles never persist on a flat row (see UpdateRuntimeBroker).
+			profiles, defaultProfile = nil, ""
+		}
+		affected, err := s.client.RuntimeBroker.Update().
+			Where(runtimebroker.IDEQ(uid), runtimebroker.LockVersionEQ(cur.LockVersion)).
+			SetCapabilities(marshalRawJSON(b.Capabilities)).
+			SetWorkspaceStorage(marshalRawJSON(b.WorkspaceStorage)).
+			SetDefaultProfile(defaultProfile).
+			SetHealth(marshalRawJSON(b.Health)).
+			SetRuntimes(marshalRawJSON(profiles)).
+			SetVersion(b.Version).
+			SetUpdated(time.Now()).
+			AddLockVersion(1).
+			Save(ctx)
+		if err != nil {
+			return mapError(err)
+		}
+		if affected == 1 {
+			return nil
+		}
 	}
 	return store.ErrVersionConflict
 }
@@ -1141,14 +1254,28 @@ func gcpHostSettingOf(b *ent.RuntimeBroker) store.GCPHostSetting {
 // UPDATE makes the UPDATE match no row, and the loop retries with a fresh
 // read, so the returned values are exactly the ones overwritten.
 func (s *ProjectStore) casGCPHostWrite(ctx context.Context, id string, apply func(u *ent.RuntimeBrokerUpdate)) (store.GCPHostSetting, error) {
+	prev, _, err := s.casGCPHostWriteIf(ctx, id, nil, apply)
+	return prev, err
+}
+
+// casGCPHostWriteIf is casGCPHostWrite with an optional precondition on the
+// stored values. cond is evaluated on each read; when it returns false the
+// row is not written and the stored values are returned with applied=false.
+// Because the UPDATE is conditioned on the lock_version that was read, the
+// values cond accepted are the values the write replaces.
+func (s *ProjectStore) casGCPHostWriteIf(ctx context.Context, id string, cond func(store.GCPHostSetting) bool, apply func(u *ent.RuntimeBrokerUpdate)) (store.GCPHostSetting, bool, error) {
 	uid, err := parseUUID(id)
 	if err != nil {
-		return store.GCPHostSetting{}, err
+		return store.GCPHostSetting{}, false, err
 	}
 	for attempt := 0; attempt < maxCASRetries; attempt++ {
 		cur, err := s.client.RuntimeBroker.Get(ctx, uid)
 		if err != nil {
-			return store.GCPHostSetting{}, mapError(err)
+			return store.GCPHostSetting{}, false, mapError(err)
+		}
+		stored := gcpHostSettingOf(cur)
+		if cond != nil && !cond(stored) {
+			return stored, false, nil
 		}
 		u := s.client.RuntimeBroker.Update().
 			Where(runtimebroker.IDEQ(uid), runtimebroker.LockVersionEQ(cur.LockVersion)).
@@ -1157,20 +1284,33 @@ func (s *ProjectStore) casGCPHostWrite(ctx context.Context, id string, apply fun
 		apply(u)
 		affected, err := u.Save(ctx)
 		if err != nil {
-			return store.GCPHostSetting{}, mapError(err)
+			return store.GCPHostSetting{}, false, mapError(err)
 		}
 		if affected == 1 {
-			return gcpHostSettingOf(cur), nil
+			return stored, true, nil
 		}
 	}
-	return store.GCPHostSetting{}, store.ErrVersionConflict
+	return store.GCPHostSetting{}, false, store.ErrVersionConflict
 }
 
 // SetRuntimeBrokerGCPHost writes the GCP host pair unconditionally with
 // source admin, as a compare-and-set on lock_version, and returns the
-// values it replaced.
+// values it replaced. For test fixtures and maintenance only; request paths
+// use SetRuntimeBrokerGCPHostIfPrior or SetRuntimeBrokerGCPHostIfUnset.
 func (s *ProjectStore) SetRuntimeBrokerGCPHost(ctx context.Context, id, email, project string) (store.GCPHostSetting, error) {
 	return s.casGCPHostWrite(ctx, id, func(u *ent.RuntimeBrokerUpdate) {
+		setGCPHostPair(u.SetGcpHostSource(store.GCPHostSourceAdmin), email, project)
+	})
+}
+
+// SetRuntimeBrokerGCPHostIfPrior writes the GCP host pair with source admin
+// only while the stored pair is priorEmail/priorProject (email compared
+// ignoring letter case), in the same compare-and-set as the write.
+func (s *ProjectStore) SetRuntimeBrokerGCPHostIfPrior(ctx context.Context, id, priorEmail, priorProject, email, project string) (store.GCPHostSetting, bool, error) {
+	matches := func(stored store.GCPHostSetting) bool {
+		return strings.EqualFold(stored.Email, priorEmail) && stored.Project == priorProject
+	}
+	return s.casGCPHostWriteIf(ctx, id, matches, func(u *ent.RuntimeBrokerUpdate) {
 		setGCPHostPair(u.SetGcpHostSource(store.GCPHostSourceAdmin), email, project)
 	})
 }
@@ -1219,6 +1359,11 @@ func (s *ProjectStore) RecordRuntimeBrokerHostObservation(ctx context.Context, i
 // (ptone/scion#2061 P2, AC-P2-4). Both deletes run in one transaction so a
 // failure partway through never orphans a settings row for an ID that no
 // longer has a broker (ptone/scion#2061 P2 review round 1, F10).
+//
+// The broker's HMAC secret and any unconsumed join token (broker_secrets and
+// broker_join_tokens, keyed by the broker ID with no FK) are deleted in the
+// same transaction: once the row is gone, no credential for its ID is left
+// that a later row with the same ID could inherit.
 func (s *ProjectStore) DeleteRuntimeBroker(ctx context.Context, id string) error {
 	uid, err := parseUUID(id)
 	if err != nil {
@@ -1245,6 +1390,12 @@ func (s *ProjectStore) DeleteRuntimeBroker(ctx context.Context, id string) error
 	// broker_target_inventory has no FK to runtime_brokers either.
 	if _, err := tx.BrokerTargetInventory.Delete().Where(brokertargetinventory.BrokerIDEQ(uid.String())).Exec(ctx); err != nil {
 		return fmt.Errorf("delete runtime broker: delete target inventory: %w", err)
+	}
+	if _, err := tx.BrokerSecret.Delete().Where(brokersecret.IDEQ(uid)).Exec(ctx); err != nil {
+		return fmt.Errorf("delete runtime broker: delete broker secret: %w", err)
+	}
+	if _, err := tx.BrokerJoinToken.Delete().Where(brokerjointoken.IDEQ(uid)).Exec(ctx); err != nil {
+		return fmt.Errorf("delete runtime broker: delete join token: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("delete runtime broker: commit: %w", err)

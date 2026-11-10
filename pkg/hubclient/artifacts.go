@@ -16,15 +16,20 @@ package hubclient
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 )
+
+// errArtifactRedirect is returned when an artifact file redirect target is invalid.
+var errArtifactRedirect = errors.New("artifact file: invalid redirect")
 
 // ArtifactService handles artifact operations (/api/v1/artifacts).
 type ArtifactService interface {
@@ -98,8 +103,9 @@ type ArtifactService interface {
 	ListGrants(ctx context.Context, id string) (*ArtifactGrantList, error)
 
 	// PutGrant adds a grant or changes the permission of the subject's
-	// existing grant (POST /api/v1/artifacts/{id}/grants).
-	PutGrant(ctx context.Context, id string, req *ArtifactGrantRequest) (*ArtifactGrant, error)
+	// existing grant (POST /api/v1/artifacts/{id}/grants). With
+	// req.Notify, the result says whether the user was told.
+	PutGrant(ctx context.Context, id string, req *ArtifactGrantRequest) (*ArtifactGrantResult, error)
 
 	// DeleteGrant removes a grant (DELETE /api/v1/artifacts/{id}/grants/{grantId}).
 	DeleteGrant(ctx context.Context, id, grantID string) error
@@ -114,10 +120,13 @@ type ArtifactLink struct {
 }
 
 // ArtifactLinkCreated answers CreateLink. URL is the hub-relative path of
-// the link, the only place its token appears.
+// the link; ShareURL, present only when the hub has a content host
+// (server.hub.content_url), is the absolute link on it. They are the
+// only places its token appears.
 type ArtifactLinkCreated struct {
 	Link                    ArtifactLink `json:"link"`
 	URL                     string       `json:"url"`
+	ShareURL                string       `json:"shareUrl,omitempty"`
 	ClampedToArtifactExpiry bool         `json:"clampedToArtifactExpiry,omitempty"`
 }
 
@@ -250,6 +259,21 @@ type ArtifactGrantRequest struct {
 	SubjectKind string `json:"subjectKind"`
 	SubjectRef  string `json:"subjectRef"`
 	Permission  string `json:"permission"`
+	// Notify asks the hub to tell the user subject about the grant (Ask
+	// for review). It never blocks the grant.
+	Notify bool `json:"notify,omitempty"`
+}
+
+// ArtifactGrantResult is the response of POST /api/v1/artifacts/{id}/grants.
+type ArtifactGrantResult struct {
+	Grant ArtifactGrant `json:"grant"`
+	// Notified is true when the request asked for notify and the user was
+	// told.
+	Notified bool `json:"notified,omitempty"`
+	// NotifySkipped says why a request that asked for notify did not tell
+	// the user: self, not_permitted, unavailable, not_raised or
+	// rate_limited.
+	NotifySkipped string `json:"notifySkipped,omitempty"`
 }
 
 // ArtifactResponse mirrors the hub's artifact response body.
@@ -429,19 +453,37 @@ func (s *artifactService) OpenFile(ctx context.Context, id string, seq int, file
 		}
 		return s.fetchObject(ctx, loc.String())
 	default:
-		return nil, apiclient.CheckResponse(resp)
+		if err := apiclient.CheckResponse(resp); err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("artifact file: unexpected status %d", resp.StatusCode)
 	}
 }
 
+// fetchObject downloads signedURL, an object-store URL, with a client that
+// carries no credential and follows no further redirect. Only https is
+// followed, unless the hub itself is reached over plain http (a local
+// development hub), matching fetchRedirect's contract.
 func (s *artifactService) fetchObject(ctx context.Context, signedURL string) (io.ReadCloser, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, signedURL, nil)
+	u, err := url.Parse(signedURL)
+	allowHTTP := strings.HasPrefix(s.c.transport.BaseURL, "http://")
+	if err != nil || (u.Scheme != "https" && (u.Scheme != "http" || !allowHTTP)) || u.Host == "" {
+		return nil, errArtifactRedirect
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
 		return nil, fmt.Errorf("create object request: %w", err)
 	}
 	hc := s.objectClient
 	if hc == nil {
 		// No whole-exchange timeout: the caller's context bounds it.
-		hc = &http.Client{}
+		// An object-store URL follows no further redirect.
+		hc = &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	} else {
+		// Ensure the custom client also does not follow subsequent redirects.
+		clientCopy := *hc
+		clientCopy.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+		hc = &clientCopy
 	}
 	resp, err := hc.Do(req)
 	if err != nil {
@@ -641,18 +683,12 @@ func (s *artifactService) ListGrants(ctx context.Context, id string) (*ArtifactG
 // PutGrant implements ArtifactService. Adding or changing a grant is
 // idempotent for the same subject and permission, but it is sent once, as
 // the other mutating artifact calls are.
-func (s *artifactService) PutGrant(ctx context.Context, id string, req *ArtifactGrantRequest) (*ArtifactGrant, error) {
+func (s *artifactService) PutGrant(ctx context.Context, id string, req *ArtifactGrantRequest) (*ArtifactGrantResult, error) {
 	resp, err := s.c.postNoRetry(ctx, artifactPath(id)+"/grants", req, nil)
 	if err != nil {
 		return nil, err
 	}
-	out, err := apiclient.DecodeRequired[struct {
-		Grant ArtifactGrant `json:"grant"`
-	}](resp)
-	if err != nil {
-		return nil, err
-	}
-	return &out.Grant, nil
+	return apiclient.DecodeRequired[ArtifactGrantResult](resp)
 }
 
 // DeleteGrant implements ArtifactService.

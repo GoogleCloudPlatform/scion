@@ -16,10 +16,13 @@
  * Experiments tab E2E spec (ptone/scion#2217), under the main Playwright
  * config, against the real hub started by global-setup.
  *
- * Flow: toggle `web.agent_edit` (default off) on through the Experiments
+ * Flow: toggle `web.agent_edit` (default on) off through the Experiments
  * tab (proving the Go<->TS contract end to end), confirm a fresh page load
- * receives it on, reset it through the API, and confirm the next load
- * receives the registry default (off) again.
+ * receives it off, reset it through the API, and confirm the next load
+ * receives the registry default (on) again. No web-only experiment is off
+ * by default, and toggling one that also gates the hub would change hub
+ * behaviour under other specs, so this spec toggles this flag the other
+ * way.
  *
  * State hygiene: all main-suite specs share one hub with one worker. This
  * spec (1) asserts up front that the flag has no stored override, failing
@@ -85,7 +88,7 @@ test.describe('Experiments tab', () => {
   const env = getE2EEnv();
   test.use({ storageState: env.adminStorageState, baseURL: env.baseURL });
 
-  test('toggles web.agent_edit on through the tab; a reset through the API restores the default', async ({
+  test('toggles web.agent_edit off through the tab; a reset through the API restores the default', async ({
     page,
   }) => {
     // Precondition: fail fast if a previous run left an override behind.
@@ -134,16 +137,16 @@ test.describe('Experiments tab', () => {
       expect(res.status()).toBe(200);
       const body = (await res.json()) as AdminExperimentsResponse;
       currentRevision = body.revision;
-      expect(body.experiments.find((e) => e.name === EXPERIMENT_NAME)?.enabled).toBe(true);
+      expect(body.experiments.find((e) => e.name === EXPERIMENT_NAME)?.enabled).toBe(false);
 
       await expect(page.getByText(/Last changed by/)).toBeVisible({ timeout: 15_000 });
 
-      // The flag is now on hub-wide: a fresh page load receives it from
+      // The flag is now off hub-wide: a fresh page load receives it from
       // GET /api/v1/experiments into the feature-flag bag.
       await page.goto('/', { waitUntil: 'domcontentloaded' });
       await expect
         .poll(() => page.evaluate((name) => window.__SCION_FEATURES__?.[name], EXPERIMENT_NAME))
-        .toBe(true);
+        .toBe(false);
 
       // Reset through the API (not the tab): the next load gets the default.
       const reset = await putOverride(env.baseURL, env.devToken, null, currentRevision);
@@ -152,10 +155,10 @@ test.describe('Experiments tab', () => {
       await page.goto('/', { waitUntil: 'domcontentloaded' });
       await expect
         .poll(() => page.evaluate((name) => window.__SCION_FEATURES__?.[name], EXPERIMENT_NAME))
-        .toBe(false);
+        .toBe(true);
     } finally {
       // Cleanup: always reset to "no override" so later main-suite specs
-      // never see this flag enabled, even if an assertion above failed.
+      // never see this flag turned off, even if an assertion above failed.
       const latest = await getAdminExperiments(env.baseURL, env.devToken);
       const latestEntry = latest.experiments.find((e) => e.name === EXPERIMENT_NAME);
       if (latestEntry?.override !== null) {

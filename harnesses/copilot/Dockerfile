@@ -26,6 +26,8 @@ RUN mkdir -p /home/scion/.copilot /home/scion/.copilot/skills \
 # auto-update banner) that block non-interactive operation. The provisioner
 # also writes these defaults, but baking them into the image guarantees
 # they exist even if the harness-config home-dir staging doesn't fire.
+# settings.json also keeps remote control off ("remoteSessions": false);
+# the CLI has no --no-remote flag since 1.0.103.
 # config.json is also copilot's sign-in file, so the harness home template
 # does not ship it; the provisioner does not treat a config.json holding only
 # trustedFolders as a sign-in (see _config_file_may_hold_credential).

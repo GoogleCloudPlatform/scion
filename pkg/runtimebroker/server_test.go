@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
@@ -159,7 +160,7 @@ func TestSwapRuntime(t *testing.T) {
 	}
 
 	newRT := &runtime.MockRuntime{NameFunc: func() string { return "podman" }}
-	srv.SwapRuntime(newRT)
+	srv.SwapRuntime(newRT, config.RuntimeBuildRecord{})
 
 	if got := srv.RuntimeName(); got != "podman" {
 		t.Errorf("after swap runtime = %q, want %q", got, "podman")
@@ -211,7 +212,7 @@ func TestSwapRuntime_PropagatesManagerToHeartbeat(t *testing.T) {
 			}, nil
 		},
 	}
-	srv.SwapRuntime(newRT)
+	srv.SwapRuntime(newRT, config.RuntimeBuildRecord{})
 
 	// Heartbeat after swap — should use the new manager and report agents.
 	if err := hb.ForceHeartbeat(context.Background()); err != nil {

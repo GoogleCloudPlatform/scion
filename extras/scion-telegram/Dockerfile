@@ -25,8 +25,15 @@ WORKDIR /src
 # Copy the root module (required by the replace directive).
 COPY go.mod go.sum ./
 COPY pkg/ pkg/
+COPY proto/ proto/
 COPY cmd/ cmd/
+COPY internal/ internal/
+COPY resources/ resources/
+COPY harnesses/ harnesses/
 COPY third_party/ third_party/
+# Only the Go files of web/: the build below uses -tags no_embed_web, so the
+# web UI is not built or embedded.
+COPY web/*.go web/
 
 # Copy the telegram module.
 COPY extras/scion-telegram/ extras/scion-telegram/
@@ -35,7 +42,7 @@ WORKDIR /src/extras/scion-telegram
 
 RUN go mod download
 
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath \
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -tags no_embed_web \
     -ldflags="-s -w -X 'github.com/GoogleCloudPlatform/scion/pkg/version.Commit=${GIT_COMMIT}' -X 'github.com/GoogleCloudPlatform/scion/pkg/version.Version=${BUILD_VERSION}'" \
     -o /scion-plugin-telegram ./cmd/scion-plugin-telegram
 

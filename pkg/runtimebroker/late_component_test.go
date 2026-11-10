@@ -20,6 +20,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
@@ -31,7 +32,7 @@ func newLateComponentServer() *Server {
 	cfg.ControlChannelEnabled = false
 	cfg.BrokerAuthEnabled = true
 	cfg.BrokerAuthStrictMode = true
-	return New(cfg, &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }})
+	return New(cfg, &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
 }
 
 // addLateComponentConn adds a connection named name and returns its key.
@@ -89,8 +90,9 @@ func TestLateComponent_TakesEffectWithoutRestart(t *testing.T) {
 	if lateComponentInPlace(srv) {
 		t.Fatal("precondition: component already set up when the handler was built")
 	}
-	if got := lateComponentStatus(h, nil); got != http.StatusOK {
-		t.Fatalf("before setup: got %d, want %d", got, http.StatusOK)
+	// No keys yet: only health endpoints are served.
+	if got := lateComponentStatus(h, nil); got != http.StatusServiceUnavailable {
+		t.Fatalf("before setup: got %d, want %d", got, http.StatusServiceUnavailable)
 	}
 
 	key := addLateComponentConn(t, srv, "hub-late")

@@ -19,10 +19,9 @@ package hub
 import (
 	"context"
 	"encoding/json"
-	"go/ast"
-	"go/parser"
-	"go/token"
+	"errors"
 	"io/fs"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -66,7 +65,7 @@ func identityForms(t *testing.T, fn func(t *testing.T, markerForm bool)) {
 // returns the workspace path and the project config directory.
 func seedWorkspaceIdentity(t *testing.T, slug, id string, markerForm bool) (string, string) {
 	t.Helper()
-	workspacePath, err := hubManagedProjectPath(slug)
+	workspacePath, err := localProjectPath(slug)
 	require.NoError(t, err)
 	require.NoError(t, os.MkdirAll(workspacePath, 0755))
 	scionPath := filepath.Join(workspacePath, config.DotScion)
@@ -107,6 +106,8 @@ func workspaceConfigRoot(t *testing.T, workspacePath string) string {
 }
 
 func notInUse() (bool, error) { return false, nil }
+
+func isFormerID(string, string) (recordedRelation, error) { return recordedSameProject, nil }
 
 // projectConfigRoot returns ~/.scion/project-configs/<slug>__<id8>.
 func projectConfigRoot(slug, projectID string) (string, error) {
@@ -164,13 +165,15 @@ func TestCloneSharedWorkspaceProject_HubProjectIDIsWorkspaceIdentity(t *testing.
 			require.NoError(t, cmd.Run(), "git %v", args)
 		}
 
+		allowLocalCloneFixture(t, sourceDir)
+
 		project := sharedWorkspaceProject("clone-identity")
 		project.Labels[store.LabelCloneURL] = sourceDir
 		project.Labels[store.LabelDefaultBranch] = "master"
 
 		require.NoError(t, srv.cloneSharedWorkspaceProject(context.Background(), project))
 
-		workspacePath, err := hubManagedProjectPath(project.Slug)
+		workspacePath, err := localProjectPath(project.Slug)
 		require.NoError(t, err)
 		ident, err := config.ReadWorkspaceIdentity(workspacePath)
 		require.NoError(t, err)
@@ -211,13 +214,15 @@ func TestCloneSharedWorkspaceProject_RepositoryIdentityReplacedByHubProjectID(t 
 		require.NoError(t, cmd.Run(), "git %v", args)
 	}
 
+	allowLocalCloneFixture(t, sourceDir)
+
 	project := sharedWorkspaceProject("clone-repo-identity")
 	project.Labels[store.LabelCloneURL] = sourceDir
 	project.Labels[store.LabelDefaultBranch] = "master"
 
 	require.NoError(t, srv.cloneSharedWorkspaceProject(context.Background(), project))
 
-	workspacePath, err := hubManagedProjectPath(project.Slug)
+	workspacePath, err := localProjectPath(project.Slug)
 	require.NoError(t, err)
 	want, err := projectConfigRoot(project.Slug, project.ID)
 	require.NoError(t, err)
@@ -281,7 +286,7 @@ func TestAlignClonedProjectIdentities_SecondRunIsNoOp(t *testing.T) {
 		counts := srv.alignClonedProjectIdentities(ctx)
 		assert.Equal(t, 1, counts.alreadyMatching)
 		assert.Zero(t, counts.aligned)
-		res, err := alignWorkspaceProjectIdentity(workspacePath, project.Slug, project.ID, notInUse)
+		res, err := alignWorkspaceProjectIdentity(workspacePath, project.Slug, project.ID, isFormerID, notInUse)
 		require.NoError(t, err)
 		assert.False(t, res.Changed())
 		assert.Equal(t, alignAlreadyMatching, res.Outcome)
@@ -394,7 +399,7 @@ func TestAlignWorkspaceProjectIdentity_PopulatedRecordDirSkipsProject(t *testing
 	require.NoError(t, os.MkdirAll(filepath.Join(want, config.DotScion), 0755))
 	require.NoError(t, os.WriteFile(filepath.Join(want, config.DotScion, "settings.yaml"), []byte("kept\n"), 0644))
 
-	res, err := alignWorkspaceProjectIdentity(workspacePath, project.Slug, project.ID, notInUse)
+	res, err := alignWorkspaceProjectIdentity(workspacePath, project.Slug, project.ID, isFormerID, notInUse)
 	require.NoError(t, err)
 	assert.Equal(t, alignSkippedTargetExists, res.Outcome)
 	assert.False(t, res.Changed())
@@ -434,7 +439,7 @@ func TestAlignClonedProjectIdentities_IdentityOutsideExpectedFormChangesNothing(
 			project := sharedWorkspaceProject("form-check")
 			require.NoError(t, st.CreateProject(ctx, project))
 
-			workspacePath, err := hubManagedProjectPath(project.Slug)
+			workspacePath, err := localProjectPath(project.Slug)
 			require.NoError(t, err)
 			require.NoError(t, os.MkdirAll(workspacePath, 0755))
 			scionPath := filepath.Join(workspacePath, config.DotScion)
@@ -472,18 +477,12 @@ func TestAlignClonedProjectIdentities_IdentityOutsideExpectedFormChangesNothing(
 			assert.Zero(t, counts.failed)
 			assert.Zero(t, counts.aligned)
 
-			res, err := alignWorkspaceProjectIdentity(workspacePath, project.Slug, project.ID, notInUse)
+			res, err := alignWorkspaceProjectIdentity(workspacePath, project.Slug, project.ID, isFormerID, notInUse)
 			require.NoError(t, err)
 			assert.Equal(t, alignSkippedUnexpectedIdentity, res.Outcome)
 
 			after := snapshotTree(t, home)
-			recordsDir := filepath.Join(home, config.GlobalDir, config.HubWorkspacesDir)
-			for path := range after {
-				if path == recordsDir || strings.HasPrefix(path, recordsDir+string(filepath.Separator)) {
-					delete(after, path)
-				}
-			}
-			assert.Equal(t, before, after, "no file or directory changed apart from the hub workspace record")
+			assert.Equal(t, before, after, "no file or directory changed")
 		})
 	}
 }
@@ -497,7 +496,7 @@ func TestAlignWorkspaceProjectIdentity_EmptyRecordDirIsReplaced(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, os.MkdirAll(filepath.Join(want, config.DotScion, "agents"), 0755))
 
-	res, err := alignWorkspaceProjectIdentity(workspacePath, project.Slug, project.ID, notInUse)
+	res, err := alignWorkspaceProjectIdentity(workspacePath, project.Slug, project.ID, isFormerID, notInUse)
 	require.NoError(t, err)
 	assert.True(t, res.Relocated)
 	assert.Equal(t, alignAligned, res.Outcome)
@@ -517,40 +516,12 @@ func TestAlignWorkspaceProjectIdentity_CompletesAfterMovedDir(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, os.Rename(previous, want))
 
-	res, err := alignWorkspaceProjectIdentity(workspacePath, project.Slug, project.ID, notInUse)
+	res, err := alignWorkspaceProjectIdentity(workspacePath, project.Slug, project.ID, isFormerID, notInUse)
 	require.NoError(t, err)
 	assert.True(t, res.Changed())
 	assert.False(t, res.Relocated)
 	assert.Equal(t, want, workspaceConfigRoot(t, workspacePath))
 	assert.Equal(t, "shared", readFile(t, filepath.Join(want, config.SharedDirsSubdir, "data", "file.txt")))
-}
-
-// stubHubWorkspaceDownload replaces the GCS download with one that writes
-// a file and a different project identity into the hub workspace, in the
-// form the workspace already has.
-func stubHubWorkspaceDownload(t *testing.T, srv *Server) {
-	t.Helper()
-	srv.setHubWorkspaceDownloader(func(_ context.Context, _, _, workspacePath string) error {
-		if err := os.WriteFile(filepath.Join(workspacePath, "synced.txt"), []byte("synced"), 0644); err != nil {
-			return err
-		}
-		scionPath := filepath.Join(workspacePath, config.DotScion)
-		info, err := os.Lstat(scionPath)
-		switch {
-		case os.IsNotExist(err):
-			return config.WriteProjectMarker(scionPath, &config.ProjectMarker{
-				ProjectID: "copied-id", ProjectName: "copied", ProjectSlug: "copied",
-			})
-		case err != nil:
-			return err
-		case info.IsDir():
-			return config.WriteProjectID(scionPath, "copied-id")
-		default:
-			return config.WriteProjectMarker(scionPath, &config.ProjectMarker{
-				ProjectID: "copied-id", ProjectName: "copied", ProjectSlug: "copied",
-			})
-		}
-	})
 }
 
 // identitySnapshot returns the raw identity entry of a workspace: the marker
@@ -572,328 +543,6 @@ func identitySnapshot(t *testing.T, workspacePath string) string {
 	}
 	require.NoError(t, err)
 	return "dir:" + string(data)
-}
-
-func TestSyncHubWorkspaceFromGCS_KeepsHubWorkspaceIdentity(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		seed func(t *testing.T, scionPath string)
-	}{
-		{"project-id file", func(t *testing.T, p string) {
-			require.NoError(t, os.MkdirAll(p, 0755))
-			require.NoError(t, config.WriteProjectID(p, api.NewUUID()))
-		}},
-		{"directory without project-id", func(t *testing.T, p string) {
-			require.NoError(t, os.MkdirAll(p, 0755))
-		}},
-		{"marker file", func(t *testing.T, p string) {
-			require.NoError(t, config.WriteProjectMarker(p, &config.ProjectMarker{
-				ProjectID: api.NewUUID(), ProjectName: "hub", ProjectSlug: "hub",
-			}))
-		}},
-		{"no entry", func(t *testing.T, p string) {}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			identityTestHome(t)
-			srv, _ := testServer(t)
-			stubHubWorkspaceDownload(t, srv)
-			workspacePath := t.TempDir()
-			tc.seed(t, filepath.Join(workspacePath, config.DotScion))
-			before := identitySnapshot(t, workspacePath)
-
-			require.NoError(t, srv.syncHubWorkspaceFromGCS(context.Background(), "bucket", "prefix", workspacePath))
-
-			assert.Equal(t, before, identitySnapshot(t, workspacePath))
-			assert.Equal(t, "synced", readFile(t, filepath.Join(workspacePath, "synced.txt")), "other files are downloaded")
-		})
-	}
-}
-
-func TestSyncHubManagedWorkspaceBack_KeepsHubWorkspaceIdentity(t *testing.T) {
-	identityForms(t, func(t *testing.T, markerForm bool) {
-		identityTestHome(t)
-		srv, st := testServer(t)
-		ctx := context.Background()
-		stubHubWorkspaceDownload(t, srv)
-		srv.SetStorage(newMockStorage("bucket"))
-
-		project := sharedWorkspaceProject("sync-back")
-		require.NoError(t, st.CreateProject(ctx, project))
-		workspacePath, _ := seedWorkspaceIdentity(t, project.Slug, project.ID, markerForm)
-		before := identitySnapshot(t, workspacePath)
-
-		srv.syncHubManagedWorkspaceBack(ctx, &store.Agent{ID: "agent-1", ProjectID: project.ID}, "unused")
-
-		assert.Equal(t, "synced", readFile(t, filepath.Join(workspacePath, "synced.txt")))
-		assert.Equal(t, before, identitySnapshot(t, workspacePath))
-	})
-}
-
-func TestHandleProjectCacheNotify_KeepsHubWorkspaceIdentity(t *testing.T) {
-	identityTestHome(t)
-	srv, st := testServer(t)
-	ctx := context.Background()
-	stubHubWorkspaceDownload(t, srv)
-	srv.SetStorage(newMockStorage("bucket"))
-
-	project := sharedWorkspaceProject("cache-notify")
-	require.NoError(t, st.CreateProject(ctx, project))
-	workspacePath, _ := seedWorkspaceIdentity(t, project.Slug, project.ID, false)
-	before := identitySnapshot(t, workspacePath)
-
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/projects/"+project.ID+"/workspace/cache/notify", nil)
-	rec := httptest.NewRecorder()
-	srv.handleProjectCacheNotify(rec, req, project)
-
-	assert.Equal(t, "synced", readFile(t, filepath.Join(workspacePath, "synced.txt")))
-	assert.Equal(t, before, identitySnapshot(t, workspacePath))
-}
-
-// TestHubWorkspaceDownloads_UseIdentityKeepingHelper checks that every hub
-// download of a workspace upload goes through syncHubWorkspaceFromGCS:
-//   - the only reference to gcp.SyncFromGCS in the hub package is in
-//     Server.hubWorkspaceDownloader, which with setHubWorkspaceDownloader
-//     is the only user of the hubWorkspaceDownload field;
-//   - hubWorkspaceDownloader is used only inside syncHubWorkspaceFromGCS;
-//   - syncHubWorkspaceFromGCS is called once from each of the four
-//     functions that download a broker workspace upload into a hub
-//     workspace, and from nowhere else.
-func TestHubWorkspaceDownloads_UseIdentityKeepingHelper(t *testing.T) {
-	// pkgmove:scan-covers pkg/hub/apierr
-	// scanned through guardScanSubdirs; guards SyncFromGCS and hub workspace downloader uses.
-	// pkgmove:scan-covers pkg/hub/internal/principal
-	// scanned through guardScanSubdirs; guards SyncFromGCS and hub workspace downloader uses.
-	// pkgmove:scan-covers pkg/hub/maintenance
-	// scanned through guardScanSubdirs once it exists; guards SyncFromGCS and hub workspace downloader uses.
-	files, err := globGuardScanDirs(".", "*.go")
-	require.NoError(t, err)
-	fset := token.NewFileSet()
-	var gcpRefs []string
-	varUses := map[string]int{}
-	helperCalls := map[string]int{}
-	for _, file := range files {
-		if strings.HasSuffix(file, "_test.go") {
-			continue
-		}
-		f, err := parser.ParseFile(fset, file, nil, 0)
-		require.NoError(t, err, file)
-
-		// Package-level declarations outside functions.
-		for _, decl := range f.Decls {
-			gen, ok := decl.(*ast.GenDecl)
-			if !ok {
-				continue
-			}
-			ast.Inspect(gen, func(n ast.Node) bool {
-				if sel, ok := n.(*ast.SelectorExpr); ok && sel.Sel.Name == "SyncFromGCS" {
-					if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == "gcp" {
-						gcpRefs = append(gcpRefs, "decl")
-					}
-				}
-				return true
-			})
-		}
-
-		for _, decl := range f.Decls {
-			fn, ok := decl.(*ast.FuncDecl)
-			if !ok || fn.Body == nil {
-				continue
-			}
-			ast.Inspect(fn.Body, func(n ast.Node) bool {
-				switch x := n.(type) {
-				case *ast.SelectorExpr:
-					if pkg, ok := x.X.(*ast.Ident); ok && pkg.Name == "gcp" && x.Sel.Name == "SyncFromGCS" {
-						gcpRefs = append(gcpRefs, fn.Name.Name)
-					}
-					if x.Sel.Name == "syncHubWorkspaceFromGCS" {
-						helperCalls[fn.Name.Name]++
-					}
-				case *ast.Ident:
-					if x.Name == "hubWorkspaceDownloader" || x.Name == "hubWorkspaceDownload" {
-						varUses[fn.Name.Name+"."+x.Name]++
-					}
-				}
-				return true
-			})
-		}
-	}
-	assert.Equal(t, []string{"hubWorkspaceDownloader"}, gcpRefs, "gcp.SyncFromGCS references")
-	assert.Equal(t, map[string]int{
-		"syncHubWorkspaceFromGCS.hubWorkspaceDownloader": 1,
-		"hubWorkspaceDownloader.hubWorkspaceDownload":    2,
-		"setHubWorkspaceDownloader.hubWorkspaceDownload": 1,
-	}, varUses, "hub workspace downloader uses")
-	assert.Equal(t, map[string]int{
-		"syncWorkspaceOnStop":           1,
-		"syncHubManagedWorkspaceBack":   1,
-		"refreshProjectCacheFromBroker": 1,
-		"handleProjectCacheNotify":      1,
-	}, helperCalls, "syncHubWorkspaceFromGCS callers")
-}
-
-func TestRecordHubWorkspace(t *testing.T) {
-	identityTestHome(t)
-	srv, st := testServer(t)
-	ctx := context.Background()
-
-	clone := sharedWorkspaceProject("own-clone")
-	require.NoError(t, st.CreateProject(ctx, clone))
-	_, _ = seedWorkspaceIdentity(t, clone.Slug, clone.ID, false)
-
-	native := &store.Project{ID: api.NewUUID(), Name: "own-native", Slug: "own-native"}
-	require.NoError(t, st.CreateProject(ctx, native))
-	_, _ = seedWorkspaceIdentity(t, native.Slug, native.ID, true)
-
-	worktree := &store.Project{
-		ID: api.NewUUID(), Name: "own-worktree", Slug: "own-worktree",
-		GitRemote: "github.com/example/own-worktree",
-		Labels:    map[string]string{store.LabelWorkspaceMode: store.WorkspaceModeWorktreePerAgent},
-	}
-	require.NoError(t, st.CreateProject(ctx, worktree))
-	_, _ = seedWorkspaceIdentity(t, worktree.Slug, worktree.ID, false)
-
-	noWorkspace := sharedWorkspaceProject("no-workspace")
-	require.NoError(t, st.CreateProject(ctx, noWorkspace))
-
-	counts := srv.alignClonedProjectIdentities(ctx)
-	assert.Equal(t, 2, counts.hubWorkspaceRecorded)
-	assert.Zero(t, counts.hubWorkspaceRecordFailed)
-
-	for _, p := range []*store.Project{clone, native} {
-		path, err := config.HubWorkspaceRecordPath(p.Slug)
-		require.NoError(t, err)
-		got, err := config.ReadWorkspaceRecord(path)
-		require.NoError(t, err, p.Slug)
-		assert.Equal(t, p.ID, got, "record holds exactly the hub project ID")
-	}
-	for _, p := range []*store.Project{worktree, noWorkspace} {
-		path, err := config.HubWorkspaceRecordPath(p.Slug)
-		require.NoError(t, err)
-		assert.NoFileExists(t, path, p.Slug)
-	}
-}
-
-func TestCloneSharedWorkspaceProject_RecordsHubWorkspace(t *testing.T) {
-	identityTestHome(t)
-	srv, _ := testServer(t)
-
-	sourceDir := t.TempDir()
-	for _, args := range [][]string{
-		{"init"},
-		{"config", "user.email", "test@test.com"},
-		{"config", "user.name", "Test"},
-		{"commit", "--allow-empty", "-m", "init"},
-	} {
-		cmd := exec.Command("git", args...)
-		cmd.Dir = sourceDir
-		require.NoError(t, cmd.Run(), "git %v", args)
-	}
-	project := sharedWorkspaceProject("clone-record")
-	project.Labels[store.LabelCloneURL] = sourceDir
-	project.Labels[store.LabelDefaultBranch] = "master"
-
-	require.NoError(t, srv.cloneSharedWorkspaceProject(context.Background(), project))
-
-	path, err := config.HubWorkspaceRecordPath(project.Slug)
-	require.NoError(t, err)
-	got, err := config.ReadWorkspaceRecord(path)
-	require.NoError(t, err)
-	assert.Equal(t, project.ID, got)
-}
-
-// replaceScionEntry replaces the workspace .scion entry with one of the
-// given form ("dir" with a project-id and another file, or "marker"), as a
-// download carrying the other form would.
-func replaceScionEntry(workspacePath, form string) error {
-	scionPath := filepath.Join(workspacePath, config.DotScion)
-	if err := os.RemoveAll(scionPath); err != nil {
-		return err
-	}
-	if form == "marker" {
-		return config.WriteProjectMarker(scionPath, &config.ProjectMarker{
-			ProjectID: "copied-id", ProjectName: "copied", ProjectSlug: "copied",
-		})
-	}
-	if err := os.MkdirAll(filepath.Join(scionPath, "templates"), 0755); err != nil {
-		return err
-	}
-	if err := os.WriteFile(filepath.Join(scionPath, "templates", "t.yaml"), []byte("t"), 0644); err != nil {
-		return err
-	}
-	return config.WriteProjectID(scionPath, "copied-id")
-}
-
-func TestSyncHubWorkspaceFromGCS_KeepsIdentityFormWhenDownloadChangesIt(t *testing.T) {
-	for _, tc := range []struct {
-		name, downloadForm string
-		seed               func(t *testing.T, scionPath string)
-	}{
-		{"marker kept over downloaded directory", "dir", func(t *testing.T, p string) {
-			require.NoError(t, config.WriteProjectMarker(p, &config.ProjectMarker{
-				ProjectID: api.NewUUID(), ProjectName: "hub", ProjectSlug: "hub",
-			}))
-		}},
-		{"directory kept over downloaded marker", "marker", func(t *testing.T, p string) {
-			require.NoError(t, os.MkdirAll(p, 0755))
-			require.NoError(t, config.WriteProjectID(p, api.NewUUID()))
-		}},
-		{"directory without project-id kept over downloaded marker", "marker", func(t *testing.T, p string) {
-			require.NoError(t, os.MkdirAll(p, 0755))
-		}},
-		{"no entry kept over downloaded directory", "dir", func(t *testing.T, p string) {}},
-		{"no entry kept over downloaded marker", "marker", func(t *testing.T, p string) {}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			identityTestHome(t)
-			srv, _ := testServer(t)
-			srv.setHubWorkspaceDownloader(func(_ context.Context, _, _, workspacePath string) error {
-				if err := os.WriteFile(filepath.Join(workspacePath, "synced.txt"), []byte("synced"), 0644); err != nil {
-					return err
-				}
-				return replaceScionEntry(workspacePath, tc.downloadForm)
-			})
-			workspacePath := t.TempDir()
-			tc.seed(t, filepath.Join(workspacePath, config.DotScion))
-			before := identitySnapshot(t, workspacePath)
-
-			require.NoError(t, srv.syncHubWorkspaceFromGCS(context.Background(), "bucket", "prefix", workspacePath))
-
-			assert.Equal(t, before, identitySnapshot(t, workspacePath))
-			assert.Equal(t, "synced", readFile(t, filepath.Join(workspacePath, "synced.txt")))
-		})
-	}
-}
-
-func TestSyncHubWorkspaceFromGCS_ReportsIdentityNotKept(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("a read-only directory does not stop removal when running as root")
-	}
-	identityTestHome(t)
-	srv, _ := testServer(t)
-	workspacePath := t.TempDir()
-	scionPath := filepath.Join(workspacePath, config.DotScion)
-	require.NoError(t, config.WriteProjectMarker(scionPath, &config.ProjectMarker{
-		ProjectID: api.NewUUID(), ProjectName: "hub", ProjectSlug: "hub",
-	}))
-
-	// The download leaves a .scion directory that cannot be removed.
-	locked := filepath.Join(scionPath, "locked")
-	t.Cleanup(func() { _ = os.Chmod(locked, 0755) })
-	srv.setHubWorkspaceDownloader(func(_ context.Context, _, _, _ string) error {
-		if err := os.Remove(scionPath); err != nil {
-			return err
-		}
-		if err := os.MkdirAll(locked, 0755); err != nil {
-			return err
-		}
-		if err := os.WriteFile(filepath.Join(locked, "f"), []byte("f"), 0644); err != nil {
-			return err
-		}
-		return os.Chmod(locked, 0500)
-	})
-
-	err := srv.syncHubWorkspaceFromGCS(context.Background(), "bucket", "prefix", workspacePath)
-	require.ErrorIs(t, err, errHubIdentityNotKept)
 }
 
 // sameHomeManager is the smallest agent.Manager a broker create needs.
@@ -931,23 +580,22 @@ func TestHubWorkspaceOnSameHome_BrokerKeepsHubIdentity(t *testing.T) {
 	}{
 		{"project-id file, upload", false, false, true},
 		{"marker file, upload", true, false, true},
-		{"project-id file, broker record present, upload", false, true, true},
-		{"marker file, broker record present, no upload", true, true, false},
+		// No "broker record present, upload" case: without the retired hub
+		// workspace record the broker cannot tell the hub's workspace from
+		// its own on a shared HOME, and the hub no longer sends a workspace
+		// upload for its own hub-managed workspace (a co-located broker gets
+		// the workspace path; a remote broker without a path is refused).
 		{"project-id file, no upload", false, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			identityTestHome(t)
-			hubSrv, st := testServer(t)
+			_, st := testServer(t)
 			ctx := context.Background()
 
 			project := sharedWorkspaceProject("same-home")
 			require.NoError(t, st.CreateProject(ctx, project))
 			localID := api.NewUUID()
 			workspacePath, previous := seedWorkspaceIdentity(t, project.Slug, localID, tc.markerForm)
-
-			recorded, err := hubSrv.recordHubWorkspace(project)
-			require.NoError(t, err)
-			require.True(t, recorded)
 
 			brokerRecord, err := config.BrokerWorkspaceRecordPath(project.Slug)
 			require.NoError(t, err)
@@ -957,10 +605,11 @@ func TestHubWorkspaceOnSameHome_BrokerKeepsHubIdentity(t *testing.T) {
 			before := identitySnapshot(t, workspacePath)
 
 			cfg := runtimebroker.DefaultServerConfig()
+			cfg.BrokerAuthEnabled = false // no hub keys here: serve the broker API without auth
 			cfg.BrokerID = "same-home-broker"
 			cfg.BrokerName = "same-home-broker"
 			cfg.StorageBucket = "bucket"
-			brokerSrv := runtimebroker.New(cfg, &sameHomeManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }})
+			brokerSrv := runtimebroker.New(cfg, &sameHomeManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
 			brokerSrv.SetWorkspaceDownloader(func(_ context.Context, _, _, localPath string) error {
 				return os.WriteFile(filepath.Join(localPath, "downloaded.txt"), []byte("downloaded"), 0644)
 			})
@@ -1013,7 +662,7 @@ func TestAlignWorkspaceProjectIdentity_EntryAddedToEmptyRecordDirIsKept(t *testi
 		return false, os.WriteFile(added, []byte("added"), 0644)
 	}
 
-	res, err := alignWorkspaceProjectIdentity(workspacePath, project.Slug, project.ID, inUse)
+	res, err := alignWorkspaceProjectIdentity(workspacePath, project.Slug, project.ID, isFormerID, inUse)
 	require.NoError(t, err)
 	assert.Equal(t, alignSkippedTargetExists, res.Outcome)
 	assert.False(t, res.Changed())
@@ -1054,7 +703,7 @@ func TestAlignWorkspaceProjectIdentity_UnreadableIdentityIsFailure(t *testing.T)
 	require.NoError(t, os.Remove(filepath.Join(scionPath, projectkeys.ProjectIDFile)))
 	require.NoError(t, os.MkdirAll(filepath.Join(scionPath, projectkeys.ProjectIDFile, "x"), 0755))
 
-	_, err := alignWorkspaceProjectIdentity(workspacePath, project.Slug, project.ID, notInUse)
+	_, err := alignWorkspaceProjectIdentity(workspacePath, project.Slug, project.ID, isFormerID, notInUse)
 	require.Error(t, err)
 	assert.NotErrorIs(t, err, config.ErrInvalidProjectID)
 
@@ -1062,4 +711,615 @@ func TestAlignWorkspaceProjectIdentity_UnreadableIdentityIsFailure(t *testing.T)
 	assert.Equal(t, 1, counts.failed)
 	assert.Zero(t, counts.skippedUnexpectedIdentity)
 	assert.DirExists(t, previous)
+}
+
+// madeUpIDWithSamePrefix returns a project ID other than id whose first
+// eight characters (the <id8> of a project config directory name) are id's.
+func madeUpIDWithSamePrefix(t *testing.T, id string) string {
+	t.Helper()
+	tail := "0"
+	if strings.HasSuffix(id, "0") {
+		tail = "1"
+	}
+	other := id[:len(id)-1] + tail
+	require.NotEqual(t, id, other)
+	return other
+}
+
+func TestAlignClonedProjectIdentities_FormerIDOfSameProjectIsMoved(t *testing.T) {
+	identityForms(t, func(t *testing.T, markerForm bool) {
+		identityTestHome(t)
+		srv, st := testServer(t)
+		ctx := context.Background()
+
+		// An unrelated live project on the same hub.
+		other := sharedWorkspaceProject("bystander")
+		require.NoError(t, st.CreateProject(ctx, other))
+		otherWS, otherRoot := seedWorkspaceIdentity(t, other.Slug, other.ID, markerForm)
+		otherBefore := snapshotTree(t, otherRoot)
+
+		project := sharedWorkspaceProject("former-id")
+		require.NoError(t, st.CreateProject(ctx, project))
+		formerID := api.NewUUID()
+		workspacePath, previous := seedWorkspaceIdentity(t, project.Slug, formerID, markerForm)
+
+		rel, err := srv.recordedProjectRelation(ctx, project, project.Slug, formerID)
+		require.NoError(t, err)
+		assert.Equal(t, recordedSameProject, rel, "an ID under the project's slug that no live project has is a former ID")
+
+		counts := srv.alignClonedProjectIdentities(ctx)
+		assert.Equal(t, 1, counts.aligned)
+		assert.Equal(t, 1, counts.alreadyMatching)
+		assert.Zero(t, counts.skippedNotFormerID)
+
+		want, err := projectConfigRoot(project.Slug, project.ID)
+		require.NoError(t, err)
+		assert.Equal(t, want, workspaceConfigRoot(t, workspacePath))
+		assert.NoDirExists(t, previous)
+		assert.Equal(t, "shared", readFile(t, filepath.Join(want, config.SharedDirsSubdir, "data", "file.txt")))
+
+		assert.Equal(t, otherRoot, workspaceConfigRoot(t, otherWS))
+		assert.Equal(t, otherBefore, snapshotTree(t, otherRoot))
+	})
+}
+
+// TestAlignClonedProjectIdentities_NotFormerIDChangesNothing covers a
+// hub-cloned workspace whose recorded identity is not a former ID of the
+// project: another live project's ID (with that project's slug or the
+// workspace's own), a made-up ID naming another project's config directory,
+// or a made-up ID no project has under a slug other than the project's.
+func TestAlignClonedProjectIdentities_NotFormerIDChangesNothing(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		markerForm bool
+		// recorded returns the slug and ID the workspace records.
+		recorded func(t *testing.T, project, owner *store.Project) (string, string)
+	}{
+		{"marker naming the other project", true, func(_ *testing.T, _, owner *store.Project) (string, string) {
+			return owner.Slug, owner.ID
+		}},
+		{"marker with own slug and the other project's ID", true, func(_ *testing.T, project, owner *store.Project) (string, string) {
+			return project.Slug, owner.ID
+		}},
+		{"project-id file with the other project's ID", false, func(_ *testing.T, project, owner *store.Project) (string, string) {
+			return project.Slug, owner.ID
+		}},
+		{"marker naming the other project's config directory", true, func(t *testing.T, _, owner *store.Project) (string, string) {
+			return owner.Slug, madeUpIDWithSamePrefix(t, owner.ID)
+		}},
+		{"marker with an unowned made-up ID under another slug", true, func(_ *testing.T, _, _ *store.Project) (string, string) {
+			return "elsewhere", api.NewUUID()
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			identityTestHome(t)
+			restore := config.OverrideIsGitRepo(func() bool { return !tc.markerForm })
+			t.Cleanup(restore)
+			srv, st := testServer(t)
+			ctx := context.Background()
+			var logs strings.Builder
+			srv.projectsLog = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+			owner := sharedWorkspaceProject("owner-project")
+			require.NoError(t, st.CreateProject(ctx, owner))
+			ownerWS, ownerRoot := seedWorkspaceIdentity(t, owner.Slug, owner.ID, tc.markerForm)
+
+			project := sharedWorkspaceProject("mismatched-clone")
+			require.NoError(t, st.CreateProject(ctx, project))
+			recordedSlug, recordedID := tc.recorded(t, project, owner)
+			workspacePath, recordedRoot := seedWorkspaceIdentity(t, project.Slug, recordedID, tc.markerForm)
+			if tc.markerForm {
+				require.NoError(t, config.WriteProjectMarker(filepath.Join(workspacePath, config.DotScion), &config.ProjectMarker{
+					ProjectID: recordedID, ProjectName: recordedSlug, ProjectSlug: recordedSlug,
+				}))
+				recordedRoot = workspaceConfigRoot(t, workspacePath)
+				require.NoError(t, os.MkdirAll(filepath.Join(recordedRoot, config.SharedDirsSubdir, "data"), 0755))
+				recordedFile := filepath.Join(recordedRoot, config.SharedDirsSubdir, "data", "recorded.txt")
+				require.NoError(t, os.WriteFile(recordedFile, []byte("recorded"), 0644))
+			}
+
+			configsDir := filepath.Dir(ownerRoot)
+			configsBefore := snapshotTree(t, configsDir)
+			ownerIdentity := identitySnapshot(t, ownerWS)
+			projectIdentity := identitySnapshot(t, workspacePath)
+
+			res, err := alignWorkspaceProjectIdentity(workspacePath, project.Slug, project.ID, func(slug, id string) (recordedRelation, error) {
+				return srv.recordedProjectRelation(ctx, project, slug, id)
+			}, func() (bool, error) {
+				t.Fatal("in-use check reached for an identity that is not a former ID")
+				return false, nil
+			})
+			require.NoError(t, err)
+			assert.Equal(t, alignSkippedNotFormerID, res.Outcome)
+			assert.Equal(t, recordedID, res.RecordedID)
+			assert.False(t, res.Changed())
+			assert.False(t, res.Relocated)
+
+			counts := srv.alignClonedProjectIdentities(ctx)
+			assert.Equal(t, 1, counts.skippedNotFormerID)
+			assert.Equal(t, 1, counts.alreadyMatching)
+			assert.Zero(t, counts.aligned)
+			assert.Zero(t, counts.failed)
+
+			assert.Equal(t, configsBefore, snapshotTree(t, configsDir), "no project config directory is touched")
+			assert.Equal(t, ownerIdentity, identitySnapshot(t, ownerWS), "the other project's identity is unchanged")
+			assert.Equal(t, projectIdentity, identitySnapshot(t, workspacePath), "the workspace identity is unchanged")
+			assert.Equal(t, ownerRoot, workspaceConfigRoot(t, ownerWS))
+			assert.Equal(t, recordedRoot, workspaceConfigRoot(t, workspacePath))
+			want, err := projectConfigRoot(project.Slug, project.ID)
+			require.NoError(t, err)
+			assert.NoDirExists(t, want)
+
+			var mismatch []string
+			for _, line := range strings.Split(logs.String(), "\n") {
+				if strings.Contains(line, "is not a former ID of the project") {
+					mismatch = append(mismatch, line)
+				}
+			}
+			require.Len(t, mismatch, 1, logs.String())
+			assert.Contains(t, mismatch[0], "project_id="+project.ID)
+			assert.Contains(t, mismatch[0], "recorded_project_id="+recordedID)
+			assert.NotContains(t, mismatch[0], configsDir, "the log line carries IDs only")
+			assert.NotContains(t, mismatch[0], workspacePath, "the log line carries IDs only")
+		})
+	}
+}
+
+// TestAlignClonedProjectIdentities_FirstLinkCloneUnaffected covers the
+// ordinary path: a fresh hub clone records the hub project ID, and the
+// hub-start pass finds it matching and changes nothing.
+func TestAlignClonedProjectIdentities_FirstLinkCloneUnaffected(t *testing.T) {
+	identityForms(t, func(t *testing.T, markerForm bool) {
+		identityTestHome(t)
+		srv, st := testServer(t)
+		ctx := context.Background()
+
+		sourceDir := t.TempDir()
+		for _, args := range [][]string{
+			{"init"},
+			{"config", "user.email", "test@test.com"},
+			{"config", "user.name", "Test"},
+			{"commit", "--allow-empty", "-m", "init"},
+		} {
+			cmd := exec.Command("git", args...)
+			cmd.Dir = sourceDir
+			require.NoError(t, cmd.Run(), "git %v", args)
+		}
+		allowLocalCloneFixture(t, sourceDir)
+
+		project := sharedWorkspaceProject("first-link")
+		project.Labels[store.LabelCloneURL] = sourceDir
+		project.Labels[store.LabelDefaultBranch] = "master"
+		require.NoError(t, st.CreateProject(ctx, project))
+		require.NoError(t, srv.cloneSharedWorkspaceProject(ctx, project))
+
+		workspacePath, err := localProjectPath(project.Slug)
+		require.NoError(t, err)
+		want, err := projectConfigRoot(project.Slug, project.ID)
+		require.NoError(t, err)
+		configsBefore := snapshotTree(t, filepath.Dir(want))
+		identityBefore := identitySnapshot(t, workspacePath)
+
+		counts := srv.alignClonedProjectIdentities(ctx)
+		assert.Equal(t, 1, counts.alreadyMatching)
+		assert.Zero(t, counts.aligned)
+		assert.Zero(t, counts.skippedNotFormerID)
+
+		assert.Equal(t, identityBefore, identitySnapshot(t, workspacePath))
+		assert.Equal(t, configsBefore, snapshotTree(t, filepath.Dir(want)))
+		assert.Equal(t, want, workspaceConfigRoot(t, workspacePath))
+	})
+}
+
+// TestBrokerRecordedOtherProjectIdentity_HubAlignmentChangesNothing runs a
+// broker and the hub-start pass against one HOME. A broker create
+// dispatched for one project with another hub-cloned project's workspace
+// as its project path records the dispatched project's identity in that
+// workspace; the hub-start pass then leaves both projects unchanged.
+func TestBrokerRecordedOtherProjectIdentity_HubAlignmentChangesNothing(t *testing.T) {
+	identityTestHome(t)
+	restore := config.OverrideIsGitRepo(func() bool { return false })
+	t.Cleanup(restore)
+	srv, st := testServer(t)
+	ctx := context.Background()
+	var logs strings.Builder
+	srv.projectsLog = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	owner := sharedWorkspaceProject("dispatched-project")
+	require.NoError(t, st.CreateProject(ctx, owner))
+	ownerWS, ownerRoot := seedWorkspaceIdentity(t, owner.Slug, owner.ID, true)
+
+	project := sharedWorkspaceProject("receiving-clone")
+	require.NoError(t, st.CreateProject(ctx, project))
+	workspacePath, err := localProjectPath(project.Slug)
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(workspacePath, 0755))
+
+	cfg := runtimebroker.DefaultServerConfig()
+	cfg.BrokerAuthEnabled = false // no hub keys here: serve the broker API without auth
+	cfg.BrokerID = "same-home-broker"
+	cfg.BrokerName = "same-home-broker"
+	cfg.StorageBucket = "bucket"
+	brokerSrv := runtimebroker.New(cfg, &sameHomeManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
+
+	body, err := json.Marshal(runtimebroker.CreateAgentRequest{
+		ID:          "agent-dispatched",
+		Name:        "agent-dispatched",
+		ProjectID:   owner.ID,
+		ProjectSlug: owner.Slug,
+		ProjectPath: workspacePath,
+	})
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	brokerSrv.Handler().ServeHTTP(rec, req)
+	require.Less(t, rec.Code, 300, rec.Body.String())
+
+	ident, err := config.ReadWorkspaceIdentity(workspacePath)
+	require.NoError(t, err)
+	require.NotNil(t, ident, "the broker records the dispatched identity")
+	require.Equal(t, owner.ID, ident.ID)
+
+	configsDir := filepath.Dir(ownerRoot)
+	configsBefore := snapshotTree(t, configsDir)
+	ownerIdentity := identitySnapshot(t, ownerWS)
+	projectIdentity := identitySnapshot(t, workspacePath)
+
+	counts := srv.alignClonedProjectIdentities(ctx)
+	assert.Equal(t, 1, counts.skippedNotFormerID)
+	assert.Zero(t, counts.aligned)
+
+	assert.Equal(t, configsBefore, snapshotTree(t, configsDir), "no project config directory is touched")
+	assert.Equal(t, ownerIdentity, identitySnapshot(t, ownerWS))
+	assert.Equal(t, projectIdentity, identitySnapshot(t, workspacePath))
+	assert.Equal(t, "shared", readFile(t, filepath.Join(ownerRoot, config.SharedDirsSubdir, "data", "file.txt")))
+	assert.Contains(t, logs.String(), "recorded_project_id="+owner.ID)
+}
+
+func TestAlignWorkspaceProjectIdentity_FormerIDLookupFailureChangesNothing(t *testing.T) {
+	identityTestHome(t)
+	project := sharedWorkspaceProject("lookup-failure")
+	workspacePath, previous := seedWorkspaceIdentity(t, project.Slug, api.NewUUID(), false)
+	before := identitySnapshot(t, workspacePath)
+	configsBefore := snapshotTree(t, filepath.Dir(previous))
+
+	lookupErr := errors.New("store unavailable")
+	_, err := alignWorkspaceProjectIdentity(workspacePath, project.Slug, project.ID, func(string, string) (recordedRelation, error) {
+		return recordedNotFormer, lookupErr
+	}, func() (bool, error) {
+		t.Fatal("in-use check reached after a failed former ID lookup")
+		return false, nil
+	})
+	require.ErrorIs(t, err, lookupErr)
+	var ae *alignError
+	require.ErrorAs(t, err, &ae)
+	assert.Equal(t, "look up recorded project", ae.step)
+
+	assert.Equal(t, before, identitySnapshot(t, workspacePath))
+	assert.Equal(t, configsBefore, snapshotTree(t, filepath.Dir(previous)))
+}
+
+// writeMarker records slug and id in the workspace's .scion marker file.
+func writeMarker(t *testing.T, workspacePath, slug, id string) {
+	t.Helper()
+	require.NoError(t, config.WriteProjectMarker(filepath.Join(workspacePath, config.DotScion), &config.ProjectMarker{
+		ProjectID: id, ProjectName: slug, ProjectSlug: slug,
+	}))
+}
+
+// TestAlignClonedProjectIdentities_OwnIDUnderOldSlugIsRepaired covers a slug
+// rename: the workspace marker records the project's own ID under the
+// earlier slug. The marker is rewritten to the current slug, and the project
+// config directory under the earlier slug is moved when it is still there.
+func TestAlignClonedProjectIdentities_OwnIDUnderOldSlugIsRepaired(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// oldDirLeft keeps the project config directory under the earlier
+		// slug (the rename did not move it) instead of under the current one.
+		oldDirLeft bool
+	}{
+		{"config directory already renamed", false},
+		{"config directory left under the earlier slug", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			identityTestHome(t)
+			restore := config.OverrideIsGitRepo(func() bool { return false })
+			t.Cleanup(restore)
+			srv, st := testServer(t)
+			ctx := context.Background()
+
+			project := sharedWorkspaceProject("renamed-project")
+			require.NoError(t, st.CreateProject(ctx, project))
+			workspacePath, currentRoot := seedWorkspaceIdentity(t, project.Slug, project.ID, true)
+			oldRoot, err := projectConfigRoot("earlier-slug", project.ID)
+			require.NoError(t, err)
+			if tc.oldDirLeft {
+				require.NoError(t, os.Rename(currentRoot, oldRoot))
+			}
+			writeMarker(t, workspacePath, "earlier-slug", project.ID)
+			moved := snapshotTree(t, map[bool]string{true: oldRoot, false: currentRoot}[tc.oldDirLeft])
+
+			counts := srv.alignClonedProjectIdentities(ctx)
+			assert.Equal(t, 1, counts.aligned)
+			assert.Zero(t, counts.skippedNotFormerID)
+			assert.Zero(t, counts.skippedOtherProjectDir)
+
+			ident, err := config.ReadWorkspaceIdentity(workspacePath)
+			require.NoError(t, err)
+			require.NotNil(t, ident.Marker)
+			assert.Equal(t, project.ID, ident.ID)
+			assert.Equal(t, project.Slug, ident.Slug, "the marker records the current slug")
+			assert.Equal(t, currentRoot, workspaceConfigRoot(t, workspacePath))
+			assert.NoDirExists(t, oldRoot)
+			got := snapshotTree(t, currentRoot)
+			assert.Len(t, got, len(moved), "the project config directory is moved whole")
+			assert.Equal(t, "shared", readFile(t, filepath.Join(currentRoot, config.SharedDirsSubdir, "data", "file.txt")))
+			entries, err := os.ReadDir(filepath.Dir(currentRoot))
+			require.NoError(t, err)
+			assert.Len(t, entries, 1, "no other project config directory is created or left")
+		})
+	}
+}
+
+// TestAlignClonedProjectIdentities_OwnIDUnderOtherProjectsDirChangesNothing
+// covers the project's own ID recorded under a slug that another live
+// project holds, whose ID shares the project's first eight characters: the
+// directory <slug>__<id8> is that project's, and nothing is moved.
+func TestAlignClonedProjectIdentities_OwnIDUnderOtherProjectsDirChangesNothing(t *testing.T) {
+	identityTestHome(t)
+	restore := config.OverrideIsGitRepo(func() bool { return false })
+	t.Cleanup(restore)
+	srv, st := testServer(t)
+	ctx := context.Background()
+	var logs strings.Builder
+	srv.projectsLog = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	project := sharedWorkspaceProject("renamed-project")
+	require.NoError(t, st.CreateProject(ctx, project))
+	workspacePath, _ := seedWorkspaceIdentity(t, project.Slug, project.ID, true)
+
+	holder := sharedWorkspaceProject("earlier-slug")
+	holder.ID = madeUpIDWithSamePrefix(t, project.ID)
+	require.NoError(t, st.CreateProject(ctx, holder))
+	holderWS, holderRoot := seedWorkspaceIdentity(t, holder.Slug, holder.ID, true)
+	collided, err := projectConfigRoot(holder.Slug, project.ID)
+	require.NoError(t, err)
+	require.Equal(t, holderRoot, collided, "the recorded identity names the other project's directory")
+
+	writeMarker(t, workspacePath, holder.Slug, project.ID)
+	configsDir := filepath.Dir(holderRoot)
+	configsBefore := snapshotTree(t, configsDir)
+	projectIdentity := identitySnapshot(t, workspacePath)
+	holderIdentity := identitySnapshot(t, holderWS)
+
+	rel, err := srv.recordedProjectRelation(ctx, project, holder.Slug, project.ID)
+	require.NoError(t, err)
+	assert.Equal(t, recordedOtherProjectDir, rel)
+
+	counts := srv.alignClonedProjectIdentities(ctx)
+	assert.Equal(t, 1, counts.skippedOtherProjectDir)
+	assert.Equal(t, 1, counts.alreadyMatching)
+	assert.Zero(t, counts.aligned)
+
+	assert.Equal(t, configsBefore, snapshotTree(t, configsDir), "no project config directory is touched")
+	assert.Equal(t, projectIdentity, identitySnapshot(t, workspacePath))
+	assert.Equal(t, holderIdentity, identitySnapshot(t, holderWS))
+
+	var lines []string
+	for _, line := range strings.Split(logs.String(), "\n") {
+		if strings.Contains(line, "belongs to another project") {
+			lines = append(lines, line)
+		}
+	}
+	require.Len(t, lines, 1, logs.String())
+	assert.Contains(t, lines[0], "project_id="+project.ID)
+	assert.Contains(t, lines[0], "recorded_project_id="+project.ID)
+	assert.NotContains(t, lines[0], configsDir, "the log line carries IDs only")
+}
+
+// errIdentityLookupFault is the store error the identity lookup wrappers
+// return while armed.
+var errIdentityLookupFault = errors.New("store unavailable")
+
+// getProjectFailingStore fails GetProject for one project ID with a store
+// error other than not found while its switch is armed.
+type getProjectFailingStore struct {
+	store.Store
+	fault  *storeFaultSwitch
+	failID string
+}
+
+func (s *getProjectFailingStore) GetProject(ctx context.Context, id string) (*store.Project, error) {
+	if s.fault.Active() && id == s.failID {
+		return nil, errIdentityLookupFault
+	}
+	return s.Store.GetProject(ctx, id)
+}
+
+// TestAlignClonedProjectIdentities_StoreErrorMovesNothing covers the real
+// lookup failing for a recorded ID that would otherwise move (an unowned ID
+// under the project's slug): the project counts as failed and nothing
+// changes.
+func TestAlignClonedProjectIdentities_StoreErrorMovesNothing(t *testing.T) {
+	identityTestHome(t)
+	restore := config.OverrideIsGitRepo(func() bool { return false })
+	t.Cleanup(restore)
+	recordedID := api.NewUUID()
+	srv, st, _, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *getProjectFailingStore {
+		return &getProjectFailingStore{Store: inner, fault: f, failID: recordedID}
+	})
+	ctx := context.Background()
+	var logs strings.Builder
+	srv.projectsLog = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	project := sharedWorkspaceProject("lookup-outage")
+	require.NoError(t, st.CreateProject(ctx, project))
+	workspacePath, previous := seedWorkspaceIdentity(t, project.Slug, recordedID, false)
+	configsDir := filepath.Dir(previous)
+	configsBefore := snapshotTree(t, configsDir)
+	identityBefore := identitySnapshot(t, workspacePath)
+
+	fault.Arm()
+
+	counts := srv.alignClonedProjectIdentities(ctx)
+	assert.Equal(t, 1, counts.failed)
+	assert.Zero(t, counts.aligned)
+	assert.Zero(t, counts.skippedNotFormerID)
+
+	assert.Equal(t, configsBefore, snapshotTree(t, configsDir), "no project config directory is touched")
+	assert.Equal(t, identityBefore, identitySnapshot(t, workspacePath))
+	want, err := projectConfigRoot(project.Slug, project.ID)
+	require.NoError(t, err)
+	assert.NoDirExists(t, want)
+
+	var lines []string
+	for _, line := range strings.Split(logs.String(), "\n") {
+		if strings.Contains(line, "failed to align workspace identity") {
+			lines = append(lines, line)
+		}
+	}
+	require.Len(t, lines, 1, logs.String())
+	assert.Contains(t, lines[0], `step="look up recorded project"`)
+	assert.Contains(t, lines[0], "project_id="+project.ID)
+	assert.NotContains(t, lines[0], configsDir, "the log line carries no path")
+	assert.NotContains(t, lines[0], workspacePath, "the log line carries no path")
+}
+
+// getProjectBySlugFailingStore fails GetProjectBySlug for one slug with a
+// store error other than not found while its switch is armed.
+type getProjectBySlugFailingStore struct {
+	store.Store
+	fault    *storeFaultSwitch
+	failSlug string
+}
+
+func (s *getProjectBySlugFailingStore) GetProjectBySlug(ctx context.Context, slug string) (*store.Project, error) {
+	if s.fault.Active() && slug == s.failSlug {
+		return nil, errIdentityLookupFault
+	}
+	return s.Store.GetProjectBySlug(ctx, slug)
+}
+
+// TestAlignClonedProjectIdentities_OwnIDSlugLookupErrorMovesNothing covers
+// the slug lookup of the own-ID case failing: the project's own ID recorded
+// under an earlier slug, whose config directory would otherwise move. The
+// project counts as failed and nothing changes.
+func TestAlignClonedProjectIdentities_OwnIDSlugLookupErrorMovesNothing(t *testing.T) {
+	identityTestHome(t)
+	restore := config.OverrideIsGitRepo(func() bool { return false })
+	t.Cleanup(restore)
+	srv, st, _, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *getProjectBySlugFailingStore {
+		return &getProjectBySlugFailingStore{Store: inner, fault: f, failSlug: "earlier-slug"}
+	})
+	ctx := context.Background()
+	var logs strings.Builder
+	srv.projectsLog = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	project := sharedWorkspaceProject("renamed-project")
+	require.NoError(t, st.CreateProject(ctx, project))
+	workspacePath, currentRoot := seedWorkspaceIdentity(t, project.Slug, project.ID, true)
+	oldRoot, err := projectConfigRoot("earlier-slug", project.ID)
+	require.NoError(t, err)
+	require.NoError(t, os.Rename(currentRoot, oldRoot))
+	writeMarker(t, workspacePath, "earlier-slug", project.ID)
+
+	configsDir := filepath.Dir(oldRoot)
+	configsBefore := snapshotTree(t, configsDir)
+	identityBefore := identitySnapshot(t, workspacePath)
+
+	fault.Arm()
+
+	counts := srv.alignClonedProjectIdentities(ctx)
+	assert.Equal(t, 1, counts.failed)
+	assert.Zero(t, counts.aligned)
+	assert.Zero(t, counts.skippedOtherProjectDir)
+	assert.Zero(t, counts.skippedNotFormerID)
+
+	assert.Equal(t, configsBefore, snapshotTree(t, configsDir), "no project config directory is touched")
+	assert.Equal(t, identityBefore, identitySnapshot(t, workspacePath))
+	assert.NoDirExists(t, currentRoot)
+
+	var lines []string
+	for _, line := range strings.Split(logs.String(), "\n") {
+		if strings.Contains(line, "failed to align workspace identity") {
+			lines = append(lines, line)
+		}
+	}
+	require.Len(t, lines, 1, logs.String())
+	assert.Contains(t, lines[0], `step="look up recorded project"`)
+	assert.Contains(t, lines[0], "project_id="+project.ID)
+	assert.NotContains(t, lines[0], configsDir, "the log line carries IDs only")
+	assert.NotContains(t, lines[0], workspacePath, "the log line carries IDs only")
+}
+
+// nilProjectBySlugStore answers GetProjectBySlug for one slug with no
+// project and no error while its switch is armed.
+type nilProjectBySlugStore struct {
+	store.Store
+	fault   *storeFaultSwitch
+	nilSlug string
+}
+
+func (s *nilProjectBySlugStore) GetProjectBySlug(ctx context.Context, slug string) (*store.Project, error) {
+	if s.fault.Active() && slug == s.nilSlug {
+		return nil, nil
+	}
+	return s.Store.GetProjectBySlug(ctx, slug)
+}
+
+// TestAlignClonedProjectIdentities_OwnIDSlugLookupWithoutProjectMovesNothing
+// covers the slug lookup of the own-ID case returning no project and no
+// error: it is a lookup failure, not the same project. The project counts as
+// failed and nothing changes.
+func TestAlignClonedProjectIdentities_OwnIDSlugLookupWithoutProjectMovesNothing(t *testing.T) {
+	identityTestHome(t)
+	restore := config.OverrideIsGitRepo(func() bool { return false })
+	t.Cleanup(restore)
+	srv, st, _, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *nilProjectBySlugStore {
+		return &nilProjectBySlugStore{Store: inner, fault: f, nilSlug: "earlier-slug"}
+	})
+	ctx := context.Background()
+	var logs strings.Builder
+	srv.projectsLog = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	project := sharedWorkspaceProject("renamed-project")
+	require.NoError(t, st.CreateProject(ctx, project))
+	workspacePath, currentRoot := seedWorkspaceIdentity(t, project.Slug, project.ID, true)
+	oldRoot, err := projectConfigRoot("earlier-slug", project.ID)
+	require.NoError(t, err)
+	require.NoError(t, os.Rename(currentRoot, oldRoot))
+	writeMarker(t, workspacePath, "earlier-slug", project.ID)
+
+	configsDir := filepath.Dir(oldRoot)
+	configsBefore := snapshotTree(t, configsDir)
+	identityBefore := identitySnapshot(t, workspacePath)
+
+	fault.Arm()
+
+	rel, err := srv.recordedProjectRelation(ctx, project, "earlier-slug", project.ID)
+	require.ErrorIs(t, err, errNoProjectFromLookup)
+	assert.Equal(t, recordedNotFormer, rel)
+
+	counts := srv.alignClonedProjectIdentities(ctx)
+	assert.Equal(t, 1, counts.failed)
+	assert.Zero(t, counts.aligned)
+	assert.Zero(t, counts.skippedOtherProjectDir)
+	assert.Zero(t, counts.skippedNotFormerID)
+
+	assert.Equal(t, configsBefore, snapshotTree(t, configsDir), "no project config directory is touched")
+	assert.Equal(t, identityBefore, identitySnapshot(t, workspacePath))
+	assert.NoDirExists(t, currentRoot)
+
+	var lines []string
+	for _, line := range strings.Split(logs.String(), "\n") {
+		if strings.Contains(line, "failed to align workspace identity") {
+			lines = append(lines, line)
+		}
+	}
+	require.Len(t, lines, 1, logs.String())
+	assert.Contains(t, lines[0], `step="look up recorded project"`)
+	assert.Contains(t, lines[0], "project_id="+project.ID)
+	assert.NotContains(t, lines[0], configsDir, "the log line carries IDs only")
+	assert.NotContains(t, lines[0], workspacePath, "the log line carries IDs only")
 }

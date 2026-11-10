@@ -45,6 +45,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
@@ -54,6 +55,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth/adcsource"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
+	"github.com/GoogleCloudPlatform/scion/pkg/version"
 	"k8s.io/client-go/kubernetes"
 )
 
@@ -119,7 +121,10 @@ type ServerConfig struct {
 	// HubEnabled indicates whether this Runtime Broker should connect to a Hub
 	// for template hydration and other centralized services.
 	HubEnabled bool
-	// HubToken is the authentication token for the Hub API.
+	// HubToken is an operator-configured bearer token for the Hub API. It is
+	// not the dev token: in dev-auth mode the broker authenticates with the
+	// dev token through DevAuthHubOptions, which sends it only to a loopback
+	// hub (a HubToken that is the dev token gets the same rule).
 	HubToken string
 	// HostCredentials makes a co-located broker eligible to give its agents
 	// the host's harness-declared credential files. The caller sets it only
@@ -205,11 +210,36 @@ type ServerConfig struct {
 	// NFS-backed agent dispatches. Nil leaves all NFS handling off.
 	NFSConfig *config.V1NFSConfig
 
+	// StorageOverridesCheck, when set, reports whether the settings this
+	// broker starts agents with still carry a removed per-runtime or
+	// per-profile storage override (config.RemovedStorageOverridesError):
+	// /healthz then shows storage_overrides and the broker is degraded
+	// (ptone/scion#6371). The process keeps serving; agent starts of the
+	// affected profiles are refused. Nil disables the check.
+	StorageOverridesCheck func() error
+
 	// WorkspaceStorageBackend is the configured server.workspace_storage
 	// backend name ("" means "local"). It is reported to the hub, with
 	// NFSConfig's first share, as the broker's workspace storage descriptor
 	// (see BuildWorkspaceStorageDescriptor).
 	WorkspaceStorageBackend string
+
+	// StorageLayout is the broker's projectfs Layout, built at startup from
+	// the same server.project_storage struct the hub builds its own from
+	// (config.ResolveProjectStorage, config.ProjectStorageLayout). Its
+	// Homes is reported in the workspace storage descriptor, so the hub
+	// can refuse shared-mode dispatch to a broker whose layout disagrees
+	// with its own (projectfs.Layout.DescriptorDiff).
+	StorageLayout projectfs.Layout
+
+	// StorageError, when set, is why the broker's project storage settings
+	// are unusable (an invalid server.project_storage block, reported with
+	// the fields at fault). The broker then has no storage: StorageLayout
+	// is the zero Layout, every agent start (create, start, restart) is
+	// refused with this error, the workspace storage descriptor is marked
+	// invalid and health is degraded. Stop, delete, logs and status keep
+	// working, so existing agents can still be managed.
+	StorageError error
 
 	// DefaultProfile is the broker's default (active) profile name from its
 	// settings (active_profile), reported to the hub on every heartbeat. A
@@ -250,7 +280,20 @@ type ServerConfig struct {
 	// disk instead of hydrating over HTTP. Leave nil for remote-only brokers or
 	// when the co-located Hub uses a non-local backend.
 	ColocatedStorage storage.Storage
+
+	// ColocatedHubID is the co-located Hub's instance ID, which namespaces
+	// its storage paths. It selects the template directories of
+	// ColocatedStorage that are accepted as template hydration roots.
+	ColocatedHubID string
 }
+
+// DefaultWriteTimeout is the broker HTTP server's default write timeout. A
+// broker handler can take as long as the hub's hub-to-broker request limit
+// (180s, ptone/scion#6829) before it answers, and the handlers do not extend
+// their own write deadline, so the default leaves 30s of margin above that
+// limit: otherwise a direct-HTTP answer after 120s would be cut off before
+// the hub gives up.
+const DefaultWriteTimeout = 210 * time.Second
 
 // DefaultServerConfig returns the default server configuration.
 func DefaultServerConfig() ServerConfig {
@@ -258,9 +301,9 @@ func DefaultServerConfig() ServerConfig {
 		Port:                 9800,
 		Host:                 "0.0.0.0",
 		ReadTimeout:          30 * time.Second,
-		WriteTimeout:         120 * time.Second,
-		CORSEnabled:          true,
-		CORSAllowedOrigins:   []string{"*"},
+		WriteTimeout:         DefaultWriteTimeout,
+		CORSEnabled:          false, // off by default: nothing calls the broker from a browser (opt in with server.broker.cors)
+		CORSAllowedOrigins:   []string{},
 		CORSAllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
 		CORSAllowedHeaders:   []string{"Authorization", "Content-Type", "X-Scion-Broker-Token", "X-API-Key", "X-Scion-Broker-ID", "X-Scion-Timestamp", "X-Scion-Nonce", "X-Scion-Signature", "X-Scion-Signed-Headers"},
 		CORSMaxAge:           3600,
@@ -271,34 +314,42 @@ func DefaultServerConfig() ServerConfig {
 
 // Server is the Runtime Broker API HTTP server.
 type Server struct {
-	config     ServerConfig
-	manager    agent.Manager
-	runtime    scionrt.Runtime
+	config  ServerConfig
+	manager agent.Manager
+	runtime scionrt.Runtime
+
+	// runtimeRecord is the build record of runtime (Kubernetes placement
+	// defaults, ptone/scion#5085). It is replaced together with runtime and
+	// read only through defaultPair, never on its own.
+	runtimeRecord config.RuntimeBuildRecord
+
 	httpServer *http.Server
 	mux        *http.ServeMux
 	mu         sync.RWMutex
 	startTime  time.Time
+	// listening is closed once Start's listener is bound (Listening).
+	listening listenSignal
 	// servicesStarted is set once startServices begins (Started).
 	servicesStarted bool
-
-	// nfsCleanupWG tracks background NFS project tree removals started by
-	// project delete (startNFSProjectTreeCleanup), so tests can wait for them.
-	nfsCleanupWG sync.WaitGroup
 
 	// workspaceDownload replaces gcp.SyncFromGCS for the GCS workspace
 	// bootstrap (create-time and handleWorkspaceApply) when set (see
 	// SetWorkspaceDownloader).
 	workspaceDownload func(ctx context.Context, bucket, prefix, localPath string) error
-	version           string
+	// signedDownload overrides the signed-URL workspace download's object
+	// client, page source and timing (tests only; zero values mean the
+	// defaults, see signedDownloadSettings).
+	signedDownload signedDownloadSettings
+
+	version string
 
 	// Workspace transfer and project delete steps, like workspaceDownload:
 	// each replaces its real implementation when set (see the setters in
 	// workspace_handlers.go), per Server, so tests can fake one without
 	// racing parallel tests. Guarded by mu.
-	workspaceUpload      func(ctx context.Context, localPath, bucket, prefix string) error
-	manifestUpload       func(ctx context.Context, bucket, storagePath string, manifest *transfer.Manifest) error
-	projectWorkspaceStat func(path string) (os.FileInfo, error)
-	projectPathAbs       func(path string) (string, error)
+	workspaceUpload func(ctx context.Context, localPath, bucket, prefix string) error
+	manifestUpload  func(ctx context.Context, bucket, storagePath string, manifest *transfer.Manifest) error
+	projectPathAbs  func(path string) (string, error)
 	// projectConfigsRemove, when set (tests), replaces
 	// removeProjectConfigsSubtree for a project delete's project-configs
 	// entry (removeProjectConfigs).
@@ -338,6 +389,10 @@ type Server struct {
 	multiCredStore  *brokercredentials.MultiStore
 	credLastScan    time.Time
 	credWatcherStop chan struct{}
+
+	// shutdownContext, when set (SetShutdownContext), returns the context
+	// Start passes to Shutdown once its ctx ends (ptone/scion#5054).
+	shutdownContext func() (context.Context, context.CancelFunc)
 
 	// dispatchAttempts tracks request-id based create-attempt state for
 	// idempotency and auditability.
@@ -394,12 +449,24 @@ type Server struct {
 
 	stateDir string
 
+	// inbox holds the attachment delivery state (ptone/scion#4596): the
+	// spool root downloads are verified in, and the last inbox prune per
+	// agent.
+	inbox inboxState
+
 	// ownership is a flat instance's durable ownership record store
 	// (ownership.go); nil for a legacy Runtime Broker.
 	ownership *OwnershipStore
+	// cloudRunIdentityResolves counts resolveCloudRunIdentity calls, so a
+	// test can show that a refusal returned before any identity work.
+	cloudRunIdentityResolves callCounter
 	// ownedStarts maps a run ID to its in-flight ownership mirror
 	// (installOwnedStart / completeOwnedStart).
 	ownedStarts sync.Map
+	// ownedHolds counts the in-flight holds on each owned run
+	// (holdOwnedRun), guarded by ownedHoldsMu.
+	ownedHoldsMu sync.Mutex
+	ownedHolds   map[ownedRunKey]int
 	// unmirroredUIDs holds the object UIDs from the journals of this
 	// instance's launches whose ownership recording failed; launch cleanup
 	// may delete them although the record may lack them (launchHandleOwned).
@@ -413,6 +480,9 @@ type Server struct {
 	// stateDirSetupErr refuses to start a server whose broker ID cannot
 	// name its default state directory (DefaultStateDir; startServices).
 	stateDirSetupErr error
+	// controlPathSetupErr refuses to start a server whose layout roots
+	// reach Runtime Broker control paths (checkLayoutRoots).
+	controlPathSetupErr error
 
 	// auxiliaryRuntimes holds runtime+manager pairs for non-default runtimes
 	// created via profile resolution (e.g. kubernetes when default is docker).
@@ -425,15 +495,44 @@ type Server struct {
 	auxiliaryRuntimes   map[string]auxiliaryRuntime
 	auxiliaryRuntimesMu sync.RWMutex
 
+	// auxDiscoveryDone is closed when the background auxiliary runtime
+	// discovery pass (startAuxiliaryRuntimeDiscovery) has finished, nil
+	// when none was started; auxDiscoveryCancel stops the running pass
+	// (Shutdown); auxDiscoveryStopped, set by Shutdown, keeps a later start
+	// from starting a pass. All three are guarded by auxDiscoveryMu.
+	auxDiscoveryMu      sync.Mutex
+	auxDiscoveryDone    chan struct{}
+	auxDiscoveryCancel  context.CancelFunc
+	auxDiscoveryStopped bool
+
+	// auxCheckTimeout, when positive, overrides auxProfileCheckTimeout for
+	// this server; afterAuxDiscovery, when set, replaces recoverLaunches at
+	// the end of the pass; afterLateAuxResult, when set, is called when
+	// applyLateAuxResult returns. All for tests.
+	auxCheckTimeout    time.Duration
+	afterAuxDiscovery  func()
+	afterLateAuxResult func()
+
+	// onHubConnectionsStarted, when set (tests only), is called right after
+	// startServices has started every hub connection.
+	onHubConnectionsStarted func()
+
+	// profileRuntimeUnavailable holds the profile settings whose runtime was
+	// found not available, reported as profile_runtime.<name> self-health checks
+	// (profileRuntimeHealthChecks). Guarded by profileRuntimeHealthMu.
+	profileRuntimeHealthMu    sync.Mutex
+	profileRuntimeUnavailable map[string]string // auxProfileKey -> profile name
+
 	// resolveAuxiliaryRuntime resolves the runtime.Runtime for a project path
 	// and profile name when discovering or creating auxiliary runtimes, and
 	// in resolveManagerForOpts when settings resolve to something other than
 	// the broker's default runtime. It is a field (defaulting to
-	// agent.ResolveRuntime, set in New) rather than a direct call, so tests
-	// can substitute a stub that does not require live cluster/network
-	// access — resolving a real Kubernetes runtime calls Verify() against
-	// the API server.
-	resolveAuxiliaryRuntime func(projectPath, agentName, profileFlag string) scionrt.Runtime
+	// agent.ResolveRuntimeWithRecord, set in New) rather than a direct call,
+	// so tests can substitute a stub that does not require live
+	// cluster/network access — resolving a real Kubernetes runtime calls
+	// Verify() against the API server. It returns the runtime's build
+	// record with it.
+	resolveAuxiliaryRuntime func(projectPath, agentName, profileFlag string) (scionrt.Runtime, config.RuntimeBuildRecord)
 
 	// saDiscoveryCache holds the background ServiceAccount annotation
 	// discovery results behind the heartbeat's service account report
@@ -499,8 +598,22 @@ type Server struct {
 	// every request it serves (flat_instance.go).
 	flatPolicy *config.FlatInstancePolicy
 
+	// presentationSeq is the process-wide sequence of a flat instance's
+	// presentation reports: every heartbeat service this server builds (one
+	// per hub connection, rebuilt on re-initialisation) takes the next
+	// value, so the sequence grows for the process life under one epoch
+	// (the start time) and a rebuilt service is never fenced out by its own
+	// earlier reports.
+	presentationSeq atomic.Int64
+
+	// conversionPlan caches a legacy server's publishable conversion plan
+	// (conversion_plan.go), recomputed only when its settings change.
+	conversionPlan conversionPlanCache
+
 	// NFS mount reconciler (nil when backend != "nfs")
 	nfsMountReconciler *NFSMountReconciler
+	// storageOverrides caches the StorageOverridesCheck result for /healthz.
+	storageOverrides storageOverridesCache
 	// nfsHostOwned is set when nfsMountReconciler is the host mounter's:
 	// the host runs its loop, this server never does.
 	nfsHostOwned bool
@@ -516,7 +629,17 @@ type Server struct {
 	nfsStartupReconcileDone chan struct{}
 	nfsReconcileStopped     chan struct{}
 	nfsReconcileOnce        sync.Once
-	nfsReconcileCancel      context.CancelFunc
+	// sharedDirsMigrateOnce runs the node-local shared-dir migration hook
+	// once per process (startSharedDirsMigrationHook).
+	sharedDirsMigrateOnce sync.Once
+	nfsReconcileCancel    context.CancelFunc
+	// controlPathSweepOnce and controlPathSweepCancel run and stop the
+	// running-agent control-path sweep (startControlPathSweep).
+	controlPathSweepOnce   sync.Once
+	controlPathSweepCancel context.CancelFunc
+	// shareHealth is the project storage share's visibility on a shared
+	// Layout, re-checked by startShareHealthLoop (share_health.go).
+	shareHealth shareHealthState
 	// nfsReconcileInterval overrides DefaultNFSReconcileInterval (tests).
 	nfsReconcileInterval time.Duration
 
@@ -532,10 +655,13 @@ type Server struct {
 	envSecretLog      *slog.Logger
 }
 
-// auxiliaryRuntime pairs a runtime with its manager for non-default runtimes.
+// auxiliaryRuntime pairs a runtime with its manager for non-default
+// runtimes, and with the runtime's build record (the zero value when the
+// runtime was built without one).
 type auxiliaryRuntime struct {
 	Runtime scionrt.Runtime
 	Manager agent.Manager
+	Record  config.RuntimeBuildRecord
 }
 
 type dispatchAttempt struct {
@@ -552,8 +678,9 @@ type dispatchAttempt struct {
 	EnvResponse     *EnvRequirementsResponse
 }
 
-// New creates a new Runtime Broker API server.
-func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime) *Server {
+// New creates a new Runtime Broker API server. rec is rt's build record;
+// a flat host instance passes the zero value.
+func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime, rec config.RuntimeBuildRecord) *Server {
 	// Enable util debug logging when broker debug mode is on,
 	// so that debug messages from pkg/agent (which use util.Debugf)
 	// are visible in the broker's logs.
@@ -565,9 +692,10 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime) *Server {
 		config:            cfg,
 		manager:           mgr,
 		runtime:           rt,
+		runtimeRecord:     rec,
 		mux:               http.NewServeMux(),
 		startTime:         time.Now(),
-		version:           "0.1.0", // TODO: Get from build info
+		version:           version.Short(),
 		hubConnections:    make(map[string]*HubConnection),
 		dispatchAttempts:  make(map[string]*dispatchAttempt),
 		auxiliaryRuntimes: make(map[string]auxiliaryRuntime),
@@ -575,7 +703,7 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime) *Server {
 		// Defaults to the real profile-resolution path; tests substitute a
 		// stub that does not require live cluster/network access (see
 		// discoverAuxiliaryRuntimesForProjects and resolveManagerForOpts).
-		resolveAuxiliaryRuntime: agent.ResolveRuntime,
+		resolveAuxiliaryRuntime: agent.ResolveRuntimeWithRecord,
 		launchRegistry:          newLaunchRegistry(),
 		startsInFlight:          newStartTracker(),
 		retainedPurges:          newRetainedPurgeGuard(),
@@ -610,6 +738,14 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime) *Server {
 		} else {
 			srv.stateDir = dir
 		}
+	}
+	// The state directory, a configured credentials file and a co-located
+	// Hub's database are Runtime Broker control paths no agent may mount,
+	// wherever they are configured (brokercontrol).
+	registerControlPaths(cfg.BrokerID, srv.stateDir, cfg.BrokerCredentialsPath)
+	if err := checkLayoutRoots(cfg); err != nil {
+		srv.controlPathSetupErr = fmt.Errorf("runtime broker layout: %w", err)
+		slog.Error("Runtime Broker will not start", "error", srv.controlPathSetupErr)
 	}
 	if fi := srv.flatInstance(); fi != nil {
 		srv.flatK8sIdentity = newFlatKubernetesIdentityPolicy(fi)
@@ -657,6 +793,9 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime) *Server {
 			slog.Warn("Failed to initialize runtime broker state store", "error", err, "stateDir", srv.stateDir)
 		}
 	}
+	// Remove attachment spools a crash left behind, before any message is
+	// accepted (ptone/scion#4596).
+	srv.initInboxSpool()
 
 	// A host-bind instance of a host with a single NFS mount owner uses
 	// that owner's reconciler (registered requirement, shared status, one
@@ -757,27 +896,28 @@ func (s *Server) RuntimeName() string {
 }
 
 // defaultPair returns one consistent snapshot of the broker's default
-// manager and runtime, read under s.mu: SwapRuntime replaces both together
-// while requests are in flight. A caller that uses both takes one snapshot
-// and uses it throughout, so it never pairs the old manager with the new
-// runtime. Callers must not hold s.mu.
-func (s *Server) defaultPair() (agent.Manager, scionrt.Runtime) {
+// manager, runtime and the runtime's build record, read under s.mu:
+// SwapRuntime replaces all three together while requests are in flight. A
+// caller that uses more than one takes one snapshot and uses it throughout,
+// so it never pairs the old manager or record with the new runtime. Callers
+// must not hold s.mu.
+func (s *Server) defaultPair() (agent.Manager, scionrt.Runtime, config.RuntimeBuildRecord) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.manager, s.runtime
+	return s.manager, s.runtime, s.runtimeRecord
 }
 
 // currentManager returns the broker's default manager, read under s.mu
 // (see defaultPair). Callers must not hold s.mu.
 func (s *Server) currentManager() agent.Manager {
-	mgr, _ := s.defaultPair()
+	mgr, _, _ := s.defaultPair()
 	return mgr
 }
 
 // currentRuntime returns the broker's default runtime, read under s.mu
 // (see defaultPair). Callers must not hold s.mu.
 func (s *Server) currentRuntime() scionrt.Runtime {
-	_, rt := s.defaultPair()
+	_, rt, _ := s.defaultPair()
 	return rt
 }
 
@@ -786,11 +926,13 @@ func (s *Server) currentRuntime() scionrt.Runtime {
 // change (e.g. during onboarding) so the broker picks up the new engine
 // without requiring a full server restart. Running heartbeat services are
 // updated to use the new manager so they don't continue shelling out to
-// the old (possibly missing) runtime binary.
-func (s *Server) SwapRuntime(rt scionrt.Runtime) {
+// the old (possibly missing) runtime binary. rec is rt's build record; it
+// replaces the old runtime's record in the same critical section.
+func (s *Server) SwapRuntime(rt scionrt.Runtime, rec config.RuntimeBuildRecord) {
 	s.mu.Lock()
 	old := s.runtime.Name()
 	s.runtime = rt
+	s.runtimeRecord = rec
 	newMgr := agent.NewManager(rt)
 	s.manager = newMgr
 	s.mu.Unlock()
@@ -841,6 +983,9 @@ func (s *Server) initHubIntegration() error {
 		return err
 	}
 	s.cache, s.hcCache, s.skCache = fc.templates, fc.harnessConfigs, fc.skills
+	// Hydrated templates are written below the template cache directory;
+	// a template lookup accepts an absolute template directory only there.
+	config.AddTemplateHydrationRoot(cacheDir)
 	// The GitHub resolution cache holds resolution metadata, not file
 	// content; nil is safe (resolution then runs uncached).
 	s.ghResolutionCache = openGitHubResolutionCache()
@@ -878,6 +1023,7 @@ func (s *Server) initHubConnections() error {
 			// the cache like any other broker.
 			if stor := s.config.ColocatedStorage; stor != nil && stor.Provider() == storage.ProviderLocal {
 				conn.LocalStorage = stor
+				s.registerColocatedTemplateRoots(stor)
 			}
 
 			s.hubMu.Lock()
@@ -987,6 +1133,21 @@ func (s *Server) initHubConnections() error {
 	return nil
 }
 
+// registerColocatedTemplateRoots registers, as template hydration roots, the
+// template directories of a co-located local storage backend, from which
+// resolveLocalResource reads templates. Only the template subtrees are
+// registered: the backend also holds agent workspace uploads, which must
+// never be accepted as an absolute template directory.
+func (s *Server) registerColocatedTemplateRoots(stor storage.Storage) {
+	fsr, ok := stor.(localObjectResolver)
+	if !ok {
+		return
+	}
+	for _, p := range storage.ResourceRootPaths(s.config.ColocatedHubID, storage.ResourceKindTemplate) {
+		config.AddTemplateHydrationRoot(fsr.ObjectFSPath(p))
+	}
+}
+
 // createHubConnection creates a HubConnection from credentials.
 func (s *Server) createHubConnection(name string, creds *brokercredentials.BrokerCredentials) (*HubConnection, error) {
 	// Decode secret key
@@ -1004,9 +1165,15 @@ func (s *Server) createHubConnection(name string, creds *brokercredentials.Broke
 	if hubEndpoint == "" {
 		hubEndpoint = s.config.HubEndpoint
 	}
+	// No client is built for a hub this broker would reach unencrypted over
+	// the network: the connection carries the broker's credentials and,
+	// through the control channel and conduit, agent secrets.
+	if err := config.CheckHubTransport(hubEndpoint); err != nil {
+		return nil, fmt.Errorf("hub connection %q: %w", name, err)
+	}
 
 	// Build hub client options
-	opts := buildHubClientOpts(creds, secretKey)
+	opts := buildHubClientOpts(creds, secretKey, hubEndpoint)
 
 	// Resolve transport auth once and share between REST client and control channel
 	var transportSrc transportauth.TokenSource
@@ -1056,16 +1223,29 @@ func (s *Server) createHubConnection(name string, creds *brokercredentials.Broke
 }
 
 // createHubConnectionFromConfig creates a HubConnection from server config
-// (bearer token or dev-auth), without file-based credentials.
+// (bearer token or dev-auth), without file-based credentials. HubToken is an
+// operator-configured bearer and is sent as configured. The server's dev
+// token reaches the hub only through DevAuthHubOptions (loopback hubs only);
+// a HubToken that is the dev token gets the same loopback rule.
 func (s *Server) createHubConnectionFromConfig() (*HubConnection, error) {
+	// The same transport rule as createHubConnection: the configured bearer
+	// token is never sent unencrypted to a network host.
+	if err := config.CheckHubTransport(s.config.HubEndpoint); err != nil {
+		return nil, fmt.Errorf("hub connection from config: %w", err)
+	}
 	var opts []hubclient.Option
 
-	if s.config.HubToken != "" {
+	switch {
+	case s.config.HubToken != "" && isDevAuthToken(s.config.HubToken):
+		if devTokenAllowedFor(s.config.HubEndpoint, "config") {
+			opts = append(opts, hubclient.WithBearerToken(s.config.HubToken))
+			slog.Info("Hub client using dev token authentication")
+		}
+	case s.config.HubToken != "":
 		opts = append(opts, hubclient.WithBearerToken(s.config.HubToken))
 		slog.Info("Hub client using bearer token authentication")
-	} else {
-		opts = append(opts, hubclient.WithAutoDevAuth())
-		slog.Info("Hub client using auto dev authentication")
+	default:
+		opts = append(opts, DevAuthHubOptions(s.config.HubEndpoint, "config")...)
 	}
 
 	// Resolve transport auth once from env and share between REST client and control channel
@@ -1258,10 +1438,11 @@ func (s *Server) validateBrokerAuthStartup() error {
 		if !loopbackOnly {
 			return fmt.Errorf("runtime broker API bound to %q in hub mode requires HMAC auth keys; register first on loopback or provide credentials", s.config.Host)
 		}
-		slog.Warn("Runtime Broker starting in hub mode without HMAC keys — pending registration",
+		slog.Warn("Runtime Broker starting in hub mode without HMAC keys — pending registration; only health endpoints are served until keys are loaded",
 			"host", s.config.Host,
 			"hint", "run 'scion runtime-broker register' to complete setup",
 		)
+		s.warnCORSWildcard()
 		return nil
 	}
 
@@ -1270,8 +1451,16 @@ func (s *Server) validateBrokerAuthStartup() error {
 		return fmt.Errorf("runtime broker API bound to %q requires strict broker auth with valid HMAC keys", s.config.Host)
 	}
 
-	// Loopback-only listeners may be temporarily permissive, but emit a warning.
-	if loopbackOnly && (!strictAuthConfigured || !hasKeys) {
+	// Loopback-only listeners may start without keys or strict auth, but emit
+	// a warning. With broker auth enabled and no keys, the auth gate serves
+	// only the health endpoints.
+	switch {
+	case loopbackOnly && s.config.BrokerAuthEnabled && !hasKeys:
+		slog.Warn("Runtime Broker has no HMAC keys; only health endpoints are served until keys are loaded",
+			"host", s.config.Host,
+			"brokerAuthStrictMode", s.config.BrokerAuthStrictMode,
+		)
+	case loopbackOnly && (!strictAuthConfigured || !hasKeys):
 		slog.Warn("Runtime Broker API is loopback-only and running without strict broker auth",
 			"host", s.config.Host,
 			"brokerAuthEnabled", s.config.BrokerAuthEnabled,
@@ -1280,7 +1469,24 @@ func (s *Server) validateBrokerAuthStartup() error {
 		)
 	}
 
+	s.warnCORSWildcard()
 	return nil
+}
+
+// warnCORSWildcard logs a warning when the broker's CORS settings allow
+// every origin. CORS is off by default; a wildcard is only ever set
+// explicitly by the operator.
+func (s *Server) warnCORSWildcard() {
+	if !s.config.CORSEnabled {
+		return
+	}
+	for _, o := range s.config.CORSAllowedOrigins {
+		if o == "*" {
+			slog.Warn("Runtime Broker CORS allows every origin (server.broker.cors.allowed_origins contains \"*\"); list the origins that need cross-origin access instead",
+				"host", s.config.Host)
+			return
+		}
+	}
 }
 
 // SetWorkspaceDownloader replaces the GCS download used to bootstrap an
@@ -1344,6 +1550,11 @@ func (s *Server) SetHubClient(client hubclient.Client) {
 // This is useful for testing or when the cache is configured externally.
 func (s *Server) SetTemplateCache(cache *templatecache.Cache) {
 	s.cache = cache
+	if cache != nil {
+		// Templates hydrated into this cache are accepted as absolute
+		// template directories (config.AddTemplateHydrationRoot).
+		config.AddTemplateHydrationRoot(cache.Dir())
+	}
 	s.hubMu.Lock()
 	defer s.hubMu.Unlock()
 	for _, conn := range s.hubConnections {
@@ -1368,6 +1579,12 @@ func (s *Server) GetHydrator() *templatecache.Hydrator {
 	return nil
 }
 
+// Listening returns a channel that is closed once Start has bound its HTTP
+// listener. It is never closed when the bind fails. A server start uses it
+// to release the 'runtime-broker convert' host lock only after the
+// broker's own listener is up.
+func (s *Server) Listening() <-chan struct{} { return s.listening.ch() }
+
 // Start starts the broker's services and its own HTTP listener, and blocks
 // until ctx is done (then shuts down) or the listener fails.
 func (s *Server) Start(ctx context.Context) error {
@@ -1375,9 +1592,19 @@ func (s *Server) Start(ctx context.Context) error {
 		return err
 	}
 
+	addr := s.httpServer.Addr
+	if addr == "" {
+		addr = ":http"
+	}
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+	s.listening.mark()
+
 	errCh := make(chan error, 1)
 	go func() {
-		if err := s.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := s.httpServer.Serve(ln); err != nil && err != http.ErrServerClosed {
 			errCh <- err
 		}
 		close(errCh)
@@ -1387,8 +1614,27 @@ func (s *Server) Start(ctx context.Context) error {
 	case err := <-errCh:
 		return err
 	case <-ctx.Done():
-		return s.Shutdown(context.Background())
+		s.mu.RLock()
+		shutdownContext := s.shutdownContext
+		s.mu.RUnlock()
+		sctx, cancel := context.Background(), context.CancelFunc(func() {})
+		if shutdownContext != nil {
+			sctx, cancel = shutdownContext()
+		}
+		defer cancel()
+		return s.Shutdown(sctx)
 	}
+}
+
+// SetShutdownContext sets the function that returns the context Start
+// passes to Shutdown once its ctx ends, so the process can bound the
+// broker's shutdown by its own shutdown budget (ptone/scion#5054);
+// Shutdown's ShutdownDeadline still applies within it. Nil (the default):
+// context.Background(). Call it before Start.
+func (s *Server) SetShutdownContext(fn func() (context.Context, context.CancelFunc)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.shutdownContext = fn
 }
 
 // Started reports whether the server's services were started.
@@ -1422,6 +1668,9 @@ func (s *Server) startServices(ctx context.Context, withListener bool) error {
 	}
 	if s.stateDirSetupErr != nil {
 		return s.stateDirSetupErr
+	}
+	if s.controlPathSetupErr != nil {
+		return s.controlPathSetupErr
 	}
 	if s.hostSetupErr != nil {
 		return s.hostSetupErr
@@ -1482,14 +1731,6 @@ func (s *Server) startServices(ctx context.Context, withListener bool) error {
 		slog.Warn("skipping legacy layout migration: could not resolve global directory", "error", err)
 	}
 
-	// Discover auxiliary runtimes (e.g. Kubernetes) from project settings
-	// so that agents running on non-default runtimes can be found after
-	// a broker restart. A flat instance serves only its single target and
-	// never resolves profiles, so it has no auxiliary runtimes.
-	if !s.isFlat() {
-		s.discoverAuxiliaryRuntimes()
-	}
-
 	// Check (and, with nfs.auto_mount, mount) the configured NFS shares.
 	// This runs in the background: an NFS mount or mountpoint check against
 	// an unreachable server can block for minutes, and a failed mount must
@@ -1497,6 +1738,15 @@ func (s *Server) startServices(ctx context.Context, withListener bool) error {
 	// NFS. Until the first pass finishes, /healthz reports the shares as not
 	// reconciled.
 	s.startNFSReconcileLoop(ctx)
+	s.startShareHealthLoop(ctx)
+
+	// Re-check the binds of agents already running, now and periodically,
+	// against the Runtime Broker control paths (controlPathSweeper).
+	s.startControlPathSweep(ctx)
+
+	// Move shared dirs this broker kept node-local onto the shared tree
+	// its Layout now places them on (background, once per process).
+	s.startSharedDirsMigrationHook(ctx)
 
 	// Start all hub connections' services. Start is called without
 	// s.hubMu held: it takes the connection's lifecycle lock and, inside,
@@ -1507,6 +1757,10 @@ func (s *Server) startServices(ctx context.Context, withListener bool) error {
 		}
 	}
 
+	if s.onHubConnectionsStarted != nil {
+		s.onHubConnectionsStarted()
+	}
+
 	// Log a summary of all hub connections
 	s.logHubConnections()
 
@@ -1515,11 +1769,21 @@ func (s *Server) startServices(ctx context.Context, withListener bool) error {
 		s.startCredentialWatcher(ctx)
 	}
 
-	// Report and clean up the async launches a previous process of this
-	// broker left in its journal (design wave 3 §1 C-c). After the hub
-	// connections start, which the reports go out on, and after auxiliary
-	// runtime discovery, which resolves their managers.
-	s.recoverLaunches()
+	// Discover auxiliary runtimes (e.g. Kubernetes) from project settings
+	// so that agents running on non-default runtimes can be found after
+	// a broker restart, then report and clean up the async launches a
+	// previous process of this broker left in its journal (design wave 3
+	// §1 C-c), which need the discovered managers. Both run in the
+	// background AFTER the hub connections start: a profile whose runtime
+	// is slow or unreachable must not delay the control channel
+	// (ptone/scion#7010; see startAuxiliaryRuntimeDiscovery). A flat
+	// instance serves only its single target and never resolves profiles,
+	// so it has no auxiliary runtimes and recovers its launches here.
+	if s.isFlat() {
+		s.recoverLaunches()
+	} else {
+		s.startAuxiliaryRuntimeDiscovery(ctx)
+	}
 
 	return nil
 }
@@ -1557,6 +1821,11 @@ func (s *Server) logNFSStartupResult() {
 			"status", r.HealthCheckString(), "autoMount", r.AutoMount())
 		return
 	}
+	if r.UnhealthyAdvisoryOnly() {
+		slog.Warn("NFS mount-table check failed at startup; advisory on this broker, which does not mount the share, and the share directory is visible",
+			"detail", r.HealthCheckString(), "autoMount", r.AutoMount())
+		return
+	}
 	slog.Error("NFS mounts unhealthy at startup; the broker keeps serving",
 		"detail", r.HealthCheckString(), "autoMount", r.AutoMount())
 }
@@ -1568,6 +1837,10 @@ const ghResolutionCacheCloseTimeout = 10 * time.Second
 
 // Shutdown gracefully shuts down the server.
 func (s *Server) Shutdown(ctx context.Context) error {
+	// Stop the background auxiliary runtime discovery pass, bounded: it
+	// registers nothing more and skips launch recovery (ptone/scion#7010).
+	s.stopAuxiliaryRuntimeDiscovery()
+
 	// Stop the heartbeat service account report's background discovery.
 	s.saDiscovery().stop()
 
@@ -1612,6 +1885,13 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	if nfsCancel != nil {
 		nfsCancel()
 	}
+	s.mu.RLock()
+	sweepCancel := s.controlPathSweepCancel
+	s.mu.RUnlock()
+	if sweepCancel != nil {
+		sweepCancel()
+	}
+	s.stopShareHealthLoop()
 
 	// Cancel every start still running on a start, restart or create
 	// handler and wait for Run's deferred cleanup, before the hub
@@ -1737,7 +2017,13 @@ func (s *Server) sortedAuxiliaryRuntimes() []namedAuxiliaryRuntime {
 // resolve to a runtime different from the broker's default. Any discovered
 // non-default runtimes are registered as auxiliary runtimes so that agents
 // running on them (e.g. Kubernetes pods) can be found after a broker restart.
-func (s *Server) discoverAuxiliaryRuntimes() {
+//
+// Linked projects elsewhere on disk are not scanned here; their runtime
+// profiles are registered on first use, so the running-agent control-path
+// sweep (controlPathSweeper) reaches their agents only from then on. Scanning
+// the project dirs this broker has local agent state for is a follow-up (see
+// the Limitations in the Volume Source Restrictions reference).
+func (s *Server) discoverAuxiliaryRuntimes(ctx context.Context) {
 	// Collect project paths to scan
 	var projectPaths []string
 
@@ -1759,12 +2045,16 @@ func (s *Server) discoverAuxiliaryRuntimes() {
 		}
 	}
 
+	// Hub-managed projects on shared project storage that this broker has
+	// agent state for (sharedProjectsWithLocalAgents).
+	projectPaths = append(projectPaths, s.sharedProjectsWithLocalAgents()...)
+
 	// Current project dir
 	if pd, _ := config.GetResolvedProjectDir(""); pd != "" {
 		projectPaths = append(projectPaths, pd)
 	}
 
-	s.discoverAuxiliaryRuntimesForProjects(projectPaths)
+	s.discoverAuxiliaryRuntimesForProjectsCtx(ctx, projectPaths)
 }
 
 // logUnresolvedAuxiliaryProfile reports a settings profile whose runtime
@@ -1805,6 +2095,13 @@ func logUnresolvedAuxiliaryProfile(profileName, activeProfile string, resolved s
 // de-duplication and registration directly, without depending on the
 // broker's on-disk project discovery.
 func (s *Server) discoverAuxiliaryRuntimesForProjects(projectPaths []string) {
+	s.discoverAuxiliaryRuntimesForProjectsCtx(context.Background(), projectPaths)
+}
+
+// discoverAuxiliaryRuntimesForProjectsCtx is discoverAuxiliaryRuntimesForProjects
+// on ctx: once ctx is done (the server is stopping) it stops waiting for
+// checks and registers nothing more.
+func (s *Server) discoverAuxiliaryRuntimesForProjectsCtx(ctx context.Context, projectPaths []string) {
 	defRT := s.currentRuntime()
 	// Compared against every resolved profile below so that a profile
 	// pointing at the broker's own runtime instance — not merely the same
@@ -1814,8 +2111,73 @@ func (s *Server) discoverAuxiliaryRuntimesForProjects(projectPaths []string) {
 	// types alone would wrongly treat it as "the default" and drop it.
 	defaultIdentity := auxiliaryRuntimeIdentity(defRT)
 
-	discoveredIdentities := make(map[string]bool)
+	cands := collectAuxProfileCandidates(projectPaths)
+	results := s.checkAuxProfileCandidates(ctx, cands, defaultIdentity)
+	if ctx.Err() != nil {
+		return
+	}
 
+	// Results are applied in candidate order (projects in the given order,
+	// profile names sorted), as when the checks ran one by one, so the
+	// sorted-first profile still wins a collapsed identity among the checks
+	// that finished in time; a timed-out check is skipped here and a later
+	// candidate of the same identity registers instead.
+	discoveredIdentities := make(map[string]bool)
+	for i, c := range cands {
+		r := results[i]
+		if r.timedOut || r.rt == nil {
+			// Reported when the check timed out (checkAuxProfileCandidates),
+			// before any late result could clear it; nil: stopped.
+			continue
+		}
+		if r.rt.Name() == "error" {
+			// Only the project's active profile is reported on a fast
+			// failure; a non-active one (for example a built-in profile on a
+			// broker without cluster access) keeps the Info line only
+			// (ptone/scion#3605).
+			s.setProfileRuntimeUnavailable(c.key, c.profile, c.profile == c.activeProfile)
+			logUnresolvedAuxiliaryProfile(c.profile, c.activeProfile, r.rt)
+			continue
+		}
+		s.setProfileRuntimeUnavailable(c.key, c.profile, false)
+
+		identity := auxiliaryRuntimeIdentity(r.rt)
+		if identity == defaultIdentity || discoveredIdentities[identity] {
+			continue
+		}
+		discoveredIdentities[identity] = true
+
+		mgr := agent.NewManager(r.rt)
+		s.auxiliaryRuntimesMu.Lock()
+		s.auxiliaryRuntimes[identity] = auxiliaryRuntime{Runtime: r.rt, Manager: mgr, Record: r.rec}
+		s.auxiliaryRuntimesMu.Unlock()
+
+		slog.Info("Discovered auxiliary runtime from project settings",
+			"runtime", r.rt.Name(), "identity", identity, "profile", c.profile)
+	}
+}
+
+// auxProfileCandidate is one profile runtime check of a discovery pass.
+type auxProfileCandidate struct {
+	projectPath   string
+	profile       string
+	activeProfile string
+	key           string // auxProfileKey
+}
+
+// collectAuxProfileCandidates lists the profiles of the given project
+// settings directories whose runtime entry exists, projects in the given
+// order and profile names sorted. A profile whose resolved settings
+// (name, runtime type and runtime config: auxProfileKey) equal an earlier
+// candidate's is checked once, with the FIRST project's path: one stale
+// profile shared by several projects costs one check per pass, not one per
+// project. This assumes equal runtime settings resolve to the same runtime
+// in every project, which holds while no runtime config value is resolved
+// relative to the project. The candidate counts as the active profile when
+// it is active in any of those projects.
+func collectAuxProfileCandidates(projectPaths []string) []auxProfileCandidate {
+	var cands []auxProfileCandidate
+	seen := make(map[string]int)
 	for _, gp := range projectPaths {
 		vs, _, _ := config.LoadEffectiveSettings(gp)
 		if vs == nil {
@@ -1830,34 +2192,117 @@ func (s *Server) discoverAuxiliaryRuntimesForProjects(projectPaths []string) {
 
 		for _, profileName := range profileNames {
 			// Only used here to skip profiles whose runtime entry doesn't
-			// exist at all; the actual default/de-dup comparisons below are
-			// by resolved IDENTITY, not by this settings-level type string,
+			// exist at all, and to recognise the same profile settings in
+			// another project; the default/de-dup comparisons are by
+			// resolved IDENTITY, not by this settings-level type string,
 			// so settings spellings that alias one runtime type (e.g. "k8s"
 			// and "kubernetes") don't register twice.
-			if _, _, err := vs.ResolveRuntime(profileName); err != nil {
+			rtConfig, runtimeType, err := vs.ResolveRuntime(profileName)
+			if err != nil {
 				continue
 			}
-
-			resolved := s.resolveAuxiliaryRuntime(gp, "", profileName)
-			if resolved.Name() == "error" {
-				logUnresolvedAuxiliaryProfile(profileName, vs.ActiveProfile, resolved)
+			key := auxProfileKey(profileName, runtimeType, rtConfig, gp)
+			if i, ok := seen[key]; ok {
+				if profileName == vs.ActiveProfile {
+					cands[i].activeProfile = profileName
+				}
 				continue
 			}
-
-			identity := auxiliaryRuntimeIdentity(resolved)
-			if identity == defaultIdentity || discoveredIdentities[identity] {
-				continue
-			}
-			discoveredIdentities[identity] = true
-
-			mgr := agent.NewManager(resolved)
-			s.auxiliaryRuntimesMu.Lock()
-			s.auxiliaryRuntimes[identity] = auxiliaryRuntime{Runtime: resolved, Manager: mgr}
-			s.auxiliaryRuntimesMu.Unlock()
-
-			slog.Info("Discovered auxiliary runtime from project settings",
-				"runtime", resolved.Name(), "identity", identity, "profile", profileName)
+			seen[key] = len(cands)
+			cands = append(cands, auxProfileCandidate{projectPath: gp, profile: profileName, activeProfile: vs.ActiveProfile, key: key})
 		}
+	}
+	return cands
+}
+
+// auxCheckResult is the outcome of one profile runtime check.
+type auxCheckResult struct {
+	rt       scionrt.Runtime
+	rec      config.RuntimeBuildRecord
+	timedOut bool
+}
+
+// checkAuxProfileCandidates resolves every candidate's runtime,
+// auxDiscoveryConcurrency at a time, each bounded by the check timeout, and
+// returns the results in candidate order. A check that times out releases
+// its worker slot at once, is reported unavailable (and logged at Warn),
+// and is returned timedOut; its resolution keeps running and, if it later
+// succeeds, is registered by applyLateAuxResult. Once ctx is done no more
+// checks start, and the ones in flight are abandoned unreported (nil rt).
+func (s *Server) checkAuxProfileCandidates(ctx context.Context, cands []auxProfileCandidate, defaultIdentity string) []auxCheckResult {
+	resolver := s.resolveAuxiliaryRuntime
+	if resolver == nil {
+		resolver = agent.ResolveRuntimeWithRecord
+	}
+	timeout := s.auxProfileTimeout()
+	results := make([]auxCheckResult, len(cands))
+	sem := make(chan struct{}, auxDiscoveryConcurrency)
+	var wg sync.WaitGroup
+	for i, c := range cands {
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+		}
+		if ctx.Err() != nil {
+			break
+		}
+		wg.Add(1)
+		go func(i int, c auxProfileCandidate) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			done := make(chan auxCheckResult, 1)
+			go func() {
+				rt, rec := resolver(c.projectPath, "", c.profile)
+				done <- auxCheckResult{rt: rt, rec: rec}
+			}()
+			timer := time.NewTimer(timeout)
+			defer timer.Stop()
+			select {
+			case r := <-done:
+				results[i] = r
+			case <-timer.C:
+				results[i] = auxCheckResult{timedOut: true}
+				// Report first, then hand the result over: a late success
+				// clears the report, and must not be overwritten by it.
+				s.setProfileRuntimeUnavailable(c.key, c.profile, true)
+				logAuxProfileCheckTimedOut(c.profile, timeout)
+				go func() { s.applyLateAuxResult(ctx, c, <-done, defaultIdentity) }()
+			case <-ctx.Done():
+				go func() { <-done }()
+			}
+		}(i, c)
+	}
+	wg.Wait()
+	return results
+}
+
+// applyLateAuxResult handles a profile runtime check that finished after
+// the pass stopped waiting for it. Unless ctx is done (the server is
+// stopping), a runtime that resolved is registered under
+// auxiliaryRuntimesMu, the same lock and map every other registration uses,
+// unless its identity is the default's or is already registered, and the
+// profile's unavailable state is cleared. A failed one stays reported.
+func (s *Server) applyLateAuxResult(ctx context.Context, c auxProfileCandidate, r auxCheckResult, defaultIdentity string) {
+	if s.afterLateAuxResult != nil {
+		defer s.afterLateAuxResult()
+	}
+	if ctx.Err() != nil || r.rt == nil || r.rt.Name() == "error" {
+		return
+	}
+	s.setProfileRuntimeUnavailable(c.key, c.profile, false)
+	identity := auxiliaryRuntimeIdentity(r.rt)
+	if identity == defaultIdentity {
+		return
+	}
+	s.auxiliaryRuntimesMu.Lock()
+	_, exists := s.auxiliaryRuntimes[identity]
+	if !exists {
+		s.auxiliaryRuntimes[identity] = auxiliaryRuntime{Runtime: r.rt, Manager: agent.NewManager(r.rt), Record: r.rec}
+	}
+	s.auxiliaryRuntimesMu.Unlock()
+	if !exists {
+		slog.Info("Discovered auxiliary runtime from project settings after its check timed out",
+			"runtime", r.rt.Name(), "identity", identity, "profile", c.profile)
 	}
 }
 
@@ -2049,8 +2494,9 @@ func (s *Server) LookupContainerID(ctx context.Context, slug, projectID string) 
 //
 //  1. a project-scoped search (scion.name plus the project label);
 //  2. only when projectID is set and stage 1 found nothing, a slug-only
-//     search that accepts just containers carrying no project label at all
-//     (pre-label or solo/CLI containers — see agentsWithoutProjectLabel).
+//     search that accepts just containers carrying no project identity
+//     whose recorded path identifies as projectID (pre-label containers —
+//     see legacyAgentsInProject; the same rule delete applies).
 //
 // Errors:
 //   - a default-runtime List failure, in either stage, wraps
@@ -2083,10 +2529,16 @@ func (s *Server) lookupAgentTarget(ctx context.Context, slug, projectID string) 
 // the ErrAgentNotFound returned for a matched entry that carries no
 // container identifier: there is nothing to act on, but the entry's listed
 // name and project path are still the agent's.
+//
+// record is runtime's build record, taken from the same holder as manager
+// and runtime (a defaultPair snapshot, an auxiliary runtime, or the agent's
+// own runtime); it is the zero value when runtime was paired with manager
+// through runtimeOfManager.
 type agentMatch struct {
 	containerID string
 	manager     agent.Manager
 	runtime     scionrt.Runtime
+	record      config.RuntimeBuildRecord
 	entry       api.AgentInfo
 	matched     bool
 }
@@ -2096,7 +2548,7 @@ type agentMatch struct {
 // path reads them from the same entry it acts on. Resolution order and
 // errors are exactly lookupAgentTarget's.
 func (s *Server) lookupAgentMatch(ctx context.Context, slug, projectID string) (agentMatch, error) {
-	defMgr, defRT := s.defaultPair()
+	defMgr, defRT, defRec := s.defaultPair()
 	if defMgr == nil {
 		return agentMatch{}, fmt.Errorf("agent manager not available")
 	}
@@ -2112,7 +2564,7 @@ func (s *Server) lookupAgentMatch(ctx context.Context, slug, projectID string) (
 		if err != nil {
 			return agentMatch{}, err
 		}
-		return agentMatchFrom(slug, agents, own.mgr, own.rt)
+		return agentMatchFrom(slug, agents, own.mgr, own.rt, own.record)
 	}
 
 	// A recorded runtime type (ptone/scion#2748) can exclude the default
@@ -2129,22 +2581,25 @@ func (s *Server) lookupAgentMatch(ctx context.Context, slug, projectID string) (
 	}
 	matchManager := defMgr
 	matchRuntime := defRT
+	matchRecord := defRec
 
 	// Fall back to auxiliary runtimes (e.g. kubernetes when default is docker)
 	if len(agents) == 0 {
-		auxAgents, auxManager, auxRuntime, auxErr := s.auxListAgentsSorted(ctx, slug, false, filter, func(a []api.AgentInfo) []api.AgentInfo { return agentsForProject(a, projectID) })
+		auxAgents, aux, auxErr := s.auxListAgentsSorted(ctx, slug, false, filter, func(a []api.AgentInfo) []api.AgentInfo { return agentsForProject(a, projectID) })
 		if auxErr != nil {
 			return agentMatch{}, auxErr
 		}
 		agents = auxAgents
-		matchManager = auxManager
-		matchRuntime = auxRuntime
+		matchManager = aux.Manager
+		matchRuntime = aux.Runtime
+		matchRecord = aux.Record
 	}
 
 	// Backward compatibility: retry without project filter, but only accept
-	// containers that lack a project label (pre-existing agents or solo/CLI
-	// mode). A container labeled for a different project must not match a
-	// project-scoped request, or same-slug agents across projects would collide.
+	// containers that carry no project identity and whose recorded path
+	// identifies as projectID (legacyAgentsInProject). A container of a
+	// different project must not match a project-scoped request, or same-slug
+	// agents across projects would collide.
 	if len(agents) == 0 && projectID != "" {
 		fallbackFilter := map[string]string{"scion.name": slug}
 		if useDefault {
@@ -2152,22 +2607,24 @@ func (s *Server) lookupAgentMatch(ctx context.Context, slug, projectID string) (
 			if err != nil {
 				return agentMatch{}, fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
 			}
-			agents = agentsWithoutProjectLabel(agents)
+			agents = legacyAgentsInProject(agents, projectID)
 		}
 		matchManager = defMgr
 		matchRuntime = defRT
+		matchRecord = defRec
 		if len(agents) == 0 {
-			auxAgents, auxManager, auxRuntime, auxErr := s.auxListAgentsSorted(ctx, slug, true, fallbackFilter, agentsWithoutProjectLabel)
+			auxAgents, aux, auxErr := s.auxListAgentsSorted(ctx, slug, true, fallbackFilter, func(a []api.AgentInfo) []api.AgentInfo { return legacyAgentsInProject(a, projectID) })
 			if auxErr != nil {
 				return agentMatch{}, auxErr
 			}
 			agents = auxAgents
-			matchManager = auxManager
-			matchRuntime = auxRuntime
+			matchManager = aux.Manager
+			matchRuntime = aux.Runtime
+			matchRecord = aux.Record
 		}
 	}
 
-	return agentMatchFrom(slug, agents, matchManager, matchRuntime)
+	return agentMatchFrom(slug, agents, matchManager, matchRuntime, matchRecord)
 }
 
 // lookupAgentMatchForRun is the lookup of a run-scoped stop
@@ -2198,7 +2655,7 @@ func (s *Server) lookupAgentMatchForRun(ctx context.Context, slug, projectID, ru
 	if runID == "" {
 		return s.lookupAgentMatch(ctx, slug, projectID)
 	}
-	if defMgr, _ := s.defaultPair(); defMgr == nil {
+	if defMgr, _, _ := s.defaultPair(); defMgr == nil {
 		return agentMatch{}, fmt.Errorf("agent manager not available")
 	}
 	slug = strings.ToLower(slug)
@@ -2214,7 +2671,9 @@ func (s *Server) lookupAgentMatchForRun(ctx context.Context, slug, projectID, ru
 		return agentMatch{}, fmt.Errorf("agent '%s' is ambiguous: %d agents match in project %q", slug, len(targets), projectID)
 	case len(targets) == 1:
 		c := targets[0]
-		return agentMatchFrom(slug, []api.AgentInfo{c.entry}, c.mgr, s.runtimeOfManager(c.mgr))
+		// Stop only; the record is never consumed here, and a runtime
+		// paired through runtimeOfManager carries no record.
+		return agentMatchFrom(slug, []api.AgentInfo{c.entry}, c.mgr, s.runtimeOfManager(c.mgr), config.RuntimeBuildRecord{})
 	case listErr != nil:
 		return agentMatch{}, fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, listErr)
 	default:
@@ -2239,7 +2698,8 @@ func (e *otherRunsHoldNameError) Error() string {
 
 // listInOwnRuntime lists agent slug in the agent's own runtime with the
 // project scoping lookupAgentMatch and LookupAgent use: entries labelled for
-// projectID, else (with a projectID) entries carrying no project label. A
+// projectID, else (with a projectID) entries carrying no project identity
+// whose recorded path identifies as projectID (legacyAgentsInProject). A
 // failed List wraps ErrAgentListUnavailable.
 func listInOwnRuntime(ctx context.Context, own *agentOwnRuntime, slug, projectID string) ([]api.AgentInfo, error) {
 	agents, err := own.mgr.List(ctx, scopedNameFilter(slug, projectID))
@@ -2252,14 +2712,15 @@ func listInOwnRuntime(ctx context.Context, own *agentOwnRuntime, slug, projectID
 		if err != nil {
 			return nil, fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
 		}
-		agents = agentsWithoutProjectLabel(agents)
+		agents = legacyAgentsInProject(agents, projectID)
 	}
 	return agents, nil
 }
 
 // agentMatchFrom builds lookupAgentMatch's result from the entries the
-// runtime behind matchManager/matchRuntime listed for slug.
-func agentMatchFrom(slug string, agents []api.AgentInfo, matchManager agent.Manager, matchRuntime scionrt.Runtime) (agentMatch, error) {
+// runtime behind matchManager/matchRuntime listed for slug. matchRecord is
+// matchRuntime's build record from the same holder.
+func agentMatchFrom(slug string, agents []api.AgentInfo, matchManager agent.Manager, matchRuntime scionrt.Runtime, matchRecord config.RuntimeBuildRecord) (agentMatch, error) {
 	if len(agents) == 0 {
 		return agentMatch{}, &agentNotFoundError{slug: slug}
 	}
@@ -2278,11 +2739,11 @@ func agentMatchFrom(slug string, agents []api.AgentInfo, matchManager agent.Mana
 		containerID = entry.ID
 	}
 	if containerID == "" {
-		return agentMatch{manager: matchManager, runtime: matchRuntime, entry: entry, matched: true},
+		return agentMatch{manager: matchManager, runtime: matchRuntime, record: matchRecord, entry: entry, matched: true},
 			fmt.Errorf("agent '%s' has no container ID: %w", slug, ErrAgentNotFound)
 	}
 
-	return agentMatch{containerID: containerID, manager: matchManager, runtime: matchRuntime, entry: entry, matched: true}, nil
+	return agentMatch{containerID: containerID, manager: matchManager, runtime: matchRuntime, record: matchRecord, entry: entry, matched: true}, nil
 }
 
 // auxListAgentsSorted queries every currently registered auxiliary runtime
@@ -2304,12 +2765,12 @@ func agentMatchFrom(slug string, agents []api.AgentInfo, matchManager agent.Mana
 //
 // slug and fallback are used only for the debug line logged on a match.
 //
-// The returned agent.Manager and scionrt.Runtime are always the pair
-// registered together for the same auxiliary runtime identity (auxiliaryRuntime
-// stores them together), so a caller never has to re-derive one from the
-// other: they are paired at the moment the match is found, not looked up
-// again afterward.
-func (s *Server) auxListAgentsSorted(ctx context.Context, slug string, fallback bool, filter map[string]string, filterAgents func([]api.AgentInfo) []api.AgentInfo) ([]api.AgentInfo, agent.Manager, scionrt.Runtime, error) {
+// The returned auxiliaryRuntime is the holder registered for that auxiliary
+// runtime identity, so its Manager, Runtime and Record always belong
+// together: a caller never has to re-derive one from another, since they
+// are paired at the moment the match is found, not looked up again
+// afterward. With no match it is the zero value.
+func (s *Server) auxListAgentsSorted(ctx context.Context, slug string, fallback bool, filter map[string]string, filterAgents func([]api.AgentInfo) []api.AgentInfo) ([]api.AgentInfo, auxiliaryRuntime, error) {
 	var listErr error
 	for _, aux := range s.sortedAuxiliaryRuntimesFor(ctx) {
 		rtName := aux.identity
@@ -2326,13 +2787,13 @@ func (s *Server) auxListAgentsSorted(ctx context.Context, slug string, fallback 
 				msg += " (fallback)"
 			}
 			slog.Debug(msg, "slug", slug, "runtime", rtName)
-			return matched, aux.Manager, aux.Runtime, nil
+			return matched, aux.auxiliaryRuntime, nil
 		}
 	}
 	if listErr != nil {
-		return nil, nil, nil, fmt.Errorf("%w: %w", ErrAgentListUnavailable, listErr)
+		return nil, auxiliaryRuntime{}, fmt.Errorf("%w: %w", ErrAgentListUnavailable, listErr)
 	}
-	return nil, nil, nil, nil
+	return nil, auxiliaryRuntime{}, nil
 }
 
 // errAuxiliaryRuntimeList marks an ErrAgentListUnavailable error that came
@@ -2345,7 +2806,7 @@ var errAuxiliaryRuntimeList = errors.New("auxiliary runtime")
 // It looks up an agent by slug and returns detailed info including the runtime.
 // projectID scopes the lookup to prevent cross-project collision.
 func (s *Server) LookupAgent(ctx context.Context, slug, projectID string) (*AgentLookupResult, error) {
-	defMgr, defRT := s.defaultPair()
+	defMgr, defRT, _ := s.defaultPair()
 	if defMgr == nil {
 		return nil, fmt.Errorf("agent manager not available")
 	}
@@ -2420,8 +2881,9 @@ func (s *Server) LookupAgent(ctx context.Context, slug, projectID string) (*Agen
 	}
 
 	// Backward compatibility: retry without project filter, but only accept
-	// containers that lack a project label (pre-existing agents or solo/CLI
-	// mode). A container labeled for a different project must not match a
+	// containers that carry no project identity and whose recorded path
+	// identifies as projectID (legacyAgentsInProject), as lookupAgentMatch
+	// does. A container of a different project must not match a
 	// project-scoped request, or same-slug agents across projects would collide.
 	if len(agents) == 0 && projectID != "" && own == nil {
 		fallbackFilter := map[string]string{"scion.name": slug}
@@ -2429,7 +2891,7 @@ func (s *Server) LookupAgent(ctx context.Context, slug, projectID string) (*Agen
 		if err != nil {
 			return nil, fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
 		}
-		agents = agentsWithoutProjectLabel(agents)
+		agents = legacyAgentsInProject(agents, projectID)
 		if len(agents) == 0 {
 			for _, aux := range s.sortedAuxiliaryRuntimes() {
 				auxAgents, auxErr := aux.Manager.List(ctx, fallbackFilter)
@@ -2437,7 +2899,7 @@ func (s *Server) LookupAgent(ctx context.Context, slug, projectID string) (*Agen
 					listUnavailable = true
 					continue
 				}
-				auxAgents = agentsWithoutProjectLabel(auxAgents)
+				auxAgents = legacyAgentsInProject(auxAgents, projectID)
 				if len(auxAgents) > 0 {
 					agents = auxAgents
 					// See the identity note above: use the runtime's own
@@ -2862,7 +3324,7 @@ func (s *Server) buildProjectFilterForHub(hubEndpoint string) func(string) bool 
 				continue
 			}
 
-			projectSettings, err := config.LoadSettingsFromDir(ag.ProjectPath)
+			projectSettings, err := config.LoadProjectSettingsFromDir(resolveProjectSettingsDir(ag.ProjectPath))
 			if err != nil {
 				continue
 			}
@@ -3050,7 +3512,6 @@ func (s *Server) registerRoutes() {
 	// Workspace sync routes (for Hub-initiated sync via control channel)
 	s.mux.HandleFunc("/api/v1/workspace/upload", s.handleWorkspaceUpload)
 	s.mux.HandleFunc("/api/v1/workspace/apply", s.handleWorkspaceApply)
-	s.mux.HandleFunc("/api/v1/workspace/project-upload", s.handleProjectWorkspaceUpload)
 }
 
 // applyMiddleware wraps the handler with middleware.
@@ -3090,16 +3551,37 @@ func (s *Server) outerMiddleware(h http.Handler) http.Handler {
 }
 
 // currentMiddlewareGate passes each request through the component that
-// buildAuthMiddleware has in place at the time, or straight to next when
-// there is none.
+// buildAuthMiddleware has in place at the time. When broker auth is enabled
+// but no hub keys are loaded yet (pending registration, or a credential
+// that failed to load), only the health endpoints are served and every
+// other request is refused, so the API is never served without auth. With
+// broker auth disabled, requests go straight to next.
 func (s *Server) currentMiddlewareGate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if mw := s.loadBrokerMiddleware(); mw != nil {
 			mw.ServeWith(w, r, next)
 			return
 		}
+		if s.config.BrokerAuthEnabled && !isHealthPath(r.URL.Path) {
+			writeBrokerAuthUnavailable(w)
+			return
+		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// isHealthPath reports whether path is one of the broker's unauthenticated
+// health endpoints.
+func isHealthPath(path string) bool {
+	return path == "/healthz" || path == "/readyz"
+}
+
+// writeBrokerAuthUnavailable answers a request that arrived while broker
+// auth is enabled but no hub keys are loaded.
+func writeBrokerAuthUnavailable(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusServiceUnavailable)
+	_, _ = fmt.Fprint(w, `{"error":{"code":"broker_auth_unavailable","message":"no hub keys are loaded; only health endpoints are served until keys are loaded"}}`)
 }
 
 // loadBrokerMiddleware returns the middleware in place now, or nil.

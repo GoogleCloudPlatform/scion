@@ -180,19 +180,23 @@ func inferHarnessFromName(name string) string {
 // importTemplateHarnessConfigs imports harness-configs bundled inside a
 // template's harness-configs/ subdirectory into the Hub's harness-config store.
 // Configs are scoped to match the template's scope (global or project).
-func (s *Server) importTemplateHarnessConfigs(ctx context.Context, templatePath, scope, scopeID string) {
-	hcDir := filepath.Join(templatePath, "harness-configs")
-	info, err := os.Stat(hcDir)
-	if err != nil || !info.IsDir() {
+//
+// Everything comes from the template's collected directory cd: a
+// subdirectory is imported only if collection recorded files under it (a
+// link, which collection skips, is never followed); harness-configs/ and the
+// subdirectory must be real directories inside cd's root; and its
+// config.yaml (and agent-plugins sidecar) are read through cd's root,
+// verified against the collected entries. Each subdirectory's own bootstrap
+// collects it again and must open its root at that same subdirectory of cd's
+// root (ResourceStore.within).
+func (s *Server) importTemplateHarnessConfigs(ctx context.Context, cd *collectedDir, scope, scopeID string) {
+	const hcPrefix = "harness-configs"
+	names := cd.subdirs(hcPrefix)
+	if len(names) == 0 {
 		return
 	}
 
 	if s.GetStorage() == nil {
-		return
-	}
-
-	entries, err := os.ReadDir(hcDir)
-	if err != nil {
 		return
 	}
 
@@ -201,15 +205,19 @@ func (s *Server) importTemplateHarnessConfigs(ctx context.Context, templatePath,
 		hcScope = store.HarnessConfigScopeProject
 	}
 
-	for _, entry := range entries {
-		if !entry.IsDir() {
+	for _, name := range names {
+		rel := hcPrefix + "/" + name
+		if err := cd.realSubdir(rel); err != nil {
+			s.templateLog.Warn("template harness-config import: not a directory inside the template, skipping",
+				"config", name, "error", err)
 			continue
 		}
-		name := entry.Name()
-		dirPath := filepath.Join(hcDir, name)
+		dirPath := filepath.Join(cd.dir, filepath.FromSlash(rel))
 		slug := api.Slugify(name)
 
-		hcDirCfg, err := config.LoadHarnessConfigDir(dirPath)
+		hcDirCfg, err := config.LoadHarnessConfigFromFiles(name, dirPath, func(file string) ([]byte, error) {
+			return cd.read(rel + "/" + file)
+		})
 		if err != nil {
 			s.templateLog.Debug("template harness-config import: failed to load config, skipping",
 				"config", name, "error", err)
@@ -221,8 +229,10 @@ func (s *Server) importTemplateHarnessConfigs(ctx context.Context, templatePath,
 			continue
 		}
 
+		rs := s.harnessConfigStore(hcDirCfg.Config.Harness)
+		rs.within, rs.withinPath = cd, rel
 		if existing == nil {
-			if err := s.bootstrapSingleHarnessConfig(ctx, name, dirPath, hcDirCfg, hcScope, scopeID); err != nil {
+			if _, err := rs.Bootstrap(ctx, name, dirPath, hcScope, scopeID, "", false); err != nil {
 				s.templateLog.Warn("template harness-config import: failed to import, skipping",
 					"config", name, "error", err)
 				continue
@@ -230,7 +240,7 @@ func (s *Server) importTemplateHarnessConfigs(ctx context.Context, templatePath,
 			s.templateLog.Info("template harness-config import: imported config",
 				"config", name, "harness", hcDirCfg.Config.Harness, "scope", hcScope)
 		} else {
-			if _, err := s.syncExistingHarnessConfig(ctx, existing, dirPath, hcDirCfg, false); err != nil {
+			if _, err := rs.Bootstrap(ctx, existing.Name, dirPath, existing.Scope, existing.ScopeID, "", false); err != nil {
 				s.templateLog.Warn("template harness-config import: failed to sync, skipping",
 					"config", name, "error", err)
 			}

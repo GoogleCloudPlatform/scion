@@ -38,11 +38,14 @@ import (
 // (recheckWorkloadDelegation):
 //
 //   - the delegation's grantor kind is offline and its scope is the member
-//     scope (the kind never holds an admin scope);
+//     scope, or the hub-admin scope while the offline hub-admin delegation
+//     setting is on (test_identity_offline_admin_delegation.go; never the
+//     super-admin scope);
 //   - three-way hub id binding: the running hub's pinned hub id equals the
 //     delegation's hub id and the marker's hub id, and the delegation's
 //     grantor id is the reserved id of that hub;
-//   - the running hub's --test-mode is member or above;
+//   - the running hub's --test-mode is member or above (admin or above for
+//     the hub-admin scope);
 //   - the marker is present, of class test, and is the same marker instance
 //     the delegation was bound to (an unmark followed by a new mark ends
 //     every delegation bound to the old marker);
@@ -56,9 +59,11 @@ import (
 //
 // Authority: the reserved grantor has no bindings. Decide Step 5b4
 // (offlineDelegationBinding) adds a request-local synthetic grant of
-// exactly test_identity.issue at hub scope, only for a request whose state
-// says the gate passed for THIS request; the delegation's frozen ceiling
-// ({test_identity.issue}, hub boundary) still intersects it.
+// exactly the delegation scope's one permission (test_identity.issue, or
+// test_identity.issue_admin for the hub-admin scope) at hub scope, only for
+// a request whose state says the gate passed for THIS request; the
+// delegation's frozen ceiling (that one permission, hub boundary) still
+// intersects it.
 
 // testIdentityDelegationRedeemOfflineMutation is the mutation type of the
 // per-redeem audit row of an offline delegation.
@@ -82,6 +87,9 @@ type offlineGateFacts struct {
 	hubID           string
 	markerCreatedAt time.Time
 	level           TestMode
+	// adminScope is true only when the gate admitted the hub-admin scope
+	// (the setting on and the level admin or above).
+	adminScope bool
 }
 
 // sameMarkerInstant reports whether two marker creation times are the same
@@ -100,11 +108,19 @@ func (a *workloadIssuerAuthenticator) offlineGrantorGate(ctx context.Context, st
 		return nil, refuse403("offline delegation gate unavailable")
 	}
 	now := a.clock()
+	adminScope := false
 	switch {
 	case d.EffectiveGrantorKind() != store.DelegationGrantorTestInfraOffline:
 		return nil, refuse403("offline gate: delegation grantor kind is not offline")
-	case d.Scope != store.TestInfraOfflineDelegationScope:
-		return nil, refuse403("offline gate: an offline delegation holds only the member scope")
+	case store.IsSuperAdminIssueVariant(d.Scope):
+		return nil, refuse403("offline gate: an offline delegation never holds the super-admin scope")
+	case d.Scope == store.TestInfraOfflineDelegationScope:
+	case offlineAdminScopeAdmitted(d.Scope) && a.offlineAdmin:
+		adminScope = true
+	default:
+		return nil, refuse403("offline gate: an offline delegation holds only the member scope, or the hub-admin scope with the offline admin delegation setting on")
+	}
+	switch {
 	case a.hubID == "":
 		return nil, refuse403("offline gate: the hub has no resolved hub id")
 	case d.HubID != a.hubID:
@@ -114,7 +130,11 @@ func (a *workloadIssuerAuthenticator) offlineGrantorGate(ctx context.Context, st
 	case d.MarkerCreatedAt == nil:
 		return nil, refuse403("offline gate: delegation is bound to no marker")
 	}
-	if refusal := a.checkDelegationLive(d, now); refusal != nil {
+	live := a.checkDelegationLive
+	if a.liveCheckForTest != nil {
+		live = a.liveCheckForTest
+	}
+	if refusal := live(d, now); refusal != nil {
 		return nil, refusal
 	}
 	if a.testModeLevel == nil {
@@ -123,6 +143,9 @@ func (a *workloadIssuerAuthenticator) offlineGrantorGate(ctx context.Context, st
 	level := a.testModeLevel()
 	if !level.Capabilities().TestIdentities {
 		return nil, refuse403("offline gate: the hub does not run --test-mode at member or above")
+	}
+	if adminScope && !level.IsAdminLevel() {
+		return nil, refuse403("offline gate: a hub-admin delegation needs --test-mode at admin or above")
 	}
 	marker, err := st.GetTestInfraBinding(ctx)
 	switch {
@@ -146,7 +169,7 @@ func (a *workloadIssuerAuthenticator) offlineGrantorGate(ctx context.Context, st
 	} else if !errors.Is(err, store.ErrNotFound) {
 		return nil, refuse403("offline gate: reserved grantor id could not be checked")
 	}
-	return &offlineGateFacts{hubID: a.hubID, markerCreatedAt: marker.CreatedAt, level: level}, nil
+	return &offlineGateFacts{hubID: a.hubID, markerCreatedAt: marker.CreatedAt, level: level, adminScope: adminScope}, nil
 }
 
 // auditOfflineRedeem writes the per-redeem audit row of a request the
@@ -154,6 +177,10 @@ func (a *workloadIssuerAuthenticator) offlineGrantorGate(ctx context.Context, st
 func (a *workloadIssuerAuthenticator) auditOfflineRedeem(ctx context.Context, r *http.Request, d *store.TestIdentityDelegation, sub, runLabel string, facts *offlineGateFacts, now time.Time) *workloadDelegationRefusal {
 	if a.writeAudit == nil || facts == nil {
 		return refuse403("offline redeem audit unavailable")
+	}
+	capPart := ""
+	if facts.adminScope {
+		capPart = fmt.Sprintf(" admin_cap=%d", d.MemberCap)
 	}
 	record := &store.MutationAuditRecord{
 		Timestamp:           now,
@@ -166,9 +193,9 @@ func (a *workloadIssuerAuthenticator) auditOfflineRedeem(ctx context.Context, r 
 		ExecutorID:          sub,
 		TargetType:          testIdentityDelegationAuditTarget,
 		TargetID:            d.ID,
-		AfterSummary: fmt.Sprintf("offline issuer delegation redeemed: grantor_kind=%s hub_id=%s marker_id=%s marker_created_at=%s test_mode=%s delegation_id=%s workload_sub=%s route=%s %s run_label=%q",
+		AfterSummary: fmt.Sprintf("offline issuer delegation redeemed: grantor_kind=%s hub_id=%s marker_id=%s marker_created_at=%s test_mode=%s delegation_id=%s scope=%s%s workload_sub=%s route=%s %s run_label=%q",
 			store.DelegationGrantorTestInfraOffline, facts.hubID, testInfraMarkerAuditID,
-			facts.markerCreatedAt.UTC().Format(time.RFC3339Nano), string(facts.level), d.ID, sub,
+			facts.markerCreatedAt.UTC().Format(time.RFC3339Nano), string(facts.level), d.ID, d.Scope, capPart, sub,
 			r.Method, logging.RequestPath(r), runLabel),
 	}
 	if err := a.writeAudit(ctx, a.store, record); err != nil {
@@ -191,22 +218,25 @@ func offlineGrantorUser(d *store.TestIdentityDelegation) *store.User {
 
 // offlineDelegationBinding is Decide Step 5b4: the request-local synthetic
 // grant of an offline delegation. It returns a hub-scope (system) candidate
-// binding for exactly test_identity.issue, and its role, only when ALL hold:
+// binding for exactly one permission, and its role, only when ALL hold:
 //
-//   - the permission decided is test_identity.issue;
+//   - the permission decided is the delegation scope's one permission:
+//     test_identity.issue for the member scope, or exactly
+//     test_identity.issue_admin for the hub-admin scope when the gate
+//     admitted that scope for this request (a super-admin variant never);
 //   - the principal is a user whose identity is the hub-boundary scoped
 //     identity the workload arm built (its credential id is the
 //     delegation id);
 //   - the request credential context is a workload delegation with that id;
 //   - the request's workload delegation state names that delegation, its
-//     grantor kind is offline, its scope is the member scope, its grantor
-//     id is the principal, and offlineGatePassed is true (set only by the
-//     arm after offlineGrantorGate passed for this request).
+//     grantor kind is offline, its grantor id is the principal, and
+//     offlineGatePassed is true (set only by the arm after
+//     offlineGrantorGate passed for this request).
 //
 // Otherwise it returns nils. It reads only the request context and its
 // arguments, and shares no state with the agent synthetic bindings.
 func offlineDelegationBinding(ctx context.Context, principal PrincipalContext, credential CredentialContext, permissionID string) (*CandidateBinding, *RolePermissions) {
-	if permissionID != permissionTestIdentityIssue || principal.Kind != PrincipalKindUser || principal.ID == "" {
+	if principal.Kind != PrincipalKindUser || principal.ID == "" {
 		return nil, nil
 	}
 	scoped, ok := principal.Identity.(*ScopedUserIdentity)
@@ -221,11 +251,28 @@ func offlineDelegationBinding(ctx context.Context, principal PrincipalContext, c
 	if st == nil || !st.offlineGatePassed || st.delegation == nil {
 		return nil, nil
 	}
+	// Never any spelling of the super-admin permission (checked only on
+	// a gate-passed offline request, so ordinary decisions pay nothing).
+	if store.IsSuperAdminIssueVariant(permissionID) {
+		return nil, nil
+	}
 	d := st.delegation
+	// The one permission this delegation's scope grants for this request.
+	var granted string
+	switch {
+	case d.Scope == store.TestInfraOfflineDelegationScope:
+		granted = permissionTestIdentityIssue
+	case offlineAdminScopeAdmitted(d.Scope) && st.offline != nil && st.offline.adminScope:
+		granted = permissionTestIdentityIssueAdmin
+	default:
+		return nil, nil
+	}
+	if permissionID != granted {
+		return nil, nil
+	}
 	switch {
 	case d.ID == "",
 		d.EffectiveGrantorKind() != store.DelegationGrantorTestInfraOffline,
-		d.Scope != store.TestInfraOfflineDelegationScope,
 		d.GrantorID != principal.ID,
 		scoped.ID() != principal.ID,
 		scoped.CredentialID() != d.ID,
@@ -238,7 +285,7 @@ func offlineDelegationBinding(ctx context.Context, principal PrincipalContext, c
 		RoleID:      id,
 		RoleName:    "test-infra-offline-delegation",
 		ScopeType:   ScopeTypeSystem,
-		Permissions: map[string]struct{}{permissionTestIdentityIssue: {}},
+		Permissions: map[string]struct{}{granted: {}},
 	}
 	cb := &CandidateBinding{
 		BindingID:        id,
@@ -248,4 +295,23 @@ func offlineDelegationBinding(ctx context.Context, principal PrincipalContext, c
 		ScopeType:        ScopeTypeSystem,
 	}
 	return cb, role
+}
+
+// offlineGrantorStatusExempt reports whether the account-status gate
+// (principalStatusGate) admits principal although it has no users row. It
+// holds only when decide Step 5b4 grants this request
+// (offlineDelegationBinding returns a binding) and principal.ID is the
+// reserved offline grantor id recomputed from the delegation's hub id. It
+// reads only the request context and its arguments. principalStatusGate is
+// its only caller, and only for a store.ErrNotFound users-row read.
+func offlineGrantorStatusExempt(ctx context.Context, principal PrincipalContext, credential CredentialContext, permissionID string) bool {
+	if cb, _ := offlineDelegationBinding(ctx, principal, credential, permissionID); cb == nil {
+		return false
+	}
+	st := workloadDelegationFromContext(ctx)
+	if st == nil || st.delegation == nil {
+		return false
+	}
+	reserved := store.TestInfraOfflineGrantorID(st.delegation.HubID)
+	return reserved != "" && principal.ID == reserved
 }

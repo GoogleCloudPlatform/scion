@@ -15,6 +15,7 @@
 package runtime
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,7 +30,8 @@ import (
 // records (<agent dir>/harness-inputs, config.HarnessInputsRecordDirName;
 // <agent dir>/harness-secrets, config.HarnessSecretsRecordDirName; and the
 // broker-side image provenance file <agent dir>/image-provenance.json,
-// config.ImageProvenanceFileName) are outside
+// config.ImageProvenanceFileName; and the rerender record
+// <agent dir>/rerender-record.json, config.RerenderRecordFileName) are outside
 // every container mount scion computes for the agent, in every runtime mode,
 // using the real mount builders. Author-configured volumes are excluded: they
 // are a separately tracked capability.
@@ -49,11 +51,12 @@ func TestHarnessInputsRecordOutsideScionMounts(t *testing.T) {
 
 // controlPlaneRecordNames are the agent-dir entries that must never be
 // visible inside the container: the harness inputs and secrets record
-// directories and the image provenance file.
+// directories, the image provenance file and the rerender record.
 var controlPlaneRecordNames = []string{
 	config.HarnessInputsRecordDirName,
 	config.HarnessSecretsRecordDirName,
 	config.ImageProvenanceFileName,
+	config.RerenderRecordFileName,
 }
 
 // pathWithin reports whether p is base or below it.
@@ -83,6 +86,14 @@ func testRecordOutsideRunArgMounts(t *testing.T) {
 	if err := config.WriteProjectID(scion, "11111111-2222-3333-4444-555555555555"); err != nil {
 		t.Fatal(err)
 	}
+	// The "worktree inside the repo" mode uses root/worktrees/a as its worktree;
+	// record the broker-side worktree admin back-reference the mount narrowing
+	// resolves (worktrees/a → workspace/.git).
+	worktreeInRepo := filepath.Join(root, "worktrees", "a")
+	if err := os.MkdirAll(worktreeInRepo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	setupWorktreeAdmin(t, root, "a", worktreeInRepo)
 
 	type mode struct {
 		name     string
@@ -94,18 +105,23 @@ func testRecordOutsideRunArgMounts(t *testing.T) {
 	if inProject == external {
 		t.Fatalf("fixture: shared-workspace agent dir should be external, got %s", external)
 	}
+	priv := seedTestPrivateGitConfig(t)
 	withPaths := func(home, repoRoot, workspace string, gc *api.GitCloneConfig) RunConfig {
 		cfg := minimalRunConfig()
 		cfg.BrokerMode = true
+		cfg.RuntimeName = "docker"
 		cfg.HomeDir = home
 		cfg.RepoRoot = repoRoot
 		cfg.Workspace = workspace
 		cfg.GitClone = gc
+		// A worktree/shared-plain git layout now binds a per-agent private
+		// .git/config; provide a seeded source so buildCommonRunArgs does not
+		// refuse. (The outside-repo-root full-repo-root fallback is gone —
+		// so that mode is covered by its own refusal test, not here.)
+		cfg.PrivateGitConfigSource = priv
 		return cfg
 	}
 	modes := []mode{
-		{"worktree outside the repo (full repo root mounted)", inProject,
-			withPaths(config.GetAgentHomePath(scion, "a"), root, filepath.Join(base, ".scion_worktrees", "repo", "a"), nil)},
 		{"worktree inside the repo", inProject,
 			withPaths(config.GetAgentHomePath(scion, "a"), root, filepath.Join(root, "worktrees", "a"), nil)},
 		{"shared workspace (repo root)", external,
@@ -120,6 +136,38 @@ func testRecordOutsideRunArgMounts(t *testing.T) {
 	// the /workspace mount and must be shadowed by the agents tmpfs.
 	modes = append(modes, mode{"shared workspace, in-project agent dir (restart resolution)", inProject,
 		withPaths(filepath.Join(external, "home"), root, root, nil)})
+	// Neither case reaches a mount layout here: the outside-root workspace is
+	// UNREGISTERED, so it is refused on EVERY runtime (a registered outside worktree
+	// would instead start, on Apple too); and the shared-workspace layout is refused
+	// on Apple specifically, which cannot bind the per-agent read-only .git/config.
+	// Both refusals are asserted below, so Apple contributes no run-arg mounts here
+	// and the containment property holds vacuously.
+	apple := func(cfg RunConfig) RunConfig {
+		cfg.RuntimeName = appleContainerRuntimeName
+		return cfg
+	}
+	t.Run("apple refuses the layouts that would otherwise expose records", func(t *testing.T) {
+		// Outside-root fallback: refused fail-closed (errors.Is + message + nil args).
+		outsideArgs, err := buildCommonRunArgs(apple(withPaths(config.GetAgentHomePath(scion, "a"), root, filepath.Join(base, ".scion_worktrees", "repo", "a"), nil)))
+		if !errors.Is(err, errOutsideRootNotRegistered) {
+			t.Errorf("apple outside-root fallback error = %v, want errOutsideRootNotRegistered", err)
+		} else if !strings.Contains(err.Error(), "is not a registered worktree") {
+			t.Errorf("apple outside-root message lacks the registered-worktree reason: %v", err)
+		}
+		if outsideArgs != nil {
+			t.Errorf("apple outside-root fallback not fail-closed: got args %q", outsideArgs)
+		}
+		// Shared-workspace: refused fail-closed (errors.Is + message + nil args).
+		sharedArgs, err := buildCommonRunArgs(apple(withPaths(filepath.Join(external, "home"), root, root, nil)))
+		if !errors.Is(err, errAppleSharedWorkspaceUnsupported) {
+			t.Errorf("apple shared-workspace error = %v, want errAppleSharedWorkspaceUnsupported", err)
+		} else if !strings.Contains(err.Error(), "not supported on the Apple runtime") {
+			t.Errorf("apple shared-workspace message lacks the Apple-runtime reason: %v", err)
+		}
+		if sharedArgs != nil {
+			t.Errorf("apple shared-workspace not fail-closed: got args %q", sharedArgs)
+		}
+	})
 	for _, m := range modes {
 		for _, recordName := range controlPlaneRecordNames {
 			t.Run(m.name+"/"+recordName, func(t *testing.T) {
@@ -138,6 +186,11 @@ func checkRecordOutsideRunArgs(t *testing.T, record string, cfg RunConfig) {
 	if err != nil {
 		t.Fatalf("buildCommonRunArgs: %v", err)
 	}
+	if cfg.RuntimeName == appleContainerRuntimeName {
+		// The Apple runtime drops the flags it does not support before
+		// the run; check what it actually passes.
+		args = stripUnsupportedAppleFlags(args)
+	}
 	var tmpfs []string
 	type bind struct{ src, dst string }
 	var binds []bind
@@ -148,6 +201,8 @@ func checkRecordOutsideRunArgs(t *testing.T, record string, cfg RunConfig) {
 			if len(parts) >= 2 {
 				binds = append(binds, bind{parts[0], parts[1]})
 			}
+		case "--tmpfs":
+			tmpfs = append(tmpfs, args[i+1])
 		case "--mount":
 			spec := args[i+1]
 			if strings.Contains(spec, "type=tmpfs") {
@@ -231,7 +286,7 @@ func testRecordOutsideCloudRunPaths(t *testing.T) {
 		t.Fatal(err)
 	}
 	workspace := filepath.Join("/mnt/filestore", root, "proj-123", "workspace")
-	paths, err := cloudRunNFSHostPaths(workspace, "", "proj-123", "agent-1")
+	paths, err := cloudRunNFSHostPaths(workspace, "", "proj-123", "agent-1", "6f1c2b3a-4d5e-4f60-8a9b-0c1d2e3f4a5b")
 	if err != nil {
 		t.Fatalf("cloudRunNFSHostPaths: %v", err)
 	}
@@ -247,8 +302,9 @@ func testRecordOutsideCloudRunPaths(t *testing.T) {
 }
 
 // In the shared-workspace layout the in-project agents root is shadowed with
-// a tmpfs when <workspace>/.scion is a directory, and no mask is added when
-// .scion is a project marker file.
+// a tmpfs when <workspace>/.scion/agents is a directory (the read-only
+// .scion mount above it means the mount point must already exist), and no
+// mask is added when .scion is a project marker file.
 func TestSharedWorkspaceAgentsMask(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	hasMask := func(args []string) bool {
@@ -260,7 +316,7 @@ func TestSharedWorkspaceAgentsMask(t *testing.T) {
 		return false
 	}
 	root := filepath.Join(t.TempDir(), "repo")
-	if err := os.MkdirAll(filepath.Join(root, ".scion"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(root, ".scion", "agents"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	cfg := minimalRunConfig()
@@ -273,7 +329,7 @@ func TestSharedWorkspaceAgentsMask(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !hasMask(args) {
-		t.Error("shared workspace with a .scion directory: expected the agents tmpfs mask")
+		t.Error("shared workspace with a .scion/agents directory: expected the agents tmpfs mask")
 	}
 
 	markerRoot := filepath.Join(t.TempDir(), "repo")

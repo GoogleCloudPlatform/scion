@@ -74,10 +74,10 @@ accepted. Time-box it; do not leave agents stopped indefinitely.
 
 | Agent role | Deleted by | When |
 |---|---|---|
-| Developer, reviewer — clear start and end | The agent's creator/supervisor | Once output is accepted and verified |
-| Investigator, architect — may hold an open question | The agent's creator/supervisor | **Only after all questions to humans are answered** and the conversation is explicitly done |
-| Project initiator — the first agent on a project, whatever role it started as | **Only on explicit human instruction** | It is the project's continuity point from first research through closure; its starting role does not govern its lifespan |
-| Engineering manager, coordinator, project lead | **Only on explicit human instruction naming the workstream** | Human says "close down the X workstream" or equivalent |
+| Task-bounded agent — clear start and end | The agent's creator/supervisor | Once output is accepted and verified |
+| Agent with an open human question | The agent's creator/supervisor | **Only after all questions to humans are answered** and the conversation is explicitly done |
+| Lead — the first agent on a project or workstream, an agent coordinating that project or workstream, or an agent explicitly designated by a human as its lead | **Only on explicit human instruction naming the workstream** | It carries continuity from the initial request through closure, including non-code and non-repository projects |
+| Delegated supervisor with a bounded assignment, not a lead | Its creator or authorized supervisor, subject to the assigned workflow; a human where that workflow requires it | After its deliverable is accepted, verified and durable, its subtree is torn down, and its human questions are resolved |
 
 ### Hierarchy teardown: bottom-up deletion
 
@@ -86,7 +86,7 @@ hierarchy, deletion happens bottom-up — each level confirms its subtree is tor
 down before the level above deletes it:
 
 1. The parent learns work is complete; notifies the orchestrator below.
-2. The orchestrator deletes its workers (developers, reviewers).
+2. The orchestrator deletes its completed task-bounded agents.
 3. The orchestrator confirms its subtree is torn down.
 4. The parent deletes the orchestrator.
 
@@ -105,11 +105,11 @@ can delete it directly or explicit human instruction is required.
 
 3. **An agent's own readiness signal is not permission.** An agent saying it is ready for
    cleanup does not constitute user permission to delete it. Only a human can authorize
-   deletion of leads and initiators.
+   deletion of leads.
 
-4. **"Clean up the agents" means workers.** When a human says "clean up agents" or "check
-   with leads about cleanup," they mean completed **worker** agents (developers, reviewers,
-   investigators). They do **not** mean delete the leads themselves.
+4. **"Clean up the agents" means task-bounded agents.** When a human says "clean up
+   agents" or "check with leads about cleanup," they mean completed **task-bounded**
+   agents. They do **not** mean delete the leads themselves.
 
    | Human phrase | Means |
    |---|---|

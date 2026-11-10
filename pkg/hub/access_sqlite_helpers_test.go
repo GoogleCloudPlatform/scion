@@ -159,33 +159,6 @@ func pvSeedGroup(t *testing.T, s store.Store, name string) string {
 	return id
 }
 
-// pvSeedGroupMember adds a member to a group (preview-test-scoped helper).
-func pvSeedGroupMember(t *testing.T, s store.Store, groupID, memberType, memberID string) {
-	t.Helper()
-	err := s.AddGroupMember(context.Background(), &store.GroupMember{
-		GroupID:    groupID,
-		MemberType: memberType,
-		MemberID:   memberID,
-		Role:       "member",
-		AddedBy:    "test",
-	})
-	require.NoError(t, err)
-}
-
-// pvSeedRoleBinding creates a role binding (preview-test-scoped helper).
-func pvSeedRoleBinding(t *testing.T, s store.Store, roleDefID, principalType, principalID, scopeType, scopeID string) {
-	t.Helper()
-	_, err := s.CreateRoleBinding(context.Background(), &store.RoleBinding{
-		RoleDefinitionID: roleDefID,
-		PrincipalType:    principalType,
-		PrincipalID:      principalID,
-		ScopeType:        scopeType,
-		ScopeID:          scopeID,
-		CreatedBy:        "test",
-	})
-	require.NoError(t, err)
-}
-
 // pvSeedProject creates a project in the store (preview-test-scoped helper).
 func pvSeedProject(t *testing.T, s store.Store, name string) string {
 	t.Helper()

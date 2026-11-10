@@ -103,3 +103,44 @@ export function chatConversationPath(target: ChatConversationTarget): string | n
 
   return `/chat/space/${encodeURIComponent(projectId)}/thread/${encodeURIComponent(key)}`;
 }
+
+/**
+ * The center message filter of a conversation route: `starred` shows only
+ * the signed-in user's starred messages (`?messages=starred`), '' the whole
+ * history.
+ */
+export type ChatMessageFilter = '' | 'starred';
+
+/** The query parameter carrying the center message filter. */
+export const CHAT_MESSAGE_FILTER_PARAM = 'messages';
+
+/** The message filter a URL query names ('' for none or an unknown value). */
+export function messageFilterFromSearch(search: string): ChatMessageFilter {
+  return new URLSearchParams(search).get(CHAT_MESSAGE_FILTER_PARAM) === 'starred' ? 'starred' : '';
+}
+
+/**
+ * Whether an app path (no query or fragment) names one conversation: a
+ * legacy thread route, a readable `/chat/<slug>/<thread-id>` route or a DM
+ * route. Only these carry a message filter.
+ */
+export function isChatConversationPath(path: string): boolean {
+  // `/chat/space/{projectId}` is a space; the router matches it before the
+  // readable two-segment thread route, which it would otherwise look like.
+  if (CHAT_SPACE_ROUTE.test(path)) return false;
+  return (
+    CHAT_THREAD_ROUTE.test(path) || CHAT_DM_ROUTE.test(path) || /^\/chat\/[^/]+\/[^/]+$/.test(path)
+  );
+}
+
+/**
+ * `search` with the message filter set to `filter` (removed for ''), every
+ * other parameter kept. Returns '' or a string starting with '?'.
+ */
+export function searchWithMessageFilter(search: string, filter: ChatMessageFilter): string {
+  const params = new URLSearchParams(search);
+  if (filter) params.set(CHAT_MESSAGE_FILTER_PARAM, filter);
+  else params.delete(CHAT_MESSAGE_FILTER_PARAM);
+  const q = params.toString();
+  return q ? `?${q}` : '';
+}

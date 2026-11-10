@@ -26,8 +26,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
@@ -43,6 +41,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/urlredact"
 	"github.com/GoogleCloudPlatform/scion/pkg/version"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -202,7 +201,8 @@ var hubBrokersInfoCmd = &cobra.Command{
 	Long: `Show detailed information about a runtime broker on the Hub.
 
 Displays broker metadata including name, status, version, last heartbeat,
-capabilities, available profiles, and projects it provides for.
+capabilities, available profiles (legacy) or runtime target (flat), and
+projects it provides for.
 
 If no broker name is provided, the current host's broker is used (if registered).
 
@@ -453,13 +453,10 @@ func printTokenExpiry(expiry time.Time) {
 	fmt.Printf("Expires:    %s (%s)\n", when, clitime.Relative(expiry))
 }
 
+// isLocalhostEndpoint is hubsync.IsLocalhostEndpoint: the loopback rule the
+// CLI uses both to report a dev credential and to send one.
 func isLocalhostEndpoint(endpoint string) bool {
-	u, err := url.Parse(endpoint)
-	if err != nil {
-		return false
-	}
-	host := u.Hostname()
-	return host == "localhost" || host == "127.0.0.1" || host == "::1"
+	return hubsync.IsLocalhostEndpoint(endpoint)
 }
 
 // readAgentTokenFile reads the canonical agent token from ~/.scion/scion-token.
@@ -593,29 +590,90 @@ func scopeDevAuth(info authInfo, endpoint string) authInfo {
 }
 
 func getHubClient(settings *config.Settings) (hubclient.Client, error) {
-	// With a hub profile selected, the client comes only from the profile:
-	// none of the credentials below is read, and there is no fallback.
-	if hubProfileSelected() {
-		return openHubProfileClient()
+	c, _, err := getHubClientWithAuthSource(settings)
+	return c, err
+}
+
+// getHubClientUAT is getHubClient that also reports whether the client
+// sends a user access token (see authSourceIsUserAccessToken).
+func getHubClientUAT(settings *config.Settings) (hubclient.Client, bool, error) {
+	c, source, err := getHubClientWithAuthSource(settings)
+	if err != nil {
+		return nil, false, err
 	}
-	endpoint := invocationHubEndpoint()
-	if endpoint == "" {
-		return nil, errHubNotConfigured
-	}
-	return hubClientForEndpoint(settings, endpoint)
+	return c, authSourceIsUserAccessToken(source), nil
+}
+
+// authSourceIsUserAccessToken reports whether a client whose credential
+// came from source (a hubAuthSource value) sends a user access token: the
+// SCION_HUB_TOKEN credential holding one. It is the rule of
+// hubsync.UsesUserAccessToken for clients built by getHubClient, which do
+// not report a hubsync.CredentialKind. A user access token sees the project
+// list only with project:list, so an empty project lookup under one most
+// likely means a missing scope (ptone/scion#5294).
+func authSourceIsUserAccessToken(source string) bool {
+	return source == hubAuthSourceEnvHubToken && hubsync.IsUserAccessToken(os.Getenv("SCION_HUB_TOKEN"))
 }
 
 // hubClientForEndpoint returns a client for the hub at endpoint, with the
 // credential getHubClient would choose for that endpoint.
 func hubClientForEndpoint(settings *config.Settings, endpoint string) (hubclient.Client, error) {
+	c, _, err := hubClientAndAuthSourceForEndpoint(settings, endpoint)
+	return c, err
+}
+
+// Hub credential sources, as "scion doctor" reports them (hub.auth.source
+// in its JSON output). Each names where the credential came from, never
+// the credential itself.
+const (
+	hubAuthSourceHubProfile     = "hub_profile"
+	hubAuthSourceStoredLogin    = "stored_login"
+	hubAuthSourceAgentTokenFile = "agent_token_file"
+	hubAuthSourceEnvAuthToken   = "env_auth_token"
+	hubAuthSourceEnvHubToken    = "env_hub_token"
+	hubAuthSourceDev            = "dev"
+	// hubAuthSourceTransport: no Hub credential, only the transport
+	// (proxy) credential that hubclient.New adds from the environment.
+	hubAuthSourceTransport = "transport"
+	hubAuthSourceNone      = "none"
+)
+
+// transportAuthActive reports whether hubclient.New will add a transport
+// (proxy) credential from the environment, as noCredentialAuthInfo does.
+func transportAuthActive() bool {
+	src, err := transportauth.FromEnv()
+	return err == nil && src != nil
+}
+
+// getHubClientWithAuthSource is getHubClient that also names the source
+// of the credential the client sends (a hubAuthSource value).
+func getHubClientWithAuthSource(settings *config.Settings) (hubclient.Client, string, error) {
+	// With a hub profile selected, the client comes only from the profile:
+	// none of the credentials below is read, and there is no fallback.
+	if hubProfileSelected() {
+		c, err := openHubProfileClient()
+		return c, hubAuthSourceHubProfile, err
+	}
+	endpoint := invocationHubEndpoint()
+	if endpoint == "" {
+		return nil, "", errHubNotConfigured
+	}
+	return hubClientAndAuthSourceForEndpoint(settings, endpoint)
+}
+
+// hubClientAndAuthSourceForEndpoint is hubClientForEndpoint that also
+// names the source of the credential it chose (a hubAuthSource value).
+func hubClientAndAuthSourceForEndpoint(settings *config.Settings, endpoint string) (hubclient.Client, string, error) {
 	var opts []hubclient.Option
+	source := ""
 
 	// Get auth info for logging
 	info := getAuthInfo(settings, endpoint)
 
 	// Add authentication - check in priority order.
 	// Note: hub.token and hub.apiKey are deprecated and no longer used for auth.
-	// Auth priority: OAuth credentials > scion-token file > SCION_AUTH_TOKEN env > SCION_HUB_TOKEN env > auto dev auth.
+	// Auth priority: OAuth credentials > scion-token file > SCION_AUTH_TOKEN env > SCION_HUB_TOKEN env >
+	// auto dev auth, which applies to a loopback hub only (isLocalhostEndpoint).
 	// Exception: for localhost endpoints, dev auth takes priority over non-dev agent tokens
 	// to avoid stale scion-token files from previous remote hub connections. This exception
 	// is suppressed for hub-managed agents (config.IsHubManagedAgent()) — see the matching
@@ -626,6 +684,7 @@ func hubClientForEndpoint(settings *config.Settings, endpoint string) (hubclient
 	if accessToken := credentials.GetAccessToken(endpoint); accessToken != "" {
 		opts = append(opts, hubclient.WithBearerToken(accessToken))
 		authConfigured = true
+		source = hubAuthSourceStoredLogin
 	}
 
 	// Check for agent auth token from canonical token file, then bootstrap env var
@@ -635,15 +694,18 @@ func hubClientForEndpoint(settings *config.Settings, endpoint string) (hubclient
 				if devToken := apiclient.ResolveDevToken(); devToken != "" {
 					opts = append(opts, hubclient.WithBearerToken(devToken))
 					authConfigured = true
+					source = hubAuthSourceDev
 				}
 			}
 			if !authConfigured {
 				opts = append(opts, hubclient.WithAgentToken(token))
 				authConfigured = true
+				source = hubAuthSourceAgentTokenFile
 			}
 		} else if token := os.Getenv("SCION_AUTH_TOKEN"); token != "" {
 			opts = append(opts, hubclient.WithAgentToken(token))
 			authConfigured = true
+			source = hubAuthSourceEnvAuthToken
 		}
 	}
 
@@ -652,22 +714,57 @@ func hubClientForEndpoint(settings *config.Settings, endpoint string) (hubclient
 		if token := os.Getenv("SCION_HUB_TOKEN"); token != "" {
 			opts = append(opts, hubclient.WithBearerToken(token))
 			authConfigured = true
+			source = hubAuthSourceEnvHubToken
 		}
 	}
 
 	// Fallback to auto dev auth if no explicit auth configured
-	// This checks SCION_DEV_TOKEN env var and ~/.scion/dev-token file
+	// This checks SCION_DEV_TOKEN env var and ~/.scion/dev-token file. A
+	// dev token is valid only on the local workstation server that wrote
+	// it, so it is sent only to a loopback hub (as scopeDevAuth reports).
 	if !authConfigured {
-		opts = append(opts, hubclient.WithAutoDevAuth())
+		// The source names what is actually sent: dev only when the
+		// development credential is sent; otherwise the transport
+		// credential hubclient.New may add, or nothing.
+		devSent := false
+		if isLocalhostEndpoint(endpoint) {
+			opts = append(opts, hubclient.WithAutoDevAuth())
+			// getAuthInfo above reached the same development credential
+			// lookup, so its result says whether one is sent.
+			devSent = info.IsDevAuth
+		}
+		switch {
+		case devSent:
+			source = hubAuthSourceDev
+		case transportAuthActive():
+			source = hubAuthSourceTransport
+		default:
+			source = hubAuthSourceNone
+		}
 	}
 
 	util.Debugf("Hub client auth: %s (source: %s)", info.Method, info.Source)
 	util.Debugf("Hub endpoint: %s", config.RedactURL(endpoint))
 
-	opts = append(opts, hubclient.WithTimeout(30*time.Second))
+	// The transport rule (newUserHubClient) applies to every credential.
+	// The one exception is the broker-injected agent token sent to exactly
+	// the broker-injected endpoint inside a hub-managed agent
+	// (hubsync.NewInjectedAgentHubClient checks all of that itself).
+	if source == hubAuthSourceAgentTokenFile || source == hubAuthSourceEnvAuthToken {
+		if c, ok := hubsync.NewInjectedAgentHubClient(endpoint, hubClientTimeout); ok {
+			return c, source, nil
+		}
+	}
 
-	return hubclient.New(endpoint, opts...)
+	opts = append(opts, hubclient.WithTimeout(hubClientTimeout))
+
+	c, err := newUserHubClient(endpoint, opts...)
+	return c, source, err
 }
+
+// hubClientTimeout is the client timeout of hub requests. A synchronous
+// agent create can take longer and gets hubCreateRequestTimeout instead.
+const hubClientTimeout = 30 * time.Second
 
 // hubEndpointScope describes where the effective hub endpoint comes from.
 type hubEndpointScope struct {
@@ -705,10 +802,16 @@ func endpointSourceNote(s hubEndpointScope) string {
 
 // redactEndpointIn returns text (an error message that may quote the hub
 // URL, or a URL built from it) with the user info of endpoint redacted as
-// config.RedactURL does.
+// config.RedactURL does. An endpoint that does not parse, whose user info
+// the shared rule cannot delimit (urlredact.Undelimited), or that holds an
+// '@' the parser does not read as user info (a password that reads as a
+// port and a path, as in https://u:1234/x@h, or a token followed by a
+// path) is replaced whole instead (see redactUnparsedEndpointIn). Hub URLs
+// must not contain '@' (config.ValidateHubURL), so such an endpoint can
+// only come from a source that skipped the validator.
 func redactEndpointIn(text, endpoint string) string {
 	u, err := url.Parse(endpoint)
-	if err != nil {
+	if err != nil || urlredact.Undelimited(endpoint) || (u.User == nil && strings.Contains(endpoint, "@")) {
 		return redactUnparsedEndpointIn(text, endpoint)
 	}
 	if u.User == nil {
@@ -716,9 +819,9 @@ func redactEndpointIn(text, endpoint string) string {
 	}
 	r, err := url.Parse(config.RedactURL(endpoint))
 	if err != nil || r.User == nil {
-		// Not reached (the redacted form of a parsed URL parses); mask any
-		// user info all the same.
-		return urlUserInfoInTextRe.ReplaceAllString(text, "${1}xxxxx@")
+		// Not reached (the redacted form of a delimited URL parses with
+		// its user info); mask any user info all the same.
+		return urlredact.RedactUserInfoIn(text, urlredact.Mask)
 	}
 	masked := "//" + r.User.String() + "@"
 	// The user info as url.URL writes it, and as written in endpoint.
@@ -736,67 +839,37 @@ func redactEndpointIn(text, endpoint string) string {
 // located (see redactUnparsedEndpointIn).
 const redactedHubURL = "[redacted hub URL]"
 
-// urlUserInfoInTextRe matches the user info of a URL anywhere in a text, up
-// to the last '@' of the authority (a password may contain '@').
-var urlUserInfoInTextRe = regexp.MustCompile(`([A-Za-z][A-Za-z0-9+.-]*://)[^/?#\s"<>]*@`)
-
-// redactUnparsedEndpointIn is redactEndpointIn for an endpoint that
-// url.Parse rejects, so its user info cannot be located: it fails closed.
-// Every occurrence of the endpoint in text is replaced whole, both as given
-// and as %q writes it (Go quotes URLs that way in its errors, escaping
-// control and other special characters), and the user info of any URL
-// still in text is masked.
+// redactUnparsedEndpointIn is redactEndpointIn for an endpoint whose user
+// info cannot be located: it fails closed. Every occurrence of the
+// endpoint in text is replaced whole, both as given and as %q writes it
+// (Go quotes URLs that way in its errors, escaping control and other
+// special characters), every rendering of the part of it that may be user
+// info is replaced (endpointUserInfo), and the user info of any URL still
+// in text is masked by the shared rule (urlredact.RedactUserInfoIn).
 func redactUnparsedEndpointIn(text, endpoint string) string {
 	if endpoint != "" {
 		text = strings.ReplaceAll(text, endpoint, redactedHubURL)
-		text = strings.ReplaceAll(text, quotedBody(strconv.Quote(endpoint)), redactedHubURL)
-		text = redactSecretForms(text, endpointUserInfo(endpoint))
+		text = strings.ReplaceAll(text, config.QuotedBody(endpoint), redactedHubURL)
+		text = config.RedactSecretForms(text, endpointUserInfo(endpoint))
 	}
-	return urlUserInfoInTextRe.ReplaceAllString(text, "${1}xxxxx@")
+	return urlredact.RedactUserInfoIn(text, urlredact.Mask)
 }
 
-// endpointUserInfo returns the user info of an endpoint that url.Parse
-// rejects, read from the string itself: the text after "://" (or from the
-// start, without one) up to the last '@' before the first '/', '?' or '#'.
-// It returns "" when there is none.
+// endpointUserInfo returns the part of an endpoint that may be user info,
+// read from the string itself: the text after "://" (or from the start,
+// without one) up to its last '@'. The whole span is taken, path included,
+// because the endpoint reaches here only when its user info cannot be
+// delimited: replacing more than the user info is safe, less is not. It
+// returns "" when the endpoint holds no '@'.
 func endpointUserInfo(endpoint string) string {
 	rest := endpoint
 	if _, after, ok := strings.Cut(endpoint, "://"); ok {
 		rest = after
 	}
-	if i := strings.IndexAny(rest, "/?#"); i >= 0 {
-		rest = rest[:i]
-	}
 	if at := strings.LastIndex(rest, "@"); at > 0 {
 		return rest[:at]
 	}
 	return ""
-}
-
-// minSecretLen is the length below which a user info is not replaced on
-// its own: replacing a shorter string would rewrite unrelated text.
-const minSecretLen = 3
-
-// redactSecretForms replaces secret (a user info) everywhere in text: as
-// given, and as strconv.Quote, JSON, url.PathEscape and url.QueryEscape
-// write it, so no rendering of an error that quoted the endpoint shows it.
-func redactSecretForms(text, secret string) string {
-	if len(secret) < minSecretLen {
-		return text
-	}
-	forms := []string{secret, quotedBody(strconv.Quote(secret)), url.PathEscape(secret), url.QueryEscape(secret)}
-	if b, err := json.Marshal(secret); err == nil {
-		forms = append(forms, quotedBody(string(b)))
-	}
-	for _, f := range forms {
-		text = strings.ReplaceAll(text, f, "xxxxx")
-	}
-	return text
-}
-
-// quotedBody returns a strconv.Quote result without its outer quotes.
-func quotedBody(q string) string {
-	return q[1 : len(q)-1]
 }
 
 // hubLinkJSONResult is the --format json result of 'hub link'. The
@@ -1491,7 +1564,7 @@ func runHubProjectsInfo(cmd *cobra.Command, args []string) error {
 		outputFormat = "json"
 	}
 
-	projectName, client, err := hubProjectsTarget(args)
+	projectName, client, uat, err := hubProjectsTarget(args)
 	if err != nil {
 		return err
 	}
@@ -1499,7 +1572,7 @@ func runHubProjectsInfo(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	project, err := resolveProjectNameOrID(ctx, client, projectName)
+	project, err := resolveProjectNameOrID(ctx, client, projectName, uat)
 	if err != nil {
 		return err
 	}
@@ -1635,16 +1708,18 @@ func providerCapacityIndicator(p hubclient.ProjectProvider) string {
 // project) and a hub client for 'hub projects info' and 'delete'. With a
 // hub profile the project must be named: no local project is resolved and
 // no local settings are read.
-func hubProjectsTarget(args []string) (string, hubclient.Client, error) {
+func hubProjectsTarget(args []string) (string, hubclient.Client, bool, error) {
 	if hubProfileSelected() {
 		if len(args) == 0 || strings.TrimSpace(args[0]) == "" {
-			return "", nil, errors.New("with a hub profile, name the project on the target hub (its name or id): the current directory's project is not used")
+			return "", nil, false, errors.New("with a hub profile, name the project on the target hub (its name or id): the current directory's project is not used")
 		}
+		// A hub profile mints its own tokens; it never sends a user
+		// access token.
 		client, err := openHubProfileClient()
 		if err != nil {
-			return "", nil, err
+			return "", nil, false, err
 		}
-		return args[0], client, nil
+		return args[0], client, false, nil
 	}
 
 	// Resolve project path to find project settings
@@ -1655,12 +1730,12 @@ func hubProjectsTarget(args []string) (string, hubclient.Client, error) {
 
 	resolvedPath, isGlobal, err := config.ResolveProjectPath(gp)
 	if err != nil {
-		return "", nil, fmt.Errorf("failed to resolve project path: %w", err)
+		return "", nil, false, fmt.Errorf("failed to resolve project path: %w", err)
 	}
 
 	settings, err := config.LoadSettings(resolvedPath)
 	if err != nil {
-		return "", nil, fmt.Errorf("failed to load settings: %w", err)
+		return "", nil, false, fmt.Errorf("failed to load settings: %w", err)
 	}
 
 	// Determine project name from args or current project
@@ -1681,15 +1756,15 @@ func hubProjectsTarget(args []string) (string, hubclient.Client, error) {
 		}
 	}
 
-	client, err := getHubClient(settings)
+	client, uat, err := getHubClientUAT(settings)
 	if err != nil {
-		return "", nil, err
+		return "", nil, false, err
 	}
-	return projectName, client, nil
+	return projectName, client, uat, nil
 }
 
 func runHubProjectsDelete(cmd *cobra.Command, args []string) error {
-	projectName, client, err := hubProjectsTarget(args)
+	projectName, client, uat, err := hubProjectsTarget(args)
 	if err != nil {
 		return err
 	}
@@ -1698,7 +1773,7 @@ func runHubProjectsDelete(cmd *cobra.Command, args []string) error {
 	defer cancel()
 
 	// Find the project by name or ID, exactly as `hub projects info` does.
-	project, err := resolveProjectNameOrID(ctx, client, projectName)
+	project, err := resolveProjectNameOrID(ctx, client, projectName, uat)
 	if err != nil {
 		return err
 	}
@@ -1894,8 +1969,8 @@ func runHubProjectCreate(cmd *cobra.Command, args []string) error {
 	//
 	// The clone-url label is always https, whatever scheme the remote uses
 	// (ptone/scion#2862). Agents and shared-workspace init clone from it
-	// with the hub/broker token, and token auth only works over HTTPS:
-	// util.authenticatedCloneURL injects the token only for https URLs, and
+	// with the hub/broker token, and token auth only works over HTTPS: the
+	// host-scoped credential helper supplies the token for https URLs only, and
 	// the broker's git credential helper supplies GITHUB_TOKEN for HTTP(S)
 	// clones only (see hubCloneTransportNote). An ssh:// or git:// label
 	// would clone without credentials, or stall on an SSH host-key prompt.
@@ -2065,8 +2140,11 @@ func parseDefaultBranch(output string) string {
 }
 
 // findProjectByName finds a project by name (case-insensitive) and returns it.
-// Returns an error if not found or multiple matches are found.
-func findProjectByName(ctx context.Context, client hubclient.Client, name string) (*hubclient.Project, error) {
+// Returns an error if not found or multiple matches are found. uat reports
+// that client sends a user access token: then a lookup that finds nothing
+// returns hubsync.ScopedTokenProjectLookupEmptyError, which reads the same
+// whether or not the project exists.
+func findProjectByName(ctx context.Context, client hubclient.Client, name string, uat bool) (*hubclient.Project, error) {
 	resp, err := client.Projects().List(ctx, &hubclient.ListProjectsOptions{
 		Name: name,
 	})
@@ -2075,6 +2153,9 @@ func findProjectByName(ctx context.Context, client hubclient.Client, name string
 	}
 
 	if len(resp.Projects) == 0 {
+		if uat {
+			return nil, hubsync.ScopedTokenProjectLookupEmptyError(name)
+		}
 		return nil, fmt.Errorf("project '%s' not found", name)
 	}
 
@@ -2095,17 +2176,18 @@ func findProjectByName(ctx context.Context, client hubclient.Client, name string
 // the REST API) goes through the shared ID-first resolver, which looks the
 // project up by ID and falls back to an exact slug or case-insensitive name
 // match of the same string (ptone/scion#3772, ptone/scion#3792). Any other
-// value keeps the existing name lookup unchanged.
-func resolveProjectNameOrID(ctx context.Context, client hubclient.Client, arg string) (*hubclient.Project, error) {
+// value keeps the existing name lookup unchanged. uat is as for
+// findProjectByName.
+func resolveProjectNameOrID(ctx context.Context, client hubclient.Client, arg string, uat bool) (*hubclient.Project, error) {
 	// An empty or blank argument is never a valid project; an empty one
 	// would also list every project instead of looking one up.
 	if strings.TrimSpace(arg) == "" {
 		return nil, fmt.Errorf("project name or ID must not be empty")
 	}
 	if isUUIDLike(arg) {
-		return resolveProjectByNameOrID(ctx, client, arg)
+		return resolveProjectByNameOrID(ctx, client, arg, uat)
 	}
-	return findProjectByName(ctx, client, arg)
+	return findProjectByName(ctx, client, arg, uat)
 }
 
 // valueOrDefault returns value if non-empty, otherwise returns the default.
@@ -2205,42 +2287,7 @@ func runHubBrokersInfo(cmd *cobra.Command, args []string) error {
 	}
 
 	if isJSONOutput() {
-		output := map[string]interface{}{
-			"id":              broker.ID,
-			"name":            broker.Name,
-			"slug":            broker.Slug,
-			"version":         broker.Version,
-			"status":          broker.Status,
-			"connectionState": broker.ConnectionState,
-			"autoProvide":     broker.AutoProvide,
-			"created":         broker.Created,
-			"updated":         broker.Updated,
-		}
-		if !broker.LastHeartbeat.IsZero() {
-			output["lastHeartbeat"] = broker.LastHeartbeat
-		}
-		if broker.Endpoint != "" {
-			output["endpoint"] = broker.Endpoint
-		}
-		if broker.CreatedBy != "" {
-			output["createdBy"] = broker.CreatedBy
-		}
-		if broker.Capabilities != nil {
-			output["capabilities"] = broker.Capabilities
-		}
-		if len(broker.Profiles) > 0 {
-			output["profiles"] = broker.Profiles
-		}
-		if len(broker.Projects) > 0 {
-			output["projects"] = broker.Projects
-		}
-		if len(broker.Labels) > 0 {
-			output["labels"] = broker.Labels
-		}
-		if len(broker.Annotations) > 0 {
-			output["annotations"] = broker.Annotations
-		}
-		return outputJSON(output)
+		return outputJSON(brokerInfoJSON(broker))
 	}
 
 	// Text output
@@ -2306,6 +2353,11 @@ func runHubBrokersInfo(cmd *cobra.Command, args []string) error {
 				fmt.Printf("  - %s (%s) [%s]\n", p.Name, p.Type, availStr)
 			}
 		}
+	} else if broker.RuntimeTarget != nil {
+		// A flat Runtime Broker has no profiles: it serves one runtime
+		// target and shows what its instance reported.
+		fmt.Println()
+		writeRuntimeTargetSections(os.Stdout, broker.RuntimeTarget, broker.RuntimeTargetPresentation, broker.RuntimeTargetPresentationObservedAt)
 	} else {
 		fmt.Println()
 		fmt.Println("Profiles: none")
@@ -2325,6 +2377,54 @@ func runHubBrokersInfo(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// brokerInfoJSON is the `hub brokers info --json` document. A flat Runtime
+// Broker's reported presentation and its observation time are included as
+// the Hub returns them.
+func brokerInfoJSON(broker *hubclient.RuntimeBroker) map[string]interface{} {
+	output := map[string]interface{}{
+		"id":              broker.ID,
+		"name":            broker.Name,
+		"slug":            broker.Slug,
+		"version":         broker.Version,
+		"status":          broker.Status,
+		"connectionState": broker.ConnectionState,
+		"autoProvide":     broker.AutoProvide,
+		"created":         broker.Created,
+		"updated":         broker.Updated,
+	}
+	if !broker.LastHeartbeat.IsZero() {
+		output["lastHeartbeat"] = broker.LastHeartbeat
+	}
+	if broker.Endpoint != "" {
+		output["endpoint"] = broker.Endpoint
+	}
+	if broker.CreatedBy != "" {
+		output["createdBy"] = broker.CreatedBy
+	}
+	if broker.Capabilities != nil {
+		output["capabilities"] = broker.Capabilities
+	}
+	if len(broker.Profiles) > 0 {
+		output["profiles"] = broker.Profiles
+	}
+	if len(broker.Projects) > 0 {
+		output["projects"] = broker.Projects
+	}
+	if len(broker.Labels) > 0 {
+		output["labels"] = broker.Labels
+	}
+	if len(broker.Annotations) > 0 {
+		output["annotations"] = broker.Annotations
+	}
+	if broker.RuntimeTargetPresentation != nil {
+		output["runtimeTargetPresentation"] = broker.RuntimeTargetPresentation
+	}
+	if broker.RuntimeTargetPresentationObservedAt != nil {
+		output["runtimeTargetPresentationObservedAt"] = broker.RuntimeTargetPresentationObservedAt
+	}
+	return output
 }
 
 func runHubBrokersDelete(cmd *cobra.Command, args []string) error {
@@ -2526,7 +2626,11 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 	// Read this project's own settings in isolation (without global merge) to
 	// determine whether hub.projectId was explicitly set for THIS project, rather
 	// than inherited from global settings via the koanf merge chain.
-	localSettings, _ := config.LoadSettingsFromDir(resolvedPath)
+	loadOwn := config.LoadProjectSettingsFromDir
+	if isGlobal {
+		loadOwn = config.LoadSettingsFromDir
+	}
+	localSettings, _ := loadOwn(resolvedPath)
 	localHubProjectID := ""
 	if localSettings != nil {
 		localHubProjectID = localSettings.GetHubProjectID()

@@ -65,12 +65,15 @@ func deleteGhost(t *testing.T, f *flatInstanceFixture, query string) {
 	}
 }
 
-// TestFlatDelete_FailedCreateGhostIsRetiredByHubRollbackDelete: a create
-// that fails at the broker leaves an active record holding the slug, whose
-// only run its failure cleanup finished. The Hub's whole-agent rollback
-// delete then marks the record deleted (tombstone kept) and releases the
-// slug, so a create of the same slug with a new agent ID succeeds.
-func TestFlatDelete_FailedCreateGhostIsRetiredByHubRollbackDelete(t *testing.T) {
+// TestFlatDelete_FailedCreateReleasesSlugBeforeHubRollbackDelete: a create
+// that fails at the broker, and whose failure cleanup ended its run and
+// removed its files, releases its record and slug itself
+// (ptone/scion#5768). The Hub's whole-agent rollback delete then finds
+// nothing and changes nothing, and a create of the same slug with a new
+// agent ID succeeds. (A record left behind, for example by an older build,
+// is retired by the rollback delete:
+// TestFlatDelete_LeftoverGhostIsRetiredByHubRollbackDelete.)
+func TestFlatDelete_FailedCreateReleasesSlugBeforeHubRollbackDelete(t *testing.T) {
 	for _, query := range []string{"&deleteFiles=true&runId=" + ghostRun, "&deleteFiles=true", "&localOnly=true"} {
 		t.Run(query, func(t *testing.T) {
 			f := newFlatInstanceTestServer(t, flatInstanceOpts{hubInProcess: true})
@@ -87,21 +90,15 @@ func TestFlatDelete_FailedCreateGhostIsRetiredByHubRollbackDelete(t *testing.T) 
 			if w := serveFlat(f.srv, http.MethodPost, "/api/v1/agents", flatCreateBody("req-ghost", ghostSlug, failed)); w.Code < 400 {
 				t.Fatalf("create: status = %d, want a failure: %s", w.Code, w.Body.String())
 			}
-			state, holder := ghostState(t, f)
-			if state != OwnershipStateActive || holder != ghostAgentID {
-				t.Fatalf("after the failed create: state=%s holder=%q, want active holding the slug", state, holder)
-			}
-			rec, _, _ := f.srv.ownership.Get(flatTestProjectID, ghostAgentID)
-			if liveRunsOtherThan(rec, "") {
-				t.Fatalf("the failed create's run is still live: %+v", rec.Runs)
+			noOwnedRecord(t, f, ghostAgentID)
+			if holder, _ := f.srv.ownership.SlugHolder(flatTestProjectID, ghostSlug); holder != "" {
+				t.Fatalf("after the failed create: slug held by %q, want it released", holder)
 			}
 
 			// The Hub's rollback delete finds nothing on the runtime or on
 			// disk.
 			deleteGhost(t, f, query)
-			if state, holder := ghostState(t, f); state != OwnershipStateDeleted || holder != "" {
-				t.Fatalf("after the rollback delete: state=%s holder=%q, want deleted with the slug released", state, holder)
-			}
+			noOwnedRecord(t, f, ghostAgentID)
 			if live, err := f.srv.ownership.HasLiveAgents(flatTestProjectID); err != nil || live {
 				t.Fatalf("an active record remains in the project (%v)", err)
 			}
@@ -174,5 +171,27 @@ func TestFlatDelete_GhostWithUnconfirmedObjectStaysDeleting(t *testing.T) {
 	rec, _, _ := st.Get(flatTestProjectID, ghostAgentID)
 	if res := rec.Runs[0].Resources; len(res) != 1 || res[0].State != OwnedResourceRecorded {
 		t.Fatalf("the unconfirmed object is no longer recorded: %+v", res)
+	}
+}
+
+// TestFlatDelete_LeftoverGhostIsRetiredByHubRollbackDelete: an active
+// record left by a failed create whose run already ended (for example by
+// an older build, or where its files could not be proven absent) is
+// retired by the Hub's whole-agent rollback delete, which finds nothing on
+// the runtime or on disk: the record becomes a tombstone and the slug is
+// released.
+func TestFlatDelete_LeftoverGhostIsRetiredByHubRollbackDelete(t *testing.T) {
+	for _, query := range []string{"&deleteFiles=true&runId=" + ghostRun, "&deleteFiles=true", "&localOnly=true"} {
+		t.Run(query, func(t *testing.T) {
+			f := newFlatInstanceTestServer(t, flatInstanceOpts{hubInProcess: true})
+			seedFailedCreateRecord(t, f, true)
+			if state, holder := ghostState(t, f); state != OwnershipStateActive || holder != ghostAgentID {
+				t.Fatalf("seeded ghost: state=%s holder=%q", state, holder)
+			}
+			deleteGhost(t, f, query)
+			if state, holder := ghostState(t, f); state != OwnershipStateDeleted || holder != "" {
+				t.Fatalf("after the rollback delete: state=%s holder=%q, want deleted with the slug released", state, holder)
+			}
+		})
 	}
 }

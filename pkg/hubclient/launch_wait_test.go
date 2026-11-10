@@ -159,7 +159,7 @@ func TestWaitForLaunch_EndedWithErrorAnyPhase(t *testing.T) {
 
 // Mutant: drop the failed end reason clause in launchDone.
 func TestWaitForLaunch_EndReasonWithoutCode(t *testing.T) {
-	for _, reason := range []string{"failed", "timed_out", "lost", "not_launched"} {
+	for _, reason := range []string{"failed", "timed_out", "lost"} {
 		t.Run(reason, func(t *testing.T) {
 			fastLaunchTimings(t)
 			ended := &Agent{ID: "a1", Name: "alpha", Phase: "provisioning",
@@ -173,6 +173,81 @@ func TestWaitForLaunch_EndReasonWithoutCode(t *testing.T) {
 			assert.Equal(t, 1, svc.Calls())
 		})
 	}
+}
+
+// notLaunchedAgent is an agent whose launch the Hub ended not_launched,
+// as after a synchronous answer from a broker without async launch.
+func notLaunchedAgent(phase, code string) *Agent {
+	return &Agent{ID: "a1", Name: "alpha", Phase: phase,
+		Launch: &AgentLaunch{ID: "l1", State: "ended", Kind: "start", EndReason: "not_launched", Error: code}}
+}
+
+// A launch ended not_launched without a code does not end the wait: the
+// synchronous start goes on and the agent comes up (ptone/scion#5283).
+// Mutant: add "not_launched" back to failedLaunchEndReason.
+func TestWaitForLaunch_NotLaunchedKeepsWaiting(t *testing.T) {
+	fastLaunchTimings(t)
+	svc := script(ok(notLaunchedAgent("starting", "")), ok(notLaunchedAgent("starting", "")), ok(runningAgent()))
+
+	out, err := WaitForLaunch(context.Background(), svc, "a1", launchingAgent(""), LaunchWaitOptions{})
+	require.NoError(t, err)
+	assert.True(t, out.Running)
+	assert.Equal(t, "running", out.Phase)
+	assert.Equal(t, 3, svc.Calls())
+}
+
+// An agent left starting with a not_launched launch is waited for until
+// the budget runs out. Mutant: add "not_launched" back to
+// failedLaunchEndReason.
+func TestWaitForLaunch_NotLaunchedTimesOut(t *testing.T) {
+	fastLaunchTimings(t)
+	svc := script(ok(notLaunchedAgent("starting", "")))
+
+	out, err := WaitForLaunch(context.Background(), svc, "a1", launchingAgent(""),
+		LaunchWaitOptions{Timeout: 100 * time.Millisecond})
+	require.ErrorIs(t, err, ErrLaunchWaitTimeout)
+	assert.False(t, out.Running)
+	assert.Equal(t, "not_launched", out.EndReason)
+	assert.Greater(t, svc.Calls(), 1)
+}
+
+// A synchronous start that fails moves the agent to error or stopped: the
+// phase still ends the wait at the first read, not at the budget.
+// Mutant: drop launchDone's error/stopped phase case.
+func TestWaitForLaunch_NotLaunchedFailedPhaseEndsPromptly(t *testing.T) {
+	for _, phase := range []string{"error", "stopped"} {
+		t.Run(phase, func(t *testing.T) {
+			fastLaunchTimings(t)
+			svc := script(ok(notLaunchedAgent(phase, "")))
+
+			began := time.Now()
+			out, err := WaitForLaunch(context.Background(), svc, "a1", launchingAgent(""),
+				LaunchWaitOptions{Timeout: 2 * time.Second})
+			require.NoError(t, err)
+			assert.False(t, out.Running)
+			assert.Equal(t, phase, out.Phase)
+			assert.Equal(t, "not_launched", out.EndReason)
+			assert.Equal(t, 1, svc.Calls())
+			assert.Less(t, time.Since(began), time.Second)
+		})
+	}
+}
+
+// A not_launched launch that carries an error code still ends the wait,
+// whatever the phase: the Hub's failed dispatch keeps the row in
+// provisioning and ends the launch with dispatch_failed.
+// Mutant: drop the error code clause in launchDone.
+func TestWaitForLaunch_NotLaunchedWithCodeEnds(t *testing.T) {
+	fastLaunchTimings(t)
+	svc := script(ok(notLaunchedAgent("provisioning", "dispatch_failed")))
+
+	out, err := WaitForLaunch(context.Background(), svc, "a1", launchingAgent(""), LaunchWaitOptions{})
+	require.NoError(t, err)
+	assert.False(t, out.Running)
+	assert.Equal(t, "provisioning", out.Phase)
+	assert.Equal(t, "dispatch_failed", out.Code)
+	assert.Equal(t, "not_launched", out.EndReason)
+	assert.Equal(t, 1, svc.Calls())
 }
 
 // An ended launch that succeeded or was superseded does not end the wait
@@ -449,6 +524,13 @@ func TestEnsureRunningBeforeSend(t *testing.T) {
 	t.Run("launch runs", func(t *testing.T) {
 		fastLaunchTimings(t)
 		svc := script(ok(launchingAgent("image_pull")), ok(runningAgent()))
+		require.NoError(t, EnsureRunningBeforeSend(context.Background(), svc, launchingAgent(""), LaunchWaitOptions{}))
+		assert.Equal(t, 2, svc.Calls())
+	})
+	// Mutant: add "not_launched" back to failedLaunchEndReason.
+	t.Run("not_launched then running", func(t *testing.T) {
+		fastLaunchTimings(t)
+		svc := script(ok(notLaunchedAgent("starting", "")), ok(runningAgent()))
 		require.NoError(t, EnsureRunningBeforeSend(context.Background(), svc, launchingAgent(""), LaunchWaitOptions{}))
 		assert.Equal(t, 2, svc.Calls())
 	})

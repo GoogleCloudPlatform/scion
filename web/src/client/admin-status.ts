@@ -36,15 +36,17 @@
  *   get an admin result that a recheck could not confirm. A nav that has
  *   already rendered reads the value once per user, so a fresh result or a
  *   failed recheck only reaches nav renders that happen after it.
- * - It uses a plain credentialed fetch, as the startup check always did, so
- *   a 401 here never triggers the session-expired login redirect on its own
- *   (other requests on the page still do).
+ * - It skips apiFetch's global 401/403 handling (`authErrors: 'caller'`),
+ *   as the startup check always did, so a 401 here never triggers the
+ *   session-expired login redirect on its own (other requests on the page
+ *   still do).
  *
  * This only decides what the UI shows; the server authorizes every admin
  * request itself.
  */
 
 import type { AdminStatus } from '../lib/admin-permissions.js';
+import { apiFetch } from './api.js';
 
 interface Inflight {
   userId: string;
@@ -74,7 +76,7 @@ function isAdminStatusBody(
 
 async function fetchAdminStatus(): Promise<{ ok: boolean; status: AdminStatus | null }> {
   try {
-    const res = await fetch('/api/v1/auth/admin-status', { credentials: 'include' });
+    const res = await apiFetch('/api/v1/auth/admin-status', { authErrors: 'caller' });
     if (!res.ok) return { ok: false, status: null };
     const body: unknown = await res.json();
     // Anything but a JSON object (null, a number, a string, an array) is a

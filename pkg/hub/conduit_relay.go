@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -34,6 +35,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
+	"github.com/gorilla/websocket"
 )
 
 // The hub's in-process conduit relay (design v2.4 §3.9: every hub process
@@ -69,6 +71,10 @@ type ConduitRelayOptions struct {
 	// testHookAdmission, when set, runs during admission (before the
 	// session is registered). Tests only.
 	testHookAdmission func()
+	// testHookRevalidated, when set, runs each time a newly registered
+	// session's revalidation (conduitRevalidatePrincipal) has returned,
+	// whatever its result. Tests only.
+	testHookRevalidated func()
 	// sessionWriteWait, when positive, is the per-write deadline of every
 	// relay session (conduit.Config.WriteWait; 0 = conduit.DefaultWriteWait).
 	// It runs on Clock, so tests that advance a fake Clock set it above
@@ -84,6 +90,10 @@ type ConduitRelayOptions struct {
 	PeerAuth relay.PeerAuth
 	// HTTPClient performs the self-check probe (nil: relay default).
 	HTTPClient *http.Client
+	// HopTLS is the TLS client configuration of every internal hop call
+	// to other relays (relay.NewHopClientTLS: the operator CA and server
+	// name; nil: the system roots). Verification is never skipped.
+	HopTLS *tls.Config
 	// ReconnectWindow is GoAway.reconnect_after_ms, the jitter window
 	// targets draw their redial delay from (0 = the relay default, 5s).
 	ReconnectWindow time.Duration
@@ -92,6 +102,9 @@ type ConduitRelayOptions struct {
 	// deadline ends by it (server.hub.conduit.lifetime_cap; 0 = the
 	// default, 3500s).
 	LifetimeCap time.Duration
+	// JitterLifetimeCap is relay.Config.JitterLifetimeCap: the
+	// per-session jitter of LifetimeCap (nil: none; ptone/scion#5245).
+	JitterLifetimeCap func(time.Duration) time.Duration
 	// AuthzRecheckInterval overrides ServerConfig.ConduitAuthzRecheckInterval
 	// (0 = use it; negative disables the sweep, for tests).
 	AuthzRecheckInterval time.Duration
@@ -140,7 +153,7 @@ func (s *Server) conduitServingIn(snap ExperimentsSnapshot) bool {
 // verifies with the same ring. Without it each node holds its own
 // in-memory ring, which hosted HA refuses (C8).
 func (s *Server) ConduitGrantRingShared() bool {
-	return len(s.encryptionKey) > 0
+	return s.cipher.Enabled()
 }
 
 // SetConduitRelayStartFailure records that the in-process relay failed to
@@ -214,9 +227,29 @@ func (s *Server) StartConduitRelay(ctx context.Context, opts ConduitRelayOptions
 			return s.conduitWelcomeGrantKeys(ctx)
 		}
 	}
+	revalidate := s.conduitRevalidatePrincipal
+	if h := opts.testHookRevalidated; h != nil {
+		revalidate = func(ctx context.Context, p relay.Principal) error {
+			err := s.conduitRevalidatePrincipal(ctx, p)
+			h()
+			return err
+		}
+	}
 	lifetimeCap := opts.LifetimeCap
 	if lifetimeCap == 0 {
 		lifetimeCap = config.ConduitDefaultLifetimeCap
+	}
+	// With HopTLS every hop client verifies peers with it; the clients
+	// keep the defaults they have without it (the relay's 10s client, the
+	// router's untimed one).
+	relayHTTPClient, peerHTTP := opts.HTTPClient, opts.HTTPClient
+	var hopWS *websocket.Dialer
+	if opts.HopTLS != nil {
+		hopWS = relay.NewHopWSDialer(opts.HopTLS)
+		if opts.HTTPClient == nil {
+			relayHTTPClient = relay.NewHopHTTPClientWithTimeout(opts.HopTLS, 10*time.Second)
+			peerHTTP = relay.NewHopHTTPClient(opts.HopTLS)
+		}
 	}
 	r, err := relay.New(relay.Config{
 		InstanceID:       id,
@@ -225,14 +258,17 @@ func (s *Server) StartConduitRelay(ctx context.Context, opts ConduitRelayOptions
 		Registry:         reg,
 		Store:            st,
 		GrantKeys:        grantKeys,
-		Revalidate:       s.conduitRevalidatePrincipal,
+		Revalidate:       revalidate,
 		Refresh:          s.conduitAgentRefresh,
 		PeerAuth:         opts.PeerAuth,
-		HTTPClient:       opts.HTTPClient,
+		HTTPClient:       relayHTTPClient,
+		WSDialer:         hopWS,
 		Clock:            opts.Clock,
 		Session:          conduit.Config{WriteWait: opts.sessionWriteWait},
 		ReconnectWindow:  opts.ReconnectWindow,
 		LifetimeCap:      lifetimeCap,
+		// Per-session jitter of the cap (ptone/scion#5245).
+		JitterLifetimeCap: opts.JitterLifetimeCap,
 		OnBrokerSessionsSuperseded: func(brokerID string, closed int) {
 			s.recordBrokerSessionsSuperseded(brokerID, brokerSupersededAtAdmission, closed)
 		},
@@ -246,7 +282,7 @@ func (s *Server) StartConduitRelay(ctx context.Context, opts ConduitRelayOptions
 		Relay:    r,
 		Registry: reg,
 		Store:    st,
-		Peers:    &relay.PeerClient{HTTP: opts.HTTPClient, Auth: opts.PeerAuth},
+		Peers:    &relay.PeerClient{HTTP: peerHTTP, WS: hopWS, Auth: opts.PeerAuth},
 		Now:      now,
 		Brokers:  newLegacyBrokerResolver(s.controlChannel, id),
 	})
@@ -348,16 +384,44 @@ func (s *Server) conduitRefreshGrantKeys(ctx context.Context) []grant.WireKey {
 	return grant.ToWire(keys)
 }
 
+// SetConduitShutdownGrace records server.hub.conduit.shutdown_grace (the
+// time the platform allows between SIGTERM and process kill) when it is
+// set, so every relay shutdown path caps the GoAway drain deadline at
+// grace - 2s: the SIGTERM drain (DrainConduitForShutdown) and the
+// teardown's shutdownConduitRelay, which runs alone when the server
+// context was cancelled without the SIGTERM drain (ptone/scion#5105
+// timing). Unset (never called), the teardown's drain stays uncapped.
+func (s *Server) SetConduitShutdownGrace(grace time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.conduitShutdownGrace, s.conduitShutdownGraceSet = grace, true
+}
+
+// conduitShutdownGraceSetting returns the grace SetConduitShutdownGrace
+// recorded and whether it was set.
+func (s *Server) conduitShutdownGraceSetting() (time.Duration, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.conduitShutdownGrace, s.conduitShutdownGraceSet
+}
+
 // shutdownConduitRelay drains the relay (relay row draining, GoAway to every
-// session, wait until ctx is done). It runs first in CleanupResources. The
-// relay marks session rows draining with a bounded number of writes in
-// flight; one batched per-relay UPDATE is tracked in ptone/scion#2897.
+// session, wait until ctx is done). It runs first in CleanupResources. With
+// a shutdown grace recorded (SetConduitShutdownGrace), the GoAway drain
+// deadline is capped as in the SIGTERM drain; when that drain already ran,
+// this only waits for it. The relay marks session rows draining with a
+// bounded number of writes in flight; one batched per-relay UPDATE is
+// tracked in ptone/scion#2897.
 func (s *Server) shutdownConduitRelay(ctx context.Context) {
 	rt := s.conduit.Load()
 	if rt == nil {
 		return
 	}
-	if err := rt.relay.Shutdown(ctx); err != nil {
+	var opts relay.ShutdownOptions
+	if grace, ok := s.conduitShutdownGraceSetting(); ok {
+		opts = relay.ShutdownOptions{CapDrain: true, DrainCap: relay.ShutdownDrainCap(grace)}
+	}
+	if err := rt.relay.ShutdownWith(ctx, opts); err != nil {
 		slog.Warn("Conduit relay shutdown", "error", err)
 	}
 }
@@ -525,6 +589,8 @@ func (s *Server) handleConduit(w http.ResponseWriter, r *http.Request) {
 			NotFound(w, "route")
 		case r.Method != http.MethodGet:
 			MethodNotAllowed(w, http.MethodGet)
+		case rt.ingressServing():
+			s.serveConduitIngress(w, r, rt)
 		default:
 			s.refuseConduitExternal(w, r, rt)
 		}

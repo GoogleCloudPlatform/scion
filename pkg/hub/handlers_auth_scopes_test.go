@@ -242,10 +242,10 @@ func TestUATScopes_NoPolicyScopesExist(t *testing.T) {
 // authority-escalation operations.
 //
 // user.update and user.suspend have hub-only selectors, pinned by
-// TestUATScopes_UserUpdateAndSuspendAreHubOnly; user.promote has none.
+// TestUATScopes_UserUpdateAndSuspendAreHubOnly; user.promote and
+// user.delete by TestUATScopes_UserPromoteAndDeleteAreHubOnly.
 func TestUATScopes_NoAuthorityEscalationScopes(t *testing.T) {
 	forbidden := map[string]bool{
-		"user.promote":            true,
 		"hub.maintenance.execute": true,
 		"hub.admin_mode.update":   true,
 		"hub.auth_reset.execute":  true,
@@ -262,6 +262,23 @@ func TestUATScopes_NoAuthorityEscalationScopes(t *testing.T) {
 // only on a hub boundary and only on the hub-level user record.
 func TestUATScopes_UserUpdateAndSuspendAreHubOnly(t *testing.T) {
 	for id, selector := range map[string]string{"user.update": "user:update", "user.suspend": "user:suspend"} {
+		var scope string
+		for _, perm := range permissions.Registry {
+			if perm.ID == id {
+				scope = perm.UATScope
+			}
+		}
+		assert.Equal(t, selector, scope, "%s selector", id)
+		assert.Equal(t, []permissions.BoundaryKind{permissions.BoundaryKindHub}, permissions.PermissionAllowedBoundaries[id], "%s boundaries", id)
+		assert.Equal(t, []permissions.TargetClassKind{permissions.TargetClassKindHubResource}, permissions.SupportedTargetClasses[id], "%s target classes", id)
+	}
+}
+
+// TestUATScopes_UserPromoteAndDeleteAreHubOnly pins the selectors of
+// user.promote and user.delete: user:promote and user:delete, each allowed
+// only on a hub boundary and only on the hub-level user record.
+func TestUATScopes_UserPromoteAndDeleteAreHubOnly(t *testing.T) {
+	for id, selector := range map[string]string{"user.promote": "user:promote", "user.delete": "user:delete"} {
 		var scope string
 		for _, perm := range permissions.Registry {
 			if perm.ID == id {
@@ -687,10 +704,10 @@ func TestAuthScopes_AliasEligibleOnlyWhenAllMembersEligible(t *testing.T) {
 	assert.Empty(t, manage.Eligibility.Reason, "an alias-level denial has no single reason code, only ineligibleMembers")
 }
 
-// TestAuthScopes_BoundaryParamValidation pins every 400 case for
-// ?boundary=/?projectId=, independent of whether hub-boundary eligibility
-// is enabled yet: when that single gate is flipped on, these structural
-// validations must keep returning 400 unchanged.
+// TestAuthScopes_BoundaryParamValidation pins the ?boundary=/?projectId=
+// forms: boundary=project needs a projectId, boundary=hub refuses one, and
+// an unknown boundary value is refused, each with 400; boundary=hub alone
+// answers hub eligibility; neither parameter gives the catalog alone.
 func TestAuthScopes_BoundaryParamValidation(t *testing.T) {
 	srv, s := testServer(t)
 
@@ -709,12 +726,19 @@ func TestAuthScopes_BoundaryParamValidation(t *testing.T) {
 		})
 	}
 
-	t.Run("boundary=hub alone is the single not-yet-enabled gate", func(t *testing.T) {
-		rec := doRequest(t, srv, http.MethodGet, "/api/v1/auth/scopes?boundary=hub", nil)
-		assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
-		var resp ErrorResponse
+	t.Run("boundary=hub alone answers hub eligibility", func(t *testing.T) {
+		userID := hubConfigTokenUser(t, s, "authscopes-boundary-hub-user", store.SystemRoleHubMember)
+		user, err := s.GetUser(context.Background(), userID)
+		require.NoError(t, err)
+		rec := doRequestAsUser(t, srv, user, http.MethodGet, "/api/v1/auth/scopes?boundary=hub", nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var resp AuthScopesResponse
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-		assert.Equal(t, "unsupported_boundary", resp.Error.Code)
+		require.NotEmpty(t, resp.Scopes)
+		for _, entry := range resp.Scopes {
+			require.NotNil(t, entry.Eligibility, "scope %s missing eligibility", entry.ID)
+			assert.Equal(t, TokenBoundaryDTO{Kind: "hub"}, entry.Eligibility.Boundary, "scope %s", entry.ID)
+		}
 	})
 
 	t.Run("neither boundary nor projectId keeps the unchanged catalog", func(t *testing.T) {
@@ -786,4 +810,292 @@ func TestTokenCreate_ScopeViolationNamesSelector(t *testing.T) {
 	require.NotNil(t, resp.Error.Details)
 	assert.Equal(t, "agent:delete", resp.Error.Details["selector"])
 	assert.Equal(t, string(MintDenialFlatRoleInsufficient), resp.Error.Details["reason"])
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/auth/scopes?boundary=hub and hub-boundary mint denials.
+// ---------------------------------------------------------------------------
+
+// authScopesHubByID requests hub-boundary eligibility as user over a
+// session and returns the entries by selector.
+func authScopesHubByID(t *testing.T, srv *Server, user *store.User) map[string]AuthScopeEntry {
+	t.Helper()
+	rec := doRequestAsUser(t, srv, user, http.MethodGet, "/api/v1/auth/scopes?boundary=hub", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var resp AuthScopesResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	byID := make(map[string]AuthScopeEntry, len(resp.Scopes))
+	for _, entry := range resp.Scopes {
+		byID[entry.ID] = entry
+	}
+	return byID
+}
+
+// assertHubEligibilityShape checks every hub-boundary entry: it carries a
+// hub eligibility answer, a selector not allowed on a hub boundary is
+// refused as boundary_not_allowed (or unknown_selector), and no entry
+// reports project_access_required.
+func assertHubEligibilityShape(t *testing.T, byID map[string]AuthScopeEntry) {
+	t.Helper()
+	require.NotEmpty(t, byID)
+	for id, entry := range byID {
+		require.NotNil(t, entry.Eligibility, "scope %s missing eligibility", id)
+		assert.Equal(t, TokenBoundaryDTO{Kind: "hub"}, entry.Eligibility.Boundary, "scope %s", id)
+		assert.NotEqual(t, string(MintDenialProjectAccessRequired), entry.Eligibility.Reason,
+			"scope %s: a hub boundary names no project", id)
+		hubAllowed := false
+		for _, b := range entry.AllowedBoundaries {
+			if b == string(BoundaryKindHub) {
+				hubAllowed = true
+			}
+		}
+		if !hubAllowed {
+			assert.False(t, entry.Eligibility.Eligible, "scope %s is not allowed on a hub boundary", id)
+			assert.Contains(t, []string{string(MintDenialBoundaryNotAllowed), string(MintDenialUnknownSelector)},
+				entry.Eligibility.Reason, "scope %s", id)
+		}
+		if entry.Eligibility.Eligible {
+			assert.Empty(t, entry.Eligibility.Reason, "scope %s", id)
+		} else {
+			assert.NotEmpty(t, entry.Eligibility.Reason, "scope %s", id)
+		}
+	}
+}
+
+// TestAuthScopes_HubEligibility_OrdinaryMember pins hub-boundary
+// eligibility for an ordinary member of one project: a self selector is
+// eligible, agent:attach is eligible through the relationship path,
+// broker:create is eligible through the hub-member role, and hub_config:read
+// and user:list, which the user holds through no role, are refused with
+// authority_required.
+func TestAuthScopes_HubEligibility_OrdinaryMember(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	projectID := tid("authscopes-hub-member-project")
+	ownerID := tid("authscopes-hub-member-owner")
+	memberID := tid("authscopes-hub-member-member")
+	createRS1Project(t, s, projectID, ownerID)
+	uatpMember(t, s, projectID, memberID)
+	member, err := s.GetUser(ctx, memberID)
+	require.NoError(t, err)
+
+	byID := authScopesHubByID(t, srv, member)
+	assertHubEligibilityShape(t, byID)
+
+	for _, id := range []string{"inbox:read", "agent:attach", "broker:create"} {
+		entry, ok := byID[id]
+		require.True(t, ok, "scope %s missing from response", id)
+		assert.True(t, entry.Eligibility.Eligible, "scope %s: reason %q", id, entry.Eligibility.Reason)
+	}
+	assert.Equal(t, string(permissions.MintEligibilityRelationship), byID["agent:attach"].EligibilityKind)
+
+	for _, id := range []string{"hub_config:read", "user:list"} {
+		entry, ok := byID[id]
+		require.True(t, ok, "scope %s missing from response", id)
+		assert.False(t, entry.Eligibility.Eligible, "scope %s", id)
+		assert.Equal(t, string(MintDenialAuthorityRequired), entry.Eligibility.Reason, "scope %s", id)
+	}
+}
+
+// TestAuthScopes_HubEligibility_NeverCollapsesToForbidden pins that a hub
+// eligibility request answers per entry with 200 for a user who holds no
+// project binding: a hub boundary names no project to hide.
+func TestAuthScopes_HubEligibility_NeverCollapsesToForbidden(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	userID := hubConfigTokenUser(t, s, "authscopes-hub-nobinding-user", store.SystemRoleHubMember)
+	user, err := s.GetUser(ctx, userID)
+	require.NoError(t, err)
+
+	byID := authScopesHubByID(t, srv, user)
+	assertHubEligibilityShape(t, byID)
+
+	assert.True(t, byID["inbox:read"].Eligibility.Eligible, "a self selector is eligible for any active user")
+	for _, id := range []string{"agent:attach", "agent:read", "hub_config:read"} {
+		entry, ok := byID[id]
+		require.True(t, ok, "scope %s missing from response", id)
+		assert.False(t, entry.Eligibility.Eligible, "scope %s", id)
+		assert.Equal(t, string(MintDenialAuthorityRequired), entry.Eligibility.Reason, "scope %s", id)
+	}
+}
+
+// TestAuthScopes_HubListingAgreesWithMint pins that the hub listing and
+// hub mint agree for the same principal over every catalog selector and
+// alias: a selector or alias listed eligible mints; a selector listed
+// ineligible is refused with 403 scope_violation naming that selector and
+// the listed reason; an alias listed ineligible is refused with 403
+// scope_violation naming one of its listed ineligible members.
+func TestAuthScopes_HubListingAgreesWithMint(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	projectID := tid("authscopes-hub-agree-project")
+	ownerID := tid("authscopes-hub-agree-owner")
+	memberID := tid("authscopes-hub-agree-member")
+	createRS1Project(t, s, projectID, ownerID)
+	uatpMember(t, s, projectID, memberID)
+	member, err := s.GetUser(ctx, memberID)
+	require.NoError(t, err)
+
+	byID := authScopesHubByID(t, srv, member)
+	ids := make([]string, 0, len(byID))
+	for id := range byID {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+
+	var sawEligible, sawAuthorityRequired bool
+	for _, id := range ids {
+		elig := byID[id].Eligibility
+		require.NotNil(t, elig, "scope %s missing eligibility", id)
+		rec := doRequestAsUser(t, srv, member, http.MethodPost, "/api/v1/auth/tokens", map[string]any{
+			"name": "hub-agree", "boundary": map[string]string{"kind": "hub"}, "scopes": []string{id},
+		})
+		if elig.Eligible {
+			sawEligible = true
+			require.Equal(t, http.StatusCreated, rec.Code, "listing said %s eligible, mint should succeed: %s", id, rec.Body.String())
+			var created TokenCreateResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &created))
+			require.NotNil(t, created.AccessToken)
+			// Keep the holder under the per-user token cap.
+			require.NoError(t, s.DeleteUserAccessToken(ctx, created.AccessToken.ID))
+			continue
+		}
+		if elig.Reason == string(MintDenialAuthorityRequired) {
+			sawAuthorityRequired = true
+		}
+		require.Equal(t, http.StatusForbidden, rec.Code, "listing said %s ineligible, mint should fail: %s", id, rec.Body.String())
+		var resp ErrorResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		assert.Equal(t, "scope_violation", resp.Error.Code, "scope %s", id)
+		require.NotNil(t, resp.Error.Details, "scope %s", id)
+		assert.Equal(t, id, resp.Error.Details["selector"], "scope %s", id)
+		assert.Equal(t, elig.Reason, resp.Error.Details["reason"], "scope %s", id)
+	}
+	assert.True(t, sawEligible, "precondition: some selector is eligible")
+	assert.True(t, sawAuthorityRequired, "precondition: some selector is refused with authority_required")
+
+	// Aliases: an alias listed eligible mints; one listed ineligible is
+	// refused with 403 scope_violation naming one of its listed ineligible
+	// members.
+	rec := doRequestAsUser(t, srv, member, http.MethodGet, "/api/v1/auth/scopes?boundary=hub", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var full AuthScopesResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &full))
+	require.NotEmpty(t, full.Aliases)
+	var sawIneligibleAlias bool
+	for _, alias := range full.Aliases {
+		require.NotNil(t, alias.Eligibility, "alias %s missing eligibility", alias.ID)
+		mint := doRequestAsUser(t, srv, member, http.MethodPost, "/api/v1/auth/tokens", map[string]any{
+			"name": "hub-agree-alias", "boundary": map[string]string{"kind": "hub"}, "scopes": []string{alias.ID},
+		})
+		if alias.Eligibility.Eligible {
+			require.Equal(t, http.StatusCreated, mint.Code, "listing said alias %s eligible, mint should succeed: %s", alias.ID, mint.Body.String())
+			var created TokenCreateResponse
+			require.NoError(t, json.Unmarshal(mint.Body.Bytes(), &created))
+			require.NotNil(t, created.AccessToken)
+			require.NoError(t, s.DeleteUserAccessToken(ctx, created.AccessToken.ID))
+			continue
+		}
+		sawIneligibleAlias = true
+		require.Equal(t, http.StatusForbidden, mint.Code, "listing said alias %s ineligible, mint should fail: %s", alias.ID, mint.Body.String())
+		var resp ErrorResponse
+		require.NoError(t, json.Unmarshal(mint.Body.Bytes(), &resp))
+		assert.Equal(t, "scope_violation", resp.Error.Code, "alias %s", alias.ID)
+		require.NotNil(t, resp.Error.Details, "alias %s", alias.ID)
+		assert.Contains(t, alias.Eligibility.IneligibleMembers, resp.Error.Details["selector"],
+			"alias %s: the refused selector is one of the listed ineligible members", alias.ID)
+		sel, _ := resp.Error.Details["selector"].(string)
+		entry, ok := byID[sel]
+		require.True(t, ok, "alias %s: refused selector %q is in the listing", alias.ID, sel)
+		require.NotNil(t, entry.Eligibility, "alias %s: refused selector %q has eligibility", alias.ID, sel)
+		assert.Equal(t, entry.Eligibility.Reason, resp.Error.Details["reason"],
+			"alias %s: mint's reason for %s matches the listing's reason", alias.ID, sel)
+	}
+	assert.True(t, sawIneligibleAlias, "precondition: some alias is ineligible on a hub boundary")
+}
+
+// TestTokenCreate_HubDenialNamesSelector pins the hub-boundary mint
+// refusal: 403 scope_violation naming the selector and authority_required.
+// A project-boundary refusal for a non-member stays the bare 403.
+func TestTokenCreate_HubDenialNamesSelector(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	projectID := tid("authscopes-hubdeny-project")
+	ownerID := tid("authscopes-hubdeny-owner")
+	createRS1Project(t, s, projectID, ownerID)
+	userID := hubConfigTokenUser(t, s, "authscopes-hubdeny-user", store.SystemRoleHubMember)
+	user, err := s.GetUser(ctx, userID)
+	require.NoError(t, err)
+
+	rec := doRequestAsUser(t, srv, user, http.MethodPost, "/api/v1/auth/tokens", map[string]any{
+		"name": "hubdeny", "boundary": map[string]string{"kind": "hub"}, "scopes": []string{"inbox:read", "hub_config:read"},
+	})
+	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	var resp ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, "scope_violation", resp.Error.Code)
+	require.NotNil(t, resp.Error.Details)
+	assert.Equal(t, "hub_config:read", resp.Error.Details["selector"])
+	assert.Equal(t, string(MintDenialAuthorityRequired), resp.Error.Details["reason"])
+
+	rec = doRequestAsUser(t, srv, user, http.MethodPost, "/api/v1/auth/tokens", map[string]any{
+		"name": "projdeny", "projectId": projectID, "scopes": []string{"agent:read"},
+	})
+	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.JSONEq(t, `{"error":{"code":"forbidden","message":"forbidden"}}`, rec.Body.String())
+
+	tokens, err := s.ListUserAccessTokens(ctx, userID)
+	require.NoError(t, err)
+	assert.Empty(t, tokens, "a refused mint stores no token")
+}
+
+// TestAuthScopes_TokenCannotRequestBoundaryEligibility pins that a user
+// access token reads the selector catalog only: a project token and a hub
+// token naming a boundary or project (also an empty or unknown boundary)
+// are refused with the session-only 403 before any parameter validation,
+// and the same tokens read the catalog with 200.
+func TestAuthScopes_TokenCannotRequestBoundaryEligibility(t *testing.T) {
+	srv, s := testServer(t)
+	projectID := tid("authscopes-token-elig-project")
+	ownerID := tid("authscopes-token-elig-owner")
+	createRS1Project(t, s, projectID, ownerID)
+	ensureHubMembership(context.Background(), s, ownerID)
+
+	tokens := map[string]string{
+		"project token": mintHubConfigToken(t, srv, ownerID, projectBoundary(projectID), "agent:read"),
+		"hub token":     mintHubConfigToken(t, srv, ownerID, hubBoundary(), "inbox:read"),
+	}
+	refused := []string{
+		"/api/v1/auth/scopes?projectId=" + projectID,
+		"/api/v1/auth/scopes?boundary=project&projectId=" + projectID,
+		"/api/v1/auth/scopes?boundary=hub",
+		"/api/v1/auth/scopes?boundary=hub&projectId=" + projectID,
+		"/api/v1/auth/scopes?projectId=",
+		"/api/v1/auth/scopes?boundary=",
+		"/api/v1/auth/scopes?boundary=bogus",
+	}
+	for name, key := range tokens {
+		t.Run(name, func(t *testing.T) {
+			for _, path := range refused {
+				rec := doRequestWithToken(t, srv, key, http.MethodGet, path, nil)
+				require.Equal(t, http.StatusForbidden, rec.Code, "%s: %s", path, rec.Body.String())
+				var resp ErrorResponse
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+				assert.Equal(t, ErrCodeForbidden, resp.Error.Code, path)
+				require.NotNil(t, resp.Error.Details, path)
+				assert.Equal(t, "CREDENTIAL_MANAGEMENT", resp.Error.Details["reason"], path)
+				assert.Equal(t, "session_required", resp.Error.Details["credential"], path)
+				assert.NotContains(t, rec.Body.String(), `"scopes"`, path)
+			}
+
+			rec := doRequestWithToken(t, srv, key, http.MethodGet, "/api/v1/auth/scopes", nil)
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			var resp AuthScopesResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+			require.NotEmpty(t, resp.Scopes)
+			for _, entry := range resp.Scopes {
+				assert.Nil(t, entry.Eligibility, "catalog-only response must not include eligibility")
+			}
+		})
+	}
 }

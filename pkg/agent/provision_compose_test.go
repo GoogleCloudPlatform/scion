@@ -321,6 +321,10 @@ default_harness_config: settings-hc
 	})
 
 	t.Run("error when no harness-config resolved", func(t *testing.T) {
+		// The embedded defaults set default_harness_config; clear it, so
+		// nothing resolves.
+		_ = os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte("schema_version: \"1\"\ndefault_harness_config: \"\"\n"), 0644)
+		t.Cleanup(func() { _ = os.Remove(filepath.Join(globalScionDir, "settings.yaml")) })
 		_, _, _, err := ProvisionAgent(context.Background(), "no-hc", "no-default-test", "", "", projectScionDir, "", "", "", "")
 		if err == nil {
 			t.Fatal("expected error when no harness-config can be resolved")

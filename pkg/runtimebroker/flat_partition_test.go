@@ -237,7 +237,7 @@ func newPartitionInstanceWithLocks(t *testing.T, d *sharedDaemon, key, stateDir 
 		Instance: config.V1RuntimeBrokerInstanceConfig{Key: key, Name: key, RuntimeTarget: &config.V1RuntimeTargetConfig{Type: "docker"}}}
 	cfg.InMemoryCredentials = &brokercredentials.BrokerCredentials{BrokerID: id.RuntimeBrokerID, SecretKey: "c2VjcmV0", HubEndpoint: cfg.HubEndpoint}
 	cfg.WorkspaceLocks = locks
-	srv := New(cfg, mgr, rt)
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 	return &partitionInstance{key: key, identity: id, stateDir: stateDir, mgr: mgr, rt: rt, srv: srv}
 }
 

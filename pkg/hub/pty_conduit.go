@@ -72,6 +72,10 @@ const (
 	ptyReasonRegistryUnavailable = "registry_unavailable"
 	ptyReasonAgentPTYUnavailable = "agent_pty_unavailable"
 	ptyReasonManagedRuntime      = wsprotocol.PTYReasonManagedRuntime
+	// ptyReasonDelegatedBrokerOnly: an agent delegated credential attaches
+	// only on the broker terminal path, and this attach would take the
+	// agent's conduit path. Not temporary: retrying does not change it.
+	ptyReasonDelegatedBrokerOnly = "delegated_credential_broker_path_only"
 )
 
 // Close reasons of an agent-path PTY stream that the hub chooses itself.
@@ -142,6 +146,21 @@ func writePTYPreflightOK(w http.ResponseWriter, d ptyPathDecision) {
 // A managed runtime (isManagedAgentRuntime) never takes the broker path:
 // see managedPTYPath.
 func (s *Server) resolvePTYPath(ctx context.Context, identity Identity, agent *store.Agent) ptyPathDecision {
+	d := s.resolvePTYPathFor(ctx, identity, agent)
+	if d.Path == ptyPathAgent && isDelegatedAgentIdentity(identity) {
+		// An agent delegated credential is authorized at the handshake and
+		// attaches only on the broker terminal path; conduit streams admit
+		// only user and agent identities (mintConduitGrant, the backstop).
+		// Refused before any upgrade, on the preflight and the WebSocket
+		// open alike (.design/agent-delegation.md §16.6).
+		return ptyRefusal(http.StatusServiceUnavailable, wsprotocol.ErrCodeRuntimeAttachUnsupported,
+			"Attach with a delegated credential is available only on the runtime broker's terminal path", ptyReasonDelegatedBrokerOnly)
+	}
+	return d
+}
+
+// resolvePTYPathFor is resolvePTYPath's path decision for any identity.
+func (s *Server) resolvePTYPathFor(ctx context.Context, identity Identity, agent *store.Agent) ptyPathDecision {
 	if isManagedAgentRuntime(agent.Runtime) {
 		return s.managedPTYPath(ctx, identity, agent)
 	}
@@ -173,6 +192,13 @@ func (s *Server) resolvePTYPath(ctx context.Context, identity Identity, agent *s
 			"Agent has no runtime broker", "")
 	}
 	if !s.experimentEnabled(conduitExperiment) {
+		// No path without a target-side deadline (design §3.5 Q14,
+		// v2.21.46): in external relay mode with enforce a user attach never
+		// takes the broker's terminal path, even with hub.conduit off at
+		// run time.
+		if s.conduitLegacyRouteRefused(ctx, identity, conduitRoutePTY, ptyReasonConduitNotServing, conduitCauseConduitNotRoutable, agent.ID) {
+			return ptyRefusal(http.StatusServiceUnavailable, ErrCodeUnavailable, conduitNotRoutableMessage, ptyReasonConduitNotServing)
+		}
 		return s.brokerPTYPath(ctx, agent, false)
 	}
 	// Targets without stream renewal (contracts, Target lacks stream
@@ -247,6 +273,10 @@ func (s *Server) managedPTYPath(ctx context.Context, identity Identity, agent *s
 func (s *Server) agentPTYPath(ctx context.Context, identity Identity, agent *store.Agent, brokerSkipped bool) ptyPathDecision {
 	rtr := s.conduitRouter()
 	if rtr == nil {
+		if brokerSkipped {
+			// No route at all, and the broker's terminal path is not used.
+			s.conduitLegacyRouteRefused(ctx, identity, conduitRoutePTY, ptyReasonConduitNotServing, conduitCauseConduitNotRoutable, agent.ID)
+		}
 		return ptyRefusal(http.StatusServiceUnavailable, ErrCodeUnavailable,
 			"The agent's runtime does not support attach, and conduit is not serving on this hub node", ptyReasonConduitNotServing)
 	}
@@ -282,8 +312,11 @@ func (s *Server) agentPTYPath(ctx context.Context, identity Identity, agent *sto
 		// an agent image without conduit from a session that is briefly
 		// reconnecting, so this is the temporary failure, never
 		// stream_renewal_unsupported (design v2.21.46 §3.5 Q14).
-		return ptyRefusal(http.StatusServiceUnavailable, ErrCodeUnavailable,
-			"Conduit routing is unavailable", ptyReasonRegistryUnavailable)
+		message := "Conduit routing is unavailable"
+		if s.conduitLegacyRouteRefused(ctx, identity, conduitRoutePTY, ptyReasonRegistryUnavailable, conduitCauseNoConduitSession, agent.ID) {
+			message = conduitNoSessionMessage
+		}
+		return ptyRefusal(http.StatusServiceUnavailable, ErrCodeUnavailable, message, ptyReasonRegistryUnavailable)
 	default:
 		return ptyRefusal(http.StatusServiceUnavailable, wsprotocol.ErrCodeRuntimeAttachUnsupported,
 			"The agent's runtime does not support attach, and the agent has no conduit session that serves PTY",
@@ -480,8 +513,8 @@ func (s *Server) runAgentPTY(ctx context.Context, conn *websocket.Conn, identity
 		slog.Error("PTY session error", "agent_id", agent.ID, "slug", agent.Slug, "path", string(ptyPathAgent), "error", err)
 	}
 	code, reason := session.CloseCause()
-	slog.Info("PTY session ended", "agent_id", agent.ID, "slug", agent.Slug, "path", string(ptyPathAgent),
-		"conduit_session_id", up.sessionID, "close_code", code, "close_reason", reason)
+	slog.Info("PTY session ended", append([]any{"agent_id", agent.ID, "slug", agent.Slug, "path", string(ptyPathAgent),
+		"conduit_session_id", up.sessionID, "close_code", code, "close_reason", reason}, up.route...)...)
 }
 
 // ptyAgentReadBuffer is the size of one terminal output read from a
@@ -499,8 +532,11 @@ type agentPTYUpstream struct {
 
 	st        conduit.Stream
 	sessionID string
-	untrack   func()
-	buf       []byte
+	// route holds the routing log fields of the open stream
+	// (conduitRouteLogAttrs).
+	route   []any
+	untrack func()
+	buf     []byte
 	// authzClose is set when the re-check closed the stream.
 	authzClose atomic.Pointer[StreamClosedError]
 }
@@ -556,6 +592,7 @@ func (u *agentPTYUpstream) Open(ctx context.Context, cols, rows int) error {
 		}
 		u.st = st
 		u.sessionID = res.Record.SessionID
+		u.route = conduitRouteLogAttrs(res)
 		target := conduitLeafTarget(res, st, bridge)
 		tracked := &conduitUserStream{
 			Kind:      grant.StreamKindPTY,
@@ -581,6 +618,7 @@ func (u *agentPTYUpstream) Open(ctx context.Context, cols, rows int) error {
 		}
 		return ptyAgentOpenError(err)
 	}
+	slog.Info("Conduit PTY stream opened", append([]any{"agent_id", u.agent.ID, "conduit_session_id", u.sessionID}, u.route...)...)
 	u.buf = make([]byte, ptyAgentReadBuffer)
 	return nil
 }
@@ -687,12 +725,16 @@ func ptyLeafCloseForStream(err error) error {
 // ptyLeafCloseCode maps a conduit close code (design §3.3.1) to the PTY
 // leaf close code (pkg/wsprotocol/pty_close.go). Codes both contracts
 // define keep their meaning and pass through; 0 is the normal close;
-// 4499 (open cancelled) is a retriable 4503; any other code is 1011 with
-// its reason kept for diagnosis.
+// 4499 (open cancelled) is a retriable 4503; any other code is 1011. The
+// reason reaches the client's close frame, so only a fixed protocol token
+// is passed on (relayableStreamCloseReason); any other reason goes to the
+// hub log.
 func ptyLeafCloseCode(code uint32, reason string) (int, string) {
-	switch code {
-	case conduit.CloseNormal:
+	if code == conduit.CloseNormal {
 		return wsprotocol.ClosePTYNormal, ""
+	}
+	reason = relayableStreamCloseReason("conduit", int(code), reason)
+	switch code {
 	case conduit.CloseUnauthenticated, conduit.CloseForbidden, uint32(wsprotocol.ClosePTYAgentNotFound),
 		conduit.CloseRelayRestart, conduit.CloseRelayTimeout, uint32(wsprotocol.ClosePTYInternalError):
 		return int(code), reason

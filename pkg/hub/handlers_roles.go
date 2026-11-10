@@ -345,12 +345,17 @@ func (s *Server) createRoleBindingScopeAware(w http.ResponseWriter, r *http.Requ
 	requireHubAuth := peek.ScopeType != store.RoleScopeProject
 	if peek.ScopeType == store.RoleScopeProject && peek.RoleDefinitionID != "" {
 		// Check if this is a built-in project role.
+		// A missing role is refused by createRoleBinding; any other lookup
+		// error answers 500 before an admission decision.
 		roleDef, err := s.store.GetRoleDefinition(r.Context(), peek.RoleDefinitionID)
-		if err == nil && !store.IsBuiltInProjectMembershipRole(roleDef.Name) {
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusInternalServerError, "internal_error", "failed to load role definition", nil)
+			return
+		}
+		if err == nil && !store.IsBuiltInProjectMembershipRoleDef(roleDef) {
 			// Custom project role — require hub-level auth.
 			requireHubAuth = true
 		}
-		// If role lookup fails, createRoleBinding will handle the error.
 	}
 
 	if requireHubAuth {
@@ -358,7 +363,7 @@ func (s *Server) createRoleBindingScopeAware(w http.ResponseWriter, r *http.Requ
 			decision := s.authzService.Decide(r.Context(), AuthzRequest{
 				Principal:  principalContextForIdentity(user),
 				Credential: credentialContextForIdentity(user),
-				Resource:   Resource{Type: "role_binding", ID: "hub"},
+				Resource:   hubScopedResource("role_binding", "hub"),
 				Action:     Action("create"),
 				Permission: "role_binding.create",
 			})
@@ -884,6 +889,7 @@ var systemRoleNames = map[string]bool{
 	store.ProjectRoleOwner:     true,
 	store.ProjectRoleAdmin:     true,
 	store.ProjectRoleMember:    true,
+	store.ProjectRoleViewer:    true,
 	store.AgentRoleDefNone:     true,
 	store.AgentRoleDefReadonly: true,
 	store.AgentRoleDefBaseline: true,
@@ -1440,7 +1446,7 @@ func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request, user 
 			BadRequest(w, "role definition not found")
 			return
 		}
-		if store.IsBuiltInProjectMembershipRole(roleDef.Name) {
+		if store.IsBuiltInProjectMembershipRoleDef(roleDef) {
 			// Built-in project role — route through membership service.
 			if s.membershipService == nil {
 				writeError(w, http.StatusInternalServerError, "internal_error",
@@ -1939,7 +1945,7 @@ func (s *Server) requireWritePermissionForRole(w http.ResponseWriter, r *http.Re
 	decision := s.authzService.Decide(r.Context(), AuthzRequest{
 		Principal:  principalContextForIdentity(user),
 		Credential: credentialContextForIdentity(user),
-		Resource:   Resource{Type: "role", ID: "hub"},
+		Resource:   hubScopedResource("role", "hub"),
 		Action:     Action(action),
 		Permission: permission,
 	})
@@ -1970,7 +1976,7 @@ func (s *Server) requireWritePermissionForRoleBinding(w http.ResponseWriter, r *
 	decision := s.authzService.Decide(r.Context(), AuthzRequest{
 		Principal:  principalContextForIdentity(user),
 		Credential: credentialContextForIdentity(user),
-		Resource:   Resource{Type: "role_binding", ID: "hub"},
+		Resource:   hubScopedResource("role_binding", "hub"),
 		Action:     Action(action),
 		Permission: permission,
 	})

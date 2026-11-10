@@ -75,8 +75,11 @@ var fedCredentialCensus = map[string]string{
 	"federation_auth.go:hasHubAgentClaims":                       fedCensusNoCredential,
 	"handlers_project_visitors.go:(*Server).visitorGrantIssuer":  fedCensusNoCredential,
 	"operational_settings.go:ApplySnapshot":                      fedCensusNoCredential,
-	"server.go:New":                                              fedCensusNoCredential,
-	"test_admin_gate.go:(*Server).VerifyTestAdminFederationOff":  fedCensusNoCredential,
+	// Names the federation header only to remove it from a port proxy
+	// request before the request reaches the agent's app; verifies nothing.
+	"port_forward_handlers.go:sensitiveHeader": fedCensusNoCredential,
+	"server.go:New": fedCensusNoCredential,
+	"test_admin_gate.go:(*Server).VerifyTestAdminFederationOff": fedCensusNoCredential,
 	// Reads the federation header only to leave such a request unchanged;
 	// it verifies a proxy driver's Google ID token, never a federation
 	// credential.

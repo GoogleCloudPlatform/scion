@@ -17,12 +17,16 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
@@ -34,6 +38,65 @@ type sseAgentStore struct {
 	agents    map[string]*store.Agent
 	lookupErr error
 	authzErr  error
+}
+
+// sseStatusWriter is an httptest.ResponseRecorder that reports, once, when
+// the handler has written its status: an explicit WriteHeader, a first body
+// write or a flush (each of which fixes the status).
+type sseStatusWriter struct {
+	*httptest.ResponseRecorder
+	once    sync.Once
+	written chan struct{}
+}
+
+func (w *sseStatusWriter) signal() { w.once.Do(func() { close(w.written) }) }
+
+func (w *sseStatusWriter) WriteHeader(code int) {
+	w.ResponseRecorder.WriteHeader(code)
+	w.signal()
+}
+
+func (w *sseStatusWriter) Write(b []byte) (int, error) {
+	n, err := w.ResponseRecorder.Write(b)
+	w.signal()
+	return n, err
+}
+
+func (w *sseStatusWriter) Flush() {
+	w.ResponseRecorder.Flush()
+	w.signal()
+}
+
+// serveSSELive runs ws.handleSSE on a request built by mkReq with a LIVE
+// context, so the authorization decision runs on a context that has not
+// ended. Once the handler has written its status (or returned), the context
+// is cancelled to end the stream, and serveSSELive waits for the handler to
+// return before handing back the recorder. Only the end of the stream is
+// driven by the cancellation.
+func serveSSELive(t *testing.T, ws *WebServer, mkReq func(ctx context.Context) *http.Request) *httptest.ResponseRecorder {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w := &sseStatusWriter{ResponseRecorder: httptest.NewRecorder(), written: make(chan struct{})}
+	req := mkReq(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ws.handleSSE(w, req)
+	}()
+	select {
+	case <-w.written:
+	case <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("handleSSE wrote no status within 30s")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("handleSSE did not return within 30s of the cancellation")
+	}
+	return w.ResponseRecorder
 }
 
 func sseAgentRequest(ctx context.Context, userID, role string, subjects ...string) *http.Request {
@@ -84,7 +147,19 @@ type mockAuthzStore struct {
 	roleDefinitions       map[string]*store.RoleDefinition
 	projects              []store.Project                     // injectable project list for wildcard expansion tests
 	projectMemberships    map[string]*store.ProjectMembership // key: "projectID:userID"
-	listProjectsReturnNil bool                                // when true, ListProjects returns (nil, nil)
+	listProjectsReturnNil bool                                // when true, the project lists return (nil, nil)
+
+	// Project paging (ptone/scion#1741). projectPageSize > 0 serves
+	// projects in pages of that size with an index cursor; it is capped by
+	// the request's Limit when that is smaller.
+	projectPageSize       int
+	listProjectsErrAfter  int  // > 0: calls after this many fail
+	stuckProjectCursor    bool // every page is the first, with the same cursor
+	listProjectsCalls     int  // list calls of either kind
+	lastListProjectsLimit int
+	// listProjectsFullCalls counts ListProjects calls only (the computed
+	// fields; ListProjectSummaries skips them).
+	listProjectsFullCalls int
 }
 
 // sseMessageIDs returns the message ids of the events written to an SSE body.
@@ -263,11 +338,12 @@ func (m *mockAuthzStore) GetRoleDefinitionByName(_ context.Context, name, scopeT
 	return nil, store.ErrNotFound
 }
 
-// GetUser serves the test-identity grant clamp's kind read
-// (authz_test_fixture_clamp.go): the mock holds no user rows, so every
-// principal reads as an ordinary user.
-func (m *mockAuthzStore) GetUser(_ context.Context, _ string) (*store.User, error) {
-	return nil, store.ErrNotFound
+// GetUser reports every principal as an existing, active account; the
+// tests using this mock exercise role bindings, not account status. It also
+// serves the test-identity grant clamp's kind read
+// (authz_test_fixture_clamp.go): the empty Kind reads as an ordinary user.
+func (m *mockAuthzStore) GetUser(_ context.Context, id string) (*store.User, error) {
+	return &store.User{ID: id, Status: store.UserStatusActive}, nil
 }
 
 func (m *mockAuthzStore) GetRoleDefinitionsByIDs(_ context.Context, ids []string) (map[string]*store.RoleDefinition, error) {
@@ -299,15 +375,57 @@ func (m *mockAuthzStore) ListAccessConstraints(_ context.Context, _, _ int) ([]*
 	return nil, nil
 }
 
-func (m *mockAuthzStore) ListProjects(_ context.Context, _ store.ProjectFilter, _ store.ListOptions) (*store.ListResult[store.Project], error) {
+// ListProjects serves m.projects like ListProjectSummaries and also counts
+// listProjectsFullCalls, so a test can check that a caller used summaries.
+func (m *mockAuthzStore) ListProjects(_ context.Context, _ store.ProjectFilter, opts store.ListOptions) (*store.ListResult[store.Project], error) {
+	m.listProjectsFullCalls++
+	return m.pageProjects(opts)
+}
+
+// ListProjectSummaries serves m.projects, paged per projectPageSize.
+func (m *mockAuthzStore) ListProjectSummaries(_ context.Context, _ store.ProjectFilter, opts store.ListOptions) (*store.ListResult[store.Project], error) {
+	return m.pageProjects(opts)
+}
+
+// pageProjects is one list call of either kind (counted in
+// listProjectsCalls).
+func (m *mockAuthzStore) pageProjects(opts store.ListOptions) (*store.ListResult[store.Project], error) {
+	m.listProjectsCalls++
+	m.lastListProjectsLimit = opts.Limit
 	if m.listProjectsReturnNil {
 		return nil, nil
+	}
+	if m.listProjectsErrAfter > 0 && m.listProjectsCalls > m.listProjectsErrAfter {
+		return nil, errors.New("list projects failed")
 	}
 	items := m.projects
 	if items == nil {
 		items = []store.Project{}
 	}
-	return &store.ListResult[store.Project]{Items: items, TotalCount: len(items)}, nil
+	if m.projectPageSize <= 0 {
+		return &store.ListResult[store.Project]{Items: items, TotalCount: len(items)}, nil
+	}
+	size := m.projectPageSize
+	if opts.Limit > 0 && opts.Limit < size {
+		size = opts.Limit
+	}
+	start := 0
+	if opts.Cursor != "" && !m.stuckProjectCursor {
+		n, err := strconv.Atoi(opts.Cursor)
+		if err != nil {
+			return nil, err
+		}
+		start = n
+	}
+	end := min(start+size, len(items))
+	res := &store.ListResult[store.Project]{Items: items[start:end]}
+	switch {
+	case m.stuckProjectCursor:
+		res.NextCursor = "stuck"
+	case end < len(items):
+		res.NextCursor = strconv.Itoa(end)
+	}
+	return res, nil
 }
 
 func (w *sseFlushWriter) Flush() {

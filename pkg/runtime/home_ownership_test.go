@@ -1,13 +1,13 @@
+//go:build unix
+
 // Copyright 2026 The Scion Authors.
 
 package runtime
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -728,6 +728,9 @@ func TestAdvertisedHostOwnerIDs_MatchesRunArgs(t *testing.T) {
 		}
 		cfg := minimalRunConfig()
 		cfg.WorkspaceBackendName, cfg.NFSUID, cfg.NFSGID = tc.backend, tc.nfsUID, tc.nfsGID
+		if tc.backend == "nfs" {
+			cfg = withNFSWorkspace(t, cfg)
+		}
 		args, err := buildCommonRunArgs(cfg)
 		if err != nil {
 			t.Fatalf("buildCommonRunArgs(%q): %v", tc.backend, err)
@@ -735,14 +738,6 @@ func TestAdvertisedHostOwnerIDs_MatchesRunArgs(t *testing.T) {
 		assertEnvInArgs(t, args, fmt.Sprintf("SCION_HOST_UID=%d", uid), "advertised uid")
 		assertEnvInArgs(t, args, fmt.Sprintf("SCION_HOST_GID=%d", gid), "advertised gid")
 	}
-}
-
-// captureRuntimeLog sends runtime log lines to a buffer for the rest of the test.
-func captureRuntimeLog(t *testing.T) *bytes.Buffer {
-	t.Helper()
-	var logs bytes.Buffer
-	setRuntimeLogHandler(t, slog.NewTextHandler(&logs, nil))
-	return &logs
 }
 
 // The leftover sweep is cleanup only: when listing fails, an id is not a
@@ -758,7 +753,9 @@ func TestDockerRuntime_RepairAgentHomeOwnershipSweepFailures(t *testing.T) {
 		{"listing fails", func(o *fakeRepairOpts) { o.psFails = true }, nil, "Could not list leftover"},
 		{"invalid id", func(o *fakeRepairOpts) { o.psOut = "not-an-id" }, nil, "Ignoring unexpected leftover"},
 		{"overlong invalid id", func(o *fakeRepairOpts) { o.psOut = strings.Repeat("z", 64) + "TAILTAIL" }, nil, "(72 bytes total)"},
-		{"invalid ids mixed with a valid one", func(o *fakeRepairOpts) { o.psOut = "bad1\n0123456789ab\nbad2\nbad3\nbad4" }, []string{"rm -f 0123456789ab"}, "count=4"},
+		// The rejected ids are not hex, so they cannot appear by chance in
+		// the random hex helper name every case logs.
+		{"invalid ids mixed with a valid one", func(o *fakeRepairOpts) { o.psOut = "zz1\n0123456789ab\nzz2\nzz3\nzz4" }, []string{"rm -f 0123456789ab"}, `count=4 first="[zz1 zz2 zz3]"`},
 		{"removal fails", func(o *fakeRepairOpts) { o.psOut = "0123456789ab"; o.rmFails = true }, []string{"rm -f 0123456789ab"}, "Could not remove leftover"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -786,7 +783,7 @@ func TestDockerRuntime_RepairAgentHomeOwnershipSweepFailures(t *testing.T) {
 			if strings.Contains(logs.String(), "TAILTAIL") {
 				t.Errorf("log quotes the tail of an overlong rejected id: %s", logs.String())
 			}
-			if strings.Contains(logs.String(), "bad4") {
+			if strings.Contains(logs.String(), "zz4") {
 				t.Errorf("log quotes more than the first three rejected ids: %s", logs.String())
 			}
 		})

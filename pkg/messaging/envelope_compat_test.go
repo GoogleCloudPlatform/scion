@@ -127,6 +127,18 @@ func TestMapLegacyType_AllOldTypes(t *testing.T) {
 			wantKind:   KindText,
 			wantIntent: ptrIntent(IntentRequest),
 		},
+		{
+			name:       "choice-prompt → text/question",
+			oldType:    messages.TypeChoicePrompt,
+			wantKind:   KindText,
+			wantIntent: ptrIntent(IntentQuestion),
+		},
+		{
+			name:       "choice-response → text/inform",
+			oldType:    messages.TypeChoiceResponse,
+			wantKind:   KindText,
+			wantIntent: ptrIntent(IntentInform),
+		},
 	}
 
 	for _, tc := range tests {

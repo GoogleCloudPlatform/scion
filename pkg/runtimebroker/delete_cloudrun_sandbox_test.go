@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
@@ -69,10 +70,10 @@ func TestDeleteAgent_CloudRunSandbox_HubNameDeletesSandbox(t *testing.T) {
 	}
 	rt := runtime.NewCloudRunSandboxRuntimeForTest(bin, statePath, filepath.Join(dir, "scion"))
 
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
-	srv := New(cfg, agent.NewManager(rt), rt)
+	srv := New(cfg, agent.NewManager(rt), rt, config.RuntimeBuildRecord{})
 	// The agents' files exist, so a resolution that misses the sandbox
 	// still answers 204 (a files-only delete).
 	scionA, infoA := makeHubProject(t, home, "proj-a", scopeProjA, "dev")

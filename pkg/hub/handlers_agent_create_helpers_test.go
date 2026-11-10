@@ -34,7 +34,7 @@ import (
 )
 
 func TestPopulateAgentConfig_RelativeWorkspacePreserved(t *testing.T) {
-	// Set up a temp HOME so hubManagedProjectPath can resolve.
+	// Set up a temp HOME so the hub-managed workspace path can resolve.
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 
@@ -89,7 +89,7 @@ func TestPopulateAgentConfig_RelativeWorkspacePreserved(t *testing.T) {
 
 		require.NoError(t, srv.populateAgentConfig(context.Background(), agent, project, nil))
 
-		expectedPath, err := hubManagedProjectPath(slug)
+		expectedPath, err := localProjectPath(slug)
 		require.NoError(t, err)
 		assert.Equal(t, expectedPath, agent.AppliedConfig.Workspace,
 			"empty workspace should be overwritten with hub-managed path")

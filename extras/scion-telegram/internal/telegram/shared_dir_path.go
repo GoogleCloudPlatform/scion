@@ -33,15 +33,22 @@ var loadSharedDirSettings = scionruntime.LoadSharedDirStorageSettings
 // scionruntime.ErrSharedDirStorageUnavailable; callers must not fall back
 // to the local layout, which no agent mounts in that case.
 func resolveSharedDirHostPath(home, slug, projectID, name string) (string, error) {
-	gs, err := loadSharedDirSettings()
-	if err != nil {
-		return "", err
-	}
-	res, err := scionruntime.ResolveSharedDirHostPath(gs, home, slug, projectID, name)
+	res, err := resolveSharedDir(home, slug, projectID, name)
 	if err != nil {
 		return "", err
 	}
 	return res.Path, nil
+}
+
+// resolveSharedDir is resolveSharedDirHostPath with the layout authority's
+// answer (res.Resolved, pkg/projectfs) for writing below the shared dir
+// through Resolved.Open.
+func resolveSharedDir(home, slug, projectID, name string) (scionruntime.SharedDirHostPath, error) {
+	gs, err := loadSharedDirSettings()
+	if err != nil {
+		return scionruntime.SharedDirHostPath{}, err
+	}
+	return scionruntime.ResolveSharedDirHostPath(gs, home, slug, projectID, name)
 }
 
 // isSharedDirStorageUnavailable reports whether err means a shared dir's
@@ -69,20 +76,3 @@ func attachmentFailureText(filename string, err error) string {
 // openAttachmentFile opens an outbound attachment on this host. Tests
 // replace it to check which paths are opened.
 var openAttachmentFile = os.Open
-
-// telegramAttachmentName returns a display name for the file attached to
-// tgMsg, for messages to the sender.
-func telegramAttachmentName(tgMsg *TGMessage) string {
-	switch {
-	case tgMsg == nil:
-	case tgMsg.Document != nil && tgMsg.Document.FileName != "":
-		return tgMsg.Document.FileName
-	case tgMsg.Audio != nil && tgMsg.Audio.FileName != "":
-		return tgMsg.Audio.FileName
-	case tgMsg.Video != nil && tgMsg.Video.FileName != "":
-		return tgMsg.Video.FileName
-	case len(tgMsg.Photo) > 0:
-		return "photo"
-	}
-	return "attachment"
-}

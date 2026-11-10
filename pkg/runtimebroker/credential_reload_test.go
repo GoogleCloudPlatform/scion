@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 )
@@ -71,7 +72,7 @@ func TestCredentialReload_TakesEffectAfterReinitialize(t *testing.T) {
 	cfg.ControlChannelEnabled = true
 	cfg.BrokerAuthEnabled = true
 	cfg.BrokerAuthStrictMode = true
-	srv := New(cfg, &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }})
+	srv := New(cfg, &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
 	srv.multiCredStore = brokercredentials.NewMultiStore(credDir)
 
 	conn, err := srv.createHubConnection(name, oldCreds)
@@ -124,7 +125,9 @@ func TestCredentialReload_TakesEffectAfterReinitialize(t *testing.T) {
 
 	deadline := time.Now().Add(10 * time.Second)
 	for {
-		reinitialized := string(conn.snapshot().SecretKey) == string(newKey) && conn.GetStatus() == ConnectionStatusConnected
+		// The test hub serves no control channel, so a restarted
+		// connection waits for its handshake: connecting.
+		reinitialized := string(conn.snapshot().SecretKey) == string(newKey) && conn.GetStatus() == ConnectionStatusConnecting
 		if reinitialized && status(newKey) == http.StatusOK {
 			break
 		}
@@ -157,9 +160,9 @@ func TestCredentialReload_InEffectMatchesConnectionAfterFailedStep(t *testing.T)
 	t.Setenv(transportauth.EnvTransportAudience, "")
 
 	const name = "hub-partial"
-	oldCreds := makeTestCreds(name, "broker-1", "http://hub1.example.com")
+	oldCreds := makeTestCreds(name, "broker-1", "https://hub1.example.com")
 	newCreds := *oldCreds
-	newCreds.SecretKey = makeTestCreds(name+"-rotated", "broker-1", "http://hub1.example.com").SecretKey
+	newCreds.SecretKey = makeTestCreds(name+"-rotated", "broker-1", "https://hub1.example.com").SecretKey
 	newCreds.TransportMode = "iap"
 
 	credDir := filepath.Join(t.TempDir(), "hub-credentials")
@@ -185,7 +188,7 @@ func TestCredentialReload_InEffectMatchesConnectionAfterFailedStep(t *testing.T)
 	cfg.ControlChannelEnabled = false
 	cfg.BrokerAuthEnabled = true
 	cfg.BrokerAuthStrictMode = true
-	srv := New(cfg, &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }})
+	srv := New(cfg, &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
 	srv.multiCredStore = brokercredentials.NewMultiStore(credDir)
 
 	conn, err := srv.createHubConnection(name, oldCreds)
@@ -257,9 +260,9 @@ func testRetriesFailedReinitialize(t *testing.T, otherChanged bool) {
 	t.Setenv(transportauth.EnvTransportAudience, "")
 
 	const name = "hub-retry"
-	oldCreds := makeTestCreds(name, "broker-1", "http://hub1.example.com")
+	oldCreds := makeTestCreds(name, "broker-1", "https://hub1.example.com")
 	newCreds := *oldCreds
-	newCreds.SecretKey = makeTestCreds(name+"-rotated", "broker-1", "http://hub1.example.com").SecretKey
+	newCreds.SecretKey = makeTestCreds(name+"-rotated", "broker-1", "https://hub1.example.com").SecretKey
 
 	credDir := filepath.Join(t.TempDir(), "hub-credentials")
 	if err := os.MkdirAll(credDir, 0o700); err != nil {
@@ -283,7 +286,7 @@ func testRetriesFailedReinitialize(t *testing.T, otherChanged bool) {
 	cfg.HeartbeatEnabled = false
 	cfg.ControlChannelEnabled = false
 	cfg.BrokerAuthEnabled = false
-	srv := New(cfg, &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }})
+	srv := New(cfg, &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
 	srv.multiCredStore = brokercredentials.NewMultiStore(credDir)
 	// Close every connection at the end, including one the watcher added,
 	// so no Start or reinitialize queued by a tick starts anything after
@@ -344,7 +347,7 @@ func testRetriesFailedReinitialize(t *testing.T, otherChanged bool) {
 		// in which this connection's set compares unchanged. Resetting the
 		// last scan time makes the change visible whatever the file
 		// system's timestamp granularity.
-		writeCreds(makeTestCreds("hub-other", "broker-1", "http://hub2.example.com"))
+		writeCreds(makeTestCreds("hub-other", "broker-1", "https://hub2.example.com"))
 		srv.credLastScan = time.Time{}
 	}
 	if err := srv.checkAndReloadCredentials(ctx); err != nil {
@@ -368,7 +371,7 @@ func testRetriesFailedReinitialize(t *testing.T, otherChanged bool) {
 	conn.mu.RUnlock()
 	if otherChanged {
 		// Make the further tick take the changed-files path again.
-		writeCreds(makeTestCreds("hub-other", "broker-1", "http://hub2.example.com"))
+		writeCreds(makeTestCreds("hub-other", "broker-1", "https://hub2.example.com"))
 		srv.credLastScan = time.Time{}
 	}
 	if err := srv.checkAndReloadCredentials(ctx); err != nil {

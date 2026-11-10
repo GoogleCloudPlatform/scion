@@ -267,6 +267,24 @@ func TestMintInstallationToken(t *testing.T) {
 		}
 	})
 
+	t.Run("empty permissions are refused without a request", func(t *testing.T) {
+		called := false
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			called = true
+			w.WriteHeader(http.StatusCreated)
+		}))
+		defer server.Close()
+
+		client, _ := NewClient(Config{AppID: 42, APIBaseURL: server.URL}, pemData)
+		_, err := client.MintInstallationToken(context.Background(), 12345, []string{"my-repo"}, TokenPermissions{})
+		if err == nil {
+			t.Fatal("expected an error for an empty permission set")
+		}
+		if called {
+			t.Error("no access_tokens request may be sent without explicit permissions")
+		}
+	})
+
 	t.Run("installation not found (404)", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusNotFound)

@@ -103,6 +103,45 @@ func TestPostgresConfigProvider_SaveUpsert(t *testing.T) {
 	}
 }
 
+// Save replaces the stored config as a whole rather than merging into it,
+// so a key deleted from the loaded map is gone after the next Save. The
+// integration config PUT relies on this for a settings key sent as null
+// (ptone/scion#3913).
+func TestPostgresConfigProvider_SaveReplacesDeletedKey(t *testing.T) {
+	if !enttest.Active() {
+		t.Skip("requires Postgres backend; set SCION_TEST_POSTGRES_URL and build with -tags integration")
+	}
+	client := enttest.NewClient(t)
+	p := pgprovider.NewPostgresConfigProvider(client, "telegram")
+	ctx := context.Background()
+
+	if err := p.Save(ctx, map[string]string{"inbound_mode": "webhook", "db_path": "/var/tg.db"}); err != nil {
+		t.Fatalf("first Save() failed: %v", err)
+	}
+	cfg, err := p.Load(ctx)
+	if err != nil {
+		t.Fatalf("Load() failed: %v", err)
+	}
+	delete(cfg, "db_path")
+	if err := p.Save(ctx, cfg); err != nil {
+		t.Fatalf("second Save() failed: %v", err)
+	}
+
+	loaded, err := p.Load(ctx)
+	if err != nil {
+		t.Fatalf("Load() after delete failed: %v", err)
+	}
+	if _, ok := loaded["db_path"]; ok {
+		t.Errorf("db_path still stored after it was deleted and saved: %v", loaded)
+	}
+	if got := loaded["inbound_mode"]; got != "webhook" {
+		t.Errorf("inbound_mode: got %q, want %q", got, "webhook")
+	}
+	if len(loaded) != 1 {
+		t.Errorf("expected exactly 1 key, got %v", loaded)
+	}
+}
+
 func TestPostgresConfigProvider_IsolatedByIntegration(t *testing.T) {
 	if !enttest.Active() {
 		t.Skip("requires Postgres backend; set SCION_TEST_POSTGRES_URL and build with -tags integration")

@@ -448,7 +448,7 @@ func (ts *conduitTunnelSession) open(ctx context.Context, ls conduit.LocalSessio
 	ts.commit(t)
 	committed = true
 	go t.run(ts)
-	log.Info("Conduit tunnel opened", "stream_id", user.ID())
+	log.Info("Conduit tunnel opened", append([]any{"stream_id", user.ID(), "target_session_id", opened.target.SessionID}, opened.route...)...)
 	return resp, nil
 }
 
@@ -628,9 +628,12 @@ func (s *Server) authorizeConduitTunnel(ctx context.Context, identity UserIdenti
 	}
 }
 
-// conduitTunnelBrokerOffline reports whether the stored broker row says
-// the agent's broker is offline. A missing row is not treated as offline
-// (the session resolution decides then); a read that fails is returned.
+// conduitTunnelBrokerOffline reports whether the agent's broker is offline:
+// its stored status is offline and it is not present (brokerPresence), so a
+// broker with a live registry session is not refused on a stale status, and
+// nothing that passed before is refused. A missing row is not treated as
+// offline (the session resolution decides then); a read that fails is
+// returned.
 func (s *Server) conduitTunnelBrokerOffline(ctx context.Context, agent *store.Agent) (bool, error) {
 	if agent.RuntimeBrokerID == "" {
 		return false, nil
@@ -644,7 +647,7 @@ func (s *Server) conduitTunnelBrokerOffline(ctx context.Context, agent *store.Ag
 	case b == nil:
 		return false, nil
 	}
-	return b.Status == store.BrokerStatusOffline, nil
+	return b.Status == store.BrokerStatusOffline && !s.brokerPresence(ctx, b).Connected, nil
 }
 
 // openTarget resolves the agent's session that serves kind, mints a grant
@@ -705,6 +708,7 @@ func (ts *conduitTunnelSession) openTarget(ctx context.Context, rtr *router.Rout
 		opened.grant, opened.claims = tok, claims
 		opened.target = conduitLeafTarget(res, st, bridge)
 		opened.renew = conduitStreamRenewal(res, st, claims != nil && !claims.AuthzUntil.IsZero())
+		opened.route = conduitRouteLogAttrs(res)
 		return nil
 	})
 	if err != nil {
@@ -721,6 +725,8 @@ type conduitTunnelOpened struct {
 	claims *grant.Claims
 	target relay.TargetStream
 	renew  func(grant []byte) error
+	// route holds the routing log fields (conduitRouteLogAttrs).
+	route []any
 }
 
 // conduitTunnelMintErrPassesThrough reports whether a mintConduitGrant

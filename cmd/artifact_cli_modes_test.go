@@ -68,3 +68,22 @@ func containsLine(s, prefix string) bool {
 	}
 	return false
 }
+
+// TestArtifactCommentsMode: artifact comments only reads, with the
+// caller's own access, so it is available to agents and listed in the
+// artifact help in both modes (ptone/scion#7115).
+func TestArtifactCommentsMode(t *testing.T) {
+	assert.True(t, agentAllowed["artifact.comments"])
+	_, _, err := rootCmd.Find([]string{"artifact", "comments"})
+	assert.NoError(t, err, "artifact comments is registered")
+
+	for _, mode := range []CLIMode{ModeHuman, ModeAgent} {
+		root := &cobra.Command{Use: "scion"}
+		art := &cobra.Command{Use: "artifact", Long: artifactCmd.Long}
+		art.AddCommand(&cobra.Command{Use: "comments"})
+		root.AddCommand(art)
+		applyModeRestrictions(root, mode)
+		assert.Contains(t, collectCommandNames(root), "artifact.comments", "artifact.comments in %s mode", mode)
+		assert.True(t, containsLine(art.Long, "scion artifact comments <ref>"), "comments help line in %s mode", mode)
+	}
+}

@@ -85,6 +85,15 @@ NAMESPACE="scion-system"
 
 HELM="${HELM:-helm}"
 KUBECONFORM="${KUBECONFORM:-kubeconform}"
+# kubeconform's default schema location is the master branch of
+# yannh/kubernetes-json-schema, which moves. Pin it to one commit, keeping the
+# "master" schema set the default reads, so every run validates against the
+# same schema bytes. Not overridable: a run against other schemas is a different
+# check. The location is printed in the toolchain banner below.
+KC_SCHEMA_COMMIT="f7d855e49c34b039c9ef2196444910275e31e09e"
+KC_KUBERNETES_VERSION="master"
+KC_SCHEMA_LOCATION="https://raw.githubusercontent.com/yannh/kubernetes-json-schema/${KC_SCHEMA_COMMIT}/{{.NormalizedKubernetesVersion}}-standalone{{.StrictSuffix}}/{{.ResourceKind}}{{.KindSuffix}}.json"
+KC_FLAGS=(-schema-location "$KC_SCHEMA_LOCATION" -kubernetes-version "$KC_KUBERNETES_VERSION")
 
 UPDATE=0
 [[ "${1:-}" == "--update" ]] && UPDATE=1
@@ -245,7 +254,17 @@ NO_RENDERED_SETTINGS=(existing-secret)
 #        so new leaves add no assertion
 # 363 - 1 = 362. Summed, then read off the driver's output:
 #   bash hack/verify.sh 2>&1 | sed -n 's/^assertions: \([0-9]*\)\/.*/\1/p'
-EXPECTED_TOTAL=362
+#
+# 362 -> 365 for hub.terminationGracePeriodSeconds (ptone/scion#7070):
+#    +3  grace-period: the default render sets 45 once on the pod spec, an
+#        override replaces it, and 0 is refused by the schema
+#     0  the values walk picks the new leaf up on its own (it asserts in
+#        aggregate, so a new leaf adds no assertion)
+# 362 + 3 = 365. Summed, then read off the driver's output.
+#
+# 365 -> 366: grace-period gains the explicit-null arm (null deletes the key,
+# so it must fall back to 45, not int(nil) = 0). Summed, then read off a run.
+EXPECTED_TOTAL=366
 
 failures=0
 assertions=0
@@ -376,6 +395,7 @@ _pin_verdict() {  # $1 = the sha256 this run resolved, $2 = the pinned sha256
 }
 echo "toolchain  helm         $_hv  $_hp  sha256=${_hs:0:16}  $(_pin_verdict "$_hs" "$_helm_pin")"
 echo "toolchain  kubeconform  $_kv  $_kp  sha256=${_ks:0:16}  $(_pin_verdict "$_ks" "$_kc_pin")"
+echo "toolchain  schemas      kubernetes-version=$KC_KUBERNETES_VERSION  $KC_SCHEMA_LOCATION"
 echo "toolchain  stderr       $(wc -l <"$_tcerr" | tr -d ' ') lines$([[ -s "$_tcerr" ]] && printf ':\n%s' "$(cat "$_tcerr")")"
 rm -f "$_tcerr"
 
@@ -399,9 +419,9 @@ rm -f "$_tcerr"
 # instrument that cannot say "valid" about anything cannot be trusted when it
 # says "valid" about the chart.
 _kcprobe="$(printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: verify-sh-probe\ndata:\n  a: "b"\n' \
-  | "$KUBECONFORM" -strict -summary 2>&1 || true)"
+  | "$KUBECONFORM" "${KC_FLAGS[@]}" -strict -summary 2>&1 || true)"
 if ! grep -qF "Valid: 1, Invalid: 0, Errors: 0, Skipped: 0" <<<"$_kcprobe"; then
-  meta_failure "kubeconform cannot validate a known-good ConfigMap, so it cannot be asked about the chart. This is almost always the schema registry being unreachable - kubeconform's default -schema-location is remote. Output: $_kcprobe"
+  meta_failure "kubeconform cannot validate a known-good ConfigMap, so it cannot be asked about the chart. This is almost always the schema registry being unreachable - the pinned -schema-location ($KC_SCHEMA_LOCATION) is remote. Output: $_kcprobe"
 fi
 
 in_list() {
@@ -579,7 +599,7 @@ for name in "${PERMUTATIONS[@]}"; do
   # about what was checked. Skipped is asserted at 0 for the same reason one
   # layer down: a kind kubeconform has no schema for is a skip, not a failure,
   # the moment anyone adds --ignore-missing-schemas.
-  kcout="$("$KUBECONFORM" -strict -summary <"$WORK/$name.yaml" 2>&1 || true)"
+  kcout="$("$KUBECONFORM" "${KC_FLAGS[@]}" -strict -summary <"$WORK/$name.yaml" 2>&1 || true)"
   kcwant="Valid: ${EXPECTED_DOCS[$name]}, Invalid: 0, Errors: 0, Skipped: 0"
   if grep -qF "failed downloading schema" <<<"$kcout"; then
     # The preflight probe should have caught this. If it fires HERE the registry
@@ -591,7 +611,7 @@ for name in "${PERMUTATIONS[@]}"; do
     pass "kubeconform $name validated ${EXPECTED_DOCS[$name]} documents, none skipped"
   else
     fail "kubeconform $name: wanted '$kcwant', got '$kcout'"
-    "$KUBECONFORM" -strict <"$WORK/$name.yaml" || true
+    "$KUBECONFORM" "${KC_FLAGS[@]}" -strict <"$WORK/$name.yaml" || true
   fi
 done
 
@@ -654,7 +674,7 @@ if [[ ! -s "$kc_dep" ]] || ! grep -Eq '^kind: Deployment$' "$kc_dep" || ! grep -
   meta_failure "could not extract this chart's Deployment (with its proxy initContainers) from the settings render, so the control below would be validating something other than the chart."
 fi
 
-kc_summary() { "$KUBECONFORM" -strict -summary <"$1" 2>&1 || true; }
+kc_summary() { "$KUBECONFORM" "${KC_FLAGS[@]}" -strict -summary <"$1" 2>&1 || true; }
 
 # THE PAIRED POSITIVE. Without it, every negative below is satisfied by a
 # document kubeconform cannot parse at all - which is invalid for the wrong
@@ -953,6 +973,52 @@ if "$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
 else
   fail "hub.extraEnv POD_NAME was refused, duplicated or ignored - existing releases that set it there would fail or change on upgrade"
 fi
+
+# --------------------------------------------------------------------------
+step "grace-period: the hub pod gets 45s to shut down unless hub.terminationGracePeriodSeconds says otherwise"
+# --------------------------------------------------------------------------
+# The pod runs the Runtime Broker, whose SIGTERM launch drain (up to 10s) comes
+# out of the server's 30s shutdown budget. With the Kubernetes default grace of
+# 30s that fits only tightly (ptone/scion#7070), so the chart renders 45. The
+# match is anchored at the pod spec's six-space indent: a container-level or
+# commented copy would not set the pod's grace period.
+grace_default="$WORK/grace-default.yaml"
+if "$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
+    "${BASE[@]}" >"$grace_default" 2>>"$_tcerr" \
+    && [[ $(grep -cE '^      terminationGracePeriodSeconds: 45$' "$grace_default") -eq 1 ]] \
+    && [[ $(grep -cF 'terminationGracePeriodSeconds:' "$grace_default") -eq 1 ]]; then
+  pass "the default render sets the hub pod's terminationGracePeriodSeconds to 45, once"
+else
+  fail "the default render does not set terminationGracePeriodSeconds: 45 exactly once on the hub pod spec"
+fi
+grace_user="$WORK/grace-user.yaml"
+if "$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
+    "${BASE[@]}" --set hub.terminationGracePeriodSeconds=90 >"$grace_user" 2>>"$_tcerr" \
+    && [[ $(grep -cE '^      terminationGracePeriodSeconds: 90$' "$grace_user") -eq 1 ]] \
+    && [[ $(grep -cF 'terminationGracePeriodSeconds:' "$grace_user") -eq 1 ]]; then
+  pass "hub.terminationGracePeriodSeconds replaces the default on the hub pod spec"
+else
+  fail "hub.terminationGracePeriodSeconds=90 did not render as the hub pod's only terminationGracePeriodSeconds"
+fi
+grace_null="$WORK/grace-null.yaml"
+# An explicit null deletes the key, so the schema's minimum never runs; the
+# template must fall back to the values.yaml default rather than render
+# int(nil) = 0, which is an immediate SIGKILL with no launch drain. The null
+# render is compared with the DEFAULT render's line, not a literal, so the
+# template's fallback drifting from the values.yaml default is caught too.
+grace_default_line=$(grep -E '^      terminationGracePeriodSeconds: [0-9]+$' "$grace_default" || true)
+if [[ -n $grace_default_line ]] \
+    && "$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
+    "${BASE[@]}" --set hub.terminationGracePeriodSeconds=null >"$grace_null" 2>>"$_tcerr" \
+    && [[ $(grep -cxF -- "$grace_default_line" "$grace_null") -eq 1 ]] \
+    && [[ $(grep -cF 'terminationGracePeriodSeconds:' "$grace_null") -eq 1 ]]; then
+  pass "hub.terminationGracePeriodSeconds=null renders the default render's value (${grace_default_line##* }), not 0"
+else
+  fail "hub.terminationGracePeriodSeconds=null did not render the default render's line (${grace_default_line:-<none>}) exactly once - a null that renders 0 kills the pod without a drain, and a different value means the template fallback drifted from values.yaml"
+fi
+expect_render_failure "hub.terminationGracePeriodSeconds=0" \
+  "hub.terminationGracePeriodSeconds: Must be greater than or equal to 1" \
+  "${BASE[@]}" --set hub.terminationGracePeriodSeconds=0
 
 # --------------------------------------------------------------------------
 step "migration-rename-hazard: schema_version is present in every rendered settings.yaml"
@@ -2079,6 +2145,20 @@ declare -A PROBE_MUTATION=(
   [auth.oauth.web.github.clientId]='--set-string|auth.oauth.web.github.clientId=probe-gh-id|--set-string|auth.oauth.web.github.clientSecret=probe-gh-secret'
   [auth.oauth.web.github.clientSecret]='--set-string|auth.oauth.web.github.clientId=probe-gh-id|--set-string|auth.oauth.web.github.clientSecret=probe-gh-secret2'
   [hub.adminEmails]='--set|hub.adminEmails={probe-admin@example.com}'
+  # Above one replica conduit.internalTls "auto" needs a relay Secret; the
+  # companion turns the relay off so this leaf moves only the Deployment.
+  [replicaCount]='--set|conduit.internalTls.enabled=false|--set|replicaCount=2'
+  # The relay leaves are inert unless the listener is on, which needs its
+  # Secret, so each one carries both and ends in the --set of its own leaf.
+  # They also set an image digest: the relay wiring refuses an image tag older
+  # than the minimum hub release for relay TLS, and the default tag is the
+  # chart's appVersion.
+  [conduit.internalTls.enabled]='--set-string|conduit.internalTls.existingSecret=probe-relay|--set|image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000000|--set|conduit.internalTls.enabled=true'
+  [conduit.internalTls.existingSecret]='--set|conduit.internalTls.enabled=true|--set|image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000000|--set-string|conduit.internalTls.existingSecret=probe-relay'
+  [conduit.internalTls.port]='--set|conduit.internalTls.enabled=true|--set-string|conduit.internalTls.existingSecret=probe-relay|--set|image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000000|--set|conduit.internalTls.port=9555'
+  [conduit.internalTls.caSecret]='--set|conduit.internalTls.enabled=true|--set-string|conduit.internalTls.existingSecret=probe-relay|--set|image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000000|--set-string|conduit.internalTls.caSecret=probe-relay-ca'
+  [conduit.internalTls.caKey]='--set|conduit.internalTls.enabled=true|--set-string|conduit.internalTls.existingSecret=probe-relay|--set|image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000000|--set-string|conduit.internalTls.caKey=probe-ca.pem'
+  [conduit.internalTls.serverName]='--set|conduit.internalTls.enabled=true|--set-string|conduit.internalTls.existingSecret=probe-relay|--set|image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000000|--set-string|conduit.internalTls.serverName=probe-relay.example.internal'
   # hub.hubClass is an enum ("" or test). hub.testIdentities.enabled=true needs
   # hub.hubClass: test to render at all (the render guard), so it carries it.
   [hub.hubClass]='--set-string|hub.hubClass=test'
@@ -3490,7 +3570,7 @@ _ps_bad="$(_pipe_unguarded "$_self" | wc -l || true)"
 #
 # So: bump this number in the diff that adds the assignment. That is the same
 # contract every other pinned count in this suite carries.
-PIPE_SITES_EXPECTED=43   # 44, less the gate-parity step's sites (removed with acknowledgeHAUnlanded), plus the four in its replacement, plus the two in the config.existingSecret + K_SERVICE NOTES rows.
+PIPE_SITES_EXPECTED=44   # 44, less the gate-parity step's sites (removed with acknowledgeHAUnlanded), plus the four in its replacement, plus the two in the config.existingSecret + K_SERVICE NOTES rows (= 43), plus grace_default_line in the grace-period null arm (|| true fallback) = 44.
 if [[ "$_ps_total" -ne "$PIPE_SITES_EXPECTED" ]]; then
   meta_failure "the pipeline-assignment sweep found $_ps_total sites in $_self, pinned at $PIPE_SITES_EXPECTED. If you added an assignment-from-a-pipeline, give it a || fallback and bump PIPE_SITES_EXPECTED in the same diff. If you did not, the pattern has stopped matching and the zero below would mean nothing."
 else

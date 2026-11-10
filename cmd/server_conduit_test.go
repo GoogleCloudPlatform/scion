@@ -22,7 +22,6 @@ import (
 	"errors"
 	"log/slog"
 	"net"
-	"os"
 	"strings"
 	"sync"
 	"syscall"
@@ -39,6 +38,7 @@ import (
 
 func resetConduitFlags() {
 	conduitInternalListen, conduitInternalAdvertise = "", ""
+	conduitInternalTLSCert, conduitInternalTLSKey, conduitInternalTLSCA, conduitInternalTLSName = "", "", "", ""
 	conduitGrantKeyActivation, conduitReconnectWindow = "", ""
 	conduitLifetimeCap = ""
 	conduitUserStreamAuthzMax = ""
@@ -69,9 +69,13 @@ func TestConduitAdvertiseEndpoint(t *testing.T) {
 		advertise string
 		bound     net.Addr
 		podIP     string
+		tls       bool
 		want      string
 	}{
 		{name: "configured wins", advertise: "https://relay.internal:9443", bound: tcp("10.0.0.5:9810"), podIP: "10.1.1.1", want: "https://relay.internal:9443"},
+		{name: "TLS listener derives https", bound: tcp("0.0.0.0:9810"), podIP: "10.1.1.1", tls: true, want: "https://10.1.1.1:9810"},
+		{name: "TLS listener on a specific host", bound: tcp("10.0.0.5:9810"), tls: true, want: "https://10.0.0.5:9810"},
+		{name: "loopback listener without TLS", bound: tcp("127.0.0.1:9810"), want: "http://127.0.0.1:9810"},
 		{name: "specific listen host", bound: tcp("10.0.0.5:9810"), podIP: "10.1.1.1", want: "http://10.0.0.5:9810"},
 		{name: "wildcard uses pod IP", bound: tcp("0.0.0.0:9810"), podIP: "10.1.1.1", want: "http://10.1.1.1:9810"},
 		{name: "IPv6 wildcard uses pod IP", bound: tcp("[::]:9810"), podIP: "fd00::5", want: "http://[fd00::5]:9810"},
@@ -80,7 +84,7 @@ func TestConduitAdvertiseEndpoint(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, conduitAdvertiseEndpoint(tt.advertise, tt.bound, tt.podIP))
+			assert.Equal(t, tt.want, conduitAdvertiseEndpoint(tt.advertise, tt.bound, tt.podIP, tt.tls))
 		})
 	}
 }
@@ -99,10 +103,14 @@ func TestApplyConduitFlagOverrides(t *testing.T) {
 		{
 			name: "every flag overrides",
 			args: []string{"--internal-listen=:9810", "--internal-advertise=http://b:9810", "--conduit-grant-key-activation=30m",
-				"--conduit-reconnect-window=0s", "--conduit-tcp-allowed-ports=3000,8080", "--conduit-lifetime-cap=90s"},
+				"--conduit-reconnect-window=0s", "--conduit-tcp-allowed-ports=3000,8080", "--conduit-lifetime-cap=90s",
+				"--internal-tls-cert-file=/tls/tls.crt", "--internal-tls-key-file=/tls/tls.key", "--internal-tls-ca-file=/tls/ca.crt",
+				"--internal-tls-server-name=scion-relay.internal"},
 			want: config.HubConduitConfig{
 				InternalListen: ":9810", InternalAdvertise: "http://b:9810", GrantKeyActivation: "30m",
 				ReconnectWindow: "0s", TCPAllowedPorts: []int{3000, 8080}, PeerAuth: "hmac", LifetimeCap: "90s",
+				InternalTLSCertFile: "/tls/tls.crt", InternalTLSKeyFile: "/tls/tls.key", InternalTLSCAFile: "/tls/ca.crt",
+				InternalTLSServerName: "scion-relay.internal",
 			},
 		},
 		{
@@ -144,6 +152,11 @@ func TestAppendConduitDaemonArgs(t *testing.T) {
 			name: "every flag",
 			args: []string{"--internal-advertise=http://b:9810", "--conduit-grant-key-activation=30m", "--conduit-lifetime-cap=1h"},
 			want: []string{"server", "start", "--internal-advertise=http://b:9810", "--conduit-grant-key-activation=30m", "--conduit-lifetime-cap=1h"},
+		},
+		{
+			name: "internal hop TLS flags",
+			args: []string{"--internal-tls-cert-file=/tls/tls.crt", "--internal-tls-key-file=/tls/tls.key", "--internal-tls-ca-file=/tls/ca.crt", "--internal-tls-server-name=scion-relay.internal"},
+			want: []string{"server", "start", "--internal-tls-cert-file=/tls/tls.crt", "--internal-tls-key-file=/tls/tls.key", "--internal-tls-ca-file=/tls/ca.crt", "--internal-tls-server-name=scion-relay.internal"},
 		},
 	}
 	for _, tt := range tests {
@@ -277,13 +290,14 @@ func TestStartConduit(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		var wg sync.WaitGroup
 		t.Cleanup(func() { cancel(); wg.Wait() })
-		// No relay runs on any of these paths, so SIGTERM is never trapped.
-		trapped := false
-		prev := conduitSignalNotify
-		conduitSignalNotify = func(chan<- os.Signal, ...os.Signal) { trapped = true }
-		t.Cleanup(func() { conduitSignalNotify = prev })
-		err := startConduit(ctx, cancel, cfg, srv, "https://hub.example.com", &wg, make(chan error, 1))
-		assert.False(t, trapped, "SIGTERM trapped without a running relay")
+		// No relay runs on any of these paths, so no drain step is
+		// registered.
+		q := newTestShutdown(cancel)
+		err := startConduit(ctx, q, cfg, srv, "https://hub.example.com", &wg, make(chan error, 1))
+		q.mu.Lock()
+		steps := len(q.steps)
+		q.mu.Unlock()
+		assert.Zero(t, steps, "a shutdown step registered without a running relay")
 		return err
 	}
 
@@ -291,10 +305,11 @@ func TestStartConduit(t *testing.T) {
 		assert.NoError(t, run(t, nil, &config.GlobalConfig{}))
 	})
 
-	// With the relay started, startConduit traps SIGTERM (and only SIGTERM);
-	// the trap runs the hub drain with the configured grace (10s and a cap
-	// when set, 0 and no cap when unset) and cancels only after it.
-	t.Run("relay started traps SIGTERM and drains before cancel", func(t *testing.T) {
+	// With the relay started, startConduit registers the drain as a
+	// pre-cancel step of the graceful shutdown (ptone/scion#5054); the
+	// step runs the hub drain with the configured grace (10s and a cap
+	// when set, 0 and no cap when unset) and cancel comes only after it.
+	t.Run("relay started registers the drain before cancel", func(t *testing.T) {
 		for _, tc := range []struct {
 			name, grace string
 			wantGrace   time.Duration
@@ -307,9 +322,17 @@ func TestStartConduit(t *testing.T) {
 				resetServerFlags()
 				enableHub = true
 				t.Setenv("K_SERVICE", "")
-				sigs := installFakeConduitSignals(t)
-				prevStart, prevDrain := startConduitRelayFn, conduitShutdownDrain
-				t.Cleanup(func() { startConduitRelayFn, conduitShutdownDrain = prevStart, prevDrain })
+				captureStdLog(t)
+				prevStart, prevDrain, prevSetGrace := startConduitRelayFn, conduitShutdownDrain, conduitSetShutdownGrace
+				t.Cleanup(func() {
+					startConduitRelayFn, conduitShutdownDrain, conduitSetShutdownGrace = prevStart, prevDrain, prevSetGrace
+				})
+				var recordedGrace []time.Duration
+				var recordedSrv *hub.Server
+				conduitSetShutdownGrace = func(s *hub.Server, grace time.Duration) {
+					recordedSrv = s
+					recordedGrace = append(recordedGrace, grace)
+				}
 				startConduitRelayFn = func(context.Context, *config.GlobalConfig, *hub.Server, string, *sync.WaitGroup, chan<- error, bool) error {
 					return nil
 				}
@@ -337,15 +360,10 @@ func TestStartConduit(t *testing.T) {
 				cfg := &config.GlobalConfig{}
 				cfg.Hub.Conduit.ShutdownGrace = tc.grace
 				var wg sync.WaitGroup
-				require.NoError(t, startConduit(ctx, recordCancel, cfg, srv, "https://hub.example.com", &wg, make(chan error, 1)))
+				q := newTestShutdown(recordCancel)
+				require.NoError(t, startConduit(ctx, q, cfg, srv, "https://hub.example.com", &wg, make(chan error, 1)))
 
-				sigs.mu.Lock()
-				ch, trapped := sigs.ch, append([]os.Signal(nil), sigs.signals...)
-				sigs.mu.Unlock()
-				require.NotNil(t, ch, "SIGTERM not trapped with the relay running")
-				assert.Equal(t, []os.Signal{syscall.SIGTERM}, trapped, "only SIGTERM is trapped")
-
-				ch <- syscall.SIGTERM
+				q.begin(syscall.SIGTERM)
 				wg.Wait()
 				mu.Lock()
 				defer mu.Unlock()
@@ -353,6 +371,15 @@ func TestStartConduit(t *testing.T) {
 				assert.Same(t, srv, gotSrv)
 				assert.Equal(t, tc.wantGrace, gotGrace)
 				assert.Equal(t, tc.wantCap, gotCap)
+				// conduit review F1: a set grace is recorded on the hub (the
+				// teardown's relay shutdown then caps the drain too); unset,
+				// nothing is recorded.
+				if tc.wantCap {
+					assert.Equal(t, []time.Duration{tc.wantGrace}, recordedGrace, "startConduit must record the set shutdown_grace on the hub")
+					assert.Same(t, srv, recordedSrv)
+				} else {
+					assert.Empty(t, recordedGrace, "no grace recorded when shutdown_grace is unset")
+				}
 				assert.Error(t, ctx.Err())
 			})
 		}
@@ -477,8 +504,8 @@ func TestStartConduit(t *testing.T) {
 
 // TestStartConduitRelay_AdvertiseHostCheckOnlyInHA: the public-host rule
 // applies only in hosted HA. A single-node hub on http://localhost may
-// advertise localhost on its internal port; in hosted HA the same setting
-// is refused.
+// advertise https://localhost on its internal port; in hosted HA the same
+// setting is refused.
 func TestStartConduitRelay_AdvertiseHostCheckOnlyInHA(t *testing.T) {
 	t.Cleanup(resetServerFlags)
 	const hubEndpoint = "http://localhost:9810"
@@ -488,9 +515,9 @@ func TestStartConduitRelay_AdvertiseHostCheckOnlyInHA(t *testing.T) {
 		advertise string
 		wantErr   string // "" = the advertise check passes
 	}{
-		{name: "single node, localhost", advertise: "http://localhost:9811"},
+		{name: "single node, localhost", advertise: "https://localhost:9811"},
 		{name: "single node, cloud run host", advertise: "https://x.a.run.app"},
-		{name: "hosted HA, public hub host", requireHA: true, advertise: "http://localhost:9811", wantErr: "public hub host"},
+		{name: "hosted HA, public hub host", requireHA: true, advertise: "https://localhost:9811", wantErr: "public hub host"},
 		{name: "hosted HA, cloud run host", requireHA: true, advertise: "https://x.a.run.app", wantErr: "Cloud Run host"},
 	}
 	for _, tt := range tests {

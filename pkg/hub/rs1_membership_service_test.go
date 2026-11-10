@@ -272,16 +272,27 @@ func TestRS1_PrincipalEligibility(t *testing.T) {
 		{"user_member", store.RoleBindingPrincipalUser, store.ProjectRoleMember, true},
 		{"group_member", store.RoleBindingPrincipalGroup, store.ProjectRoleMember, true},
 		{"agent_member", store.RoleBindingPrincipalAgent, store.ProjectRoleMember, true},
+
+		// Viewer: like member (ptone/scion#5519).
+		{"user_viewer", store.RoleBindingPrincipalUser, store.ProjectRoleViewer, true},
+		{"group_viewer", store.RoleBindingPrincipalGroup, store.ProjectRoleViewer, true},
+		{"agent_viewer", store.RoleBindingPrincipalAgent, store.ProjectRoleViewer, true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := principalEligibleForRole(tt.principalType, tt.roleName)
+			result := principalEligibleForRole(tt.principalType, &store.RoleDefinition{Name: tt.roleName, System: true})
 			assert.Equal(t, tt.expectOK, result,
 				"principalEligibleForRole(%q, %q) = %v, want %v",
 				tt.principalType, tt.roleName, result, tt.expectOK)
 		})
 	}
+
+	// A custom (non-system) role that holds a built-in name gets the
+	// custom-role rule: users and groups only, never agents.
+	custom := &store.RoleDefinition{Name: store.ProjectRoleMember, System: false}
+	assert.True(t, principalEligibleForRole(store.RoleBindingPrincipalUser, custom))
+	assert.False(t, principalEligibleForRole(store.RoleBindingPrincipalAgent, custom), "a custom row named project-member is not built-in")
 }
 
 // ---------------------------------------------------------------------------

@@ -34,10 +34,11 @@ type StatsProvider interface {
 // (scion.db.pool.connections.wait_count) so dashboards can rate() it.
 func poolStatsFrom(s sql.DBStats) PoolStats {
 	return PoolStats{
-		Active:    int64(s.InUse),
-		Idle:      int64(s.Idle),
-		WaitCount: s.WaitCount,
-		Max:       int64(s.MaxOpenConnections),
+		Active:       int64(s.InUse),
+		Idle:         int64(s.Idle),
+		WaitCount:    s.WaitCount,
+		Max:          int64(s.MaxOpenConnections),
+		WaitDuration: s.WaitDuration,
 	}
 }
 

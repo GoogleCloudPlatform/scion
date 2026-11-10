@@ -15,14 +15,17 @@
 package hub
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/keyring"
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
 )
@@ -81,6 +84,11 @@ type UserTokenClaims struct {
 	Role        string        `json:"role"`
 	TokenType   UserTokenType `json:"type"`
 	ClientType  ClientType    `json:"client"`
+	// SessionGeneration is the user's session generation at the time the
+	// credential behind this token was established. Validation compares it
+	// with the users row (see sessionGenerationRefusal). A token without the
+	// claim decodes to 0.
+	SessionGeneration int64 `json:"sg"`
 }
 
 // UserTokenConfig holds configuration for user token generation.
@@ -100,6 +108,70 @@ type UserTokenConfig struct {
 type UserTokenService struct {
 	config UserTokenConfig
 	signer jose.Signer
+	// ring, when set, replaces config.SigningKey and signer: a keyring
+	// file's signing ring signs and verifies (ptone/scion#1530 Phase 3).
+	ring *ringJWTKeys
+	// now is the token clock (nil: time.Now).
+	now func() time.Time
+}
+
+// newRingUserTokenService returns a user token service that signs and
+// verifies with the signing ring's user JWT purpose (access, refresh, CLI
+// and test-login tokens). cfg.SigningKey must be empty (an explicit key is
+// refused with a keyring file). now is the clock of token times and ring
+// deadlines (nil: time.Now).
+func newRingUserTokenService(ring *keyring.SigningRing, cfg UserTokenConfig, now func() time.Time) (*UserTokenService, error) {
+	if len(cfg.SigningKey) > 0 {
+		return nil, errors.New("an explicit user token signing key cannot be combined with a keyring file")
+	}
+	applyUserTokenDurationDefaults(&cfg)
+	keys := &ringJWTKeys{ring: ring, purpose: userJWTPurpose,
+		newSigner: func(key jose.SigningKey, opts *jose.SignerOptions) (jose.Signer, error) {
+			return jose.NewSigner(key, opts)
+		}}
+	return &UserTokenService{config: cfg, ring: keys, now: now}, nil
+}
+
+// applyUserTokenDurationDefaults fills the zero token durations.
+func applyUserTokenDurationDefaults(cfg *UserTokenConfig) {
+	if cfg.AccessTokenDuration == 0 {
+		cfg.AccessTokenDuration = DefaultAccessTokenDuration
+	}
+	if cfg.CLIAccessTokenDuration == 0 {
+		cfg.CLIAccessTokenDuration = DefaultCLIAccessTokenDuration
+	}
+	if cfg.RefreshTokenDuration == 0 {
+		cfg.RefreshTokenDuration = DefaultRefreshTokenDuration
+	}
+}
+
+// clock returns the service's current time.
+func (s *UserTokenService) clock() time.Time {
+	if s.now != nil {
+		return s.now()
+	}
+	return time.Now()
+}
+
+// signClaims serializes claims under the service's signing key.
+func (s *UserTokenService) signClaims(claims any, now time.Time) (string, error) {
+	if s.ring != nil {
+		return s.ring.sign(claims, now)
+	}
+	return jwt.Signed(s.signer).Claims(claims).Serialize()
+}
+
+// verifyClaims checks tok's signature and decodes its claims into dst.
+// Without a ring (legacy mode) the token's key ID must be absent or
+// "legacy" (checkLegacyJWTKeyID).
+func (s *UserTokenService) verifyClaims(tok *jwt.JSONWebToken, now time.Time, dst any) error {
+	if s.ring != nil {
+		return s.ring.verify(tok, now, dst)
+	}
+	if err := checkLegacyJWTKeyID(tok); err != nil {
+		return err
+	}
+	return tok.Claims(s.config.SigningKey, dst)
 }
 
 // NewUserTokenService creates a new user token service.
@@ -113,15 +185,7 @@ func NewUserTokenService(config UserTokenConfig) (*UserTokenService, error) {
 		}
 	}
 
-	if config.AccessTokenDuration == 0 {
-		config.AccessTokenDuration = DefaultAccessTokenDuration
-	}
-	if config.CLIAccessTokenDuration == 0 {
-		config.CLIAccessTokenDuration = DefaultCLIAccessTokenDuration
-	}
-	if config.RefreshTokenDuration == 0 {
-		config.RefreshTokenDuration = DefaultRefreshTokenDuration
-	}
+	applyUserTokenDurationDefaults(&config)
 
 	// Create signer using HS256 (symmetric)
 	// In production, consider RS256 (asymmetric) for better security
@@ -139,8 +203,11 @@ func NewUserTokenService(config UserTokenConfig) (*UserTokenService, error) {
 	}, nil
 }
 
-// GenerateTokenPair generates an access token and refresh token for a user.
-func (s *UserTokenService) GenerateTokenPair(userID, email, displayName, role string, clientType ClientType) (accessToken, refreshToken string, expiresIn int64, err error) {
+// MintTokenPair generates an access token and refresh token for a user.
+// sessionGeneration is carried in both tokens as the sg claim. Callers pass
+// the users-row value for a fresh authentication, or the value captured in
+// the presented credential for a re-mint, never a fresh row read.
+func (s *UserTokenService) MintTokenPair(userID, email, displayName, role string, sessionGeneration int64, clientType ClientType) (accessToken, refreshToken string, expiresIn int64, err error) {
 	// Determine access token duration based on client type
 	var accessDuration time.Duration
 	var tokenType UserTokenType
@@ -153,13 +220,13 @@ func (s *UserTokenService) GenerateTokenPair(userID, email, displayName, role st
 	}
 
 	// Generate access token
-	accessToken, err = s.generateToken(userID, email, displayName, role, tokenType, clientType, accessDuration)
+	accessToken, err = s.generateToken(userID, email, displayName, role, sessionGeneration, tokenType, clientType, accessDuration)
 	if err != nil {
 		return "", "", 0, fmt.Errorf("failed to generate access token: %w", err)
 	}
 
 	// Generate refresh token
-	refreshToken, err = s.generateToken(userID, email, displayName, role, TokenTypeRefresh, clientType, s.config.RefreshTokenDuration)
+	refreshToken, err = s.generateToken(userID, email, displayName, role, sessionGeneration, TokenTypeRefresh, clientType, s.config.RefreshTokenDuration)
 	if err != nil {
 		return "", "", 0, fmt.Errorf("failed to generate refresh token: %w", err)
 	}
@@ -168,8 +235,9 @@ func (s *UserTokenService) GenerateTokenPair(userID, email, displayName, role st
 	return accessToken, refreshToken, expiresIn, nil
 }
 
-// GenerateAccessToken generates just an access token for a user.
-func (s *UserTokenService) GenerateAccessToken(userID, email, displayName, role string, clientType ClientType) (string, int64, error) {
+// MintAccessToken generates just an access token for a user, carrying
+// sessionGeneration as the sg claim (see MintTokenPair).
+func (s *UserTokenService) MintAccessToken(userID, email, displayName, role string, sessionGeneration int64, clientType ClientType) (string, int64, error) {
 	var duration time.Duration
 	var tokenType UserTokenType
 	if clientType == ClientTypeCLI {
@@ -180,18 +248,19 @@ func (s *UserTokenService) GenerateAccessToken(userID, email, displayName, role 
 		tokenType = TokenTypeAccess
 	}
 
-	token, err := s.generateToken(userID, email, displayName, role, tokenType, clientType, duration)
+	token, err := s.generateToken(userID, email, displayName, role, sessionGeneration, tokenType, clientType, duration)
 	if err != nil {
 		return "", 0, err
 	}
 	return token, int64(duration.Seconds()), nil
 }
 
-// GenerateAccessTokenWithTTL generates an access token with a specific duration.
+// MintAccessTokenWithTTL generates an access token with a specific duration,
+// carrying sessionGeneration as the sg claim (see MintTokenPair).
 // Used by GE exchange to cryptographically cap the token lifetime at
 // min(configured TTL, upstream credential expiry).
-func (s *UserTokenService) GenerateAccessTokenWithTTL(userID, email, displayName, role string, clientType ClientType, ttl time.Duration) (string, int64, error) {
-	token, err := s.generateToken(userID, email, displayName, role, TokenTypeAccess, clientType, ttl)
+func (s *UserTokenService) MintAccessTokenWithTTL(userID, email, displayName, role string, sessionGeneration int64, clientType ClientType, ttl time.Duration) (string, int64, error) {
+	token, err := s.generateToken(userID, email, displayName, role, sessionGeneration, TokenTypeAccess, clientType, ttl)
 	if err != nil {
 		return "", 0, err
 	}
@@ -199,8 +268,8 @@ func (s *UserTokenService) GenerateAccessTokenWithTTL(userID, email, displayName
 }
 
 // generateToken creates a signed JWT token.
-func (s *UserTokenService) generateToken(userID, email, displayName, role string, tokenType UserTokenType, clientType ClientType, duration time.Duration) (string, error) {
-	now := time.Now()
+func (s *UserTokenService) generateToken(userID, email, displayName, role string, sessionGeneration int64, tokenType UserTokenType, clientType ClientType, duration time.Duration) (string, error) {
+	now := s.clock()
 
 	claims := UserTokenClaims{
 		Claims: jwt.Claims{
@@ -218,9 +287,11 @@ func (s *UserTokenService) generateToken(userID, email, displayName, role string
 		Role:        role,
 		TokenType:   tokenType,
 		ClientType:  clientType,
+
+		SessionGeneration: sessionGeneration,
 	}
 
-	token, err := jwt.Signed(s.signer).Claims(claims).Serialize()
+	token, err := s.signClaims(claims, now)
 	if err != nil {
 		return "", fmt.Errorf("failed to sign token: %w", err)
 	}
@@ -235,10 +306,15 @@ func (s *UserTokenService) ValidateUserToken(tokenString string) (*UserTokenClai
 		return nil, fmt.Errorf("failed to parse token: %w", err)
 	}
 
+	now := s.clock()
 	var claims UserTokenClaims
-	if err := token.Claims(s.config.SigningKey, &claims); err != nil {
-		fp := sha256.Sum256(s.config.SigningKey)
-		slog.Debug("Token verification failed", "error", err, "key_fingerprint", hex.EncodeToString(fp[:8]), "key_len", len(s.config.SigningKey))
+	if err := s.verifyClaims(token, now, &claims); err != nil {
+		if s.ring == nil {
+			fp := sha256.Sum256(s.config.SigningKey)
+			slog.Debug("Token verification failed", "error", err, "key_fingerprint", hex.EncodeToString(fp[:8]), "key_len", len(s.config.SigningKey))
+		} else {
+			slog.Debug("Token verification failed", "error", err)
+		}
 		return nil, fmt.Errorf("failed to verify token: %w", err)
 	}
 
@@ -246,7 +322,7 @@ func (s *UserTokenService) ValidateUserToken(tokenString string) (*UserTokenClai
 	expected := jwt.Expected{
 		Issuer:      UserTokenIssuer,
 		AnyAudience: jwt.Audience{UserTokenAudience},
-		Time:        time.Now(),
+		Time:        now,
 	}
 
 	if err := claims.Validate(expected); err != nil {
@@ -270,15 +346,47 @@ func (s *UserTokenService) ValidateRefreshToken(tokenString string) (*UserTokenC
 	return claims, nil
 }
 
-// RefreshTokens uses a refresh token to generate a new token pair.
-func (s *UserTokenService) RefreshTokens(refreshToken string) (accessToken, newRefreshToken string, expiresIn int64, err error) {
-	claims, err := s.ValidateRefreshToken(refreshToken)
-	if err != nil {
-		return "", "", 0, fmt.Errorf("invalid refresh token: %w", err)
+// sessionGenerationRefusal compares the session generation carried by a
+// credential (claim) with the users row (row). It returns "" when they are
+// equal and a stable reason otherwise: any inequality refuses. A credential
+// without a generation reads as 0.
+//
+// The any-inequality rule relies on every read of the users row being
+// authoritative: there is no read replica and no user-row cache on the user
+// read path. If either is introduced, revisit this rule before it ships.
+func sessionGenerationRefusal(claim, row int64) string {
+	switch {
+	case claim == row:
+		return ""
+	case row > claim:
+		return sessionGenerationReasonRevoked
+	default:
+		return sessionGenerationReasonAhead
 	}
+}
 
-	// Generate new token pair
-	return s.GenerateTokenPair(claims.UserID, claims.Email, claims.DisplayName, claims.Role, claims.ClientType)
+const (
+	// sessionGenerationReasonRevoked: the users row has moved past the
+	// credential's generation (sessions were revoked after it was issued).
+	sessionGenerationReasonRevoked = "session_revoked"
+	// sessionGenerationReasonAhead: the credential's generation is ahead of
+	// the users row, which only happens after a rollback or restore.
+	sessionGenerationReasonAhead = "session_generation_ahead"
+)
+
+// logSessionGenerationRefusal logs a refusal from sessionGenerationRefusal to
+// log (the caller's own logger; the default logger when nil): at Warn for a
+// revoked session, at Error for a credential ahead of the row.
+func logSessionGenerationRefusal(ctx context.Context, log *slog.Logger, path, userID string, claim, row int64, reason string) {
+	if log == nil {
+		log = slog.Default()
+	}
+	level := slog.LevelWarn
+	if reason == sessionGenerationReasonAhead {
+		level = slog.LevelError
+	}
+	log.Log(ctx, level, "Session generation mismatch",
+		"path", path, "user_id", userID, "claim", claim, "row", row, "reason", reason)
 }
 
 // GetTokenExpiry extracts the expiry time from a token without full validation.
@@ -289,7 +397,7 @@ func (s *UserTokenService) GetTokenExpiry(tokenString string) (time.Time, error)
 	}
 
 	var claims UserTokenClaims
-	if err := token.Claims(s.config.SigningKey, &claims); err != nil {
+	if err := s.verifyClaims(token, s.clock(), &claims); err != nil {
 		return time.Time{}, fmt.Errorf("failed to verify token: %w", err)
 	}
 
@@ -305,7 +413,7 @@ func (s *UserTokenService) GetTokenExpiry(tokenString string) (time.Time, error)
 // but a dedicated audience ("scion-test-login") so it cannot be used as a
 // regular access token and vice versa.
 func (s *UserTokenService) GenerateTestLoginToken(subject string) (string, error) {
-	now := time.Now()
+	now := s.clock()
 
 	claims := jwt.Claims{
 		Issuer:    UserTokenIssuer,
@@ -317,7 +425,7 @@ func (s *UserTokenService) GenerateTestLoginToken(subject string) (string, error
 		ID:        generateUserTokenID(),
 	}
 
-	token, err := jwt.Signed(s.signer).Claims(claims).Serialize()
+	token, err := s.signClaims(claims, now)
 	if err != nil {
 		return "", fmt.Errorf("failed to sign test-login token: %w", err)
 	}
@@ -334,8 +442,9 @@ func (s *UserTokenService) ValidateTestLoginToken(tokenString string) error {
 		return fmt.Errorf("failed to parse token: %w", err)
 	}
 
+	now := s.clock()
 	var claims jwt.Claims
-	if err := token.Claims(s.config.SigningKey, &claims); err != nil {
+	if err := s.verifyClaims(token, now, &claims); err != nil {
 		return fmt.Errorf("failed to verify token: %w", err)
 	}
 
@@ -349,7 +458,7 @@ func (s *UserTokenService) ValidateTestLoginToken(tokenString string) error {
 	expected := jwt.Expected{
 		Issuer:      UserTokenIssuer,
 		AnyAudience: jwt.Audience{TestLoginAudience},
-		Time:        time.Now(),
+		Time:        now,
 	}
 
 	if err := claims.Validate(expected); err != nil {

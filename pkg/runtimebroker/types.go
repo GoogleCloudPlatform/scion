@@ -23,6 +23,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/version"
 )
 
 // ============================================================================
@@ -93,6 +94,12 @@ type BrokerCapabilities struct {
 	// BeginLaunch for a broker known to lack support; the create response's
 	// LaunchPending echo is authoritative either way.
 	AsyncLaunch bool `json:"asyncLaunch"`
+	// AsyncStart indicates this broker runs a start of an existing agent
+	// (the start request's asyncLaunch, launchId, launchTimeoutSeconds and
+	// launchKeepaliveSeconds, with the agentId query parameter) as an async
+	// launch (design wave 3 §2 D-f; ptone/scion#4669). As for AsyncLaunch,
+	// the start response's LaunchPending echo is authoritative.
+	AsyncStart bool `json:"asyncStart,omitempty"`
 	// EmptyPerAgentWorkspace indicates this broker provisions the
 	// empty-per-agent workspace sharing mode: a private, initially empty
 	// directory at <projectDir>/agents/<slug>/workspace (design #2703). The
@@ -103,11 +110,30 @@ type BrokerCapabilities struct {
 	// reincarnate --broker`). The hub refuses a move unless both brokers
 	// report it (412).
 	AgentMove bool `json:"agentMove"`
+	// AgentMoveRecreate indicates this broker can be the target of a forced
+	// move: it provisions the agent with a fresh workspace after confirming
+	// it has no files for the agent.
+	AgentMoveRecreate bool `json:"agentMoveRecreate,omitempty"`
 	// ReprovisionEmptyPerAgent indicates this broker's reprovision reuses an
 	// empty-per-agent agent's private workspace in place (same-broker
 	// `scion reincarnate`, miller79/scion#167). Set on every runtime: the
 	// hub checks runtime suitability separately.
 	ReprovisionEmptyPerAgent bool `json:"reprovisionEmptyPerAgent,omitempty"`
+	// ChangedFields indicates this broker re-renders, at start, the files
+	// provisioning wrote for the provision-rendered keys the hub lists in
+	// the inline config's changed_fields (ptone/scion#3982).
+	ChangedFields bool `json:"changedFields,omitempty"`
+	// ClearedFields indicates this broker applies the inline config's
+	// cleared_fields at start (ptone/scion#3906, ptone/scion#4890).
+	ClearedFields bool `json:"clearedFields,omitempty"`
+	// UnlimitedCountLimits indicates this broker honours an explicit
+	// max_turns or max_model_calls of 0 as "no limit" over an inherited one
+	// (ptone/scion#5605).
+	UnlimitedCountLimits bool `json:"unlimitedCountLimits,omitempty"`
+	// ClearedResourceSubfields indicates this broker applies the resources
+	// sub-field entries of cleared_fields (api.ResourceSubPaths) at start
+	// (ptone/scion#5676).
+	ClearedResourceSubfields bool `json:"clearedResourceSubfields,omitempty"`
 	// StartsInFlight indicates the broker reports the agent starts still
 	// running on it in every heartbeat (BrokerHeartbeat.StartsInFlight). Only
 	// then does the hub read a start's absence from that list as "no start
@@ -150,6 +176,15 @@ type HubConnectionInfo struct {
 	IsColocated       bool   `json:"isColocated,omitempty"`
 	HasHeartbeat      bool   `json:"hasHeartbeat"`
 	HasControlChannel bool   `json:"hasControlChannel"`
+	// CommandPath is whether the hub can send commands over this
+	// connection's control channel: healthy, unknown (starting or
+	// reconnecting) or unhealthy (ControlChannelClient.CommandPathState).
+	// Empty when the connection runs no control channel.
+	CommandPath string `json:"commandPath,omitempty"`
+	// TransportRefused reports that the hub's transport policy refused the
+	// last dial of this connection's control channel or conduit (the hub
+	// requires TLS or a proxy it trusts: server.trusted_proxies).
+	TransportRefused bool `json:"transportRefused,omitempty"`
 }
 
 // ============================================================================
@@ -204,6 +239,15 @@ type AgentResponse struct {
 	// the agent's workspace (api.WorkspacePlacementExport or
 	// WorkspacePlacementLocal). Empty when no start resolved it.
 	WorkspacePlacement string `json:"workspacePlacement,omitempty"`
+
+	// The broker's effective configuration of the start (WP1 slice 3
+	// addendum v12 section 5): the template content hash, the harness and
+	// the effective model Start resolved, and the broker build. Older
+	// brokers omit them, and the hub then records nothing.
+	TemplateHash string `json:"templateHash,omitempty"`
+	Harness      string `json:"harness,omitempty"`
+	Model        string `json:"model,omitempty"`
+	BrokerBuild  string `json:"brokerBuild,omitempty"`
 }
 
 // AgentConfig contains agent configuration details.
@@ -241,6 +285,15 @@ type CreateAgentRequest struct {
 	// project path ~/.scion/projects/<slug> did not exist when the request
 	// arrived. It is never read from the wire.
 	workspaceAbsentAtAdmission bool
+	// workspaceAdmissionChecked is set by createAgent when it checked the
+	// hub-managed project path at admission (the slug-dispatch case that
+	// sets workspaceAbsentAtAdmission). Without the check, a workspace
+	// bootstrap is never treated as finding an existing workspace.
+	workspaceAdmissionChecked bool
+	// workspaceHubConn names the Hub connection the create arrived on
+	// (resolveHubNameForLaunch), which the signed-URL workspace download
+	// asks for its URLs. It is never read from the wire.
+	workspaceHubConn string
 
 	RequestID   string             `json:"requestId,omitempty"`
 	ID          string             `json:"id,omitempty"`   // Hub UUID for status reporting
@@ -295,24 +348,23 @@ type CreateAgentRequest struct {
 	// while preserving the agent's home directory and clone-per-agent
 	// workspace. Ignored when ProvisionOnly is false.
 	Reprovision bool `json:"reprovision,omitempty"`
-	// SharedDirBackendChanges asks a Reprovision to change the recorded
-	// shared-dir storage backend of the named shared dirs (dir name to
-	// "nfs" or "local"; `scion reincarnate --shared-dir-backend`). Only the agent's
-	// record changes; no data is copied, moved or deleted. Refused on a
-	// request that is not a Reprovision.
-	SharedDirBackendChanges map[string]string `json:"sharedDirBackendChanges,omitempty"`
-	// AllowEmptySharedDir, with SharedDirBackendChanges, skips the start
-	// check that refuses an empty directory on the new backend while the
-	// dir's directory on its previous backend is not empty.
-	AllowEmptySharedDir bool `json:"allowEmptySharedDir,omitempty"`
-	// ExpectExistingNFSWorkspace, on a ProvisionOnly request, says the agent
-	// is being moved here from another broker on the same NFS export: before
-	// provisioning, the broker confirms through its own mount that the
+	// ExpectExistingNFSWorkspace is the moved-agent workspace expectation of
+	// a ProvisionOnly request for an agent moved here from another broker
+	// (the JSON key predates the third value). For a move on the same NFS
+	// export, the broker first confirms through its own mount that the
 	// workspace already exists ("agent-dir": <subPathRoot>/<projectID>/
 	// agents/<name>/workspace; "project": <subPathRoot>/<projectID>/
 	// workspace) and refuses with 409 when it does not, instead of
-	// provisioning an empty workspace (design ptone/scion#2727 A9).
+	// provisioning an empty workspace (design ptone/scion#2727 A9). For a
+	// forced move ("fresh-agent-dir", ptone/scion#5441) the workspace is
+	// recreated, and the broker refuses with 409 when it already has any
+	// directory for the agent.
 	ExpectExistingNFSWorkspace string `json:"expectExistingNfsWorkspace,omitempty"`
+	// MoveReincarnationID, required with ExpectExistingNFSWorkspace
+	// "fresh-agent-dir" and refused otherwise, is the forced move's
+	// reincarnation ID: the provision writes it into the agent directory it
+	// creates as the move marker (agent.MoveMarkerFile).
+	MoveReincarnationID string `json:"moveReincarnationId,omitempty"`
 	// ProjectPath is the local filesystem path to the project on this runtime broker.
 	// This is provided by the Hub from the project provider record.
 	ProjectPath string `json:"projectPath,omitempty"`
@@ -323,6 +375,13 @@ type CreateAgentRequest struct {
 	// sent by the hub that uploaded it. When empty the broker falls back to
 	// its own StorageBucket setting (older hubs do not send it).
 	WorkspaceStorageBucket string `json:"workspaceStorageBucket,omitempty"`
+	// WorkspaceDownloadMode selects how a WorkspaceStoragePath upload is
+	// downloaded: empty for the bucket download with this broker's
+	// credentials, api.WorkspaceDownloadModeSignedURLs for the Hub's
+	// signed-URL workspace download (no storage credential, no bucket
+	// listing). Any other value is refused: the broker never falls back to
+	// the bucket download for a mode it does not know.
+	WorkspaceDownloadMode string `json:"workspaceDownloadMode,omitempty"`
 
 	// ProjectSlug is the project slug for hub-managed projects.
 	// When set, the broker creates the workspace at ~/.scion.projects/<slug>/
@@ -366,6 +425,11 @@ type CreateAgentRequest struct {
 	// (e.g. "shared", "per-agent", "worktree-per-agent"). Threaded from the
 	// Hub so the broker can branch dispatch without re-deriving from labels.
 	WorkspaceMode string `json:"workspaceMode,omitempty"`
+
+	// PreviousProjectIDs are earlier IDs of the agent's project, sent by the
+	// Hub, that a git project's agent may be carried over from after a
+	// re-link (see relinkSharedProjectIdentity). An older Hub sends none.
+	PreviousProjectIDs []string `json:"previousProjectIds,omitempty"`
 
 	// ProvisionCredentials carries project-scope secrets for use by core provision
 	// logic (skill resolution, URI variable substitution, credential helpers).
@@ -484,16 +548,25 @@ type GCPIdentityConfig struct {
 	ProjectID    string `json:"project_id,omitempty"` // GCP project ID
 
 	// RequireLocalRuntime marks a "passthrough" mode granted by the hub's
-	// hub-default identity rung, which resolves the runtime this agent will
-	// use from the broker's own registration data rather than from
-	// project-effective settings at dispatch time. When this is set, the
-	// broker re-checks the resolved runtime once it knows it (after
-	// resolveManagerForOpts) and downgrades passthrough to block itself if
-	// that runtime is not a local container runtime — see buildStartContext.
-	// Explicit and project-level passthrough are never flagged, so their
+	// hub-default or project-default identity rung, which resolves the
+	// runtime this agent will use from the broker's own registration data
+	// rather than from project-effective settings at dispatch time. When
+	// this is set, the broker re-checks the resolved runtime once it knows
+	// it (after resolveManagerForOpts) and downgrades passthrough to block
+	// itself if that runtime is not a local container runtime — see
+	// buildStartContext. Explicit passthrough is never flagged, so its
 	// behavior is unaffected. The JSON tag must match
 	// hub.RemoteGCPIdentityConfig's field of the same name.
 	RequireLocalRuntime bool `json:"require_local_runtime,omitempty"`
+
+	// NativeCloudRun is set by the hub on a create when it decides that the
+	// agent's Cloud Run instance runs natively as the assigned account
+	// (hub.cloudrun_native_identity). With the experiment on, a Cloud Run
+	// "assign" create without it is refused (cloudRunNativeMarked). It is
+	// read only on a create: start and restart carry the same decision as
+	// the resolved env key SCION_METADATA_NATIVE_CLOUDRUN. native_cloud_run
+	// is its wire name in the create request.
+	NativeCloudRun bool `json:"native_cloud_run,omitempty"`
 }
 
 // CreateAgentResponse is the response for creating an agent.
@@ -509,11 +582,6 @@ type CreateAgentResponse struct {
 	// treats an absent echo on a reprovision dispatch as a failure, which is
 	// what keeps that failure mode closed instead of a silent no-op.
 	Reprovisioned bool `json:"reprovisioned,omitempty"`
-
-	// SharedDirBackendsChanged is set true when a Reprovision recorded the
-	// request's SharedDirBackendChanges. A broker that predates the field
-	// ignores the change, so the hub treats a missing echo as a failure.
-	SharedDirBackendsChanged bool `json:"sharedDirBackendsChanged,omitempty"`
 
 	// LaunchPending is set true instead of running Manager.Start inline when
 	// the broker accepted an async launch (design §3.2, §7 P1b-1): the Hub
@@ -569,6 +637,16 @@ type MessageRequest struct {
 	// MessageID is the hub's persisted message ID, when the hub wants to be
 	// told about a buffered delivery that fails after acceptance (#1820).
 	MessageID string `json:"message_id,omitempty"`
+
+	// Attachments are the files the broker downloads, verifies and writes
+	// into the agent's home before it delivers the text (ptone/scion#4596).
+	// An entry without URL is reported to the agent as not delivered.
+	Attachments []messages.WireAttachment `json:"attachments,omitempty"`
+
+	// AttachmentRetentionDays is how long the agent's inbox keeps delivered
+	// attachments (messaging.attachment_inbox_retention_days); the broker
+	// prunes older ones after a write. 0 means the default.
+	AttachmentRetentionDays int `json:"attachment_retention_days,omitempty"`
 }
 
 // UnmarshalJSON implements custom unmarshaling to support the legacy
@@ -643,6 +721,20 @@ type StatsResponse struct {
 // Conversion Functions
 // ============================================================================
 
+// effectiveBrokerBuild is the broker build echoed with info: this
+// broker's version.Short() when the start that produced info resolved the
+// agent's configuration (info.ConfigResolved, set only by agent Start's
+// resolving return paths), else "". A start that found the agent already
+// running, and every list or get entry, carry no brokerBuild and so no
+// effective-only field: the hub records nothing for them (WP1 slice 3
+// addendum v14 section 5).
+func effectiveBrokerBuild(info api.AgentInfo) string {
+	if !info.ConfigResolved {
+		return ""
+	}
+	return version.Short()
+}
+
 // AgentInfoToResponse converts an api.AgentInfo to an AgentResponse.
 func AgentInfoToResponse(info api.AgentInfo) AgentResponse {
 	phase := info.Phase
@@ -695,6 +787,10 @@ func AgentInfoToResponse(info api.AgentInfo) AgentResponse {
 		HarnessConfigRevision: info.HarnessConfigRevision,
 		HarnessConfigSource:   info.HarnessConfigSource,
 		HarnessAuth:           info.HarnessAuth,
+		TemplateHash:          info.TemplateHash,
+		Harness:               info.Harness,
+		Model:                 info.Model,
+		BrokerBuild:           effectiveBrokerBuild(info),
 		Image:                 info.Image,
 		RuntimeType:           info.Runtime,
 		Profile:               info.Profile,
@@ -708,8 +804,8 @@ func AgentInfoToResponse(info api.AgentInfo) AgentResponse {
 		Ready:                 phase == string(state.PhaseRunning),
 		WorkspacePlacement:    info.WorkspacePlacement,
 	}
-	if len(info.HubOnlyEnvWarnings) > 0 {
-		resp.Warnings = append([]string(nil), info.HubOnlyEnvWarnings...)
+	if len(info.HubOnlyEnvWarnings) > 0 || len(info.RelayedWarnings) > 0 {
+		resp.Warnings = append(append([]string(nil), info.HubOnlyEnvWarnings...), info.RelayedWarnings...)
 	}
 
 	if info.Template != "" || info.Image != "" {

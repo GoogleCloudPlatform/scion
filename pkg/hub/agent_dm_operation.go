@@ -96,6 +96,19 @@ type AgentDMInput struct {
 	// DMs reject non-empty attachments before ingestion.
 	Attachments []string
 
+	// AttachRefs are the attachments stored as artifacts the sender
+	// named by id (attachment_ids), validated by the adapter
+	// (validateAttachmentIDs) and built by newArtifactAttachmentRef. They
+	// are bound to this message once it is stored (ptone/scion#4596). They
+	// carry no host path, so the cross-project path refusal (ptone/scion#1687) does
+	// not apply to them.
+	AttachRefs []AttachmentRef
+
+	// Deliveries, for a copy of another message (a mention copy),
+	// are the bound attachments of that primary message, delivered into the
+	// target's home with this copy. Ignored when AttachRefs is set.
+	Deliveries []messages.AttachmentDelivery
+
 	// Metadata is the message metadata map.
 	Metadata map[string]string
 
@@ -214,6 +227,10 @@ type AgentDMResult struct {
 	// RecipientID is the target agent's UUID.
 	RecipientID string
 
+	// ConversationID is the conversation the message was persisted in.
+	// Empty when conversation resolution was skipped or failed.
+	ConversationID string
+
 	// DispatchErr is non-nil when Outcome is AgentDMAmbiguous. It
 	// captures the dispatch failure reason for logging/diagnostics.
 	// Callers should NOT expose this to end users.
@@ -227,6 +244,10 @@ type AgentDMResult struct {
 	// (ptone/scion#3667). The message was still sent; adapters return these
 	// to the sender as an additive response field.
 	AttachmentWarnings []AttachmentWarning
+
+	// BoundAttachments are the artifact attachments bound to the message
+	// (ptone/scion#4596): the references of AttachRefs that bound.
+	BoundAttachments []AttachmentRef
 }
 
 // AgentDMError is a typed error from the shared DM operation. It carries
@@ -379,13 +400,26 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 	// phase-conflict error below, in favor of the deferred outcome.
 	deferred := reincarnationInFlight(input.TargetAgent)
 
-	// ── Phase 1b: Wake handling (#1691) ─────────────────────────────────
+	// ── Phase 1b: Hold check, then wake handling (#1691) ────────────────
+	// A held target (ptone/scion#3433) is never dispatched to, whether or
+	// not wake was requested (ptone/scion#6859): a mention is kept,
+	// undispatched, like a migrating target; any other send is refused like
+	// a suspended target, and is never woken. A lookup fault refuses.
+	//
 	// Wake runs after all admission checks so that denied, oversized, or
 	// unauthorized requests cannot resume an agent (AC-2). Resume failure
 	// or readiness timeout returns an explicit error and no message is
 	// dispatched (AC-4).
 	if !deferred {
-		if input.Wake {
+		held, holdErr := s.agentHeld(ctx, input.TargetAgent.ID)
+		switch {
+		case holdErr != nil:
+			return nil, heldLookupFaultDMError()
+		case held && input.SkipPhaseGate && input.Type == messages.TypeMention:
+			deferred = true
+		case held:
+			return nil, heldTargetDMError(input.TargetAgent)
+		case input.Wake:
 			if denial := s.wakeResumeDenial(ctx, input.SenderIdentity, input.TargetAgent); denial != nil {
 				LogDMAdmission(DMAuditEntryForDenial(input, denial.Code, denial.Message))
 				return nil, denial
@@ -401,24 +435,7 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 				// Another start is in progress: keep the message, deferred.
 				deferred = true
 			}
-		} else if held, holdErr := s.agentHeld(ctx, input.TargetAgent.ID); holdErr != nil || held {
-			// A held target (ptone/scion#3433) is never dispatched to: a
-			// mention is kept, undispatched, like a migrating target; any
-			// other send is refused like a suspended target. A lookup
-			// fault refuses.
-			if holdErr != nil {
-				return nil, &AgentDMError{
-					Code:       ErrCodeInternalError,
-					Message:    "could not verify the target agent's status",
-					HTTPStatus: http.StatusInternalServerError,
-				}
-			}
-			if input.SkipPhaseGate && input.Type == messages.TypeMention {
-				deferred = true
-			} else {
-				return nil, heldTargetDMError(input.TargetAgent)
-			}
-		} else if !input.SkipPhaseGate || input.Type != messages.TypeMention {
+		case !input.SkipPhaseGate || input.Type != messages.TypeMention:
 			// SkipPhaseGate applies only to mention deliveries — a non-mention
 			// send always gets the phase gate, regardless of the flag, so a
 			// caller cannot use it to bypass phase checks for a primary send.
@@ -519,15 +536,24 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 	// 8. Persist message (AC-3: CreateMessage failure prevents dispatch).
 	if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
 		s.messageLog.Error("agent DM: failed to persist message", "error", err)
-		return nil, &AgentDMError{
-			Code:       ErrCodeInternalError,
-			Message:    "Failed to persist message",
-			HTTPStatus: http.StatusInternalServerError,
-		}
+		return nil, persistFailedDMError()
 	}
+	s.logMessageEnteredPending(pendingPathAgentDM, storeMsg)
 
 	// 8. (cont.) Record the admitted artifact references for the web chat.
 	recordedRefs := s.recordMessageArtifacts(ctx, msgID, artifactRefs)
+
+	// 8. (cont.) Bind the attachments stored as artifacts the sender named
+	// to the stored message (ptone/scion#4596), before the SSE publish and
+	// the delivery render, and list what the dispatch delivers: the bound
+	// attachments, or for a copy the primary's.
+	boundAttachments := s.bindChatAttachments(ctx, artifacts.PrincipalKindAgent, input.SenderAgent.ID, msgID,
+		s.bindProject(ctx, storeMsg, input.AttachRefs), input.AttachRefs)
+	if len(input.AttachRefs) > 0 {
+		structuredMsg.AttachmentDeliveries = attachmentDeliveries(msgID, boundAttachments)
+	} else {
+		structuredMsg.AttachmentDeliveries = input.Deliveries
+	}
 
 	// 8a. Audit: body-free admission allow record (#1690).
 	// Logged after persistence so the message ID is available as correlation.
@@ -559,12 +585,16 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 	}
 
 	// 9. Publish SSE event.
-	s.events.PublishUserMessage(ctx, storeMsg, attachmentRefs, recordedRefs)
+	s.events.PublishUserMessage(ctx, storeMsg, append(append([]AttachmentRef(nil), attachmentRefs...), boundAttachments...), recordedRefs)
 
 	// 10. Render delivery text envelope. IsMention marks the envelope as a
 	// mention (not a message) for Type mention deliveries, matching how chat
 	// v2 and broker-inbound already render their secondary/fan-out
 	// recipients.
+	// The attachments delivered with this message are planned for the
+	// target once, before any render; the dispatcher issues their
+	// capabilities from the plan (ptone/scion#4596).
+	s.applyAttachmentPlan(ctx, input.TargetAgent, structuredMsg)
 	if s.writeDenyEnabled() {
 		structuredMsg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
 			MessageID:  storeMsg.ID,
@@ -572,6 +602,7 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 			Msg:        structuredMsg,
 			CreatedAt:  storeMsg.CreatedAt,
 			IsMention:  input.Type == messages.TypeMention,
+			Plan:       structuredMsg.AttachmentPlan,
 		})
 	}
 
@@ -585,8 +616,10 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 			MessageID:          msgID,
 			Recipient:          storeMsg.Recipient,
 			RecipientID:        storeMsg.RecipientID,
+			ConversationID:     storeMsg.ConversationID,
 			AttachmentWarnings: attachmentWarnings,
 			ArtifactWarning:    artifactWarning,
+			BoundAttachments:   boundAttachments,
 		}, nil
 	}
 
@@ -625,6 +658,7 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 					Msg:        deliverMsg,
 					CreatedAt:  storeMsg.CreatedAt,
 					IsMention:  input.Type == messages.TypeMention,
+					Plan:       deliverMsg.AttachmentPlan,
 				})
 			}
 			dispatchMsg = deliverMsg
@@ -634,24 +668,33 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 	// Dispatch outcome determines the final message state:
 	//   - Success → CAS pending→dispatched (AC-1)
 	//   - Definite failure → persist failed state, return non-2xx (AC-2)
-	//   - Ambiguous (context cancelled) → leave pending, return ambiguous (AC-4)
+	//   - Ambiguous (dispatch deadline) → leave pending, return ambiguous (AC-4)
+	//
+	// The dispatch runs on dispatchContext: detached from the caller's
+	// cancellation, so a caller that goes away (a client that disconnects,
+	// a sender agent being deleted) cannot abort a dispatch whose row is
+	// already persisted and strand that row in pending (ptone/scion#4827).
+	// The caller's deadline still applies, and agentDMDispatchTimeout caps
+	// the dispatch, so only a deadline can leave a row ambiguous.
+	dctx, dcancel := dispatchContext(ctx, agentDMDispatchTimeout)
+	defer dcancel()
 	var dispatchErr error
 	if isManagedAgentRuntime(input.TargetAgent.Runtime) {
 		// D4: managed runtimes stay unconverted — a managed agent may not
 		// have the scion CLI to fetch with. Unchanged: input.Msg, full body.
-		dispatchErr = s.managedAgentMessage(ctx, input.TargetAgent, input.Msg, input.Urgent || input.Interrupt)
+		dispatchErr = s.managedAgentMessage(dctx, input.TargetAgent, input.Msg, input.Urgent || input.Interrupt)
 	} else if dispatcher := s.GetDispatcher(); dispatcher != nil && input.TargetAgent.RuntimeBrokerID != "" {
-		retryCtx, retryCancel := context.WithTimeout(withDispatchMessageID(ctx, msgID), 30*time.Second)
-		dispatchErr = dispatchWithBrokerRetry(retryCtx, nil, dispatcher, input.TargetAgent, dispatchMsg.Msg, input.Urgent || input.Interrupt, dispatchMsg)
-		retryCancel()
+		dispatchErr = dispatchWithBrokerRetry(withDispatchMessageID(dctx, msgID), nil, dispatcher, input.TargetAgent, dispatchMsg.Msg, input.Urgent || input.Interrupt, dispatchMsg)
 	}
 
 	// 12. Finalize dispatch state (#1689).
 	if dispatchErr != nil {
 		if isAmbiguousDispatchError(dispatchErr) {
 			// Ambiguous: dispatch may have succeeded but confirmation was
-			// lost (e.g. context cancelled mid-flight). Leave the row in
-			// pending state for inspection; return ambiguous outcome (AC-4).
+			// lost (a dispatch deadline expired mid-flight; the caller's
+			// cancellation no longer reaches the dispatch, see dispatchContext).
+			// Leave the row in pending state for inspection; return
+			// ambiguous outcome (AC-4).
 			s.messageLog.Warn("agent DM: dispatch ambiguous (message persisted as pending)",
 				"sender_id", input.SenderAgent.ID,
 				"target_agent_id", input.TargetAgent.ID,
@@ -665,9 +708,11 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 				MessageID:          msgID,
 				Recipient:          storeMsg.Recipient,
 				RecipientID:        storeMsg.RecipientID,
+				ConversationID:     storeMsg.ConversationID,
 				DispatchErr:        dispatchErr,
 				AttachmentWarnings: attachmentWarnings,
 				ArtifactWarning:    artifactWarning,
+				BoundAttachments:   boundAttachments,
 			}, nil
 		}
 
@@ -706,9 +751,11 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 			MessageID:          msgID,
 			Recipient:          storeMsg.Recipient,
 			RecipientID:        storeMsg.RecipientID,
+			ConversationID:     storeMsg.ConversationID,
 			DispatchErr:        fmt.Errorf("dispatch succeeded but state transition failed: %w", casErr),
 			AttachmentWarnings: attachmentWarnings,
 			ArtifactWarning:    artifactWarning,
+			BoundAttachments:   boundAttachments,
 		}, nil
 	}
 	if !dispatched {
@@ -730,6 +777,8 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 	if bp := s.GetMessageBrokerProxy(); bp != nil {
 		observerMsg := *structuredMsg
 		observerMsg.ObserverOnly = true
+		observerMsg.AttachmentDeliveries = nil
+		observerMsg.AttachmentPlan = nil
 		observerMsg.ConversationAsserted = false
 		if input.SenderAgent.ProjectID != input.TargetAgent.ProjectID {
 			sanitizeCrossProjectObserver(&observerMsg)
@@ -764,8 +813,10 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 		MessageID:          msgID,
 		Recipient:          storeMsg.Recipient,
 		RecipientID:        storeMsg.RecipientID,
+		ConversationID:     storeMsg.ConversationID,
 		AttachmentWarnings: attachmentWarnings,
 		ArtifactWarning:    artifactWarning,
+		BoundAttachments:   boundAttachments,
 	}, nil
 }
 
@@ -833,6 +884,9 @@ func WriteAgentDMResult(w http.ResponseWriter, result *AgentDMResult, mentionRes
 		"recipient":    result.Recipient,
 		"recipient_id": result.RecipientID,
 	}
+	if result.ConversationID != "" {
+		body["conversation_id"] = result.ConversationID
+	}
 	if deferredNote != "" {
 		body["deferred"] = deferredNote
 	}
@@ -846,4 +900,14 @@ func WriteAgentDMResult(w http.ResponseWriter, result *AgentDMResult, mentionRes
 		body["artifact_warning"] = result.ArtifactWarning
 	}
 	writeJSON(w, httpStatus, body)
+}
+
+// persistFailedDMError is the refusal of an agent send whose message could
+// not be stored: it is not dispatched (AC-3).
+func persistFailedDMError() *AgentDMError {
+	return &AgentDMError{
+		Code:       ErrCodeInternalError,
+		Message:    "Failed to persist message",
+		HTTPStatus: http.StatusInternalServerError,
+	}
 }

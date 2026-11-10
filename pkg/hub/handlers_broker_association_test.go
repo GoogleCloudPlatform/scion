@@ -223,6 +223,12 @@ func TestBrokerAssociation_AgentCreateCannotLinkOtherUsersBroker(t *testing.T) {
 func TestBrokerAssociation_AgentCreateLinkRecordsLinkingUser(t *testing.T) {
 	t.Parallel()
 	f := brokerLinkAuthzSetup(t)
+	// The auto-linked broker is remote and has no checkout of the project,
+	// so the project is a git project (clone-per-agent, the default): a
+	// hub-managed project's workspace cannot reach such a broker and that
+	// create is refused (ptone/scion#5813).
+	f.proj.GitRemote = "github.com/test/link-authz"
+	require.NoError(t, f.store.UpdateProject(context.Background(), f.proj))
 
 	rec := createAgentAsOwner(t, f.bypassAgentsFixture, CreateAgentRequest{
 		Name:            "assoc-agent-own-broker",
@@ -264,7 +270,7 @@ func TestBrokerAssociation_RegistrationCreatesNoAssociation(t *testing.T) {
 	ctx := context.Background()
 	member := newHubMemberUser(t, s, "assoc-reg-none-member")
 
-	rec := doRequestAsUser(t, srv, member, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+	rec := doRequestAsUserLoopback(t, srv, member, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
 		Name: "assoc-reg-none-broker",
 	})
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())

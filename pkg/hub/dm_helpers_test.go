@@ -16,27 +16,9 @@ package hub
 
 import (
 	"bytes"
-	"log/slog"
 	"strings"
 	"testing"
 )
-
-// captureSlog replaces the default slog logger with one that writes to a
-// buffer and returns the buffer. Restores the original logger on cleanup.
-//
-// Call this BEFORE constructing a Server (or anything else that snapshots
-// slog.Default() into a fixed subsystem logger, e.g. logging.Subsystem).
-// Capturing after construction can leave the test's absence assertions
-// vacuous: see requireLogCaptureLive below.
-func captureSlog(t *testing.T) *bytes.Buffer {
-	t.Helper()
-	var buf bytes.Buffer
-	handler := slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})
-	original := slog.Default()
-	slog.SetDefault(slog.New(handler))
-	t.Cleanup(func() { slog.SetDefault(original) })
-	return &buf
-}
 
 // serverConstructionLogLine mirrors the slog.Info call in server.go's
 // New(), the construction-time line most positive controls in this

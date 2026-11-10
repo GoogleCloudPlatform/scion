@@ -549,8 +549,8 @@ func TestReviewGrantNeedsSubjectSupport(t *testing.T) {
 // ReviewSubjectAuthority.
 type noSubjectHost struct{ Host }
 
-func (h noSubjectHost) MayGrantReview(ctx context.Context, ownerAgentID, homeScope string) bool {
-	return h.Host.(ReviewGrantAuthority).MayGrantReview(ctx, ownerAgentID, homeScope)
+func (h noSubjectHost) MayGrantReview(ctx context.Context, ownerAgentID, homeScope, sponsorRef string) bool {
+	return h.Host.(ReviewGrantAuthority).MayGrantReview(ctx, ownerAgentID, homeScope, sponsorRef)
 }
 
 // TestReviewSubjectIsGetWithoutOwnGrant: the review-access subject check

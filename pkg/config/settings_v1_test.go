@@ -15,7 +15,6 @@
 package config
 
 import (
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -183,6 +182,41 @@ default_template: my-template
 		"global default_harness_config should not be overridden by project defaults (issue #212)")
 	assert.Equal(t, "my-template", vs.DefaultTemplate,
 		"global default_template should not be overridden by project defaults")
+}
+
+// TestLoadVersionedSettings_NewProjectInheritsGlobalActiveProfile verifies
+// that a project seeded from the embedded project defaults (scion init, and
+// the hub-native project seed) does not pin active_profile, so the merged
+// settings use the global active_profile (ptone/scion#3913).
+func TestLoadVersionedSettings_NewProjectInheritsGlobalActiveProfile(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("SCION_ACTIVE_PROFILE", "")
+
+	globalScionDir := filepath.Join(tmpDir, ".scion")
+	require.NoError(t, os.MkdirAll(globalScionDir, 0755))
+	globalSettings := `
+schema_version: "1"
+active_profile: remote
+profiles:
+  remote:
+    runtime: docker
+`
+	require.NoError(t, os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(globalSettings), 0644))
+
+	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
+	require.NoError(t, ensureProjectSettingsFile(projectDir, InitProjectOpts{SkipRuntimeCheck: true}))
+
+	seeded, err := os.ReadFile(filepath.Join(projectDir, "settings.yaml"))
+	require.NoError(t, err)
+	var seededSettings VersionedSettings
+	require.NoError(t, yaml.Unmarshal(seeded, &seededSettings))
+	assert.Empty(t, seededSettings.ActiveProfile, "the project seed must not set active_profile")
+
+	vs, err := LoadVersionedSettings(projectDir)
+	require.NoError(t, err)
+	assert.Equal(t, "remote", vs.ActiveProfile,
+		"a new project should inherit the global active_profile")
 }
 
 func TestLoadVersionedSettings_ProjectOverride(t *testing.T) {
@@ -752,7 +786,7 @@ hub:
 	}
 	// newLegacyProject writes an unversioned settings.yaml (no
 	// schema_version), which LoadEffectiveSettings routes through
-	// LoadSettingsKoanf and its legacy env key mapper. The legacy
+	// LoadSettings and its legacy env key mapper. The legacy
 	// Settings.Hub field is struct-typed too, so it collides the same way.
 	newLegacyProject := func(t *testing.T) string {
 		t.Helper()
@@ -790,8 +824,8 @@ hub:
 	t.Run("SCION_HUB set: legacy koanf load ignores it", func(t *testing.T) {
 		projectDir := newLegacyProject(t)
 		t.Setenv("SCION_HUB", "https://env.example.com")
-		s, err := LoadSettingsKoanf(projectDir)
-		require.NoError(t, err, "a bare SCION_HUB must never break LoadSettingsKoanf decoding")
+		s, err := LoadSettings(projectDir)
+		require.NoError(t, err, "a bare SCION_HUB must never break LoadSettings decoding")
 		require.NotNil(t, s.Hub)
 		assert.Equal(t, "https://file.example.com", s.Hub.Endpoint)
 	})
@@ -808,36 +842,6 @@ hub:
 }
 
 // --- Default settings compatibility tests ---
-
-func TestGetDefaultSettingsData_ProducesSameEffectiveDefaults(t *testing.T) {
-	// GetDefaultSettingsData should produce the same effective config regardless
-	// of whether the embedded file is versioned or legacy
-	data, err := GetDefaultSettingsData()
-	require.NoError(t, err)
-
-	var settings Settings
-	require.NoError(t, json.Unmarshal(data, &settings))
-
-	// Harness configs are no longer inline in settings (they live on disk as harness-config dirs)
-	// So the Harnesses map should be empty or nil
-	assert.Empty(t, settings.Harnesses, "harness configs should not be inline in default settings")
-
-	// Should have expected runtimes
-	assert.Contains(t, settings.Runtimes, "docker")
-	assert.Contains(t, settings.Runtimes, "container")
-	assert.Contains(t, settings.Runtimes, "kubernetes")
-
-	// Should have expected profiles
-	assert.Contains(t, settings.Profiles, "local")
-	assert.Contains(t, settings.Profiles, "remote")
-
-	// OS-specific runtime check
-	expectedRuntime := "docker"
-	if runtime.GOOS == "darwin" {
-		expectedRuntime = "container"
-	}
-	assert.Equal(t, expectedRuntime, settings.Profiles["local"].Runtime)
-}
 
 func TestDefaultSettingsValidateAgainstSchema(t *testing.T) {
 	// The embedded default_settings.yaml should validate against the v1 schema

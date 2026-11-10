@@ -24,7 +24,6 @@ import (
 	"go/parser"
 	"go/token"
 	"log/slog"
-	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -455,16 +454,17 @@ func TestConduitConfirmAgentPresent(t *testing.T) {
 
 // TestConduitRenewStream_DevUser (D5): a grant naming the development
 // user is rebuilt as that user only while development authentication is
-// enabled on the hub doing the re-check; otherwise a missing row is an
-// inactive principal.
+// enabled on the hub doing the re-check; otherwise the user id takes the
+// normal path. Either way the account-status rule applies to the
+// development user's row: a missing or suspended row is an inactive
+// principal.
 func TestConduitRenewStream_DevUser(t *testing.T) {
 	f := newRenewalFixture(t)
 	tok, open := f.openGrant(t, grant.ViaProxy, tcpHeader("3000"), func(c *grant.Claims) {
 		c.Subject, c.JTI = grant.SubjectUserPrefix+DevUserID, "open-dev"
 	})
 	// The test server may seed a row for the development user; the store
-	// reports it missing here, so the dev-auth-off case takes the path of a
-	// development user id with no row.
+	// reports it missing here.
 	_, fault := installStoreFault(t, f.srv, func(inner store.Store, sw *storeFaultSwitch) *devUserMissingStore {
 		return &devUserMissingStore{Store: inner, fault: sw}
 	})
@@ -481,20 +481,46 @@ func TestConduitRenewStream_DevUser(t *testing.T) {
 
 	f.srv.authConfig.DevAuthEnabled = true
 	f.srv.authConfig.DevUserCfg = DevUserConfig{Username: "dev"}
-	var seen []Identity
-	f.srv.conduitAuthorizeActionTestHook = func(_ context.Context, ident Identity, _ *store.Agent, _ Action) error {
-		seen = append(seen, ident)
-		return nil
-	}
-	r, err := f.renew(tok, open, 7)
-	require.NoError(t, err, "dev auth on: the development user renews")
-	assert.Equal(t, recheckRenewed, classOfRenewal(err))
-	require.NotNil(t, r)
-	assert.Equal(t, grant.SubjectUserPrefix+DevUserID, r.Claims.Subject)
-	require.NotEmpty(t, seen)
-	for _, ident := range seen {
-		assert.IsType(t, &DevUser{}, ident, "evaluated as the development user")
-	}
+	_, err = f.renew(tok, open, 7)
+	assert.ErrorIs(t, err, errConduitPrincipalInactive, "dev auth on, no row: the account-status rule refuses")
+	assert.Equal(t, ConduitRenewalDeny, ClassifyConduitRenewal(err))
+
+	t.Run("dev auth on with an active row for the development user", func(t *testing.T) {
+		g := newRenewalFixture(t)
+		ctx := context.Background()
+		if _, err := g.store.GetUser(ctx, DevUserID); errors.Is(err, store.ErrNotFound) {
+			createTestUserWithProjectRole(t, g.store, DevUserID, "dev@conduit.test", g.agent.ProjectID, store.ProjectRoleMember)
+		}
+		tok, open := g.openGrant(t, grant.ViaProxy, tcpHeader("3000"), func(c *grant.Claims) {
+			c.Subject, c.JTI = grant.SubjectUserPrefix+DevUserID, "open-dev-active"
+		})
+		prevEnabled, prevCfg := g.srv.authConfig.DevAuthEnabled, g.srv.authConfig.DevUserCfg
+		t.Cleanup(func() { g.srv.authConfig.DevAuthEnabled, g.srv.authConfig.DevUserCfg = prevEnabled, prevCfg })
+		g.srv.authConfig.DevAuthEnabled = true
+		g.srv.authConfig.DevUserCfg = DevUserConfig{Username: "dev"}
+		var seen []Identity
+		g.srv.conduitAuthorizeActionTestHook = func(_ context.Context, ident Identity, _ *store.Agent, _ Action) error {
+			seen = append(seen, ident)
+			return nil
+		}
+		r, err := g.renew(tok, open, 7)
+		require.NoError(t, err, "dev auth on: the development user renews")
+		assert.Equal(t, recheckRenewed, classOfRenewal(err))
+		require.NotNil(t, r)
+		assert.Equal(t, grant.SubjectUserPrefix+DevUserID, r.Claims.Subject)
+		require.NotEmpty(t, seen)
+		for _, ident := range seen {
+			assert.IsType(t, &DevUser{}, ident, "evaluated as the development user")
+		}
+
+		row, err := g.store.GetUser(ctx, DevUserID)
+		require.NoError(t, err)
+		row.Status = store.UserStatusSuspended
+		require.NoError(t, g.store.UpdateUser(ctx, row))
+		_, err = g.renew(tok, open, 7)
+		assert.ErrorIs(t, err, errConduitPrincipalInactive, "dev auth on, suspended row: the account-status rule refuses")
+		assert.Equal(t, ConduitRenewalDeny, ClassifyConduitRenewal(err))
+	})
 
 	// A second fixture runs in its own subtest (the registry test database is
 	// named after the test).
@@ -588,10 +614,17 @@ func TestRelayStreamRecheck_NoRenewalPathIsUnavailable(t *testing.T) {
 	assert.False(t, res.Close)
 }
 
-// productionFiles parses the non-test Go files of pkg/hub.
+// productionFiles parses the non-test Go files of pkg/hub and of each
+// existing guardScanSubdirs directory.
 func productionFiles(t *testing.T) map[string]*ast.File {
 	t.Helper()
-	names, err := filepath.Glob("*.go")
+	// pkgmove:scan-covers pkg/hub/apierr
+	// scanned through guardScanSubdirs; guards the conduit stream renewer, track-site and renewal-principal pins.
+	// pkgmove:scan-covers pkg/hub/internal/principal
+	// scanned through guardScanSubdirs; guards the conduit stream renewer, track-site and renewal-principal pins.
+	// pkgmove:scan-covers pkg/hub/maintenance
+	// scanned through guardScanSubdirs once it exists; guards the conduit stream renewer, track-site and renewal-principal pins.
+	names, err := globGuardScanDirs(".", "*.go")
 	require.NoError(t, err)
 	out := map[string]*ast.File{}
 	for _, name := range names {

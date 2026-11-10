@@ -108,6 +108,8 @@ func init() {
 	startCmd.Flags().BoolVar(&startWaitReady, "wait-ready", false, "After the agent is running, also wait until its harness accepts input (shown as \"starting\" until then). "+
 		"--wait-timeout, if set, bounds the whole wait; otherwise the readiness wait is limited to 2m. Exits 3 if the agent is not ready in time (it is left running)")
 
+	startCmd.Flags().BoolVar(&sendEnvFlag, sendEnvFlagName, false, sendEnvFlagUsage)
+
 	// GCP service account assignment flag
 	startCmd.Flags().StringVar(&serviceAccountFlag, "service-account", "", "GCP service account to assign to this agent: its id, email or display name")
 

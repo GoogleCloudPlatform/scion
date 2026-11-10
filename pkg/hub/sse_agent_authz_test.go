@@ -20,7 +20,6 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -32,11 +31,40 @@ import (
 type sseCountingPublisher struct {
 	*ChannelEventPublisher
 	subscriptions int
+	// patterns holds each Subscribe call's patterns, in call order.
+	patterns [][]string
 }
 
 func (p *sseCountingPublisher) Subscribe(patterns ...string) (<-chan Event, func()) {
 	p.subscriptions++
+	p.patterns = append(p.patterns, append([]string(nil), patterns...))
 	return p.ChannelEventPublisher.Subscribe(patterns...)
+}
+
+// clientSubscriptions returns the subscriptions other than userID's own
+// membership-changed subscription, which a stream installs before it
+// authorizes (ptone/scion#7494) and so holds even on a refused request.
+// Only that exact subject is skipped.
+func (p *sseCountingPublisher) clientSubscriptions(userID string) [][]string {
+	own := membershipChangedSubjectFor(userID)
+	var out [][]string
+	for _, pat := range p.patterns {
+		if len(pat) == 1 && pat[0] == own {
+			continue
+		}
+		out = append(out, pat)
+	}
+	return out
+}
+
+// assertRefusedSubscriptions: a stream refused for userID subscribed to no
+// client subject, held at most userID's own membership subscription, and
+// released everything before returning.
+func assertRefusedSubscriptions(t *testing.T, pub *sseCountingPublisher, userID string) {
+	t.Helper()
+	assert.Empty(t, pub.clientSubscriptions(userID), "denied requests must never subscribe to a client subject")
+	assert.LessOrEqual(t, pub.subscriptions, 1, "at most the caller's own membership subscription")
+	assertNoSSESubscribers(t, pub.ChannelEventPublisher)
 }
 
 func TestSSEHandler_AgentUnauthorized(t *testing.T) {
@@ -47,14 +75,11 @@ func TestSSEHandler_AgentUnauthorized(t *testing.T) {
 	pub := &sseCountingPublisher{ChannelEventPublisher: NewChannelEventPublisher()}
 	defer pub.Close()
 	ws := &WebServer{store: s, events: pub, authzService: NewAuthzService(s, slog.Default())}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // Bounds the old, incorrectly accepted streaming path without sleeps.
 	subject := "agent." + id + ".>"
-	w := httptest.NewRecorder()
-	ws.handleSSE(w, sseAgentRequest(ctx, "user-1", "user", subject))
+	w := serveSSELive(t, ws, func(ctx context.Context) *http.Request { return sseAgentRequest(ctx, "user-1", "user", subject) })
 	assert.Equal(t, http.StatusForbidden, w.Code)
 	assert.False(t, w.Flushed)
-	assert.Zero(t, pub.subscriptions, "denied requests must never subscribe")
+	assertRefusedSubscriptions(t, pub, "user-1")
 	var body struct {
 		Denied []string `json:"denied_subjects"`
 	}
@@ -179,14 +204,11 @@ func TestSSEHandler_AgentMixedBatch(t *testing.T) {
 			if deny {
 				subjects = append(subjects, deniedSubject)
 			}
-			ctx, cancel := context.WithCancel(context.Background())
-			cancel()
-			w := httptest.NewRecorder()
-			ws.handleSSE(w, sseAgentRequest(ctx, "user-1", "user", subjects...))
+			w := serveSSELive(t, ws, func(ctx context.Context) *http.Request { return sseAgentRequest(ctx, "user-1", "user", subjects...) })
 			if deny {
 				assert.Equal(t, http.StatusForbidden, w.Code)
 				assert.False(t, w.Flushed)
-				assert.Zero(t, pub.subscriptions)
+				assertRefusedSubscriptions(t, pub, "user-1")
 				var body struct {
 					Denied []string `json:"denied_subjects"`
 				}
@@ -195,7 +217,22 @@ func TestSSEHandler_AgentMixedBatch(t *testing.T) {
 			} else {
 				assert.Equal(t, http.StatusOK, w.Code)
 				assert.True(t, w.Flushed)
-				assert.Equal(t, 1, pub.subscriptions)
+				// One subscription for the whole authorized batch, plus the
+				// internal subscription to the caller's own membership-change
+				// subject every stream holds (ptone/scion#7494).
+				assert.Equal(t, 2, pub.subscriptions)
+				var client, internal [][]string
+				for _, p := range pub.patterns {
+					if len(p) == 1 && p[0] == membershipChangedSubjectFor("user-1") {
+						internal = append(internal, p)
+					} else {
+						client = append(client, p)
+					}
+				}
+				assert.Len(t, internal, 1, "exactly one internal membership subscription")
+				if assert.Len(t, client, 1, "exactly one client subscription for the batch") {
+					assert.ElementsMatch(t, subjects, client[0])
+				}
 			}
 			assertNoSSESubscribers(t, pub.ChannelEventPublisher)
 		})

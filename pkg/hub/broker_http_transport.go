@@ -33,6 +33,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
@@ -80,16 +81,63 @@ type brokerHTTPTransport struct {
 	signer     brokerRequestSigner
 }
 
+// brokerEndpointTransportError applies the hub-broker transport policy to a
+// broker endpoint before anything is sent: requests to a broker carry agent
+// tokens, secrets and keystrokes, so they are never sent over plain http to
+// a non-loopback endpoint (for example another hub replica's co-located
+// broker registered with a non-loopback server.broker.host). Every sender in
+// this file (doRequest, ExecuteKeys) calls it, and the redirect check
+// (checkBrokerRedirect) applies the same rule to each hop.
+func brokerEndpointTransportError(brokerID, endpoint string) error {
+	if err := config.CheckHubTransport(endpoint); err != nil {
+		return fmt.Errorf("runtime broker %q: refusing its HTTP endpoint: %w", brokerID, err)
+	}
+	return nil
+}
+
+// checkBrokerRedirect is the main broker client's redirect policy. A
+// redirect is followed only to the host of the original request, never from
+// https to another scheme (even on a loopback host, where the transport
+// policy alone would accept http), and only when the target passes the
+// transport policy. So a broker response cannot make the hub resend a signed
+// request body (agent tokens, secrets) to another host, over a downgraded
+// scheme, or over plain http to a network host.
+func checkBrokerRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= 10 {
+		return errors.New("stopped after 10 redirects")
+	}
+	if len(via) > 0 && strings.EqualFold(via[0].URL.Scheme, "https") && !strings.EqualFold(req.URL.Scheme, "https") {
+		return fmt.Errorf("refusing a broker redirect that downgrades https to %s", req.URL.Scheme)
+	}
+	if len(via) > 0 && !strings.EqualFold(req.URL.Host, via[0].URL.Host) {
+		return fmt.Errorf("refusing a broker redirect to another host (%s)", req.URL.Host)
+	}
+	if err := config.CheckHubTransport(req.URL.Scheme + "://" + req.URL.Host); err != nil {
+		return fmt.Errorf("refusing a broker redirect: %w", err)
+	}
+	return nil
+}
+
+// brokerRequestTimeout is the hub-to-broker request limit (ptone/scion#6829):
+// the broker HTTP clients' timeout here, the control channel's
+// RequestTimeout (DefaultControlChannelConfig and the configuration New
+// builds), the conduit tunnels' default (which read the control channel
+// default), and syncDispatchTimeout, the bound on one synchronous launch
+// dispatch. They are one limit and change together. It is not
+// configurable.
+const brokerRequestTimeout = 180 * time.Second
+
 func newBrokerHTTPTransport(debug bool, signer brokerRequestSigner) *brokerHTTPTransport {
 	transport := otelhttp.NewTransport(http.DefaultTransport)
 	return &brokerHTTPTransport{
 		client: &http.Client{
-			Transport: transport,
-			Timeout:   120 * time.Second,
+			Transport:     transport,
+			Timeout:       brokerRequestTimeout,
+			CheckRedirect: checkBrokerRedirect,
 		},
 		keysClient: &http.Client{
 			Transport: transport,
-			Timeout:   120 * time.Second,
+			Timeout:   brokerRequestTimeout,
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
 				return http.ErrUseLastResponse
 			},
@@ -102,6 +150,11 @@ func newBrokerHTTPTransport(debug bool, signer brokerRequestSigner) *brokerHTTPT
 func (t *brokerHTTPTransport) doRequest(ctx context.Context, brokerID, method, endpoint string, body []byte) (*http.Response, error) {
 	if endpoint == "" || !strings.Contains(endpoint, "://") {
 		return nil, fmt.Errorf("runtime broker %q has no HTTP endpoint configured (control channel may be required): %w", brokerID, errStartRequestNotSent)
+	}
+	// Transport policy (brokerEndpointTransportError). Nothing is sent, so
+	// the request is reported as not sent.
+	if err := brokerEndpointTransportError(brokerID, endpoint); err != nil {
+		return nil, fmt.Errorf("%w (%w)", err, errStartRequestNotSent)
 	}
 
 	var reader io.Reader
@@ -142,17 +195,17 @@ func (t *brokerHTTPTransport) decodeResponse(resp *http.Response, out interface{
 	return nil
 }
 
-func (t *brokerHTTPTransport) decodeResponseWithSnippet(resp *http.Response, out interface{}) error {
+func (t *brokerHTTPTransport) decodeResponseWithSnippet(brokerID string, resp *http.Response, out interface{}) error {
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return fmt.Errorf("failed to read response body: %w", err)
 	}
 	if err := json.Unmarshal(respBody, out); err != nil {
-		bodySnippet := string(respBody)
-		if len(bodySnippet) > 256 {
-			bodySnippet = bodySnippet[:256] + "...(truncated)"
-		}
-		return fmt.Errorf("failed to decode response: %w (body=%q)", err, bodySnippet)
+		// The body stays in the hub log (capped and rendered); the error,
+		// which can reach a client, does not carry it.
+		slog.Warn("runtime broker response could not be decoded", "broker_id", brokerID, "error", err,
+			"body_len", len(respBody), "body", brokerBodyForLog(string(respBody)))
+		return fmt.Errorf("failed to decode response: %w", err)
 	}
 	return nil
 }
@@ -163,14 +216,14 @@ func (t *brokerHTTPTransport) decodeResponseWithSnippet(resp *http.Response, out
 // isBrokerAgentNotFound / brokerErrorMessage / brokerErrorDetails decode, so
 // 64KiB leaves two orders of magnitude of headroom for legitimate bodies
 // while bounding what a misbehaving or compromised broker can make the hub
-// buffer (and then carry in error text) per failed request. A body over the
+// buffer per failed request. A body over the
 // cap is truncated; JSON decoding of it then fails and callers fall back to
 // the status code, which is the safe behaviour for an oversized error.
 const maxBrokerErrorBodyBytes = 64 << 10
 
-func brokerHTTPError(resp *http.Response) error {
+func brokerHTTPError(brokerID string, resp *http.Response) error {
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxBrokerErrorBodyBytes))
-	return &brokerStatusError{StatusCode: resp.StatusCode, Body: string(respBody), RetryAfter: resp.Header.Get("Retry-After")}
+	return newBrokerStatusError(brokerID, resp.StatusCode, respBody, resp.Header.Get("Retry-After"))
 }
 
 func (t *brokerHTTPTransport) CreateAgent(ctx context.Context, brokerID, brokerEndpoint string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, error) {
@@ -185,7 +238,7 @@ func (t *brokerHTTPTransport) CreateAgent(ctx context.Context, brokerID, brokerE
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 400 {
-		return nil, brokerHTTPError(resp)
+		return nil, brokerHTTPError(brokerID, resp)
 	}
 	var result RemoteAgentResponse
 	if err := t.decodeResponse(resp, &result); err != nil {
@@ -200,6 +253,7 @@ func (t *brokerHTTPTransport) StartAgent(ctx context.Context, brokerID, brokerEn
 		endpoint += "?projectId=" + url.QueryEscape(projectID)
 	}
 	endpoint = withRunIDURL(endpoint, extras.RunID)
+	endpoint = withDispatchAgentIDURL(ctx, endpoint)
 	payload := map[string]interface{}{}
 	if task != "" {
 		payload["task"] = task
@@ -257,11 +311,11 @@ func (t *brokerHTTPTransport) StartAgent(ctx context.Context, brokerID, brokerEn
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 400 {
-		return nil, brokerHTTPError(resp)
+		return nil, brokerHTTPError(brokerID, resp)
 	}
 
 	var result RemoteAgentResponse
-	if err := t.decodeResponseWithSnippet(resp, &result); err != nil {
+	if err := t.decodeResponseWithSnippet(brokerID, resp, &result); err != nil {
 		return nil, err
 	}
 	return &result, nil
@@ -278,7 +332,7 @@ func (t *brokerHTTPTransport) StopAgent(ctx context.Context, brokerID, brokerEnd
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 400 {
-		return stopAgentError(brokerHTTPError(resp), runID)
+		return stopAgentError(brokerHTTPError(brokerID, resp), runID)
 	}
 	return nil
 }
@@ -312,7 +366,7 @@ func (t *brokerHTTPTransport) RestartAgent(ctx context.Context, brokerID, broker
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 400 {
-		return nil, brokerHTTPError(resp)
+		return nil, brokerHTTPError(brokerID, resp)
 	}
 	// The broker answers a restart with the entry it started (or found
 	// still running), including its run ID. An empty or undecodable body
@@ -350,7 +404,7 @@ func (t *brokerHTTPTransport) ResetAuthAgent(ctx context.Context, brokerID, brok
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 400 {
-		return brokerHTTPError(resp)
+		return brokerHTTPError(brokerID, resp)
 	}
 	return nil
 }
@@ -368,7 +422,7 @@ func (t *brokerHTTPTransport) DeleteAgent(ctx context.Context, brokerID, brokerE
 		// A 404 is an idempotent success unless the broker refused a
 		// run-scoped delete because another run holds the name
 		// (deleteAgentError, ptone/scion#3080).
-		return deleteAgentError(brokerHTTPError(resp), opts.RunID)
+		return deleteAgentError(brokerHTTPError(brokerID, resp), opts.RunID)
 	}
 	return nil
 }
@@ -402,6 +456,14 @@ func (t *brokerHTTPTransport) MessageAgent(ctx context.Context, brokerID, broker
 	if msgID := dispatchMessageIDFromContext(ctx); msgID != "" {
 		reqBody["message_id"] = msgID
 	}
+	// ptone/scion#4596: the attachments the broker downloads and writes into
+	// the agent's home before delivering the text.
+	if wire := dispatchAttachmentsFromContext(ctx); len(wire) > 0 {
+		reqBody["attachments"] = wire
+		if days := dispatchRetentionFromContext(ctx); days > 0 {
+			reqBody["attachment_retention_days"] = days
+		}
+	}
 
 	body, err := json.Marshal(reqBody)
 	if err != nil {
@@ -413,7 +475,7 @@ func (t *brokerHTTPTransport) MessageAgent(ctx context.Context, brokerID, broker
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 400 {
-		return brokerHTTPError(resp)
+		return brokerHTTPError(brokerID, resp)
 	}
 	return nil
 }
@@ -437,6 +499,12 @@ const maxKeysResponseBodyBytes = 64 * 1024
 func (t *brokerHTTPTransport) ExecuteKeys(ctx context.Context, brokerID, brokerEndpoint, agentSlug string, req agentkeys.BrokerRequest) (agentkeys.BrokerResult, error) {
 	if brokerEndpoint == "" || !strings.Contains(brokerEndpoint, "://") {
 		return agentkeys.BrokerResult{}, fmt.Errorf("%w: runtime broker %q has no HTTP endpoint configured (control channel may be required)", agentkeys.ErrNotDispatched, brokerID)
+	}
+	// Transport policy (brokerEndpointTransportError): keystrokes can carry
+	// typed secrets. Nothing is sent, so the keys are reported not
+	// dispatched.
+	if err := brokerEndpointTransportError(brokerID, brokerEndpoint); err != nil {
+		return agentkeys.BrokerResult{}, fmt.Errorf("%w: %w", agentkeys.ErrNotDispatched, err)
 	}
 
 	// The broker compares ExecuteBefore against its own UTC clock; a caller
@@ -561,7 +629,7 @@ func (t *brokerHTTPTransport) CheckAgentPrompt(ctx context.Context, brokerID, br
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 400 {
-		return false, brokerHTTPError(resp)
+		return false, brokerHTTPError(brokerID, resp)
 	}
 	var result HasPromptResponse
 	if err := t.decodeResponse(resp, &result); err != nil {
@@ -582,7 +650,7 @@ func (t *brokerHTTPTransport) CreateAgentWithGather(ctx context.Context, brokerI
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 400 {
-		return nil, nil, brokerHTTPError(resp)
+		return nil, nil, brokerHTTPError(brokerID, resp)
 	}
 
 	if resp.StatusCode == http.StatusAccepted {
@@ -617,7 +685,7 @@ func (t *brokerHTTPTransport) GetAgentLogs(ctx context.Context, brokerID, broker
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 400 {
-		return "", brokerHTTPError(resp)
+		return "", brokerHTTPError(brokerID, resp)
 	}
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -647,7 +715,7 @@ func (t *brokerHTTPTransport) ExecAgent(ctx context.Context, brokerID, brokerEnd
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 400 {
-		return "", 0, brokerHTTPError(resp)
+		return "", 0, brokerHTTPError(brokerID, resp)
 	}
 
 	var result struct {
@@ -724,7 +792,7 @@ func (t *brokerHTTPTransport) PullImage(ctx context.Context, brokerID, brokerEnd
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 400 {
-		return brokerHTTPError(resp)
+		return brokerHTTPError(brokerID, resp)
 	}
 	return nil
 }
@@ -741,7 +809,7 @@ func (t *brokerHTTPTransport) DeleteImage(ctx context.Context, brokerID, brokerE
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 400 {
-		return brokerHTTPError(resp)
+		return brokerHTTPError(brokerID, resp)
 	}
 	return nil
 }
@@ -757,7 +825,7 @@ func (t *brokerHTTPTransport) CleanupProject(ctx context.Context, brokerID, brok
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 400 && resp.StatusCode != http.StatusNotFound {
-		return brokerHTTPError(resp)
+		return brokerHTTPError(brokerID, resp)
 	}
 	return nil
 }

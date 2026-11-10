@@ -167,9 +167,9 @@ func canReadAttachmentScope(ctx context.Context, host Host, a *Artifact, kind, r
 	}
 	switch a.ScopeKind {
 	case ScopeKindUpload:
-		return kind == a.OwnerKind && ref == a.OwnerRef && a.ScopeRef == PrincipalRef(kind, ref)
+		return kind == a.OwnerKind && ref == a.OwnerRef && a.ScopeRef == PrincipalRef(kind, ref) && mh.PermitsUploadRead(ctx)
 	case ScopeKindMessage:
-		return a.ScopeRef != "" && mh.MayReadMessage(ctx, a.ScopeRef)
+		return a.ScopeRef != "" && mh.MayReadMessage(ctx, a.ScopeRef, a.MessageProjectID)
 	}
 	return false
 }
@@ -191,8 +191,11 @@ var (
 // naming the caller, or a scope grant for a scope in which the host
 // authorizes the caller for scopePerm. With excludeHome, a scope grant for
 // a's home scope does not count (the caller's checks already asked the
-// host about the home scope). Share links never count. It is the one place
-// grants are matched, for reading, writing and administering alike.
+// host about the home scope). Share links never count. A principal grant
+// in its automatic form (CreatedByRef SponsorReviewCreator) counts only
+// while the host authorizes the caller to read in a's home scope. It is
+// the one place grants are matched, for reading, writing and administering
+// alike.
 func grantAllows(ctx context.Context, host Host, a *Artifact, grants []Grant, now time.Time,
 	kind, ref string, perms []string, scopePerm string, excludeHome bool) bool {
 	for _, g := range grants {
@@ -204,9 +207,18 @@ func grantAllows(ctx context.Context, host Host, a *Artifact, grants []Grant, no
 		}
 		switch g.SubjectKind {
 		case SubjectPrincipal:
-			if g.SubjectRef == PrincipalRef(kind, ref) {
-				return true
+			if g.SubjectRef != PrincipalRef(kind, ref) {
+				continue
 			}
+			// An automatic review grant in its automatic form counts only
+			// while its subject holds a role that reads in the home
+			// project (ptone/scion#7134). Authorize is decided from roles,
+			// never from the artifact's grants, so the grant cannot
+			// justify itself; a failed lookup answers false.
+			if g.CreatedByRef == SponsorReviewCreator && !host.Authorize(ctx, a.ScopeRef, PermissionRead) {
+				continue
+			}
+			return true
 		case SubjectScope:
 			if g.SubjectRef == "" || (excludeHome && g.SubjectRef == a.ScopeRef) {
 				continue
@@ -319,6 +331,7 @@ func (s *Service) handleGetArtifact(w http.ResponseWriter, r *http.Request, id s
 			return
 		}
 		resp.Version = versionInfo(v, files)
+		resp.Archive = s.archiveInfo(r.Context(), b, files)
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -470,6 +483,11 @@ func deliveryFor(r *http.Request, b backend) delivery {
 // nosniff, private caching) are set here for every delivery, so all read
 // routes, now and in later phases, share one code path.
 func serveFile(w http.ResponseWriter, r *http.Request, b backend, f *File, how delivery, immutable bool) {
+	serveFileTTL(w, r, b, f, how, immutable, signedURLTTL)
+}
+
+// serveFileTTL is serveFile with ttl as the lifetime of a redirect URL.
+func serveFileTTL(w http.ResponseWriter, r *http.Request, b backend, f *File, how delivery, immutable bool, ttl time.Duration) {
 	ctx := r.Context()
 	disposition := contentDisposition(f.MediaType, f.Path)
 	ctype := responseContentType(f.MediaType)
@@ -481,7 +499,7 @@ func serveFile(w http.ResponseWriter, r *http.Request, b backend, f *File, how d
 	blobPath := BlobPath(b.hubID, f.SHA256)
 	if how == deliverRedirect {
 		signed, err := b.blobs.GenerateSignedURL(ctx, blobPath, storage.SignedURLOptions{
-			Method: http.MethodGet, Expires: signedURLTTL,
+			Method: http.MethodGet, Expires: ttl,
 			ResponseContentType: ctype, ResponseContentDisposition: disposition,
 		})
 		if err != nil {

@@ -17,8 +17,11 @@
 package hub
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -213,5 +216,62 @@ func TestSkillFiles_ReadAuthz(t *testing.T) {
 	t.Run("formerly-public anonymous download still denied", func(t *testing.T) {
 		rec := doAnonymousRequest(srv, downloadURL)
 		assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+	})
+}
+
+// skillExistsErrorStorage fails every Exists call while failing is set, like
+// a transient storage or permission error.
+type skillExistsErrorStorage struct {
+	storage.Storage
+	failing bool
+}
+
+func (s *skillExistsErrorStorage) Exists(ctx context.Context, objectPath string) (bool, error) {
+	if s.failing {
+		return false, errors.New("injected storage error")
+	}
+	return s.Storage.Exists(ctx, objectPath)
+}
+
+// TestSkillFinalize_StorageErrorIsNotFileNotFound: a storage error while
+// finalize checks the uploaded files is a 500, not the 400 "file not found",
+// and the version stays a draft; a file that is really missing is still a
+// 400 (ptone/scion#5075).
+func TestSkillFinalize_StorageErrorIsNotFileNotFound(t *testing.T) {
+	srv, alice, _, skill := setupLocalStorageSkillTest(t)
+	stor := &skillExistsErrorStorage{Storage: srv.GetStorage()}
+	srv.SetStorage(stor)
+
+	content := []byte("---\nname: test\n---\n# Test")
+	rec := doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/skills/"+skill.ID+"/versions",
+		PublishVersionRequest{Version: "1.0.0", Files: []FileUploadRequest{{Path: "SKILL.md", Size: int64(len(content))}}})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var pub PublishVersionResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&pub))
+	require.Len(t, pub.UploadURLs, 1)
+	rec = doRawRequestAsUser(t, srv, alice, pub.UploadURLs[0].Method, pub.UploadURLs[0].URL, content)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	finalize := func(files []store.TemplateFile) *httptest.ResponseRecorder {
+		return doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/skills/"+skill.ID+"/finalize",
+			FinalizeSkillVersionRequest{Version: "1.0.0", Manifest: &SkillManifest{Files: files}})
+	}
+	uploaded := store.TemplateFile{Path: "SKILL.md", Size: int64(len(content)), Hash: sha256Hex(content)}
+
+	t.Run("storage error is 500", func(t *testing.T) {
+		stor.failing = true
+		defer func() { stor.failing = false }()
+		rec := finalize([]store.TemplateFile{uploaded})
+		require.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+		assert.NotContains(t, rec.Body.String(), "file not found")
+	})
+	t.Run("missing file is 400", func(t *testing.T) {
+		rec := finalize([]store.TemplateFile{uploaded, {Path: "missing.txt", Size: 1, Hash: sha256Hex([]byte("x"))}})
+		require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), "file not found: missing.txt")
+	})
+	t.Run("still a draft and finalizes once storage recovers", func(t *testing.T) {
+		rec := finalize([]store.TemplateFile{uploaded})
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	})
 }

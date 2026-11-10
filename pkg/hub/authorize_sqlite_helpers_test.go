@@ -90,9 +90,12 @@ func newAgentKeysRouteFixture(t *testing.T) *agentKeysRouteFixture {
 	// unless a test opts in via SetDispatcher) still ends in 503
 	// keys_unavailable, since that determination is
 	// s.GetDispatcher() == nil, not anything about the target agent.
+	// The endpoint is stubBrokerEndpoint (loopback): the hub-broker transport
+	// policy accepts it, so a test that dials it through a stub reaches the
+	// dial instead of the plaintext non-loopback refusal.
 	broker := &store.RuntimeBroker{
 		ID: tid("agentkeys-route-broker"), Name: "agentkeys-route-broker", Slug: "agentkeys-route-broker",
-		Endpoint: "http://broker.invalid:9800", Status: store.BrokerStatusOnline,
+		Endpoint: stubBrokerEndpoint, Status: store.BrokerStatusOnline,
 	}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
 
@@ -358,14 +361,6 @@ func msgAuthzGrantAgentMessage(t *testing.T, s store.Store, userID, projectID st
 	})
 	if err != nil && err != store.ErrAlreadyExists {
 		t.Fatalf("failed to create agent.message role binding: %v", err)
-	}
-}
-
-// require_NoError is a test helper that fails immediately on error.
-func require_NoError(t *testing.T, err error) {
-	t.Helper()
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

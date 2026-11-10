@@ -38,7 +38,7 @@ func TestServer_NFSReconcilerWired_WhenNFSConfigured(t *testing.T) {
 		},
 	}
 
-	srv := New(cfg, nil, nil)
+	srv := New(cfg, nil, nil, config.RuntimeBuildRecord{})
 
 	if srv.nfsMountReconciler == nil {
 		t.Fatal("expected nfsMountReconciler to be constructed when NFSConfig has shares")
@@ -55,7 +55,7 @@ func TestServer_NFSReconcilerNil_WhenLocalBackend(t *testing.T) {
 		// NFSConfig is nil — local backend
 	}
 
-	srv := New(cfg, nil, nil)
+	srv := New(cfg, nil, nil, config.RuntimeBuildRecord{})
 
 	if srv.nfsMountReconciler != nil {
 		t.Fatal("expected nfsMountReconciler to be nil when NFSConfig is not set")
@@ -75,7 +75,7 @@ func TestServer_NFSReconcilerNil_WhenNoShares(t *testing.T) {
 		},
 	}
 
-	srv := New(cfg, nil, nil)
+	srv := New(cfg, nil, nil, config.RuntimeBuildRecord{})
 
 	if srv.nfsMountReconciler != nil {
 		t.Fatal("expected nfsMountReconciler to be nil when no shares configured")
@@ -97,7 +97,7 @@ func TestServer_HealthIncludesNFS(t *testing.T) {
 		},
 	}
 
-	srv := New(cfg, nil, &runtime.MockRuntime{NameFunc: func() string { return "docker" }})
+	srv := New(cfg, nil, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
 
 	// Before reconciliation: shares are unreconciled → unhealthy
 	health := srv.GetHealthInfo(context.Background())
@@ -124,7 +124,7 @@ func TestServer_HealthExcludesNFS_WhenLocal(t *testing.T) {
 		Host: "127.0.0.1",
 	}
 
-	srv := New(cfg, nil, nil)
+	srv := New(cfg, nil, nil, config.RuntimeBuildRecord{})
 	health := srv.GetHealthInfo(context.Background())
 
 	if _, ok := health.Checks["nfs_mounts"]; ok {

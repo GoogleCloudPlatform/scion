@@ -17,6 +17,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
@@ -179,26 +180,6 @@ func (r *KubernetesRuntime) nfsHomeEnv(config RunConfig) ([]corev1.EnvVar, error
 	return env, nil
 }
 
-// withHomeStorageAnnotation returns annotations with
-// k8sHomeStorageAnnotation set when nfsHome is true and removed otherwise.
-// The input map is not modified; it is returned as is when no change is
-// needed.
-func withHomeStorageAnnotation(annotations map[string]string, nfsHome bool) map[string]string {
-	_, has := annotations[k8sHomeStorageAnnotation]
-	if !nfsHome && !has {
-		return annotations
-	}
-	out := make(map[string]string, len(annotations)+1)
-	for k, v := range annotations {
-		out[k] = v
-	}
-	delete(out, k8sHomeStorageAnnotation)
-	if nfsHome {
-		out[k8sHomeStorageAnnotation] = HomeStorageNFS
-	}
-	return out
-}
-
 // k8sHomeLinksResult is the content of k8sHomeLinksResultFile, written in
 // the pod by the step that places the links. Targets are relative to the
 // home. State is "linked" or "skipped" (a user file was kept at the
@@ -306,7 +287,7 @@ func (r *KubernetesRuntime) verifyK8sHomeLinks(ctx context.Context, namespace, p
 		targets = append(targets, l.Target)
 	}
 	runtimeLog().Info("Checking linked files in agent home", "agent", config.Name, "phase", "home-files", "targets", targets)
-	out, err := r.execInPod(ctx, namespace, podName, k8sHomeLinksResultCommand)
+	out, err := r.execInPodDialRetry(ctx, namespace, podName, k8sHomeLinksResultCommand, config.Name, "home-files")
 	if err != nil {
 		return fmt.Errorf("failed to read %s: %w", k8sHomeLinksResultFile, err)
 	}
@@ -315,7 +296,7 @@ func (r *KubernetesRuntime) verifyK8sHomeLinks(ctx context.Context, namespace, p
 		return err
 	}
 	script := k8sHomeLinkVerifyScript(util.GetHomeDir(config.UnixUsername), links, skipped)
-	if _, err := r.execInPod(ctx, namespace, podName, []string{"sh", "-c", script}); err != nil {
+	if _, err := r.execInPodDialRetry(ctx, namespace, podName, []string{"sh", "-c", script}, config.Name, "home-files"); err != nil {
 		return fmt.Errorf("failed to verify linked files in agent home: %w", err)
 	}
 	return nil
@@ -399,8 +380,18 @@ func NFSHomeSubPaths(subPathRoot, projectID, slug, agentID string) (agentDir, ho
 	if !validHomeAgentID(agentID) || agentID == slug {
 		return "", "", fmt.Errorf("home storage nfs: invalid agent ID %q", agentID)
 	}
-	agentDir = filepath.Join(subPathRoot, projectID, "agents", slug)
-	return agentDir, filepath.Join(agentDir, "home-"+agentID), nil
+	// The layout authority places homes (ptone/scion#5825): the Cloud Run
+	// agent runtime resolves the same path for the same (project, agent).
+	layout := projectfs.Layout{Backend: projectfs.BackendNFS, SubPathRoot: subPathRoot}
+	ar, err := layout.AgentRoot(projectID, slug)
+	if err != nil {
+		return "", "", fmt.Errorf("home storage nfs: %w", err)
+	}
+	h, err := layout.AgentHome(projectID, slug, agentID)
+	if err != nil {
+		return "", "", fmt.Errorf("home storage nfs: %w", err)
+	}
+	return ar.RelPath, h.RelPath, nil
 }
 
 // homeInitCommand wraps a sciontool home command in a check that the
@@ -428,18 +419,32 @@ type nfsHomePodParts struct {
 }
 
 // nfsHomePodSpec builds the home volume, the agent container's home mount
-// and the home init containers. workspaceClaim is the claim of the
-// workspace volume "workspace", or "" when the workspace is not a PVC; the
-// home shares that volume when the claims match.
-func (r *KubernetesRuntime) nfsHomePodSpec(config RunConfig, containerHome, workspaceClaim string) (nfsHomePodParts, error) {
+// and the home init containers. workspaceShare is the share of the
+// workspace volume "workspace", or the zero share when the workspace is not
+// on NFS; the home shares that volume when it is the same claim.
+func (r *KubernetesRuntime) nfsHomePodSpec(config RunConfig, containerHome string, workspaceShare NFSPodShare) (nfsHomePodParts, error) {
 	var parts nfsHomePodParts
 	hs := config.HomeStorage
 	if hs == nil || hs.PVClaimName == "" {
 		return parts, fmt.Errorf("home storage %q needs a claim", HomeStorageNFS)
 	}
+	if workspaceShare.Inline() {
+		// The same refusal as at agent start: an inline workspace share
+		// (no shares[0].pv_name) does not carry NFS homes yet.
+		return parts, fmt.Errorf("home storage %q needs a claim (shares[0].pv_name) on the workspace share: "+
+			"without it Kubernetes pods mount the share inline, which NFS homes do not support yet", HomeStorageNFS)
+	}
 	agentDir, home, err := NFSHomeSubPaths(hs.SubPathRoot, hs.ProjectID, hs.AgentSlug, hs.AgentID)
 	if err != nil {
 		return parts, err
+	}
+	// Defense in depth: NFSHomeSubPaths validates every component and takes
+	// the paths from the layout, so no accepted input reaches a refusal
+	// here today.
+	for _, sub := range []string{agentDir, home} {
+		if err := checkNFSMountScope(sub, hs.SubPathRoot, hs.ProjectID); err != nil {
+			return parts, fmt.Errorf("NFS home: %w", err)
+		}
 	}
 	if hs.GID <= 0 {
 		return parts, fmt.Errorf("home storage %q needs the export group", HomeStorageNFS)
@@ -450,15 +455,19 @@ func (r *KubernetesRuntime) nfsHomePodSpec(config RunConfig, containerHome, work
 	}
 
 	volName := k8sHomeVolume
-	if workspaceClaim != "" && workspaceClaim == hs.PVClaimName {
+	if workspaceShare.Same(NFSPodShare{ClaimName: hs.PVClaimName}) {
 		volName = "workspace"
 	} else {
-		parts.volume = &corev1.Volume{
-			Name: volName,
-			VolumeSource: corev1.VolumeSource{
-				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: hs.PVClaimName},
-			},
+		// NFS homes are on a claim only (an inline workspace share is
+		// refused above and at agent start); the volume source comes from
+		// the same translation as every other NFS share volume. A
+		// whole-claim volume is the deliberate exception to
+		// projectfs.Layout.Realize, which models subPath mounts only.
+		src, err := podVolumeSource(projectfs.Realized{ClaimName: hs.PVClaimName, Target: containerHome})
+		if err != nil {
+			return parts, err
 		}
+		parts.volume = &corev1.Volume{Name: volName, VolumeSource: src}
 	}
 	parts.mount = corev1.VolumeMount{Name: volName, MountPath: containerHome, SubPath: home}
 
@@ -821,21 +830,16 @@ func k8sHomeHooksGuardCommand(home string) []string {
 done`, "sh", home}
 }
 
-// Paths, relative to the agent home, of the harness bundle's secrets and
-// outputs on the broker. For NFS-home pods they are never transferred into
-// the home on the export: the secrets are staged in memory
-// (k8sHarnessSecretsDir) and the outputs are regenerated in the pod
-// (k8sHarnessOutputsDir).
-const (
-	harnessBundleSecretsRel = ".scion/harness/secrets"
-	harnessBundleOutputsRel = ".scion/harness/outputs"
-)
-
 // nfsHomeSyncExcludes returns what the home transfer of an NFS-home pod
-// leaves out: the link targets and the harness bundle's secrets and
-// outputs.
+// leaves out: the shared home transfer set's excludes (homeTransferExcludes:
+// the link targets and the harness bundle's secrets and outputs). The
+// harness secrets are staged in memory (k8sHarnessSecretsDir) and the
+// outputs are regenerated in the pod (k8sHarnessOutputsDir).
 func (r *KubernetesRuntime) nfsHomeSyncExcludes(config RunConfig) []string {
-	return append(r.k8sHomeLinkTargets(config), harnessBundleSecretsRel, harnessBundleOutputsRel)
+	if k8sHomeFileModeFor(config) != k8sHomeFilesLink {
+		return []string{harnessBundleSecretsRel, harnessBundleOutputsRel}
+	}
+	return homeTransferExcludes(config, !r.useGKESecretsPath(config))
 }
 
 // k8sHarnessSecretsDirCommand creates the in-memory harness secrets

@@ -60,7 +60,7 @@ func authConfig(t *testing.T, f *hostFixture, instances ...config.V1RuntimeBroke
 			SecretKey: base64.StdEncoding.EncodeToString(secretFor(ic.Instance.Key)),
 		}
 		sc.FlatInstance = &runtimebroker.FlatInstanceConfig{Identity: ic.Identity, Instance: ic.Instance, HubInProcess: true}
-		return runtimebroker.New(sc, ic.Manager, ic.Runtime), nil
+		return runtimebroker.New(sc, ic.Manager, ic.Runtime, config.RuntimeBuildRecord{}), nil
 	}
 	return cfg
 }

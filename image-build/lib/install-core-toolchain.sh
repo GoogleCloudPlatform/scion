@@ -67,6 +67,42 @@ ver_ge() {
 
 deb_arch() { dpkg --print-architecture; }
 
+# probe_version <cmd> [args...] — print the first line of a tool's version
+# output, or nothing if the tool is broken. Never fails, so it is safe under
+# `set -euo pipefail`: a binary that exists but cannot run (wrong architecture,
+# missing shared library, truncated download) must read as "not usably
+# installed" and lead to a reinstall, not abort the build in a version probe.
+probe_version() {
+  local out
+  out="$("$@" 2>/dev/null)" || out=""
+  printf '%s\n' "${out%%$'\n'*}"
+}
+
+# verify_installed <tool> <expected-path> <expected-version> <version-cmd...>
+#
+# Post-install check: the tool that PATH resolves is the one just installed,
+# and it reports the pinned version. Without it, another copy earlier on PATH
+# (left by the base image) would silently win over the one this step put down.
+# <version-cmd...> prints the bare version of the binary at <expected-path>;
+# it is run through probe_version, so a broken install reads as empty.
+verify_installed() {
+  local tool="$1" want_path="$2" want_ver="$3"
+  shift 3
+  local got_path got_ver
+  got_path="$(command -v "$tool" 2>/dev/null || true)"
+  got_ver="$(probe_version "$@")"
+  if [ "$got_path" != "$want_path" ]; then
+    echo "FAIL: $tool resolves to '${got_path:-<not on PATH>}' after installing $want_ver to $want_path." >&2
+    echo "      Another copy is earlier on PATH; remove it or reorder PATH." >&2
+    exit 1
+  fi
+  if [ "$got_ver" != "$want_ver" ]; then
+    echo "FAIL: $want_path reports version '${got_ver:-<none: the binary does not run>}', expected $want_ver." >&2
+    exit 1
+  fi
+  log "verified $tool $want_ver at $want_path"
+}
+
 # Two different questions get asked about apt packages here, they have two
 # different answers, and using one helper for both produced a bug in each
 # direction during development. Keep them separate and named for what they ask.
@@ -205,6 +241,106 @@ step_chromium() {
   apt_cleanup
 }
 
+# Playwright WebKit and Firefox system libraries. Agents run as non-root and
+# cannot apt-install, so `npx playwright install webkit firefox` only yields a
+# browser that starts if the libraries are already in the image. The browsers
+# themselves are not baked in: their revision follows each project's own
+# Playwright version.
+#
+# This step deliberately keys on the distro release, unlike the capability
+# tests elsewhere in this file: the list is Playwright's own, and Playwright
+# publishes it per release. A suite with no list here is skipped, so a base
+# without one (thick-prep's Ubuntu) is left unchanged rather than half-served.
+#
+# Derived from npm playwright-core@1.62.1 (webkit revision 2336, firefox 1538),
+# lib/coreBundle.js, the bundled
+# packages/playwright-core/src/server/registry/nativeDeps.ts entries
+# deps["debian13-x64"].tools + .webkit + .firefox, de-duplicated in that order.
+# deps["debian13-arm64"] reuses the same arrays. "tools" is included because
+# `playwright install-deps <browser>` always adds that group. Regenerate from
+# the published package (no docker or apt needed), then apply the libasound2
+# rename below and update the version named above:
+#   npm pack playwright-core@<version> && tar xzf playwright-core-<version>.tgz
+#   node -e 'const s=require("fs").readFileSync(process.argv[1],"utf8");
+#     const b=s.slice(s.indexOf("\"debian13-x64\": {"));
+#     const g=k=>JSON.parse(b.match(new RegExp(k+": (\\[[^\\]]*\\])"))[1]);
+#     console.log([...new Set(["tools","webkit","firefox"].flatMap(g))].join(" "))' \
+#     package/lib/coreBundle.js
+# (`install-deps --dry-run` is not a substitute: it prints only the packages
+# missing on the host it runs on, after apt's transitive resolution.)
+#
+# One divergence from Playwright's list: it names libasound2 (firefox group),
+# which trixie no longer ships as a real package; libasound2t64 replaces it.
+# It is listed here by its real name instead of relying on apt's choice of a
+# provider for the virtual name.
+PLAYWRIGHT_DEPS_DEBIAN13="
+  xvfb fonts-noto-color-emoji fonts-unifont libfontconfig1 libfreetype6
+  xfonts-scalable fonts-liberation fonts-ipafont-gothic fonts-wqy-zenhei
+  fonts-tlwg-loma-otf fonts-freefont-ttf
+  libsoup-3.0-0 gstreamer1.0-libav gstreamer1.0-plugins-bad
+  gstreamer1.0-plugins-base gstreamer1.0-plugins-good libatk-bridge2.0-0t64
+  libatk1.0-0t64 libcairo2 libdbus-1-3 libdrm2 libegl1 libenchant-2-2
+  libepoxy0 libevdev2 libgbm1 libgdk-pixbuf-2.0-0 libgles2 libglib2.0-0t64
+  libglx0 libgstreamer-gl1.0-0 libgstreamer-plugins-base1.0-0
+  libgstreamer1.0-0 libgtk-4-1 libgudev-1.0-0 libharfbuzz-icu0 libharfbuzz0b
+  libhyphen0 libicu76 libjpeg62-turbo liblcms2-2 libmanette-0.2-0 libnotify4
+  libopengl0 libopenjp2-7 libopus0 libpango-1.0-0 libpng16-16t64 libproxy1v5
+  libsecret-1-0 libwayland-client0 libwayland-egl1 libwayland-server0 libwebp7
+  libwebpdemux2 libwoff1 libx11-6 libxcomposite1 libxdamage1 libxkbcommon0
+  libxml2 libxslt1.1 libatomic1 libevent-2.1-7t64 libavif16
+  libasound2t64 libavcodec61 libcairo-gobject2 libdbus-glib-1-2
+  libgtk-3-0t64 libpangocairo-1.0-0 libx11-xcb1 libxcb-shm0 libxcb1
+  libxcursor1 libxext6 libxfixes3 libxi6 libxrandr2 libxrender1 libxtst6
+"
+
+# Overridable so the hermetic test can present a different distro.
+OS_RELEASE_FILE="${OS_RELEASE_FILE:-/etc/os-release}"
+
+# playwright_deps_for_os — print the package list for this distro release, or
+# nothing when there is none. verify-base-contract.sh keys its sentinel check
+# on the same ID/VERSION_ID pair; keep the two in step.
+playwright_deps_for_os() {
+  local id version_id
+  # shellcheck source=/dev/null
+  id="$(. "$OS_RELEASE_FILE" 2>/dev/null && printf '%s' "${ID:-}")" || id=""
+  # shellcheck source=/dev/null
+  version_id="$(. "$OS_RELEASE_FILE" 2>/dev/null && printf '%s' "${VERSION_ID:-}")" || version_id=""
+  case "${id}${version_id}" in
+  debian13) printf '%s\n' "$PLAYWRIGHT_DEPS_DEBIAN13" ;;
+  esac
+}
+
+step_playwright_deps() {
+  local pkgs
+  pkgs="$(playwright_deps_for_os)"
+  if [ -z "${pkgs//[[:space:]]/}" ]; then
+    local pretty
+    # shellcheck source=/dev/null
+    pretty="$(. "$OS_RELEASE_FILE" 2>/dev/null && printf '%s' "${PRETTY_NAME:-unknown}")" || pretty=unknown
+    skip "no Playwright WebKit/Firefox library list for ${pretty:-unknown}"
+    return 0
+  fi
+  ensure_apt_updated
+
+  # Same pre-flight as apt-common: a package renamed between suites fails the
+  # build with its name, not as an anonymous resolver error.
+  # shellcheck disable=SC2086
+  if ! apt-get install -s --no-install-recommends $pkgs >/dev/null 2>&1; then
+    local missing="" p
+    for p in $pkgs; do
+      apt_installable "$p" || missing="$missing $p"
+    done
+    echo "FAIL: apt cannot install these Playwright libraries:${missing:- (set resolves individually but not together)}" >&2
+    echo "      Regenerate the list from the Playwright version named above step_playwright_deps." >&2
+    exit 1
+  fi
+
+  log "installing Playwright WebKit and Firefox system libraries"
+  # shellcheck disable=SC2086
+  apt-get install -y --no-install-recommends $pkgs
+  apt_cleanup
+}
+
 # Go. Floor, not pin: a base shipping something newer keeps it. Only install
 # when Go is absent or older than the floor.
 step_go() {
@@ -213,12 +349,16 @@ step_go() {
 
   if command -v go >/dev/null 2>&1; then
     local have
-    have="$(go version | awk '{print $3}' | sed 's/^go//')"
-    if ver_ge "$have" "$min"; then
+    have="$(go_version_of go)"
+    if [ -n "$have" ] && ver_ge "$have" "$min"; then
       skip "go $have already satisfies the >= $min floor (not downgrading to $pin)"
       return 0
     fi
-    log "go $have is below the $min floor; installing $pin"
+    if [ -n "$have" ]; then
+      log "go $have is below the $min floor; installing $pin"
+    else
+      log "go at $(command -v go) does not run; installing $pin"
+    fi
   else
     log "go absent; installing $pin"
   fi
@@ -236,6 +376,17 @@ step_go() {
   rm -rf /usr/local/go
   tar -C /usr/local -xzf /tmp/go.tar.gz
   rm -f /tmp/go.tar.gz
+
+  # The Dockerfiles put /usr/local/go/bin on PATH with an ENV line that comes
+  # after this step (core-base), so check with it prepended, as it will be in
+  # the finished image.
+  PATH="/usr/local/go/bin:$PATH" verify_installed go /usr/local/go/bin/go "$pin" go_version_of /usr/local/go/bin/go
+}
+
+# go_version_of <go binary> — "1.26.1" from `go version`, or nothing if the
+# binary does not run.
+go_version_of() {
+  probe_version "$1" version | awk '{print $3}' | sed 's/^go//'
 }
 
 step_gcsfuse() {
@@ -299,14 +450,18 @@ step_gh() {
   local want="${1:?usage: gh <version>}"
   if command -v gh >/dev/null 2>&1; then
     local have
-    have="$(gh --version 2>/dev/null | head -n1 | awk '{print $3}')"
+    have="$(gh_version_of gh)"
     if [ -n "$have" ] && ver_ge "$have" "$want"; then
       skip "gh $have already satisfies the >= $want floor"
       # Still enforce the path contract even when we keep the existing binary.
       [ -x /usr/bin/gh ] || ln -sf "$(command -v gh)" /usr/bin/gh
       return 0
     fi
-    log "gh ${have:-unknown} is below $want; replacing"
+    if [ -n "$have" ]; then
+      log "gh $have is below $want; replacing"
+    else
+      log "gh at $(command -v gh) does not run; replacing"
+    fi
   fi
   log "installing gh $want"
   local arch tarball
@@ -316,6 +471,13 @@ step_gh() {
   tar -xzf /tmp/gh.tar.gz -C /tmp
   install -o root -g root -m 0755 "/tmp/${tarball}/bin/gh" /usr/bin/gh
   rm -rf /tmp/gh.tar.gz "/tmp/${tarball}"
+  verify_installed gh /usr/bin/gh "$want" gh_version_of /usr/bin/gh
+}
+
+# gh_version_of <gh binary> — "2.100.0" from `gh --version`, or nothing if the
+# binary does not run.
+gh_version_of() {
+  probe_version "$1" --version | awk '{print $3}'
 }
 
 # helm. An exact pin with a checksum per architecture, not a floor: chart work
@@ -331,12 +493,16 @@ step_helm() {
 
   if command -v helm >/dev/null 2>&1; then
     local have
-    have="$(helm version --template '{{.Version}}' 2>/dev/null | sed 's/^v//')"
+    have="$(helm_version_of helm)"
     if [ "$have" = "$want" ]; then
       skip "helm $have already present ($(command -v helm))"
       return 0
     fi
-    log "helm ${have:-unknown} is not the pinned $want; installing $want to /usr/local/bin"
+    if [ -n "$have" ]; then
+      log "helm $have is not the pinned $want; installing $want to /usr/local/bin"
+    else
+      log "helm at $(command -v helm) does not run; installing $want to /usr/local/bin"
+    fi
   fi
 
   local arch sha tarball
@@ -362,6 +528,13 @@ step_helm() {
   tar -xzf /tmp/helm.tar.gz -C /tmp
   install -o root -g root -m 0755 "/tmp/linux-${arch}/helm" /usr/local/bin/helm
   rm -rf /tmp/helm.tar.gz "/tmp/linux-${arch}"
+  verify_installed helm /usr/local/bin/helm "$want" helm_version_of /usr/local/bin/helm
+}
+
+# helm_version_of <helm binary> — "3.17.3" from `helm version`, or nothing if
+# the binary does not run.
+helm_version_of() {
+  probe_version "$1" version --template '{{.Version}}' | sed 's/^v//'
 }
 
 step_golangci_lint() {
@@ -442,6 +615,7 @@ main() {
   case "$step" in
   apt-common) step_apt_common "$@" ;;
   chromium) step_chromium "$@" ;;
+  playwright-deps) step_playwright_deps "$@" ;;
   go) step_go "$@" ;;
   gcsfuse) step_gcsfuse "$@" ;;
   gcloud) step_gcloud "$@" ;;
@@ -454,10 +628,14 @@ main() {
   free-uid-1000) step_free_uid_1000 "$@" ;;
   *)
     echo "unknown step: $step" >&2
-    echo "steps: apt-common chromium go gcsfuse gcloud kubectl gh helm golangci-lint npm-global npm-tools free-uid-1000" >&2
+    echo "steps: apt-common chromium playwright-deps go gcsfuse gcloud kubectl gh helm golangci-lint npm-global npm-tools free-uid-1000" >&2
     exit 2
     ;;
   esac
 }
 
-main "$@"
+# Run only when executed, not when sourced (the helpers are exercised by a
+# hermetic test that sources this file: cmd/toolchain_script_contract_test.go).
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  main "$@"
+fi

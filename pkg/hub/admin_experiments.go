@@ -102,7 +102,7 @@ func (s *Server) buildAdminExperimentsResponse(overrides map[string]bool, revisi
 			Description:   exp.Description,
 			Layers:        layers,
 			Stage:         string(exp.Stage),
-			Default:       exp.Default,
+			Default:       s.experimentDefault(exp),
 			Override:      override,
 			Enabled:       s.experimentEnabledIn(snap, exp.Name),
 			Issue:         exp.Issue,

@@ -128,10 +128,13 @@ func (d *tolerableStopFailingStartDispatcher) DispatchAgentStop(_ context.Contex
 	}
 }
 
-// A tolerated stop error means the old instance is not running, so a restart
-// whose start leg then fails is handled as after a clean stop: the slot is
-// released and the agent is recorded as stopped.
-func TestAgentLifecycle_RestartToleratedStopThenFailedStartReleasesSlot(t *testing.T) {
+// A restart whose stop leg reports a tolerated error (the old instance is
+// already gone) proceeds to the start leg. When that start leg then fails
+// with an unknown outcome ("simulated broker start failure"), the restart
+// keeps its slot and does not record the agent stopped: the start may have
+// reached the runtime, and the start-claim reaper settles the claim and the
+// slot (ptone/scion#5143, erratum E-33c-1).
+func TestAgentLifecycle_RestartToleratedStopThenAmbiguousStartKeepsSlot(t *testing.T) {
 	srv, s := testServer(t)
 	disp := &tolerableStopFailingStartDispatcher{}
 	srv.SetDispatcher(disp)
@@ -140,9 +143,8 @@ func TestAgentLifecycle_RestartToleratedStopThenFailedStartReleasesSlot(t *testi
 	broker, project := newQuotaTestBrokerAndProject(t, s, "restart-tolerated-stop")
 	running := newQuotaTestAgent(t, s, broker, project, "restart-tolerated-stop", state.PhaseRunning)
 	reserveBrokerSlot(t, s, broker, running.ID)
-	// The agent has a run, as every dispatched agent does: a failed restart
-	// that leaves no run records nothing (ptone/scion#2550 P5, see
-	// TestRestartStartLegFailureWithEmptyCurrentRunRecordsNothing).
+	// The agent has a run, as every dispatched agent does: the confirmed
+	// branch would record it stopped and release (ptone/scion#2550 P5).
 	_, err := s.SetAgentRunID(context.Background(), running.ID, "run-x", nil)
 	require.NoError(t, err)
 
@@ -151,10 +153,10 @@ func TestAgentLifecycle_RestartToleratedStopThenFailedStartReleasesSlot(t *testi
 	assert.EqualValues(t, 1, disp.stopCount.Load(), "the stop leg is dispatched once")
 	assert.EqualValues(t, 1, disp.startCount.Load(), "the start leg follows a tolerated stop error")
 
-	assert.EqualValues(t, 0, brokerReservationCount(t, s, broker.ID),
-		"the slot is released after a tolerated stop and a failed start")
+	assert.EqualValues(t, 1, brokerReservationCount(t, s, broker.ID),
+		"an ambiguous restart keeps the reservation")
 	got, err := s.GetAgent(context.Background(), running.ID)
 	require.NoError(t, err)
-	assert.Equal(t, string(state.PhaseStopped), got.Phase,
-		"the agent is recorded as stopped after a tolerated stop and a failed start")
+	assert.NotEqual(t, string(state.PhaseStopped), got.Phase,
+		"an ambiguous start leg records nothing stopped")
 }

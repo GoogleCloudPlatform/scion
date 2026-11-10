@@ -219,10 +219,11 @@ func init() {
 }
 
 // resolveSecretScope determines the scope and scopeID based on flags.
-// When --project or --broker is used bare (no value), scopeID is inferred from settings.
+// When --project is used bare (no value), the project is inferred (see
+// inferScopeProject); a bare --broker infers the broker from settings.
 // When a value is provided, it is returned as-is and may need further resolution
 // (name/slug to UUID) via resolveScopeID.
-func resolveSecretScope(cmd *cobra.Command, settings *config.Settings) (scope, scopeID string, err error) {
+func resolveSecretScope(cmd *cobra.Command, settings *config.Settings) (hubScopeTarget, error) {
 	scopeSet := cmd.Flags().Changed("scope")
 	projectSet := cmd.Flags().Changed("project")
 	brokerSet := cmd.Flags().Changed("broker")
@@ -239,44 +240,38 @@ func resolveSecretScope(cmd *cobra.Command, settings *config.Settings) (scope, s
 		setCount++
 	}
 	if setCount > 1 {
-		return "", "", newUsageError("cannot specify more than one of --scope, --project, and --broker")
+		return hubScopeTarget{}, newUsageError("cannot specify more than one of --scope, --project, and --broker")
 	}
 
 	if scopeSet {
 		switch secretScope {
 		case "hub":
-			return "hub", "", nil
+			return hubScopeTarget{scope: "hub"}, nil
 		case "user", "":
-			return "user", "", nil
+			return hubScopeTarget{scope: "user"}, nil
 		default:
-			return "", "", newUsageError("invalid --scope value %q: must be 'hub' or 'user'", secretScope)
+			return hubScopeTarget{}, newUsageError("invalid --scope value %q: must be 'hub' or 'user'", secretScope)
 		}
 	}
 
 	if projectSet {
-		scope = "project"
 		projectVal := secretProjectScope
 		if projectVal == scopeInferSentinel {
 			projectVal = ""
 		}
 		if projectVal != "" {
 			// Explicit value — may be a name, slug, or UUID (resolved later)
-			scopeID = projectVal
-		} else {
-			// Infer from settings: try explicit hub link first, then local project ID
-			if settings.Hub != nil && settings.Hub.ProjectID != "" {
-				scopeID = settings.Hub.ProjectID
-			} else if settings.ProjectID != "" {
-				scopeID = settings.ProjectID
-			} else {
-				return "", "", fmt.Errorf("cannot infer project ID: not linked with Hub. Use 'scion hub link' first or provide explicit project ID")
-			}
+			return hubScopeTarget{scope: "project", id: projectVal, source: scopeSourceFlag}, nil
 		}
-		return scope, scopeID, nil
+		id, source, err := inferScopeProject(settings)
+		if err != nil {
+			return hubScopeTarget{}, err
+		}
+		return hubScopeTarget{scope: "project", id: id, source: source}, nil
 	}
 
 	if brokerSet {
-		scope = "runtime_broker"
+		scope, scopeID := "runtime_broker", ""
 		brokerVal := secretBrokerScope
 		if brokerVal == scopeInferSentinel {
 			brokerVal = ""
@@ -289,14 +284,14 @@ func resolveSecretScope(cmd *cobra.Command, settings *config.Settings) (scope, s
 			if settings.Hub != nil && settings.Hub.BrokerID != "" {
 				scopeID = settings.Hub.BrokerID
 			} else {
-				return "", "", fmt.Errorf("cannot infer broker ID: not linked with Hub. Use 'scion hub link' first or provide explicit broker ID")
+				return hubScopeTarget{}, fmt.Errorf("cannot infer broker ID: not linked with Hub. Use 'scion hub link' first or provide explicit broker ID")
 			}
 		}
-		return scope, scopeID, nil
+		return hubScopeTarget{scope: scope, id: scopeID}, nil
 	}
 
 	// Default to user scope
-	return "user", "", nil
+	return hubScopeTarget{scope: "user"}, nil
 }
 
 func runSecretSet(cmd *cobra.Command, args []string) error {
@@ -349,7 +344,7 @@ func runSecretSet(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	client, scope, scopeID, ctx, cancel, err := resolveHubScope(cmd, resolveSecretScope)
+	client, scope, scopeID, ctx, cancel, err := resolveHubScopeForWrite(cmd, resolveSecretScope)
 	if err != nil {
 		return err
 	}
@@ -569,7 +564,7 @@ func runSecretUpdate(cmd *cobra.Command, args []string) error {
 	injectionMode, _ := cmd.Flags().GetString("injection-mode")
 	secretTypeVal, _ := cmd.Flags().GetString("type")
 
-	client, scope, scopeID, ctx, cancel, err := resolveHubScope(cmd, resolveSecretScope)
+	client, scope, scopeID, ctx, cancel, err := resolveHubScopeForWrite(cmd, resolveSecretScope)
 	if err != nil {
 		return err
 	}
@@ -616,7 +611,7 @@ func runSecretUpdate(cmd *cobra.Command, args []string) error {
 func runSecretClear(cmd *cobra.Command, args []string) error {
 	key := args[0]
 
-	client, scope, scopeID, ctx, cancel, err := resolveHubScope(cmd, resolveSecretScope)
+	client, scope, scopeID, ctx, cancel, err := resolveHubScopeForWrite(cmd, resolveSecretScope)
 	if err != nil {
 		return err
 	}

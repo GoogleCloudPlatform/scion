@@ -20,7 +20,9 @@ package hub
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
@@ -100,7 +102,8 @@ func (s *Server) materialRuntimePrecheck(ctx context.Context, ident AgentIdentit
 
 	// Check 5: root human live authority. Admission is project membership
 	// (CheckEffectiveMembership: any active project-scoped binding, built-in
-	// or custom, direct or group-derived) OR target-applicable system
+	// or custom, direct or group-derived, other than the
+	// project-viewer role alone) OR target-applicable system
 	// authority for the exact secret.use permission (SystemAuthorityProof).
 	// Membership is admission only: the check-7 project.secret_read
 	// permission still gates every read, so a custom-only member without
@@ -125,7 +128,8 @@ func (s *Server) materialRuntimePrecheck(ctx context.Context, ident AgentIdentit
 	if m.Err != nil {
 		return nil, ReasonBackendError, http.StatusInternalServerError
 	}
-	admitted := m.IsMember
+	// The project-viewer role alone does not admit (ptone/scion#5519).
+	admitted := m.AdmitsBeyondViewer()
 	if !admitted {
 		if s.authzService == nil {
 			return nil, ReasonBackendError, http.StatusInternalServerError
@@ -252,7 +256,26 @@ func (s *Server) authorizeRuntimeProjectItem(ctx context.Context, key string, fa
 // Progeny only; every user item carries Grant = GrantProgeny. No
 // Decide(project.secret_read) of any shape is made here, and there is no
 // owner shortcut.
-func (s *Server) authorizeRuntimeUserItem(ctx context.Context, facts *TargetFacts, key string) ItemResult {
+//
+// After the metadata and AllowProgeny checks, the item is authorized by
+// the agent's delegation chain (userSecretChainVerdict, for the request's
+// agent identity ident), computed once per item:
+//   - a chain with recorded provenance is authorized by
+//     Decide(secret.use, ActionUse) on the item with ident, whose step 10
+//     applies the user-scope secret parent ceiling to the verdict computed
+//     here (AuthzRequest.userSecretChain), not to a second one;
+//   - a chain without recorded provenance (no active edge, more than one,
+//     the migration sentinel, an unrecorded or unreadable hop, an edge whose
+//     principal does not type-check) cannot be fully evaluated and is
+//     refused (chain_unrecorded), with one rate-limited Warn per agent.
+//     Re-delegating the agent records its chain.
+//
+// The chain verdict stops at its first failing clause, so a recorded hop
+// below an unrecorded one denies with its own cause; a chain that reaches
+// an unrecorded hop is refused whatever the recorded hops above it allow.
+//
+// Source liveness then applies to both.
+func (s *Server) authorizeRuntimeUserItem(ctx context.Context, ident AgentIdentity, facts *TargetFacts, key string) ItemResult {
 	cand := Candidate{
 		Kind:    MaterialKindSecret,
 		Key:     key,
@@ -282,10 +305,10 @@ func (s *Server) authorizeRuntimeUserItem(ctx context.Context, facts *TargetFact
 	// source-inactive outcomes.
 	cand.SharingSource = &SourceRef{ID: meta.CreatedBy}
 
-	// Checks 8b (AllowProgeny) and 8c (CheckProgenyAccess) run before source
-	// liveness is resolved: an unshared row or a row outside the agent's
-	// lineage denies without the extra store lookups that resolving the
-	// source would cost.
+	// Checks 8b (AllowProgeny) and 8c (the chain and the progeny grant) run
+	// before source liveness is resolved: an unshared row or a row outside
+	// the agent's lineage denies without the extra store lookups that
+	// resolving the source would cost.
 	if !meta.AllowProgeny {
 		return ItemResult{Candidate: cand, Reason: ReasonSharingDisabled}
 	}
@@ -293,16 +316,49 @@ func (s *Server) authorizeRuntimeUserItem(ctx context.Context, facts *TargetFact
 	if s.authzService == nil {
 		return ItemResult{Candidate: cand, Reason: ReasonBackendError}
 	}
-	grant := s.authzService.relationshipResolver.CheckProgenyAccess(
-		ctx,
-		&storedAgentIdentity{agent: facts.Agent},
-		Resource{Type: "secret", ID: meta.ID, OwnerID: meta.ScopeID, ParentType: "user", ParentID: meta.ScopeID},
-		ActionRead,
-	)
-	if !grant.Allowed {
-		return ItemResult{Candidate: cand, Reason: ReasonDeniedByPolicy}
+	resource := userSecretResource(meta.ID, meta.ScopeID)
+	chain := s.authzService.userSecretChainVerdict(ctx, ident, nil)
+	switch {
+	case chain.decision.DenyCause == DenyCauseCeilingError:
+		return ItemResult{Candidate: cand, Reason: ReasonBackendError}
+	case !chain.decision.Allowed && chain.unrecorded:
+		s.warnUnrecordedChainRefusal(ctx, "read", ident.ID(), chain)
+		return ItemResult{Candidate: cand, Reason: ReasonChainUnrecorded}
+	default:
+		decision := s.authzService.Decide(ctx, AuthzRequest{
+			Principal:       principalContextForIdentity(ident),
+			Credential:      credentialContextForIdentity(ident),
+			Resource:        resource,
+			Action:          ActionUse,
+			Permission:      secretUsePermission,
+			userSecretChain: newPrecomputedUserSecretChain(ident, chain),
+		})
+		if !decision.Allowed {
+			// The read is refused and the agent sees denied_by_policy or
+			// unavailable; name the secret and the cause at Warn so a
+			// missing credential can be traced on the hub. Never the value.
+			// Rate limited per (agent, secret, cause).
+			if record, suppressed := s.userSecretWithheldWarnLimiter().admit(ident.ID()+"/"+meta.ID, string(decision.DenyCause)+"/"+decision.Reason); record {
+				slog.WarnContext(ctx, "runtime user secret read withheld by authorization",
+					"agent_id", ident.ID(), "secret", key, "secret_id", meta.ID,
+					"user_id", meta.ScopeID, "deny_cause", string(decision.DenyCause), "reason", decision.Reason,
+					"suppressed_since_last", suppressed)
+			}
+			switch decision.DenyCause {
+			case DenyCauseCeilingError, DenyCauseResolutionError:
+				return ItemResult{Candidate: cand, Reason: ReasonBackendError}
+			}
+			return ItemResult{Candidate: cand, Reason: ReasonDeniedByPolicy}
+		}
 	}
 
+	// Source liveness. On this path it is defence in depth: a recorded chain
+	// admits only rows whose recorded author is their owner, the root user
+	// (the parent ceiling's source check), and that user's activity is
+	// already required by the precheck and the chain verdict; an
+	// agent-authored row is refused by Decide before this point, and an
+	// unrecorded chain is refused above. The agent secret list evaluates
+	// liveness before its source check.
 	live, kind, liveReason, liveErr := s.progenySourceLive(ctx, *meta)
 	if kind != "" {
 		cand.SharingSource = &SourceRef{Kind: kind, ID: meta.CreatedBy}
@@ -339,4 +395,37 @@ func (s *Server) fetchAuthorizedValue(ctx context.Context, item ItemResult) (*se
 		return nil, ReasonRecordChanged
 	}
 	return sv, ReasonAllowed
+}
+
+// userSecretWithheldWarnInterval is the shortest gap between two Warn lines
+// for the same user secret withheld from the same agent for the same cause.
+const userSecretWithheldWarnInterval = 10 * time.Minute
+
+// warnUnrecordedChainRefusal logs, at Warn and rate limited per agent, a
+// user-scope runtime read or list refused because the agent's delegation
+// chain has no recorded provenance, so operators can find the agents that
+// need re-delegation. It names the agent, the path and the chain's deny
+// cause and reason, never a key or a value.
+func (s *Server) warnUnrecordedChainRefusal(ctx context.Context, path, agentID string, chain userSecretChain) {
+	record, suppressed := s.userSecretWithheldWarnLimiter().admit(agentID+"/"+ReasonChainUnrecorded, ReasonChainUnrecorded)
+	if !record {
+		return
+	}
+	slog.WarnContext(ctx, "runtime user secret refused: the agent's delegation chain is not recorded; re-delegate the agent to record it",
+		"path", path, "agent_id", agentID, "reason", ReasonChainUnrecorded,
+		"deny_cause", string(chain.decision.DenyCause), "detail", chain.decision.Reason,
+		"suppressed_since_last", suppressed)
+}
+
+func newUserSecretWithheldLimiter() *hookRefusalLimiter {
+	return newHookRefusalLimiter(userSecretWithheldWarnInterval, time.Now)
+}
+
+// userSecretWithheldWarnLimiter rate limits the runtime read's withheld
+// Warn; created on first use.
+func (s *Server) userSecretWithheldWarnLimiter() *hookRefusalLimiter {
+	s.userSecretWithheldLimiterOnce.Do(func() {
+		s.userSecretWithheldLimiter = newUserSecretWithheldLimiter()
+	})
+	return s.userSecretWithheldLimiter
 }

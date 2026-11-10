@@ -16,12 +16,15 @@
 
 /**
  * The GCP identity picker's state and rules, shared by the agent config form
- * (create page) and the configure page (ptone/scion#3974).
+ * on the create and edit pages (ptone/scion#3974, ptone/scion#3975).
  *
  * GcpIdentityState is plain state, owned by the page and rendered by the
  * form, so the page can validate and build its request from it before and
  * after the form exists. KUBERNETES_BLOCK_HINT is the Kubernetes meaning of
- * Block, shown by the create, configure and project settings pages.
+ * Block, shown by the create, edit and project settings pages.
+ *
+ * On the Edit page the agent's stored identity is shown (applyStored) but
+ * never sent back: only an explicit pick is part of the request.
  */
 
 import { orderByAssignStatus } from './gcp-sa-assign-status.js';
@@ -51,6 +54,10 @@ export const KUBERNETES_BLOCK_HINT =
   "On Kubernetes, Block runs the agent as the runtime profile's block service account, or " +
   "the namespace's default service account if none is configured, with no GCP credentials " +
   "mounted. The agent's GCP access is whatever IAM grants that service account holds.";
+
+/** Appended to the hint while the picker shows the agent's stored identity, untouched. */
+export const STORED_IDENTITY_HINT =
+  "This is the agent's current identity; it stays in effect until you choose another.";
 
 /** The project's GCP identity defaults, from its settings. */
 export interface GcpProjectDefaults {
@@ -91,6 +98,12 @@ export class GcpIdentityState {
   projectGCPIdentityDefaultApplied = false;
   /** The project's per-profile defaults (profile name to account ID). */
   projectGCPIdentityProfileDefaults: Record<string, string> = {};
+
+  /**
+   * The mode shown is the agent's stored identity (edit mode, applyStored),
+   * not a default; it stays in effect until the user picks.
+   */
+  storedIdentity = false;
 
   /** The target is reliably known to be Kubernetes; set by the page. */
   targetKubernetesOnly = false;
@@ -165,6 +178,7 @@ export class GcpIdentityState {
     this.defaultGcpMetadataMode = 'block';
     this.defaultGcpServiceAccountId = '';
     this.gcpIdentityUserSet = false;
+    this.storedIdentity = false;
     this.projectGCPIdentityDefaultMode = '';
     this.projectGCPIdentityDefaultApplied = false;
     this.projectGCPIdentityProfileDefaults = {};
@@ -217,6 +231,25 @@ export class GcpIdentityState {
     this.notify();
   }
 
+  /**
+   * Shows the agent's stored identity (edit mode). It is not a user choice,
+   * so toRequest still omits it until the user picks: a save never rewrites
+   * a stored value. A missing mode stores nothing and leaves the picker
+   * blank.
+   */
+  applyStored(mode: string | undefined, serviceAccountId: string | undefined): void {
+    if (mode !== 'block' && mode !== 'passthrough' && mode !== 'assign') {
+      this.storedIdentity = false;
+      this.notify();
+      return;
+    }
+    this.storedIdentity = true;
+    this.gcpIdentityUserSet = false;
+    this.gcpMetadataMode = mode;
+    this.gcpServiceAccountId = mode === 'assign' ? (serviceAccountId ?? '') : '';
+    this.notify();
+  }
+
   /** The user picked a mode. Any pick, including the shown one, is a choice. */
   pickMode(mode: GcpMetadataMode): void {
     this.gcpMetadataMode = mode;
@@ -248,7 +281,7 @@ export class GcpIdentityState {
    * NO_IDENTITY_MODE_HINT. Submitting with nothing chosen is allowed.
    */
   get noIdentityModeChosen(): boolean {
-    return !this.gcpIdentityUserSet && !this.projectDefaultIsOutcome;
+    return !this.gcpIdentityUserSet && !this.storedIdentity && !this.projectDefaultIsOutcome;
   }
 
   /** The picker shows no value. */
@@ -284,8 +317,10 @@ export class GcpIdentityState {
     const precedence = this.showProfileDefaultPrecedence
       ? ` ${PROFILE_DEFAULT_PRECEDENCE_HINT}`
       : '';
+    const stored =
+      this.storedIdentity && !this.gcpIdentityUserSet ? ` ${STORED_IDENTITY_HINT}` : '';
     const k8s = this.targetKubernetesOnly && !kubernetesBlock ? ` ${KUBERNETES_BLOCK_HINT}` : '';
-    return base + precedence + k8s;
+    return base + precedence + stored + k8s;
   }
 
   /**

@@ -25,8 +25,8 @@ type inFlightCall[T any] struct {
 }
 
 // joinOrStartInFlight returns the call in flight for key in m, or stores a
-// new one and runs it. It is the dedupe shared by the workspace probes
-// (probeWorkspaceContent and startWorkspaceHealthProbe): on a hung mount a
+// new one and runs it. It is the dedupe used by the workspace health probe
+// (startWorkspaceHealthProbe): on a hung mount a
 // probe never returns and holds an OS thread in the syscall, so there is at
 // most one stuck probe per key and later callers wait on it, each with its
 // own timeout. Each caller keeps its own map, key type and result type, and

@@ -171,10 +171,17 @@ func storeBrokerCapabilities(c *hubclient.BrokerCapabilities) *store.BrokerCapab
 		Attach:                   c.Attach,
 		Reprovision:              c.Reprovision,
 		AsyncLaunch:              c.AsyncLaunch,
+		AsyncStart:               c.AsyncStart,
 		EmptyPerAgentWorkspace:   c.EmptyPerAgentWorkspace,
 		AgentMove:                c.AgentMove,
+		AgentMoveRecreate:        c.AgentMoveRecreate,
 		ReprovisionEmptyPerAgent: c.ReprovisionEmptyPerAgent,
+		ChangedFields:            c.ChangedFields,
+		ClearedFields:            c.ClearedFields,
+		UnlimitedCountLimits:     c.UnlimitedCountLimits,
+		ClearedResourceSubfields: c.ClearedResourceSubfields,
 		StartsInFlight:           c.StartsInFlight,
+		AttachmentDelivery:       c.AttachmentDelivery,
 		NodeImageRegistry:        c.NodeImageRegistry,
 	}
 }

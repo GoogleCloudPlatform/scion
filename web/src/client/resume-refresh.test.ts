@@ -32,7 +32,7 @@ function pageshow(persisted: boolean): void {
 }
 
 describe('ResumeRefresh', () => {
-  let onResume: ReturnType<typeof vi.fn>;
+  let onResume: ReturnType<typeof vi.fn<() => void>>;
   let resume: ResumeRefresh;
 
   beforeEach(() => {

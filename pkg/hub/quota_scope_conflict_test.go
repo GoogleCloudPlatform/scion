@@ -36,7 +36,9 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 )
 
 // Reservation scope tests (max_agents_per_broker): an agent's active
@@ -507,9 +509,21 @@ func TestReassert_DifferentScopeNotOverwritten(t *testing.T) {
 func TestSweep_PinnedScopeConflictReportedNotMoved(t *testing.T) {
 	srv, s := testServer(t)
 	conflicts := scopeConflictCounter(t, srv.quotaService)
+	// brokerD is registered first and kept out of the sweep's list (the
+	// list holds the newest brokers first and is capped below), so a row
+	// on it is unlisted but live: the deregistered-scope pass leaves it.
+	brokerD, _ := newQuotaTestBrokerAndProject(t, s, "sweep-d")
+	time.Sleep(5 * time.Millisecond)
 	brokerA, _ := newQuotaTestBrokerAndProject(t, s, "sweep-a")
+	time.Sleep(5 * time.Millisecond)
 	brokerB, projectB := newQuotaTestFlatBrokerAndProject(t, s, "sweep-b")
+	time.Sleep(5 * time.Millisecond)
 	brokerC, projectC := newQuotaTestBrokerAndProject(t, s, "sweep-c")
+	all, err := s.ListRuntimeBrokers(context.Background(), store.RuntimeBrokerFilter{}, store.ListOptions{})
+	require.NoError(t, err)
+	oldLimit := reconcileBrokerListLimit
+	reconcileBrokerListLimit = len(all.Items) - 1 // every broker but the oldest, brokerD
+	t.Cleanup(func() { reconcileBrokerListLimit = oldLimit })
 	def, err := s.GetLimitDefinitionByName(context.Background(), store.LimitMaxAgentsPerBroker)
 	require.NoError(t, err)
 	old := time.Now().Add(-2 * reconcileMinReservationAge)
@@ -521,10 +535,12 @@ func TestSweep_PinnedScopeConflictReportedNotMoved(t *testing.T) {
 	})
 	require.True(t, agentHoldsBrokerCapacity(queued), "a queued stop holds capacity")
 	queuedRow := seedBrokerRow(t, s, def.ID, brokerA.ID, queued.ID, old)
-	// A pinned agent whose row is on a broker that is not listed (deleted):
-	// the backfill on B reports it and writes nothing.
+	// A pinned agent whose row is on a registered broker that is not listed
+	// (beyond the list cap): the backfill on B reports it and writes
+	// nothing. (A row on a deleted broker is released instead; see
+	// TestSweep_DeregisteredBrokerScope_ReleasesReservation_Audited.)
 	orphaned := pinnedQuotaAgent(t, s, brokerB, projectB, "sweep-orphaned", state.PhaseRunning)
-	orphanedRow := seedBrokerRow(t, s, def.ID, tid("broker-deleted"), orphaned.ID, old)
+	orphanedRow := seedBrokerRow(t, s, def.ID, brokerD.ID, orphaned.ID, old)
 	// Control: an unpinned agent keeps today's rule (an old row of a stopped
 	// agent is released wherever it is).
 	unpinned := newQuotaTestAgent(t, s, brokerC, projectC, "sweep-unpinned", state.PhaseStopped)
@@ -740,19 +756,13 @@ func (p lockingPassthroughStore) TryAdvisoryLockObject(ctx context.Context, clas
 	return p.Store.(store.AdvisoryLocker).TryAdvisoryLockObject(ctx, class, obj)
 }
 
-// releaseFailingStore fails every ReleaseReservation, as a best-effort
-// release that only logs.
-type releaseFailingStore struct{ lockingPassthroughStore }
-
-func (releaseFailingStore) ReleaseReservation(context.Context, string, string) error {
-	return errors.New("release failed")
-}
-
-// A move whose source release fails is refused with the scope conflict and
-// leaves the slot on the source; nothing is reserved on the target.
-func TestMoveBrokerQuota_FailedSourceReleaseFailsTheMove(t *testing.T) {
+// A move whose transaction fails after it released the source row (a
+// failure injected through the store's transfer hook right before the
+// insert on the target) fails the move and rolls the release back: the
+// agent keeps exactly its source row, unchanged, and nothing is on the
+// target.
+func TestMoveBrokerQuota_FailedTransferKeepsSource(t *testing.T) {
 	srv, s := testServer(t)
-	srv.quotaService.store = releaseFailingStore{lockingPassthroughStore{srv.quotaService.store}}
 	brokerA, projectA := newQuotaTestBrokerAndProject(t, s, "move-a")
 	brokerB, _ := newQuotaTestBrokerAndProject(t, s, "move-b")
 	def, err := s.GetLimitDefinitionByName(context.Background(), store.LimitMaxAgentsPerBroker)
@@ -760,11 +770,26 @@ func TestMoveBrokerQuota_FailedSourceReleaseFailsTheMove(t *testing.T) {
 	agent := newQuotaTestAgent(t, s, brokerA, projectA, "move-x", state.PhaseStopped)
 	row := seedBrokerRow(t, s, def.ID, brokerA.ID, agent.ID, time.Time{})
 
+	injected := errors.New("injected transfer failure")
+	var steps []string
+	t.Cleanup(entadapter.SetTransferBrokerReservationTestHook(func(_ context.Context, _ *ent.Tx, step string, req store.BrokerReservationTransfer) error {
+		if req.AgentID != agent.ID {
+			return nil
+		}
+		steps = append(steps, step)
+		if step == "before_insert" {
+			return injected
+		}
+		return nil
+	}))
+
 	err = srv.moveBrokerQuota(context.Background(), agent, &reincarnationMove{SourceBrokerID: brokerA.ID, TargetBrokerID: brokerB.ID})
-	requireScopeConflict(t, err, agent.ID, brokerA.ID, brokerB.ID)
+	require.ErrorIs(t, err, injected, "the injected transfer failure fails the move")
+	assert.Equal(t, []string{"locked", "released", "before_insert"}, steps, "the source row was released inside the transaction")
 	got := activeReservation(t, s, def.ID, agent.ID)
 	require.NotNil(t, got)
-	assert.Equal(t, row.ID, got.ID, "the slot stays on the source")
+	assert.Equal(t, row.ID, got.ID, "the slot stays on the source, unchanged")
+	assert.Equal(t, brokerA.ID, got.ScopeID)
 	assert.Zero(t, brokerReservationCount(t, s, brokerB.ID), "nothing on the target")
 }
 

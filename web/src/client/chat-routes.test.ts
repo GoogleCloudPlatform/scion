@@ -15,7 +15,13 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { buildAgentDMKey, dmPeerFromKey } from './chat-routes.js';
+import {
+  buildAgentDMKey,
+  dmPeerFromKey,
+  isChatConversationPath,
+  messageFilterFromSearch,
+  searchWithMessageFilter,
+} from './chat-routes.js';
 
 describe('dmPeerFromKey', () => {
   it('names the agent of an agent DM, whoever is asking', () => {
@@ -60,5 +66,32 @@ describe('dmPeerFromKey', () => {
     ]) {
       expect(dmPeerFromKey(key, 'user-me'), key).toBeNull();
     }
+  });
+});
+
+describe('center message filter', () => {
+  it('reads only the literal starred value', () => {
+    expect(messageFilterFromSearch('?messages=starred')).toBe('starred');
+    expect(messageFilterFromSearch('?a=1&messages=starred')).toBe('starred');
+    expect(messageFilterFromSearch('')).toBe('');
+    expect(messageFilterFromSearch('?messages=all')).toBe('');
+    expect(messageFilterFromSearch('?messages=STARRED')).toBe('');
+  });
+
+  it('applies to conversation routes only', () => {
+    expect(isChatConversationPath('/chat/space/p1/thread/t1')).toBe(true);
+    expect(isChatConversationPath('/chat/my-project/t1')).toBe(true);
+    expect(isChatConversationPath('/chat/dm/dm%3Aagent%3Aa%3Auser%3Ab')).toBe(true);
+    expect(isChatConversationPath('/chat')).toBe(false);
+    expect(isChatConversationPath('/chat/my-project')).toBe(false);
+    expect(isChatConversationPath('/chat/space/p1')).toBe(false);
+    expect(isChatConversationPath('/agents/x')).toBe(false);
+  });
+
+  it('sets and removes the filter, keeping other parameters', () => {
+    expect(searchWithMessageFilter('', 'starred')).toBe('?messages=starred');
+    expect(searchWithMessageFilter('?messages=starred', '')).toBe('');
+    expect(searchWithMessageFilter('?a=1&messages=starred', '')).toBe('?a=1');
+    expect(searchWithMessageFilter('?a=1', 'starred')).toBe('?a=1&messages=starred');
   });
 });

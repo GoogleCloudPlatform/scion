@@ -32,7 +32,7 @@ func assertRetiredAsyncAgentLaunch422(t *testing.T, rr *httptest.ResponseRecorde
 	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	want := "server.hub.async_agent_launch is retired; enable the hub.async_agent_launch experiment instead"
+	want := "server.hub.async_agent_launch is retired and ignored; use the hub.async_agent_launch experiment (on by default)"
 	if resp.Error.Message != want {
 		t.Errorf("message = %q, want %q", resp.Error.Message, want)
 	}

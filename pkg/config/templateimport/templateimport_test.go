@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -90,6 +91,63 @@ body
 	_, _, err := ParseFrontMatter(data)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to parse front matter YAML")
+}
+
+func TestParseFrontMatter_DelimiterTextInYAML(t *testing.T) {
+	tests := []struct {
+		name        string
+		yaml        string
+		description string
+	}{
+		{"plain value", "description: Review --- carefully", "Review --- carefully"},
+		{"quoted value", `description: "Review --- carefully"`, "Review --- carefully"},
+		{"block scalar", "description: |\n  Before\n  ---\n  After", "Before\n---\nAfter\n"},
+		{"comment", "# --- is not a delimiter here\ndescription: Review carefully", "Review carefully"},
+		{"key prefix", "---suffix: ordinary key\ndescription: Review carefully", "Review carefully"},
+	}
+	for _, tt := range tests {
+		for _, newline := range []struct{ name, value string }{{"LF", "\n"}, {"CRLF", "\r\n"}} {
+			t.Run(tt.name+"/"+newline.name, func(t *testing.T) {
+				body := "\nReview the code.\n---\nKeep this body separator.\n"
+				data := "---\nname: reviewer\n" + tt.yaml + "\nmodel: sonnet\n---\n" + body
+				fm, gotBody, err := ParseFrontMatter([]byte(strings.ReplaceAll(data, "\n", newline.value)))
+				require.NoError(t, err)
+				assert.Equal(t, "reviewer", fm["name"])
+				assert.Equal(t, tt.description, fm["description"])
+				assert.Equal(t, "sonnet", fm["model"])
+				assert.Equal(t, strings.ReplaceAll(body, "\n", newline.value), gotBody)
+			})
+		}
+	}
+}
+
+func TestParseFrontMatter_DelimiterLines(t *testing.T) {
+	tests := []struct {
+		name    string
+		data    string
+		wantFM  map[string]any
+		body    string
+		wantErr string
+	}{
+		{name: "opening prefix", data: "---not-a-delimiter\nPlain text.\n", body: "---not-a-delimiter\nPlain text.\n"},
+		{name: "horizontal rule", data: "----\nPlain text.\n", body: "----\nPlain text.\n"},
+		{name: "inline dashes without closing line", data: "---\ndescription: Before --- after\n", wantErr: "unclosed front matter"},
+		{name: "closing at EOF", data: "---\nname: reviewer\n---", wantFM: map[string]any{"name": "reviewer"}},
+		{name: "empty at EOF", data: "---\n---", wantFM: map[string]any{}},
+		{name: "delimiter whitespace", data: " \t\n--- \t\r\nname: reviewer\r\n--- \t\r\nBody.\r\n", wantFM: map[string]any{"name": "reviewer"}, body: "Body.\r\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fm, body, err := ParseFrontMatter([]byte(tt.data))
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantFM, fm)
+			assert.Equal(t, tt.body, body)
+		})
+	}
 }
 
 // --- Detection Tests ---
@@ -214,7 +272,7 @@ func TestClaudeImporter_Parse(t *testing.T) {
 	file := filepath.Join(dir, "reviewer.md")
 	content := `---
 name: code-reviewer
-description: Reviews code for quality
+description: Reviews code --- checks quality
 tools: Read, Glob, Grep, Bash
 model: sonnet
 maxTurns: 10
@@ -230,7 +288,7 @@ You are a code reviewer. Analyze the code and provide feedback.
 	require.NoError(t, err)
 
 	assert.Equal(t, "code-reviewer", agent.Name)
-	assert.Equal(t, "Reviews code for quality", agent.Description)
+	assert.Equal(t, "Reviews code --- checks quality", agent.Description)
 	assert.Equal(t, "claude", agent.Harness)
 	assert.Equal(t, "sonnet", agent.Model)
 	assert.Equal(t, []string{"Read", "Glob", "Grep", "Bash"}, agent.Tools)
@@ -329,7 +387,7 @@ func TestGeminiImporter_Parse(t *testing.T) {
 	file := filepath.Join(dir, "auditor.md")
 	content := `---
 name: security-auditor
-description: Finds security vulnerabilities
+description: Finds vulnerabilities --- suggests fixes
 kind: local
 tools:
   - read_file
@@ -349,7 +407,7 @@ You are a security auditor. Find vulnerabilities.
 	require.NoError(t, err)
 
 	assert.Equal(t, "security-auditor", agent.Name)
-	assert.Equal(t, "Finds security vulnerabilities", agent.Description)
+	assert.Equal(t, "Finds vulnerabilities --- suggests fixes", agent.Description)
 	assert.Equal(t, "gemini", agent.Harness)
 	assert.Equal(t, "gemini-2.5-pro", agent.Model)
 	assert.Equal(t, []string{"read_file", "grep_search"}, agent.Tools)

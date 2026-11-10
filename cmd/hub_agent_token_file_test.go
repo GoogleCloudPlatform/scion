@@ -18,7 +18,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -80,7 +79,7 @@ func TestReadAgentTokenFile_RefusesLinkAndFIFO(t *testing.T) {
 
 	t.Run("FIFO", func(t *testing.T) {
 		home := clearAgentAuthEnv(t)
-		if err := syscall.Mkfifo(filepath.Join(home, ".scion", "scion-token"), 0o600); err != nil {
+		if err := mkfifoForTest(filepath.Join(home, ".scion", "scion-token"), 0o600); err != nil {
 			t.Skipf("mkfifo unavailable: %v", err)
 		}
 		var token string

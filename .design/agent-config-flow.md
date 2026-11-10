@@ -18,9 +18,11 @@ Settings are loaded via Koanf (`pkg/config/koanf.go`) in this merge order:
 3. **Grove settings** — `.scion/settings.yaml`
 4. **Environment variables** — `SCION_*` prefix (top-level settings keys only)
 
-Each layer deeply merges into the previous one (see `MergeSettings()` in
-`pkg/config/settings.go:247`). Harnesses, profiles, and runtimes are all
-individually deep-merged field-by-field rather than replaced wholesale.
+Each layer deeply merges into the previous one (the settings loader,
+`loadVersionedLayers` in `pkg/config/settings_v1.go`; the former
+`MergeSettings()` helper has been removed). Harness configs, profiles, and
+runtimes are all individually deep-merged field-by-field rather than
+replaced wholesale.
 
 The resulting `Settings` struct contains:
 - `ActiveProfile` / `DefaultTemplate` — scalars

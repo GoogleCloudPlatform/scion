@@ -35,36 +35,6 @@ type capturingHandler struct {
 	records []slog.Record
 }
 
-// attrMap flattens a slog.Record's top-level attributes (including nested
-// groups, dotted) into a map for easy lookup in assertions.
-func recordAttrs(r slog.Record) map[string]any {
-	out := map[string]any{}
-	var walk func(prefix string, a slog.Attr)
-	walk = func(prefix string, a slog.Attr) {
-		key := a.Key
-		if prefix != "" {
-			key = prefix + "." + a.Key
-		}
-		// Resolve LogValuer values (e.g. CredentialDecoration.LogValue())
-		// before inspecting Kind: a captured record from a bare handler like
-		// capturingHandler never resolves them itself (only the standard
-		// Text/JSON handlers do that internally when formatting).
-		a.Value = a.Value.Resolve()
-		if a.Value.Kind() == slog.KindGroup {
-			for _, ga := range a.Value.Group() {
-				walk(key, ga)
-			}
-			return
-		}
-		out[key] = a.Value.Any()
-	}
-	r.Attrs(func(a slog.Attr) bool {
-		walk("", a)
-		return true
-	})
-	return out
-}
-
 // setupUATProjectAndOwner creates a project and an owner user with a real
 // project-owner role binding (via createRS1Project), so the owner has actual
 // authority to mint a scoped UAT with real scopes (RS4's issuer-ceiling check
@@ -75,15 +45,6 @@ func setupUATProjectAndOwner(t *testing.T, s store.Store, name string) (projectI
 	ownerID = tid(name + "-owner")
 	createRS1Project(t, s, projectID, ownerID)
 	return projectID, ownerID
-}
-
-func findRecord(records []slog.Record, msg string) (slog.Record, bool) {
-	for i := len(records) - 1; i >= 0; i-- {
-		if records[i].Message == msg {
-			return records[i], true
-		}
-	}
-	return slog.Record{}, false
 }
 
 func doRequestWithBearer(srv *Server, bearer string) *httptest.ResponseRecorder {

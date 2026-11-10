@@ -1,0 +1,9 @@
+{
+  "auth_candidates": {},
+  "harness_config": {
+    "no_auth": {
+      "behavior": "drop-to-shell",
+      "message": "This agent started without credentials."
+    }
+  }
+}

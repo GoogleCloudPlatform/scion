@@ -106,7 +106,7 @@ func (f *ownedBrokerFixture) req(mutate func(*CreateBrokerRegistrationRequest)) 
 
 func (f *ownedBrokerFixture) reregister(t *testing.T, mutate func(*CreateBrokerRegistrationRequest)) CreateBrokerRegistrationResponse {
 	t.Helper()
-	rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPost, "/api/v1/brokers", f.req(mutate))
+	rec := doRequestAsUserLoopback(t, f.srv, f.owner, http.MethodPost, "/api/v1/brokers", f.req(mutate))
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
 	resp := decodeBrokerRegistration(t, rec.Body)
 	require.Equal(t, f.id, resp.BrokerID)
@@ -250,14 +250,14 @@ func TestReregistration_KeepsGCPHostFieldsForEveryCaller(t *testing.T) {
 		do   func(t *testing.T, f *ownedBrokerFixture, req CreateBrokerRegistrationRequest) *httptest.ResponseRecorder
 	}{
 		{"owner session", func(t *testing.T, f *ownedBrokerFixture, req CreateBrokerRegistrationRequest) *httptest.ResponseRecorder {
-			return doRequestAsUser(t, f.srv, f.owner, http.MethodPost, "/api/v1/brokers", req)
+			return doRequestAsUserLoopback(t, f.srv, f.owner, http.MethodPost, "/api/v1/brokers", req)
 		}},
 		{"owner token", func(t *testing.T, f *ownedBrokerFixture, req CreateBrokerRegistrationRequest) *httptest.ResponseRecorder {
 			key := mintHubBrokerUAT(t, f.srv, f.owner.ID, "broker:create")
-			return doRequestWithToken(t, f.srv, key, http.MethodPost, "/api/v1/brokers", req)
+			return doRequestWithTokenLoopback(t, f.srv, key, http.MethodPost, "/api/v1/brokers", req)
 		}},
 		{"super-admin", func(t *testing.T, f *ownedBrokerFixture, req CreateBrokerRegistrationRequest) *httptest.ResponseRecorder {
-			return doRequest(t, f.srv, http.MethodPost, "/api/v1/brokers", req)
+			return doRequestLoopback(t, f.srv, http.MethodPost, "/api/v1/brokers", req)
 		}},
 	}
 	for _, c := range callers {
@@ -402,7 +402,7 @@ func TestReregistration_KeptSettingsInResponseJSON(t *testing.T) {
 	t.Parallel()
 	f := newOwnedBrokerFixture(t, false, "kept-json")
 	f.update(t, gcpHostBody(ownedEmailA, ownedProjectA))
-	rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPost, "/api/v1/brokers", f.req(withGCPHost(ownedEmailB, "")))
+	rec := doRequestAsUserLoopback(t, f.srv, f.owner, http.MethodPost, "/api/v1/brokers", f.req(withGCPHost(ownedEmailB, "")))
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 	var raw map[string]interface{}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &raw))
@@ -456,7 +456,7 @@ func TestJoin_LeavesUpdateManagedFields(t *testing.T) {
 		if flat {
 			join.RuntimeTarget = f.base.RuntimeTarget
 		}
-		rec := doRequestNoAuth(t, f.srv, http.MethodPost, "/api/v1/brokers/join", join)
+		rec := doRequestNoAuthLoopback(t, f.srv, http.MethodPost, "/api/v1/brokers/join", join)
 		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
 		f.requireGCPHost(t, ownedEmailA, ownedProjectA)
@@ -500,7 +500,7 @@ func TestReregistration_NeverClearsGCPHostFields(t *testing.T) {
 		{"join", func(t *testing.T, f *ownedBrokerFixture) {
 			resp := f.reregister(t, nil)
 			join := BrokerJoinRequest{BrokerID: f.id, JoinToken: resp.JoinToken, Hostname: "never-clears", Version: "1.0.0", RuntimeTarget: f.base.RuntimeTarget}
-			rec := doRequestNoAuth(t, f.srv, http.MethodPost, "/api/v1/brokers/join", join)
+			rec := doRequestNoAuthLoopback(t, f.srv, http.MethodPost, "/api/v1/brokers/join", join)
 			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 		}},
 		{"heartbeat copy", func(t *testing.T, f *ownedBrokerFixture) {
@@ -627,32 +627,29 @@ type fillBeforeUpdateStore struct {
 	failUpdate bool
 }
 
-func (s *fillBeforeUpdateStore) SetRuntimeBrokerGCPHost(ctx context.Context, id, email, project string) (store.GCPHostSetting, error) {
+func (s *fillBeforeUpdateStore) SetRuntimeBrokerGCPHostIfPrior(ctx context.Context, id, priorEmail, priorProject, email, project string) (store.GCPHostSetting, bool, error) {
 	if !s.fault.Active() {
-		return s.Store.SetRuntimeBrokerGCPHost(ctx, id, email, project)
+		return s.Store.SetRuntimeBrokerGCPHostIfPrior(ctx, id, priorEmail, priorProject, email, project)
 	}
 	if s.failUpdate {
-		return store.GCPHostSetting{}, errors.New("injected GCP host write failure")
+		return store.GCPHostSetting{}, false, errors.New("injected GCP host write failure")
 	}
 	if _, err := s.SetRuntimeBrokerGCPHostIfUnset(ctx, id, ownedEmailA, ownedProjectA, store.GCPHostSourceRegistration); err != nil {
-		return store.GCPHostSetting{}, err
+		return store.GCPHostSetting{}, false, err
 	}
-	return s.Store.SetRuntimeBrokerGCPHost(ctx, id, email, project)
+	return s.Store.SetRuntimeBrokerGCPHostIfPrior(ctx, id, priorEmail, priorProject, email, project)
 }
 
 // TestBrokerUpdate_AuditRecordsReplacedValues: the update audit event's old
-// GCP host values are the ones the write replaced, also when a registration
-// filled them after the update request read the broker.
+// GCP host values are the ones the write replaced: the pair a registration
+// filled, with its source.
 func TestBrokerUpdate_AuditRecordsReplacedValues(t *testing.T) {
 	t.Parallel()
-	var fault *storeFaultSwitch
-	f := newOwnedBrokerFixtureWithStore(t, false, "update-audit-replaced", func(srv *Server) {
-		_, fault = installStoreFault(t, srv, func(inner store.Store, sw *storeFaultSwitch) *fillBeforeUpdateStore {
-			return &fillBeforeUpdateStore{Store: inner, fault: sw}
-		})
-	})
+	f := newOwnedBrokerFixture(t, false, "update-audit-replaced")
+	applied, err := f.s.SetRuntimeBrokerGCPHostIfUnset(context.Background(), f.id, ownedEmailA, ownedProjectA, store.GCPHostSourceRegistration)
+	require.NoError(t, err)
+	require.True(t, applied)
 	audit := installBrokerAuditCapture(f.srv)
-	fault.Arm()
 
 	f.update(t, gcpHostBody(ownedEmailB, ownedProjectB))
 
@@ -664,6 +661,31 @@ func TestBrokerUpdate_AuditRecordsReplacedValues(t *testing.T) {
 	assert.Equal(t, ownedProjectA, d["gcp_host_project_id.old"])
 	assert.Equal(t, store.GCPHostSourceRegistration, d["gcp_host_source.old"])
 	assert.Equal(t, ownedEmailB, d["gcp_host_service_account_email.new"])
+	assert.Equal(t, ownedProjectB, d["gcp_host_project_id.new"])
+	assert.Equal(t, store.GCPHostSourceAdmin, d["gcp_host_source.new"])
+}
+
+// TestBrokerUpdate_StoredPairChangedAfterDecision_Conflict: when a
+// registration fills the GCP host pair after the update's actAs decision and
+// before its write, the update writes nothing and returns 409. The pair is
+// written only over the stored value the decision was made against.
+func TestBrokerUpdate_StoredPairChangedAfterDecision_Conflict(t *testing.T) {
+	t.Parallel()
+	var fault *storeFaultSwitch
+	f := newOwnedBrokerFixtureWithStore(t, false, "update-stale-prior", func(srv *Server) {
+		_, fault = installStoreFault(t, srv, func(inner store.Store, sw *storeFaultSwitch) *fillBeforeUpdateStore {
+			return &fillBeforeUpdateStore{Store: inner, fault: sw}
+		})
+	})
+	audit := installBrokerAuditCapture(f.srv)
+	fault.Arm()
+
+	rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPatch, "/api/v1/runtime-brokers/"+f.id, gcpHostBody(ownedEmailB, ownedProjectB))
+
+	assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	f.requireGCPHost(t, ownedEmailA, ownedProjectA)
+	assert.Empty(t, brokerAuditEventsOfType(audit, BrokerAuthEventUpdateSettings),
+		"no update event: the update applied nothing")
 }
 
 // TestBrokerUpdate_AuditCoversAppliedPartOfFailedUpdate: when a later write
@@ -724,6 +746,11 @@ func (s *gcpHostWriteSpyStore) SetRuntimeBrokerGCPHost(ctx context.Context, id, 
 	return s.Store.SetRuntimeBrokerGCPHost(ctx, id, email, project)
 }
 
+func (s *gcpHostWriteSpyStore) SetRuntimeBrokerGCPHostIfPrior(ctx context.Context, id, priorEmail, priorProject, email, project string) (store.GCPHostSetting, bool, error) {
+	s.record("SetRuntimeBrokerGCPHostIfPrior")
+	return s.Store.SetRuntimeBrokerGCPHostIfPrior(ctx, id, priorEmail, priorProject, email, project)
+}
+
 func (s *gcpHostWriteSpyStore) SetRuntimeBrokerGCPHostSource(ctx context.Context, id, source string) (store.GCPHostSetting, error) {
 	s.record("SetRuntimeBrokerGCPHostSource")
 	return s.Store.SetRuntimeBrokerGCPHostSource(ctx, id, source)
@@ -747,7 +774,7 @@ func TestBrokerReregistration_DeniedCallerWritesNoGCPHostFields(t *testing.T) {
 		other := newHubMemberUser(t, f.s, "denied-no-write-other")
 		fault.Arm()
 
-		rec := doRequestAsUser(t, f.srv, other, http.MethodPost, "/api/v1/brokers", f.req(withGCPHost(ownedEmailA, ownedProjectA)))
+		rec := doRequestAsUserLoopback(t, f.srv, other, http.MethodPost, "/api/v1/brokers", f.req(withGCPHost(ownedEmailA, ownedProjectA)))
 
 		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 		assert.Empty(t, spy.calls)
@@ -766,7 +793,7 @@ func TestFlatReregistration_StalePinWritesNothing(t *testing.T) {
 	_, err := f.srv.createFlatBrokerRegistration(context.Background(), f.req(func(r *CreateBrokerRegistrationRequest) {
 		withGCPHost(ownedEmailA, ownedProjectA)(r)
 		r.Labels = map[string]string{"zone": "x"}
-	}), f.owner.ID, otherRow, false)
+	}), f.owner.ID, otherRow, false, hostSAClaimVerdict{})
 
 	require.True(t, errors.Is(err, ErrBrokerRegistrationAuthorizationStale), "got %v", err)
 	f.requireGCPHost(t, "", "")
@@ -793,15 +820,15 @@ func TestBrokerReregistration_FlatAuthorizationMatrix(t *testing.T) {
 		}},
 		{"owner token", true, func(t *testing.T, f *flatRegFixture, req CreateBrokerRegistrationRequest) *httptest.ResponseRecorder {
 			key := mintHubBrokerUAT(t, f.srv, f.operator.ID, "broker:create")
-			return doRequestWithToken(t, f.srv, key, http.MethodPost, "/api/v1/brokers", req)
+			return doRequestWithTokenLoopback(t, f.srv, key, http.MethodPost, "/api/v1/brokers", req)
 		}},
 		{"super-admin token on another user's broker", false, func(t *testing.T, f *flatRegFixture, req CreateBrokerRegistrationRequest) *httptest.ResponseRecorder {
 			admin := newSuperAdminUser(t, f.s, "flat-matrix-admin")
 			key := mintHubBrokerUAT(t, f.srv, admin.ID, "broker:create")
-			return doRequestWithToken(t, f.srv, key, http.MethodPost, "/api/v1/brokers", req)
+			return doRequestWithTokenLoopback(t, f.srv, key, http.MethodPost, "/api/v1/brokers", req)
 		}},
 		{"super-admin dev credential", true, func(t *testing.T, f *flatRegFixture, req CreateBrokerRegistrationRequest) *httptest.ResponseRecorder {
-			return doRequest(t, f.srv, http.MethodPost, "/api/v1/brokers", req)
+			return doRequestLoopback(t, f.srv, http.MethodPost, "/api/v1/brokers", req)
 		}},
 	}
 	for _, preserve := range []bool{false, true} {
@@ -848,7 +875,7 @@ func TestBrokerReregistration_FlatAuthorizationMatrix(t *testing.T) {
 			req := CreateBrokerRegistrationRequest{BrokerID: row.ID, Name: row.Name, RuntimeTarget: &api.RuntimeTargetDescriptor{ID: target.ID, Type: target.Type, DisplayName: target.DisplayName}, PreserveSettings: preserve}
 			rec := f.register(t, f.operator, req)
 			assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
-			rec = doRequestWithToken(t, f.srv, adminKey, http.MethodPost, "/api/v1/brokers", req)
+			rec = doRequestWithTokenLoopback(t, f.srv, adminKey, http.MethodPost, "/api/v1/brokers", req)
 			assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 		}
 	})
@@ -890,7 +917,7 @@ func TestBrokerRoleLabel_HubManaged(t *testing.T) {
 	t.Run("new legacy row", func(t *testing.T) {
 		srv, s := testServer(t)
 		member := newHubMemberUser(t, s, "role-new-legacy")
-		rec := doRequestAsUser(t, srv, member, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{Name: "role-new-legacy", Labels: embeddedLabel})
+		rec := doRequestAsUserLoopback(t, srv, member, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{Name: "role-new-legacy", Labels: embeddedLabel})
 		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 		row, err := s.GetRuntimeBroker(context.Background(), decodeBrokerRegistration(t, rec.Body).BrokerID)
 		require.NoError(t, err)

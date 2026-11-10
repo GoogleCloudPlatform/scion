@@ -85,6 +85,12 @@ type Config struct {
 	Enabled bool
 	// CloudEnabled controls whether data is forwarded to cloud backend.
 	CloudEnabled bool
+	// CloudEnabledExplicit records that CloudEnabled came from
+	// SCION_TELEMETRY_CLOUD_ENABLED rather than the default. Pipeline.Start
+	// treats a missing cloud destination as a misconfiguration only when
+	// cloud export was asked for explicitly; under the default it just
+	// leaves cloud export off (ptone/scion#7104).
+	CloudEnabledExplicit bool
 	// Endpoint is the cloud OTLP endpoint.
 	Endpoint string
 	// Protocol is the OTLP protocol ("grpc" or "http").
@@ -177,6 +183,12 @@ func LoadConfig() *Config {
 		CloudProvider:      os.Getenv(EnvCloudProvider),
 		MetricsDebug:       util.ParseBoolEnv(EnvMetricsDebug, false),
 	}
+
+	// Explicit only when the value parses: ParseBoolEnv returns each default
+	// for an unset, empty or misspelt value, so the two calls agree only for a
+	// recognised boolean. Uses only ParseBoolEnv, which the cmd/sciontool
+	// exec-audit allowlist permits on the PID-1 path (no LookupBoolEnv there).
+	cfg.CloudEnabledExplicit = util.ParseBoolEnv(EnvCloudEnabled, true) == util.ParseBoolEnv(EnvCloudEnabled, false)
 
 	// Fallback: if SCION_OTEL_GCP_CREDENTIALS is not set, probe the
 	// well-known path where the broker mounts the telemetry SA key file.

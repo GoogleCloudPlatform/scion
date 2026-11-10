@@ -59,15 +59,16 @@ func TestListAgentsSorted_InvalidParams(t *testing.T) {
 }
 
 // TestListAgentsSorted_InvalidCursorSameEnvelope pins that the global
-// endpoint's sorted-mode 400 for a malformed cursor uses the same error
-// envelope as the legacy invalid-cursor 400, and pins the legacy body itself
-// byte for byte against a golden string.
+// endpoint's sorted-mode 400 for a malformed cursor is the same response as
+// the legacy invalid-cursor 400, and pins the legacy body itself byte for
+// byte against a golden string: every malformed cursor is 400
+// invalid_cursor with one fixed message (ptone/scion#3062).
 func TestListAgentsSorted_InvalidCursorSameEnvelope(t *testing.T) {
 	f := globalSortedSetup(t)
 
 	legacyRec := doRequestAsUser(t, f.srv, f.admin, http.MethodGet, f.listPath("cursor=not-valid-base64!!"), nil)
 	require.Equal(t, http.StatusBadRequest, legacyRec.Code)
-	assert.Equal(t, legacyInvalidCursorBody, legacyRec.Body.String(), "the legacy invalid-cursor body must not change")
+	assert.Equal(t, legacyInvalidCursorBody, legacyRec.Body.String(), "the legacy invalid-cursor body")
 
 	sortedRec := doRequestAsUser(t, f.srv, f.admin, http.MethodGet, f.listPath("sort=updated&cursor=not-valid-base64!!"), nil)
 	require.Equal(t, http.StatusBadRequest, sortedRec.Code)
@@ -80,18 +81,16 @@ func TestListAgentsSorted_InvalidCursorSameEnvelope(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(legacyRec.Body.Bytes(), &legacyBody))
 	require.NoError(t, json.Unmarshal(sortedRec.Body.Bytes(), &sortedBody))
-	// Same envelope (code invalid_request, an "invalid cursor" message), but
-	// not the same message: the legacy decoder's message includes the
-	// underlying decode error, while the sorted path's is the fixed string
-	// "invalid cursor".
+	// Same envelope: code invalid_cursor and the same fixed message, with
+	// no decoder detail in either.
 	assert.Equal(t, legacyBody.Error.Code, sortedBody.Error.Code)
-	assert.Contains(t, legacyBody.Error.Message, "invalid cursor")
-	assert.Equal(t, "invalid cursor", sortedBody.Error.Message)
+	assert.Equal(t, legacyBody.Error.Message, sortedBody.Error.Message)
+	assert.Equal(t, legacyInvalidCursorBody, sortedRec.Body.String(), "the sorted invalid-cursor body")
 }
 
 // legacyInvalidCursorBody is the exact legacy 400 body for
 // cursor=not-valid-base64!! on the global endpoint.
-const legacyInvalidCursorBody = `{"error":{"code":"invalid_request","message":"invalid cursor: illegal base64 data at input byte 16"}}` + "\n"
+const legacyInvalidCursorBody = `{"error":{"code":"invalid_cursor","message":"invalid cursor: restart pagination from the first page"}}` + "\n"
 
 // TestListAgentsSorted_DirValidatedBeforeSort pins the validation order:
 // with both sort and dir invalid, the error reports dir.

@@ -156,6 +156,41 @@ func lockSettingsDirFile(dir string, deadline time.Time, wait time.Duration) (*S
 	}
 }
 
+// tryLockSettingsDir takes the settings lock for dir only if it is free
+// right now: it neither waits nor reports anything. ok is false when this
+// process or another one holds the lock, or the lock file cannot be opened.
+// The settings loaders use it for the legacy-key migration they run, which
+// may happen while this process already holds the lock.
+//
+// dir must exist. In a directory that refuses new files and has no lock file,
+// only the in-process mutex is taken, as LockSettingsDir does, without its
+// warning.
+func tryLockSettingsDir(dir string) (lock *SettingsLock, ok bool) {
+	if !settingsFileMu.TryLock() {
+		return nil, false
+	}
+	lockDir := dir
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+		lockDir = resolved
+	}
+	lockPath := filepath.Join(lockDir, settingsLockFileName)
+	fl, err := filelock.Acquire(lockPath, 0644, 0)
+	switch {
+	case err == nil:
+		if fl.Created {
+			if gerr := util.EnsureGitIgnoresFile(lockDir, settingsLockFileName); gerr != nil {
+				slog.Warn("settings: could not keep the settings lock file out of git", "path", lockPath, "error", gerr)
+			}
+		}
+		return &SettingsLock{dir: dir, file: fl, held: true}, true
+	case isReadOnlyErr(err) && !dirWritable(lockDir):
+		return &SettingsLock{dir: dir, held: true}, true
+	default:
+		settingsFileMu.Unlock()
+		return nil, false
+	}
+}
+
 // isReadOnlyErr reports whether err means the file system refused a new
 // file: no permission, or a read-only file system.
 func isReadOnlyErr(err error) bool {
@@ -204,7 +239,7 @@ func LoadModifySaveVersionedSettings(dir string, modify func(*VersionedSettings)
 		return err
 	}
 	defer lock.Unlock()
-	vs, err := LoadSingleFileVersioned(dir)
+	vs, err := loadSingleFileVersioned(lock, dir)
 	if err != nil {
 		return err
 	}

@@ -673,6 +673,7 @@ func TestStart_TemplateEnvFromTemplateEnvSource(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Create from the hydrated cache dir, as the broker does on create.
+	allowHydratedTemplate(t, hashDir)
 	env, _ := startTemplateEnv(t, context.Background(), project, "hosted", func(o *api.StartOptions) {
 		o.Template, o.TemplateName = hashDir, "web-dev"
 	})

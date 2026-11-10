@@ -29,7 +29,6 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -45,7 +44,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/fsutil"
-	"golang.org/x/sys/unix"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/urlredact"
 )
 
 // ProvisionSentinelFile is the name of the sentinel file written atomically
@@ -71,11 +70,10 @@ func ProjectStateDir(workspacePath string) string {
 }
 
 // SentinelPresent reports whether ProvisionSentinelFile exists in any of
-// dirs, checked in order; empty entries are skipped. Callers list the
-// current location first and legacy locations after it (for example the
-// workspace root, where Kubernetes init containers wrote the sentinel before
-// the state directory existed), so a workspace provisioned under an older
-// layout is not provisioned again.
+// dirs, checked in order; empty entries are skipped. A caller that must
+// agree with ProvisionShared passes ProvisionInput.SentinelDirs, which is
+// the sentinel directory alone: a sentinel in the workspace root (written
+// by images from before the provisioning state directory) is not read.
 func SentinelPresent(dirs ...string) bool {
 	_, ok := findSentinel(dirs...)
 	return ok
@@ -205,6 +203,12 @@ type ResolvedWorkspace struct {
 	// Backend identifies which backend produced this resolution: "local",
 	// "nfs", "cloudrun-volume" or "gke-shared-volume".
 	Backend string
+
+	// OwnerUID and OwnerGID are the nfs backend's configured nfs uid and
+	// gid (unset meaning the default 1000, DefaultOwnerID). Directory
+	// creators only check existing upper directories against them; they
+	// never chown with them. Zero for every other backend.
+	OwnerUID, OwnerGID int
 }
 
 // ResolvedSharedDir holds path resolution for a single shared directory.
@@ -250,33 +254,49 @@ type ProvisionInput struct {
 	// clone URL, the command line or any file.
 	CloneWithToken bool
 
+	// CloneToken, when non-empty, is the git token for the clone, given to
+	// the clone command alone: its environment gets GITHUB_TOKEN set to it
+	// plus the same credential helper CloneWithToken uses, and clone errors
+	// are redacted with it. The calling process's environment is not read
+	// or changed. The hub sets it when it provisions a project's shared
+	// workspace at create (ptone/scion#5813); it takes precedence over
+	// CloneWithToken.
+	CloneToken string
+
+	// CloneTokenRemote, when set with CloneToken, binds the token to the
+	// project's recorded git remote: the clone gets the token only when
+	// GitClone.URL is https and its normalized host and owner/repo equal this
+	// remote, and then only for that host (credential.https://<host>.helper,
+	// constant helper text, the token only in the clone command's
+	// environment). Any other URL is cloned without a token. The hub sets it
+	// to the project's GitRemote for its clone at create.
+	CloneTokenRemote string
+
+	// HostGitHardened runs the clone as host-side git on a project-supplied
+	// URL: with HostCloneGitArgs ahead of the subcommand and
+	// GIT_ALLOW_PROTOCOL limited to HostCloneProtocols, so only the https,
+	// ssh and git transports can be used (no local path, file://, ext:: or
+	// other helper transport) and no hook, fsmonitor or pager runs. The hub,
+	// the broker, the Cloud Run runtime and the Kubernetes provisioning init
+	// container (sciontool provision) set it for their clones. Independently of it, ProvisionShared refuses any GitClone.URL
+	// that CheckHostCloneURL refuses.
+	HostGitHardened bool
+
 	// NFSUID and NFSGID are the stable NFS ownership values (default 1000:1000).
 	// Used for one-time chown of newly provisioned workspace directories.
 	NFSUID int
 	NFSGID int
 
 	// SentinelDir overrides the directory where the provisioning sentinel file
-	// (.scion-provisioned) is written and checked. When empty, defaults to
-	// filepath.Dir(Resolved.HostPath) — the project root parent of the workspace
-	// dir. The k8s init container, which cannot see that parent, sets it to the
-	// project's provisioning state directory mounted next to the workspace
-	// (ProvisionStateDirName), or, when its pod has no such mount (an older
-	// runtime), to the workspace dir itself.
+	// (.scion-provisioned) is written and checked and the provisioning file
+	// lock is taken. When empty, defaults to filepath.Dir(Resolved.HostPath)
+	// — the project root parent of the workspace dir. The k8s init container,
+	// which cannot see that parent, sets it to the project's provisioning
+	// state directory mounted next to the workspace (ProvisionStateDirName).
+	// It must be outside the workspace: ProvisionShared refuses a sentinel
+	// directory that is the workspace or inside it, so nothing of the
+	// provisioning bookkeeping is ever kept in the workspace root.
 	SentinelDir string
-
-	// LegacyDir is the directory where an older layout kept the sentinel and
-	// the file lock: the workspace directory itself, for the Kubernetes init
-	// container before the provisioning state directory existed. When set
-	// and different from the sentinel directory:
-	//   - a sentinel found there also counts as provisioned (the new sentinel
-	//     is only ever written in the sentinel directory), and
-	//     "/.scion-provisioned" is added to the workspace's git excludes;
-	//   - the file lock in LegacyDir is taken BEFORE the one
-	//     in the sentinel directory and released after it, so a pod running
-	//     an older sciontool (which takes only the legacy lock) and a newer
-	//     one always exclude each other, and the fixed order rules out a
-	//     deadlock. The legacy lock is transient and git-excluded.
-	LegacyDir string
 
 	// RequireChownSuccess makes a chown failure fatal (returns an error,
 	// before the sentinel is written) instead of the default warn-and-continue
@@ -289,6 +309,12 @@ type ProvisionInput struct {
 	// sentinel would still be written, masking the failure from every future
 	// pod that starts for this project (they'd all see the sentinel and skip
 	// provisioning, forever).
+	//
+	// A chown that fails with EPERM on an entry already owned by the
+	// resolved owner (NFSUID:NFSGID, 0 meaning 1000) is not a failure, with
+	// or without this flag: on an NFS export with all_squash, or root_squash
+	// with anonuid/anongid set to the workspace owner, root cannot chown but
+	// every entry already has the wanted owner (see checkChownEPERM).
 	RequireChownSuccess bool
 
 	// MountedWorktree is set by the Kubernetes provisioning init container
@@ -368,13 +394,8 @@ type heldLock struct {
 // init container (shared-plain and worktree-per-agent) overrides it with the
 // project's provisioning state directory (ProvisionStateDirName), which the
 // pod mounts by its own subPath next to the workspace, so the sentinel and
-// the lock's litter stay out of the workspace there too. Only an init
-// container whose pod has no such mount (an older runtime) still falls back
-// to the workspace directory itself; there the lock's litter is excluded
-// from chownProjectTree's walk (isLockArtifactPath) and from git's view
-// (appendGitExclude), and is garbage-collected once old enough. The legacy
-// lock taken through ProvisionInput.LegacyDir lives in the workspace too and
-// is handled the same way.
+// the lock's litter stay out of the workspace there too. A sentinel
+// directory in the workspace is refused (checkSentinelDirOutsideWorkspace).
 func resolveSentinelDir(in ProvisionInput) string {
 	if in.SentinelDir != "" {
 		return in.SentinelDir
@@ -384,51 +405,27 @@ func resolveSentinelDir(in ProvisionInput) string {
 	return filepath.Dir(in.Resolved.HostPath)
 }
 
+// checkSentinelDirOutsideWorkspace refuses a sentinel directory that is the
+// workspace itself or inside it. The provisioning sentinel and lock are kept
+// only outside the workspace (the project root, or the project's
+// provisioning state directory); nothing reads or writes them in the
+// workspace root any more.
+func checkSentinelDirOutsideWorkspace(in ProvisionInput, sentinelDir string) error {
+	ws := filepath.Clean(in.Resolved.HostPath)
+	rel, err := filepath.Rel(ws, filepath.Clean(sentinelDir))
+	if err == nil && filepath.IsLocal(rel) { // "." (the workspace itself) is local too
+		return fmt.Errorf("ProvisionShared: the provisioning state directory %s must be outside the workspace %s", sentinelDir, ws)
+	}
+	return nil
+}
+
 // SentinelDirs returns the directories ProvisionShared looks in for the
-// sentinel, in order: the sentinel directory (SentinelDir, or the
-// workspace's parent by default), then LegacyDir when set and different.
-// A caller that must agree with ProvisionShared about whether the shared
-// checkout is provisioned checks exactly these (see SentinelPresent).
+// sentinel: the sentinel directory alone (SentinelDir, or the workspace's
+// parent by default). A caller that must agree with ProvisionShared about
+// whether the shared checkout is provisioned checks exactly these (see
+// SentinelPresent).
 func (in ProvisionInput) SentinelDirs() []string {
-	sentinelDir := resolveSentinelDir(in)
-	if legacy := legacyDir(in, sentinelDir); legacy != "" {
-		return []string{sentinelDir, legacy}
-	}
-	return []string{sentinelDir}
-}
-
-// legacyDir returns in.LegacyDir when it names a directory other than
-// sentinelDir, and "" otherwise.
-func legacyDir(in ProvisionInput, sentinelDir string) string {
-	if in.LegacyDir == "" || filepath.Clean(in.LegacyDir) == filepath.Clean(sentinelDir) {
-		return ""
-	}
-	return in.LegacyDir
-}
-
-// excludeLegacySentinel adds "/.scion-provisioned" to the workspace's git
-// excludes when the legacy layout is in use (LegacyDir is the workspace) and
-// a sentinel file is in the workspace root, so it does not show in git
-// status. That is checked independently of where the sentinel that ended
-// provisioning was found: a pod running an older sciontool writes the
-// legacy sentinel back into the workspace root even after the state
-// directory has its own. Best effort: a workspace without a .git directory,
-// or a failed write, is left alone.
-func excludeLegacySentinel(in ProvisionInput) {
-	ws := in.Resolved.HostPath
-	if in.LegacyDir == "" || filepath.Clean(in.LegacyDir) != filepath.Clean(ws) {
-		return
-	}
-	if _, err := os.Lstat(filepath.Join(ws, ProvisionSentinelFile)); err != nil {
-		return
-	}
-	if fi, err := os.Lstat(filepath.Join(ws, ".git")); err != nil || !fi.IsDir() {
-		return
-	}
-	if err := appendGitExclude(ws, "/"+ProvisionSentinelFile); err != nil {
-		slog.Warn("ProvisionShared: failed to exclude the legacy sentinel from git status (non-fatal)",
-			"project_id", in.ProjectID, "path", ws, "error", err)
-	}
+	return []string{resolveSentinelDir(in)}
 }
 
 // ProvisionShared is the universal, vendor-agnostic workspace provisioning
@@ -477,8 +474,17 @@ func ProvisionShared(in ProvisionInput) error {
 	if in.ProjectID == "" {
 		return fmt.Errorf("ProvisionShared: ProjectID is required")
 	}
+	// The clone URL is checked before anything else, for every caller and
+	// also when the workspace is already provisioned: only an https, ssh or
+	// git URL is accepted.
+	if err := checkProvisionCloneURL(in); err != nil {
+		return fmt.Errorf("ProvisionShared: %w", err)
+	}
 
 	sentinelDir := resolveSentinelDir(in)
+	if err := checkSentinelDirOutsideWorkspace(in, sentinelDir); err != nil {
+		return err
+	}
 	sentinelPath := filepath.Join(sentinelDir, ProvisionSentinelFile)
 
 	ctx := in.Ctx
@@ -494,7 +500,12 @@ func ProvisionShared(in ProvisionInput) error {
 		if dir, ok := findSentinel(in.SentinelDirs()...); ok && !markedWorkspaceNeedsClone(in) {
 			slog.Debug("ProvisionShared: workspace already provisioned (sentinel exists, pre-lock)",
 				"project_id", in.ProjectID, "sentinel_dir", dir)
-			excludeLegacySentinel(in)
+			// Every open of the state directory sweeps its aged lock
+			// litter, not only a contended acquisition (which sweeps it
+			// in acquireFileLockWithin): a provisioned project stays on
+			// this path and would otherwise keep litter from its first
+			// provisioning forever. Never touches a live lock.
+			garbageCollectLockLitter(sentinelDir)
 			return nil
 		}
 	}
@@ -522,7 +533,6 @@ func ProvisionShared(in ProvisionInput) error {
 		// Already provisioned — skip to worktree setup if needed.
 		slog.Debug("ProvisionShared: workspace already provisioned (sentinel exists)",
 			"project_id", in.ProjectID, "sentinel_dir", dir)
-		excludeLegacySentinel(in)
 		if markedWorkspaceNeedsClone(in) {
 			return cloneIntoMarkedWorkspace(ctx, in, held.stillOwned, sentinelDir)
 		}
@@ -575,7 +585,7 @@ func ProvisionShared(in ProvisionInput) error {
 	// (F-111, design §9).
 	chownRoot := chownTarget(in.Resolved.HostPath)
 	uid, gid := resolveUID(in), resolveGID(in)
-	if err := chownProjectTreeExcluding(ctx, chownRoot, []string{sentinelDir, legacyDir(in, sentinelDir)}, uid, gid); err != nil {
+	if err := chownProjectTree(ctx, chownRoot, sentinelDir, uid, gid); err != nil {
 		if in.RequireChownSuccess {
 			return fmt.Errorf("ProvisionShared: chown %s to %d:%d: %w", chownRoot, uid, gid, err)
 		}
@@ -652,8 +662,10 @@ func ensureMountedWorktree(ctx context.Context, in ProvisionInput) error {
 		var err error
 		if recursive {
 			err = chownProjectTree(ctx, path, "", uid, gid)
-		} else {
-			err = lchownFile(path, uid, gid)
+		} else if lerr := lchownFile(path, uid, gid); lerr != nil {
+			// EPERM on an entry already owned by uid:gid (a squashing NFS
+			// export) is success, as in the recursive walk.
+			err = checkChownEPERM(path, uid, gid, lerr)
 		}
 		if err != nil {
 			if in.RequireChownSuccess {
@@ -758,12 +770,10 @@ const (
 // clone is left in place (ErrSeparateCheckout), and so is anything else,
 // with an error.
 //
-// stateDir is the project's provisioning state directory (ProjectStateDir)
-// when the init containers keep their lock there, or "" for the legacy
-// layout. With stateDir set, the legacy lock in base is taken first and the
-// lock in stateDir second, in the same order as ProvisionShared with
-// ProvisionInput.LegacyDir, so a removal excludes both older and newer
-// provisioning init containers.
+// stateDir is the project's provisioning state directory, where the
+// provisioning init containers take their lock; "" means
+// ProjectStateDir(base). Only that lock is taken. A stateDir that is base
+// or inside it is refused: no lock is ever taken in the workspace root.
 func RemoveMountedWorktree(ctx context.Context, base, stateDir, name string, lockWait time.Duration) error {
 	if slug, err := api.ValidateAgentName(name); err != nil || slug != name {
 		return fmt.Errorf("remove worktree: agent name %q is not an agent slug", name)
@@ -775,16 +785,15 @@ func RemoveMountedWorktree(ctx context.Context, base, stateDir, name string, loc
 		return fmt.Errorf("remove worktree %s: %w", path, err)
 	}
 
+	if stateDir == "" {
+		stateDir = ProjectStateDir(base)
+	}
+	if err := checkSentinelDirOutsideWorkspace(ProvisionInput{Resolved: ResolvedWorkspace{HostPath: base}}, stateDir); err != nil {
+		return fmt.Errorf("remove worktree %s: %w", path, err)
+	}
 	// lockWait bounds the wait for the lock; the caller's cancellation is
 	// ignored so the steps under the lock always finish.
-	lockDirs := []string{base}
-	if stateDir != "" && filepath.Clean(stateDir) != filepath.Clean(base) {
-		// Legacy lock first, then the state-directory lock (see
-		// ProvisionInput.LegacyDir). The legacy lock goes away with
-		// ptone/scion#2974.
-		lockDirs = append(lockDirs, stateDir)
-	}
-	held, err := acquireOrderedFileLocks(context.WithoutCancel(ctx), lockDirs, lockWait)
+	held, err := acquireFileLockWithin(context.WithoutCancel(ctx), stateDir, lockWait)
 	if err != nil {
 		return fmt.Errorf("remove worktree %s: %w", path, err)
 	}
@@ -874,11 +883,14 @@ func moveWorktreeAside(base, name, prefix string) (string, error) {
 	return to, nil
 }
 
-// gitInSharedCheckout runs git in the shared checkout at base. The shared
-// checkout and the agent's worktree belong to the agents' user rather than
-// the caller, so both are listed in safe.directory for this command only.
+// gitInSharedCheckout runs git in the shared checkout at base through
+// util.HostGitCommand. The shared checkout and the agent's worktree belong
+// to the agents' user rather than the caller, so both are listed in
+// safe.directory for this command only.
 func gitInSharedCheckout(ctx context.Context, base, worktree string, args ...string) (string, error) {
-	cmd, err := sharedCheckoutGitCmd(base, worktree)(ctx, args...)
+	cmd, err := util.HostGitCommand(ctx, base, util.HostGitOptions{
+		Config: []string{"safe.directory=" + base, "safe.directory=" + worktree},
+	}, args...)
 	if err != nil {
 		return "", err
 	}
@@ -886,13 +898,17 @@ func gitInSharedCheckout(ctx context.Context, base, worktree string, args ...str
 	return strings.TrimSpace(string(out)), err
 }
 
-// sharedCheckoutGitCmd returns a builder of the git commands
-// gitInSharedCheckout runs, for callers that run the command themselves
-// (util.RemoveWorktreeEntry).
+// sharedCheckoutGitCmd returns a builder of git commands in the shared
+// checkout at base for util.RemoveWorktreeEntry, which runs "git worktree
+// remove" only once the worktree directory is gone, so no work tree file is
+// read: the fixed host settings (util.HostGitArgs, util.HostGitEnv) are
+// enough. safe.directory lists base and worktree as in gitInSharedCheckout.
 func sharedCheckoutGitCmd(base, worktree string) func(ctx context.Context, args ...string) (*exec.Cmd, error) {
 	return func(ctx context.Context, args ...string) (*exec.Cmd, error) {
-		full := append([]string{"-c", "safe.directory=" + base, "-c", "safe.directory=" + worktree, "-C", base}, args...)
-		return exec.CommandContext(ctx, "git", full...), nil
+		full := append(util.HostGitArgs(), "-c", "safe.directory="+base, "-c", "safe.directory="+worktree, "-C", base)
+		cmd := exec.CommandContext(ctx, "git", append(full, args...)...)
+		cmd.Env = util.HostGitEnv(os.Environ())
+		return cmd, nil
 	}
 }
 
@@ -906,8 +922,8 @@ func fileLockWait(in ProvisionInput) time.Duration {
 	return in.LockWait
 }
 
-// acquireProvisionLock acquires the provisioning file lock in sentinelDir
-// (preceded by the legacy one when LegacyDir applies). Returns a heldLock.
+// acquireProvisionLock acquires the provisioning file lock in sentinelDir,
+// and only there. Returns a heldLock.
 //
 // sentinelDir is the directory both a lock-winner and any concurrent
 // waiters already see identically (the NFS-mounted project root), so it
@@ -915,13 +931,6 @@ func fileLockWait(in ProvisionInput) time.Duration {
 // container has no Hub/DB connection at all (see the package doc above), so
 // a filesystem lock is the coordination medium available to every caller.
 func acquireProvisionLock(ctx context.Context, in ProvisionInput, sentinelDir string) (heldLock, error) {
-	if legacy := legacyDir(in, sentinelDir); legacy != "" {
-		// Legacy lock first, then the state-directory lock, always in
-		// this order (see ProvisionInput.LegacyDir). The legacy lock can
-		// be dropped once no supported sciontool image takes only the
-		// legacy lock; tracked in ptone/scion#2974.
-		return acquireOrderedFileLocks(ctx, []string{legacy, sentinelDir}, fileLockWait(in))
-	}
 	return acquireFileLockWithin(ctx, sentinelDir, fileLockWait(in))
 }
 
@@ -1450,44 +1459,169 @@ func acquireFileLockWithin(ctx context.Context, dir string, wait time.Duration) 
 // an existing, older directory into a staging name, so a staging entry's
 // mtime is genuinely its creation time.
 //
-// Known gap: a project that reaches its sentinel and then stays on the
-// SharedPlain pre-lock fast path (see ProvisionShared) never calls this
-// again, so litter from that project's initial contended provisioning is
-// not revisited. Accepted: it does not accumulate further once contention
-// stops, and it is already git-excluded.
+// It runs on every open of a provisioning state directory (ptone/scion#5836):
+// each lock acquisition, and the SharedPlain pre-lock fast path of
+// ProvisionShared, which an already provisioned project stays on. The
+// directory is listed first and the server clock is probed only when there
+// is litter to age, so an open with nothing to sweep writes nothing. The
+// live lock name itself is never touched.
 func garbageCollectLockLitter(dir string) {
-	now, err := serverNow(dir)
-	if err != nil {
-		return
-	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return
-	}
-	cutoff := 2 * provisionLockStaleAfter
-	prefix := provisionFileLockName + "."
-	for _, e := range entries {
-		name := e.Name()
-		if name == provisionFileLockName || !strings.HasPrefix(name, prefix) {
-			continue // the live lock name itself, or not one of ours
+	_, _ = SweepLockLitter(dir)
+}
+
+// GarbageCollectStateDir sweeps the aged lock litter of the provisioning
+// state directory dir (garbageCollectLockLitter): what an open of the state
+// directory runs, for callers outside this package (provisioner.Provisioner).
+// Best effort; a live lock is never touched.
+func GarbageCollectStateDir(dir string) {
+	garbageCollectLockLitter(dir)
+}
+
+// LockLitterMinAge is the age past which provisioning-lock litter may be
+// removed: the garbage-collection cutoff 2S of acquireFileLock's
+// correctness argument.
+func LockLitterMinAge() time.Duration {
+	return 2 * provisionLockStaleAfter
+}
+
+// LockLitter is what SweepLockLitter left in place.
+type LockLitter struct {
+	// Pending is how long the youngest remaining aged entry still needs
+	// before it may be removed (0 when none is left).
+	Pending time.Duration
+	// Unaged counts ".evict-*" entries without their evicted-at marker.
+	// They have no eviction time and are never removed automatically, so
+	// waiting does not help (see garbageCollectLockLitter).
+	Unaged int
+}
+
+// SweepLockLitter removes dir's provisioning-lock litter older than
+// LockLitterMinAge and reports what it left. ".evict-*" entries are aged
+// from their evicted-at marker (see garbageCollectLockLitter); one without
+// the marker is never guessed at (counted in Unaged). Other litter
+// (staging directories, clock probes a crashed caller left) is aged from
+// its own mtime; a concurrent caller's probe is young and kept. The live
+// lock itself and anything not under the lock's name prefix are never
+// touched. Ages are measured against the file server's clock (serverNow).
+// The directory is listed first and the clock is probed only when there is
+// litter to age, so a sweep with nothing to do writes nothing. One sweep
+// examines at most lockLitterMaxEntries entries (lockLitterEntries); a
+// later sweep handles the rest. The first removal error is returned; the
+// sweep continues past it.
+//
+// The cutoff is fixed: a caller MUST NOT remove litter younger than
+// LockLitterMinAge by any other means, since a younger ".evict-*" entry
+// can still be the destination a stale observer's rename relies on (the
+// invariant in acquireFileLock's correctness argument).
+func SweepLockLitter(dir string) (LockLitter, error) {
+	return sweepLockLitter(dir, LockLitterMinAge())
+}
+
+// sweepLockLitter is SweepLockLitter with the cutoff as a parameter, for
+// tests only.
+func sweepLockLitter(dir string, minAge time.Duration) (LockLitter, error) {
+	left, _, err := sweepLockLitterIn(dir, dir, minAge)
+	return left, err
+}
+
+// sweepLockLitterIn is the sweep behind SweepLockLitter for the litter in
+// dir, with the server clock probed in clockDir (a directory on the same
+// export) and the number of entries removed returned too. The one-shot
+// promotion of the workspace root sweeps litter there while probing the
+// clock in the state directory, so it writes nothing into the workspace.
+func sweepLockLitterIn(dir, clockDir string, minAge time.Duration) (left LockLitter, removed int, err error) {
+	litter, listErr := lockLitterEntries(dir)
+	if listErr != nil {
+		if errors.Is(listErr, fs.ErrNotExist) {
+			return left, 0, nil
 		}
+		if len(litter) == 0 {
+			return left, 0, listErr
+		}
+	}
+	if len(litter) == 0 {
+		return left, 0, nil
+	}
+	now, err := serverNow(clockDir)
+	if err != nil {
+		left.Pending = minAge
+		return left, 0, err
+	}
+	// A listing that failed part-way is swept as far as it got and its
+	// error reported.
+	firstErr := listErr
+	keep := func(age time.Duration) {
+		left.Pending = max(left.Pending, minAge-age)
+	}
+	for _, e := range litter {
+		name := e.Name()
 		path := filepath.Join(dir, name)
+		var age time.Duration
 		if strings.Contains(name, ".evict-") {
 			info, err := os.Stat(filepath.Join(path, provisionLockEvictedAtFile))
 			if err != nil {
-				continue // no confirmed eviction time yet; never guess (see doc)
+				left.Unaged++ // no confirmed eviction time; never guess
+				continue
 			}
-			if now.Sub(info.ModTime()) > cutoff {
-				_ = os.RemoveAll(path)
+			age = now.Sub(info.ModTime())
+		} else {
+			info, err := e.Info()
+			if err != nil {
+				keep(0)
+				continue
+			}
+			age = now.Sub(info.ModTime())
+		}
+		if age <= minAge {
+			keep(age)
+			continue
+		}
+		if err := os.RemoveAll(path); err != nil {
+			if firstErr == nil {
+				firstErr = err
 			}
 			continue
 		}
-		info, err := e.Info()
+		removed++
+	}
+	return left, removed, firstErr
+}
+
+// lockLitterMaxEntries bounds the lock litter entries one listing returns
+// (lockLitterEntries); a later sweep handles the rest.
+const lockLitterMaxEntries = 4096
+
+// lockLitterEntries lists the lock litter entries of dir: the names under
+// the lock's prefix, never the live lock name itself. The directory is read
+// in chunks and only matching entries are kept, at most
+// lockLitterMaxEntries, so a directory with very many entries (the
+// agent-writable workspace root the one-shot promotion sweeps) is never held
+// in memory as a whole.
+func lockLitterEntries(dir string) ([]os.DirEntry, error) {
+	f, err := os.Open(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	prefix := provisionFileLockName + "."
+	var out []os.DirEntry
+	for {
+		chunk, err := f.ReadDir(256)
+		for _, e := range chunk {
+			name := e.Name()
+			if name == provisionFileLockName || !strings.HasPrefix(name, prefix) {
+				continue // the live lock name itself, or not one of ours
+			}
+			out = append(out, e)
+			if len(out) >= lockLitterMaxEntries {
+				return out, nil
+			}
+		}
+		if errors.Is(err, io.EOF) {
+			return out, nil
+		}
 		if err != nil {
-			continue
-		}
-		if now.Sub(info.ModTime()) > cutoff {
-			_ = os.RemoveAll(path)
+			return out, err
 		}
 	}
 }
@@ -2197,28 +2331,18 @@ var ErrCommondirPresent = errors.New("refusing git operation: base .git/commondi
 //     <dir>/.git/commondir exists at all and refuses (ErrCommondirPresent)
 //     if so, since a hub-native base never legitimately has one.
 //
-// It deliberately does NOT disable hooks (core.hooksPath), filters, aliases,
-// or the global/system gitconfig — once the above holds, any hook/filter
-// still configured for the base is host-managed and must keep running (most
-// notably git-lfs: a post-checkout hook + filter.lfs.* smudge/clean driver).
-// Specifically:
-//   - GIT_CONFIG_NOSYSTEM=1 / GIT_CONFIG_GLOBAL=/dev/null were considered and
-//     REJECTED: `git lfs install` writes filter.lfs.* to the global or system
-//     gitconfig (not repo-local), so this would silently break LFS. It would
-//     also strip broker-host config the broker legitimately relies on
-//     (safe.directory, credential.helper, url.insteadOf, http.*,
-//     core.sshCommand for its own auth) for no corresponding benefit.
-//   - core.sshCommand is left alone for the same reason: this wrapper also
-//     covers the base clone/pull paths, which may legitimately depend on the
-//     broker's configured SSH transport.
-//   - Alias neutralization is unnecessary: every caller here invokes an
-//     explicit, hardcoded subcommand, never a user-suppliable one.
-//
-// What it does additionally clear:
-//   - core.fsmonitor (both boolean and hook-path forms): not used by git-lfs
-//     or any other broker operation, so clearing it costs nothing.
-//   - core.pager=cat: purely cosmetic — a pager must never block
-//     non-interactive broker output.
+// The command itself is built by util.HostGitCommand, because agent
+// containers can write the base's .git: it runs without repository hooks
+// (core.hooksPath=/dev/null), without a file-system monitor, with
+// core.pager=cat, and with every filter driver defined in the repository's
+// own config replaced by its global/system definition (or disabled). The
+// global and system gitconfig stay in effect (safe.directory,
+// credential.helper, url.insteadOf, http.*, core.sshCommand for the
+// broker's own auth, and the filter.lfs.* driver `git lfs install` writes
+// there), so LFS content is still checked out. The git-lfs post-checkout
+// hook does not run; it only marks lockable files read-only.
+// Aliases are not a concern: every caller here invokes an explicit,
+// hardcoded subcommand, never a user-suppliable one.
 //
 // dir is the working directory (cmd.Dir) and the base whose common directory
 // is pinned; it must be non-empty. args are the git subcommand and its
@@ -2227,7 +2351,7 @@ var ErrCommondirPresent = errors.New("refusing git operation: base .git/commondi
 // GIT_COMMON_DIR; callers that need to layer additional env (e.g. the
 // GIT_CONFIG_COUNT/KEY_0/VALUE_0 credential-helper technique) must append to
 // cmd.Env rather than replace it, or the pin is lost.
-func SafeGitCommand(ctx context.Context, dir string, args ...string) (*exec.Cmd, error) {
+func SafeGitCommand(ctx context.Context, dir string, args ...string) (*util.HostGitCmd, error) {
 	if dir == "" {
 		return nil, fmt.Errorf("SafeGitCommand: dir is required")
 	}
@@ -2238,16 +2362,11 @@ func SafeGitCommand(ctx context.Context, dir string, args ...string) (*exec.Cmd,
 		return nil, fmt.Errorf("%w: %s", ErrCommondirPresent, commondirFile)
 	}
 
-	safeArgs := []string{
-		"-c", "core.fsmonitor=false",
-		"-c", "core.fsmonitor=",
-		"-c", "core.pager=cat",
-	}
-	fullArgs := append(safeArgs, args...)
-	cmd := exec.CommandContext(ctx, "git", fullArgs...)
-	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "GIT_COMMON_DIR="+filepath.Join(dir, ".git"))
-	return cmd, nil
+	env := append(util.HostGitEnv(os.Environ()), "GIT_COMMON_DIR="+filepath.Join(dir, ".git"))
+	// Managed base: a worktree add checks out files, but agents fetch LFS
+	// objects in-container, so skip the host-side LFS smudge rather than let
+	// git-lfs read a tracked .lfsconfig for its endpoint.
+	return util.HostGitCommand(ctx, dir, util.HostGitOptions{Env: env, SkipLFSSmudge: true}, args...)
 }
 
 // markedWorkspaceNeedsClone reports whether a shared-plain git workspace that
@@ -2301,11 +2420,8 @@ func cloneIntoMarkedWorkspace(ctx context.Context, in ProvisionInput, stillOwned
 	if err := gitCloneWorkspace(ctx, in, stillOwned); err != nil {
 		return fmt.Errorf("ProvisionShared: git clone: %w", err)
 	}
-	// The marker may be the legacy one in the workspace root; now that
-	// there is a .git, keep it out of git status.
-	excludeLegacySentinel(in)
 	uid, gid := resolveUID(in), resolveGID(in)
-	if err := chownProjectTreeExcluding(ctx, in.Resolved.HostPath, []string{sentinelDir, legacyDir(in, sentinelDir)}, uid, gid); err != nil {
+	if err := chownProjectTree(ctx, in.Resolved.HostPath, sentinelDir, uid, gid); err != nil {
 		if in.RequireChownSuccess {
 			return fmt.Errorf("ProvisionShared: chown %s to %d:%d: %w", in.Resolved.HostPath, uid, gid, err)
 		}
@@ -2333,24 +2449,20 @@ const sharedVolumesDirName = ".scion-volumes"
 
 // ignorableWorkspaceEntry reports whether e, an entry directly in the
 // workspace dir, may sit next to a clone. These are Scion's own entries:
-//   - the provisioning marker file (ProvisionSentinelFile);
-//   - the provisioning file lock directory (provisionFileLockName) and its
-//     siblings "<lock>.stage-*", "<lock>.evict-*" and "<lock>.clock-probe";
 //   - clone scratch directories (cloneTempDirPrefix);
 //   - .scion-volumes, when it is a directory whose children are all
 //     directories that are either empty (mount points created for
 //     in-workspace shared dirs) or the mount of one of in's shared dirs;
 //   - an empty worktrees directory.
 //
-// Anything else is workspace content. Symlinks are never ignorable.
+// Anything else is workspace content, including a provisioning sentinel or
+// lock left in the workspace root by images from before the provisioning
+// state directory (the hub's one-shot promotion removes the sentinel and
+// aged lock litter there). Symlinks are never ignorable.
 func ignorableWorkspaceEntry(in ProvisionInput, dir string, e os.DirEntry) (bool, error) {
 	name := e.Name()
 	isDir := e.IsDir()
 	switch {
-	case name == ProvisionSentinelFile:
-		return e.Type().IsRegular(), nil
-	case name == provisionFileLockName || strings.HasPrefix(name, provisionFileLockName+"."):
-		return true, nil
 	case strings.HasPrefix(name, cloneTempDirPrefix):
 		return isDir, nil
 	case name == sharedVolumesDirName && isDir:
@@ -2532,28 +2644,18 @@ func gitCloneWorkspace(ctx context.Context, in ProvisionInput, stillOwned func()
 	return finishCloneScratch(tmpDir)
 }
 
-// excludeProvisioningFiles keeps Scion's provisioning files in a freshly
-// cloned workspace out of git's view: leftover clone scratch directories,
-// and, when the provisioning file lock (or the legacy one) lives in the
-// workspace itself (the k8s init container), the lock's on-disk footprint
-// and the marker. Patterns are anchored with a leading "/", so an untracked
-// file elsewhere that shares a prefix stays visible. Best effort.
+// excludeProvisioningFiles keeps leftover clone scratch directories in a
+// freshly cloned workspace out of git's view. The provisioning sentinel and
+// lock are never in the workspace (they are kept in the sentinel directory
+// outside it), so nothing is excluded for them. The pattern is anchored with
+// a leading "/", so an untracked file elsewhere that shares a prefix stays
+// visible. Best effort.
 func excludeProvisioningFiles(in ProvisionInput) {
 	dest := in.Resolved.HostPath
-	patterns := []string{"/" + cloneTempDirPrefix + "*"}
-	sentinelDir := resolveSentinelDir(in)
-	if sentinelDir == dest || legacyDir(in, sentinelDir) == dest {
-		patterns = append(patterns, "/"+provisionFileLockName, "/"+provisionFileLockName+".*")
-	}
-	if sentinelDir == dest {
-		patterns = append(patterns, "/"+ProvisionSentinelFile)
-	}
-	for _, p := range patterns {
-		if err := appendGitExclude(dest, p); err != nil {
-			slog.Warn("gitCloneWorkspace: failed to add a git exclude for provisioning files (non-fatal)",
-				"project_id", in.ProjectID, "path", dest, "pattern", p, "error", err)
-			return
-		}
+	p := "/" + cloneTempDirPrefix + "*"
+	if err := appendGitExclude(dest, p); err != nil {
+		slog.Warn("gitCloneWorkspace: failed to add a git exclude for provisioning files (non-fatal)",
+			"project_id", in.ProjectID, "path", dest, "pattern", p, "error", err)
 	}
 }
 
@@ -2605,7 +2707,9 @@ func manifestBranch(gc *api.GitCloneConfig) string {
 
 // readCloneManifest parses scratch's manifest.
 func readCloneManifest(scratch string) (cloneManifest, error) {
-	data, err := os.ReadFile(filepath.Join(scratch, cloneManifestFile))
+	// The scratch directory is in the agent-writable workspace: the manifest is
+	// read without following a symlink and bounded (cloneManifestMaxBytes).
+	data, err := readSmallFileNoFollow(filepath.Join(scratch, cloneManifestFile), cloneManifestMaxBytes)
 	if err != nil {
 		return cloneManifest{}, err
 	}
@@ -2823,7 +2927,26 @@ func removeCloneTempDirs(dir string) error {
 // rejected credential.
 func runGitClone(ctx context.Context, in ProvisionInput) error {
 	gc := in.GitClone
-	args := []string{"clone"}
+	// A test's registered local fixture (AllowLocalCloneFixture) is cloned
+	// without the hardened settings, which refuse local paths
+	// (hostCloneHardened, clone_fixture.go).
+	hardened := hostCloneHardened(in)
+	var args []string
+	if hardened {
+		args = append(args, HostCloneGitArgs()...)
+	} else {
+		// Non-hardened clones still carry the base host-side git pins unconditionally
+		// (no hooks, no fsmonitor, no pager, restricted ext/file transports, no
+		// submodule recursion, no signature checks): a cloned repository's config
+		// cannot change what this host git invocation does. HostCloneGitArgs (the
+		// hardened path) already includes exactly these base pins (hostGitArgs ==
+		// util.HostGitArgs) plus the clone transport/redirect extras, so the base
+		// pins are present on every clone path. The hardened path intentionally
+		// repeats protocol.file.allow, overriding the base =user with =never (the
+		// last -c wins), so file:// transport is fully denied on that path.
+		args = append(args, util.HostGitArgs()...)
+	}
+	args = append(args, "clone")
 
 	// Depth: nil/omitted = shallow depth 1, 0 = full clone (no --depth), >0 = that depth.
 	depth := 1
@@ -2836,18 +2959,57 @@ func runGitClone(ctx context.Context, in ProvisionInput) error {
 	if gc.Branch != "" {
 		args = append(args, "--branch", gc.Branch)
 	}
-	args = append(args, gc.URL, in.Resolved.HostPath)
+	// "--" ends the options: a URL or path starting with "-" is never read
+	// as one.
+	args = append(args, "--", gc.URL, in.Resolved.HostPath)
 
 	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
-	if in.CloneWithToken {
-		cmd.Env = append(cmd.Env, TokenCredentialHelperEnv(cmd.Env)...)
+	// Base host-side git environment: GIT_* scrubbed and the scoped-credential
+	// variable dropped (HostGitEnv), interactive prompts off, and the LFS smudge
+	// skipped so git-lfs never contacts an endpoint named in the cloned tracked
+	// .lfsconfig with the host's credentials (agents fetch LFS objects
+	// in-container). This path also runs in the Kubernetes init container (via
+	// `sciontool provision`). The host-side git hardening pins (no hooks, no
+	// pager, restricted transports, no submodule recursion) plus
+	// http.followRedirects=false and the protocol allow list are applied as fixed
+	// args by HostCloneGitArgs when HostGitHardened (the hub project-create clone).
+	env := append(util.HostGitEnv(os.Environ()), "GIT_TERMINAL_PROMPT=0", "GIT_LFS_SKIP_SMUDGE=1")
+	if hardened {
+		env = append(env, "GIT_ALLOW_PROTOCOL="+HostCloneProtocols)
 	}
+	// Decide which token, if any, is offered. A project-supplied CloneToken is
+	// bound to its recorded remote: with a CloneTokenRemote it is used only when
+	// the clone URL resolves to that remote's host and owner/repo
+	// (cloneTokenHost), and is refused on any mismatch. The binding comes from the
+	// project record (CloneTokenRemote), never from the clone URL or a label.
+	withToken, token := in.CloneWithToken, os.Getenv(GitTokenEnv)
+	if in.CloneToken != "" {
+		bound := in.CloneTokenRemote == ""
+		if !bound {
+			_, bound = cloneTokenHost(in.CloneTokenRemote, gc.URL)
+		}
+		if bound {
+			withToken, token = true, in.CloneToken
+		}
+	}
+	offered := ""
+	if withToken {
+		offered = token
+	}
+	// Remote authentication: no host credential of any kind (credential
+	// helpers, askpass, extra headers, netrc, client certificates, Kerberos,
+	// ssh identity, host global/system config), on every clone, the
+	// project's recorded remote included. With no token offered the clone is
+	// anonymous; with one, the token is the only credential, offered only to
+	// the clone URL's host through a scoped helper, carried in the environment
+	// and never in argv/URL/config. A non-http(s) URL ignores the token.
+	env = util.HostGitRemoteEnv(env, gc.URL, offered)
+	cmd.Env = env
 	output, err := cmd.CombinedOutput()
 	if err == nil {
 		return nil
 	}
-	return cloneError(gc.URL, string(output), err, in.CloneWithToken, os.Getenv(GitTokenEnv))
+	return cloneError(gc.URL, string(output), err, withToken, token)
 }
 
 // redactedCredential replaces a credential value in clone error output.
@@ -2863,31 +3025,11 @@ const GitTokenEnv = "GITHUB_TOKEN"
 // workspace provisioning and the agent authenticate the same way.
 const GitTokenCredentialHelper = `!f() { echo "password=${GITHUB_TOKEN}"; echo "username=oauth2"; }; f`
 
-// TokenCredentialHelperEnv returns the GIT_CONFIG_COUNT/KEY/VALUE entries
-// to append to env, the environment of one git command, so that the command
-// uses GitTokenCredentialHelper and no other credential helper: the first
-// entry clears the helpers from git's config files (so none of them stores
-// the credential), the second adds this one. Entries already counted in env
-// are kept. The returned values name the variable, never the token.
-func TokenCredentialHelperEnv(env []string) []string {
-	base := 0
-	for _, e := range env {
-		if v, ok := strings.CutPrefix(e, "GIT_CONFIG_COUNT="); ok {
-			// The last entry is the one exec uses.
-			base = 0
-			if n, err := strconv.Atoi(v); err == nil && n > 0 {
-				base = n
-			}
-		}
-	}
-	return []string{
-		"GIT_CONFIG_COUNT=" + strconv.Itoa(base+2),
-		fmt.Sprintf("GIT_CONFIG_KEY_%d=credential.helper", base),
-		fmt.Sprintf("GIT_CONFIG_VALUE_%d=", base),
-		fmt.Sprintf("GIT_CONFIG_KEY_%d=credential.helper", base+1),
-		fmt.Sprintf("GIT_CONFIG_VALUE_%d=%s", base+1, GitTokenCredentialHelper),
-	}
-}
+// Host-side git clones (runGitClone, util.CloneSharedWorkspace) authenticate
+// through util.ScopedCredentialHelperEnv, a credential helper scoped to the
+// clone URL's host, never an unscoped helper or a token embedded in the URL.
+// GitTokenCredentialHelper above remains only for the in-container agent
+// (sciontool init), which authenticates its own clone.
 
 // cloneError builds the error for a failed clone of rawURL. git's output is
 // stripped of the URL's credentials before it is included.
@@ -2930,8 +3072,9 @@ func cloneError(rawURL, output string, runErr error, withToken bool, token strin
 
 // redactCloneURL returns rawURL without userinfo, query string or fragment,
 // any of which can carry a token. For an scp-style URL ("user@host:path")
-// the user is dropped and host and path are kept. An unparseable URL is
-// never echoed.
+// the user is dropped and host and path are kept. A URL that does not
+// parse, or holds an '@' the shared user info rule cannot place
+// (urlredact.HostAndPath), is never echoed.
 func redactCloneURL(rawURL string) string {
 	if !strings.Contains(rawURL, "://") {
 		// scp-style "user@host:path", or a local path: keep host and path,
@@ -2943,13 +3086,10 @@ func redactCloneURL(rawURL string) string {
 			return rawURL
 		}
 	}
-	u, err := url.Parse(rawURL)
-	if err != nil {
+	u, ok := urlredact.HostAndPath(rawURL)
+	if !ok {
 		return "<unparseable clone URL>"
 	}
-	u.User = nil
-	u.RawQuery = ""
-	u.Fragment = ""
 	return u.String()
 }
 
@@ -2970,26 +3110,14 @@ func scpUserEnd(rawURL string) int {
 }
 
 // sanitizeCloneOutput removes rawURL's credentials, query string and
-// fragment from text (git's own output can echo the URL).
+// fragment from text (git's own output can echo the URL), by the shared
+// rule (urlredact.RedactURLIn): every rendering of rawURL is shown as
+// redactCloneURL shows it.
 func sanitizeCloneOutput(text, rawURL string) string {
 	if rawURL == "" || text == "" {
 		return text
 	}
-	out := strings.ReplaceAll(text, rawURL, redactCloneURL(rawURL))
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return out
-	}
-	if u.User != nil && u.User.String() != "" {
-		out = strings.ReplaceAll(out, u.User.String()+"@", "")
-	}
-	if u.RawQuery != "" {
-		out = strings.ReplaceAll(out, "?"+u.RawQuery, "")
-	}
-	if u.Fragment != "" {
-		out = strings.ReplaceAll(out, "#"+u.Fragment, "")
-	}
-	return out
+	return urlredact.RedactURLIn(text, rawURL, redactCloneURL(rawURL), urlredact.Mask)
 }
 
 // moveDirContentsUp moves every entry from src into dest, leaving src with
@@ -3188,7 +3316,7 @@ func IsRealWorktreeDir(path, base string) bool {
 		return false
 	}
 
-	data, err := os.ReadFile(gitFile)
+	data, err := readSmallFileNoFollow(gitFile, gitPointerMaxBytes)
 	if err != nil {
 		return false
 	}
@@ -3622,7 +3750,7 @@ func mountedDisplayPath(in ProvisionInput, path string) string {
 // error status means the name is invalid; git failing to start or to be
 // waited on is returned as an error running git.
 func checkBranchName(ctx context.Context, base, name string) error {
-	out, err := exec.CommandContext(ctx, "git", "-C", base, "check-ref-format", "--branch", name).Output()
+	out, err := exec.CommandContext(ctx, "git", append(util.HostGitArgs(), "-C", base, "check-ref-format", "--branch", name)...).Output()
 	var exitErr *exec.ExitError
 	switch {
 	case errors.As(err, &exitErr):
@@ -3650,7 +3778,10 @@ const (
 // is false unless that directory is a real directory directly inside
 // <base>/.git/worktrees.
 func worktreeAdminDir(path, base string) (dir string, ok bool) {
-	data, err := os.ReadFile(filepath.Join(path, ".git"))
+	// The .git file is read without following a symlink and bounded: a
+	// worktree's .git is a regular file git writes (IsRealWorktreeDir
+	// refuses a symlinked one too).
+	data, err := readSmallFileNoFollow(filepath.Join(path, ".git"), gitPointerMaxBytes)
 	if err != nil {
 		return "", false
 	}
@@ -3681,7 +3812,7 @@ func linkedWorktreeState(base, path string) linkedWorktreeKind {
 	if !ok {
 		return linkedWorktreeNoAdmin
 	}
-	data, err := os.ReadFile(filepath.Join(admin, "gitdir"))
+	data, err := readSmallFileNoFollow(filepath.Join(admin, "gitdir"), gitPointerMaxBytes)
 	if err != nil {
 		return linkedWorktreeMismatch
 	}
@@ -3750,11 +3881,10 @@ func startBranch(base, path string) string {
 	if !ok {
 		return ""
 	}
-	file := filepath.Join(admin, startBranchFile)
-	if fi, err := os.Lstat(file); err != nil || !fi.Mode().IsRegular() {
-		return ""
-	}
-	data, err := os.ReadFile(file)
+	// The record is read without following a symlink, as a regular file of
+	// at most gitPointerMaxBytes (the shared .git is agent-writable); a
+	// missing, symlinked, non-regular or over-cap record reads as none.
+	data, err := readSmallFileNoFollow(filepath.Join(admin, startBranchFile), gitPointerMaxBytes)
 	if err != nil {
 		return ""
 	}
@@ -3807,7 +3937,7 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 // currentBranch returns the branch checked out in the repository at
 // repoDir, or "" when HEAD is detached or cannot be read.
 func currentBranch(ctx context.Context, repoDir string) string {
-	out, err := exec.CommandContext(ctx, "git", "-C", repoDir, "symbolic-ref", "--quiet", "--short", "HEAD").Output()
+	out, err := exec.CommandContext(ctx, "git", append(util.HostGitArgs(), "-C", repoDir, "symbolic-ref", "--quiet", "--short", "HEAD")...).Output()
 	if err != nil {
 		return ""
 	}
@@ -3934,8 +4064,14 @@ func worktreeRegisteredAt(ctx context.Context, repoDir, path string) (bool, erro
 // Any failing step returns an error that names the path and what to do,
 // depending on the state the step left behind.
 func clearOwnStaleWorktreeEntry(ctx context.Context, in ProvisionInput, base, worktreePath string) error {
+	// util.RemoveWorktreeEntry runs the command itself, after the worktree
+	// directory is gone; the SafeGitCommand settings and pin stay on it.
 	gitCmd := func(ctx context.Context, args ...string) (*exec.Cmd, error) {
-		return SafeGitCommand(ctx, base, args...)
+		cmd, err := SafeGitCommand(ctx, base, args...)
+		if err != nil {
+			return nil, err
+		}
+		return cmd.Cmd, nil
 	}
 	fi, err := os.Lstat(worktreePath)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -3951,7 +4087,7 @@ func clearOwnStaleWorktreeEntry(ctx context.Context, in ProvisionInput, base, wo
 	if err != nil || !registered {
 		return nil
 	}
-	st, ok := fi.Sys().(*syscall.Stat_t)
+	uid, gid, ok := fileOwner(fi)
 	if !ok {
 		return staleEntryError(in, worktreePath, staleEntryDirKept, fmt.Errorf("cannot read the owner of %s", worktreePath))
 	}
@@ -3960,12 +4096,12 @@ func clearOwnStaleWorktreeEntry(ctx context.Context, in ProvisionInput, base, wo
 	}
 	mode := fi.Mode() & (fs.ModePerm | fs.ModeSetgid | fs.ModeSticky)
 	if err := util.RemoveWorktreeEntry(ctx, worktreePath, gitCmd); err != nil {
-		if mkErr := recreateEmptyDir(worktreePath, mode, int(st.Uid), int(st.Gid)); mkErr != nil {
+		if mkErr := recreateEmptyDir(worktreePath, mode, int(uid), int(gid)); mkErr != nil {
 			err = errors.Join(err, mkErr)
 		}
 		return staleEntryError(in, worktreePath, staleEntryDirKept, err)
 	}
-	if err := recreateEmptyDir(worktreePath, mode, int(st.Uid), int(st.Gid)); err != nil {
+	if err := recreateEmptyDir(worktreePath, mode, int(uid), int(gid)); err != nil {
 		return staleEntryError(in, worktreePath, staleEntryDirNotRecreated, err)
 	}
 	slog.Info("ProvisionShared: removed a stale git entry for the agent's empty worktree directory",
@@ -4012,14 +4148,17 @@ func staleEntryError(in ProvisionInput, path string, state staleEntryState, err 
 }
 
 // recreateEmptyDir creates dir with mode and owner. The mode is applied
-// after the owner, since changing the owner can clear setgid. A variable
-// so tests can make it fail.
+// after the owner, since changing the owner can clear setgid. A chown that
+// fails with EPERM while dir already has the owner uid:gid (a squashing NFS
+// export) is not a failure. A variable so tests can make it fail.
 var recreateEmptyDir = func(dir string, mode os.FileMode, uid, gid int) error {
 	if err := os.Mkdir(dir, mode.Perm()); err != nil {
 		return err
 	}
-	if err := os.Lchown(dir, uid, gid); err != nil {
-		return err
+	if err := lchownFile(dir, uid, gid); err != nil {
+		if cerr := checkChownEPERM(dir, uid, gid, err); cerr != nil {
+			return cerr
+		}
 	}
 	return os.Chmod(dir, mode)
 }
@@ -4124,9 +4263,32 @@ func appendGitExclude(hostPath, pattern string) error {
 		return err
 	}
 	defer func() { _ = f.Close() }()
-	data, err := io.ReadAll(io.NewSectionReader(f, 0, 1<<62))
+	data, err := readBoundedFile(f, gitExcludeMaxBytes)
+	if errors.Is(err, errFileTooLarge) {
+		// The file is agent-writable. An over-cap file is not read: the
+		// duplicate check is skipped and the pattern is appended anyway (a
+		// repeated exclude line is harmless), after a newline when the
+		// file's last byte is not one, so the exclude is never lost.
+		slog.Warn("git exclude file above the read cap; appending the pattern without the duplicate check",
+			"path", f.Name(), "pattern", pattern, "error", err)
+		fi, serr := f.Stat()
+		if serr != nil {
+			return fmt.Errorf("stat %s: %w", f.Name(), serr)
+		}
+		last := make([]byte, 1)
+		if _, rerr := f.ReadAt(last, fi.Size()-1); rerr != nil {
+			return fmt.Errorf("read %s: %w", f.Name(), rerr)
+		}
+		if last[0] != '\n' {
+			if _, werr := f.WriteString("\n"); werr != nil {
+				return werr
+			}
+		}
+		_, err = f.WriteString(pattern + "\n")
+		return err
+	}
 	if err != nil {
-		return fmt.Errorf("read %s: %w", f.Name(), err)
+		return err
 	}
 	// Exact line match — strings.Contains would false-positive on e.g.
 	// "my-worktrees/" or "worktrees/agent-1" and skip appending the pattern.
@@ -4143,57 +4305,6 @@ func appendGitExclude(hostPath, pattern string) error {
 	}
 	_, err = f.WriteString(pattern + "\n")
 	return err
-}
-
-// openGitExclude opens hostPath/.git/info/exclude for reading and appending
-// without following a symlink at .git, info or exclude: each component is
-// opened with openat relative to its parent's descriptor and O_NOFOLLOW, so
-// none of them can be redirected by a symlink, or swapped for one between
-// a check and the open. info is created if missing; exclude is created if
-// missing and must be a regular file (O_NONBLOCK keeps a FIFO planted there
-// from blocking the open; it is then refused).
-func openGitExclude(hostPath string) (*os.File, error) {
-	const dirFlags = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC
-	rootFd, err := unix.Open(hostPath, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
-	if err != nil {
-		return nil, fmt.Errorf("open %s: %w", hostPath, err)
-	}
-	defer func() { _ = unix.Close(rootFd) }()
-	gitDir := filepath.Join(hostPath, ".git")
-	gitFd, err := unix.Openat(rootFd, ".git", dirFlags, 0)
-	if err != nil {
-		return nil, fmt.Errorf("open %s without following symlinks: %w", gitDir, err)
-	}
-	defer func() { _ = unix.Close(gitFd) }()
-
-	infoDir := filepath.Join(gitDir, "info")
-	infoFd, err := unix.Openat(gitFd, "info", dirFlags, 0)
-	if errors.Is(err, unix.ENOENT) {
-		if mkErr := unix.Mkdirat(gitFd, "info", 0o755); mkErr != nil && !errors.Is(mkErr, unix.EEXIST) {
-			return nil, fmt.Errorf("mkdir %s: %w", infoDir, mkErr)
-		}
-		infoFd, err = unix.Openat(gitFd, "info", dirFlags, 0)
-	}
-	if err != nil {
-		return nil, fmt.Errorf("open %s without following symlinks: %w", infoDir, err)
-	}
-	defer func() { _ = unix.Close(infoFd) }()
-
-	excludePath := filepath.Join(infoDir, "exclude")
-	fd, err := unix.Openat(infoFd, "exclude", unix.O_RDWR|unix.O_APPEND|unix.O_CREAT|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0o644)
-	if err != nil {
-		return nil, fmt.Errorf("open %s without following symlinks: %w", excludePath, err)
-	}
-	var st unix.Stat_t
-	if err := unix.Fstat(fd, &st); err != nil {
-		_ = unix.Close(fd)
-		return nil, fmt.Errorf("stat %s: %w", excludePath, err)
-	}
-	if st.Mode&unix.S_IFMT != unix.S_IFREG {
-		_ = unix.Close(fd)
-		return nil, fmt.Errorf("%s is not a regular file", excludePath)
-	}
-	return os.NewFile(uintptr(fd), excludePath), nil
 }
 
 // sanitizeBranchName produces a git-safe branch name from an agent name.
@@ -4251,10 +4362,10 @@ func chownTarget(hostPath string) string {
 //     mounted shared dir) must have its REFERENT left alone — only the link
 //     itself is re-owned. os.Lchown is exactly that operation, with no
 //     dependency on a particular chown binary's own flag support.
-//   - lockDir, when non-empty, is the SAME directory the file-lock fallback
-//     above publishes its lock into (see resolveSentinelDir and the k8s
-//     init container's SentinelDir, which has no other directory available
-//     to it in that mount) — so when projectRoot IS that directory, a plain
+//   - lockDir, when non-empty, is the SAME directory the provisioning file
+//     lock is published into (the sentinel directory, see
+//     resolveSentinelDir: the project root by default, which is the chown
+//     root on the broker's host-side flow) — so when projectRoot IS that directory, a plain
 //     recursive chown walking the whole tree would also walk the lock's own
 //     live directory, its staging and evicted-generation entries, and its
 //     clock-probe files — every one of them transient bookkeeping a
@@ -4311,8 +4422,7 @@ func chownProjectTree(ctx context.Context, projectRoot, lockDir string, uid, gid
 
 // chownProjectTreeExcluding is chownProjectTree with several lock
 // directories (empty entries are ignored): the lock artifacts directly in
-// any of them are skipped. ProvisionShared passes both the sentinel
-// directory and the legacy lock directory (ProvisionInput.LegacyDir).
+// any of them are skipped.
 func chownProjectTreeExcluding(ctx context.Context, projectRoot string, lockDirs []string, uid, gid int) error {
 	if err := fsutil.CheckRoot(projectRoot); err != nil {
 		return fmt.Errorf("recursive chown %s to %d:%d: %w", projectRoot, uid, gid, err)
@@ -4377,18 +4487,18 @@ func checkChownEPERM(path string, uid, gid int, lerr error) error {
 	if serr != nil {
 		return fmt.Errorf("lchown %d:%d %s: %w (stat for owner check failed: %v)", uid, gid, path, lerr, serr)
 	}
-	st, ok := info.Sys().(*syscall.Stat_t)
+	ownerUID, ownerGID, ok := fileOwner(info)
 	if !ok {
 		return fmt.Errorf("lchown %d:%d %s: %w (owner unknown)", uid, gid, path, lerr)
 	}
 	// -1 means "leave unchanged" to lchown, so it matches any on-disk ID.
-	if (uid == -1 || int(st.Uid) == uid) && (gid == -1 || int(st.Gid) == gid) {
+	if (uid == -1 || int(ownerUID) == uid) && (gid == -1 || int(ownerGID) == gid) {
 		slog.Debug("chown not permitted but ownership already matches, continuing",
 			"path", path, "uid", uid, "gid", gid)
 		return nil
 	}
 	return fmt.Errorf("lchown %d:%d %s: %w (owner is %d:%d, want %d:%d)",
-		uid, gid, path, lerr, st.Uid, st.Gid, uid, gid)
+		uid, gid, path, lerr, ownerUID, ownerGID, uid, gid)
 }
 
 // isLockArtifactPath reports whether path's base name is the file lock's own
@@ -4421,6 +4531,19 @@ func resolveUID(in ProvisionInput) int {
 // resolveGID returns the NFS GID to use for chown, defaulting to 1000.
 func resolveGID(in ProvisionInput) int {
 	return DefaultOwnerID(in.NFSGID)
+}
+
+// MarkProvisioned writes the provisioning sentinel in sentinelDir (the
+// project state directory, ProjectStateDir, for a shared workspace), so
+// every later provisioner takes the reuse path. The caller holds the
+// provisioning locks (WithWorkspaceProvisionLocks) and has placed the
+// workspace's content first: a broker applying a workspace bootstrap upload
+// into a shared workspace that no provisioner has populated yet.
+func MarkProvisioned(sentinelDir string) error {
+	if sentinelDir == "" || !filepath.IsAbs(sentinelDir) {
+		return errors.New("provision: an absolute sentinel directory is required")
+	}
+	return writeSentinel(filepath.Join(sentinelDir, ProvisionSentinelFile))
 }
 
 // writeSentinel writes the provisioning sentinel file atomically using

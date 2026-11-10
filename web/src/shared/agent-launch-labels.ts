@@ -17,8 +17,9 @@
 /**
  * Display labels for async launch steps and failure codes (design wave 3
  * §3 E-e, ptone/scion#4670). The keys are the wire values in
- * pkg/api/launch_codes.go, plus the broker codes skill_resolution_failed and
- * harness_config_unusable, which also reach launch.error. The CLI
+ * pkg/api/launch_codes.go, plus the broker codes skill_resolution_failed,
+ * harness_config_unusable and storage_migration_required, which also reach
+ * launch.error. The CLI
  * (cmd/launch_wait.go) uses the same wording, so change both together.
  *
  * Labels are lower case with no final period, so they read inside a
@@ -66,15 +67,21 @@ export const LAUNCH_CODE_LABELS: Readonly<Record<string, string>> = {
   harness_config_unusable: 'the harness config cannot be used',
   agent_state_unavailable: "the agent's state on the broker is unavailable",
   agent_state_conflict: "the agent's state on the broker cannot be used",
+  project_path_not_initialized:
+    'the project path on the runtime broker is not initialized as a project',
+  git_config_refused: "the repository's git config sets keys agents may not be given",
   skill_resolution_failed: 'a required skill could not be resolved',
+  storage_migration_required: "the agent's storage settings must be migrated first",
   image_pull_failed: 'the agent image could not be pulled',
   invalid_image: 'the agent image reference is not valid',
   container_config: 'the agent container could not be configured',
   crash_loop: 'the agent container keeps crashing on start',
   init_container_failed: 'an init container of the agent pod failed',
+  volume_mount_failed: 'an agent volume could not be mounted',
   unschedulable: 'the agent pod cannot be scheduled',
   pod_disrupted: 'the agent pod was preempted, evicted or deleted while starting',
   broker_restarted: 'the runtime broker restarted during the launch',
+  dispatch_failed: 'the runtime broker did not accept the launch',
 };
 
 function fallbackLabel(key: string): string {

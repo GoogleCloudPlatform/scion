@@ -344,3 +344,36 @@ func pollEventText(t *testing.T, ev *state.TaskEvent) string {
 	}
 	return strings.Join(text, "\n")
 }
+
+// TestReplyWaitKey_SameCallerOnly: the same-caller check refuses a second
+// waiting call only for the same principal and agent. Two users calling the
+// same agent, and a user and a call without a caller, wait side by side.
+func TestReplyWaitKey_SameCallerOnly(t *testing.T) {
+	const admin = "admin-user-id"
+	alice := &CallerIdentity{UserID: "alice-id"}
+	bob := &CallerIdentity{UserID: "bob-id"}
+
+	b := &Bridge{}
+	if !b.acquireReplyWait(replyWaitKey(alice, admin, pollTestAgentID)) {
+		t.Fatalf("first call by alice was refused")
+	}
+	if b.acquireReplyWait(replyWaitKey(&CallerIdentity{UserID: "alice-id"}, admin, pollTestAgentID)) {
+		t.Fatalf("second concurrent call by alice to the same agent was admitted")
+	}
+	if !b.acquireReplyWait(replyWaitKey(bob, admin, pollTestAgentID)) {
+		t.Fatalf("bob's call was refused while alice's call to the same agent waits")
+	}
+	if !b.acquireReplyWait(replyWaitKey(nil, admin, pollTestAgentID)) {
+		t.Fatalf("a call without a caller was refused while user calls to the same agent wait")
+	}
+	if b.acquireReplyWait(replyWaitKey(nil, admin, pollTestAgentID)) {
+		t.Fatalf("a second concurrent call without a caller to the same agent was admitted")
+	}
+	if !b.acquireReplyWait(replyWaitKey(alice, admin, "agent-uuid-2")) {
+		t.Fatalf("alice's call to another agent was refused")
+	}
+	b.releaseReplyWait(replyWaitKey(alice, admin, pollTestAgentID))
+	if !b.acquireReplyWait(replyWaitKey(alice, admin, pollTestAgentID)) {
+		t.Fatalf("alice's call was refused after her earlier call ended")
+	}
+}

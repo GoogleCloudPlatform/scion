@@ -22,6 +22,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
@@ -44,7 +45,7 @@ func newPrefixedInstance(id string) *prefixedInstance {
 	return &prefixedInstance{
 		id:     id,
 		prefix: "/instances/" + id,
-		srv:    New(cfg, &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}),
+		srv:    New(cfg, &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{}),
 	}
 }
 

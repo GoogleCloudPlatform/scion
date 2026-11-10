@@ -184,8 +184,8 @@ func TestSyncsHubProjectWorkspace(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := syncsHubProjectWorkspace(tc.project); got != tc.want {
-				t.Errorf("syncsHubProjectWorkspace = %v, want %v", got, tc.want)
+			if got := mountsHubProjectWorkspace(tc.project); got != tc.want {
+				t.Errorf("mountsHubProjectWorkspace = %v, want %v", got, tc.want)
 			}
 		})
 	}

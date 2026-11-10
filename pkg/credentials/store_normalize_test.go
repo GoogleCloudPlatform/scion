@@ -16,7 +16,6 @@ package credentials
 
 import (
 	"encoding/json"
-	"os"
 	"path/filepath"
 	"sort"
 	"testing"
@@ -46,9 +45,7 @@ func writeRawCredentials(t *testing.T, path string, tokens map[string]string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, data, FileMode); err != nil {
-		t.Fatal(err)
-	}
+	writePrivateFixture(t, path, data)
 }
 
 func storedKeys(t *testing.T, path string) []string {
@@ -149,9 +146,7 @@ func TestCredentialsFileWithoutHubs(t *testing.T) {
 	for _, content := range []string{`{"version":1}`, `{"version":1,"hubs":null}`} {
 		t.Run(content, func(t *testing.T) {
 			path := useTempCredentials(t)
-			if err := os.WriteFile(path, []byte(content), FileMode); err != nil {
-				t.Fatal(err)
-			}
+			writePrivateFixture(t, path, []byte(content))
 			if _, err := Load("https://hub.example.com"); err != ErrNotAuthenticated {
 				t.Fatalf("Load = %v, want ErrNotAuthenticated", err)
 			}

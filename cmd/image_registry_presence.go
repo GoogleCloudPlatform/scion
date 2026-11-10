@@ -59,17 +59,29 @@ func maintenanceOnlyRegistrySet() bool {
 
 // brokerRegistryMissingError is the error of a broker start with no image
 // registry. It is used by the standalone broker and by hosted servers, which
-// have no setup wizard, so it does not mention one.
+// have no setup wizard, so it does not mention one. It names both the
+// setting and the env var, and how to set the env var for an interactive
+// run (an export) and for a service (its environment file), where an export
+// in a shell has no effect (ptone/scion#7183).
 func brokerRegistryMissingError() error {
 	msg := "image_registry is not configured, but the runtime broker requires it.\n\n" +
 		"The runtime broker pulls container images to run agents. Without a registry,\n" +
-		"image pulls will fail. To fix this:\n\n" +
-		"  Option 1: scion config set --global image_registry <your-registry>\n" +
-		"  Option 2: export SCION_IMAGE_REGISTRY=<your-registry>\n\n"
+		"image pulls will fail. To fix this, set one of:\n\n" +
+		"  Option 1: image_registry in settings.yaml, for example with\n" +
+		"            scion config set --global image_registry <your-registry>\n" +
+		"  Option 2: the " + config.EnvImageRegistry + " environment variable: in a shell,\n" +
+		"            export " + config.EnvImageRegistry + "=<your-registry>; for a service, add\n" +
+		"            " + config.EnvImageRegistry + "=<your-registry> to its environment file\n" +
+		"            (such as hub.env for a hub run by systemd)\n\n" +
+		"For images in this host's local image store, use localhost/scion.\n" +
+		"Then start or restart the server or broker.\n\n"
 	if maintenanceOnlyRegistrySet() {
 		msg += maintenanceRegistryOnlyNote + ".\n\n"
 	}
-	msg += "See image-build/README.md for instructions on building and pushing images"
+	msg += "See image-build/README.md for instructions on building and pushing images.\n" +
+		"For images that match a release, run image-build/scripts/build-release-images.sh <version>\n" +
+		"(image-build/README.md#build-images-for-a-release); a release build of scion pulls the images\n" +
+		"tagged with its own version unless image_tag is set (image_tag: latest opts out)"
 	return errors.New(msg)
 }
 

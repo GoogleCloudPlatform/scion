@@ -45,6 +45,8 @@ func sanitizeCrossProjectObserver(msg *messages.StructuredMessage) {
 	msg.Msg = ""
 	msg.Attachments = nil
 	msg.ArtifactRefsAdmitted = false
+	msg.AttachmentDeliveries = nil
+	msg.AttachmentPlan = nil
 	if msg.Metadata != nil {
 		sanitized := make(map[string]string, len(msg.Metadata))
 		for k, v := range msg.Metadata {
@@ -67,6 +69,14 @@ type OutboundMessageRequest struct {
 	Channel     string            `json:"channel,omitempty"`
 	ThreadID    string            `json:"thread_id,omitempty"`
 	Metadata    map[string]string `json:"metadata,omitempty"`
+
+	// AttachmentIDs names attachments stored as artifacts that the sending
+	// agent uploaded (POST /api/v1/chat/attachments), by id
+	// (ptone/scion#4596). They are bound to the stored message and
+	// delivered to agent recipients. Attachments keeps meaning hub-local
+	// paths.
+	AttachmentIDs []string `json:"attachment_ids,omitempty"`
+
 	// ConversationID is an explicit conversation assertion from the caller.
 	// When set, the hub authorizes the agent for this conversation and
 	// persists the message into it, bypassing the DeriveConversationKey
@@ -84,6 +94,16 @@ type OutboundMessageRequest struct {
 	// message delivery (#1691). Only meaningful for agent-to-agent DMs;
 	// ignored for user and group recipients (zero resumes invoked).
 	Wake bool `json:"wake,omitempty"`
+
+	// Choices makes the message a choice prompt: one or more decisions
+	// for a user or a conversation (design choices v4, 4.3). Gated by the
+	// web.chat_choices experiment; the hub validates and normalizes them,
+	// stores them with the message, and renders Msg (the optional intro)
+	// followed by a markdown fallback of the decisions.
+	Choices []messages.DecisionInput `json:"choices,omitempty"`
+	// ChoicesUpdate allows Choices to replace decisions whose keys already
+	// exist (a new version each). Valid only with Choices.
+	ChoicesUpdate bool `json:"choices_update,omitempty"`
 
 	// This outbound path never accepted a raw field. A "raw" member in the
 	// request body is an unknown field and is ignored by JSON decoding; it
@@ -1128,6 +1148,18 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	// choice-prompt and choice-response are minted by the hub only.
+	if rejectHubMintedType(w, req.Type) {
+		return
+	}
+	choiceSend, ok := s.prepareChoicePromptSend(w, &req)
+	if !ok {
+		return
+	}
+	if choiceSend != nil {
+		req.Type = messages.TypeChoicePrompt
+	}
+
 	if req.Type == "" {
 		req.Type = "input-needed"
 	}
@@ -1141,7 +1173,8 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	if req.Msg == "" {
+	// With choices the body is the optional intro above the decisions.
+	if req.Msg == "" && choiceSend == nil {
 		ValidationError(w, "msg is required", nil)
 		return
 	}
@@ -1153,6 +1186,10 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	// (agent DM, mention fan-out, human mentions, the stored row) sees the
 	// same body.
 	req.Msg = rewriteIncomingAgentMentions(req.Msg)
+	if choiceSend != nil {
+		// The intro is the body after that rewrite, as the stored row is.
+		choiceSend.intro = req.Msg
+	}
 
 	// Validate DM key format when the thread_id looks like a DM key.
 	// Non-DM thread IDs (topic UUIDs, etc.) pass through as-is.
@@ -1206,6 +1243,32 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		}
 	}
 
+	// A choice prompt is for humans: a recipient that routing resolved to
+	// an agent (an agent DM, or a conversation that is one) is refused.
+	if choiceSend != nil && (outboundTargetAgentID != "" || result.DeliveryPath == deliveryAgentDM) {
+		ValidationError(w, "choices can be sent only to a user or a conversation, not to an agent",
+			map[string]interface{}{"field": "recipient"})
+		return
+	}
+
+	// Attachments stored as artifacts named by id (ptone/scion#4596): the
+	// sender must be an agent that may send; the ids must be its own unsent
+	// uploads; a send that can reach an agent (target, group post or agent
+	// mention) must fit the delivery budget.
+	ctx = withStandingMemo(ctx)
+	reachesAgents := len(req.AttachmentIDs) > 0 && s.agentSendReachesAgents(ctx, agent, outboundTargetAgentID != "",
+		result.ConvResult != nil && result.ConvResult.Kind == "group", req.Msg)
+	artifactAttachments, attachmentMsg, mayAttach := s.validateAgentSendAttachments(ctx, agentIdent, agent,
+		req.AttachmentIDs, req.Attachments, reachesAgents, "outbound-message")
+	if !mayAttach {
+		Forbidden(w)
+		return
+	}
+	if attachmentMsg != "" {
+		ValidationError(w, attachmentMsg, nil)
+		return
+	}
+
 	if outboundTargetAgentID != "" {
 		// Re-read the target agent to get its current mode. The record
 		// from S5 may come from the same request, but using the fresh
@@ -1227,6 +1290,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 			Type:           req.Type,
 			Urgent:         req.Urgent,
 			Attachments:    req.Attachments,
+			AttachRefs:     artifactAttachments,
 			Metadata:       stripClientAttachmentRefs(req.Metadata),
 			ConversationID: result.ConversationID,
 			ConvResult:     result.ConvResult,
@@ -1253,13 +1317,14 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		// conversation, which is never reused for a mention regardless of
 		// verification, so there is nothing to pass.
 		mentionResults := s.fanOutAgentMentions(ctx, agentMentionFanoutInput{
-			Sender:          agent,
-			SenderIdent:     agentIdent,
-			Primary:         freshTarget,
-			Msg:             req.Msg,
-			Type:            req.Type,
-			ParentMessageID: dmResult.MessageID,
-			Channel:         result.Channel,
+			Sender:            agent,
+			SenderIdent:       agentIdent,
+			Primary:           freshTarget,
+			Msg:               req.Msg,
+			Type:              req.Type,
+			ParentMessageID:   dmResult.MessageID,
+			ParentAttachments: dmResult.BoundAttachments,
+			Channel:           result.Channel,
 		})
 		WriteAgentDMResult(w, dmResult, mentionResults)
 		return
@@ -1399,10 +1464,24 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	// and artifacts, and emits the SSE event. It does not dispatch to
 	// channel spokes. Every store and publish call uses storeCtx, so the
 	// caller decides whether request cancellation can cut it short.
+	var boundAttachments []AttachmentRef
+	// stampWatermarks, set on the broker path for a message the handler
+	// stores itself (decision D2), runs the watermark steps of
+	// deliverToUser before the SSE publish.
+	var stampWatermarks func(context.Context, *store.Message)
 	storeOutboundRow := func(storeCtx context.Context) error {
-		if err := s.store.CreateMessage(storeCtx, storeMsg); err != nil {
+		if choiceSend != nil {
+			// The message and its decisions in one transaction.
+			if err := s.storeChoicePrompt(storeCtx, choiceSend, agent, storeMsg, structuredMsg); err != nil {
+				return err
+			}
+		} else if err := s.store.CreateMessage(storeCtx, storeMsg); err != nil {
 			return err
 		}
+		// Attachments stored as artifacts are bound now that the row exists
+		// (ptone/scion#4596); one that cannot be bound is left out.
+		boundAttachments = s.bindChatAttachments(storeCtx, artifacts.PrincipalKindAgent, agent.ID, storeMsg.ID,
+			s.bindProject(storeCtx, storeMsg, artifactAttachments), artifactAttachments)
 		// Record mention rows before publish: clients refetch the thread
 		// list and its mention dots on the SSE event.
 		s.recordHumanMentions(storeCtx, req.ThreadID, storeMsg.ID, mentionedHumans)
@@ -1413,8 +1492,17 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		s.mu.RUnlock()
 		linkAttachmentRefs(storeCtx, wcs, storeMsg.ID, attachmentRefs, s.messageLog)
 		recordedRefs := s.recordMessageArtifacts(storeCtx, storeMsg.ID, outboundArtifactRefs)
-		s.events.PublishUserMessage(storeCtx, storeMsg, attachmentRefs, recordedRefs)
-		s.fanOutThreadMessageToMembersAsync(storeCtx, storeMsg, attachmentRefs, recordedRefs)
+		if stampWatermarks != nil {
+			stampWatermarks(storeCtx, storeMsg)
+		}
+		publishRefs := append(append([]AttachmentRef(nil), attachmentRefs...), boundAttachments...)
+		var chatOpts []ChatEventOption
+		if choiceSend != nil {
+			// The chat events of a choice prompt carry its decisions.
+			chatOpts = append(chatOpts, withChoiceEvent(&choiceEventPayload{Prompt: s.choicePromptViewOf(storeCtx, storeMsg)}))
+		}
+		s.events.PublishUserMessage(storeCtx, storeMsg, publishRefs, recordedRefs, chatOpts...)
+		s.fanOutThreadMessageToMembersAsync(storeCtx, storeMsg, publishRefs, recordedRefs, chatOpts...)
 		return nil
 	}
 
@@ -1453,11 +1541,31 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	case deliveryUserBroker:
 		// Broker path: PublishUserMessage handles persistence and SSE.
 		if bp := s.GetMessageBrokerProxy(); bp != nil {
+			if len(artifactAttachments) > 0 || choiceSend != nil {
+				// A choice prompt is stored with its decisions by this
+				// handler, so it takes the same stored-first path.
+				// Decision D2 (ptone/scion#4596): a message that carries
+				// attachments stored as artifacts is stored by this handler,
+				// so they can be bound to the stored row; deliverToUser then
+				// runs only its post-persist steps (StoredMessageID).
+				stampWatermarks = bp.afterUserMessagePersisted
+				stored, logged := s.storeOutboundBeforeBroker(ctx, w, bp, agent, storeMsg, structuredMsg, storeOutboundRow)
+				if !stored {
+					return
+				}
+				recordLogged = logged
+				break
+			}
 			// Ensure the persisting user-message subscription first, as the
 			// notification path does: it is otherwise only created on agent
 			// lifecycle events.
 			persisting := bp.subscribeProjectUserMessages(agent.ProjectID)
 			recordLogged = persisting
+			// The persisting subscriber stores the row under the id and
+			// creation time already used for the receipt (message_id) and
+			// the published Timestamp.
+			structuredMsg.PersistMessageID = storeMsg.ID
+			structuredMsg.PersistCreatedAt = storeMsg.CreatedAt
 			err := bp.PublishUserMessage(ctx, agent.ProjectID, result.RecipientID, structuredMsg)
 			if errors.Is(err, eventbus.ErrReservedChannel) {
 				// Nothing was published or stored: the request named a
@@ -1526,6 +1634,9 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	case deliveryUserDirect:
 		// Direct path: persist, link attachments, publish SSE, dispatch to channels.
 		if err := storeOutboundRow(ctx); err != nil {
+			if writeChoiceStoreError(w, err) {
+				return
+			}
 			s.messageLog.Error("Failed to persist outbound message", "error", err)
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 				"Failed to persist message", nil)
@@ -1549,18 +1660,24 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	// caller's own free-text thread_id (Rules 2/3) is minted on demand, so
 	// its external_ref embeds whatever the caller chose to send; fan-out
 	// treats that the same as no group context at all.
-	mentionResults := s.fanOutAgentMentions(ctx, agentMentionFanoutInput{
-		Sender:             agent,
-		SenderIdent:        agentIdent,
-		Primary:            nil,
-		Msg:                originalMsgForMentions,
-		Type:               req.Type,
-		ParentConv:         result.ConvResult,
-		ParentConvVerified: result.Asserted,
-		ParentMessageID:    storeMsg.ID,
-		Channel:            result.Channel,
-		HumanMembers:       humanMembers,
-	})
+	//
+	// A choice prompt is addressed to humans and fans out to no agent.
+	var mentionResults []messages.MentionResult
+	if choiceSend == nil {
+		mentionResults = s.fanOutAgentMentions(ctx, agentMentionFanoutInput{
+			Sender:             agent,
+			SenderIdent:        agentIdent,
+			Primary:            nil,
+			Msg:                originalMsgForMentions,
+			Type:               req.Type,
+			ParentConv:         result.ConvResult,
+			ParentConvVerified: result.Asserted,
+			ParentMessageID:    storeMsg.ID,
+			ParentAttachments:  boundAttachments,
+			Channel:            result.Channel,
+			HumanMembers:       humanMembers,
+		})
+	}
 
 	// A group post that @mentions no agent goes to the conversation's
 	// default agent. The sender's agentGroupPostDecision already allowed
@@ -1569,16 +1686,17 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	// (group_message_mode.go).
 	isGroupPost := result.ConvResult != nil && result.ConvResult.Kind == "group"
 	var defaultAgentResult *messages.MentionResult
-	if isGroupPost {
+	if isGroupPost && choiceSend == nil {
 		defaultAgentResult = s.wakeGroupDefaultAgent(ctx, groupDefaultWakeInput{
-			Sender:          agent,
-			SenderIdent:     agentIdent,
-			Conv:            result.ConvResult,
-			Msg:             originalMsgForMentions,
-			Type:            req.Type,
-			MentionResults:  mentionResults,
-			ParentMessageID: storeMsg.ID,
-			Channel:         result.Channel,
+			Sender:            agent,
+			SenderIdent:       agentIdent,
+			Conv:              result.ConvResult,
+			Msg:               originalMsgForMentions,
+			Type:              req.Type,
+			MentionResults:    mentionResults,
+			ParentMessageID:   storeMsg.ID,
+			ParentAttachments: boundAttachments,
+			Channel:           result.Channel,
 		})
 	}
 
@@ -1641,6 +1759,9 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	if outboundArtifactWarning != "" {
 		respBody["artifact_warning"] = outboundArtifactWarning
 	}
+	if choiceSend != nil {
+		respBody["decisions"] = choiceDecisionResults(agent.ID, choiceSend.result)
+	}
 	writeJSON(w, http.StatusOK, respBody)
 }
 
@@ -1697,20 +1818,32 @@ func (s *Server) handleAgentGitHubTokenRefresh(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	if project.GitHubInstallationID == nil {
+	// Resolve the token source exactly as agent create does: the agent's
+	// own project, or a token-source project label only when the agent's
+	// source user is authorized for it. The mint below re-verifies the
+	// resolved project's installation association, so a refresh can never
+	// reach an installation a create would not.
+	mintProject := resolveGitHubMintProject(ctx, s.store, s, s.projectsLogger(), agent, project)
+	if mintProject == nil {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
 			"project has no GitHub App installation", nil)
 		return
 	}
 
-	token, expiry, err := s.MintGitHubAppTokenForProject(ctx, project)
+	token, expiry, err := s.MintGitHubAppTokenForProject(ctx, mintProject)
 	if err != nil {
 		// Classify the error to return an appropriate status code.
 		// Configuration errors (bad key, wrong app_id) are 502 (upstream auth failed),
 		// not 500 (our server is broken).
 		statusCode := http.StatusBadGateway
 		errCode := ErrCodeRuntimeError
+		// The client gets fixed text: the TokenMintError's Message is fixed
+		// per code; any other error answers a generic line. The error and
+		// GitHub's text are logged once, rendered, by mintGitHubAppToken,
+		// the choke point every mint passes (ptone/scion#7498).
+		message := "failed to mint GitHub token"
 		if mintErr, ok := err.(*githubapp.TokenMintError); ok {
+			message = "failed to mint GitHub token: " + mintErr.Message
 			switch mintErr.ErrorCode {
 			case githubapp.ErrCodePrivateKeyInvalid, githubapp.ErrCodeAppNotFound:
 				statusCode = http.StatusBadGateway
@@ -1723,8 +1856,7 @@ func (s *Server) handleAgentGitHubTokenRefresh(w http.ResponseWriter, r *http.Re
 				errCode = ErrCodeForbidden
 			}
 		}
-		writeError(w, statusCode, errCode,
-			"failed to mint GitHub token: "+err.Error(), nil)
+		writeError(w, statusCode, errCode, message, nil)
 		return
 	}
 
@@ -1793,6 +1925,16 @@ func (s *Server) restoreAgent(w http.ResponseWriter, r *http.Request, id string)
 				"cannot restore the agent: the user or agent it belongs to no longer exists", nil)
 			return
 		}
+		if errors.Is(err, errAgentOwnerUserDeleting) {
+			writeError(w, http.StatusConflict, ErrCodeConflict,
+				"cannot restore the agent: the user it belongs to is being deleted", nil)
+			return
+		}
+		if errors.Is(err, errAgentGuardUserLookup) {
+			slog.ErrorContext(ctx, "restore: guard user lookup failed", "agent_id", agent.ID, "error", err)
+			writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, "Could not verify the agent's owner; retry the restore", nil)
+			return
+		}
 		if errors.Is(err, errRestoreEdgeConflict) {
 			Conflict(w, "The agent already has an active delegation that conflicts with the one being restored")
 			return
@@ -1818,8 +1960,9 @@ func (s *Server) restoreAgent(w http.ResponseWriter, r *http.Request, id string)
 
 	// Answer with the same enriched shape as GET /agents/{id}, so the
 	// restored agent carries its deletion view (null) and project/broker
-	// names like every other agent response.
-	s.writeAgentGetResponse(w, r, agent)
+	// names like every other agent response. The restore has committed, so a
+	// TZ read error omits the timezone fields rather than answering 503.
+	s.writeAgentResponseAfterWrite(w, r, agent)
 }
 
 // MessageRequest is the request body for sending a message to an agent.
@@ -1847,6 +1990,12 @@ type MessageRequest struct {
 
 	// Wake resumes a suspended agent before delivering the message.
 	Wake bool `json:"wake,omitempty"`
+
+	// AttachmentIDs names attachments stored as artifacts that the sender
+	// uploaded, by id (ptone/scion#4596). They are bound to the stored
+	// message and delivered to the agent. StructuredMessage.Attachments
+	// keeps meaning hub-local paths. Refused on group sends.
+	AttachmentIDs []string `json:"attachment_ids,omitempty"`
 
 	// Mentions lists agent slugs to receive mention notifications (max 10).
 	// The primary recipient is automatically excluded from mention fan-out.
@@ -1881,6 +2030,26 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		}
 		if req.StructuredMessage != nil {
 			req.StructuredMessage.Timestamp = ""
+		}
+	}
+
+	// An agent delegated credential sends a direct text message to the
+	// route's own agent only (delegatedMessageRequestRefusal); every other
+	// field is refused before anything is looked up or written. The hub
+	// sets the timestamp.
+	if delegated := delegatedAgentIdentityFromContext(ctx); delegated != nil {
+		if field := delegatedMessageRequestRefusal(&req); field != "" {
+			ValidationError(w, field+" is not available to a delegated credential", map[string]interface{}{"field": field})
+			return
+		}
+		if req.StructuredMessage != nil {
+			req.StructuredMessage.Timestamp = ""
+		}
+		// A delegated send is an agent send: it is charged to the actor
+		// agent's send budget (AC-2), the same budget ExecuteAgentDM
+		// charges for the agent's own sends, before anything is written.
+		if !s.allowChatSend(w, delegated.ID(), chatSenderAgent) {
+			return
 		}
 	}
 
@@ -1924,6 +2093,8 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		if user := GetUserIdentityFromContext(ctx); user != nil {
 			structuredMsg.SenderID = user.ID()
 			structuredMsg.Sender = userSenderAddress(user)
+		} else if delegated := delegatedAgentIdentityFromContext(ctx); delegated != nil {
+			structuredMsg.Sender, structuredMsg.SenderID = s.delegatedSenderAddress(ctx, delegated)
 		} else if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
 			structuredMsg.SenderID = agentIdent.ID()
 			senderSlug := agentIdent.ID() // fallback to UUID
@@ -1936,6 +2107,10 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			structuredMsg.Sender = "agent:" + senderSlug
 		}
 		defaultInboundStructured(structuredMsg)
+		// choice-prompt and choice-response are minted by the hub only.
+		if rejectHubMintedType(w, structuredMsg.Type) {
+			return
+		}
 		messaging.RecordStep(ctx, "sender_identity_extracted")
 	} else if req.Message != "" {
 		plainMessage = req.Message
@@ -1946,6 +2121,8 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		if user := GetUserIdentityFromContext(ctx); user != nil {
 			senderID = user.ID()
 			sender = userSenderAddress(user)
+		} else if delegated := delegatedAgentIdentityFromContext(ctx); delegated != nil {
+			sender, senderID = s.delegatedSenderAddress(ctx, delegated)
 		} else if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
 			senderID = agentIdent.ID()
 			senderSlug := agentIdent.ID() // fallback to UUID
@@ -1995,6 +2172,12 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 
 	// Detect group[] recipient for multi-target fan-out.
 	if structuredMsg != nil && messages.IsGroupRecipient(structuredMsg.Recipient) {
+		// attachment_ids are not accepted on a hub group send
+		// (ptone/scion#4596): each attachment binds to one message.
+		if len(req.AttachmentIDs) > 0 {
+			ValidationError(w, "attachment_ids are not accepted on group sends; send to each recipient", nil)
+			return
+		}
 		s.handleGroupMessage(w, r, id, structuredMsg, plainMessage, req.Interrupt)
 		return
 	}
@@ -2006,6 +2189,75 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		return
 	}
 	messaging.RecordStep(ctx, "agent_loaded")
+
+	// A chat reference (surface and external_ref) resolves a conversation
+	// whose default agent is set to the recipient, so the recipient must be
+	// live. A soft-deleted recipient gets exactly this handler's answer for
+	// an unknown agent, before anything is dispatched or written.
+	if req.Surface != "" && req.ExternalRef != "" && (agent == nil || !agent.DeletedAt.IsZero()) {
+		writeErrorFromErr(w, store.ErrNotFound, "")
+		return
+	}
+
+	// Ownership check: verify the DM key IDs match the actual participants.
+	// The agent in the DM key must match the target agent; the user must match
+	// the AUTHENTICATED identity (not the client-supplied SenderID, which can
+	// be spoofed).
+	//
+	// parseDMKeyIDs's second slot is always semantically a USER (A25.7 R2):
+	// the authenticated principal must actually be a user, not merely have a
+	// UUID that happens to equal that slot's value — otherwise an agent
+	// sender can name its own UUID there and pass. See the commit history
+	// for the phantom-participant-row rationale.
+	if structuredMsg != nil && structuredMsg.ThreadID != "" &&
+		strings.HasPrefix(structuredMsg.ThreadID, "dm:") {
+		dmAgentID, dmUserID := parseDMKeyIDs(structuredMsg.ThreadID)
+		var authenticatedUserID string
+		isAuthenticatedUser := false
+		if user := GetUserIdentityFromContext(ctx); user != nil {
+			authenticatedUserID = user.ID()
+			isAuthenticatedUser = true
+		} else if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
+			authenticatedUserID = agentIdent.ID()
+		}
+		if !isAuthenticatedUser || dmAgentID != agent.ID || dmUserID != authenticatedUserID {
+			BadRequest(w, "DM thread_id does not match the sender and recipient")
+			return
+		}
+	}
+
+	// The sender of a post with no conversation_id is decided here, by the
+	// conversation key the request derives: after the recipient is loaded
+	// (its project decides) and after the DM key ownership check above, and
+	// before the wake, the phase answers, the broker availability answer, the
+	// chat integration reference and any row (decideKeyedPostSender).
+	if structuredMsg.ConversationID == "" && !s.decideKeyedPostSender(w, r, structuredMsg, agent) {
+		return
+	}
+
+	// Attachments stored as artifacts named by id (ptone/scion#4596): an
+	// agent sender must pass agentMaySend; a user sender must be one
+	// attachmentWriterKind admits. The ids must be the sender's own unsent
+	// uploads, and the send must fit the delivery budget (the recipient is
+	// an agent).
+	var attachRefs []AttachmentRef
+	if len(req.AttachmentIDs) > 0 {
+		ctx = withStandingMemo(ctx)
+		var paths []string
+		if structuredMsg != nil {
+			paths = structuredMsg.Attachments
+		}
+		refs, msg, ok := s.validateMessageAttachments(ctx, agent, req.AttachmentIDs, paths)
+		if !ok {
+			Forbidden(w)
+			return
+		}
+		if msg != "" {
+			ValidationError(w, msg, nil)
+			return
+		}
+		attachRefs = refs
+	}
 
 	// Old-CLI skew dedup gate. Placed here, before any conversation
 	// resolution runs, rather than immediately before ExecuteAgentDM, so a
@@ -2026,10 +2278,11 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusOK)
 				_ = json.NewEncoder(w).Encode(MessageDeliveryResponse{
-					MessageID:  existing.ID,
-					Status:     "deduplicated",
-					Agent:      agent.Slug,
-					AgentPhase: agent.Phase,
+					MessageID:      existing.ID,
+					Status:         "deduplicated",
+					Agent:          agent.Slug,
+					AgentPhase:     agent.Phase,
+					ConversationID: existing.ConversationID,
 				})
 				return
 			}
@@ -2142,6 +2395,22 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		ValidationError(w, "external_ref requires surface to be set", nil)
 		return
 	}
+
+	// A held target (ptone/scion#3433) is refused for a user send, with or
+	// without wake, with the refusal an agent send gets (ptone/scion#6859).
+	// It runs after request validation and the resume-permission check
+	// (the same order as an agent send on this route, whose hold check is
+	// in ExecuteAgentDM), and before conversation resolution, persistence
+	// and any wake, so a refused send writes and resumes nothing. Delegated
+	// sends get it in delegatedDeliveryRefusal. A migrating recipient is
+	// deferred, not refused (see the migration gate below).
+	if GetAgentIdentityFromContext(ctx) == nil && delegatedAgentIdentityFromContext(ctx) == nil && !reincarnationInFlight(agent) {
+		if dmErr := s.heldTargetRefusal(ctx, agent); dmErr != nil {
+			WriteAgentDMError(w, dmErr)
+			return
+		}
+	}
+
 	if req.Surface != "" && req.ExternalRef != "" {
 		var keyOpts []messaging.ConversationByKeyOption
 		keyOpts = append(keyOpts, messaging.WithSurface(req.Surface))
@@ -2181,33 +2450,6 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		}
 	}
 
-	// Ownership check: verify the DM key IDs match the actual participants.
-	// The agent in the DM key must match the target agent; the user must match
-	// the AUTHENTICATED identity (not the client-supplied SenderID, which can
-	// be spoofed).
-	//
-	// parseDMKeyIDs's second slot is always semantically a USER (A25.7 R2):
-	// the authenticated principal must actually be a user, not merely have a
-	// UUID that happens to equal that slot's value — otherwise an agent
-	// sender can name its own UUID there and pass. See the commit history
-	// for the phantom-participant-row rationale.
-	if structuredMsg != nil && structuredMsg.ThreadID != "" &&
-		strings.HasPrefix(structuredMsg.ThreadID, "dm:") {
-		dmAgentID, dmUserID := parseDMKeyIDs(structuredMsg.ThreadID)
-		var authenticatedUserID string
-		isAuthenticatedUser := false
-		if user := GetUserIdentityFromContext(ctx); user != nil {
-			authenticatedUserID = user.ID()
-			isAuthenticatedUser = true
-		} else if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
-			authenticatedUserID = agentIdent.ID()
-		}
-		if !isAuthenticatedUser || dmAgentID != agent.ID || dmUserID != authenticatedUserID {
-			BadRequest(w, "DM thread_id does not match the sender and recipient")
-			return
-		}
-	}
-
 	// Wake handling: if requested, resume a suspended agent before message delivery.
 	// For agent-to-agent DMs, wake is handled by ExecuteAgentDM after admission
 	// checks so that denied requests cannot resume an agent (#1691 AC-2).
@@ -2225,7 +2467,20 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	// migrating recipient, or when a wake finds another start in progress.
 	deferDelivery := reincarnationInFlight(agent)
 
-	if req.Wake && !senderIsAgent && !deferDelivery {
+	// A delegated send is an agent send: before anything is written, it
+	// gets the delivery checks ExecuteAgentDM applies to the actor agent's
+	// own send (dispatch availability, the target's hold and its phase),
+	// with the same refusals, in place of the user checks below. A
+	// delegated request never carries wake.
+	delegatedSender := delegatedAgentIdentityFromContext(ctx) != nil
+	if delegatedSender {
+		if dmErr := s.delegatedDeliveryRefusal(ctx, agent, deferDelivery); dmErr != nil {
+			WriteAgentDMError(w, dmErr)
+			return
+		}
+	}
+
+	if req.Wake && !senderIsAgent && !delegatedSender && !deferDelivery {
 		// The response waits on the resume and the readiness wait: extend
 		// this request's write deadline to cover them (ptone/scion#4178).
 		s.extendWriteDeadlineForDMWake(ctx, w)
@@ -2244,7 +2499,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 
 	// Reject messages to non-running agents when --wake is not set.
 	// For agent-to-agent DMs, phase validation is handled by ExecuteAgentDM.
-	if !req.Wake && !senderIsAgent && !deferDelivery {
+	if !req.Wake && !senderIsAgent && !delegatedSender && !deferDelivery {
 		switch state.Phase(agent.Phase) {
 		case state.PhaseRunning:
 			// OK — proceed to deliver
@@ -2312,8 +2567,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	// to "dispatched" (no new pending rows per delivery policy).
 	var persistedMsgID string
 	// persistedConversationID is the conversation the persisted message
-	// landed in; the response reports it to a project visitor only
-	// (visitorDeliveryConversation).
+	// landed in; the response reports it to every sender.
 	var persistedConversationID string
 	// artifactWarning reports artifact references not attached on the
 	// non-agent-sender path below (admitMessageArtifacts).
@@ -2381,10 +2635,13 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		storeMsg.RecipientProjectID = &recipientProjectID
 		// SenderProjectID is derived from the authenticated sender.
 		// For human senders, SenderProjectID remains nil (no project-level provenance).
-		if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
-			senderProjID := agentIdent.ProjectID()
+		// A delegated send is an agent-sender row too: the actor agent's
+		// project, like every other agent-to-agent row.
+		if senderProjID, ok := senderAgentProject(ctx); ok {
 			storeMsg.SenderProjectID = &senderProjID
 		}
+		// A delegated send also names the issuer and the grant.
+		stampDelegatedMessageAttribution(ctx, storeMsg)
 
 		// Phase 5 dual-write: resolve-or-create conversation for user/agent → agent messages.
 		// If the CLI already resolved a conversation_id (S4 conversation references),
@@ -2587,7 +2844,8 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			} else {
 				// An agent sender's message mode is checked before the
 				// thread conversation is resolved, so a refused post writes
-				// no row (group_message_mode.go).
+				// no row (group_message_mode.go). Every other sender of a
+				// thread post was decided by decideKeyedPostSender.
 				if kind == "group" && authKind == "agent" {
 					sender, ok := s.loadGroupPostSender(ctx, w, authID)
 					if !ok {
@@ -2689,11 +2947,17 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			Reason:     reason,
 		})
 		messaging.RecordStep(ctx, "divergence_logged")
-		// DEF-3: Independent consistency check against prior messages.
-		if consistent := messaging.CheckConversationConsistency(ctx, s.store, storeMsg.ID, convID, structuredMsg.ThreadID, structuredMsg.SenderID, agent.ID, s.messageLog); !consistent {
-			s.messageLog.Warn("DEF-3: conversation consistency mismatch (structured agent message)",
-				"message_id", storeMsg.ID, "conversation_id", convID, "agent_id", agent.ID)
-		}
+		// DEF-3: Independent consistency check against prior messages, run
+		// off the request path with its own deadline.
+		messaging.GoConsistencyCheck(messaging.ConsistencyInput{
+			Store: s.store, Log: s.messageLog, MessageID: storeMsg.ID, ConversationID: convID,
+			ThreadID: structuredMsg.ThreadID, SenderID: structuredMsg.SenderID, RecipientID: agent.ID,
+		}, func(ctx context.Context, in messaging.ConsistencyInput) {
+			if consistent := messaging.CheckConversationConsistency(ctx, in.Store, in.MessageID, in.ConversationID, in.ThreadID, in.SenderID, in.RecipientID, in.Log); !consistent {
+				in.Log.Warn("DEF-3: conversation consistency mismatch (structured agent message)",
+					"message_id", in.MessageID, "conversation_id", in.ConversationID, "agent_id", in.RecipientID)
+			}
+		})
 		// Propagate GroupID from metadata so CLI-originated group[] messages
 		// preserve correlation in the store.
 		groupID := ""
@@ -2728,6 +2992,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				Urgent:         structuredMsg.Urgent,
 				Interrupt:      req.Interrupt,
 				Attachments:    structuredMsg.Attachments,
+				AttachRefs:     attachRefs,
 				Metadata:       structuredMsg.Metadata,
 				ConversationID: storeMsg.ConversationID,
 				ConvResult:     convResult,
@@ -2786,6 +3051,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				ParentConv:         groupConv,
 				ParentConvVerified: groupConvIsExistingReference,
 				ParentMessageID:    dmResult.MessageID,
+				ParentAttachments:  dmResult.BoundAttachments,
 				Channel:            structuredMsg.Channel,
 			})
 
@@ -2814,6 +3080,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				AgentPhase:     agent.Phase,
 				MentionResults: mentionResults,
 				Deferred:       deferredNote,
+				ConversationID: dmResult.ConversationID,
 				// ptone/scion#3667: attachments the hub could not record.
 				AttachmentWarnings: dmResult.AttachmentWarnings,
 				ArtifactWarning:    dmResult.ArtifactWarning,
@@ -2828,6 +3095,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		// artifact references the sender can read under its own request
 		// credential (ptone/scion#3222).
 		var artifactRefs, recordedRefs []artifacts.MessageRef
+		var boundUserAttachments []AttachmentRef
 		structuredMsg.Metadata, artifactRefs, artifactWarning = s.admitMessageArtifacts(ctx, structuredMsg.Metadata,
 			directAgentRecipient(agent, groupID))
 		structuredMsg.ArtifactRefsAdmitted = len(artifactRefs) > 0
@@ -2836,13 +3104,29 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		// envelope rendered below tells the agent that a project visitor
 		// sent it.
 		structuredMsg.Metadata = stampVisitorSender(structuredMsg.Metadata, GetIdentityFromContext(ctx))
+		// A human sender's profile time zone travels with the message.
+		structuredMsg.Metadata = s.stampSenderTimezone(ctx, structuredMsg.Metadata, structuredMsg.Sender, structuredMsg.SenderID)
 
 		if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
 			s.messageLog.Error("Failed to persist message", "error", err)
+			if delegatedSender {
+				// As for the agent's own send (ExecuteAgentDM, AC-3), a
+				// delegated send that could not be stored is not dispatched.
+				WriteAgentDMError(w, persistFailedDMError())
+				return
+			}
 		} else {
 			persistedMsgID = storeMsg.ID
 			persistedConversationID = storeMsg.ConversationID
 			recordedRefs = s.recordMessageArtifacts(ctx, storeMsg.ID, artifactRefs)
+			// Attachments stored as artifacts the user named are bound to the
+			// stored message and delivered into the agent's home
+			// (ptone/scion#4596). An unpersisted message binds nothing.
+			if user := GetUserIdentityFromContext(ctx); user != nil && len(attachRefs) > 0 {
+				boundUserAttachments = s.bindChatAttachments(ctx, artifacts.PrincipalKindUser, user.ID(), storeMsg.ID,
+					s.bindProject(ctx, storeMsg, attachRefs), attachRefs)
+				structuredMsg.AttachmentDeliveries = attachmentDeliveries(storeMsg.ID, boundUserAttachments)
+			}
 		}
 		messaging.RecordStep(ctx, "message_persisted")
 		// B11/B13: only publish when persistence succeeded — publishing an
@@ -2851,18 +3135,22 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			// Publish SSE event so connected browser clients can update the
 			// per-agent conversation view in real time — mirrors the agent→user
 			// publish path in handleAgentOutboundMessage.
-			s.events.PublishUserMessage(ctx, storeMsg, nil, recordedRefs)
+			s.events.PublishUserMessage(ctx, storeMsg, boundUserAttachments, recordedRefs)
 			messaging.RecordStep(ctx, "sse_published")
 		}
 
 		// Phase 9b(ii): render the delivery envelope from the persisted row
 		// and conversation result when the envelope switch is ON.
+		// The attachments delivered with this message are planned for the
+		// agent once, before any render (ptone/scion#4596).
+		s.applyAttachmentPlan(ctx, agent, structuredMsg)
 		if s.writeDenyEnabled() && persistedMsgID != "" {
 			structuredMsg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
 				MessageID:  storeMsg.ID,
 				ConvResult: convResult,
 				Msg:        structuredMsg,
 				CreatedAt:  storeMsg.CreatedAt,
+				Plan:       structuredMsg.AttachmentPlan,
 			})
 		}
 
@@ -2895,6 +3183,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 						ConvResult: convResult,
 						Msg:        deliverMsg,
 						CreatedAt:  storeMsg.CreatedAt,
+						Plan:       deliverMsg.AttachmentPlan,
 					})
 				}
 				dispatchMsg = deliverMsg
@@ -3020,10 +3309,8 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				if bp := s.GetMessageBrokerProxy(); bp != nil {
 					observerMsg := *structuredMsg
 					observerMsg.ObserverOnly = true
-					isCrossProjectObs := false
-					if senderAgent := GetAgentIdentityFromContext(ctx); senderAgent != nil {
-						isCrossProjectObs = senderAgent.ProjectID() != "" && senderAgent.ProjectID() != agent.ProjectID
-					}
+					senderProjectID := senderAgentProjectID(ctx)
+					isCrossProjectObs := senderProjectID != "" && senderProjectID != agent.ProjectID
 					if isCrossProjectObs {
 						sanitizeCrossProjectObserver(&observerMsg)
 					}
@@ -3081,10 +3368,10 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		mentionResults = s.processMentions(ctx, req.Mentions, agent, structuredMsg, mentionParticipantGroupID, groupConversationThreadKey)
 	}
 
-	// A project visitor learns the conversation and DM key its message
-	// landed in, so it can read the DM; no other sender's response
-	// changes.
-	visitorConvID, visitorConvKey := visitorDeliveryConversation(GetIdentityFromContext(ctx), agent, persistedConversationID)
+	// Every sender learns the conversation its message landed in, so it
+	// can reply there. A project visitor also learns its DM key, which the
+	// visitor DM read routes take.
+	visitorConvKey := visitorDMKey(GetIdentityFromContext(ctx), agent)
 
 	if deferDelivery {
 		w.Header().Set("Content-Type", "application/json")
@@ -3097,7 +3384,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			MentionResults:  mentionResults,
 			Deferred:        deferredReason(agent),
 			ArtifactWarning: artifactWarning,
-			ConversationID:  visitorConvID,
+			ConversationID:  persistedConversationID,
 			ConversationKey: visitorConvKey,
 		})
 		return
@@ -3112,7 +3399,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		AgentPhase:      agent.Phase,
 		MentionResults:  mentionResults,
 		ArtifactWarning: artifactWarning,
-		ConversationID:  visitorConvID,
+		ConversationID:  persistedConversationID,
 		ConversationKey: visitorConvKey,
 	})
 }
@@ -3136,12 +3423,14 @@ type MessageDeliveryResponse struct {
 	// ArtifactWarning is set when artifact references the request named
 	// were not attached (ptone/scion#3222).
 	ArtifactWarning string `json:"artifact_warning,omitempty"`
-	// ConversationID and ConversationKey are set only for a project
-	// visitor sender (ptone/scion#4603): the conversation its message was
-	// persisted in, and the visitor's DM key with the agent
+	// ConversationID is the conversation the message was persisted in, so
+	// the sender can reply into it. Omitted only when the message was not
+	// recorded in a conversation.
+	ConversationID string `json:"conversation_id,omitempty"`
+	// ConversationKey is set only for a project visitor sender
+	// (ptone/scion#4603): the visitor's DM key with the agent
 	// (dm:agent:<agentId>:user:<visitorId>), which the visitor DM read
 	// routes take. Omitted for every other sender.
-	ConversationID  string `json:"conversation_id,omitempty"`
 	ConversationKey string `json:"conversation_key,omitempty"`
 }
 
@@ -3186,6 +3475,8 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 	// dispatched. Every `agentMsg := *msg` copy below aliases msg.Metadata's
 	// map, so stripping it once here covers all of them.
 	msg.Metadata = messaging.StripReservedMetadata(msg.Metadata)
+	// A human sender's profile time zone travels with every member's copy.
+	msg.Metadata = s.stampSenderTimezone(ctx, msg.Metadata, msg.Sender, msg.SenderID)
 
 	recipients, err := messages.ParseGroupRecipient(msg.Recipient)
 	if err != nil {
@@ -3284,6 +3575,18 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 				recipDispatchState = store.MessageDispatchDeferred
 			}
 
+			// A held member (ptone/scion#3433) is refused, like a direct
+			// send (ptone/scion#6859): nothing is stored or dispatched for
+			// it, and the other members still get the message. A lookup
+			// fault refuses that member. A deferred (reincarnating) member
+			// is saved for catch-up instead.
+			if !recipDeferred {
+				if dmErr := s.heldTargetRefusal(ctx, agent); dmErr != nil {
+					results[i] = GroupMessageRecipientResult{Recipient: recipStr, Status: "failed", Error: dmErr.Message}
+					continue
+				}
+			}
+
 			// ptone/scion#1839: per-member deliverability gate, mirroring
 			// the phase gate on direct sends (handleAgentMessage,
 			// ExecuteAgentDM, deliverToAgent). A non-running member cannot
@@ -3372,11 +3675,17 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 				Match:      match,
 				Reason:     reason,
 			})
-			// DEF-3: Independent consistency check against prior messages.
-			if consistent := messaging.CheckConversationConsistency(ctx, s.store, storeMsg.ID, convID, "", agentMsg.SenderID, agent.ID, s.messageLog); !consistent {
-				s.messageLog.Warn("DEF-3: conversation consistency mismatch (agent-to-agent DM)",
-					"message_id", storeMsg.ID, "conversation_id", convID, "agent_id", agent.ID)
-			}
+			// DEF-3: Independent consistency check against prior messages,
+			// run off the request path with its own deadline.
+			messaging.GoConsistencyCheck(messaging.ConsistencyInput{
+				Store: s.store, Log: s.messageLog, MessageID: storeMsg.ID, ConversationID: convID,
+				SenderID: agentMsg.SenderID, RecipientID: agent.ID,
+			}, func(ctx context.Context, in messaging.ConsistencyInput) {
+				if consistent := messaging.CheckConversationConsistency(ctx, in.Store, in.MessageID, in.ConversationID, "", in.SenderID, in.RecipientID, in.Log); !consistent {
+					in.Log.Warn("DEF-3: conversation consistency mismatch (agent-to-agent DM)",
+						"message_id", in.MessageID, "conversation_id", in.ConversationID, "agent_id", in.RecipientID)
+				}
+			})
 			persisted := false
 			if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
 				s.messageLog.Error("Failed to persist set message", "recipient", recipStr, "error", err)
@@ -3585,11 +3894,17 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 				Match:      match,
 				Reason:     reason,
 			})
-			// DEF-3: Independent consistency check against prior messages.
-			if consistent := messaging.CheckConversationConsistency(ctx, s.store, storeMsg.ID, convID, "", userMsg.SenderID, userID, s.messageLog); !consistent {
-				s.messageLog.Warn("DEF-3: conversation consistency mismatch (user-to-agent DM)",
-					"message_id", storeMsg.ID, "conversation_id", convID)
-			}
+			// DEF-3: Independent consistency check against prior messages,
+			// run off the request path with its own deadline.
+			messaging.GoConsistencyCheck(messaging.ConsistencyInput{
+				Store: s.store, Log: s.messageLog, MessageID: storeMsg.ID, ConversationID: convID,
+				SenderID: userMsg.SenderID, RecipientID: userID,
+			}, func(ctx context.Context, in messaging.ConsistencyInput) {
+				if consistent := messaging.CheckConversationConsistency(ctx, in.Store, in.MessageID, in.ConversationID, "", in.SenderID, in.RecipientID, in.Log); !consistent {
+					in.Log.Warn("DEF-3: conversation consistency mismatch (user-to-agent DM)",
+						"message_id", in.MessageID, "conversation_id", in.ConversationID)
+				}
+			})
 			persisted := true
 			if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
 				persisted = false
@@ -3644,6 +3959,9 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 type BroadcastMessageRequest struct {
 	StructuredMessage *messages.StructuredMessage `json:"structured_message"`
 	Interrupt         bool                        `json:"interrupt,omitempty"`
+	// AttachmentIDs is refused on a broadcast (ptone/scion#4596): an
+	// attachment binds to one message. Declared so the refusal is explicit.
+	AttachmentIDs []string `json:"attachment_ids,omitempty"`
 }
 
 // handleProjectBroadcast handles POST /api/v1/projects/{projectId}/broadcast.
@@ -3713,9 +4031,20 @@ func (s *Server) handleProjectBroadcast(w http.ResponseWriter, r *http.Request, 
 		BadRequest(w, "Invalid request body: "+err.Error())
 		return
 	}
+	if len(req.AttachmentIDs) > 0 {
+		ValidationError(w, "attachment_ids are not accepted on broadcasts", nil)
+		return
+	}
 
 	if req.StructuredMessage == nil {
 		ValidationError(w, "structured_message is required", nil)
+		return
+	}
+	// A broadcast carries text: attachment ids are refused above, and the
+	// messages store accepts an empty body (attachment-only chat messages,
+	// ptone/scion#6146), so an empty one is refused here, before fan-out.
+	if req.StructuredMessage.Msg == "" {
+		ValidationError(w, "msg is required", nil)
 		return
 	}
 
@@ -3755,6 +4084,10 @@ func (s *Server) handleProjectBroadcast(w http.ResponseWriter, r *http.Request, 
 	// ptone/scion#2100: fill what a minimal client payload omits, as
 	// handleAgentMessage does.
 	defaultInboundStructured(req.StructuredMessage)
+	// choice-prompt and choice-response are minted by the hub only.
+	if rejectHubMintedType(w, req.StructuredMessage.Type) {
+		return
+	}
 
 	// Use authenticated identity for self-skip, not the Sender field.
 	// The Sender field is a display label; the auth identity is the
@@ -3914,11 +4247,24 @@ func (s *Server) broadcastDirect(w http.ResponseWriter, r *http.Request, project
 	// map, so stripping it once here covers all of them. No offload here —
 	// broadcast rows have no ConversationID (design §10 P4 site 2).
 	msg.Metadata = messaging.StripReservedMetadata(msg.Metadata)
+	// A human sender's profile time zone travels with every copy.
+	msg.Metadata = s.stampSenderTimezone(ctx, msg.Metadata, msg.Sender, msg.SenderID)
 
 	for _, agent := range runningAgents {
 		agentMsg := *msg
 		agentMsg.Recipient = "agent:" + agent.Slug
 		agentMsg.RecipientID = agent.ID
+
+		// A held agent (ptone/scion#3433) is not delivered to, as on the
+		// broker path (deliverToAgent, ptone/scion#6859): nothing is
+		// stored or dispatched for it, an agent sender is told, and the
+		// other agents still get the broadcast. A lookup fault refuses it.
+		if dmErr := s.heldTargetRefusal(ctx, &agent); dmErr != nil {
+			s.messageLog.Warn("Broadcast not delivered to held agent",
+				"agent_id", agent.ID, "agentSlug", agent.Slug, "reason", dmErr.Message)
+			s.publishBroadcastDeliveryFailed(ctx, &agent, &agentMsg, errors.New(dmErr.Message))
+			continue
+		}
 
 		storeMsg := &store.Message{
 			ID:            api.NewUUID(),
@@ -4106,6 +4452,19 @@ func (s *Server) processMentions(ctx context.Context, mentionSlugs []string, pri
 	// Resolve mentions using the shared package.
 	results := messages.ResolveMentions(mentionSlugs, agentInfos, primaryAgent.Slug)
 
+	// A mention copy carries the text only, not the attachments, so a
+	// message without text (an attachment-only message, ptone/scion#6146)
+	// would reach the mentioned agents as an empty message. It is not
+	// copied; each resolved mention reports why.
+	if originalMsg.Msg == "" {
+		for i := range results {
+			if results[i].Status == "delivered" {
+				results[i].Status, results[i].Error = "error", errMentionCopyNeedsText
+			}
+		}
+		return results
+	}
+
 	// Phase 3 msg-authz: extract sender identity once for per-mention checks.
 	senderIdentity := GetIdentityFromContext(ctx)
 
@@ -4153,6 +4512,7 @@ func (s *Server) processMentions(ctx context.Context, mentionSlugs []string, pri
 		// #2257 P2: strip on this copy too (U5(a) row), even though
 		// NewMention's own metadata never carries client input today.
 		mentionMsg.Metadata = messaging.StripReservedMetadata(mentionMsg.Metadata)
+		mentionMsg.Metadata = s.stampSenderTimezone(ctx, mentionMsg.Metadata, mentionMsg.Sender, mentionMsg.SenderID)
 
 		// Migration gate (design agent-reincarnate §3.7, R3 p2a-r1 review):
 		// a mentioned agent is a recipient in its own right, independent of
@@ -4163,6 +4523,20 @@ func (s *Server) processMentions(ctx context.Context, mentionSlugs []string, pri
 		mentionDispatchState := store.MessageDispatchDispatched
 		if mentionDeferred {
 			mentionDispatchState = store.MessageDispatchDeferred
+		}
+
+		// A held mentioned agent (ptone/scion#3433) is refused, like a
+		// direct send (ptone/scion#6859): nothing is stored or dispatched
+		// for it, and the primary send is unaffected. An agent-send
+		// mention of a held agent is kept deferred by ExecuteAgentDM
+		// instead (ptone/scion#3433). A lookup fault refuses that mention.
+		// A deferred (reincarnating) agent is saved for catch-up instead.
+		if !mentionDeferred {
+			if dmErr := s.heldTargetRefusal(ctx, mentionAgent); dmErr != nil {
+				results[i].Status = "error"
+				results[i].Error = dmErr.Message
+				continue
+			}
 		}
 
 		// F3 (p2a-r2 review, A25.2 option (a)): a deferred mention has no
@@ -4324,6 +4698,132 @@ func (s *Server) processMentions(ctx context.Context, mentionSlugs []string, pri
 	return results
 }
 
+// decideKeyedPostSender decides whether the sender of a post with no
+// conversation_id may post by the conversation key the request derives
+// (messaging.DeriveConversationKey, with the same inputs the conversation
+// resolution uses). A direct key is decided by the DM key ownership check.
+// For a group (thread) key, a user must be able to read the recipient
+// agent's project and post in its chat (decideUserThreadPost, the decision
+// of a chat send); an agent goes on, and its message mode decides before
+// the thread conversation is resolved (precheckThreadGroupPost); any other
+// sender is refused. A key kind with no rule here is refused. A refusal is
+// written to w and ok is false.
+//
+// It runs before every other answer that depends on the recipient, so a
+// refused sender cannot tell this agent from an unknown one by the answer.
+func (s *Server) decideKeyedPostSender(w http.ResponseWriter, r *http.Request, msg *messages.StructuredMessage, agent *store.Agent) bool {
+	ctx := r.Context()
+	authKind, authID := authenticatedSender(ctx)
+	_, kind, _, err := messaging.DeriveConversationKey(messaging.KeyInputs{
+		ThreadID:      msg.ThreadID,
+		ProjectID:     agent.ProjectID,
+		SenderKind:    authKind,
+		SenderID:      authID,
+		RecipientKind: "agent",
+		RecipientID:   agent.ID,
+	})
+	if err != nil {
+		// A thread key fails derivation when the recipient agent has no
+		// project (DeriveErrThreadNoProject). That is defended here, and
+		// unreachable through the ent store, where project_id is a
+		// required edge of the agent schema. Such a thread post is refused
+		// for every sender kind, without evaluating the empty project. Any
+		// other failure is a direct key (a dm: thread_id, or the sender and
+		// recipient pair), which is not a post into a project's
+		// conversation: the resolution step refuses it with write-deny on,
+		// and otherwise goes on without a conversation.
+		if msg.ThreadID != "" && !strings.HasPrefix(msg.ThreadID, "dm:") {
+			s.refuseKeyedPostAsNotFound(w, r, agent.ProjectID, "thread post: conversation key not derived")
+			return false
+		}
+		return true
+	}
+	switch kind {
+	case "direct":
+		return true
+	case "group":
+		switch authKind {
+		case "user":
+			// The same decision point as a chat send (chatThreadAccess):
+			// a user who cannot read the project gets the unknown-agent
+			// answer; one who reads it but may not post gets 403
+			// chat_post_denied. Both come before any row or wake.
+			return s.decideUserThreadPost(w, r, agent.ProjectID)
+		case "agent":
+			return true
+		default:
+			s.refuseKeyedPostAsNotFound(w, r, agent.ProjectID, "thread post: unsupported sender kind")
+			return false
+		}
+	default:
+		s.refuseKeyedPostAsNotFound(w, r, agent.ProjectID, "post by key: unsupported conversation kind")
+		return false
+	}
+}
+
+// decideUserThreadPost decides, with chatThreadAccess, whether the user
+// sender of a post by thread key may post into a thread of projectID, the
+// recipient agent's project. A sender who may not read the project, and a
+// project that cannot be loaded, get the unknown-agent answer
+// (refuseKeyedPostAsNotFound) with the reason logged. A sender who reads
+// the project but may not post gets 403 chat_post_denied with reason
+// read_only; the denial is logged.
+// ok reports whether the post may go on.
+func (s *Server) decideUserThreadPost(w http.ResponseWriter, r *http.Request, projectID string) bool {
+	refuseAsNotFound := func(reason string) { s.refuseKeyedPostAsNotFound(w, r, projectID, reason) }
+	ctx := r.Context()
+	user := GetUserIdentityFromContext(ctx)
+	if user == nil || projectID == "" {
+		refuseAsNotFound("thread post: no user sender or no project")
+		return false
+	}
+	project, err := s.store.GetProject(ctx, projectID)
+	if err != nil || project == nil {
+		reason := "thread post: project not found"
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			reason = "thread post: project lookup failed: " + err.Error()
+		}
+		refuseAsNotFound(reason)
+		return false
+	}
+	// The thread conversation may not exist yet; a user is decided by the
+	// project alone. The token-scope step is skipped: in Phase 1 a user
+	// access token on this route keeps the route's own checks (design
+	// section 8.3 item 4), and only the post decision is added. Phase 2
+	// decides whether to unify it with chat sends (ptone/scion#5519).
+	access, err := s.chatThreadAccess(ctx, user, chatThreadRef{Project: project, skipTokenScope: true})
+	if err != nil {
+		// An internal caller error or a store fault: the common 500.
+		writeErrorFromErr(w, err, "")
+		return false
+	}
+	if !access.Can(ChatActionRead) {
+		refuseAsNotFound("thread post: sender cannot read the project")
+		return false
+	}
+	if !access.Can(ChatActionPost) {
+		logAuthzDenial(r, user, projectResource(project), ActionChatPost, access.postDenial.Reason)
+		chatSendPostDenied(access.Reason).write(w)
+		return false
+	}
+	return true
+}
+
+// refuseKeyedPostAsNotFound refuses a post by conversation key from a sender
+// who may not post into projectID's conversations. The answer is the one an
+// unknown recipient agent gets (404), so the refusal says nothing about the
+// agent or its project; the reason is logged as an authorization denial.
+// A visitor gets the one visitor refusal, its answer for an unknown agent.
+func (s *Server) refuseKeyedPostAsNotFound(w http.ResponseWriter, r *http.Request, projectID, reason string) {
+	identity := GetIdentityFromContext(r.Context())
+	logAuthzDenial(r, identity, Resource{Type: "project", ID: projectID}, ActionRead, reason)
+	if isVisitorIdentity(identity) {
+		writeVisitorRefusal(w)
+		return
+	}
+	writeErrorFromErr(w, store.ErrNotFound, "")
+}
+
 // authenticatedSender returns the principal kind ("user" or "agent") and ID
 // from the request's authenticated context. Returns ("", "") when no
 // authenticated identity is present.
@@ -4338,6 +4838,12 @@ func authenticatedSender(ctx context.Context) (kind, id string) {
 	}
 	if agent := GetAgentIdentityFromContext(ctx); agent != nil {
 		return "agent", agent.ID()
+	}
+	// An agent delegated credential sends as its actor agent
+	// (.design/agent-delegation.md §14.5). Its request shape is limited to
+	// a direct message to the route's agent (delegatedMessageRequestRefusal).
+	if delegated := delegatedAgentIdentityFromContext(ctx); delegated != nil {
+		return "agent", delegated.ID()
 	}
 	return "", ""
 }

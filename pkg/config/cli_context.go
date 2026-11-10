@@ -28,6 +28,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/internal/settingslockhook"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/filelock"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/privatefs"
 	"gopkg.in/yaml.v3"
 )
 
@@ -116,6 +117,11 @@ type ProjectRef struct {
 	ID string `json:"id" yaml:"id"`
 	// Slug is the project slug, for display.
 	Slug string `json:"slug,omitempty" yaml:"slug,omitempty"`
+	// Unverified is set when 'scion use' selected the project while its
+	// hub could not confirm it (no login, a refused login or no answer).
+	// Every selection writes a new ref, so the next confirmed one clears
+	// it.
+	Unverified bool `json:"unverified,omitempty" yaml:"unverified,omitempty"`
 }
 
 // KnownProject is one entry of the known-project list.
@@ -274,9 +280,16 @@ func updateCLIContext(fn func(*CLIContext) error, force bool) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	// Missing components of the global directory are created private
+	// (mode 0700; on Windows an owner-only ACL); an existing one is left as
+	// it is. context.yaml is written private by writeFileAtomicMode (mode
+	// 0600 is Private), and the lock file gets the private descriptor
+	// (filelock.Acquire with mode 0600).
+	tree, err := privatefs.OpenTree(dir, privatefs.TreeOptions{CreateAnchor: true})
+	if err != nil {
 		return fmt.Errorf("create %s: %w", dir, err)
 	}
+	_ = tree.Close()
 	unlock, err := lockCLIContext(filepath.Join(dir, cliContextLockFileName))
 	if err != nil {
 		return err
@@ -325,18 +338,28 @@ func ValidHubName(name string) bool {
 }
 
 // NormalizeEndpoint returns endpoint in the form in which two spellings of
-// one hub URL compare equal: spaces and trailing slashes trimmed, scheme and
-// host lowercased, and the scheme's default port (80 for http, 443 for
-// https) dropped. A value that does not parse as a URL with a host is only
-// trimmed. It is the key of hub entries and of stored logins.
+// one hub URL compare equal: spaces and trailing slashes trimmed, the ASCII
+// letters of the scheme and host lowercased, and the scheme's default port
+// (80 for http, 443 for https) dropped. A value that does not parse as a
+// URL with a host is only trimmed. It is the key of hub entries and of
+// stored logins, so two different hubs must never get the same key:
+//
+//   - only ASCII letters are lowercased; a non-ASCII host is kept as
+//     written, because Unicode case mapping folds some characters into
+//     ASCII ones (U+212A KELVIN SIGN becomes "k");
+//   - an IDN host and its punycode form ("xn--...") are different keys;
+//   - a host with a trailing dot ("hub.example.com.") is a different key
+//     from the one without;
+//   - any non-default port is kept as written ("0443" stays "0443");
+//   - the path keeps its case and its escaping.
 func NormalizeEndpoint(endpoint string) string {
 	e := strings.TrimRight(strings.TrimSpace(endpoint), "/")
 	u, err := url.Parse(e)
 	if err != nil || u.Host == "" {
 		return e
 	}
-	u.Scheme = strings.ToLower(u.Scheme)
-	host := strings.ToLower(u.Hostname())
+	u.Scheme = asciiLower(u.Scheme)
+	host := asciiLower(u.Hostname())
 	port := u.Port()
 	if (u.Scheme == "http" && port == "80") || (u.Scheme == "https" && port == "443") {
 		port = ""

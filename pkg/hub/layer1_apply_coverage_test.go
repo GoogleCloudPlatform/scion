@@ -61,11 +61,6 @@ var layer1NotWritableKeys = map[string]string{
 	"default_agent_role":     "accepted only as an unchanged echo of GET (dbUnwrittenLayer1Paths)",
 }
 
-// layer1ExemptKeys are Layer-1 koanf paths left out of this check.
-var layer1ExemptKeys = map[string]string{
-	"server.auth.authorized_domains": "handled in a separate change",
-}
-
 func observeLocked[T any](f func(s *Server) T) func(s *Server, _ *OperationalSettings) any {
 	return func(s *Server, _ *OperationalSettings) any {
 		s.mu.RLock()
@@ -159,6 +154,7 @@ var telemetryProbeDocs = map[string]string{
 	"telemetry.cloud.protocol":                 `{"cloud":{"protocol":"http"}}`,
 	"telemetry.cloud.headers":                  `{"cloud":{"headers":{"x-probe":"v"}}}`,
 	"telemetry.cloud.provider":                 `{"cloud":{"provider":"gcp"}}`,
+	"telemetry.cloud.gcp_project_id":           `{"cloud":{"gcp_project_id":"probe-project"}}`,
 	"telemetry.cloud.tls":                      `{"cloud":{"tls":{"enabled":true}}}`,
 	"telemetry.cloud.tls.enabled":              `{"cloud":{"tls":{"enabled":true}}}`,
 	"telemetry.cloud.tls.insecure_skip_verify": `{"cloud":{"tls":{"insecure_skip_verify":true}}}`,
@@ -207,6 +203,9 @@ func layer1LiveProbes(t *testing.T) map[string]layer1LiveProbe {
 			observe: observeLocked(func(s *Server) any { return s.config.UserAccessMode })},
 		"server.auth.default_user_role": {section: "access", doc: `{"default_user_role":"viewer"}`,
 			observe: observeLocked(func(s *Server) any { return s.config.DefaultUserRole })},
+		// ptone/scion#6000: a saved list was stored but not applied.
+		"server.auth.authorized_domains": {section: "access", doc: `{"authorized_domains":["probe.example.com"]}`,
+			observe: func(s *Server, _ *OperationalSettings) any { return s.AuthorizedDomains() }},
 
 		// lifecycle
 		"server.hub.auto_suspend_stalled": {section: "lifecycle", doc: `{"auto_suspend_stalled":true}`,
@@ -261,6 +260,10 @@ func layer1LiveProbes(t *testing.T) map[string]layer1LiveProbe {
 			observe: func(s *Server, _ *OperationalSettings) any { return s.resolveImageRegistry() }},
 		"server.hub.monitoring_dashboard_url": {section: "endpoints", doc: `{"monitoring_dashboard_url":"https://monitoring.example.com/d/1"}`,
 			observe: observeLocked(func(s *Server) any { return s.config.MonitoringDashboardURL })},
+		"server.hub.content_url": {section: "endpoints", doc: `{"content_url":"https://content.example.net"}`,
+			observe: func(s *Server, _ *OperationalSettings) any { return s.contentURLLiveState().URL }},
+		"server.hub.content_url_allow_same_site": {section: "endpoints", doc: `{"content_url_allow_same_site":true}`,
+			observe: func(s *Server, _ *OperationalSettings) any { return s.contentURLAllowSameSiteLiveValue() }},
 
 		// github_app
 		"server.github_app":                  {section: "github_app", base: ghBase + `}`, doc: ghBase + `,"api_base_url":"https://ghe.example.com/api/v3"}`, observe: observeGitHubApp},
@@ -302,6 +305,13 @@ func layer1LiveProbes(t *testing.T) map[string]layer1LiveProbe {
 			observe: func(_ *Server, o *OperationalSettings) any { return o.Artifacts() }},
 		"profiling": {section: "profiling", doc: `{"readiness_marks":true}`,
 			observe: func(_ *Server, o *OperationalSettings) any { return o.ReadinessMarks() }},
+		"chat_retention": {section: "chat_retention", doc: `{"enabled":true,"messages_retention_days":30}`,
+			observe: func(_ *Server, o *OperationalSettings) any { return o.ChatRetention() }},
+		"agent_delegation_policy": {section: "agent_delegation_policy", doc: `{"remove":{"hub":["agent.read"]}}`,
+			observe: func(_ *Server, o *OperationalSettings) any {
+				p, err := o.AgentDelegationPolicy()
+				return []any{p.Removes("hub", "agent.read"), err == nil}
+			}},
 	}
 	for path, doc := range telemetryProbeDocs {
 		p[path] = layer1LiveProbe{section: "telemetry", doc: doc, observe: observeTelemetry}
@@ -338,12 +348,6 @@ func TestLayer1Keys_AppliedLiveOrRestartRequired(t *testing.T) {
 		_, live := probes[key]
 		restart := opsettings.IsRestartRequired(key)
 		_, exempt := layer1NotWritableKeys[key]
-		if _, skip := layer1ExemptKeys[key]; skip {
-			if live || restart || exempt {
-				t.Errorf("%s is exempt from this check but also has a probe, the restart_required flag or a not-writable entry", key)
-			}
-			continue
-		}
 		switch {
 		case live && restart:
 			t.Errorf("%s has a live-apply probe and is flagged restart_required; it must be one or the other", key)
