@@ -374,7 +374,34 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 	}
 
 	s.resolveDerivedConfig(ctx, agent, project, resolvedTemplate)
+	if guard := noAuthFallbackGuardFrom(ctx); guard != nil && guard.refused {
+		return errNoAuthFallbackRefused
+	}
 	return nil
+}
+
+// errNoAuthFallbackRefused reports an agent create refused because it would
+// have fallen back to no credentials (NoAuth) while the caller forbade that
+// fallback (withNoAuthFallbackForbidden).
+var errNoAuthFallbackRefused = errors.New("the agent has no credentials for its harness, and the no-auth fallback is not allowed for this create")
+
+type noAuthFallbackGuardKey struct{}
+
+// noAuthFallbackGuard records whether a create carrying it was refused.
+type noAuthFallbackGuard struct{ refused bool }
+
+// withNoAuthFallbackForbidden marks ctx so that an agent create on it never
+// takes the auto no-auth fallback (drop-to-shell with no credentials): the
+// create fails with errNoAuthFallbackRefused before any agent is stored. It
+// is internal to the hub; no request field reaches it. The welcome project's
+// coordinator uses it.
+func withNoAuthFallbackForbidden(ctx context.Context) context.Context {
+	return context.WithValue(ctx, noAuthFallbackGuardKey{}, &noAuthFallbackGuard{})
+}
+
+func noAuthFallbackGuardFrom(ctx context.Context) *noAuthFallbackGuard {
+	g, _ := ctx.Value(noAuthFallbackGuardKey{}).(*noAuthFallbackGuard)
+	return g
 }
 
 // remoteBrokerWithoutProjectPath reports whether brokerID names a remote
@@ -734,7 +761,13 @@ func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, p
 				hc.Config != nil &&
 				hc.Config.NoAuthBehavior == "drop-to-shell" {
 				hasCreds, err := s.hasRequiredAuthCredentials(ctx, agent, hc.Harness, hc.Config.AuthMeta)
-				if err != nil {
+				if guard := noAuthFallbackGuardFrom(ctx); guard != nil && (err != nil || !hasCreds) {
+					// The caller forbade the fallback: refuse the create
+					// instead of starting the agent with no credentials.
+					guard.refused = true
+					s.agentLifecycleLog.Info("Auto no-auth fallback refused by the caller: no credentials found",
+						"agent_id", agent.ID, "harness", hc.Harness)
+				} else if err != nil {
 					s.agentLifecycleLog.Error("Failed to check auth credentials for fallback", "agent_id", agent.ID, "error", err)
 				} else if !hasCreds {
 					agent.AppliedConfig.NoAuth = true

@@ -251,3 +251,10 @@ export const USER_DELETE_FORCE_CASCADE_FLAG = 'hub.user_delete_force_cascade';
  * marker. Default OFF.
  */
 export const CHAT_RETENTION_FLAG = 'hub.chat_retention';
+
+/**
+ * Welcome project (hub.welcome_project): the Welcome project step of the
+ * workstation setup wizard. Presentation only: the hub checks the
+ * experiment on the welcome preview, install and skip routes. Default OFF.
+ */
+export const WELCOME_PROJECT_FLAG = 'hub.welcome_project';

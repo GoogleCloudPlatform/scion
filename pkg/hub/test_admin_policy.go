@@ -593,6 +593,7 @@ var testAdminExperimentPolicy = map[string]testAdminPolicy{
 	experiments.ImageTagVersionDefault:       testAdminPolicyDeny,
 	experiments.ArtifactsOpenReviewCheck:     testAdminPolicyDeny,
 	experiments.ProjectSelfLeave:             testAdminPolicyDeny,
+	experiments.WelcomeProject:               testAdminPolicyDeny,
 }
 
 // testAdminPolicyInputs are the vocabularies the classification must cover.
