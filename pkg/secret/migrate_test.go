@@ -39,6 +39,7 @@ type faultSMClient struct {
 	accessData map[string][]byte // full secret path -> substituted read-back
 	accessErr  map[string]error  // full secret path -> read-back error
 	addErr     map[string]error  // full secret path -> AddSecretVersion error
+	adds       int               // AddSecretVersion calls
 }
 
 func trimVersion(name string) string {
@@ -66,6 +67,7 @@ func (f *faultSMClient) AccessSecretVersion(ctx context.Context, req *smpb.Acces
 func (f *faultSMClient) AddSecretVersion(ctx context.Context, req *smpb.AddSecretVersionRequest) (*smpb.SecretVersion, error) {
 	f.fmu.Lock()
 	err, hasErr := f.addErr[req.Parent]
+	f.adds++
 	f.fmu.Unlock()
 	if hasErr {
 		return nil, err
@@ -97,11 +99,15 @@ const migScopeID = "user-1"
 
 func newMigrationFixture(t *testing.T) *migrationFixture {
 	t.Helper()
+	return newMigrationFixtureWith(t, NewLegacyValueCipher("migration-test-shared-secret"))
+}
+
+func newMigrationFixtureWith(t *testing.T, c *ValueCipher) *migrationFixture {
+	t.Helper()
 	st, err := newTestStore(":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	c := NewLegacyValueCipher("migration-test-shared-secret")
 	sm := &faultSMClient{mockSMClient: newMockSMClient()}
 	sm.clearFaults()
 	return &migrationFixture{
@@ -267,8 +273,8 @@ func TestMigrateLocalToGCP_ReadBackMismatchKeepsRowAndIncomplete(t *testing.T) {
 	if err != nil {
 		t.Fatalf("re-run: %v", err)
 	}
-	if report.Migrated != 1 || report.AlreadyRef != 1 {
-		t.Fatalf("re-run report = %+v, want 1 migrated and 1 already migrated", report)
+	if report.Migrated != 1 || report.Verified != 1 {
+		t.Fatalf("re-run report = %+v, want 1 migrated and 1 verified", report)
 	}
 	if got, _ := f.smValue("KEY_B"); got != plainB {
 		t.Error("re-run did not migrate KEY_B with its decoded value")
@@ -459,4 +465,157 @@ func TestGCPBackendSetVerified_MismatchLeavesRowUntouched(t *testing.T) {
 		t.Error("the verify error carries a value")
 	}
 	f.assertKeptLocal(t, "SV_KEY", raw, plain)
+}
+
+// seedOldRawCopy reproduces a migration made before values were decoded:
+// value is stored at rest through the LocalBackend, then that stored form
+// is written to Secret Manager with Set, exactly as the old migration did.
+// It returns the stored form, which is now Secret Manager's value.
+func (f *migrationFixture) seedOldRawCopy(t *testing.T, name, value string) string {
+	t.Helper()
+	raw := f.seed(t, name, value)
+	if _, _, err := f.gcp.Set(context.Background(), &SetSecretInput{
+		Name: name, Value: raw, SecretType: store.SecretTypeEnvironment, Scope: store.ScopeUser, ScopeID: migScopeID,
+	}); err != nil {
+		t.Fatalf("old raw copy of %s: %v", name, err)
+	}
+	if got, _ := f.smValue(name); got != raw {
+		t.Fatalf("precondition: Secret Manager must hold the at-rest form of %s", name)
+	}
+	return raw
+}
+
+// seedRef stores value in Secret Manager for name, the way a correct
+// migration or a direct write leaves it.
+func (f *migrationFixture) seedRef(t *testing.T, name, value string) {
+	t.Helper()
+	if _, _, err := f.gcp.Set(context.Background(), &SetSecretInput{
+		Name: name, Value: value, SecretType: store.SecretTypeEnvironment, Scope: store.ScopeUser, ScopeID: migScopeID,
+	}); err != nil {
+		t.Fatalf("seeding %s in Secret Manager: %v", name, err)
+	}
+}
+
+func (f *migrationFixture) addCount() int {
+	f.sm.fmu.Lock()
+	defer f.sm.fmu.Unlock()
+	return f.sm.adds
+}
+
+func TestMigrateLocalToGCP_RepairsEnvelopeFromOldRawCopy(t *testing.T) {
+	for name, c := range map[string]*ValueCipher{
+		"legacy":  NewLegacyValueCipher("migration-test-shared-secret"),
+		"managed": ciphertestRing(t, "k1"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newMigrationFixtureWith(t, c)
+			const plain = "plain-value-old-run"
+			raw := f.seedOldRawCopy(t, "OLD_KEY", plain)
+
+			report, log, err := f.run(t, false)
+			if err != nil {
+				t.Fatalf("MigrateLocalToGCP: %v", err)
+			}
+			if report.Repaired != 1 || report.Verified != 0 {
+				t.Fatalf("report = %+v, want 1 repaired", report)
+			}
+			if got, _ := f.smValue("OLD_KEY"); got != plain {
+				t.Fatal("Secret Manager does not hold the decoded original after the repair")
+			}
+			row, gErr := f.st.GetSecret(context.Background(), "OLD_KEY", store.ScopeUser, migScopeID)
+			if gErr != nil {
+				t.Fatalf("GetSecret: %v", gErr)
+			}
+			if row.SecretRef == "" {
+				t.Fatal("repaired row lost its Secret Manager reference")
+			}
+			assertNoLeak(t, report, err, log, plain, raw)
+
+			// A second run finds nothing left to repair.
+			report, _, err = f.run(t, false)
+			if err != nil || report.Repaired != 0 || report.Verified != 1 {
+				t.Fatalf("second run: report = %+v, err = %v; want 1 verified", report, err)
+			}
+		})
+	}
+}
+
+func TestMigrateLocalToGCP_RepairDryRunWritesNothing(t *testing.T) {
+	f := newMigrationFixture(t)
+	const plain = "plain-value-old-run-dry"
+	raw := f.seedOldRawCopy(t, "OLD_DRY", plain)
+	before := f.addCount()
+
+	report, log, err := f.run(t, true)
+	if err != nil {
+		t.Fatalf("dry run: %v", err)
+	}
+	if report.Repaired != 1 {
+		t.Fatalf("report = %+v, want 1 would-repair", report)
+	}
+	if f.addCount() != before {
+		t.Fatal("dry run wrote to Secret Manager")
+	}
+	if got, _ := f.smValue("OLD_DRY"); got != raw {
+		t.Fatal("dry run changed the Secret Manager value")
+	}
+	assertNoLeak(t, report, err, log, plain, raw)
+}
+
+// TestMigrateLocalToGCP_LeavesRealValuesAlone covers values that must not
+// be taken for a local envelope: a plaintext value (which a legacy-mode
+// cipher reads back unchanged, and a managed cipher refuses as unadmitted
+// plaintext) and a value that is shaped like an envelope but opens under
+// no local key.
+func TestMigrateLocalToGCP_LeavesRealValuesAlone(t *testing.T) {
+	values := map[string]string{
+		"plaintext":       "a-real-plaintext-secret-value",
+		"envelope-shaped": undecodable(),
+	}
+	for cname, c := range map[string]*ValueCipher{
+		"legacy":  NewLegacyValueCipher("migration-test-shared-secret"),
+		"managed": ciphertestRing(t, "k1"),
+	} {
+		for vname, value := range values {
+			t.Run(cname+"/"+vname, func(t *testing.T) {
+				f := newMigrationFixtureWith(t, c)
+				f.seedRef(t, "REAL_KEY", value)
+				before := f.addCount()
+
+				report, log, err := f.run(t, false)
+				if err != nil {
+					t.Fatalf("MigrateLocalToGCP: %v", err)
+				}
+				if report.Verified != 1 || report.Repaired != 0 {
+					t.Fatalf("report = %+v, want 1 verified and 0 repaired", report)
+				}
+				if f.addCount() != before {
+					t.Fatal("a real value was rewritten")
+				}
+				if got, _ := f.smValue("REAL_KEY"); got != value {
+					t.Fatal("the Secret Manager value changed")
+				}
+				assertNoLeak(t, report, err, log, value)
+			})
+		}
+	}
+}
+
+func TestMigrateLocalToGCP_UnreadableRefIsIncomplete(t *testing.T) {
+	f := newMigrationFixture(t)
+	const plain = "plain-value-unreadable-ref"
+	f.seedRef(t, "REF_KEY", plain)
+	f.sm.accessErr[f.path("REF_KEY", store.ScopeUser, migScopeID)] = status.Error(codes.PermissionDenied, "denied")
+
+	report, log, err := f.run(t, false)
+	if !errors.Is(err, ErrMigrationIncomplete) {
+		t.Fatalf("err = %v, want ErrMigrationIncomplete", err)
+	}
+	if report.Unverified != 1 {
+		t.Fatalf("report = %+v, want 1 unverified", report)
+	}
+	if strings.Contains(log, "denied\n") {
+		t.Error("log carries the Secret Manager error text")
+	}
+	assertNoLeak(t, report, err, log, plain)
 }

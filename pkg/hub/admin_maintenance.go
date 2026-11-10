@@ -338,7 +338,7 @@ func (s *Server) resolveMaintenanceExecutor(key string) (MaintenanceExecutor, er
 	log := s.maintenanceLog
 
 	switch key {
-	case "secret-hub-id-migration":
+	case entadapter.SecretHubIDMigrationKey:
 		backend := s.GetSecretBackend()
 		if backend == nil {
 			return nil, fmt.Errorf("no secret backend configured; cannot run secret migration")
