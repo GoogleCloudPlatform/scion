@@ -521,9 +521,13 @@ secrets:    runtime_broker  <  hub  <  project  <  user           (user wins)
 The scope order applies within variables and within secrets. Across the two kinds, for the same
 key a variable from any scope takes precedence over an environment-type secret: the hub fills the
 agent's environment from variables first, and environment-type secrets fill only keys that are
-still unset or empty. On the broker, the agent's config env likewise wins over an environment-type
-secret with the same target. So a `hub`- or `runtime_broker`-scoped variable beats a `user`-scoped
-environment-type secret with the same key.
+still unset or empty (for a `hub`-scoped `environment` secret, start and restart deliver it
+directly only when its `injectionMode` is `always`, while an `as_needed` `hub`-scoped
+`environment` secret is filled only by the harness credential pass for a key the harness asks
+for; see [Hub-Scoped Secrets](/scion/hosted/user/secrets/#hub-scoped-secrets)). On the broker,
+the agent's config env likewise wins over an environment-type secret with the same target. So a
+`hub`- or `runtime_broker`-scoped variable beats a `user`-scoped environment-type secret with the
+same key.
 
 ### A6. `SCION_AUTO_EXPOSE_PORTS` has its own four-tier order
 

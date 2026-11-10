@@ -24,7 +24,7 @@ Both variables and secrets can be scoped to different levels. Scion resolves the
 
 1.  **User Scope** (Highest Priority): Personal secrets or variables for a specific user. Applied to all agents owned by that user.
 2.  **Project Scope**: Project-level secrets or variables. Available to all agents running in a specific Project.
-3.  **Hub Scope**: Platform-wide settings or secrets configured by Hub administrators. Hub-scoped secrets reach agents only as `environment` secrets: `always` secrets at start, and `as_needed` secrets only through the harness's credential gathering; see [Hub-Scoped Secrets](#hub-scoped-secrets).
+3.  **Hub Scope**: Platform-wide settings or secrets configured by Hub administrators. Hub-scoped secrets reach agents only as `environment` secrets: `always` secrets are delivered at start and restart, and `as_needed` secrets are filled only by the harness credential pass for keys the harness asks for; see [Hub-Scoped Secrets](#hub-scoped-secrets).
 4.  **Broker Scope** (Lowest Priority): Infrastructure-level secrets or variables. Available only to agents running on a specific Runtime Broker (e.g., for hardware-specific config).
 
 **Resolution Priority:** When multiple scopes define the same secret key, the more specific scope wins. The precedence order is:
@@ -46,7 +46,7 @@ A scope decides which agents receive a variable or secret, not which people can 
 
 Hub, Broker and Project scopes apply to child agents in the same way as to the agents users start directly.
 
-The [injection mode](#injection-modes) does not change who can receive a value. An `always` value is injected into every agent in its scope. An `as_needed` environment value is injected into any agent in its scope whose template or harness configuration requests that key. Template choice is up to the user starting the agent, so any user who can start an agent in the scope can request the key. `file` and `variable` secrets are placed in every agent in their scope, whatever their injection mode. Hub scope is different for secrets: only `environment` secrets reach agents (see [Hub-Scoped Secrets](#hub-scoped-secrets)).
+The [injection mode](#injection-modes) does not change who can receive a value. An `always` value is injected into every agent in its scope. An `as_needed` environment value is injected into any agent in its scope whose template or harness configuration requests that key. Template choice is up to the user starting the agent, so any user who can start an agent in the scope can request the key. `file` and `variable` secrets are placed in every agent in their scope, whatever their injection mode. Hub scope is different for secrets: only `environment` secrets reach agents (`always` at start and restart, `as_needed` only through the harness credential pass; see [Hub-Scoped Secrets](#hub-scoped-secrets)).
 
 :::caution[Hub and Broker scopes are shared]
 Hub-scoped and Broker-scoped variables and secrets are shared credentials. Every user who can start an agent on the Hub, or on that Runtime Broker, receives them in their agents. These scopes do not keep a value private to one user. Put only values there that every such user may hold.
@@ -92,7 +92,7 @@ Values stored under a reserved name before this check existed are not deleted, b
 
 ### Hub-Scoped Secrets
 
-Hub-scoped secrets reach agents only when their type is `environment`, apart from the telemetry credential file (below). An `environment` secret with the `always` mode is placed in every agent's environment at start. An `environment` secret with the `as_needed` mode is not placed in the agent environment at start; it is supplied only when the agent's harness requests that key during credential gathering. Hub-scoped secrets of type `file` or `variable` are not delivered to any agent at create, start, restart or during credential gathering. They are left out before scope precedence, so a Runtime Broker-scoped secret with the same name applies instead.
+Hub-scoped secrets reach agents only when their type is `environment`, apart from the telemetry credential file (below). Start and restart deliver a Hub-scoped `environment` secret directly only when its mode is `always`. A Hub-scoped `environment` secret with the `as_needed` mode is not delivered in the agent environment at start or restart; it is filled only by the harness credential pass for a key the harness asks for. Hub-scoped secrets of type `file` or `variable` are not delivered to any agent at create, start, restart or during credential gathering. They are left out before scope precedence, so a Runtime Broker-scoped secret with the same name applies instead.
 
 One Hub-scoped `file` secret is delivered: the telemetry credential file, when its name is `scion-telemetry-gcp-credentials` and its target is a path whose last two parts are `.scion/telemetry-gcp-credentials.json`, such as `~/.scion/telemetry-gcp-credentials.json` (see [Well-Known Secrets](#well-known-secrets)). A Hub-scoped file secret with any other name or target is not delivered.
 
@@ -105,7 +105,7 @@ An agent reading Hub-scoped secrets (`GET /api/v1/secrets?scope=hub`, `GET /api/
 
 Both environment variables and secrets support **Injection Modes**, which control how they are delivered to the agent container:
 
-- **As Needed (Default)**: The variable or secret is only injected if it is explicitly requested in the agent's template (`scion-agent.yaml`) or harness configuration. This is the recommended mode for most credentials to minimize the attack surface.
+- **As Needed (Default)**: The variable or secret is only injected if it is explicitly requested in the agent's template (`scion-agent.yaml`) or harness configuration (for a Hub-scoped `environment` secret, only when the harness credential pass asks for that key; see [Hub-Scoped Secrets](#hub-scoped-secrets)). This is the recommended mode for most credentials to minimize the attack surface.
 - **Always**: The variable or secret is injected into *every* agent started within that scope, regardless of whether it is explicitly requested.
 
 :::note[GITHUB_TOKEN and the Always mode]
@@ -141,7 +141,7 @@ To explicitly enable propagation on a specific secret, use the `--allow-progeny`
 * **User-Scoped Environment Variables**: Can only be marked for progeny propagation if their injection mode is set to `always`. Progeny propagation for environment variables cannot currently be set from the CLI: `scion hub env set` has no `--allow-progeny` flag.
 
 #### How it Works Under the Hood
-Enabling progeny propagation dynamically registers implicit access policies (e.g. `progeny-secret-access:<id>` or `progeny-envvar-access:<id>`) on the Scion Hub. When an agent starts, restarts, or resumes (including `as_needed` secret resolution) or reads secrets at runtime, Scion walks the calling agent's ancestry and delegation chain: if the secret's owner is at the root of that ancestry tree and has enabled progeny permission, and — when the agent's delegation chain carries recorded provenance — every recorded delegation hop on the chain allows `secret.use`, every agent delegator on the chain is live and holds `project:secret:read`, and the root user is active, admitted to the project, not restricted from `secret.use` by an access constraint, and the recorded author of the secret, then the agent inherits the secret (if a user-scoped secret is withheld at start by this check, a lower-precedence project, Runtime Broker, or Hub secret with the same key still applies; see [Security & Audit Logging](#security--audit-logging)).
+Enabling progeny propagation dynamically registers implicit access policies (e.g. `progeny-secret-access:<id>` or `progeny-envvar-access:<id>`) on the Scion Hub. When an agent starts, restarts, or resumes (including `as_needed` secret resolution) or reads secrets at runtime, Scion walks the calling agent's ancestry and delegation chain: if the secret's owner is at the root of that ancestry tree and has enabled progeny permission, and — when the agent's delegation chain carries recorded provenance — every recorded delegation hop on the chain allows `secret.use`, every agent delegator on the chain is live and holds `project:secret:read`, and the root user is active, admitted to the project, not restricted from `secret.use` by an access constraint, and the recorded author of the secret, then the agent inherits the secret (if a user-scoped secret is withheld at start by this check, a lower-precedence project, Runtime Broker, or Hub secret with the same key still applies; see [Security & Audit Logging](#security--audit-logging)). At start, restart, and resume, progeny-shared owner secrets are decided once per request on the owner-material chain, and a legacy chain with no recorded ancestry is withheld.
 
 ---
 
@@ -158,7 +158,7 @@ Hub-scope (`scope=hub`) environment variable and secret routes also require an u
 # Set a user-scoped variable
 scion hub env set API_URL=https://api.example.com
 
-# Set a project-scoped variable (inferred from current directory)
+# Set a project-scoped variable (a bare --project infers the directory's linked Hub project, else the 'scion use' project; or pass --project=<name|id>)
 scion hub env set --project LOG_LEVEL=debug
 
 # Set a variable only for a specific Runtime Broker
@@ -176,7 +176,7 @@ Secrets can be set manually via the CLI or Web Dashboard, or gathered interactiv
 # Set a user-scoped secret
 scion hub secret set ANTHROPIC_API_KEY sk-ant-api01-...
 
-# Set a project-scoped secret
+# Set a project-scoped secret (a bare --project infers the directory's linked Hub project, else the 'scion use' project; or pass --project=<name|id>)
 scion hub secret set --project DB_PASSWORD my-secure-password
 ```
 
@@ -524,6 +524,8 @@ When this field is non-empty, Scion creates secrets with **user-managed** replic
 When GCP Secret Manager is configured, Scion uses a **hybrid storage** model:
 - **Metadata** (name, type, scope) is stored in the Hub database.
 - **Secret values** are stored in GCP Secret Manager with automatic versioning.
+
+To move existing database-stored secrets to GCP Secret Manager on an upgraded Hub, run the `secret-hub-id-migration` maintenance migration from **Admin → Maintenance** (or `POST /api/v1/admin/maintenance/migrations/secret-hub-id-migration/run`; see [Hub server: Migrations](/scion/hosted/single-node/hub-server/#migrations)). It decodes each secret, writes the plaintext value to Secret Manager under its hub-prefixed name, reads it back to verify it, keeps the local database values until every secret is verified, repairs values that an earlier run copied in encoded form, and reopens once automatically if it was marked completed under an earlier release. The `scion hub secret migrate` CLI command is disabled and points to this maintenance migration.
 
 #### IAM Permissions and Secret Naming
 

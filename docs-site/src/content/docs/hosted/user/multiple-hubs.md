@@ -223,7 +223,7 @@ Inside an agent container, the agent's own project (`SCION_PROJECT_ID`) also app
 Note: in this directory, project 'bar' (~/src/bar, hub 'local') takes precedence; 'web' applies outside scion project directories.
 ```
 
-**The context project is used only by commands that need a project.** Commands that act on a login, the hub list, the server or the Runtime Broker never get one, and neither do `scion config` commands. `scion tunnel`, `scion ssh`, `scion ssh-config` and `scion vscode` do use it. To make a script independent of the current context, pass `--project` or `--global`.
+**The context project is used only by commands that need a project.** Commands that act on a login, the hub list, the server or the Runtime Broker never get one, and neither do `scion config` commands. `scion tunnel`, `scion ssh`, `scion ssh-config` and `scion vscode` do use it, and `scion hub env` and `scion hub secret` use it when passed a bare `--project` (outside a linked project directory). To make a script independent of the current context, pass `--project <name|id>` or `--global`.
 
 :::note[`--hub` in a linked directory]
 For commands that act on a project, `--hub` given in a directory linked to a different hub prints a warning, because the directory's project probably does not exist on the other hub:
