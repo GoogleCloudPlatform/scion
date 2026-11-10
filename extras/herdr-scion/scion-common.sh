@@ -515,7 +515,12 @@ herdr_socket_request() {
   }
 
   if command -v socat >/dev/null 2>&1; then
-    printf '%s\n' "$request_json" | socat -T 10 - "UNIX-CONNECT:${socket_path}"
+    # -t 10: after the request is sent (stdin EOF), wait up to 10 s for the
+    # reply. socat's default is 0.5 s, and a layout.apply that starts many
+    # panes can take longer; the reply was then lost although herdr applied
+    # the layout. herdr closes the connection after its reply, so a fast
+    # reply still returns at once.
+    printf '%s\n' "$request_json" | socat -T 10 -t 10 - "UNIX-CONNECT:${socket_path}"
     return $?
   fi
 

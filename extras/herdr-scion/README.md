@@ -9,13 +9,14 @@ A [herdr](https://github.com/herdrdev/herdr) plugin that integrates Scion agents
 - **Interactive attach** — Pick a running agent from a list and open it in a new pane.
 - **Start and attach** — Create a new agent from a Scion template and open it in one step.
 - **State bridge** — Agent states (working, blocked, idle, unknown) are polled from Scion and reported to herdr's status indicators.
-- **Dashboard** — Create a tiled layout with all running agents in a single action. Invoking it again replaces the previous dashboard instead of adding another.
+- **Dashboard** — Create a tiled layout with all running agents in a single action, split over several tabs when there are many agents. Invoking it again replaces the previous dashboard instead of adding another.
 - **Reconnection** — If a session disconnects (e.g., inner tmux detach), the wrapper auto-reconnects after 10 seconds, and stops after 3 short-lived sessions in a row.
 - **Hub support** — Works identically for local and Hub-connected Scion agents.
 
 ## Requirements
 
-- [herdr](https://github.com/herdrdev/herdr) v0.6.10 or later
+- [herdr](https://github.com/herdrdev/herdr) v0.6.10 or later; the dashboard
+  needs herdr v0.9.1 or later
 - [scion](https://github.com/scion-ai/scion) CLI on PATH
 - `jq` for JSON processing
 - `fzf` (optional) for fuzzy interactive selection; falls back to a numbered menu
@@ -44,6 +45,17 @@ On herdr startup, the plugin runs `scion-discover.sh` which:
 3. Creates a herdr pane for each agent not already represented
 4. Starts the state bridge in the background
 
+Each run that gets past `scion list` writes one timing line to `herdr plugin
+log`, in milliseconds, numbers only:
+
+```
+[scion-discover] timing ms: scion_list=19 pane_list=11 diff=109 opens=10 opens_total=565 total=743
+```
+
+`scion_list` is the `scion list` call, `pane_list` herdr's pane list,
+`diff` the comparison of the two, `opens` and `opens_total` the number of
+panes opened and the time spent opening them, and `total` the whole run.
+
 If no project is resolved, the action fails and says so: `No scion project
 selected: run 'scion use <project>'`; the details are in `herdr plugin log`.
 
@@ -56,7 +68,9 @@ With herdr's default settings a notification does not appear on screen
 next — no project selected, no running agents, a dashboard that could not
 read herdr's tab list — also open a small **notice** overlay pane. It shows
 the fixed text and closes when you press Enter, or by itself after 30
-seconds. At most one notice opens per discovery or dashboard run.
+seconds. A dashboard spread over more than one tab opens one too, saying how
+many agents are in how many tabs. At most one notice opens per discovery or
+dashboard run.
 
 ### Actions
 
@@ -67,7 +81,7 @@ All actions are available in herdr's action palette:
 | **Attach to Scion Agent** | Pick one of the project's running agents and open it in a new pane |
 | **Start Scion Agent** | Choose one of the project's templates, name the agent, and start+attach in one step |
 | **Refresh Scion Agents** | Re-run discovery to pick up newly started agents |
-| **Scion Agent Dashboard** | Create a tiled layout (tab `scion: <project>`) with the project's running agents, replacing an earlier one |
+| **Scion Agent Dashboard** | Create a tiled layout (tab `scion: <project>`, or tabs `scion: <project> [k/P]` for many agents) with the project's running agents, replacing an earlier one |
 
 ### Manual Invocation
 
@@ -199,7 +213,7 @@ The `scion-attach-wrapper.sh` script wraps `scion attach` with:
 
 1. **Scope check**: Before each scion call it checks that the pinned project still matches (see [Project Scope](#project-scope)). If it doesn't, it calls nothing and waits.
 2. **Idempotent start-or-attach**: Checks `scion list` before deciding whether to attach or start. This handles the Hub-mode gap where `scion start -a` may not be idempotent for already-running agents.
-3. **Reconnection loop**: If `scion attach` exits while the agent is still running (e.g., the user pressed Ctrl-b d inside the inner tmux), the wrapper waits 10 seconds then reconnects. Press Enter to reconnect immediately, or Ctrl-C to close the pane. This covers deliberate detaches and local runtimes, which `scion attach`'s own reconnect doesn't.
+3. **Reconnection loop**: If `scion attach` exits while the agent is still running (e.g., the user pressed ctrl+b ctrl+b d, see [Keys](#keys)), the wrapper waits 10 seconds then reconnects. Press Enter to reconnect immediately, or Ctrl-C to close the pane. This covers deliberate detaches and local runtimes, which `scion attach`'s own reconnect doesn't.
 4. **Reconnect cap**: After 3 sessions in a row that each lasted under 60 seconds, the wrapper stops reconnecting by itself and waits for Enter. `scion attach` already retries a dropped connection itself, so repeated short sessions mean that has given up too.
 5. **Graceful exit**: When the agent stops running, the wrapper prints a status message and waits for the user to dismiss.
 
@@ -227,16 +241,38 @@ one `jq` call):
 - 2 agents: side-by-side (horizontal split)
 - 3+ agents: grid layout (alternating horizontal and vertical splits)
 
+herdr refuses a layout with more than 24 panes, so the dashboard is paged:
+the running agents, sorted by project and name, are split into pages of at
+most `SCION_DASHBOARD_PAGE_SIZE` panes (default 16, see
+[Configuration](#configuration)), one tab per page.
+
 Its panes are labelled `scion-dash:<project>/<name>` (see
-[Pane Labels](#pane-labels)) and open in a tab labelled `scion: <project>`
-(`scion: all projects` in all mode), in the workspace you invoked it from.
-There is one dashboard per project and workspace: invoking it again builds
-the new tab first, then closes every earlier tab with exactly that label in
-that workspace, so it always shows the current agents and never stacks.
-Closing a dashboard tab only ends its attach panes; the agents and their own
-`scion:` panes are untouched. Dashboards from older plugin versions (same tab
-label, panes labelled `scion:`) are replaced the same way. If herdr's tab
-list cannot be read, the dashboard is not opened, and a notice says so.
+[Pane Labels](#pane-labels)). With one page, they open in a tab labelled
+`scion: <project>` (`scion: all projects` in all mode); with more, in tabs
+labelled `scion: <project> [k/P]` (page k of P), in the workspace you
+invoked it from. The first page is then shown, and when there is more than
+one page a notice says how many agents are in how many tabs.
+
+There is one dashboard per project and workspace: its tabs are the tab
+labelled exactly `scion: <project>` and the tabs labelled
+`scion: <project> [k/P]`. Invoking it again builds all the new tabs first,
+then closes every earlier dashboard tab of that project in that workspace,
+so it always shows the current agents and never stacks; a one-tab and a
+several-tab dashboard replace each other. If a page cannot be built, the
+tabs already made for this run are closed, the earlier dashboard stays, and
+a notification says the dashboard failed. Closing a dashboard tab only ends
+its attach panes; the agents and their own `scion:` panes are untouched.
+Dashboards from older plugin versions (same tab label, panes labelled
+`scion:`) are replaced the same way. If herdr's tab list cannot be read, the
+dashboard is not opened, and a notice says so.
+
+Known limits:
+- Two dashboards opened at the same moment for the same project can
+  interfere: a failed run may close the other run's page of the same label.
+- A herdr reply slower than 10 seconds can leave an extra dashboard tab; the
+  next dashboard closes it.
+- With `nc` as the socket client there is no reply timeout (`socat` and
+  `python3` wait up to 10 seconds).
 
 ### Notice Pane
 
@@ -250,8 +286,24 @@ removes that file only if it is directly in the plugin state directory
 600. Otherwise it shows a fixed fallback line and touches nothing.
 `SCION_NOTICE_TIMEOUT` (default 30) sets the auto-close delay.
 
-Standing rule: notices carry fixed text only; if a notice ever carries
-request or agent data, strip C1 bytes (0x80-0x9f) as well as C0.
+Standing rule: notices carry text built by the plugin only: fixed text,
+which may include integers such as agent and tab counts. If a notice ever
+carries request or agent data, strip C1 bytes (0x80-0x9f) as well as C0.
+
+### Keys
+
+herdr's prefix is `ctrl+b`, the same as the inner tmux of an agent's
+session. A single `ctrl+b` goes to herdr. Inside an agent pane, press
+`ctrl+b` twice to send `ctrl+b` to the inner tmux: for example
+`ctrl+b ctrl+b d` detaches the attach, and the pane reconnects by itself
+after about 10 seconds. herdr's own detach is `prefix+q`.
+
+The sidebar shows each agent's state. With herdr's default `dots` style,
+working, blocked and done differ only by colour; setting
+`[ui] status_indicators = "symbols"` in herdr's config shows ◐ × ✓ instead
+(the plugin reports idle, working, blocked or unknown; herdr itself shows
+done for an idle agent you have not looked at yet).
+This is herdr's setting; the plugin does not change it.
 
 ## Configuration
 
@@ -263,6 +315,15 @@ Environment variables for tuning:
 | `SCION_BRIDGE_INTERVAL` | `4` | State bridge poll interval in seconds |
 | `SCION_BRIDGE_PIDFILE` | `$HERDR_PLUGIN_STATE_DIR/scion-state-bridge.pid` | PID file path for singleton enforcement |
 | `SCION_NOTICE_TIMEOUT` | `30` | Seconds before the notice pane closes by itself |
+| `SCION_DASHBOARD_PAGE_SIZE` | `16` | Dashboard panes per tab |
+
+Set these in the environment herdr starts with; only `SCION_HERDR_SCOPE` is
+also read from the plugin config file.
+
+`SCION_DASHBOARD_PAGE_SIZE` takes a plain decimal integer, clamped to 1..24
+(herdr's limit for one layout); anything else uses 16. A clamp or a fallback
+writes one line to `herdr plugin log` with the size used; the line names
+neither the setting nor its value.
 
 ## Architecture
 
@@ -275,7 +336,7 @@ herdr pane (PTY)
           -> harness (Claude Code, Gemini CLI, etc.)
 ```
 
-Terminal resize propagates through the full chain. Herdr's detach (herdr keybind) leaves the inner session running. The inner tmux detach (Ctrl-b d) triggers the wrapper's reconnection logic.
+Terminal resize propagates through the full chain. Herdr's detach (herdr keybind) leaves the inner session running. The inner tmux detach (ctrl+b ctrl+b d, see [Keys](#keys)) triggers the wrapper's reconnection logic.
 
 ## Troubleshooting
 
@@ -319,8 +380,8 @@ Terminal resize propagates through the full chain. Herdr's detach (herdr keybind
 - Run `scion use --hub <name>` (after `scion hub add <name> <url>`), or `scion server start` for the local hub, or use the default mode
 
 ### Keybinding conflicts
-- Herdr and the inner tmux may both use Ctrl-b as a prefix
-- Configure Scion's inner tmux to use a different prefix (e.g., Ctrl-a), or adjust herdr's keybinding in `~/.config/herdr/config.toml`
+- Herdr and the inner tmux both use ctrl+b as a prefix: press ctrl+b twice to reach the inner tmux (see [Keys](#keys))
+- Alternatively, configure Scion's inner tmux to use a different prefix (e.g., ctrl+a), or change herdr's prefix in `~/.config/herdr/config.toml`
 
 ## Uninstalling
 

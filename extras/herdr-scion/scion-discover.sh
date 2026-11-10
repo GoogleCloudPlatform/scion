@@ -22,6 +22,26 @@ source "${SCRIPT_DIR}/scion-common.sh"
 
 log() { echo "[scion-discover] $*" >&2; }
 
+# Milliseconds since the epoch, for the timing line: bash 5's EPOCHREALTIME
+# when set, else GNU date's %3N, else whole seconds (BSD date has
+# no %N; bash 3.2 has no EPOCHREALTIME).
+now_ms() {
+  local t
+  if [[ -n "${EPOCHREALTIME:-}" ]]; then
+    t="${EPOCHREALTIME/[.,]/}"
+    if [[ "$t" =~ ^[0-9]+$ ]]; then
+      echo $((t / 1000))
+      return 0
+    fi
+  fi
+  t="$(date +%s%3N 2>/dev/null)"
+  if [[ "$t" =~ ^[0-9]+$ ]]; then
+    echo "$t"
+  else
+    echo $(( $(date +%s) * 1000 ))
+  fi
+}
+
 # Running agents as TSV rows: name, then (all mode only) project,
 # projectPath and projectId, "-" when empty (read with IFS=tab collapses
 # empty fields). Uses .slug // .name because slug is omitempty in local/podman
@@ -72,6 +92,8 @@ check_deps() {
 }
 
 main() {
+  local t_start t_list t_panes t_diff_end open_ms=0 open_t
+  t_start="$(now_ms)"
   check_deps
 
   SCOPE_MODE_ALL=0
@@ -91,12 +113,15 @@ main() {
   fi
 
   local agents
+  t_list="$(now_ms)"
   if ! agents="$(running_agents)"; then
     log "scion list failed or was truncated — see the error above."
     exit 1
   fi
 
   if [[ -z "$agents" ]]; then
+    t_panes="$(now_ms)"
+    log "timing ms: scion_list=$((t_panes - t_list)) pane_list=0 diff=0 opens=0 opens_total=0 total=$((t_panes - t_start))"
     log "No running Scion agents found."
     notify_user "No running Scion agents found."
     open_notice "$SCION_NOTICE_NO_AGENTS" "$SCION_NOTICE_NO_AGENTS_HINT"
@@ -104,8 +129,10 @@ main() {
     return 0
   fi
 
+  t_panes="$(now_ms)"
   local existing
   existing="$(existing_pane_agents)"
+  t_diff_end="$(now_ms)"
 
   local created=0 failed=0
   local name project project_path project_id
@@ -132,15 +159,24 @@ main() {
     fi
 
     log "Creating pane for agent: $identifier"
+    open_t="$(now_ms)"
     if ! open_agent_pane "$name" >/dev/null; then
+      open_ms=$((open_ms + $(now_ms) - open_t))
       log "Could not open a pane for $identifier — skipping."
       failed=$((failed + 1))
       continue
     fi
+    open_ms=$((open_ms + $(now_ms) - open_t))
     created=$((created + 1))
   done <<< "$agents"
 
+  local t_end
+  t_end="$(now_ms)"
   log "Discovery complete. Created $created new pane(s)."
+  # Phase timings in ms, numbers only: scion list, herdr pane
+  # list, the diff (the loop without its pane opens), the pane opens (count
+  # and total; failed opens count too), and the whole run.
+  log "timing ms: scion_list=$((t_panes - t_list)) pane_list=$((t_diff_end - t_panes)) diff=$((t_end - t_diff_end - open_ms)) opens=$((created + failed)) opens_total=${open_ms} total=$((t_end - t_start))"
   if [[ "$failed" -gt 0 ]]; then
     notify_user "Could not open a pane for ${failed} Scion agent(s); see 'herdr plugin log'"
   fi
