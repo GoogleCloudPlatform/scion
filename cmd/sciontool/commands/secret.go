@@ -7,6 +7,7 @@ package commands
 import (
 	"context"
 	"encoding/base64"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -42,7 +43,9 @@ var secretSetCmd = &cobra.Command{
 
 By default, the secret is scoped to the current agent's project. Subsequent
 agents in the same project will receive this secret automatically. Use
---scope=user to store a personal credential visible only to your agents.
+--scope=user to save a personal credential for your agents: a user-scope
+secret waits for your approval in Scion before any agent receives it, and
+--force has no effect on it.
 
 If VALUE starts with @, the remainder is treated as a file path. The file
 contents are read and base64-encoded, and --type defaults to "file".
@@ -158,6 +161,14 @@ Examples:
 			os.Exit(1)
 		}
 
+		if resp.Pending() {
+			msg := fmt.Sprintf("Secret %q saved, pending approval in Scion (scope: %s)", resp.Key, resp.Scope)
+			if resp.ReplacesExisting {
+				msg += "; it replaces your existing secret once approved"
+			}
+			log.Info("%s", msg)
+			return
+		}
 		log.Info("Secret %q stored (scope: %s)", resp.Key, resp.Scope)
 	},
 }

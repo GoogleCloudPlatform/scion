@@ -28,15 +28,19 @@ _COPILOT_CONFIG = os.path.join(
 )
 
 
-def _capture_config_json(force: bool = False, scope: str = "user") -> bool:
-    """Capture ~/.copilot/config.json as a COPILOT_CONFIG file secret."""
+def _capture_config_json(force: bool = False, scope: str = "user") -> str:
+    """Capture ~/.copilot/config.json as a COPILOT_CONFIG file secret.
+
+    Returns "captured", "held" (another agent's pending secret holds the
+    name), or "failed".
+    """
     if not os.path.isfile(_COPILOT_CONFIG):
         print(
             f"capture-auth: {_COPILOT_CONFIG} not found — "
             "run 'copilot login' first, then re-run this script",
             file=sys.stderr,
         )
-        return False
+        return "failed"
 
     cmd = [
         "sciontool", "secret", "set", "COPILOT_CONFIG",
@@ -54,23 +58,26 @@ def _capture_config_json(force: bool = False, scope: str = "user") -> bool:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
     except FileNotFoundError:
         print("capture-auth: sciontool not found in PATH", file=sys.stderr)
-        return False
+        return "failed"
     except subprocess.TimeoutExpired:
         print("capture-auth: sciontool timed out setting COPILOT_CONFIG", file=sys.stderr)
-        return False
+        return "failed"
 
-    if result.returncode != 0:
-        stderr = result.stderr.strip()
-        if "already exists" in stderr.lower():
-            print(
-                'capture-auth: COPILOT_CONFIG already exists (use --force to overwrite)',
-            )
-            return False
-        print(f"capture-auth: failed to set COPILOT_CONFIG: {stderr}", file=sys.stderr)
-        return False
+    outcome = scion_harness.secret_set_outcome(result)
+    if outcome == "held":
+        print(scion_harness.held_message("COPILOT_CONFIG"))
+        return "held"
+    if outcome == "conflict":
+        print(
+            'capture-auth: COPILOT_CONFIG already exists (use --force to overwrite)',
+        )
+        return "failed"
+    if outcome == "error":
+        print(f"capture-auth: failed to set COPILOT_CONFIG: {result.stderr.strip()}", file=sys.stderr)
+        return "failed"
 
-    print(f"capture-auth: COPILOT_CONFIG: captured from {_COPILOT_CONFIG}")
-    return True
+    print(scion_harness.captured_message("COPILOT_CONFIG", _COPILOT_CONFIG, outcome))
+    return "captured"
 
 
 if __name__ == "__main__":
@@ -82,8 +89,10 @@ if __name__ == "__main__":
     rc = scion_harness.capture_auth_main()
 
     force = "--force" in sys.argv
-    config_ok = _capture_config_json(force, known.scope)
+    config = _capture_config_json(force, known.scope)
 
-    if rc != 0 and config_ok:
+    if config == "held":
+        sys.exit(scion_harness._CA_EXIT_CONFLICT)
+    if rc != 0 and config == "captured":
         sys.exit(0)
     sys.exit(rc)

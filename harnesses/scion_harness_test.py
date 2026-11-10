@@ -2971,5 +2971,95 @@ class TestAgentPluginsReconcile(unittest.TestCase):
         self.assertEqual(len(sections), 1)
         self.assertIn("## real", sections[0])
 
+class TestCaptureAuthPendingApproval(unittest.TestCase):
+    """capture_auth_main with user-scope saves that wait for approval."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        bundle = os.path.join(self.tmp.name, "bundle")
+        os.makedirs(os.path.join(bundle, "inputs"))
+        self.source = os.path.join(self.tmp.name, "creds.json")
+        with open(self.source, "w", encoding="utf-8") as f:
+            f.write("{}")
+        with open(os.path.join(bundle, "inputs", "capture-auth-config.json"), "w", encoding="utf-8") as f:
+            json.dump({"credentials": [{"key": "TOOL_AUTH", "source": self.source,
+                                        "type": "file", "target": "~/.tool/creds.json"}]}, f)
+        self.bundle = bundle
+
+    def run_capture(self, results, argv=()):
+        """Run capture_auth_main with sciontool answering results in turn."""
+        calls = []
+
+        def fake_run(cmd, **_kwargs):
+            calls.append(cmd)
+            rc, stderr = results[min(len(calls), len(results)) - 1]
+            return sh.subprocess.CompletedProcess(cmd, rc, stdout="", stderr=stderr)
+
+        out = []
+        with mock.patch.object(sh.subprocess, "run", side_effect=fake_run), \
+                mock.patch("builtins.print", side_effect=lambda *a, **k: out.append(" ".join(str(x) for x in a))):
+            rc = sh.capture_auth_main(["--bundle", self.bundle, *argv])
+        return rc, calls, "\n".join(out)
+
+    def test_outcome_classification(self):
+        cp = sh.subprocess.CompletedProcess
+        cases = [
+            (cp([], 0, "", 'INFO Secret "K" saved, pending approval in Scion (scope: user)'), "pending"),
+            (cp([], 0, "", 'INFO Secret "K" stored (scope: project)'), "stored"),
+            (cp([], 1, "", "ERROR secret \"K\": ... (secret_pending_held_by_other_agent)"), "held"),
+            (cp([], 1, "", 'ERROR secret "K" already exists (use --force to overwrite)'), "conflict"),
+            (cp([], 1, "", "ERROR hub returned error 500"), "error"),
+        ]
+        for result, want in cases:
+            with self.subTest(want=want):
+                self.assertEqual(sh.secret_set_outcome(result), want)
+
+    def test_user_scope_reauth_completes_in_one_run(self):
+        # Re-auth for a name that already has an approved secret: the Hub
+        # accepts it for approval, so one run without --force succeeds.
+        rc, calls, out = self.run_capture(
+            [(0, 'INFO Secret "TOOL_AUTH" saved, pending approval in Scion (scope: user); '
+                 "it replaces your existing secret once approved")])
+        self.assertEqual(rc, sh._CA_EXIT_OK)
+        self.assertEqual(len(calls), 1)
+        self.assertNotIn("--force", calls[0])
+        self.assertIn("--scope", calls[0])
+        self.assertEqual(calls[0][calls[0].index("--scope") + 1], "user")
+        self.assertIn("capture-auth: TOOL_AUTH: captured (pending approval in Scion)", out)
+        self.assertNotIn("CONFLICT", out)
+
+    def test_force_still_accepted(self):
+        rc, calls, out = self.run_capture(
+            [(0, 'INFO Secret "TOOL_AUTH" saved, pending approval in Scion (scope: user)')], argv=["--force"])
+        self.assertEqual(rc, sh._CA_EXIT_OK)
+        self.assertIn("--force", calls[0])
+        self.assertIn("captured (pending approval in Scion)", out)
+
+    def test_held_by_other_agent_is_the_conflict(self):
+        rc, calls, out = self.run_capture(
+            [(1, 'ERROR secret "TOOL_AUTH": a pending secret with this name, saved by another agent, '
+                 "is awaiting your approval in Scion; approve or reject it before saving this one "
+                 "(secret_pending_held_by_other_agent)")])
+        self.assertEqual(rc, sh._CA_EXIT_CONFLICT)
+        self.assertEqual(len(calls), 1)
+        self.assertIn("saved by another agent", out)
+        # Not the "already exists" line: --force would not help.
+        self.assertNotIn("already exists", out)
+
+    def test_project_scope_conflict_unchanged(self):
+        rc, _, out = self.run_capture(
+            [(1, 'ERROR secret "TOOL_AUTH" already exists (use --force to overwrite)')],
+            argv=["--scope", "project"])
+        self.assertEqual(rc, sh._CA_EXIT_CONFLICT)
+        self.assertIn('CONFLICT: secret "TOOL_AUTH" already exists (use --force to overwrite)', out)
+
+    def test_project_scope_store_unchanged(self):
+        rc, _, out = self.run_capture(
+            [(0, 'INFO Secret "TOOL_AUTH" stored (scope: project)')], argv=["--scope", "project"])
+        self.assertEqual(rc, sh._CA_EXIT_OK)
+        self.assertIn(f"capture-auth: TOOL_AUTH: captured from {self.source}", out)
+
+
 if __name__ == "__main__":
     unittest.main()
