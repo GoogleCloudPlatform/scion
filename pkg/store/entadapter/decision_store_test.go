@@ -696,9 +696,10 @@ func TestGetDecisionAnswersByResponseMessageIDs(t *testing.T) {
 	got, err := f.cs.GetDecisionAnswersByResponseMessageIDs(ctx, []string{in.ResponseMessage.ID, uuid.NewString(), "not-a-uuid"})
 	require.NoError(t, err)
 	require.Len(t, got, 1)
-	assert.Equal(t, a.ID, got[in.ResponseMessage.ID].ID)
-	assert.Equal(t, "no", got[in.ResponseMessage.ID].ChoiceLabel)
-	assert.Equal(t, res.Decisions[0].RowID, got[in.ResponseMessage.ID].DecisionRowID)
+	require.Len(t, got[in.ResponseMessage.ID], 1, "a one-click response has one answer")
+	assert.Equal(t, a.ID, got[in.ResponseMessage.ID][0].ID)
+	assert.Equal(t, "no", got[in.ResponseMessage.ID][0].ChoiceLabel)
+	assert.Equal(t, res.Decisions[0].RowID, got[in.ResponseMessage.ID][0].DecisionRowID)
 
 	empty, err := f.cs.GetDecisionAnswersByResponseMessageIDs(ctx, nil)
 	require.NoError(t, err)

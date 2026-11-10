@@ -197,7 +197,7 @@ func TestChoiceSetAnswer_ShapeAndIdempotency(t *testing.T) {
 	f := newChoicesFixture(t)
 	resp := f.sendSetToBob(t)
 	r := resp.Decisions
-	other := f.sendPromptToBob(t, twoDecisions, false)
+	other := f.sendPromptToBob(t, `[{"id":"E1","question":"Other?","choices":["yes","no"]},{"id":"E2","question":"Other two?","choices":["yes","no"]}]`, false)
 
 	for name, pairs := range map[string][]string{
 		"empty":          nil,
@@ -286,14 +286,14 @@ func TestDecisionAnswer_BatchRequired(t *testing.T) {
 func TestChoiceSetAnswer_AllConfirmNotDelivered(t *testing.T) {
 	f := newChoicesFixture(t)
 	_, res := f.topicPrompt(t, twoDecisions, false)
-	for _, d := range res.Decisions {
-		f.recordInterpreted(t, f.alice, d.RowID, "1")
-	}
+	// Each row's own first choice: D234 has 1 and 2, the second decision a and b.
+	f.recordInterpreted(t, f.alice, res.Decisions[0].RowID, "1")
+	f.recordInterpreted(t, f.alice, res.Decisions[1].RowID, "a")
 	row, err := f.store.GetDecision(context.Background(), res.Decisions[0].RowID)
 	require.NoError(t, err)
 	before := len(f.dispatcher.getMessages())
 
-	rr := f.submitSet(t, f.alice, row.MessageID, "", res.Decisions[0].RowID, "1", res.Decisions[1].RowID, "1")
+	rr := f.submitSet(t, f.alice, row.MessageID, "", res.Decisions[0].RowID, "1", res.Decisions[1].RowID, "a")
 	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
 	out := decodeSetResponse(t, rr)
 	for _, v := range out.Decisions {

@@ -563,7 +563,7 @@ func TestDecisionAnswer_PublishesChoiceUpdated(t *testing.T) {
 func TestChoicesHistory_ViewsGatedByExperiment(t *testing.T) {
 	f := newChoicesFixture(t)
 	msg, _ := f.topicPrompt(t, twoDecisions, false)
-	single, res := f.topicPrompt(t, oneDecision, false)
+	single, res := f.topicPrompt(t, `[{"id":"D300","question":"Ship the **feature** now?","choices":["yes","no"],"default":"yes"}]`, false)
 	rr := f.answer(t, f.bob, res.Decisions[0].RowID, map[string]interface{}{"choice_id": "1"})
 	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
 	var ans DecisionAnswerResponse
@@ -787,7 +787,7 @@ func TestDecisionAnswer_IdempotencyKeyKeepsChecks(t *testing.T) {
 	_, otherRes := f.topicPrompt(t, `[{"id":"Q1","question":"Which?","choices":["a","b"]}]`, false)
 	other := otherRes.Decisions[0].RowID
 	f.topicPrompt(t, `[{"id":"Q1","question":"Which, again?","choices":["a","b"]}]`, true)
-	rr = f.answer(t, f.bob, other, map[string]interface{}{"choice_id": "a", "idempotency_key": "bob-replaced"})
+	rr = f.answer(t, f.bob, other, map[string]interface{}{"choice_id": "1", "idempotency_key": "bob-replaced"})
 	require.Equal(t, http.StatusConflict, rr.Code, "body: %s", rr.Body.String())
 	assert.Equal(t, ErrCodeDecisionReplaced, errorCode(t, rr))
 
