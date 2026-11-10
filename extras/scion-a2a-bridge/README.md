@@ -354,7 +354,7 @@ reply_poll:
   concurrency: 64    # cap on conversation reads in flight per bridge process
 ```
 
-With `enabled: false` the bridge behaves as before reply polling existed: no same-caller check, no preflight, no reader. The push path's check that a pushed message comes from the caller's own user topic still applies. Agent callers (federated agents) always wait on the push path; federated users wait on it only when `enabled` is `false`.
+With `enabled: false` the bridge behaves as before reply polling existed: no same-caller check, no preflight, no reader. The push path's check that a pushed message comes from the caller's own user topic still applies. Agent callers (federated agents) always wait on the push path; federated users wait on it when `enabled` is `false`, or, as with any caller, when the Hub returns no message ID for the send.
 
 ### Behaviour and limits
 

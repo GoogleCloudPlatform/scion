@@ -92,7 +92,7 @@ No sample reported "could not check". Subprocess spawners in the module's tests:
 - No hub shards: the diff against main stays under `extras/scion-a2a-bridge/` and `.design/project-log/`.
 - `make ci` was not run. The diff touches no root-module code, and the root lint and tests do not cover the bridge module.
 
-## Round 1 fixes
+## Follow-up: README, two-visitor test, issue reference
 
 Base: main `9e87b08984a6` (not merged again). Item 10: `2a335a1e`. Starting head: `7a8970eb1`. No non-test code changed.
 
