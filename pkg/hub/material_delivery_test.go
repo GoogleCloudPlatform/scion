@@ -1050,9 +1050,9 @@ func TestDispatchDelivery_GCPSecretRefMatchesResolve(t *testing.T) {
 
 	// set stores a file secret through the GCP backend and returns its
 	// record as written, with the gcpsm: ref Set records.
-	set := func(name, scope string) *store.Secret {
+	setAt := func(name, scope, target string) *store.Secret {
 		_, meta, err := gcp.Set(ctx, &secret.SetSecretInput{
-			Name: name, Value: "v-" + name, SecretType: store.SecretTypeFile, Target: "/etc/md/" + strings.ToLower(name),
+			Name: name, Value: "v-" + name, SecretType: store.SecretTypeFile, Target: target,
 			Scope: scope, ScopeID: m.scopeID(scope), InjectionMode: store.InjectionModeAlways, CreatedBy: m.projectOwnerID,
 		})
 		require.NoError(t, err)
@@ -1061,13 +1061,17 @@ func TestDispatchDelivery_GCPSecretRefMatchesResolve(t *testing.T) {
 		require.NoError(t, err)
 		return rec
 	}
+	set := func(name, scope string) *store.Secret {
+		return setAt(name, scope, "/etc/md/"+strings.ToLower(name))
+	}
 	repoint := func(rec *store.Secret, ref string) {
 		applied, err := m.store.UpdateSecretRefIfMatches(ctx, rec.Key, rec.Scope, rec.ScopeID, rec.SecretRef, rec.Version, ref)
 		require.NoError(t, err)
 		require.True(t, applied)
 	}
 	project := set("MD_GCP_PREFIXED", store.ScopeProject)
-	hub := set("MD_GCP_LEGACY_EMPTY", store.ScopeHub)
+	// The only hub-scope file secret either path delivers.
+	hub := setAt("scion-telemetry-gcp-credentials", store.ScopeHub, "~/.scion/telemetry-gcp-credentials.json")
 	repoint(hub, "")
 	broker := set("MD_GCP_UNPREFIXED", store.ScopeRuntimeBroker)
 	repoint(broker, smPrefix+"unprefixed-ref")
@@ -1518,8 +1522,12 @@ func TestDispatchDelivery_LocalSelectionMatchesResolve(t *testing.T) {
 	require.NoError(t, err)
 	old, _, err := m.d.resolveSecrets(ctx, m.agent)
 	require.NoError(t, err)
-	require.Len(t, got, 8)
+	// The hub-scope file secret is not delivered by either path.
+	require.Len(t, got, 7)
 	assert.ElementsMatch(t, old, got)
+	for _, r := range got {
+		assert.NotEqual(t, "md-lp-file-"+store.ScopeHub, r.Name)
+	}
 }
 
 // TestMaterialAssociation_FactDefensiveBranches: the association fact's

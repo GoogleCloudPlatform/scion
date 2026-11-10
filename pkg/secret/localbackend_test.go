@@ -495,6 +495,7 @@ func TestLocalBackend_ResolveExcludesInternalSecrets(t *testing.T) {
 		Target:         "HUB_API_TOKEN",
 		Scope:          store.ScopeHub,
 		ScopeID:        "test-hub-id",
+		InjectionMode:  store.InjectionModeAlways,
 	})
 
 	// Seed a user-scoped secret

@@ -417,6 +417,15 @@ func (d *HTTPAgentDispatcher) selectDeliverySecrets(ctx context.Context, sel *de
 			if m.SecretType == store.SecretTypeInternal {
 				continue
 			}
+			// The same hub-scope rule as the backends' Resolve, applied
+			// before authorization and before any value is read, so an
+			// excluded hub row never shadows a broker-scope row.
+			if sc.scope == store.ScopeHub {
+				m.Scope = store.ScopeHub
+				if !secret.HubSecretDeliverable(m) {
+					continue
+				}
+			}
 			if sc.scope != store.ScopeUser {
 				allowed, err := sel.authorize(ctx, MaterialKindSecret, materialRecordSecret, m.ID, m.Name, sc.scope, sc.scopeID)
 				if err != nil {
