@@ -86,7 +86,7 @@
         "updated:string"
       ]
     },
-    "/api/v1/projects/{project}/agents?limit=500": {
+    "/api/v1/projects/{project}/agents?include=authority\u0026limit=500": {
       "status": 200,
       "fields": [
         "_capabilities.actions:array",
@@ -115,6 +115,8 @@
         "agents[].appliedConfig.templateHash:string",
         "agents[].appliedConfig.templateId:string",
         "agents[].appliedConfig:object",
+        "agents[].authority.state:string",
+        "agents[].authority:object",
         "agents[].created:string",
         "agents[].createdBy:string",
         "agents[].deletedAt:string",
@@ -147,7 +149,7 @@
         "totalCount:number"
       ]
     },
-    "/api/v1/projects/{project}/agents?sort=updated\u0026dir=desc\u0026limit=25\u0026fit=50\u0026stats=1": {
+    "/api/v1/projects/{project}/agents?sort=updated\u0026dir=desc\u0026limit=25\u0026fit=50\u0026stats=1\u0026include=authority": {
       "status": 200,
       "fields": [
         "_capabilities.actions:array",
@@ -176,6 +178,8 @@
         "agents[].appliedConfig.templateHash:string",
         "agents[].appliedConfig.templateId:string",
         "agents[].appliedConfig:object",
+        "agents[].authority.state:string",
+        "agents[].authority:object",
         "agents[].created:string",
         "agents[].createdBy:string",
         "agents[].deletedAt:string",

@@ -462,8 +462,8 @@ var perfBudgetWebRequests = []string{
 	"/api/v1/projects/{project}/metrics-summary",
 	"/api/v1/projects/{project}/metrics/summary",
 	"/api/v1/projects/{project}/workspace/files?limit=500",
-	"/api/v1/projects/{project}/agents?sort=updated&dir=desc&limit=25&fit=50&stats=1",
-	"/api/v1/projects/{project}/agents?limit=500",
+	"/api/v1/projects/{project}/agents?sort=updated&dir=desc&limit=25&fit=50&stats=1&include=authority",
+	"/api/v1/projects/{project}/agents?include=authority&limit=500",
 }
 
 // perfBudgetWebSchema is the file format; fixture.mjs computes the same
