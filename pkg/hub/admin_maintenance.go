@@ -421,13 +421,14 @@ func (s *Server) resolveMaintenanceExecutor(key string) (MaintenanceExecutor, er
 		log.Debug("Resolved update-binary executor",
 			"installer", installer.Name(), "github_repo", mc.GitHubRepo)
 		return NewBinaryUpdateExecutor(BinaryUpdateOptions{
-			GitHubRepo:    mc.GitHubRepo,
-			Installer:     installer,
-			Releases:      s.updateReleaseSource(),
-			Catalog:       s.updateReleaseCatalog(),
-			Snapshotter:   s.updateSnapshotter(context.Background()),
-			SettingsCheck: s.requiredSettingsCheck,
-			PluginDir:     updatePluginDir(),
+			GitHubRepo:     mc.GitHubRepo,
+			Installer:      installer,
+			Releases:       s.updateReleaseSource(),
+			Catalog:        s.updateReleaseCatalog(),
+			Snapshotter:    s.updateSnapshotter(context.Background()),
+			SettingsCheck:  s.requiredSettingsCheck,
+			PluginDir:      updatePluginDir(),
+			DowngradeFloor: downgradeFloor,
 		}), nil
 	default:
 		return nil, fmt.Errorf("no executor registered for operation %q", key)

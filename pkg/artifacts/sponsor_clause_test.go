@@ -51,9 +51,8 @@ func (h *fakeHost) sponsorQuestions() []string {
 }
 
 // TestSponsorPassedToClauses: the service hands the recorded sponsor of
-// the artifact to the steward clause (stewardAuthority) and to the review
-// clause (reviewGrantAuthorized), and "" for an artifact with nothing
-// recorded (ptone/scion#6028).
+// the artifact to the steward clause (stewardAuthority), and "" for an
+// artifact with nothing recorded (ptone/scion#6028).
 func TestSponsorPassedToClauses(t *testing.T) {
 	f := newFixture(t, false)
 	recorded := f.seedOwned(PrincipalKindAgent, agentA.ref, "user-delegator")
@@ -66,9 +65,7 @@ func TestSponsorPassedToClauses(t *testing.T) {
 	got := f.host.sponsorQuestions()
 	for _, want := range []string{
 		"steward " + agentA.ref + " user-delegator",
-		"clause " + agentA.ref + " user-delegator",
 		"steward " + agentB.ref + " ",
-		"clause " + agentB.ref + " ",
 	} {
 		if !slices.Contains(got, want) {
 			t.Errorf("host was not asked %q; asked %q", want, got)
@@ -76,53 +73,23 @@ func TestSponsorPassedToClauses(t *testing.T) {
 	}
 }
 
-// mayOnlyHost has ReviewGrantAuthority but not ReviewGrantClauser, so the
-// service asks MayGrantReview.
-type mayOnlyHost struct {
-	Host
-	f *fakeHost
-}
-
-func (h mayOnlyHost) MayGrantReview(ctx context.Context, ownerAgentID, homeScope, sponsorRef string) bool {
-	return h.f.MayGrantReview(ctx, ownerAgentID, homeScope, sponsorRef)
-}
-
-// TestSponsorPassedToMayGrantReview: a host with only ReviewGrantAuthority
-// gets the recorded sponsor too.
-func TestSponsorPassedToMayGrantReview(t *testing.T) {
-	f := newFixture(t, false)
-	a := f.seedOwned(PrincipalKindAgent, agentA.ref, "user-delegator")
-	svc := NewService(mayOnlyHost{Host: f.host, f: f.host})
-	svc.SetStore(f.store)
-	svc.SetBlobStorage(f.blobs, "hub-1")
-	f.svc = svc
-	if rec := f.do(&userU, http.MethodGet, "/api/v1/artifacts/"+a.ID, nil, nil); rec.Code != http.StatusOK {
-		t.Fatalf("GET: %d %s", rec.Code, rec.Body.String())
-	}
-	if got := f.host.sponsorQuestions(); !slices.Contains(got, "review "+agentA.ref+" user-delegator") {
-		t.Errorf("MayGrantReview not asked with the recorded sponsor; asked %q", got)
-	}
-}
-
 // TestSponsorIgnoredUnlessAgentOwned pins the owner_kind gate the sponsor
-// relies on: an artifact not owned by an agent has no stewards and no
-// review-grant authority even when it carries a sponsor matching the
-// caller (as a row would after an ownership change), and the host is never
-// asked either clause for it.
+// relies on: an artifact not owned by an agent has no stewards even when it
+// carries a sponsor matching the caller (as a row would after an ownership
+// change), and the host is never asked the steward clause for it.
 func TestSponsorIgnoredUnlessAgentOwned(t *testing.T) {
 	f := newFixture(t, false)
 	a := f.seedOwned(PrincipalKindUser, "user-9", userU.ref)
-	// A host that would make anyone a steward and let userU grant review.
+	// A host that would make anyone a steward.
 	f.host.stewardAll = StewardClauseDelegator
-	f.host.allowReview(userU, "user-9", "project-1")
 	rec := f.do(&userU, http.MethodGet, "/api/v1/artifacts/"+a.ID, nil, nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET: %d %s", rec.Code, rec.Body.String())
 	}
 	resp := decodeInto[ArtifactResponse](t, rec)
-	if resp.CanShare || resp.CanGrantReview || resp.ShareAuthority != "" {
-		t.Errorf("user-owned artifact with a sponsor: canShare=%v canGrantReview=%v shareAuthority=%q",
-			resp.CanShare, resp.CanGrantReview, resp.ShareAuthority)
+	if resp.CanShare || resp.ShareAuthority != "" {
+		t.Errorf("user-owned artifact with a sponsor: canShare=%v shareAuthority=%q",
+			resp.CanShare, resp.ShareAuthority)
 	}
 	share := f.postJSON(&userU, "/api/v1/artifacts/"+a.ID+"/grants",
 		GrantRequest{SubjectKind: SubjectPrincipal, SubjectRef: PrincipalRef(PrincipalKindUser, "user-3"), Permission: GrantRead})

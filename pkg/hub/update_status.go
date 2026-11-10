@@ -609,7 +609,7 @@ func (s *Server) buildUpdateStatus(ctx context.Context, cur runningBuild) (*upda
 		Installer:    redactInstallerStatus(s.updateInstaller().Status(), mc.RepoPath),
 		UpdatePolicy: mc.UpdatePolicy,
 		Downgrade: updateStatusDowngrade{
-			Floor:              version.DowngradeFloor,
+			Floor:              downgradeFloor,
 			SnapshotsSupported: s.updateSnapshotter(ctx).SnapshotStatus().Supported,
 		},
 	}

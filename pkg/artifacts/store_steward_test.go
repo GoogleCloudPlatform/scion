@@ -329,7 +329,7 @@ func TestStewardRaceAnswersNotFound(t *testing.T) {
 	})
 }
 
-// TestStoreCreationEvents: PutGrant, PutReviewGrant and CreateLink need an
+// TestStoreCreationEvents: PutGrant and CreateLink need an
 // actor and record grant_created, grant_changed (only when the permission
 // changes) and link_created by it in the write's own transaction
 // (ptone/scion#4882); a refused write records nothing.
@@ -343,9 +343,6 @@ func TestStoreCreationEvents(t *testing.T) {
 		for _, bad := range []*Actor{nil, {Kind: "user", Ref: "u"}} {
 			if _, err := st.PutGrant(ctx, g(GrantRead), 10, true, bad); !errors.Is(err, errNoActor) {
 				t.Errorf("PutGrant with actor %+v: %v", bad, err)
-			}
-			if _, err := st.PutReviewGrant(ctx, g(GrantReview), 10, "project-1", bad); !errors.Is(err, errNoActor) {
-				t.Errorf("PutReviewGrant with actor %+v: %v", bad, err)
 			}
 			if err := st.CreateLink(ctx, linkGrant(a.ID, LinkTokenHash("x"), time.Now().Add(time.Hour)), 5, time.Now(), bad); !errors.Is(err, errNoActor) {
 				t.Errorf("CreateLink with actor %+v: %v", bad, err)
@@ -378,8 +375,8 @@ func TestStoreCreationEvents(t *testing.T) {
 		onlyEvent(t, st, a.ID, EventGrantChanged, admin)
 
 		rg := &Grant{ID: uuid.NewString(), ArtifactID: a.ID, SubjectKind: SubjectPrincipal, SubjectRef: "user:r", Permission: GrantReview, CreatedAt: time.Now()}
-		reviewActor := &Actor{Kind: PrincipalKindUser, Ref: "user-pa", Authority: AuthorityCustodianProjectAdmin}
-		if _, err := st.PutReviewGrant(ctx, rg, 10, "project-1", reviewActor); err != nil {
+		reviewActor := &Actor{Kind: PrincipalKindUser, Ref: "user-pa", Authority: AuthorityAdminGrant}
+		if _, err := st.PutGrant(ctx, rg, 10, true, reviewActor); err != nil {
 			t.Fatal(err)
 		}
 		if evs := eventsOf(t, st, a.ID); len(evs) == 0 || evs[len(evs)-1].Action != EventGrantCreated || evs[len(evs)-1].ActorRef != "user-pa" ||

@@ -56,6 +56,9 @@ const (
 	AuthorityCustodianProjectAdmin = "custodian_project_admin"
 	AuthorityRetention             = "retention"
 	AuthorityReconciler            = "reconciler"
+	// AuthorityMigration is a store migration's own change, such as
+	// 0014_review_ladder's conversions (see applyReviewLadder).
+	AuthorityMigration = "migration"
 	// AuthorityStewardProjectOwner and AuthorityStewardDelegator are the
 	// steward clauses (design D25): an owner of the home project of an
 	// artifact owned by an agent (artifact.steward there), and the user who

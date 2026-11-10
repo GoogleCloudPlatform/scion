@@ -30,7 +30,6 @@ import type { ArtifactResponse } from '../../client/artifacts.js';
 export interface AccessCapabilities {
   canManage: boolean;
   canShare: boolean;
-  canGrantReview: boolean;
   /** A steward's clause; '' for any caller who is not a steward. */
   shareAuthority: '' | 'project_owner' | 'delegator';
 }
@@ -38,16 +37,15 @@ export interface AccessCapabilities {
 /**
  * People and access: "edit" is the full people section (search users and
  * projects, change and remove); "bounded" adds review access and removes
- * any grant (a steward); "review-only" only gives review access, with no
- * grant list; "remove-only" lists grants with Remove only.
+ * any grant (a steward); "remove-only" lists grants with Remove only.
  */
-export type PeopleState = 'edit' | 'bounded' | 'review-only' | 'remove-only' | 'hidden';
+export type PeopleState = 'edit' | 'bounded' | 'remove-only' | 'hidden';
 
 /** Link sharing: "edit" creates and revokes; "revoke-only" lists and revokes. */
 export type LinksState = 'edit' | 'revoke-only' | 'hidden';
 
-/** Retention: "edit" changes the expiry; "read-only" shows it. */
-export type RetentionState = 'edit' | 'read-only' | 'hidden';
+/** Retention: "edit" changes the expiry. */
+export type RetentionState = 'edit' | 'hidden';
 
 export interface SectionStates {
   people: PeopleState;
@@ -73,14 +71,13 @@ export function capabilitiesFrom(r: ArtifactResponse | null | undefined): Access
   return {
     canManage: r?.canManage === true,
     canShare: r?.canShare === true,
-    canGrantReview: r?.canGrantReview === true,
     shareAuthority: auth === 'project_owner' || auth === 'delegator' ? auth : '',
   };
 }
 
 /** Whether the page offers Manage access: the caller may change access or retention. */
 export function showManageAccess(c: AccessCapabilities): boolean {
-  return c.canShare || c.canGrantReview;
+  return c.canShare;
 }
 
 /** Each section's state for a caller with these capabilities. */
@@ -88,7 +85,6 @@ export function sectionStates(c: AccessCapabilities, o: AccessOptions): SectionS
   let people: PeopleState = 'hidden';
   if (c.canManage) people = 'edit';
   else if (c.canShare) people = 'bounded';
-  else if (c.canGrantReview) people = 'review-only';
 
   let links: LinksState = 'hidden';
   if (c.canManage || (c.canShare && o.stewardCreateLink)) links = 'edit';
@@ -96,7 +92,6 @@ export function sectionStates(c: AccessCapabilities, o: AccessOptions): SectionS
 
   let retention: RetentionState = 'hidden';
   if (c.canShare) retention = 'edit';
-  else if (c.canGrantReview) retention = 'read-only';
 
   return { people, links, retention };
 }
@@ -115,9 +110,8 @@ export function needsAccessData(st: SectionStates): boolean {
 }
 
 /** The section states of the dialog's fixed modes, as before Manage access. */
-export const MODE_PRESETS: Readonly<Record<'share' | 'review' | 'retention', SectionStates>> = {
+export const MODE_PRESETS: Readonly<Record<'share' | 'retention', SectionStates>> = {
   share: { people: 'edit', links: 'edit', retention: 'edit' },
-  review: { people: 'review-only', links: 'hidden', retention: 'hidden' },
   retention: { people: 'remove-only', links: 'revoke-only', retention: 'edit' },
 };
 

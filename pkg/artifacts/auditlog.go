@@ -26,10 +26,8 @@ import (
 // structured entry per decision to the logger set with SetLogger: each
 // lifecycle change it records in artifact_event (and the version changes
 // it does not), each authorization refusal on a
-// management or write route (WARN; a refused POST /{id}/grants from a
-// caller who may read the artifact but not administer it, which
-// putReviewGrant answers, is logged by logReviewGrantRefusal with a review_
-// reason), and each read answered with the 404 of a hidden or missing
+// management or write route (WARN), and each read answered with the 404
+// of a hidden or missing
 // artifact (DEBUG only, to bound volume).
 //
 // An entry carries ids, enums and counts only. It never carries a share
@@ -152,9 +150,7 @@ const (
 // Log authorities: why the actor was allowed. They are the artifact_event
 // authorities of the same name: owner, admin_grant, the steward clauses
 // steward_project_owner and steward_delegator (design D25), and
-// custodian_project_admin. A review grant given on the review-grant path
-// (design D24) is logged with the authority its event records
-// (reviewGrantAuthority). The maintenance pass logs the event authorities
+// custodian_project_admin. The maintenance pass logs the event authorities
 // retention and reconciler. The automatic review grant of a new artifact
 // (ptone/scion#7134) is logged with authority sponsor_review.
 const (
@@ -550,52 +546,4 @@ func (s *Service) logVersionError(r *http.Request, a *Artifact, seq int, reason 
 		outcome = logOutcomeError
 	}
 	s.logDecision(r, slog.LevelInfo, logEntry{action: logActionVersionFailed, outcome: outcome, reason: reason, artifact: a, seq: seq})
-}
-
-// reviewClauseNote is the context key under which putReviewGrant passes a
-// *string for reviewGrantAuthorized to record the review clause in, from
-// the host's single evaluation.
-type reviewClauseNote struct{}
-
-// reviewClauseUnnamed is the clause recorded for a host that allows a
-// review grant through ReviewGrantAuthority alone, which does not name it.
-const reviewClauseUnnamed = "unnamed"
-
-// reviewGrantProjectAdminAuthority is the authority recorded for a review
-// grant given on the review-grant path (design D24) by an admin of the
-// artifact's home project. Since stewards (design D25), an owner of the
-// home project gives grants as a steward, so this path serves the admins
-// who are not owners. The path is removed with the grant ladder; until
-// then this one constant names their authority.
-const reviewGrantProjectAdminAuthority = AuthorityCustodianProjectAdmin
-
-// reviewGrantDelegatorAuthority is the authority recorded for a review grant
-// given on the review-grant path (design D24) by the owning agent's
-// delegating user. That path serves only callers who are not stewards (a
-// steward is served by the manager path first), so a delegating user here
-// failed the steward check (for example, it holds no role in the
-// artifact's current home project) and is not recorded as one. The path is
-// removed with the grant ladder; until then this one constant names it.
-const reviewGrantDelegatorAuthority = "review_grant"
-
-// reviewGrantUnnamedAuthority is the authority recorded for a review grant
-// allowed by a host that implements ReviewGrantAuthority but not
-// ReviewGrantClauser, which does not name the clause. The hub names it.
-const reviewGrantUnnamedAuthority = "review_grant"
-
-// reviewGrantAuthority is the authority of a review grant allowed by
-// clause, recorded on its event and logged: reviewGrantDelegatorAuthority
-// for the owning agent's delegating user, reviewGrantProjectAdminAuthority
-// for an admin of the home project, and reviewGrantUnnamedAuthority when
-// the host did not name the clause. None is a steward authority, so the
-// write carries no steward precondition (callerActor); PutReviewGrant
-// re-checks the home and owner kind under the artifact's lock itself.
-func reviewGrantAuthority(clause string) string {
-	switch clause {
-	case ReviewClauseProjectAdmin:
-		return reviewGrantProjectAdminAuthority
-	case ReviewClauseDelegatingUser:
-		return reviewGrantDelegatorAuthority
-	}
-	return reviewGrantUnnamedAuthority
 }

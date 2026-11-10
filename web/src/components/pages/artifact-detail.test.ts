@@ -1267,7 +1267,7 @@ describe('artifact page', () => {
     expect(dialog.artifact).toMatchObject({ expiresAt: '2026-12-01T00:00:00Z' });
   });
 
-  it('offers Grant review access, the Share dialog in review mode, to who may grant review but not manage', async () => {
+  it('offers Share only to a manager, and nothing for a canGrantReview flag', async () => {
     const meta = (extra: Partial<ArtifactResponse>): ArtifactResponse => {
       const m = { ...artifact('notes.md', 'text/markdown'), ...extra };
       m.artifact = { ...m.artifact, ownerKind: 'agent', ownerRef: 'agent-1' };
@@ -1279,36 +1279,20 @@ describe('artifact page', () => {
       ) as HTMLElement | undefined;
     type Dialog = HTMLElement & { open: boolean; mode: string; artifact: { id: string } };
 
-    // canGrantReview without canManage: Grant review access, not Share.
-    mockFetch(meta({ canGrantReview: true }));
+    // canManage: Share with the full dialog.
+    mockFetch(meta({ canManage: true }));
     let el = await mount(true);
-    expect(actionButton(el, 'Share')).toBeUndefined();
-    const grant = actionButton(el, 'Grant review access');
-    expect(grant).toBeDefined();
-    let dialog = el.shadowRoot!.querySelector('scion-artifact-share-dialog') as Dialog;
-    expect(dialog.mode).toBe('review');
-    expect(dialog.artifact.id).toBe(ID);
-    expect(dialog.open).toBe(false);
-    grant!.click();
-    await el.updateComplete;
-    expect(dialog.open).toBe(true);
-    dialog.dispatchEvent(new CustomEvent('artifact-share-closed'));
-    await el.updateComplete;
-    expect(dialog.open).toBe(false);
-    document.body.innerHTML = '';
-
-    // canManage wins: Share with the full dialog, never both actions.
-    mockFetch(meta({ canManage: true, canGrantReview: true }));
-    el = await mount(true);
     expect(actionButton(el, 'Share')).toBeDefined();
     expect(actionButton(el, 'Grant review access')).toBeUndefined();
-    dialog = el.shadowRoot!.querySelector('scion-artifact-share-dialog') as Dialog;
+    const dialog = el.shadowRoot!.querySelector('scion-artifact-share-dialog') as Dialog;
     expect(dialog.mode).toBe('share');
+    expect(dialog.artifact.id).toBe(ID);
     document.body.innerHTML = '';
 
-    // Neither: no action and no dialog.
-    for (const canGrantReview of [false, undefined]) {
-      mockFetch(meta({ canGrantReview }));
+    // No canManage: no action and no dialog, also for a canGrantReview
+    // flag, which the hub no longer sends.
+    for (const extra of [{}, { canGrantReview: true }]) {
+      mockFetch(meta(extra as unknown as Partial<ArtifactResponse>));
       el = await mount(true);
       expect(actionButton(el, 'Grant review access')).toBeUndefined();
       expect(actionButton(el, 'Share')).toBeUndefined();
