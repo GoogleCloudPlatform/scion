@@ -906,3 +906,270 @@ func TestGetDecisionRowsByIDs(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, none)
 }
+
+// ---- set submits (design choices v5, PR A2) ----
+
+// threeDecisions is a set prompt: D1 and D3 recommend choice 1, D2 has no
+// recommended choice.
+func threeDecisions() []messages.Decision {
+	d2 := yesNo("D2", "second?")
+	d2.DefaultChoiceID = ""
+	return []messages.Decision{yesNo("D1", "first?"), d2, yesNo("D3", "third?")}
+}
+
+// createSet stores a set prompt and returns its message id and row ids in
+// position order.
+func (f *decisionFixture) createSet(t *testing.T, ds ...messages.Decision) (string, []string) {
+	t.Helper()
+	in := f.prompt("", false, ds...)
+	res, err := f.cs.CreateChoicePrompt(context.Background(), in)
+	require.NoError(t, err)
+	ids := make([]string, len(res.Decisions))
+	for i, d := range res.Decisions {
+		ids[i] = d.RowID
+	}
+	return in.Message.ID, ids
+}
+
+// answerSet is a set submit of userID with the given row and choice pairs.
+func (f *decisionFixture) answerSet(msgID, userID, idem string, pairs ...string) *store.RecordAnswerSetInput {
+	in := &store.RecordAnswerSetInput{
+		MessageID:        msgID,
+		AnsweredByUserID: userID,
+		AnsweredByName:   "Pat",
+		AnsweredByEmail:  "pat@example.com",
+		IdempotencyKey:   idem,
+		ResponseMessage: &store.Message{
+			ID:             uuid.NewString(),
+			ProjectID:      f.projectID,
+			ConversationID: f.conversationID,
+			Sender:         "user:pat@example.com",
+			SenderID:       userID,
+			Recipient:      "agent:asker",
+			RecipientID:    f.agentID,
+			AgentID:        f.agentID,
+			Msg:            "Pat answered decisions",
+			DispatchState:  store.MessageDispatchDispatched,
+		},
+	}
+	for i := 0; i+1 < len(pairs); i += 2 {
+		in.Answers = append(in.Answers, store.AnswerSetItem{DecisionRowID: pairs[i], ChoiceID: pairs[i+1]})
+	}
+	return in
+}
+
+// TestRecordAnswerSet_RecordsAllWithOneBatch: one transaction records an
+// answer per row in position order with one batch id, matched_default from
+// the recommended choice, one response message, and every row decided.
+func TestRecordAnswerSet_RecordsAllWithOneBatch(t *testing.T) {
+	f := newDecisionFixture(t)
+	ctx := context.Background()
+	msgID, rows := f.createSet(t, threeDecisions()...)
+
+	in := f.answerSet(msgID, "user-1", "", rows[2], "2", rows[0], "1", rows[1], "2")
+	res, err := f.cs.RecordAnswerSet(ctx, in)
+	require.NoError(t, err)
+	require.NotEmpty(t, res.BatchID)
+	assert.False(t, res.Replayed)
+	require.Len(t, res.Answers, 3)
+	for i, a := range res.Answers {
+		assert.Equal(t, rows[i], a.DecisionRowID, "position order")
+		assert.Equal(t, res.BatchID, a.BatchID)
+		assert.Equal(t, in.ResponseMessage.ID, a.ResponseMessageID)
+		assert.Equal(t, store.DecisionProvenanceDirect, a.Provenance)
+		assert.Equal(t, store.DecisionOutcomeAnswer, a.Outcome)
+		assert.Equal(t, store.DecisionSurfaceNative, a.Surface)
+	}
+	assert.True(t, res.Answers[0].MatchedDefault, "D1 answered with its recommended choice")
+	assert.False(t, res.Answers[1].MatchedDefault, "D2 has no recommended choice")
+	assert.False(t, res.Answers[2].MatchedDefault, "D3 answered against its recommended choice")
+	assert.Equal(t, "no", res.Answers[2].ChoiceLabel, "the label comes from the stored row")
+
+	for _, id := range rows {
+		d, err := f.cs.GetDecision(ctx, id)
+		require.NoError(t, err)
+		assert.Equal(t, store.DecisionStatusDecided, d.Status)
+		require.Len(t, d.Answers, 1)
+		assert.Equal(t, res.BatchID, d.Answers[0].BatchID)
+	}
+	m, err := f.cs.GetMessage(ctx, in.ResponseMessage.ID)
+	require.NoError(t, err)
+	assert.Equal(t, messages.TypeChoiceResponse, m.Type)
+}
+
+// TestRecordAnswerSet_ChangedSetStoresNothing: every difference from the
+// actionable set is refused with a reason per row, and nothing is stored.
+func TestRecordAnswerSet_ChangedSetStoresNothing(t *testing.T) {
+	ctx := context.Background()
+	cases := map[string]struct {
+		setup  func(f *decisionFixture, rows []string)
+		pairs  func(rows []string) []string
+		reason func(rows []string) map[string]string
+	}{
+		"missing row": {
+			setup:  func(*decisionFixture, []string) {},
+			pairs:  func(r []string) []string { return []string{r[0], "1", r[1], "1"} },
+			reason: func(r []string) map[string]string { return map[string]string{r[2]: store.AnswerSetReasonMissing} },
+		},
+		"decided row": {
+			setup: func(f *decisionFixture, r []string) {
+				_, _, err := f.cs.RecordAnswer(ctx, f.answer(r[0], "1", "user-2", ""))
+				require.NoError(t, err)
+			},
+			pairs:  func(r []string) []string { return []string{r[0], "1", r[1], "1", r[2], "1"} },
+			reason: func(r []string) map[string]string { return map[string]string{r[0]: store.AnswerSetReasonDecided} },
+		},
+		"foreign interpreted row": {
+			setup: func(f *decisionFixture, r []string) {
+				_, _, err := f.cs.RecordAnswer(ctx, f.interpretedAnswer(r[1], "1", "user-2"))
+				require.NoError(t, err)
+			},
+			pairs: func(r []string) []string { return []string{r[0], "1", r[1], "1", r[2], "1"} },
+			reason: func(r []string) map[string]string {
+				return map[string]string{r[1]: store.AnswerSetReasonNotRecordedAnswerer}
+			},
+		},
+		"replaced row": {
+			setup: func(f *decisionFixture, r []string) {
+				f.create(t, true, yesNo("D3", "third, again?"))
+			},
+			pairs:  func(r []string) []string { return []string{r[0], "1", r[1], "1", r[2], "1"} },
+			reason: func(r []string) map[string]string { return map[string]string{r[2]: store.AnswerSetReasonReplaced} },
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			f := newDecisionFixture(t)
+			msgID, rows := f.createSet(t, threeDecisions()...)
+			tc.setup(f, rows)
+			before := map[string]int{}
+			for _, id := range rows {
+				d, err := f.cs.GetDecision(ctx, id)
+				require.NoError(t, err)
+				before[id] = len(d.Answers)
+			}
+
+			in := f.answerSet(msgID, "user-1", "", tc.pairs(rows)...)
+			_, err := f.cs.RecordAnswerSet(ctx, in)
+			require.ErrorIs(t, err, store.ErrAnswerSetChanged)
+			var changed *store.AnswerSetChangedError
+			require.ErrorAs(t, err, &changed)
+			assert.Equal(t, tc.reason(rows), changed.Reasons)
+
+			for _, id := range rows {
+				d, err := f.cs.GetDecision(ctx, id)
+				require.NoError(t, err)
+				assert.Len(t, d.Answers, before[id], "no answer stored")
+			}
+			_, err = f.cs.GetMessage(ctx, in.ResponseMessage.ID)
+			assert.ErrorIs(t, err, store.ErrNotFound, "no response message stored")
+		})
+	}
+}
+
+// TestRecordAnswerSet_SmallerSetAfterUpdate: after an --update repost of one
+// key, the old prompt's remaining decisions submit as a smaller set.
+func TestRecordAnswerSet_SmallerSetAfterUpdate(t *testing.T) {
+	f := newDecisionFixture(t)
+	ctx := context.Background()
+	msgID, rows := f.createSet(t, threeDecisions()...)
+	f.create(t, true, yesNo("D2", "second, again?"))
+
+	res, err := f.cs.RecordAnswerSet(ctx, f.answerSet(msgID, "user-1", "", rows[0], "1", rows[2], "1"))
+	require.NoError(t, err)
+	require.Len(t, res.Answers, 2)
+	assert.Equal(t, rows[0], res.Answers[0].DecisionRowID)
+	assert.Equal(t, rows[2], res.Answers[1].DecisionRowID)
+}
+
+// TestRecordAnswerSet_ShapeErrors: malformed submits are invalid input and
+// store nothing.
+func TestRecordAnswerSet_ShapeErrors(t *testing.T) {
+	f := newDecisionFixture(t)
+	ctx := context.Background()
+	msgID, rows := f.createSet(t, threeDecisions()...)
+	otherMsg, otherRows := f.createSet(t, yesNo("E1", "other?"), yesNo("E2", "other two?"))
+	_ = otherMsg
+
+	cases := map[string][]string{
+		"empty":          nil,
+		"duplicate row":  {rows[0], "1", rows[0], "2", rows[1], "1", rows[2], "1"},
+		"row not in M":   {rows[0], "1", rows[1], "1", rows[2], "1", otherRows[0], "1"},
+		"unknown choice": {rows[0], "9", rows[1], "1", rows[2], "1"},
+	}
+	for name, pairs := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := f.cs.RecordAnswerSet(ctx, f.answerSet(msgID, "user-1", "", pairs...))
+			assert.ErrorIs(t, err, store.ErrInvalidInput)
+		})
+	}
+	_, err := f.cs.RecordAnswerSet(ctx, f.answerSet(uuid.NewString(), "user-1", "", rows[0], "1"))
+	assert.ErrorIs(t, err, store.ErrNotFound, "a message with no decisions")
+	for _, id := range rows {
+		d, err := f.cs.GetDecision(ctx, id)
+		require.NoError(t, err)
+		assert.Empty(t, d.Answers)
+	}
+}
+
+// TestRecordAnswerSet_IdempotencyPerBatch: the same key and answers replay
+// the recorded set; the same key with other answers is a mismatch.
+func TestRecordAnswerSet_IdempotencyPerBatch(t *testing.T) {
+	f := newDecisionFixture(t)
+	ctx := context.Background()
+	msgID, rows := f.createSet(t, threeDecisions()...)
+	pairs := []string{rows[0], "1", rows[1], "2", rows[2], "1"}
+
+	first, err := f.cs.RecordAnswerSet(ctx, f.answerSet(msgID, "user-1", "k1", pairs...))
+	require.NoError(t, err)
+	again, err := f.cs.RecordAnswerSet(ctx, f.answerSet(msgID, "user-1", "k1", pairs...))
+	require.NoError(t, err)
+	assert.True(t, again.Replayed)
+	assert.Equal(t, first.BatchID, again.BatchID)
+	require.Len(t, again.Answers, 3)
+	assert.Equal(t, rows[0], again.Answers[0].DecisionRowID, "replay in position order")
+
+	_, err = f.cs.RecordAnswerSet(ctx, f.answerSet(msgID, "user-1", "k1", rows[0], "2", rows[1], "2", rows[2], "1"))
+	assert.ErrorIs(t, err, store.ErrIdempotencyMismatch)
+	_, err = f.cs.RecordAnswerSet(ctx, f.answerSet(msgID, "user-2", "k1", pairs...))
+	assert.ErrorIs(t, err, store.ErrIdempotencyMismatch, "another user's key")
+}
+
+// TestRecordAnswerSet_OwnInterpretedRows: a row with the user's own
+// interpreted answer is actionable, as a confirm or an override, and a
+// stale expected outcome is a changed set.
+func TestRecordAnswerSet_OwnInterpretedRows(t *testing.T) {
+	f := newDecisionFixture(t)
+	ctx := context.Background()
+	msgID, rows := f.createSet(t, threeDecisions()...)
+	_, _, err := f.cs.RecordAnswer(ctx, f.interpretedAnswer(rows[0], "1", "user-1"))
+	require.NoError(t, err)
+
+	stale := f.answerSet(msgID, "user-1", "", rows[0], "1", rows[1], "1", rows[2], "1")
+	_, err = f.cs.RecordAnswerSet(ctx, stale)
+	var changed *store.AnswerSetChangedError
+	require.ErrorAs(t, err, &changed, "outcome answer over an interpreted answer is stale")
+	assert.Equal(t, map[string]string{rows[0]: store.AnswerSetReasonDecided}, changed.Reasons)
+
+	in := f.answerSet(msgID, "user-1", "", rows[0], "2", rows[1], "1", rows[2], "1")
+	in.Answers[0].Outcome = store.DecisionOutcomeOverride
+	res, err := f.cs.RecordAnswerSet(ctx, in)
+	require.NoError(t, err)
+	assert.Equal(t, store.DecisionOutcomeOverride, res.Answers[0].Outcome)
+	assert.Equal(t, store.DecisionOutcomeAnswer, res.Answers[1].Outcome)
+}
+
+// TestRecordAnswer_MatchedDefault: a one-click answer also records whether
+// it chose the recommended choice.
+func TestRecordAnswer_MatchedDefault(t *testing.T) {
+	f := newDecisionFixture(t)
+	ctx := context.Background()
+	res := f.create(t, false, yesNo("D1", "q"), yesNo("D2", "q2"))
+	a, _, err := f.cs.RecordAnswer(ctx, f.answer(res.Decisions[0].RowID, "1", "user-1", ""))
+	require.NoError(t, err)
+	assert.True(t, a.MatchedDefault)
+	assert.Empty(t, a.BatchID, "a one-click answer has no batch")
+	b, _, err := f.cs.RecordAnswer(ctx, f.answer(res.Decisions[1].RowID, "2", "user-1", ""))
+	require.NoError(t, err)
+	assert.False(t, b.MatchedDefault)
+}

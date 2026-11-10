@@ -728,6 +728,7 @@ func (c *CompositeStore) recordAnswerTx(ctx context.Context, in *store.RecordAns
 		SetNillableAuthorizingUserID(nullableString(in.AuthorizingUserID)).
 		SetNillableDelegationGrantID(nullableString(in.DelegationGrantID)).
 		SetNillableIdempotencyKey(nullableString(in.IdempotencyKey)).
+		SetMatchedDefault(row.DefaultChoiceID != nil && *row.DefaultChoiceID == in.ChoiceID).
 		SetCreatedAt(now)
 	if in.InterpretedByAgentID != "" {
 		aid, err := parseUUID(in.InterpretedByAgentID)
@@ -766,6 +767,278 @@ func (c *CompositeStore) recordAnswerTx(ctx context.Context, in *store.RecordAns
 		}
 	}
 	return answerToStore(saved), false, nil
+}
+
+// RecordAnswerSet implements store.DecisionStore.
+func (c *CompositeStore) RecordAnswerSet(ctx context.Context, in *store.RecordAnswerSetInput) (*store.AnswerSetResult, error) {
+	if err := validateRecordAnswerSetInput(in); err != nil {
+		return nil, err
+	}
+	if c.inTx {
+		return c.recordAnswerSetTx(ctx, in)
+	}
+	var res *store.AnswerSetResult
+	for attempt := 0; ; attempt++ {
+		err := c.WithTx(ctx, func(tx store.Store) error {
+			var err error
+			res, err = tx.(*CompositeStore).recordAnswerSetTx(ctx, in)
+			return err
+		})
+		if err == nil {
+			return res, nil
+		}
+		// The loser of a concurrent answer or repost retries: the next
+		// attempt sees the winner's rows and reports the changed set (or
+		// replays its own key).
+		if attempt < maxDecisionRaceRetries && (errors.Is(err, errDecisionRace) || errors.Is(err, store.ErrTransient)) {
+			continue
+		}
+		if errors.Is(err, errDecisionRace) {
+			return nil, store.ErrTransient
+		}
+		return nil, err
+	}
+}
+
+func validateRecordAnswerSetInput(in *store.RecordAnswerSetInput) error {
+	if in == nil || in.ResponseMessage == nil || in.ResponseMessage.ID == "" || in.ResponseMessage.ProjectID == "" {
+		return fmt.Errorf("%w: a set submit needs a response message with an ID and a project", store.ErrInvalidInput)
+	}
+	if in.AnsweredByUserID == "" {
+		return fmt.Errorf("%w: a set submit needs the answering user", store.ErrInvalidInput)
+	}
+	if len(in.Answers) == 0 {
+		return fmt.Errorf("%w: a set submit needs at least one answer", store.ErrInvalidInput)
+	}
+	if len(in.IdempotencyKey) > store.MaxDecisionIdempotencyKeyLen {
+		return fmt.Errorf("%w: the idempotency key is at most %d bytes", store.ErrInvalidInput, store.MaxDecisionIdempotencyKeyLen)
+	}
+	seen := make(map[string]bool, len(in.Answers))
+	for _, a := range in.Answers {
+		if a.DecisionRowID == "" || a.ChoiceID == "" {
+			return fmt.Errorf("%w: every answer needs a decision row id and a choice id", store.ErrInvalidInput)
+		}
+		if seen[a.DecisionRowID] {
+			return fmt.Errorf("%w: decision row %s is answered twice", store.ErrInvalidInput, a.DecisionRowID)
+		}
+		seen[a.DecisionRowID] = true
+		if a.Outcome != "" {
+			if err := decisionanswer.OutcomeValidator(decisionanswer.Outcome(a.Outcome)); err != nil {
+				return fmt.Errorf("%w: %v", store.ErrInvalidInput, err)
+			}
+		}
+	}
+	return nil
+}
+
+// recordAnswerSetTx is RecordAnswerSet inside the transaction c runs in.
+func (c *CompositeStore) recordAnswerSetTx(ctx context.Context, in *store.RecordAnswerSetInput) (*store.AnswerSetResult, error) {
+	client := c.client
+	msgID, err := parseGetID(in.MessageID)
+	if err != nil {
+		return nil, err
+	}
+	// Lock the prompt's rows on Postgres, in position order: concurrent
+	// set submits, one-click answers and reposts of a key serialize here.
+	q := client.Decision.Query().Where(decision.MessageID(msgID)).Order(ent.Asc(decision.FieldPosition))
+	if c.isPostgres() {
+		q = q.ForUpdate()
+	}
+	rows, err := q.All(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	if len(rows) == 0 {
+		return nil, fmt.Errorf("%w: message %s has no decisions", store.ErrNotFound, in.MessageID)
+	}
+	byID := make(map[string]*ent.Decision, len(rows))
+	rowIDs := make([]uuid.UUID, len(rows))
+	for i, r := range rows {
+		byID[r.ID.String()] = r
+		rowIDs[i] = r.ID
+	}
+
+	// A replay is answered first, so a retry after the set changed still
+	// gets the answers it recorded.
+	if in.IdempotencyKey != "" {
+		if res, ok, err := replayableAnswerSet(ctx, client, rows, in); err != nil || ok {
+			return res, err
+		}
+	}
+
+	// Shape: every requested row is in the prompt and names one of its
+	// choices.
+	labels := make(map[string]string, len(in.Answers))
+	for _, a := range in.Answers {
+		r, ok := byID[a.DecisionRowID]
+		if !ok {
+			return nil, fmt.Errorf("%w: decision row %s is not in message %s", store.ErrInvalidInput, a.DecisionRowID, in.MessageID)
+		}
+		label := ""
+		for _, ch := range r.Choices {
+			if ch.ID == a.ChoiceID {
+				label = ch.Label
+			}
+		}
+		if label == "" {
+			return nil, fmt.Errorf("%w: %s has no choice %q", store.ErrInvalidInput, r.Key, a.ChoiceID)
+		}
+		labels[a.DecisionRowID] = label
+	}
+
+	// The actionable set (design choices v5, 4.1) must equal the request.
+	existing, err := loadAnswers(ctx, client, rowIDs)
+	if err != nil {
+		return nil, err
+	}
+	requested := make(map[string]store.AnswerSetItem, len(in.Answers))
+	for _, a := range in.Answers {
+		requested[a.DecisionRowID] = a
+	}
+	reasons := map[string]string{}
+	for _, r := range rows {
+		d := decisionToStore(r)
+		d.Answers = answersToStore(existing[r.ID])
+		reason := store.DecisionActionableReason(d, in.AnsweredByUserID)
+		_, asked := requested[d.ID]
+		switch {
+		case asked && reason != "":
+			reasons[d.ID] = reason
+		case !asked && reason == "":
+			reasons[d.ID] = store.AnswerSetReasonMissing
+		}
+	}
+	// Each outcome must be the one the row's answers give: a direct
+	// answer over the user's own interpreted one is a confirm (same
+	// choice) or an override (another choice); every other answer is
+	// outcome answer. A difference means the state changed after the
+	// caller read it.
+	outcomes := make(map[string]string, len(in.Answers))
+	for _, a := range in.Answers {
+		if _, bad := reasons[a.DecisionRowID]; bad {
+			continue
+		}
+		r := byID[a.DecisionRowID]
+		want := store.DecisionOutcomeAnswer
+		for _, e := range existing[r.ID] {
+			if e.Provenance == decisionanswer.ProvenanceAgentInterpreted {
+				want = store.DecisionOutcomeConfirm
+				if e.ChoiceID != a.ChoiceID {
+					want = store.DecisionOutcomeOverride
+				}
+			}
+		}
+		got := a.Outcome
+		if got == "" {
+			got = store.DecisionOutcomeAnswer
+		}
+		if got != want {
+			reasons[a.DecisionRowID] = store.AnswerSetReasonDecided
+			continue
+		}
+		outcomes[a.DecisionRowID] = want
+	}
+	if len(reasons) > 0 {
+		return nil, &store.AnswerSetChangedError{Reasons: reasons}
+	}
+
+	in.ResponseMessage.Type = messages.TypeChoiceResponse
+	if err := c.CreateMessage(ctx, in.ResponseMessage); err != nil {
+		return nil, err
+	}
+	responseID, _ := parseUUID(in.ResponseMessage.ID)
+	batchID := uuid.New()
+	now := time.Now().UTC()
+	res := &store.AnswerSetResult{BatchID: batchID.String()}
+	for _, r := range rows {
+		a, ok := requested[r.ID.String()]
+		if !ok {
+			continue
+		}
+		saved, err := client.DecisionAnswer.Create().
+			SetDecisionRowID(r.ID).
+			SetProjectID(r.ProjectID).
+			SetAskerAgentID(r.AskerAgentID).
+			SetKey(r.Key).
+			SetVersion(r.Version).
+			SetQuestionText(r.Question).
+			SetChoiceID(a.ChoiceID).
+			SetChoiceLabel(labels[a.DecisionRowID]).
+			SetAnsweredByUserID(in.AnsweredByUserID).
+			SetAnsweredByName(in.AnsweredByName).
+			SetAnsweredByEmail(in.AnsweredByEmail).
+			SetProvenance(decisionanswer.ProvenanceDirect).
+			SetOutcome(decisionanswer.Outcome(outcomes[a.DecisionRowID])).
+			SetSurface(decisionanswer.SurfaceNative).
+			SetResponseMessageID(responseID).
+			SetNillableIdempotencyKey(nullableString(in.IdempotencyKey)).
+			SetBatchID(batchID).
+			SetMatchedDefault(r.DefaultChoiceID != nil && *r.DefaultChoiceID == a.ChoiceID).
+			SetCreatedAt(now).
+			Save(ctx)
+		if err != nil {
+			return nil, markDecisionRace(err)
+		}
+		// Only the pending-to-decided transition sets decided_at. It must
+		// change exactly the row read above; none changed means a
+		// concurrent write won, and the whole set rolls back and retries.
+		if r.Status == decision.StatusPending {
+			n, err := client.Decision.Update().
+				Where(decision.ID(r.ID), decision.StatusEQ(decision.StatusPending)).
+				SetStatus(decision.StatusDecided).
+				SetDecidedAt(now).
+				Save(ctx)
+			if err != nil {
+				return nil, mapError(err)
+			}
+			if n != 1 {
+				return nil, fmt.Errorf("%w: version %d of %s changed concurrently", errDecisionRace, r.Version, r.Key)
+			}
+		}
+		res.Answers = append(res.Answers, answerToStore(saved))
+	}
+	return res, nil
+}
+
+// replayableAnswerSet returns the set recorded under in's idempotency key on
+// the prompt's rows. ok is false when the key was not used there;
+// ErrIdempotencyMismatch when it names other answers (other rows or
+// choices, or another user).
+func replayableAnswerSet(ctx context.Context, client *ent.Client, rows []*ent.Decision, in *store.RecordAnswerSetInput) (*store.AnswerSetResult, bool, error) {
+	rowIDs := make([]uuid.UUID, len(rows))
+	pos := make(map[uuid.UUID]int, len(rows))
+	for i, r := range rows {
+		rowIDs[i] = r.ID
+		pos[r.ID] = i
+	}
+	found, err := client.DecisionAnswer.Query().
+		Where(decisionanswer.DecisionRowIDIn(rowIDs...), decisionanswer.IdempotencyKey(in.IdempotencyKey), decisionanswer.BatchIDNotNil()).
+		All(ctx)
+	if err != nil {
+		return nil, false, mapError(err)
+	}
+	if len(found) == 0 {
+		return nil, false, nil
+	}
+	mismatch := fmt.Errorf("%w: the idempotency key was used for other answers", store.ErrIdempotencyMismatch)
+	if len(found) != len(in.Answers) {
+		return nil, false, mismatch
+	}
+	want := make(map[string]string, len(in.Answers))
+	for _, a := range in.Answers {
+		want[a.DecisionRowID] = a.ChoiceID
+	}
+	batch := *found[0].BatchID
+	for _, f := range found {
+		if f.AnsweredByUserID == nil || *f.AnsweredByUserID != in.AnsweredByUserID || f.BatchID == nil || *f.BatchID != batch {
+			return nil, false, mismatch
+		}
+		if choice, ok := want[f.DecisionRowID.String()]; !ok || choice != f.ChoiceID {
+			return nil, false, mismatch
+		}
+	}
+	sort.Slice(found, func(i, j int) bool { return pos[found[i].DecisionRowID] < pos[found[j].DecisionRowID] })
+	return &store.AnswerSetResult{BatchID: batch.String(), Answers: answersToStore(found), Replayed: true}, true, nil
 }
 
 // checkAnswerPreconditions enforces in the store what the answer endpoint
@@ -893,5 +1166,9 @@ func answerToStore(r *ent.DecisionAnswer) *store.DecisionAnswer {
 	if r.IdempotencyKey != nil {
 		a.IdempotencyKey = *r.IdempotencyKey
 	}
+	if r.BatchID != nil {
+		a.BatchID = r.BatchID.String()
+	}
+	a.MatchedDefault = r.MatchedDefault
 	return a
 }

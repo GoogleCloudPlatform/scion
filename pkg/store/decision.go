@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -101,7 +102,79 @@ var (
 	// override it), typically because the state changed since the caller
 	// read it.
 	ErrDecisionOutcomeMismatch = errors.New("decision outcome mismatch")
+	// ErrAnswerSetChanged: a set submit's rows are not the prompt's
+	// actionable set (design choices v5, 4.2 step 5). It matches
+	// *AnswerSetChangedError, which names a reason per row.
+	ErrAnswerSetChanged = errors.New("answer set changed")
+	// ErrIdempotencyMismatch: a set submit reused an idempotency key the
+	// user already used on the prompt for a different set of answers.
+	ErrIdempotencyMismatch = errors.New("idempotency mismatch")
 )
+
+// Reasons a row of a set submit is not answerable, or is missing from it
+// (AnswerSetChangedError.Reasons).
+const (
+	AnswerSetReasonReplaced            = "replaced"
+	AnswerSetReasonDecided             = "decided"
+	AnswerSetReasonNotRecordedAnswerer = "not_recorded_answerer"
+	AnswerSetReasonMissing             = "missing"
+	AnswerSetReasonNotActionable       = "not_actionable"
+)
+
+// AnswerSetChangedError lists, by decision row id, why a set submit does
+// not equal the prompt's actionable set: a requested row that is not
+// actionable (replaced, decided, not_recorded_answerer, not_actionable) or
+// an actionable row the request left out (missing). It matches
+// ErrAnswerSetChanged.
+type AnswerSetChangedError struct {
+	Reasons map[string]string
+}
+
+func (e *AnswerSetChangedError) Error() string {
+	ids := make([]string, 0, len(e.Reasons))
+	for id := range e.Reasons {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	parts := make([]string, len(ids))
+	for i, id := range ids {
+		parts[i] = id + ": " + e.Reasons[id]
+	}
+	return "the answer set changed: " + strings.Join(parts, "; ")
+}
+
+func (e *AnswerSetChangedError) Unwrap() error { return ErrAnswerSetChanged }
+
+// DecisionActionableReason is the actionable-set rule of design choices
+// v5, 4.1, for one row and user: "" when the user may answer the row in a
+// set submit (pending, or decided with only an agent_interpreted answer
+// that records this user), else the reason it is excluded (replaced,
+// decided for a direct answer, not_recorded_answerer for another user's
+// interpreted answer). d.Answers must be loaded.
+func DecisionActionableReason(d *Decision, userID string) string {
+	if d.Status == DecisionStatusReplaced {
+		return AnswerSetReasonReplaced
+	}
+	var interpreted *DecisionAnswer
+	for _, a := range d.Answers {
+		switch a.Provenance {
+		case DecisionProvenanceDirect:
+			return AnswerSetReasonDecided
+		case DecisionProvenanceAgentInterpreted:
+			interpreted = a
+		}
+	}
+	if interpreted != nil {
+		if interpreted.AnsweredByUserID == "" || interpreted.AnsweredByUserID != userID {
+			return AnswerSetReasonNotRecordedAnswerer
+		}
+		return ""
+	}
+	if d.Status != DecisionStatusPending {
+		return AnswerSetReasonNotActionable
+	}
+	return ""
+}
 
 // ExistingDecisionKey describes the active version of a key a prompt tried
 // to reuse without Update.
@@ -255,6 +328,12 @@ type DecisionAnswer struct {
 	DelegationGrantID string
 	IdempotencyKey    string
 
+	// BatchID is shared by every answer of one set submit; empty for a
+	// one-click answer. MatchedDefault is set when ChoiceID is the
+	// decision's recommended choice.
+	BatchID        string
+	MatchedDefault bool
+
 	CreatedAt time.Time
 }
 
@@ -341,6 +420,47 @@ type RecordAnswerInput struct {
 	IdempotencyKey string
 }
 
+// AnswerSetItem is one answer of a set submit: the row, the chosen id and
+// the outcome the caller expects from the state it read (answer, or
+// confirm or override over the user's own agent_interpreted answer).
+type AnswerSetItem struct {
+	DecisionRowID string
+	ChoiceID      string
+	Outcome       string // DecisionOutcome*; empty means answer
+}
+
+// RecordAnswerSetInput is one set submit of a choice prompt (design choices
+// v5, 4.2): direct answers from the native surface for every actionable
+// row of the prompt message, by one user.
+type RecordAnswerSetInput struct {
+	MessageID string
+
+	AnsweredByUserID string // required
+	AnsweredByName   string
+	AnsweredByEmail  string
+
+	Answers []AnswerSetItem
+
+	// ResponseMessage is the one choice-response message of the set,
+	// stored in the same transaction (ID and ProjectID required; Type is
+	// set to messages.TypeChoiceResponse).
+	ResponseMessage *Message
+
+	// IdempotencyKey, when set, is scoped to the user and the prompt: a
+	// retry with the same key and the same answers returns the recorded
+	// set (replayed); the same key with other answers is
+	// ErrIdempotencyMismatch. At most MaxDecisionIdempotencyKeyLen.
+	IdempotencyKey string
+}
+
+// AnswerSetResult is a recorded set submit: its batch id and its answers in
+// position order.
+type AnswerSetResult struct {
+	BatchID  string
+	Answers  []*DecisionAnswer
+	Replayed bool
+}
+
 // DecisionStore persists choice prompt decisions and their answers.
 type DecisionStore interface {
 	// CreateChoicePrompt stores a choice prompt in one transaction: it
@@ -389,6 +509,19 @@ type DecisionStore interface {
 	// the decision row is locked for the transaction, so an answer and a
 	// concurrent repost of the key serialize.
 	RecordAnswer(ctx context.Context, in *RecordAnswerInput) (answer *DecisionAnswer, replayed bool, err error)
+
+	// RecordAnswerSet records a set submit in one transaction: it locks
+	// the prompt's decision rows (on Postgres), answers a replay of the
+	// idempotency key first, checks the shape (ErrInvalidInput for an
+	// empty or duplicated answer, a row not in the prompt or a choice not
+	// in its row), recomputes the actionable set and requires the request
+	// rows to equal it (*AnswerSetChangedError, nothing stored), checks
+	// each outcome against the row's answers (a difference is a changed
+	// set, reason decided), then stores the response message, one direct
+	// native answer per row with one shared batch id and matched_default,
+	// and marks pending rows decided. ErrNotFound for a message with no
+	// decisions.
+	RecordAnswerSet(ctx context.Context, in *RecordAnswerSetInput) (*AnswerSetResult, error)
 
 	// GetDecisionRowsByIDs returns the given decision versions keyed by
 	// row ID, without their answers, in one query (history pages read the
