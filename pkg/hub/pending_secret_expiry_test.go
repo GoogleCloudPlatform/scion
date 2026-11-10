@@ -19,7 +19,9 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -80,12 +82,17 @@ func TestPendingSecretExpiry_ManyBatches(t *testing.T) {
 	f := newPendingFixture(t, "pend-expiry-batch")
 	ctx := context.Background()
 	past := time.Now().Add(-store.PendingSecretTTL - time.Hour)
+	// Spread the rows over owners and agents so every write stays within
+	// the per-owner and per-agent caps.
 	total := pendingSecretExpiryBatch + 5
+	owners := map[string]bool{}
 	for i := 0; i < total; i++ {
+		owner := tid(fmt.Sprintf("pend-expiry-batch-owner-%d", i/store.PendingSecretOwnerCap))
+		owners[owner] = true
 		_, err := f.Store.CreateOrReplacePendingSecret(ctx, &store.PendingSecret{
-			Key: "BATCH_" + time.Duration(i).String(), SecretType: store.SecretTypeEnvironment,
-			Scope: store.ScopeUser, ScopeID: f.UserID, ValueRef: "test-ref", ValueLen: 1,
-			AgentID: tid("pend-expiry-batch-writer-" + time.Duration(i/5).String()), AgentSlug: "w",
+			Key: fmt.Sprintf("BATCH_%d", i), SecretType: store.SecretTypeEnvironment,
+			Scope: store.ScopeUser, ScopeID: owner, ValueRef: "test-ref", ValueLen: 1,
+			AgentID: tid(fmt.Sprintf("pend-expiry-batch-writer-%d", i/store.PendingSecretAgentCap)), AgentSlug: "w",
 			ProjectID: f.ProjectID, ProjectName: f.ProjectName,
 		}, past)
 		require.NoError(t, err)
@@ -93,9 +100,11 @@ func TestPendingSecretExpiry_ManyBatches(t *testing.T) {
 	n, err := f.Server.expirePendingSecrets(ctx, time.Now())
 	require.NoError(t, err)
 	assert.Equal(t, total, n)
-	rows, err := f.Store.ListPendingSecretsByOwner(ctx, store.ScopeUser, f.UserID)
-	require.NoError(t, err)
-	assert.Empty(t, rows)
+	for owner := range owners {
+		rows, err := f.Store.ListPendingSecretsByOwner(ctx, store.ScopeUser, owner)
+		require.NoError(t, err)
+		assert.Empty(t, rows)
+	}
 }
 
 // TestPendingSecretExpiry_Registered: the sweep is registered as the
@@ -162,11 +171,25 @@ func TestSecretsList_IncludePending(t *testing.T) {
 	assert.NotContains(t, rec.Body.String(), "enc:v")
 	var resp ListSecretsResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	assert.Len(t, resp.Secrets, 2, "secrets keeps the approved list")
+	// The fixture stores user secrets of its own (SD_*); they are
+	// approved items like any other and are left out of the checks.
+	ours := func(key string) bool { return !strings.HasPrefix(key, "SD_") }
+	approvedOurs := 0
+	for _, sec := range resp.Secrets {
+		if ours(sec.Key) {
+			approvedOurs++
+		}
+	}
+	assert.Equal(t, 2, approvedOurs, "secrets keeps the approved list")
 
 	type row struct{ key, state string }
 	var got []row
+	var items []SecretListItem
 	for _, it := range resp.Items {
+		if !ours(it.Key) {
+			continue
+		}
+		items = append(items, it)
 		got = append(got, row{it.Key, it.State})
 		switch it.State {
 		case SecretStateApproved:
@@ -185,7 +208,7 @@ func TestSecretsList_IncludePending(t *testing.T) {
 		{"REPLACED", "pending"},
 	}, got)
 
-	pendingNew := resp.Items[1].Pending
+	pendingNew := items[1].Pending
 	assert.Equal(t, newKey.PendingID, pendingNew.ID)
 	assert.Equal(t, f.AgentB, pendingNew.AgentID)
 	assert.Equal(t, f.ProjectB, pendingNew.ProjectID)
@@ -195,9 +218,9 @@ func TestSecretsList_IncludePending(t *testing.T) {
 	assert.Equal(t, []ProjectSecretOverride{{ProjectID: f.ProjectID, ProjectName: f.ProjectName}},
 		pendingNew.OverridesProjectSecrets, "only projects the caller can read are named")
 
-	pendingReplaced := resp.Items[3].Pending
+	pendingReplaced := items[3].Pending
 	assert.True(t, pendingReplaced.ReplacesExisting)
-	assert.Equal(t, resp.Items[2].Secret.ID, pendingReplaced.ReplacesSecretID)
+	assert.Equal(t, items[2].Secret.ID, pendingReplaced.ReplacesSecretID)
 	assert.Empty(t, pendingReplaced.OverridesProjectSecrets)
 
 	// Without includePending the response is the approved list only.
