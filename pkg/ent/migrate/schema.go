@@ -1224,6 +1224,131 @@ var (
 			},
 		},
 	}
+	// DecisionsColumns holds the columns for the "decisions" table.
+	DecisionsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "project_id", Type: field.TypeUUID},
+		{Name: "conversation_id", Type: field.TypeUUID, Nullable: true},
+		{Name: "message_id", Type: field.TypeUUID},
+		{Name: "position", Type: field.TypeInt},
+		{Name: "asker_agent_id", Type: field.TypeUUID},
+		{Name: "asker_agent_name", Type: field.TypeString},
+		{Name: "key", Type: field.TypeString, Size: 32},
+		{Name: "key_norm", Type: field.TypeString, Size: 32},
+		{Name: "key_source", Type: field.TypeEnum, Enums: []string{"agent", "hub"}},
+		{Name: "version", Type: field.TypeInt},
+		{Name: "question", Type: field.TypeString, Size: 2147483647},
+		{Name: "choices", Type: field.TypeJSON},
+		{Name: "default_choice_id", Type: field.TypeString, Nullable: true},
+		{Name: "intro_length", Type: field.TypeInt, Default: 0},
+		{Name: "status", Type: field.TypeEnum, Enums: []string{"pending", "decided", "replaced"}, Default: "pending"},
+		{Name: "replaced_by_id", Type: field.TypeUUID, Nullable: true},
+		{Name: "created_at", Type: field.TypeTime},
+		{Name: "decided_at", Type: field.TypeTime, Nullable: true},
+		{Name: "replaced_at", Type: field.TypeTime, Nullable: true},
+	}
+	// DecisionsTable holds the schema information for the "decisions" table.
+	DecisionsTable = &schema.Table{
+		Name:       "decisions",
+		Columns:    DecisionsColumns,
+		PrimaryKey: []*schema.Column{DecisionsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "decision_asker_agent_id_key_norm_version",
+				Unique:  true,
+				Columns: []*schema.Column{DecisionsColumns[5], DecisionsColumns[8], DecisionsColumns[10]},
+			},
+			{
+				Name:    "decision_asker_agent_id_status",
+				Unique:  false,
+				Columns: []*schema.Column{DecisionsColumns[5], DecisionsColumns[15]},
+			},
+			{
+				Name:    "decision_project_id_status",
+				Unique:  false,
+				Columns: []*schema.Column{DecisionsColumns[1], DecisionsColumns[15]},
+			},
+			{
+				Name:    "decision_message_id_position",
+				Unique:  false,
+				Columns: []*schema.Column{DecisionsColumns[3], DecisionsColumns[4]},
+			},
+			{
+				Name:    "decision_conversation_id",
+				Unique:  false,
+				Columns: []*schema.Column{DecisionsColumns[2]},
+			},
+		},
+	}
+	// DecisionAnswersColumns holds the columns for the "decision_answers" table.
+	DecisionAnswersColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "decision_row_id", Type: field.TypeUUID},
+		{Name: "project_id", Type: field.TypeUUID},
+		{Name: "asker_agent_id", Type: field.TypeUUID},
+		{Name: "key", Type: field.TypeString, Size: 32},
+		{Name: "version", Type: field.TypeInt},
+		{Name: "question_text", Type: field.TypeString, Size: 2147483647},
+		{Name: "choice_id", Type: field.TypeString, Size: 32},
+		{Name: "choice_label", Type: field.TypeString},
+		{Name: "answered_by_user_id", Type: field.TypeString, Nullable: true},
+		{Name: "answered_by_name", Type: field.TypeString, Default: ""},
+		{Name: "answered_by_email", Type: field.TypeString, Default: ""},
+		{Name: "provenance", Type: field.TypeEnum, Enums: []string{"direct", "agent_interpreted"}},
+		{Name: "outcome", Type: field.TypeEnum, Enums: []string{"answer", "confirm", "override"}, Default: "answer"},
+		{Name: "interpreted_by_agent_id", Type: field.TypeUUID, Nullable: true},
+		{Name: "source_message_id", Type: field.TypeUUID, Nullable: true},
+		{Name: "surface", Type: field.TypeEnum, Enums: []string{"native", "slack", "google_chat", "discord", "telegram", "teams", "other"}},
+		{Name: "response_message_id", Type: field.TypeUUID},
+		{Name: "authorizing_user_id", Type: field.TypeString, Nullable: true},
+		{Name: "delegation_grant_id", Type: field.TypeString, Nullable: true},
+		{Name: "idempotency_key", Type: field.TypeString, Nullable: true, Size: 128},
+		{Name: "created_at", Type: field.TypeTime},
+	}
+	// DecisionAnswersTable holds the schema information for the "decision_answers" table.
+	DecisionAnswersTable = &schema.Table{
+		Name:       "decision_answers",
+		Columns:    DecisionAnswersColumns,
+		PrimaryKey: []*schema.Column{DecisionAnswersColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "decisionanswer_decision_row_id_provenance",
+				Unique:  true,
+				Columns: []*schema.Column{DecisionAnswersColumns[1], DecisionAnswersColumns[12]},
+			},
+			{
+				Name:    "decisionanswer_decision_row_id_idempotency_key",
+				Unique:  true,
+				Columns: []*schema.Column{DecisionAnswersColumns[1], DecisionAnswersColumns[20]},
+			},
+			{
+				Name:    "decisionanswer_project_id_created_at",
+				Unique:  false,
+				Columns: []*schema.Column{DecisionAnswersColumns[2], DecisionAnswersColumns[21]},
+			},
+			{
+				Name:    "decisionanswer_response_message_id",
+				Unique:  false,
+				Columns: []*schema.Column{DecisionAnswersColumns[17]},
+			},
+			{
+				Name:    "decisionanswer_answered_by_user_id",
+				Unique:  false,
+				Columns: []*schema.Column{DecisionAnswersColumns[9]},
+			},
+		},
+	}
+	// DecisionKeyCountersColumns holds the columns for the "decision_key_counters" table.
+	DecisionKeyCountersColumns = []*schema.Column{
+		{Name: "agent_id", Type: field.TypeUUID},
+		{Name: "next", Type: field.TypeInt64},
+	}
+	// DecisionKeyCountersTable holds the schema information for the "decision_key_counters" table.
+	DecisionKeyCountersTable = &schema.Table{
+		Name:       "decision_key_counters",
+		Columns:    DecisionKeyCountersColumns,
+		PrimaryKey: []*schema.Column{DecisionKeyCountersColumns[0]},
+	}
 	// DelegationAdoptionsColumns holds the columns for the "delegation_adoptions" table.
 	DelegationAdoptionsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
@@ -3540,6 +3665,9 @@ var (
 		ConduitSessionsTable,
 		ConversationsTable,
 		ConversationParticipantsTable,
+		DecisionsTable,
+		DecisionAnswersTable,
+		DecisionKeyCountersTable,
 		DelegationAdoptionsTable,
 		DelegationEdgesTable,
 		EntitlementBindingsTable,
@@ -3679,6 +3807,15 @@ func init() {
 	}
 	ConversationParticipantsTable.Annotation = &entsql.Annotation{
 		Table: "conversation_participants",
+	}
+	DecisionsTable.Annotation = &entsql.Annotation{
+		Table: "decisions",
+	}
+	DecisionAnswersTable.Annotation = &entsql.Annotation{
+		Table: "decision_answers",
+	}
+	DecisionKeyCountersTable.Annotation = &entsql.Annotation{
+		Table: "decision_key_counters",
 	}
 	EntitlementBindingsTable.ForeignKeys[0].RefTable = LimitDefinitionsTable
 	EnvVarsTable.Annotation = &entsql.Annotation{

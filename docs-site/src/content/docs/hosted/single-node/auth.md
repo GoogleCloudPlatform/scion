@@ -101,6 +101,8 @@ When the deletion succeeds, Scion also removes all of the user's role bindings (
 
 Schedules do not block a user delete. Once it succeeds, every active recurring schedule whose recorded authority is the user (the user last created, changed or resumed it; it may have been created by someone else), in any project, is paused with status reason `creator_deleted`, because none of its fires could be authorized. Anyone allowed to resume such a schedule who resumes it records their own authority, and it then runs as them (see [Schedules paused by the Hub](/scion/hosted/user/scheduling/#schedules-paused-by-the-hub)). This step is best effort: a schedule it misses, or one whose user was removed through the deprecated allow-list delete, is paused the next time it comes due. A schedule whose recorded authority is an agent is not affected by the user delete; it is paused when that agent is deleted.
 
+Answers the user gave to agent choice prompts (the `web.chat_choices` [experiment](/scion/reference/experiments/)) are kept in the decision log after the user is deleted. The delete clears the user's id from each answer, but the **name and email recorded with the answer stay**, so the log still shows who decided. This is personal data the Hub retains on purpose. Chat retention never removes answers; deleting the project they belong to does.
+
 After a user is deleted, that user's tokens stop working immediately. Requests that present a web or CLI sign-in token get `401` with the error code `user_not_found`. Requests that present one of the user's access tokens (`scion_pat_`) are also refused, with `401` and the error code `unauthorized`.
 
 ### Force-deleting a user who has agents

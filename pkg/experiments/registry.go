@@ -181,6 +181,15 @@ const AttachmentArtifacts = "hub.attachment_artifacts"
 // the delivery sweeper, which holds pending messages while it is off.
 const ChatScheduledSend = "web.chat_scheduled_send"
 
+// ChatChoices gates agent choice prompts in native web chat (design
+// native-chat choices v4): agent sends carrying decisions, which the hub
+// refuses with experiment_disabled while it is off, the hub's decision and
+// answer routes (404 while off), the decisions and choiceResponse fields of
+// chat history, and the decision cards in the web UI. Stored decisions and
+// answers are kept while it is off, and the markdown fallback in each
+// choice prompt's text stays readable.
+const ChatChoices = "web.chat_choices"
+
 // ChatStarredMessages gates starred messages in native web chat: the
 // message Star/Unstar action, the private starred indicator, the
 // conversation header's starred-message list, the starred-only center and
@@ -657,6 +666,17 @@ var compiled = []Experiment{
 		Issue:       "ptone/scion#3666",
 		Owner:       "native-chat",
 		ReviewBy:    "2027-01-31",
+	},
+	{
+		Name:        ChatChoices,
+		Title:       "Choices in chat",
+		Description: "Lets an agent ask a user to decide between a few options: a choice prompt carries one or more keyed decisions, which web chat shows as cards with one button per choice; a click records the answer and sends it back to the agent. Gates sending choices, which the hub refuses while it is off, the hub's decision and answer routes, which answer 404 while it is off, and the decision fields of chat history (LayerServer), and the cards (LayerWeb). Every choice prompt also carries a markdown copy of its decisions, so other surfaces and clients with it off still show them. Stored decisions and answers are kept while it is off.",
+		Default:     false,
+		Layers:      []Layer{LayerWeb, LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#7514",
+		Owner:       "native-chat",
+		ReviewBy:    "2027-02-05",
 	},
 	{
 		Name:        ChatStarredMessages,

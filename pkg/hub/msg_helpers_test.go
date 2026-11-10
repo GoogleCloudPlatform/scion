@@ -51,6 +51,14 @@ var effectCallSiteClassifications = []effectCallSiteEntry{
 	{file: "handlers_agent_messaging.go", function: "broadcastDirect", symbol: "dispatchWithBrokerRetry",
 		class: "guarded", reason: "authorizeAgentMessage per-recipient at handlers_agent_messaging.go:1644"},
 
+	// choices_answer.go: deliverChoiceResponse — the choice-response of a
+	// user's answer to the asking agent; handleDecisionAnswer calls
+	// authorizeAgentMessage on the asker before the answer is recorded,
+	// and deliverChoiceResponse runs only after that (not for a confirm,
+	// which is not delivered).
+	{file: "choices_answer.go", function: "deliverChoiceResponse", symbol: "dispatchWithBrokerRetry",
+		class: "guarded", reason: "authorizeAgentMessage in handleDecisionAnswer before RecordAnswer and delivery"},
+
 	// handlers_agent_messaging.go: publishBroadcastDeliveryFailed — derivative
 	// notice back to the original sender agent.
 	{file: "handlers_agent_messaging.go", function: "publishBroadcastDeliveryFailed", symbol: "DispatchAgentMessage",

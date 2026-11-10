@@ -567,6 +567,9 @@ type Store interface {
 
 	// Workload-bound issuer delegations (test identities, ptone/scion#4240)
 	TestIdentityDelegationStore
+
+	// Choice prompt decisions and answers (choices, ptone/scion#7514)
+	DecisionStore
 }
 
 // AgentStore defines agent-related persistence operations.

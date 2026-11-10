@@ -545,7 +545,23 @@ func (c *CompositeStore) DeleteProject(ctx context.Context, id string) error {
 	if err := c.DeleteThreadGroupsForProject(ctx, id); err != nil {
 		return err
 	}
+	// Choice prompt decisions, answers and the deleted agents' key counters
+	// go with the project (they have no DB-level FK either).
+	if err := deleteProjectDecisions(ctx, c.client, uid, agentIDs); err != nil {
+		return err
+	}
 	return c.ProjectStore.DeleteProject(ctx, id)
+}
+
+// DeleteUser removes a user, in one transaction with the clearing of the
+// user id on the user's choice answers (UserStore.DeleteUser does both):
+// a failed delete leaves the answers as they were. Called inside WithTx it
+// joins that transaction.
+func (c *CompositeStore) DeleteUser(ctx context.Context, id string) error {
+	if !c.inTx {
+		return c.WithTx(ctx, func(tx store.Store) error { return tx.DeleteUser(ctx, id) })
+	}
+	return c.UserStore.DeleteUser(ctx, id)
 }
 
 // purgeDeletedAgentsBatchSize caps how many agent IDs a single purge

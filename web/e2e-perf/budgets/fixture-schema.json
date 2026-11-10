@@ -48,6 +48,7 @@
         "experiments.web.agent_edit:boolean",
         "experiments.web.artifact_manage_access:boolean",
         "experiments.web.artifact_review_editor:boolean",
+        "experiments.web.chat_choices:boolean",
         "experiments.web.chat_scheduled_send:boolean",
         "experiments.web.chat_starred_messages:boolean",
         "experiments.web.gcs_links:boolean",

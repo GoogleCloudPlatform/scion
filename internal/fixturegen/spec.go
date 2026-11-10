@@ -330,6 +330,41 @@ func Spec() []TableFixture {
 				"agent_id": agentID, "created_at": baseTime,
 			},
 		}},
+		// ---- Choice prompt decisions ----
+		{Table: "decisions", Rows: []row{
+			{ // decided version of a hub-numbered key, in a conversation, with a default and an intro
+				"id": "dc000000-0000-0000-0000-000000000002", "project_id": projectID,
+				"conversation_id": conversationID, "message_id": messageID, "position": 0,
+				"asker_agent_id": agentID, "asker_agent_name": "worker",
+				"key": "1", "key_norm": "1", "key_source": "hub", "version": 2,
+				"question":          "Ship the feature now? — café ☕",
+				"choices":           `[{"id":"1","label":"yes"},{"id":"2","label":"no — später"}]`,
+				"default_choice_id": "1", "intro_length": 12, "status": "decided",
+				"created_at": baseTime, "decided_at": baseTime.Add(time.Minute),
+			},
+			{ // replaced version 1 of the same key: nullable conversation and default left NULL
+				"id": "dc000000-0000-0000-0000-000000000001", "project_id": projectID,
+				"message_id": messageID, "position": 1,
+				"asker_agent_id": agentID, "asker_agent_name": "worker",
+				"key": "1", "key_norm": "1", "key_source": "hub", "version": 1,
+				"question": "Ship the feature?", "choices": `[{"id":"1","label":"yes"},{"id":"2","label":"no"}]`,
+				"status": "replaced", "replaced_by_id": "dc000000-0000-0000-0000-000000000002",
+				"created_at": baseTime, "replaced_at": baseTime,
+			},
+		}},
+		{Table: "decision_answers", Rows: []row{
+			{ // a direct answer recorded from the web session
+				"id": "da000000-0000-0000-0000-000000000001", "decision_row_id": "dc000000-0000-0000-0000-000000000002",
+				"project_id": projectID, "asker_agent_id": agentID, "key": "1", "version": 2,
+				"question_text": "Ship the feature now? — café ☕", "choice_id": "2", "choice_label": "no — später",
+				"answered_by_user_id": userID, "answered_by_name": "Alice", "answered_by_email": "alice@example.com",
+				"provenance": "direct", "outcome": "answer", "surface": "native",
+				"response_message_id": messageID, "idempotency_key": "web-1", "created_at": baseTime.Add(time.Minute),
+			},
+		}},
+		{Table: "decision_key_counters", Rows: []row{
+			{"agent_id": agentID, "next": 2},
+		}},
 
 		// ---- Schedules ----
 		{Table: "schedules", Rows: []row{

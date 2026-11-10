@@ -66,17 +66,23 @@ var offloadMetadataKeys = map[string]bool{
 // an agent.
 //
 // messages.MetadataSenderTimezone is reserved for the same reason: the hub
-// sets it from a human sender's profile after this strip.
+// sets it from a human sender's profile after this strip. So are the choice
+// response keys (messages.MetadataChoiceKey and the rest), which only the
+// hub sets, on the choice-response it delivers.
 var reservedMetadataKeys = map[string]bool{
-	MetaBodyOffloaded:               true,
-	MetaBodyChars:                   true,
-	MetaBodySHA256:                  true,
-	artifacts.MessageMetadataKey:    true,
-	messages.MetadataSenderVisitor:  true,
-	messages.MetadataSenderEmail:    true,
-	messages.MetadataSenderIssuer:   true,
-	messages.MetadataSenderDisplay:  true,
-	messages.MetadataSenderTimezone: true,
+	MetaBodyOffloaded:                 true,
+	MetaBodyChars:                     true,
+	MetaBodySHA256:                    true,
+	artifacts.MessageMetadataKey:      true,
+	messages.MetadataSenderVisitor:    true,
+	messages.MetadataSenderEmail:      true,
+	messages.MetadataSenderIssuer:     true,
+	messages.MetadataSenderDisplay:    true,
+	messages.MetadataSenderTimezone:   true,
+	messages.MetadataChoiceKey:        true,
+	messages.MetadataChoiceVersion:    true,
+	messages.MetadataChoiceID:         true,
+	messages.MetadataChoiceProvenance: true,
 }
 
 // DefaultPreviewBudgetBytes is the compiled default preview byte budget

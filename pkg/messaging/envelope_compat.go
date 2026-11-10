@@ -93,6 +93,17 @@ func MapLegacyType(oldType, systemCategory string, hasAddressee bool) (MessageKi
 		intent := IntentRequest
 		return KindText, &intent, nil
 
+	case messages.TypeChoicePrompt:
+		// An agent asks a human to decide; the decisions travel as rows, the
+		// body is the markdown fallback.
+		intent := IntentQuestion
+		return KindText, &intent, nil
+
+	case messages.TypeChoiceResponse:
+		// The hub-formatted record of an answer.
+		intent := IntentInform
+		return KindText, &intent, nil
+
 	default:
 		// Unknown type — treat as text/inform and log a warning.
 		slog.Warn("unknown legacy message type, defaulting to text/inform",

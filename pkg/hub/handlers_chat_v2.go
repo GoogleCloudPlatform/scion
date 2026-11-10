@@ -3395,7 +3395,7 @@ func (s *Server) chatHistoryPage(ctx context.Context, wcs WebChatStore, key, his
 		}
 	}
 
-	return chatHistoryResponse{
+	resp := chatHistoryResponse{
 		Messages:                    result.Items,
 		NextCursor:                  result.NextCursor,
 		TotalCount:                  result.TotalCount,
@@ -3406,6 +3406,8 @@ func (s *Server) chatHistoryPage(ctx context.Context, wcs WebChatStore, key, his
 		MessageExtensions:           messageExtensions,
 		ReplyPreviews:               replyPreviews,
 	}
+	s.addChoiceHistoryViews(ctx, &resp)
+	return resp
 }
 
 // ---------------------------------------------------------------------------
@@ -6016,6 +6018,14 @@ type chatHistoryResponse struct {
 	// of the hub's chat retention policy (hub.chat_retention). Set only on
 	// the oldest page (no nextCursor); see chatHistoryRetentionMarker.
 	Retention *chatHistoryRetention `json:"retention,omitempty"`
+
+	// MessageDecisions and MessageChoiceIntros (choice-prompt rows) and
+	// MessageChoiceResponses (choice-response rows) are keyed by message
+	// ID, set only while web.chat_choices is on (design choices v4, 4.4).
+	// The intro is the agent's body without the markdown fallback.
+	MessageDecisions       map[string][]DecisionView     `json:"messageDecisions,omitempty"`
+	MessageChoiceIntros    map[string]string             `json:"messageChoiceIntros,omitempty"`
+	MessageChoiceResponses map[string]ChoiceResponseView `json:"messageChoiceResponses,omitempty"`
 }
 
 // chatHistoryRetention is the history page's retention marker: messages
