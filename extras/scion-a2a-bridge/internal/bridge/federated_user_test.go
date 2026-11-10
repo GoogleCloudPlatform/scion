@@ -2237,7 +2237,9 @@ func TestExecutor_FederatedUsersLaunchingAgentTasksKeptPerAccount(t *testing.T) 
 	taskIDs := append([]string(nil), b.agentTasks[aKey]...)
 	owners := make([]string, len(taskIDs))
 	for i, id := range taskIDs {
-		owners[i] = b.activeTasks[id].federatedUserID
+		if e := b.activeTasks[id]; e.userCaller {
+			owners[i] = e.callerUserID
+		}
 	}
 	b.tasksMu.RUnlock()
 	if len(taskIDs) != 2 {
