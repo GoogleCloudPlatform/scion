@@ -57,13 +57,13 @@ See ptone/scion#7633.`,
 func init() {
 	hubSecretCmd.AddCommand(hubSecretMigrateCmd)
 
-	hubSecretMigrateCmd.Flags().StringVar(&migrateProject, "gcp-project", "", "GCP project ID (required)")
+	hubSecretMigrateCmd.Flags().StringVar(&migrateProject, "gcp-project", "", "GCP project ID")
 	hubSecretMigrateCmd.Flags().StringVar(&migrateCredentials, "credentials", "", "Path to GCP credentials JSON file")
 	hubSecretMigrateCmd.Flags().BoolVar(&migrateDryRun, "dry-run", false, "Show what would be migrated without making changes")
 	hubSecretMigrateCmd.Flags().BoolVar(&migrateForce, "force", false, "Re-migrate secrets that already have a GCP SM reference")
 	hubSecretMigrateCmd.Flags().StringVar(&migrateHubID, "hub-id", "", "Hub instance ID for secret namespacing (defaults to sha256(hostname)[:12])")
-
-	_ = hubSecretMigrateCmd.MarkFlagRequired("gcp-project")
+	// No flag is required, so every invocation reaches the disabled
+	// message instead of a missing-flag error.
 }
 
 // runSecretMigrate refuses to run; it opens no database and contacts no
