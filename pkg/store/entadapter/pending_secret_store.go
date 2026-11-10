@@ -130,6 +130,11 @@ func (s *PendingSecretStore) CreateOrReplacePendingSecret(ctx context.Context, p
 			break
 		}
 	}
+	if errors.Is(err, store.ErrAlreadyExists) && !s.inTx {
+		// Every attempt lost a race on the unique index: report a
+		// transient conflict the caller can retry, not an existing row.
+		return nil, fmt.Errorf("%w: the pending secret write lost %d races for its key", store.ErrTransient, pendingSecretWriteAttempts)
+	}
 	if err != nil {
 		return nil, err
 	}

@@ -123,6 +123,8 @@ type PendingSecretStore interface {
 	//   - a live row by the same agent (p.AgentID): it is replaced by p under
 	//     a new ID, keeping its Created and ExpiresAt, with Updated = now.
 	// A new ID is assigned when p.ID is empty. The input is not modified.
+	// A write that keeps losing races on the unique index (outside an
+	// ambient transaction) returns ErrTransient, never ErrAlreadyExists.
 	CreateOrReplacePendingSecret(ctx context.Context, p *PendingSecret, now time.Time) (*PendingSecretWriteResult, error)
 
 	// GetPendingSecret returns the pending secret with the given ID, with

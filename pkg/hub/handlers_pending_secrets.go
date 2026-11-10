@@ -189,6 +189,11 @@ func (s *Server) agentWritePendingUserSecret(w http.ResponseWriter, r *http.Requ
 	if err != nil {
 		// The held value was never recorded; release it.
 		s.dropPendingValues(ctx, []string{ref})
+		if errors.Is(err, store.ErrTransient) {
+			writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
+				"The save conflicted with a concurrent save of the same name and stored nothing. Retry it.", nil)
+			return
+		}
 		if errors.Is(err, store.ErrPendingSecretHeldByOtherAgent) {
 			writeError(w, http.StatusConflict, ErrCodeSecretPendingHeldByOtherAgent,
 				pendingSecretHeldByOtherAgentMessage, map[string]interface{}{
@@ -246,9 +251,12 @@ func (s *Server) pendingSecretProvenanceNames(ctx context.Context, agentID, proj
 }
 
 // dropPendingValues releases held pending values after the pending rows
-// that referenced them are gone. A failure is logged (never the value or
-// its reference) and does not fail the request.
+// that referenced them are gone. It runs on a context that the request's
+// cancellation does not end, since the rows are already gone. A failure
+// is logged (never the value or its reference) and does not fail the
+// request.
 func (s *Server) dropPendingValues(ctx context.Context, refs []string) {
+	ctx = context.WithoutCancel(ctx)
 	for _, ref := range refs {
 		if ref == "" {
 			continue

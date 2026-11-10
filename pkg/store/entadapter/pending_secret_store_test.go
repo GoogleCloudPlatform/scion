@@ -645,3 +645,28 @@ func TestPendingSecretStore_TransitionAfterPendingWriteInTx(t *testing.T) {
 	})
 	assert.ErrorIs(t, err, store.ErrPolicyTransitionAfterFencedWrite)
 }
+
+// TestPendingSecretStore_RetriesExhaustedIsTransient: a write that loses
+// every attempt to a unique-index conflict reports a transient conflict
+// the caller can retry, not an existing row.
+func TestPendingSecretStore_RetriesExhaustedIsTransient(t *testing.T) {
+	cs := newTestCompositeStore(t)
+	ctx := context.Background()
+	now := time.Now()
+
+	first := newPendingSecretInput("K1", "owner-1", "agent-a", "ref-1")
+	_, err := cs.CreateOrReplacePendingSecret(ctx, first, now)
+	require.NoError(t, err)
+
+	// The same ID under another key conflicts on every attempt.
+	clash := newPendingSecretInput("K2", "owner-1", "agent-a", "ref-2")
+	clash.ID = first.ID
+	_, err = cs.CreateOrReplacePendingSecret(ctx, clash, now)
+	require.ErrorIs(t, err, store.ErrTransient)
+	assert.NotErrorIs(t, err, store.ErrAlreadyExists)
+
+	list, err := cs.ListPendingSecretsByOwner(ctx, store.ScopeUser, "owner-1")
+	require.NoError(t, err)
+	require.Len(t, list, 1)
+	assert.Equal(t, "K1", list[0].Key)
+}

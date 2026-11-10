@@ -527,11 +527,12 @@ func lockAgentGuardUserTx(ctx context.Context, tx store.Store, a *store.Agent) e
 const userScopedDataCleanupTimeout = 30 * time.Second
 
 // removeUserScopedData deletes the user-scope env vars, secrets and pending
-// secrets of a user that has been deleted. It runs after the delete transaction commits and is
-// best effort: the secret backend may be external (GCP Secret Manager) and
-// cannot join the transaction, so a failure is logged at Warn and never
-// fails the request. Anything left behind is retried by the startup sweep
-// (sweepOrphanedUserScopedData). It reports whether everything was removed.
+// secrets of a user that has been deleted. It runs after the delete
+// transaction commits and is best effort: the secret backend may be
+// external (GCP Secret Manager) and cannot join the transaction, so a
+// failure is logged at Warn and never fails the request. Anything left
+// behind is retried by the startup sweep (sweepOrphanedUserScopedData). It
+// reports whether everything was removed.
 func (s *Server) removeUserScopedData(ctx context.Context, userID string) bool {
 	// The user's scheduled chat messages go too, on their own bounded
 	// context (best effort; one left behind fails at fire time and is
@@ -708,9 +709,10 @@ func (s *Server) startUserScopedDataSweep(parent context.Context) <-chan struct{
 }
 
 // findOrphanedUserScopeIDs returns, sorted, the scope IDs of user-scope
-// secrets, pending secrets and env vars whose user no longer exists. A user lookup error
-// other than not-found leaves that ID out, so its values are kept. If ctx
-// ends during the lookups, it returns ctx's error and no IDs.
+// secrets, pending secrets and env vars whose user no longer exists. A
+// user lookup error other than not-found leaves that ID out, so its values
+// are kept. If ctx ends during the lookups, it returns ctx's error and no
+// IDs.
 func (s *Server) findOrphanedUserScopeIDs(ctx context.Context) ([]string, error) {
 	scopeIDs := make(map[string]bool)
 	envVars, err := s.store.ListEnvVars(ctx, store.EnvVarFilter{Scope: store.ScopeUser})
