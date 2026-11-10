@@ -37,11 +37,13 @@ type apiError struct {
 	status  int
 	code    string
 	message string
+	// details, when set, is written as the error envelope's details.
+	details map[string]interface{}
 }
 
 // write sends e as a standard JSON error response.
 func (e *apiError) write(w http.ResponseWriter) {
-	writeError(w, e.status, e.code, e.message, nil)
+	writeError(w, e.status, e.code, e.message, e.details)
 }
 
 // validateThreadName trims and validates a thread/topic name. Rules (shared

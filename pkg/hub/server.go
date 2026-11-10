@@ -7834,6 +7834,8 @@ func (s *Server) registerRoutes() {
 	// Broker plugin inbound message delivery
 	s.mux.HandleFunc("/api/v1/broker/inbound", s.guarded("/api/v1/broker/inbound", s.handleBrokerInbound))
 	s.mux.HandleFunc("/api/v1/broker/inbound/routed", s.guarded("/api/v1/broker/inbound/routed", s.handleBrokerInboundRouted))
+	s.mux.HandleFunc("/api/v1/broker/inbound/attachments", s.guarded("/api/v1/broker/inbound/attachments", s.handleBrokerAttachmentsUpload))
+	s.mux.HandleFunc("/api/v1/broker/inbound/attachments/check", s.guarded("/api/v1/broker/inbound/attachments/check", s.handleBrokerAttachmentsCheck))
 
 	// Broker plugin callback delivery (interactive card responses, action acks)
 	s.mux.HandleFunc("/api/v1/broker/callback", s.guarded("/api/v1/broker/callback", s.handleBrokerCallback))

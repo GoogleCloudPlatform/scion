@@ -62,6 +62,9 @@ const (
 type inboundPayload struct {
 	Topic   string                      `json:"topic"`
 	Message *messages.StructuredMessage `json:"message"`
+	// AttachmentIDs names hub uploads of the sender delivered with the
+	// message.
+	AttachmentIDs []string `json:"attachment_ids,omitempty"`
 }
 
 // hubError represents a structured error returned by the hub API.
