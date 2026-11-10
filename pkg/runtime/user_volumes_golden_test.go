@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"flag"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -102,10 +103,12 @@ func TestUserVolumes_RunArgsGolden(t *testing.T) {
 	}
 	t.Cleanup(func() { projectConfigsDirFunc = origPC })
 
-	// The mock CLI prints the run argv one argument per line; Run returns
-	// it trimmed.
-	mock := filepath.Join(t.TempDir(), "mock-cli")
-	script := "#!/bin/sh\nif [ \"$1\" = \"run\" ]; then printf '%s\\n' \"$@\"; fi\n"
+	// The mock CLI writes the run argv one argument per line to argvLog and
+	// prints a full container ID, as podman run -d does.
+	dir := t.TempDir()
+	mock := filepath.Join(dir, "mock-cli")
+	argvLog := filepath.Join(dir, "argv")
+	script := fmt.Sprintf("#!/bin/sh\nif [ \"$1\" = \"run\" ]; then printf '%%s\\n' \"$@\" > %q; echo %s; fi\n", argvLog, mockPodmanID)
 	if err := os.WriteFile(mock, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -128,6 +131,7 @@ func TestUserVolumes_RunArgsGolden(t *testing.T) {
 					Task:         "hello",
 					Volumes:      tc.volumes,
 				}
+				_ = os.Remove(argvLog)
 				out, err := rc.rt.Run(context.Background(), cfg)
 				var got []byte
 				switch {
@@ -138,7 +142,11 @@ func TestUserVolumes_RunArgsGolden(t *testing.T) {
 				case err != nil:
 					t.Fatalf("Run: %v", err)
 				default:
-					got = append(hostIDEnv.ReplaceAll([]byte(out), []byte("${1}=HOST_ID")), '\n')
+					argv, rerr := os.ReadFile(argvLog)
+					if rerr != nil {
+						t.Fatalf("the mock recorded no run argv: %v", rerr)
+					}
+					got = append(hostIDEnv.ReplaceAll(bytes.TrimRight(argv, "\n"), []byte("${1}=HOST_ID")), '\n')
 				}
 				file := filepath.Join("testdata", "user_volumes_golden", rc.name+"-"+tc.name+".txt")
 				if *updateVolumeArgsGolden {

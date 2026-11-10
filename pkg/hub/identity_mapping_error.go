@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 )
@@ -209,14 +210,20 @@ func identityMappingFailureText(err error) (string, bool) {
 }
 
 // dispatchFailureText is the text recorded or warned for a failed broker
-// dispatch, wherever the failure is reported as text rather than as an HTTP
-// response: a reincarnation record, and the warning of a provision-only
-// create. It is the hub's identity_not_mapped or identity_ksa_mismatch
-// message for a Kubernetes identity mapping refusal (ptone/scion#4024), the
-// code and filtered message of a broker 503 project_storage_unavailable
+// dispatch, wherever the failure is reported as text: a reincarnation
+// record, a failed dispatch row, the warning of a provision-only create,
+// and the message of a start's generic error response. It is the hub's
+// identity_not_mapped or identity_ksa_mismatch message for a Kubernetes
+// identity mapping refusal (ptone/scion#4024), the code and filtered
+// message of a broker 503 project_storage_unavailable
 // (brokerProjectStorageRefusal), the code and the hub's path-free text of a
-// broker 409 project_path_not_initialized, otherwise err's own text, and "" for a nil
-// err or a typed nil *brokerStatusError.
+// broker 409 project_path_not_initialized, for any other broker HTTP error
+// answer err's text with the broker's error replaced by brokerRecordText,
+// otherwise err's own text, and "" for a nil err or a typed nil
+// *brokerStatusError. When err wraps a broker answer but its own text does
+// not hold that answer's Error() (DeleteRunMismatchError writes its own),
+// nothing is replaced and the result is err.Error(), which is body-free
+// because brokerStatusError.Error() is.
 func dispatchFailureText(err error) string {
 	if err == nil {
 		return ""
@@ -237,6 +244,11 @@ func dispatchFailureText(err error) string {
 	// recorded text is the hub's own (ptone/scion#6647).
 	if isProjectPathNotInitialized(err) {
 		return projectPathNotInitializedErrorCode + ": " + projectPathRefusalGeneric
+	}
+	// A broker HTTP error answer: its code, filtered message and allowlisted
+	// current run, never its body. Text the hub wrapped around it is kept.
+	if se != nil {
+		return strings.Replace(err.Error(), se.Error(), brokerRecordText(se), 1)
 	}
 	return err.Error()
 }

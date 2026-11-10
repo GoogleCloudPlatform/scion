@@ -33,10 +33,9 @@ import (
 
 // Grants (design §5.2, D7, D16). A grant gives a principal (a user or an
 // agent) or a scope (a project's members) read, write or admin on one
-// artifact, or gives a user review (ptone/scion#4538): versions of kind
-// review only, with no read of its own; it counts only while the user
-// reads the artifact through the home project or a grant to one of their
-// projects. Grants are read at request time by the same read check every
+// artifact, or gives a user review (ptone/scion#4538), which reads and
+// lets the user append versions of kind review; the levels form a ladder,
+// read ⊂ review ⊂ write ⊂ admin (ptone/scion#5145). Grants are read at request time by the same read check every
 // route uses (canReadWith), so a grant never reaches past what the
 // caller's credential permits (Host.Permits, for agents including the live
 // delegation chain).
@@ -48,39 +47,14 @@ import (
 //
 // All of them need administration (adminAuthorityWith): the owner, an
 // admin grantee, or, on an artifact owned by an agent, a steward (design
-// D25; steward.go), who may not give admin or move the artifact. One
-// exception (design D24): on an
-// artifact owned by an agent, the agent's delegating user and an admin of
-// the home project may also POST a review grant to a user who can already
-// read the artifact through the home project or a grant to one of their
-// projects, the access a human reviewer needs (putReviewGrant). The home project's read grant (the
+// D25; steward.go), who may not give admin or move the artifact. The
+// review-only path for other callers (design D24) is removed
+// (ptone/scion#5145). The home project's read grant (the
 // scope grant naming the current home scope) is listed with home set; its
 // permission may be read or write, and it cannot be removed. A scope grant
 // to any other project needs the host to allow sharing across projects
 // (CrossScopeSharing) when it is created; existing grants keep working if
 // that is turned off later.
-
-// CodeReviewReplacesAccess is the error code of a review grant refused
-// because the user holds a principal read, write or admin grant.
-const CodeReviewReplacesAccess = "review_replaces_access"
-
-// reviewReplacesAccessMessage is the text of a CodeReviewReplacesAccess
-// refusal, on the manager path (handlePutGrant, with 400) and the review
-// path (putReviewGrant, with 403).
-const reviewReplacesAccessMessage = "a review grant cannot replace a user's read, write or admin grant"
-
-// CodeReviewSubjectCannotRead is the error code of a review grant refused
-// on the review path (putReviewGrant) because the user cannot read the
-// artifact through the home project or a grant to one of their projects
-// (ptone/scion#5119). Only a caller already proven to hold review-grant
-// authority gets it.
-const CodeReviewSubjectCannotRead = "review_subject_cannot_read"
-
-// reviewSubjectCannotReadMessage is the text of a
-// CodeReviewSubjectCannotRead refusal. The hub knows the user only by id,
-// so it does not name them.
-const reviewSubjectCannotReadMessage = "This user cannot read this artifact. Review access is only for people who can already read it " +
-	"(members of its home project, or of a project it is shared with)."
 
 // MaxGrantsPerArtifact caps the principal and scope grants of one
 // artifact, the home project's included.
@@ -302,26 +276,16 @@ func (s *Service) handleListGrants(w http.ResponseWriter, r *http.Request, id st
 
 // handlePutGrant implements POST /{id}/grants. It answers 201 when it
 // created the grant and 200 when it changed an existing grant's
-// permission. A caller that can read the artifact but not administer it
-// may still give review access to an agent-owned artifact
-// (putReviewGrant); every other request from it answers the same 403,
-// apart from the refusals putReviewGrant names for a caller with that
-// authority.
+// permission. Authority comes first (adminArtifact: 404 for a caller that
+// cannot read, the uniform 403 for one that cannot administer), and the
+// body is decoded and validated only after it (K17), so a reader who may
+// not administer the artifact learns nothing from the shape of its body.
 func (s *Service) handlePutGrant(w http.ResponseWriter, r *http.Request, id string) {
-	b, a, ok := s.readableArtifact(w, r, id)
+	b, a, caller, ok := s.adminArtifact(w, r, id)
 	if !ok {
 		return
 	}
-	authority, err := s.adminAuthorityWith(r.Context(), a, func() ([]Grant, error) { return b.store.ListGrants(r.Context(), a.ID) })
-	if err != nil {
-		slog.ErrorContext(r.Context(), "artifacts: list grants failed", "error", err)
-		writeError(w, http.StatusInternalServerError, "internal", "could not read the artifact's grants")
-		return
-	}
-	if authority == "" {
-		s.putReviewGrant(w, r, b, a)
-		return
-	}
+	authority := caller.Authority
 	var req GrantRequest
 	if !decodeSmallJSON(w, r, &req, `{"subjectKind": "principal", "subjectRef": "user:<id>", "permission": "read"}`) {
 		return
@@ -362,7 +326,7 @@ func (s *Service) handlePutGrant(w http.ResponseWriter, r *http.Request, id stri
 			"sharing artifacts with other projects is turned off on this hub")
 		return
 	}
-	actor := s.callerActor(r.Context(), a, authority)
+	actor := caller
 	g := &Grant{
 		ID: uuid.NewString(), ArtifactID: a.ID, SubjectKind: req.SubjectKind, SubjectRef: req.SubjectRef,
 		Permission: req.Permission, CreatedByRef: PrincipalRef(actor.Kind, actor.Ref), CreatedAt: time.Now().UTC(),
@@ -382,9 +346,6 @@ func (s *Service) handlePutGrant(w http.ResponseWriter, r *http.Request, id stri
 		return
 	case errors.Is(err, ErrHomeGrantAdmin):
 		writeError(w, http.StatusBadRequest, "bad_request", "the home project's grant may be read or write")
-		return
-	case errors.Is(err, ErrReviewReplacesAccess):
-		writeError(w, http.StatusBadRequest, CodeReviewReplacesAccess, reviewReplacesAccessMessage)
 		return
 	case errors.Is(err, ErrCrossScopeDisabled):
 		s.logRefusal(r, logActionShare, logReasonCrossProjectDisabled, a)
@@ -449,9 +410,6 @@ func isUserPrincipal(kind, ref string) bool {
 //   - the grant names the caller: skipped "self";
 //   - the host's GrantNotifier.MayNotifyGrant (no notifier: "unavailable";
 //     a refusal: "not_permitted"; a fault: "unavailable");
-//   - for review, until review reads (phase 3): the user must already read
-//     the artifact some other way (reviewSubjectCanRead): "not_permitted",
-//     or "unavailable" on a lookup fault;
 //   - the grant must raise the user's current level: "not_raised";
 //   - the notify limiter, per requester and in all: "rate_limited".
 //
@@ -479,20 +437,6 @@ func (s *Service) grantNotifyDecision(r *http.Request, b backend, a *Artifact, r
 	if !allowed {
 		s.logNotifySkipped(r, a, logReasonNotifyNotPermitted, req.SubjectRef, req.Permission)
 		return false, NotifySkippedNotPermitted
-	}
-	if req.Permission == GrantReview {
-		// Phase 2 only: a review grant does not read, so the review notice
-		// goes only to a user who can already open the artifact (Q1).
-		readable, err := s.reviewSubjectCanRead(ctx, b, a, req.SubjectRef)
-		if err != nil {
-			slog.WarnContext(ctx, "artifacts: grant notify: subject read check failed", "error", err)
-			s.logNotifySkipped(r, a, logReasonNotifyUnavailable, req.SubjectRef, req.Permission)
-			return false, NotifySkippedUnavailable
-		}
-		if !readable {
-			s.logNotifySkipped(r, a, logReasonNotifyNotPermitted, req.SubjectRef, req.Permission)
-			return false, NotifySkippedNotPermitted
-		}
 	}
 	grants, err := b.store.ListGrants(ctx, a.ID)
 	if err != nil {
@@ -534,227 +478,6 @@ func (s *Service) sendGrantNotice(r *http.Request, a *Artifact, g *Grant, actor 
 		return false
 	}
 	return true
-}
-
-// putReviewGrant implements POST /{id}/grants for a caller that may read
-// artifact a but not administer it (design D24, ptone/scion#4014). For an
-// artifact owned by an agent, the agent's delegating user and an admin of
-// the home project may give a user a review grant (ptone/scion#4538), the
-// access a reviewer needs, and nothing else: no read, write or admin grant,
-// no grant to an agent or a scope. The user must already read the
-// artifact through the home project or a grant to one of their projects
-// (reviewSubjectCanRead), and an existing principal grant other than
-// review is never replaced, so the grant never takes away the read it
-// counts with. The owning agent itself, like every agent,
-// is refused (sharing is user-only). The caller's credential must permit
-// artifact.manage in the home scope, as for an administrator.
-//
-// A caller that fails reviewGrantSubject (no review-grant authority, or a
-// malformed body) gets the 403 a non-administrator gets, so the request
-// says nothing about why. Only a caller that passed it, and so holds
-// review-grant authority, learns why its well-formed grant was refused
-// (ptone/scion#5119): code CodeReviewSubjectCannotRead when the user
-// cannot read the artifact, and code CodeReviewReplacesAccess when the
-// user holds a principal read, write or admin grant. A refusal by the
-// store's re-check of the home and owner under the artifact's lock keeps
-// the uniform 403. Every 403 here writes one decision log entry
-// (logReviewGrantRefusal).
-func (s *Service) putReviewGrant(w http.ResponseWriter, r *http.Request, b backend, a *Artifact) {
-	var clause string // the review clause that allowed the grant, for the decision log
-	r = r.WithContext(context.WithValue(r.Context(), reviewClauseNote{}, &clause))
-	ctx := r.Context()
-	subject, notify, refusal := s.reviewGrantSubject(r, a)
-	if refusal != "" {
-		s.logReviewGrantRefusal(r, a, refusal, subject)
-		s.writeAdminForbidden(w, r)
-		return
-	}
-	if _, ok := s.host.(ReviewSubjectAuthority); !ok {
-		// Without the subject check nobody passes it (fail closed), but
-		// saying the user cannot read would not be true: the uniform 403.
-		s.logReviewGrantRefusal(r, a, reviewRefusalSubjectUnreadable, subject)
-		s.writeAdminForbidden(w, r)
-		return
-	}
-	readable, err := s.reviewSubjectCanRead(ctx, b, a, subject)
-	if err != nil {
-		slog.ErrorContext(ctx, "artifacts: review grant: subject read check failed", "error", err)
-		writeError(w, http.StatusInternalServerError, "internal", "could not record the grant")
-		return
-	}
-	if !readable {
-		// The read check leaves the user's own principal grant out, so a
-		// user whose only read is a read grant lands here too: name the
-		// grant, not the read.
-		held, err := s.reviewSubjectHoldsAccess(ctx, b, a, subject)
-		if err != nil {
-			slog.ErrorContext(ctx, "artifacts: review grant: list grants failed", "error", err)
-			writeError(w, http.StatusInternalServerError, "internal", "could not record the grant")
-			return
-		}
-		if held {
-			s.refuseReviewReplacesAccess(w, r, a, subject)
-			return
-		}
-		s.logReviewGrantRefusal(r, a, reviewRefusalSubjectUnreadable, subject)
-		writeError(w, http.StatusForbidden, CodeReviewSubjectCannotRead, reviewSubjectCannotReadMessage)
-		return
-	}
-	actor := s.callerActor(ctx, a, reviewGrantAuthority(clause))
-	g := &Grant{
-		ID: uuid.NewString(), ArtifactID: a.ID, SubjectKind: SubjectPrincipal, SubjectRef: subject,
-		Permission: GrantReview, CreatedByRef: PrincipalRef(actor.Kind, actor.Ref), CreatedAt: time.Now().UTC(),
-	}
-	put, err := b.store.PutReviewGrant(ctx, g, MaxGrantsPerArtifact, a.ScopeRef, actor)
-	switch {
-	case errors.Is(err, ErrReviewReplacesAccess):
-		s.refuseReviewReplacesAccess(w, r, a, subject)
-		return
-	case errors.Is(err, ErrReviewGrantRefused):
-		// The home or owner changed since the caller's authority was
-		// checked: the uniform 403.
-		s.logReviewGrantRefusal(r, a, reviewRefusalStoreRefused, subject)
-		s.writeAdminForbidden(w, r)
-		return
-	case errors.Is(err, ErrAttachmentNotShareable):
-		writeAttachmentNotShareable(w)
-		return
-	case errors.Is(err, ErrTooManyGrants):
-		writeError(w, http.StatusConflict, "too_many_grants",
-			"the artifact already has "+strconv.Itoa(MaxGrantsPerArtifact)+" grants; remove one first")
-		return
-	case errors.Is(err, ErrNotFound):
-		writeNotFound(w)
-		return
-	case err != nil:
-		slog.ErrorContext(ctx, "artifacts: put review grant failed", "error", err)
-		writeError(w, http.StatusInternalServerError, "internal", "could not record the grant")
-		return
-	}
-	s.logGrantPut(r, a, g, put, actor.Authority)
-	status := http.StatusOK
-	if put == GrantPutCreated {
-		status = http.StatusCreated
-	}
-	resp := GrantResponse{Grant: grantInfo(a, g)}
-	if notify {
-		// The review path never notifies (spec section 2.6): phase 3
-		// removes it, and its project-admin callers lose review-giving.
-		// Only a caller with review-grant authority gets here.
-		resp.NotifySkipped = NotifySkippedNotPermitted
-	}
-	writeJSON(w, status, resp)
-}
-
-// refuseReviewReplacesAccess logs and answers putReviewGrant's refusal of
-// a user who holds a principal read, write or admin grant on a.
-func (s *Service) refuseReviewReplacesAccess(w http.ResponseWriter, r *http.Request, a *Artifact, subject string) {
-	s.logReviewGrantRefusal(r, a, reviewRefusalExistingAccess, subject)
-	writeError(w, http.StatusForbidden, CodeReviewReplacesAccess, reviewReplacesAccessMessage)
-}
-
-// reviewSubjectHoldsAccess reports whether the user principal subject
-// holds a principal grant other than review on a, one a review grant
-// would replace.
-func (s *Service) reviewSubjectHoldsAccess(ctx context.Context, b backend, a *Artifact, subject string) (bool, error) {
-	gs, err := b.store.ListGrants(ctx, a.ID)
-	if err != nil {
-		return false, err
-	}
-	for _, g := range gs {
-		if g.SubjectKind == SubjectPrincipal && g.SubjectRef == subject && g.Permission != GrantReview {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
-// reviewGrantCaller reports whether the caller of ctx is one that
-// putReviewGrant may serve for artifact a: a is owned by an agent and the
-// caller is a user whose credential permits artifact.manage in a's home
-// scope. It is the cheap half of mayGrantReview.
-func (s *Service) reviewGrantCaller(ctx context.Context, a *Artifact) bool {
-	if a.OwnerKind != PrincipalKindAgent {
-		return false
-	}
-	kind, _, _, ok := s.host.Principal(ctx)
-	if !ok || kind != PrincipalKindUser {
-		return false
-	}
-	return s.host.Permits(ctx, a.ScopeRef, PermissionManage)
-}
-
-// reviewGrantAuthorized reports whether the host's ReviewGrantAuthority
-// lets the caller of ctx give review access on a (the delegating user of
-// a's owning agent, the project owners and admins of a's home project, and
-// super-admins). A host without the authority answers no. A host with
-// ReviewGrantClauser is asked that instead, and the clause is kept for the
-// decision log when ctx carries a reviewClauseNote (putReviewGrant).
-func (s *Service) reviewGrantAuthorized(ctx context.Context, a *Artifact) bool {
-	clause := reviewClauseUnnamed
-	if clauser, ok := s.host.(ReviewGrantClauser); ok {
-		clause = clauser.ReviewGrantClause(ctx, a.OwnerRef, a.ScopeRef, a.SponsorRef)
-	} else if authority, ok := s.host.(ReviewGrantAuthority); !ok || !authority.MayGrantReview(ctx, a.OwnerRef, a.ScopeRef, a.SponsorRef) {
-		clause = ""
-	}
-	if note, ok := ctx.Value(reviewClauseNote{}).(*string); ok {
-		*note = clause
-	}
-	return clause != ""
-}
-
-// mayGrantReview is the caller half of the review-grant decision (design
-// D24, ptone/scion#4014): whether a well-formed review grant from the caller
-// of ctx on a would pass reviewGrantSubject. ArtifactResponse.CanGrantReview
-// states it; reviewGrantSubject makes the same two checks, with the body
-// checks between them. It does not include the store's checks under the
-// artifact's lock (an existing admin grant, a concurrent move).
-func (s *Service) mayGrantReview(ctx context.Context, a *Artifact) bool {
-	return s.reviewGrantCaller(ctx, a) && s.reviewGrantAuthorized(ctx, a)
-}
-
-// reviewGrantSubject decides putReviewGrant's request: it returns the user
-// principal ref to give a review grant and an empty refusal when every
-// condition holds, cheapest first and the host's authority last, and the
-// refusal reason otherwise:
-//   - the caller passes reviewGrantCaller (a is owned by an agent; the
-//     caller is a user whose credential permits artifact.manage in a's
-//     home scope), else reviewRefusalCaller;
-//   - the body is exactly a principal review grant to a user, else
-//     reviewRefusalBody;
-//   - the caller passes reviewGrantAuthorized, else reviewRefusalCaller.
-//
-// With a refusal, subject is the well-formed user ref the body named when
-// the body checks passed, and empty otherwise. notify is the body's notify,
-// reported only without a refusal: the review path never notifies, and a
-// caller without review-grant authority learns nothing from it. Without
-// the body checks this is mayGrantReview.
-func (s *Service) reviewGrantSubject(r *http.Request, a *Artifact) (subject string, notify bool, refusal reviewGrantRefusal) {
-	ctx := r.Context()
-	if !s.reviewGrantCaller(ctx, a) {
-		return "", false, reviewRefusalCaller
-	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxGrantRequestBytes+1))
-	if err != nil || len(body) > maxGrantRequestBytes {
-		return "", false, reviewRefusalBody
-	}
-	var req GrantRequest
-	dec := json.NewDecoder(bytes.NewReader(body))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&req); err != nil || dec.More() {
-		return "", false, reviewRefusalBody
-	}
-	if req.SubjectKind != SubjectPrincipal || req.Permission != GrantReview {
-		return "", false, reviewRefusalBody
-	}
-	pk, id, found := strings.Cut(req.SubjectRef, ":")
-	if !found || pk != PrincipalKindUser || !validSubjectID(id) {
-		return "", false, reviewRefusalBody
-	}
-	if !s.reviewGrantAuthorized(ctx, a) {
-		return req.SubjectRef, false, reviewRefusalCaller
-	}
-	return req.SubjectRef, req.Notify, ""
 }
 
 // handleDeleteGrant implements DELETE /{id}/grants/{grantId}.

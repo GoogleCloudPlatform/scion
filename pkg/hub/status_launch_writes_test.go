@@ -108,6 +108,23 @@ func TestSyncStart_ReplacesFailedAsyncStartLaunchError(t *testing.T) {
 	}
 }
 
+// TestSyncStart_TokenShapedBrokerMessageNotRelayed: a failed start's generic
+// 502 carries the broker's code and, for a message with a token shape, the
+// generic text in its place (brokerRecordText), never the token or the
+// raw body.
+func TestSyncStart_TokenShapedBrokerMessageNotRelayed(t *testing.T) {
+	startErr := fakeBrokerStartErr(t, http.StatusInternalServerError, brokerErrorBody("runtime_error", "auth failed with "+testTokenShaped))
+	disp := &skillFailDispatcher{startErr: startErr}
+	srv, s, project := setupCreateAgentServer(t, disp)
+	agent := createLifecycleTestAgent(t, s, project, "sync-start-token", state.PhaseStopped)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/start", nil)
+	require.Equal(t, http.StatusBadGateway, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "runtime broker returned error 500 (runtime_error): "+brokerErrorGenericMessage)
+	assert.NotContains(t, rec.Body.String(), testTokenShaped)
+	assert.NotContains(t, rec.Body.String(), "auth failed")
+}
+
 // TestSyncStart_KeepsUnconfirmedLaunchOutcome covers an ended start launch
 // whose outcome the hub declared without the broker (broker_lost,
 // launch_timeout), followed by two failed synchronous starts

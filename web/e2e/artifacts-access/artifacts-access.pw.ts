@@ -195,7 +195,6 @@ interface CapabilityFlags {
   canManage: boolean;
   canPublish: boolean;
   canReview: boolean;
-  canGrantReview: boolean;
 }
 
 /** Shared state of the journey. */
@@ -689,7 +688,6 @@ async function capabilities(
     canManage: !!b.canManage,
     canPublish: !!b.canPublish,
     canReview: !!b.canReview,
-    canGrantReview: !!b.canGrantReview,
   };
   rec.ui[`${key}Flags`] = flags;
   return { status: res.status, flags, body: res.body };
@@ -1112,7 +1110,6 @@ test.describe.serial('artifact access per role (R1)', () => {
         canManage: true,
         canPublish: true,
         canReview: false,
-        canGrantReview: false,
       });
     });
 
@@ -1220,7 +1217,6 @@ test.describe.serial('artifact access per role (R1)', () => {
         canManage: false,
         canPublish: false,
         canReview: false,
-        canGrantReview: false,
       });
       const publish = await api(
         'member',
@@ -1279,7 +1275,6 @@ test.describe.serial('artifact access per role (R1)', () => {
         canManage: false,
         canPublish: false,
         canReview: false,
-        canGrantReview: false,
       });
     });
 
@@ -1568,7 +1563,6 @@ test.describe.serial('artifact access per role (R1)', () => {
           canManage: false,
           canPublish: false,
           canReview: false,
-          canGrantReview: false,
         });
       },
       { requires: ['R1-06b', 'R1-07a'] }
@@ -1586,13 +1580,12 @@ test.describe.serial('artifact access per role (R1)', () => {
       if (keys.length < 4) r.legNotRun = 'grantee leg not run: needs R1-06b to pass';
       for (const key of keys) {
         const snap = await snapshotArtifactPage(key, 'R1-08');
-        const caps = await capabilities(key, r);
-        seen[key] = { visible: snap.visible, canGrantReview: caps.flags.canGrantReview };
+        await capabilities(key, r);
+        seen[key] = { visible: snap.visible };
         expect.soft(snap.headerRendered, `${key}: header rendered`).toBe(true);
         expect
           .soft(snap.hidden, `${key}: Grant review access hidden`)
           .toContain('Grant review access');
-        expect.soft(caps.flags.canGrantReview, `${key}: canGrantReview`).toBe(false);
       }
       expect
         .soft(
@@ -1802,7 +1795,6 @@ test.describe.serial('artifact access per role (R1)', () => {
           const flags = (get.body ?? {}) as {
             canManage?: boolean;
             canShare?: boolean;
-            canGrantReview?: boolean;
           };
           const probe = await api(key, 'POST', linksPath, { ttlHours: 24 }, r);
           const view = {
@@ -1814,7 +1806,6 @@ test.describe.serial('artifact access per role (R1)', () => {
             flags: {
               canManage: !!flags.canManage,
               canShare: !!flags.canShare,
-              canGrantReview: !!flags.canGrantReview,
             },
             postLinks: { status: probe.status, code: probe.code },
           };
@@ -1828,8 +1819,8 @@ test.describe.serial('artifact access per role (R1)', () => {
             .soft(snap.hidden, `${key}: Grant review access hidden`)
             .toContain('Grant review access');
           expect
-            .soft(view.flags, `${key}: no share or review-grant flags`)
-            .toEqual({ canManage: false, canShare: false, canGrantReview: false });
+            .soft(view.flags, `${key}: no share flags`)
+            .toEqual({ canManage: false, canShare: false });
           expect.soft(view.postLinks, `${key}: POST /links refused`).toEqual({
             status: 403,
             code: 'forbidden',

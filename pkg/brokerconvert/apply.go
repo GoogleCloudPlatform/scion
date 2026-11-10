@@ -81,6 +81,15 @@ type ApplyInput struct {
 	// LegacyDefaultProfile is the legacy settings' default profile, for a
 	// project with no active profile.
 	LegacyDefaultProfile string
+	// HostMode and HostModeSource are recorded in a new run's journal: the
+	// host mode ("colocated" or "remote") and how it was known ("detected"
+	// or "asserted"). Empty leaves the journal fields empty.
+	HostMode       string
+	HostModeSource string
+	// LocalPlan marks a plan built without the Hub sections, for the
+	// stopped phase of a co-located apply only: this host's server, which
+	// is the Hub, is stopped. Every other path refuses it.
+	LocalPlan bool
 }
 
 // run is one locked operation: the env, the journal and its report.
@@ -111,34 +120,151 @@ func Apply(ctx context.Context, env *Env, in ApplyInput) (*Report, error) {
 	}
 	defer lock.Release()
 
-	p := in.Plan
-	// P-1: a clean plan for exactly one instance, from the Hub too.
-	if p == nil || p.LegacyBrokerID == "" || p.Agents == nil || p.Projects == nil {
-		return refused(ModeApply, nil, refuse(RefuseHubSections))
+	st, rep, err := startApply(env, in)
+	if rep != nil {
+		return rep, err
 	}
-	if p.ExitCode() != ExitClean || p.Agents.Note != "" || p.Projects.Note != "" {
-		return refused(ModeApply, nil, refuse(RefusePlanNotClean))
+	r := &run{ctx: ctx, env: env, j: st.j}
+	legacyID := st.plan.LegacyBrokerID
+	// P-3 and P-4.
+	if ref := r.drainedAndStopped(legacyID); ref != nil {
+		return refused(ModeApply, r.j, ref)
+	}
+	projects, ref := r.applyPrechecks(st)
+	if ref != nil {
+		return refused(ModeApply, r.j, ref)
+	}
+	if ref := r.applyBegin(st); ref != nil {
+		return refused(ModeApply, r.j, ref)
+	}
+	if ref := r.applyRegister(st); ref != nil {
+		return refused(ModeApply, r.j, ref)
+	}
+	// Step 2: the settings.
+	if ref := r.writeSettings(st.insts); ref != nil {
+		return refused(ModeApply, r.j, ref)
+	}
+	// Drained re-check before step 3 (section 4.6).
+	if ref := r.drainedAndStopped(legacyID); ref != nil {
+		return refused(ModeApply, r.j, ref)
+	}
+	// Step 3: re-point projects.
+	if ref := r.repointProjects(st.plan, in.LegacyDefaultProfile, projects); ref != nil {
+		return refused(ModeApply, r.j, ref)
+	}
+	// Drained re-check before the switch instruction.
+	if ref := r.drainedAndStopped(legacyID); ref != nil {
+		return refused(ModeApply, r.j, ref)
+	}
+	return r.applyFinish()
+}
+
+// startLocalApply starts the stopped phase of a co-located apply from a
+// plan built without the Hub sections: this host's server, which is the
+// Hub, is stopped. It only resumes the run that stopped at awaiting-stop,
+// and the plan digest (instances, env keys, profile map, choices) binds
+// it to that run's plan, whose Hub checks the running phase passed.
+func startLocalApply(env *Env, in ApplyInput) (*applyState, *Report, error) {
+	p := in.Plan
+	if p == nil {
+		rep, err := refused(ModeApply, nil, refuse(RefuseHubSections))
+		return nil, rep, err
+	}
+	if p.ExitCode() != ExitClean {
+		rep, err := refused(ModeApply, nil, refuse(RefusePlanNotClean))
+		return nil, rep, err
 	}
 	insts := p.SettingsInstances()
 	if len(insts) != 1 || len(p.Instances) != 1 {
-		return refused(ModeApply, nil, refuse(RefuseMultipleInstances))
+		rep, err := refused(ModeApply, nil, refuse(RefuseMultipleInstances))
+		return nil, rep, err
+	}
+	digest, err := PlanDigest(p, in.Choices)
+	if err != nil {
+		rep, err := refused(ModeApply, nil, refuse(RefuseLocalWrite))
+		return nil, rep, err
+	}
+	j, err := LoadJournal(env.GlobalDir)
+	if err != nil {
+		rep, err := refused(ModeApply, nil, refuse(RefuseLocalWrite))
+		return nil, rep, err
+	}
+	if j == nil || j.State != JournalAwaitingStop || j.Rollback != nil {
+		rep, err := refused(ModeApply, j, refuse(RefuseColocatedJournal))
+		return nil, rep, err
+	}
+	if j.PlanDigest != digest {
+		rep, err := refused(ModeApply, j, refuse(RefusePlanChanged))
+		return nil, rep, err
+	}
+	// P-2: not already flat, unless this run wrote the same instances.
+	current, err := env.LoadInstances()
+	if err != nil {
+		rep, err := refused(ModeApply, j, refuse(RefuseSettingsWrite))
+		return nil, rep, err
+	}
+	if len(current) > 0 && !config.InstancesEqual(current, insts) {
+		rep, err := refused(ModeApply, j, refuse(RefuseAlreadyFlat))
+		return nil, rep, err
+	}
+	return &applyState{plan: p, insts: insts, digest: digest, j: j, resuming: true,
+		hostMode: in.HostMode, hostModeSource: in.HostModeSource}, nil, nil
+}
+
+// applyState is what the checks before any write establish for one apply.
+type applyState struct {
+	plan      *Plan
+	insts     []config.V1RuntimeBrokerInstanceConfig
+	maxAgents int64
+	digest    string
+	// j is the journal of the run being resumed, nil for a new run.
+	j        *Journal
+	resuming bool
+	// hostMode and hostModeSource go into a new run's journal.
+	hostMode       string
+	hostModeSource string
+}
+
+// startApply runs the checks that need neither a Hub write nor a lock of
+// their own: P-1, the capacity target, the plan digest, the journal's
+// resume rule (section 5.2) and P-2. A non-nil report ends the apply: a
+// refusal (also returned as the error) or the no-op of an applied plan.
+func startApply(env *Env, in ApplyInput) (*applyState, *Report, error) {
+	p := in.Plan
+	// P-1: a clean plan for exactly one instance, from the Hub too. A local
+	// plan is taken only by the co-located stopped phase (startLocalApply).
+	if in.LocalPlan || p == nil || p.LegacyBrokerID == "" || p.Agents == nil || p.Projects == nil {
+		rep, err := refused(ModeApply, nil, refuse(RefuseHubSections))
+		return nil, rep, err
+	}
+	if p.ExitCode() != ExitClean || p.Agents.Note != "" || p.Projects.Note != "" {
+		rep, err := refused(ModeApply, nil, refuse(RefusePlanNotClean))
+		return nil, rep, err
+	}
+	insts := p.SettingsInstances()
+	if len(insts) != 1 || len(p.Instances) != 1 {
+		rep, err := refused(ModeApply, nil, refuse(RefuseMultipleInstances))
+		return nil, rep, err
 	}
 	// The capacity carry-over (erratum E2 to sections 4.2 and 7): the new
 	// row takes the legacy row's own explicit override, L for one
 	// instance, 0 (unlimited) for no_limit; never unset.
 	maxAgents, ref := capacityTarget(p)
 	if ref != nil {
-		return refused(ModeApply, nil, ref)
+		rep, err := refused(ModeApply, nil, ref)
+		return nil, rep, err
 	}
 	digest, err := PlanDigest(p, in.Choices)
 	if err != nil {
-		return refused(ModeApply, nil, refuse(RefuseLocalWrite))
+		rep, err := refused(ModeApply, nil, refuse(RefuseLocalWrite))
+		return nil, rep, err
 	}
 
 	// The journal: resume only on an equal digest (section 5.2).
 	j, err := LoadJournal(env.GlobalDir)
 	if err != nil {
-		return refused(ModeApply, nil, refuse(RefuseLocalWrite))
+		rep, err := refused(ModeApply, nil, refuse(RefuseLocalWrite))
+		return nil, rep, err
 	}
 	resuming := false
 	if j != nil {
@@ -146,13 +272,16 @@ func Apply(ctx context.Context, env *Env, in ApplyInput) (*Report, error) {
 		case JournalRolledBack:
 			j = nil // a finished rollback: a new run
 		case JournalRollingBack:
-			return refused(ModeApply, j, refuse(RefuseRollingBack))
+			rep, err := refused(ModeApply, j, refuse(RefuseRollingBack))
+			return nil, rep, err
 		default:
 			if j.LegacyBrokerID != p.LegacyBrokerID {
-				return refused(ModeApply, j, refuse(RefuseOtherLegacy))
+				rep, err := refused(ModeApply, j, refuse(RefuseOtherLegacy))
+				return nil, rep, err
 			}
 			if j.PlanDigest != digest {
-				return refused(ModeApply, j, refuse(RefusePlanChanged))
+				rep, err := refused(ModeApply, j, refuse(RefusePlanChanged))
+				return nil, rep, err
 			}
 			resuming = true
 		}
@@ -161,82 +290,79 @@ func Apply(ctx context.Context, env *Env, in ApplyInput) (*Report, error) {
 	// P-2: not already flat, unless this apply wrote the settings.
 	current, err := env.LoadInstances()
 	if err != nil {
-		return refused(ModeApply, j, refuse(RefuseSettingsWrite))
+		rep, err := refused(ModeApply, j, refuse(RefuseSettingsWrite))
+		return nil, rep, err
 	}
 	if len(current) > 0 && (!resuming || j.Settings.State == StepPending || !config.InstancesEqual(current, insts)) {
-		return refused(ModeApply, j, refuse(RefuseAlreadyFlat))
+		rep, err := refused(ModeApply, j, refuse(RefuseAlreadyFlat))
+		return nil, rep, err
 	}
 	if resuming && j.State == JournalApplied {
 		rep := reportFrom(ModeApply, j)
 		rep.Notes = append(rep.Notes, NoteNoop)
-		return rep, nil
+		return nil, rep, nil
 	}
+	return &applyState{plan: p, insts: insts, maxAgents: maxAgents, digest: digest, j: j, resuming: resuming,
+		hostMode: in.HostMode, hostModeSource: in.HostModeSource}, nil, nil
+}
 
-	r := &run{ctx: ctx, env: env, j: j}
-	// P-3 and P-4.
-	if ref := r.drainedAndStopped(p.LegacyBrokerID); ref != nil {
-		return refused(ModeApply, j, ref)
-	}
+// applyPrechecks runs P-5 (the capacity permission), P-6 (names) and P-7
+// (no local path link), and returns the per-project facts for step 3.
+func (r *run) applyPrechecks(st *applyState) ([]projectFacts, *Refusal) {
+	legacyID := st.plan.LegacyBrokerID
 	// P-5: the capacity write needs quota.update (hub-scoped), read from
 	// the legacy row's settings capabilities before anything is written.
-	if ref := r.checkCapacityPermission(p.LegacyBrokerID); ref != nil {
-		return refused(ModeApply, j, ref)
+	if ref := r.checkCapacityPermission(legacyID); ref != nil {
+		return nil, ref
 	}
 	// P-6: no name collision, other than a row this run registered.
-	if ref := r.checkNames(insts); ref != nil {
-		return refused(ModeApply, j, ref)
+	if ref := r.checkNames(st.insts); ref != nil {
+		return nil, ref
 	}
 	// P-7 and the per-project facts for step 3.
-	projects, ref := r.collectProjects(p.LegacyBrokerID)
-	if ref != nil {
-		return refused(ModeApply, j, ref)
-	}
+	return r.collectProjects(legacyID)
+}
 
+// applyBegin creates the journal of a new run and keeps the evidence copy
+// and the copy of the instances step 2 writes.
+func (r *run) applyBegin(st *applyState) *Refusal {
 	if r.j == nil {
-		if r.j, err = NewJournal(digest, p.LegacyBrokerID, env.now()); err != nil {
-			return refused(ModeApply, nil, refuse(RefuseLocalWrite))
+		j, err := NewJournal(st.digest, st.plan.LegacyBrokerID, r.env.now())
+		if err != nil {
+			return refuse(RefuseLocalWrite)
 		}
-		for _, inst := range insts {
-			target := maxAgents
+		r.j = j
+		r.j.HostMode, r.j.HostModeSource = st.hostMode, st.hostModeSource
+		for _, inst := range st.insts {
+			target := st.maxAgents
 			r.j.Register = append(r.j.Register, RegisterItem{Key: inst.Key, Name: inst.Name, ItemStatus: ItemStatus{State: StepPending},
 				MaxAgents: &target, Capacity: ItemStatus{State: StepPending}})
 		}
 	}
 	// The evidence copy and the copy of the instances step 2 writes.
-	if ref := r.keepCopies(insts); ref != nil {
-		return refused(ModeApply, r.j, ref)
-	}
+	return r.keepCopies(st.insts)
+}
 
-	// Step 1: register (the first Hub write, behind the Hub's experiment
-	// gate and name check).
+// applyRegister runs step 1 (registration, the first Hub write, behind the
+// Hub's experiment gate and name check) and step 1b (each instance row's
+// agent limit, written and read back before step 3, so the row never
+// serves agents without it).
+func (r *run) applyRegister(st *applyState) *Refusal {
 	for i := range r.j.Register {
-		if ref := r.register(&r.j.Register[i], insts); ref != nil {
-			return refused(ModeApply, r.j, ref)
+		if ref := r.register(&r.j.Register[i], st.insts); ref != nil {
+			return ref
 		}
 	}
-	// Step 1b: each instance row's agent limit, written and read back
-	// before step 3, so the row never serves agents without it.
 	for i := range r.j.Register {
 		if ref := r.carryCapacity(&r.j.Register[i]); ref != nil {
-			return refused(ModeApply, r.j, ref)
+			return ref
 		}
 	}
-	// Step 2: the settings.
-	if ref := r.writeSettings(insts); ref != nil {
-		return refused(ModeApply, r.j, ref)
-	}
-	// Drained re-check before step 3 (section 4.6).
-	if ref := r.drainedAndStopped(p.LegacyBrokerID); ref != nil {
-		return refused(ModeApply, r.j, ref)
-	}
-	// Step 3: re-point projects.
-	if ref := r.repointProjects(p, in.LegacyDefaultProfile, projects); ref != nil {
-		return refused(ModeApply, r.j, ref)
-	}
-	// Drained re-check before the switch instruction.
-	if ref := r.drainedAndStopped(p.LegacyBrokerID); ref != nil {
-		return refused(ModeApply, r.j, ref)
-	}
+	return nil
+}
+
+// applyFinish marks the switch done and the run applied.
+func (r *run) applyFinish() (*Report, error) {
 	r.j.Switch = ItemStatus{State: StepDone}
 	r.j.State = JournalApplied
 	if ref := r.save(); ref != nil {

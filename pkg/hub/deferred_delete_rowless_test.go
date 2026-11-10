@@ -272,7 +272,7 @@ func TestProjectDeleteDeferred_RowGone_RefusalSettlesIntent(t *testing.T) {
 	f.removeRows(t)
 	d, wait := f.projectDeleteIntent(t)
 
-	client := newRowlessRecordingClient(runMismatchEnvelope(t, "run-a", "run-z", true))
+	client := newRowlessRecordingClient(runMismatchEnvelope(t, "run-a", testMintedRunID, true))
 	owner, _ := f.owner(t, client)
 	owner.drainBrokerDispatch(ctx, f.broker, nil)
 	wait()
@@ -280,7 +280,8 @@ func TestProjectDeleteDeferred_RowGone_RefusalSettlesIntent(t *testing.T) {
 	row, err := f.store.GetBrokerDispatch(ctx, d.ID)
 	require.NoError(t, err)
 	assert.Equal(t, store.DispatchStateFailed, row.State)
-	assert.Contains(t, row.Error, "run-z", "the broker's answer is recorded")
+	assert.Equal(t, "dispatch delete: runtime broker returned error 404 (run_mismatch) (current run "+testMintedRunID+")", row.Error,
+		"the broker's code and current run are recorded, and nothing of its body")
 	assert.Equal(t, []string{"run-a"}, rowlessRuns(client.sent()), "previous runs are not sent after a refusal")
 }
 

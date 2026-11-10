@@ -262,18 +262,14 @@ func TestDockerRun_NoNFSSharedDirs_NoGroupAdd(t *testing.T) {
 }
 
 func TestPodmanRun_SharedDirLeafGroups(t *testing.T) {
-	cmd := writeEchoCommand(t)
-
-	out, err := (&PodmanRuntime{Command: cmd}).Run(context.Background(), sharedDirGroupsRunConfig(4242))
-	require.NoError(t, err)
+	out := runPodmanRecorded(t, false, sharedDirGroupsRunConfig(4242))
 	args := argsBeforeImage(t, out, "test-image")
 	assert.Contains(t, strings.Join(args, " "), "--group-add 4242")
 
 	// Rootless: the leaf gid is not mapped in the user namespace; warn and skip.
 	logs := &bytes.Buffer{}
 	setRuntimeLogHandler(t, slog.NewTextHandler(logs, nil))
-	out, err = (&PodmanRuntime{Command: cmd, Rootless: true}).Run(context.Background(), sharedDirGroupsRunConfig(4242))
-	require.NoError(t, err)
+	out = runPodmanRecorded(t, true, sharedDirGroupsRunConfig(4242))
 	args = argsBeforeImage(t, out, "test-image")
 	assert.NotContains(t, args, "--group-add")
 	n, _ := countEnv(args, SupplementalGIDsEnvVar)

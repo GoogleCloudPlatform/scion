@@ -30,16 +30,14 @@
  * review's preview can show its marks, the text with every mark rejected
  * (Clean) or accepted (Accepted). Edit, Review and Upload new version are
  * shown only when the hub reports canPublish; for a caller with canReview
- * (a review grant, ptone/scion#4538) only Review is shown. Share is shown for canManage;
- * Grant review access (the Share dialog limited to giving a user review
- * access) for canGrantReview without canManage. Retention… (the Retention
- * and access dialog: expiry, revoke links, remove grants) is shown for
- * canShare without canManage (a steward), and Delete… for canRetire
- * (ptone/scion#4535). With the experiment web.artifact_manage_access on
- * (ptone/scion#7107), one Manage access button, shown for canShare or
- * canGrantReview, replaces Share, Grant review access and Retention…; it
- * opens the Share dialog in manage mode, with each section decided from the
- * same flags. Move… and Delete… are unchanged. An artifact whose owner
+ * (a review grant, ptone/scion#4538) only Review is shown. Share is shown
+ * for canManage. Retention… (the Retention and access dialog: expiry,
+ * revoke links, remove grants) is shown for canShare without canManage (a
+ * steward), and Delete… for canRetire (ptone/scion#4535). With the
+ * experiment web.artifact_manage_access on (ptone/scion#7107), one Manage
+ * access button, shown for canShare, replaces Share and Retention…; it
+ * opens the Share dialog in manage mode, with each section decided from
+ * the same flags. Move… and Delete… are unchanged. An artifact whose owner
  * was deleted has the Owner deleted badge and its owner struck through;
  * the meta row shows when it expires.
  * Route: /projects/{projectId}/artifacts/{artifactId}[/v/{seq}]
@@ -1320,15 +1318,6 @@ export class ScionPageArtifactDetail extends LitElement {
     return !this.canPublish && !!this.data?.canReview;
   }
 
-  /**
-   * The caller may give a user review access but not manage the artifact
-   * (GET's canGrantReview; design D24, ptone/scion#4014): the page offers
-   * Grant review access, the Share dialog limited to that, instead of Share.
-   */
-  private get canGrantReview(): boolean {
-    return !this.data?.canManage && !!this.data?.canGrantReview;
-  }
-
   /** The entry of the current version is text the page can edit in place. */
   private get entryEditable(): boolean {
     const f = this.entry;
@@ -1358,8 +1347,8 @@ export class ScionPageArtifactDetail extends LitElement {
   }
 
   /**
-   * One Manage access button and dialog replace Share, Grant review access
-   * and Retention… (experiment web.artifact_manage_access, ptone/scion#7107).
+   * One Manage access button and dialog replace Share and Retention…
+   * (experiment web.artifact_manage_access, ptone/scion#7107).
    */
   private get manageAccess(): boolean {
     return isFeatureEnabled(ARTIFACT_MANAGE_ACCESS_FLAG);
@@ -1967,11 +1956,11 @@ export class ScionPageArtifactDetail extends LitElement {
             }}
           ></scion-artifact-share-dialog>`
         : nothing}
-      ${!this.manageAccess && (this.data?.canManage || this.canGrantReview)
+      ${!this.manageAccess && this.data?.canManage
         ? html`<scion-artifact-share-dialog
             .artifact=${this.data.artifact}
             .currentUserId=${this.pageData?.user?.id ?? ''}
-            .mode=${this.data?.canManage ? 'share' : 'review'}
+            .mode=${'share'}
             ?open=${this.shareOpen}
             @artifact-changed=${(e: CustomEvent<Artifact>): void => {
               if (this.data) this.data = { ...this.data, artifact: e.detail };
@@ -2095,12 +2084,11 @@ export class ScionPageArtifactDetail extends LitElement {
     const owner = this.label(a.ownerKind, a.ownerRef);
     const f = this.entry;
     const ownFiles = v ? v.files.filter((x) => !isRemoteFile(x)) : [];
-    // Every action needs a version, edit rights or (for Share and Grant
-    // review access) the right to manage the artifact or give review
-    // access; all are hidden while editing or reviewing.
+    // Every action needs a version, edit rights or (for Share) the right
+    // to manage the artifact; all are hidden while editing or reviewing.
     const accessActions = this.manageAccess
       ? showManageAccess(this.accessCaps)
-      : !!this.data?.canManage || this.canGrantReview || this.canRetention;
+      : !!this.data?.canManage || this.canRetention;
     const hasActions =
       !this.editing &&
       !this.reviewing &&
@@ -2202,17 +2190,7 @@ export class ScionPageArtifactDetail extends LitElement {
                         <sl-icon slot="prefix" name="person-plus"></sl-icon>
                         Share
                       </sl-button>`
-                    : this.canGrantReview
-                      ? html`<sl-button
-                          size="small"
-                          @click=${(): void => {
-                            this.shareOpen = true;
-                          }}
-                        >
-                          <sl-icon slot="prefix" name="person-plus"></sl-icon>
-                          Grant review access
-                        </sl-button>`
-                      : nothing}
+                    : nothing}
                 ${!this.manageAccess && this.canRetention
                   ? html`<sl-button
                       size="small"

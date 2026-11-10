@@ -806,7 +806,7 @@ func TestBrokerError_Error(t *testing.T) {
 		},
 		{
 			name:     "without brokerID",
-			err:      &brokerError{statusCode: 500, msg: "internal error"},
+			err:      &brokerError{msg: "internal error"},
 			expected: "internal error",
 		},
 		{
@@ -835,25 +835,5 @@ func TestErrBrokerNotConnected(t *testing.T) {
 	expected := "broker host-abc: broker not connected via control channel"
 	if err.Error() != expected {
 		t.Errorf("error message = %q, want %q", err.Error(), expected)
-	}
-}
-
-func TestErrRuntimeBrokerError(t *testing.T) {
-	err := errRuntimeBrokerError(503, "service unavailable")
-	if err == nil {
-		t.Fatal("expected non-nil error")
-	}
-
-	expected := "service unavailable"
-	if err.Error() != expected {
-		t.Errorf("error message = %q, want %q", err.Error(), expected)
-	}
-
-	hostErr, ok := err.(*brokerError)
-	if !ok {
-		t.Fatal("expected *brokerError type")
-	}
-	if hostErr.statusCode != 503 {
-		t.Errorf("status code = %d, want 503", hostErr.statusCode)
 	}
 }

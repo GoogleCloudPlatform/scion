@@ -366,7 +366,8 @@ func statusByKeyCmd(h *brokerhost.Host) map[string]brokerhost.InstanceStatus {
 // instance's registered (prefixed) endpoint and signs the full path with
 // that instance's secret; the host routes to exactly that instance, which
 // verifies the signature once and answers as it does over the control
-// channel (same status and body for an existing-agent error).
+// channel (same status and broker error code for an existing-agent error;
+// the broker's body stays out of the Hub client's error text).
 func TestFlatHost_HubTransportReachesPrefixedInstance(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
@@ -424,7 +425,15 @@ func TestFlatHost_HubTransportReachesPrefixedInstance(t *testing.T) {
 		rec := httptest.NewRecorder()
 		a.Server.Handler().ServeHTTP(rec, ccReq)
 		assert.Contains(t, httpErr.Error(), strconvItoa(rec.Code), "same status over HTTP and the control channel")
-		assert.Contains(t, httpErr.Error(), strings.TrimSpace(rec.Body.String()), "same body over HTTP and the control channel")
+		var ccBody struct {
+			Error struct {
+				Code string `json:"code"`
+			} `json:"error"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &ccBody), rec.Body.String())
+		require.NotEmpty(t, ccBody.Error.Code, rec.Body.String())
+		assert.Contains(t, httpErr.Error(), "("+ccBody.Error.Code+")", "same broker error code over HTTP and the control channel")
+		assert.NotContains(t, httpErr.Error(), strings.TrimSpace(rec.Body.String()), "the broker's raw body stays out of the Hub client's error text")
 		assert.NotContains(t, httpErr.Error(), "401", "signature over the prefixed path verified")
 	}
 

@@ -1213,7 +1213,7 @@ Every installed release is downloaded only from the configured repository's GitH
 **Confirmed downgrades.** Installing an older release than the running one (`update-binary` when the target release is classified as a downgrade) requires explicit confirmation:
 
 - Pass `params.confirm_downgrade` equal to the resolved target release tag (`v…` or `nightly-YYYYMMDD`). Without it, `POST /api/v1/admin/maintenance/operations/update-binary/run` is refused before any run record is created with `409 downgrade_requires_confirmation`, returning the resolved `target_version`, `current_version`, `downgrade_floor`, and `risks` list in `error.details` (which also notes any installed Runtime Broker plugin that has no asset or `SHA256SUMS` line in the target release and would therefore stay at its current version).
-- Targets older than the downgrade floor (`nightly-20261009`) are classified as `below-floor` in `GET /api/v1/admin/maintenance/releases` and refused before download with `below_downgrade_floor`.
+- Targets older than the downgrade floor (`nightly-20261112`) are classified as `below-floor` in `GET /api/v1/admin/maintenance/releases` and refused before download with `below_downgrade_floor`.
 - Downgrades are supported only on SQLite (where the Hub takes a pre-update snapshot); non-SQLite stores refuse a downgrade before download with `downgrade_unsupported_driver`.
 
 :::caution[Behaviour change for single-node VMs]

@@ -347,7 +347,7 @@ func NewBinaryUpdateExecutor(opts BinaryUpdateOptions) *BinaryUpdateExecutor {
 		e.snapshots = NewUnsupportedDBSnapshotter("no database snapshotter is configured")
 	}
 	if e.floor == "" {
-		e.floor = version.DowngradeFloor
+		e.floor = defaultDowngradeFloor
 	}
 	e.preflightTimeout = preflightTimeout
 	e.installTimeout = installTimeout

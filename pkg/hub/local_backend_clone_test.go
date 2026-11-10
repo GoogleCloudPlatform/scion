@@ -184,22 +184,26 @@ func TestLocalBackendClone_RefusesHostCloneURLs(t *testing.T) {
 	}
 }
 
-// Legitimate https and ssh clone URLs still clone on the local backend,
-// through the hardened host-clone settings. An ssh clone URL needs a project
-// git secret, so the ssh cases give the project one.
-func TestLocalBackendClone_HTTPSAndSSHCloneHardened(t *testing.T) {
-	for i, cloneURL := range []string{
-		"https://git.example.invalid/org/repo.git",
-		"ssh://git@git.example.invalid/org/repo.git",
-		"git@git.example.invalid:org/repo.git",
+// On the local backend an https clone URL clones through the hardened
+// host-clone settings. An ssh or scp-style clone URL is refused before any
+// git or filesystem work, even with a project git secret: the secret
+// authenticates https only, and the fixed refusal text names no URL.
+func TestLocalBackendClone_HardenedByScheme(t *testing.T) {
+	for i, tc := range []struct {
+		cloneURL string
+		refused  bool
+	}{
+		{"https://git.example.invalid/org/repo.git", false},
+		{"ssh://git@git.example.invalid/org/repo.git", true},
+		{"git@git.example.invalid:org/repo.git", true},
 	} {
-		t.Run(cloneURL, func(t *testing.T) {
+		t.Run(tc.cloneURL, func(t *testing.T) {
 			identityTestHome(t)
 			srv, st := testServer(t)
 			argvLog, envLog := localGateFakeGit(t)
 			project := sharedWorkspaceProject("local-gate-ok-" + string(rune('a'+i)))
-			project.Labels[store.LabelCloneURL] = cloneURL
-			if !strings.HasPrefix(cloneURL, "https://") {
+			project.Labels[store.LabelCloneURL] = tc.cloneURL
+			if tc.refused {
 				backend := secret.NewLocalBackend(st, "local-gate-hub", "local-gate-secret")
 				srv.SetSecretBackend(backend)
 				_, _, err := backend.Set(context.Background(), &secret.SetSecretInput{
@@ -212,10 +216,19 @@ func TestLocalBackendClone_HTTPSAndSSHCloneHardened(t *testing.T) {
 			workspacePath, err := localProjectPath(project.Slug)
 			require.NoError(t, err)
 
-			require.NoError(t, srv.cloneSharedWorkspaceProject(context.Background(), project))
+			err = srv.cloneSharedWorkspaceProject(context.Background(), project)
+			if tc.refused {
+				require.ErrorIs(t, err, errSSHCloneURLProjectSecretHTTPSOnly)
+				assert.Equal(t, sshSecretHTTPSOnlyText, err.Error(), "fixed text, no part of the URL")
+				assert.Empty(t, localGateCloneInvocations(t, argvLog), "no clone may run for a refused URL")
+				_, statErr := os.Lstat(workspacePath)
+				assert.True(t, os.IsNotExist(statErr), "a refused URL must not create the workspace")
+				return
+			}
+			require.NoError(t, err)
 			clones := localGateCloneInvocations(t, argvLog)
 			require.Len(t, clones, 1)
-			localGateAssertHardenedClone(t, clones[0], cloneURL, workspacePath, envLog)
+			localGateAssertHardenedClone(t, clones[0], tc.cloneURL, workspacePath, envLog)
 			assert.True(t, util.IsGitRepoDir(workspacePath), "the workspace should be a git repo")
 			assert.DirExists(t, filepath.Join(workspacePath, ".scion"))
 		})

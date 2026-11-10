@@ -69,13 +69,14 @@ func TestIsSSHCloneURL(t *testing.T) {
 		{"ssh+git://git@git.example.test/org/repo.git", true},
 		{"GIT+SSH://git@git.example.test/org/repo.git", true},
 		{"git@git.example.test:org/repo.git", true},
+		{"git.example.test:org/repo.git", true},
 		{"https://git.example.test/org/repo.git", false},
 		{"git://git.example.test/org/repo.git", false},
 	} {
 		assert.Equal(t, tc.want, isSSHCloneURL(tc.url), tc.url)
 	}
 	// The recorded remote falls through to the clone URL: an explicit ssh
-	// remote stays ssh after resolution (and is refused without a secret);
+	// remote stays ssh after resolution (and is refused);
 	// an scp address with another login resolves to https.
 	assert.True(t, isSSHCloneURL(resolveCloneURL("", "ssh://git@git.example.test/org/repo.git")))
 	assert.True(t, isSSHCloneURL(resolveCloneURL("", "git@git.example.test:org/repo.git")))
@@ -84,14 +85,11 @@ func TestIsSSHCloneURL(t *testing.T) {
 	// normalized to ssh:// on the way (NormalizeCloneURL does rewrite them).
 	assert.True(t, isSSHCloneURL(resolveCloneURL("git+ssh://git@git.example.test/org/repo.git", "")))
 	assert.True(t, isSSHCloneURL(resolveCloneURL("ssh+git://git@git.example.test/org/repo.git", "")))
-	assert.ErrorIs(t, sshCloneURLRefused("git@git.example.test:org/repo.git", false), errSSHCloneURLNeedsProjectSecret)
-	assert.NoError(t, sshCloneURLRefused("git@git.example.test:org/repo.git", true))
-	assert.NoError(t, sshCloneURLRefused("https://git.example.test/org/repo.git", false))
 }
 
 // hubRefusesCloneURL reports whether the hub refuses raw (a clone-url label
 // value) at one of its two layers: the host clone-URL check
-// (provision.CheckHostCloneURL) or the ssh-without-a-secret refuse, after
+// (provision.CheckHostCloneURL) or the ssh refusal, after
 // the hub's own resolution of the label (resolveCloneURL).
 func hubRefusesCloneURL(raw string) bool {
 	resolved := resolveCloneURL(raw, "")
@@ -136,48 +134,111 @@ func sshRefusalCases() []struct{ name, gitRemote, label string } {
 		{"scp label", "git.example.test/org/repo", "git@git.example.test:org/repo.git"},
 		{"git+ssh label", "git.example.test/org/repo", "git+ssh://git@git.example.test/org/repo.git"},
 		{"ssh+git label", "git.example.test/org/repo", "ssh+git://git@git.example.test/org/repo.git"},
+		{"upper-case GIT+SSH label", "git.example.test/org/repo", "GIT+SSH://git@git.example.test/org/repo.git"},
 		{"ssh recorded remote", "ssh://git@git.example.test/org/repo.git", ""},
 		{"scp recorded remote", "git@git.example.test:org/repo.git", ""},
 	}
 }
 
-// A workspace pull of an ssh repository URL with no project git secret is
-// refused (422, fixed text) before git runs; with a project secret it goes
-// ahead to git.
-func TestHostGitAccess_PullSSHWithoutProjectSecretRefused(t *testing.T) {
-	for i, tc := range sshRefusalCases() {
-		t.Run(tc.name, func(t *testing.T) {
-			record := fakeSSH(t)
-			srv, st, setToken := hostGitTokenServer(t)
-			p := hostGitProvisionedProject(t, srv, st, fmt.Sprintf("host-git-ssh-%d", i), tc.gitRemote, tc.label)
-
-			code, body := hostGitPull(t, srv, p.ID)
-			assert.Equal(t, http.StatusUnprocessableEntity, code, body)
-			assert.True(t, strings.Contains(body, errSSHCloneURLNeedsProjectSecret.Error()) || strings.Contains(body, provision.ErrHostCloneURLRefused.Error()),
-				"refused by one of the hub's layers: %s", body)
-			assert.False(t, sshRan(t, record), "git must not reach ssh without a project secret")
-
-			setToken(p.ID)
-			code, body = hostGitPull(t, srv, p.ID)
-			assert.NotContains(t, body, errSSHCloneURLNeedsProjectSecret.Error(), "with a project secret the pull is not refused")
-			assert.NotEqual(t, http.StatusOK, code, "fixture check: the fake ssh fails the pull")
-			assert.True(t, sshRan(t, record), "with a project secret git goes ahead over ssh")
-		})
+// sshEdgeCases are ssh-looking clone URLs the host clone-URL check refuses
+// before the ssh refusal is consulted: an upper-case SSH:// scheme (git
+// takes the scheme as written) and a scheme-less host:path with no login
+// (resolution reads it as a host/path and makes it an https URL with a
+// non-numeric port).
+func sshEdgeCases() []struct{ name, gitRemote, label string } {
+	return []struct{ name, gitRemote, label string }{
+		{"upper-case SSH label", "git.example.test/org/repo", "SSH://git@git.example.test/org/repo.git"},
+		{"user-less scp label", "git.example.test/org/repo", "git.example.test:org/repo.git"},
 	}
 }
 
-// The local-backend clone of an ssh repository URL with no project git
-// secret is refused before git runs.
-func TestCloneSharedWorkspaceProject_LocalSSHWithoutProjectSecretRefused(t *testing.T) {
-	for i, tc := range sshRefusalCases() {
-		t.Run(tc.name, func(t *testing.T) {
-			record := fakeSSH(t)
-			srv, st, _ := hostGitTokenServer(t)
-			p := hostGitProject(t, st, fmt.Sprintf("host-git-ssh-clone-%d", i), tc.gitRemote, tc.label)
-			err := srv.cloneSharedWorkspaceProject(context.Background(), p)
-			require.True(t, errors.Is(err, errSSHCloneURLNeedsProjectSecret) || errors.Is(err, provision.ErrHostCloneURLRefused),
-				"refused by one of the hub's layers: %v", err)
-			assert.False(t, sshRan(t, record), "git must not reach ssh without a project secret")
-		})
+// The two ssh refusal texts, written out so a change to either is a test
+// change.
+const (
+	sshUnsupportedText     = "an ssh repository URL is not supported for hub-side git; use an https repository URL"
+	sshSecretHTTPSOnlyText = "a project git secret authenticates https only; use an https repository URL"
+)
+
+// sshRefusalWant is the text a hub-host git path answers for an ssh clone
+// URL: the host clone-URL check's for an edge case, otherwise the ssh
+// refusal with or without a project git secret.
+func sshRefusalWant(edge, withSecret bool) string {
+	switch {
+	case edge:
+		return provision.ErrHostCloneURLRefused.Error()
+	case withSecret:
+		return sshSecretHTTPSOnlyText
+	default:
+		return sshUnsupportedText
+	}
+}
+
+type sshCase struct {
+	name, gitRemote, label string
+	edge                   bool
+}
+
+// sshAllCases are sshRefusalCases and sshEdgeCases, the edge ones marked.
+func sshAllCases() []sshCase {
+	var out []sshCase
+	for _, c := range sshRefusalCases() {
+		out = append(out, sshCase{c.name, c.gitRemote, c.label, false})
+	}
+	for _, c := range sshEdgeCases() {
+		out = append(out, sshCase{c.name, c.gitRemote, c.label, true})
+	}
+	return out
+}
+
+// A workspace pull of an ssh repository URL is refused (422, fixed text)
+// before git runs, with or without a project git secret; the text says
+// which.
+func TestHostGitAccess_PullSSHRefused(t *testing.T) {
+	for i, tc := range sshAllCases() {
+		for _, withSecret := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/secret=%t", tc.name, withSecret), func(t *testing.T) {
+				record := fakeSSH(t)
+				gitLog := hostGitFakeGit(t)
+				srv, st, setToken := hostGitTokenServer(t)
+				p := hostGitProvisionedProject(t, srv, st, fmt.Sprintf("host-git-ssh-%d-%t", i, withSecret), tc.gitRemote, tc.label)
+				if withSecret {
+					setToken(p.ID)
+				}
+				gitRuns := len(hostGitInvocations(t, gitLog))
+
+				code, body := hostGitPull(t, srv, p.ID)
+				require.Equal(t, http.StatusUnprocessableEntity, code, body)
+				assert.Equal(t, sshRefusalWant(tc.edge, withSecret), decodeErrorMessage(t, []byte(body)))
+				assert.False(t, sshRan(t, record), "git must not reach ssh")
+				assert.Len(t, hostGitInvocations(t, gitLog), gitRuns, "git must not run")
+			})
+		}
+	}
+}
+
+// The local-backend clone of an ssh repository URL is refused before git
+// runs or the workspace is made, with or without a project git secret.
+func TestCloneSharedWorkspaceProject_LocalSSHRefused(t *testing.T) {
+	for i, tc := range sshAllCases() {
+		for _, withSecret := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/secret=%t", tc.name, withSecret), func(t *testing.T) {
+				record := fakeSSH(t)
+				gitLog := hostGitFakeGit(t)
+				srv, st, setToken := hostGitTokenServer(t)
+				p := hostGitProject(t, st, fmt.Sprintf("host-git-ssh-clone-%d-%t", i, withSecret), tc.gitRemote, tc.label)
+				if withSecret {
+					setToken(p.ID)
+				}
+				err := srv.cloneSharedWorkspaceProject(context.Background(), p)
+				require.Error(t, err)
+				assert.Equal(t, sshRefusalWant(tc.edge, withSecret), err.Error())
+				assert.False(t, sshRan(t, record), "git must not reach ssh")
+				assert.Empty(t, hostGitInvocations(t, gitLog), "git must not run")
+				ws, pathErr := localProjectPath(p.Slug)
+				require.NoError(t, pathErr)
+				_, statErr := os.Stat(ws)
+				assert.True(t, errors.Is(statErr, os.ErrNotExist), "no workspace is made")
+			})
+		}
 	}
 }

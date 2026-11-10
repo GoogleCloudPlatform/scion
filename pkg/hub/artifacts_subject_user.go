@@ -23,9 +23,8 @@ import (
 
 // The named-user subject (ptone/scion#5145): the one builder of a
 // check-only identity for a user other than the caller of a request. The
-// review-grant subject check (ReviewSubjectAuthorize), the Ask-for-review
-// send check (MayNotifyGrant) and the notice label's email rule
-// (grantNoticeLabel) ask policy a question ABOUT a named user; none of them
+// Ask-for-review send check (MayNotifyGrant) and the notice label's email
+// rule (grantNoticeLabel) ask policy a question ABOUT a named user; neither
 // acts AS that user.
 //
 // The identity built here is passed only as the subject of one
