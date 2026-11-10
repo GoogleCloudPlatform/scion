@@ -92,3 +92,13 @@ func TestHubSecretMigrateCmd_NoHintWhenNoProjectFlags(t *testing.T) {
 	require.NotNil(t, hubSecretMigrateCmd.Args)
 	require.NoError(t, hubSecretMigrateCmd.Args(hubSecretMigrateCmd, nil))
 }
+
+// TestHubSecretMigrateCmd_RefusesToRun checks that the command refuses to
+// run, so it can no longer copy stored at-rest forms into Secret Manager,
+// and that its error points at the Hub maintenance migration.
+func TestHubSecretMigrateCmd_RefusesToRun(t *testing.T) {
+	err := hubSecretMigrateCmd.RunE(hubSecretMigrateCmd, nil)
+	require.ErrorIs(t, err, errSecretMigrateDisabled)
+	assert.Contains(t, err.Error(), "secret-hub-id-migration")
+	assert.Contains(t, err.Error(), "ptone/scion#7633")
+}
