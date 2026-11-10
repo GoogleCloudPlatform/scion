@@ -552,7 +552,7 @@ func runUserSecretList(ctx context.Context, client hubclient.Client) (handled bo
 			version = "-"
 			pending++
 		}
-		fmt.Printf("%-30s  %-8s  %-12s  %-8s  %-8s  %s\n", truncate(s.Key, 30), s.State, s.Type, progenyLabel, version, clitime.Format(s.Updated, clitime.Full))
+		fmt.Printf("%-30s  %-8s  %-12s  %-8s  %-8s  %s\n", truncate(terminalText(s.Key), 30), s.State, terminalText(s.Type), progenyLabel, version, clitime.Format(s.Updated, clitime.Full))
 	}
 	if pending > 0 {
 		fmt.Println("\nPending secrets are not delivered until you approve them: scion hub secret pending list")

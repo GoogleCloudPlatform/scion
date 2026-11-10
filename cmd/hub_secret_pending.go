@@ -69,7 +69,7 @@ func pendingSecretClient() (hubclient.Client, context.Context, context.CancelFun
 
 // pendingSecretHintTimeout bounds the pending secret lookup of the start
 // hint, so a slow Hub never delays a start noticeably.
-const pendingSecretHintTimeout = 5 * time.Second
+const pendingSecretHintTimeout = 2 * time.Second
 
 // printPendingSecretHint writes "N secrets await approval" to w when the
 // calling user has pending secrets. It is for the user's own terminal: it

@@ -15,6 +15,7 @@
 package cmd
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -33,6 +34,7 @@ type pendingMockHub struct {
 	requests     []string
 	bodies       []string
 	forbidMerged bool // answer the merged list with 403
+	controls     bool // serve agent-chosen fields and values with control characters
 	plainLists   int  // approved-only list requests
 }
 
@@ -57,9 +59,34 @@ func (h *pendingMockHub) server(t *testing.T) *httptest.Server {
 			}}})
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/pending-secrets/pend-1/approve":
 			_ = json.NewEncoder(w).Encode(map[string]string{"id": "pend-1", "key": "TOOL_AUTH", "scope": "user", "state": "approved"})
+		case h.controls && r.Method == http.MethodGet && r.URL.Path == "/api/v1/pending-secrets":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"pendingSecrets": []map[string]interface{}{{
+				"id": "pend-1", "key": "TOOL\x1b[2KAUTH", "type": "file", "target": "~/.tool/creds\r.json", "scope": "user",
+				"valueLen": 12, "agentId": "agent-1", "agentSlug": "work\u202eer", "projectId": "proj-1",
+				"projectName": "Al\x07pha", "created": "2026-01-01T00:00:00Z", "updated": "2026-01-01T00:00:00Z",
+				"expiresAt": "2026-01-08T00:00:00Z", "state": "pending",
+			}}})
+		case h.controls && r.Method == http.MethodPost && r.URL.Path == "/api/v1/pending-secrets/pend-1/reveal":
+			// "line1\n\x1b]52;c;evil\x07\rok\\" base64-encoded
+			_ = json.NewEncoder(w).Encode(map[string]string{"id": "pend-1", "key": "TOOL_AUTH", "type": "file",
+				"target": "~/.tool/creds.json", "value": base64.StdEncoding.EncodeToString([]byte("line1\n\x1b]52;c;evil\x07\rok\\")), "encoding": "base64"})
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/pending-secrets/pend-1/reveal":
 			_ = json.NewEncoder(w).Encode(map[string]string{"id": "pend-1", "key": "TOOL_AUTH", "type": "file",
 				"target": "~/.tool/creds.json", "value": "dGVzdC12YWx1ZS1yZXZlYWw=", "encoding": "base64"})
+		case h.controls && r.Method == http.MethodGet && r.URL.Path == "/api/v1/secrets" && r.URL.Query().Get("includePending") == "true":
+			approved := map[string]interface{}{"id": "sec-1", "key": "APP\x1b[8mROVED", "type": "file\r", "scope": "user", "version": 1,
+				"created": "2026-01-01T00:00:00Z", "updated": "2026-01-01T00:00:00Z"}
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"secrets": []interface{}{approved}, "scope": "user", "scopeId": "u1",
+				"items": []interface{}{
+					map[string]interface{}{"state": "approved", "key": "APP\x1b[8mROVED", "secret": approved},
+					map[string]interface{}{"state": "pending", "key": "PEND\u202eING", "pending": map[string]interface{}{
+						"id": "pend-1", "key": "PEND\u202eING", "type": "environment\x07", "target": "T", "scope": "user",
+						"created": "2026-01-01T00:00:00Z", "updated": "2026-01-01T00:00:00Z",
+						"expiresAt": "2026-01-08T00:00:00Z", "state": "pending",
+					}},
+				},
+			})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/secrets" && r.URL.Query().Get("includePending") == "true":
 			if h.forbidMerged {
 				w.WriteHeader(http.StatusForbidden)
@@ -97,11 +124,11 @@ func setupPendingSecretTest(t *testing.T) *pendingMockHub {
 	t.Helper()
 	orig := saveSecretTestState()
 	origFormat := outputFormat
-	origJSON, origNoProgeny, origShowJSON := pendingSecretListJSON, pendingSecretApproveNoProgeny, pendingSecretShowJSON
+	origJSON, origNoProgeny, origShowJSON, origRaw := pendingSecretListJSON, pendingSecretApproveNoProgeny, pendingSecretShowJSON, pendingSecretRevealRaw
 	t.Cleanup(func() {
 		orig.restore()
 		outputFormat = origFormat
-		pendingSecretListJSON, pendingSecretApproveNoProgeny, pendingSecretShowJSON = origJSON, origNoProgeny, origShowJSON
+		pendingSecretListJSON, pendingSecretApproveNoProgeny, pendingSecretShowJSON, pendingSecretRevealRaw = origJSON, origNoProgeny, origShowJSON, origRaw
 	})
 	hub := &pendingMockHub{}
 	server := hub.server(t)
@@ -114,6 +141,10 @@ func setupPendingSecretTest(t *testing.T) *pendingMockHub {
 	pendingSecretListJSON = false
 	pendingSecretApproveNoProgeny = false
 	pendingSecretShowJSON = false
+	pendingSecretRevealRaw = false
+	origTTY := stdoutIsTerminal
+	t.Cleanup(func() { stdoutIsTerminal = origTTY })
+	stdoutIsTerminal = func() bool { return false }
 	secretOutputJSON = false
 	secretScope = ""
 	return hub
@@ -295,4 +326,124 @@ func TestPrintPendingSecretHint(t *testing.T) {
 	printPendingSecretHint(ctx, &buf, client)
 	assert.Empty(t, buf.String())
 	assert.Len(t, hub.requests, before)
+}
+
+func TestEscapeForTerminal(t *testing.T) {
+	cases := []struct {
+		in        string
+		keepLines bool
+		want      string
+	}{
+		{"plain text: é ✓", false, "plain text: é ✓"},
+		{"esc\x1b[31mred", false, `esc\x1b[31mred`},
+		{"cr\roverwrite", false, `cr\x0doverwrite`},
+		{"bell\x07 del\x7f nul\x00", false, `bell\x07 del\x7f nul\x00`},
+		{"c1\u009b31m", false, `c1\u{009b}31m`},
+		{"bidi\u202eevil", false, `bidi\u{202e}evil`},
+		{"bad\xffbyte", false, `bad\xffbyte`},
+		{`back\slash \x1b`, false, `back\\slash \\x1b`},
+		{"two\nlines\ttab", false, `two\x0alines\x09tab`},
+		{"two\nlines\ttab", true, "two\nlines\ttab"},
+	}
+	for _, tc := range cases {
+		assert.Equal(t, tc.want, escapeForTerminal(tc.in, tc.keepLines), "%q", tc.in)
+	}
+}
+
+func TestRunSecretPendingReveal_TerminalEscapes(t *testing.T) {
+	hub := setupPendingSecretTest(t)
+	hub.controls = true
+	raw := "line1\n\x1b]52;c;evil\x07\rok\\"
+
+	// Redirected: exactly as stored.
+	out := captureStdout(t, func() {
+		require.NoError(t, runSecretPendingReveal(hubSecretPendingRevealCmd, []string{"pend-1"}))
+	})
+	assert.Equal(t, raw, out)
+
+	// On a terminal: controls shown as escapes, lines kept.
+	stdoutIsTerminal = func() bool { return true }
+	out = captureStdout(t, func() {
+		require.NoError(t, runSecretPendingReveal(hubSecretPendingRevealCmd, []string{"pend-1"}))
+	})
+	assert.Equal(t, "line1\n\\x1b]52;c;evil\\x07\\x0dok\\\\", out)
+	assert.NotContains(t, out, "\x1b")
+	assert.NotContains(t, out, "\r")
+
+	// --raw on a terminal: exactly as stored.
+	pendingSecretRevealRaw = true
+	out = captureStdout(t, func() {
+		require.NoError(t, runSecretPendingReveal(hubSecretPendingRevealCmd, []string{"pend-1"}))
+	})
+	assert.Equal(t, raw, out)
+	assert.NotNil(t, hubSecretPendingRevealCmd.Flags().Lookup("raw"))
+}
+
+func TestRunSecretPendingList_TerminalEscapesAgentFields(t *testing.T) {
+	hub := setupPendingSecretTest(t)
+	hub.controls = true
+	stdoutIsTerminal = func() bool { return true }
+	out := captureStdout(t, func() {
+		require.NoError(t, runSecretPendingList(hubSecretPendingListCmd, nil))
+	})
+	for _, c := range []string{"\x1b", "\r", "\x07", "\u202e"} {
+		assert.NotContains(t, out, c)
+	}
+	assert.Contains(t, out, `TOOL\x1b[2KAUTH`)
+	assert.Contains(t, out, `~/.tool/creds\x0d.json`)
+	assert.Contains(t, out, `agent work\u{202e}er`)
+	assert.Contains(t, out, `project Al\x07pha`)
+
+	// JSON output keeps the values, JSON-encoded.
+	pendingSecretListJSON = true
+	out = captureStdout(t, func() {
+		require.NoError(t, runSecretPendingList(hubSecretPendingListCmd, nil))
+	})
+	var got struct {
+		PendingSecrets []map[string]interface{} `json:"pendingSecrets"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(out), &got), out)
+	assert.Equal(t, "TOOL\x1b[2KAUTH", got.PendingSecrets[0]["key"])
+	assert.NotContains(t, out, "\x1b", "JSON escapes control characters itself")
+}
+
+func TestRunSecretPendingShow_TerminalEscapesAgentFields(t *testing.T) {
+	setupPendingSecretTest(t)
+	stdoutIsTerminal = func() bool { return true }
+	out := captureStdout(t, func() {
+		require.NoError(t, runSecretPendingShow(hubSecretPendingShowCmd, []string{"pend-1"}))
+	})
+	assert.Contains(t, out, "pend-1  TOOL_AUTH", "printable fields are unchanged")
+	assert.Contains(t, out, "Overrides:  project secret TOOL_AUTH in Beta")
+}
+
+// TestRunSecretList_UserScopeEscapesOnTerminal: every agent-influenced
+// column of the user-scope table (key and type) is escaped on a terminal;
+// JSON output carries the text as stored.
+func TestRunSecretList_UserScopeEscapesOnTerminal(t *testing.T) {
+	hub := setupPendingSecretTest(t)
+	hub.controls = true
+	stdoutIsTerminal = func() bool { return true }
+	out := captureStdout(t, func() {
+		require.NoError(t, runSecretList(hubSecretListCmd, nil))
+	})
+	for _, c := range []string{"\x1b", "\r", "\x07", "\u202e"} {
+		assert.NotContains(t, out, c)
+	}
+	assert.Contains(t, out, `APP\x1b[8mROVED`)
+	assert.Contains(t, out, `file\x0d`)
+	assert.Contains(t, out, `PEND\u{202e}ING`)
+	assert.Contains(t, out, `environment\x07`)
+
+	secretOutputJSON = true
+	out = captureStdout(t, func() {
+		require.NoError(t, runSecretList(hubSecretListCmd, nil))
+	})
+	var got struct {
+		Secrets []map[string]interface{} `json:"secrets"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(out), &got), out)
+	require.Len(t, got.Secrets, 2)
+	assert.Equal(t, "APP\x1b[8mROVED", got.Secrets[0]["key"])
+	assert.Equal(t, "PEND\u202eING", got.Secrets[1]["key"])
 }

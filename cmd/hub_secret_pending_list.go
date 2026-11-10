@@ -76,10 +76,11 @@ func runSecretPendingList(_ *cobra.Command, _ []string) error {
 
 	fmt.Println("Secrets waiting for your approval:")
 	for _, p := range resp.PendingSecrets {
-		fmt.Printf("\n%s  %s\n", p.ID, p.Key)
+		fmt.Printf("\n%s  %s\n", p.ID, terminalText(p.Key))
 		fmt.Printf("  Type:       %s\n", secretTypeLabel(p.Type))
-		fmt.Printf("  Target:     %s\n", p.Target)
-		fmt.Printf("  Written by: agent %s (%s) in project %s (%s)\n", p.AgentSlug, p.AgentID, p.ProjectName, p.ProjectID)
+		fmt.Printf("  Target:     %s\n", terminalText(p.Target))
+		fmt.Printf("  Written by: agent %s (%s) in project %s (%s)\n",
+			terminalText(p.AgentSlug), p.AgentID, terminalText(p.ProjectName), p.ProjectID)
 		fmt.Printf("  Written at: %s\n", clitime.Format(p.Created, clitime.Full))
 		if !p.Updated.Equal(p.Created) {
 			fmt.Printf("  Replaced:   %s\n", clitime.Format(p.Updated, clitime.Full))

@@ -28,19 +28,27 @@ var hubSecretPendingRevealCmd = &cobra.Command{
 	Long: `Print the value of a pending secret, by the ID 'scion hub secret pending list'
 shows, so you can check it before you approve it.
 
-The value is written to standard output exactly as stored, with no trailing
-newline added. The Hub records every reveal in its audit log. Nothing else
+An agent chose the value, so on a terminal every byte the terminal could act on
+(escape sequences, carriage returns and other control characters) is shown as
+a visible escape such as \x1b, and a backslash as \\. Redirected to a file or
+a pipe, or with --raw, the value is written exactly as stored. No trailing
+newline is added. The Hub records every reveal in its audit log. Nothing else
 changes: the secret stays pending.
 
 Examples:
   scion hub secret pending reveal 0b6f...
-  scion hub secret pending reveal 0b6f... > /tmp/check.json`,
+  scion hub secret pending reveal 0b6f... > /tmp/check.json
+  scion hub secret pending reveal 0b6f... --raw`,
 	Args: cobra.ExactArgs(1),
 	RunE: runSecretPendingReveal,
 }
 
+var pendingSecretRevealRaw bool
+
 func init() {
 	hubSecretPendingCmd.AddCommand(hubSecretPendingRevealCmd)
+	hubSecretPendingRevealCmd.Flags().BoolVar(&pendingSecretRevealRaw, "raw", false,
+		"Write the value exactly as stored, even to a terminal")
 }
 
 func runSecretPendingReveal(_ *cobra.Command, args []string) error {
@@ -61,6 +69,10 @@ func runSecretPendingReveal(_ *cobra.Command, args []string) error {
 	value, err := base64.StdEncoding.DecodeString(resp.Value)
 	if err != nil {
 		return fmt.Errorf("failed to decode the revealed value: %w", err)
+	}
+	if !pendingSecretRevealRaw && stdoutIsTerminal() {
+		_, err = os.Stdout.WriteString(escapeForTerminal(string(value), true))
+		return err
 	}
 	_, err = os.Stdout.Write(value)
 	return err

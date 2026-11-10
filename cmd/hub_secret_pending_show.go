@@ -81,11 +81,12 @@ func runSecretPendingShow(_ *cobra.Command, args []string) error {
 	}
 
 	p := item.PendingSecret
-	fmt.Printf("%s  %s\n", p.ID, p.Key)
+	fmt.Printf("%s  %s\n", p.ID, terminalText(p.Key))
 	fmt.Printf("  Type:       %s\n", secretTypeLabel(p.Type))
-	fmt.Printf("  Target:     %s\n", p.Target)
+	fmt.Printf("  Target:     %s\n", terminalText(p.Target))
 	fmt.Printf("  Length:     %d bytes\n", p.ValueLen)
-	fmt.Printf("  Written by: agent %s (%s) in project %s (%s)\n", p.AgentSlug, p.AgentID, p.ProjectName, p.ProjectID)
+	fmt.Printf("  Written by: agent %s (%s) in project %s (%s)\n",
+		terminalText(p.AgentSlug), p.AgentID, terminalText(p.ProjectName), p.ProjectID)
 	fmt.Printf("  Written at: %s\n", clitime.Format(p.Created, clitime.Full))
 	if !p.Updated.Equal(p.Created) {
 		fmt.Printf("  Replaced:   %s\n", clitime.Format(p.Updated, clitime.Full))
@@ -99,15 +100,15 @@ func runSecretPendingShow(_ *cobra.Command, args []string) error {
 	if len(item.OverridesProjectSecrets) > 0 {
 		names := make([]string, 0, len(item.OverridesProjectSecrets))
 		for _, o := range item.OverridesProjectSecrets {
-			names = append(names, o.ProjectName)
+			names = append(names, terminalText(o.ProjectName))
 		}
-		fmt.Printf("  Overrides:  project secret %s in %s\n", p.Key, strings.Join(names, ", "))
+		fmt.Printf("  Overrides:  project secret %s in %s\n", terminalText(p.Key), strings.Join(names, ", "))
 	}
 	if p.ReplacesExisting {
 		fmt.Println("  Replaces:   your existing secret of this name")
 	}
 	if p.Description != "" {
-		fmt.Printf("  Description: %s\n", p.Description)
+		fmt.Printf("  Description: %s\n", terminalText(p.Description))
 	}
 	return nil
 }
