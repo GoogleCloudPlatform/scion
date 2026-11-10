@@ -629,11 +629,13 @@ func TestDecisionAnswer_AskerGoneStoresFailedResponse(t *testing.T) {
 	assert.Len(t, f.dispatcher.getMessages(), before, "nothing is dispatched to a gone asker")
 }
 
-// A user access token and a visitor get 403 on both decision routes;
-// answers come from a web session only. The token's refusal is the
-// session-only one the catalog records (reason INTERACTIVE_STATE,
-// credential session_required); the bearer disposition matrix cannot
-// reach it while web.chat_choices is off, so this test pins it.
+// A user access token, a federated user and a visitor get 403 on both
+// decision routes; answers come from a web session only. The token's and
+// the federated user's refusal is the session-only one the catalog
+// records (reason INTERACTIVE_STATE, credential session_required); the
+// bearer disposition matrix cannot reach it while web.chat_choices is
+// off, so this test pins it. The refusal does not depend on the token's
+// selectors, which is why a project:read token covers the matrix rows.
 func TestDecisionRoutes_TokenAndVisitorForbidden(t *testing.T) {
 	f := newChoicesFixture(t)
 	_, res := f.topicPrompt(t, twoDecisions, false)
@@ -641,13 +643,14 @@ func TestDecisionRoutes_TokenAndVisitorForbidden(t *testing.T) {
 
 	uat := NewScopedUserIdentity(authUser(f.bob), f.project.ID, []string{"project:read"})
 	visitor := NewVisitorIdentity(tid("choices-visitor"), "https://issuer.choices.test", "choices-visitor", "visitor@choices.test", "Visitor")
-	for name, id := range map[string]Identity{"user access token": uat, "visitor": visitor} {
+	federated := NewFederatedUserIdentity("https://issuer.choices.test", "choices-fed", f.bob.Email, "Fed Bob", "member", nil)
+	for name, id := range map[string]Identity{"user access token": uat, "federated user": federated, "visitor": visitor} {
 		answer := requestAsIdentity(t, f.srv, id, http.MethodPost, "/api/v1/decisions/"+row+"/answer", map[string]interface{}{"choice_id": "1"})
 		get := requestAsIdentity(t, f.srv, id, http.MethodGet, "/api/v1/decisions/"+row, nil)
 		for route, rec := range map[string]*httptest.ResponseRecorder{"answer": answer, "get": get} {
 			require.Equal(t, http.StatusForbidden, rec.Code, "%s %s: %s", name, route, rec.Body.String())
 			_, details := errorCodeAndDetails(t, rec)
-			if name == "user access token" {
+			if name != "visitor" {
 				assert.Equal(t, string(authzop.ReasonInteractiveState), details["reason"], "%s %s", name, route)
 				assert.Equal(t, "session_required", details["credential"], "%s %s", name, route)
 			} else {

@@ -92,9 +92,10 @@ func (s *Server) handleDecisionRoutes(w http.ResponseWriter, r *http.Request) {
 
 // decisionCaller returns the user calling a decision endpoint, or writes
 // the refusal: agents (an agent never answers directly, design 5 item 2),
-// visitors and user access tokens get 403, a token with the session-only
-// details (reason INTERACTIVE_STATE, credential session_required). Phase 1
-// answers come from the web session only.
+// visitors get 403, and every other credential that is not a web session
+// or dev credential (a user access token, a federated user) gets the
+// session-only 403 (reason INTERACTIVE_STATE, credential
+// session_required). Phase 1 answers come from the web session only.
 func decisionCaller(w http.ResponseWriter, r *http.Request) UserIdentity {
 	ctx := r.Context()
 	if GetAgentIdentityFromContext(ctx) != nil {
@@ -110,9 +111,12 @@ func decisionCaller(w http.ResponseWriter, r *http.Request) UserIdentity {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "decisions are answered from a web session", nil)
 		return nil
 	}
-	if chatToken(ctx) != nil {
-		// A user access token gets the session-only refusal the catalog
-		// records for both decision routes.
+	// Only a web session (or a dev credential) may answer or read: every
+	// other user credential gets the session-only refusal the catalog
+	// records for both decision routes. That is a user access token, and
+	// also a federated user, which chatRoute admits and which is neither
+	// a visitor nor a token.
+	if cls, _ := inboxCredentialOf(ctx); cls != inboxCredentialSession {
 		writeSessionOnlyDenial(w, ErrCodeForbidden, "decisions are answered from a web session", authzop.ReasonInteractiveState)
 		return nil
 	}
