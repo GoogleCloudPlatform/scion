@@ -270,7 +270,7 @@ _See also_: Deliverable, Artifact, Durability
 
 **Durability**:
 The property of a deliverable being reachable by someone else after its producing agent's container has been deleted. A verified shared-volume document or pushed remote ref can be durable without artifact-system publication. Publication alone does not guarantee retention: published content may expire or be deleted.
-_See also_: Deliverable, Artifact
+_See also_: Deliverable, File / Document, Artifact
 
 **Artifact**:
 A published file or folder (a bundle) stored by the Hub, with numbered immutable versions and a stable reference `scion://artifact/<id>[@<seq>]` that works from any Runtime Broker and in the web UI. Owned by the publishing agent or user and homed in a project. Gated by the `hub.artifacts` experiment. Not a build output or a chat attachment.
