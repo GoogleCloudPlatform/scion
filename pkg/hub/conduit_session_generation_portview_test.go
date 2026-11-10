@@ -379,10 +379,13 @@ func callerFuncs(t *testing.T, path, callee string) []string {
 	return out
 }
 
-// portViewNonTestGoFileNames returns the package's non-test Go files.
+// portViewNonTestGoFileNames returns the non-test Go files of pkg/hub and of
+// every area moved out of it.
 func portViewNonTestGoFileNames(t *testing.T) []string {
 	t.Helper()
-	all, err := filepath.Glob("*.go")
+	// pkgmove:scan-covers guardScanSubdirs
+	// scanned through guardScanSubdirs; finds every setter of the page view link marker.
+	all, err := globGuardScanDirs(".", "*.go")
 	require.NoError(t, err)
 	var out []string
 	for _, f := range all {
