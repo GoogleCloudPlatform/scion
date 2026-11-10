@@ -2051,7 +2051,9 @@ func TestExecutor_FederatedUserLaunchingAgentRefusalIsUniform(t *testing.T) {
 // TestExecutor_FederatedUserLaunchingAgentAllowedWaits: when the hub allows
 // the federated user to message an agent that is still launching, the
 // bridge asks the hub first (the caller's own read of its conversation with
-// the agent), then waits for the launch, then sends as the user.
+// the agent), then waits for the launch, then sends as the user. Reply
+// polling is off, so the reply is the pushed one; the polled case is
+// TestExecutor_FederatedUserLaunchingAgentAllowedWaitsPolled.
 func TestExecutor_FederatedUserLaunchingAgentAllowedWaits(t *testing.T) {
 	token := fedUserToken(t)
 	hub := newFedUserHub(t, token)
@@ -2062,7 +2064,7 @@ func TestExecutor_FederatedUserLaunchingAgentAllowedWaits(t *testing.T) {
 			"launch": map[string]interface{}{"id": "launch-1", "state": "ended", "kind": "create"},
 		}
 	})
-	b, _, ts := newFedUserTestServer(t, hub)
+	b, _, ts := newFedUserTestServer(t, hub, fedUserPushOnly)
 	b.launchPollInterval = 5 * time.Millisecond
 
 	done := sendAsync(t, ts, "agent1", token)
@@ -2097,6 +2099,66 @@ func TestExecutor_FederatedUserLaunchingAgentAllowedWaits(t *testing.T) {
 	}
 	if !strings.Contains(body, fedUserReplyText) {
 		t.Fatalf("response does not carry the agent's reply; body %s", body)
+	}
+}
+
+// TestExecutor_FederatedUserLaunchingAgentAllowedWaitsPolled: with reply
+// polling on, a federated user's message to an agent that is still
+// launching is checked with the caller's own conversation read before the
+// launch wait, read again by the reply preflight after the wait and before
+// the send, and the reply is the one read from that conversation. Every
+// read is of the caller's conversation key with the caller's credential.
+func TestExecutor_FederatedUserLaunchingAgentAllowedWaitsPolled(t *testing.T) {
+	token := fedUserToken(t)
+	hub := newFedUserHub(t, token)
+	hub.set(func(h *fedUserHub) {
+		h.adminAgents = []map[string]interface{}{fedUserLaunchingAgent()}
+		h.agentGet = map[string]interface{}{
+			"id": fedUserAgentID, "name": "agent1", "slug": "agent1", "projectId": fedUserProjectID, "phase": "running", "status": "running",
+			"launch": map[string]interface{}{"id": "launch-1", "state": "ended", "kind": "create"},
+		}
+	})
+	b, _, ts := newFedUserTestServer(t, hub, visitorPollConfig)
+	b.launchPollInterval = 5 * time.Millisecond
+
+	done := sendAsync(t, ts, "agent1", token)
+	sent := waitForSend(t, hub)
+	hub.set(func(h *fedUserHub) { h.dmMessages = visitorDMRows(fedUserReplyText) })
+
+	status, body := awaitResult(t, done)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body %s", status, body)
+	}
+	if !strings.Contains(body, fedUserReplyText) {
+		t.Fatalf("response does not carry the agent's reply; body %s", body)
+	}
+	if sent.DMReadsBefore != 2 {
+		t.Errorf("conversation reads before the send = %d, want 2 (the check before the launch wait and the preflight)", sent.DMReadsBefore)
+	}
+
+	snap := hub.snapshot()
+	firstGet := slices.Index(snap.order, "agent-get")
+	if firstGet < 0 {
+		t.Fatalf("the bridge did not wait for the launch (no read of the agent); hub requests %v", snap.order)
+	}
+	var reads []int
+	for i, req := range snap.order {
+		if req == "dm-read" {
+			reads = append(reads, i)
+		}
+	}
+	sendAt := slices.Index(snap.order, "send")
+	if len(reads) < 2 || reads[0] > firstGet || reads[1] < firstGet || reads[1] > sendAt {
+		t.Errorf("hub requests in order %v, want a conversation read before the first agent read and another between the launch wait and the send", snap.order)
+	}
+	wantKey := visitorDMKey(t)
+	for i, key := range snap.dmReadKeys {
+		if key != wantKey || snap.dmReadTokens[i] != token {
+			t.Errorf("read %d: key %q with credential %q, want %q with the caller's", i, key, snap.dmReadTokens[i], wantKey)
+		}
+	}
+	if len(snap.dmReadKeys) < 4 {
+		t.Errorf("conversation reads = %d, want at least the launch check, the preflight, a poll and the access re-check", len(snap.dmReadKeys))
 	}
 }
 
@@ -2258,7 +2320,7 @@ func fedUser2Token(t *testing.T) string {
 // through the local cache, each task is registered for its own account
 // once the launch ends: each account's reply reaches only that account's
 // task, and the second account can neither read nor cancel the first
-// account's task.
+// account's task. Reply polling is off, so the replies are the pushed ones.
 func TestExecutor_FederatedUsersLaunchingAgentTasksKeptPerAccount(t *testing.T) {
 	const (
 		firstReplyText  = "reply from agent1 to the first visitor"
@@ -2274,7 +2336,7 @@ func TestExecutor_FederatedUsersLaunchingAgentTasksKeptPerAccount(t *testing.T) 
 			"launch": map[string]interface{}{"id": "launch-1", "state": "ended", "kind": "create"},
 		}
 	})
-	b, _, ts := newFedUserTestServer(t, hub)
+	b, _, ts := newFedUserTestServer(t, hub, fedUserPushOnly)
 	b.launchPollInterval = 5 * time.Millisecond
 
 	waitForSends := func(n int) []fedUserHubSend {
