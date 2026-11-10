@@ -179,6 +179,10 @@ var fixtureCreateSites = []fixtureCreateSite{
 	{"perf/bench/seed/main.go", "s.CreateAgent(ctx, agent)", false,
 		"benchmark seeding tool writing a store directly; no hub principal exists"},
 
+	// ── Test support outside _test.go files ───────────────────────────
+	{"pkg/hub/internal/hubtestutil/authz_sqlite.go", "s.CreateProject(ctx, &store.Project{", false,
+		"CreateDelegateTestProject: test fixture helper writing a store directly; hubtestutil is imported only by _test.go files (TestOnlyTestCodeImportsHubtestutil)"},
+
 	// ── Not store creates (broker / hub client RPCs of the same name) ─
 	{"pkg/hub/brokerclient.go", "c.transport.CreateAgent(", false, "broker RPC: starts an agent already created by commitAgentCreate"},
 	{"pkg/hub/httpdispatcher.go", "c.transport.CreateAgent(", false, "broker RPC"},
