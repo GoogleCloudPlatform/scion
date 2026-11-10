@@ -187,11 +187,20 @@ func wpTeamEntries() []wpEntry {
 	}
 }
 
-func newWelcomeFixture(t *testing.T) *welcomeFixture {
+// newWelcomeFixture builds the workstation server and the fakes. Each hook
+// runs right after the server is built and its startup sweep has ended,
+// before any audited setup, which is where installStoreFault must run.
+func newWelcomeFixture(t *testing.T, hooks ...func(*Server)) *welcomeFixture {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	srv, s := testWorkstationServer(t)
+	if len(hooks) > 0 {
+		waitUserScopedDataSweep(t, srv)
+		for _, h := range hooks {
+			h(srv)
+		}
+	}
 	srv.SetStorage(newMockStorage("test-bucket"))
 	welcomeSetExperiment(t, srv, true)
 
@@ -1463,35 +1472,60 @@ func TestWelcome_ClientCancelAfterStagingRemovesTheStagingDir(t *testing.T) {
 	f.requireNoProject(led.ProjectID)
 }
 
-// wpGetProjectFailOnce fails the first successful GetProject of one id, once.
-// The create route's own existence check reads a missing project, so the
-// failure lands on the welcome flow's read after the create.
+// wpGetProjectFailOnce, once its switch is armed, fails the first successful
+// GetProject of one id, once. The create route's own existence check reads a
+// missing project, so the failure lands on the welcome flow's read after the
+// create. Until it is armed it only delegates.
 type wpGetProjectFailOnce struct {
 	store.Store
+	fault *storeFaultSwitch
+	mu    sync.Mutex
 	id    string
 	fired bool
 }
 
 func (w *wpGetProjectFailOnce) GetProject(ctx context.Context, id string) (*store.Project, error) {
 	p, err := w.Store.GetProject(ctx, id)
-	if err == nil && id == w.id && !w.fired {
+	if err != nil || !w.fault.Active() {
+		return p, err
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if id == w.id && !w.fired {
 		w.fired = true
 		return nil, errors.New("injected read failure")
 	}
 	return p, err
 }
 
+func (w *wpGetProjectFailOnce) target(id string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.id = id
+}
+
+func (w *wpGetProjectFailOnce) didFire() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.fired
+}
+
 // N-c: a project read that fails right after a successful create rolls the
 // project back, as the later error paths do.
 func TestWelcome_ProjectReadFailureAfterCreateRollsBack(t *testing.T) {
-	f := newWelcomeFixture(t)
+	var fs *wpGetProjectFailOnce
+	var fault *storeFaultSwitch
+	f := newWelcomeFixture(t, func(srv *Server) {
+		fs, fault = installStoreFault(t, srv, func(inner store.Store, sw *storeFaultSwitch) *wpGetProjectFailOnce {
+			return &wpGetProjectFailOnce{Store: inner, fault: sw}
+		})
+	})
 	pv := f.preview()
-	fs := &wpGetProjectFailOnce{Store: f.srv.store, id: f.ledger().ProjectID}
-	f.srv.store = fs
+	fs.target(f.ledger().ProjectID)
+	fault.Arm()
 	rec := f.install(pv.PreviewID)
-	f.srv.store = fs.Store
 	require.NotEqual(t, http.StatusOK, rec.Code, rec.Body.String())
-	require.True(t, fs.fired, "the injected read failure fired after the create")
+	require.True(t, fs.didFire(), "the injected read failure fired after the create")
 	f.requireNoProject(f.ledger().ProjectID)
 }
 
