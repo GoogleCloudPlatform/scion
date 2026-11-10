@@ -39327,6 +39327,8 @@ type DecisionAnswerMutation struct {
 	authorizing_user_id     *string
 	delegation_grant_id     *string
 	idempotency_key         *string
+	batch_id                *uuid.UUID
+	matched_default         *bool
 	created_at              *time.Time
 	clearedFields           map[string]struct{}
 	done                    bool
@@ -40256,6 +40258,91 @@ func (m *DecisionAnswerMutation) ResetIdempotencyKey() {
 	delete(m.clearedFields, decisionanswer.FieldIdempotencyKey)
 }
 
+// SetBatchID sets the "batch_id" field.
+func (m *DecisionAnswerMutation) SetBatchID(u uuid.UUID) {
+	m.batch_id = &u
+}
+
+// BatchID returns the value of the "batch_id" field in the mutation.
+func (m *DecisionAnswerMutation) BatchID() (r uuid.UUID, exists bool) {
+	v := m.batch_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldBatchID returns the old "batch_id" field's value of the DecisionAnswer entity.
+// If the DecisionAnswer object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DecisionAnswerMutation) OldBatchID(ctx context.Context) (v *uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldBatchID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldBatchID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldBatchID: %w", err)
+	}
+	return oldValue.BatchID, nil
+}
+
+// ClearBatchID clears the value of the "batch_id" field.
+func (m *DecisionAnswerMutation) ClearBatchID() {
+	m.batch_id = nil
+	m.clearedFields[decisionanswer.FieldBatchID] = struct{}{}
+}
+
+// BatchIDCleared returns if the "batch_id" field was cleared in this mutation.
+func (m *DecisionAnswerMutation) BatchIDCleared() bool {
+	_, ok := m.clearedFields[decisionanswer.FieldBatchID]
+	return ok
+}
+
+// ResetBatchID resets all changes to the "batch_id" field.
+func (m *DecisionAnswerMutation) ResetBatchID() {
+	m.batch_id = nil
+	delete(m.clearedFields, decisionanswer.FieldBatchID)
+}
+
+// SetMatchedDefault sets the "matched_default" field.
+func (m *DecisionAnswerMutation) SetMatchedDefault(b bool) {
+	m.matched_default = &b
+}
+
+// MatchedDefault returns the value of the "matched_default" field in the mutation.
+func (m *DecisionAnswerMutation) MatchedDefault() (r bool, exists bool) {
+	v := m.matched_default
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldMatchedDefault returns the old "matched_default" field's value of the DecisionAnswer entity.
+// If the DecisionAnswer object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DecisionAnswerMutation) OldMatchedDefault(ctx context.Context) (v bool, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldMatchedDefault is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldMatchedDefault requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldMatchedDefault: %w", err)
+	}
+	return oldValue.MatchedDefault, nil
+}
+
+// ResetMatchedDefault resets all changes to the "matched_default" field.
+func (m *DecisionAnswerMutation) ResetMatchedDefault() {
+	m.matched_default = nil
+}
+
 // SetCreatedAt sets the "created_at" field.
 func (m *DecisionAnswerMutation) SetCreatedAt(t time.Time) {
 	m.created_at = &t
@@ -40326,7 +40413,7 @@ func (m *DecisionAnswerMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *DecisionAnswerMutation) Fields() []string {
-	fields := make([]string, 0, 21)
+	fields := make([]string, 0, 23)
 	if m.decision_row_id != nil {
 		fields = append(fields, decisionanswer.FieldDecisionRowID)
 	}
@@ -40387,6 +40474,12 @@ func (m *DecisionAnswerMutation) Fields() []string {
 	if m.idempotency_key != nil {
 		fields = append(fields, decisionanswer.FieldIdempotencyKey)
 	}
+	if m.batch_id != nil {
+		fields = append(fields, decisionanswer.FieldBatchID)
+	}
+	if m.matched_default != nil {
+		fields = append(fields, decisionanswer.FieldMatchedDefault)
+	}
 	if m.created_at != nil {
 		fields = append(fields, decisionanswer.FieldCreatedAt)
 	}
@@ -40438,6 +40531,10 @@ func (m *DecisionAnswerMutation) Field(name string) (ent.Value, bool) {
 		return m.DelegationGrantID()
 	case decisionanswer.FieldIdempotencyKey:
 		return m.IdempotencyKey()
+	case decisionanswer.FieldBatchID:
+		return m.BatchID()
+	case decisionanswer.FieldMatchedDefault:
+		return m.MatchedDefault()
 	case decisionanswer.FieldCreatedAt:
 		return m.CreatedAt()
 	}
@@ -40489,6 +40586,10 @@ func (m *DecisionAnswerMutation) OldField(ctx context.Context, name string) (ent
 		return m.OldDelegationGrantID(ctx)
 	case decisionanswer.FieldIdempotencyKey:
 		return m.OldIdempotencyKey(ctx)
+	case decisionanswer.FieldBatchID:
+		return m.OldBatchID(ctx)
+	case decisionanswer.FieldMatchedDefault:
+		return m.OldMatchedDefault(ctx)
 	case decisionanswer.FieldCreatedAt:
 		return m.OldCreatedAt(ctx)
 	}
@@ -40640,6 +40741,20 @@ func (m *DecisionAnswerMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetIdempotencyKey(v)
 		return nil
+	case decisionanswer.FieldBatchID:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetBatchID(v)
+		return nil
+	case decisionanswer.FieldMatchedDefault:
+		v, ok := value.(bool)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetMatchedDefault(v)
+		return nil
 	case decisionanswer.FieldCreatedAt:
 		v, ok := value.(time.Time)
 		if !ok {
@@ -40710,6 +40825,9 @@ func (m *DecisionAnswerMutation) ClearedFields() []string {
 	if m.FieldCleared(decisionanswer.FieldIdempotencyKey) {
 		fields = append(fields, decisionanswer.FieldIdempotencyKey)
 	}
+	if m.FieldCleared(decisionanswer.FieldBatchID) {
+		fields = append(fields, decisionanswer.FieldBatchID)
+	}
 	return fields
 }
 
@@ -40741,6 +40859,9 @@ func (m *DecisionAnswerMutation) ClearField(name string) error {
 		return nil
 	case decisionanswer.FieldIdempotencyKey:
 		m.ClearIdempotencyKey()
+		return nil
+	case decisionanswer.FieldBatchID:
+		m.ClearBatchID()
 		return nil
 	}
 	return fmt.Errorf("unknown DecisionAnswer nullable field %s", name)
@@ -40809,6 +40930,12 @@ func (m *DecisionAnswerMutation) ResetField(name string) error {
 		return nil
 	case decisionanswer.FieldIdempotencyKey:
 		m.ResetIdempotencyKey()
+		return nil
+	case decisionanswer.FieldBatchID:
+		m.ResetBatchID()
+		return nil
+	case decisionanswer.FieldMatchedDefault:
+		m.ResetMatchedDefault()
 		return nil
 	case decisionanswer.FieldCreatedAt:
 		m.ResetCreatedAt()
