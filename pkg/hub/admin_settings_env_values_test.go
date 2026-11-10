@@ -52,6 +52,7 @@ func secretEnvKeys() map[string]any {
 		"telemetry.cloud.headers.authorization",
 		"server.hub.conduit.peer_secret",
 		"server.hub.test_identities.admin_web_sessions",
+		"server.hub.test_identities.offline_admin_delegations",
 		"server.hub.class",
 		"server.auth.proxy.driver_token_audience",
 		"profiles.local.env.API_KEY",

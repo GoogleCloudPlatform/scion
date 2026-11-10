@@ -159,7 +159,7 @@ func (s *Server) reapTestIdentities(ctx context.Context, now time.Time) (testIde
 			trigger:     testIdentityExpireMutation,
 			executor:    fixturePurgeExecutorReaper,
 			requestedBy: fixturePurgeExecutorReaper,
-			actor:       AuditActor{PrincipalKind: "user", PrincipalID: issuer},
+			actor:       AuditActor{PrincipalKind: reaperIssuerPrincipalKind(issuer, s.config.HubID), PrincipalID: issuer},
 		}
 		// An admin-kind identity (admin tier A3): its stamped grants go
 		// with it.
@@ -235,4 +235,14 @@ func (s *Server) holdExpiredTestIdentities(ctx context.Context, now time.Time) (
 	}
 	s.drainMembershipLossChecks(ctx)
 	return len(users), nil
+}
+
+// reaperIssuerPrincipalKind is the audit principal kind of an expired test
+// identity's issuer: the offline grantor kind when issuer is this hub's
+// reserved offline grantor id (which names no user), otherwise "user".
+func reaperIssuerPrincipalKind(issuer, hubID string) string {
+	if reserved := store.TestInfraOfflineGrantorID(hubID); reserved != "" && issuer == reserved {
+		return store.DelegationGrantorTestInfraOffline
+	}
+	return "user"
 }

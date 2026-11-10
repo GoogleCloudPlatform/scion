@@ -115,3 +115,41 @@ func TestTestIdentityAdminWebSessions_LoadFromSettingsFile(t *testing.T) {
 		t.Fatalf("key = %q", TestIdentityAdminWebSessionsKey)
 	}
 }
+
+// server.hub.test_identities.offline_admin_delegations loads from the
+// settings file into HubServerConfig.TestIdentities, is empty by default,
+// survives the versioned round trip, and is independent of
+// admin_web_sessions.
+func TestTestIdentityOfflineAdminDelegations_LoadFromSettingsFile(t *testing.T) {
+	yaml := "schema_version: \"1\"\nserver:\n  hub:\n    test_identities:\n      offline_admin_delegations: hub-oad-a\n"
+	scionDir, _ := writeConfigPathFixture(t, yaml, "schema_version: \"1\"\n")
+	gc, err := LoadGlobalConfig(scionDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := gc.Hub.TestIdentityOfflineAdminDelegations(); got != "hub-oad-a" {
+		t.Fatalf("offline admin delegations = %q, want hub-oad-a", got)
+	}
+	if got := gc.Hub.TestIdentityAdminWebSessions(); got != "" {
+		t.Fatalf("admin web sessions = %q, want empty", got)
+	}
+	v1 := ConvertGlobalToV1ServerConfig(gc)
+	if v1 == nil || v1.Hub == nil || v1.Hub.TestIdentities == nil || v1.Hub.TestIdentities.OfflineAdminDelegations != "hub-oad-a" {
+		t.Fatal("versioned conversion lost offline_admin_delegations")
+	}
+	if back := ConvertV1ServerToGlobalConfig(v1); back.Hub.TestIdentityOfflineAdminDelegations() != "hub-oad-a" {
+		t.Fatal("versioned round trip lost offline_admin_delegations")
+	}
+
+	scionDir, _ = writeConfigPathFixture(t, "schema_version: \"1\"\n", "schema_version: \"1\"\n")
+	gc, err = LoadGlobalConfig(scionDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := gc.Hub.TestIdentityOfflineAdminDelegations(); got != "" {
+		t.Fatalf("default offline admin delegations = %q, want empty", got)
+	}
+	if TestIdentityOfflineAdminDelegationsKey != "server.hub.test_identities.offline_admin_delegations" {
+		t.Fatalf("key = %q", TestIdentityOfflineAdminDelegationsKey)
+	}
+}
