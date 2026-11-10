@@ -277,13 +277,57 @@ func TestPendingSecretNotification_CountsWaitingSecrets(t *testing.T) {
 		AgentID: f.AgentID, AgentSlug: "slug\u202eevil", ProjectID: f.ProjectID, ProjectName: f.ProjectName,
 	}
 	base := time.Date(2026, 11, 10, 10, 15, 0, 0, time.UTC)
-	n := buildPendingSecretNotification(p, 3, base.Add(2*time.Hour))
+	n := buildPendingSecretNotification(p, pendingSecretCounts{waiting: 3}, base.Add(2*time.Hour))
 	assert.Contains(t, n.Message, "3 secrets from this agent await your approval.")
+	n2 := buildPendingSecretNotification(p, pendingSecretCounts{waiting: 3, replacing: 2}, base)
+	assert.Contains(t, n2.Message, "3 secrets from this agent await your approval, 2 of them replace existing secrets.")
+	n1 := buildPendingSecretNotification(p, pendingSecretCounts{waiting: 2, replacing: 1}, base)
+	assert.Contains(t, n1.Message, "2 secrets from this agent await your approval, 1 of them replaces an existing secret.")
 	assert.Contains(t, n.Message, "at 2026-11-10T12:15:00Z.")
 	assert.NotContains(t, n.Message, "\u202e", "agent-chosen names are cleaned")
-	earlier := buildPendingSecretNotification(p, 1, base)
+	earlier := buildPendingSecretNotification(p, pendingSecretCounts{waiting: 1}, base)
 	assert.NotContains(t, earlier.Message, "await your approval.", "a single secret gets no count")
 	assert.NotEqual(t, earlier.ID, n.ID, "a later hour gets its own notification id")
-	assert.Equal(t, earlier.ID, buildPendingSecretNotification(p, 2, base.Add(30*time.Minute)).ID,
+	assert.Equal(t, earlier.ID, buildPendingSecretNotification(p, pendingSecretCounts{waiting: 2}, base.Add(30*time.Minute)).ID,
 		"the same hour maps to one notification id")
+}
+
+// TestPendingSecretNotification_ReplacementAlwaysAnnounced: a write that
+// would replace an approved secret is announced even inside the agent's
+// hourly window, says that it is a replacement, and is announced at most
+// once per key and hour.
+func TestPendingSecretNotification_ReplacementAlwaysAnnounced(t *testing.T) {
+	f := newPendingFixture(t, "pend-notify-replace")
+	rec := ownerRequest(t, f.Server, f.owner(), CredentialKindInteractive, http.MethodPut, "/api/v1/secrets/EXISTING_KEY",
+		SetSecretRequest{Value: "dGVzdC12YWx1ZS1hcHByb3ZlZA==", Scope: store.ScopeUser})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	// First write in the hour: a new key, notified.
+	decodePendingResponse(t, agentPut(t, f.Server, f.AgentID, f.Token, "NEW_KEY", userScopeWrite("test-value-1", false)))
+	require.Len(t, pendingNotifications(t, f), 1)
+
+	// Second write in the same hour replaces an approved secret: notified too.
+	repl := decodePendingResponse(t, agentPut(t, f.Server, f.AgentID, f.Token, "EXISTING_KEY", userScopeWrite("test-value-2", false)))
+	require.True(t, repl.ReplacesExisting)
+	notes := pendingNotifications(t, f)
+	require.Len(t, notes, 2, "a replacement is announced inside the agent's hourly window")
+	var replNote *store.Notification
+	for i := range notes {
+		if notes[i].ResourceID == repl.PendingID {
+			replNote = &notes[i]
+		}
+	}
+	require.NotNil(t, replNote)
+	assert.Contains(t, replNote.Message, "saved a replacement for your existing secret EXISTING_KEY (file) at ")
+	assert.Contains(t, replNote.Message, "Your current value stays in effect until you approve it.")
+	assert.Contains(t, replNote.Message, "2 secrets from this agent await your approval, 1 of them replaces an existing secret.")
+	assert.NotContains(t, replNote.Message, "test-value")
+
+	// The same agent replacing the same key again within the hour adds nothing.
+	decodePendingResponse(t, agentPut(t, f.Server, f.AgentID, f.Token, "EXISTING_KEY", userScopeWrite("test-value-3", false)))
+	assert.Len(t, pendingNotifications(t, f), 2)
+
+	// A new key inside the window stays covered by the hourly notification.
+	decodePendingResponse(t, agentPut(t, f.Server, f.AgentID, f.Token, "NEW_KEY_2", userScopeWrite("test-value-4", false)))
+	assert.Len(t, pendingNotifications(t, f), 2)
 }

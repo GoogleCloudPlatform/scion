@@ -32,8 +32,11 @@ import (
 // own subject like the artifact review summary. At most one is created per
 // (owner, writing agent) per pendingSecretNotifyInterval; a write inside
 // that window adds no notification, and the next one reports how many of
-// that agent's secrets await approval. The text names the agent, its
-// project, the key, its type and the time; never the value.
+// that agent's secrets await approval and how many of those replace an
+// existing secret. A write that would replace an approved secret always
+// notifies, outside that window, at most once per (owner, writing agent,
+// key) per interval, so no replacement goes unannounced. The text names
+// the agent, its project, the key, its type and the time; never the value.
 
 // pendingSecretNotifyInterval is the minimum time between two pending
 // secret notifications for the same owner and writing agent.
@@ -59,31 +62,46 @@ func (s *Server) notifyPendingSecret(ctx context.Context, p *store.PendingSecret
 	now := time.Now()
 	log := slog.With("pending_id", p.ID)
 
-	recent, err := s.store.GetNotificationsByAgent(ctx, p.AgentID, store.SubscriberTypeUser, p.ScopeID, false)
-	if err != nil {
-		log.WarnContext(ctx, "pending secret: notification skipped: listing notifications failed", "error", err)
-		return
-	}
-	for _, n := range recent {
-		if n.Kind == store.NotificationKindSecretPending && now.Sub(n.CreatedAt) < pendingSecretNotifyInterval {
+	// A replacement of an approved secret is announced whatever the
+	// agent's hourly window says; its notification id is per key and hour.
+	if p.ReplacesSecretID == "" {
+		recent, err := s.store.GetNotificationsByAgent(ctx, p.AgentID, store.SubscriberTypeUser, p.ScopeID, false)
+		if err != nil {
+			log.WarnContext(ctx, "pending secret: notification skipped: listing notifications failed", "error", err)
 			return
 		}
-	}
-
-	count := 1
-	if rows, err := s.store.ListPendingSecretsByOwner(ctx, store.ScopeUser, p.ScopeID); err == nil {
-		count = 0
-		for _, row := range rows {
-			if row.AgentID == p.AgentID && !row.Expired(now) {
-				count++
+		for _, n := range recent {
+			if n.Kind == store.NotificationKindSecretPending && now.Sub(n.CreatedAt) < pendingSecretNotifyInterval {
+				return
 			}
 		}
-		if count == 0 {
-			count = 1
+	}
+
+	counts := pendingSecretCounts{waiting: 1}
+	if p.ReplacesSecretID != "" {
+		counts.replacing = 1
+	}
+	if rows, err := s.store.ListPendingSecretsByOwner(ctx, store.ScopeUser, p.ScopeID); err == nil {
+		var c pendingSecretCounts
+		for _, row := range rows {
+			if row.AgentID == p.AgentID && !row.Expired(now) {
+				c.waiting++
+				if row.ReplacesSecretID != "" {
+					c.replacing++
+				}
+			}
+		}
+		if c.waiting > 0 {
+			counts = c
 		}
 	}
 
-	notif := buildPendingSecretNotification(p, count, now)
+	notif := buildPendingSecretNotification(p, counts, now)
+	if p.ReplacesSecretID != "" {
+		if _, err := s.store.GetNotification(ctx, notif.ID); err == nil {
+			return // this key's replacement was announced within the hour
+		}
+	}
 	if err := s.store.CreateNotification(ctx, notif); err != nil {
 		if errors.Is(err, store.ErrAlreadyExists) {
 			return // a concurrent write in the same hour stored it
@@ -96,10 +114,19 @@ func (s *Server) notifyPendingSecret(ctx context.Context, p *store.PendingSecret
 	}
 }
 
+// pendingSecretCounts are a writing agent's live pending secrets for one
+// owner: how many await approval, and how many of those would replace an
+// approved secret.
+type pendingSecretCounts struct {
+	waiting   int
+	replacing int
+}
+
 // buildPendingSecretNotification is the notification for pending secret
-// p, created at now, when count of the writing agent's pending secrets
-// await the owner's approval. The agent-chosen names are cleaned.
-func buildPendingSecretNotification(p *store.PendingSecret, count int, now time.Time) *store.Notification {
+// p, created at now, with the writing agent's counts. The agent-chosen
+// names are cleaned. A replacement of an approved secret says so and gets
+// an id per key and hour; any other write gets an id per agent and hour.
+func buildPendingSecretNotification(p *store.PendingSecret, counts pendingSecretCounts, now time.Time) *store.Notification {
 	slug := cleanNotificationText(p.AgentSlug, pendingSecretNotifyLabelMaxRunes)
 	if slug == "" {
 		slug = p.AgentID
@@ -110,17 +137,30 @@ func buildPendingSecretNotification(p *store.PendingSecret, count int, now time.
 	}
 	key := cleanNotificationText(p.Key, pendingSecretNotifyLabelMaxRunes)
 	at := now.UTC().Format(time.RFC3339)
+	bucket := now.UTC().Truncate(pendingSecretNotifyInterval).Unix()
 
-	message := fmt.Sprintf("Agent %s in project %s saved secret %s (%s) for your account at %s. ",
-		slug, project, key, p.SecretType, at)
-	if count > 1 {
-		message += fmt.Sprintf("%d secrets from this agent await your approval. ", count)
+	var message, idName string
+	if p.ReplacesSecretID != "" {
+		message = fmt.Sprintf("Agent %s in project %s saved a replacement for your existing secret %s (%s) at %s. "+
+			"Your current value stays in effect until you approve it. ", slug, project, key, p.SecretType, at)
+		idName = fmt.Sprintf("%s|%s|replace|%s|%d", p.ScopeID, p.AgentID, p.Key, bucket)
+	} else {
+		message = fmt.Sprintf("Agent %s in project %s saved secret %s (%s) for your account at %s. ",
+			slug, project, key, p.SecretType, at)
+		idName = fmt.Sprintf("%s|%s|%d", p.ScopeID, p.AgentID, bucket)
+	}
+	if counts.waiting > 1 {
+		message += fmt.Sprintf("%d secrets from this agent await your approval", counts.waiting)
+		switch {
+		case counts.replacing == 1:
+			message += ", 1 of them replaces an existing secret"
+		case counts.replacing > 1:
+			message += fmt.Sprintf(", %d of them replace existing secrets", counts.replacing)
+		}
+		message += ". "
 	}
 	message += "Approve or reject in Profile > Secrets."
-
-	bucket := now.UTC().Truncate(pendingSecretNotifyInterval).Unix()
-	id := uuid.NewSHA1(pendingSecretNotifyNamespace,
-		[]byte(fmt.Sprintf("%s|%s|%d", p.ScopeID, p.AgentID, bucket))).String()
+	id := uuid.NewSHA1(pendingSecretNotifyNamespace, []byte(idName)).String()
 
 	projectID := uuid.Nil.String()
 	if pid, err := uuid.Parse(p.ProjectID); err == nil && pid.String() == p.ProjectID {
