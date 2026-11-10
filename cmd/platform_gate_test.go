@@ -223,9 +223,9 @@ func TestWindowsGate_AllowsUseOnlyUnderProject(t *testing.T) {
 // shows the copied tree does carry those rules before gating.
 func TestWindowsGate_DropsFlagValidationOnGatedCommands(t *testing.T) {
 	root, _ := gateTestTree(t)
-	migrate := resolveCommandPath(root, "hub.secret.migrate")
+	migrate := resolveCommandPath(root, "hub.secret.migrate-names")
 	require.NotNil(t, migrate)
-	require.Error(t, migrate.ValidateRequiredFlags(), "control: hub secret migrate has required flags before gating")
+	require.Error(t, migrate.ValidateRequiredFlags(), "control: hub secret migrate-names has required flags before gating")
 	visitors := resolveCommandPath(root, "project.visitors.add")
 	require.NotNil(t, visitors)
 	require.Error(t, visitors.ValidateFlagGroups(), "control: project visitors add has a one-required group before gating")
