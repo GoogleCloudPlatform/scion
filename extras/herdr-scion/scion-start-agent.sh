@@ -107,7 +107,10 @@ pick_project() {
   done <<< "$lines"
 
   echo "" >&2
-  read -rp "Select project [1-${#rows[@]}]: " choice
+  # A failed read (Ctrl-D, closed input) is no selection.
+  if ! read -rp "Select project [1-${#rows[@]}]: " choice; then
+    choice=""
+  fi
   if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#rows[@]} )); then
     echo "${rows[$((choice - 1))]}"
   fi
@@ -137,7 +140,10 @@ pick_template() {
   done <<< "$templates"
 
   echo "" >&2
-  read -rp "Select template [1-${#items[@]}]: " choice
+  # A failed read (Ctrl-D, closed input) is no selection.
+  if ! read -rp "Select template [1-${#items[@]}]: " choice; then
+    choice=""
+  fi
   if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#items[@]} )); then
     echo "${items[$((choice - 1))]}"
   fi
@@ -179,7 +185,8 @@ choose_project_all_mode() {
   elif [[ "$project_count" -eq 1 ]]; then
     chosen_row="$projects"
   else
-    chosen_row="$(pick_project "$projects")"
+    # A cancelled pick (Esc in fzf, Ctrl-D at the menu) is no selection.
+    chosen_row="$(pick_project "$projects")" || chosen_row=""
     if [[ -z "$chosen_row" ]]; then
       echo "No project selected." >&2
       exit 0
@@ -209,7 +216,8 @@ main() {
   fi
 
   local selected_template
-  selected_template="$(pick_template "$templates")"
+  # A cancelled pick (Esc in fzf, Ctrl-D at the menu) is no selection.
+  selected_template="$(pick_template "$templates")" || selected_template=""
 
   if [[ -z "$selected_template" ]]; then
     echo "No template selected." >&2
@@ -219,7 +227,10 @@ main() {
   # Step 2: Prompt for agent name.
   echo "" >&2
   scope_header >&2
-  read -rp "Agent name: " agent_name
+  # A failed read (Ctrl-D, closed input) is no name.
+  if ! read -rp "Agent name: " agent_name; then
+    agent_name=""
+  fi
 
   if [[ -z "$agent_name" ]]; then
     echo "No agent name provided." >&2

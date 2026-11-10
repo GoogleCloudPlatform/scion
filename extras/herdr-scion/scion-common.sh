@@ -47,10 +47,15 @@ notify_user() {
   return 0
 }
 
-# Fixed texts for the notice pane (open_notice).
+# Fixed texts for the notice pane (open_notice). They are read by the scripts
+# that source this file, which shellcheck does not see.
+# shellcheck disable=SC2034
 SCION_NOTICE_NO_PROJECT="No scion project selected: run 'scion use <project>'."
+# shellcheck disable=SC2034
 SCION_NOTICE_NO_PROJECT_HINT="Or open this herdr workspace in a scion project directory."
+# shellcheck disable=SC2034
 SCION_NOTICE_NO_AGENTS="No running Scion agents found."
+# shellcheck disable=SC2034
 SCION_NOTICE_NO_AGENTS_HINT="Start one with the 'Start Scion Agent' action, or 'scion start'."
 
 # Show <line>... in the plugin's "notice" overlay pane (scion-notice.sh),
@@ -184,6 +189,8 @@ scope_set() {
 # overlay) and a herdr notification, when no project is resolved;
 # SCOPE_FAIL_REASON is then "no_project" when scion has none selected.
 resolve_scope() {
+  # SCOPE_FAIL_REASON is read by the scripts that source this file.
+  # shellcheck disable=SC2034
   SCOPE_FAIL_REASON=""
   scope_dir_init || return 1
 
@@ -220,6 +227,7 @@ resolve_scope() {
   if [[ "$source" == "none" ]]; then
     echo "No scion project selected (checked from ${probe_dir}) — run 'scion use <project>' or open the herdr workspace in a scion project directory." >&2
     notify_user "No scion project selected: run 'scion use <project>'"
+    # shellcheck disable=SC2034
     SCOPE_FAIL_REASON=no_project
     return 1
   elif [[ "$source" == "global" ]]; then

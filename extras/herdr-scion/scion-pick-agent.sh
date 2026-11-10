@@ -77,7 +77,10 @@ pick_agent() {
   done <<< "$lines"
 
   echo "" >&2
-  read -rp "Select agent [1-${#rows[@]}]: " choice
+  # A failed read (Ctrl-D, closed input) is no selection.
+  if ! read -rp "Select agent [1-${#rows[@]}]: " choice; then
+    choice=""
+  fi
   if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#rows[@]} )); then
     echo "${rows[$((choice - 1))]}"
   fi
@@ -127,7 +130,8 @@ main() {
   fi
 
   local selected_row
-  selected_row="$(pick_agent "$lines")"
+  # A cancelled pick (Esc in fzf, Ctrl-D at the menu) is no selection.
+  selected_row="$(pick_agent "$lines")" || selected_row=""
 
   if [[ -z "$selected_row" ]]; then
     echo "No agent selected." >&2

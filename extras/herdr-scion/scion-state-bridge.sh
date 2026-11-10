@@ -172,7 +172,9 @@ poll_once() {
   local label
   while IFS= read -r label; do
     [[ -z "$label" ]] && continue
-    poll_project "$label" "$(awk -F'\t' -v l="$label" '$1 == l { print $2 "\t" $3 }' <<<"$pane_entries")"
+    # The label goes through the environment: awk -v would read backslashes
+    # in it as escape sequences.
+    poll_project "$label" "$(LABEL="$label" awk -F'\t' '$1 == ENVIRON["LABEL"] { print $2 "\t" $3 }' <<<"$pane_entries")"
   done < <(cut -f1 <<<"$pane_entries" | sort -u)
 }
 
