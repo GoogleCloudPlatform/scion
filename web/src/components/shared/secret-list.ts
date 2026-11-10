@@ -517,7 +517,8 @@ export class ScionSecretList extends LitElement {
     } catch {
       this.revealError = 'Failed to reveal';
     } finally {
-      this.pendingBusyId = null;
+      // A later Reveal on another row owns the busy state; leave it.
+      if (this.pendingBusyId === pending.id) this.pendingBusyId = null;
     }
   }
 

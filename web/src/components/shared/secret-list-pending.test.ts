@@ -360,6 +360,36 @@ describe('scion-secret-list — pending user secrets', () => {
     expect(calls.filter((c) => c.url.startsWith('/api/v1/secrets')).length).toBe(2);
   });
 
+  it('leaves the busy state of a later reveal when an earlier one finishes', async () => {
+    let releaseFirst: (r: Response) => void = () => {};
+    const { el } = await mount();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string) => {
+        if (url.endsWith('/p-TOKEN/reveal')) {
+          return new Promise<Response>((resolve) => {
+            releaseFirst = resolve;
+          });
+        }
+        if (url.endsWith('/p-Z_NEW/reveal')) {
+          return new Promise<Response>(() => {});
+        }
+        return Promise.resolve(jsonResponse(LIST));
+      })
+    );
+    const first = el.handleReveal(entry(el, 'TOKEN').pending);
+    el.closeReveal();
+    void el.handleReveal(entry(el, 'Z_NEW').pending);
+    expect(el.pendingBusyId).toBe('p-Z_NEW');
+
+    releaseFirst(jsonResponse({ value: FAKE_VALUE_B64, encoding: 'base64' }));
+    await first;
+    await settle(el);
+    expect(el.pendingBusyId).toBe('p-Z_NEW');
+    expect(el.revealPending?.id).toBe('p-Z_NEW');
+    expect(el.revealText).toBeNull();
+  });
+
   it('lists approved secrets alone when the response has no items', async () => {
     const { el } = await mount((url) =>
       url.startsWith('/api/v1/secrets')
