@@ -1353,7 +1353,8 @@ func TestUserSecretWriters_Inventory(t *testing.T) {
 	reviewed := map[string]string{
 		"Server.setEnvVar":               "user scope: scope ID and creator are both the calling user (resolveEnvSecretAccess)",
 		"Server.setSecret":               "user scope: scope ID and creator are both the calling user (resolveEnvSecretAccess)",
-		"Server.handleAgentSecrets":      "user scope: the creator is set to the scope ID (the agent's origin user)",
+		"Server.handleAgentSecrets":      "project scope only: a user-scope agent write is held pending (agentWritePendingUserSecret)",
+		"Server.approvePendingSecret":    "user scope: scope ID and creator are both the approving owner (resolveEnvSecretAccess)",
 		"Server.handleScopedEnvVarByKey": "called with the project and runtime broker scopes only (TestUserSecretWriters_ScopedByKeyCallers)",
 		"Server.handleScopedSecretByKey": "called with the project and runtime broker scopes only (TestUserSecretWriters_ScopedByKeyCallers)",
 		"SecretMigrationExecutor.Run":    "copies an existing row's scope and CreatedBy",
@@ -1406,7 +1407,7 @@ func TestUserSecretWriters_Inventory(t *testing.T) {
 			})
 		}
 	}
-	for _, name := range []string{"Server.setEnvVar", "Server.setSecret", "Server.handleAgentSecrets"} {
+	for _, name := range []string{"Server.setEnvVar", "Server.setSecret", "Server.handleAgentSecrets", "Server.approvePendingSecret"} {
 		assert.True(t, found[name], "the user-scope writer %s is still found", name)
 	}
 }

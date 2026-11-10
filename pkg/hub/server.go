@@ -7814,6 +7814,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/env/", s.guarded("/api/v1/env/", s.handleEnvVarByKey))
 	s.mux.HandleFunc("/api/v1/secrets", s.guarded("/api/v1/secrets", s.handleSecrets))
 	s.mux.HandleFunc("/api/v1/secrets/", s.guarded("/api/v1/secrets/", s.handleSecretByKey))
+	s.mux.HandleFunc("/api/v1/pending-secrets", s.guarded("/api/v1/pending-secrets", s.handlePendingSecrets))
+	s.mux.HandleFunc("/api/v1/pending-secrets/", s.guarded("/api/v1/pending-secrets/", s.handlePendingSecrets))
 
 	// Session metrics (DB-backed, distinct from Cloud Monitoring metrics dashboard)
 	s.mux.HandleFunc("/api/v1/metrics/session/", s.guarded("/api/v1/metrics/session/", s.handleSessionMetrics))

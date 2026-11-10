@@ -123,6 +123,10 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/env/":     "authenticated", // Env var by key
 	"/api/v1/secrets":  "authenticated", // List/create secrets
 	"/api/v1/secrets/": "authenticated", // Secret by key
+	// Caller's own pending secrets (agent-written, awaiting approval);
+	// session-only, own user ID only (resolveEnvSecretAccess).
+	"/api/v1/pending-secrets":  "authenticated",
+	"/api/v1/pending-secrets/": "authenticated",
 
 	// ── Usage ──────────────────────────────────────────────────────────
 	"/api/v1/usage/me": "authenticated", // Caller's own quota usage
