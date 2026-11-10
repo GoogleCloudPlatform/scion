@@ -1132,8 +1132,52 @@ func TestRecordAnswerSet_IdempotencyPerBatch(t *testing.T) {
 
 	_, err = f.cs.RecordAnswerSet(ctx, f.answerSet(msgID, "user-1", "k1", rows[0], "2", rows[1], "2", rows[2], "1"))
 	assert.ErrorIs(t, err, store.ErrIdempotencyMismatch)
+	// The key is scoped to the user: another user reusing it is not a
+	// mismatch but a fresh submit, here of a fully decided set.
 	_, err = f.cs.RecordAnswerSet(ctx, f.answerSet(msgID, "user-2", "k1", pairs...))
-	assert.ErrorIs(t, err, store.ErrIdempotencyMismatch, "another user's key")
+	assert.NotErrorIs(t, err, store.ErrIdempotencyMismatch, "another user's key is not a mismatch")
+	var changed *store.AnswerSetChangedError
+	require.ErrorAs(t, err, &changed)
+	for _, id := range rows {
+		assert.Equal(t, store.AnswerSetReasonDecided, changed.Reasons[id])
+	}
+}
+
+// TestRecordAnswerSet_ConfirmOwnInterpreted: a set answer equal to the
+// user's own interpreted answer is a confirm; the row stays decided with
+// both answers, and matched_default follows the recommended choice.
+func TestRecordAnswerSet_ConfirmOwnInterpreted(t *testing.T) {
+	f := newDecisionFixture(t)
+	ctx := context.Background()
+	msgID, rows := f.createSet(t, threeDecisions()...)
+	_, _, err := f.cs.RecordAnswer(ctx, f.interpretedAnswer(rows[0], "1", "user-1"))
+	require.NoError(t, err)
+
+	in := f.answerSet(msgID, "user-1", "", rows[0], "1", rows[1], "1", rows[2], "1")
+	in.Answers[0].Outcome = store.DecisionOutcomeConfirm
+	res, err := f.cs.RecordAnswerSet(ctx, in)
+	require.NoError(t, err)
+	assert.Equal(t, store.DecisionOutcomeConfirm, res.Answers[0].Outcome)
+	assert.True(t, res.Answers[0].MatchedDefault, "D1 confirmed with its recommended choice")
+
+	d, err := f.cs.GetDecision(ctx, rows[0])
+	require.NoError(t, err)
+	assert.Equal(t, store.DecisionStatusDecided, d.Status)
+	assert.Len(t, d.Answers, 2, "the interpreted answer and the confirm")
+}
+
+// TestRecordAnswerSet_OutcomeOnPendingRow: a confirm or override on a row
+// with no interpreted answer is not actionable as asked.
+func TestRecordAnswerSet_OutcomeOnPendingRow(t *testing.T) {
+	f := newDecisionFixture(t)
+	ctx := context.Background()
+	msgID, rows := f.createSet(t, threeDecisions()...)
+	in := f.answerSet(msgID, "user-1", "", rows[0], "1", rows[1], "1", rows[2], "1")
+	in.Answers[1].Outcome = store.DecisionOutcomeConfirm
+	_, err := f.cs.RecordAnswerSet(ctx, in)
+	var changed *store.AnswerSetChangedError
+	require.ErrorAs(t, err, &changed)
+	assert.Equal(t, map[string]string{rows[1]: store.AnswerSetReasonNotActionable}, changed.Reasons)
 }
 
 // TestRecordAnswerSet_OwnInterpretedRows: a row with the user's own

@@ -839,9 +839,13 @@ func (c *CompositeStore) recordAnswerSetTx(ctx context.Context, in *store.Record
 	if err != nil {
 		return nil, err
 	}
-	// Lock the prompt's rows on Postgres, in position order: concurrent
-	// set submits, one-click answers and reposts of a key serialize here.
-	q := client.Decision.Query().Where(decision.MessageID(msgID)).Order(ent.Asc(decision.FieldPosition))
+	// Lock the prompt's rows on Postgres in the order a repost of a key
+	// locks them (loadKeyStates: key, then version), so a set submit and a
+	// repost never wait on each other in opposite orders; set submits and
+	// one-click answers then serialize on these locks. The rows are put
+	// back in position order after the read.
+	q := client.Decision.Query().Where(decision.MessageID(msgID)).
+		Order(ent.Asc(decision.FieldKeyNorm), ent.Asc(decision.FieldVersion))
 	if c.isPostgres() {
 		q = q.ForUpdate()
 	}
@@ -852,6 +856,7 @@ func (c *CompositeStore) recordAnswerSetTx(ctx context.Context, in *store.Record
 	if len(rows) == 0 {
 		return nil, fmt.Errorf("%w: message %s has no decisions", store.ErrNotFound, in.MessageID)
 	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].Position < rows[j].Position })
 	byID := make(map[string]*ent.Decision, len(rows))
 	rowIDs := make([]uuid.UUID, len(rows))
 	for i, r := range rows {
@@ -921,8 +926,10 @@ func (c *CompositeStore) recordAnswerSetTx(ctx context.Context, in *store.Record
 		}
 		r := byID[a.DecisionRowID]
 		want := store.DecisionOutcomeAnswer
+		interpreted := false
 		for _, e := range existing[r.ID] {
 			if e.Provenance == decisionanswer.ProvenanceAgentInterpreted {
+				interpreted = true
 				want = store.DecisionOutcomeConfirm
 				if e.ChoiceID != a.ChoiceID {
 					want = store.DecisionOutcomeOverride
@@ -934,7 +941,14 @@ func (c *CompositeStore) recordAnswerSetTx(ctx context.Context, in *store.Record
 			got = store.DecisionOutcomeAnswer
 		}
 		if got != want {
-			reasons[a.DecisionRowID] = store.AnswerSetReasonDecided
+			// Over an interpreted answer the state changed after the
+			// caller read it; on a row with none, a confirm or override
+			// was never possible.
+			if interpreted {
+				reasons[a.DecisionRowID] = store.AnswerSetReasonDecided
+			} else {
+				reasons[a.DecisionRowID] = store.AnswerSetReasonNotActionable
+			}
 			continue
 		}
 		outcomes[a.DecisionRowID] = want
@@ -1001,10 +1015,11 @@ func (c *CompositeStore) recordAnswerSetTx(ctx context.Context, in *store.Record
 	return res, nil
 }
 
-// replayableAnswerSet returns the set recorded under in's idempotency key on
-// the prompt's rows. ok is false when the key was not used there;
+// replayableAnswerSet returns the set recorded under in's idempotency key by
+// the same user on the prompt's rows (the key is scoped to the user and the
+// prompt). ok is false when the user did not use the key there;
 // ErrIdempotencyMismatch when it names other answers (other rows or
-// choices, or another user).
+// choices). The per-row user check stays as a safety net.
 func replayableAnswerSet(ctx context.Context, client *ent.Client, rows []*ent.Decision, in *store.RecordAnswerSetInput) (*store.AnswerSetResult, bool, error) {
 	rowIDs := make([]uuid.UUID, len(rows))
 	pos := make(map[uuid.UUID]int, len(rows))
@@ -1013,7 +1028,8 @@ func replayableAnswerSet(ctx context.Context, client *ent.Client, rows []*ent.De
 		pos[r.ID] = i
 	}
 	found, err := client.DecisionAnswer.Query().
-		Where(decisionanswer.DecisionRowIDIn(rowIDs...), decisionanswer.IdempotencyKey(in.IdempotencyKey), decisionanswer.BatchIDNotNil()).
+		Where(decisionanswer.DecisionRowIDIn(rowIDs...), decisionanswer.IdempotencyKey(in.IdempotencyKey),
+			decisionanswer.BatchIDNotNil(), decisionanswer.AnsweredByUserID(in.AnsweredByUserID)).
 		All(ctx)
 	if err != nil {
 		return nil, false, mapError(err)
