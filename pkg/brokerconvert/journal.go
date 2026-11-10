@@ -119,6 +119,10 @@ type RegisterItem struct {
 	// legacy row's own override (0 is unlimited); Capacity is its write.
 	MaxAgents *int64     `json:"maxAgents,omitempty"`
 	Capacity  ItemStatus `json:"capacity"`
+	// CredentialsCleanup is the removal of the instance credentials file
+	// that a co-located apply's HTTP pre-registration leaves behind. Nil
+	// when not applicable (the remote path).
+	CredentialsCleanup *ItemStatus `json:"credentialsCleanup,omitempty"`
 }
 
 // ProjectItem is step 3 for one project.
@@ -186,6 +190,24 @@ type Journal struct {
 	Projects []ProjectItem   `json:"projects"`
 	Switch   ItemStatus      `json:"switch"`
 	Rollback *RollbackRecord `json:"rollback,omitempty"`
+
+	// StopRecheckAt is the time of a co-located apply's drained re-check
+	// immediately before the server stop (the stopped phase's time bound).
+	// Nil on the remote path.
+	StopRecheckAt *time.Time `json:"stopRecheckAt,omitempty"`
+	// SingleHubReplica records the operator's --single-hub-replica
+	// assertion on a co-located stopped phase against an external Hub
+	// database.
+	SingleHubReplica bool `json:"singleHubReplica,omitempty"`
+	// HostMode is the host mode this conversion runs in ("colocated" or
+	// "remote"), fixed by its first apply: detected from the saved daemon
+	// launch, or asserted with --host-mode when detection cannot decide.
+	// Every later invocation must agree with it. Empty in a journal
+	// written before the field existed.
+	HostMode string `json:"hostMode,omitempty"`
+	// HostModeSource is "detected" (from the saved daemon launch) or
+	// "asserted" (the operator's --host-mode).
+	HostModeSource string `json:"hostModeSource,omitempty"`
 }
 
 // NewJournal returns a journal for a new run, with a fresh run ID.
