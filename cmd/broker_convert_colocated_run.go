@@ -107,9 +107,7 @@ func convertHost(globalDir string) (colocatedHost, string, string, error) {
 // launch backs the mode, that launch's Hub and web listener URLs.
 func hostEvidence(globalDir string, host colocatedHost, source string, launched bool) brokerconvert.HostEvidence {
 	ev := brokerconvert.HostEvidence{Source: source, Named: []string{invocationHubEndpoint()}}
-	if host.Config != nil {
-		ev.Configured = host.Config.Hub.Endpoint
-	}
+	ev.Configured = serverConfiguredHubEndpoint(host.Config)
 	legacy := filepath.Join(globalDir, brokercredentials.DefaultFileName)
 	if _, err := os.Lstat(legacy); !errors.Is(err, fs.ErrNotExist) {
 		ev.LegacyCredentials = legacy
@@ -192,7 +190,7 @@ func colocatedQ7Input(ctx context.Context, cfg *config.GlobalConfig, j *brokerco
 		}
 	}
 	if in.Topology == brokerconvert.TopologySingleExternal {
-		endpoints := []string{cfg.Hub.Endpoint, invocationHubEndpoint()}
+		endpoints := []string{serverConfiguredHubEndpoint(cfg), invocationHubEndpoint()}
 		in.EndpointAnswers = func() (bool, error) {
 			return darkEndpointProbe(ctx, endpoints)
 		}

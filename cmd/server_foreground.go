@@ -2484,6 +2484,17 @@ func resolveHubEndpoint(cfg *config.GlobalConfig, brokerSettings *config.Setting
 	return endpoint
 }
 
+// serverConfiguredHubEndpoint is the server's own explicit
+// server.hub.endpoint (SCION_SERVER_HUB_ENDPOINT when set), as loaded, with
+// no derivation; "" for a nil config. Code outside the server's files reads
+// the server's configured endpoint through it.
+func serverConfiguredHubEndpoint(cfg *config.GlobalConfig) string {
+	if cfg == nil {
+		return ""
+	}
+	return cfg.Hub.Endpoint
+}
+
 // resolveHubEndpointWithSource determines the Hub's public endpoint URL and
 // reports which input it came from.
 func resolveHubEndpointWithSource(cfg *config.GlobalConfig, brokerSettings *config.Settings) (string, hubEndpointSource) {
