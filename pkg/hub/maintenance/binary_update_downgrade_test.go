@@ -23,7 +23,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/version"
 	"github.com/GoogleCloudPlatform/scion/pkg/version/update"
 )
 
@@ -93,7 +92,7 @@ func TestBinaryUpdate_DowngradeConfirmation(t *testing.T) {
 		}
 		risks, _ := re.Details["risks"].([]string)
 		if len(risks) < 5 || re.Details["snapshotPath"] != fakeSnapshotDir || re.Details["class"] != "downgrade" ||
-			re.Details["target"] != "nightly-20261020" || re.Details["floor"] != version.DowngradeFloor {
+			re.Details["target"] != "nightly-20261020" || re.Details["floor"] != e.floor {
 			t.Fatalf("details = %#v", re.Details)
 		}
 		if hooked != nil || len(inst.calls) != 0 || len(snaps.froms) != 0 || gh.requestCount() != 0 {
@@ -209,8 +208,8 @@ func TestBinaryUpdate_DowngradeFloor(t *testing.T) {
 		if err := e.ValidateParams(map[string]string{"target_version": "nightly-20261021", "confirm_downgrade": "nightly-20261021"}); err != nil {
 			t.Fatal(err)
 		}
-		if NewBinaryUpdateExecutor(BinaryUpdateOptions{}).floor != version.DowngradeFloor {
-			t.Fatal("default floor is not version.DowngradeFloor")
+		if NewBinaryUpdateExecutor(BinaryUpdateOptions{}).floor != defaultDowngradeFloor {
+			t.Fatal("default floor is not defaultDowngradeFloor")
 		}
 	})
 }

@@ -3313,6 +3313,9 @@
 - `pkg/artifacts:TestStewardBoundedTable`
 - `pkg/artifacts:TestStewardEvents`
 - `pkg/artifacts:TestStoreCreationEvents`
+- `pkg/artifacts:TestMigration0014ReviewLadder`
+- `pkg/artifacts:TestGrantWritesAllowlist`
+- `pkg/artifacts:TestPutGrantEventFaultRollsBack`
 
 ---
 

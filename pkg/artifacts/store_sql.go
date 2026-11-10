@@ -42,13 +42,29 @@ const initLockKey int64 = 0x6172746966616374
 // timestamps, so that they sort lexically in time order.
 const sqliteTimeLayout = "2006-01-02T15:04:05.000000000Z"
 
-// migration is one named schema step. Steps run in order, each at most once
-// per database, and are recorded in artifact_migrations.
+// migration is one named step. Steps run in order, each at most once per
+// database, and are recorded in artifact_migrations. A step runs its
+// dialect's DDL, when there is any, and then apply, when set; both run in
+// Init's transaction, so a failure leaves neither the change nor the ledger
+// row.
+//
+// apply may return errMigrationDeferred to put its step off: Init then
+// records no ledger row for it, keeps going with the later steps and
+// succeeds, and the step runs again at the next start. A deferring apply
+// must return before it writes anything, so it leaves nothing behind in
+// the shared transaction. Only a data step whose effect no later step
+// depends on may defer (no schema change); 0014_review_ladder qualifies,
+// since it only rewrites grant permissions.
 type migration struct {
 	name     string
 	sqlite   string
 	postgres string
+	apply    func(ctx context.Context, tx *sql.Tx, s *sqlStore) error
 }
+
+// errMigrationDeferred is returned by a migration's apply to put its step
+// off until the next start (see migration).
+var errMigrationDeferred = errors.New("artifacts: migration deferred")
 
 // migrations is the ordered schema history. Append new steps; never edit or
 // reorder applied ones.
@@ -65,6 +81,7 @@ var migrations = []migration{
 	{name: migrationAttachmentProject, sqlite: sqliteAttachmentProject, postgres: postgresAttachmentProject},
 	{name: migrationDeliveryRedemptions, sqlite: sqliteDeliveryRedemptions, postgres: postgresDeliveryRedemptions},
 	{name: migrationReviewSessions, sqlite: sqliteReviewSessions, postgres: postgresReviewSessions},
+	{name: migrationReviewLadder, apply: applyReviewLadder},
 }
 
 const ledgerSQLite = `CREATE TABLE IF NOT EXISTS artifact_migrations (
@@ -207,8 +224,17 @@ func (s *sqlStore) Init(ctx context.Context) error {
 		if s.dialect == dialectPostgres {
 			ddl = m.postgres
 		}
-		if _, err := tx.ExecContext(ctx, ddl); err != nil {
-			return fmt.Errorf("artifacts: migration %s: %w", m.name, err)
+		if ddl != "" {
+			if _, err := tx.ExecContext(ctx, ddl); err != nil {
+				return fmt.Errorf("artifacts: migration %s: %w", m.name, err)
+			}
+		}
+		if m.apply != nil {
+			if err := m.apply(ctx, tx, s); errors.Is(err, errMigrationDeferred) {
+				continue
+			} else if err != nil {
+				return fmt.Errorf("artifacts: migration %s: %w", m.name, err)
+			}
 		}
 		if _, err := tx.ExecContext(ctx, s.rebind("INSERT INTO artifact_migrations (name, applied_at) VALUES (?, ?)"),
 			m.name, s.timeArg(time.Now())); err != nil {

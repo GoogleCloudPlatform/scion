@@ -266,9 +266,9 @@ func TestSponsorBackfillLedgerName(t *testing.T) {
 	if !slices.IsSorted(names) {
 		t.Errorf("migration names out of order: %v", names)
 	}
-	// Compare the numeric prefixes: a DDL step numbered 0012 under any
-	// name would reuse the backfill's number. DDL steps after the backfill
-	// skip 0012 and continue at 0013 (see migrationSponsorBackfill).
+	// Compare the numeric prefixes: a step numbered 0012 under any name
+	// would reuse the backfill's number. Steps after the backfill skip
+	// 0012 and continue at 0013 (see migrationSponsorBackfill).
 	for _, n := range names {
 		if n[:4] == migrationSponsorBackfill[:4] {
 			t.Errorf("DDL migration %q uses the backfill's number %s", n, migrationSponsorBackfill[:4])

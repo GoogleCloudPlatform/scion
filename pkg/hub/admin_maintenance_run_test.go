@@ -236,7 +236,7 @@ func TestLaunchMaintenanceRun_FailureAfterHookIsFailed(t *testing.T) {
 func TestLaunchMaintenanceRun_RequestErrorCodeInResult(t *testing.T) {
 	srv, s := newTestServerWithStore(t)
 	run := newRun(t, s)
-	exec := maintenance.NewBinaryUpdateExecutor(maintenance.BinaryUpdateOptions{CurrentVersion: "nightly-20261023"})
+	exec := maintenance.NewBinaryUpdateExecutor(maintenance.BinaryUpdateOptions{CurrentVersion: "nightly-20261023", DowngradeFloor: downgradeFloor})
 	srv.launchMaintenanceRun(run, exec, map[string]string{"target_version": "nightly-20261023"})
 	got := waitForRunStatus(t, s, run.ID, func(r *store.MaintenanceOperationRun) bool {
 		return r.Status == store.MaintenanceStatusFailed
