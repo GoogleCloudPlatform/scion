@@ -365,6 +365,11 @@ const (
 	// it again.
 	ErrCodeSecretPendingExistingChanged = "secret_pending_existing_changed"
 
+	// ErrCodeSecretPendingCap is returned (429) when an agent's user-scope
+	// secret write would exceed the pending secret caps: per writing agent
+	// or per owner. Nothing is stored.
+	ErrCodeSecretPendingCap = "secret_pending_cap"
+
 	// ErrCodeInvalidRoleSet is returned by PUT …/members/principals/{type}/{id}
 	// when the desired role set contains an unknown role definition ID, a
 	// non-project-scoped role, or more than one built-in membership role

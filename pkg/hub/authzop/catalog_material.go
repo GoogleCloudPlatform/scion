@@ -314,15 +314,20 @@ var materialOperations = []OperationSpec{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/secrets/{key}", Method: "PATCH", Variant: "scope=user"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/secrets/{key}", Method: "DELETE", Variant: "scope=user"},
 		}, []SecurityEffect{EffectCreateResource, EffectUpdateResource, EffectDeleteResource}, false),
-	pendingSecretOp("secret.user.pending.read", "List the caller's own pending secrets: user-scope secrets written by an agent that wait for the caller's approval. Metadata and provenance only, never the value. A federated caller is refused",
+	pendingSecretOp("secret.user.pending.read", "List the caller's own pending secrets: user-scope secrets written by an agent that wait for the caller's approval, alone or merged with the caller's approved user secrets (includePending=true). Metadata and provenance only, never the value. A federated caller is refused",
 		[]EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/pending-secrets", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/secrets", Method: "GET", Variant: "scope=user&includePending=true"},
 		}, []SecurityEffect{EffectListScoped}),
 	pendingSecretOp("secret.user.pending.decide", "Approve (writing the caller's own user-level secret the agent requested) or reject one of the caller's own pending secrets. Another user's or an expired pending secret is not found. A federated caller is refused (requireProfileWriter)",
 		[]EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/pending-secrets/{id}/approve", Method: "POST"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/pending-secrets/{id}/reject", Method: "POST"},
 		}, []SecurityEffect{EffectCreateResource, EffectUpdateResource, EffectDeleteResource}),
+	pendingSecretOp("secret.user.pending.reveal", "Return the held value of one of the caller's own pending secrets, audited (secret_pending_reveal). Another user's or an expired pending secret is not found. Cross-site and non-JSON browser requests are refused. A federated caller is refused (requireProfileWriter)",
+		[]EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/pending-secrets/{id}/reveal", Method: "POST", Response: ResponseCredential},
+		}, []SecurityEffect{EffectReadSecret}),
 	envSecretSessionOnlyOp("env.hub.read", "env", "Read one hub-level environment variable (scope=hub). Agents may read; a user must be an unscoped admin",
 		[]EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/env/{key}", Method: "GET", Variant: "scope=hub", Response: ResponseCredential},

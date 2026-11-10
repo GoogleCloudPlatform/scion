@@ -2372,3 +2372,21 @@ func TestClient_SetSecret_Conflicts(t *testing.T) {
 		})
 	}
 }
+
+func TestClient_SetSecret_PendingCap(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": map[string]interface{}{"code": ErrCodeSecretPendingCap, "message": "cap",
+				"details": map[string]interface{}{"cap": "agent", "limit": 10}},
+		})
+	}))
+	defer server.Close()
+	client := NewClientWithConfig(server.URL, "test-token", "agent-123")
+	_, err := client.SetSecret(context.Background(), "MY_SECRET", "c2VjcmV0", "", "", "user", false, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), ErrCodeSecretPendingCap)
+	assert.Contains(t, err.Error(), "await your approval")
+	assert.NotContains(t, err.Error(), "already exists")
+}

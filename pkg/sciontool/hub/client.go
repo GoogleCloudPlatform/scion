@@ -544,6 +544,11 @@ func (r *SetSecretResponse) Pending() bool { return r != nil && r.State == "pend
 // user secret name that another agent's pending secret holds.
 const ErrCodeSecretPendingHeldByOtherAgent = "secret_pending_held_by_other_agent"
 
+// ErrCodeSecretPendingCap is the Hub error code (429) for a user secret
+// write over the pending secret caps: too many secrets from this agent, or
+// for its owner, await approval.
+const ErrCodeSecretPendingCap = "secret_pending_cap"
+
 // secretErrorCode returns the error code of a Hub error response body.
 func secretErrorCode(body []byte) string {
 	var env struct {
@@ -762,6 +767,12 @@ func (c *Client) SetSecret(ctx context.Context, key, value, secretType, target, 
 				"approve or reject it before saving this one (%s)", key, ErrCodeSecretPendingHeldByOtherAgent)
 		}
 		return nil, fmt.Errorf("secret %q already exists (use --force to overwrite)", key)
+	case http.StatusTooManyRequests:
+		if secretErrorCode(respBody) == ErrCodeSecretPendingCap {
+			return nil, fmt.Errorf("secret %q not saved: too many secrets already await your approval in Scion; "+
+				"approve or reject them before saving more (%s)", key, ErrCodeSecretPendingCap)
+		}
+		return nil, fmt.Errorf("hub returned error %d: %s", resp.StatusCode, string(respBody))
 	default:
 		return nil, fmt.Errorf("hub returned error %d: %s", resp.StatusCode, string(respBody))
 	}

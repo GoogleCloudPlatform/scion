@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 384
+**Operations:** 385
 
 ## Table of Contents
 
@@ -364,8 +364,9 @@
 - [env.user.write](#envuserwrite) — Create, update or delete the caller's own user-level environment variables (scope=user, the default). A federated caller is refused (requireProfileWriter)
 - [secret.user.read](#secretuserread) — Read the caller's own user-level secrets (scope=user, the default). A federated caller reads its own (retained prior behaviour)
 - [secret.user.write](#secretuserwrite) — Create, update or delete the caller's own user-level secrets (scope=user, the default). A federated caller is refused (requireProfileWriter)
-- [secret.user.pending.read](#secretuserpendingread) — List the caller's own pending secrets: user-scope secrets written by an agent that wait for the caller's approval. Metadata and provenance only, never the value. A federated caller is refused
+- [secret.user.pending.read](#secretuserpendingread) — List the caller's own pending secrets: user-scope secrets written by an agent that wait for the caller's approval, alone or merged with the caller's approved user secrets (includePending=true). Metadata and provenance only, never the value. A federated caller is refused
 - [secret.user.pending.decide](#secretuserpendingdecide) — Approve (writing the caller's own user-level secret the agent requested) or reject one of the caller's own pending secrets. Another user's or an expired pending secret is not found. A federated caller is refused (requireProfileWriter)
+- [secret.user.pending.reveal](#secretuserpendingreveal) — Return the held value of one of the caller's own pending secrets, audited (secret_pending_reveal). Another user's or an expired pending secret is not found. Cross-site and non-JSON browser requests are refused. A federated caller is refused (requireProfileWriter)
 - [env.hub.read](#envhubread) — Read one hub-level environment variable (scope=hub). Agents may read; a user must be an unscoped admin
 - [env.hub.write](#envhubwrite) — Create, update or delete hub-level environment variables (scope=hub). A user must be an unscoped admin
 - [secret.hub.read](#secrethubread) — Read hub-level secrets (scope=hub). Agents may read; a user must be an unscoped admin
@@ -13628,13 +13629,14 @@
 
 **Domain:** secret
 
-**Description:** List the caller's own pending secrets: user-scope secrets written by an agent that wait for the caller's approval. Metadata and provenance only, never the value. A federated caller is refused
+**Description:** List the caller's own pending secrets: user-scope secrets written by an agent that wait for the caller's approval, alone or merged with the caller's approved user secrets (includePending=true). Metadata and provenance only, never the value. A federated caller is refused
 
 ### Entry Points
 
 | Kind | Method | Pattern |
 |------|--------|---------|
 | http_route | GET | `/api/v1/pending-secrets` |
+| http_route | GET | `/api/v1/secrets` |
 
 **Principals:** `user`
 
@@ -13688,6 +13690,48 @@
 - **Event Type:** `secret.write`
 - **Context Fields:** actor_id
 - **Before Fields:** secret_key
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestPendingSecretsAPI_Refusals`
+- `pkg/hub:TestPendingSecretsAPI_ListApproveReject`
+
+### Exemptions
+
+- **authentication_only:** User-level env and secret material is the caller's own record, so no resource permission applies; a session credential is required (scope: caller's own user-level environment variables and secrets) — waives: `base_permission`
+
+---
+
+## secret.user.pending.reveal
+
+**Domain:** secret
+
+**Description:** Return the held value of one of the caller's own pending secrets, audited (secret_pending_reveal). Another user's or an expired pending secret is not found. Cross-site and non-JSON browser requests are refused. A federated caller is refused (requireProfileWriter)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/pending-secrets/{id}/reveal` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `CREDENTIAL_MANAGEMENT`)
+
+**Resource Resolver:** self-principal
+
+**Effects:** `read-secret`
+
+### Audit
+
+- **Event Type:** `secret.read`
+- **Context Fields:** actor_id
 - **Atomic:** Yes
 
 **Denial Codes:** `forbidden`
