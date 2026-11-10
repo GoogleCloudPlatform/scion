@@ -239,15 +239,17 @@ func parsesAsEnvelope(stored string) bool {
 // and returns false; the row is left as it was.
 func writeVerified(ctx context.Context, gcp *GCPBackend, s store.Secret, value, kept string, logger io.Writer, report *MigrationReport) bool {
 	input := &SetSecretInput{
-		Name:        s.Key,
-		Value:       value,
-		SecretType:  s.SecretType,
-		Target:      s.Target,
-		Scope:       s.Scope,
-		ScopeID:     s.ScopeID,
-		Description: s.Description,
-		CreatedBy:   s.CreatedBy,
-		UpdatedBy:   s.UpdatedBy,
+		Name:          s.Key,
+		Value:         value,
+		SecretType:    s.SecretType,
+		Target:        s.Target,
+		Scope:         s.Scope,
+		ScopeID:       s.ScopeID,
+		Description:   s.Description,
+		InjectionMode: s.InjectionMode,
+		AllowProgeny:  s.AllowProgeny,
+		CreatedBy:     s.CreatedBy,
+		UpdatedBy:     s.UpdatedBy,
 	}
 	if _, _, err := gcp.SetVerified(ctx, input); err != nil {
 		if errors.Is(err, ErrSecretVerify) {

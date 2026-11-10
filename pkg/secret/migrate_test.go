@@ -724,3 +724,62 @@ func TestMigrateLocalToGCP_NonSecretManagerRefIsUnverified(t *testing.T) {
 		t.Error("log does not report the row as unverified")
 	}
 }
+
+// TestMigrateLocalToGCP_KeepsInjectionModeAndAllowProgeny checks that a
+// migration and a repair keep the row's injection mode and progeny
+// opt-in instead of resetting them to their defaults.
+func TestMigrateLocalToGCP_KeepsInjectionModeAndAllowProgeny(t *testing.T) {
+	ctx := context.Background()
+	input := func(name, value string) *SetSecretInput {
+		return &SetSecretInput{
+			Name: name, Value: value, SecretType: store.SecretTypeEnvironment, Scope: store.ScopeUser, ScopeID: migScopeID,
+			InjectionMode: store.InjectionModeAlways, AllowProgeny: true,
+		}
+	}
+	assertKept := func(t *testing.T, f *migrationFixture, name string) {
+		t.Helper()
+		row, err := f.st.GetSecret(ctx, name, store.ScopeUser, migScopeID)
+		if err != nil {
+			t.Fatalf("GetSecret %s: %v", name, err)
+		}
+		if row.SecretRef == "" {
+			t.Fatalf("%s has no Secret Manager reference", name)
+		}
+		if row.InjectionMode != store.InjectionModeAlways || !row.AllowProgeny {
+			t.Errorf("%s: injection mode %q, allow progeny %v; want %q and true", name, row.InjectionMode, row.AllowProgeny, store.InjectionModeAlways)
+		}
+	}
+
+	t.Run("migrate", func(t *testing.T) {
+		f := newMigrationFixture(t)
+		if _, _, err := f.local.Set(ctx, input("FLAGS_KEY", "plain-flags-value")); err != nil {
+			t.Fatalf("seeding: %v", err)
+		}
+		if report, _, err := f.run(t, false); err != nil || report.Migrated != 1 {
+			t.Fatalf("report = %+v, err = %v; want 1 migrated", report, err)
+		}
+		assertKept(t, f, "FLAGS_KEY")
+	})
+
+	t.Run("repair", func(t *testing.T) {
+		f := newMigrationFixture(t)
+		if _, _, err := f.local.Set(ctx, input("FLAGS_OLD", "plain-flags-old")); err != nil {
+			t.Fatalf("seeding: %v", err)
+		}
+		raw, err := f.st.GetSecretValue(ctx, "FLAGS_OLD", store.ScopeUser, migScopeID)
+		if err != nil {
+			t.Fatalf("GetSecretValue: %v", err)
+		}
+		// The old raw copy, with the row's flags.
+		if _, _, err := f.gcp.Set(ctx, input("FLAGS_OLD", raw)); err != nil {
+			t.Fatalf("old raw copy: %v", err)
+		}
+		if report, _, err := f.run(t, false); err != nil || report.Repaired != 1 {
+			t.Fatalf("report = %+v, err = %v; want 1 repaired", report, err)
+		}
+		assertKept(t, f, "FLAGS_OLD")
+		if got, _ := f.smValue("FLAGS_OLD"); got != "plain-flags-old" {
+			t.Error("the repair did not write the decoded value")
+		}
+	})
+}
