@@ -21,6 +21,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -641,6 +642,28 @@ func TestProjectLeave_AcceptedDeletePrintsProgress(t *testing.T) {
 	h := &leaveHarness{outcomes: map[string]hubDeleteOutcome{"a-2": confirmed}}
 	require.NoError(t, runProjectLeave(context.Background(), svc, leaveTestProject, leaveOptions{yes: true, agents: leaveAgentsDelete}, h.io()))
 	assert.Equal(t, "Waiting for the Hub to delete beta...\n", h.errOut.String(), "only the accepted delete waits")
+}
+
+// TestProjectLeave_ProductionPromptWritesToErrOut: the production leaveIO
+// asks its agents question on the errOut it was given, and reads the answer
+// from stdin.
+func TestProjectLeave_ProductionPromptWritesToErrOut(t *testing.T) {
+	in, err := os.CreateTemp(t.TempDir(), "stdin")
+	require.NoError(t, err)
+	_, err = in.WriteString("k\n")
+	require.NoError(t, err)
+	_, err = in.Seek(0, 0)
+	require.NoError(t, err)
+	origStdin := os.Stdin
+	os.Stdin = in
+	t.Cleanup(func() { os.Stdin = origStdin; _ = in.Close() })
+
+	var out, errOut bytes.Buffer
+	got, err := newLeaveIO(nil, &out, &errOut).prompt("Q?", true)
+	require.NoError(t, err)
+	assert.Equal(t, leaveAgentsKeep, got)
+	assert.Equal(t, "Q? [d]elete / [k]eep / [c]ancel: ", errOut.String())
+	assert.Empty(t, out.String())
 }
 
 // TestProjectLeave_ProductionDeleteWaitsForConfirmation (round 2 N4, round 3

@@ -124,7 +124,7 @@ func newLeaveIO(agents hubclient.AgentService, out, errOut io.Writer) leaveIO {
 		out:    out,
 		errOut: errOut,
 		prompt: func(q string, allowDelete bool) (leaveAgentChoice, error) {
-			return promptLeaveAgentChoice(os.Stdin, os.Stderr, q, allowDelete)
+			return promptLeaveAgentChoice(os.Stdin, errOut, q, allowDelete)
 		},
 		confirm:     func(q string) bool { return hubsync.ConfirmAction(q, false, false) },
 		deleteAgent: leaveAgentDeleter(agents),
