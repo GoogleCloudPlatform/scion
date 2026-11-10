@@ -1214,7 +1214,7 @@ var projectOperations = []OperationSpec{
 	{
 		ID:          "artifact.grant.notify",
 		Domain:      "artifact",
-		Description: "Ask for review: with notify on an artifact grant to a user (POST, body notify true), write one hub notification to that user after the grant commits, naming the granter and the level, never the artifact's title or any request text; only an artifact manager or steward on an interactive, unscoped user session (the scheduled-send gate) sends it, only to an active user the caller may read, only when the grant raises the user's level and, for review until the review ladder lands, only to a user who can already read the artifact; at most 30 per hour per requester (burst 10) and 600 per hour in all (burst 60); a refusal never blocks the grant and answers notifySkipped (self, not_permitted, unavailable, not_raised, rate_limited); the review path for non-managers never notifies",
+		Description: "Ask for review: with notify on an artifact grant to a user (POST, body notify true), write one hub notification to that user after the grant commits, naming the granter and the level, never the artifact's title or any request text; only an artifact manager or steward on an interactive, unscoped user session (the scheduled-send gate) sends it, only to an active user the caller may read, only when the grant raises the user's level; at most 30 per hour per requester (burst 10) and 600 per hour in all (burst 60); a refusal never blocks the grant and answers notifySkipped (self, not_permitted, unavailable, not_raised, rate_limited)",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts/{id}/grants", Method: "POST", Variant: "notify"},
 		},
