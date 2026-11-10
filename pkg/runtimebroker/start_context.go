@@ -718,6 +718,25 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	for k, v := range in.ResolvedEnv {
 		env[k] = v
 	}
+	// An agent without credentials: the hub leaves secret material out, and
+	// this is the broker's own check. An entry the hub classified
+	// secret-fetchable (a value from the secret store or a stored setting
+	// marked secret) is not copied, except the git token. Without
+	// classifications (an older hub, which never sends the intent on start
+	// or restart) secret entries cannot be told apart, and the env is
+	// copied as sent.
+	if in.NoAuth {
+		if envCls != nil {
+			for k := range env {
+				if envCls[k] == api.EnvKindSecretFetchable && k != noAuthGitTokenEnvKey {
+					delete(env, k)
+					delete(envCls, k)
+				}
+			}
+		} else if len(env) > 0 {
+			s.agentLifecycleLog.Info("no-credential start without env classifications; resolved env copied as sent", "agent_id", in.AgentID, "count", len(env))
+		}
+	}
 
 	// 2. Config.Env (takes precedence). The native Cloud Run marker is never
 	// taken from it: only the hub sets that key (cloudRunNativeMarked).
@@ -1491,7 +1510,8 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// gcloud-adc file secret so agents can authenticate with GCP without requiring
 	// the user to manually upload the credential file.
 	// Only inject if the user has explicitly opted in via settings.
-	if isColocated {
+	// Never for an agent without credentials.
+	if isColocated && !in.NoAuth {
 		if adcGlobalDir, gErr := config.GetGlobalDir(); gErr == nil {
 			if vs, loadErr := config.LoadSingleFileVersioned(adcGlobalDir); loadErr == nil &&
 				vs != nil && vs.AutoInjectGcloudADC {
@@ -1849,6 +1869,10 @@ func redactCloneURL(rawURL string) string {
 
 // unparseableCloneURL is what redactCloneURL shows for a URL it cannot
 // show any part of.
+// noAuthGitTokenEnvKey is the one secret-store value an agent without
+// credentials still receives: the git token (the hub's noAuthGitTokenKey).
+const noAuthGitTokenEnvKey = "GITHUB_TOKEN"
+
 const unparseableCloneURL = "<unparseable>"
 
 // sanitizeCloneErrorText strips a clone URL's credentials, query string, and

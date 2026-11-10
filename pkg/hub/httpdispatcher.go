@@ -1094,6 +1094,35 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 	if req.ResolvedEnv == nil {
 		req.ResolvedEnv = make(map[string]string)
 	}
+
+	// An agent without credentials gets the launch material start gives it
+	// (noauth_delivery.go): the credential names are read before any stored
+	// setting, and the saved config env keys noAuthKeepsConfigEnv withholds
+	// are dropped. A read error fails create, create-with-gather and
+	// finalize-env like a stored env settings read error; provision and
+	// reprovision continue with the built-in names only.
+	noAuth := agent.AppliedConfig != nil && agent.AppliedConfig.NoAuth
+	var noAuthCredNames credentialEnvNames
+	if noAuth {
+		names, nerr := d.noAuthCredentialEnvNames(ctx, agent)
+		if nerr != nil && secrets == failOnSecretResolutionError {
+			d.log.WarnContext(ctx, callerName+": failed to read harness credential names; agent not created",
+				"agent_id", agent.ID, "error", nerr)
+			return nil, &secretResolutionError{Verb: "created", Source: resolutionSourceEnvSettings, Err: nerr}
+		}
+		if nerr != nil {
+			d.log.WarnContext(ctx, callerName+": failed to read harness credential names; using the built-in names",
+				"agent_id", agent.ID, "error", nerr)
+			names = builtinCredentialEnvNameSet()
+		}
+		noAuthCredNames = names
+		for k := range req.ResolvedEnv {
+			if !noAuthKeepsConfigEnv(k, requesterSetEnvKey(agent, k), noAuthCredNames) {
+				delete(req.ResolvedEnv, k)
+				delete(req.EnvClassifications, k)
+			}
+		}
+	}
 	tel.injectRequesterEnabled(req.ResolvedEnv, &req.EnvClassifications)
 	injectModelEnv(req.ResolvedEnv, agent.AppliedConfig)
 	if _, ok := req.ResolvedEnv["SCION_MODEL"]; ok {
@@ -1139,6 +1168,9 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 		for k, v := range envFromStorage {
 			if k == agentTZEnvKey {
 				continue // the resolver owns TZ
+			}
+			if noAuth && !noAuthKeepsStoredEnv(k, !envFromStoragePlain[k], noAuthCredNames) {
+				continue
 			}
 			if existing, exists := req.ResolvedEnv[k]; !exists || existing == "" {
 				req.ResolvedEnv[k] = v
@@ -1201,8 +1233,9 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 	// Propagate no-auth intent from the agent's applied config.
 	// NoAuth suppresses LLM-auth secrets (API keys, credential files) but must
 	// NOT suppress git-related credentials (GITHUB_TOKEN) which are needed for
-	// repository clone/pull operations regardless of LLM auth status.
-	noAuth := agent.AppliedConfig != nil && agent.AppliedConfig.NoAuth
+	// repository clone/pull operations regardless of LLM auth status. The
+	// token is picked as start picks it (pickNoAuthGitToken: project first,
+	// then the owner's) and written over any existing value.
 	if noAuth {
 		req.NoAuth = true
 		req.ResolvedSecrets = nil
@@ -1216,47 +1249,22 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 		// Without this, NoAuth blanket-suppresses all secrets including
 		// GITHUB_TOKEN, causing git clone failures (#1165).
 		if agent.ProjectID != "" && d.secretBackend != nil {
-			ghSecret, err := d.secretBackend.Get(ctx, "GITHUB_TOKEN", secret.ScopeProject, agent.ProjectID)
-			if err != nil {
-				if d.debug {
-					d.log.Debug("NoAuth: failed to resolve GITHUB_TOKEN from project secrets",
-						"agent_id", agent.ID, "project_id", agent.ProjectID, "error", err)
-				}
-			} else if ghSecret != nil && ghSecret.Value != "" {
-				req.ResolvedEnv["GITHUB_TOKEN"] = ghSecret.Value
-				req.noAuthProjectToken = ghSecret.Value
-				// From secret store → secret-fetchable.
-				classifyEnv(&req.EnvClassifications, "GITHUB_TOKEN", api.EnvKindSecretFetchable)
-				if d.debug {
-					d.log.Debug("NoAuth: resolved GITHUB_TOKEN from project secrets for git operations",
-						"agent_id", agent.ID, "project_id", agent.ProjectID)
-				}
-			}
+			projectValue := d.noAuthCreateGitToken(ctx, agent, secret.ScopeProject, agent.ProjectID)
 
 			// Fall back to the creating user's profile-level GITHUB_TOKEN,
 			// mirroring the cascade in resolveCloneToken. Users who store
 			// GITHUB_TOKEN at user/profile scope only (no project-scoped token)
 			// would otherwise still hit the NoAuth suppression bug (#1165).
 			// The owner's row is held to the same start-time user-scope
-			// checks as Resolve (startSecretResolveOpts) before its value
+			// checks as Resolve (ownerCloneTokenAllowed) before its value
 			// is read; a refused row is not used.
-			if (ghSecret == nil || ghSecret.Value == "") && agent.OwnerID != "" && d.ownerCloneTokenAllowed(ctx, agent) {
-				ghSecret, err = d.secretBackend.Get(ctx, "GITHUB_TOKEN", secret.ScopeUser, agent.OwnerID)
-				if err != nil {
-					if d.debug {
-						d.log.Debug("NoAuth: failed to resolve GITHUB_TOKEN from user secrets",
-							"agent_id", agent.ID, "owner_id", agent.OwnerID, "error", err)
-					}
-				} else if ghSecret != nil && ghSecret.Value != "" {
-					req.ResolvedEnv["GITHUB_TOKEN"] = ghSecret.Value
-					// From secret store → secret-fetchable.
-					classifyEnv(&req.EnvClassifications, "GITHUB_TOKEN", api.EnvKindSecretFetchable)
-					if d.debug {
-						d.log.Debug("NoAuth: resolved GITHUB_TOKEN from user secrets for git operations",
-							"agent_id", agent.ID, "owner_id", agent.OwnerID)
-					}
-				}
+			userValue := ""
+			if projectValue == "" && agent.OwnerID != "" && d.ownerCloneTokenAllowed(ctx, agent) {
+				userValue = d.noAuthCreateGitToken(ctx, agent, secret.ScopeUser, agent.OwnerID)
 			}
+			tok := pickNoAuthGitToken(projectValue, userValue)
+			applyNoAuthGitToken(req.ResolvedEnv, &req.EnvClassifications, tok)
+			req.noAuthProjectToken = tok.projectBound()
 		}
 	}
 
@@ -3500,12 +3508,29 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 	// its env records; adopt it as a pin before the env is copied below.
 	adoptLegacyTZ(agent.AppliedConfig)
 
+	// An agent without credentials gets the launch material create gives it
+	// (noauth_delivery.go). The credential names are read once, here, before
+	// any env is assembled; a read error fails the start or restart like a
+	// stored env settings read error.
+	noAuth := launchesWithoutCredentials(agent)
+	var credNames credentialEnvNames
+	if noAuth {
+		names, err := d.noAuthCredentialEnvNames(ctx, agent)
+		if err != nil {
+			d.log.WarnContext(ctx, caller+": failed to read harness credential names; agent not "+startedVerb,
+				"agent_id", agent.ID, "error", err)
+			return startEnvResult{}, &secretResolutionError{Verb: startedVerb, Source: resolutionSourceEnvSettings, Err: err}
+		}
+		credNames = names
+	}
+
 	// Start with agent's applied config env (template/config-level vars).
 	if agent.AppliedConfig != nil {
-		for k, v := range agent.AppliedConfig.Env {
+		configEnv := noAuthConfigEnv(agent, credNames)
+		for k, v := range configEnv {
 			resolvedEnv[k] = v
 		}
-		classifyEnvKeys(&envClassifications, agent.AppliedConfig.Env, api.EnvKindPlain)
+		classifyEnvKeys(&envClassifications, configEnv, api.EnvKindPlain)
 	}
 
 	injectModelEnv(resolvedEnv, agent.AppliedConfig)
@@ -3530,7 +3555,7 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 	// resolved are admitted too, through the same selector
 	// (reprovisionGatheredEnv).
 	gathered := reprovisionGatheredEnvFrom(ctx)
-	envFromStorage, envFromStoragePlain, err := d.selectDeliveryEnvWith(ctx, sel, agent, gathered)
+	envFromStorage, envFromStoragePlain, err := d.selectDeliveryEnvFor(ctx, sel, agent, credNames, gathered)
 	if err != nil {
 		d.log.WarnContext(ctx, caller+": failed to read stored env settings; agent not "+startedVerb,
 			"agent_id", agent.ID, "error", err)
@@ -3562,6 +3587,15 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 		d.log.WarnContext(ctx, caller+": failed to resolve secrets; agent not "+startedVerb,
 			"agent_id", agent.ID, "error", err)
 		return startEnvResult{}, &secretResolutionError{Verb: startedVerb, Err: err}
+	}
+	// An agent without credentials: the selection returned only the git
+	// token candidates. One is written into the env as create writes it
+	// (over any existing value), and none is sent as a resolved secret.
+	var gitToken noAuthGitToken
+	if noAuth {
+		gitToken = pickNoAuthGitTokenFrom(resolvedSecrets)
+		resolvedSecrets = nil
+		applyNoAuthGitToken(resolvedEnv, &envClassifications, gitToken)
 	}
 	resolvedSecrets = d.dropTZTargetedSecrets(ctx, agent, resolvedSecrets)
 	for _, s := range resolvedSecrets {
@@ -3730,6 +3764,9 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 		env:       resolvedEnv,
 		secrets:   resolvedSecrets,
 		appToken:  appToken,
+		// The project's own token, for an agent without credentials (as
+		// create passes it): it is not in secrets.
+		projectToken: gitToken.projectBound(),
 	}, &wsSpec.GitClone, &wsSpec.SharedWorkspaceClone)
 	// Read once: DispatchAgentStart/Restart send the same set to the broker.
 	experiments := d.dispatchExperiments()
@@ -4014,6 +4051,7 @@ func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *sto
 		Image:                d.dispatchImageForBroker(agent, imageTag),
 		TemplateName:         agent.Template,
 		PreviousProjectIDs:   d.previousProjectIDs(ctx, projectInfo),
+		NoAuth:               launchesWithoutCredentials(agent),
 	}
 	extras.TemplateID, extras.TemplateHash = dispatchTemplateIdentity(agent)
 	extras.Profile = dispatchProfile(agent)
@@ -4307,6 +4345,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 		SharedDirs:           projectInfo.sharedDirs,
 		ResolvedSecrets:      startEnv.secrets,
 		PreviousProjectIDs:   d.previousProjectIDs(ctx, projectInfo),
+		NoAuth:               launchesWithoutCredentials(agent),
 	}
 	extras.TemplateID, extras.TemplateHash = dispatchTemplateIdentity(agent)
 	extras.Profile = dispatchProfile(agent)
