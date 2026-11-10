@@ -102,9 +102,9 @@ func (r *visitorDMReader) check(ctx context.Context) error {
 // visitorReadOutcome maps a failed read of a federated user's conversation
 // to its outcome: a hub refusal (401, 403 or 404) is the uniform refusal;
 // anything else (503 and other 5xx, transport errors and timeouts, a read
-// with no result) is retried until the deadline. The conversation exists once the send has
-// returned, and a never-used one answers 200 with no messages, so a 404 is
-// a refusal here too.
+// with no result) is retried until the deadline. The conversation exists
+// once the send has returned, and a never-used one answers 200 with no
+// messages, so a 404 is a refusal here too.
 func visitorReadOutcome(err error) pollOutcome {
 	if isHubRefusal(err) {
 		return pollRefused
