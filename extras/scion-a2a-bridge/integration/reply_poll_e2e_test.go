@@ -49,7 +49,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 )
 
-// Agent replies reach A2A callers (ptone/scion#4603). A real hub serves a
+// Agent replies reach A2A callers (upstream issue 4603). A real hub serves a
 // project with one agent; the A2A bridge sits in front of it, receiving the
 // hub's broker publications as a broker spoke. An A2A client calls the
 // agent as a local hub user with a hub user JWT (the bridge's hubJWT
