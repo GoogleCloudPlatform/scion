@@ -375,15 +375,22 @@ the agent start or workspace pull rather than being ignored.
   with credential helpers, extra HTTP headers and askpass cleared. Without a project git token it runs
   anonymously; with one, the token is the only credential. Over ssh it offers no host identity and
   checks the server's host key strictly against the host user's and the system's `known_hosts`, without
-  writing them; a project token never authenticates ssh, and Hub-host clones or pulls of an SSH
-  repository URL (`ssh://`, `git+ssh://`, `ssh+git://`, or `git@host:path`) require a project git
-  secret (`an ssh repository URL requires a project git secret`). To trust a private CA, set
+  writing them; a project token never authenticates ssh. To trust a private CA, set
   `GIT_SSL_CAINFO` (or use the system trust store); for a proxy, set `https_proxy`/`no_proxy` in the
   Hub or Runtime Broker environment.
+- **ssh repository URLs on the Hub:** a clone or fetch the Hub runs itself (provisioning a
+  shared-workspace project at project create or project clone, and a shared-workspace pull) refuses a
+  project clone URL (its `scion.dev/clone-url` label, else `gitRepo`) that uses ssh (`ssh://`,
+  `git+ssh://`, `ssh+git://` or `git@host:path`). The refusal comes before any git or filesystem work,
+  as HTTP 422 with a fixed message that names no URL. With a git credential for the project (a
+  project git secret, the GitHub App, or the creator's GitHub token) the message is `a project git
+  secret authenticates https only; use an https repository URL`; without one it is `an ssh repository
+  URL is not supported for hub-side git; use an https repository URL`. Use the repository's
+  `https://` URL. Clones that a Runtime Broker or an agent runs are not affected.
 - **Updating a shared workspace** (pull) re-validates the project's stored `gitRepo` URL, verifies
   that the checkout's `origin` remote URL matches `gitRepo` (`origin remote mismatch` otherwise), and
-  fetches from `gitRepo` (with the project's git credential for HTTPS remotes, or refusing SSH URLs
-  when no project git secret is configured), then fast-forwards the current branch.
+  fetches from `gitRepo` (with the project's git credential for HTTPS remotes; an SSH URL is refused,
+  as above), then fast-forwards the current branch.
 
 Your own git commands in your checkout are not affected. Scion also mounts the repository's git
 metadata into agents so that an agent cannot change what git does for you or for other agents, and
