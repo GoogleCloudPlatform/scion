@@ -120,6 +120,15 @@ func TestIsHarnessConfigDir_DoesNotFollowLinkedConfigYAML(t *testing.T) {
 	}
 }
 
+// The onboarding status counts the directories bootstrap imports: a linked
+// config.yaml, which bootstrap refuses to load, does not count.
+func TestCountHarnessConfigDirs_DoesNotCountLinkedConfigYAML(t *testing.T) {
+	parent := localLinkedConfigYAMLTree(t)
+	if got := countHarnessConfigDirs(parent); got != 1 {
+		t.Errorf("countHarnessConfigDirs = %d, want 1 (claude-real only)", got)
+	}
+}
+
 func TestLoadLocalHarnessConfigDir(t *testing.T) {
 	parent := localLinkedConfigYAMLTree(t)
 
