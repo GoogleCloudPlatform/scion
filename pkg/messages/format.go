@@ -60,6 +60,11 @@ const (
 	MetadataChoiceVersion    = "choice_version"
 	MetadataChoiceID         = "choice_id"
 	MetadataChoiceProvenance = "choice_provenance"
+	// MetadataChoiceBatch and MetadataChoiceAnswers are set instead of the
+	// four keys above on the response of a set submit (design choices v5,
+	// 5.1): the batch id and a compact key@version=choiceId list.
+	MetadataChoiceBatch   = "choice_batch"
+	MetadataChoiceAnswers = "choice_answers"
 )
 
 // deliveryMetadataAllowlist defines the metadata keys that are forwarded to
@@ -96,6 +101,8 @@ var deliveryMetadataAllowlist = map[string]bool{
 	MetadataChoiceVersion:    true,
 	MetadataChoiceID:         true,
 	MetadataChoiceProvenance: true,
+	MetadataChoiceBatch:      true,
+	MetadataChoiceAnswers:    true,
 }
 
 // deliveryMessage is the subset of StructuredMessage fields delivered to the agent.

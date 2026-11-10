@@ -216,6 +216,34 @@ func (_c *DecisionAnswerCreate) SetNillableIdempotencyKey(v *string) *DecisionAn
 	return _c
 }
 
+// SetBatchID sets the "batch_id" field.
+func (_c *DecisionAnswerCreate) SetBatchID(v uuid.UUID) *DecisionAnswerCreate {
+	_c.mutation.SetBatchID(v)
+	return _c
+}
+
+// SetNillableBatchID sets the "batch_id" field if the given value is not nil.
+func (_c *DecisionAnswerCreate) SetNillableBatchID(v *uuid.UUID) *DecisionAnswerCreate {
+	if v != nil {
+		_c.SetBatchID(*v)
+	}
+	return _c
+}
+
+// SetMatchedDefault sets the "matched_default" field.
+func (_c *DecisionAnswerCreate) SetMatchedDefault(v bool) *DecisionAnswerCreate {
+	_c.mutation.SetMatchedDefault(v)
+	return _c
+}
+
+// SetNillableMatchedDefault sets the "matched_default" field if the given value is not nil.
+func (_c *DecisionAnswerCreate) SetNillableMatchedDefault(v *bool) *DecisionAnswerCreate {
+	if v != nil {
+		_c.SetMatchedDefault(*v)
+	}
+	return _c
+}
+
 // SetCreatedAt sets the "created_at" field.
 func (_c *DecisionAnswerCreate) SetCreatedAt(v time.Time) *DecisionAnswerCreate {
 	_c.mutation.SetCreatedAt(v)
@@ -290,6 +318,10 @@ func (_c *DecisionAnswerCreate) defaults() {
 	if _, ok := _c.mutation.Outcome(); !ok {
 		v := decisionanswer.DefaultOutcome
 		_c.mutation.SetOutcome(v)
+	}
+	if _, ok := _c.mutation.MatchedDefault(); !ok {
+		v := decisionanswer.DefaultMatchedDefault
+		_c.mutation.SetMatchedDefault(v)
 	}
 	if _, ok := _c.mutation.CreatedAt(); !ok {
 		v := decisionanswer.DefaultCreatedAt()
@@ -379,6 +411,9 @@ func (_c *DecisionAnswerCreate) check() error {
 		if err := decisionanswer.IdempotencyKeyValidator(v); err != nil {
 			return &ValidationError{Name: "idempotency_key", err: fmt.Errorf(`ent: validator failed for field "DecisionAnswer.idempotency_key": %w`, err)}
 		}
+	}
+	if _, ok := _c.mutation.MatchedDefault(); !ok {
+		return &ValidationError{Name: "matched_default", err: errors.New(`ent: missing required field "DecisionAnswer.matched_default"`)}
 	}
 	if _, ok := _c.mutation.CreatedAt(); !ok {
 		return &ValidationError{Name: "created_at", err: errors.New(`ent: missing required field "DecisionAnswer.created_at"`)}
@@ -498,6 +533,14 @@ func (_c *DecisionAnswerCreate) createSpec() (*DecisionAnswer, *sqlgraph.CreateS
 	if value, ok := _c.mutation.IdempotencyKey(); ok {
 		_spec.SetField(decisionanswer.FieldIdempotencyKey, field.TypeString, value)
 		_node.IdempotencyKey = &value
+	}
+	if value, ok := _c.mutation.BatchID(); ok {
+		_spec.SetField(decisionanswer.FieldBatchID, field.TypeUUID, value)
+		_node.BatchID = &value
+	}
+	if value, ok := _c.mutation.MatchedDefault(); ok {
+		_spec.SetField(decisionanswer.FieldMatchedDefault, field.TypeBool, value)
+		_node.MatchedDefault = value
 	}
 	if value, ok := _c.mutation.CreatedAt(); ok {
 		_spec.SetField(decisionanswer.FieldCreatedAt, field.TypeTime, value)
@@ -646,6 +689,12 @@ func (u *DecisionAnswerUpsertOne) UpdateNewValues() *DecisionAnswerUpsertOne {
 		}
 		if _, exists := u.create.mutation.IdempotencyKey(); exists {
 			s.SetIgnore(decisionanswer.FieldIdempotencyKey)
+		}
+		if _, exists := u.create.mutation.BatchID(); exists {
+			s.SetIgnore(decisionanswer.FieldBatchID)
+		}
+		if _, exists := u.create.mutation.MatchedDefault(); exists {
+			s.SetIgnore(decisionanswer.FieldMatchedDefault)
 		}
 		if _, exists := u.create.mutation.CreatedAt(); exists {
 			s.SetIgnore(decisionanswer.FieldCreatedAt)
@@ -941,6 +990,12 @@ func (u *DecisionAnswerUpsertBulk) UpdateNewValues() *DecisionAnswerUpsertBulk {
 			}
 			if _, exists := b.mutation.IdempotencyKey(); exists {
 				s.SetIgnore(decisionanswer.FieldIdempotencyKey)
+			}
+			if _, exists := b.mutation.BatchID(); exists {
+				s.SetIgnore(decisionanswer.FieldBatchID)
+			}
+			if _, exists := b.mutation.MatchedDefault(); exists {
+				s.SetIgnore(decisionanswer.FieldMatchedDefault)
 			}
 			if _, exists := b.mutation.CreatedAt(); exists {
 				s.SetIgnore(decisionanswer.FieldCreatedAt)

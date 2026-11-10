@@ -185,6 +185,7 @@ var routePermissionClassifications = map[string]string{
 	"/api/v1/chat/attachments":                       "policy:chat-attachment",
 	"/api/v1/chat/attachments/":                      "policy:chat-attachment",
 	"/api/v1/decisions/":                             "policy:chat",
+	"/api/v1/choice-prompts/":                        "policy:chat",
 	"/api/v1/runtime-brokers/connect":                "broker-hmac:control-channel",
 	"/api/v1/attachment-deliveries/":                 "broker-hmac:attachment-delivery",
 	"/api/v1/agent/gcp-token":                        "agent-token:gcp-token",

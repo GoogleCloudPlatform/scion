@@ -126,3 +126,47 @@ func TestDecisionRace_AnswerWaitsForRepostInFlight(t *testing.T) {
 	_, err = f.cs.GetMessage(ctx, in.ResponseMessage.ID)
 	assert.ErrorIs(t, err, store.ErrNotFound, "nor its response message")
 }
+
+// TestDecisionRace_ConcurrentSetSubmitsOneWins: a set submit holds the
+// locks of its prompt's rows; a concurrent set submit of the same prompt
+// waits for it and then gets a changed set (every row decided), and
+// nothing of the loser is stored.
+func TestDecisionRace_ConcurrentSetSubmitsOneWins(t *testing.T) {
+	requirePostgres(t)
+	f := newDecisionFixture(t)
+	ctx := context.Background()
+	msgID, rows := f.createSet(t, threeDecisions()...)
+
+	tx, err := f.cs.client.Tx(ctx)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = tx.Rollback() })
+	won, err := newTxCompositeStore(tx).recordAnswerSetTx(ctx, f.answerSet(msgID, "user-1", "", rows[0], "1", rows[1], "1", rows[2], "1"))
+	require.NoError(t, err)
+
+	loser := f.answerSet(msgID, "user-2", "", rows[0], "2", rows[1], "2", rows[2], "2")
+	done := make(chan error, 1)
+	go func() {
+		_, err := f.cs.RecordAnswerSet(ctx, loser)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		t.Fatalf("the second submit did not wait for the first one's locks: %v", err)
+	case <-time.After(blockedFor):
+	}
+	require.NoError(t, tx.Commit())
+
+	err = <-done
+	var changed *store.AnswerSetChangedError
+	require.ErrorAs(t, err, &changed)
+	assert.Len(t, changed.Reasons, 3)
+	for _, id := range rows {
+		assert.Equal(t, store.AnswerSetReasonDecided, changed.Reasons[id])
+		d, err := f.cs.GetDecision(ctx, id)
+		require.NoError(t, err)
+		require.Len(t, d.Answers, 1, "only the winner's answer")
+		assert.Equal(t, won.BatchID, d.Answers[0].BatchID)
+	}
+	_, err = f.cs.GetMessage(ctx, loser.ResponseMessage.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound, "the loser's response message is not stored")
+}

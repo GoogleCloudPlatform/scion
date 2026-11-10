@@ -124,6 +124,17 @@ func (DecisionAnswer) Fields() []ent.Field {
 			NotEmpty().
 			MaxLen(128).
 			Immutable(),
+		// batch_id is shared by every answer of one set submit (design
+		// choices v5, 4.4); NULL for a one-click answer.
+		field.UUID("batch_id", uuid.UUID{}).
+			Optional().
+			Nillable().
+			Immutable(),
+		// matched_default is set by the hub when the answer's choice is the
+		// decision's recommended (default) choice.
+		field.Bool("matched_default").
+			Default(false).
+			Immutable(),
 		field.Time("created_at").
 			Default(time.Now).
 			Immutable(),
@@ -147,6 +158,8 @@ func (DecisionAnswer) Indexes() []ent.Index {
 		index.Fields("response_message_id"),
 		// User deletion clears answered_by_user_id on the user's answers.
 		index.Fields("answered_by_user_id"),
+		// The answers of one set submit.
+		index.Fields("batch_id"),
 	}
 }
 

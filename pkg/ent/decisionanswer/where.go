@@ -140,6 +140,16 @@ func IdempotencyKey(v string) predicate.DecisionAnswer {
 	return predicate.DecisionAnswer(sql.FieldEQ(FieldIdempotencyKey, v))
 }
 
+// BatchID applies equality check predicate on the "batch_id" field. It's identical to BatchIDEQ.
+func BatchID(v uuid.UUID) predicate.DecisionAnswer {
+	return predicate.DecisionAnswer(sql.FieldEQ(FieldBatchID, v))
+}
+
+// MatchedDefault applies equality check predicate on the "matched_default" field. It's identical to MatchedDefaultEQ.
+func MatchedDefault(v bool) predicate.DecisionAnswer {
+	return predicate.DecisionAnswer(sql.FieldEQ(FieldMatchedDefault, v))
+}
+
 // CreatedAt applies equality check predicate on the "created_at" field. It's identical to CreatedAtEQ.
 func CreatedAt(v time.Time) predicate.DecisionAnswer {
 	return predicate.DecisionAnswer(sql.FieldEQ(FieldCreatedAt, v))
@@ -1193,6 +1203,66 @@ func IdempotencyKeyEqualFold(v string) predicate.DecisionAnswer {
 // IdempotencyKeyContainsFold applies the ContainsFold predicate on the "idempotency_key" field.
 func IdempotencyKeyContainsFold(v string) predicate.DecisionAnswer {
 	return predicate.DecisionAnswer(sql.FieldContainsFold(FieldIdempotencyKey, v))
+}
+
+// BatchIDEQ applies the EQ predicate on the "batch_id" field.
+func BatchIDEQ(v uuid.UUID) predicate.DecisionAnswer {
+	return predicate.DecisionAnswer(sql.FieldEQ(FieldBatchID, v))
+}
+
+// BatchIDNEQ applies the NEQ predicate on the "batch_id" field.
+func BatchIDNEQ(v uuid.UUID) predicate.DecisionAnswer {
+	return predicate.DecisionAnswer(sql.FieldNEQ(FieldBatchID, v))
+}
+
+// BatchIDIn applies the In predicate on the "batch_id" field.
+func BatchIDIn(vs ...uuid.UUID) predicate.DecisionAnswer {
+	return predicate.DecisionAnswer(sql.FieldIn(FieldBatchID, vs...))
+}
+
+// BatchIDNotIn applies the NotIn predicate on the "batch_id" field.
+func BatchIDNotIn(vs ...uuid.UUID) predicate.DecisionAnswer {
+	return predicate.DecisionAnswer(sql.FieldNotIn(FieldBatchID, vs...))
+}
+
+// BatchIDGT applies the GT predicate on the "batch_id" field.
+func BatchIDGT(v uuid.UUID) predicate.DecisionAnswer {
+	return predicate.DecisionAnswer(sql.FieldGT(FieldBatchID, v))
+}
+
+// BatchIDGTE applies the GTE predicate on the "batch_id" field.
+func BatchIDGTE(v uuid.UUID) predicate.DecisionAnswer {
+	return predicate.DecisionAnswer(sql.FieldGTE(FieldBatchID, v))
+}
+
+// BatchIDLT applies the LT predicate on the "batch_id" field.
+func BatchIDLT(v uuid.UUID) predicate.DecisionAnswer {
+	return predicate.DecisionAnswer(sql.FieldLT(FieldBatchID, v))
+}
+
+// BatchIDLTE applies the LTE predicate on the "batch_id" field.
+func BatchIDLTE(v uuid.UUID) predicate.DecisionAnswer {
+	return predicate.DecisionAnswer(sql.FieldLTE(FieldBatchID, v))
+}
+
+// BatchIDIsNil applies the IsNil predicate on the "batch_id" field.
+func BatchIDIsNil() predicate.DecisionAnswer {
+	return predicate.DecisionAnswer(sql.FieldIsNull(FieldBatchID))
+}
+
+// BatchIDNotNil applies the NotNil predicate on the "batch_id" field.
+func BatchIDNotNil() predicate.DecisionAnswer {
+	return predicate.DecisionAnswer(sql.FieldNotNull(FieldBatchID))
+}
+
+// MatchedDefaultEQ applies the EQ predicate on the "matched_default" field.
+func MatchedDefaultEQ(v bool) predicate.DecisionAnswer {
+	return predicate.DecisionAnswer(sql.FieldEQ(FieldMatchedDefault, v))
+}
+
+// MatchedDefaultNEQ applies the NEQ predicate on the "matched_default" field.
+func MatchedDefaultNEQ(v bool) predicate.DecisionAnswer {
+	return predicate.DecisionAnswer(sql.FieldNEQ(FieldMatchedDefault, v))
 }
 
 // CreatedAtEQ applies the EQ predicate on the "created_at" field.
