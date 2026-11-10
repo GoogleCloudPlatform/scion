@@ -159,6 +159,7 @@ func (b *TelegramBrokerV2) postToHub(ctx context.Context, path, contentType stri
 	hmacKey := b.hmacKey
 	brokerID := b.brokerID
 	pluginName := b.pluginName
+	client := b.httpClient
 	b.mu.RUnlock()
 
 	if hubURL == "" {
@@ -176,7 +177,7 @@ func (b *TelegramBrokerV2) postToHub(ctx context.Context, path, contentType stri
 			return 0, nil, fmt.Errorf("sign request: %w", err)
 		}
 	}
-	resp, err := b.httpClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return 0, nil, err
 	}
