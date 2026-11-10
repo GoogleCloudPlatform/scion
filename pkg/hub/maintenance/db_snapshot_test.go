@@ -153,6 +153,22 @@ func TestSnapshotSourceDSN(t *testing.T) {
 	}
 }
 
+func TestRootedURIPath(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		abs  bool
+		want string
+	}{
+		{"/data/hub.db", true, "/data/hub.db"},
+		{"C:/Users/hub/hub.db", true, "/C:/Users/hub/hub.db"},
+		{"hub.db", false, "hub.db"},
+	} {
+		if got := rootedURIPath(tc.in, tc.abs); got != tc.want {
+			t.Errorf("rootedURIPath(%q, %v) = %q, want %q", tc.in, tc.abs, got, tc.want)
+		}
+	}
+}
+
 func TestSQLiteSnapshotter_OpenFailure(t *testing.T) {
 	dir := t.TempDir()
 	openErr := errors.New("open refused")

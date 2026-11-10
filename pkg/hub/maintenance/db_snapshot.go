@@ -208,9 +208,22 @@ func snapshotSourceDSN(file string) string {
 	if abs, err := filepath.Abs(file); err == nil {
 		file = abs
 	}
-	path := (&url.URL{Path: filepath.ToSlash(file)}).EscapedPath()
+	path := (&url.URL{Path: rootedURIPath(filepath.ToSlash(file), filepath.IsAbs(file))}).EscapedPath()
 	return fmt.Sprintf("file:%s?mode=ro&cache=private&_pragma=busy_timeout(%d)",
 		path, snapshotBusyTimeout.Milliseconds())
+}
+
+// rootedURIPath returns the slash path p of an absolute path (abs) as an
+// absolute URI path: one that does not start with "/" (a Windows drive path
+// such as "C:/data") gets one leading "/", which SQLite removes again before
+// a drive letter. A relative path is returned as it is.
+// Windows UNC paths are not supported (they would become a URI authority,
+// which SQLite refuses); SnapshotStatus reports snapshots unsupported on Windows.
+func rootedURIPath(p string, abs bool) string {
+	if !abs || strings.HasPrefix(p, "/") {
+		return p
+	}
+	return "/" + p
 }
 
 // SnapshotStatus implements DBSnapshotter. Snapshots are unsupported on a
