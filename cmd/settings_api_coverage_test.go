@@ -217,6 +217,9 @@ func settingsAPICoverageProblems(ops []authzop.OperationSpec, families, excluded
 // resolveCLIPath reports whether path names a command of root exactly (no
 // prefix match onto a parent).
 func resolveCLIPath(root *cobra.Command, path []string) bool {
+	if len(path) == 0 {
+		return false
+	}
 	c, rest, err := root.Find(path)
 	return err == nil && len(rest) == 0 && c.CommandPath() == strings.Join(append([]string{root.Name()}, path...), " ")
 }
@@ -292,5 +295,8 @@ func TestSettingsAPICoverage_Controls(t *testing.T) {
 	}
 	if resolveCLIPath(rootCmd, []string{"broker", "convert"}) {
 		t.Error("an alias must not resolve; name the command by its Use name")
+	}
+	if resolveCLIPath(rootCmd, []string{}) {
+		t.Error("an empty command path must not resolve")
 	}
 }
