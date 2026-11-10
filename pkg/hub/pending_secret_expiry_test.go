@@ -361,3 +361,22 @@ func TestPendingSecretExpiry_LocalBackendHoldsNothingElsewhere(t *testing.T) {
 	assert.Zero(t, n)
 	assert.Len(t, f.drops.dropped, dropsBefore)
 }
+
+// TestSecretsList_IncludePendingOnlyOnTheList: the single-key env and
+// secret reads refuse includePending with 400 and never return the merged
+// list.
+func TestSecretsList_IncludePendingOnlyOnTheList(t *testing.T) {
+	f := newPendingFixture(t, "pend-merged-single")
+	decodePendingResponse(t, agentPut(t, f.Server, f.AgentID, f.Token, "SINGLE_KEY", userScopeWrite("test-value-1", false)))
+	for _, path := range []string{
+		"/api/v1/env/SINGLE_KEY?scope=user&includePending=true",
+		"/api/v1/secrets/SINGLE_KEY?scope=user&includePending=true",
+		"/api/v1/env/SINGLE_KEY?includePending=false",
+		"/api/v1/secrets/SINGLE_KEY?includePending=1",
+	} {
+		rec := ownerRequest(t, f.Server, f.owner(), CredentialKindInteractive, http.MethodGet, path, nil)
+		assert.Equal(t, http.StatusBadRequest, rec.Code, "%s: %s", path, rec.Body.String())
+		assert.NotContains(t, rec.Body.String(), `"items"`, path)
+		assert.NotContains(t, rec.Body.String(), "SINGLE_KEY\",\"state\"", path)
+	}
+}

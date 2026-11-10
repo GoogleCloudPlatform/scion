@@ -22,7 +22,6 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"strconv"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -416,27 +415,8 @@ func (s *Server) getEnvVar(w http.ResponseWriter, r *http.Request, key string) {
 		scope = store.ScopeUser
 	}
 
-	includePending := false
-	if v := query.Get("includePending"); v != "" {
-		b, err := strconv.ParseBool(v)
-		if err != nil {
-			BadRequest(w, "invalid includePending: "+v)
-			return
-		}
-		includePending = b
-	}
-	if includePending {
-		if scope != store.ScopeUser {
-			BadRequest(w, "includePending is only valid for scope=user")
-			return
-		}
-		// Pending secrets are listed only to their owner's session: the
-		// same gate as the pending secret endpoints.
-		ownerID, ok := s.resolveEnvSecretAccess(w, r, store.ScopeUser, "", true)
-		if !ok {
-			return
-		}
-		s.listSecretsWithPending(w, r, ownerID)
+	if query.Has("includePending") {
+		BadRequest(w, "includePending is only valid on the secret list (GET /api/v1/secrets)")
 		return
 	}
 
@@ -816,27 +796,7 @@ func (s *Server) listSecrets(w http.ResponseWriter, r *http.Request) {
 		scope = store.ScopeUser
 	}
 
-	includePending := false
-	if v := query.Get("includePending"); v != "" {
-		b, err := strconv.ParseBool(v)
-		if err != nil {
-			BadRequest(w, "invalid includePending: "+v)
-			return
-		}
-		includePending = b
-	}
-	if includePending {
-		if scope != store.ScopeUser {
-			BadRequest(w, "includePending is only valid for scope=user")
-			return
-		}
-		// Pending secrets are listed only to their owner's session: the
-		// same gate as the pending secret endpoints.
-		ownerID, ok := s.resolveEnvSecretAccess(w, r, store.ScopeUser, "", true)
-		if !ok {
-			return
-		}
-		s.listSecretsWithPending(w, r, ownerID)
+	if s.serveSecretListWithPending(w, r, scope) {
 		return
 	}
 
@@ -899,27 +859,8 @@ func (s *Server) getSecret(w http.ResponseWriter, r *http.Request, key string) {
 		scope = store.ScopeUser
 	}
 
-	includePending := false
-	if v := query.Get("includePending"); v != "" {
-		b, err := strconv.ParseBool(v)
-		if err != nil {
-			BadRequest(w, "invalid includePending: "+v)
-			return
-		}
-		includePending = b
-	}
-	if includePending {
-		if scope != store.ScopeUser {
-			BadRequest(w, "includePending is only valid for scope=user")
-			return
-		}
-		// Pending secrets are listed only to their owner's session: the
-		// same gate as the pending secret endpoints.
-		ownerID, ok := s.resolveEnvSecretAccess(w, r, store.ScopeUser, "", true)
-		if !ok {
-			return
-		}
-		s.listSecretsWithPending(w, r, ownerID)
+	if query.Has("includePending") {
+		BadRequest(w, "includePending is only valid on the secret list (GET /api/v1/secrets)")
 		return
 	}
 

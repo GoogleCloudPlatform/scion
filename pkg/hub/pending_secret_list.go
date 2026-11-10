@@ -19,6 +19,7 @@ import (
 	"errors"
 	"net/http"
 	"sort"
+	"strconv"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
@@ -63,6 +64,36 @@ type PendingSecretItem struct {
 type ProjectSecretOverride struct {
 	ProjectID   string `json:"projectId"`
 	ProjectName string `json:"projectName"`
+}
+
+// serveSecretListWithPending serves the secret list request when it asks
+// for the merged view (includePending=true) and reports whether it did.
+// Only the secret list route calls it. includePending is valid only with
+// scope user; the merged list is served only to the owner's session (the
+// gate of the pending secret endpoints).
+func (s *Server) serveSecretListWithPending(w http.ResponseWriter, r *http.Request, scope string) bool {
+	v := r.URL.Query().Get("includePending")
+	if v == "" {
+		return false
+	}
+	include, err := strconv.ParseBool(v)
+	if err != nil {
+		BadRequest(w, "invalid includePending: "+v)
+		return true
+	}
+	if !include {
+		return false
+	}
+	if scope != store.ScopeUser {
+		BadRequest(w, "includePending is only valid for scope=user")
+		return true
+	}
+	ownerID, ok := s.resolveEnvSecretAccess(w, r, store.ScopeUser, "", true)
+	if !ok {
+		return true
+	}
+	s.listSecretsWithPending(w, r, ownerID)
+	return true
 }
 
 // listSecretsWithPending writes the merged list for ownerID. The caller has
