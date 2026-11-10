@@ -392,20 +392,20 @@ func (s *Server) hubDefaultPassthroughAllowed(ctx context.Context, runtimeBroker
 func (s *Server) projectDefaultPassthroughAllowed(ctx context.Context, r *http.Request, runtimeBrokerID, projectID, agentName, profileName string) (bool, string) {
 	allowed, resolvedProfile := s.hubDefaultPassthroughAllowed(ctx, runtimeBrokerID, projectID, agentName, profileName)
 	if !allowed {
-		slog.Info("project-default GCP passthrough denied: outside the passthrough default confinement",
+		slog.InfoContext(ctx, "project-default GCP passthrough denied: outside the passthrough default confinement",
 			"surface", SurfacePassthroughProjectDefault, "project_id", projectID, "agent", agentName,
 			"broker", runtimeBrokerID)
 		return false, ""
 	}
 	broker, err := s.store.GetRuntimeBroker(ctx, runtimeBrokerID)
 	if err != nil || broker == nil {
-		slog.Info("project-default GCP passthrough denied: runtime broker unavailable",
+		slog.InfoContext(ctx, "project-default GCP passthrough denied: runtime broker unavailable",
 			"surface", SurfacePassthroughProjectDefault, "project_id", projectID, "agent", agentName,
 			"broker", runtimeBrokerID, "error", err)
 		return false, ""
 	}
 	if d := s.evaluatePassthroughIdentity(ctx, r, broker, SurfacePassthroughProjectDefault); d != nil {
-		slog.Info("project-default GCP passthrough denied: caller lacks passthrough authority",
+		slog.InfoContext(ctx, "project-default GCP passthrough denied: caller lacks passthrough authority",
 			"surface", SurfacePassthroughProjectDefault, "project_id", projectID, "agent", agentName,
 			"broker", runtimeBrokerID, "reason", d.msg)
 		return false, ""
