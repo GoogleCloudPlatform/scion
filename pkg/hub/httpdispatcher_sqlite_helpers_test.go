@@ -18,6 +18,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"testing"
 	"time"
@@ -305,11 +306,11 @@ func (m *mockGitTokenSecretBackend) HubID() string { return "test-hub" }
 // HoldPending, ReadPending and DropPending satisfy secret.PendingHolder; the
 // fake holds no pending values.
 func (m *mockGitTokenSecretBackend) HoldPending(context.Context, string, []byte) (string, error) {
-	return "", secret.ErrPendingNotImplemented
+	return "", errors.New("pending secrets are not supported by this test backend")
 }
 
 func (m *mockGitTokenSecretBackend) ReadPending(context.Context, string) ([]byte, error) {
-	return nil, secret.ErrPendingNotImplemented
+	return nil, errors.New("pending secrets are not supported by this test backend")
 }
 
 func (m *mockGitTokenSecretBackend) DropPending(context.Context, string) error { return nil }
@@ -518,11 +519,11 @@ func (m *mockSecretBackend) HubID() string { return "test-hub" }
 // HoldPending, ReadPending and DropPending satisfy secret.PendingHolder; the
 // fake holds no pending values.
 func (m *mockSecretBackend) HoldPending(context.Context, string, []byte) (string, error) {
-	return "", secret.ErrPendingNotImplemented
+	return "", errors.New("pending secrets are not supported by this test backend")
 }
 
 func (m *mockSecretBackend) ReadPending(context.Context, string) ([]byte, error) {
-	return nil, secret.ErrPendingNotImplemented
+	return nil, errors.New("pending secrets are not supported by this test backend")
 }
 
 func (m *mockSecretBackend) DropPending(context.Context, string) error { return nil }

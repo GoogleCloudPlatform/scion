@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -193,11 +194,11 @@ func (b *cleanupTestSecretBackend) HubID() string { return "test-hub" }
 // HoldPending, ReadPending and DropPending satisfy secret.PendingHolder; the
 // fake holds no pending values.
 func (b *cleanupTestSecretBackend) HoldPending(context.Context, string, []byte) (string, error) {
-	return "", secret.ErrPendingNotImplemented
+	return "", errors.New("pending secrets are not supported by this test backend")
 }
 
 func (b *cleanupTestSecretBackend) ReadPending(context.Context, string) ([]byte, error) {
-	return nil, secret.ErrPendingNotImplemented
+	return nil, errors.New("pending secrets are not supported by this test backend")
 }
 
 func (b *cleanupTestSecretBackend) DropPending(context.Context, string) error { return nil }

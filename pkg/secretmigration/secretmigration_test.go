@@ -97,11 +97,11 @@ func (f *fakeBackend) HubID() string { return "test-hub" }
 // HoldPending, ReadPending and DropPending satisfy secret.PendingHolder; the
 // fake holds no pending values.
 func (f *fakeBackend) HoldPending(context.Context, string, []byte) (string, error) {
-	return "", secret.ErrPendingNotImplemented
+	return "", errors.New("pending secrets are not supported by this test backend")
 }
 
 func (f *fakeBackend) ReadPending(context.Context, string) ([]byte, error) {
-	return nil, secret.ErrPendingNotImplemented
+	return nil, errors.New("pending secrets are not supported by this test backend")
 }
 
 func (f *fakeBackend) DropPending(context.Context, string) error { return nil }
