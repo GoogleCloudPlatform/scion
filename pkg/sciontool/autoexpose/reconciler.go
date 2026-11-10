@@ -74,9 +74,10 @@ type Reconciler struct {
 	// withdrawn holds ports this reconciler exposed that a later fetch no
 	// longer found in the hub's registry: someone un-exposed them out of
 	// band. They are not exposed again while this reconciler runs, even if
-	// they keep listening or listen again later. They stay in autoExposed
-	// until they stop listening, when the usual delete (a 404 counts as
-	// done) drops them.
+	// they keep listening or listen again later. They are dropped from
+	// autoExposed at once: this reconciler no longer owns them, so it never
+	// deletes them later (a manual re-expose stays registered) and they do
+	// not count toward MaxPorts.
 	withdrawn map[int]bool
 
 	// backoff paces reconciles after failures; state is the loop's
@@ -478,6 +479,7 @@ func (r *Reconciler) getRegistered(ctx context.Context, force bool) (map[int]str
 	for port := range r.autoExposed {
 		if _, ok := registered[port]; !ok && !r.withdrawn[port] {
 			r.withdrawn[port] = true
+			delete(r.autoExposed, port)
 			log.Info("auto-expose: port %d was un-exposed outside the agent; not exposing it again while the agent runs", port)
 		}
 	}

@@ -179,22 +179,93 @@ func TestReconcileOnce_OutOfBandRemovalIsNotReexposed(t *testing.T) {
 	if !r.withdrawn[3000] {
 		t.Fatal("port 3000 should be withdrawn")
 	}
+	if r.autoExposed[3000] {
+		t.Fatal("a withdrawn port must no longer be tracked as auto-exposed")
+	}
 
-	// When 3000 stops listening it is dropped (the delete answers 404 or
-	// succeeds; either is done) and stays withdrawn: listening again does
-	// not expose it.
+	// When 3000 stops listening nothing is deleted (it is no longer
+	// tracked) and it stays withdrawn: listening again does not expose it.
 	r.scan = listening(4000)
 	if err := r.reconcileOnce(ctx); err != nil {
 		t.Fatalf("pass after 3000 stopped: %v", err)
 	}
 	if r.autoExposed[3000] {
-		t.Fatal("port 3000 should no longer be tracked once it stopped listening")
+		t.Fatal("port 3000 should stay untracked after it stopped listening")
 	}
 	r.scan = listening(3000, 4000)
 	for i := 0; i < 3; i++ {
 		if err := r.reconcileOnce(ctx); err != nil {
 			t.Fatalf("pass %d after 3000 listened again: %v", i, err)
 		}
+	}
+	if got := client.registeredPorts(); len(got) != 1 || got[0] != 4000 {
+		t.Fatalf("registered ports = %v, want [4000]", got)
+	}
+}
+
+// A port the user exposes again by hand after an out-of-band un-expose is
+// the user's: when it stops listening, the reconciler must not delete it.
+func TestReconcileOnce_ManualReexposeAfterWithdrawalIsKept(t *testing.T) {
+	r, client := newCountingReconciler(t, 3000)
+	ctx := context.Background()
+	if err := r.reconcileOnce(ctx); err != nil {
+		t.Fatalf("first pass: %v", err)
+	}
+
+	// The user un-exposes 3000; another port's register refreshes the
+	// cache, which marks 3000 withdrawn.
+	if err := client.DeletePort(ctx, 3000); err != nil {
+		t.Fatal(err)
+	}
+	r.scan = listening(3000, 4000)
+	if err := r.reconcileOnce(ctx); err != nil {
+		t.Fatalf("pass with the second port: %v", err)
+	}
+	if !r.withdrawn[3000] || r.autoExposed[3000] {
+		t.Fatalf("port 3000: withdrawn=%v autoExposed=%v, want withdrawn and untracked", r.withdrawn[3000], r.autoExposed[3000])
+	}
+
+	// The user exposes 3000 again by hand, then it stops listening.
+	if _, err := client.RegisterPort(ctx, scionhub.RegisterPortRequest{Port: 3000, Label: "manual", Host: "127.0.0.1"}); err != nil {
+		t.Fatal(err)
+	}
+	r.scan = listening(4000)
+	for i := 0; i < 3; i++ {
+		if err := r.reconcileOnce(ctx); err != nil {
+			t.Fatalf("pass %d after 3000 stopped: %v", i, err)
+		}
+	}
+	if got := client.registeredPorts(); len(got) != 2 || got[0] != 3000 || got[1] != 4000 {
+		t.Fatalf("registered ports = %v, want [3000 4000] (the manual expose of 3000 kept)", got)
+	}
+}
+
+// A withdrawn port frees its MaxPorts slot for a port waiting at the limit.
+func TestReconcileOnce_WithdrawalFreesMaxPortsSlot(t *testing.T) {
+	r, client := newCountingReconciler(t, 3000)
+	r.cfg.MaxPorts = 1
+	ctx := context.Background()
+	if err := r.reconcileOnce(ctx); err != nil {
+		t.Fatalf("first pass: %v", err)
+	}
+	r.scan = listening(3000, 4000)
+	if err := r.reconcileOnce(ctx); err != nil {
+		t.Fatalf("pass at the limit: %v", err)
+	}
+	if got := client.registeredPorts(); len(got) != 1 || got[0] != 3000 {
+		t.Fatalf("registered ports = %v, want [3000] (4000 waits at MaxPorts=1)", got)
+	}
+
+	// The user un-exposes 3000; a fetch marks it withdrawn, which frees the
+	// slot, so the next pass exposes 4000.
+	if err := client.DeletePort(ctx, 3000); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.getRegistered(ctx, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.reconcileOnce(ctx); err != nil {
+		t.Fatalf("pass after the withdrawal: %v", err)
 	}
 	if got := client.registeredPorts(); len(got) != 1 || got[0] != 4000 {
 		t.Fatalf("registered ports = %v, want [4000]", got)
