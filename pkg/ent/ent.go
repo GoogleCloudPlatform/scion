@@ -76,6 +76,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/noncecache"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/notification"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/notificationsubscription"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/pendingsecret"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/policybinding"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/project"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/projectcontributor"
@@ -231,6 +232,7 @@ func checkColumn(t, c string) error {
 			noncecache.Table:                    noncecache.ValidColumn,
 			notification.Table:                  notification.ValidColumn,
 			notificationsubscription.Table:      notificationsubscription.ValidColumn,
+			pendingsecret.Table:                 pendingsecret.ValidColumn,
 			policybinding.Table:                 policybinding.ValidColumn,
 			project.Table:                       project.ValidColumn,
 			projectcontributor.Table:            projectcontributor.ValidColumn,

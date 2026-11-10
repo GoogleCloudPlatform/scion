@@ -271,6 +271,10 @@ type SecretBackend interface {
 
 	// HubID returns the hub instance ID used for hub-scoped secret namespacing.
 	HubID() string
+
+	// PendingHolder holds pending secret values (HoldPending, ReadPending,
+	// DropPending).
+	PendingHolder
 }
 
 // scopePrecedence returns a numeric rank for the given scope string.
@@ -354,4 +358,25 @@ func DeduplicateByTarget(secrets []SecretWithValue) []SecretWithValue {
 		}
 	}
 	return result
+}
+
+// ErrPendingNotImplemented is returned by a backend's pending-value methods
+// when the backend does not support holding pending values yet.
+var ErrPendingNotImplemented = errors.New("holding pending secret values is not implemented for this secret backend")
+
+// PendingHolder holds the values of pending secrets: user-scope secrets
+// written by an agent that wait for the owner's approval. A held value is
+// never part of Resolve, List, Get or FetchValues; it is read only when the
+// owner approves it.
+type PendingHolder interface {
+	// HoldPending stores value for the pending secret id and returns the
+	// reference to record on the pending row.
+	HoldPending(ctx context.Context, id string, value []byte) (ref string, err error)
+
+	// ReadPending returns the value held under ref.
+	ReadPending(ctx context.Context, ref string) ([]byte, error)
+
+	// DropPending releases the value held under ref. Dropping a value that
+	// is already gone is not an error.
+	DropPending(ctx context.Context, ref string) error
 }

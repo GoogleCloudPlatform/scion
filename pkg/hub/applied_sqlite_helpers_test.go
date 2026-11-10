@@ -189,6 +189,18 @@ func (b *cleanupTestSecretBackend) Resolve(ctx context.Context, userID, projectI
 	return nil, nil
 }
 func (b *cleanupTestSecretBackend) HubID() string { return "test-hub" }
+
+// HoldPending, ReadPending and DropPending satisfy secret.PendingHolder; the
+// fake holds no pending values.
+func (b *cleanupTestSecretBackend) HoldPending(context.Context, string, []byte) (string, error) {
+	return "", secret.ErrPendingNotImplemented
+}
+
+func (b *cleanupTestSecretBackend) ReadPending(context.Context, string) ([]byte, error) {
+	return nil, secret.ErrPendingNotImplemented
+}
+
+func (b *cleanupTestSecretBackend) DropPending(context.Context, string) error { return nil }
 func (b *cleanupTestSecretBackend) FetchValues(ctx context.Context, metas []secret.SecretMeta) (map[string]secret.FetchResult, error) {
 	results := make(map[string]secret.FetchResult, len(metas))
 	for _, meta := range metas {

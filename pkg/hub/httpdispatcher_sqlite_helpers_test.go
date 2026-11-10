@@ -302,6 +302,18 @@ func (m *mockGitTokenSecretBackend) Resolve(_ context.Context, _, _, _ string, _
 
 func (m *mockGitTokenSecretBackend) HubID() string { return "test-hub" }
 
+// HoldPending, ReadPending and DropPending satisfy secret.PendingHolder; the
+// fake holds no pending values.
+func (m *mockGitTokenSecretBackend) HoldPending(context.Context, string, []byte) (string, error) {
+	return "", secret.ErrPendingNotImplemented
+}
+
+func (m *mockGitTokenSecretBackend) ReadPending(context.Context, string) ([]byte, error) {
+	return nil, secret.ErrPendingNotImplemented
+}
+
+func (m *mockGitTokenSecretBackend) DropPending(context.Context, string) error { return nil }
+
 func (m *mockGitTokenSecretBackend) FetchValues(_ context.Context, metas []secret.SecretMeta) (map[string]secret.FetchResult, error) {
 	results := make(map[string]secret.FetchResult, len(metas))
 	for _, meta := range metas {
@@ -502,6 +514,18 @@ func (m *mockSecretBackend) Resolve(ctx context.Context, userID, projectID, brok
 	return m.secrets, nil
 }
 func (m *mockSecretBackend) HubID() string { return "test-hub" }
+
+// HoldPending, ReadPending and DropPending satisfy secret.PendingHolder; the
+// fake holds no pending values.
+func (m *mockSecretBackend) HoldPending(context.Context, string, []byte) (string, error) {
+	return "", secret.ErrPendingNotImplemented
+}
+
+func (m *mockSecretBackend) ReadPending(context.Context, string) ([]byte, error) {
+	return nil, secret.ErrPendingNotImplemented
+}
+
+func (m *mockSecretBackend) DropPending(context.Context, string) error { return nil }
 func (m *mockSecretBackend) FetchValues(ctx context.Context, metas []secret.SecretMeta) (map[string]secret.FetchResult, error) {
 	results := make(map[string]secret.FetchResult, len(metas))
 	for _, meta := range metas {

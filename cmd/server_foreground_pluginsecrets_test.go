@@ -40,6 +40,18 @@ func newFakeSecretBackend() *fakeSecretBackend {
 
 func (f *fakeSecretBackend) HubID() string { return f.hubID }
 
+// HoldPending, ReadPending and DropPending satisfy secret.PendingHolder; the
+// fake holds no pending values.
+func (f *fakeSecretBackend) HoldPending(context.Context, string, []byte) (string, error) {
+	return "", secret.ErrPendingNotImplemented
+}
+
+func (f *fakeSecretBackend) ReadPending(context.Context, string) ([]byte, error) {
+	return nil, secret.ErrPendingNotImplemented
+}
+
+func (f *fakeSecretBackend) DropPending(context.Context, string) error { return nil }
+
 func (f *fakeSecretBackend) Get(_ context.Context, name, _, _ string) (*secret.SecretWithValue, error) {
 	v, ok := f.values[name]
 	if !ok {

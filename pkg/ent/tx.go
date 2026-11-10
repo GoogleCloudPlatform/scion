@@ -140,6 +140,8 @@ type Tx struct {
 	Notification *NotificationClient
 	// NotificationSubscription is the client for interacting with the NotificationSubscription builders.
 	NotificationSubscription *NotificationSubscriptionClient
+	// PendingSecret is the client for interacting with the PendingSecret builders.
+	PendingSecret *PendingSecretClient
 	// PolicyBinding is the client for interacting with the PolicyBinding builders.
 	PolicyBinding *PolicyBindingClient
 	// Project is the client for interacting with the Project builders.
@@ -397,6 +399,7 @@ func (tx *Tx) init() {
 	tx.NonceCache = NewNonceCacheClient(tx.config)
 	tx.Notification = NewNotificationClient(tx.config)
 	tx.NotificationSubscription = NewNotificationSubscriptionClient(tx.config)
+	tx.PendingSecret = NewPendingSecretClient(tx.config)
 	tx.PolicyBinding = NewPolicyBindingClient(tx.config)
 	tx.Project = NewProjectClient(tx.config)
 	tx.ProjectContributor = NewProjectContributorClient(tx.config)
