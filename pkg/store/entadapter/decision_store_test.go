@@ -668,6 +668,8 @@ func TestCreateChoicePrompt_InvalidInput(t *testing.T) {
 	cases := map[string]func(in *store.ChoicePromptInput){
 		"no message":          func(in *store.ChoicePromptInput) { in.Message = nil },
 		"no project":          func(in *store.ChoicePromptInput) { in.Message.ProjectID = "" },
+		"bad message id":      func(in *store.ChoicePromptInput) { in.Message.ID = "message-1" },
+		"bad project id":      func(in *store.ChoicePromptInput) { in.Message.ProjectID = "project-1" },
 		"bad agent":           func(in *store.ChoicePromptInput) { in.AskerAgentID = "agent-1" },
 		"no decisions":        func(in *store.ChoicePromptInput) { in.Decisions = nil },
 		"invalid key":         func(in *store.ChoicePromptInput) { in.Decisions[0].Key = "a b" },

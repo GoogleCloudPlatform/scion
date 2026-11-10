@@ -90,8 +90,12 @@ func validateChoicePromptInput(in *store.ChoicePromptInput) error {
 	if in == nil || in.Message == nil || in.Message.ID == "" || in.Message.ProjectID == "" {
 		return fmt.Errorf("%w: a choice prompt needs a message with an ID and a project", store.ErrInvalidInput)
 	}
-	if _, err := parseUUID(in.AskerAgentID); err != nil {
-		return err
+	// Every ID is a UUID column; a malformed one is refused here, before
+	// the transaction reserves numbers or replaces versions.
+	for _, id := range []string{in.Message.ID, in.Message.ProjectID, in.AskerAgentID} {
+		if _, err := parseUUID(id); err != nil {
+			return err
+		}
 	}
 	if len(in.Decisions) == 0 || len(in.Decisions) > messages.MaxDecisionsPerMessage {
 		return fmt.Errorf("%w: a choice prompt carries 1 to %d decisions", store.ErrInvalidInput, messages.MaxDecisionsPerMessage)
