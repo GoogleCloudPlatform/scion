@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -421,9 +422,16 @@ func (s *OAuthService) exchangeCodeForToken(ctx context.Context, tokenURL, clien
 		return nil, fmt.Errorf("token exchange failed: %d - %s", resp.StatusCode, upstreamText(string(body)))
 	}
 
+	// Read the body once, so a decode failure can be reported through
+	// tokenDecodeError.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, oauthResponseMaxBytes))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read token response: %w", err)
+	}
+
 	var tokenResp tokenResponse
-	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
-		return nil, fmt.Errorf("failed to decode token response: %w", err)
+	if err := json.Unmarshal(body, &tokenResp); err != nil {
+		return nil, tokenDecodeError(err, body)
 	}
 
 	return &tokenResp, nil
@@ -465,7 +473,7 @@ func (s *OAuthService) exchangeGitHubCodeForTokenWithConfig(ctx context.Context,
 
 	var tokenResp tokenResponse
 	if err := json.Unmarshal(body, &tokenResp); err != nil {
-		return nil, fmt.Errorf("failed to decode token response: %w", err)
+		return nil, tokenDecodeError(err, body)
 	}
 
 	if tokenResp.AccessToken == "" {
@@ -479,18 +487,75 @@ func (s *OAuthService) exchangeGitHubCodeForTokenWithConfig(ctx context.Context,
 // the hub reads into memory.
 const oauthResponseMaxBytes = 1 << 20
 
-// githubTokenErrorText renders the error fields of a GitHub token response
-// that carried no access token, through upstreamText. Only the error and
-// error_description fields are rendered, never the rest of the body.
+// githubTokenErrorText renders a GitHub token response that carried no
+// access token, through upstreamText. A JSON body with an error or
+// error_description field renders the non-empty fields only; any other body
+// (an HTML error page, plain text, or JSON without those fields) renders the
+// raw body, so a proxy or outage answer stays visible.
+//
+// Every caller's error reaches the server log only: the handlers answer the
+// client with fixed text (ptone/scion#7498).
 func githubTokenErrorText(body []byte) string {
 	var e struct {
 		Error            string `json:"error"`
 		ErrorDescription string `json:"error_description"`
+		AccessToken      string `json:"access_token"`
+		RefreshToken     string `json:"refresh_token"`
+		IDToken          string `json:"id_token"`
 	}
 	if err := json.Unmarshal(body, &e); err != nil || (e.Error == "" && e.ErrorDescription == "") {
-		return "no error field"
+		// A JSON body that carries a credential field but no error field is
+		// never rendered: the raw body would put the credential in the log.
+		if err == nil && (e.AccessToken != "" || e.RefreshToken != "" || e.IDToken != "") {
+			return "token response without an error field"
+		}
+		// A body that names a credential field in any other shape (JSON cut
+		// short or with trailing bytes, a malformed form body) is not
+		// rendered either.
+		if hasCredentialKey(body) {
+			return "token response naming a credential field"
+		}
+		return upstreamText(string(body))
 	}
-	return upstreamText(e.Error + ": " + e.ErrorDescription)
+	switch {
+	case e.Error == "":
+		return upstreamText(e.ErrorDescription)
+	case e.ErrorDescription == "":
+		return upstreamText(e.Error)
+	default:
+		return upstreamText(e.Error + ": " + e.ErrorDescription)
+	}
+}
+
+// formTokenBody reports whether body parses as form-urlencoded and carries a
+// credential field. GitHub answers a token request that way, with 200 and
+// the token, when it does not honour the Accept header.
+func formTokenBody(body []byte) bool {
+	v, _ := url.ParseQuery(string(body))
+	return v.Has("access_token") || v.Has("refresh_token") || v.Has("id_token")
+}
+
+// tokenDecodeError reports a token response body that did not decode as
+// JSON. A form-encoded body carrying a credential gets a fixed text, so the
+// credential never reaches an error or a log. Any other body is rendered
+// through githubTokenErrorText (ptone/scion#7498).
+func tokenDecodeError(err error, body []byte) error {
+	if formTokenBody(body) {
+		return errors.New("failed to decode token response: unexpected form-encoded body")
+	}
+	if hasCredentialKey(body) {
+		return errors.New("failed to decode token response: body names a credential field")
+	}
+	return fmt.Errorf("failed to decode token response: %w: %s", err, githubTokenErrorText(body))
+}
+
+// hasCredentialKey reports whether body names a credential field anywhere,
+// in any case and any format: JSON cut short by the read cap or followed by
+// trailing bytes, and form bodies that url.ParseQuery rejects, all fail the
+// decoders but can still carry a token.
+func hasCredentialKey(body []byte) bool {
+	b := strings.ToLower(string(body))
+	return strings.Contains(b, "access_token") || strings.Contains(b, "refresh_token") || strings.Contains(b, "id_token")
 }
 
 // googleUserInfo represents the response from Google's userinfo endpoint.
@@ -857,7 +922,7 @@ func (s *OAuthService) pollGoogleDeviceToken(ctx context.Context, cfg OAuthProvi
 	if resp.StatusCode == http.StatusOK {
 		var tokenResp tokenResponse
 		if err := json.Unmarshal(body, &tokenResp); err != nil {
-			return nil, fmt.Errorf("failed to decode token response: %w", err)
+			return nil, tokenDecodeError(err, body)
 		}
 		return &tokenResp, nil
 	}
@@ -915,7 +980,7 @@ func (s *OAuthService) pollGitHubDeviceToken(ctx context.Context, cfg OAuthProvi
 	if resp.StatusCode == http.StatusOK {
 		var tokenResp tokenResponse
 		if err := json.Unmarshal(body, &tokenResp); err != nil {
-			return nil, fmt.Errorf("failed to decode token response: %w", err)
+			return nil, tokenDecodeError(err, body)
 		}
 		if tokenResp.AccessToken == "" {
 			return nil, fmt.Errorf("no access token in response: %s", githubTokenErrorText(body))

@@ -153,7 +153,10 @@ func (c *TeamsChannel) Deliver(ctx context.Context, msg *messages.StructuredMess
 
 	resp, err := c.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("teams channel: send activity: %w", err)
+		// The transport error can carry the service URL and other remote
+		// text; ChannelRegistry.Dispatch logs it, so render it here
+		// (ptone/scion#7498). Nothing unwraps this error.
+		return fmt.Errorf("teams channel: send activity: %s", upstreamText(err.Error()))
 	}
 	defer func() {
 		_, _ = io.Copy(io.Discard, resp.Body)
@@ -163,7 +166,7 @@ func (c *TeamsChannel) Deliver(ctx context.Context, msg *messages.StructuredMess
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		resBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
 		return fmt.Errorf("teams channel: API returned status %d: %s",
-			resp.StatusCode, strings.TrimSpace(string(resBody)))
+			resp.StatusCode, upstreamText(strings.TrimSpace(string(resBody))))
 	}
 
 	return nil

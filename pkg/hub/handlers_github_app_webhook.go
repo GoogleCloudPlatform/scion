@@ -351,7 +351,7 @@ func (s *Server) handleGitHubAppSetup(w http.ResponseWriter, r *http.Request) {
 	// List repos for this installation
 	repos, err := client.ListInstallationRepos(ctx, installationID)
 	if err != nil {
-		slog.Warn("Failed to list installation repos", "error", err, "installation_id", installationID)
+		slog.Warn("Failed to list installation repos", "error", upstreamText(err.Error()), "installation_id", installationID)
 		// Continue without repos — we can still record the installation
 	}
 
@@ -428,7 +428,7 @@ func (s *Server) handleGitHubAppDiscover(w http.ResponseWriter, r *http.Request)
 		// Try to list repos for each installation
 		repos, err := client.ListInstallationRepos(ctx, ghInst.ID)
 		if err != nil {
-			slog.Warn("Failed to list repos for installation", "installation_id", ghInst.ID, "error", err)
+			slog.Warn("Failed to list repos for installation", "installation_id", ghInst.ID, "error", upstreamText(err.Error()))
 		}
 
 		repoNames := make([]string, len(repos))
@@ -705,8 +705,12 @@ func (s *Server) mintGitHubAppToken(ctx context.Context, project *store.Project)
 		} else if strings.Contains(err.Error(), "private key") || strings.Contains(err.Error(), "PEM") {
 			errorCode = githubapp.ErrCodePrivateKeyInvalid
 		}
+		// The stored status is shown to users: fixed text for the code; the
+		// error itself reaches only the log, rendered (ptone/scion#7498).
+		slog.ErrorContext(ctx, "GitHub App client unavailable", "project_id", project.ID,
+			"error_code", errorCode, "error", upstreamText(err.Error()))
 		s.updateProjectGitHubAppStatus(ctx, project, store.GitHubAppStateError,
-			errorCode, err.Error())
+			errorCode, githubAppStatusMessage(errorCode))
 		return "", "", err
 	}
 
@@ -728,11 +732,18 @@ func (s *Server) mintGitHubAppToken(ctx context.Context, project *store.Project)
 		// Classify the error and update project status
 		var mintErr *githubapp.TokenMintError
 		errorCode := githubapp.ErrCodeTokenMintFailed
-		errorMessage := err.Error()
+		errorMessage := githubAppStatusMessage(errorCode)
+		upstream := ""
 		if ok := isTokenMintError(err, &mintErr); ok {
 			errorCode = mintErr.ErrorCode
 			errorMessage = mintErr.Message
+			upstream = mintErr.UpstreamDetail()
 		}
+		// The stored status is shown to users: Message is fixed per code;
+		// GitHub's text and the error reach only the log, rendered
+		// (ptone/scion#7498).
+		slog.ErrorContext(ctx, "GitHub App token mint failed", "project_id", project.ID,
+			"error_code", errorCode, "error", upstreamText(err.Error()), "upstream", upstreamText(upstream))
 
 		state := store.GitHubAppStateError
 		if errorCode == githubapp.ErrCodePermissionDenied {
@@ -780,6 +791,21 @@ func (s *Server) updateProjectGitHubAppStatus(ctx context.Context, project *stor
 		slog.Warn("Failed to update project GitHub App status", "project_id", project.ID, "error", err)
 	} else {
 		s.events.PublishProjectUpdated(ctx, project)
+	}
+}
+
+// githubAppStatusMessage is the fixed project-status text stored for a
+// GitHub App failure that is not a TokenMintError (whose Message is already
+// fixed). The status is shown to users, so it never carries error or
+// upstream text (ptone/scion#7498).
+func githubAppStatusMessage(errorCode string) string {
+	switch errorCode {
+	case githubapp.ErrCodePrivateKeyInvalid:
+		return "The GitHub App private key is missing or invalid. Re-upload it in Admin > Server Config."
+	case githubapp.ErrCodeAppNotFound:
+		return "GitHub App not found — verify the App ID in Admin > Server Config > GitHub App."
+	default:
+		return "The GitHub App could not provide a token. See the hub log for details."
 	}
 }
 

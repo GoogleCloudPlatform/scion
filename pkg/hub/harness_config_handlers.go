@@ -1145,7 +1145,11 @@ func (s *Server) handleHarnessConfigValidate(w http.ResponseWriter, r *http.Requ
 	rs := s.harnessConfigStore(hc.Harness)
 	report, err := rs.ValidateStorage(ctx, rec)
 	if err != nil {
-		RuntimeError(w, fmt.Sprintf("validation failed: %v", err))
+		// The error can carry the storage object path and the wrapped
+		// backend error: log it rendered, answer fixed text
+		// (ptone/scion#7498).
+		slog.ErrorContext(ctx, "harness-config validation failed", "harness_config_id", hc.ID, "error", upstreamText(err.Error()))
+		RuntimeError(w, "validation failed")
 		return
 	}
 
