@@ -377,3 +377,85 @@ func TestReplyWaitKey_SameCallerOnly(t *testing.T) {
 		t.Fatalf("alice's call was refused after her earlier call ended")
 	}
 }
+
+// nilResultReader serves fakeReplyReader, except that each read flagged
+// here answers once with neither a result nor an error.
+type nilResultReader struct {
+	*fakeReplyReader
+	nilList, nilGet, nilPage bool
+}
+
+func (r *nilResultReader) List(ctx context.Context, opts *hubclient.ListConversationsOptions) (*hubclient.ConversationListResult, error) {
+	if r.nilList {
+		r.nilList = false
+		return nil, nil
+	}
+	return r.fakeReplyReader.List(ctx, opts)
+}
+
+func (r *nilResultReader) GetMessage(ctx context.Context, conversationID, messageID string) (*hubstore.Message, error) {
+	if r.nilGet {
+		r.nilGet = false
+		return nil, nil
+	}
+	return r.fakeReplyReader.GetMessage(ctx, conversationID, messageID)
+}
+
+func (r *nilResultReader) ListMessages(ctx context.Context, conversationID string, opts *hubclient.ConversationMessagesOptions) (*hubstore.ListResult[hubstore.Message], error) {
+	if r.nilPage {
+		r.nilPage = false
+		return nil, nil
+	}
+	return r.fakeReplyReader.ListMessages(ctx, conversationID, opts)
+}
+
+// TestReplyPoll_NilReadResultIsRetried: a conversation read that returns
+// neither a result nor an error (the conversation list, the anchor, or a
+// message page) is a failed read: the poll reports pollError, which is
+// retried, not "not listed" or "not yet", and the next poll finds the
+// reply. The preflight goes on to the send after a list with no result.
+func TestReplyPoll_NilReadResultIsRetried(t *testing.T) {
+	const dm = "dm:agent:agent-uuid-1:user:caller-uuid"
+	newReader := func() *fakeReplyReader {
+		return &fakeReplyReader{
+			conversations: []hubclient.ConversationDetail{
+				{Conversation: hubstore.Conversation{ID: "conv-1", Kind: "direct"},
+					DMPeer: &hubclient.ConversationPeer{Kind: "agent", ID: pollTestAgentID}},
+			},
+			byID: map[string]hubstore.Message{pollTestAnchorID: anchorRow()},
+			page: []hubstore.Message{
+				dmRow("reply-msg", pollTestAgentID, messages.TypeInstruction, dm, "the polled answer", 2*time.Second),
+				anchorRow(),
+			},
+		}
+	}
+	for _, tc := range []struct {
+		name   string
+		reader *nilResultReader
+	}{
+		{"conversation list", &nilResultReader{fakeReplyReader: newReader(), nilList: true}},
+		{"anchor", &nilResultReader{fakeReplyReader: newReader(), nilGet: true}},
+		{"message page", &nilResultReader{fakeReplyReader: newReader(), nilPage: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b, _ := newLifecycleTestBridge(t)
+			p := newReplyPoller(b, tc.reader, "nil-read-task", "helper", pollTestAgentID, pollTestAnchorID, "", nil)
+			ctx := context.Background()
+			if outcome, msg := p.pollOnce(ctx); outcome != pollError || msg != nil {
+				t.Fatalf("first poll = (%q, %v), want (%q, nil)", outcome, msg, pollError)
+			}
+			outcome, msg := p.pollOnce(ctx)
+			if outcome != pollFound || msg == nil || msg.ID != "reply-msg" {
+				t.Fatalf("second poll = (%q, %v), want the reply", outcome, msg)
+			}
+		})
+	}
+
+	t.Run("preflight conversation list", func(t *testing.T) {
+		r := &nilResultReader{fakeReplyReader: newReader(), nilList: true}
+		id, refusal := replyPreflight(context.Background(), r, pollTestAgentID, time.Now())
+		if id != "" || refusal != "" {
+			t.Fatalf("preflight = (%q, %q), want (\"\", \"\"): no refusal, the poll lists again", id, refusal)
+		}
+	})
+}
