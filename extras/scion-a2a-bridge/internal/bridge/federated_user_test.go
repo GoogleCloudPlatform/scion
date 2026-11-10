@@ -373,6 +373,9 @@ type fedUserHub struct {
 	dmReadSeq []int
 	// dmMessages is the conversation page the reads answer, newest first.
 	dmMessages []map[string]interface{}
+	// dmNullReads is the number of next conversation reads answered 200
+	// with a JSON null body, after the dmReadSeq and dmReadStatus answers.
+	dmNullReads int
 
 	// visitorConvStatus answers /api/v1/conversations* requests that carry
 	// a federation credential, as the hub refuses a visitor there; 0: 404,
@@ -508,6 +511,12 @@ func newFedUserHub(t *testing.T, userToken string) *fedUserHub {
 			}
 			if status != 0 {
 				writeHubError(w, status)
+				return
+			}
+			if h.dmNullReads > 0 {
+				h.dmNullReads--
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, "null")
 				return
 			}
 			page, next, ok := fedUserDMPage(h.dmMessages, r.URL.Query())

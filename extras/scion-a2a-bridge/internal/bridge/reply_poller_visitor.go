@@ -73,15 +73,21 @@ func newVisitorDMReader(b *Bridge, caller *CallerIdentity, agentID string) (*vis
 
 // page reads one newest-first page of up to replyPollPageSize messages,
 // from cursor ("" for the newest page). It is the poller's page read
-// (replyPageFetch).
+// (replyPageFetch). A 200 answer of JSON null carries no page and is a
+// failed read (errNoReadResult), as for a local caller's reader, never an
+// empty page: an empty page is the hub's answer for a conversation with no
+// messages, which this was not.
 func (r *visitorDMReader) page(ctx context.Context, cursor string) ([]hubstore.Message, string, error) {
 	query := url.Values{"limit": []string{strconv.Itoa(replyPollPageSize)}}
 	if cursor != "" {
 		query.Set("cursor", cursor)
 	}
-	var page visitorDMPage
+	var page *visitorDMPage
 	if err := r.bridge.federatedUserGet(ctx, r.caller, r.path, query, &page); err != nil {
 		return nil, "", err
+	}
+	if page == nil {
+		return nil, "", errNoReadResult
 	}
 	return page.Messages, page.NextCursor, nil
 }
@@ -95,8 +101,8 @@ func (r *visitorDMReader) check(ctx context.Context) error {
 
 // visitorReadOutcome maps a failed read of a federated user's conversation
 // to its outcome: a hub refusal (401, 403 or 404) is the uniform refusal;
-// anything else (503 and other 5xx, transport errors and timeouts) is
-// retried until the deadline. The conversation exists once the send has
+// anything else (503 and other 5xx, transport errors and timeouts, a read
+// with no result) is retried until the deadline. The conversation exists once the send has
 // returned, and a never-used one answers 200 with no messages, so a 404 is
 // a refusal here too.
 func visitorReadOutcome(err error) pollOutcome {

@@ -579,3 +579,41 @@ func TestExecutor_FederatedUserPolledWaitIgnoresAppendedPushEvent(t *testing.T) 
 		t.Fatalf("task log response events: appended at %d, polled at %d; want the appended event before the polled reply", appendedAt, polledAt)
 	}
 }
+
+// TestReplyPoll_VisitorNullPageIsRetried: a read of the federated user's
+// conversation that the hub answers 200 with a JSON null body carries no
+// page. The poll reports it as a failed read (pollError), retried, not as
+// an empty page ("anchor not seen"), and the next poll finds the reply. The
+// preflight's access read decodes nothing, so a null answer passes it.
+func TestReplyPoll_VisitorNullPageIsRetried(t *testing.T) {
+	token := fedUserToken(t)
+	hub := newFedUserHub(t, token)
+	b, _, _ := newFedUserTestServer(t, hub)
+	caller := &CallerIdentity{TokenType: "federation", Subject: fedUserSubject, IssuerURL: fedUserIssuer, UserID: fedUserAccountID, RawToken: token}
+	r, err := newVisitorDMReader(b, caller, fedUserAgentID)
+	if err != nil {
+		t.Fatalf("newVisitorDMReader: %v", err)
+	}
+	ctx := context.Background()
+
+	hub.set(func(h *fedUserHub) { h.dmNullReads = 1 })
+	if refusal := visitorReplyPreflight(ctx, r); refusal != "" {
+		t.Fatalf("preflight on a null answer = %q, want no refusal", refusal)
+	}
+
+	hub.set(func(h *fedUserHub) {
+		h.dmMessages = visitorDMRows(fedUserReplyText)
+		h.dmNullReads = 1
+	})
+	p := newVisitorReplyPoller(b, r, "visitor-null-task", "agent1", fedUserAgentID, "msg-1", nil)
+	if outcome, msg := p.pollOnce(ctx); outcome != pollError || msg != nil {
+		t.Fatalf("poll on a null answer = (%q, %v), want (%q, nil)", outcome, msg, pollError)
+	}
+	outcome, msg := p.pollOnce(ctx)
+	if outcome != pollFound || msg == nil || msg.ID != "reply-1" {
+		t.Fatalf("next poll = (%q, %v), want the reply", outcome, msg)
+	}
+	if n := len(hub.snapshot().dmReadKeys); n != 3 {
+		t.Errorf("conversation reads = %d, want 3 (preflight, null poll, poll)", n)
+	}
+}
