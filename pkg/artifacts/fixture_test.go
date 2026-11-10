@@ -388,15 +388,6 @@ func sha(b []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func errCode(t *testing.T, rec *httptest.ResponseRecorder) string {
-	t.Helper()
-	var e errorResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &e); err != nil {
-		t.Fatalf("not a JSON error (%d): %q", rec.Code, rec.Body.String())
-	}
-	return e.Error.Code
-}
-
 // allowSteward makes StewardClause answer clause for u on artifacts owned
 // by agent homed in scope.
 func (h *fakeHost) allowSteward(u principal, agent, scope, clause string) {

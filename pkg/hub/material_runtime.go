@@ -259,19 +259,20 @@ func (s *Server) authorizeRuntimeProjectItem(ctx context.Context, key string, fa
 //
 // After the metadata and AllowProgeny checks, the item is authorized by
 // the agent's delegation chain (userSecretChainVerdict, for the request's
-// agent identity ident):
+// agent identity ident), computed once per item:
 //   - a chain with recorded provenance is authorized by
 //     Decide(secret.use, ActionUse) on the item with ident, whose step 10
-//     applies the user-scope secret parent ceiling;
+//     applies the user-scope secret parent ceiling to the verdict computed
+//     here (AuthzRequest.userSecretChain), not to a second one;
 //   - a chain without recorded provenance (no active edge, more than one,
 //     the migration sentinel, an unrecorded or unreadable hop, an edge whose
-//     principal does not type-check) is authorized by the progeny
-//     relationship check alone (CheckProgenyAccess).
+//     principal does not type-check) cannot be fully evaluated and is
+//     refused (chain_unrecorded), with one rate-limited Warn per agent.
+//     Re-delegating the agent records its chain.
 //
 // The chain verdict stops at its first failing clause, so a recorded hop
-// below an unrecorded one is still enforced: when that recorded hop fails,
-// the chain is refused here, not sent to the progeny rule
-// (userSecretChain.unrecorded).
+// below an unrecorded one denies with its own cause; a chain that reaches
+// an unrecorded hop is refused whatever the recorded hops above it allow.
 //
 // Source liveness then applies to both.
 func (s *Server) authorizeRuntimeUserItem(ctx context.Context, ident AgentIdentity, facts *TargetFacts, key string) ItemResult {
@@ -321,22 +322,16 @@ func (s *Server) authorizeRuntimeUserItem(ctx context.Context, ident AgentIdenti
 	case chain.decision.DenyCause == DenyCauseCeilingError:
 		return ItemResult{Candidate: cand, Reason: ReasonBackendError}
 	case !chain.decision.Allowed && chain.unrecorded:
-		grant := s.authzService.relationshipResolver.CheckProgenyAccess(
-			ctx,
-			&storedAgentIdentity{agent: facts.Agent},
-			resource,
-			ActionRead,
-		)
-		if !grant.Allowed {
-			return ItemResult{Candidate: cand, Reason: ReasonDeniedByPolicy}
-		}
+		s.warnUnrecordedChainRefusal(ctx, "read", ident.ID(), chain)
+		return ItemResult{Candidate: cand, Reason: ReasonChainUnrecorded}
 	default:
 		decision := s.authzService.Decide(ctx, AuthzRequest{
-			Principal:  principalContextForIdentity(ident),
-			Credential: credentialContextForIdentity(ident),
-			Resource:   resource,
-			Action:     ActionUse,
-			Permission: secretUsePermission,
+			Principal:       principalContextForIdentity(ident),
+			Credential:      credentialContextForIdentity(ident),
+			Resource:        resource,
+			Action:          ActionUse,
+			Permission:      secretUsePermission,
+			userSecretChain: newPrecomputedUserSecretChain(ident, chain),
 		})
 		if !decision.Allowed {
 			// The read is refused and the agent sees denied_by_policy or
@@ -357,6 +352,13 @@ func (s *Server) authorizeRuntimeUserItem(ctx context.Context, ident AgentIdenti
 		}
 	}
 
+	// Source liveness. On this path it is defence in depth: a recorded chain
+	// admits only rows whose recorded author is their owner, the root user
+	// (the parent ceiling's source check), and that user's activity is
+	// already required by the precheck and the chain verdict; an
+	// agent-authored row is refused by Decide before this point, and an
+	// unrecorded chain is refused above. The agent secret list evaluates
+	// liveness before its source check.
 	live, kind, liveReason, liveErr := s.progenySourceLive(ctx, *meta)
 	if kind != "" {
 		cand.SharingSource = &SourceRef{Kind: kind, ID: meta.CreatedBy}
@@ -398,6 +400,22 @@ func (s *Server) fetchAuthorizedValue(ctx context.Context, item ItemResult) (*se
 // userSecretWithheldWarnInterval is the shortest gap between two Warn lines
 // for the same user secret withheld from the same agent for the same cause.
 const userSecretWithheldWarnInterval = 10 * time.Minute
+
+// warnUnrecordedChainRefusal logs, at Warn and rate limited per agent, a
+// user-scope runtime read or list refused because the agent's delegation
+// chain has no recorded provenance, so operators can find the agents that
+// need re-delegation. It names the agent, the path and the chain's deny
+// cause and reason, never a key or a value.
+func (s *Server) warnUnrecordedChainRefusal(ctx context.Context, path, agentID string, chain userSecretChain) {
+	record, suppressed := s.userSecretWithheldWarnLimiter().admit(agentID+"/"+ReasonChainUnrecorded, ReasonChainUnrecorded)
+	if !record {
+		return
+	}
+	slog.WarnContext(ctx, "runtime user secret refused: the agent's delegation chain is not recorded; re-delegate the agent to record it",
+		"path", path, "agent_id", agentID, "reason", ReasonChainUnrecorded,
+		"deny_cause", string(chain.decision.DenyCause), "detail", chain.decision.Reason,
+		"suppressed_since_last", suppressed)
+}
 
 func newUserSecretWithheldLimiter() *hookRefusalLimiter {
 	return newHookRefusalLimiter(userSecretWithheldWarnInterval, time.Now)

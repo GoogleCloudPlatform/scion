@@ -63,7 +63,10 @@ steps:
   - name: 'gcr.io/cloud-builders/docker'
     id: 'push-core-base'
     dir: 'image-build'
+    entrypoint: 'bash'
     args:
+      - '/workspace/image-build/scripts/buildx-record-digest.sh'
+      - '$_REGISTRY/core-base:$_TAG'
       - 'buildx'
       - 'build'
       - '--platform'

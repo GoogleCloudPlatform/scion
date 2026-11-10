@@ -40,11 +40,12 @@ import (
 // goroutine the call started has finished: a record that was going to be
 // written has been written, and its absence is not a matter of timing.
 //
-// The call runs under a context carrying the suspending user's identity, as
-// the suspend handler's request context does: a mutation audit record needs
-// an actor (actor_principal_kind and actor_principal_id are NotEmpty in the
-// schema), so under a bare context.Background() no record could ever be
-// written and the tests would prove nothing.
+// Each test runs on both suspend paths (suspendRevokeCallers). The suspend
+// route's call carries the suspending user's identity, as its request
+// context does. The scheduler's auto-suspend carries no principal, so the
+// record names the system actor: a mutation audit record needs an actor
+// (actor_principal_kind and actor_principal_id are NotEmpty in the schema),
+// and without one the write would fail and leave only a warning.
 
 var errSuspendRevokeFault = errors.New("injected suspend revoke fault")
 
@@ -95,7 +96,32 @@ func setupSuspendRevokeAuditTest(t *testing.T, n int) *suspendRevokeFixture {
 	return &suspendRevokeFixture{srv: srv, s: s, user: user, agentID: agentID, tokens: tokens, fault: fault}
 }
 
-// runSuspendRevoke calls revokeSuspendedCredentials as f.user in a synctest
+// suspendRevokeCallers are the two suspend paths' calls of
+// revokeSuspendedCredentials, each with the actor its record must name.
+var suspendRevokeCallers = []struct {
+	name string
+	// ctx builds the caller's context; it runs outside the bubble.
+	ctx func(f *suspendRevokeFixture) context.Context
+	// actor is the record's expected principal kind and ID.
+	actor func(f *suspendRevokeFixture) (kind, id string)
+}{
+	{
+		name: "suspend",
+		ctx: func(f *suspendRevokeFixture) context.Context {
+			identity := NewAuthenticatedUser(f.user.ID, f.user.Email, f.user.DisplayName, f.user.Role, "api")
+			return contextWithIdentity(context.Background(), identity)
+		},
+		actor: func(f *suspendRevokeFixture) (string, string) { return "user", f.user.ID },
+	},
+	{
+		// The scheduler's context: no request principal.
+		name:  "auto-suspend",
+		ctx:   func(*suspendRevokeFixture) context.Context { return context.Background() },
+		actor: func(*suspendRevokeFixture) (string, string) { return mintAuditSystemActorKind, mintAuditSystemActorID },
+	},
+}
+
+// runSuspendRevoke calls revokeSuspendedCredentials under ctx in a synctest
 // bubble and returns once every goroutine it started (the audit write) has
 // finished. It also returns what was logged through the default slog logger
 // meanwhile.
@@ -107,17 +133,13 @@ func setupSuspendRevokeAuditTest(t *testing.T, n int) *suspendRevokeFixture {
 // or block durably, letting synctest.Wait return before the audit write.
 // Setup is synchronous and the test server starts no background services,
 // so nothing outside the bubble touches the store here.
-func runSuspendRevoke(t *testing.T, f *suspendRevokeFixture) string {
+func runSuspendRevoke(t *testing.T, f *suspendRevokeFixture, ctx context.Context) string {
 	t.Helper()
 	logs := &syncBuffer{}
 	prev := slog.Default()
 	slog.SetDefault(slog.New(slog.NewJSONHandler(logs, nil)))
 	t.Cleanup(func() { slog.SetDefault(prev) })
 
-	// The suspending user's identity, as the suspend handler's request
-	// context carries it; built outside the bubble.
-	identity := NewAuthenticatedUser(f.user.ID, f.user.Email, f.user.DisplayName, f.user.Role, "api")
-	ctx := contextWithIdentity(context.Background(), identity)
 	synctest.Test(t, func(t *testing.T) {
 		f.srv.revokeSuspendedCredentials(ctx, f.agentID)
 		synctest.Wait()
@@ -159,12 +181,20 @@ func assertCredentialsRevoked(t *testing.T, srv *Server, s store.Store, tokens [
 // TestSuspendRevokeFailureRecordsNoRevokeAudit: a failed suspend revoke
 // keeps its warning and writes no agent_credential_revoke record.
 func TestSuspendRevokeFailureRecordsNoRevokeAudit(t *testing.T) {
-	f := setupSuspendRevokeAuditTest(t, 2)
-	require.Empty(t, suspendRevokeAudits(t, f.s, f.agentID), "setup must not record a revoke")
+	for _, c := range suspendRevokeCallers {
+		t.Run(c.name, func(t *testing.T) {
+			f := setupSuspendRevokeAuditTest(t, 2)
+			require.Empty(t, suspendRevokeAudits(t, f.s, f.agentID), "setup must not record a revoke")
 
-	f.fault.Arm()
-	logs := runSuspendRevoke(t, f)
+			f.fault.Arm()
+			logs := runSuspendRevoke(t, f, c.ctx(f))
+			assertSuspendRevokeFailure(t, f, logs)
+		})
+	}
+}
 
+func assertSuspendRevokeFailure(t *testing.T, f *suspendRevokeFixture, logs string) {
+	t.Helper()
 	assert.Empty(t, suspendRevokeAudits(t, f.s, f.agentID),
 		"a failed revoke must not be recorded as a committed agent_credential_revoke")
 	assertCredentialsRevoked(t, f.srv, f.s, f.tokens, false)
@@ -194,22 +224,35 @@ func TestSuspendRevokeFailureRecordsNoRevokeAudit(t *testing.T) {
 
 // TestSuspendRevokeSuccessRecordsOneRevokeAudit: a successful suspend revoke
 // revokes every credential of the agent and writes exactly one
-// agent_credential_revoke record for it, with its existing fields.
+// agent_credential_revoke record for it, with its existing fields, naming
+// the suspending user, or the system actor for the auto-suspend.
 func TestSuspendRevokeSuccessRecordsOneRevokeAudit(t *testing.T) {
-	f := setupSuspendRevokeAuditTest(t, 2)
-	require.Empty(t, suspendRevokeAudits(t, f.s, f.agentID), "setup must not record a revoke")
+	for _, c := range suspendRevokeCallers {
+		t.Run(c.name, func(t *testing.T) {
+			f := setupSuspendRevokeAuditTest(t, 2)
+			require.Empty(t, suspendRevokeAudits(t, f.s, f.agentID), "setup must not record a revoke")
 
-	logs := runSuspendRevoke(t, f)
+			logs := runSuspendRevoke(t, f, c.ctx(f))
+			kind, id := c.actor(f)
+			assertSuspendRevokeSuccess(t, f, logs, kind, id)
+		})
+	}
+}
 
+func assertSuspendRevokeSuccess(t *testing.T, f *suspendRevokeFixture, logs, wantKind, wantID string) {
+	t.Helper()
 	assertCredentialsRevoked(t, f.srv, f.s, f.tokens, true)
 	recs := suspendRevokeAudits(t, f.s, f.agentID)
 	require.Len(t, recs, 1, "a successful revoke must be recorded exactly once")
 	assert.Equal(t, "agent_credential_revoke", recs[0].MutationType)
 	assert.Equal(t, "agent_credential", recs[0].TargetType)
 	assert.Equal(t, f.agentID, recs[0].TargetID)
-	assert.Equal(t, "user", recs[0].ActorPrincipalKind)
-	assert.Equal(t, f.user.ID, recs[0].ActorPrincipalID, "the record names the suspending user")
+	assert.Equal(t, wantKind, recs[0].ActorPrincipalKind)
+	assert.Equal(t, wantID, recs[0].ActorPrincipalID, "the record names the suspending actor")
 	assert.NotContains(t, logs, "Failed to revoke agent credentials on suspend")
 	assert.NotContains(t, logs, "failed to emit mutation audit record",
 		"the audit write must not fail silently")
+	for i, token := range f.tokens {
+		assert.NotContains(t, logs, token, "token %d must not appear in the logs", i)
+	}
 }

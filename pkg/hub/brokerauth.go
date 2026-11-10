@@ -911,9 +911,10 @@ func applyBrokerJoinRequest(broker *store.RuntimeBroker, req BrokerJoinRequest, 
 
 // GenerateAndStoreSecret returns the broker's stored HMAC secret, or
 // generates and stores one when there is none. Its callers are in-process
-// (the co-located, flat-host and plugin brokers), which share one key
-// across restarts and instances; a response to a remote caller uses MintSecretIfAbsent
-// instead, which never returns a stored secret.
+// (the co-located and plugin brokers), which share one key across
+// restarts and instances; the co-located flat Runtime Broker activation
+// uses ReplaceBrokerSecret instead, and a response to a remote caller uses
+// MintSecretIfAbsent, which never returns a stored secret.
 // Returns the base64-encoded secret key.
 func (s *BrokerAuthService) GenerateAndStoreSecret(ctx context.Context, brokerID string) (string, error) {
 	if brokerID == "" {
@@ -944,6 +945,43 @@ func (s *BrokerAuthService) GenerateAndStoreSecret(ctx context.Context, brokerID
 
 	if err := s.store.CreateBrokerSecret(ctx, brokerSecret); err != nil {
 		return "", fmt.Errorf("failed to store broker secret: %w", err)
+	}
+
+	return base64.StdEncoding.EncodeToString(secretKey), nil
+}
+
+// ReplaceBrokerSecret generates a new HMAC secret for brokerID and installs
+// it in place of any stored one, in one transaction: before the commit only
+// the prior secret verifies, after it only the new one, and a failed
+// replacement rolls back and leaves the prior secret as it was. Unlike
+// GenerateAndStoreSecret it never returns a stored secret. The co-located
+// flat Runtime Broker calls it on every activation, so a secret saved
+// earlier stops verifying from the first co-located start.
+// Returns the base64-encoded new secret key.
+func (s *BrokerAuthService) ReplaceBrokerSecret(ctx context.Context, brokerID string) (string, error) {
+	if brokerID == "" {
+		return "", errors.New("brokerId is required")
+	}
+
+	secretKey := make([]byte, s.config.SecretKeyLength)
+	if _, err := rand.Read(secretKey); err != nil {
+		return "", fmt.Errorf("failed to generate secret key: %w", err)
+	}
+
+	err := s.store.WithTx(ctx, func(tx store.Store) error {
+		if err := tx.DeleteBrokerSecret(ctx, brokerID); err != nil && !errors.Is(err, store.ErrNotFound) {
+			return fmt.Errorf("failed to remove prior broker secret: %w", err)
+		}
+		return tx.CreateBrokerSecret(ctx, &store.BrokerSecret{
+			BrokerID:  brokerID,
+			SecretKey: secretKey,
+			Algorithm: store.BrokerSecretAlgorithmHMACSHA256,
+			CreatedAt: time.Now(),
+			Status:    store.BrokerSecretStatusActive,
+		})
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to replace broker secret: %w", err)
 	}
 
 	return base64.StdEncoding.EncodeToString(secretKey), nil

@@ -17,7 +17,6 @@ package hub
 import (
 	"context"
 	"errors"
-	"fmt"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -113,36 +112,4 @@ func (s *Server) progenySourceLive(ctx context.Context, meta secret.SecretMeta) 
 		return false, "agent", ReasonSourceInactive, nil
 	}
 	return true, "agent", ReasonAllowed, nil
-}
-
-// progenyEligibleSecretIDs makes one store.ListProgenySecrets call per
-// request and returns the set of secret IDs eligible for the agent's
-// ancestry. It applies the same preconditions as CheckProgenyAccess (a
-// non-nil rec; stored, hub-attested identity; non-empty ancestry; a non-nil
-// store) and is used only to filter metadata for agentListSecrets — by-key
-// reads (check 8) still call CheckProgenyAccess per item. A nil rec denies
-// with an empty set rather than panicking; callers do not pass one today.
-func (s *Server) progenyEligibleSecretIDs(ctx context.Context, rec *store.Agent) (map[string]bool, error) {
-	if rec == nil {
-		return map[string]bool{}, nil
-	}
-	ident := &storedAgentIdentity{agent: rec}
-	if !AncestryIsHubAttested(ident) {
-		return map[string]bool{}, nil
-	}
-	if len(rec.Ancestry) == 0 {
-		return map[string]bool{}, nil
-	}
-	if s.store == nil {
-		return nil, fmt.Errorf("store not available (fail-closed)")
-	}
-	secrets, err := s.store.ListProgenySecrets(ctx, rec.Ancestry)
-	if err != nil {
-		return nil, err
-	}
-	ids := make(map[string]bool, len(secrets))
-	for _, sec := range secrets {
-		ids[sec.ID] = true
-	}
-	return ids, nil
 }

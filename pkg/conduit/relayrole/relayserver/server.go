@@ -138,6 +138,9 @@ type Config struct {
 	RecheckInterval time.Duration
 	ReconnectWindow time.Duration
 	LifetimeCap     time.Duration
+	// JitterLifetimeCap is relay.Config.JitterLifetimeCap: the per-session
+	// jitter of LifetimeCap (nil: none; ptone/scion#5245).
+	JitterLifetimeCap func(time.Duration) time.Duration
 	// RequireSelfCheck makes the relay probe its own internal endpoint at
 	// start (HA deployments).
 	RequireSelfCheck bool
@@ -360,7 +363,9 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		ReconnectWindow: cfg.ReconnectWindow,
 		LifetimeCap:     cfg.LifetimeCap,
 		Clock:           cfg.Clock,
-		Logger:          log,
+		// Per-session jitter of the cap (ptone/scion#5245).
+		JitterLifetimeCap: cfg.JitterLifetimeCap,
+		Logger:            log,
 	})
 	if err != nil {
 		_ = s.internal.Close()

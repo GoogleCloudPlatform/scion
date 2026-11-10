@@ -40,15 +40,17 @@ import (
 )
 
 // flatTestHub returns a Hub server over s with hub.flat_runtime_brokers set
-// as requested.
+// as requested. Broker HMAC authentication is on, as in production, so a
+// co-located activation gets its replaced secret.
 func flatTestHub(t *testing.T, s store.Store, experimentOn bool) *hub.Server {
 	t.Helper()
 	ctx := context.Background()
 	_, err := s.UpsertHubSetting(ctx, "experiments",
 		json.RawMessage(fmt.Sprintf(`{"overrides":{%q:%t}}`, experiments.FlatRuntimeBrokers, experimentOn)), "test", -1, "managed")
 	require.NoError(t, err)
-	srv, err := hub.New(hub.ServerConfig{}, s)
+	srv, err := hub.New(hub.ServerConfig{BrokerAuthConfig: hub.DefaultBrokerAuthConfig()}, s)
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 	ops := hub.NewOperationalSettings(s, koanf.New("."), koanf.New("."))
 	_, err = ops.Refresh(ctx)
 	require.NoError(t, err)

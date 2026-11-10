@@ -332,7 +332,7 @@ func (r *PodmanRuntime) List(ctx context.Context, labelFilter map[string]string)
 }
 
 func (r *PodmanRuntime) GetLogs(ctx context.Context, id string) (string, error) {
-	return runSimpleCommand(ctx, r.Command, "logs", id)
+	return runCombinedCommand(ctx, r.Command, "logs", id)
 }
 
 func (r *PodmanRuntime) Attach(ctx context.Context, id string) error {
@@ -431,7 +431,7 @@ func (r *PodmanRuntime) Exec(ctx context.Context, id string, cmd []string) (stri
 		id = resolveContainerID(agents, id)
 	}
 	args := append([]string{"exec", "--user", r.ExecUser(), id}, cmd...)
-	out, err := runSimpleCommand(ctx, r.Command, args...)
+	out, err := runCombinedCommand(ctx, r.Command, args...)
 	// A container removed after the lookup above must surface as
 	// ErrContainerNotFound, not as the command's exit (ptone/scion#3655).
 	return out, podmanExecNotFound.classifyExecErr(ctx, err, out, id, r.List)

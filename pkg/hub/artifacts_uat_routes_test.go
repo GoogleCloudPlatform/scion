@@ -43,7 +43,10 @@ import (
 // read, or bounded to another project, gets 404 as for a missing artifact;
 // a token that can read but lacks artifact manage (manage routes) or
 // artifact create (version writes) gets 403; a token with them is allowed.
-// It is the pin of the catalog's bearer disposition for these routes.
+// The review-session routes (PUT and DELETE review-sessions, with
+// hub.artifacts_open_review_check on; ptone/scion#6849) are bounded the
+// same way as the version writes. It is the pin of the catalog's bearer
+// disposition for these routes.
 func TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded(t *testing.T) {
 	srv, s := testServer(t)
 	enableArtifactsForTest(t, srv)
@@ -140,6 +143,25 @@ func TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded(t *testing.T)
 	check("artifact:create", create, http.MethodPut, vbase+"/files/index.html", v2, http.StatusNoContent)
 	refused(http.MethodPost, vbase+"/finalize", nil, true)
 	check("artifact:create", create, http.MethodPost, vbase+"/finalize", nil, http.StatusOK)
+
+	// Review sessions, with hub.artifacts_open_review_check on: refused like
+	// a version write, and the admitted token (artifact:read and
+	// artifact:create, the write check of artifact.version.create) reaches
+	// the handler: PUT with an empty body gets its 400 (base must be a
+	// published version) and records nothing, DELETE with no session gets 204.
+	setOpenReviewCheckForTest(t, srv, true)
+	spath := base + "/review-sessions/uatr-tab-0123456789abcdef"
+	for _, r := range []struct {
+		method  string
+		body    []byte
+		allowed int
+	}{
+		{http.MethodPut, []byte(`{}`), http.StatusBadRequest},
+		{http.MethodDelete, nil, http.StatusNoContent},
+	} {
+		refused(r.method, spath, r.body, true)
+		check("artifact:create", create, r.method, spath, r.body, r.allowed)
+	}
 
 	// The archive route answers 404 to everyone while hub.artifact_archive
 	// is off, the owner's session included.

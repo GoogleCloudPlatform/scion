@@ -118,7 +118,7 @@ Commands:
   hubs         List hub connections
   provide      Add this broker as a provider for a project
   withdraw     Remove this broker as a provider from a project
-  convert      Plan a move to flat Runtime Brokers (read-only, experimental)`,
+  convert      Plan, apply or roll back a move to flat Runtime Brokers (experimental)`,
 }
 
 // brokerRegisterCmd registers this broker with the Hub

@@ -800,7 +800,8 @@ func (s *Server) handleHarnessConfigUpload(w http.ResponseWriter, r *http.Reques
 		if writeInvalidFilePathError(w, err) {
 			return
 		}
-		RuntimeError(w, "Failed to generate upload URLs: "+err.Error())
+		slog.ErrorContext(ctx, "harness-config upload URLs failed", "harness_config_id", hc.ID, "error", upstreamText(err.Error()))
+		RuntimeError(w, "Failed to generate upload URLs")
 		return
 	}
 	if len(uploadURLs) == 0 && len(req.Files) > 0 {
@@ -1108,7 +1109,8 @@ func (s *Server) handleHarnessConfigDownload(w http.ResponseWriter, r *http.Requ
 	// lands while the client downloads.
 	downloadURLs, manifestURL, expires, err := s.generateHarnessConfigDownloadURLs(ctx, stor, hc)
 	if err != nil {
-		RuntimeError(w, fmt.Sprintf("harness-config %q: %s — run 'scion harness-config validate %s' to diagnose", hc.Name, err, hc.Name))
+		slog.ErrorContext(ctx, "harness-config download URLs failed", "harness_config_id", hc.ID, "error", upstreamText(err.Error()))
+		RuntimeError(w, fmt.Sprintf("harness-config %q: failed to generate download URLs — run 'scion harness-config validate %s' to diagnose", hc.Name, hc.Name))
 		return
 	}
 
@@ -1143,7 +1145,11 @@ func (s *Server) handleHarnessConfigValidate(w http.ResponseWriter, r *http.Requ
 	rs := s.harnessConfigStore(hc.Harness)
 	report, err := rs.ValidateStorage(ctx, rec)
 	if err != nil {
-		RuntimeError(w, fmt.Sprintf("validation failed: %v", err))
+		// The error can carry the storage object path and the wrapped
+		// backend error: log it rendered, answer fixed text
+		// (ptone/scion#7498).
+		slog.ErrorContext(ctx, "harness-config validation failed", "harness_config_id", hc.ID, "error", upstreamText(err.Error()))
+		RuntimeError(w, "validation failed")
 		return
 	}
 

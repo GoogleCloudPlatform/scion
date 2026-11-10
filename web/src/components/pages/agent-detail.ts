@@ -188,6 +188,18 @@ function formatDurationHMS(totalSeconds: number): string {
   return parts.join(' ');
 }
 
+/**
+ * A stored config limit as Limits card text, matching the Edit page: a count
+ * limit of 0 or a duration of "0" is Unlimited; an absent limit is Inherited
+ * (the hub fills it from the template, hub or broker defaults); otherwise the
+ * stored value.
+ */
+function formatConfigLimit(value: number | string | undefined): string {
+  if (value == null || value === '') return 'Inherited';
+  if (value === 0 || value === '0') return 'Unlimited';
+  return String(value);
+}
+
 @customElement('scion-page-agent-detail')
 export class ScionPageAgentDetail extends LitElement {
   /** Re-renders absolute times when the display timezone changes. */
@@ -3052,11 +3064,13 @@ export class ScionPageAgentDetail extends LitElement {
   }
 
   private renderConfigLimitsCard(inline: AgentInlineConfig | undefined) {
-    const maxTurns = inline?.max_turns ?? 0;
-    const maxModelCalls = inline?.max_model_calls ?? 0;
-    const maxDuration = inline?.max_duration ?? '';
+    const maxTurns = inline?.max_turns;
+    const maxModelCalls = inline?.max_model_calls;
+    const maxDuration = inline?.max_duration;
 
-    if (!maxTurns && !maxModelCalls && !maxDuration) return nothing;
+    // A stored 0 (or "0" for the duration) is Unlimited, so the card hides
+    // only when no limit is stored at all.
+    if (maxTurns == null && maxModelCalls == null && !maxDuration) return nothing;
 
     return html`
       <div class="card">
@@ -3064,15 +3078,15 @@ export class ScionPageAgentDetail extends LitElement {
         <div class="info-grid">
           <div class="info-item">
             <span class="info-label">Max Turns</span>
-            <span class="info-value">${maxTurns || 'None'}</span>
+            <span class="info-value">${formatConfigLimit(maxTurns)}</span>
           </div>
           <div class="info-item">
             <span class="info-label">Max Model Calls</span>
-            <span class="info-value">${maxModelCalls || 'None'}</span>
+            <span class="info-value">${formatConfigLimit(maxModelCalls)}</span>
           </div>
           <div class="info-item">
             <span class="info-label">Max Duration</span>
-            <span class="info-value">${maxDuration || 'None'}</span>
+            <span class="info-value">${formatConfigLimit(maxDuration)}</span>
           </div>
         </div>
       </div>

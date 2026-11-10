@@ -3444,9 +3444,12 @@ type MaintenanceStore interface {
 	// ListMaintenanceRuns returns runs for a given operation key, ordered by started_at DESC.
 	ListMaintenanceRuns(ctx context.Context, operationKey string, limit int) ([]MaintenanceOperationRun, error)
 
-	// AbortRunningMaintenanceOps transitions any "running" operation runs and
-	// migrations to "failed". Called at server startup to clean up operations
-	// that were interrupted by a restart.
+	// AbortRunningMaintenanceOps transitions any "running" operation runs to
+	// "failed" and resets "running" migrations to "pending". Called at server
+	// startup to clean up operations that were interrupted by a restart. A
+	// run's JSON-object Result keeps its keys and gains "error" and
+	// "aborted": true; any other Result is replaced by the abort error. A
+	// Result written while the abort runs is not overwritten.
 	AbortRunningMaintenanceOps(ctx context.Context) (runs int64, migrations int64, err error)
 }
 
@@ -3545,13 +3548,21 @@ type SkillStore interface {
 	CreateSkillVersion(ctx context.Context, version *SkillVersion) error
 	GetSkillVersion(ctx context.Context, id string) (*SkillVersion, error)
 	GetSkillVersionByNumber(ctx context.Context, skillID, version string) (*SkillVersion, error)
-	ListSkillVersions(ctx context.Context, skillID string, opts ListOptions) (*ListResult[SkillVersion], error)
+	ListSkillVersions(ctx context.Context, skillID string, filter SkillVersionFilter, opts ListOptions) (*ListResult[SkillVersion], error)
 	UpdateSkillVersion(ctx context.Context, version *SkillVersion) error
 	DeleteSkillVersion(ctx context.Context, id string) error
 
 	ResolveSkillVersion(ctx context.Context, skillID, constraint string) (*SkillVersion, error)
 
 	IncrementSkillVersionDownloadCount(ctx context.Context, versionID string) error
+}
+
+// SkillVersionFilter defines criteria for listing a skill's versions.
+type SkillVersionFilter struct {
+	// Statuses, when non-empty, restricts results to versions in one of
+	// these statuses. It is applied in the store query, before LIMIT and
+	// TotalCount. Empty means every status.
+	Statuses []string
 }
 
 // SkillFilter defines criteria for filtering skills.

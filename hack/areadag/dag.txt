@@ -19,6 +19,7 @@ leaf        apierr
 leaf        internal/keymaterial
 leaf        internal/principal      # imports permissions
 leaf        permissions             # imported by internal/principal
+leaf        rebuildpreflight        # imported by maintenance
 leaf        unitdrift               # imported by maintenance
 
 area        maintenance

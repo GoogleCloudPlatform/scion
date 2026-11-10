@@ -31,6 +31,7 @@ import type { Project } from '../../shared/types.js';
 import { apiFetch, extractApiError, parseApiError } from '../../client/api.js';
 import { resourceStyles } from './resource-styles.js';
 import { showToast } from '../../utils/toast.js';
+import { copyToClipboard, showCopyFailedToast } from '../../utils/clipboard.js';
 import { showConfirm } from './confirm-dialog.js';
 import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
@@ -1879,23 +1880,25 @@ export class ScionTokenList extends LitElement {
   // ── Copy ───────────────────────────────────────────────────────────
 
   private async copyToken(): Promise<void> {
-    try {
-      await navigator.clipboard.writeText(this.revealToken);
+    if (await copyToClipboard(this.revealToken)) {
       this.revealCopied = true;
       setTimeout(() => {
         this.revealCopied = false;
       }, 2000);
-    } catch {
-      // Fallback: select the text
-      const el = this.shadowRoot?.querySelector('.token-value') as HTMLElement | null;
-      if (el) {
-        const range = document.createRange();
-        range.selectNodeContents(el);
-        const sel = window.getSelection();
-        sel?.removeAllRanges();
-        sel?.addRange(range);
-      }
+      return;
     }
+    // Fallback: select the text so it can be copied by hand, and say so.
+    const el = this.shadowRoot?.querySelector('.token-value') as HTMLElement | null;
+    if (!el) {
+      showCopyFailedToast();
+      return;
+    }
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    const sel = window.getSelection();
+    sel?.removeAllRanges();
+    sel?.addRange(range);
+    showToast('Could not copy. The token is selected: press Ctrl/Cmd+C.', 'danger');
   }
 
   // ── Formatting ─────────────────────────────────────────────────────

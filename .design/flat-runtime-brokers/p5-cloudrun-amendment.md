@@ -11,11 +11,15 @@ Terms follow `GLOSSARY.md`. The CR items are numbered as in the design; CR3a pre
 **CR2: §2 validation.** `runtime_target.type` accepts `docker`, `kubernetes` and `cloudrun`. For `cloudrun`, the following are required:
 - `project_id`, in GCP project ID form. A domain-scoped project ID (`example.com:proj`) is refused with its own message: "domain-scoped project IDs are not supported";
 - `region`;
-- `service_account`, a service-account email. The project default service accounts (`<number>-compute@developer.gserviceaccount.com`, and `<project_id>@appspot.gserviceaccount.com`) are refused: "the project default service accounts are not allowed";
+- `service_account`, a user-managed service account (E-4). The project default service accounts (`<number>-compute@developer.gserviceaccount.com`, and `<project_id>@appspot.gserviceaccount.com`) are refused: "the project default service accounts are not allowed";
 - at least one of `network`/`subnetwork`;
 - `credentials_file`, one absolute local file path with no tilde, environment expansion or path list.
 
 Both refusals compare case-insensitively: the compute-default form `^[0-9]+-compute@developer\.gserviceaccount\.com$` and the equality with `<project_id>@appspot.gserviceaccount.com`. P13's comparison with the probed number is case-insensitive too.
+
+`service_account` must match `^[a-z][a-z0-9-]{4,28}[a-z0-9]@[a-z][a-z0-9-]{4,28}[a-z0-9]\.iam\.gserviceaccount\.com$`. Google-managed service agents, other `developer.gserviceaccount.com` or `appspot.gserviceaccount.com` addresses, the bare domain, domain-scoped project forms and upper-case addresses are refused. The project default accounts are checked first and refused with CR2's exact text, "the project default service accounts are not allowed". Any other non-matching value is refused with "service_account must be a user-managed service account (name@project.iam.gserviceaccount.com)". The settings schema mirrors the pattern.
+
+In addition, an address whose local part is `service-` followed only by digits, or whose domain begins with `gcp-sa-`, is refused as a service agent with the same user-managed text, even though it matches the pattern.
 
 Kubernetes-only fields are refused for `cloudrun` ("field not valid for runtime target type cloudrun"), and the six Cloud Run fields are refused for `docker` and `kubernetes`. Any other type is "unsupported runtime target type "x" (supported: docker, kubernetes, cloudrun)".
 
@@ -31,9 +35,13 @@ All of these form rules live in `ValidateRuntimeBrokerInstances` itself, so ever
 - Credentials:
   - `runtime_target.credentials_file` is **required**. It is the sole credential source, with no fallback to Application Default Credentials or the metadata server.
   - Accepted credential types: `service_account` and `impersonated_service_account` only. Every other type is refused, including any external-account credential source.
+    - An `impersonated_service_account` file is accepted only when its source credential is a `service_account` key and its `delegates` list is absent or empty; a delegation chain is refused (refusal code `cloudrun_credentials_type`, with no file contents in the message). Otherwise an account in the chain, possibly the agent's own `service_account`, could mint the instance principal's token through the chain, which the principal checks do not see.
+    - A `service_account` key's `token_uri`, and an impersonated credential's source `token_uri`, must be absent or equal `https://oauth2.googleapis.com/token`; a `universe_domain` other than `googleapis.com` (at the top level or in the source) is refused. Both are refused with `cloudrun_credentials_type`.
   - The file must be a regular file, not a symlink, owned by the service user, with mode 0600 or 0400, checked on the opened handle.
   - The credential bytes that are parsed are read from the same opened handle that passed the file checks; the file is never re-opened by path between the check and the parse.
   - Process environment is never mutated. The same credentials serve the probe and all operations. No proactive polling.
+  - Agent identity: a Cloud Run agent runs as `runtime_target.service_account`, and code in the agent can obtain that account's access token from the instance metadata server, so the account is fully in the agent's hands. Grant it only what agents need: no role on Cloud Run, IAM, Secret Manager or Logging in the instance's project, and no project-level role. A startup check of the account's roles is a tracked follow-up.
+  - Per-agent GCP identity: an agent on a flat `cloudrun` instance runs only as the instance's `runtime_target.service_account`. A per-agent GCP identity request is refused at dispatch, before any instance is created, in every mode: assign, block, passthrough, and an unset mode that would resolve to the Hub-default passthrough. An agent with no GCP identity request, and no Hub default that applies, is not refused. The refusal names the agent and says that flat Cloud Run instances do not support per-agent GCP identities. The Hub-side default passthrough gate stays limited to the docker and podman runtime types.
 - **Activation order.** Each step refuses only that instance, before registration, heartbeat or control channel:
   1. **Local preconditions, before the runtime is built** (no cloud call):
      - the host is co-located;
@@ -83,7 +91,7 @@ P1 to P6 make no cloud call and no metadata call: credentials are not parsed and
 **CR5: §14.** A second server-layer experiment, `hub.flat_cloudrun_target` (`experiments.FlatCloudRunTarget`), Default false, Stage alpha, Owner `runtime-broker`.
 - With it off, a new flat registration whose target type is `cloudrun`, and agent create on a flat Runtime Broker whose stored target type is `cloudrun`, are refused with `experiment_disabled` naming it.
 - It requires `hub.flat_runtime_brokers`. It is not exposed through `/api/v1/settings/public`, and it is not in `dispatchExperimentNames`.
-- **GA gate:** it may not leave alpha or become default-on until agent secret delivery stops placing secrets as plain values in the Cloud Run Instance definition.
+- **GA gate:** it may not leave alpha or become default-on until agent secret delivery stops placing secrets as plain values in the Cloud Run Instance definition, and until the admin server-config GET half of the credential-contents test (E-8) has landed.
 
 **CR6: ownership labels.**
 - **Keys.** Every flat-path read of an ownership or identity label from runtime inventory uses the runtime's stored label key (`runtime.LabelKey`).
@@ -93,7 +101,14 @@ P1 to P6 make no cloud call and no metadata call: credentials are not parsed and
 - At create, a launch whose owner, project, agent or name value the label rewrite would change is refused (`checkOwnerLabel`, `pkg/runtime/owner_label.go`).
 - At read, a stored value that differs from the record, including by sanitization or truncation, is **unresolved and never attributed**. No fuzzy or sanitized matching is permitted.
 - An unlabeled agent object on a Cloud Run scope (project, region), including one created by a legacy Runtime Broker or another Hub, makes ownership on that scope unresolved, and every configured instance on that scope is refused, as for other targets.
+- §15 migration is normative: drain the legacy Cloud Run agents in that project and region (stop and delete them through the legacy Runtime Broker that created them) BEFORE enabling the flat instance.
+- Operator-facing refusal (1c): the `ownership_unresolved` refusal for a cloudrun instance names the drain step. Suggested text: "flat Runtime Broker instance "<key>" not activated: N Cloud Run agent instance(s) in this project and region carry no owner label (for example, created by a legacy Cloud Run Runtime Broker); drain them through the Runtime Broker that created them, then restart". It names instance names only, never paths, credentials or the project number. The existing generic text already says "drain or recreate … through the Runtime Broker that created them". 1c makes the Cloud Run wording explicit, and a test asserts the drain wording for a cloudrun scope.
 - Ownership labels are not a security boundary: anyone who can update Cloud Run instances in the project can rewrite them. Only operators may hold that right.
+
+**CR12: §6 R1, canonical runtime target type.** A registration that creates a new flat row must carry `runtimeTarget.type` equal, byte for byte, to a canonical type the Hub knows: `docker`, `kubernetes` or `cloudrun`. Any other value, including a case or whitespace variant of a canonical type, is refused with 422 `runtime_target_type_unsupported`, which names the value, and nothing is written. The echoed value is untrusted Runtime Broker input: it is truncated to 64 bytes and returned only as a JSON string field, and it is never interpolated into log lines unescaped. Re-registration and join of an existing row keep comparing the descriptor with the stored one exactly (R4). Every Hub policy keyed on the target type (experiment gates, presentation) uses one shared matching function. A newer Runtime Broker whose type the Hub does not know is refused rather than stored (as in R9), so the Hub is upgraded first. Precedence at R1 and at create: the parent experiment (`hub.flat_runtime_brokers`) is checked first; then the canonical type (422 `runtime_target_type_unsupported`); then the per-type experiment (for `cloudrun`, `hub.flat_cloudrun_target`, 412). A non-canonical spelling of a known type is therefore refused with 422 whatever the per-type experiment says.
+
+Row for the §9 error-code table (CR12):
+| `runtime_target_type_unsupported` | 422 | R1: a new flat row's descriptor type is not a canonical type the Hub knows |
 
 ## Amendments to appendix-p3
 
@@ -130,6 +145,7 @@ These are frozen-test expectations for the implementation phases.
   - the label-value tests;
   - the `ScopeKey`/`ScopeIdentity` parity test;
   - the https-only endpoint refusals.
+  - The R1 canonical-type refusals: `CloudRun`, ` cloudrun `, `cloudrun\t` and an unknown `podman` give 422 `runtime_target_type_unsupported` with nothing stored; the three canonical values are accepted; re-registration of an existing row is unchanged; a 4 KiB type string and one containing control characters or a newline are refused, and the response stays bounded (at most 64 bytes of the value) and escaped.
 - No test calls a cloud API. Real constructor coverage builds the per-instance credentials from fixture credential files.
 
 ### Named failure and fail-closed tests
@@ -140,7 +156,7 @@ These are frozen-test expectations for the implementation phases.
 | `TestRuntimeBrokerInstances_CloudRunRequiresNetwork` | config | both network fields empty → error |
 | `TestRuntimeBrokerInstances_CloudRunRejectsKubernetesFields` / `_DockerAndKubernetesRejectCloudRunFields` | config | cross-type refusals for every field |
 | `TestRuntimeBrokerInstances_CloudRunCredentialsFileRequired` / `_CloudRunCredentialsFileAbsolutePath` | config | missing → required error; relative, `~`, env-syntax or list → path-form error |
-| `TestRuntimeBrokerInstances_CloudRunRefusesDefaultServiceAccounts` | config | both `<n>-compute@developer.gserviceaccount.com` and `<project_id>@appspot.gserviceaccount.com` → "project default service accounts are not allowed"; mixed-case variants of both forms are refused |
+| `TestRuntimeBrokerInstances_CloudRunRefusesDefaultServiceAccounts` | config | both `<n>-compute@developer.gserviceaccount.com` and `<project_id>@appspot.gserviceaccount.com` → "the project default service accounts are not allowed"; mixed-case variants of both forms are refused |
 | `TestRuntimeBrokerInstances_CloudRunRefusesDomainScopedProject` | config | `example.com:proj` → its own message |
 | `TestRuntimeBrokerInstances_CloudRunAccepted` | config | replaces the unsupported-type expectation for cloudrun |
 | `TestRuntimeBrokerInstances_UnsupportedTypeMessage` | config | the default message names "(supported: docker, kubernetes, cloudrun)" |
@@ -161,7 +177,7 @@ These are frozen-test expectations for the implementation phases.
 | `TestFlatHost_CloudRunProbeFailureSiblingActivates` | cmd | for each probe failure class a docker sibling activates |
 | `TestFlatCloudRunHubEndpoint_NotAgentInfluenced` | runtimebroker | request-level HubEndpoint, resolved env and labels cannot change a flat cloudrun agent's hub URL |
 | `TestHubEnv_FlatCloudRunNeverDerivesKService` | runtimebroker | flat + loopback → refusal, not a `K_SERVICE` URL |
-| `TestFlatCloudRunCredentials_FileChecks` | cmd | symlink, mode 0644, non-regular file and wrong owner are each refused in the precondition, before any parse. Checked on the opened handle (Windows arm per `docs-repo/agents/windows-platform-seams.md`) |
+| `TestFlatCloudRunCredentials_FileChecks` | cmd | symlink, mode 0644, non-regular file and wrong owner are each refused in the precondition, before any parse. Checked on the opened handle. P6 is unix-only, in a `//go:build unix` file; its `!unix` counterpart fails closed with an error wrapping `errors.ErrUnsupported`, per the platform-seams rules, and is never a weaker path-based check. The test file carries `//go:build unix`. |
 | `TestFlatCloudRunCredentials_ParsedFromCheckedHandle` | cmd | a file swapped at the path after P6 is not the one parsed: the original handle's bytes are used, or the instance is refused. It never parses the swapped file |
 | `TestFlatCloudRunCredentials_TypeRefused` | cmd/runtime | `authorized_user`, `external_account` (including an `executable` credential source, which must never be executed: a sentinel program records no run) and `external_account_authorized_user` are each refused; `service_account` and `impersonated_service_account` are accepted |
 | `TestFlatCloudRunCredentials_ExplicitFileNoADCFallback` | cmd/runtime | with a malformed or unsupported file plus usable ADC available, the instance is refused and the ADC detector is never invoked. A sibling instance still activates |
@@ -183,13 +199,15 @@ These are frozen-test expectations for the implementation phases.
 | `TestFlatCloudRunRuntime_NoMetadataFallback` | runtime | the constructor refuses empty project or region. Config resolution never calls metadata |
 | `TestFlatCloudRunRuntime_UsesShareNFSOnly` | runtime | the NFS target is always the share. No runtime override exists |
 | `TestFlatCloudRun_HubRecordsOmitCloudFields` | hub/runtimebroker | registration, join, heartbeat, presentation, inventory, saved placement and identity JSON contain none of project_id, service account, network, subnetwork, credentials path |
-| `TestFlatCloudRun_CredentialContentsNeverInAPI` | hub/runtimebroker | with a fixture credentials file, no API response body (admin server-config GET, broker, presentation, heartbeat) contains its contents; only the admin GET may show the path |
+| `TestFlatCloudRun_CredentialContentsNeverInAPI` | cmd/runtimebroker | with a fixture credentials file carrying a unique marker, the marker appears in no body the Runtime Broker side produces for a flat cloudrun instance: the broker API response bodies, the heartbeat payload, the presentation, the health report and the identity file. |
 | `TestRegisterFlat_CloudRunExperimentOff` / `TestCreateAgent_FlatCloudRunExperimentOff` | hub | 412 `experiment_disabled` with the new experiment name. Docker and Kubernetes registration still succeed. An existing cloudrun row re-registers |
 | `TestProfileConversion_CloudRunMapped`, `_CloudRunInstancesFieldRequired`, `_CloudRunSandboxStillBlocking`, `_CloudRunBlockOnDockerNotice`, `_CloudRunNFSFieldsNoEffect`, `_CloudRunSplitBySA` | config | the CR9 and CR10 rules and `flat_target_field_required` (blocking, no `ProfileMap` entry) |
 | `TestProfileConversion_CloudRunCredentialsFileNotice` | config | `flat_target_operator_input_required` as a notice at `runtime_target.credentials_file`, and a kept `ProfileMap` entry |
-| a `convert --plan` test | cmd | exit 3 for a plan whose only finding is `flat_target_operator_input_required`, with the summary naming the field |
+| `TestConvertPlan_CloudRunOperatorInputExits3` | cmd | exit 3 for a plan whose only finding is `flat_target_operator_input_required`, with the summary naming the field |
 | `TestPresentInstance_CloudRunRedaction` | config | the FC4-a rows of CR8 |
 | `TestDoctor_FlatCloudRunNoHomesWarning` | cmd | the homes warning is skipped for a flat cloudrun instance |
+
+The admin server-config GET half (pkg/hub: the GET may show the `credentials_file` path, never its contents) is a tracked follow-up. It must land before `hub.flat_cloudrun_target` leaves alpha or becomes default-on, the same gate as agent secret delivery (CR5). Until then the property rests on the Hub storing only the path and never reading the file.
 
 ### Positive and parity tests
 
@@ -198,3 +216,7 @@ These are frozen-test expectations for the implementation phases.
 - Full lifecycle through a flat cloudrun instance with a fake Instances client: create, pin, start, stop, restart, delete, a mismatched `expectedRuntimeTargetId` → 409, and a missing one → 412.
 
 No other frozen expectation is implicitly waived.
+
+### Deferred: doctor reachability probe
+
+- No on-demand VPC/NFS reachability probe in `scion doctor` in this work. An unreachable share keeps surfacing as the agent's first-start error (§7.3).

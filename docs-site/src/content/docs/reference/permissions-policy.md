@@ -59,7 +59,7 @@ Access to any resource or operation in Scion must be explicitly authorized by a 
 
 A `RoleBinding` contains the following fields:
 
-* **Role Definition ID**: The UUID of the `RoleDefinition` being granted. Role definitions contain specific permission IDs (e.g., `agent.create`, `project.read`).
+* **Role Definition ID**: The UUID of the `RoleDefinition` being granted. Role definitions contain specific permission IDs (e.g., `agent.create`, `project.read`). The built-in project membership roles are `project-owner`, `project-admin`, `project-member`, and `project-viewer` (`agent.list`, `agent.read`, `project.list`, `project.read`). At startup, any non-system custom role in `project` scope named `project-viewer` is renamed by appending `-custom-` and the first eight characters of its role ID, recording a `builtin_role_name_custom_role_renamed` mutation audit event. See [User Roles](/scion/hosted/ha/permissions/#user-roles) and [Chat posting](/scion/hosted/ha/permissions/#chat-posting).
 * **Principal Type**: The category of principal (`user`, `agent`, or `group`).
 * **Principal ID**: The identifier of the specific principal.
 * **Scope Type**: The scope bounds, either `system` (global permissions) or `project` (project-restricted permissions).

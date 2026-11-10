@@ -596,14 +596,14 @@ func (v *googleCredentialValidator) getTokenInfo(ctx context.Context, token stri
 
 	var info googleTokenInfoResponse
 	if err := json.Unmarshal(body, &info); err != nil {
-		return nil, fmt.Errorf("%w: tokeninfo decode failed: %v", ErrGoogleUpstreamError, err)
+		return nil, fmt.Errorf("%w: tokeninfo decode failed: %s", ErrGoogleUpstreamError, upstreamText(err.Error()))
 	}
 
 	if info.Error != "" {
 		// A 200 response can still carry a body-level error field for an
 		// invalid credential — also a credential verdict, not an upstream
 		// fault.
-		return nil, fmt.Errorf("%w: tokeninfo error: %s", ErrGoogleInvalidCredential, info.Error)
+		return nil, fmt.Errorf("%w: tokeninfo error: %s", ErrGoogleInvalidCredential, upstreamText(info.Error))
 	}
 
 	return &info, nil
@@ -636,7 +636,7 @@ func (v *googleCredentialValidator) getUserInfo(ctx context.Context, token strin
 
 	var info googleUserInfoResponse
 	if err := json.Unmarshal(body, &info); err != nil {
-		return nil, fmt.Errorf("%w: userinfo decode failed: %v", ErrGoogleUpstreamError, err)
+		return nil, fmt.Errorf("%w: userinfo decode failed: %s", ErrGoogleUpstreamError, upstreamText(err.Error()))
 	}
 
 	return &info, nil
@@ -741,7 +741,7 @@ func (c *googleJWKSCache) fetchLocked(ctx context.Context) (*jose.JSONWebKeySet,
 
 	var jwks jose.JSONWebKeySet
 	if err := json.Unmarshal(body, &jwks); err != nil {
-		return nil, fmt.Errorf("JWKS decode failed: %w", err)
+		return nil, fmt.Errorf("JWKS decode failed: %s", upstreamText(err.Error()))
 	}
 
 	c.keys = &jwks

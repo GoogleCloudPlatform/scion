@@ -130,7 +130,7 @@ func TestDelegate_Refusals(t *testing.T) {
 		{"empty hub id", func(in *DelegateInput) { in.HubID = "" }, ErrDelegateHubIDRequired},
 		{"padded hub id", func(in *DelegateInput) { in.HubID = " " + dlHubID }, ErrDelegateHubIDRequired},
 		{"marker names another hub", func(in *DelegateInput) { in.HubID = "dl-hub-other" }, ErrDelegateMarkerHubMismatch},
-		{"admin scope", func(in *DelegateInput) { in.Scope = "test_identity:issue_admin" }, ErrDelegateScope},
+		{"admin scope without the opt-in", func(in *DelegateInput) { in.Scope = "test_identity:issue_admin" }, ErrDelegateAdminOptIn},
 		{"super-admin scope", func(in *DelegateInput) { in.Scope = "test_identity:issue_super_admin" }, ErrDelegateScope},
 		{"off the allowlist", func(in *DelegateInput) { in.WorkloadSub = "100000000000000000099" }, ErrDelegateNotAllowlisted},
 		{"empty allowlist", func(in *DelegateInput) { in.WorkloadIssuers = nil }, ErrDelegateNotAllowlisted},
@@ -306,4 +306,123 @@ func TestDelegate_ConcurrentLiveCapHolds_Postgres(t *testing.T) {
 	n, err := client.TestIdentityDelegation.Query().Count(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, store.TestInfraOfflineMaxLiveDelegations, n)
+}
+
+// Offline hub-admin delegations: behind the startup setting
+// server.hub.test_identities.offline_admin_delegations (AdminOptIn), for an
+// admin-tier subject, within the hub-admin bounds. Super-admin never.
+
+const dlAdminSub = "100000000000000000092"
+
+func dlAdminInput() DelegateInput {
+	in := dlInput()
+	in.WorkloadSub = dlAdminSub
+	in.Scope = store.TestInfraOfflineAdminDelegationScope
+	in.AdminOptIn = dlHubID
+	return in
+}
+
+func TestDelegate_WritesHubAdminDelegationWithOptIn(t *testing.T) {
+	client := dlMarked(t)
+	ctx := context.Background()
+	in := dlAdminInput()
+	in.TTL = 3 * time.Hour
+	in.AdminCap = 2
+	d, err := Delegate(ctx, client, in)
+	require.NoError(t, err)
+	assert.Equal(t, store.TestInfraOfflineAdminDelegationScope, d.Scope)
+	assert.Equal(t, store.DelegationGrantorTestInfraOffline, d.GrantorKind)
+	assert.Equal(t, store.TestInfraOfflineGrantorID(dlHubID), d.GrantorID)
+	assert.Equal(t, 2, d.MemberCap, "the admin cap is stored in the per-delegation cap column")
+	assert.Equal(t, 3*time.Hour, d.ExpiresAt.Sub(d.Created))
+
+	audits, err := client.MutationAudit.Query().Where(mutationaudit.MutationType(DelegateMutationType)).All(ctx)
+	require.NoError(t, err)
+	require.Len(t, audits, 1)
+	for _, want := range []string{"scope=" + store.TestInfraOfflineAdminDelegationScope, "admin_cap=2", "workload_sub=" + dlAdminSub} {
+		assert.Contains(t, audits[0].AfterSummary, want)
+	}
+
+	// Defaults: 4 h and an admin cap of 1.
+	_, _, err = RevokeDelegation(ctx, client, RevokeDelegationInput{HubID: dlHubID, ID: d.ID, Operator: "op"})
+	require.NoError(t, err)
+	d, err = Delegate(ctx, client, dlAdminInput())
+	require.NoError(t, err)
+	assert.Equal(t, store.TestInfraOfflineAdminDelegationDefaultTTL, d.ExpiresAt.Sub(d.Created))
+	assert.Equal(t, store.TestInfraOfflineAdminDelegationDefaultAdminCap, d.MemberCap)
+}
+
+func TestDelegate_HubAdminRefusals(t *testing.T) {
+	ctx := context.Background()
+	cases := []struct {
+		name   string
+		mutate func(*DelegateInput)
+		want   error
+	}{
+		{"no opt-in", func(in *DelegateInput) { in.AdminOptIn = "" }, ErrDelegateAdminOptIn},
+		{"opt-in for another hub", func(in *DelegateInput) { in.AdminOptIn = "dl-hub-other" }, ErrDelegateAdminOptIn},
+		{"padded opt-in", func(in *DelegateInput) { in.AdminOptIn = dlHubID + " " }, ErrDelegateAdminOptIn},
+		{"member-tier subject", func(in *DelegateInput) { in.WorkloadSub = dlSub }, ErrDelegateNotAllowlisted},
+		{"subject off the allowlist", func(in *DelegateInput) { in.WorkloadSub = "100000000000000000099" }, ErrDelegateNotAllowlisted},
+		{"ttl over the hub-admin maximum", func(in *DelegateInput) {
+			in.TTL = store.TestInfraOfflineAdminDelegationMaxTTL + time.Second
+		}, ErrDelegateTTL},
+		{"admin cap too high", func(in *DelegateInput) {
+			in.AdminCap = store.TestInfraOfflineAdminDelegationMaxAdminCap + 1
+		}, ErrDelegateAdminCap},
+		{"negative admin cap", func(in *DelegateInput) { in.AdminCap = -1 }, ErrDelegateAdminCap},
+		{"member cap on a hub-admin delegation", func(in *DelegateInput) { in.MemberCap = 1 }, ErrDelegateMemberCap},
+		{"admin cap on a member delegation", func(in *DelegateInput) {
+			in.Scope = store.TestInfraOfflineDelegationScope
+			in.AdminCap = 1
+		}, ErrDelegateAdminCap},
+	}
+	// The super-admin scope in every spelling, even with the opt-in and an
+	// admin-tier subject.
+	for _, v := range []string{
+		"test_identity:issue_super_admin", "test_identity.issue_super_admin", "TEST_IDENTITY:ISSUE_SUPER_ADMIN",
+		"Test_Identity.Issue_Super_Admin", " test_identity:issue_super_admin", "test_identity:issue_super-admin",
+		"test_identity:issue_superadmin",
+	} {
+		v := v
+		cases = append(cases, struct {
+			name   string
+			mutate func(*DelegateInput)
+			want   error
+		}{"super-admin variant " + v, func(in *DelegateInput) { in.Scope = v }, ErrDelegateScope})
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			client := dlMarked(t)
+			in := dlAdminInput()
+			tc.mutate(&in)
+			_, err := Delegate(ctx, client, in)
+			require.ErrorIs(t, err, tc.want)
+			rows, audits := dlCount(t, client, DelegateMutationType)
+			assert.Zero(t, rows, "a refused delegate writes no delegation")
+			assert.Zero(t, audits, "a refused delegate writes no audit row")
+		})
+	}
+}
+
+// At most one live offline hub-admin delegation per hub; member
+// delegations are not affected, and a revoked one frees the slot.
+func TestDelegate_LiveHubAdminCapPerHub(t *testing.T) {
+	client := dlMarked(t)
+	ctx := context.Background()
+	d, err := Delegate(ctx, client, dlAdminInput())
+	require.NoError(t, err)
+	_, err = Delegate(ctx, client, dlAdminInput())
+	require.ErrorIs(t, err, ErrDelegateTooManyLiveAdmin)
+	rows, _ := dlCount(t, client, DelegateMutationType)
+	assert.Equal(t, 1, rows)
+
+	_, err = Delegate(ctx, client, dlInput())
+	require.NoError(t, err, "a member delegation still fits")
+
+	_, changed, err := RevokeDelegation(ctx, client, RevokeDelegationInput{HubID: dlHubID, ID: d.ID, Operator: "op"})
+	require.NoError(t, err)
+	require.True(t, changed)
+	_, err = Delegate(ctx, client, dlAdminInput())
+	require.NoError(t, err)
 }

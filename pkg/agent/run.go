@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -3338,8 +3339,8 @@ func detectRepoRootFrom(effectiveWorkspace, projectDir, projectRoot string) (str
 		}
 		if hasOwnGitDir {
 			// A .git directory git rejects gives a plain mount (a probe
-			// that does not finish refuses): it never falls through to a
-			// wider root.
+			// that does not finish, or that the door refuses, refuses): it
+			// never falls through to a wider root.
 			isRepo, err := checkOwnCommonDir(effectiveWorkspace)
 			if err != nil {
 				return "", err
@@ -3349,20 +3350,35 @@ func detectRepoRootFrom(effectiveWorkspace, projectDir, projectRoot string) (str
 			}
 			return effectiveWorkspace, nil
 		}
-		projectRepo := projectRepoRoot(projectRoot)
-		ceiling := filepath.Dir(effectiveWorkspace)
-		if projectRepo != "" && resolvedPathWithin(effectiveWorkspace, projectRepo) {
-			ceiling = filepath.Dir(projectRepo)
-		}
-		commonDir, err := boundedCommonGitDir(effectiveWorkspace, ceiling)
-		if errors.Is(err, errGitProbeTimeout) {
-			return "", gitProbeTimeoutError(effectiveWorkspace, err)
-		}
-		if err == nil {
-			if projectCommon := projectCommonDir(projectRepo); projectCommon != "" && samePath(commonDir, projectCommon) {
-				return filepath.Dir(projectCommon), nil
+		// A workspace that does not exist yet (created later in Start, for
+		// example by the NFS leaf helpers), or whose .git file is in git's
+		// exact pointer format and names a gitdir that, resolved as git
+		// resolves it, does not exist (a leftover from a removed worktree), is
+		// not probed: it falls through as git's "not a repository" does, so it
+		// is never refused here and never mounts wider than the fallback
+		// allows.
+		_, lstatErr := os.Lstat(effectiveWorkspace)
+		skipProbe := errors.Is(lstatErr, fs.ErrNotExist) || danglingGitfile(effectiveWorkspace)
+		if !skipProbe {
+			projectRepo := projectRepoRoot(projectRoot)
+			ceiling := filepath.Dir(effectiveWorkspace)
+			if projectRepo != "" && resolvedPathWithin(effectiveWorkspace, projectRepo) {
+				ceiling = filepath.Dir(projectRepo)
 			}
-			return "", workspaceCommonDirError(effectiveWorkspace, commonDir)
+			commonDir, err := boundedCommonGitDir(effectiveWorkspace, ceiling)
+			// A timeout or a door refusal (for example a workspace with no
+			// .git but a HEAD entry) refuses the start: it never falls through
+			// to the project-dir fallback, which could mount the whole
+			// repository.
+			if refusal := gitProbeRefusal(effectiveWorkspace, err); refusal != nil {
+				return "", refusal
+			}
+			if err == nil {
+				if projectCommon := projectCommonDir(projectRepo); projectCommon != "" && samePath(commonDir, projectCommon) {
+					return filepath.Dir(projectCommon), nil
+				}
+				return "", workspaceCommonDirError(effectiveWorkspace, commonDir)
+			}
 		}
 	}
 	// The project-dir fallback names a root only for a workspace inside the
@@ -3377,10 +3393,15 @@ func detectRepoRootFrom(effectiveWorkspace, projectDir, projectRoot string) (str
 			"workspace", effectiveWorkspace, "repository", projectRepo)
 		return "", nil
 	}
-	// Any failure here, a timeout included, gives a plain mount, never the
-	// project's repository.
+	// Any failure here, a timeout or a door refusal included, gives a plain
+	// mount, never the project's repository, except a repository config
+	// policy refusal, which is returned so the user sees its remedy.
 	top, err := boundedRevParse(projectDir, filepath.Dir(projectRepo), "--show-toplevel")
 	if err != nil {
+		var refused *util.RepoConfigRefusedError
+		if errors.As(err, &refused) {
+			return "", fmt.Errorf("project %s: %w", projectDir, err)
+		}
 		return "", nil
 	}
 	if samePath(top, projectRepo) {
@@ -3389,16 +3410,62 @@ func detectRepoRootFrom(effectiveWorkspace, projectDir, projectRoot string) (str
 	return "", fmt.Errorf("git reports repository root %s for project %s, which is not the project's own repository; refusing to start: check the repository's git configuration", top, projectDir)
 }
 
+// danglingGitfile reports whether ws/.git is a regular file in git's exact
+// pointer format whose target, resolved as git resolves it, does not exist.
+// The file must be at most 4096 bytes and start with "gitdir: "; the rest,
+// with trailing CR and LF stripped (as git strips them), must be a non-empty
+// path with no CR, LF or NUL and no leading or trailing whitespace. A
+// relative path is joined to the workspace's physical path without any
+// lexical cleaning, so the kernel resolves ".." and symlinks as it does for
+// git. Only a target that does not exist reports true; anything else (a
+// different format, a .git symlink, a read error, or a target that exists or
+// cannot be checked) reports false, so the workspace is still probed.
+func danglingGitfile(ws string) bool {
+	gitPath := filepath.Join(ws, ".git")
+	info, err := os.Lstat(gitPath)
+	if err != nil || !info.Mode().IsRegular() {
+		return false
+	}
+	f, err := os.Open(gitPath)
+	if err != nil {
+		return false
+	}
+	defer func() { _ = f.Close() }()
+	data, err := io.ReadAll(io.LimitReader(f, 4096+1))
+	if err != nil || len(data) > 4096 {
+		return false
+	}
+	rest, ok := strings.CutPrefix(string(data), "gitdir: ")
+	if !ok {
+		return false
+	}
+	path := strings.TrimRight(rest, "\r\n")
+	if path == "" || strings.ContainsAny(path, "\r\n\x00") || path != strings.TrimSpace(path) {
+		return false
+	}
+	if !filepath.IsAbs(path) {
+		wsReal, err := filepath.EvalSymlinks(ws)
+		if err != nil {
+			return false
+		}
+		path = wsReal + string(filepath.Separator) + path
+	}
+	_, err = os.Lstat(path)
+	return errors.Is(err, fs.ErrNotExist)
+}
+
 // checkOwnCommonDir checks a workspace with its own .git directory. It
 // reports false when git does not treat the workspace as a repository at all
 // (for example an empty .git directory), and refuses with an error when git
-// does, but with a common dir other than that .git directory, or when the
-// probe does not finish in time.
+// does, but with a common dir other than that .git directory, when the probe
+// does not finish in time, or when the host-side git door refuses it. For a
+// .git directory, the door refuses a root-level commondir or gitdir file
+// first, so the common-dir mismatch below is a defence-in-depth check.
 func checkOwnCommonDir(workspace string) (bool, error) {
 	ownGitDir := filepath.Join(workspace, ".git")
 	commonDir, err := boundedCommonGitDir(workspace, filepath.Dir(workspace))
-	if errors.Is(err, errGitProbeTimeout) {
-		return false, gitProbeTimeoutError(workspace, err)
+	if refusal := gitProbeRefusal(workspace, err); refusal != nil {
+		return false, refusal
 	}
 	if err != nil {
 		return false, nil
@@ -3415,27 +3482,55 @@ func workspaceCommonDirError(workspace, commonDir string) error {
 	return fmt.Errorf("git common dir %s of workspace %s is outside the project's own repository; refusing to start: check the workspace's .git metadata", commonDir, workspace)
 }
 
-// boundedRevParse runs git rev-parse with args in dir, with ceiling as
-// GIT_CEILING_DIRECTORIES: git checks dir and its ancestors below ceiling for
-// a repository, never ceiling itself or anything above it. The environment
-// is worktreeGitEnv's, so an inherited GIT_DIR or similar cannot override
+// boundedRevParse runs git rev-parse with args in dir through util.RunHostGit
+// with the linked-checkout policy, with ceiling as GIT_CEILING_DIRECTORIES:
+// git checks dir and its ancestors below ceiling for a repository, never
+// ceiling itself or anything above it. The environment is worktreeGitEnv's
+// with HostGitEnv applied, so an inherited GIT_DIR or similar cannot override
 // the search. Like the package's other git calls in agent-writable
-// directories, it is bounded by worktreeGitTimeout.
+// directories, git itself is bounded by worktreeGitTimeout; the door's
+// after-run check runs under its own bound. A refusal by the door wraps
+// errGitProbeRefused and a probe that does not finish in time wraps
+// errGitProbeTimeout; any other error is git's own non-zero exit, or git
+// missing.
 func boundedRevParse(dir, ceiling string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), worktreeGitTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", append([]string{"-c", "core.fsmonitor=false", "rev-parse"}, args...)...)
-	cmd.WaitDelay = 5 * time.Second
-	cmd.Dir = dir
-	cmd.Env = append(worktreeGitEnv(), "GIT_CEILING_DIRECTORIES="+ceiling)
-	out, err := cmd.Output()
-	if err != nil {
-		if ctx.Err() != nil {
-			return "", fmt.Errorf("git rev-parse %s in %s: %w after %s", strings.Join(args, " "), dir, errGitProbeTimeout, worktreeGitTimeout)
-		}
-		return "", fmt.Errorf("git rev-parse %s in %s: %w", strings.Join(args, " "), dir, err)
+	// The probe runs in the user's checkout, a Scion worktree of it, or a
+	// workspace whose layout is not known here, so it uses the linked list,
+	// the wider one, which accepts every config the managed list accepts.
+	// The environment starts from HostGitEnv over worktreeGitEnv (of the
+	// GIT_* variables only GIT_CONFIG_NOSYSTEM and GIT_CONFIG_GLOBAL are
+	// kept), and the ceiling is appended last, so an inherited
+	// GIT_CEILING_DIRECTORIES cannot replace it. The callers need a bound
+	// wider than CeilingOn, which stops at dir's parent: a probe may have to
+	// find the project's repository several levels up and no further. Under
+	// CeilingOff the door leaves GIT_CEILING_DIRECTORIES as the caller set
+	// it, so this bound is the one git applies; with a .git at dir it also
+	// bounds the door's own config listings. HostGitArgs pins
+	// core.fsmonitor=false.
+	res := util.RunHostGit(ctx, dir, util.HostGitOptions{
+		Policy:  util.RepoPolicyLinked,
+		Ceiling: util.CeilingOff,
+		Env:     append(util.HostGitEnv(worktreeGitEnv()), "GIT_CEILING_DIRECTORIES="+ceiling),
+	}, append([]string{"rev-parse"}, args...)...)
+	joined := strings.Join(args, " ")
+	switch {
+	case res.Err == nil && res.ExitCode == 0:
+		return strings.TrimSpace(string(res.Stdout)), nil
+	case ctx.Err() != nil:
+		return "", fmt.Errorf("git rev-parse %s in %s: %w after %s", joined, dir, errGitProbeTimeout, worktreeGitTimeout)
+	case errors.Is(res.Err, exec.ErrNotFound):
+		// Without git there is no repository to widen to: read as git's own
+		// failure ("not a repository"), not as a refusal.
+		return "", fmt.Errorf("git rev-parse %s in %s: %w", joined, dir, res.Err)
+	case res.Err != nil:
+		return "", fmt.Errorf("git rev-parse %s in %s: %w: %w", joined, dir, errGitProbeRefused, res.Err)
 	}
-	return strings.TrimSpace(string(out)), nil
+	if stderr := strings.TrimSpace(string(res.Stderr)); stderr != "" {
+		return "", fmt.Errorf("git rev-parse %s in %s: git exited with code %d: %s", joined, dir, res.ExitCode, stderr)
+	}
+	return "", fmt.Errorf("git rev-parse %s in %s: git exited with code %d", joined, dir, res.ExitCode)
 }
 
 // errGitProbeTimeout marks a boundedRevParse call that did not finish in
@@ -3444,10 +3539,36 @@ func boundedRevParse(dir, ceiling string, args ...string) (string, error) {
 // layout than the workspace's own git metadata allows.
 var errGitProbeTimeout = errors.New("git probe timed out")
 
+// errGitProbeRefused marks a boundedRevParse call the host-side git door
+// refused, before or after git ran (for example a repository config the
+// policy refuses, a directory that may itself be a git directory, a config
+// change while git ran), or that failed to wait for git (exec.ErrWaitDelay).
+// A missing git binary is not one. It is never read as "not a repository".
+var errGitProbeRefused = errors.New("git probe refused")
+
 // gitProbeTimeoutError is detectRepoRoot's refusal for a git probe in the
 // workspace that did not finish in time.
 func gitProbeTimeoutError(workspace string, err error) error {
 	return fmt.Errorf("cannot check the git metadata of workspace %s: %w; refusing to start: check the workspace's .git metadata and the filesystem", workspace, err)
+}
+
+// gitProbeRefusedError is detectRepoRoot's refusal for a git probe in the
+// workspace that the host-side git door refused.
+func gitProbeRefusedError(workspace string, err error) error {
+	return fmt.Errorf("cannot check the git metadata of workspace %s: %w; refusing to start: check the workspace's .git metadata and its git config", workspace, err)
+}
+
+// gitProbeRefusal returns the start refusal for a workspace probe error that
+// must not be read as "not a repository" (a timeout or a door refusal), or
+// nil otherwise (no error, git's own non-zero exit, or git missing).
+func gitProbeRefusal(workspace string, err error) error {
+	switch {
+	case errors.Is(err, errGitProbeTimeout):
+		return gitProbeTimeoutError(workspace, err)
+	case errors.Is(err, errGitProbeRefused):
+		return gitProbeRefusedError(workspace, err)
+	}
+	return nil
 }
 
 // boundedCommonGitDir returns dir's git common dir as an absolute path, with
@@ -3672,7 +3793,14 @@ func workspaceSourceRoots(explicitWorkspace bool, effectiveWorkspace string, set
 		}
 		roots := []string{projectRepoRoot}
 		if effectiveWorkspace != "" {
-			if ok, err := util.IsRegisteredWorktree(projectRepoRoot, effectiveWorkspace); err == nil && ok {
+			ok, err := util.IsRegisteredWorktree(projectRepoRoot, effectiveWorkspace)
+			// A policy refusal carries its remedy, so it is returned instead
+			// of narrowing silently.
+			var refused *util.RepoConfigRefusedError
+			if errors.As(err, &refused) {
+				return nil, fmt.Errorf("workspace %q: cannot check its worktree registration in %q: %w", effectiveWorkspace, projectRepoRoot, err)
+			}
+			if err == nil && ok {
 				if workspaceSharesProjectRepo(projectDir, effectiveWorkspace) {
 					roots = append(roots, effectiveWorkspace)
 				}

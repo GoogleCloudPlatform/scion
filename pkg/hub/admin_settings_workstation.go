@@ -617,7 +617,8 @@ func (e *serverConfigFileValidationError) Error() string { return e.msg }
 // PUT with the same rules the file-mode handler applies, normalising
 // req.Server.Hub.AgentEndpoint in place. ops supplies the current runtimes
 // and profiles when the request changes server.shared_dir_storage. A PUT
-// that sends keys under server.hub.conduit or server.hub.port_proxy is also
+// that sends keys under server.hub.conduit, server.hub.port_proxy,
+// server.hub.sse or server.hub.platform_request_timeout is also
 // checked with the Validate methods the hub applies at startup and refused
 // with a *serverConfigFileFieldError (422) when they fail.
 func validateServerConfigFileKeys(req *ServerConfigUpdateRequest, fileKeys []string, ops *OperationalSettings) error {
@@ -689,6 +690,10 @@ var startupCheckedFileBlocks = []struct {
 }{
 	{[]string{"server", "hub", "conduit"}, func(gc *config.GlobalConfig) error { return gc.Hub.Conduit.Validate() }},
 	{[]string{"server", "hub", "port_proxy"}, func(gc *config.GlobalConfig) error { return gc.Hub.PortProxy.Validate() }},
+	{[]string{"server", "hub", "sse"}, func(gc *config.GlobalConfig) error { return gc.Hub.SSE.Validate() }},
+	{[]string{"server", "hub", "platform_request_timeout"}, func(gc *config.GlobalConfig) error {
+		return config.ValidatePlatformRequestTimeout(gc.Hub.PlatformRequestTimeout)
+	}},
 	{[]string{"server", "relay"}, func(gc *config.GlobalConfig) error { return gc.Relay.Validate() }},
 }
 

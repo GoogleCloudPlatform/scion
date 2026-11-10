@@ -15,16 +15,27 @@
 // Command delivery-census reports, READ-ONLY, which live agents on a hub
 // database the launch material delivery admission would refuse at start or
 // restart, which of those the fallback still serves (legacy_* cohorts: no
-// edge, sentinel edge, unadopted edge, adopted; and uat_descendant_legacy,
-// counted separately; see pkg/hub/material_delivery_legacy.go), and which stay
+// edge, sentinel edge, unadopted edge, adopted; see
+// pkg/hub/material_delivery_legacy.go), and which stay
 // withheld (deleted or held parent, held agent, duplicate edges, recorded
 // ceiling, ...), with counts by cohort and by deny cause with and without
 // the fallback. It runs hub.(*AuthzService).LaunchDeliveryCensus, the same
-// admission and fallback a start runs, and reads no secret or env value.
+// admission and fallback a start runs, and reads no secret value.
 // For agents created from a user access token it also reports the stored
 // role against the role their chain allows, and how many of their owner's
 // progeny-shared user secrets the start-time check admits (counts only, no
-// names). Not part of the product.
+// names).
+//
+// It also lists every agent whose owner's user-scope rows not shared with
+// progeny are withheld at start because the agent's delegation chain is
+// not recorded to its owner, with the reason, the agent's depth, the names
+// of those rows and the remedy. Its runtime read section lists every agent
+// whose runtime user-scope reads are refused because its chain is not
+// recorded, with the chain's shape, the names of the owner's shared
+// secrets it is refused and the remedy. Env var rows are listed through
+// the store, which returns their values; only the keys are kept and
+// printed. The output names secret rows, so it is operator-only: keep it
+// out of issues, chats and other shared places. Not part of the product.
 //
 // The database is opened read-only: sqlite with mode=ro and query_only(1)
 // (entc.OpenSQLiteReadOnly), postgres with default_transaction_read_only=on
@@ -51,6 +62,7 @@ import (
 	"log/slog"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
@@ -140,8 +152,8 @@ func withQueryParam(dsn, key, value string) string {
 func writeText(w io.Writer, rep *hub.LaunchDeliveryCensusReport, devAuth, all bool) error {
 	o := &textOut{w: w}
 	o.printf("# launch delivery census (read-only), dev_auth=%t\n", devAuth)
-	o.printf("agents\t%d\nwithheld\t%d\nlegacy_fallback\t%d\nstrict_withheld\t%d\nuat_descendant_legacy\t%d\n",
-		rep.Agents, rep.Withheld, rep.Fallback, rep.StrictWithheld, rep.UATDescendantLegacy)
+	o.printf("agents\t%d\nwithheld\t%d\nlegacy_fallback\t%d\nstrict_withheld\t%d\n",
+		rep.Agents, rep.Withheld, rep.Fallback, rep.StrictWithheld)
 	o.printf("%s\n", "# agents created from a user access token (intrinsic set)")
 	o.printf("uat_created\t%d\nuat_role_filtered\t%d\nuat_owner_shared_rows\t%d\nuat_owner_shared_admitted\t%d\nuat_owner_shared_intrinsic\t%d\nuat_root_not_admitted\t%d\nscheduler_uat_initiated\t%d\n",
 		rep.UATCreated, rep.UATRoleFiltered, rep.UATOwnerSharedRows, rep.UATOwnerSharedAdmitted, rep.UATOwnerSharedIntrinsic,
@@ -200,7 +212,45 @@ func writeText(w io.Writer, rep *hub.LaunchDeliveryCensusReport, devAuth, all bo
 		f = append(f, reason)
 		o.printf("%s\n", strings.Join(f, "\t"))
 	}
+	writeOwnerMaterialChain(o, rep.OwnerMaterialChain)
+	writeRuntimeRead(o, rep.RuntimeRead)
 	return o.err
+}
+
+// writeRuntimeRead prints the runtime read section: the counts by cohort
+// and by shape, and one row per agent whose chain is not recorded (secret
+// names only).
+func writeRuntimeRead(o *textOut, rr hub.RuntimeReadCensus) {
+	o.printf("%s\n", "# runtime read")
+	for _, k := range sortedKeys(rr.ByCohort) {
+		o.printf("cohort\t%s\t%d\n", k, rr.ByCohort[k])
+	}
+	for _, k := range sortedKeys(rr.ByShape) {
+		o.printf("shape\t%s\t%d\n", k, rr.ByShape[k])
+	}
+	o.printf("%s\n", strings.Join([]string{"agent_id", "project_id", "owner_id", "cohort", "shape", "depth", "ancestor_agent_id",
+		"root_user_id", "shared_secrets", "secrets_error", "remedy"}, "\t"))
+	for _, r := range rr.Rows {
+		o.printf("%s\n", strings.Join([]string{r.AgentID, r.ProjectID, r.OwnerID, r.Cohort, r.Shape, strconv.Itoa(r.Depth),
+			r.AncestorAgentID, r.RootUserID, strings.Join(r.SharedSecrets, ","), r.SecretsError, r.Remedy}, "\t"))
+	}
+}
+
+// writeOwnerMaterialChain prints the owner material chain section: the
+// counts, the remedy, and one row per listed agent (row names only),
+// including the owner's shared secrets that start also withholds.
+func writeOwnerMaterialChain(o *textOut, omc hub.OwnerMaterialChainCensus) {
+	o.printf("%s\n", "# owner material chain")
+	o.printf("withheld\t%d\naffected\t%d\n", omc.Withheld, omc.Affected)
+	for _, k := range sortedKeys(omc.ByReason) {
+		o.printf("reason\t%s\t%d\n", k, omc.ByReason[k])
+	}
+	o.printf("remedy\t%s\n", omc.Remedy)
+	o.printf("%s\n", strings.Join([]string{"agent_id", "project_id", "owner_id", "reason", "depth", "secrets", "env_vars", "rows_error", "shared_secrets"}, "\t"))
+	for _, r := range omc.Rows {
+		o.printf("%s\n", strings.Join([]string{r.AgentID, r.ProjectID, r.OwnerID, r.Reason, strconv.Itoa(r.Depth),
+			strings.Join(r.Secrets, ","), strings.Join(r.EnvVars, ","), r.RowsError, strings.Join(r.SharedSecrets, ",")}, "\t"))
+	}
 }
 
 // textOut writes formatted lines and keeps the first write error.

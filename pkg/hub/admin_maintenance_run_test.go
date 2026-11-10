@@ -24,12 +24,14 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/maintenance"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/rebuildpreflight"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/version"
 )
@@ -420,5 +422,235 @@ func TestMarkRunRestarting_FailureOnCancelledCtxClearsPendingUpdate(t *testing.T
 	requireNoPendingUpdate(t, s)
 	if run.Status == store.MaintenanceStatusRestarting {
 		t.Fatalf("run left as restarting after a failed write: %+v", run)
+	}
+}
+
+// resultTestExecutor is a MaintenanceExecutor for the run plumbing tests.
+// It writes logText, then panics with panicWith if set, else returns err.
+// It reports result (a copy) as its RunResult, or panics there when
+// resultPanics is set.
+type resultTestExecutor struct {
+	logText      string
+	err          error
+	panicWith    any
+	result       map[string]any
+	resultPanics bool
+
+	grant      *rebuildpreflight.ForceGrant
+	checkpoint func(map[string]any) error
+}
+
+func (e *resultTestExecutor) Run(_ context.Context, logger io.Writer, _ map[string]string) error {
+	_, _ = io.WriteString(logger, e.logText)
+	if e.panicWith != nil {
+		panic(e.panicWith)
+	}
+	return e.err
+}
+
+func (e *resultTestExecutor) RunResult() map[string]any {
+	if e.resultPanics {
+		panic("RunResult broke")
+	}
+	out := make(map[string]any, len(e.result))
+	for k, v := range e.result {
+		out[k] = v
+	}
+	return out
+}
+
+func (e *resultTestExecutor) SetForceGrant(g *rebuildpreflight.ForceGrant) { e.grant = g }
+
+func (e *resultTestExecutor) SetCheckpoint(f func(map[string]any) error) { e.checkpoint = f }
+
+// plainTestExecutor reports no result.
+type plainTestExecutor struct {
+	logText   string
+	err       error
+	panicWith any
+}
+
+func (e *plainTestExecutor) Run(_ context.Context, logger io.Writer, _ map[string]string) error {
+	_, _ = io.WriteString(logger, e.logText)
+	if e.panicWith != nil {
+		panic(e.panicWith)
+	}
+	return e.err
+}
+
+// runStoredOperation creates a running run, runs executor for it through
+// launchMaintenanceRun, and returns the stored run once it has finished.
+func runStoredOperation(t *testing.T, executor MaintenanceExecutor) *store.MaintenanceOperationRun {
+	t.Helper()
+	srv, s := newTestServerWithStore(t)
+	ctx := context.Background()
+	run := &store.MaintenanceOperationRun{
+		ID:           tid("run-plumbing"),
+		OperationKey: "pull-images",
+		Status:       store.MaintenanceStatusRunning,
+		StartedAt:    time.Now(),
+		StartedBy:    "admin@example.com",
+	}
+	if err := s.CreateMaintenanceRun(ctx, run); err != nil {
+		t.Fatal(err)
+	}
+	srv.launchMaintenanceRun(run, executor, nil)
+	return waitForRunStatus(t, s, run.ID, func(r *store.MaintenanceOperationRun) bool {
+		return r.Status != store.MaintenanceStatusRunning
+	})
+}
+
+func decodeRunResult(t *testing.T, raw string) map[string]any {
+	t.Helper()
+	var m map[string]any
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+		t.Fatalf("Result %q is not a JSON object: %v", raw, err)
+	}
+	return m
+}
+
+// A finished run's Result is the executor's RunResult, plus the error on
+// failure and on panic; a panic keeps the log written before it.
+func TestLaunchMaintenanceRun_MergesTheExecutorResult(t *testing.T) {
+	recorded := map[string]any{"commit": "abc", "installed": true}
+	cases := []struct {
+		name       string
+		executor   *resultTestExecutor
+		wantStatus string
+		want       map[string]any
+	}{
+		{"success", &resultTestExecutor{logText: "built\n", result: recorded},
+			store.MaintenanceStatusCompleted, map[string]any{"commit": "abc", "installed": true}},
+		{"failure", &resultTestExecutor{logText: "built\n", result: recorded, err: errors.New("install failed")},
+			store.MaintenanceStatusFailed, map[string]any{"commit": "abc", "installed": true, "error": "install failed"}},
+		{"panic", &resultTestExecutor{logText: "built\n", result: recorded, panicWith: "boom"},
+			store.MaintenanceStatusFailed, map[string]any{"commit": "abc", "installed": true, "error": "executor panic: boom"}},
+		{"executor error key loses", &resultTestExecutor{logText: "built\n", result: map[string]any{"error": "mine"}, err: errors.New("real")},
+			store.MaintenanceStatusFailed, map[string]any{"error": "real"}},
+		{"RunResult panics on a panicked run", &resultTestExecutor{logText: "built\n", resultPanics: true, panicWith: "boom"},
+			store.MaintenanceStatusFailed, map[string]any{"error": "executor panic: boom", "resultError": "internal"}},
+		// A RunResult panic on the failure or success path is caught by the
+		// run's recover, so the run fails with only the panic as its error.
+		{"RunResult panics on a failed run", &resultTestExecutor{logText: "built\n", resultPanics: true, err: errors.New("install failed")},
+			store.MaintenanceStatusFailed, map[string]any{"error": "executor panic: RunResult broke", "resultError": "internal"}},
+		{"RunResult panics on a successful run", &resultTestExecutor{logText: "built\n", resultPanics: true},
+			store.MaintenanceStatusFailed, map[string]any{"error": "executor panic: RunResult broke", "resultError": "internal"}},
+		// A Result that cannot be encoded keeps only its error.
+		{"unencodable result on a failed run", &resultTestExecutor{logText: "built\n", result: map[string]any{"commit": "abc", "bad": func() {}}, err: errors.New("install failed")},
+			store.MaintenanceStatusFailed, map[string]any{"error": "install failed", "resultError": "internal"}},
+		{"unencodable result on a successful run", &resultTestExecutor{logText: "built\n", result: map[string]any{"commit": "abc", "bad": make(chan int)}},
+			store.MaintenanceStatusCompleted, map[string]any{"resultError": "internal"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := runStoredOperation(t, tc.executor)
+			if got.Status != tc.wantStatus {
+				t.Errorf("status = %q, want %q", got.Status, tc.wantStatus)
+			}
+			if got.CompletedAt == nil {
+				t.Error("CompletedAt not set")
+			}
+			if got.Log != "built\n" {
+				t.Errorf("log = %q, want the executor's log", got.Log)
+			}
+			if res := decodeRunResult(t, got.Result); !reflect.DeepEqual(res, tc.want) {
+				t.Errorf("Result = %v, want %v", res, tc.want)
+			}
+		})
+	}
+}
+
+// An executor that reports no result keeps the Result it always had: none
+// on success, the error on failure and panic. The panic keeps the log.
+func TestLaunchMaintenanceRun_ExecutorWithoutResult(t *testing.T) {
+	got := runStoredOperation(t, &plainTestExecutor{logText: "ok\n"})
+	if got.Status != store.MaintenanceStatusCompleted || got.Result != "" || got.Log != "ok\n" {
+		t.Errorf("success: status %q, Result %q, log %q", got.Status, got.Result, got.Log)
+	}
+
+	got = runStoredOperation(t, &plainTestExecutor{logText: "half\n", err: errors.New("pull failed")})
+	if got.Status != store.MaintenanceStatusFailed || got.Result != `{"error":"pull failed"}` || got.Log != "half\n" {
+		t.Errorf("failure: status %q, Result %q, log %q", got.Status, got.Result, got.Log)
+	}
+
+	got = runStoredOperation(t, &plainTestExecutor{logText: "before the panic\n", panicWith: "boom"})
+	if got.Status != store.MaintenanceStatusFailed || got.Result != `{"error":"executor panic: boom"}` {
+		t.Errorf("panic: status %q, Result %q", got.Status, got.Result)
+	}
+	if got.Log != "before the panic\n" {
+		t.Errorf("panic: log = %q, want the log written before the panic", got.Log)
+	}
+}
+
+// The force grant reaches only an executor that takes one, and only when
+// there is one; the checkpoint reaches an executor that takes one.
+func TestWireMaintenanceExecutor(t *testing.T) {
+	checkpointCalled := false
+	checkpoint := func(map[string]any) error { checkpointCalled = true; return nil }
+
+	ex := &resultTestExecutor{}
+	if err := wireMaintenanceExecutor(ex, nil, checkpoint); err != nil {
+		t.Fatal(err)
+	}
+	if ex.grant != nil {
+		t.Error("no grant was built, but the executor got one")
+	}
+	if ex.checkpoint == nil {
+		t.Fatal("the checkpoint was not handed over")
+	}
+	_ = ex.checkpoint(nil)
+	if !checkpointCalled {
+		t.Error("the executor got a different checkpoint")
+	}
+
+	grant := &rebuildpreflight.ForceGrant{RerunOf: "run-1", ActorID: "u-1", ActorEmail: "admin@example.com"}
+	ex = &resultTestExecutor{}
+	if err := wireMaintenanceExecutor(ex, grant, checkpoint); err != nil {
+		t.Fatal(err)
+	}
+	if ex.grant != grant {
+		t.Errorf("grant = %+v, want the handler's grant", ex.grant)
+	}
+
+	err := wireMaintenanceExecutor(&plainTestExecutor{}, grant, checkpoint)
+	if err == nil || !strings.Contains(err.Error(), "does not take a force grant") {
+		t.Errorf("a grant for an executor that cannot take one: err = %v", err)
+	}
+	if err := wireMaintenanceExecutor(&plainTestExecutor{}, nil, checkpoint); err != nil {
+		t.Errorf("an executor without the optional interfaces: err = %v", err)
+	}
+}
+
+// resultRestartingExecutor is a restartingExecutor that also reports a
+// result.
+type resultRestartingExecutor struct {
+	restartingExecutor
+	result map[string]any
+}
+
+func (e *resultRestartingExecutor) RunResult() map[string]any {
+	out := make(map[string]any, len(e.result))
+	for k, v := range e.result {
+		out[k] = v
+	}
+	return out
+}
+
+// A restarting executor that fails after its before-restart hook records
+// its RunResult with the error, as any failed run does.
+func TestLaunchMaintenanceRun_RestartingFailureMergesTheExecutorResult(t *testing.T) {
+	srv, s := newTestServerWithStore(t)
+	run := newRun(t, s)
+	exec := &resultRestartingExecutor{
+		restartingExecutor: restartingExecutor{hookErr: errors.New("restart failed")},
+		result:             map[string]any{"commit": "abc"},
+	}
+	srv.launchMaintenanceRun(run, exec, map[string]string{})
+	got := waitForRunStatus(t, s, run.ID, func(r *store.MaintenanceOperationRun) bool {
+		return r.Status == store.MaintenanceStatusFailed
+	})
+	res := decodeRunResult(t, got.Result)
+	if res["commit"] != "abc" || !strings.Contains(fmt.Sprint(res["error"]), "restart failed") {
+		t.Fatalf("Result = %v, want the executor's result plus the error", res)
 	}
 }
