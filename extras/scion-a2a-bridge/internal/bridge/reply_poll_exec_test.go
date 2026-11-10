@@ -698,6 +698,30 @@ func TestReplyPoll_SameCallerConcurrency(t *testing.T) {
 		}
 	})
 
+	t.Run("a concurrent call by a different user caller is not refused", func(t *testing.T) {
+		f := newFakeConvHub(t)
+		f.seedConversation()
+		b, _, _ := newExecTestBridge(t, f, func(c *Config) { c.Timeouts.SendMessage = 3 * time.Second })
+		first := runExecAsync(context.Background(), b, "task-d13-other-1", execTestCaller(), false, "the first request")
+		f.awaitSend(t)
+		other := &CallerIdentity{
+			UserID: "other-caller-uuid-exec", Email: "other@example.com", Role: "member",
+			RawToken: "other-caller-credential-exec", TokenType: "uat",
+		}
+		second := runExecAsync(context.Background(), b, "task-d13-other-2", other, false, "the other caller's request")
+		f.awaitSend(t)
+		if _, _, _, sends := f.counts(); sends != 2 {
+			t.Fatalf("sends = %d, want 2 (the other caller's call is sent)", sends)
+		}
+		f.addAgentRow(messages.TypeInstruction, execTestDMKey, "the first reply")
+		if out := awaitOutcome(t, first); out.final != a2a.TaskStateCompleted || out.text != "the first reply" {
+			t.Fatalf("first call ended %v %q, want completed with the first reply", out.final, out.text)
+		}
+		if out := awaitOutcome(t, second); out.text == replyMsgBusy {
+			t.Fatalf("the other caller's call was refused as a concurrent call by the same caller")
+		}
+	})
+
 	t.Run("with reply_poll.enabled false the second call is not refused", func(t *testing.T) {
 		f := newFakeConvHub(t)
 		f.seedConversation()

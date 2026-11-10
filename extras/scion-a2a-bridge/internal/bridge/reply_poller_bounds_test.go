@@ -21,6 +21,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -481,6 +482,11 @@ func TestReplyPoller_StopWaitsForAppend(t *testing.T) {
 // PostgreSQL SDK task store. The reply is appended only while the task's
 // snapshot is not final and this replica holds its execution lease (D10).
 func TestReplyPoller_StandaloneAppendFence(t *testing.T) {
+	// Skip the parent as a whole, so a run without PostgreSQL reports a
+	// skip rather than a pass with every subtest skipped.
+	if os.Getenv("TEST_DATABASE_URL") == "" {
+		t.Skip("TEST_DATABASE_URL not set — skipping real Postgres test")
+	}
 	reply := dmRow("fenced-reply", pollTestAgentID, messages.TypeInstruction, "dm:x", "a late reply", time.Second)
 	tests := []struct {
 		name    string
