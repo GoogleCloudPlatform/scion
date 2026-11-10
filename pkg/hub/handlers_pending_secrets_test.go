@@ -238,7 +238,7 @@ func TestAgentPendingSecret_ProvenanceFromTokenOnly(t *testing.T) {
 
 // TestAgentPendingSecret_OtherAgentRefused: agent B's write of a name agent
 // A holds pending is refused with 409, force or not. A's row, value and ID
-// are unchanged, and the response names neither A nor A's project.
+// stay as they were, and the response names neither A nor A's project.
 func TestAgentPendingSecret_OtherAgentRefused(t *testing.T) {
 	f := newPendingFixture(t, "pend-other")
 	resp := decodePendingResponse(t, agentPut(t, f.Server, f.AgentID, f.Token, "TOOL_AUTH", userScopeWrite("test-value-a", false)))
@@ -272,7 +272,7 @@ func TestAgentPendingSecret_OtherAgentRefused(t *testing.T) {
 
 // TestAgentPendingSecret_SameAgentReplaces: the writer replaces its own
 // pending write with or without force: new ID, created and expiry kept,
-// updated set, the old held value released after the write.
+// updated set, the replaced held value released after the write.
 func TestAgentPendingSecret_SameAgentReplaces(t *testing.T) {
 	for _, force := range []bool{false, true} {
 		t.Run("force="+boolStr(force), func(t *testing.T) {
@@ -554,9 +554,9 @@ func TestPendingSecretsAPI_Refusals(t *testing.T) {
 	assert.ErrorIs(t, err, store.ErrNotFound)
 }
 
-// TestAgentPendingSecret_ProjectScopeUnchanged: project-scope agent writes
-// still write the secrets table directly and record no pending row.
-func TestAgentPendingSecret_ProjectScopeUnchanged(t *testing.T) {
+// TestAgentPendingSecret_ProjectScopeStoredDirectly: project-scope agent
+// writes go to the secrets table and record no pending row.
+func TestAgentPendingSecret_ProjectScopeStoredDirectly(t *testing.T) {
 	f := newPendingFixture(t, "pend-project")
 	rec := agentPut(t, f.Server, f.AgentID, f.Token, "PROJ_KEY", AgentSetSecretRequest{
 		Value: base64.StdEncoding.EncodeToString([]byte("test-value-1")), Scope: store.ScopeProject,
@@ -565,7 +565,7 @@ func TestAgentPendingSecret_ProjectScopeUnchanged(t *testing.T) {
 	rec = agentPut(t, f.Server, f.AgentID, f.Token, "PROJ_KEY", AgentSetSecretRequest{
 		Value: base64.StdEncoding.EncodeToString([]byte("test-value-2")), Scope: store.ScopeProject,
 	})
-	require.Equal(t, http.StatusConflict, rec.Code, "an existing project secret still needs force: %s", rec.Body.String())
+	require.Equal(t, http.StatusConflict, rec.Code, "an existing project secret needs force: %s", rec.Body.String())
 	rec = agentPut(t, f.Server, f.AgentID, f.Token, "PROJ_KEY", AgentSetSecretRequest{
 		Value: base64.StdEncoding.EncodeToString([]byte("test-value-2")), Scope: store.ScopeProject, Force: true,
 	})
@@ -647,7 +647,7 @@ func TestPendingSecret_EndToEnd(t *testing.T) {
 
 // TestPendingSecretsAPI_SecretNamedPendingReachable: the pending secret
 // endpoints have their own prefix, so a user secret named "pending" is
-// reachable on every verb of the secrets route as before.
+// reachable on every verb of the secrets route.
 func TestPendingSecretsAPI_SecretNamedPendingReachable(t *testing.T) {
 	f := newPendingFixture(t, "pend-name")
 	owner := f.owner()
@@ -669,7 +669,7 @@ func TestPendingSecretsAPI_SecretNamedPendingReachable(t *testing.T) {
 		map[string]interface{}{"description": "named pending"})
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
-	// The pending list is a different endpoint and is unaffected.
+	// The pending list is a separate endpoint and lists nothing.
 	assert.Empty(t, f.listPending(t, owner))
 
 	rec = ownerRequest(t, f.Server, owner, CredentialKindInteractive, http.MethodDelete, path, nil)

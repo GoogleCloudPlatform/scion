@@ -3047,14 +3047,14 @@ class TestCaptureAuthPendingApproval(unittest.TestCase):
         # Not the "already exists" line: --force would not help.
         self.assertNotIn("already exists", out)
 
-    def test_project_scope_conflict_unchanged(self):
+    def test_project_scope_conflict_needs_force(self):
         rc, _, out = self.run_capture(
             [(1, 'ERROR secret "TOOL_AUTH" already exists (use --force to overwrite)')],
             argv=["--scope", "project"])
         self.assertEqual(rc, sh._CA_EXIT_CONFLICT)
         self.assertIn('CONFLICT: secret "TOOL_AUTH" already exists (use --force to overwrite)', out)
 
-    def test_project_scope_store_unchanged(self):
+    def test_project_scope_stored_directly(self):
         rc, _, out = self.run_capture(
             [(0, 'INFO Secret "TOOL_AUTH" stored (scope: project)')], argv=["--scope", "project"])
         self.assertEqual(rc, sh._CA_EXIT_OK)
