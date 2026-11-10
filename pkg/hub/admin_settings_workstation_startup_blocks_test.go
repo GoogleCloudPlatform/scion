@@ -87,6 +87,8 @@ func TestWorkstation_PutServerConfig_StartupBlockValidSaved(t *testing.T) {
 			[]string{"server", "hub", "sse", "max_connection_age"}, "5m"},
 		{"platform_request_timeout", `{"server":{"hub":{"platform_request_timeout":"900s"}}}`,
 			[]string{"server", "hub", "platform_request_timeout"}, "900s"},
+		{"chat search timeout", `{"server":{"hub":{"chat":{"search":{"timeout":"5s"}}}}}`,
+			[]string{"server", "hub", "chat", "search", "timeout"}, "5s"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -134,6 +136,15 @@ func TestWorkstation_PutServerConfig_StartupBlockInvalidRejected(t *testing.T) {
 			`"platform_request_timeout":"30s"`,
 			"server.hub.platform_request_timeout",
 			config.ValidatePlatformRequestTimeout("30s").Error()},
+		// Round-4 item R4-02: startup would log this and use 3s; the PUT refuses it.
+		{"chat search timeout not a duration",
+			`"chat":{"search":{"timeout":"soon"}}`,
+			"server.hub.chat.search.timeout",
+			config.HubChatSearchConfig{Timeout: "soon"}.Validate().Error()},
+		{"chat search timeout negative",
+			`"chat":{"search":{"timeout":"-1s"}}`,
+			"server.hub.chat.search.timeout",
+			config.HubChatSearchConfig{Timeout: "-1s"}.Validate().Error()},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -311,6 +322,9 @@ func TestHosted_PutServerConfig_StartupBlocksStillLayer0(t *testing.T) {
 		{`{"server":{"hub":{"conduit":{"lifetime_cap":"10s"}}}}`, "server.hub.conduit.lifetime_cap"},
 		{`{"server":{"hub":{"port_proxy":{"response_header_timeout":"30s"}}}}`, "server.hub.port_proxy.response_header_timeout"},
 		{`{"server":{"hub":{"port_proxy":{"response_header_timeout":"1s"}}}}`, "server.hub.port_proxy.response_header_timeout"},
+		// Round-5 item R5-01: the chat search block is Layer-0 on a hosted hub too.
+		{`{"server":{"hub":{"chat":{"search":{"timeout":"5s"}}}}}`, "server.hub.chat.search.timeout"},
+		{`{"server":{"hub":{"chat":{"search":{"timeout":"soon"}}}}}`, "server.hub.chat.search.timeout"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.body, func(t *testing.T) {

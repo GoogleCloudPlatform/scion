@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -83,6 +84,11 @@ type UserTokenClaims struct {
 	Role        string        `json:"role"`
 	TokenType   UserTokenType `json:"type"`
 	ClientType  ClientType    `json:"client"`
+	// SessionGeneration is the user's session generation at the time the
+	// credential behind this token was established. Validation compares it
+	// with the users row (see sessionGenerationRefusal). A token without the
+	// claim decodes to 0.
+	SessionGeneration int64 `json:"sg"`
 }
 
 // UserTokenConfig holds configuration for user token generation.
@@ -197,8 +203,11 @@ func NewUserTokenService(config UserTokenConfig) (*UserTokenService, error) {
 	}, nil
 }
 
-// GenerateTokenPair generates an access token and refresh token for a user.
-func (s *UserTokenService) GenerateTokenPair(userID, email, displayName, role string, clientType ClientType) (accessToken, refreshToken string, expiresIn int64, err error) {
+// MintTokenPair generates an access token and refresh token for a user.
+// sessionGeneration is carried in both tokens as the sg claim. Callers pass
+// the users-row value for a fresh authentication, or the value captured in
+// the presented credential for a re-mint, never a fresh row read.
+func (s *UserTokenService) MintTokenPair(userID, email, displayName, role string, sessionGeneration int64, clientType ClientType) (accessToken, refreshToken string, expiresIn int64, err error) {
 	// Determine access token duration based on client type
 	var accessDuration time.Duration
 	var tokenType UserTokenType
@@ -211,13 +220,13 @@ func (s *UserTokenService) GenerateTokenPair(userID, email, displayName, role st
 	}
 
 	// Generate access token
-	accessToken, err = s.generateToken(userID, email, displayName, role, tokenType, clientType, accessDuration)
+	accessToken, err = s.generateToken(userID, email, displayName, role, sessionGeneration, tokenType, clientType, accessDuration)
 	if err != nil {
 		return "", "", 0, fmt.Errorf("failed to generate access token: %w", err)
 	}
 
 	// Generate refresh token
-	refreshToken, err = s.generateToken(userID, email, displayName, role, TokenTypeRefresh, clientType, s.config.RefreshTokenDuration)
+	refreshToken, err = s.generateToken(userID, email, displayName, role, sessionGeneration, TokenTypeRefresh, clientType, s.config.RefreshTokenDuration)
 	if err != nil {
 		return "", "", 0, fmt.Errorf("failed to generate refresh token: %w", err)
 	}
@@ -226,8 +235,9 @@ func (s *UserTokenService) GenerateTokenPair(userID, email, displayName, role st
 	return accessToken, refreshToken, expiresIn, nil
 }
 
-// GenerateAccessToken generates just an access token for a user.
-func (s *UserTokenService) GenerateAccessToken(userID, email, displayName, role string, clientType ClientType) (string, int64, error) {
+// MintAccessToken generates just an access token for a user, carrying
+// sessionGeneration as the sg claim (see MintTokenPair).
+func (s *UserTokenService) MintAccessToken(userID, email, displayName, role string, sessionGeneration int64, clientType ClientType) (string, int64, error) {
 	var duration time.Duration
 	var tokenType UserTokenType
 	if clientType == ClientTypeCLI {
@@ -238,18 +248,19 @@ func (s *UserTokenService) GenerateAccessToken(userID, email, displayName, role 
 		tokenType = TokenTypeAccess
 	}
 
-	token, err := s.generateToken(userID, email, displayName, role, tokenType, clientType, duration)
+	token, err := s.generateToken(userID, email, displayName, role, sessionGeneration, tokenType, clientType, duration)
 	if err != nil {
 		return "", 0, err
 	}
 	return token, int64(duration.Seconds()), nil
 }
 
-// GenerateAccessTokenWithTTL generates an access token with a specific duration.
+// MintAccessTokenWithTTL generates an access token with a specific duration,
+// carrying sessionGeneration as the sg claim (see MintTokenPair).
 // Used by GE exchange to cryptographically cap the token lifetime at
 // min(configured TTL, upstream credential expiry).
-func (s *UserTokenService) GenerateAccessTokenWithTTL(userID, email, displayName, role string, clientType ClientType, ttl time.Duration) (string, int64, error) {
-	token, err := s.generateToken(userID, email, displayName, role, TokenTypeAccess, clientType, ttl)
+func (s *UserTokenService) MintAccessTokenWithTTL(userID, email, displayName, role string, sessionGeneration int64, clientType ClientType, ttl time.Duration) (string, int64, error) {
+	token, err := s.generateToken(userID, email, displayName, role, sessionGeneration, TokenTypeAccess, clientType, ttl)
 	if err != nil {
 		return "", 0, err
 	}
@@ -257,7 +268,7 @@ func (s *UserTokenService) GenerateAccessTokenWithTTL(userID, email, displayName
 }
 
 // generateToken creates a signed JWT token.
-func (s *UserTokenService) generateToken(userID, email, displayName, role string, tokenType UserTokenType, clientType ClientType, duration time.Duration) (string, error) {
+func (s *UserTokenService) generateToken(userID, email, displayName, role string, sessionGeneration int64, tokenType UserTokenType, clientType ClientType, duration time.Duration) (string, error) {
 	now := s.clock()
 
 	claims := UserTokenClaims{
@@ -276,6 +287,8 @@ func (s *UserTokenService) generateToken(userID, email, displayName, role string
 		Role:        role,
 		TokenType:   tokenType,
 		ClientType:  clientType,
+
+		SessionGeneration: sessionGeneration,
 	}
 
 	token, err := s.signClaims(claims, now)
@@ -333,15 +346,47 @@ func (s *UserTokenService) ValidateRefreshToken(tokenString string) (*UserTokenC
 	return claims, nil
 }
 
-// RefreshTokens uses a refresh token to generate a new token pair.
-func (s *UserTokenService) RefreshTokens(refreshToken string) (accessToken, newRefreshToken string, expiresIn int64, err error) {
-	claims, err := s.ValidateRefreshToken(refreshToken)
-	if err != nil {
-		return "", "", 0, fmt.Errorf("invalid refresh token: %w", err)
+// sessionGenerationRefusal compares the session generation carried by a
+// credential (claim) with the users row (row). It returns "" when they are
+// equal and a stable reason otherwise: any inequality refuses. A credential
+// without a generation reads as 0.
+//
+// The any-inequality rule relies on every read of the users row being
+// authoritative: there is no read replica and no user-row cache on the user
+// read path. If either is introduced, revisit this rule before it ships.
+func sessionGenerationRefusal(claim, row int64) string {
+	switch {
+	case claim == row:
+		return ""
+	case row > claim:
+		return sessionGenerationReasonRevoked
+	default:
+		return sessionGenerationReasonAhead
 	}
+}
 
-	// Generate new token pair
-	return s.GenerateTokenPair(claims.UserID, claims.Email, claims.DisplayName, claims.Role, claims.ClientType)
+const (
+	// sessionGenerationReasonRevoked: the users row has moved past the
+	// credential's generation (sessions were revoked after it was issued).
+	sessionGenerationReasonRevoked = "session_revoked"
+	// sessionGenerationReasonAhead: the credential's generation is ahead of
+	// the users row, which only happens after a rollback or restore.
+	sessionGenerationReasonAhead = "session_generation_ahead"
+)
+
+// logSessionGenerationRefusal logs a refusal from sessionGenerationRefusal to
+// log (the caller's own logger; the default logger when nil): at Warn for a
+// revoked session, at Error for a credential ahead of the row.
+func logSessionGenerationRefusal(ctx context.Context, log *slog.Logger, path, userID string, claim, row int64, reason string) {
+	if log == nil {
+		log = slog.Default()
+	}
+	level := slog.LevelWarn
+	if reason == sessionGenerationReasonAhead {
+		level = slog.LevelError
+	}
+	log.Log(ctx, level, "Session generation mismatch",
+		"path", path, "user_id", userID, "claim", claim, "row", row, "reason", reason)
 }
 
 // GetTokenExpiry extracts the expiry time from a token without full validation.

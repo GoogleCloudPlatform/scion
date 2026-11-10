@@ -170,6 +170,10 @@ const (
 	CloseReasonAttachUnsupported = "attach_unsupported"
 )
 
+// CloseReasonInputOverflow (1009): the broker closed a stream whose input
+// exceeded its stream input limit (pkg/runtimebroker).
+const CloseReasonInputOverflow = "input_overflow"
+
 // ErrCodeRuntimeAttachUnsupported is the JSON error code
 // (ErrorResponse.Error.Code) a broker's direct-connect PTY endpoint returns
 // with HTTP 501, before any WebSocket upgrade, for the same attach-support

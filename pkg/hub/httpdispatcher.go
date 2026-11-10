@@ -688,7 +688,20 @@ func (d *HTTPAgentDispatcher) dispatchStandingError(ctx context.Context, agent *
 // isHashMismatchError reports whether err is a broker hash-mismatch error
 // from resource hydration (template or harness-config).
 func isHashMismatchError(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "hash mismatch for file")
+	return err != nil && strings.Contains(brokerErrorMatchText(err), "hash mismatch for file")
+}
+
+// brokerErrorMatchText returns the text a broker error is matched against:
+// err's own text plus, when err carries a broker HTTP error, the broker's
+// body, which brokerStatusError.Error() leaves out. For matching only;
+// never for a response or a stored message.
+func brokerErrorMatchText(err error) string {
+	text := err.Error()
+	var se *brokerStatusError
+	if errors.As(err, &se) {
+		text += " " + se.Body
+	}
+	return text
 }
 
 // repairHashMismatch attempts to sync the affected resource's DB manifest from
@@ -699,7 +712,7 @@ func (d *HTTPAgentDispatcher) repairHashMismatch(ctx context.Context, agent *sto
 		return fmt.Errorf("no applied config")
 	}
 
-	msg := dispatchErr.Error()
+	msg := brokerErrorMatchText(dispatchErr)
 
 	// Route to the correct repairer based on the hydration error prefix.
 	if strings.Contains(msg, "Failed to hydrate template:") {

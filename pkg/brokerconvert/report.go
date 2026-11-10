@@ -65,6 +65,22 @@ const (
 	RefuseDefaultUnknown     = "default_instance_unknown"
 	RefuseInstanceDrained    = "instance_not_drained"
 	RefuseIdentityUnreadable = "identity_unreadable"
+
+	// The co-located path (design section 4.8 and Q7).
+	RefuseColocatedUnknown    = "colocated_mode_unknown"
+	RefuseHostModeConflict    = "host_mode_conflict"
+	RefuseColocatedServerDown = "colocated_server_down"
+	RefuseColocatedJournal    = "colocated_journal_state"
+	RefuseStoreReplica        = "store_replica_setup"
+	RefuseStoreUnknown        = "store_topology_unknown"
+	RefuseStoreUnreadable     = "store_unreadable"
+	RefuseSingleHubMisplaced  = "single_hub_replica_misplaced"
+	RefuseSingleHubRequired   = "single_hub_replica_required"
+	RefuseHubEndpointAnswers  = "hub_endpoint_answers"
+	RefuseHubEndpointUnprobed = "hub_endpoint_unprobeable"
+	RefuseStopRecheckMissing  = "stop_recheck_missing"
+	RefuseStopRecheckExpired  = "stop_recheck_expired"
+	RefuseCredentialsCleanup  = "credentials_cleanup_failed"
 )
 
 var refusalTexts = map[string]string{
@@ -95,6 +111,21 @@ var refusalTexts = map[string]string{
 	RefuseDefaultUnknown:     "a project's default instance cannot be chosen from the plan",
 	RefuseInstanceDrained:    "non-terminal agents are bound to a flat instance; finish or delete them, then run the rollback again",
 	RefuseIdentityUnreadable: "an instance identity file could not be read; it must be an owner-only regular file holding valid JSON; fix it, then run the rollback again",
+
+	RefuseColocatedUnknown:    "whether this host's server runs the Hub with an embedded Runtime Broker cannot be determined: no saved server or broker launch was found (or it, or the server settings, could not be read); either assert the mode with --host-mode colocated|remote, or start the server ('scion server start') or the Runtime Broker ('scion runtime-broker start') once through the daemon, then run the command again",
+	RefuseHostModeConflict:    "the host mode is fixed by the first apply and is never overridden, and the sources disagree; run with the journaled mode, or roll back first",
+	RefuseColocatedServerDown: "this step needs this host's Hub: start the server ('scion server start') and run the command again",
+	RefuseColocatedJournal:    "the convert journal is in a state this command cannot continue from; see 'convert --status'",
+	RefuseStoreReplica:        "this Hub's settings configure more than one Hub process for its store (an HA or replica setup), so another Hub could accept agents while this server is stopped; a co-located conversion is refused (--single-hub-replica does not override this)",
+	RefuseStoreUnknown:        "whether more than one Hub process serves this Hub's store cannot be determined from its settings; a co-located conversion is refused",
+	RefuseStoreUnreadable:     "the Hub's SQLite store could not be opened or read read-only; a co-located conversion is refused",
+	RefuseSingleHubMisplaced:  "--single-hub-replica is accepted only on the stopped phase of a co-located '--apply' whose Hub uses an external database",
+	RefuseSingleHubRequired:   "this Hub uses an external database, so this command cannot see whether another Hub process serves it; if exactly one Hub process serves it, say so with --single-hub-replica",
+	RefuseHubEndpointAnswers:  "the Hub endpoint still answers with this server stopped, so another Hub process serves this store; a co-located conversion is refused",
+	RefuseHubEndpointUnprobed: "the Hub endpoint could not be probed (none configured, or its address does not resolve); a co-located conversion is refused",
+	RefuseStopRecheckMissing:  "the journal has no record of the drained re-check before the stop; start the server and run 'convert --apply' again to repeat the running phase",
+	RefuseStopRecheckExpired:  "the server was stopped more than 30 minutes after the drained re-check; start the server and run 'convert --apply' again to repeat the running phase",
+	RefuseCredentialsCleanup:  "an instance credentials file could not be removed; nothing past it was removed; fix the cause and run again",
 }
 
 // RefusalText returns the fixed text for a refusal code.
@@ -116,6 +147,24 @@ const (
 	// started but recorded no Runtime Broker ID, and its identity file
 	// holds none, so no row could be named for deregistration.
 	NoteNoIdentity = "No Runtime Broker ID is recorded for an instance whose registration started, and its identity file holds none, so no row was deregistered for it. Check the Hub for a row of that name. Instance key:"
+
+	// NoteColocatedAwaitingStop is the outage text of a co-located apply's
+	// running phase. It is fixed, and a test holds it verbatim.
+	NoteColocatedAwaitingStop = "The legacy Runtime Broker is drained and the flat instance is registered. " +
+		"This host runs the Hub and its Runtime Broker in the same server process, so stopping the server takes the whole Hub down: " +
+		"every user, Runtime Broker and agent connected to this Hub loses it until the server is started again. " +
+		"Plan a maintenance window, then stop the server ('scion server stop') and run 'scion runtime-broker convert --apply' again."
+	// NoteColocatedRollbackAwaitingStop is the outage text of a co-located
+	// rollback's running phase.
+	NoteColocatedRollbackAwaitingStop = "The flat instance row and its links are removed. " +
+		"This host runs the Hub and its Runtime Broker in the same server process, so stopping the server takes the whole Hub down: " +
+		"every user, Runtime Broker and agent connected to this Hub loses it until the server is started again. " +
+		"Plan a maintenance window, then stop the server ('scion server stop') and run 'scion runtime-broker convert --rollback' again."
+
+	NoteColocatedStart          = "The settings now name the flat instance. Start the server ('scion server start'): it serves the flat instance under its registered ID. Then run 'scion runtime-broker convert --apply' again to remove the unused instance credentials file."
+	NoteColocatedCleanupWaiting = "The flat instance has not reported online yet; its unused credentials file is kept until it does. Run 'scion runtime-broker convert --apply' again once it shows online in 'convert --status'."
+	NoteColocatedDone           = "The conversion is complete: the flat instance serves this host and no unused instance credentials file remains."
+	NoteColocatedRollbackStart  = "The flat instance is removed from the settings and its directory is moved aside, without its unused credentials file. Start the server ('scion server start'): it serves the legacy Runtime Broker again."
 )
 
 // Refusal is a refused operation. It is an error whose text is fixed.
@@ -198,6 +247,7 @@ type Report struct {
 	PlanDigest     string         `json:"planDigest,omitempty"`
 	LegacyBrokerID string         `json:"legacyBrokerId,omitempty"`
 	State          JournalState   `json:"state,omitempty"`
+	HostMode       string         `json:"hostMode,omitempty"`
 	Instances      []InstanceLine `json:"instances"`
 	Settings       StepState      `json:"settings,omitempty"`
 	Projects       []ProjectLine  `json:"projects"`
@@ -215,6 +265,7 @@ func reportFrom(mode string, j *Journal) *Report {
 		return r
 	}
 	r.RunID, r.PlanDigest, r.LegacyBrokerID, r.State = j.RunID, j.PlanDigest, j.LegacyBrokerID, j.State
+	r.HostMode = j.HostMode
 	for _, it := range j.Register {
 		r.Instances = append(r.Instances, InstanceLine{Key: it.Key, Name: it.Name, BrokerID: it.BrokerID, RuntimeTargetID: it.RuntimeTargetID, State: it.State})
 	}

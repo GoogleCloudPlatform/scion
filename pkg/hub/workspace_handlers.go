@@ -271,7 +271,7 @@ func (s *Server) handleWorkspaceSyncFrom(w http.ResponseWriter, r *http.Request,
 			return
 		}
 		// Check if it's a timeout or connection issue
-		if errors.Is(err, context.DeadlineExceeded) || strings.Contains(err.Error(), "timeout") {
+		if errors.Is(err, context.DeadlineExceeded) || strings.Contains(brokerErrorMatchText(err), "timeout") {
 			GatewayTimeout(w, "Runtime Broker unreachable")
 			return
 		}
@@ -647,7 +647,7 @@ func (s *Server) handleWorkspaceSyncToFinalize(w http.ResponseWriter, r *http.Re
 		if writeRuntimeTargetRefusal(w, err) {
 			return
 		}
-		if strings.Contains(err.Error(), "timeout") {
+		if strings.Contains(brokerErrorMatchText(err), "timeout") {
 			GatewayTimeout(w, "Runtime Broker unreachable")
 			return
 		}
@@ -777,9 +777,10 @@ func tunnelWorkspaceRequest(ctx context.Context, cc *ControlChannelManager, brok
 		return err
 	}
 
-	// Check for error status codes
+	// Check for error status codes. The broker's body goes to the hub log
+	// only (newBrokerStatusError); the error text names the status and code.
 	if respEnv.StatusCode >= 400 {
-		return errRuntimeBrokerError(respEnv.StatusCode, string(respEnv.Body))
+		return newBrokerStatusError(brokerID, respEnv.StatusCode, respEnv.Body, respEnv.Headers["Retry-After"])
 	}
 
 	// Unmarshal response body
@@ -797,16 +798,12 @@ func errBrokerNotConnected(brokerID string) error {
 	return &brokerError{brokerID: brokerID, msg: "broker not connected via control channel"}
 }
 
-// errRuntimeBrokerError returns an error from the runtime broker.
-func errRuntimeBrokerError(statusCode int, body string) error {
-	return &brokerError{statusCode: statusCode, msg: body}
-}
-
-// brokerError represents an error from communication with a runtime broker.
+// brokerError represents an error from communication with a runtime broker
+// before any answer arrives (an answer with an error status is a
+// *brokerStatusError).
 type brokerError struct {
-	brokerID   string
-	statusCode int
-	msg        string
+	brokerID string
+	msg      string
 }
 
 func (e *brokerError) Error() string {

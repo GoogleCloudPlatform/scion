@@ -131,9 +131,10 @@ func (s *Server) drainBrokerDispatch(ctx context.Context, brokerID string, only 
 		result, execErr := s.execDispatch(dispatchCtx, d)
 		if execErr != nil {
 			s.agentLifecycleLog.Warn("reconcile: dispatch op failed", append(initiatorLogArgs, "error", execErr)...)
-			// The error text stays execErr.Error(): nodes that predate the
-			// result envelope read only that column.
-			if err := s.store.FailBrokerDispatch(ctx, d.ID, execErr.Error(), dispatchFailureResult(execErr)); err != nil {
+			// The error text is execErr's text with a broker answer's code
+			// and filtered message (dispatchFailureText), never its body:
+			// nodes that predate the result envelope read only that column.
+			if err := s.store.FailBrokerDispatch(ctx, d.ID, dispatchFailureText(execErr), dispatchFailureResult(execErr)); err != nil {
 				s.agentLifecycleLog.Error("reconcile: fail dispatch failed", "id", d.ID, "error", err)
 			}
 			if rec := s.dispatchMetrics; rec != nil {

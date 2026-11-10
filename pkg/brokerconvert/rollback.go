@@ -47,29 +47,57 @@ func Rollback(ctx context.Context, env *Env) (*Report, error) {
 	}
 	defer lock.Release()
 
-	j, err := LoadJournal(env.GlobalDir)
-	if err != nil {
-		return refused(ModeRollback, nil, refuse(RefuseLocalWrite))
+	r, rep, err := startRollback(ctx, env)
+	if rep != nil {
+		return rep, err
 	}
-	if j == nil {
-		return refused(ModeRollback, nil, refuse(RefuseNoJournal))
-	}
-	if j.State == JournalRolledBack {
-		return refused(ModeRollback, j, refuse(RefuseNothingToRollBack))
-	}
-	r := &run{ctx: ctx, env: env, j: j}
-
 	// The server must be stopped (the offline window holds).
 	if env.ServerRunning != nil && env.ServerRunning(ctx) {
-		return refused(ModeRollback, j, refuse(RefuseServerRunning))
+		return refused(ModeRollback, r.j, refuse(RefuseServerRunning))
 	}
+	notes, ref := r.rollbackHub()
+	if ref != nil {
+		return refused(ModeRollback, r.j, ref)
+	}
+	if ref := r.rollbackLocal(); ref != nil {
+		return refused(ModeRollback, r.j, ref)
+	}
+	rep = reportFrom(ModeRollback, r.j)
+	rep.Notes = append(rep.Notes, notes...)
+	rep.Notes = append(rep.Notes, NoteRolledBack)
+	return rep, nil
+}
+
+// startRollback loads the journal of the run to roll back. A non-nil
+// report ends the rollback with a refusal, also returned as the error.
+func startRollback(ctx context.Context, env *Env) (*run, *Report, error) {
+	j, err := LoadJournal(env.GlobalDir)
+	if err != nil {
+		rep, err := refused(ModeRollback, nil, refuse(RefuseLocalWrite))
+		return nil, rep, err
+	}
+	if j == nil {
+		rep, err := refused(ModeRollback, nil, refuse(RefuseNoJournal))
+		return nil, rep, err
+	}
+	if j.State == JournalRolledBack {
+		rep, err := refused(ModeRollback, j, refuse(RefuseNothingToRollBack))
+		return nil, rep, err
+	}
+	return &run{ctx: ctx, env: env, j: j}, nil, nil
+}
+
+// rollbackHub is the Hub part of a rollback: section 8.1 steps 0 to 3.
+// It returns the notes of step 0 for the report.
+func (r *run) rollbackHub() ([]string, *Refusal) {
+	j := r.j
 	// 0. A registration that started but recorded no Runtime Broker ID
 	// (it failed, or the run was cut short, after the Hub may have created
 	// the row) is named from the instance identity file, so that row is
 	// deregistered before the directory moves.
 	notes, ref := r.fillRegisteredIDs()
 	if ref != nil {
-		return refused(ModeRollback, j, ref)
+		return nil, ref
 	}
 	// 1. No flat instance may have a non-terminal agent.
 	for _, it := range j.Register {
@@ -77,7 +105,7 @@ func Rollback(ctx context.Context, env *Env) (*Report, error) {
 			continue
 		}
 		if ref := r.drained(it.BrokerID, RefuseInstanceDrained); ref != nil {
-			return refused(ModeRollback, j, ref)
+			return nil, ref
 		}
 	}
 
@@ -87,38 +115,38 @@ func Rollback(ctx context.Context, env *Env) (*Report, error) {
 	ensureDeregisterItems(j)
 	j.State = JournalRollingBack
 	if ref := r.save(); ref != nil {
-		return refused(ModeRollback, j, ref)
+		return nil, ref
 	}
 
 	// 2. Per project: restore the default, remove the instance links.
 	if ref := r.rollbackProjects(); ref != nil {
-		return refused(ModeRollback, j, ref)
+		return nil, ref
 	}
 	// 3. Deregister each instance row (its secret goes with it).
 	for i := range j.Rollback.Deregister {
 		if ref := r.deregister(&j.Rollback.Deregister[i]); ref != nil {
-			return refused(ModeRollback, j, ref)
+			return nil, ref
 		}
 	}
+	return notes, nil
+}
+
+// rollbackLocal is the local part of a rollback: section 8.1 steps 4 to 6.
+func (r *run) rollbackLocal() *Refusal {
+	j := r.j
 	// 4. Remove the instances key, only while it equals what apply wrote.
 	if ref := r.removeSettings(); ref != nil {
-		return refused(ModeRollback, j, ref)
+		return ref
 	}
 	// 5. Move each identity directory aside within the tree.
 	for i := range j.Rollback.Moved {
 		if ref := r.moveAside(&j.Rollback.Moved[i]); ref != nil {
-			return refused(ModeRollback, j, ref)
+			return ref
 		}
 	}
 	// 6. Done.
 	j.State = JournalRolledBack
-	if ref := r.save(); ref != nil {
-		return refused(ModeRollback, j, ref)
-	}
-	rep := reportFrom(ModeRollback, j)
-	rep.Notes = append(rep.Notes, notes...)
-	rep.Notes = append(rep.Notes, NoteRolledBack)
-	return rep, nil
+	return r.save()
 }
 
 // fillRegisteredIDs records, for each register item that is not pending

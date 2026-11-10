@@ -279,3 +279,76 @@ func TestWrapHubError_LocalWorktreeRefusedReasonBounded(t *testing.T) {
 		})
 	}
 }
+
+// The current Hub's relay of a broker failure: the message names the status
+// and code only, and the allowlisted details are structured error details.
+// These are the exact texts and details the Hub writes for the broker
+// answers in pkg/hub TestDispatchCreateErrorResponse_RelaysAllowlistedDetails.
+const (
+	currentHubTemplateErrorMessage = "Failed to dispatch to runtime broker: runtime broker returned error 422 (template_error)"
+	currentHubWorktreeMessage      = "Failed to dispatch to runtime broker: runtime broker returned error 409 (local_worktree_refused)"
+	currentHubWorktreeReason       = "cannot create a local worktree for this agent: the project's checkout at /home/u/r has origin " +
+		"https://example.com/acme/other.git, but the hub project's repository is https://example.com/acme/widgets.git; " +
+		"point origin at the hub project's repository, or link this checkout as its own project"
+)
+
+// TestWrapHubError_CurrentHubText: the CLI reads the current Hub's text
+// (status and code, no body) and its structured details, and renders the
+// same categories and guidance as for an older Hub's text.
+func TestWrapHubError_CurrentHubText(t *testing.T) {
+	tests := []struct {
+		name    string
+		message string
+		details map[string]interface{}
+		want    []string
+	}{
+		{
+			name:    "missing template file",
+			message: currentHubTemplateErrorMessage,
+			details: map[string]interface{}{"cause": "file_not_found", "file": "settings.json"},
+			want: []string{
+				`a template or harness-config file is missing on the runtime broker (file "settings.json")`,
+				"re-sync the template or harness-config to the Hub",
+				"broker code: template_error", "broker status: 422",
+			},
+		},
+		{
+			name:    "local worktree refused shows the reason",
+			message: currentHubWorktreeMessage,
+			details: map[string]interface{}{"reason": currentHubWorktreeReason},
+			want: []string{
+				"runtime broker failure: cannot create a local worktree for this agent",
+				"point origin at the hub project's repository",
+				"broker code: local_worktree_refused", "broker status: 409",
+			},
+		},
+		{
+			name:    "runtime error without details",
+			message: "Failed to dispatch to runtime broker: runtime broker returned error 500 (runtime_error)",
+			want:    []string{"container runtime operation failed", "broker code: runtime_error", "broker status: 500"},
+		},
+		{
+			name:    "status only",
+			message: "Failed to dispatch to runtime broker: runtime broker returned error 500",
+			want:    []string{"unrecognized error (status 500)", "broker status: 500"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			base := &apiclient.APIError{
+				StatusCode: http.StatusBadGateway,
+				Code:       "runtime_error",
+				Message:    tt.message,
+				Details:    tt.details,
+				RequestID:  "req-123",
+			}
+			msg := wrapHubError(fmt.Errorf("failed to start agent via Hub: %w", base)).Error()
+			assert.Contains(t, msg, "failed to start agent via Hub: runtime broker failure: ")
+			for _, w := range tt.want {
+				assert.Contains(t, msg, w)
+			}
+			assert.NotContains(t, msg, "runtime broker returned error")
+			assert.NotContains(t, msg, "scion hub status")
+		})
+	}
+}

@@ -229,8 +229,8 @@ const StreamInputLimit = 4 << 20
 const closeCodeInputOverflow = 1009
 
 // closeReasonInputOverflow is the close reason sent with
-// closeCodeInputOverflow.
-const closeReasonInputOverflow = "input_overflow"
+// closeCodeInputOverflow; the Hub relays it as a fixed protocol token.
+const closeReasonInputOverflow = wsprotocol.CloseReasonInputOverflow
 
 // streamInputQueue is a byte-bounded FIFO of input frames for one stream.
 // The control-channel read loop pushes without blocking; run moves frames

@@ -5230,8 +5230,13 @@ func (s *Server) handleChatSearch(w http.ResponseWriter, r *http.Request) {
 		ValidationError(w, "q is required", nil)
 		return
 	}
-	if len([]rune(query)) < 2 {
+	termLen := len([]rune(query))
+	if termLen < 2 {
 		ValidationError(w, "q must be at least 2 characters", nil)
+		return
+	}
+	if termLen > ChatSearchMaxQueryRunes {
+		ValidationError(w, fmt.Sprintf("q must be at most %d characters", ChatSearchMaxQueryRunes), nil)
 		return
 	}
 
@@ -5242,6 +5247,57 @@ func (s *Server) handleChatSearch(w http.ResponseWriter, r *http.Request) {
 	if wcs == nil {
 		writeJSON(w, http.StatusOK, chatSearchResponse{Results: []ChatSearchResult{}})
 		return
+	}
+
+	// Gate before cost (design v3 section 9 item 7): after authentication
+	// and the validation of q, before project enumeration and the query.
+	// The caller gets a slot at once or a 429; nothing queues.
+	shape := chatSearchShape{
+		backend:   chatSearchBackend(wcs),
+		path:      "like",
+		scope:     chatSearchScope(q.Get("key"), q.Get("projectId")),
+		termLen:   termLen,
+		hasCursor: q.Get("cursor") != "",
+	}
+	searchStart := time.Now()
+	release, ok := s.chatSearchGateFor(wcs).tryAcquire(user.ID())
+	if !ok {
+		s.recordChatSearchBusy(ctx, shape)
+		w.Header().Set("Retry-After", "1")
+		writeError(w, http.StatusTooManyRequests, "SEARCH_BUSY",
+			"Another search is still running. Try again in a moment.", nil)
+		return
+	}
+	defer release()
+
+	// The time limit starts with the gate slot and covers project
+	// enumeration, the store call and the DM post-filters (design v4 6.2,
+	// erratum E1), so a search ends within the limit from the caller's side.
+	// SQLite is interrupted when searchCtx ends; Postgres runs under SET
+	// LOCAL statement_timeout derived from the same deadline.
+	searchCtx, cancel := context.WithTimeout(ctx, s.chatSearchTimeout())
+	defer cancel()
+	// finishCtxErr ends the request when the search's context has ended:
+	// a client that went away gets no body (outcome canceled), and a
+	// passed deadline gets 503 SEARCH_TIMEOUT (outcome timeout). No
+	// deadline path answers 500. It reports whether it ended the request.
+	finishCtxErr := func() bool {
+		switch {
+		case r.Context().Err() != nil:
+			shape.outcome = chatSearchOutcomeCanceled
+		case errors.Is(searchCtx.Err(), context.DeadlineExceeded):
+			shape.outcome = chatSearchOutcomeTimeout
+		default:
+			return false
+		}
+		shape.duration = time.Since(searchStart)
+		s.recordChatSearch(ctx, slog.Default(), shape)
+		if shape.outcome == chatSearchOutcomeTimeout {
+			// No partial results: the whole search is refused.
+			writeError(w, http.StatusServiceUnavailable, "SEARCH_TIMEOUT",
+				"Search took too long. Try a longer phrase or search one space.", nil)
+		}
+		return true
 	}
 
 	// Parse limit.
@@ -5287,13 +5343,19 @@ func (s *Server) handleChatSearch(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		} else {
-			topic, err := wcs.GetTopic(ctx, conversationKey)
+			topic, err := wcs.GetTopic(searchCtx, conversationKey)
 			if err != nil || topic == nil {
+				if finishCtxErr() {
+					return
+				}
 				NotFound(w, "Thread")
 				return
 			}
-			project, err := s.store.GetProject(ctx, topic.ProjectID)
+			project, err := s.store.GetProject(searchCtx, topic.ProjectID)
 			if err != nil {
+				if finishCtxErr() {
+					return
+				}
 				NotFound(w, "Project")
 				return
 			}
@@ -5304,8 +5366,11 @@ func (s *Server) handleChatSearch(w http.ResponseWriter, r *http.Request) {
 		filter.ConversationKey = conversationKey
 	} else if projectID != "" {
 		// Scope to one project — authorize access.
-		project, err := s.store.GetProject(ctx, projectID)
+		project, err := s.store.GetProject(searchCtx, projectID)
 		if err != nil {
+			if finishCtxErr() {
+				return
+			}
 			NotFound(w, "Project")
 			return
 		}
@@ -5313,10 +5378,14 @@ func (s *Server) handleChatSearch(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		filter.ProjectID = projectID
+		shape.projectCount = 1
 	} else {
 		// Search all visible projects. Filter by user's accessible projects.
-		allProjects, err := s.store.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{Limit: 1000})
+		allProjects, err := s.store.ListProjects(searchCtx, store.ProjectFilter{}, store.ListOptions{Limit: 1000})
 		if err != nil {
+			if finishCtxErr() {
+				return
+			}
 			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list projects", nil)
 			return
 		}
@@ -5326,7 +5395,12 @@ func (s *Server) handleChatSearch(w http.ResponseWriter, r *http.Request) {
 		for i := range allProjects.Items {
 			resources[i] = projectResource(&allProjects.Items[i])
 		}
-		caps := s.authzService.ComputeCapabilitiesBatch(ctx, identity, resources, "project")
+		caps := s.authzService.ComputeCapabilitiesBatch(searchCtx, identity, resources, "project")
+		// A capability batch cut short by the deadline is not a smaller
+		// visible set: the search ends as a timeout.
+		if finishCtxErr() {
+			return
+		}
 
 		var visibleIDs []string
 		for i, p := range allProjects.Items {
@@ -5339,14 +5413,33 @@ func (s *Server) handleChatSearch(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		filter.ProjectIDs = visibleIDs
+		shape.projectCount = len(visibleIDs)
 	}
 
-	results, nextCursor, err := wcs.SearchChatMessages(ctx, filter)
-	if errors.Is(err, ErrInvalidSearchCursor) {
-		writeInvalidCursor(w)
-		return
-	}
+	results, nextCursor, err := wcs.SearchChatMessages(searchCtx, filter)
 	if err != nil {
+		if errors.Is(err, ErrInvalidSearchCursor) {
+			// A client error that ran no query: no metric sample and no
+			// slow line, so it cannot drown the 6.5 signal (round-2 R2-02).
+			writeInvalidCursor(w)
+			return
+		}
+		if finishCtxErr() {
+			return
+		}
+		if isChatSearchTimeout(err) {
+			// Postgres statement_timeout (57014) can fire just before the
+			// context deadline does.
+			shape.outcome = chatSearchOutcomeTimeout
+			shape.duration = time.Since(searchStart)
+			s.recordChatSearch(ctx, slog.Default(), shape)
+			writeError(w, http.StatusServiceUnavailable, "SEARCH_TIMEOUT",
+				"Search took too long. Try a longer phrase or search one space.", nil)
+			return
+		}
+		shape.outcome = chatSearchOutcomeError
+		shape.duration = time.Since(searchStart)
+		s.recordChatSearch(ctx, slog.Default(), shape)
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "search failed", nil)
 		return
 	}
@@ -5355,23 +5448,35 @@ func (s *Server) handleChatSearch(w http.ResponseWriter, r *http.Request) {
 	// token may read that DM under inbox:read; with no inbox:read it keeps
 	// none.
 	if token := chatToken(ctx); token != nil && filter.ConversationKey == "" {
-		check := s.newSelfScopeCheck(ctx, token, permInboxRead)
+		check := s.newSelfScopeCheck(searchCtx, token, permInboxRead)
 		kept := results[:0]
 		for _, res := range results {
-			if strings.HasPrefix(res.ConversationKey, "dm:") && !s.chatTokenDMVisible(ctx, token, check, res.ConversationKey) {
+			if strings.HasPrefix(res.ConversationKey, "dm:") && !s.chatTokenDMVisible(searchCtx, token, check, res.ConversationKey) {
 				continue
 			}
 			kept = append(kept, res)
 		}
 		results = kept
 	}
+	// The DM post-filters are inside the limit: a filter cut short by the
+	// deadline must not decide visibility, so the search ends as a timeout.
+	if finishCtxErr() {
+		return
+	}
 
-	// Enrich results with thread/DM names.
-	s.enrichSearchResults(ctx, wcs, results)
+	// Enrich results with thread/DM names. Best-effort under the same
+	// context: if the deadline passes here, the results the caller may see
+	// go back with whatever names resolved (design v4 erratum E1).
+	s.enrichSearchResults(searchCtx, wcs, results)
 
 	if results == nil {
 		results = []ChatSearchResult{}
 	}
+
+	shape.outcome = chatSearchOutcomeOK
+	shape.results = len(results)
+	shape.duration = time.Since(searchStart)
+	s.recordChatSearch(ctx, slog.Default(), shape)
 
 	writeJSON(w, http.StatusOK, chatSearchResponse{
 		Results:    results,

@@ -78,6 +78,10 @@ const (
 // §3.3.1) with a detail.
 const reasonDrainingRefusal = "relay_restart: session draining"
 
+// CloseReasonDrainDeadline is the close reason of the streams a session
+// still holds when its drain deadline passes and no other reason is given.
+const CloseReasonDrainDeadline = "drain deadline"
+
 // CloseError is a stream or session termination carrying a close code.
 type CloseError struct {
 	Code   uint32

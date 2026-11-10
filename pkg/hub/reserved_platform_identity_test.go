@@ -580,7 +580,7 @@ func TestSessionToBearerMiddleware_PlatformAuthSA_OverflowMint_ClearsSession(t *
 // sessionToBearerMiddleware's refresh branch: a session carrying the
 // configured service account's email, with an expired access token and a
 // usable refresh token (so the middleware would otherwise call
-// RefreshTokens), must be cleared instead, with no refresh performed and no
+// refreshHubTokens), must be cleared instead, with no refresh performed and no
 // Authorization header on the request.
 func TestSessionToBearerMiddleware_PlatformAuthSA_Refresh_ClearsSession(t *testing.T) {
 	ws := newTestWebServer(t, WebServerConfig{

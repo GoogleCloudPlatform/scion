@@ -25,6 +25,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/brokerconvert"
+	"github.com/GoogleCloudPlatform/scion/pkg/brokerhost"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
 )
@@ -64,6 +65,17 @@ func runBrokerConvertWriteModes(cmd *cobra.Command) error {
 	if err != nil {
 		return err
 	}
+	// A co-located host (the server process runs the Hub and embeds the
+	// Runtime Broker) takes the co-located phases; --status is the same
+	// for both.
+	var host colocatedHost
+	var hostMode, hostSource string
+	if !brokerConvertStatus {
+		if host, hostMode, hostSource, err = convertHost(env.GlobalDir); err != nil {
+			return err
+		}
+	}
+	useColocatedRegister(env, settings, host)
 
 	var rep *brokerconvert.Report
 	switch {
@@ -73,9 +85,9 @@ func runBrokerConvertWriteModes(cmd *cobra.Command) error {
 		if !convertConfirmTo(cmd.ErrOrStderr(), "Roll back the recorded convert run on this host? The flat instance is deregistered and its identity moved aside.") {
 			return errors.New("rollback not confirmed")
 		}
-		rep, err = brokerconvert.Rollback(ctx, env)
+		rep, err = convertRollback(ctx, env, host)
 	default:
-		rep, err = runConvertApply(ctx, cmd, env, settings)
+		rep, err = runConvertApply(ctx, cmd, env, settings, host, hostMode, hostSource)
 	}
 	if rep != nil {
 		if werr := writeConvertReport(out, rep); werr != nil {
@@ -111,7 +123,7 @@ func writeConvertReport(w io.Writer, rep *brokerconvert.Report) error {
 // runConvertApply builds the plan with the same builder and inputs as
 // --plan, shows it (redacted, as --plan does), asks for confirmation and
 // applies it.
-func runConvertApply(ctx context.Context, cmd *cobra.Command, env *brokerconvert.Env, settings *config.Settings) (*brokerconvert.Report, error) {
+func runConvertApply(ctx context.Context, cmd *cobra.Command, env *brokerconvert.Env, settings *config.Settings, host colocatedHost, hostMode, hostSource string) (*brokerconvert.Report, error) {
 	in, _, err := loadConvertInput(cmd)
 	if err != nil {
 		return nil, err
@@ -131,8 +143,14 @@ func runConvertApply(ctx context.Context, cmd *cobra.Command, env *brokerconvert
 	if err != nil {
 		return nil, err
 	}
-	if err := brokerconvert.CollectHub(ctx, env.Client, getCurrentHostBrokerID(settings), plan); err != nil {
-		return nil, err
+	// The stopped and start-pending phases of a co-located apply run with
+	// this host's server, which is the Hub, stopped: they plan locally, and
+	// the journal's plan digest binds them to the running phase's plan.
+	local := colocatedPlansLocally(ctx, env, host)
+	if !local {
+		if err := brokerconvert.CollectHub(ctx, env.Client, getCurrentHostBrokerID(settings), plan); err != nil {
+			return nil, err
+		}
 	}
 	if !isJSONOutput() {
 		if err := brokerconvert.WriteHuman(cmd.ErrOrStderr(), plan, brokerconvert.HumanOptions{}); err != nil {
@@ -143,14 +161,19 @@ func runConvertApply(ctx context.Context, cmd *cobra.Command, env *brokerconvert
 	if err != nil {
 		return nil, err
 	}
-	if !convertConfirmTo(cmd.ErrOrStderr(), "Apply this plan (digest "+digest+") to this host? The server must be stopped; the switch takes effect at the next 'scion server start'.") {
+	prompt := "Apply this plan (digest " + digest + ") to this host? The server must be stopped; the switch takes effect at the next 'scion server start'."
+	if host.Colocated {
+		prompt = "Run the next step of this plan (digest " + digest + ") on this co-located host? With the server running, the Hub steps run; with it stopped, the settings are written."
+	}
+	if !convertConfirmTo(cmd.ErrOrStderr(), prompt) {
 		return nil, errors.New("apply not confirmed")
 	}
 	defaultProfile := ""
 	if in.Settings != nil {
 		defaultProfile = in.Settings.ActiveProfile
 	}
-	return brokerconvert.Apply(ctx, env, brokerconvert.ApplyInput{Plan: plan, Choices: in.Choices, LegacyDefaultProfile: defaultProfile})
+	return convertApply(ctx, env, host, brokerconvert.ApplyInput{Plan: plan, Choices: in.Choices, LegacyDefaultProfile: defaultProfile,
+		HostMode: hostMode, HostModeSource: hostSource, LocalPlan: local})
 }
 
 // newConvertEnv wires the convert engine to this host and the operator's
@@ -194,7 +217,38 @@ func newConvertEnv() (*brokerconvert.Env, *config.Settings, error) {
 	default:
 		env.Client = client
 	}
-	env.Register = func(ctx context.Context, inst config.V1RuntimeBrokerInstanceConfig) (string, string, error) {
+	// PR1's remote path registers as the remote registration flow; a
+	// co-located host's apply replaces this once the host is known.
+	env.Register = convertRegisterFor(settings, globalDir, flatPrecheckHost{mode: brokerhost.ModeRemote})
+	if convertEnvHook != nil {
+		convertEnvHook(env)
+	}
+	return env, settings, nil
+}
+
+// useColocatedRegister installs the co-located Register seam on a
+// co-located host: the running phase registers with the shared precheck in
+// ModeColocated, as the server's own does. It re-applies convertEnvHook so
+// tests keep their overrides. Any other host keeps the remote Register.
+func useColocatedRegister(env *brokerconvert.Env, settings *config.Settings, host colocatedHost) {
+	if !host.Colocated {
+		return
+	}
+	env.Register = convertRegisterFor(settings, env.GlobalDir, colocatedPrecheckHost(host, settings))
+	if convertEnvHook != nil {
+		convertEnvHook(env)
+	}
+}
+
+// convertRegisterFor builds the Register seam; tests replace it to see the
+// precheck host each Register is built with.
+var convertRegisterFor = convertRegister
+
+// convertRegister is the engine's Register seam: it registers the planned
+// instance with the same helper as 'register --instance', whose shared
+// precheck applies to the host hc.
+func convertRegister(settings *config.Settings, globalDir string, hc flatPrecheckHost) func(ctx context.Context, inst config.V1RuntimeBrokerInstanceConfig) (string, string, error) {
+	return func(ctx context.Context, inst config.V1RuntimeBrokerInstanceConfig) (string, string, error) {
 		endpoint := invocationHubEndpoint()
 		if endpoint == "" {
 			return "", "", errHubNotConfigured
@@ -204,16 +258,12 @@ func newConvertEnv() (*brokerconvert.Env, *config.Settings, error) {
 		}
 		// The Hub's kept-settings notes are not printed: the report is the
 		// only output.
-		creds, id, err := registerConfiguredFlatInstance(ctx, settings, globalDir, endpoint, inst, io.Discard)
+		creds, id, err := registerConfiguredFlatInstance(ctx, settings, globalDir, endpoint, inst, io.Discard, hc)
 		if err != nil {
 			return "", "", err
 		}
 		return creds.BrokerID, id.RuntimeTarget.ID, nil
 	}
-	if convertEnvHook != nil {
-		convertEnvHook(env)
-	}
-	return env, settings, nil
 }
 
 // errNoApplyToResume refuses --apply on flat settings with no interrupted

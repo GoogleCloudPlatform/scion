@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -119,6 +120,16 @@ func jkUserSvc(t testing.TB, k *keyring.Keyring, clk *jkClock, cfg UserTokenConf
 	svc, err := newRingUserTokenService(k.Signing(), cfg, clk.now)
 	require.NoError(t, err)
 	return svc
+}
+
+// jkWebRefresh refreshes a user token pair the way the web server does
+// (refreshHubTokens), with svc as its token service and no store: the new
+// pair carries the presented refresh token's session generation.
+func jkWebRefresh(t *testing.T, svc *UserTokenService, refreshToken string) (string, string, int64, error) {
+	t.Helper()
+	ws := newTestWebServer(t, WebServerConfig{})
+	ws.SetUserTokenService(svc)
+	return ws.refreshHubTokens(context.Background(), refreshToken)
 }
 
 // jwtHeader returns the decoded protected header of a compact JWS.
@@ -395,7 +406,7 @@ func TestJWTRing_NoIssuanceAfterSignUntil(t *testing.T) {
 	assert.ErrorIs(t, err, keyring.ErrIssuanceClosed)
 	_, err = user.GenerateTestLoginToken("u1")
 	assert.ErrorIs(t, err, keyring.ErrIssuanceClosed)
-	_, _, _, err = user.RefreshTokens(beforeRefresh)
+	_, _, _, err = jkWebRefresh(t, user, beforeRefresh)
 	assert.ErrorIs(t, err, keyring.ErrIssuanceClosed)
 
 	_, err = agent.ValidateAgentToken(before)
@@ -468,7 +479,7 @@ func TestJWTRing_EveryValidatorAcrossReplicas(t *testing.T) {
 	clk.t = jkT0.Add(48 * time.Hour)
 	_, err = userB.ValidateRefreshToken(old.refresh)
 	assert.ErrorIs(t, err, errJWTNoEligibleKey)
-	_, _, _, err = userB.RefreshTokens(old.refresh)
+	_, _, _, err = jkWebRefresh(t, userB, old.refresh)
 	assert.ErrorIs(t, err, errJWTNoEligibleKey)
 	_, err = userB.GetTokenExpiry(old.cli)
 	assert.ErrorIs(t, err, errJWTNoEligibleKey)
@@ -483,7 +494,7 @@ func TestJWTRing_RefreshWithOldTokenReturnsNewGeneration(t *testing.T) {
 	_, oldRefresh, _, err := jkUserSvc(t, a, clk, UserTokenConfig{}).GenerateTokenPair("u1", "u1@example.com", "U", "member", ClientTypeCLI)
 	require.NoError(t, err)
 	clk.t = jkT0.Add(2 * time.Hour) // after legacy's sign_until on B
-	access, refresh, _, err := jkUserSvc(t, b, clk, UserTokenConfig{}).RefreshTokens(oldRefresh)
+	access, refresh, _, err := jkWebRefresh(t, jkUserSvc(t, b, clk, UserTokenConfig{}), oldRefresh)
 	require.NoError(t, err)
 	for _, tok := range []string{access, refresh} {
 		assert.Equal(t, "gen2", jwtHeader(t, tok)["kid"])
