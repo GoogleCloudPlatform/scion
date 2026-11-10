@@ -344,6 +344,18 @@ Only you can list, approve or reject your pending secrets, from an interactive l
 (`scion hub auth login`). Agents, access tokens, other users and hub admins cannot see or
 decide on them.
 
+*   An approval writes the secret only while your existing user secret of that name is the one
+    the agent saw when it saved the pending secret. If you created, changed or deleted that
+    secret since, the approval is refused with `409` (`secret_pending_existing_changed`) and
+    nothing changes. Reject the pending secret and have the agent save it again.
+*   An approval and a rejection of the same pending secret never both succeed: the second one
+    answers `404`.
+*   Deleting a project deletes the pending secrets its agents saved. Deleting the agent that
+    saved a pending secret does not; you can still approve or reject it.
+*   Approve and reject are refused (`403`) when a browser sends them from another site. Behind
+    a front proxy, the proxy must pass the public `Host` header through to the Hub unchanged;
+    otherwise approvals and rejections from the web UI are refused with `403`.
+
 Project-scoped secrets that an agent saves are stored directly.
 
 #### Using the Hub API Directly

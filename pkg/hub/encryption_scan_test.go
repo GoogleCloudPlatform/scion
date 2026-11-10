@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -231,7 +232,7 @@ func TestEncryptionScan_ReferenceOnlyRowsNeverDecrypted(t *testing.T) {
 
 // scanPageCountingStore counts ScanSecretPayloads calls and checks each limit.
 type scanPageCountingStore struct {
-	store.SecretStore
+	store.Store
 	pages  int
 	limits []int
 }
@@ -239,7 +240,7 @@ type scanPageCountingStore struct {
 func (s *scanPageCountingStore) ScanSecretPayloads(ctx context.Context, after string, limit int) ([]store.SecretPayload, error) {
 	s.pages++
 	s.limits = append(s.limits, limit)
-	return s.SecretStore.ScanSecretPayloads(ctx, after, limit)
+	return s.Store.ScanSecretPayloads(ctx, after, limit)
 }
 
 // Input count across page boundaries: pages of store.MaxSecretPayloadScan
@@ -258,7 +259,7 @@ func TestEncryptionScan_PagesCoverEveryRow(t *testing.T) {
 						EncryptedValue: sealed, Scope: store.ScopeHub, ScopeID: scanTestScopeID, SecretType: store.SecretTypeEnvironment})
 					require.NoError(t, err)
 				}
-				ps := &scanPageCountingStore{SecretStore: st}
+				ps := &scanPageCountingStore{Store: st}
 				dec := &countingDecrypter{d: c}
 				seen := map[string]bool{}
 				n, err := scanSecretPayloads(context.Background(), ps, dec, func(r ScanRow) error {
@@ -297,6 +298,10 @@ func (s *fakeScanStore) ScanSecretPayloads(context.Context, string, int) ([]stor
 	p := s.pages[0]
 	s.pages = s.pages[1:]
 	return p, nil
+}
+
+func (s *fakeScanStore) ScanPendingSecretPayloads(context.Context, string, int) ([]store.SecretPayload, error) {
+	return nil, nil
 }
 
 // A store error, a page out of ID order and a visitor error stop the scan
@@ -467,4 +472,79 @@ func TestVerifyEncryption_LegacyModePlaintextFails(t *testing.T) {
 	assert.Equal(t, 2, a.Readable, "legacy mode reads plaintext")
 	assert.Equal(t, map[string]int{"plaintext": 2}, a.ByFormat)
 	assert.Equal(t, 1, a.EmptyNoRef)
+}
+
+// Pending secrets are part of the scan: a held local value is decrypted
+// and classified like a stored secret value, a held Secret Manager value
+// is reference-only, and audit and verify report pending rows as such.
+// A pending row never counts as an unreadable infrastructure backup, and
+// the audit flag of a pending row does not match a stored secret.
+func TestEncryptionScan_IncludesPendingSecrets(t *testing.T) {
+	for backend, open := range scanBackends {
+		t.Run(backend, func(t *testing.T) {
+			ctx := context.Background()
+			st := open(t)
+			c := scanRing(t)
+			sealed, err := c.Encrypt("scan-synthetic-pending")
+			require.NoError(t, err)
+			_, err = st.UpsertSecret(ctx, &store.Secret{ID: scanRowID(0), Key: "SCAN_STORED", EncryptedValue: sealed,
+				Scope: store.ScopeHub, ScopeID: scanTestScopeID, SecretType: store.SecretTypeEnvironment})
+			require.NoError(t, err)
+
+			pendingIDs := map[string]string{}
+			for name, ref := range map[string]string{
+				"PENDING_V2":        sealed,
+				"PENDING_SM":        "gcpsm:projects/x/secrets/scion-abc-pending-1",
+				"PENDING_PLAINTEXT": "scan-synthetic-pending-plaintext",
+			} {
+				res, err := st.CreateOrReplacePendingSecret(ctx, &store.PendingSecret{
+					Key: name, SecretType: store.SecretTypeEnvironment, Scope: store.ScopeUser, ScopeID: scanTestScopeID,
+					ValueRef: ref, ValueLen: 1, AgentID: "agent-1", AgentSlug: "agent-1", ProjectID: "project-1", ProjectName: "project-1",
+				}, time.Now())
+				require.NoError(t, err)
+				pendingIDs[name] = res.Secret.ID
+			}
+
+			rows := map[string]ScanRow{}
+			n, err := scanSecretPayloads(ctx, st, c, func(r ScanRow) error {
+				rows[r.Key] = r
+				return nil
+			})
+			require.NoError(t, err)
+			assert.Equal(t, 4, n)
+			assert.False(t, rows["SCAN_STORED"].Pending)
+			for name, id := range pendingIDs {
+				assert.True(t, rows[name].Pending, name)
+				assert.Equal(t, id, rows[name].ID, name)
+				assert.Equal(t, store.ScopeUser, rows[name].Scope, name)
+			}
+			assert.True(t, rows["PENDING_V2"].Class.Readable())
+			assert.Equal(t, "k1", rows["PENDING_V2"].Class.KID)
+			assert.True(t, rows["PENDING_SM"].Class.ReferenceOnly)
+			assert.Equal(t, secret.FailurePlaintextNotAdmitted, rows["PENDING_PLAINTEXT"].Class.Failure)
+
+			a, err := runEncryptionAudit(ctx, st, c)
+			require.NoError(t, err)
+			assert.Equal(t, 4, a.Scanned)
+			assert.Equal(t, 1, a.ReferenceOnly)
+			assert.Equal(t, 2, a.Readable)
+			require.Len(t, a.Unreadable, 1)
+			assert.True(t, a.Unreadable[0].Pending)
+			assert.Equal(t, pendingIDs["PENDING_PLAINTEXT"], a.Unreadable[0].ID)
+			assert.Empty(t, a.BackupUnreadable)
+
+			srv := &Server{encryptionAudit: a}
+			assert.False(t, srv.auditFlagged("PENDING_PLAINTEXT", store.ScopeUser, scanTestScopeID),
+				"a pending row's flag does not match a stored secret of the same name")
+
+			ksSeedPolicy(t, st, "k1")
+			r, err := VerifyEncryption(ctx, st, c)
+			require.NoError(t, err)
+			assert.False(t, r.OK)
+			assert.Equal(t, 4, r.Scanned)
+			require.Len(t, r.Failures, 1)
+			assert.Equal(t, VerifyFailure{ID: pendingIDs["PENDING_PLAINTEXT"], Key: "PENDING_PLAINTEXT", Scope: store.ScopeUser,
+				ScopeID: scanTestScopeID, Pending: true, Reason: secret.FailurePlaintextNotAdmitted}, r.Failures[0])
+		})
+	}
 }

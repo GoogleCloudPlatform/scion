@@ -3948,6 +3948,10 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, id string
 	// All effects are best-effort (fire_and_forget, log_and_continue).
 	// Authorization is complete — the service has committed the deletion.
 	deletedProject := result.Project
+	// Release the held values of the project's deleted pending secrets.
+	if s.secretBackend != nil {
+		s.dropPendingValues(ctx, result.PendingSecretValueRefs)
+	}
 	s.executePostDeletionEffects(ctx, id, deletedProject, effectInputs)
 
 	// The Hub is the only remover of the project's tree on shared project

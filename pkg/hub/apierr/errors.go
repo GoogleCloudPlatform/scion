@@ -357,6 +357,14 @@ const (
 	// force included; the response does not name the other writer.
 	ErrCodeSecretPendingHeldByOtherAgent = "secret_pending_held_by_other_agent"
 
+	// ErrCodeSecretPendingExistingChanged is returned when the owner
+	// approves a pending secret but the approved secret of the same name is
+	// not the one recorded when the agent wrote the pending secret (one was
+	// created, changed or deleted since). Nothing is written and the
+	// pending secret is kept; the owner rejects it and has the agent save
+	// it again.
+	ErrCodeSecretPendingExistingChanged = "secret_pending_existing_changed"
+
 	// ErrCodeInvalidRoleSet is returned by PUT …/members/principals/{type}/{id}
 	// when the desired role set contains an unknown role definition ID, a
 	// non-project-scoped role, or more than one built-in membership role

@@ -44,6 +44,12 @@ const pendingSecretsPath = "/api/v1/pending-secrets"
 const pendingSecretHeldByOtherAgentMessage = "A pending secret with this name is awaiting the owner's decision. " +
 	"It cannot be replaced until the owner approves or rejects it."
 
+// pendingSecretExistingChangedMessage is the refusal of an approval when
+// the approved secret of the same name changed after the agent wrote the
+// pending secret.
+const pendingSecretExistingChangedMessage = "The existing secret with this name changed after the agent saved this pending secret. " +
+	"Reject it and have the agent save it again."
+
 // AgentPendingSecretResponse is the 202 Accepted body of an agent's
 // user-scope secret write.
 type AgentPendingSecretResponse struct {
@@ -291,6 +297,9 @@ func (s *Server) handlePendingSecrets(w http.ResponseWriter, r *http.Request) {
 		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
+	if pendingSecretBrowserRequestRefused(w, r) {
+		return
+	}
 	ownerID, ok := s.resolveEnvSecretAccess(w, r, store.ScopeUser, "", true)
 	if !ok {
 		return
@@ -305,6 +314,35 @@ func (s *Server) handlePendingSecrets(w http.ResponseWriter, r *http.Request) {
 	} else {
 		s.rejectPendingSecret(w, r, ownerID, id)
 	}
+}
+
+// pendingSecretBrowserRequestRefused refuses a decision request a browser
+// sent from another site, in every auth mode, and reports whether it did
+// (the response is then written and nothing is changed). It applies the
+// checks proxyModeWriteGuard applies in proxy auth mode: a cross-site
+// request (requestIsCrossSite) gets 403, and a request with a browser
+// signal (Origin or Sec-Fetch-Site) whose body is not JSON
+// (acceptableWriteBody) gets 415. First it removes any CORS response
+// headers corsMiddleware has set, so these routes never grant another
+// origin access to their responses.
+func pendingSecretBrowserRequestRefused(w http.ResponseWriter, r *http.Request) bool {
+	h := w.Header()
+	for name := range h {
+		if strings.HasPrefix(http.CanonicalHeaderKey(name), "Access-Control-Allow-") {
+			h.Del(name)
+		}
+	}
+	if requestIsCrossSite(r) {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden,
+			"this request is not accepted on this endpoint", nil)
+		return true
+	}
+	if requestHasOriginSignal(r) && !acceptableWriteBody(r) {
+		writeError(w, http.StatusUnsupportedMediaType, errCodeUnsupportedMediaType,
+			"this endpoint requires an application/json request body", nil)
+		return true
+	}
+	return false
 }
 
 func (s *Server) listPendingSecrets(w http.ResponseWriter, r *http.Request, ownerID string) {
@@ -372,8 +410,34 @@ func (s *Server) approvePendingSecret(w http.ResponseWriter, r *http.Request, ow
 		allowProgeny = *req.AllowProgeny
 	}
 
+	// Read the held value before claiming the row, so a read failure
+	// changes nothing.
 	value, err := s.secretBackend.ReadPending(ctx, p.ValueRef)
 	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	// Claim the row: of a concurrent approval and rejection exactly one
+	// claims it, and the other answers 404. The claim also checks that the
+	// approved secret of this name is still the one recorded when the
+	// agent wrote the pending secret; if not, nothing is written and the
+	// pending secret is kept.
+	claimed, err := s.store.ClaimPendingSecretForApproval(ctx, p.ID, store.ScopeUser, ownerID, time.Now())
+	switch {
+	case err == nil:
+	case errors.Is(err, store.ErrNotFound):
+		NotFound(w, "Pending secret")
+		return
+	case errors.Is(err, store.ErrPendingSecretExistingChanged):
+		writeError(w, http.StatusConflict, ErrCodeSecretPendingExistingChanged,
+			pendingSecretExistingChangedMessage, map[string]interface{}{
+				"id":    p.ID,
+				"key":   p.Key,
+				"scope": store.ScopeUser,
+			})
+		return
+	default:
 		writeErrorFromErr(w, err, "")
 		return
 	}
@@ -386,49 +450,63 @@ func (s *Server) approvePendingSecret(w http.ResponseWriter, r *http.Request, ow
 	// reach that one agent's descendants rather than the owner's agents.
 	// The writing agent is recorded as the updater.
 	input := &secret.SetSecretInput{
-		Name:          p.Key,
+		Name:          claimed.Key,
 		Value:         string(value),
-		SecretType:    p.SecretType,
-		Target:        p.Target,
+		SecretType:    claimed.SecretType,
+		Target:        claimed.Target,
 		Scope:         store.ScopeUser,
 		ScopeID:       ownerID,
-		Description:   p.Description,
-		InjectionMode: p.InjectionMode,
+		Description:   claimed.Description,
+		InjectionMode: claimed.InjectionMode,
 		AllowProgeny:  allowProgeny,
 		CreatedBy:     ownerID,
-		UpdatedBy:     "agent:" + p.AgentID,
+		UpdatedBy:     "agent:" + claimed.AgentID,
 	}
 	if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
 		input.UserEmail = userIdent.Email()
 	}
 	if _, _, err := s.secretBackend.Set(ctx, input); err != nil {
+		// Put the pending secret back so the owner can try again.
+		s.restoreClaimedPendingSecret(ctx, claimed)
 		writeErrorFromErr(w, err, "")
 		return
 	}
-
-	if err := s.store.DeletePendingSecret(ctx, p.ID); err != nil && !errors.Is(err, store.ErrNotFound) {
-		// The secret is approved; the pending row is left for expiry.
-		slog.Warn("pending secret: deleting the approved pending row failed",
-			"pending_id", p.ID, "error", err)
-	} else {
-		s.dropPendingValues(ctx, []string{p.ValueRef})
-	}
+	// The approved secret is written: release the held value.
+	s.dropPendingValues(ctx, []string{claimed.ValueRef})
 
 	writeJSON(w, http.StatusOK, PendingSecretDecisionResponse{
-		ID:    p.ID,
-		Key:   p.Key,
+		ID:    claimed.ID,
+		Key:   claimed.Key,
 		Scope: store.ScopeUser,
 		State: "approved",
 	})
 }
 
+// restoreClaimedPendingSecret puts back a pending secret an approval
+// claimed but could not write, with its ID and held value. When the key
+// has been taken since (the same agent wrote a replacement), the claimed
+// value is no longer referenced by any row and is released.
+func (s *Server) restoreClaimedPendingSecret(ctx context.Context, p *store.PendingSecret) {
+	ctx = context.WithoutCancel(ctx)
+	err := s.store.RestorePendingSecret(ctx, p)
+	switch {
+	case err == nil:
+	case errors.Is(err, store.ErrAlreadyExists):
+		slog.Warn("pending secret: a newer pending secret took the key; releasing the claimed value",
+			"pending_id", p.ID)
+		s.dropPendingValues(ctx, []string{p.ValueRef})
+	default:
+		slog.Warn("pending secret: putting back a claimed pending secret failed",
+			"pending_id", p.ID, "error", err)
+	}
+}
+
 func (s *Server) rejectPendingSecret(w http.ResponseWriter, r *http.Request, ownerID, id string) {
 	ctx := r.Context()
-	p, ok := s.ownPendingSecret(w, ctx, ownerID, id)
-	if !ok {
-		return
-	}
-	if err := s.store.DeletePendingSecret(ctx, p.ID); err != nil {
+	// Claim the row: of a concurrent approval and rejection exactly one
+	// claims it, and the other answers 404.
+	p, err := s.store.ClaimPendingSecret(ctx, id, store.ScopeUser, ownerID, time.Now())
+	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			NotFound(w, "Pending secret")
 		} else {

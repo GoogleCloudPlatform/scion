@@ -28,7 +28,8 @@ import (
 )
 
 // The authenticating payload scan (ptone/scion#1530 §6, §7): one paginated
-// pass over every stored secret row, shared by the startup audit, key
+// pass over every stored secret row and then every pending secret row
+// (a pending row's value ref split by store.PendingValuePayload), shared by the startup audit, key
 // status and `scion server keys verify`. Every row that holds a local
 // payload is decrypted and authenticated, and infrastructure backups are
 // structurally validated; a row's format and key ID come from the key
@@ -81,7 +82,15 @@ type ScanRow struct {
 	Scope   string
 	ScopeID string
 	Version int
+	// Pending is set for a pending secret row (ID is the pending ID).
+	Pending bool
 	Class   ScanClass
+}
+
+// payloadScanStore is the store capability the scan uses.
+type payloadScanStore interface {
+	ScanSecretPayloads(ctx context.Context, afterID string, limit int) ([]store.SecretPayload, error)
+	ScanPendingSecretPayloads(ctx context.Context, afterID string, limit int) ([]store.SecretPayload, error)
 }
 
 // classifyPayload decrypts and authenticates p with d, unless it is
@@ -107,26 +116,48 @@ func classifyPayload(d payloadDecrypter, p store.SecretPayload) ScanClass {
 	return c
 }
 
-// scanSecretPayloads visits every stored secret row, classified with d,
-// in ascending ID order, reading ScanSecretPayloads pages of
-// store.MaxSecretPayloadScan rows. It returns the number of rows visited.
-// A store error, a page out of order, or an error from visit stops the
-// scan and is returned.
-func scanSecretPayloads(ctx context.Context, st store.SecretStore, d payloadDecrypter, visit func(ScanRow) error) (int, error) {
+// scanSecretPayloads visits every stored secret row and then every pending
+// secret row, classified with d, each in ascending ID order, reading pages
+// of store.MaxSecretPayloadScan rows. It returns the number of rows
+// visited. A store error, a page out of order, or an error from visit
+// stops the scan and is returned.
+func scanSecretPayloads(ctx context.Context, st payloadScanStore, d payloadDecrypter, visit func(ScanRow) error) (int, error) {
+	n, err := scanPayloadPages(ctx, st, false, d, visit)
+	if err != nil {
+		return n, err
+	}
+	m, err := scanPayloadPages(ctx, st, true, d, visit)
+	return n + m, err
+}
+
+// scanPayloadPages visits every stored secret row, or with pending every
+// pending secret row, page by page.
+func scanPayloadPages(ctx context.Context, st payloadScanStore, pending bool, d payloadDecrypter, visit func(ScanRow) error) (int, error) {
+	what := "stored secret payloads"
+	if pending {
+		what = "pending secret payloads"
+	}
 	n := 0
 	after := ""
 	for {
-		page, err := st.ScanSecretPayloads(ctx, after, store.MaxSecretPayloadScan)
+		var page []store.SecretPayload
+		var err error
+		if pending {
+			page, err = st.ScanPendingSecretPayloads(ctx, after, store.MaxSecretPayloadScan)
+		} else {
+			page, err = st.ScanSecretPayloads(ctx, after, store.MaxSecretPayloadScan)
+		}
 		if err != nil {
-			return n, fmt.Errorf("scanning stored secret payloads: %w", err)
+			return n, fmt.Errorf("scanning %s: %w", what, err)
 		}
 		for _, p := range page {
 			if p.ID <= after {
-				return n, errors.New("scanning stored secret payloads: the store returned rows out of ID order")
+				return n, fmt.Errorf("scanning %s: the store returned rows out of ID order", what)
 			}
 			after = p.ID
 			n++
-			if err := visit(ScanRow{ID: p.ID, Key: p.Key, Scope: p.Scope, ScopeID: p.ScopeID, Version: p.Version, Class: classifyPayload(d, p)}); err != nil {
+			row := ScanRow{ID: p.ID, Key: p.Key, Scope: p.Scope, ScopeID: p.ScopeID, Version: p.Version, Pending: pending, Class: classifyPayload(d, p)}
+			if err := visit(row); err != nil {
 				return n, err
 			}
 		}
@@ -193,6 +224,8 @@ type VerifyFailure struct {
 	Key     string `json:"key"`
 	Scope   string `json:"scope"`
 	ScopeID string `json:"scope_id"`
+	// Pending is set for a pending secret (ID is the pending ID).
+	Pending bool   `json:"pending,omitempty"`
 	Reason  string `json:"reason"`
 }
 
@@ -236,7 +269,7 @@ func VerifyEncryption(ctx context.Context, st store.Store, c *secret.ValueCipher
 		}
 		r.Failed++
 		r.FailedByReason[reason]++
-		r.Failures = append(r.Failures, VerifyFailure{ID: row.ID, Key: row.Key, Scope: row.Scope, ScopeID: row.ScopeID, Reason: reason})
+		r.Failures = append(r.Failures, VerifyFailure{ID: row.ID, Key: row.Key, Scope: row.Scope, ScopeID: row.ScopeID, Pending: row.Pending, Reason: reason})
 		return nil
 	})
 	if err != nil {

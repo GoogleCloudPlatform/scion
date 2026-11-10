@@ -21,15 +21,18 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -685,4 +688,408 @@ func TestPendingSecretsAPI_SecretNamedPendingReachable(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 	rec = ownerRequest(t, f.Server, owner, CredentialKindInteractive, http.MethodGet, "/api/v1/pending-secrets/x/approve", nil)
 	assert.Equal(t, http.StatusMethodNotAllowed, rec.Code)
+}
+
+// approvedSecretSet writes the owner's approved user secret key directly.
+func (f *pendingFixture) approvedSecretSet(t *testing.T, key, value string) *secret.SecretMeta {
+	t.Helper()
+	_, meta, err := f.Server.secretBackend.Set(context.Background(), &secret.SetSecretInput{
+		Name: key, Value: value, SecretType: store.SecretTypeEnvironment, Target: key,
+		Scope: store.ScopeUser, ScopeID: f.UserID, CreatedBy: f.UserID, UpdatedBy: f.UserID,
+	})
+	require.NoError(t, err)
+	return meta
+}
+
+func (f *pendingFixture) decide(t *testing.T, id, action string) *httptest.ResponseRecorder {
+	t.Helper()
+	return ownerRequest(t, f.Server, f.owner(), CredentialKindInteractive, http.MethodPost,
+		"/api/v1/pending-secrets/"+id+"/"+action, nil)
+}
+
+// TestPendingSecretsAPI_ApproveChecksExistingSecret: approval swaps the
+// value in only while the approved secret of the same name is the one
+// recorded when the agent wrote the pending secret. Otherwise it answers
+// 409 secret_pending_existing_changed, writes nothing, keeps the pending
+// secret and its held value.
+func TestPendingSecretsAPI_ApproveChecksExistingSecret(t *testing.T) {
+	cases := []struct {
+		name string
+		// before runs before the agent write, after runs after it.
+		before, after func(t *testing.T, f *pendingFixture)
+		// wantValue is the approved value after the decision ("" when
+		// there is no approved secret).
+		wantValue string
+		wantCode  int
+	}{
+		{
+			name:      "no existing secret then or now",
+			wantValue: "test-value-new", wantCode: http.StatusOK,
+		},
+		{
+			name:      "existing secret unchanged",
+			before:    func(t *testing.T, f *pendingFixture) { f.approvedSecretSet(t, "TOOL_AUTH", "test-value-old") },
+			wantValue: "test-value-new", wantCode: http.StatusOK,
+		},
+		{
+			name:      "secret created after the write",
+			after:     func(t *testing.T, f *pendingFixture) { f.approvedSecretSet(t, "TOOL_AUTH", "test-value-owner") },
+			wantValue: "test-value-owner", wantCode: http.StatusConflict,
+		},
+		{
+			name:      "existing secret changed after the write",
+			before:    func(t *testing.T, f *pendingFixture) { f.approvedSecretSet(t, "TOOL_AUTH", "test-value-old") },
+			after:     func(t *testing.T, f *pendingFixture) { f.approvedSecretSet(t, "TOOL_AUTH", "test-value-owner") },
+			wantValue: "test-value-owner", wantCode: http.StatusConflict,
+		},
+		{
+			name:   "existing secret deleted after the write",
+			before: func(t *testing.T, f *pendingFixture) { f.approvedSecretSet(t, "TOOL_AUTH", "test-value-old") },
+			after: func(t *testing.T, f *pendingFixture) {
+				require.NoError(t, f.Server.secretBackend.Delete(context.Background(), "TOOL_AUTH", store.ScopeUser, f.UserID))
+			},
+			wantValue: "", wantCode: http.StatusConflict,
+		},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newPendingFixture(t, "pend-cas-"+string(rune('a'+i)))
+			ctx := context.Background()
+			if tc.before != nil {
+				tc.before(t, f)
+			}
+			resp := decodePendingResponse(t, agentPut(t, f.Server, f.AgentID, f.Token, "TOOL_AUTH", userScopeWrite("test-value-new", false)))
+			row := f.pendingRow(t, resp.PendingID)
+			if tc.after != nil {
+				tc.after(t, f)
+			}
+
+			rec := f.decide(t, resp.PendingID, "approve")
+			require.Equal(t, tc.wantCode, rec.Code, rec.Body.String())
+			got, err := f.Server.secretBackend.Get(ctx, "TOOL_AUTH", store.ScopeUser, f.UserID)
+			if tc.wantValue == "" {
+				assert.ErrorIs(t, err, store.ErrNotFound, "nothing is written")
+			} else {
+				require.NoError(t, err)
+				assert.Equal(t, tc.wantValue, got.Value)
+			}
+			if tc.wantCode == http.StatusOK {
+				_, err := f.Store.GetPendingSecret(ctx, resp.PendingID)
+				assert.ErrorIs(t, err, store.ErrNotFound)
+				assert.Contains(t, f.drops.dropped, row.ValueRef)
+				return
+			}
+			var body struct {
+				Error struct {
+					Code    string                 `json:"code"`
+					Message string                 `json:"message"`
+					Details map[string]interface{} `json:"details"`
+				} `json:"error"`
+			}
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+			assert.Equal(t, ErrCodeSecretPendingExistingChanged, body.Error.Code)
+			assert.Contains(t, body.Error.Message, "Reject it")
+			assert.NotContains(t, rec.Body.String(), "test-value")
+			kept := f.pendingRow(t, resp.PendingID)
+			assert.Equal(t, row.ValueRef, kept.ValueRef, "the pending secret is kept with its held value")
+			assert.Equal(t, "test-value-new", f.heldValue(t, kept))
+			assert.NotContains(t, f.drops.dropped, row.ValueRef)
+
+			// The owner can still reject it.
+			require.Equal(t, http.StatusOK, f.decide(t, resp.PendingID, "reject").Code)
+			assert.Contains(t, f.drops.dropped, row.ValueRef)
+		})
+	}
+}
+
+// TestPendingSecretsAPI_ConcurrentApproveAndReject: of an approval and a
+// rejection of the same pending secret sent together, exactly one
+// succeeds and the other answers 404; the outcome matches the answer.
+func TestPendingSecretsAPI_ConcurrentApproveAndReject(t *testing.T) {
+	f := newPendingFixture(t, "pend-race")
+	ctx := context.Background()
+	for round := 0; round < 10; round++ {
+		key := "RACE_KEY_" + string(rune('A'+round))
+		resp := decodePendingResponse(t, agentPut(t, f.Server, f.AgentID, f.Token, key, userScopeWrite("test-value-race", false)))
+
+		codes := map[string]int{}
+		var mu sync.Mutex
+		var wg sync.WaitGroup
+		for _, action := range []string{"approve", "reject"} {
+			wg.Add(1)
+			go func(action string) {
+				defer wg.Done()
+				rec := ownerRequest(t, f.Server, f.owner(), CredentialKindInteractive, http.MethodPost,
+					"/api/v1/pending-secrets/"+resp.PendingID+"/"+action, nil)
+				mu.Lock()
+				codes[action] = rec.Code
+				mu.Unlock()
+			}(action)
+		}
+		wg.Wait()
+
+		_, err := f.Server.secretBackend.GetMeta(ctx, key, store.ScopeUser, f.UserID)
+		switch {
+		case codes["approve"] == http.StatusOK:
+			assert.Equal(t, http.StatusNotFound, codes["reject"], "round %d", round)
+			assert.NoError(t, err, "round %d: approved", round)
+		case codes["reject"] == http.StatusOK:
+			assert.Equal(t, http.StatusNotFound, codes["approve"], "round %d", round)
+			assert.ErrorIs(t, err, store.ErrNotFound, "round %d: rejected", round)
+		default:
+			t.Fatalf("round %d: neither decision succeeded: %v", round, codes)
+		}
+		_, err = f.Store.GetPendingSecret(ctx, resp.PendingID)
+		assert.ErrorIs(t, err, store.ErrNotFound, "round %d", round)
+	}
+}
+
+// setFailingBackend fails every Set after running onSet.
+type setFailingBackend struct {
+	secret.SecretBackend
+	onSet func()
+}
+
+func (b *setFailingBackend) Set(context.Context, *secret.SetSecretInput) (bool, *secret.SecretMeta, error) {
+	if b.onSet != nil {
+		b.onSet()
+	}
+	return false, nil, errors.New("secret backend unavailable")
+}
+
+// TestPendingSecretsAPI_ApproveWriteFailurePutsBack: when the approved
+// secret cannot be written, the claimed pending secret is put back with
+// its ID and held value, so the owner can try again. When the key was
+// taken meanwhile (the same agent wrote a replacement), the claimed value
+// is released and the newer pending secret stays.
+func TestPendingSecretsAPI_ApproveWriteFailurePutsBack(t *testing.T) {
+	t.Run("put back", func(t *testing.T) {
+		f := newPendingFixture(t, "pend-putback")
+		resp := decodePendingResponse(t, agentPut(t, f.Server, f.AgentID, f.Token, "TOOL_AUTH", userScopeWrite("test-value-1", false)))
+		row := f.pendingRow(t, resp.PendingID)
+		f.Server.SetSecretBackend(&setFailingBackend{SecretBackend: f.drops})
+
+		rec := f.decide(t, resp.PendingID, "approve")
+		assert.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+		kept := f.pendingRow(t, resp.PendingID)
+		assert.Equal(t, *row, *kept, "the pending secret is back as it was")
+		assert.NotContains(t, f.drops.dropped, row.ValueRef)
+
+		f.Server.SetSecretBackend(f.drops)
+		require.Equal(t, http.StatusOK, f.decide(t, resp.PendingID, "approve").Code)
+		got, err := f.Server.secretBackend.Get(context.Background(), "TOOL_AUTH", store.ScopeUser, f.UserID)
+		require.NoError(t, err)
+		assert.Equal(t, "test-value-1", got.Value)
+	})
+	t.Run("key taken meanwhile", func(t *testing.T) {
+		f := newPendingFixture(t, "pend-putback-clash")
+		resp := decodePendingResponse(t, agentPut(t, f.Server, f.AgentID, f.Token, "TOOL_AUTH", userScopeWrite("test-value-1", false)))
+		row := f.pendingRow(t, resp.PendingID)
+		var newer AgentPendingSecretResponse
+		f.Server.SetSecretBackend(&setFailingBackend{SecretBackend: f.drops, onSet: func() {
+			f.Server.SetSecretBackend(f.drops)
+			newer = decodePendingResponse(t, agentPut(t, f.Server, f.AgentID, f.Token, "TOOL_AUTH", userScopeWrite("test-value-2", false)))
+			f.Server.SetSecretBackend(&setFailingBackend{SecretBackend: f.drops})
+		}})
+
+		rec := f.decide(t, resp.PendingID, "approve")
+		assert.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+		_, err := f.Store.GetPendingSecret(context.Background(), resp.PendingID)
+		assert.ErrorIs(t, err, store.ErrNotFound)
+		assert.Contains(t, f.drops.dropped, row.ValueRef, "the claimed value is released")
+		f.Server.SetSecretBackend(f.drops)
+		assert.Equal(t, "test-value-2", f.heldValue(t, f.pendingRow(t, newer.PendingID)))
+	})
+}
+
+// ownerWebRequest sends a request through the hub's full handler chain
+// with the owner's web session token, the extra headers and a raw body.
+func (f *pendingFixture) ownerWebRequest(t *testing.T, srv *Server, method, path, contentType, body string, headers map[string]string) *httptest.ResponseRecorder {
+	t.Helper()
+	tok, _, err := srv.userTokenService.GenerateAccessToken(f.UserID, f.UserID+"@test.com", "Owner", "member", ClientTypeWeb)
+	require.NoError(t, err)
+	req := httptest.NewRequest(method, path, strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+tok)
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	return rec
+}
+
+// TestPendingSecretsAPI_DecisionRefusesCrossSiteRequests: in every auth
+// mode, approve and reject refuse a request a browser sent from another
+// site (403) and a browser request whose body is not JSON (415), change
+// nothing, and send no CORS headers. A same-origin JSON request and a
+// request without browser headers (the CLI) are served.
+func TestPendingSecretsAPI_DecisionRefusesCrossSiteRequests(t *testing.T) {
+	// httptest requests carry Host example.com.
+	crossSite := map[string]map[string]string{
+		"foreign origin":                {"Origin": "https://attacker.test"},
+		"null origin":                   {"Origin": "null"},
+		"sec-fetch-site cross-site":     {"Sec-Fetch-Site": "cross-site"},
+		"sibling host origin":           {"Origin": "https://other.example.com"},
+		"same-site from a sibling host": {"Sec-Fetch-Site": "same-site", "Origin": "https://other.example.com"},
+		"unknown sec-fetch-site":        {"Sec-Fetch-Site": "something-else"},
+	}
+	f := newPendingFixture(t, "pend-xsite")
+	ctx := context.Background()
+	resp := decodePendingResponse(t, agentPut(t, f.Server, f.AgentID, f.Token, "TOOL_AUTH", userScopeWrite("test-value-1", false)))
+	row := f.pendingRow(t, resp.PendingID)
+	unchanged := func(t *testing.T, what string) {
+		t.Helper()
+		kept, err := f.Store.GetPendingSecret(ctx, resp.PendingID)
+		require.NoError(t, err, what)
+		assert.Equal(t, row.ValueRef, kept.ValueRef, what)
+		_, err = f.Server.secretBackend.GetMeta(ctx, "TOOL_AUTH", store.ScopeUser, f.UserID)
+		assert.ErrorIs(t, err, store.ErrNotFound, what)
+		assert.NotContains(t, f.drops.dropped, row.ValueRef, what)
+	}
+	noCORS := func(t *testing.T, rec *httptest.ResponseRecorder, what string) {
+		t.Helper()
+		for name := range rec.Header() {
+			assert.False(t, strings.HasPrefix(name, "Access-Control-Allow-"), "%s: %s header sent", what, name)
+		}
+	}
+
+	for _, action := range []string{"approve", "reject"} {
+		path := "/api/v1/pending-secrets/" + resp.PendingID + "/" + action
+		for name, h := range crossSite {
+			what := action + " " + name
+			rec := f.ownerWebRequest(t, f.Server, http.MethodPost, path, "application/json", "{}", h)
+			assert.Equal(t, http.StatusForbidden, rec.Code, "%s: %s", what, rec.Body.String())
+			assert.NotContains(t, rec.Body.String(), "test-value")
+			noCORS(t, rec, what)
+			unchanged(t, what)
+		}
+		for _, ct := range []string{"text/plain", "application/x-www-form-urlencoded", "multipart/form-data; boundary=x", ""} {
+			what := action + " same-origin body " + ct
+			rec := f.ownerWebRequest(t, f.Server, http.MethodPost, path, ct, "{}", map[string]string{"Origin": "https://example.com"})
+			assert.Equal(t, http.StatusUnsupportedMediaType, rec.Code, "%s: %s", what, rec.Body.String())
+			noCORS(t, rec, what)
+			unchanged(t, what)
+		}
+	}
+
+	// A same-origin JSON approval is served, without CORS headers.
+	rec := f.ownerWebRequest(t, f.Server, http.MethodPost, "/api/v1/pending-secrets/"+resp.PendingID+"/approve",
+		"application/json", "{}", map[string]string{"Origin": "https://example.com", "Sec-Fetch-Site": "same-origin"})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	noCORS(t, rec, "same-origin approve")
+
+	// A request without browser headers (the CLI) is served too.
+	resp = decodePendingResponse(t, agentPut(t, f.Server, f.AgentID, f.Token, "TOOL_AUTH_2", userScopeWrite("test-value-2", false)))
+	rec = f.ownerWebRequest(t, f.Server, http.MethodPost, "/api/v1/pending-secrets/"+resp.PendingID+"/reject", "", "", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+}
+
+// TestPendingSecretsAPI_CrossSiteRefusedInProxyMode: behind an
+// authenticating proxy the full middleware chain refuses a cross-site
+// decision as well.
+func TestPendingSecretsAPI_CrossSiteRefusedInProxyMode(t *testing.T) {
+	f := newPendingFixture(t, "pend-xsite-proxy")
+	resp := decodePendingResponse(t, agentPut(t, f.Server, f.AgentID, f.Token, "TOOL_AUTH", userScopeWrite("test-value-1", false)))
+	f.Server.authConfig.AuthMode = proxyAuthMode
+	t.Cleanup(func() { f.Server.authConfig.AuthMode = "" })
+	for _, action := range []string{"approve", "reject"} {
+		rec := f.ownerWebRequest(t, f.Server, http.MethodPost, "/api/v1/pending-secrets/"+resp.PendingID+"/"+action,
+			"application/json", "{}", map[string]string{"Origin": "https://attacker.test"})
+		assert.Equal(t, http.StatusForbidden, rec.Code, "%s: %s", action, rec.Body.String())
+	}
+	f.pendingRow(t, resp.PendingID)
+	_, err := f.Server.secretBackend.GetMeta(context.Background(), "TOOL_AUTH", store.ScopeUser, f.UserID)
+	assert.ErrorIs(t, err, store.ErrNotFound)
+}
+
+// TestPendingSecret_ProjectDeletionCascade: deleting a project deletes
+// the pending secrets its agents wrote and releases their held values;
+// pending secrets from other projects stay. Deleting the writing agent
+// keeps its pending secret, still approvable.
+func TestPendingSecret_ProjectDeletionCascade(t *testing.T) {
+	f := newPendingFixture(t, "pend-proj-del")
+	ctx := context.Background()
+	a := decodePendingResponse(t, agentPut(t, f.Server, f.AgentID, f.Token, "KEY_A", userScopeWrite("test-value-a", false)))
+	b := decodePendingResponse(t, agentPut(t, f.Server, f.AgentB, f.TokenB, "KEY_B", userScopeWrite("test-value-b", false)))
+	aRow := f.pendingRow(t, a.PendingID)
+	bRow := f.pendingRow(t, b.PendingID)
+
+	// Deleting the writer agent B keeps its pending secret.
+	require.NoError(t, f.Store.DeleteAgent(ctx, f.AgentB))
+	assert.Equal(t, bRow.ValueRef, f.pendingRow(t, b.PendingID).ValueRef)
+
+	rec := doRequest(t, f.Server, http.MethodDelete, "/api/v1/projects/"+f.ProjectID+"?force=true", nil)
+	require.Contains(t, []int{http.StatusOK, http.StatusNoContent}, rec.Code, rec.Body.String())
+	_, err := f.Store.GetPendingSecret(ctx, a.PendingID)
+	assert.ErrorIs(t, err, store.ErrNotFound, "the deleted project's pending secret is deleted")
+	assert.Contains(t, f.drops.dropped, aRow.ValueRef, "its held value is released")
+	assert.NotContains(t, f.drops.dropped, bRow.ValueRef)
+
+	// B's pending secret, from the other project and a deleted writer,
+	// is still approvable.
+	require.Equal(t, http.StatusOK, f.decide(t, b.PendingID, "approve").Code)
+	got, err := f.Server.secretBackend.Get(ctx, "KEY_B", store.ScopeUser, f.UserID)
+	require.NoError(t, err)
+	assert.Equal(t, "test-value-b", got.Value)
+}
+
+// seedPendingSecret holds value with b and records a pending secret of
+// ownerID for it.
+func seedPendingSecret(t *testing.T, s store.Store, b secret.SecretBackend, ownerID, key, value string) *store.PendingSecret {
+	t.Helper()
+	ctx := context.Background()
+	id := api.NewUUID()
+	ref, err := b.HoldPending(ctx, id, []byte(value))
+	require.NoError(t, err)
+	res, err := s.CreateOrReplacePendingSecret(ctx, &store.PendingSecret{
+		ID: id, Key: key, SecretType: store.SecretTypeEnvironment, Scope: store.ScopeUser, ScopeID: ownerID,
+		ValueRef: ref, ValueLen: len(value), AgentID: "agent-1", AgentSlug: "agent-1", ProjectID: "project-1", ProjectName: "project-1",
+	}, time.Now())
+	require.NoError(t, err)
+	return res.Secret
+}
+
+// TestPendingSecret_UserDeletionCascade: removing a deleted user's data
+// deletes their pending secrets and releases the held values; the
+// startup sweep finds a missing user that has only pending secrets; other
+// users' pending secrets stay. With no secret backend the rows are kept
+// for a later sweep.
+func TestPendingSecret_UserDeletionCascade(t *testing.T) {
+	ctx := context.Background()
+	srv, s := testServer(t)
+	drops := &pendingDropRecorder{SecretBackend: secret.NewLocalBackend(s, "test-hub-id", "test-secret")}
+	srv.SetSecretBackend(drops)
+
+	gone := tid("pend-user-gone")
+	swept := tid("pend-user-swept")
+	live := newActiveMember(t, s, "pend-user-live", "pend-live@test.com")
+	goneRow := seedPendingSecret(t, s, drops, gone, "KEY_1", "test-value-1")
+	sweptRow := seedPendingSecret(t, s, drops, swept, "KEY_2", "test-value-2")
+	liveRow := seedPendingSecret(t, s, drops, live.ID, "KEY_3", "test-value-3")
+
+	assert.True(t, srv.removeUserScopedData(ctx, gone))
+	_, err := s.GetPendingSecret(ctx, goneRow.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound)
+	assert.Contains(t, drops.dropped, goneRow.ValueRef)
+
+	removed, _, err := srv.sweepOrphanedUserScopedData(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 1, removed, "the user with only a pending secret is found")
+	_, err = s.GetPendingSecret(ctx, sweptRow.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound)
+	assert.Contains(t, drops.dropped, sweptRow.ValueRef)
+
+	_, err = s.GetPendingSecret(ctx, liveRow.ID)
+	require.NoError(t, err, "a live user's pending secret stays")
+	assert.NotContains(t, drops.dropped, liveRow.ValueRef)
+
+	// No secret backend: the row is kept and the removal reports it.
+	kept := seedPendingSecret(t, s, drops, gone, "KEY_4", "test-value-4")
+	srv.SetSecretBackend(nil)
+	assert.False(t, srv.removeUserScopedData(ctx, gone))
+	_, err = s.GetPendingSecret(ctx, kept.ID)
+	require.NoError(t, err)
 }
