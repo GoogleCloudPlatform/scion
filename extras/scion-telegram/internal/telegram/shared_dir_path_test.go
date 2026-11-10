@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -71,21 +72,18 @@ func localSharedDir(home, name string) string {
 	return filepath.Join(home, ".scion", "project-configs", "my-project__abcd1234", "shared-dirs", name)
 }
 
-func downloadTestFile(t *testing.T) (string, error) {
+func stageTestFile(t *testing.T) (string, error) {
 	t.Helper()
-	b := newTestBrokerV2(t, newFakeTGServerV2(t))
-	b.downloadsPath = ""
-	tgMsg := &TGMessage{Document: &TGDocument{FileID: "doc1", FileUniqueID: "u1", FileName: "note.txt", FileSize: 10}}
-	agentPath, _, err := b.downloadTelegramFile(context.Background(), b.api, tgMsg, "my-project", sharedDirTestProjectID)
-	return agentPath, err
+	staged, err := legacyStage("my-project", sharedDirTestProjectID, "note.txt", strings.NewReader("0123456789"))
+	return staged.agentPath, err
 }
 
-func TestDownloadTelegramFile_LocalBackend(t *testing.T) {
+func TestLegacyStage_LocalBackend(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	stubSharedDirSettings(t, &config.VersionedSettings{})
 
-	agentPath, err := downloadTestFile(t)
+	agentPath, err := stageTestFile(t)
 	require.NoError(t, err)
 	assert.Contains(t, agentPath, "/scion-volumes/scratchpad/.attachments/_telegram/")
 
@@ -94,13 +92,13 @@ func TestDownloadTelegramFile_LocalBackend(t *testing.T) {
 	assert.Len(t, entries, 1)
 }
 
-func TestDownloadTelegramFile_NFSBackend(t *testing.T) {
+func TestLegacyStage_NFSBackend(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	mountRoot, nfsDir := mountedNFSRoot(t, "scratchpad")
 	stubSharedDirSettings(t, nfsSettings(mountRoot))
 
-	agentPath, err := downloadTestFile(t)
+	agentPath, err := stageTestFile(t)
 	require.NoError(t, err)
 	assert.Contains(t, agentPath, "/scion-volumes/scratchpad/.attachments/_telegram/")
 
@@ -111,18 +109,20 @@ func TestDownloadTelegramFile_NFSBackend(t *testing.T) {
 	assert.True(t, os.IsNotExist(err), "local shared dir must not be written for nfs")
 }
 
-func TestDownloadTelegramFile_NFSUnavailable(t *testing.T) {
+func TestLegacyStage_NFSUnavailable(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	stubSharedDirSettings(t, nfsSettings(filepath.Join(t.TempDir(), "not-mounted")))
 
-	_, err := downloadTestFile(t)
+	_, err := stageTestFile(t)
 	require.Error(t, err)
 	assert.True(t, isSharedDirStorageUnavailable(err), "err = %v", err)
 	_, statErr := os.Stat(localSharedDir(home, "scratchpad"))
 	assert.True(t, os.IsNotExist(statErr), "must not fall back to the local shared dir")
 
-	text := sharedDirUnavailableText(telegramAttachmentName(&TGMessage{Document: &TGDocument{FileName: "note.txt"}}))
+	att, ok := telegramAttachmentOf(&TGMessage{Document: &TGDocument{FileID: "f1", FileName: "note.txt"}})
+	require.True(t, ok)
+	text := sharedDirUnavailableText(att.Name)
 	assert.Contains(t, text, "note.txt")
 	assert.NotContains(t, text, "not-mounted", "the sender message must not name host paths")
 }
@@ -234,12 +234,14 @@ func TestHandleGroupMessage_AttachmentErrorTextHasNoDetails(t *testing.T) {
 	b, tgSrv, hub := newRoutingTestBroker(t)
 	hub.agents["proj-1"] = []AgentInfo{{Slug: "coder"}}
 	linkTestUser(t, b.store, 456, "alice@example.com")
+	serveAttachmentCheck(t, b, attachmentCheckAnswer{Authorized: true, Uploads: attachmentUploadsLegacy})
 
-	// A downloads path below a regular file cannot be created; the
-	// resulting error names that path.
+	// A scratchpad below a regular file cannot be created; the resulting
+	// error names that path.
 	blocker := filepath.Join(t.TempDir(), "blocker")
 	require.NoError(t, os.WriteFile(blocker, []byte("x"), 0o644))
-	b.downloadsPath = filepath.Join(blocker, "downloads")
+	t.Setenv("HOME", filepath.Join(blocker, "home"))
+	stubSharedDirSettings(t, &config.VersionedSettings{})
 
 	msg := plainGroupMessage(456, "")
 	msg.Document = &TGDocument{FileID: "doc1", FileUniqueID: "u1", FileName: "note.txt", FileSize: 10}

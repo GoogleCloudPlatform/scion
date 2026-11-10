@@ -193,6 +193,8 @@ The bot strips @-mentions from the message text before forwarding to the agent. 
 
 ### File Attachments
 
+Files sent in a linked group (photos, documents, audio and video) are delivered to each addressed agent. When attachment artifacts are enabled on the Hub (the default where the artifact service is ready), each agent receives the file in its inbox at `~/.scion/inbox/<message-id>/`. When attachment artifacts are off on the Hub, or the Hub is older, the file is placed in the project's shared scratchpad and its path is delivered. If the Hub accepts no attachments at all, the message text is still delivered and the sender is told in the chat. A message that carries only a file which can't be delivered is not sent at all, and the sender is told. If the Hub doesn't accept attachments from the sender for the addressed agents, the whole message is refused; with several recipients, none of them receives the text. A file over the size limit (the smaller of the Hub's current limit and Telegram's download limit for bots) is left out: the text is delivered and the sender gets a notice naming the limit. The former `downloads_path` setting is retired; if it is still configured, the plugin logs a warning at startup and ignores it.
+
 Agents can send files to users via the Scion CLI:
 
 ```bash

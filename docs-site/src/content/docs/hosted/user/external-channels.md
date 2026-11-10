@@ -32,6 +32,12 @@ configuration from the web UI, registration, and your first message.
 - **Body mentions:** Mentions inside the body of a message (e.g., `@agent-b`) are delivered as lightweight `TypeMention` (`mention`) notifications instead of full instructions, preventing accidental multi-agent execution loops. If a message contains only body mentions, the group's default agent is restored as the primary recipient.
 - Available bot commands: `/agents` (list agents), `/default` (set default), `/terminal <agent>` (get web terminal URL), `/settings` (configure group), `/notifications` (toggle notification types).
 
+### Attachments
+
+Photos, documents, audio and video sent in a linked group are delivered to each addressed agent (the agents the message is routed to, including mentioned agents). When attachment artifacts are enabled on the Hub (the default where the artifact service is ready), each agent receives the file in its inbox at `~/.scion/inbox/<message-id>/`. When attachment artifacts are off on the Hub, or the Hub is older, the file is placed in the project's shared scratchpad and its path is delivered. If the Hub accepts no attachments at all, the message text is still delivered and the sender is told in the chat that the attachment was not. A message that carries only a file which can't be delivered is not sent at all, and the sender is told. If the Hub doesn't accept attachments from the sender for the addressed agents, the whole message is refused; with several recipients, none of them receives the text. A file over the size limit (the smaller of the Hub's current limit and Telegram's download limit for bots) is left out: the text is delivered and the sender gets a notice naming the limit.
+
+The plugin's former `downloads_path` setting is retired. If it is still configured, the plugin logs a warning at startup and ignores it.
+
 ### Group Settings
 
 Each linked group can be configured via `/settings`:

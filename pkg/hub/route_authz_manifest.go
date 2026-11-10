@@ -166,10 +166,12 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/brokers/":     "authenticated", // Broker by ID routes
 
 	// ── Broker plugin endpoints ────────────────────────────────────────
-	"/api/v1/broker/inbound":        "broker-hmac", // Broker inbound messages — broker HMAC
-	"/api/v1/broker/inbound/routed": "broker-hmac", // Broker inbound routed messages — broker HMAC
-	"/api/v1/broker/callback":       "broker-hmac", // Broker callback delivery — broker HMAC
-	"/api/v1/broker/projects":       "broker-hmac", // Broker project listing — broker HMAC
+	"/api/v1/broker/inbound":                   "broker-hmac", // Broker inbound messages — broker HMAC
+	"/api/v1/broker/inbound/routed":            "broker-hmac", // Broker inbound routed messages — broker HMAC
+	"/api/v1/broker/inbound/attachments":       "broker-hmac", // Broker attachment upload — broker HMAC; sender authorized in handler
+	"/api/v1/broker/inbound/attachments/check": "broker-hmac", // Broker attachment check — broker HMAC; writes nothing
+	"/api/v1/broker/callback":                  "broker-hmac", // Broker callback delivery — broker HMAC
+	"/api/v1/broker/projects":                  "broker-hmac", // Broker project listing — broker HMAC
 
 	// ── Admin system endpoints ─────────────────────────────────────────
 	"/api/v1/admin/maintenance":                  "admin", // Maintenance mode — requires admin role

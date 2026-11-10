@@ -889,6 +889,11 @@ var principalContextSetterFiles = map[string]map[string]bool{
 		// The attachment read decision for a delivery recipient, built from
 		// the hub's agent row (attachmentDecisionForRecipient; ptone/scion#4596).
 		"attachment_delivery.go": true,
+		// A broker inbound sender, resolved and authorized after the broker
+		// HMAC check (brokerSenderContext): artifact service calls run as that
+		// user, so uploads are owned by, and ids are checked against, the
+		// sender, never the broker. The credential context stays the broker's.
+		"broker_inbound_sender.go": true,
 	},
 	"contextWithCredentialContext": {
 		"internal/principal/identity.go": true, "zz_alias_principal.go": true,
