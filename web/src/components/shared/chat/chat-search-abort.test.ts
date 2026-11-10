@@ -243,3 +243,60 @@ describe('scion-chat-search request lifecycle', () => {
     expect(el.noResults).toBe(true);
   });
 });
+
+describe('search term length (round-5 item R5-02)', () => {
+  it('counts code points, as the hub counts runes', () => {
+    expect(mod.searchQueryChars('🙂')).toBe(1);
+    expect(mod.searchQueryChars(' 🙂🚀 ')).toBe(2);
+    expect(mod.searchQueryChars('ab')).toBe(2);
+  });
+
+  it('sends no request for a single emoji and shows the prompt', async () => {
+    vi.useFakeTimers();
+    const el = makeSearch('') as any;
+    try {
+      document.body.appendChild(el);
+      el.searchActive = true;
+      el.handleInput({ target: { value: '🙂' } } as unknown as Event);
+      await vi.advanceTimersByTimeAsync(400);
+      await el.performSearch();
+      expect(apiFetch).not.toHaveBeenCalled();
+      await el.updateComplete;
+      expect(el.shadowRoot?.textContent).toContain('Type at least 2 characters to search');
+    } finally {
+      el.remove();
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('a superseded request writes no error (round-5 item R5-03)', () => {
+  it('drops the error of a "load more" superseded while its body is read', async () => {
+    apiFetch.mockImplementation((_path, init) =>
+      Promise.resolve({
+        ok: false,
+        status: 503,
+        headers: new Headers(),
+        // The error body never arrives; reading it fails like fetch once the
+        // request is aborted.
+        json: () =>
+          new Promise((_resolve, reject) => {
+            init?.signal?.addEventListener('abort', () =>
+              reject(new DOMException('The operation was aborted.', 'AbortError'))
+            );
+          }),
+      } as unknown as Response)
+    );
+    const el = makeSearch();
+    el.results = [{ messageId: 'm1' }];
+    el.nextCursor = 'c1';
+    const run = el.performSearch(true);
+    await vi.waitFor(() => expect(apiFetch).toHaveBeenCalledTimes(1));
+    await Promise.resolve();
+    el.abortSearch();
+    await run;
+    expect(el.loadMoreError).toBe('');
+    expect(el.errorMsg).toBe('');
+    expect(el.results).toEqual([{ messageId: 'm1' }]);
+  });
+});

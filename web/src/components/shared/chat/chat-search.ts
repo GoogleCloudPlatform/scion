@@ -81,6 +81,17 @@ export function searchErrorMessage(status: number, code = ''): string {
   return SEARCH_FAILED_MESSAGE;
 }
 
+/** The hub's shortest accepted search term, in characters. */
+export const SEARCH_MIN_QUERY_CHARS = 2;
+
+/**
+ * The length of a search term in characters as the hub counts them (Unicode
+ * code points, not UTF-16 units), so one emoji is one character.
+ */
+export function searchQueryChars(q: string): number {
+  return [...q.trim()].length;
+}
+
 /** The error code of an API error body ({ error: { code } }), or '' if none. */
 async function errorCode(res: Response): Promise<string> {
   try {
@@ -425,7 +436,7 @@ export class ScionChatSearch extends LitElement {
     this.errorMsg = '';
     this.loadMoreError = '';
 
-    if (this.query.trim().length < 2) {
+    if (searchQueryChars(this.query) < SEARCH_MIN_QUERY_CHARS) {
       this.results = [];
       this.nextCursor = '';
       this.noResults = false;
@@ -446,7 +457,7 @@ export class ScionChatSearch extends LitElement {
 
   private async performSearch(append = false): Promise<void> {
     const q = this.query.trim();
-    if (q.length < 2) return;
+    if (searchQueryChars(q) < SEARCH_MIN_QUERY_CHARS) return;
 
     this.abortSearch();
     const controller = new AbortController();
@@ -488,7 +499,11 @@ export class ScionChatSearch extends LitElement {
         res = await apiFetch(url, { signal: controller.signal });
       }
       if (!res.ok) {
-        const msg = searchErrorMessage(res.status, await errorCode(res));
+        const code = await errorCode(res);
+        // Reading the body can end with the request superseded; a superseded
+        // request writes no error (errorCode swallows its AbortError).
+        if (controller.signal.aborted) return;
+        const msg = searchErrorMessage(res.status, code);
         if (append) {
           // Keep the results already on screen; show the error below them.
           this.loadMoreError = msg;
@@ -500,6 +515,7 @@ export class ScionChatSearch extends LitElement {
       }
 
       const data = (await res.json()) as SearchResponse;
+      if (controller.signal.aborted) return;
 
       if (append) {
         this.results = [...this.results, ...data.results];
@@ -530,7 +546,7 @@ export class ScionChatSearch extends LitElement {
   private toggleScope(all: boolean): void {
     if (this.scopeAll === all) return;
     this.scopeAll = all;
-    if (this.query.trim().length >= 2) {
+    if (searchQueryChars(this.query) >= SEARCH_MIN_QUERY_CHARS) {
       void this.performSearch();
     }
   }
@@ -633,7 +649,7 @@ export class ScionChatSearch extends LitElement {
               ? html`<div class="status-msg search-error" role="alert">${this.errorMsg}</div>`
               : this.noResults
                 ? html`<div class="status-msg">No messages found</div>`
-                : this.results.length === 0 && this.query.trim().length < 2
+                : this.results.length === 0 && searchQueryChars(this.query) < SEARCH_MIN_QUERY_CHARS
                   ? html`<div class="status-msg">Type at least 2 characters to search</div>`
                   : this.results.map((r) => this.renderResult(r))
         }

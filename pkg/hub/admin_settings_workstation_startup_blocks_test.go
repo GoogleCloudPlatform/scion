@@ -310,6 +310,9 @@ func TestHosted_PutServerConfig_StartupBlocksStillLayer0(t *testing.T) {
 		{`{"server":{"hub":{"conduit":{"lifetime_cap":"10s"}}}}`, "server.hub.conduit.lifetime_cap"},
 		{`{"server":{"hub":{"port_proxy":{"response_header_timeout":"30s"}}}}`, "server.hub.port_proxy.response_header_timeout"},
 		{`{"server":{"hub":{"port_proxy":{"response_header_timeout":"1s"}}}}`, "server.hub.port_proxy.response_header_timeout"},
+		// Round-5 item R5-01: the chat search block is Layer-0 on a hosted hub too.
+		{`{"server":{"hub":{"chat":{"search":{"timeout":"5s"}}}}}`, "server.hub.chat.search.timeout"},
+		{`{"server":{"hub":{"chat":{"search":{"timeout":"soon"}}}}}`, "server.hub.chat.search.timeout"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.body, func(t *testing.T) {
