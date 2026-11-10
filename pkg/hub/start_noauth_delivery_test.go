@@ -215,11 +215,14 @@ func TestStartNoAuth_OwnerScopeOnly(t *testing.T) {
 			}
 			m.agent.AppliedConfig.NoAuth = true
 			require.NoError(t, m.store.UpdateAgent(context.Background(), m.agent))
+			rec := &naRecordingBackend{SecretBackend: m.backend}
+			m.d.SetSecretBackend(rec)
 
 			sent := op.run(t, m)
 			assertNoCanary(t, sent, canaries)
 			assert.Empty(t, sent.secrets)
 			assert.NotContains(t, sent.env, noAuthGitTokenKey, "no git token is stored")
+			assert.Empty(t, rec.fetched, "no owner-scope value is read")
 		})
 	}
 }
