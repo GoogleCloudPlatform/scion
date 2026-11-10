@@ -153,6 +153,13 @@ func TestProjectLeave_NotAvailableInAgentMode(t *testing.T) {
 	assert.NotContains(t, collectCommandNames(root), "project.leave")
 }
 
+// TestProjectLeave_AvailableOnWindows: the command makes Hub API calls
+// only, so the Windows build lists it; the parent stays gated.
+func TestProjectLeave_AvailableOnWindows(t *testing.T) {
+	assert.True(t, windowsAllowed["project.leave"])
+	assert.False(t, windowsAllowed["project"], "the parent stays gated")
+}
+
 // TestProjectLeave_Registered: the command is wired under 'scion project'.
 func TestProjectLeave_Registered(t *testing.T) {
 	assert.Equal(t, projectCmd, projectLeaveCmd.Parent())
