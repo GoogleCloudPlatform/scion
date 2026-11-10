@@ -256,6 +256,10 @@ func (s *Server) validateScheduledEventPayloadJSON(w http.ResponseWriter, eventT
 	case "dispatch_agent":
 		var p DispatchAgentEventPayload
 		decodeErr = json.Unmarshal([]byte(payload), &p)
+		if decodeErr == nil && !templateRefAllowed(p.Template) {
+			ValidationError(w, templateRefRefusal, nil)
+			return false
+		}
 	default:
 		// Every caller validates eventType against the closed
 		// {message, dispatch_agent} set before reaching here, so this branch

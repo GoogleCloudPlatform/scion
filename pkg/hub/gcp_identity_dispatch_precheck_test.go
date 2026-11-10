@@ -95,7 +95,7 @@ func TestKubernetesIdentityNotMapped(t *testing.T) {
 			p.MappingsIncompleteReason = api.BrokerSAReportForceRuntime
 		}},
 		{name: "complete report without a version (4a-only broker) allows", profile: func(p *store.BrokerProfile) { p.MappingsReportVersion = 0 }},
-		{name: "complete report at an older version allows", profile: func(p *store.BrokerProfile) { p.MappingsReportVersion = api.BrokerSAReportVersion - 1 }},
+		{name: "complete report at an older version allows", profile: func(p *store.BrokerProfile) { p.MappingsReportVersion = kubernetesSAReportMinVersion - 1 }},
 		{name: "no report (older broker) allows", profile: func(p *store.BrokerProfile) {
 			p.MappingsReported, p.MappingsComplete, p.MappingsReportedAt, p.ServiceAccountMappings = false, false, nil, nil
 		}},
@@ -475,7 +475,7 @@ func saDecisionCases(now time.Time) []saDecisionCase {
 			p.MappingsIncompleteReason = api.BrokerKSADiscoveryListFailed
 		}, state: SAMappingStateUnknown, reason: SAMappingReasonReportIncomplete},
 		{name: "report unversioned", profile: func(p *store.BrokerProfile) { p.MappingsReportVersion = 0 }, state: SAMappingStateUnknown, reason: SAMappingReasonReportOldVersion},
-		{name: "report older version", profile: func(p *store.BrokerProfile) { p.MappingsReportVersion = api.BrokerSAReportVersion - 1 }, state: SAMappingStateUnknown, reason: SAMappingReasonReportOldVersion},
+		{name: "report older version", profile: func(p *store.BrokerProfile) { p.MappingsReportVersion = kubernetesSAReportMinVersion - 1 }, state: SAMappingStateUnknown, reason: SAMappingReasonReportOldVersion},
 		{name: "report stale", profile: func(p *store.BrokerProfile) {
 			at := now.Add(-profileSAReportFreshFor - time.Second)
 			p.MappingsReportedAt = &at

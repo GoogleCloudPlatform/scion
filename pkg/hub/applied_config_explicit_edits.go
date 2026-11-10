@@ -54,11 +54,12 @@ var explicitEditExcludedFields = map[string]bool{
 // value, and leaves it alone otherwise.
 //
 // Invariant E: a PATCH changes a CreateInputs field (or env key) IF AND ONLY
-// IF it changed that field's live value. The configure page reloads the
-// live, derived config and PATCHes the whole thing back on every Save and
-// every Start (web/src/components/pages/agent-configure.ts's populateForm
-// and buildConfig), so most of any given PATCH body is an echo, not an
-// edit; an echoed value is therefore never recorded, which is what lets a
+// IF it changed that field's live value. A client may reload the live,
+// derived config and PATCH it back (the retired Configure page did so on
+// every Save and Start; the shared agent form,
+// web/src/components/shared/agent-config-form.ts, sends only the fields the
+// user touched), so a PATCH body can be largely an echo, not an edit; an
+// echoed value is therefore never recorded, which is what lets a
 // template, hub or catalog value nobody actually touched keep refreshing at
 // `scion reincarnate` instead of being frozen in as if the requester had
 // typed it.
@@ -176,15 +177,15 @@ func recordExplicitEdits(ci *store.AgentCreateInputs, old *store.AgentAppliedCon
 	}
 
 	// Every other ScionConfig field, present-keys-only: a field the
-	// configure page (or any other caller) doesn't render is never present
+	// agent form (or any other caller) doesn't send is never present
 	// in the request, so it is left alone here regardless of its live
 	// value -- absent is never treated as cleared. A present field that
 	// differs from the live AppliedConfig.InlineConfig value (empty
 	// included) is recorded; this is what lets a field be cleared back to
 	// "not explicit" (re-derived from the template at reincarnate) by
-	// sending it as an explicit empty value -- see agent-configure.ts's
-	// buildConfig, which sends an explicit empty value for the fields it
-	// owns when the user clears them.
+	// sending it as an explicit empty value -- see the shared agent form
+	// (web/src/components/shared/agent-config-form.ts), whose Clear sends an
+	// explicit null for a value the agent stores.
 	recordOtherInlineFieldEdits(ensureInline, old.InlineConfig, cfg, present)
 }
 
@@ -198,9 +199,10 @@ func thinkingLevelEqual(a, b *int) bool {
 	return *a == *b
 }
 
-// autoExposeEnvKeys mirrors AUTO_EXPOSE_ENV_KEYS in agent-configure.ts: the
-// four env keys the dedicated auto-expose control owns. The configure page
-// sends them only when the user changed that control, so in a PATCH env map
+// autoExposeEnvKeys mirrors AUTO_EXPOSE_ENV_KEYS in
+// web/src/components/shared/agent-config-form.ts: the four env keys the
+// dedicated auto-expose control owns. The form sends them only when the
+// user changed that control, so in a PATCH env map
 // an absent auto-expose key means "untouched", never "removed"
 // (diffExplicitEnvKeys, applyPatchAutoExposeEnv).
 var autoExposeEnvKeys = map[string]bool{

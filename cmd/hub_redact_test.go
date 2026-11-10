@@ -84,3 +84,41 @@ func TestRedactEndpointIn_QueryEscapedEndpoint(t *testing.T) {
 	got := redactEndpointIn("next="+url.QueryEscape(endpoint), endpoint)
 	require.Empty(t, secretFragmentIn(got, "s3@cret", 4), got)
 }
+
+// TestRedactEndpointIn_AtOutsideUserInfoNeverEchoed: an endpoint that
+// parses but holds an '@' the parser does not read as user info (a
+// password that reads as a port and a path, or a token that reads as a
+// host, followed by '/', '?' or '#') is replaced whole, and no 4-character
+// fragment of its secret survives in any rendering of a text that quotes
+// it. Hub URLs must not contain '@', so such an endpoint can only come
+// from a source that skipped the validator.
+func TestRedactEndpointIn_AtOutsideUserInfoNeverEchoed(t *testing.T) {
+	for _, tc := range []struct{ name, endpoint, secret string }{
+		{"password read as a port and a path", "https://u:1234/x@hub.example.com", "1234/x"},
+		{"token read as a host", "https://tok9/x@hub.example.com", "tok9/x"},
+		{"password read as a port, then '?'", "https://u:12?34@hub.example.com", "12?34"},
+		{"token read as a host, then '#'", "https://tok9#x@hub.example.com", "tok9#x"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			u, err := url.Parse(tc.endpoint)
+			require.NoError(t, err, "the endpoint must be one url.Parse accepts")
+			require.Nil(t, u.User, "the endpoint must parse without user info")
+			jsonText, err := json.Marshal("hub " + tc.endpoint + " failed")
+			require.NoError(t, err)
+			renderings := map[string]string{
+				"verbatim":      "hub " + tc.endpoint + " failed",
+				"URL built":     `Get "` + tc.endpoint + `/api/v1/health": refused`,
+				"%q":            fmt.Sprintf("hub %q failed", tc.endpoint),
+				"JSON":          string(jsonText),
+				"query-escaped": "next=" + url.QueryEscape(tc.endpoint),
+				"path-escaped":  "/p/" + url.PathEscape(tc.endpoint),
+			}
+			for name, text := range renderings {
+				got := redactEndpointIn(text, tc.endpoint)
+				assert.Empty(t, secretFragmentIn(got, tc.secret, 4), "%s: %q", name, got)
+			}
+			assert.Equal(t, `Get "[redacted hub URL]/api/v1/health": refused`,
+				redactEndpointIn(renderings["URL built"], tc.endpoint))
+		})
+	}
+}

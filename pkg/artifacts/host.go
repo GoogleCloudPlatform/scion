@@ -153,8 +153,18 @@ type MessageScopeHost interface {
 	// MayReadMessage reports whether the caller may read the message
 	// messageID now: a reader of its conversation, or one of its
 	// addressees. A deleted or unknown message, and any lookup failure,
-	// answer false.
-	MayReadMessage(ctx context.Context, messageID string) bool
+	// answer false. messageProjectID is the project the attachment rows of
+	// the message record (Artifact.MessageProjectID): nil when unknown,
+	// "" for a message without a project. A host may require it for some
+	// credentials (ptone/scion#4596); nil and "" are distinct.
+	MayReadMessage(ctx context.Context, messageID string, messageProjectID *string) bool
+
+	// PermitsUploadRead reports whether the caller's credential allows the
+	// uploader to read its own unsent upload (an upload-scoped row). It is
+	// asked after the uploader matches (ptone/scion#4596, section 9, clause
+	// 0): a project-bounded user access token does not read its holder's
+	// unsent upload, which belongs to no project.
+	PermitsUploadRead(ctx context.Context) bool
 }
 
 // ScopeExplainer is an optional extension of Host. When a credential
@@ -173,40 +183,25 @@ type ScopeExplainer interface {
 	MissingScope(ctx context.Context, permission string) string
 }
 
-// ReviewGrantAuthority is an optional extension of Host (design D24,
-// ptone/scion#4014). For an artifact owned by an agent, the agent cannot
-// administer it (sharing is user-only), so without this extension no one
-// but an admin grantee can give a human review access. With it, the
-// service lets two more users give a user a review grant, and nothing else:
-// the owning agent's delegating user and an admin of the artifact's home
-// project. A host without it allows neither (fail closed).
-type ReviewGrantAuthority interface {
-	// MayGrantReview reports whether the caller of ctx, a user, may give a
-	// user a review grant on an artifact owned by agent ownerAgentID and
-	// homed in project homeScope: the caller is the user at the root of the
-	// agent's live, recorded delegation chain, or holds project
-	// administration in homeScope. Any lookup failure answers false.
-	MayGrantReview(ctx context.Context, ownerAgentID, homeScope string) bool
+// GrantNotifier is an optional extension of Host for Ask for review
+// (ptone/scion#5145): a grant with notify may tell its user subject. A host
+// without it sends nothing, and the response says notifySkipped
+// "unavailable" (fail closed).
+type GrantNotifier interface {
+	// MayNotifyGrant: the whole send authorization, synchronous, writes nothing.
+	// ok=false, err=nil -> "not_permitted"; err != nil -> "unavailable".
+	MayNotifyGrant(ctx context.Context, subjectUserID string) (ok bool, err error)
+	// NotifyGrant: after commit, synchronous, best effort; returns the write error.
+	NotifyGrant(ctx context.Context, n GrantNotice) error
 }
 
-// Review grant clauses, as ReviewGrantClauser names them.
-const (
-	ReviewClauseProjectAdmin   = "project_admin"
-	ReviewClauseDelegatingUser = "delegating_user"
-)
-
-// ReviewGrantClauser is an optional host interface that replaces
-// ReviewGrantAuthority when a host has it (ptone/scion#5120): the service
-// asks it instead of MayGrantReview. It makes the same decision as
-// MayGrantReview, in the same single evaluation, and names the clause that
-// allowed it, so the decision log can record it without asking the host a
-// second question.
-type ReviewGrantClauser interface {
-	// ReviewGrantClause answers like MayGrantReview: ReviewClauseProjectAdmin
-	// when the caller holds project administration in homeScope,
-	// ReviewClauseDelegatingUser when it is the delegating user of agent
-	// ownerAgentID, or "" when MayGrantReview would answer false.
-	ReviewGrantClause(ctx context.Context, ownerAgentID, homeScope string) string
+// GrantNotice describes a committed grant whose subject is to be told. It
+// carries ids and enums only: no title and no free text (K14/K19).
+type GrantNotice struct {
+	ArtifactID, HomeScope, SubjectUserID, Permission string
+	// ActorKind, ActorRef and Authority are the granter's, as its event
+	// records them. The hub refuses ActorKind != user in this phase.
+	ActorKind, ActorRef, Authority string
 }
 
 // PrincipalChecker is an optional extension of Host (ptone/scion#4529).
@@ -242,9 +237,10 @@ const (
 	// StewardClauseProjectOwner: the caller holds artifact.steward in the
 	// artifact's home project (its owners, and super-admins).
 	StewardClauseProjectOwner = "project_owner"
-	// StewardClauseDelegator: the caller is the user at the root of the
-	// owning agent's live delegation chain and reads in the home project
-	// through a role.
+	// StewardClauseDelegator: the caller is the owning agent's delegating
+	// user (the user recorded on the artifact at creation, or for an
+	// artifact with nothing recorded the root of the agent's live
+	// delegation chain) and reads in the home project through a role.
 	StewardClauseDelegator = "delegator"
 )
 
@@ -261,9 +257,12 @@ type Stewardship interface {
 	// satisfies for an artifact owned by agent ownerAgentID and homed in
 	// project homeScope: StewardClauseProjectOwner,
 	// StewardClauseDelegator, or "" for none. sponsorRef and orphaned come
-	// from the artifact row (sponsorRef is "" until sponsors are recorded).
-	// A grant on the artifact never makes the caller a steward: the clauses
-	// are decided from roles and the delegation chain only. Any lookup
-	// failure answers "".
+	// from the artifact row: sponsorRef is the delegating user recorded at
+	// creation (Artifact.SponsorRef), which decides the delegator clause
+	// when set, with the agent's live delegation chain consulted only when
+	// it is ""; orphaned is not consulted yet. A grant on the artifact
+	// never makes the caller a steward: the clauses are decided from
+	// roles, the recorded delegating user and the delegation chain only.
+	// Any lookup failure answers "".
 	StewardClause(ctx context.Context, ownerAgentID, homeScope, sponsorRef string, orphaned bool) string
 }

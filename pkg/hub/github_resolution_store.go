@@ -18,7 +18,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -57,25 +56,18 @@ func NewGitHubResolutionStore(client *ent.Client) *GitHubResolutionStore {
 	return &GitHubResolutionStore{client: client}
 }
 
-// Get retrieves a cache entry by key, returning (entry, true, nil) on hit,
-// (nil, false, nil) on miss or expiration, or (nil, false, error) on DB error.
-func (s *GitHubResolutionStore) Get(ctx context.Context, cacheKey string) (*GitHubCacheEntry, bool, error) {
+// load reads the row for cacheKey, returning (nil, nil) when there is none.
+func (s *GitHubResolutionStore) load(ctx context.Context, cacheKey string) (*GitHubCacheEntry, error) {
 	row, err := s.client.GitHubResolutionCache.
 		Query().
 		Where(githubresolutioncache.CacheKeyEQ(cacheKey)).
 		Only(ctx)
 	if err != nil {
 		if ent.IsNotFound(err) {
-			return nil, false, nil
+			return nil, nil
 		}
-		return nil, false, err
+		return nil, err
 	}
-
-	// Check expiration
-	if time.Now().After(row.ExpiresAt) {
-		return nil, false, nil
-	}
-
 	return &GitHubCacheEntry{
 		CommitSHA:   row.CommitSha,
 		FileEntries: row.FileEntries,
@@ -83,7 +75,35 @@ func (s *GitHubResolutionStore) Get(ctx context.Context, cacheKey string) (*GitH
 		TokenScope:  row.TokenScope,
 		ExpiresAt:   row.ExpiresAt,
 		OriginalURI: row.OriginalURI,
-	}, true, nil
+	}, nil
+}
+
+// fileEntriesHaveModes reports whether every file entry records a mode.
+// Entries written since the hub reads GitHub trees always do; a row written
+// before has none (ptone/scion#5781).
+func fileEntriesHaveModes(files []GitHubFileEntry) bool {
+	for _, f := range files {
+		if f.Mode == "" {
+			return false
+		}
+	}
+	return true
+}
+
+// Get retrieves a cache entry by key, returning (entry, true, nil) on hit,
+// (nil, false, nil) on miss or expiration, or (nil, false, error) on DB error.
+//
+// A row written before file modes were recorded (see GetModeless) is a
+// miss, so the ref is resolved again with its modes.
+func (s *GitHubResolutionStore) Get(ctx context.Context, cacheKey string) (*GitHubCacheEntry, bool, error) {
+	entry, err := s.load(ctx, cacheKey)
+	if err != nil || entry == nil {
+		return nil, false, err
+	}
+	if time.Now().After(entry.ExpiresAt) || !fileEntriesHaveModes(entry.FileEntries) {
+		return nil, false, nil
+	}
+	return entry, true, nil
 }
 
 // GetStale returns a cache entry for cacheKey even though its TTL has
@@ -95,32 +115,40 @@ func (s *GitHubResolutionStore) Get(ctx context.Context, cacheKey string) (*GitH
 // (a known, fixed TTL); a commit-SHA entry's TTL differs and, being
 // immutable, has no use for staleness in the first place.
 //
-// Returns (nil, false, nil) when the row does not exist or is older than
-// maxStaleAge, and (nil, false, error) on a DB error.
+// Returns (nil, false, nil) when the row does not exist, is older than
+// maxStaleAge or records no file modes (see GetModeless), and
+// (nil, false, error) on a DB error.
 func (s *GitHubResolutionStore) GetStale(ctx context.Context, cacheKey string, lastTTL, maxStaleAge time.Duration) (*GitHubCacheEntry, bool, error) {
-	row, err := s.client.GitHubResolutionCache.
-		Query().
-		Where(githubresolutioncache.CacheKeyEQ(cacheKey)).
-		Only(ctx)
-	if err != nil {
-		if ent.IsNotFound(err) {
-			return nil, false, nil
-		}
+	entry, err := s.load(ctx, cacheKey)
+	if err != nil || entry == nil {
 		return nil, false, err
 	}
-
-	if !row.ExpiresAt.After(staleCutoff(time.Now(), lastTTL, maxStaleAge)) {
+	if !entry.ExpiresAt.After(staleCutoff(time.Now(), lastTTL, maxStaleAge)) || !fileEntriesHaveModes(entry.FileEntries) {
 		return nil, false, nil
 	}
+	return entry, true, nil
+}
 
-	return &GitHubCacheEntry{
-		CommitSHA:   row.CommitSha,
-		FileEntries: row.FileEntries,
-		BundleHash:  row.BundleHash,
-		TokenScope:  row.TokenScope,
-		ExpiresAt:   row.ExpiresAt,
-		OriginalURI: row.OriginalURI,
-	}, true, nil
+// GetModeless returns the row for cacheKey if it was written before file
+// modes were recorded and could still be served: unexpired, or, when
+// isBranchRef, within the stale window GetStale uses. Get and GetStale
+// treat such a row as a miss; resolveGitHubSkill serves it only when
+// re-resolving the ref failed, as it was served before (ptone/scion#5781).
+func (s *GitHubResolutionStore) GetModeless(ctx context.Context, cacheKey string, isBranchRef bool, lastTTL, maxStaleAge time.Duration) (*GitHubCacheEntry, bool, error) {
+	entry, err := s.load(ctx, cacheKey)
+	if err != nil || entry == nil {
+		return nil, false, err
+	}
+	if fileEntriesHaveModes(entry.FileEntries) {
+		return nil, false, nil
+	}
+	now := time.Now()
+	fresh := !now.After(entry.ExpiresAt)
+	stale := isBranchRef && entry.ExpiresAt.After(staleCutoff(now, lastTTL, maxStaleAge))
+	if !fresh && !stale {
+		return nil, false, nil
+	}
+	return entry, true, nil
 }
 
 // Put upserts a cache entry. If an entry with the same cache_key exists, it is updated.
@@ -253,20 +281,21 @@ func ghResolveCommitSHA(ctx context.Context, cooldown *agent.GitHubCooldown, ide
 	return sha, nil
 }
 
-// ghListContents calls GET /repos/{owner}/{repo}/contents/{path}?ref={sha}
-// and returns a list of file entries with permanent raw content URLs and git
-// blob SHAs.
+// ghListTree lists every regular file of the skill directory at path, at any
+// depth, with its mode, in one call: GET
+// /repos/{owner}/{repo}/git/trees/{commitSHA}:{path}?recursive=1 (see
+// agent.DecodeGitHubSkillTree for how symlinks, submodules, unsafe paths
+// and a truncated listing are handled). Each entry gets a permanent raw
+// content URL, its git blob SHA and its normalised mode ("0755" or
+// "0644").
 //
 // rawBase is the origin for raw content URLs (githubRawBase in production;
-// overridden by tests). It is deliberately not the download_url the Contents
-// API returns: for private repos that field is a CDN link carrying a
-// short-lived signed token, which would be dead long before this entry's
-// cache TTL expires. A URL built from the resolved commit SHA is permanent,
-// and the caller authenticates it with its own credential.
+// overridden by tests). A URL built from the resolved commit SHA is
+// permanent, and the caller authenticates it with its own credential.
 //
 // Like ghResolveCommitSHA, the request goes through cooldown for identity.
-func ghListContents(ctx context.Context, cooldown *agent.GitHubCooldown, identity, apiBase, rawBase, owner, repo, path, commitSHA, token string) ([]GitHubFileEntry, error) {
-	url := fmt.Sprintf("%s/repos/%s/%s/contents/%s?ref=%s", apiBase, owner, repo, path, commitSHA)
+func ghListTree(ctx context.Context, cooldown *agent.GitHubCooldown, identity, apiBase, rawBase, owner, repo, path, commitSHA, token string) ([]GitHubFileEntry, error) {
+	url := apiBase + agent.GitHubSkillTreePath(owner, repo, path, commitSHA)
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, err
@@ -289,37 +318,23 @@ func ghListContents(ctx context.Context, cooldown *agent.GitHubCooldown, identit
 		return nil, &ghStatusError{status: resp.StatusCode, msg: fmt.Sprintf("GitHub API error %d listing %s/%s at %s: %s", resp.StatusCode, owner, repo, path, ghErrorBody(body))}
 	}
 
-	var apiResponse []struct {
-		Name        string `json:"name"`
-		Path        string `json:"path"`
-		SHA         string `json:"sha"` // Git blob SHA
-		Size        int64  `json:"size"`
-		Type        string `json:"type"`
-		DownloadURL string `json:"download_url"`
+	// The caller (fetchAndCacheGitHubSkill) already prefixes "failed to
+	// list contents", so a decode error is returned as it is.
+	files, err := agent.DecodeGitHubSkillTree(resp.Body)
+	if err != nil {
+		return nil, err
 	}
 
-	if err := json.NewDecoder(resp.Body).Decode(&apiResponse); err != nil {
-		return nil, fmt.Errorf("failed to decode contents response: %w", err)
-	}
-
-	var entries []GitHubFileEntry
-	for _, item := range apiResponse {
-		if item.Type != "file" {
-			continue // Skip directories
-		}
-		// Use relative path within the skill directory
-		relPath := strings.TrimPrefix(item.Path, path+"/")
-		if relPath == item.Path && !strings.HasPrefix(path, item.Path) {
-			relPath = item.Name
-		}
+	entries := make([]GitHubFileEntry, 0, len(files))
+	for _, f := range files {
 		entries = append(entries, GitHubFileEntry{
-			Path: relPath,
-			URL:  ghRawContentURL(rawBase, owner, repo, commitSHA, item.Path),
-			Hash: item.SHA, // Git blob SHA; verified by the broker after download.
-			Size: item.Size,
+			Path: f.Path,
+			URL:  ghRawContentURL(rawBase, owner, repo, commitSHA, path+"/"+f.Path),
+			Hash: f.SHA, // Git blob SHA; verified by the broker after download.
+			Size: f.Size,
+			Mode: f.Mode,
 		})
 	}
-
 	return entries, nil
 }
 

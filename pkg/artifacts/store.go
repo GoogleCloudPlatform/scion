@@ -44,16 +44,6 @@ var ErrTooManyGrants = errors.New("artifacts: too many grants")
 // project's grant is read or write only.
 var ErrHomeGrantAdmin = errors.New("artifacts: the home scope's grant may only be read or write")
 
-// ErrReviewGrantRefused is returned by PutReviewGrant when the artifact's
-// home or owner changed since the caller's authority was checked.
-var ErrReviewGrantRefused = errors.New("artifacts: review grant refused")
-
-// ErrReviewReplacesAccess is returned by PutGrant and PutReviewGrant for
-// a review grant to a user who holds a principal read, write or admin
-// grant on the artifact: the review grant would take that grant's row,
-// and with it the user's read.
-var ErrReviewReplacesAccess = errors.New("artifacts: a review grant cannot replace a read, write or admin grant")
-
 // ErrCrossScopeDisabled is returned by PutGrant for a scope grant to a
 // scope other than the artifact's home while sharing across scopes is off.
 var ErrCrossScopeDisabled = errors.New("artifacts: sharing with other scopes is off")
@@ -87,7 +77,7 @@ var ErrPendingNewer = errors.New("artifacts: a newer version is being published"
 
 // ErrAttachmentNotShareable is returned by every store write that would
 // share, version or change a row of an attachment scope (PutGrant,
-// PutReviewGrant, CreateLink, CreateVersion, UpdateArtifact, SetExpiry):
+// CreateLink, CreateVersion, UpdateArtifact, SetExpiry):
 // an attachment is exactly as readable as its message, and lives as long.
 var ErrAttachmentNotShareable = errors.New("artifacts: attachments cannot be shared or changed")
 
@@ -167,6 +157,25 @@ type Artifact struct {
 	// OrphanedAt is when the owner liveness reconciler found the owner
 	// gone, or nil while the owner is live (or was never checked).
 	OrphanedAt *time.Time
+	// SponsorRef is, for an artifact owned by an agent in a project scope,
+	// the id of the user at the root of the agent's recorded delegation
+	// chain when the artifact was created (ptone/scion#6028): the agent's
+	// delegating user, as SponsorRecorder answered at creation or the
+	// sponsor backfill recorded later for an older artifact. It is ""
+	// when nothing was recorded: a user-owned artifact, an attachment, an
+	// artifact created before sponsors were recorded and not backfilled,
+	// or one whose delegating user could not be resolved. The creation-time
+	// value stands: nothing updates a recorded value. It never gives
+	// access by itself; the steward and review clauses check the user
+	// again on every request.
+	SponsorRef string
+	// MessageProjectID is, for an attachment bound to a message, the project
+	// of that message as the hub derived it at bind time (ptone/scion#4596):
+	// nil while unknown (an unbound upload, or a row bound before migration
+	// 0010_attachment_project), "" when the message has no project. nil and
+	// "" are distinct values and are never converted into each other. Rows
+	// that are not attachments always read nil.
+	MessageProjectID *string
 }
 
 // ArtifactRef names an artifact and its home scope.
@@ -361,6 +370,30 @@ type Store interface {
 	// how many it reaped.
 	ReapPending(ctx context.Context, cutoff time.Time, limit int) (int, error)
 
+	// TouchReviewSession records a heartbeat of review session rs
+	// (ptone/scion#6849): it inserts the row (started_at = now) or updates
+	// it, setting last_seen_at = now, base_seq and dirty from rs, and
+	// last_edit_at = now when edited. A beat that would create a new row
+	// while the principal already has maxPerPrincipal live sessions (seen
+	// within ReviewLiveWindow) on the artifact returns
+	// ErrTooManyReviewSessions and records nothing. A beat of an existing
+	// row is never refused, so a row that beats again after leaving the
+	// live window is not counted again.
+	TouchReviewSession(ctx context.Context, rs ReviewSession, edited bool, now time.Time, maxPerPrincipal int) error
+
+	// EndReviewSession deletes the caller's session and reports whether a
+	// row was deleted. It is idempotent: a missing row is not an error.
+	EndReviewSession(ctx context.Context, artifactID, kind, ref, sessionID string) (bool, error)
+
+	// ListOpenReviewSessions returns the sessions of the artifact seen at
+	// or after seenAfter, most recently seen first, at most
+	// maxListedReviewSessions of them.
+	ListOpenReviewSessions(ctx context.Context, artifactID string, seenAfter time.Time) ([]ReviewSession, error)
+
+	// ReapReviewSessions deletes at most limit sessions last seen before
+	// cutoff and returns how many it deleted.
+	ReapReviewSessions(ctx context.Context, cutoff time.Time, limit int) (int, error)
+
 	// GetArtifact returns the artifact with id unless it is absent or
 	// soft-deleted, in which case it returns ErrNotFound.
 	GetArtifact(ctx context.Context, id string) (*Artifact, error)
@@ -424,8 +457,7 @@ type Store interface {
 	// GrantPutUnchanged when the grant already had g's permission. Under
 	// the artifact's lock it reads the artifact's home scope and refuses an admin grant to it
 	// (ErrHomeGrantAdmin) and, unless crossScope, a scope grant to any
-	// other scope (ErrCrossScopeDisabled), and a review grant over a
-	// subject's read, write or admin grant (ErrReviewReplacesAccess). It
+	// other scope (ErrCrossScopeDisabled). It
 	// refuses with ErrTooManyGrants when adding would exceed maxGrants
 	// principal and scope grants, and returns ErrNotFound when the artifact
 	// is absent or deleted.
@@ -434,17 +466,17 @@ type Store interface {
 	// permission when an existing grant's permission changes (none when
 	// it already had g's permission). An actor with a steward authority
 	// may not give admin (ErrStewardActionNotAllowed).
+	// It is PutGrantNotify with notify false.
 	PutGrant(ctx context.Context, g *Grant, maxGrants int, crossScope bool, actor *Actor) (GrantPut, error)
 
-	// PutReviewGrant is PutGrant for a review grant (design D24): g must
-	// be a review grant to a user principal. Under the artifact's lock it
-	// also refuses, with ErrReviewGrantRefused and writing nothing, when
-	// the artifact is no longer homed in home or not owned by an agent; like
-	// PutGrant it refuses with ErrReviewReplacesAccess when the user already
-	// holds a principal grant other than review on it (a read, write or
-	// admin grant is never replaced this way).
-	// It records its events like PutGrant.
-	PutReviewGrant(ctx context.Context, g *Grant, maxGrants int, home string, actor *Actor) (GrantPut, error)
+	// PutGrantNotify is PutGrant for a grant whose subject may be told
+	// (Ask for review, ptone/scion#5145). With notify, under the artifact's
+	// lock it records "notified": true in the grant_created or
+	// grant_changed event's detail when the write raised the subject's
+	// level (grantRank; a created grant counts as a raise), and reports
+	// that in GrantPutResult.Notified. Without notify, or for a change that
+	// did not raise the level, it is exactly PutGrant.
+	PutGrantNotify(ctx context.Context, g *Grant, maxGrants int, crossScope bool, actor *Actor, notify bool) (GrantPutResult, error)
 
 	// DeleteGrant deletes principal or scope grant grantID of artifact
 	// artifactID. It returns ErrNotFound when there is no such grant, and
@@ -506,6 +538,27 @@ type Store interface {
 	// is left.
 	SetOwnerOrphaned(ctx context.Context, owner Owner, orphaned bool, now time.Time, limit int) ([]ArtifactRef, error)
 
+	// SponsorBackfillDone reports whether the sponsor backfill
+	// (BackfillSponsors) has completed on this database: its ledger name,
+	// migrationSponsorBackfill, is recorded in artifact_migrations.
+	SponsorBackfillDone(ctx context.Context) (bool, error)
+
+	// ListUnsponsoredAgents returns up to limit distinct agent ids, in
+	// order and strictly greater than after ("" = from the start), that
+	// own a live artifact in a project scope with no recorded sponsor
+	// (sponsor_ref NULL).
+	ListUnsponsoredAgents(ctx context.Context, after string, limit int) ([]string, error)
+
+	// SetAgentSponsor records userID as the sponsor of every artifact of
+	// agent agentID in a project scope that has none recorded, and returns
+	// how many it changed. It never changes a recorded sponsor, and never
+	// touches a deleted artifact.
+	SetAgentSponsor(ctx context.Context, agentID, userID string) (int, error)
+
+	// MarkSponsorBackfillDone records migrationSponsorBackfill in
+	// artifact_migrations at now. Recording it again is not an error.
+	MarkSponsorBackfillDone(ctx context.Context, now time.Time) error
+
 	// ListEvents returns the artifact_event rows of an artifact, oldest
 	// first.
 	ListEvents(ctx context.Context, artifactID string) ([]Event, error)
@@ -557,8 +610,11 @@ type Store interface {
 	// the artifact is absent, deleted or not an attachment,
 	// ErrAttachmentNotOwned when the upload is not scoped to
 	// PrincipalRef(ownerKind, ownerRef) or not owned by that principal, and
-	// ErrAttachmentBound when it is no longer an upload.
-	BindAttachment(ctx context.Context, artifactID, ownerKind, ownerRef, messageID string, now time.Time) error
+	// ErrAttachmentBound when it is no longer an upload. The same statement
+	// that moves the scope sets message_project_id to messageProjectID (""
+	// is a value: the message has no project), so the project is never
+	// written without the bind, nor the bind without the project.
+	BindAttachment(ctx context.Context, artifactID, ownerKind, ownerRef, messageID, messageProjectID string, now time.Time) error
 
 	// ListMessageAttachments returns the live attachments bound to each of
 	// messageIDs, keyed by message id, each with its one file, ordered by
@@ -575,6 +631,16 @@ type Store interface {
 	// the upload scope created before cutoff, and returns how many it
 	// deleted.
 	RetireStaleUploads(ctx context.Context, cutoff time.Time, limit int) (int, error)
+
+	// RecordDeliveryRedemption records that the attachment delivery
+	// capability with nonce was redeemed at at (ptone/scion#4596). It
+	// reports true only for the first redemption of nonce: the insert does
+	// nothing on a conflict, so two concurrent redemptions record one.
+	RecordDeliveryRedemption(ctx context.Context, nonce string, at time.Time) (bool, error)
+
+	// SweepDeliveryRedemptions deletes redemption records older than
+	// before and returns how many it deleted.
+	SweepDeliveryRedemptions(ctx context.Context, before time.Time) (int, error)
 
 	// ListLiveScopeRefs returns up to limit distinct scope refs of live
 	// artifacts of scope kind, in ascending order, strictly after after
@@ -675,10 +741,17 @@ func NewStore(db *sql.DB, driverName string) Store {
 	}
 }
 
-// GrantPut is what PutGrant and PutReviewGrant did. Only GrantPutCreated and
+// GrantPut is what PutGrant did. Only GrantPutCreated and
 // GrantPutChanged changed anything, and only they record an event; the
 // decision log follows the same rule.
 type GrantPut int
+
+// GrantPutResult is what PutGrantNotify did: the GrantPut, and whether the
+// event it recorded says the subject is to be told.
+type GrantPutResult struct {
+	Put      GrantPut
+	Notified bool
+}
 
 const (
 	// GrantPutUnchanged: the subject already held the permission.

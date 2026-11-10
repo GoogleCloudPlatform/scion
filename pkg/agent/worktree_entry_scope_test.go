@@ -127,7 +127,7 @@ func TestHandleAgentDirWithoutConfig_StaleDir_KeepsHiddenSibling(t *testing.T) {
 	_, repo, agentDir, agentHome, ws := staleWorktreeLayout(t)
 	sibling, restore := addHiddenSiblingWorktree(t, repo)
 
-	if err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws); err != nil {
+	if err := handleAgentDirWithoutConfigGuarded(testAgentDirGuard("a", agentDir), "a", agentDir, agentHome, ws); err != nil {
 		t.Fatalf("handleAgentDirWithoutConfig: %v", err)
 	}
 	if _, err := os.Stat(agentDir); !os.IsNotExist(err) {
@@ -168,7 +168,7 @@ func TestPurgeExpiredKeptAgentDir_SymlinkedParent_RemovesOwnEntryOnly(t *testing
 	}
 	t.Chdir(base)
 
-	if err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws); !errors.Is(err, config.ErrAgentStateConflict) {
+	if err := handleAgentDirWithoutConfigGuarded(testAgentDirGuard("a", agentDir), "a", agentDir, agentHome, ws); !errors.Is(err, config.ErrAgentStateConflict) {
 		t.Fatalf("expected the dir with work to be kept on the first call (a state conflict); got: %v", err)
 	}
 	if _, err := os.Stat(agentDir); err != nil {
@@ -177,7 +177,7 @@ func TestPurgeExpiredKeptAgentDir_SymlinkedParent_RemovesOwnEntryOnly(t *testing
 	sibling, restore := addHiddenSiblingWorktree(t, repo)
 
 	*now = now.Add(72 * time.Hour)
-	if err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws); err != nil {
+	if err := handleAgentDirWithoutConfigGuarded(testAgentDirGuard("a", agentDir), "a", agentDir, agentHome, ws); err != nil {
 		t.Fatalf("handleAgentDirWithoutConfig after the window: %v", err)
 	}
 	requireRemoved(t, agentDir)

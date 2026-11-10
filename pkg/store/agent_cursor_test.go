@@ -44,24 +44,24 @@ func TestAgentCursor_RoundTrip(t *testing.T) {
 func TestAgentCursor_SortMismatchRejected(t *testing.T) {
 	k := time.Now().UTC()
 	cursor := EncodeAgentCursor("updated", "desc", k, k, testCursorID, "bind")
-	if _, err := DecodeAgentCursor(cursor, "created", "desc", "bind"); !errors.Is(err, ErrInvalidInput) {
-		t.Fatalf("sort mismatch: err = %v, want ErrInvalidInput", err)
+	if _, err := DecodeAgentCursor(cursor, "created", "desc", "bind"); !isInvalidCursor(err) {
+		t.Fatalf("sort mismatch: err = %v, want ErrInvalidCursor", err)
 	}
 }
 
 func TestAgentCursor_DirMismatchRejected(t *testing.T) {
 	k := time.Now().UTC()
 	cursor := EncodeAgentCursor("updated", "desc", k, k, testCursorID, "bind")
-	if _, err := DecodeAgentCursor(cursor, "updated", "asc", "bind"); !errors.Is(err, ErrInvalidInput) {
-		t.Fatalf("dir mismatch: err = %v, want ErrInvalidInput", err)
+	if _, err := DecodeAgentCursor(cursor, "updated", "asc", "bind"); !isInvalidCursor(err) {
+		t.Fatalf("dir mismatch: err = %v, want ErrInvalidCursor", err)
 	}
 }
 
 func TestAgentCursor_BindingMismatchRejected(t *testing.T) {
 	k := time.Now().UTC()
 	cursor := EncodeAgentCursor("updated", "desc", k, k, testCursorID, "bind-a")
-	if _, err := DecodeAgentCursor(cursor, "updated", "desc", "bind-b"); !errors.Is(err, ErrInvalidInput) {
-		t.Fatalf("binding mismatch: err = %v, want ErrInvalidInput", err)
+	if _, err := DecodeAgentCursor(cursor, "updated", "desc", "bind-b"); !isInvalidCursor(err) {
+		t.Fatalf("binding mismatch: err = %v, want ErrInvalidCursor", err)
 	}
 }
 
@@ -70,14 +70,14 @@ func TestAgentCursor_LegacyCursorRejected(t *testing.T) {
 	// no "v2" prefix segment: decoding it as a v2 cursor must fail rather
 	// than silently misparse the timestamp field into the wrong slot.
 	legacy := "MjAyNi0wMS0wMVQwMDowMDowMFosYWJjLGJpbmQ=" // arbitrary base64, no v2 marker
-	if _, err := DecodeAgentCursor(legacy, "updated", "desc", "bind"); !errors.Is(err, ErrInvalidInput) {
-		t.Fatalf("legacy cursor: err = %v, want ErrInvalidInput", err)
+	if _, err := DecodeAgentCursor(legacy, "updated", "desc", "bind"); !isInvalidCursor(err) {
+		t.Fatalf("legacy cursor: err = %v, want ErrInvalidCursor", err)
 	}
 }
 
 func TestAgentCursor_MalformedBase64Rejected(t *testing.T) {
-	if _, err := DecodeAgentCursor("not-valid-base64!!!", "updated", "desc", "bind"); !errors.Is(err, ErrInvalidInput) {
-		t.Fatalf("malformed cursor: err = %v, want ErrInvalidInput", err)
+	if _, err := DecodeAgentCursor("not-valid-base64!!!", "updated", "desc", "bind"); !isInvalidCursor(err) {
+		t.Fatalf("malformed cursor: err = %v, want ErrInvalidCursor", err)
 	}
 }
 
@@ -122,8 +122,8 @@ func TestAgentCursor_NonUUIDIDRejected(t *testing.T) {
 		strings.ToUpper(canonical),
 	} {
 		cursor := EncodeAgentCursor("updated", "desc", k, k, id, "bind")
-		if _, err := DecodeAgentCursor(cursor, "updated", "desc", "bind"); !errors.Is(err, ErrInvalidInput) {
-			t.Errorf("id %q: err = %v, want ErrInvalidInput", id, err)
+		if _, err := DecodeAgentCursor(cursor, "updated", "desc", "bind"); !isInvalidCursor(err) {
+			t.Errorf("id %q: err = %v, want ErrInvalidCursor", id, err)
 		}
 	}
 
@@ -136,4 +136,10 @@ func TestAgentCursor_NonUUIDIDRejected(t *testing.T) {
 	if got.ID != canonical {
 		t.Errorf("canonical id: ID = %q, want %q", got.ID, canonical)
 	}
+}
+
+// isInvalidCursor reports whether err is store.ErrInvalidCursor, which still
+// matches store.ErrInvalidInput for callers that check the broader sentinel.
+func isInvalidCursor(err error) bool {
+	return errors.Is(err, ErrInvalidCursor) && errors.Is(err, ErrInvalidInput)
 }

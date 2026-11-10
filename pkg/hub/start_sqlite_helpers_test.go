@@ -90,6 +90,7 @@ func errorDetails(body map[string]interface{}) (string, map[string]interface{}) 
 type failRunningStatusStore struct {
 	store.Store
 	agentID string
+	fault   *storeFaultSwitch
 }
 
 // claimRefusingStore refuses every start claim with err.
@@ -118,7 +119,7 @@ func (d *stopHookDispatcher) DispatchAgentStop(ctx context.Context, a *store.Age
 }
 
 func (s failRunningStatusStore) UpdateAgentStatus(ctx context.Context, id string, u store.AgentStatusUpdate) error {
-	if id == s.agentID && u.ClearExit {
+	if s.fault.Active() && id == s.agentID && u.ClearExit {
 		return errors.New("database is locked")
 	}
 	return s.Store.UpdateAgentStatus(ctx, id, u)

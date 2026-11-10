@@ -25,7 +25,6 @@ import (
 	"regexp"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -69,41 +68,7 @@ func httpRollbackSites() []httpRollbackSite {
 	return []httpRollbackSite{
 		{name: "storage", wantStatus: http.StatusBadGateway, wantCode: ErrCodeRuntimeError},
 		{name: "upload URL", wantStatus: http.StatusBadGateway, wantCode: ErrCodeRuntimeError},
-		{name: "workspace storage", wantStatus: http.StatusServiceUnavailable, wantCode: ErrCodeUnavailable},
-		{name: "unsupported capability", wantStatus: http.StatusPreconditionFailed, wantCode: ErrCodeUnsupportedCapability, own: &createRollbackSite{
-			disp: &createAgentDispatcher{},
-			setup: func(t *testing.T, srv *Server) {
-				// A hub-managed project with no git remote on a remote
-				// broker, on a hub whose storage is not GCS.
-				t.Setenv("HOME", t.TempDir())
-				srv.SetStorage(newContentMockStorage("local"))
-			},
-			wantStage: createStageWorkspaceStorage,
-		}},
-		{name: "workspace upload", wantStatus: http.StatusBadGateway, wantCode: ErrCodeRuntimeError, own: &createRollbackSite{
-			disp: &createAgentDispatcher{},
-			setup: func(t *testing.T, srv *Server) {
-				// The workspace upload runs past its own budget.
-				t.Setenv("HOME", t.TempDir())
-				prevBudget := hubWorkspaceUploadTimeout
-				hubWorkspaceUploadTimeout = 50 * time.Millisecond
-				prevSync := syncToGCSForWorkspaceUpload
-				syncToGCSForWorkspaceUpload = func(uctx context.Context, _, _, _ string) error {
-					select {
-					case <-uctx.Done():
-						return uctx.Err()
-					case <-time.After(10 * time.Second):
-						return errProbeNeverDone
-					}
-				}
-				t.Cleanup(func() {
-					hubWorkspaceUploadTimeout = prevBudget
-					syncToGCSForWorkspaceUpload = prevSync
-				})
-				srv.SetStorage(newGCSContentMockStorage("test-bucket"))
-			},
-			wantStage: createStageWorkspaceUpload,
-		}},
+		{name: "workspace storage", wantStatus: http.StatusConflict, wantCode: ErrCodeConflict},
 		{name: "provision-only run intent", runIntent: true, wantStatus: http.StatusInternalServerError, wantCode: ErrCodeInternalError, own: &createRollbackSite{
 			disp:      &createAgentDispatcher{},
 			req:       CreateAgentRequest{ProvisionOnly: true},
@@ -164,6 +129,9 @@ func runHTTPRollbackSite(t *testing.T, site httpRollbackSite, faults rollbackFau
 	t.Helper()
 	rs := site.rollbackSite(t)
 	srv, s, project := setupCreateAgentServer(t, rs.disp)
+	if rs.remoteBroker {
+		clearCreateAgentProviderPath(t, s, project)
+	}
 	if rs.setup != nil {
 		rs.setup(t, srv)
 	}

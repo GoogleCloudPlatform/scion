@@ -86,6 +86,7 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/runtime-brokers":         "authenticated", // List/create runtime brokers
 	"/api/v1/runtime-brokers/":        "authenticated", // Runtime broker routes
 	"/api/v1/runtime-brokers/connect": "broker-hmac",   // WebSocket control channel — broker HMAC
+	"/api/v1/attachment-deliveries/":  "broker-hmac",   // Attachment delivery capability redemption (broker credential, one 404)
 
 	// ── Templates ──────────────────────────────────────────────────────
 	"/api/v1/templates":  "authenticated", // List/create templates
@@ -150,7 +151,8 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/users/me/templates/":       "authenticated", // User-scoped template by ID
 
 	// ── Agent delegation grants the caller issued ──────────────────────
-	"/api/v1/users/me/delegations": "authenticated", // GET: caller's issued grants; session/dev credential only (requireSessionCredentialFor)
+	"/api/v1/users/me/delegations":            "authenticated", // GET: caller's issued grants; session/dev credential only (requireSessionCredentialFor)
+	"/api/v1/users/me/delegations/revoke-all": "authenticated", // POST: revoke every grant the caller issued; session/dev credential only (requireSessionCredentialFor)
 
 	// ── User-scoped terminal workspace ─────────────────────────────────
 	"/api/v1/users/me/terminal-workspace": "authenticated", // GET/PUT: caller's own list; session/dev credential only (requireSessionCredentialFor)
@@ -164,10 +166,12 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/brokers/":     "authenticated", // Broker by ID routes
 
 	// ── Broker plugin endpoints ────────────────────────────────────────
-	"/api/v1/broker/inbound":        "broker-hmac", // Broker inbound messages — broker HMAC
-	"/api/v1/broker/inbound/routed": "broker-hmac", // Broker inbound routed messages — broker HMAC
-	"/api/v1/broker/callback":       "broker-hmac", // Broker callback delivery — broker HMAC
-	"/api/v1/broker/projects":       "broker-hmac", // Broker project listing — broker HMAC
+	"/api/v1/broker/inbound":                   "broker-hmac", // Broker inbound messages — broker HMAC
+	"/api/v1/broker/inbound/routed":            "broker-hmac", // Broker inbound routed messages — broker HMAC
+	"/api/v1/broker/inbound/attachments":       "broker-hmac", // Broker attachment upload — broker HMAC; sender authorized in handler
+	"/api/v1/broker/inbound/attachments/check": "broker-hmac", // Broker attachment check — broker HMAC; writes nothing
+	"/api/v1/broker/callback":                  "broker-hmac", // Broker callback delivery — broker HMAC
+	"/api/v1/broker/projects":                  "broker-hmac", // Broker project listing — broker HMAC
 
 	// ── Admin system endpoints ─────────────────────────────────────────
 	"/api/v1/admin/maintenance":                  "admin", // Maintenance mode — requires admin role
@@ -177,6 +181,8 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/admin/maintenance/check-updates":    "admin", // Check for updates
 	"/api/v1/admin/maintenance/update-available": "admin", // Update availability status
 	"/api/v1/admin/maintenance/restart":          "admin", // Restart hub
+	"/api/v1/admin/maintenance/update-status":    "admin", // Update status (version, installer, last update)
+	"/api/v1/admin/maintenance/releases":         "admin", // Release catalog per channel
 	"/api/v1/admin/scheduler":                    "admin", // Scheduler status
 	"/api/v1/admin/allow-list":                   "admin", // Allow list management
 	"/api/v1/admin/allow-list/":                  "admin", // Allow list by email
@@ -206,8 +212,10 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/admin/messaging/divergence":         "admin", // Admin messaging divergence check
 	"/api/v1/admin/experiments":                  "admin", // Admin experiment overrides
 	"/api/v1/admin/profiling":                    "admin", // Admin profiling switches (session only)
+	"/api/v1/admin/chat-retention":               "admin", // Admin chat retention settings (session only)
 	"/api/v1/admin/conduit/grant-keys/rotate":    "admin", // POST: rotate the conduit grant signing key; returns kids and timestamps only; 404 when hub.conduit is off
 	"/api/v1/admin/conduit/grant-keys/revoke":    "admin", // POST {kid}: revoke a conduit grant key at once; returns the kid only; 404 when hub.conduit is off
+	"/api/v1/admin/keys/status":                  "admin", // GET: this instance's server key status report (IDs, deadlines, counts; never key material); platform admin only; 404 when server.secret_rotation is off
 	"/api/v1/admin/limits":                       "admin", // Admin limits
 	"/api/v1/admin/limits/":                      "admin", // Admin limit by ID
 	"/api/v1/admin/entitlements/":                "admin", // Admin entitlement by ID
@@ -244,26 +252,30 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/conversations":         "authenticated", // List/create conversations
 	"/api/v1/conversations/":        "authenticated", // Conversation routes
 	"/api/v1/conversations/resolve": "authenticated", // Resolve a conversation reference
-	"/api/v1/thread-groups":         "authenticated", // List/create thread groups (experiment hub.chat_thread_groups)
-	"/api/v1/thread-groups/":        "authenticated", // Thread group routes (experiment hub.chat_thread_groups)
+	"/api/v1/thread-groups":         "authenticated", // List/create thread groups
+	"/api/v1/thread-groups/":        "authenticated", // Thread group routes
 
 	// ── Cross-project messaging ────────────────────────────────────────
 	"/api/v1/messaging/capabilities":    "authenticated", // Messaging feature capabilities
 	"/api/v1/messaging/targets/resolve": "authenticated", // Resolve a message target
 
 	// ── Native chat (conditionally registered) ─────────────────────────
-	"/api/v1/chat/prefs":          "authenticated", // Chat preferences
-	"/api/v1/chat/spaces":         "authenticated", // Chat spaces
-	"/api/v1/chat/spaces/":        "authenticated", // Chat space routes
-	"/api/v1/chat/conversations/": "authenticated", // Chat conversation routes
-	"/api/v1/chat/topics/":        "authenticated", // Chat topic routes
-	"/api/v1/chat/dms":            "authenticated", // Chat direct messages
-	"/api/v1/chat/unread-count":   "authenticated", // Chat unread conversation count
-	"/api/v1/chat/user-prefs":     "authenticated", // Chat user preferences
-	"/api/v1/chat/presence":       "authenticated", // Chat presence
-	"/api/v1/chat/search":         "authenticated", // Chat search
-	"/api/v1/chat/attachments":    "authenticated", // Chat attachments
-	"/api/v1/chat/attachments/":   "authenticated", // Chat attachment by ID
+	"/api/v1/chat/prefs":                 "authenticated", // Chat preferences
+	"/api/v1/chat/spaces":                "authenticated", // Chat spaces
+	"/api/v1/chat/spaces/":               "authenticated", // Chat space routes
+	"/api/v1/chat/conversations/":        "authenticated", // Chat conversation routes
+	"/api/v1/chat/topics/":               "authenticated", // Chat topic routes
+	"/api/v1/chat/dms":                   "authenticated", // Chat direct messages
+	"/api/v1/chat/unread-count":          "authenticated", // Chat unread conversation count
+	"/api/v1/chat/user-prefs":            "authenticated", // Chat user preferences
+	"/api/v1/chat/presence":              "authenticated", // Chat presence
+	"/api/v1/chat/search":                "authenticated", // Chat search
+	"/api/v1/decisions/":                 "authenticated", // Choice prompt decisions (read, answer)
+	"/api/v1/chat/stars":                 "authenticated", // Caller's starred messages in one conversation; 404 when the experiment is off
+	"/api/v1/chat/stars/":                "authenticated", // Star state, star detail, star add/remove (caller's own); 404 when the experiment is off
+	"/api/v1/chat/starred-conversations": "authenticated", // Caller's conversations with starred messages (the Starred rail); 404 when the experiment is off
+	"/api/v1/chat/attachments":           "authenticated", // Chat attachments (agents: POST upload and GET probe only, chatAttachmentRoute)
+	"/api/v1/chat/attachments/":          "authenticated", // Chat attachment by ID (never agents)
 
 	// ── gs:// link fetch (native chat) ─────────────────────────────────
 	"/api/v1/gcs/object": "authenticated", // GET: user identity only (handler); access derived from message readability, never client-supplied SA
@@ -278,6 +290,9 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/artifacts/shared/": "public",        // GET/HEAD: share-link read; the service resolves the link token in the path (hashed, one lookup) and answers 303 to the view route; rate limited; no session used; 404 when the experiment is off
 	"/api/v1/artifacts/view/":   "public",        // GET/HEAD: one version's files under a short-lived view capability in the path, verified by the service on every request (no session used); 404 when the experiment is off
 
+	// ── Port page view (hub.port_view experiment) ─────────────────────
+	"/api/v1/portview/": "public", // ANY: an agent's exposed port served on the short-lived page link in the path, checked with the user's port access on every request (no session used for access); 404 when the experiment is off
+
 	// ── Agent GCP identity ─────────────────────────────────────────────
 	"/api/v1/agent/gcp-token":          "agent-token", // Agent GCP access token
 	"/api/v1/agent/gcp-identity-token": "agent-token", // Agent GCP identity token
@@ -286,6 +301,7 @@ var routeAuthzManifest = map[string]string{
 	// ── Public settings ────────────────────────────────────────────────
 	"/api/v1/settings/public":       "authenticated", // Public settings — requires session despite name
 	"GET /api/v1/test-infra/status": "public",        // Test-identity gate status for the web banner — no auth (ptone/scion#4240)
+	"POST /api/v1/csp-reports":      "public",        // Browser policy reports for the web pages — no auth, rate limited, log only (ptone/scion#5912)
 	"/api/v1/experiments":           "authenticated", // Resolved experiment map — any signed-in identity (#2217)
 	"/api/v1/profiling":             "authenticated", // Profiling switches the web client acts on — any signed-in identity
 
@@ -345,6 +361,9 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/system/apple-dns":            "workstation",       // Apple DNS helper
 	"/api/v1/system/registry":             "workstation",       // System registry
 	"/api/v1/system/workstation-settings": "workstation-admin", // Workstation settings
+	"/api/v1/system/welcome/preview":      "workstation-admin", // Welcome project preview
+	"/api/v1/system/welcome/install":      "workstation-admin", // Welcome project install
+	"/api/v1/system/welcome/skip":         "workstation-admin", // Welcome project skip
 
 	// ── Workstation-only filesystem endpoints ──────────────────────────
 	"/api/v1/system/fs/list":          "workstation", // Filesystem listing

@@ -179,11 +179,14 @@ var fixtureCreateSites = []fixtureCreateSite{
 	{"perf/bench/seed/main.go", "s.CreateAgent(ctx, agent)", false,
 		"benchmark seeding tool writing a store directly; no hub principal exists"},
 
+	// ── Test support outside _test.go files ───────────────────────────
+	{"pkg/hub/internal/hubtestutil/authz_sqlite.go", "s.CreateProject(ctx, &store.Project{", false,
+		"CreateDelegateTestProject: test fixture helper writing a store directly; hubtestutil is imported only by _test.go files (TestOnlyTestCodeImportsHubtestutil)"},
+
 	// ── Not store creates (broker / hub client RPCs of the same name) ─
 	{"pkg/hub/brokerclient.go", "c.transport.CreateAgent(", false, "broker RPC: starts an agent already created by commitAgentCreate"},
 	{"pkg/hub/httpdispatcher.go", "c.transport.CreateAgent(", false, "broker RPC"},
-	{"pkg/hub/httpdispatcher.go", "d.client.CreateAgent(", false, "broker RPC"},
-	{"pkg/hub/httpdispatcher.go", "d.client.CreateAgent(", false, "broker RPC (retry)"},
+	{"pkg/hub/dispatch_metadata_seal.go", "d.client.CreateAgent(", false, "broker RPC (sealed send wrapper; the dispatcher's create and its retry both call it)"},
 	{"pkg/hub/controlchannel_client.go", "c.controlChannel.CreateAgent(", false, "broker RPC over the control channel"},
 	{"pkg/hub/controlchannel_client.go", "c.httpClient.CreateAgent(", false, "broker RPC (HTTP fallback)"},
 	{"pkg/hub/controlchannel_client.go", "c.httpClient.CreateAgent(", false, "broker RPC (HTTP)"},

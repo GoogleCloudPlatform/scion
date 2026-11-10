@@ -56,6 +56,8 @@ var leakGuardSignatures = hubtestutil.LeakGuardSignatures
 
 const leakGuardStoreSignature = hubtestutil.LeakGuardStoreSignature
 
+const leakGuardStoreDiagSignature = hubtestutil.LeakGuardStoreDiagSignature
+
 const memGuardCapEnv = hubtestutil.MemGuardCapEnv
 
 const memGuardIntervalEnv = hubtestutil.MemGuardIntervalEnv

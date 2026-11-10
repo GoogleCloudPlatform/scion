@@ -119,7 +119,7 @@ func TestDeleteFindsKeptAgentDir(t *testing.T) {
 				t.Fatalf("write home file: %v", err)
 			}
 			mustMkdirAll(t, agentDir)
-			err := handleAgentDirWithoutConfig(agentName, agentDir, agentHome, agentWorkspace)
+			err := handleAgentDirWithoutConfigGuarded(testAgentDirGuard(agentName, agentDir), agentName, agentDir, agentHome, agentWorkspace)
 			if !errors.Is(err, config.ErrAgentStateConflict) {
 				t.Fatalf("handleAgentDirWithoutConfig = %v; want an error wrapping ErrAgentStateConflict", err)
 			}

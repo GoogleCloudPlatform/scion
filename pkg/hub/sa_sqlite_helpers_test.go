@@ -396,6 +396,13 @@ type spcFixture struct {
 func newSPCFixture(t *testing.T) *spcFixture {
 	t.Helper()
 	srv, s := testServer(t)
+	return newSPCFixtureOn(t, srv, s)
+}
+
+// newSPCFixtureOn is newSPCFixture on a server the caller built, for a test
+// that installs a store wrapper (installStoreFault) before the setup.
+func newSPCFixtureOn(t *testing.T, srv *Server, s store.Store) *spcFixture {
+	t.Helper()
 	ctx := context.Background()
 	project := setupProjectWithBroker(t, s, "spc-proj", "spc-proj")
 	assigner := tid("spc-assigner")

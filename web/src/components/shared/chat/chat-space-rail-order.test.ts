@@ -53,6 +53,9 @@ function createRail(): any {
   el.threadsBySpace = new Map();
   el.collapsedSpaces = new Set<string>();
   el.loading = false;
+  // As after a successful loadPrefs: the rail never saves preferences it
+  // has not read (see savePrefs).
+  el._prefsLoaded = true;
   return el;
 }
 

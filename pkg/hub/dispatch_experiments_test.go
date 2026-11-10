@@ -70,6 +70,38 @@ func TestAgentPluginsExperiment_Dispatched(t *testing.T) {
 	}
 }
 
+// hub.cloudrun_native_identity is a server-layer experiment, off by default,
+// and the hub puts it in HubAgentDefaults.Experiments only while it is on.
+func TestCloudRunNativeIdentityExperiment_Dispatched(t *testing.T) {
+	exp, ok := experiments.Default().Lookup(experiments.CloudRunNativeIdentity)
+	if !ok {
+		t.Fatalf("%s is not registered", experiments.CloudRunNativeIdentity)
+	}
+	if exp.Default || !exp.HasLayer(experiments.LayerServer) || exp.HasLayer(experiments.LayerWeb) {
+		t.Errorf("experiment = %+v, want default off, server layer only", exp)
+	}
+
+	on := dispatchExperimentsServer(t, `{"overrides":{"hub.cloudrun_native_identity":true}}`)
+	if got := on.dispatchExperiments(); !slices.Equal(got, []string{experiments.CloudRunNativeIdentity}) {
+		t.Errorf("on: dispatch experiments = %v, want [%s]", got, experiments.CloudRunNativeIdentity)
+	}
+	d := on.CreateAuthenticatedDispatcher()
+	start := startHubAgentDefaults(d.hubAgentDefaults(), d.autoExposePortsDefault(), d.dispatchExperiments(), nil)
+	if start == nil || !slices.Contains(start.Experiments, experiments.CloudRunNativeIdentity) {
+		t.Errorf("on: start dispatch defaults = %+v, want %s", start, experiments.CloudRunNativeIdentity)
+	}
+
+	off := dispatchExperimentsServer(t, `{"overrides":{"hub.k8s_nfs_home":true}}`)
+	if got := off.dispatchExperiments(); slices.Contains(got, experiments.CloudRunNativeIdentity) {
+		t.Errorf("off: dispatch experiments = %v include %s", got, experiments.CloudRunNativeIdentity)
+	}
+	d = off.CreateAuthenticatedDispatcher()
+	start = startHubAgentDefaults(d.hubAgentDefaults(), d.autoExposePortsDefault(), d.dispatchExperiments(), nil)
+	if start != nil && slices.Contains(start.Experiments, experiments.CloudRunNativeIdentity) {
+		t.Errorf("off: start dispatch defaults = %+v include %s", start, experiments.CloudRunNativeIdentity)
+	}
+}
+
 func dispatchExperimentsServer(t *testing.T, raw string) *Server {
 	t.Helper()
 	fakeStore := newFakeHubSettingStore()

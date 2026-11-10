@@ -42,13 +42,29 @@ const initLockKey int64 = 0x6172746966616374
 // timestamps, so that they sort lexically in time order.
 const sqliteTimeLayout = "2006-01-02T15:04:05.000000000Z"
 
-// migration is one named schema step. Steps run in order, each at most once
-// per database, and are recorded in artifact_migrations.
+// migration is one named step. Steps run in order, each at most once per
+// database, and are recorded in artifact_migrations. A step runs its
+// dialect's DDL, when there is any, and then apply, when set; both run in
+// Init's transaction, so a failure leaves neither the change nor the ledger
+// row.
+//
+// apply may return errMigrationDeferred to put its step off: Init then
+// records no ledger row for it, keeps going with the later steps and
+// succeeds, and the step runs again at the next start. A deferring apply
+// must return before it writes anything, so it leaves nothing behind in
+// the shared transaction. Only a data step whose effect no later step
+// depends on may defer (no schema change); 0014_review_ladder qualifies,
+// since it only rewrites grant permissions.
 type migration struct {
 	name     string
 	sqlite   string
 	postgres string
+	apply    func(ctx context.Context, tx *sql.Tx, s *sqlStore) error
 }
+
+// errMigrationDeferred is returned by a migration's apply to put its step
+// off until the next start (see migration).
+var errMigrationDeferred = errors.New("artifacts: migration deferred")
 
 // migrations is the ordered schema history. Append new steps; never edit or
 // reorder applied ones.
@@ -62,6 +78,10 @@ var migrations = []migration{
 	{name: migrationOrphans, sqlite: sqliteOrphans, postgres: postgresOrphans},
 	{name: migrationVersionFailReason, sqlite: sqliteVersionFailReason, postgres: postgresVersionFailReason},
 	{name: migrationAttachments, sqlite: sqliteAttachments, postgres: postgresAttachments},
+	{name: migrationAttachmentProject, sqlite: sqliteAttachmentProject, postgres: postgresAttachmentProject},
+	{name: migrationDeliveryRedemptions, sqlite: sqliteDeliveryRedemptions, postgres: postgresDeliveryRedemptions},
+	{name: migrationReviewSessions, sqlite: sqliteReviewSessions, postgres: postgresReviewSessions},
+	{name: migrationReviewLadder, apply: applyReviewLadder},
 }
 
 const ledgerSQLite = `CREATE TABLE IF NOT EXISTS artifact_migrations (
@@ -204,8 +224,17 @@ func (s *sqlStore) Init(ctx context.Context) error {
 		if s.dialect == dialectPostgres {
 			ddl = m.postgres
 		}
-		if _, err := tx.ExecContext(ctx, ddl); err != nil {
-			return fmt.Errorf("artifacts: migration %s: %w", m.name, err)
+		if ddl != "" {
+			if _, err := tx.ExecContext(ctx, ddl); err != nil {
+				return fmt.Errorf("artifacts: migration %s: %w", m.name, err)
+			}
+		}
+		if m.apply != nil {
+			if err := m.apply(ctx, tx, s); errors.Is(err, errMigrationDeferred) {
+				continue
+			} else if err != nil {
+				return fmt.Errorf("artifacts: migration %s: %w", m.name, err)
+			}
 		}
 		if _, err := tx.ExecContext(ctx, s.rebind("INSERT INTO artifact_migrations (name, applied_at) VALUES (?, ?)"),
 			m.name, s.timeArg(time.Now())); err != nil {
@@ -245,7 +274,9 @@ func (s *sqlStore) CreatePending(ctx context.Context, a *Artifact, v *Version, f
 
 // createArtifact writes an artifact, its first version, the version's
 // files and the grants in one transaction. The artifact's current version
-// is the version when it is ready, and none otherwise.
+// is the version when it is ready, and none otherwise. A grant created by
+// SponsorReviewCreator gets its grant_created event in the same
+// transaction.
 func (s *sqlStore) createArtifact(ctx context.Context, a *Artifact, v *Version, files []File, grants []Grant) error {
 	if a == nil || v == nil {
 		return errors.New("artifacts: creating an artifact needs an artifact and a version")
@@ -264,10 +295,10 @@ func (s *sqlStore) createArtifact(ctx context.Context, a *Artifact, v *Version, 
 		current = v.Seq
 	}
 	if _, err := tx.ExecContext(ctx, s.rebind(`INSERT INTO artifact
-		(id, scope_kind, scope_ref, owner_kind, owner_ref, "key", title, current_seq, expires_at, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+		(id, scope_kind, scope_ref, owner_kind, owner_ref, "key", title, current_seq, expires_at, created_at, updated_at, sponsor_ref)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
 		a.ID, a.ScopeKind, a.ScopeRef, a.OwnerKind, a.OwnerRef, nullString(a.Key), a.Title, nullInt(current),
-		s.nullTimeArg(a.ExpiresAt), s.timeArg(a.CreatedAt), s.timeArg(a.UpdatedAt)); err != nil {
+		s.nullTimeArg(a.ExpiresAt), s.timeArg(a.CreatedAt), s.timeArg(a.UpdatedAt), nullString(a.SponsorRef)); err != nil {
 		return fmt.Errorf("artifacts: insert artifact: %w", err)
 	}
 	if err := s.insertVersion(ctx, tx, v, files); err != nil {
@@ -283,6 +314,19 @@ func (s *sqlStore) createArtifact(ctx context.Context, a *Artifact, v *Version, 
 			g.ID, g.ArtifactID, g.SubjectKind, g.SubjectRef, g.Permission, s.nullTimeArg(g.ExpiresAt),
 			nullString(g.CreatedByRef), s.timeArg(g.CreatedAt)); err != nil {
 			return fmt.Errorf("artifacts: insert grant: %w", err)
+		}
+		// The automatic review grant (ptone/scion#7134) is the hub's own
+		// act, recorded with its event in this transaction; the home grant
+		// is implicit and records none.
+		if g.CreatedByRef == SponsorReviewCreator {
+			if !validSponsorReviewGrant(&g) {
+				return errors.New("artifacts: an automatic review grant must be a review grant to a user")
+			}
+			if err := s.insertEvent(ctx, tx, a.ID, EventGrantCreated, &sponsorReviewActor, g.CreatedAt, map[string]any{
+				"grantId": g.ID, "subjectKind": g.SubjectKind, "subjectRef": g.SubjectRef, "permission": g.Permission,
+			}); err != nil {
+				return err
+			}
 		}
 	}
 	if err := tx.Commit(); err != nil {
@@ -697,13 +741,15 @@ func (s *sqlStore) getArtifact(ctx context.Context, where string, args ...any) (
 		expires, created     dbTime
 		updated, deletedTime dbTime
 		orphaned             dbTime
+		messageProject       sql.NullString
+		sponsor              sql.NullString
 	)
 	err := s.db.QueryRowContext(ctx, s.rebind(`SELECT
 		id, scope_kind, scope_ref, owner_kind, owner_ref, "key", title, current_seq, expires_at, created_at, updated_at, deleted_at,
-		orphaned_at
+		orphaned_at, message_project_id, sponsor_ref
 		FROM artifact WHERE `+where+` AND deleted_at IS NULL`), args...).Scan(
 		&a.ID, &a.ScopeKind, &a.ScopeRef, &a.OwnerKind, &a.OwnerRef, &key, &a.Title, &seq,
-		&expires, &created, &updated, &deletedTime, &orphaned)
+		&expires, &created, &updated, &deletedTime, &orphaned, &messageProject, &sponsor)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -717,6 +763,8 @@ func (s *sqlStore) getArtifact(ctx context.Context, where string, args ...any) (
 	a.UpdatedAt = updated.Time
 	a.DeletedAt = deletedTime.ptr()
 	a.OrphanedAt = orphaned.ptr()
+	a.MessageProjectID = nullStringPtr(messageProject)
+	a.SponsorRef = sponsor.String
 	return &a, nil
 }
 
@@ -894,13 +942,13 @@ func (s *sqlStore) ListCandidates(ctx context.Context, q CandidateQuery) ([]Cand
 	for rows.Next() {
 		var (
 			c                         Candidate
-			key, kind                 sql.NullString
+			key, kind, sponsor        sql.NullString
 			seq                       sql.NullInt64
 			expires, created, updated dbTime
 			orphaned                  dbTime
 		)
 		if err := rows.Scan(&c.ID, &c.ScopeKind, &c.ScopeRef, &c.OwnerKind, &c.OwnerRef, &key, &c.Title,
-			&seq, &expires, &created, &updated, &orphaned, &kind); err != nil {
+			&seq, &expires, &created, &updated, &orphaned, &sponsor, &kind); err != nil {
 			return nil, fmt.Errorf("artifacts: scan candidate: %w", err)
 		}
 		c.Key = key.String
@@ -909,6 +957,7 @@ func (s *sqlStore) ListCandidates(ctx context.Context, q CandidateQuery) ([]Cand
 		c.CreatedAt = created.Time
 		c.UpdatedAt = updated.Time
 		c.OrphanedAt = orphaned.ptr()
+		c.SponsorRef = sponsor.String
 		c.CurrentKind = kind.String
 		out = append(out, c)
 	}
@@ -949,8 +998,9 @@ func (s *sqlStore) candidateQuery(q CandidateQuery) (string, []any) {
 	arm("artifact a", "a.owner_kind = ? AND a.owner_ref = ?", q.PrincipalKind, q.PrincipalRef)
 	if !q.OwnedOnly {
 		now := s.timeArg(q.Now)
-		grantWhere := " AND (g.expires_at IS NULL OR g.expires_at > ?) AND g.permission IN (?, ?, ?)"
-		grantArgs := []any{now, GrantRead, GrantWrite, GrantAdmin}
+		permSQL, permArgs := readGrantFilter("g")
+		grantWhere := " AND (g.expires_at IS NULL OR g.expires_at > ?) AND " + permSQL
+		grantArgs := append([]any{now}, permArgs...)
 		arm("artifact_grant g JOIN artifact a ON a.id = g.artifact_id",
 			"g.subject_kind = ? AND g.subject_ref = ?"+grantWhere,
 			append([]any{SubjectPrincipal, PrincipalRef(q.PrincipalKind, q.PrincipalRef)}, grantArgs...)...)
@@ -970,10 +1020,23 @@ func (s *sqlStore) candidateQuery(q CandidateQuery) (string, []any) {
 	return s.rebind(b.String()), args
 }
 
+// readGrantFilter returns the SQL condition, on the grant table aliased
+// alias, that a grant carries a permission in grantsForRead, and its
+// arguments. Both list pushdowns (the grant arms of the candidate query and
+// the "shared with the project" subquery) use it, so the read set the list
+// pushes down to SQL is always the one canReadWith matches in Go.
+func readGrantFilter(alias string) (string, []any) {
+	args := make([]any, len(grantsForRead))
+	for i, p := range grantsForRead {
+		args[i] = p
+	}
+	return alias + ".permission IN (" + strings.TrimSuffix(strings.Repeat("?, ", len(args)), ", ") + ")", args
+}
+
 // candidateColumns is the column list every arm of the candidate query
 // selects; the union and its outer ORDER BY rely on the names.
 const candidateColumns = `a.id, a.scope_kind, a.scope_ref, a.owner_kind, a.owner_ref, a."key", a.title,
-		a.current_seq, a.expires_at, a.created_at, a.updated_at, a.orphaned_at, v.kind AS current_kind`
+		a.current_seq, a.expires_at, a.created_at, a.updated_at, a.orphaned_at, a.sponsor_ref, v.kind AS current_kind`
 
 // writeCandidateFilters appends the conditions every candidate arm shares:
 // live, not expired, the search, the review filter, the home scope and the
@@ -1006,9 +1069,10 @@ func (s *sqlStore) writeCandidateFilters(b *strings.Builder, args *[]any, q Cand
 	if q.HomeScope != "" {
 		// Shared with the project: an unexpired scope grant to it, found
 		// through the (artifact_id, subject_kind, subject_ref) unique index.
+		permSQL, permArgs := readGrantFilter("sg")
 		shared := `EXISTS (SELECT 1 FROM artifact_grant sg WHERE sg.artifact_id = a.id AND sg.subject_kind = ?
-			AND sg.subject_ref = ? AND (sg.expires_at IS NULL OR sg.expires_at > ?) AND sg.permission IN (?, ?, ?))`
-		sharedArgs := []any{SubjectScope, q.HomeScope, now, GrantRead, GrantWrite, GrantAdmin}
+			AND sg.subject_ref = ? AND (sg.expires_at IS NULL OR sg.expires_at > ?) AND ` + permSQL + `)`
+		sharedArgs := append([]any{SubjectScope, q.HomeScope, now}, permArgs...)
 		switch {
 		case q.ScopeShares && q.SharedOnly:
 			b.WriteString(" AND a.scope_kind = ? AND a.scope_ref <> ? AND " + shared)

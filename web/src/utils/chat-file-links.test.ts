@@ -40,8 +40,7 @@ import {
   GCS_URI_PATTERN,
   resolveGcsMatch,
   parseGcsUri,
-  escAttr,
-  buildGcsLinkHtml,
+  buildGcsLinkElement,
   buildGcsObjectApiUrl,
   pinGcsObjectUrl,
   buildCloudConsoleUrl,
@@ -1358,15 +1357,12 @@ const GCS_PARITY_VECTORS: Array<{
     linked: false,
     serverAllowed: false,
   },
-  // The posted text is the same "a&b" as the Go row of this name, but here
-  // it is written pre-escaped, matching what this function actually
-  // consumes: production always HTML-escapes a message body before
-  // GCS_URI_PATTERN ever runs on it, so a raw '&' is never in this table's
-  // input as a bare byte — it is a raw '&' the moment it reaches the Go
-  // side's bodyReferencesGCSURI (see the exact same row in gcs_link_test.go).
+  // The same "a&b" as the Go row of this name: the link pass reads the
+  // rendered message's text, where '&' is one character, as in the raw body
+  // the Go side's bodyReferencesGCSURI reads (see gcs_link_test.go).
   {
     name: 'fragment-continuation-amp',
-    body: 'gs://bkt/a&amp;b',
+    body: 'gs://bkt/a&b',
     bucket: 'bkt',
     object: 'a',
     linked: false,
@@ -1630,16 +1626,19 @@ describe('resolveGcsMatch (exact extraction, not a widened reject set)', () => {
     expect(resolve(`gs://bkt/${objectPart}`)).toEqual({ object: expected, suffix: '' });
   });
 
-  it.each([
-    ['a#frag', 'a#frag'],
-    ['a?x=1', 'a?x=1'],
-    // A raw '&' is HTML-escaped to the 5-character entity '&amp;' before
-    // this function ever sees it — matching real usage, where the markdown
-    // renderer escapes text before GCS_URI_PATTERN runs on it.
-    ['a&b', 'a&amp;b'],
-  ])('does not link %s: a fragment/query/param continuation immediately follows', (_, escaped) => {
-    expect(resolve(`gs://bkt/${escaped}`)).toBeNull();
-  });
+  it.each(['a#frag', 'a?x=1', 'a&b'])(
+    'does not link %s: a fragment/query/param continuation immediately follows',
+    (objectPart) => {
+      expect(resolve(`gs://bkt/${objectPart}`)).toBeNull();
+    }
+  );
+
+  it.each(['a#', 'a?', 'a&', 'a# x', 'a? x', 'a& x'])(
+    'links %s: a marker followed by nothing or whitespace is not a continuation',
+    (objectPart) => {
+      expect(resolve(`gs://bkt/${objectPart}`)).toEqual({ object: 'a', suffix: '' });
+    }
+  );
 
   it('links up to a trailing ? at the end of a sentence', () => {
     // '?' is not part of the object class at all, so it was never in the
@@ -1756,33 +1755,22 @@ describe('parseGcsUri', () => {
   });
 });
 
-describe('escAttr', () => {
-  it('escapes all five reserved characters', () => {
-    expect(escAttr(`&<>"'`)).toBe('&amp;&lt;&gt;&quot;&#39;');
-  });
-
-  it('escapes & before other entities so it never double-encodes', () => {
-    expect(escAttr('&amp;')).toBe('&amp;amp;');
-  });
-
-  it('leaves an ordinary gs:// URI unchanged', () => {
-    expect(escAttr('gs://bkt/o.txt')).toBe('gs://bkt/o.txt');
-  });
-});
-
-describe('buildGcsLinkHtml', () => {
+describe('buildGcsLinkElement', () => {
   it('builds an anchor with the expected class, data attribute and text', () => {
-    const html = buildGcsLinkHtml('bkt', 'dir/o.txt');
-    expect(html).toBe(
-      '<a class="entity-link gcs-link" data-gcs-uri="gs://bkt/dir/o.txt" href="javascript:void(0)" title="Open gs://bkt/dir/o.txt">gs://bkt/dir/o.txt</a>'
+    const a = buildGcsLinkElement('bkt', 'dir/o.txt');
+    expect(a.outerHTML).toBe(
+      '<a class="entity-link gcs-link" data-gcs-uri="gs://bkt/dir/o.txt" href="#" title="Open gs://bkt/dir/o.txt">gs://bkt/dir/o.txt</a>'
     );
   });
 
-  it('escapes an ampersand that survives into the object text (defense in depth)', () => {
-    // GCS_URI_PATTERN's object class has no '&', so this exercises escAttr's
-    // own behaviour, not a value the regex could actually capture.
-    const html = buildGcsLinkHtml('bkt', 'a&b');
-    expect(html).toContain('data-gcs-uri="gs://bkt/a&amp;b"');
+  it('carries a value that looks like markup as text, never as markup', () => {
+    // GCS_URI_PATTERN's object class has none of these characters, so this
+    // exercises the builder itself, not a value the regex could capture.
+    const a = buildGcsLinkElement('bkt', 'a&b"<i>');
+    expect(a.dataset.gcsUri).toBe('gs://bkt/a&b"<i>');
+    expect(a.textContent).toBe('gs://bkt/a&b"<i>');
+    expect(a.children).toHaveLength(0);
+    expect(a.attributes).toHaveLength(4);
   });
 });
 
@@ -1808,13 +1796,12 @@ describe('GCS_URI_PATTERN excludes dangerous characters from the object capture'
     expect(firstGcsMatch('gs://bkt/a<img src=x>')).toEqual({ bucket: 'bkt', object: 'a' });
   });
 
-  it('stops the object capture before a literal & at all (the pattern runs on already-HTML-escaped text, so a raw & in the source is "&amp;" by the time this regex sees it), then rejects the whole occurrence under the continuation rule since more text follows', () => {
-    // The '&' that starts "&amp;" is itself the very next character after
-    // "a", followed by non-whitespace ("mp;b...") — the same continuation
-    // rule the server applies to the raw '&' in the unescaped body, so
-    // client and server reject this occurrence identically, not just
-    // truncate it to "a".
-    expect(firstGcsMatch('gs://bkt/a&amp;b')).toBeNull();
+  it('stops the object capture before a literal &, then rejects the whole occurrence under the continuation rule since more text follows', () => {
+    // The '&' is the very next character after "a", followed by
+    // non-whitespace — the same continuation rule the server applies to the
+    // raw '&' in the body, so client and server reject this occurrence
+    // identically, not just truncate it to "a".
+    expect(firstGcsMatch('gs://bkt/a&b')).toBeNull();
   });
 
   it('stops the raw run before & directly, independent of the continuation rule', () => {
@@ -1825,7 +1812,7 @@ describe('GCS_URI_PATTERN excludes dangerous characters from the object capture'
     // whether that stop counts as a full reject, never how the run itself
     // is bounded.
     const re = new RegExp(GCS_URI_PATTERN.source, GCS_URI_PATTERN.flags);
-    const m = re.exec('gs://bkt/a&amp;b');
+    const m = re.exec('gs://bkt/a&b');
     expect(m).not.toBeNull();
     expect(m![3]).toBe('a');
   });
@@ -2016,13 +2003,16 @@ describe('artifact references', () => {
     ]);
   });
 
-  it('builds escaped link markup carrying id and seq', async () => {
-    const { buildArtifactLinkHtml } = await import('./chat-file-links.js');
-    expect(buildArtifactLinkHtml(`scion://artifact/${ID}@2`, { id: ID, seq: 2 })).toBe(
-      `<a class="entity-link artifact-link" data-artifact-id="${ID}" data-artifact-seq="2" href="#" title="Open artifact">scion://artifact/${ID}&#64;2</a>`
+  it('builds a link element carrying id and seq', async () => {
+    const { buildArtifactLinkElement } = await import('./chat-file-links.js');
+    expect(buildArtifactLinkElement(`scion://artifact/${ID}@2`, { id: ID, seq: 2 }).outerHTML).toBe(
+      `<a class="entity-link artifact-link" data-artifact-id="${ID}" data-artifact-seq="2" href="#" title="Open artifact">scion://artifact/${ID}@2</a>`
     );
-    expect(buildArtifactLinkHtml('<x>', { id: '"', seq: 0 })).toBe(
-      '<a class="entity-link artifact-link" data-artifact-id="&quot;" href="#" title="Open artifact">&lt;x&gt;</a>'
-    );
+    // Text and attribute values that look like markup stay values.
+    const odd = buildArtifactLinkElement('<x>', { id: '"', seq: 0 });
+    expect(odd.textContent).toBe('<x>');
+    expect(odd.dataset.artifactId).toBe('"');
+    expect(odd.children).toHaveLength(0);
+    expect(odd.hasAttribute('data-artifact-seq')).toBe(false);
   });
 });

@@ -45,6 +45,7 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY cmd/ ./cmd/
 COPY harnesses/ ./harnesses/
+COPY internal/ ./internal/
 COPY pkg/ ./pkg/
 COPY proto/ ./proto/
 COPY resources/ ./resources/

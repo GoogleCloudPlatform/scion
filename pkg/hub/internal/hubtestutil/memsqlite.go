@@ -25,7 +25,7 @@ import (
 // still close it themselves; closing twice is harmless.
 //
 // Every pkg/hub test that wants a raw *sql.DB on ":memory:" must use this
-// helper instead of sql.Open (TestNoRawMemorySQLiteOpen enforces it).
+// helper instead of sql.Open (hack/memsqliteguard enforces it).
 //
 // Why the pool is pinned to one connection: each connection database/sql
 // opens to ":memory:" is a separate, empty database. With the default

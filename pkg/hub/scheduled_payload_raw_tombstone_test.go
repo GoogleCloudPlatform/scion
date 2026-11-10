@@ -273,7 +273,9 @@ func TestSchedule_UpdateMalformedPayload_NonObjectAndMistypedField(t *testing.T)
 					return sched.Payload
 				}()
 
-				rec := doScheduleAgentRequest(t, srv, authzHelperAgent(projectID, ScopeProjectRead, ScopeAgentCreate), projectID, created.ID, http.MethodPatch,
+				// Agent callers do not edit schedule definitions, so the
+				// replacement payload is sent by a user.
+				rec := doRequest(t, srv, http.MethodPatch, "/api/v1/projects/"+projectID+"/schedules/"+created.ID,
 					UpdateScheduleRequest{Payload: tc.payload})
 				require.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
 				// Also check the JSON-escaped form.
@@ -355,7 +357,7 @@ func TestSchedule_UpdateEventTypeOnly_RevalidatesStoredPayload(t *testing.T) {
 	// Switching to "dispatch_agent" with no new Payload must re-validate the
 	// carried-over stored Payload against the new type: "task" is a string
 	// field there, so 5 is a type mismatch.
-	rec := doScheduleAgentRequest(t, srv, authzHelperAgent(projectID, ScopeProjectRead, ScopeAgentCreate), projectID, created.ID, http.MethodPatch,
+	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/projects/"+projectID+"/schedules/"+created.ID,
 		UpdateScheduleRequest{EventType: "dispatch_agent"})
 	require.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
 
@@ -437,7 +439,9 @@ func TestSchedule_UpdateRawTombstone_DispatchAgent(t *testing.T) {
 			var created struct{ ID string }
 			require.NoError(t, json.NewDecoder(createRec.Body).Decode(&created))
 
-			rec := doScheduleAgentRequest(t, srv, authzHelperAgent(projectID, ScopeProjectRead, ScopeAgentCreate), projectID, created.ID, http.MethodPatch,
+			// Agent callers do not edit schedule definitions, so the
+			// replacement payload is sent by a user.
+			rec := doRequest(t, srv, http.MethodPatch, "/api/v1/projects/"+projectID+"/schedules/"+created.ID,
 				UpdateScheduleRequest{Payload: `{"agentName":"scheduled-worker","raw":` + rawVal + `}`})
 			require.Equal(t, http.StatusUnprocessableEntity, rec.Code, "body: %s", rec.Body.String())
 

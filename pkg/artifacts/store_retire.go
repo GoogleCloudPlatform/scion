@@ -56,6 +56,9 @@ const (
 	AuthorityCustodianProjectAdmin = "custodian_project_admin"
 	AuthorityRetention             = "retention"
 	AuthorityReconciler            = "reconciler"
+	// AuthorityMigration is a store migration's own change, such as
+	// 0014_review_ladder's conversions (see applyReviewLadder).
+	AuthorityMigration = "migration"
 	// AuthorityStewardProjectOwner and AuthorityStewardDelegator are the
 	// steward clauses (design D25): an owner of the home project of an
 	// artifact owned by an agent (artifact.steward there), and the user who
@@ -63,6 +66,11 @@ const (
 	// project. See Stewardship.
 	AuthorityStewardProjectOwner = "steward_project_owner"
 	AuthorityStewardDelegator    = "steward_delegator"
+	// AuthoritySponsorReview is the hub's own act of giving an agent's
+	// recorded delegating user review access to a new artifact the agent
+	// creates (ptone/scion#7134; see sponsor_review.go). Only the creation
+	// path records it.
+	AuthoritySponsorReview = "sponsor_review"
 )
 
 // isSteward reports whether authority is a steward clause. A steward may
@@ -150,6 +158,10 @@ var reconcilerActor = Actor{Kind: ActorKindSystem, Ref: AuthorityReconciler, Aut
 
 // retentionActor is the actor of the expiry sweep's deleted events.
 var retentionActor = Actor{Kind: ActorKindSystem, Ref: AuthorityRetention, Authority: AuthorityRetention}
+
+// sponsorReviewActor is the actor of the grant_created event of the
+// automatic review grant written with a new artifact (ptone/scion#7134).
+var sponsorReviewActor = Actor{Kind: ActorKindSystem, Ref: AuthoritySponsorReview, Authority: AuthoritySponsorReview}
 
 // Event is a row of the append-only artifact_event table.
 type Event struct {
@@ -249,8 +261,8 @@ func (s *sqlStore) DeleteArtifact(ctx context.Context, artifactID string, opts D
 }
 
 // deleteArtifactTx is the one soft delete: inside tx it sets deleted_at,
-// removes every grant and share link of the artifact, and records the
-// deleted event with what was removed.
+// removes every grant, share link and review session row of the artifact,
+// and records the deleted event with the grants and links it removed.
 func (s *sqlStore) deleteArtifactTx(ctx context.Context, tx *sql.Tx, artifactID string, opts DeleteOptions, now time.Time) (DeleteResult, error) {
 	at := s.timeArg(now)
 	q := `UPDATE artifact SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL`
@@ -306,6 +318,9 @@ func (s *sqlStore) deleteArtifactTx(ctx context.Context, tx *sql.Tx, artifactID 
 	}
 	if _, err := tx.ExecContext(ctx, s.rebind(`DELETE FROM artifact_grant WHERE artifact_id = ?`), artifactID); err != nil {
 		return DeleteResult{}, fmt.Errorf("artifacts: drop grants: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, s.rebind(`DELETE FROM artifact_review_session WHERE artifact_id = ?`), artifactID); err != nil {
+		return DeleteResult{}, fmt.Errorf("artifacts: drop review sessions: %w", err)
 	}
 	if err := s.insertEvent(ctx, tx, artifactID, EventDeleted, opts.Actor, now,
 		map[string]any{"grantsRemoved": res.Grants, "linksRevoked": res.Links}); err != nil {

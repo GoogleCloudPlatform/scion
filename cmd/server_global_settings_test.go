@@ -86,9 +86,9 @@ func TestServerStartupSettings_GlobalOnlyFromProjectDir(t *testing.T) {
 		}
 		v.colocatedActiveProfile = colocatedActiveProfile()
 		v.registryCheckErr = requireImageRegistryForBrokerAt(globalDir) != nil
-		_, err = resolveBrokerDefaultRuntime(func(projectPath, _ string) scionruntime.Runtime {
+		_, _, err = resolveBrokerDefaultRuntime(func(projectPath, _ string) (scionruntime.Runtime, config.RuntimeBuildRecord) {
 			v.defaultRuntimePath = projectPath
-			return scionruntime.NewDockerRuntime()
+			return scionruntime.NewDockerRuntime(), config.RuntimeBuildRecord{}
 		}, func(string, ...interface{}) {})
 		require.NoError(t, err)
 		v.runtimeProjectDir, err = config.GetResolvedProjectDir(v.defaultRuntimePath)
@@ -123,17 +123,17 @@ func TestServerStartupSettings_GlobalOnlyFromProjectDir(t *testing.T) {
 // settings load that resolves the project from the working directory. It is
 // a literal-only tripwire: it flags a call whose project-path argument is
 // the literal "" (a variable holding "" is not caught):
-//   - config.LoadSettings, LoadSettingsKoanf, LoadSettingsIgnoringEnvProjectID,
+//   - config.LoadSettings, LoadSettingsIgnoringEnvProjectID,
 //     LoadVersionedSettings, LoadEffectiveSettings, LoadEffectiveSettingsFor
 //     and GetResolvedProjectDir
-//   - runtime.GetRuntime
+//   - runtime.GetRuntime and runtime.GetRuntimeWithRecord
 //   - requireImageRegistryForBrokerAt and imageRegistryConfiguredEnvOrFile
 //
 // and any call of requireImageRegistryForBroker (the standalone broker's
 // working-directory check).
 func TestServerStartup_NoWorkingDirectorySettingsLoads(t *testing.T) {
 	configFns := map[string]bool{
-		"LoadSettings": true, "LoadSettingsKoanf": true, "LoadSettingsIgnoringEnvProjectID": true,
+		"LoadSettings": true, "LoadSettingsIgnoringEnvProjectID": true,
 		"LoadVersionedSettings": true, "LoadEffectiveSettings": true, "LoadEffectiveSettingsFor": true,
 		"GetResolvedProjectDir": true,
 	}
@@ -193,7 +193,7 @@ func TestServerStartup_NoWorkingDirectorySettingsLoads(t *testing.T) {
 				if !ok {
 					return true
 				}
-				if (pkg.Name == "config" && configFns[fun.Sel.Name]) || (pkg.Name == "runtime" && fun.Sel.Name == "GetRuntime") {
+				if (pkg.Name == "config" && configFns[fun.Sel.Name]) || (pkg.Name == "runtime" && (fun.Sel.Name == "GetRuntime" || fun.Sel.Name == "GetRuntimeWithRecord")) {
 					if isEmptyLit(pathArg(pkg.Name, fun.Sel.Name)) {
 						t.Errorf("%s: %s.%s(\"\") resolves the project from the working directory; use the global directory", fset.Position(call.Pos()), pkg.Name, fun.Sel.Name)
 					}

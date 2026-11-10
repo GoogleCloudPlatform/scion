@@ -154,14 +154,14 @@ type agentService struct {
 
 func (s *agentService) agentPath(agentID string) string {
 	if s.projectID != "" {
-		return "/api/v1/projects/" + s.projectID + "/agents/" + agentID
+		return "/api/v1/projects/" + url.PathEscape(s.projectID) + "/agents/" + url.PathEscape(agentID)
 	}
-	return "/api/v1/agents/" + agentID
+	return "/api/v1/agents/" + url.PathEscape(agentID)
 }
 
 func (s *agentService) agentsPath() string {
 	if s.projectID != "" {
-		return "/api/v1/projects/" + s.projectID + "/agents"
+		return "/api/v1/projects/" + url.PathEscape(s.projectID) + "/agents"
 	}
 	return "/api/v1/agents"
 }
@@ -356,6 +356,76 @@ type UpdateAgentRequest struct {
 	Annotations  map[string]string `json:"annotations,omitempty"`
 	TaskSummary  string            `json:"taskSummary,omitempty"`
 	StateVersion int64             `json:"stateVersion"` // Required for optimistic locking
+
+	// Config edits the agent's inline config. The hub applies only the
+	// keys the request names, and every api.ScionConfig key is omitempty,
+	// so only non-empty values are sent: this field cannot clear a key.
+	// The response's disposition says when each edit takes effect (applied
+	// now, held until the next start, or held until a reincarnation).
+	Config *api.ScionConfig `json:"config,omitempty"`
+	// GCPIdentity changes the agent's GCP identity. The hub accepts it only
+	// for an agent that has not started yet (created phase).
+	GCPIdentity *GCPIdentityConfig `json:"gcp_identity,omitempty"`
+	// AgentRole is reserved for held role edits. A hub with held edits on
+	// refuses it (409): the role changes by reincarnating the agent.
+	AgentRole *string `json:"agentRole,omitempty"`
+	// ExplicitTimezone pins (an IANA zone name) or unpins ("") the agent's
+	// container timezone; nil leaves it unchanged. Applies at the next
+	// start, in any phase.
+	ExplicitTimezone *string `json:"explicitTimezone,omitempty"`
+	// Task is the task the agent gets at its next fresh start (a resume
+	// does not send it). It is sent as config.task: Update copies it there,
+	// and refuses a request that sets both Task and Config.Task.
+	Task string `json:"-"`
+}
+
+// MarshalJSON encodes r with Config reduced to its set keys: a key whose
+// value encodes as null (api.ScionConfig.Detached has no omitempty) is left
+// out, so the hub never reads it as an edit of that key.
+func (r UpdateAgentRequest) MarshalJSON() ([]byte, error) {
+	type alias UpdateAgentRequest
+	var cfg json.RawMessage
+	if r.Config != nil {
+		b, err := json.Marshal(r.Config)
+		if err != nil {
+			return nil, err
+		}
+		var keys map[string]json.RawMessage
+		if err := json.Unmarshal(b, &keys); err != nil {
+			return nil, err
+		}
+		for k, v := range keys {
+			if string(v) == "null" {
+				delete(keys, k)
+			}
+		}
+		if cfg, err = json.Marshal(keys); err != nil {
+			return nil, err
+		}
+	}
+	return json.Marshal(struct {
+		alias
+		Config json.RawMessage `json:"config,omitempty"`
+	}{alias: alias(r), Config: cfg})
+}
+
+// wireBody returns the body Update sends for r: r itself, or a copy whose
+// Config carries Task as config.task.
+func (r *UpdateAgentRequest) wireBody() (*UpdateAgentRequest, error) {
+	if r == nil || r.Task == "" {
+		return r, nil
+	}
+	if r.Config != nil && r.Config.Task != "" {
+		return nil, fmt.Errorf("update agent: set Task or Config.Task, not both")
+	}
+	body := *r
+	cfg := api.ScionConfig{}
+	if r.Config != nil {
+		cfg = *r.Config
+	}
+	cfg.Task = r.Task
+	body.Config = &cfg
+	return &body, nil
 }
 
 // DeleteAgentOptions configures agent deletion.
@@ -468,9 +538,13 @@ func (s *agentService) SubmitEnv(ctx context.Context, agentID string, req *Submi
 	return apiclient.DecodeRequired[CreateAgentResponse](resp)
 }
 
-// Update updates an agent's metadata.
+// Update updates an agent's metadata and config.
 func (s *agentService) Update(ctx context.Context, agentID string, req *UpdateAgentRequest) (*Agent, error) {
-	resp, err := s.c.patch(ctx, s.agentPath(agentID), req, nil)
+	body, err := req.wireBody()
+	if err != nil {
+		return nil, err
+	}
+	resp, err := s.c.patch(ctx, s.agentPath(agentID), body, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -688,7 +762,10 @@ type ScopeReissueResult struct {
 	CredentialsRevoked int                       `json:"credentials_revoked"`
 	Dispatched         bool                      `json:"dispatched"`
 	DispatchError      string                    `json:"dispatch_error,omitempty"`
-	Message            string                    `json:"message"`
+	// ReloadUnconfirmed is set when the new credential was delivered but
+	// the running agent did not confirm the reload.
+	ReloadUnconfirmed string `json:"reload_unconfirmed,omitempty"`
+	Message           string `json:"message"`
 }
 
 // ReissueScopes posts {"reissue_scopes": true, "dry_run": dryRun} to the
@@ -724,6 +801,9 @@ type ScopeReissueBulkAgent struct {
 	RoleAfter     string   `json:"role_after,omitempty"`
 	OpID          string   `json:"op_id,omitempty"`
 	DispatchError string   `json:"dispatch_error,omitempty"`
+	// ReloadUnconfirmed is set on a "changed" agent whose new credential
+	// was delivered but whose running agent did not confirm the reload.
+	ReloadUnconfirmed string `json:"reload_unconfirmed,omitempty"`
 }
 
 // ScopeReissueBulkRef names an agent in a bulk result list.
@@ -814,6 +894,10 @@ type MessageResponse struct {
 	// mid-`scion reincarnate` (design agent-reincarnate §3.7). The message
 	// was saved to conversation history but not dispatched.
 	Deferred string `json:"deferred,omitempty"`
+	// ConversationID is the conversation the message was recorded in, so
+	// the sender can reply into it. Empty on hubs that predate this field,
+	// or when the message was not recorded in a conversation.
+	ConversationID string `json:"conversation_id,omitempty"`
 	// MentionResults reports the outcome of server-side @mention fan-out,
 	// one entry per resolved mention name. Empty when the message had no
 	// mentions, or on hubs that predate this field.
@@ -851,6 +935,9 @@ type SendMessageOptions struct {
 	// addition to any @mentions the server extracts from the body. The
 	// primary recipient and the sender are excluded automatically.
 	Mentions []string
+	// AttachmentIDs names attachments the sender uploaded
+	// (AttachmentUploader.UploadAttachments), by id (ptone/scion#4596).
+	AttachmentIDs []string
 }
 
 // SendStructuredMessage sends a structured message to an agent.
@@ -873,12 +960,14 @@ func (s *agentService) SendStructuredMessageWithOptions(ctx context.Context, age
 		Notify            bool                        `json:"notify,omitempty"`
 		Wake              bool                        `json:"wake,omitempty"`
 		Mentions          []string                    `json:"mentions,omitempty"`
+		AttachmentIDs     []string                    `json:"attachment_ids,omitempty"`
 	}{
 		StructuredMessage: msg,
 		Interrupt:         opts.Interrupt,
 		Notify:            opts.Notify,
 		Wake:              opts.Wake,
 		Mentions:          opts.Mentions,
+		AttachmentIDs:     opts.AttachmentIDs,
 	}
 	resp, err := s.c.post(ctx, s.agentPath(agentID)+"/message", body, nil)
 	if err != nil {
@@ -908,8 +997,7 @@ func (s *agentService) SendKeys(ctx context.Context, agentID string, keys string
 
 	// Contract §2.4: the ONLY success shape is HTTP 200 with
 	// Response.Status == agentkeys.StatusDispatched. Nothing else — a 204,
-	// a 2xx the server never defines, or a 3xx apiclient.DecodeResponse's
-	// own <400 check would otherwise treat as decodable — may be reported
+	// a 2xx the server never defines, or an unfollowed 3xx — may be reported
 	// as success: each is either a response this contract never promises
 	// (so treating it as success would be a guess, not a decision) or a
 	// response DoNoRetry's "do not follow the redirect" contract leaves
@@ -959,6 +1047,34 @@ type OutboundMessageRequest struct {
 	// Wake requests that a suspended target agent be resumed before
 	// delivering the message. Ignored for non-agent recipients.
 	Wake bool `json:"wake,omitempty"`
+	// AttachmentIDs names attachments the sending agent uploaded, by id
+	// (ptone/scion#4596). Attachments keeps meaning staged paths.
+	AttachmentIDs []string `json:"attachment_ids,omitempty"`
+	// Choices makes the message a choice prompt: the decisions as the JSON
+	// array scion message --choices takes. The hub validates them (the
+	// web.chat_choices experiment); Msg is then the optional intro.
+	Choices json.RawMessage `json:"choices,omitempty"`
+	// ChoicesUpdate lets Choices replace decisions whose keys exist.
+	ChoicesUpdate bool `json:"choices_update,omitempty"`
+}
+
+// ChoiceDecisionResult is one decision of a sent choice prompt.
+type ChoiceDecisionResult struct {
+	Key      string                  `json:"key"`
+	Version  int                     `json:"version"`
+	Ref      string                  `json:"ref"`
+	RowID    string                  `json:"row_id,omitempty"`
+	Replaced *ChoiceReplacedDecision `json:"replaced"`
+}
+
+// ChoiceReplacedDecision is the version a choice prompt replaced.
+// For a decided version, Answer is the effective answer's label and
+// AnsweredBy who gave it (the name, else the email).
+type ChoiceReplacedDecision struct {
+	Version    int    `json:"version"`
+	Status     string `json:"status"`
+	Answer     string `json:"answer,omitempty"`
+	AnsweredBy string `json:"answered_by,omitempty"`
 }
 
 // OutboundMessageResult is the parsed response from a successful outbound
@@ -980,8 +1096,8 @@ type OutboundMessageResult struct {
 	// Deferred is set only when Status == "deferred".
 	Deferred string `json:"deferred,omitempty"`
 	// ConversationID is the conversation the message was recorded in. It is
-	// empty on hubs that predate this field, and on paths that do not report
-	// it (for example, a send to another agent).
+	// empty on hubs that predate this field, or when the message was not
+	// recorded in a conversation.
 	ConversationID string `json:"conversation_id,omitempty"`
 	// MentionResults reports the outcome of server-side @mention fan-out,
 	// one entry per resolved mention name. Empty when the message had no
@@ -1005,6 +1121,10 @@ type OutboundMessageResult struct {
 	// message, which was still sent without them. Empty when every
 	// attachment was recorded, or on hubs that predate this field.
 	AttachmentWarnings []AttachmentWarning `json:"attachment_warnings,omitempty"`
+
+	// Decisions lists the decisions of a choice prompt, one per decision
+	// sent; empty for any other message.
+	Decisions []ChoiceDecisionResult `json:"decisions,omitempty"`
 }
 
 // SendOutboundMessage sends a message from an agent via the outbound endpoint.
@@ -1044,7 +1164,7 @@ func (s *agentService) BroadcastMessage(ctx context.Context, msg *messages.Struc
 		StructuredMessage: msg,
 		Interrupt:         interrupt,
 	}
-	resp, err := s.c.post(ctx, "/api/v1/projects/"+s.projectID+"/broadcast", body, nil)
+	resp, err := s.c.post(ctx, "/api/v1/projects/"+url.PathEscape(s.projectID)+"/broadcast", body, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -1261,13 +1381,11 @@ type ReincarnateAgentRequest struct {
 	// TargetBroker (a broker ID, name or slug) asks to move the agent to
 	// that broker, which must mount the same NFS export as its current one.
 	TargetBroker string `json:"targetBroker,omitempty"`
-	// SharedDirBackends changes the recorded shared-dir storage backend of
-	// the named shared dirs (dir name to "nfs" or "local"). Only the
-	// agent's record changes; the data is copied by the operator.
-	SharedDirBackends map[string]string `json:"sharedDirBackends,omitempty"`
-	// AllowEmptySharedDir skips the start check that refuses an empty
-	// directory on the new backend while the previous one is not empty.
-	AllowEmptySharedDir bool `json:"allowEmptySharedDir,omitempty"`
+	// ForceMove, with TargetBroker, allows a move whose workspace cannot
+	// travel through a shared NFS export: the workspace is recreated on the
+	// target and the agent's local state is given up. A hub that predates
+	// it ignores it; MoveVerdict.TransferMode tells a client the hub knows it.
+	ForceMove bool `json:"forceMove,omitempty"`
 
 	// Patch fields: each changes the next generation's setting, and later
 	// reincarnations keep it. Empty (nil for ThinkingLevel) is unchanged.
@@ -1299,12 +1417,17 @@ type ReincarnateAgentResponse struct {
 	TargetBrokerID string `json:"targetBrokerId,omitempty"`
 	// MoveVerdict is the move eligibility verdict of a dry-run move.
 	MoveVerdict *MoveVerdict `json:"moveVerdict,omitempty"`
+	// TransferMode is how an accepted cross-broker move carries the
+	// workspace: "export" or "recreate" (a forced move). Empty for a plain
+	// reincarnation and from a hub that predates forced moves.
+	TransferMode string `json:"transferMode,omitempty"`
 }
 
 // MoveVerdict is the hub's eligibility verdict for moving an agent to
 // another broker. A refused request carries it in the error details under
 // "verdict". Checks lists every check in evaluation order, each passed,
-// failed or not_evaluated.
+// failed, not_evaluated or (for a forced move) waived; treat any other
+// value as not passed.
 type MoveVerdict struct {
 	Eligible     bool          `json:"eligible"`
 	SourceBroker MoveBrokerRef `json:"sourceBroker"`
@@ -1312,6 +1435,21 @@ type MoveVerdict struct {
 	Profile      string        `json:"profile,omitempty"`
 	RuntimeType  string        `json:"runtimeType,omitempty"`
 	Checks       []MoveCheck   `json:"checks"`
+	// TransferMode is how the workspace reaches the target of an eligible
+	// move: "export" (carried through a shared NFS export) or "recreate"
+	// (provisioned fresh; local state is lost). A hub that predates
+	// --force never sets it.
+	TransferMode string `json:"transferMode,omitempty"`
+	// Consequences lists what an eligible move keeps, carries, recreates
+	// and loses.
+	Consequences []MoveConsequence `json:"consequences,omitempty"`
+}
+
+// MoveConsequence is one item a move keeps, carries, recreates or loses.
+type MoveConsequence struct {
+	Kind string `json:"kind"` // kept | carried | recreated | lost
+	Item string `json:"item"` // stable key, e.g. "identity", "workspace"
+	Text string `json:"text"`
 }
 
 // MoveBrokerRef identifies a broker in a MoveVerdict.
@@ -1361,8 +1499,4 @@ type ReincarnationPlan struct {
 	ServiceAccount *FieldChange `json:"serviceAccount,omitempty"`
 	ThinkingLevel  *FieldChange `json:"thinkingLevel,omitempty"`
 	HarnessAuth    *FieldChange `json:"harnessAuth,omitempty"`
-	// SharedDirBackends and AllowEmptySharedDir echo the request's shared
-	// dir backend change.
-	SharedDirBackends   map[string]string `json:"sharedDirBackends,omitempty"`
-	AllowEmptySharedDir bool              `json:"allowEmptySharedDir,omitempty"`
 }

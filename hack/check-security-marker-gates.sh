@@ -68,8 +68,21 @@
 #   handlers_broker_inbound.go (parallel entry point to handlers_agent_messaging):
 #     REQUIRED: authorizeAgentMessage x1 in handleBrokerInbound (#1371 — message authorization)
 #     REQUIRED: SenderID x4 in handleBrokerInbound (B5 — canonical sender identity)
-#     REQUIRED: NewAuthenticatedUser x1 in handleBrokerInbound (B5 — server-derived identity)
 #     REQUIRED: parseDMKeyIDs x1 in handleBrokerInbound (B5 — DM key ownership)
+#
+#   resolveBrokerInboundSender, the shared broker sender resolver
+#   (broker_inbound_sender.go; sender resolution moved out of handleBrokerInbound):
+#     REQUIRED: emailResolvedPrincipalRefused x2 in resolveBrokerInboundSender
+#               (B5 — sender eligibility refusals before identity construction:
+#               on the email before the store lookup, and on the resolved user)
+#     REQUIRED: NewAuthenticatedUser x1 in resolveBrokerInboundSender
+#               (B5 — server-derived identity, relocated from handleBrokerInbound)
+#     REQUIRED: resolveBrokerInboundSender x1 in handleBrokerInbound,
+#               handleBrokerInboundRouted (handlers_broker_inbound_routed.go) and
+#               authorizeBrokerAttachmentRequest (handlers_broker_inbound_attachments.go)
+#               (B5 — delegation; removing a call bypasses the resolver for that route)
+#     REQUIRED: authorizeBrokerAttachmentRequest x1 in handleBrokerAttachmentsCheck
+#               and handleBrokerAttachmentsUpload (B5 — attachment route delegation)
 #
 #   resolveOutboundRouting delegation in handlers_agent_messaging.go:
 #     REQUIRED: handleAgentOutboundMessage must call resolveOutboundRouting x1

@@ -102,7 +102,7 @@ auth:
   # release namespace; the chart only references it.
   existingSecret: tfha-gke-h3-session
 
-# One value renders settings.yaml server.workspace_storage and mounts the
+# One value renders settings.yaml server.project_storage and mounts the
 # export in the hub pod at <mountRoot>/<shareId>. Placeholder server and
 # export; shareId is the hub name.
 workspaceStorage:

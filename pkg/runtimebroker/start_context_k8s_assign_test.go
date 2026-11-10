@@ -590,7 +590,7 @@ func TestBuildStartContext_KubernetesAssignCreateAndStartProduceSameEnv(t *testi
 
 // TestBuildStartContext_KubernetesAssignSavedProfileFallback covers the
 // start/restart profile source: with no Config at all, the profile must come
-// from the agent's own saved profile (agent.GetSavedProfile), not silently
+// from the agent's provisioned profile (image provenance), not silently
 // fall back to the project's active profile. Uses
 // newTestServerForStartContextMultiProfile (not
 // newTestServerForStartContextRuntime): ForceRuntime short-circuits
@@ -615,9 +615,8 @@ runtimes:
             agent-worker@my-project.iam.gserviceaccount.com: runtime-entry-ksa
 `, otherProfile))
 
-	// Persist a saved profile for this agent, distinct from the broker's
-	// default, the same way agent.GetSavedProfile reads it (agent-info.json
-	// under the agent's home directory).
+	// Record a provisioned profile for this agent, distinct from the
+	// broker's default (writeSavedAgentProfile).
 	const agentName = "agent-k8s-assign-saved-profile"
 	writeSavedAgentProfile(t, dotScion, agentName, otherProfile)
 
@@ -884,7 +883,7 @@ runtimes:
 // which cover run.go's application of the field once it reaches Start.
 
 func TestStartAgentEndpoint_KubernetesAssignResolvedKSAReachesOpts(t *testing.T) {
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContextRuntime(t, cfg, "kubernetes")
 	mgr, ok := srv.manager.(*envCapturingManager)
@@ -909,7 +908,7 @@ func TestStartAgentEndpoint_KubernetesAssignResolvedKSAReachesOpts(t *testing.T)
 }
 
 func TestRestartAgentEndpoint_KubernetesAssignResolvedKSAReachesOpts(t *testing.T) {
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContextRuntime(t, cfg, "kubernetes")
 	mgr, ok := srv.manager.(*envCapturingManager)
@@ -943,7 +942,7 @@ func TestRestartAgentEndpoint_KubernetesAssignResolvedKSAReachesOpts(t *testing.
 // path (a JSON inlineConfig field in the request body), not only when
 // buildStartContext is called directly — mgr.Start must never be reached.
 func TestStartAgentEndpoint_KubernetesAssignConflictingInlineServiceAccountNameRejected(t *testing.T) {
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContextRuntime(t, cfg, "kubernetes")
 	mgr, ok := srv.manager.(*envCapturingManager)
@@ -982,7 +981,7 @@ func TestStartAgentEndpoint_KubernetesAssignConflictingInlineServiceAccountNameR
 // requestId needs the real status to distinguish a client-correctable
 // rejection from a broker-side failure.
 func TestCreateAgentEndpoint_BuildStartContext400RecordedAsAttemptStatus(t *testing.T) {
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContextRuntime(t, cfg, "kubernetes")
 
@@ -1025,7 +1024,7 @@ func TestCreateAgentEndpoint_BuildStartContext400RecordedAsAttemptStatus(t *test
 // in.ProjectPath is non-empty, isolating exactly the behavior this test
 // guards.
 func TestStartAgentEndpoint_NoStrayProjectMarkerFromResolvedProjectPath(t *testing.T) {
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContextRuntime(t, cfg, "docker")
 

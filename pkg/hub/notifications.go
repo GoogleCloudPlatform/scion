@@ -441,6 +441,16 @@ func (nd *NotificationDispatcher) dispatchToAgent(ctx context.Context, sub *stor
 		return
 	}
 
+	if subscriberSuspended(subscriber) {
+		// No running agent to deliver to: leave the notification pending
+		// with no attempt counted. The dispatch sweep leaves it out while
+		// the subscriber is suspended, delivers it after a resume, and
+		// expires it at notificationRetryMaxAge.
+		nd.log.Info("Subscriber agent is suspended; notification parked until it resumes",
+			"subscriberID", sub.SubscriberID, "notificationID", notif.ID)
+		return
+	}
+
 	dispatcher := nd.getDispatcher()
 	if dispatcher == nil {
 		nd.log.Error("No dispatcher available; notification NOT dispatched",
@@ -526,7 +536,7 @@ func (nd *NotificationDispatcher) dispatchToAgent(ctx context.Context, sub *stor
 	if err := nd.store.MarkNotificationDispatched(ctx, notif.ID); err != nil {
 		nd.log.Error("Failed to mark notification dispatched", "notificationID", notif.ID, "error", err)
 	}
-	nd.setOutcome(ctx, notif.ID, store.NotificationOutcomeDelivered)
+	nd.setOutcome(ctx, notif.ID, store.NotificationOutcomeDelivered, "")
 }
 
 // notificationMessageType returns the structured message type for a notification status.

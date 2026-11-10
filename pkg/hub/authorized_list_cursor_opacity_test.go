@@ -375,8 +375,8 @@ func TestListTemplatesCursor_WrongVersionRejected(t *testing.T) {
 	inner, err := srv.listCursorSealer.Open(first.NextCursor, binding)
 	require.NoError(t, err)
 
-	nonce := make([]byte, srv.listCursorSealer.aead.NonceSize())
-	ciphertext := srv.listCursorSealer.aead.Seal(nil, nonce, []byte(inner), []byte("scion-list-cursor-v2:"+binding))
+	nonce := make([]byte, testSealerAEAD(t, srv.listCursorSealer).NonceSize())
+	ciphertext := testSealerAEAD(t, srv.listCursorSealer).Seal(nil, nonce, []byte(inner), []byte("scion-list-cursor-v2:"+binding))
 	forged := listCursorPrefix + base64.RawURLEncoding.EncodeToString(append(nonce, ciphertext...))
 
 	rec, _ := getTemplatesPage(t, srv, carol, "scope=user&limit=1&cursor="+forged)

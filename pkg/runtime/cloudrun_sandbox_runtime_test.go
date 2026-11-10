@@ -1,3 +1,5 @@
+//go:build unix
+
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -16,7 +18,6 @@ package runtime
 
 import (
 	"context"
-	"embed"
 	"errors"
 	"os"
 	"path/filepath"
@@ -827,14 +828,7 @@ func TestCloudRunSandboxRuntime_Run_AppliesResolvedAuth(t *testing.T) {
 		rootDir:      rootDir,
 		watchCancels: make(map[string]context.CancelFunc),
 	}
-
-	t.Cleanup(func() {
-		rt.watchMu.Lock()
-		for _, cancel := range rt.watchCancels {
-			cancel()
-		}
-		rt.watchMu.Unlock()
-	})
+	stopWatchersOnCleanup(t, stateFile, rt)
 
 	cfg := RunConfig{
 		Name:      "auth-agent",
@@ -1016,35 +1010,6 @@ func TestP3a_EnvForBehaviourIdentity(t *testing.T) {
 // -----------------------------------------------------------------------
 // buildEntrypoint tests
 // -----------------------------------------------------------------------
-
-type mockHarness struct {
-	command []string
-	env     map[string]string
-}
-
-func (h *mockHarness) Name() string { return "mock" }
-func (h *mockHarness) AdvancedCapabilities() api.HarnessAdvancedCapabilities {
-	return api.HarnessAdvancedCapabilities{}
-}
-func (h *mockHarness) GetCommand(task string, resume bool, baseArgs []string) []string {
-	return h.command
-}
-func (h *mockHarness) GetEnv(agentName, agentHome, unixUsername string) map[string]string {
-	return h.env
-}
-func (h *mockHarness) DefaultConfigDir() string                                        { return "" }
-func (h *mockHarness) SkillsDir() string                                               { return "" }
-func (h *mockHarness) HasSystemPrompt(agentHome string) bool                           { return false }
-func (h *mockHarness) Provision(ctx context.Context, name, dir, home, ws string) error { return nil }
-func (h *mockHarness) GetInterruptKey() string                                         { return "C-c" }
-func (h *mockHarness) GetInterruptSequence() []string                                  { return nil }
-func (h *mockHarness) DeliverySpec() api.DeliverySpec                                  { return api.DeliverySpec{} }
-func (h *mockHarness) ReadySpec() api.ReadySpec                                        { return api.ReadySpec{} }
-func (h *mockHarness) GetHarnessEmbedsFS() (embed.FS, string)                          { return embed.FS{}, "" }
-func (h *mockHarness) InjectAgentInstructions(agentHome string, content []byte) error  { return nil }
-func (h *mockHarness) InjectSystemPrompt(agentHome string, content []byte) error       { return nil }
-func (h *mockHarness) GetTelemetryEnv() map[string]string                              { return nil }
-func (h *mockHarness) ResolveAuth(auth api.AuthConfig) (*api.ResolvedAuth, error)      { return nil, nil }
 
 func TestBuildEntrypoint_WithHarness(t *testing.T) {
 	cfg := RunConfig{
@@ -1894,17 +1859,7 @@ func TestCloudRunSandboxRuntime_Run_BuildsCommand(t *testing.T) {
 		rootDir:      rootDir,
 		watchCancels: make(map[string]context.CancelFunc),
 	}
-
-	// Cancel the background watchSandbox goroutine on test exit so it cannot
-	// write to the state file after t.TempDir() cleanup begins, which would
-	// cause a "directory not empty" failure.
-	t.Cleanup(func() {
-		rt.watchMu.Lock()
-		for _, cancel := range rt.watchCancels {
-			cancel()
-		}
-		rt.watchMu.Unlock()
-	})
+	stopWatchersOnCleanup(t, stateFile, rt)
 
 	cfg := RunConfig{
 		Name:      "test-agent",
@@ -1927,15 +1882,6 @@ func TestCloudRunSandboxRuntime_Run_BuildsCommand(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
-	// Cancel the watch/tailer goroutines so temp files are released.
-	t.Cleanup(func() {
-		rt.watchMu.Lock()
-		if cancel, ok := rt.watchCancels[id]; ok {
-			cancel()
-		}
-		rt.watchMu.Unlock()
-		time.Sleep(100 * time.Millisecond) // let goroutines exit
-	})
 	if id != "test-agent" {
 		t.Errorf("Run() returned id = %q, want %q", id, "test-agent")
 	}

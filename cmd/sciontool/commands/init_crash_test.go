@@ -161,6 +161,38 @@ func TestClassifyExit(t *testing.T) {
 	}
 }
 
+// TestInitExitCode covers the exit code RunInit returns on the non-crash
+// path: a requested stop exits 0 even when the signal-killed child reports
+// -1 (which os.Exit would turn into 255), and an unrequested exit keeps the
+// child's own code.
+func TestInitExitCode(t *testing.T) {
+	tests := []struct {
+		name              string
+		childCode         int
+		harnessCode       *int
+		requestedShutdown bool
+		want              int
+	}{
+		{name: "requested stop, child killed by signal", childCode: -1, requestedShutdown: true, want: 0},
+		{name: "requested stop, child killed, harness file 0", childCode: -1, harnessCode: intPtr(0), requestedShutdown: true, want: 0},
+		{name: "requested stop, child exited 0", childCode: 0, requestedShutdown: true, want: 0},
+		{name: "requested stop, child non-zero, harness file 0", childCode: 143, harnessCode: intPtr(0), requestedShutdown: true, want: 0},
+		{name: "clean exit", childCode: 0, want: 0},
+		{name: "unrequested, child non-zero, harness file 0", childCode: 3, harnessCode: intPtr(0), want: 3},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			outcome := classifyExit(tc.childCode, nil, tc.harnessCode, false, tc.requestedShutdown)
+			if outcome.isCrash || outcome.limitsExceeded {
+				t.Fatalf("classifyExit = %+v, want a non-crash outcome", outcome)
+			}
+			if got := initExitCode(outcome, tc.childCode); got != tc.want {
+				t.Errorf("initExitCode = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestFinalStatusUpdate(t *testing.T) {
 	t.Run("signaled stop", func(t *testing.T) {
 		u := finalStatusUpdate(exitOutcome{exitCode: 0, signaled: true})

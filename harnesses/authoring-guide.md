@@ -52,6 +52,7 @@ list|show|upgrade|reset|sync|pull`.
   capture_auth.py    # thin shim: sys.exit(scion_harness.capture_auth_main())
   dialect.yaml       # optional — data-driven hook-event dialect
   agent-plugins.yaml # optional — native Agent Plugins support (see Capabilities)
+  no-auth-env.yaml   # optional — env added only in no-auth mode (see no_auth)
   home/              # seeded into the agent home at install time
     .bashrc
     .<tool>/...      # native client settings, hook wiring, notify scripts
@@ -62,7 +63,7 @@ list|show|upgrade|reset|sync|pull`.
 ```
 
 At install time, `provision.py`, `scion_harness.py`, `capture_auth.py`,
-`dialect.yaml`, `agent-plugins.yaml` (plus `schema/`, `examples/`, `tests/fixtures/`) stay at the
+`dialect.yaml`, `agent-plugins.yaml`, `no-auth-env.yaml` (plus `schema/`, `examples/`, `tests/fixtures/`) stay at the
 bundle root; everything under `home/` is copied into the harness-config's
 `home/` directory verbatim. `Dockerfile`, `cloudbuild.yaml`, `README.md`,
 `provision_test.py`, `.gitkeep`, and `init-firewall.sh` are not installed.
@@ -293,10 +294,13 @@ harness-config overrides included) to the container, and both readiness
 readers use it: `sciontool init`, which ends the agent's initializing state,
 and the broker's wait before it pastes a held message. A session-start from
 `/clear` or `/compact` never counts as the hook signal. The built-in bundles
-use `hook` for claude, gemini-cli, copilot and grok-build, and `delay` 8s for
-every other harness; change a value only with evidence that the tool reads
-its input by then. A harness-config with no `ready` block gets the block of
-the built-in bundle for its `harness` type, or `delay` 8s if there is none.
+use `hook` for claude, gemini-cli and grok-build, and `delay` 8s for every
+other harness; change a value only with evidence that the tool reads its
+input by then. The copilot bundle uses `delay` because its `sessionStart`
+fires only when the first prompt is submitted, so `hook` held the first
+message of an agent started without a task for the whole `timeout`. A
+harness-config with no `ready` block gets the block of the built-in bundle
+for its `harness` type, or `delay` 8s if there is none.
 
 **`delivery`.** A message is loaded into a tmux buffer and pasted with
 bracketed paste. Then each key in `submit_keys` is sent with its own
@@ -466,6 +470,28 @@ with your message. The user logs in interactively, then runs the staged
 the host from your `required_files` declarations) and stores each credential
 as a project secret via `sciontool secret set` — so the next agent starts
 authenticated.
+
+`command` is optional: without it the agent starts the shell with the message
+only.
+
+**Env for no-auth mode goes in `no-auth-env.yaml`, not in `config.yaml`.** The
+file sits next to `config.yaml` and holds one key, `env`, a map of variable
+names to literal values. Scion adds them to the container only when the agent
+runs in no-auth mode (the bundle needs a `no_auth` block), never for a start
+with credentials. An entry never replaces env set by settings, the agent or
+the hub, and names reserved for scion (`SCION_*`, `GCE_METADATA_*`, hub-only
+keys) and entries with an empty value are ignored with a warning, as is an
+invalid file; an entry whose name is empty or contains `=` is ignored without a
+warning. Like
+`agent-plugins.yaml`, it is kept out of `config.yaml` so older binaries can
+still validate `config.yaml`; they ignore the file. Copilot uses it to run
+without a session bus:
+
+```yaml
+# harnesses/copilot/no-auth-env.yaml
+env:
+  DBUS_SESSION_BUS_ADDRESS: unix:path=/home/scion/.scion/harness/no-session-bus
+```
 
 ### MCP (declarative mapping)
 

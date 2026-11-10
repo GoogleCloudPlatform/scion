@@ -1,0 +1,24 @@
+scion://artifact/5f1c2d3e-6b1a-4c55-9f3e-0d6e7a1b2c3d@2  review by user:user-1, 2026-11-02 09:30 UTC
+Note: Two questions.
+      Otherwise fine.
+
+plan.md:3:4  suggestion (replace)
+  "ship" -> "launch"
+
+plan.md:3:29  comment
+  date?
+
+plan.md:4:1  suggestion (insert)
+  insert "New line."
+
+plan.md:4:22  suggestion (delete)
+  delete "this"
+
+plan.md:5:1  highlight
+  on "Owners"
+
+plan.md:5:20  comment
+  which
+  team?
+
+2 comments, 3 suggestions, 1 highlight

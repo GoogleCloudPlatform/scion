@@ -84,6 +84,7 @@ func setupIntegrationTest(t *testing.T) *integrationTestEnv {
 		ProjectID:  project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
+		LocalPath:  fixtureProviderCheckout(t),
 		Status:     store.BrokerStatusOnline,
 	}))
 	project.DefaultRuntimeBrokerID = broker.ID

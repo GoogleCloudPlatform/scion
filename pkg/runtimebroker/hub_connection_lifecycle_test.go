@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 )
@@ -66,7 +67,7 @@ func TestHubConnection_OverlappingStartAndReinitialize(t *testing.T) {
 	cfg.HeartbeatInterval = 10 * time.Millisecond
 	cfg.ControlChannelEnabled = true
 	cfg.BrokerAuthEnabled = false
-	srv := New(cfg, &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }})
+	srv := New(cfg, &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
 
 	conn, err := srv.createHubConnection("hub-overlap", creds)
 	if err != nil {
@@ -152,15 +153,15 @@ func TestHubConnection_RequestedReinitializeAppliesLatest(t *testing.T) {
 	cfg.HeartbeatEnabled = false
 	cfg.ControlChannelEnabled = false
 	cfg.BrokerAuthEnabled = false
-	srv := New(cfg, &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }})
+	srv := New(cfg, &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
 
-	first := makeTestCreds("hub-latest", "broker-1", "http://hub1.example.com")
+	first := makeTestCreds("hub-latest", "broker-1", "https://hub1.example.com")
 	conn, err := srv.createHubConnection("hub-latest", first)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second := makeTestCreds("hub-latest", "broker-2", "http://hub2.example.com")
-	third := makeTestCreds("hub-latest", "broker-3", "http://hub3.example.com")
+	second := makeTestCreds("hub-latest", "broker-2", "https://hub2.example.com")
+	third := makeTestCreds("hub-latest", "broker-3", "https://hub3.example.com")
 	conn.requestReinitialize(second)
 	conn.requestReinitialize(third)
 
@@ -237,7 +238,7 @@ func TestHubConnection_NoRestartAfterFinalStop(t *testing.T) {
 			cfg.HeartbeatInterval = 10 * time.Millisecond
 			cfg.ControlChannelEnabled = true
 			cfg.BrokerAuthEnabled = false
-			srv := New(cfg, &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }})
+			srv := New(cfg, &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
 
 			conn, err := srv.createHubConnection(name, creds)
 			if err != nil {

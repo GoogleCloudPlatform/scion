@@ -15,6 +15,7 @@
 package config
 
 import (
+	"slices"
 	"sort"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -29,8 +30,9 @@ import (
 // published through it. A field added to the instance schema later is not
 // publishable until FC4-a lists it and this type gains it.
 //
-// Build it only with PresentInstance. P3 publishes nothing new to the Hub;
-// whether and how a later change sends this set is decided there.
+// Build it only with PresentInstance. A flat instance sends it to the Hub
+// on every heartbeat as api.RuntimeTargetPresentation (API), and the Hub
+// shows it read-only.
 type FlatInstancePresentation struct {
 	Key           string                         `json:"key"`
 	Name          string                         `json:"name"`
@@ -54,6 +56,14 @@ type FlatRuntimeTargetPresentation struct {
 	SharedDirStorageBackend  string            `json:"shared_dir_storage_backend,omitempty"`
 	SharedDirStorageBackends map[string]string `json:"shared_dir_storage_backends,omitempty"`
 	HomeStorageBackend       string            `json:"home_storage_backend,omitempty"`
+	// NodeSelector, Tolerations and RuntimeClassName are the instance's
+	// pod placement. PlacementReported is true when this build reports
+	// placement (a Kubernetes target), so a reader can tell "reported, none
+	// configured" from an older instance that does not report it.
+	NodeSelector      map[string]string   `json:"node_selector,omitempty"`
+	Tolerations       []api.K8sToleration `json:"tolerations,omitempty"`
+	RuntimeClassName  string              `json:"runtime_class_name,omitempty"`
+	PlacementReported bool                `json:"placement_reported,omitempty"`
 }
 
 // FlatAgentDefaultsPresentation is the publishable part of an instance's
@@ -101,7 +111,9 @@ type FlatHarnessOverridePresentation struct {
 
 // PresentInstance returns the publishable form of inst (FC4-a). The result
 // shares no map, slice or pointer with inst, so changing one never changes
-// the other.
+// the other. Presented agent defaults use the same image-registry display
+// redaction as the broker record (RedactImageRegistry); the redaction applies
+// to the published form only, and inst keeps the configured value.
 func PresentInstance(inst V1RuntimeBrokerInstanceConfig) FlatInstancePresentation {
 	out := FlatInstancePresentation{Key: inst.Key, Name: inst.Name}
 	if t := inst.RuntimeTarget; t != nil {
@@ -117,12 +129,16 @@ func PresentInstance(inst V1RuntimeBrokerInstanceConfig) FlatInstancePresentatio
 			SharedDirStorageBackend:  t.SharedDirStorageBackend,
 			SharedDirStorageBackends: copyStringMap(t.SharedDirStorageBackends),
 			HomeStorageBackend:       t.HomeStorageBackend,
+			NodeSelector:             copyStringMap(t.NodeSelector),
+			Tolerations:              slices.Clone(t.Tolerations),
+			RuntimeClassName:         t.RuntimeClassName,
+			PlacementReported:        t.Type == RuntimeTargetTypeKubernetes,
 		}
 	}
 	if d := inst.AgentDefaults; d != nil {
 		ad := &FlatAgentDefaultsPresentation{
 			DefaultHarnessConfig: d.DefaultHarnessConfig,
-			ImageRegistry:        d.ImageRegistry,
+			ImageRegistry:        RedactImageRegistry(d.ImageRegistry),
 			CloneDepth:           d.CloneDepth,
 			Resources:            copyResourceSpec(d.Resources),
 			Volumes:              presentVolumes(d.Volumes),
@@ -170,4 +186,79 @@ func sortedEnvKeys(env map[string]string) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// API returns p as the Hub wire type api.RuntimeTargetPresentation, field
+// by field, with SchemaVersion set to api.RuntimeTargetPresentationSchemaVersion.
+// The result shares no map, slice or pointer with p. It adds nothing that p
+// does not hold, so it publishes exactly PresentInstance's FC4-a set; build
+// p only with PresentInstance.
+func (p FlatInstancePresentation) API() api.RuntimeTargetPresentation {
+	out := api.RuntimeTargetPresentation{
+		SchemaVersion: api.RuntimeTargetPresentationSchemaVersion,
+		Key:           p.Key,
+		Name:          p.Name,
+	}
+	if t := p.RuntimeTarget; t != nil {
+		out.Target = &api.PresentedTarget{
+			Type:                     t.Type,
+			DisplayName:              t.DisplayName,
+			Namespace:                t.Namespace,
+			GKE:                      t.GKE,
+			PriorityClassName:        t.PriorityClassName,
+			SharedDirStorageClass:    t.SharedDirStorageClass,
+			SharedDirSize:            t.SharedDirSize,
+			SafeToEvict:              copyBoolPtr(t.SafeToEvict),
+			SharedDirStorageBackend:  t.SharedDirStorageBackend,
+			SharedDirStorageBackends: copyStringMap(t.SharedDirStorageBackends),
+			HomeStorageBackend:       t.HomeStorageBackend,
+			NodeSelector:             copyStringMap(t.NodeSelector),
+			Tolerations:              slices.Clone(t.Tolerations),
+			RuntimeClassName:         t.RuntimeClassName,
+			PlacementReported:        t.PlacementReported,
+		}
+	}
+	if d := p.AgentDefaults; d != nil {
+		ad := &api.PresentedAgentDefaults{
+			DefaultHarnessConfig: d.DefaultHarnessConfig,
+			ImageRegistry:        d.ImageRegistry,
+			CloneDepth:           d.CloneDepth,
+			Resources:            copyResourceSpec(d.Resources),
+			Volumes:              apiPresentedVolumes(d.Volumes),
+		}
+		for _, s := range d.Secrets {
+			ad.Secrets = append(ad.Secrets, api.PresentedSecretDecl{Key: s.Key, Type: s.Type, Description: s.Description})
+		}
+		if len(d.HarnessOverrides) > 0 {
+			ad.HarnessOverrides = make(map[string]api.PresentedHarnessOverride, len(d.HarnessOverrides))
+			for name, o := range d.HarnessOverrides {
+				var envKeys []string
+				if len(o.EnvKeys) > 0 {
+					envKeys = append([]string(nil), o.EnvKeys...)
+				}
+				ad.HarnessOverrides[name] = api.PresentedHarnessOverride{
+					Image:            o.Image,
+					ImagePullPolicy:  o.ImagePullPolicy,
+					AuthSelectedType: o.AuthSelectedType,
+					User:             o.User,
+					EnvKeys:          envKeys,
+					Volumes:          apiPresentedVolumes(o.Volumes),
+					Resources:        copyResourceSpec(o.Resources),
+				}
+			}
+		}
+		out.AgentDefaults = ad
+	}
+	return out
+}
+
+func apiPresentedVolumes(vols []FlatVolumePresentation) []api.PresentedVolume {
+	if len(vols) == 0 {
+		return nil
+	}
+	out := make([]api.PresentedVolume, len(vols))
+	for i, v := range vols {
+		out[i] = api.PresentedVolume{Target: v.Target, ReadOnly: v.ReadOnly, Type: v.Type}
+	}
+	return out
 }

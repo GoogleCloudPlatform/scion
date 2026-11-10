@@ -18,20 +18,25 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net"
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"unicode"
+	"unicode/utf8"
 
 	"golang.org/x/crypto/ssh"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/tunnelclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/privatefs"
 )
 
 // File layout managed by scion ssh-config, one include file and one
@@ -59,10 +64,22 @@ type sshPaths struct {
 	home string
 }
 
-func (p sshPaths) sshDir() string        { return filepath.Join(p.home, ".ssh") }
-func (p sshPaths) userConfig() string    { return filepath.Join(p.sshDir(), "config") }
-func (p sshPaths) includeDir() string    { return filepath.Join(p.sshDir(), "config.d") }
-func (p sshPaths) knownHostsDir() string { return filepath.Join(p.home, ".scion", "ssh") }
+// The directories ssh-config creates, relative to the home directory
+// (slash-separated, constant): ensureSSHDir takes these, never a path.
+const (
+	sshDirRel           = ".ssh"
+	sshIncludeDirRel    = ".ssh/config.d"
+	sshKnownHostsDirRel = ".scion/ssh"
+)
+
+func (p sshPaths) sshDir() string     { return filepath.Join(p.home, filepath.FromSlash(sshDirRel)) }
+func (p sshPaths) userConfig() string { return filepath.Join(p.sshDir(), "config") }
+func (p sshPaths) includeDir() string {
+	return filepath.Join(p.home, filepath.FromSlash(sshIncludeDirRel))
+}
+func (p sshPaths) knownHostsDir() string {
+	return filepath.Join(p.home, filepath.FromSlash(sshKnownHostsDirRel))
+}
 
 func (p sshPaths) includeFile(label string) string {
 	return filepath.Join(p.includeDir(), sshIncludePrefix+label)
@@ -109,7 +126,28 @@ func sshEndpointURL(endpoint string) (*url.URL, error) {
 	if u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
 		return nil, fmt.Errorf("invalid hub endpoint %q: user info, query and fragment are not allowed", config.RedactURL(endpoint))
 	}
+	if r, ok := sshEndpointUnsafeRune(endpoint, u); ok {
+		return nil, fmt.Errorf("invalid hub endpoint %q: contains %q; a hub endpoint may contain only ASCII letters, digits and -._:/ (and [ ] around an IPv6 address)", config.RedactURL(endpoint), r)
+	}
 	return u, nil
+}
+
+// sshEndpointUnsafeRune returns the first character of endpoint outside the
+// characters a hub endpoint is written with: ASCII letters, digits and
+// -._:/, plus one [ ] pair when the host is an IPv6 literal. The endpoint is
+// written into ProxyCommand lines and ssh options, so it is held to this
+// set on every OS.
+func sshEndpointUnsafeRune(endpoint string, u *url.URL) (rune, bool) {
+	ipv6 := strings.HasPrefix(u.Host, "[") && strings.Count(endpoint, "[") == 1 && strings.Count(endpoint, "]") == 1
+	for _, r := range endpoint {
+		switch {
+		case (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || strings.ContainsRune("-._:/", r):
+		case ipv6 && (r == '[' || r == ']'):
+		default:
+			return r, true
+		}
+	}
+	return 0, false
 }
 
 // sshHubLabelCandidates returns the preferred hub label and the fallback
@@ -239,82 +277,118 @@ func resolveSSHHubLabel(endpoint string, u *url.URL, files []sshIncludeFileInfo)
 	return "", fmt.Errorf("hub label %q and %q are both used by other scion include files in %s", preferred, fallback, filepath.Dir(files[0].path))
 }
 
-// ensureSSHDir creates dir and any missing parents below stop with mode
-// 0700. Existing directories keep their mode.
-func ensureSSHDir(stop, dir string) error {
-	rel, err := filepath.Rel(stop, dir)
-	if err != nil || strings.HasPrefix(rel, "..") {
-		return fmt.Errorf("%s is not under %s", dir, stop)
+// ~/.ssh is deliberately NOT a refuse-reparse tree. Dotfile managers
+// (chezmoi, stow, yadm) symlink ~/.ssh or the files in it, so refusing
+// links there would break legitimate setups. Instead links are followed
+// and the trust decision is made on handles after following (the
+// follow-then-verify rule, privatefs.ReplaceFollowing): the target's
+// parent directory and an existing target must pass
+// CheckNoForeignWriters; a foreign-owned target or a foreign-writable
+// parent is refused; a target the user owns but left too open is replaced
+// by a private temporary file through a handle rename; the old security
+// descriptor is never copied, because a writable ssh config is code
+// execution via ProxyCommand. The same writer and directory rule serve
+// ~/.scion/ssh and ~/.scion/vscode, which ssh and VS Code read the same way.
+
+// ensureSSHDir creates the directory rel below home, and any missing
+// parents, private (mode 0700 on unix; an owner-only ACL on Windows).
+// Existing directories are left as they are, and existing links on the way
+// are followed, wherever they lead (a dotfile manager's ~/.ssh or a
+// ~/.scion moved to another disk): see the note above.
+//
+// rel is one of the constant relative paths of sshPaths and vscodePaths
+// (sshDirRel, sshIncludeDirRel, sshKnownHostsDirRel, vscodeDirRel,
+// vscodeSettingsDirRel), never a caller-supplied path, so there is nothing
+// to contain: Tree.MkdirAll opens every component relative to its
+// parent's handle (no path-based open on this path) and validates each
+// one (pathcanon.ValidName: no "..", no absolute or alias forms).
+//
+// There is deliberately no pathcanon.Within here. A location check would
+// be a proxy: it resolves links, so it would refuse exactly the linked
+// layouts FollowLinks exists for. The property it would stand in for
+// (nobody else can change what ssh and VS Code will read) is enforced by
+// the follow-then-verify rule on the resolved handles of every file
+// written below these directories (writeFileAtomic,
+// privatefs.ReplaceFollowing), and a failure of that rule is a returned
+// error.
+//
+// Several rels are verified together before any is created
+// (Tree.MkdirAllEach): a refused location leaves no side effect, not even
+// a directory created for another rel of the same call.
+//
+// A followed link whose target sits in a directory another user can
+// change is warned about on stderr (sshLinkWarning), not refused: that is
+// an accepted residual (the follow-then-verify rule protects the target,
+// not the path to it; see privatefs.TreeOptions.FollowLinks).
+func ensureSSHDir(home string, rels ...string) error {
+	t, err := privatefs.OpenTree(home, privatefs.TreeOptions{FollowLinks: true, Warn: sshLinkWarning})
+	if err != nil {
+		return err
 	}
-	cur := stop
-	for _, part := range strings.Split(rel, string(filepath.Separator)) {
-		if part == "." || part == "" {
-			continue
-		}
-		cur = filepath.Join(cur, part)
-		if err := os.Mkdir(cur, sshDirMode); err != nil {
-			if errors.Is(err, fs.ErrExist) {
-				continue
-			}
-			return err
-		}
-		// Mkdir is subject to the umask; set the mode explicitly.
-		if err := os.Chmod(cur, sshDirMode); err != nil {
+	defer func() { _ = t.Close() }()
+	return t.MkdirAllEach(privatefs.ForMode(sshDirMode), rels...)
+}
+
+// preflightSSHWrites runs privatefs.CheckReplaceTarget (writeFileAtomic's
+// checks, writing nothing) on every file an operation is about to write,
+// so a file that would be refused is found before the first directory is
+// created or the first file written. writeFileAtomic still checks each
+// file itself; this is in addition, not instead. Callers list only the
+// files they will write: a file the operation leaves alone is never
+// refused.
+func preflightSSHWrites(paths ...string) error {
+	for _, path := range paths {
+		if err := privatefs.CheckReplaceTarget(path); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
+// sshIncludeLineNeeded reports whether ~/.ssh/config lacks the scion
+// Include line, i.e. whether ensureSSHIncludeLine will write it. A missing
+// file needs it.
+func sshIncludeLineNeeded(p sshPaths) (bool, error) {
+	data, err := os.ReadFile(p.userConfig())
+	if errors.Is(err, fs.ErrNotExist) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return !hasSSHIncludeLine(string(data)), nil
+}
+
+// sshWarnOut receives sshLinkWarning's lines; tests replace it.
+var sshWarnOut io.Writer = os.Stderr
+
+var (
+	sshWarnedMu sync.Mutex
+	sshWarned   = map[string]bool{}
+)
+
+// sshLinkWarning prints a privatefs FollowLinks warning once per process
+// (several ensureSSHDir calls in one command walk the same link).
+func sshLinkWarning(msg string) {
+	sshWarnedMu.Lock()
+	defer sshWarnedMu.Unlock()
+	if sshWarned[msg] {
+		return
+	}
+	sshWarned[msg] = true
+	_, _ = fmt.Fprintf(sshWarnOut, "scion: warning: %s\n", msg)
+}
+
 // writeFileAtomic replaces path with data through a temporary file in the
 // same directory and a rename, so readers see the old or the new file and
-// never a partial one. An existing file keeps its mode; a new file gets
-// newMode. When path is a symlink, the file it points to is replaced and the
-// link is kept.
+// never a partial one. When path is a symlink, the file it points to is
+// replaced and the link is kept (see the ~/.ssh note above). On unix an
+// existing file keeps its mode and a new file gets newMode; on Windows the
+// result is always private, a foreign-owned target or a foreign-writable
+// directory is refused, and a hard-linked target is refused on both
+// (privatefs.ReplaceFollowing).
 func writeFileAtomic(path string, data []byte, newMode fs.FileMode) error {
-	target := path
-	if fi, err := os.Lstat(path); err == nil && fi.Mode()&fs.ModeSymlink != 0 {
-		resolved, err := filepath.EvalSymlinks(path)
-		if err != nil {
-			return err
-		}
-		target = resolved
-	}
-	mode := newMode
-	if fi, err := os.Stat(target); err == nil {
-		mode = fi.Mode().Perm()
-	} else if !errors.Is(err, fs.ErrNotExist) {
-		return err
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(target), sshTempPrefix+filepath.Base(target)+"-*")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	ok := false
-	defer func() {
-		if !ok {
-			_ = tmp.Close()
-			_ = os.Remove(tmpName)
-		}
-	}()
-	if err := tmp.Chmod(mode); err != nil {
-		return err
-	}
-	if _, err := tmp.Write(data); err != nil {
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmpName, target); err != nil {
-		return err
-	}
-	ok = true
-	return nil
+	return privatefs.ReplaceFollowing(path, data, newMode, sshTempPrefix)
 }
 
 // hasSSHIncludeLine reports whether content already has the scion Include
@@ -339,7 +413,7 @@ func hasSSHIncludeLine(content string) bool {
 // ensureSSHIncludeLine adds the scion Include line at the top of ~/.ssh/config
 // once. It reports whether the file changed.
 func ensureSSHIncludeLine(p sshPaths) (bool, error) {
-	if err := ensureSSHDir(p.home, p.sshDir()); err != nil {
+	if err := ensureSSHDir(p.home, sshDirRel); err != nil {
 		return false, err
 	}
 	data, err := os.ReadFile(p.userConfig())
@@ -455,21 +529,125 @@ func renderSSHIncludeFile(endpoint, label string, blocks map[string]string) stri
 	return b.String()
 }
 
+// sshQuoteForWindows reports whether ProxyCommand words are quoted for a
+// Windows ssh client (sshCmdQuote) rather than for a POSIX shell. It is a
+// variable so tests can exercise both forms. (From miller79/scion#189,
+// where it was named sshQuoteForCmd.)
+var sshQuoteForWindows = runtime.GOOS == "windows"
+
 // sshShellQuote quotes s for the shell ssh runs a ProxyCommand with, and
-// doubles '%' so ssh does not expand it as a token.
-func sshShellQuote(s string) string {
+// doubles '%' so ssh does not expand it as a token. Only the Windows form
+// (sshCmdQuote) can return an error; the unix form quotes every word.
+func sshShellQuote(s string) (string, error) {
+	if sshQuoteForWindows {
+		return sshCmdQuote(s)
+	}
 	s = strings.ReplaceAll(s, "%", "%%")
 	safe := s != ""
 	for _, r := range s {
-		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && !strings.ContainsRune("@%+=:,./_-", r) {
+		if !isSSHWordSafe(r) && r != '%' {
 			safe = false
 			break
 		}
 	}
 	if safe {
-		return s
+		return s, nil
 	}
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'", nil
+}
+
+// isSSHWordSafe reports whether r may appear in a ProxyCommand word on
+// either form without quoting: ASCII letters and digits and @+=:,./_-.
+func isSSHWordSafe(r rune) bool {
+	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || strings.ContainsRune("@+=:,./_-", r)
+}
+
+// sshCmdQuote writes s as one word of a Windows ssh client's ProxyCommand.
+// The two clients read that command differently:
+//   - Win32-OpenSSH runs the expanded ProxyCommand without a shell: it
+//     posix_spawnp's the command line (sshconnect.c ssh_proxy_connect,
+//     FORK_NOT_SUPPORTED branch, PowerShell/openssh-portable latestw_all
+//     274893f8), and CreateProcess splits it with the C runtime's rules, so
+//     double quotes group a word with spaces.
+//   - Git for Windows' ssh runs it with /bin/sh, which drops unquoted
+//     backslashes and treats many characters specially, inside double
+//     quotes too.
+//
+// No single quoting is read the same way by both, so the word is
+// validated against an allowlist instead of being escaped. Backslashes
+// become forward slashes, which both accept in a Windows path. After that
+// a word may contain only:
+//   - ASCII letters and digits and @+=:,./_- (left unquoted), and
+//   - non-ASCII letters, digits and combining marks (an account name in
+//     a path), except those that best-fit to ASCII punctuation
+//     (isNonASCIIWordRune), and
+//   - spaces and ( ) ~ [ ], in which case the whole word is
+//     double-quoted: inside double quotes they are literal for sh and for
+//     the C runtime's command-line parser (a "Program Files (x86)" or 8.3
+//     "~" path, an IPv6 host).
+//
+// Any other character, including '%' (ssh expands % tokens in a
+// ProxyCommand) and every character that sh or the C runtime's
+// command-line parser treats specially inside double quotes, is an error
+// that names the character; the caller names the word. (The allowlist replaces
+// the quoting from miller79/scion#189; the name is kept from there.)
+func sshCmdQuote(s string) (string, error) {
+	s = strings.ReplaceAll(s, `\`, "/")
+	if s == "" {
+		return "", errors.New("is empty")
+	}
+	quote := false
+	for _, r := range s {
+		switch {
+		case isSSHWordSafe(r):
+		case strings.ContainsRune(" ()~[]", r):
+			quote = true
+		case isNonASCIIWordRune(r):
+		default:
+			return "", fmt.Errorf("contains %q, which a Windows ssh ProxyCommand cannot carry as written", r)
+		}
+	}
+	if quote {
+		return `"` + s + `"`, nil
+	}
+	return s, nil
+}
+
+// isNonASCIIWordRune reports whether r is a non-ASCII letter, digit or
+// combining mark allowed in a Windows word (account names in paths,
+// including decomposed ones). Refused, because Microsoft's WindowsBestFit
+// tables (unicode.org MAPPINGS/VENDORS/MICSFT/WindowsBestFit, code pages
+// 874, 932, 936, 949, 950 and 1250-1258) map them to ASCII punctuation
+// under a best-fit conversion: every modifier letter (category Lm), and
+// the letters and combining marks in sshBestFitPunct. Modifier symbols
+// (Sk) and other punctuation and symbols are not letters, digits or
+// marks, so they are refused too.
+func isNonASCIIWordRune(r rune) bool {
+	if r < utf8.RuneSelf || unicode.Is(unicode.Lm, r) || sshBestFitPunct[r] {
+		return false
+	}
+	return unicode.IsLetter(r) || unicode.IsDigit(r) || unicode.IsMark(r)
+}
+
+// sshBestFitPunct lists the non-Lm letters and combining marks that the
+// WindowsBestFit tables map to an ASCII character the allowlists refuse.
+var sshBestFitPunct = map[rune]bool{
+	'\u01C0': true, // LATIN LETTER DENTAL CLICK -> '|'
+	'\u01C3': true, // LATIN LETTER RETROFLEX CLICK -> '!'
+	'\u0300': true, // COMBINING GRAVE ACCENT -> '`'
+	'\u0302': true, // COMBINING CIRCUMFLEX ACCENT -> '^'
+	'\u0303': true, // COMBINING TILDE -> '~'
+	'\u030E': true, // COMBINING DOUBLE VERTICAL LINE ABOVE -> '"'
+}
+
+// sshProxyWord is sshShellQuote for one named ProxyCommand word; the error
+// names the word as shown (an endpoint is shown redacted).
+func sshProxyWord(kind, shown, s string) (string, error) {
+	q, err := sshShellQuote(s)
+	if err != nil {
+		return "", fmt.Errorf("%s %q %w", kind, shown, err)
+	}
+	return q, nil
 }
 
 // renderSSHHostBlock returns the Host block for one agent. exe must be an
@@ -507,15 +685,10 @@ func renderSSHHostBlockPinned(exe, endpoint, label, projectSlug, agentSlug, know
 		return "", fmt.Errorf("known-hosts path %q is not a clean absolute path", pinFile)
 	}
 	host := sshHostName(label, projectSlug, agentSlug)
-	words := []string{
-		sshShellQuote(exe), "tunnel", "--stdio", "--ssh",
-		"--hub", sshShellQuote(endpoint),
-		"--project", sshShellQuote(projectSlug),
+	proxy, err := sshProxyCommand(exe, endpoint, projectSlug, agentSlug, pinFile, host)
+	if err != nil {
+		return "", err
 	}
-	if pinFile != "" {
-		words = append(words, "--known-hosts", sshShellQuote(pinFile), "--host-key-alias", sshShellQuote(host))
-	}
-	proxy := strings.Join(append(words, sshShellQuote(agentSlug)), " ")
 	var b strings.Builder
 	b.WriteString("Host " + host + "\n")
 	b.WriteString("  ProxyCommand " + proxy + "\n")
@@ -523,6 +696,38 @@ func renderSSHHostBlockPinned(exe, endpoint, label, projectSlug, agentSlug, know
 	b.WriteString("  UserKnownHostsFile " + knownHostsRef + "\n")
 	b.WriteString("  StrictHostKeyChecking yes\n")
 	return b.String(), nil
+}
+
+// sshProxyCommand returns the ProxyCommand that runs scion tunnel for an
+// agent: exe tunnel --stdio --ssh --hub endpoint --project projectSlug
+// [--known-hosts pinFile --host-key-alias host] agentSlug. Every word is
+// checked (sshProxyWord), so a word the Windows form cannot carry is an
+// error before anything is written.
+func sshProxyCommand(exe, endpoint, projectSlug, agentSlug, pinFile, host string) (string, error) {
+	type word struct{ kind, shown, value string }
+	parts := []word{
+		{"scion executable path", exe, exe}, {"", "", "tunnel"}, {"", "", "--stdio"}, {"", "", "--ssh"},
+		{"", "", "--hub"}, {"hub endpoint", config.RedactURL(endpoint), endpoint},
+		{"", "", "--project"}, {"project", projectSlug, projectSlug},
+	}
+	if pinFile != "" {
+		parts = append(parts, word{"", "", "--known-hosts"}, word{"known-hosts path", pinFile, pinFile},
+			word{"", "", "--host-key-alias"}, word{"host key alias", host, host})
+	}
+	parts = append(parts, word{"agent", agentSlug, agentSlug})
+	words := make([]string, 0, len(parts))
+	for _, w := range parts {
+		if w.kind == "" {
+			words = append(words, w.value)
+			continue
+		}
+		q, err := sshProxyWord(w.kind, w.shown, w.value)
+		if err != nil {
+			return "", err
+		}
+		words = append(words, q)
+	}
+	return strings.Join(words, " "), nil
 }
 
 // isSSHSlug reports whether v is a non-empty slug, the only form allowed in
@@ -754,10 +959,26 @@ func regenerateSSHHubFiles(p sshPaths, hub, exe string, l sshAgentListing) (*ssh
 // The known-hosts file is written first, so an installed block never lacks
 // its pin.
 func writeSSHHubPlan(p sshPaths, res *sshRegenResult) error {
-	if err := ensureSSHDir(p.home, p.knownHostsDir()); err != nil {
+	// A refusal leaves no side effect:
+	// first every file this call may write is checked as writeFileAtomic
+	// will check it, creating nothing; then both directories are verified
+	// together before either is created; only then is anything written.
+	leaves := []string{res.knownHostsFile, res.includeFile}
+	// ~/.ssh/config only when the Include line is missing, i.e. when
+	// ensureSSHIncludeLine will write it: a config the
+	// operation leaves alone (a hard-linked one that already has the line,
+	// say) is not refused. The read only decides whether to check;
+	// writeFileAtomic applies the follow-then-verify and one-name rules on
+	// handles if it writes.
+	if need, err := sshIncludeLineNeeded(p); err != nil {
+		return err
+	} else if need {
+		leaves = append(leaves, p.userConfig())
+	}
+	if err := preflightSSHWrites(leaves...); err != nil {
 		return err
 	}
-	if err := ensureSSHDir(p.home, p.includeDir()); err != nil {
+	if err := ensureSSHDir(p.home, sshKnownHostsDirRel, sshIncludeDirRel); err != nil {
 		return err
 	}
 	if err := writeFileAtomic(res.knownHostsFile, []byte(res.knownContent), sshFileMode); err != nil {

@@ -21,6 +21,8 @@ import (
 	"net/http"
 	osuser "os/user"
 	"strings"
+	"sync"
+	"sync/atomic"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
@@ -76,6 +78,51 @@ func NewDevUser(cfg DevUserConfig) *DevUser {
 	}
 
 	return u
+}
+
+// devUserSource holds the development identity a running server hands to
+// dev-token requests. The identity step of the onboarding wizard
+// (PUT /api/v1/system/identity) replaces it through SetIdentity, so a new
+// display name or email takes effect without a server restart. Every value
+// it holds is built by NewDevUser, which keeps isTrustedLocalDevUser's
+// "only NewDevUser produces a trusted *DevUser" contract.
+type devUserSource struct {
+	mu   sync.Mutex // serializes SetIdentity's read-modify-write of cfg
+	cfg  DevUserConfig
+	user atomic.Pointer[DevUser]
+}
+
+func newDevUserSource(cfg DevUserConfig) *devUserSource {
+	s := &devUserSource{cfg: cfg}
+	s.user.Store(NewDevUser(cfg))
+	return s
+}
+
+// Load returns the current development identity.
+func (s *devUserSource) Load() *DevUser { return s.user.Load() }
+
+// SetIdentity replaces the display name and/or email of the development
+// identity. An empty argument keeps the current value.
+func (s *devUserSource) SetIdentity(displayName, email string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if displayName != "" {
+		s.cfg.DisplayName = displayName
+	}
+	if email != "" {
+		s.cfg.Email = email
+	}
+	s.user.Store(NewDevUser(s.cfg))
+}
+
+// currentDevUser returns the development identity this configuration
+// authenticates dev tokens as: the live one when the server installed a
+// devUserSource, otherwise one built from DevUserCfg.
+func (c *AuthConfig) currentDevUser() *DevUser {
+	if c.DevUser != nil {
+		return c.DevUser.Load()
+	}
+	return NewDevUser(c.DevUserCfg)
 }
 
 // ID returns the user ID.

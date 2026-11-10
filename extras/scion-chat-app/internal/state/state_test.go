@@ -4,8 +4,9 @@ import (
 	"database/sql"
 	"path/filepath"
 	"testing"
+	"time"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
 
 func newTestStore(t *testing.T) *Store {
@@ -276,7 +277,7 @@ func newStoreWithOldSchema(dbPath string) (*Store, error) {
 
 // openDB opens a SQLite database without running migrations.
 func openDB(dbPath string) (*sql.DB, error) {
-	db, err := sql.Open("sqlite3", dbPath)
+	db, err := sql.Open("sqlite", dbPath+sqliteDSNOptions)
 	if err != nil {
 		return nil, err
 	}
@@ -429,5 +430,80 @@ func TestDeleteThreadDefaultsForSpace(t *testing.T) {
 	got3, _ := s.GetThreadDefault("space-2", "thread-3", "google_chat")
 	if got3 != "agent-c" {
 		t.Errorf("space-2 thread-3 should be unaffected, got %q", got3)
+	}
+}
+
+// TestNew_ConnectionOptions verifies that the busy timeout in the data source
+// name takes effect. The driver silently ignores options it does not
+// recognize, so an option in another driver's syntax would leave the default
+// of no timeout.
+func TestNew_ConnectionOptions(t *testing.T) {
+	s := newTestStore(t)
+
+	var got int
+	if err := s.db.QueryRow("PRAGMA busy_timeout").Scan(&got); err != nil {
+		t.Fatalf("PRAGMA busy_timeout: %v", err)
+	}
+	if got != 5000 {
+		t.Errorf("PRAGMA busy_timeout = %d, want 5000", got)
+	}
+}
+
+// TestNew_TimeStorageFormat verifies that time.Time values are written in the
+// "2006-01-02 15:04:05.999999999-07:00" text form that earlier releases
+// stored, and that a time read back from the store is written again as the
+// same text.
+func TestNew_TimeStorageFormat(t *testing.T) {
+	s := newTestStore(t)
+
+	ts := time.Date(2026, 1, 2, 3, 4, 5, 600000000, time.UTC)
+	m := &UserMapping{
+		PlatformUserID: "user-time-format",
+		Platform:       "googlechat",
+		HubUserID:      "hub-user-1",
+		HubUserEmail:   "test@example.com",
+		RegisteredAt:   ts,
+		RegisteredBy:   "manual",
+	}
+	if err := s.SetUserMapping(m); err != nil {
+		t.Fatalf("SetUserMapping: %v", err)
+	}
+
+	rawRegisteredAt := func(platformUserID string) string {
+		t.Helper()
+		var raw string
+		if err := s.db.QueryRow(
+			`SELECT CAST(registered_at AS TEXT) FROM user_mappings WHERE platform_user_id = ? AND platform = ?`,
+			platformUserID, m.Platform,
+		).Scan(&raw); err != nil {
+			t.Fatalf("select raw registered_at: %v", err)
+		}
+		return raw
+	}
+	raw := rawRegisteredAt(m.PlatformUserID)
+	if want := "2026-01-02 03:04:05.6+00:00"; raw != want {
+		t.Errorf("stored registered_at = %q, want %q", raw, want)
+	}
+
+	got, err := s.GetUserMapping(m.PlatformUserID, m.Platform)
+	if err != nil {
+		t.Fatalf("GetUserMapping: %v", err)
+	}
+	if got == nil {
+		t.Fatal("GetUserMapping returned nil")
+	}
+	if !got.RegisteredAt.Equal(ts) {
+		t.Errorf("GetUserMapping RegisteredAt = %v, want %v", got.RegisteredAt, ts)
+	}
+
+	// The driver may return the value in time.Local or an unnamed zero-offset
+	// zone rather than time.UTC; writing it back must store the same text.
+	copied := *got
+	copied.PlatformUserID = "user-time-format-copy"
+	if err := s.SetUserMapping(&copied); err != nil {
+		t.Fatalf("SetUserMapping (copy): %v", err)
+	}
+	if rawCopy := rawRegisteredAt(copied.PlatformUserID); rawCopy != raw {
+		t.Errorf("re-written registered_at = %q, want %q", rawCopy, raw)
 	}
 }

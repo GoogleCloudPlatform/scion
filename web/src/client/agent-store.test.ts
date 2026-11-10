@@ -429,7 +429,7 @@ describe('AgentStore coalescing', () => {
     h.stream().drop();
 
     const again = h.store.ensure(HUB);
-    await vi.advanceTimersByTimeAsync(1_200);
+    await vi.advanceTimersByTimeAsync(2_000);
     expect(h.server.walks()).toBe(1);
 
     await h.connect();
@@ -814,7 +814,7 @@ describe('AgentStore refetch triggers', () => {
     const h = await twoRetained();
 
     h.stream().drop();
-    await vi.advanceTimersByTimeAsync(1_200);
+    await vi.advanceTimersByTimeAsync(2_000);
     await h.connect();
 
     expect(h.server.walks('/api/v1/agents')).toBe(2);
@@ -845,7 +845,7 @@ describe('AgentStore refetch triggers', () => {
     h.events.dispatchEvent(new CustomEvent(MEMBERSHIP_CHANGED_EVENT));
     await h.connect();
     h.stream().drop();
-    await vi.advanceTimersByTimeAsync(1_200);
+    await vi.advanceTimersByTimeAsync(2_000);
     await h.connect();
 
     expect(h.server.walks()).toBe(0);

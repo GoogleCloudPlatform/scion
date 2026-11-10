@@ -407,7 +407,7 @@ func TestUnmarkNotificationDispatched(t *testing.T) {
 	require.NoError(t, s.MarkNotificationDispatched(ctx, notifID))
 
 	// Unmark.
-	reverted, err := s.UnmarkNotificationDispatched(ctx, notifID)
+	reverted, err := s.UnmarkNotificationDispatched(ctx, notifID, time.Time{})
 	require.NoError(t, err)
 	assert.True(t, reverted, "a row with no outcome must be reverted")
 
@@ -502,7 +502,7 @@ func TestSetNotificationDispatchOutcome(t *testing.T) {
 		t.Run(outcome, func(t *testing.T) {
 			id := createAgentNotification(t, s)
 			require.NoError(t, s.RecordNotificationDispatchAttempt(ctx, id))
-			applied, err := s.SetNotificationDispatchOutcome(ctx, id, outcome)
+			applied, err := s.SetNotificationDispatchOutcome(ctx, id, outcome, "")
 			require.NoError(t, err)
 			assert.True(t, applied, "the first outcome must apply")
 
@@ -525,7 +525,7 @@ func TestSetNotificationDispatchOutcome_Rejects(t *testing.T) {
 	id := createAgentNotification(t, s)
 
 	for _, bad := range []string{"", "pending", "FAILED"} {
-		_, err := s.SetNotificationDispatchOutcome(ctx, id, bad)
+		_, err := s.SetNotificationDispatchOutcome(ctx, id, bad, "")
 		assert.ErrorIs(t, err, store.ErrInvalidInput, "outcome %q", bad)
 	}
 	got, err := s.GetNotification(ctx, id)
@@ -534,7 +534,7 @@ func TestSetNotificationDispatchOutcome_Rejects(t *testing.T) {
 	assert.Empty(t, got.DispatchOutcome)
 
 	for _, outcome := range []string{store.NotificationOutcomeDelivered, store.NotificationOutcomeFailed} {
-		_, err = s.SetNotificationDispatchOutcome(ctx, uuid.NewString(), outcome)
+		_, err = s.SetNotificationDispatchOutcome(ctx, uuid.NewString(), outcome, "")
 		assert.ErrorIs(t, err, store.ErrNotFound, "outcome %q on a missing row", outcome)
 	}
 }
@@ -552,11 +552,11 @@ func TestUnmarkNotificationDispatched_RefusedAfterOutcome(t *testing.T) {
 			claimed, err := s.ClaimNotificationForDispatch(ctx, id)
 			require.NoError(t, err)
 			require.True(t, claimed)
-			applied, err := s.SetNotificationDispatchOutcome(ctx, id, outcome)
+			applied, err := s.SetNotificationDispatchOutcome(ctx, id, outcome, "")
 			require.NoError(t, err)
 			require.True(t, applied)
 
-			reverted, err := s.UnmarkNotificationDispatched(ctx, id)
+			reverted, err := s.UnmarkNotificationDispatched(ctx, id, time.Time{})
 			require.NoError(t, err, "a refused revert is not an error")
 			assert.False(t, reverted, "a row with an outcome must not be reverted")
 
@@ -571,7 +571,7 @@ func TestUnmarkNotificationDispatched_RefusedAfterOutcome(t *testing.T) {
 		})
 	}
 
-	reverted, err := s.UnmarkNotificationDispatched(ctx, uuid.NewString())
+	reverted, err := s.UnmarkNotificationDispatched(ctx, uuid.NewString(), time.Time{})
 	require.NoError(t, err)
 	assert.False(t, reverted, "a missing row is not reverted")
 }
@@ -597,11 +597,11 @@ func TestSetNotificationDispatchOutcome_DeliveredBeatsFailed(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.first+"_then_"+tc.second, func(t *testing.T) {
 			id := createAgentNotification(t, s)
-			applied, err := s.SetNotificationDispatchOutcome(ctx, id, tc.first)
+			applied, err := s.SetNotificationDispatchOutcome(ctx, id, tc.first, "")
 			require.NoError(t, err)
 			require.True(t, applied, "the first outcome must apply")
 
-			applied, err = s.SetNotificationDispatchOutcome(ctx, id, tc.second)
+			applied, err = s.SetNotificationDispatchOutcome(ctx, id, tc.second, "")
 			require.NoError(t, err, "a refused second outcome is not an error")
 			assert.Equal(t, tc.wantApplied, applied, "whether the second outcome applies")
 

@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+# Test stub for gcloud: records argv (NUL-separated) and, for secret versions,
+# stdin, under $STUB_DIR/calls; answers describe calls from $STUB_DIR/exists
+# and $STUB_DIR/deny (one resource ID per line). Never contacts anything.
+set -u
+calls="$STUB_DIR/calls"
+mkdir -p "$calls"
+n=$(find "$calls" -name '*.args' | wc -l)
+id=$(printf '%04d' $((n + 1)))
+printf '%s\0' gcloud "$@" >"$calls/$id.args"
+
+has() { grep -qxF -- "$1" "$STUB_DIR/$2" 2>/dev/null; }
+args=" $* "
+
+if [[ ${1:-} == --version ]]; then
+  echo "Google Cloud SDK ${STUB_GCLOUD_VERSION:-999.0.0}"
+  exit 0
+fi
+
+# The resource ID is the argument after "describe".
+if [[ $args == *" describe "* ]]; then
+  rid=""
+  prev=""
+  for a in "$@"; do
+    if [[ $prev == describe ]]; then rid=$a; break; fi
+    prev=$a
+  done
+  # Command group, e.g. "run.jobs" or "artifacts.docker.images".
+  group=""
+  for a in "$@"; do
+    [[ $a == describe ]] && break
+    [[ $a == -* ]] || group+="${group:+.}$a"
+  done
+  if has "$rid" deny; then
+    # gcloud's real wording, including the misleading "(or it may not exist)".
+    echo "ERROR: (gcloud.$group.describe) PERMISSION_DENIED: Permission '$group.get' denied on resource '$rid' (or it may not exist)." >&2
+    exit 1
+  fi
+  if ! has "$rid" exists; then
+    # The real not-found message of each command (they differ).
+    case $group in
+      run.jobs) echo "ERROR: (gcloud.run.jobs.describe) Cannot find job [$rid]." ;;
+      run.services) echo "ERROR: (gcloud.run.services.describe) Cannot find service [$rid]" ;;
+      scheduler.jobs) echo "ERROR: (gcloud.scheduler.jobs.describe) NOT_FOUND: Job not found." ;;
+      secrets) echo "ERROR: (gcloud.secrets.describe) NOT_FOUND: Secret [projects/123456789/secrets/$rid] not found or has no versions." ;;
+      iam.service-accounts) echo "ERROR: (gcloud.iam.service-accounts.describe) NOT_FOUND: Unknown service account" ;;
+      artifacts.docker.images) echo "ERROR: (gcloud.artifacts.docker.images.describe) Image not found." ;;
+      artifacts.repositories) echo "ERROR: (gcloud.artifacts.repositories.describe) NOT_FOUND: Requested entity was not found." ;;
+      storage.buckets) echo "ERROR: (gcloud.storage.buckets.describe) $rid not found: 404." ;;
+      *)
+        echo "STUB: no not-found message for describe in group '$group'; add one" >&2
+        exit 2
+        ;;
+    esac >&2
+    exit 1
+  fi
+  case $args in
+    *status.url*) echo "${STUB_URL:-https://cr-runner-mediator-abc123-uc.a.run.app}" ;;
+    *containers\[0\].image*) echo "${STUB_JOB_IMAGE:-us-central1-docker.pkg.dev/example-project/cr-runners/gh-runner:golden}" ;;
+    *run.googleapis.com/urls*) echo "${STUB_URLS:-[\"https://cr-runner-mediator-abc123-uc.a.run.app\"]}" ;;
+    *maxScale*) echo "${STUB_MAXSCALE:-1}" ;;
+  esac
+  exit 0
+fi
+
+# Cloud Run's per-job ephemeral-disk limit (region and quota dependent).
+if [[ -n ${STUB_DISK_LIMIT_GI:-} && $args == *" run jobs "* && $args =~ type=ephemeral-disk,size=([0-9]+)Gi ]] &&
+  ((BASH_REMATCH[1] > STUB_DISK_LIMIT_GI)); then
+  echo "ERROR: (gcloud.run.jobs.${3:-create}) spec.template.spec.volumes: Total size of 'ephemeral-disk' volumes cannot exceed $STUB_DISK_LIMIT_GI GiB." >&2
+  exit 1
+fi
+
+case $args in
+  *" services list "*)
+    if [[ -n ${STUB_SERVICES_LIST_DENIED:-} ]]; then
+      echo "ERROR: (gcloud.services.list) PERMISSION_DENIED: Permission denied to list services for consumer container [projects/123456789]" >&2
+      exit 1
+    fi
+    [[ -n ${STUB_ENABLED_APIS:-} ]] && tr ' ' '\n' <<<"$STUB_ENABLED_APIS"
+    ;;
+  *" remove-iam-policy-binding "*)
+    if [[ -n ${STUB_REMOVE_MISSING:-} ]]; then
+      echo "ERROR: Policy binding with the specified principal, role, and condition not found!" >&2
+      exit 1
+    fi
+    ;;
+  *" projects get-iam-policy "*) printf '%s' "${STUB_EXEC_ROLES:-}" ;;
+  *" secrets versions add "*) cat >"$calls/$id.stdin" ;;
+  *" auth print-access-token "*) echo "FAKE-ACCESS-TOKEN-d2f81c" ;;
+esac
+exit "${STUB_GCLOUD_RC:-0}"

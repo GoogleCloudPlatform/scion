@@ -137,7 +137,7 @@ func TestValidateSettings_OpenObjectFieldsValidateAndLoad(t *testing.T) {
 
 	dir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "settings.yaml"), []byte(schemaOpenObjectsDoc), 0o644))
-	vs, err := loadVersionedSettingsFileOnly(dir)
+	vs, _, err := loadVersionedSettingsFileOnly(dir)
 	require.NoError(t, err)
 	require.NotNil(t, vs.Server)
 

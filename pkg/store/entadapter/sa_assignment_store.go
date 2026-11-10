@@ -104,6 +104,14 @@ func validateAssignmentDeactivation(cause store.EdgeDeactivationCause, opID stri
 
 // deactivateActive deactivates the agent's active rows and records d.
 func (s *SAAssignmentStore) deactivateActive(ctx context.Context, agentID string, d store.Deactivation) (int, error) {
+	return s.deactivateWhere(ctx, d,
+		agentserviceaccountassignment.AgentIDEQ(canonicalPrincipalID(agentID)),
+		agentserviceaccountassignment.ActiveEQ(true),
+	)
+}
+
+// deactivateWhere deactivates the rows matching where and records d.
+func (s *SAAssignmentStore) deactivateWhere(ctx context.Context, d store.Deactivation, where ...predicate.AgentServiceAccountAssignment) (int, error) {
 	if err := validateAssignmentDeactivation(d.Cause, d.OpID); err != nil {
 		return 0, err
 	}
@@ -113,10 +121,7 @@ func (s *SAAssignmentStore) deactivateActive(ctx context.Context, agentID string
 		at = *d.At
 	}
 	n, err := s.client.AgentServiceAccountAssignment.Update().
-		Where(
-			agentserviceaccountassignment.AgentIDEQ(canonicalPrincipalID(agentID)),
-			agentserviceaccountassignment.ActiveEQ(true),
-		).
+		Where(where...).
 		SetActive(false).
 		SetDeactivationCause(string(d.Cause)).
 		SetDeactivatedAt(at).
@@ -133,20 +138,30 @@ func (s *SAAssignmentStore) deactivateActive(ctx context.Context, agentID string
 // a.AgentID with cause sa_replaced under a fresh operation ID, then inserts a
 // as the active row. Run it in a transaction so both writes commit together.
 func (s *SAAssignmentStore) ReplaceAgentServiceAccountAssignment(ctx context.Context, a *store.AgentServiceAccountAssignment) error {
+	now := time.Now()
+	return s.ReplaceAgentServiceAccountAssignmentWith(ctx, a, store.Deactivation{
+		Cause: store.EdgeDeactivationSAReplaced,
+		At:    &now,
+		OpID:  uuid.New().String(),
+	})
+}
+
+// ReplaceAgentServiceAccountAssignmentWith deactivates any active row of
+// a.AgentID with d, then inserts a as the active row. Run it in a
+// transaction so both writes commit together.
+func (s *SAAssignmentStore) ReplaceAgentServiceAccountAssignmentWith(ctx context.Context, a *store.AgentServiceAccountAssignment, d store.Deactivation) error {
 	if a == nil || a.AgentID == "" || a.ServiceAccountID == "" {
 		return fmt.Errorf("%w: assignment requires an agent and a service account", store.ErrInvalidInput)
 	}
 	if err := validateEdgeCeiling(a.EffectCeiling); err != nil {
 		return err
 	}
+	if err := validateAssignmentDeactivation(d.Cause, d.OpID); err != nil {
+		return err
+	}
 	a.AgentID = canonicalPrincipalID(a.AgentID)
 	a.ProjectID = canonicalPrincipalID(a.ProjectID)
-	now := time.Now()
-	if _, err := s.deactivateActive(ctx, a.AgentID, store.Deactivation{
-		Cause: store.EdgeDeactivationSAReplaced,
-		At:    &now,
-		OpID:  uuid.New().String(),
-	}); err != nil {
+	if _, err := s.deactivateActive(ctx, a.AgentID, d); err != nil {
 		return err
 	}
 
@@ -226,6 +241,20 @@ func (s *SAAssignmentStore) DeactivateAgentServiceAccountAssignments(ctx context
 	return s.deactivateActive(ctx, agentID, d)
 }
 
+// DeactivateAgentServiceAccountAssignment deactivates the agent's row rowID
+// when it is active and records d.
+func (s *SAAssignmentStore) DeactivateAgentServiceAccountAssignment(ctx context.Context, agentID, rowID string, d store.Deactivation) (int, error) {
+	uid, err := parseUUID(rowID)
+	if err != nil {
+		return 0, err
+	}
+	return s.deactivateWhere(ctx, d,
+		agentserviceaccountassignment.IDEQ(uid),
+		agentserviceaccountassignment.AgentIDEQ(canonicalPrincipalID(agentID)),
+		agentserviceaccountassignment.ActiveEQ(true),
+	)
+}
+
 // deactivatedAssignmentsOf selects the agent's inactive rows deactivated with
 // cause under opID.
 func deactivatedAssignmentsOf(agentID string, cause store.EdgeDeactivationCause, opID string) []predicate.AgentServiceAccountAssignment {
@@ -252,6 +281,43 @@ func (s *SAAssignmentStore) ReactivateAgentServiceAccountAssignments(ctx context
 		ClearDeactivatedAt().
 		SetDeactivationOpID("").
 		SetUpdated(time.Now()).
+		Save(ctx)
+	if err != nil {
+		return 0, mapError(err)
+	}
+	return n, nil
+}
+
+// RemarkDeactivatedAgentServiceAccountAssignments replaces the deactivation
+// record of the agent's inactive rows deactivated with cause under opID
+// (only the row with ID rowID when rowID is set) by to. Active rows are
+// never selected.
+func (s *SAAssignmentStore) RemarkDeactivatedAgentServiceAccountAssignments(ctx context.Context, agentID, rowID string, cause store.EdgeDeactivationCause, opID string, to store.Deactivation) (int, error) {
+	if err := validateAssignmentDeactivation(cause, opID); err != nil {
+		return 0, err
+	}
+	if err := validateAssignmentDeactivation(to.Cause, to.OpID); err != nil {
+		return 0, err
+	}
+	where := deactivatedAssignmentsOf(agentID, cause, opID)
+	if rowID != "" {
+		uid, err := parseUUID(rowID)
+		if err != nil {
+			return 0, err
+		}
+		where = append(where, agentserviceaccountassignment.IDEQ(uid))
+	}
+	now := time.Now()
+	at := now
+	if to.At != nil && !to.At.IsZero() {
+		at = *to.At
+	}
+	n, err := s.client.AgentServiceAccountAssignment.Update().
+		Where(where...).
+		SetDeactivationCause(string(to.Cause)).
+		SetDeactivatedAt(at).
+		SetDeactivationOpID(to.OpID).
+		SetUpdated(now).
 		Save(ctx)
 	if err != nil {
 		return 0, mapError(err)

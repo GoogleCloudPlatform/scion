@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/internal/hubtestutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -645,7 +646,7 @@ func TestWave2_DM_ListEmpty(t *testing.T) {
 // --- Migration: thread_id backfill ---
 
 func TestWave2_Migration_ThreadIDBackfill(t *testing.T) {
-	db := openTestMemorySQLite(t, "sqlite")
+	db := hubtestutil.OpenTestMemorySQLite(t, "sqlite")
 
 	// Create a minimal messages table.
 	_, err := db.Exec(`
@@ -703,7 +704,7 @@ INSERT INTO messages (id, sender, sender_id, recipient, recipient_id, channel, t
 }
 
 func TestWave2_Migration_ThreadIDBackfill_Batching(t *testing.T) {
-	db := openTestMemorySQLite(t, "sqlite")
+	db := hubtestutil.OpenTestMemorySQLite(t, "sqlite")
 
 	// Create a minimal messages table.
 	_, err := db.Exec(`
@@ -754,7 +755,7 @@ CREATE TABLE IF NOT EXISTS webchat_migrations (
 }
 
 func TestWave2_Migration_Idempotent(t *testing.T) {
-	db := openTestMemorySQLite(t, "sqlite")
+	db := hubtestutil.OpenTestMemorySQLite(t, "sqlite")
 
 	// Create messages table.
 	_, err := db.Exec(`
@@ -793,7 +794,7 @@ CREATE TABLE messages (
 // --- Wave-1 seeding ---
 
 func TestWave2_SeedFromWave1(t *testing.T) {
-	db := openTestMemorySQLite(t, "sqlite")
+	db := hubtestutil.OpenTestMemorySQLite(t, "sqlite")
 
 	// Manually create wave-1 tables and seed them.
 	_, err := db.Exec(`
@@ -854,7 +855,7 @@ INSERT INTO webchat_thread_prefs VALUES ('user-1', 'proj-1', 'agent-1', 'convers
 }
 
 func TestWave2_SeedFromWave1_Idempotent(t *testing.T) {
-	db := openTestMemorySQLite(t, "sqlite")
+	db := hubtestutil.OpenTestMemorySQLite(t, "sqlite")
 
 	_, err := db.Exec(`
 CREATE TABLE webchat_thread (

@@ -1,0 +1,47 @@
+Proposed only: nothing was written, registered or changed. Instance keys and names are proposals you may edit. Harness env values are redacted: shown as <redacted> in the human output and omitted from JSON (keys only); --show-env-values prints them in the human output, which then contains secrets and must not be shared.
+
+1. Proposed instances
+# Proposed, not applied. Keys and names are editable.
+server:
+  broker:
+    instances:
+      - key: docker-build
+        name: docker-build
+        runtime_target:
+          type: docker
+        agent_defaults:
+          image_registry: reg.example/build
+      - key: docker-local
+        name: docker-local
+        runtime_target:
+          type: docker
+        agent_defaults:
+          image_registry: reg.example/local
+      - key: k8s-prod-agents
+        name: k8s-prod-agents
+        runtime_target:
+          type: kubernetes
+          context: prod
+          namespace: agents
+
+2. Profile map
+   build -> docker-build
+   k8s -> k8s-prod-agents
+   legacy-podman -> (no mapping: unsupported_flat_target_type)
+   local -> docker-local
+
+3. Findings
+   [notice] profile_conflict profiles.* (profiles: build, local)
+     these profiles share a target but differ in one or more settings, so they keep separate instances; compare the proposed instances, then give the profiles the same values or add a field choice to merge them
+   [blocking] unsupported_flat_target_type runtimes.pod.type (profiles: legacy-podman)
+     this runtime type has no flat Runtime Broker target; keep these profiles on the legacy Runtime Broker
+
+4. Capacity
+   (needs_hub) the per-instance agent limits need the Hub (the legacy Runtime Broker's maxAgents setting)
+
+5. Still bound on the Hub
+   (skipped: needs the Hub)
+
+Summary
+   4 profiles in scope, 3 mapped, 3 proposed instances, 1 blocking finding, 1 notice finding.
+   Result: 1 blocking finding; capacity not planned (needs the Hub).

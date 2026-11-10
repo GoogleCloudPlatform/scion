@@ -254,7 +254,9 @@ func TestRemoveSymlinkSafe(t *testing.T) {
 		if err := os.Symlink("/home/scion/.claude/debug/test.txt", link); err != nil {
 			t.Fatal(err)
 		}
-		removeSymlinkSafe(link)
+		if err := removeSymlinkSafe(link); err != nil {
+			t.Fatalf("removeSymlinkSafe: %v", err)
+		}
 		if _, err := os.Lstat(link); !os.IsNotExist(err) {
 			t.Error("expected dangling symlink to be removed")
 		}
@@ -269,7 +271,9 @@ func TestRemoveSymlinkSafe(t *testing.T) {
 		if err := os.Symlink(target, link); err != nil {
 			t.Fatal(err)
 		}
-		removeSymlinkSafe(link)
+		if err := removeSymlinkSafe(link); err != nil {
+			t.Fatalf("removeSymlinkSafe: %v", err)
+		}
 		if _, err := os.Lstat(link); !os.IsNotExist(err) {
 			t.Error("expected valid symlink to be removed")
 		}
@@ -288,7 +292,9 @@ func TestRemoveSymlinkSafe(t *testing.T) {
 		if err := os.Symlink("/nonexistent/path", link); err != nil {
 			t.Fatal(err)
 		}
-		removeSymlinkSafe(link)
+		if err := removeSymlinkSafe(link); err != nil {
+			t.Fatalf("removeSymlinkSafe: %v", err)
+		}
 		entries, err := os.ReadDir(subDir)
 		if err != nil {
 			t.Fatal(err)

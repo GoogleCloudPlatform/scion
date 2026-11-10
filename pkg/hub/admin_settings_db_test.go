@@ -278,10 +278,7 @@ func TestPutServerConfigDB_Layer0Keys_Rejected422(t *testing.T) {
 		t.Fatalf("expected 422, got %d: %s", rr.Code, rr.Body.String())
 	}
 
-	var resp map[string]interface{}
-	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("json.Unmarshal: %v", err)
-	}
+	resp := settingsErrorFields(t, rr.Body.Bytes())
 
 	if resp["error"] != "layer0_rejected" {
 		t.Errorf("expected error=layer0_rejected, got %v", resp["error"])
@@ -346,10 +343,7 @@ func TestPutServerConfigDB_UnclassifiedOnly_422Rejected(t *testing.T) {
 		t.Fatalf("expected 422, got %d: %s", rr.Code, rr.Body.String())
 	}
 
-	var resp map[string]interface{}
-	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("json.Unmarshal: %v", err)
-	}
+	resp := settingsErrorFields(t, rr.Body.Bytes())
 
 	if resp["error"] != "unclassified_keys_rejected" {
 		t.Errorf("expected error=unclassified_keys_rejected, got %v", resp["error"])
@@ -399,10 +393,7 @@ func TestPutServerConfigDB_MixedLayer1AndUnclassified_422Rejected(t *testing.T) 
 		t.Fatalf("expected 422, got %d: %s", rr.Code, rr.Body.String())
 	}
 
-	var resp map[string]interface{}
-	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("json.Unmarshal: %v", err)
-	}
+	resp := settingsErrorFields(t, rr.Body.Bytes())
 
 	if resp["error"] != "unclassified_keys_rejected" {
 		t.Errorf("expected error=unclassified_keys_rejected, got %v", resp["error"])
@@ -527,10 +518,7 @@ func TestPutServerConfigDB_ExplicitLayer0_Still422(t *testing.T) {
 		t.Fatalf("expected 422, got %d: %s", rr.Code, rr.Body.String())
 	}
 
-	var resp map[string]interface{}
-	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("json.Unmarshal: %v", err)
-	}
+	resp := settingsErrorFields(t, rr.Body.Bytes())
 
 	if resp["error"] != "layer0_rejected" {
 		t.Errorf("expected error=layer0_rejected, got %v", resp["error"])
@@ -618,10 +606,7 @@ func TestPutServerConfigDB_CAS_StaleRevision_409(t *testing.T) {
 		t.Fatalf("expected 409, got %d: %s", rr.Code, rr.Body.String())
 	}
 
-	var resp map[string]interface{}
-	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("json.Unmarshal: %v", err)
-	}
+	resp := settingsErrorFields(t, rr.Body.Bytes())
 
 	if resp["error"] != "revision_conflict" {
 		t.Errorf("expected error=revision_conflict, got %v", resp["error"])
@@ -1832,7 +1817,9 @@ func TestGetServerConfigDB_SupersededKeys_SeededSectionExcluded(t *testing.T) {
 // value is attributed to settings.yaml, which wins over the seed layer; a
 // key with only a seed value or only a settings.yaml value keeps its source;
 // and the public URL keeps its settings.yaml attribution (ptone/scion#4865,
-// ptone/scion#4904).
+// ptone/scion#4904). A saved authorized_domains is applied
+// (ptone/scion#6000), so with no SCION_SERVER_* pin it supersedes the
+// settings.yaml value like the other access keys.
 func TestGetServerConfigDB_SupersededKeySourceFollowsPrecedence(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -1840,6 +1827,7 @@ func TestGetServerConfigDB_SupersededKeySourceFollowsPrecedence(t *testing.T) {
 		"SCION_SERVER_HUB_ADMINEMAILS", "SCION_SERVER_HUB_MONITORINGDASHBOARDURL",
 		"SCION_SERVER_AUTH_DEFAULTUSERROLE", "SCION_SERVER_AUTH_AUTHORIZEDDOMAINS",
 		"SCION_SERVER_HUB_ENDPOINT", "SCION_SEED_SERVER_AUTH_AUTHORIZEDDOMAINS",
+		"SCION_SERVER_AUTH_USERACCESSMODE", "SCION_SEED_SERVER_AUTH_USERACCESSMODE",
 	} {
 		t.Setenv(name, "")
 	}
@@ -1862,6 +1850,7 @@ server:
     public_url: https://file.example.com
   auth:
     authorized_domains: ["file.example.com"]
+    user_access_mode: domain_restricted
 `
 	if err := os.WriteFile(filepath.Join(scionDir, "settings.yaml"), []byte(settings), 0o644); err != nil {
 		t.Fatal(err)
@@ -1875,7 +1864,7 @@ server:
 	fakeStore := newFakeHubSettingStore()
 	ops := NewOperationalSettings(fakeStore, bootK, emptyKoanf())
 	ops.SetUnseededBootstrap(config.LoadUnseededBootstrapKoanfWithConfigPath(""))
-	fakeStore.seedWithOrigin("access", json.RawMessage(`{"admin_emails":["db@example.com"],"default_user_role":"member","authorized_domains":["db.example.com"]}`), "managed")
+	fakeStore.seedWithOrigin("access", json.RawMessage(`{"admin_emails":["db@example.com"],"default_user_role":"member","authorized_domains":["db.example.com"],"user_access_mode":"open"}`), "managed")
 	fakeStore.seedWithOrigin("endpoints", json.RawMessage(`{"monitoring_dashboard_url":"https://db-dash.example.com","public_url":"https://saved.example.com"}`), "managed")
 	if _, err := ops.Refresh(context.Background()); err != nil {
 		t.Fatal(err)
@@ -1898,7 +1887,8 @@ server:
 		"server.hub.monitoring_dashboard_url": "yaml",     // seed and settings.yaml
 		"server.hub.public_url":               "yaml",     // seed and settings.yaml
 		"server.auth.default_user_role":       "seed_env", // seed only
-		"server.auth.authorized_domains":      "yaml",     // settings.yaml only
+		"server.auth.user_access_mode":        "yaml",     // settings.yaml only
+		"server.auth.authorized_domains":      "yaml",     // settings.yaml only, applied (ptone/scion#6000)
 	} {
 		if got[key] != want {
 			t.Errorf("superseded %s source = %q, want %q (all: %v)", key, got[key], want, got)
@@ -2315,14 +2305,35 @@ func TestPutServerConfigDB_AsyncLaunchSettings_422(t *testing.T) {
 			if rr.Code != http.StatusUnprocessableEntity {
 				t.Fatalf("expected 422 for %s, got %d: %s", tt.name, rr.Code, rr.Body.String())
 			}
-			var resp map[string]interface{}
-			if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
-				t.Fatalf("failed to unmarshal response: %v", err)
-			}
+			resp := settingsErrorFields(t, rr.Body.Bytes())
 			if resp["error"] != "layer0_rejected" {
 				t.Errorf("expected error=layer0_rejected, got %v", resp["error"])
 			}
 		})
+	}
+}
+
+// TestPutServerConfigDB_ProjectStorage_422: server.project_storage is
+// Layer-0. A DB-mode PUT carrying it is rejected with 422 layer0_rejected
+// and never stored.
+func TestPutServerConfigDB_ProjectStorage_422(t *testing.T) {
+	srv, fakeStore, ops := newTestDBServer(t)
+	body := `{"server": {"project_storage": {"backend": "nfs", "nfs": {"mount_root": "/mnt/x", "shares": [{"id": "a", "server": "10.0.0.2", "export": "/e"}]}}}}`
+	rr := httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config", body), ops)
+	if rr.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422, got %d: %s", rr.Code, rr.Body.String())
+	}
+	resp := settingsErrorFields(t, rr.Body.Bytes())
+	if resp["error"] != "layer0_rejected" {
+		t.Errorf("expected error=layer0_rejected, got %v", resp["error"])
+	}
+	if !strings.Contains(rr.Body.String(), "server.project_storage") {
+		t.Errorf("the refusal should name server.project_storage, got: %s", rr.Body.String())
+	}
+	// Never stored: the refused PUT wrote no settings section at all.
+	if len(fakeStore.settings) != 0 {
+		t.Errorf("a layer0_rejected PUT must store nothing, got sections: %v", fakeStore.settings)
 	}
 }
 
@@ -2798,10 +2809,7 @@ func TestPutServerConfigDB_CAS_MultiSection_PartialApply(t *testing.T) {
 		t.Fatalf("expected 409 Conflict, got %d: %s", rr.Code, rr.Body.String())
 	}
 
-	var resp map[string]interface{}
-	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("json.Unmarshal: %v", err)
-	}
+	resp := settingsErrorFields(t, rr.Body.Bytes())
 
 	if resp["error"] != "revision_conflict" {
 		t.Errorf("expected error=revision_conflict, got %v", resp["error"])
@@ -3726,14 +3734,17 @@ func TestPutServerConfigDB_DefaultUserRoleOnly_PersistedAndSnapshot(t *testing.T
 }
 
 // Invalid values are rejected by the access-section schema in DB mode.
-func TestPutServerConfigDB_DefaultUserRoleInvalid_400NothingWritten(t *testing.T) {
+func TestPutServerConfigDB_DefaultUserRoleInvalid_422NothingWritten(t *testing.T) {
 	srv, fakeStore, ops := newTestDBServer(t)
 	fakeStore.seed("access", json.RawMessage(`{"default_user_role":"viewer"}`))
 	_, _ = ops.Refresh(context.Background())
 
 	rr := putServerConfigDB(t, srv, ops, `{"server":{"auth":{"default_user_role":"superuser"}}}`)
-	if rr.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d: %s", rr.Code, rr.Body.String())
+	if rr.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if entries := settingsErrorEntries(t, rr); entries[0].Field != "server.auth.default_user_role" {
+		t.Errorf("field = %q, want server.auth.default_user_role", entries[0].Field)
 	}
 	access, _ := readAccessRow(t, fakeStore)
 	if access.DefaultUserRole != "viewer" {
@@ -4089,66 +4100,6 @@ func TestPutServerConfigDB_SharedDirSize(t *testing.T) {
 	}
 }
 
-// shared_dir_storage_backend round-trips through the DB settings: it is
-// stored, returned by GET, kept when another profile field is edited and
-// written back, kept when another section is written, and reaches the
-// settings overlay that the co-located broker reads per dispatch.
-func TestPutServerConfigDB_SharedDirStorageBackend_RoundTrip(t *testing.T) {
-	sdsWriteGlobalNFSBlock(t)
-	old := config.GetGlobalSettingsOverlay()
-	t.Cleanup(func() { config.SetGlobalSettingsOverlay(old) })
-	config.SetGlobalSettingsOverlay(config.NewSettingsOverlay())
-
-	srv, _, ops := newTestDBServer(t)
-	put := func(body string) {
-		t.Helper()
-		rr := httptest.NewRecorder()
-		srv.handlePutServerConfigDB(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config", body), ops)
-		if rr.Code != http.StatusOK {
-			t.Fatalf("PUT %s: expected 200, got %d: %s", body, rr.Code, rr.Body.String())
-		}
-	}
-
-	put(`{"runtimes": {"k8s": {"type": "kubernetes"}}, "profiles": {"gke": {"runtime": "k8s", "shared_dir_storage_backend": "nfs"}}}`)
-	profiles := sdsGetProfilesDB(t, srv, ops)
-	if got := profiles["gke"].SharedDirStorageBackend; got != "nfs" {
-		t.Fatalf("GET after PUT: shared_dir_storage_backend = %q, want nfs", got)
-	}
-
-	// Edit another field of the same profile the way the admin form does:
-	// send back what GET returned with one field changed.
-	gke := profiles["gke"]
-	gke.DefaultTemplate = "edited-template"
-	profiles["gke"] = gke
-	body, err := json.Marshal(map[string]interface{}{"profiles": profiles})
-	if err != nil {
-		t.Fatal(err)
-	}
-	put(string(body))
-
-	// Write a different section.
-	put(`{"server": {"hub": {"auto_suspend_stalled": false}}}`)
-
-	profiles = sdsGetProfilesDB(t, srv, ops)
-	if got := profiles["gke"].SharedDirStorageBackend; got != "nfs" {
-		t.Errorf("after editing another field: shared_dir_storage_backend = %q, want nfs", got)
-	}
-	if got := profiles["gke"].DefaultTemplate; got != "edited-template" {
-		t.Errorf("default_template = %q, want edited-template", got)
-	}
-
-	// The overlay the co-located broker reads now resolves gke to nfs.
-	ApplySnapshot(srv, ops.Snapshot())
-	gs, _, err := config.LoadGlobalSettingsWithOverlay()
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg, source := gs.ResolveSharedDirStorage("gke")
-	if cfg == nil || cfg.Backend != "nfs" {
-		t.Fatalf("overlay resolution for gke = %+v (%s), want nfs", cfg, source)
-	}
-}
-
 // shared_dir_storage_backend is checked on a DB-mode write: an unknown
 // value is rejected by the schema, and "nfs" without a complete
 // server.shared_dir_storage.nfs block in the global settings is rejected
@@ -4178,67 +4129,6 @@ func TestPutServerConfigDB_SharedDirStorageBackend_Invalid(t *testing.T) {
 			t.Errorf("error should name the key: %s", rr.Body.String())
 		}
 	})
-}
-
-// home_storage_backend and home_storage_leaf round-trip through the DB
-// settings on profiles and runtime entries: stored, returned by GET, kept
-// when another profile field is edited and written back, kept when another
-// section is written, and present in the overlay the co-located broker
-// reads at each dispatch. A docker profile on the same hub still resolves
-// its own value, which the broker ignores for non-Kubernetes runtimes.
-func TestPutServerConfigDB_HomeStorage_RoundTrip(t *testing.T) {
-	sdsWriteGlobalNFSBlock(t)
-	old := config.GetGlobalSettingsOverlay()
-	t.Cleanup(func() { config.SetGlobalSettingsOverlay(old) })
-	config.SetGlobalSettingsOverlay(config.NewSettingsOverlay())
-
-	srv, _, ops := newTestDBServer(t)
-	put := func(body string) string {
-		t.Helper()
-		rr := httptest.NewRecorder()
-		srv.handlePutServerConfigDB(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config", body), ops)
-		if rr.Code != http.StatusOK {
-			t.Fatalf("PUT %s: expected 200, got %d: %s", body, rr.Code, rr.Body.String())
-		}
-		return rr.Body.String()
-	}
-
-	resp := put(`{"runtimes": {"k8s": {"type": "kubernetes", "home_storage_leaf": "broker"}, "docker": {"type": "docker", "home_storage_backend": "nfs"}},
-		"profiles": {"gke": {"runtime": "k8s", "home_storage_backend": "nfs", "home_storage_leaf": "pod"}, "local": {"runtime": "docker"}}}`)
-	if !strings.Contains(resp, "runtimes.docker.home_storage_backend") {
-		t.Errorf("an nfs value on a docker entry should be saved with a warning, got: %s", resp)
-	}
-	profiles := sdsGetProfilesDB(t, srv, ops)
-	if got := profiles["gke"]; got.HomeStorageBackend != "nfs" || got.HomeStorageLeaf != "pod" {
-		t.Fatalf("GET after PUT: gke = %+v, want nfs/pod", got)
-	}
-
-	gke := profiles["gke"]
-	gke.DefaultTemplate = "edited-template"
-	profiles["gke"] = gke
-	body, err := json.Marshal(map[string]interface{}{"profiles": profiles})
-	if err != nil {
-		t.Fatal(err)
-	}
-	put(string(body))
-	put(`{"server": {"hub": {"auto_suspend_stalled": false}}}`)
-
-	profiles = sdsGetProfilesDB(t, srv, ops)
-	if got := profiles["gke"]; got.HomeStorageBackend != "nfs" || got.HomeStorageLeaf != "pod" || got.DefaultTemplate != "edited-template" {
-		t.Errorf("after editing another field: gke = %+v", got)
-	}
-
-	ApplySnapshot(srv, ops.Snapshot())
-	gs, _, err := config.LoadGlobalSettingsWithOverlay()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := gs.ResolveHomeStorage("gke"); got.Backend != "nfs" || got.Leaf != "pod" {
-		t.Fatalf("overlay resolution for gke = %+v, want nfs/pod", got)
-	}
-	if got := gs.Runtimes["k8s"].HomeStorageLeaf; got != "broker" {
-		t.Errorf("runtime entry home_storage_leaf = %q, want broker", got)
-	}
 }
 
 // Unknown home storage values are rejected on a DB-mode write.

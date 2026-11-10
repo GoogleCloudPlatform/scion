@@ -14,7 +14,11 @@
 
 package store
 
-import "time"
+import (
+	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
+)
 
 // LaunchKind values for Agent.LaunchKind (design t1-async-create-v11.md
 // §3.3). BeginLaunch writes LaunchKindCreate; BeginStartLaunch writes
@@ -37,6 +41,11 @@ type BeginLaunchOptions struct {
 	// RevokeOnFail records whether a failed end of this start revokes the
 	// credential the start issued (launch_revoke_on_fail).
 	RevokeOnFail bool
+	// RunID is the run the dispatcher minted for this launch: the run ID
+	// beginRun returned, never a later read of the agent's mutable run.
+	// BeginLaunch binds it as launch_run_id only when the row still holds
+	// it; "" binds nothing (WP1 slice 3 addendum v12 section 1).
+	RunID string
 }
 
 // LaunchState values for Agent.LaunchState.
@@ -56,20 +65,67 @@ const (
 	LaunchEndReasonSuperseded      = "superseded"
 )
 
-// Launch error codes for Agent.LaunchError (design §3.3, §3.9).
+// Launch error codes for Agent.LaunchError (design §3.3, §3.9). They are
+// aliases of the shared pkg/api launch codes (design wave 3 E-a,
+// ptone/scion#4670): the store writes these, and the broker reports the rest.
 const (
-	LaunchErrorLaunchTimeout  = "launch_timeout"
-	LaunchErrorBrokerLost     = "broker_lost"
-	LaunchErrorLaunchStopped  = "launch_stopped"
-	LaunchErrorAgentError     = "agent_error"
-	LaunchErrorHubUnreachable = "hub_unreachable"
+	LaunchErrorLaunchTimeout  = api.LaunchCodeLaunchTimeout
+	LaunchErrorBrokerLost     = api.LaunchCodeBrokerLost
+	LaunchErrorLaunchStopped  = api.LaunchCodeLaunchStopped
+	LaunchErrorAgentError     = api.LaunchCodeAgentError
+	LaunchErrorHubUnreachable = api.LaunchCodeHubUnreachable
 	// LaunchErrorBrokerRestarted: the broker process restarted, or shut
 	// down, while the launch was in flight, and reported the launch failed
 	// itself (from its shutdown drain or, after a crash, from its launch
 	// journal on the next boot; ptone/scion#4668). Broker-confirmed: the
 	// broker reports it only for a launch it ended.
-	LaunchErrorBrokerRestarted = "broker_restarted"
+	LaunchErrorBrokerRestarted = api.LaunchCodeBrokerRestarted
+	// LaunchErrorDispatchFailed: the hub's send of the launch failed with a
+	// known outcome, or the broker acknowledged a different launch; the
+	// dispatcher ends the launch not_launched with this code.
+	LaunchErrorDispatchFailed = api.LaunchCodeDispatchFailed
 )
+
+// IsUnconfirmedLaunchError reports whether launchError is a launch outcome
+// the Hub declared on its own, without the broker confirming how the launch
+// ended (the launch reaper's timeout and lost codes). The agent's runtime
+// state is unknown after such an end, so these codes are kept until a later
+// launch or a running write replaces them: the start claim does not clear
+// them (ptone/scion#5273), and a later start reads them.
+func IsUnconfirmedLaunchError(launchError string) bool {
+	switch launchError {
+	case LaunchErrorLaunchTimeout, LaunchErrorBrokerLost:
+		return true
+	default:
+		return false
+	}
+}
+
+// IsBrokerPreContainerLaunchRefusal reports whether launchError is one of
+// the codes a broker's failed launch report carries only for a launch it
+// refused while resolving or provisioning the agent, before it created any
+// runtime resource (the broker's classifyStartErrorCode,
+// pkg/runtimebroker/run_launch.go; Manager.Start raises each before
+// Runtime.Run): an unusable or policy-refused harness-config, a template or
+// harness-config that does not resolve, a required skill that does not
+// resolve, refused repository git config, or a storage placement that
+// needs migration. Every other code, including runtime_error,
+// container_config, name_in_use, agent_error, launch_stopped,
+// dispatch_failed and the Hub's own launch_timeout and broker_lost, can
+// follow a created container or says nothing about one.
+func IsBrokerPreContainerLaunchRefusal(launchError string) bool {
+	switch launchError {
+	case api.BrokerErrCodeHarnessConfigUnusable,
+		api.LaunchCodeHarnessConfigPolicy,
+		api.LaunchCodeTemplateNotFound,
+		api.BrokerErrCodeSkillResolution,
+		api.LaunchCodeGitConfigRefused,
+		api.BrokerErrCodeStorageMigrationRequired:
+		return true
+	default:
+		return false
+	}
+}
 
 // LaunchReport report-state values (mirrors the broker->Hub wire report's
 // State field, design §3.2 AgentLaunchReport; defined here rather than
@@ -99,6 +155,10 @@ type LaunchReport struct {
 	// failed report's runtime_error, or "" (ptone/scion#4666). The hub
 	// filters it before it gets here; it is stored with ErrorCode.
 	Cause string
+	// RunID is the run the launch started (the hub-minted run ID the broker
+	// echoes); empty when the broker does not send it. The store only
+	// compares it with the row's run ID; it is never stored.
+	RunID string
 
 	// AgentConfig is applied on a succeeded terminal with
 	// ApplyBrokerAgentConfig, the same rules a synchronous dispatch uses

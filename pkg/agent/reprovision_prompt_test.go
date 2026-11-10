@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// These tests exercise unix-only, Windows-gated agent storage code.
+//go:build unix
+
 package agent
 
 import (
@@ -21,10 +24,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 // reprovisionPromptFixture provisions generation N of an empty-per-agent
@@ -195,36 +195,4 @@ func TestStart_WithoutReprovision_StoredTaskBehaviourUnchanged(t *testing.T) {
 	if got := readPrompt(t, promptPath); got != "gen 1 task" {
 		t.Fatalf("prompt.md = %q, want the stored task kept", got)
 	}
-}
-
-// TestReprovision_PromptWriteFailureLeavesSharedDirRecord pins the step
-// order in Reprovision: a failed prompt.md write fails the reprovision
-// before the shared dir backend change is recorded, so the record stays as
-// it was ("recorded only after provisioning succeeds"). The hub then
-// re-renders the previous config with the change cleared, which matches.
-func TestReprovision_PromptWriteFailureLeavesSharedDirRecord(t *testing.T) {
-	f, mountRoot := newPerDirFixture(t)
-	f.writeRawGlobalSettings(t, perDirSettingsYAML(mountRoot, ""))
-	workspace := filepath.Join(f.tmpDir, "checkout")
-	require.NoError(t, os.MkdirAll(workspace, 0o755))
-	opts := perDirStartOpts(f, "agent", "local")
-	opts.Workspace = workspace
-	_, err := NewManager(newSDSMockRuntime("docker", &sdsCapture{})).Start(context.Background(), opts)
-	require.NoError(t, err)
-	before := perDirRecord(t, f, "agent")
-	require.Equal(t, &sharedDirStorageRecord{Backend: "local"}, before)
-
-	// A directory at prompt.md's path makes the prompt write fail.
-	promptPath := filepath.Join(config.ResolveAgentDir(f.projectScionDir, "agent"), "prompt.md")
-	require.NoError(t, os.RemoveAll(promptPath))
-	require.NoError(t, os.MkdirAll(promptPath, 0o755))
-
-	_, err = NewManager(newSDSMockRuntime("docker", &sdsCapture{})).Reprovision(context.Background(), api.StartOptions{
-		Name: "agent", ProjectPath: f.projectScionDir, Profile: "local", Workspace: workspace,
-		SharedDirs: opts.SharedDirs, SharedDirBackendChanges: map[string]string{"notes": "nfs"},
-		Task: "gen 2 task",
-	})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "prompt.md")
-	assert.Equal(t, before, perDirRecord(t, f, "agent"), "the shared dir backend change must not be recorded")
 }

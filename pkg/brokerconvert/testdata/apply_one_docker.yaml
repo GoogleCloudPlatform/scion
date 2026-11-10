@@ -1,0 +1,12 @@
+schema_version: "1"
+active_profile: build
+runtimes:
+  docker:
+    type: docker
+profiles:
+  build:
+    runtime: docker
+    harness_overrides:
+      claude:
+        env:
+          API_TOKEN: PLANTED-APPLY-ENV-c51

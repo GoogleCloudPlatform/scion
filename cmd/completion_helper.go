@@ -157,12 +157,13 @@ func fetchHubAgents(ctx context.Context, endpoint string, settings *config.Setti
 		}
 	}
 
-	// Fallback to auto dev auth (checks env var and file)
-	if !authConfigured {
+	// Fallback to auto dev auth (checks env var and file), for a loopback
+	// hub only (see scopeDevAuth)
+	if !authConfigured && isLocalhostEndpoint(endpoint) {
 		opts = append(opts, hubclient.WithAutoDevAuth())
 	}
 
-	client, err := hubclient.New(endpoint, opts...)
+	client, err := newUserHubClient(endpoint, opts...)
 	if err != nil {
 		return nil, err
 	}

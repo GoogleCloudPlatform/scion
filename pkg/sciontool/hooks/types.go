@@ -55,6 +55,18 @@ type EventData struct {
 	Success bool   `json:"success,omitempty"`
 	Error   string `json:"error,omitempty"`
 
+	// Failed is true when the harness reported the call as failed: its
+	// success field was present and false, or the event is a failure event
+	// (claude PostToolUseFailure). Success alone cannot tell a failure from
+	// a success, since most harnesses send no success field for a call that
+	// succeeded.
+	Failed bool `json:"failed,omitempty"`
+
+	// Interrupted is true when the user interrupted the tool call (claude
+	// PostToolUseFailure with is_interrupt). An interrupted call is not a
+	// failure of the tool.
+	Interrupted bool `json:"interrupted,omitempty"`
+
 	// Raw contains the original unparsed data
 	Raw map[string]interface{} `json:"raw,omitempty"`
 }

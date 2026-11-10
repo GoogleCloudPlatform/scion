@@ -652,6 +652,26 @@ const (
 	DenialUserSuspended           DenialCode = "user_suspended"
 	DenialResourceNotFound        DenialCode = "not_found"
 	DenialConflict                DenialCode = "conflict"
+	DenialUserDeleteBlocked       DenialCode = "user_delete_blocked"
+	// DenialUserDeleteForceForbidden: a forced user delete names agents
+	// the caller may not delete (ptone/scion#2143).
+	DenialUserDeleteForceForbidden DenialCode = "user_delete_force_forbidden"
+	// DenialUserDeleteBlockersChanged: the agents blocking a forced user
+	// delete changed before its transaction ran.
+	DenialUserDeleteBlockersChanged DenialCode = "user_delete_blockers_changed"
+	// DenialUserDeletionInProgress: a forced deletion of the user is in
+	// progress.
+	DenialUserDeletionInProgress DenialCode = "user_deletion_in_progress"
+	// DenialConstraintAdminLockout: the change would leave a scope without
+	// a constraint admin.
+	DenialConstraintAdminLockout DenialCode = "constraint_admin_lockout"
+	// DenialMembershipGroupDerived: a project leave by a caller whose only
+	// membership comes from a group (ptone/scion#7494).
+	DenialMembershipGroupDerived DenialCode = "membership_group_derived"
+	// DenialLeaveBindingUnclassified: a project leave refused, failing
+	// closed, because a caller binding is of a kind the leave does not
+	// classify (ptone/scion#7494).
+	DenialLeaveBindingUnclassified DenialCode = "leave_binding_unclassified"
 )
 
 // TestRef references an executable test that proves part of the contract.

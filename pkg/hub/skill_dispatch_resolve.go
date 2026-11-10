@@ -93,6 +93,7 @@ func (s *Server) resolveRegistrySkillRef(
 		Name:            skill.Name,
 		ResolvedVersion: sv.Version,
 		ContentHash:     sv.ContentHash,
+		ContentHashV2:   s.withSkillContentHashV2(sv).ContentHashV2,
 	}
 
 	if sv.Status == store.SkillVersionStatusDeprecated {

@@ -260,13 +260,13 @@ var agentOperations = []OperationSpec{
 	{
 		ID:          "agent.list",
 		Domain:      "agent",
-		Description: "List agents within the caller's authorized project scope. A user access token needs agent:list on either boundary: a project token lists only its boundary project's agents. The project form lists one project's agents and decides agent.list on that project",
+		Description: "List agents within the caller's authorized project scope. A user access token needs agent:list on either boundary: a project token lists only its boundary project's agents. The project form lists one project's agents and decides agent.list on that project. An agent delegated credential is admitted on the hub and project forms: its scope is the authorizing user's list scope within the grant boundary (on the project form, within that one project), and each item is also decided for agent.read",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/agents", Method: "GET"},
 		},
-		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
-		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
+		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent, PrincipalAgentDelegated},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT, CredentialDelegatedAgent},
 		ResourceResolver: "list-scope-resolver",
 		BasePermission:   "agent.list",
 		Effects:          []SecurityEffect{EffectListScoped},
@@ -278,7 +278,7 @@ var agentOperations = []OperationSpec{
 			{ID: "no-broad-query-on-none", Description: "ScopeSetNone produces empty list without issuing any resource query", Kind: InvariantSecurity, FailClosed: true},
 			{ID: "slug-not-oracle", Description: "Project slug lookup for agent list filter must not distinguish unauthorized from nonexistent", Kind: InvariantSecurity, FailClosed: true},
 		},
-		DenialCodes: []DenialCode{DenialForbidden, DenialCredentialInsufficient, DenialUserSuspended},
+		DenialCodes: []DenialCode{DenialForbidden, DenialCredentialInsufficient, DenialUserSuspended, "credential_not_admitted", "delegated_list_sort_unsupported"},
 		TestRefs: []TestRef{
 			{Package: "pkg/hub", Function: "TestRS2_AgentListScopePushed"},
 			{Package: "pkg/hub", Function: "TestRS2_AgentListMineSharedClassification"},
@@ -298,6 +298,9 @@ var agentOperations = []OperationSpec{
 			{Package: "pkg/hub", Function: "TestListCaveats_ProjectBoundaryRequiresListPermissionInCeiling"},
 			{Package: "pkg/hub", Function: "TestProjectAgentListToken_RequiresAgentListOnTheProject"},
 			{Package: "pkg/hub", Function: "TestListFilters_CannotEnlargeTokenResults"},
+			{Package: "pkg/hub", Function: "TestAgentDelegatedAgentList_ExplicitScopeAcrossProjects"},
+			{Package: "pkg/hub", Function: "TestAgentDelegatedAgentList_MixedItemsAndCounts"},
+			{Package: "pkg/hub", Function: "TestDelegatedProjectAgentList_ScopeAndBinding"},
 		},
 		Bearer: AdmitOn(BearerTargetListScope, BearerBoundaryProject, BearerBoundaryHub),
 	},
@@ -327,6 +330,30 @@ var agentOperations = []OperationSpec{
 			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
 			{Package: "pkg/hub", Function: "TestAgentUpdateToken_PassthroughGateStillApplies"},
 			{Package: "pkg/hub", Function: "TestAgentUpdateToken_ServiceAccountAssignRequiresAssignSelector"},
+		},
+		Bearer: AdmitOn(BearerTargetAgentRecord, BearerBoundaryProject, BearerBoundaryHub),
+	},
+	{
+		ID:          "agent.update.pendingconfig.delete",
+		Domain:      "agent",
+		Description: "Discard an agent's pending config edits (behind hub.agent_edit_held; 404 while it is off)",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/pending-config", Method: "DELETE", Response: ResponseCallerSpecific},
+		},
+		Principals:  []PrincipalKind{PrincipalUser},
+		Credentials: []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		// discardAgentPendingConfig also applies the optional stateVersion
+		// check. Discarding grants nothing: it only removes edits that were
+		// never applied.
+		ResourceResolver: "agent-from-url",
+		BasePermission:   "agent.update",
+		Effects:          []SecurityEffect{EffectUpdateResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden, DenialConflict},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestAgentSubRoute_CatalogDrift"},
+			{Package: "pkg/hub", Function: "TestAgentPendingConfig_DiscardClearsAndAudits"},
 		},
 		Bearer: AdmitOn(BearerTargetAgentRecord, BearerBoundaryProject, BearerBoundaryHub),
 	},
@@ -486,16 +513,18 @@ var agentOperations = []OperationSpec{
 	{
 		ID:          "agent.action.message",
 		Domain:      "agent",
-		Description: "Send a message to an agent through its message action",
+		Description: "Send a message to an agent through its message action. A user's post into a thread by thread key also needs the post action of chat-thread-access on the agent's project (project:read, then project.chat_post; 403 chat_post_denied with reason read_only), decided before any wake or row",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/message", Method: "POST"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/agents/{id}/message", Method: "POST"},
 		},
 		// authorizeAgentMessage applies the recipient's message mode and,
 		// for a user access token, the agent:message selector and the token
-		// boundary before any piercing rule.
-		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
-		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
+		// boundary before any piercing rule. An agent delegated credential
+		// may send a direct message to the route's own agent only, and
+		// pierces no message mode (.design/agent-delegation.md §12.3).
+		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent, PrincipalAgentDelegated},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT, CredentialDelegatedAgent},
 		ResourceResolver: "agent-from-url",
 		BasePermission:   "agent.message",
 		Effects:          []SecurityEffect{EffectEmitExternal},
@@ -531,8 +560,11 @@ var agentOperations = []OperationSpec{
 			// pins this entry point to the live route.
 			{Kind: EntryPointWebSocket, Pattern: "/api/v1/agents/{id}/pty", Method: "GET"},
 		},
-		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
-		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
+		// An agent delegated credential is authorized at the handshake
+		// only, on the broker terminal path; its established session is
+		// not re-checked (.design/agent-delegation.md §16.6).
+		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent, PrincipalAgentDelegated},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT, CredentialDelegatedAgent},
 		ResourceResolver: "agent-from-url",
 		BasePermission:   "agent.attach",
 		Effects:          []SecurityEffect{EffectReadOne},

@@ -462,6 +462,16 @@ func (m *moveFirstStore) PutGrant(ctx context.Context, g *Grant, max int, cross 
 	return m.Store.PutGrant(ctx, g, max, cross, actor)
 }
 
+// PutGrantNotify moves first too: the grant route writes through it.
+func (m *moveFirstStore) PutGrantNotify(ctx context.Context, g *Grant, max int, cross bool, actor *Actor, notify bool) (GrantPutResult, error) {
+	if _, err := m.UpdateArtifact(ctx, g.ArtifactID, ArtifactUpdate{
+		HomeGrant: &Grant{ID: "moved-" + g.ID, ArtifactID: g.ArtifactID, SubjectKind: SubjectScope, SubjectRef: m.to,
+			Permission: GrantRead, CreatedAt: time.Now()}, MaxGrants: max, Actor: testActor}); err != nil {
+		return GrantPutResult{}, err
+	}
+	return m.Store.PutGrantNotify(ctx, g, max, cross, actor, notify)
+}
+
 // TestGrantHomeRulesUnderLock: the home project's read/write-only rule
 // and the cross-project switch are decided against the home as it is when
 // the grant is written, not as the handler last saw it.

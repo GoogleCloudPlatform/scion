@@ -509,6 +509,9 @@ func (s *Server) testAdminIssuer(w http.ResponseWriter, r *http.Request, spec te
 	}
 	cred := GetCredentialContextFromContext(ctx)
 	var workload *workloadDelegationState
+	// offlineAdmin is true only for an offline hub-admin delegation whose
+	// gate passed for this request (test_identity_offline_admin_delegation.go).
+	offlineAdmin := false
 	switch cred.Kind {
 	case CredentialKindInteractive, CredentialKindDev, CredentialKindUAT:
 	case CredentialKindWorkloadDelegation:
@@ -520,10 +523,29 @@ func (s *Server) testAdminIssuer(w http.ResponseWriter, r *http.Request, spec te
 		if testIdentityDelegationScopes[st.delegation.Scope].adminKind != spec.kind {
 			return deny(user, "workload delegation scope does not cover this admin kind", "")
 		}
-		// Admin-tier delegations need a live human grantor (X4); an
-		// offline delegation (phase DL) or any other grantor kind never
-		// issues an admin kind.
-		if st.delegation.EffectiveGrantorKind() != store.DelegationGrantorHuman || st.offlineGatePassed || st.offline != nil {
+		// Admin-tier delegations need a live human grantor (X4). The one
+		// exception is an offline hub-admin delegation: test hub-admin
+		// only, with the offline admin delegation setting on and the
+		// offline gate passed for this request at the hub-admin scope. Any
+		// other grantor kind never issues an admin kind.
+		switch st.delegation.EffectiveGrantorKind() {
+		case store.DelegationGrantorHuman:
+			if st.offlineGatePassed || st.offline != nil {
+				return deny(user, "admin-tier workload delegations require a human grantor", "")
+			}
+		case store.DelegationGrantorTestInfraOffline:
+			switch {
+			case !offlineAdminPermissionAdmitted(spec.permission):
+				return deny(user, "offline delegations never issue this admin kind", testAdminReasonOfflineDelegation)
+			case !st.offlineGatePassed || st.offline == nil || !st.offline.adminScope:
+				return deny(user, "offline hub-admin delegation without a passed offline gate", testAdminReasonOfflineDelegation)
+			case !offlineAdminScopeAdmitted(st.delegation.Scope):
+				return deny(user, "offline delegation scope is not the hub-admin scope", testAdminReasonOfflineDelegation)
+			case !s.offlineAdminDelegationsOn():
+				return deny(user, "offline hub-admin delegations are off on this hub", testAdminReasonOfflineDelegation)
+			}
+			offlineAdmin = true
+		default:
 			return deny(user, "admin-tier workload delegations require a human grantor", "")
 		}
 		workload = st
@@ -531,9 +553,17 @@ func (s *Server) testAdminIssuer(w http.ResponseWriter, r *http.Request, spec te
 		return deny(user, "credential kind not admitted for test admin issuance", "")
 	}
 	// A test identity of any kind never issues test identities. The kind
-	// is read from the store; a read error or unknown kind denies.
+	// is read from the store; a read error or unknown kind denies. An
+	// offline hub-admin delegation acts for its reserved grantor id, which
+	// must name no user row at all (offlineGrantorGate checked it for this
+	// request).
 	k, err := s.kindForPrincipal(ctx, user.ID())
-	if err != nil || !k.isHuman() {
+	switch {
+	case offlineAdmin:
+		if err != nil || k.Found {
+			return deny(user, "offline delegation grantor id names a user", testAdminReasonCallerNotHuman)
+		}
+	case err != nil || !k.isHuman():
 		return deny(user, "caller is not a human user", testAdminReasonCallerNotHuman)
 	}
 	decision := s.authzService.Decide(ctx, AuthzRequest{
@@ -547,8 +577,14 @@ func (s *Server) testAdminIssuer(w http.ResponseWriter, r *http.Request, spec te
 	if !decision.Allowed {
 		return deny(user, decision.Reason, "")
 	}
-	if err := s.canIssueTestAdmin(ctx, user.ID(), spec.permission); err != nil {
-		return deny(user, err.Error(), testAdminReasonNotLiveAdmin)
+	// DEC-3 C1 for a human issuer. An offline hub-admin delegation has no
+	// human issuer: its stand-in is the offline gate, run when the request
+	// authenticated and again inside the issuance transaction
+	// (recheckOfflineAdminDelegationGrantor).
+	if !offlineAdmin {
+		if err := s.canIssueTestAdmin(ctx, user.ID(), spec.permission); err != nil {
+			return deny(user, err.Error(), testAdminReasonNotLiveAdmin)
+		}
 	}
 	credentialID := ""
 	switch {
@@ -862,7 +898,11 @@ func (s *Server) handleIssueTestAdminIdentity(w http.ResponseWriter, r *http.Req
 			if err := s.recheckWorkloadDelegation(ctx, tx, workload, now); err != nil {
 				return err
 			}
-			if err := s.recheckTestAdminDelegationGrantor(ctx, tx, workload.delegation.EffectiveGrantorKind(), issuerID, spec.permission); err != nil {
+			if workload.delegation.EffectiveGrantorKind() == store.DelegationGrantorTestInfraOffline {
+				if err := s.recheckOfflineAdminDelegationGrantor(ctx, tx, workload, spec.permission); err != nil {
+					return err
+				}
+			} else if err := s.recheckTestAdminDelegationGrantor(ctx, tx, workload.delegation.EffectiveGrantorKind(), issuerID, spec.permission); err != nil {
 				return err
 			}
 			n, err = tx.CountLiveTestAdminUsersByDelegation(ctx, delegationID, now)
@@ -909,7 +949,7 @@ func (s *Server) handleIssueTestAdminIdentity(w http.ResponseWriter, r *http.Req
 		if err := s.testIdentities.hooks.syncGrants(ctx, tx, u.ID, u.Role, store.TestIdentityIssuanceCreatedBy); err != nil {
 			return fmt.Errorf("sync hub role grants: %w", err)
 		}
-		token, expiresIn, err = s.userTokenService.GenerateAccessTokenWithTTL(u.ID, u.Email, u.DisplayName, u.Role, ClientTypeAPI, tokenTTL)
+		token, expiresIn, err = s.userTokenService.MintAccessTokenWithTTL(u.ID, u.Email, u.DisplayName, u.Role, u.SessionGeneration, ClientTypeAPI, tokenTTL)
 		if err != nil {
 			return fmt.Errorf("issue token: %w", err)
 		}
@@ -942,6 +982,11 @@ func (s *Server) handleIssueTestAdminIdentity(w http.ResponseWriter, r *http.Req
 		if workload != nil {
 			line["issuer_delegation_id"] = delegationID
 			line["workload_sub"] = workload.sub
+			if workload.offline != nil {
+				line["grantor_kind"] = store.DelegationGrantorTestInfraOffline
+				line["scope"] = workload.delegation.Scope
+				line["delegation_cap"] = perCredentialCap
+			}
 		}
 		if err := s.testAdminAudit.emit(testAdminAuditEventIssue, line); err != nil {
 			return fmt.Errorf("%w: %v", errTestAdminSinkWrite, err)
@@ -1094,6 +1139,16 @@ func (s *Server) handleRevokeAllTestAdminIdentities(w http.ResponseWriter, r *ht
 // returns "deleted" or "suspended". The audit record and sink line are
 // written in the same transaction.
 func (s *Server) revokeTestAdminIdentity(ctx context.Context, u *store.User, auditActor AuditActor, now time.Time) (string, error) {
+	return s.revokeTestAdminIdentityWith(ctx, u, auditActor, now, true)
+}
+
+// revokeTestAdminIdentityWith is revokeTestAdminIdentity. With sinkRequired
+// false (the startup cleanup of offline hub-admin delegations, which also
+// runs on hubs without the test admin audit sink) the sink line is written
+// only when the sink is configured; a configured sink that fails still
+// refuses the revocation.
+func (s *Server) revokeTestAdminIdentityWith(ctx context.Context, u *store.User, auditActor AuditActor, now time.Time, sinkRequired bool) (string, error) {
+	emitSink := sinkRequired || (s.testAdminAudit != nil && s.testAdminAudit.out != nil)
 	write := func(tx store.Store, outcome string) error {
 		record := &store.MutationAuditRecord{
 			MutationType:  testAdminRevokeMutation,
@@ -1106,6 +1161,9 @@ func (s *Server) revokeTestAdminIdentity(ctx context.Context, u *store.User, aud
 		auditActor.ApplyActor(record)
 		if err := s.testIdentities.hooks.writeAudit(ctx, tx, record); err != nil {
 			return fmt.Errorf("audit test admin revoke: %w", err)
+		}
+		if !emitSink {
+			return nil
 		}
 		issuanceID := ""
 		if u.IssuanceID != nil {
@@ -1158,8 +1216,8 @@ func (s *Server) revokeTestAdminIdentity(ctx context.Context, u *store.User, aud
 		return "deleted", nil
 	}
 	var lastOwnerErr *lastProjectOwnerDeleteError
-	var ownsAgentsErr *userOwnsAgentsDeleteError
-	if !errors.As(err, &lastOwnerErr) && !errors.As(err, &ownsAgentsErr) && !errors.Is(err, errUserRoleBindingsChanged) {
+	var blockedErr *userDeleteBlockedError
+	if !errors.As(err, &lastOwnerErr) && !errors.As(err, &blockedErr) && !errors.Is(err, errUserRoleBindingsChanged) {
 		return "", err
 	}
 	err = s.store.WithTx(ctx, func(tx store.Store) error {

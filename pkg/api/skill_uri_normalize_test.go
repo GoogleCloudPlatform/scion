@@ -368,3 +368,30 @@ func TestNormalizeSkillURI(t *testing.T) {
 		})
 	}
 }
+
+// The unsupported-scheme error quotes the text before "://" only when it
+// is a scheme name. The whole error text is pinned. Every value is made up.
+func TestNormalizeSkillURI_UnsupportedSchemeText(t *testing.T) {
+	const supported = "supported inputs: gh://owner/repo/skill, skill://name, or a GitHub URL (https://github.com/...)"
+	for _, tc := range []struct{ in, want, secret string }{
+		{"ftp://example.com/something", `unsupported scheme "ftp"; ` + supported, ""},
+		{"git+ssh://example.com/x", `unsupported scheme "git+ssh"; ` + supported, ""},
+		{"x?token=Rw5nYp2c://y", "unsupported scheme; " + supported, "Rw5nYp2c"},
+		{"alice:Vb8kTq3m@host://y", "unsupported scheme; " + supported, "Vb8kTq3m"},
+		{"x#Rw5nYp2c://y", "unsupported scheme; " + supported, "Rw5nYp2c"},
+	} {
+		got, err := NormalizeSkillURI(tc.in)
+		if err == nil {
+			t.Errorf("NormalizeSkillURI(%q) = %q, want an error", tc.in, got)
+			continue
+		}
+		if err.Error() != tc.want {
+			t.Errorf("NormalizeSkillURI(%q) error = %q, want %q", tc.in, err.Error(), tc.want)
+		}
+		for i := 0; i+4 <= len(tc.secret); i++ {
+			if strings.Contains(err.Error(), tc.secret[i:i+4]) {
+				t.Errorf("NormalizeSkillURI(%q) error = %q shows %q", tc.in, err.Error(), tc.secret[i:i+4])
+			}
+		}
+	}
+}

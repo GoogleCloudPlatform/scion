@@ -147,6 +147,11 @@ type tunnelHub struct {
 	// lookupMissed records that ResolveAgent found no such project or
 	// agent, so runTunnel can name the project and its source.
 	lookupMissed atomic.Bool
+	// projectUnlisted records that, for a token from the environment, the
+	// project list was empty and the lookup by slug or id found nothing.
+	// A user access token without project:list sees an empty list, so the
+	// project may exist.
+	projectUnlisted atomic.Bool
 }
 
 func (h *tunnelHub) client(cred tunnelclient.Credential) (hubclient.Client, error) {
@@ -154,7 +159,7 @@ func (h *tunnelHub) client(cred tunnelclient.Credential) (hubclient.Client, erro
 	if h.src != nil {
 		opts = append(opts, hubclient.WithTransportAuth(h.src, h.mode))
 	}
-	return hubclient.New(h.endpoint, opts...)
+	return newUserHubClient(h.endpoint, opts...)
 }
 
 // Whoami implements tunnelclient.Hub.
@@ -191,7 +196,13 @@ func (h *tunnelHub) ResolveAgent(ctx context.Context, cred tunnelclient.Credenti
 	} else {
 		p, err := c.Projects().Get(ctx, project)
 		if err != nil {
-			return tunnelclient.Target{}, h.lookupError(err)
+			err = h.lookupError(err)
+			var he *tunnelclient.HTTPError
+			if len(list.Projects) == 0 && cred.Kind == tunnelclient.CredentialToken &&
+				errors.As(err, &he) && he.Status == http.StatusNotFound {
+				h.projectUnlisted.Store(true)
+			}
+			return tunnelclient.Target{}, err
 		}
 		projectID = p.ID
 	}
@@ -279,6 +290,11 @@ func runTunnel(cmd *cobra.Command, args []string) error {
 	if endpoint == "" {
 		return tunnelclient.Errorf(tunnelclient.ExitUsage, "no hub endpoint: pass --hub or select a hub with 'scion use --hub <name>'")
 	}
+	// The transport rule, before the host-key hint or the tunnel reads a
+	// credential (tunnelClientConfig checks again for its other callers).
+	if err := checkUserHubTransport(endpoint); err != nil {
+		return tunnelclient.Errorf(tunnelclient.ExitError, "%v", err)
+	}
 	target := resolveHubOnlyProject()
 	if err := target.unlinkedError(); err != nil {
 		return err
@@ -317,7 +333,7 @@ func runTunnel(cmd *cobra.Command, args []string) error {
 	}
 	var te *tunnelclient.Error
 	if errors.As(err, &te) {
-		return tunnelNotFoundError(te, hub.lookupMissed.Load(), args[0], target)
+		return tunnelNotFoundError(te, hub.lookupMissed.Load(), hub.projectUnlisted.Load(), args[0], target)
 	}
 	return tunnelclient.Errorf(tunnelclient.ExitError, "%v", err)
 }
@@ -350,6 +366,11 @@ func tunnelPinSource() (sshPinSource, error) {
 // credential chain and the state store. The returned hub records agent
 // lookup misses.
 func tunnelClientConfig(endpoint string, stderr io.Writer) (tunnelclient.Config, *tunnelHub, error) {
+	// The transport rule, before the transport source or the credential is
+	// resolved: the conduit dial would otherwise use ws:// for http.
+	if err := checkUserHubTransport(endpoint); err != nil {
+		return tunnelclient.Config{}, nil, tunnelclient.Errorf(tunnelclient.ExitError, "%v", err)
+	}
 	src, mode, err := tunnelTransportSource(hubTransportSettings(endpoint))
 	if err != nil {
 		return tunnelclient.Config{}, nil, tunnelclient.Errorf(tunnelclient.ExitError, "resolving transport auth: %v", err)
@@ -375,11 +396,15 @@ func tunnelClientConfig(endpoint string, stderr io.Writer) (tunnelclient.Config,
 
 // tunnelNotFoundError names the project and its source in te when the
 // agent lookup found no such project or agent (missed); the hub's own
-// message would show the project as sent, often a raw id. Other errors are
-// returned as they are.
-func tunnelNotFoundError(te *tunnelclient.Error, missed bool, agent string, target hubOnlyProject) *tunnelclient.Error {
+// message would show the project as sent, often a raw id. When the project
+// was not listed for a token (unlisted), it adds that the token may lack
+// project:list. Other errors are returned as they are.
+func tunnelNotFoundError(te *tunnelclient.Error, missed, unlisted bool, agent string, target hubOnlyProject) *tunnelclient.Error {
 	if te.Code != tunnelclient.ExitAgentNotFound || !missed {
 		return te
+	}
+	if unlisted {
+		return tunnelclient.Errorf(te.Code, "agent %s not found in %s; the token may lack the project:list scope", agent, target.describe())
 	}
 	return tunnelclient.Errorf(te.Code, "agent %s not found in %s", agent, target.describe())
 }

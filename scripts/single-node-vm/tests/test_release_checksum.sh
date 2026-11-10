@@ -257,13 +257,15 @@ test_release_checksum_install_commands_verify_before_extract() {
 
   local binary_verify_line binary_extract_line
   binary_verify_line="$(line_number "grep -E '^[0-9a-f]{64} [ *]scion-linux-amd64\.tar\.gz\$' SHA256SUMS | sha256sum -c -" "$log")"
-  binary_extract_line="$(line_number "tar -xzf /tmp/scion-linux-amd64.tar.gz -C /tmp" "$log")"
+  # shellcheck disable=SC2016 # a literal from the generated command
+  binary_extract_line="$(line_number 'tar -xzf "$SCION_EXTRACT_DIR/scion-linux-amd64.tar.gz" -C "$SCION_EXTRACT_DIR"' "$log")"
   assert_true "$([[ -n "$binary_verify_line" && -n "$binary_extract_line" && "$binary_verify_line" -lt "$binary_extract_line" ]] && echo true || echo false)" \
     "the scion binary must be checksum-verified before it is extracted"
 
   local plugin_verify_line plugin_extract_line
   plugin_verify_line="$(line_number "grep -E '^[0-9a-f]{64} [ *]scion-plugin-telegram-linux-amd64\.tar\.gz\$' SHA256SUMS | sha256sum -c -" "$log")"
-  plugin_extract_line="$(line_number "tar -xzf /tmp/scion-plugin-telegram-linux-amd64.tar.gz -C /tmp" "$log")"
+  # shellcheck disable=SC2016 # a literal from the generated command
+  plugin_extract_line="$(line_number 'tar -xzf "$PLUGIN_EXTRACT_DIR/scion-plugin-telegram-linux-amd64.tar.gz" -C "$PLUGIN_EXTRACT_DIR"' "$log")"
   assert_true "$([[ -n "$plugin_verify_line" && -n "$plugin_extract_line" && "$plugin_verify_line" -lt "$plugin_extract_line" ]] && echo true || echo false)" \
     "the telegram plugin must be checksum-verified before it is extracted"
 
@@ -277,20 +279,35 @@ test_release_checksum_install_commands_verify_before_extract() {
 # This executes deploy.sh's generated command text as a regression test.
 # =====================================================================
 
+# _extracted_payload WORK [quiet] -- the content of the scion binary the
+# snippet extracted into its private scion-extract.* directory under WORK
+# (the rewritten /tmp), or "<missing>" ("" with quiet) if none was.
+_extracted_payload() {
+  local f
+  for f in "$1"/scion-extract.*/scion; do
+    if [[ -f "$f" ]]; then
+      cat "$f"
+      return 0
+    fi
+  done
+  [[ "${2:-}" == quiet ]] || echo '<missing>'
+}
+
 # _extract_binary_install_snippet LOG — prints the scion-binary install
 # command's own body, from its "Downloading scion binary..." echo through
-# its "tar -xzf ... -C /tmp" line (inclusive), stripping deploy.sh's own
-# leading indentation. Excludes everything from "sudo mv" onward (the
-# `sudo mv`/`sudo chmod +x` install step needs real root, which this
-# suite deliberately never provides -- see tests/lib/gcloud's
-# "compute ssh" case): the download+verify logic under test here is
+# its "tar -xzf ..." line (inclusive; download, verification and
+# extraction all happen in a fresh mktemp -d directory), stripping deploy.sh's
+# own leading indentation. Excludes the scion-layout.sh install step after
+# it (it runs as root, which this suite deliberately never provides -- see
+# tests/lib/gcloud's "compute ssh" case; test_install_layout.sh runs it
+# against a fake root): the download+verify logic under test here is
 # entirely contained in the part before that.
 _extract_binary_install_snippet() {
   local log="$1"
   printf '%s\n' "$log" | awk '
     /Downloading scion binary\.\.\./ { on = 1 }
     on { print }
-    /tar -xzf \/tmp\/scion-linux-amd64\.tar\.gz -C \/tmp/ { if (on) exit }
+    /tar -xzf .*scion-linux-amd64\.tar\.gz/ { if (on) exit }
   ' | sed -E 's/^[[:space:]]+//'
 }
 
@@ -316,6 +333,10 @@ _run_extracted_snippet() {
   # already-rewritten text would find and mangle /tmp again inside
   # WORKDIR's own value.
   rewritten="${snippet//\/tmp/${workdir}}"
+  # The generated command removes its private download/extract directory
+  # on exit (an EXIT trap). Drop that trap here so the test can inspect
+  # what was downloaded and extracted; WORKDIR is removed by the test.
+  rewritten="$(printf '%s\n' "$rewritten" | grep -v "^trap 'rm -rf ")"
   bash -c "set -euo pipefail
 $rewritten" 2>&1
 }
@@ -351,7 +372,7 @@ test_release_checksum_dry_run_good_tarball_extracts() {
 
   assert_eq "0" "$rc" "a matching tarball and SHA256SUMS entry must verify and extract cleanly"
   assert_contains "$out" "OK" "sha256sum -c must report OK for a matching tarball"
-  assert_eq "real-scion-binary-payload" "$(cat "${work}/scion" 2>/dev/null || echo '<missing>')" \
+  assert_eq "real-scion-binary-payload" "$(_extracted_payload "$work")" \
     "tar -xzf must actually have extracted the verified tarball's payload"
   rm -rf "$work"
 }
@@ -382,7 +403,7 @@ test_release_checksum_dry_run_binary_mode_sums_entry_verifies() {
   assert_eq "0" "$rc" \
     "a binary-mode (asterisk-prefixed) SHA256SUMS entry must still verify and extract cleanly"
   assert_contains "$out" "OK" "sha256sum -c must report OK for a matching binary-mode entry"
-  assert_eq "real-scion-binary-payload" "$(cat "${work}/scion" 2>/dev/null || echo '<missing>')" \
+  assert_eq "real-scion-binary-payload" "$(_extracted_payload "$work")" \
     "tar -xzf must actually have extracted the verified tarball's payload"
   rm -rf "$work"
 }
@@ -411,7 +432,7 @@ test_release_checksum_dry_run_mismatched_tarball_fails_closed() {
   assert_true "$([[ "$rc" -ne 0 ]] && echo true || echo false)" \
     "a hash mismatch must fail the install command, not just warn"
   assert_contains "$out" "FAILED" "sha256sum -c must report FAILED for a mismatched tarball"
-  assert_true "$([[ ! -e "${work}/scion" ]] && echo true || echo false)" \
+  assert_true "$([[ -z "$(_extracted_payload "$work" quiet)" ]] && echo true || echo false)" \
     "tar -xzf must never have run against a tarball that failed verification"
   rm -rf "$work"
 }
@@ -438,7 +459,7 @@ test_release_checksum_dry_run_missing_entry_fails_closed() {
     "a SHA256SUMS with no matching entry must fail the install command"
   assert_contains "$out" "no checksum entry for scion-linux-amd64.tar.gz" \
     "the failure must name the missing entry explicitly, not just fail sha256sum -c"
-  assert_true "$([[ ! -e "${work}/scion" ]] && echo true || echo false)" \
+  assert_true "$([[ -z "$(_extracted_payload "$work" quiet)" ]] && echo true || echo false)" \
     "tar -xzf must never have run when the checksum entry itself was missing"
   rm -rf "$work"
 }
@@ -470,7 +491,7 @@ test_release_checksum_dry_run_missing_sums_asset_fails_closed() {
     "a missing SHA256SUMS asset at install time must fail the install command"
   assert_contains "$out" "could not download SHA256SUMS" \
     "the failure must say the checksums asset itself could not be fetched"
-  assert_true "$([[ ! -e "${work}/scion" ]] && echo true || echo false)" \
+  assert_true "$([[ -z "$(_extracted_payload "$work" quiet)" ]] && echo true || echo false)" \
     "tar -xzf must never have run when SHA256SUMS itself could not be downloaded"
   rm -rf "$work"
 }
@@ -510,7 +531,7 @@ test_release_checksum_dry_run_override_does_not_bypass_mismatch() {
     "ALLOW_UNVERIFIED_RELEASE=true must not let a hash mismatch through"
   assert_contains "$out" "FAILED" \
     "a mismatch under the override must still report FAILED from sha256sum -c"
-  assert_true "$([[ ! -e "${work}/scion" ]] && echo true || echo false)" \
+  assert_true "$([[ -z "$(_extracted_payload "$work" quiet)" ]] && echo true || echo false)" \
     "tar -xzf must never have run: a present-but-wrong checksum is never overridable"
   rm -rf "$work"
 }
@@ -540,7 +561,7 @@ test_release_checksum_dry_run_override_allows_missing_sums() {
     "ALLOW_UNVERIFIED_RELEASE=true must let a missing SHA256SUMS asset proceed to extraction"
   assert_contains "$out" "installing UNVERIFIED" \
     "the override path must print its own loud warning, not install silently"
-  assert_eq "real-scion-binary-payload" "$(cat "${work}/scion" 2>/dev/null || echo '<missing>')" \
+  assert_eq "real-scion-binary-payload" "$(_extracted_payload "$work")" \
     "extraction must actually have happened under the override"
   rm -rf "$work"
 }

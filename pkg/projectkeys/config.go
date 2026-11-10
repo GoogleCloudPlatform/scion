@@ -23,6 +23,11 @@ const (
 	EnvHubProjectID = "SCION_HUB_PROJECT_ID"
 
 	ProjectIDFile = "project-id"
+	// ProjectSlugFile holds the project's slug beside ProjectIDFile in a
+	// shared-backend project configuration directory
+	// (<ProjectRoot>/.scion/project-slug). The hub writes it; it is content,
+	// not identity.
+	ProjectSlugFile = "project-slug"
 
 	ProjectConfigsDir = "project-configs"
 	ProjectsDir       = "projects"

@@ -44,7 +44,7 @@ import (
 // ---------------------------------------------------------------------------
 
 func testSigningServer() *Server {
-	return &Server{downloadSigningKey: bytes.Repeat([]byte{0x42}, 32)}
+	return &Server{downloadKeys: fixedCapabilityKeys(bytes.Repeat([]byte{0x42}, 32))}
 }
 
 // signedFileRequest builds a GET for skillID/filePath@version carrying the
@@ -140,7 +140,7 @@ func TestSkillFileSignature_Verify(t *testing.T) {
 		assert.False(t, s.verifySkillFileSignature(valid, skillID, "1.0.1", path, now))
 	})
 	t.Run("different key", func(t *testing.T) {
-		other := &Server{downloadSigningKey: bytes.Repeat([]byte{0x43}, 32)}
+		other := &Server{downloadKeys: fixedCapabilityKeys(bytes.Repeat([]byte{0x43}, 32))}
 		assert.False(t, other.verifySkillFileSignature(valid, skillID, version, path, now))
 	})
 	t.Run("no key configured", func(t *testing.T) {
@@ -162,11 +162,11 @@ func TestSkillFileSignature_Verify(t *testing.T) {
 		// Moving a character across the id/version or version/path boundary
 		// must not produce the same MAC.
 		assert.NotEqual(t,
-			skillFileSignature(s.downloadSigningKey, "ab", "c", "d", 1),
-			skillFileSignature(s.downloadSigningKey, "a", "bc", "d", 1))
+			skillFileSignature(fixedKeyBytes(s.downloadKeys), "ab", "c", "d", 1),
+			skillFileSignature(fixedKeyBytes(s.downloadKeys), "a", "bc", "d", 1))
 		assert.NotEqual(t,
-			skillFileSignature(s.downloadSigningKey, "a", "b", "cd", 1),
-			skillFileSignature(s.downloadSigningKey, "a", "bc", "d", 1))
+			skillFileSignature(fixedKeyBytes(s.downloadKeys), "a", "b", "cd", 1),
+			skillFileSignature(fixedKeyBytes(s.downloadKeys), "a", "bc", "d", 1))
 	})
 }
 
@@ -252,19 +252,19 @@ func TestSignSkillFileDownloadURLs(t *testing.T) {
 
 func TestDownloadSigningKey_ProvisionedAndPersisted(t *testing.T) {
 	srv, _ := testServer(t)
-	require.Len(t, srv.downloadSigningKey, 32)
+	require.Len(t, fixedKeyBytes(srv.downloadKeys), 32)
 
 	// The key is dedicated: distinct from the agent and user token keys.
 	require.NotNil(t, srv.agentTokenService)
 	require.NotNil(t, srv.userTokenService)
-	assert.NotEqual(t, srv.agentTokenService.config.SigningKey, srv.downloadSigningKey)
-	assert.NotEqual(t, srv.userTokenService.config.SigningKey, srv.downloadSigningKey)
+	assert.NotEqual(t, srv.agentTokenService.config.SigningKey, fixedKeyBytes(srv.downloadKeys))
+	assert.NotEqual(t, srv.userTokenService.config.SigningKey, fixedKeyBytes(srv.downloadKeys))
 
 	// It is persisted: resolving the key again yields the same bytes, so
 	// URLs survive a Hub restart.
 	again, err := srv.ensureSigningKey(context.Background(), SecretKeyDownloadSigningKey, nil)
 	require.NoError(t, err)
-	assert.Equal(t, srv.downloadSigningKey, again)
+	assert.Equal(t, fixedKeyBytes(srv.downloadKeys), again)
 }
 
 func TestDownloadSigningKey_DerivedFromSharedSecret(t *testing.T) {
@@ -272,12 +272,12 @@ func TestDownloadSigningKey_DerivedFromSharedSecret(t *testing.T) {
 	b := &Server{config: ServerConfig{SharedSigningSecret: "shared"}}
 	require.NoError(t, a.initDownloadSigningKey(context.Background()))
 	require.NoError(t, b.initDownloadSigningKey(context.Background()))
-	require.Len(t, a.downloadSigningKey, 32)
+	require.Len(t, fixedKeyBytes(a.downloadKeys), 32)
 	// Replicas sharing the secret validate each other's URLs...
-	assert.Equal(t, a.downloadSigningKey, b.downloadSigningKey)
+	assert.Equal(t, fixedKeyBytes(a.downloadKeys), fixedKeyBytes(b.downloadKeys))
 	// ...and the key is domain-separated from the token keys.
-	assert.NotEqual(t, deriveSharedSigningKey("shared", SecretKeyAgentSigningKey), a.downloadSigningKey)
-	assert.NotEqual(t, deriveSharedSigningKey("shared", SecretKeyUserSigningKey), a.downloadSigningKey)
+	assert.NotEqual(t, deriveSharedSigningKey("shared", SecretKeyAgentSigningKey), fixedKeyBytes(a.downloadKeys))
+	assert.NotEqual(t, deriveSharedSigningKey("shared", SecretKeyUserSigningKey), fixedKeyBytes(a.downloadKeys))
 }
 
 // When the deployment requires stable keys, a missing download key fails
@@ -289,17 +289,17 @@ func TestDownloadSigningKey_FailFastWhenStableKeysRequired(t *testing.T) {
 	for _, scopeID := range []string{srv.hubID, "hub", ""} {
 		_ = srv.store.DeleteSecret(context.Background(), SecretKeyDownloadSigningKey, store.ScopeHub, scopeID)
 	}
-	srv.downloadSigningKey = nil
+	srv.downloadKeys = capabilityKeys{}
 	srv.config.RequireStableSigningKey = true
 	err := srv.initDownloadSigningKey(context.Background())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "download signing key")
-	assert.Nil(t, srv.downloadSigningKey)
+	assert.Nil(t, fixedKeyBytes(srv.downloadKeys))
 
 	// Without the stable-key requirement the same situation provisions a key.
 	srv.config.RequireStableSigningKey = false
 	require.NoError(t, srv.initDownloadSigningKey(context.Background()))
-	assert.Len(t, srv.downloadSigningKey, 32)
+	assert.Len(t, fixedKeyBytes(srv.downloadKeys), 32)
 }
 
 // ---------------------------------------------------------------------------
@@ -552,7 +552,7 @@ func TestSignedSkillFileURL_EndToEnd(t *testing.T) {
 	})
 
 	t.Run("signature from a different hub key is rejected", func(t *testing.T) {
-		other := &Server{downloadSigningKey: bytes.Repeat([]byte{0x01}, 32)}
+		other := &Server{downloadKeys: fixedCapabilityKeys(bytes.Repeat([]byte{0x01}, 32))}
 		forged := other.signDownloadURL(f.skillA.ID, "1.0.0", "SKILL.md", time.Now().Add(skillFileURLTTL))
 		target := "/api/v1/skills/" + f.skillA.ID + "/files/SKILL.md?raw=1&version=1.0.0&" + forged
 		assertDenied(t, f.brokerGet(target), "SECRET")

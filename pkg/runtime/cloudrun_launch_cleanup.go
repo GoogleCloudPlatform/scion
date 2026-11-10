@@ -205,9 +205,17 @@ func cloudRunSleep(ctx context.Context, d time.Duration) error {
 }
 
 // parent returns the runtime's resource parent,
-// projects/<project>/locations/<location>.
+// projects/<project>/locations/<location>: the project number
+// BindProjectNumber bound (a flat instance, after its scope probe),
+// otherwise the configured project ID.
 func (r *CloudRunRuntime) parent() string {
-	return fmt.Sprintf("projects/%s/locations/%s", r.config.ProjectID, r.config.Location)
+	r.resolveMu.Lock()
+	project, location := r.config.ProjectID, r.config.Location
+	if r.projectNumber != "" {
+		project = r.projectNumber
+	}
+	r.resolveMu.Unlock()
+	return fmt.Sprintf("projects/%s/locations/%s", project, location)
 }
 
 // DeleteResource deletes the Cloud Run instance an async launch reported
@@ -254,6 +262,7 @@ func (r *CloudRunRuntime) DeleteResource(ctx context.Context, h api.ResourceHand
 	if parent := r.parent(); h.Namespace != parent {
 		return fmt.Errorf("cloudrun: instance %s is in %q, not this runtime's %q; not deleting it", h.Name, h.Namespace, parent)
 	}
+	defer r.forgetExecKey(h.Name)
 
 	start := time.Now()
 	budget, cancel := context.WithTimeout(ctx, cloudRunCleanupBudget)

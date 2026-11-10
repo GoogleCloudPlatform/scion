@@ -313,6 +313,7 @@ func initBareRepo(t *testing.T) string {
 	run("-C", wc, "add", "-A")
 	run("-C", wc, "commit", "-m", "init")
 	run("-C", wc, "push", "origin", "main")
+	provision.AllowLocalCloneFixture(t, bare)
 	return bare
 }
 
@@ -1067,6 +1068,12 @@ func TestDeleteAgentFiles_ProvisionAgentAttachToUserWorktree_NeverRemoved(t *tes
 	if _, _, _, err := ProvisionAgent(context.Background(), "agent-x", "default", "", "", scionDir, "", "created", branch, ""); err != nil {
 		t.Fatalf("provision agent-x (attach to user-created worktree): %v", err)
 	}
+	// Provisioning records, broker-side, that the attached worktree is the
+	// agent's own checkout, so its .scion is not treated as project
+	// configuration.
+	if agentDir := config.ResolveAgentDir(scionDir, "agent-x"); !isAgentOwnWorkspace(agentDir, scionDir, userWorktree) {
+		t.Errorf("attached worktree %s not recorded as the agent's own (agent dir %s, record %q)", userWorktree, agentDir, readAgentOwnWorkspace(agentDir))
+	}
 
 	root, err := util.RepoRootDir(projectDir)
 	if err != nil {
@@ -1090,6 +1097,11 @@ func TestDeleteAgentFiles_ProvisionAgentAttachToUserWorktree_NeverRemoved(t *tes
 	}
 	if _, err := os.Stat(filepath.Join(userWorktree, ".git")); err != nil {
 		t.Errorf("user-created worktree must survive teardown of its last scion-tracked sharer: %v", err)
+	}
+	// Deleting the agent removes its attached-worktree record with its
+	// state dir.
+	if got := readAgentOwnWorkspace(config.ResolveAgentDir(scionDir, "agent-x")); got != "" {
+		t.Errorf("attached-worktree record %q survives the agent's deletion", got)
 	}
 }
 

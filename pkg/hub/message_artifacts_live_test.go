@@ -254,7 +254,7 @@ func TestLiveChatArtifacts_BrokerDeliveryCarriesRecordedRefsOnly(t *testing.T) {
 	proxy.recordArtifactRefs = f.srv.recordMessageArtifacts
 	// The member fan-out hook gets the same references as the event.
 	var fannedOut [][]artifacts.MessageRef
-	proxy.memberFanout = func(_ context.Context, _ *store.Message, _ []AttachmentRef, refs []artifacts.MessageRef) {
+	proxy.memberFanout = func(_ context.Context, _ *store.Message, _ []AttachmentRef, refs []artifacts.MessageRef, _ ...ChatEventOption) {
 		fannedOut = append(fannedOut, refs)
 	}
 

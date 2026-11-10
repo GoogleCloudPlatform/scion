@@ -84,12 +84,14 @@ unconditional. The output is discarded; this is the call, not a use.
 {{- $_ := include "scion-hub.agentNamespace" . }}
 {{- /*
 workspaceStorage.nfs, validated, or empty when disabled. Read here for the
-volume and the mount, and by scion-hub.settings for server.workspace_storage -
+volume and the mount, and by scion-hub.settings for server.project_storage -
 one define, so the mount path is mount_root/shares[0].id by construction. Called
 from this always-rendered template so its guards also run under
 config.existingSecret.
 */}}
 {{- $nfsWs := include "scion-hub.nfsWorkspace" . | fromYaml }}
+{{- /* conduit.internalTls, validated, or empty when disabled. */}}
+{{- $relayTls := include "scion-hub.relayTls" . | fromYaml }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -97,6 +99,17 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "scion-hub.labels" . | nindent 4 }}
+  {{- /*
+  Set only when the image check applies (the relay wiring is on, or config.extra
+  sets a non-loopback relay listener) and the image could not be checked
+  against the minimum hub release for relay TLS (scion-hub.relayImageCheck),
+  so the unverified state is visible on the object, not only in NOTES.txt.
+  Deployment metadata, not the pod template, so it never rolls the pods.
+  */}}
+  {{- if eq (include "scion-hub.relayImageCheck" .) "unverified" }}
+  annotations:
+    scion.io/relay-tls-image-check: unverified
+  {{- end }}
 spec:
   replicas: {{ .Values.replicaCount }}
   strategy:
@@ -215,6 +228,16 @@ spec:
         {{- end }}
     spec:
       serviceAccountName: {{ include "scion-hub.serviceAccountName" . }}
+      {{- /*
+      default 45, not a bare int: an explicit null (--set ...=null, or null or ~
+      in a values file) makes Helm delete the key, so the schema has nothing to
+      check (its minimum of 1 never runs) and int of nil renders 0, an
+      immediate SIGKILL with no drain. 0 itself is refused by the schema before
+      this line, so default only ever replaces the deleted key. 45 is the
+      values.yaml default (hub.terminationGracePeriodSeconds); keep the two
+      equal. hack/verify.sh compares the null render with the default render.
+      */}}
+      terminationGracePeriodSeconds: {{ int (default 45 .Values.hub.terminationGracePeriodSeconds) }}
       {{- with .Values.image.pullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -351,6 +374,26 @@ spec:
                 fieldRef:
                   fieldPath: metadata.name
             {{- end }}
+            {{- /*
+            The pod IP, from which the hub derives the relay endpoint it
+            advertises to the other nodes (https://POD_IP:<port>) when
+            conduit.internalTls is enabled. Skipped when hub.extraEnv sets
+            POD_IP itself, so the env list never carries the name twice.
+            */}}
+            {{- if $relayTls }}
+            {{- $userPodIP := false }}
+            {{- range $entry := .Values.hub.extraEnv }}
+            {{- if eq (toString (dig "name" "" $entry)) "POD_IP" }}
+            {{- $userPodIP = true }}
+            {{- end }}
+            {{- end }}
+            {{- if not $userPodIP }}
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            {{- end }}
+            {{- end }}
             {{- with .Values.hub.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -358,6 +401,12 @@ spec:
             - name: http
               containerPort: {{ .Values.hub.webPort }}
               protocol: TCP
+            {{- /* Declared for the pod spec only; the chart's Service never exposes it. */}}
+            {{- if $relayTls }}
+            - name: relay-tls
+              containerPort: {{ $relayTls.port }}
+              protocol: TCP
+            {{- end }}
           {{- /*
           Called OUTSIDE the if, and unconditionally, because the disabled case is
           one of the two things it checks. Inside the if, probes.startup.enabled=false
@@ -446,13 +495,27 @@ spec:
             {{- /*
             The NFS workspace share, at exactly <mount_root>/<shares[0].id> from
             the rendered settings: the path the hub's /readyz requires to exist
-            when server.workspace_storage.backend is nfs. Not a
+            when server.project_storage.backend is nfs. Not a
             subPath - the hub needs the whole export, since agent trees live at
             <subpath_root>/<project>/... beneath it.
             */}}
             {{- if $nfsWs }}
             - name: workspace-nfs
               mountPath: {{ $nfsWs.mountPath | quote }}
+            {{- end }}
+            {{- /*
+            The relay hop's certificate and CA, as whole directories and not
+            by subPath: a subPath mount never sees a rotated Secret. The hub
+            re-reads the certificate and key when they change; it reads the CA
+            once at startup, so a CA change needs a rolling restart.
+            */}}
+            {{- if $relayTls }}
+            - name: relay-tls
+              mountPath: {{ $relayTls.certDir | quote }}
+              readOnly: true
+            - name: relay-tls-ca
+              mountPath: {{ $relayTls.caDir | quote }}
+              readOnly: true
             {{- end }}
         {{- /*
         THE FALLBACK PLACEMENT, for clusters below 1.29 where restartPolicy on
@@ -504,9 +567,10 @@ spec:
               - key: settings.yaml
                 path: settings.yaml
         {{- /*
-        Inline nfs, not a PVC: the hub needs only the mount, and the claim
-        agents use (workspaceStorage.nfs.pvName) lives in the agent namespace,
-        which may not be this one. GKE Autopilot allows the nfs volume type.
+        Inline nfs, not a PVC: the hub needs only the mount. When
+        workspaceStorage.nfs.pvName is set, it names a claim in the agent
+        namespace, which may not be this one; when it is empty, agent pods
+        mount the share inline too. GKE Autopilot allows the nfs volume type.
         No fsGroup is set for it - see the defaultMode note above for why.
         */}}
         {{- if $nfsWs }}
@@ -515,6 +579,28 @@ spec:
             server: {{ $nfsWs.server | quote }}
             path: {{ $nfsWs.export | quote }}
             readOnly: false
+        {{- end }}
+        {{- /*
+        0444 for the same reason as the settings volume above: the pod runs as
+        a non-root uid and Secret volumes are projected root:root.
+        */}}
+        {{- if $relayTls }}
+        - name: relay-tls
+          secret:
+            secretName: {{ $relayTls.secret }}
+            defaultMode: 0444
+            items:
+              - key: tls.crt
+                path: tls.crt
+              - key: tls.key
+                path: tls.key
+        - name: relay-tls-ca
+          secret:
+            secretName: {{ $relayTls.caSecret }}
+            defaultMode: 0444
+            items:
+              - key: {{ $relayTls.caKey }}
+                path: ca.crt
         {{- end }}
       {{- with .Values.hub.nodeSelector }}
       nodeSelector:

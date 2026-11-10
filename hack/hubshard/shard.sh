@@ -28,6 +28,11 @@
 #       Compile shard K (go test -c), check that the binary's test list is
 #       exactly what hubshard -list K expects, then run that binary (no
 #       second compile), skipping the common files' tests outside shard 1.
+#       The binary runs with -test.v; its stdout is rebuilt as without
+#       -test.v and followed by a sorted summary of the skipped top-level
+#       tests (run_skip_summary in lib.sh). Pass/fail and the exit status
+#       are unchanged; stdout is rebuilt from -test.v and matches the
+#       non-verbose output except in the cases documented there.
 #       Running the binary skips the vet checks go test runs before a test
 #       (go test's built-in vet pass). CI vets every shard fully (make
 #       vet-hub-shard; make hubshard-parity checks those vets cover every
@@ -37,8 +42,8 @@
 #       Compile shard K only (binary discarded).
 #   shard.sh vet K
 #       go vet shard K with -tags no_sqlite and with -tags 'integration
-#       volume_test tzcontract': together, the shards' vets cover every
-#       file the module-wide vets (make lint, make vet-integration) cover.
+#       tzcontract': together, the shards' vets cover every file the
+#       module-wide vets (make lint, make vet-integration) cover.
 #   shard.sh postgres K|all TAGS TEST...
 #       Run the named tests (the shard binary with -test.v and -test.run)
 #       in the shard that holds each (in every shard holding one for
@@ -147,13 +152,17 @@ compile() {
 # once and running the binary avoids a second compile and link of the
 # shard (go test would relink it). The
 # exit status is the binary's: non-zero on a failed test, a panic or
-# -test.timeout. Prints an ok/FAIL line like go test's.
+# -test.timeout. Prints an ok/FAIL line like go test's. With
+# skip_summary set, the binary runs under run_skip_summary (lib.sh), which
+# adds a summary of the skipped tests before that line; pass/fail and the
+# exit status are unchanged.
+skip_summary=
 run_binary() {
 	local bin=$1 label=$2 start rc
 	shift 2
 	start=$(date +%s)
 	rc=0
-	(cd pkg/hub && step env PATH="$goroot_bin:$PATH" ${run_gogc:+GOGC="$run_gogc"} "$bin" -test.paniconexit0 "$@") || rc=$?
+	(cd pkg/hub && ${skip_summary:+run_skip_summary} step env PATH="$goroot_bin:$PATH" ${run_gogc:+GOGC="$run_gogc"} "$bin" -test.paniconexit0 "$@") || rc=$?
 	if [ "$rc" -eq 0 ]; then
 		echo "ok  	$label	$(($(date +%s) - start))s"
 	else
@@ -189,13 +198,13 @@ test)
 
 	skip=$(hubshard -tags "$nosqlite" -skip "$shard")
 	echo "== run pkg/hub shard $shard (the binary checked above)"
-	run_binary "$tmp/bin/hub.test" "pkg/hub shard $shard (tags: $(with_tags "$shard" "$nosqlite"))" \
+	skip_summary=1 run_binary "$tmp/bin/hub.test" "pkg/hub shard $shard (tags: $(with_tags "$shard" "$nosqlite"))" \
 		-test.count=1 -test.timeout="$timeout" ${skip:+-test.skip="$skip"}
 	;;
 
 vet)
 	[ $# -eq 0 ] || usage
-	for extra in no_sqlite integration,volume_test,tzcontract; do
+	for extra in no_sqlite integration,tzcontract; do
 		echo "== go vet pkg/hub shard $shard (tags: $(with_tags "$shard" "$extra"))"
 		step env GOGC="$build_gogc" go vet -p "$par" -overlay "$overlay" -tags "$(with_tags "$shard" "$extra")" ./pkg/hub
 	done

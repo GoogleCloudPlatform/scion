@@ -21,6 +21,7 @@ import {
   TERMINAL_SESSION_COUNT_EVENT,
   TERMINAL_DRAG_MIME,
   TERMINAL_PALETTE_NEW_AGENT_EVENT,
+  TERMINAL_PANE_DIALOG_OPEN_EVENT,
   type TerminalSessionCountDetail,
   type TerminalPaletteNewAgentDetail,
 } from './terminal-workspace-events.js';
@@ -44,6 +45,7 @@ import {
   getTestInfraStatus,
   loadTestInfraStatus,
 } from './test-infra-status.js';
+import { noteShownEntry } from './navigation.js';
 
 interface RailEntry {
   session: TerminalSession;
@@ -439,6 +441,7 @@ export class TerminalWorkspaceRoot {
     // buildRailFooter) or the keyboard shortcut (handleGlobalKeydown).
     document.addEventListener('keydown', this.handleGlobalKeydown);
     document.addEventListener('focusin', this.handleGlobalFocusIn);
+    this.element.addEventListener(TERMINAL_PANE_DIALOG_OPEN_EVENT, this.handlePaneDialogOpen);
 
     this.shell.append(this.rail, this.createPaneArea());
     this.testHubBannerHost.className = 'terminal-test-hub-banner';
@@ -783,6 +786,7 @@ export class TerminalWorkspaceRoot {
     window.removeEventListener(TEST_INFRA_STATUS_EVENT, this.handleTestInfraStatus);
     document.removeEventListener('keydown', this.handleGlobalKeydown);
     document.removeEventListener('focusin', this.handleGlobalFocusIn);
+    this.element.removeEventListener(TERMINAL_PANE_DIALOG_OPEN_EVENT, this.handlePaneDialogOpen);
     this.releasePaletteAgents();
     this.touchQuery?.removeEventListener?.('change', this.handleTouchQueryChange);
     this.paletteHost.dispose();
@@ -1021,6 +1025,20 @@ export class TerminalWorkspaceRoot {
     if (this.paletteHost.hasUnrelatedModalOpen()) return;
     e.preventDefault();
     this.openPalette();
+  };
+
+  /**
+   * A pane dialog that opens while the palette is open or pending (such as
+   * the secret-conflict dialog, when a capture request returns) closes the
+   * palette, so two modals are never open together. The close does not
+   * refocus the palette's invoker: the pane dialog takes focus. A dialog in
+   * an off-screen pane is not visible, so it leaves the palette open, as
+   * {@link QuickPaletteHost.hasUnrelatedModalOpen} ignores it.
+   */
+  private readonly handlePaneDialogOpen = (e: Event): void => {
+    if (!this.paletteHost.isOpen) return;
+    if (e.target instanceof Element && e.target.closest('[hidden]')) return;
+    this.paletteHost.hide();
   };
 
   /**
@@ -2154,6 +2172,7 @@ export class TerminalWorkspaceRoot {
     // Only update if URL actually changed
     if (newUrl !== window.location.pathname + window.location.search) {
       window.history.replaceState(window.history.state, '', newUrl);
+      noteShownEntry();
     }
   }
 
@@ -2695,6 +2714,23 @@ export class TerminalWorkspaceRoot {
           border-right: 0;
           border-bottom: 1px solid var(--scion-border, #e2e8f0);
         }
+      }
+      /* While an on-screen keyboard is up (ptone/scion#5059) the screen is
+         the terminal and the keyboard. client/viewport.ts detects the
+         keyboard and sets html[data-keyboard='open'] (iOS Safari, where it
+         also shrinks the frame to the visible height, and Android Chrome,
+         where resizes-content shrinks the frame itself); the panes refit to
+         what is left through their own ResizeObserver. Nothing hidden here holds a text field, so
+         hiding it cannot blur the field that raised the keyboard. */
+      html[data-keyboard='open'] #terminal-workspace > .terminal-test-hub-banner,
+      html[data-keyboard='open'] #terminal-workspace > scion-header,
+      html[data-keyboard='open'] #terminal-workspace .terminal-rail,
+      html[data-keyboard='open'] #terminal-workspace .terminal-layout-bar {
+        display: none;
+      }
+      html[data-keyboard='open'] #terminal-workspace .terminal-workspace-shell {
+        grid-template-columns: minmax(0, 1fr);
+        grid-template-rows: minmax(0, 1fr);
       }
     `;
     this.element.appendChild(style);

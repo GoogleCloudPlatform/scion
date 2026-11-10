@@ -26,6 +26,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -482,9 +483,9 @@ func TestCreateAgent_WiresProvisionedWorktreeRepoRootOntoStartContext(t *testing
 			return "mock-id", nil
 		},
 	}
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.ForceRuntime = "docker"
-	srv := New(cfg, agent.NewManager(mockRT), mockRT)
+	srv := New(cfg, agent.NewManager(mockRT), mockRT, config.RuntimeBuildRecord{})
 
 	body := `{
 		"name": "agent-a",
@@ -634,10 +635,10 @@ func TestCreateAgent_ProvisionOnlyThenStart_RepoRootSurvives(t *testing.T) {
 			return "mock-id", nil
 		},
 	}
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.ForceRuntime = "docker"
 	mgr := agent.NewManager(mockRT)
-	srv := New(cfg, mgr, mockRT)
+	srv := New(cfg, mgr, mockRT, config.RuntimeBuildRecord{})
 
 	body := `{
 		"name": "agent-a",

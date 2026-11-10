@@ -16,7 +16,16 @@
 
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 import { apiFetch } from '../../client/api.js';
-import { BROKER_RESTART_HINT, registryPrefill } from './onboarding.js';
+import {
+  BROKER_RESTART_HINT,
+  registryPrefill,
+  welcomeProjectLabel,
+  welcomeResultNote,
+  type WelcomePhase,
+  type WelcomePreview,
+  type WelcomeResult,
+} from './onboarding.js';
+import { WELCOME_PROJECT_FLAG, setFeatureFlag } from '../../utils/feature-flags.js';
 import {
   MEMBERSHIP_CHANGED_EVENT,
   type MembershipChangedDetail,
@@ -29,6 +38,7 @@ vi.mock('../../client/api.js', async (importOriginal) => {
 
 /** The workspace step's state and handlers, reached past their private modifiers. */
 interface OnboardingPage extends HTMLElement {
+  loading: boolean;
   currentStep: number;
   error: string | null;
   wsProjectName: string;
@@ -39,10 +49,20 @@ interface OnboardingPage extends HTMLElement {
   gcloudADCAvailable: boolean;
   autoInjectGcloudADC: boolean;
   selectedHarnesses: Set<string>;
+  harnessConfigs: Array<{ slug: string }>;
+  harnessLoadFailed: boolean;
+  loadHarnessConfigs(): Promise<void>;
+  handleSaveRegistryAndNext(): Promise<void>;
   handleHarnessesNext(): Promise<void>;
   registryInput: string;
   brokerRestartNeeded: boolean;
   handleSaveRegistry(): Promise<void>;
+  welcomePhase: WelcomePhase;
+  welcomePreview: WelcomePreview | null;
+  welcomeError: string | null;
+  welcomeResult: WelcomeResult | null;
+  handleWelcomeContinue(): Promise<void>;
+  handleWelcomeSkip(): Promise<void>;
   updateComplete: Promise<boolean>;
 }
 
@@ -302,5 +322,364 @@ describe('onboarding registry step: pre-fill', () => {
     const p = registryPrefill({ imageRegistry: 'old.example/scion' });
     expect(p.input).toBe('old.example/scion');
     expect(p.fromNodeEnv).toBe(false);
+  });
+});
+
+describe('onboarding harness step: harness config list', () => {
+  const listPath = '/api/v1/harness-configs?scope=global&status=active';
+  const configs = [
+    {
+      id: 'hc-1',
+      name: 'claude',
+      slug: 'claude',
+      harness: 'claude',
+      status: 'active',
+      scope: 'global',
+    },
+    {
+      id: 'hc-2',
+      name: 'codex',
+      slug: 'codex',
+      harness: 'codex',
+      status: 'active',
+      scope: 'global',
+    },
+  ];
+
+  function listCalls(): number {
+    return vi.mocked(apiFetch).mock.calls.filter((c) => c[0] === listPath).length;
+  }
+
+  afterEach(() => {
+    sessionStorage.clear();
+  });
+
+  it('a resume that lands on the harness step lists the harness configs', async () => {
+    // A reload after the restart the registry step asks for: onboarding was
+    // started and the status reports harnesses seeded.
+    sessionStorage.setItem('onboardingStarted', 'true');
+    sessionStorage.setItem(
+      'onboardingStatus',
+      JSON.stringify({ identitySet: true, runtimeOK: true, harnessesSeeded: true })
+    );
+    vi.mocked(apiFetch).mockImplementation((path) =>
+      Promise.resolve(
+        path === listPath ? jsonResponse({ harnessConfigs: configs }) : jsonResponse({}, 404)
+      )
+    );
+    const el = createPage();
+    document.body.appendChild(el);
+    try {
+      await vi.waitFor(() => {
+        expect(el.shadowRoot?.querySelector('.harness-list')).not.toBeNull();
+      });
+      await el.updateComplete;
+
+      expect(el.currentStep).toBe(4);
+      expect(listCalls()).toBe(1);
+      expect(el.harnessConfigs.map((hc) => hc.slug)).toEqual(['claude', 'codex']);
+      expect(el.error).toBeNull();
+      const listed = el.shadowRoot?.querySelector('.harness-list')?.textContent ?? '';
+      expect(listed).toContain('claude');
+      expect(listed).toContain('codex');
+    } finally {
+      el.remove();
+    }
+  });
+
+  it('a failed list request shows an actionable error and a retry, not an empty list', async () => {
+    vi.mocked(apiFetch).mockImplementation((path) =>
+      Promise.resolve(
+        path === listPath
+          ? jsonResponse({ error: { message: 'harness configs unavailable' } }, 500)
+          : jsonResponse({}, 404)
+      )
+    );
+    const el = createPage();
+    document.body.appendChild(el);
+    try {
+      await vi.waitFor(() => {
+        expect(el.shadowRoot?.querySelector('.loading-state')).toBeNull();
+      });
+      await el.loadHarnessConfigs();
+      el.currentStep = 4;
+      await el.updateComplete;
+
+      expect(el.harnessConfigs).toEqual([]);
+      expect(el.harnessLoadFailed).toBe(true);
+      expect(el.error).toBe(
+        'harness configs unavailable (HTTP 500). Retry, or check the server log.'
+      );
+      expect(el.shadowRoot?.querySelector('.error-banner')?.textContent).toContain(
+        'harness configs unavailable'
+      );
+      const retry = el.shadowRoot?.querySelector<HTMLElement>('.harness-load-retry');
+      expect(retry).not.toBeNull();
+
+      // The retry loads the list again; a success clears the error.
+      vi.mocked(apiFetch).mockImplementation((path) =>
+        Promise.resolve(
+          path === listPath ? jsonResponse({ harnessConfigs: configs }) : jsonResponse({}, 404)
+        )
+      );
+      retry!.click();
+      await vi.waitFor(() => {
+        expect(el.harnessConfigs.map((hc) => hc.slug)).toEqual(['claude', 'codex']);
+      });
+      expect(el.error).toBeNull();
+      expect(el.harnessLoadFailed).toBe(false);
+    } finally {
+      el.remove();
+    }
+  });
+
+  it('a failed list request without a message shows the fallback error', async () => {
+    const el = createPage();
+    respond(new Response('bad gateway', { status: 502 }));
+
+    await el.loadHarnessConfigs();
+
+    expect(el.error).toBe(
+      'Failed to load harness configurations (HTTP 502). Retry, or check the server log.'
+    );
+    expect(el.harnessLoadFailed).toBe(true);
+  });
+
+  it('saving the registry and going on loads the list once', async () => {
+    vi.mocked(apiFetch).mockImplementation((path) => {
+      if (path === listPath) return Promise.resolve(jsonResponse({ harnessConfigs: configs }));
+      if (path === '/api/v1/system/registry') return Promise.resolve(jsonResponse({ ok: true }));
+      if (path === '/api/v1/system/status') {
+        return Promise.resolve(jsonResponse({ complete: false, embeddedBrokerID: 'b-1' }));
+      }
+      return Promise.resolve(jsonResponse({}, 404));
+    });
+    const el = createPage();
+    el.currentStep = 3;
+    el.registryInput = 'ghcr.io/example';
+
+    await el.handleSaveRegistryAndNext();
+    await vi.waitFor(() => {
+      expect(el.harnessConfigs.map((hc) => hc.slug)).toEqual(['claude', 'codex']);
+    });
+
+    expect(el.currentStep).toBe(4);
+    expect(listCalls()).toBe(1);
+  });
+});
+
+describe('onboarding welcome project step', () => {
+  const preview: WelcomePreview = {
+    preview_id: 'p'.repeat(64),
+    expires_at: '2026-11-08T12:30:00Z',
+    source: { repo: 'scion-frontiers/agent-team', path: 'templates', sha: 'a'.repeat(40) },
+    manifest: {
+      agent_team_repo: 'scion-frontiers/agent-team',
+      agent_team_sha: 'a'.repeat(40),
+      skills: [{ repo: 'addyosmani/agent-skills', ref: 'v1', sha: 'b'.repeat(40) }],
+      templates: ['coordinator', 'developer'],
+      files_sha256: 'sha256:' + 'c'.repeat(64),
+    },
+    file_count: 9,
+  };
+
+  /** Answers each path with a fresh response from routes; anything else is 404. */
+  function route(routes: Record<string, () => Response>): void {
+    vi.mocked(apiFetch).mockImplementation((path) => {
+      const make = routes[path];
+      return Promise.resolve(make ? make() : jsonResponse({}, 404));
+    });
+  }
+
+  function paths(): unknown[] {
+    return vi.mocked(apiFetch).mock.calls.map((c) => c[0]);
+  }
+
+  function createWelcomePage(): OnboardingPage {
+    const el = createPage();
+    el.currentStep = 4;
+    el.selectedHarnesses = new Set(['claude']);
+    return el;
+  }
+
+  /**
+   * Connects the page and waits for its own initialize() to finish: the
+   * page's `loading` state, not a selector, because right after connect the
+   * shadow root is still empty and a selector check would pass at once.
+   */
+  async function mount(el: OnboardingPage): Promise<string> {
+    document.body.appendChild(el);
+    await vi.waitFor(() => {
+      expect(el.loading).toBe(false);
+    });
+    await el.updateComplete;
+    return el.shadowRoot?.textContent ?? '';
+  }
+
+  afterEach(() => {
+    delete window.__SCION_FEATURES__?.[WELCOME_PROJECT_FLAG];
+    document.querySelectorAll('scion-page-onboarding').forEach((n) => n.remove());
+  });
+
+  it('is not shown, and the hub is not asked, while the flag is off', async () => {
+    setFeatureFlag(WELCOME_PROJECT_FLAG, false);
+    const el = createWelcomePage();
+    route({ '/api/v1/system/init': () => jsonResponse({}) });
+
+    await el.handleHarnessesNext();
+
+    expect(el.currentStep).toBe(5);
+    expect(el.welcomePhase).toBe('off');
+    expect(paths()).toEqual(['/api/v1/system/init']);
+  });
+
+  it('shows the pinned shas, then Continue installs that preview', async () => {
+    setFeatureFlag(WELCOME_PROJECT_FLAG, true);
+    const el = createWelcomePage();
+    route({
+      '/api/v1/system/init': () => jsonResponse({}),
+      '/api/v1/system/welcome/preview': () => jsonResponse(preview),
+      '/api/v1/system/welcome/install': () =>
+        jsonResponse({ state: 'started', project_id: 'p-welcome', agent_id: 'a-1' }),
+    });
+
+    await el.handleHarnessesNext();
+    expect(el.currentStep).toBe(5);
+    expect(el.welcomePhase).toBe('preview');
+
+    const text = await mount(el);
+    expect(text).toContain('a'.repeat(40));
+    expect(text).toContain('b'.repeat(40));
+    expect(text).toContain('addyosmani/agent-skills');
+
+    await el.handleWelcomeContinue();
+    const install = vi
+      .mocked(apiFetch)
+      .mock.calls.find((c) => c[0] === '/api/v1/system/welcome/install');
+    expect(install?.[1]?.method).toBe('POST');
+    expect(JSON.parse(install?.[1]?.body as string)).toEqual({ preview_id: preview.preview_id });
+    expect(el.welcomePhase).toBe('done');
+    expect(el.welcomeResult?.state).toBe('started');
+    expect(heard).toEqual([{ kind: 'project', id: 'p-welcome' }]);
+  });
+
+  it('a failed preview shows the reason and offers only Next', async () => {
+    setFeatureFlag(WELCOME_PROJECT_FLAG, true);
+    const el = createWelcomePage();
+    route({
+      '/api/v1/system/init': () => jsonResponse({}),
+      '/api/v1/system/welcome/preview': () =>
+        jsonResponse(
+          { error: { message: 'skill repository evil/x is not on the allow-list' } },
+          422
+        ),
+    });
+
+    await el.handleHarnessesNext();
+
+    expect(el.welcomePhase).toBe('failed');
+    expect(el.welcomeError).toContain('allow-list');
+    const text = await mount(el);
+    expect(text).toContain('allow-list');
+    const labels = [...(el.shadowRoot?.querySelectorAll('sl-button') ?? [])].map((b) =>
+      b.textContent?.trim()
+    );
+    expect(labels).toEqual(['Next']);
+  });
+
+  it('a failed install shows the reason and offers only Next', async () => {
+    setFeatureFlag(WELCOME_PROJECT_FLAG, true);
+    const el = createWelcomePage();
+    route({
+      '/api/v1/system/init': () => jsonResponse({}),
+      '/api/v1/system/welcome/preview': () => jsonResponse(preview),
+      '/api/v1/system/welcome/install': () =>
+        jsonResponse({ error: { message: 'the staged templates changed after the preview' } }, 422),
+    });
+
+    await el.handleHarnessesNext();
+    expect(el.welcomePhase).toBe('preview');
+    await mount(el);
+
+    await el.handleWelcomeContinue();
+
+    expect(paths()).toContain('/api/v1/system/welcome/install');
+    expect(el.welcomePhase).toBe('failed');
+    expect(el.welcomeError).toContain('changed after the preview');
+    expect(el.welcomeResult).toBeNull();
+    expect(heard).toEqual([]);
+    await el.updateComplete;
+    const text = el.shadowRoot?.textContent ?? '';
+    expect(text).toContain('changed after the preview');
+    const labels = [...(el.shadowRoot?.querySelectorAll('sl-button') ?? [])].map((b) =>
+      b.textContent?.trim()
+    );
+    expect(labels).toEqual(['Next']);
+  });
+
+  it('Skip records the skip and goes on to the workspace', async () => {
+    setFeatureFlag(WELCOME_PROJECT_FLAG, true);
+    const el = createWelcomePage();
+    route({
+      '/api/v1/system/init': () => jsonResponse({}),
+      '/api/v1/system/welcome/preview': () => jsonResponse(preview),
+      '/api/v1/system/welcome/skip': () => jsonResponse({ state: 'skipped' }),
+    });
+
+    await el.handleHarnessesNext();
+    await el.handleWelcomeSkip();
+
+    expect(paths()).toContain('/api/v1/system/welcome/skip');
+    expect(paths()).not.toContain('/api/v1/system/welcome/install');
+    expect(el.welcomePhase).toBe('done');
+    expect(el.welcomeResult).toBeNull();
+  });
+
+  it('an already-run step goes straight on to the workspace', async () => {
+    setFeatureFlag(WELCOME_PROJECT_FLAG, true);
+    const el = createWelcomePage();
+    route({
+      '/api/v1/system/init': () => jsonResponse({}),
+      '/api/v1/system/welcome/preview': () =>
+        jsonResponse({ error: { code: 'welcome_project_done' } }, 409),
+    });
+
+    await el.handleHarnessesNext();
+
+    expect(el.welcomePhase).toBe('done');
+    expect(el.currentStep).toBe(5);
+  });
+
+  it('Skip is disabled while the preview is loading', async () => {
+    setFeatureFlag(WELCOME_PROJECT_FLAG, true);
+    const el = createWelcomePage();
+    route({});
+    await mount(el);
+    el.currentStep = 5;
+    el.welcomePhase = 'loading';
+    await el.updateComplete;
+    const skip = [...(el.shadowRoot?.querySelectorAll('sl-button') ?? [])].find(
+      (b) => b.textContent?.trim() === 'Skip'
+    );
+    expect(skip?.hasAttribute('disabled')).toBe(true);
+  });
+
+  it('names the project as actually created', () => {
+    expect(
+      welcomeProjectLabel({
+        state: 'started',
+        project_slug: 'welcome-1',
+        project_name: 'welcome (1)',
+      })
+    ).toBe('welcome (1)');
+    expect(welcomeProjectLabel({ state: 'started', project_slug: 'welcome-1' })).toBe('welcome-1');
+    expect(welcomeProjectLabel(null)).toBe('welcome');
+  });
+
+  it('explains a coordinator that was not started', () => {
+    expect(welcomeResultNote({ state: 'pending_credentials' })).toContain('no credentials');
+    expect(welcomeResultNote({ state: 'pending_broker' })).toContain('no runtime broker');
+    expect(welcomeResultNote({ state: 'started' })).toBe('');
+    expect(welcomeResultNote(null)).toBe('');
   });
 });

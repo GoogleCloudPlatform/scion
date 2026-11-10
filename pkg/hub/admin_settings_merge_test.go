@@ -408,16 +408,17 @@ func TestHandlePutServerConfig_DepthTwoPartialUpdateKeepsSiblings(t *testing.T) 
 }
 
 // When the merged result fails validateMergedServerSections, the PUT is a
-// 400 and settings.yaml is left byte-identical.
+// 422 validation_error and settings.yaml is left byte-identical.
 func TestHandlePutServerConfig_MergedValidationRejectsWithoutWriting(t *testing.T) {
 	stored := storedServerSettings + `  home_storage:
     backend: local
     leaf: bogus
 `
 	rr, settingsPath := putFileModeServerConfig(t, stored, `{"server":{"home_storage":{"backend":"local"}}}`)
-	if rr.Code != http.StatusBadRequest {
-		t.Fatalf("PUT: status %d, want 400: %s", rr.Code, rr.Body.String())
+	if rr.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("PUT: status %d, want 422: %s", rr.Code, rr.Body.String())
 	}
+	settingsErrorEntries(t, rr)
 	data, err := os.ReadFile(settingsPath)
 	if err != nil {
 		t.Fatal(err)

@@ -17,14 +17,56 @@ package hubclient
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 )
+
+func TestArtifactWrite_AuthErrorClosesFile(t *testing.T) {
+	for _, operation := range []string{"Publish", "UploadFile"} {
+		t.Run(operation, func(t *testing.T) {
+			file, err := os.CreateTemp(t.TempDir(), "artifact-body-*")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = file.Close() })
+			if _, err := file.WriteString("payload"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := file.Seek(0, io.SeekStart); err != nil {
+				t.Fatal(err)
+			}
+			rt := &countingErrorRoundTripper{err: errors.New("unexpected transport call")}
+			client, err := New("https://hub.invalid", WithHMACAuth("", nil), WithRetry(3, 0),
+				WithHTTPClient(&http.Client{Transport: rt}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if operation == "Publish" {
+				_, err = client.Artifacts().Publish(t.Context(), &PublishArtifactRequest{
+					Name: "notes.txt", Content: file, Size: 7,
+				})
+			} else {
+				err = client.Artifacts().UploadFile(t.Context(), "artifact-1", 1, "notes.txt", file, 7, "")
+			}
+			if err == nil || !strings.Contains(err.Error(), "HMAC auth requires brokerID and secretKey") {
+				t.Fatalf("error = %v; want HMAC validation error", err)
+			}
+			if calls := atomic.LoadInt32(&rt.calls); calls != 0 {
+				t.Errorf("transport calls = %d; want 0", calls)
+			}
+			if _, err := file.Read(make([]byte, 1)); !errors.Is(err, os.ErrClosed) {
+				t.Errorf("reading artifact file after auth failure: %v; want os.ErrClosed", err)
+			}
+		})
+	}
+}
 
 func TestArtifactPublish(t *testing.T) {
 	var calls atomic.Int32
@@ -147,6 +189,112 @@ func TestArtifactOpenFileRedirectDropsCredentials(t *testing.T) {
 	b, _ := io.ReadAll(rc)
 	if string(b) != "object bytes" {
 		t.Errorf("body %q", b)
+	}
+}
+
+// TestArtifactOpenFile_RedirectHTTPSOnly checks that an object-store redirect
+// is followed only over https, unless the hub itself is reached over plain http
+// (a local development hub), matching fetchRedirect's contract.
+func TestArtifactOpenFile_RedirectHTTPSOnly(t *testing.T) {
+	objects := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("object bytes"))
+	}))
+	defer objects.Close()
+
+	// HTTPS hub redirecting to plain http object store:
+	httpsHub := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, objects.URL+"/blob", http.StatusFound)
+	}))
+	defer httpsHub.Close()
+
+	c, err := New(httpsHub.URL, WithHTTPClient(httpsHub.Client()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Artifacts().OpenFile(context.Background(), "id-1", 0, "a.png"); !errors.Is(err, errArtifactRedirect) {
+		t.Fatalf("https hub following plain http redirect: got err %v, want errArtifactRedirect", err)
+	}
+
+	// Plain http hub redirecting to plain http object store (dev):
+	httpHub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, objects.URL+"/blob", http.StatusFound)
+	}))
+	defer httpHub.Close()
+
+	c2, err := New(httpHub.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc, err := c2.Artifacts().OpenFile(context.Background(), "id-1", 0, "a.png")
+	if err != nil {
+		t.Fatalf("plain http hub failed to follow plain http redirect: %v", err)
+	}
+	_ = rc.Close()
+
+	// Other schemes (e.g. ftp) are refused:
+	ftpHub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "ftp://objects.example.com/blob", http.StatusFound)
+	}))
+	defer ftpHub.Close()
+
+	c3, _ := New(ftpHub.URL)
+	if _, err := c3.Artifacts().OpenFile(context.Background(), "id-1", 0, "a.png"); !errors.Is(err, errArtifactRedirect) {
+		t.Fatalf("ftp redirect: got err %v, want errArtifactRedirect", err)
+	}
+}
+
+// TestArtifactOpenFile_NoSubsequentRedirect checks that the object-store client
+// does not follow further redirects from the object store.
+func TestArtifactOpenFile_NoSubsequentRedirect(t *testing.T) {
+	third := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("third party server should not be requested")
+		_, _ = w.Write([]byte("third bytes"))
+	}))
+	defer third.Close()
+
+	object := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, third.URL+"/blob", http.StatusFound)
+	}))
+	defer object.Close()
+
+	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, object.URL+"/blob", http.StatusFound)
+	}))
+	defer hub.Close()
+
+	c, _ := New(hub.URL)
+	if _, err := c.Artifacts().OpenFile(context.Background(), "id-1", 0, "a.png"); err == nil || !strings.Contains(err.Error(), "unexpected status") {
+		t.Fatalf("object store redirect followed: got %v, want unexpected status error", err)
+	}
+}
+
+// TestArtifactOpenFile_CustomClient_NoSubsequentRedirect checks that when a custom
+// objectClient is configured on artifactService, it also enforces the redirect policy
+// and does not follow subsequent redirects.
+func TestArtifactOpenFile_CustomClient_NoSubsequentRedirect(t *testing.T) {
+	third := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("third party server should not be requested")
+		_, _ = w.Write([]byte("third bytes"))
+	}))
+	defer third.Close()
+
+	object := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, third.URL+"/blob", http.StatusFound)
+	}))
+	defer object.Close()
+
+	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, object.URL+"/blob", http.StatusFound)
+	}))
+	defer hub.Close()
+
+	c, _ := New(hub.URL)
+	svc := &artifactService{
+		c:            c.(*client),
+		objectClient: &http.Client{},
+	}
+	if _, err := svc.OpenFile(context.Background(), "id-1", 0, "a.png"); err == nil || !strings.Contains(err.Error(), "unexpected status") {
+		t.Fatalf("object store redirect followed with custom client: got %v, want unexpected status error", err)
 	}
 }
 
@@ -309,7 +457,7 @@ func TestArtifactMintView(t *testing.T) {
 // (ptone/scion#4579).
 func TestArtifactGrantCalls(t *testing.T) {
 	var seen []string
-	var putBody map[string]string
+	var putBody map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		seen = append(seen, r.Method+" "+r.URL.Path)
 		switch {
@@ -332,9 +480,12 @@ func TestArtifactGrantCalls(t *testing.T) {
 	if err != nil || len(list.Grants) != 1 || !list.Grants[0].Home || list.Grants[0].SubjectKind != "scope" || !list.CrossProjectSharing {
 		t.Fatalf("ListGrants = %+v, %v", list, err)
 	}
-	g, err := c.Artifacts().PutGrant(ctx, "id-1", &ArtifactGrantRequest{SubjectKind: "principal", SubjectRef: "user:u1", Permission: "write"})
-	if err != nil || g.ID != "g2" || g.Permission != "write" {
-		t.Fatalf("PutGrant = %+v, %v", g, err)
+	res, err := c.Artifacts().PutGrant(ctx, "id-1", &ArtifactGrantRequest{SubjectKind: "principal", SubjectRef: "user:u1", Permission: "write"})
+	if err != nil || res.Grant.ID != "g2" || res.Grant.Permission != "write" || res.Notified || res.NotifySkipped != "" {
+		t.Fatalf("PutGrant = %+v, %v", res, err)
+	}
+	if _, ok := putBody["notify"]; ok {
+		t.Errorf("put body without notify sends the key: %v", putBody)
 	}
 	if putBody["subjectKind"] != "principal" || putBody["subjectRef"] != "user:u1" || putBody["permission"] != "write" {
 		t.Errorf("put body = %v", putBody)
@@ -345,5 +496,32 @@ func TestArtifactGrantCalls(t *testing.T) {
 	want := []string{"GET /api/v1/artifacts/id-1/grants", "POST /api/v1/artifacts/id-1/grants", "DELETE /api/v1/artifacts/id-1/grants/g 2"}
 	if strings.Join(seen, "|") != strings.Join(want, "|") {
 		t.Errorf("requests = %q", seen)
+	}
+}
+
+// TestArtifactGrantNotify: PutGrant sends notify when asked and decodes the
+// response's notified and notifySkipped (ptone/scion#5145).
+func TestArtifactGrantNotify(t *testing.T) {
+	var putBody map[string]any
+	answer := `{"grant":{"id":"g3","subjectKind":"principal","subjectRef":"user:u2","permission":"review"},"notified":true}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&putBody)
+		w.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(w, answer)
+	}))
+	defer srv.Close()
+	c, _ := New(srv.URL)
+	req := &ArtifactGrantRequest{SubjectKind: "principal", SubjectRef: "user:u2", Permission: "review", Notify: true}
+	res, err := c.Artifacts().PutGrant(context.Background(), "id-1", req)
+	if err != nil || res.Grant.ID != "g3" || !res.Notified || res.NotifySkipped != "" {
+		t.Fatalf("PutGrant = %+v, %v", res, err)
+	}
+	if putBody["notify"] != true {
+		t.Errorf("put body = %v, want notify true", putBody)
+	}
+	answer = `{"grant":{"id":"g3","subjectKind":"principal","subjectRef":"user:u2","permission":"review"},"notifySkipped":"not_permitted"}`
+	res, err = c.Artifacts().PutGrant(context.Background(), "id-1", req)
+	if err != nil || res.Notified || res.NotifySkipped != "not_permitted" {
+		t.Fatalf("PutGrant skipped = %+v, %v", res, err)
 	}
 }

@@ -296,6 +296,16 @@ func TestFlatCreate_PassthroughGateUsesTargetType(t *testing.T) {
 	allowed, pinnedProfile = f.srv.hubDefaultPassthroughAllowed(context.Background(), k8s.ID, f.project.ID, "agent", "")
 	assert.False(t, allowed, "a kubernetes target is not a local container runtime")
 	assert.Empty(t, pinnedProfile)
+
+	// A cloudrun target is denied too: the gate stays limited to the docker
+	// and podman runtime types (amendment P5-CR, E-10).
+	cr := &store.RuntimeBroker{ID: tid("flat-cr-" + t.Name()), Name: "flat-cr", Slug: "flat-cr", Status: store.BrokerStatusOnline,
+		Endpoint: "http://cr.invalid", RuntimeTarget: &api.RuntimeTargetDescriptor{ID: tid("flat-cr-target-" + t.Name()), Type: "cloudrun"}}
+	require.NoError(t, f.s.CreateRuntimeBroker(context.Background(), cr))
+	f.srv.SetEmbeddedBrokerID(cr.ID)
+	allowed, pinnedProfile = f.srv.hubDefaultPassthroughAllowed(context.Background(), cr.ID, f.project.ID, "agent", "")
+	assert.False(t, allowed, "a cloudrun target is not a local container runtime")
+	assert.Empty(t, pinnedProfile)
 }
 
 func TestFlatCreate_PinsPlacementAndSendsExpectedTarget(t *testing.T) {
@@ -532,7 +542,9 @@ func TestFlatCreate_UnlinkedFlatBrokerNotAutoLinked(t *testing.T) {
 
 func TestFlatCreate_ExplicitLinkThenCreateWithBrokerIDOnly(t *testing.T) {
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true})
-	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/projects/"+f.project.ID+"/providers", AddProviderRequest{BrokerID: f.flat.ID})
+	// The link gives the remote broker its own checkout of the hub-managed
+	// project; one without a path is refused at create (ptone/scion#5813).
+	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/projects/"+f.project.ID+"/providers", AddProviderRequest{BrokerID: f.flat.ID, LocalPath: fixtureProviderCheckout(t)})
 	require.Truef(t, rec.Code == http.StatusOK || rec.Code == http.StatusCreated, "explicit link: %d %s", rec.Code, rec.Body.String())
 	assert.Contains(t, f.providerIDs(t, f.project.ID), f.flat.ID)
 

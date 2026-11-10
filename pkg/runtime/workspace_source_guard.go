@@ -21,6 +21,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/brokercontrol"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/fsutil"
 )
@@ -224,6 +225,17 @@ func validateHostPathSource(source, kind string, allowedScionHomeSubtree func(re
 		// attempting the allow list against a spelling it wasn't computed
 		// for. A source outside ~/.scion by any spelling is unaffected.
 		return "", fmt.Errorf("%s source %q is not an allowed %s path", kind, source, kind)
+	}
+
+	// No workspace or agent-home source may reach a Runtime Broker control
+	// path (brokercontrol). The ~/.scion floor and allow list above already
+	// keep a source clear of the control files inside ~/.scion; this adds
+	// the control paths registered outside it and the file-identity
+	// comparisons. Every caller of this function (binds, syncs, uploads)
+	// inherits it.
+	if _, err := brokercontrol.CheckNamed(source); err != nil {
+		logControlPathRefusal(err)
+		return "", err
 	}
 
 	var usableRoots []string

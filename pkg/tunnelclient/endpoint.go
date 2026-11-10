@@ -21,16 +21,19 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/util/urlredact"
 )
 
 // RedactEndpoint returns the hub endpoint as it is shown in status
 // records, status output and error lines: scheme, host, port and path
 // only, never userinfo, a query or a fragment, with trailing slashes
-// removed. An endpoint that does not parse as a URL with a host is shown
-// as "the configured hub endpoint".
+// removed. An endpoint that does not parse as a URL with a host, or that
+// holds an '@' the shared user info rule cannot place
+// (urlredact.HostAndPath), is shown as "the configured hub endpoint".
 func RedactEndpoint(endpoint string) string {
-	u, err := url.Parse(strings.TrimSpace(endpoint))
-	if err != nil || u.Scheme == "" || u.Host == "" {
+	u, ok := urlredact.HostAndPath(strings.TrimSpace(endpoint))
+	if !ok || u.Scheme == "" || u.Host == "" {
 		return "the configured hub endpoint"
 	}
 	r := url.URL{Scheme: u.Scheme, Host: u.Host, Path: strings.TrimRight(u.Path, "/")}
@@ -38,11 +41,12 @@ func RedactEndpoint(endpoint string) string {
 }
 
 // NormalizeEndpoint returns the form of a hub endpoint used to identify a
-// session locally: the redacted endpoint (RedactEndpoint) with scheme and
-// host lowercased and the scheme's default port dropped. It follows the
-// CLI's rule for comparing hub URLs. Input that is not a URL with a host
-// gives "invalid:" and a short digest of the input, so different invalid
-// inputs never compare equal and no input text is kept.
+// session locally: the redacted endpoint (RedactEndpoint) with the ASCII
+// letters of scheme and host lowercased and the scheme's default port
+// dropped. It follows the CLI's rule for comparing hub URLs. Input that is
+// not a URL with a host gives "invalid:" and a short digest of the input,
+// so different invalid inputs never compare equal and no input text is
+// kept.
 //
 // Normalisation here is for session reuse and comparison. The CLI's
 // credential lookup normalises endpoints with config.NormalizeEndpoint;
@@ -57,8 +61,8 @@ func NormalizeEndpoint(endpoint string) string {
 		sum := sha256.Sum256([]byte(strings.ToLower(s)))
 		return "invalid:" + hex.EncodeToString(sum[:8])
 	}
-	u.Scheme = strings.ToLower(u.Scheme)
-	host := strings.ToLower(u.Hostname())
+	u.Scheme = asciiLower(u.Scheme)
+	host := asciiLower(u.Hostname())
 	port := u.Port()
 	if (u.Scheme == "https" && port == "443") || (u.Scheme == "http" && port == "80") {
 		port = ""
@@ -75,37 +79,67 @@ func NormalizeEndpoint(endpoint string) string {
 	return r.String()
 }
 
+// asciiLower returns s with only its ASCII letters lowercased, as
+// config.NormalizeEndpoint lowercases a hub URL: Unicode case mapping would
+// fold some characters into ASCII ones (U+212A KELVIN SIGN becomes "k") and
+// give two different hosts one key.
+func asciiLower(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if 'A' <= c && c <= 'Z' {
+			b[i] = c + ('a' - 'A')
+		}
+	}
+	return string(b)
+}
+
+// scrubMask replaces what scrubEndpoint masks.
+const scrubMask = "***"
+
+// scrubMinLen is the length below which scrubEndpoint does not mask a part
+// of the endpoint on its own, as urlredact does (its minSecretLen): masking
+// a shorter string would rewrite unrelated text.
+const scrubMinLen = 3
+
 // scrubEndpoint removes the endpoint's userinfo, query and fragment from
-// text (for example, a transport error that quotes the URL).
+// text (for example, a transport error that quotes the URL, or the conduit
+// URL built from it), by the shared rule (urlredact.RedactURLIn): the
+// endpoint is shown by its scheme, host, port and path. An endpoint that
+// urlredact.HostAndPath rejects (it does not parse, or holds an '@' the
+// rule cannot place) is shown as its scheme and scrubMask. When the
+// endpoint parses, accepted or not, its credential (a password, or a user
+// name given without one), its whole query and every query value, of
+// scrubMinLen bytes or more, are also masked wherever they appear on their
+// own.
 func scrubEndpoint(text, endpoint string) string {
-	u, err := url.Parse(strings.TrimSpace(endpoint))
+	ep := strings.TrimSpace(endpoint)
+	shown := urlredact.MaskWhole(ep, scrubMask)
+	if u, ok := urlredact.HostAndPath(ep); ok {
+		shown = u.String()
+	}
+	text = urlredact.RedactURLIn(text, ep, shown, scrubMask)
+	u, err := url.Parse(ep)
 	if err != nil {
 		return text
 	}
+	var secrets []string
+	// The credential: the password, or a user name given without one,
+	// which may itself be a token (as urlredact.RedactUserInfo reads it).
 	if u.User != nil {
-		name := u.User.Username()
-		text = strings.ReplaceAll(text, u.User.String()+"@", "")
-		text = strings.ReplaceAll(text, name+":***@", "")
-		if name != "" {
-			text = strings.ReplaceAll(text, name+"@", "")
+		secret, hasPassword := u.User.Password()
+		if !hasPassword {
+			secret = u.User.Username()
 		}
-		if pw, ok := u.User.Password(); ok && pw != "" {
-			text = strings.ReplaceAll(text, pw, "***")
-		}
+		secrets = append(secrets, secret)
 	}
-	if u.RawQuery != "" {
-		text = strings.ReplaceAll(text, "?"+u.RawQuery, "")
-		text = strings.ReplaceAll(text, u.RawQuery, "")
-		for _, vs := range u.Query() {
-			for _, v := range vs {
-				if len(v) >= 3 {
-					text = strings.ReplaceAll(text, v, "***")
-				}
-			}
-		}
+	secrets = append(secrets, u.RawQuery)
+	for _, vs := range u.Query() {
+		secrets = append(secrets, vs...)
 	}
-	if u.Fragment != "" {
-		text = strings.ReplaceAll(text, "#"+u.EscapedFragment(), "")
+	for _, v := range secrets {
+		if len(v) >= scrubMinLen {
+			text = strings.ReplaceAll(text, v, scrubMask)
+		}
 	}
 	return text
 }

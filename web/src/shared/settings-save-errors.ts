@@ -19,21 +19,30 @@
  * the settings pages can show them next to the field or section they concern
  * (ptone/scion#3923).
  *
- * The hub sends two envelopes:
+ * The hub answers every settings save error with the nested envelope
+ * `{error: {code, message, details?}}` (ptone/scion#4450):
  *
- * - flat: `{error: "<code>", message?, errors?, keys?, conflicted?}`, used by
- *   the server-config PUT for `validation_failed` (400, `errors` maps a
- *   settings section to `[{Path, Message}]`, where Path is a JSON pointer
- *   inside that section's document), `revision_conflict` (409) and
- *   `layer0_rejected` / `*_keys_rejected` (422, `keys` lists koanf paths);
- * - nested: `{error: {code, message, details?}}`, from the Go writeError
- *   helper, used for `validation_error` (422) and everything else.
+ * - `validation_error` (422): `details.errors` lists
+ *   `{section?, field, path?, message}` entries, where `field` is the koanf
+ *   path of the field, and `details.field` is the first entry's field;
+ * - `revision_conflict` (409): `details.conflicted` lists
+ *   `{section, expected_revision, current_revision}`, next to the save
+ *   report of the sections written before the conflict (`applied_keys`,
+ *   `pending_restart`, `skipped`);
+ * - `layer0_rejected` / `*_keys_rejected` (422): `details.keys` lists koanf
+ *   paths.
+ *
+ * Earlier hubs sent some of these flat, `{error: "<code>", message?,
+ * errors?, keys?, conflicted?, applied_keys?, pending_restart?, skipped?}`,
+ * with `validation_failed` (400, `errors` mapping a settings section to
+ * `[{Path, Message}]`, Path a JSON pointer inside that section's document).
+ * Both envelopes and both codes are still accepted.
  *
  * Field keys are koanf paths (for example `server.hub.public_url`). Entry
- * keys are accepted capitalized (`Path`, `Message`, as the hub encodes them
- * today) or lowercase (`path`, `field`, `message`). Field names are never
- * parsed out of message text: an error without a structured field is shown
- * as a section-level summary.
+ * keys are accepted capitalized (`Path`, `Message`) or lowercase (`path`,
+ * `field`, `message`); an entry's `field` is a koanf path. Field names
+ * are never parsed out of message text: an error without a structured
+ * field is shown as a section-level summary.
  */
 
 export type SettingsSaveErrorKind = 'validation' | 'conflict' | 'layer0' | 'generic';
@@ -54,6 +63,12 @@ export interface SettingsConflict {
   current_revision?: number | undefined;
 }
 
+/** A key saved but not in use, with the reason (409 `skipped`). */
+export interface SettingsSkippedKey {
+  key: string;
+  reason: string;
+}
+
 export interface SettingsSaveError {
   kind: SettingsSaveErrorKind;
   status: number;
@@ -67,6 +82,14 @@ export interface SettingsSaveError {
   keys: string[];
   /** Conflicted sections (kind 'conflict'). */
   conflicted: SettingsConflict[];
+  /**
+   * Keys of the sections written before the conflict (kind 'conflict'),
+   * from the 409 body (ptone/scion#4467): applied to the running hub now,
+   * saved but taking effect only after a restart, and saved but not in use.
+   */
+  appliedKeys: string[];
+  pendingRestart: string[];
+  skipped: SettingsSkippedKey[];
 }
 
 export interface SettingsErrorContext {
@@ -104,6 +127,11 @@ export function sectionPathsFromSchema(body: unknown): Record<string, string[]> 
     if (strings.length > 0) out[name] = strings;
   }
   return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/** The non-empty strings of v when it is an array, else []. */
+function stringList(v: unknown): string[] {
+  return Array.isArray(v) ? v.filter((k): k is string => typeof k === 'string' && k !== '') : [];
 }
 
 function str(v: unknown): string | null {
@@ -186,8 +214,18 @@ function entryFromUnknown(
   if (!isRecord(raw)) return null;
   const message = str(raw.Message) ?? str(raw.message);
   if (!message) return null;
-  const path = str(raw.Path) ?? str(raw.path) ?? str(raw.field) ?? str(raw.key) ?? '';
-  return { section, key: resolveFieldKey(section, path, ctx), path, message };
+  const entrySection = str(raw.section) ?? section;
+  // A `field` is the koanf path the hub resolved. It is normalized through
+  // the section mapping when one is known (a section-relative field, as
+  // older bodies sent, resolves too), and otherwise only to the dotted form
+  // ("a[0].b" is "a.0.b").
+  const field = str(raw.field);
+  if (field) {
+    const key = resolveFieldKey(entrySection, field, ctx) ?? fallbackFieldKey(null, field) ?? field;
+    return { section: entrySection, key, path: str(raw.path) ?? field, message };
+  }
+  const path = str(raw.Path) ?? str(raw.path) ?? str(raw.key) ?? '';
+  return { section: entrySection, key: resolveFieldKey(entrySection, path, ctx), path, message };
 }
 
 /** Reads a section->entries map or an entries list into field errors. */
@@ -220,6 +258,13 @@ function nestedValidationEntries(
   ctx: SettingsErrorContext
 ): SettingsFieldError[] {
   const section = str(details?.section) ?? ctx.defaultSection ?? null;
+  // An entry list (`details.errors` of objects) names every failing field.
+  // A list of strings (older hubs) only adds messages to the summary.
+  const listedEntries =
+    details && Array.isArray(details.errors) && details.errors.some(isRecord)
+      ? collectEntries(details.errors, { ...ctx, defaultSection: section ?? undefined })
+      : null;
+  if (listedEntries && listedEntries.length > 0) return listedEntries;
   const field = str(details?.field) ?? str(details?.path) ?? str(details?.key);
   if (field && message) {
     return [{ section, key: resolveFieldKey(section, field, ctx), path: field, message }];
@@ -250,6 +295,9 @@ export function classifySettingsError(
     fieldErrors: [],
     keys: [],
     conflicted: [],
+    appliedKeys: [],
+    pendingRestart: [],
+    skipped: [],
   };
   if (!isRecord(body)) return result;
 
@@ -286,7 +334,9 @@ export function classifySettingsError(
 
   if (result.code === 'revision_conflict') {
     result.kind = 'conflict';
-    const list = Array.isArray(body.conflicted) ? body.conflicted : [];
+    // Nested (details) or flat (older hubs) conflict members.
+    const src: Record<string, unknown> = details ?? body;
+    const list = Array.isArray(src.conflicted) ? src.conflicted : [];
     result.conflicted = list
       .filter(isRecord)
       .filter((c) => typeof c.section === 'string')
@@ -296,6 +346,14 @@ export function classifySettingsError(
           typeof c.expected_revision === 'number' ? c.expected_revision : undefined,
         current_revision: typeof c.current_revision === 'number' ? c.current_revision : undefined,
       }));
+    // The sections written before the conflict stay saved; their keys are
+    // reported like a successful save's (ptone/scion#4467).
+    result.appliedKeys = stringList(src.applied_keys);
+    result.pendingRestart = stringList(src.pending_restart);
+    result.skipped = (Array.isArray(src.skipped) ? src.skipped : [])
+      .filter(isRecord)
+      .filter((k) => typeof k.key === 'string' && k.key !== '')
+      .map((k) => ({ key: k.key as string, reason: typeof k.reason === 'string' ? k.reason : '' }));
     return result;
   }
 

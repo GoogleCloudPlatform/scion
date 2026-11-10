@@ -15,12 +15,17 @@
 package runtimebroker
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
+
+// errNoLaunchMarkerProject is returned by launchMarkersDir for an empty project
+// path.
+var errNoLaunchMarkerProject = errors.New("launch marker: no project path")
 
 // launchMarkersDir returns "<project .scion dir>/launch-markers" (design
 // t1-async-create-v11.md §3.8.2 step 5.2, F5): a sibling of the agents root
@@ -40,7 +45,15 @@ import (
 // shared-workspace git project, the agents root (and so the marker root) is
 // the external per-project directory, not a path under the resolved project
 // dir.
+// An empty projectPath is refused (errNoLaunchMarkerProject): resolving it
+// would fall back to the broker process's working directory or the global
+// project, which is never a launch's project. Every writer already skips an
+// empty path, so this keeps a read or removal from reaching another
+// project's markers (ptone/scion#5186 review).
 func launchMarkersDir(projectPath string, sharedWorkspace bool) (string, error) {
+	if projectPath == "" {
+		return "", errNoLaunchMarkerProject
+	}
 	projectDir, err := config.GetResolvedProjectDir(projectPath)
 	if err != nil {
 		return "", err

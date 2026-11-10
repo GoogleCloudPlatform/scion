@@ -483,6 +483,47 @@ type OnboardingStatus struct {
 	ImageRegistrySaveable string `json:"imageRegistrySaveable,omitempty"`
 }
 
+// harnessesSeeded reports whether at least one active global harness config
+// exists: the rows the setup wizard's harness step lists, the same query as
+// its request (GET /api/v1/harness-configs?scope=global&status=active). A
+// directory under globalDir/harness-configs with no row does not count when
+// bootstrap could have created one.
+//
+// Where no row can be created for the directory, the directory counts (a
+// subdirectory holding config.yaml), so the onboarding status is never held
+// incomplete on a hub that cannot seed: without a store, without a storage
+// backend (bootstrap skips) and after a bootstrap, workstation or hosted,
+// that could not load the built-in seed ledger. A store error also falls
+// back to the directory rather than reading as not seeded.
+func (s *Server) harnessesSeeded(ctx context.Context, globalDir string) bool {
+	hcDir := filepath.Join(globalDir, "harness-configs")
+	if s.store == nil {
+		return countHarnessConfigDirs(hcDir) > 0
+	}
+	result, err := s.store.ListHarnessConfigs(ctx, store.HarnessConfigFilter{
+		Scope:  store.HarnessConfigScopeGlobal,
+		Status: store.HarnessConfigStatusActive,
+	}, store.ListOptions{Limit: 1, SkipTotalCount: true})
+	if err != nil {
+		// The UI polls this status: WARN once per failure streak.
+		logf := s.resourceLog.Debug
+		if !s.harnessListWarned.Swap(true) {
+			logf = s.resourceLog.Warn
+		}
+		logf("onboarding status: listing harness configs failed; counting the harness-configs directory",
+			"dir", hcDir, "error", err)
+		return countHarnessConfigDirs(hcDir) > 0
+	}
+	s.harnessListWarned.Store(false)
+	if result != nil && len(result.Items) > 0 {
+		return true
+	}
+	if s.GetStorage() == nil || s.harnessSeedLedgerFailed.Load() {
+		return countHarnessConfigDirs(hcDir) > 0
+	}
+	return false
+}
+
 func (s *Server) computeOnboardingStatus(ctx context.Context) OnboardingStatus {
 	var status OnboardingStatus
 
@@ -509,16 +550,7 @@ func (s *Server) computeOnboardingStatus(ctx context.Context) OnboardingStatus {
 	_, detectErr := config.DetectLocalRuntime()
 	status.RuntimeOK = detectErr == nil
 
-	// HarnessesSeeded: at least one harness-config exists
-	harnessConfigsDir := filepath.Join(globalDir, "harness-configs")
-	if entries, err := os.ReadDir(harnessConfigsDir); err == nil {
-		for _, e := range entries {
-			if e.IsDir() {
-				status.HarnessesSeeded = true
-				break
-			}
-		}
-	}
+	status.HarnessesSeeded = s.harnessesSeeded(ctx, globalDir)
 
 	// HasWorkspace: at least one project in the store
 	if s.store != nil {
@@ -746,6 +778,9 @@ type imagePullResponse struct {
 	JobID string `json:"jobId"`
 }
 
+// systemImagePuller is the signature of runtime.PullImages.
+type systemImagePuller func(ctx context.Context, rt runtime.Runtime, harnesses []string, registry, tag string, onEvent func(runtime.PullResult)) error
+
 func (s *Server) handleSystemImagesPull(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w, http.MethodPost)
@@ -776,6 +811,9 @@ func (s *Server) handleSystemImagesPull(w http.ResponseWriter, r *http.Request) 
 	}
 
 	registry := s.resolveImageRegistry()
+	// The harness images take the hub-scope image_tag (ptone/scion#6625);
+	// "" when none applies (imageTagStateOf).
+	imageTag := s.hubScopeImageTag()
 	if registry == "" {
 		s.imagePullActive.Store(false)
 		writeError(w, http.StatusUnprocessableEntity, ErrCodeUnprocessable, "image_registry is not configured — run 'scion config set --global image_registry <registry>' or reinstall via Homebrew", nil)
@@ -787,10 +825,14 @@ func (s *Server) handleSystemImagesPull(w http.ResponseWriter, r *http.Request) 
 	rt := runtime.GetRuntime(systemRuntimeProjectPath, "")
 
 	requestedHarnesses := req.Harnesses
+	pull := s.systemImagePull
+	if pull == nil {
+		pull = runtime.PullImages
+	}
 
 	go func() {
 		defer s.imagePullActive.Store(false)
-		if err := runtime.PullImages(s.ctx, rt, requestedHarnesses, registry, func(pr runtime.PullResult) {
+		if err := pull(s.ctx, rt, requestedHarnesses, registry, imageTag, func(pr runtime.PullResult) {
 			s.events.PublishRaw("system.images."+jobID, pr)
 		}); err != nil {
 			s.events.PublishRaw("system.images."+jobID, map[string]string{

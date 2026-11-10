@@ -74,10 +74,15 @@ func NormalizeKubernetesAPIServer(server string) string {
 	return strings.ToLower(u.Scheme) + "://" + strings.ToLower(u.Hostname()) + ":" + port + strings.TrimRight(u.Path, "/")
 }
 
-// scopeIdentity returns the identity string of a scope: the Docker daemon ID,
-// or the Kubernetes cluster UID plus namespace. Endpoints, API server URLs,
-// context aliases and credentials are never part of it.
-func scopeIdentity(s ExecutionScope) (string, error) {
+// ScopeIdentity returns the normative identity string of a scope:
+// "docker:<daemon ID>", "kubernetes:<cluster UID>/<namespace>" or
+// "cloudrun:<project number>/<region>". Endpoints, API server URLs, context
+// aliases, project IDs, service accounts, networks and credentials are never
+// part of it. A scope without its identity fields is
+// ErrExecutionScopeUnidentified. It is the one source of the scope identity:
+// VerifyScope compares it, and the host groups instances by it
+// (brokerhost.ScopeKey).
+func ScopeIdentity(s ExecutionScope) (string, error) {
 	switch s.Type {
 	case TargetTypeDocker:
 		if s.Docker == nil || strings.TrimSpace(s.Docker.DaemonID) == "" {
@@ -89,25 +94,32 @@ func scopeIdentity(s ExecutionScope) (string, error) {
 			return "", fmt.Errorf("%w: kubernetes scope needs a cluster UID and a namespace", ErrExecutionScopeUnidentified)
 		}
 		return "kubernetes:" + s.Kubernetes.ClusterUID + "/" + s.Kubernetes.Namespace, nil
+	case TargetTypeCloudRun:
+		if s.CloudRun == nil || strings.TrimSpace(s.CloudRun.ProjectNumber) == "" || strings.TrimSpace(s.CloudRun.Region) == "" {
+			return "", fmt.Errorf("%w: cloudrun scope needs a project number and a region", ErrExecutionScopeUnidentified)
+		}
+		return "cloudrun:" + s.CloudRun.ProjectNumber + "/" + s.CloudRun.Region, nil
 	default:
 		return "", fmt.Errorf("%w: unknown scope type %q", ErrExecutionScopeUnidentified, s.Type)
 	}
 }
 
 // VerifyScope compares a recorded execution scope with the one observed at
-// start. Only identity fields count: a changed Docker endpoint or Kubernetes
-// API server URL with the same daemon ID or cluster UID and namespace is the
-// same target. A different identity, or an observed scope without one, is an
+// start. Only identity fields count: a changed Docker endpoint, Kubernetes
+// API server URL or Cloud Run project ID with the same daemon ID, cluster
+// UID and namespace, or project number and region, is the same target (the
+// recorded project ID is kept; LoadOrCreate logs the accepted alias without
+// its values). A different identity, or an observed scope without one, is an
 // error; existing placement is never re-pointed.
 func VerifyScope(recorded, observed ExecutionScope) error {
-	want, err := scopeIdentity(recorded)
+	want, err := ScopeIdentity(recorded)
 	if err != nil {
 		return fmt.Errorf("recorded scope: %w", err)
 	}
 	if observed.Type != recorded.Type {
 		return fmt.Errorf("%w: recorded type %q, observed %q", ErrExecutionScopeChanged, recorded.Type, observed.Type)
 	}
-	got, err := scopeIdentity(observed)
+	got, err := ScopeIdentity(observed)
 	if err != nil {
 		return err
 	}

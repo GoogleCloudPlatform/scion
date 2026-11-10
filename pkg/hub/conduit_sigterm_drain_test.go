@@ -118,3 +118,62 @@ func TestConduitSIGTERMDrain_NoRelay(t *testing.T) {
 	f := newConduitFixture(t)
 	f.srv.DrainConduitForShutdown(10*time.Second, true)
 }
+
+// TestConduitShutdownDrain_CapWhicheverPathFirst (ptone/scion#5105 timing,
+// defence in depth for ptone/scion#5054): with shutdown_grace = 10s
+// recorded (SetConduitShutdownGrace), the GoAway drain_deadline_ms is
+// 8000 (grace - 2s) whichever relay shutdown path runs first: the SIGTERM
+// drain, or the teardown's shutdownConduitRelay alone, as when the server
+// context was cancelled without the pre-cancel step. Without a recorded
+// grace the teardown's drain keeps the unchanged 30000.
+func TestConduitShutdownDrain_CapWhicheverPathFirst(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		setGrace bool
+		first    string
+		wantMs   uint32
+	}{
+		{name: "teardown path first, grace set", setGrace: true, first: "teardown", wantMs: 8000},
+		{name: "SIGTERM drain first, grace set", setGrace: true, first: "sigterm", wantMs: 8000},
+		{name: "teardown path, grace unset", setGrace: false, first: "teardown", wantMs: 30000},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newRelayFixture(t, nil)
+			_, _, goAways := dialRecordingGoAway(t, f)
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if tc.setGrace {
+				f.srv.SetConduitShutdownGrace(10 * time.Second)
+			}
+			// The teardown path waits for the sessions until its ctx ends;
+			// run it bounded and in the background.
+			tctx, tcancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer tcancel()
+			teardownDone := make(chan struct{})
+			switch tc.first {
+			case "teardown":
+				go func() {
+					defer close(teardownDone)
+					f.srv.shutdownConduitRelay(tctx)
+				}()
+			case "sigterm":
+				f.srv.DrainConduitForShutdown(10*time.Second, true)
+				go func() {
+					defer close(teardownDone)
+					f.srv.shutdownConduitRelay(tctx)
+				}()
+			}
+			select {
+			case g := <-goAways:
+				assert.Equal(t, tc.wantMs, g.GetDrainDeadlineMs(), "GoAway drain_deadline_ms")
+			case <-ctx.Done():
+				t.Fatal("agent did not receive GoAway")
+			}
+			select {
+			case <-teardownDone:
+			case <-ctx.Done():
+				t.Fatal("the teardown's relay shutdown outlived its context")
+			}
+		})
+	}
+}

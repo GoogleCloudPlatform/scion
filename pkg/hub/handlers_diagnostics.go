@@ -62,9 +62,11 @@ func (s *Server) handleDiagnosticsLogs(w http.ResponseWriter, r *http.Request) {
 			opts.Until = t
 		}
 	}
-	if v := query.Get("severity"); v != "" {
-		opts.Severity = v
+	sev, ok := logSeverityParam(w, query)
+	if !ok {
+		return
 	}
+	opts.Severity = sev
 	if v := query.Get("broker_id"); v != "" {
 		opts.BrokerID = v
 	}
@@ -129,16 +131,21 @@ func (s *Server) handleDiagnosticsLogsStream(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	ctx := r.Context()
+	// The stream also ends when the server begins shutting down, so it
+	// does not hold the HTTP drain (ptone/scion#5054).
+	ctx, endStream := s.shutdownMark.streamContext(r)
+	defer endStream()
 	query := r.URL.Query()
 
 	// Parse query filters — no LogID or AgentID to stream all system logs
 	opts := LogQueryOptions{
 		HubName: s.config.HubName,
 	}
-	if v := query.Get("severity"); v != "" {
-		opts.Severity = v
+	sev, ok := logSeverityParam(w, query)
+	if !ok {
+		return
 	}
+	opts.Severity = sev
 	if v := query.Get("broker_id"); v != "" {
 		opts.BrokerID = v
 	}

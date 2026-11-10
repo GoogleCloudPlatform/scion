@@ -166,7 +166,7 @@ func (r *GCPSkillResolver) resolveOne(ctx context.Context, gcpRef *GCPSkillRef, 
 		return nil, fmt.Errorf("GCP skill %q has no files", gcpRef.SkillID)
 	}
 
-	bundleHash := transfer.ComputeContentHash(fileInfos)
+	bundleHash := transfer.ComputeContentHashV1(fileInfos)
 
 	return &ResolvedSkill{
 		Name:     gcpRef.SkillID,

@@ -1,0 +1,5 @@
+# Native Agent Plugins install support of this bundle's provision.py: yes,
+# partial or no, with a reason. Kept out of config.yaml so binaries built
+# before Agent Plugins can still validate config.yaml (ptone/scion#5196).
+support: "no"
+reason: "Native Agent Plugins install is not supported for this harness"

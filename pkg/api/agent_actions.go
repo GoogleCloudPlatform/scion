@@ -126,3 +126,13 @@ const AgentIDQueryParam = "agentId"
 // still soft-deleted, and past its retention window, when the delete is
 // dispatched.
 const PurgeRetainedQueryParam = "purgeRetained"
+
+// MoveReincarnationIDQueryParam, on an agent files delete, is a forced
+// move's reincarnation ID: the rollback delete of what the move created on
+// its target broker (ptone/scion#5441). The broker removes the agent's
+// directories only when every one that exists carries that move's marker,
+// and otherwise answers 409 with BrokerErrCodeMoveMarkerMismatch and
+// removes nothing (not even the runtime entry). A directory that does not
+// exist is fine. The delete must carry projectId and deleteFiles, and
+// cannot be combined with localOnly, softDelete or purgeRetained.
+const MoveReincarnationIDQueryParam = "moveReincarnationId"

@@ -26,11 +26,11 @@ import (
 	"testing"
 	"time"
 
-	entsql "entgo.io/ent/dialect/sql"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 )
 
@@ -961,7 +961,7 @@ func TestConduitRegistry_CapabilitiesSQLDefault(t *testing.T) {
 	// A writer that omits capabilities gets the SQL-level '{}' default.
 	f := newConduitFixture(t)
 	gen := f.registerRelay("relay-1")
-	drv, ok := f.store.client.Driver().(*entsql.Driver)
+	drv, ok := entc.SQLDriver(f.store.client.Driver())
 	require.True(t, ok)
 	q := fmt.Sprintf(`INSERT INTO conduit_sessions (session_id, principal_kind, principal_id, relay_instance_id,
   relay_generation, transport, endpoint_incarnation, connection_epoch, connected_at, last_seen)
@@ -1063,4 +1063,29 @@ func TestConduitRegistry_PruneThenReRegister_GenerationStaysMonotonic(t *testing
 		assert.ErrorIs(t, err, registry.ErrRelaySuperseded)
 	}
 	require.NoError(t, f.reg.HeartbeatRelay(f.ctx, "relay-stable", g3))
+}
+
+// TestConduitRegistry_CountRelaySessions: the per-dial session count of
+// relay selection counts only the named relay generation's rows.
+func TestConduitRegistry_CountRelaySessions(t *testing.T) {
+	f := newConduitFixture(t)
+	g1 := f.registerRelay("relay-1")
+	other := f.registerRelay("relay-2")
+	f.insert(agentSession("s-1a", "relay-1", g1, "inc-A"))
+	f.insert(brokerSession("s-1b", "relay-1", g1, "binc", ""))
+	f.insert(brokerSession("s-2", "relay-2", other, "binc", ""))
+
+	count := func(id string, gen int64) int {
+		t.Helper()
+		n, err := f.store.CountRelaySessions(f.ctx, id, gen)
+		require.NoError(t, err)
+		return n
+	}
+	assert.Equal(t, 2, count("relay-1", g1))
+	assert.Equal(t, 1, count("relay-2", other))
+	assert.Equal(t, 0, count("relay-3", 1), "an unknown relay holds nothing")
+
+	g2 := f.registerRelay("relay-1")
+	assert.Equal(t, 0, count("relay-1", g2), "a new generation holds none of the old rows")
+	assert.Equal(t, 2, count("relay-1", g1))
 }

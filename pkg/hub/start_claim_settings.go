@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -97,15 +98,34 @@ func (c StartClaimSettings) normalized() (StartClaimSettings, []string) {
 // working: such a hold is raised to the minimum, with a warning, and never
 // refused.
 func (c StartClaimSettings) normalize() (StartClaimSettings, []string, []string) {
+	n, issues, soft := c.normalizeIssues()
+	var hard []string
+	for _, is := range issues {
+		hard = append(hard, is.msg)
+	}
+	return n, hard, soft
+}
+
+// startClaimIssue is an out-of-range start-claim value: name is its
+// lifecycle section key.
+type startClaimIssue struct {
+	name string
+	msg  string
+}
+
+// normalizeIssues is normalize with the hard issues naming their key.
+func (c StartClaimSettings) normalizeIssues() (StartClaimSettings, []startClaimIssue, []string) {
 	d := DefaultStartClaimSettings()
-	var hard, soft []string
+	var hard []startClaimIssue
+	var soft []string
 	check := func(name string, v *time.Duration, def time.Duration, ok bool, rule string) {
 		if *v == 0 {
 			*v = def
 			return
 		}
 		if !ok {
-			hard = append(hard, fmt.Sprintf("%s %s is out of range (%s); using default %s", name, *v, rule, def))
+			hard = append(hard, startClaimIssue{name: name,
+				msg: fmt.Sprintf("%s %s is out of range (%s); using default %s", name, *v, rule, def)})
 			*v = def
 		}
 	}
@@ -181,6 +201,8 @@ func (s *Server) setStartClaimSettings(c StartClaimSettings) bool {
 // set key parsed over it. Each set value must parse as a duration, and the
 // result must be within range (the create hold is compared with the
 // effective hold).
+//
+// A failure is a *startClaimFieldError naming the key.
 func validateStartClaimSettingStrings(base StartClaimSettings, d opsettings.LifecycleSettings) error {
 	for _, f := range []struct{ name, v string }{
 		{"start_claim_lease_ttl", d.StartClaimLeaseTTL},
@@ -192,7 +214,7 @@ func validateStartClaimSettingStrings(base StartClaimSettings, d opsettings.Life
 			continue
 		}
 		if _, err := time.ParseDuration(f.v); err != nil {
-			return fmt.Errorf("invalid %s %q: %v", f.name, f.v, err)
+			return &startClaimFieldError{name: f.name, msg: fmt.Sprintf("invalid %s %q: %v", f.name, f.v, err)}
 		}
 	}
 	// The base is what is applied today: an out-of-range startup value has
@@ -201,8 +223,81 @@ func validateStartClaimSettingStrings(base StartClaimSettings, d opsettings.Life
 	c, _ := parseStartClaimSettings(base, d.StartClaimLeaseTTL, d.StartMaxDuration, d.StartUnconfirmedHold, d.StartCreateUnconfirmedHold)
 	// A hold below today's minimum is raised, not refused (normalize's
 	// soft warnings): a configuration from an earlier release still saves.
-	if _, hard, _ := c.normalize(); len(hard) > 0 {
-		return errors.New(hard[0])
+	if _, hard, _ := c.normalizeIssues(); len(hard) > 0 {
+		return &startClaimFieldError{name: hard[0].name, msg: hard[0].msg}
 	}
 	return nil
+}
+
+// startClaimFieldError is a start-claim value a lifecycle save refuses;
+// name is its lifecycle section key.
+type startClaimFieldError struct {
+	name string
+	msg  string
+}
+
+func (e *startClaimFieldError) Error() string { return e.msg }
+
+// startClaimErrorField is the koanf path of the key a
+// validateStartClaimSettingStrings error names.
+func startClaimErrorField(err error) string {
+	var fe *startClaimFieldError
+	if errors.As(err, &fe) {
+		return settingsKoanfField("lifecycle", fe.name)
+	}
+	return settingsKoanfField("lifecycle", "")
+}
+
+// startClaimSettingKeys are the start-claim keys under server.hub, in the
+// order validateStartClaimSettingStrings checks them.
+var startClaimSettingKeys = []string{
+	"start_claim_lease_ttl",
+	"start_max_duration",
+	"start_unconfirmed_hold",
+	"start_create_unconfirmed_hold",
+}
+
+// startClaimKeysSent reports whether a server-config PUT body sends any
+// start-claim key under server.hub (any value, "" and null included).
+func startClaimKeysSent(rawBody []byte) bool {
+	var body struct {
+		Server *struct {
+			Hub map[string]json.RawMessage `json:"hub"`
+		} `json:"server"`
+	}
+	if err := json.Unmarshal(rawBody, &body); err != nil || body.Server == nil {
+		return false
+	}
+	for _, k := range startClaimSettingKeys {
+		if _, ok := body.Server.Hub[k]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// fileStartClaimLifecycle returns the start-claim keys of a merged
+// settings.yaml document (raw, as the settings.yaml PUT writes it) as a
+// lifecycle document for validateStartClaimSettingStrings. A missing value
+// is unset; a non-string value (for example a YAML integer) is passed as
+// its text, so the validator refuses it instead of silently skipping it.
+func fileStartClaimLifecycle(raw map[string]any) opsettings.LifecycleSettings {
+	var d opsettings.LifecycleSettings
+	server, _ := raw["server"].(map[string]any)
+	hub, _ := server["hub"].(map[string]any)
+	get := func(k string) string {
+		switch v := hub[k].(type) {
+		case nil:
+			return ""
+		case string:
+			return v
+		default:
+			return fmt.Sprint(v)
+		}
+	}
+	d.StartClaimLeaseTTL = get("start_claim_lease_ttl")
+	d.StartMaxDuration = get("start_max_duration")
+	d.StartUnconfirmedHold = get("start_unconfirmed_hold")
+	d.StartCreateUnconfirmedHold = get("start_create_unconfirmed_hold")
+	return d
 }

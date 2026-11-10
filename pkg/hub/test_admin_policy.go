@@ -97,6 +97,7 @@ var testAdminPermissionPolicy = map[string]testAdminPolicy{
 	"agent.delegation.credential.revoke": testAdminPolicyDeny,
 	"agent.delegation.list":              testAdminPolicyDeny,
 	"agent.delegation.read":              testAdminPolicyDeny,
+	"agent.delegation.revoke_all":        testAdminPolicyDeny,
 	// Agent-principal permissions: only agent credentials use them.
 	"agent.status_update":  testAdminPolicyAllow,
 	"agent.log_append":     testAdminPolicyAllow,
@@ -115,6 +116,9 @@ var testAdminPermissionPolicy = map[string]testAdminPolicy{
 	"project.set_messaging_policy": testAdminPolicyAllow,
 	"project.clone":                testAdminPolicyAllow,
 	"project.list":                 testAdminPolicyAllow,
+	// Posting into a project's chat threads, held by the built-in
+	// project roles.
+	"project.chat_post": testAdminPolicyAllow,
 	// Visitor access for federated accounts (ptone/scion#4603): deny. A
 	// test hub is not federated (A0 gate), like federation.project_visitors.
 	// Still grantable at project scope (testAdminGrantableAtProjectScope):
@@ -345,6 +349,8 @@ var testAdminLegacyRoutePolicy = map[string]testAdminPolicy{
 	"admin.delegationAdoption":          testAdminPolicyDeny,
 	"admin.delegationAdoption.previews": testAdminPolicyDeny,
 	"admin.delegationAdoption.commits":  testAdminPolicyDeny,
+	// Server key status: deployment-wide key configuration.
+	"admin.keys.status": testAdminPolicyDeny,
 	// Lifting a governance hold on one agent.
 	"agents.hold.lift": testAdminPolicyAllow,
 	// Revoking one user's web sessions.
@@ -372,6 +378,7 @@ var testAdminRoleGatePolicy = map[string]testAdminRoleGate{
 	"admin_delegation_adoption.go:recheckDelegationAdoptionAdmin": {Policy: testAdminPolicyDeny, Reason: "agent authority migration"},
 	"admin_mode.go:adminModeMiddleware":                           {Policy: testAdminPolicyAllow, Reason: "admins pass while admin mode is on (the mode itself is hub.admin_mode.update, deny)"},
 	"admin_mode.go:adminModeWebMiddleware":                        {Policy: testAdminPolicyAllow, Reason: "admins pass while admin mode is on (web)"},
+	"agent_pending_config_authz.go:deferDuringMaintenance":        {Policy: testAdminPolicyAllow, Reason: "a held edit's fold mirrors adminModeMiddleware: an admin saver's keys are not deferred while admin mode is on"},
 	"gcp_iam_settings.go:gcpIAMHubAdmin":                          {Policy: testAdminPolicyDeny, EnforcedIn: "requireGCPIAMHubAdmin", Reason: "GCP permission check settings are runtime configuration"},
 	"handlers_env_secrets.go:authorizeHubEnvVarList":              {Policy: testAdminPolicyDeny, Reason: "hub environment variables (hub.env_vars.read)"},
 	"handlers_env_secrets.go:resolveEnvSecretAccess":              {Policy: testAdminPolicyDeny, Reason: "hub-scope environment variables and secrets"},
@@ -379,7 +386,7 @@ var testAdminRoleGatePolicy = map[string]testAdminRoleGate{
 	"handlers_runtime_brokers.go:updateRuntimeBroker":             {Policy: testAdminPolicyDeny, Reason: "runtime broker update, except a broker the test identity registered (the co-located broker)"},
 	"handlers_runtime_brokers.go:deleteRuntimeBroker":             {Policy: testAdminPolicyDeny, Reason: "runtime broker deregistration, except a broker the test identity registered (the co-located broker)"},
 	"web.go:authorizeSSESubjects":                                 {Policy: testAdminPolicyAllow, Reason: "event subscriptions (read)"},
-	"passthrough_gate.go:authorizePassthroughIdentity":            {Policy: testAdminPolicyDeny, Reason: "exposes the co-located broker's host GCP identity to agents"},
+	"passthrough_gate.go:evaluatePassthroughIdentity":             {Policy: testAdminPolicyDeny, Reason: "exposes the co-located broker's host GCP identity to agents"},
 	"handlers_auth.go:handleAuthAdminStatus":                      {Policy: testAdminPolicyAllow, Reason: "display of the caller's own admin status"},
 	"perftrace_middleware.go:perfHeadersAllowed":                  {Policy: testAdminPolicyAllow, Reason: "request timing headers"},
 	"project_messaging_policy.go:messagingPolicyOwnerRule":        {Policy: testAdminPolicyAllow, Reason: "project messaging policy (project.set_messaging_policy is allow)"},
@@ -436,6 +443,9 @@ var testAdminSettingsSectionPolicy = map[string]testAdminPolicy{
 	"experiments":       testAdminPolicyDeny,
 	"artifacts":         testAdminPolicyDeny,
 	"profiling":         testAdminPolicyDeny,
+
+	"agent_delegation_policy": testAdminPolicyDeny,
+	"chat_retention":          testAdminPolicyDeny,
 }
 
 // testAdminSettingsKeyPolicy classifies every operational settings key
@@ -460,6 +470,7 @@ var testAdminSettingsKeyPolicy = map[string]testAdminPolicy{
 	"telemetry.cloud.protocol":                 testAdminPolicyDeny,
 	"telemetry.cloud.headers":                  testAdminPolicyDeny,
 	"telemetry.cloud.provider":                 testAdminPolicyDeny,
+	"telemetry.cloud.gcp_project_id":           testAdminPolicyDeny,
 	"telemetry.cloud.tls":                      testAdminPolicyDeny,
 	"telemetry.cloud.tls.enabled":              testAdminPolicyDeny,
 	"telemetry.cloud.tls.insecure_skip_verify": testAdminPolicyDeny,
@@ -512,6 +523,8 @@ var testAdminSettingsKeyPolicy = map[string]testAdminPolicy{
 	"default_gcp_identity_service_account_id":  testAdminPolicyDeny,
 	"server.hub.public_url":                    testAdminPolicyDeny,
 	"server.hub.hub_name":                      testAdminPolicyDeny,
+	"server.hub.content_url":                   testAdminPolicyDeny,
+	"server.hub.content_url_allow_same_site":   testAdminPolicyDeny,
 	"image_registry":                           testAdminPolicyDeny,
 	"server.hub.monitoring_dashboard_url":      testAdminPolicyDeny,
 	"server.github_app":                        testAdminPolicyDeny,
@@ -546,18 +559,42 @@ var testAdminFileLiveKeyPolicy = map[string]testAdminPolicy{
 var testAdminExperimentPolicy = map[string]testAdminPolicy{
 	experiments.FederationProjectVisitors:    testAdminPolicyDeny,
 	experiments.AsyncAgentLaunch:             testAdminPolicyDeny,
+	experiments.AsyncAgentStart:              testAdminPolicyDeny,
 	experiments.AgentDelegation:              testAdminPolicyDeny,
 	experiments.AuthorizationDecisionAuditV2: testAdminPolicyDeny,
 	"web.gcs_links":                          testAdminPolicyDeny,
 	experiments.K8sNFSHome:                   testAdminPolicyDeny,
+	experiments.CloudRunNativeIdentity:       testAdminPolicyDeny,
 	experiments.FlatRuntimeBrokers:           testAdminPolicyDeny,
+	experiments.FlatCloudRunTarget:           testAdminPolicyDeny,
 	experiments.Artifacts:                    testAdminPolicyDeny,
 	"hub.conduit":                            testAdminPolicyDeny,
+	experiments.ConduitDeliver:               testAdminPolicyDeny,
 	experiments.ChatScheduledSend:            testAdminPolicyDeny,
+	experiments.ChatStarredMessages:          testAdminPolicyDeny,
+	experiments.ChatChoices:                  testAdminPolicyDeny,
+	experiments.ChatRetention:                testAdminPolicyDeny,
 	experiments.AgentEdit:                    testAdminPolicyDeny,
-	experiments.ChatThreadGroups:             testAdminPolicyDeny,
+	experiments.AgentEditHeld:                testAdminPolicyDeny,
 	experiments.AttachmentArtifacts:          testAdminPolicyDeny,
 	experiments.AgentPlugins:                 testAdminPolicyDeny,
+	experiments.PortView:                     testAdminPolicyDeny,
+	experiments.AgentBadges:                  testAdminPolicyDeny,
+	experiments.SSEHiddenTabClose:            testAdminPolicyDeny,
+	experiments.SecretRotation:               testAdminPolicyDeny,
+	experiments.ContentHashV2:                testAdminPolicyDeny,
+	experiments.LifecycleEvents:              testAdminPolicyDeny,
+	experiments.ArtifactReviewEditor:         testAdminPolicyDeny,
+	experiments.ArtifactManageAccess:         testAdminPolicyDeny,
+	experiments.ArtifactSponsorReviewGrant:   testAdminPolicyDeny,
+	experiments.SkillContentHashV2:           testAdminPolicyDeny,
+	experiments.UserDeleteForceCascade:       testAdminPolicyDeny,
+	experiments.ArtifactArchive:              testAdminPolicyDeny,
+	experiments.ImageTagSetting:              testAdminPolicyDeny,
+	experiments.ImageTagVersionDefault:       testAdminPolicyDeny,
+	experiments.ArtifactsOpenReviewCheck:     testAdminPolicyDeny,
+	experiments.ProjectSelfLeave:             testAdminPolicyDeny,
+	experiments.WelcomeProject:               testAdminPolicyDeny,
 }
 
 // testAdminPolicyInputs are the vocabularies the classification must cover.
@@ -901,22 +938,24 @@ func (d *HTTPAgentDispatcher) testAdminRootScopes(ctx context.Context, agent *st
 	if agent.OwnerID == root {
 		allowed[store.ScopeUser] = true
 	}
-	if m := checkEffectiveMembership(ctx, d.store, d.authzService, root, agent.ProjectID); m.Err == nil && m.IsMember {
+	// Project-scope secrets are material: the project-viewer role
+	// alone does not admit them (ptone/scion#5519, AdmitsBeyondViewer).
+	if m := checkEffectiveMembership(ctx, d.store, d.authzService, root, agent.ProjectID); m.Err == nil && m.AdmitsBeyondViewer() {
 		allowed[store.ScopeProject] = true
 	}
 	return true, allowed, root
 }
 
-// restrictTestAdminRootedSecrets applies testAdminRootScopes to the secrets
-// secretBackend.Resolve returned (both dispatch paths call it:
-// resolveSecrets for the first pass and resolveAsNeededForKeys for the
-// as_needed pass).
-func (d *HTTPAgentDispatcher) restrictTestAdminRootedSecrets(ctx context.Context, agent *store.Agent, resolved []secret.SecretWithValue) []secret.SecretWithValue {
-	if len(resolved) == 0 {
-		return resolved
-	}
-	restricted, allowed, root := d.testAdminRootScopes(ctx, agent)
-	if !restricted {
+// applyTestAdminSecretScopes applies a testAdminRootScopes result, supplied
+// by the caller, to the secrets secretBackend.Resolve returned. Every
+// start-time site evaluates testAdminRootScopes once (testAdminScopesFor)
+// and passes the same result here and to the owner material chain rule's
+// keep decision (resolveSecrets for the first pass, resolveAsNeededForKeys
+// for the as_needed pass; the launch selection applies it before it
+// fetches any value): when restricted, it keeps
+// only secrets of an allowed scope and reports the withheld scopes.
+func (d *HTTPAgentDispatcher) applyTestAdminSecretScopes(ctx context.Context, agent *store.Agent, resolved []secret.SecretWithValue, restricted bool, allowed map[string]bool, root string) []secret.SecretWithValue {
+	if !restricted || len(resolved) == 0 {
 		return resolved
 	}
 	out := resolved[:0:0]
@@ -941,7 +980,7 @@ func (d *HTTPAgentDispatcher) restrictTestAdminRootedSecrets(ctx context.Context
 // envScopesForDispatch is envScopesInPrecedenceOrder with testAdminRootScopes
 // applied: the env var scopes an agent rooted at an admin-kind test
 // identity may receive. Every dispatch env read uses it (first pass,
-// as_needed pass, env source labels); the TZ chain (resolveStorageTZ)
+// as_needed pass); the TZ chain (resolveStorageTZ)
 // reads only TZ and keeps every scope.
 func (d *HTTPAgentDispatcher) envScopesForDispatch(ctx context.Context, agent *store.Agent) []store.EnvVarFilter {
 	filters := d.envScopesInPrecedenceOrder(agent)

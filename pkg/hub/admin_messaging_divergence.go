@@ -49,6 +49,8 @@ type divergenceBoardResponse struct {
 	Fallbacks             int64                  `json:"fallbacks"`
 	ConsistencyChecks     int64                  `json:"consistency_checks"`
 	ConsistencyMismatches int64                  `json:"consistency_mismatches"`
+	ConsistencySkipped    int64                  `json:"consistency_skipped"`
+	ConsistencyTimeouts   int64                  `json:"consistency_timeouts"`
 	ExplicitRoutes        int64                  `json:"explicit_routes"`
 	DerivedRoutes         int64                  `json:"derived_routes"`
 	Caveats               divergenceBoardCaveats `json:"caveats"`
@@ -77,7 +79,11 @@ var divergenceCaveats = divergenceBoardCaveats{
 		"resolved conversation IDs, and when insufficient data prevents " +
 		"lookup. A low mismatch count does not imply agreement — it is " +
 		"equally consistent with agreement, query errors, or insufficient " +
-		"lookup data.",
+		"lookup data. The check runs in the background with a short " +
+		"deadline: a check that hits the deadline also returns true " +
+		"(counted in consistency_timeouts), and a check that is not run " +
+		"because too many are already running, or one for the same " +
+		"lookup is in flight, is counted in consistency_skipped.",
 	UnbackfilledBlindSpot: "The consistency check skips prior messages " +
 		"whose ConversationID is empty (divergence.go:312). Messages " +
 		"written before the Tranche G dual-write was enabled have no " +
@@ -133,6 +139,8 @@ func (s *Server) handleAdminMessagingDivergence(w http.ResponseWriter, r *http.R
 	fallbacks := m.Fallbacks()
 	consistencyChecks := m.ConsistencyChecks()
 	consistencyMismatches := m.ConsistencyMismatches()
+	consistencySkipped := m.ConsistencySkipped()
+	consistencyTimeouts := m.ConsistencyTimeouts()
 	explicitRoutes := m.ExplicitRoutes()
 	derivedRoutes := m.DerivedRoutes()
 
@@ -146,6 +154,8 @@ func (s *Server) handleAdminMessagingDivergence(w http.ResponseWriter, r *http.R
 		Fallbacks:             fallbacks,
 		ConsistencyChecks:     consistencyChecks,
 		ConsistencyMismatches: consistencyMismatches,
+		ConsistencySkipped:    consistencySkipped,
+		ConsistencyTimeouts:   consistencyTimeouts,
 		ExplicitRoutes:        explicitRoutes,
 		DerivedRoutes:         derivedRoutes,
 		Caveats:               divergenceCaveats,

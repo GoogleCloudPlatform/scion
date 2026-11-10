@@ -390,6 +390,7 @@ func TestAgentCreateAgent_WithScope(t *testing.T) {
 		ProjectID:  project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
+		LocalPath:  fixtureProviderCheckout(t),
 		Status:     store.BrokerStatusOnline,
 	}
 	require.NoError(t, s.AddProjectProvider(ctx, contrib))
@@ -1933,7 +1934,7 @@ func TestCreateAgent_ScionConfigInlineConfigPreserved(t *testing.T) {
 			HarnessConfig:    "claude-default",
 			AuthSelectedType: "api-key",
 			SystemPrompt:     "You are a code reviewer.",
-			MaxTurns:         50,
+			MaxTurns:         api.IntPtr(50),
 		},
 	})
 
@@ -1955,7 +1956,7 @@ func TestCreateAgent_ScionConfigInlineConfigPreserved(t *testing.T) {
 	// Verify the full inline config is preserved
 	require.NotNil(t, resp.Agent.AppliedConfig.InlineConfig, "InlineConfig should be preserved")
 	assert.Equal(t, "You are a code reviewer.", resp.Agent.AppliedConfig.InlineConfig.SystemPrompt)
-	assert.Equal(t, 50, resp.Agent.AppliedConfig.InlineConfig.MaxTurns)
+	assert.Equal(t, api.IntPtr(50), resp.Agent.AppliedConfig.InlineConfig.MaxTurns)
 	assert.Equal(t, "claude-opus-4-6", resp.Agent.AppliedConfig.InlineConfig.Model)
 
 	// Verify persisted in store
@@ -2682,6 +2683,7 @@ func TestCreateAgent_NotifyCreatesSubscription(t *testing.T) {
 		ProjectID:  project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
+		LocalPath:  fixtureProviderCheckout(t),
 		Status:     store.BrokerStatusOnline,
 	}))
 	project.DefaultRuntimeBrokerID = broker.ID
@@ -2821,6 +2823,7 @@ func TestCreateAgent_NotifySubscriptionCascadeOnDelete(t *testing.T) {
 		ProjectID:  project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
+		LocalPath:  fixtureProviderCheckout(t),
 		Status:     store.BrokerStatusOnline,
 	}))
 	project.DefaultRuntimeBrokerID = broker.ID
@@ -4216,6 +4219,7 @@ func TestCreateAgent_GCPPassthrough_BrokerOwnerAllowed(t *testing.T) {
 		ProjectID:  project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
+		LocalPath:  fixtureProviderCheckout(t),
 		Status:     store.BrokerStatusOnline,
 	}))
 	project.DefaultRuntimeBrokerID = broker.ID
@@ -4368,6 +4372,7 @@ func TestCreateAgent_GCPPassthrough_AdminAllowed(t *testing.T) {
 		ProjectID:  project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
+		LocalPath:  fixtureProviderCheckout(t),
 		Status:     store.BrokerStatusOnline,
 	}))
 	project.DefaultRuntimeBrokerID = broker.ID

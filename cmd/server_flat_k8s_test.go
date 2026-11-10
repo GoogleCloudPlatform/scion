@@ -164,7 +164,7 @@ func prepareK8sHost(t *testing.T, globalDir string, insts ...config.V1RuntimeBro
 			cfg.BrokerID = ic.Identity.RuntimeBrokerID
 			cfg.StateDir = filepath.Join(globalDir, "state", ic.Identity.RuntimeBrokerID)
 			cfg.FlatInstance = &runtimebroker.FlatInstanceConfig{Identity: ic.Identity, Instance: ic.Instance, HubInProcess: true}
-			return runtimebroker.New(cfg, ic.Manager, ic.Runtime), nil
+			return runtimebroker.New(cfg, ic.Manager, ic.Runtime, config.RuntimeBuildRecord{}), nil
 		},
 	})
 	require.NoError(t, err)

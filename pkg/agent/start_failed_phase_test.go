@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
@@ -243,6 +244,12 @@ func TestList_FailedStartRecord_ContainerRunMatch(t *testing.T) {
 		// Guard rows: no overlay.
 		{"other run", "run-1", "stopped", "stopped"},
 		{"running", "run-2", "running", "running"},
+		// ptone/scion#5373: a failed start whose entry the runtime still
+		// reports starting shows as error; a start in progress (another
+		// run's record, or the record its start cleared) stays starting.
+		{"starting, same run", "run-2", "starting", "error"},
+		{"starting, other run", "run-1", "starting", "starting"},
+		{"starting, no record", "", "starting", "starting"},
 		{"invalid value", "../run-2", "stopped", "stopped"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -332,5 +339,157 @@ func TestList_FailedStartRecord_UnreadableFile_NoOverlay(t *testing.T) {
 				t.Errorf("List phase = %q, want stopped (no overlay)", got)
 			}
 		})
+	}
+}
+
+// k8sPendingSameRun returns a Kubernetes-named runtime that lists
+// tz-agent's run-2 entry in phase "starting", as the Kubernetes List
+// reports a Pending pod (ptone/scion#5365): with the project path from the
+// pod's annotation.
+func k8sPendingSameRun(projectScionDir string) *runtime.MockRuntime {
+	rt := noContainers()
+	rt.NameFunc = func() string { return "kubernetes" }
+	rt.ListFunc = func(context.Context, map[string]string) ([]api.AgentInfo, error) {
+		return []api.AgentInfo{{
+			Name: "tz-agent", ContainerID: "tz-agent", RunID: "run-2", Phase: "starting", ContainerStatus: "Pending",
+			ProjectPath: projectScionDir, Runtime: "kubernetes",
+			Labels: map[string]string{"scion.name": "tz-agent", api.LabelRunID: "run-2"},
+		}}, nil
+	}
+	return rt
+}
+
+// ptone/scion#5373, Kubernetes: a failed synchronous start that leaves the
+// pod Pending (listed as starting, ptone/scion#5365) shows as error, both
+// through a project-scoped List and through the call the broker heartbeat
+// makes (Manager.List with WithVanishedPodReports and no filter), so the
+// hub is told error too.
+func TestList_FailedStartRecord_KubernetesPendingPod(t *testing.T) {
+	projectScionDir, agentDir := startTZFixture(t, "", `""`)
+	writeRun1AgentInfo(t, projectScionDir, agentDir)
+	writeRawHostState(t, projectScionDir, "tz-agent", `{"runId":"run-2","startFailedRunId":"run-2"}`)
+	rt := k8sPendingSameRun(projectScionDir)
+	if got := listedPhase(t, rt, projectScionDir, "tz-agent"); got != "error" {
+		t.Errorf("List phase = %q, want error", got)
+	}
+
+	agents, err := NewManager(rt).List(runtime.WithVanishedPodReports(context.Background()), nil)
+	if err != nil {
+		t.Fatalf("heartbeat List: %v", err)
+	}
+	found := false
+	for _, a := range agents {
+		if a.Name == "tz-agent" && a.RunID == "run-2" {
+			found = true
+			if a.Phase != "error" {
+				t.Errorf("heartbeat List phase = %q, want error", a.Phase)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("heartbeat List did not report tz-agent run-2: %+v", agents)
+	}
+}
+
+// ptone/scion#5373, Cloud Run sandbox (a pin of current behaviour): a failed
+// start whose cleanup could not remove its Starting entry leaves that run
+// listed as starting. The stub returns what CloudRunSandboxRuntime.List
+// returns for it: the sandbox name as ContainerID, the run ID from the run
+// label, Project and ProjectID, and no ProjectPath. Its labels are the
+// agent, name, run, project and project-ID labels, a subset of what Start
+// sets; none of the others changes the result. There is no
+// scion.project_path label: Start puts the project path in Annotations,
+// which the Cloud Run runtime does not store. Like the real List it
+// applies the label filter with runtime.LabelsMatchFilter.
+//
+//   - Unfiltered List (the broker heartbeat's call): the entry has no
+//     ProjectPath, so List never reaches the failed-start overlay and it
+//     reports starting whatever the record says. The "same run" row fails
+//     if a change lets the overlay reach Cloud Run sandbox entries.
+//   - Project-path-filtered List (a local list of the project): the
+//     runtime drops the entry, and the created-agent scan reports the agent
+//     from its files, as error whenever a failed-start record is present.
+func TestList_FailedStartRecord_CloudRunSandboxStarting(t *testing.T) {
+	for _, tc := range []struct {
+		name, hostState, wantFiltered string
+	}{
+		{"same run", `{"runId":"run-2","startFailedRunId":"run-2"}`, "error"},
+		{"other run", `{"runId":"run-2","startFailedRunId":"run-1"}`, "error"},
+		{"no record", `{"runId":"run-2"}`, "stopped"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			projectScionDir, agentDir := startTZFixture(t, "", `""`)
+			writeRun1AgentInfo(t, projectScionDir, agentDir)
+			writeRawHostState(t, projectScionDir, "tz-agent", tc.hostState)
+			rt := noContainers()
+			rt.NameFunc = func() string { return "cloudrun-sandbox" }
+			rt.ListFunc = func(_ context.Context, filter map[string]string) ([]api.AgentInfo, error) {
+				e := api.AgentInfo{
+					ContainerID: "project--tz-agent", RunID: "run-2", Name: "tz-agent",
+					ContainerStatus: "starting", Phase: "starting", Image: "test-image:latest",
+					Labels: map[string]string{
+						"scion.agent": "true", "scion.name": "tz-agent", api.LabelRunID: "run-2",
+						projectkeys.LabelProject: "project", projectkeys.LabelProjectID: "project-id",
+					},
+					Project: "project", ProjectID: "project-id", Runtime: "cloudrun-sandbox",
+				}
+				if !runtime.LabelsMatchFilter(e.Labels, filter) {
+					return nil, nil
+				}
+				return []api.AgentInfo{e}, nil
+			}
+
+			agents, err := NewManager(rt).List(runtime.WithVanishedPodReports(context.Background()), nil)
+			if err != nil {
+				t.Fatalf("heartbeat List: %v", err)
+			}
+			found := false
+			for _, a := range agents {
+				if a.Name == "tz-agent" && a.RunID == "run-2" {
+					found = true
+					if a.Phase != "starting" {
+						t.Errorf("heartbeat List phase = %q, want starting (Cloud Run sandbox entries carry no ProjectPath)", a.Phase)
+					}
+				}
+			}
+			if !found {
+				t.Errorf("heartbeat List did not report tz-agent run-2: %+v", agents)
+			}
+
+			if got := listedPhase(t, rt, projectScionDir, "tz-agent"); got != tc.wantFiltered {
+				t.Errorf("project-filtered List phase = %q, want %q (from the created-agent scan)", got, tc.wantFiltered)
+			}
+		})
+	}
+}
+
+// ptone/scion#5373 end to end in pkg/agent: Start's launch fails and the
+// runtime then lists the same run as starting (a Pending pod). Start's
+// record and List's overlay agree on the run, and List shows error.
+func TestStart_FailedLaunch_StartingEntry_ListsError(t *testing.T) {
+	projectScionDir, agentDir := startTZFixture(t, "", `""`)
+	writeRun1AgentInfo(t, projectScionDir, agentDir)
+
+	launched := false
+	rt := k8sPendingSameRun(projectScionDir)
+	listStarting := rt.ListFunc
+	rt.ListFunc = func(ctx context.Context, f map[string]string) ([]api.AgentInfo, error) {
+		if !launched {
+			return nil, nil
+		}
+		return listStarting(ctx, f)
+	}
+	rt.RunFunc = func(context.Context, runtime.RunConfig) (string, error) {
+		launched = true
+		return "", errLaunchFailed
+	}
+	if err := startTZ(t, rt, projectScionDir, "run-2"); err == nil {
+		t.Fatal("Start succeeded although the launch failed")
+	}
+	if !launched {
+		t.Fatal("Start failed before the launch")
+	}
+	if got := listedPhase(t, rt, projectScionDir, "tz-agent"); got != "error" {
+		t.Errorf("List phase = %q, want error", got)
 	}
 }

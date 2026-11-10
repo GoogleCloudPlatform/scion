@@ -351,7 +351,7 @@ func (s *Server) handleGitHubAppSetup(w http.ResponseWriter, r *http.Request) {
 	// List repos for this installation
 	repos, err := client.ListInstallationRepos(ctx, installationID)
 	if err != nil {
-		slog.Warn("Failed to list installation repos", "error", err, "installation_id", installationID)
+		slog.Warn("Failed to list installation repos", "error", upstreamText(err.Error()), "installation_id", installationID)
 		// Continue without repos — we can still record the installation
 	}
 
@@ -428,7 +428,7 @@ func (s *Server) handleGitHubAppDiscover(w http.ResponseWriter, r *http.Request)
 		// Try to list repos for each installation
 		repos, err := client.ListInstallationRepos(ctx, ghInst.ID)
 		if err != nil {
-			slog.Warn("Failed to list repos for installation", "installation_id", ghInst.ID, "error", err)
+			slog.Warn("Failed to list repos for installation", "installation_id", ghInst.ID, "error", upstreamText(err.Error()))
 		}
 
 		repoNames := make([]string, len(repos))
@@ -501,8 +501,9 @@ func (s *Server) matchProjectsToInstallation(ctx context.Context, installation *
 			continue
 		}
 
-		// Extract owner/repo from the git remote URL
-		ownerRepo := extractOwnerRepo(project.GitRemote)
+		// Extract owner/repo from the git remote URL; a remote on any host
+		// other than the configured GitHub host yields "".
+		ownerRepo := s.githubOwnerRepo(project.GitRemote)
 		if ownerRepo == "" {
 			continue
 		}
@@ -516,18 +517,24 @@ func (s *Server) matchProjectsToInstallation(ctx context.Context, installation *
 			continue
 		}
 
-		// Associate the project with this installation
-		project.GitHubInstallationID = &installation.InstallationID
-		project.GitHubAppStatus = &store.GitHubAppProjectStatus{
-			State:       store.GitHubAppStateUnchecked,
-			LastChecked: timeNow(),
+		// A repo-name match only selects the candidate: associate only an
+		// authorized association (host, installation account, and the
+		// creator's own GitHub access; see authorizeGitHubAppAssociation).
+		if _, authzErr := s.authorizeGitHubAppAssociation(ctx, &project, installation.InstallationID); authzErr != nil {
+			slog.Info("Not auto-associating project with GitHub App installation: association not authorized",
+				"project_id", project.ID, "installation_id", installation.InstallationID, "error", authzErr)
+			continue
 		}
+
+		// Associate the project with this installation
+		s.setGitHubInstallationAssociation(&project, installation.InstallationID)
 
 		if err := s.store.UpdateProject(ctx, &project); err != nil {
 			slog.Error("Failed to associate project with installation",
 				"project_id", project.ID, "installation_id", installation.InstallationID, "error", err)
 			continue
 		}
+		s.invalidateGitHubAssociation(project.ID)
 		s.events.PublishProjectUpdated(ctx, &project)
 
 		slog.Info("Auto-associated project with GitHub App installation",
@@ -599,7 +606,7 @@ func (s *Server) checkProjectsForRemovedRepos(ctx context.Context, installationI
 			continue
 		}
 
-		ownerRepo := extractOwnerRepo(project.GitRemote)
+		ownerRepo := s.githubOwnerRepo(project.GitRemote)
 		if ownerRepo == "" || !removedRepos[ownerRepo] {
 			continue
 		}
@@ -619,55 +626,6 @@ func (s *Server) checkProjectsForRemovedRepos(ctx context.Context, installationI
 			s.events.PublishProjectUpdated(ctx, &project)
 		}
 	}
-}
-
-// extractOwnerRepo extracts the "owner/repo" from a git remote URL.
-// Supports HTTPS, SSH, and shorthand formats:
-//   - https://github.com/owner/repo.git → owner/repo
-//   - git@github.com:owner/repo.git → owner/repo
-//   - github.com/owner/repo → owner/repo
-func extractOwnerRepo(remote string) string {
-	remote = strings.TrimSpace(remote)
-
-	// Handle SSH format: git@github.com:owner/repo.git
-	if strings.Contains(remote, ":") && strings.Contains(remote, "@") {
-		parts := strings.SplitN(remote, ":", 2)
-		if len(parts) == 2 {
-			path := strings.TrimSuffix(parts[1], ".git")
-			path = strings.TrimPrefix(path, "/")
-			if isValidOwnerRepo(path) {
-				return path
-			}
-		}
-	}
-
-	// Handle HTTPS format: https://github.com/owner/repo.git
-	remote = strings.TrimPrefix(remote, "https://")
-	remote = strings.TrimPrefix(remote, "http://")
-
-	// Remove host prefix (e.g., "github.com/")
-	parts := strings.SplitN(remote, "/", 2)
-	if len(parts) < 2 {
-		return ""
-	}
-
-	// If the first part looks like a hostname, skip it
-	if strings.Contains(parts[0], ".") {
-		path := strings.TrimSuffix(parts[1], ".git")
-		path = strings.TrimSuffix(path, "/")
-		if isValidOwnerRepo(path) {
-			return path
-		}
-		return ""
-	}
-
-	return ""
-}
-
-// isValidOwnerRepo checks if a string is in "owner/repo" format.
-func isValidOwnerRepo(s string) bool {
-	parts := strings.Split(s, "/")
-	return len(parts) == 2 && parts[0] != "" && parts[1] != ""
 }
 
 // getGitHubAppClient creates a GitHub App client from the server's configuration.
@@ -722,6 +680,21 @@ func (s *Server) mintGitHubAppToken(ctx context.Context, project *store.Project)
 		return "", "", fmt.Errorf("project has no GitHub App installation")
 	}
 
+	// Single choke for every token delivery leg (hub-host clone and pull,
+	// agent env at create and refresh, the agent token-refresh endpoint,
+	// resource import, skills, the status check): the association must be
+	// authorized NOW, whatever was recorded before. See
+	// github_app_association_authz.go. A refusal, definitive or
+	// inconclusive, mints nothing and is surfaced on the project status.
+	grant, authzErr := s.authorizeGitHubAppAssociation(ctx, project, *project.GitHubInstallationID)
+	if authzErr != nil {
+		slog.Warn("GitHub App token refused: installation association not authorized",
+			"project_id", project.ID, "installation_id", *project.GitHubInstallationID, "error", authzErr)
+		s.updateProjectGitHubAppStatus(ctx, project, store.GitHubAppStateError,
+			githubAssociationErrorCode(authzErr), authzErr.Error())
+		return "", "", authzErr
+	}
+
 	client, err := s.getGitHubAppClient()
 	if err != nil {
 		// Classify the client-creation error: it could be a missing app_id,
@@ -732,49 +705,45 @@ func (s *Server) mintGitHubAppToken(ctx context.Context, project *store.Project)
 		} else if strings.Contains(err.Error(), "private key") || strings.Contains(err.Error(), "PEM") {
 			errorCode = githubapp.ErrCodePrivateKeyInvalid
 		}
+		// The stored status is shown to users: fixed text for the code; the
+		// error itself reaches only the log, rendered (ptone/scion#7498).
+		slog.ErrorContext(ctx, "GitHub App client unavailable", "project_id", project.ID,
+			"error_code", errorCode, "error", upstreamText(err.Error()))
 		s.updateProjectGitHubAppStatus(ctx, project, store.GitHubAppStateError,
-			errorCode, err.Error())
+			errorCode, githubAppStatusMessage(errorCode))
 		return "", "", err
 	}
 
 	installationID := *project.GitHubInstallationID
 
-	// Determine permissions to request
-	perms := githubapp.DefaultTokenPermissions()
-	if project.GitHubPermissions != nil {
-		perms = githubapp.TokenPermissions{
-			Contents:     project.GitHubPermissions.Contents,
-			PullRequests: project.GitHubPermissions.PullRequests,
-			Issues:       project.GitHubPermissions.Issues,
-			Metadata:     project.GitHubPermissions.Metadata,
-			Checks:       project.GitHubPermissions.Checks,
-			Actions:      project.GitHubPermissions.Actions,
-		}
-	}
+	// Never request more than the stored permissions and the association's
+	// proof allow (a pull-only proof gets read-only permissions), and never
+	// an empty set, which GitHub would treat as every installation
+	// permission.
+	perms := githubTokenPermissionsForGrant(project.GitHubPermissions, grant)
 
-	// Extract repo name from git remote (just the repo name, not owner/repo)
-	var repos []string
-	if project.GitRemote != "" {
-		ownerRepo := extractOwnerRepo(project.GitRemote)
-		if ownerRepo != "" {
-			// GitHub API expects just the repo name, not owner/repo
-			parts := strings.SplitN(ownerRepo, "/", 2)
-			if len(parts) == 2 {
-				repos = []string{parts[1]}
-			}
-		}
-	}
+	// Always repository-scoped, never installation-wide: the API takes the
+	// bare repo name, and the coverage check above pinned the installation
+	// account to the remote owner.
+	repos := []string{grant.Repo}
 
 	token, err := client.MintInstallationToken(ctx, installationID, repos, perms)
 	if err != nil {
 		// Classify the error and update project status
 		var mintErr *githubapp.TokenMintError
 		errorCode := githubapp.ErrCodeTokenMintFailed
-		errorMessage := err.Error()
+		errorMessage := githubAppStatusMessage(errorCode)
+		upstream := ""
 		if ok := isTokenMintError(err, &mintErr); ok {
 			errorCode = mintErr.ErrorCode
 			errorMessage = mintErr.Message
+			upstream = mintErr.UpstreamDetail()
 		}
+		// The stored status is shown to users: Message is fixed per code;
+		// GitHub's text and the error reach only the log, rendered
+		// (ptone/scion#7498).
+		slog.ErrorContext(ctx, "GitHub App token mint failed", "project_id", project.ID,
+			"error_code", errorCode, "error", upstreamText(err.Error()), "upstream", upstreamText(upstream))
 
 		state := store.GitHubAppStateError
 		if errorCode == githubapp.ErrCodePermissionDenied {
@@ -822,6 +791,21 @@ func (s *Server) updateProjectGitHubAppStatus(ctx context.Context, project *stor
 		slog.Warn("Failed to update project GitHub App status", "project_id", project.ID, "error", err)
 	} else {
 		s.events.PublishProjectUpdated(ctx, project)
+	}
+}
+
+// githubAppStatusMessage is the fixed project-status text stored for a
+// GitHub App failure that is not a TokenMintError (whose Message is already
+// fixed). The status is shown to users, so it never carries error or
+// upstream text (ptone/scion#7498).
+func githubAppStatusMessage(errorCode string) string {
+	switch errorCode {
+	case githubapp.ErrCodePrivateKeyInvalid:
+		return "The GitHub App private key is missing or invalid. Re-upload it in Admin > Server Config."
+	case githubapp.ErrCodeAppNotFound:
+		return "GitHub App not found — verify the App ID in Admin > Server Config > GitHub App."
+	default:
+		return "The GitHub App could not provide a token. See the hub log for details."
 	}
 }
 

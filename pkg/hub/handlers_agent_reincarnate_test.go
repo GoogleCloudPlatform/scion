@@ -1182,8 +1182,9 @@ func TestReincarnateAgent_PlanUsesSettingsImageOverHarnessConfig(t *testing.T) {
 	overlay.Update(nil, nil, map[string]config.HarnessConfigEntry{
 		hcSlug: {Harness: "claude", Image: "settings-image:v1"},
 	})
+	prevOverlay := config.GetGlobalSettingsOverlay()
 	config.SetGlobalSettingsOverlay(overlay)
-	t.Cleanup(func() { config.SetGlobalSettingsOverlay(nil) })
+	t.Cleanup(func() { config.SetGlobalSettingsOverlay(prevOverlay) })
 
 	disp := newReincarnateTestDispatcher()
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)
@@ -3104,7 +3105,7 @@ func TestReincarnateAgent_ReprovisionFailure_RerendersPreviousConfig(t *testing.
 	require.Len(t, cfgs, 2)
 	assert.Contains(t, cfgs[0].Task, "[SCION REINCARNATION]", "the first dispatch carries the fresh config")
 	require.NotNil(t, r.PreviousAppliedConfig)
-	assert.Equal(t, *r.PreviousAppliedConfig, cfgs[1], "the re-render dispatches exactly the previous config")
+	assert.Equal(t, *reincarnationRecoveryConfig(r.PreviousAppliedConfig, r.ToGeneration, r.Handoff, store.AgentReincarnationStateProvisioning), cfgs[1], "the re-render dispatches the previous config with the recovery Task")
 	assert.Zero(t, disp.startCalls)
 
 	final, err := s.GetAgent(context.Background(), agent.ID)
@@ -3135,7 +3136,7 @@ func TestReincarnateAgent_StartFailure_RerendersPreviousConfig(t *testing.T) {
 	calls, cfgs := disp.reprovisionSnapshot()
 	require.Equal(t, 2, calls)
 	require.NotNil(t, r.PreviousAppliedConfig)
-	assert.Equal(t, *r.PreviousAppliedConfig, cfgs[1], "the re-render dispatches exactly the previous config")
+	assert.Equal(t, *reincarnationRecoveryConfig(r.PreviousAppliedConfig, r.ToGeneration, r.Handoff, store.AgentReincarnationStateStarting), cfgs[1], "the re-render dispatches the previous config with the recovery Task")
 
 	final, err := s.GetAgent(context.Background(), agent.ID)
 	require.NoError(t, err)
@@ -3167,7 +3168,7 @@ func TestReincarnateAgent_SecretResolutionError_FailsAndRerenders(t *testing.T) 
 	calls, cfgs := disp.reprovisionSnapshot()
 	require.Equal(t, 2, calls, "one reprovision, one re-render of the previous config")
 	require.NotNil(t, r.PreviousAppliedConfig)
-	assert.Equal(t, *r.PreviousAppliedConfig, cfgs[1])
+	assert.Equal(t, *reincarnationRecoveryConfig(r.PreviousAppliedConfig, r.ToGeneration, r.Handoff, store.AgentReincarnationStateStarting), cfgs[1])
 
 	final, err := s.GetAgent(context.Background(), agent.ID)
 	require.NoError(t, err)
@@ -3397,7 +3398,7 @@ func TestReincarnateAgent_AdvanceToStartingFailure_RerendersPreviousConfig(t *te
 	calls, cfgs := disp.reprovisionSnapshot()
 	require.Equal(t, 2, calls, "the reprovision plus one re-render")
 	require.NotNil(t, r.PreviousAppliedConfig)
-	assert.Equal(t, *r.PreviousAppliedConfig, cfgs[1])
+	assert.Equal(t, *reincarnationRecoveryConfig(r.PreviousAppliedConfig, r.ToGeneration, r.Handoff, store.AgentReincarnationStateProvisioning), cfgs[1])
 	assert.Zero(t, disp.startCalls)
 
 	final, err := s.GetAgent(context.Background(), agent.ID)
@@ -3445,7 +3446,7 @@ func TestReincarnateAgent_StartingWriteFailure_RerendersPreviousConfig(t *testin
 	calls, cfgs := disp.reprovisionSnapshot()
 	require.Equal(t, 2, calls, "the reprovision plus one re-render")
 	require.NotNil(t, r.PreviousAppliedConfig)
-	assert.Equal(t, *r.PreviousAppliedConfig, cfgs[1])
+	assert.Equal(t, *reincarnationRecoveryConfig(r.PreviousAppliedConfig, r.ToGeneration, r.Handoff, store.AgentReincarnationStateStarting), cfgs[1])
 	assert.Zero(t, disp.startCalls, "no start is dispatched when the starting step cannot be recorded")
 
 	final, err := s.GetAgent(context.Background(), agent.ID)
@@ -4803,7 +4804,7 @@ func TestReincarnateAgent_SweepCASRespectsStalenessCutoff(t *testing.T) {
 	cutoff := r.UpdatedAt.Add(-time.Minute) // r is NOT stale relative to this cutoff
 	require.True(t, r.UpdatedAt.After(cutoff))
 
-	srv.sweepFailStaleRecord(ctx, r, "hub restarted during reincarnation", cutoff)
+	srv.sweepFailStaleRecord(ctx, r, "hub restarted during reincarnation", store.EdgeDeactivationReincarnateStaleSwept, cutoff)
 
 	got, err := s.GetAgentReincarnation(ctx, r.ID)
 	require.NoError(t, err)
@@ -5103,15 +5104,16 @@ func TestReincarnateAgent_StepCASPersistentErrorEndsFailed(t *testing.T) {
 // not just the in-process Go error value a fake dispatcher would hand back
 // directly. It proves a 409 from the broker (a refused reprovision, e.g.
 // agent.ErrReprovisionRefused) ends with the record failed and its Error
-// field carrying the broker's reason, and the agent at reincarnation_state=
+// field carrying the broker's status, code and filtered message
+// (brokerRecordText, never the raw body), and the agent at reincarnation_state=
 // failed / phase=error, exactly like any other reprovision-dispatch failure.
 func TestReincarnateAgent_E2E_BrokerReprovisionRefusal409EndsInFailedRecord(t *testing.T) {
 	const refusalReason = "reprovision refused: agent e2e-409-agent container is still running, stop it first"
 	fakeBroker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/api/v1/agents") {
 			// Mirrors runtimebroker/errors.go's Conflict(...) envelope exactly,
-			// so brokerHTTPError's "runtime broker returned error 409: <body>"
-			// carries the same text a real broker would send.
+			// so brokerHTTPError sees the same status and code a real broker
+			// would send.
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusConflict)
 			_ = json.NewEncoder(w).Encode(map[string]any{
@@ -5164,8 +5166,10 @@ func TestReincarnateAgent_E2E_BrokerReprovisionRefusal409EndsInFailedRecord(t *t
 
 	settled := waitForReincarnationSettled(t, s, agent.ID)
 	assert.Equal(t, store.AgentReincarnationStateFailed, settled.State)
-	assert.Contains(t, settled.Error, "409", "the record's error must surface the broker's HTTP status")
-	assert.Contains(t, settled.Error, refusalReason, "the record's error must surface the broker's refusal reason verbatim")
+	assert.Contains(t, settled.Error, "runtime broker returned error 409 (conflict): Failed to provision agent: "+refusalReason,
+		"the record carries the broker's status, code and rendered message: it passes the relay filter (brokerRecordText)")
+	assert.NotContains(t, settled.Error, `"error"`,
+		"the broker's raw JSON body stays in the hub log, out of the stored record")
 
 	after, err := s.GetAgent(ctx, agent.ID)
 	require.NoError(t, err)
@@ -5355,7 +5359,8 @@ func TestReincarnateAgent_AC2b_HubDefaultHarnessConfigStillApplies(t *testing.T)
 // caller computes.
 func TestReincarnateAgent_AC2b_CreateInputsHarnessConfigEmptyWhenNotExplicit(t *testing.T) {
 	disp := newReincarnateTestDispatcher()
-	srv, s, project, _ := setupReincarnateTestServer(t, disp)
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	giveProviderCheckout(t, s, project.ID, broker.ID)
 
 	project.Annotations = map[string]string{"scion.io/default-harness-config": "project-default-hc"}
 	require.NoError(t, s.UpdateProject(context.Background(), project))
@@ -5538,7 +5543,8 @@ func TestReincarnateAgent_AC2b_Matrix_CreateAndReincarnateAgree(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
 			disp := newReincarnateTestDispatcher()
-			srv, s, project, _ := setupReincarnateTestServer(t, disp)
+			srv, s, project, broker := setupReincarnateTestServer(t, disp)
+			giveProviderCheckout(t, s, project.ID, broker.ID)
 
 			if len(tc.projectAnnotations) > 0 {
 				project.Annotations = tc.projectAnnotations

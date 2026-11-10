@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net/http"
 	"strings"
 	"time"
@@ -39,13 +40,76 @@ import (
 
 // --- refusals ------------------------------------------------------------
 
-func experimentDisabledRefusal() *RuntimeTargetRefusal {
+// experimentDisabledRefusal is the 412 experiment_disabled refusal naming
+// experiment: experiments.FlatRuntimeBrokers, or the experiment of a flat
+// target type that has one of its own (flatTargetTypeCheck).
+func experimentDisabledRefusal(experiment string) *RuntimeTargetRefusal {
+	what := "flat Runtime Brokers are"
+	if experiment == experiments.FlatCloudRunTarget {
+		what = "flat Cloud Run runtime targets are"
+	}
 	return &RuntimeTargetRefusal{
 		Code:    ErrCodeExperimentDisabled,
 		Status:  http.StatusPreconditionFailed,
-		Message: fmt.Sprintf("flat Runtime Brokers are not enabled on this Hub (experiment %s is off)", experiments.FlatRuntimeBrokers),
-		Details: map[string]interface{}{"experiment": experiments.FlatRuntimeBrokers},
+		Message: fmt.Sprintf("%s not enabled on this Hub (experiment %s is off)", what, experiment),
+		Details: map[string]interface{}{"experiment": experiment},
 	}
+}
+
+// flatCloudRunTargetType is the canonical runtime target type of a flat
+// Cloud Run target. It equals the Cloud Run runtime's name.
+const flatCloudRunTargetType = "cloudrun"
+
+// flatTargetTypeCheck is the one check of a flat runtime target type, shared
+// by the R1 gate and the create gate (through flatTargetTypeRefusal) so they
+// cannot drift. It returns the experiment the type needs in addition to
+// experiments.FlatRuntimeBrokers ("" for docker, kubernetes and any other
+// type), and canonical=false for a type that is cloudrun after trimming
+// surrounding whitespace and ignoring case but is not exactly "cloudrun".
+// Such a type is not the cloudrun type: it is refused whatever the Cloud Run
+// experiment's state (flatTargetTypeNotCanonicalRefusal), so stored rows
+// stay canonical and descriptor comparisons stay exact.
+func flatTargetTypeCheck(targetType string) (experiment string, canonical bool) {
+	if strings.EqualFold(strings.TrimSpace(targetType), flatCloudRunTargetType) {
+		return experiments.FlatCloudRunTarget, targetType == flatCloudRunTargetType
+	}
+	return "", true
+}
+
+// maxEchoedRuntimeTargetType bounds the runtime target type a refusal echoes:
+// the value is untrusted Runtime Broker input.
+const maxEchoedRuntimeTargetType = 64
+
+// flatTargetTypeNotCanonicalRefusal refuses a runtime target type that is a
+// non-canonical spelling of cloudrun with 422 runtime_target_type_unsupported.
+// The type is echoed only as a JSON string field in the details, truncated to
+// maxEchoedRuntimeTargetType bytes at a rune boundary (truncateUTF8, shared
+// with skill federation); the message never contains it, so a log
+// line built from the error carries no broker-supplied text.
+func flatTargetTypeNotCanonicalRefusal(targetType string) *RuntimeTargetRefusal {
+	return &RuntimeTargetRefusal{
+		Code:    ErrCodeRuntimeTargetTypeUnsupported,
+		Status:  http.StatusUnprocessableEntity,
+		Message: fmt.Sprintf("the runtime target type is not supported; a Cloud Run runtime target must use exactly %q", flatCloudRunTargetType),
+		Details: map[string]interface{}{"runtimeTargetType": truncateUTF8(targetType, maxEchoedRuntimeTargetType)},
+	}
+}
+
+// flatTargetTypeRefusal returns the refusal for a new flat registration, or
+// an agent create, on a runtime target of targetType, after the
+// experiments.FlatRuntimeBrokers check: 422 runtime_target_type_unsupported
+// for a non-canonical cloudrun spelling, whatever the Cloud Run experiment's
+// state; otherwise experiment_disabled (412) when the type's own experiment
+// is off; nil when neither applies.
+func (s *Server) flatTargetTypeRefusal(targetType string) *RuntimeTargetRefusal {
+	exp, canonical := flatTargetTypeCheck(targetType)
+	if !canonical {
+		return flatTargetTypeNotCanonicalRefusal(targetType)
+	}
+	if exp != "" && !s.experimentEnabled(exp) {
+		return experimentDisabledRefusal(exp)
+	}
+	return nil
 }
 
 func runtimeTargetChangedRefusal(brokerID, stored, reported string) *RuntimeTargetRefusal {
@@ -207,6 +271,14 @@ type flatRegistration struct {
 	GateAutoProvide       bool
 	RequestedAutoProvide  bool
 	AutoProvideAuthorized bool
+	// HostSAClaim is the caller's actAs decision for the host service
+	// account Apply sets (Server.evaluateHostSAClaim). A row whose host
+	// service account Apply changes to a non-empty value is written only
+	// when HostSAClaim allows exactly that value; otherwise the registration
+	// is refused with ErrHostSAClaimNotAuthorized before anything is
+	// written. The zero value allows only writes that leave it unchanged,
+	// which is all the embedded registration does.
+	HostSAClaim hostSAClaimVerdict
 }
 
 // refuseRuntimeTargetInUse returns a runtime_target_in_use refusal when a
@@ -245,9 +317,15 @@ func (s *Server) registerFlatRuntimeBroker(ctx context.Context, reg flatRegistra
 	}
 
 	if current == nil {
-		// R1: a new flat registration needs the experiment.
+		// R1: a new flat registration needs the experiment. Then a
+		// non-canonical cloudrun spelling is refused (422), and a new row
+		// whose target type has an experiment of its own (cloudrun) needs
+		// that one too (412).
 		if !s.experimentEnabled(experiments.FlatRuntimeBrokers) {
-			return nil, false, experimentDisabledRefusal()
+			return nil, false, experimentDisabledRefusal(experiments.FlatRuntimeBrokers)
+		}
+		if refusal := s.flatTargetTypeRefusal(reg.Target.Type); refusal != nil {
+			return nil, false, refusal
 		}
 		// R2: the name/slug collision check applies when a flat
 		// registration creates a row. It is check-then-act; the identity
@@ -284,7 +362,10 @@ func (s *Server) registerFlatRuntimeBroker(ctx context.Context, reg flatRegistra
 		}
 		b.ID, b.Name, b.Slug, b.RuntimeTarget = reg.BrokerID, reg.Name, slug, &target
 		b.Profiles, b.DefaultProfile = nil, ""
-		if err := s.store.CreateRuntimeBroker(ctx, b); err != nil {
+		if err := hostSAClaimWriteAllowed(hostSAClaim{}, hostSAClaimOf(b), reg.HostSAClaim); err != nil {
+			return nil, false, err
+		}
+		if err := s.store.CreateRuntimeBrokerClearingCredentials(ctx, b); err != nil {
 			// A row that took the target after the check above.
 			var refusal *RuntimeTargetRefusal
 			if errors.Is(err, store.ErrAlreadyExists) && errors.As(s.refuseRuntimeTargetInUse(ctx, reg.Target.ID, reg.BrokerID), &refusal) {
@@ -296,18 +377,34 @@ func (s *Server) registerFlatRuntimeBroker(ctx context.Context, reg flatRegistra
 		if err != nil {
 			return nil, false, fmt.Errorf("failed to read flat Runtime Broker: %w", err)
 		}
+		// A row created (or re-created after a deregistration) here gets its
+		// agents' reservations back before the registration returns.
+		s.BackfillBrokerOnRegistration(ctx, reg.BrokerID)
 		return stored, true, nil
 	}
 
 	// R3: an existing legacy row is never converted, and a flat row's
 	// target never changes. R1: an existing flat row with the same target
-	// re-registers whatever the experiment state, so its agents are not
-	// stranded.
+	// re-registers whatever the experiment state (the target type's own
+	// experiment included), so its agents are not stranded.
 	if !current.IsFlat() {
 		return nil, false, runtimeBrokerNotFlatRefusal(current.ID)
 	}
 	if !sameRuntimeTarget(current.RuntimeTarget, &reg.Target) {
 		return nil, false, runtimeTargetChangedRefusal(current.ID, current.RuntimeTarget.ID, reg.Target.ID)
+	}
+	// The host service account decision is checked before the first write
+	// (the display name below), on a copy with Apply's changes, so a refusal
+	// leaves the row unchanged. It is checked again on the row itself
+	// immediately before the update.
+	priorHostSA := hostSAClaimOf(current)
+	if reg.Apply != nil {
+		probe := *current
+		probe.Labels = maps.Clone(current.Labels)
+		reg.Apply(&probe, false)
+		if err := hostSAClaimWriteAllowed(priorHostSA, hostSAClaimOf(&probe), reg.HostSAClaim); err != nil {
+			return nil, false, err
+		}
 	}
 	// R2: name and slug are set only at creation; a re-registration matched
 	// by ID is never refused for a name collision.
@@ -330,6 +427,9 @@ func (s *Server) registerFlatRuntimeBroker(ctx context.Context, reg flatRegistra
 	if reg.Apply != nil {
 		reg.Apply(current, false)
 		current.Updated = time.Now()
+		if err := hostSAClaimWriteAllowed(priorHostSA, hostSAClaimOf(current), reg.HostSAClaim); err != nil {
+			return nil, false, err
+		}
 		if err := s.store.UpdateRuntimeBroker(ctx, current); err != nil {
 			return nil, false, fmt.Errorf("failed to update flat Runtime Broker: %w", err)
 		}
@@ -416,9 +516,9 @@ func (s *Server) registerEmbeddedFlat(ctx context.Context, id *brokeridentity.Id
 			b.Endpoint = o.Endpoint
 			b.AutoProvide = o.AutoProvide
 			b.LastHeartbeat = time.Now()
-			if created {
-				b.Version = "0.1.0"
-			}
+			// The embedded broker runs in the hub binary, so its version is
+			// the hub's build token, written on every registration.
+			b.Version = hubBuildToken()
 			if o.Capabilities != nil {
 				caps := *o.Capabilities
 				b.Capabilities = &caps
@@ -491,7 +591,7 @@ func (s *Server) flatCreatePlacement(ctx context.Context, broker *store.RuntimeB
 			return store.PinnedPlacement{}, nil
 		}
 		if !s.experimentEnabled(experiments.FlatRuntimeBrokers) {
-			return store.PinnedPlacement{}, experimentDisabledRefusal()
+			return store.PinnedPlacement{}, experimentDisabledRefusal(experiments.FlatRuntimeBrokers)
 		}
 		brokerID := ""
 		if broker != nil {
@@ -500,7 +600,13 @@ func (s *Server) flatCreatePlacement(ctx context.Context, broker *store.RuntimeB
 		return store.PinnedPlacement{}, runtimeTargetMismatchRefusal(api.CheckExpectedRuntimeTarget(brokerID, "", expectedRuntimeTargetID))
 	}
 	if !s.experimentEnabled(experiments.FlatRuntimeBrokers) {
-		return store.PinnedPlacement{}, experimentDisabledRefusal()
+		return store.PinnedPlacement{}, experimentDisabledRefusal(experiments.FlatRuntimeBrokers)
+	}
+	// Next, before the expected target and the profile: a stored
+	// non-canonical cloudrun spelling is refused (422) and never pinned, and
+	// the stored target type's own experiment (cloudrun) gives the 412.
+	if refusal := s.flatTargetTypeRefusal(broker.RuntimeTarget.Type); refusal != nil {
+		return store.PinnedPlacement{}, refusal
 	}
 	if m := api.CheckExpectedRuntimeTarget(broker.ID, broker.RuntimeTarget.ID, expectedRuntimeTargetID); m != nil {
 		return store.PinnedPlacement{}, runtimeTargetMismatchRefusal(m)
@@ -920,17 +1026,25 @@ func runtimeTargetDMError(err error) *AgentDMError {
 	return &AgentDMError{Code: ErrCodeInternalError, Message: "Failed to wake agent: " + err.Error(), HTTPStatus: http.StatusInternalServerError}
 }
 
+// runtimeTargetRefusalMessage returns the message of a flat Runtime Broker
+// refusal returned by a start (the hub's own pre-check refusal, or the
+// broker's), or "" for any other error.
+func runtimeTargetRefusalMessage(err error) string {
+	var refusal *RuntimeTargetRefusal
+	if errors.As(err, &refusal) {
+		return refusal.Message
+	}
+	if se, _, _, ok := brokerRuntimeTargetRefusal(err); ok {
+		return se.brokerErrorMessage()
+	}
+	return ""
+}
+
 // settleRuntimeTargetRefusal records a flat Runtime Broker refusal returned
 // by a start as a definite start failure: the agent's message is set to the
 // refusal message. Nothing retries a refusal. Any other error is ignored.
 func (s *Server) settleRuntimeTargetRefusal(ctx context.Context, agent *store.Agent, err error) {
-	msg := ""
-	var refusal *RuntimeTargetRefusal
-	if errors.As(err, &refusal) {
-		msg = refusal.Message
-	} else if se, _, _, ok := brokerRuntimeTargetRefusal(err); ok {
-		msg = se.brokerErrorMessage()
-	}
+	msg := runtimeTargetRefusalMessage(err)
 	if msg == "" || agent == nil {
 		return
 	}

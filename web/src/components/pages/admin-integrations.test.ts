@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 import type { ScionPageAdminIntegrations } from './admin-integrations.js';
+import { integrationSettingsPayload } from './admin-integrations.js';
 
 // ── Mock data builders ──
 
@@ -181,7 +182,7 @@ describe('scion-page-admin-integrations — Discord guild_ids', () => {
 
   // ── Form submission ──
 
-  it('includes guild_ids in PUT payload', async () => {
+  it('includes an edited guild_ids in PUT payload, and only the changed key', async () => {
     let capturedPayload: Record<string, unknown> | null = null;
 
     element = await createComponent(
@@ -193,6 +194,13 @@ describe('scion-page-admin-integrations — Discord guild_ids', () => {
       })
     );
 
+    const guildInput = queryAll(element, 'sl-input').find(
+      (input) => (input as any).value === '111,222'
+    ) as HTMLElement & { value: string };
+    guildInput.value = '111,222,333';
+    guildInput.dispatchEvent(new Event('sl-change'));
+    await (element as any).updateComplete;
+
     // Click save button
     const buttons = queryAll(element, 'sl-button[variant="primary"]');
     const saveBtn = buttons.find((b) => b.textContent?.trim().includes('Save'));
@@ -201,17 +209,14 @@ describe('scion-page-admin-integrations — Discord guild_ids', () => {
     await new Promise((resolve) => setTimeout(resolve, 300));
 
     expect(capturedPayload).not.toBeNull();
-    const settings = capturedPayload!.settings as Record<string, string>;
-    expect(settings).toBeDefined();
-    expect(settings.guild_ids).toBe('111,222');
-    expect(settings.application_id).toBeDefined();
+    expect(capturedPayload!.settings).toEqual({ guild_ids: '111,222,333' });
   });
 
-  it('sends empty guild_ids when cleared (global mode)', async () => {
+  it('sends null for a cleared stored guild_ids, so the stored key is deleted (global mode)', async () => {
     let capturedPayload: Record<string, unknown> | null = null;
 
     element = await createComponent(
-      createFetchHandler(makeDiscordDetail({ guild_ids: '' }), {
+      createFetchHandler(makeDiscordDetail({ guild_ids: '111' }), {
         putHandler: (body) => {
           capturedPayload = body;
           return { status: 200, body: {} };
@@ -219,14 +224,20 @@ describe('scion-page-admin-integrations — Discord guild_ids', () => {
       })
     );
 
+    const guildInput = queryAll(element, 'sl-input').find(
+      (input) => (input as any).value === '111'
+    ) as HTMLElement & { value: string };
+    guildInput.value = '';
+    guildInput.dispatchEvent(new Event('sl-change'));
+    await (element as any).updateComplete;
+
     const buttons = queryAll(element, 'sl-button[variant="primary"]');
     const saveBtn = buttons.find((b) => b.textContent?.trim().includes('Save'));
     (saveBtn as HTMLElement).click();
     await new Promise((resolve) => setTimeout(resolve, 300));
 
     expect(capturedPayload).not.toBeNull();
-    const settings = capturedPayload!.settings as Record<string, string>;
-    expect(settings.guild_ids).toBe('');
+    expect(capturedPayload!.settings).toEqual({ guild_ids: null });
   });
 });
 
@@ -350,7 +361,8 @@ describe('scion-page-admin-integrations — structured save errors (ptone/scion#
     await clickSave(element);
     await clickSave(element);
 
-    const expected = { settings: { application_id: '123456789', guild_ids: '', register_url: '' } };
+    // Nothing was edited, so no setting is sent (ptone/scion#3913).
+    const expected = { settings: {} };
     expect(puts).toEqual([expected, expected]);
   });
 
@@ -512,15 +524,15 @@ describe('scion-page-admin-integrations — cleared config save (ptone/scion#392
         .filter((v): v is string => v !== null && !sentValues.includes(v));
       expect(notSent, 'shown fields missing from the save payload').toEqual([]);
 
-      // Cleared, each one is still sent, as "" (or "false" for a switch).
+      // Cleared (the reload after the save shows the stored values again):
+      // a stored key is sent as null, which deletes it on the hub; a field
+      // with no stored value, cleared or set to its default, is not sent,
+      // so plugin defaults are never written (ptone/scion#3913).
       const cleared = await setAllAndSave((c) => {
         if (isSwitch(c)) c.checked = false;
         else c.value = '';
       });
-      expect(Object.keys(cleared)).toHaveLength(fields.length);
-      expect(cleared).toHaveProperty('extra_server_key', '');
-      const notCleared = Object.entries(cleared).filter(([, v]) => v !== '' && v !== 'false');
-      expect(notCleared, 'shown fields not sent as cleared').toEqual([]);
+      expect(cleared).toEqual({ extra_server_key: null });
     }
   );
 });
@@ -587,5 +599,160 @@ describe('scion-page-admin-integrations — Telegram webhook secret requirement 
     input!.dispatchEvent(new Event('sl-change'));
     await el.updateComplete;
     expect(webhookSecretRequired(el)).toBe(true);
+  });
+});
+
+describe('scion-page-admin-integrations — plugin defaults are placeholders (ptone/scion#3913)', () => {
+  let element: HTMLElement | null = null;
+
+  afterEach(() => {
+    element?.remove();
+    element = null;
+    vi.restoreAllMocks();
+  });
+
+  async function render(name: string, settings: Record<string, string>) {
+    const puts: Array<Record<string, unknown>> = [];
+    const detail = {
+      name,
+      platform: name,
+      self_managed: false,
+      settings,
+      has_secrets: {},
+      status: { connected: true, version: '0.1.0' },
+    };
+    Object.defineProperty(window, 'location', {
+      value: { pathname: `/admin/integrations/${name}` },
+      writable: true,
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        createFetchHandler(detail, {
+          putHandler: (body) => {
+            puts.push(body);
+            return { status: 200, body: {} };
+          },
+        })
+      )
+    );
+    await import('./admin-integrations.js');
+    element = document.createElement('scion-page-admin-integrations');
+    document.body.appendChild(element);
+    const el = element as any;
+    await el.updateComplete;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    await el.updateComplete;
+    return { el: el as HTMLElement & { updateComplete: Promise<boolean> }, puts };
+  }
+
+  async function save(el: HTMLElement) {
+    const saveBtn = queryAll(el, 'sl-button[variant="primary"]').find(
+      (b) => b.textContent?.trim() === 'Save Configuration'
+    );
+    (saveBtn as HTMLElement).click();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+  }
+
+  function fieldControl(el: HTMLElement, label: string): HTMLElement & { value: string } {
+    const field = queryAll(el, '.form-field').find(
+      (f) => f.querySelector('label')?.textContent?.trim() === label
+    );
+    expect(field, label).toBeDefined();
+    return field!.querySelector('sl-input, sl-select, sl-switch') as HTMLElement & {
+      value: string;
+    };
+  }
+
+  it('shows a text default as the placeholder, not the value, and does not save it', async () => {
+    const { el, puts } = await render('telegram', {});
+    const input = queryAll(el, 'sl-input').find(
+      (i) => i.getAttribute('placeholder') === ':9094'
+    ) as (HTMLElement & { value: string }) | undefined;
+    expect(input, 'webhook listen input with the default as placeholder').toBeDefined();
+    expect(input!.value).toBe('');
+
+    await save(el);
+    expect(puts).toEqual([{ settings: {} }]);
+  });
+
+  it('a select set to its default with no stored value is not saved; another value is', async () => {
+    const { el, puts } = await render('a2a-bridge', {});
+    const select = fieldControl(el, 'Auth Scheme');
+    expect(select.value).toBe('none');
+
+    select.value = 'none';
+    select.dispatchEvent(new Event('sl-change'));
+    await el.updateComplete;
+    await save(el);
+    expect(puts.at(-1)).toEqual({ settings: {} });
+
+    const again = fieldControl(el, 'Auth Scheme');
+    again.value = 'bearer';
+    again.dispatchEvent(new Event('sl-change'));
+    await el.updateComplete;
+    await save(el);
+    expect(puts.at(-1)).toEqual({ settings: { auth_scheme: 'bearer' } });
+  });
+
+  it('Use default on a stored switch sends null, deleting the stored key', async () => {
+    const { el, puts } = await render('a2a-bridge', { rate_limit_enabled: 'true' });
+    expect(queryAll(el, '[data-use-default="auth_scheme"]')).toHaveLength(0);
+    const useDefault = queryAll(el, '[data-use-default="rate_limit_enabled"]');
+    expect(useDefault).toHaveLength(1);
+    (useDefault[0] as HTMLElement).click();
+    await el.updateComplete;
+    expect(queryAll(el, '[data-use-default="rate_limit_enabled"]')).toHaveLength(0);
+
+    await save(el);
+    expect(puts).toEqual([{ settings: { rate_limit_enabled: null } }]);
+  });
+});
+
+describe('integrationSettingsPayload (ptone/scion#3913)', () => {
+  const fields = [
+    { key: 'mode', defaultValue: 'poll' },
+    { key: 'listen', defaultValue: ':9094' },
+    { key: 'name', defaultValue: '' },
+  ];
+
+  it('sends nothing when nothing changed', () => {
+    expect(integrationSettingsPayload({ mode: 'webhook' }, { mode: 'webhook' }, fields)).toEqual(
+      {}
+    );
+    expect(integrationSettingsPayload({}, {}, fields)).toEqual({});
+  });
+
+  it('does not send an unset key left empty or set to its default', () => {
+    expect(integrationSettingsPayload({ name: '', mode: 'poll' }, {}, fields)).toEqual({});
+  });
+
+  it('sends a changed or newly set value', () => {
+    expect(
+      integrationSettingsPayload({ mode: 'webhook', listen: ':9095' }, { mode: 'poll' }, fields)
+    ).toEqual({ mode: 'webhook', listen: ':9095' });
+  });
+
+  it('sends a stored value equal to the default when the user keeps it explicitly', () => {
+    expect(integrationSettingsPayload({ mode: 'poll' }, { mode: 'webhook' }, fields)).toEqual({
+      mode: 'poll',
+    });
+  });
+
+  it('sends null for a cleared or reset stored key, and keeps a stored empty value', () => {
+    expect(
+      integrationSettingsPayload(
+        { listen: '', name: '' },
+        { listen: ':1', name: '', mode: 'x' },
+        fields
+      )
+    ).toEqual({ listen: null, mode: null });
+  });
+
+  it('treats server keys with no field definition the same way', () => {
+    expect(integrationSettingsPayload({ extra: '' }, { extra: 'v' }, fields)).toEqual({
+      extra: null,
+    });
+    expect(integrationSettingsPayload({ extra: 'w' }, {}, fields)).toEqual({ extra: 'w' });
   });
 });

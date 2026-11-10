@@ -70,7 +70,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: extract move -dir DIR -family FILE [-n]\n       extract bulk -dir DIR [-by area|origin] [-origins GLOB] [-keep FILE] [-n]\n       extract verify -before DIR -after DIR\n       extract export -dir DIR -to DIR [-import PATH] [-alias FILE] -family FILE [-n]\n       extract verify-export -before DIR -after DIR -to DIR [-import PATH] [-alias FILE] -family FILE\n       extract comment-only -before DIR -after DIR")
+	fmt.Fprintln(os.Stderr, "usage: extract move -dir DIR -family FILE [-n]\n       extract bulk -dir DIR [-by area|origin] [-origins GLOB] [-keep FILE] [-n]\n       extract verify -before DIR -after DIR\n       extract export -dir DIR -to DIR [-import PATH] [-src-import PATH] [-alias FILE] -family FILE [-n]\n       extract verify-export -before DIR -after DIR -to DIR [-import PATH] [-src-import PATH] [-alias FILE] -family FILE\n       extract comment-only -before DIR -after DIR")
 	os.Exit(2)
 }
 
@@ -188,6 +188,7 @@ func runExport(args []string) error {
 	imp := fs.String("import", "", "target import path (default: module path + -to)")
 	alias := fs.String("alias", defaultAliasFile, "alias file written into -dir")
 	famPath := fs.String("family", "", "export family file")
+	src := fs.String("src-import", "", "source package import path (default: module path + -dir, which is right only for a repository-relative -dir such as pkg/hub; set it for an archive or other absolute -dir); subpackages under it are read from -dir")
 	dry := fs.Bool("n", false, "dry run: print the plan, write nothing")
 	_ = fs.Parse(args)
 	if *famPath == "" {
@@ -195,6 +196,9 @@ func runExport(args []string) error {
 	}
 	if *imp == "" {
 		*imp = defaultImportPath(*to)
+	}
+	if *src == "" {
+		*src = defaultImportPath(*dir)
 	}
 	spec, err := readExportSpec(*famPath)
 	if err != nil {
@@ -204,7 +208,7 @@ func runExport(args []string) error {
 	if err != nil {
 		return err
 	}
-	ep, err := planExport(p, spec, *to, *imp, *alias)
+	ep, err := planExport(p, spec, *to, *imp, *src, *alias)
 	if err != nil {
 		return err
 	}
@@ -225,6 +229,7 @@ func runVerifyExport(args []string) error {
 	imp := fs.String("import", "", "target import path (default: the hubtestutil import path when -to is defaulted, else module path + -to)")
 	alias := fs.String("alias", defaultAliasFile, "alias file in -after")
 	famPath := fs.String("family", "", "export family file")
+	src := fs.String("src-import", modulePath+"/pkg/hub", "import path of the -before/-after package; subpackages under it are read from -before")
 	_ = fs.Parse(args)
 	if *before == "" || *after == "" || *famPath == "" {
 		return fmt.Errorf("-before, -after and -family are required")
@@ -250,7 +255,7 @@ func runVerifyExport(args []string) error {
 	if err != nil {
 		return err
 	}
-	r, err := verifyExport(pb, pa, *to, *imp, spec, *alias)
+	r, err := verifyExport(pb, pa, *to, *imp, *src, spec, *alias)
 	if err != nil {
 		return err
 	}

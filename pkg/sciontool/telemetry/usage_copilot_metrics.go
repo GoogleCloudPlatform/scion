@@ -291,6 +291,8 @@ type copilotTokenGroup struct {
 	deltas       map[string]int64
 	model        string
 	timeUnixNano uint64
+	startNanos   uint64
+	temporality  string
 }
 
 // DeriveBatch implements metricBatchDeriver for copilotUsageRule (design §5
@@ -393,6 +395,10 @@ func (r *copilotUsageRule) deriveCallsIncrementsLocked(scopeName string, resourc
 			Status:    telemetrycontract.StatusSuccess,
 			Calls:     delta,
 			dedupeKey: "copilot_calls\x00" + streamKey + "\x00" + strconv.FormatUint(point.TimeUnixNano, 10),
+
+			intervalStartNanos: point.StartTimeUnixNano,
+			intervalEndNanos:   point.TimeUnixNano,
+			temporality:        copilotTemporality(hist.AggregationTemporality),
 		})
 	}
 	return increments
@@ -441,6 +447,8 @@ func (r *copilotUsageRule) deriveTokenDeltasLocked(scopeName string, resourceAtt
 				deltas:       make(map[string]int64, 5),
 				model:        copilotPointModel(point.Attributes, resourceAttrs),
 				timeUnixNano: point.TimeUnixNano,
+				startNanos:   point.StartTimeUnixNano,
+				temporality:  copilotTemporality(sum.AggregationTemporality),
 			}
 			groups[corrKey] = g
 			*groupOrder = append(*groupOrder, corrKey)
@@ -495,6 +503,11 @@ func (r *copilotUsageRule) canonicalizeTokenGroups(groups map[string]*copilotTok
 			Status:    telemetrycontract.StatusSuccess,
 			Tokens:    tokens,
 			dedupeKey: "copilot_tokens\x00" + corrKey + "\x00" + strconv.FormatUint(g.timeUnixNano, 10),
+
+			rawTokens:          g.deltas,
+			intervalStartNanos: g.startNanos,
+			intervalEndNanos:   g.timeUnixNano,
+			temporality:        g.temporality,
 		})
 	}
 	return increments
@@ -514,4 +527,13 @@ func (r *copilotUsageRule) staleBackwardsCount() int64 { return r.converter.stal
 // did not exceed maxEvictedStart (see cumulativeToDeltaConverter).
 func (r *copilotUsageRule) baselinedAfterCapCount() int64 {
 	return r.converter.baselinedAfterCap.Load()
+}
+
+// copilotTemporality maps a stream's OTLP temporality to the analytics
+// temporality value.
+func copilotTemporality(t metricpb.AggregationTemporality) string {
+	if t == metricpb.AggregationTemporality_AGGREGATION_TEMPORALITY_CUMULATIVE {
+		return telemetrycontract.TemporalityCumulativeDelta
+	}
+	return telemetrycontract.TemporalityDelta
 }

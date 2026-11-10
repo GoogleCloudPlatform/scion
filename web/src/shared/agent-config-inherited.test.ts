@@ -184,3 +184,29 @@ describe('inheritedAgentRole caps the project default at the project maximum', (
     expect(p.agentRole).toEqual({ value: 'readonly', source: FROM_PROJECT });
   });
 });
+
+// A project count limit of 0 is Unlimited, not unset (ptone/scion#3925):
+// the placeholder reads "Unlimited" with the project source, a limit keeps
+// its number, and null or absent gives no project placeholder.
+describe('project count limits', () => {
+  it('shows a project 0 as Unlimited, from project settings', () => {
+    const p = resolveInheritedPlaceholders({
+      projectSettings: { defaultMaxTurns: 0, defaultMaxModelCalls: 0 },
+    });
+    expect(p['config.max_turns']).toEqual({ value: 'Unlimited', source: FROM_PROJECT });
+    expect(p['config.max_model_calls']).toEqual({ value: 'Unlimited', source: FROM_PROJECT });
+  });
+
+  it('keeps a project limit as its number', () => {
+    const p = resolveInheritedPlaceholders({ projectSettings: { defaultMaxTurns: 40 } });
+    expect(p['config.max_turns']).toEqual({ value: '40', source: FROM_PROJECT });
+  });
+
+  it('gives no project placeholder for null or absent', () => {
+    const p = resolveInheritedPlaceholders({
+      projectSettings: { defaultMaxTurns: null },
+    });
+    expect(p['config.max_turns']).toBeUndefined();
+    expect(p['config.max_model_calls']).toBeUndefined();
+  });
+});

@@ -234,6 +234,8 @@ func (s *Server) resolveDefaultSAAssignmentCore(ctx context.Context, r *http.Req
 	// evaluateSAAssignment runs:
 	//   1. Hub-scoped mode coupling (D4) — denies hub-scoped SAs
 	//      when gcpIamCheckMode != enforce.
+	//   1a. Refusal of a broker host service account translation record
+	//      (saReferencePreconditions), for every caller.
 	//   2. Hub ActionAssign authorization.
 	//   3. GCP actAs check via callerPrincipal, using the identity on ctx.
 	//   4. Audit record via EvaluateActAs with the given surface.
@@ -368,6 +370,47 @@ func (s *Server) hubDefaultPassthroughAllowed(ctx context.Context, runtimeBroker
 			"broker", runtimeBrokerID, "embedded_brokers", state.sortedIDs())
 	}
 	return false, ""
+}
+
+// projectDefaultPassthroughAllowed reports whether a project-default
+// "passthrough" may be applied to an agent named agentName, dispatched to
+// runtimeBrokerID under profileName (the effective profile; see
+// effectiveRuntimeProfileName). It applies the hub-default confinement
+// unchanged (hubDefaultPassthroughAllowed: the embedded broker, on a local
+// container runtime), then the passthrough authority
+// (evaluatePassthroughIdentity) for the identity on ctx: the requesting user
+// on agent create, the schedule's principal on scheduled dispatch. Both must
+// hold. Confinement runs first so a broker outside it costs no permission
+// check.
+//
+// A project default is checked here at consume time as well as when it is
+// saved (validateDefaultGCPIdentity), so a default saved before that check
+// existed, or copied in with a project, still cannot grant passthrough to a
+// caller without the authority. On denial the caller leaves
+// AppliedConfig.GCPIdentity unset, as the hub-default rung does. On a grant
+// the second return value is the profile to pin, as for the hub default.
+func (s *Server) projectDefaultPassthroughAllowed(ctx context.Context, r *http.Request, runtimeBrokerID, projectID, agentName, profileName string) (bool, string) {
+	allowed, resolvedProfile := s.hubDefaultPassthroughAllowed(ctx, runtimeBrokerID, projectID, agentName, profileName)
+	if !allowed {
+		slog.InfoContext(ctx, "project-default GCP passthrough denied: outside the passthrough default confinement",
+			"surface", SurfacePassthroughProjectDefault, "project_id", projectID, "agent", agentName,
+			"broker", runtimeBrokerID)
+		return false, ""
+	}
+	broker, err := s.store.GetRuntimeBroker(ctx, runtimeBrokerID)
+	if err != nil || broker == nil {
+		slog.InfoContext(ctx, "project-default GCP passthrough denied: runtime broker unavailable",
+			"surface", SurfacePassthroughProjectDefault, "project_id", projectID, "agent", agentName,
+			"broker", runtimeBrokerID, "error", err)
+		return false, ""
+	}
+	if d := s.evaluatePassthroughIdentity(ctx, r, broker, SurfacePassthroughProjectDefault); d != nil {
+		slog.InfoContext(ctx, "project-default GCP passthrough denied: caller lacks passthrough authority",
+			"surface", SurfacePassthroughProjectDefault, "project_id", projectID, "agent", agentName,
+			"broker", runtimeBrokerID, "reason", d.msg)
+		return false, ""
+	}
+	return true, resolvedProfile
 }
 
 // hubDefaultPassthroughRuntimeTypes are the runtime profile types the

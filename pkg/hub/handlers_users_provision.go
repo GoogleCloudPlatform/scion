@@ -188,6 +188,26 @@ func decodeStrictJSONObject(body []byte) (map[string]json.RawMessage, error) {
 	return fields, nil
 }
 
+// decodeStrictArray decodes raw as exactly one JSON array and returns its
+// elements undecoded, for the caller to decode strictly one by one.
+// Anything other than an array (including null) and trailing data after
+// the array are errors.
+func decodeStrictArray(raw json.RawMessage) ([]json.RawMessage, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || trimmed[0] != '[' {
+		return nil, errors.New("a JSON array is required")
+	}
+	dec := json.NewDecoder(bytes.NewReader(trimmed))
+	var out []json.RawMessage
+	if err := dec.Decode(&out); err != nil {
+		return nil, err
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return nil, errors.New("trailing data after the JSON array")
+	}
+	return out, nil
+}
+
 // hasControlChar reports whether s contains a control character other
 // than the allowed ones. With allowNewline, line breaks are allowed: '\n'
 // and '\r' (so CRLF text is accepted).
@@ -387,22 +407,22 @@ func (s *Server) handleProvisionUser(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	target := Resource{Type: "user"}
 
-	// Rows 1, 4, 4a, 5: admission. The D.2 session-only gate admits an
-	// interactive session or a dev credential and refuses a user access
-	// token until token admission is enabled; dev auth is then refused
-	// below. The gate writes its own response; a refused identity
-	// is logged here so the log follows the gate's decision.
-	actor, ok := s.requireSessionCredentialFor(w, ctx, authzop.ReasonGovernancePending)
+	// Rows 1, 4, 4a: admission. An interactive session, a dev credential
+	// or a user access token of a user is admitted here; dev auth is then
+	// refused below. Every other credential kind gets the session-only
+	// refusal. The gate writes its own response; a refused identity is
+	// logged here so the log follows the gate's decision.
+	actor, token, ok := s.sessionOrUserTokenCredential(w, ctx, authzop.ReasonGovernancePending)
 	if !ok {
 		if identity := GetIdentityFromContext(ctx); identity != nil {
-			logAuthzDenial(r, identity, target, ActionInvite, provisionOperationID+": refused by the session-only gate")
+			logAuthzDenial(r, identity, target, ActionInvite, provisionOperationID+": refused by the credential gate")
 		}
 		return
 	}
 	// Row 4a: dev auth is single-user local mode and does not mix with
 	// other user authentication setups. Provisioning is therefore refused
 	// for every caller while the hub runs with dev auth enabled, which
-	// covers the dev credential and the session the web dev auto-login
+	// covers the dev credential and the session a web dev sign-in link
 	// mints for the dev user. The dev-user check also refuses a session for
 	// the seeded dev user on a hub that has since turned dev auth off. The
 	// credential-kind check is belt-and-braces: redundant with the mode
@@ -415,9 +435,24 @@ func (s *Server) handleProvisionUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Rows 6-7: a user access token must carry user:invite (its frozen
+	// ceiling allows user.invite) on a boundary user.invite is eligible
+	// for, which is the hub boundary only. The decision below applies the
+	// same ceiling and boundary again; this check gives a token that
+	// lacks them the credential_insufficient reason.
+	if token != nil && !tokenAllowsPermission(token, "user.invite") {
+		logAuthzDenial(r, actor, target, ActionInvite,
+			provisionOperationID+": "+string(authzop.DenialCredentialInsufficient)+": the token lacks user:invite on a hub boundary")
+		writeError(w, http.StatusForbidden, ErrCodeForbidden,
+			"user provisioning by user access token requires the user:invite scope on a hub boundary",
+			map[string]interface{}{"reason": string(authzop.DenialCredentialInsufficient)})
+		return
+	}
+
 	// Row 8: live user.invite on the hub-level user collection. The
 	// collection evidence makes the target the hub scope, so only a grant
-	// that applies there counts.
+	// that applies there counts. For a token, the holder's current grants
+	// are intersected with the token's ceiling, inside its boundary.
 	decision := s.authzService.Decide(ctx, AuthzRequest{
 		Principal:      principalContextForIdentity(actor),
 		Credential:     credentialContextForIdentity(actor),
@@ -487,10 +522,12 @@ func (s *Server) handleProvisionUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Detail authority (design §5.4): user.read at hub scope. It never
-	// admits or denies; it selects the replay view and the collision
-	// detail, so it is evaluated only for an existing record (a created
-	// record always gets the detailed view).
+	// Detail authority (design §5.4): user.read on the hub-level user
+	// record, which resolves to the hub scope, the scope of the
+	// user.invite decision above. For a token it also needs user:read in
+	// the ceiling. It never admits or denies; it selects the replay view
+	// and the collision detail, so it is evaluated only for an existing
+	// record (a created record always gets the detailed view).
 	detail := false
 	if outcome != PendingCreated {
 		detail = s.authzService.Decide(ctx, AuthzRequest{

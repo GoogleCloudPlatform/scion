@@ -165,6 +165,26 @@ func holdsLiveClaim(row *ent.Agent, claimID, owner string, now time.Time) bool {
 
 func launchActive(row *ent.Agent) bool { return row.LaunchState == store.LaunchStateActive }
 
+// clearsEndedLaunchError reports whether a start claim on row clears the
+// row's launch error and cause: the row's last launch was a start or
+// restart launch, it has ended, and it left an error or cause. Kept:
+//   - a create launch's error: it marks an incomplete create
+//     (store.Agent.IsIncompleteCreate), which refuses the start;
+//   - an unconfirmed launch outcome (store.IsUnconfirmedLaunchError): the
+//     agent's runtime state is unknown after it, and later starts must keep
+//     treating it as unknown, so only a later launch or a running write
+//     replaces it;
+//   - an active launch: its own end writes its outcome.
+func clearsEndedLaunchError(row *ent.Agent) bool {
+	if launchActive(row) || (row.LaunchError == "" && row.LaunchCause == "") {
+		return false
+	}
+	if store.IsUnconfirmedLaunchError(row.LaunchError) {
+		return false
+	}
+	return row.LaunchKind == store.LaunchKindStart || row.LaunchKind == store.LaunchKindRestart
+}
+
 // ClaimAgentStart implements store.AgentStore.ClaimAgentStart.
 func (s *AgentStore) ClaimAgentStart(ctx context.Context, agentID, owner string, kind store.StartClaimKind, target string, ttl time.Duration) (store.StartClaim, error) {
 	if !kind.Valid() || kind == store.StartClaimStop {
@@ -196,7 +216,14 @@ func (s *AgentStore) ClaimAgentStart(ctx context.Context, agentID, owner string,
 			LeaseUntil:  now.Add(ttl),
 			RunIntentAt: intentAt,
 		}
-		if _, err := claimUpdate(c, row).
+		upd := claimUpdate(c, row)
+		if clearsEndedLaunchError(row) {
+			// A start that begins now replaces the outcome of the last
+			// start-kind launch: its launch error and cause would otherwise
+			// sit next to this start's own result (ptone/scion#5273).
+			upd.SetLaunchError("").SetLaunchCause("")
+		}
+		if _, err := upd.
 			SetStartClaimID(claim.ID).
 			SetStartClaimKind(string(kind)).
 			SetStartClaimState(string(store.StartClaimLive)).
@@ -564,20 +591,32 @@ func (s *AgentStore) ClaimAgentReincarnation(ctx context.Context, agentID string
 	// One conditional update, so the claim is atomic on its own and also
 	// inside a caller's transaction (it opens none of its own).
 	newVersion := expectedVersion + 1
-	n, err := s.client.Agent.Update().
-		Where(
-			agent.IDEQ(uid),
-			agent.StateVersionEQ(expectedVersion),
-			agent.StartClaimIDIsNil(),
-			agent.ReincarnationStateIn(store.ReincarnationStateNone, store.ReincarnationStateFailed),
-		).
-		SetReincarnationState(store.ReincarnationStatePending).
-		SetReincarnationUpdatedAt(at).
-		SetStateVersion(newVersion).
-		SetUpdated(time.Now()).
-		Save(ctx)
+	claim := func(ac *ent.AgentClient) (int, error) {
+		n, err := ac.Update().
+			Where(
+				agent.IDEQ(uid),
+				agent.StateVersionEQ(expectedVersion),
+				agent.StartClaimIDIsNil(),
+				agent.ReincarnationStateIn(store.ReincarnationStateNone, store.ReincarnationStateFailed),
+			).
+			SetReincarnationState(store.ReincarnationStatePending).
+			SetReincarnationUpdatedAt(at).
+			SetStateVersion(newVersion).
+			SetUpdated(time.Now()).
+			Save(ctx)
+		return n, mapError(err)
+	}
+	var n int
+	if obs := s.lifecycle.load(); obs != nil {
+		// Observed (design 2.7, r2 N2): derives nothing, records the
+		// reincarnation base run in the cursor.
+		n, err = s.observedAgentWrite(ctx, obs, uid, store.AgentWriteReincarnationClaim, store.AgentWriteHints{},
+			func(c *ent.Client) (int, error) { return claim(c.Agent) })
+	} else {
+		n, err = claim(s.client.Agent)
+	}
 	if err != nil {
-		return 0, mapError(err)
+		return 0, err
 	}
 	if n == 1 {
 		return newVersion, nil

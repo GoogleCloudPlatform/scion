@@ -25,22 +25,38 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 )
 
-func TestPodmanRuntime_Run_NoInitFlag(t *testing.T) {
-	// Create a temporary script to act as a mock podman
-	tmpDir := t.TempDir()
-	mockPodman := filepath.Join(tmpDir, "mock-podman")
+// mockPodmanID is a well-formed full container ID, as "podman run -d"
+// prints it.
+const mockPodmanID = "a3f1c2d4e5b60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90"
 
-	script := `#!/bin/sh
-echo "$@"
-`
-	if err := os.WriteFile(mockPodman, []byte(script), 0755); err != nil {
+// runPodmanRecorded runs a PodmanRuntime against a mock podman that records
+// its argv and prints mockPodmanID, and returns the recorded run argv as
+// one space-joined line.
+func runPodmanRecorded(t *testing.T, rootless bool, config RunConfig) string {
+	t.Helper()
+	dir := t.TempDir()
+	mockPodman := filepath.Join(dir, "mock-podman")
+	argvFile := filepath.Join(dir, "argv")
+	script := "#!/bin/sh\necho \"$@\" > '" + argvFile + "'\necho " + mockPodmanID + "\n"
+	if err := os.WriteFile(mockPodman, []byte(script), 0o755); err != nil {
 		t.Fatalf("failed to write mock podman: %v", err)
 	}
-
-	rt := &PodmanRuntime{
-		Command: mockPodman,
+	rt := &PodmanRuntime{Command: mockPodman, Rootless: rootless}
+	id, err := rt.Run(context.Background(), config)
+	if err != nil {
+		t.Fatalf("runtime.Run failed: %v", err)
 	}
+	if id != mockPodmanID {
+		t.Fatalf("runtime.Run returned %q, want %q", id, mockPodmanID)
+	}
+	argv, err := os.ReadFile(argvFile)
+	if err != nil {
+		t.Fatalf("failed to read recorded argv: %v", err)
+	}
+	return strings.TrimSpace(string(argv))
+}
 
+func TestPodmanRuntime_Run_NoInitFlag(t *testing.T) {
 	config := RunConfig{
 		Harness:      &harness.Generic{},
 		Name:         "test-agent",
@@ -49,10 +65,7 @@ echo "$@"
 		Task:         "hello",
 	}
 
-	out, err := rt.Run(context.Background(), config)
-	if err != nil {
-		t.Fatalf("runtime.Run failed: %v", err)
-	}
+	out := runPodmanRecorded(t, false, config)
 
 	// sciontool handles PID 1 responsibilities, so --init should NOT be present
 	if strings.Contains(out, "--init") {
@@ -72,7 +85,7 @@ func TestPodmanRuntime_Exec_UserFlag(t *testing.T) {
 	script := `#!/bin/sh
 echo "$@"
 `
-	if err := os.WriteFile(mockPodman, []byte(script), 0755); err != nil {
+	if err := os.WriteFile(mockPodman, []byte(script), 0o755); err != nil {
 		t.Fatalf("failed to write mock podman: %v", err)
 	}
 
@@ -125,19 +138,42 @@ func TestPodmanRuntime_ExecUserMethod(t *testing.T) {
 	})
 }
 
-func TestPodmanRuntime_Run_RootlessKeepID(t *testing.T) {
-	tmpDir := t.TempDir()
-	mockPodman := filepath.Join(tmpDir, "mock-podman")
-
-	script := `#!/bin/sh
-echo "$@"
-`
-	if err := os.WriteFile(mockPodman, []byte(script), 0755); err != nil {
-		t.Fatalf("failed to write mock podman: %v", err)
+// TestPodmanRuntime_Run_MetadataInterception checks that rootless Podman,
+// whose init drops to the keep-id user before the metadata server starts,
+// never gets NET_ADMIN or a required interception marker, while rootful
+// Podman keeps both.
+func TestPodmanRuntime_Run_MetadataInterception(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		rootless     bool
+		wantMarker   string
+		wantNetAdmin bool
+	}{
+		{name: "rootless", rootless: true, wantMarker: "SCION_METADATA_INTERCEPTION=off", wantNetAdmin: false},
+		{name: "rootful", rootless: false, wantMarker: "SCION_METADATA_INTERCEPTION=required", wantNetAdmin: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out := runPodmanRecorded(t, tc.rootless, RunConfig{
+				Harness:              &harness.Generic{},
+				Name:                 "test-agent",
+				UnixUsername:         "scion",
+				Image:                "scion-agent:latest",
+				Task:                 "hello",
+				Env:                  []string{"SCION_METADATA_MODE=block"},
+				MetadataInterception: true,
+			})
+			if !strings.Contains(out, tc.wantMarker) {
+				t.Errorf("expected %q in args, got %q", tc.wantMarker, out)
+			}
+			if got := strings.Contains(out, "--cap-add NET_ADMIN"); got != tc.wantNetAdmin {
+				t.Errorf("NET_ADMIN granted = %v, want %v (args %q)", got, tc.wantNetAdmin, out)
+			}
+		})
 	}
+}
 
+func TestPodmanRuntime_Run_RootlessKeepID(t *testing.T) {
 	t.Run("rootless adds --userns=keep-id with uid/gid mapping and env var", func(t *testing.T) {
-		rt := &PodmanRuntime{Command: mockPodman, Rootless: true}
 		config := RunConfig{
 			Harness:      &harness.Generic{},
 			Name:         "test-agent",
@@ -145,10 +181,7 @@ echo "$@"
 			Image:        "scion-agent:latest",
 			Task:         "hello",
 		}
-		out, err := rt.Run(context.Background(), config)
-		if err != nil {
-			t.Fatalf("runtime.Run failed: %v", err)
-		}
+		out := runPodmanRecorded(t, true, config)
 		if !strings.Contains(out, "--userns=keep-id:uid=1000,gid=1000") {
 			t.Errorf("expected '--userns=keep-id:uid=1000,gid=1000' in output, got %q", out)
 		}
@@ -158,7 +191,6 @@ echo "$@"
 	})
 
 	t.Run("rootful omits --userns=keep-id", func(t *testing.T) {
-		rt := &PodmanRuntime{Command: mockPodman, Rootless: false}
 		config := RunConfig{
 			Harness:      &harness.Generic{},
 			Name:         "test-agent",
@@ -166,10 +198,7 @@ echo "$@"
 			Image:        "scion-agent:latest",
 			Task:         "hello",
 		}
-		out, err := rt.Run(context.Background(), config)
-		if err != nil {
-			t.Fatalf("runtime.Run failed: %v", err)
-		}
+		out := runPodmanRecorded(t, false, config)
 		if strings.Contains(out, "--userns=keep-id") {
 			t.Errorf("did not expect '--userns=keep-id' in output, got %q", out)
 		}

@@ -17,6 +17,7 @@ package runtimebroker
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/url"
 	"os"
@@ -103,6 +104,10 @@ type hubEndpointInputs struct {
 	ColocatedRuntimeHubEndpoints map[string]string
 	RuntimeName                  string
 	HubListenPort                int
+	// FlatCloudRun is set for a flat cloudrun Runtime Broker instance
+	// (amendment P5-CR): its agents get ContainerHubEndpoint, the URL the
+	// flat host validated at activation, and nothing else.
+	FlatCloudRun bool
 }
 
 // resolveEffectiveHubEndpoint resolves the hub endpoint to stamp into a
@@ -118,6 +123,21 @@ type hubEndpointInputs struct {
 // this function returns and delivers into the agent's own SCION_HUB_ENDPOINT
 // env is identical whether or not it is trusted.
 func resolveEffectiveHubEndpoint(ctx context.Context, in hubEndpointInputs) (endpoint string, trusted bool, err error) {
+	// A flat cloudrun instance's agents get only the endpoint its host
+	// resolved from its own configuration and validated at activation
+	// (ContainerHubEndpoint): no request-level, connection, resolved-env or
+	// project-settings tier applies, and the K_SERVICE derivation below
+	// never runs. An endpoint that fails the activation rules here refuses
+	// the start; it is never replaced by a derived one.
+	if in.FlatCloudRun {
+		if !in.Op.valid() {
+			return "", false, fmt.Errorf("resolveEffectiveHubEndpoint: unknown start operation %q", in.Op)
+		}
+		if err := ValidateFlatCloudRunHubEndpoint(in.ContainerHubEndpoint); err != nil {
+			return "", false, fmt.Errorf("cannot resolve hub endpoint for a flat Cloud Run instance: %w", err)
+		}
+		return in.ContainerHubEndpoint, true, nil
+	}
 	switch in.Op {
 	case opCreate, opHTTPStart, opHTTPRestart:
 		endpoint, trusted = resolveHubEndpointForCreate(
@@ -248,7 +268,13 @@ func hubEndpointFromProjectSettings(projectPath string) string {
 		return ""
 	}
 	settingsDir := resolveProjectSettingsDir(projectPath)
-	projectSettings, err := config.LoadSettingsFromDir(settingsDir)
+	if settingsDir != projectPath {
+		if ignored := config.GetSettingsPath(projectPath); ignored != "" {
+			slog.Warn("Ignoring a settings file at the workspace root; project settings are read from the project's .scion directory",
+				"path", ignored, "settings_dir", settingsDir)
+		}
+	}
+	projectSettings, err := config.LoadProjectSettingsFromDir(settingsDir)
 	if err != nil {
 		return ""
 	}

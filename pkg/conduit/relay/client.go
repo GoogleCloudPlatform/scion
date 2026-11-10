@@ -37,6 +37,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/clock"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/transport/ws"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
 )
 
@@ -85,8 +86,11 @@ func isDialFailure(err error) bool {
 // PeerClient calls other relays' internal APIs. It is the injectable seam
 // for tests (two relays over httptest).
 type PeerClient struct {
-	// HTTP performs internal RPCs and probes. Its Timeout must be zero or
-	// above the RPC cap; per-call deadlines come from the context.
+	// HTTP performs internal RPCs and probes (nil: a hop client with the
+	// system roots). Whatever it is, it is used without redirects
+	// (hopClientWithoutRedirects); build it with NewHopHTTPClient. Its
+	// Timeout must be zero or above the RPC cap; per-call deadlines come
+	// from the context.
 	HTTP *http.Client
 	// WS dials internal stream WebSockets (nil: gorilla defaults).
 	WS *websocket.Dialer
@@ -117,9 +121,40 @@ func (c *PeerClient) closeWait() time.Duration {
 
 func (c *PeerClient) httpClient() *http.Client {
 	if c.HTTP != nil {
-		return c.HTTP
+		return hopClientWithoutRedirects(c.HTTP)
 	}
-	return http.DefaultClient
+	return defaultHopHTTPClient
+}
+
+// checkHopEndpoint applies the relay internal hop transport rule
+// (config.CheckRelayTransport) to a peer endpoint before anything is sent
+// to it. Its error wraps config.ErrPlaintextNonLoopback and is permanent:
+// it is never marked ErrOwnerUnreachable or ErrStaleRoute, so a router
+// neither excludes the relay as unreachable nor retries on it.
+func checkHopEndpoint(endpoint string) error {
+	if err := config.CheckRelayTransport(endpoint); err != nil {
+		return fmt.Errorf("conduit relay: refusing the internal hop: %w", err)
+	}
+	return nil
+}
+
+// hopWebSocketURL turns an internal API URL into its WebSocket URL:
+// https becomes wss and http becomes ws, whatever the case of the scheme
+// (checkHopEndpoint accepts an upper-case scheme, as net/url does).
+func hopWebSocketURL(raw string) (string, error) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("conduit relay: internal stream URL: %w", err)
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "https", "wss":
+		u.Scheme = "wss"
+	case "http", "ws":
+		u.Scheme = "ws"
+	default:
+		return "", fmt.Errorf("conduit relay: internal stream URL has scheme %q", u.Scheme)
+	}
+	return u.String(), nil
 }
 
 func (c *PeerClient) sign(req *http.Request) error {
@@ -132,6 +167,9 @@ func (c *PeerClient) sign(req *http.Request) error {
 // Probe is GET {endpoint}/internal/v1/conduit/self, signed for the relay
 // targetID at generation targetGen. It returns the answering instance id.
 func (c *PeerClient) Probe(ctx context.Context, endpoint, targetID string, targetGen int64) (string, error) {
+	if err := checkHopEndpoint(endpoint); err != nil {
+		return "", err
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(endpoint, "/")+internalSelfPath, nil)
 	if err != nil {
 		return "", err
@@ -159,6 +197,82 @@ func (c *PeerClient) Probe(ctx context.Context, endpoint, targetID string, targe
 	return sr.InstanceID, nil
 }
 
+// Causes of a failed drain call (DrainError.Cause), the values of the
+// hub counter scion.hub.conduit.ingress_drain_failed.
+const (
+	DrainFailedUnreachable = "unreachable"
+	DrainFailedTimeout     = "timeout"
+	DrainFailedRefused     = "refused"
+	DrainFailedBadResponse = "bad_response"
+)
+
+// DrainError is a failed drain call: Cause is one of the DrainFailed
+// values, Status the HTTP status of a refused call.
+type DrainError struct {
+	Cause  string
+	Status int
+	Err    error
+}
+
+func (e *DrainError) Error() string {
+	if e.Status != 0 {
+		return fmt.Sprintf("conduit relay drain: %s (HTTP %d)", e.Cause, e.Status)
+	}
+	return fmt.Sprintf("conduit relay drain: %s: %v", e.Cause, e.Err)
+}
+
+func (e *DrainError) Unwrap() error { return e.Err }
+
+// Drain is POST {endpoint}/internal/v1/conduit/drain, signed for the relay
+// targetID at generation targetGen, with its body bound to the signature
+// (X-Conduit-Body-SHA256). It asks the relay to send GoAway to the
+// sessions proxied by ingressInstance, which must be this client's own
+// relay-peer identity, with deadline (0: the relay's own) as the drain
+// deadline. It returns the count of sessions sent GoAway, or a
+// *DrainError.
+func (c *PeerClient) Drain(ctx context.Context, endpoint, targetID string, targetGen int64, ingressInstance string, deadline time.Duration) (int, error) {
+	if err := checkHopEndpoint(endpoint); err != nil {
+		return 0, &DrainError{Cause: DrainFailedRefused, Err: err}
+	}
+	body, err := json.Marshal(DrainRequest{IngressInstance: ingressInstance, DrainDeadlineMs: deadline.Milliseconds()})
+	if err != nil {
+		return 0, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(endpoint, "/")+internalDrainPath, bytes.NewReader(body))
+	if err != nil {
+		return 0, err
+	}
+	sum := sha256.Sum256(body)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(HeaderBodySHA256, hex.EncodeToString(sum[:]))
+	SetPeerTarget(req, targetID, targetGen)
+	if err := c.sign(req); err != nil {
+		return 0, err
+	}
+	resp, err := c.httpClient().Do(req)
+	if err != nil {
+		if ctx.Err() != nil {
+			return 0, &DrainError{Cause: DrainFailedTimeout, Err: ctx.Err()}
+		}
+		return 0, &DrainError{Cause: DrainFailedUnreachable, Err: err}
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return 0, &DrainError{Cause: DrainFailedRefused, Status: resp.StatusCode}
+	}
+	var dr DrainResponse
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&dr); err != nil {
+		if ctx.Err() != nil {
+			return 0, &DrainError{Cause: DrainFailedTimeout, Err: ctx.Err()}
+		}
+		return 0, &DrainError{Cause: DrainFailedBadResponse, Err: err}
+	}
+	if dr.GoAwaySent < 0 {
+		return 0, &DrainError{Cause: DrainFailedBadResponse, Err: errors.New("negative goaway_sent")}
+	}
+	return dr.GoAwaySent, nil
+}
+
 // probe is the relay's self-check probe (registry.ProbeFunc). It runs
 // before RegisterRelay, so it targets this instance at its current,
 // not yet registered, generation.
@@ -167,7 +281,7 @@ func (r *Relay) probe(ctx context.Context, endpoint string) (string, error) {
 }
 
 func (r *Relay) peerClient() *PeerClient {
-	return &PeerClient{HTTP: r.cfg.HTTPClient, Auth: r.cfg.PeerAuth, RPCTimeout: r.cfg.RPCTimeout, Clock: r.clk, CloseWait: r.handshakeTimeout()}
+	return &PeerClient{HTTP: r.cfg.HTTPClient, WS: r.cfg.WSDialer, Auth: r.cfg.PeerAuth, RPCTimeout: r.cfg.RPCTimeout, Clock: r.clk, CloseWait: r.handshakeTimeout()}
 }
 
 // RemoteSession is a conduit.Session held by another relay, reached over
@@ -200,6 +314,9 @@ func (s *RemoteSession) Call(ctx context.Context, rpc *conduitv1.RpcRequest) (*c
 		// Same contract as a local session: answered locally, the caller
 		// falls back to direct HTTP.
 		return &conduitv1.RpcResponse{RequestId: rpc.GetRequestId(), Status: http.StatusRequestEntityTooLarge}, nil
+	}
+	if err := checkHopEndpoint(s.endpoint); err != nil {
+		return nil, err
 	}
 	timeout := s.client.RPCTimeout
 	if timeout <= 0 {
@@ -326,11 +443,17 @@ func (s *RemoteSession) openHop(ctx context.Context, open *conduitv1.StreamOpen)
 	if err != nil {
 		return nil, closeErr(conduit.CloseProtocolError, ReasonBadFrame, err.Error())
 	}
+	if err := checkHopEndpoint(s.endpoint); err != nil {
+		return nil, err
+	}
 	// The owner opens only the kind it re-checked admission for.
 	want := s.want
 	want.Capability = string(kind)
 	u := s.sessionURL("stream")
-	wsURL := "ws" + strings.TrimPrefix(u, "http")
+	wsURL, err := hopWebSocketURL(u)
+	if err != nil {
+		return nil, err
+	}
 	sign := func(ctx context.Context) (http.Header, error) {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 		if err != nil {

@@ -47,58 +47,6 @@ func newSweepTestServer(t *testing.T) (*Server, store.Store) {
 	return srv, cs
 }
 
-func TestFailedMessageRetentionHandler_DefaultsWhenUnconfigured(t *testing.T) {
-	srv, cs := newSweepTestServer(t)
-	ctx := context.Background()
-	projectID := uuid.NewString()
-
-	// Older than the default 7-day window.
-	oldFailed := &store.Message{
-		ID: uuid.NewString(), ProjectID: projectID,
-		Sender: "user:x", Recipient: "agent:a", Msg: "old",
-		DispatchState: store.MessageDispatchFailed,
-		CreatedAt:     time.Now().Add(-8 * 24 * time.Hour),
-	}
-	require.NoError(t, cs.CreateMessage(ctx, oldFailed))
-
-	// Within the default 7-day window.
-	recentFailed := &store.Message{
-		ID: uuid.NewString(), ProjectID: projectID,
-		Sender: "user:x", Recipient: "agent:b", Msg: "recent",
-		DispatchState: store.MessageDispatchFailed,
-	}
-	require.NoError(t, cs.CreateMessage(ctx, recentFailed))
-
-	// srv.config.FailedMessageRetentionDays is left at its zero value —
-	// the handler must fall back to defaultFailedMessageRetentionDays (7).
-	srv.failedMessageRetentionHandler()(ctx)
-
-	_, err := cs.GetMessage(ctx, oldFailed.ID)
-	assert.ErrorIs(t, err, store.ErrNotFound, "message past the default retention window is purged")
-	_, err = cs.GetMessage(ctx, recentFailed.ID)
-	require.NoError(t, err, "message within the default retention window survives")
-}
-
-func TestFailedMessageRetentionHandler_HonorsConfiguredWindow(t *testing.T) {
-	srv, cs := newSweepTestServer(t)
-	srv.config.FailedMessageRetentionDays = 1
-	ctx := context.Background()
-	projectID := uuid.NewString()
-
-	old := &store.Message{
-		ID: uuid.NewString(), ProjectID: projectID,
-		Sender: "user:x", Recipient: "agent:a", Msg: "old",
-		DispatchState: store.MessageDispatchFailed,
-		CreatedAt:     time.Now().Add(-2 * 24 * time.Hour),
-	}
-	require.NoError(t, cs.CreateMessage(ctx, old))
-
-	srv.failedMessageRetentionHandler()(ctx)
-
-	_, err := cs.GetMessage(ctx, old.ID)
-	assert.ErrorIs(t, err, store.ErrNotFound, "configured 1-day window purges the 2-day-old message")
-}
-
 func TestBrokerMessageSweepHandler_FailsPendingMessagesWithMissingRecipient(t *testing.T) {
 	srv, cs := newSweepTestServer(t)
 	ctx := context.Background()

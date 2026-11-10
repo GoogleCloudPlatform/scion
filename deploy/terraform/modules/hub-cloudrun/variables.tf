@@ -106,24 +106,24 @@ variable "nfs_mount_root" {
 }
 
 variable "pv_name" {
-  description = "PersistentVolume/claim name for this hub's workspace share (agent-runtime-k8s output pv_name). Embedded in settings.yaml workspace_storage.nfs.shares[0].pv_name."
+  description = "PersistentVolume/claim name for this hub's workspace share (agent-runtime-k8s output pv_name). Embedded in settings.yaml project_storage.nfs.shares[0].pv_name."
   type        = string
 }
 
 variable "nfs_uid" {
-  description = "uid the settings.yaml workspace_storage.nfs block advertises. Single-sourced with agent-runtime-k8s's nfs_uid in the hub root — hardcoding this here separately from what actually chowns the export would silently split the two (found in review)."
+  description = "uid the settings.yaml project_storage.nfs block advertises. Single-sourced with agent-runtime-k8s's nfs_uid in the hub root — hardcoding this here separately from what actually chowns the export would silently split the two (found in review)."
   type        = number
   default     = 1000
 }
 
 variable "nfs_gid" {
-  description = "gid the settings.yaml workspace_storage.nfs block advertises. Single-sourced with agent-runtime-k8s's nfs_gid in the hub root."
+  description = "gid the settings.yaml project_storage.nfs block advertises. Single-sourced with agent-runtime-k8s's nfs_gid in the hub root."
   type        = number
   default     = 1000
 }
 
 variable "nfs_subpath_root" {
-  description = "subpath_root the settings.yaml workspace_storage.nfs block advertises. Single-sourced with agent-runtime-k8s's subpath_root in the hub root."
+  description = "subpath_root the settings.yaml project_storage.nfs block advertises. Single-sourced with agent-runtime-k8s's subpath_root in the hub root."
   type        = string
   default     = "projects"
 }

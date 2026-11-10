@@ -84,7 +84,7 @@ run_script() {
     OUT="$(cd "${REPO_ROOT}" && env \
         -u CERT_EMAIL -u SKIP_TLS -u HEALTH_CHECK_INSECURE -u HUB_BASE_URL \
         -u DNS_ZONE_DESCRIPTION -u PROJECT_ID -u HUB_NAME -u BASE_DOMAIN \
-        -u HUB_DOMAIN -u CERT_DOMAIN -u ENABLE_GKE \
+        -u HUB_DOMAIN -u CERT_DOMAIN -u ENABLE_GKE -u IMAGE_REGISTRY \
         PATH="${TESTS_DIR}/lib:${PATH}" \
         HUB_ENV_FILE="${STATE_DIR}/no-such-hub.env" \
         "${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"}" \
@@ -151,7 +151,7 @@ test_deploy_requires_cert_email_before_provisioning() {
 
 test_deploy_skip_tls_does_not_require_cert_email() {
     fresh_state
-    EXTRA_ENV=(SKIP_TLS=true)
+    EXTRA_ENV=(SKIP_TLS=true HUB_BASE_URL=https://hub.internal.example.test)
     run_script gce-demo-deploy.sh
     # The sub-steps (preflight first) run for real against the stubs and may
     # stop the run; this test only checks that the CERT_EMAIL guard lets
@@ -246,7 +246,198 @@ test_full_unit_renders_values_verbatim() {
     assert_not_contains "$unit" "##" "template notes dropped"
 }
 
-test_full_no_tls_skips_caddy() {
+# --- gce-start-hub.sh --full image_registry (ptone/scion#7183) ---
+
+test_full_settings_default_image_registry() {
+    fresh_state
+    EXTRA_ENV=("CURL_STUB_BODY=${HEALTHY}")
+    run_script gce-start-hub.sh --full
+    assert_eq 0 "$RC" "full deploy passes"
+    assert_contains "$(cat "${STUB_SCP_DIR}/scion-settings.yaml")" \
+        $'\nimage_registry: "localhost/scion"\n' "default image_registry is localhost/scion"
+}
+
+test_full_settings_image_registry_override() {
+    fresh_state
+    EXTRA_ENV=("CURL_STUB_BODY=${HEALTHY}" IMAGE_REGISTRY=us-docker.pkg.dev/example/scion)
+    run_script gce-start-hub.sh --full
+    assert_eq 0 "$RC" "full deploy with IMAGE_REGISTRY passes"
+    assert_contains "$(cat "${STUB_SCP_DIR}/scion-settings.yaml")" \
+        $'\nimage_registry: "us-docker.pkg.dev/example/scion"\n' "IMAGE_REGISTRY is written"
+}
+
+test_full_rejects_unsafe_image_registry() {
+    fresh_state
+    EXTRA_ENV=("CURL_STUB_BODY=${HEALTHY}" 'IMAGE_REGISTRY=bad"registry')
+    run_script gce-start-hub.sh --full
+    assert_eq 1 "$RC" "unsafe IMAGE_REGISTRY fails"
+    assert_contains "$OUT" "is not a registry path" "names the problem"
+    assert_not_contains "$CALLS" "compute scp" "stops before uploading"
+}
+
+# --- image_registry with ENABLE_GKE=true (ptone/scion#7183) ---
+
+test_full_gke_refuses_loopback_registry() {
+    fresh_state
+    EXTRA_ENV=("CURL_STUB_BODY=${HEALTHY}" ENABLE_GKE=true)
+    run_script gce-start-hub.sh --full
+    assert_eq 1 "$RC" "ENABLE_GKE=true with the localhost/scion default fails"
+    assert_contains "$OUT" "is a loopback address on the VM. GKE nodes cannot pull from it." "names the problem"
+    assert_not_contains "$CALLS" "compute scp" "stops before uploading"
+
+    fresh_state
+    printf 'SCION_IMAGE_REGISTRY = "127.0.0.1:5000/scion"\r\n' > "${STATE_DIR}/hub.env"
+    EXTRA_ENV=("CURL_STUB_BODY=${HEALTHY}" ENABLE_GKE=true IMAGE_REGISTRY=us-docker.pkg.dev/example/scion
+        "HUB_ENV_FILE=${STATE_DIR}/hub.env")
+    run_script gce-start-hub.sh --full
+    assert_eq 1 "$RC" "a loopback SCION_IMAGE_REGISTRY in hub.env wins over IMAGE_REGISTRY and fails"
+    assert_contains "$OUT" "'127.0.0.1:5000/scion' is a loopback address" "checks the hub.env value"
+    assert_not_contains "$CALLS" "compute scp" "stops before uploading (hub.env)"
+}
+
+test_full_gke_accepts_reachable_registry() {
+    fresh_state
+    EXTRA_ENV=("CURL_STUB_BODY=${HEALTHY}" ENABLE_GKE=true IMAGE_REGISTRY=us-docker.pkg.dev/example/scion)
+    run_script gce-start-hub.sh --full
+    assert_eq 0 "$RC" "ENABLE_GKE=true with a reachable IMAGE_REGISTRY passes"
+    assert_contains "$(cat "${STUB_SCP_DIR}/scion-settings.yaml")" \
+        $'\nimage_registry: "us-docker.pkg.dev/example/scion"\n' "IMAGE_REGISTRY is written"
+    assert_not_contains "$OUT" "This script does not build them" "no local-store note for a remote registry"
+
+    fresh_state
+    printf 'SCION_IMAGE_REGISTRY=us-docker.pkg.dev/example/scion\n' > "${STATE_DIR}/hub.env"
+    EXTRA_ENV=("CURL_STUB_BODY=${HEALTHY}" ENABLE_GKE=true "HUB_ENV_FILE=${STATE_DIR}/hub.env")
+    run_script gce-start-hub.sh --full
+    assert_eq 0 "$RC" "ENABLE_GKE=true with a reachable SCION_IMAGE_REGISTRY in hub.env passes"
+}
+
+test_full_local_registry_note() {
+    fresh_state
+    EXTRA_ENV=("CURL_STUB_BODY=${HEALTHY}")
+    run_script gce-start-hub.sh --full
+    assert_eq 0 "$RC" "full deploy passes"
+    assert_contains "$OUT" "This script does not build them" "says the starter does not build agent images"
+}
+
+# registry_is_loopback (hub-config.sh) must give the same answer as deploy.sh's
+# _hybrid_registry_is_loopback (single-node-vm/hybrid-tier.sh) for every input.
+test_registry_loopback_matches_deploy_sh() {
+    local out
+    out="$(cd "${REPO_ROOT}" && PROJECT_ID=stub PATH="${TESTS_DIR}/lib:${PATH}" STUB_LOG=/dev/null bash -c '
+        source scripts/starter-hub/hub-config.sh
+        source scripts/single-node-vm/hybrid-tier.sh
+        for r in localhost/scion localhost:5000/scion localhost 127.0.0.1/scion 127.1.2.3:80/x \
+            0.0.0.0/scion "[::1]/scion" "[::1]:5000/scion" ::1 \
+            us-docker.pkg.dev/p/r ghcr.io/org localhost.example.com/x 10.0.0.1:5000/x \
+            "[2001:db8::1]:5000/x" my-localhost/x; do
+            registry_is_loopback "$r"; a=$?
+            _hybrid_registry_is_loopback "$r"; b=$?
+            echo "$r $a $b"
+        done' 2>&1)"
+    local n=0 reg mine theirs
+    while read -r reg mine theirs; do
+        n=$((n + 1))
+        assert_eq "$theirs" "$mine" "registry_is_loopback(${reg}) agrees with _hybrid_registry_is_loopback"
+    done <<< "$out"
+    assert_eq 15 "$n" "all inputs compared"
+    assert_contains "$out" "localhost:5000/scion 0 0" "localhost with a port is loopback"
+    assert_contains "$out" "us-docker.pkg.dev/p/r 1 1" "a remote registry is not loopback"
+}
+
+# --- gce-demo-preflight.sh image registry branches (ptone/scion#7183) ---
+
+# preflight_registry ENV_FILE_CONTENT [VAR=value...] -- runs the preflight
+# with a hub env file holding ENV_FILE_CONTENT; sets PLAIN (OUT without
+# colour codes). Other preflight checks may fail under the stubs; the tests
+# judge only the image registry lines.
+preflight_registry() {
+    local content="$1"
+    shift
+    fresh_state
+    printf '%s' "$content" > "${STATE_DIR}/hub.env"
+    EXTRA_ENV=("HUB_ENV_FILE=${STATE_DIR}/hub.env" "$@")
+    run_script gce-demo-preflight.sh
+    PLAIN="$(printf '%s' "$OUT" | sed 's/\x1b\[[0-9;]*m//g')"
+}
+
+test_preflight_registry_unset_passes() {
+    preflight_registry $'SCION_LOG_LEVEL=info\n'
+    assert_contains "$PLAIN" "[PASS] SCION_IMAGE_REGISTRY not set; settings.yaml uses image_registry localhost/scion" "unset passes"
+    assert_contains "$PLAIN" "[WARN] The starter scripts do not build agent images" "warns that images are not built"
+    assert_not_contains "$PLAIN" "[FAIL] SCION_IMAGE_REGISTRY" "no registry failure"
+}
+
+test_preflight_registry_real_value_passes() {
+    preflight_registry $'SCION_IMAGE_REGISTRY=us-docker.pkg.dev/acme/scion\n'
+    assert_contains "$PLAIN" "[PASS] SCION_IMAGE_REGISTRY"$'\n' "a real value passes"
+    assert_not_contains "$PLAIN" "do not build agent images" "no build warning for a set registry"
+}
+
+test_preflight_registry_placeholder_fails() {
+    preflight_registry $'SCION_IMAGE_REGISTRY=your-registry.example.com/your-project/your-repo\n'
+    assert_eq 1 "$RC" "a placeholder fails the preflight"
+    assert_contains "$PLAIN" "[FAIL] SCION_IMAGE_REGISTRY is still a placeholder" "placeholder fails"
+}
+
+test_preflight_registry_invalid_image_registry_fails() {
+    preflight_registry $'SCION_LOG_LEVEL=info\n' 'IMAGE_REGISTRY=bad registry'
+    assert_eq 1 "$RC" "an invalid IMAGE_REGISTRY fails the preflight"
+    assert_contains "$PLAIN" "[FAIL] IMAGE_REGISTRY 'bad registry' is not a registry path" "names the bad value"
+    assert_not_contains "$PLAIN" "SCION_IMAGE_REGISTRY not set" "invalid IMAGE_REGISTRY is reported once (no pass line)"
+
+    # With GKE, an invalid IMAGE_REGISTRY that looks like loopback gives only the
+    # path failure, not a second (loopback) failure.
+    preflight_registry $'SCION_LOG_LEVEL=info\n' ENABLE_GKE=true 'IMAGE_REGISTRY=localhost/bad reg'
+    assert_eq 1 "$RC" "an invalid IMAGE_REGISTRY fails the preflight with GKE"
+    assert_contains "$PLAIN" "[FAIL] IMAGE_REGISTRY 'localhost/bad reg' is not a registry path" "names the bad value with GKE"
+    assert_not_contains "$PLAIN" "is a loopback address" "invalid IMAGE_REGISTRY is reported once (no loopback failure)"
+    assert_not_contains "$PLAIN" "SCION_IMAGE_REGISTRY not set" "invalid IMAGE_REGISTRY is reported once with GKE (no pass line)"
+}
+
+test_preflight_registry_gke_refuses_loopback() {
+    preflight_registry $'SCION_LOG_LEVEL=info\n' ENABLE_GKE=true
+    assert_eq 1 "$RC" "ENABLE_GKE=true with the default fails the preflight"
+    assert_contains "$PLAIN" "[FAIL] ENABLE_GKE=true, but the image registry localhost/scion is a loopback address" "default refused"
+
+    preflight_registry $'SCION_IMAGE_REGISTRY=localhost:5000/scion\n' ENABLE_GKE=true
+    assert_contains "$PLAIN" "[FAIL] ENABLE_GKE=true, but SCION_IMAGE_REGISTRY localhost:5000/scion is a loopback address" "hub.env loopback refused"
+
+    preflight_registry $'SCION_IMAGE_REGISTRY=us-docker.pkg.dev/acme/scion\n' ENABLE_GKE=true
+    assert_contains "$PLAIN" "[PASS] SCION_IMAGE_REGISTRY"$'\n' "hub.env reachable registry passes with GKE"
+
+    preflight_registry $'SCION_LOG_LEVEL=info\n' ENABLE_GKE=true IMAGE_REGISTRY=us-docker.pkg.dev/acme/scion
+    assert_contains "$PLAIN" "[PASS] SCION_IMAGE_REGISTRY not set; settings.yaml uses image_registry us-docker.pkg.dev/acme/scion" "reachable IMAGE_REGISTRY passes with GKE"
+}
+
+# The preflight reads hub.env as --full and systemd do (hub_env_value): a
+# spaced assignment counts and the last assignment wins, so both agree.
+test_preflight_registry_reads_hub_env_like_full() {
+    local gke=(ENABLE_GKE=true IMAGE_REGISTRY=us-docker.pkg.dev/acme/scion)
+
+    preflight_registry $'SCION_IMAGE_REGISTRY = localhost:5000/scion\n' "${gke[@]}"
+    assert_contains "$PLAIN" "[FAIL] ENABLE_GKE=true, but SCION_IMAGE_REGISTRY localhost:5000/scion is a loopback address" "spaced key is read"
+    EXTRA_ENV=("CURL_STUB_BODY=${HEALTHY}" "${gke[@]}" "HUB_ENV_FILE=${STATE_DIR}/hub.env")
+    run_script gce-start-hub.sh --full
+    assert_eq 1 "$RC" "--full also refuses the spaced key"
+
+    preflight_registry $'SCION_IMAGE_REGISTRY=us-docker.pkg.dev/acme/first\nSCION_IMAGE_REGISTRY=localhost/scion\n' "${gke[@]}"
+    assert_contains "$PLAIN" "[FAIL] ENABLE_GKE=true, but SCION_IMAGE_REGISTRY localhost/scion is a loopback address" "last assignment wins (loopback last)"
+    EXTRA_ENV=("CURL_STUB_BODY=${HEALTHY}" "${gke[@]}" "HUB_ENV_FILE=${STATE_DIR}/hub.env")
+    run_script gce-start-hub.sh --full
+    assert_eq 1 "$RC" "--full also refuses when the loopback value is last"
+
+    preflight_registry $'SCION_IMAGE_REGISTRY=localhost/scion\nSCION_IMAGE_REGISTRY=us-docker.pkg.dev/acme/last\n' "${gke[@]}"
+    assert_contains "$PLAIN" "[PASS] SCION_IMAGE_REGISTRY"$'\n' "last assignment wins (reachable last)"
+    assert_not_contains "$PLAIN" "[FAIL] ENABLE_GKE=true" "no GKE refusal when the reachable value is last"
+    EXTRA_ENV=("CURL_STUB_BODY=${HEALTHY}" "${gke[@]}" "HUB_ENV_FILE=${STATE_DIR}/hub.env")
+    run_script gce-start-hub.sh --full
+    assert_eq 0 "$RC" "--full also accepts when the reachable value is last"
+
+    preflight_registry $'SCION_IMAGE_REGISTRY=us-docker.pkg.dev/acme/scion\n' 'IMAGE_REGISTRY=bad registry'
+    assert_contains "$PLAIN" "[FAIL] IMAGE_REGISTRY 'bad registry' is not a registry path" "IMAGE_REGISTRY is checked even when hub.env sets a registry"
+}
+
+test_full_no_tls_needs_https_base_url() {
     local mode
     for mode in flag env; do
         fresh_state
@@ -257,11 +448,138 @@ test_full_no_tls_skips_caddy() {
             EXTRA_ENV=(SKIP_TLS=true)
             run_script gce-start-hub.sh --full
         fi
+        assert_eq 1 "$RC" "${mode}: --no-tls without an https HUB_BASE_URL stops"
+        assert_contains "$OUT" "needs HUB_BASE_URL set to the https:// URL" "${mode}: names the fix"
+        assert_contains "$OUT" "refuses to start with an http base URL on a non-loopback listener" "${mode}: says why"
+        if [[ -f "${STUB_SCP_DIR}/scion-hub.service" ]]; then fail "${mode}: nothing uploaded"; else pass; fi
+        assert_eq "" "$(cat "${STUB_SSH_LOG}" 2>/dev/null)" "${mode}: no remote session"
+    done
+
+    fresh_state
+    EXTRA_ENV=(HUB_BASE_URL=http://hub.internal.example.test:8080)
+    run_script gce-start-hub.sh --full --no-tls
+    assert_eq 1 "$RC" "an http HUB_BASE_URL stops"
+    assert_contains "$OUT" "(got http://hub.internal.example.test:8080 from HUB_BASE_URL)" "names the rejected URL and its source"
+}
+
+# gce-demo-deploy.sh with SKIP_TLS=true applies the same https check in its
+# fail-early block, before anything is provisioned (ptone/scion#5364).
+test_deploy_skip_tls_needs_https_base_url_before_provisioning() {
+    fresh_state
+    EXTRA_ENV=(SKIP_TLS=true)
+    run_script gce-demo-deploy.sh
+    assert_eq 1 "$RC" "SKIP_TLS=true without an https base URL stops"
+    assert_contains "$OUT" "needs HUB_BASE_URL set to the https:// URL" "names the fix"
+    assert_not_contains "$OUT" "Step 0" "stops before the first step (nothing provisioned)"
+    assert_not_contains "$CALLS" "compute" "no compute (provisioning) call"
+}
+
+# The base URL that takes effect is checked: a SCION_SERVER_BASE_URL in
+# hub.env overrides the unit's value (ptone/scion#5364).
+test_full_no_tls_checks_the_effective_hub_env_base_url() {
+    local envfile
+
+    # Scenario A: hub.env sets an http URL; an https HUB_BASE_URL does not
+    # help, the two differ.
+    fresh_state
+    envfile="${STATE_DIR}/hub-test.env"
+    printf 'SCION_SERVER_BASE_URL=http://10.0.0.5:8080\n' > "$envfile"
+    EXTRA_ENV=(HUB_ENV_FILE="$envfile" HUB_BASE_URL=https://hub.internal.example.test)
+    run_script gce-start-hub.sh --full --no-tls
+    assert_eq 1 "$RC" "A: an http hub.env value with an https HUB_BASE_URL stops"
+    assert_contains "$OUT" "differ" "A: names the mismatch"
+    assert_contains "$OUT" "$envfile" "A: names hub.env"
+    if [[ -f "${STUB_SCP_DIR}/scion-hub.service" ]]; then fail "A: nothing uploaded"; else pass; fi
+
+    # Scenario A': hub.env sets an http URL and HUB_BASE_URL is unset.
+    fresh_state
+    envfile="${STATE_DIR}/hub-test.env"
+    printf 'SCION_SERVER_BASE_URL="http://10.0.0.5:8080"\n' > "$envfile"
+    EXTRA_ENV=(HUB_ENV_FILE="$envfile")
+    run_script gce-start-hub.sh --full --no-tls
+    assert_eq 1 "$RC" "A': an http hub.env value stops"
+    assert_contains "$OUT" "(got http://10.0.0.5:8080 from SCION_SERVER_BASE_URL in ${envfile})" "A': names the value and hub.env"
+
+    # Scenario B: hub.env sets an https URL and HUB_BASE_URL is unset: accepted.
+    fresh_state
+    envfile="${STATE_DIR}/hub-test.env"
+    printf '# comment\nSCION_SERVER_BASE_URL=https://hub.internal.example.test\n' > "$envfile"
+    EXTRA_ENV=("CURL_STUB_BODY=${HEALTHY}" HUB_ENV_FILE="$envfile")
+    run_script gce-start-hub.sh --full --no-tls
+    assert_eq 0 "$RC" "B: an https hub.env value with HUB_BASE_URL unset is accepted"
+    assert_contains "$(cat "${STUB_SCP_DIR}/scion-hub.service")" \
+        'SCION_SERVER_BASE_URL=https://hub.internal.example.test"' "B: the unit carries the effective URL"
+
+    # Both https and equal: accepted.
+    fresh_state
+    envfile="${STATE_DIR}/hub-test.env"
+    printf 'SCION_SERVER_BASE_URL=https://hub.internal.example.test\n' > "$envfile"
+    EXTRA_ENV=("CURL_STUB_BODY=${HEALTHY}" HUB_ENV_FILE="$envfile" HUB_BASE_URL=https://hub.internal.example.test)
+    run_script gce-start-hub.sh --full --no-tls
+    assert_eq 0 "$RC" "equal https values are accepted"
+
+    # Both https but different: refused.
+    fresh_state
+    envfile="${STATE_DIR}/hub-test.env"
+    printf 'SCION_SERVER_BASE_URL=https://a.example.test\n' > "$envfile"
+    EXTRA_ENV=(HUB_ENV_FILE="$envfile" HUB_BASE_URL=https://b.example.test)
+    run_script gce-start-hub.sh --full --no-tls
+    assert_eq 1 "$RC" "different https values are refused"
+}
+
+# hub.env is parsed as systemd does: CRLF line endings and spaces around
+# "=" are accepted (ptone/scion#5364).
+test_full_no_tls_hub_env_crlf_and_spaced_assignment() {
+    local envfile
+    fresh_state
+    envfile="${STATE_DIR}/hub-test.env"
+    printf 'SCION_SERVER_BASE_URL=https://hub.internal.example.test\r\n' > "$envfile"
+    EXTRA_ENV=("CURL_STUB_BODY=${HEALTHY}" HUB_ENV_FILE="$envfile")
+    run_script gce-start-hub.sh --full --no-tls
+    assert_eq 0 "$RC" "a CRLF hub.env is accepted"
+    assert_contains "$(cat "${STUB_SCP_DIR}/scion-hub.service")" \
+        'SCION_SERVER_BASE_URL=https://hub.internal.example.test"' "CRLF: no CR in the unit"
+
+    fresh_state
+    envfile="${STATE_DIR}/hub-test.env"
+    printf '  SCION_SERVER_BASE_URL = "https://hub.internal.example.test"  \n' > "$envfile"
+    EXTRA_ENV=("CURL_STUB_BODY=${HEALTHY}" HUB_ENV_FILE="$envfile" HUB_BASE_URL=https://hub.internal.example.test)
+    run_script gce-start-hub.sh --full --no-tls
+    assert_eq 0 "$RC" "a spaced, quoted assignment equal to HUB_BASE_URL is accepted"
+
+    fresh_state
+    envfile="${STATE_DIR}/hub-test.env"
+    printf 'SCION_SERVER_BASE_URL = http://10.0.0.5:8080\r\n' > "$envfile"
+    EXTRA_ENV=(HUB_ENV_FILE="$envfile")
+    run_script gce-start-hub.sh --full --no-tls
+    assert_eq 1 "$RC" "a spaced http assignment is refused"
+    assert_contains "$OUT" "(got http://10.0.0.5:8080 from SCION_SERVER_BASE_URL in ${envfile})" "the parsed value is named"
+}
+
+# The scheme match is case-insensitive without bash-4 expansions.
+test_full_no_tls_accepts_upper_case_https() {
+    fresh_state
+    EXTRA_ENV=("CURL_STUB_BODY=${HEALTHY}" HUB_BASE_URL=HTTPS://hub.internal.example.test)
+    run_script gce-start-hub.sh --full --no-tls
+    assert_eq 0 "$RC" "HTTPS:// is accepted"
+}
+
+test_full_no_tls_skips_caddy() {
+    local mode
+    for mode in flag env; do
+        fresh_state
+        if [[ "$mode" == flag ]]; then
+            EXTRA_ENV=(HUB_BASE_URL=https://hub.internal.example.test)
+            run_script gce-start-hub.sh --full --no-tls
+        else
+            EXTRA_ENV=(SKIP_TLS=true HUB_BASE_URL=https://hub.internal.example.test)
+            run_script gce-start-hub.sh --full
+        fi
         assert_eq 0 "$RC" "${mode}: --full without TLS completes"
         if [[ -f "${STUB_SCP_DIR}/Caddyfile" ]]; then fail "${mode}: no Caddyfile uploaded"; else pass; fi
         if [[ -f "${STUB_SCP_DIR}/scion-hub.service" ]]; then pass; else fail "${mode}: unit file still uploaded"; fi
         assert_contains "$(cat "${STUB_SCP_DIR}/scion-hub.service")" \
-            'SCION_SERVER_BASE_URL=http://hub.demo.scion-ai.dev:8080"' "${mode}: plain HTTP base URL"
+            'SCION_SERVER_BASE_URL=https://hub.internal.example.test"' "${mode}: the terminator's https base URL"
         assert_contains "$(cat "${STUB_SSH_LOG}")" "SKIP_TLS=true" "${mode}: remote session skips Caddy"
         assert_eq "" "$CURL_CALLS" "${mode}: no HTTPS health check"
         assert_contains "$OUT" "Skipping the HTTPS health check" "${mode}: says the check is skipped"

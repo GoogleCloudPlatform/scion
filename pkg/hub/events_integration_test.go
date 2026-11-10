@@ -58,6 +58,7 @@ func setupEventTestServer(t *testing.T) (*Server, store.Store, *ChannelEventPubl
 		ProjectID:  project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
+		LocalPath:  fixtureProviderCheckout(t),
 		Status:     store.BrokerStatusOnline,
 	}
 	require.NoError(t, s.AddProjectProvider(ctx, provider))

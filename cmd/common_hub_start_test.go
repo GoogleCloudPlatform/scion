@@ -20,6 +20,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -684,4 +685,47 @@ func TestNonInteractiveBrokerMessage(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A synchronous create that the hub answers after the hub client's usual
+// timeout still succeeds: the create request has its own, longer timeout.
+// The timeouts are scaled down; the usual one is 50ms here, as
+// hubClientTimeout (30s) is in production.
+func TestCreateAgentWithBrokerResolution_SlowCreateOutlastsClientTimeout(t *testing.T) {
+	require.Greater(t, hubCreateRequestTimeout, hubClientTimeout, "the create timeout must exceed the usual client timeout")
+	orig := hubCreateRequestTimeout
+	hubCreateRequestTimeout = 10 * time.Second
+	t.Cleanup(func() { hubCreateRequestTimeout = orig })
+
+	const projectID = "proj-slow"
+	var creates atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.NotFound(w, r)
+			return
+		}
+		creates.Add(1)
+		select {
+		case <-time.After(300 * time.Millisecond):
+		case <-r.Context().Done():
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"agent": map[string]interface{}{"id": "agent-1", "slug": "slow"}})
+	}))
+	t.Cleanup(srv.Close)
+	client, err := hubclient.New(srv.URL, hubclient.WithTimeout(50*time.Millisecond))
+	require.NoError(t, err)
+	hubCtx := &HubContext{Client: client, Endpoint: srv.URL, ProjectID: projectID}
+
+	resp, err := createAgentWithBrokerResolution(context.Background(), hubCtx, projectID, &hubclient.CreateAgentRequest{Name: "slow"})
+	require.NoError(t, err, "a create slower than the client timeout must not be cut off")
+	require.NotNil(t, resp.Agent)
+	assert.Equal(t, "agent-1", resp.Agent.ID)
+	assert.Equal(t, int32(1), creates.Load(), "the create is sent once")
+
+	// Other requests on the same client keep the usual timeout.
+	_, err = client.ProjectAgents(projectID).Create(context.Background(), &hubclient.CreateAgentRequest{Name: "slow"})
+	require.Error(t, err, "without the create timeout the usual client timeout applies")
 }

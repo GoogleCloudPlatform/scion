@@ -24,6 +24,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -32,9 +33,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestBrokerRegistrationAndJoin(t *testing.T) {
@@ -895,6 +899,131 @@ func TestGenerateAndStoreSecret_RequiresBrokerID(t *testing.T) {
 	}
 }
 
+// TestMintSecretIfAbsent_MintsFirstSecret pins that MintSecretIfAbsent
+// stores and returns a new secret when the broker has none.
+func TestMintSecretIfAbsent_MintsFirstSecret(t *testing.T) {
+	svc, s := setupTestBrokerAuthService(t)
+	ctx := context.Background()
+	brokerID := uuid.New().String()
+	require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+		ID: brokerID, Name: "mint-first", Slug: "mint-first", Status: store.BrokerStatusOnline,
+		Created: time.Now(), Updated: time.Now(),
+	}))
+
+	secretKey, minted, err := svc.MintSecretIfAbsent(ctx, brokerID)
+	require.NoError(t, err)
+	assert.True(t, minted)
+	secretBytes, err := base64.StdEncoding.DecodeString(secretKey)
+	require.NoError(t, err)
+	assert.Len(t, secretBytes, 32)
+
+	stored, err := s.GetBrokerSecret(ctx, brokerID)
+	require.NoError(t, err)
+	assert.True(t, bytes.Equal(stored.SecretKey, secretBytes), "the returned secret must be the stored one")
+}
+
+// TestMintSecretIfAbsent_NeverReturnsStoredSecret pins that a broker which
+// already has a secret gets no secret back, and that the stored secret is
+// left unchanged.
+func TestMintSecretIfAbsent_NeverReturnsStoredSecret(t *testing.T) {
+	svc, s := setupTestBrokerAuthService(t)
+	ctx := context.Background()
+	brokerID := uuid.New().String()
+	require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+		ID: brokerID, Name: "mint-existing", Slug: "mint-existing", Status: store.BrokerStatusOnline,
+		Created: time.Now(), Updated: time.Now(),
+	}))
+	first, err := svc.GenerateAndStoreSecret(ctx, brokerID)
+	require.NoError(t, err)
+
+	secretKey, minted, err := svc.MintSecretIfAbsent(ctx, brokerID)
+	require.NoError(t, err)
+	assert.False(t, minted)
+	assert.Empty(t, secretKey, "a stored secret must never be returned")
+
+	stored, err := s.GetBrokerSecret(ctx, brokerID)
+	require.NoError(t, err)
+	assert.Equal(t, first, base64.StdEncoding.EncodeToString(stored.SecretKey), "the stored secret must not change")
+}
+
+// TestMintSecretIfAbsent_RequiresBrokerID pins the keyless error for an
+// empty broker ID.
+func TestMintSecretIfAbsent_RequiresBrokerID(t *testing.T) {
+	svc, _ := setupTestBrokerAuthService(t)
+	secretKey, minted, err := svc.MintSecretIfAbsent(context.Background(), "")
+	require.Error(t, err)
+	assert.Equal(t, "brokerId is required", err.Error())
+	assert.False(t, minted)
+	assert.Empty(t, secretKey)
+}
+
+// mintRaceStore stands in for a concurrent first-secret insert that wins
+// against MintSecretIfAbsent: the lookup always reports no secret, and the
+// insert fails. With winnerKey set, the insert first stores a secret with
+// that key for the same broker and then makes the real insert, so the
+// underlying store reports its own duplicate error; otherwise it returns
+// createErr. It counts lookups and inserts.
+type mintRaceStore struct {
+	store.Store
+	winnerKey []byte
+	createErr error
+	gets      int
+	creates   int
+}
+
+func (m *mintRaceStore) GetBrokerSecret(ctx context.Context, brokerID string) (*store.BrokerSecret, error) {
+	m.gets++
+	return nil, store.ErrNotFound
+}
+
+func (m *mintRaceStore) CreateBrokerSecret(ctx context.Context, secret *store.BrokerSecret) error {
+	m.creates++
+	if m.winnerKey == nil {
+		return m.createErr
+	}
+	if err := m.Store.CreateBrokerSecret(ctx, &store.BrokerSecret{
+		BrokerID:  secret.BrokerID,
+		SecretKey: m.winnerKey,
+		Algorithm: store.BrokerSecretAlgorithmHMACSHA256,
+		CreatedAt: time.Now(),
+		Status:    store.BrokerSecretStatusActive,
+	}); err != nil {
+		return err
+	}
+	return m.Store.CreateBrokerSecret(ctx, secret)
+}
+
+// TestMintSecretIfAbsent_LostInsertIsNotMinted pins that an insert failing
+// with a wrapped store.ErrAlreadyExists is reported like an existing
+// secret, and that nothing reads the stored secret after the insert.
+func TestMintSecretIfAbsent_LostInsertIsNotMinted(t *testing.T) {
+	race := &mintRaceStore{createErr: fmt.Errorf("insert broker secret: %w", store.ErrAlreadyExists)}
+	svc := NewBrokerAuthService(DefaultBrokerAuthConfig(), race)
+	t.Cleanup(svc.Close)
+
+	secretKey, minted, err := svc.MintSecretIfAbsent(context.Background(), uuid.New().String())
+	require.NoError(t, err)
+	assert.False(t, minted)
+	assert.Empty(t, secretKey)
+	assert.Equal(t, 1, race.creates, "one insert")
+	assert.Equal(t, 1, race.gets, "only the lookup before the insert reads the secret")
+}
+
+// TestMintSecretIfAbsent_InsertErrorPropagates pins that any other insert
+// error is still returned, with no key.
+func TestMintSecretIfAbsent_InsertErrorPropagates(t *testing.T) {
+	insertErr := errors.New("disk unavailable")
+	race := &mintRaceStore{createErr: insertErr}
+	svc := NewBrokerAuthService(DefaultBrokerAuthConfig(), race)
+	t.Cleanup(svc.Close)
+
+	secretKey, minted, err := svc.MintSecretIfAbsent(context.Background(), uuid.New().String())
+	require.ErrorIs(t, err, insertErr)
+	assert.Contains(t, err.Error(), "failed to store broker secret")
+	assert.False(t, minted)
+	assert.Empty(t, secretKey)
+}
+
 // TestGenerateAndStoreSecret_CanBeUsedForHMACAuth tests the full flow:
 // generate secret, then use it to authenticate a request.
 func TestGenerateAndStoreSecret_CanBeUsedForHMACAuth(t *testing.T) {
@@ -1498,7 +1627,7 @@ func TestBrokerRegistration_HostSAEmail_NormalizedToLowercase(t *testing.T) {
 		GCPHostServiceAccountEmail: "Broker-SA@My-Project.iam.gserviceaccount.com",
 	}
 
-	resp, err := svc.CreateBrokerRegistration(ctx, req, "admin")
+	resp, err := createBrokerRegistrationWithHostSA(ctx, svc, req, "admin")
 	if err != nil {
 		t.Fatalf("CreateBrokerRegistration failed: %v", err)
 	}
@@ -1536,7 +1665,7 @@ func TestBrokerReregistration_HostSAEmail_NormalizedToLowercase(t *testing.T) {
 	}
 
 	for _, email := range []string{"MixedCase@Proj.iam.gserviceaccount.com", "Other@Proj.iam.gserviceaccount.com"} {
-		resp, err := svc.CreateBrokerRegistration(ctx, CreateBrokerRegistrationRequest{
+		resp, err := createBrokerRegistrationWithHostSA(ctx, svc, CreateBrokerRegistrationRequest{
 			Name:                       "rereg-host",
 			GCPHostServiceAccountEmail: email,
 			GCPHostProjectID:           "proj",
@@ -1591,7 +1720,7 @@ func TestCreateBrokerRegistrationForAuthorizedMatch_IDMismatchRefused(t *testing
 	_, err = svc.CreateBrokerRegistrationForAuthorizedMatch(ctx, CreateBrokerRegistrationRequest{
 		Name:        "pin-mismatch-host",
 		AutoProvide: !beforeAutoProvide,
-	}, "someone-else", "a-different-broker-id-than-was-matched", true)
+	}, "someone-else", "a-different-broker-id-than-was-matched", true, hostSAClaimVerdict{})
 	if !errors.Is(err, ErrBrokerRegistrationAuthorizationStale) {
 		t.Fatalf("expected ErrBrokerRegistrationAuthorizationStale, got: %v", err)
 	}
@@ -1642,7 +1771,7 @@ func TestCreateBrokerRegistrationForAuthorizedMatch_AutoProvidePin(t *testing.T)
 			_, err := svc.CreateBrokerRegistrationForAuthorizedMatch(ctx, CreateBrokerRegistrationRequest{
 				Name:        "pin-autoprovide-host",
 				AutoProvide: tc.requestedOn,
-			}, "owner", broker.ID, tc.authorized)
+			}, "owner", broker.ID, tc.authorized, hostSAClaimVerdict{})
 			if tc.wantStale {
 				if !errors.Is(err, ErrBrokerRegistrationAuthorizationStale) {
 					t.Fatalf("expected ErrBrokerRegistrationAuthorizationStale, got: %v", err)
@@ -1682,7 +1811,7 @@ func TestCreateBrokerRegistrationForAuthorizedMatch_EmptyIDRefused(t *testing.T)
 	_, err = svc.CreateBrokerRegistrationForAuthorizedMatch(ctx, CreateBrokerRegistrationRequest{
 		Name:        "pin-empty-host",
 		AutoProvide: !beforeAutoProvide,
-	}, "someone-else", "", true)
+	}, "someone-else", "", true, hostSAClaimVerdict{})
 	if err == nil {
 		t.Fatal("expected an error for an empty expectedExistingBrokerID, got nil")
 	}
@@ -1719,7 +1848,7 @@ func TestCreateBrokerRegistrationForAuthorizedNew_ExistingMatchRefused(t *testin
 	_, err = svc.CreateBrokerRegistrationForAuthorizedNew(ctx, CreateBrokerRegistrationRequest{
 		Name:        "pin-new-host",
 		AutoProvide: !beforeAutoProvide,
-	}, "late-arriving-caller")
+	}, "late-arriving-caller", hostSAClaimVerdict{})
 	if !errors.Is(err, ErrBrokerRegistrationAuthorizationStale) {
 		t.Fatalf("expected ErrBrokerRegistrationAuthorizationStale, got: %v", err)
 	}
@@ -1734,4 +1863,175 @@ func TestCreateBrokerRegistrationForAuthorizedNew_ExistingMatchRefused(t *testin
 	if after.CreatedBy != "original-owner" {
 		t.Errorf("the existing broker's owner must not change; got CreatedBy=%q", after.CreatedBy)
 	}
+}
+
+// replaceSecretBroker creates a runtime broker row for the
+// ReplaceBrokerSecret tests and returns its ID.
+func replaceSecretBroker(t *testing.T, s store.Store) string {
+	t.Helper()
+	brokerID := uuid.New().String()
+	require.NoError(t, s.CreateRuntimeBroker(context.Background(), &store.RuntimeBroker{
+		ID: brokerID, Name: "replace-" + brokerID[:8], Slug: "replace-" + brokerID[:8], Status: store.BrokerStatusOnline,
+		Created: time.Now(), Updated: time.Now(),
+	}))
+	return brokerID
+}
+
+// verifiesWith reports whether a request signed with the base64 secret
+// secretB64 for brokerID passes ValidateBrokerSignature. A failure other
+// than an invalid signature fails the test. Keys are never printed.
+func verifiesWith(t *testing.T, svc *BrokerAuthService, brokerID, secretB64 string) bool {
+	t.Helper()
+	key, err := base64.StdEncoding.DecodeString(secretB64)
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/runtime-brokers/"+brokerID, nil)
+	require.NoError(t, (&apiclient.HMACAuth{BrokerID: brokerID, SecretKey: key}).ApplyAuth(req))
+	_, err = svc.ValidateBrokerSignature(context.Background(), req)
+	if err == nil {
+		return true
+	}
+	require.ErrorIs(t, err, errBrokerAuthInvalidSignature, "a wrong key must fail only on the signature")
+	return false
+}
+
+// assertNoKeyIn fails when text contains any of the keys, raw or base64.
+// It reports only which key index leaked, never a key.
+func assertNoKeyIn(t *testing.T, text string, keysB64 ...string) {
+	t.Helper()
+	for i, k := range keysB64 {
+		raw, err := base64.StdEncoding.DecodeString(k)
+		require.NoError(t, err)
+		assert.False(t, strings.Contains(text, k), "key %d (base64) appears in the text", i)
+		assert.False(t, strings.Contains(text, string(raw)), "key %d (raw) appears in the text", i)
+	}
+}
+
+// replaceFailStore makes CreateBrokerSecret fail, inside and outside a
+// transaction, and records the key it was asked to store.
+type replaceFailStore struct {
+	store.Store
+	createErr error
+	attempted *[]byte
+}
+
+func (f *replaceFailStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	return f.Store.WithTx(ctx, func(tx store.Store) error {
+		return fn(&replaceFailStore{Store: tx, createErr: f.createErr, attempted: f.attempted})
+	})
+}
+
+func (f *replaceFailStore) CreateBrokerSecret(ctx context.Context, secret *store.BrokerSecret) error {
+	*f.attempted = append([]byte(nil), secret.SecretKey...)
+	return f.createErr
+}
+
+// TestReplaceBrokerSecret_PriorStopsVerifying pins that after the
+// replacement the prior secret is refused and the new one verifies.
+func TestReplaceBrokerSecret_PriorStopsVerifying(t *testing.T) {
+	svc, s := setupTestBrokerAuthService(t)
+	ctx := context.Background()
+	brokerID := replaceSecretBroker(t, s)
+	prior, err := svc.GenerateAndStoreSecret(ctx, brokerID)
+	require.NoError(t, err)
+	require.True(t, verifiesWith(t, svc, brokerID, prior), "control: the prior secret verifies before the replacement")
+
+	fresh, err := svc.ReplaceBrokerSecret(ctx, brokerID)
+	require.NoError(t, err)
+	assert.False(t, fresh == prior, "the replacement must be a new secret")
+	assert.False(t, verifiesWith(t, svc, brokerID, prior), "the prior secret must stop verifying")
+	assert.True(t, verifiesWith(t, svc, brokerID, fresh), "the new secret must verify")
+
+	stored, err := s.GetBrokerSecret(ctx, brokerID)
+	require.NoError(t, err)
+	assert.True(t, base64.StdEncoding.EncodeToString(stored.SecretKey) == fresh, "the stored secret is the returned one")
+	assert.Equal(t, store.BrokerSecretStatusActive, stored.Status)
+}
+
+// TestReplaceBrokerSecret_EachCallFresh pins that every call gives a new
+// secret and only the latest verifies.
+func TestReplaceBrokerSecret_EachCallFresh(t *testing.T) {
+	svc, s := setupTestBrokerAuthService(t)
+	ctx := context.Background()
+	brokerID := replaceSecretBroker(t, s)
+
+	first, err := svc.ReplaceBrokerSecret(ctx, brokerID)
+	require.NoError(t, err)
+	second, err := svc.ReplaceBrokerSecret(ctx, brokerID)
+	require.NoError(t, err)
+	assert.False(t, first == second, "two replacements must give two secrets")
+	assert.False(t, verifiesWith(t, svc, brokerID, first), "the first secret must stop verifying after the second")
+	assert.True(t, verifiesWith(t, svc, brokerID, second), "the latest secret verifies")
+}
+
+// TestReplaceBrokerSecret_NoPriorSecret pins that a broker without a
+// secret gets one of the configured length.
+func TestReplaceBrokerSecret_NoPriorSecret(t *testing.T) {
+	svc, s := setupTestBrokerAuthService(t)
+	brokerID := replaceSecretBroker(t, s)
+
+	fresh, err := svc.ReplaceBrokerSecret(context.Background(), brokerID)
+	require.NoError(t, err)
+	raw, err := base64.StdEncoding.DecodeString(fresh)
+	require.NoError(t, err)
+	assert.Len(t, raw, DefaultBrokerAuthConfig().SecretKeyLength)
+	assert.True(t, verifiesWith(t, svc, brokerID, fresh), "the new secret verifies")
+}
+
+// TestReplaceBrokerSecret_RequiresBrokerID pins the keyless error for an
+// empty broker ID.
+func TestReplaceBrokerSecret_RequiresBrokerID(t *testing.T) {
+	svc, _ := setupTestBrokerAuthService(t)
+	secretKey, err := svc.ReplaceBrokerSecret(context.Background(), "")
+	require.Error(t, err)
+	assert.Equal(t, "brokerId is required", err.Error())
+	assert.Empty(t, secretKey)
+}
+
+// TestReplaceBrokerSecret_StoreErrorKeepsPrior pins that a failed store
+// write rolls the whole replacement back: an error and no secret are
+// returned, the prior secret is stored unchanged and still verifies, and
+// neither key appears in the error.
+func TestReplaceBrokerSecret_StoreErrorKeepsPrior(t *testing.T) {
+	svc, s := setupTestBrokerAuthService(t)
+	ctx := context.Background()
+	brokerID := replaceSecretBroker(t, s)
+	prior, err := svc.GenerateAndStoreSecret(ctx, brokerID)
+	require.NoError(t, err)
+
+	var attempted []byte
+	insertErr := errors.New("injected insert failure")
+	failing := NewBrokerAuthService(DefaultBrokerAuthConfig(), &replaceFailStore{Store: s, createErr: insertErr, attempted: &attempted})
+	t.Cleanup(failing.Close)
+
+	secretKey, err := failing.ReplaceBrokerSecret(ctx, brokerID)
+	require.ErrorIs(t, err, insertErr)
+	assert.Empty(t, secretKey, "no secret is returned when the replacement fails")
+	require.NotEmpty(t, attempted, "control: the replacement reached the insert")
+	assertNoKeyIn(t, err.Error(), prior, base64.StdEncoding.EncodeToString(attempted))
+
+	stored, err := s.GetBrokerSecret(ctx, brokerID)
+	require.NoError(t, err, "the prior secret must still be stored")
+	assert.True(t, base64.StdEncoding.EncodeToString(stored.SecretKey) == prior, "the prior secret must be unchanged")
+	assert.True(t, verifiesWith(t, svc, brokerID, prior), "the prior secret must still verify")
+}
+
+// TestGenerateAndStoreSecret_ReturnsStoredSecretUnchanged pins the legacy
+// behaviour the in-process callers rely on: with a stored secret,
+// GenerateAndStoreSecret returns it and leaves the stored row as it was.
+func TestGenerateAndStoreSecret_ReturnsStoredSecretUnchanged(t *testing.T) {
+	svc, s := setupTestBrokerAuthService(t)
+	ctx := context.Background()
+	brokerID := replaceSecretBroker(t, s)
+	first, err := svc.GenerateAndStoreSecret(ctx, brokerID)
+	require.NoError(t, err)
+	before, err := s.GetBrokerSecret(ctx, brokerID)
+	require.NoError(t, err)
+
+	again, err := svc.GenerateAndStoreSecret(ctx, brokerID)
+	require.NoError(t, err)
+	assert.True(t, again == first, "the stored secret is returned")
+	after, err := s.GetBrokerSecret(ctx, brokerID)
+	require.NoError(t, err)
+	assert.True(t, bytes.Equal(before.SecretKey, after.SecretKey), "the stored secret is unchanged")
+	assert.True(t, verifiesWith(t, svc, brokerID, first), "the stored secret still verifies")
 }

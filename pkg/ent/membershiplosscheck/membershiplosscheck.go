@@ -99,6 +99,7 @@ const (
 	TriggerRestoreCheck          Trigger = "restore_check"
 	TriggerReconcile             Trigger = "reconcile"
 	TriggerTestIdentityExpiry    Trigger = "test_identity_expiry"
+	TriggerMemberLeave           Trigger = "member_leave"
 )
 
 func (t Trigger) String() string {
@@ -108,7 +109,7 @@ func (t Trigger) String() string {
 // TriggerValidator is a validator for the "trigger" field enum values. It is called by the builders before save.
 func TriggerValidator(t Trigger) error {
 	switch t {
-	case TriggerMemberRemove, TriggerMemberRoleChange, TriggerMemberPrincipalDelete, TriggerAdminBindingDelete, TriggerOwnershipTransfer, TriggerGroupChange, TriggerBindingExpiry, TriggerSystemScopeChange, TriggerRestoreCheck, TriggerReconcile, TriggerTestIdentityExpiry:
+	case TriggerMemberRemove, TriggerMemberRoleChange, TriggerMemberPrincipalDelete, TriggerAdminBindingDelete, TriggerOwnershipTransfer, TriggerGroupChange, TriggerBindingExpiry, TriggerSystemScopeChange, TriggerRestoreCheck, TriggerReconcile, TriggerTestIdentityExpiry, TriggerMemberLeave:
 		return nil
 	default:
 		return fmt.Errorf("membershiplosscheck: invalid enum value for trigger field: %q", t)

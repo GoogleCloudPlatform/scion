@@ -83,6 +83,11 @@ type launchRecord struct {
 	// recorded resources (a local stop or delete owns the files), so a
 	// retry reruns only that.
 	resourcesOnlyCleanup atomic.Bool
+	// terminalUndelivered is set when the launch's terminal report got no
+	// definitive hub answer within its TTL, so runLaunch keeps the journal
+	// record (and the launch marker) for the next boot to resend it
+	// (ptone/scion#5186).
+	terminalUndelivered atomic.Bool
 
 	// journal is the launch's journal entry (launch_journal.go), or nil
 	// when the launch is not journalled. Its methods are nil-safe.
@@ -93,6 +98,9 @@ type launchRecord struct {
 	// after removing its objects (zero for a legacy Runtime Broker).
 	ownedRunMu sync.Mutex
 	ownedRun   ownedRunKey
+	// filesRemoved is set by cleanupLaunchFiles when it removed the
+	// agent's files and a flat instance's files proof then found none.
+	filesRemoved atomic.Bool
 	// done is closed once runLaunch (including any cleanup), or a create's
 	// registration (syncStart.finish), has fully finished. A later create
 	// for the same key waits on this before any name-addressed work
@@ -145,9 +153,14 @@ func (rec *launchRecord) CancelLocal() {
 }
 
 // launchRegistry tracks local launch bookkeeping keyed by (projectID, slug)
-// (design §3.8.1). It is a pure optimisation: a replica restart loses it
-// with no correctness impact, because the Hub always resolves the launch's
-// fate independently (the reaper, or the next report's answer).
+// (design §3.8.1). It is in memory only and a replica restart loses it.
+// That has no correctness impact: the Hub resolves each launch's fate
+// independently (the reaper, or the next report's answer). The launch
+// journal (launch_journal.go, under the broker's state directory) is a
+// separate, best-effort record: a restarted broker uses it to report each
+// unfinished launch's outcome (failed, or succeeded when that was already
+// decided) and to clean up what a failed launch created, never to resume a
+// launch.
 type launchRegistry struct {
 	mu      sync.Mutex
 	records map[launchKey]*launchRecord
@@ -237,26 +250,36 @@ func (r *launchRegistry) Handoff(key launchKey, from, to *launchRecord, fromCanc
 //
 // It reports whether it woke a launch.
 func (r *launchRegistry) CancelLocalFor(key launchKey, agentID, runID string) bool {
+	return r.cancelLocalForExcept(key, agentID, runID, nil) != nil
+}
+
+// cancelLocalForExcept is CancelLocalFor that leaves skip alone (nil skips
+// nothing) and returns the record it woke, or nil. A stop's second cancel,
+// after its start tracker wait, passes the record its first cancel woke, so
+// it reaches only a record registered in between: an async start that
+// registered after the first cancel and handed over to its launch (design
+// wave 3 §2 D-f).
+func (r *launchRegistry) cancelLocalForExcept(key launchKey, agentID, runID string, skip *launchRecord) *launchRecord {
 	if r == nil {
 		// A *Server built directly (e.g. by a test that does not go through
 		// New()) has a nil registry; treat it the same as "no launch held
 		// for this key" rather than panicking.
-		return false
+		return nil
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	rec := r.records[key]
-	if rec == nil {
-		return false
+	if rec == nil || rec == skip {
+		return nil
 	}
 	if runID != "" && rec.RunID != "" && rec.RunID != runID {
-		return false
+		return nil
 	}
 	if agentID != "" && rec.AgentID != "" && rec.AgentID != agentID {
-		return false
+		return nil
 	}
 	rec.CancelLocal()
-	return true
+	return rec
 }
 
 // OtherRunInFlight reports whether a launch of a run other than runID is

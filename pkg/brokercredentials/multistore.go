@@ -139,8 +139,13 @@ func (s *MultiStore) Save(creds *BrokerCredentials) error {
 	return nil
 }
 
-// Load reads credentials for a named hub connection.
+// Load reads credentials for a named hub connection. Like Save, it refuses a
+// name that ValidateName rejects.
 func (s *MultiStore) Load(name string) (*BrokerCredentials, error) {
+	if err := ValidateName(name); err != nil {
+		return nil, err
+	}
+
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -171,8 +176,13 @@ func (s *MultiStore) loadUnlocked(name string) (*BrokerCredentials, error) {
 	return &creds, nil
 }
 
-// Delete removes a named hub connection's credentials.
+// Delete removes a named hub connection's credentials. Like Save, it refuses a
+// name that ValidateName rejects.
 func (s *MultiStore) Delete(name string) error {
+	if err := ValidateName(name); err != nil {
+		return err
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

@@ -233,7 +233,7 @@ func (ps *PreviewService) GeneratePreview(ctx context.Context, req PreviewReques
 	page := ps.buildAffectedPage(impactedPrincipals, 0, defaultPreviewPageSize, &completeness)
 
 	// Compute state fingerprint for token binding.
-	stateFingerprint := ps.computeStateFingerprint(ctx, req, now)
+	stateFingerprint := ps.computeConstraintStateFingerprint(ctx, req, now)
 
 	// Generate preview ID and token.
 	previewID := ps.generatePreviewID()
@@ -2155,13 +2155,16 @@ func (ps *PreviewService) issueToken(
 // Token validation
 // ---------------------------------------------------------------------------
 
-// ValidateToken validates a preview token for commit.
+// ValidateToken validates a preview token for commit. constraintID is the
+// target constraint of an update or delete (empty for create); a token for
+// an update or delete is accepted only for the constraint it was issued for.
 // Returns nil on success, or a TokenValidationError with a specific code.
 func (ps *PreviewService) ValidateToken(
 	ctx context.Context,
 	token string,
 	actor PrincipalContext,
 	operation string,
+	constraintID string,
 	draft *store.AccessConstraint,
 	objectRevision int64,
 ) error {
@@ -2236,6 +2239,17 @@ func (ps *PreviewService) ValidateToken(
 		}
 	}
 
+	// Check the target constraint: an update or delete token is accepted
+	// only for the constraint it was issued for.
+	if operation == "update" || operation == "delete" {
+		if constraintID == "" || payload.ConstraintID != constraintID {
+			return &TokenValidationError{
+				Code:    ErrCodePreviewConstraintMismatch,
+				Message: "target constraint does not match the preview token",
+			}
+		}
+	}
+
 	// Check draft hash.
 	draftHash := ps.computeDraftHash(draft)
 	if draftHash != payload.DraftHash {
@@ -2261,8 +2275,8 @@ func (ps *PreviewService) ValidateToken(
 		}
 	}
 
-	// Check state fingerprint (related state may have changed).
-	currentFingerprint := ps.computeStateFingerprint(ctx, PreviewRequest{
+	// Check the constraint-state fingerprint (constraints in scope may have changed).
+	currentFingerprint := ps.computeConstraintStateFingerprint(ctx, PreviewRequest{
 		Operation:    operation,
 		Draft:        draft,
 		ConstraintID: payload.ConstraintID,
@@ -2272,7 +2286,7 @@ func (ps *PreviewService) ValidateToken(
 	if currentFingerprint != payload.StateFingerprint {
 		return &TokenValidationError{
 			Code:    ErrCodePreviewStateMismatch,
-			Message: "related state has changed since preview was generated (group membership, role bindings, etc.)",
+			Message: "access constraint state has changed since preview was generated",
 		}
 	}
 
@@ -2291,9 +2305,12 @@ func (ps *PreviewService) ValidateToken(
 // State fingerprint
 // ---------------------------------------------------------------------------
 
-// computeStateFingerprint computes a hash over relevant state timestamps
-// and counts to detect changes since the preview was generated.
-func (ps *PreviewService) computeStateFingerprint(
+// computeConstraintStateFingerprint hashes access-constraint state only: the
+// total constraint count and the (id, revision, updated_at) of every
+// constraint in the draft's scope. It detects constraint changes since the
+// preview was generated. Role bindings, group memberships and principal
+// status are not included.
+func (ps *PreviewService) computeConstraintStateFingerprint(
 	ctx context.Context,
 	req PreviewRequest,
 	now time.Time,

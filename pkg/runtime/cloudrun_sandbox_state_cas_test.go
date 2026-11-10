@@ -97,21 +97,8 @@ func siblingRuntime(t *testing.T, rt *CloudRunSandboxRuntime, bin string) *Cloud
 		rootDir:      t.TempDir(),
 		watchCancels: make(map[string]context.CancelFunc),
 	}
-	cancelWatchersOnCleanup(t, sib)
+	stopWatchersOnCleanup(t, sib.state.path, sib)
 	return sib
-}
-
-// cancelWatchersOnCleanup cancels rt's exit watchers when the test ends.
-func cancelWatchersOnCleanup(t *testing.T, rt *CloudRunSandboxRuntime) {
-	t.Helper()
-	t.Cleanup(func() {
-		rt.watchMu.Lock()
-		defer rt.watchMu.Unlock()
-		for name, cancel := range rt.watchCancels {
-			cancel()
-			delete(rt.watchCancels, name)
-		}
-	})
 }
 
 // readStateForTest reads the state file at path.
@@ -233,7 +220,7 @@ if [ "$1" = run ]; then
 fi
 exit 0`, log, release))
 	rt := newWorkaroundTestRuntime(t, bin)
-	cancelWatchersOnCleanup(t, rt)
+	stopWatchersOnCleanup(t, rt.state.path, rt)
 
 	runDone := make(chan error, 1)
 	var runReturned time.Time
@@ -317,15 +304,6 @@ func TestCloudRunSandboxRun_HeldCheckReadsStateFile(t *testing.T) {
 // cached map instead of a compare-and-set of one key.
 // -----------------------------------------------------------------------
 
-// gonePerKeyBin returns a mock sandbox binary whose exec probe answers
-// "not found" for key and succeeds for any other name; other verbs succeed.
-func gonePerKeyBin(t *testing.T, key string) string {
-	t.Helper()
-	return writeMockBin(t, fmt.Sprintf(`[ "$1" = wait ] && exec sleep 60
-if [ "$1" = exec ] && [ "$2" = %q ]; then echo "sandbox not found" >&2; exit 1; fi
-exit 0`, key))
-}
-
 func TestSandboxState_TwoInstancesKeepEachOthersWrites(t *testing.T) {
 	type op func(t *testing.T, rt *CloudRunSandboxRuntime, key string)
 	put := func(t *testing.T, rt *CloudRunSandboxRuntime, key string) {
@@ -344,8 +322,13 @@ func TestSandboxState_TwoInstancesKeepEachOthersWrites(t *testing.T) {
 			t.Fatalf("casMarkStopped %s: %v", key, err)
 		}
 	}
+	// Reconcile removes only stopped entries (ptone/scion#4776): the key
+	// is marked stopped through the instance's own store, then removed by
+	// its reconcile.
 	reconcile := func(t *testing.T, rt *CloudRunSandboxRuntime, key string) {
-		rt.state.reconcile(gonePerKeyBin(t, key))
+		mark(t, rt, key)
+		rt.state.reconcile(writeMockBin(t, `[ "$1" = wait ] && exec sleep 60
+exit 0`))
 	}
 	del := func(workaround bool) op {
 		return func(t *testing.T, rt *CloudRunSandboxRuntime, key string) {
@@ -751,7 +734,7 @@ func newArgsLogSandboxRuntime(t *testing.T) (*CloudRunSandboxRuntime, string) {
 echo "$*" >> %q
 exit 0`, log))
 	rt := newWorkaroundTestRuntime(t, bin)
-	cancelWatchersOnCleanup(t, rt)
+	stopWatchersOnCleanup(t, rt.state.path, rt)
 	return rt, log
 }
 

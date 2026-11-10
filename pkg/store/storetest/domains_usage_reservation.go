@@ -152,6 +152,7 @@ func UsageReservationConformance(t *testing.T, factory Factory) {
 			assert.Equal(t, second.ID, got.ID)
 
 			assert.ErrorIs(t, s.ReleaseReservationByID(ctx, uuid.NewString()), store.ErrNotFound)
+			assert.ErrorIs(t, s.ReleaseReservationByID(ctx, "not-a-uuid"), store.ErrNotFound)
 		})
 
 		t.Run("limits are independent", func(t *testing.T) {

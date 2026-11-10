@@ -44,6 +44,7 @@ func sharedDirGroupsRunConfig(groups ...int64) RunConfig {
 		Labels:       map[string]string{"scion.project": "myproject"},
 		SharedDirs:   []api.SharedDir{{Name: "scratchpad"}},
 		SharedDirStorage: &SharedDirRealization{
+			ProjectID:          "pid-1",
 			Backend:            "nfs",
 			PVClaimName:        "scion-shared",
 			SubPaths:           map[string]string{"scratchpad": "projects/pid-1/shared-dirs/scratchpad"},
@@ -261,18 +262,14 @@ func TestDockerRun_NoNFSSharedDirs_NoGroupAdd(t *testing.T) {
 }
 
 func TestPodmanRun_SharedDirLeafGroups(t *testing.T) {
-	cmd := writeEchoCommand(t)
-
-	out, err := (&PodmanRuntime{Command: cmd}).Run(context.Background(), sharedDirGroupsRunConfig(4242))
-	require.NoError(t, err)
+	out := runPodmanRecorded(t, false, sharedDirGroupsRunConfig(4242))
 	args := argsBeforeImage(t, out, "test-image")
 	assert.Contains(t, strings.Join(args, " "), "--group-add 4242")
 
 	// Rootless: the leaf gid is not mapped in the user namespace; warn and skip.
 	logs := &bytes.Buffer{}
 	setRuntimeLogHandler(t, slog.NewTextHandler(logs, nil))
-	out, err = (&PodmanRuntime{Command: cmd, Rootless: true}).Run(context.Background(), sharedDirGroupsRunConfig(4242))
-	require.NoError(t, err)
+	out = runPodmanRecorded(t, true, sharedDirGroupsRunConfig(4242))
 	args = argsBeforeImage(t, out, "test-image")
 	assert.NotContains(t, args, "--group-add")
 	n, _ := countEnv(args, SupplementalGIDsEnvVar)

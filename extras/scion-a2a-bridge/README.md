@@ -187,6 +187,7 @@ Edit `scion-a2a-bridge.yaml`. The required fields are:
 | `hub.signing_key_secret` | GCP Secret Manager resource name for the signing key. Mutually exclusive with `hub.signing_key`. | `projects/my-project/secrets/hub-signing-key` |
 | `bridge.listen_address` | Address for the A2A HTTP server | `:8443` |
 | `bridge.external_url` | Public URL where A2A clients reach the bridge | `https://a2a.example.com` |
+| `bridge.async_create` | Optional, default `true`. Auto-provisioning asks the Hub for an asynchronous create. With a Hub that has async launch on, the task reports `working` while the agent starts (streaming and SDK clients also see "provisioning agent (<step>)"), then the message is sent; a failed start ends the task `failed` without a send (streaming and SDK clients see "Agent failed to start (<code>): <message>"). `false` always uses the synchronous create. | `true` |
 | `auth.api_key` | Static API key clients pass in the `X-API-Key` header. Supports env var expansion. | `${A2A_API_KEY}` |
 | `projects[].slug` | Project slug to expose. Add one entry per project. | `my-project` |
 | `plugin.listen_address` | Broker plugin RPC listen address | `localhost:9090` |
@@ -305,7 +306,7 @@ Replace `PROJECT` and `AGENT` with the target project slug and agent name. A suc
 
 ### 8. Docker deployment
 
-The Docker build requires `CGO_ENABLED=1` (for `go-sqlite3`). The default runtime image is `debian:bookworm-slim` (glibc). Alpine users must use a musl-compatible SQLite driver or switch to a glibc-based image.
+The bridge uses a pure-Go SQLite driver, so the Docker build sets `CGO_ENABLED=0` and needs no C toolchain. The default runtime image is `debian:bookworm-slim`; the binary does not depend on the image's C library.
 
 Build the image from the repository root (the Dockerfile expects the full repo context):
 
@@ -332,7 +333,7 @@ While an A2A call waits, the bridge reads the agent's reply from the caller's ow
 For each call the bridge:
 
 1. refuses the call if the same caller already has a call to the same agent waiting in this bridge process;
-2. checks that the caller can read its conversation with the agent (it lists the caller's direct conversations and, when the conversation with the agent exists, reads from it); a refusal ends the call before anything is sent;
+2. checks that the caller can read its conversation with the agent (it lists the caller's direct conversations and, when the conversation with the agent exists, reads from it; for a federated user, it instead reads one message from the user's own direct conversation with the agent); a refusal ends the call before anything is sent;
 3. sends the message, and anchors on the message ID the Hub returns;
 4. reads the conversation after the anchor (first after 1 s, then every 0.5 s longer, up to every 3 s) until the agent's reply arrives, a read is refused, or `timeouts.send_message` passes.
 
@@ -342,6 +343,7 @@ The reply is the oldest message from the agent after the caller's message: a rep
 
 - **User access tokens** need the `inbox:read` scope and access to the agent's project. Without them the call is refused with: "This access token can't read your conversation with this agent (it needs the inbox:read scope and access to the agent's project); agent replies can't be returned."
 - **Legacy mode** (no caller identity) needs `hub.user_id`: replies are read from the bridge admin user's conversation with the agent, and the Hub keys that conversation on the user ID. Without `hub.user_id` the call fails at once with "Your conversation with this agent can't be found; the agent's reply can't be returned."
+- **Federated users** are read through their own direct conversation's chat history, which needs the Hub's conversation envelope switch on (the default; the Hub also treats it as off when its messaging setting cannot be read). With it off, set `reply_poll.enabled: false`, or federated user calls time out.
 - The Hub must return the message ID of a send (`message_id`). With a Hub that does not, the bridge waits on pushed broker messages as before; on such a Hub, an agent reply pushed before the Hub has answered the send is not returned. A send the Hub delivered but did not store ends the call with "The hub did not record this message; the agent's reply can't be returned."
 
 ### Configuration
@@ -352,7 +354,7 @@ reply_poll:
   concurrency: 64    # cap on conversation reads in flight per bridge process
 ```
 
-With `enabled: false` the bridge behaves as before reply polling existed: no same-caller check, no preflight, no reader. The push path's check that a pushed message comes from the caller's own user topic still applies. Agent callers (federated agents) always wait on the push path.
+With `enabled: false` the bridge behaves as before reply polling existed: no same-caller check, no preflight, no reader. The push path's check that a pushed message comes from the caller's own user topic still applies. Agent callers (federated agents) always wait on the push path; federated users wait on it when `enabled` is `false`, or, as with any caller, when the Hub returns no message ID for the send.
 
 ### Behaviour and limits
 

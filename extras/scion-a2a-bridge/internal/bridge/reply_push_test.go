@@ -282,7 +282,7 @@ func newDebugLoggedBridge(t *testing.T, logs *syncBuffer) (*Bridge, state.Store)
 	if err != nil {
 		t.Fatalf("state store: %v", err)
 	}
-	t.Cleanup(func() { store.Close() })
+	t.Cleanup(func() { _ = store.Close() })
 	cfg := &Config{
 		Hub:      HubConfig{User: "test-user"},
 		Timeouts: TimeoutConfig{SendMessage: 5 * time.Second},

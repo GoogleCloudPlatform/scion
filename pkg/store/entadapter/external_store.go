@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -331,6 +332,9 @@ func gcpFilterPredicates(filter store.GCPServiceAccountFilter) []predicate.GCPSe
 
 	if filter.Email != "" {
 		preds = append(preds, gcpserviceaccount.EmailEQ(filter.Email))
+	}
+	if filter.EmailFold != "" {
+		preds = append(preds, gcpserviceaccount.EmailEqualFold(filter.EmailFold))
 	}
 	if filter.Managed != nil {
 		preds = append(preds, gcpserviceaccount.ManagedEQ(*filter.Managed))
@@ -794,6 +798,68 @@ func (s *ExternalStore) CountUserAccessTokens(ctx context.Context, userID string
 			useraccesstoken.RevokedEQ(false),
 		).
 		Count(ctx)
+}
+
+// RevokeUserAccessTokensForUser revokes every unrevoked token of a user and returns how many it revoked (ptone/scion#2143).
+func (s *ExternalStore) RevokeUserAccessTokensForUser(ctx context.Context, userID string) (int, error) {
+	uid, err := parseUUID(userID)
+	if err != nil {
+		return 0, err
+	}
+	n, err := s.client.UserAccessToken.Update().
+		Where(
+			useraccesstoken.UserIDEQ(uid),
+			useraccesstoken.RevokedEQ(false),
+		).
+		SetRevoked(true).
+		Save(ctx)
+	if err != nil {
+		return 0, mapError(err)
+	}
+	return n, nil
+}
+
+// RevokeUserAccessTokensForUserProject revokes every unrevoked
+// "project"-boundary token of a user scoped to projectID and returns the
+// IDs it revoked (ptone/scion#7494). The boundary_kind predicate states the
+// rule explicitly: a hub-boundary token is never revoked here. The IDs are
+// read and then revoked by ID with the same predicates, so a token revoked
+// concurrently is not reported twice; inside the caller's transaction the
+// two statements see the same rows.
+func (s *ExternalStore) RevokeUserAccessTokensForUserProject(ctx context.Context, userID, projectID string) ([]string, error) {
+	uid, err := parseUUID(userID)
+	if err != nil {
+		return nil, err
+	}
+	pid, err := parseUUID(projectID)
+	if err != nil {
+		return nil, err
+	}
+	match := []predicate.UserAccessToken{
+		useraccesstoken.UserIDEQ(uid),
+		useraccesstoken.ProjectIDEQ(pid),
+		useraccesstoken.BoundaryKindEQ(string(permissions.BoundaryKindProject)),
+		useraccesstoken.RevokedEQ(false),
+	}
+	ids, err := s.client.UserAccessToken.Query().Where(match...).IDs(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	if len(ids) == 0 {
+		return []string{}, nil
+	}
+	if _, err := s.client.UserAccessToken.Update().
+		Where(append(match, useraccesstoken.IDIn(ids...))...).
+		SetRevoked(true).
+		Save(ctx); err != nil {
+		return nil, mapError(err)
+	}
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, id.String())
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 // DeleteUserAccessTokensByProject permanently removes all "project"-boundary

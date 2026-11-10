@@ -449,6 +449,7 @@ func setupLegacyScheduleTest(t *testing.T) (*Server, store.Store, string, *sql.D
 	srv, s := testServerOnMigratedStore(t, st)
 	db, err := sql.Open("sqlite", dsn)
 	require.NoError(t, err)
+	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { _ = db.Close() })
 	srv, s, projectID := initScheduleTest(t, srv, s)
 	return srv, s, projectID, db

@@ -77,7 +77,7 @@ func TestSchedMetadataEditKeepsAuthority(t *testing.T) {
 	id := createOwnerSchedule(t, srv, owner, projectID, "meta-edit", "dispatch_agent")
 	before := loadScheduleRevision(t, s, id)
 
-	editor := authzHelperAgent(projectID, ScopeProjectRead, ScopeAgentCreate)
+	editor := setupScopedDispatchAgentOwner(t, srv, s, projectID, tid("sched-meta-editor"))
 	rec := doAuthoredScheduleRequest(t, srv, editor, projectID, id, http.MethodPatch, UpdateScheduleRequest{Name: "meta-edit-renamed"})
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
@@ -98,24 +98,27 @@ func TestPatchEnableReauthorizes(t *testing.T) {
 	pauseSchedule(t, srv, owner, projectID, id)
 	before := loadScheduleRevision(t, s, id)
 
-	// An agent without agent:create is denied, and nothing changes.
-	denied := authzHelperAgent(projectID, ScopeProjectRead)
+	// A user who may manage schedules but not create agents is denied,
+	// and nothing changes.
+	denied := scheduleOnlyUser(t, s, projectID, tid("sched-enable-denied"))
 	rec := doAuthoredScheduleRequest(t, srv, denied, projectID, id, http.MethodPatch, UpdateScheduleRequest{Status: store.ScheduleStatusActive})
 	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), agentCreateDenyMessage)
 	assert.Equal(t, before, loadScheduleRevision(t, s, id))
 	sc, err := s.GetSchedule(context.Background(), id)
 	require.NoError(t, err)
 	assert.Equal(t, store.ScheduleStatusPaused, sc.Status)
 
-	// An agent with agent:create re-enables it and becomes the revision.
-	allowed := authzHelperAgent(projectID, ScopeProjectRead, ScopeAgentCreate)
+	// Another user who may create agents re-enables it and becomes the
+	// revision.
+	allowed := setupScopedDispatchAgentOwner(t, srv, s, projectID, tid("sched-enable-editor"))
 	rec = doAuthoredScheduleRequest(t, srv, allowed, projectID, id, http.MethodPatch, UpdateScheduleRequest{Status: store.ScheduleStatusActive})
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	after := loadScheduleRevision(t, s, id)
-	assert.Equal(t, authzHelperAgentID, after.Attribution.InitiatorPrincipalID)
-	assert.Equal(t, store.InitiatorCredentialKindAgent, after.Attribution.InitiatorCredentialKind)
+	assert.Equal(t, allowed.ID(), after.Attribution.InitiatorPrincipalID)
+	assert.NotEqual(t, before.Attribution.InitiatorPrincipalID, after.Attribution.InitiatorPrincipalID)
 	assert.Equal(t, before.Attribution.AuthorizationRevision+1, after.Attribution.AuthorizationRevision)
-	assert.Equal(t, store.EffectCeilingBounded, after.Ceiling.Kind)
+	assert.Equal(t, store.EffectCeilingPrincipal, after.Ceiling.Kind)
 }
 
 // uatLookupFailingStore fails GetUserAccessToken.
@@ -240,6 +243,27 @@ func unrecordableMessageWriteCredentials(t *testing.T, srv *Server, s store.Stor
 	}
 }
 
+// holdScheduleFor records an agent identity as the current initiator of
+// schedule id, so an agent caller reaches the checks that follow the
+// row decision. A user identity leaves the row as it is.
+func holdScheduleFor(t *testing.T, s store.Store, id string, identity Identity) {
+	t.Helper()
+	if identity.Type() != "agent" {
+		return
+	}
+	ctx := context.Background()
+	sc, err := s.GetSchedule(ctx, id)
+	require.NoError(t, err)
+	attr := sc.InitiatorAttribution
+	attr.InitiatorPrincipalKind = store.DelegationPrincipalAgent
+	attr.InitiatorPrincipalID = identity.ID()
+	attr.InitiatorCredentialKind = store.InitiatorCredentialKindAgent
+	attr.InitiatorCredentialID = ""
+	attr.InitiatorCredentialSnapshot = ""
+	attr.AttributionVersion = 1
+	require.NoError(t, s.UpdateSchedule(ctx, sc, store.ScheduleFieldMask{}, sc.AuthorizationRevision, sc.AuthorizationRevision != 0, &attr))
+}
+
 // A message event or schedule write by a credential whose authority cannot
 // be recorded is refused with the same 403 as a dispatch_agent write, and
 // writes nothing: no event or schedule row on create, and no attribution,
@@ -302,11 +326,18 @@ func TestMessageScheduleWriteDeniedWhenCeilingUnrecordable(t *testing.T) {
 
 			t.Run("PATCH", func(t *testing.T) {
 				id := createUnrecTargetSchedule(t, "unrec-msg-patch"+suffix)
+				holdScheduleFor(t, s, id, c.identity)
 				before, err := s.GetSchedule(ctx, id)
 				require.NoError(t, err)
 				rec := doAuthoredScheduleRequest(t, srv, c.identity, projectID, id, http.MethodPatch,
 					UpdateScheduleRequest{CronExpr: "30 * * * *"})
-				assertCeilingDenial(t, c, rec)
+				if c.identity.Type() == "agent" {
+					// Agent callers do not edit schedule definitions.
+					require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+					assert.JSONEq(t, agentScopeForbiddenBody, rec.Body.String())
+				} else {
+					assertCeilingDenial(t, c, rec)
+				}
 				after, err := s.GetSchedule(ctx, id)
 				require.NoError(t, err)
 				assert.Equal(t, before.CronExpr, after.CronExpr)
@@ -317,6 +348,7 @@ func TestMessageScheduleWriteDeniedWhenCeilingUnrecordable(t *testing.T) {
 			t.Run("resume", func(t *testing.T) {
 				id := createUnrecTargetSchedule(t, "unrec-msg-resume"+suffix)
 				pauseSchedule(t, srv, owner, projectID, id)
+				holdScheduleFor(t, s, id, c.identity)
 				before := loadScheduleRevision(t, s, id)
 				rec := doAuthoredScheduleRequest(t, srv, c.identity, projectID, id+"/resume", http.MethodPost, nil)
 				assertCeilingDenial(t, c, rec)
@@ -512,13 +544,13 @@ func TestScheduledPayloadTargetChanged(t *testing.T) {
 }
 
 // Resuming a dispatch_agent schedule requires agent creation in the project:
-// an agent without agent:create is denied even though it may update the
-// schedule; with agent:create it resumes and becomes the revision.
+// the agent holding the schedule is denied without agent:create; with
+// agent:create it resumes and stays the revision.
 func TestResumeDispatchAgentRequiresAgentCreate(t *testing.T) {
 	srv, s, projectID := setupScheduleTest(t)
-	owner := setupScopedDispatchAgentOwner(t, srv, s, projectID, tid("resume-create-owner"))
-	id := createOwnerSchedule(t, srv, owner, projectID, "resume-create", "dispatch_agent")
-	pauseSchedule(t, srv, owner, projectID, id)
+	holder := authzHelperAgent(projectID, ScopeProjectRead, ScopeAgentCreate)
+	id := createOwnerSchedule(t, srv, holder, projectID, "resume-create", "dispatch_agent")
+	pauseSchedule(t, srv, holder, projectID, id)
 
 	rec := doAuthoredScheduleRequest(t, srv, authzHelperAgent(projectID, ScopeProjectRead), projectID, id+"/resume", http.MethodPost, nil)
 	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
@@ -538,11 +570,13 @@ func TestResumeDenyLeavesAttributionCeilingRevision(t *testing.T) {
 	owner := setupScopedDispatchAgentOwner(t, srv, s, projectID, tid("resume-deny-owner"))
 	id := createOwnerSchedule(t, srv, owner, projectID, "resume-deny", "dispatch_agent")
 	pauseSchedule(t, srv, owner, projectID, id)
+	holdScheduleFor(t, s, id, authzHelperAgent(projectID, ScopeProjectRead))
 	beforeRow, err := s.GetSchedule(context.Background(), id)
 	require.NoError(t, err)
 
 	rec := doAuthoredScheduleRequest(t, srv, authzHelperAgent(projectID, ScopeProjectRead), projectID, id+"/resume", http.MethodPost, nil)
 	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), string(ScopeAgentCreate), "the denial is the resume's agent-create reauthorization")
 	afterRow, err := s.GetSchedule(context.Background(), id)
 	require.NoError(t, err)
 	assert.Equal(t, beforeRow.InitiatorAttribution, afterRow.InitiatorAttribution)
@@ -595,7 +629,7 @@ func TestResumeConcurrent409(t *testing.T) {
 
 	srv.store = &concurrentReattributeStore{Store: s}
 	defer func() { srv.store = s }()
-	rec := doAuthoredScheduleRequest(t, srv, authzHelperAgent(projectID, ScopeProjectRead, ScopeAgentCreate), projectID, id+"/resume", http.MethodPost, nil)
+	rec := doAuthoredScheduleRequest(t, srv, owner, projectID, id+"/resume", http.MethodPost, nil)
 	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
 
 	after, err := s.GetSchedule(context.Background(), id)

@@ -303,7 +303,7 @@ func TestPrintRemediation_ExpiredTransport(t *testing.T) {
 	for _, want := range []string{
 		"transport credential in use has expired",
 		"The last refresh did not renew it: mint failed for test",
-		"scion agent reset-auth <agent-name>  (also pushes a fresh transport token)",
+		"scion reset-auth <agent-name>  (also pushes a fresh transport token)",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("remediation missing %q:\n%s", want, out)
@@ -330,7 +330,7 @@ func TestCheckTransportAuth_MalformedFileFails(t *testing.T) {
 		t.Errorf("malformed credential must not be reported OK:\n%s", out)
 	}
 	rem := captureStdout(t, func() { printRemediation(time.Now().Add(time.Hour), "agent", true, diag) })
-	for _, want := range []string{"could not be parsed", "scion agent reset-auth"} {
+	for _, want := range []string{"could not be parsed", "scion reset-auth"} {
 		if !strings.Contains(rem, want) {
 			t.Errorf("remediation missing %q:\n%s", want, rem)
 		}
@@ -702,5 +702,33 @@ func TestCheckTransportAuth_NoProxyModeNone(t *testing.T) {
 	}
 	if !strings.Contains(out, "[INFO] Transport Auth: none") {
 		t.Errorf("expected none:\n%s", out)
+	}
+}
+
+// Retained: the file was being replaced during every read of the last load
+// and the value read before is in use. Doctor says so instead of reporting
+// the file as unreadable.
+func TestReportFileSource_Retained(t *testing.T) {
+	home := isolateDoctorTransport(t)
+	path := filepath.Join(home, ".scion", transportauth.TransportTokenFileName)
+	exp := time.Now().Add(30 * time.Minute)
+	st := transportauth.FileSourceStatus{
+		Path:         path,
+		InUse:        transportauth.SourceLabelFile,
+		Expiry:       exp,
+		FilePresent:  true,
+		FileExpiry:   exp,
+		FileError:    fmt.Errorf("transport token file %s: file has no link left", path),
+		FileRetained: true,
+	}
+	var diag doctorDiag
+	out := captureStdout(t, func() { reportFileSource(st, &diag) })
+
+	want := "[WARN]   file (" + path + "): being replaced; using the value read before (expires"
+	if !strings.Contains(out, want) {
+		t.Errorf("output missing %q:\n%s", want, out)
+	}
+	if strings.Contains(out, "unreadable") {
+		t.Errorf("a retained value must not be reported as unreadable:\n%s", out)
 	}
 }

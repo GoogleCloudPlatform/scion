@@ -1,0 +1,301 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Native Windows build and test.
+#
+# WHY THIS EXISTS. The Windows private-file code (pkg/util/privatefs,
+# pathcanon, filelock and their callers) is new Windows code: owner-only
+# DACLs set at creation, DACL checks on open handles, reparse-point
+# refusal. None of it runs on Linux, so only a real Windows runner can show
+# it works. These tests run here, with a negative case per alias form, and
+# junction and symlink cases that FAIL, never skip, when the runner cannot
+# create links.
+#
+# WHAT MAKES IT TRUSTWORTHY.
+#   - The capability step proves, before any test runs, that this runner
+#     can create symlinks and junctions, generates 8.3 short names, and has
+#     a FAT32 volume. Each is a hard failure if missing: a test that cannot
+#     exercise its case must not pass.
+#   - The test step fails on ANY skipped test or package (zero
+#     "Action":"skip" events in go test -json). The pinned skip set is
+#     empty.
+#   - The package list is explicit (.github/windows-test-packages.txt), with
+#     no wildcard, and a guard step refuses pkg/hub: its unsharded test
+#     compile needs about 12 GiB, more than a hosted runner has.
+#
+# WHY A SEPARATE FILE FROM ci.yml: no collision with ci.yml editors, and its
+# own trigger. There is deliberately NO paths filter while the job proves
+# itself stable, so it runs on every PR. If it is ever made a REQUIRED
+# status check together with a paths filter, PRs that the filter skips will
+# hang (a filtered-out job reports nothing), the trap macos-bash32.yml
+# records. Making it required is a separate, later decision.
+#
+# The Build step builds and vets the allowlisted packages and builds
+# ./cmd/scion: every client-reachable site compiles for Windows on
+# privatefs/pathcanon/filelock.
+
+name: Windows
+
+on:
+  pull_request: {}
+  push:
+    branches: [ main ]
+
+# One run per PR: a new push to the same PR cancels the superseded run, as
+# in ci.yml (same block; github.workflow is "Windows", so the group never
+# collides with ci.yml's). Runs on main are never cancelled: outside
+# pull_request the group is the unique run_id, not github.ref, because
+# GitHub cancels an older pending run in a shared group even when
+# cancel-in-progress is false.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+# Fork CI gate (hack/check-fork-ci-gate.sh, cr-ci/workflows/README.md): on push
+# and schedule every job runs only in GoogleCloudPlatform/scion; forks stage PRs.
+jobs:
+  windows:
+    name: Windows build and test (allowlist)
+    if: ${{ (github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion' }}
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      GOTOOLCHAIN: local
+      GOFLAGS: -buildvcs=false
+      GOGC: '50'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      # Line format of .github/windows-test-packages.txt: a package, then
+      # optionally go test flags (an anchored -run for ./cmd and
+      # ./pkg/config, whose full suites are POSIX-bound), e.g.
+      #   ./cmd -run=^(TestA|TestB)$
+      # No quotes and no spaces inside a flag. Plain lines run together in
+      # one go test; each flagged line runs as its own go test. The guards
+      # and checks below apply to the package (first field) of every line.
+      - name: Allowlist guard (no pkg/hub, no wildcards)
+        shell: bash
+        run: |
+          set -euo pipefail
+          list=.github/windows-test-packages.txt
+          pkgs=$(sed -e 's/\r$//' -e 's/#.*//' -e 's/[[:space:]]*$//' -e '/^[[:space:]]*$/d' "$list" | awk '{print $1}')
+          if [ -z "$pkgs" ]; then
+            echo "::error::$list lists no packages"; exit 1
+          fi
+          if printf '%s\n' "$pkgs" | grep -E '^\./pkg/hub($|/\.\.\.)'; then
+            echo "::error::$list must never list ./pkg/hub: its unsharded test compile needs about 12 GiB"; exit 1
+          fi
+          if printf '%s\n' "$pkgs" | grep -F '...'; then
+            echo "::error::$list must list packages explicitly, without wildcards"; exit 1
+          fi
+          printf '%s\n' "$pkgs"
+
+      # The list's header also forbids any package whose test binary links
+      # pkg/hub; the guard above sees only ./pkg/hub lines. One compile-free
+      # go list over every listed package prints each test binary (the
+      # <pkg>.test main package) with its full dependency list; a test
+      # binary that depends on pkg/hub fails the job (a pkg/hub recompiled
+      # for that test prints as "pkg/hub [x.test]"; awk splits on spaces, so
+      # its first word matches too). ./cmd is the one documented exception: its test
+      # binary links pkg/hub production code (never pkg/hub's tests).
+      - name: Allowlist guard (no test binary links pkg/hub)
+        shell: bash
+        run: |
+          set -euo pipefail
+          list=.github/windows-test-packages.txt
+          pkgs=$(sed -e 's/\r$//' -e 's/#.*//' -e 's/[[:space:]]*$//' -e '/^[[:space:]]*$/d' "$list" | awk '!seen[$1]++ {print $1}')
+          deps=$(GOOS=windows go list -test -f '{{if and (not .ForTest) (eq .Name "main")}}{{.ImportPath}}{{range .Deps}} {{.}}{{end}}{{"\n"}}{{end}}' $pkgs)
+          mod=github.com/GoogleCloudPlatform/scion
+          bad=$(printf '%s\n' "$deps" | awk -v hub="$mod/pkg/hub" -v exempt="$mod/cmd.test" '
+            $1 ~ /\.test$/ && $1 != exempt {
+              for (i = 2; i <= NF; i++) if ($i == hub) { print $1; break }
+            }')
+          if [ -n "$bad" ]; then
+            printf '::error::%s lists a package whose test binary links pkg/hub: %s\n' "$list" $bad; exit 1
+          fi
+          echo "test binaries checked: $(printf '%s\n' "$deps" | awk '$1 ~ /\.test$/' | wc -l)"
+
+      # Runner capabilities. Every check FAILS the job; none is skippable.
+      # A symlink or junction test that cannot create its link must fail,
+      # and so must the job that would make it fail for a configuration
+      # reason.
+      - name: Runner capabilities (fail, never skip)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          # Tests use a temp dir on the runner's work volume.
+          $tmp = Join-Path $env:RUNNER_TEMP 'gotmp'
+          New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+          "TMP=$tmp" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "TEMP=$tmp" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          $vol = $tmp.Substring(0, 2)
+
+          # 1. Symlink privilege, then a real symlink and a junction.
+          $priv = whoami /priv | Select-String 'SeCreateSymbolicLinkPrivilege'
+          if (-not $priv) { Write-Error 'SeCreateSymbolicLinkPrivilege is not held by the runner token' }
+          $priv
+          $probe = Join-Path $tmp 'symlink-probe'
+          New-Item -ItemType SymbolicLink -Path $probe -Target $tmp | Out-Null
+          if ((Get-Item $probe).LinkType -ne 'SymbolicLink') { Write-Error 'symlink creation did not produce a symlink' }
+          Remove-Item $probe
+          $jprobe = Join-Path $tmp 'junction-probe'
+          cmd /c mklink /J "$jprobe" "$tmp"
+          if ($LASTEXITCODE -ne 0) { Write-Error 'junction creation failed' }
+          if ((Get-Item $jprobe).LinkType -ne 'Junction') { Write-Error 'mklink /J did not produce a junction' }
+          cmd /c rmdir "$jprobe"
+
+          # 2. Elevation (an administrator token): the tests need
+          # Administrators as an owner-capable group in the token
+          # (TestCreate_OwnerExplicitWhenElevated sets it as the default
+          # owner of an impersonation token), SeRestorePrivilege (setting a
+          # foreign owner in the refuse tests) and the right to create a
+          # local group (TestCheckPrivate_ForeignLocalGroupRefusedBySID).
+          $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+          if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { Write-Error 'the runner is not elevated' }
+
+          # 3. 8.3 short names on the test volume (TestWithin_ShortName8dot3).
+          fsutil 8dot3name set 0
+          fsutil 8dot3name set $vol 0
+          fsutil 8dot3name query $vol
+          $long = Join-Path $tmp 'longdirectoryname-8dot3-probe'
+          New-Item -ItemType Directory -Force -Path $long | Out-Null
+          $short = (New-Object -ComObject Scripting.FileSystemObject).GetFolder($long).ShortPath
+          if ($short -notmatch '~') { Write-Error "no 8.3 short name was generated on $vol ($short)" }
+          "8.3 probe: $long -> $short"
+          Remove-Item $long
+
+          # 4. A FAT32 volume (no persistent ACLs) for TestNoPersistentACLs_Refused.
+          $letter = [char[]](70..90) | Where-Object { -not (Test-Path "$($_):\") } | Select-Object -Last 1
+          if (-not $letter) { Write-Error 'no free drive letter for the FAT32 volume' }
+          $vhd = Join-Path $env:RUNNER_TEMP 'scion-fat32.vhd'
+          $script = Join-Path $env:RUNNER_TEMP 'diskpart-fat32.txt'
+          @(
+            "create vdisk file=`"$vhd`" maximum=256 type=expandable",
+            "select vdisk file=`"$vhd`"",
+            'attach vdisk',
+            'convert mbr',
+            'create partition primary',
+            'format fs=fat32 quick label=SCIONFAT',
+            "assign letter=$letter"
+          ) | Set-Content -Path $script -Encoding ascii
+          diskpart /s $script
+          if ($LASTEXITCODE -ne 0) { Write-Error "diskpart failed ($LASTEXITCODE)" }
+          $fs = (Get-Volume -DriveLetter $letter).FileSystem
+          if ($fs -ne 'FAT32') { Write-Error "the test volume ${letter}: is $fs, not FAT32" }
+          $info = fsutil fsinfo volumeinfo "${letter}:"
+          $info
+          if ($info -match 'Supports Persistent ACLs') { Write-Error "the FAT32 volume ${letter}: reports persistent ACLs" }
+          "SCION_TEST_FAT_VOLUME=${letter}:\" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Build and vet (allowlist)
+        shell: bash
+        run: |
+          set -euo pipefail
+          pkgs=$(sed -e 's/\r$//' -e 's/#.*//' -e 's/[[:space:]]*$//' -e '/^[[:space:]]*$/d' .github/windows-test-packages.txt | awk '!seen[$1]++ {print $1}')
+          go build $pkgs
+          go vet $pkgs
+          # The Windows CLI itself (every client-reachable private-file
+          # site compiles for Windows).
+          go build -o scion.exe ./cmd/scion
+
+      - name: Test (allowlist, zero skips)
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${SCION_TEST_FAT_VOLUME:-}" || { echo "::error::SCION_TEST_FAT_VOLUME is not set"; exit 1; }
+          lines=$(sed -e 's/\r$//' -e 's/#.*//' -e 's/[[:space:]]*$//' -e '/^[[:space:]]*$/d' .github/windows-test-packages.txt)
+          plain=$(printf '%s\n' "$lines" | awk 'NF == 1')
+          rc=0
+          : > test.json
+          if [ -n "$plain" ]; then
+            go test -json -count=1 $plain >> test.json || rc=$?
+          fi
+          # Flagged lines: one go test each, into its own log (checked
+          # below), appended to test.json. set -f: no globbing of the flags.
+          n=0
+          while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            n=$((n + 1))
+            set -f
+            go test -json -count=1 $line > "flagged-$n.json" || rc=$?
+            set +f
+            cat "flagged-$n.json" >> test.json
+          done <<< "$(printf '%s\n' "$lines" | awk 'NF > 1')"
+          # Human-readable failures and the per-package summary.
+          grep -E '"Action":"(fail|skip)"' test.json || true
+          grep -E '"Action":"(pass|fail)","Package":"[^"]*","Elapsed"' test.json || true
+          if [ "$rc" -ne 0 ]; then
+            grep -E '"Action":"output"' test.json | sed -e 's/.*"Output":"//' -e 's/"}$//' | tail -n 200
+            echo "::error::go test failed (exit $rc)"; exit 1
+          fi
+          # Pinned skip set: empty. Any skipped test, or a package skipped for
+          # having no test files, fails the job (every invocation is in
+          # test.json).
+          if grep -q '"Action":"skip"' test.json; then
+            echo "::error::tests were skipped; the Windows job allows none"; exit 1
+          fi
+          # Every listed package must report a pass.
+          for p in $(printf '%s\n' "$lines" | awk '!seen[$1]++ {print $1}'); do
+            ip="github.com/GoogleCloudPlatform/scion/${p#./}"
+            grep -qE "\"Action\":\"pass\",\"Package\":\"$ip\",\"Elapsed\"" test.json || { echo "::error::no package pass for $ip"; exit 1; }
+          done
+          # Every flagged line must have run tests: each name in an anchored
+          # -run=^(A|B)$ must report a pass in that line's own log (a typo
+          # or a renamed test would otherwise match nothing and pass).
+          n=0
+          while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            n=$((n + 1))
+            pkg=${line%% *}
+            ip="github.com/GoogleCloudPlatform/scion/${pkg#./}"
+            run=$(printf '%s\n' "$line" | tr ' ' '\n' | sed -n 's/^-run=//p')
+            names=$(printf '%s\n' "$run" | sed -n -e 's/^\^(\(.*\))\$$/\1/p' -e 's/^\^\([A-Za-z0-9_]*\)\$$/\1/p' | tr '|' '\n')
+            if [ -z "$names" ]; then
+              grep -qE "\"Action\":\"pass\",\"Package\":\"$ip\",\"Test\":" "flagged-$n.json" || { echo "::error::$line ran no tests"; exit 1; }
+              continue
+            fi
+            for name in $names; do
+              grep -qF "\"Action\":\"pass\",\"Package\":\"$ip\",\"Test\":\"$name\"," "flagged-$n.json" || { echo "::error::$line: $name did not run and pass"; exit 1; }
+            done
+          done <<< "$(printf '%s\n' "$lines" | awk 'NF > 1')"
+          echo "passed tests: $(grep -cE '"Action":"pass","Package":"[^"]*","Test":' test.json)"
+
+      # The full go test -json streams (test.json, and each flagged line's
+      # flagged-N.json), so a failure or a timeout's goroutine dump can be
+      # read without a rerun; the console above shows only the last 200
+      # output lines. Plain go test -json output: test names, results and
+      # test output, no credentials.
+      - name: Upload test log
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows-test-json
+          path: |
+            test.json
+            flagged-*.json
+          if-no-files-found: ignore
+          retention-days: 7

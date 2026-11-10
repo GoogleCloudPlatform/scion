@@ -143,6 +143,10 @@ CREATE TABLE IF NOT EXISTS webchat_topic (
 CREATE INDEX IF NOT EXISTS idx_webchat_topic_project_activity
     ON webchat_topic (project_id, deleted_at, last_activity_at);
 
+-- Soft-deleted topics, for the chat retention grace purge.
+CREATE INDEX IF NOT EXISTS idx_webchat_topic_deleted
+    ON webchat_topic (deleted_at) WHERE deleted_at IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS webchat_read_state (
     user_id          TEXT NOT NULL,
     conversation_key TEXT NOT NULL,
@@ -262,6 +266,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_webchat_topic_project_name
 
 	// Scheduled chat messages (webchat_scheduled_store*.go).
 	if err := s.initScheduledMessages(); err != nil {
+		return err
+	}
+
+	// Starred messages (webchat_star_store*.go); created whether or not
+	// the web.chat_starred_messages experiment is on.
+	if err := s.initMessageStars(); err != nil {
 		return err
 	}
 
@@ -1221,10 +1231,13 @@ func (s *pgWebChatStore) SearchChatMessages(ctx context.Context, filter ChatSear
 	var args []interface{}
 	argIdx := 1
 
-	conditions = append(conditions, "channel = 'web'")
-	conditions = append(conditions, fmt.Sprintf("msg ILIKE '%%' || $%d || '%%'", argIdx))
-	args = append(args, filter.Query)
+	conditions = append(conditions, "m.channel = 'web'")
+	// The term is matched literally (escapeLikeTerm; design v3 section 9 item 3).
+	conditions = append(conditions, fmt.Sprintf(`m.msg ILIKE '%%' || $%d || '%%' ESCAPE '\'`, argIdx))
+	args = append(args, escapeLikeTerm(filter.Query))
 	argIdx++
+	// A soft-deleted message is never a result (design v3 section 9 item 4).
+	conditions = append(conditions, "x.deleted_at IS NULL")
 
 	if filter.ConversationKey != "" {
 		conditions = append(conditions, fmt.Sprintf("thread_id = $%d", argIdx))
@@ -1273,18 +1286,36 @@ func (s *pgWebChatStore) SearchChatMessages(ctx context.Context, filter ChatSear
 		}
 	}
 
+	extTable, err := s.table(ctx, "webchat_message_ext")
+	if err != nil {
+		return nil, "", err
+	}
 	query := fmt.Sprintf(`
-SELECT id, project_id, COALESCE(thread_id, ''), sender, msg, created
-  FROM %s
+SELECT m.id, m.project_id, COALESCE(m.thread_id, ''), m.sender, m.msg, m.created
+  FROM %s m
+  LEFT JOIN %s x ON x.message_id = m.id::text
  WHERE %s
- ORDER BY created DESC, id DESC
+ ORDER BY m.created DESC, m.id DESC
  LIMIT $%d
-`, messagesTable, strings.Join(conditions, " AND "), argIdx)
+`, messagesTable, extTable, strings.Join(conditions, " AND "), argIdx)
 	args = append(args, filter.Limit+1)
 
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	// A READ ONLY transaction with SET LOCAL statement_timeout: the server
+	// cancels a runaway statement (57014) even if the client stops waiting,
+	// and SET LOCAL ends with the transaction, so the timeout never leaks to
+	// the next user of the pooled connection (design v3 section 6.1).
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
-		return nil, "", fmt.Errorf("webchat store: search messages: %w", err)
+		return nil, "", searchError(ctx, "search begin", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf("SET LOCAL statement_timeout = %d", pgSearchStatementTimeoutMS(ctx))); err != nil {
+		return nil, "", searchError(ctx, "search statement_timeout", err)
+	}
+
+	rows, err := tx.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, "", searchError(ctx, "search messages", err)
 	}
 	defer func() { _ = rows.Close() }()
 
@@ -1302,7 +1333,7 @@ SELECT id, project_id, COALESCE(thread_id, ''), sender, msg, created
 		results = append(results, r)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, "", fmt.Errorf("webchat store: search rows: %w", err)
+		return nil, "", searchError(ctx, "search rows", err)
 	}
 
 	// Determine next cursor.
@@ -1314,6 +1345,22 @@ SELECT id, project_id, COALESCE(thread_id, ''), sender, msg, created
 	}
 
 	return results, nextCursor, nil
+}
+
+// pgSearchStatementTimeoutMS returns the statement_timeout, in whole
+// milliseconds, for a search under ctx: the time left before ctx's deadline
+// (at least 1 ms, since 0 would disable the timeout), or
+// DefaultChatSearchTimeout when ctx has no deadline.
+func pgSearchStatementTimeoutMS(ctx context.Context) int64 {
+	d := DefaultChatSearchTimeout
+	if deadline, ok := ctx.Deadline(); ok {
+		d = time.Until(deadline)
+	}
+	ms := d.Milliseconds()
+	if ms < 1 {
+		ms = 1
+	}
+	return ms
 }
 
 // ---------------------------------------------------------------------------
@@ -2030,30 +2077,12 @@ DO UPDATE SET edited_at = EXCLUDED.edited_at
 	return nil
 }
 
-// SetMessageDeleted marks a message as soft-deleted at the given time.
+// SetMessageDeleted marks a message as soft-deleted at the given time,
+// removing its mentions and stars in the same transaction
+// (markMessageDeletedTx).
 func (s *pgWebChatStore) SetMessageDeleted(ctx context.Context, messageID string, deletedAt time.Time) error {
-	const query = `
-INSERT INTO webchat_message_ext (message_id, deleted_at)
-VALUES ($1, $2)
-ON CONFLICT (message_id)
-DO UPDATE SET deleted_at = EXCLUDED.deleted_at
-`
-	// One transaction: the soft delete and its mention cleanup land
-	// together, so a deleted message never keeps lighting a mention dot.
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("webchat store: set message deleted begin tx: %w", err)
-	}
-	defer tx.Rollback() //nolint:errcheck
-	if _, err := tx.ExecContext(ctx, query, messageID, deletedAt); err != nil {
-		return fmt.Errorf("webchat store: set message deleted: %w", err)
-	}
-	// A deleted message no longer mentions anyone.
-	if _, err := tx.ExecContext(ctx,
-		`DELETE FROM webchat_mention WHERE message_id = $1`, messageID); err != nil {
-		return fmt.Errorf("webchat store: delete message mentions: %w", err)
-	}
-	return tx.Commit()
+	_, err := s.markMessageDeletedTx(ctx, messageID, deletedAt)
+	return err
 }
 
 // UpdateMessageContent updates the content (msg column) of a message in the
@@ -2096,15 +2125,18 @@ func (s *pgWebChatStore) UpdateThreadID(ctx context.Context, oldThreadID, newThr
 }
 
 // DeleteDM removes all webchat_dm rows for the given conversation key,
-// and the scheduled messages of that conversation.
+// and the scheduled messages and stars of that conversation.
 func (s *pgWebChatStore) DeleteDM(ctx context.Context, conversationKey string) error {
 	const query = `DELETE FROM webchat_dm WHERE conversation_key = $1`
 	_, err := s.db.ExecContext(ctx, query, conversationKey)
 	if err != nil {
 		return fmt.Errorf("webchat store: delete DM: %w", err)
 	}
-	// The conversation's scheduled messages go with it.
+	// The conversation's scheduled messages and stars go with it.
 	if _, err := s.DeleteScheduledMessagesForConversation(ctx, conversationKey); err != nil {
+		return fmt.Errorf("webchat store: delete DM: %w", err)
+	}
+	if _, err := s.DeleteMessageStarsForConversation(ctx, conversationKey); err != nil {
 		return fmt.Errorf("webchat store: delete DM: %w", err)
 	}
 	return nil
@@ -2232,6 +2264,19 @@ func (s *pgWebChatStore) PromoteDM(ctx context.Context, topic WebChatTopic, keys
 	}
 	if err != nil {
 		return nil, fmt.Errorf("webchat store: re-key messages in promote: %w", err)
+	}
+
+	// Step 2b: Stars follow the messages actually moved (both arms above):
+	// the new topic is the only conversation with thread_id = topic.ID, so
+	// this join selects exactly the re-keyed rows. It is a new statement
+	// after the re-key, so a star added by a request that held a moved
+	// row's lock first (AddMessageStar locks it) is seen and moved too.
+	// Owner, message and save time stay; access is checked on every read.
+	if _, err = tx.ExecContext(ctx,
+		`UPDATE webchat_message_star SET conversation_key = $1, project_id = $2
+		 WHERE message_id IN (SELECT id::text FROM `+messagesTable+` WHERE thread_id = $3)`,
+		topic.ID, nullableString(topic.ProjectID), topic.ID); err != nil {
+		return nil, fmt.Errorf("webchat store: move stars in promote: %w", err)
 	}
 
 	// Step 3: Migrate read state
@@ -2449,28 +2494,4 @@ SELECT DISTINCT wm.conversation_key
 		out[key] = true
 	}
 	return out, rows.Err()
-}
-
-// PurgeOrphanMentions deletes mention rows whose message row is gone.
-// message_id is a hub-minted UUID, so the cast lets the lookup use the
-// messages primary key. The cast sits inside a CASE so it only runs on
-// UUID-shaped values (Postgres does not promise OR evaluation order). A
-// non-UUID message_id maps to NULL, matches no message, and is deleted as
-// an orphan instead of failing the whole sweep.
-func (s *pgWebChatStore) PurgeOrphanMentions(ctx context.Context) (int, error) {
-	messagesTable, err := s.table(ctx, "messages")
-	if err != nil {
-		return 0, err
-	}
-	res, err := s.db.ExecContext(ctx, `
-DELETE FROM webchat_mention wm
- WHERE NOT EXISTS (SELECT 1 FROM `+messagesTable+` m WHERE m.id = (CASE
-        WHEN wm.message_id ~* `+pgUUIDShapeRegex+`
-        THEN wm.message_id::uuid END))
-`)
-	if err != nil {
-		return 0, fmt.Errorf("webchat store: purge orphan mentions: %w", err)
-	}
-	n, _ := res.RowsAffected()
-	return int(n), nil
 }

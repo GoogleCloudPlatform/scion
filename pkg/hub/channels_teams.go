@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -70,6 +71,18 @@ func NewTeamsChannel(params map[string]string) *TeamsChannel {
 
 func (c *TeamsChannel) Name() string { return "teams" }
 
+// allowedTeamsServiceHosts is the closed set of Bot Framework service URL
+// hostnames for Teams: the public cloud (all regions share this host and
+// differ only in the path), GCC, GCC High and DoD. Source: Microsoft Teams
+// platform documentation, "Send proactive messages" (global service URLs).
+// The refusal message lists them in this order.
+var allowedTeamsServiceHosts = []string{
+	"smba.trafficmanager.net",
+	"smba.infra.gcc.teams.microsoft.com",
+	"smba.infra.gov.teams.microsoft.us",
+	"smba.infra.dod.teams.microsoft.us",
+}
+
 func (c *TeamsChannel) Validate() error {
 	if c.appID == "" {
 		return fmt.Errorf("teams channel requires an 'app_id' param")
@@ -95,6 +108,10 @@ func (c *TeamsChannel) Validate() error {
 	}
 	if u.Scheme != "https" {
 		return fmt.Errorf("teams channel service_url must use https:// (got %q)", u.Scheme)
+	}
+	host := strings.ToLower(u.Hostname())
+	if !slices.Contains(allowedTeamsServiceHosts, host) {
+		return fmt.Errorf("teams channel service_url host %q is not a recognised Bot Framework service host (expected one of: %s)", host, strings.Join(allowedTeamsServiceHosts, ", "))
 	}
 	return nil
 }
@@ -136,7 +153,10 @@ func (c *TeamsChannel) Deliver(ctx context.Context, msg *messages.StructuredMess
 
 	resp, err := c.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("teams channel: send activity: %w", err)
+		// The transport error can carry the service URL and other remote
+		// text; ChannelRegistry.Dispatch logs it, so render it here
+		// (ptone/scion#7498). Nothing unwraps this error.
+		return fmt.Errorf("teams channel: send activity: %s", upstreamText(err.Error()))
 	}
 	defer func() {
 		_, _ = io.Copy(io.Discard, resp.Body)
@@ -146,7 +166,7 @@ func (c *TeamsChannel) Deliver(ctx context.Context, msg *messages.StructuredMess
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		resBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
 		return fmt.Errorf("teams channel: API returned status %d: %s",
-			resp.StatusCode, strings.TrimSpace(string(resBody)))
+			resp.StatusCode, upstreamText(strings.TrimSpace(string(resBody))))
 	}
 
 	return nil
@@ -252,7 +272,7 @@ func (tp *teamsTokenProvider) refresh(ctx context.Context) (string, error) {
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return "", fmt.Errorf("token endpoint returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return "", fmt.Errorf("token endpoint returned %d: %s", resp.StatusCode, upstreamText(strings.TrimSpace(string(body))))
 	}
 
 	var result teamsTokenResponse

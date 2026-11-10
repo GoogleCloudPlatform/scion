@@ -165,7 +165,7 @@ func TestHarnessConfigClone_CollisionLeavesExistingConfigIntact(t *testing.T) {
 		Files:   []store.TemplateFile{{Path: "Dockerfile", Size: int64(len(existingContent))}},
 		Created: time.Now(), Updated: time.Now(),
 	}
-	existing.ContentHash = computeContentHash(existing.Files)
+	existing.ContentHash = defaultContentHash(existing.Files)
 	require.NoError(t, s.CreateHarnessConfig(ctx, existing))
 
 	sourcePath := storage.HarnessConfigStoragePath(srv.HubID(), store.HarnessConfigScopeGlobal, "", "other-source")
@@ -178,7 +178,7 @@ func TestHarnessConfigClone_CollisionLeavesExistingConfigIntact(t *testing.T) {
 		Files:   []store.TemplateFile{{Path: "Dockerfile", Size: int64(len(sourceContent))}},
 		Created: time.Now(), Updated: time.Now(),
 	}
-	source.ContentHash = computeContentHash(source.Files)
+	source.ContentHash = defaultContentHash(source.Files)
 	require.NoError(t, s.CreateHarnessConfig(ctx, source))
 
 	// Clone "other-source" naming it "collide" — same destination as the
@@ -224,7 +224,7 @@ func TestTemplateClone_CollisionLeavesExistingTemplateIntact(t *testing.T) {
 		Files:   []store.TemplateFile{{Path: "scion-agent.yaml", Size: int64(len(existingContent))}},
 		Created: time.Now(), Updated: time.Now(),
 	}
-	existing.ContentHash = computeContentHash(existing.Files)
+	existing.ContentHash = defaultContentHash(existing.Files)
 	require.NoError(t, s.CreateTemplate(ctx, existing))
 
 	sourcePath := storage.TemplateStoragePath(srv.HubID(), store.TemplateScopeGlobal, "", "other-source")
@@ -237,7 +237,7 @@ func TestTemplateClone_CollisionLeavesExistingTemplateIntact(t *testing.T) {
 		Files:   []store.TemplateFile{{Path: "scion-agent.yaml", Size: int64(len(sourceContent))}},
 		Created: time.Now(), Updated: time.Now(),
 	}
-	source.ContentHash = computeContentHash(source.Files)
+	source.ContentHash = defaultContentHash(source.Files)
 	require.NoError(t, s.CreateTemplate(ctx, source))
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/templates/"+source.ID+"/clone", map[string]interface{}{

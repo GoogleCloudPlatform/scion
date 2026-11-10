@@ -1,6 +1,7 @@
 /** Workspace metadata has document/session lifetime, independent of route state. */
 import type { Agent, ExposedPort } from '../shared/types.js';
 import { SSEClient, type SSEUpdateEvent } from './sse-client.js';
+import { apiFetch } from './api.js';
 
 export interface TerminalAgentMetadata {
   readonly agent: Agent | null;
@@ -303,9 +304,9 @@ export class TerminalMetadata {
     const current = (): boolean =>
       !signal.aborted && this.entries.get(entry.id) === entry && entry.epoch === epoch;
     try {
-      const response = await fetch(new URL(`api/v1/agents/${entry.id}`, this.hubUrl), {
-        credentials: 'include',
+      const response = await apiFetch(new URL(`api/v1/agents/${entry.id}`, this.hubUrl).href, {
         signal,
+        authErrors: 'caller',
       });
       if (!current()) return;
       if (!response.ok) {

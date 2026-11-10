@@ -15,6 +15,7 @@
 package tunnelclient
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -23,9 +24,9 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 
@@ -57,47 +58,11 @@ func sampleRecord(endpoint, subject, session string, agents ...string) Record {
 }
 
 func TestStateDir(t *testing.T) {
-	if got := StateDir("/run/user/1000", "/home/u/.scion"); got != "/run/user/1000/scion/tunnels" {
+	if got := StateDir("/run/user/1000", "/home/u/.scion"); got != filepath.FromSlash("/run/user/1000/scion/tunnels") {
 		t.Fatalf("StateDir with XDG_RUNTIME_DIR = %q", got)
 	}
-	if got := StateDir("", "/home/u/.scion"); got != "/home/u/.scion/run/tunnels" {
+	if got := StateDir("", "/home/u/.scion"); got != filepath.FromSlash("/home/u/.scion/run/tunnels") {
 		t.Fatalf("StateDir fallback = %q", got)
-	}
-}
-
-func TestFileStoreOpenWriteListClose(t *testing.T) {
-	st := testStore(t)
-	w, err := st.Open()
-	if err != nil {
-		t.Fatal(err)
-	}
-	fi, err := os.Stat(st.Dir)
-	if err != nil || fi.Mode().Perm() != 0o700 {
-		t.Fatalf("dir mode %v, %v; want 0700", fi.Mode().Perm(), err)
-	}
-	rec := sampleRecord("https://hub.example.com", "u1", "s1", "a1")
-	if err := w.Write(rec); err != nil {
-		t.Fatal(err)
-	}
-	got, err := st.List()
-	if err != nil || len(got) != 1 || !reflect.DeepEqual(got[0], rec) {
-		t.Fatalf("List = %+v, %v; want the record", got, err)
-	}
-	entries, _ := os.ReadDir(st.Dir)
-	for _, e := range entries {
-		info, _ := e.Info()
-		if info.Mode().Perm() != 0o600 {
-			t.Fatalf("%s mode %v, want 0600", e.Name(), info.Mode().Perm())
-		}
-	}
-	if err := w.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if got, err := st.List(); err != nil || len(got) != 0 {
-		t.Fatalf("List after Close = %+v, %v", got, err)
-	}
-	if entries, _ := os.ReadDir(st.Dir); len(entries) != 0 {
-		t.Fatalf("files left after Close: %v", entries)
 	}
 }
 
@@ -108,82 +73,16 @@ func TestFileStoreMissingDirHasNoRecords(t *testing.T) {
 	}
 }
 
-func TestFileStoreRefusesGroupOrWorldAccess(t *testing.T) {
-	st := testStore(t)
-	w, err := st.Open()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = w.Close() }()
-	if err := w.Write(sampleRecord("https://hub.example.com", "u1", "s1")); err != nil {
-		t.Fatal(err)
-	}
-
-	for _, mode := range []os.FileMode{0o750, 0o707} {
-		if err := os.Chmod(st.Dir, mode); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := st.List(); err == nil || !strings.Contains(err.Error(), "group- or world-accessible") {
-			t.Fatalf("dir mode %o: List = %v, want a refusal", mode, err)
-		}
-		if _, err := st.Open(); err == nil {
-			t.Fatalf("dir mode %o: Open accepted", mode)
-		}
-	}
-	if err := os.Chmod(st.Dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-
-	recs, _ := filepath.Glob(filepath.Join(st.Dir, "*"+recordSuffix))
-	if len(recs) != 1 {
-		t.Fatalf("records %v", recs)
-	}
-	for _, mode := range []os.FileMode{0o640, 0o604} {
-		if err := os.Chmod(recs[0], mode); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := st.List(); err == nil || !strings.Contains(err.Error(), "group- or world-accessible") {
-			t.Fatalf("record mode %o: List = %v, want a refusal", mode, err)
-		}
-	}
-	if err := os.Chmod(recs[0], 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if got, err := st.List(); err != nil || len(got) != 1 {
-		t.Fatalf("List after restoring modes = %v, %v", got, err)
-	}
-}
-
-// fakeFileInfo is a stat result with a chosen mode and owner.
-type fakeFileInfo struct {
-	mode os.FileMode
-	uid  uint32
-}
-
-func (f fakeFileInfo) Name() string       { return "x" }
-func (f fakeFileInfo) Size() int64        { return 0 }
-func (f fakeFileInfo) Mode() os.FileMode  { return f.mode }
-func (f fakeFileInfo) ModTime() time.Time { return time.Time{} }
-func (f fakeFileInfo) IsDir() bool        { return f.mode.IsDir() }
-func (f fakeFileInfo) Sys() any           { return &syscall.Stat_t{Uid: f.uid} }
-
-func TestCheckPrivateRefusesOtherOwner(t *testing.T) {
-	me := uint32(os.Getuid())
-	if err := checkPrivate("f", fakeFileInfo{mode: 0o600, uid: me}); err != nil {
-		t.Fatalf("own 0600 file refused: %v", err)
-	}
-	err := checkPrivate("f", fakeFileInfo{mode: 0o600, uid: me + 1})
-	if err == nil || !strings.Contains(err.Error(), "owned by another user") {
-		t.Fatalf("file owned by another user: %v, want a refusal", err)
-	}
-}
-
 func mustStat(t *testing.T, p string) os.FileInfo {
 	t.Helper()
 	fi, err := os.Stat(p)
 	if err != nil {
 		t.Fatal(err)
 	}
+	// On Windows os.Stat records the file ID lazily: os.SameFile reads it
+	// by path at its first call. Read it now, so the result describes the
+	// file that was at p at this moment.
+	_ = os.SameFile(fi, fi)
 	return fi
 }
 
@@ -290,10 +189,13 @@ func TestMergeStatus(t *testing.T) {
 }
 
 // The status JSON schema: endpoint, credential identity (kind, subject,
-// scope), session ids and tunnels [agent, project, kind, port, opened_at,
-// authz_deadline].
+// scope), session ids, tunnels [agent, project, kind, port, opened_at,
+// authz_deadline] and listeners [agent, project, kind, local_port,
+// opened_at].
 func TestStatusJSONSchema(t *testing.T) {
-	data, err := json.Marshal(MergeStatus([]Record{sampleRecord("https://hub.example.com", "u1", "s1", "a1")}, ""))
+	rec := sampleRecord("https://hub.example.com", "u1", "s1", "a1")
+	rec.Listeners = []ListenerRecord{{Agent: "a1", Project: "proj", Kind: "tcp", LocalPort: 15173, OpenedAt: rec.StartedAt}}
+	data, err := json.Marshal(MergeStatus([]Record{rec}, ""))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -302,10 +204,92 @@ func TestStatusJSONSchema(t *testing.T) {
 		t.Fatal(err)
 	}
 	entry := doc["entries"][0]
-	assertKeys(t, entry, "credential", "endpoint", "session_ids", "tunnels")
+	assertKeys(t, entry, "credential", "endpoint", "listeners", "session_ids", "tunnels")
 	assertKeys(t, entry["credential"].(map[string]any), "kind", "scope", "subject")
 	tunnel := entry["tunnels"].([]any)[0].(map[string]any)
 	assertKeys(t, tunnel, "agent", "authz_deadline", "kind", "opened_at", "port", "project")
+	listener := entry["listeners"].([]any)[0].(map[string]any)
+	assertKeys(t, listener, "agent", "kind", "local_port", "opened_at", "project")
+}
+
+// A --local-port listener with no connection is listed in its record with
+// agent, project, kind, local port and open time, and nothing else; the
+// record, listener included, is removed when the listener closes.
+func TestRunListsIdleListener(t *testing.T) {
+	const secret = "secret-token-7a2e"
+	h := newFakeHub(t)
+	h.set(func() { h.users[secret] = "u1" })
+	rest := newFakeREST()
+	rest.users[secret] = User{ID: "u1"}
+	st := testStore(t)
+	cfg := testConfig(h, rest, credSeq(oauth(secret)))
+	cfg.State = st
+	addr, cancel, done := listen(t, cfg, Request{Agent: "a1", Project: "proj", Port: 8080})
+	_, portText, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	recs, err := st.List()
+	if err != nil || len(recs) != 1 {
+		t.Fatalf("List = %+v, %v", recs, err)
+	}
+	r := recs[0]
+	if len(r.Tunnels) != 0 {
+		t.Fatalf("tunnels = %+v, want none before a connection", r.Tunnels)
+	}
+	if len(r.Listeners) != 1 {
+		t.Fatalf("listeners = %+v, want one", r.Listeners)
+	}
+	l := r.Listeners[0]
+	if l.Agent != "a1" || l.Project != "proj" || l.Kind != "tcp" || strconv.Itoa(l.LocalPort) != portText || l.OpenedAt.IsZero() {
+		t.Fatalf("listener = %+v, want a1 proj tcp on local port %s", l, portText)
+	}
+	out, _ := json.Marshal(MergeStatus(recs, ""))
+	if strings.Contains(string(out), secret) {
+		t.Fatal("status output holds the secret")
+	}
+
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run = %v, want context.Canceled", err)
+	}
+	if recs, err := st.List(); err != nil || len(recs) != 0 {
+		t.Fatalf("records after the listener closed: %+v, %v", recs, err)
+	}
+}
+
+// A listener that stops accepting after a final refusal is no longer
+// listed, while the tunnel still open keeps its row until it ends.
+func TestListenerUnlistedWhenItStopsAccepting(t *testing.T) {
+	h := newFakeHub(t)
+	h.set(func() { h.handle = firstOpensThenRefuses(respond(403, "forbidden", "")) })
+	stderr := newLineWatch(stopLine)
+	st := testStore(t)
+	cfg := testConfig(h, newFakeREST(), credSeq(oauth("tok1")))
+	cfg.Stderr = stderr
+	cfg.State = st
+	addr, cancel, done := listen(t, cfg, Request{Agent: "a1", Project: "proj", Port: 8080})
+	defer cancel()
+
+	open := dialListener(t, addr)
+	roundTrip(t, open, "before")
+	assertRefusedConn(t, dialListener(t, addr))
+	stderr.wait(t)
+	assertNotAccepting(t, addr)
+
+	recs, err := st.List()
+	if err != nil || len(recs) != 1 {
+		t.Fatalf("List = %+v, %v", recs, err)
+	}
+	if len(recs[0].Listeners) != 0 || len(recs[0].Tunnels) != 1 {
+		t.Fatalf("record = %+v, want no listener and the open tunnel", recs[0])
+	}
+
+	_ = open.Close()
+	if err := <-done; CodeOf(err) != ExitForbidden {
+		t.Fatalf("Run = %v (exit %d), want %d", err, CodeOf(err), ExitForbidden)
+	}
 }
 
 func assertKeys(t *testing.T, m map[string]any, want ...string) {

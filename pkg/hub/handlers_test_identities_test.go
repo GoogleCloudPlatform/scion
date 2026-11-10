@@ -631,7 +631,7 @@ func tiAddProvider(t *testing.T, s store.Store, projectID string) {
 	ctx := context.Background()
 	broker := &store.RuntimeBroker{ID: tid("ti-broker-" + projectID), Name: "ti broker", Slug: "ti-broker-" + projectID[:8], Status: store.BrokerStatusOnline, Endpoint: "http://localhost:9800"}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
-	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{ProjectID: projectID, BrokerID: broker.ID, BrokerName: broker.Name, Status: store.BrokerStatusOnline}))
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{ProjectID: projectID, BrokerID: broker.ID, BrokerName: broker.Name, LocalPath: fixtureProviderCheckout(t), Status: store.BrokerStatusOnline}))
 }
 
 // The issued identity, as an ordinary member, creates a project (becoming

@@ -66,11 +66,13 @@ const (
 	AgentRouteActionResetAuth    AgentSubRouteID = "agents.action.resetAuth"
 	AgentRouteActionKeys         AgentSubRouteID = "agents.action.keys"
 	AgentRouteHoldLift           AgentSubRouteID = "agents.hold.lift"
+	AgentRoutePendingConfig      AgentSubRouteID = "agents.pendingConfig"
 	// Agent delegation (.design/agent-delegation.md §18.4).
 	AgentRouteDelegations          AgentSubRouteID = "agents.delegations"
 	AgentRouteDelegationExchange   AgentSubRouteID = "agents.delegations.exchange"
 	AgentRouteDelegationItem       AgentSubRouteID = "agents.delegations.byId"
 	AgentRouteDelegationCredential AgentSubRouteID = "agents.delegations.credentials.byId"
+	AgentRouteDelegationRevokeAll  AgentSubRouteID = "agents.delegations.revokeAll"
 )
 
 // Agent sub-routes under /api/v1/projects/{projectId}/agents.
@@ -189,6 +191,7 @@ const (
 	opAgentEnv              authzop.OperationID = "agent.lifecycle.env"
 	opAgentResetAuth        authzop.OperationID = "agent.lifecycle.resetauth"
 	opAgentHoldLift         authzop.OperationID = "agent.hold.lift"
+	opAgentPendingDiscard   authzop.OperationID = "agent.update.pendingconfig.delete"
 	opAgentReincarnate      authzop.OperationID = "agent.lifecycle.reincarnate"
 	opAgentSetMessageMode   authzop.OperationID = "agent.setmessagemode"
 	opAgentTokenRefresh     authzop.OperationID = "agent.token.refresh"
@@ -211,6 +214,7 @@ const (
 	opAgentDelegationRead             authzop.OperationID = "agent.delegation.read"
 	opAgentDelegationRevoke           authzop.OperationID = "agent.delegation.revoke"
 	opAgentDelegationCredentialRevoke authzop.OperationID = "agent.delegation.credential.revoke"
+	opAgentDelegationRevokeAll        authzop.OperationID = "agent.delegation.revokeall"
 )
 
 func postOp(op authzop.OperationID) map[string]authzop.OperationID {
@@ -276,15 +280,21 @@ var agentSubRouteTable = []agentSubRouteRow{
 	{id: AgentRouteActionKeys, form: agentFormByID, segs: []string{"keys"}, ops: postOp(opAgentKeys)},
 	// Hub-admin lift of an agent's holds (ptone/scion#3433).
 	{id: AgentRouteHoldLift, form: agentFormByID, segs: []string{"hold", "lift"}, ops: postOp(opAgentHoldLift)},
+	// Discard of held config edits (ptone/scion#3976), behind
+	// hub.agent_edit_held.
+	{id: AgentRoutePendingConfig, form: agentFormByID, segs: []string{"pending-config"}, ops: map[string]authzop.OperationID{http.MethodDelete: opAgentPendingDiscard}},
 	// Agent delegation (.design/agent-delegation.md §18.4): grant issuance
 	// and credential exchange, behind hub.agent_delegation; grant list,
-	// read and revoke, and delegated credential revoke, which answer while
-	// the experiment is off (§10).
+	// read, revoke and revoke-all, and delegated credential revoke, which
+	// answer while the experiment is off (§10).
 	{id: AgentRouteDelegations, form: agentFormByID, segs: []string{"delegations"}, ops: map[string]authzop.OperationID{
 		http.MethodPost: opAgentDelegationCreate,
 		http.MethodGet:  opAgentDelegationList,
 	}},
 	{id: AgentRouteDelegationExchange, form: agentFormByID, segs: []string{"delegations", agentRouteParam, "exchange"}, ops: postOp(opAgentDelegationExchange), paramNames: []string{"{grantId}"}},
+	// revoke-all is matched before the grant item row, which would
+	// otherwise take "revoke-all" as a grant ID.
+	{id: AgentRouteDelegationRevokeAll, form: agentFormByID, segs: []string{"delegations", "revoke-all"}, ops: postOp(opAgentDelegationRevokeAll)},
 	{id: AgentRouteDelegationItem, form: agentFormByID, segs: []string{"delegations", agentRouteParam}, ops: map[string]authzop.OperationID{
 		http.MethodGet:    opAgentDelegationRead,
 		http.MethodDelete: opAgentDelegationRevoke,

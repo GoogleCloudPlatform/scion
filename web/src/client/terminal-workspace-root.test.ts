@@ -19,6 +19,7 @@ import { _appFrameRefCountForTests } from '../components/shared/app-frame.js';
 import {
   TERMINAL_DRAG_MIME,
   TERMINAL_PALETTE_NEW_AGENT_EVENT,
+  TERMINAL_PANE_DIALOG_OPEN_EVENT,
   type TerminalPaletteNewAgentDetail,
 } from './terminal-workspace-events.js';
 import type { ScionQuickPalette } from '../components/shared/palette/quick-palette.js';
@@ -2012,6 +2013,115 @@ describe('show() frame-mode ref counting', () => {
     expect(_appFrameRefCountForTests()).toBe(start);
   });
 });
+
+describe('an open on-screen keyboard collapses the chrome around the terminal (ptone/scion#5059)', () => {
+  let root: TerminalWorkspaceRoot;
+
+  /**
+   * Creates and shows the root with the keyboard up or not, as
+   * client/viewport.ts marks it. Each test reads one state only: happy-dom
+   * clears its computed-style cache on child-list mutations, not on
+   * attribute changes, so the state is set before the root is added and read.
+   */
+  function showRoot({ keyboard }: { keyboard: boolean }): void {
+    if (keyboard) document.documentElement.dataset['keyboard'] = 'open';
+    root = new WorkspaceRoot();
+    document.body.append(root.element);
+    root.show(true);
+  }
+
+  afterEach(() => {
+    document.documentElement.removeAttribute('data-keyboard');
+    root.show(false);
+    root.dispose();
+    root.element.remove();
+  });
+
+  function part(selector: string): HTMLElement {
+    const el = root.element.querySelector<HTMLElement>(selector);
+    if (!el) throw new Error(`No ${selector} in the workspace`);
+    return el;
+  }
+
+  /** The workspace parts that are not terminal panes. */
+  function chrome(): Record<string, HTMLElement> {
+    return {
+      banner: part('.terminal-test-hub-banner'),
+      header: part('scion-header'),
+      rail: part('.terminal-rail'),
+      layoutBar: part('.terminal-layout-bar'),
+    };
+  }
+
+  function display(el: HTMLElement): string {
+    return getComputedStyle(el).display;
+  }
+
+  function shellGrid(): { columns: string; rows: string } {
+    const style = getComputedStyle(part('.terminal-workspace-shell'));
+    return { columns: style.gridTemplateColumns, rows: style.gridTemplateRows };
+  }
+
+  const ONE_CELL = 'minmax(0, 1fr)';
+
+  it('shows the chrome while no keyboard is up', () => {
+    showRoot({ keyboard: false });
+    for (const el of Object.values(chrome())) expect(display(el)).not.toBe('none');
+  });
+
+  it('hides the header, banner, Open terminals rail and Layout bar while the keyboard is up', () => {
+    showRoot({ keyboard: true });
+    for (const el of Object.values(chrome())) expect(display(el)).toBe('none');
+    // The terminal panes stay: the pane area takes the whole frame.
+    expect(display(part('.terminal-pane-area'))).not.toBe('none');
+    expect(display(part('.terminal-pane-host'))).not.toBe('none');
+  });
+
+  it('shows the chrome again once the keyboard has closed', () => {
+    // viewport.ts sets the attribute while the keyboard is up and removes it
+    // when the keyboard closes.
+    document.documentElement.dataset['keyboard'] = 'open';
+    delete document.documentElement.dataset['keyboard'];
+    showRoot({ keyboard: false });
+    for (const el of Object.values(chrome())) expect(display(el)).not.toBe('none');
+    expect(shellGrid().columns).not.toBe(ONE_CELL);
+  });
+
+  it('keeps the wide shell in two columns while no keyboard is up', () => {
+    showRoot({ keyboard: false });
+    expect(shellGrid().columns).not.toBe(ONE_CELL);
+  });
+
+  it('collapses the wide shell to one cell while the keyboard is up', () => {
+    // Otherwise the pane area, now the only grid item, drops into the rail column.
+    showRoot({ keyboard: true });
+    expect(shellGrid()).toEqual({ columns: ONE_CELL, rows: ONE_CELL });
+  });
+
+  it('collapses the narrow shell too: the keyboard rule follows and outranks the 760px rule', () => {
+    // happy-dom does not apply the (max-width: 760px) rule in this setup, so
+    // the narrow case is checked on the stylesheet text instead.
+    showRoot({ keyboard: false });
+    const css = root.element.querySelector('style')?.textContent ?? '';
+    const narrowStart = css.indexOf('@media (max-width: 760px) {');
+    const selector = "html[data-keyboard='open'] #terminal-workspace .terminal-workspace-shell";
+    const ruleStart = css.indexOf(`${selector} {`);
+    expect(narrowStart).toBeGreaterThan(-1);
+    expect(ruleStart).toBeGreaterThan(-1);
+
+    // Outside any @media block: every brace before it is closed.
+    const before = css.slice(0, ruleStart);
+    expect(before.split('{').length).toBe(before.split('}').length);
+    // After the 760px block, which sets .terminal-workspace-shell (0,1,0);
+    // the keyboard selector, (1,2,1), outranks it as well.
+    expect(ruleStart).toBeGreaterThan(narrowStart);
+    expect(css.slice(narrowStart, ruleStart)).toContain('.terminal-workspace-shell {');
+
+    const body = css.slice(ruleStart, css.indexOf('}', ruleStart));
+    expect(body).toMatch(/grid-template-columns:\s*minmax\(0, 1fr\);/);
+    expect(body).toMatch(/grid-template-rows:\s*minmax\(0, 1fr\);/);
+  });
+});
 // ────────────────────────────────────────────────────────────────────────────
 // "Jump to agent" palette
 // ────────────────────────────────────────────────────────────────────────────
@@ -3112,6 +3222,114 @@ describe('"Jump to agent" palette: palette and focus lifecycle', () => {
 
     await vi.waitFor(() => expect(palette.groups.agents?.status).toBe('error'));
     expect(palette.groups.agents?.error).toBe('agents list failed');
+  });
+});
+
+// ptone/scion#2612: a pane dialog that opens while the palette is open or
+// pending closes the palette, so two modals are never open together.
+describe('"Jump to agent" palette: a pane dialog opening under it', () => {
+  let root: TerminalWorkspaceRoot;
+  let reg: TerminalSessionRegistry;
+  let invoker: HTMLButtonElement;
+
+  beforeEach(async () => {
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      cb(0);
+      return 0;
+    });
+    stubFetchForPalette([{ id: AGENT_A }, { id: AGENT_NEW }]);
+    stubWebSocketAndEventSource();
+    reg = new TerminalSessionRegistry({ hubUrl: window.location.origin, accountId: 'r2612' });
+    root = new WorkspaceRoot();
+    document.body.append(root.element);
+    root.show(true);
+    root.create(reg, AGENT_A);
+    await flush();
+    invoker = document.createElement('button');
+    document.body.appendChild(invoker);
+  });
+
+  afterEach(() => {
+    invoker.remove();
+    root.dispose();
+    root.element.remove();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  /** Dispatches the pane's dialog-open event, as the pane does when a dialog renders. */
+  function paneDialogOpens(pane: ScionTerminalPane): void {
+    pane.dispatchEvent(
+      new CustomEvent(TERMINAL_PANE_DIALOG_OPEN_EVENT, { bubbles: true, composed: true })
+    );
+  }
+
+  /** Opens the palette from `invoker`, then moves focus off it, so a refocus is observable. */
+  async function openFromInvoker(): Promise<ScionQuickPalette> {
+    invoker.focus();
+    root['openPalette']();
+    const palette = await waitForPalette(root);
+    await vi.waitFor(() => expect(palette.open).toBe(true));
+    invoker.blur();
+    return palette;
+  }
+
+  it('closes the open palette and refocuses nothing', async () => {
+    const pane = paneFor(root, AGENT_A);
+    expect(pane.hidden).toBe(false);
+    const palette = await openFromInvoker();
+
+    paneDialogOpens(pane);
+    fireFromDialog(palette, 'sl-hide');
+    fireFromDialog(palette, 'sl-after-hide');
+    await nextTask();
+
+    expect(root['paletteHost'].isOpen).toBe(false);
+    expect(palette.open).toBe(false);
+    expect(document.activeElement).not.toBe(invoker);
+  });
+
+  it('cancels a pending open, so the palette never shows, and refocuses nothing', async () => {
+    const pane = paneFor(root, AGENT_A);
+    invoker.focus();
+    root['openPalette']();
+    expect(root['paletteHost'].isOpen).toBe(true);
+    // The palette module and element are still loading: the open is pending.
+    expect(root.element.querySelector('scion-quick-palette')?.open ?? false).toBe(false);
+    invoker.blur();
+
+    paneDialogOpens(pane);
+    const palette = await waitForPalette(root);
+    await nextTask();
+
+    expect(root['paletteHost'].isOpen).toBe(false);
+    expect(palette.open).toBe(false);
+    expect(document.activeElement).not.toBe(invoker);
+  });
+
+  it('a dialog in an off-screen pane leaves the palette open', async () => {
+    // A background restore creates the pane without showing it.
+    root.create(reg, AGENT_NEW, { deferConnect: true });
+    await flush();
+    const hiddenPane = paneFor(root, AGENT_NEW);
+    expect(hiddenPane.closest('[hidden]')).not.toBeNull();
+    const palette = await openFromInvoker();
+
+    paneDialogOpens(hiddenPane);
+    await nextTask();
+
+    expect(root['paletteHost'].isOpen).toBe(true);
+    expect(palette.open).toBe(true);
+  });
+
+  it('does nothing while the palette is closed: a later open still shows', async () => {
+    paneDialogOpens(paneFor(root, AGENT_A));
+    expect(root['paletteHost'].isOpen).toBe(false);
+
+    const palette = await openFromInvoker();
+
+    expect(root['paletteHost'].isOpen).toBe(true);
+    expect(palette.open).toBe(true);
   });
 });
 

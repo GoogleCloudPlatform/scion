@@ -16,7 +16,7 @@
 
 /**
  * The one agent-delete flow shared by every page that deletes an agent
- * (agents, agent-detail, project-detail, agent-configure), for the
+ * (agents, agent-detail, project-detail), for the
  * backend-driven delete lifecycle (ptone/scion#2483 phase 2, §2.4).
  *
  * It owns the confirm, the DELETE, the reading of every answer the hub can
@@ -72,7 +72,7 @@ export interface AgentDeleteOptions {
   force?: boolean | undefined;
   /**
    * When a normal DELETE answers 502 or 503, offer a force delete (default
-   * true). agent-configure turns it off to keep its own behaviour.
+   * true). Pass false to report the failure without offering force.
    */
   forceFallback?: boolean | undefined;
   /**

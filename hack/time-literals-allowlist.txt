@@ -15,3 +15,4 @@
 # gate, so delete entries together with the code they cover.
 #
 pkg/hub/metrics_dashboard.go | dayKey | t.In(loc).Format(dayKeyLayout) | calendar-day key in the viewer's resolved IANA zone (tz-refactor task 24, design §2.3); never stored or sent as an instant
+pkg/hub/webchannel_store.go | sqliteWebChatStore.SearchChatMessages | QueryContext arg cursorAt | the cursor compares with messages.created, an ent column holding time.Time text; webchat_message_ext is only LEFT JOINed for soft-delete exclusion, and an RFC3339 string would never advance the cursor

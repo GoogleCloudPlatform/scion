@@ -241,12 +241,15 @@ func TestDecisionLogLifecycleEvents(t *testing.T) {
 	}))
 }
 
-// TestDecisionLogReviewGrant: a review grant is logged with the clause that
-// allowed it: steward_delegator for the owning agent's delegating user,
-// steward_project_owner for an owner or administrator of the home project.
+// TestDecisionLogReviewGrant: a review grant is logged with the authority
+// that allowed it. With the review-only path removed (ptone/scion#5145),
+// only the owner, admin grantees and stewards give one: steward_delegator
+// for the owning agent's delegating user, steward_project_owner for an
+// owner of the home project.
 func TestDecisionLogReviewGrant(t *testing.T) {
 	f, id := newReviewGrantFixture(t)
-	f.host.allowAdmin(projAdmin, "project-1")
+	f.host.allowSteward(delegator, agentA.ref, "project-1", StewardClauseDelegator)
+	f.host.allowSteward(projAdmin, agentA.ref, "project-1", StewardClauseProjectOwner)
 	c := captureLog(f, slog.LevelDebug)
 	memberID := PrincipalRef(member.kind, member.ref)
 	for _, tc := range []struct {
@@ -254,12 +257,9 @@ func TestDecisionLogReviewGrant(t *testing.T) {
 		subject   string
 		authority string
 	}{
-		{delegator, reviewerID, reviewGrantDelegatorAuthority},
-		{projAdmin, memberID, reviewGrantProjectAdminAuthority},
+		{delegator, reviewerID, AuthorityStewardDelegator},
+		{projAdmin, memberID, AuthorityStewardProjectOwner},
 	} {
-		f.host.mu.Lock()
-		f.host.calls = nil
-		f.host.mu.Unlock()
 		if rec := f.postGrantBody(tc.caller, id, reviewBody(SubjectPrincipal, tc.subject, GrantReview)); rec.Code != http.StatusCreated {
 			t.Fatalf("review grant by %s: %d %s", tc.caller.ref, rec.Code, rec.Body.String())
 		}
@@ -269,22 +269,6 @@ func TestDecisionLogReviewGrant(t *testing.T) {
 			logKeyPrincipalID: tc.caller.ref, logKeySubjectKind: SubjectPrincipal, logKeySubjectRef: tc.subject,
 			logKeyPermission: GrantReview, logKeyOwnerKind: PrincipalKindAgent,
 		})
-		// The clause comes from the host's one review evaluation: no second
-		// question (no AdministersScope call) is asked for the log.
-		f.host.mu.Lock()
-		reviews, administers := 0, 0
-		for _, call := range f.host.calls {
-			switch {
-			case strings.HasPrefix(call, "review "):
-				reviews++
-			case strings.HasPrefix(call, "administers "):
-				administers++
-			}
-		}
-		f.host.mu.Unlock()
-		if reviews != 1 || administers != 0 {
-			t.Errorf("grant by %s asked review %d times and AdministersScope %d times, want 1 and 0", tc.caller.ref, reviews, administers)
-		}
 	}
 }
 
@@ -498,6 +482,7 @@ func TestRouteTemplate(t *testing.T) {
 		"/api/v1/artifacts/" + id + "/versions/3":                "/api/v1/artifacts/{id}/versions/{seq}",
 		"/api/v1/artifacts/" + id + "/versions/3/finalize":       "/api/v1/artifacts/{id}/versions/{seq}/finalize",
 		"/api/v1/artifacts/" + id + "/versions/3/view":           "/api/v1/artifacts/{id}/versions/{seq}/view",
+		"/api/v1/artifacts/" + id + "/versions/3/archive":        "/api/v1/artifacts/{id}/versions/{seq}/archive",
 		"/api/v1/artifacts/" + id + "/versions/3/files/a/b.png":  "/api/v1/artifacts/{id}/versions/{seq}/files/{path}",
 		"/api/v1/artifacts/" + id + "/versions/3/secret-segment": "/api/v1/artifacts/{id}/unknown",
 		"/api/v1/artifacts/shared/TOKEN-SECRET/files/x.md":       "/api/v1/artifacts/shared/{token}",
@@ -739,45 +724,6 @@ func TestDecisionLogLinkSubjectRefNeverWritten(t *testing.T) {
 	checkEntry(t, "link", one(t, "link", entries), "INFO", map[string]any{logKeySubjectKind: SubjectLink, logKeySubjectRef: nil})
 	if strings.Contains(raw, "token-hash-sentinel") {
 		t.Errorf("the link subject ref reached the entry: %s", raw)
-	}
-}
-
-// noClauseHost is the fake host without ReviewGrantClauser: it allows review
-// grants through ReviewGrantAuthority alone, which does not name the clause.
-type noClauseHost struct {
-	Host
-	ReviewGrantAuthority
-	ReviewSubjectAuthority
-}
-
-// TestDecisionLogReviewGrantUnnamedClause: on a host that does not name the
-// clause, a review grant is logged (and recorded) with the authority
-// reviewGrantUnnamedAuthority, and the
-// host is asked once (MayGrantReview), never a second question.
-func TestDecisionLogReviewGrantUnnamedClause(t *testing.T) {
-	f, id := newReviewGrantFixture(t)
-	f.svc.host = noClauseHost{f.host, f.host, f.host}
-	c := captureLog(f, slog.LevelDebug)
-	f.host.mu.Lock()
-	f.host.calls = nil
-	f.host.mu.Unlock()
-	if rec := f.postGrantBody(delegator, id, reviewBody(SubjectPrincipal, reviewerID, GrantReview)); rec.Code != http.StatusCreated {
-		t.Fatalf("review grant: %d %s", rec.Code, rec.Body.String())
-	}
-	entries, _ := c.take(t)
-	checkEntry(t, "unnamed clause", one(t, "unnamed clause", entries), "INFO", map[string]any{
-		logKeyAction: logActionGrantCreated, logKeyAuthority: reviewGrantUnnamedAuthority, logKeyPrincipalID: delegator.ref,
-	})
-	f.host.mu.Lock()
-	defer f.host.mu.Unlock()
-	reviews := 0
-	for _, call := range f.host.calls {
-		if strings.HasPrefix(call, "review ") {
-			reviews++
-		}
-	}
-	if reviews != 1 {
-		t.Errorf("the host was asked about review %d times, want 1: %v", reviews, f.host.calls)
 	}
 }
 

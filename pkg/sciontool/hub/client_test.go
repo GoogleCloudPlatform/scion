@@ -28,7 +28,6 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
-	"syscall"
 	"testing"
 	"time"
 
@@ -1059,7 +1058,7 @@ func TestReadTokenFile_Hardening(t *testing.T) {
 
 		scionDir := filepath.Join(home, ".scion")
 		require.NoError(t, os.MkdirAll(scionDir, 0700))
-		require.NoError(t, syscall.Mkfifo(filepath.Join(scionDir, TokenFile), 0o600))
+		require.NoError(t, mkfifoForTest(filepath.Join(scionDir, TokenFile), 0o600))
 
 		done := make(chan string, 1)
 		go func() { done <- ReadTokenFile() }()

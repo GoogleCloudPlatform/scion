@@ -14,7 +14,35 @@
 
 package store
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+	"time"
+)
+
+func TestUserActivityTimestampsJSON(t *testing.T) {
+	for _, timestamp := range []time.Time{{}, time.Date(2026, 10, 16, 8, 0, 0, 0, time.UTC)} {
+		t.Run(timestamp.String(), func(t *testing.T) {
+			data, err := json.Marshal(User{LastLogin: timestamp, LastSeen: timestamp})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(data, &fields); err != nil {
+				t.Fatal(err)
+			}
+			for _, field := range []string{"lastLogin", "lastSeen"} {
+				value, present := fields[field]
+				if present == timestamp.IsZero() {
+					t.Fatalf("%s presence = %v for %v", field, present, timestamp)
+				}
+				if present && string(value) != `"2026-10-16T08:00:00Z"` {
+					t.Errorf("%s = %s", field, value)
+				}
+			}
+		})
+	}
+}
 
 func TestResolveWorkspaceSharingMode(t *testing.T) {
 	tests := []struct {

@@ -74,52 +74,128 @@ func TestHashBytes_Empty(t *testing.T) {
 	}
 }
 
-func TestComputeContentHash(t *testing.T) {
+func TestComputeContentHash_OrderIndependent(t *testing.T) {
 	files := []FileInfo{
-		{Path: "b.txt", Hash: "sha256:bbb"},
+		{Path: "b.txt", Hash: "sha256:bbb", Mode: "0755"},
 		{Path: "a.txt", Hash: "sha256:aaa"},
 		{Path: "c.txt", Hash: "sha256:ccc"},
 	}
-
-	hash := ComputeContentHash(files)
-
-	// Verify hash format
-	if !strings.HasPrefix(hash, HashPrefix) {
-		t.Errorf("hash should start with %q, got %s", HashPrefix, hash)
-	}
-
-	// Compute same hash with files already sorted
 	sortedFiles := []FileInfo{
 		{Path: "a.txt", Hash: "sha256:aaa"},
-		{Path: "b.txt", Hash: "sha256:bbb"},
+		{Path: "b.txt", Hash: "sha256:bbb", Mode: "0755"},
 		{Path: "c.txt", Hash: "sha256:ccc"},
 	}
-	sortedHash := ComputeContentHash(sortedFiles)
-
-	// Both should produce the same hash
-	if hash != sortedHash {
-		t.Errorf("hashes should be equal regardless of input order: %s != %s", hash, sortedHash)
+	for name, fn := range map[string]func([]FileInfo) string{"v1": ComputeContentHashV1, "v2": ComputeContentHashV2} {
+		hash := fn(files)
+		if !IsContentHash(hash) {
+			t.Errorf("%s: hash %q is not in content-hash form", name, hash)
+		}
+		if again := fn(sortedFiles); hash != again {
+			t.Errorf("%s: hashes should be equal regardless of input order: %s != %s", name, hash, again)
+		}
+		if again := fn(files); hash != again {
+			t.Errorf("%s: content hash should be deterministic: %s != %s", name, hash, again)
+		}
 	}
 }
 
 func TestComputeContentHash_Empty(t *testing.T) {
-	hash := ComputeContentHash([]FileInfo{})
-	if hash != "" {
-		t.Errorf("expected empty hash for empty file list, got %s", hash)
+	for name, fn := range map[string]func([]FileInfo) string{"v1": ComputeContentHashV1, "v2": ComputeContentHashV2} {
+		if hash := fn([]FileInfo{}); hash != "" {
+			t.Errorf("%s: expected empty hash for empty file list, got %s", name, hash)
+		}
+		if hash := fn(nil); hash != "" {
+			t.Errorf("%s: expected empty hash for nil file list, got %s", name, hash)
+		}
 	}
 }
 
-func TestComputeContentHash_Deterministic(t *testing.T) {
+// TestComputeContentHashV1_Golden pins the v1 value: skill versions are
+// pinned by it, so it must never change.
+func TestComputeContentHashV1_Golden(t *testing.T) {
 	files := []FileInfo{
-		{Path: "file1.txt", Hash: "sha256:abc"},
-		{Path: "file2.txt", Hash: "sha256:def"},
+		{Path: "b.txt", Hash: "sha256:bbb", Mode: "0755"},
+		{Path: "a.txt", Hash: "sha256:aaa"},
+	}
+	// sha256("sha256:aaasha256:bbb")
+	want := HashBytes([]byte("sha256:aaasha256:bbb"))
+	if got := ComputeContentHashV1(files); got != want {
+		t.Errorf("v1 = %s, want %s", got, want)
+	}
+	// Paths and modes are not part of v1.
+	renamed := []FileInfo{
+		{Path: "z.txt", Hash: "sha256:bbb"},
+		{Path: "a.txt", Hash: "sha256:aaa"},
+	}
+	if got := ComputeContentHashV1(renamed); got != want {
+		t.Errorf("v1 of a renamed, chmodded set = %s, want unchanged %s", got, want)
+	}
+}
+
+// TestComputeContentHashV2_Golden pins the v2 preimage format.
+func TestComputeContentHashV2_Golden(t *testing.T) {
+	files := []FileInfo{
+		{Path: "bin/run", Hash: "sha256:bbb", Mode: "0700"},
+		{Path: "a.txt", Hash: "sha256:aaa"},
+	}
+	want := HashBytes([]byte("a.txt\x000644\x00sha256:aaa\nbin/run\x000755\x00sha256:bbb\n"))
+	if got := ComputeContentHashV2(files); got != want {
+		t.Errorf("v2 = %s, want %s", got, want)
+	}
+}
+
+// TestComputeContentHashV2_CoversPathsAndModes covers ptone/scion#5658: a
+// rename-only or chmod-only change changes the v2 hash; a mode change that
+// normalises to the same mode does not.
+func TestComputeContentHashV2_CoversPathsAndModes(t *testing.T) {
+	base := []FileInfo{
+		{Path: "a.txt", Hash: "sha256:aaa", Mode: "0644"},
+		{Path: "run.sh", Hash: "sha256:bbb", Mode: "0644"},
+	}
+	h := ComputeContentHashV2(base)
+
+	cases := []struct {
+		name    string
+		files   []FileInfo
+		changed bool
+	}{
+		{"rename only", []FileInfo{
+			{Path: "a.txt", Hash: "sha256:aaa", Mode: "0644"},
+			{Path: "bin/run.sh", Hash: "sha256:bbb", Mode: "0644"},
+		}, true},
+		{"swap contents between paths", []FileInfo{
+			{Path: "a.txt", Hash: "sha256:bbb", Mode: "0644"},
+			{Path: "run.sh", Hash: "sha256:aaa", Mode: "0644"},
+		}, true},
+		{"chmod +x only", []FileInfo{
+			{Path: "a.txt", Hash: "sha256:aaa", Mode: "0644"},
+			{Path: "run.sh", Hash: "sha256:bbb", Mode: "0755"},
+		}, true},
+		{"content change", []FileInfo{
+			{Path: "a.txt", Hash: "sha256:aaa", Mode: "0644"},
+			{Path: "run.sh", Hash: "sha256:ccc", Mode: "0644"},
+		}, true},
+		{"empty mode is 0644", []FileInfo{
+			{Path: "a.txt", Hash: "sha256:aaa"},
+			{Path: "run.sh", Hash: "sha256:bbb"},
+		}, false},
+		{"non-exec bits normalise away", []FileInfo{
+			{Path: "a.txt", Hash: "sha256:aaa", Mode: "0600"},
+			{Path: "run.sh", Hash: "sha256:bbb", Mode: "0666"},
+		}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ComputeContentHashV2(tc.files)
+			if (got != h) != tc.changed {
+				t.Errorf("v2 changed = %v, want %v (%s vs %s)", got != h, tc.changed, got, h)
+			}
+		})
 	}
 
-	hash1 := ComputeContentHash(files)
-	hash2 := ComputeContentHash(files)
-
-	if hash1 != hash2 {
-		t.Errorf("content hash should be deterministic: %s != %s", hash1, hash2)
+	// v1 and v2 never coincide for the same files.
+	if ComputeContentHashV1(base) == h {
+		t.Error("v1 and v2 hashes are equal")
 	}
 }
 

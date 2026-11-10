@@ -377,7 +377,7 @@ func TestConduitOpen_UpgradeRequired_PTYPath(t *testing.T) {
 		assert.Equal(t, http.StatusServiceUnavailable, d.Status)
 		assert.Equal(t, ErrCodeUnavailable, d.Code)
 		assert.Equal(t, ptyReasonRegistryUnavailable, d.Reason)
-		assert.Empty(t, o.rec.list(), "not counted as a renewal refusal")
+		assert.Equal(t, []string{noSessionRefusal(conduitRoutePTY, ptyReasonRegistryUnavailable)}, o.rec.list(), "counted once as a no-session refusal, not a renewal refusal")
 	})
 	t.Run("broker skipped, agent pty session without renewal", func(t *testing.T) {
 		o := &openSetup{enforce: true}

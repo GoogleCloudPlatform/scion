@@ -1,6 +1,6 @@
 # A2A bridge: agent replies read from the caller's own conversation
 
-Tracked in ptone/scion#4603. Bridge-only change on upstream main `163f4e8f0c37`; no Hub or hubclient change.
+Tracked in upstream issue 4603. Bridge-only change on upstream main `163f4e8f0c37`; no Hub or hubclient change.
 
 ## Problem
 

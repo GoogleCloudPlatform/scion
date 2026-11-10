@@ -56,7 +56,7 @@ func TestProjectWorkspaceAuthz_ExternalBearerSameDecisionAsHubToken(t *testing.T
 	require.Equal(t, http.StatusCreated, projRec.Code, "body: %s", projRec.Body.String())
 	var project store.Project
 	require.NoError(t, json.NewDecoder(projRec.Body).Decode(&project))
-	ws, err := hubManagedProjectPath(project.Slug)
+	ws, err := localProjectPath(project.Slug)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = os.RemoveAll(ws) })
 	require.NoError(t, os.MkdirAll(ws, 0o755))

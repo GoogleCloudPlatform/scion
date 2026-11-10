@@ -38,7 +38,7 @@
  * the test harness) are ported from miller79/scion PR #127 by Anthony Lofton.
  */
 
-import { LitElement, html, css, nothing } from 'lit';
+import { LitElement, html, css, nothing, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError, parseApiError } from '../../client/api.js';
@@ -53,8 +53,13 @@ import type {
 import type { PrincipalChangeDetail } from './principal-picker.js';
 import { showConfirm } from './confirm-dialog.js';
 import './principal-picker.js';
+import { leaveVisibility, type LeaveVisibility } from '../../client/project-leave.js';
+import './project-leave-dialog.js';
+import type { ProjectLeftDetail, ScionProjectLeaveDialog } from './project-leave-dialog.js';
 import {
   BUILT_IN_PROJECT_MEMBERSHIP_ROLES,
+  builtInRoleLabel,
+  PROJECT_VIEWER_ROLE_NAME,
   getPrincipalIcon,
   getRoleTier,
   type RoleTier,
@@ -282,14 +287,17 @@ export function customRoleState(
   return { disabled: false, reason: '' };
 }
 
-/** Built-in roles from the catalog, in tier order (owner, admin, member). */
+/** Built-in roles from the catalog, in tier order (owner, admin, member),
+ *  with the viewer role last. */
 export function builtInCatalog(
   assignable: readonly AssignableProjectRole[]
 ): AssignableProjectRole[] {
   const rank: Record<RoleTier, number> = { owner: 0, admin: 1, member: 2 };
+  const order = (name: string): number =>
+    rank[getRoleTier(name)] + (name === PROJECT_VIEWER_ROLE_NAME ? 1 : 0);
   return assignable
     .filter((r) => (r.roleKind ? r.roleKind === 'builtin' : !isCustomProjectRole(r.name)))
-    .sort((a, b) => rank[getRoleTier(a.name)] - rank[getRoleTier(b.name)]);
+    .sort((a, b) => order(a.name) - order(b.name));
 }
 
 /** Whether a catalog role is custom: its roleKind when the hub sent one,
@@ -321,7 +329,9 @@ export function defaultBuiltInForAdd(
   };
   const builtIns = builtInCatalog(assignable);
   for (const tier of ['admin', 'member'] as const) {
-    const role = builtIns.find((r) => getRoleTier(r.name) === tier);
+    const role = builtIns.find(
+      (r) => getRoleTier(r.name) === tier && r.name !== PROJECT_VIEWER_ROLE_NAME
+    );
     if (role && !builtInOptionState(role, ctx).disabled) return role.id;
   }
   return NO_PROJECT_ROLE;
@@ -526,6 +536,9 @@ function principalLabel(group: Pick<ProjectMemberGroup, 'principalDisplayName' |
   return group.principalDisplayName || group.principalId;
 }
 
+/** Event the editor dispatches after it opened the transfer dialog for `openTransferOnLoad`. */
+export const TRANSFER_OPENED_ON_LOAD_EVENT = 'scion-transfer-opened-on-load';
+
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
@@ -546,6 +559,20 @@ export class ScionProjectMembersEditor extends LitElement {
 
   /** Section description override. */
   @property() sectionDescription = '';
+
+  /**
+   * The signed-in user's ID. Their own row offers Leave (ptone/scion#7494)
+   * instead of Remove while the capabilities offer a leave.
+   */
+  @property() currentUserId = '';
+
+  /** The project's name, for the leave dialog. */
+  @property() projectName = '';
+
+  /** Open the transfer ownership dialog once loaded, when the user may transfer. */
+  @property({ type: Boolean }) openTransferOnLoad = false;
+
+  private transferOpenedOnLoad = false;
 
   @state() private loading = true;
   @state() private groups: ProjectMemberGroup[] = [];
@@ -1052,6 +1079,9 @@ export class ScionProjectMembersEditor extends LitElement {
             canTransfer: rawCaps.canTransfer ?? false,
             canManageCustomRoles: rawCaps.canManageCustomRoles ?? false,
             actions: rawCaps.actions ?? [],
+            ...(typeof rawCaps.canLeave === 'boolean'
+              ? { canLeave: rawCaps.canLeave, leaveBlockedReason: rawCaps.leaveBlockedReason ?? '' }
+              : {}),
           }
         : null;
     } catch (err) {
@@ -1070,6 +1100,14 @@ export class ScionProjectMembersEditor extends LitElement {
       this.catalogError = null;
     }
     this.loading = false;
+    if (this.openTransferOnLoad && !this.transferOpenedOnLoad && this.capabilities?.canTransfer) {
+      this.transferOpenedOnLoad = true;
+      this.openTransferDialog();
+      // Tell the host the one-time open happened, so it clears its flag.
+      this.dispatchEvent(
+        new CustomEvent(TRANSFER_OPENED_ON_LOAD_EVENT, { bubbles: true, composed: true })
+      );
+    }
   }
 
   private async loadAssignableRoles(): Promise<void> {
@@ -1602,6 +1640,76 @@ export class ScionProjectMembersEditor extends LitElement {
   // Transfer ownership
   // ---------------------------------------------------------------------------
 
+  /** Open the transfer ownership dialog, when the user may transfer. */
+  openTransferOwnership(): void {
+    if (this.capabilities?.canTransfer) this.openTransferDialog();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Leave (ptone/scion#7494)
+  // ---------------------------------------------------------------------------
+
+  /** Whether `group` is the signed-in user's own row. */
+  private isSelfRow(group: ProjectMemberGroup): boolean {
+    return (
+      !!this.currentUserId &&
+      group.principalType === 'user' &&
+      group.principalId === this.currentUserId
+    );
+  }
+
+  /** How the signed-in user's own row offers Leave. */
+  private get selfLeave(): LeaveVisibility {
+    return leaveVisibility(this.capabilities);
+  }
+
+  /** Whether the actions column is shown: editable, or a self row with Leave. */
+  private get showActions(): boolean {
+    if (!this.effectiveReadOnly) return true;
+    return this.selfLeave.kind !== 'hidden' && this.groups.some((g) => this.isSelfRow(g));
+  }
+
+  private openLeaveDialog(): void {
+    if (this.selfLeave.kind !== 'enabled') return;
+    const dialog = this.shadowRoot?.querySelector<ScionProjectLeaveDialog>(
+      'scion-project-leave-dialog'
+    );
+    void dialog?.show();
+  }
+
+  private renderLeaveDialog(): TemplateResult | typeof nothing {
+    if (this.selfLeave.kind === 'hidden') return nothing;
+    return html`<scion-project-leave-dialog
+      projectId=${this.projectId}
+      projectName=${this.projectName}
+      ?transferAvailable=${!!this.capabilities?.canTransfer}
+      @scion-leave-transfer-ownership=${(e: Event) => {
+        e.stopPropagation();
+        this.openTransferDialog();
+      }}
+      @scion-project-left=${(e: CustomEvent<ProjectLeftDetail>) => {
+        if (e.detail.result.remainingAccess !== 'none') void this.loadData();
+      }}
+    ></scion-project-leave-dialog>`;
+  }
+
+  private renderSelfLeave(): TemplateResult {
+    const leave = this.selfLeave;
+    const button = html`<sl-button
+      size="small"
+      variant="default"
+      data-self-leave
+      ?disabled=${leave.kind === 'blocked'}
+      @click=${() => this.openLeaveDialog()}
+    >
+      <sl-icon slot="prefix" name="box-arrow-right"></sl-icon>
+      Leave
+    </sl-button>`;
+    return leave.kind === 'blocked'
+      ? html`<sl-tooltip content=${leave.reason}><span>${button}</span></sl-tooltip>`
+      : button;
+  }
+
   private openTransferDialog(): void {
     this.transferNewOwnerId = '';
     this.transferError = null;
@@ -1696,6 +1804,7 @@ export class ScionProjectMembersEditor extends LitElement {
         </div>
       </div>
       ${this.renderBody()} ${this.renderMemberDialog()} ${this.renderTransferDialog()}
+      ${this.renderLeaveDialog()}
     `;
   }
 
@@ -1736,6 +1845,7 @@ export class ScionProjectMembersEditor extends LitElement {
           </div>
         </div>
         ${this.renderBody()} ${this.renderMemberDialog()} ${this.renderTransferDialog()}
+        ${this.renderLeaveDialog()}
       </div>
     `;
   }
@@ -1809,7 +1919,7 @@ export class ScionProjectMembersEditor extends LitElement {
               <th>Member</th>
               <th>Roles</th>
               ${showSource ? html`<th class="hide-mobile">Source</th>` : nothing}
-              ${!this.effectiveReadOnly ? html`<th class="actions-cell">Actions</th>` : nothing}
+              ${this.showActions ? html`<th class="actions-cell">Actions</th>` : nothing}
             </tr>
           </thead>
           <tbody>
@@ -1842,6 +1952,8 @@ export class ScionProjectMembersEditor extends LitElement {
     const remove = canRemoveRow(group, this.capabilities, this.groups);
     // The shield-lock icon already explains the last-owner case.
     const removeTip = lastOwner ? '' : remove.reason;
+    // The user's own row offers Leave in place of Remove (ptone/scion#7494).
+    const selfLeave = this.isSelfRow(group) && this.selfLeave.kind !== 'hidden';
 
     return html`
       <tr data-principal=${key}>
@@ -1867,10 +1979,10 @@ export class ScionProjectMembersEditor extends LitElement {
               </span>
             </td>`
           : nothing}
-        ${!this.effectiveReadOnly
+        ${this.showActions
           ? html`
               <td class="actions-cell">
-                ${editable
+                ${editable && !this.effectiveReadOnly
                   ? html`
                       <sl-icon-button
                         name="pencil"
@@ -1880,7 +1992,8 @@ export class ScionProjectMembersEditor extends LitElement {
                       ></sl-icon-button>
                     `
                   : nothing}
-                ${editable
+                ${selfLeave ? this.renderSelfLeave() : nothing}
+                ${editable && !this.effectiveReadOnly && !selfLeave
                   ? html`
                       <sl-tooltip content=${removeTip} ?disabled=${!removeTip}>
                         <sl-icon-button
@@ -1892,7 +2005,7 @@ export class ScionProjectMembersEditor extends LitElement {
                       </sl-tooltip>
                     `
                   : nothing}
-                ${lastOwner
+                ${lastOwner && !this.effectiveReadOnly && !selfLeave
                   ? html`<sl-tooltip content=${LAST_OWNER_REMOVE_REASON}>
                       <sl-icon
                         name="shield-lock"
@@ -1935,7 +2048,6 @@ export class ScionProjectMembersEditor extends LitElement {
     const locked = !!this.dlgLockedReason;
     const optionState = (role: AssignableProjectRole | null): OptionState =>
       locked ? { disabled: true, reason: '' } : builtInOptionState(role, ctx);
-    const labels: Record<RoleTier, string> = { owner: 'Owner', admin: 'Admin', member: 'Member' };
     const option = (value: string, label: string, state: OptionState, description = '') => html`
       <sl-radio
         class="role-option ${this.dlgErrorRoleId === value ? 'option-error' : ''}"
@@ -1961,7 +2073,7 @@ export class ScionProjectMembersEditor extends LitElement {
           }}
         >
           ${builtIns.map((role) =>
-            option(role.id, labels[getRoleTier(role.name)], optionState(role), role.description)
+            option(role.id, builtInRoleLabel(role.name), optionState(role), role.description)
           )}
           ${this.noProjectRoleShown
             ? option(

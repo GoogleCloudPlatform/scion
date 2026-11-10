@@ -153,6 +153,24 @@ type HeartbeatService struct {
 	// ProfileSAMappings, and no per-agent profile.
 	flat bool
 
+	// presentation is a flat instance's FC4-a presentation
+	// (config.PresentInstance(...).API()), computed once: the instance entry
+	// is fixed for the process life. Every flat heartbeat carries it in
+	// full, with presentationTargetID (the instance's runtime target ID),
+	// presentationEpoch (the instance server's start time, Unix
+	// nanoseconds) and the next value of nextPresentationSeq (the server's
+	// process-wide counter), so the Hub stores it only when this process's
+	// fence advances. Nil (legacy) omits all four.
+	presentation         *api.RuntimeTargetPresentation
+	presentationTargetID string
+	presentationEpoch    int64
+	nextPresentationSeq  func() int64
+
+	// conversionPlan, when set, returns a legacy broker's conversion plan
+	// snapshot (Server.heartbeatConversionPlan), sent on every heartbeat.
+	// A nil result omits the field. Never consulted in flat mode.
+	conversionPlan func() *api.ConversionPlanPresentation
+
 	mu          sync.Mutex
 	listFailing map[string]bool // target key -> last listing failed (guarded by mu)
 	// listings holds the listing in progress for each target key (guarded
@@ -246,9 +264,18 @@ func defaultListingDeadline(interval time.Duration) time.Duration {
 	return deadline
 }
 
+// SetConversionPlanSource sets the source of a legacy broker's conversion
+// plan snapshot, called once per heartbeat; a nil result omits the field.
+// It has no effect in flat mode. Call it before Start.
+func (s *HeartbeatService) SetConversionPlanSource(fn func() *api.ConversionPlanPresentation) {
+	s.conversionPlan = fn
+}
+
 // SetVersion sets the broker version reported in heartbeats.
 func (s *HeartbeatService) SetVersion(version string) {
+	s.mu.Lock()
 	s.version = version
+	s.mu.Unlock()
 }
 
 // Start begins sending heartbeats in the background.
@@ -432,10 +459,14 @@ func (s *HeartbeatService) buildHeartbeat(ctx context.Context) *hubclient.Broker
 
 	s.mu.Lock()
 	defaultRuntime := s.defaultRuntime
+	brokerVersion := s.version
 	s.mu.Unlock()
 
 	heartbeat := &hubclient.BrokerHeartbeat{
 		Status: status,
+		// The build token refreshes the stored broker version on the Hub
+		// (ptone/scion#5972).
+		Version: brokerVersion,
 		// Design §3.4 Amendment A2.2(b): report capabilities on every heartbeat so the hub's
 		// `scion reincarnate` gate is never stuck on a stale join-time
 		// snapshot for an already-registered broker. The same static set is
@@ -456,6 +487,15 @@ func (s *HeartbeatService) buildHeartbeat(ctx context.Context) *hubclient.Broker
 			v := *name
 			heartbeat.DefaultProfile = &v
 		}
+	}
+	if s.flat && s.presentation != nil && s.nextPresentationSeq != nil {
+		heartbeat.RuntimeTargetPresentation = s.presentation
+		heartbeat.PresentationTargetID = s.presentationTargetID
+		heartbeat.PresentationEpoch = s.presentationEpoch
+		heartbeat.PresentationSeq = s.nextPresentationSeq()
+	}
+	if !s.flat && s.conversionPlan != nil {
+		heartbeat.ConversionPlanPresentation = s.conversionPlan()
 	}
 
 	// Starts in flight are read BEFORE the agents are listed: a start that
@@ -818,6 +858,13 @@ func (s *HeartbeatService) gatherProjectAgents(ctx context.Context, startsBefore
 			ExitReason:      ag.ExitReason,
 			RuntimeTarget:   agentTargets[heartbeatAgentKey(ag)],
 			RunID:           ag.RunID,
+			// The resolved agent config, for a create the Hub kept after
+			// an unknown dispatch outcome (ptone/scion#4987).
+			Template:            ag.Template,
+			HarnessConfig:       ag.HarnessConfig,
+			HarnessConfigSource: ag.HarnessConfigSource,
+			Image:               ag.Image,
+			Runtime:             ag.Runtime,
 		}
 		// The other entries go with the first reported entry of the key.
 		if more := otherEntries[heartbeatAgentKey(ag)]; len(more) > 0 {

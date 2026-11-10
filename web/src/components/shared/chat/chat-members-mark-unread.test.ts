@@ -210,4 +210,24 @@ describe('members sidebar — context menu gating', () => {
     const item = el.shadowRoot.querySelector('.context-menu-item');
     expect(item?.textContent?.trim()).toBe('Mark unread');
   });
+
+  it('the member menu is a named menu, focused on open; Escape closes and restores the opener', async () => {
+    const el = createMembers();
+    document.body.appendChild(el);
+    await el.updateComplete;
+    const b = document.createElement('button');
+    document.body.appendChild(b);
+    b.focus();
+    el.openMemberMenu(AGENT.id, { x: 10, y: 10 });
+    await el.updateComplete;
+    const menu = el.shadowRoot.querySelector('[role="menu"]') as HTMLElement;
+    expect(menu.getAttribute('aria-label')).toMatch(/^(Actions for |Member actions)/);
+    const item = menu.querySelector('[role="menuitem"]');
+    expect(item?.textContent?.trim()).toBe('Mark unread');
+    expect(el.shadowRoot.activeElement).toBe(item);
+    menu.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    await el.updateComplete;
+    expect(el.contextMenuTarget).toBeNull();
+    expect(document.activeElement).toBe(b);
+  });
 });

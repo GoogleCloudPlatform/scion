@@ -14,6 +14,7 @@
 
 import { chromium, webkit, type BrowserType, type Browser } from 'playwright';
 import * as fs from 'node:fs';
+import { devSignInURL } from '../harness/auth.js';
 
 const BASE_URL = process.env.E2E_BASE_URL || 'http://127.0.0.1:4520';
 const DEV_TOKEN =
@@ -76,8 +77,8 @@ async function testBrowser(browserType: BrowserType, label: string): Promise<boo
     const context = await browser.newContext({ baseURL: BASE_URL });
     const page = await context.newPage();
 
-    // Navigate to trigger dev-auth session
-    await page.goto('/', { waitUntil: 'domcontentloaded' });
+    // Sign in as the dev admin from a dev sign-in link
+    await page.goto(await devSignInURL(BASE_URL, DEV_TOKEN), { waitUntil: 'domcontentloaded' });
 
     // --- Test 1: List export via direct navigation ---
     console.log(`  Test 1: List export download event...`);

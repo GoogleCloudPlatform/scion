@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"maps"
 	"net/http"
@@ -30,6 +31,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs/provisioner"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -194,6 +197,9 @@ func (s *Server) buildAppliedConfig(req CreateAgentRequest, creatorName string, 
 		// (nextClearedFields); a new agent starts with none, whatever the
 		// request carries (ptone/scion#3906).
 		req.Config.ClearedFields = nil
+		// changed_fields likewise records changes made after creation
+		// (nextChangedFields; ptone/scion#3982).
+		req.Config.ChangedFields = nil
 		ac.Image = req.Config.Image
 		// Env gets its own map, never req.Config.Env itself: ac.InlineConfig
 		// below IS req.Config, so sharing the map would let every later
@@ -290,8 +296,8 @@ func deepCopyScionConfig(cfg *api.ScionConfig) *api.ScionConfig {
 // sets template ID, hash, and hub access scopes from the resolved template.
 //
 // It returns an error only when the project workspace path could not be
-// resolved because workspace storage did not respond (wraps
-// errWorkspaceContentTimeout). Creating the agent anyway would leave
+// resolved because workspace storage is unavailable (wraps
+// errWorkspaceStorageUnavailable). Creating the agent anyway would leave
 // Workspace empty, and the broker would fall back to the legacy local
 // project path: the agent would run against the wrong workspace. Every other
 // failure here stays best-effort.
@@ -320,16 +326,39 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 	// verbatim -- the broker will resolve it against its own project root.
 	// Empty-per-agent projects are skipped: Workspace stays empty and the
 	// broker provisions a private per-agent directory (design #2703 §2.1).
-	if syncsHubProjectWorkspace(project) {
+	if mountsHubProjectWorkspace(project) {
 		existingWorkspace := agent.AppliedConfig.Workspace
 		if existingWorkspace == "" {
-			workspacePath, err := s.hubManagedProjectPath(project.Slug)
-			if err != nil {
-				if errors.Is(err, errWorkspaceContentTimeout) {
+			resolved, err := s.projectWorkspaceResolved(project)
+			switch {
+			case err != nil:
+				if errors.Is(err, errWorkspaceStorageUnavailable) {
 					return err
 				}
-			} else {
-				agent.AppliedConfig.Workspace = workspacePath
+			case s.remoteBrokerWithoutProjectPath(ctx, project, agent.RuntimeBrokerID):
+				// A remote broker with no local path for the project
+				// resolves the workspace itself: on the hub's shared
+				// storage through its own mount of the share (its
+				// workspace backend places the agent on the project's
+				// leaf); for a non-git project on a local-backend hub in
+				// its own project directory, populated by the CLI
+				// workspace bootstrap (the linked non-git exception). The hub's path
+				// need not exist on that broker, so it is not recorded;
+				// later dispatches are built from this row.
+			default:
+				// On a shared backend the workspace leaf is created here
+				// if missing, through the layout authority's Provisioner
+				// (the same leaf contract the brokers use), so the
+				// co-located broker given this path finds it. The hub
+				// used to create its own copy at project create.
+				if resolved.Backend.Shared() {
+					if _, leafErr := (provisioner.Provisioner{}).EnsureLeaf(resolved); leafErr != nil {
+						s.projectsLogger().Warn("failed to create the project workspace on shared storage",
+							"project_id", project.ID, "error", leafErr)
+						return fmt.Errorf("project workspace: %w", errWorkspaceStorageUnavailable)
+					}
+				}
+				agent.AppliedConfig.Workspace = resolved.HostPath
 			}
 		}
 	}
@@ -345,7 +374,44 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 	}
 
 	s.resolveDerivedConfig(ctx, agent, project, resolvedTemplate)
+	if guard := noAuthFallbackGuardFrom(ctx); guard != nil && guard.refused {
+		return errNoAuthFallbackRefused
+	}
 	return nil
+}
+
+// errNoAuthFallbackRefused reports an agent create refused because it would
+// have fallen back to no credentials (NoAuth) while the caller forbade that
+// fallback (withNoAuthFallbackForbidden).
+var errNoAuthFallbackRefused = errors.New("the agent has no credentials for its harness, and the no-auth fallback is not allowed for this create")
+
+type noAuthFallbackGuardKey struct{}
+
+// noAuthFallbackGuard records whether a create carrying it was refused.
+type noAuthFallbackGuard struct{ refused bool }
+
+// withNoAuthFallbackForbidden marks ctx so that an agent create on it never
+// takes the auto no-auth fallback (drop-to-shell with no credentials): the
+// create fails with errNoAuthFallbackRefused before any agent is stored. It
+// is internal to the hub; no request field reaches it. The welcome project's
+// coordinator uses it.
+func withNoAuthFallbackForbidden(ctx context.Context) context.Context {
+	return context.WithValue(ctx, noAuthFallbackGuardKey{}, &noAuthFallbackGuard{})
+}
+
+func noAuthFallbackGuardFrom(ctx context.Context) *noAuthFallbackGuard {
+	g, _ := ctx.Value(noAuthFallbackGuardKey{}).(*noAuthFallbackGuard)
+	return g
+}
+
+// remoteBrokerWithoutProjectPath reports whether brokerID names a remote
+// (non-embedded) runtime broker that has no local path for project.
+func (s *Server) remoteBrokerWithoutProjectPath(ctx context.Context, project *store.Project, brokerID string) bool {
+	if brokerID == "" || s.isEmbeddedBroker(brokerID) {
+		return false
+	}
+	provider, err := s.store.GetProjectProvider(ctx, project.ID, brokerID)
+	return err != nil || provider.LocalPath == ""
 }
 
 // projectCloneSource returns the URL and branch to clone a git-anchored
@@ -363,7 +429,9 @@ func projectCloneSource(project *store.Project) (cloneURL, branch string) {
 // sharedWorkspaceCloneConfig returns the clone settings for the workspace of
 // a shared-plain git project, or nil for any other project. They describe
 // the same full clone of the default branch the hub makes for the project's
-// own workspace (cloneSharedWorkspaceProject).
+// own workspace (cloneSharedWorkspaceProject), with TokenRemote set to the
+// project's recorded git remote so the git token is offered only to a clone
+// of that remote.
 //
 // They are sent to the broker separately from AppliedConfig.GitClone, which
 // stays nil for these projects: GitClone would make the broker clone into a
@@ -380,7 +448,7 @@ func sharedWorkspaceCloneConfig(project *store.Project) *api.GitCloneConfig {
 		return nil
 	}
 	fullClone := 0
-	return &api.GitCloneConfig{URL: cloneURL, Branch: branch, Depth: &fullClone}
+	return &api.GitCloneConfig{URL: cloneURL, Branch: branch, Depth: &fullClone, TokenRemote: project.GitRemote}
 }
 
 // deriveAgentConfig is create's whole config-resolution pipeline, run after
@@ -422,18 +490,26 @@ func sharedWorkspaceCloneConfig(project *store.Project) *api.GitCloneConfig {
 //     item 2), so a harness-type-only template leaves the slot to the hub
 //     default.
 //
-// It returns populateAgentConfig's error: non-nil only on a workspace storage
-// timeout (errWorkspaceContentTimeout). Callers must not create the agent then.
+// It returns populateAgentConfig's error: non-nil only when workspace
+// storage is unavailable (errWorkspaceStorageUnavailable). Callers must not create the agent then.
 func (s *Server) deriveAgentConfig(ctx context.Context, agent *store.Agent, project *store.Project, resolvedTemplate *store.Template) error {
 	// Harness-config resolution: request (already on AppliedConfig.HarnessConfig
 	// from the explicit-inputs setup) > project annotation > template default.
+	// A default that is not a harness-config name is dropped with a warning
+	// naming its tier (dropUnusableDefaultHarnessConfig), so it is never
+	// stored or dispatched. So is an explicit value replayed from an agent's
+	// recorded create inputs (reincarnate) that predates the request check.
+	dropUnusableDefaultHarnessConfig(ctx, agent, harnessConfigTierRecorded)
 	if agent.AppliedConfig.HarnessConfig == "" && project != nil && project.Annotations != nil {
 		agent.AppliedConfig.HarnessConfig = project.Annotations[projectSettingDefaultHarnessConfig]
+		dropUnusableDefaultHarnessConfig(ctx, agent, harnessConfigTierProject)
 	}
 	if agent.AppliedConfig.HarnessConfig == "" {
 		if name := templateHarnessConfigName(resolvedTemplate); name != "" {
 			agent.AppliedConfig.HarnessConfig = name
-			ctx = withTemplateDefaultHarnessConfig(ctx)
+			if !dropUnusableDefaultHarnessConfig(ctx, agent, harnessConfigTierTemplate) {
+				ctx = withTemplateDefaultHarnessConfig(ctx)
+			}
 		}
 	}
 
@@ -441,7 +517,9 @@ func (s *Server) deriveAgentConfig(ctx context.Context, agent *store.Agent, proj
 	// HarnessAuth/Model/ThinkingLevel/Profile the rungs above left empty. Its
 	// own harness-config fill is a no-op here in practice (the rung above
 	// already applied the same annotation), kept for parity with the
-	// non-harness-config fields it also fills.
+	// non-harness-config fields it also fills. It never fills a value that
+	// is not a harness-config name, so a project default the rung above
+	// dropped stays dropped.
 	// A pinned (flat) agent takes no default Runtime Broker Profile: the
 	// project active profile is dropped with a dispatch warning.
 	priorProfile := agent.AppliedConfig.Profile
@@ -485,7 +563,9 @@ func (s *Server) deriveAgentConfig(ctx context.Context, agent *store.Agent, proj
 	// running it before the template rungs above would let the hub default
 	// beat the template for HarnessConfig, Model and ThinkingLevel.
 	if applyHubAgentDefaults(agent.AppliedConfig, s.hubAgentDefaults()) {
-		ctx = withHubDefaultHarnessConfig(ctx)
+		if !dropUnusableDefaultHarnessConfig(ctx, agent, harnessConfigTierHub) {
+			ctx = withHubDefaultHarnessConfig(ctx)
+		}
 	}
 
 	return s.populateAgentConfig(ctx, agent, project, resolvedTemplate)
@@ -641,7 +721,11 @@ func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, p
 	hcFromTemplateDefault := hcName != "" && !hcFromProjectAnnotation && !hcFromHubDefault &&
 		templateDefaultHarnessConfigFromContext(ctx)
 	if hcName == "" && resolvedTemplate != nil {
-		hcName = templateHarnessConfigName(resolvedTemplate)
+		// A template default that is not a harness-config name was dropped
+		// by deriveAgentConfig; it is not looked up here either.
+		if name := templateHarnessConfigName(resolvedTemplate); harnessConfigNameAllowed(name) {
+			hcName = name
+		}
 		hcFromTemplateDefault = hcName != ""
 	}
 	// resolvedHC is the hub harness config resolved below, if any; the
@@ -677,7 +761,13 @@ func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, p
 				hc.Config != nil &&
 				hc.Config.NoAuthBehavior == "drop-to-shell" {
 				hasCreds, err := s.hasRequiredAuthCredentials(ctx, agent, hc.Harness, hc.Config.AuthMeta)
-				if err != nil {
+				if guard := noAuthFallbackGuardFrom(ctx); guard != nil && (err != nil || !hasCreds) {
+					// The caller forbade the fallback: refuse the create
+					// instead of starting the agent with no credentials.
+					guard.refused = true
+					s.agentLifecycleLog.Info("Auto no-auth fallback refused by the caller: no credentials found",
+						"agent_id", agent.ID, "harness", hc.Harness)
+				} else if err != nil {
 					s.agentLifecycleLog.Error("Failed to check auth credentials for fallback", "agent_id", agent.ID, "error", err)
 				} else if !hasCreds {
 					agent.AppliedConfig.NoAuth = true
@@ -782,6 +872,19 @@ func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, p
 			agent.AppliedConfig.ProjectPreStartHookID = hook.ID
 			agent.AppliedConfig.ProjectPreStartHookScript = hook.Script
 		}
+	}
+
+	// Record the resolved harness type for agent lists and events, which
+	// derive the harness vendor from it without a harness-config lookup.
+	s.stampAgentHarness(ctx, agent, resolvedHC)
+
+	// Record the model size alias before it is resolved below. Every
+	// precedence layer (request > project > template > hub) has already
+	// written AppliedConfig.Model by now, so this is the alias of whichever
+	// layer supplied the model. An explicit model ID or no model records
+	// no size.
+	if size := config.ModelSizeAlias(agent.AppliedConfig.Model); size != "" {
+		agent.AppliedConfig.ModelSize = size
 	}
 
 	// Resolve model size aliases (e.g. "extra-large" → "fable") so that
@@ -1141,19 +1244,24 @@ const (
 )
 
 // classifyExistingAgent mirrors handleExistingAgent's decision tree
-// read-only.
+// read-only. Both read the agent's effective resting phase
+// (store.EffectiveRestingPhase, ptone/scion#4669), never its stored phase:
+// an error row that remembers the phase a failed asynchronous start began
+// from takes the branch that phase would take. The CLI's mirror of this
+// tree (cmd/common.go) must follow the same rule.
 func classifyExistingAgent(a *store.Agent, req CreateAgentRequest) existingAgentBranch {
+	rest := store.EffectiveRestingPhase(a)
 	switch {
-	case !req.ProvisionOnly && a.Phase == string(state.PhaseSuspended):
+	case !req.ProvisionOnly && rest == string(state.PhaseSuspended):
 		return existingBranchStart
-	case !req.ProvisionOnly && (a.Phase == string(state.PhaseRunning) || a.Phase == string(state.PhaseStopped) || a.Phase == string(state.PhaseError) || a.Phase == string(state.PhaseHalted)):
-		if inPlace, _ := resumeInPlaceDecision(a.Phase, req.Resume, req.ForceResume); inPlace {
+	case !req.ProvisionOnly && (rest == string(state.PhaseRunning) || rest == string(state.PhaseStopped) || rest == string(state.PhaseError) || rest == string(state.PhaseHalted)):
+		if inPlace, _ := resumeInPlaceDecision(rest, req.Resume, req.ForceResume); inPlace {
 			return existingBranchStart
 		}
 		return existingBranchNone
-	case req.GatherEnv && a.Phase == string(state.PhaseProvisioning):
+	case req.GatherEnv && rest == string(state.PhaseProvisioning):
 		return existingBranchRecreate
-	case !req.ProvisionOnly && (a.Phase == string(state.PhaseCreated) || a.Phase == string(state.PhaseProvisioning)):
+	case !req.ProvisionOnly && (rest == string(state.PhaseCreated) || rest == string(state.PhaseProvisioning)):
 		return existingBranchStart
 	}
 	return existingBranchNone
@@ -1343,11 +1451,22 @@ func (s *Server) handleExistingAgent(
 		return res
 	}
 
+	// rest is the phase the branches below are chosen by: the effective
+	// resting phase (store.EffectiveRestingPhase, ptone/scion#4669), which
+	// for an error row that remembers the phase a failed asynchronous start
+	// began from is that phase. It is never written to existingAgent.Phase,
+	// which the whole-row post-start writes would persist. storedPhase is
+	// the stored phase, for the post-start "did the broker set a phase"
+	// checks.
+	rest := store.EffectiveRestingPhase(existingAgent)
+	storedPhase := existingAgent.Phase
+
 	s.agentLifecycleLog.Info("handleExistingAgent: found existing agent",
 		"slug", existingAgent.Slug,
 		"existing_agent_id", existingAgent.ID,
 		"existing_owner_id", existingAgent.OwnerID,
 		"existing_phase", existingAgent.Phase,
+		"resting_phase", rest,
 		"caller_id", createdBy,
 	)
 	cleanupMode := req.CleanupMode
@@ -1356,7 +1475,7 @@ func (s *Server) handleExistingAgent(
 	}
 
 	// Branch 1: Suspended agents are restarted in-place (not deleted), preserving harness state.
-	if !req.ProvisionOnly && existingAgent.Phase == string(state.PhaseSuspended) {
+	if !req.ProvisionOnly && rest == string(state.PhaseSuspended) {
 		if existingAgent.RuntimeBrokerID == "" && runtimeBrokerID != "" {
 			existingAgent.RuntimeBrokerID = runtimeBrokerID
 		}
@@ -1392,7 +1511,7 @@ func (s *Server) handleExistingAgent(
 		extendWriteDeadlineForSyncDispatch(ctx, w, s.config.WriteTimeout)
 		// This branch only runs for suspended agents, so resume the harness
 		// session (Claude --continue) rather than starting fresh.
-		resume := existingAgent.Phase == string(state.PhaseSuspended)
+		resume := rest == string(state.PhaseSuspended)
 		// The post-start write runs inside the start claim, before it is
 		// released, so it never overwrites a newer start's status.
 		var afterErr error // a post-start write error, answered after the start
@@ -1404,7 +1523,7 @@ func (s *Server) handleExistingAgent(
 				answered = true
 				return nil
 			}
-			if existingAgent.Phase == string(state.PhaseSuspended) {
+			if existingAgent.Phase == string(state.PhaseSuspended) || existingAgent.Phase == storedPhase {
 				existingAgent.Phase = string(state.PhaseRunning)
 			}
 			// Clear any exit reason/code left from the prior generation —
@@ -1428,7 +1547,11 @@ func (s *Server) handleExistingAgent(
 		// reserves the broker capacity and marks the agent starting for the
 		// dispatch (ptone/scion#1963, ptone/scion#2014; rolled back if the
 		// start fails) and runs afterStart while the claim is held.
-		if err := s.startAgentCore(ctx, existingAgent, StartOpts{Kind: store.StartClaimUser, Task: req.Task, Resume: resume, AfterStart: afterStart, SyncDispatchBound: true}); answered || err != nil {
+		// launchAccepted: the start was accepted as an asynchronous launch
+		// (ptone/scion#4669); afterStart did not run.
+		var launchAccepted bool
+		if err := s.startAgentCore(ctx, existingAgent, StartOpts{Kind: store.StartClaimUser, Task: req.Task, Resume: resume, AfterStart: afterStart, SyncDispatchBound: true,
+			AcceptAsyncLaunch: req.AcceptAsyncLaunch, OnLaunchAccepted: func(context.Context, *store.Agent) { launchAccepted = true }}); answered || err != nil {
 			if answered {
 				return existingAgentErrored
 			}
@@ -1455,6 +1578,8 @@ func (s *Server) handleExistingAgent(
 				// 412 already written (design #2703 D3).
 			case relayDispatchRefusal(w, err):
 				// Required-skill resolution failure relayed with the broker's status.
+			case s.relayProjectPathRefusal(ctx, w, existingAgent, err):
+				// The broker's project path is not initialized (ptone/scion#6647).
 			case relayBrokerRefusal(w, err):
 				// Broker refusal relayed with the broker's status.
 			case relayIdentityMappingError(w, err):
@@ -1463,6 +1588,19 @@ func (s *Server) handleExistingAgent(
 				RuntimeError(w, "Failed to resume suspended agent: "+err.Error())
 			}
 			return existingAgentErrored
+		}
+
+		if launchAccepted {
+			// A delete that won during the send answers as for a
+			// synchronous start; the delete ends the launch.
+			if s.existingAgentDeleteWonBeforeAnswer(ctx, w, existingAgent.ID, nil) {
+				return existingAgentErrored
+			}
+			if req.Notify {
+				s.createNotifySubscription(ctx, existingAgent.ID, existingAgent.ProjectID, notifySubscriberType, notifySubscriberID, createdBy)
+			}
+			s.writeExistingAgentLaunchAccepted(ctx, w, existingAgent, project)
+			return existingAgentStarted
 		}
 
 		if s.existingAgentDeleteWonBeforeAnswer(ctx, w, existingAgent.ID, afterErr) {
@@ -1484,12 +1622,12 @@ func (s *Server) handleExistingAgent(
 	// Branch 2: Agent is running/stopped/error/halted.
 	// Resume=true for stopped or halted agents restarts in-place; otherwise reject as duplicate.
 	if !req.ProvisionOnly &&
-		(existingAgent.Phase == string(state.PhaseRunning) ||
-			existingAgent.Phase == string(state.PhaseStopped) ||
-			existingAgent.Phase == string(state.PhaseError) ||
-			existingAgent.Phase == string(state.PhaseHalted)) {
+		(rest == string(state.PhaseRunning) ||
+			rest == string(state.PhaseStopped) ||
+			rest == string(state.PhaseError) ||
+			rest == string(state.PhaseHalted)) {
 
-		resumeInPlace, forcedRecovery := resumeInPlaceDecision(existingAgent.Phase, req.Resume, req.ForceResume)
+		resumeInPlace, forcedRecovery := resumeInPlaceDecision(rest, req.Resume, req.ForceResume)
 		if resumeInPlace {
 			if existingAgent.RuntimeBrokerID == "" && runtimeBrokerID != "" {
 				existingAgent.RuntimeBrokerID = runtimeBrokerID
@@ -1569,7 +1707,11 @@ func (s *Server) handleExistingAgent(
 			// reserves the broker capacity and marks the agent starting for the
 			// dispatch (ptone/scion#1963, ptone/scion#2014; rolled back if the
 			// start fails) and runs afterStart while the claim is held.
-			if err := s.startAgentCore(ctx, existingAgent, StartOpts{Kind: store.StartClaimUser, Task: req.Task, Resume: forcedRecovery, AfterStart: afterStart, SyncDispatchBound: true}); answered || err != nil {
+			// launchAccepted: the start was accepted as an asynchronous launch
+			// (ptone/scion#4669); afterStart did not run.
+			var launchAccepted bool
+			if err := s.startAgentCore(ctx, existingAgent, StartOpts{Kind: store.StartClaimUser, Task: req.Task, Resume: forcedRecovery, AfterStart: afterStart, SyncDispatchBound: true,
+				AcceptAsyncLaunch: req.AcceptAsyncLaunch, OnLaunchAccepted: func(context.Context, *store.Agent) { launchAccepted = true }}); answered || err != nil {
 				if answered {
 					return existingAgentErrored
 				}
@@ -1596,6 +1738,8 @@ func (s *Server) handleExistingAgent(
 					// 412 already written (design #2703 D3).
 				case relayDispatchRefusal(w, err):
 					// Required-skill resolution failure relayed with the broker's status.
+				case s.relayProjectPathRefusal(ctx, w, existingAgent, err):
+					// The broker's project path is not initialized (ptone/scion#6647).
 				case relayBrokerRefusal(w, err):
 					// Broker refusal relayed with the broker's status.
 				case relayIdentityMappingError(w, err):
@@ -1604,6 +1748,19 @@ func (s *Server) handleExistingAgent(
 					RuntimeError(w, "Failed to resume stopped agent: "+err.Error())
 				}
 				return existingAgentErrored
+			}
+
+			if launchAccepted {
+				// A delete that won during the send answers as for a
+				// synchronous start; the delete ends the launch.
+				if s.existingAgentDeleteWonBeforeAnswer(ctx, w, existingAgent.ID, nil) {
+					return existingAgentErrored
+				}
+				if req.Notify {
+					s.createNotifySubscription(ctx, existingAgent.ID, existingAgent.ProjectID, notifySubscriberType, notifySubscriberID, createdBy)
+				}
+				s.writeExistingAgentLaunchAccepted(ctx, w, existingAgent, project)
+				return existingAgentStarted
 			}
 
 			if s.existingAgentDeleteWonBeforeAnswer(ctx, w, existingAgent.ID, afterErr) {
@@ -1626,7 +1783,7 @@ func (s *Server) handleExistingAgent(
 	}
 
 	// Branch 3: Env-gather re-provisioning — provisioning + GatherEnv requested.
-	if req.GatherEnv && existingAgent.Phase == string(state.PhaseProvisioning) {
+	if req.GatherEnv && rest == string(state.PhaseProvisioning) {
 		// Flat placement pre-check on the agent being replaced, before its
 		// stop intent: the recreate deletes it on its Runtime Broker.
 		if _, err := s.pinnedPlacementBroker(ctx, existingAgent); err != nil {
@@ -1696,7 +1853,7 @@ func (s *Server) handleExistingAgent(
 		// failed delete, or a deleting row whose lease lapsed, does not hold
 		// the row, so it is removed as before.
 		actor := auditActorFromContext(ctx)
-		n, err := s.store.FinalizeAgentDeletion(ctx, existingAgent.ID, createRowCompensable(), store.DeletionFinalizeHard, store.DeletionFields{},
+		n, err := s.store.FinalizeAgentDeletion(lifecycleCreateRollback(ctx, "env_gather_recreate"), existingAgent.ID, createRowCompensable(), store.DeletionFinalizeHard, store.DeletionFields{},
 			createRowHeldCheck(func(tx store.Store) error {
 				return s.hardDeleteAgentTx(ctx, tx, existingAgent, actor)
 			}))
@@ -1725,8 +1882,8 @@ func (s *Server) handleExistingAgent(
 
 	// Branch 4: Restart — agent was provisioned/created and needs to be started.
 	if !req.ProvisionOnly &&
-		(existingAgent.Phase == string(state.PhaseCreated) ||
-			existingAgent.Phase == string(state.PhaseProvisioning)) {
+		(rest == string(state.PhaseCreated) ||
+			rest == string(state.PhaseProvisioning)) {
 
 		// Recover RuntimeBrokerID from the freshly-resolved value if the stored one is empty.
 		if existingAgent.RuntimeBrokerID == "" && runtimeBrokerID != "" {
@@ -1786,7 +1943,8 @@ func (s *Server) handleExistingAgent(
 			}
 			// If the broker didn't set a running phase, default to running.
 			if existingAgent.Phase == string(state.PhaseCreated) ||
-				existingAgent.Phase == string(state.PhaseProvisioning) {
+				existingAgent.Phase == string(state.PhaseProvisioning) ||
+				existingAgent.Phase == storedPhase {
 				existingAgent.Phase = string(state.PhaseRunning)
 			}
 			// Clear any exit reason/code left from the prior generation — see
@@ -1803,7 +1961,11 @@ func (s *Server) handleExistingAgent(
 		// The start runs under a start claim, which records run intent running,
 		// reserves the broker capacity (rolled back if the start fails) and
 		// runs afterStart while the claim is held.
-		if err := s.startAgentCore(ctx, existingAgent, StartOpts{Kind: store.StartClaimUser, Task: req.Task, Resume: false, AfterStart: afterStart, SyncDispatchBound: true}); answered || err != nil {
+		// launchAccepted: the start was accepted as an asynchronous launch
+		// (ptone/scion#4669); afterStart did not run.
+		var launchAccepted bool
+		if err := s.startAgentCore(ctx, existingAgent, StartOpts{Kind: store.StartClaimUser, Task: req.Task, Resume: false, AfterStart: afterStart, SyncDispatchBound: true,
+			AcceptAsyncLaunch: req.AcceptAsyncLaunch, OnLaunchAccepted: func(context.Context, *store.Agent) { launchAccepted = true }}); answered || err != nil {
 			if answered {
 				return existingAgentErrored
 			}
@@ -1830,6 +1992,8 @@ func (s *Server) handleExistingAgent(
 				// 412 already written (design #2703 D3).
 			case relayDispatchRefusal(w, err):
 				// Required-skill resolution failure relayed with the broker's status.
+			case s.relayProjectPathRefusal(ctx, w, existingAgent, err):
+				// The broker's project path is not initialized (ptone/scion#6647).
 			case relayBrokerRefusal(w, err):
 				// Broker refusal relayed with the broker's status.
 			case relayIdentityMappingError(w, err):
@@ -1838,6 +2002,19 @@ func (s *Server) handleExistingAgent(
 				RuntimeError(w, "Failed to start agent: "+err.Error())
 			}
 			return existingAgentErrored
+		}
+
+		if launchAccepted {
+			// A delete that won during the send answers as for a
+			// synchronous start; the delete ends the launch.
+			if s.existingAgentDeleteWonBeforeAnswer(ctx, w, existingAgent.ID, nil) {
+				return existingAgentErrored
+			}
+			if req.Notify {
+				s.createNotifySubscription(ctx, existingAgent.ID, existingAgent.ProjectID, notifySubscriberType, notifySubscriberID, createdBy)
+			}
+			s.writeExistingAgentLaunchAccepted(ctx, w, existingAgent, project)
+			return existingAgentStarted
 		}
 
 		if s.existingAgentDeleteWonBeforeAnswer(ctx, w, existingAgent.ID, afterErr) {
@@ -1878,7 +2055,8 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 		return "", err
 	}
 
-	// Get available (online) brokers for fallback logic
+	// Get available brokers (online provider rows whose broker is present)
+	// for fallback logic
 	availableBrokers, err := s.getAvailableBrokersForProject(ctx, project.ID)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
@@ -1930,7 +2108,7 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 		// broker record cannot be read (rec == nil), let it through, as
 		// brokerReachable does.
 		acceptProvider := func(brokerID string, rec *store.RuntimeBroker) (string, error) {
-			if rec != nil && !s.brokerRecordReachable(rec) {
+			if rec != nil && !s.brokerRecordReachable(ctx, rec) {
 				// The broker exists but is offline: refuse at resolution,
 				// before any agent row is created (ptone/scion#2715).
 				slog.Warn("Requested broker is offline during agent creation",
@@ -2046,7 +2224,7 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 
 			// Do not link (or dispatch to) a broker that exists but is
 			// offline: 503 before anything is written (ptone/scion#2715).
-			if !s.brokerRecordReachable(broker) {
+			if !s.brokerRecordReachable(ctx, broker) {
 				slog.Warn("Requested broker is offline during agent creation",
 					"requestedBrokerID", requestedBrokerID, "brokerID", broker.ID,
 					"status", broker.Status, "project_id", project.ID)
@@ -2137,13 +2315,15 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 	}
 
 	// Case 3: No default and no explicit broker - auto-select only when there is
-	// exactly one provider and its broker is online and dispatchable.
+	// exactly one provider and its broker is present (brokerPresence) and
+	// dispatchable.
 	if len(allProviders) == 1 {
 		broker, brokerErr := s.store.GetRuntimeBroker(ctx, allProviders[0].BrokerID)
-		if brokerErr == nil && broker.Status == store.BrokerStatusOnline && s.canUseBrokerForProject(ctx, broker, project) {
+		present := brokerErr == nil && s.brokerPresence(ctx, broker).Connected
+		if present && s.canUseBrokerForProject(ctx, broker, project) {
 			return allProviders[0].BrokerID, nil
 		}
-		if brokerErr == nil && broker.Status == store.BrokerStatusOnline {
+		if present {
 			NoRuntimeBroker(w, "No runtime brokers available for this project that you have permission to use", usableBrokers())
 		} else {
 			NoRuntimeBroker(w, "This project's only runtime broker is offline", usableBrokers())
@@ -2367,7 +2547,9 @@ func (s *Server) brokerProviderHasOwnerConsent(ctx context.Context, broker *stor
 	return s.authzService.IsSystemAdmin(ctx, provider.LinkedBy)
 }
 
-// getAvailableBrokersForProject returns online runtime brokers that are providers to the project.
+// getAvailableBrokersForProject returns the runtime brokers that are online
+// providers to the project and are present (brokerPresence, design v2.21.50
+// §3.4). The provider row must still be online.
 func (s *Server) getAvailableBrokersForProject(ctx context.Context, projectID string) ([]store.RuntimeBroker, error) {
 	// Get providers for this project
 	providers, err := s.store.GetProjectProviders(ctx, projectID)
@@ -2375,7 +2557,7 @@ func (s *Server) getAvailableBrokersForProject(ctx context.Context, projectID st
 		return nil, err
 	}
 
-	// Filter to online brokers and fetch their full details
+	// Filter to online provider rows whose broker is present
 	var availableBrokers []store.RuntimeBroker
 	for _, provider := range providers {
 		if provider.Status == store.BrokerStatusOnline {
@@ -2383,7 +2565,7 @@ func (s *Server) getAvailableBrokersForProject(ctx context.Context, projectID st
 			if err != nil {
 				continue // Skip brokers we can't fetch
 			}
-			if broker.Status == store.BrokerStatusOnline {
+			if s.brokerPresence(ctx, broker).Connected {
 				availableBrokers = append(availableBrokers, *broker)
 			}
 		}
@@ -2474,6 +2656,9 @@ func agentHasGCPIdentityAssigned(agent *store.Agent) bool {
 // SkippedWhenGCPServiceAccountAssigned are treated as satisfied when the
 // agent's project has at least one verified GCP service account.
 func (s *Server) hasRequiredAuthCredentials(ctx context.Context, agent *store.Agent, harnessType string, authMeta *config.HarnessAuthMetadata) (bool, error) {
+	// One owner material chain verdict for the whole probe: every hasAnyKey
+	// call below decides the agent's chain on it.
+	ctx = withOwnerChainMemo(ctx)
 	// When authMeta defines auth types and no explicit type was selected,
 	// check ALL config-defined auth types and return true if ANY is fully
 	// satisfiable. This prevents the compiled default (api-key) from
@@ -2632,7 +2817,37 @@ func (s *Server) projectHasVerifiedGCPSA(ctx context.Context, projectID string) 
 // agent's env, or in the hub's env/secret stores at user, project, or hub scope.
 // For progeny agents (those with ancestry len > 1), it also checks for
 // allowProgeny secrets and env vars inherited through the ancestry chain.
+//
+// A project- or hub-scope record counts only if it would be delivered to the
+// agent at start: once the agent's own record exists, each such record is
+// authorized under the delivery credential (Decide *.deliver, no value
+// read; deliverySelector.probe). Before that (the create-time probe)
+// there is no target to authorize against and the record counts by
+// existence, as the start still authorizes every item before delivery.
+// An owner's user-scope row not shared with progeny counts only when the
+// owner material chain rule would deliver it (start_owner_material_chain.go).
+// An owner's secret shared with progeny, and an ancestor's progeny secret,
+// count only when start delivers them too (ownerChainCheck.allowsSecretRow
+// and sharedChainWithheld).
+// A hub-scope secret counts only if secret.HubSecretDeliverable admits it,
+// at either time, since no other hub-scope secret is ever delivered.
 func (s *Server) hasAnyKey(ctx context.Context, agent *store.Agent, keys []string) (bool, error) {
+	var sel *deliverySelector
+	selReady := false
+	probe := func(kind MaterialKind, record materialRecordKind, id, key, scope, scopeID string) (bool, error) {
+		if !selReady {
+			var err error
+			sel, err = s.newProbeDeliverySelector(ctx, agent)
+			if err != nil {
+				return false, err
+			}
+			selReady = true
+		}
+		return sel.probe(ctx, kind, record, id, key, scope, scopeID)
+	}
+	// An owner's user row the owner material chain rule withholds at start
+	// does not count as present (decided without a report).
+	ownerRows := newOwnerChainCheck(s.authzService, agent)
 	for _, key := range keys {
 		if agent.AppliedConfig != nil && agent.AppliedConfig.Env != nil {
 			if _, ok := agent.AppliedConfig.Env[key]; ok {
@@ -2644,47 +2859,56 @@ func (s *Server) hasAnyKey(ctx context.Context, agent *store.Agent, keys []strin
 			if err != nil && !errors.Is(err, store.ErrNotFound) {
 				return false, err
 			}
-			if ev != nil {
+			if ev != nil && ownerRows.allowsRow(ctx, ev.AllowProgeny, ownerRowScope(ev.ScopeID, agent.OwnerID)) {
 				return true, nil
 			}
 			sec, err := s.store.GetSecret(ctx, key, "user", agent.OwnerID)
 			if err != nil && !errors.Is(err, store.ErrNotFound) {
 				return false, err
 			}
-			if sec != nil {
+			if sec != nil && ownerRows.allowsSecretRow(ctx, sec.AllowProgeny, ownerRowScope(sec.ScopeID, agent.OwnerID)) {
 				return true, nil
 			}
 		}
-		if agent.ProjectID != "" {
-			ev, err := s.store.GetEnvVar(ctx, key, "project", agent.ProjectID)
+		for _, sc := range []struct{ scope, scopeID string }{
+			{store.ScopeProject, agent.ProjectID},
+			{store.ScopeHub, s.hubID},
+		} {
+			if sc.scopeID == "" {
+				continue
+			}
+			ev, err := s.store.GetEnvVar(ctx, key, sc.scope, sc.scopeID)
 			if err != nil && !errors.Is(err, store.ErrNotFound) {
 				return false, err
 			}
 			if ev != nil {
-				return true, nil
+				ok, err := probe(envVarDeliveryKind(*ev), materialRecordEnvVar, ev.ID, ev.Key, sc.scope, sc.scopeID)
+				if err != nil {
+					return false, err
+				}
+				if ok {
+					return true, nil
+				}
 			}
-			sec, err := s.store.GetSecret(ctx, key, "project", agent.ProjectID)
+			sec, err := s.store.GetSecret(ctx, key, sc.scope, sc.scopeID)
 			if err != nil && !errors.Is(err, store.ErrNotFound) {
 				return false, err
+			}
+			if sec != nil && sc.scope == store.ScopeHub {
+				meta := secretMetaFromStore(sec)
+				meta.Scope = store.ScopeHub
+				if !secret.HubSecretDeliverable(*meta) {
+					sec = nil
+				}
 			}
 			if sec != nil {
-				return true, nil
-			}
-		}
-		if s.hubID != "" {
-			ev, err := s.store.GetEnvVar(ctx, key, store.ScopeHub, s.hubID)
-			if err != nil && !errors.Is(err, store.ErrNotFound) {
-				return false, err
-			}
-			if ev != nil {
-				return true, nil
-			}
-			sec, err := s.store.GetSecret(ctx, key, store.ScopeHub, s.hubID)
-			if err != nil && !errors.Is(err, store.ErrNotFound) {
-				return false, err
-			}
-			if sec != nil {
-				return true, nil
+				ok, err := probe(MaterialKindSecret, materialRecordSecret, sec.ID, sec.Key, sc.scope, sc.scopeID)
+				if err != nil {
+					return false, err
+				}
+				if ok {
+					return true, nil
+				}
 			}
 		}
 	}
@@ -2699,13 +2923,18 @@ func (s *Server) hasAnyKey(ctx context.Context, agent *store.Agent, keys []strin
 			keySet[k] = struct{}{}
 		}
 
-		progenySecrets, err := s.store.ListProgenySecrets(ctx, agent.Ancestry)
-		if err != nil {
-			return false, err
-		}
-		for _, ps := range progenySecrets {
-			if _, ok := keySet[ps.Key]; ok {
-				return true, nil
+		// Start refuses every progeny secret to an agent whose chain is
+		// not recorded or cannot be evaluated (the runtime chain verdict;
+		// sharedChainWithheld), so none of them counts as present then.
+		if !ownerRows.sharedChainWithheld(ctx) {
+			progenySecrets, err := s.store.ListProgenySecrets(ctx, agent.Ancestry)
+			if err != nil {
+				return false, err
+			}
+			for _, ps := range progenySecrets {
+				if _, ok := keySet[ps.Key]; ok {
+					return true, nil
+				}
 			}
 		}
 

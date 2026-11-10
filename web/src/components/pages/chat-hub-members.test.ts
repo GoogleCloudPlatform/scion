@@ -2463,3 +2463,56 @@ describe('hub members: request counts per trigger', () => {
     }
   });
 });
+
+describe('hub members: deactivated users', () => {
+  function statusPage(
+    users: Array<{ id: string; status?: string }>,
+    nextCursor?: string
+  ): Response {
+    const rows = users.map((u) => ({ ...u, displayName: u.id }));
+    return new Response(JSON.stringify({ users: rows, ...(nextCursor ? { nextCursor } : {}) }), {
+      status: 200,
+    });
+  }
+
+  it('the recent page hides a suspended user and shows active, invited and status-less users', async () => {
+    serveUsers(() =>
+      statusPage([
+        { id: 'u-active', status: 'active' },
+        { id: 'u-suspended', status: 'suspended' },
+        { id: 'u-invited', status: 'invited' },
+        { id: 'u-none' },
+      ])
+    );
+    const page = await mountPage();
+    try {
+      expect(ids(page.v2HumanMembers)).toEqual(['u-active', 'u-invited', 'u-none']);
+      expect(ids(page.v2Members)).not.toContain('u-suspended');
+    } finally {
+      unmount(page);
+    }
+  });
+
+  it('a suspended user found by search is hidden too', async () => {
+    serveUsers((url) =>
+      url.startsWith('/api/v1/users?search=')
+        ? statusPage([
+            { id: 'far-active', status: 'active' },
+            { id: 'far-suspended', status: 'suspended' },
+          ])
+        : statusPage([{ id: 'u1', status: 'active' }], 'u-cursor')
+    );
+    const page = await mountPage();
+    try {
+      (
+        page as ChatPage & { _handleMemberSearch(e: CustomEvent<{ query: string }>): void }
+      )._handleMemberSearch(new CustomEvent('member-search', { detail: { query: 'far' } }));
+      await vi.advanceTimersByTimeAsync(250);
+      await settle();
+
+      expect(ids(page.v2HumanMembers)).toEqual(['u1', 'far-active']);
+    } finally {
+      unmount(page);
+    }
+  });
+});

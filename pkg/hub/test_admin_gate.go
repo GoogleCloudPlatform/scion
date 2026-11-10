@@ -53,6 +53,8 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/internal/keymaterial"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -103,6 +105,8 @@ var (
 		`the test infrastructure marker class is not "test"`)
 	ErrTestAdminMarkerUnreadable = testAdminGateErr("G6", "marker_unreadable",
 		"the test infrastructure marker could not be read")
+	ErrTestAdminKeyringSigning = testAdminGateErr("G7", "keyring_signing",
+		"a keyring file (server.keyring_file) supplies deployment-wide signing keys; the test admin tier requires hub-local signing keys")
 	ErrTestAdminSharedSigningSecret = testAdminGateErr("G7", "shared_signing_secret",
 		"a shared signing secret (--session-secret / SCION_SERVER_SESSION_SECRET) is configured; the test admin tier requires hub-local signing keys")
 	ErrTestAdminPreconfiguredSigningKey = testAdminGateErr("G7", "preconfigured_signing_key",
@@ -190,6 +194,9 @@ func validateTestAdminGateConfig(cfg ServerConfig, hasStore bool) error {
 		return ErrTestAdminMarkerClassNotTest
 	case federationConfigured(&cfg.Federation):
 		return ErrTestAdminFederationConfigured
+	case managedSigning(cfg):
+		// Keyring mode refuses here, before SharedSigningSecret is read.
+		return ErrTestAdminKeyringSigning
 	case cfg.SharedSigningSecret != "":
 		return ErrTestAdminSharedSigningSecret
 	case len(cfg.UserTokenConfig.SigningKey) > 0 || len(cfg.AgentTokenConfig.SigningKey) > 0:
@@ -271,19 +278,20 @@ func (s *Server) liveTestAdminIdentityCount(ctx context.Context) (int, error) {
 }
 
 // Signing-key source labels (signingKeySource). Labels only: no key
-// material is ever recorded or returned.
+// material is ever recorded or returned. They are declared in
+// keymaterial, which the OIDC key manager shares.
 const (
-	signingKeySourceConfig        = "config"
-	signingKeySourceSharedSecret  = "shared_secret"
-	signingKeySourceSecretBackend = "secret_backend"
-	signingKeySourceStore         = "store"
-	signingKeySourceLegacyStore   = "legacy_store"
-	signingKeySourceGenerated     = "generated"
-	signingKeySourceEphemeral     = "ephemeral"
-	signingKeySourceUnresolved    = "unresolved"
+	signingKeySourceConfig        = keymaterial.SourceConfig
+	signingKeySourceSharedSecret  = keymaterial.SourceSharedSecret
+	signingKeySourceSecretBackend = keymaterial.SourceSecretBackend
+	signingKeySourceStore         = keymaterial.SourceStore
+	signingKeySourceLegacyStore   = keymaterial.SourceLegacyStore
+	signingKeySourceGenerated     = keymaterial.SourceGenerated
+	signingKeySourceEphemeral     = keymaterial.SourceEphemeral
+	signingKeySourceUnresolved    = keymaterial.SourceUnresolved
 	// signingKeySourceSharedScope is a key persisted under a fixed scope
 	// every node and hub sharing the database reads (not hub-id scoped).
-	signingKeySourceSharedScope = "shared_scope"
+	signingKeySourceSharedScope = keymaterial.SourceSharedScope
 )
 
 // webSessionKeyName names the web session cookie key class for
@@ -294,8 +302,8 @@ const webSessionKeyName = "web_session_key"
 // key ring. It uses the same predicate as conduitGrantKeySet: the ring is
 // persisted (under the fixed, not hub-id scoped "conduit" scope) exactly
 // when an encryption key exists, otherwise it is memory-only.
-func conduitGrantKeySource(encryptionKey []byte) string {
-	if _, err := newDBConduitGrantKeyStore(nil, encryptionKey); err == nil {
+func conduitGrantKeySource(c *secret.ValueCipher) string {
+	if _, err := newDBConduitGrantKeyStore(nil, c); err == nil {
 		return signingKeySourceSharedScope
 	}
 	return signingKeySourceEphemeral
@@ -348,8 +356,9 @@ type testAdminSigningKeyClass struct {
 }
 
 // testAdminSigningKeyClasses lists every hub signing-key class: user JWTs,
-// agent tokens, signed download URLs, artifact view capability URLs, list
-// cursors, conduit stream grants and the web session cookie key. The OIDC
+// agent tokens, signed download URLs, artifact view capability URLs,
+// attachment delivery capabilities, port page view links, list cursors,
+// conduit stream grants and the web session cookie key. The OIDC
 // identity-token key is added when OIDC is enabled.
 func testAdminSigningKeyClasses(oidcEnabled bool) []testAdminSigningKeyClass {
 	classes := []testAdminSigningKeyClass{
@@ -357,6 +366,8 @@ func testAdminSigningKeyClasses(oidcEnabled bool) []testAdminSigningKeyClass {
 		{Class: "agent_token", KeyName: SecretKeyAgentSigningKey},
 		{Class: "download_url", KeyName: SecretKeyDownloadSigningKey},
 		{Class: "artifact_view_url", KeyName: SecretKeyArtifactViewKey},
+		{Class: "port_view_url", KeyName: SecretKeyPortViewKey},
+		{Class: "attachment_delivery", KeyName: SecretKeyAttachmentDeliveryKey},
 		{Class: "list_cursor", KeyName: SecretKeyListCursorKey},
 		{Class: "conduit_grant", KeyName: conduitGrantKeySecretName},
 		{Class: "web_session", KeyName: webSessionKeyName},
@@ -398,18 +409,19 @@ func (s *Server) emitTestAdminGateStart() error {
 		sources[c.Class] = s.signingKeySource(c.KeyName)
 	}
 	if err := s.testAdminAudit.emit(testAdminAuditEventGateStart, map[string]any{
-		"level":               "WARN",
-		"msg":                 testAdminGateStartMessage(g.superAdmin),
-		"warning":             testModeSecretsWarning,
-		"kinds":               kinds,
-		"hub_id":              g.hubID,
-		"hub_class":           g.hubClass,
-		"marker_created_at":   markerAt,
-		"signing_key_sources": sources,
-		"federation":          "off",
-		"admin_web_sessions":  s.testAdminWeb.on,
-		"test_mode":           string(s.TestModeLevel()),
-		"preconditions":       s.testModePreconditions(),
+		"level":                     "WARN",
+		"msg":                       testAdminGateStartMessage(g.superAdmin),
+		"warning":                   testModeSecretsWarning,
+		"kinds":                     kinds,
+		"hub_id":                    g.hubID,
+		"hub_class":                 g.hubClass,
+		"marker_created_at":         markerAt,
+		"signing_key_sources":       sources,
+		"federation":                "off",
+		"admin_web_sessions":        s.testAdminWeb.on,
+		"offline_admin_delegations": s.offlineAdmin.on,
+		"test_mode":                 string(s.TestModeLevel()),
+		"preconditions":             s.testModePreconditions(),
 	}); err != nil {
 		return fmt.Errorf("test admin tier: startup banner could not be written: %w", err)
 	}

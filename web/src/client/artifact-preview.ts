@@ -108,7 +108,65 @@ export function imageSource(src: string, entryPath: string, files: ArtifactFile[
   return file ? { kind: 'file', path } : { kind: 'missing' };
 }
 
-const PLACEHOLDER_TEXT: Record<'not-fetched' | 'failed' | 'missing', string> = {
+/** What a link of an artifact's markdown points at. */
+export type LinkTarget =
+  | { kind: 'external'; href: string }
+  | { kind: 'file'; href: string }
+  | { kind: 'fragment'; id: string }
+  | { kind: 'none' };
+
+/** The version a link or image of a markdown entry resolves in. */
+export interface ArtifactLinkContext {
+  id: string;
+  seq: number;
+  entryPath: string;
+  files: ArtifactFile[];
+}
+
+/** Schemes a link may keep as written. */
+const LINK_SCHEMES = new Set(['http:', 'https:', 'mailto:']);
+
+/**
+ * Decides where a link of an artifact's markdown may point, for the
+ * preview and the review editor alike:
+ *
+ * - an http, https or mailto URL is kept (in the form the URL parser gives);
+ * - a relative link to a file of the version opens that file;
+ * - a #fragment is a target inside the document;
+ * - anything else (other schemes, protocol-relative URLs, relative links
+ *   to files the version does not have) gets no target and shows as text.
+ *
+ * The value is read as the URL parser reads it: leading and trailing C0
+ * control characters and spaces are stripped, then ASCII tabs and line
+ * breaks anywhere are dropped (other whitespace is kept), and the scheme
+ * is taken from the parsed URL.
+ */
+export function artifactLinkTarget(href: string, ctx: ArtifactLinkContext): LinkTarget {
+  // eslint-disable-next-line no-control-regex
+  const value = href.replace(/^[\u0000- ]+|[\u0000- ]+$/g, '').replace(/[\t\n\r]/g, '');
+  if (value === '') return { kind: 'none' };
+  if (value.startsWith('#')) {
+    return value.length > 1 ? { kind: 'fragment', id: value.slice(1) } : { kind: 'none' };
+  }
+  if (/^[\\/][\\/]/.test(value)) return { kind: 'none' };
+  if (/^[a-z][a-z0-9+.-]*:/i.test(value)) {
+    try {
+      const u = new URL(value);
+      if (LINK_SCHEMES.has(u.protocol)) return { kind: 'external', href: u.href };
+    } catch {
+      // Not a URL the browser would follow.
+    }
+    return { kind: 'none' };
+  }
+  const path = resolveBundlePath(ctx.entryPath, value);
+  const file =
+    path === null ? undefined : ctx.files.find((f) => !isRemoteFile(f) && f.path === path);
+  return file
+    ? { kind: 'file', href: artifactFileUrl(ctx.id, ctx.seq, file.path) }
+    : { kind: 'none' };
+}
+
+export const PLACEHOLDER_TEXT: Record<'not-fetched' | 'failed' | 'missing', string> = {
   'not-fetched': 'Image not fetched',
   failed: 'Image could not be fetched',
   missing: 'Image not in this version',
@@ -143,18 +201,13 @@ export function rewriteImages(
       : PLACEHOLDER_TEXT[where.kind];
     img.replaceWith(span);
   }
-  // A relative link to a file of the version opens that file; any other
-  // relative link, including a #fragment (links open in a new tab), would
-  // resolve against the app's own URL, so it is made plain text. Absolute
-  // links are left as the sanitizer kept them.
+  // Links follow artifactLinkTarget, the rule the review editor uses too.
+  // Links open in a new tab (the frame's base target), so a #fragment,
+  // which would resolve against the app's own URL, is made plain text.
   for (const a of Array.from(tpl.content.querySelectorAll('a[href]'))) {
-    const href = a.getAttribute('href') ?? '';
-    if (/^[a-z][a-z0-9+.-]*:/i.test(href) || href.startsWith('//')) continue;
-    const path = href.startsWith('#') ? null : resolveBundlePath(ctx.entryPath, href);
-    const file =
-      path === null ? undefined : ctx.files.find((f) => !isRemoteFile(f) && f.path === path);
-    if (file) {
-      a.setAttribute('href', artifactFileUrl(ctx.id, ctx.seq, file.path));
+    const target = artifactLinkTarget(a.getAttribute('href') ?? '', ctx);
+    if (target.kind === 'external' || target.kind === 'file') {
+      a.setAttribute('href', target.href);
     } else {
       a.removeAttribute('href');
     }

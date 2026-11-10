@@ -26,11 +26,11 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"golang.org/x/sys/unix"
 )
 
 // nfsWorktreeSelection decides whether an agent on the NFS workspace backend
@@ -93,16 +93,16 @@ func isNFSWorktreeName(name string) bool {
 //
 // The directory is only created once the shared checkout has been
 // provisioned (its .scion-provisioned file exists). Before the first clone
-// the workspace directory must stay empty apart from the provisioning lock,
-// so the clone can run; the init container then creates the worktree
-// itself before the agent container starts.
+// the workspace directory must stay empty, so the clone can run; the init
+// container then creates the worktree itself before the agent container
+// starts.
 //
 // It has the same no-op and fallback cases as ensureNFSWorkspaceLeaf (not
 // Kubernetes, no claim, export not mounted on the broker, or a directory
 // the broker is not allowed to create), and prepared has the same meaning.
 // An existing directory is left exactly as it is.
-func ensureNFSWorktreeLeaf(runtimeName string, resolved runtime.ResolvedWorkspace, pvClaimName, name string) (prepared bool, err error) {
-	if !isKubernetesRuntime(runtimeName) || resolved.Backend != "nfs" || pvClaimName == "" {
+func ensureNFSWorktreeLeaf(runtimeName string, resolved runtime.ResolvedWorkspace, share runtime.NFSPodShare, name string) (prepared bool, err error) {
+	if !isKubernetesRuntime(runtimeName) || resolved.Backend != "nfs" || !share.Mountable() {
 		return false, nil
 	}
 	if !isNFSWorktreeName(name) {
@@ -117,6 +117,9 @@ func ensureNFSWorktreeLeaf(runtimeName string, resolved runtime.ResolvedWorkspac
 	info, err := os.Stat(resolved.HostBase)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
+			if share.Inline() {
+				return false, inlineShareNotVisible(resolved.HostBase)
+			}
 			slog.Info("workspace_storage nfs: export not mounted on this broker; the node will create the agent's worktree directory "+
 				"when the pod starts, which requires an export that allows root to create directories (no_root_squash)",
 				"host_base", resolved.HostBase, "sub_path", leaf)
@@ -133,10 +136,13 @@ func ensureNFSWorktreeLeaf(runtimeName string, resolved runtime.ResolvedWorkspac
 	}
 
 	provisioned, err := nfsSharedCheckoutProvisioned(resolvedHostBase, rel)
+	if err != nil && isNFSLeafPermissionError(err) && share.Inline() {
+		return false, nfsInlineLeafRefusal(resolved.HostBase, leaf, err)
+	}
 	if err != nil && isNFSLeafPermissionError(err) {
 		// The broker cannot look into the state directory (for example one
 		// the node created and the init container gave to the agents' user
-		// and group) and found no legacy sentinel: leave the worktree
+		// and group): leave the worktree
 		// directory to the node, as for a directory the broker may not
 		// create.
 		slog.Warn("workspace_storage nfs: the broker could not check whether the shared checkout is provisioned, so the node will create "+
@@ -149,11 +155,17 @@ func ensureNFSWorktreeLeaf(runtimeName string, resolved runtime.ResolvedWorkspac
 	}
 	if !provisioned {
 		// First provisioning of this project: the init container
-		// clones the shared checkout and adds the worktree.
+		// clones the shared checkout and adds the worktree. This holds
+		// for an inline share too: the worktree-per-agent shape is
+		// refused on Kubernetes today (k8sSharedRepoShapeRefusal), so
+		// only the node fallbacks below change for it.
 		return true, nil
 	}
 
-	ok, err := ensureNFSLeaf(resolvedHostBase, leaf)
+	ok, err := ensureNFSLeaf(resolvedHostBase, leaf, resolvedLeafOwner(resolved))
+	if err != nil && isNFSLeafPermissionError(err) && share.Inline() {
+		return false, nfsInlineLeafRefusal(resolved.HostBase, leaf, err)
+	}
 	if err != nil && isNFSLeafPermissionError(err) {
 		slog.Warn("workspace_storage nfs: the broker could not create the agent's worktree directory, so the node will create it "+
 			"when the pod starts, which requires an export that allows root to create directories (no_root_squash)",
@@ -170,74 +182,21 @@ func ensureNFSWorktreeLeaf(runtimeName string, resolved runtime.ResolvedWorkspac
 // nfsSharedCheckoutProvisioned reports whether the project's shared
 // checkout at rel (relative to the resolved export mount hostBase) has been
 // provisioned: its sentinel is in the project's provisioning state directory
-// (<project>/provision), or, for a workspace provisioned before that
-// directory existed, in the workspace itself. Lstat is used, so a symlink
-// named like the sentinel also counts, as before.
+// (<project>/provision), the only place it is kept. Lstat is used, so a
+// symlink named like the sentinel also counts, as before.
 //
-// A permission error on either location does not end the check: the other
-// location is still checked, and the first permission error is returned
-// (wrapped, so isNFSLeafPermissionError matches it) only when the sentinel
-// is found in neither. Any other error than "does not exist" is returned
-// straight away.
+// A permission error is returned wrapped, so isNFSLeafPermissionError
+// matches it. Any other error than "does not exist" is returned too.
 func nfsSharedCheckoutProvisioned(hostBase, rel string) (bool, error) {
-	var permErr error
-	for _, dir := range []string{provision.ProjectStateDir(rel), rel} {
-		_, err := os.Lstat(filepath.Join(hostBase, dir, provision.ProvisionSentinelFile))
-		switch {
-		case err == nil:
-			return true, nil
-		case errors.Is(err, fs.ErrNotExist):
-		case isNFSLeafPermissionError(err):
-			if permErr == nil {
-				permErr = err
-			}
-		default:
-			return false, fmt.Errorf("workspace_storage nfs: check provisioning state of %q: %w", rel, err)
-		}
-	}
-	if permErr != nil {
-		return false, fmt.Errorf("workspace_storage nfs: check provisioning state of %q: %w", rel, permErr)
+	_, err := os.Lstat(filepath.Join(hostBase, provision.ProjectStateDir(rel), provision.ProvisionSentinelFile))
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, fs.ErrNotExist):
+	default:
+		return false, fmt.Errorf("workspace_storage nfs: check provisioning state of %q: %w", rel, err)
 	}
 	return false, nil
-}
-
-// nfsRemovalStateDir returns the provisioning state directory whose lock
-// RemoveNFSWorktree takes after the legacy lock in the workspace, the same
-// order as the provisioning init containers. The path is derived the same
-// way as the runtime's mount (runtime.NFSProvisionStateSubPath) and the
-// directory is created like before a pod starts (ensureNFSLeaf, no symlink
-// following).
-//
-// When the broker is not allowed to create, open or write in the directory
-// (a permission error, or no write and search access to an existing one),
-// it returns "" with a warning: the removal then takes only the legacy lock,
-// which every provisioning init container and broker takes first while
-// legacy support exists, so it still excludes them all. A symlink, a
-// regular file or any other unusable path is an error, and the worktree is
-// left in place.
-//
-// TODO(ptone/scion#2974): when the legacy lock is dropped, this fallback
-// must go: the state-directory lock is then the only lock, and a removal
-// that cannot take it must fail.
-func nfsRemovalStateDir(hostBase, rel, projectID string) (string, error) {
-	stateRel, err := runtime.NFSProvisionStateSubPath(rel, projectID)
-	if err != nil {
-		return "", fmt.Errorf("workspace_storage nfs: %w; left in place", err)
-	}
-	stateDir := filepath.Join(hostBase, stateRel)
-	_, err = ensureNFSLeaf(hostBase, stateRel)
-	if err == nil {
-		err = unix.Access(stateDir, unix.W_OK|unix.X_OK)
-	}
-	if err != nil && isNFSLeafPermissionError(err) {
-		slog.Warn("workspace_storage nfs: the broker cannot use the provisioning state directory; removing the worktree under the legacy provisioning lock only",
-			"path", stateDir, "error", err)
-		return "", nil
-	}
-	if err != nil {
-		return "", fmt.Errorf("workspace_storage nfs: prepare the provisioning state directory %q: %w; left in place", stateRel, err)
-	}
-	return stateDir, nil
 }
 
 // nfsWorktreeSubPath is the export-relative path of an agent's worktree:
@@ -278,38 +237,68 @@ var purgeRemovedWorktrees = func(base string) {
 // the runtime is not Kubernetes, the project's workspace_storage backend is
 // not nfs, or the export is not mounted here. agentName must be an agent
 // slug and projectID a valid project ID; the workspace path is checked the
-// same way as when it is created before a pod starts.
-func (m *AgentManager) nfsExportWorkspace(projectPath, projectID, agentName string) (resolvedHostBase, rel string, err error) {
+// same way as when it is created before a pod starts. owner is the share's
+// configured nfs uid and gid (resolvedLeafOwner), for checking only.
+func (m *AgentManager) nfsExportWorkspace(projectPath, projectID, agentName string) (resolvedHostBase, rel string, owner shareddirs.Owner, err error) {
 	if m.Runtime == nil || !isKubernetesRuntime(m.Runtime.Name()) {
-		return "", "", nil
+		return "", "", shareddirs.Owner{}, nil
 	}
 	return nfsExportWorkspaceOnAnyRuntime(projectPath, projectID, agentName)
+}
+
+// nfsAgentDirExportWorkspace is nfsExportWorkspace for the agent's own
+// directory on the export (removeNFSAgentWorkspace): it also applies on the
+// Cloud Run runtime, whose clone-per-agent agents mount their own
+// <subpath_root>/<projectID>/agents/<agent>/workspace (cloudrun_runtime.go
+// cloudRunAgentWorkspaceRel), and on a local container runtime for a
+// project on a shared Layout, whose agent-scoped workspaces are in the
+// agent's directory on the share too (localRuntimeAgentDirOnShare).
+// Worktrees stay Kubernetes-only (RemoveNFSWorktree keeps
+// nfsExportWorkspace).
+func (m *AgentManager) nfsAgentDirExportWorkspace(projectPath, projectID, agentName string) (resolvedHostBase, rel string, err error) {
+	if m.Runtime == nil {
+		return "", "", nil
+	}
+	rt := m.Runtime.Name()
+	if isLocalContainerRuntime(rt) {
+		projectDir, err := config.GetResolvedProjectDir(projectPath)
+		if err != nil {
+			return "", "", fmt.Errorf("workspace_storage nfs: resolve project directory: %w", err)
+		}
+		if !localRuntimeAgentDirOnShare(rt, projectDir) {
+			return "", "", nil
+		}
+	} else if !isKubernetesRuntime(rt) && !isCloudRunRuntime(rt) {
+		return "", "", nil
+	}
+	resolvedHostBase, rel, _, err = nfsExportWorkspaceOnAnyRuntime(projectPath, projectID, agentName)
+	return resolvedHostBase, rel, err
 }
 
 // nfsExportWorkspaceOnAnyRuntime is nfsExportWorkspace without the
 // Kubernetes condition: it resolves the project's workspace on the broker's
 // mount of the NFS export for any runtime.
-func nfsExportWorkspaceOnAnyRuntime(projectPath, projectID, agentName string) (resolvedHostBase, rel string, err error) {
+func nfsExportWorkspaceOnAnyRuntime(projectPath, projectID, agentName string) (resolvedHostBase, rel string, owner shareddirs.Owner, err error) {
 	if !isNFSWorktreeName(agentName) {
-		return "", "", fmt.Errorf("workspace_storage nfs: invalid agent name %q", agentName)
+		return "", "", shareddirs.Owner{}, fmt.Errorf("workspace_storage nfs: invalid agent name %q", agentName)
 	}
 	if !shareddirs.ValidProjectID(projectID) {
-		return "", "", fmt.Errorf("workspace_storage nfs: invalid project ID %q", projectID)
+		return "", "", shareddirs.Owner{}, fmt.Errorf("workspace_storage nfs: invalid project ID %q", projectID)
 	}
 	projectDir, err := config.GetResolvedProjectDir(projectPath)
 	if err != nil {
-		return "", "", fmt.Errorf("workspace_storage nfs: resolve project directory: %w", err)
+		return "", "", shareddirs.Owner{}, fmt.Errorf("workspace_storage nfs: resolve project directory: %w", err)
 	}
 	settings, _, err := config.LoadEffectiveSettings(projectDir)
 	if err != nil {
-		return "", "", fmt.Errorf("workspace_storage nfs: load settings: %w", err)
+		return "", "", shareddirs.Owner{}, fmt.Errorf("workspace_storage nfs: load settings: %w", err)
 	}
-	if settings == nil || settings.Server == nil || settings.Server.WorkspaceStorage == nil {
-		return "", "", nil
+	if settings == nil || settings.Server == nil || settings.Server.EffectiveWorkspaceStorage() == nil {
+		return "", "", shareddirs.Owner{}, nil
 	}
-	backend := nfsWorktreeBackend(settings.Server.WorkspaceStorage, store.SharingModeWorktreePerAgent)
+	backend := nfsWorktreeBackend(settings.Server.EffectiveWorkspaceStorage(), store.SharingModeWorktreePerAgent)
 	if backend.Name() != "nfs" {
-		return "", "", nil
+		return "", "", shareddirs.Owner{}, nil
 	}
 	resolved, err := backend.Resolve(runtime.ResolveInput{
 		ProjectID:   projectID,
@@ -319,28 +308,28 @@ func nfsExportWorkspaceOnAnyRuntime(projectPath, projectID, agentName string) (r
 		ProjectDir:  projectDir,
 	})
 	if err != nil {
-		return "", "", fmt.Errorf("workspace_storage nfs: resolve workspace: %w", err)
+		return "", "", shareddirs.Owner{}, fmt.Errorf("workspace_storage nfs: resolve workspace: %w", err)
 	}
 	rel = resolved.ServerRelativePath
 	if rel == "" || !filepath.IsLocal(rel) || filepath.Join(resolved.HostBase, rel) != resolved.HostPath {
-		return "", "", fmt.Errorf("workspace_storage nfs: unexpected workspace path %q under %q", rel, resolved.HostBase)
+		return "", "", shareddirs.Owner{}, fmt.Errorf("workspace_storage nfs: unexpected workspace path %q under %q", rel, resolved.HostBase)
 	}
 	info, err := os.Stat(resolved.HostBase)
 	if errors.Is(err, fs.ErrNotExist) {
 		// Export not mounted on this broker: nothing to remove from here.
-		return "", "", nil
+		return "", "", shareddirs.Owner{}, nil
 	}
 	if err != nil {
-		return "", "", fmt.Errorf("workspace_storage nfs: check export mount %q: %w", resolved.HostBase, err)
+		return "", "", shareddirs.Owner{}, fmt.Errorf("workspace_storage nfs: check export mount %q: %w", resolved.HostBase, err)
 	}
 	if !info.IsDir() {
-		return "", "", fmt.Errorf("workspace_storage nfs: check export mount %q: not a directory", resolved.HostBase)
+		return "", "", shareddirs.Owner{}, fmt.Errorf("workspace_storage nfs: check export mount %q: not a directory", resolved.HostBase)
 	}
 	resolvedHostBase, err = filepath.EvalSymlinks(resolved.HostBase)
 	if err != nil {
-		return "", "", fmt.Errorf("workspace_storage nfs: resolve export mount %q: %w", resolved.HostBase, err)
+		return "", "", shareddirs.Owner{}, fmt.Errorf("workspace_storage nfs: resolve export mount %q: %w", resolved.HostBase, err)
 	}
-	return resolvedHostBase, rel, nil
+	return resolvedHostBase, rel, resolvedLeafOwner(resolved), nil
 }
 
 // RemoveNFSWorktree removes the worktree of the agent named agentName from
@@ -363,29 +352,64 @@ func nfsExportWorkspaceOnAnyRuntime(projectPath, projectID, agentName string) (r
 // for the caller to log; the worktree is then left in place, and an agent
 // created again with the same name reuses it.
 func (m *AgentManager) RemoveNFSWorktree(ctx context.Context, projectPath, projectID, agentName string) (path string, err error) {
-	resolvedHostBase, rel, err := m.nfsExportWorkspace(projectPath, projectID, agentName)
+	d, ok := m.removeNFSWorktreeOutcome(ctx, projectPath, projectID, agentName)
+	if !ok {
+		return "", nil
+	}
+	return d.Path, d.Err
+}
+
+// removeNFSWorktreeOutcome is RemoveNFSWorktree reporting what happened to
+// the worktree: deleted, absent when there was none, failed with the
+// error (Path empty when it could not be resolved); ok is false when the
+// project's workspace is not on an NFS export this broker has mounted.
+func (m *AgentManager) removeNFSWorktreeOutcome(ctx context.Context, projectPath, projectID, agentName string) (d projectfs.Deletion, ok bool) {
+	d = projectfs.Deletion{Tree: projectfs.TreeAgentWorkspace}
+	path, existed, err := m.removeNFSWorktree(ctx, projectPath, projectID, agentName)
+	switch {
+	case err != nil:
+		d.Path, d.Outcome, d.Err = path, projectfs.OutcomeFailed, err
+	case path == "":
+		return d, false
+	case !existed:
+		d.Path, d.Outcome = path, projectfs.OutcomeAbsent
+	default:
+		d.Path, d.Outcome = path, projectfs.OutcomeDeleted
+	}
+	return d, true
+}
+
+func (m *AgentManager) removeNFSWorktree(ctx context.Context, projectPath, projectID, agentName string) (path string, existed bool, err error) {
+	resolvedHostBase, rel, owner, err := m.nfsExportWorkspace(projectPath, projectID, agentName)
 	if err != nil || resolvedHostBase == "" {
-		return "", err
+		return "", false, err
 	}
 	workspace := filepath.Join(resolvedHostBase, rel)
 	worktree := filepath.Join(resolvedHostBase, nfsWorktreeSubPath(rel, agentName))
 	if _, err := os.Lstat(worktree); errors.Is(err, fs.ErrNotExist) {
-		return worktree, nil
+		return worktree, false, nil
 	}
 	// Every component from the export down to worktrees/ must be a real
 	// directory, not a symlink.
 	if real, err := filepath.EvalSymlinks(filepath.Dir(worktree)); err != nil || real != filepath.Dir(worktree) {
-		return worktree, fmt.Errorf("workspace_storage nfs: %s is not a plain directory on the export; left in place", filepath.Dir(worktree))
+		return worktree, true, fmt.Errorf("workspace_storage nfs: %s is not a plain directory on the export; left in place", filepath.Dir(worktree))
 	}
 
-	stateDir, err := nfsRemovalStateDir(resolvedHostBase, rel, projectID)
+	// The worktree is the agent's; the project's shared checkout around it
+	// is never removed (agentFilesGuard). RemoveMountedWorktree removes
+	// the worktree by name under the checkout checked here.
+	if _, err := newAgentFilesGuard(agentName, []string{resolvedHostBase}, []string{worktree}, []string{workspace}).check(worktree); err != nil {
+		return worktree, true, fmt.Errorf("workspace_storage nfs: %w", err)
+	}
+
+	stateDir, err := nfsRemovalStateDir(resolvedHostBase, rel, projectID, owner)
 	if err != nil {
-		return worktree, err
+		return worktree, true, err
 	}
 	if err := provision.RemoveMountedWorktree(ctx, workspace, stateDir, agentName, nfsWorktreeLockWait); err != nil {
-		return worktree, err
+		return worktree, true, err
 	}
 	purgeRemovedWorktrees(workspace)
 	slog.Info("workspace_storage nfs: removed the agent's worktree", "path", worktree)
-	return worktree, nil
+	return worktree, true, nil
 }

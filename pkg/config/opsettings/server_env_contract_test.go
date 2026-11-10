@@ -81,15 +81,17 @@ var envContractConsumers = []string{consumerOpsettings, consumerSeed, consumerGl
 // objects. No single env string can set them, so they are outside the
 // contract. The test checks this list against the schema in both directions.
 var envContractStructuredKeys = map[string]bool{
-	"default_resources":                 true, // object
-	"harness_configs":                   true, // map of objects
-	"profiles":                          true, // map of objects
-	"runtimes":                          true, // map of objects
-	"server.broker.instances":           true, // list of objects
-	"server.federation.trusted_issuers": true, // list of objects (ptone/scion#3836)
+	"default_resources":                           true, // object
+	"harness_configs":                             true, // map of objects
+	"profiles":                                    true, // map of objects
+	"runtimes":                                    true, // map of objects
+	"server.broker.instances":                     true, // list of objects
+	"server.federation.trusted_issuers":           true, // list of objects (ptone/scion#3836)
+	"server.hub.conduit.peers":                    true, // list of objects
 	"server.hub.test_identities.workload_issuers": true, // list of objects (ptone/scion#4240)
 	"server.notification_channels":                true, // list of objects
 	"server.plugins.broker":                       true, // map of objects
+	"server.project_storage.nfs.shares":           true, // list of objects
 	"server.shared_dir_storage.nfs.shares":        true, // list of objects
 	"server.workspace_storage.nfs.shares":         true, // list of objects
 	"telemetry.cloud.headers":                     true, // map
@@ -308,6 +310,8 @@ var schemaEnvVarDerivationExceptions = map[string]string{
 	"server.broker.state_dir":                        envNameRuntimeBroker,
 	"server.broker.write_timeout":                    envNameRuntimeBroker,
 	"server.hub.public_url":                          "named after the GlobalConfig field hub.endpoint (ptone/scion#3905)",
+	"server.keyring_file":                            "named SCION_SERVER_KEYRING_FILE by its design (ptone/scion#1530)",
+	"server.keyring_file_allow_world_readable":       "named after server.keyring_file's design spelling (ptone/scion#1530)",
 }
 
 const envNameRuntimeBroker = "server.broker is documented under the GlobalConfig section name runtimeBroker " +
@@ -459,6 +463,7 @@ var globalConfigOutsideKoanf = map[string]string{
 	"project_defaults.default_scratchpad":     "DefaultScratchpad",
 	"quotas.enforce_broker_quotas":            "EnforceBrokerQuotas",
 	"server.native_chat":                      "NativeChat",
+	"server.project_storage":                  "ProjectStorage",
 	"server.workspace_storage":                "WorkspaceStorage",
 	"telemetry":                               "TelemetryConfig",
 }
@@ -532,7 +537,6 @@ func globalConfigLeaf(key envContractKey) (leaf func(gc interface{}) (reflect.Va
 // Reasons used in envContractNoField.
 const (
 	noFieldGlobalConfigNotModeled = "GlobalConfig has no field for this key"
-	noFieldVersioned              = "VersionedSettings has no field for this key (the schema has no node for it)"
 )
 
 // envContractNoField lists the (consumer, key) pairs a struct consumer
@@ -576,7 +580,6 @@ var envContractNoField = map[string]string{
 	"globalconfig server.shared_dir_storage.nfs.storage_class":  noFieldGlobalConfigNotModeled,
 	"globalconfig server.shared_dir_storage.nfs.subpath_root":   noFieldGlobalConfigNotModeled,
 	"globalconfig server.shared_dir_storage.nfs.uid":            noFieldGlobalConfigNotModeled,
-	"versioned server.hub.gcp_project_id":                       noFieldVersioned,
 }
 
 // consumerInScope reports whether consumer reads key at all. The versioned
@@ -852,22 +855,39 @@ const noSeedLegacyServerOutsideKoanf = "legacy mode has no file that holds a koa
 // seed a value. For these it only checks that name="" leaves the loaded
 // value unchanged. Checked in both directions.
 var envContractNoYAMLSeed = map[string]string{
-	"[legacy] GlobalConfig server.native_chat.enabled":                               noSeedLegacyServerOutsideKoanf,
-	"[legacy] GlobalConfig server.workspace_storage.backend":                         noSeedLegacyServerOutsideKoanf,
-	"[legacy] GlobalConfig server.workspace_storage.cloudrun_volume.subpath_root":    noSeedLegacyServerOutsideKoanf,
-	"[legacy] GlobalConfig server.workspace_storage.cloudrun_volume.volume_name":     noSeedLegacyServerOutsideKoanf,
-	"[legacy] GlobalConfig server.workspace_storage.gke_shared_volume.pv_claim_name": noSeedLegacyServerOutsideKoanf,
-	"[legacy] GlobalConfig server.workspace_storage.gke_shared_volume.subpath_root":  noSeedLegacyServerOutsideKoanf,
-	"[legacy] GlobalConfig server.workspace_storage.gke_shared_volume.volume_name":   noSeedLegacyServerOutsideKoanf,
-	"[legacy] GlobalConfig server.workspace_storage.nfs.auto_mount":                  noSeedLegacyServerOutsideKoanf,
-	"[legacy] GlobalConfig server.workspace_storage.nfs.gid":                         noSeedLegacyServerOutsideKoanf,
-	"[legacy] GlobalConfig server.workspace_storage.nfs.mount_options":               noSeedLegacyServerOutsideKoanf,
-	"[legacy] GlobalConfig server.workspace_storage.nfs.mount_root":                  noSeedLegacyServerOutsideKoanf,
-	"[legacy] GlobalConfig server.workspace_storage.nfs.storage_class":               noSeedLegacyServerOutsideKoanf,
-	"[legacy] GlobalConfig server.workspace_storage.nfs.subpath_root":                noSeedLegacyServerOutsideKoanf,
-	"[legacy] GlobalConfig server.workspace_storage.nfs.uid":                         noSeedLegacyServerOutsideKoanf,
-	"[settings] GlobalConfig server.hub.gcp_project_id": "the settings schema has no node for the key, " +
-		"so settings.yaml cannot hold it",
+	"[legacy] GlobalConfig server.native_chat.enabled":                                    noSeedLegacyServerOutsideKoanf,
+	"[legacy] GlobalConfig server.project_storage.backend":                                noSeedLegacyServerOutsideKoanf,
+	"[legacy] GlobalConfig server.project_storage.homes":                                  noSeedLegacyServerOutsideKoanf,
+	"[legacy] GlobalConfig server.project_storage.cloudrun_volume.subpath_root":           noSeedLegacyServerOutsideKoanf,
+	"[legacy] GlobalConfig server.project_storage.cloudrun_volume.volume_name":            noSeedLegacyServerOutsideKoanf,
+	"[legacy] GlobalConfig server.project_storage.gke_shared_volume.pv_claim_name":        noSeedLegacyServerOutsideKoanf,
+	"[legacy] GlobalConfig server.project_storage.gke_shared_volume.subpath_root":         noSeedLegacyServerOutsideKoanf,
+	"[legacy] GlobalConfig server.project_storage.gke_shared_volume.volume_name":          noSeedLegacyServerOutsideKoanf,
+	"[legacy] GlobalConfig server.project_storage.homes_options.allow_incomplete_phases":  noSeedLegacyServerOutsideKoanf,
+	"[legacy] GlobalConfig server.project_storage.homes_options.leaf":                     noSeedLegacyServerOutsideKoanf,
+	"[legacy] GlobalConfig server.project_storage.homes_options.skeleton_max_bytes":       noSeedLegacyServerOutsideKoanf,
+	"[legacy] GlobalConfig server.project_storage.homes_options.stop_grace_seconds":       noSeedLegacyServerOutsideKoanf,
+	"[legacy] GlobalConfig server.project_storage.homes_options.termination_wait_seconds": noSeedLegacyServerOutsideKoanf,
+	"[legacy] GlobalConfig server.project_storage.nfs.auto_mount":                         noSeedLegacyServerOutsideKoanf,
+	"[legacy] GlobalConfig server.project_storage.nfs.gid":                                noSeedLegacyServerOutsideKoanf,
+	"[legacy] GlobalConfig server.project_storage.nfs.mount_options":                      noSeedLegacyServerOutsideKoanf,
+	"[legacy] GlobalConfig server.project_storage.nfs.mount_root":                         noSeedLegacyServerOutsideKoanf,
+	"[legacy] GlobalConfig server.project_storage.nfs.storage_class":                      noSeedLegacyServerOutsideKoanf,
+	"[legacy] GlobalConfig server.project_storage.nfs.subpath_root":                       noSeedLegacyServerOutsideKoanf,
+	"[legacy] GlobalConfig server.project_storage.nfs.uid":                                noSeedLegacyServerOutsideKoanf,
+	"[legacy] GlobalConfig server.workspace_storage.backend":                              noSeedLegacyServerOutsideKoanf,
+	"[legacy] GlobalConfig server.workspace_storage.cloudrun_volume.subpath_root":         noSeedLegacyServerOutsideKoanf,
+	"[legacy] GlobalConfig server.workspace_storage.cloudrun_volume.volume_name":          noSeedLegacyServerOutsideKoanf,
+	"[legacy] GlobalConfig server.workspace_storage.gke_shared_volume.pv_claim_name":      noSeedLegacyServerOutsideKoanf,
+	"[legacy] GlobalConfig server.workspace_storage.gke_shared_volume.subpath_root":       noSeedLegacyServerOutsideKoanf,
+	"[legacy] GlobalConfig server.workspace_storage.gke_shared_volume.volume_name":        noSeedLegacyServerOutsideKoanf,
+	"[legacy] GlobalConfig server.workspace_storage.nfs.auto_mount":                       noSeedLegacyServerOutsideKoanf,
+	"[legacy] GlobalConfig server.workspace_storage.nfs.gid":                              noSeedLegacyServerOutsideKoanf,
+	"[legacy] GlobalConfig server.workspace_storage.nfs.mount_options":                    noSeedLegacyServerOutsideKoanf,
+	"[legacy] GlobalConfig server.workspace_storage.nfs.mount_root":                       noSeedLegacyServerOutsideKoanf,
+	"[legacy] GlobalConfig server.workspace_storage.nfs.storage_class":                    noSeedLegacyServerOutsideKoanf,
+	"[legacy] GlobalConfig server.workspace_storage.nfs.subpath_root":                     noSeedLegacyServerOutsideKoanf,
+	"[legacy] GlobalConfig server.workspace_storage.nfs.uid":                              noSeedLegacyServerOutsideKoanf,
 }
 
 // structEmptyCheck checks that name="" is treated as unset by a struct

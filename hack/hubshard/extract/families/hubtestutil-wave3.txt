@@ -1,0 +1,36 @@
+# P3 wave A, A0-5 (ptone/scion#4275): Server-free test helpers of the authz
+# family that tests on both sides of the authz / access-constraint boundary
+# use (store, permissions or ast only) move to pkg/hub/internal/hubtestutil,
+# so the future pkg/hub/authz and pkg/hub/authz/accessconstraint test
+# packages can use them. pkg/hub keeps their names through
+# zz_alias_hubtestutil_wave3_test.go.
+#
+#   extract export -dir pkg/hub -to pkg/hub/internal/hubtestutil \
+#       -alias zz_alias_hubtestutil_wave3_test.go \
+#       -family hack/hubshard/extract/families/hubtestutil-wave3.txt
+#
+# export writes only a fresh alias file, so this wave uses its own alias file.
+# Helpers that extract refuses (they use a name that stays in pkg/hub), and
+# helpers whose staying users build them with unexported composite-literal
+# keys or call unexported methods, are not listed here.
+
+# access_sqlite_helpers_test.go
+pvSeedGroupMember
+pvSeedRoleBinding
+
+# authz_sqlite_helpers_test.go
+createTestRoleDefinition
+createTestUserWithProjectRole
+addProjectMemberWithRole
+allRegistryIDs
+bearerCeiling
+boundedCeiling
+createDelegateTestProject
+createTestUserWithRole
+declReceiverName
+grantProjectAccessOnly
+recordedProv
+sameTypeRegistryPermissions
+setUserStatus
+softDeleteStoredAgent
+systemRoleUserWithPermissions

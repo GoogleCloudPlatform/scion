@@ -57,8 +57,9 @@ export interface ProjectCreateDefaults {
   defaultHarnessAuth?: string;
   defaultModel?: string;
   defaultThinkingLevel?: number | null;
-  defaultMaxTurns?: number;
-  defaultMaxModelCalls?: number;
+  /** null or absent: no project value; 0: Unlimited; n: a limit. */
+  defaultMaxTurns?: number | null;
+  defaultMaxModelCalls?: number | null;
   defaultMaxDuration?: string;
   defaultResources?: AgentResourceSpec | null;
   telemetryEnabled?: boolean | null;
@@ -83,7 +84,10 @@ export interface HubPublicDefaults {
 /** What the overlay reads: only values the page fetched. */
 export interface InheritedSources {
   /** The chosen template, as the template list returns it. */
-  template?: { agentConfig?: TemplateAgentConfig | undefined } | null | undefined;
+  template?:
+    | { agentConfig?: TemplateAgentConfig | undefined; defaultHarnessConfig?: string | undefined }
+    | null
+    | undefined;
   projectSettings?: ProjectCreateDefaults | null | undefined;
   hubSettings?: HubPublicDefaults | null | undefined;
 }
@@ -111,6 +115,10 @@ const RESOURCE_KEYS: ReadonlyArray<{
  * The order per field follows the hub's create path
  * (pkg/hub/handlers_agent_create_helpers.go, project_settings_handlers.go,
  * hub_agent_defaults.go):
+ * - harness config: project, then the template's declared
+ *   default_harness_config (never its harness type, ptone/scion#601), then
+ *   hub (ptone/scion#3914). With none of these the Runtime Broker resolves it
+ *   from its own settings, which the page cannot read, so nothing is shown.
  * - model: project, then template, then hub (the hub's SCION_MODEL). The
  *   template's model is its agentConfig snapshot's (ptone/scion#4222).
  * - thinking level, harness auth, limits, resources: project. The
@@ -130,6 +138,11 @@ const RESOURCE_KEYS: ReadonlyArray<{
  *   ignores; the broker resolves the image from settings and the harness
  *   config.
  */
+/** A count limit as hint text: 0 is "Unlimited". */
+function countLimitText(n: number): string {
+  return n === 0 ? 'Unlimited' : String(n);
+}
+
 export function resolveInheritedPlaceholders(
   sources: InheritedSources
 ): Record<string, AgentConfigPlaceholder> {
@@ -137,6 +150,15 @@ export function resolveInheritedPlaceholders(
   const tc = sources.template?.agentConfig;
   const ps = sources.projectSettings ?? {};
   const hub = sources.hubSettings ?? {};
+
+  const templateHarnessConfig = sources.template?.defaultHarnessConfig;
+  if (ps.defaultHarnessConfig) {
+    out.harnessConfig = { value: ps.defaultHarnessConfig, source: FROM_PROJECT };
+  } else if (templateHarnessConfig) {
+    out.harnessConfig = { value: templateHarnessConfig, source: FROM_TEMPLATE };
+  } else if (hub.defaultHarnessConfig) {
+    out.harnessConfig = { value: hub.defaultHarnessConfig, source: FROM_HUB };
+  }
 
   if (ps.defaultModel) out['config.model'] = { value: ps.defaultModel, source: FROM_PROJECT };
   else if (tc?.model) out['config.model'] = { value: tc.model, source: FROM_TEMPLATE };
@@ -148,12 +170,13 @@ export function resolveInheritedPlaceholders(
   if (ps.defaultHarnessAuth) {
     out['config.auth_selectedType'] = { value: ps.defaultHarnessAuth, source: FROM_PROJECT };
   }
-  if (ps.defaultMaxTurns) {
-    out['config.max_turns'] = { value: String(ps.defaultMaxTurns), source: FROM_PROJECT };
+  // A project count limit of 0 is Unlimited, not unset (ptone/scion#3925).
+  if (typeof ps.defaultMaxTurns === 'number') {
+    out['config.max_turns'] = { value: countLimitText(ps.defaultMaxTurns), source: FROM_PROJECT };
   }
-  if (ps.defaultMaxModelCalls) {
+  if (typeof ps.defaultMaxModelCalls === 'number') {
     out['config.max_model_calls'] = {
-      value: String(ps.defaultMaxModelCalls),
+      value: countLimitText(ps.defaultMaxModelCalls),
       source: FROM_PROJECT,
     };
   }

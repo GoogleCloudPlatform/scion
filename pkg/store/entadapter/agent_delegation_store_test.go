@@ -390,3 +390,61 @@ func TestMutationAuditStore_AgentDelegationColumns(t *testing.T) {
 	assert.Equal(t, "agent_delegated", d.ActorKind)
 	assert.Equal(t, "code", d.AgentDelegationCode)
 }
+
+// A grant's run key round-trips, defaults to "" when unset, and
+// ExceptIssuedRunID leaves out only the named agent's grants keyed to that
+// run: unkeyed grants and grants of other runs stay listed
+// (ptone/scion#6403).
+func TestAgentDelegationStore_IssuedRunIDAndExceptFilter(t *testing.T) {
+	s := NewCompositeStore(enttest.NewClient(t))
+	ctx := context.Background()
+	now := time.Now()
+
+	keyed := func(agentID, runID string) *store.AgentDelegationGrant {
+		g := testDelegationGrant()
+		g.AgentID = agentID
+		g.IssuedRunID = runID
+		require.NoError(t, s.CreateAgentDelegationGrant(ctx, g))
+		return g
+	}
+	agentID := uuid.NewString()
+	unkeyed := keyed(agentID, "")
+	run1 := keyed(agentID, "run-1")
+	run2 := keyed(agentID, "run-2")
+	other := keyed(uuid.NewString(), "run-2")
+
+	got, err := s.GetAgentDelegationGrant(ctx, run1.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "run-1", got.IssuedRunID)
+	got, err = s.GetAgentDelegationGrant(ctx, unkeyed.ID)
+	require.NoError(t, err)
+	assert.Empty(t, got.IssuedRunID)
+
+	ids := func(gs []*store.AgentDelegationGrant) []string {
+		out := make([]string, 0, len(gs))
+		for _, g := range gs {
+			out = append(out, g.ID)
+		}
+		return out
+	}
+	all, err := s.ListAgentDelegationGrants(ctx, store.AgentDelegationGrantFilter{AgentID: agentID})
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{unkeyed.ID, run1.ID, run2.ID}, ids(all))
+
+	except, err := s.ListAgentDelegationGrants(ctx, store.AgentDelegationGrantFilter{AgentID: agentID, ExceptIssuedRunID: "run-2"})
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{unkeyed.ID, run1.ID}, ids(except))
+	for _, g := range except {
+		assert.Equal(t, g.ID == run1.ID, g.IssuedRunID == "run-1", "the listed grants carry their run key")
+	}
+
+	n, err := s.CountActiveAgentDelegationGrants(ctx, store.AgentDelegationGrantFilter{AgentID: agentID, ExceptIssuedRunID: "run-2"}, now)
+	require.NoError(t, err)
+	assert.Equal(t, 2, n)
+
+	_, err = s.ListAgentDelegationGrants(ctx, store.AgentDelegationGrantFilter{ExceptIssuedRunID: "run-2"})
+	assert.ErrorIs(t, err, store.ErrInvalidInput, "a run key alone does not name an agent or an issuer")
+	onOther, err := s.ListAgentDelegationGrants(ctx, store.AgentDelegationGrantFilter{AgentID: other.AgentID, ExceptIssuedRunID: "run-1"})
+	require.NoError(t, err)
+	assert.Equal(t, []string{other.ID}, ids(onOther), "the run key narrows only within the named agent")
+}

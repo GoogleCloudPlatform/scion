@@ -17,8 +17,9 @@
 /**
  * The artifact Share dialog: share links (create once-shown, revoke),
  * people and projects (grants) and retention with the warning of what an
- * expiry change cuts; and its review mode (Grant review access), limited
- * to giving a user a write grant.
+ * expiry change cuts; and its retention mode (Retention and access,
+ * ptone/scion#4535 mock states S5 and S6): retention first, links with
+ * Revoke only, grants with Remove only.
  */
 
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
@@ -32,6 +33,8 @@ import {
   type ScionArtifactShareDialog,
 } from './artifact-share-dialog.js';
 import { requestUrl } from '../../client/__fixtures__/request-url.js';
+import type { AccessCapabilities } from './artifact-access-sections.js';
+import { formatInstant } from '../../utils/time.js';
 
 const ID = '00000000-0000-4000-8000-000000000001';
 const BASE = `/api/v1/artifacts/${ID}`;
@@ -92,14 +95,16 @@ interface Server {
   clamped: boolean;
   /** When set, POST /grants answers the 403 of a refused request. */
   refuseGrant?: boolean;
-  /** When set, POST /grants answers the 403 of a review grantee who cannot read the artifact. */
-  refuseSubject?: boolean;
   /** When set, POST /grants answers the 409 of an artifact at its grant limit. */
   grantsFull?: boolean;
   /** The hub's link lifetimes GET /links reports; absent like an older hub. */
   lifetimes?: { defaultTtlHours: number; maxTtlHours: number };
   /** When set, link creation waits until the test calls release(). */
   holdCreate?: boolean;
+  /** When set, POST /links answers this hub refusal. */
+  createError?: { status: number; code: string; message: string };
+  /** When set, POST /links answers with this shareUrl (a hub with a content host). */
+  shareUrl?: string;
   release?: () => void;
 }
 
@@ -131,12 +136,17 @@ function mockServer(init: Partial<Server> = {}): Server {
       if (url === `${BASE}/links` && method === 'GET')
         return json({ links: s.links, ...s.lifetimes });
       if (url === `${BASE}/links` && method === 'POST') {
+        if (s.createError) {
+          const { status, code, message } = s.createError;
+          return json({ error: { code, message } }, status);
+        }
         const l = link('l-new', (body as { ttlHours: number }).ttlHours / 24);
         const answer = (): Promise<Response> =>
           json(
             {
               link: l,
               url: '/api/v1/artifacts/shared/TOKEN123',
+              ...(s.shareUrl ? { shareUrl: s.shareUrl } : {}),
               clampedToArtifactExpiry: s.clamped,
             },
             201
@@ -164,18 +174,6 @@ function mockServer(init: Partial<Server> = {}): Server {
               },
             },
             409
-          );
-        }
-        if (s.refuseSubject) {
-          return json(
-            {
-              error: {
-                code: 'review_subject_cannot_read',
-                message:
-                  'This user cannot read this artifact. Review access is only for people who can already read it (members of its home project, or of a project it is shared with).',
-              },
-            },
-            403
           );
         }
         if (s.refuseGrant) {
@@ -214,6 +212,7 @@ function mockServer(init: Partial<Server> = {}): Server {
       if (url === '/api/v1/users/user-priya') return json({ displayName: 'Priya Shah' });
       if (url === '/api/v1/projects/proj-1') return json({ name: 'web-frontend' });
       if (url === '/api/v1/projects/proj-2') return json({ name: 'platform' });
+      if (url === '/api/v1/agents/agent-1') return json({ name: 'report-bot' });
       return json({ error: { code: 'not_found', message: 'not found' } }, 404);
     })
   );
@@ -234,7 +233,7 @@ async function settle(el: ScionArtifactShareDialog): Promise<void> {
 
 async function mount(
   a: Artifact = artifact(),
-  mode: 'share' | 'review' = 'share'
+  mode: 'share' | 'retention' = 'share'
 ): Promise<ScionArtifactShareDialog> {
   const el = document.createElement('scion-artifact-share-dialog') as ScionArtifactShareDialog;
   el.artifact = a;
@@ -420,6 +419,41 @@ describe('share dialog', () => {
     await settle(el);
     expect($(el, '.created')).toBeNull();
     expect(showsToken(el)).toBe(false);
+  });
+
+  it('shows and copies the hub shareUrl when the hub has a content host (ptone/scion#7107)', async () => {
+    const shareUrl = 'https://links.example.net/api/v1/artifacts/shared/TOKEN123';
+    mockServer({ shareUrl });
+    const writeText = vi.fn(() => Promise.resolve());
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+    const el = await mount();
+    button(el, 'Create link').click();
+    await settle(el);
+
+    const input = $(el, '.created sl-input') as HTMLElement & { value: string };
+    expect(input.value).toBe(shareUrl);
+    button(el, 'Copy').click();
+    await settle(el);
+    expect(writeText).toHaveBeenCalledWith(shareUrl);
+  });
+
+  it('keeps its own copy-failure message, without throwing, when the clipboard is unavailable (ptone/scion#7555)', async () => {
+    mockServer();
+    const original = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+    Object.defineProperty(navigator, 'clipboard', { value: undefined, configurable: true });
+    try {
+      const el = await mount();
+      button(el, 'Create link').click();
+      await settle(el);
+      button(el, 'Copy').click();
+      await settle(el);
+      expect($(el, 'sl-alert[variant="danger"]')!.textContent).toContain(
+        'Could not copy. Select the link and copy it yourself.'
+      );
+    } finally {
+      if (original) Object.defineProperty(navigator, 'clipboard', original);
+      else delete (navigator as unknown as Record<string, unknown>).clipboard;
+    }
   });
 
   it('forgets a created link when Done closes the dialog', async () => {
@@ -667,113 +701,463 @@ describe('share dialog', () => {
     await settle(el);
     expect(s.calls.find((c) => c.method === 'PATCH')!.body).toEqual({ expiresAt: null });
   });
-  describe('review mode', () => {
-    const agentOwned = (): Artifact =>
-      artifact({ ownerKind: 'agent', ownerRef: 'agent-1', title: 'Draft plan' });
+});
 
-    async function searchFor(el: ScionArtifactShareDialog, q: string): Promise<void> {
-      vi.useFakeTimers();
-      const input = $(el, '.picker sl-input') as HTMLElement & { value: string };
-      input.value = q;
-      input.dispatchEvent(new Event('sl-input'));
-      await vi.advanceTimersByTimeAsync(300);
-      vi.useRealTimers();
+describe('share dialog, retention mode (Retention and access)', () => {
+  beforeAll(async () => {
+    await import('./artifact-share-dialog.js');
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+    vi.unstubAllGlobals();
+    resetPrincipalNames();
+  });
+
+  const RESEARCH: ArtifactGrant = {
+    id: 'g-research',
+    subjectKind: 'scope',
+    subjectRef: 'proj-2',
+    permission: 'read',
+    createdAt: '2026-10-03T12:00:00Z',
+  };
+
+  it('S5: retention first, links with Revoke only, grants with Remove only (no steward clause)', async () => {
+    mockServer({ links: [link('l-1', 3), link('l-2', 60)], grants: [HOME, PRIYA, RESEARCH] });
+    const el = await mount(artifact(), 'retention');
+    expect($(el, 'sl-dialog')!.getAttribute('label')).toBe(
+      'Retention and access: “Q3 rollout plan”'
+    );
+    const headings = $$(el, 'h3').map((h) => h.textContent!.trim());
+    expect(headings).toEqual(['Retention', 'Share links', 'People and projects']);
+    expect(el.shadowRoot!.textContent).toContain(
+      'You can revoke links. Only the owner can create them.'
+    );
+    expect(el.shadowRoot!.textContent).toContain(
+      'You can remove access. Only the owner can give it.'
+    );
+    // No way to create links or give access.
+    expect($(el, '#ttl')).toBeNull();
+    expect(() => button(el, 'Create link')).toThrow();
+    expect(() => button(el, 'Add')).toThrow();
+    expect($(el, '.picker')).toBeNull();
+    // Permissions are text, never a select.
+    expect($$(el, '.grant sl-select')).toHaveLength(0);
+    expect($$(el, 'sl-button').filter((b) => b.textContent!.trim() === 'Revoke')).toHaveLength(2);
+    const grants = $$(el, '.grant');
+    expect(grants).toHaveLength(3);
+    // The home project's grant is shown but never removable.
+    expect(grants[0]!.textContent).toContain('(home project)');
+    expect(grants[0]!.textContent).toContain('Can view');
+    expect(grants[0]!.querySelector('sl-button')).toBeNull();
+    expect(grants[1]!.textContent).toContain('Can edit');
+    expect(grants[1]!.querySelector('sl-button')!.textContent!.trim()).toBe('Remove');
+    expect(grants[2]!.querySelector('sl-button')!.textContent!.trim()).toBe('Remove');
+    expect(button(el, 'Done')).toBeTruthy();
+  });
+
+  it('S5: a steward is told to create links and give access with the CLI, not that only the owner can', async () => {
+    mockServer({ links: [link('l-1', 3)], grants: [HOME, PRIYA] });
+    const el = document.createElement('scion-artifact-share-dialog') as ScionArtifactShareDialog;
+    el.artifact = artifact();
+    el.currentUserId = 'user-me';
+    el.mode = 'retention';
+    el.shareAuthority = 'project_owner';
+    document.body.appendChild(el);
+    el.open = true;
+    await settle(el);
+    const text = el.shadowRoot!.textContent!.replace(/\s+/g, ' ');
+    expect(text).toContain('You can revoke links here. Create links with scion artifact share.');
+    expect(text).toContain('You can remove access here. Give access with scion artifact grants.');
+    expect(text).not.toContain('Only the owner');
+    // Still no way to create links or give access in the dialog itself.
+    expect($(el, '#ttl')).toBeNull();
+    expect($(el, '.picker')).toBeNull();
+  });
+
+  it('S5: Revoke and Remove act at once', async () => {
+    const s = mockServer({ links: [link('l-1', 3)], grants: [HOME, PRIYA] });
+    const el = await mount(artifact(), 'retention');
+    button(el, 'Revoke').click();
+    await settle(el);
+    button(el, 'Remove').click();
+    await settle(el);
+    expect(s.calls.filter((c) => c.method === 'DELETE').map((c) => c.url)).toEqual([
+      `${BASE}/links/l-1`,
+      `${BASE}/grants/g-priya`,
+    ]);
+    expect(el.shadowRoot!.textContent).toContain('No active links.');
+    expect(el.shadowRoot!.textContent).toContain('No other people or projects have access.');
+  });
+
+  it('S5: a changed expiry warns what it cuts and saves with PATCH', async () => {
+    const s = mockServer({ links: [link('l-1', 60)], grants: [HOME, PRIYA] });
+    const el = await mount(artifact(), 'retention');
+    choose($(el, '#retention')!, '30d');
+    await settle(el);
+    expect(el.shadowRoot!.textContent).toContain('was: Never');
+    expect($(el, 'sl-alert[variant="warning"]')!.textContent).toContain(
+      '1 link will be cut short and 2 grants will be removed'
+    );
+    expect(button(el, 'Cancel')).toBeTruthy();
+    button(el, 'Save').click();
+    await settle(el);
+    const patch = s.calls.find((c) => c.method === 'PATCH')!;
+    expect(patch.url).toBe(BASE);
+    expect(typeof (patch.body as { expiresAt: string }).expiresAt).toBe('string');
+    expect(button(el, 'Done')).toBeTruthy();
+  });
+
+  it('S6: no links, only the home grant, no expiry', async () => {
+    mockServer({ links: [], grants: [HOME] });
+    const el = await mount(artifact(), 'retention');
+    expect(el.shadowRoot!.textContent).toContain('No active links.');
+    expect(el.shadowRoot!.textContent).toContain('No other people or projects have access.');
+    expect($$(el, '.grant')).toHaveLength(1);
+    const sel = $(el, '#retention') as HTMLElement & { value: string };
+    expect(sel.value).toBe('never');
+    expect(button(el, 'Done')).toBeTruthy();
+  });
+
+  it('shows the hub refusal and keeps the dialog open', async () => {
+    mockServer({ links: [], grants: [HOME, PRIYA] });
+    const el = await mount(artifact(), 'retention');
+    // A refused remove: the hub answers 403.
+    vi.mocked(fetch).mockImplementation((input) =>
+      requestUrl(input as RequestInfo).includes('/grants/')
+        ? Promise.resolve(
+            new Response(
+              JSON.stringify({ error: { code: 'forbidden', message: 'no longer allowed' } }),
+              {
+                status: 403,
+              }
+            )
+          )
+        : Promise.resolve(new Response('{}'))
+    );
+    button(el, 'Remove').click();
+    await settle(el);
+    expect($(el, 'sl-alert[variant="danger"]')!.textContent).toContain('no longer allowed');
+    expect(el.open).toBe(true);
+  });
+});
+
+describe('share dialog, manage mode (Manage access, ptone/scion#7107)', () => {
+  beforeAll(async () => {
+    await import('./artifact-share-dialog.js');
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+    resetPrincipalNames();
+  });
+
+  const caps = (c: Partial<AccessCapabilities>): AccessCapabilities => ({
+    canManage: false,
+    canShare: false,
+    shareAuthority: '',
+    ...c,
+  });
+  const MANAGER = caps({ canManage: true, canShare: true });
+  const STEWARD_OWNER = caps({ canShare: true, shareAuthority: 'project_owner' });
+  const STEWARD_DELEGATOR = caps({ canShare: true, shareAuthority: 'delegator' });
+
+  const agentOwned = (extra: Partial<Artifact> = {}): Artifact =>
+    artifact({ ownerKind: 'agent', ownerRef: 'agent-1', ...extra });
+
+  async function mountManage(
+    capabilities: AccessCapabilities | null,
+    a: Artifact = agentOwned()
+  ): Promise<ScionArtifactShareDialog> {
+    const el = document.createElement('scion-artifact-share-dialog') as ScionArtifactShareDialog;
+    el.artifact = a;
+    el.currentUserId = 'user-me';
+    el.mode = 'manage';
+    el.capabilities = capabilities;
+    document.body.appendChild(el);
+    el.open = true;
+    await settle(el);
+    return el;
+  }
+
+  async function searchFor(el: ScionArtifactShareDialog, q: string): Promise<void> {
+    vi.useFakeTimers();
+    const input = $(el, '.picker sl-input') as HTMLElement & { value: string };
+    input.value = q;
+    input.dispatchEvent(new Event('sl-input'));
+    await vi.advanceTimersByTimeAsync(300);
+    vi.useRealTimers();
+    await settle(el);
+  }
+
+  const text = (el: ScionArtifactShareDialog): string =>
+    el.shadowRoot!.textContent!.replace(/\s+/g, ' ');
+  const headings = (el: ScionArtifactShareDialog): string[] =>
+    $$(el, 'h3').map((h) => h.textContent!.trim());
+  const accessGets = (s: Server): string[] =>
+    s.calls
+      .filter(
+        (c) => c.method === 'GET' && (c.url === `${BASE}/links` || c.url === `${BASE}/grants`)
+      )
+      .map((c) => c.url);
+
+  it('R1/R2 manager: every section editable, Can manage offered, Create link present', async () => {
+    const s = mockServer({ links: [link('l-1', 7), link('l-2', 2)], grants: [HOME, PRIYA] });
+    const el = await mountManage(MANAGER, artifact());
+    expect($(el, 'sl-dialog')!.getAttribute('label')).toBe('Manage access: “Q3 rollout plan”');
+    expect(headings(el)).toEqual(['People and access', 'Link sharing', 'Retention']);
+    expect($(el, '.authority')).toBeNull();
+    expect(button(el, 'Create link')).toBeTruthy();
+    expect($(el, '#ttl')).not.toBeNull();
+    // The full people section: the add row offers Can manage.
+    const addSelect = $(el, '.row sl-select[aria-label="Permission"]')!;
+    expect(optionValues(addSelect)).toContain('admin');
+    expect($$(el, '.grant sl-select').length).toBeGreaterThan(0);
+    expect($(el, '#retention')).not.toBeNull();
+    expect(text(el)).toContain(
+      'Anyone with the link can view the current version without signing in. Links always expire.'
+    );
+    expect(text(el)).toContain('2 active links; the latest expires');
+    expect(accessGets(s).sort()).toEqual([`${BASE}/grants`, `${BASE}/links`]);
+    expect(button(el, 'Done')).toBeTruthy();
+  });
+
+  it('R3 steward (project owner): the clause note, review add row, grant list with Remove, Create link', async () => {
+    mockServer({ links: [link('l-1', 7)], grants: [HOME, PRIYA] });
+    const el = await mountManage(STEWARD_OWNER);
+    expect(headings(el)).toEqual(['People and access', 'Link sharing', 'Retention']);
+    expect($(el, '.authority')!.textContent!.replace(/\s+/g, ' ').trim()).toBe(
+      "You can manage access because you are an owner of web-frontend, the home project of this agent's artifact. You cannot give Can manage or move it."
+    );
+    expect(text(el)).toContain(
+      "You can give review access here and remove anyone's access. To give Can view or Can edit, use scion artifact grants for now."
+    );
+    // Review add row: the permission is fixed to review; no permission menu.
+    expect(text(el)).toContain('Permission: Can review');
+    expect($$(el, 'sl-select[aria-label="Permission"]')).toHaveLength(0);
+    // The grant list: the home grant shown and not removable; others removable.
+    const grants = $$(el, '.grant');
+    expect(grants).toHaveLength(2);
+    expect(grants[0]!.textContent).toContain('(home project)');
+    expect(grants[0]!.querySelector('sl-button')).toBeNull();
+    expect(grants[1]!.querySelector('sl-button')!.textContent!.trim()).toBe('Remove');
+    // Links (phase 2): the lifetime picker, Create link and Revoke, with no
+    // CLI hint for links.
+    expect(button(el, 'Create link')).toBeTruthy();
+    expect($(el, '#ttl')).not.toBeNull();
+    expect(button(el, 'Revoke')).toBeTruthy();
+    expect(text(el)).not.toContain('Create links with scion artifact share');
+    expect(text(el)).not.toContain('Only the owner can create them');
+    expect(text(el)).toContain('1 active link; the latest expires');
+    // Retention editable.
+    expect($(el, '#retention')).not.toBeNull();
+  });
+
+  it('R4 steward (delegator): the delegator clause note', async () => {
+    mockServer({ grants: [HOME] });
+    const el = await mountManage(STEWARD_DELEGATOR);
+    expect($(el, '.authority')!.textContent!.replace(/\s+/g, ' ').trim()).toBe(
+      'You can manage access because you delegated to report-bot, the agent that owns this artifact. You cannot give Can manage or move it.'
+    );
+    expect(text(el)).toContain('No active links.');
+    expect(button(el, 'Create link')).toBeTruthy();
+    expect(text(el)).not.toContain('Create links with scion artifact share');
+  });
+
+  for (const [who, c] of [
+    ['R3 project owner', STEWARD_OWNER],
+    ['R4 delegator', STEWARD_DELEGATOR],
+  ] as const) {
+    it(`${who} steward creates a link: shown once, listed, and forgotten on close`, async () => {
+      const s = mockServer({ links: [link('l-1', 7)], grants: [HOME] });
+      const el = await mountManage(c);
+      choose($(el, '#ttl')!, '24');
+      button(el, 'Create link').click();
       await settle(el);
-    }
+      const posts = s.calls.filter((x) => x.method === 'POST' && x.url === `${BASE}/links`);
+      expect(posts.map((x) => x.body)).toEqual([{ ttlHours: 24 }]);
+      const input = $(el, '.created sl-input') as HTMLElement & { value: string };
+      expect(input.value).toBe(`${window.location.origin}/api/v1/artifacts/shared/TOKEN123`);
+      expect($(el, '.created .once')!.textContent!.replace(/\s+/g, ' ').trim()).toMatch(
+        /^Copy it now: the link is shown only once\. Anyone with it can view this artifact until .+ or until you revoke it\.$/
+      );
+      expect($$(el, 'tbody tr')).toHaveLength(2);
+      expect(text(el)).toContain('2 active links; the latest expires');
+      expect($(el, 'sl-alert[variant="danger"]')).toBeNull();
 
-    it('shows only the people search with the permission fixed, and reads no grants or links', async () => {
-      const s = mockServer({ cross: true, links: [link('l-1', 7)], grants: [HOME, PRIYA] });
-      const el = await mount(agentOwned(), 'review');
-      expect(s.calls.filter((c) => c.method === 'GET' && c.url.startsWith(BASE))).toEqual([]);
-      expect($(el, 'sl-dialog')!.getAttribute('label')).toBe('Grant review access');
-      const text = el.shadowRoot!.textContent!.replace(/\s+/g, ' ');
-      expect(text).toContain(
-        'Give a person who can already read “Draft plan” review access. They will be able to publish reviews of it, and nothing else.'
-      );
-      expect(text).toContain(
-        'Review access is only for people who can already read this artifact: members of its home project, or of a project it is shared with.'
-      );
-      expect(text).toContain('Permission: Can review');
-      expect(text).not.toContain('read it');
-      expect($(el, '#links-heading')).toBeNull();
-      expect($(el, '#people-heading')).toBeNull();
-      expect($(el, '#retention-heading')).toBeNull();
-      expect($$(el, 'sl-select')).toEqual([]);
-      expect($$(el, '.grant')).toEqual([]);
+      el.open = false;
+      await settle(el);
+      expect($(el, '.created')).toBeNull();
       expect(showsToken(el)).toBe(false);
-      expect(button(el, 'Add').hasAttribute('disabled')).toBe(true);
-      expect(button(el, 'Close')).not.toBeNull();
-      expect(() => button(el, 'Create link')).toThrow();
+      el.open = true;
+      await settle(el);
+      expect($(el, '.created')).toBeNull();
+      expect(showsToken(el)).toBe(false);
     });
+  }
 
-    it('grants a user review access and confirms it, offering no projects', async () => {
-      const s = mockServer({ cross: true });
-      const el = await mount(agentOwned(), 'review');
-      await searchFor(el, 're');
-      expect(s.calls.some((c) => c.url.startsWith('/api/v1/projects?search='))).toBe(false);
-      const options = $$(el, '.suggestions button');
-      expect(options.map((o) => o.textContent!.replace(/\s+/g, ' ').trim())).toEqual([
-        'Alex Reviewer alex@example.com',
-        'Priya Shah priya@example.com',
-      ]);
-      options[0].click();
-      await settle(el);
-      button(el, 'Add').click();
-      await settle(el);
-      const posts = s.calls.filter((c) => c.method === 'POST' && c.url === `${BASE}/grants`);
-      expect(posts.map((c) => c.body)).toEqual([
-        { subjectKind: 'principal', subjectRef: 'user:user-alex', permission: 'review' },
-      ]);
-      expect($$(el, '.granted').map((g) => g.textContent!.replace(/\s+/g, ' ').trim())).toEqual([
-        'Alex Reviewer can now review.',
-      ]);
-      expect(($(el, '.picker sl-input') as HTMLElement & { value: string }).value).toBe('');
-      expect(button(el, 'Add').hasAttribute('disabled')).toBe(true);
-      expect(s.calls.some((c) => c.method !== 'POST' && c.url.startsWith(`${BASE}/`))).toBe(false);
-    });
+  it('a steward’s created link is forgotten when Done closes the dialog', async () => {
+    mockServer({ grants: [HOME] });
+    const el = await mountManage(STEWARD_OWNER);
+    const closed: Event[] = [];
+    el.addEventListener('artifact-share-closed', (e) => closed.push(e));
+    button(el, 'Create link').click();
+    await settle(el);
+    expect(showsToken(el)).toBe(true);
+    button(el, 'Done').click();
+    await settle(el);
+    expect(closed).toHaveLength(1);
+    expect(showsToken(el)).toBe(false);
+  });
 
-    it('shows a refused grant inline', async () => {
-      mockServer({ refuseGrant: true });
-      const el = await mount(agentOwned(), 'review');
-      await searchFor(el, 're');
-      $$(el, '.suggestions button')[0].click();
+  it('a steward is told when the link is cut to the artifact’s expiry', async () => {
+    const expiresAt = new Date(Date.now() + 2 * DAY).toISOString();
+    mockServer({ grants: [HOME], clamped: true });
+    const el = await mountManage(STEWARD_DELEGATOR, agentOwned({ expiresAt }));
+    button(el, 'Create link').click();
+    await settle(el);
+    expect($(el, '.created .once')!.textContent!.trim()).toBe(
+      'Copy it now: the link is shown only once.'
+    );
+    expect($(el, '.clamped')!.textContent!.replace(/\s+/g, ' ').trim()).toMatch(
+      /^The link ends .+, when the artifact expires\.$/
+    );
+  });
+
+  for (const refusal of [
+    {
+      status: 400,
+      code: 'ttl_too_long',
+      message: 'the link lifetime is longer than this hub allows (at most 720 hours)',
+    },
+    {
+      status: 409,
+      code: 'too_many_links',
+      message: 'the artifact already has 50 active links; revoke one first',
+    },
+    { status: 404, code: 'not_found', message: 'artifact not found' },
+  ]) {
+    it(`a steward's refused link (${refusal.status} ${refusal.code}) shows the hub's message and no link`, async () => {
+      const s = mockServer({ links: [link('l-1', 7)], grants: [HOME], createError: refusal });
+      const el = await mountManage(STEWARD_OWNER);
+      button(el, 'Create link').click();
       await settle(el);
-      button(el, 'Add').click();
-      await settle(el);
-      expect($(el, 'sl-alert[variant="danger"]')!.textContent).toContain(
-        'You can view this artifact but not share it'
+      expect(s.calls.filter((x) => x.method === 'POST' && x.url === `${BASE}/links`)).toHaveLength(
+        1
       );
-      expect($$(el, '.granted')).toEqual([]);
+      expect($(el, 'sl-alert[variant="danger"]')!.textContent).toContain(refusal.message);
+      expect($(el, '.created')).toBeNull();
+      expect(showsToken(el)).toBe(false);
+      expect($$(el, 'tbody tr')).toHaveLength(1);
+      expect(el.open).toBe(true);
     });
+  }
 
-    it('shows the hub message when the person cannot read the artifact', async () => {
-      mockServer({ refuseSubject: true });
-      const el = await mount(agentOwned(), 'review');
-      await searchFor(el, 're');
-      $$(el, '.suggestions button')[0].click();
-      await settle(el);
-      button(el, 'Add').click();
-      await settle(el);
-      expect($(el, 'sl-alert[variant="danger"]')!.textContent).toContain(
-        'This user cannot read this artifact. Review access is only for people who can already read it'
-      );
-      expect($$(el, '.granted')).toEqual([]);
-    });
+  it('the link summary names the latest expiry of an unsorted list', async () => {
+    const links = [link('l-a', 2), link('l-b', 9), link('l-c', 5)];
+    mockServer({ links, grants: [HOME] });
+    const el = await mountManage(STEWARD_OWNER);
+    expect(text(el)).toContain(
+      `3 active links; the latest expires ${formatInstant(links[1]!.expiresAt)}.`
+    );
+  });
 
-    it('shows the grant limit inline when the artifact has too many grants', async () => {
-      const s = mockServer({ grantsFull: true });
-      const el = await mount(agentOwned(), 'review');
-      await searchFor(el, 're');
-      $$(el, '.suggestions button')[0].click();
-      await settle(el);
-      button(el, 'Add').click();
-      await settle(el);
-      expect(s.calls.filter((c) => c.method === 'POST')).toHaveLength(1);
-      expect($(el, 'sl-alert[variant="danger"]')!.textContent).toContain(
-        'the artifact already has 100 grants; remove one first'
-      );
-      expect($$(el, '.granted')).toEqual([]);
-      expect(button(el, 'Add').hasAttribute('disabled')).toBe(false);
-    });
+  it('the link summary keeps an unparsable expiry as before: a first one stays, a later one is skipped', async () => {
+    const bad: ShareLink = { ...link('l-bad', 1), expiresAt: 'not-a-time' };
+    const good = link('l-good', 9);
+    mockServer({ links: [bad, good], grants: [HOME] });
+    const first = await mountManage(STEWARD_OWNER);
+    expect(text(first)).toContain(
+      `2 active links; the latest expires ${formatInstant('not-a-time')}.`
+    );
+    document.body.innerHTML = '';
+    mockServer({ links: [good, bad], grants: [HOME] });
+    const later = await mountManage(STEWARD_OWNER);
+    expect(text(later)).toContain(
+      `2 active links; the latest expires ${formatInstant(good.expiresAt)}.`
+    );
+  });
+
+  it('the link summary replaces an empty first expiry with the next link, as before', async () => {
+    const empty: ShareLink = { ...link('l-empty', 1), expiresAt: '' };
+    const good = link('l-good', 9);
+    mockServer({ links: [empty, good], grants: [HOME] });
+    const el = await mountManage(STEWARD_OWNER);
+    expect(text(el)).toContain(
+      `2 active links; the latest expires ${formatInstant(good.expiresAt)}.`
+    );
+  });
+
+  it('a steward who gives review access sees the grant list reload with the new grant', async () => {
+    const s = mockServer({ grants: [HOME] });
+    const el = await mountManage(STEWARD_OWNER);
+    expect($$(el, '.grant')).toHaveLength(1);
+    const before = accessGets(s).filter((u) => u === `${BASE}/grants`).length;
+    s.grants = [
+      HOME,
+      {
+        id: 'g-new',
+        subjectKind: 'principal',
+        subjectRef: 'user:user-alex',
+        permission: 'review',
+        createdAt: '2026-10-08T12:00:00Z',
+      },
+    ];
+    await searchFor(el, 're');
+    expect(s.calls.some((c) => c.url.startsWith('/api/v1/projects?search='))).toBe(false);
+    $$(el, '.suggestions button')[0]!.click();
+    await settle(el);
+    button(el, 'Add').click();
+    await settle(el);
+    const posts = s.calls.filter((c) => c.method === 'POST' && c.url === `${BASE}/grants`);
+    expect(posts.map((c) => c.body)).toEqual([
+      { subjectKind: 'principal', subjectRef: 'user:user-alex', permission: 'review' },
+    ]);
+    expect(accessGets(s).filter((u) => u === `${BASE}/grants`).length).toBe(before + 1);
+    const grants = $$(el, '.grant');
+    expect(grants).toHaveLength(2);
+    expect(grants[1]!.textContent).toContain('Can review');
+    expect($$(el, '.granted')).toHaveLength(1);
+  });
+
+  it('a steward sees a refused review grant inline', async () => {
+    mockServer({ grants: [HOME], refuseGrant: true });
+    const el = await mountManage(STEWARD_OWNER);
+    await searchFor(el, 're');
+    $$(el, '.suggestions button')[0]!.click();
+    await settle(el);
+    button(el, 'Add').click();
+    await settle(el);
+    expect($(el, 'sl-alert[variant="danger"]')!.textContent).toContain(
+      'You can view this artifact but not share it'
+    );
+    expect($$(el, '.granted')).toEqual([]);
+  });
+
+  it('a steward sees the grant limit inline when the artifact has too many grants', async () => {
+    const s = mockServer({ grants: [HOME], grantsFull: true });
+    const el = await mountManage(STEWARD_OWNER);
+    await searchFor(el, 're');
+    $$(el, '.suggestions button')[0]!.click();
+    await settle(el);
+    button(el, 'Add').click();
+    await settle(el);
+    expect(s.calls.filter((c) => c.method === 'POST')).toHaveLength(1);
+    expect($(el, 'sl-alert[variant="danger"]')!.textContent).toContain(
+      'the artifact already has 100 grants; remove one first'
+    );
+    expect($$(el, '.granted')).toEqual([]);
+    expect(button(el, 'Add').hasAttribute('disabled')).toBe(false);
+  });
+
+  it('no capabilities: an empty dialog that requests nothing', async () => {
+    const s = mockServer({ links: [link('l-1', 7)] });
+    const el = await mountManage(null);
+    expect(headings(el)).toEqual([]);
+    expect($(el, '.authority')).toBeNull();
+    expect($(el, '.picker')).toBeNull();
+    expect(s.calls.filter((c) => c.url.startsWith(BASE))).toEqual([]);
   });
 });

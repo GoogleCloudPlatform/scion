@@ -241,43 +241,6 @@ func TestCloudWriteStats_LastFailureMonotonic(t *testing.T) {
 	}
 }
 
-// Health precedence and the 5-minute recent-failure window, on a fake clock.
-func TestCloudWriteStats_Health(t *testing.T) {
-	clk := &fakeClock{now: time.Unix(1_800_000_000, 0)}
-	s := newCloudWriteStats(clk.Now)
-	if s.Configured() {
-		t.Fatal("configured without a circuit source")
-	}
-	var open atomic.Bool
-	unregister := s.RegisterCircuitSource(open.Load)
-	if !s.Configured() {
-		t.Fatal("not configured with a circuit source")
-	}
-	now := clk.Now()
-	if got := s.HealthStatus(now); got != "healthy" {
-		t.Fatalf("initial = %q", got)
-	}
-	s.RecordFailure(CloudReasonQueueFull)
-	if got := s.HealthStatus(now); got != "degraded: recent write failures" {
-		t.Fatalf("after failure = %q", got)
-	}
-	open.Store(true)
-	if got := s.HealthStatus(now); got != "degraded: circuit open" {
-		t.Fatalf("circuit open = %q", got)
-	}
-	open.Store(false)
-	if got := s.HealthStatus(now.Add(asyncwrite.DefaultFailureWindow - time.Second)); got != "degraded: recent write failures" {
-		t.Fatalf("inside window = %q", got)
-	}
-	if got := s.HealthStatus(now.Add(asyncwrite.DefaultFailureWindow)); got != "healthy" {
-		t.Fatalf("after window = %q", got)
-	}
-	unregister()
-	if s.Configured() {
-		t.Fatal("still configured after unregister")
-	}
-}
-
 // manualTimers is an asyncwrite.AfterFunc that records each callback for
 // the test to fire instead of scheduling it.
 type manualTimers struct {

@@ -29,6 +29,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubprofile"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/pathcanon"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/privatefs"
 	"github.com/spf13/cobra"
 )
 
@@ -519,15 +521,23 @@ func wholeSeconds(flag string, d time.Duration) (int64, error) {
 // substitute the file between the check and the write.
 type tokenFile struct {
 	path string
+	t    *privatefs.Tree
 	f    *os.File
 }
 
-// createTokenFile creates path for writing a token: exclusively
-// (O_CREATE|O_EXCL, so an existing file and any symlink, even a dangling
-// one, are refused) with mode 0600.
+// createTokenFile creates path for writing a token: the
+// path is checked by pathcanon.ValidInputPath, its directory is opened as
+// a privatefs tree anchor (links at or above it are followed), and the
+// file is created there exclusively and private (Tree.Create: an existing
+// file and any symlink, even a dangling one, are refused; mode 0600 on
+// unix, an owner-only ACL set at creation on Windows; on a volume that
+// cannot store ACLs it fails and creates nothing).
 func createTokenFile(path string) (*tokenFile, error) {
 	if path == "" {
 		return nil, newUsageError("--out is required: the token is written only to a file")
+	}
+	if err := pathcanon.ValidInputPath(path); err != nil {
+		return nil, fmt.Errorf("refusing --out %s: %w", path, err)
 	}
 	if fi, err := os.Lstat(path); err == nil {
 		if fi.Mode()&os.ModeSymlink != 0 {
@@ -537,26 +547,33 @@ func createTokenFile(path string) (*tokenFile, error) {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("cannot use --out %s: %w", path, err)
 	}
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	tree, err := privatefs.OpenTree(filepath.Dir(path), privatefs.TreeOptions{})
 	if err != nil {
-		if errors.Is(err, os.ErrExist) {
+		return nil, fmt.Errorf("cannot create --out %s: %w", path, err)
+	}
+	f, err := tree.Create(filepath.Base(path), true, privatefs.Private)
+	if err != nil {
+		_ = tree.Close()
+		if errors.Is(err, os.ErrExist) || errors.Is(err, privatefs.ErrReparsePoint) {
 			return nil, fmt.Errorf("refusing --out %s: it already exists; name a new file", path)
 		}
 		return nil, fmt.Errorf("cannot create --out %s: %w", path, err)
 	}
-	// The umask can only narrow 0600; set it exactly anyway.
-	if err := f.Chmod(0o600); err != nil {
-		_ = f.Close()
-		_ = os.Remove(path)
-		return nil, fmt.Errorf("cannot set mode 0600 on --out %s: %w", path, err)
-	}
-	return &tokenFile{path: path, f: f}, nil
+	return &tokenFile{path: path, t: tree, f: f}, nil
 }
 
-// abandon closes and removes the file, which holds no token yet.
+// tokenFileProtection is how the token file is protected, for the output
+// line: "mode 0600" on unix, "owner-only ACL" on Windows (privatefs.Describe).
+func tokenFileProtection() string {
+	return "(" + privatefs.Describe(privatefs.Private) + ")"
+}
+
+// abandon removes the file, which holds no token yet, through its open
+// handle, and closes it.
 func (t *tokenFile) abandon() {
+	_ = t.t.RemoveOpen(t.f)
 	_ = t.f.Close()
-	_ = os.Remove(t.path)
+	_ = t.t.Close()
 }
 
 // write writes the token and a newline, and closes the file.
@@ -571,12 +588,21 @@ func (t *tokenFile) writeExact(content string) error {
 	if err == nil {
 		err = t.f.Sync()
 	}
+	if err != nil {
+		_ = t.t.RemoveOpen(t.f)
+	}
 	if cerr := t.f.Close(); err == nil {
 		err = cerr
+		if err != nil {
+			// The data may not have reached the file: remove it by name,
+			// as before (the handle is gone). Tree.Remove works relative
+			// to the pinned directory handle and refuses a reparse point,
+			// so it can only remove whatever is at that name in that
+			// directory at this moment (normally our file).
+			_ = t.t.Remove(filepath.Base(t.path))
+		}
 	}
-	if err != nil {
-		_ = os.Remove(t.path)
-	}
+	_ = t.t.Close()
 	return err
 }
 
@@ -616,7 +642,7 @@ func printTestIdentityToken(out io.Writer, verb string, resp *hubclient.TestIden
 	if id.Purpose != "" {
 		_, _ = fmt.Fprintf(out, "  Purpose:       %s\n", id.Purpose)
 	}
-	_, _ = fmt.Fprintf(out, "  Token file:    %s (mode 0600)\n", absPath)
+	_, _ = fmt.Fprintf(out, "  Token file:    %s %s\n", absPath, tokenFileProtection())
 	return nil
 }
 
@@ -751,7 +777,7 @@ func mintTestIdentityWebCode(ctx context.Context, out io.Writer, svc hubclient.T
 	_, _ = fmt.Fprintf(out, "Web-login code for test identity %s\n", opts.ID)
 	_, _ = fmt.Fprintf(out, "  Code ID:       %s\n", resp.CodeID)
 	_, _ = fmt.Fprintf(out, "  Expires:       %s (single use)\n", formatTestIdentityTime(resp.ExpiresAt))
-	_, _ = fmt.Fprintf(out, "  Code file:     %s (mode 0600)\n", absPath)
+	_, _ = fmt.Fprintf(out, "  Code file:     %s %s\n", absPath, tokenFileProtection())
 	return nil
 }
 

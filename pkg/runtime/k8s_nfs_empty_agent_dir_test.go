@@ -99,6 +99,7 @@ func TestBuildPod_NFSEmptyAgentDir_MountsAndEnv(t *testing.T) {
 func TestBuildPod_NFSEmptyAgentDir_SharedDirs(t *testing.T) {
 	cfg := nfsEmptyAgentDirConfig("epa-shared")
 	cfg.SharedDirs = []api.SharedDir{{Name: "scratchpad"}}
+	cfg.SharedDirStorage = sharedDirsOnClaim("nfs", cfg.NFSPVClaimName, "projects/proj-123", "scratchpad")
 	pod, err := newNFSTestK8sRuntime().buildPod("default", cfg)
 	require.NoError(t, err)
 	ic := pod.Spec.InitContainers[0]

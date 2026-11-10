@@ -28,6 +28,8 @@
  * must reflect the hub's startup gate, not the browser's state.
  */
 
+import { apiFetch } from './api.js';
+
 export const TEST_INFRA_STATUS_URL = '/api/v1/test-infra/status';
 
 /** Dispatched on window when the status first arrives. */
@@ -76,9 +78,9 @@ export function loadTestInfraStatus(): Promise<TestInfraStatus | null> {
       // public, but the web layer answers 401 (session_expired) for a stale
       // session cookie, and clears that cookie as it does, so one immediate
       // retry gets the status.
-      let res = await fetch(TEST_INFRA_STATUS_URL, { credentials: 'include' });
+      let res = await apiFetch(TEST_INFRA_STATUS_URL, { authErrors: 'caller' });
       if (res.status === 401) {
-        res = await fetch(TEST_INFRA_STATUS_URL, { credentials: 'include' });
+        res = await apiFetch(TEST_INFRA_STATUS_URL, { authErrors: 'caller' });
       }
       if (!res.ok) return null;
       const status = parseTestInfraStatus(await res.json());

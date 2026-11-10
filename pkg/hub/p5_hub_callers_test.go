@@ -341,29 +341,56 @@ func TestEnvGatherRecreate_RunMismatchRefusal(t *testing.T) {
 	}
 }
 
-// The delete engine follows the flipped policy too: with force, a refused
-// delete then finalizes, as for any other dispatch error under force.
-func TestAgentDelete_RunMismatchPolicyFlipped_ForceFinalizes(t *testing.T) {
+// The delete engine follows the flipped policy too, for a refusal it did
+// not answer by deleting the reported run (retryReportedRun,
+// ptone/scion#5016): a forced delete whose reported run is not a valid run
+// ID, and a plain best-effort delete whose reported run is not one of the
+// row's previous runs. The refusal then finalizes, as for any other
+// dispatch error under force or best-effort, and nothing but the
+// recorded run is sent.
+func TestAgentDelete_RunMismatchPolicyFlipped_Finalizes(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
-		phase state.Phase
-		want  policyCall
+		name    string
+		phase   state.Phase
+		query   string
+		current string
+		want    policyCall
 	}{
-		{"running agent: force, not best-effort", state.PhaseRunning, policyCall{force: true, bestEffort: false}},
-		{"created agent with no launch: force, best-effort", state.PhaseCreated, policyCall{force: true, bestEffort: true}},
+		{"running agent, force, invalid reported run", state.PhaseRunning, "?force=true", "bad,run", policyCall{force: true, bestEffort: false}},
+		{"created agent with no launch, force, invalid reported run", state.PhaseCreated, "?force=true", "bad,run", policyCall{force: true, bestEffort: true}},
+		{"created agent with no launch, plain, reported run not a previous run", state.PhaseCreated, "", "run-b", policyCall{force: false, bestEffort: true}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			policy := flipDeleteRunMismatchPolicy(t, false)
 			f := newRunMismatchFixture(t, "p5-rm-flip-"+uuid.NewString()[:8], tc.phase)
-			f.client.answer = func(runID string) error { return runMismatchEnvelope(t, runID, "run-b", true) }
-			r := f.del(t, "?force=true")
+			f.client.answer = func(runID string) error { return runMismatchEnvelope(t, runID, tc.current, true) }
+			r := f.del(t, tc.query)
 			require.Less(t, r.rec.Code, 300, r.rec.Body.String())
 			got, err := f.store.GetAgent(context.Background(), f.agent.ID)
 			require.True(t, errors.Is(err, store.ErrNotFound) || (err == nil && !got.DeletedAt.IsZero()),
 				"the row was not finalized (err %v)", err)
 			assert.Equal(t, []policyCall{tc.want}, policy.got(), "the engine passes the request's force and its best-effort")
+			assert.Equal(t, []string{"run-a"}, f.client.deleted(), "the reported run is not sent")
 		})
 	}
+}
+
+// A retried delete answered with another refusal is refused whatever the
+// policy says: there is no second retry, and the policy is not asked.
+func TestAgentDelete_RunMismatchPolicyFlipped_SecondMismatchStillRefused(t *testing.T) {
+	policy := flipDeleteRunMismatchPolicy(t, false)
+	f := newRunMismatchFixture(t, "p5-rm-flip2-"+uuid.NewString()[:8], state.PhaseRunning)
+	f.client.answer = func(runID string) error {
+		if runID == "run-a" {
+			return runMismatchEnvelope(t, runID, "run-b", true)
+		}
+		return runMismatchEnvelope(t, runID, "run-c", true)
+	}
+	r := f.del(t, "?force=true")
+	require.Equal(t, http.StatusConflict, r.rec.Code, r.rec.Body.String())
+	assert.Empty(t, policy.got(), "the policy is not asked about the retried delete's refusal")
+	assert.Equal(t, []string{"run-a", "run-b"}, f.client.deleted())
+	assert.False(t, agentGone(t, f.store, f.agent.ID))
 }
 
 // mintAfterEmptySwapStore is the dispatcher's store: when the failed start

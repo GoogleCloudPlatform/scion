@@ -101,7 +101,7 @@ func TestUpdateAgent_AllowsGeminiMaxModelCalls(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, updated.AppliedConfig)
 	require.NotNil(t, updated.AppliedConfig.InlineConfig)
-	assert.Equal(t, 3, updated.AppliedConfig.InlineConfig.MaxModelCalls)
+	assert.Equal(t, api.IntPtr(3), updated.AppliedConfig.InlineConfig.MaxModelCalls)
 }
 
 func TestUpdateAgent_AllowsMaxDurationForAllHarnesses(t *testing.T) {

@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
@@ -32,9 +33,17 @@ import (
 // in, as HubConnection.Start does, and returns it.
 func sendHealthHeartbeat(t *testing.T, srv *Server) *hubclient.BrokerHeartbeat {
 	t.Helper()
+	return sendConnectionHealthHeartbeat(t, srv, nil)
+}
+
+// sendConnectionHealthHeartbeat sends one heartbeat of hub connection hc
+// (nil: none), with its health wired in as HubConnection.Start does, and
+// returns it.
+func sendConnectionHealthHeartbeat(t *testing.T, srv *Server, hc *HubConnection) *hubclient.BrokerHeartbeat {
+	t.Helper()
 	client := &mockRuntimeBrokerService{}
 	hb := NewHeartbeatService(client, "test-host", time.Hour, nil, nil, slog.Default())
-	hb.health = srv.heartbeatHealthReport
+	hb.health = srv.heartbeatHealthReportFor(hc)
 	if err := hb.ForceHeartbeat(context.Background()); err != nil {
 		t.Fatalf("ForceHeartbeat failed: %v", err)
 	}
@@ -122,7 +131,7 @@ func TestHeartbeatHealth_NFSMounts(t *testing.T) {
 			mc := newSyncMountChecker()
 			mc.mountErr = tc.mountErr
 			srv := New(ServerConfig{Host: "127.0.0.1", NFSConfig: nfsCfg(tc.autoMount), NFSMountChecker: mc},
-				nil, &runtime.MockRuntime{NameFunc: func() string { return "docker" }})
+				nil, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
 			if !tc.pending {
 				_ = srv.nfsMountReconciler.Reconcile(context.Background())
 				close(srv.nfsStartupReconcileDone)

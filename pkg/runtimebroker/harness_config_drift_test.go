@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -101,6 +102,44 @@ func TestHarnessConfigDrift_NoWarnWhenEqual(t *testing.T) {
 	}
 }
 
+// The hash covers paths (ptone/scion#5658), so a copy whose only
+// difference is a renamed file is drift.
+func TestHarnessConfigDrift_WarnsForRenameOnlyDifference(t *testing.T) {
+	srv, logBuf, dotScion, hydrated := driftEnv(t)
+	writeLocalHC(t, dotScion, map[string]string{
+		"config.yaml":          driftHCBody,
+		"scripts/provision.py": "print('v2')\n",
+	})
+
+	srv.warnHarnessConfigDrift("agent-1", "hc", hydrated, "", "")
+
+	if !driftWarned(logBuf) {
+		t.Errorf("expected a drift WARN for a rename-only difference, got log: %s", logBuf.String())
+	}
+}
+
+// The hash covers the executable bit (ptone/scion#5658), so a copy whose
+// only difference is chmod +x on a file is drift.
+func TestHarnessConfigDrift_WarnsForChmodOnlyDifference(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("file modes carry no executable bit on Windows")
+	}
+	srv, logBuf, dotScion, hydrated := driftEnv(t)
+	local := writeLocalHC(t, dotScion, map[string]string{
+		"config.yaml":  driftHCBody,
+		"provision.py": "print('v2')\n",
+	})
+	if err := os.Chmod(filepath.Join(local, "provision.py"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	srv.warnHarnessConfigDrift("agent-1", "hc", hydrated, "", "")
+
+	if !driftWarned(logBuf) {
+		t.Errorf("expected a drift WARN for a chmod-only difference, got log: %s", logBuf.String())
+	}
+}
+
 // Line endings are normalized before hashing, as the hub does when it
 // stores a harness-config, so a CRLF copy of the same content is not drift.
 func TestHarnessConfigDrift_NoWarnForCRLFOnlyDifference(t *testing.T) {
@@ -156,7 +195,7 @@ func TestHubCompatibleContentHash_MatchesTransferHash(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := transfer.ComputeContentHash(files)
+	want := transfer.ComputeContentHashV2(files)
 	got, err := hubCompatibleContentHash(dir)
 	if err != nil {
 		t.Fatal(err)

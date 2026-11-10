@@ -17,6 +17,8 @@ package cmd
 import (
 	"context"
 	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/hubprofile"
 )
 
 // isolateJoinEnv clears the environment the join and mint commands read, so
@@ -27,6 +29,7 @@ func isolateJoinEnv(t *testing.T) {
 		envBrokerJoinToken, envBrokerID, "SCION_HUB_ENDPOINT", "SCION_HUB_URL",
 		"SCION_AUTH_TOKEN", "SCION_HUB_TOKEN", "SCION_DEV_TOKEN", "SCION_DEV_TOKEN_FILE",
 		"SCION_TRANSPORT_MODE", "SCION_TRANSPORT_AUDIENCE",
+		hubprofile.EnvHubProfile, hubprofile.EnvHubRun,
 	} {
 		t.Setenv(k, "")
 	}
@@ -34,12 +37,14 @@ func isolateJoinEnv(t *testing.T) {
 	savedBrokerID, savedHubName := brokerJoinBrokerID, brokerHubName
 	savedTokenFile, savedForce := brokerJoinTokenFile, brokerJoinForce
 	savedTTL, savedJSON := hubBrokersJoinTokenTTL, hubBrokersJoinTokenJSON
+	savedProfile, savedAs, savedRun := hubProfileFlag, hubProfileAs, hubProfileRun
 	t.Cleanup(func() {
 		projectPath, globalMode, hubEndpoint = savedProjectPath, savedGlobal, savedHubEndpoint
 		brokerJoinBrokerID, brokerHubName = savedBrokerID, savedHubName
 		brokerJoinTokenFile, brokerJoinForce = savedTokenFile, savedForce
 		brokerJoinCmd.SetIn(nil)
 		hubBrokersJoinTokenTTL, hubBrokersJoinTokenJSON = savedTTL, savedJSON
+		hubProfileFlag, hubProfileAs, hubProfileRun = savedProfile, savedAs, savedRun
 	})
 	// cobra sets a context when the command is executed; these tests call
 	// the run functions directly.
@@ -49,4 +54,7 @@ func isolateJoinEnv(t *testing.T) {
 	brokerJoinBrokerID, brokerHubName = "", ""
 	brokerJoinTokenFile, brokerJoinForce = "", false
 	hubBrokersJoinTokenTTL, hubBrokersJoinTokenJSON = 0, false
+	// No hub profile selection: with one, the mint would use the profile
+	// instead of the test hub.
+	hubProfileFlag, hubProfileAs, hubProfileRun = "", "", ""
 }

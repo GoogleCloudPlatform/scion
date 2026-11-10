@@ -50,7 +50,7 @@ var ErrMoveWorkspaceMissing = errors.New("the agent's workspace is not on this b
 // is not nfs: provisioning would then create an empty workspace and the
 // agent would lose its work.
 func (m *AgentManager) CheckNFSMoveWorkspace(projectPath, projectID, agentName, kind string) (string, error) {
-	hostBase, rel, err := nfsExportWorkspaceOnAnyRuntime(projectPath, projectID, agentName)
+	hostBase, rel, _, err := nfsExportWorkspaceOnAnyRuntime(projectPath, projectID, agentName)
 	if err != nil {
 		return "", err
 	}

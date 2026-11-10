@@ -19,17 +19,26 @@
 #            [--branch <branch>] [--insecure-health-check]
 #
 #   Default (fast): pull → build → restart → health check
-#   --full:         Also uploads config files, installs Caddy, updates systemd/Caddy
-#   --no-tls:       Skip the Caddy/TLS step, for internal deployments without
-#                   certificates (env: SKIP_TLS=true). No Caddyfile is written,
-#                   Caddy is not installed or restarted, agents use
-#                   http://<HUB_DOMAIN>:8080 (override with HUB_BASE_URL), and
-#                   the HTTPS health check is skipped; the on-VM check still runs.
-#                   gce-certs.sh is not run in this mode, so nothing creates a
-#                   DNS record: HUB_DOMAIN must resolve to the VM through your
-#                   own DNS, or set HUB_BASE_URL to an address agents can reach.
-#                   Behind an upstream TLS terminator, set HUB_BASE_URL (or
-#                   SCION_SERVER_BASE_URL in hub.env) to the https:// URL.
+#   --full:         Also uploads config files, installs Caddy, updates systemd/Caddy.
+#                   The settings.yaml it writes sets image_registry to
+#                   IMAGE_REGISTRY (default localhost/scion, see hub-config.sh);
+#                   SCION_IMAGE_REGISTRY in hub.env takes precedence. This
+#                   script does not build agent images (see hub-config.sh).
+#                   With ENABLE_GKE=true a loopback registry is refused.
+#   --no-tls:       Skip the Caddy/TLS step, for a hub behind an upstream TLS
+#                   terminator (env: SKIP_TLS=true). The base URL that takes
+#                   effect (SCION_SERVER_BASE_URL in hub.env if it sets one,
+#                   which must then agree with HUB_BASE_URL if that is set,
+#                   else HUB_BASE_URL) must be that terminator's https:// URL;
+#                   the script stops before doing anything otherwise, because
+#                   the hub refuses to start
+#                   with an http base URL on a non-loopback listener (OAuth
+#                   callbacks and session cookies would cross the network
+#                   unencrypted). No Caddyfile is written, Caddy is not
+#                   installed or restarted, and the HTTPS health check is
+#                   skipped; the on-VM check still runs. gce-certs.sh is not
+#                   run in this mode, so nothing creates a DNS record for the
+#                   terminator's name.
 #   --reset-db:     Deletes the hub database before starting (works in both modes)
 #   --branch <b>:   Checkout and build from a specific branch (default: current branch)
 #   --insecure-health-check:
@@ -126,9 +135,12 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Public base URL dispatched to agents (SCION_SERVER_BASE_URL in the unit).
+# Public base URL (SCION_SERVER_BASE_URL in the unit): the OAuth redirect
+# base and the URL dispatched to agents.
 if [[ "${SKIP_TLS}" == "true" ]]; then
-    HUB_BASE_URL="${HUB_BASE_URL:-http://${HUB_DOMAIN}:8080}"
+    # Without Caddy the hub needs the https:// URL of an upstream TLS
+    # terminator; checks the value that takes effect (hub.env included).
+    require_no_tls_https_base_url
 else
     HUB_BASE_URL="${HUB_BASE_URL:-https://${HUB_DOMAIN}}"
 fi
@@ -136,6 +148,17 @@ fi
 if [[ -z "$PROJECT_ID" ]]; then
     echo "Error: PROJECT_ID is not set and could not be determined from gcloud config."
     exit 1
+fi
+
+# IMAGE_REGISTRY (hub-config.sh) is written into settings.yaml (--full) as a
+# quoted YAML string, so it must be a plain registry path. With ENABLE_GKE=true
+# the registry that takes effect must not be a loopback address.
+if $FULL_DEPLOY; then
+    if ! registry_is_valid "${IMAGE_REGISTRY}"; then
+        echo "Error: IMAGE_REGISTRY '${IMAGE_REGISTRY}' is not a registry path (for example localhost/scion or us-docker.pkg.dev/<project>/<repo>)." >&2
+        exit 1
+    fi
+    require_gke_reachable_registry
 fi
 
 # Compute total steps based on mode
@@ -173,6 +196,9 @@ if $FULL_DEPLOY; then
     cat <<SETTINGS_EOF > "$UPLOAD_DIR/scion-settings.yaml"
 schema_version: "1"
 active_profile: ${ACTIVE_PROFILE}
+# Registry the runtime broker pulls agent images from; the Hub does not start
+# its broker without one. SCION_IMAGE_REGISTRY in hub.env takes precedence.
+image_registry: "${IMAGE_REGISTRY}"
 server:
   mode: production
 telemetry:
@@ -203,6 +229,9 @@ telemetry:
         - "session_id"
 SETTINGS_EOF
     substep "Prepared settings.yaml"
+    if registry_is_loopback "$(effective_image_registry)"; then
+        substep "Note: agent images come from $(effective_image_registry) on the VM. This script does not build them; see image-build/README.md, or set SCION_IMAGE_REGISTRY in hub.env."
+    fi
 
     # systemd service file, rendered from scion-hub.service.tmpl. Rebuild
     # from git compares the installed unit against that template, so the

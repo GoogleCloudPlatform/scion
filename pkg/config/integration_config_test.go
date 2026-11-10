@@ -80,6 +80,38 @@ func TestYAMLConfigProvider_SaveAndLoad(t *testing.T) {
 	}
 }
 
+// Save replaces the file as a whole rather than merging into it, so a key
+// deleted from the loaded map is gone after the next Save. The integration
+// config PUT relies on this for a settings key sent as null
+// (ptone/scion#3913).
+func TestYAMLConfigProvider_SaveReplacesDeletedKey(t *testing.T) {
+	p, err := NewYAMLConfigProvider(filepath.Join(t.TempDir(), "telegram.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+
+	if err := p.Save(ctx, map[string]string{"inbound_mode": "webhook", "db_path": "/var/tg.db"}); err != nil {
+		t.Fatalf("first Save() failed: %v", err)
+	}
+	cfg, err := p.Load(ctx)
+	if err != nil {
+		t.Fatalf("Load() failed: %v", err)
+	}
+	delete(cfg, "db_path")
+	if err := p.Save(ctx, cfg); err != nil {
+		t.Fatalf("second Save() failed: %v", err)
+	}
+
+	loaded, err := p.Load(ctx)
+	if err != nil {
+		t.Fatalf("Load() after delete failed: %v", err)
+	}
+	if len(loaded) != 1 || loaded["inbound_mode"] != "webhook" {
+		t.Errorf("expected only inbound_mode=webhook after the delete, got %v", loaded)
+	}
+}
+
 func TestYAMLConfigProvider_EmptyPath(t *testing.T) {
 	_, err := NewYAMLConfigProvider("")
 	if err == nil {

@@ -86,7 +86,7 @@ func TestV2_AgentRefresh_RunsAsMessageSender(t *testing.T) {
 	hub.agents["proj-1"] = []AgentInfo{{Slug: "coder"}}
 	principal := linkTestUser(t, b.store, 456, "alice@example.com")
 
-	b.handleGroupMessage(plainGroupMessage(456, "hello"))
+	b.handleGroupMessage(b.gen, plainGroupMessage(456, "hello"))
 
 	calls := hub.agentCalls()
 	require.Len(t, calls, 1)
@@ -109,8 +109,8 @@ func TestV2_AgentRefresh_EachSenderActsAsThemselves(t *testing.T) {
 	alice := linkTestUser(t, b.store, 456, "alice@example.com")
 	bob := linkTestUser(t, b.store, 789, "bob@example.com")
 
-	b.handleGroupMessage(plainGroupMessage(456, "hello"))
-	b.handleGroupMessage(plainGroupMessage(789, "hi"))
+	b.handleGroupMessage(b.gen, plainGroupMessage(456, "hello"))
+	b.handleGroupMessage(b.gen, plainGroupMessage(789, "hi"))
 
 	calls := hub.agentCalls()
 	require.Len(t, calls, 2)
@@ -125,7 +125,7 @@ func TestV2_AgentCache_PerUser_FreshListIsNotServedToAnotherUser(t *testing.T) {
 	bob := linkTestUser(t, b.store, 789, "bob@example.com")
 	saveAgentCache(t, b.store, alice, "proj-1", time.Now(), "coder")
 
-	b.handleGroupMessage(plainGroupMessage(789, "hi"))
+	b.handleGroupMessage(b.gen, plainGroupMessage(789, "hi"))
 
 	calls := hub.agentCalls()
 	require.Len(t, calls, 1, "bob fetches his own list")
@@ -139,7 +139,7 @@ func TestV2_AgentCache_PerUser_FreshListIsReusedForSameUser(t *testing.T) {
 	delivered := make(chan string, 1)
 	b.InboundHandler = func(topic string, _ *messages.StructuredMessage) { delivered <- topic }
 
-	b.handleGroupMessage(plainGroupMessage(456, "hello"))
+	b.handleGroupMessage(b.gen, plainGroupMessage(456, "hello"))
 
 	select {
 	case topic := <-delivered:
@@ -159,7 +159,7 @@ func TestV2_AgentCache_PerUser_StaleListIsNotServedToAnotherUser(t *testing.T) {
 	delivered := false
 	b.InboundHandler = func(string, *messages.StructuredMessage) { delivered = true }
 
-	b.handleGroupMessage(plainGroupMessage(789, "hi"))
+	b.handleGroupMessage(b.gen, plainGroupMessage(789, "hi"))
 
 	assert.False(t, delivered, "bob is not routed with alice's list")
 	sent := tgSrv.getSentMessages()
@@ -177,7 +177,7 @@ func TestV2_AgentCache_PerUser_DeniedUserDoesNotSeeAnothersList(t *testing.T) {
 	delivered := false
 	b.InboundHandler = func(string, *messages.StructuredMessage) { delivered = true }
 
-	b.handleGroupMessage(botMentionMessage(789, "@reviewer hi"))
+	b.handleGroupMessage(b.gen, botMentionMessage(789, "@reviewer hi"))
 
 	assert.False(t, delivered)
 	sent := tgSrv.getSentMessages()
@@ -274,7 +274,7 @@ func unresolvedSenderReplies(t *testing.T, sender string, msgName string, cache 
 		sc.from(msg)
 	}
 
-	b.handleGroupMessage(msg)
+	b.handleGroupMessage(b.gen, msg)
 
 	assert.False(t, delivered, "an unresolved sender is never routed")
 	assert.Empty(t, hub.agentCalls(), "no hub call for an unresolved sender")
@@ -319,7 +319,7 @@ func TestV2_UnresolvedSender_NeverSeenSenderUnaddressedTextGetsNoReply(t *testin
 	delivered := false
 	b.InboundHandler = func(string, *messages.StructuredMessage) { delivered = true }
 
-	b.handleGroupMessage(plainGroupMessage(456, "hello"))
+	b.handleGroupMessage(b.gen, plainGroupMessage(456, "hello"))
 
 	assert.False(t, delivered)
 	assert.Empty(t, hub.agentCalls())
@@ -343,10 +343,10 @@ func TestV2_UnresolvedSender_DefaultAgentReplyIsThrottledPerSender(t *testing.T)
 				}))
 			}
 
-			b.handleGroupMessage(plainGroupMessage(456, "hello"))
-			b.handleGroupMessage(plainGroupMessage(456, "hello again"))
-			b.handleGroupMessage(plainGroupMessage(789, "hi"))
-			b.handleGroupMessage(botMentionMessage(456, "are you there"))
+			b.handleGroupMessage(b.gen, plainGroupMessage(456, "hello"))
+			b.handleGroupMessage(b.gen, plainGroupMessage(456, "hello again"))
+			b.handleGroupMessage(b.gen, plainGroupMessage(789, "hi"))
+			b.handleGroupMessage(b.gen, botMentionMessage(456, "are you there"))
 
 			assert.Equal(t, []string{sc.want, sc.want, sc.want}, sentTexts(tgSrv),
 				"one reply per sender for unaddressed text; addressing the bot is always answered")
@@ -373,7 +373,7 @@ func TestV2_UnresolvedSender_LookupFailureReplyIsGeneric(t *testing.T) {
 				saveAgentCache(t, b.store, "user:alice@example.com", "proj-1", time.Now(), "coder")
 				b.store = mappingLookupFailingStore{b.store}
 
-				b.handleGroupMessage(msg)
+				b.handleGroupMessage(b.gen, msg)
 
 				sent := tgSrv.getSentMessages()
 				require.Len(t, sent, 1)
@@ -391,7 +391,7 @@ func TestV2_UnresolvedSender_LinkWithoutEmailGetsReregisterText(t *testing.T) {
 			TelegramUserID: "456", ScionUserID: "u-456", LinkedAt: time.Now().UTC(),
 		}))
 
-		b.handleGroupMessage(msg)
+		b.handleGroupMessage(b.gen, msg)
 
 		sent := tgSrv.getSentMessages()
 		require.Len(t, sent, 1)
@@ -404,7 +404,7 @@ func TestV2_AgentRefresh_FailedListIsNotReportedAsMissingDefault(t *testing.T) {
 	hub.listAgentsErr = errors.New("list agents returned status 500")
 	linkTestUser(t, b.store, 456, "alice@example.com")
 
-	b.handleGroupMessage(plainGroupMessage(456, "hello"))
+	b.handleGroupMessage(b.gen, plainGroupMessage(456, "hello"))
 
 	sent := tgSrv.getSentMessages()
 	require.Len(t, sent, 1)
@@ -418,7 +418,7 @@ func TestV2_AgentRefresh_FailedListIsNotReportedAsMissingAgent(t *testing.T) {
 	linkTestUser(t, b.store, 456, "alice@example.com")
 	saveTestGroupLink(t, b.store, -200, "proj-1", "my-project", "")
 
-	b.handleGroupMessage(botMentionMessage(456, "@reviewer please look"))
+	b.handleGroupMessage(b.gen, botMentionMessage(456, "@reviewer please look"))
 
 	sent := tgSrv.getSentMessages()
 	require.Len(t, sent, 1)
@@ -434,7 +434,7 @@ func TestV2_AgentRefresh_FailedListFallsBackToSameUsersCache(t *testing.T) {
 
 	delivered := make(chan string, 1)
 	b.InboundHandler = func(topic string, _ *messages.StructuredMessage) { delivered <- topic }
-	b.handleGroupMessage(plainGroupMessage(456, "hello"))
+	b.handleGroupMessage(b.gen, plainGroupMessage(456, "hello"))
 
 	select {
 	case topic := <-delivered:
@@ -486,7 +486,7 @@ func TestV2_Routing_LooksUpSenderOnce(t *testing.T) {
 	delivered := make(chan *messages.StructuredMessage, 1)
 	b.InboundHandler = func(_ string, m *messages.StructuredMessage) { delivered <- m }
 
-	b.handleGroupMessage(plainGroupMessage(456, "hello"))
+	b.handleGroupMessage(b.gen, plainGroupMessage(456, "hello"))
 
 	select {
 	case m := <-delivered:
@@ -509,8 +509,8 @@ func TestV2_AgentListUnavailable_OneUsersReplyDoesNotSuppressAnothers(t *testing
 	linkTestUser(t, b.store, 789, "bob@example.com")
 	hub.listAgentsErr = forbiddenListAgents()
 
-	b.handleGroupMessage(plainGroupMessage(456, "hello"))
-	b.handleGroupMessage(plainGroupMessage(789, "hi"))
+	b.handleGroupMessage(b.gen, plainGroupMessage(456, "hello"))
+	b.handleGroupMessage(b.gen, plainGroupMessage(789, "hi"))
 
 	sent := tgSrv.getSentMessages()
 	require.Len(t, sent, 2)
@@ -523,8 +523,8 @@ func TestV2_AgentListUnavailable_SameUserRepeatIsSuppressed(t *testing.T) {
 	linkTestUser(t, b.store, 456, "alice@example.com")
 	hub.listAgentsErr = errors.New("list agents returned status 500")
 
-	b.handleGroupMessage(plainGroupMessage(456, "hello"))
-	b.handleGroupMessage(plainGroupMessage(456, "hello again"))
+	b.handleGroupMessage(b.gen, plainGroupMessage(456, "hello"))
+	b.handleGroupMessage(b.gen, plainGroupMessage(456, "hello again"))
 
 	assert.Len(t, tgSrv.getSentMessages(), 1)
 }
@@ -563,7 +563,7 @@ func TestV2_AgentRefresh_DeniedSenderIsNotServedFromStaleCache(t *testing.T) {
 				delivered := false
 				b.InboundHandler = func(string, *messages.StructuredMessage) { delivered = true }
 
-				b.handleGroupMessage(tc.msg())
+				b.handleGroupMessage(b.gen, tc.msg())
 
 				assert.False(t, delivered, "a denied sender's message is not delivered")
 				sent := tgSrv.getSentMessages()
@@ -597,7 +597,7 @@ func TestV2_DeniedSender_ChatterNotAddressedToBotIsIgnored(t *testing.T) {
 				delivered := false
 				b.InboundHandler = func(string, *messages.StructuredMessage) { delivered = true }
 
-				b.handleGroupMessage(mk())
+				b.handleGroupMessage(b.gen, mk())
 
 				assert.False(t, delivered)
 				assert.Empty(t, tgSrv.getSentMessages(), "no reply to chatter not addressed to the bot")
@@ -631,7 +631,7 @@ func TestV2_DeniedSender_AddressedMessagesGetDenialText(t *testing.T) {
 			delivered := false
 			b.InboundHandler = func(string, *messages.StructuredMessage) { delivered = true }
 
-			b.handleGroupMessage(tc.msg())
+			b.handleGroupMessage(b.gen, tc.msg())
 
 			assert.False(t, delivered)
 			sent := tgSrv.getSentMessages()
@@ -663,8 +663,8 @@ func deniedSenderRepeatGetsOneReply(t *testing.T) {
 			delivered := false
 			b.InboundHandler = func(string, *messages.StructuredMessage) { delivered = true }
 
-			b.handleGroupMessage(mk())
-			b.handleGroupMessage(mk())
+			b.handleGroupMessage(b.gen, mk())
+			b.handleGroupMessage(b.gen, mk())
 
 			assert.False(t, delivered)
 			sent := tgSrv.getSentMessages()
@@ -704,7 +704,7 @@ func TestV2_AgentList_WithoutHubClient(t *testing.T) {
 		delivered := false
 		b.InboundHandler = func(string, *messages.StructuredMessage) { delivered = true }
 
-		b.handleGroupMessage(plainGroupMessage(456, "hello"))
+		b.handleGroupMessage(b.gen, plainGroupMessage(456, "hello"))
 
 		assert.False(t, delivered)
 		assert.Equal(t, []string{"Couldn't fetch the agent list for this project. Please try again later."}, sentTexts(tgSrv))

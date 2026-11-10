@@ -30,6 +30,7 @@ import (
 	k8sexecutil "k8s.io/client-go/util/exec"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
@@ -192,7 +193,7 @@ func TestExecCommand_ErrorClassification(t *testing.T) {
 					return "partial-output", tt.execErr
 				},
 			}
-			srv := New(DefaultServerConfig(), mgr, rt)
+			srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 
 			body, _ := json.Marshal(map[string]any{"command": []string{"foo"}})
 			r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/worker/exec?projectId=project-A", bytes.NewReader(body))
@@ -241,7 +242,7 @@ func TestExecCommand_LookupMissIsAgentNotFound(t *testing.T) {
 			return "", nil
 		},
 	}
-	srv := New(DefaultServerConfig(), mgr, rt)
+	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 
 	body, _ := json.Marshal(map[string]any{"command": []string{"foo"}})
 	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/worker/exec?projectId=project-A", bytes.NewReader(body))

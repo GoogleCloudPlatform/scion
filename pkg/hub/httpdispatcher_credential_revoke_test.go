@@ -326,7 +326,8 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_RevokesCredentialOnFailure(t *te
 
 			err := dispatcher.DispatchAgentStart(ctx, agent, "", false)
 			require.Error(t, err)
-			assert.Contains(t, err.Error(), "start rejected")
+			assert.Contains(t, err.Error(), "runtime broker returned error 400")
+			assert.NotContains(t, err.Error(), "start rejected")
 
 			require.Len(t, gen.jtis, 1)
 			cred := getTestAgentCredential(t, memStore, gen.lastJTI())

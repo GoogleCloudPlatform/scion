@@ -43,6 +43,15 @@ func LabelKey(rt Runtime, key string) string {
 	return key
 }
 
+// RewritesLabels reports whether rt rewrites the label keys and values it is
+// given to its platform's rules (Cloud Run Instances), so a stored value may
+// differ from the one written. Every other runtime stores labels exactly as
+// given, or refuses them.
+func RewritesLabels(rt Runtime) bool {
+	_, ok := rt.(labelKeyRewriter)
+	return ok
+}
+
 // storedLabelKey is the GCP-sanitized label key: Run rewrites every label
 // key with sanitizeGCPLabelKey, and List returns the stored labels as they
 // are.
@@ -51,6 +60,17 @@ func (r *CloudRunRuntime) storedLabelKey(key string) string {
 }
 
 var _ labelKeyRewriter = (*CloudRunRuntime)(nil)
+
+// CloudRunStoredLabels returns labels as Run stores them on a Cloud Run
+// instance: every key and value rewritten to GCP's label rules. List then
+// returns exactly these stored labels.
+func CloudRunStoredLabels(labels map[string]string) map[string]string {
+	out := make(map[string]string, len(labels))
+	for k, v := range labels {
+		out[sanitizeGCPLabelKey(k)] = sanitizeGCPLabelValue(v)
+	}
+	return out
+}
 
 // checkOwnerLabel refuses a launch whose ownership labels Run could not
 // store exactly. Run rewrites every label key and value to GCP's rules, so

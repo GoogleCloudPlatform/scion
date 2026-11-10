@@ -392,9 +392,10 @@ func TestStewardCapabilities(t *testing.T) {
 }
 
 // TestStewardEvents: every grant creation, level change and link creation
-// by a steward writes an event naming the actor and the steward clause,
-// and neither the event nor the decision log carries the link token or
-// its hash.
+// by a steward writes an event naming the actor and the steward clause
+// (a link by each clause), and neither the event nor the decision log
+// carries the link token or its hash; the decision log carries no link id
+// either.
 func TestStewardEvents(t *testing.T) {
 	f := newStewardFixture(t)
 	c := captureLog(f.fixture, slog.LevelDebug)
@@ -420,15 +421,22 @@ func TestStewardEvents(t *testing.T) {
 	}
 	link := decodeInto[CreateLinkResponse](t, rec)
 	token := strings.TrimPrefix(link.URL, RouteShared)
+	rec = f.jsonDo(ownerSteward, http.MethodPost, linksPath(f.id), `{"ttlHours": 2}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("owner steward link: %d %s", rec.Code, rec.Body.String())
+	}
+	ownerLink := decodeInto[CreateLinkResponse](t, rec)
+	ownerToken := strings.TrimPrefix(ownerLink.URL, RouteShared)
 
 	evs := eventsOf(t, f.store, f.id)[before:]
-	if len(evs) != 3 {
-		t.Fatalf("events = %+v; want grant_created, grant_changed, link_created", evs)
+	if len(evs) != 4 {
+		t.Fatalf("events = %+v; want grant_created, grant_changed, link_created twice", evs)
 	}
 	want := []struct{ action, ref, authority string }{
 		{EventGrantCreated, delegSteward.ref, AuthorityStewardDelegator},
 		{EventGrantChanged, ownerSteward.ref, AuthorityStewardProjectOwner},
 		{EventLinkCreated, delegSteward.ref, AuthorityStewardDelegator},
+		{EventLinkCreated, ownerSteward.ref, AuthorityStewardProjectOwner},
 	}
 	for i, w := range want {
 		e := evs[i]
@@ -445,14 +453,33 @@ func TestStewardEvents(t *testing.T) {
 	if d := evs[2].Detail; d["linkId"] != link.Link.ID || d["expiresAt"] == nil || len(d) != 2 {
 		t.Errorf("link_created detail = %+v", d)
 	}
+	if d := evs[3].Detail; d["linkId"] != ownerLink.Link.ID || d["expiresAt"] == nil || len(d) != 2 {
+		t.Errorf("owner steward link_created detail = %+v", d)
+	}
 	raw, _ := json.Marshal(evs)
-	_, logged := c.take(t)
-	for _, secret := range []string{token, LinkTokenHash(token)} {
+	entries, logged := c.take(t)
+	var linkEntries int
+	for _, e := range entries {
+		if e["action"] == logActionLinkCreated {
+			linkEntries++
+		}
+	}
+	if linkEntries != 2 {
+		t.Errorf("the decision log has %d %s entries, want 2: %v", linkEntries, logActionLinkCreated, entries)
+	}
+	for _, secret := range []string{token, LinkTokenHash(token), ownerToken, LinkTokenHash(ownerToken)} {
 		if strings.Contains(string(raw), secret) {
-			t.Errorf("an event carries the link token or its hash: %s", raw)
+			t.Errorf("an event carries a link token or its hash: %s", raw)
 		}
 		if strings.Contains(logged, secret) {
-			t.Errorf("the decision log carries the link token or its hash: %s", logged)
+			t.Errorf("the decision log carries a link token or its hash: %s", logged)
+		}
+	}
+	// The link id is in the artifact's history (above), never in the
+	// decision log.
+	for _, id := range []string{link.Link.ID, ownerLink.Link.ID} {
+		if id == "" || strings.Contains(logged, id) {
+			t.Errorf("the decision log carries the link id %q: %s", id, logged)
 		}
 	}
 }
@@ -533,14 +560,13 @@ func TestStewardCrossProjectSwitch(t *testing.T) {
 	}
 }
 
-// TestStewardReviewGrantTakesManagerPath pins a phase 1 side effect: a
-// steward's review grant is served by the steward (manager) path, not the
-// review-grant path (design D24), so it does not check that the user can
-// already read the artifact, and replacing a read grant answers the
-// manager path's 400 review_replaces_access.
+// TestStewardReviewGrantTakesManagerPath: a steward's review grant is
+// served by the manager path (the only grant path since the review-only
+// path was removed, ptone/scion#5145), so it does not check that the user
+// can already read the artifact, and review over a read grant is an
+// ordinary level change (the ladder).
 func TestStewardReviewGrantTakesManagerPath(t *testing.T) {
 	f := newStewardFixture(t)
-	f.host.allowReview(delegSteward, agentA.ref, "project-1")
 	f.host.mu.Lock()
 	f.host.calls = nil
 	f.host.mu.Unlock()
@@ -550,8 +576,8 @@ func TestStewardReviewGrantTakesManagerPath(t *testing.T) {
 	}
 	f.host.mu.Lock()
 	for _, c := range f.host.calls {
-		if strings.HasPrefix(c, "review ") || strings.HasPrefix(c, "subject ") {
-			t.Errorf("the review-grant path was asked: %q", c)
+		if strings.HasPrefix(c, "subject ") {
+			t.Errorf("a subject read check was asked: %q", c)
 		}
 	}
 	f.host.mu.Unlock()
@@ -562,8 +588,8 @@ func TestStewardReviewGrantTakesManagerPath(t *testing.T) {
 		t.Fatal(rec.Body.String())
 	}
 	rec = f.jsonDo(delegSteward, http.MethodPost, grantsPath(f.id), reviewBody(SubjectPrincipal, "user:outsider", GrantReview))
-	if rec.Code != http.StatusBadRequest || errCode(t, rec) != CodeReviewReplacesAccess {
-		t.Fatalf("steward review over a read grant: %d %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("steward review over a read grant: %d %s, want 200", rec.Code, rec.Body.String())
 	}
 }
 
@@ -588,38 +614,6 @@ func TestStewardNotFoundParity(t *testing.T) {
 	}
 }
 
-// TestReviewGrantEventAuthority: a review grant on the review-grant path
-// (design D24, which serves callers who are not stewards) records a
-// grant_created event: a home-project admin as
-// reviewGrantProjectAdminAuthority, the delegating user as
-// reviewGrantDelegatorAuthority (never a steward authority: the path serves
-// only callers who are not stewards).
-func TestReviewGrantEventAuthority(t *testing.T) {
-	f, id := newReviewGrantFixture(t)
-	f.host.allowAdmin(projAdmin, "project-1")
-	memberID := PrincipalRef(member.kind, member.ref)
-	for _, tc := range []struct {
-		caller    principal
-		subject   string
-		authority string
-	}{
-		{projAdmin, memberID, reviewGrantProjectAdminAuthority},
-		{delegator, reviewerID, reviewGrantDelegatorAuthority},
-	} {
-		if rec := f.postGrantBody(tc.caller, id, reviewBody(SubjectPrincipal, tc.subject, GrantReview)); rec.Code != http.StatusCreated {
-			t.Fatalf("review grant by %s: %d %s", tc.caller.ref, rec.Code, rec.Body.String())
-		}
-		evs := eventsOf(t, f.store, id)
-		if len(evs) == 0 {
-			t.Fatalf("review grant by %s recorded no event", tc.caller.ref)
-		}
-		e := evs[len(evs)-1]
-		if e.Action != EventGrantCreated || e.ActorRef != tc.caller.ref || e.Authority != tc.authority || e.Detail["subjectRef"] != tc.subject {
-			t.Errorf("review grant by %s: event %+v, want authority %s", tc.caller.ref, e, tc.authority)
-		}
-	}
-}
-
 // laxStore stands for a store without the steward bounds: it records a
 // steward's admin grant or move as if an owner made it. With it, only the
 // routes' own gates stand between a steward and those actions.
@@ -634,6 +628,10 @@ func laxActor(actor *Actor) *Actor {
 
 func (s laxStore) PutGrant(ctx context.Context, g *Grant, max int, cross bool, actor *Actor) (GrantPut, error) {
 	return s.Store.PutGrant(ctx, g, max, cross, laxActor(actor))
+}
+
+func (s laxStore) PutGrantNotify(ctx context.Context, g *Grant, max int, cross bool, actor *Actor, notify bool) (GrantPutResult, error) {
+	return s.Store.PutGrantNotify(ctx, g, max, cross, laxActor(actor), notify)
 }
 
 func (s laxStore) UpdateArtifact(ctx context.Context, id string, u ArtifactUpdate) (*Artifact, error) {

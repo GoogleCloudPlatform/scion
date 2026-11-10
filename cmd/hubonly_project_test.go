@@ -184,6 +184,16 @@ func TestResolveHubOnlyProject(t *testing.T) {
 			wantHub: ctxTestHub,
 		},
 		{
+			name: "--global with --project uses the --project value",
+			setup: func(t *testing.T) {
+				writeHomeGlobalSettings(t, "hub:\n  projectId: global-hub-id\n")
+				globalMode = true
+				projectPath = "bar"
+			},
+			want:    hubOnlyProject{ref: "bar", label: "bar", source: hubOnlySourceFlag},
+			wantHub: ctxTestHub,
+		},
+		{
 			name:    "--project global names a hub project",
 			setup:   func(t *testing.T) { projectPath = "global" },
 			want:    hubOnlyProject{ref: "global", label: "global", source: hubOnlySourceFlag},
@@ -395,10 +405,43 @@ func TestTunnelHub_LookupMissNamesSource(t *testing.T) {
 
 	target := hubOnlyProject{ref: ctxTestProjectID, label: "foo", source: hubOnlySourceContext}
 	raw := tunnelclient.Errorf(tunnelclient.ExitAgentNotFound, "agent %q not found in project %q", "a1", ctxTestProjectID)
-	got := tunnelNotFoundError(raw, true, "a1", target)
+	got := tunnelNotFoundError(raw, true, false, "a1", target)
 	assert.Equal(t, "agent a1 not found in project foo (from the scion use context)", got.Error())
 	assert.Equal(t, tunnelclient.ExitAgentNotFound, got.Code)
-	assert.Same(t, raw, tunnelNotFoundError(raw, false, "a1", target), "no lookup miss: unchanged")
+	assert.Same(t, raw, tunnelNotFoundError(raw, false, false, "a1", target), "no lookup miss: unchanged")
 	other := tunnelclient.Errorf(tunnelclient.ExitHubUnavailable, "down")
-	assert.Same(t, other, tunnelNotFoundError(other, true, "a1", target), "other codes: unchanged")
+	assert.Same(t, other, tunnelNotFoundError(other, true, true, "a1", target), "other codes: unchanged")
+}
+
+// For a token from the environment, an empty project list followed by a
+// not-found lookup is recorded, and the not-found error then says the
+// token may lack project:list; the exit code stays 4. A stored login, a
+// listed project or a found agent records nothing.
+func TestTunnelHub_UnlistedProjectHintsProjectList(t *testing.T) {
+	hub := twoProjectHub(t, "tok")
+	token := tunnelclient.Credential{Token: "tok", Kind: tunnelclient.CredentialToken}
+	login := tunnelclient.Credential{Token: "tok", Kind: tunnelclient.CredentialOAuth}
+	for _, tc := range []struct {
+		name           string
+		cred           tunnelclient.Credential
+		project, agent string
+		unlisted       bool
+	}{
+		{"token, project not listed", token, ctxTestProjectID, "b-c", true},
+		{"login, project not listed", login, ctxTestProjectID, "b-c", false},
+		{"token, listed project, unknown agent", token, "a", "nope", false},
+		{"token, found", token, "a", "b-c", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			th := &tunnelHub{endpoint: hub.srv.URL}
+			_, _ = th.ResolveAgent(context.Background(), tc.cred, tc.project, tc.agent)
+			assert.Equal(t, tc.unlisted, th.projectUnlisted.Load())
+		})
+	}
+
+	target := hubOnlyProject{ref: "p1", label: "p1", source: hubOnlySourceFlag}
+	raw := tunnelclient.Errorf(tunnelclient.ExitAgentNotFound, "agent %q not found in project %q", "a1", "p1")
+	got := tunnelNotFoundError(raw, true, true, "a1", target)
+	assert.Equal(t, "agent a1 not found in project p1 (from --project); the token may lack the project:list scope", got.Error())
+	assert.Equal(t, tunnelclient.ExitAgentNotFound, got.Code)
 }

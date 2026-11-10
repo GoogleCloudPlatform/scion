@@ -34,8 +34,8 @@ Edits to a template's `env` take effect on an agent's next start. Its job keys a
 | :--- | :--- | :--- |
 | `schema_version` | string | Should be `"1"`. |
 | `default_harness_config` | string | The name of the default harness config to use (e.g., `gemini`, `antigravity`). |
-| `agent_instructions` | string | Role-specific instructions for the agent (harness-agnostic). |
-| `system_prompt` | string | The system prompt to use for the agent (harness-agnostic). |
+| `agent_instructions` | string | Role-specific instructions for the agent (harness-agnostic). A value with a line break is inline text. A single-line value must be a relative path inside the template directory (an absolute path, `..` component, or `.` is refused); if a template in the chain has that path, it is read as a plain regular file of at most 4 MiB without following symlinks or hard links (an invalid or unreadable file is refused), and if no template in the chain has the file, the value is used as inline text (see [`scion-agent.yaml`](/scion/local/templates/#scion-agentyaml)). |
+| `system_prompt` | string | The system prompt to use for the agent (harness-agnostic). Follows the same relative template file or inline text rules as `agent_instructions`. |
 | `harness_config` | string | The harness config to use. When a template sets both this and `default_harness_config`, `default_harness_config` wins. |
 | `env` | map | Environment variables. In a template, a lowest-precedence fallback; see [Environment variables](#environment-variables-env). |
 | `detached` | bool | Run in background (default `true`). |
@@ -62,9 +62,11 @@ These platform skills are managed by Scion and do not need to be manually includ
 
 | Field | Type | Description |
 | :--- | :--- | :--- |
-| `max_turns` | int | Maximum number of LLM turns before the agent stops. Exceeding this triggers a `LIMITS_EXCEEDED` state and termination. |
-| `max_model_calls` | int | Maximum number of model calls before the agent stops. |
-| `max_duration` | string | Maximum runtime duration (e.g., `"2h"`, `"30m"`). Exceeding this triggers a `LIMITS_EXCEEDED` state and termination. |
+| `max_turns` | int | Maximum number of LLM turns before the agent stops. Exceeding this triggers a `LIMITS_EXCEEDED` state and termination. `0` means no limit and overrides any inherited or default limit; leave the key out to inherit. |
+| `max_model_calls` | int | Maximum number of model calls before the agent stops. `0` means no limit and overrides any inherited or default limit; leave the key out to inherit. |
+| `max_duration` | string | Maximum runtime duration (e.g., `"2h"`, `"30m"`). Exceeding this triggers a `LIMITS_EXCEEDED` state and termination. `"0"` means no limit; leave the key out to inherit. |
+
+Each limit has three states: left out (or `null`), which inherits the value from the template chain and then from the hub and broker default limits; an explicit "no limit" (`0` for a count, `"0"` for a duration), which overrides an inherited limit and is never filled by a default; and a limit. A negative count is invalid. Before count limits were typed, a `max_turns: 0` or `max_model_calls: 0` in a template or config file was accepted silently and meant "inherit"; it now means no limit, so remove the key to inherit. A Runtime Broker logs each template that sets a count limit to `0` when it provisions an agent. An explicit count limit of `0` takes effect only on a Runtime Broker that advertises the `unlimitedCountLimits` capability: at create or start an older broker keeps the inherited limit and the Hub warns about it, while a configuration edit (`PATCH /api/v1/agents/:id` or `PATCH /api/v1/projects/:id/agents/:agentId`) that changes `max_turns` or `max_model_calls` to `0` is refused with `422 validation_error` (`unlimited_not_supported_by_broker`, or `broker_unknown` when the agent's Runtime Broker is not registered).
 
 ### Environment variables (`env`)
 
@@ -91,7 +93,7 @@ The keys in this section are **ignored in templates**, with a warning. They take
 | Field | Type | Description | Set it instead in |
 | :--- | :--- | :--- | :--- |
 | `image` | string | Container image for this agent. | The harness-config's `config.yaml` `image`; settings `harness_configs.<name>.image`; a profile `harness_overrides.<name>.image`; `--image` |
-| `volumes` | list | Additional volume mounts. | Settings `harness_configs.<name>.volumes`; the harness-config |
+| `volumes` | list | Additional volume mounts. Subject to [Volume Source Restrictions](/scion/reference/orchestrator-settings/#volume-source-restrictions). | Settings `harness_configs.<name>.volumes`; the harness-config |
 | `resources` | object | Container resource requests/limits (see below). | Settings `default_resources`, profile `resources` and `harness_overrides`; hub `agent_defaults.resources`; project resource defaults |
 | `kubernetes` | object | Kubernetes runtime overrides (see below). | Settings runtimes and profiles |
 | `hub` | object | Hub endpoint override (see below). | Broker settings |
@@ -214,7 +216,7 @@ When an agent starts:
 ### Project settings precedence
 
 Agents created inside a hub project have one more source of values: the
-project's own defaults, set in Project Settings and stored as `scion.io/*`
+project's own defaults, set in Project Settings (or with [`scion project settings`](/scion/reference/cli/#scion-project)) and stored as `scion.io/*`
 annotations on the project. For these fields the ordering is, highest priority
 first:
 
@@ -234,9 +236,9 @@ first:
 | `resources` | `scion.io/default-resources-cpu-request`, `-memory-request`, `-cpu-limit`, `-memory-limit`, `-disk` |
 
 A project setting is an *override*: it takes precedence over the template the
-project uses. Leave it blank to let the template — and then the rest of the
+project uses. Leave it blank (`null` in `PUT /api/v1/projects/:id/settings`) to let the template — and then the rest of the
 chain — decide. Blank means **unset, falls through** — it does not mean "set to
-whatever the default happens to be".
+whatever the default happens to be". For the two project count limits (`defaultMaxTurns` / `scion.io/default-max-turns` and `defaultMaxModelCalls` / `scion.io/default-max-model-calls`), `0` is **Unlimited** — an explicit "no limit" that new agents receive in their inline config, overriding any template, Hub, or Runtime Broker default limit — while `null` clears the project setting back to inheriting and a negative value is refused with `422 validation_error` (the Project Settings and Agent Configuration forms in the Web UI provide a **Limited / Unlimited** selector for both fields). Changing a project default count limit to `0` records a `project_settings_limit_unlimited` mutation audit event (and logs a warning when the field was previously unset, since a browser tab opened before the upgrade sends `0` for an empty field) and returns a `warnings` entry when a Runtime Broker providing the project does not advertise `unlimitedCountLimits` (agents on such a broker keep the inherited limit).
 
 :::note[This is a partial ordering, and it does not cover environment variables]
 The three ranks above are the top of a longer chain, not the whole of it — below

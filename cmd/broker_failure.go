@@ -28,11 +28,11 @@ import (
 )
 
 // brokerReturnedErrorMarker is the text the Hub puts in front of a runtime
-// broker's raw error body when it relays a failed create or start as a 502
-// runtime_error ("Failed to dispatch to runtime broker: runtime broker
-// returned error <status>: <body>"). The Hub does not copy the broker's
-// error code or details into structured fields, so the CLI reads them back
-// out of the body.
+// broker's status when it relays a failed create or start as a 502
+// runtime_error. The current Hub writes "runtime broker returned error
+// <status> (<code>)" and relays the allowlisted details as structured
+// error details; older Hubs wrote "runtime broker returned error <status>:
+// <body>", and the CLI still reads the code and details out of that body.
 const brokerReturnedErrorMarker = "runtime broker returned error "
 
 // brokerCodePattern bounds a broker error code shown to the user. The code
@@ -59,29 +59,52 @@ func parseBrokerFailure(err error) (apiErr *apiclient.APIError, bf brokerFailure
 		return nil, bf, false
 	}
 	rest := apiErr.Message[i+len(brokerReturnedErrorMarker):]
-	statusText, body, found := strings.Cut(rest, ":")
-	if !found {
-		return nil, bf, false
-	}
-	status, convErr := strconv.Atoi(strings.TrimSpace(statusText))
-	if convErr != nil {
-		return nil, bf, false
-	}
-	bf.Status = status
-	var parsed struct {
-		Error struct {
-			Code    string                 `json:"code"`
-			Details map[string]interface{} `json:"details"`
-		} `json:"error"`
-	}
-	if json.Unmarshal([]byte(strings.TrimSpace(body)), &parsed) == nil {
-		if brokerCodePattern.MatchString(parsed.Error.Code) {
-			bf.Code = parsed.Error.Code
+	if m := brokerFailureTextPattern.FindStringSubmatch(rest); m != nil {
+		// Current Hub text: "<status>" or "<status> (<code>)", no body.
+		status, convErr := strconv.Atoi(m[1])
+		if convErr != nil {
+			return nil, bf, false
 		}
-		bf.Details = parsed.Error.Details
+		bf.Status = status
+		if brokerCodePattern.MatchString(m[2]) {
+			bf.Code = m[2]
+		}
+	} else {
+		// Older Hub text: "<status>: <raw broker body>".
+		statusText, body, found := strings.Cut(rest, ":")
+		if !found {
+			return nil, bf, false
+		}
+		status, convErr := strconv.Atoi(strings.TrimSpace(statusText))
+		if convErr != nil {
+			return nil, bf, false
+		}
+		bf.Status = status
+		var parsed struct {
+			Error struct {
+				Code    string                 `json:"code"`
+				Details map[string]interface{} `json:"details"`
+			} `json:"error"`
+		}
+		if json.Unmarshal([]byte(strings.TrimSpace(body)), &parsed) == nil {
+			if brokerCodePattern.MatchString(parsed.Error.Code) {
+				bf.Code = parsed.Error.Code
+			}
+			bf.Details = parsed.Error.Details
+		}
+	}
+	// The Hub's own structured details (its allowlisted relay of the
+	// broker's cause, file and reason) come first.
+	if len(apiErr.Details) > 0 {
+		bf.Details = apiErr.Details
 	}
 	return apiErr, bf, true
 }
+
+// brokerFailureTextPattern matches the current Hub text after
+// brokerReturnedErrorMarker: the status, then an optional " (<code>)", and
+// no colon (the older form carried ": <body>").
+var brokerFailureTextPattern = regexp.MustCompile(`^([0-9]{3})(?: \(([a-z0-9_]{1,64})\))?(?:$|[^:0-9])`)
 
 // brokerFailureCategory is the short, user-facing description of a broker
 // failure. It is built from the broker's error code and structured details
@@ -116,6 +139,8 @@ func brokerFailureCategory(bf brokerFailure) string {
 		return "workspace storage is not configured for the runtime broker"
 	case "conflict":
 		return "the agent is in a conflicting state on the runtime broker"
+	case api.BrokerErrCodeReloadUnconfirmed:
+		return api.ReloadUnconfirmedMessage
 	case api.BrokerErrCodeLocalWorktreeRefused:
 		// The broker's reason is built from fixed templates that name the
 		// cause and the fix, filled in with paths, remotes (shown without

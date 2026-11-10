@@ -71,6 +71,13 @@ type HealthSummary struct {
 	Raw json.RawMessage `json:"-"`
 }
 
+// HealthAttentionBrokerVersionMismatch is the attention item kind for an
+// online runtime broker whose version differs from the hub's. It mirrors
+// hub.HealthAttentionBrokerVersionMismatch. Kind is an open string: a
+// client treats a kind it does not know as a plain item and shows its
+// Message.
+const HealthAttentionBrokerVersionMismatch = "broker_version_mismatch"
+
 // HealthAttentionItem is one entry of the "Needs attention" list.
 type HealthAttentionItem struct {
 	// Severity is critical or warning.
@@ -149,6 +156,9 @@ type HealthSummaryBroker struct {
 	ID      string `json:"id"`
 	Name    string `json:"name"`
 	Version string `json:"version"`
+	// VersionStatus compares Version with hub.version: match, mismatch or
+	// unknown.
+	VersionStatus string `json:"version_status"`
 	// Status is broker liveness: online, offline or degraded.
 	Status           string               `json:"status"`
 	LastHeartbeat    *time.Time           `json:"last_heartbeat"`
@@ -191,6 +201,9 @@ type HealthBrokerRuntime struct {
 type HealthBrokerStorage struct {
 	Backend    string `json:"backend"`
 	NFSHealthy *bool  `json:"nfs_healthy,omitempty"`
+	// LayoutMismatch lists how the broker's storage layout disagrees with
+	// the hub's; the hub refuses shared-mode dispatches to such a broker.
+	LayoutMismatch []string `json:"layout_mismatch,omitempty"`
 }
 
 // HealthSummaryAgents is the agents section of the health summary.
@@ -318,6 +331,30 @@ type HealthSummarySchedules struct {
 	Total       int  `json:"total"`
 	Truncated   bool `json:"truncated"`
 	ScanLimited bool `json:"scan_limited"`
+	// Paused lists schedules the hub paused itself, with their reason.
+	// A schedule a user paused is not listed. Nil from an older hub.
+	Paused []HealthPausedSchedule `json:"paused"`
+	// PausedUnavailable is true when the hub could not list them; the
+	// failing list is still reported.
+	PausedUnavailable bool `json:"paused_unavailable"`
+	// PausedTotal is a lower bound when PausedScanLimited is true.
+	PausedTotal       int  `json:"paused_total"`
+	PausedTruncated   bool `json:"paused_truncated"`
+	PausedScanLimited bool `json:"paused_scan_limited"`
+}
+
+// HealthPausedSchedule is one schedule the hub paused, with its reason.
+type HealthPausedSchedule struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	ProjectID   string `json:"project_id"`
+	ProjectSlug string `json:"project_slug"`
+	EventType   string `json:"event_type"`
+	Target      string `json:"target"`
+	// Reason is "creator_deleted", "cron_zone_unsupported" or "other";
+	// a newer hub may add values.
+	Reason    string     `json:"reason"`
+	UpdatedAt *time.Time `json:"updated_at"`
 }
 
 // HealthFailingSchedule is one active schedule whose last run failed.

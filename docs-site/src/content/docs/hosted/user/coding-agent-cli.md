@@ -22,19 +22,21 @@ Create it from your own signed-in shell:
 scion hub token create \
   --project my-project \
   --name "coding-agent" \
-  --scopes project:read,agent:list,agent:read,agent:create,agent:message \
+  --scopes project:read,project:list,agent:list,agent:read,agent:create,agent:message,skill:read,skill:list,template:read,template:list,harness_config:read,harness_config:list \
   --expires 30d
 ```
 
 Most CLI commands that run in a project look the project up on the Hub first, which needs
-`project:read`, so include it in every token. Scopes common CLI flows need:
+`project:read`, and `project:list` when the CLI finds the project by its git remote, slug or
+name, so include both in every token. `project:manage` does not include them. Scopes common
+CLI flows need:
 
 | Flow | Scopes |
 |------|--------|
-| Any command run in a project | `project:read` |
+| Any command run in a project | `project:read`, `project:list` |
 | `scion list` | `project:read`, `agent:list` |
 | `scion look`, `scion logs` | `project:read`, `agent:read` |
-| `scion start` / `scion create` | `project:read`, `agent:create`, `agent:read` |
+| `scion start` / `scion create` | `project:read`, `agent:create`, `agent:read`; for an agent role above `none`, also `skill:read`, `skill:list`, `template:read`, `template:list`, `harness_config:read`, `harness_config:list` (or pass `--role none`) |
 | `scion message` | `project:read`, `agent:message` |
 | `scion attach` | `project:read`, `agent:attach` |
 | `scion stop`, `scion suspend`, `scion resume`, `scion restore` | `project:read`, `agent:lifecycle` |
@@ -73,6 +75,12 @@ A stored interactive login (from `scion hub auth login`) takes precedence over
 `SCION_HUB_TOKEN`. To run the CLI under a scoped token, use an environment with no stored login:
 a dedicated OS user, an isolated `HOME`, or log out first (`scion hub auth logout`).
 :::
+
+User- and hub-scope `scion hub env` and `scion hub secret` commands (without `--project` or
+`--broker`, or with `--hub-scope`) need an interactive login (`scion hub auth login`); the Hub
+refuses access tokens on them with `403 Forbidden` (`details.reason: "CREDENTIAL_MANAGEMENT"`).
+Project (`--project`) and Runtime Broker (`--broker`) scopes continue to accept appropriately scoped
+tokens.
 
 Run `scion hub status` in the agent's environment to check which credential the CLI is
 using.

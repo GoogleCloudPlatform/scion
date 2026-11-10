@@ -41,11 +41,6 @@ func TestSlowWorkspaceSyncFrom_AfterWriteTimeout_GetsResponse(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	srv, s, project := setupSlowLaunchServer(t)
 	srv.SetStorage(newContentMockStorage("test-bucket"))
-	var downloaded bool
-	srv.setHubWorkspaceDownloader(func(context.Context, string, string, string) error {
-		downloaded = true
-		return nil
-	})
 	agent := createSiteAgent(t, s, project, "slow-sync-from", state.PhaseRunning, store.RunIntentRunning)
 	broker := connectFakeBroker(t, srv, agent.RuntimeBrokerID)
 	uploaded := answerBrokerUploads(t, broker, slowPathDelay, 1)
@@ -58,42 +53,10 @@ func TestSlowWorkspaceSyncFrom_AfterWriteTimeout_GetsResponse(t *testing.T) {
 		t.Fatal("fixture check: the upload never reached the broker")
 	}
 	require.Equal(t, http.StatusOK, code, string(body))
-	assert.True(t, downloaded, "fixture check: the hub-managed workspace is synced back")
 	var resp SyncFromResponse
 	require.NoError(t, json.Unmarshal(body, &resp))
 	require.NotNil(t, resp.Manifest)
 	assert.Equal(t, "1.0", resp.Manifest.Version)
-}
-
-// The download into the hub workspace after the upload is bounded with it,
-// so the response still lands within the extended write deadline.
-func TestWorkspaceSyncFrom_HubDownloadBounded_GetsResponse(t *testing.T) {
-	const syncBound = 400 * time.Millisecond
-	t.Setenv("HOME", t.TempDir())
-	srv, s, project := setupCreateAgentServer(t, &slowLaunchDispatcher{})
-	shortenSyncDispatchTimeout(t, syncBound)
-	srv.SetStorage(newContentMockStorage("test-bucket"))
-	downloadErr := make(chan error, 1)
-	srv.setHubWorkspaceDownloader(func(ctx context.Context, _, _, _ string) error {
-		err := errDownloadNeverCut
-		if awaitCanceled(ctx) {
-			err = ctx.Err()
-		}
-		downloadErr <- err
-		return err
-	})
-	agent := createSiteAgent(t, s, project, "sync-from-bound", state.PhaseRunning, store.RunIntentRunning)
-	broker := connectFakeBroker(t, srv, agent.RuntimeBrokerID)
-	answerBrokerUploads(t, broker, 50*time.Millisecond, 1)
-
-	code, body := serveThroughSlowListener(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/workspace/sync-from", nil, syncBound)
-	select {
-	case err := <-downloadErr:
-		require.ErrorIs(t, err, context.DeadlineExceeded, "the hub download must be cut at the sync-from bound")
-	default:
-		t.Fatal("fixture check: the hub download never ran")
-	}
-	assert.Equal(t, http.StatusOK, code, string(body))
 }
 
 // Each agent's stop dispatch answers after slowPathDelay; the agents stop

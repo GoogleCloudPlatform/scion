@@ -18,6 +18,8 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // chatUnreadCountResponse is the body of GET /api/v1/chat/unread-count.
@@ -97,7 +99,15 @@ func (s *Server) chatUnreadCount(ctx context.Context, identity Identity, userID 
 	if err != nil {
 		return resp, fmt.Errorf("member projects: %w", err)
 	}
-	rollups, err := chatSpaceRollupsStrict(ctx, wcs, userID, spaces, members, s.chatSpacesBatch)
+	// Only member spaces count toward the badge, so only their topics are
+	// read: a non-member space would load its topics for a zero count.
+	memberSpaces := make([]*store.Project, 0, len(spaces))
+	for _, p := range spaces {
+		if members[p.ID] {
+			memberSpaces = append(memberSpaces, p)
+		}
+	}
+	rollups, err := chatSpaceRollupsStrict(ctx, wcs, userID, memberSpaces, members, s.chatSpacesBatch)
 	if err != nil {
 		return resp, fmt.Errorf("space rollups: %w", err)
 	}

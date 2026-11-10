@@ -20,6 +20,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -193,6 +194,7 @@ func main() {
 		broker,
 		log.With("component", "commands"),
 	)
+	cmdRouter.SetAsyncCreate(cfg.AsyncCreateEnabled())
 
 	// Initialize the platform messenger (Google Chat adapter for now).
 	var messenger chatapp.Messenger
@@ -321,6 +323,12 @@ func main() {
 		if err := gcAdapter.Stop(shutdownCtx); err != nil {
 			log.Error("failed to stop google chat adapter", "error", err)
 		}
+	}
+
+	// Stop following agent launches; pending follow-up posts and deferred
+	// messages are dropped.
+	if err := cmdRouter.Shutdown(shutdownCtx); err != nil {
+		log.Error("failed to stop launch watchers", "error", err)
 	}
 
 	log.Info("scion-chat-app stopped")
@@ -583,7 +591,21 @@ func discoverSigningKey(ctx context.Context, projectID string) (value, resourceN
 	if err != nil {
 		return "", "", fmt.Errorf("accessing secret %s: %w", chosen.Name, err)
 	}
-	return string(resp.Payload.Data), chosen.Name, nil
+	data, err := secretPayloadData(resp)
+	if err != nil {
+		return "", "", fmt.Errorf("accessing secret %s: %w", chosen.Name, err)
+	}
+	return data, chosen.Name, nil
+}
+
+// secretPayloadData returns the secret value of a successful
+// AccessSecretVersion response. A missing response or payload is an error,
+// never an empty value; a payload with empty data is an empty value.
+func secretPayloadData(resp *smpb.AccessSecretVersionResponse) (string, error) {
+	if resp == nil || resp.Payload == nil {
+		return "", errors.New("secret manager returned no payload")
+	}
+	return string(resp.Payload.Data), nil
 }
 
 // accessSecret fetches the latest version of a GCP Secret Manager secret.
@@ -602,7 +624,7 @@ func accessSecret(ctx context.Context, resourceName string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("accessing secret version: %w", err)
 	}
-	return string(resp.Payload.Data), nil
+	return secretPayloadData(resp)
 }
 
 // gceProjectID returns the GCP project ID from the GCE metadata server,

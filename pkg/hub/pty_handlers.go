@@ -100,11 +100,23 @@ func (s *Server) handleAgentPTY(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Enforce authorization for every caller kind. A user passes on ActionAttach
-	// against the agent; an agent passes on ScopeAgentLifecycle within its own
-	// project. Attaching a PTY is not read-class, so the agent project read
-	// baseline deliberately does not reach it.
-	if !s.authorizeAgentLifecycle(w, r, agent, ActionAttach) {
+	// An agent delegated credential is decided by its own procedure, on
+	// this handshake only; the established session is not re-checked
+	// (.design/agent-delegation.md §16.6). Every other caller kind keeps
+	// the shared agent-target rule below.
+	if !admitDelegatedAgentHandler(w, r, opAgentAttach, agent) {
+		return
+	}
+	if isDelegatedAgentIdentity(identity) {
+		if !s.authorizeDelegatedAttach(w, r, identity, agent) {
+			return
+		}
+	} else if !s.authorizeAgentLifecycle(w, r, agent, ActionAttach) {
+		// Enforce authorization for every caller kind. A user passes on
+		// ActionAttach against the agent; an agent passes on
+		// ScopeAgentLifecycle within its own project. Attaching a PTY is not
+		// read-class, so the agent project read baseline deliberately does
+		// not reach it.
 		return
 	}
 
@@ -168,6 +180,25 @@ func (s *Server) handleAgentPTY(w http.ResponseWriter, r *http.Request) {
 
 	code, reason := session.CloseCause()
 	logPTYSessionEnded(agentID, agent.Slug, agent.RuntimeBrokerID, code, reason)
+}
+
+// authorizeDelegatedAttach decides agent.attach on agent for an agent
+// delegated credential at the PTY handshake (and so at every reconnect,
+// which is a new handshake). A denial answers 403 forbidden and never
+// carries the decision's reason (.design/agent-delegation.md §11.4).
+func (s *Server) authorizeDelegatedAttach(w http.ResponseWriter, r *http.Request, identity Identity, agent *store.Agent) bool {
+	decision := s.authzService.Decide(r.Context(), AuthzRequest{
+		Principal:  principalContextForIdentity(identity),
+		Credential: credentialContextForIdentity(identity),
+		Resource:   agentResource(agent),
+		Action:     ActionAttach,
+		Permission: "agent.attach",
+	})
+	if !decision.Allowed {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, agentTargetDenyMessage, nil)
+		return false
+	}
+	return true
 }
 
 // logPTYSessionStarted logs the start of a PTY session. routedBrokerID is
@@ -305,20 +336,44 @@ func (u *brokerPTYUpstream) Read(ctx context.Context) ([]byte, error) {
 	return u.stream.Read(ctx)
 }
 
+// errPTYStreamNoOwner is returned by brokerPTYUpstream.Write and Resize
+// for a stream with no owning control channel connection.
+var errPTYStreamNoOwner = errors.New("pty: stream has no control channel connection")
+
+// owner returns the control channel connection that owns the stream, or nil.
+// Per-stream writes go to it, never to the broker's current connection: a
+// stream id is valid only on the connection that opened it, and after a
+// reconnect the current connection is a session that never had the stream
+// (ptone/scion#5869). Once the owner is closed its writes fail.
+func (u *brokerPTYUpstream) owner() *BrokerConnection {
+	if u.stream == nil {
+		return nil
+	}
+	return u.stream.owner
+}
+
 func (u *brokerPTYUpstream) Write(data []byte) error {
-	if err := u.cc.SendStreamData(u.brokerID, u.stream.streamID, data); err != nil {
+	owner := u.owner()
+	if owner == nil {
+		return &ptyBrokerWriteError{err: errPTYStreamNoOwner}
+	}
+	if err := owner.SendStreamData(u.stream.streamID, data); err != nil {
 		return &ptyBrokerWriteError{err: err}
 	}
 	return nil
 }
 
 func (u *brokerPTYUpstream) Resize(cols, rows int) error {
-	return u.cc.ResizeStream(u.brokerID, u.stream.streamID, cols, rows)
+	owner := u.owner()
+	if owner == nil {
+		return errPTYStreamNoOwner
+	}
+	return owner.ResizeStream(u.stream.streamID, cols, rows)
 }
 
 func (u *brokerPTYUpstream) Close() {
-	if u.stream != nil {
-		_ = u.cc.CloseStream(u.brokerID, u.stream.streamID, "session closed")
+	if owner := u.owner(); owner != nil {
+		_ = owner.CloseStream(u.stream.streamID, "session closed")
 	}
 }
 

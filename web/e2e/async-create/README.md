@@ -1,7 +1,9 @@
 # Async agent create journey
 
 Playwright journey for agent create from the web form on a hub with
-`server.hub.async_agent_launch` on (ptone/scion#4664). See the header of
+the `hub.async_agent_launch` experiment on (ptone/scion#4664). The local
+hub's global setup sets the experiment on through the admin experiments API
+and reads it back before the journey runs. See the header of
 `async-create.pw.ts` for the checks.
 
 ## Run

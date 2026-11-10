@@ -47,6 +47,14 @@ var fc4aRows = map[string]map[string]string{
 		"shared_dir_size": fc4AsIs, "safe_to_evict": fc4AsIs,
 		"shared_dir_storage_backend": fc4AsIs, "shared_dir_storage_backends": fc4AsIs,
 		"home_storage_backend": fc4AsIs, "home_storage_leaf": fc4Never,
+		"node_selector": fc4AsIs, "tolerations": fc4AsIs, "runtime_class_name": fc4AsIs,
+		// Cloud Run (contract amendment P5-CR, CR8). project_id,
+		// service_account, network, subnetwork and credentials_file are
+		// never published. CR8 allows region as is; until the presentation
+		// carries a region field it is not published either, which this
+		// row records.
+		"project_id": fc4Never, "region": fc4Never, "service_account": fc4Never,
+		"network": fc4Never, "subnetwork": fc4Never, "credentials_file": fc4Never,
 	},
 	"agent_defaults": {
 		"default_harness_config": fc4AsIs, "image_registry": fc4AsIs, "clone_depth": fc4AsIs,
@@ -65,6 +73,13 @@ var fc4aRows = map[string]map[string]string{
 		"image": fc4AsIs, "image_pull_policy": fc4AsIs, "auth_selected_type": fc4AsIs, "user": fc4AsIs,
 		"env": fc4KeysOnly, "volumes": fc4Partial, "resources": fc4AsIs,
 	},
+}
+
+// fc4aMarkers are presentation fields that publish no source field: the
+// placement_reported marker, which says whether the instance reports
+// placement at all (FC4-a amendment).
+var fc4aMarkers = map[string][]string{
+	"runtime_target": {"placement_reported"},
 }
 
 // fc4aSources and fc4aPresentations name the source struct of each row
@@ -125,6 +140,7 @@ func TestPresentInstance_EveryFieldHasAnFC4aRow(t *testing.T) {
 				published = append(published, name)
 			}
 		}
+		published = append(published, fc4aMarkers[group]...)
 		sort.Strings(published)
 		if got := tagNames(fc4aPresentations[group], "json"); !reflect.DeepEqual(got, published) {
 			t.Errorf("%s: presentation fields %v, published rows %v", group, got, published)
@@ -153,6 +169,9 @@ func fullyPopulatedInstance() V1RuntimeBrokerInstanceConfig {
 			SharedDirStorageClass: "standard-rwx", SharedDirSize: "40Gi", SafeToEvict: &evict,
 			SharedDirStorageBackend: "nfs", SharedDirStorageBackends: map[string]string{"data": "local"},
 			HomeStorageBackend: "nfs", HomeStorageLeaf: "NEVER-leaf",
+			NodeSelector:     map[string]string{"scion.dev/pool": "agents"},
+			Tolerations:      []api.K8sToleration{{Key: "scion.dev/pool", Operator: "Equal", Value: "agents", Effect: "NoSchedule"}},
+			RuntimeClassName: "gvisor",
 		},
 		AgentDefaults: &V1InstanceAgentDefaults{
 			DefaultHarnessConfig: "claude", ImageRegistry: "registry.example/team", CloneDepth: "full",
@@ -185,6 +204,9 @@ func TestPresentInstance_RedactsEveryFC4aRow(t *testing.T) {
 			PriorityClassName: "agents-high", SharedDirStorageClass: "standard-rwx", SharedDirSize: "40Gi",
 			SafeToEvict: &evict, SharedDirStorageBackend: "nfs", SharedDirStorageBackends: map[string]string{"data": "local"},
 			HomeStorageBackend: "nfs",
+			NodeSelector:       map[string]string{"scion.dev/pool": "agents"},
+			Tolerations:        []api.K8sToleration{{Key: "scion.dev/pool", Operator: "Equal", Value: "agents", Effect: "NoSchedule"}},
+			RuntimeClassName:   "gvisor", PlacementReported: true,
 		},
 		AgentDefaults: &FlatAgentDefaultsPresentation{
 			DefaultHarnessConfig: "claude", ImageRegistry: "registry.example/team", CloneDepth: "full",
@@ -243,6 +265,8 @@ func TestPresentInstance_SharesNothingWithSource(t *testing.T) {
 	before, _ := json.Marshal(got)
 	inst.RuntimeTarget.SharedDirStorageBackends["data"] = "nfs"
 	*inst.RuntimeTarget.SafeToEvict = true
+	inst.RuntimeTarget.NodeSelector["scion.dev/pool"] = "changed"
+	inst.RuntimeTarget.Tolerations[0].Value = "changed"
 	inst.AgentDefaults.Resources.Requests.CPU = "9"
 	inst.AgentDefaults.Volumes[0].Target = "/changed"
 	ho := inst.AgentDefaults.HarnessOverrides["claude"]

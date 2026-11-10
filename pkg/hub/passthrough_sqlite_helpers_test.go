@@ -64,10 +64,14 @@ func setupPassthroughServer(t *testing.T, owner *store.User, hostSAEmail, hostPr
 		GCPHostProjectID:           hostProjectID,
 	}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+	// The broker is remote and serves the hub-managed project from its own
+	// checkout (LocalPath); a remote broker without one is refused at
+	// create (ptone/scion#5813).
 	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
 		ProjectID:  project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
+		LocalPath:  fixtureProviderCheckout(t),
 		Status:     store.BrokerStatusOnline,
 	}))
 	project.DefaultRuntimeBrokerID = broker.ID
@@ -146,10 +150,14 @@ func seedPassthroughSandboxServer(
 		},
 	}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+	// The broker is remote and serves the hub-managed project from its own
+	// checkout (LocalPath); a remote broker without one is refused at
+	// create (ptone/scion#5813).
 	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
 		ProjectID:  project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
+		LocalPath:  fixtureProviderCheckout(t),
 		Status:     store.BrokerStatusOnline,
 	}))
 	project.DefaultRuntimeBrokerID = broker.ID

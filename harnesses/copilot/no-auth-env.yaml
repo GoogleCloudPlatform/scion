@@ -1,0 +1,6 @@
+# Environment added to the container only when the agent runs in no-auth
+# mode (see no_auth in config.yaml). The session bus address points at a path
+# that never exists, so Copilot runs with no session bus and keeps its
+# sign-in in ~/.copilot/config.json, which capture_auth.py reads.
+env:
+  DBUS_SESSION_BUS_ADDRESS: unix:path=/home/scion/.scion/harness/no-session-bus

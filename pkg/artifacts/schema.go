@@ -408,3 +408,55 @@ ALTER TABLE artifact_version ADD COLUMN IF NOT EXISTS source_message_id TEXT;
 CREATE INDEX IF NOT EXISTS idx_artifact_scope_created
     ON artifact (scope_kind, created_at) WHERE deleted_at IS NULL;
 `
+
+// migrationAttachmentProject records, on an attachment bound to a message,
+// the project of that message as the hub derived it from the message's
+// conversation at bind time (ptone/scion#4596). NULL means unknown: an
+// upload not yet bound, or a row bound before this step (nothing is
+// backfilled); an empty string means the message has no project.
+const migrationAttachmentProject = "0010_attachment_project"
+
+const sqliteAttachmentProject = `
+ALTER TABLE artifact ADD COLUMN message_project_id TEXT;
+`
+
+const postgresAttachmentProject = `
+ALTER TABLE artifact ADD COLUMN IF NOT EXISTS message_project_id TEXT;
+`
+
+// migrationDeliveryRedemptions records the redeemed nonces of attachment
+// delivery capabilities (ptone/scion#4596), so each capability serves at
+// most once. Rows older than a day are swept by the maintenance pass.
+const migrationDeliveryRedemptions = "0011_delivery_redemptions"
+
+const sqliteDeliveryRedemptions = `
+CREATE TABLE IF NOT EXISTS artifact_delivery_redemption (
+    nonce       TEXT PRIMARY KEY,
+    redeemed_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_artifact_delivery_redemption_at
+    ON artifact_delivery_redemption (redeemed_at);
+`
+
+const postgresDeliveryRedemptions = `
+CREATE TABLE IF NOT EXISTS artifact_delivery_redemption (
+    nonce       TEXT PRIMARY KEY,
+    redeemed_at TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_artifact_delivery_redemption_at
+    ON artifact_delivery_redemption (redeemed_at);
+`
+
+// migrationSponsorBackfill is the ledger name the sponsor backfill
+// (BackfillSponsors, ptone/scion#6028) records in artifact_migrations when
+// it completes. It is NOT a schema step and is not in migrations: Init
+// never runs or records it, because the backfill needs the host's
+// delegation lookup and runs from the hub's maintenance pass. It shares
+// the ledger's numbering, so the next DDL migration is 0013, never 0012.
+const migrationSponsorBackfill = "0012_sponsor_backfill"
+
+// migrationReviewLadder converts the legacy write grants of the removed
+// review-only path to review (ptone/scion#5145). It is a data step with no
+// DDL; see applyReviewLadder. It follows 0013, the review sessions step
+// of ptone/scion#6849.
+const migrationReviewLadder = "0014_review_ladder"

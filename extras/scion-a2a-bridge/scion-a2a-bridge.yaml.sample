@@ -17,6 +17,13 @@ bridge:
     organization: "My Org"
     url: "https://example.com"
 
+  # Auto-provisioning asks the Hub for an asynchronous agent create
+  # (default true). With a Hub that has async launch on, the bridge
+  # reports the task as working while the agent starts, then sends the
+  # message; a failed start fails the task without sending. Set false to
+  # always use the synchronous create.
+  # async_create: true
+
 # Scion Hub connection.
 hub:
   # Hub API endpoint.

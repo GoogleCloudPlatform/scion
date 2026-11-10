@@ -21,7 +21,7 @@
  * via the session registry and Hub PTY endpoint.
  */
 
-import { LitElement, html, css, nothing, unsafeCSS } from 'lit';
+import { LitElement, html, css, nothing, unsafeCSS, type PropertyValues } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import type {
@@ -44,13 +44,32 @@ import { dispatchPageTitle } from '../../client/page-title.js';
 import type { TerminalAgentMetadata } from '../../client/terminal-metadata.js';
 import '../shared/status-badge.js';
 import { showToast } from '../../utils/toast.js';
+import { copyToClipboard, copyWithToast } from '../../utils/clipboard.js';
 import { buildAgentDMKey, chatConversationPath } from '../../client/chat-routes.js';
 import { isFeatureEnabled } from '../../utils/feature-flags.js';
-import { TERMINAL_DRAG_MIME } from '../../client/terminal-workspace-events.js';
+import {
+  TERMINAL_DRAG_MIME,
+  TERMINAL_PANE_DIALOG_OPEN_EVENT,
+} from '../../client/terminal-workspace-events.js';
 import { navigateTo } from '../../client/navigation.js';
 
 /** Back to Agent in a compact pane header (U+1F916 ROBOT FACE). */
 const ROBOT_EMOJI = '\u{1F916}';
+
+/**
+ * Reads the clipboard text for a paste, resolving `null` instead of throwing
+ * when the Clipboard API is unavailable (a plain-http host) or the read is
+ * denied.
+ */
+function readClipboardText(): Promise<string | null> {
+  try {
+    const clipboard = (navigator as Partial<Navigator>).clipboard;
+    if (typeof clipboard?.readText !== 'function') return Promise.resolve(null);
+    return clipboard.readText().catch(() => null);
+  } catch {
+    return Promise.resolve(null);
+  }
+}
 
 // xterm.js imports are client-side only — guarded by typeof check in lifecycle
 // These will be imported dynamically in firstUpdated() since they require DOM APIs
@@ -203,7 +222,7 @@ export class ScionTerminalPane extends LitElement {
   @state() private uploadEnabled = false;
   @state() private uploadDisabledReason = '';
   @state() private uploadTargetDir = ''; // shared dir name (e.g. "scratchpad")
-  @state() private uploadBasePath = ''; // container path (e.g. "/scion-volumes/scratchpad")
+  @state() private uploadBasePath = ''; // container path of the target dir, from the hub (SharedDir.target)
   @state() private isDragOver = false;
   @state() private isUploading = false;
   @state() private uploadStatus = ''; // progress/error message in overlay
@@ -870,6 +889,22 @@ export class ScionTerminalPane extends LitElement {
     this.cancelResize();
   }
 
+  /**
+   * Announces each capture-auth dialog as it opens, with
+   * TERMINAL_PANE_DIALOG_OPEN_EVENT. The dialogs render already open, so
+   * they fire no `sl-show` a surface outside the pane could observe.
+   */
+  protected override updated(changed: PropertyValues): void {
+    super.updated(changed);
+    const opened = (key: 'captureAuthConflicts' | 'captureAuthScopeDialogOpen'): boolean =>
+      changed.has(key) && !changed.get(key) && Boolean(this[key]);
+    if (opened('captureAuthConflicts') || opened('captureAuthScopeDialogOpen')) {
+      this.dispatchEvent(
+        new CustomEvent(TERMINAL_PANE_DIALOG_OPEN_EVENT, { bubbles: true, composed: true })
+      );
+    }
+  }
+
   /** Recompute and push the combined frontmost signal. */
   private _onDocumentVisibilityChange = (): void => {
     this.updateFrontmost();
@@ -1241,24 +1276,22 @@ export class ScionTerminalPane extends LitElement {
         // Clipboard read — requires focused + visible + generation match.
         if (!this._visible || !this._focused || this.disposed) return true;
         const gen = this.session?.state.generation ?? 0;
-        void navigator.clipboard
-          .readText()
-          .then((text) => {
-            // Recheck at completion: focus/visibility/generation may have changed.
-            // Generation check prevents leaking clipboard to a reconnected session.
-            if (
-              !this._visible ||
-              !this._focused ||
-              this.disposed ||
-              this.session?.state.generation !== gen
-            )
-              return;
-            const bytes = new TextEncoder().encode(text);
-            let binary = '';
-            for (const byte of bytes) binary += String.fromCharCode(byte);
-            this.sendData(`\x1b]52;${sel};${btoa(binary)}\x07`);
-          })
-          .catch(() => {});
+        void readClipboardText().then((text) => {
+          if (text === null) return;
+          // Recheck at completion: focus/visibility/generation may have changed.
+          // Generation check prevents leaking clipboard to a reconnected session.
+          if (
+            !this._visible ||
+            !this._focused ||
+            this.disposed ||
+            this.session?.state.generation !== gen
+          )
+            return;
+          const bytes = new TextEncoder().encode(text);
+          let binary = '';
+          for (const byte of bytes) binary += String.fromCharCode(byte);
+          this.sendData(`\x1b]52;${sel};${btoa(binary)}\x07`);
+        });
       } else {
         // Clipboard write — guard prevents unauthorized initiation.
         // Note: once writeText() is dispatched, the OS write cannot be revoked
@@ -1269,7 +1302,8 @@ export class ScionTerminalPane extends LitElement {
           const binary = atob(payload);
           const bytes = Uint8Array.from(binary, (c) => c.charCodeAt(0));
           const text = new TextDecoder().decode(bytes);
-          void navigator.clipboard.writeText(text).catch(() => {});
+          // Program-driven write: no toast, and a failure is ignored.
+          void copyToClipboard(text);
         } catch {
           // Invalid base64: atob() throws → no clipboard mutation.
           // Deliberate divergence from original addon which decoded invalid
@@ -1348,7 +1382,7 @@ export class ScionTerminalPane extends LitElement {
       // Ctrl/Cmd+C: copy selection — requires focused + visible.
       if (event.type === 'keydown' && event.key === 'c' && isMod && !event.shiftKey) {
         if (this._visible && this._focused && this.terminal?.hasSelection()) {
-          void navigator.clipboard.writeText(this.terminal.getSelection());
+          void copyWithToast(this.terminal.getSelection());
           return false; // prevent sending to PTY
         }
         return true; // no selection → send SIGINT
@@ -1359,7 +1393,7 @@ export class ScionTerminalPane extends LitElement {
       if (event.type === 'keydown' && event.key === 'v' && isMod && !event.shiftKey) {
         event.preventDefault();
         const gen = this.session?.state.generation ?? 0;
-        void navigator.clipboard.readText().then((text) => {
+        void readClipboardText().then((text) => {
           if (
             text &&
             this._visible &&
@@ -1375,7 +1409,7 @@ export class ScionTerminalPane extends LitElement {
       // Ctrl+Shift+C: always copy (focused + visible)
       if (event.type === 'keydown' && event.key === 'C' && event.ctrlKey && event.shiftKey) {
         if (this._visible && this._focused && this.terminal?.hasSelection()) {
-          void navigator.clipboard.writeText(this.terminal.getSelection());
+          void copyWithToast(this.terminal.getSelection());
         }
         return false;
       }
@@ -1384,7 +1418,7 @@ export class ScionTerminalPane extends LitElement {
       if (event.type === 'keydown' && event.key === 'V' && event.ctrlKey && event.shiftKey) {
         event.preventDefault();
         const gen = this.session?.state.generation ?? 0;
-        void navigator.clipboard.readText().then((text) => {
+        void readClipboardText().then((text) => {
           if (
             text &&
             this._visible &&
@@ -1467,13 +1501,14 @@ export class ScionTerminalPane extends LitElement {
       }
       const data = (await resp.json()) as { sharedDirs?: SharedDir[] };
       const dirs = data.sharedDirs ?? [];
-      // Filter: writable, non-in_workspace
-      const candidates = dirs.filter((d) => !d.read_only && !d.in_workspace);
+      // Filter: writable, non-in_workspace, with a container path from the
+      // hub (the layout authority computes it; the UI never builds one).
+      const candidates = dirs.filter((d) => !d.read_only && !d.in_workspace && !!d.target);
       const target = candidates.find((d) => d.name === 'scratchpad') || candidates[0];
-      if (target) {
+      if (target && target.target) {
         this.uploadEnabled = true;
         this.uploadTargetDir = target.name;
-        this.uploadBasePath = `/scion-volumes/${target.name}`;
+        this.uploadBasePath = target.target;
       } else {
         this.uploadEnabled = false;
         this.uploadDisabledReason = 'No writable shared directory available for file upload';

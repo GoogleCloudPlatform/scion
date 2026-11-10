@@ -39,6 +39,7 @@ package hub
 import (
 	"context"
 	"errors"
+	"fmt"
 	"maps"
 	"sync"
 
@@ -103,6 +104,18 @@ type authzInputMemo struct {
 	// only. This is the ONLY ceiling input this memo ever serves — see
 	// maskAuthzInputs below.
 	edges map[string][]*store.DelegationEdge
+
+	// users memoizes the requester's users-row lookup for decide's
+	// account-status gate (principalStatusGate), keyed by user ID. A found
+	// row and a not-found result are stored; a store fault is not.
+	users map[string]memoUser
+}
+
+// memoUser is one memoized users-row lookup: the row, or notFound when the
+// store reported store.ErrNotFound.
+type memoUser struct {
+	user     *store.User
+	notFound bool
 }
 
 // authzMemoHolder is the value stored under each of the two context keys
@@ -135,6 +148,7 @@ func withAuthzInputMemo(ctx context.Context) context.Context {
 	holder := &authzMemoHolder{memo: &authzInputMemo{
 		principals: make(map[principalKey]*memoEntry),
 		edges:      make(map[string][]*store.DelegationEdge),
+		users:      make(map[string]memoUser),
 	}}
 	ctx = context.WithValue(ctx, authzInputsContextKey{}, holder)
 	ctx = context.WithValue(ctx, authzEdgesContextKey{}, holder)
@@ -302,12 +316,17 @@ func (h *principalInputs) Principals() ([]store.PrincipalRef, error) {
 	}
 	h.principalsLoaded = true
 
-	// Done-ctx bypass: on a cancelled/expired ctx, the memo is bypassed
-	// entirely. Today's store call is made with today's ctx and its result
-	// is returned verbatim; nothing is stored. This is what makes
-	// post-cancellation behaviour identical to today's by construction,
-	// whatever the store does with a done ctx.
-	if h.memo == nil || !h.memoEligible() || h.ctx.Err() != nil {
+	// Done ctx: once the request context has ended, the closure is not
+	// resolved at all, memo or no memo (ptone/scion#6012). The error wraps
+	// ctx.Err(), so every caller fails closed exactly as for a store
+	// failure, and since ctx.Err() is sticky, every later decision of the
+	// request stops here too without a store call. Nothing is stored.
+	if err := h.ctx.Err(); err != nil {
+		h.principalsErr = fmt.Errorf("authorization principals: %w", err)
+		return nil, h.principalsErr
+	}
+
+	if h.memo == nil || !h.memoEligible() {
 		h.principalsVal, h.principalsErr = h.a.authorizationPrincipals(h.ctx, h.identity)
 		return h.principalsVal, h.principalsErr
 	}

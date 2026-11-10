@@ -341,7 +341,17 @@ func TestSettingsOverlay_ImageRegistryInputs(t *testing.T) {
 // file under pkg/ or cmd/ passes that name (as a literal or as
 // EnvImageRegistry) to os.Getenv or os.LookupEnv.
 func TestImageRegistryEnvReadOnlyByHelper(t *testing.T) {
+	assertEnvReadOnlyByHelper(t, EnvImageRegistry, "EnvImageRegistry", "ImageRegistryFromEnv", "image_registry.go")
+}
+
+// assertEnvReadOnlyByHelper fails when a non-test Go file under pkg/ or
+// cmd/ passes env (as a literal, or as the constant constName) to
+// os.Getenv or os.LookupEnv anywhere except in function helper of file
+// helperFile.
+func assertEnvReadOnlyByHelper(t *testing.T, env, constName, helper, helperFile string) {
+	t.Helper()
 	root := filepath.Join("..", "..")
+	literal := strconv.Quote(env)
 	var bad []string
 	for _, sub := range []string{"pkg", "cmd"} {
 		err := filepath.WalkDir(filepath.Join(root, sub), func(path string, d fs.DirEntry, err error) error {
@@ -357,7 +367,7 @@ func TestImageRegistryEnvReadOnlyByHelper(t *testing.T) {
 			}
 			ast.Inspect(f, func(n ast.Node) bool {
 				fn, ok := n.(*ast.FuncDecl)
-				if ok && fn.Name.Name == "ImageRegistryFromEnv" && filepath.Base(path) == "image_registry.go" {
+				if ok && fn.Name.Name == helper && filepath.Base(path) == helperFile {
 					return false
 				}
 				call, ok := n.(*ast.CallExpr)
@@ -370,15 +380,15 @@ func TestImageRegistryEnvReadOnlyByHelper(t *testing.T) {
 				}
 				switch a := call.Args[0].(type) {
 				case *ast.BasicLit:
-					if a.Value == `"SCION_IMAGE_REGISTRY"` {
+					if a.Value == literal {
 						bad = append(bad, path)
 					}
 				case *ast.Ident:
-					if a.Name == "EnvImageRegistry" {
+					if a.Name == constName {
 						bad = append(bad, path)
 					}
 				case *ast.SelectorExpr:
-					if a.Sel.Name == "EnvImageRegistry" {
+					if a.Sel.Name == constName {
 						bad = append(bad, path)
 					}
 				}
@@ -391,7 +401,7 @@ func TestImageRegistryEnvReadOnlyByHelper(t *testing.T) {
 		}
 	}
 	if len(bad) > 0 {
-		t.Fatalf("SCION_IMAGE_REGISTRY read outside config.ImageRegistryFromEnv: %v", bad)
+		t.Fatalf("%s read outside config.%s: %v", env, helper, bad)
 	}
 }
 

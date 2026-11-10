@@ -23,8 +23,8 @@ import (
 	"testing"
 	"time"
 
-	entsql "entgo.io/ent/dialect/sql"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	"github.com/google/uuid"
@@ -54,7 +54,7 @@ func newJSONNormalizeFixture(t *testing.T) *jsonNormalizeFixture {
 	t.Helper()
 	ctx := context.Background()
 	client := enttest.NewClient(t)
-	drv, ok := client.Driver().(*entsql.Driver)
+	drv, ok := entc.SQLDriver(client.Driver())
 	require.True(t, ok, "test client is not backed by database/sql")
 	f := &jsonNormalizeFixture{db: drv.DB(), client: client, agents: NewAgentStore(client)}
 	f.dialect = drv.Dialect()

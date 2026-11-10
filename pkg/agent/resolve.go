@@ -15,13 +15,15 @@
 package agent
 
 import (
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
-// ResolveRuntime determines the runtime to use for an agent.
+// ResolveRuntimeWithRecord determines the runtime to use for an agent and
+// returns it with its build record (runtime.GetRuntimeWithRecord).
 // If profileFlag is non-empty, it is used as the profile name.
-// Otherwise, GetRuntime resolves the active profile from merged settings
+// Otherwise, the active profile is resolved from merged settings
 // (project settings override global settings).
-func ResolveRuntime(projectPath, agentName, profileFlag string) runtime.Runtime {
-	return runtime.GetRuntime(projectPath, profileFlag)
+func ResolveRuntimeWithRecord(projectPath, agentName, profileFlag string) (runtime.Runtime, config.RuntimeBuildRecord) {
+	return runtime.GetRuntimeWithRecord(projectPath, profileFlag)
 }

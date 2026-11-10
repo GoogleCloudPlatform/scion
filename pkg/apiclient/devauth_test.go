@@ -158,14 +158,8 @@ func TestInitDevAuth(t *testing.T) {
 			t.Errorf("Token file content = %v, want %v", string(data), token1)
 		}
 
-		// Check file permissions
-		info, err := os.Stat(tokenFile)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if info.Mode().Perm() != 0600 {
-			t.Errorf("Token file permissions = %v, want 0600", info.Mode().Perm())
-		}
+		// Check the file is private (mode 0600; on Windows an owner-only ACL)
+		assertPrivateTokenFile(t, tokenFile)
 
 		// Second call should return same token
 		token2, err := InitDevAuth(cfg, subDir)

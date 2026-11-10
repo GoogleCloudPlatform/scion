@@ -6,6 +6,10 @@ Scion is a container-based orchestration platform for running multiple LLM "deep
 
 ## Orchestration
 
+**Lead**:
+An agent that carries continuity for a project or workstream from its initial request through closure, including non-code and non-repository work. The first agent, an agent coordinating that workstream, or a human-designated lead is protected regardless of its starting template. Only a human may authorize deletion of that lead. A bounded delegated supervisor is not automatically a lead; workflow-specific role mappings belong to that workflow.
+_Avoid_: initiator (for the agent role; unrelated to the `initiatorPrincipal` provenance concept).
+
 **Agent**:
 An isolated worker: one LLM-plus-harness loop in its own container with its own identity, credentials, and workspace. The fundamental unit of execution in Scion.
 _Avoid_: worker, bot, instance, process
@@ -98,7 +102,7 @@ A workspace sharing mode where one workspace directory is mounted into every age
 _Avoid_: shared mount, plain workspace
 
 **Worktree-per-agent**:
-A workspace sharing mode where each agent gets its own git worktree over a shared checkout, isolating working trees while sharing one clone's history. Supported on repositories linked to the local workstation Hub (registered with this mode automatically; the worktrees are of your own checkout) and on Hub-managed git projects created with `worktree-per-agent` (see "Linked git projects" in the docs); on Kubernetes it requires NFS workspace storage.
+A workspace sharing mode where each agent gets its own git worktree over a shared checkout, isolating working trees while sharing one clone's history (with the shared `.git` root mounted read-only into each container). Supported on repositories linked to the local workstation Hub (registered with this mode automatically; the worktrees are of your own checkout) and on Hub-managed git projects created with `worktree-per-agent` (see "Linked git projects" in the docs); not supported on Kubernetes.
 _Avoid_: worktree mode, shared checkout
 
 **Clone-per-agent**:
@@ -256,33 +260,22 @@ A short-lived, single-use token the Hub issues when a user creates or re-registe
 _Avoid_: registration token, bootstrap secret
 _See also_: Runtime Broker, User Access Token (UAT) (a different credential)
 
+**Deliverable**:
+A general work product, such as a code change, design, report or document. Use **File / Document** for concrete content and **Artifact** for a resource published through Scion's artifact system. Not every deliverable needs artifact-system publication.
+_See also_: File / Document, Artifact, Durability
+
+**File / Document**:
+Concrete content, including a file in a scratchpad. A file remains a file whether or not it is published as a Scion artifact. Its existence alone does not make it durable.
+_See also_: Deliverable, Artifact, Durability
+
+**Durability**:
+The property of a deliverable being reachable by someone else after its producing agent's container has been deleted. A verified shared-volume document or pushed remote ref can be durable without artifact-system publication. Publication alone does not guarantee retention: published content may expire or be deleted.
+_See also_: Deliverable, File / Document, Artifact
+
 **Artifact**:
 A published file or folder (a bundle) stored by the Hub, with numbered immutable versions and a stable reference `scion://artifact/<id>[@<seq>]` that works from any Runtime Broker and in the web UI. Owned by the publishing agent or user and homed in a project. Gated by the `hub.artifacts` experiment. Not a build output or a chat attachment.
 _Avoid_: attachment, upload, build artifact
-_See also_: Project
-
-## Users & Access
-
-**Access Boundary**:
-The user-facing term and UI representation of an underlying **AccessConstraint**. It defines a monotonic maximum-permissions boundary (permission ceiling) for users, group closures, or all principals. Admins can view, create, and manage access boundaries via a guided authoring workflow, previewing and dry-running changes using the built-in preview engine and effective-access integration before committing. It is not a User Access Token's boundary (the single project or the hub a UAT is bound to).
-_Avoid_: access ceiling, permission boundary, role constraint
-_See also_: AccessConstraint, Group, RoleBinding, User Access Token (UAT)
-
-**Agent Authorization Role**:
-A named authority tier (one of `none`, `readonly`, `baseline`, or `full`) assigned to an agent that governs the API scopes granted in its Hub-issued JWT. At creation, the requested or default role is capped by the project maximum and, for sub-agents, the parent agent's role. Live delegation checks separately verify the caller's authority.
-_Avoid_: raw template scopes, agent scopes
-_See also_: User Access Token (UAT)
-
-**Group**:
-A named collection of Hub users, agents and nested groups used by the Hub permissions system to assign access. This is the primary meaning of "group" in Scion.
-_Avoid_: team, org, role
-_See also_: Message Group (different concept — message recipients, not users), Thread Group (different concept — a project's threads, not users)
-
-**User Access Token (UAT)**:
-A scoped, revocable bearer token (prefixed with `scion_pat_`) linked to a user account and used for non-interactive Hub authentication (e.g., CLI, CI/CD pipelines, desktop app integration). Every UAT has a boundary, either a single project or (for a hub-bound token, minted through the API) the hub, and carries a specific list of action permissions (scopes). The token boundary is not an **Access Boundary**.
-_Avoid_: personal access token (PAT), API key, secret token
-_See also_: Hub
-
+_See also_: Project, Deliverable, File / Document, Durability
 
 **Quota System**:
 An advisory-lock-based enforcement system that governs resource consumption at agent and project creation. It uses fail-closed semantics and prevents reservation leaks, operating on schemas including LimitDefinition, EntitlementBinding, and UsageReservation.
@@ -307,6 +300,29 @@ _See also_: Inventory target key, Flat Runtime Broker
 **Inventory target key**:
 The `auxiliaryRuntimeIdentity` string (runtime name, plus context and namespace on Kubernetes) that heartbeats, start claims and recovery use to name the runtime an agent was observed on. It appears as `appliedConfig.runtimeTarget`/`runtimeTargetCandidate`, `hubclient.AgentHeartbeat.RuntimeTarget` and the Hub-side heartbeat agent type. It is not a runtime target ID.
 _See also_: Runtime target ID
+
+## Users & Access
+
+**Access Boundary**:
+The user-facing term and UI representation of an underlying **AccessConstraint**. It defines a monotonic maximum-permissions boundary (permission ceiling) for users, group closures, or all principals. Admins can view, create, and manage access boundaries via a guided authoring workflow, previewing and dry-running changes using the built-in preview engine and effective-access integration before committing. It is not a User Access Token's boundary (the single project or the hub a UAT is bound to).
+_Avoid_: access ceiling, permission boundary, role constraint
+_See also_: AccessConstraint, Group, RoleBinding, User Access Token (UAT)
+
+**Agent Authorization Role**:
+A named authority tier (one of `none`, `readonly`, `baseline`, or `full`) assigned to an agent that governs the API scopes granted in its Hub-issued JWT. At creation, the requested or default role is capped by the project maximum and, for sub-agents, the parent agent's role. Live delegation checks separately verify the caller's authority.
+_Avoid_: raw template scopes, agent scopes
+_See also_: User Access Token (UAT)
+
+**Group**:
+A named collection of Hub users, agents and nested groups used by the Hub permissions system to assign access. This is the primary meaning of "group" in Scion.
+_Avoid_: team, org, role
+_See also_: Message Group (different concept — message recipients, not users), Thread Group (different concept — a project's threads, not users)
+
+**User Access Token (UAT)**:
+A scoped, revocable bearer token (prefixed with `scion_pat_`) linked to a user account and used for non-interactive Hub authentication (e.g., CLI, CI/CD pipelines, desktop app integration). Every user access token has a boundary and carries a specific list of action permissions (scopes). Each request is allowed only when the token carries the scope and the user currently has that access. The token boundary is not an **Access Boundary**.
+_Token boundary_: the reach of a user access token, chosen when it is created in the web UI, the CLI or the API: a single project (a project token), or the hub (a hub token), which works in every project the user can currently access and is the only boundary that can carry hub-level scopes.
+_Avoid_: personal access token (PAT), API key, secret token
+_See also_: Hub
 
 ## Messaging
 
@@ -364,9 +380,39 @@ The default message mode. Any user with the `agent:message` permission in the pr
 _Avoid_: open mode, public mode
 
 **Thread Group**:
-A named set of a project's group conversations (threads), owned by the project and shared by every project member, user or agent. A thread is in at most one thread group; adding it to another moves it. Membership is shared, while each user keeps their own sidebar order. Served at `/api/v1/thread-groups` and managed with `scion conversation group`, behind the `hub.chat_thread_groups` experiment (ptone/scion#4424). It is not a permissions **Group** and not a **Message Group**. The older per-user groups in a user's chat preferences are *personal groups*.
+A named set of a project's group conversations (threads), owned by the project and shared by every project member, user or agent. A thread is in at most one thread group; adding it to another moves it. Membership is shared, while each user keeps their own sidebar order. Served at `/api/v1/thread-groups` and managed with `scion conversation group` (ptone/scion#4424). It is not a permissions **Group** and not a **Message Group**. The older per-user groups in a user's chat preferences are *personal groups*.
 _Avoid_: group (bare), folder, channel, conversation group, thread folder
 _See also_: Group (hub users, not threads), Message Group (recipients of one send, not threads), Native Web Chat
+
+**Decision** (choices):
+One thing an agent needs a human to decide, posted in a choice prompt. It has a per-agent **key** (one the agent picks, such as `D234`, which has at least one non-digit, or a number the Hub assigns from a per-agent counter, such as `17`), **versions** (reposting the key with `--update` adds one), and a **status**: `pending`, `decided` or `replaced`. It is named across versions by `<asker-agent-uuid>/<key>`, and one version by `<asker-agent-uuid>/<key>@<version>`. The feature as a whole is called **choices** (the `web.chat_choices` experiment).
+_Avoid_: prompt (for the decision), poll, ticket, request
+_See also_: Question, Choice, Answer, Choice prompt
+
+**Question** (choices):
+The text of a decision: a markdown field the agent writes.
+_Avoid_: prompt, title
+_See also_: Decision
+
+**Choice** (choices):
+One of the options offered for a decision: an id (agent-supplied or `1..N` by position), a plain-text label, and an optional description.
+_Avoid_: option, button (for the data; acceptable for the UI control)
+_See also_: Decision, Answer
+
+**Answer** (choices):
+The choice recorded for a decision. It is **direct** (a user's click) or **interpreted** (recorded by the asking agent from a user's free-text reply), and a direct answer may **confirm** or **override** an interpreted one. The answer comes back to the agent as a `choice-response` message.
+_Avoid_: decision (for the answer), vote, selection, response (for the record)
+_See also_: Decision, Decision log
+
+**Choice prompt**:
+The message (type `choice-prompt`) that carries one or more decisions. Its text also holds a markdown copy of them, so surfaces that cannot show the cards still show the decisions.
+_Avoid_: choices message, poll, question message
+_See also_: Decision, Answer
+
+**Decision log**:
+The list of answers, append-only and kept forever, each with the question and label snapshots, who answered, the surface and the provenance (direct or interpreted).
+_Avoid_: answer history, audit log (the audit log is a different record)
+_See also_: Answer, Decision
 
 ## Identity & State
 

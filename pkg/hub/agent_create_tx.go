@@ -24,6 +24,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/lifecycleevents"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
@@ -154,6 +155,11 @@ func (s *Server) commitAgentCreate(ctx context.Context, w agentCreateWrite) erro
 	}
 	w.Edge.EffectCeiling = w.Ceiling
 	w.Edge.AuthorityProvenance = w.Provenance
+	// The creating principal is not on the agent row; the lifecycle
+	// observer records it on the created event (WP1 design 2.1).
+	ctx = lifecycleevents.WithCreateContext(ctx, lifecycleevents.CreateContext{
+		CreatorType: w.Edge.DelegatorType, CreatorID: w.Edge.DelegatorID,
+	})
 
 	return s.store.WithTx(ctx, func(tx store.Store) error {
 		if err := lockAgentGuardUserTx(ctx, tx, w.Agent); err != nil {
@@ -209,8 +215,10 @@ func (s *Server) commitAgentCreate(ctx context.Context, w agentCreateWrite) erro
 // audit record, so readers can tell a failure before dispatch from a
 // dispatch failure.
 const (
-	createStageStorage           = "storage"
-	createStageUploadURL         = "upload_url"
+	createStageStorage   = "storage"
+	createStageUploadURL = "upload_url"
+	// createStageWorkspaceStorage: the project's workspace is on storage the
+	// target broker cannot reach (the remote-broker refusal, 409).
 	createStageWorkspaceStorage  = "workspace_storage"
 	createStageManaged           = "managed"
 	createStageRunIntent         = "run_intent"
@@ -218,9 +226,6 @@ const (
 	createStageDispatch          = "dispatch"
 	createStageMissingEnv        = "missing_env"
 	createStageProvision         = "provision"
-	// createStageWorkspaceUpload: the hub-managed workspace upload ran past
-	// its own budget (hubWorkspaceUploadTimeout).
-	createStageWorkspaceUpload = "workspace_upload"
 	// createStageEnvFinalize: the env submit's finalize dispatch, which
 	// starts the agent. Recorded only when its outcome is unknown
 	// (keepUnknownOutcomeStart); the finalize never rolls the create back.
@@ -228,10 +233,6 @@ const (
 	// createStageManagedRecord: the managed create's post-create write
 	// (managed Runtime, interaction ID) failed (ptone/scion#3557).
 	createStageManagedRecord = "managed_record"
-	// createStageWorkspaceRecord: the write that records the hub-managed
-	// workspace's storage path and bucket on the row failed
-	// (ptone/scion#3730).
-	createStageWorkspaceRecord = "workspace_record"
 )
 
 // createRowCompensable is the predicate of a conditional create
@@ -360,7 +361,7 @@ func (s *Server) compensateAgentCreate(ctx context.Context, c createCompensation
 	// check rolls it all back. A delete claim that lands after the read
 	// bumps state_version, so the row delete misses and the attempt is
 	// retried from a fresh read, which then refuses.
-	n, err := s.store.FinalizeAgentDeletion(ctx, agentID, createRowCompensable(), store.DeletionFinalizeHard, store.DeletionFields{},
+	n, err := s.store.FinalizeAgentDeletion(lifecycleCreateRollback(ctx, c.Stage), agentID, createRowCompensable(), store.DeletionFinalizeHard, store.DeletionFields{},
 		createRowHeldCheck(edgesAndAudit))
 	if errors.Is(err, errCreateRowDeleteHeld) {
 		return errCreateRowDeleteHeld

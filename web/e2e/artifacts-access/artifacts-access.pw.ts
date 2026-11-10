@@ -36,8 +36,15 @@
  * - R1-06/07: the owner grants the grantee Can edit in the Share dialog;
  *   the grantee publishes v2 from the Edit view; the owner stays the owner.
  * - R1-08: Grant review access is hidden on a user-owned artifact.
- * - R1-B1..B5 (agent-owned artifact): NOT RUN here, skipped with the reason
- *   (they need a broker and a publishing agent).
+ * - R1-11 (its own test, after R1-A): with web.artifact_manage_access on,
+ *   the owner's Manage access dialog creates a link, shows it once, lists
+ *   and revokes it; member, padmin and the grantee see no Manage access
+ *   button and no Create link, and the hub refuses their POST /links. The
+ *   override is reset in the cleanup. Stewards need an agent-owned
+ *   artifact (a broker), so their Create link is covered by the dialog's
+ *   component tests, not here.
+ * - The agent-owned artifact rows (R1-B) are a separate suite:
+ *   web/e2e/artifacts-agent-owned/.
  * - R1-09/10 (afterAll): cleanup verified by absence, then the evidence.
  *
  * Each row records its UI observation and the API statuses. The UI
@@ -94,6 +101,12 @@ import {
   shareCloseButton,
   shareDialog,
   shareSuggestion,
+  accessCreateLinkButton,
+  accessDialog,
+  accessLinkRows,
+  accessRevokeButtons,
+  anyCreateLinkButton,
+  manageAccessButton,
   tab,
   uploadVersionButton,
   type HeaderControl,
@@ -108,6 +121,8 @@ import {
 } from './state.js';
 
 const EXPERIMENT = 'hub.artifacts';
+/** The Manage access dialog (web only; ptone/scion#7107), switched on for R1-11. */
+const MANAGE_ACCESS_EXPERIMENT = 'web.artifact_manage_access';
 const ENTRY = 'r1-access.md';
 const ENTRY_TEXT = [
   '# R1 access fixture',
@@ -118,10 +133,6 @@ const ENTRY_TEXT = [
   '',
 ].join('\n');
 const APPENDED_LINE = 'Appended by the grantee.';
-const R1B_REASON =
-  'NOT RUN: needs an agent-owned artifact fixture (a broker and an agent that publishes, ' +
-  "created from a member session, ptone/scion#4569); main's e2e harness has no runtime " +
-  'broker option. Rows frozen; run them with that fixture.';
 
 /** One identity of the journey. */
 interface Identity {
@@ -184,7 +195,6 @@ interface CapabilityFlags {
   canManage: boolean;
   canPublish: boolean;
   canReview: boolean;
-  canGrantReview: boolean;
 }
 
 /** Shared state of the journey. */
@@ -197,6 +207,8 @@ const journey: {
   artifact?: { id: string; title: string; ownerRefAtPublish?: string | undefined };
   /** Set when a precondition failure stops the remaining rows. */
   stopped?: string;
+  /** R1-11 stored an override of web.artifact_manage_access (the cleanup resets it). */
+  manageAccessSet?: boolean;
   /** First line of a beforeAll failure (identities, projects, memberships). */
   setupError?: string;
   /** First line of an R1-A failure outside any row (e.g. the experiment toggle). */
@@ -324,14 +336,14 @@ interface ExperimentState {
   override: boolean | null;
 }
 
-async function readExperiment(): Promise<ExperimentState> {
+async function readExperiment(name: string = EXPERIMENT): Promise<ExperimentState> {
   const res = await adminRequest('GET', '/api/v1/admin/experiments');
   if (res.status !== 200) throw new Error(`GET /api/v1/admin/experiments answered ${res.status}`);
   const body = res.body as {
     revision: number;
     experiments: Array<{ name: string; enabled: boolean; override: boolean | null }>;
   };
-  const entry = body.experiments.find((e) => e.name === EXPERIMENT);
+  const entry = body.experiments.find((e) => e.name === name);
   return {
     revision: body.revision,
     enabled: entry ? entry.enabled : null,
@@ -339,14 +351,17 @@ async function readExperiment(): Promise<ExperimentState> {
   };
 }
 
-async function setExperiment(value: boolean | null): Promise<ExperimentState> {
-  const before = await readExperiment();
+async function setExperiment(
+  value: boolean | null,
+  name: string = EXPERIMENT
+): Promise<ExperimentState> {
+  const before = await readExperiment(name);
   const res = await adminRequest('PUT', '/api/v1/admin/experiments', {
-    overrides: { [EXPERIMENT]: value },
+    overrides: { [name]: value },
     expected_revision: before.revision,
   });
   if (res.status !== 200) throw new Error(`PUT /api/v1/admin/experiments answered ${res.status}`);
-  return readExperiment();
+  return readExperiment(name);
 }
 
 /** A row of the spec's section 8: who acts, what it checks, whether it is graded. */
@@ -355,7 +370,7 @@ interface RowSpec {
   title: string;
   graded?: boolean;
   /** Where the row runs (for the oracle row map); default the R1-A test. */
-  where?: 'a' | 'b' | 'cleanup';
+  where?: 'a' | 'manage' | 'cleanup';
 }
 
 /** Every row, declared once: it seeds the evidence and the oracle row map. */
@@ -411,30 +426,21 @@ const ROWS: Record<string, RowSpec> = {
     role: 'owner, member, padmin, grantee',
     title: 'Grant review access hidden on a user-owned artifact',
   },
-  'R1-B1': {
-    role: 'owner (delegating user)',
-    title: 'agent-owned: Grant review access visible; Share, Edit, Review hidden',
-    where: 'b',
+  'R1-11a': {
+    role: 'admin API',
+    title: 'web.artifact_manage_access off before the run, then enabled and read back',
+    where: 'manage',
   },
-  'R1-B2': {
-    role: 'padmin',
-    title: 'agent-owned: Grant review access visible; Share hidden',
-    where: 'b',
+  'R1-11b': {
+    role: 'owner',
+    title:
+      'Manage access replaces Share; the dialog creates a link, shows it once, forgets it, lists and revokes it',
+    where: 'manage',
   },
-  'R1-B3': {
-    role: 'member',
-    title: 'agent-owned: Grant review access and Share hidden',
-    where: 'b',
-  },
-  'R1-B4': {
-    role: 'owner -> member',
-    title: 'Grant review access dialog gives Can review',
-    where: 'b',
-  },
-  'R1-B5': {
-    role: 'member',
-    title: 'review grantee sees Review only and saves a review; owner unchanged',
-    where: 'b',
+  'R1-11c': {
+    role: 'member, padmin, grantee',
+    title: 'no Manage access button and no Create link anywhere; the hub refuses their POST /links',
+    where: 'manage',
   },
   'R1-09': {
     role: '-',
@@ -682,7 +688,6 @@ async function capabilities(
     canManage: !!b.canManage,
     canPublish: !!b.canPublish,
     canReview: !!b.canReview,
-    canGrantReview: !!b.canGrantReview,
   };
   rec.ui[`${key}Flags`] = flags;
   return { status: res.status, flags, body: res.body };
@@ -810,44 +815,23 @@ async function addMember(
 }
 
 const TITLE_A = 'R1-A: artifact access per role, graded at the UI';
-const R1B_IDS = Object.keys(ROWS).filter((id) => ROWS[id].where === 'b');
-const r1bTitle = (id: string): string => `${id}: agent-owned artifact`;
+const TITLE_MANAGE =
+  'R1-11: Manage access on: the owner creates a link; others see no Create link and no button';
 const TITLE_CLEANUP = 'R1-09/R1-10: cleanup by absence, then the evidence';
 
 /** Every row mapped to the test that carries it. */
 const ORACLE_ROW_MAP: Record<string, { test: string; note: string }> = Object.fromEntries(
   Object.entries(ROWS).map(([id, spec]) => {
-    if (spec.where === 'b') return [id, { test: r1bTitle(id), note: R1B_REASON }];
     if (spec.where === 'cleanup') {
       return [id, { test: TITLE_CLEANUP, note: `the afterAll hook: evidence.rows["${id}"]` }];
+    }
+    if (spec.where === 'manage') {
+      return [id, { test: TITLE_MANAGE, note: `evidence.rows["${id}"] (a test step)` }];
     }
     const kind = spec.graded === false ? 'observation, not graded' : 'a test step';
     return [id, { test: TITLE_A, note: `evidence.rows["${id}"] (${kind})` }];
   })
 );
-
-// ---- R1-B: agent-owned artifact (frozen rows, NOT RUN here) ------------
-// Declared before the serial R1-A group and outside it, so each body always
-// runs and records its reason, whatever happens to R1-A.
-test.describe('agent-owned artifact rows (R1-B, not run)', () => {
-  for (const id of R1B_IDS) {
-    test(r1bTitle(id), () => {
-      const spec = ROWS[id];
-      notRun([id], R1B_REASON);
-      test.info().annotations.push({
-        type: 'NOT RUN',
-        description: `${id} (${spec.role}): ${spec.title}`,
-      });
-      const results = (journey.evidence.results ??= {}) as Record<string, unknown>;
-      results[r1bTitle(id)] = {
-        status: 'not run',
-        skipReason: R1B_REASON,
-        annotations: annotationsOf(test.info().annotations),
-      };
-      test.skip(true, R1B_REASON);
-    });
-  }
-});
 
 test.describe.serial('artifact access per role (R1)', () => {
   // eslint-disable-next-line no-empty-pattern -- Playwright needs the fixtures argument
@@ -1126,7 +1110,6 @@ test.describe.serial('artifact access per role (R1)', () => {
         canManage: true,
         canPublish: true,
         canReview: false,
-        canGrantReview: false,
       });
     });
 
@@ -1234,7 +1217,6 @@ test.describe.serial('artifact access per role (R1)', () => {
         canManage: false,
         canPublish: false,
         canReview: false,
-        canGrantReview: false,
       });
       const publish = await api(
         'member',
@@ -1293,7 +1275,6 @@ test.describe.serial('artifact access per role (R1)', () => {
         canManage: false,
         canPublish: false,
         canReview: false,
-        canGrantReview: false,
       });
     });
 
@@ -1377,15 +1358,36 @@ test.describe.serial('artifact access per role (R1)', () => {
       expect
         .soft(r.ui.dialogLabel, 'Share dialog label')
         .toBe(`Share “${journey.artifact!.title}”`);
-      // The home project row: listed, "(home project)", no controls.
+      // The home project row (oracle R1 rev2 AMEND1, ptone/scion#4582): listed
+      // as "(home project)", exactly one permission select offering exactly
+      // Can view (read) and Can edit (write), never admin, and no buttons (no
+      // Remove). The select's current value is recorded, not graded or changed.
       const homeControls = grantRowControls(homeGrantRow(ownerPage));
+      const homeSelects = await homeControls.selects.count();
       r.ui.homeRowControls = {
-        selects: await homeControls.selects.count(),
+        selects: homeSelects,
         buttons: await homeControls.buttons.count(),
       };
+      const homeSelect = homeControls.selects.first();
+      r.ui.homeRowPermissionOptions =
+        homeSelects === 1
+          ? await homeSelect
+              .locator('sl-option')
+              .evaluateAll((os) => os.map((o) => o.getAttribute('value') ?? ''))
+          : [];
+      r.ui.homeRowPermissionValue =
+        homeSelects === 1
+          ? await homeSelect.evaluate((el) => String((el as HTMLInputElement).value))
+          : null;
       expect
-        .soft(r.ui.homeRowControls, 'home project row has no controls')
-        .toEqual({ selects: 0, buttons: 0 });
+        .soft(r.ui.homeRowControls, 'home project row: one permission select, no buttons')
+        .toEqual({ selects: 1, buttons: 0 });
+      expect
+        .soft(
+          r.ui.homeRowPermissionOptions,
+          'home project row offers exactly Can view and Can edit'
+        )
+        .toEqual(['read', 'write']);
 
       const res = await searchPeople(grantee.email);
       r.api.push({
@@ -1561,7 +1563,6 @@ test.describe.serial('artifact access per role (R1)', () => {
           canManage: false,
           canPublish: false,
           canReview: false,
-          canGrantReview: false,
         });
       },
       { requires: ['R1-06b', 'R1-07a'] }
@@ -1579,13 +1580,12 @@ test.describe.serial('artifact access per role (R1)', () => {
       if (keys.length < 4) r.legNotRun = 'grantee leg not run: needs R1-06b to pass';
       for (const key of keys) {
         const snap = await snapshotArtifactPage(key, 'R1-08');
-        const caps = await capabilities(key, r);
-        seen[key] = { visible: snap.visible, canGrantReview: caps.flags.canGrantReview };
+        await capabilities(key, r);
+        seen[key] = { visible: snap.visible };
         expect.soft(snap.headerRendered, `${key}: header rendered`).toBe(true);
         expect
           .soft(snap.hidden, `${key}: Grant review access hidden`)
           .toContain('Grant review access');
-        expect.soft(caps.flags.canGrantReview, `${key}: canGrantReview`).toBe(false);
       }
       expect
         .soft(
@@ -1629,6 +1629,221 @@ test.describe.serial('artifact access per role (R1)', () => {
       .toEqual(Object.values(identityChecks).map(() => 'ok'));
 
     expect(journey.hardFailures, 'rows that could not be carried out').toEqual([]);
+  });
+
+  // ---- R1-11: Manage access on (web.artifact_manage_access) ------------
+  // Runs after R1-A (serial): the artifact, the grantee's Can edit grant and
+  // the identities are R1-A's. The owner is the only caller here who may
+  // share; member, padmin (custodian only on a user-owned artifact) and the
+  // grantee (Can edit, no manage) must see neither the button nor Create
+  // link. Stewards exist only on agent-owned artifacts, which need a broker:
+  // the dialog's steward path is covered by the component tests.
+  test(TITLE_MANAGE, async () => {
+    const t = target();
+    const manage: Record<string, unknown> = {};
+    journey.evidence.manageAccess = manage;
+    const ids = ['R1-11a', 'R1-11b', 'R1-11c'];
+    if (!adminToken()) {
+      notRun(
+        ids,
+        'remote target without E2E_ARTIFACTS_TOGGLE_EXPERIMENT=1: web.artifact_manage_access is not toggled'
+      );
+      return;
+    }
+    if (!journey.artifact) {
+      notRun(ids, journey.stopped ?? 'needs R1-01 to pass (no artifact)');
+      return;
+    }
+    const id = artifactId();
+    const linksPath = `/api/v1/artifacts/${id}/links`;
+
+    const enabled = await row('R1-11a', async (r) => {
+      const before = await readExperiment(MANAGE_ACCESS_EXPERIMENT);
+      manage.before = before;
+      r.ui.before = before;
+      expect(before.override, 'no stored override of web.artifact_manage_access').toBeNull();
+      expect.soft(before.enabled, 'web.artifact_manage_access is off by default').toBe(false);
+      journey.manageAccessSet = true;
+      const after = await setExperiment(true, MANAGE_ACCESS_EXPERIMENT);
+      manage.afterEnable = after;
+      r.ui.afterEnable = after;
+      expect(after.enabled, 'web.artifact_manage_access enabled').toBe(true);
+    });
+    if (!enabled) {
+      notRun(['R1-11b', 'R1-11c'], 'needs R1-11a to pass');
+      manage.rows = Object.fromEntries(ids.map((x) => [x, journey.rows[x]?.status ?? null]));
+      expect(enabled, 'R1-11a: web.artifact_manage_access could not be enabled').toBe(true);
+      return;
+    }
+
+    /** Waits until the page applied the hub's experiment map with the flag on. */
+    async function flagApplied(page: Page): Promise<void> {
+      await page.waitForFunction(
+        (name) =>
+          (window as unknown as { __SCION_FEATURES__?: Record<string, boolean> })
+            .__SCION_FEATURES__?.[name] === true,
+        MANAGE_ACCESS_EXPERIMENT
+      );
+    }
+
+    await row(
+      'R1-11b',
+      async (r) => {
+        const snap = await snapshotArtifactPage('owner', 'R1-11b');
+        r.ui.snapshot = snap;
+        const page = await pageOf('owner');
+        await flagApplied(page);
+        const button = manageAccessButton(page);
+        await expect(button, 'owner: Manage access shown').toBeVisible();
+        r.ui.manageAccessShown = true;
+        expectControls(snap, {
+          visible: ['Edit', 'Review', 'Download'],
+          hidden: ['Share', 'Grant review access'],
+        });
+        const get = await api('owner', 'GET', `/api/v1/artifacts/${id}`, undefined, r);
+        const flags = (get.body ?? {}) as { canManage?: boolean; canShare?: boolean };
+        r.ui.ownerFlags = { canManage: !!flags.canManage, canShare: !!flags.canShare };
+        expect.soft(r.ui.ownerFlags, 'owner flags').toEqual({ canManage: true, canShare: true });
+
+        await button.click();
+        const dialog = accessDialog(page);
+        await expect(dialog, 'Manage access dialog open').toBeVisible();
+        r.ui.dialogLabel = await dialog.getAttribute('label');
+        expect
+          .soft(r.ui.dialogLabel, 'dialog label')
+          .toBe(`Manage access: “${journey.artifact!.title}”`);
+        const create = accessCreateLinkButton(page);
+        await expect(create, 'owner: Create link shown').toBeVisible();
+        // Positive anchor: the link list loaded empty (R1-A made no link).
+        await expect(
+          page.locator(SELECTORS.accessLinksSection).getByText('No active links.', { exact: true }),
+          'no active links before the create'
+        ).toBeVisible();
+
+        const createdRes = page.waitForResponse(
+          (q) => q.request().method() === 'POST' && new URL(q.url()).pathname === linksPath
+        );
+        await create.click();
+        const res = await createdRes;
+        // The body carries the token: it is never read into the evidence.
+        r.api.push({
+          as: 'owner',
+          method: 'POST',
+          path: linksPath,
+          status: res.status(),
+          code: null,
+        });
+        expect(res.status(), 'POST /links from the dialog').toBe(201);
+        const shown = page.locator(SELECTORS.accessCreatedLink);
+        await expect(shown, 'the created link is shown').toBeVisible();
+        // Only whether it has the share-link form is recorded, never the value.
+        r.ui.createdLinkForm = await shown.evaluate((el) =>
+          /\/api\/v1\/artifacts\/shared\/[^/\s]+$/.test(String((el as HTMLInputElement).value))
+        );
+        expect.soft(r.ui.createdLinkForm, 'the created link is a share link').toBe(true);
+        await expect.soft(accessLinkRows(page), 'one active link listed').toHaveCount(1);
+
+        await shareCloseButton(page).click();
+        await expect(dialog, 'dialog closed').toBeHidden();
+        await button.click();
+        await expect(dialog, 'dialog reopened').toBeVisible();
+        await expect(accessLinkRows(page), 'the link is listed after reopening').toHaveCount(1);
+        r.ui.createdShownAfterReopen = await page.locator(SELECTORS.accessCreatedLink).count();
+        expect.soft(r.ui.createdShownAfterReopen, 'the created link is shown only once').toBe(0);
+
+        // Revoke it, so the artifact holds no live link after the row.
+        const revokedRes = page.waitForResponse(
+          (q) =>
+            q.request().method() === 'DELETE' &&
+            new URL(q.url()).pathname.startsWith(`${linksPath}/`)
+        );
+        await accessRevokeButtons(page).first().click();
+        const revoked = await revokedRes;
+        r.api.push({
+          as: 'owner',
+          method: 'DELETE',
+          path: `${linksPath}/{linkId}`,
+          status: revoked.status(),
+          code: null,
+        });
+        expect.soft(revoked.status(), 'DELETE /links/{linkId}').toBe(204);
+        await expect.soft(accessLinkRows(page), 'no active link after Revoke').toHaveCount(0);
+        const list = await api('owner', 'GET', linksPath, undefined, r);
+        const live = ((list.body ?? {}) as { links?: unknown[] }).links ?? null;
+        r.ui.linksAfterRevoke = live === null ? null : live.length;
+        expect.soft(r.ui.linksAfterRevoke, 'GET /links after Revoke').toBe(0);
+        await shareCloseButton(page).click();
+        await expect(dialog, 'dialog closed').toBeHidden();
+      },
+      { requires: ['R1-01'] }
+    );
+
+    await row(
+      'R1-11c',
+      async (r) => {
+        const seen: Record<string, unknown> = {};
+        const keys: IdentityKey[] =
+          journey.rows['R1-06b']?.status === 'passed'
+            ? ['member', 'padmin', 'grantee']
+            : ['member', 'padmin'];
+        if (keys.length < 3) r.legNotRun = 'grantee leg not run: needs R1-06b to pass';
+        for (const key of keys) {
+          const snap = await snapshotArtifactPage(key, 'R1-11c');
+          const page = await pageOf(key);
+          await flagApplied(page);
+          const get = await api(key, 'GET', `/api/v1/artifacts/${id}`, undefined, r);
+          const flags = (get.body ?? {}) as {
+            canManage?: boolean;
+            canShare?: boolean;
+          };
+          const probe = await api(key, 'POST', linksPath, { ttlHours: 24 }, r);
+          const view = {
+            headerRendered: snap.headerRendered,
+            visible: snap.visible,
+            manageAccess: await manageAccessButton(page).count(),
+            accessDialogs: await page.locator(SELECTORS.accessDialogHost).count(),
+            createLink: await anyCreateLinkButton(page).count(),
+            flags: {
+              canManage: !!flags.canManage,
+              canShare: !!flags.canShare,
+            },
+            postLinks: { status: probe.status, code: probe.code },
+          };
+          seen[key] = view;
+          expect.soft(view.headerRendered, `${key}: header rendered`).toBe(true);
+          expect.soft(view.manageAccess, `${key}: no Manage access button`).toBe(0);
+          expect.soft(view.accessDialogs, `${key}: no Manage access dialog mounted`).toBe(0);
+          expect.soft(view.createLink, `${key}: no Create link anywhere`).toBe(0);
+          expect.soft(snap.hidden, `${key}: Share hidden`).toContain('Share');
+          expect
+            .soft(snap.hidden, `${key}: Grant review access hidden`)
+            .toContain('Grant review access');
+          expect
+            .soft(view.flags, `${key}: no share flags`)
+            .toEqual({ canManage: false, canShare: false });
+          expect.soft(view.postLinks, `${key}: POST /links refused`).toEqual({
+            status: 403,
+            code: 'forbidden',
+          });
+        }
+        r.ui.seen = seen;
+      },
+      { requires: ['R1-01'] }
+    );
+
+    manage.rows = Object.fromEntries(ids.map((x) => [x, journey.rows[x]?.status ?? null]));
+    expect(
+      journey.hardFailures.filter((f) => f.startsWith('R1-11')),
+      'R1-11 rows that could not be carried out'
+    ).toEqual([]);
+    // Exact: on a hub where the experiment can be toggled, every R1-11 row passes.
+    if (t.hub) {
+      expect(manage.rows, 'every R1-11 row passed').toEqual({
+        'R1-11a': 'passed',
+        'R1-11b': 'passed',
+        'R1-11c': 'passed',
+      });
+    }
   });
 
   // ---- R1-09/R1-10: cleanup by absence, then the evidence --------------
@@ -1741,6 +1956,17 @@ test.describe.serial('artifact access per role (R1)', () => {
       residue.push(`cleanup error (final reads): ${firstLine(err)}`);
     }
 
+    // R1-11's override of web.artifact_manage_access back to its default.
+    if (t && adminToken() && journey.manageAccessSet) {
+      try {
+        const after = await setExperiment(null, MANAGE_ACCESS_EXPERIMENT);
+        cleanup.manageAccessReset = after;
+        if (after.override !== null) residue.push('web.artifact_manage_access override still set');
+      } catch (err) {
+        residue.push(`cleanup error (web.artifact_manage_access reset): ${firstLine(err)}`);
+      }
+    }
+
     // The experiment override back to its stored default.
     if (t && adminToken()) {
       try {
@@ -1828,10 +2054,6 @@ test.describe.serial('artifact access per role (R1)', () => {
         r.reason = `${NOT_REACHED}: ${cause}`;
       }
     }
-    notRun(
-      R1B_IDS.filter((id) => journey.rows[id]?.reason?.startsWith(NOT_REACHED)),
-      R1B_REASON
-    );
 
     // R1-09: cleanup verified by absence.
     const r09 = rowRecord('R1-09');
@@ -1852,9 +2074,6 @@ test.describe.serial('artifact access per role (R1)', () => {
     journey.evidence.cleanup = { ...cleanup, residue };
     const results = (journey.evidence.results ??= {}) as Record<string, unknown>;
     results[TITLE_A] ??= { status: 'not run', skipReason: cause ?? null };
-    for (const id of R1B_IDS) {
-      results[r1bTitle(id)] ??= { status: 'not run', skipReason: R1B_REASON };
-    }
     results[TITLE_CLEANUP] = {
       status: residue.length === 0 ? 'passed' : 'failed',
       residue: residue.length,

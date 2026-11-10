@@ -22,7 +22,9 @@ func TestProvisionCmd_Clone_Idempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sentinelPath := filepath.Join(wsDir, ".scion-provisioned")
+	stateDir := testStateDir(t, wsDir)
+	t.Setenv(provisionStateDirEnv, stateDir)
+	sentinelPath := filepath.Join(stateDir, ".scion-provisioned")
 	if err := os.WriteFile(sentinelPath, []byte("provisioned_at=test\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -95,6 +97,7 @@ func TestProvisionCmd_SharedDirPaths_ParsedAndProvisioned(t *testing.T) {
 	t.Setenv("SCION_PROJECT_ID", "test-proj-shared-dirs")
 	t.Setenv(provision.GitTokenEnv, "") // no ambient git token
 	t.Setenv("SCION_SHARED_DIR_PATHS", "scratchpad="+sharedRootA+",other-scratchpad="+sharedRootB)
+	t.Setenv(provisionStateDirEnv, testStateDir(t, provisionWorkspace))
 
 	if err := runProvision(context.Background()); err != nil {
 		t.Fatalf("provision with shared dirs should succeed, got: %v", err)
@@ -134,12 +137,14 @@ func TestProvisionCmd_Clone_NoURL(t *testing.T) {
 	t.Setenv("SCION_WORKSPACE_MODE", "")
 	t.Setenv("SCION_PROJECT_ID", "test-proj-no-url")
 	t.Setenv(provision.GitTokenEnv, "") // no ambient git token
+	stateDir := testStateDir(t, dir)
+	t.Setenv(provisionStateDirEnv, stateDir)
 
 	if err := runProvision(context.Background()); err != nil {
 		t.Fatalf("provision without clone URL should succeed (non-git project), got: %v", err)
 	}
 
-	sentinelPath := filepath.Join(dir, ".scion-provisioned")
+	sentinelPath := filepath.Join(stateDir, ".scion-provisioned")
 	if _, err := os.Stat(sentinelPath); err != nil {
 		t.Errorf("sentinel should be written for non-git project: %v", err)
 	}
@@ -154,10 +159,12 @@ func runProvisionWithFailingChown(t *testing.T, bestEffortValue *string) (error,
 		t.Skip("running as root: chown to another uid would succeed")
 	}
 	workspace := filepath.Join(t.TempDir(), "workspace")
+	stateDir := testStateDir(t, workspace)
 
 	t.Setenv("SCION_CLONE_URL", "")
 	t.Setenv("SCION_SHARED_DIR_PATHS", "")
 	t.Setenv("SCION_WORKSPACE_MODE", "")
+	t.Setenv(provisionStateDirEnv, stateDir)
 	t.Setenv("SCION_PROJECT_ID", "proj-chown")
 	t.Setenv(provision.GitTokenEnv, "") // no ambient git token
 	if bestEffortValue != nil {
@@ -177,7 +184,7 @@ func runProvisionWithFailingChown(t *testing.T, bestEffortValue *string) (error,
 	provisionGID = os.Getgid()
 
 	err := runProvision(context.Background())
-	_, statErr := os.Stat(filepath.Join(workspace, provision.ProvisionSentinelFile))
+	_, statErr := os.Stat(filepath.Join(stateDir, provision.ProvisionSentinelFile))
 	return err, statErr == nil
 }
 

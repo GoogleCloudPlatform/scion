@@ -30,10 +30,11 @@ const threadGroupsPath = "/api/v1/thread-groups"
 // ThreadGroupService provides operations on project-scoped chat thread
 // groups: named sets of a project's group conversations (threads).
 //
-// While the hub.chat_thread_groups experiment is off, the hub answers 404 on
-// every /api/v1/thread-groups route. Every method reports that case as a
-// *ThreadGroupsNotEnabledError (see IsThreadGroupsNotEnabled), never as a
-// plain not-found.
+// A hub older than ptone/scion#5546 serves the /api/v1/thread-groups routes
+// only while its thread groups experiment is on, and answers 404 on
+// every one of them otherwise (as does a hub that predates the routes).
+// Every method reports that case as a *ThreadGroupsNotEnabledError (see
+// IsThreadGroupsNotEnabled), never as a plain not-found.
 type ThreadGroupService interface {
 	// List returns the project's thread groups, sorted by name. An empty
 	// projectID lets the hub default it to an agent caller's project; a
@@ -115,11 +116,12 @@ type threadGroupListResponse struct {
 }
 
 // ThreadGroupsNotEnabledMessage is the error text for a hub that does not
-// serve /api/v1/thread-groups: the experiment is off, or the hub predates it.
-const ThreadGroupsNotEnabledMessage = "thread groups are not enabled on this hub (experiment hub.chat_thread_groups)"
+// serve /api/v1/thread-groups: an older hub with its thread groups
+// experiment off, or a hub that predates the routes.
+const ThreadGroupsNotEnabledMessage = "this hub does not serve thread groups: upgrade the hub, or turn on its thread groups experiment"
 
-// ThreadGroupsNotEnabledError reports that the hub answered 404 because
-// thread groups are not enabled. Err is the hub's original 404.
+// ThreadGroupsNotEnabledError reports that the hub answered 404 because it
+// does not serve thread groups. Err is the hub's original error.
 type ThreadGroupsNotEnabledError struct {
 	Err error
 }
@@ -127,7 +129,7 @@ type ThreadGroupsNotEnabledError struct {
 // Error implements the error interface.
 func (e *ThreadGroupsNotEnabledError) Error() string { return ThreadGroupsNotEnabledMessage }
 
-// Unwrap returns the hub's original 404.
+// Unwrap returns the hub's original error.
 func (e *ThreadGroupsNotEnabledError) Unwrap() error { return e.Err }
 
 // IsThreadGroupsNotEnabled reports whether err is, or wraps, a
@@ -144,10 +146,10 @@ func isAPINotFound(err error) bool {
 }
 
 // collectionErr maps a 404 from the collection route to
-// *ThreadGroupsNotEnabledError. With the experiment on, the collection
-// never answers 404 (a missing project is 403 and a missing projectId 400),
-// so a 404 there can only come from the experiment gate or a hub without
-// the route.
+// *ThreadGroupsNotEnabledError. A hub that serves thread groups never
+// answers 404 on the collection (a missing project is 403 and a missing
+// projectId 400), so a 404 there can only come from an older hub's
+// experiment gate or a hub without the route.
 func collectionErr(err error) error {
 	if isAPINotFound(err) {
 		return &ThreadGroupsNotEnabledError{Err: err}
@@ -156,11 +158,11 @@ func collectionErr(err error) error {
 }
 
 // itemErr maps a 404 from a /api/v1/thread-groups/{id}... route. Such a 404
-// may mean the group or thread does not exist, or that the experiment is
-// off. To tell them apart without matching message text, it probes the
-// collection route with no projectId: the experiment gate runs before the
-// handler, so the probe is 404 only when thread groups are not enabled
-// (with them enabled it is 400 for a user, or 200 or 403 for an agent).
+// may mean the group or thread does not exist, or that the hub does not
+// serve thread groups. To tell them apart without matching message text, it
+// probes the collection route with no projectId, which is 404 only on a hub
+// that does not serve thread groups (otherwise it is 400 for a user, or 200
+// or 403 for an agent).
 // Any probe answer other than 404, including a transport failure, keeps
 // the original error.
 func (s *threadGroupService) itemErr(ctx context.Context, err error) error {

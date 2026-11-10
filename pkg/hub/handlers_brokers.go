@@ -18,11 +18,15 @@ package hub
 import (
 	"context"
 	"errors"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/auditevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -35,9 +39,13 @@ import (
 // is owned by the caller's user. Re-registration additionally requires that
 // user to be the broker's creator, or a super-admin presenting an
 // interactive session or dev credential. Turning on auto-provide
-// additionally requires broker.auto_provide. Registration never associates
-// the broker with a project. The route is RouteBrokerHMAC, so these checks
-// run in the handler.
+// additionally requires broker.auto_provide. Because the response carries a
+// join token, the request must also arrive over TLS, from this host, or from a
+// listed proxy reporting https (requireConfidentialArrival, after the
+// authorization checks and before any lookup or mutation); otherwise it gets
+// 403 transport_not_confidential and no token is minted or replaced.
+// Registration never associates the broker with a project. The route is
+// RouteBrokerHMAC, so these checks run in the handler.
 func (s *Server) handleBrokersEndpoint(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w, http.MethodPost)
@@ -74,6 +82,14 @@ func (s *Server) createBrokerRegistration(w http.ResponseWriter, r *http.Request
 	// owner/super-admin check below, which applies only to the re-register
 	// case and is evaluated after this credential restriction.
 	if !s.authorizeBrokerCreate(w, r) {
+		return
+	}
+
+	// Transport policy: the response carries a join token, so a request
+	// that did not arrive over TLS or from this host
+	// (confidentialArrival) is refused before any lookup or mutation. No
+	// token is minted or replaced for it.
+	if !s.requireConfidentialArrival(w, r) {
 		return
 	}
 
@@ -160,6 +176,25 @@ func (s *Server) createBrokerRegistration(w http.ResponseWriter, r *http.Request
 		autoProvideAuthorized = true
 	}
 
+	// A registration that writes the broker's host service account needs
+	// actAs for the registering user on the requested value. It is written
+	// on a new row, and on an existing row only while the stored pair is
+	// unset and was not set through the update API
+	// (registrationFillsGCPHost); otherwise the requested value is kept, so
+	// no decision is made. The decision is made here, where the caller's
+	// identity is, and enforced where the row is written, against the value
+	// actually stored. A preserveSettings request never writes it.
+	var hostSAVerdict hostSAClaimVerdict
+	if !req.PreserveSettings {
+		requested := hostSAClaim{
+			Email:     strings.ToLower(req.GCPHostServiceAccountEmail),
+			ProjectID: req.GCPHostProjectID,
+		}
+		if existingBroker == nil || registrationFillsGCPHost(existingBroker, requested.Email) {
+			hostSAVerdict = s.evaluateHostSAClaim(r.Context(), hostSAClaimOf(existingBroker), requested, SurfaceBrokerHostSARegister)
+		}
+	}
+
 	// Create the broker registration. Pin the mutation to what was just
 	// authorized above, so a lookup race between the authorization check
 	// and this call cannot redirect it onto a broker the caller was not
@@ -171,14 +206,34 @@ func (s *Server) createBrokerRegistration(w http.ResponseWriter, r *http.Request
 	var resp *CreateBrokerRegistrationResponse
 	switch {
 	case req.RuntimeTarget != nil:
-		resp, err = s.createFlatBrokerRegistration(r.Context(), req, user.ID(), existingBroker, autoProvideAuthorized)
+		resp, err = s.createFlatBrokerRegistration(r.Context(), req, user.ID(), existingBroker, autoProvideAuthorized, hostSAVerdict)
 	case existingBroker != nil:
-		resp, err = s.brokerAuthService.CreateBrokerRegistrationForAuthorizedMatch(r.Context(), req, user.ID(), existingBroker.ID, autoProvideAuthorized)
+		resp, err = s.brokerAuthService.CreateBrokerRegistrationForAuthorizedMatch(r.Context(), req, user.ID(), existingBroker.ID, autoProvideAuthorized, hostSAVerdict)
 	default:
-		resp, err = s.brokerAuthService.CreateBrokerRegistrationForAuthorizedNew(r.Context(), req, user.ID())
+		resp, err = s.brokerAuthService.CreateBrokerRegistrationForAuthorizedNew(r.Context(), req, user.ID(), hostSAVerdict)
 	}
 	if err != nil {
 		if writeRuntimeTargetRefusal(w, err) {
+			return
+		}
+		if errors.Is(err, ErrHostSAClaimStale) {
+			// The row read for the decision would not have been filled, so
+			// no decision was made, and it became fillable before the write.
+			Conflict(w, "the broker's host service account changed during registration; retry")
+			return
+		}
+		if errors.Is(err, ErrHostSAClaimNotAuthorized) {
+			if hostSAVerdict.Allowed {
+				// Not reachable from this handler: it makes a decision only
+				// against an unset prior (a new row, or a row registration
+				// would fill), and a decision that allows a non-empty value
+				// against an unset prior is always checked. A write site that
+				// refuses an allowed decision fails closed, as a conflict to
+				// retry.
+				Conflict(w, "the broker's host service account changed during registration; retry")
+				return
+			}
+			writeHostSAClaimDenied(w, hostSAVerdict)
 			return
 		}
 		writeBrokerRegistrationError(w, err)
@@ -187,20 +242,20 @@ func (s *Server) createBrokerRegistration(w http.ResponseWriter, r *http.Request
 
 	// Log audit event, with the credential that carried the request and the
 	// issued join token's details.
-	operation := "register"
+	operation := auditevent.BrokerRegisterNew
 	if existingBroker != nil {
-		operation = "reregister"
+		operation = auditevent.BrokerRegisterReregister
 	}
 	details := brokerAuditCredentialDetails(r.Context())
 	for k, v := range joinTokenAuditDetails(resp) {
 		details[k] = v
 	}
-	kv := append([]string{"operation", operation}, keptSettingsAuditDetails(resp.KeptSettings)...)
+	kv := append([]string{"operation", string(operation)}, keptSettingsAuditDetails(resp.KeptSettings)...)
 	if resp.GCPHostSet {
 		kv = append(kv, "gcp_host_set", "true")
 	}
 	LogRegistrationEvent(r.Context(), s.auditLogger, resp.BrokerID, req.Name, user.ID(), getClientIP(r),
-		mergeBrokerAuditDetails(details, kv...))
+		operation, mergeBrokerAuditDetails(details, kv...))
 
 	writeJSON(w, http.StatusCreated, resp)
 }
@@ -212,7 +267,10 @@ func (s *Server) createBrokerRegistration(w http.ResponseWriter, r *http.Request
 //
 // autoProvideAuthorized is the handler's broker.auto_provide decision; the
 // write is pinned to it as on the legacy path (flatRegistration.GateAutoProvide).
-func (s *Server) createFlatBrokerRegistration(ctx context.Context, req CreateBrokerRegistrationRequest, createdBy string, existing *store.RuntimeBroker, autoProvideAuthorized bool) (*CreateBrokerRegistrationResponse, error) {
+//
+// hostSA is the handler's host service account decision
+// (flatRegistration.HostSAClaim).
+func (s *Server) createFlatBrokerRegistration(ctx context.Context, req CreateBrokerRegistrationRequest, createdBy string, existing *store.RuntimeBroker, autoProvideAuthorized bool, hostSA hostSAClaimVerdict) (*CreateBrokerRegistrationResponse, error) {
 	requested := stripReservedBrokerLabels(req.Labels)
 	saEmail := strings.ToLower(req.GCPHostServiceAccountEmail)
 	// PreserveSettings (GoogleCloudPlatform/scion#2702) applies as on the
@@ -220,6 +278,13 @@ func (s *Server) createFlatBrokerRegistration(ctx context.Context, req CreateBro
 	// only issues a new join token; a new row gets AutoProvide off and no
 	// GCP host fields, with only the labels applied.
 	preserve := req.PreserveSettings
+	// A refused fill of an existing row's host service account refuses the
+	// registration before anything is written.
+	if existing != nil && !preserve {
+		if err := registrationFillDenied(saEmail, req.GCPHostProjectID, hostSA); err != nil {
+			return nil, err
+		}
+	}
 	var keptLabels []KeptSetting
 	row, created, err := s.registerFlatRuntimeBroker(ctx, flatRegistration{
 		BrokerID:  req.BrokerID,
@@ -231,6 +296,7 @@ func (s *Server) createFlatBrokerRegistration(ctx context.Context, req CreateBro
 		GateAutoProvide:       true,
 		RequestedAutoProvide:  req.AutoProvide,
 		AutoProvideAuthorized: autoProvideAuthorized,
+		HostSAClaim:           hostSA,
 		Apply: func(b *store.RuntimeBroker, created bool) {
 			if preserve && !created {
 				return
@@ -260,7 +326,7 @@ func (s *Server) createFlatBrokerRegistration(ctx context.Context, req CreateBro
 	}
 	var gcp registrationGCPHostResult
 	if !created && !preserve {
-		if gcp, err = fillRegistrationGCPHost(ctx, s.store, row.ID, saEmail, req.GCPHostProjectID); err != nil {
+		if gcp, err = fillRegistrationGCPHost(ctx, s.store, row.ID, saEmail, req.GCPHostProjectID, hostSA); err != nil {
 			return nil, err
 		}
 	}
@@ -304,6 +370,13 @@ func writeBrokerRegistrationError(w http.ResponseWriter, err error) {
 	}
 	if errors.Is(err, ErrJoinTokenTTLOutOfRange) {
 		ValidationError(w, err.Error(), map[string]interface{}{"field": "joinTokenTtlSeconds"})
+		return
+	}
+	if errors.Is(err, ErrHostSAClaimNotAuthorized) {
+		// Not reachable today: the registration handler writes the
+		// decision-specific refusal first. This is the generic form for any
+		// other caller.
+		writeForbidden(w, "Setting gcpHostServiceAccountEmail on this broker is not authorized")
 		return
 	}
 	writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
@@ -617,9 +690,25 @@ func (s *Server) handleBrokerJoin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Transport policy: the response carries the broker's HMAC secret, so a
+	// join that did not arrive over TLS or from this host is refused before
+	// the token is consumed. Its token has crossed the network in the clear,
+	// so it is revoked when it is the broker's pending token (and only
+	// then: a wrong token revokes nothing).
+	if !config.ConfidentialArrival(r, s.transportTrustedNets) {
+		revoked, revokeErr := s.brokerAuthService.RevokeExposedJoinToken(r.Context(), req.BrokerID, req.JoinToken)
+		if revokeErr != nil {
+			slog.Error("Failed to revoke a join token sent without TLS", "brokerID", req.BrokerID, "error", revokeErr)
+		}
+		LogJoinEvent(r.Context(), s.auditLogger, req.BrokerID, getClientIP(r), false,
+			fmt.Sprintf("refused: not over TLS or from this host (join token revoked: %t)", revoked), auditevent.BrokerFailureRefused)
+		s.requireConfidentialArrival(w, r)
+		return
+	}
+
 	// Test admin tier: only the co-located broker may complete a join.
 	if s.refuseTestAdminBrokerRegistration(w, req.BrokerID) {
-		LogJoinEvent(r.Context(), s.auditLogger, req.BrokerID, getClientIP(r), false, ErrTestAdminRemoteBrokerRefused.Error())
+		LogJoinEvent(r.Context(), s.auditLogger, req.BrokerID, getClientIP(r), false, ErrTestAdminRemoteBrokerRefused.Error(), auditevent.BrokerFailureRefused)
 		return
 	}
 
@@ -638,7 +727,7 @@ func (s *Server) handleBrokerJoin(w http.ResponseWriter, r *http.Request) {
 	resp, err := s.brokerAuthService.CompleteBrokerJoin(r.Context(), req, hubEndpoint)
 	if err != nil {
 		// Log failed join attempt
-		LogJoinEvent(r.Context(), s.auditLogger, req.BrokerID, getClientIP(r), false, err.Error())
+		LogJoinEvent(r.Context(), s.auditLogger, req.BrokerID, getClientIP(r), false, err.Error(), brokerJoinFailureCode(err))
 
 		if writeRuntimeTargetRefusal(w, err) {
 			return
@@ -659,8 +748,12 @@ func (s *Server) handleBrokerJoin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Log successful join
-	LogJoinEvent(r.Context(), s.auditLogger, req.BrokerID, getClientIP(r), true, "")
+	LogJoinEvent(r.Context(), s.auditLogger, req.BrokerID, getClientIP(r), true, "", "")
 	s.conduitBrokerCredentialChanged(req.BrokerID)
+	// Record the reservations of the agents the broker still runs (a broker
+	// registered again under the same ID), now that its row is written and
+	// before the join answers (BackfillBrokerOnRegistration).
+	s.BackfillBrokerOnRegistration(r.Context(), req.BrokerID)
 
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -709,6 +802,11 @@ func (s *Server) handleBrokerRotateSecret(w http.ResponseWriter, r *http.Request
 	if s.brokerAuthService == nil {
 		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
 			"broker authentication service not configured", nil)
+		return
+	}
+
+	// Transport policy: the response carries the broker's new HMAC secret.
+	if !s.requireConfidentialArrival(w, r) {
 		return
 	}
 

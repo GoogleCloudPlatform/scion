@@ -92,7 +92,8 @@ import '../shared/agent-message-viewer.js';
 import type { ScionAgentMessageViewer } from '../shared/agent-message-viewer.js';
 import '../shared/chat/chat-thread.js';
 import type { ScionChatThread } from '../shared/chat/chat-thread.js';
-import { isFeatureEnabled, AGENT_EDIT_FLAG } from '../../utils/feature-flags.js';
+import { isFeatureEnabled } from '../../utils/feature-flags.js';
+import { REINCARNATE_CONFIRM_MESSAGE } from '../../shared/agent-reincarnate.js';
 import '../shared/hash-display.js';
 import '../shared/quick-message-dialog.js';
 import '../shared/cascade-mode-dialog.js';
@@ -172,11 +173,6 @@ function parseDuration(s: string): number {
  */
 export const DELETE_REDIRECT_DELAY_MS = 1000;
 
-/** Body of the Reincarnate confirm dialog (ptone/scion#3707). */
-export const REINCARNATE_CONFIRM_MESSAGE =
-  'The agent will be stopped and re-provisioned with its current settings and template. ' +
-  'Any work running in its current session is interrupted.';
-
 /**
  * Format seconds as "Xh Ym Zs".
  */
@@ -190,6 +186,18 @@ function formatDurationHMS(totalSeconds: number): string {
   if (m > 0) parts.push(`${m}m`);
   if (s > 0 || parts.length === 0) parts.push(`${s}s`);
   return parts.join(' ');
+}
+
+/**
+ * A stored config limit as Limits card text, matching the Edit page: a count
+ * limit of 0 or a duration of "0" is Unlimited; an absent limit is Inherited
+ * (the hub fills it from the template, hub or broker defaults); otherwise the
+ * stored value.
+ */
+function formatConfigLimit(value: number | string | undefined): string {
+  if (value == null || value === '') return 'Inherited';
+  if (value === 0 || value === '0') return 'Unlimited';
+  return String(value);
 }
 
 @customElement('scion-page-agent-detail')
@@ -1972,17 +1980,7 @@ export class ScionPageAgentDetail extends LitElement {
                     </sl-button>
                   `
                 : nothing}
-          ${agent.phase === 'created' || can(agent._capabilities, 'update')
-            ? html`
-                <a href="/agents/${this.agentId}/configure" style="text-decoration: none;">
-                  <sl-button variant="default" size="small">
-                    <sl-icon slot="prefix" name="sliders"></sl-icon>
-                    Configure
-                  </sl-button>
-                </a>
-              `
-            : nothing}
-          ${isFeatureEnabled(AGENT_EDIT_FLAG) && can(agent._capabilities, 'update')
+          ${can(agent._capabilities, 'update')
             ? html`
                 <a
                   href="/agents/${this.agentId}/edit"
@@ -3066,11 +3064,13 @@ export class ScionPageAgentDetail extends LitElement {
   }
 
   private renderConfigLimitsCard(inline: AgentInlineConfig | undefined) {
-    const maxTurns = inline?.max_turns ?? 0;
-    const maxModelCalls = inline?.max_model_calls ?? 0;
-    const maxDuration = inline?.max_duration ?? '';
+    const maxTurns = inline?.max_turns;
+    const maxModelCalls = inline?.max_model_calls;
+    const maxDuration = inline?.max_duration;
 
-    if (!maxTurns && !maxModelCalls && !maxDuration) return nothing;
+    // A stored 0 (or "0" for the duration) is Unlimited, so the card hides
+    // only when no limit is stored at all.
+    if (maxTurns == null && maxModelCalls == null && !maxDuration) return nothing;
 
     return html`
       <div class="card">
@@ -3078,15 +3078,15 @@ export class ScionPageAgentDetail extends LitElement {
         <div class="info-grid">
           <div class="info-item">
             <span class="info-label">Max Turns</span>
-            <span class="info-value">${maxTurns || 'None'}</span>
+            <span class="info-value">${formatConfigLimit(maxTurns)}</span>
           </div>
           <div class="info-item">
             <span class="info-label">Max Model Calls</span>
-            <span class="info-value">${maxModelCalls || 'None'}</span>
+            <span class="info-value">${formatConfigLimit(maxModelCalls)}</span>
           </div>
           <div class="info-item">
             <span class="info-label">Max Duration</span>
-            <span class="info-value">${maxDuration || 'None'}</span>
+            <span class="info-value">${formatConfigLimit(maxDuration)}</span>
           </div>
         </div>
       </div>
