@@ -30,7 +30,6 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -48,6 +47,12 @@ import (
 
 // Broker plugin attachments: the check and upload routes and attachment_ids
 // on the legacy broker inbound route.
+
+// Paths of the broker attachment routes.
+const (
+	brokerAttachmentsCheckPath  = "/api/v1/broker/inbound/attachments/check"
+	brokerAttachmentsUploadPath = "/api/v1/broker/inbound/attachments"
+)
 
 // brokerAttFile is one file part of a broker upload.
 type brokerAttFile struct {
@@ -1038,7 +1043,9 @@ func brokerSenderContextRefs(files map[string]*ast.File, name string) map[string
 // once, inside brokerSenderContext, and brokerSenderContext is called only
 // by the two broker routes, after the sender was resolved and authorized.
 func TestBrokerSenderContext_SingleIdentitySetter(t *testing.T) {
-	paths, err := filepath.Glob("*.go")
+	// pkgmove:scan-covers guardScanSubdirs
+	// scanned through guardScanSubdirs; pins the single identity setter and the callers of brokerSenderContext.
+	paths, err := globGuardScanDirs(".", "*.go")
 	require.NoError(t, err)
 	fset := token.NewFileSet()
 	files := map[string]*ast.File{}

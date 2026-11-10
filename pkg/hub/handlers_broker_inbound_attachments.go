@@ -44,12 +44,6 @@ import (
 // once it is sent is the artifact service's decision, as for every other
 // attachment stored as an artifact.
 
-// Paths of the broker attachment routes.
-const (
-	brokerAttachmentsCheckPath  = "/api/v1/broker/inbound/attachments/check"
-	brokerAttachmentsUploadPath = "/api/v1/broker/inbound/attachments"
-)
-
 // Values of brokerAttachmentCheckResponse.Uploads.
 const (
 	// brokerUploadsArtifact: upload on the broker attachment route and send
