@@ -345,8 +345,15 @@ export class ScionChatSearch extends LitElement {
 
     .load-more {
       display: flex;
-      justify-content: center;
+      flex-direction: column;
+      align-items: center;
+      gap: 0.5rem;
       padding: 0.75rem;
+    }
+
+    /* A failed "Load more" shows its message above the button, not beside it. */
+    .load-more .search-error {
+      padding: 0;
     }
 
     .load-more button {
