@@ -7607,6 +7607,7 @@
 - `pkg/hub:TestDecisionAnswer_Authorization`
 - `pkg/hub:TestDecisionAnswer_ConcurrentOneWinner`
 - `pkg/hub:TestDecisionAnswer_IdempotencyKeyKeepsChecks`
+- `pkg/hub:TestDecisionAnswer_AskerRefusesMessages`
 
 ---
 
