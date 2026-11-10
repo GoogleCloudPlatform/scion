@@ -208,7 +208,7 @@ func TestPortViewSessionGen_StaticPlacement(t *testing.T) {
 		"the capture is called only inside proxyToAgentPort")
 	assert.Empty(t, callerFuncs(t, "port_view.go", "conduitCaptureSessionGeneration"), "the page view does not capture by itself")
 	var sites []string
-	for _, f := range nonTestGoFiles(t) {
+	for _, f := range portViewNonTestGoFileNames(t) {
 		for _, fn := range callerFuncs(t, f, "contextWithPortViewLink") {
 			sites = append(sites, f+":"+fn)
 		}
@@ -297,8 +297,8 @@ func callerFuncs(t *testing.T, path, callee string) []string {
 	return out
 }
 
-// nonTestGoFiles returns the package's non-test Go files.
-func nonTestGoFiles(t *testing.T) []string {
+// portViewNonTestGoFileNames returns the package's non-test Go files.
+func portViewNonTestGoFileNames(t *testing.T) []string {
 	t.Helper()
 	all, err := filepath.Glob("*.go")
 	require.NoError(t, err)
