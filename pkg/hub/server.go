@@ -7980,6 +7980,8 @@ func (s *Server) registerRoutes() {
 		s.mux.HandleFunc("/api/v1/chat/attachments/", s.guarded("/api/v1/chat/attachments/", s.chatAttachmentRoute(s.handleChatAttachmentByID)))
 		// Choice prompt decisions: read and answer (web.chat_choices; 404 while off).
 		s.mux.HandleFunc("/api/v1/decisions/", s.guarded("/api/v1/decisions/", s.chatRoute(s.handleDecisionRoutes)))
+		// Choice prompt set answers (web.chat_choices; 404 while off).
+		s.mux.HandleFunc("/api/v1/choice-prompts/", s.guarded("/api/v1/choice-prompts/", s.chatRoute(s.handleChoicePromptRoutes)))
 	}
 
 	// Attachment delivery capability redemption by brokers (ptone/scion#4596).

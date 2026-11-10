@@ -6026,6 +6026,11 @@ type chatHistoryResponse struct {
 	MessageDecisions       map[string][]DecisionView     `json:"messageDecisions,omitempty"`
 	MessageChoiceIntros    map[string]string             `json:"messageChoiceIntros,omitempty"`
 	MessageChoiceResponses map[string]ChoiceResponseView `json:"messageChoiceResponses,omitempty"`
+	// MessageChoiceAnswerModes (choice-prompt rows: "single" or "set") and
+	// MessageChoiceResponseSets (the response rows of set submits) are set
+	// under the same rule (design choices v5, 5.1 and 5.2).
+	MessageChoiceAnswerModes  map[string]string                `json:"messageChoiceAnswerModes,omitempty"`
+	MessageChoiceResponseSets map[string]ChoiceResponseSetView `json:"messageChoiceResponseSets,omitempty"`
 }
 
 // chatHistoryRetention is the history page's retention marker: messages

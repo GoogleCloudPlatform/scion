@@ -532,5 +532,5 @@ type DecisionStore interface {
 	// GetDecisionAnswersByResponseMessageIDs returns the answer recorded
 	// with each of the given choice-response messages, keyed by message
 	// ID, for history pages. IDs with no answer (or not UUIDs) are absent.
-	GetDecisionAnswersByResponseMessageIDs(ctx context.Context, messageIDs []string) (map[string]*DecisionAnswer, error)
+	GetDecisionAnswersByResponseMessageIDs(ctx context.Context, messageIDs []string) (map[string][]*DecisionAnswer, error)
 }

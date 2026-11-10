@@ -198,6 +198,15 @@ func (s *Server) handleDecisionAnswer(w http.ResponseWriter, r *http.Request, ro
 	if !ok {
 		return
 	}
+	// A row of a prompt with two or more decisions is answered only with
+	// the rest of its set (design choices v5, 4.3).
+	if rows, err := s.store.GetDecisionsByMessageIDs(ctx, []string{d.MessageID}); err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	} else if ds := rows[d.MessageID]; len(ds) >= 2 {
+		s.writeBatchRequired(w, ctx, user, prompt, ds)
+		return
+	}
 	// Step 4: the choice is checked against the stored row; the label is
 	// never taken from the client.
 	choice, ok := d.Choice(req.ChoiceID)

@@ -86,6 +86,7 @@ var requestPathSites = []requestPathSite{
 	{"auth.go", "isConstraintAuditAuthFailureRoute", "URL.Path", 4, "comparison: matches the constraint-audit routes on both path forms"},
 	{"auth.go", "isConstraintAuditAuthFailureRoute", "URL.RawPath", 1, "comparison: matches the constraint-audit routes on both path forms"},
 	{"cloud_handler.go", "mapToCloudHTTPRequest", "URL(bare)", 1, "not the served request: rebuilds a request from an already redacted log URL"},
+	{"choices_batch.go", "Server.handleChoicePromptRoutes", "URL.Path", 1, "routing: extracts the prompt message id and sub-route"},
 	{"choices_answer.go", "Server.handleDecisionRoutes", "URL.Path", 1, "routing: extracts the decision row id and sub-route"},
 	{"conduit_hub_internal.go", "Server.serveHubInternal", "URL.Path", 1, "routing: picks the hub internal API operation from the path; not logged"},
 	{"conduit_ingress.go", "Server.proxyConduitDial", "URL.Path", 1, "not the served request: sets the fixed path /api/v1/conduit on the outgoing ingress leg to a relay; not logged"},

@@ -494,8 +494,8 @@ func (c *CompositeStore) GetDecisionRowsByIDs(ctx context.Context, rowIDs []stri
 }
 
 // GetDecisionAnswersByResponseMessageIDs implements store.DecisionStore.
-func (c *CompositeStore) GetDecisionAnswersByResponseMessageIDs(ctx context.Context, messageIDs []string) (map[string]*store.DecisionAnswer, error) {
-	out := map[string]*store.DecisionAnswer{}
+func (c *CompositeStore) GetDecisionAnswersByResponseMessageIDs(ctx context.Context, messageIDs []string) (map[string][]*store.DecisionAnswer, error) {
+	out := map[string][]*store.DecisionAnswer{}
 	uids := make([]uuid.UUID, 0, len(messageIDs))
 	for _, id := range messageIDs {
 		if uid, err := uuid.Parse(id); err == nil {
@@ -512,7 +512,8 @@ func (c *CompositeStore) GetDecisionAnswersByResponseMessageIDs(ctx context.Cont
 		return nil, mapError(err)
 	}
 	for _, r := range rows {
-		out[r.ResponseMessageID.String()] = answerToStore(r)
+		id := r.ResponseMessageID.String()
+		out[id] = append(out[id], answerToStore(r))
 	}
 	return out, nil
 }
