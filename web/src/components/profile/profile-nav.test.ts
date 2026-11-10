@@ -16,6 +16,7 @@
 
 /**
  * Tests for profile-nav.ts: the user's own hub role badge (design §5.G).
+ * Also the pending secrets count badge on the Secrets link.
  * Display only; the badge text and tooltip come from user.role.
  */
 
@@ -298,5 +299,84 @@ describe('scion-profile-nav — GitHub Application link (ptone/scion#5311)', () 
   it('a failed projects request shows no link', async () => {
     element = await mount({ configured: true, installation_url: INSTALL_URL }, [page(3, 0)], 500);
     expect(githubLink(element)).toBeNull();
+  });
+});
+
+describe('scion-profile-nav — pending secrets badge', () => {
+  let element: HTMLElement | null = null;
+
+  beforeAll(async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve(jsonResponse({})))
+    );
+    await import('./profile-nav.js');
+  });
+
+  afterEach(() => {
+    element?.remove();
+    element = null;
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  async function mount(pendingSecrets: unknown[] | null): Promise<HTMLElement> {
+    let listed = false;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: string) => {
+        if (input === '/api/v1/pending-secrets') {
+          listed = true;
+          return Promise.resolve(
+            pendingSecrets === null
+              ? jsonResponse({ error: { code: 'forbidden' } }, 403)
+              : jsonResponse({ pendingSecrets })
+          );
+        }
+        return Promise.resolve(jsonResponse({ configured: false }));
+      })
+    );
+    const el = document.createElement('scion-profile-nav') as HTMLElement & {
+      updateComplete: Promise<boolean>;
+      user: User | null;
+    };
+    el.user = user('member');
+    document.body.appendChild(el);
+    await vi.waitFor(() => expect(listed).toBe(true));
+    for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
+    await el.updateComplete;
+    return el;
+  }
+
+  function secretsBadge(el: HTMLElement): HTMLElement | null {
+    return (
+      el.shadowRoot?.querySelector<HTMLElement>('a[href="/profile/secrets"] .nav-badge') ?? null
+    );
+  }
+
+  it('shows the number of pending secrets on the Secrets link', async () => {
+    element = await mount([{ id: 'p-1' }, { id: 'p-2' }]);
+    const b = secretsBadge(element);
+    expect(b?.textContent?.trim()).toBe('2');
+    expect(b?.getAttribute('aria-label')).toBe('2 secrets await approval');
+    expect(element.shadowRoot?.querySelectorAll('.nav-badge')).toHaveLength(1);
+  });
+
+  it('shows no badge without pending secrets or when the list cannot be read', async () => {
+    element = await mount([]);
+    expect(secretsBadge(element)).toBeNull();
+    element.remove();
+    element = await mount(null);
+    expect(secretsBadge(element)).toBeNull();
+  });
+
+  it('follows the count the secret list reports', async () => {
+    element = await mount([{ id: 'p-1' }]);
+    expect(secretsBadge(element)?.textContent?.trim()).toBe('1');
+    window.dispatchEvent(
+      new CustomEvent('scion:pending-secrets-changed', { detail: { count: 0 } })
+    );
+    await (element as HTMLElement & { updateComplete: Promise<boolean> }).updateComplete;
+    expect(secretsBadge(element)).toBeNull();
   });
 });
