@@ -108,6 +108,10 @@ var layer0Prefixes = []string{
 	// Agent port proxy settings — the response header bound is read into
 	// ServerConfig at startup.
 	"server.hub.port_proxy",
+	// Events stream bounds and the declared platform request timeout — the
+	// web server and the conduit relay read them at startup.
+	"server.hub.sse",
+	"server.hub.platform_request_timeout",
 	// Separate relay process settings (scion server --role relay) — read
 	// at startup.
 	"server.relay",
