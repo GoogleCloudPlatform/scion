@@ -360,10 +360,6 @@ func DeduplicateByTarget(secrets []SecretWithValue) []SecretWithValue {
 	return result
 }
 
-// ErrPendingNotImplemented is returned by a backend's pending-value methods
-// when the backend does not support holding pending values yet.
-var ErrPendingNotImplemented = errors.New("holding pending secret values is not implemented for this secret backend")
-
 // PendingHolder holds the values of pending secrets: user-scope secrets
 // written by an agent that wait for the owner's approval. A held value is
 // never part of Resolve, List, Get or FetchValues; it is read only when the

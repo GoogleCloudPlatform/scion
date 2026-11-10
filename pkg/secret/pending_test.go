@@ -58,14 +58,114 @@ func TestLocalBackend_HoldReadDropPending(t *testing.T) {
 	assert.Error(t, err, "a reference sealed under another key does not open")
 }
 
-func TestGCPBackend_PendingNotImplemented(t *testing.T) {
-	backend, _ := createTestGCPBackend(t)
+func TestGCPBackend_HoldReadDropPending(t *testing.T) {
+	backend, mock := createTestGCPBackend(t)
 	ctx := context.Background()
-	_, err := backend.HoldPending(ctx, "pending-1", []byte("test-value-1"))
-	assert.ErrorIs(t, err, ErrPendingNotImplemented)
-	_, err = backend.ReadPending(ctx, "gcpsm:x")
-	assert.ErrorIs(t, err, ErrPendingNotImplemented)
-	assert.ErrorIs(t, backend.DropPending(ctx, "gcpsm:x"), ErrPendingNotImplemented)
+	value := []byte("test-value-1")
+	id := api.NewUUID()
+
+	ref, err := backend.HoldPending(ctx, id, value)
+	require.NoError(t, err)
+	wantPath := "projects/test-project/secrets/" + backend.secretNamePrefix() + "pending-" + id
+	assert.Equal(t, "gcpsm:"+wantPath, ref)
+	assert.NotContains(t, ref, string(value))
+	require.Contains(t, mock.secrets, wantPath)
+	assert.Equal(t, "true", mock.secrets[wantPath].Labels["scion-pending"])
+	assert.Equal(t, value, mock.versions[wantPath])
+
+	got, err := backend.ReadPending(ctx, ref)
+	require.NoError(t, err)
+	assert.Equal(t, value, got)
+
+	// The held value is not a secret of the hub: nothing is listed or
+	// resolved, and no metadata row is written.
+	metas, err := backend.List(ctx, Filter{})
+	require.NoError(t, err)
+	assert.Empty(t, metas)
+
+	require.NoError(t, backend.DropPending(ctx, ref))
+	assert.NotContains(t, mock.secrets, wantPath, "dropping deletes the Secret Manager secret")
+	require.NoError(t, backend.DropPending(ctx, ref), "dropping twice is not an error")
+	_, err = backend.ReadPending(ctx, ref)
+	assert.ErrorIs(t, err, store.ErrNotFound)
+}
+
+func TestGCPBackend_HoldPendingRefusals(t *testing.T) {
+	backend, mock := createTestGCPBackend(t)
+	ctx := context.Background()
+
+	_, err := backend.HoldPending(ctx, api.NewUUID(), nil)
+	assert.Error(t, err, "an empty value is refused")
+	for _, id := range []string{"", "a/b", "../x", strings.Repeat("a", maxPendingIDLen+1)} {
+		_, err := backend.HoldPending(ctx, id, []byte("test-value-1"))
+		assert.Error(t, err, "id %q", id)
+	}
+	assert.Empty(t, mock.secrets)
+
+	id := api.NewUUID()
+	_, err = backend.HoldPending(ctx, id, []byte("test-value-1"))
+	require.NoError(t, err)
+	_, err = backend.HoldPending(ctx, id, []byte("test-value-2"))
+	assert.Error(t, err, "an existing pending secret is never given a second version")
+	path := "projects/test-project/secrets/" + backend.secretNamePrefix() + "pending-" + id
+	assert.Equal(t, []byte("test-value-1"), mock.versions[path])
+}
+
+// TestGCPBackend_PendingRefOnlyNamesPendingValues: ReadPending and
+// DropPending act only on references naming a pending value of this hub,
+// never on an approved secret or another hub's pending value.
+func TestGCPBackend_PendingRefOnlyNamesPendingValues(t *testing.T) {
+	backend, mock := createTestGCPBackend(t)
+	ctx := context.Background()
+
+	_, _, err := backend.Set(ctx, &SetSecretInput{
+		Name:       "API_KEY",
+		Value:      "test-value-approved",
+		SecretType: store.SecretTypeEnvironment,
+		Scope:      store.ScopeUser,
+		ScopeID:    "user-1",
+	})
+	require.NoError(t, err)
+	approvedPath := "projects/test-project/secrets/" + backend.gcpSecretName("API_KEY", store.ScopeUser, "user-1")
+	require.Contains(t, mock.secrets, approvedPath)
+
+	other := NewGCPBackendWithClient(backend.store, mock, "test-project", "other-hub-id")
+	otherRef, err := other.HoldPending(ctx, api.NewUUID(), []byte("test-value-other"))
+	require.NoError(t, err)
+
+	for _, ref := range []string{
+		"",
+		"enc:v1:abc",
+		"gcpsm:" + approvedPath,
+		otherRef,
+		"gcpsm:projects/another-project/secrets/" + backend.secretNamePrefix() + "pending-" + api.NewUUID(),
+		"gcpsm:projects/test-project/secrets/" + backend.secretNamePrefix() + "pending-",
+		"gcpsm:projects/test-project/secrets/" + backend.secretNamePrefix() + "pending-a/versions/1",
+	} {
+		_, err := backend.ReadPending(ctx, ref)
+		assert.Error(t, err, "read %q", ref)
+		assert.Error(t, backend.DropPending(ctx, ref), "drop %q", ref)
+	}
+	assert.Contains(t, mock.secrets, approvedPath, "the approved secret is untouched")
+	got, err := other.ReadPending(ctx, otherRef)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("test-value-other"), got)
+}
+
+// TestGCPBackend_PendingNameNeverMatchesApprovedNames: an approved
+// secret's Secret Manager name, current or legacy, never falls under the
+// pending name prefix, whatever its scope, scope id or key.
+func TestGCPBackend_PendingNameNeverMatchesApprovedNames(t *testing.T) {
+	backend, _ := createTestGCPBackend(t)
+	pendingPrefix := backend.secretNamePrefix() + "pending-"
+	for _, scope := range []string{store.ScopeHub, store.ScopeUser, store.ScopeProject, store.ScopeRuntimeBroker} {
+		for _, key := range []string{"API_KEY", "pending", "pending-" + api.NewUUID()} {
+			name := backend.gcpSecretName(key, scope, "scope-1")
+			assert.False(t, strings.HasPrefix(name, pendingPrefix), "%s/%s -> %s", scope, key, name)
+			legacy := backend.legacyGCPSecretName(key, scope, "scope-1")
+			assert.False(t, strings.HasPrefix(legacy, pendingPrefix), "legacy %s/%s -> %s", scope, key, legacy)
+		}
+	}
 }
 
 // TestLocalBackend_PendingRowsNeverDelivered: delivery reads the secrets
