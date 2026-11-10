@@ -485,8 +485,6 @@ func matchDefault(choices []Choice, def string) (string, bool) {
 	return "", false
 }
 
-// validPlainText reports whether s is valid UTF-8 with no control, format,
-// line or paragraph separator characters (so no newlines).
 // validQuestionText reports whether s is valid UTF-8 without control
 // characters other than line feed and tab: a question may span lines, but
 // no other control character (a carriage return, an escape sequence) may
@@ -503,6 +501,8 @@ func validQuestionText(s string) bool {
 	return true
 }
 
+// validPlainText reports whether s is valid UTF-8 with no control, format,
+// line or paragraph separator characters (so no newlines).
 func validPlainText(s string) bool {
 	if !utf8.ValidString(s) {
 		return false

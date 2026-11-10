@@ -766,10 +766,14 @@ func (c *CompositeStore) recordAnswerTx(ctx context.Context, in *store.RecordAns
 
 // checkAnswerPreconditions enforces in the store what the answer endpoint
 // checks before it calls RecordAnswer, so no caller can skip it: one
-// answer per provenance; a direct answer over an agent_interpreted one
-// comes only from the user it records, as a confirm (same choice) or an
-// override (another choice); every other answer is outcome answer.
+// answer per provenance; an agent_interpreted answer only to a version
+// with no answer of either kind; a direct answer over an agent_interpreted
+// one comes only from the user it records, as a confirm (same choice) or
+// an override (another choice); every other answer is outcome answer.
 func checkAnswerPreconditions(row *ent.Decision, existing []*ent.DecisionAnswer, in *store.RecordAnswerInput, outcome string) error {
+	if in.Provenance == store.DecisionProvenanceAgentInterpreted && len(existing) > 0 {
+		return fmt.Errorf("%w: version %d of %s is already answered", store.ErrDecisionAnswerConflict, row.Version, row.Key)
+	}
 	var interpreted *ent.DecisionAnswer
 	for _, a := range existing {
 		if string(a.Provenance) == in.Provenance {
@@ -779,9 +783,15 @@ func checkAnswerPreconditions(row *ent.Decision, existing []*ent.DecisionAnswer,
 			interpreted = a
 		}
 	}
-	if in.Provenance != store.DecisionProvenanceDirect || interpreted == nil {
+	if in.Provenance != store.DecisionProvenanceDirect {
 		if outcome != store.DecisionOutcomeAnswer {
-			return fmt.Errorf("%w: outcome %s needs an agent_interpreted answer to confirm or override", store.ErrInvalidInput, outcome)
+			return fmt.Errorf("%w: an agent_interpreted answer is outcome answer, not %s", store.ErrInvalidInput, outcome)
+		}
+		return nil
+	}
+	if interpreted == nil {
+		if outcome != store.DecisionOutcomeAnswer {
+			return fmt.Errorf("%w: outcome %s needs an agent_interpreted answer to confirm or override", store.ErrDecisionOutcomeMismatch, outcome)
 		}
 		return nil
 	}
@@ -793,7 +803,7 @@ func checkAnswerPreconditions(row *ent.Decision, existing []*ent.DecisionAnswer,
 		want = store.DecisionOutcomeOverride
 	}
 	if outcome != want {
-		return fmt.Errorf("%w: an answer over the agent_interpreted one is outcome %s, not %s", store.ErrInvalidInput, want, outcome)
+		return fmt.Errorf("%w: an answer over the agent_interpreted one is outcome %s, not %s", store.ErrDecisionOutcomeMismatch, want, outcome)
 	}
 	return nil
 }

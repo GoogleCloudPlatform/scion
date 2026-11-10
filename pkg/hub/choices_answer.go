@@ -271,9 +271,10 @@ func (s *Server) handleDecisionAnswer(w http.ResponseWriter, r *http.Request, ro
 		}
 		s.writeNotRecordedAnswerer(w, ctx, d)
 		return
-	case errors.Is(err, store.ErrDecisionAnswerConflict):
-		// The loser of a race, or an idempotency key reused for another
-		// answer: the current state wins.
+	case errors.Is(err, store.ErrDecisionAnswerConflict), errors.Is(err, store.ErrDecisionOutcomeMismatch):
+		// The loser of a race, an idempotency key reused for another
+		// answer, or an interpreted answer recorded after the state check
+		// above (the outcome no longer fits): the current state wins.
 		if cur, gerr := s.store.GetDecision(ctx, d.ID); gerr == nil {
 			d = cur
 		}

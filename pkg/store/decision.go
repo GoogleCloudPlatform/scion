@@ -88,12 +88,19 @@ var (
 	// one and can no longer be answered.
 	ErrDecisionReplaced = errors.New("replaced")
 	// ErrDecisionAnswerConflict: the version already has an answer of this
-	// provenance, or the idempotency key was used for a different answer.
+	// provenance (an agent_interpreted answer: of either provenance), or
+	// the idempotency key was used for a different answer.
 	ErrDecisionAnswerConflict = errors.New("decision answer conflict")
 	// ErrNotRecordedAnswerer: a direct answer to a version that has an
 	// agent_interpreted answer, from a user other than the one that answer
 	// records. Only the recorded answerer may confirm or override it.
 	ErrNotRecordedAnswerer = errors.New("not the recorded answerer")
+	// ErrDecisionOutcomeMismatch: a direct answer's outcome does not fit
+	// the version's recorded answers (confirm or override needs an
+	// agent_interpreted answer; an answer over one must confirm or
+	// override it), typically because the state changed since the caller
+	// read it.
+	ErrDecisionOutcomeMismatch = errors.New("decision outcome mismatch")
 )
 
 // ExistingDecisionKey describes the active version of a key a prompt tried
@@ -370,11 +377,13 @@ type DecisionStore interface {
 	// ErrInvalidInput for an unknown choice or malformed input,
 	// ErrDecisionReplaced for a replaced version, and
 	// ErrDecisionAnswerConflict when the version already has an answer of
-	// this provenance or the idempotency key names another answer. A direct
-	// answer to a version with an agent_interpreted answer must come from
-	// the user that answer records (else ErrNotRecordedAnswerer) and carry
-	// outcome confirm (same choice) or override (another choice); every
-	// other answer carries outcome answer (else ErrInvalidInput). A retry
+	// this provenance, an agent_interpreted answer finds any answer, or the
+	// idempotency key names another answer. A direct answer to a version
+	// with an agent_interpreted answer must come from the user that answer
+	// records (else ErrNotRecordedAnswerer) and carry outcome confirm (same
+	// choice) or override (another choice); every other direct answer
+	// carries outcome answer (else ErrDecisionOutcomeMismatch), and an
+	// agent_interpreted answer always does (else ErrInvalidInput). A retry
 	// with the same idempotency key, choice and answerer returns the
 	// recorded answer with replayed true and stores nothing. On Postgres
 	// the decision row is locked for the transaction, so an answer and a

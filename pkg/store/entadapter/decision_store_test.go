@@ -798,9 +798,10 @@ func TestRecordAnswer_OutcomeNeedsInterpretedAnswer(t *testing.T) {
 		in := f.answer(row, "1", "user-1", "")
 		in.Outcome = outcome
 		_, _, err := f.cs.RecordAnswer(ctx, in)
-		assert.ErrorIs(t, err, store.ErrInvalidInput, outcome)
+		assert.ErrorIs(t, err, store.ErrDecisionOutcomeMismatch, outcome)
 	}
-	// An interpreted answer is itself outcome answer.
+	// An interpreted answer is itself outcome answer: anything else is
+	// malformed input, not a state mismatch.
 	interp := f.interpretedAnswer(row, "1", "user-1")
 	interp.Outcome = store.DecisionOutcomeConfirm
 	_, _, err := f.cs.RecordAnswer(ctx, interp)
@@ -837,9 +838,9 @@ func TestRecordAnswer_OverInterpretedOnlyByRecordedAnswerer(t *testing.T) {
 	}
 	// The recorded answerer, with the wrong outcome.
 	_, _, err = f.cs.RecordAnswer(ctx, f.answer(row, "1", "user-1", ""))
-	assert.ErrorIs(t, err, store.ErrInvalidInput, "outcome answer over an interpreted answer")
+	assert.ErrorIs(t, err, store.ErrDecisionOutcomeMismatch, "outcome answer over an interpreted answer")
 	_, _, err = f.cs.RecordAnswer(ctx, withOutcome(f.answer(row, "2", "user-1", ""), store.DecisionOutcomeConfirm))
-	assert.ErrorIs(t, err, store.ErrInvalidInput, "confirm with another choice")
+	assert.ErrorIs(t, err, store.ErrDecisionOutcomeMismatch, "confirm with another choice")
 
 	d, err := f.cs.GetDecision(ctx, row)
 	require.NoError(t, err)
@@ -849,6 +850,36 @@ func TestRecordAnswer_OverInterpretedOnlyByRecordedAnswerer(t *testing.T) {
 	a, _, err := f.cs.RecordAnswer(ctx, withOutcome(f.answer(row, "1", "user-1", ""), store.DecisionOutcomeConfirm))
 	require.NoError(t, err)
 	assert.Equal(t, store.DecisionOutcomeConfirm, a.Outcome)
+}
+
+// TestRecordAnswer_InterpretedAfterDirectRefused: an agent_interpreted
+// answer needs a version with no answer of either kind, so one after a
+// direct answer is refused and nothing is stored.
+func TestRecordAnswer_InterpretedAfterDirectRefused(t *testing.T) {
+	f := newDecisionFixture(t)
+	ctx := context.Background()
+	row := f.create(t, false, yesNo("D1", "q")).Decisions[0].RowID
+	_, _, err := f.cs.RecordAnswer(ctx, f.answer(row, "1", "user-1", ""))
+	require.NoError(t, err)
+
+	for name, in := range map[string]*store.RecordAnswerInput{
+		"same user, same choice":    f.interpretedAnswer(row, "1", "user-1"),
+		"same user, another choice": f.interpretedAnswer(row, "2", "user-1"),
+		"another user":              f.interpretedAnswer(row, "2", "user-2"),
+	} {
+		_, _, err := f.cs.RecordAnswer(ctx, in)
+		assert.ErrorIs(t, err, store.ErrDecisionAnswerConflict, name)
+	}
+
+	d, err := f.cs.GetDecision(ctx, row)
+	require.NoError(t, err)
+	require.Len(t, d.Answers, 1, "no interpreted answer was stored")
+	assert.Equal(t, store.DecisionProvenanceDirect, d.Answers[0].Provenance)
+
+	// Positive control: an interpreted answer to an unanswered version.
+	row2 := f.create(t, false, yesNo("D2", "q")).Decisions[0].RowID
+	_, _, err = f.cs.RecordAnswer(ctx, f.interpretedAnswer(row2, "1", "user-1"))
+	require.NoError(t, err)
 }
 
 func withOutcome(in *store.RecordAnswerInput, outcome string) *store.RecordAnswerInput {

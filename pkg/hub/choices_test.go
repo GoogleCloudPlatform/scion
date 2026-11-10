@@ -784,3 +784,52 @@ func TestChoicesSend_IntroGetsMentionRewrite(t *testing.T) {
 	assert.Contains(t, msg.Msg, "helper-bot")
 	assert.NotContains(t, msg.Msg, "agent:helper-bot", "the intro was stored before the rewrite")
 }
+
+// interpretedFirstStore records an agent_interpreted answer just before
+// the next RecordAnswer, as one landing between the answer endpoint's
+// state check and its write would.
+type interpretedFirstStore struct {
+	store.Store
+	before func()
+}
+
+func (s *interpretedFirstStore) RecordAnswer(ctx context.Context, in *store.RecordAnswerInput) (*store.DecisionAnswer, bool, error) {
+	if b := s.before; b != nil {
+		s.before = nil
+		b()
+	}
+	return s.Store.RecordAnswer(ctx, in)
+}
+
+// An interpreted answer by the same user recorded after the endpoint read
+// the decision makes the store refuse the direct answer's outcome; the
+// user gets 409 with the current decision, not a validation error.
+func TestDecisionAnswer_InterpretedAfterStateCheck409(t *testing.T) {
+	f := newChoicesFixture(t)
+	_, res := f.topicPrompt(t, twoDecisions, false)
+	row := res.Decisions[0].RowID
+
+	real := f.srv.store
+	f.srv.store = &interpretedFirstStore{Store: real, before: func() { f.recordInterpreted(t, f.alice, row, "1") }}
+	t.Cleanup(func() { f.srv.store = real })
+
+	rr := f.answer(t, f.alice, row, map[string]interface{}{"choice_id": "1"})
+	require.Equal(t, http.StatusConflict, rr.Code, "body: %s", rr.Body.String())
+	code, details := errorCodeAndDetails(t, rr)
+	assert.Equal(t, ErrCodeDecisionAnswered, code)
+	view, ok := details["decision"].(map[string]interface{})
+	require.True(t, ok, "the 409 carries the current decision: %s", rr.Body.String())
+	assert.Equal(t, store.DecisionStatusDecided, view["status"])
+	eff, ok := view["decision"].(map[string]interface{})
+	require.True(t, ok, "the current decision has the interpreted answer")
+	assert.Equal(t, "1", eff["choiceId"])
+
+	d, err := real.GetDecision(context.Background(), row)
+	require.NoError(t, err)
+	require.Len(t, d.Answers, 1, "only the interpreted answer is stored")
+	assert.Equal(t, store.DecisionProvenanceAgentInterpreted, d.Answers[0].Provenance)
+
+	// Control: the same answer now, as a confirm, is recorded.
+	rr = f.answer(t, f.alice, row, map[string]interface{}{"choice_id": "1"})
+	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+}
