@@ -180,6 +180,8 @@ Scion uses a **well-known secret** to provision the key file into every agent co
 | **Target path** | `~/.scion/telemetry-gcp-credentials.json` |
 | **Env var set by broker** | `SCION_OTEL_GCP_CREDENTIALS` |
 
+At Hub scope, the Hub delivers this secret to agents only with exactly this name and type and a target path whose last two parts are `.scion/telemetry-gcp-credentials.json`, and it does not list it to agents; see [Hub-Scoped Secrets](/scion/hosted/user/secrets/#hub-scoped-secrets).
+
 Register the secret once via the Hub:
 
 ```bash

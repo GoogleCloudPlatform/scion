@@ -83,6 +83,10 @@ const (
 	// CloseSessionEnded: the test identity web session behind the stream
 	// ended or stopped being valid.
 	CloseSessionEnded CloseReason = "session_ended"
+	// CloseAccessChanged: a membership change of the stream's user left a
+	// subscribed subject unauthorized (or could not be re-checked); the
+	// server sent a reconnect hint.
+	CloseAccessChanged CloseReason = "access_changed"
 )
 
 // Query parameters that identify a stream. The web client sends them from

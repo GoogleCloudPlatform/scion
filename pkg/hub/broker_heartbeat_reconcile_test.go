@@ -760,7 +760,9 @@ func TestHeartbeat_NoListingMarksOfflineBrokerOnline(t *testing.T) {
 // heartbeat's active-phase regression guard (intentional). A stopped or
 // error row stays terminal: the heartbeat's terminal guard keeps a phase an
 // explicit lifecycle write set (telling a crash-left start from a stale
-// report is left to ptone/scion#4757 / ptone/scion#4759). An omitted
+// report is left to ptone/scion#4757 / ptone/scion#4759), and its stored
+// container status is not set to the live "starting" either, so it never
+// reads starting next to a terminal phase (ptone/scion#3607). An omitted
 // running agent in the same inventory gets a missing clock, which shows the
 // reconcile ran.
 func TestHeartbeat_StartingPhase(t *testing.T) {
@@ -799,10 +801,17 @@ func TestHeartbeat_StartingPhase(t *testing.T) {
 			stopped.ID:      string(state.PhaseStopped),
 			errored.ID:      string(state.PhaseError),
 		}
+		wantContainerStatus := map[string]string{
+			provisioning.ID: "starting",
+			starting.ID:     "starting",
+			running.ID:      "starting",
+			stopped.ID:      "",
+			errored.ID:      "",
+		}
 		for _, a := range reported {
 			got := f.get(a.ID)
 			assert.Equal(t, want[a.ID], got.Phase, "%s: phase of %s", round, a.Slug)
-			assert.Equal(t, "starting", got.ContainerStatus, "%s: container status of %s", round, a.Slug)
+			assert.Equal(t, wantContainerStatus[a.ID], got.ContainerStatus, "%s: container status of %s", round, a.Slug)
 			assert.Empty(t, got.ExitReason, "%s: exit reason of %s", round, a.Slug)
 			assert.Nil(t, got.ExitCode, "%s: exit code of %s", round, a.Slug)
 			assert.True(t, got.DeletedAt.IsZero(), "%s: %s is not deleted", round, a.Slug)

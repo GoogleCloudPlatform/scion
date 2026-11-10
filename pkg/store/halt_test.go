@@ -24,3 +24,16 @@ func TestIsHaltEvidence_SignaledIsNotEvidence(t *testing.T) {
 		t.Error(`IsHaltEvidence("signaled") = true, want false`)
 	}
 }
+
+// PhaseAtRest is a terminal phase or suspended; every live or unknown phase
+// is not at rest.
+func TestPhaseAtRest(t *testing.T) {
+	for phase, want := range map[string]bool{
+		"stopped": true, "error": true, "halted": true, "suspended": true,
+		"running": false, "starting": false, "provisioning": false, "": false,
+	} {
+		if got := PhaseAtRest(phase); got != want {
+			t.Errorf("PhaseAtRest(%q) = %v, want %v", phase, got, want)
+		}
+	}
+}

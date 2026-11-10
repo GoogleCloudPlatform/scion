@@ -2175,6 +2175,22 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 		defer logPerfTraceLine(perfTraceLogger(), r, trace.Snapshot, slog.String("sse_stage", "close"))
 	}
 
+	// Membership changes of the caller (an internal per-user subject, never
+	// written to the client) re-run the subject authorization in the loop,
+	// so a stream does not outlive the access it was opened with
+	// (ptone/scion#7494). Only the caller's own subject is subscribed, and
+	// it is subscribed BEFORE the expansion and authorization below: a
+	// membership change published while the stream is being set up is then
+	// queued and re-checked when the loop starts, instead of being missed.
+	// The deferred unsubscribe releases it on every return, refusals
+	// included.
+	streamUserID := ""
+	if su := getWebSessionUser(r.Context()); su != nil {
+		streamUserID = su.UserID
+	}
+	membershipCh, unsubscribeMembership := subscribeMembershipChanged(ws.events, streamUserID)
+	defer unsubscribeMembership()
+
 	// Expand NATS-style wildcards (e.g. project.>) into specific
 	// resource-scoped subjects before authorization. This ensures the
 	// subscription only covers resources the caller can actually access,
@@ -2209,6 +2225,9 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 		})
 		_, _ = w.Write(body)
 		return
+	}
+	if streamAuthorizedHook != nil {
+		streamAuthorizedHook(streamKindWebEvents)
 	}
 
 	// Disable the server's WriteTimeout for this long-lived SSE connection.
@@ -2270,12 +2289,60 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 	reconnectTimer := time.NewTimer(maxAge)
 	defer reconnectTimer.Stop()
 
+	// recheckMembership handles one membership-changed event; it reports
+	// whether the stream must end (closeReason is then set).
+	recheckMembership := func(evt Event, ok bool) bool {
+		if !ok {
+			// The publisher closed the subscription: end the stream as
+			// for the event subscription, so no change can be missed.
+			closeReason = eventstreams.ClosePublisher
+			return true
+		}
+		if !membershipChangedNames(evt, streamUserID) {
+			return false
+		}
+		// Fail closed: a subject the caller may no longer read, or a
+		// re-check that cannot decide, ends the stream with a reconnect
+		// hint, so the client reconnects and is authorized afresh.
+		if !sseStreamStillAuthorized(ws, r, subjects) {
+			n, _ := fmt.Fprintf(w, "event: reconnect\ndata: {}\n\n")
+			flusher.Flush()
+			stream.RecordBytes(n)
+			closeReason = eventstreams.CloseAccessChanged
+			return true
+		}
+		// Still authorized: drop cached per-agent decisions so the message
+		// rules are decided again.
+		viewer = ws.newSSEMessageViewer(r)
+		return false
+	}
+	// drainMembership handles every membership-changed event already
+	// queued, without blocking. The event case runs it before writing, so
+	// a membership change published before an event is re-checked before
+	// that event is written: select picks among ready cases at random, and
+	// would otherwise let the event through first.
+	drainMembership := func() bool {
+		for {
+			select {
+			case evt, ok := <-membershipCh:
+				if recheckMembership(evt, ok) {
+					return true
+				}
+			default:
+				return false
+			}
+		}
+	}
+
 	for {
 		select {
 		case evt, ok := <-ch:
 			if !ok {
 				// Publisher closed
 				closeReason = eventstreams.ClosePublisher
+				return
+			}
+			if drainMembership() {
 				return
 			}
 			if !viewer.visible(evt) {
@@ -2297,6 +2364,10 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 			stream.RecordEvent(n)
 			if trace != nil {
 				trace.addSSEEvent(time.Since(writeStart))
+			}
+		case evt, ok := <-membershipCh:
+			if recheckMembership(evt, ok) {
+				return
 			}
 		case <-heartbeat.C:
 			if tiSession && !ws.sseTestIdentitySessionStillValid(r) {
@@ -2895,6 +2966,10 @@ func (ws *WebServer) authorizeSSESubjects(r *http.Request, subjects []string) []
 			if len(tokens) != 3 || tokens[1] != "images" || isNATSWildcard(tokens[2]) {
 				denied = append(denied, sub)
 			}
+		case "hub":
+			// Internal hub events (membershipChangedSubject): never a client
+			// subscription.
+			denied = append(denied, sub)
 		case "admin":
 			// Admin-only namespace. No web client subscribes to this today.
 			if sessionUser.Role != "admin" {

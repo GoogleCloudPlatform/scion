@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 380
+**Operations:** 381
 
 ## Table of Contents
 
@@ -42,6 +42,7 @@
 - [project.membership.add](#projectmembershipadd) — Add a member to a project with a specified role
 - [project.membership.update](#projectmembershipupdate) — Change a project member's role
 - [project.membership.remove](#projectmembershipremove) — Remove a member from a project
+- [project.membership.leave](#projectmembershipleave) — Leave a project: remove the caller's own direct project roles (ptone/scion#7494)
 - [project.membership.list](#projectmembershiplist) — List project members and their roles
 - [project.membership.transfer](#projectmembershiptransfer) — Atomically transfer project ownership from the actor to another user
 - [project.membership.principal.set](#projectmembershipprincipalset) — Replace a principal's whole set of project roles
@@ -1743,6 +1744,60 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## project.membership.leave
+
+**Domain:** project.membership
+
+**Description:** Leave a project: remove the caller's own direct project roles (ptone/scion#7494)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/projects/{id}/leave` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `GOV_PENDING`)
+
+**Base Permission:** `project.read`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `revoke-authority`
+
+**Authority Evaluation:** `proposed_post_state`
+
+### Governance
+
+- **Kind:** peer_superior
+- self only: removes the caller's own direct user bindings on the project, classified removable by leaveBindingClass (allow-list, fails closed); never another principal, never group, agent or visitor bindings. The governance matrix and the hub-level role-binding override do not apply. Enforced by ProjectMembershipService.LeaveProject.
+
+### Invariants
+
+| ID | Kind | Description | Fail-Closed |
+|----|------|-------------|-------------|
+| last-owner-guard | security | The last usable direct owner cannot leave | Yes |
+| constraint-admin-lockout | security | A leave cannot leave a scope without a constraint admin | Yes |
+
+### Audit
+
+- **Event Type:** `project_member_leave`
+- **Context Fields:** actor_id, project_id
+- **Before Fields:** target_principal_id, target_roles
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`, `not_found`, `last_owner`, `membership_group_derived`, `constraint_admin_lockout`, `credential_insufficient`, `leave_binding_unclassified`, `conflict`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestProjectLeave_TokenRefusedSessionOnly`
 
 ---
 

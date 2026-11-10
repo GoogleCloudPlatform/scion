@@ -17,6 +17,7 @@ package cmd
 import (
 	"testing"
 
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -79,8 +80,8 @@ func TestHubSecretMigrateCmd_NoHintWhenGCPProjectSet(t *testing.T) {
 
 // TestHubSecretMigrateCmd_NoHintWhenNoProjectFlags ensures a bare
 // invocation, with neither --project nor --gcp-project set, does not
-// trigger the hint: that case must fall through to cobra's normal
-// required-flag error instead.
+// trigger the hint: that case must fall through to the command's disabled
+// message instead.
 func TestHubSecretMigrateCmd_NoHintWhenNoProjectFlags(t *testing.T) {
 	origProjectPath, origMigrateProject := projectPath, migrateProject
 	defer func() { projectPath, migrateProject = origProjectPath, origMigrateProject }()
@@ -91,4 +92,20 @@ func TestHubSecretMigrateCmd_NoHintWhenNoProjectFlags(t *testing.T) {
 
 	require.NotNil(t, hubSecretMigrateCmd.Args)
 	require.NoError(t, hubSecretMigrateCmd.Args(hubSecretMigrateCmd, nil))
+}
+
+// TestHubSecretMigrateCmd_RefusesToRun checks that the command refuses to
+// run, so it can no longer copy stored at-rest forms into Secret Manager,
+// and that its error points at the Hub maintenance migration.
+func TestHubSecretMigrateCmd_RefusesToRun(t *testing.T) {
+	// No flag is required, so a bare invocation reaches the message too.
+	for _, name := range []string{"gcp-project", "credentials", "dry-run", "force", "hub-id"} {
+		f := hubSecretMigrateCmd.Flags().Lookup(name)
+		require.NotNil(t, f, name)
+		assert.Empty(t, f.Annotations[cobra.BashCompOneRequiredFlag], "--%s must not be required", name)
+	}
+	err := hubSecretMigrateCmd.RunE(hubSecretMigrateCmd, nil)
+	require.ErrorIs(t, err, errSecretMigrateDisabled)
+	assert.Contains(t, err.Error(), "secret-hub-id-migration")
+	assert.Contains(t, err.Error(), "ptone/scion#7633")
 }

@@ -24,6 +24,12 @@ import (
 // Capabilities represents the set of actions a user can perform on a resource.
 type Capabilities struct {
 	Actions []string `json:"actions"`
+
+	// CanLeave and LeaveBlockedReason are set only on a project's
+	// _capabilities, only while hub.project_self_leave is on
+	// (ptone/scion#7494); see MembershipCapabilities.
+	CanLeave           *bool  `json:"canLeave,omitempty"`
+	LeaveBlockedReason string `json:"leaveBlockedReason,omitempty"`
 }
 
 // ResourceActions maps resource types to the actions applicable to individual resources.

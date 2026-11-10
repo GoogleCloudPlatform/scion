@@ -87,19 +87,26 @@ const HubSettingSectionUpdateAvailable = "system.update_available"
 // last systemd unit check of Rebuild from git (UnitDriftStatus).
 const HubSettingSectionUnitDrift = "system.unit_drift"
 
-// SecretMigrationExecutor migrates hub-scoped secrets from the legacy fixed "hub" scope ID
-// to the per-instance hub ID namespace in GCP Secret Manager.
+// SecretMigrationExecutor moves secrets whose value is stored in the Hub
+// database into GCP Secret Manager (secret.MigrateLocalToGCP): each value
+// is decoded through the local backend's decode path, written, and read
+// back before the row is switched to its Secret Manager reference. A run
+// that leaves any secret unverified returns an error, so the migration is
+// not marked complete and can be run again.
 type SecretMigrationExecutor struct {
 	store         store.Store
 	secretBackend secret.SecretBackend
+	cipher        *secret.ValueCipher
 }
 
 // NewSecretMigrationExecutor returns a SecretMigrationExecutor that reads
-// secrets from s and migrates them in backend.
-func NewSecretMigrationExecutor(s store.Store, backend secret.SecretBackend) *SecretMigrationExecutor {
+// secrets from s, decodes their stored values with cipher (the Hub's
+// local value cipher) and migrates them into backend.
+func NewSecretMigrationExecutor(s store.Store, backend secret.SecretBackend, cipher *secret.ValueCipher) *SecretMigrationExecutor {
 	return &SecretMigrationExecutor{
 		store:         s,
 		secretBackend: backend,
+		cipher:        cipher,
 	}
 }
 
@@ -118,81 +125,8 @@ func (e *SecretMigrationExecutor) Run(ctx context.Context, logger io.Writer, par
 	if !ok {
 		return fmt.Errorf("secret migration requires GCP Secret Manager backend; current backend is not GCP SM")
 	}
-
-	// List all secrets from the database (no scope filter = all secrets).
-	allSecrets, err := e.store.ListSecrets(ctx, store.SecretFilter{})
-	if err != nil {
-		return fmt.Errorf("failed to list secrets: %w", err)
-	}
-
-	if len(allSecrets) == 0 {
-		_, _ = fmt.Fprintln(logger, "No secrets found to migrate.")
-		return nil
-	}
-
-	_, _ = fmt.Fprintf(logger, "Found %d secret(s) to process.\n", len(allSecrets))
-	if dryRun {
-		_, _ = fmt.Fprintln(logger, "DRY RUN: No changes will be made.")
-	}
-
-	migrated := 0
-	skipped := 0
-
-	for _, s := range allSecrets {
-		// Skip secrets that already have a GCP SM reference.
-		if s.SecretRef != "" {
-			_, _ = fmt.Fprintf(logger, "  SKIP  %s (scope: %s/%s) - already has ref: %s\n", s.Key, s.Scope, s.ScopeID, s.SecretRef)
-			skipped++
-			continue
-		}
-
-		if dryRun {
-			_, _ = fmt.Fprintf(logger, "  WOULD MIGRATE  %s (scope: %s/%s, type: %s)\n", s.Key, s.Scope, s.ScopeID, s.SecretType)
-			migrated++
-			continue
-		}
-
-		// Read value from the database.
-		value, err := e.store.GetSecretValue(ctx, s.Key, s.Scope, s.ScopeID)
-		if err != nil {
-			_, _ = fmt.Fprintf(logger, "  WARN  %s (scope: %s/%s) - failed to get value: %v\n", s.Key, s.Scope, s.ScopeID, err)
-			skipped++
-			continue
-		}
-
-		// Force-migrate: read the value from the existing GCP SM reference if present.
-		// (This path is only reached for secrets without a ref, so no force logic needed here —
-		// the CLI --force flag handles re-migration of already-migrated secrets.)
-
-		input := &secret.SetSecretInput{
-			Name:        s.Key,
-			Value:       value,
-			SecretType:  s.SecretType,
-			Target:      s.Target,
-			Scope:       s.Scope,
-			ScopeID:     s.ScopeID,
-			Description: s.Description,
-			CreatedBy:   s.CreatedBy,
-			UpdatedBy:   s.UpdatedBy,
-		}
-
-		if _, _, err := gcpBackend.Set(ctx, input); err != nil {
-			_, _ = fmt.Fprintf(logger, "  ERROR  %s (scope: %s/%s) - %v\n", s.Key, s.Scope, s.ScopeID, err)
-			skipped++
-			continue
-		}
-
-		_, _ = fmt.Fprintf(logger, "  MIGRATED  %s (scope: %s/%s, type: %s)\n", s.Key, s.Scope, s.ScopeID, s.SecretType)
-		migrated++
-	}
-
-	status := "complete"
-	if dryRun {
-		status = "dry run complete"
-	}
-	_, _ = fmt.Fprintf(logger, "\nMigration %s: %d migrated, %d skipped\n", status, migrated, skipped)
-
-	return nil
+	_, err := secret.MigrateLocalToGCP(ctx, e.store, e.cipher, gcpBackend, dryRun, logger)
+	return err
 }
 
 // ResultJSON returns the migration result as a JSON string.

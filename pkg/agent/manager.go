@@ -555,6 +555,12 @@ func (m *AgentManager) DeleteTarget(ctx context.Context, agentName, sharerKey st
 	return m.deleteResolved(ctx, agentName, sharerKey, ref, deleteFiles, projectPath, removeBranch)
 }
 
+// deletePreStopTimeout bounds the graceful stop delete runs before it
+// force-removes a container. It is the engines' own default, shorter than
+// the runtime's default stop window for a plain stop, and it must stay below
+// the hub's deferred-delete wait (dispatchDeleteTimeout, 15s, in pkg/hub).
+const deletePreStopTimeout = 10 * time.Second
+
 func (m *AgentManager) deleteResolved(ctx context.Context, agentName, sharerKey string, ref runtime.RunRef, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
 	if targetID := ref.ID; targetID != "" {
 		// Stop the container gracefully before force-removing it. This ensures
@@ -562,8 +568,14 @@ func (m *AgentManager) deleteResolved(ctx context.Context, agentName, sharerKey 
 		// filesystem cleanup. Without this, docker rm -f / container kill sends
 		// SIGKILL which can leave mounts in a state that causes permission
 		// errors when DeleteAgentFiles tries to remove the agent directory.
+		// The stop is bounded by deletePreStopTimeout rather than the
+		// runtime's default stop window: the agent is being removed, so
+		// there is no point waiting out its full shutdown and final Hub
+		// report, and the Hub bounds a deferred delete by a short wait.
 		util.Debugf("delete: stopping container %s before removal", targetID)
-		if err := m.Runtime.Stop(ctx, ref); err != nil {
+		stopRef := ref
+		stopRef.StopTimeout = deletePreStopTimeout
+		if err := m.Runtime.Stop(ctx, stopRef); err != nil {
 			// Log but don't fail — the container may already be stopped,
 			// and Delete (force-remove) will handle it either way.
 			util.Debugf("delete: stop returned error (continuing): %v", err)
