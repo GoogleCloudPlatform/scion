@@ -91,3 +91,53 @@ No sample reported "could not check". Subprocess spawners in the module's tests:
 
 - No hub shards: the diff against main stays under `extras/scion-a2a-bridge/` and `.design/project-log/`.
 - `make ci` was not run. The diff touches no root-module code, and the root lint and tests do not cover the bridge module.
+
+## Round 1 fixes
+
+Base: main `9e87b08984a6` (not merged again). Item 10: `2a335a1e`. Starting head: `7a8970eb1`. No non-test code changed.
+
+### README: federated user reads and the conversation envelope switch
+
+`extras/scion-a2a-bridge/README.md`, section "Agent replies", now says three things that it did not say before:
+
+- Requirements: a federated user's reply is read through its own direct conversation's chat history. That read needs the Hub's conversation envelope switch on. With the switch off, set `reply_poll.enabled: false`, or federated user calls time out. The README also notes that the Hub treats the switch as off when it cannot read its messaging setting.
+- Step 2: a federated user's preflight reads one message from its own direct conversation, not the conversation list.
+- Configuration: agent callers always wait on the push path, and federated users do so only when `enabled` is `false`.
+
+Checked against the code:
+
+- `pkg/hub/chat_read_target.go:214`: with the switch off, or with no operational settings, the history filter becomes channel plus thread key, so the bridge's send (not filed as a thread) is never in the page.
+- `pkg/hub/operational_settings.go:2272` (section absent: on), `:2276` (malformed: off), `:2281` (parse error: off), `:2287` (field omitted: on).
+- `extras/scion-a2a-bridge/internal/bridge/reply_poller_visitor.go:36-41` (the same limit in the code comment) and `:98-99` (`check` reads with `limit=1`).
+- `extras/scion-a2a-bridge/internal/bridge/executor.go:170` (a reader is built only when `reply_poll` is enabled and the caller is not an agent), `:182` (`polling`), `:300` (a federated user's preflight is `visitorReplyPreflight`), `:408` and `:420` (the visitor poller and `pollOnlyEvent`). With `enabled: false` no reader is built, so a federated user waits on the push path.
+
+### Two federated users polling one agent
+
+New test `TestExecutor_TwoFederatedUserPollersOnOneAgent` in `reply_poll_visitor_test.go`. Two visitor accounts (`fedUserAccountID` with `fedUserToken`, `fedUser2AccountID` with `fedUser2Token`) call agent1 at the same time with polling on. Each task has a live reply poller for its own account. Each conversation holds its own reply. The test checks three things: each response carries only its own reply, every conversation read used the reader's own conversation key with its own credential, and each visitor made at least three reads (preflight, poll, access re-check). To support it, the hub double gained `dmMessagesByKey`, which answers each read with the page of the conversation key read. Existing tests leave it nil and keep the single `dmMessages` page.
+
+Mutant: in `newVisitorDMReader`, the conversation key was built from the fixed account `fedUserAccountID` instead of `caller.UserID` (one site). Result: caught. The new test failed with "second visitor: response ... the reply in the first visitor's conversation ..., want only the reply in its own conversation". With the mutant reverted, it passes. The mutant was never committed.
+
+### Plain upstream issue reference
+
+The reflowed comment of `TestExecutor_IdentityIssuerUserWithoutVisitorAccountRefused` in `federated_user_test.go` now says "upstream issue 3577". The copy in `TestAuthMiddleware_FederatedUserIdentity` (line 861) is main's text and is unchanged.
+
+### Scoped gate
+
+Each go command ran with a private `GOCACHE` and `GOMODCACHE` under its own `/tmp` directory and with `-buildvcs=false`.
+
+| Command (in `extras/scion-a2a-bridge`) | Result |
+|---|---|
+| `go test -count=1 -v -run 'Visitor\|FederatedUser\|ReplyPoll\|ReplyWaitKey\|PollOnly\|NilReadResult\|LaunchingAgent' ./internal/bridge/` | ok, 55.3 s: 71 top-level tests passed (60 subtests passed), 0 failed, 2 skipped |
+| `go vet ./internal/bridge/` | clean |
+| `gofmt -l ./internal ./integration` | no files |
+| `GOGC=40 golangci-lint run --new-from-rev=origin/main --concurrency=1 ./internal/bridge/... ./integration/...` | exit 0, "0 issues", 7 min 35 s (lowest MemAvailable 102 GiB) |
+
+Skips, both because no PostgreSQL ran in this round ("TEST_DATABASE_URL not set — skipping real Postgres test"): `TestCorrelate_FederatedUserTaskStandalone` and `TestReplyPoller_StandaloneAppendFence`.
+
+Leftover-process check for the scoped test run. The checker was built fresh outside the repository and works as described above: `setsid --wait`, a script that records `$$` and execs `go test`, and reads of `/proc/[0-9]*/stat` only.
+
+| Run | Samples | Max members during | Members after |
+|---|---|---|---|
+| Scoped bridge test run, fixed head | 13 | 2 | 0 |
+
+No sample reported "could not check". A search of `internal/bridge/*_test.go` for `Setsid`, `setsid`, `nohup` and `disown` finds nothing. Limit: a child that calls `setsid` itself leaves the session and is not seen.
