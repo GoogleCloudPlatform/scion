@@ -904,6 +904,10 @@ export class ScionPageAgentCreate extends LitElement {
       const startedPhases = ['running', 'provisioning', 'cloning', 'starting'];
       const alreadyStarted = agent?.phase ? startedPhases.includes(agent.phase) : false;
       const hubLaunch = !!agent && (isAgentLaunching(agent) || isIncompleteCreate(agent));
+      // The pending secrets hint follows a create that started the agent or
+      // whose launch the hub is running, and a successful explicit start;
+      // not an incomplete create or a failed start.
+      let started = alreadyStarted || (!!agent && isAgentLaunching(agent));
       if (!alreadyStarted && !hubLaunch) {
         // The agent exists, so a failed start, including a rejected fetch,
         // is reported and its page still opens, where the user can start
@@ -920,7 +924,7 @@ export class ScionPageAgentCreate extends LitElement {
             startError = (await parseApiError(startResp, fallback)).message;
           } else {
             await showResponseBodyWarnings(startResp, shownWarnings);
-            void showPendingSecretsStartHint();
+            started = true;
           }
         } catch (startErr) {
           startError =
@@ -931,6 +935,7 @@ export class ScionPageAgentCreate extends LitElement {
           showToast(`Agent was created but did not start: ${startError}`, 'danger');
         }
       }
+      if (started) void showPendingSecretsStartHint();
 
       // Navigate to agent detail page
       navigateTo(`/agents/${agentId}`);
