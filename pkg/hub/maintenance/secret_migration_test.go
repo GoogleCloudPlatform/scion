@@ -21,15 +21,21 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
+
+// untouchedStore is a non-nil store.Store whose methods are never meant
+// to run: any call panics through the nil embedded interface.
+type untouchedStore struct{ store.Store }
 
 // TestSecretMigrationExecutor_RefusesWithoutCipher checks that the
 // migration never runs without the local cipher, so it can never fall back
 // to copying stored at-rest forms into Secret Manager. The cipher check
-// comes before any store or Secret Manager access, so neither is needed.
+// comes before any store or Secret Manager access: the store panics if
+// used, and the Secret Manager backend has no client.
 func TestSecretMigrationExecutor_RefusesWithoutCipher(t *testing.T) {
 	gcp := secret.NewGCPBackendWithClient(nil, nil, "test-project", "test-hub-id")
-	executor := NewSecretMigrationExecutor(nil, gcp, nil)
+	executor := NewSecretMigrationExecutor(untouchedStore{}, gcp, nil)
 
 	var log bytes.Buffer
 	err := executor.Run(context.Background(), &log, map[string]string{})
