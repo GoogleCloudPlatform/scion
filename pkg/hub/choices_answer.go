@@ -508,17 +508,18 @@ func (s *Server) deliverChoiceResponse(ctx context.Context, asker *store.Agent, 
 		Channel:        m.Channel,
 		ThreadID:       m.ThreadID,
 		ConversationID: m.ConversationID,
-		Metadata: map[string]string{
-			messages.MetadataChoiceKey:        a.Key,
-			messages.MetadataChoiceVersion:    strconv.Itoa(a.Version),
-			messages.MetadataChoiceID:         a.ChoiceID,
-			messages.MetadataChoiceProvenance: a.Provenance,
-		},
 	}
-	// The metadata is hub-built (the four choice keys); strip the reserved
-	// keys anyway, as every dispatch site does, so a later field cannot
-	// carry one through.
+	// Strip the reserved keys first, as every dispatch site does, so no
+	// value from another source reaches the agent; the four choice keys are
+	// reserved and only the hub sets them, after the strip.
 	sm.Metadata = messaging.StripReservedMetadata(sm.Metadata)
+	if sm.Metadata == nil {
+		sm.Metadata = make(map[string]string, 4)
+	}
+	sm.Metadata[messages.MetadataChoiceKey] = a.Key
+	sm.Metadata[messages.MetadataChoiceVersion] = strconv.Itoa(a.Version)
+	sm.Metadata[messages.MetadataChoiceID] = a.ChoiceID
+	sm.Metadata[messages.MetadataChoiceProvenance] = a.Provenance
 	dctx, cancel := context.WithTimeout(withDispatchMessageID(context.WithoutCancel(ctx), m.ID), 30*time.Second)
 	defer cancel()
 	if err := dispatchWithBrokerRetry(dctx, s.recordLog(), dispatcher, asker, line, false, sm); err != nil {
