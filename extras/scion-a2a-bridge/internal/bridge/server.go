@@ -151,6 +151,10 @@ func ValidateConfig(cfg *Config) error {
 	if cfg.Hub.Endpoint == "" {
 		return fmt.Errorf("hub.endpoint is required")
 	}
+	if !hubEndpointOK(cfg.Hub.Endpoint) {
+		// Fixed text: the endpoint may carry user information.
+		return fmt.Errorf("hub.endpoint must be a URL with a host, no user information, query or fragment")
+	}
 	if cfg.Hub.User == "" {
 		return fmt.Errorf("hub.user is required")
 	}

@@ -145,6 +145,10 @@ server:
     #                                   # perf_trace line per request (phase times,
     #                                   # authz store calls, decision audits, DB
     #                                   # pool waits). Observe only. Off by default.
+    # csp_report_raw_samples: false    # Layer 0 (restart required). Adds the
+    #                                   # sample of each browser policy report to
+    #                                   # its csp_violation log record. Samples can
+    #                                   # hold page content. Off by default.
     # membership_sweep_report_only: false # Layer 0 (restart required). The
     #                                   # membership-standing sweep logs and audits
     #                                   # the agents it would hold and stop, and

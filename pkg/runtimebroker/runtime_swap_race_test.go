@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
@@ -63,7 +64,7 @@ func TestSwapRuntime_ConcurrentDispatchReadsUnderLock(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for ctx.Err() == nil {
-			srv.SwapRuntime(newRT())
+			srv.SwapRuntime(newRT(), config.RuntimeBuildRecord{})
 		}
 	}()
 
@@ -79,7 +80,7 @@ func TestSwapRuntime_ConcurrentDispatchReadsUnderLock(t *testing.T) {
 		func() { _, _ = srv.LookupAgent(context.Background(), "test-agent-1", "") },
 		func() { _, _ = srv.resolveAgentRuntimeTarget(context.Background(), "test-agent-1", "") },
 		func() { _ = srv.allManagers(context.Background()) },
-		func() { _ = srv.resolveRuntimeNameForOpts(api.StartOptions{Name: "test-agent-1"}) },
+		func() { _, _ = srv.resolveRuntimeNameForOpts(api.StartOptions{Name: "test-agent-1"}) },
 		func() { _ = projectFilter("proj-1") },
 		func() { _ = srv.hasRecordlessProber() },
 		func() { _, _ = srv.forcedRuntime() },

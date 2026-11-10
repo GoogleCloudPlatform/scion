@@ -60,6 +60,7 @@ var brokerMachineLevelCommands = map[string]bool{
 	"status":     true,
 	"hubs":       true,
 	"join":       true,
+	"convert":    true,
 }
 
 // commandRequiresProject reports whether cmd needs an active scion project

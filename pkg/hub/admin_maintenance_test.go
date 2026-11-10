@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 )
 
 func TestListMaintenanceOperations(t *testing.T) {
@@ -78,8 +79,8 @@ func TestExecuteMigration_NotFound(t *testing.T) {
 func TestExecuteMigration_AlreadyCompleted(t *testing.T) {
 	srv, s := newTestServerWithStore(t)
 
-	// Mark the migration as completed.
-	op, err := s.GetMaintenanceOperation(context.Background(), "secret-hub-id-migration")
+	// Mark a migration that is not re-runnable as completed.
+	op, err := s.GetMaintenanceOperation(context.Background(), "applied-config-env-cleanup")
 	if err != nil {
 		t.Fatalf("failed to get operation: %v", err)
 	}
@@ -91,7 +92,7 @@ func TestExecuteMigration_AlreadyCompleted(t *testing.T) {
 	}
 
 	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/maintenance/migrations/secret-hub-id-migration/run", nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/maintenance/migrations/applied-config-env-cleanup/run", nil)
 	req = req.WithContext(contextWithIdentity(req.Context(), admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminMaintenanceMigrations(rr, req)
@@ -104,6 +105,35 @@ func TestExecuteMigration_AlreadyCompleted(t *testing.T) {
 	// migration through this endpoint.
 	if body := rr.Body.String(); strings.Contains(body, "--force") || strings.Contains(body, "CLI") {
 		t.Errorf("409 body must not reference a nonexistent CLI flag, got: %s", body)
+	}
+}
+
+// TestExecuteMigration_SecretMigrationRunsAgainAfterCompleted checks that a
+// completed secret migration does not block another run: a run made before
+// values were decoded and verified must not count as final. The run gets
+// past the completed check and stops only for the missing secret backend.
+func TestExecuteMigration_SecretMigrationRunsAgainAfterCompleted(t *testing.T) {
+	srv, s := newTestServerWithStore(t)
+
+	op, err := s.GetMaintenanceOperation(context.Background(), entadapter.SecretHubIDMigrationKey)
+	if err != nil {
+		t.Fatalf("failed to get operation: %v", err)
+	}
+	now := time.Now()
+	op.Status = store.MaintenanceStatusCompleted
+	op.CompletedAt = &now
+	if err := s.UpdateMaintenanceOperation(context.Background(), op); err != nil {
+		t.Fatalf("failed to update operation: %v", err)
+	}
+
+	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/maintenance/migrations/"+entadapter.SecretHubIDMigrationKey+"/run", nil)
+	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	rr := httptest.NewRecorder()
+	srv.handleAdminMaintenanceMigrations(rr, req)
+
+	if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "no secret backend configured") {
+		t.Fatalf("expected the run to pass the completed check and stop for the missing backend (400), got %d: %s", rr.Code, rr.Body.String())
 	}
 }
 
@@ -663,6 +693,12 @@ func TestCheckForUpdates_NoRepoPath(t *testing.T) {
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %s", rr.Code, rr.Body.String())
 	}
+	// The error names the real knobs; there is no maintenance.repo_path key.
+	body := rr.Body.String()
+	if !strings.Contains(body, "SCION_MAINTENANCE_REPO_PATH") || !strings.Contains(body, "workspace_path") ||
+		strings.Contains(body, "maintenance.repo_path") {
+		t.Errorf("error text = %s", body)
+	}
 }
 
 func TestCheckForUpdates_WrongMethod(t *testing.T) {
@@ -800,5 +836,52 @@ func TestListMaintenanceOperations_ShowsContainerBinariesWhenEnvSet(t *testing.T
 	}
 	if !found {
 		t.Error("rebuild-container-binaries should be visible when SCION_DEV_BINARIES is set")
+	}
+}
+
+// An invalid branch parameter on rebuild-server or rebuild-web is refused
+// with 400 and the allowed form, before any run is created. That includes a
+// key the parameter parser would trim to "branch", and a second such key. A
+// padded key with a valid value passes the branch check and is refused by
+// the raw-key allow-list as an unknown parameter.
+func TestExecuteOperation_InvalidBranchRejected(t *testing.T) {
+	cases := []struct {
+		name, body string
+		wants      []string
+	}{
+		{"invalid", `{"params":{"branch":"--upload-pack=x"}}`, []string{"invalid branch name", "start with a letter or digit"}},
+		{"padded key", `{"params":{" branch":"x+y"}}`, []string{"invalid branch name", "start with a letter or digit"}},
+		{"repeated key", `{"params":{"branch":"main","branch ":"x+y"}}`, []string{"branch is given more than once", "start with a letter or digit"}},
+		{"padded key, valid value", `{"params":{" branch ":"main"}}`, []string{"unknown_param", "unknown parameter(s):  branch  (allowed: branch)"}},
+	}
+	for _, key := range []string{"rebuild-server", "rebuild-web"} {
+		for _, tc := range cases {
+			t.Run(key+" "+tc.name, func(t *testing.T) {
+				srv, s := newTestServerWithStore(t)
+				admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+				req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/maintenance/operations/"+key+"/run",
+					strings.NewReader(tc.body))
+				req.Header.Set("Content-Type", "application/json")
+				req = req.WithContext(contextWithIdentity(req.Context(), admin))
+				rr := httptest.NewRecorder()
+				srv.handleAdminMaintenanceOps(rr, req)
+
+				if rr.Code != http.StatusBadRequest {
+					t.Fatalf("expected 400, got %d: %s", rr.Code, rr.Body.String())
+				}
+				for _, want := range tc.wants {
+					if !strings.Contains(rr.Body.String(), want) {
+						t.Errorf("expected %q in the body, got %s", want, rr.Body.String())
+					}
+				}
+				runs, err := s.ListMaintenanceRuns(context.Background(), key, 10)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(runs) != 0 {
+					t.Errorf("a rejected request must not create a run, got %d", len(runs))
+				}
+			})
+		}
 	}
 }

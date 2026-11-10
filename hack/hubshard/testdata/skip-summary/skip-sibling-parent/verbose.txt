@@ -1,0 +1,10 @@
+=== RUN   TestSkipSiblingParent
+=== RUN   TestSkipSiblingParent/x
+=== NAME  TestSkipSiblingParent
+    toy_test.go:187: setup
+=== RUN   TestSkipSiblingParent/x/y
+    toy_test.go:188: y work
+--- SKIP: TestSkipSiblingParent (0.00s)
+    --- PASS: TestSkipSiblingParent/x (0.00s)
+    --- PASS: TestSkipSiblingParent/x/y (0.00s)
+PASS

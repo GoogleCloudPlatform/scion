@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// These tests exercise unix-only, Windows-gated agent storage code.
+//go:build unix
+
 package agent
 
 import (
@@ -44,17 +47,14 @@ runtimes:
 profiles:
   local:
     runtime: docker
-    home_storage_backend: nfs
-    shared_dir_storage_backend: nfs
   gke:
     runtime: k8s
-    home_storage_backend: nfs
-    shared_dir_storage_backend: nfs
 server:
   home_storage:
+    backend: nfs
     allow_incomplete_phases: true
   shared_dir_storage:
-    backend: local
+    backend: nfs
     nfs:
       mount_root: %s
       shares:
@@ -134,9 +134,12 @@ func TestStartHomeStorage_NFSHome(t *testing.T) {
 }
 
 // A settings file without schema_version that sets server.home_storage is
-// not loaded with its server block. A start with shared dirs (which takes
-// the shared-dir settings snapshot) must fail, not record a local home.
-func TestStartHomeStorage_LegacySettingsWithSharedDirsFailClosed(t *testing.T) {
+// converted at its own layer, which keeps its server block (ptone/scion#3919),
+// so the operator's home storage settings apply: here the NFS home is
+// incomplete without allow_incomplete_phases, and a start with shared dirs
+// (which takes the shared-dir settings snapshot) fails instead of recording
+// a local home.
+func TestStartHomeStorage_LegacySettingsWithSharedDirsEnforced(t *testing.T) {
 	f := newSharedDirStorageRunFixture(t)
 	f.writeRawGlobalSettings(t, `active_profile: local
 server:
@@ -148,7 +151,7 @@ server:
 	opts.SharedDirs = []api.SharedDir{{Name: "scratchpad"}}
 	_, err := NewManager(newSDSMockRuntime("kubernetes", &c)).Start(withNFSHomeExperiment(context.Background()), opts)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "schema_version")
+	assert.Contains(t, err.Error(), "home_storage")
 	assert.Equal(t, 0, c.ran)
 	assert.Equal(t, &homeStorageRecord{Backend: homeStoragePending}, startHomeRecord(t, f, "gke-agent"))
 }

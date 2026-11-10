@@ -75,7 +75,7 @@ func (s *Server) flatDispatchSelection() dispatchProfileSelection {
 // pods in: its runtime's namespace (the activated target), else the
 // namespace recorded in its execution scope.
 func (s *Server) flatInstanceNamespace() string {
-	if _, rt := s.defaultPair(); rt != nil {
+	if _, rt, _ := s.defaultPair(); rt != nil {
 		if k8s, ok := rt.(*scionrt.KubernetesRuntime); ok && k8s.DefaultNamespace != "" {
 			return k8s.DefaultNamespace
 		}

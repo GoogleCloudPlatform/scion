@@ -153,7 +153,6 @@ else
         SCION_HUB_STORAGE_BUCKET
         SCION_SERVER_SESSION_SECRET
         SCION_SERVER_BASE_URL
-        SCION_IMAGE_REGISTRY
     )
 
     OAUTH_VARS=(
@@ -204,6 +203,43 @@ else
     done
 
     # Optional vars — warn if missing
+    # Without SCION_IMAGE_REGISTRY, gce-start-hub.sh --full writes
+    # image_registry (IMAGE_REGISTRY, default localhost/scion) to settings.yaml.
+    # The starter scripts do not build agent images (see hub-config.sh). With
+    # ENABLE_GKE=true the registry that takes effect must not be loopback:
+    # GKE nodes cannot pull from the VM's local store.
+    # hub.env is read with hub_env_value, as --full and systemd read it (last
+    # assignment wins, spaces around "=" and a trailing CR allowed), so this
+    # check predicts --full. IMAGE_REGISTRY is checked on every run, because
+    # --full always writes it to settings.yaml.
+    reg_ok=true
+    if ! registry_is_valid "${IMAGE_REGISTRY}"; then
+        reg_ok=false
+        check_fail "IMAGE_REGISTRY '${IMAGE_REGISTRY}' is not a registry path" \
+            "Use letters, digits and . _ : / - only, for example us-docker.pkg.dev/<project>/<repo>"
+    fi
+    val=$(hub_env_value SCION_IMAGE_REGISTRY)
+    if [[ -z "$val" ]]; then
+        # An invalid IMAGE_REGISTRY was reported above; say nothing more about it.
+        if [[ "$reg_ok" == true && "${ENABLE_GKE}" == "true" ]] && registry_is_loopback "${IMAGE_REGISTRY}"; then
+            check_fail "ENABLE_GKE=true, but the image registry ${IMAGE_REGISTRY} is a loopback address GKE nodes cannot pull from" \
+                "Set SCION_IMAGE_REGISTRY in ${HUB_ENV_FILE} (or IMAGE_REGISTRY) to a registry the cluster can pull from"
+        elif [[ "$reg_ok" == true ]]; then
+            check_pass "SCION_IMAGE_REGISTRY not set; settings.yaml uses image_registry ${IMAGE_REGISTRY}"
+            if registry_is_loopback "${IMAGE_REGISTRY}"; then
+                check_warn "The starter scripts do not build agent images: build them on the VM (image-build/README.md) or set SCION_IMAGE_REGISTRY"
+            fi
+        fi
+    elif is_placeholder "$val"; then
+        check_fail "SCION_IMAGE_REGISTRY is still a placeholder" \
+            "Set it to your registry in ${HUB_ENV_FILE}, or remove it to use image_registry ${IMAGE_REGISTRY}"
+    elif [[ "${ENABLE_GKE}" == "true" ]] && registry_is_loopback "$val"; then
+        check_fail "ENABLE_GKE=true, but SCION_IMAGE_REGISTRY ${val} is a loopback address GKE nodes cannot pull from" \
+            "Set SCION_IMAGE_REGISTRY in ${HUB_ENV_FILE} to a registry the cluster can pull from"
+    else
+        check_pass "SCION_IMAGE_REGISTRY"
+    fi
+
     val=$(get_env_value SCION_SERVER_HUB_ENDPOINT "${HUB_ENV_FILE}")
     if [[ -z "$val" ]]; then
         check_warn "SCION_SERVER_HUB_ENDPOINT is not set (optional — see hub.env.sample)"

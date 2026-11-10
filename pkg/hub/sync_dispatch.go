@@ -28,22 +28,16 @@ import (
 // several broker requests (a hash-mismatch retry, a second-pass finalize, or
 // a cross-node deferred wait); the bound covers them all together.
 //
-// It equals the hub-to-broker request limit: the control channel's
-// RequestTimeout (set in New, server.go:2007; default in
-// DefaultControlChannelConfig, controlchannel.go:59) and the
-// broker HTTP transport's client timeout (broker_http_transport.go). When it
+// It is the hub-to-broker request limit, brokerRequestTimeout (180s,
+// ptone/scion#6829), which also sets the control channel's RequestTimeout
+// (in New and in DefaultControlChannelConfig) and the broker HTTP
+// transport's client timeout (broker_http_transport.go). When it
 // fires, the dispatch ctx is done, and what the broker sees depends on the
 // transport: on the control channel, BrokerConnection.TunnelRequest sends a
 // cancel frame; on direct HTTP, the request is aborted; on a cross-node
 // deferred dispatch, nothing is sent, and the owning node runs the durable
 // intent to its end. A variable so tests can shorten it.
-var syncDispatchTimeout = 120 * time.Second
-
-// hubWorkspaceUploadTimeout bounds the create-time upload of a hub-managed
-// project workspace to storage, which runs detached from the client
-// (ptone/scion#1961). Generous: a large workspace can take minutes. A
-// variable so tests can shorten it.
-var hubWorkspaceUploadTimeout = 10 * time.Minute
+var syncDispatchTimeout = brokerRequestTimeout
 
 // detachLaunchFromClient returns a context for the rest of a synchronous
 // launch: it keeps ctx's values (identity, trace, dispatch warnings) but not
@@ -130,35 +124,19 @@ func restartWriteBudget() time.Duration {
 	return workspaceCheckTimeout + 2*syncDispatchTimeout + syncDispatchWriteSlack
 }
 
-// stopSyncBackTimeout bounds the stop-time workspace sync-back
-// (syncWorkspaceOnStop) as a whole: the upload request tunneled to the
-// broker and the download of the upload into the hub workspace together
-// (ptone/scion#4210). It equals syncDispatchTimeout, the hub-to-broker
-// request limit that already capped the upload alone, so the sync-back's
-// share of stopWriteBudget is unchanged and now also covers the download.
-func stopSyncBackTimeout() time.Duration {
-	return syncDispatchTimeout
-}
-
-// stopSyncBackTimedOutWarning is the stop (or suspend) response's warning
-// when the workspace sync-back ran out of time and the stop went on.
-const stopSyncBackTimedOutWarning = "The workspace sync-back to the hub did not finish in time; the stop went ahead. The hub's copy of the workspace may not have the agent's latest changes, or may have only part of them."
-
 // stopWriteBudget is the write deadline, from the start of the broker
-// work, of a lifecycle stop or suspend: the workspace sync-back
-// (syncWorkspaceOnStop, bounded by stopSyncBackTimeout), the ephemeral
-// workspace check, then the stop dispatch (under syncDispatch), plus
+// work, of a lifecycle stop or suspend: the ephemeral workspace check, then
+// the stop dispatch (under syncDispatch), plus
 // syncDispatchWriteSlack. It is also the bound of the whole stop once it is
 // detached from the client (detachStopFromClient): the slack is then what
 // is left for the stopped status write and the other store writes after
 // the broker steps.
 func stopWriteBudget() time.Duration {
-	return stopSyncBackTimeout() + workspaceCheckTimeout + syncDispatchTimeout + syncDispatchWriteSlack
+	return workspaceCheckTimeout + syncDispatchTimeout + syncDispatchWriteSlack
 }
 
 // stopAllAgentOpTimeout bounds each agent's broker work in a stop-all: the
-// workspace sync-back, the ephemeral workspace check and the stop dispatch
-// together. All agents share one
+// ephemeral workspace check and the stop dispatch together. All agents share one
 // deadline, this long after the stops begin. A variable so tests can
 // shorten it.
 var stopAllAgentOpTimeout = 60 * time.Second
@@ -180,15 +158,6 @@ func stopAllWriteBudget() time.Duration {
 // plus syncDispatchWriteSlack for the delivery and the response write.
 func dmWakeWriteBudget() time.Duration {
 	return syncDispatchTimeout + wakeReadyTimeout + syncDispatchWriteSlack
-}
-
-// hubWorkspaceUploadWriteBudget is the write deadline, from the start of the
-// upload, of a create that uploads its hub-managed project workspace: the
-// upload's own budget plus syncDispatchWriteSlack, for the failure answer
-// written when the upload runs out of time. A create that goes on to
-// dispatch moves the deadline again (extendWriteDeadlineForSyncDispatch).
-func hubWorkspaceUploadWriteBudget() time.Duration {
-	return hubWorkspaceUploadTimeout + syncDispatchWriteSlack
 }
 
 // extendWriteDeadlineForSyncDispatch moves the connection's write deadline

@@ -595,6 +595,10 @@ type testIdentityWorkloadAudit struct {
 	HubID           string `json:"hub_id,omitempty"`
 	MarkerCreatedAt string `json:"marker_created_at,omitempty"`
 	TestMode        string `json:"test_mode,omitempty"`
+	// Scope and DelegationCap are the offline delegation's scope and its
+	// per-delegation identity cap (offline delegations only).
+	Scope         string `json:"scope,omitempty"`
+	DelegationCap int    `json:"delegation_cap,omitempty"`
 }
 
 // testIdentityWorkloadAuditOf returns the workload audit part of a request,
@@ -618,6 +622,11 @@ func testIdentityWorkloadAuditOf(ctx context.Context) *testIdentityWorkloadAudit
 		a.HubID = st.offline.hubID
 		a.MarkerCreatedAt = st.offline.markerCreatedAt.UTC().Format(time.RFC3339Nano)
 		a.TestMode = string(st.offline.level)
+		a.Scope = st.delegation.Scope
+		a.DelegationCap = st.delegation.MemberCap
+		if maxCap := testIdentityDelegationScopes[st.delegation.Scope].maxCap; maxCap > 0 && a.DelegationCap > maxCap {
+			a.DelegationCap = maxCap
+		}
 	}
 	return a
 }

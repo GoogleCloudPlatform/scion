@@ -80,6 +80,13 @@ type Config struct {
 	// change mergeEnvOverlay's precedence rule — it is correct for its own
 	// case. See the override reasoning in the P2d PR description.
 	SecretOverrides map[string]string
+	// AuthEnv are resolved-auth environment entries the runtime delivered
+	// in the staged blob rather than as plain env (Cloud Run only; nil
+	// elsewhere). Applied to the harness child only, at the same gate as
+	// SecretOverrides: each fills a name the runtime environment lacks
+	// (the runtime environment wins, as on Docker), before the harness
+	// env overlay is merged, so it wins over the overlay.
+	AuthEnv map[string]string
 	// WorkingDir sets the child process's working directory (exec.Cmd.Dir).
 	// Empty (the zero value) leaves cmd.Dir unset, so the child inherits
 	// this process's own current working directory — exactly today's
@@ -453,6 +460,16 @@ func childEnv(cfg Config, base []string, applySecrets, logSteps bool) ([]string,
 		}
 	}
 
+	// Resolved-auth entries from the staged blob fill names the runtime env
+	// lacks, before the overlay (harness child only).
+	if applySecrets && len(cfg.AuthEnv) > 0 {
+		before := len(env)
+		env = mergeEnvOverlay(env, cfg.AuthEnv)
+		if logSteps {
+			log.Debug("Applied resolved-auth env: %d entries (added %d)", len(cfg.AuthEnv), len(env)-before)
+		}
+	}
+
 	// Merge harness-generated env overlay. Runtime env wins on conflict so a
 	// container-script harness cannot mask a value set by the broker/CLI.
 	if len(cfg.EnvOverlay) > 0 {
@@ -608,7 +625,8 @@ func indexByte(s string, c byte) int {
 // is new behaviour that must not change non-substrate runtimes.
 //
 // Per-entry chown failures and hard-link-guard skips are logged (entry name
-// only) rather than silently discarded.
+// only) rather than silently discarded; see logChownEntryError for the
+// level each one gets.
 func chownRecursive(root string, uid, gid int, requirePrivilegeDrop bool) error {
 	if err := fsutil.CheckRoot(root); err != nil {
 		return err
@@ -616,14 +634,25 @@ func chownRecursive(root string, uid, gid int, requirePrivilegeDrop bool) error 
 	if err := checkMountSource(root); err != nil {
 		return err
 	}
-	_, _, err := dirfd.ChownTreeNoFollow(root, uid, gid, func(uint32) bool { return true }, requirePrivilegeDrop, func(name string, cerr error) {
-		if errors.Is(cerr, dirfd.ErrHardlinkedRegularFile) {
-			log.Warn("chownRecursive: skipping %s: %v", name, cerr)
-			return
-		}
-		log.Error("chownRecursive: failed to chown %s: %v", name, cerr)
-	})
+	_, _, err := dirfd.ChownTreeNoFollow(root, uid, gid, func(uint32) bool { return true }, requirePrivilegeDrop, logChownEntryError)
 	return err
+}
+
+// logChownEntryError logs one per-entry failure from chownRecursive's walk.
+// A hard-link-guard skip is a warning. EROFS is logged at debug only: the
+// home directory may hold a mount that is read-only by design (the Cloud Run
+// runtime mounts the agent secrets read-only at ~/.scion/secrets), so its
+// chown is expected to fail and is not an error (ptone/scion#7104). Every
+// other failure stays an error.
+func logChownEntryError(name string, cerr error) {
+	switch {
+	case errors.Is(cerr, dirfd.ErrHardlinkedRegularFile):
+		log.Warn("chownRecursive: skipping %s: %v", name, cerr)
+	case errors.Is(cerr, syscall.EROFS):
+		log.Debug("chownRecursive: skipping %s on a read-only file system: %v", name, cerr)
+	default:
+		log.Error("chownRecursive: failed to chown %s: %v", name, cerr)
+	}
 }
 
 // checkMountSource is fsutil.CheckMountSource, held behind a package

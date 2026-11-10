@@ -20,7 +20,7 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
 
 // UserMapping associates a platform user with a hub user.
@@ -61,9 +61,16 @@ type Store struct {
 	db *sql.DB
 }
 
+// sqliteDSNOptions are the connection options appended to the database path,
+// in the pure-Go driver's form. They keep the behavior of the cgo driver used
+// before: a 5 second busy timeout (that driver's default; this one defaults to
+// none) and time.Time values written as "2006-01-02 15:04:05.999999999-07:00",
+// so existing database files keep the same stored format.
+const sqliteDSNOptions = "?_pragma=busy_timeout(5000)&_time_format=sqlite"
+
 // New opens (or creates) the SQLite database at dbPath and runs schema migrations.
 func New(dbPath string) (*Store, error) {
-	db, err := sql.Open("sqlite3", dbPath)
+	db, err := sql.Open("sqlite", dbPath+sqliteDSNOptions)
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}

@@ -112,6 +112,7 @@ func (c *ControlChannelBrokerClient) StartAgent(ctx context.Context, brokerID, b
 		path += "?projectId=" + url.QueryEscape(projectID)
 	}
 	path = withRunIDURL(path, extras.RunID)
+	path = withDispatchAgentIDURL(ctx, path)
 
 	payload := map[string]interface{}{}
 	if task != "" {
@@ -285,6 +286,14 @@ func (c *ControlChannelBrokerClient) MessageAgent(ctx context.Context, brokerID,
 	// buffered-delivery failure back against the right row.
 	if msgID := dispatchMessageIDFromContext(ctx); msgID != "" {
 		reqBody["message_id"] = msgID
+	}
+	// ptone/scion#4596: the attachments the broker downloads and writes into
+	// the agent's home before delivering the text.
+	if wire := dispatchAttachmentsFromContext(ctx); len(wire) > 0 {
+		reqBody["attachments"] = wire
+		if days := dispatchRetentionFromContext(ctx); days > 0 {
+			reqBody["attachment_retention_days"] = days
+		}
 	}
 
 	body, err := json.Marshal(reqBody)
@@ -482,13 +491,16 @@ func (c *ControlChannelBrokerClient) CleanupProject(ctx context.Context, brokerI
 	if projectID != "" {
 		path += "?project_id=" + url.QueryEscape(projectID)
 	}
-	resp, err := c.doRequest(ctx, brokerID, "DELETE", path, "", nil)
+	// doRequestRaw, not doRequest: doRequest turns every status >= 400 into
+	// an error, 404 included. A 404 is success for an idempotent cleanup, as
+	// over HTTP (brokerHTTPTransport.CleanupProject); any other error status
+	// is the broker's answer (a 409 keeps its project directory).
+	resp, err := c.doRequestRaw(ctx, brokerID, "DELETE", path, "", nil)
 	if err != nil {
 		return err
 	}
-	// Allow 404 for idempotent cleanup
-	if resp.StatusCode == http.StatusNotFound {
-		return nil
+	if resp.StatusCode >= 400 && resp.StatusCode != http.StatusNotFound {
+		return &brokerStatusError{StatusCode: resp.StatusCode, Body: string(resp.Body), RetryAfter: resp.Headers["Retry-After"]}
 	}
 	return nil
 }
@@ -523,7 +535,7 @@ func (c *ControlChannelBrokerClient) ImageStatus(ctx context.Context, brokerID, 
 }
 
 // PullImage asks a broker to pull an image via control channel.
-// Note: inherits the tunnel's RequestTimeout (default 120s). Large image pulls
+// Note: inherits the tunnel's RequestTimeout (brokerRequestTimeout, 180s). Large image pulls
 // may exceed this timeout and report an error even though the pull continues
 // broker-side. A future async-pull mechanism would address this limitation.
 func (c *ControlChannelBrokerClient) PullImage(ctx context.Context, brokerID, image string) error {

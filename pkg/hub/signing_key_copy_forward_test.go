@@ -81,6 +81,7 @@ func TestEnsureSigningKey_CopiesLegacyKeyForwardAndRepairsRef(t *testing.T) {
 		store:         st,
 		secretBackend: backend,
 		config:        ServerConfig{},
+		cipher:        secret.NewLegacyValueCipher(""),
 	}
 
 	key, err := s.ensureSigningKey(ctx, keyName, nil)
@@ -117,7 +118,7 @@ func TestEnsureSigningKey_CopiesLegacyKeyForwardAndRepairsRef(t *testing.T) {
 // names oidc_signing_key explicitly, but it has its own load path — separate
 // from ensureSigningKey — that originally had no copy-forward at all).
 func TestOIDCKeyManager_CopiesLegacyKeyForwardAndRepairsRef(t *testing.T) {
-	st := createOIDCTestStore(t)
+	st := newOIDCHubTestStore(t)
 	ctx := context.Background()
 
 	hubID := "test-hub-oidc-copy-forward"
@@ -152,10 +153,11 @@ func TestOIDCKeyManager_CopiesLegacyKeyForwardAndRepairsRef(t *testing.T) {
 	}
 
 	mgr, err := NewOIDCKeyManager(ctx, OIDCKeyManagerConfig{
-		Store:     st,
-		Backend:   backend,
-		HubID:     hubID,
-		IssuerURL: "https://hub.example.com",
+		ValueCipher: secret.NewLegacyValueCipher(""),
+		Store:       st,
+		Backend:     backend,
+		HubID:       hubID,
+		IssuerURL:   "https://hub.example.com",
 	})
 	if err != nil {
 		t.Fatalf("NewOIDCKeyManager failed: %v", err)

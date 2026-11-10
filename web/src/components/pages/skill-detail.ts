@@ -32,6 +32,7 @@ import '../shared/detail-header.js';
 import '../shared/hash-display.js';
 import '../shared/skill-publish-dialog.js';
 import { showToast } from '../../utils/toast.js';
+import { copyWithToast } from '../../utils/clipboard.js';
 import { showConfirm } from '../shared/confirm-dialog.js';
 import { formatRelative } from '../../utils/time.js';
 import { navigateTo } from '../../client/navigation.js';
@@ -412,11 +413,7 @@ export class ScionPageSkillDetail extends LitElement {
   }
 
   private async copyUri(): Promise<void> {
-    try {
-      await navigator.clipboard.writeText(this.getSkillUri());
-    } catch {
-      /* ignore */
-    }
+    await copyWithToast(this.getSkillUri());
   }
 
   // -- Edit mode --

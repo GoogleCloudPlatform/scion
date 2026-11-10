@@ -226,7 +226,7 @@ describe('space rail — new thread name entry', () => {
     /** Mount the rail with one group, and answer thread creation with a new thread. */
     async function mountWithGroup(): Promise<any> {
       const el = await mount();
-      el.prefs = { ...el.prefs, threadGroups: { [SPACE.projectId]: [GROUP] } };
+      el.projectGroups = new Map([[SPACE.projectId, [GROUP]]]);
       el.savePrefs = () => Promise.resolve();
       vi.mocked(apiFetch).mockResolvedValueOnce(
         new Response(JSON.stringify({ id: 'topic-new', name: 'new-one' }), { status: 200 })

@@ -79,8 +79,14 @@ func TestWorkstation_PutServerConfig_StartupBlockValidSaved(t *testing.T) {
 	}{
 		{"port_proxy response_header_timeout", `{"server":{"hub":{"port_proxy":{"response_header_timeout":"30s"}}}}`,
 			[]string{"server", "hub", "port_proxy", "response_header_timeout"}, "30s"},
+		{"port_proxy view_ttl", `{"server":{"hub":{"port_proxy":{"view_ttl":"4h"}}}}`,
+			[]string{"server", "hub", "port_proxy", "view_ttl"}, "4h"},
 		{"conduit lifetime_cap", `{"server":{"hub":{"conduit":{"lifetime_cap":"3h"}}}}`,
 			[]string{"server", "hub", "conduit", "lifetime_cap"}, "3h"},
+		{"sse max_connection_age", `{"server":{"hub":{"sse":{"max_connection_age":"5m"}}}}`,
+			[]string{"server", "hub", "sse", "max_connection_age"}, "5m"},
+		{"platform_request_timeout", `{"server":{"hub":{"platform_request_timeout":"900s"}}}`,
+			[]string{"server", "hub", "platform_request_timeout"}, "900s"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -108,6 +114,10 @@ func TestWorkstation_PutServerConfig_StartupBlockInvalidRejected(t *testing.T) {
 			`"port_proxy":{"response_header_timeout":"1s"}`,
 			"server.hub.port_proxy.response_header_timeout",
 			config.HubPortProxyConfig{ResponseHeaderTimeout: "1s"}.Validate().Error()},
+		{"port_proxy view_ttl above maximum",
+			`"port_proxy":{"view_ttl":"25h"}`,
+			"server.hub.port_proxy.view_ttl",
+			config.HubPortProxyConfig{ViewTTL: "25h"}.Validate().Error()},
 		{"conduit lifetime_cap below minimum",
 			`"conduit":{"lifetime_cap":"10s"}`,
 			"server.hub.conduit.lifetime_cap",
@@ -116,6 +126,14 @@ func TestWorkstation_PutServerConfig_StartupBlockInvalidRejected(t *testing.T) {
 			`"conduit":{"stream_authz_max":{"user":"10s"}}`,
 			"server.hub.conduit.stream_authz_max.user",
 			config.HubConduitConfig{StreamAuthzMax: config.HubConduitStreamAuthzMax{User: "10s"}}.Validate().Error()},
+		{"sse heartbeat_interval above maximum",
+			`"sse":{"heartbeat_interval":"2m"}`,
+			"server.hub.sse.heartbeat_interval",
+			config.HubSSEConfig{HeartbeatInterval: "2m"}.Validate().Error()},
+		{"platform_request_timeout below minimum",
+			`"platform_request_timeout":"30s"`,
+			"server.hub.platform_request_timeout",
+			config.ValidatePlatformRequestTimeout("30s").Error()},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -152,8 +170,9 @@ func TestWorkstation_PutServerConfig_StartupBlockInvalidRejected(t *testing.T) {
 	}
 }
 
-// The refusal is exactly {"error":{"code","message","details":{"field"}}}:
-// the shape of the other settings validation errors, with no extra field.
+// The refusal is exactly {"error":{"code","message","details":{"field",
+// "errors"}}}: the settings error envelope (ptone/scion#4450), with one
+// entry naming the field and no extra member.
 func TestWorkstation_PutServerConfig_StartupBlockErrorShape(t *testing.T) {
 	startupBlockHome(t, startupBlockSettingsYAML)
 	srv, _, _ := newSQLiteHubInMode(t, true, nil)
@@ -165,11 +184,18 @@ func TestWorkstation_PutServerConfig_StartupBlockErrorShape(t *testing.T) {
 	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
 		t.Fatalf("unmarshal %s: %v", rr.Body.String(), err)
 	}
+	msg := config.HubPortProxyConfig{ResponseHeaderTimeout: "1h"}.Validate().Error()
 	want := map[string]interface{}{
 		"error": map[string]interface{}{
 			"code":    ErrCodeValidationError,
-			"message": config.HubPortProxyConfig{ResponseHeaderTimeout: "1h"}.Validate().Error(),
-			"details": map[string]interface{}{"field": "server.hub.port_proxy.response_header_timeout"},
+			"message": msg,
+			"details": map[string]interface{}{
+				"field": "server.hub.port_proxy.response_header_timeout",
+				"errors": []interface{}{map[string]interface{}{
+					"field":   "server.hub.port_proxy.response_header_timeout",
+					"message": msg,
+				}},
+			},
 		},
 	}
 	if !reflect.DeepEqual(got, want) {

@@ -137,6 +137,15 @@ func (r *PodmanRuntime) Run(ctx context.Context, config RunConfig) (string, erro
 			"use rootful Docker or Podman for NFS-backed projects")
 	}
 
+	// Rootless Podman runs PID 1 as the keep-id user (SCION_KEEPID_UID below),
+	// which drops privileges before the metadata server starts, so the
+	// in-container interception cannot be installed. Do not grant NET_ADMIN
+	// or mark the interception required there; the metadata env vars remain
+	// the mechanism.
+	if r.Rootless {
+		config.MetadataInterception = false
+	}
+
 	if err := prepareContainerSecretEnv(&config); err != nil {
 		return "", err
 	}
@@ -222,7 +231,8 @@ func (r *PodmanRuntime) Run(ctx context.Context, config RunConfig) (string, erro
 // Stop stops the container ref.ID. The engine container ID is already
 // unique per run, so ref.RunID needs no further check here.
 func (r *PodmanRuntime) Stop(ctx context.Context, ref RunRef) error {
-	out, err := runSimpleCommand(ctx, r.Command, "stop", ref.ID)
+	args := append([]string{"stop"}, stopTimeoutArgs(ref)...)
+	out, err := runSimpleCommand(ctx, r.Command, append(args, ref.ID)...)
 	if err != nil && out != "" {
 		// Include podman's stderr output in the error so callers can match
 		// on messages like "not running" (which runSimpleCommand's error
@@ -323,7 +333,7 @@ func (r *PodmanRuntime) List(ctx context.Context, labelFilter map[string]string)
 }
 
 func (r *PodmanRuntime) GetLogs(ctx context.Context, id string) (string, error) {
-	return runSimpleCommand(ctx, r.Command, "logs", id)
+	return runCombinedCommand(ctx, r.Command, "logs", id)
 }
 
 func (r *PodmanRuntime) Attach(ctx context.Context, id string) error {
@@ -422,7 +432,7 @@ func (r *PodmanRuntime) Exec(ctx context.Context, id string, cmd []string) (stri
 		id = resolveContainerID(agents, id)
 	}
 	args := append([]string{"exec", "--user", r.ExecUser(), id}, cmd...)
-	out, err := runSimpleCommand(ctx, r.Command, args...)
+	out, err := runCombinedCommand(ctx, r.Command, args...)
 	// A container removed after the lookup above must surface as
 	// ErrContainerNotFound, not as the command's exit (ptone/scion#3655).
 	return out, podmanExecNotFound.classifyExecErr(ctx, err, out, id, r.List)

@@ -28,6 +28,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	sciontoolhub "github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 )
 
@@ -163,7 +164,7 @@ func buildWhoamiResult(slug, name string) WhoamiResult {
 		Name:        name,
 		ID:          id,
 		Project:     os.Getenv("SCION_PROJECT"),
-		ProjectID:   os.Getenv("SCION_PROJECT_ID"),
+		ProjectID:   projectkeys.ProjectIDFromEnv(os.Getenv),
 		Template:    os.Getenv("SCION_TEMPLATE_NAME"),
 		Harness:     os.Getenv("SCION_HARNESS"),
 		Model:       os.Getenv("SCION_MODEL"),

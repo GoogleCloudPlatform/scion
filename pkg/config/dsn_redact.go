@@ -95,8 +95,13 @@ func RedactDatabaseURL(driver, dsn string) string {
 
 // redactConnectionURL masks the password in a URL-style connection string,
 // whether it appears in the userinfo component or as a query parameter. It
-// falls back to a placeholder if dsn cannot be parsed as a URL at all.
+// falls back to a placeholder if dsn cannot be parsed as a URL at all, or
+// if its userinfo cannot be told apart from its host and path (see
+// userInfoOutsideAuthority).
 func redactConnectionURL(dsn string) string {
+	if userInfoOutsideAuthority(dsn) {
+		return redactedPlaceholder
+	}
 	u, err := url.Parse(dsn)
 	if err != nil {
 		return redactedPlaceholder
@@ -110,6 +115,20 @@ func redactConnectionURL(dsn string) string {
 		u.RawQuery = redactQueryCredentials(u.RawQuery)
 	}
 	return u.String()
+}
+
+// userInfoOutsideAuthority reports whether dsn, a URL-style connection
+// string, holds an '@' after its authority: after its scheme and "://", the
+// first '/', '?' or '#' ends the authority, and url.Parse reads anything
+// past it as the path, query or fragment. A '/', '?' or '#' inside a
+// password ends the authority early, so the password's tail and the host
+// would be shown as a path, query or fragment; a connection string never
+// needs an '@' there, so such a dsn is not shown at all. An authority with
+// no host after its '@' (a Unix socket given in the query) is kept.
+func userInfoOutsideAuthority(dsn string) bool {
+	rest := dsn[len(connectionURLPattern.FindString(dsn)):]
+	i := strings.IndexAny(rest, "/?#")
+	return i >= 0 && strings.Contains(rest[i:], "@")
 }
 
 // redactQueryCredentials masks any credential parameter (see

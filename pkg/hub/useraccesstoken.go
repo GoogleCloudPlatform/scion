@@ -87,16 +87,16 @@ var (
 
 // UATScopeViolationError names the selector and machine-readable reason when
 // CanMintSelector (pkg/hub/authz_boundary.go) denies a requested selector at
-// mint time. Unwrap returns ErrUATScopeViolation so existing
-// errors.Is(err, ErrUATScopeViolation) callers (handlers_auth.go's error
-// mapping, TestRS4_DenialCodeStability) keep working unchanged.
-// handlers_auth.go's scope_violation response already writes err.Error() as
-// its message, so the 403 body now includes the selector and reason text
-// (e.g. `requested scopes exceed issuer authority: selector "agent:delete"
-// denied (flat_role_insufficient)`), where it previously carried only the
-// sentinel text. This is reached only once project admission has already
+// mint time. Unwrap returns ErrUATScopeViolation, so
+// errors.Is(err, ErrUATScopeViolation) matches it (handlers_auth.go's error
+// mapping, TestRS4_DenialCodeStability). handlers_auth.go's scope_violation
+// response writes err.Error() as its message, so the 403 body carries the
+// selector and reason text (e.g. `requested scopes exceed issuer authority:
+// selector "agent:delete" denied (flat_role_insufficient)`). For a project
+// boundary this error is returned only after project admission has
 // succeeded, never on the uniform ErrUATProjectForbidden path (see
-// CreateToken below), so it does not weaken oracle resistance.
+// CreateToken below); for a hub boundary, which names no project, every
+// per-selector denial is reported this way.
 type UATScopeViolationError struct {
 	Selector string
 	Reason   MintDenialReason
@@ -111,15 +111,15 @@ func (e *UATScopeViolationError) Unwrap() error {
 }
 
 // UATRejection reports that a presented UAT failed ValidateToken, and
-// classifies why. Reason is one of "invalid", "revoked", "expired", or
-// "user_suspended" — see auth.go's UAT branch, which logs exactly one of
+// classifies why. Reason is one of "invalid", "revoked", "expired",
+// "user_suspended" or "user_not_active" — see auth.go's UAT branch, which logs exactly one of
 // these per rejection (plan §3.1(3)).
 //
 // Found and TokenID answer the rulings' plan correction (b): a rejection log
 // may identify a server-verified matched credential record, but must mark it
 // as a rejection, not an authenticated principal. Found is true, and TokenID
 // is set, only when the presented value hashed to a stored token row
-// (revoked, expired, or the row's user suspended) — never for a value that
+// (revoked, expired, or the row's user suspended or not active) — never for a value that
 // matched nothing (invalid format or unknown hash), so an unrecognized
 // bearer value never yields an asserted identity, not even a rejected one.
 type UATRejection struct {
@@ -405,17 +405,20 @@ func (s *UserAccessTokenService) CreateTokenWithParams(ctx context.Context, para
 		if result.OK {
 			continue
 		}
-		// Oracle resistance: MintDenialProjectAccessRequired means
-		// CanMintSelector's ONE admission check for the whole batch failed
-		// (no membership and no exact-permission system authority) -- every
-		// selector gets this same reason uniformly in that case. Preserve
-		// the existing contract that a non-member and a nonexistent project
-		// both get the bare ErrUATProjectForbidden, with no selector
-		// detail, so neither is distinguishable from the other or from
-		// "authority exists but not for this selector." Only a per-selector
-		// eligibility denial (admission passed, this specific selector
-		// didn't) surfaces the typed UATScopeViolationError.
-		if result.Reason == MintDenialProjectAccessRequired {
+		// Uniform refusal: for a project boundary,
+		// MintDenialProjectAccessRequired means CanMintSelector's ONE
+		// admission check for the whole batch failed (no membership and no
+		// exact-permission system authority) -- every selector gets this
+		// same reason uniformly in that case. A non-member and a
+		// nonexistent project both get the bare ErrUATProjectForbidden,
+		// with no selector detail, so neither is distinguishable from the
+		// other or from "authority exists but not for this selector." Only
+		// a per-selector eligibility denial (admission passed, this
+		// specific selector didn't) surfaces the typed
+		// UATScopeViolationError. A hub boundary names no project, so every
+		// hub denial is the typed UATScopeViolationError naming the
+		// selector and its reason (uniformMintRefusal).
+		if uniformMintRefusal(boundary, result.Reason) {
 			return "", nil, ErrUATProjectForbidden
 		}
 		return "", nil, &UATScopeViolationError{Selector: result.Selector, Reason: result.Reason}
@@ -568,16 +571,20 @@ func (s *UserAccessTokenService) ValidateToken(ctx context.Context, key string) 
 		_ = s.tokens.UpdateUserAccessTokenLastUsed(context.Background(), token.ID)
 	}()
 
-	user, err := s.users.GetUser(ctx, token.UserID)
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return nil, fmt.Errorf("token user not found")
-		}
+	// The token's user must be active (checkUserAccount, the rule decide
+	// applies): suspended, missing and every other non-active status are
+	// refused.
+	user, err := checkUserAccount(ctx, s.users, PrincipalContext{Kind: PrincipalKindUser, ID: token.UserID})
+	switch classifyUserAccount(user, err) {
+	case accountAllowed:
+	case accountLookupFault:
 		return nil, fmt.Errorf("failed to look up user: %w", err)
-	}
-
-	if user.Status == store.UserStatusSuspended {
+	case accountMissing:
+		return nil, fmt.Errorf("token user not found")
+	case accountSuspended:
 		return nil, &UATRejection{err: ErrUserSuspended, Reason: "user_suspended", Found: true, TokenID: token.ID}
+	default:
+		return nil, &UATRejection{err: ErrInvalidUAT, Reason: "user_not_active", Found: true, TokenID: token.ID}
 	}
 
 	// The boundary was already validated above (ValidateBoundary), so it is
@@ -746,8 +753,8 @@ func requestCredentialIsUAT(ctx context.Context) bool {
 // still validates. A request whose credential is not a user access token
 // (requestCredentialIsUAT) passes. For a user access token the stored token
 // must exist, must not be revoked or expired, must have a valid boundary and
-// must belong to the request's user, and that user must exist and must not
-// be suspended. A token credential without a token ID, a request without a
+// must belong to the request's user, and that user must exist and be active
+// (checkUserAccount). A token credential without a token ID, a request without a
 // user identity and any lookup error fail the check.
 func (s *Server) bearerStillValid(ctx context.Context) bool {
 	if !requestCredentialIsUAT(ctx) {
@@ -777,9 +784,39 @@ func (s *Server) bearerStillValid(ctx context.Context) bool {
 	if token.ValidateBoundary() != nil {
 		return false
 	}
-	owner, err := s.store.GetUser(ctx, token.UserID)
-	if err != nil || owner == nil || owner.Status == store.UserStatusSuspended {
+	if _, err := checkUserAccount(ctx, s.store, PrincipalContext{Kind: PrincipalKindUser, ID: token.UserID}); err != nil {
 		return false
 	}
 	return true
+}
+
+// revokeUserAccessTokensForUserTx revokes every unrevoked access token of
+// userID inside the caller's transaction and returns how many it revoked.
+// The forced user delete (forceDeleteUserTx, ptone/scion#2143) calls it in
+// the transaction that marks the user deleting, so the user's tokens end
+// with the rest of the user's authority; ValidateToken already refuses a
+// token whose user is not active. Like every UAT mutation it lives in this
+// file.
+func revokeUserAccessTokensForUserTx(ctx context.Context, tx store.Store, userID string) (int, error) {
+	n, err := tx.RevokeUserAccessTokensForUser(ctx, userID)
+	if err != nil {
+		return 0, fmt.Errorf("revoke access tokens of user: %w", err)
+	}
+	return n, nil
+}
+
+// revokeUserAccessTokensForUserProjectTx revokes, inside the caller's
+// transaction, every unrevoked access token of userID whose boundary is
+// projectID, and returns the revoked token IDs. A project leave
+// (LeaveProject, ptone/scion#7494) calls it in the transaction that removes
+// the leaver's bindings, when the leaver keeps no access to the project, so
+// a token issued before the leave is refused on its next use and stays
+// refused after a re-add. Hub-boundary tokens are not touched. Like every
+// UAT mutation it lives in this file.
+func revokeUserAccessTokensForUserProjectTx(ctx context.Context, tx store.Store, userID, projectID string) ([]string, error) {
+	ids, err := tx.RevokeUserAccessTokensForUserProject(ctx, userID, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("revoke project access tokens of user: %w", err)
+	}
+	return ids, nil
 }

@@ -81,6 +81,9 @@ func New(store Store, cfg Config) *Registry {
 
 func (r *Registry) now() time.Time { return r.cfg.Clock.Now().UTC() }
 
+// Now is the registry clock: the time last_seen is written and judged by.
+func (r *Registry) Now() time.Time { return r.now() }
+
 // RegisterRelay registers (or re-registers) a relay instance and returns its
 // new generation, which is strictly greater than any generation previously
 // returned for the same instance_id. In hosted-HA mode the caller must run
@@ -502,6 +505,26 @@ func (r *Registry) EligibleRelays(ctx context.Context, transport string, now tim
 	var out []RelayInstance
 	for _, ri := range all {
 		if r.relayStale(ri, now) || ri.Draining || ri.InternalEndpoint == "" {
+			continue
+		}
+		out = append(out, ri)
+	}
+	return out, nil
+}
+
+// LiveRelays returns the relays live by relayStale with a non-empty
+// internal_endpoint, draining ones included: the relays that may hold
+// sessions, which a terminating hub ingress asks to drain the sessions it
+// proxied (design §3.9 "Drain through the proxy").
+func (r *Registry) LiveRelays(ctx context.Context, now time.Time) ([]RelayInstance, error) {
+	all, err := r.store.ListRelays(ctx)
+	if err != nil {
+		return nil, err
+	}
+	now = now.UTC()
+	var out []RelayInstance
+	for _, ri := range all {
+		if r.relayStale(ri, now) || ri.InternalEndpoint == "" {
 			continue
 		}
 		out = append(out, ri)

@@ -193,14 +193,14 @@ func TestCreateConversationRequest_ThreadGroupIDJSON(t *testing.T) {
 	}
 }
 
-// flagOffHandler answers every thread group route 404, as the hub's
-// experiment gate does.
-func flagOffHandler(w http.ResponseWriter, r *http.Request) {
+// olderHubHandler answers every thread group route 404, as an older hub's
+// experiment gate does with thread groups off (ptone/scion#5546).
+func olderHubHandler(w http.ResponseWriter, r *http.Request) {
 	writeTGError(w, http.StatusNotFound, "not_found", "route not found")
 }
 
-func TestThreadGroupService_FlagOffIsNotEnabledError(t *testing.T) {
-	srv, _ := newThreadGroupTestServer(t, flagOffHandler)
+func TestThreadGroupService_OlderHubIsNotEnabledError(t *testing.T) {
+	srv, _ := newThreadGroupTestServer(t, olderHubHandler)
 	tg := newTGClient(t, srv.URL).ThreadGroups()
 	ctx := context.Background()
 
@@ -232,10 +232,10 @@ func TestThreadGroupService_FlagOffIsNotEnabledError(t *testing.T) {
 	}
 }
 
-// With the experiment on, a 404 for a missing group or thread stays a plain
-// not-found: the collection probe answers 400 (a user without projectId)
-// or 403/200 (an agent), not 404.
-func TestThreadGroupService_ItemNotFoundWithFlagOn(t *testing.T) {
+// On a hub that serves thread groups, a 404 for a missing group or thread
+// stays a plain not-found: the collection probe answers 400 (a user without
+// projectId) or 403/200 (an agent), not 404.
+func TestThreadGroupService_ItemNotFoundStaysNotFound(t *testing.T) {
 	for _, probe := range []int{http.StatusBadRequest, http.StatusForbidden, http.StatusOK} {
 		srv, seen := newThreadGroupTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path == "/api/v1/thread-groups" {

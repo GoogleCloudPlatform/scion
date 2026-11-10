@@ -21,6 +21,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
@@ -71,7 +72,7 @@ func newResolveTestServer(t *testing.T, rt runtime.Runtime) *Server {
 	cfg.ForceRuntime = ""
 	mgr := agent.NewManager(rt)
 	t.Cleanup(mgr.Close)
-	return New(cfg, mgr, rt)
+	return New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 }
 
 // A default runtime without the capability keeps the type-only shortcut:
@@ -88,7 +89,7 @@ func TestResolveManagerForOpts_NoCapability_SameTypeProfilesShareDefaultManager(
 		// same-type profiles sharing one manager), so it can never
 		// distinguish the manager-identity property this test actually
 		// checks.
-		got, _ := srv.resolveManagerForOpts(api.StartOptions{Name: "a", Profile: profile, ProjectPath: projectDir})
+		got, _ := managerAndType(srv.resolveManagerForOpts(api.StartOptions{Name: "a", Profile: profile, ProjectPath: projectDir}))
 		if got != srv.manager {
 			t.Errorf("profile %q: got a non-default manager, want the default manager", profile)
 		}
@@ -113,7 +114,7 @@ func TestResolveManagerForOpts_CapabilityFalse_KeepsShortcut(t *testing.T) {
 	// The runtime-type string is irrelevant here too: "local-alt" still
 	// resolves to type "docker" (see twoDockerProfilesProject), so it
 	// cannot distinguish "default manager" from "own manager" either.
-	got, _ := srv.resolveManagerForOpts(api.StartOptions{Name: "a", Profile: "local-alt", ProjectPath: projectDir})
+	got, _ := managerAndType(srv.resolveManagerForOpts(api.StartOptions{Name: "a", Profile: "local-alt", ProjectPath: projectDir}))
 	if got != srv.manager {
 		t.Error("capability reporting false: got a non-default manager, want the default manager")
 	}
@@ -131,7 +132,7 @@ func TestResolveManagerForOpts_CapabilityTrue_SameTypeProfileGetsOwnManager(t *t
 	// Same note as the sibling tests above: the string return is "docker"
 	// on both sides of this branch, so it can't distinguish the
 	// manager-identity property under test here either.
-	got, _ := srv.resolveManagerForOpts(api.StartOptions{Name: "a", Profile: "local-alt", ProjectPath: projectDir})
+	got, _ := managerAndType(srv.resolveManagerForOpts(api.StartOptions{Name: "a", Profile: "local-alt", ProjectPath: projectDir}))
 	if got == srv.manager {
 		t.Error("capability reporting true: got the default manager, want a manager of its own")
 	}

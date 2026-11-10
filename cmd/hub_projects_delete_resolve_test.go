@@ -153,7 +153,7 @@ func TestRunHubProjectsDelete_Resolve(t *testing.T) {
 			if tt.wantErr == "" {
 				client, cerr := hubclient.New(os.Getenv("SCION_HUB_ENDPOINT"))
 				require.NoError(t, cerr)
-				got, rerr := resolveProjectNameOrID(t.Context(), client, tt.arg)
+				got, rerr := resolveProjectNameOrID(t.Context(), client, tt.arg, false)
 				require.NoError(t, rerr)
 				assert.Equal(t, tt.wantDelete, []string{got.ID})
 			}

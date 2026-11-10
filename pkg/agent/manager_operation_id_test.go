@@ -71,9 +71,9 @@ func TestManagerStopAndDelete_KubernetesPodAddressedByNamespace(t *testing.T) {
 			ctx := context.Background()
 			var err error
 			if op == "stop" {
-				err = mgr.Stop(ctx, "my-agent", "", "")
+				err = mgr.Stop(ctx, "my-agent", "", "", "")
 			} else {
-				_, err = mgr.Delete(ctx, "my-agent", false, "", false)
+				_, err = mgr.Delete(ctx, "my-agent", false, "", "", false)
 			}
 			if err != nil {
 				t.Fatalf("%s: %v", op, err)
@@ -96,7 +96,7 @@ func TestManagerStop_RunScoped_KubernetesPodAddressedByNamespace(t *testing.T) {
 	t.Run("own run", func(t *testing.T) {
 		mgr, cs, defaultRequests := newNamespacedPodManager(t, "run-1")
 		ctx := context.Background()
-		if err := mgr.Stop(ctx, "my-agent", "", "run-1"); err != nil {
+		if err := mgr.Stop(ctx, "my-agent", "", "", "run-1"); err != nil {
 			t.Fatalf("stop: %v", err)
 		}
 		if _, err := cs.CoreV1().Pods("scion-agents").Get(ctx, "my-agent", metav1.GetOptions{}); !k8serrors.IsNotFound(err) {
@@ -109,7 +109,7 @@ func TestManagerStop_RunScoped_KubernetesPodAddressedByNamespace(t *testing.T) {
 	t.Run("other run", func(t *testing.T) {
 		mgr, cs, defaultRequests := newNamespacedPodManager(t, "run-1")
 		ctx := context.Background()
-		if err := mgr.Stop(ctx, "my-agent", "", "run-0"); !errors.Is(err, ErrStopRunNotFound) {
+		if err := mgr.Stop(ctx, "my-agent", "", "", "run-0"); !errors.Is(err, ErrStopRunNotFound) {
 			t.Fatalf("stop: err = %v, want ErrStopRunNotFound", err)
 		}
 		if _, err := cs.CoreV1().Pods("scion-agents").Get(ctx, "my-agent", metav1.GetOptions{}); err != nil {
@@ -158,9 +158,9 @@ func TestManagerStopAndDelete_SameNamedPodsInTwoNamespaces(t *testing.T) {
 			addPodIn(t, cs, "ns-b", "run-2")
 			var err error
 			if op == "stop" {
-				err = mgr.Stop(ctx, "my-agent", "", "")
+				err = mgr.Stop(ctx, "my-agent", "", "", "")
 			} else {
-				_, err = mgr.Delete(ctx, "my-agent", false, "", false)
+				_, err = mgr.Delete(ctx, "my-agent", false, "", "", false)
 			}
 			if err == nil || !strings.Contains(err.Error(), "ambiguous") {
 				t.Fatalf("%s: err = %v, want ambiguous", op, err)
@@ -173,7 +173,7 @@ func TestManagerStopAndDelete_SameNamedPodsInTwoNamespaces(t *testing.T) {
 	t.Run("run-scoped stop finds its own run's pod", func(t *testing.T) {
 		mgr, cs, defaultRequests := newNamespacedPodManager(t, "run-1")
 		addPodIn(t, cs, "ns-b", "run-2")
-		if err := mgr.Stop(ctx, "my-agent", "", "run-2"); err != nil {
+		if err := mgr.Stop(ctx, "my-agent", "", "", "run-2"); err != nil {
 			t.Fatalf("stop: %v", err)
 		}
 		if podPresent(t, cs, "ns-b") {
@@ -236,7 +236,7 @@ func TestManagerStop_RunScoped_LegacyEntryCarriesRequestedRun(t *testing.T) {
 					return nil
 				},
 			}
-			if err := NewManager(rt).Stop(context.Background(), "dev", "", "run-req"); err != nil {
+			if err := NewManager(rt).Stop(context.Background(), "dev", "", "", "run-req"); err != nil {
 				t.Fatalf("stop: %v", err)
 			}
 			if len(got) != 1 || got[0] != (runtime.RunRef{ID: "cid-1", RunID: tc.want}) {

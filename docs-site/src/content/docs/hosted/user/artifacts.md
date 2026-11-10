@@ -74,6 +74,8 @@ Things to know before you publish:
 
 Open a project, go to its **Files** area and choose the **Artifacts** view. **New artifact** uploads a file, or a folder with a chosen entry file, with a title, an optional key and an optional note. The new artifact is homed in that project.
 
+You can also start from the **Artifacts** item in the sidebar. Its **New artifact** asks which project to home the artifact in. It offers only the projects where you may publish (for example, as owner, as a member with publish rights, or as an admin), and preselects the Hub's global project when you may publish there. If you may not publish in any project, the button is disabled and says so. After publishing, the new artifact's page opens.
+
 You can also start from chat: in a conversation that belongs to a project, when the **Attach artifact…** picker has nothing to list, it offers **New artifact**, and the new artifact is attached to your message.
 
 ## Publish new versions and get an artifact
@@ -98,7 +100,7 @@ With `--version-of`, a single file replaces the current version's entry file, wh
 
 ### Add a version (web)
 
-On the artifact's page, **Edit** opens a Markdown or text entry file in an editor, and **Publish new version** saves your change as the next version. **Upload new version**, on the **History** tab, publishes a file or a folder as the next version. These buttons appear only when you may publish versions of that artifact.
+On the artifact's page, **Edit** opens a Markdown or text entry file in an editor, and **Publish new version** saves your change as the next version. **Upload new version**, on the **History** tab, publishes a file or a folder as the next version. These buttons appear only when you may publish versions of that artifact. While the `hub.artifacts_open_review_check` [experiment](/scion/reference/experiments/) is on (off by default), publishing a new non-review version while someone else has an open review in the web editor warns with `409` (`review_open`, listing up to 5 open reviews with the reviewer's display name, last activity to the minute, and whether there are unsaved changes); sending `"force": true` in the publish manifest publishes anyway, returns the open reviews in `warnings`, and records `version_forced` in the decision log (see [Open reviews](/scion/reference/artifacts/#open-reviews)).
 
 ### List versions and get an artifact (CLI)
 
@@ -129,10 +131,10 @@ The **Artifacts** item in the sidebar (under *Management*) lists the artifacts y
 Opening an artifact shows its page with three tabs:
 
 - **Preview** shows the entry file. Markdown is shown formatted; text and code (including JSON, YAML and CSV) in a read-only editor; PNG, JPEG, GIF and WebP images inline. Other types, such as SVG and PDF, are offered as a download.
-- **Files** lists every file of the version. Plain text, Markdown, CSV, TSV, JSON, YAML, TOML and PNG, JPEG, GIF and WebP images open in the browser; other files, such as HTML, CSS and SVG, can only be downloaded there. An HTML entry renders in **Preview**.
+- **Files** lists every file of the version. Plain text, Markdown, CSV, TSV, JSON, YAML, TOML and PNG, JPEG, GIF and WebP images open in the browser; other files, such as HTML, CSS and SVG, can only be downloaded there. When the `hub.artifact_archive` experiment is on, **Download all (.zip)** downloads the version's files as a zip archive (see [Zip download](/scion/reference/artifacts/#zip-download)). An HTML entry renders in **Preview**.
 - **History** lists the versions. Use the **Version** menu in the header, or a version's link here, to open an earlier one.
 
-The clipboard button next to the reference in the header (**Copy reference**) copies the version's `scion://artifact/` reference, ready to paste into a message or a command. For a single-file version, **Download** in the header downloads the file; for a version with more than one file, download them from the **Files** tab.
+The clipboard button next to the reference in the header (**Copy reference**) copies the version's `scion://artifact/` reference, ready to paste into a message or a command. For a single-file version, **Download** in the header downloads the file; for a version with more than one file, download individual files or **Download all (.zip)** (when `hub.artifact_archive` is on) from the **Files** tab.
 
 ### How HTML artifacts render
 
@@ -142,7 +144,7 @@ An artifact whose entry file is HTML, such as a single page or a small site publ
 - **Scripts run, isolated.** The page's scripts run in an isolated origin with no access to the Hub page around it, your session or the Hub API. They cannot make network requests, open windows, submit forms or navigate away.
 - **Keep every asset in the bundle.** Images, styles, scripts and fonts load only from the bundle's own files. Images referenced by absolute `http(s)` URL do not load; the publish prints a warning, and the viewer shows one above the frame.
 - **The view expires.** A view lasts 30 minutes. After that the page says so and offers **Reload view**. **Full screen** and **Open in new tab** are on the bar above the frame.
-- **The view URL works without signing in.** Anyone holding the URL behind **Open in new tab** can open that version until the view expires, and it cannot be revoked. Treat it as a temporary access URL: do not paste it into chat or tickets; share the `scion://artifact/` reference instead.
+- **The view URL works without signing in.** Anyone holding the URL behind **Open in new tab** can open that version until the view expires, and it cannot be revoked. Treat it as a temporary access URL: do not paste it into chat or tickets; share the `scion://artifact/` reference instead. When a Hub administrator configures a separate content host (`server.hub.content_url`; see [`server.hub.content_url`: the content host](/scion/reference/admin-settings/#serverhubcontent_url-the-content-host) and [Content Host](/scion/reference/security/#6-content-host)), share links and the HTML artifact views opened from them are served on that content host with ambient credentials stripped.
 
 Markdown artifacts are different. Their preview runs no scripts: HTML written in the Markdown is shown as plain text, and links open in a new tab. When you publish a Markdown artifact, the Hub fetches the remote images it references and serves copies from then on. Images that could not be fetched show a placeholder instead.
 
@@ -156,11 +158,20 @@ A review is a version that carries suggestion and comment marks (in [CriticMarku
 
 ### Review in the web UI
 
-On the current version of a Markdown artifact, choose **Review**. An editor opens beside a live preview.
+On the current version of a Markdown artifact, choose **Review**. An editor opens beside a live preview (on touch screens with a coarse pointer, the review editor, note dialog, and source editor enforce a `16px` minimum font size so mobile browsers do not zoom on focus and push the pinned review toolbar off-screen).
 
 1. Select text and choose **Comment**, **Suggest**, **Insert** or **Delete** to add a mark. Marks cannot be nested, and the toolbar refuses a selection that falls inside code; a short hint says why.
 2. **Save review** publishes your marked-up copy as a version of kind *review*, with an optional note. It stays disabled until there is at least one mark, and while text outside your marks differs from the version you started from.
-3. If someone publishes a newer version while you review, your review is not saved. The editor restarts from the current version, and your text is shown read-only with **Copy** so you can redo your marks.
+3. If someone publishes a newer version while you review, your review is not saved. The editor restarts from the current version, and your text is shown read-only with **Copy** so you can redo your marks. While `hub.artifacts_open_review_check` is on, the review editor reports your open review session (`POST /api/v1/artifacts/{id}/review-sessions`, heartbeating every 60 seconds and closing on save or tab unload) so publishers are warned before overwriting an open review (see [Open reviews](/scion/reference/artifacts/#open-reviews)).
+
+:::note[Graphical review editor (experimental)]
+When the `web.artifact_review_editor` [experiment](/scion/reference/experiments/) is on (in addition to `hub.artifacts`), **Review** opens a graphical review editor with a **Graphical** and **Source** view toggle:
+- In **Graphical** view (**Track changes** is always on), you edit the rendered document directly — including prose inside paragraphs, headings, blockquotes, list items, and table cells — and typing, deleting, and replacing text are recorded inline as CriticMarkup suggestions, while **Comment** (`Ctrl+Alt+M` or `Cmd+Alt+M`) adds a note on the selection (`Enter` edits a comment you added in this review; comments from earlier reviews are read-only). Unedited list items, table rows, bullet markers, list numbering, alignment colons, and cell padding stay byte-for-byte as written.
+- Structural changes that cannot be recorded in the graphical view — formatting, adding or removing list items or table rows/columns, code blocks, paragraph breaks, multi-paragraph paste, or edits that would alter CriticMarkup token pairing or move an earlier comment — show a hint to switch to **Source** view.
+- **Large documents**: Markdown documents over **200 KB** (`200,000` UTF-8 bytes) or **4,000** top-level blocks open directly in **Source** view with a notice ("This document is large, so it opened in the Source view."), though you can still switch to **Graphical** view after confirming a prompt. Documents over **500 KB** (`500,000` bytes) or **10,000** top-level blocks open in **Source** view with the **Graphical** toggle disabled ("Too large for the graphical view.").
+- **Source** view uses the CriticMarkup source editor and toolbar (**Comment**, **Suggest**, **Insert**, **Delete**). Suggestions you made in the graphical view become read-only in the graphical view after you switch to **Source**, though you can still edit them in **Source**. Undo history is kept per view and resets when you switch, and your last chosen view is remembered in the browser.
+- Every save goes through the same review publish and Hub checks whether or not `web.artifact_review_editor` is on.
+:::
 
 While a review is the current version, the artifact shows a *Review pending* badge (also in the Artifacts list), and a banner names the reviewer and counts the marks. On a review, the preview's **Marks · Clean · Accepted** switch shows the marks, the text with every mark rejected, or the text with every mark accepted.
 
@@ -178,9 +189,10 @@ As with `--version-of`, a reference with `@<n>` must name the current version. T
 
 ### Act on a review (owner)
 
-When an agent owns the artifact, the Hub sends it a message when someone else's review is published, with the commands to read it. A user owner gets no message; check for the *Review pending* badge instead. To read a review:
+When an agent owns the artifact, the Hub sends it a message when someone else's review is published, with the commands to read it. When a user owns the artifact and someone else publishes a review of it, the Hub sends the owner an in-app notification (`kind: "artifact_review_summary"`, `status: "ARTIFACT_REVIEW_SUBMITTED"`, `resourceType: "artifact"`, `resourceId: "<artifact-id>"`) in the Web Dashboard's notification tray and in [`scion notifications`](/scion/reference/cli/#scion-notifications), with the cleaned start of the reviewer's summary note (up to 240 runes) in `excerpt`; see [Reviews](/scion/reference/artifacts/#reviews). To read a review or list its comments, suggested changes and highlights as entries without parsing CriticMarkup:
 
 ```bash
+scion artifact comments scion://artifact/5f1c2d3e-...        # list the newest review's entries (@<seq> for a specific review, --format json for JSON)
 scion artifact get scion://artifact/5f1c2d3e-...             # with the marks
 scion artifact get scion://artifact/5f1c2d3e-... --clean     # every mark rejected
 scion artifact get scion://artifact/5f1c2d3e-... --accept    # every mark accepted
@@ -199,7 +211,7 @@ On the artifact's page, **Share** opens a dialog with three parts: **Share links
 
 A share link lets anyone who holds it open the artifact's **current** version in a browser **without signing in**. Use one for readers who do not have an account on the Hub.
 
-- Choose a lifetime (1, 7 or 30 days) and **Create link**. The link is shown **once**, with **Copy**; copy it then.
+- Choose a lifetime (1, 7 or 30 days) and **Create link**. The link is shown **once**, with **Copy**; copy it then. When the Hub has `server.hub.content_url` configured, the dialog and `scion artifact share` return the link on that content host (`shareUrl`).
 - Treat the link like a password: anyone holding it can open the artifact until it expires or you **Revoke** it. Every link expires, at the latest when the artifact itself expires.
 - An HTML entry renders in its sandbox; a Markdown entry opens as plain text.
 - A link gives no other access: it does not add the artifact to anyone's list.
@@ -224,11 +236,13 @@ Search for a user, or for a project when the Hub's cross-project sharing setting
 
 A grant to a project covers its members and its agents. The home project is listed first: it always has at least *Can view*, can be raised to *Can edit*, and cannot be removed. Grants stay until they are removed or the artifact is deleted.
 
+When adding or raising a grant for a user (`user:`), the owner, an admin grantee, or a [steward](#share-an-agents-artifact) can pass `--notify` on `scion artifact grants` (or set `notify` to `true` on `POST /api/v1/artifacts/{id}/grants`) to send that user an in-app notification (`artifact_grant`, with status `ARTIFACT_REVIEW_REQUESTED` for `review` or `ARTIFACT_SHARED` for `read`, `write`, or `admin`). See [Grants](/scion/reference/artifacts/#grants) for eligibility, rate limits, and `notifySkipped` reasons.
+
 ### Share an agent's artifact
 
 An agent cannot share what it publishes, so the people accountable for it can. For an artifact **owned by an agent**, these users are its **stewards**:
 
-- the user who delegated to the agent (or to the agent that started it), while they hold a role in the artifact's home project;
+- the user who delegated to the agent (or to the agent that started it), while that user is active and holds a role that reads in the artifact's home project. The Hub records this delegating user on the artifact when the artifact is created, so stewardship survives agent deletion or purge;
 - the owners of the artifact's home project (and super-admins).
 
 Project admins who are not owners, and other members, are not stewards.
@@ -242,9 +256,9 @@ A steward can:
 
 A steward cannot give *Can manage* or move the artifact to another project. The Hub refuses both with `steward_action_not_allowed`. A user with *Can manage* on the artifact can do both. For full control of your own copy, fetch it and publish it as your own artifact (see [What agents cannot do](#what-agents-cannot-do)).
 
-Steward rights follow the artifact as it is now. They end when you lose your role in the home project, when the delegation to the agent is revoked, or when the artifact moves to a project where you no longer qualify: as a project owner, one you do not own; as the delegating user, one where you hold no role. Grants and links you created stay until someone removes them. Every grant, change and link you create is recorded with the reason you were allowed.
+Steward rights follow the artifact as it is now. They end when you lose your role in the home project, when the delegation to the agent is revoked (for an artifact whose delegating user was not recorded on the artifact at creation), or when the artifact moves to a project where you no longer qualify: as a project owner, one you do not own; as the delegating user, one where you hold no role. Grants and links you created stay until someone removes them. Every grant, change and link you create is recorded with the reason you were allowed.
 
-For now, stewards share from the CLI: the artifact page does not show **Share** to them yet.
+When the `web.artifact_manage_access` experiment is on, the artifact page replaces **Share**, **Grant review access** and **Retention…** with a single **Manage access** dialog, where stewards can create and revoke share links, give a user *Can review*, remove grants, and change the artifact's expiry; giving *Can view* or *Can edit* still uses `scion artifact grants`. With `web.artifact_manage_access` off, stewards share from the CLI:
 
 ```bash
 scion artifact grants scion://artifact/5f1c2d3e-... --add user:<id> --permission read
@@ -253,11 +267,11 @@ scion artifact share scion://artifact/5f1c2d3e-... --ttl 3d
 
 ### Grant review access to an agent's artifact
 
-For an artifact **owned by an agent**, admins of its home project who are not stewards may still give a person review access, even though they cannot otherwise manage the artifact. The stewards (the user who delegated to the agent, and the project's owners) can do this too, and more; see [Share an agent's artifact](#share-an-agents-artifact).
+For an artifact **owned by an agent**, admins of its home project who are not stewards may still give a person review access, even though they cannot otherwise manage the artifact. The stewards (the user who delegated to the agent, and the project's owners) can do this too, and more; see [Share an agent's artifact](#share-an-agents-artifact). When the `hub.artifact_sponsor_review_grant` [experiment](/scion/reference/experiments/#server-experiments-with-notes) is on (off by default), the Hub automatically gives the recorded delegating user a *Can review* grant (`user:<id>`) when an agent creates a new artifact in a project, if that user is active and holds a role that reads in the artifact's home project; that automatic grant gives review access while the user keeps a role that reads in the home project, until its permission is changed or it is removed.
 
-They see **Grant review access** on the artifact page instead of **Share**. Stewards see it too, for now. Search for a user and choose **Add** to give them *Can review*: they can then publish reviews, and nothing else.
+With `web.artifact_manage_access` off, non-owner project admins and stewards see **Grant review access** on the artifact page instead of **Share** (with `web.artifact_manage_access` on, they use **Manage access**). Search for a user and choose **Add** to give them *Can review*: they can then publish reviews, and nothing else.
 
-Review access does not give read access. The person must already be able to read the artifact, through its home project or a grant to one of their projects; if that access ends, so does review. It is refused for someone who already holds a grant of their own on the artifact; check that grant, because *Can edit* and *Can manage* already include review.
+Review access added by a non-steward project admin (or created automatically by `hub.artifact_sponsor_review_grant`) does not give read access: the person must already be able to read the artifact, through its home project or a grant to one of their projects, and if that access ends, so does review. A non-steward project admin's review grant is refused for someone who already holds a grant of their own on the artifact; check that grant, because *Can edit* and *Can manage* already include review. A *Can review* grant added by the artifact's owner, a user with *Can manage*, or a steward also gives read access on its own (see [Grants](/scion/reference/artifacts/#grants)).
 
 ## Attach artifacts in chat
 
@@ -329,7 +343,7 @@ While `hub.artifacts` is off:
 - **CLI:** every artifact request answers `404`. `scion artifact publish` adds a hint that the experiment may be off; `get` lists it among the possible causes. Messages sent with `--artifact` lose their references, with a warning.
 - **Check.** Inside an agent, `scion whoami --full` lists the experiments that are on now, on its `Experiments:` line. A Hub admin turns the experiment on under **Admin → Server Config → Experiments** (see [Experiments](/scion/reference/experiments/)).
 
-If the experiment is on but artifacts are disabled in the Hub's settings, the web controls still appear, but every artifact request behind them, and every `scion artifact` command, answers `404` (ptone/scion#4932). Messages sent with `--artifact` lose their references, with a warning. Ask a Hub admin to check the Hub's `artifacts` settings.
+If the experiment is on but artifacts are disabled in the Hub's settings, the web controls still appear, but every artifact request behind them, and every `scion artifact` command, answers `404`. Messages sent with `--artifact` lose their references, with a warning. Ask a Hub admin to check the Hub's `artifacts` settings.
 
 ### A review is refused
 

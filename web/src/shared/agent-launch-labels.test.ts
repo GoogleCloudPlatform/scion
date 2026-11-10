@@ -69,14 +69,23 @@ describe('launch label vocabulary', () => {
   });
 
   it('labels every launch code in pkg/api and the broker codes that reach launch.error', () => {
-    // LaunchCodeHarnessConfigUnusable aliases the broker code checked below.
-    const codes = goStringConstants(launchCodes, 'LaunchCode', ['LaunchCodeHarnessConfigUnusable']);
+    // LaunchCodeHarnessConfigUnusable and LaunchCodeProjectPathNotInitialized
+    // alias the broker codes checked below.
+    const codes = goStringConstants(launchCodes, 'LaunchCode', [
+      'LaunchCodeHarnessConfigUnusable',
+      'LaunchCodeProjectPathNotInitialized',
+    ]);
     expect(codes.length).toBeGreaterThanOrEqual(19);
     const brokerCodes = goStringConstants(
       goSource('pkg/api/broker_error_codes.go'),
-      'BrokerErrCode(?:SkillResolution|HarnessConfigUnusable)'
+      'BrokerErrCode(?:SkillResolution|HarnessConfigUnusable|StorageMigrationRequired|ProjectPathNotInitialized)'
     );
-    expect([...brokerCodes].sort()).toEqual(['harness_config_unusable', 'skill_resolution_failed']);
+    expect([...brokerCodes].sort()).toEqual([
+      'harness_config_unusable',
+      'project_path_not_initialized',
+      'skill_resolution_failed',
+      'storage_migration_required',
+    ]);
     expect([...codes, ...brokerCodes].filter((c) => !Object.hasOwn(LAUNCH_CODE_LABELS, c))).toEqual(
       []
     );
@@ -107,6 +116,7 @@ describe('launch labels', () => {
     );
     expect(launchStepLabel('awaiting_capacity')).toBe('waiting for node capacity');
     expect(launchCodeLabel('image_pull_failed')).toBe('the agent image could not be pulled');
+    expect(launchCodeLabel('volume_mount_failed')).toBe('an agent volume could not be mounted');
     expect(launchCodeLabel('launch_timeout')).toBe('the launch timed out');
   });
 

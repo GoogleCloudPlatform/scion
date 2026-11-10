@@ -76,3 +76,35 @@ func (s *Server) messageLogger() *slog.Logger {
 	}
 	return s.messageLog
 }
+
+// reportAttachmentOutcomes tells the hub the per-file outcomes of one
+// message's attachment delivery (ptone/scion#4596), next to the failure
+// report: to the hub connection the message arrived on, else to every
+// connection with a hub client. A failed report is logged.
+func (s *Server) reportAttachmentOutcomes(connName string, outcomes []hubclient.AttachmentOutcome) {
+	if len(outcomes) == 0 {
+		return
+	}
+	var targets []*HubConnection
+	s.hubMu.RLock()
+	if conn, ok := s.hubConnections[connName]; connName != "" && ok && conn.HubClient != nil {
+		targets = append(targets, conn)
+	} else {
+		for _, conn := range s.hubConnections {
+			if conn.HubClient != nil {
+				targets = append(targets, conn)
+			}
+		}
+	}
+	s.hubMu.RUnlock()
+	report := &hubclient.MessageFailuresReport{Failures: []hubclient.MessageFailure{}, AttachmentOutcomes: outcomes}
+	for _, conn := range targets {
+		ctx, cancel := context.WithTimeout(context.Background(), messageFailureReportTimeout)
+		err := conn.HubClient.RuntimeBrokers().ReportMessageFailures(ctx, conn.BrokerID, report)
+		cancel()
+		if err != nil {
+			s.messageLogger().Warn("failed to report attachment delivery outcomes to hub",
+				"connection", conn.Name, "message_id", outcomes[0].MessageID, "error", err)
+		}
+	}
+}

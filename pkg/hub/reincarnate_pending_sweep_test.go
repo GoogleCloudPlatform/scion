@@ -203,7 +203,7 @@ func TestSweepStaleReincarnations_WorkerLosingPendingCASWritesNothing(t *testing
 	fresh := *claimed.PreviousAppliedConfig
 	fresh.Image = "patched-image:v9"
 	srv.runReincarnationWorker(ctx, agent.ID, claimed.ID, claimed.PreviousAppliedConfig, &fresh, "",
-		time.Now(), "", &ReincarnationPlan{}, claimed.ToGeneration, 0, nil)
+		time.Now(), "", &ReincarnationPlan{}, claimed.ToGeneration, 0, nil, nil)
 
 	after := snapshotAgent(t, s, agent.ID)
 	assert.Equal(t, swept, after, "the losing worker must not write the agent")
@@ -249,7 +249,7 @@ func TestSweepStaleReincarnations_OrphanPendingUsesPendingBound(t *testing.T) {
 	after, err := s.GetAgent(ctx, agent.ID)
 	require.NoError(t, err)
 	assert.Equal(t, store.ReincarnationStateFailed, after.ReincarnationState)
-	assert.Contains(t, after.Message, reincarnationDidNotStartReason)
+	assert.Contains(t, after.Message, reincarnationOrphanDidNotStartReason)
 }
 
 // TestSweepStaleReincarnations_OrphanNonPendingKeepsGeneralBound: an agent

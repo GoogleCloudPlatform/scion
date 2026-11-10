@@ -167,7 +167,9 @@ func TestHubAuthLoginHelpDocumentsPrecedence(t *testing.T) {
 		"4. the current hub ('scion use --hub <name>')",
 		"--hub-url is a deprecated alias of --hub",
 		"A login never changes settings files.",
-		"To make it the current hub, run 'scion use --hub <name>'.",
+		"To make hub <name> the current hub, run 'scion use --hub <name>'.",
+		"the hub logged in to becomes the current hub",
+		"A login never switches a hub that is already current.",
 	} {
 		assert.Contains(t, long, want)
 	}
@@ -233,6 +235,7 @@ func TestHubSettingsFilesUnchangedByResolution(t *testing.T) {
 	home := setupContextTest(t)
 	enableGlobalHubImport(t)
 	writeHomeGlobalSettings(t, "hub:\n  endpoint: https://global.example.com\n")
+	listTestHub(t, "project", "https://project.example.com")
 	dotScion := makeLinkedDirProject(t, "https://project.example.com")
 	globalFile := filepath.Join(home, ".scion", "settings.yaml")
 	projectFile := filepath.Join(dotScion, "settings.yaml")

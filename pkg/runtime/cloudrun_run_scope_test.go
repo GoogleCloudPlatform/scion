@@ -102,11 +102,10 @@ func (s *statefulInstances) CreateInstance(_ context.Context, req *runpb.CreateI
 	if _, ok := s.instances[name]; ok {
 		return nil, status.Error(codes.AlreadyExists, "instance exists")
 	}
-	inst := proto.Clone(req.Instance).(*runpb.Instance)
-	inst.Name = name
+	inst := fakeReadyInstance(req.Instance, name, 0)
 	inst.Etag = s.nextEtag()
 	s.instances[name] = inst
-	return &fakeInstanceOperation{}, nil
+	return &fakeInstanceOperation{instance: proto.Clone(inst).(*runpb.Instance)}, nil
 }
 
 // write applies a Stop, Start or Delete with its etag precondition.
@@ -131,12 +130,35 @@ func (s *statefulInstances) write(name, etag string, apply func()) (cloudrun.Ins
 
 func (s *statefulInstances) StartInstance(_ context.Context, req *runpb.StartInstanceRequest, _ ...gax.CallOption) (cloudrun.InstanceOperation, error) {
 	s.starts++
-	return s.write(req.Name, req.Etag, func() { s.instances[req.Name].Etag = s.nextEtag() })
+	return s.write(req.Name, req.Etag, func() {
+		inst := s.instances[req.Name]
+		inst.Etag = s.nextEtag()
+		// A start is a new generation, observed once it is started.
+		inst.Generation++
+		inst.ObservedGeneration = inst.Generation
+		// The recorded shape of a started instance (ptone/scion#5295).
+		inst.TerminalCondition = &runpb.Condition{Type: "Running", State: runpb.Condition_CONDITION_SUCCEEDED, Message: "Started instance in 3.47s."}
+		inst.Conditions = []*runpb.Condition{
+			{Type: "ContainerReady", State: runpb.Condition_CONDITION_SUCCEEDED, Message: "Imported container image in 1.39s."},
+			{Type: "ResourcesAvailable", State: runpb.Condition_CONDITION_SUCCEEDED, Message: "Provisioned imported containers."},
+			{Type: "Retry", State: runpb.Condition_CONDITION_SUCCEEDED, Reasons: &runpb.Condition_Reason{Reason: runpb.Condition_WAITING_FOR_OPERATION}, Message: "System will retry after 00:05 from lastTransitionTime for polling interval", Severity: runpb.Condition_INFO},
+		}
+	})
 }
 
 func (s *statefulInstances) StopInstance(_ context.Context, req *runpb.StopInstanceRequest, _ ...gax.CallOption) (cloudrun.InstanceOperation, error) {
 	s.stops++
-	return s.write(req.Name, req.Etag, func() { s.instances[req.Name].Etag = s.nextEtag() })
+	return s.write(req.Name, req.Etag, func() {
+		inst := s.instances[req.Name]
+		inst.Etag = s.nextEtag()
+		// The recorded shape of a stopped instance (ptone/scion#5295): the
+		// Retry condition is gone, the other conditions stay.
+		inst.TerminalCondition = &runpb.Condition{Type: "Running", State: runpb.Condition_CONDITION_FAILED, Message: "Instance stopped."}
+		inst.Conditions = []*runpb.Condition{
+			{Type: "ContainerReady", State: runpb.Condition_CONDITION_SUCCEEDED, Message: "Imported container image in 2.66s."},
+			{Type: "ResourcesAvailable", State: runpb.Condition_CONDITION_SUCCEEDED, Message: "Provisioned imported containers."},
+		}
+	})
 }
 
 func (s *statefulInstances) DeleteInstance(_ context.Context, req *runpb.DeleteInstanceRequest, _ ...gax.CallOption) (cloudrun.InstanceOperation, error) {
@@ -375,38 +397,46 @@ func runCfgForRun(runID string) RunConfig {
 
 var crAgentName = "projects/test-project/locations/us-central1/instances/" + cloudRunInstanceID("agent-1")
 
-// D1: Run reuses an existing instance only when it is this run's or a
-// legacy unlabelled one; another run's instance is refused with
-// ErrRunConflict (409 at the broker) and is not started.
+// Run reuses an existing instance only when it is this run's and matches
+// the computed spec; a legacy unlabelled instance is recreated under this
+// run; another run's instance is refused with ErrRunConflict (409 at the
+// broker) and is not started.
 func TestCloudRunRun_ReuseIsRunChecked(t *testing.T) {
 	t.Run("same run reused", func(t *testing.T) {
 		s := newStatefulInstances()
-		s.put(crAgentName, "run-b")
-		etag := s.instances[crAgentName].Etag
 		rt := newStatefulCloudRunRuntime(t, s)
-		if _, err := rt.Run(context.Background(), runCfgForRun("run-b")); err != nil {
+		ctx := context.Background()
+		id, err := rt.Run(ctx, runCfgForRun("run-b"))
+		if err != nil {
+			t.Fatalf("first Run: %v", err)
+		}
+		if err := rt.Stop(ctx, RunRef{ID: id, RunID: "run-b"}); err != nil {
+			t.Fatalf("Stop: %v", err)
+		}
+		etag := s.instances[crAgentName].Etag
+		if _, err := rt.Run(ctx, runCfgForRun("run-b")); err != nil {
 			t.Fatalf("Run: %v", err)
 		}
-		if s.starts != 1 || s.creates != 0 || s.lastEtag != etag {
-			t.Errorf("starts=%d creates=%d etag=%q, want 1, 0, %q", s.starts, s.creates, s.lastEtag, etag)
+		if s.starts != 1 || s.creates != 1 || s.deletes != 0 || s.lastEtag != etag {
+			t.Errorf("starts=%d creates=%d deletes=%d etag=%q, want 1, 1 (the first Run's), 0, %q", s.starts, s.creates, s.deletes, s.lastEtag, etag)
 		}
 	})
-	t.Run("legacy instance reused unstamped", func(t *testing.T) {
+	t.Run("legacy instance recreated under this run", func(t *testing.T) {
 		s := newStatefulInstances()
 		s.put(crAgentName, "")
 		rt := newStatefulCloudRunRuntime(t, s)
 		if _, err := rt.Run(context.Background(), runCfgForRun("run-b")); err != nil {
 			t.Fatalf("Run: %v", err)
 		}
-		if s.starts != 1 || s.creates != 0 {
-			t.Errorf("starts=%d creates=%d, want 1, 0", s.starts, s.creates)
+		if s.starts != 0 || s.deletes != 1 || s.creates != 1 {
+			t.Errorf("starts=%d deletes=%d creates=%d, want 0, 1, 1", s.starts, s.deletes, s.creates)
 		}
 		agents, err := rt.List(context.Background(), nil)
 		if err != nil || len(agents) != 1 {
 			t.Fatalf("List = %v, %v; want one entry", agents, err)
 		}
-		if agents[0].RunID != "" {
-			t.Errorf("reused legacy instance reports run %q, want \"\" (legacy)", agents[0].RunID)
+		if agents[0].RunID != "run-b" {
+			t.Errorf("recreated instance reports run %q, want run-b", agents[0].RunID)
 		}
 	})
 	t.Run("other run refused", func(t *testing.T) {
@@ -429,8 +459,8 @@ func TestCloudRunRun_ReuseIsRunChecked(t *testing.T) {
 // Stop then start of the same agent still works: the stop leaves run A's
 // instance, Start's pre-clean (pkg/agent/run.go) deletes every listed
 // non-running entry with its run, and Run for run B then creates a fresh
-// instance labelled run B. Cloud Run's List sets no Phase, so the listed
-// instance always counts as not running.
+// instance labelled run B. List reports the stopped instance as "stopped"
+// (cloudRunInstancePhase), so the pre-clean removes it.
 func TestCloudRunRun_StopThenStartNewRun(t *testing.T) {
 	s := newStatefulInstances()
 	rt := newStatefulCloudRunRuntime(t, s)
@@ -449,8 +479,8 @@ func TestCloudRunRun_StopThenStartNewRun(t *testing.T) {
 	if err != nil || len(agents) != 1 {
 		t.Fatalf("List = %v, %v; want one entry", agents, err)
 	}
-	if agents[0].Phase == "running" {
-		t.Fatalf("listed phase %q: pre-clean would skip the instance", agents[0].Phase)
+	if agents[0].Phase != "stopped" {
+		t.Fatalf("listed phase %q, want stopped: pre-clean would skip a running instance", agents[0].Phase)
 	}
 	if err := rt.Delete(ctx, RunRef{ID: AgentOperationID(agents[0]), RunID: agents[0].RunID}); err != nil {
 		t.Fatalf("pre-clean Delete: %v", err)
@@ -574,8 +604,11 @@ func TestCloudRunRun_OverlappingRunsDoNotTakeOver(t *testing.T) {
 		}
 		rt := newStatefulCloudRunRuntime(t, s)
 		_, err := rt.Run(context.Background(), runCfgForRun("run-a"))
-		if status.Code(err) != codes.AlreadyExists {
-			t.Fatalf("Run A = %v, want AlreadyExists", err)
+		if status.Code(err) != codes.AlreadyExists || !errors.Is(err, ErrRunConflict) {
+			t.Fatalf("Run A = %v, want AlreadyExists and ErrRunConflict", err)
+		}
+		if s.creates != 1 {
+			t.Errorf("creates = %d, want 1 (never re-issued)", s.creates)
 		}
 		if run, ok := s.runOf(crAgentName); !ok || run != "run-b" {
 			t.Errorf("instance: present=%v run=%q, want run B's untouched", ok, run)
@@ -586,13 +619,16 @@ func TestCloudRunRun_OverlappingRunsDoNotTakeOver(t *testing.T) {
 	})
 	t.Run("own instance replaced by newer run after the read: start refused", func(t *testing.T) {
 		s := newStatefulInstances()
-		s.put(crAgentName, "run-a") // run A's stopped instance
+		rt := newStatefulCloudRunRuntime(t, s)
+		// Run A's instance, with the spec run A computes (etag-1).
+		if _, err := rt.Run(context.Background(), runCfgForRun("run-a")); err != nil {
+			t.Fatalf("first Run A: %v", err)
+		}
 		s.beforeWrite = func(s *statefulInstances, name string) {
 			s.beforeWrite = nil
 			// Run B's pre-clean deletes it and run B creates its own.
 			s.put(name, "run-b")
 		}
-		rt := newStatefulCloudRunRuntime(t, s)
 		_, err := rt.Run(context.Background(), runCfgForRun("run-a"))
 		if !strings.Contains(fmt.Sprint(err), "etag mismatch") {
 			t.Fatalf("Run A = %v, want the start refused by its etag", err)

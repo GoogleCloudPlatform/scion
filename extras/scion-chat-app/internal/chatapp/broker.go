@@ -30,6 +30,8 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
+	scionruntime "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	goplugin "github.com/hashicorp/go-plugin"
 )
 
@@ -451,23 +453,43 @@ func SizeLimitErrorCard(filename string, size int64) Card {
 	}
 }
 
-// resolveGChatAttachmentDir returns the host-side directory for storing
-// Google Chat attachments in the shared scratchpad volume.
-func resolveGChatAttachmentDir(projectSlug, projectID, conversationID string) (string, error) {
+// resolveGChatScratchpad resolves the project's scratchpad shared dir, where
+// Google Chat attachments are stored under .attachments/_gchat/<conversation>/
+// (written through the layout authority, ptone/scion#5831).
+func resolveGChatScratchpad(projectSlug, projectID string) (scionruntime.SharedDirHostPath, error) {
 	if projectSlug == "" || projectID == "" {
-		return "", fmt.Errorf("project slug or ID is empty")
+		return scionruntime.SharedDirHostPath{}, fmt.Errorf("project slug or ID is empty")
 	}
 
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return "", fmt.Errorf("resolving home directory: %w", err)
+		return scionruntime.SharedDirHostPath{}, fmt.Errorf("resolving home directory: %w", err)
 	}
 
-	sharedDirBase, err := resolveSharedDirHostPath(home, projectSlug, projectID, "scratchpad")
+	res, err := resolveSharedDir(home, projectSlug, projectID, projectfs.ScratchpadName)
 	if err != nil {
-		return "", fmt.Errorf("resolving scratchpad shared dir: %w", err)
+		return scionruntime.SharedDirHostPath{}, fmt.Errorf("resolving scratchpad shared dir: %w", err)
 	}
-	return filepath.Join(sharedDirBase, ".attachments", gchatAttachmentDir, conversationID), nil
+	return res, nil
+}
+
+// maxSizeReader reads r and fails once more than max bytes were read, so an
+// oversized attachment is refused (and its partial file removed) rather
+// than silently truncated.
+type maxSizeReader struct {
+	r    io.Reader
+	max  int64
+	n    int64
+	name string
+}
+
+func (m *maxSizeReader) Read(p []byte) (int, error) {
+	n, err := m.r.Read(p)
+	m.n += int64(n)
+	if m.n > m.max {
+		return n, fmt.Errorf("attachment %q too large (more than %d bytes)", m.name, m.max)
+	}
+	return n, err
 }
 
 // resolveAgentPath translates agent-side container paths to host-side paths.

@@ -49,7 +49,8 @@ gcloud projects add-iam-policy-binding ptone-experiments \
   --member=serviceAccount:scion-hub-runner@ptone-experiments.iam.gserviceaccount.com \
   --role=roles/run.admin
 
-# Attach service account to Cloud Run Instances
+# Attach service account to Cloud Run Instances (iam.serviceAccounts.actAs;
+# see "actAs on the instance service account" below)
 gcloud projects add-iam-policy-binding ptone-experiments \
   --member=serviceAccount:scion-hub-runner@ptone-experiments.iam.gserviceaccount.com \
   --role=roles/iam.serviceAccountUser
@@ -64,6 +65,39 @@ gcloud projects add-iam-policy-binding ptone-experiments \
   --member=serviceAccount:scion-hub-runner@ptone-experiments.iam.gserviceaccount.com \
   --role=roles/iap.tunnelResourceAccessor
 ```
+
+### actAs on the instance service account
+
+The cloudrun runtime creates each agent Instance to run as the configured
+`cloudrun.service_account`. Cloud Run only allows that when the identity
+creating the Instance (the Hub SA, which runs the co-located broker) holds
+`iam.serviceAccounts.actAs` on that service account, which
+`roles/iam.serviceAccountUser` grants. Without it every agent start fails
+with an error that contains:
+
+```
+Permission 'iam.serviceaccounts.actAs' denied on service account <cloudrun.service_account> (or it may not exist)
+```
+
+This applies even when `cloudrun.service_account` is the Hub SA itself: a
+service account does not implicitly have actAs on itself, so it needs a
+binding on its own account. The project-level `roles/iam.serviceAccountUser`
+grant above covers every service account in the project. To grant only what
+is needed, bind the role on the instance service account instead:
+
+```bash
+# INSTANCE_SA is cloudrun.service_account; it may be the Hub SA itself
+INSTANCE_SA=scion-hub-runner@ptone-experiments.iam.gserviceaccount.com
+gcloud iam service-accounts add-iam-policy-binding "$INSTANCE_SA" \
+  --member=serviceAccount:scion-hub-runner@ptone-experiments.iam.gserviceaccount.com \
+  --role=roles/iam.serviceAccountUser
+```
+
+`scripts/cloudrun/deploy.sh` grants both the project-level role and this
+binding on its runtime service account. `scion doctor --profile <cloudrun
+profile>` checks the grant ("Cloud Run Instance Service Account (actAs)"). It
+checks the credentials doctor runs with, so run it with the Hub SA's
+credentials to check the identity that starts agents.
 
 ### Hub-minted service accounts (granted by default)
 
@@ -143,6 +177,7 @@ gcloud projects add-iam-policy-binding ptone-experiments \
 | secretmanager.viewer | scion-hub-runner | ✅ granted |
 | run.admin | scion-hub-runner | ✅ granted |
 | iam.serviceAccountUser | scion-hub-runner | ✅ granted |
+| iam.serviceAccountUser on cloudrun.service_account (actAs; self if it is the Hub SA) | scion-hub-runner | required; covered by the project-level grant |
 | logging.viewer | scion-hub-runner | ✅ granted |
 | iap.tunnelResourceAccessor | scion-hub-runner | ✅ granted |
 | iam.serviceAccountAdmin | scion-hub-runner | granted by deploy.sh unless SCION_HUB_SA_MINTING=false |

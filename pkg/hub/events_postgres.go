@@ -33,6 +33,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dbmetrics"
+	"github.com/GoogleCloudPlatform/scion/pkg/observability/ssemetrics"
 )
 
 // PostgresEventPublisher is an EventPublisher backed by PostgreSQL LISTEN/NOTIFY.
@@ -108,6 +109,9 @@ type PostgresEventPublisher struct {
 	// Tests only (they order an unsubscribe against Close).
 	testHookInUnsubscribe   func()
 	testHookBeforeCloseSubs func()
+	// testNotifyExec, when set, replaces the pool as the executor of
+	// publish. Tests only (they publish without a database).
+	testNotifyExec pgExecutor
 }
 
 // listenHook is one AddOnListen registration.
@@ -205,7 +209,7 @@ func NewPostgresEventPublisher(ctx context.Context, dsn string, metrics dbmetric
 		subs:    make(map[string]map[*pgSubscription][]string),
 		desired: make(map[string]int),
 	}
-	p.sink = p.publish
+	p.wireSinks()
 
 	if err := p.ensurePayloadTable(ctx); err != nil {
 		cancel()
@@ -238,18 +242,39 @@ CREATE INDEX IF NOT EXISTS scion_event_payloads_created_at_idx
 	return nil
 }
 
+// wireSinks wires publish into eventBuilder: as the sink, and, counting
+// the event as trigger=heartbeat, as the heartbeat sink.
+func (p *PostgresEventPublisher) wireSinks() {
+	p.sink = p.publish
+	p.heartbeatSink = func(subject string, event interface{}) {
+		p.publishTriggered(subject, event, ssemetrics.TriggerHeartbeat)
+	}
+}
+
 // publish is the sink wired into eventBuilder. It marshals and NOTIFYs on the
 // pool (autocommit). Errors are logged rather than returned because the
 // EventPublisher Publish* methods are fire-and-forget.
 func (p *PostgresEventPublisher) publish(subject string, event interface{}) {
+	p.publishTriggered(subject, event, ssemetrics.TriggerChange)
+}
+
+// publishTriggered is publish, counting a published event on
+// scion.hub.events.published with the given trigger.
+func (p *PostgresEventPublisher) publishTriggered(subject string, event interface{}, trigger string) {
 	// Bound the publish so a saturated event pool surfaces a logged error instead
 	// of blocking the calling (often request-handler) goroutine forever. See
 	// publishTimeout.
 	ctx, cancel := context.WithTimeout(p.ctx, publishTimeout)
 	defer cancel()
-	if err := p.buildAndNotify(ctx, p.pool, subject, event); err != nil {
-		p.log.Error("Failed to publish event via NOTIFY", "subject", subject, "error", err)
+	var exec pgExecutor = p.pool
+	if p.testNotifyExec != nil {
+		exec = p.testNotifyExec
 	}
+	if err := p.buildAndNotify(ctx, exec, subject, event); err != nil {
+		p.log.Error("Failed to publish event via NOTIFY", "subject", subject, "error", err)
+		return
+	}
+	p.published.Count(subject, trigger)
 }
 
 // PublishTx publishes an event using a caller-supplied executor, giving an

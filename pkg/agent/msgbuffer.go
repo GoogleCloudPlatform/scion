@@ -71,6 +71,13 @@ type MessageBuffer struct {
 	// goroutines and are not delayed by it.
 	waitReady func(ctx context.Context, agentID, projectID string)
 
+	// preDeliver, when set, runs a message's PreDelivery against the
+	// agent's container and returns the text to append after that
+	// message (ptone/scion#4596). flush calls it once per message that has
+	// one, in message order, after the readiness wait and before the
+	// coalesced delivery and its retries.
+	preDeliver func(ctx context.Context, agentID, projectID string, pd PreDelivery) string
+
 	// closeCtx is cancelled when Close starts. It cuts short a readiness
 	// wait and the backoff between delivery retries.
 	closeCtx    context.Context
@@ -138,6 +145,10 @@ type agentBuffer struct {
 	// delivery fails, because the caller was already told the message was
 	// accepted and has no other way to learn it was lost (#1820).
 	onFailure []DeliveryFailureHandler
+
+	// pre holds per-message PreDelivery work (nil entries allowed), aligned
+	// with messages.
+	pre []PreDelivery
 }
 
 // DeliveryFailureHandler is called when a buffered message could not be
@@ -215,6 +226,13 @@ func (mb *MessageBuffer) Send(agentID, projectID string, message string) {
 // after Close started is dropped and onFailure, if set, is called at once
 // with ErrMessageBufferClosed.
 func (mb *MessageBuffer) SendWithFailureHandler(agentID, projectID string, message string, onFailure DeliveryFailureHandler) {
+	mb.SendWithHooks(agentID, projectID, message, onFailure, nil)
+}
+
+// SendWithHooks is SendWithFailureHandler with a PreDelivery that runs
+// right before this message's text is delivered; its returned text is
+// appended to this message only (ptone/scion#4596).
+func (mb *MessageBuffer) SendWithHooks(agentID, projectID string, message string, onFailure DeliveryFailureHandler, pre PreDelivery) {
 	mb.mu.Lock()
 	if mb.closed {
 		mb.mu.Unlock()
@@ -224,6 +242,9 @@ func (mb *MessageBuffer) SendWithFailureHandler(agentID, projectID string, messa
 		)
 		if onFailure != nil {
 			onFailure(ErrMessageBufferClosed)
+		}
+		if pre != nil {
+			pre.Discard()
 		}
 		return
 	}
@@ -239,6 +260,7 @@ func (mb *MessageBuffer) SendWithFailureHandler(agentID, projectID string, messa
 	// Append the message to the pending list.
 	buf.messages = append(buf.messages, message)
 	buf.onFailure = append(buf.onFailure, onFailure)
+	buf.pre = append(buf.pre, pre)
 	util.Debugf("msgbuffer: queued message for agent %s project %s (%d pending)", agentID, projectID, len(buf.messages))
 
 	// Reset or start the debounce timer. If a timer is already running,
@@ -311,9 +333,21 @@ func (mb *MessageBuffer) flush(agentID, key string, waitForReady bool) {
 	// Take ownership of the pending messages and clean up the buffer entry.
 	pending := buf.messages
 	handlers := buf.onFailure
+	pres := buf.pre
 	projectID := buf.projectID
 	delete(mb.buffers, key)
 	mb.mu.Unlock()
+
+	// Per-message work in the container (attachments written into the
+	// agent's home) runs now, once, in message order, before the delivery
+	// and outside its retries; its text follows that message's own text.
+	if mb.preDeliver != nil {
+		for i := range pending {
+			if i < len(pres) && pres[i] != nil {
+				pending[i] += mb.preDeliver(context.Background(), agentID, projectID, pres[i])
+			}
+		}
+	}
 
 	// Concatenate all buffered messages with double-newline separators so
 	// each original message remains visually distinct in the agent's input.

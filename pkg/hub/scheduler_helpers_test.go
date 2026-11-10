@@ -80,7 +80,7 @@ func seedFullRoleDispatchCreator(ms *mockScheduledEventStore, projectID string) 
 	ms.users[ownerID] = &store.User{ID: ownerID, Email: "creator-owner@test.example", Role: store.UserRoleMember, Status: store.UserStatusActive}
 	ms.roleDefinitions["rd-creator-member"] = &store.RoleDefinition{
 		ID: "rd-creator-member", Name: store.ProjectRoleMember, ScopeType: store.RoleScopeProject,
-		Permissions: []string{"agent.read"},
+		Permissions: []string{"agent.read"}, System: true,
 	}
 	ms.roleBindings = append(ms.roleBindings, &store.RoleBinding{
 		ID: "rb-creator-member", RoleDefinitionID: "rd-creator-member",
@@ -196,6 +196,20 @@ func (m *mockScheduledEventStore) CancelScheduledEvent(_ context.Context, id str
 		return store.ErrNotFound
 	}
 	evt.Status = store.ScheduledEventCancelled
+	return nil
+}
+
+func (m *mockScheduledEventStore) CancelScheduledEventWithReason(_ context.Context, id string, reason string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	evt, ok := m.events[id]
+	if !ok || evt.Status != store.ScheduledEventPending {
+		return store.ErrNotFound
+	}
+	evt.Status = store.ScheduledEventCancelled
+	if reason != "" {
+		evt.Error = reason
+	}
 	return nil
 }
 

@@ -65,6 +65,21 @@ func igMintRefused(t *testing.T, srv *Server, userID string, boundary TokenBound
 	require.Error(t, err, "a %s token with %v must not mint", boundary.Kind, scopes)
 }
 
+// igSelectorsWithout returns selectors without the listed ones.
+func igSelectorsWithout(selectors []string, drop ...string) []string {
+	skip := map[string]bool{}
+	for _, d := range drop {
+		skip[d] = true
+	}
+	var out []string
+	for _, sel := range selectors {
+		if !skip[sel] {
+			out = append(out, sel)
+		}
+	}
+	return out
+}
+
 // igRequestWithCredential calls handler directly with identity and an
 // explicit credential context of kind.
 func igRequestWithCredential(handler http.HandlerFunc, identity Identity, kind CredentialKind, method, path, body string) *httptest.ResponseRecorder {
@@ -136,6 +151,59 @@ func TestUserListToken_RequiresUserListAndHubBoundary(t *testing.T) {
 	assert.Contains(t, ids, listed, "a session lists users")
 }
 
+// TestUserReadToken_RequiresHubUserRead pins GET /api/v1/users/{id} for
+// tokens: user:read on a hub boundary reads another user, for a super-admin
+// and for a hub-member holder alike, and the returned capabilities allow
+// read; a token without user:read is refused with one identical 403 body
+// (forbidden, resource_type user, denied_action read) for another user, for
+// its holder's own id and for an id that does not exist; a project-boundary
+// credential carrying user:read is refused. A session reads users as it does
+// without these rules.
+func TestUserReadToken_RequiresHubUserRead(t *testing.T) {
+	srv, s := testServer(t)
+	admin := hubConfigTokenUser(t, s, "ig-read-super", store.SystemRoleSuperAdmin)
+	target := hubConfigTokenUser(t, s, "ig-read-target", store.SystemRoleHubMember)
+	path := func(id string) string { return "/api/v1/users/" + id }
+
+	member := hubConfigTokenUser(t, s, "ig-read-member", store.SystemRoleHubMember)
+	for label, holder := range map[string]string{"super-admin": admin, "hub member": member} {
+		readKey := mintHubConfigToken(t, srv, holder, hubBoundary(), "user:read")
+		rec := doRequestWithToken(t, srv, readKey, http.MethodGet, path(target), nil)
+		require.Equal(t, http.StatusOK, rec.Code, "%s with user:read: %s", label, rec.Body.String())
+		var got UserWithCapabilities
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+		assert.Equal(t, target, got.ID, label)
+		assert.True(t, capabilityAllows(got.Cap, ActionRead), "%s: capabilities allow read: %+v", label, got.Cap)
+	}
+
+	listOnly := mintHubConfigToken(t, srv, admin, hubBoundary(), "user:list")
+	var refusals []ErrorResponse
+	for _, id := range []string{target, admin, tid("ig-read-unknown")} {
+		rec := doRequestWithToken(t, srv, listOnly, http.MethodGet, path(id), nil)
+		require.Equal(t, http.StatusForbidden, rec.Code, "without user:read, id %s: %s", id, rec.Body.String())
+		var resp ErrorResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		resp.Error.RequestID = ""
+		refusals = append(refusals, resp)
+	}
+	assert.Equal(t, ErrCodeForbidden, refusals[0].Error.Code)
+	assert.Equal(t, "user", refusals[0].Error.Details["resource_type"])
+	assert.Equal(t, "read", refusals[0].Error.Details["denied_action"])
+	assert.Equal(t, refusals[0], refusals[1], "own id refused as another user")
+	assert.Equal(t, refusals[0], refusals[2], "unknown id refused as another user")
+
+	project := igProject(t, s, "ig-read-project")
+	igProjectBinding(t, s, admin, project, store.ProjectRoleOwner)
+	adminUser := NewAuthenticatedUser(admin, admin+"@test.com", admin, "admin", "api")
+	projectCredential := NewScopedUserIdentityWithBoundaryAndDecoration(adminUser, projectBoundary(project),
+		[]string{"user:read"}, tid("ig-read-project-cred"), bearerCeiling(t, "user:read"), nil)
+	rec := doRequestAsIdentity(t, srv, projectCredential, http.MethodGet, path(target), nil)
+	assert.Equal(t, http.StatusForbidden, rec.Code, "project boundary: %s", rec.Body.String())
+
+	rec = doRequest(t, srv, http.MethodGet, path(target), nil)
+	assert.Equal(t, http.StatusOK, rec.Code, "a session reads users: %s", rec.Body.String())
+}
+
 // TestRoleReadToken_DoesNotAdmitRoleWrites pins that role:read and
 // role_binding:read admit the role definition, permission registry and role
 // binding reads on a hub boundary, each read needs its own selector, the
@@ -184,15 +252,17 @@ func TestRoleReadToken_DoesNotAdmitRoleWrites(t *testing.T) {
 	assert.NoError(t, err, "the refused delete leaves the binding")
 }
 
-// TestRoleRoutesToken_WriteMethodsStillDenied pins that the role routes'
-// hub-level read target admits no write: a super-admin hub token carrying
-// every mintable selector, role:read included, is refused on every role
-// definition write and changes nothing.
-func TestRoleRoutesToken_WriteMethodsStillDenied(t *testing.T) {
+// TestRoleRoutesToken_WriteMethodsNeedWriteSelectors pins that the role
+// routes' hub-level read target admits no write: a super-admin hub token
+// carrying every mintable selector except role:create, role:update and
+// role:delete, role:read included, is refused on every role definition
+// write and changes nothing.
+func TestRoleRoutesToken_WriteMethodsNeedWriteSelectors(t *testing.T) {
 	m := newBearerMatrixFixture(t)
 	ctx := context.Background()
-	all, selectors := m.everySelectorHubToken(t)
+	_, selectors := m.everySelectorHubToken(t)
 	require.Contains(t, selectors, "role:read")
+	all := m.mint(t, hubBoundary(), igSelectorsWithout(selectors, "role:create", "role:update", "role:delete"))
 	before, err := m.store.ListRoleDefinitions(ctx)
 	require.NoError(t, err)
 
@@ -261,16 +331,18 @@ func TestConstraintReadToken_DoesNotAdmitConstraintAdmin(t *testing.T) {
 	assert.NoError(t, err, "the refused delete leaves the constraint")
 }
 
-// TestConstraintWriteRoutesToken_WriteMethodsStillDenied pins that the
-// access constraint routes' hub-level read target admits no write: a
-// super-admin hub token carrying every mintable selector,
-// access_constraint:read included, is refused on every constraint write and
-// on the constraint draft route, and changes nothing.
-func TestConstraintWriteRoutesToken_WriteMethodsStillDenied(t *testing.T) {
+// TestConstraintWriteRoutesToken_WriteMethodsNeedAdminSelector pins that
+// the access constraint routes' hub-level read target admits no write: a
+// super-admin hub token carrying every mintable selector except
+// access_constraint:admin, access_constraint:read included, is refused on
+// every constraint write and on the constraint draft route, and changes
+// nothing.
+func TestConstraintWriteRoutesToken_WriteMethodsNeedAdminSelector(t *testing.T) {
 	m := newBearerMatrixFixture(t)
 	ctx := context.Background()
-	all, selectors := m.everySelectorHubToken(t)
+	_, selectors := m.everySelectorHubToken(t)
 	require.Contains(t, selectors, "access_constraint:read")
+	all := m.mint(t, hubBoundary(), igSelectorsWithout(selectors, "access_constraint:admin"))
 	ac := m.ids.accessConstraint
 	before, err := m.store.GetAccessConstraint(ctx, ac)
 	require.NoError(t, err)

@@ -66,11 +66,17 @@ func TestGetHubAccessToken_DevTokenFallback(t *testing.T) {
 	t.Setenv("SCION_DEV_TOKEN_FILE", "")
 	t.Setenv("SCION_HUB_TOKEN", "")
 
-	endpoint := "https://hub.example.com"
+	endpoint := "http://127.0.0.1:8080"
 
-	// Should fall back to dev token
+	// Should fall back to dev token for a loopback hub
 	token := getHubAccessToken(endpoint)
 	assert.Equal(t, "scion_dev_test123", token)
+
+	// A dev token is valid only on the local workstation server, so a hub
+	// on another address gets none.
+	assert.Empty(t, getHubAccessToken("https://hub.example.com"), "a remote hub")
+	assert.Empty(t, getHubAccessToken("http://127.0.0.2:8080"), "a non-loopback local address")
+	assert.Empty(t, getHubAccessToken("http://10.0.0.5:8080"), "a private address")
 }
 
 func TestGetHubAccessToken_DevTokenFileFallback(t *testing.T) {
@@ -94,9 +100,9 @@ func TestGetHubAccessToken_DevTokenFileFallback(t *testing.T) {
 	require.NoError(t, err)
 	t.Setenv("SCION_DEV_TOKEN_FILE", tokenFile)
 
-	endpoint := "https://hub.example.com"
+	endpoint := "http://localhost:8080"
 
-	// Should fall back to dev token from file
+	// Should fall back to dev token from file for a loopback hub
 	token := getHubAccessToken(endpoint)
 	assert.Equal(t, "scion_dev_fromfile", token)
 }

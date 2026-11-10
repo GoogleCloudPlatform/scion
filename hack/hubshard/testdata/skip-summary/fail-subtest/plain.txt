@@ -1,0 +1,7 @@
+--- FAIL: TestFailSub (0.00s)
+    --- FAIL: TestFailSub/bad (0.00s)
+        toy_test.go:61: before
+        toy_test.go:62: boom
+            second line
+            third line
+FAIL

@@ -544,6 +544,23 @@ func (s *Server) userAdmittedByIDOn(ctx context.Context, st store.Store, userID,
 	return s.userAdmittedToProjectOn(ctx, st, user, projectID, nil)
 }
 
+// userAdmissionByIDOn is userAdmittedByIDOn returning the whole admission
+// result, with the Source of the evidence that admitted the user. A
+// missing user is not admitted.
+func (s *Server) userAdmissionByIDOn(ctx context.Context, st store.Store, userID, projectID string) (ProjectAdmissionResult, error) {
+	user, err := st.GetUser(ctx, userID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return ProjectAdmissionResult{}, nil
+		}
+		return ProjectAdmissionResult{}, err
+	}
+	if user == nil {
+		return ProjectAdmissionResult{}, nil
+	}
+	return s.userAdmissionAs(ctx, st, user, projectID, defaultStandingAdmission, nil)
+}
+
 // holdAgentsTx holds refs for root userID inside tx: agent rows locked in
 // ascending ID order, holds inserted, credentials revoked and run intent set
 // to stopped for live agents, with one audit record per agent. It returns
@@ -735,6 +752,7 @@ func (s *Server) stopHeldAgent(ctx context.Context, agentID string, attempt int)
 	agent.ContainerStatus = "stopped"
 	agent.Activity = ""
 	s.releaseBrokerQuota(ctx, agent)
+	s.releaseProjectQuota(ctx, agent)
 	if s.events != nil {
 		s.events.PublishAgentStatus(ctx, agent)
 	}

@@ -32,6 +32,13 @@ import (
 //
 // See design §3.1 "Two tiers" table for the full rationale.
 var layer0Prefixes = []string{
+	// Server keyring file path (ptone/scion#1530): read once at startup.
+	"server.keyring_file",
+	// Operator override for a world-readable keyring file: restart-bound.
+	"server.keyring_file_allow_world_readable",
+	// TLS-terminating proxy allowlist for the hub-broker transport check:
+	// operator-only and read once at startup.
+	"server.trusted_proxies",
 	// Database
 	"server.database",
 	// Listeners
@@ -52,6 +59,7 @@ var layer0Prefixes = []string{
 	// Secrets/storage
 	"server.secrets",
 	"server.storage",
+	"server.project_storage",
 	"server.workspace_storage",
 	"server.shared_dir_storage",
 	"server.home_storage",
@@ -86,6 +94,9 @@ var layer0Prefixes = []string{
 	// Request performance tracing — the middleware and the authorization
 	// store and audit-emitter decorators are installed at startup.
 	"server.hub.perf_trace",
+	// Browser policy report samples — the report handler is built at
+	// startup.
+	"server.hub.csp_report_raw_samples",
 	// Membership-standing sweep report-only mode — the sweep reads it from
 	// ServerConfig, set at startup.
 	"server.hub.membership_sweep_report_only",
@@ -97,6 +108,10 @@ var layer0Prefixes = []string{
 	// Agent port proxy settings — the response header bound is read into
 	// ServerConfig at startup.
 	"server.hub.port_proxy",
+	// Events stream bounds and the declared platform request timeout — the
+	// web server and the conduit relay read them at startup.
+	"server.hub.sse",
+	"server.hub.platform_request_timeout",
 	// Separate relay process settings (scion server --role relay) — read
 	// at startup.
 	"server.relay",
@@ -135,10 +150,12 @@ var koanfPathToJSONField = map[string]map[string]string{
 		"server.hub.start_create_unconfirmed_hold": "start_create_unconfirmed_hold",
 	},
 	"endpoints": {
-		"server.hub.public_url":               "public_url",
-		"server.hub.hub_name":                 "hub_name",
-		"image_registry":                      "image_registry",
-		"server.hub.monitoring_dashboard_url": "monitoring_dashboard_url",
+		"server.hub.public_url":                  "public_url",
+		"server.hub.hub_name":                    "hub_name",
+		"server.hub.content_url":                 "content_url",
+		"server.hub.content_url_allow_same_site": "content_url_allow_same_site",
+		"image_registry":                         "image_registry",
+		"server.hub.monitoring_dashboard_url":    "monitoring_dashboard_url",
 	},
 	"github_app": {
 		"server.github_app.app_id":           "app_id",
@@ -174,6 +191,9 @@ var koanfPathToJSONField = map[string]map[string]string{
 		"server.federation.refresh_interval":  "refresh_interval",
 		"server.federation.debounce_interval": "debounce_interval",
 	},
+	"notifications": {
+		"server.notification_channels": "notification_channels",
+	},
 }
 
 // jsonFieldToKoanfPaths maps section name → json field → koanf path for the
@@ -196,10 +216,12 @@ var jsonFieldToKoanfPaths = map[string]map[string]string{
 		"start_create_unconfirmed_hold": "server.hub.start_create_unconfirmed_hold",
 	},
 	"endpoints": {
-		"public_url":               "server.hub.public_url",
-		"hub_name":                 "server.hub.hub_name",
-		"image_registry":           "image_registry",
-		"monitoring_dashboard_url": "server.hub.monitoring_dashboard_url",
+		"public_url":                  "server.hub.public_url",
+		"hub_name":                    "server.hub.hub_name",
+		"content_url":                 "server.hub.content_url",
+		"content_url_allow_same_site": "server.hub.content_url_allow_same_site",
+		"image_registry":              "image_registry",
+		"monitoring_dashboard_url":    "server.hub.monitoring_dashboard_url",
 	},
 	"github_app": {
 		"app_id":           "server.github_app.app_id",
@@ -235,6 +257,9 @@ var jsonFieldToKoanfPaths = map[string]map[string]string{
 		"refresh_interval":  "server.federation.refresh_interval",
 		"debounce_interval": "server.federation.debounce_interval",
 	},
+	"notifications": {
+		"notification_channels": "server.notification_channels",
+	},
 }
 
 // ExtractSectionFromKoanf extracts a section's JSON document from a koanf
@@ -263,8 +288,6 @@ func ExtractSectionFromKoanf(k *koanf.Koanf, sectionName string) (json.RawMessag
 		return extractAgentDefaults(k)
 	case "github_app":
 		return extractGitHubApp(k)
-	case "notifications":
-		return extractNotifications(k)
 	default:
 		return extractMappedSection(k, sectionName)
 	}
@@ -300,14 +323,6 @@ func extractAgentDefaults(k *koanf.Koanf) (json.RawMessage, error) {
 
 func extractGitHubApp(k *koanf.Koanf) (json.RawMessage, error) {
 	return extractMappedSection(k, "github_app")
-}
-
-func extractNotifications(k *koanf.Koanf) (json.RawMessage, error) {
-	doc := make(map[string]interface{})
-	if k.Exists("server.notification_channels") {
-		doc["notification_channels"] = k.Get("server.notification_channels")
-	}
-	return json.Marshal(doc)
 }
 
 func extractMappedSection(k *koanf.Koanf, sectionName string) (json.RawMessage, error) {
@@ -364,12 +379,6 @@ func loadSectionIntoKoanf(k *koanf.Koanf, sectionName string, doc json.RawMessag
 		return k.Load(confmap.Provider(raw, "."), nil)
 	case "github_app":
 		return loadMappedSection(k, "github_app", raw)
-	case "notifications":
-		flat := make(map[string]interface{})
-		for key, val := range raw {
-			flat["server."+key] = val
-		}
-		return k.Load(confmap.Provider(flat, "."), nil)
 	default:
 		return loadMappedSection(k, sectionName, raw)
 	}
@@ -579,8 +588,20 @@ func DetectDeprecatedServerEnv(serverEnvKoanf *koanf.Koanf) []DeprecatedEnvVar {
 // variable is the supported way to pin the value on a node, not a
 // deprecated seed input. server.hub.public_url resolves env first, then the
 // database, then settings.yaml (ptone/scion#3905).
+// server.auth.authorized_domains resolves the same way (ptone/scion#6000):
+// a node that restricts sign-in through SCION_SERVER_* keeps that list
+// whatever is saved. This differs on purpose from the other access keys,
+// where a saved value wins over SCION_SERVER_*.
 var envPinnedLayer1Keys = map[string]bool{
-	"server.hub.public_url": true,
+	"server.hub.public_url":          true,
+	"server.auth.authorized_domains": true,
+}
+
+// IsEnvPinnedLayer1Key reports whether a SCION_SERVER_* variable pins the
+// Layer-1 key on a node (envPinnedLayer1Keys), so the saved value does not
+// apply where the variable is set.
+func IsEnvPinnedLayer1Key(key string) bool {
+	return envPinnedLayer1Keys[key]
 }
 
 // koanfKeyToEnvSuffix converts a koanf key back to the env var suffix form:

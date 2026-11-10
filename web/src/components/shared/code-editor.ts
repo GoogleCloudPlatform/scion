@@ -214,6 +214,23 @@ export class ScionCodeEditor extends LitElement {
       );
     }
 
+    /* 16px or more on a touch screen: iOS Safari zooms in on an editable
+       area under 16px when it takes focus and keeps the zoom after the
+       keyboard closes, which hides pinned chrome such as the artifact
+       review toolbar. CodeMirror's own panel fields (search, replace, go
+       to line) are 70% of the editor's size in its base theme
+       (.cm-textfield), so they take the same floor; these selectors
+       outrank the theme's scoped ones. */
+    @media (pointer: coarse) {
+      .editor-container .cm-editor {
+        font-size: max(16px, 0.875rem);
+      }
+      .editor-container .cm-editor .cm-textfield,
+      .editor-container .cm-editor .cm-panel input {
+        font-size: max(16px, 70%);
+      }
+    }
+
     .editor-container .cm-editor.cm-focused {
       outline: none;
     }
@@ -528,7 +545,7 @@ export class ScionCodeEditor extends LitElement {
       if (!container) return;
 
       // Clear mount point
-      container.innerHTML = '';
+      container.replaceChildren();
 
       this.editorView = new EditorView({
         state: EditorState.create({

@@ -21,12 +21,15 @@
  * `scion:access-denied` CustomEvent on the window when a 403 response is
  * received, allowing the app shell to display a toast notification.
  *
- * This is additive — existing components can continue using fetch() directly.
- * Phase 3 will migrate them to apiFetch().
+ * Every request from web/src goes through apiFetch(); ESLint
+ * (web/eslint.config.mjs) refuses a direct fetch() there except at the few
+ * commented exceptions (ptone/scion#353). A caller with its own handling
+ * of 401 and 403 passes `authErrors: 'caller'`.
  */
 
 import { dispatchTeardown } from '../utils/auth.js';
 import { recordHubDateHeader } from '../shared/hub-clock.js';
+import { loadPage } from './navigation.js';
 
 /** Detail payload for the scion:access-denied custom event. */
 export interface AccessDeniedDetail {
@@ -66,6 +69,15 @@ export interface ApiFetchOptions extends RequestInit {
    * sl-alert) to prevent duplicate notifications (RC-C fix).
    */
   suppressAccessDeniedToast?: boolean;
+  /**
+   * Who handles a 401 or 403 answer. 'global' (the default): apiFetch
+   * redirects to the login page on a 401, and on a 403 reloads the page for
+   * a suspended account or dispatches `scion:access-denied`. 'caller':
+   * apiFetch does none of that and returns the response as is, for a caller
+   * that reads those statuses itself (a boot probe that may run signed out,
+   * a session check, a purpose-built 403 UI).
+   */
+  authErrors?: 'global' | 'caller';
 }
 
 /**
@@ -103,8 +115,11 @@ export function _resetSuspendedState(): void {
 export async function apiFetch(path: string, options?: ApiFetchOptions): Promise<Response> {
   const start = performance.now();
   const sentMs = Date.now();
+  // The apiFetch-only options are not part of the request.
+  const { suppressAccessDeniedToast, authErrors, ...init } = options ?? {};
+  // eslint-disable-next-line no-restricted-globals -- apiFetch is the shared request helper itself
   const response = await fetch(path, {
-    ...options,
+    ...init,
     credentials: 'include',
   });
   const elapsed = performance.now() - start;
@@ -117,6 +132,8 @@ export async function apiFetch(path: string, options?: ApiFetchOptions): Promise
     );
   }
 
+  if (authErrors === 'caller') return response;
+
   if (response.status === 401) {
     // Session expired or signing key rotated — redirect to login.
     // Use a flag to prevent multiple concurrent redirects.
@@ -126,7 +143,7 @@ export async function apiFetch(path: string, options?: ApiFetchOptions): Promise
       // active terminals survive the transition (acceptance criterion 4).
       dispatchAuthExpiredTeardown();
       const returnTo = encodeURIComponent(window.location.pathname);
-      window.location.href = `/login?error=session_expired&returnTo=${returnTo}`;
+      loadPage(`/login?error=session_expired&returnTo=${returnTo}`);
     }
     return response;
   }
@@ -184,7 +201,7 @@ export async function apiFetch(path: string, options?: ApiFetchOptions): Promise
       return response;
     }
 
-    if (!options?.suppressAccessDeniedToast) {
+    if (!suppressAccessDeniedToast) {
       window.dispatchEvent(new CustomEvent('scion:access-denied', { detail }));
     }
   }

@@ -96,7 +96,8 @@ export interface PaletteTypeaheadOptions {
   holdsKeyboard?: () => boolean;
 }
 
-function primaryPointerIsTouch(): boolean {
+/** Whether the primary pointer is touch: the default {@link PaletteTypeaheadOptions.holdsKeyboard}. */
+export function primaryPointerIsTouch(): boolean {
   return typeof window.matchMedia === 'function' && window.matchMedia(TOUCH_PRIMARY_QUERY).matches;
 }
 

@@ -1,0 +1,5 @@
+=== RUN   TestNonUTF8
+direct ÿþ bytes
+    toy_test.go:113: bad ÿÃ bytes
+--- FAIL: TestNonUTF8 (0.00s)
+FAIL

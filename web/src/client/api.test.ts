@@ -574,6 +574,105 @@ describe('apiFetch — 403 body read aborted by the request signal', () => {
   });
 });
 
+describe("apiFetch — authErrors: 'caller' (ptone/scion#353)", () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+  let denied: AccessDeniedDetail[];
+  let teardowns: number;
+  let reloadSpy: ReturnType<typeof vi.fn>;
+
+  function onDenied(e: Event): void {
+    denied.push((e as CustomEvent<AccessDeniedDetail>).detail);
+  }
+  function onTeardown(): void {
+    teardowns++;
+  }
+
+  beforeEach(() => {
+    denied = [];
+    teardowns = 0;
+    fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    window.addEventListener('scion:access-denied', onDenied);
+    window.addEventListener('scion:account-teardown', onTeardown);
+    _resetSuspendedState();
+    reloadSpy = vi.fn();
+    Object.defineProperty(window, 'location', {
+      value: { ...window.location, href: 'http://localhost/projects', reload: reloadSpy },
+      writable: true,
+      configurable: true,
+    });
+  });
+
+  afterEach(() => {
+    window.removeEventListener('scion:access-denied', onDenied);
+    window.removeEventListener('scion:account-teardown', onTeardown);
+    vi.restoreAllMocks();
+  });
+
+  it('returns a 401 untouched: no login redirect, no teardown; the default still redirects', async () => {
+    fetchMock.mockResolvedValue(fakeResponse(401, { error: { code: 'unauthorized' } }));
+
+    const res = await apiFetch('/auth/me', { authErrors: 'caller' });
+
+    expect(res.status).toBe(401);
+    expect(window.location.href).toBe('http://localhost/projects');
+    expect(teardowns).toBe(0);
+
+    // Control (last: the redirect guard is once per page): the default redirects.
+    await apiFetch('/api/v1/agents');
+    expect(window.location.href).toContain('/login?error=session_expired');
+    expect(teardowns).toBe(1);
+  });
+
+  it('returns a user_suspended 403 untouched: no reload, no toast; the default still reloads', async () => {
+    // Each response is read only through clone(), so one can serve both calls.
+    fetchMock.mockResolvedValue(
+      fakeResponse(403, { error: { code: 'user_suspended', message: 'Suspended.' } })
+    );
+
+    const res = await apiFetch('/api/v1/auth/admin-status', { authErrors: 'caller' });
+
+    expect(res.status).toBe(403);
+    expect(reloadSpy).not.toHaveBeenCalled();
+    expect(denied).toHaveLength(0);
+
+    await apiFetch('/api/v1/agents');
+    expect(reloadSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns a plain 403 untouched: no access-denied event; the default still dispatches it', async () => {
+    fetchMock.mockResolvedValue(
+      fakeResponse(403, { error: { code: 'forbidden', message: 'No.' } })
+    );
+
+    const res = await apiFetch('/api/v1/groups/g-1', { method: 'DELETE', authErrors: 'caller' });
+
+    expect(res.status).toBe(403);
+    expect(denied).toHaveLength(0);
+
+    await apiFetch('/api/v1/agents');
+    expect(denied).toHaveLength(1);
+  });
+
+  it('passes neither apiFetch-only option to fetch()', async () => {
+    fetchMock.mockResolvedValue(fakeResponse(200, {}));
+    const signal = new AbortController().signal;
+
+    await apiFetch('/api/v1/agents', {
+      method: 'POST',
+      signal,
+      authErrors: 'caller',
+      suppressAccessDeniedToast: true,
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith('/api/v1/agents', {
+      method: 'POST',
+      signal,
+      credentials: 'include',
+    });
+  });
+});
+
 describe('apiErrorMessageFromBody / extractApiError', () => {
   it('reads {error: {message}}, appending error.details.guidance', () => {
     expect(apiErrorMessageFromBody({ error: { code: 'x', message: 'nope' } })).toBe('nope');

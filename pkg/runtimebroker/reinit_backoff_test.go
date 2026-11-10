@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 )
@@ -67,9 +68,9 @@ func newReinitBackoffFixture(t *testing.T) *reinitBackoffFixture {
 	cfg.HeartbeatEnabled = false
 	cfg.ControlChannelEnabled = false
 	cfg.BrokerAuthEnabled = false
-	srv := New(cfg, &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }})
+	srv := New(cfg, &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
 
-	conn, err := srv.createHubConnection(reinitBackoffConnName, makeTestCreds(reinitBackoffConnName, "broker-1", "http://hub1.example.com"))
+	conn, err := srv.createHubConnection(reinitBackoffConnName, makeTestCreds(reinitBackoffConnName, "broker-1", "https://hub1.example.com"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +95,7 @@ func (f *reinitBackoffFixture) setFailing(failing bool) {
 // watcher does when a connection's credentials change.
 func (f *reinitBackoffFixture) request(brokerID string) error {
 	f.t.Helper()
-	f.conn.requestReinitialize(makeTestCreds(reinitBackoffConnName, brokerID, "http://hub1.example.com"))
+	f.conn.requestReinitialize(makeTestCreds(reinitBackoffConnName, brokerID, "https://hub1.example.com"))
 	applied, err := f.conn.applyRequestedReinitialize(context.Background(), f.srv)
 	if !applied {
 		f.t.Fatalf("a newly requested credential set was not applied at once")

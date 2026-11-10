@@ -28,8 +28,6 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
-	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -63,6 +61,15 @@ const (
 	// a directory directly under the project-configs directory in the
 	// <slug>__<id8> form. Nothing was changed.
 	alignSkippedUnexpectedIdentity alignOutcome = "skipped_unexpected_identity"
+	// alignSkippedNotFormerID: the recorded identity is neither the
+	// project's own ID nor a former ID of it (see recordedProjectRelation).
+	// Nothing was changed.
+	alignSkippedNotFormerID alignOutcome = "skipped_not_former_id"
+	// alignSkippedOtherProjectDir: the recorded identity is the project's
+	// own ID under another slug, but the project config directory it names
+	// belongs to another live project (a <slug>__<id8> prefix collision).
+	// Nothing was changed.
+	alignSkippedOtherProjectDir alignOutcome = "skipped_other_project_dir"
 )
 
 // identityAlignment describes what alignWorkspaceProjectIdentity did.
@@ -71,6 +78,9 @@ type identityAlignment struct {
 	// Relocated is true when the project config directory was moved to
 	// the name derived from the hub project ID.
 	Relocated bool
+	// RecordedID is the project ID the workspace recorded. It is set for
+	// alignSkippedNotFormerID and alignSkippedOtherProjectDir.
+	RecordedID string
 }
 
 // Changed reports whether the workspace identity was rewritten.
@@ -106,6 +116,11 @@ func confinedProjectConfigRoot(slug, projectID string) (root string, ok bool) {
 // directly under ~/.scion/project-configs in the <slug>__<id8> form;
 // otherwise nothing is changed (alignSkippedUnexpectedIdentity).
 //
+// Only an identity of the same project is aligned. relation is called with
+// the recorded slug and ID before any filesystem inspection; unless it
+// reports recordedSameProject, nothing is changed (alignSkippedNotFormerID
+// or alignSkippedOtherProjectDir).
+//
 // When the workspace holds a different identity, its project config
 // directory is first moved to the hub-derived name, then the identity is
 // rewritten. A hub-derived directory made up only of empty directories is
@@ -116,7 +131,7 @@ func confinedProjectConfigRoot(slug, projectID string) (root string, ok bool) {
 //
 // inUse is called after all checks and immediately before the first change;
 // when it reports true, nothing is changed (alignSkippedInUse).
-func alignWorkspaceProjectIdentity(workspacePath, slug, projectID string, inUse func() (bool, error)) (identityAlignment, error) {
+func alignWorkspaceProjectIdentity(workspacePath, slug, projectID string, relation func(recordedSlug, recordedID string) (recordedRelation, error), inUse func() (bool, error)) (identityAlignment, error) {
 	current, err := config.ReadWorkspaceIdentity(workspacePath)
 	if err != nil {
 		// A recorded project ID outside the project ID format is an identity
@@ -141,6 +156,17 @@ func alignWorkspaceProjectIdentity(workspacePath, slug, projectID string, inUse 
 	if current.ID != "" {
 		if previous, ok = confinedProjectConfigRoot(current.Slug, current.ID); !ok {
 			return identityAlignment{Outcome: alignSkippedUnexpectedIdentity}, nil
+		}
+		rel, err := relation(current.Slug, current.ID)
+		if err != nil {
+			return identityAlignment{}, alignFailed("look up recorded project", err)
+		}
+		switch rel {
+		case recordedSameProject:
+		case recordedOtherProjectDir:
+			return identityAlignment{Outcome: alignSkippedOtherProjectDir, RecordedID: current.ID}, nil
+		default:
+			return identityAlignment{Outcome: alignSkippedNotFormerID, RecordedID: current.ID}, nil
 		}
 	}
 
@@ -308,6 +334,89 @@ func (s *Server) projectConfigInUse(ctx context.Context, projectID string) (bool
 	}
 }
 
+// recordedRelation is how a recorded workspace identity relates to the
+// project being aligned.
+type recordedRelation int
+
+const (
+	// recordedNotFormer: the identity is not one of the project's.
+	recordedNotFormer recordedRelation = iota
+	// recordedSameProject: the identity is the project's own ID under
+	// another slug, or a former ID of the project.
+	recordedSameProject
+	// recordedOtherProjectDir: the identity is the project's own ID under
+	// another slug, and another live project owns the project config
+	// directory it names.
+	recordedOtherProjectDir
+)
+
+// recordedProjectRelation classifies the recorded identity
+// recordedSlug/recordedID against project. The hub keeps no history of
+// project IDs, so:
+//   - the project's own ID under another slug (left by a slug rename) is the
+//     same project, unless another live project owns its project config
+//     directory <recordedSlug>__<id8>. Directory names derive from (slug,
+//     id8) and slugs are unique, so at most one live project maps to that
+//     directory: the one holding recordedSlug, when its ID shares the
+//     project's id8;
+//   - any other ID is a former ID of the project when it lies in the
+//     project's own config namespace (recordedSlug is the project's slug)
+//     and is the ID of no live project.
+//
+// A store error other than not found is returned, and nothing is changed.
+func (s *Server) recordedProjectRelation(ctx context.Context, project *store.Project, recordedSlug, recordedID string) (recordedRelation, error) {
+	if recordedID == project.ID {
+		return s.ownIDRelation(ctx, project, recordedSlug)
+	}
+	if recordedSlug != project.Slug {
+		return recordedNotFormer, nil
+	}
+	_, err := s.store.GetProject(ctx, recordedID)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		return recordedSameProject, nil
+	case err != nil:
+		return recordedNotFormer, err
+	}
+	return recordedNotFormer, nil
+}
+
+// errNoProjectFromLookup reports a project lookup that returned neither a
+// project nor an error.
+var errNoProjectFromLookup = errors.New("project lookup returned no project and no error")
+
+// ownIDRelation classifies the project's own ID recorded under
+// recordedSlug: recordedOtherProjectDir when the live project holding
+// recordedSlug is another project whose project config directory is the
+// one <recordedSlug>__<id8 of project.ID> names, else recordedSameProject.
+// A slug lookup that returns no project and no error is a failure
+// (errNoProjectFromLookup), so nothing is changed.
+func (s *Server) ownIDRelation(ctx context.Context, project *store.Project, recordedSlug string) (recordedRelation, error) {
+	if recordedSlug == project.Slug {
+		return recordedSameProject, nil
+	}
+	holder, err := s.store.GetProjectBySlug(ctx, recordedSlug)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		return recordedSameProject, nil
+	case err != nil:
+		return recordedNotFormer, err
+	case holder == nil:
+		return recordedNotFormer, errNoProjectFromLookup
+	}
+	if holder.ID == project.ID {
+		return recordedSameProject, nil
+	}
+	recordedRoot, ok := confinedProjectConfigRoot(recordedSlug, project.ID)
+	if !ok {
+		return recordedNotFormer, nil
+	}
+	if holderRoot, ok := confinedProjectConfigRoot(holder.Slug, holder.ID); ok && holderRoot == recordedRoot {
+		return recordedOtherProjectDir, nil
+	}
+	return recordedSameProject, nil
+}
+
 // alignErrorAttrs returns log attributes for an alignment failure that carry
 // no filesystem paths: the failed step, and for filesystem errors the
 // operation and the underlying error only.
@@ -331,8 +440,7 @@ func alignErrorAttrs(err error) []any {
 // identityAlignmentCounts summarizes one alignClonedProjectIdentities pass.
 type identityAlignmentCounts struct {
 	aligned, alreadyMatching, noIdentity, skippedInUse, skippedTargetExists,
-	skippedUnexpectedIdentity, failed, notReached int
-	hubWorkspaceRecorded, hubWorkspaceRecordFailed int
+	skippedUnexpectedIdentity, skippedNotFormerID, skippedOtherProjectDir, failed, notReached int
 }
 
 func (c *identityAlignmentCounts) add(outcome alignOutcome) {
@@ -349,6 +457,10 @@ func (c *identityAlignmentCounts) add(outcome alignOutcome) {
 		c.skippedTargetExists++
 	case alignSkippedUnexpectedIdentity:
 		c.skippedUnexpectedIdentity++
+	case alignSkippedNotFormerID:
+		c.skippedNotFormerID++
+	case alignSkippedOtherProjectDir:
+		c.skippedOtherProjectDir++
 	}
 }
 
@@ -360,10 +472,10 @@ func (c identityAlignmentCounts) attrs() []any {
 		"skipped_in_use", c.skippedInUse,
 		"skipped_target_exists", c.skippedTargetExists,
 		"skipped_unexpected_identity", c.skippedUnexpectedIdentity,
+		"skipped_not_former_id", c.skippedNotFormerID,
+		"skipped_other_project_dir", c.skippedOtherProjectDir,
 		"failed", c.failed,
 		"not_reached", c.notReached,
-		"hub_workspace_recorded", c.hubWorkspaceRecorded,
-		"hub_workspace_record_failed", c.hubWorkspaceRecordFailed,
 	}
 }
 
@@ -382,16 +494,20 @@ func (s *Server) startClonedProjectIdentityAlignment(ctx context.Context) {
 	}()
 }
 
-// alignClonedProjectIdentities writes the hub workspace record of every
-// project whose workspace this hub keeps at the conventional local path (see
-// recordHubWorkspace), makes the hub project ID the workspace identity of
-// every hub-cloned (shared-workspace git) project on this hub, and logs one
-// summary line of counts. Each project that is skipped or
+// alignClonedProjectIdentities makes the hub project ID the workspace
+// identity of every hub-cloned (shared-workspace git) project on this hub,
+// and logs one summary line of counts. It runs only on the local workspace
+// backend: on a shared backend the project's identity lives in its project
+// configuration at the project root, and a .scion entry in
+// the workspace is repository content that never supplies identity. Each project that is skipped or
 // fails is logged by project ID; a skipped or failed project is handled
 // again on the next hub start.
 func (s *Server) alignClonedProjectIdentities(ctx context.Context) identityAlignmentCounts {
 	logger := s.projectsLogger()
 	var counts identityAlignmentCounts
+	if s.workspaceBackendShared() {
+		return counts
+	}
 	cursor := ""
 	total, seen := 0, 0
 	for {
@@ -421,13 +537,6 @@ func (s *Server) alignClonedProjectIdentities(ctx context.Context) identityAlign
 			}
 			seen++
 			project := &result.Items[i]
-			if recorded, err := s.recordHubWorkspace(project); err != nil {
-				counts.hubWorkspaceRecordFailed++
-				logger.Warn("cloned project identity: failed to write hub workspace record",
-					append([]any{"project_id", project.ID}, alignErrorAttrs(err)...)...)
-			} else if recorded {
-				counts.hubWorkspaceRecorded++
-			}
 			if !project.IsSharedWorkspace() {
 				continue
 			}
@@ -452,13 +561,17 @@ func (s *Server) alignClonedProjectIdentities(ctx context.Context) identityAlign
 func (s *Server) alignClonedProjectIdentity(ctx context.Context, project *store.Project) (alignOutcome, bool) {
 	logger := s.projectsLogger()
 
-	workspacePath, err := s.hubManagedProjectPath(project.Slug)
+	resolved, err := s.projectWorkspaceResolved(project)
 	if err != nil {
 		logger.Warn("cloned project identity: no workspace location for project", "project_id", project.ID)
 		return "", false
 	}
+	workspacePath := resolved.HostPath
 
-	res, err := alignWorkspaceProjectIdentity(workspacePath, project.Slug, project.ID, func() (bool, error) {
+	relation := func(recordedSlug, recordedID string) (recordedRelation, error) {
+		return s.recordedProjectRelation(ctx, project, recordedSlug, recordedID)
+	}
+	res, err := alignWorkspaceProjectIdentity(workspacePath, project.Slug, project.ID, relation, func() (bool, error) {
 		return s.projectConfigInUse(ctx, project.ID)
 	})
 	if err != nil {
@@ -482,216 +595,12 @@ func (s *Server) alignClonedProjectIdentity(ctx context.Context, project *store.
 	case alignSkippedUnexpectedIdentity:
 		logger.Warn("cloned project identity: recorded workspace identity is not in the expected form, skipped",
 			"project_id", project.ID)
+	case alignSkippedNotFormerID:
+		logger.Warn("cloned project identity: recorded workspace identity is not a former ID of the project, skipped",
+			"project_id", project.ID, "recorded_project_id", res.RecordedID)
+	case alignSkippedOtherProjectDir:
+		logger.Warn("cloned project identity: project config directory of the recorded identity belongs to another project, skipped",
+			"project_id", project.ID, "recorded_project_id", res.RecordedID)
 	}
 	return res.Outcome, true
-}
-
-// sameExistingPath reports whether a and b name the same existing directory
-// once symlinks are resolved.
-func sameExistingPath(a, b string) bool {
-	ra, err := filepath.EvalSymlinks(a)
-	if err != nil {
-		return false
-	}
-	rb, err := filepath.EvalSymlinks(b)
-	if err != nil {
-		return false
-	}
-	return filepath.Clean(ra) == filepath.Clean(rb)
-}
-
-// recordHubWorkspace writes the hub workspace record
-// (<globalDir>/hub-workspaces/<slug>, holding the hub project ID) for a
-// project whose workspace this hub keeps at the conventional local path
-// ~/.scion/projects/<slug>. recorded is false for projects without a hub
-// workspace, or whose hub workspace is elsewhere (e.g. on a shared volume).
-func (s *Server) recordHubWorkspace(project *store.Project) (recorded bool, err error) {
-	if !syncsHubProjectWorkspace(project) {
-		return false, nil
-	}
-	workspacePath, err := s.hubManagedProjectPath(project.Slug)
-	if err != nil {
-		return false, err
-	}
-	local, err := localProjectPath(project.Slug)
-	if err != nil {
-		return false, err
-	}
-	if !sameExistingPath(workspacePath, local) {
-		return false, nil
-	}
-	record, err := config.HubWorkspaceRecordPath(project.Slug)
-	if err != nil {
-		return false, err
-	}
-	if current, err := config.ReadWorkspaceRecord(record); err == nil && current == project.ID {
-		return true, nil
-	}
-	if err := config.WriteWorkspaceRecord(record, project.ID); err != nil {
-		return false, err
-	}
-	return true, nil
-}
-
-// setHubWorkspaceDownloader replaces the download of a workspace upload into
-// a hub workspace. nil restores the default (gcp.SyncFromGCS). This is
-// useful for testing.
-func (s *Server) setHubWorkspaceDownloader(fn func(ctx context.Context, bucket, prefix, localPath string) error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.hubWorkspaceDownload = fn
-}
-
-// hubWorkspaceDownloader returns the function that downloads a workspace
-// upload into a hub workspace: the one set by setHubWorkspaceDownloader
-// (tests), otherwise gcp.SyncFromGCS.
-func (s *Server) hubWorkspaceDownloader() func(ctx context.Context, bucket, prefix, localPath string) error {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if s.hubWorkspaceDownload != nil {
-		return s.hubWorkspaceDownload
-	}
-	return gcp.SyncFromGCS
-}
-
-// Errors returned by syncHubWorkspaceFromGCS. They carry no paths; details
-// are logged by project-neutral step, operation and errno.
-var (
-	errHubIdentityUnreadable = errors.New("hub workspace identity could not be read; workspace download skipped")
-	errHubIdentityNotKept    = errors.New("hub workspace identity could not be kept after workspace download")
-)
-
-// syncHubWorkspaceFromGCS downloads a broker's workspace upload into the hub
-// workspace at workspacePath, keeping the hub workspace's own project
-// identity as it was before the download: the .scion entry keeps its form
-// (marker file, directory, or none) and its identity content (marker
-// content, or .scion/project-id content or absence). The hub workspace
-// identity is set only by the hub itself. When the identity cannot be read
-// beforehand, nothing is downloaded; when it cannot be put back, an error
-// is returned.
-func (s *Server) syncHubWorkspaceFromGCS(ctx context.Context, bucket, prefix, workspacePath string) error {
-	saved, err := captureWorkspaceIdentity(workspacePath)
-	if err != nil {
-		s.workspaceLog.Warn("hub workspace identity could not be read, workspace download skipped",
-			alignErrorAttrs(alignFailed("read hub workspace identity", err))...)
-		return errHubIdentityUnreadable
-	}
-	syncErr := s.hubWorkspaceDownloader()(ctx, bucket, prefix, workspacePath)
-	if err := saved.restore(); err != nil {
-		s.workspaceLog.Warn("hub workspace identity could not be kept after workspace download",
-			alignErrorAttrs(alignFailed("keep hub workspace identity", err))...)
-		return errors.Join(syncErr, errHubIdentityNotKept)
-	}
-	return syncErr
-}
-
-// identityEntryKind is the on-disk form of a workspace .scion entry.
-type identityEntryKind int
-
-const (
-	identityEntryNone identityEntryKind = iota
-	identityEntryMarker
-	identityEntryDir
-)
-
-// savedWorkspaceIdentity is a workspace's project identity as captured by
-// captureWorkspaceIdentity.
-type savedWorkspaceIdentity struct {
-	scionPath string
-	kind      identityEntryKind
-	// content is the marker file content (identityEntryMarker) or the
-	// project-id file content (identityEntryDir with hasProjectID).
-	content      []byte
-	hasProjectID bool
-}
-
-func captureWorkspaceIdentity(workspacePath string) (*savedWorkspaceIdentity, error) {
-	saved := &savedWorkspaceIdentity{scionPath: filepath.Join(workspacePath, config.DotScion)}
-	info, err := os.Lstat(saved.scionPath)
-	switch {
-	case os.IsNotExist(err):
-		return saved, nil
-	case err != nil:
-		return nil, err
-	case info.Mode().IsRegular():
-		saved.kind = identityEntryMarker
-		saved.content, err = os.ReadFile(saved.scionPath)
-		return saved, err
-	case info.IsDir():
-		saved.kind = identityEntryDir
-		data, err := os.ReadFile(saved.projectIDPath())
-		switch {
-		case err == nil:
-			saved.content, saved.hasProjectID = data, true
-		case !os.IsNotExist(err):
-			return nil, err
-		}
-		return saved, nil
-	default:
-		return nil, fmt.Errorf("unsupported .scion entry type")
-	}
-}
-
-func (w *savedWorkspaceIdentity) projectIDPath() string {
-	return filepath.Join(w.scionPath, projectkeys.ProjectIDFile)
-}
-
-// restore puts the captured identity back. The captured form is
-// authoritative: a .scion entry of another form left by the download is
-// removed first (the hub workspace had no entry of that form, so nothing the
-// hub kept is lost). Files other than the identity inside a .scion
-// directory are left as the download wrote them.
-func (w *savedWorkspaceIdentity) restore() error {
-	info, err := os.Lstat(w.scionPath)
-	exists := err == nil
-	if err != nil && !os.IsNotExist(err) {
-		return err
-	}
-
-	switch w.kind {
-	case identityEntryNone:
-		if !exists {
-			return nil
-		}
-		return os.RemoveAll(w.scionPath)
-
-	case identityEntryMarker:
-		// writeIfDifferent replaces an entry of another form.
-		return writeIfDifferent(w.scionPath, w.content)
-
-	case identityEntryDir:
-		if exists && !info.IsDir() {
-			if err := os.Remove(w.scionPath); err != nil {
-				return err
-			}
-		}
-		if err := os.MkdirAll(w.scionPath, 0755); err != nil {
-			return err
-		}
-		if !w.hasProjectID {
-			return os.RemoveAll(w.projectIDPath())
-		}
-		return writeIfDifferent(w.projectIDPath(), w.content)
-	}
-	return nil
-}
-
-// writeIfDifferent makes path a regular file holding content. An entry of
-// another type at path (directory, symlink) is removed first, so the write
-// never goes through it.
-func writeIfDifferent(path string, content []byte) error {
-	info, err := os.Lstat(path)
-	switch {
-	case err == nil && !info.Mode().IsRegular():
-		if err := os.RemoveAll(path); err != nil {
-			return err
-		}
-	case err == nil:
-		if current, err := os.ReadFile(path); err == nil && string(current) == string(content) {
-			return nil
-		}
-	case !os.IsNotExist(err):
-		return err
-	}
-	return os.WriteFile(path, content, 0644)
 }

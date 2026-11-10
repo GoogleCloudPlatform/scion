@@ -231,4 +231,60 @@ describe('space rail — mark-unread menu visibility', () => {
 
     expect(menuItemNames(el).some((t) => t === 'Mark unread')).toBe(false);
   });
+
+  describe('keyboard menu contract', () => {
+    function opener(): HTMLButtonElement {
+      const b = document.createElement('button');
+      document.body.appendChild(b);
+      b.focus();
+      return b;
+    }
+
+    it('a thread menu is a named menu, focused on open; Escape closes and restores the opener', async () => {
+      const el = await mount([thread()]);
+      const b = opener();
+      el.openThreadMenu(thread(), SPACE.projectId, { x: 10, y: 10 });
+      await el.updateComplete;
+      const menu = el.shadowRoot.querySelector('[role="menu"]') as HTMLElement;
+      expect(menu.getAttribute('aria-label')).toMatch(/^Actions for #/);
+      expect(el.shadowRoot.activeElement).toBe(menu.querySelector('[role="menuitem"]'));
+      menu.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      await el.updateComplete;
+      expect(el.contextMenuTarget).toBeNull();
+      expect(el.shadowRoot.querySelector('[role="menu"]')).toBeNull();
+      expect(document.activeElement).toBe(b);
+    });
+
+    it('a group menu is a named menu with the same keys', async () => {
+      const el = await mount([thread()]);
+      const b = opener();
+      const group = { id: 'group-1', name: 'Group One', threadIds: [] as string[] };
+      el.openGroupMenu(group, SPACE.projectId, { x: 10, y: 10 });
+      await el.updateComplete;
+      const menu = el.shadowRoot.querySelector('[role="menu"]') as HTMLElement;
+      expect(menu.getAttribute('aria-label')).toBe('Actions for Group One');
+      const items = [...menu.querySelectorAll('[role="menuitem"]')];
+      expect(el.shadowRoot.activeElement).toBe(items[0]);
+      menu.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true }));
+      expect(el.shadowRoot.activeElement).toBe(items.at(-1));
+      menu.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true }));
+      await el.updateComplete;
+      expect(el.groupContextMenuTarget).toBeNull();
+      expect(document.activeElement).toBe(b);
+    });
+
+    it('an outside click closes without moving focus back', async () => {
+      const el = await mount([thread()]);
+      opener();
+      el.openThreadMenu(thread(), SPACE.projectId, { x: 10, y: 10 });
+      await el.updateComplete;
+      const other = document.createElement('button');
+      document.body.appendChild(other);
+      other.focus();
+      document.body.click();
+      await el.updateComplete;
+      expect(el.contextMenuTarget).toBeNull();
+      expect(document.activeElement).toBe(other);
+    });
+  });
 });

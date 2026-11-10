@@ -28,9 +28,11 @@ import (
 
 	"github.com/bwmarrin/discordgo"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 )
@@ -58,11 +60,6 @@ const (
 	// OriginMarkerValue is the marker value for hub-originated messages.
 	OriginMarkerValue = "hub"
 )
-
-// legacyProjectsRoot is the base path for legacy download directories
-// when no explicit downloads_path is configured. Extracted to a package-level
-// var so tests can point it at a temp dir without skipping.
-var legacyProjectsRoot = "/home/scion/.scion/projects"
 
 // outboundEmailRe matches scion user emails in outbound messages, with optional "user:" prefix.
 var outboundEmailRe = regexp.MustCompile(`(?:user:)?[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}`)
@@ -2818,12 +2815,15 @@ const maxDiscordAttachmentSize = 25 * 1024 * 1024 // 25 MB
 // and saves it so the agent can access it. Returns the agent-visible path and
 // a placeholder string for the message body.
 //
-// The function uses a three-tier fallback for the destination directory:
-//  1. downloadsPath config (highest priority, supports {project_slug} placeholder)
-//  2. The scratchpad shared dir, resolved through its storage backend (local
-//     or nfs) — makes the file available at /scion-volumes/scratchpad/.attachments/_discord/.
-//     An unavailable nfs mount is an error, never a local fallback.
-//  3. Legacy /home/scion/.scion/projects/<slug>/downloads/ (last resort)
+// The destination is:
+//  1. downloadsPath config (an operator override, supports the
+//     {project_slug} placeholder), or
+//  2. the project's scratchpad shared dir, resolved through the layout
+//     authority (pkg/projectfs, local or nfs): the file is written through
+//     Resolved.Open to <scratchpad>/.attachments/_discord/discord_<ts>/<name>,
+//     and the agent path comes from the scratchpad Mount's Target. An
+//     unavailable nfs mount, or a message with no project ID, is an error;
+//     there is no local fallback (ptone/scion#5827).
 func (b *DiscordBroker) downloadDiscordAttachment(ctx context.Context, att *discordgo.MessageAttachment, projectSlug, projectID string) (agentPath, placeholder string, err error) {
 	if projectSlug == "" {
 		return "", "", fmt.Errorf("project slug is empty")
@@ -2853,62 +2853,50 @@ func (b *DiscordBroker) downloadDiscordAttachment(ctx context.Context, att *disc
 		fileName = att.ID
 	}
 	timestamp := time.Now().UnixNano()
-	destName := fmt.Sprintf("discord_%d_%s", timestamp, fileName)
-
-	// Route attachments through the shared dir infrastructure so container-based
-	// agents can access them at /scion-volumes/scratchpad/.attachments/_discord/.
-	// Use configured downloads_path as highest-priority override for edge cases.
-	var hostDir string
-	var useSharedDir bool
+	limited := io.LimitReader(resp.Body, maxDiscordAttachmentSize)
+	var destPath string
 	if b.downloadsPath != "" {
-		hostDir = strings.ReplaceAll(b.downloadsPath, "{project_slug}", projectSlug)
-	} else if projectID != "" {
+		hostDir := strings.ReplaceAll(b.downloadsPath, "{project_slug}", projectSlug)
+		if err := os.MkdirAll(hostDir, 0o755); err != nil {
+			return "", "", fmt.Errorf("create downloads dir: %w", err)
+		}
+		destPath = filepath.Join(hostDir, fmt.Sprintf("discord_%d_%s", timestamp, fileName))
+		f, err := os.Create(destPath)
+		if err != nil {
+			return "", "", fmt.Errorf("create file: %w", err)
+		}
+		defer f.Close()
+		if _, err := io.Copy(f, limited); err != nil {
+			f.Close()
+			os.Remove(destPath)
+			return "", "", fmt.Errorf("write file: %w", err)
+		}
+		agentPath = filepath.ToSlash(destPath)
+	} else {
+		if projectID == "" {
+			return "", "", fmt.Errorf("no project ID for %q: attachments are stored in the project's scratchpad", att.Filename)
+		}
 		home, homeErr := os.UserHomeDir()
-		if homeErr == nil {
-			// The scratchpad dir resolves through its storage backend (local
-			// or nfs). It is not checked against the project's declared
-			// shared dirs: if scratchpad is not configured, the file is
-			// written on the host but no agent container sees it.
-			sharedDirBase, resolveErr := resolveSharedDirHostPath(home, projectSlug, projectID, "scratchpad")
-			if resolveErr != nil {
-				// Never fall back to a local directory for an nfs-backed
-				// scratchpad: no agent mounts it.
-				return "", "", fmt.Errorf("resolve scratchpad shared dir for %q: %w", att.Filename, resolveErr)
-			}
-			hostDir = filepath.Join(sharedDirBase, ".attachments", "_discord")
-			useSharedDir = true
+		if homeErr != nil {
+			return "", "", fmt.Errorf("resolve home directory: %w", homeErr)
+		}
+		// The scratchpad resolves through the layout authority (local or
+		// nfs). It is not checked against the project's declared shared
+		// dirs: if scratchpad is not configured, the file is written on the
+		// host but no agent container sees it. Never fall back to a local
+		// directory for an nfs-backed scratchpad: no agent mounts it.
+		scratchpad, resolveErr := resolveSharedDir(home, projectSlug, projectID, projectfs.ScratchpadName)
+		if resolveErr != nil {
+			return "", "", fmt.Errorf("resolve scratchpad shared dir for %q: %w", att.Filename, resolveErr)
+		}
+		destPath = scratchpad.Path
+		agentPath, err = projectfs.WriteAttachment(scratchpad.Resolved, true,
+			projectfs.SharedDirMount(api.SharedDir{Name: projectfs.ScratchpadName}, ""),
+			projectfs.AttachmentChannelDiscord, fmt.Sprintf("discord_%d", timestamp), fileName, limited)
+		if err != nil {
+			return "", "", fmt.Errorf("write file: %w", err)
 		}
 	}
-	if hostDir == "" {
-		// Fallback to legacy path when shared dir resolution fails.
-		hostDir = filepath.Join(legacyProjectsRoot, projectSlug, "downloads")
-	}
-	if err := os.MkdirAll(hostDir, 0o755); err != nil {
-		return "", "", fmt.Errorf("create downloads dir: %w", err)
-	}
-
-	destPath := filepath.Join(hostDir, destName)
-	f, err := os.Create(destPath)
-	if err != nil {
-		return "", "", fmt.Errorf("create file: %w", err)
-	}
-	defer f.Close()
-
-	if _, err := io.Copy(f, io.LimitReader(resp.Body, maxDiscordAttachmentSize)); err != nil {
-		f.Close()
-		os.Remove(destPath)
-		return "", "", fmt.Errorf("write file: %w", err)
-	}
-
-	// Derive the agent-visible path.
-	if b.downloadsPath != "" {
-		agentPath = filepath.Join(strings.ReplaceAll(b.downloadsPath, "{project_slug}", projectSlug), destName)
-	} else if useSharedDir {
-		agentPath = filepath.Join("/scion-volumes/scratchpad/.attachments/_discord", destName)
-	} else {
-		agentPath = filepath.Join("/workspace/downloads", destName)
-	}
-	agentPath = filepath.ToSlash(agentPath)
 	contentType := att.ContentType
 	if contentType == "" {
 		contentType = "file"

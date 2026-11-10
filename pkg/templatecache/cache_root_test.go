@@ -266,7 +266,7 @@ func TestGet_EntryDirStaysInsideCacheDirThroughSymlink(t *testing.T) {
 func TestPut_CanonicalContentHashRoundTrips(t *testing.T) {
 	cache, _, sibling := newCacheWithSibling(t)
 	files := map[string][]byte{"a/b.txt": []byte("b"), "c.txt": []byte("c")}
-	hash := transfer.ComputeContentHash([]transfer.FileInfo{
+	hash := transfer.ComputeContentHashV2([]transfer.FileInfo{
 		{Path: "a/b.txt", Hash: transfer.HashBytes(files["a/b.txt"])},
 		{Path: "c.txt", Hash: transfer.HashBytes(files["c.txt"])},
 	})

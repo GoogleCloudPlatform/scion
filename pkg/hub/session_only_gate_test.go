@@ -47,8 +47,6 @@ func TestSessionOnlyGate_ReasonIsReported(t *testing.T) {
 		want   authzop.SessionOnlyReason
 	}{
 		{"own profile update", http.MethodPatch, "/api/v1/users/" + m.adminID, map[string]interface{}{"displayName": "x"}, authzop.ReasonInteractiveState},
-		{"other user role change", http.MethodPatch, "/api/v1/users/" + f.user, map[string]interface{}{"role": "member"}, authzop.ReasonGovernancePending},
-		{"user delete", http.MethodDelete, "/api/v1/users/" + f.userDel, nil, authzop.ReasonGovernancePending},
 		{"revoke sessions", http.MethodPost, "/api/v1/users/" + f.user + "/revoke-sessions", map[string]interface{}{}, authzop.ReasonSessionRecovery},
 		{"terminal workspace read", http.MethodGet, "/api/v1/users/me/terminal-workspace", nil, authzop.ReasonInteractiveState},
 		{"terminal workspace write", http.MethodPut, "/api/v1/users/me/terminal-workspace", map[string]interface{}{"agentIds": []string{}}, authzop.ReasonInteractiveState},
@@ -63,10 +61,11 @@ func TestSessionOnlyGate_ReasonIsReported(t *testing.T) {
 		requireSessionOnlyRefusal(t, rec, tc.want, tc.name)
 	}
 
-	// Sites a token cannot reach through the route layer, because the
-	// role_binding permissions carry no selector, are called directly with
-	// the same minted token, authenticated as the middleware does. Project
-	// delete is pinned at the service by TestRS3_ProjectDeleteScopedUATDenied.
+	// The super-admin binding delete site is called directly with the same
+	// minted token, authenticated as the middleware does;
+	// TestRoleBindingDeleteToken_SuperAdminBindingDenied drives it through
+	// the route with role_binding:delete. Project delete is pinned at the
+	// service by TestRS3_ProjectDeleteScopedUATDenied.
 	ctx := realTokenContext(t, m.srv, key)
 
 	bindings, err := m.store.ListRoleBindingsForPrincipal(context.Background(), store.RoleBindingPrincipalUser, m.adminID)

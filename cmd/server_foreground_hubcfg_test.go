@@ -43,3 +43,28 @@ func TestBuildHubServerConfig_DefaultUserRoleEmptyByDefault(t *testing.T) {
 
 	assert.Empty(t, hubCfg.DefaultUserRole)
 }
+
+// TestBuildHubServerConfig_StartupServerSettings proves the hub receives the
+// server settings as start-up resolved them (after the workstation defaults
+// and flags), which the server-config GET compares environment values with
+// to report whether they are in effect.
+func TestBuildHubServerConfig_StartupServerSettings(t *testing.T) {
+	cfg := &config.GlobalConfig{}
+	cfg.Hub.Host = "127.0.0.1"
+	cfg.Hub.Port = 9810
+	cfg.RuntimeBroker.Enabled = true
+	cfg.Storage.Provider = "local"
+
+	hubCfg := buildHubServerConfig(cfg, "https://hub.example.com", "", nil, false, "", nil)
+
+	if assert.NotNil(t, hubCfg.StartupServerSettings) && assert.NotNil(t, hubCfg.StartupServerSettings.Hub) {
+		assert.Equal(t, "127.0.0.1", hubCfg.StartupServerSettings.Hub.Host)
+		assert.Equal(t, 9810, hubCfg.StartupServerSettings.Hub.Port)
+	}
+	if assert.NotNil(t, hubCfg.StartupServerSettings.Broker) {
+		assert.True(t, hubCfg.StartupServerSettings.Broker.Enabled)
+	}
+	if assert.NotNil(t, hubCfg.StartupServerSettings.Storage) {
+		assert.Equal(t, "local", hubCfg.StartupServerSettings.Storage.Provider)
+	}
+}

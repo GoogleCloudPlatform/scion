@@ -97,11 +97,12 @@ func (e *ScionExecutor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorCon
 		// executor), the same answer as when the hub refuses the send, so
 		// these cannot be told apart; a routing failure for any other error.
 		var agentCtx *state.Context
+		var launching *hubclient.Agent
 		var resolveErr error
 		if federatedUser && e.bridge.AuthorizeExposed(route.ProjectSlug, route.AgentSlug) != nil {
 			resolveErr = fmt.Errorf("%w: %q", ErrAgentNotFound, route.AgentSlug)
 		} else {
-			agentCtx, resolveErr = e.bridge.resolveContext(ctx, route.ProjectSlug, route.AgentSlug, "")
+			agentCtx, launching, resolveErr = e.bridge.resolveContextLaunch(ctx, route.ProjectSlug, route.AgentSlug, "")
 		}
 		if resolveErr != nil && !federatedUser {
 			yield(nil, fmt.Errorf("resolve agent: %w", resolveErr))
@@ -191,6 +192,66 @@ func (e *ScionExecutor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorCon
 				e.bridge.subscribeAllUserTopics(agentCtx.ProjectID)
 			default:
 				e.bridge.subscribeAdminUserTopics(agentCtx.ProjectID)
+			}
+		}
+
+		// A federated user gets the hub's decision on the message before
+		// anything about a launch. The hub refuses a message to an agent
+		// that is still launching, so the send cannot be asked yet; the
+		// caller's read of its conversation with the agent
+		// (recheckFederatedUserAccess) is admitted by the same hub check
+		// as the send. A refusal ends the task at once with the uniform
+		// refusal, the same answer as for a running agent, with no launch
+		// step, launch outcome or wait; any other error is a routing
+		// failure. Only a caller the hub allows waits for the launch.
+		if federatedUser && hubclient.LaunchActive(launching) {
+			if err := e.bridge.recheckFederatedUserAccess(ctx, caller, agentCtx.AgentID); err != nil {
+				failMsg := a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("Failed to route message to agent"))
+				if isHubRefusal(err) {
+					e.log.Debug("federated user: hub refused the message to a launching agent", "error", err, "task_id", taskID, "agent_id", agentCtx.AgentID)
+					failMsg = federatedUserRefusalMessage()
+				} else {
+					e.log.Error("federated user: access check before the launch wait failed", "error", err, "task_id", taskID, "agent_id", agentCtx.AgentID)
+				}
+				yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, failMsg), nil)
+				return
+			}
+		}
+
+		// An agent still launching (an asynchronous create, or an adopted
+		// agent another client is launching) is waited for before the
+		// send. This runs before the execution lease is claimed, so no
+		// lease is held during the wait. The task reports working with the
+		// launch step, and fails without a send when the launch fails.
+		if hubclient.LaunchActive(launching) {
+			waitCtx, cancelWait := context.WithCancel(ctx)
+			defer cancelWait()
+			consumerGone := false
+			report := launchStepReporter(func(text string) {
+				if consumerGone {
+					return
+				}
+				msg := a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart(text))
+				if !yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateWorking, msg), nil) {
+					consumerGone = true
+					cancelWait()
+				}
+			})
+			report(launchStep(launching))
+			waitErr := e.bridge.waitForAgentLaunch(waitCtx, launching, report)
+			cancelWait()
+			if consumerGone {
+				return
+			}
+			if waitErr != nil {
+				e.log.Warn("agent did not start; message not sent", "error", waitErr, "task_id", taskID, "agent_id", agentCtx.AgentID)
+				failText := launchFailureText(waitErr)
+				if federatedUser {
+					failText = federatedUserLaunchFailureText(waitErr)
+				}
+				failMsg := a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart(failText))
+				yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, failMsg), nil)
+				return
 			}
 		}
 

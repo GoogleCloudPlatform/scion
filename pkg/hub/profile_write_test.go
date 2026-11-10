@@ -318,24 +318,70 @@ func TestUserEnvSecretWrites_FederatedUserRefused(t *testing.T) {
 	assert.Equal(t, "seeded", value.Value)
 }
 
-// TestUserEnvSecretWrites_SessionAndTokenUnchanged pins that a session and
-// a user access credential keep their behaviour on the user-scope env var and
-// secret writes.
-func TestUserEnvSecretWrites_SessionAndTokenUnchanged(t *testing.T) {
-	want := []int{http.StatusOK, http.StatusOK, http.StatusOK, http.StatusOK, http.StatusNoContent, http.StatusNoContent}
-	for _, caller := range []string{"session", "user access credential"} {
-		t.Run(caller, func(t *testing.T) {
-			f := newProfileWriteFixture(t)
-			key := f.session
-			if caller == "user access credential" {
-				key = f.token
-			}
-			seedUserEnvAndSecret(t, f, f.alice.ID, "PW_ENV", "PW_SECRET")
-			for i, pr := range userEnvSecretWrites(t, "PW_ENV", "PW_SECRET") {
-				rec := f.asBearer(pr, key)
-				assert.Equal(t, want[i], rec.Code, "%s %s: %s", pr.method, pr.path, rec.Body.String())
-			}
-		})
+// TestUserEnvSecretWrites_SessionAllowedTokenRefused pins that a session
+// keeps its behaviour on the user-scope env var and secret writes, and that a
+// user access credential is refused as session-only (CREDENTIAL_MANAGEMENT)
+// with the values unchanged.
+func TestUserEnvSecretWrites_SessionAllowedTokenRefused(t *testing.T) {
+	t.Run("session", func(t *testing.T) {
+		want := []int{http.StatusOK, http.StatusOK, http.StatusOK, http.StatusOK, http.StatusNoContent, http.StatusNoContent}
+		f := newProfileWriteFixture(t)
+		seedUserEnvAndSecret(t, f, f.alice.ID, "PW_ENV", "PW_SECRET")
+		for i, pr := range userEnvSecretWrites(t, "PW_ENV", "PW_SECRET") {
+			rec := f.asBearer(pr, f.session)
+			assert.Equal(t, want[i], rec.Code, "%s %s: %s", pr.method, pr.path, rec.Body.String())
+		}
+	})
+	t.Run("user access credential", func(t *testing.T) {
+		f := newProfileWriteFixture(t)
+		ctx := context.Background()
+		seedUserEnvAndSecret(t, f, f.alice.ID, "PW_ENV", "PW_SECRET")
+		for _, pr := range userEnvSecretWrites(t, "PW_ENV", "PW_SECRET") {
+			requireSessionOnlyRefusal(t, f.asBearer(pr, f.token), authzop.ReasonCredentialManagement, pr.method+" "+pr.path)
+		}
+		env, err := f.store.GetEnvVar(ctx, "PW_ENV", store.ScopeUser, f.alice.ID)
+		require.NoError(t, err)
+		assert.Equal(t, "seeded", env.Value)
+		_, err = f.store.GetEnvVar(ctx, "NEW_PW_ENV", store.ScopeUser, f.alice.ID)
+		assert.ErrorIs(t, err, store.ErrNotFound)
+		value, err := f.secrets.Get(ctx, "PW_SECRET", store.ScopeUser, f.alice.ID)
+		require.NoError(t, err)
+		assert.Equal(t, "seeded", value.Value)
+	})
+}
+
+// TestUserEnvSecretReads_FederatedOwnScopeAllowed pins the deliberate
+// retention of federated reads: a federated user reads its own user-level
+// variables and secrets (200, its own scope ID), gets 403 on every hub-level
+// read, and a user access token is still refused on user-level reads.
+func TestUserEnvSecretReads_FederatedOwnScopeAllowed(t *testing.T) {
+	f := newProfileWriteFixture(t)
+	seedUserEnvAndSecret(t, f, f.fed.ID(), "PW_ENV", "PW_SECRET")
+
+	rec := f.asIdentity(jsonProfileRequest(t, http.MethodGet, "/api/v1/env?scope=user", nil), f.fed)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var list ListEnvVarsResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &list))
+	assert.Equal(t, f.fed.ID(), list.ScopeID, "a federated read lists its own user scope only")
+
+	rec = f.asIdentity(jsonProfileRequest(t, http.MethodGet, "/api/v1/env/PW_ENV?scope=user", nil), f.fed)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var ev store.EnvVar
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &ev))
+	assert.Equal(t, "seeded", ev.Value)
+
+	for _, path := range []string{"/api/v1/secrets?scope=user", "/api/v1/secrets/PW_SECRET?scope=user"} {
+		rec = f.asIdentity(jsonProfileRequest(t, http.MethodGet, path, nil), f.fed)
+		assert.Equal(t, http.StatusOK, rec.Code, "GET %s: %s", path, rec.Body.String())
+	}
+
+	for _, path := range []string{"/api/v1/env?scope=hub", "/api/v1/env/PW_ENV?scope=hub", "/api/v1/secrets?scope=hub", "/api/v1/secrets/PW_SECRET?scope=hub"} {
+		rec = f.asIdentity(jsonProfileRequest(t, http.MethodGet, path, nil), f.fed)
+		assert.Equal(t, http.StatusForbidden, rec.Code, "federated GET %s: %s", path, rec.Body.String())
+	}
+
+	for _, path := range []string{"/api/v1/env?scope=user", "/api/v1/secrets?scope=user"} {
+		requireSessionOnlyRefusal(t, f.asBearer(jsonProfileRequest(t, http.MethodGet, path, nil), f.token), authzop.ReasonCredentialManagement, "token GET "+path)
 	}
 }
 

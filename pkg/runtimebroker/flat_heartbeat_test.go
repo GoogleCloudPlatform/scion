@@ -24,6 +24,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
@@ -256,9 +257,9 @@ func TestFlatServerStart_NeverResolvesAuxiliaryProfiles(t *testing.T) {
 		cfg := f.srv.config
 		cfg.HeartbeatEnabled = true // readiness: hub connections start after the discovery step
 		cfg.ControlChannelEnabled = false
-		srv := New(cfg, f.mgr, f.srv.runtime)
+		srv := New(cfg, f.mgr, f.srv.runtime, config.RuntimeBuildRecord{})
 		res := &countingAuxResolver{}
-		srv.resolveAuxiliaryRuntime = res.resolve
+		srv.resolveAuxiliaryRuntime = withoutRecord(res.resolve)
 		_, errCh := start(t, srv)
 
 		deadline := time.Now().Add(10 * time.Second)
@@ -293,9 +294,9 @@ func TestFlatServerStart_NeverResolvesAuxiliaryProfiles(t *testing.T) {
 		cfg := f.srv.config
 		cfg.FlatInstance = nil
 		cfg.HubEnabled = false
-		srv := New(cfg, f.mgr, f.srv.runtime)
+		srv := New(cfg, f.mgr, f.srv.runtime, config.RuntimeBuildRecord{})
 		res := &countingAuxResolver{}
-		srv.resolveAuxiliaryRuntime = res.resolve
+		srv.resolveAuxiliaryRuntime = withoutRecord(res.resolve)
 		start(t, srv)
 
 		deadline := time.Now().Add(10 * time.Second)

@@ -18,8 +18,6 @@ package hub
 
 import (
 	"context"
-	"encoding/json"
-	"net/http/httptest"
 	"os"
 	"testing"
 
@@ -38,11 +36,6 @@ func adoptionAdmin(t *testing.T, s store.Store, name string) *store.User {
 	u, err := s.GetUser(context.Background(), id)
 	require.NoError(t, err)
 	return u
-}
-
-func decodeJSONBody(t *testing.T, rec *httptest.ResponseRecorder, v interface{}) {
-	t.Helper()
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), v), rec.Body.String())
 }
 
 func withFingerprint(body map[string]interface{}, p delegationAdoptionPreviewResponse) map[string]interface{} {

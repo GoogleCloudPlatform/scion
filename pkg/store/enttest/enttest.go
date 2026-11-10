@@ -37,6 +37,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
+	"github.com/GoogleCloudPlatform/scion/pkg/observability/txdiag"
 )
 
 // NewClient returns a fresh, migrated Ent client for the active backend with
@@ -79,7 +80,9 @@ func MainTeardown() { teardown() }
 // production SQLite behavior.
 func newSQLiteClient(t *testing.T) *ent.Client {
 	t.Helper()
-	client, err := entc.OpenSQLite("file:"+t.Name()+"?mode=memory&cache=shared", entc.PoolConfig{MaxOpenConns: 1})
+	// Diag runs every store test through the transaction diagnostics
+	// wrapper, as in production (output discarded).
+	client, err := entc.OpenSQLite("file:"+t.Name()+"?mode=memory&cache=shared", entc.PoolConfig{MaxOpenConns: 1, Diag: txdiag.QuietConfig()})
 	if err != nil {
 		t.Fatalf("open sqlite ent client: %v", err)
 	}

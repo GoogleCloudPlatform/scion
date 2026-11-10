@@ -31,6 +31,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
@@ -39,7 +41,7 @@ import (
 )
 
 func TestHubManagedProjectPath(t *testing.T) {
-	path, err := hubManagedProjectPath("my-test-project")
+	path, err := localProjectPath("my-test-project")
 	require.NoError(t, err)
 
 	homeDir, err := os.UserHomeDir()
@@ -70,7 +72,7 @@ func TestHubManagedProjectPath_NeverFallsBackToLegacyDir(t *testing.T) {
 	require.NoError(t, os.MkdirAll(grovesDir, 0755))
 	require.NoError(t, os.WriteFile(filepath.Join(grovesDir, "README.md"), []byte("# workspace"), 0644))
 
-	path, err := hubManagedProjectPath(slug)
+	path, err := localProjectPath(slug)
 	require.NoError(t, err)
 	assert.Equal(t, projectsDir, path, "should always resolve to the projects path, never the legacy directory")
 }
@@ -85,133 +87,15 @@ func TestHubManagedProjectPath_UsesProjectsDirWhenEmpty(t *testing.T) {
 	projectsDir := filepath.Join(globalDir, "projects", slug)
 	require.NoError(t, os.MkdirAll(filepath.Join(projectsDir, "shared-dirs"), 0755))
 
-	path, err := hubManagedProjectPath(slug)
+	path, err := localProjectPath(slug)
 	require.NoError(t, err)
 	assert.Equal(t, projectsDir, path, "should resolve to the projects path even when it only contains infrastructure dirs")
 }
 
 func TestHubManagedProjectPath_EmptySlug(t *testing.T) {
-	_, err := hubManagedProjectPath("")
+	_, err := localProjectPath("")
 	require.Error(t, err, "empty slug should return an error")
 	assert.Contains(t, err.Error(), "slug must not be empty")
-}
-
-// TestResolveHubManagedWorkspaceForUpload_RejectsUnrelatedPath is the
-// regression test for agent.AppliedConfig.Workspace being uploaded to GCS
-// without validation: it starts as the caller-supplied req.Workspace
-// (buildAppliedConfig) and is only ever replaced by the resolved
-// hub-managed project path when the caller left it empty, so a non-empty
-// value the caller supplied directly must still be checked against the
-// project's own managed path before anything is read from it.
-func TestResolveHubManagedWorkspaceForUpload_RejectsUnrelatedPath(t *testing.T) {
-	srv, _ := testServer(t)
-
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
-
-	slug := "upload-guard-project"
-	expectedPath, err := hubManagedProjectPath(slug)
-	require.NoError(t, err)
-	require.NoError(t, os.MkdirAll(expectedPath, 0755))
-
-	// A sibling directory under the same projects root, not the project's
-	// own managed path: exactly the shape a caller-supplied req.Workspace
-	// pointing at an unrelated or another project's directory would take.
-	unrelated := filepath.Join(filepath.Dir(expectedPath), "another-project")
-	require.NoError(t, os.MkdirAll(unrelated, 0755))
-
-	if _, err := srv.resolveHubManagedWorkspaceForUpload(unrelated, slug); err == nil {
-		t.Error("expected an unrelated workspace path to be rejected, got nil")
-	}
-
-	// The project's own managed path itself is accepted -- this floor must
-	// not over-refuse the legitimate case.
-	if resolved, err := srv.resolveHubManagedWorkspaceForUpload(expectedPath, slug); err != nil {
-		t.Errorf("expected the project's own managed path to be accepted, got error: %v", err)
-	} else if resolved != expectedPath {
-		t.Errorf("resolved path = %q, want %q", resolved, expectedPath)
-	}
-
-	// Its "workspace" subdirectory is one of the two named shapes the
-	// ~/.scion allow list admits under a project slug (isAllowedProjectSubtree)
-	// and so is also accepted directly, with no root-containment fallback
-	// needed. An unnamed subdirectory of the bare managed path (e.g.
-	// ".../upload-guard-project/sub") is NOT equivalent to this: the allow
-	// list only admits it when the whole bare "<slug>" directory is itself
-	// the value passed in, not some child path computed separately -- see
-	// isAllowedProjectSubtree's own doc comment.
-	workspaceSubdir := filepath.Join(expectedPath, "workspace")
-	require.NoError(t, os.MkdirAll(workspaceSubdir, 0755))
-	if resolved, err := srv.resolveHubManagedWorkspaceForUpload(workspaceSubdir, slug); err != nil {
-		t.Errorf("expected the project's workspace subdirectory to be accepted, got error: %v", err)
-	} else if resolved != workspaceSubdir {
-		t.Errorf("resolved path = %q, want %q", resolved, workspaceSubdir)
-	}
-}
-
-// TestCreateAgent_SkipsGCSUploadForUnrelatedWorkspace is the handler-level
-// companion to TestResolveHubManagedWorkspaceForUpload_RejectsUnrelatedPath:
-// that test drives the validation helper directly, proving the helper
-// itself works; this one drives a real POST /api/v1/agents request through
-// the hub-managed-project GCS-upload branch and asserts the upload function
-// itself is never invoked when the workspace is outside the project's
-// managed path, proving the handler actually calls the helper in front of
-// the upload rather than just containing correct logic nothing reaches.
-func TestCreateAgent_SkipsGCSUploadForUnrelatedWorkspace(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
-
-	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
-	srv, _, project := setupCreateAgentServer(t, disp) // hub-managed: no GitRemote.
-	srv.SetStorage(newGCSContentMockStorage("test-bucket"))
-	t.Cleanup(func() {
-		if p, err := hubManagedProjectPath(project.Slug); err == nil {
-			_ = os.RemoveAll(p)
-		}
-	})
-
-	var uploadCalls int
-	previous := syncToGCSForWorkspaceUpload
-	syncToGCSForWorkspaceUpload = func(_ context.Context, _, _, _ string) error {
-		uploadCalls++
-		return nil
-	}
-	t.Cleanup(func() { syncToGCSForWorkspaceUpload = previous })
-
-	// A real, absolute, but entirely unrelated directory -- not under this
-	// project's own managed path -- supplied directly as the request's
-	// Workspace, the same shape TestResolveHubManagedWorkspaceForUpload_RejectsUnrelatedPath
-	// exercises at the helper level.
-	unrelated := t.TempDir()
-
-	agentRec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-		Name:      "upload-guard-agent",
-		ProjectID: project.ID,
-		Workspace: unrelated,
-	})
-	require.Equal(t, http.StatusCreated, agentRec.Code, "body: %s", agentRec.Body.String())
-
-	if uploadCalls != 0 {
-		t.Errorf("expected the GCS upload to be skipped for an unrelated workspace, but it ran %d time(s)", uploadCalls)
-	}
-	require.NotNil(t, disp.capturedAgent, "fixture check: dispatch must have been reached")
-	if disp.capturedAgent.AppliedConfig != nil && disp.capturedAgent.AppliedConfig.WorkspaceStoragePath != "" {
-		t.Errorf("expected WorkspaceStoragePath to remain unset when the upload is skipped, got %q", disp.capturedAgent.AppliedConfig.WorkspaceStoragePath)
-	}
-
-	// Confirm the stub is actually wired to something real: a request whose
-	// workspace IS the project's own managed path must reach the upload.
-	// Without this, a test environment where the upload branch is never
-	// reached at all (a wrong condition earlier in the handler, for example)
-	// would also show zero calls above for the wrong reason.
-	legitimateAgentRec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-		Name:      "upload-guard-agent-legit",
-		ProjectID: project.ID,
-	})
-	require.Equal(t, http.StatusCreated, legitimateAgentRec.Code, "body: %s", legitimateAgentRec.Body.String())
-	if uploadCalls != 1 {
-		t.Errorf("expected the GCS upload to run exactly once for the project's own managed workspace, ran %d time(s)", uploadCalls)
-	}
 }
 
 func TestCreateProject_HubManaged_NoGitRemote(t *testing.T) {
@@ -232,7 +116,7 @@ func TestCreateProject_HubManaged_NoGitRemote(t *testing.T) {
 	assert.Empty(t, project.GitRemote, "hub-managed project should have no git remote")
 
 	// Verify the filesystem was initialized
-	workspacePath, err := hubManagedProjectPath(project.Slug)
+	workspacePath, err := localProjectPath(project.Slug)
 	require.NoError(t, err)
 
 	scionDir := filepath.Join(workspacePath, ".scion")
@@ -264,7 +148,7 @@ func TestCreateProject_GitBacked_NoFilesystemInit(t *testing.T) {
 	assert.Equal(t, "github.com/test/repo", project.GitRemote)
 
 	// Verify no filesystem was created for git-backed project
-	workspacePath, err := hubManagedProjectPath(project.Slug)
+	workspacePath, err := localProjectPath(project.Slug)
 	require.NoError(t, err)
 
 	_, err = os.Stat(workspacePath)
@@ -288,7 +172,7 @@ func TestPopulateAgentConfig_HubManagedProject_SetsWorkspace(t *testing.T) {
 
 	require.NoError(t, srv.populateAgentConfig(context.Background(), agent, project, nil))
 
-	expectedPath, err := hubManagedProjectPath("hub-managed")
+	expectedPath, err := localProjectPath("hub-managed")
 	require.NoError(t, err)
 	assert.Equal(t, expectedPath, agent.AppliedConfig.Workspace,
 		"Workspace should be set for hub-managed projects")
@@ -316,7 +200,7 @@ func TestPopulateAgentConfig_HubManagedProject_RemoteBroker_WorkspaceSet(t *test
 	// populateAgentConfig sets Workspace for hub-managed projects.
 	// For remote brokers, the createAgent handler later swaps this to
 	// WorkspaceStoragePath. Here we verify the initial workspace is set.
-	expectedPath, err := hubManagedProjectPath("hub-managed-remote")
+	expectedPath, err := localProjectPath("hub-managed-remote")
 	require.NoError(t, err)
 	assert.Equal(t, expectedPath, agent.AppliedConfig.Workspace)
 }
@@ -530,14 +414,11 @@ func TestCreateAgent_HubManagedProject_ExplicitBroker_AutoLinks(t *testing.T) {
 	}
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", body)
-	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
-
-	var resp CreateAgentResponse
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
-
-	assert.NotNil(t, resp.Agent)
-	assert.Equal(t, broker.ID, resp.Agent.RuntimeBrokerID,
-		"Agent should be assigned to the explicitly selected broker")
+	// The explicitly selected broker is remote and has no checkout of the
+	// hub-managed project, so the create is refused (ptone/scion#5813);
+	// broker resolution, and so the auto-link, runs before that refusal.
+	require.Equal(t, http.StatusConflict, rec.Code, "body: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "remote runtime broker cannot reach")
 
 	// Verify the broker was auto-linked as a provider
 	provider, err := s.GetProjectProvider(ctx, project.ID, broker.ID)
@@ -597,15 +478,14 @@ func TestCreateProject_HubManaged_AutoProvide(t *testing.T) {
 		"projectId": project.ID,
 	}
 	rec = doRequest(t, srv, http.MethodPost, "/api/v1/agents", agentBody)
-	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
-
-	var resp CreateAgentResponse
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
-	assert.Equal(t, broker.ID, resp.Agent.RuntimeBrokerID,
-		"Agent should use the auto-provided default broker")
+	// The auto-provided default broker is remote and has no checkout of the
+	// hub-managed project: the create resolves to it and is then refused
+	// (ptone/scion#5813).
+	require.Equal(t, http.StatusConflict, rec.Code, "body: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "remote runtime broker cannot reach")
 
 	// Cleanup hub-managed project filesystem
-	workspacePath, err := hubManagedProjectPath(project.Slug)
+	workspacePath, err := localProjectPath(project.Slug)
 	if err == nil {
 		t.Cleanup(func() { _ = os.RemoveAll(workspacePath) })
 	}
@@ -664,6 +544,9 @@ server:
 	require.NoError(t, os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(settingsYAML), 0644))
 
 	srv, s := testServer(t)
+	// The hub resolves shared dirs from its in-memory server.project_storage
+	// (synthesized from the settings above at startup), never per request.
+	useNFSSharedDirStorage(srv, hostBase)
 	project := createTestGitProject(t, srv, "NFS Delete Test", "github.com/test/nfs-delete-repo")
 
 	// Pre-populate the project's shared-dir tree on the "export" exactly as
@@ -680,6 +563,8 @@ server:
 
 	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/projects/"+project.ID, nil)
 	assert.Equal(t, http.StatusNoContent, rec.Code, "body: %s", rec.Body.String())
+	// The project's storage is removed in the background after the commit.
+	srv.storageCleanupWG.Wait()
 
 	_, err := os.Stat(filepath.Join(hostBase, "projects", project.ID))
 	assert.True(t, os.IsNotExist(err), "the deleted project's NFS shared-dir tree must be removed")
@@ -835,7 +720,7 @@ func TestAutoLinkProviders_HubManagedProject_NoLocalPath(t *testing.T) {
 		"LocalPath should NOT be set for hub-managed project auto-linked provider")
 
 	// Cleanup hub-managed project filesystem
-	workspacePath, err := hubManagedProjectPath(project.Slug)
+	workspacePath, err := localProjectPath(project.Slug)
 	if err == nil {
 		t.Cleanup(func() { _ = os.RemoveAll(workspacePath) })
 	}
@@ -940,6 +825,52 @@ func TestDeleteProject_HubManaged_DispatchesCleanupToBrokers(t *testing.T) {
 	// Verify project deleted from database
 	_, err := s.GetProject(ctx, project.ID)
 	assert.ErrorIs(t, err, store.ErrNotFound)
+}
+
+// TestDeleteProject_Forced_BrokerKeepsDirIsAuditedNotFailed: on a forced
+// delete a remote broker that still has agents of the project keeps its
+// project directory and answers the cleanup with 409. The hub logs and
+// audits that as kept on that broker; the forced delete succeeds and is
+// never rolled back.
+func TestDeleteProject_Forced_BrokerKeepsDirIsAuditedNotFailed(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	project, broker, agent := setupOnlineBrokerAgent(t, s, "forced-kept")
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID:  project.ID,
+		BrokerID:   broker.ID,
+		BrokerName: broker.Name,
+		LinkedBy:   "test",
+	}))
+	mockClient := &mockRuntimeBrokerClient{cleanupErr: &brokerStatusError{
+		StatusCode: http.StatusConflict,
+		Body:       `{"error":{"code":"conflict","message":"the project still has agents on this Runtime Broker"}}`,
+	}}
+	srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(s, mockClient, false, slog.Default()))
+	logs := &syncLogBuffer{}
+	srv.projectsLog = slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/projects/"+project.ID+"?force=true", nil)
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+
+	_, err := s.GetProject(ctx, project.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound, "the forced delete stands")
+	_, err = s.GetAgent(ctx, agent.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound)
+	assert.Equal(t, 1, mockClient.cleanupCalls)
+
+	out := logs.String()
+	kept := false
+	for _, l := range strings.Split(out, "\n") {
+		if strings.Contains(l, `msg="`+projectfs.AuditMessage+`"`) && strings.Contains(l, "tree=project-dir") &&
+			strings.Contains(l, "outcome=kept") && strings.Contains(l, "deleter=hub") &&
+			strings.Contains(l, "project_id="+project.ID) && strings.Contains(l, "Runtime Broker "+broker.ID) {
+			kept = true
+		}
+	}
+	assert.True(t, kept, "the broker's kept project directory must be audited as kept:\n%s", out)
+	assert.Contains(t, out, `msg="project directory kept on broker"`)
+	assert.NotContains(t, out, "failed to cleanup project on broker", "a 409 is the kept outcome, not a failure")
 }
 
 // TestDeleteProject_HubManaged_SkipsEmbeddedBroker verifies that the embedded broker
@@ -1085,7 +1016,11 @@ func TestResolveRuntimeBroker_HubManagedProject_NoLocalPath(t *testing.T) {
 	}
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", agentBody)
-	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+	// The broker is remote and has no checkout of the hub-managed project,
+	// so the create itself is refused (ptone/scion#5813); broker resolution,
+	// and so the auto-link, runs before that refusal.
+	require.Equal(t, http.StatusConflict, rec.Code, "body: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "remote runtime broker cannot reach")
 
 	// Verify the auto-linked provider does NOT have LocalPath set
 	provider, err := s.GetProjectProvider(ctx, project.ID, broker.ID)
@@ -1970,6 +1905,8 @@ func TestCreateProject_SharedWorkspace_SetsLabelAndInitFilesystem(t *testing.T) 
 		require.NoError(t, cmd.Run(), "git %v", args)
 	}
 
+	allowLocalCloneFixture(t, sourceDir)
+
 	body := CreateProjectRequest{
 		Name:          "Shared WS Project",
 		GitRemote:     "github.com/test/shared-ws",
@@ -1992,7 +1929,7 @@ func TestCreateProject_SharedWorkspace_SetsLabelAndInitFilesystem(t *testing.T) 
 	assert.True(t, project.IsSharedWorkspace(), "project should report as shared workspace")
 
 	// Verify workspace was cloned (it's a git repo)
-	workspacePath, err := hubManagedProjectPath(project.Slug)
+	workspacePath, err := localProjectPath(project.Slug)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = os.RemoveAll(workspacePath) })
 
@@ -2109,7 +2046,7 @@ func TestPopulateAgentConfig_SharedWorkspace_SetsWorkspaceNotClone(t *testing.T)
 
 	require.NoError(t, srv.populateAgentConfig(context.Background(), agent, project, nil))
 
-	expectedPath, err := hubManagedProjectPath("shared-ws")
+	expectedPath, err := localProjectPath("shared-ws")
 	require.NoError(t, err)
 	assert.Equal(t, expectedPath, agent.AppliedConfig.Workspace,
 		"Workspace should be set for shared-workspace git projects")
@@ -2220,6 +2157,8 @@ func TestCloneSharedWorkspaceProject_Success(t *testing.T) {
 		require.NoError(t, cmd.Run(), "git %v", args)
 	}
 
+	allowLocalCloneFixture(t, sourceDir)
+
 	project := &store.Project{
 		ID:        "project-clone-test",
 		Name:      "Clone Test",
@@ -2236,7 +2175,7 @@ func TestCloneSharedWorkspaceProject_Success(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify the workspace was created with a git repo
-	workspacePath, err := hubManagedProjectPath(project.Slug)
+	workspacePath, err := localProjectPath(project.Slug)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = os.RemoveAll(workspacePath) })
 
@@ -2281,6 +2220,8 @@ func TestCloneSharedWorkspaceProject_IgnoreRuleFailure_CleansUpWithoutPath(t *te
 		require.NoError(t, cmd.Run(), "git %v", args)
 	}
 
+	allowLocalCloneFixture(t, sourceDir)
+
 	project := &store.Project{
 		ID:        "project-clone-unignored",
 		Name:      "Clone Unignored",
@@ -2292,7 +2233,7 @@ func TestCloneSharedWorkspaceProject_IgnoreRuleFailure_CleansUpWithoutPath(t *te
 			"scion.dev/default-branch": "master",
 		},
 	}
-	workspacePath, err := hubManagedProjectPath(project.Slug)
+	workspacePath, err := localProjectPath(project.Slug)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = os.RemoveAll(workspacePath) })
 
@@ -2322,7 +2263,7 @@ func TestCloneSharedWorkspaceProject_Failure_CleansUp(t *testing.T) {
 	assert.Contains(t, err.Error(), "shared workspace clone failed")
 
 	// Verify the workspace directory was cleaned up
-	workspacePath, pathErr := hubManagedProjectPath(project.Slug)
+	workspacePath, pathErr := localProjectPath(project.Slug)
 	require.NoError(t, pathErr)
 	_, statErr := os.Stat(workspacePath)
 	assert.True(t, os.IsNotExist(statErr), "workspace directory should be cleaned up on clone failure")
@@ -2440,6 +2381,13 @@ func TestCreateProject_AutoAssociatesGitHubInstallation(t *testing.T) {
 	}
 	require.NoError(t, st.CreateGitHubInstallation(ctx, inst))
 
+	// The creator (the dev user) proves access to the repository with their
+	// own GitHub token; a repo-name match alone does not associate.
+	giveUserGitHubToken(t, srv, st, DevUserID, "ghp_dev_creator")
+	fakeCreatorAccess(srv, map[string]githubapp.RepoAccess{
+		"ghp_dev_creator|myorg/myrepo": {Push: true, Pull: true},
+	})
+
 	// Create a project whose git remote matches the installation's repo.
 	// Use a local git repo as clone source so the clone actually succeeds.
 	sourceDir := t.TempDir()
@@ -2453,6 +2401,8 @@ func TestCreateProject_AutoAssociatesGitHubInstallation(t *testing.T) {
 		cmd.Dir = sourceDir
 		require.NoError(t, cmd.Run(), "git %v", args)
 	}
+
+	allowLocalCloneFixture(t, sourceDir)
 
 	body := CreateProjectRequest{
 		Name:          "Auto Assoc Project",
@@ -2471,7 +2421,7 @@ func TestCreateProject_AutoAssociatesGitHubInstallation(t *testing.T) {
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&project))
 
 	// Clean up the cloned workspace
-	workspacePath, err := hubManagedProjectPath(project.Slug)
+	workspacePath, err := localProjectPath(project.Slug)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = os.RemoveAll(workspacePath) })
 

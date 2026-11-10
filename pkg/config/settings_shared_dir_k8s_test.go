@@ -289,6 +289,14 @@ func TestValidateSharedDirSizes(t *testing.T) {
 	assert.NoError(t, ValidateSharedDirSize("10Gi"))
 	assert.NoError(t, ValidateSharedDirSize("1Ti"))
 	assert.Error(t, ValidateSharedDirSize("1TB"))
+	// Parity rows for the admin page's client-side check (ptone/scion#2649).
+	assert.NoError(t, ValidateSharedDirSize("500Mi"))
+	assert.NoError(t, ValidateSharedDirSize("1G"))
+	assert.Error(t, ValidateSharedDirSize("10GB"))
+	assert.Error(t, ValidateSharedDirSize("abc"))
+	assert.NoError(t, ValidateSharedDirSize("1e-400"))
+	assert.Error(t, ValidateSharedDirSize("0e5"))
+	assert.Error(t, ValidateSharedDirSize("0.000"))
 	for _, v := range []string{"0", "-1Gi"} {
 		err := ValidateSharedDirSize(v)
 		require.Error(t, err, v)

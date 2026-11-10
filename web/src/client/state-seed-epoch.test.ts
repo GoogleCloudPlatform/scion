@@ -111,7 +111,9 @@ describe('W3 seed epoch', () => {
     sm.setScope({ type: 'dashboard' });
 
     // A full seed (e.g. from agents.ts) establishes full fields.
-    sm.seedAgents([{ id: 'a1', name: 'A1', phase: 'running', labels: { env: 'prod' } } as Agent]);
+    sm.seedAgents([
+      { id: 'a1', name: 'A1', phase: 'running', labels: { env: 'prod' } } as unknown as Agent,
+    ]);
 
     // A later compact seed (e.g. from the graph drain) only carries a subset.
     sm.seedAgents([{ id: 'a1', name: 'A1', phase: 'stopped' } as Agent], { partial: true });
@@ -124,7 +126,9 @@ describe('W3 seed epoch', () => {
     const sm = new StateManager();
     sm.setScope({ type: 'dashboard' });
 
-    sm.seedAgents([{ id: 'a1', name: 'A1', phase: 'running', labels: { env: 'prod' } } as Agent]);
+    sm.seedAgents([
+      { id: 'a1', name: 'A1', phase: 'running', labels: { env: 'prod' } } as unknown as Agent,
+    ]);
     sm.seedAgents([{ id: 'a1', name: 'A1', phase: 'stopped' } as Agent]);
 
     expect(sm.getAgent('a1')?.labels).toBeUndefined();
@@ -268,7 +272,9 @@ describe('W3 seed epoch', () => {
     sm.setScope({ type: 'dashboard' });
 
     // A fuller seed already established full fields for this ID.
-    sm.seedAgents([{ id: 'a1', name: 'A1', phase: 'running', labels: { env: 'prod' } } as Agent]);
+    sm.seedAgents([
+      { id: 'a1', name: 'A1', phase: 'running', labels: { env: 'prod' } } as unknown as Agent,
+    ]);
 
     const token = sm.beginSeedEpoch();
     // SSE delivers a fresher update during the compact drain's fetch.
@@ -461,7 +467,7 @@ describe('W3 seed epoch', () => {
     const token = sm.beginSeedEpoch();
     emit(sm, 'agent.a1.ports', { ports: [{ ...port }] }); // no-op against live state (fresh array, same values)
 
-    sm.seedAgents([{ id: 'a1', name: 'A1', exposedPorts: [] } as Agent], { token });
+    sm.seedAgents([{ id: 'a1', name: 'A1', exposedPorts: [] } as unknown as Agent], { token });
 
     expect(sm.getAgent('a1')?.exposedPorts).toEqual([port]);
   });

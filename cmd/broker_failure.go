@@ -116,6 +116,8 @@ func brokerFailureCategory(bf brokerFailure) string {
 		return "workspace storage is not configured for the runtime broker"
 	case "conflict":
 		return "the agent is in a conflicting state on the runtime broker"
+	case api.BrokerErrCodeReloadUnconfirmed:
+		return api.ReloadUnconfirmedMessage
 	case api.BrokerErrCodeLocalWorktreeRefused:
 		// The broker's reason is built from fixed templates that name the
 		// cause and the fix, filled in with paths, remotes (shown without

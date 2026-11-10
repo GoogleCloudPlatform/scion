@@ -46,8 +46,14 @@ type DeliveryEnvelope struct {
 	Metadata     map[string]string `json:"metadata,omitempty"`
 	Urgent       bool              `json:"urgent,omitempty"`
 	Attachments  []string          `json:"attachments,omitempty"`
-	ReplyTo      *string           `json:"reply_to,omitempty"`      // msg ID
-	ReplyContext string            `json:"reply_context,omitempty"` // first 32 chars of replied-to message
+	// AttachmentMounts names, for each entry of Attachments that is a path
+	// in a shared dir (for example a scratchpad projection), that shared
+	// dir, keyed by the path: the path is valid only in a container that
+	// mounts it. Entries not listed are in the recipient's own home or
+	// workspace (ptone/scion#5827).
+	AttachmentMounts map[string]string `json:"attachment_mounts,omitempty"`
+	ReplyTo          *string           `json:"reply_to,omitempty"`      // msg ID
+	ReplyContext     string            `json:"reply_context,omitempty"` // first 32 chars of replied-to message
 }
 
 // DeliveryOptions captures transport-level options that are not part of the
@@ -111,6 +117,12 @@ func FormatNewDelivery(
 	// Map attachments to plain paths.
 	for _, a := range msg.Attachments {
 		env.Attachments = append(env.Attachments, a.Path)
+		if a.Mount != "" {
+			if env.AttachmentMounts == nil {
+				env.AttachmentMounts = make(map[string]string)
+			}
+			env.AttachmentMounts[a.Path] = a.Mount
+		}
 	}
 
 	// Promote RE-to from metadata to top-level reply_context.

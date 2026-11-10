@@ -69,6 +69,8 @@ import { DeletionLeaseController } from './deletion-badge.js';
 import { getMessageModeDisplay, getDenialMessage } from '../../shared/message-mode.js';
 import type { MessageMode } from '../../shared/types.js';
 import './quick-message-dialog.js';
+import { agentBadges } from './agent-badges.js';
+import { AGENT_BADGES_FLAG, isFeatureEnabled } from '../../utils/feature-flags.js';
 import { terminalHref } from '../../client/open-terminal.js';
 import {
   READINESS_MARKS,
@@ -540,6 +542,25 @@ export class ScionAgentTreeView extends LitElement {
       overflow: hidden;
       text-overflow: ellipsis;
       padding-right: 20px; /* clearance for mode icon */
+    }
+
+    /*
+     * Agent badges (web.agent_badges): the vendor mark and size chip sit
+     * before the name on the name line. They are 16 px tall, under the
+     * name's line height, so the fixed 180x76 card keeps its layout; the
+     * name truncates sooner instead.
+     */
+    .node .name-row {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      min-width: 0;
+      padding-right: 20px; /* clearance for mode icon */
+    }
+
+    .node .name-row .name {
+      min-width: 0;
+      padding-right: 0;
     }
 
     .node:hover .name {
@@ -1178,6 +1199,8 @@ export class ScionAgentTreeView extends LitElement {
 
   override render() {
     const agents = this.agents;
+    // Read once per render, not per node (web.agent_badges, ptone/scion#5503).
+    const badgesOn = isFeatureEnabled(AGENT_BADGES_FLAG);
     if (agents.length === 0) {
       // An empty graph is ready once its empty state is on screen.
       if (readinessMarkPending(READINESS_MARKS.graph)) {
@@ -1322,7 +1345,7 @@ export class ScionAgentTreeView extends LitElement {
           ${repeat(
             nodes,
             (n) => n.agent.id,
-            (n) => this.renderNode(n, related, hiddenCounts, agentById)
+            (n) => this.renderNode(n, related, hiddenCounts, agentById, badgesOn)
           )}
         </div>
         <div class="zoom-controls">
@@ -1455,7 +1478,8 @@ export class ScionAgentTreeView extends LitElement {
     n: PositionedNode,
     related: Set<string> | null,
     hiddenCounts: Map<string, number>,
-    agentById: Map<string, Agent>
+    agentById: Map<string, Agent>,
+    badgesOn: boolean
   ) {
     // Resolve the live agent object by ID rather than trusting n.agent: when
     // the layout came from cache (#2388), n.agent may still be the object
@@ -1507,7 +1531,11 @@ export class ScionAgentTreeView extends LitElement {
                 ><sl-icon name="diagram-3"></sl-icon> ancestor not loaded</span
               >`
             : nothing}
-          <span class="name">${agent.name}</span>
+          ${badgesOn
+            ? html`<span class="name-row"
+                >${agentBadges(agent)}<span class="name">${agent.name}</span></span
+              >`
+            : html`<span class="name">${agent.name}</span>`}
           <span class="badges">
             ${agentStatusBadge(agent, { status, size: 'small' })}
             <scion-deletion-badge

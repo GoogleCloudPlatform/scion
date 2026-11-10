@@ -16,7 +16,9 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -111,7 +113,7 @@ profiles:
   endpoint: "http://localhost:9810"
 `), 0644)
 
-	// Write a dev-token file so the token resolution finds it
+	// A dev-token file on the host. No start ever hands it to the agent.
 	_ = os.WriteFile(filepath.Join(globalScionDir, "dev-token"), []byte("scion-dev-test-token-abc"), 0644)
 
 	// Capture the RunConfig
@@ -157,13 +159,9 @@ profiles:
 		t.Error("expected SCION_AUTH_TOKEN to NOT be in container env (should be in token file)")
 	}
 
-	// Verify the token was written to the agent home token file
-	tokenData, err := os.ReadFile(filepath.Join(capturedConfig.HomeDir, ".scion", "scion-token"))
-	if err != nil {
-		t.Fatalf("failed to read token file: %v", err)
-	}
-	if got := strings.TrimSpace(string(tokenData)); got != "scion-dev-test-token-abc" {
-		t.Errorf("token file = %q, want %q", got, "scion-dev-test-token-abc")
+	// The host dev token is not written to the agent's token file.
+	if _, err := os.Stat(filepath.Join(capturedConfig.HomeDir, ".scion", "scion-token")); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("agent token file: stat err = %v, want not exist (the host dev token never reaches an agent)", err)
 	}
 }
 
@@ -206,7 +204,7 @@ profiles:
 	_ = os.MkdirAll(projectScionDir, 0755)
 	_ = os.WriteFile(filepath.Join(projectScionDir, "settings.yaml"), []byte(`hub:
   enabled: true
-  endpoint: "http://project-setting:9810"
+  endpoint: "https://project-setting:9810"
 `), 0644)
 
 	// Capture the RunConfig
@@ -228,7 +226,7 @@ profiles:
 		ProjectPath: projectScionDir,
 		NoAuth:      true,
 		Env: map[string]string{
-			"SCION_HUB_ENDPOINT": "http://broker-dispatch:9810",
+			"SCION_HUB_ENDPOINT": "https://broker-dispatch:9810",
 		},
 	})
 	if err != nil {
@@ -244,8 +242,8 @@ profiles:
 	}
 
 	// Broker-dispatched endpoint should be preserved, not overwritten by project settings
-	if got := envMap["SCION_HUB_ENDPOINT"]; got != "http://broker-dispatch:9810" {
-		t.Errorf("SCION_HUB_ENDPOINT = %q, want %q (explicit should win over project settings)", got, "http://broker-dispatch:9810")
+	if got := envMap["SCION_HUB_ENDPOINT"]; got != "https://broker-dispatch:9810" {
+		t.Errorf("SCION_HUB_ENDPOINT = %q, want %q (explicit should win over project settings)", got, "https://broker-dispatch:9810")
 	}
 }
 
@@ -259,7 +257,7 @@ func TestBuildAgentEnv_EnvKeyScionHubEndpointOverride(t *testing.T) {
 				Endpoint: "https://hub-endpoint.example.com",
 			},
 			Env: map[string]string{
-				"SCION_HUB_ENDPOINT": "http://host.docker.internal:8080",
+				"SCION_HUB_ENDPOINT": "https://host.docker.internal:8080",
 			},
 		}
 
@@ -295,11 +293,11 @@ func TestBuildAgentEnv_EnvKeyScionHubEndpointOverride(t *testing.T) {
 		}
 
 		// The env section value should be the final winner
-		if got := envMap["SCION_HUB_ENDPOINT"]; got != "http://host.docker.internal:8080" {
-			t.Errorf("SCION_HUB_ENDPOINT = %q, want %q (env section should win)", got, "http://host.docker.internal:8080")
+		if got := envMap["SCION_HUB_ENDPOINT"]; got != "https://host.docker.internal:8080" {
+			t.Errorf("SCION_HUB_ENDPOINT = %q, want %q (env section should win)", got, "https://host.docker.internal:8080")
 		}
-		if got := envMap["SCION_HUB_URL"]; got != "http://host.docker.internal:8080" {
-			t.Errorf("SCION_HUB_URL = %q, want %q (env section should win)", got, "http://host.docker.internal:8080")
+		if got := envMap["SCION_HUB_URL"]; got != "https://host.docker.internal:8080" {
+			t.Errorf("SCION_HUB_URL = %q, want %q (env section should win)", got, "https://host.docker.internal:8080")
 		}
 	})
 
@@ -451,7 +449,7 @@ profiles:
 		_ = os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte(`{
 			"harness": "gemini",
 			"hub": {
-				"endpoint": "http://agent-hub:9810"
+				"endpoint": "https://agent-hub:9810"
 			}
 		}`), 0644)
 
@@ -497,7 +495,7 @@ profiles:
 		_ = os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte(`{
 			"harness": "gemini",
 			"env": {
-				"SCION_HUB_ENDPOINT": "http://host.docker.internal:8080"
+				"SCION_HUB_ENDPOINT": "https://host.docker.internal:8080"
 			}
 		}`), 0644)
 
@@ -585,7 +583,7 @@ profiles:
 	_ = os.MkdirAll(projectScionDir, 0755)
 	_ = os.WriteFile(filepath.Join(projectScionDir, "settings.yaml"), []byte(`hub:
   enabled: true
-  endpoint: "http://project-settings:9810"
+  endpoint: "https://project-settings:9810"
 `), 0644)
 
 	// Create agent with both hub.endpoint (priority 2) and
@@ -595,10 +593,10 @@ profiles:
 	_ = os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte(`{
 		"harness": "gemini",
 		"hub": {
-			"endpoint": "http://hub-endpoint-field:9810"
+			"endpoint": "https://hub-endpoint-field:9810"
 		},
 		"env": {
-			"SCION_HUB_ENDPOINT": "http://host.docker.internal:8080"
+			"SCION_HUB_ENDPOINT": "https://host.docker.internal:8080"
 		}
 	}`), 0644)
 
@@ -636,11 +634,11 @@ profiles:
 
 	// The env section value (priority 3) should be the final winner,
 	// overriding both project settings (priority 1) and hub.endpoint (priority 2)
-	if got := envMap["SCION_HUB_ENDPOINT"]; got != "http://host.docker.internal:8080" {
-		t.Errorf("SCION_HUB_ENDPOINT = %q, want %q (env section should override all)", got, "http://host.docker.internal:8080")
+	if got := envMap["SCION_HUB_ENDPOINT"]; got != "https://host.docker.internal:8080" {
+		t.Errorf("SCION_HUB_ENDPOINT = %q, want %q (env section should override all)", got, "https://host.docker.internal:8080")
 	}
-	if got := envMap["SCION_HUB_URL"]; got != "http://host.docker.internal:8080" {
-		t.Errorf("SCION_HUB_URL = %q, want %q (env section should override all)", got, "http://host.docker.internal:8080")
+	if got := envMap["SCION_HUB_URL"]; got != "https://host.docker.internal:8080" {
+		t.Errorf("SCION_HUB_URL = %q, want %q (env section should override all)", got, "https://host.docker.internal:8080")
 	}
 }
 
@@ -651,6 +649,10 @@ profiles:
 // env.SCION_HUB_ENDPOINT to creator-controlled values distinct from the
 // caller-provided one, so a test can assert neither ever reaches
 // TrustedHubEndpoint.
+//
+// Non-loopback hub endpoints in these tests use https: on the mock runtime
+// Start refuses a plaintext hub endpoint that is not loopback
+// (checkAgentHubTransport).
 func setupTrustedHubEndpointTestProject(t *testing.T, agentName, agentLevelHubEndpoint, templateEnvHubEndpoint string) (projectScionDir string) {
 	t.Helper()
 	tmpDir := t.TempDir()
@@ -676,7 +678,7 @@ func setupTrustedHubEndpointTestProject(t *testing.T, agentName, agentLevelHubEn
 	projectDir := filepath.Join(tmpDir, "project")
 	projectScionDir = filepath.Join(projectDir, ".scion")
 	_ = os.MkdirAll(projectScionDir, 0755)
-	_ = os.WriteFile(filepath.Join(projectScionDir, "settings.yaml"), []byte("hub:\n  enabled: true\n  endpoint: \"http://project-settings:9810\"\n"), 0644)
+	_ = os.WriteFile(filepath.Join(projectScionDir, "settings.yaml"), []byte("hub:\n  enabled: true\n  endpoint: \"https://project-settings:9810\"\n"), 0644)
 
 	agentDir := filepath.Join(projectScionDir, "agents", agentName)
 	_ = os.MkdirAll(filepath.Join(agentDir, "home"), 0755)
@@ -691,12 +693,14 @@ func setupTrustedHubEndpointTestProject(t *testing.T, agentName, agentLevelHubEn
 // path directly (not just substrateEgressHostnames), so that capturing
 // callerHubEndpoint anywhere other than the top of Start — in particular,
 // after the agent-level Hub-config override applies — fails one of these
-// cases.
+// cases. The broker-mode cases are hub-dispatched starts, so each carries a
+// made-up hub-issued token in HubIssuedToken (a start without one fails, see
+// TestStartHubCredentialIsHubIssuedOnly).
 func TestStartTrustedHubEndpoint(t *testing.T) {
 	const (
-		brokerHubEndpoint      = "http://broker-hub:9810"
-		agentLevelHubEndpoint  = "http://169.254.169.254"
-		templateEnvHubEndpoint = "http://host.docker.internal:8080"
+		brokerHubEndpoint      = "https://broker-hub:9810"
+		agentLevelHubEndpoint  = "https://169.254.169.254"
+		templateEnvHubEndpoint = "https://host.docker.internal:8080"
 	)
 
 	t.Run("broker opts.Env hub is trusted", func(t *testing.T) {
@@ -719,6 +723,7 @@ func TestStartTrustedHubEndpoint(t *testing.T) {
 			NoAuth:             true,
 			Env:                map[string]string{"SCION_HUB_ENDPOINT": brokerHubEndpoint},
 			TrustedHubEndpoint: brokerHubEndpoint,
+			HubIssuedToken:     fakeHubIssuedToken,
 		})
 		if err != nil {
 			t.Fatalf("Start failed: %v", err)
@@ -748,6 +753,7 @@ func TestStartTrustedHubEndpoint(t *testing.T) {
 			NoAuth:             true,
 			Env:                map[string]string{"SCION_HUB_ENDPOINT": brokerHubEndpoint},
 			TrustedHubEndpoint: brokerHubEndpoint,
+			HubIssuedToken:     fakeHubIssuedToken,
 		})
 		if err != nil {
 			t.Fatalf("Start failed: %v", err)
@@ -777,6 +783,7 @@ func TestStartTrustedHubEndpoint(t *testing.T) {
 			NoAuth:             true,
 			Env:                map[string]string{"SCION_HUB_ENDPOINT": brokerHubEndpoint},
 			TrustedHubEndpoint: brokerHubEndpoint,
+			HubIssuedToken:     fakeHubIssuedToken,
 		})
 		if err != nil {
 			t.Fatalf("Start failed: %v", err)
@@ -817,7 +824,10 @@ func TestStartTrustedHubEndpoint(t *testing.T) {
 			ProjectPath: projectScionDir,
 			BrokerMode:  true,
 			NoAuth:      true,
-			// No SCION_HUB_ENDPOINT in opts.Env at all.
+			// No SCION_HUB_ENDPOINT in opts.Env at all; the agent config's
+			// hub.endpoint makes it a hub-dispatched start, so it carries a
+			// hub-issued token.
+			HubIssuedToken: fakeHubIssuedToken,
 		})
 		if err != nil {
 			t.Fatalf("Start failed: %v", err)
@@ -856,7 +866,8 @@ func TestStartTrustedHubEndpoint(t *testing.T) {
 			// when every operator tier is empty — but TrustedHubEndpoint
 			// itself is left unset, as buildStartContext now does in that
 			// case.
-			Env: map[string]string{"SCION_HUB_ENDPOINT": "http://169.254.169.254"},
+			Env:            map[string]string{"SCION_HUB_ENDPOINT": "https://169.254.169.254"},
+			HubIssuedToken: fakeHubIssuedToken,
 		})
 		if err != nil {
 			t.Fatalf("Start failed: %v", err)
@@ -875,7 +886,7 @@ func TestStartTrustedHubEndpoint(t *testing.T) {
 	// other case above sets BrokerMode: true.
 	t.Run("non-broker mode: caller-supplied env hub endpoint is trusted", func(t *testing.T) {
 		projectScionDir := setupTrustedHubEndpointTestProject(t, "agent-6", agentLevelHubEndpoint, templateEnvHubEndpoint)
-		const callerHubEndpoint = "http://caller-hub:9810"
+		const callerHubEndpoint = "https://caller-hub:9810"
 		var capturedConfig runtime.RunConfig
 		mockRT := &runtime.MockRuntime{
 			ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
@@ -910,7 +921,7 @@ func TestStartTrustedHubEndpoint(t *testing.T) {
 		// opts.Env[\"SCION_HUB_ENDPOINT\"] isn't already set") before
 		// trustedHubEndpoint's fallback is ever reached.
 		projectScionDir := setupTrustedHubEndpointTestProject(t, "agent-7", "", "")
-		const projectSettingsHubEndpoint = "http://project-settings:9810" // set by setupTrustedHubEndpointTestProject's settings.yaml fixture.
+		const projectSettingsHubEndpoint = "https://project-settings:9810" // set by setupTrustedHubEndpointTestProject's settings.yaml fixture.
 		var capturedConfig runtime.RunConfig
 		mockRT := &runtime.MockRuntime{
 			ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {

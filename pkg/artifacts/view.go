@@ -15,6 +15,7 @@
 package artifacts
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
@@ -63,29 +64,53 @@ const (
 	// a share link from those of capabilities minted for a session, so
 	// neither form can be turned into the other.
 	viewLinkSigDomain = "artifact-view-link"
+
+	// viewSigDomainV2 separates versioned capability signatures (session
+	// and link-bound alike: the signed linkID field tells them apart) from
+	// the legacy ones and from any other use of the key.
+	viewSigDomainV2 = "artifact-view-v2"
+
+	// viewCapabilityV2Prefix starts every versioned capability. A legacy
+	// capability starts with a canonical artifact ID, never "v2".
+	viewCapabilityV2Prefix = "v2."
 )
 
-// viewCSP returns the Content-Security-Policy of a view response served
-// for host under capability. Scripts and styles of the bundle run, in an
-// opaque origin (sandbox without allow-same-origin); scripts, styles,
-// images, fonts and media load only from this view's own path on the hub
-// (inline scripts and styles and data: images and fonts are allowed); the
-// document cannot connect, frame, embed, submit forms, open popups or
+// viewCSP returns the Content-Security-Policy of a view response under
+// capability, whose sources are on sourceHost. Scripts and styles of the
+// bundle run, in an opaque origin (sandbox without allow-same-origin);
+// scripts, styles, images, fonts and media load only from this view's own
+// path (inline scripts and styles and data: images and fonts are allowed);
+// the document cannot connect, frame, embed, submit forms, open popups or
 // navigate the page that frames it, and only the hub may frame it.
+//
+// sourceHost comes from configuration only, never from the request (security
+// review condition 1): viewSourceHost picks the configured content host on a
+// content-host request and the hub's configured public origin otherwise.
 //
 // The source is a host-source with a path: no scheme, so it takes the
 // response's own, and a trailing '/', so it matches every file under the
-// view. A host that is not a plain host[:port] yields no source at all,
-// which blocks every load.
-func viewCSP(host, capability string) string {
+// view. A sourceHost that is not a plain host[:port] (or is empty) yields
+// no source at all, which blocks every load.
+func viewCSP(sourceHost, capability string) string {
 	src := "'none'"
-	if validCSPHost(host) {
-		src = host + RouteView + capability + "/"
+	if validCSPHost(sourceHost) {
+		src = sourceHost + RouteView + capability + "/"
 	}
 	return "sandbox allow-scripts; default-src 'none'; script-src " + src + " 'unsafe-inline'; " +
 		"style-src " + src + " 'unsafe-inline'; img-src " + src + " data:; font-src " + src + " data:; media-src " + src + "; " +
 		"connect-src 'none'; frame-src 'none'; worker-src 'none'; object-src 'none'; form-action 'none'; " +
 		"base-uri 'none'; frame-ancestors 'self'"
+}
+
+// viewSourceHost returns the host the view CSP names, from configuration
+// only: the content host when ContentHostGuard marked the request as a
+// content-host request, otherwise the hub's configured public
+// origin (Limits.PublicOrigin), or "" when neither can be named.
+func (b backend) viewSourceHost(ctx context.Context) string {
+	if h, ok := contentHostCSPHost(ctx); ok {
+		return h
+	}
+	return hubCSPHost(b.currentLimits(ctx).PublicOrigin)
 }
 
 // validCSPHost accepts host[:port] made of letters, digits, '.' and '-',
@@ -127,8 +152,9 @@ type ViewResponse struct {
 	RemoteImages bool `json:"remoteImages,omitempty"`
 }
 
-// viewMAC signs a capability. linkID is "" for a capability minted for a
-// session and the link grant's id for one bound to a share link.
+// viewMAC signs a legacy (ID-less) capability. linkID is "" for a
+// capability minted for a session and the link grant's id for one bound to
+// a share link.
 func viewMAC(key []byte, id string, seq int, exp int64, linkID string) []byte {
 	mac := hmac.New(sha256.New, key)
 	if linkID == "" {
@@ -139,15 +165,26 @@ func viewMAC(key []byte, id string, seq int, exp int64, linkID string) []byte {
 	return mac.Sum(nil)
 }
 
-// mintViewCapability returns the capability for version seq of artifact id
-// until exp: "<id>.<seq>.<exp>.<signature>".
+// viewMACv2 signs a versioned capability: the message is
+// "artifact-view-v2\n" + kid + "\n" + id, seq, exp and linkID, newline
+// separated, with linkID present (empty) for a session capability, so a
+// session capability can never be read as a link-bound one or the reverse.
+func viewMACv2(key []byte, kid, id string, seq int, exp int64, linkID string) []byte {
+	mac := hmac.New(sha256.New, key)
+	mac.Write([]byte(viewSigDomainV2 + "\n" + kid + "\n" + id + "\n" + strconv.Itoa(seq) + "\n" +
+		strconv.FormatInt(exp, 10) + "\n" + linkID))
+	return mac.Sum(nil)
+}
+
+// mintViewCapability returns the legacy capability for version seq of
+// artifact id until exp: "<id>.<seq>.<exp>.<signature>".
 func mintViewCapability(key []byte, id string, seq int, exp time.Time) string {
 	e := exp.Unix()
 	return id + "." + strconv.Itoa(seq) + "." + strconv.FormatInt(e, 10) + "." +
 		base64.RawURLEncoding.EncodeToString(viewMAC(key, id, seq, e, ""))
 }
 
-// mintLinkViewCapability returns the capability for version seq of
+// mintLinkViewCapability returns the legacy capability for version seq of
 // artifact id until exp, bound to the share link linkID:
 // "<id>.<seq>.<exp>.<linkID>.<signature>". The view route serves it only
 // while that link is unexpired and unrevoked.
@@ -155,6 +192,37 @@ func mintLinkViewCapability(key []byte, id string, seq int, exp time.Time, linkI
 	e := exp.Unix()
 	return id + "." + strconv.Itoa(seq) + "." + strconv.FormatInt(e, 10) + "." + linkID + "." +
 		base64.RawURLEncoding.EncodeToString(viewMAC(key, id, seq, e, linkID))
+}
+
+// mintViewCapabilityV2 returns the versioned capability signed by key
+// generation kid: "v2.<kid>.<id>.<seq>.<exp>.<signature>", or, bound to the
+// share link linkID, "v2.<kid>.<id>.<seq>.<exp>.<linkID>.<signature>".
+func mintViewCapabilityV2(key []byte, kid, id string, seq int, exp time.Time, linkID string) string {
+	e := exp.Unix()
+	c := viewCapabilityV2Prefix + kid + "." + id + "." + strconv.Itoa(seq) + "." + strconv.FormatInt(e, 10) + "."
+	if linkID != "" {
+		c += linkID + "."
+	}
+	return c + base64.RawURLEncoding.EncodeToString(viewMACv2(key, kid, id, seq, e, linkID))
+}
+
+// mintView signs a capability with the keys' active generation, in the
+// form the ring's emit setting selects: versioned (key ID carried) or the
+// legacy form. linkID is "" for a session capability. It fails when no key
+// may sign now (errViewIssuanceClosed): nothing is signed after the active
+// generation's sign_until.
+func mintView(keys ViewKeys, id string, seq int, exp time.Time, linkID string) (string, error) {
+	key, versioned, err := keys.issue()
+	if err != nil {
+		return "", err
+	}
+	if versioned {
+		return mintViewCapabilityV2(key.Bytes(), key.ID, id, seq, exp, linkID), nil
+	}
+	if linkID == "" {
+		return mintViewCapability(key.Bytes(), id, seq, exp), nil
+	}
+	return mintLinkViewCapability(key.Bytes(), id, seq, exp, linkID), nil
 }
 
 var errBadCapability = errors.New("invalid view capability")
@@ -167,12 +235,26 @@ type viewGrant struct {
 	linkID string
 }
 
-// parseViewCapability checks a capability and returns what it names.
-func parseViewCapability(key []byte, capability string, now time.Time) (viewGrant, error) {
-	if len(key) == 0 {
+// parseViewCapability checks a capability and returns what it names. A
+// capability starting "v2." is versioned: its key ID selects the one
+// generation that may have signed it (an unknown or retired ID refuses,
+// never trying another key). Any other capability is the legacy four- or
+// five-part form, checked against the ring's legacy readers. Every failure
+// is the same errBadCapability.
+func parseViewCapability(keys ViewKeys, capability string, now time.Time) (viewGrant, error) {
+	if !keys.configured() {
 		return viewGrant{}, errBadCapability
 	}
-	parts := strings.Split(capability, ".")
+	kid := ""
+	body := capability
+	if rest, ok := strings.CutPrefix(capability, viewCapabilityV2Prefix); ok {
+		var found bool
+		kid, body, found = strings.Cut(rest, ".")
+		if !found || !viewKeyIDPattern.MatchString(kid) {
+			return viewGrant{}, errBadCapability
+		}
+	}
+	parts := strings.Split(body, ".")
 	if (len(parts) != 4 && len(parts) != 5) || !canonicalID(parts[0]) {
 		return viewGrant{}, errBadCapability
 	}
@@ -192,7 +274,23 @@ func parseViewCapability(key []byte, capability string, now time.Time) (viewGran
 		return viewGrant{}, errBadCapability
 	}
 	sig, err := base64.RawURLEncoding.DecodeString(parts[len(parts)-1])
-	if err != nil || !hmac.Equal(sig, viewMAC(key, parts[0], seq, exp, linkID)) {
+	if err != nil {
+		return viewGrant{}, errBadCapability
+	}
+	matched := false
+	for _, k := range keys.candidates(kid) {
+		var want []byte
+		if kid == "" {
+			want = viewMAC(k.Bytes(), parts[0], seq, exp, linkID)
+		} else {
+			want = viewMACv2(k.Bytes(), kid, parts[0], seq, exp, linkID)
+		}
+		if hmac.Equal(sig, want) {
+			matched = true
+			break
+		}
+	}
+	if !matched {
 		return viewGrant{}, errBadCapability
 	}
 	t := time.Unix(exp, 0)
@@ -214,7 +312,7 @@ func (s *Service) handleMintView(w http.ResponseWriter, r *http.Request, id stri
 	if !ok {
 		return
 	}
-	if len(b.viewKey) == 0 {
+	if !b.viewKeys.configured() {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "artifact views are not configured")
 		return
 	}
@@ -229,7 +327,15 @@ func (s *Service) handleMintView(w http.ResponseWriter, r *http.Request, id stri
 		return
 	}
 	exp := time.Now().Add(ViewTTL).Truncate(time.Second)
-	capability := mintViewCapability(b.viewKey, a.ID, v.Seq, exp)
+	capability, err := mintView(b.viewKeys, a.ID, v.Seq, exp, "")
+	if err != nil {
+		// The active signing generation may not issue any more (its
+		// sign_until passed): no capability is signed, as when views are
+		// not configured.
+		s.warnViewIssuanceClosed(r)
+		writeError(w, http.StatusServiceUnavailable, "unavailable", "artifact views are not configured")
+		return
+	}
 	resp := ViewResponse{
 		URL:       RouteView + capability + "/" + escapePath(v.EntryPath),
 		ExpiresAt: exp.UTC(),
@@ -251,7 +357,7 @@ func (s *Service) handleView(w http.ResponseWriter, r *http.Request, segs []stri
 		return
 	}
 	now := time.Now()
-	vg, err := parseViewCapability(b.viewKey, segs[0], now)
+	vg, err := parseViewCapability(b.viewKeys, segs[0], now)
 	if err != nil {
 		writeNotFound(w)
 		return
@@ -293,7 +399,7 @@ func (s *Service) handleView(w http.ResponseWriter, r *http.Request, segs []stri
 	h := w.Header()
 	h.Set("Content-Type", responseContentType(f.MediaType))
 	h.Set("Content-Length", strconv.FormatInt(f.Size, 10))
-	h.Set("Content-Security-Policy", viewCSP(r.Host, segs[0]))
+	h.Set("Content-Security-Policy", viewCSP(b.viewSourceHost(ctx), segs[0]))
 	h.Set("X-Content-Type-Options", "nosniff")
 	h.Set("Referrer-Policy", "no-referrer")
 	h.Set("Cache-Control", "private, no-store")

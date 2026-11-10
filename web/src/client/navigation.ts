@@ -39,6 +39,29 @@ export function browserPath(path: string): string {
 }
 
 /**
+ * The browser URL for a full-page load of `target`. An app path (starting
+ * with a single `/`, query allowed) gets the base path through
+ * {@link browserPath}; anything else (an absolute or protocol-relative URL)
+ * is returned unchanged. Pass app paths, not paths already under the base.
+ */
+export function fullPageUrl(target: string): string {
+  return target.startsWith('/') && !target.startsWith('//') ? browserPath(target) : target;
+}
+
+/**
+ * Leave the app with a full page load of `target` (see {@link fullPageUrl}),
+ * for a target outside the client router (a server route such as
+ * `/auth/...` or `/login` after the session expired) or where the app must
+ * boot afresh (access or onboarding state changed). For an app route that
+ * needs no reload, use {@link navigateTo}. Assigning an absolute path to
+ * `window.location.href` directly drops the base path; an ESLint rule
+ * flags it (ptone/scion#5535).
+ */
+export function loadPage(target: string): void {
+  window.location.href = fullPageUrl(target);
+}
+
+/**
  * Strip the Vite base path prefix from a URL pathname so the client-side
  * router can match application routes when served behind a reverse proxy.
  * Uses import.meta.env.BASE_URL which Vite injects at build/dev time.
@@ -80,6 +103,69 @@ export function navigateTo(path: string): void {
  */
 export function pushUrl(path: string): void {
   window.history.pushState({}, '', browserPath(path));
+  noteShownEntry();
+}
+
+/**
+/**
+ * Asked before the router leaves the page on screen; returns true to let it
+ * leave (e.g. once the user has confirmed), false to stay.
+ */
+export type LeaveGuard = () => boolean;
+
+const leaveGuards = new Set<LeaveGuard>();
+
+/** The browser URL and history state of the entry on screen (see noteShownEntry). */
+let shownEntry: { url: string; state: unknown } | null = null;
+
+/**
+ * Record the current browser URL and history state as the entry on screen,
+ * for a vetoed Back/Forward to put back. The router calls it after each URL
+ * it writes or renders, and so do the URL helpers here and the terminal
+ * workspace's own URL updates.
+ */
+export function noteShownEntry(): void {
+  shownEntry = {
+    url: `${window.location.pathname}${window.location.search}${window.location.hash}`,
+    state: window.history.state,
+  };
+}
+
+/**
+ * Let a page veto leaving it through the router: a link, `navigateTo`, or
+ * browser Back/Forward. The router asks before it renders anything, and
+ * only for a navigation that would remove the page (not for the terminal
+ * workspace, which keeps it), so a veto leaves the page, and its unsaved
+ * state, as it is. A full unload is not covered; use `beforeunload` for
+ * that. Add the guard on connect and remove it, with the returned
+ * function, on disconnect.
+ */
+export function addLeaveGuard(guard: LeaveGuard): () => void {
+  leaveGuards.add(guard);
+  return () => {
+    leaveGuards.delete(guard);
+  };
+}
+
+/** For the router: whether every leave guard lets the page go, asking each in turn. */
+export function mayLeave(): boolean {
+  for (const guard of Array.from(leaveGuards)) {
+    if (!guard()) return false;
+  }
+  return true;
+}
+
+/**
+ * For the router, on a popstate that would remove the guarded page: the
+ * browser has already moved to the other entry. When a guard vetoes, push
+ * the entry that was on screen back as a new entry and return true; the
+ * router must then not render. (A vetoed Back so drops the forward entries;
+ * a vetoed Forward leaves the target entry below the restored one.)
+ */
+export function vetoPopState(): boolean {
+  if (!shownEntry || mayLeave()) return false;
+  window.history.pushState(shownEntry.state, '', shownEntry.url);
+  return true;
 }
 
 /**
@@ -92,6 +178,7 @@ export function replaceSearch(search: URLSearchParams | string): void {
   const qs = (typeof search === 'string' ? search : search.toString()).replace(/^\?/, '');
   const url = `${window.location.pathname}${qs ? `?${qs}` : ''}${window.location.hash}`;
   window.history.replaceState(window.history.state, '', url);
+  noteShownEntry();
 }
 
 /**
@@ -121,4 +208,5 @@ export function pushInPageFragment(
     '',
     `${window.location.pathname}${window.location.search}${fragment}`
   );
+  noteShownEntry();
 }

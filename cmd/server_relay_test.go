@@ -19,6 +19,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -29,8 +30,11 @@ import (
 	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/observability/hubexport"
+	"github.com/GoogleCloudPlatform/scion/pkg/observability/hubmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/relaydb"
 )
 
@@ -44,8 +48,8 @@ func relayRoleTestConfig() *config.GlobalConfig {
 	cfg.Hub.Conduit.PeerAuth = config.ConduitPeerAuthHMAC
 	cfg.Hub.Conduit.InstanceID = "relay-7"
 	cfg.Hub.Conduit.InternalListen = "127.0.0.1:0"
-	cfg.Hub.Conduit.InternalAdvertise = "http://relay-7.internal:9811"
-	cfg.Relay.HubInternalURL = "http://hub-internal.example:9811"
+	cfg.Hub.Conduit.InternalAdvertise = "https://relay-7.internal:9811"
+	cfg.Relay.HubInternalURL = "https://hub-internal.example:9811"
 	cfg.Relay.PublicURL = "https://relay-7.example.com"
 	cfg.Database.Driver, cfg.Database.URL = "sqlite", "relay.db"
 	return cfg
@@ -59,10 +63,17 @@ func TestServerRoleFlag(t *testing.T) {
 }
 
 // TestValidateRelayRoleConfig: --role relay requires peer_secret, the hub
-// internal URL, its public URL and the internal listener; errors name the
-// setting, never a value.
+// internal URL, its public URL and the internal listener, and refuses an
+// invalid platform_request_timeout like the hub (ptone/scion#5245); errors
+// name the setting, never a value.
 func TestValidateRelayRoleConfig(t *testing.T) {
+	prevCR := relayOnCloudRun
+	t.Cleanup(func() { relayOnCloudRun = prevCR })
+	relayOnCloudRun = func() bool { return false }
 	require.NoError(t, validateRelayRoleConfig(relayRoleTestConfig()))
+	declared := relayRoleTestConfig()
+	declared.Hub.PlatformRequestTimeout = "900s"
+	require.NoError(t, validateRelayRoleConfig(declared), "a valid platform_request_timeout starts the relay")
 	for name, tc := range map[string]struct {
 		mod     func(*config.GlobalConfig)
 		wantErr string
@@ -72,6 +83,8 @@ func TestValidateRelayRoleConfig(t *testing.T) {
 		"no hub internal url":  {func(c *config.GlobalConfig) { c.Relay.HubInternalURL = "" }, "server.relay.hub_internal_url is required"},
 		"no public url":        {func(c *config.GlobalConfig) { c.Relay.PublicURL = "" }, "server.relay.public_url is required"},
 		"no internal listener": {func(c *config.GlobalConfig) { c.Hub.Conduit.InternalListen = "" }, "server.hub.conduit.internal_listen is required"},
+		"timeout too short":    {func(c *config.GlobalConfig) { c.Hub.PlatformRequestTimeout = "30s" }, "server.hub.platform_request_timeout"},
+		"timeout malformed":    {func(c *config.GlobalConfig) { c.Hub.PlatformRequestTimeout = "soon" }, "server.hub.platform_request_timeout"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			cfg := relayRoleTestConfig()
@@ -115,9 +128,48 @@ func TestValidateRelayRoleConfig(t *testing.T) {
 
 			external := loaded.Hub.Conduit
 			external.RelayMode = config.ConduitRelayModeExternal
-			assert.ErrorContains(t, validateConduitPeerSecret(external, false, ""), "server.hub.conduit.peer_secret is required when server.hub.conduit.relay_mode is external")
+			assert.ErrorContains(t, validateConduitPeerSecret(external, false, "", nil), "server.hub.conduit.peer_secret is required when server.hub.conduit.relay_mode is external")
 		})
 	}
+}
+
+// TestValidateRelayRoleConfig_CloudRunSingleton (design §3.9 "Cloud Run
+// singleton"): on Cloud Run (K_SERVICE set) a relay without
+// server.relay.singleton: true fails, with an error naming the key and the
+// three instance settings; with it, or off Cloud Run, the relay starts.
+func TestValidateRelayRoleConfig_CloudRunSingleton(t *testing.T) {
+	prevCR := relayOnCloudRun
+	t.Cleanup(func() { relayOnCloudRun = prevCR })
+	for _, tc := range []struct {
+		name      string
+		cloudRun  bool
+		singleton bool
+		wantErr   bool
+	}{
+		{name: "Cloud Run without the assertion", cloudRun: true, wantErr: true},
+		{name: "Cloud Run singleton", cloudRun: true, singleton: true},
+		{name: "singleton off Cloud Run", singleton: true},
+		{name: "neither"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			relayOnCloudRun = func() bool { return tc.cloudRun }
+			cfg := relayRoleTestConfig()
+			cfg.Relay.Singleton = tc.singleton
+			err := validateRelayRoleConfig(cfg)
+			if !tc.wantErr {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			for _, want := range []string{"server.relay.singleton: true", "max_instances=1", "min_instances=1", "cpu_idle=false", "K_SERVICE"} {
+				assert.Contains(t, err.Error(), want)
+			}
+		})
+	}
+	t.Setenv("K_SERVICE", "scion-relay")
+	assert.True(t, prevCR(), "K_SERVICE set means Cloud Run")
+	t.Setenv("K_SERVICE", "")
+	assert.False(t, prevCR(), "an empty K_SERVICE is not Cloud Run")
 }
 
 // TestRunRelayRoleChecksConfigBeforeTheDatabase: an incomplete
@@ -175,11 +227,12 @@ func TestRelayServerConfigReadsRelaySettings(t *testing.T) {
 	rcfg, err := relayServerConfig(context.Background(), cfg, db)
 	require.NoError(t, err)
 	assert.Equal(t, "relay-7", rcfg.InstanceID)
-	assert.Equal(t, "http://hub-internal.example:9811", rcfg.HubInternalURL)
+	assert.Equal(t, "https://hub-internal.example:9811", rcfg.HubInternalURL)
 	assert.Equal(t, "https://relay-7.example.com", rcfg.PublicURL)
+	assert.False(t, rcfg.Singleton)
 	assert.Equal(t, "127.0.0.1:18443", rcfg.PublicListen)
 	assert.Equal(t, "127.0.0.1:0", rcfg.InternalListen)
-	assert.Equal(t, "http://relay-7.internal:9811", rcfg.Advertise(nil), "server.hub.conduit.internal_advertise")
+	assert.Equal(t, "https://relay-7.internal:9811", rcfg.Advertise(nil), "server.hub.conduit.internal_advertise")
 	assert.NotNil(t, rcfg.PeerAuth)
 	assert.Same(t, db.Settings, rcfg.Experiment)
 	assert.Nil(t, rcfg.Events, "no LISTEN source on SQLite")
@@ -274,4 +327,153 @@ func TestRelayShutdownTimeoutPadsPastTheDrainCap(t *testing.T) {
 	assert.Equal(t, relayShutdownPad, relayShutdownTimeout(0, true))
 	assert.Equal(t, 30*time.Second, relayShutdownTimeout(0, false))
 	assert.Equal(t, 30*time.Second, relayShutdownTimeout(60*time.Second, false))
+}
+
+// TestRelayMetrics_OffIsANoOp (design §3.9, v2.21.55): with metrics unset
+// or off in the relay's settings and no export project, the relay builds
+// no exporter and makes no network call: no metadata lookup is offered and
+// the exporter constructor is never called; the flush is a no-op.
+func TestRelayMetrics_OffIsANoOp(t *testing.T) {
+	prev := relayNewMeterProvider
+	t.Cleanup(func() { relayNewMeterProvider = prev })
+	built := false
+	relayNewMeterProvider = func(context.Context, string, ...hubmetrics.Option) (*sdkmetric.MeterProvider, error) {
+		built = true
+		return sdkmetric.NewMeterProvider(), nil
+	}
+	t.Setenv(hubexport.ProjectIDEnv, "")
+	off := false
+	for name, setting := range map[string]*bool{"unset": nil, "off": &off} {
+		t.Run(name, func(t *testing.T) {
+			cfg := relayRoleTestConfig()
+			cfg.Hub.Observability.MetricsEnabled = setting
+			in := relayObservabilityInputs(cfg)
+			assert.Nil(t, in.metadata, "no metadata-server lookup with metrics not on")
+			mp, flush := relayMetrics(context.Background(), cfg, "relay-7", in)
+			assert.Nil(t, mp)
+			assert.False(t, built, "no exporter is built")
+			assert.NoError(t, flush(context.Background()))
+		})
+	}
+}
+
+// TestRelayMetrics_OnBuildsTheRelayProvider: with metrics on and an export
+// project, the relay builds its provider with the hub's helper for that
+// project, and the flush shuts it down.
+func TestRelayMetrics_OnBuildsTheRelayProvider(t *testing.T) {
+	prev := relayNewMeterProvider
+	t.Cleanup(func() { relayNewMeterProvider = prev })
+	var gotProject string
+	relayNewMeterProvider = func(_ context.Context, project string, _ ...hubmetrics.Option) (*sdkmetric.MeterProvider, error) {
+		gotProject = project
+		return sdkmetric.NewMeterProvider(), nil
+	}
+	t.Setenv(hubexport.ProjectIDEnv, "")
+	on := true
+	cfg := relayRoleTestConfig()
+	cfg.Hub.Observability.MetricsEnabled = &on
+	cfg.Hub.GCPProjectID = "relay-metrics-project"
+	mp, flush := relayMetrics(context.Background(), cfg, "relay-7", relayMetricsInputs{getenv: os.Getenv})
+	require.NotNil(t, mp)
+	assert.Equal(t, "relay-metrics-project", gotProject)
+	assert.NoError(t, flush(context.Background()))
+}
+
+// TestRelayMetrics_UnsetWithAProjectExports: as for the hub (legacy rule),
+// with the switch unset an operator-set export project turns relay metrics
+// export on; only an explicit off keeps it off.
+func TestRelayMetrics_UnsetWithAProjectExports(t *testing.T) {
+	prev := relayNewMeterProvider
+	t.Cleanup(func() { relayNewMeterProvider = prev })
+	built := 0
+	relayNewMeterProvider = func(context.Context, string, ...hubmetrics.Option) (*sdkmetric.MeterProvider, error) {
+		built++
+		return sdkmetric.NewMeterProvider(), nil
+	}
+	t.Setenv(hubexport.ProjectIDEnv, "")
+	cfg := relayRoleTestConfig()
+	cfg.Hub.GCPProjectID = "relay-metrics-project"
+	mp, flush := relayMetrics(context.Background(), cfg, "relay-7", relayObservabilityInputs(cfg))
+	require.NotNil(t, mp, "unset switch with a set project: export on")
+	assert.NoError(t, flush(context.Background()))
+
+	off := false
+	cfg.Hub.Observability.MetricsEnabled = &off
+	mp, _ = relayMetrics(context.Background(), cfg, "relay-7", relayObservabilityInputs(cfg))
+	assert.Nil(t, mp, "explicitly off: no export even with a project")
+	assert.Equal(t, 1, built)
+}
+
+// TestRelayServerConfigTrustedProxies: the relay's public listener trusts
+// a forwarded protocol only from server.trusted_proxies. Not set, a proxy
+// on this host (loopback) is trusted; set to an empty list, none is; an
+// invalid or catch-all entry refuses startup.
+func TestRelayServerConfigTrustedProxies(t *testing.T) {
+	db := &relaydb.DB{Settings: &relaydb.SettingsReader{}}
+	rcfg, err := relayServerConfig(context.Background(), relayRoleTestConfig(), db)
+	require.NoError(t, err)
+	require.Len(t, rcfg.TrustedProxies, 2, "loopback is trusted when the setting is not set")
+	assert.Equal(t, "127.0.0.1/32", rcfg.TrustedProxies[0].String())
+	assert.Equal(t, "::1/128", rcfg.TrustedProxies[1].String())
+
+	explicitEmpty := relayRoleTestConfig()
+	explicitEmpty.TrustedProxiesSet = true
+	rcfg, err = relayServerConfig(context.Background(), explicitEmpty, db)
+	require.NoError(t, err)
+	assert.Empty(t, rcfg.TrustedProxies, "an explicit empty list trusts no proxy")
+
+	cfg := relayRoleTestConfig()
+	cfg.TrustedProxies = []string{"10.20.0.0/16"}
+	rcfg, err = relayServerConfig(context.Background(), cfg, db)
+	require.NoError(t, err)
+	require.Len(t, rcfg.TrustedProxies, 1)
+	assert.Equal(t, "10.20.0.0/16", rcfg.TrustedProxies[0].String())
+
+	for _, bad := range []string{"0.0.0.0/0", "not-an-ip"} {
+		cfg := relayRoleTestConfig()
+		cfg.TrustedProxies = []string{bad}
+		_, err := relayServerConfig(context.Background(), cfg, db)
+		require.Error(t, err, bad)
+		assert.Contains(t, err.Error(), config.TrustedProxiesKey)
+	}
+}
+
+// TestRelayServerConfigTrustedProxies_ParityWithHub: the relay resolves
+// server.trusted_proxies with the same helper the hub's config feeds
+// (config.TransportTrustedProxies; hub.New is checked against it in
+// pkg/hub), so both trust the same proxies for the same settings.
+func TestRelayServerConfigTrustedProxies_ParityWithHub(t *testing.T) {
+	db := &relaydb.DB{Settings: &relaydb.SettingsReader{}}
+	for name, tc := range map[string]struct {
+		list []string
+		set  bool
+	}{
+		"not set":        {},
+		"explicit empty": {set: true},
+		"listed":         {list: []string{"10.20.0.0/16", "::1"}, set: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := relayRoleTestConfig()
+			cfg.TrustedProxies, cfg.TrustedProxiesSet = tc.list, tc.set
+			rcfg, err := relayServerConfig(context.Background(), cfg, db)
+			require.NoError(t, err)
+			want, _, err := config.TransportTrustedProxies(tc.list, tc.set)
+			require.NoError(t, err)
+			assert.Equal(t, ipNetStrings(want), ipNetStrings(rcfg.TrustedProxies), "relay")
+
+			sc := buildHubServerConfig(cfg, "", "", nil, false, "", nil)
+			assert.Equal(t, tc.set, sc.TransportTrustedProxiesSet, "the hub gets whether the setting is set")
+			hubNets, _, err := config.TransportTrustedProxies(sc.TransportTrustedProxies, sc.TransportTrustedProxiesSet)
+			require.NoError(t, err)
+			assert.Equal(t, ipNetStrings(want), ipNetStrings(hubNets), "hub")
+		})
+	}
+}
+
+func ipNetStrings(nets []*net.IPNet) []string {
+	out := make([]string, 0, len(nets))
+	for _, n := range nets {
+		out = append(out, n.String())
+	}
+	return out
 }

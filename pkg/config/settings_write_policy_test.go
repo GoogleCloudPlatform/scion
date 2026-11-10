@@ -196,11 +196,11 @@ func TestValidateSettingWrite(t *testing.T) {
 		assert.NoError(t, ValidateSettingWrite(key, true), key)
 	}
 	// Writable keys, including ones that only look close to a rejected
-	// one, and hub_connections.* (left to UpdateSetting's internal callers).
+	// one.
 	for _, key := range []string{
 		"active_profile", "hub.endpoint", "hub.brokerToken", "hub.brokerId",
 		"project_id", "hub.project_id", "hub.tokenx", "bucket", "server.authx",
-		"hub_connections.prod.endpoint",
+		"hub_connectionsx",
 	} {
 		for _, global := range []bool{true, false} {
 			assert.NoError(t, ValidateSettingWrite(key, global), key)
@@ -208,16 +208,76 @@ func TestValidateSettingWrite(t *testing.T) {
 	}
 }
 
-// TestValidateConfigSetKey checks that "config set" also rejects
-// hub_connections.*, which UpdateSetting itself accepts.
-func TestValidateConfigSetKey(t *testing.T) {
+// TestValidateSettingWrite_HubConnections checks that hub_connections and
+// every key under it are refused at every layer: no writer stores them
+// (ptone/scion#3493). A key that only starts with the same letters is not.
+func TestValidateSettingWrite_HubConnections(t *testing.T) {
 	for _, global := range []bool{true, false} {
-		assertNotWritable(t, ValidateConfigSetKey("hub_connections.prod.endpoint", global), "hub_connections.prod.endpoint")
-		assertNotWritable(t, ValidateConfigSetKey("hub.token", global), "hub.token")
-		assert.NoError(t, ValidateConfigSetKey("hub.endpoint", global))
+		for _, key := range []string{"hub_connections", "hub_connections.prod.endpoint", "hub_connections.prod", "hub_connections.prod.other"} {
+			assertNotWritable(t, ValidateSettingWrite(key, global), key)
+		}
+		assert.NotErrorIs(t, ValidateSettingWrite("hub_connectionsx", global), ErrSettingNotWritable)
+		assert.NoError(t, ValidateSettingWrite("hub.endpoint", global))
 	}
-	assertNotWritable(t, ValidateConfigSetKey("server.auth.email", false), "server.auth.email")
-	assert.NoError(t, ValidateConfigSetKey("server.auth.email", true))
+	assertNotWritable(t, ValidateSettingWrite("server.auth.email", false), "server.auth.email")
+	assert.NoError(t, ValidateSettingWrite("server.auth.email", true))
+}
+
+// unknownGlobalOnlyKeys are server.auth keys that no writer accepts. They
+// are refused as unknown at both layers, with no hint to use --global
+// (ptone/scion#5481).
+var unknownGlobalOnlyKeys = []string{
+	"server.auth.dev_mode", "server.auth.authorized_domains", "server.auth.dev_token",
+}
+
+func assertUnknownKey(t *testing.T, err error, key string) {
+	t.Helper()
+	require.Error(t, err, key)
+	assert.NotErrorIs(t, err, ErrSettingNotWritable, key)
+	assert.Contains(t, err.Error(), "unknown or complex setting key: "+key)
+	assert.NotContains(t, err.Error(), "--global", key)
+	assert.NotContains(t, err.Error(), writePolicySecret, key)
+}
+
+func TestValidateSettingWrite_UnknownGlobalOnlyKeys(t *testing.T) {
+	for _, key := range unknownGlobalOnlyKeys {
+		for _, global := range []bool{true, false} {
+			assertUnknownKey(t, ValidateSettingWrite(key, global), key)
+		}
+	}
+}
+
+// config set and config unset of such a key fail the same way at either
+// layer, before any settings file is read or changed.
+func TestUpdateAndUnsetSetting_UnknownGlobalOnlyKeys(t *testing.T) {
+	for _, fx := range writePolicyFixtures {
+		for _, key := range unknownGlobalOnlyKeys {
+			for _, global := range []bool{false, true} {
+				name := fx.name + "/" + key + "/project"
+				if global {
+					name = fx.name + "/" + key + "/global"
+				}
+				t.Run(name, func(t *testing.T) {
+					home := t.TempDir()
+					t.Setenv("HOME", home)
+					dir := filepath.Join(home, "proj", ".scion")
+					if global {
+						dir = filepath.Join(home, ".scion")
+					}
+					require.NoError(t, os.MkdirAll(dir, 0755))
+					if fx.file != "" {
+						require.NoError(t, os.WriteFile(filepath.Join(dir, fx.file), []byte(fx.content), 0644))
+					}
+					before := dirSnapshot(t, dir)
+
+					assertUnknownKey(t, UpdateSetting(dir, key, writePolicySecret, global), key)
+					_, err := UnsetSetting(dir, key, global)
+					assertUnknownKey(t, err, key)
+					assert.Equal(t, before, dirSnapshot(t, dir), "a rejected write changed the settings directory")
+				})
+			}
+		}
+	}
 }
 
 // TestSettingNotWritableError_Reasons checks that every rejected key has a

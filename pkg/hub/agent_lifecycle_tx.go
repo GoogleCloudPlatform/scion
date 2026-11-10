@@ -19,6 +19,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -157,11 +159,17 @@ func (s *Server) agentFinalizeHook(ctx context.Context, tx store.Store, a *store
 	actor := auditActorFromContext(ctx)
 	switch mode {
 	case store.DeletionFinalizeSoft:
-		return s.softDeleteAgentTx(ctx, tx, a, actor)
+		if err := s.softDeleteAgentTx(ctx, tx, a, actor); err != nil {
+			return err
+		}
 	case store.DeletionFinalizeHard:
-		return s.hardDeleteAgentTx(ctx, tx, a, actor)
+		if err := s.hardDeleteAgentTx(ctx, tx, a, actor); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("agent finalize: %w: mode %q", store.ErrInvalidInput, mode)
 	}
-	return fmt.Errorf("agent finalize: %w: mode %q", store.ErrInvalidInput, mode)
+	return recordUserDeletionAgentStoppedTx(ctx, tx, a)
 }
 
 // lifecycleAudit builds a lifecycle mutation audit record for agentID with
@@ -535,6 +543,18 @@ type reincarnateAuthority struct {
 	// did not pass that gate, is the plan warning; the agent keeps its
 	// existing assignment.
 	AssignmentNotRecorded string
+	// OwnerMaterialNotice, when set, is the plan warning that the owner's
+	// unshared material will not be delivered after this re-record
+	// (ownerMaterialReRecordNotice).
+	OwnerMaterialNotice string
+	// OwnerReclaim is set when the re-record is an owner reclaim
+	// (reincarnateOwnerReclaims). The claim audit then reports
+	// owner_reclaim and the replaced edges' delegators (prior_delegator).
+	OwnerReclaim bool
+	// RuntimeReadNotice, when set, is the plan warning that runtime reads
+	// of the owner's shared secrets are refused after this re-record
+	// (runtimeReadReRecordNotice).
+	RuntimeReadNotice string
 }
 
 // reincarnateClaimTx claims agent for a reincarnation in one transaction.
@@ -554,10 +574,14 @@ type reincarnateAuthority struct {
 // Any error rolls everything back, so nothing is claimed.
 //
 // Without sa the existing assignment stays in force: the agent ID and its
-// account do not change. If the reincarnation later fails and restores the
-// previous configuration, a replaced assignment is not restored with it, so
-// the restored account differs from the active assignment and its use
-// is refused until the account is assigned again.
+// account do not change. When sa names another account than the agent's
+// active row (or the agent has none), the replacement is restorable: the
+// replaced row is deactivated with cause reincarnate_replaced under the
+// reincarnation ID, and the new row takes the reincarnation ID as its own
+// ID. A failure that restores the previous configuration then restores the
+// replaced row with it (restoreReincarnationAssignment). When sa names the
+// same account, the row is replaced as by any other write (sa_replaced) and
+// stays after a failure, like the re-recorded edge.
 func (s *Server) reincarnateClaimTx(ctx context.Context, agent *store.Agent, rec *store.AgentReincarnation, auth *reincarnateAuthority, sa *store.AgentServiceAccountAssignment, actor AuditActor) error {
 	if agent == nil {
 		return fmt.Errorf("%w: nil agent in reincarnateClaimTx", store.ErrInvalidInput)
@@ -589,7 +613,14 @@ func (s *Server) reincarnateClaimTx(ctx context.Context, agent *store.Agent, rec
 			return err
 		}
 		replaced := 0
+		priorDelegator := ""
 		if auth != nil {
+			if auth.OwnerReclaim {
+				priorDelegator, err = activeDelegators(ctx, tx, row.ID)
+				if err != nil {
+					return fmt.Errorf("reincarnate: read delegation edges: %w", err)
+				}
+			}
 			n, err := tx.DeactivateDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, row.ID, store.Deactivation{
 				Cause: store.EdgeDeactivationReincarnateReplaced,
 				At:    &now,
@@ -615,10 +646,26 @@ func (s *Server) reincarnateClaimTx(ctx context.Context, agent *store.Agent, rec
 				return fmt.Errorf("reincarnate: record delegation edge: %w", err)
 			}
 		}
+		restorable := false
 		if sa != nil {
 			sa.AgentID = row.ID
 			sa.ProjectID = row.ProjectID
-			if err := tx.ReplaceAgentServiceAccountAssignment(ctx, sa); err != nil {
+			changed, err := claimChangesAssignedAccount(ctx, tx, row.ID, sa.ServiceAccountID)
+			if err != nil {
+				return fmt.Errorf("reincarnate: read service-account assignment: %w", err)
+			}
+			if changed {
+				restorable = true
+				sa.ID = rec.ID
+				err = tx.ReplaceAgentServiceAccountAssignmentWith(ctx, sa, store.Deactivation{
+					Cause: store.EdgeDeactivationReincarnateReplaced,
+					At:    &now,
+					OpID:  rec.ID,
+				})
+			} else {
+				err = tx.ReplaceAgentServiceAccountAssignment(ctx, sa)
+			}
+			if err != nil {
 				return fmt.Errorf("reincarnate: record service-account assignment: %w", err)
 			}
 		}
@@ -642,7 +689,10 @@ func (s *Server) reincarnateClaimTx(ctx context.Context, agent *store.Agent, rec
 			ReRecorded           bool   `json:"re_recorded"`
 			EdgesReplaced        int    `json:"edges_replaced"`
 			ServiceAccountRecord *bool  `json:"service_account_recorded,omitempty"`
-		}{opID, rec.ID, auth != nil, replaced, saRecorded})
+			AssignmentRestorable bool   `json:"service_account_restorable,omitempty"`
+			OwnerReclaim         bool   `json:"owner_reclaim,omitempty"`
+			PriorDelegator       string `json:"prior_delegator,omitempty"`
+		}{opID, rec.ID, auth != nil, replaced, saRecorded, restorable, auth != nil && auth.OwnerReclaim, priorDelegator})
 		if err != nil {
 			return err
 		}
@@ -656,4 +706,40 @@ func (s *Server) reincarnateClaimTx(ctx context.Context, agent *store.Agent, rec
 	}
 	*agent = row
 	return nil
+}
+
+// activeDelegators returns the delegators of agentID's active delegation
+// edges as "type:id", sorted and comma-separated ("" when it has none).
+func activeDelegators(ctx context.Context, tx store.Store, agentID string) (string, error) {
+	edges, err := tx.GetDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, agentID)
+	if err != nil {
+		return "", err
+	}
+	var out []string
+	for _, e := range edges {
+		if e.Active {
+			out = append(out, e.DelegatorType+":"+e.DelegatorID)
+		}
+	}
+	sort.Strings(out)
+	return strings.Join(out, ","), nil
+}
+
+// claimChangesAssignedAccount reports whether a reincarnation claim that
+// records an assignment for serviceAccountID changes the agent's account:
+// the agent has no active assignment, or its one active row names another
+// account. More than one active row is ambiguous and is not treated as a
+// change, so the claim replaces it as any other write does.
+func claimChangesAssignedAccount(ctx context.Context, tx store.Store, agentID, serviceAccountID string) (bool, error) {
+	rows, err := tx.GetActiveAgentServiceAccountAssignments(ctx, agentID)
+	if err != nil {
+		return false, err
+	}
+	switch len(rows) {
+	case 0:
+		return true, nil
+	case 1:
+		return rows[0].ServiceAccountID != serviceAccountID, nil
+	}
+	return false, nil
 }

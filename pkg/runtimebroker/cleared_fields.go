@@ -19,11 +19,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
+	"log/slog"
 	"path"
-	"path/filepath"
 	"strings"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent"
+	"github.com/GoogleCloudPlatform/scion/pkg/agenthome"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
@@ -49,21 +50,26 @@ import (
 // and the clear takes effect at the agent's next reincarnation.
 //
 // Env keys (env.KEY) are always removed: a template's env is applied at
-// start as a final fill, whichever way the template resolves.
-func (s *Server) applyClearedFields(ctx context.Context, merged *api.ScionConfig, projectPath, projectDir, agentName string, paths []string) {
+// start as a final fill, whichever way the template resolves. Resources
+// sub-fields (api.ResourceSubPaths) are always emptied too: templates never
+// supply resources (config.StripTemplateEnvironmentKeys), so the chain has
+// nothing to restore, and the per-start resource tiers fill the emptied
+// sub-field (ptone/scion#5676).
+func (s *Server) applyClearedFields(ctx context.Context, merged *api.ScionConfig, projectPath, projectDir, agentDir, agentName string, paths []string) {
 	if len(paths) == 0 {
 		return
 	}
-	inherit, err := s.clearedFieldsInheritance(ctx, projectPath, projectDir, agentName)
+	inherit, err := s.clearedFieldsInheritance(ctx, projectPath, projectDir, agentDir, agentName)
 	if err != nil {
 		var kept, applied []string
 		for _, p := range paths {
-			if api.ClearableConfigPath(p) && !strings.HasPrefix(p, api.ClearedEnvPathPrefix) {
+			if api.ClearableConfigPath(p) && !strings.HasPrefix(p, api.ClearedEnvPathPrefix) && !api.IsResourceSubPath(p) {
 				kept = append(kept, p)
 				continue
 			}
-			// Env keys are applied; paths ApplyClearedFields rejects still
-			// reach it, so they are reported as ignored.
+			// Env keys and resources sub-fields never take a value from
+			// the chain, so they are applied; paths ApplyClearedFields
+			// rejects still reach it, so they are reported as ignored.
 			applied = append(applied, p)
 		}
 		if len(kept) > 0 {
@@ -78,8 +84,10 @@ func (s *Server) applyClearedFields(ctx context.Context, merged *api.ScionConfig
 }
 
 // clearedFieldsInheritance resolves the template chain the agent was
-// provisioned from, as provisioning resolves it: the template agent-info.json
-// names (or the settings' default template when it names none), or, for a
+// provisioned from, as provisioning resolves it: the template the agent's
+// broker-side image provenance records (agentDir; agent-info.json's for an
+// agent provisioned before that record existed), or the settings' default
+// template when none is named, or, for a
 // template hydrated from the content-addressed cache (a TemplateHash, or a
 // content hash recorded as the name by older versions), the cached
 // directory; GetTemplateChainInProject layers the project or global
@@ -89,13 +97,17 @@ func (s *Server) applyClearedFields(ctx context.Context, merged *api.ScionConfig
 //
 // It returns the merged chain, whose values the caller copies; err is set
 // when the chain does not resolve.
-func (s *Server) clearedFieldsInheritance(ctx context.Context, projectPath, projectDir, agentName string) (*api.ScionConfig, error) {
+func (s *Server) clearedFieldsInheritance(ctx context.Context, projectPath, projectDir, agentDir, agentName string) (*api.ScionConfig, error) {
 	templateRef := "default"
+	operatorDefault := ""
 	if vs, _, _ := config.LoadEffectiveSettingsFor(ctx, projectDir); vs != nil && vs.DefaultTemplate != "" {
 		templateRef = vs.DefaultTemplate
+		operatorDefault = vs.DefaultTemplate
 	}
+	defaultRef := templateRef
 	var hash string
-	if data, err := os.ReadFile(filepath.Join(config.GetAgentHomePath(projectDir, agentName), "agent-info.json")); err == nil {
+	// Read confined to the agent home (agenthome.ReadAgentInfo).
+	if data, err := agenthome.ReadAgentInfo(config.GetAgentHomePath(projectDir, agentName)); err == nil {
 		var info api.AgentInfo
 		if json.Unmarshal(data, &info) == nil {
 			hash = info.TemplateHash
@@ -103,9 +115,30 @@ func (s *Server) clearedFieldsInheritance(ctx context.Context, projectPath, proj
 				if hash == "" {
 					hash = info.Template
 				}
-			} else if info.Template != "" {
+			} else if config.IsTemplateSlug(info.Template) {
+				// agent-info.json is agent-writable: its template is used
+				// only when it is a template slug, never as a host
+				// directory or a remote source.
 				templateRef = info.Template
+			} else if info.Template != "" {
+				// The value is not logged: the agent wrote it.
+				slog.Warn("Ignoring the template recorded in agent-info.json for cleared-field inheritance: not a template name", "agent", agentName)
 			}
+		}
+	}
+	// The template recorded in the agent's broker-side image provenance
+	// (agentDir), when it has one, decides instead, as for GetAgent; an
+	// agent provisioned before that record existed keeps agent-info.json's.
+	if tpl, tplHash, ok, err := agent.ProvisionedTemplate(agentDir); err != nil {
+		return nil, fmt.Errorf("read the agent's image provenance: %w", err)
+	} else if ok {
+		templateRef, hash = defaultRef, tplHash
+		if transfer.IsContentHash(tpl) {
+			if hash == "" {
+				hash = tpl
+			}
+		} else if tpl != "" {
+			templateRef = tpl
 		}
 	}
 	if hash != "" {
@@ -118,7 +151,13 @@ func (s *Server) clearedFieldsInheritance(ctx context.Context, projectPath, proj
 		}
 		templateRef = dir
 	}
-	chain, err := config.GetTemplateChainInProject(templateRef, projectPath)
+	var chain []*config.Template
+	var err error
+	if operatorDefault != "" && templateRef == operatorDefault {
+		chain, err = config.GetOperatorTemplateChainInProject(ctx, templateRef, projectPath)
+	} else {
+		chain, err = config.GetTemplateChainInProject(ctx, templateRef, projectPath)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("resolve template chain: %w", err)
 	}

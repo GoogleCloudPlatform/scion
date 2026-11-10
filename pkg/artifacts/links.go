@@ -92,12 +92,16 @@ type LinkInfo struct {
 	CreatedBy string    `json:"createdBy,omitempty"`
 }
 
-// CreateLinkResponse answers POST /{id}/links. URL is the only place the
-// token ever appears; it is not retrievable later.
+// CreateLinkResponse answers POST /{id}/links. URL and ShareURL are the
+// only places the token ever appears; it is not retrievable later.
 type CreateLinkResponse struct {
 	Link LinkInfo `json:"link"`
 	// URL is the hub-relative path of the link.
 	URL string `json:"url"`
+	// ShareURL is the absolute link on the hub's content host, present
+	// only when server.hub.content_url is set and valid. It is built
+	// from that setting alone, never from the request.
+	ShareURL string `json:"shareUrl,omitempty"`
 	// ClampedToArtifactExpiry is true when the link expires earlier than
 	// asked because the artifact itself expires then.
 	ClampedToArtifactExpiry bool `json:"clampedToArtifactExpiry,omitempty"`
@@ -218,7 +222,7 @@ func (s *Service) stewardAuthority(ctx context.Context, a *Artifact) string {
 	if !ok {
 		return ""
 	}
-	switch st.StewardClause(ctx, a.OwnerRef, a.ScopeRef, "", a.OrphanedAt != nil) {
+	switch st.StewardClause(ctx, a.OwnerRef, a.ScopeRef, a.SponsorRef, a.OrphanedAt != nil) {
 	case StewardClauseProjectOwner:
 		return AuthorityStewardProjectOwner
 	case StewardClauseDelegator:
@@ -352,11 +356,18 @@ func shareAuthorityOf(authority string) string {
 // capabilities fills the caller's rights on a, an artifact it can read
 // (readableArtifact checked it), into resp: CanManage (owner or admin
 // grant), CanShare (CanManage or a steward) and ShareAuthority (the steward
-// clause) from adminAuthorityWith,
+// clause) from adminAuthorityWith, CanRetire from the same authority
+// through retireAuthorityFrom (the delete route's decision),
 // CanPublish and CanReview from canWriteErr (reviewCapability), and
 // CanGrantReview from mayGrantReview (only when CanManage is false), the
 // decisions the management, write and grant routes make for the same
 // request. A failed grants read answers 500 and returns false.
+//
+// It must run only after readableArtifact: a caller that cannot read the
+// artifact gets the 404 of a missing one and learns none of these. The
+// flags are advice: each route decides again when it is called (the
+// delete route through retireAuthority), so a flag that went stale since
+// the GET never authorizes anything.
 func (s *Service) capabilities(w http.ResponseWriter, r *http.Request, b backend, a *Artifact, resp *ArtifactResponse) bool {
 	authority, ok := s.manageable(w, r, b, a)
 	if !ok {
@@ -365,6 +376,7 @@ func (s *Service) capabilities(w http.ResponseWriter, r *http.Request, b backend
 	resp.CanManage = authority == AuthorityOwner || authority == AuthorityAdminGrant
 	resp.CanShare = authority != ""
 	resp.ShareAuthority = shareAuthorityOf(authority)
+	resp.CanRetire = s.retireAuthorityFrom(r.Context(), a, authority) != ""
 	access, err := s.canWriteErr(r.Context(), b, a)
 	if err != nil {
 		writeGrantsReadFailed(w, r, err)
@@ -459,8 +471,10 @@ func (s *Service) handleCreateLink(w http.ResponseWriter, r *http.Request, id st
 	}
 	s.logLink(r, a, logActionLinkCreated, actor)
 	w.Header().Set("Referrer-Policy", "no-referrer")
+	rel := RouteShared + token
 	writeJSON(w, http.StatusCreated, CreateLinkResponse{
-		Link: linkInfo(g), URL: RouteShared + token, ClampedToArtifactExpiry: clamped,
+		Link: linkInfo(g), URL: rel, ShareURL: shareURL(b.currentLimits(r.Context()), rel),
+		ClampedToArtifactExpiry: clamped,
 	})
 }
 
@@ -577,7 +591,7 @@ func (s *Service) handleShared(w http.ResponseWriter, r *http.Request, segs []st
 		return
 	}
 	b, ok := s.backend()
-	if !ok || len(b.viewKey) == 0 {
+	if !ok || !b.viewKeys.configured() {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "artifact sharing is not configured")
 		return
 	}
@@ -628,7 +642,14 @@ func (s *Service) handleShared(w http.ResponseWriter, r *http.Request, segs []st
 	if a.ExpiresAt != nil && a.ExpiresAt.Before(exp) {
 		exp = *a.ExpiresAt
 	}
-	capability := mintLinkViewCapability(b.viewKey, a.ID, a.CurrentSeq, exp.Truncate(time.Second), g.ID)
+	capability, err := mintView(b.viewKeys, a.ID, a.CurrentSeq, exp.Truncate(time.Second), g.ID)
+	if err != nil {
+		// No key may sign now (the active generation's sign_until
+		// passed): answer as when sharing is not configured.
+		s.warnViewIssuanceClosed(r)
+		writeError(w, http.StatusServiceUnavailable, "unavailable", "artifact sharing is not configured")
+		return
+	}
 	h := w.Header()
 	h.Set("Location", RouteView+capability+"/"+escapePath(filePath))
 	h.Set("Cache-Control", "private, no-store")

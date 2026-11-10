@@ -476,8 +476,8 @@ func TestProgenyPair_SecretUseWithRecordedEdgeDeniedAtCeiling(t *testing.T) {
 	assert.Contains(t, d.Reason, "delegator "+f.projectOwnerID+" does not hold secret.use")
 }
 
-// "env_var" is served by the built-in env var adapter: the direct
-// compatibility resolver reads it, Decide serves env_var.deliver, and list
+// "env_var" is served by the built-in env var adapter: both type strings
+// map to the env var relationship, Decide serves env_var.deliver, and list
 // filtering stays closed because deliver is not a read.
 func TestProgenyPair_EnvVarMapping(t *testing.T) {
 	f := newGoldenFixture(t)
@@ -487,9 +487,7 @@ func TestProgenyPair_EnvVarMapping(t *testing.T) {
 	createAlwaysEnvVar(t, f.store, envID, f.projectOwnerID)
 
 	for _, kind := range []string{"env_var", "envvar"} {
-		got := NewRelationshipGrantResolver(f.store).CheckProgenyAccess(ctx, agent, Resource{Type: kind, ID: envID}, ActionRead)
-		assert.True(t, got.Allowed, "%s: %s", kind, got.DenyReason)
-		assert.Equal(t, RelProgenyEnvVarRead, got.RelationshipType)
+		assert.Equal(t, RelProgenyEnvVarRead, relationshipTypeForResource(kind), kind)
 	}
 
 	adapter, perms := f.authz.progenyAdapter("env_var")

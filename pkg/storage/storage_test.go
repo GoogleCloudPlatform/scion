@@ -285,41 +285,6 @@ func TestWorkspaceStorageURI(t *testing.T) {
 	}
 }
 
-func TestProjectWorkspaceStoragePath(t *testing.T) {
-	tests := []struct {
-		name      string
-		hubID     string
-		projectID string
-		want      string
-	}{
-		{
-			name:      "basic project path",
-			projectID: "project-abc",
-			want:      "workspaces/project-abc/grove-workspace",
-		},
-		{
-			name:      "with UUID project ID",
-			projectID: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-			want:      "workspaces/a1b2c3d4-e5f6-7890-abcd-ef1234567890/grove-workspace",
-		},
-		{
-			name:      "hub-scoped project path",
-			hubID:     "my-hub",
-			projectID: "project-abc",
-			want:      "hubs/my-hub/workspaces/project-abc/grove-workspace",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := ProjectWorkspaceStoragePath(tt.hubID, tt.projectID)
-			if got != tt.want {
-				t.Errorf("ProjectWorkspaceStoragePath() = %q, want %q", got, tt.want)
-			}
-		})
-	}
-}
-
 func TestDirPrefix(t *testing.T) {
 	for _, tc := range []struct{ in, want string }{
 		{"hubs/h/templates/global/foo", "hubs/h/templates/global/foo/"},
@@ -368,5 +333,41 @@ func TestLocalListPages(t *testing.T) {
 	}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("pages = %v, want %v", got, want)
+	}
+}
+
+// ResourceRootPaths covers every path ResourceStoragePath gives a template,
+// in every scope and with or without a hub namespace, and no workspace path.
+func TestResourceRootPaths(t *testing.T) {
+	under := func(p string, roots []string) bool {
+		for _, r := range roots {
+			if strings.HasPrefix(p, r+"/") {
+				return true
+			}
+		}
+		return false
+	}
+	if got := ResourceRootPaths("", ResourceKindTemplate); len(got) != 1 || got[0] != "templates" {
+		t.Fatalf("ResourceRootPaths(\"\", template) = %v, want [templates]", got)
+	}
+	if got := ResourceRootPaths("hub-1", ResourceKindTemplate); len(got) != 2 || got[0] != "templates" || got[1] != "hubs/hub-1/templates" {
+		t.Fatalf("ResourceRootPaths(hub-1, template) = %v, want [templates hubs/hub-1/templates]", got)
+	}
+	for _, hubID := range []string{"", "hub-1"} {
+		roots := ResourceRootPaths(hubID, ResourceKindTemplate)
+		for _, scope := range []string{"global", "project", "user", "weird"} {
+			if p := TemplateStoragePath(hubID, scope, "s-1", "t1"); !under(p, roots) {
+				t.Errorf("template path %q is not under %v", p, roots)
+			}
+		}
+		for _, p := range []string{
+			WorkspaceStoragePath(hubID, "p-1", "a-1"),
+			HarnessConfigStoragePath(hubID, "global", "", "h1"),
+			SkillStoragePath(hubID, "global", "", "s1"),
+		} {
+			if under(p, roots) {
+				t.Errorf("non-template path %q is under the template roots %v", p, roots)
+			}
+		}
 	}
 }

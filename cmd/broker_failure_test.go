@@ -72,6 +72,13 @@ func TestWrapHubError_BrokerFailureCategories(t *testing.T) {
 			want:   []string{"container runtime is not available on the runtime broker"},
 		},
 		{
+			name:       "reload unconfirmed",
+			status:     502,
+			body:       `{"error":{"code":"reload_unconfirmed","message":"raw broker text"}}`,
+			want:       []string{"the running agent did not confirm the reload", "broker code: reload_unconfirmed"},
+			notContain: []string{"raw broker text"},
+		},
+		{
 			name:   "non-JSON body",
 			status: 500,
 			body:   `<html>proxy error</html>`,

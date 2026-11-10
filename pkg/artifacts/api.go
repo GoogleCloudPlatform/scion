@@ -81,6 +81,12 @@ type ArtifactResponse struct {
 	// names the steward clause: "project_owner" (an owner of the home
 	// project) or "delegator" (the user who delegated to the owning agent).
 	ShareAuthority string `json:"shareAuthority,omitempty"`
+	// CanRetire, on a GET of the artifact or of one of its versions, is
+	// true when the caller may delete it: the decision DELETE /{id} makes
+	// for the same request (retireAuthority): the owner, an admin grantee,
+	// a steward, or an owner or admin of its home project (the custodian
+	// clause), each a user whose credential permits artifact.manage there.
+	CanRetire bool `json:"canRetire,omitempty"`
 	// CanPublish, on a GET of the artifact or of one of its versions, is
 	// true when the caller may publish new versions of it of any kind
 	// (edit, upload or review; see canWriteErr): the decision POST
@@ -106,6 +112,10 @@ type ArtifactResponse struct {
 	// rows. It is advisory: when the host cannot tell, it is left unset
 	// (see scopeDeleted).
 	ScopeDeleted bool `json:"scopeDeleted,omitempty"`
+	// Archive, on a GET of the artifact or of one of its versions while
+	// the archive route is on, says whether Version can be downloaded as
+	// one zip from /versions/{seq}/archive (ptone/scion#7106).
+	Archive *ArchiveInfo `json:"archive,omitempty"`
 }
 
 // CreateVersionRequest is the body of POST /api/v1/artifacts (create an
@@ -123,6 +133,12 @@ type CreateVersionRequest struct {
 	Note  string `json:"note,omitempty"`
 	// Files is the version's manifest.
 	Files []ManifestFile `json:"files"`
+	// Force skips the open-review check (ptone/scion#6849): without it a
+	// publish while reviews of the current version are open is refused
+	// with 409 review_open. Later steps of the create can still refuse it.
+	// It has no effect on a review, while the experiment is off, or when
+	// nothing is open.
+	Force bool `json:"force,omitempty"`
 }
 
 // FinalizeRequest is the optional JSON body of a finalize request.
@@ -148,6 +164,9 @@ type PendingVersionResponse struct {
 	Artifact ArtifactInfo `json:"artifact"`
 	Version  *VersionInfo `json:"version"`
 	Upload   UploadInfo   `json:"upload"`
+	// Warnings are notes about the create that did not fail it, such as a
+	// publish forced over open reviews.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // UploadInfo tells the publisher what to upload before finalizing.

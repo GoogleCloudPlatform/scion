@@ -18,6 +18,7 @@ import (
 	"os/signal"
 	"os/user"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -35,6 +36,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/autoexpose"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit/sshd"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/delegation"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks/handlers"
@@ -168,10 +170,16 @@ type InitRunOptions struct {
 	// ResolveWorkingDir, when non-nil, is called once by RunInit — directly
 	// after gitCloneWorkspace and the post-pre-start-hook ownership fixup
 	// have both run, and before anything else that starts a long-running
-	// component on the harness's behalf (sidecar services, the metadata
-	// server, the hub secret fetch) or before harnessSupervisorConfig builds
-	// the supervisor.Config — to compute the harness child's working
-	// directory in place of the static WorkingDir field above.
+	// component on the harness's behalf (sidecar services, the hub secret
+	// fetch) or before harnessSupervisorConfig builds the supervisor.Config
+	// — to compute the harness child's working directory in place of the
+	// static WorkingDir field above.
+	//
+	// The metadata server is not one of those components: it is network
+	// setup, started before the clone so that CAP_NET_ADMIN can be dropped
+	// before any workload-controlled step (see init_netadmin.go). It is
+	// therefore already running when the resolver is called, and RunInit
+	// stops it on every early return, including a resolver error.
 	//
 	// That placement is not incidental: a resolver that needs to know
 	// whether a directory is actually usable (searchable by the scion
@@ -187,7 +195,8 @@ type InitRunOptions struct {
 	//
 	// An error from ResolveWorkingDir fails RunInit closed with
 	// exitCodeNoUsableHarnessCwd: the harness is never started, sidecar
-	// services/the metadata server/the hub secret fetch never start either,
+	// services and the hub secret fetch never start either, the
+	// already-running metadata server is stopped before RunInit returns,
 	// and RunInit never falls back to WorkingDir's own zero-value "inherit
 	// this process's cwd" behaviour or to "/".
 	//
@@ -420,6 +429,10 @@ func newLifecycleManager(agentHome string, targetUID, targetGID int, requirePriv
 // process. Production code always leaves both at their default; only a test
 // replaces them.
 var runNewLifecycleManager = newLifecycleManager
+
+// harnessSecretsRoot is the in-memory volume RunInit writes staged harness
+// secrets below (hooks.DefaultHarnessDirsRoot). Only a test changes it.
+var harnessSecretsRoot = hooks.DefaultHarnessDirsRoot
 var runEnforceTokenFileOwnerChecks = hub.EnforceTokenFileOwnerChecks
 
 // RunInit runs the sciontool init logic: it sets up the container user,
@@ -454,16 +467,9 @@ func RunInit(args []string, opts InitRunOptions) int {
 	log.Info("Child command: %v", childArgs)
 	log.Info("Grace period: %s", gracePeriod)
 
-	// Log operating mode for diagnostics
-	mode := hub.OperatingMode()
-	switch mode {
-	case hub.ModeLocal:
-		log.Info("Operating mode: local (no hub configured)")
-	case hub.ModeHubConnected:
-		log.Info("Operating mode: hub-connected (endpoint: %s)", os.Getenv(hub.EnvHubEndpoint))
-	case hub.ModeHosted:
-		log.Info("Operating mode: hosted (endpoint: %s)", os.Getenv(hub.EnvHubEndpoint))
-	}
+	// The operating mode is logged once the hub client is built (see
+	// logHubOperatingMode), so a hub endpoint without a usable client is
+	// reported as such rather than as hub-connected.
 
 	// nfs shared-dir writers: clear the umask's group bits (022 -> 002) when
 	// the runtime granted shared-dir groups (SCION_SUPPLEMENTAL_GIDS checked
@@ -513,6 +519,17 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// StatusHandler is created so it writes to the correct path.
 	agentHome := resolveAgentHome(targetUID, rootless)
 
+	// Refuse, before any credential below is written or staged, a start
+	// whose required metadata protection cannot be set up in this
+	// container (see metadataProtectionPreflight). The config is read once
+	// here and reused for the metadata server start below; nothing in
+	// between changes the variables it reads.
+	metaCfg := metadata.ConfigFromEnv()
+	if err := metadataProtectionPreflight(metaCfg); err != nil {
+		reportInitFailure(agentHome, err)
+		return 1
+	}
+
 	// Move the bootstrap transport credential out of the environment and
 	// into the transport token file before anything else can inherit it.
 	// Child processes read the file (via SCION_TRANSPORT_TOKEN_FILE), which
@@ -528,7 +545,25 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// the harness. This must happen before telemetry pipeline initialization
 	// because the GCP credentials file (pointed to by SCION_OTEL_GCP_CREDENTIALS)
 	// must exist on disk when the telemetry pipeline starts.
+	//
+	// The in-memory harness directories, when the runtime names them, are
+	// created for the workload user first (a no-op unless init runs as
+	// root), so staged harness secrets and the harness outputs never fall
+	// back to the home.
+	if err := prepareHarnessMemDirs(); err != nil {
+		log.Error("Failed to prepare the in-memory harness directories: %v", err)
+		reportInitFailure(agentHome, err)
+		return 1
+	}
+	// resolvedAuthNonceThisPass is the nonce of the resolved-auth carry
+	// file this pass wrote, for the path without a re-exec.
+	resolvedAuthNonceThisPass := ""
 	if encoded := os.Getenv(stagedsecrets.EnvVar); encoded != "" {
+		// Only this pass may set the staged-token and resolved-auth
+		// markers; ones inherited from the environment are dropped before
+		// anything is staged.
+		_ = os.Unsetenv(envHubTokenStaged)
+		_ = os.Unsetenv(envResolvedAuthStaged)
 		staged, err := stagedsecrets.Decode(encoded)
 		if err != nil {
 			log.Error("Failed to decode staged secrets: %v", err)
@@ -542,9 +577,71 @@ func RunInit(args []string, opts InitRunOptions) int {
 			reportInitFailure(agentHome, fmt.Errorf("failed to write staged secrets: %w", err))
 			return 1
 		}
+		// A runtime whose instance cannot see the broker-written token file
+		// (Cloud Run) stages the hub-issued credential instead. It is
+		// written to the canonical token file, and a marker (not the
+		// credential) survives the re-exec below so this init removes the
+		// file again at exit. The errors name the step and path only.
+		if staged.HubToken != "" {
+			kept, err := stageHubToken(staged.HubToken, targetUID, targetGID)
+			staged.HubToken = ""
+			if err != nil {
+				log.Error("Failed to write the staged hub credential: %v", err)
+				reportInitFailure(agentHome, fmt.Errorf("failed to write the staged hub credential: %w", err))
+				return 1
+			}
+			if kept {
+				log.Info("Kept the existing hub credential file: it was issued after the staged one")
+			} else {
+				log.Info("Wrote the staged hub credential to the agent token file")
+			}
+			if err := os.Setenv(envHubTokenStaged, "1"); err != nil {
+				log.Warn("Could not mark the hub credential file as staged; it will not be removed at exit: %v", err)
+			}
+		}
+		// A runtime whose instance home is on shared storage (Cloud Run)
+		// stages the harness bundle's secrets in the blob. They are written
+		// only into the in-memory directory SCION_HARNESS_SECRETS_DIR names,
+		// never into the home; with no such directory the start fails.
+		// Errors name the step and file names only.
+		harnessSecretCount := len(staged.HarnessSecrets)
+		if err := stagedsecrets.WriteHarnessSecrets(harnessSecretsRoot, os.Getenv(hooks.HarnessSecretsDirEnv), staged.HarnessSecrets); err != nil {
+			staged.HarnessSecrets = nil
+			log.Error("Failed to write the staged harness secrets: %v", err)
+			reportInitFailure(agentHome, fmt.Errorf("failed to write the staged harness secrets: %w", err))
+			return 1
+		}
+		staged.HarnessSecrets = nil
+		// A runtime that delivers the instance environment in plain form
+		// (Cloud Run) stages its resolved-auth entries that are not
+		// discovery settings. They reach the harness launch below only
+		// through a file on the in-memory volume (never this process's
+		// environment, the home or shared storage); with no in-memory
+		// harness directory the start fails. Counts only are logged.
+		// The marker carries this pass's nonce (never a credential), which
+		// the carry file also holds; it survives the re-exec below, so the
+		// next pass reads this carry file and no other.
+		resolvedAuthCount := len(staged.ResolvedAuthEnv)
+		if resolvedAuthCount > 0 {
+			nonce, err := stagedsecrets.NewResolvedAuthNonce()
+			if err == nil {
+				err = stagedsecrets.WriteResolvedAuthEnv(resolvedAuthEnvRoot, os.Getenv(hooks.HarnessSecretsDirEnv), nonce, staged.ResolvedAuthEnv)
+			}
+			if err == nil {
+				err = os.Setenv(envResolvedAuthStaged, nonce)
+			}
+			if err != nil {
+				staged.ResolvedAuthEnv = nil
+				log.Error("Failed to stage the resolved-auth environment entries: %v", err)
+				reportInitFailure(agentHome, fmt.Errorf("failed to stage the resolved-auth environment entries: %w", err))
+				return 1
+			}
+			resolvedAuthNonceThisPass = nonce
+		}
+		staged.ResolvedAuthEnv = nil
 		_ = os.Unsetenv(stagedsecrets.EnvVar)
-		log.Info("Staged %d file secret(s) and %d variable secret(s)",
-			len(staged.FileSecrets), len(staged.VariableSecrets))
+		log.Info("Staged %d file secret(s), %d variable secret(s), %d harness secret(s) and %d resolved-auth env entr(ies)",
+			len(staged.FileSecrets), len(staged.VariableSecrets), harnessSecretCount, resolvedAuthCount)
 
 		// Re-exec to purge SCION_STAGED_SECRETS from /proc/1/environ.
 		//
@@ -576,6 +673,10 @@ func RunInit(args []string, opts InitRunOptions) int {
 			log.Info("RunInit embedded: skipping environ-purge re-exec")
 		}
 	} else if transportCleared {
+		// Only the staging pass above arms the staged-token and
+		// resolved-auth markers; this re-exec carries neither.
+		_ = os.Unsetenv(envHubTokenStaged)
+		_ = os.Unsetenv(envResolvedAuthStaged)
 		// Restart init with the cleaned environment, as above. On the
 		// second pass the env var is absent and the file already exists,
 		// so this branch is not taken again. Skipped for an embedded
@@ -587,6 +688,39 @@ func RunInit(args []string, opts InitRunOptions) int {
 		} else {
 			log.Info("RunInit embedded: skipping environ-purge re-exec")
 		}
+	}
+
+	// The resolved-auth entries the staging pass carried across the re-exec
+	// are read and their file removed now, before anything else runs; they
+	// go to the harness child's environment only (supervisor AuthEnv). A
+	// carry file without the marker was not written by this init and is
+	// removed unread.
+	resolvedAuthNonce := resolvedAuthNonceThisPass
+	if resolvedAuthNonce == "" {
+		resolvedAuthNonce = os.Getenv(envResolvedAuthStaged)
+	}
+	_ = os.Unsetenv(envResolvedAuthStaged)
+	resolvedAuthEnv, err := takeResolvedAuthEnv(resolvedAuthEnvRoot, resolvedAuthNonce)
+	if err != nil {
+		log.Error("Failed to read the staged resolved-auth environment entries: %v", err)
+		reportInitFailure(agentHome, fmt.Errorf("failed to read the staged resolved-auth environment entries: %w", err))
+		return 1
+	}
+
+	// The token file this init staged from the runtime's payload is removed
+	// as init returns, after the final hub reports (deferred calls run after
+	// every return path below), but only when the agent's final outcome is
+	// clean (stagedTokenCleanExit, set once the exit is classified, or when
+	// the child exits 0 within the immediate-exit check). After a
+	// crash, a limits stop or an init failure the platform restarts the
+	// container with the same payload, so the file, which the refresh loop
+	// keeps current, is kept for stageHubToken's iat rule. A file the broker
+	// bind-mounted or copied in (docker, Kubernetes) is never staged and
+	// stays as before.
+	stagedTokenCleanExit := false
+	if os.Getenv(envHubTokenStaged) == "1" {
+		_ = os.Unsetenv(envHubTokenStaged)
+		defer func() { finishStagedHubToken(stagedTokenCleanExit) }()
 	}
 
 	// Open the startup listener when the runtime asked for one (only the
@@ -619,6 +753,9 @@ func RunInit(args []string, opts InitRunOptions) int {
 	var telemetryPipeline *telemetry.Pipeline
 	telemetryCtx := context.Background()
 	if pipeline := telemetry.New(); pipeline != nil {
+		// Usage analytics outbox: the agent home, owned by the agent user
+		// (init runs as root; hooks write the same outbox as that user).
+		pipeline.SetAnalyticsOutbox(agentHome, targetUID, targetGID)
 		var telemetryCancel context.CancelFunc
 		telemetryCtx, telemetryCancel = context.WithCancel(context.Background())
 		if err := pipeline.Start(telemetryCtx); err != nil {
@@ -713,6 +850,99 @@ func RunInit(args []string, opts InitRunOptions) int {
 	_, projectHookStatErr := os.Stat(projectHookPath)
 	projectHookStaged := projectHookStatErr == nil
 
+	// Opt-in egress firewall. It runs before the metadata server start
+	// because the script resets the nat and filter tables, which would
+	// remove the interception rules installed below.
+	firewallInstalled, err := setupInitFirewall()
+	if err != nil {
+		reportInitFailure(agentHome, err)
+		return 1
+	}
+
+	// Initialize hubClient early so the metadata server's fetch callbacks
+	// can use it without data races or startup race conditions.
+	hubClient := hub.NewClient()
+	logHubOperatingMode(hubClient)
+
+	// Start GCP metadata server if configured. This runs before the git
+	// clone, pre-start hooks, sidecar services and the harness, so that
+	// the CAP_NET_ADMIN drop below happens before any of them start (see
+	// init_netadmin.go for the full ordering).
+	var metadataServer *metadata.Server
+	if metaCfg != nil {
+		// Wire up dynamic token retrieval so the metadata server always
+		// uses the latest agent token after refresh, not the startup value.
+		metaCfg.TokenFunc = func() string {
+			return hub.ReadTokenFile()
+		}
+		// Delegate GCP token fetching to the hub client so the metadata
+		// server uses the correct auth headers (X-Scion-Agent-Token) and
+		// OIDC transport layer. hubClient is created just above, before
+		// the server starts, so the closures always see it.
+		metaCfg.FetchGCPToken = func(ctx context.Context, scopes []string) (*metadata.GCPAccessTokenResponse, error) {
+			hc := hubClient
+			if hc == nil || !hc.IsConfigured() {
+				return nil, fmt.Errorf("hub client not initialized")
+			}
+			hubResp, err := hc.FetchGCPToken(ctx, scopes)
+			if err != nil {
+				return nil, err
+			}
+			return &metadata.GCPAccessTokenResponse{
+				AccessToken: hubResp.AccessToken,
+				ExpiresIn:   hubResp.ExpiresIn,
+				TokenType:   hubResp.TokenType,
+			}, nil
+		}
+		metaCfg.FetchGCPIdentityToken = func(ctx context.Context, audience string) (string, error) {
+			hc := hubClient
+			if hc == nil || !hc.IsConfigured() {
+				return "", fmt.Errorf("hub client not initialized")
+			}
+			return hc.FetchGCPIdentityToken(ctx, audience)
+		}
+		metadataServer = metadata.New(*metaCfg)
+		// Nothing long-running may outlive an early return (a failed
+		// start or drop, a clone, pre-start, overlay or working-directory
+		// failure): stop the server on every return path. Stop is
+		// idempotent, so the normal-shutdown stop below is unaffected.
+		defer runMetadataServerStop(metadataServer)
+		metaCtx := context.Background()
+		if err := runMetadataServerStart(metaCtx, metadataServer); err != nil {
+			if metaCfg.StartFailureIsFatal(err) {
+				// Fail closed: the harness must not run in block or assign
+				// mode without the metadata server and, where the runtime
+				// granted it, the interception. This is the late backstop
+				// behind metadataProtectionPreflight: it runs after staging,
+				// so the transport token file goes too, and the staged hub
+				// credential (if this init staged it) through the deferred
+				// finishStagedHubToken. File-secret targets and the
+				// harness-secrets dir stay; see removeTransportTokenOnRefusal.
+				log.Error("Failed to start metadata server (mode=%s); not starting the harness: %v", metaCfg.Mode, err)
+				reportInitFailure(agentHome, fmt.Errorf("GCP metadata server could not start in %s mode: %w", metaCfg.Mode, err))
+				removeTransportTokenOnRefusal()
+				stagedTokenCleanExit = true
+				return 1
+			}
+			log.Warn("Metadata server not started (mode=%s, host networking); continuing: %v", metaCfg.Mode, err)
+		} else {
+			log.Info("GCP metadata server started (mode=%s, port=%d)", metaCfg.Mode, metaCfg.Port)
+		}
+	}
+
+	// Network setup is complete: drop CAP_NET_ADMIN before anything else
+	// starts (clone, pre-start hooks, services, the harness). Passthrough
+	// runs no metadata server, so it drops only when the firewall was
+	// installed. The drop is required (fatal on failure) whenever init
+	// installed network controls.
+	required := firewallInstalled || (metadataServer != nil && metadataInterceptionInstalled(metadataServer))
+	if metadataServer != nil || firewallInstalled {
+		if err := dropNetAdmin(required); err != nil {
+			reportInitFailure(agentHome, err)
+			return 1
+		}
+	}
+
 	// Clone git workspace BEFORE pre-start hooks so that provisioners
 	// (e.g. antigravity) see the populated workspace rather than an empty
 	// one.  The clone depends only on environment variables and agent
@@ -765,7 +995,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 				if pathErr != nil {
 					log.Error("Cannot locate previous env overlay: %v", pathErr)
 				} else if _, statErr := os.Stat(existingOverlay); statErr == nil {
-					log.Info("WARNING: Pre-start provisioning failed but previous env overlay exists at %s, using fallback", existingOverlay)
+					log.Warn("Pre-start provisioning failed but previous env overlay exists at %s, using fallback", existingOverlay)
 					fallbackExists = true
 				}
 			}
@@ -788,8 +1018,9 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// Resolve the harness working directory now — after runGitCloneWorkspace
 	// and the post-pre-start-hook ownership fixup above have both run, and
 	// before anything that starts a long-running component on the harness's
-	// behalf (sidecar services, the metadata server, the hub secret fetch)
-	// or builds the supervisor.Config — so a resolver that depends on the
+	// behalf (sidecar services, the hub secret fetch; the metadata server is
+	// network setup and already running, see init_netadmin.go) or builds
+	// the supervisor.Config — so a resolver that depends on the
 	// workspace being present and searchable by the scion uid
 	// (substrate-serve's, in particular) sees it in its final state rather
 	// than whatever the broker's bind mount left it in, and a resolver
@@ -832,6 +1063,9 @@ func RunInit(args []string, opts InitRunOptions) int {
 		reportInitFailure(agentHome, overlayErr)
 		return 1
 	}
+	// Report the settled usage-source decision for the telemetry.health
+	// event (WP3); only SCION_USAGE_SOURCE is read from the overlay.
+	telemetryPipeline.SettleUsageSource(harnessEnvOverlay, nativeTelemetryPolicy)
 
 	// Configure git credentials for shared-workspace projects (git-workspace hybrid).
 	// The workspace is pre-cloned on the host; agents need credentials to push/pull.
@@ -894,13 +1128,15 @@ func RunInit(args []string, opts InitRunOptions) int {
 		}
 	}
 
-	// Initialize hubClient early so the metadata server's fetch callbacks
-	// can use it without data races or startup race conditions.
-	hubClient := hub.NewClient()
+	// Publish what this process knows about its own agent credential for
+	// sciontool doctor. The first write happens here, before the child
+	// starts, so doctor never reads a state left by an earlier run as
+	// this one's. Only published when init runs as root.
+	credStateCtx, credStateCancel := context.WithCancel(context.Background())
+	defer credStateCancel()
+	hub.PublishCredentialState(credStateCtx, hubClient)
 
-	// Start GCP metadata server if configured
-	var metadataServer *metadata.Server
-	if metaCfg := metadata.ConfigFromEnv(); metaCfg != nil {
+	if metadataServer != nil {
 		// Remove pre-existing gcloud configuration state so that gcloud
 		// re-initializes and discovers the emulated metadata server via
 		// GCE_METADATA_ROOT. gcloud only checks for the metadata server
@@ -908,47 +1144,6 @@ func RunInit(args []string, opts InitRunOptions) int {
 		// We preserve application_default_credentials.json which may be
 		// bind-mounted as a secret (gcloud-adc).
 		runCleanGcloudConfigForMetadata(filepath.Join(agentHome, ".config", "gcloud"), opts.RequirePrivilegeDrop)
-		// Wire up dynamic token retrieval so the metadata server always
-		// uses the latest agent token after refresh, not the startup value.
-		metaCfg.TokenFunc = func() string {
-			return hub.ReadTokenFile()
-		}
-		// Delegate GCP token fetching to the hub client so the metadata
-		// server uses the correct auth headers (X-Scion-Agent-Token) and
-		// OIDC transport layer. The hub client is created after the metadata
-		// server starts, so the closures capture the hubClient variable
-		// which is set later. Token requests only arrive after the child
-		// process has started, so the hub client is always available by then.
-		metaCfg.FetchGCPToken = func(ctx context.Context, scopes []string) (*metadata.GCPAccessTokenResponse, error) {
-			hc := hubClient
-			if hc == nil || !hc.IsConfigured() {
-				return nil, fmt.Errorf("hub client not initialized")
-			}
-			hubResp, err := hc.FetchGCPToken(ctx, scopes)
-			if err != nil {
-				return nil, err
-			}
-			return &metadata.GCPAccessTokenResponse{
-				AccessToken: hubResp.AccessToken,
-				ExpiresIn:   hubResp.ExpiresIn,
-				TokenType:   hubResp.TokenType,
-			}, nil
-		}
-		metaCfg.FetchGCPIdentityToken = func(ctx context.Context, audience string) (string, error) {
-			hc := hubClient
-			if hc == nil || !hc.IsConfigured() {
-				return "", fmt.Errorf("hub client not initialized")
-			}
-			return hc.FetchGCPIdentityToken(ctx, audience)
-		}
-		metadataServer = metadata.New(*metaCfg)
-		metaCtx := context.Background()
-		if err := runMetadataServerStart(metaCtx, metadataServer); err != nil {
-			log.Error("Failed to start metadata server: %v", err)
-			// Continue — metadata failure shouldn't block harness
-		} else {
-			log.Info("GCP metadata server started (mode=%s, port=%d)", metaCfg.Mode, metaCfg.Port)
-		}
 	}
 
 	// Pre-flight checks: verify key paths are accessible before launching child
@@ -994,6 +1189,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 
 	// Create supervisor with configuration
 	config := harnessSupervisorConfig(opts, gracePeriod, targetUID, targetGID, rootless, harnessEnvOverlay, nativeTelemetryPolicy, secretOverrides)
+	config.AuthEnv = resolvedAuthEnv
 	sup := supervisor.New(config)
 
 	// Create a cancellable context for graceful shutdown
@@ -1073,14 +1269,16 @@ func RunInit(args []string, opts InitRunOptions) int {
 	var tokenRefreshDone <-chan struct{}
 	var ghTokenRefreshCancel context.CancelFunc
 	var ghTokenRefreshDone <-chan struct{}
+	var delegationHelper *delegation.Helper
 	var readyWatchCancel context.CancelFunc
 	var readyWatchDone chan struct{}
 
 	// Wait a moment for process to start, then run post-start hooks
 	// Use a short timeout to detect immediate startup failures
-	log.Debug("Waiting for child process startup (100ms check)...")
+	log.Debug("Waiting for child process startup (%v check)...", childStartupCheckWindow)
 	select {
 	case result := <-exitChan:
+		observeChildStartupPath(true)
 		// Child exited immediately - likely a startup error
 		if result.err != nil {
 			log.Error("Child exited immediately with error: %v (uid=%d, gid=%d)", result.err, os.Geteuid(), os.Getegid())
@@ -1088,8 +1286,12 @@ func RunInit(args []string, opts InitRunOptions) int {
 			return 1
 		}
 		log.Info("Child exited immediately with code %d (uid=%d, gid=%d)", result.code, os.Geteuid(), os.Getegid())
+		// An immediate exit 0 is as clean as one after the wait loop, so a
+		// token file this init staged is removed on both paths alike.
+		stagedTokenCleanExit = result.code == 0
 		return result.code
-	case <-time.After(100 * time.Millisecond):
+	case <-time.After(childStartupCheckWindow):
+		observeChildStartupPath(false)
 		// Process appears to be running, execute post-start hooks
 		log.Info("Running post-start hooks...")
 		if err := lifecycleManager.RunPostStart(); err != nil {
@@ -1258,6 +1460,10 @@ func RunInit(args []string, opts InitRunOptions) int {
 					},
 				})
 			}
+
+			// Serve the delegation socket, through which processes in the
+			// agent make hub requests with a delegation grant.
+			delegationHelper = startDelegationHelper(hubClient, targetUID, targetGID)
 		} else {
 			log.Debug("Hub client not configured - skipping status report")
 		}
@@ -1391,8 +1597,31 @@ func RunInit(args []string, opts InitRunOptions) int {
 		go watchLimitsTriggerFile(triggerCtx, triggerChan)
 	}
 
-	// Wait for child to exit, duration limit, SIGUSR1, SIGUSR2, or trigger file.
-	// The loop allows SIGUSR2 (auth reset) to be handled without terminating.
+	// Reset path shared by SIGUSR2 and the credential file watcher. Both
+	// run it on this goroutine (the wait loop below), one at a time.
+	authReset := &authResetter{
+		hubClient:          hubClient,
+		tokenRefreshCancel: &tokenRefreshCancel,
+		tokenRefreshDone:   &tokenRefreshDone,
+		statusHandler:      statusHandler,
+		targetUID:          targetUID,
+		targetGID:          targetGID,
+		now:                time.Now,
+	}
+
+	// Watch the credential file, so a credential written there is adopted
+	// even when the reset signal does not arrive (for example, the writer
+	// may not be allowed to signal PID 1).
+	credFileChan := make(chan struct{}, 1)
+	credWatchCtx, credWatchCancel := context.WithCancel(context.Background())
+	defer credWatchCancel()
+	if hubClient != nil && hubClient.IsConfigured() {
+		authReset.watcher = startCredentialFileWatch(credWatchCtx, hubClient, hub.TokenWatchConfig{Notify: credFileChan})
+	}
+
+	// Wait for child to exit, duration limit, SIGUSR1, SIGUSR2, credential
+	// file change, or trigger file. The loop allows SIGUSR2 and credential
+	// file changes (auth reset) to be handled without terminating.
 	var result struct {
 		code int
 		err  error
@@ -1422,8 +1651,12 @@ waitLoop:
 			break waitLoop
 		case <-usr2Chan:
 			// SIGUSR2: auth reset — re-read token file and restart refresh loop.
-			handleAuthReset(hubClient, &tokenRefreshCancel, &tokenRefreshDone, statusHandler, targetUID, targetGID)
+			authReset.reset(authResetSignal)
 			// Continue waiting — this is non-terminal.
+		case <-credFileChan:
+			// The credential file changed: adopt a valid new credential
+			// through the same reset path. Non-terminal.
+			authReset.reset(authResetFileChange)
 		case <-triggerChan:
 			// Trigger file detected from hook handler - limits already set in agent-info.json
 			limitsExceeded = true
@@ -1456,6 +1689,12 @@ waitLoop:
 		<-tokenRefreshDone
 		log.Debug("Token refresh loop stopped")
 	}
+	if delegationHelper != nil {
+		if err := delegationHelper.Close(); err != nil {
+			log.Debug("Delegation helper stop: %v", err)
+		}
+		log.Debug("Delegation helper stopped")
+	}
 	if heartbeatCancel != nil {
 		heartbeatCancel()
 		<-heartbeatDone
@@ -1486,6 +1725,13 @@ waitLoop:
 
 	outcome := classifyExit(result.code, result.err, harnessCode, limitsExceeded, requestedShutdown.Load())
 	finalCode := outcome.exitCode
+	// Clean for the staged token file also requires that the child exited 0
+	// or that a stop was requested (RunInit then exits 0, see initExitCode):
+	// when the harness exit-code file says 0 but the child exits non-zero,
+	// the container exits non-zero and is restarted with the same payload,
+	// so the file is kept.
+	stagedTokenCleanExit = finalCode == 0 && !outcome.isCrash && !outcome.limitsExceeded && result.err == nil &&
+		(result.code == 0 || outcome.signaled)
 	limitsExceeded = outcome.limitsExceeded
 
 	// Report a session whose session-end hook has not run (the agent is
@@ -1518,7 +1764,7 @@ waitLoop:
 
 	// Stop metadata server
 	if metadataServer != nil {
-		metadataServer.Stop()
+		runMetadataServerStop(metadataServer)
 		log.Info("GCP metadata server stopped")
 	}
 
@@ -1582,7 +1828,21 @@ waitLoop:
 	}
 
 	log.Info("Child exited with code %d", result.code)
-	return result.code
+	return initExitCode(outcome, result.code)
+}
+
+// initExitCode is the process exit code RunInit returns once classifyExit has
+// ruled out a crash, limits and a supervisor error. A requested stop exits 0:
+// a child killed by the stop signal reports -1, which os.Exit would turn into
+// 255 and leave the container at Exited (255) after a clean stop. Otherwise
+// the child's own code is kept, so a child that exits non-zero while the
+// harness exit-code file says 0 still exits non-zero (and keeps its staged
+// token file, see stagedTokenCleanExit).
+func initExitCode(outcome exitOutcome, childCode int) int {
+	if outcome.signaled {
+		return 0
+	}
+	return childCode
 }
 
 // loadHarnessEnvOverlay loads the env overlay produced by the pre-start
@@ -1909,74 +2169,203 @@ func reportHookLimitsExceeded(hubHandler *handlers.HubHandler, triggerPath strin
 	}
 }
 
-// handleAuthReset re-reads the token file, updates the hub client, and
-// restarts the token refresh loop. Called when SIGUSR2 is received from the
-// broker's reset-auth handler.
-func handleAuthReset(hubClient *hub.Client, tokenRefreshCancel *context.CancelFunc, tokenRefreshDone *<-chan struct{}, statusHandler *handlers.StatusHandler, targetUID, targetGID int) {
-	log.TaggedInfo("AUTH_RESET", "Received SIGUSR2: auth reset requested")
+// authResetSource is what triggered an auth reset.
+type authResetSource int
 
+const (
+	// authResetSignal is SIGUSR2 from the reset-auth writer.
+	authResetSignal authResetSource = iota
+	// authResetFileChange is the credential file watcher.
+	authResetFileChange
+)
+
+func (s authResetSource) String() string {
+	if s == authResetFileChange {
+		return "credential file change"
+	}
+	return "reset signal"
+}
+
+// authResetter holds the state an auth reset replaces: the shared hub
+// client's credential and the token refresh loop.
+type authResetter struct {
+	hubClient          *hub.Client
+	tokenRefreshCancel *context.CancelFunc
+	tokenRefreshDone   *<-chan struct{}
+	statusHandler      *handlers.StatusHandler
+	targetUID          int
+	targetGID          int
+	// watcher is told about refused credentials; nil when not watching.
+	watcher *hub.TokenFileWatcher
+	now     func() time.Time
+	// checkTimeout bounds each hub check of a credential; zero uses
+	// credentialCheckTimeout.
+	checkTimeout time.Duration
+
+	// The credential file value whose hub check last could not complete,
+	// how many times in a row, and whether that was logged.
+	uncheckedFP       hub.Fingerprint
+	uncheckedAttempts int
+	uncheckedLogged   bool
+}
+
+const (
+	// credentialCheckTimeout bounds a hub check of a credential.
+	credentialCheckTimeout = 5 * time.Second
+	// credentialRecheckBase and credentialRecheckMax pace re-checks of a
+	// credential file value whose hub check could not complete: 5s, 10s,
+	// 20s, 40s, then every 60s. Each value is paced on its own; a new
+	// value is checked at once.
+	credentialRecheckBase = 5 * time.Second
+	credentialRecheckMax  = 60 * time.Second
+)
+
+// recheckDelay is the wait before re-checking a value whose hub check could
+// not complete attempts times in a row.
+func recheckDelay(attempts int) time.Duration {
+	d := credentialRecheckBase
+	for i := 1; i < attempts && d < credentialRecheckMax; i++ {
+		d *= 2
+	}
+	return min(d, credentialRecheckMax)
+}
+
+// startCredentialFileWatch starts a watcher on the credential and transport
+// token files that notifies cfg.Notify on a change, until ctx ends. It
+// records the transport token file's current content as known first, so
+// only a later write by another process counts as a transport change, and
+// checks the current credential with the hub once in the background, so
+// its issue time is known when a newer credential arrives. That check is
+// not retried and changes nothing if it does not succeed.
+func startCredentialFileWatch(ctx context.Context, hubClient *hub.Client, cfg hub.TokenWatchConfig) *hub.TokenFileWatcher {
+	hubClient.NoteTransportTokenFile()
+	w := hub.NewTokenFileWatcher(cfg)
+	w.Run(ctx)
+	current := hubClient.GetToken()
+	go func() {
+		checkCtx, cancel := context.WithTimeout(ctx, credentialCheckTimeout)
+		defer cancel()
+		_ = hubClient.CheckCurrentCredentialAccepted(checkCtx, current)
+	}()
+	log.Info("Watching the credential file for changes (every %s)", hub.DefaultTokenWatchInterval)
+	return w
+}
+
+// reset re-reads the credential file and, if it holds a credential this
+// agent can adopt, puts it in the shared hub client and restarts the token
+// refresh loop. The wait loop calls it for both SIGUSR2 and credential file
+// changes, on one goroutine, so two resets never run at once. Everything is
+// checked before anything is stopped or replaced, so a credential that is
+// not adopted leaves the working credential and the refresh loop untouched.
+//
+// Both sources require a complete, unexpired credential whose subject is
+// this agent. For a file change, in addition:
+//   - a credential equal to the current one is a silent no-op (this process
+//     writes the file after each refresh);
+//   - it must be issued after the newest credential the hub has accepted
+//     from this client (hub.Client.VerifiedIssuedAt);
+//   - the hub must accept it (hub.Client.CheckCredentialAccepted). If the
+//     hub cannot be asked, the current credential is kept and the same value
+//     is checked again later, with a growing delay.
+//
+// The signal path adopts without asking the hub, so an operator reset
+// works even when the hub cannot be reached; the adopted credential is
+// checked afterwards, and only an accepted one moves the verified issue
+// time. Credential values are never logged; log lines name a credential by
+// its jti or a short fingerprint.
+func (r *authResetter) reset(source authResetSource) {
+	if source == authResetSignal {
+		log.TaggedInfo("AUTH_RESET", "Auth reset requested (SIGUSR2)")
+	}
+
+	hubClient := r.hubClient
 	if hubClient == nil {
-		log.Error("AUTH_RESET: Hub client is not configured, cannot reset auth")
+		if source == authResetSignal {
+			log.Error("AUTH_RESET: Hub client is not configured, cannot reset auth")
+		}
 		return
 	}
 
 	newToken := hub.ReadTokenFile()
-	if newToken == "" {
-		log.Error("AUTH_RESET: Token file is empty after SIGUSR2, cannot reset auth")
-		return
+	fp := hub.TokenFingerprint(newToken)
+	info, err := hub.ValidateCandidateToken(newToken, hubClient.AgentID(), r.now())
+	if source == authResetFileChange {
+		if newToken != "" && fp == hubClient.CredentialInfo().Fingerprint {
+			// The agent credential is the one in use; only the transport
+			// token file may have changed.
+			r.adoptTransportIfChanged(source)
+			return
+		}
+		if err == nil {
+			if anchor := hubClient.VerifiedIssuedAt(); !anchor.IsZero() && !info.IssuedAt.After(anchor) {
+				err = hub.ErrCandidateOlder
+			}
+		}
+		if err == nil {
+			err = r.checkWithHub(newToken, false)
+			if errors.Is(err, hub.ErrCandidateUnchecked) {
+				r.recheckLater(fp, info)
+				r.adoptTransportIfChanged(source)
+				return
+			}
+		}
 	}
-
-	tokenExpiry, err := hub.ParseTokenExpiry(newToken)
 	if err != nil {
-		log.Error("AUTH_RESET: Cannot parse new token expiry: %v", err)
+		// err is a fixed hub.ErrCandidate* value; it never quotes the file.
+		log.Error("AUTH_RESET: Not adopting the credential file (%s): %v", source, err)
+		r.uncheckedFP, r.uncheckedAttempts, r.uncheckedLogged = hub.Fingerprint{}, 0, false
+		if r.watcher != nil {
+			r.watcher.Refused(fp)
+		}
+		if source == authResetFileChange {
+			r.adoptTransportIfChanged(source)
+		}
 		return
 	}
+	r.uncheckedFP, r.uncheckedAttempts, r.uncheckedLogged = hub.Fingerprint{}, 0, false
+	log.TaggedInfo("AUTH_RESET", "Adopting credential %s (%s)", info.LogID(), source)
 
 	// Cancel the existing token refresh loop if running.
-	if *tokenRefreshCancel != nil {
-		(*tokenRefreshCancel)()
-		if *tokenRefreshDone != nil {
-			<-*tokenRefreshDone
+	if *r.tokenRefreshCancel != nil {
+		(*r.tokenRefreshCancel)()
+		if *r.tokenRefreshDone != nil {
+			<-*r.tokenRefreshDone
 		}
 	}
 
-	// Update the hub client's in-memory token.
-	if hubClient != nil {
-		hubClient.SetToken(newToken)
-	}
+	// Update the hub client's in-memory token. This also wakes every loop
+	// that is waiting after the hub refused the previous credential.
+	hubClient.SetToken(newToken)
 
 	// Reset-auth may also have written a fresh transport token. Adopt it so
 	// this process uses it immediately and the file is owned by the scion
 	// user for every other hub client in the container.
-	if adopted, err := hubClient.AdoptTransportTokenFile(targetUID, targetGID); err != nil {
+	if adopted, err := hubClient.AdoptTransportTokenFile(r.targetUID, r.targetGID); err != nil {
 		log.Error("AUTH_RESET: Failed to adopt transport token file: %v", err)
 	} else if adopted {
 		log.TaggedInfo("AUTH_RESET", "Transport token reloaded")
 	}
 
 	// Clear any AUTH_LOST message from agent-info.json.
-	_ = statusHandler.SetMessage("")
+	_ = r.statusHandler.SetMessage("")
 
-	// Schedule refresh 2 hours before the new token's expiry.
+	// Schedule refresh 2 hours before the new token's expiry; the expiry is
+	// after now (validated above), so a short-lived token refreshes in a
+	// minute.
+	tokenExpiry := info.Expiry
 	refreshAt := tokenExpiry.Add(-2 * time.Hour)
-	if refreshAt.Before(time.Now()) {
-		if time.Now().Before(tokenExpiry) {
-			refreshAt = time.Now().Add(1 * time.Minute)
-		} else {
-			log.Error("AUTH_RESET: New token is already expired at %s", tokenExpiry.Format(time.RFC3339))
-			return
-		}
+	if refreshAt.Before(r.now()) {
+		refreshAt = r.now().Add(1 * time.Minute)
 	}
 
 	// Start a new token refresh loop.
-	var tokenRefreshCtx context.Context
-	var cancel context.CancelFunc
-	tokenRefreshCtx, cancel = context.WithCancel(context.Background())
-	*tokenRefreshCancel = cancel
-	*tokenRefreshDone = hubClient.StartTokenRefresh(tokenRefreshCtx, &hub.TokenRefreshConfig{
+	tokenRefreshCtx, cancel := context.WithCancel(context.Background())
+	*r.tokenRefreshCancel = cancel
+	statusHandler := r.statusHandler
+	*r.tokenRefreshDone = hubClient.StartTokenRefresh(tokenRefreshCtx, &hub.TokenRefreshConfig{
 		RefreshAt: refreshAt,
-		ChownUID:  targetUID,
-		ChownGID:  targetGID,
+		ChownUID:  r.targetUID,
+		ChownGID:  r.targetGID,
 		OnRefreshed: func(newExpiry time.Time) {
 			log.Info("Token refreshed successfully, new expiry: %s", newExpiry.Format(time.RFC3339))
 		},
@@ -1994,7 +2383,7 @@ func handleAuthReset(hubClient *hub.Client, tokenRefreshCancel *context.CancelFu
 		tokenExpiry.Format(time.RFC3339), refreshAt.Format(time.RFC3339))
 
 	// Send an immediate heartbeat with the new token.
-	if hubClient != nil && hubClient.IsConfigured() {
+	if hubClient.IsConfigured() {
 		hubCtx, hubCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		if err := hubClient.Heartbeat(hubCtx); err != nil {
 			log.Error("AUTH_RESET: Post-reset heartbeat failed: %v", err)
@@ -2002,6 +2391,69 @@ func handleAuthReset(hubClient *hub.Client, tokenRefreshCancel *context.CancelFu
 			log.Info("AUTH_RESET: Post-reset heartbeat sent successfully")
 		}
 		hubCancel()
+	}
+
+	// A credential adopted on the signal was not asked about first; check
+	// it now, so that once the hub accepts it, a later credential file
+	// value is compared against its issue time.
+	if source == authResetSignal {
+		if err := r.checkWithHub(newToken, true); err != nil {
+			log.Info("AUTH_RESET: Adopted credential %s not confirmed by the hub yet: %v", info.LogID(), err)
+		}
+	}
+}
+
+// checkWithHub asks the hub whether it accepts token, within checkTimeout.
+// With current, token is the credential just adopted, and an accepted
+// answer counts only if it is still the in-memory credential.
+func (r *authResetter) checkWithHub(token string, current bool) error {
+	timeout := r.checkTimeout
+	if timeout <= 0 {
+		timeout = credentialCheckTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	if current {
+		return r.hubClient.CheckCurrentCredentialAccepted(ctx, token)
+	}
+	return r.hubClient.CheckCredentialAccepted(ctx, token)
+}
+
+// recheckLater keeps the current credential after the hub could not be
+// asked about the file's value fp, and asks the watcher to report fp
+// again after a delay that grows while the same value stays unconfirmed.
+func (r *authResetter) recheckLater(fp hub.Fingerprint, info hub.TokenInfo) {
+	if fp != r.uncheckedFP {
+		r.uncheckedFP, r.uncheckedAttempts, r.uncheckedLogged = fp, 0, false
+	}
+	r.uncheckedAttempts++
+	delay := recheckDelay(r.uncheckedAttempts)
+	if !r.uncheckedLogged {
+		log.Error("AUTH_RESET: Keeping the current credential: %v for %s; checking again in %s and later", hub.ErrCandidateUnchecked, info.LogID(), delay)
+		r.uncheckedLogged = true
+	}
+	if r.watcher != nil {
+		r.watcher.RetryAfter(fp, delay)
+	}
+}
+
+// adoptTransportIfChanged adopts the transport token file when another
+// process wrote a new value there (reset-auth writes it after the agent
+// credential, so it can land after the agent credential was adopted).
+func (r *authResetter) adoptTransportIfChanged(source authResetSource) {
+	if !r.hubClient.TransportTokenFileChanged() {
+		return
+	}
+	if adopted, err := r.hubClient.AdoptTransportTokenFile(r.targetUID, r.targetGID); err != nil {
+		log.Error("AUTH_RESET: Failed to adopt transport token file (%s): %v", source, err)
+	} else if adopted {
+		log.TaggedInfo("AUTH_RESET", "Transport token reloaded (%s)", source)
+		// A credential file value the hub refused may have been refused
+		// for want of this transport token; let the watcher report it
+		// again.
+		if r.watcher != nil {
+			r.watcher.RecheckAgent()
+		}
 	}
 }
 
@@ -2282,6 +2734,24 @@ var runReadServicesYAML = readServicesYAML
 // leaves this at its default; only a test replaces it.
 var runMetadataServerStart = func(ctx context.Context, s *metadata.Server) error {
 	return s.Start(ctx)
+}
+
+// childStartupCheckWindow is how long RunInit waits after starting the
+// child before treating it as running. A child that exits inside the
+// window takes the immediate-exit path, which returns before the normal
+// shutdown sequence. A package-level variable only so tests can choose
+// the path deterministically.
+var childStartupCheckWindow = 100 * time.Millisecond
+
+// observeChildStartupPath is called with true on the immediate-exit path
+// and false once the child is treated as running. A no-op seam so tests
+// can assert which path RunInit took.
+var observeChildStartupPath = func(immediate bool) {}
+
+// runMetadataServerStop is (*metadata.Server).Stop's call site as a seam,
+// so tests can observe that RunInit stops the server on every return path.
+var runMetadataServerStop = func(s *metadata.Server) {
+	s.Stop()
 }
 
 // runFetchSecretOverrides is fetchSecretOverrides's call site as a package
@@ -2840,7 +3310,14 @@ func gitCloneWorkspace(uid, gid int, agentHome string, requirePrivilegeDrop bool
 	// written during provisioning — they don't indicate a real clone.
 	if !isWorkspaceEmpty(workspacePath) {
 		log.Info("Workspace already populated, skipping git clone")
-		return nil
+		// The agent's .gitconfig outlives the clone: bring its credential
+		// helper to the current binding on every start, so a helper an
+		// earlier version wrote (unscoped, or scoped to a remote the hub no
+		// longer offers the token to) does not survive a restart.
+		uid, gid = cloneUserIDs(uid, gid)
+		offerToken := provision.CloneTokenAllowed(os.Getenv(api.EnvGitTokenRemote), normalizeCloneURL(cloneURL))
+		setupGitCmd := func(cmd *exec.Cmd) { configureGitCommand(cmd, uid, gid) }
+		return reconcileCloneCredentialHelper(filepath.Join(agentHome, ".gitconfig"), setupGitCmd, offerToken)
 	}
 
 	// Snapshot the workspace's pre-existing top-level entries (e.g.
@@ -2854,13 +3331,7 @@ func gitCloneWorkspace(uid, gid int, agentHome string, requirePrivilegeDrop bool
 	// When uid is 0 (broker running as root or no host UID configured), fall
 	// back to the scion user so that cloned files are owned by the container
 	// user rather than root.
-	if uid == 0 {
-		if scionUser, err := scionUserLookup("scion"); err == nil {
-			uid, _ = strconv.Atoi(scionUser.Uid)
-			gid, _ = strconv.Atoi(scionUser.Gid)
-			log.Info("Falling back to scion user UID=%d GID=%d for git clone", uid, gid)
-		}
-	}
+	uid, gid = cloneUserIDs(uid, gid)
 
 	currentEUID := os.Geteuid()
 	ensureWorkspaceOwnership(workspacePath, uid, gid, currentEUID, os.Chown)
@@ -2876,7 +3347,7 @@ func gitCloneWorkspace(uid, gid int, agentHome string, requirePrivilegeDrop bool
 	}
 	depth, err := strconv.Atoi(depthStr)
 	if err != nil {
-		log.Info("WARNING: SCION_GIT_DEPTH is not a valid integer (%q), defaulting to 1", depthStr)
+		log.Warn("SCION_GIT_DEPTH is not a valid integer (%q), defaulting to 1", depthStr)
 		depth = 1
 		depthStr = "1"
 	}
@@ -2905,8 +3376,21 @@ func gitCloneWorkspace(uid, gid int, agentHome string, requirePrivilegeDrop bool
 		hubCancel()
 	}
 
-	// Build authenticated URL (never log this)
-	authURL := buildAuthenticatedURL(cloneURL, token)
+	// The remote URL carries no credential; the token is supplied to the fetch
+	// through a run-time credential helper (initTokenCredentialHelper) that reads
+	// GITHUB_TOKEN from the environment, so it is never in a git argv or .git/config.
+	cloneURLNoCredential := normalizeCloneURL(cloneURL)
+
+	// The git token is offered to this clone only when its URL names the
+	// project's recorded remote (api.EnvGitTokenRemote, which the broker relays
+	// from the hub's project record): https, the same host and owner/repo
+	// (provision.CloneTokenAllowed). A clone URL from a label naming any other
+	// host or repository, or no recorded remote at all, gets no credential
+	// helper, on the fetch or in the agent's .gitconfig.
+	offerToken := provision.CloneTokenAllowed(os.Getenv(api.EnvGitTokenRemote), cloneURLNoCredential)
+	if !offerToken {
+		log.Warn("the clone URL does not name the project's recorded git remote; cloning without a git credential")
+	}
 
 	// Determine the agent feature branch name early so we can try cloning it.
 	agentBranch := os.Getenv("SCION_AGENT_BRANCH")
@@ -2939,7 +3423,7 @@ func gitCloneWorkspace(uid, gid int, agentHome string, requirePrivilegeDrop bool
 		}
 	}()
 
-	remoteCmd := exec.Command("git", "-C", workspacePath, "remote", "add", "origin", authURL)
+	remoteCmd := exec.Command("git", "-C", workspacePath, "remote", "add", "origin", cloneURLNoCredential)
 	setupGitCmd(remoteCmd)
 	if out, err := procreap.CombinedOutputManaged(remoteCmd); err != nil {
 		return fmt.Errorf("git remote add failed: %s", sanitizeGitOutput(string(out), token))
@@ -2949,7 +3433,15 @@ func gitCloneWorkspace(uid, gid int, agentHome string, requirePrivilegeDrop bool
 	// When depth > 0, a shallow fetch is performed; depth 0 means full clone (no --depth flag).
 	// Returns sanitized stderr and whether the fetch succeeded.
 	fetchBranch := func(branchToFetch string) (string, bool) {
-		fetchArgs := []string{"-C", workspacePath, "fetch"}
+		// -c credential.<scheme>://<host>.helper=<run-time env-expansion helper>:
+		// the helper is scoped to the clone URL's host, and the token is read from
+		// GITHUB_TOKEN by the helper, never passed on the fetch argv. Installed
+		// only when offerToken.
+		var fetchArgs []string
+		if offerToken {
+			fetchArgs = append(fetchArgs, "-c", scopedCredentialConfigArg(cloneURL))
+		}
+		fetchArgs = append(fetchArgs, "-C", workspacePath, "fetch")
 		if depth > 0 {
 			fetchArgs = append(fetchArgs, "--depth", depthStr)
 		}
@@ -3031,11 +3523,9 @@ func gitCloneWorkspace(uid, gid int, agentHome string, requirePrivilegeDrop bool
 		}
 	}
 
-	// Sanitize the remote URL to remove the embedded token. The token was
-	// needed for the initial fetch, but ongoing auth is handled by the
-	// credential helper configured below. Leaving the token in the URL
-	// exposes it via `git remote -v`.
-	sanitizeCmd := exec.Command("git", "-C", workspacePath, "remote", "set-url", "origin", buildAuthenticatedURL(cloneURL, ""))
+	// Pin origin to the credential-free URL (defensive; the remote never carried a
+	// credential, and ongoing auth is the credential helper configured below).
+	sanitizeCmd := exec.Command("git", "-C", workspacePath, "remote", "set-url", "origin", normalizeCloneURL(cloneURL))
 	setupGitCmd(sanitizeCmd)
 	if out, err := procreap.CombinedOutputManaged(sanitizeCmd); err != nil {
 		log.Error("Failed to sanitize remote URL: %s %v", string(out), err)
@@ -3048,16 +3538,11 @@ func gitCloneWorkspace(uid, gid int, agentHome string, requirePrivilegeDrop bool
 	// root (HOME=/root) but the harness runs as the scion user.
 	gitconfigPath := filepath.Join(agentHome, ".gitconfig")
 
-	var credentialHelper string
-	if hub.IsGitHubAppEnabled() {
-		credentialHelper = "!sciontool credential-helper"
-	} else {
-		credentialHelper = provision.GitTokenCredentialHelper
-	}
-	credCmd := exec.Command("git", "config", "--file", gitconfigPath, "credential.helper", credentialHelper)
-	setupGitCmd(credCmd)
-	if err := procreap.RunManaged(credCmd); err != nil {
-		return fmt.Errorf("failed to configure git credential helper: %w", err)
+	// The helper is scoped to the recorded remote's host and written only
+	// when offerToken; see reconcileCloneCredentialHelper, which also runs on
+	// every later start of this workspace.
+	if err := reconcileCloneCredentialHelper(gitconfigPath, setupGitCmd, offerToken); err != nil {
+		return err
 	}
 
 	// Resolve the agent feature branch name.
@@ -3348,7 +3833,10 @@ func configureSharedWorkspaceGit(agentHome string, uid, gid int, requirePrivileg
 		configureCmd = func(cmd *exec.Cmd) {}
 	}
 
-	runGitConfig := func(args ...string) {
+	// gitConfig runs `git config --file gitconfigPath args...` and returns its
+	// failure, after logging it. With absentOK, a run that exits 5
+	// (`--unset-all` of a key that is not set) is not a failure.
+	gitConfig := func(absentOK bool, args ...string) error {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		gitPath, rerr := rootexec.Resolve("git")
@@ -3357,17 +3845,24 @@ func configureSharedWorkspaceGit(agentHome string, uid, gid int, requirePrivileg
 			if gitConfigFailureHook != nil {
 				gitConfigFailureHook(args, rerr)
 			}
-			return
+			return rerr
 		}
 		cmd := exec.CommandContext(ctx, gitPath, append([]string{"config", "--file", gitconfigPath}, args...)...)
 		configureCmd(cmd)
 		if out, cerr := procreap.CombinedOutputManaged(cmd); cerr != nil {
+			var exitErr *exec.ExitError
+			if absentOK && errors.As(cerr, &exitErr) && exitErr.ExitCode() == 5 {
+				return nil
+			}
 			log.Error("Failed to run git config %v: %s %v", args, string(out), cerr)
 			if gitConfigFailureHook != nil {
 				gitConfigFailureHook(args, cerr)
 			}
+			return cerr
 		}
+		return nil
 	}
+	runGitConfig := func(args ...string) { _ = gitConfig(false, args...) }
 
 	// Configure credential helper using sciontool's credential-helper command,
 	// which handles both GITHUB_TOKEN env var and GitHub App token refresh.
@@ -3379,8 +3874,24 @@ func configureSharedWorkspaceGit(agentHome string, uid, gid int, requirePrivileg
 		// Simple credential helper using GITHUB_TOKEN env var
 		credentialHelper = provision.GitTokenCredentialHelper
 	}
-	// This is idempotent and works even if provisioning already set it.
-	runGitConfig("credential.helper", credentialHelper)
+	// The helper is scoped to the host of the project's recorded git remote
+	// (api.EnvGitTokenRemote, which the broker relays from the hub's project
+	// record): credential.https://<host>.helper. It is never scoped to the
+	// clone-url label or the shared workspace's own origin, which agents can
+	// write. An unscoped credential.helper (written by an earlier version) is
+	// removed first; without a recorded remote no helper is configured.
+	// Replacing all values keeps this idempotent when provisioning already
+	// wrote the same key. A failed removal fails closed, as gitCloneWorkspace
+	// does: no helper is written and the error is returned, because the
+	// unscoped helper would still offer the token to every host.
+	if err := gitConfig(true, "--unset-all", "credential.helper"); err != nil {
+		return fmt.Errorf("failed to remove an unscoped git credential helper: %w", err)
+	}
+	if scope, ok := provision.TokenRemoteCredentialScope(os.Getenv(api.EnvGitTokenRemote)); ok {
+		runGitConfig("--replace-all", "credential."+scope+".helper", credentialHelper)
+	} else {
+		log.Warn("No recorded git remote for the shared workspace; no git credential helper configured")
+	}
 
 	// Configure git identity for the agent
 	agentName := os.Getenv("SCION_AGENT_NAME")
@@ -3491,28 +4002,37 @@ func sanitizeGitOutput(output, token string) string {
 	return strings.ReplaceAll(output, token, "***")
 }
 
-// buildAuthenticatedURL constructs an HTTPS URL with embedded OAuth2 credentials.
-// If no token is provided, the original URL is returned unchanged.
-func buildAuthenticatedURL(cloneURL, token string) string {
-	// Ensure the URL has an https:// scheme. The clone URL may arrive
-	// without a scheme if it was stored from raw user input (e.g.
-	// "github.com/org/repo" instead of "https://github.com/org/repo").
-	normalized := cloneURL
-	if !strings.Contains(normalized, "://") {
-		normalized = "https://" + normalized
+// normalizeCloneURL returns the clone URL with an https:// scheme, without any
+// embedded credentials. The clone URL may arrive without a scheme if it was
+// stored from raw user input (e.g. "github.com/org/repo" instead of
+// "https://github.com/org/repo"). The token is supplied to git through a
+// run-time credential helper that reads it from the environment
+// (initTokenCredentialHelper), never embedded in the URL, so it never appears in
+// a git argv (visible in the host process list) or in .git/config.
+func normalizeCloneURL(cloneURL string) string {
+	if !strings.Contains(cloneURL, "://") {
+		return "https://" + cloneURL
 	}
+	return cloneURL
+}
 
-	if token == "" {
-		return normalized
+// initTokenCredentialHelper is the git credential helper the in-container clone
+// uses to authenticate. It is a constant that reads the token from GITHUB_TOKEN
+// at run time (the agent already holds it in its environment), so the token
+// appears in no argv and no config value — the same shape as
+// provision.GitTokenCredentialHelper.
+const initTokenCredentialHelper = `!f() { echo username=oauth2; echo "password=${GITHUB_TOKEN}"; }; f`
+
+// scopedCredentialConfigArg returns the `-c` config argument that installs
+// initTokenCredentialHelper scoped to the clone URL's host
+// (credential.<scheme>://<host>.helper), so the token is offered only to that
+// host and not to any other endpoint a step might reach. It falls back to the
+// unscoped key only if the URL has no parseable scheme and host.
+func scopedCredentialConfigArg(cloneURL string) string {
+	if u, err := url.Parse(normalizeCloneURL(cloneURL)); err == nil && u.Scheme != "" && u.Host != "" {
+		return fmt.Sprintf("credential.%s://%s.helper=%s", u.Scheme, u.Host, initTokenCredentialHelper)
 	}
-
-	parsed, err := url.Parse(normalized)
-	if err != nil || parsed.Scheme == "" {
-		return normalized
-	}
-
-	parsed.User = url.UserPassword("oauth2", token)
-	return parsed.String()
+	return "credential.helper=" + initTokenCredentialHelper
 }
 
 // isClaude returns true when the child command is for the Claude Code harness.
@@ -3725,6 +4245,106 @@ func writeEnvFile(agentHome string, uid, gid int) {
 	log.Debug("Wrote %d env vars to %s", len(lines)-1, envPath)
 }
 
+// cloneUserIDs returns the identity gitCloneWorkspace runs git as: uid/gid,
+// or the scion user when uid is 0 (broker running as root or no host UID
+// configured), so that cloned files are owned by the container user rather
+// than root.
+func cloneUserIDs(uid, gid int) (int, int) {
+	if uid != 0 {
+		return uid, gid
+	}
+	if scionUser, err := scionUserLookup("scion"); err == nil {
+		uid, _ = strconv.Atoi(scionUser.Uid)
+		gid, _ = strconv.Atoi(scionUser.Gid)
+		log.Info("Falling back to scion user UID=%d GID=%d for git clone", uid, gid)
+	}
+	return uid, gid
+}
+
+// reconcileCloneCredentialHelper brings the git credential helper in a
+// clone-per-agent agent's .gitconfig (gitconfigPath) to the current token
+// binding. It runs on the first clone and on every later start of a
+// populated workspace, because the .gitconfig outlives the clone:
+//
+//   - an unscoped credential.helper (an earlier version wrote one) is removed;
+//   - a scoped credential.<url>.helper whose value is one of the helpers this
+//     file writes is removed, so a helper written for a remote the hub no
+//     longer offers the token to does not survive a restart;
+//   - when offerToken, the helper is written again, scoped to the host of the
+//     project's recorded git remote (credential.https://<host>.helper,
+//     provision.TokenRemoteCredentialScope).
+//
+// A clone URL that does not name the recorded remote, or no recorded remote,
+// ends with no helper, so fetches and pushes to that origin are never offered
+// the token. Every git call runs a trusted git binary from rootexec's fixed
+// search path (never $PATH), as configureSharedWorkspaceGit does, through
+// setupGitCmd. Any failure is returned, so the caller fails closed.
+func reconcileCloneCredentialHelper(gitconfigPath string, setupGitCmd func(*exec.Cmd), offerToken bool) error {
+	gitPath, err := rootexec.Resolve("git")
+	if err != nil {
+		return fmt.Errorf("failed to resolve a trusted git binary for the credential helper: %w", err)
+	}
+	// unset runs `git config --unset-all key [value-pattern]`; exit status 5
+	// means the key is not set (or the file does not exist). It resolves git
+	// itself so the exec site is provably routed through rootexec.Resolve
+	// (the exec-site guard checks the smallest enclosing function).
+	unset := func(args ...string) error {
+		unsetGit, err := rootexec.Resolve("git")
+		if err != nil {
+			return err
+		}
+		cmd := exec.Command(unsetGit, append([]string{"config", "--file", gitconfigPath, "--unset-all"}, args...)...)
+		setupGitCmd(cmd)
+		if err := procreap.RunManaged(cmd); err != nil {
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) || exitErr.ExitCode() != 5 {
+				return err
+			}
+		}
+		return nil
+	}
+	if err := unset("credential.helper"); err != nil {
+		return fmt.Errorf("failed to remove an unscoped git credential helper: %w", err)
+	}
+
+	ours := []string{"!sciontool credential-helper", provision.GitTokenCredentialHelper}
+	listCmd := exec.Command(gitPath, "config", "--file", gitconfigPath, "--null", "--get-regexp", `^credential\..+\.helper$`)
+	setupGitCmd(listCmd)
+	out, err := procreap.OutputManaged(listCmd)
+	if err != nil {
+		var exitErr *exec.ExitError
+		// Exit status 1: no key matches (or the file does not exist).
+		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+			return fmt.Errorf("failed to list git credential helpers: %w", err)
+		}
+		out = nil
+	}
+	for _, entry := range strings.Split(string(out), "\x00") {
+		key, value, ok := strings.Cut(entry, "\n")
+		if !ok || !slices.Contains(ours, value) {
+			continue
+		}
+		if err := unset("--fixed-value", key, value); err != nil {
+			return fmt.Errorf("failed to remove a scoped git credential helper: %w", err)
+		}
+	}
+
+	scope, scoped := provision.TokenRemoteCredentialScope(os.Getenv(api.EnvGitTokenRemote))
+	if !offerToken || !scoped {
+		return nil
+	}
+	credentialHelper := provision.GitTokenCredentialHelper
+	if hub.IsGitHubAppEnabled() {
+		credentialHelper = "!sciontool credential-helper"
+	}
+	credCmd := exec.Command(gitPath, "config", "--file", gitconfigPath, "--replace-all", "credential."+scope+".helper", credentialHelper)
+	setupGitCmd(credCmd)
+	if err := procreap.RunManaged(credCmd); err != nil {
+		return fmt.Errorf("failed to configure git credential helper: %w", err)
+	}
+	return nil
+}
+
 // isWorkspaceEmpty returns true if the directory doesn't exist or contains
 // only provisioning marker entries (e.g. .scion/, .scion-volumes/). A workspace
 // with only marker directories is considered empty for git-clone purposes so
@@ -3736,9 +4356,9 @@ func isWorkspaceEmpty(path string) bool {
 	}
 	// Filter out known marker entries that don't indicate a real workspace
 	// (provisioning markers and shared-dir mount points; see
-	// api.IsWorkspaceMarker).
+	// api.IsWorkspaceMarkerEntry).
 	for _, e := range entries {
-		if api.IsWorkspaceMarker(e.Name()) {
+		if api.IsWorkspaceMarkerEntry(path, e.Name()) {
 			continue
 		}
 		log.Debug("Workspace not empty: found %q in %s", e.Name(), path)

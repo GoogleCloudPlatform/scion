@@ -33,6 +33,11 @@ var brokerOperations = []OperationSpec{
 			// The projects a broker serves, filtered to the projects the
 			// caller can read.
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/runtime-brokers/{id}/projects", Method: "GET"},
+			// A legacy broker's conversion plan (behind
+			// hub.flat_runtime_brokers; 404 while it is off), dispatched
+			// inside handleRuntimeBrokerRoutes; its agents and projects are
+			// filtered to the ones the caller can read.
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/runtime-brokers/{id}/conversion-plan", Method: "GET"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
@@ -195,6 +200,29 @@ var brokerOperations = []OperationSpec{
 		Bearer: NonUser(),
 	},
 	{
+		ID:          "broker.agent.workspacedownload",
+		Domain:      "broker",
+		Description: "Issue signed download URLs for the uploaded workspace files of an agent the broker runs",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/runtime-brokers/{id}/agents/{agentId}/workspace-download", Method: "POST", Response: ResponseCredential},
+		},
+		Principals:       []PrincipalKind{PrincipalBroker},
+		Credentials:      []CredentialKind{CredentialBrokerToken},
+		ResourceResolver: "broker-self",
+		Effects:          []SecurityEffect{EffectReadOne},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs:         []TestRef{{Package: "pkg/hub", Function: "TestBearerDisposition_EveryRoutePatternCovered"}},
+		Exemptions: []Exemption{{
+			Kind:   ExemptionInternalOnly,
+			Reason: "The broker authenticates with its own HMAC credential for an agent assigned to it in a project it still provides for; no user permission applies",
+			Scope:  "broker self access",
+			Waives: []WaivedObligation{WaiveBasePermission},
+		}},
+		Bearer: NonUser(),
+	},
+	{
 		ID:          "broker.messagefailures.report",
 		Domain:      "broker",
 		Description: "Record buffered message delivery failures reported by a broker",
@@ -218,15 +246,41 @@ var brokerOperations = []OperationSpec{
 		Bearer: NonUser(),
 	},
 	{
+		ID:          "broker.attachment.redeem",
+		Domain:      "broker",
+		Description: "Redeem an attachment delivery capability (ptone/scion#4596): the broker the hub issued it to downloads one attachment, once, before it expires, to write it into the recipient agent's home",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/attachment-deliveries/{token}", Method: "GET"},
+		},
+		Principals:       []PrincipalKind{PrincipalBroker},
+		Credentials:      []CredentialKind{CredentialBrokerToken},
+		ResourceResolver: "broker-self",
+		Effects:          []SecurityEffect{EffectReadOne},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialResourceNotFound},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestDeliveryRedemption_WrongBrokerRefused"},
+			{Package: "pkg/hub", Function: "TestDeliveryRedemption_UniformRefusal"},
+		},
+		Exemptions: []Exemption{{
+			Kind:   ExemptionInternalOnly,
+			Reason: "The broker authenticates with its own HMAC credential and presents a capability the hub signed for that broker and recipient under the attachment read decision; no user permission applies",
+			Scope:  "broker capability redemption",
+			Waives: []WaivedObligation{WaiveBasePermission},
+		}},
+		Bearer: NonUser(),
+	},
+	{
 		ID:          "broker.controlchannel.call",
 		Domain:      "broker",
 		Description: "Carry a call between the hub and a connected broker over the control channel; each call runs under the operation that initiated it",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointBrokerCall, Pattern: "TunnelRequest:controlchannel"},
 			{Kind: EntryPointBrokerCall, Pattern: "OpenStream:controlchannel"},
-			{Kind: EntryPointBrokerCall, Pattern: "SendStreamData:controlchannel"},
-			{Kind: EntryPointBrokerCall, Pattern: "ResizeStream:controlchannel"},
-			{Kind: EntryPointBrokerCall, Pattern: "CloseStream:controlchannel"},
+			{Kind: EntryPointBrokerCall, Pattern: "SendStreamData:brokerconnection"},
+			{Kind: EntryPointBrokerCall, Pattern: "ResizeStream:brokerconnection"},
+			{Kind: EntryPointBrokerCall, Pattern: "CloseStream:brokerconnection"},
 			{Kind: EntryPointBrokerCall, Pattern: "handleResponse:controlchannel"},
 			{Kind: EntryPointBrokerCall, Pattern: "handleStreamData:controlchannel"},
 			{Kind: EntryPointBrokerCall, Pattern: "handleStreamClose:controlchannel"},

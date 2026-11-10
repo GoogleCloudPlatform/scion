@@ -41,6 +41,7 @@ import {
   ChatPaletteDataController,
   PaletteLoadError,
 } from '../../client/chat-palette-data.js';
+import { PALETTE_PEOPLE_SEARCH_DEBOUNCE_MS } from './chat.js';
 import { agentStore } from '../../client/agent-store.js';
 import {
   FakeEventSource,
@@ -48,6 +49,7 @@ import {
   createHarness,
 } from '../../client/__fixtures__/agent-store-harness.js';
 import { chatRecentFiles } from '../../client/chat-recent-files.js';
+import { resetUserDirectory } from '../../client/user-directory.js';
 import type { RecentFile, RecentFilesSnapshot } from '../../client/chat-recent-files.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -102,6 +104,8 @@ beforeAll(async () => {
 
 beforeEach(() => {
   vi.mocked(apiFetch).mockReset();
+  // The recent-users page is cached page-wide; each test serves its own.
+  resetUserDirectory();
   vi.mocked(navigateTo).mockReset();
   fakeState.agents.clear();
   // Several tests capture "the URL before" and assert it is unchanged after
@@ -868,6 +872,233 @@ describe('_handlePaletteSelect: Document targets', () => {
 // ===========================================================================
 // People/Threads group loaders
 // ===========================================================================
+
+describe('palette People search: following the palette query', () => {
+  const RECENT = [
+    { id: 'self-user', displayName: 'Me' },
+    { id: 'u1', displayName: 'Alice' },
+  ];
+
+  /** Serves the recent-users page, the DM list, and user search via `search`. */
+  function routeApi(search: (query: string, signal?: AbortSignal) => Promise<Response>): void {
+    vi.mocked(apiFetch).mockImplementation((path: string, options?: RequestInit) => {
+      const url = new URL(path, 'http://hub.test');
+      if (url.pathname === '/api/v1/users' && url.searchParams.has('search')) {
+        return search(url.searchParams.get('search') ?? '', options?.signal ?? undefined);
+      }
+      if (url.pathname === '/api/v1/users') {
+        return Promise.resolve(jsonResponse({ users: RECENT }));
+      }
+      return Promise.resolve(jsonResponse({ dms: [] }));
+    });
+  }
+
+  function searchQueries(): string[] {
+    return vi
+      .mocked(apiFetch)
+      .mock.calls.map((call) => new URL(String(call[0]), 'http://hub.test'))
+      .filter((u) => u.pathname === '/api/v1/users' && u.searchParams.has('search'))
+      .map((u) => u.searchParams.get('search') ?? '');
+  }
+
+  function query(el: any, text: string): void {
+    el._handlePaletteQuery(new CustomEvent('palette-query', { detail: { query: text } }));
+  }
+
+  function peopleLabels(el: any): string[] {
+    return el.v2PaletteGroups.people.candidates.map((c: PaletteCandidate) => c.label);
+  }
+
+  async function openPageWithPeople(): Promise<any> {
+    const el = createPage();
+    el.v2PaletteOpen = true;
+    await el._loadPalettePeople();
+    expect(peopleLabels(el)).toEqual(['Alice']);
+    return el;
+  }
+
+  const bob = (): Promise<Response> =>
+    Promise.resolve(jsonResponse({ users: [{ id: 'u2', displayName: 'Bob' }] }));
+
+  it('debounces edits into one search for the latest query, then merges its hits', async () => {
+    routeApi(bob);
+    const el = await openPageWithPeople();
+    vi.useFakeTimers();
+    query(el, 'bo');
+    await vi.advanceTimersByTimeAsync(PALETTE_PEOPLE_SEARCH_DEBOUNCE_MS - 1);
+    query(el, 'bob');
+    await vi.advanceTimersByTimeAsync(PALETTE_PEOPLE_SEARCH_DEBOUNCE_MS - 1);
+    expect(searchQueries()).toEqual([]);
+
+    await vi.advanceTimersByTimeAsync(1);
+    await vi.waitFor(() => expect(peopleLabels(el)).toEqual(['Alice', 'Bob']));
+    expect(searchQueries()).toEqual(['bob']);
+    expect(el.v2PaletteGroups.people.status).toBe('ready');
+  });
+
+  it('a search hit can be selected: it is a People candidate', async () => {
+    routeApi(bob);
+    const el = await openPageWithPeople();
+    const openDMSpy = vi.spyOn(el, 'openDM').mockImplementation(() => {});
+    vi.useFakeTimers();
+    query(el, 'bob');
+    await vi.advanceTimersByTimeAsync(PALETTE_PEOPLE_SEARCH_DEBOUNCE_MS);
+    await vi.waitFor(() => expect(peopleLabels(el)).toContain('Bob'));
+
+    el._handlePaletteSelect(
+      new CustomEvent('palette-select', {
+        detail: { target: { kind: 'dm', peerKind: 'user', peerId: 'u2', displayName: 'Bob' } },
+      })
+    );
+    expect(openDMSpy).toHaveBeenCalledWith('u2', 'user', 'Bob');
+  });
+
+  it('a query under two characters sends nothing and drops earlier hits', async () => {
+    routeApi(bob);
+    const el = await openPageWithPeople();
+    vi.useFakeTimers();
+    query(el, 'bob');
+    await vi.advanceTimersByTimeAsync(PALETTE_PEOPLE_SEARCH_DEBOUNCE_MS);
+    await vi.waitFor(() => expect(peopleLabels(el)).toEqual(['Alice', 'Bob']));
+
+    query(el, 'b');
+    await vi.advanceTimersByTimeAsync(PALETTE_PEOPLE_SEARCH_DEBOUNCE_MS * 2);
+    expect(peopleLabels(el)).toEqual(['Alice']);
+    expect(searchQueries()).toEqual(['bob']);
+  });
+
+  it('an edit aborts the in-flight search, whose late result is never published', async () => {
+    let firstSignal: AbortSignal | undefined;
+    let resolveFirst!: (r: Response) => void;
+    routeApi((q, signal) => {
+      if (q === 'bo') {
+        firstSignal = signal;
+        return new Promise<Response>((resolve) => {
+          resolveFirst = resolve;
+        });
+      }
+      return bob();
+    });
+    const el = await openPageWithPeople();
+    vi.useFakeTimers();
+    query(el, 'bo');
+    await vi.advanceTimersByTimeAsync(PALETTE_PEOPLE_SEARCH_DEBOUNCE_MS);
+    expect(firstSignal).toBeDefined();
+
+    query(el, 'bob');
+    expect(firstSignal!.aborted).toBe(true);
+    resolveFirst(jsonResponse({ users: [{ id: 'u3', displayName: 'Boris' }] }));
+    await vi.advanceTimersByTimeAsync(PALETTE_PEOPLE_SEARCH_DEBOUNCE_MS);
+    await vi.waitFor(() => expect(peopleLabels(el)).toEqual(['Alice', 'Bob']));
+  });
+
+  it('closing during a search aborts it and publishes nothing', async () => {
+    let searchSignal: AbortSignal | undefined;
+    let resolveSearch!: (r: Response) => void;
+    routeApi((_q, signal) => {
+      searchSignal = signal;
+      return new Promise<Response>((resolve) => {
+        resolveSearch = resolve;
+      });
+    });
+    const el = await openPageWithPeople();
+    vi.useFakeTimers();
+    query(el, 'bob');
+    await vi.advanceTimersByTimeAsync(PALETTE_PEOPLE_SEARCH_DEBOUNCE_MS);
+    expect(searchSignal).toBeDefined();
+
+    el._closePaletteAndCancelLoad();
+    expect(searchSignal!.aborted).toBe(true);
+    resolveSearch(jsonResponse({ users: [{ id: 'u2', displayName: 'Bob' }] }));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(peopleLabels(el)).toEqual(['Alice']);
+  });
+
+  it('closing before the debounce fires sends no search', async () => {
+    routeApi(bob);
+    const el = await openPageWithPeople();
+    vi.useFakeTimers();
+    query(el, 'bob');
+    el._closePaletteAndCancelLoad();
+    await vi.advanceTimersByTimeAsync(PALETTE_PEOPLE_SEARCH_DEBOUNCE_MS * 2);
+    expect(searchQueries()).toEqual([]);
+  });
+
+  it('a failed search leaves the group ready with its recent users', async () => {
+    routeApi(() => Promise.resolve(jsonResponse({}, 500)));
+    const el = await openPageWithPeople();
+    vi.useFakeTimers();
+    query(el, 'bob');
+    await vi.advanceTimersByTimeAsync(PALETTE_PEOPLE_SEARCH_DEBOUNCE_MS);
+    await vi.waitFor(() => expect(searchQueries()).toEqual(['bob']));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(el.v2PaletteGroups.people.status).toBe('ready');
+    expect(peopleLabels(el)).toEqual(['Alice']);
+  });
+
+  it("a reopen drops the last open's hits from a cached People group", async () => {
+    routeApi(bob);
+    const el = await openPageWithPeople();
+    vi.useFakeTimers();
+    query(el, 'bob');
+    await vi.advanceTimersByTimeAsync(PALETTE_PEOPLE_SEARCH_DEBOUNCE_MS);
+    await vi.waitFor(() => expect(peopleLabels(el)).toEqual(['Alice', 'Bob']));
+    el._closePaletteAndCancelLoad();
+
+    el.v2PaletteOpen = true;
+    el._loadPaletteGroupsOnOpen();
+    expect(peopleLabels(el)).toEqual(['Alice']);
+  });
+
+  it('a search that lands while the People load waits on its DM list keeps the group loading; the load then includes the hit', async () => {
+    let resolveDms!: (r: Response) => void;
+    vi.mocked(apiFetch).mockImplementation((path: string) => {
+      const url = new URL(path, 'http://hub.test');
+      if (url.pathname === '/api/v1/users' && url.searchParams.has('search')) return bob();
+      if (url.pathname === '/api/v1/users') {
+        return Promise.resolve(jsonResponse({ users: RECENT }));
+      }
+      return new Promise<Response>((resolve) => {
+        resolveDms = resolve;
+      });
+    });
+    const el = createPage();
+    el.v2PaletteOpen = true;
+    vi.useFakeTimers();
+    const load = el._loadPalettePeople();
+    await vi.waitFor(() => expect(resolveDms).toBeDefined());
+
+    query(el, 'bob');
+    await vi.advanceTimersByTimeAsync(PALETTE_PEOPLE_SEARCH_DEBOUNCE_MS);
+    await vi.waitFor(() => expect(searchQueries()).toEqual(['bob']));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(el.v2PaletteGroups.people.status).toBe('loading');
+
+    resolveDms(jsonResponse({ dms: [] }));
+    await load;
+    expect(el.v2PaletteGroups.people.status).toBe('ready');
+    expect(peopleLabels(el)).toEqual(['Alice', 'Bob']);
+  });
+
+  it('collapses whitespace runs in the query before searching', async () => {
+    routeApi(bob);
+    const el = await openPageWithPeople();
+    vi.useFakeTimers();
+    query(el, '  bob   \t builder ');
+    await vi.advanceTimersByTimeAsync(PALETTE_PEOPLE_SEARCH_DEBOUNCE_MS);
+    await vi.waitFor(() => expect(searchQueries()).toEqual(['bob builder']));
+  });
+
+  it('ignores a query while the palette is closed', async () => {
+    routeApi(bob);
+    const el = await openPageWithPeople();
+    el.v2PaletteOpen = false;
+    vi.useFakeTimers();
+    query(el, 'bob');
+    await vi.advanceTimersByTimeAsync(PALETTE_PEOPLE_SEARCH_DEBOUNCE_MS * 2);
+    expect(searchQueries()).toEqual([]);
+  });
+});
 
 describe('_loadPalettePeople', () => {
   it('excludes self and resolves to ready candidates', async () => {

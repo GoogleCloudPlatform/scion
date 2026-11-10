@@ -28,8 +28,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/roledefinition"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -203,12 +205,15 @@ func TestBuiltInRoles_HubAdminConstraintPermissions(t *testing.T) {
 }
 
 // TestBuiltInRoles_HubAdminRevision pins the hub-admin revision and its
-// latest addition: revision 8 adds project.manage_visitors
-// (ptone/scion#4603).
+// latest additions: revision 10 adds agent.delegation.revoke_all
+// (ptone/scion#2132), revision 9 project.chat_post (ptone/scion#5518),
+// revision 8 project.manage_visitors (ptone/scion#4603).
 func TestBuiltInRoles_HubAdminRevision(t *testing.T) {
 	admin := builtInRoleByName(t, store.SystemRoleHubAdmin)
-	assert.Equal(t, 8, admin.Revision)
+	assert.Equal(t, 10, admin.Revision)
+	assert.Contains(t, admin.Permissions, "agent.delegation.revoke_all")
 	assert.Contains(t, admin.Permissions, "project.manage_visitors")
+	assert.Contains(t, admin.Permissions, "project.chat_post")
 }
 
 // TestBuiltInRoles_ProjectMemberPermissions verifies that the curated
@@ -1055,7 +1060,7 @@ func TestProjectRoleExactPermissionSets(t *testing.T) {
 				"gcp_service_account.assign",
 				"harness_config.create", "harness_config.delete",
 				"harness_config.list", "harness_config.read", "harness_config.update",
-				"project.delete", "project.list", "project.manage", "project.manage_visitors",
+				"project.chat_post", "project.delete", "project.list", "project.manage", "project.manage_visitors",
 				"project.read", "project.secret_read", "project.set_messaging_policy", "project.update",
 				"scheduled_event.create", "scheduled_event.delete",
 				"scheduled_event.list", "scheduled_event.read", "scheduled_event.update",
@@ -1078,7 +1083,7 @@ func TestProjectRoleExactPermissionSets(t *testing.T) {
 				"gcp_service_account.assign",
 				"harness_config.create",
 				"harness_config.list", "harness_config.read", "harness_config.update",
-				"project.list", "project.manage", "project.manage_visitors",
+				"project.chat_post", "project.list", "project.manage", "project.manage_visitors",
 				"project.read", "project.secret_read", "project.update",
 				"scheduled_event.create",
 				"scheduled_event.list", "scheduled_event.read", "scheduled_event.update",
@@ -1096,7 +1101,7 @@ func TestProjectRoleExactPermissionSets(t *testing.T) {
 				"agent.create", "agent.list", "agent.read",
 				"gcp_service_account.assign",
 				"harness_config.create", "harness_config.list", "harness_config.read",
-				"project.list", "project.read",
+				"project.chat_post", "project.list", "project.read",
 				"scheduled_event.create", "scheduled_event.list", "scheduled_event.read",
 				"skill.list", "skill.read",
 				"template.create", "template.list", "template.read",
@@ -1106,6 +1111,13 @@ func TestProjectRoleExactPermissionSets(t *testing.T) {
 			name:  "project-visitor",
 			perms: projectVisitorPermissionIDs(),
 			want:  []string{"agent.list", "agent.message", "agent.read"},
+		},
+		{
+			// project-viewer (ptone/scion#5519): reads; no
+			// project.chat_post, agent.create or agent.message.
+			name:  "project-viewer",
+			perms: projectViewerPermissionIDs(),
+			want:  []string{"agent.list", "agent.read", "project.list", "project.read"},
 		},
 	}
 	for _, tt := range tests {
@@ -1119,10 +1131,11 @@ func TestProjectRoleExactPermissionSets(t *testing.T) {
 // TestProjectRoleRevisions verifies the current revision of each project role.
 func TestProjectRoleRevisions(t *testing.T) {
 	wantRevisions := map[string]int{
-		store.ProjectRoleOwner:   10,
-		store.ProjectRoleAdmin:   8,
-		store.ProjectRoleMember:  5,
+		store.ProjectRoleOwner:   11,
+		store.ProjectRoleAdmin:   9,
+		store.ProjectRoleMember:  6,
 		store.ProjectRoleVisitor: 1,
+		store.ProjectRoleViewer:  1,
 	}
 	for _, role := range BuiltInRoles() {
 		if role.ScopeType != store.RoleScopeProject {
@@ -1145,10 +1158,11 @@ func TestProjectRoleReconciliationConverges(t *testing.T) {
 		revision    int
 		permissions func() []string
 	}{
-		{store.ProjectRoleOwner, 10, projectOwnerPermissionIDs},
-		{store.ProjectRoleAdmin, 8, projectAdminPermissionIDs},
-		{store.ProjectRoleMember, 5, projectMemberCuratedPermissionIDs},
+		{store.ProjectRoleOwner, 11, projectOwnerPermissionIDs},
+		{store.ProjectRoleAdmin, 9, projectAdminPermissionIDs},
+		{store.ProjectRoleMember, 6, projectMemberCuratedPermissionIDs},
 		{store.ProjectRoleVisitor, 1, projectVisitorPermissionIDs},
+		{store.ProjectRoleViewer, 1, projectViewerPermissionIDs},
 	}
 
 	for _, pr := range projectRoles {
@@ -1664,4 +1678,240 @@ func TestR5_ReconciliationGrantsPortAccessToExistingOwnersAndAdmins(t *testing.T
 	otherAgent.OwnerID, otherAgent.Ancestry = member2ID, []string{member2ID}
 	d := authz.CheckAccess(ctx, member, otherAgent, ActionPortAccess)
 	assert.False(t, d.Allowed, "project-member must not gain port access on another member's agent: %s", d.Reason)
+}
+
+// TestBuiltInRoles_ProjectViewerIsAMembershipRole: project-viewer is seeded
+// as a system project role that confers membership and is a built-in
+// membership role (one per principal per project), with no principals.
+func TestBuiltInRoles_ProjectViewerIsAMembershipRole(t *testing.T) {
+	_, s := testServer(t)
+	ctx := context.Background()
+	role := builtInRoleByName(t, store.ProjectRoleViewer)
+	assert.False(t, role.NoMembership)
+	assert.True(t, role.SystemRowOnly)
+
+	rd, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleViewer, store.RoleScopeProject)
+	require.NoError(t, err)
+	assert.True(t, rd.System)
+	assert.True(t, rd.ConfersProjectMembership())
+	assert.True(t, store.IsBuiltInProjectMembershipRole(store.ProjectRoleViewer))
+	for _, p := range []string{"project.chat_post", "agent.create", "agent.message"} {
+		assert.NotContains(t, rd.Permissions, p)
+	}
+	bindings, err := s.ListAllRoleBindings(ctx, store.RoleBindingListOptions{Limit: 1000})
+	require.NoError(t, err)
+	for _, b := range bindings {
+		assert.NotEqual(t, rd.ID, b.RoleDefinitionID, "nobody is moved into project-viewer")
+	}
+}
+
+// TestReconcileBuiltInRole_SystemRowOnlyLeavesCustomRow: reconcile itself
+// never takes over a custom row that holds a SystemRowOnly built-in role's
+// name (renameCustomRolesHoldingBuiltInNames renames it first at start): the
+// custom row is left untouched and the built-in role is not seeded.
+func TestReconcileBuiltInRole_SystemRowOnlyLeavesCustomRow(t *testing.T) {
+	_, s := testServer(t)
+	ctx := context.Background()
+	name := "custom-first-" + uuid.NewString()[:8]
+	custom, err := s.CreateRoleDefinition(ctx, &store.RoleDefinition{
+		Name: name, ScopeType: store.RoleScopeProject,
+		Permissions: []string{"project.read", "project.chat_post"},
+	})
+	require.NoError(t, err)
+
+	reconcileBuiltInRole(ctx, s, BuiltInRole{
+		Name: name, ScopeType: store.RoleScopeProject, Revision: 1,
+		Permissions: projectViewerPermissionIDs(), SystemRowOnly: true,
+	})
+
+	got, err := s.GetRoleDefinitionByName(ctx, name, store.RoleScopeProject)
+	require.NoError(t, err)
+	assert.Equal(t, custom.ID, got.ID, "the custom row still holds the name: the built-in role is not seeded")
+	assert.False(t, got.System)
+	assert.Equal(t, name, got.Name)
+	assert.ElementsMatch(t, []string{"project.read", "project.chat_post"}, got.Permissions, "and is untouched")
+}
+
+// TestUpgrade_CustomProjectViewerRoleStaysCustom is the upgrade case: a
+// store that holds a custom (non-system) role named project-viewer, with a
+// binding, before the hub first seeds the built-in role. On start the
+// custom role is renamed and keeps its permissions and binding, the
+// built-in project-viewer is seeded, and the bound user's access does not
+// widen: the binding is not a built-in membership role.
+func TestUpgrade_CustomProjectViewerRoleStaysCustom(t *testing.T) {
+	ctx := context.Background()
+	st, client, err := newTestStoreWithClient(t)
+	require.NoError(t, err)
+	// The template store may already hold the built-in row; remove it so
+	// the store looks like one from before this change.
+	_, err = client.RoleDefinition.Delete().Where(roledefinition.NameEQ(store.ProjectRoleViewer)).Exec(ctx)
+	require.NoError(t, err)
+
+	projectID := uuid.NewString()
+	require.NoError(t, st.CreateProject(ctx, &store.Project{ID: projectID, Name: "Upgrade", Slug: "upgrade-" + projectID[:8]}))
+	userID := uuid.NewString()
+	require.NoError(t, st.CreateUser(ctx, &store.User{ID: userID, Email: userID + "@test.com", DisplayName: "U", Role: store.UserRoleMember, Status: "active"}))
+	custom, err := st.CreateRoleDefinition(ctx, &store.RoleDefinition{
+		Name: store.ProjectRoleViewer, ScopeType: store.RoleScopeProject,
+		Permissions: []string{"project.read", "project.chat_post"},
+	})
+	require.NoError(t, err)
+	binding, err := st.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: custom.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: userID,
+		ScopeType: store.RoleScopeProject, ScopeID: projectID, CreatedBy: "test",
+	})
+	require.NoError(t, err)
+
+	srv, s := testServerOnMigratedStore(t, st)
+
+	renamed, err := s.GetRoleDefinition(ctx, custom.ID)
+	require.NoError(t, err)
+	assert.False(t, renamed.System)
+	assert.Equal(t, customRoleRenameFor(custom), renamed.Name)
+	assert.ElementsMatch(t, []string{"project.read", "project.chat_post"}, renamed.Permissions)
+	assert.False(t, store.IsBuiltInProjectMembershipRole(renamed.Name))
+
+	builtIn, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleViewer, store.RoleScopeProject)
+	require.NoError(t, err)
+	assert.True(t, builtIn.System)
+	assert.NotEqual(t, custom.ID, builtIn.ID)
+
+	gotBinding, err := s.GetRoleBinding(ctx, binding.ID)
+	require.NoError(t, err)
+	assert.Equal(t, custom.ID, gotBinding.RoleDefinitionID, "the binding still names the custom role")
+
+	// The custom role still decides what the user may do, and it is not the
+	// built-in viewer tier.
+	member := srv.CheckEffectiveMembership(ctx, userID, projectID)
+	require.NoError(t, member.Err)
+	assert.NotEqual(t, store.ProjectRoleViewer, member.Role)
+	u, err := s.GetUser(ctx, userID)
+	require.NoError(t, err)
+	project, err := s.GetProject(ctx, projectID)
+	require.NoError(t, err)
+	assert.True(t, srv.authzService.CheckAccess(ctx, userIdentityOf(u), projectResource(project), ActionChatPost).Allowed,
+		"the custom role's permissions are unchanged")
+}
+
+// customViewerStore returns a migrated store that holds a custom (non-system)
+// role named project-viewer and no built-in project-viewer row, as a store
+// from before ptone/scion#5519 would.
+func customViewerStore(t *testing.T) (store.Store, *store.RoleDefinition) {
+	t.Helper()
+	ctx := context.Background()
+	st, client, err := newTestStoreWithClient(t)
+	require.NoError(t, err)
+	_, err = client.RoleDefinition.Delete().Where(roledefinition.NameEQ(store.ProjectRoleViewer)).Exec(ctx)
+	require.NoError(t, err)
+	custom, err := st.CreateRoleDefinition(ctx, &store.RoleDefinition{
+		Name: store.ProjectRoleViewer, ScopeType: store.RoleScopeProject,
+		Permissions: []string{"project.read", "project.chat_post"},
+	})
+	require.NoError(t, err)
+	return st, custom
+}
+
+// TestRenameCustomRolesHoldingBuiltInNames_AuditedAndIdempotent: the rename
+// writes one mutation audit record (before: the name; after: the new name
+// and the role ID); running it again renames nothing and writes nothing.
+func TestRenameCustomRolesHoldingBuiltInNames_AuditedAndIdempotent(t *testing.T) {
+	ctx := context.Background()
+	st, custom := customViewerStore(t)
+
+	require.NoError(t, renameCustomRolesHoldingBuiltInNames(ctx, st))
+	got, err := st.GetRoleDefinition(ctx, custom.ID)
+	require.NoError(t, err)
+	assert.Equal(t, customRoleRenameFor(custom), got.Name)
+	audits, _, err := st.ListMutationAudits(ctx, store.MutationAuditFilter{MutationType: customRoleRenamedOp})
+	require.NoError(t, err)
+	require.Len(t, audits, 1)
+	assert.Equal(t, custom.ID, audits[0].TargetID)
+	assert.JSONEq(t, `{"name":"project-viewer"}`, audits[0].BeforeSummary)
+	assert.JSONEq(t, `{"name":"`+customRoleRenameFor(custom)+`","roleId":"`+custom.ID+`"}`, audits[0].AfterSummary)
+
+	// A second run (the next start) renames nothing and writes nothing.
+	require.NoError(t, renameCustomRolesHoldingBuiltInNames(ctx, st))
+	again, err := st.GetRoleDefinition(ctx, custom.ID)
+	require.NoError(t, err)
+	assert.Equal(t, got.Name, again.Name)
+	audits, _, err = st.ListMutationAudits(ctx, store.MutationAuditFilter{MutationType: customRoleRenamedOp})
+	require.NoError(t, err)
+	assert.Len(t, audits, 1)
+
+	// And a reconcile after it seeds the built-in row and leaves the custom one.
+	reconcileBuiltInRoles(ctx, st)
+	builtIn, err := st.GetRoleDefinitionByName(ctx, store.ProjectRoleViewer, store.RoleScopeProject)
+	require.NoError(t, err)
+	assert.True(t, builtIn.System)
+	reconcileBuiltInRoles(ctx, st)
+	still, err := st.GetRoleDefinition(ctx, custom.ID)
+	require.NoError(t, err)
+	assert.Equal(t, got.Name, still.Name, "a second reconcile changes nothing")
+}
+
+// TestRenameCustomRolesHoldingBuiltInNames_FailureReturnsError: when the
+// rename cannot be written (here the new name is taken), the error is
+// returned (the hub start fails on it), the custom row keeps its name and
+// no audit record is written.
+func TestRenameCustomRolesHoldingBuiltInNames_FailureReturnsError(t *testing.T) {
+	ctx := context.Background()
+	st, custom := customViewerStore(t)
+	_, err := st.CreateRoleDefinition(ctx, &store.RoleDefinition{
+		Name: customRoleRenameFor(custom), ScopeType: store.RoleScopeProject, Permissions: []string{"project.read"},
+	})
+	require.NoError(t, err)
+
+	err = renameCustomRolesHoldingBuiltInNames(ctx, st)
+	require.Error(t, err)
+	got, gErr := st.GetRoleDefinition(ctx, custom.ID)
+	require.NoError(t, gErr)
+	assert.Equal(t, store.ProjectRoleViewer, got.Name, "the rename rolled back")
+	audits, _, aErr := st.ListMutationAudits(ctx, store.MutationAuditFilter{MutationType: customRoleRenamedOp})
+	require.NoError(t, aErr)
+	assert.Empty(t, audits, "no audit record without the rename")
+
+	// The built-in row is never seeded beside the custom one.
+	reconcileBuiltInRoles(ctx, st)
+	rd, err := st.GetRoleDefinitionByName(ctx, store.ProjectRoleViewer, store.RoleScopeProject)
+	require.NoError(t, err)
+	assert.Equal(t, custom.ID, rd.ID)
+	assert.False(t, rd.System)
+}
+
+// TestBuiltInRoleChecks_RequireSystemRow: a custom (non-system) role that
+// holds a built-in membership name is never treated as built-in: not by the
+// store's classification, the role kind, the governance name, or the
+// effective membership tier.
+func TestBuiltInRoleChecks_RequireSystemRow(t *testing.T) {
+	custom := &store.RoleDefinition{Name: store.ProjectRoleAdmin, System: false}
+	system := &store.RoleDefinition{Name: store.ProjectRoleAdmin, System: true}
+	assert.False(t, store.IsBuiltInProjectMembershipRoleDef(custom))
+	assert.True(t, store.IsBuiltInProjectMembershipRoleDef(system))
+	assert.Equal(t, roleKindCustom, projectRoleKind(custom))
+	assert.Equal(t, roleKindBuiltIn, projectRoleKind(system))
+	assert.Equal(t, "", builtInRoleName(custom))
+	assert.Equal(t, store.ProjectRoleAdmin, builtInRoleName(system))
+	assert.Equal(t, "", builtInRoleName(nil))
+}
+
+// TestBuiltInMembershipRoleRowsNotSystem_ReportsAndDoesNotChange: the startup
+// check names a built-in membership role row that is not a system row, logs
+// an error for it and leaves it unchanged; with system rows it finds none.
+func TestBuiltInMembershipRoleRowsNotSystem_ReportsAndDoesNotChange(t *testing.T) {
+	ctx := context.Background()
+	st, client, err := newTestStoreWithClient(t)
+	require.NoError(t, err)
+	reconcileBuiltInRoles(ctx, st)
+	assert.Empty(t, builtInMembershipRoleRowsNotSystem(ctx, st), "seeded rows are system rows")
+
+	_, err = client.RoleDefinition.Update().Where(roledefinition.NameEQ(store.ProjectRoleMember)).SetSystem(false).Save(ctx)
+	require.NoError(t, err)
+	logs := captureSlog(t)
+	logs.Reset()
+	assert.Equal(t, []string{store.ProjectRoleMember}, builtInMembershipRoleRowsNotSystem(ctx, st))
+	assert.Contains(t, logs.String(), "level=ERROR")
+	assert.Contains(t, logs.String(), store.ProjectRoleMember)
+	rd, err := st.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	require.NoError(t, err)
+	assert.False(t, rd.System, "the check never changes the row")
 }

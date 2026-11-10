@@ -68,14 +68,14 @@ func TestAsyncLaunchSettings_FollowsExperiment(t *testing.T) {
 	srv, _ := testServer(t)
 	toggle := newAsyncLaunchToggle(t, srv)
 
-	assert.False(t, srv.asyncLaunchSettings().Enabled, "off by default (registry default)")
+	assert.True(t, srv.asyncLaunchSettings().Enabled, "on by default (registry default, ptone/scion#6640)")
 
-	toggle.set(true)
-	assert.True(t, srv.asyncLaunchSettings().Enabled, "on once the experiment is on")
+	toggle.set(false)
+	assert.False(t, srv.asyncLaunchSettings().Enabled, "off once an admin turns the experiment off")
 
 	// Same Server, no restart: the next read sees the change.
-	toggle.set(false)
-	assert.False(t, srv.asyncLaunchSettings().Enabled, "off again once the experiment is turned off")
+	toggle.set(true)
+	assert.True(t, srv.asyncLaunchSettings().Enabled, "on again once the experiment is turned on")
 }
 
 // newExperimentAsyncCreateServer is newAsyncCreateServer with the server's
@@ -107,8 +107,17 @@ func TestCreateAgent_AsyncLaunchFollowsExperiment(t *testing.T) {
 		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 	}
 
-	t.Run("experiment off sends a synchronous create", func(t *testing.T) {
+	t.Run("no override sends an asynchronous create (default on)", func(t *testing.T) {
 		srv, project, client, _ := newExperimentAsyncCreateServer(t)
+		create(t, srv, project, "exp-default")
+		require.Len(t, client.sends, 1)
+		assert.True(t, client.sends[0].AsyncLaunch)
+		assert.NotEmpty(t, client.sends[0].LaunchID)
+	})
+
+	t.Run("experiment off sends a synchronous create", func(t *testing.T) {
+		srv, project, client, toggle := newExperimentAsyncCreateServer(t)
+		toggle.set(false)
 		create(t, srv, project, "exp-off")
 		require.Len(t, client.sends, 1)
 		assert.False(t, client.sends[0].AsyncLaunch)

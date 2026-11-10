@@ -40,13 +40,20 @@ const WEB_KEYS = {
  */
 const UNDECLARED_ALLOWED: readonly string[] = [
   'agentMove',
+  'agentMoveRecreate',
   'asyncLaunch',
+  'asyncStart',
+  'attachmentDelivery',
+  'changedFields',
+  'clearedFields',
+  'clearedResourceSubfields',
   'emptyPerAgentWorkspace',
   'nodeImageRegistry',
   'reprovision',
   'reprovisionEmptyPerAgent',
   'startsInFlight',
   'templateTiers',
+  'unlimitedCountLimits',
 ];
 
 const serverFields: readonly string[] = fixture.fields;

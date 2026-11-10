@@ -98,31 +98,49 @@ func patchAgentConfig(t *testing.T, srv *Server, agentID string, rawConfig map[s
 	})
 }
 
-// configureUntouchedBody loads the golden fixture shared with
-// agent-configure-build-config.test.ts's "R2-2" vitest case
-// (web/src/components/pages/agent-configure-build-config.test.ts): the exact
-// JSON body the real, fixed buildConfig emits for a fully untouched form
-// loaded from a live config with model "golden-model" and nothing else set.
-// Loading the SAME file in both places means a future buildConfig change
-// that stops matching it breaks the vitest case directly, instead of
-// leaving this Go test to silently test a body nobody's buildConfig
-// actually produces anymore (ptone/scion#2493 R2-2).
+// configureUntouchedBody loads the body the retired Configure page sent for
+// a fully untouched form loaded from a live config with model
+// "golden-model" and nothing else set (ptone/scion#2493 R2-2). The page and
+// its vitest case are gone (ptone/scion#3975); the Edit page sends only
+// touched fields, and its bodies are the agent-edit-*-body.json goldens
+// (TestAgentEditGoldens). The fixture stays as a hub-side regression body:
+// a browser tab still running a bundle from before the page was retired
+// may send it until it is reloaded.
+//
+// The helper leaves out the body's two count limits ("max_turns": 0 and
+// "max_model_calls": 0, which the page sent for untouched limits). Since
+// count limits are typed (ptone/scion#5605), a 0 is Unlimited, so the full
+// body is no longer an untouched save; the tests that use this helper are
+// about the other keys. configureBodyFull returns the body as sent, and
+// TestAgentConfigPatch_RetiredConfigureBodyMeansUnlimited pins what it
+// does now.
 func configureUntouchedBody(t *testing.T) map[string]interface{} {
 	t.Helper()
-	return loadTestdataJSONBody(t, "configure-untouched-body.json")
+	return withoutCountLimits(configureBodyFull(t, "configure-untouched-body.json"))
 }
 
-// configureRowEditBody loads the golden fixture shared with
-// agent-configure-build-config.test.ts's row-edit vitest case: the exact body
-// the real buildConfig emits when the user adds one custom env row (FOO) on
-// an agent whose AppliedConfig.Env has an unrelated template key
-// (TEMPLATE_KEY) and whose auto-expose control is untouched, so no
-// SCION_AUTO_EXPOSE_* key is sent. Loading the SAME file in both places means
-// a future buildConfig change that stops matching it breaks the vitest case
-// directly.
+// configureBodyFull loads a retired Configure page body as it was sent.
+func configureBodyFull(t *testing.T, name string) map[string]interface{} {
+	t.Helper()
+	return loadTestdataJSONBody(t, name)
+}
+
+// withoutCountLimits returns body without max_turns and max_model_calls.
+func withoutCountLimits(body map[string]interface{}) map[string]interface{} {
+	delete(body, "max_turns")
+	delete(body, "max_model_calls")
+	return body
+}
+
+// configureRowEditBody loads the body the retired Configure page sent when
+// the user added one custom env row (FOO) on an agent whose
+// AppliedConfig.Env has an unrelated template key (TEMPLATE_KEY) and whose
+// auto-expose control was untouched, so no SCION_AUTO_EXPOSE_* key is sent.
+// Kept as a hub-side regression body, like configureUntouchedBody, and,
+// like it, without the count limits (configureBodyFull has them).
 func configureRowEditBody(t *testing.T) map[string]interface{} {
 	t.Helper()
-	return loadTestdataJSONBody(t, "configure-row-edit-body.json")
+	return withoutCountLimits(configureBodyFull(t, "configure-row-edit-body.json"))
 }
 
 // runMigrationViaHandler POSTs body to the migration run endpoint, expects

@@ -18,8 +18,6 @@ package hub
 
 import (
 	"context"
-	"go/ast"
-	"go/token"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
@@ -29,7 +27,8 @@ import (
 )
 
 // The subject read check of a review grant (ptone/scion#4538):
-// artifactHost.ReviewSubjectAuthorize.
+// artifactHost.ReviewSubjectAuthorize. Its identity builder's C1 pin is
+// TestNamedUserSubjectNeverEntersAContext (artifacts_grant_notify_test.go).
 
 // TestArtifactHostReviewSubjectAuthorize: the subject check answers for
 // the named user, from that user's own bindings, never the caller's, and
@@ -93,95 +92,5 @@ func TestArtifactHostReviewSubjectParity(t *testing.T) {
 				assert.Equal(t, asCaller, asSubject, "user %s scope %s %s", userID, scope, perm)
 			}
 		}
-	}
-}
-
-// TestReviewSubjectIdentityNeverEntersAContext pins that the identity
-// built for the subject read check stays a policy subject: nothing in
-// artifacts_review_subject.go puts any identity into a context, so the
-// artifact service, which learns its caller only from ctx, can never take
-// a review subject for the caller.
-func TestReviewSubjectIdentityNeverEntersAContext(t *testing.T) {
-	forbidden := map[string]bool{
-		"WithValue":                    true,
-		"contextWithIdentity":          true,
-		"contextWithCredentialContext": true,
-		"WithIdentity":                 true,
-		"withIdentity":                 true,
-		"ContextWithIdentity":          true,
-	}
-	calls := 0
-	forEachHubFile(t, func(name string, _ *token.FileSet, f *ast.File) {
-		if name != "artifacts_review_subject.go" {
-			return
-		}
-		ast.Inspect(f, func(n ast.Node) bool {
-			call, ok := n.(*ast.CallExpr)
-			if !ok {
-				return true
-			}
-			calls++
-			if sym := extractCallSymbol(call); forbidden[sym] {
-				t.Errorf("artifacts_review_subject.go calls %s: a review subject identity must never enter a context", sym)
-			}
-			return true
-		})
-	})
-	if calls == 0 {
-		t.Fatal("artifacts_review_subject.go not found or has no calls: scanner broken")
-	}
-}
-
-// TestReviewSubjectIdentityOnlyASubject pins the one use of
-// reviewSubjectIdentity's result: it is assigned in ReviewSubjectAuthorize
-// and passed only as the identity argument of CheckAccess, and the helper
-// is called nowhere else in pkg/hub.
-func TestReviewSubjectIdentityOnlyASubject(t *testing.T) {
-	callers := 0
-	forEachHubFile(t, func(name string, _ *token.FileSet, f *ast.File) {
-		ast.Inspect(f, func(n ast.Node) bool {
-			fd, ok := n.(*ast.FuncDecl)
-			if !ok || fd.Body == nil {
-				return true
-			}
-			ast.Inspect(fd.Body, func(m ast.Node) bool {
-				call, ok := m.(*ast.CallExpr)
-				if ok && extractCallSymbol(call) == "reviewSubjectIdentity" {
-					callers++
-					if name != "artifacts_review_subject.go" || fd.Name.Name != "ReviewSubjectAuthorize" {
-						t.Errorf("%s:%s calls reviewSubjectIdentity; only ReviewSubjectAuthorize may", name, fd.Name.Name)
-					}
-				}
-				return true
-			})
-			if fd.Name.Name != "ReviewSubjectAuthorize" || name != "artifacts_review_subject.go" {
-				return false
-			}
-			// Every use of the identity variable is either its assignment,
-			// the nil check, or the identity argument of CheckAccess.
-			uses := 0
-			ast.Inspect(fd.Body, func(m ast.Node) bool {
-				call, ok := m.(*ast.CallExpr)
-				if !ok {
-					return true
-				}
-				for i, arg := range call.Args {
-					if id, ok := arg.(*ast.Ident); ok && id.Name == "identity" {
-						uses++
-						if extractCallSymbol(call) != "CheckAccess" || i != 1 {
-							t.Errorf("identity passed to %s (arg %d); only CheckAccess's subject argument is allowed", extractCallSymbol(call), i)
-						}
-					}
-				}
-				return true
-			})
-			if uses != 1 {
-				t.Errorf("identity passed to %d calls in ReviewSubjectAuthorize, want exactly 1 (CheckAccess)", uses)
-			}
-			return false
-		})
-	})
-	if callers != 1 {
-		t.Errorf("reviewSubjectIdentity has %d callers, want 1", callers)
 	}
 }

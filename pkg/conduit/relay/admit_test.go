@@ -561,3 +561,77 @@ func (h *captureHandler) count(key, value string) int {
 	}
 	return n
 }
+
+// TestAgentSessionsAdmittedBySource: each admitted agent session is counted
+// once under its incarnation source (generation for a Hello without a
+// launch id, launch_id for one with it); user sessions are not counted.
+func TestAgentSessionsAdmittedBySource(t *testing.T) {
+	w := relaytest.NewWorld(t)
+	a := w.StartNode("relay-a", nil)
+	w.SetPrincipal("a", agentPrincipal("L2", 3))
+	w.SetPrincipal("user", relay.Principal{Kind: registry.PrincipalUser, ID: "user-1"})
+
+	want := func(launchID, generation uint64) {
+		t.Helper()
+		got := a.Relay.AgentSessionsAdmitted()
+		if got[relay.IncarnationSourceLaunchID] != launchID || got[relay.IncarnationSourceGeneration] != generation {
+			t.Fatalf("AgentSessionsAdmitted = %v; want launch_id=%d generation=%d", got, launchID, generation)
+		}
+	}
+	want(0, 0)
+
+	// No session of the current launch is live, so the fallback is admitted.
+	fb, _ := a.MustDial("a", relaytest.AgentHello(agentID, "", "", "pty"), conduit.Config{})
+	want(0, 1)
+	_ = fb.Close()
+	_ = relaytest.Wait(t, a.Served, "fallback session to end")
+
+	_, _ = a.MustDial("a", relaytest.AgentHello(agentID, "L2", "", "pty"), conduit.Config{})
+	want(1, 1)
+
+	_, _ = a.MustDial("user", relaytest.UserHello("user-1"), conduit.Config{})
+	want(1, 1)
+}
+
+// keyCount returns how many records carry an attribute named key.
+func (h *captureHandler) keyCount(key string) int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	n := 0
+	for _, r := range h.recs {
+		r.Attrs(func(a slog.Attr) bool {
+			if a.Key == key {
+				n++
+			}
+			return true
+		})
+	}
+	return n
+}
+
+// TestSessionAdmittedLogsIngressInstance (ptone/scion#6562): a session a
+// hub's ingress proxied is logged at admission with ingress_instance, the
+// hub instance it came in through; a direct session has no such field.
+func TestSessionAdmittedLogsIngressInstance(t *testing.T) {
+	logs := &captureHandler{}
+	w := relaytest.NewWorld(t)
+	a := w.StartNode("relay-a", func(c *relay.Config) { c.Logger = slog.New(logs) })
+	proxied := agentPrincipal("L1", 1)
+	proxied.IngressInstance = "hub-7"
+	w.SetPrincipal("proxied", proxied)
+	_, _ = a.MustDial("proxied", relaytest.AgentHello(agentID, "L1", "", "pty"), conduit.Config{})
+	if n := logs.count("ingress_instance", "hub-7"); n != 1 {
+		t.Fatalf("ingress_instance=hub-7 on %d admission records, want 1", n)
+	}
+
+	direct := relay.Principal{Kind: registry.PrincipalAgent, ID: "agent-direct", ProjectID: project,
+		Agent: relay.AgentIncarnationFacts{LaunchID: "L9", Generation: 1}}
+	w.SetPrincipal("direct", direct)
+	_, _ = a.MustDial("direct", relaytest.AgentHello("agent-direct", "L9", "", "pty"), conduit.Config{})
+	if n := logs.count("principal_id", "agent-direct"); n == 0 {
+		t.Fatal("the direct session was not logged at admission")
+	}
+	if n := logs.keyCount("ingress_instance"); n != 1 {
+		t.Fatalf("%d records carry ingress_instance, want 1 (the proxied session only)", n)
+	}
+}

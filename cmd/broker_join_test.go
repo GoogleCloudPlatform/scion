@@ -343,8 +343,9 @@ func TestBrokerJoinToken_MintOnOneMachineJoinOnAnother(t *testing.T) {
 	t.Setenv("SCION_DEV_TOKEN", joinTestDevToken)
 	hubBrokersJoinTokenJSON = true
 	hubBrokersJoinTokenTTL = 10 * time.Minute
-	stdout, _, err := runJoinTokenCreateForTest(t, "headless-build-host")
-	require.NoError(t, err)
+	mintStart := time.Now()
+	stdout, stderr, err := runJoinTokenCreateForTest(t, "headless-build-host")
+	require.NoError(t, err, "mint join token against hub %s (after %s); stderr: %s", ts.URL, time.Since(mintStart), stderr)
 	var minted brokerJoinTokenOutput
 	require.NoError(t, json.Unmarshal([]byte(stdout), &minted), "stdout: %s", stdout)
 	require.NotEmpty(t, minted.BrokerID)
@@ -360,9 +361,14 @@ func TestBrokerJoinToken_MintOnOneMachineJoinOnAnother(t *testing.T) {
 	t.Setenv(envBrokerJoinToken, minted.JoinToken)
 	brokerJoinBrokerID = minted.BrokerID
 
-	joinOut, _ := captureStdoutStderr(t, func() {
-		require.NoError(t, runBrokerJoin(brokerJoinCmd, nil))
+	// Assert outside the capture: a failed require inside fn would end the
+	// test before the command's output is returned and shown.
+	var joinErr error
+	joinStart := time.Now()
+	joinOut, joinErrOut := captureStdoutStderr(t, func() {
+		joinErr = runBrokerJoin(brokerJoinCmd, nil)
 	})
+	require.NoError(t, joinErr, "join against hub %s (after %s); stdout: %s; stderr: %s", ts.URL, time.Since(joinStart), joinOut, joinErrOut)
 	assert.Contains(t, joinOut, "Broker "+minted.BrokerID+" joined hub")
 	assert.Equal(t, []string{""}, joinAuth.all(), "the join request carries no Authorization header")
 

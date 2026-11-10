@@ -63,15 +63,20 @@ import (
 // Returns the fresh config, any warnings to surface on the plan (e.g. the
 // legacy-fallback notice), and an error only for a genuine failure (missing
 // AppliedConfig, or a workspace storage timeout from deriveAgentConfig,
-// which wraps errWorkspaceContentTimeout).
+// which wraps errWorkspaceStorageUnavailable).
 func (s *Server) buildFreshAppliedConfig(ctx context.Context, agent *store.Agent, project *store.Project, imageRegistry string) (*store.AgentAppliedConfig, []string, error) {
-	return s.buildPatchedAppliedConfig(ctx, agent, project, fixedImageRegistry(imageRegistry), nil)
+	return s.buildPatchedAppliedConfig(ctx, agent, project, fixedImageRegistry(imageRegistry), nil, nil)
 }
 
 // imageRegistryResolver returns the registry the hub rewrites an agent's
 // explicit image to for the new generation's profile ("" = no rewrite). It
 // is bound to the broker the new generation runs on (ptone/scion#3916).
 type imageRegistryResolver func(profile string) string
+
+// imageTagResolver returns the image_tag the hub applies to an agent's
+// images for the new generation's profile ("" = none), bound to the broker
+// the new generation runs on (ptone/scion#6625). Nil = none.
+type imageTagResolver func(profile string) string
 
 // fixedImageRegistry is an imageRegistryResolver that ignores the profile.
 func fixedImageRegistry(registry string) imageRegistryResolver {
@@ -86,9 +91,10 @@ func fixedImageRegistry(registry string) imageRegistryResolver {
 // Role and GCPIdentity replace the kept values. A nil patch is exactly
 // buildFreshAppliedConfig. agent.AppliedConfig is never mutated.
 //
-// resolveRegistry is called once the new generation's profile is settled,
-// so the stored image is rewritten for that profile and the target broker.
-func (s *Server) buildPatchedAppliedConfig(ctx context.Context, agent *store.Agent, project *store.Project, resolveRegistry imageRegistryResolver, patch *reincarnatePatch) (*store.AgentAppliedConfig, []string, error) {
+// resolveRegistry and resolveTag (nil = no tag) are called once the new
+// generation's profile is settled, so the stored image is rewritten for
+// that profile and the target broker.
+func (s *Server) buildPatchedAppliedConfig(ctx context.Context, agent *store.Agent, project *store.Project, resolveRegistry imageRegistryResolver, resolveTag imageTagResolver, patch *reincarnatePatch) (*store.AgentAppliedConfig, []string, error) {
 	old := agent.AppliedConfig
 	if old == nil {
 		return nil, nil, fmt.Errorf("agent %s has no applied config", agent.ID)
@@ -340,8 +346,14 @@ func (s *Server) buildPatchedAppliedConfig(ctx context.Context, agent *store.Age
 	// rewrites every image to its registry at send time and the broker echoes
 	// that form back. RewriteImageRegistry is a no-op for an empty registry
 	// and for an already-qualified name. The registry is the one for the
-	// new generation's profile on the broker it runs on.
-	fresh.Image = config.RewriteImageRegistry(fresh.Image, resolveRegistry(fresh.Profile))
+	// new generation's profile on the broker it runs on. The image_tag
+	// for that profile and broker is applied first (RewriteImageRef), as
+	// the dispatcher and the broker apply it (ptone/scion#6625).
+	tag := ""
+	if resolveTag != nil {
+		tag = resolveTag(fresh.Profile)
+	}
+	fresh.Image = config.RewriteImageRef(fresh.Image, resolveRegistry(fresh.Profile), tag)
 
 	// deriveAgentConfig's timezone capture already stripped TZ from the
 	// fresh env copies; strip again so no step after it can leave one.
@@ -353,14 +365,21 @@ func (s *Server) buildPatchedAppliedConfig(ctx context.Context, agent *store.Age
 // reincarnate plan's image steps, or returns nil (logged) if they cannot be
 // loaded, in which case those steps contribute nothing.
 //
-// The settings view comes from the hub's own config.LoadEffectiveSettings(""),
-// which — in postgres mode — already reflects DB-backed harness_configs and
+// The settings view comes from the hub's own config.LoadEffectiveSettings
+// of its global settings directory (never a project found from the process
+// working directory, ptone/scion#5363), which — in postgres mode — already
+// reflects DB-backed harness_configs and
 // profiles through the process-global settings overlay that
 // OperationalSettings.Refresh populates (pkg/config/settings_overlay.go), the
 // same overlay a co-located broker's own LoadEffectiveSettings call sees. In
 // file/SQLite mode it reads the hub's settings.yaml directly.
 func (s *Server) reincarnateImageSettings() *config.VersionedSettings {
-	vs, _, err := config.LoadEffectiveSettings("")
+	globalDir, err := config.GetGlobalDir()
+	if err != nil {
+		s.agentLifecycleLog.Warn("reincarnate: failed to resolve the global settings directory for the image plan", "error", err)
+		return nil
+	}
+	vs, _, err := config.LoadEffectiveSettings(globalDir)
 	if err != nil {
 		s.agentLifecycleLog.Warn("reincarnate: failed to load settings for the image plan", "error", err)
 		return nil
@@ -402,6 +421,12 @@ type imageRegistryProvider interface {
 	ImageRegistryFor(brokerID, profile string) string
 }
 
+// imageTagProvider is implemented by dispatchers that apply image_tag to
+// the images they send (ptone/scion#6625).
+type imageTagProvider interface {
+	ImageTagFor(brokerID, profile string) string
+}
+
 // agentImageRegistryTarget returns the broker and profile an agent's image
 // registry is resolved for: its runtime broker and its saved profile.
 func agentImageRegistryTarget(agent *store.Agent) (brokerID, profile string) {
@@ -438,6 +463,18 @@ func dispatchImageRegistryForTarget(dispatcher AgentDispatcher, brokerID, profil
 func reincarnateImageRegistry(dispatcher AgentDispatcher, brokerID string) imageRegistryResolver {
 	return func(profile string) string {
 		return dispatchImageRegistryForTarget(dispatcher, brokerID, profile)
+	}
+}
+
+// reincarnateImageTag returns the image_tag resolver for a reincarnation's
+// new generation on brokerID, as reincarnateImageRegistry does for the
+// registry.
+func reincarnateImageTag(dispatcher AgentDispatcher, brokerID string) imageTagResolver {
+	return func(profile string) string {
+		if p, ok := dispatcher.(imageTagProvider); ok {
+			return p.ImageTagFor(brokerID, profile)
+		}
+		return ""
 	}
 }
 
@@ -489,6 +526,9 @@ func legacyCreateInputsFromAppliedConfig(old *store.AgentAppliedConfig) (*store.
 		// provisions afresh, so the new generation starts with no clears
 		// (ptone/scion#3906).
 		inline.ClearedFields = nil
+		// So does changed_fields: the reprovision renders every
+		// provision-rendered key afresh (ptone/scion#3982).
+		inline.ChangedFields = nil
 
 		if len(inline.Skills) > 0 {
 			refs := make([]string, 0, len(inline.Skills))
@@ -560,9 +600,6 @@ func computeReincarnationPlan(old, fresh *store.AgentAppliedConfig, warnings []s
 		EnvKeys:    diffEnvKeys(old.Env, fresh.Env),
 		Branch:     fresh.Branch,
 		Warnings:   warnings,
-
-		SharedDirBackends:   fresh.SharedDirBackendChanges,
-		AllowEmptySharedDir: fresh.AllowEmptySharedDir,
 	}
 	if old.Image != "" && config.RewriteImageRegistry(old.Image, imageRegistry) == fresh.Image {
 		plan.Image.Old = fresh.Image

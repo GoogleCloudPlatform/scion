@@ -39,6 +39,9 @@ Key properties:
 - A GCS bucket for Hub artifacts.
 - Filestore/NFS details for Cloud Run Instances workspaces.
 - A VPC network/subnetwork usable by Cloud Run Instances.
+- `iam.serviceAccounts.actAs` for the Hub service account on the runtime
+  service account (`cloudrun.service_account`). `deploy.sh` grants it; see
+  [actAs on the runtime service account](#actas-on-the-runtime-service-account).
 
 ## Required Configuration
 
@@ -125,8 +128,8 @@ that URL unless `SCION_PUBLIC_URL` was provided.
 
 ## CPU allocation and async agent launch
 
-With asynchronous agent create (the `hub.async_agent_launch` experiment on
-the Hub), the Hub answers the create request as soon as the broker accepts it, and the
+With asynchronous agent create (the `hub.async_agent_launch` experiment,
+on by default on the Hub), the Hub answers the create request as soon as the broker accepts it, and the
 broker finishes the launch in the background. On Cloud Run that background
 work needs CPU outside requests:
 
@@ -150,6 +153,41 @@ work needs CPU outside requests:
   with `--no-cpu-throttling`. `deploy.sh` sets both. If you later redeploy
   with CPU throttling, remove the variable too: it is an assertion, not a
   check.
+
+## actAs on the runtime service account
+
+The cloudrun runtime creates each agent Instance to run as
+`cloudrun.service_account` (the runtime service account in
+`hub-settings-template.yaml`). Cloud Run allows that only when the identity
+creating the Instance, the Hub service account, holds
+`iam.serviceAccounts.actAs` on that service account, which
+`roles/iam.serviceAccountUser` grants. Without it every agent start fails
+with an error that contains:
+
+```
+Permission 'iam.serviceaccounts.actAs' denied on service account <cloudrun.service_account> (or it may not exist)
+```
+
+This also applies when `cloudrun.service_account` is the Hub service account
+itself: a service account does not implicitly have actAs on itself, so it
+needs a binding on its own account. `deploy.sh` grants
+`roles/iam.serviceAccountUser` to the Hub service account on the project and
+on the runtime service account. If you set up the service accounts by hand,
+or point `cloudrun.service_account` at another account, grant it on that
+account (no Hub restart needed; IAM changes can take a few minutes to apply):
+
+```bash
+# INSTANCE_SA is cloudrun.service_account; it may be the Hub SA itself
+INSTANCE_SA=scion-hub-sa@PROJECT_ID.iam.gserviceaccount.com
+gcloud iam service-accounts add-iam-policy-binding "$INSTANCE_SA" \
+  --member="serviceAccount:scion-hub-sa@PROJECT_ID.iam.gserviceaccount.com" \
+  --role="roles/iam.serviceAccountUser"
+```
+
+`scion doctor --profile <cloudrun profile>` checks this grant ("Cloud Run
+Instance Service Account (actAs)"). It checks the credentials doctor runs
+with, so run it with the Hub service account's credentials to check the
+identity that starts agents; a missing grant is reported as a warning.
 
 ## Hub-minted service accounts
 
@@ -215,6 +253,14 @@ gcloud iap web add-iam-policy-binding \
   --member=user:EMAIL \
   --role=roles/iap.httpsResourceAccessor
 ```
+
+## Troubleshooting
+
+### Every agent start fails with `Permission 'iam.serviceaccounts.actAs' denied`
+
+The Hub service account lacks `roles/iam.serviceAccountUser` on
+`cloudrun.service_account`, possibly its own account. Grant it as shown in
+[actAs on the runtime service account](#actas-on-the-runtime-service-account).
 
 ## Files
 

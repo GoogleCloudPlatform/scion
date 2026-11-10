@@ -1,0 +1,14 @@
+# Pins for build.sh: golangci-lint built from source with honnef.co/go/tools
+# patched for dominikh/go-tools#1839 (see README.md). Sourced by build.sh as
+# shell; keep it to KEY=value lines.
+#
+# The *_SUM values are Go module checksums (the h1: hash go.sum records and
+# sum.golang.org serves): `go mod download -json <module>@<version>` prints
+# them as "Sum". GO_TOOLS_VERSION must be the honnef.co/go/tools version that
+# golangci-lint's own go.mod requires; build.sh checks this.
+GOLANGCI_LINT_VERSION=v2.15.0
+GOLANGCI_LINT_SUM=h1:w94zf8HAYI7hm3164kwKsvZRuqXvY+YxeFoTbu1OLg8=
+GO_TOOLS_VERSION=v0.8.2
+GO_TOOLS_SUM=h1:+jPbCzuYxYrcoOvCecYUFDj+XJQRmzIhJmlbpps21Zk=
+# sha256sum go-tools-1839.patch
+PATCH_SHA256=8e52b90c9182e54c5d907504b3b1a9af30e36edc5243e1ce4662df5fe16f2182

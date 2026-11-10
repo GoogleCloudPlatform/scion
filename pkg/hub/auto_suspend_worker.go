@@ -155,8 +155,8 @@ func (s *Server) runAutoSuspendWorker() {
 }
 
 // runAutoSuspendBatch runs one batch and then removes its agents from the
-// queued set. A panic in the batch (dispatcher, store, harness or
-// sync-back) is recovered and logged, as the scheduler did when the batch
+// queued set. A panic in the batch (dispatcher, store or harness) is
+// recovered and logged, as the scheduler did when the batch
 // ran on its goroutine: the hub keeps running, the batch's agents are
 // still removed from the queued set, and the worker goes on with the next
 // batch or exits normally, so later hand-offs are still processed. The
@@ -180,6 +180,17 @@ func (s *Server) runAutoSuspendBatch(ctx context.Context, batch []store.Agent) {
 	s.autoSuspendStalledAgents(ctx, batch)
 }
 
+// haltAutoSuspendWorker drops later hand-offs and pending agents without
+// waiting for the auto-suspend in flight (stopAutoSuspendWorker does).
+// The hub calls it when it begins shutting down (Server.BeginShutdown,
+// ptone/scion#5054). It is idempotent.
+func (s *Server) haltAutoSuspendWorker() {
+	w := &s.autoSuspend
+	w.mu.Lock()
+	w.stopped = true
+	w.mu.Unlock()
+}
+
 // stopAutoSuspendWorker stops the auto-suspend worker: later hand-offs and
 // pending agents are dropped, and it waits for the worker goroutine to end,
 // at most until ctx is done or autoSuspendStopGrace has passed. The caller
@@ -187,9 +198,7 @@ func (s *Server) runAutoSuspendBatch(ctx context.Context, batch []store.Agent) {
 // starts; the one in flight runs to the end of its own bound.
 func (s *Server) stopAutoSuspendWorker(ctx context.Context) {
 	w := &s.autoSuspend
-	w.mu.Lock()
-	w.stopped = true
-	w.mu.Unlock()
+	s.haltAutoSuspendWorker()
 
 	done := make(chan struct{})
 	go func() {

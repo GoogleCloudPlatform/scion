@@ -1,0 +1,12 @@
+=== RUN   TestFailSub
+=== RUN   TestFailSub/ok
+    toy_test.go:59: passing sub log
+=== RUN   TestFailSub/bad
+    toy_test.go:61: before
+    toy_test.go:62: boom
+        second line
+        third line
+--- FAIL: TestFailSub (0.00s)
+    --- PASS: TestFailSub/ok (0.00s)
+    --- FAIL: TestFailSub/bad (0.00s)
+FAIL

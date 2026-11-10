@@ -53,6 +53,13 @@ type messagingResponse struct {
 	// OffloadThresholdRunes is the large-DM offload threshold
 	// (ptone/scion#2257). Compiled default 0 (disabled).
 	OffloadThresholdRunes *int `json:"offload_threshold_runes"`
+	// AttachmentDeliveryMaxBytes and AttachmentInboxRetentionDays are the
+	// attachment delivery settings (ptone/scion#4596).
+	AttachmentDeliveryMaxBytes   *int64 `json:"attachment_delivery_max_bytes"`
+	AttachmentInboxRetentionDays *int   `json:"attachment_inbox_retention_days"`
+	// FailedMessageRetentionDays is how long a failed message to an agent
+	// is kept before the failed-message purge deletes it.
+	FailedMessageRetentionDays *int `json:"failed_message_retention_days"`
 	// Revision is the settings section revision, used for CAS on security-
 	// critical flag changes.
 	Revision int64 `json:"revision"`
@@ -64,6 +71,9 @@ type messagingPutRequest struct {
 	ConversationEnvelopeSwitch   *bool  `json:"conversation_envelope_switch,omitempty"`
 	CrossProjectMessagingEnabled *bool  `json:"cross_project_messaging_enabled,omitempty"`
 	OffloadThresholdRunes        *int   `json:"offload_threshold_runes,omitempty"`
+	AttachmentDeliveryMaxBytes   *int64 `json:"attachment_delivery_max_bytes,omitempty"`
+	AttachmentInboxRetentionDays *int   `json:"attachment_inbox_retention_days,omitempty"`
+	FailedMessageRetentionDays   *int   `json:"failed_message_retention_days,omitempty"`
 	ExpectedRevision             *int64 `json:"expected_revision,omitempty"`
 }
 
@@ -74,12 +84,18 @@ func (s *Server) handleGetMessaging(w http.ResponseWriter) {
 	envelopeSwitch := false
 	crossProjectEnabled := false
 	offloadThreshold := 0
+	deliveryMax := DefaultAttachmentDeliveryMaxBytes
+	retention := DefaultAttachmentInboxRetentionDays
+	failedRetention := DefaultFailedMessageRetentionDays
 	var revision int64
 
 	if ops := s.GetOperationalSettings(); ops != nil {
 		envelopeSwitch = ops.ConversationEnvelopeSwitch()
 		crossProjectEnabled = ops.CrossProjectMessagingEnabled()
 		offloadThreshold = ops.OffloadThresholdRunes()
+		deliveryMax = ops.AttachmentDeliveryMaxBytes()
+		retention = ops.AttachmentInboxRetentionDays()
+		failedRetention = ops.FailedMessageRetentionDays()
 		revision = ops.SectionRevision("messaging")
 	}
 
@@ -87,6 +103,9 @@ func (s *Server) handleGetMessaging(w http.ResponseWriter) {
 		ConversationEnvelopeSwitch:   &envelopeSwitch,
 		CrossProjectMessagingEnabled: &crossProjectEnabled,
 		OffloadThresholdRunes:        &offloadThreshold,
+		AttachmentDeliveryMaxBytes:   &deliveryMax,
+		AttachmentInboxRetentionDays: &retention,
+		FailedMessageRetentionDays:   &failedRetention,
 		Revision:                     revision,
 	})
 }
@@ -132,12 +151,18 @@ func (s *Server) handlePutMessaging(w http.ResponseWriter, r *http.Request) {
 	currentEnvelope := ops.ConversationEnvelopeSwitch()
 	currentCrossProject := ops.CrossProjectMessagingEnabled()
 	currentOffloadThreshold := ops.OffloadThresholdRunes()
+	currentDeliveryMax := ops.AttachmentDeliveryMaxBytes()
+	currentRetention := ops.AttachmentInboxRetentionDays()
+	currentFailedRetention := ops.FailedMessageRetentionDays()
 	currentRevision := ops.SectionRevision("messaging")
 
 	ms := opsettings.MessagingSettings{
 		ConversationEnvelopeSwitch:   &currentEnvelope,
 		CrossProjectMessagingEnabled: &currentCrossProject,
 		OffloadThresholdRunes:        &currentOffloadThreshold,
+		AttachmentDeliveryMaxBytes:   &currentDeliveryMax,
+		AttachmentInboxRetentionDays: &currentRetention,
+		FailedMessageRetentionDays:   &currentFailedRetention,
 	}
 
 	// Apply per-field updates or resets.
@@ -192,6 +217,44 @@ func (s *Server) handlePutMessaging(w http.ResponseWriter, r *http.Request) {
 		ms.OffloadThresholdRunes = &defaultVal
 	}
 
+	// attachment_delivery_max_bytes and attachment_inbox_retention_days
+	// (ptone/scion#4596): not security-critical; null resets to the
+	// compiled default.
+	if body.AttachmentDeliveryMaxBytes != nil {
+		if *body.AttachmentDeliveryMaxBytes < 0 {
+			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "attachment_delivery_max_bytes must not be negative", nil)
+			return
+		}
+		ms.AttachmentDeliveryMaxBytes = body.AttachmentDeliveryMaxBytes
+	} else if fp != nil && fp.has("attachment_delivery_max_bytes") {
+		defaultVal := DefaultAttachmentDeliveryMaxBytes
+		ms.AttachmentDeliveryMaxBytes = &defaultVal
+	}
+	if body.AttachmentInboxRetentionDays != nil {
+		if *body.AttachmentInboxRetentionDays < 1 {
+			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "attachment_inbox_retention_days must be at least 1", nil)
+			return
+		}
+		ms.AttachmentInboxRetentionDays = body.AttachmentInboxRetentionDays
+	} else if fp != nil && fp.has("attachment_inbox_retention_days") {
+		defaultVal := DefaultAttachmentInboxRetentionDays
+		ms.AttachmentInboxRetentionDays = &defaultVal
+	}
+
+	// failed_message_retention_days: not security-critical; null resets
+	// to the compiled default. The purge reads it on every run, so a
+	// change takes effect without a restart.
+	if body.FailedMessageRetentionDays != nil {
+		if *body.FailedMessageRetentionDays < 1 {
+			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "failed_message_retention_days must be at least 1", nil)
+			return
+		}
+		ms.FailedMessageRetentionDays = body.FailedMessageRetentionDays
+	} else if fp != nil && fp.has("failed_message_retention_days") {
+		defaultVal := DefaultFailedMessageRetentionDays
+		ms.FailedMessageRetentionDays = &defaultVal
+	}
+
 	doc, err := json.Marshal(ms)
 	if err != nil {
 		slog.Error("PUT messaging: failed to marshal messaging settings", "error", err)
@@ -228,11 +291,17 @@ func (s *Server) handlePutMessaging(w http.ResponseWriter, r *http.Request) {
 	resultEnvelope := ops.ConversationEnvelopeSwitch()
 	resultCrossProject := ops.CrossProjectMessagingEnabled()
 	resultOffloadThreshold := ops.OffloadThresholdRunes()
+	resultDeliveryMax := ops.AttachmentDeliveryMaxBytes()
+	resultRetention := ops.AttachmentInboxRetentionDays()
+	resultFailedRetention := ops.FailedMessageRetentionDays()
 	resultRevision := ops.SectionRevision("messaging")
 	writeJSON(w, http.StatusOK, messagingResponse{
 		ConversationEnvelopeSwitch:   &resultEnvelope,
 		CrossProjectMessagingEnabled: &resultCrossProject,
 		OffloadThresholdRunes:        &resultOffloadThreshold,
+		AttachmentDeliveryMaxBytes:   &resultDeliveryMax,
+		AttachmentInboxRetentionDays: &resultRetention,
+		FailedMessageRetentionDays:   &resultFailedRetention,
 		Revision:                     resultRevision,
 	})
 }

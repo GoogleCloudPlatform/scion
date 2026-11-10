@@ -67,11 +67,14 @@ type fakeGoogleValidator struct {
 
 type fakeUserStore struct {
 	store.Store
-	mu           sync.Mutex
-	users        map[string]*store.User // by ID
-	usersByEmail map[string]*store.User // by email (normalized lower-case key)
-	createErr    error
-	updateErr    error
+	mu                   sync.Mutex
+	users                map[string]*store.User // by ID
+	usersByEmail         map[string]*store.User // by email (normalized lower-case key)
+	createErr            error
+	updateErr            error
+	updateCalls          int
+	lastLoginUpdateCalls int
+	lastLoginUpdateErr   error
 }
 
 func newFakeUserStore() *fakeUserStore {
@@ -103,10 +106,6 @@ func addUser(s *fakeUserStore, id, email, role, status string) *store.User {
 	s.mu.Unlock()
 	return u
 }
-
-// alwaysAuthorized is a permissive authChecker for tests that don't exercise
-// the authorization policy path.
-func alwaysAuthorized(_ context.Context, _ string) bool { return true }
 
 // newTestResolver builds a GoogleIdentityResolver for tests. roleFor may be
 // nil (defaults to "member", matching the exchange's pre-refactor hardcoded
@@ -241,12 +240,28 @@ func (s *fakeUserStore) CreateUser(_ context.Context, user *store.User) error {
 func (s *fakeUserStore) UpdateUser(_ context.Context, user *store.User) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.updateCalls++
 	if s.updateErr != nil {
 		return s.updateErr
 	}
 	cp := *user
 	s.users[user.ID] = &cp
 	s.usersByEmail[strings.ToLower(user.Email)] = &cp
+	return nil
+}
+
+func (s *fakeUserStore) UpdateUserLastLogin(_ context.Context, id string, timestamp time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lastLoginUpdateCalls++
+	if s.lastLoginUpdateErr != nil {
+		return s.lastLoginUpdateErr
+	}
+	u, ok := s.users[id]
+	if !ok {
+		return store.ErrNotFound
+	}
+	u.LastLogin = timestamp
 	return nil
 }
 

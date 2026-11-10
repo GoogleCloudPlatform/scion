@@ -297,10 +297,28 @@ func ResourceStoragePath(hubID string, kind ResourceKind, scope, scopeID, slug s
 	default:
 		scopePath = prefix + "/" + slug
 	}
+	return hubNamespaced(hubID, scopePath)
+}
+
+// hubNamespaced prefixes path with hubID's namespace ("hubs/<hubID>/"); an
+// empty hubID leaves path un-namespaced (the legacy layout).
+func hubNamespaced(hubID, path string) string {
 	if hubID != "" {
-		return "hubs/" + hubID + "/" + scopePath
+		return "hubs/" + hubID + "/" + path
 	}
-	return scopePath
+	return path
+}
+
+// ResourceRootPaths returns the storage directories below which
+// ResourceStoragePath places every resource of kind for hubID: the bare kind
+// directory (the legacy un-namespaced layout) and, for a non-empty hubID, the
+// hub-namespaced one. Nothing else (workspaces, other kinds) lies below them.
+func ResourceRootPaths(hubID string, kind ResourceKind) []string {
+	roots := []string{resourcePrefix(kind)}
+	if hubID != "" {
+		roots = append(roots, hubNamespaced(hubID, resourcePrefix(kind)))
+	}
+	return roots
 }
 
 // ResourceStorageURI returns the full bucket URI for a file-based resource.
@@ -354,22 +372,7 @@ func HarnessConfigStorageURI(hubID, bucket, scope, scopeID, slug string) string 
 // WorkspaceStoragePath returns the storage path for an agent's workspace.
 // Workspaces are stored under /workspaces/{projectId}/{agentId}/.
 func WorkspaceStoragePath(hubID, projectID, agentID string) string {
-	path := "workspaces/" + projectID + "/" + agentID
-	if hubID != "" {
-		return "hubs/" + hubID + "/" + path
-	}
-	return path
-}
-
-// ProjectWorkspaceStoragePath returns the storage path for a hub-managed project's shared workspace.
-// Hub-managed projects share a single workspace across agents (no per-agent worktrees),
-// so the path is project-level rather than agent-level.
-func ProjectWorkspaceStoragePath(hubID, projectID string) string {
-	path := "workspaces/" + projectID + "/grove-workspace"
-	if hubID != "" {
-		return "hubs/" + hubID + "/" + path
-	}
-	return path
+	return hubNamespaced(hubID, "workspaces/"+projectID+"/"+agentID)
 }
 
 // WorkspaceStorageURI returns the full storage URI for an agent's workspace.

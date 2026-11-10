@@ -105,7 +105,10 @@ var (
 //     its result reports that a delete won after the broker start landed
 //     (LifecycleDispatchResult.DeleteWon), return nil: the success phase
 //     will not come, and the caller answers from its own re-read
-//     (ptone/scion#3456). Otherwise keep waiting (the executor's write may
+//     (ptone/scion#3456). The same holds when its result carries an
+//     accepted asynchronous launch (LifecycleDispatchResult.Launch,
+//     ptone/scion#4669): the success phase comes only when the launch
+//     ends. Otherwise keep waiting (the executor's write may
 //     have lost its CAS). The rolling window is not reset.
 //   - other status events reset the rolling window.
 //   - every lifecycleRowPollInterval the row is read as on a done event, and
@@ -132,8 +135,10 @@ func waitForLifecycleOutcome(
 	// retries), unless the read failed because ctx ended: then ctx.Err() is
 	// returned as the outcome, as the ctx.Done case would.
 	//
-	// deleteWon is set when the row is done and its result reports that a
-	// delete won after the broker start landed (LifecycleDispatchResult).
+	// deleteWon is set when the row is done and its result ends the wait
+	// without a success phase (lifecycleResultEndsWait): a delete won after
+	// the broker start landed, or the start was accepted as an
+	// asynchronous launch.
 	deleteWon := false
 	readRow := func() (string, error) {
 		d, err := st.GetBrokerDispatch(ctx, dispatchID)
@@ -144,7 +149,7 @@ func waitForLifecycleOutcome(
 			return "", nil
 		}
 		if d.State != store.DispatchStateFailed {
-			deleteWon = d.State == store.DispatchStateDone && decodeLifecycleResult(d.Result).DeleteWon
+			deleteWon = d.State == store.DispatchStateDone && lifecycleResultEndsWait(decodeLifecycleResult(d.Result))
 			return d.State, nil
 		}
 		return d.State, dispatchFailureError(d)
@@ -272,6 +277,17 @@ func waitForLifecycleOutcome(
 			return ctx.Err()
 		}
 	}
+}
+
+// lifecycleResultEndsWait reports whether a done start or restart row's
+// result ends the requester's wait with success although the agent has not
+// reached the success phase: a delete won after the broker start landed
+// (ptone/scion#3456), or the owner's start was accepted as an asynchronous
+// launch, whose end the agent's phase reports later (ptone/scion#4669).
+// An owner that ran the start synchronously sets neither, and the wait ends
+// on the success or error phase (isStartTerminal) as before.
+func lifecycleResultEndsWait(r LifecycleDispatchResult) bool {
+	return r.DeleteWon || r.Launch != nil
 }
 
 // waitForDispatchDone waits for a broker_dispatch row to reach terminal state.

@@ -114,7 +114,7 @@ carries exit reason `oom_killed` and a memory-limit message instead (see
 [Out-of-memory kills](/scion/hosted/ha/kubernetes/#out-of-memory-kills)). Two paths can set `error`: `sciontool` reports it from the recovered
 exit code (the authoritative path), and the Hub also derives `error` from a
 non-zero container exit reported in the broker heartbeat — which covers cases
-where the container died before `sciontool` could report.
+where the container died before `sciontool` could report. When a start fails, the Runtime Broker records the failure for that run in a host-owned state file next to the agent's home directory, and `scion list` and the Runtime Broker heartbeat show the agent as `error` even if a leftover container from that attempt (for example a Kubernetes pod left `Pending`) still reports `starting`.
 
 A third path covers a container that vanishes without reporting an exit (for
 example, removed outside Scion). In Hub-connected setups, a `running` agent (or
@@ -159,11 +159,11 @@ Only one start of an agent runs at a time. If you start, resume, or restart an a
 
 #### Reincarnating an Agent
 
-To move an existing agent onto the current template, image, and harness config without losing its identity, use [`scion reincarnate`](/scion/reference/cli/#scion-reincarnate). It keeps the agent ID and slug, starts a new generation with a freshly resolved config, and hands it the task you supply with `--handoff-file`. Use `--dry-run` to preview the changes first. Reincarnation requires a Hub, and works for agents in clone-per-agent, shared-workspace, and Hub-managed workspaces. An agent in an empty-per-agent project can be reincarnated on its current Runtime Broker only if that Runtime Broker is up to date and uses a local-disk runtime (Docker, Podman, or Apple `container`). Agents in worktree-per-agent projects are not yet supported: the Hub rejects the request, and the Runtime Broker also refuses such a reprovision on its own.
+To move an existing agent onto the current template, image, and harness config without losing its identity, use [`scion reincarnate`](/scion/reference/cli/#scion-reincarnate). It keeps the agent ID and slug, clears the previous run's `exitCode` and `exitReason` when the migration begins, starts a new generation with a freshly resolved config, and hands it the task you supply with `--handoff-file`. Use `--dry-run` to preview the changes first. Reincarnation requires a Hub, and works for agents in clone-per-agent, shared-workspace, and Hub-managed workspaces. An agent in an empty-per-agent project can be reincarnated on its current Runtime Broker when that Runtime Broker is up to date and uses a local-disk runtime (Docker, Podman, or Apple `container`) or shared (`nfs`) workspace storage. Agents in worktree-per-agent projects are not yet supported: the Hub rejects the request, and the Runtime Broker also refuses such a reprovision on its own.
 
 Reincarnating is also how an existing agent picks up changed harness dotfiles (including hook registrations kept in them, such as Claude's `.claude/settings.json`) and changed template skills, which are otherwise copied only when the agent is created. Harnesses whose provisioner writes its hook configuration at start, such as Copilot, Antigravity and Grok Build, pick up provisioner changes on the next start. See [Changing a harness config affects new agents only](/scion/reference/harness-settings/#changing-a-harness-config-affects-new-agents-only).
 
-In a hosted setup with several Runtime Brokers, `scion reincarnate <agent> --broker <name|id>` also moves the agent to another Runtime Broker, keeping its workspace, when both Runtime Brokers mount the same NFS export. An agent in an empty-per-agent project can move only when its workspace is on that export (Kubernetes with NFS workspace storage). See [Moving an agent to another Runtime Broker](/scion/hosted/ha/multi-broker/#moving-an-agent-to-another-runtime-broker).
+In a hosted setup with several Runtime Brokers, `scion reincarnate <agent> --broker <name|id>` also moves the agent to another Runtime Broker, keeping its workspace, when both Runtime Brokers mount the same NFS export. An agent in an empty-per-agent project can move only when its workspace is on that export (Kubernetes with NFS workspace storage); `--dry-run --force` previews a forced move that would recreate a clone-per-agent or empty-per-agent workspace on the target instead. See [Moving an agent to another Runtime Broker](/scion/hosted/ha/multi-broker/#moving-an-agent-to-another-runtime-broker).
 
 ## Auto-Suspend of Stalled Agents
 
@@ -182,7 +182,8 @@ session resume. Agents already `stalled` when you turn auto-suspend on are not
 suspended unless they become active and stall again.
 
 Auto-suspend uses the same machinery as a manual `scion suspend`, so the agent's
-phase becomes `suspended` and its harness session is preserved. The agent
+phase becomes `suspended`, its harness session is preserved, and its Hub
+credentials and active delegation grants are revoked. The agent
 resumes, continuing where it left off, when someone sends it a message with wake
 (`scion message --wake`, or the web UI's wake prompt) or starts it.
 
@@ -226,7 +227,7 @@ Always start by running `scion look <agent-name>` to inspect the active screen s
 
 `scion delete <agent-name> --non-interactive` immediately reclaims container resources. Since an agent's true deliverable is its **artifact** (pushed commits, opened PRs, files written to a shared volume), **deleting a completed agent is the default, recommended clean-up path.**
 
-Teardown on the Runtime Broker can outlast the request. If it does, `scion delete` waits up to three minutes for the Hub to confirm the delete, and only then removes the local worktree. If the delete fails, the worktree is kept. If the Runtime Broker teardown is still unresolved, the agent also can't be started, restarted or woken (`409 delete_in_progress`) until you run `scion delete` again. If the Runtime Broker holds a different run of the agent than the Hub recorded, it deletes nothing and the Hub refuses the delete with `409 conflict` and keeps the agent, even with `--force`. See [`scion delete`](/scion/reference/cli/#scion-delete-or-rm) and [`DELETE /agents/:id`](/scion/reference/api/).
+Teardown on the Runtime Broker can outlast the request. If it does, `scion delete` waits up to three minutes for the Hub to confirm the delete, and only then removes the local worktree. If the delete fails, the worktree is kept. Agent deletion and failed-start cleanup pass every removal through one check: with symlinks resolved, a path may be removed only if it lies inside one of the agent's own directories, and a path that is or contains a project workspace is refused. Only the agent's own git worktree entry is removed, never with a repository-wide prune, and a worktree path that resolves elsewhere through a symlink is left alone. If the Runtime Broker teardown is still unresolved, the agent also can't be started, restarted or woken (`409 delete_in_progress`) until you run `scion delete` again. If the Runtime Broker holds a different run of the agent than the Hub recorded, it deletes nothing. If that run is one of the agent's earlier runs, as a failed start can leave behind, the Hub then deletes it and removes the agent. Otherwise the Hub refuses the delete with `409 conflict` and keeps the agent, and `--force` deletes the run the Runtime Broker holds and then removes the agent. In both cases, if that delete fails, the Hub keeps the agent. See [`scion delete`](/scion/reference/cli/#scion-delete-or-rm) and [`DELETE /agents/:id`](/scion/reference/api/).
 
 However, to prevent premature deletion of agents with active or pending tasks, strict teardown guidelines must be followed.
 
@@ -234,10 +235,10 @@ However, to prevent premature deletion of agents with active or pending tasks, s
 
 | Agent Role | Authorized to Delete | Allowed Timing |
 |---|---|---|
-| **Worker** (Developer, Reviewer) | The agent's creator or supervisor. | Immediately once the output has been accepted and verified. |
-| **Investigator / Architect** | The agent's creator or supervisor. | **Only after all questions to humans are answered** and the investigation is explicitly concluded. |
-| **Project Initiator** (The very first agent in a project) | **Explicit human instruction only.** | Initiators carry project continuity from inception through closure and must survive worker cycles. |
-| **Project Lead / Coordinator** | **Explicit human instruction naming the workstream.** | Only when a human operator commands to close down that specific workstream. |
+| **Task-bounded agent** | The agent's creator or supervisor. | Immediately once the output has been accepted and verified. |
+| **Agent with an open human question** | The agent's creator or supervisor. | **Only after all questions to humans are answered** and the conversation is explicitly concluded. |
+| **Lead** — the first agent on a project or workstream, an agent coordinating that project or workstream, or an agent explicitly designated by a human as its lead | **Only on explicit human instruction naming the workstream** | It carries continuity from the initial request through closure, including non-code and non-repository projects |
+| **Delegated supervisor** with a bounded assignment, not a lead | Its creator or authorized supervisor, subject to the assigned workflow; a human where that workflow requires it | After its deliverable is accepted, verified and durable, its subtree is torn down, and its human questions are resolved |
 
 ### 2. Hierarchical (Bottom-Up) Teardown
 

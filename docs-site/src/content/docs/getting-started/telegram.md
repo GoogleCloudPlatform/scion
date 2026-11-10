@@ -14,10 +14,14 @@ already finished [installation](/scion/getting-started/install/) and the
 dashboard at `http://127.0.0.1:8080`.
 
 :::note[Already installed the plugin?]
-The Homebrew install includes `scion-plugin-telegram` automatically — no separate build or
-download is needed. If you installed from source instead, see the
-[plugin README](https://github.com/GoogleCloudPlatform/scion/tree/main/extras/scion-telegram)
-for build instructions, then rejoin this guide at [Step 2](#step-2-configure-the-plugin-from-the-hub-admin-ui).
+Plugins are not bundled with the Homebrew formula. On Linux, download
+`scion-plugin-telegram-linux-amd64.tar.gz` or `-arm64.tar.gz` from the same [GitHub
+release](https://github.com/GoogleCloudPlatform/scion/releases) as your Scion version, verify
+it against that release's `SHA256SUMS`, and put the `scion-plugin-telegram` binary on your
+`$PATH` or in `~/.scion/plugins/broker/`. No plugin build is published for macOS: build it from
+source with the [plugin
+README](https://github.com/GoogleCloudPlatform/scion/tree/main/extras/scion-telegram). Then
+rejoin this guide at [Step 2](#step-2-configure-the-plugin-from-the-hub-admin-ui).
 :::
 
 At a glance, you will:
@@ -103,8 +107,9 @@ entirely from the browser — no config files to edit.
    from Step 1. There is also a **Webhook Secret** field. Leave it blank for a typical
    workstation setup in `poll` mode (see the note on inbound mode below). It is required
    if you set **Inbound Mode** to `webhook`.
-5. In the **Configuration** section:
-   - Leave **Inbound Mode** set to its default, `poll`.
+5. In the **Configuration** section (an empty field shows the plugin default as its
+   placeholder; the default is not saved, so the plugin keeps using its own default):
+   - Leave **Inbound Mode** empty to use its default, `poll`.
    - **Registration URL** (`register_url`): (Optional) Enter a public-facing URL (e.g., `https://scion.example.com`) used for user-facing registration links. If left empty, it defaults to the internal `hub_url`. This is useful when the Hub is behind an authentication proxy, or when mobile devices or external users need to register.
 
    :::tip[Poll vs. webhook on a workstation]
@@ -231,7 +236,7 @@ with `scion start`, and confirm with `/agents`). Then, in the linked group:
 | *(reply to a bot message)* | Continues the conversation with the **same** agent. |
 
 The bot strips its own mention and the `@agentslug` prefix before forwarding your text to the
-agent.
+agent. Photos, documents, audio, and video sent in the linked group (up to about 2 MiB per message) are uploaded through the Hub and delivered to each addressed agent's inbox at `~/.scion/inbox/<message-id>/` when attachment artifacts are enabled on the Hub, or placed in the project's shared scratchpad when off (the former `downloads_path` setting is retired and ignored with a startup warning; see [Telegram — Attachments](/scion/hosted/user/external-channels/#attachments)).
 
 ### Body Mentions & Routing Behavior
 

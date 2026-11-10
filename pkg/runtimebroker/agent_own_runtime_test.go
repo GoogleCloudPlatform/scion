@@ -133,9 +133,11 @@ func (f *ownRTFixture) forbid(ns string) {
 	f.forbiddenNS[ns] = true
 }
 
-// newOwnRTFixture builds the fixture. savedProfile is written to the agent's
-// agent-info.json ("" leaves it empty, as for an agent started without a
-// profile). withPod creates the agent pod in scion-agents.
+// newOwnRTFixture builds the fixture. savedProfile is the agent's
+// provisioned profile, written to its broker-side image provenance record
+// and, as provisioning does, to its agent-info.json ("" writes no record,
+// as for an agent provisioned before the record existed). withPod creates
+// the agent pod in scion-agents.
 func newOwnRTFixture(t *testing.T, savedProfile string, withPod bool) *ownRTFixture {
 	t.Helper()
 	return newOwnRTFixtureWith(t, ownRTOptions{savedProfile: savedProfile, withPod: withPod})
@@ -194,6 +196,9 @@ func newOwnRTFixtureWith(t *testing.T, opts ownRTOptions) *ownRTFixture {
 	if err := os.WriteFile(filepath.Join(agentHome, "agent-info.json"), info, 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if savedProfile != "" {
+		writeProvisionedProfile(t, projectDir, ownRTAgent, savedProfile)
+	}
 
 	f := &ownRTFixture{
 		cs:          k8sfake.NewClientset(),
@@ -238,15 +243,15 @@ func newOwnRTFixtureWith(t *testing.T, opts ownRTOptions) *ownRTFixture {
 	defaultRT := runtime.NewKubernetesRuntime(client)
 	defaultRT.DefaultNamespace = "default"
 
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
-	f.srv = New(cfg, agent.NewManager(defaultRT), defaultRT)
+	f.srv = New(cfg, agent.NewManager(defaultRT), defaultRT, config.RuntimeBuildRecord{})
 	f.srv.agentLifecycleLog = slog.New(slog.NewJSONHandler(&f.logs, nil))
 	// The profile names its own kubeconfig context, as in the settings above.
 	profileClient := k8s.NewTestClient(fake.NewSimpleDynamicClient(k8sruntime.NewScheme()), f.cs)
 	profileClient.CurrentContext = "agents-ctx"
-	f.srv.resolveAuxiliaryRuntime = func(projectPath, agentName, profile string) runtime.Runtime {
+	f.srv.resolveAuxiliaryRuntime = withoutRecord(func(projectPath, agentName, profile string) runtime.Runtime {
 		f.resolverCalls.Add(1)
 		rt := runtime.NewKubernetesRuntime(profileClient)
 		rt.DefaultNamespace = ownRTProfileNS
@@ -258,7 +263,7 @@ func newOwnRTFixtureWith(t *testing.T, opts ownRTOptions) *ownRTFixture {
 			return f.wrapOwn(rt)
 		}
 		return rt
-	}
+	})
 	return f
 }
 
@@ -287,7 +292,7 @@ const ownRTDeletePath = "/api/v1/agents/" + ownRTAgent + "?projectId=" + ownRTPr
 func TestDeleteAgent_ProfileNamespace_DefaultNamespaceForbidden(t *testing.T) {
 	f := newOwnRTFixture(t, "agents", true)
 	// Register the profile runtime the way a start does.
-	if _, name := f.srv.resolveManagerForOpts(api.StartOptions{Name: ownRTAgent, ProjectPath: f.projectDir, Profile: "agents"}); name != "kubernetes" {
+	if _, name := managerAndType(f.srv.resolveManagerForOpts(api.StartOptions{Name: ownRTAgent, ProjectPath: f.projectDir, Profile: "agents"})); name != "kubernetes" {
 		t.Fatalf("profile runtime = %q, want kubernetes", name)
 	}
 
@@ -436,7 +441,7 @@ func TestDeleteAgent_LegacyAgentWithoutProfile_SearchesAllRuntimes(t *testing.T)
 
 	// With the profile runtime registered, the walk finds the pod there and
 	// the delete removes it in its own namespace.
-	if _, name := f.srv.resolveManagerForOpts(api.StartOptions{Name: ownRTAgent, ProjectPath: f.projectDir, Profile: "agents"}); name != "kubernetes" {
+	if _, name := managerAndType(f.srv.resolveManagerForOpts(api.StartOptions{Name: ownRTAgent, ProjectPath: f.projectDir, Profile: "agents"})); name != "kubernetes" {
 		t.Fatalf("profile runtime = %q, want kubernetes", name)
 	}
 	w = f.do(t, http.MethodDelete, ownRTDeletePath)
@@ -502,11 +507,11 @@ func TestDeleteAgent_OwnNamespaceNotFound_FileOnlyDelete(t *testing.T) {
 // register one auxiliary runtime.
 func TestEnsureAgentOwnRuntime_ConcurrentRequestsRegisterOnce(t *testing.T) {
 	f := newOwnRTFixture(t, "agents", true)
-	inner := f.srv.resolveAuxiliaryRuntime
-	f.srv.resolveAuxiliaryRuntime = func(projectPath, agentName, profile string) runtime.Runtime {
+	inner := runtimeOnly(f.srv.resolveAuxiliaryRuntime)
+	f.srv.resolveAuxiliaryRuntime = withoutRecord(func(projectPath, agentName, profile string) runtime.Runtime {
 		time.Sleep(50 * time.Millisecond) // hold the resolution open so the second request overlaps it
 		return inner(projectPath, agentName, profile)
-	}
+	})
 
 	start := make(chan struct{})
 	var wg sync.WaitGroup
@@ -537,14 +542,14 @@ func TestEnsureAgentOwnRuntime_ConcurrentRequestsRegisterOnce(t *testing.T) {
 // A failed resolution is not stored: the next request resolves again.
 func TestEnsureAgentOwnRuntime_FailureNotCached(t *testing.T) {
 	f := newOwnRTFixture(t, "agents", true)
-	inner := f.srv.resolveAuxiliaryRuntime
+	inner := runtimeOnly(f.srv.resolveAuxiliaryRuntime)
 	var calls atomic.Int32
-	f.srv.resolveAuxiliaryRuntime = func(projectPath, agentName, profile string) runtime.Runtime {
+	f.srv.resolveAuxiliaryRuntime = withoutRecord(func(projectPath, agentName, profile string) runtime.Runtime {
 		if calls.Add(1) == 1 {
 			return &runtime.MockRuntime{NameFunc: func() string { return "error" }}
 		}
 		return inner(projectPath, agentName, profile)
-	}
+	})
 
 	if own := agentOwnRuntimeFrom(f.srv.ensureAgentOwnRuntime(context.Background(), ownRTAgent, ownRTProjectID, "")); own != nil {
 		t.Fatal("failed resolution produced an own runtime")
@@ -573,11 +578,11 @@ func TestKnownAgentProjectDir_HintOutsideKnownDirsIgnored(t *testing.T) {
 	}
 
 	for _, hint := range []string{"", other, filepath.Dir(other), "/nonexistent/path"} {
-		if got := f.srv.knownAgentProjectDir(ownRTAgent, ownRTProjectID, hint); got != f.projectDir {
+		if got := f.srv.knownAgentProjectDir(context.Background(), ownRTAgent, ownRTProjectID, hint); got != f.projectDir {
 			t.Errorf("hint %q: knownAgentProjectDir = %q, want %q", hint, got, f.projectDir)
 		}
 	}
-	if got := f.srv.knownAgentProjectDir(ownRTAgent, ownRTProjectID, f.projectDir); got != f.projectDir {
+	if got := f.srv.knownAgentProjectDir(context.Background(), ownRTAgent, ownRTProjectID, f.projectDir); got != f.projectDir {
 		t.Errorf("hint naming the known dir: got %q, want %q", got, f.projectDir)
 	}
 
@@ -586,7 +591,7 @@ func TestKnownAgentProjectDir_HintOutsideKnownDirsIgnored(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(other, "agents", "hint-only"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if got := f.srv.knownAgentProjectDir("hint-only", ownRTProjectID, other); got != "" {
+	if got := f.srv.knownAgentProjectDir(context.Background(), "hint-only", ownRTProjectID, other); got != "" {
 		t.Errorf("hint of another project: knownAgentProjectDir = %q, want empty", got)
 	}
 
@@ -599,7 +604,7 @@ func TestKnownAgentProjectDir_HintOutsideKnownDirsIgnored(t *testing.T) {
 	if err := config.WriteProjectID(linked, ownRTProjectID); err != nil {
 		t.Fatal(err)
 	}
-	if got := f.srv.knownAgentProjectDir("linked-only", ownRTProjectID, filepath.Dir(linked)); got != linked {
+	if got := f.srv.knownAgentProjectDir(context.Background(), "linked-only", ownRTProjectID, filepath.Dir(linked)); got != linked {
 		t.Errorf("linked hint: knownAgentProjectDir = %q, want %q", got, linked)
 	}
 }
@@ -635,6 +640,7 @@ func TestDeleteAgent_DockerOwnRuntime_ContainerIDUnchanged(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(agentHome, "agent-info.json"), info, 0o644); err != nil {
 		t.Fatal(err)
 	}
+	writeProvisionedProfile(t, projectDir, ownRTAgent, "local")
 
 	const containerID = "3f2a9c1d0b7e5a4f"
 	mgr := &mockManager{agents: []api.AgentInfo{{
@@ -642,13 +648,13 @@ func TestDeleteAgent_DockerOwnRuntime_ContainerIDUnchanged(t *testing.T) {
 		Labels: map[string]string{projectkeys.LabelProjectID: ownRTProjectID},
 	}}}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
-	srv := New(cfg, mgr, rt)
-	srv.resolveAuxiliaryRuntime = func(string, string, string) runtime.Runtime {
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
+	srv.resolveAuxiliaryRuntime = withoutRecord(func(string, string, string) runtime.Runtime {
 		t.Fatal("docker profile matching the default runtime must not be resolved again")
 		return nil
-	}
+	})
 
 	if own := agentOwnRuntimeFrom(srv.ensureAgentOwnRuntime(context.Background(), ownRTAgent, ownRTProjectID, "")); own == nil || own.mgr != srv.manager {
 		t.Fatalf("own runtime = %+v, want the default manager", own)
@@ -836,8 +842,8 @@ func TestDeleteAgent_RuntimeTypeChanged_NoRecordedType(t *testing.T) {
 func TestEnsureAgentOwnRuntime_ProfileEditedResolvesAgain(t *testing.T) {
 	f := newOwnRTFixture(t, "agents", true)
 	var namespaces []string
-	inner := f.srv.resolveAuxiliaryRuntime
-	f.srv.resolveAuxiliaryRuntime = func(projectPath, agentName, profile string) runtime.Runtime {
+	inner := runtimeOnly(f.srv.resolveAuxiliaryRuntime)
+	f.srv.resolveAuxiliaryRuntime = withoutRecord(func(projectPath, agentName, profile string) runtime.Runtime {
 		vs, _, err := config.LoadEffectiveSettings(projectPath)
 		if err != nil {
 			t.Fatalf("load settings: %v", err)
@@ -850,7 +856,7 @@ func TestEnsureAgentOwnRuntime_ProfileEditedResolvesAgain(t *testing.T) {
 		rt := inner(projectPath, agentName, profile).(*runtime.KubernetesRuntime)
 		rt.DefaultNamespace = rc.Namespace
 		return rt
-	}
+	})
 
 	first := agentOwnRuntimeFrom(f.srv.ensureAgentOwnRuntime(context.Background(), ownRTAgent, ownRTProjectID, ""))
 	again := agentOwnRuntimeFrom(f.srv.ensureAgentOwnRuntime(context.Background(), ownRTAgent, ownRTProjectID, ""))
@@ -890,23 +896,29 @@ func TestEnsureAgentOwnRuntime_ProfileEditedResolvesAgain(t *testing.T) {
 
 // Restart of an agent whose pod is already gone, in the issue's setup: the
 // best-effort search of the other runtimes meets the Forbidden default
-// namespace, which is logged and skipped (no 503 lookup failure); the
-// restart goes on to start the agent.
-func TestRestartAgent_ProfileNamespace_PodGone_ProceedsToStart(t *testing.T) {
+// namespace, which is logged and skipped (no 503 lookup failure). On a
+// legacy Kubernetes runtime the pathless restart is then refused before
+// the stop (operator-owned placement).
+func TestRestartAgent_ProfileNamespace_PodGonePathless_RefusedBeforeStop(t *testing.T) {
 	f := newOwnRTFixture(t, "agents", false)
+	globalDir := filepath.Dir(filepath.Dir(filepath.Dir(f.projectDir)))
+	if err := os.WriteFile(filepath.Join(globalDir, "settings.yaml"), []byte("schema_version: \"1\"\ndefault_harness_config: \"\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	w := f.do(t, http.MethodPost, "/api/v1/agents/"+ownRTAgent+"/restart?projectId="+ownRTProjectID+"&runtime=kubernetes")
-	// The start that follows fails: with the pod gone, restart has no
-	// project path for the agent (unchanged behaviour), so it answers 500,
-	// not the 503 a failed lookup would give.
-	if w.Code != http.StatusInternalServerError || !strings.Contains(w.Body.String(), "Failed to restart agent") {
-		t.Fatalf("restart status = %d, body %s; want 500 from the start", w.Code, w.Body.String())
+	// With the pod gone, restart has no project path for the agent, so the
+	// stored config cannot be checked against the operator-owned placement
+	// of the legacy Kubernetes runtime: the restart is refused before the
+	// stop, and never proceeds to the start.
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), placementLegacyRestartNoProjectCause) {
+		t.Fatalf("restart status = %d, body %s; want 400 refused before the stop", w.Code, w.Body.String())
 	}
 	if recs := f.logRecords(t, "runtime list failed while searching the other runtimes"); len(recs) == 0 {
 		t.Fatalf("no skipped-runtime warning; logs:\n%s", f.logs.String())
 	}
-	if recs := f.logRecords(t, "agent not found in project, proceeding with start"); len(recs) != 1 {
-		t.Fatalf("restart did not proceed to start; logs:\n%s", f.logs.String())
+	if recs := f.logRecords(t, "agent not found in project, proceeding with start"); len(recs) != 0 {
+		t.Fatalf("restart proceeded to start; logs:\n%s", f.logs.String())
 	}
 }
 
@@ -941,8 +953,8 @@ func TestDeleteAgent_ProfileNamespace_RunIDFilter(t *testing.T) {
 // namespace from the project settings, as runtime.GetRuntime does.
 func (f *ownRTFixture) useSettingsNamespace(t *testing.T) {
 	t.Helper()
-	inner := f.srv.resolveAuxiliaryRuntime
-	f.srv.resolveAuxiliaryRuntime = func(projectPath, agentName, profile string) runtime.Runtime {
+	inner := runtimeOnly(f.srv.resolveAuxiliaryRuntime)
+	f.srv.resolveAuxiliaryRuntime = withoutRecord(func(projectPath, agentName, profile string) runtime.Runtime {
 		vs, _, err := config.LoadEffectiveSettings(projectPath)
 		if err != nil {
 			t.Errorf("load settings: %v", err)
@@ -961,7 +973,7 @@ func (f *ownRTFixture) useSettingsNamespace(t *testing.T) {
 			return f.wrapOwn(rt)
 		}
 		return rt
-	}
+	})
 }
 
 // setProfileNamespace edits the agents profile's namespace in settings.
@@ -1159,7 +1171,13 @@ func TestOtherRuntimes_SameNamedPodsInTwoNamespaces_Ambiguous(t *testing.T) {
 
 	t.Run("restart", func(t *testing.T) {
 		f, runs := setup(t)
-		w := f.do(t, http.MethodPost, "/api/v1/agents/"+ownRTAgent+"/restart?projectId="+ownRTProjectID+"&runtime=kubernetes")
+		// The restart names the agent's project: no single container
+		// matches, so it could not recover the project from one.
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+ownRTAgent+"/restart?projectId="+ownRTProjectID+"&runtime=kubernetes",
+			strings.NewReader(projectBody(f.projectDir, "")))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		f.srv.Handler().ServeHTTP(w, req)
 		// The HTTP body is the generic runtime-op message; the logged error
 		// carries the reason.
 		if w.Code < 400 || !strings.Contains(f.logs.String(), "ambiguous") {

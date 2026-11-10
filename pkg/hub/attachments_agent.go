@@ -28,6 +28,7 @@ import (
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 )
 
 // Agents attach files by path: `scion message --attach` copies each file into
@@ -119,14 +120,11 @@ func agentAttachmentRelPath(agentPath string) (string, bool) {
 	}
 	clean := path.Clean(agentPath)
 	// Shared dirs mount at /scion-volumes/<name>, or under the workspace when
-	// declared in-workspace. Both forms are accepted regardless of how the
-	// project declares the dir: the sending CLI hardcodes the first.
-	prefixes := []string{
-		"/scion-volumes/" + attachmentSharedDirName + "/",
-		"/workspace/.scion-volumes/" + attachmentSharedDirName + "/",
-	}
-	for _, prefix := range prefixes {
-		rel, ok := strings.CutPrefix(clean, prefix)
+	// declared in-workspace. Both targets the layout authority computes are
+	// accepted regardless of how the project declares the dir: the sending
+	// CLI probes them in this order.
+	for _, target := range projectfs.SharedDirTargets(attachmentSharedDirName, "") {
+		rel, ok := strings.CutPrefix(clean, target+"/")
 		if !ok || rel == "" {
 			continue
 		}
@@ -216,8 +214,8 @@ func (s *Server) ingestAgentAttachments(ctx context.Context, projectID, senderID
 		return nil, nil
 	}
 
-	sharedHostDir, _ := s.sharedDirHostPath(ctx, projectID, attachmentSharedDirName)
-	if sharedHostDir == "" {
+	sp := s.resolveScratchpad(ctx, projectID)
+	if sp == nil {
 		s.messageLog.ErrorContext(ctx, "Agent attachments dropped: no scratchpad shared dir on this host",
 			"project_id", projectID, "count", len(paths), "paths", paths)
 		return nil, warnAll(paths, attachmentWarnNoSharedDir)
@@ -231,9 +229,12 @@ func (s *Server) ingestAgentAttachments(ctx context.Context, projectID, senderID
 		paths = paths[:MaxAttachmentsPerMessage]
 	}
 
-	// One root for the batch: agents mount this dir read-write, so the path
-	// under it is attacker-controlled and has to be resolved per component.
-	root, err := openConfinedBase(sharedHostDir, false)
+	// One root for the batch, opened through the layout authority
+	// (Resolved.Open; on a shared backend pkg/shareddirs' anchored O_NOFOLLOW
+	// walk): agents mount this dir read-write, so the path under it is
+	// attacker-controlled and has to be resolved per component. Nothing is
+	// created: a missing scratchpad holds no file to attach.
+	root, err := sp.resolution.Resolved.Open(false)
 	if err != nil {
 		s.messageLog.ErrorContext(ctx, "Agent attachments dropped: cannot open scratchpad shared dir",
 			"project_id", projectID, "count", len(paths), "error", err)
@@ -350,31 +351,38 @@ func parseAttachmentRefs(metadata map[string]string) []AttachmentRef {
 	return refs
 }
 
-// linkAttachmentRefs attaches recorded files to a persisted message. Failures
+// linkAttachmentRefs attaches recorded files to a persisted message and
+// returns the refs it linked, the ones the message's history lists. Failures
 // are logged, not returned: the message itself is already delivered.
-func linkAttachmentRefs(ctx context.Context, wcs WebChatStore, messageID string, refs []AttachmentRef, log *slog.Logger) {
+func linkAttachmentRefs(ctx context.Context, wcs WebChatStore, messageID string, refs []AttachmentRef, log *slog.Logger) []AttachmentRef {
 	if wcs == nil || messageID == "" {
-		return
+		return nil
 	}
+	var linked []AttachmentRef
 	for _, ref := range refs {
 		if ref.ID == "" {
 			continue
 		}
-		if err := wcs.LinkAttachmentToMessage(ctx, messageID, ref.ID); err != nil && log != nil {
-			log.Error("Failed to link attachment to message",
-				"message_id", messageID, "attachment", ref.ID, "error", err)
+		if err := wcs.LinkAttachmentToMessage(ctx, messageID, ref.ID); err != nil {
+			if log != nil {
+				log.Error("Failed to link attachment to message",
+					"message_id", messageID, "attachment", ref.ID, "error", err)
+			}
+			continue
 		}
+		linked = append(linked, ref)
 	}
+	return linked
 }
 
 // linkSenderOwnedAttachmentRefs is linkAttachmentRefs for refs taken from
 // message metadata. A ref is linked only when its attachment row belongs to
 // the sender: a file of the sender's project (senderProjectID), or a file
 // with no project uploaded by senderID. Anything else, and any lookup error,
-// is skipped and logged.
-func linkSenderOwnedAttachmentRefs(ctx context.Context, wcs WebChatStore, messageID, senderProjectID, senderID string, refs []AttachmentRef, log *slog.Logger) {
+// is skipped and logged. It returns the refs it linked.
+func linkSenderOwnedAttachmentRefs(ctx context.Context, wcs WebChatStore, messageID, senderProjectID, senderID string, refs []AttachmentRef, log *slog.Logger) []AttachmentRef {
 	if wcs == nil || messageID == "" {
-		return
+		return nil
 	}
 	owned := make([]AttachmentRef, 0, len(refs))
 	for _, ref := range refs {
@@ -398,7 +406,7 @@ func linkSenderOwnedAttachmentRefs(ctx context.Context, wcs WebChatStore, messag
 		}
 		owned = append(owned, ref)
 	}
-	linkAttachmentRefs(ctx, wcs, messageID, owned, log)
+	return linkAttachmentRefs(ctx, wcs, messageID, owned, log)
 }
 
 // attachmentOwnedBySender reports whether a file belongs to a sender: a file

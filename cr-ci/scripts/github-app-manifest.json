@@ -1,0 +1,21 @@
+{
+  "name": "scion-cr-ci-REPLACE-OWNER",
+  "url": "https://github.com/REPLACE-OWNER/scion/tree/main/cr-ci",
+  "description": "cr-ci: mints single-use just-in-time GitHub Actions runners on Cloud Run Jobs for workflow jobs labelled RUNNER_LABEL. See cr-ci/docs/github-setup.md.",
+  "hook_attributes": {
+    "url": "https://REPLACE-MEDIATOR-URL/webhook",
+    "active": true
+  },
+  "redirect_url": "http://127.0.0.1:9/cr-ci-app-created",
+  "public": false,
+  "request_oauth_on_install": false,
+  "setup_on_update": false,
+  "default_permissions": {
+    "actions": "read",
+    "administration": "write",
+    "metadata": "read"
+  },
+  "default_events": [
+    "workflow_job"
+  ]
+}

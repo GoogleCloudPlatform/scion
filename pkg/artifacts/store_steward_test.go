@@ -217,6 +217,11 @@ func (s *racingStore) PutGrant(ctx context.Context, g *Grant, max int, cross boo
 	return s.Store.PutGrant(ctx, g, max, cross, actor)
 }
 
+func (s *racingStore) PutGrantNotify(ctx context.Context, g *Grant, max int, cross bool, actor *Actor, notify bool) (GrantPutResult, error) {
+	s.race()
+	return s.Store.PutGrantNotify(ctx, g, max, cross, actor, notify)
+}
+
 func (s *racingStore) CreateLink(ctx context.Context, g *Grant, max int, now time.Time, actor *Actor) error {
 	s.race()
 	return s.Store.CreateLink(ctx, g, max, now, actor)

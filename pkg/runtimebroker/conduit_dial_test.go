@@ -33,6 +33,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/clock"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/transport/ws"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
 )
@@ -305,7 +306,7 @@ func TestConduitDialer_HelloAndHeaders(t *testing.T) {
 func TestConduitDialer_SupersededIncarnationNeverTerminal(t *testing.T) {
 	clk := clock.NewFake(time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC))
 	d, err := NewConduitDialer(ConduitDialConfig{
-		HubEndpoint: "http://hub.invalid",
+		HubEndpoint: "https://hub.invalid",
 		BrokerID:    "broker-1",
 		Clock:       clk,
 		Log:         slog.New(slog.NewTextHandler(&syncBuffer{}, nil)),
@@ -408,16 +409,28 @@ func TestConduitDialer_SessionResetsProbeBackoff(t *testing.T) {
 // TestConduitEndpointURL maps the hub endpoint to the conduit endpoint.
 func TestConduitEndpointURL(t *testing.T) {
 	for in, want := range map[string]string{
-		"http://hub:8080":       "ws://hub:8080/api/v1/conduit",
+		"http://127.0.0.1:8080": "ws://127.0.0.1:8080/api/v1/conduit",
+		"http://localhost:8080": "ws://localhost:8080/api/v1/conduit",
 		"https://hub.example":   "wss://hub.example/api/v1/conduit",
 		"https://hub.example/x": "wss://hub.example/api/v1/conduit",
+		"wss://hub.example":     "wss://hub.example/api/v1/conduit",
 	} {
 		got, err := conduitEndpointURL(in)
 		require.NoError(t, err)
 		assert.Equal(t, want, got, in)
 	}
-	_, err := NewConduitDialer(ConduitDialConfig{HubEndpoint: "http://hub"})
+	_, err := NewConduitDialer(ConduitDialConfig{HubEndpoint: "http://127.0.0.1"})
 	assert.Error(t, err, "broker id required")
+}
+
+// TestConduitEndpointURL_RefusesPlaintextNonLoopback: the conduit session
+// carries broker RPCs with agent secrets, so it is never dialed as ws:// to
+// a network host.
+func TestConduitEndpointURL_RefusesPlaintextNonLoopback(t *testing.T) {
+	for _, in := range []string{"http://hub:8080", "http://192.0.2.10:8080", "ws://hub.example", "ftp://hub.example"} {
+		_, err := conduitEndpointURL(in)
+		assert.ErrorIs(t, err, config.ErrPlaintextNonLoopback, in)
+	}
 }
 
 // TestHubConnection_ConduitDialerLifecycle: HubConnection.Start starts the
@@ -436,7 +449,7 @@ func TestHubConnection_ConduitDialerLifecycle(t *testing.T) {
 	cfg.HeartbeatEnabled = false
 	cfg.ControlChannelEnabled = true
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(cfg, &mockManager{}, rt)
+	srv := New(cfg, &mockManager{}, rt, config.RuntimeBuildRecord{})
 	srv.config.FlatInstance = &FlatInstanceConfig{Identity: &brokeridentity.Identity{
 		RuntimeBrokerID: "broker-1",
 		RuntimeTarget:   api.RuntimeTargetDescriptor{ID: "target-1", Type: "docker"},

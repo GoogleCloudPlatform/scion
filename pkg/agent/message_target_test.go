@@ -136,12 +136,14 @@ func TestMessage_RunningContainerBuffered(t *testing.T) {
 			{
 				ContainerID: "old",
 				Name:        "worker",
+				ProjectID:   "proj-1",
 				Phase:       string(state.PhaseStopped),
 				Labels:      map[string]string{"scion.name": "worker"},
 			},
 			{
 				ContainerID: "c1",
 				Name:        "worker",
+				ProjectID:   "proj-1",
 				Phase:       string(state.PhaseRunning),
 				Labels:      map[string]string{"scion.name": "worker"},
 			},

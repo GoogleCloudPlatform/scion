@@ -55,13 +55,25 @@ type roleFixture struct {
 
 func newRoleFixture(t *testing.T) *roleFixture {
 	t.Helper()
+	return newRoleFixtureWith(t, nil)
+}
+
+// newRoleFixtureWith is newRoleFixture with mod applied to the relay's
+// configuration (nil: none).
+func newRoleFixtureWith(t *testing.T, mod func(*relay.Config)) *roleFixture {
+	t.Helper()
 	f := &roleFixture{w: relaytest.NewWorld(t), hub: newFakeHub(t), clk: clock.NewFake(time.Now())}
 	ro, err := New(Config{Hub: f.hub.client(), Clock: f.clk, RecheckInterval: time.Minute})
 	if err != nil {
 		t.Fatal(err)
 	}
 	f.role = ro
-	f.node = f.w.StartNode("relay-0", func(c *relay.Config) { c.Refresh = ro.Refresh })
+	f.node = f.w.StartNode("relay-0", func(c *relay.Config) {
+		c.Refresh = ro.Refresh
+		if mod != nil {
+			mod(c)
+		}
+	})
 	ro.Bind(f.node.Relay)
 	f.front = httptest.NewServer(ro)
 	t.Cleanup(f.front.Close)
@@ -218,7 +230,7 @@ func TestFrontNotAdmittingRefuses(t *testing.T) {
 	f.admitAs(registry.PrincipalAgent, "tok-1", nil)
 	f.node.Relay.SetAdmitting(false)
 	status, got := f.rawDial(t)
-	if status != http.StatusServiceUnavailable || !strings.Contains(got, "conduit_not_serving") {
+	if status != http.StatusServiceUnavailable || !strings.Contains(got, relay.ReasonRelayNotAdmitting) {
 		t.Fatalf("answer %d %s", status, got)
 	}
 	if n := f.hub.count("admit"); n != 0 {

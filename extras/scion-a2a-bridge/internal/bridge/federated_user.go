@@ -108,15 +108,20 @@ func (b *Bridge) federatedUserGet(ctx context.Context, caller *CallerIdentity, p
 	if b.minter == nil {
 		return fmt.Errorf("federated user request: bridge has no signing key")
 	}
+	if !hubEndpointOK(b.config.Hub.Endpoint) {
+		return errFederatedUserEndpoint
+	}
 	endpoint := strings.TrimRight(b.config.Hub.Endpoint, "/") + path
 	if len(query) > 0 {
 		endpoint += "?" + query.Encode()
 	}
 	ctx, cancel := context.WithTimeout(ctx, federatedUserHubTimeout)
 	defer cancel()
+	// Errors name the path, never the endpoint: the endpoint may carry user
+	// information, and url.Error text quotes the full URL.
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		return fmt.Errorf("federated user request: %w", err)
+		return errors.New("federated user request: hub endpoint is not a valid URL")
 	}
 
 	if err := b.federatedUserBridgeAuth().ApplyAuth(req); err != nil {
@@ -127,10 +132,18 @@ func (b *Bridge) federatedUserGet(ctx context.Context, caller *CallerIdentity, p
 	if b.transportSrc != nil {
 		base = transportauth.Wrap(base, b.transportSrc, b.transportMode)
 	}
-	client := &http.Client{Transport: &federationHeaderTransport{base: base, token: caller.RawToken}}
-	resp, err := client.Do(req)
+	transport, err := newFederationHeaderTransport(base, caller.RawToken, b.config.Hub.Endpoint)
 	if err != nil {
 		return fmt.Errorf("federated user request: %w", err)
+	}
+	client := &http.Client{Transport: transport}
+	resp, err := client.Do(req)
+	if err != nil {
+		var urlErr *url.Error
+		if errors.As(err, &urlErr) {
+			err = urlErr.Err
+		}
+		return fmt.Errorf("federated user request: GET %s: %w", path, err)
 	}
 	defer resp.Body.Close()
 
@@ -148,6 +161,31 @@ func (b *Bridge) federatedUserGet(ctx context.Context, caller *CallerIdentity, p
 		return fmt.Errorf("federated user request: decode %s: %w", path, err)
 	}
 	return nil
+}
+
+// errFederatedUserEndpoint is returned by federatedUserGet for a hub endpoint
+// that hubEndpointOK refuses. Its text never includes the endpoint.
+var errFederatedUserEndpoint = errors.New("federated user request: hub endpoint must be a URL with a host, no user information, query or fragment")
+
+// hubEndpointOK reports whether endpoint is a URL with a host and no user
+// information, query or fragment. ValidateConfig and federatedUserGet both
+// use it. An endpoint holding an '@' anywhere is refused: a raw (not
+// percent-encoded) '@', '/', '?' or '#' in user information can make
+// url.Parse read part of it as the host or the path. An endpoint holding a
+// '?' or '#' anywhere is refused too, even with nothing after it, since
+// paths are appended to the endpoint.
+func hubEndpointOK(endpoint string) bool {
+	if strings.Contains(endpoint, "@") {
+		return false
+	}
+	if strings.ContainsAny(endpoint, "?#") {
+		return false
+	}
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return false
+	}
+	return u.User == nil && u.Opaque == "" && u.Host != ""
 }
 
 // federatedUserBridgeAuth returns the authenticator for the bridge's own

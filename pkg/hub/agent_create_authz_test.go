@@ -96,7 +96,9 @@ func TestAgentCreate_Characterization(t *testing.T) {
 		rec := requestAsIdentity(t, f.srv, uat, http.MethodPost, path, CreateAgentRequest{Name: "char-uat"})
 		require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 		apiErr := decodeTargetAPIError(t, rec)
-		assert.Equal(t, reasonNoUsableRole, apiErr.Message)
+		assert.Equal(t, "the token's scopes fit no usable agent role; the readonly role also needs the selectors "+
+			"harness_config:list, harness_config:read, project:read, skill:list, skill:read, template:list, template:read; "+
+			"add them, request role=none explicitly, or create from a session", apiErr.Message)
 		assert.Equal(t, string(DeniedByDelegationCeiling), apiErr.Details["denied_by"])
 		_, err := f.store.GetAgentBySlug(context.Background(), f.proj.ID, "char-uat")
 		assert.ErrorIs(t, err, store.ErrNotFound)

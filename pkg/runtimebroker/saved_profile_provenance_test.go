@@ -60,8 +60,8 @@ func assertProvisionedProfileUnresolved(t *testing.T, tc unresolvedCase, w *http
 // agent with image provenance whose provisioned profile does not resolve
 // gets the 503 even when agent-info.json records the broker's default
 // runtime; agent-info.json is not an input to its runtime selection. (The
-// legacy-agent fallback is covered by
-// TestStartAgent_UnresolvableSavedProfileRecordedRuntime.)
+// legacy-agent case is covered by
+// TestStartAgent_UnresolvableHubProfileNoRecordedRuntimeFallback.)
 func TestStartAgent_UnresolvableProvisionedProfileNoRecordedRuntimeFallback(t *testing.T) {
 	for _, tc := range unresolvedCases() {
 		t.Run(tc.name, func(t *testing.T) {

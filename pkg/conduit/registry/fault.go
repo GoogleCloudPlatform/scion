@@ -37,6 +37,7 @@ const (
 	OpDeleteStaleSessions              = "DeleteStaleSessions"
 	OpDeletePrincipalEpoch             = "DeletePrincipalEpoch"
 	OpListRelays                       = "ListRelays"
+	OpCountRelaySessions               = "CountRelaySessions"
 )
 
 // FaultStore wraps a Store with a fault-injection hook for tests and the 1v
@@ -184,4 +185,12 @@ func (f *FaultStore) ListRelays(ctx context.Context) ([]RelayInstance, error) {
 		return nil, err
 	}
 	return f.Inner.ListRelays(ctx)
+}
+
+// CountRelaySessions implements Store.
+func (f *FaultStore) CountRelaySessions(ctx context.Context, instanceID string, generation int64) (int, error) {
+	if err := f.fault(ctx, OpCountRelaySessions); err != nil {
+		return 0, err
+	}
+	return f.Inner.CountRelaySessions(ctx, instanceID, generation)
 }

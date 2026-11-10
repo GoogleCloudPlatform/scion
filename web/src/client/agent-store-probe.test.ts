@@ -229,14 +229,6 @@ describe('AgentStore delta probe', () => {
     expect(h.server.probes()).toBe(0);
   });
 
-  it('does not probe a server-filtered list', async () => {
-    const h = await loaded([row('a1', 1)], { scope: 'hub', ownership: 'mine' });
-    h.store.retain({ scope: 'project', projectId: 'p1', label: 'team=a' }, () => {});
-    await h.store.ensure({ scope: 'project', projectId: 'p1', label: 'team=a' });
-    await tick(3 * AGENT_PROBE_INTERVAL_MS);
-    expect(h.server.probes()).toBe(0);
-  });
-
   it('stops probing after the store resets', async () => {
     const h = await loaded([row('a1', 1)]);
     h.store.reset('test');
@@ -572,7 +564,7 @@ describe('AgentStore delta probe', () => {
       h.server.agents.push(
         active('a2', 2, {
           appliedConfig: { creatorName: 'Ada', harness: 'claude' },
-        } as Partial<Agent>)
+        })
       );
       await h.emitAgent('created', { agentId: 'a2', name: 'a2', slug: 'a2', phase: 'running' });
       await settle();
@@ -1472,7 +1464,7 @@ describe('AgentStore delta probe', () => {
   });
 
   it('merges compact rows into full rows without dropping full fields', async () => {
-    const full = row('a1', 1, { appliedConfig: { harness: 'claude' } } as Partial<Agent>);
+    const full = row('a1', 1, { appliedConfig: { harness: 'claude' } });
     const h = await loaded([full], HUB, { view: 'full' });
     h.server.agents[0] = row('a1', 10, { name: 'renamed' });
     await tick();
@@ -1569,5 +1561,90 @@ describe('AgentStore delta probe', () => {
     await tick();
     expect(h.server.probes()).toBe(2);
     expect(ids(h.store.peek(HUB)).sort()).toEqual(['a1', 'a2']);
+  });
+});
+
+describe('AgentStore delta probe on a server-filtered list (ptone/scion#3030)', () => {
+  const LABELLED = { scope: 'project', projectId: 'p1', label: 'team=a' } as const;
+  const MINE = { scope: 'hub', ownership: 'mine' } as const;
+
+  /**
+   * The server's filters: `label=k=v` matches the row's label, and
+   * `scope=mine` stands in for ownership with the row's `mine` label.
+   */
+  function serverFilter(a: Agent, params: URLSearchParams): boolean {
+    const labels = a.labels ?? {};
+    for (const label of params.getAll('label')) {
+      const [k, v] = label.split('=');
+      if (labels[k] !== v) return false;
+    }
+    return params.get('scope') !== 'mine' || labels.mine === 'yes';
+  }
+
+  async function loadedFiltered(initial: Agent[], q: AgentQuery): Promise<Harness> {
+    const h = createHarness(initial);
+    h.server.listFilter = serverFilter;
+    h.store.retain(q, () => {});
+    const load = h.store.ensure(q);
+    await h.connect();
+    await load;
+    return h;
+  }
+
+  it('probes with the list filters', async () => {
+    const h = await loadedFiltered([row('a1', 1, { labels: { mine: 'yes' } })], MINE);
+    h.store.retain(LABELLED, () => {});
+    await h.store.ensure(LABELLED);
+    await tick();
+    const probes = h.server.requests
+      .filter((p) => p.includes('sort='))
+      .map((p) => new URL(p, 'http://localhost'));
+    expect(probes.map((u) => u.pathname).sort()).toEqual([
+      '/api/v1/agents',
+      '/api/v1/projects/p1/agents',
+    ]);
+    const hub = probes.find((u) => u.pathname === '/api/v1/agents')!;
+    expect(hub.searchParams.get('scope')).toBe('mine');
+    expect(hub.searchParams.has('label')).toBe(false);
+    const project = probes.find((u) => u.pathname !== '/api/v1/agents')!;
+    expect(project.searchParams.get('label')).toBe('team=a');
+    expect(project.searchParams.has('scope')).toBe(false);
+  });
+
+  it('adds an agent the filter now lists, with no walk', async () => {
+    const h = await loadedFiltered(
+      [row('a1', 1, { labels: { team: 'a' } }), row('a2', 2, { labels: { team: 'b' } })],
+      LABELLED
+    );
+    expect(ids(h.store.peek(LABELLED))).toEqual(['a1']);
+
+    // Relabelled and a new labelled agent, neither carried by SSE.
+    h.server.agents[1] = row('a2', 10, { labels: { team: 'a' } });
+    h.server.agents.push(row('a3', 11, { labels: { team: 'a' } }));
+    await tick();
+
+    // Added by the probe itself: no walk.
+    expect(h.server.walks(), 'walks after the probe').toBe(1);
+    expect(h.server.probes()).toBe(1);
+    expect(ids(h.store.peek(LABELLED)).sort()).toEqual(['a1', 'a2', 'a3']);
+  });
+
+  it('walks once when the filtered count differs from the rows held', async () => {
+    const h = await loadedFiltered(
+      [row('a1', 1, { labels: { mine: 'yes' } }), row('a2', 2, { labels: { mine: 'yes' } })],
+      MINE
+    );
+    // No longer owned, without an event: the probe does not list it, and
+    // its count shows one row fewer.
+    h.server.agents[1] = row('a2', 2);
+    await tick();
+    expect(h.server.walks()).toBe(2);
+    expect(ids(h.store.peek(MINE))).toEqual(['a1']);
+  });
+
+  it('walks in full once five minutes have passed since the last walk', async () => {
+    const h = await loadedFiltered([row('a1', 1, { labels: { team: 'a' } })], LABELLED);
+    for (let i = 0; i < 10; i++) await tick();
+    expect(h.server.walks()).toBe(2);
   });
 });

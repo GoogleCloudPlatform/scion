@@ -163,7 +163,19 @@ type ResolveOpts struct {
 	// access via the policy engine. If nil, progeny secrets are not included.
 	// Returns true if access is allowed.
 	AuthzCheck func(secret SecretMeta) bool
+
+	// UserScopeCheck, when non-nil, is called for each user-scope secret
+	// of the userID scope (the owner path, not the progeny path) before its
+	// value is read. A secret it rejects is skipped, so a lower-scope secret
+	// with the same key stays in effect. If nil, no such check is made.
+	UserScopeCheck func(secret SecretMeta) bool
 }
+
+// ErrValueAccess matches (errors.Is) a FetchResult.Err for a value the
+// backend's external secret store (GCP Secret Manager) could not return,
+// other than not found. GCPBackend.Resolve skips such a secret; a caller
+// that selects through FetchValues may do the same.
+var ErrValueAccess = errors.New("secret value could not be read from the external secret store")
 
 // FetchResult holds the outcome of fetching one secret's value by its
 // recorded metadata. Value is meaningful only when Err is nil; a failed item
@@ -172,7 +184,21 @@ type ResolveOpts struct {
 // doc comments for the shared contract).
 type FetchResult struct {
 	Value string
-	Err   error
+	// Ref is the external reference the value was read from, in the form
+	// Resolve reports as SecretMeta.SecretRef for the same record, so a
+	// caller that delivers fetched values hands brokers the same reference
+	// Resolve did. On the GCP backend it is the Secret Manager resource path
+	// (projects/<project>/secrets/<name>, never the stored "gcpsm:" form),
+	// including the computed name for a record with no stored gcpsm ref; on
+	// the local backend it is the record's stored ref (normally empty).
+	// Empty when Err is set.
+	Ref string
+	// Err is store.ErrNotFound for a record deleted, replaced or
+	// reclassified since its metadata was recorded; a *ResolveDecryptError
+	// (errors.Is ErrResolveDecrypt) for a stored value that cannot be
+	// decrypted; an error matching ErrValueAccess for an external secret
+	// store read failure; otherwise the store read error.
+	Err error
 }
 
 // SecretBackend defines the interface for secret storage operations.

@@ -28,6 +28,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 )
@@ -73,13 +74,24 @@ func (h *artifactHost) Principal(ctx context.Context) (kind, ref, homeScope stri
 		}
 		return artifacts.PrincipalKindUser, id.ID(), "", true
 	case *agentIdentityWrapper:
-		if id.ID() == "" || id.TokenID() == "" || !agentHasAnyScope(id, []string{string(ScopeProjectArtifactRead)}) {
+		if !artifactsServeAgent(id) {
 			return "", "", "", false
 		}
 		return artifacts.PrincipalKindAgent, id.ID(), id.ProjectID(), true
 	default:
 		return "", "", "", false
 	}
+}
+
+// artifactsServeAgent reports whether the artifact service serves the agent
+// identity id: it is token-backed (a validated agent token carries a token
+// id) and its token carries project:artifact:read. It is the agent predicate
+// of both Principal and the hub's attachment write gate
+// (attachmentWriterKind), so the hub never admits an agent upload the
+// artifact service would then refuse (ptone/scion#7362).
+func artifactsServeAgent(id *agentIdentityWrapper) bool {
+	return id != nil && id.ID() != "" && id.TokenID() != "" &&
+		agentHasAnyScope(id, []string{string(ScopeProjectArtifactRead)})
 }
 
 // Permits reports whether the caller's credential allows permission on
@@ -187,8 +199,8 @@ func (h *artifactHost) Authorize(ctx context.Context, scopeRef, permission strin
 
 // MayGrantReview implements artifacts.ReviewGrantAuthority:
 // ReviewGrantClause != "".
-func (h *artifactHost) MayGrantReview(ctx context.Context, ownerAgentID, homeScope string) bool {
-	return h.ReviewGrantClause(ctx, ownerAgentID, homeScope) != ""
+func (h *artifactHost) MayGrantReview(ctx context.Context, ownerAgentID, homeScope, sponsorRef string) bool {
+	return h.ReviewGrantClause(ctx, ownerAgentID, homeScope, sponsorRef) != ""
 }
 
 var _ artifacts.ReviewGrantClauser = (*artifactHost)(nil)
@@ -197,51 +209,54 @@ var _ artifacts.ReviewGrantClauser = (*artifactHost)(nil)
 // MayGrantReview, artifacts.ReviewGrantAuthority; design D24,
 // ptone/scion#4014, ptone/scion#5120): which clause, if any, lets the
 // calling user give a user review access (a review grant)
-// on an artifact owned by agent ownerAgentID and homed in
-// project homeScope. Either is enough:
+// on an artifact owned by agent ownerAgentID and
+// homed in project homeScope. Either is enough:
 //   - the caller holds project.manage on homeScope (project owners and
 //     admins, and super-admins), decided by AuthzService.CheckAccess like any
 //     project administration, so a scoped token's own limits apply;
-//   - the caller is the user at the root of the agent's delegation chain,
-//     resolved now from the recorded, active edges only
-//     (ResolveProvenanceRoot with no legacy allowance: a revoked, missing,
-//     ambiguous or unrecorded edge, a deleted agent on the chain, or a root
-//     user who is inactive or no longer admitted to the agent's project
-//     resolves to no one). The agent's stored owner or creator links are
-//     never consulted.
+//   - the caller is the agent's delegating user. When the artifact records
+//     one (sponsorRef, ptone/scion#6028), that recorded user, while active
+//     and admitted to homeScope (recordedDelegator); the live chain is then
+//     not consulted, so the user recorded at creation keeps the clause after
+//     the agent is deleted or re-delegated, and no one else gains it. When
+//     nothing is recorded (an artifact from before sponsors were recorded),
+//     the user at the root of the agent's delegation chain, resolved now
+//     from the recorded, active edges only (ResolveProvenanceRoot with no
+//     legacy allowance: a revoked, missing, ambiguous or unrecorded edge, a
+//     deleted agent on the chain, or a root user who is inactive or no
+//     longer admitted to the agent's project resolves to no one). The
+//     agent's stored owner or creator links are never consulted.
 //
-// The first clause that holds is named: artifacts.ReviewClauseProjectAdmin,
+// A home project that no longer exists gives no one this authority. The
+// first clause that holds is named: artifacts.ReviewClauseProjectAdmin,
 // checked first, then artifacts.ReviewClauseDelegatingUser. Only users are
 // answered; every other identity, a missing authz service, and every lookup
 // error answer "".
-func (h *artifactHost) ReviewGrantClause(ctx context.Context, ownerAgentID, homeScope string) string {
+func (h *artifactHost) ReviewGrantClause(ctx context.Context, ownerAgentID, homeScope, sponsorRef string) string {
 	if h.server == nil || h.server.authzService == nil || ownerAgentID == "" || homeScope == "" {
 		return ""
 	}
-	identity := GetIdentityFromContext(ctx)
-	if isNilIdentity(identity) {
-		return ""
-	}
-	var userID string
-	switch id := identity.(type) {
-	case *AuthenticatedUser, *ScopedUserIdentity, *DevUser:
-		userID = id.ID()
-	default:
-		return ""
-	}
+	userID := artifactCallerUserID(ctx)
 	if userID == "" {
+		return ""
+	}
+	// A deleted home project gives no review authority, as it has no
+	// stewards: a system role would otherwise still pass the admin clause,
+	// and admission the recorded clause, for a project id that no longer
+	// exists. A lookup failure answers "".
+	if exists, err := h.ScopesExist(ctx, []string{homeScope}); err != nil || !exists[homeScope] {
 		return ""
 	}
 	if h.AdministersScope(ctx, homeScope) {
 		return artifacts.ReviewClauseProjectAdmin
 	}
-	root, err := h.server.authzService.ResolveProvenanceRoot(ctx, ownerAgentID, ResolveProvenanceOptions{PermissionID: artifacts.PermissionManage})
-	if err != nil {
-		slog.DebugContext(ctx, "artifacts: review grant: delegating user not resolved",
-			"agent_id", ownerAgentID, "cause", string(DenyCauseForProvenanceError(err)))
+	if sponsorRef != "" {
+		if h.recordedDelegator(ctx, userID, sponsorRef, homeScope) {
+			return artifacts.ReviewClauseDelegatingUser
+		}
 		return ""
 	}
-	if root.RootUser != nil && root.RootUser.ID == userID {
+	if h.liveDelegator(ctx, userID, ownerAgentID, "review grant") {
 		return artifacts.ReviewClauseDelegatingUser
 	}
 	return ""
@@ -260,31 +275,24 @@ var _ artifacts.Stewardship = (*artifactHost)(nil)
 //     artifact:steward in its ceiling;
 //   - artifacts.StewardClauseDelegator: the caller reads in homeScope
 //     through a role (Authorize(homeScope, artifact.read), decided from role
-//     bindings only, never from the artifact's own grants), and is the user
-//     at the root of the agent's live, recorded delegation chain
-//     (ResolveProvenanceRoot with no legacy allowance, as for the review
-//     clause). The role-read check binds the authority to the artifact's
-//     current home, which a move can change.
+//     bindings only, never from the artifact's own grants), and is the
+//     agent's delegating user: the user recorded on the artifact at
+//     creation when there is one (sponsorRef, ptone/scion#6028), while
+//     active and admitted to homeScope (recordedDelegator), with the live
+//     chain not consulted; otherwise the user at the root of the agent's
+//     live, recorded delegation chain (ResolveProvenanceRoot with no legacy
+//     allowance, as for the review clause). The role-read check binds the
+//     authority to the artifact's current home, which a move can change.
 //
-// A home project that no longer exists has no stewards. sponsorRef and
-// orphaned (the recorded sponsor of an agent that is gone) are not
-// consulted yet. Only users are answered; every other identity, a
-// missing authz service and every lookup failure answer "".
-func (h *artifactHost) StewardClause(ctx context.Context, ownerAgentID, homeScope, _ string, _ bool) string {
+// A home project that no longer exists has no stewards. orphaned (the
+// owner is gone) is not consulted yet. Only users are answered; every
+// other identity, a missing authz service and every lookup failure
+// answer "".
+func (h *artifactHost) StewardClause(ctx context.Context, ownerAgentID, homeScope, sponsorRef string, _ bool) string {
 	if h.server == nil || h.server.authzService == nil || ownerAgentID == "" || homeScope == "" {
 		return ""
 	}
-	identity := GetIdentityFromContext(ctx)
-	if isNilIdentity(identity) {
-		return ""
-	}
-	var userID string
-	switch id := identity.(type) {
-	case *AuthenticatedUser, *ScopedUserIdentity, *DevUser:
-		userID = id.ID()
-	default:
-		return ""
-	}
+	userID := artifactCallerUserID(ctx)
 	if userID == "" {
 		return ""
 	}
@@ -300,16 +308,246 @@ func (h *artifactHost) StewardClause(ctx context.Context, ownerAgentID, homeScop
 	if !h.Authorize(ctx, homeScope, artifacts.PermissionRead) {
 		return ""
 	}
-	root, err := h.server.authzService.ResolveProvenanceRoot(ctx, ownerAgentID, ResolveProvenanceOptions{PermissionID: artifacts.PermissionManage})
-	if err != nil {
-		slog.DebugContext(ctx, "artifacts: steward: delegating user not resolved",
-			"agent_id", ownerAgentID, "cause", string(DenyCauseForProvenanceError(err)))
+	if sponsorRef != "" {
+		if h.recordedDelegator(ctx, userID, sponsorRef, homeScope) {
+			return artifacts.StewardClauseDelegator
+		}
 		return ""
 	}
-	if root.RootUser != nil && root.RootUser.ID == userID {
+	if h.liveDelegator(ctx, userID, ownerAgentID, "steward") {
 		return artifacts.StewardClauseDelegator
 	}
 	return ""
+}
+
+// artifactCallerUserID returns the id of the calling user (a session, a
+// scoped user access token or the dev user), or "" for any other caller.
+func artifactCallerUserID(ctx context.Context) string {
+	identity := GetIdentityFromContext(ctx)
+	if isNilIdentity(identity) {
+		return ""
+	}
+	switch id := identity.(type) {
+	case *AuthenticatedUser, *ScopedUserIdentity, *DevUser:
+		return id.ID()
+	}
+	return ""
+}
+
+// liveDelegator reports whether userID is the user at the root of agent
+// ownerAgentID's live, recorded delegation chain (ResolveProvenanceRoot for
+// artifact.manage, no legacy allowance). It decides the delegator clauses
+// only for an artifact with no recorded delegating user. Any failure
+// answers false. clause names the caller in the debug log.
+func (h *artifactHost) liveDelegator(ctx context.Context, userID, ownerAgentID, clause string) bool {
+	root, err := h.server.authzService.ResolveProvenanceRoot(ctx, ownerAgentID, ResolveProvenanceOptions{PermissionID: artifacts.PermissionManage})
+	if err != nil {
+		slog.DebugContext(ctx, "artifacts: "+clause+": delegating user not resolved",
+			"agent_id", ownerAgentID, "source", "live", "cause", string(DenyCauseForProvenanceError(err)))
+		return false
+	}
+	return root.RootUser != nil && root.RootUser.ID == userID
+}
+
+// recordedDelegator reports whether userID, the caller, is the delegating
+// user recorded on an artifact (sponsorRef, ptone/scion#6028) and still
+// stands as one: the home project homeScope exists; the user exists and is
+// active; when it is the local
+// development user, local-development authority is enabled on this
+// server; and it is admitted to the artifact's current home homeScope for
+// artifact.manage (ProjectAdmissionForClass, evaluated for that user with
+// the requester's inputs masked, as ResolveProvenanceRoot admits a root
+// user to the agent's project). Every check reads the store on each call;
+// nothing is cached across requests, so a suspension or a lost membership
+// takes effect on the next request. Any lookup failure answers false.
+//
+// The recorded user is not compared with the agent's live delegation
+// chain: the creation-time value stands, through the agent's deletion and
+// purge and through a later re-delegation. Callers add their own
+// conditions (the steward clause's role read in homeScope).
+func (h *artifactHost) recordedDelegator(ctx context.Context, userID, sponsorRef, homeScope string) bool {
+	if userID == "" || sponsorRef == "" || userID != sponsorRef {
+		return false
+	}
+	authz := h.server.authzService
+	if authz.store == nil {
+		return false
+	}
+	// A deleted home project ends the clause (as it ends every steward
+	// clause): admission alone does not show that the project exists (a
+	// system role, or role bindings not yet removed, may still admit to a
+	// deleted project's id).
+	if project, err := authz.store.GetProject(ctx, homeScope); err != nil || project == nil {
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			slog.WarnContext(ctx, "artifacts: home project lookup for the recorded delegating user failed", "error", err)
+		}
+		return false
+	}
+	user, err := authz.store.GetUser(ctx, sponsorRef)
+	if err != nil || user == nil {
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			slog.WarnContext(ctx, "artifacts: recorded delegating user lookup failed", "error", err)
+		}
+		return false
+	}
+	if user.Status != store.UserStatusActive {
+		return false
+	}
+	if user.ID == DevUserID && !authz.devLocalAuthorityEnabled() {
+		return false
+	}
+	res, err := authz.ProjectAdmissionForClass(maskAuthzInputs(ctx), PrincipalContext{
+		Kind:     PrincipalKindUser,
+		ID:       user.ID,
+		Identity: NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, ""),
+	}, homeScope, artifacts.PermissionManage, executionProjectClass(artifacts.PermissionManage), nil)
+	if err != nil {
+		slog.WarnContext(ctx, "artifacts: recorded delegating user admission failed", "error", err)
+		return false
+	}
+	if !res.Admitted {
+		slog.DebugContext(ctx, "artifacts: recorded delegating user not admitted to the home project", "source", "recorded")
+		return false
+	}
+	return true
+}
+
+var _ artifacts.SponsorReviewPolicy = (*artifactHost)(nil)
+
+// SponsorReviewGrant implements artifacts.SponsorReviewPolicy
+// (ptone/scion#7134): a new artifact homed in project scopeRef gets a
+// review grant for its recorded delegating user sponsorUserID only while
+// experiment hub.artifact_sponsor_review_grant is on and the user reads in
+// scopeRef through a role now (sponsorReadsHomeThroughRole). The check is
+// made against the artifact's own home, never the agent's project. Any
+// failure answers no grant.
+func (h *artifactHost) SponsorReviewGrant(ctx context.Context, scopeRef, sponsorUserID string) error {
+	if h.server == nil || !h.server.experimentEnabled(experiments.ArtifactSponsorReviewGrant) {
+		return artifacts.ErrSponsorReviewOff
+	}
+	ok, err := h.sponsorReadsHomeThroughRole(ctx, sponsorUserID, scopeRef)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return &artifacts.SponsorReviewRoleError{Scope: scopeRef, Permission: artifacts.PermissionRead}
+	}
+	return nil
+}
+
+// sponsorReadsHomeThroughRole reports whether user userID, a NAMED user and
+// not the caller of ctx, reads artifacts in project homeScope through a
+// role now: the project exists; the user exists and is active; a test
+// identity that can no longer sign in, and the local development user while
+// local-development authority is off, are refused; then
+// AuthzService.CheckAccess for artifact.read on homeScope with that user as
+// the subject, decided from role bindings (an artifact's grants never feed
+// it), under maskAllAuthzMemo so nothing memoized for the caller's request
+// is visible. It is CHECK-ONLY: the identity built from the user's record is
+// the subject of that one CheckAccess and never enters a context
+// (TestSponsorReviewIdentityOnlyASubject). It answers (false, nil) for a
+// refusal and an error for a failed lookup, including a decision CheckAccess
+// marks indeterminate (a role-binding or principal resolution fault).
+//
+// The subject carries the user's global role, and CheckAccess counts
+// system-scope bindings too, so a user whose system role carries
+// artifact.read (a super-admin) passes for any existing home project. That
+// is intended: it is the same home-project read decision as the steward
+// clause's role read and the automatic form's read-time check
+// (grantAllows), and such a user already reads the artifact.
+func (h *artifactHost) sponsorReadsHomeThroughRole(ctx context.Context, userID, homeScope string) (bool, error) {
+	if h.server == nil || h.server.authzService == nil || h.server.authzService.store == nil || userID == "" || homeScope == "" {
+		return false, errors.New("artifacts: automatic review grant: authorization not available")
+	}
+	authz := h.server.authzService
+	perm, ok := artifactPermission(artifacts.PermissionRead)
+	if !ok {
+		return false, errors.New("artifacts: automatic review grant: read permission not registered")
+	}
+	// A deleted home project's id can still be admitted through a system
+	// role, so its existence is checked first.
+	if project, err := authz.store.GetProject(ctx, homeScope); err != nil || project == nil {
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return false, err
+		}
+		return false, nil
+	}
+	user, err := authz.store.GetUser(ctx, userID)
+	if errors.Is(err, store.ErrNotFound) || (err == nil && user == nil) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if user.Status != store.UserStatusActive {
+		return false, nil
+	}
+	if testFixtureRejection(user, h.server.testIdentities.enabled, h.server.testIdentities.clock()) != "" {
+		return false, nil
+	}
+	if user.ID == DevUserID && !authz.devLocalAuthorityEnabled() {
+		return false, nil
+	}
+	identity := NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "")
+	decision := authz.CheckAccess(maskAllAuthzMemo(ctx), identity, Resource{
+		Type:       permissions.ResourceArtifact,
+		ParentType: permissions.ResourceProject,
+		ParentID:   homeScope,
+	}, Action(perm.Action))
+	if decision.IsIndeterminate() {
+		// A store or resolution fault, not a policy answer: reported as a
+		// lookup failure (still no grant).
+		return false, errors.New("artifacts: automatic review grant: role lookup failed")
+	}
+	return decision.Allowed, nil
+}
+
+var _ artifacts.SponsorRecorder = (*artifactHost)(nil)
+
+// DelegatingUser implements artifacts.SponsorRecorder (ptone/scion#6028):
+// the id of the user at the root of agent agentID's recorded delegation
+// chain, by the same lookup the live delegator clauses use
+// (ResolveProvenanceRoot for artifact.manage, no legacy allowance), to
+// record on an artifact the agent creates and in the sponsor backfill. It
+// depends on nothing of the caller (the root's admission is evaluated with
+// the requester's inputs masked).
+//
+// A provenance denial (isProvenanceDenial: no, revoked, ambiguous or
+// unrecorded edge, a deleted agent on the chain, an inactive or unadmitted
+// root, a source not accepted here) answers ("", nil): there is no
+// delegating user to record. Any other error, a store lookup fault
+// included, is returned, so the backfill stops instead of recording that
+// it finished.
+func (h *artifactHost) DelegatingUser(ctx context.Context, agentID string) (string, error) {
+	if h.server == nil || h.server.authzService == nil {
+		return "", errors.New("artifacts: delegating user: authorization service not available")
+	}
+	root, err := h.server.authzService.ResolveProvenanceRoot(ctx, agentID, ResolveProvenanceOptions{PermissionID: artifacts.PermissionManage})
+	if err != nil {
+		if isProvenanceDenial(err) {
+			return "", nil
+		}
+		return "", err
+	}
+	if root.RootUser == nil {
+		return "", nil
+	}
+	return root.RootUser.ID, nil
+}
+
+// isProvenanceDenial reports whether err, from ResolveProvenanceRoot, is a
+// decision that the agent has no delegating user rather than a failure to
+// find out: every provenance sentinel except ErrProvenanceRequest.
+func isProvenanceDenial(err error) bool {
+	for _, target := range []error{
+		ErrProvenanceInactive, ErrProvenanceMissing, ErrProvenanceAmbiguous, ErrProvenanceChain,
+		ErrProvenanceUnrecorded, ErrProvenanceMismatch, ErrProvenanceNotAdmitted, ErrProvenanceSourceNotAllowed,
+	} {
+		if errors.Is(err, target) {
+			return true
+		}
+	}
+	return false
 }
 
 // MemberScopes returns the projects the caller belongs to: for a user (a
@@ -438,10 +676,20 @@ var _ artifacts.ScopeChecker = (*artifactHost)(nil)
 // exists while the store has it and it is not soft-deleted
 // (messagesExist). The maintenance pass asks about at most one page of
 // message refs at a time.
+//
+// A host without a server or a store answers an error for any non-empty
+// refs, never a panic; callers treat it as a failed lookup.
 func (h *artifactHost) ScopesExist(ctx context.Context, refs []string) (map[string]bool, error) {
 	out := make(map[string]bool, len(refs))
-	if h.server == nil || len(refs) == 0 {
+	if len(refs) == 0 {
 		return out, nil
+	}
+	// No server or no store: fail closed with an error, never a nil
+	// dereference. Every caller treats an error as "cannot tell", and the
+	// steward and review clauses deny on it.
+	if h.server == nil || h.server.store == nil {
+		slog.WarnContext(ctx, "artifacts: scope existence check without a store")
+		return nil, errors.New("artifacts: scope existence check: no store")
 	}
 	var projects, messages []string
 	for _, ref := range refs {
@@ -724,11 +972,18 @@ var _ artifacts.MessageScopeHost = (*artifactHost)(nil)
 // PermitsMessageRead implements artifacts.MessageScopeHost: whether the
 // caller's credential allows reading attachments stored as artifacts at
 // all, classified the way the inbox and conversation routes classify it
-// (inboxCredentialOf). Only a session (the session allowlist) of a user or
-// the dev user may. Every other credential is refused: user access tokens
-// read only attachments of the AttachmentStore until token access comes
-// with its own design, and agents read attachments only through the fetch
-// path of a later phase (both ptone/scion#4596).
+// (inboxCredentialOf):
+//   - a session (the session allowlist) of a user or the dev user: yes;
+//   - an agent: only while it is in good standing (agentStanding,
+//     ptone/scion#3433). The check sits here, not in MayReadMessage, so it
+//     covers every agent read, the upload scope included; a lookup fault
+//     refuses. Callers that ask twice for one request install
+//     withStandingMemo. Agents have no attachment read route: they receive
+//     attachments by delivery, which asks this decision for the recipient
+//     (ptone/scion#4596);
+//   - a user access token: not yet (ptone/scion#4596, section 9);
+//   - federated users and visitors, brokers acting for a user, and every
+//     other credential: no.
 func (h *artifactHost) PermitsMessageRead(ctx context.Context) bool {
 	cred, _ := inboxCredentialOf(ctx)
 	switch cred {
@@ -738,35 +993,82 @@ func (h *artifactHost) PermitsMessageRead(ctx context.Context) bool {
 			return id.ID() != ""
 		}
 		return false
+	case inboxCredentialAgent:
+		agent := GetAgentIdentityFromContext(ctx)
+		if agent == nil || agent.ID() == "" || h.server == nil {
+			return false
+		}
+		return h.server.agentStanding(ctx, agent.ID()) == nil
 	case inboxCredentialToken:
-		return false // user access tokens: ptone/scion#4596
+		// Clause 1 of the token rule (ptone/scion#4596, section 9): the
+		// token carries inbox:read, eligible for its boundary, and a
+		// project-boundary holder is a current member of that project.
+		token := chatToken(ctx)
+		if token == nil || h.server == nil {
+			return false
+		}
+		return h.server.newSelfScopeCheck(ctx, token, permInboxRead).allows(tokenBoundaryProject(token))
 	default:
 		return false
 	}
 }
 
-// MayReadMessage implements artifacts.MessageScopeHost: whether the calling
-// user may read message messageID now. The message must exist and not be
-// deleted; then the user reads it through its conversation or thread
-// (canReadNativeMessage: DM participants, project readers for a project
-// thread, active participants of a group without a project), or is one of
-// its addressees. It answers only for the identity of the request (users,
-// as PermitsMessageRead), and every lookup failure answers false.
-func (h *artifactHost) MayReadMessage(ctx context.Context, messageID string) bool {
+// MayReadMessage implements artifacts.MessageScopeHost: whether the caller
+// may read message messageID now. The message must exist and not be
+// deleted; then, by credential class:
+//   - a session user reads it through its conversation or thread
+//     (canReadNativeMessage: DM participants, project readers for a
+//     project thread, active participants of a group without a project),
+//     or is one of its user addressees;
+//   - an agent reads it through its conversation (canUserReadMessage: a
+//     DM party by key; a group of its own project), or is one of its
+//     addressees (attachmentAgentAddressee).
+//
+// messageProjectID is not read by these classes. It answers only for the
+// identity of the request (as PermitsMessageRead, which it asks first),
+// and every lookup failure answers false.
+func (h *artifactHost) MayReadMessage(ctx context.Context, messageID string, messageProjectID *string) bool {
 	if h.server == nil || messageID == "" || !h.PermitsMessageRead(ctx) {
 		return false
 	}
-	user := GetUserIdentityFromContext(ctx)
-	if user == nil || user.ID() == "" {
+	s := h.server
+	msg, ok := s.liveMessageForAttachments(ctx, messageID)
+	if !ok {
 		return false
 	}
-	s := h.server
+	cred, _ := inboxCredentialOf(ctx)
+	switch cred {
+	case inboxCredentialSession:
+		user := GetUserIdentityFromContext(ctx)
+		if user == nil || user.ID() == "" {
+			return false
+		}
+		return s.canReadNativeMessage(ctx, user, msg) || s.attachmentUserAddressee(ctx, messageID, user.ID())
+	case inboxCredentialAgent:
+		agent := GetAgentIdentityFromContext(ctx)
+		if agent == nil || agent.ID() == "" {
+			return false
+		}
+		if s.canUserReadMessage(ctx, agent, msg) {
+			return true
+		}
+		return s.attachmentAgentAddressee(ctx, msg, agent.ID())
+	case inboxCredentialToken:
+		return s.tokenMayReadAttachmentMessage(ctx, msg, messageProjectID)
+	default:
+		return false
+	}
+}
+
+// liveMessageForAttachments returns message messageID when it exists and
+// is not deleted on the web chat channel. Any lookup failure answers false.
+func (s *Server) liveMessageForAttachments(ctx context.Context, messageID string) (*store.Message, bool) {
 	msg, err := s.store.GetMessage(ctx, messageID)
 	if err != nil || msg == nil {
 		if err != nil && !errors.Is(err, store.ErrNotFound) {
 			slog.WarnContext(ctx, "artifacts: attachment message lookup failed", "message", messageID, "error", err)
 		}
-		return false
+		return nil, false
 	}
 	s.mu.RLock()
 	wcs := s.webChatStore
@@ -775,24 +1077,226 @@ func (h *artifactHost) MayReadMessage(ctx context.Context, messageID string) boo
 		ext, err := wcs.GetMessageExt(ctx, messageID)
 		if err != nil {
 			slog.WarnContext(ctx, "artifacts: attachment message state lookup failed", "message", messageID, "error", err)
-			return false
+			return nil, false
 		}
 		if ext != nil && ext.DeletedAt != nil {
-			return false
+			return nil, false
 		}
 	}
-	if s.canReadNativeMessage(ctx, user, msg) {
+	return msg, true
+}
+
+// attachmentAgentAddressee reports whether agent agentID is an addressee of
+// msg for its attachments (ptone/scion#4596, design section 6.4): the
+// message row's own recipient, or a message_addressees row for the agent
+// whose delivery state is pending or delivered. A failed row grants
+// nothing. A lookup failure answers false.
+func (s *Server) attachmentAgentAddressee(ctx context.Context, msg *store.Message, agentID string) bool {
+	if kind, ok := messages.PrincipalKindFromAddress(msg.Recipient); ok && kind == artifacts.PrincipalKindAgent && msg.RecipientID == agentID {
 		return true
 	}
+	addressees, err := s.store.ListAddressees(ctx, msg.ID)
+	if err != nil {
+		slog.WarnContext(ctx, "artifacts: attachment addressee lookup failed", "message", msg.ID, "error", err)
+		return false
+	}
+	for _, a := range addressees {
+		if a.PrincipalKind != artifacts.PrincipalKindAgent || a.PrincipalID != agentID {
+			continue
+		}
+		if a.DeliveryState == addresseePending || a.DeliveryState == addresseeDelivered {
+			return true
+		}
+	}
+	return false
+}
+
+// Delivery states of a message_addressees row.
+const (
+	addresseePending   = "pending"
+	addresseeDelivered = "delivered"
+	addresseeFailed    = "failed"
+)
+
+// attachmentUserAddressee reports whether user userID is one of the user
+// addressees of message messageID. A lookup failure answers false.
+func (s *Server) attachmentUserAddressee(ctx context.Context, messageID, userID string) bool {
 	addressees, err := s.store.ListAddressees(ctx, messageID)
 	if err != nil {
 		slog.WarnContext(ctx, "artifacts: attachment addressee lookup failed", "message", messageID, "error", err)
 		return false
 	}
 	for _, a := range addressees {
-		if a.PrincipalKind == artifacts.PrincipalKindUser && a.PrincipalID == user.ID() {
+		if a.PrincipalKind == artifacts.PrincipalKindUser && a.PrincipalID == userID {
 			return true
 		}
 	}
 	return false
+}
+
+// tokenMayReadAttachmentMessage is the token branch of MayReadMessage
+// (ptone/scion#4596, section 9). Clause 1 ran in PermitsMessageRead and
+// clause 2 (a live message) in MayReadMessage; then every one of these
+// must hold:
+//  3. the holder reads the message: through its conversation
+//     (canReadNativeMessage with the token identity, so the token's
+//     ceiling applies), or as one of its user addressees;
+//  4. the attachments record the message's project (not nil), and the
+//     token's inbox:read self-scope check allows it ("" needs a hub
+//     boundary);
+//  5. for a direct conversation, agent:read on every agent party of its
+//     key (dmAgentParties), whichever party the holder is; a missing agent
+//     row refuses.
+//
+// It is not tokenMayUseConversation: the project is the one stored at
+// bind, and the agent requirement does not depend on the caller.
+func (s *Server) tokenMayReadAttachmentMessage(ctx context.Context, msg *store.Message, messageProjectID *string) bool {
+	token := chatToken(ctx)
+	if token == nil || token.ID() == "" {
+		return false
+	}
+	if !s.canReadNativeMessage(ctx, token, msg) && !s.attachmentUserAddressee(ctx, msg.ID, token.ID()) {
+		return false
+	}
+	if messageProjectID == nil || !s.newSelfScopeCheck(ctx, token, permInboxRead).allows(*messageProjectID) {
+		return false
+	}
+	conv, err := s.attachmentMessageConversation(ctx, msg)
+	if err != nil {
+		slog.WarnContext(ctx, "artifacts: attachment conversation lookup failed", "message", msg.ID, "error", err)
+		return false
+	}
+	if conv == nil || conv.Kind != "direct" {
+		return true
+	}
+	parties, err := dmAgentParties(conv)
+	if err != nil {
+		return false
+	}
+	for _, id := range parties {
+		agent, err := s.store.GetAgent(ctx, id)
+		if err != nil || agent == nil {
+			return false
+		}
+		if !s.authzService.CheckAccess(ctx, token, agentResource(agent), ActionRead).Allowed {
+			return false
+		}
+	}
+	return true
+}
+
+// attachmentMessageConversation returns the conversation of msg: its
+// stored conversation, or for a message without one in a DM thread, a
+// direct conversation of the thread's key. It returns nil when neither
+// applies.
+func (s *Server) attachmentMessageConversation(ctx context.Context, msg *store.Message) (*store.Conversation, error) {
+	if msg.ConversationID != "" {
+		return s.store.GetConversation(ctx, msg.ConversationID)
+	}
+	if strings.HasPrefix(msg.ThreadID, "dm:") {
+		return &store.Conversation{Kind: "direct", ExternalRef: msg.ThreadID}, nil
+	}
+	return nil, nil
+}
+
+// PermitsUploadRead implements artifacts.MessageScopeHost (ptone/scion#4596,
+// section 9, clause 0): whether the uploader's credential reads its own
+// unsent upload. Sessions and agents in standing do; a user access token
+// does only when its inbox:read self-scope check allows a record with no
+// project (a hub boundary), as for a project-less upload in the
+// AttachmentStore.
+func (h *artifactHost) PermitsUploadRead(ctx context.Context) bool {
+	cred, _ := inboxCredentialOf(ctx)
+	switch cred {
+	case inboxCredentialSession, inboxCredentialAgent:
+		return h.PermitsMessageRead(ctx)
+	case inboxCredentialToken:
+		token := chatToken(ctx)
+		if token == nil || h.server == nil {
+			return false
+		}
+		return h.PermitsMessageRead(ctx) && h.server.newSelfScopeCheck(ctx, token, permInboxRead).allows("")
+	}
+	return false
+}
+
+var _ artifacts.FeatureGate = (*artifactHost)(nil)
+
+// FeatureEnabled implements artifacts.FeatureGate with the hub's experiment
+// resolution. It fails closed: a name that is not a registered server-layer
+// experiment answers false, whatever is stored for it.
+func (h *artifactHost) FeatureEnabled(_ context.Context, name string) bool {
+	if h.server == nil {
+		return false
+	}
+	exp, ok := h.server.experimentRegistry().Lookup(name)
+	if !ok || !exp.HasLayer(experiments.LayerServer) {
+		return false
+	}
+	return h.server.experimentEnabled(name)
+}
+
+var _ artifacts.PrincipalNamer = (*artifactHost)(nil)
+
+// PrincipalDisplayNames implements artifacts.PrincipalNamer for the
+// open-review check: a user's display name, or an agent's name. It never
+// answers an email address or an id: a user without a display name, an
+// agent without a name, a ref that is not a known principal and any store
+// error are left out of the answer, and the service names them "a
+// reviewer". It costs at most two store queries.
+func (h *artifactHost) PrincipalDisplayNames(ctx context.Context, refs []string) map[string]string {
+	out := make(map[string]string, len(refs))
+	if h.server == nil || h.server.store == nil || len(refs) == 0 {
+		return out
+	}
+	// The answer is keyed by the refs as given; ids compare in lower case.
+	var agentIDs, userIDs []string
+	agentRefs, userRefs := map[string]string{}, map[string]string{}
+	for _, ref := range refs {
+		kind, id, ok := strings.Cut(ref, ":")
+		if _, err := uuid.Parse(id); !ok || err != nil {
+			continue
+		}
+		switch kind {
+		case artifacts.PrincipalKindAgent:
+			agentIDs = append(agentIDs, id)
+			agentRefs[strings.ToLower(id)] = ref
+		case artifacts.PrincipalKindUser:
+			userIDs = append(userIDs, id)
+			userRefs[strings.ToLower(id)] = ref
+		}
+	}
+	if len(agentIDs) > 0 {
+		res, err := h.server.store.ListAgents(ctx, store.AgentFilter{IDs: agentIDs},
+			store.ListOptions{Limit: len(agentIDs), SkipTotalCount: true})
+		if err != nil {
+			slog.WarnContext(ctx, "artifacts: reading reviewer agent names failed", "error", err)
+		} else {
+			for _, a := range res.Items {
+				if name := strings.TrimSpace(a.Name); name != "" && a.DeletedAt.IsZero() {
+					if ref, ok := agentRefs[strings.ToLower(a.ID)]; ok {
+						out[ref] = name
+					}
+				}
+			}
+		}
+	}
+	if len(userIDs) > 0 {
+		users, err := h.server.store.GetUsersByIDs(ctx, userIDs)
+		if err != nil {
+			slog.WarnContext(ctx, "artifacts: reading reviewer user names failed", "error", err)
+		} else {
+			for _, u := range users {
+				if u == nil {
+					continue
+				}
+				if name := strings.TrimSpace(u.DisplayName); name != "" && !strings.Contains(name, "@") {
+					if ref, ok := userRefs[strings.ToLower(u.ID)]; ok {
+						out[ref] = name
+					}
+				}
+			}
+		}
+	}
+	return out
 }

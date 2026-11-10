@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/internal/hubtestutil"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
@@ -159,7 +160,7 @@ VALUES ('msg-rt-1', 'proj-rt', 'user:frank', 'user-rt', 'agent:helper', 'agent-r
 		projectID, topicID, resolvedConvID, convID)
 
 	// Confirm the topic also has the right conversation_id.
-	topicConvID := getTopicConvID(t, db, topicID)
+	topicConvID := hubtestutil.GetTopicConvID(t, db, topicID)
 	require.Equal(t, convID, topicConvID,
 		"promoted topic should carry the same conversation_id")
 }

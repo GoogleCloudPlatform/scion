@@ -227,6 +227,12 @@ func (s *Server) countReachableAgents(ctx context.Context, targetAgent *store.Ag
 	senderIdentity := agentIdentityFromAgent(targetAgent)
 	reachable := 0
 	for i := range projectAgents {
+		// Once the request context has ended, stop: every further check
+		// would refuse, and the count of an ended request is not
+		// delivered (ptone/scion#6012).
+		if ctx.Err() != nil {
+			break
+		}
 		other := &projectAgents[i]
 		// Self is not counted; authorizeAgentMessage's self-message
 		// exemption never applies here.
@@ -308,6 +314,16 @@ func (s *Server) getSenderMode(ctx context.Context, identity Identity) string {
 	case "agent":
 		agent, err := s.store.GetAgent(ctx, identity.ID())
 		if err != nil {
+			return "unknown"
+		}
+		if agent.MessageMode == "" {
+			return string(store.MessageModeProject)
+		}
+		return agent.MessageMode
+	case string(PrincipalKindAgentDelegated):
+		// A delegated sender sends as its actor agent: that agent's mode.
+		agent := s.delegatedActorAgent(ctx, identity)
+		if agent == nil {
 			return "unknown"
 		}
 		if agent.MessageMode == "" {

@@ -25,6 +25,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 )
 
 // Web-chat attachments stored as artifacts (ptone/scion#4595).
@@ -65,6 +67,12 @@ type AttachmentInfo struct {
 	Name      string
 	MediaType string
 	Size      int64
+	// SHA256 is the hex digest of the file, set by UsableAttachment and
+	// MessageAttachments.
+	SHA256 string
+	// MessageProjectID is the project recorded at bind time
+	// (Artifact.MessageProjectID), set by MessageAttachments.
+	MessageProjectID *string
 }
 
 // AttachmentState is what UsableAttachment found.
@@ -180,15 +188,17 @@ func (s *Service) UsableAttachment(ctx context.Context, id, senderKind, senderRe
 	if err != nil {
 		return AttachmentInfo{}, AttachmentAbsent, err
 	}
-	return AttachmentInfo{ID: a.ID, Name: f.Path, MediaType: f.MediaType, Size: f.Size}, AttachmentUsable, nil
+	return AttachmentInfo{ID: a.ID, Name: f.Path, MediaType: f.MediaType, Size: f.Size, SHA256: f.SHA256}, AttachmentUsable, nil
 }
 
 // BindAttachment moves the upload artifactID of the sender (senderKind,
 // senderRef) to the message scope of messageID, a message that is already
-// stored. It returns ErrAttachmentNotOwned for an upload of someone else,
+// stored, and records messageProjectID, the project the host derived from
+// the stored message ("" for none), on the row in the same write. It
+// returns ErrAttachmentNotOwned for an upload of someone else,
 // ErrAttachmentBound for one already sent, and ErrNotFound for an unknown
 // id.
-func (s *Service) BindAttachment(ctx context.Context, artifactID, senderKind, senderRef, messageID string) error {
+func (s *Service) BindAttachment(ctx context.Context, artifactID, senderKind, senderRef, messageID, messageProjectID string) error {
 	b, ok := s.backend()
 	if !ok {
 		return ErrUnavailable
@@ -196,7 +206,7 @@ func (s *Service) BindAttachment(ctx context.Context, artifactID, senderKind, se
 	if !canonicalID(artifactID) {
 		return ErrNotFound
 	}
-	return b.store.BindAttachment(ctx, artifactID, senderKind, senderRef, messageID, time.Now())
+	return b.store.BindAttachment(ctx, artifactID, senderKind, senderRef, messageID, messageProjectID, time.Now())
 }
 
 // ServeAttachment answers a download of attachment id (an artifact id or
@@ -287,10 +297,31 @@ func (s *Service) MessageAttachments(ctx context.Context, messageIDs []string) (
 			}
 			out[msgID] = append(out[msgID], AttachmentInfo{
 				ID: row.Artifact.ID, Name: row.File.Path, MediaType: row.File.MediaType, Size: row.File.Size,
+				SHA256: row.File.SHA256, MessageProjectID: row.Artifact.MessageProjectID,
 			})
 		}
 	}
 	return out, nil
+}
+
+// MayReadAttachments reports whether the caller of ctx may read the
+// attachments bound to message messageID, for the paths that list them
+// (history, the send echo, delivery planning; ptone/scion#4596). It asks
+// the same two host questions as the read rule of a message attachment
+// (canReadAttachmentScope), in the same order, without a row:
+// MessageScopeHost.PermitsMessageRead, then MayReadMessage.
+// messageProjectID is the project the message's attachment rows record
+// (all rows of one message are bound by one send, so any row's value
+// serves). A host without MessageScopeHost answers false.
+func (s *Service) MayReadAttachments(ctx context.Context, messageID string, messageProjectID *string) bool {
+	mh, ok := s.host.(MessageScopeHost)
+	if !ok || messageID == "" {
+		return false
+	}
+	if !mh.PermitsMessageRead(ctx) {
+		return false
+	}
+	return mh.MayReadMessage(ctx, messageID, messageProjectID)
 }
 
 // OpenBoundAttachment opens the bytes of attachment artifactID, which must
@@ -322,6 +353,63 @@ func (s *Service) OpenBoundAttachment(ctx context.Context, artifactID, messageID
 		return nil, AttachmentInfo{}, fmt.Errorf("artifacts: open attachment: %w", err)
 	}
 	return rc, AttachmentInfo{ID: a.ID, Name: f.Path, MediaType: f.MediaType, Size: f.Size}, nil
+}
+
+// DeliveryRedirectTTL is the lifetime of the object-store URL a broker is
+// redirected to when it redeems an attachment delivery capability
+// (ptone/scion#4596).
+const DeliveryRedirectTTL = 60 * time.Second
+
+// ServeBoundAttachment answers a broker redeeming a delivery capability
+// for attachment artifactID, which must be bound to message messageID
+// (ptone/scion#4596). Like OpenBoundAttachment it checks no caller: the host
+// calls it only from its capability redemption route, after the capability
+// (issued under the read decision for the recipient) has been verified and
+// spent. The local provider streams the bytes; an object store answers a
+// redirect to a URL with a DeliveryRedirectTTL lifetime. On ServeNotFound
+// nothing is written.
+func (s *Service) ServeBoundAttachment(w http.ResponseWriter, r *http.Request, artifactID, messageID string) ServeOutcome {
+	ctx := r.Context()
+	b, ok := s.backend()
+	if !ok || !canonicalID(artifactID) || messageID == "" {
+		return ServeNotFound
+	}
+	a, err := b.store.GetAttachment(ctx, artifactID)
+	if err != nil || a == nil || a.ID != artifactID || a.ScopeKind != ScopeKindMessage || a.ScopeRef != messageID {
+		if err != nil && !errors.Is(err, ErrNotFound) {
+			slog.ErrorContext(ctx, "artifacts: bound attachment lookup failed", "error", err)
+		}
+		return ServeNotFound
+	}
+	f, err := attachmentFile(ctx, b, a)
+	if err != nil {
+		return ServeNotFound
+	}
+	how := deliverRedirect
+	if b.blobs.Provider() == storage.ProviderLocal {
+		how = deliverStream
+	}
+	serveFileTTL(w, r, b, f, how, false, DeliveryRedirectTTL)
+	return ServeWritten
+}
+
+// RedeemDeliveryNonce spends the nonce of an attachment delivery capability
+// and reports whether this was its first use (ptone/scion#4596).
+func (s *Service) RedeemDeliveryNonce(ctx context.Context, nonce string) (bool, error) {
+	b, ok := s.backend()
+	if !ok {
+		return false, ErrUnavailable
+	}
+	return b.store.RecordDeliveryRedemption(ctx, nonce, time.Now())
+}
+
+// SweepDeliveryRedemptions deletes redemption records older than before.
+func (s *Service) SweepDeliveryRedemptions(ctx context.Context, before time.Time) (int, error) {
+	b, ok := s.backend()
+	if !ok {
+		return 0, nil
+	}
+	return b.store.SweepDeliveryRedemptions(ctx, before)
 }
 
 // retireBatch is how many artifacts one retire store call deletes.

@@ -161,8 +161,19 @@ type errorResponse struct {
 	} `json:"error"`
 }
 
+// maxErrorResponseBodyBytes bounds how much of an error response body
+// ParseErrorResponse reads to avoid unbounded memory allocation.
+const maxErrorResponseBodyBytes = 64 * 1024
+
 // ParseErrorResponse parses an API error response body.
 func ParseErrorResponse(resp *http.Response) *APIError {
+	if resp == nil {
+		return &APIError{
+			Code:    ErrCodeInternalError,
+			Message: "nil response",
+		}
+	}
+
 	apiErr := &APIError{
 		StatusCode: resp.StatusCode,
 		Code:       statusToCode(resp.StatusCode),
@@ -170,19 +181,25 @@ func ParseErrorResponse(resp *http.Response) *APIError {
 	}
 
 	// Try to get the request ID from the header
-	apiErr.RequestID = resp.Header.Get("X-Request-ID")
+	if resp.Header != nil {
+		apiErr.RequestID = resp.Header.Get("X-Request-ID")
 
-	// Retry-After (RFC 7231 §7.1.3): the Hub only ever sends the
-	// delta-seconds form on 429/503 keys responses, never the HTTP-date
-	// form, so a plain non-negative integer is the only shape parsed here.
-	if ra := resp.Header.Get("Retry-After"); ra != "" {
-		if secs, err := strconv.Atoi(ra); err == nil && secs >= 0 {
-			apiErr.RetryAfterSeconds = secs
+		// Retry-After (RFC 7231 §7.1.3): the Hub only ever sends the
+		// delta-seconds form on 429/503 keys responses, never the HTTP-date
+		// form, so a plain non-negative integer is the only shape parsed here.
+		if ra := resp.Header.Get("Retry-After"); ra != "" {
+			if secs, err := strconv.Atoi(ra); err == nil && secs >= 0 {
+				apiErr.RetryAfterSeconds = secs
+			}
 		}
 	}
 
+	if resp.Body == nil {
+		return apiErr
+	}
+
 	// Try to parse the response body
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxErrorResponseBodyBytes))
 	if err != nil {
 		return apiErr
 	}

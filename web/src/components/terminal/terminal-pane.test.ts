@@ -3,6 +3,7 @@ import type { ScionTerminalPane } from './terminal-pane.js';
 import { TerminalSessionRegistry } from '../../client/terminal-sessions.js';
 import { requestUrl } from '../../client/__fixtures__/request-url.js';
 import { getPublicSettings, invalidatePublicSettings } from '../../client/server-feature-flags.js';
+import { TERMINAL_PANE_DIALOG_OPEN_EVENT } from '../../client/terminal-workspace-events.js';
 
 /**
  * The automatic reconnect after a 4503 close waits a full-jitter delay;
@@ -1399,6 +1400,94 @@ describe('Capture Auth scope dialog (design ptone/scion#2291 §7)', () => {
     expect(radio('project')?.hasAttribute('disabled')).toBe(true); // restricted
     expect(radio('user')?.hasAttribute('disabled')).toBe(false);
   });
+
+  // ptone/scion#2612: both dialogs render already open and fire no sl-show,
+  // so the pane announces each one for the workspace's palette to close.
+  describe('pane dialog open event', () => {
+    /** Records each event that reaches the document, with whether `dialog` was rendered by then. */
+    function recordDialogOpens(dialog: () => HTMLElement | null): {
+      events: Event[];
+      rendered: boolean[];
+      stop: () => void;
+    } {
+      const events: Event[] = [];
+      const rendered: boolean[] = [];
+      const listener = (e: Event): void => {
+        events.push(e);
+        rendered.push(dialog() !== null);
+      };
+      document.addEventListener(TERMINAL_PANE_DIALOG_OPEN_EVENT, listener);
+      return {
+        events,
+        rendered,
+        stop: () => document.removeEventListener(TERMINAL_PANE_DIALOG_OPEN_EVENT, listener),
+      };
+    }
+
+    function conflictDialog(): HTMLElement | null {
+      return (
+        page.shadowRoot?.querySelector<HTMLElement>('sl-dialog[label*="already exist"]') ?? null
+      );
+    }
+
+    it('the scope dialog dispatches one bubbling, composed event per open, after it renders', async () => {
+      await makeCaptureEligible();
+      fetcher.mockImplementation((url) => {
+        const path = typeof url === 'string' ? url : url instanceof URL ? url.href : url.url;
+        if (path.includes('/api/v1/settings/public')) {
+          return Promise.resolve(json({ agentSecretsUserScopeOnly: false }));
+        }
+        return Promise.resolve(json(noAuthAgent));
+      });
+      const record = recordDialogOpens(scopeDialog);
+      try {
+        await openDialog();
+        // Re-renders of the open dialog announce nothing new.
+        (page as unknown as { captureAuthSelectedScope: string }).captureAuthSelectedScope = 'user';
+        await page.updateComplete;
+        expect(record.events).toHaveLength(1);
+        expect(record.events[0].target).toBe(page);
+        expect(record.events[0].bubbles).toBe(true);
+        expect(record.events[0].composed).toBe(true);
+        expect(record.rendered).toEqual([true]);
+
+        (page as unknown as { captureAuthScopeDialogOpen: boolean }).captureAuthScopeDialogOpen =
+          false;
+        await page.updateComplete;
+        expect(record.events).toHaveLength(1);
+        await openDialog();
+        expect(record.events).toHaveLength(2);
+      } finally {
+        record.stop();
+      }
+    });
+
+    it('the secret-conflict dialog dispatches the event when the capture response opens it', async () => {
+      await makeCaptureEligible();
+      fetcher.mockImplementation((url) => {
+        const path = typeof url === 'string' ? url : url instanceof URL ? url.href : url.url;
+        if (path.includes('/api/v1/settings/public')) {
+          return Promise.resolve(json({ agentSecretsUserScopeOnly: false }));
+        }
+        if (path.includes('/exec')) {
+          return Promise.resolve(json({ output: 'secret "API_KEY" already exists', exitCode: 1 }));
+        }
+        return Promise.resolve(json(noAuthAgent));
+      });
+      await openDialog();
+      const record = recordDialogOpens(conflictDialog);
+      try {
+        clickCapture();
+        await vi.waitFor(() => expect(conflictDialog()).not.toBeNull());
+        await page.updateComplete;
+
+        expect(record.events).toHaveLength(1);
+        expect(record.rendered).toEqual([true]);
+      } finally {
+        record.stop();
+      }
+    });
+  });
 });
 
 describe('focusTerminal()', () => {
@@ -1545,5 +1634,107 @@ describe('compact pane header (ptone/scion#4324)', () => {
     expect(bar.querySelector('.toggle-group')).not.toBeNull();
     expect(bar.querySelectorAll('a.back-link.compact')).toHaveLength(2);
     expect(bar.querySelector('.pane-action-btn')).not.toBeNull();
+  });
+});
+
+describe('clipboard guard (ptone/scion#7555)', () => {
+  const originalClipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+
+  function setClipboard(value: unknown): void {
+    Object.defineProperty(navigator, 'clipboard', { value, configurable: true });
+  }
+
+  afterEach(() => {
+    if (originalClipboard) Object.defineProperty(navigator, 'clipboard', originalClipboard);
+    else delete (navigator as unknown as Record<string, unknown>).clipboard;
+    showToast.mockClear();
+  });
+
+  /** Mounts a focused, connected pane whose terminal has `selection` selected. */
+  async function mountWithSelection(selection: string): Promise<{
+    keyHandler: (e: KeyboardEvent) => boolean;
+    osc52: (data: string) => boolean;
+  }> {
+    await mountConnected();
+    const xt = terminal.instances[0] as unknown as {
+      attachCustomKeyEventHandler: ReturnType<typeof vi.fn>;
+      parser: { registerOscHandler: ReturnType<typeof vi.fn> };
+      hasSelection: () => boolean;
+      getSelection: () => string;
+    };
+    xt.hasSelection = (): boolean => selection.length > 0;
+    xt.getSelection = (): string => selection;
+    (page as unknown as { _focused: boolean })._focused = true;
+    showToast.mockClear();
+    const keyHandler = xt.attachCustomKeyEventHandler.mock.calls[0][0] as (
+      e: KeyboardEvent
+    ) => boolean;
+    const osc52 = xt.parser.registerOscHandler.mock.calls.find(
+      (c: unknown[]) => c[0] === 52
+    )![1] as (data: string) => boolean;
+    return { keyHandler, osc52 };
+  }
+
+  const key = (k: string, init: KeyboardEventInit = {}): KeyboardEvent =>
+    new KeyboardEvent('keydown', { key: k, ctrlKey: true, ...init });
+
+  it.each([
+    ['Ctrl+C', key('c')],
+    ['Ctrl+Shift+C', key('C', { shiftKey: true })],
+  ])('%s copies the selection and shows "Copied"', async (_name, event) => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    setClipboard({ writeText });
+    const { keyHandler } = await mountWithSelection('selected text');
+    expect(keyHandler(event)).toBe(false);
+    await vi.waitFor(() => expect(showToast).toHaveBeenCalledWith('Copied', 'success'));
+    expect(writeText).toHaveBeenCalledWith('selected text');
+  });
+
+  it.each([
+    ['Ctrl+C', key('c')],
+    ['Ctrl+Shift+C', key('C', { shiftKey: true })],
+  ])(
+    '%s shows "Could not copy", without throwing, when the clipboard is unavailable',
+    async (_name, event) => {
+      setClipboard(undefined);
+      const { keyHandler } = await mountWithSelection('selected text');
+      expect(() => keyHandler(event)).not.toThrow();
+      await vi.waitFor(() => expect(showToast).toHaveBeenCalledWith('Could not copy', 'danger'));
+      expect(showToast).toHaveBeenCalledTimes(1);
+    }
+  );
+
+  it.each([
+    ['Ctrl+V', key('v')],
+    ['Ctrl+Shift+V', key('V', { shiftKey: true })],
+  ])('%s does not throw or toast when the clipboard is unavailable', async (_name, event) => {
+    setClipboard(undefined);
+    const { keyHandler } = await mountWithSelection('');
+    const socket = FakeSocket.instances[0];
+    socket.send.mockClear();
+    expect(() => keyHandler(event)).not.toThrow();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(showToast).not.toHaveBeenCalled();
+    expect(socket.send).not.toHaveBeenCalled();
+  });
+
+  it('OSC 52 program writes and reads do not throw or toast when the clipboard is unavailable', async () => {
+    setClipboard(undefined);
+    const { osc52 } = await mountWithSelection('');
+    expect(() => osc52(`c;${btoa('from the program')}`)).not.toThrow();
+    expect(() => osc52('c;?')).not.toThrow();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(showToast).not.toHaveBeenCalled();
+  });
+
+  it('OSC 52 program writes go to the clipboard without a toast', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    setClipboard({ writeText });
+    const { osc52 } = await mountWithSelection('');
+    osc52(`c;${btoa('from the program')}`);
+    await vi.waitFor(() => expect(writeText).toHaveBeenCalledWith('from the program'));
+    expect(showToast).not.toHaveBeenCalled();
   });
 });

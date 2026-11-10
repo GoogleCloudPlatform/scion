@@ -94,6 +94,11 @@ type GoogleIdentityResolver struct {
 	// default, which leaves the check inert.
 	driverPrincipals driverPrincipalSet
 
+	// orphanUserCleanup, when set via SetOrphanUserCleanup, is the guarded
+	// delete of a provisioned user that lost the binding race. Nil uses
+	// the fallback in cleanupProvisionedUser.
+	orphanUserCleanup func(ctx context.Context, userID string) (bool, error)
+
 	// policyDeps carries the additional server-config-derived callbacks
 	// (role assignment, super-admin binding, grant sync, audit) that
 	// applyLiveSignInPolicy uses to give an existing record found by email
@@ -172,6 +177,59 @@ func (r *GoogleIdentityResolver) SetPlatformAuthSA(email string) {
 // check covers both.
 func (r *GoogleIdentityResolver) SetDriverPrincipals(drivers driverPrincipalSet) {
 	r.driverPrincipals = drivers
+}
+
+// SetOrphanUserCleanup sets the guarded cleanup Resolve uses for a user
+// row it provisioned and then lost to a concurrent binding of the same
+// subject (cleanupProvisionedUser). server.go wires
+// Server.cleanupOrphanedProvisionedUser, which deletes the row in a
+// transaction only while nothing depends on it. Nil keeps the fallback.
+func (r *GoogleIdentityResolver) SetOrphanUserCleanup(fn func(ctx context.Context, userID string) (bool, error)) {
+	r.orphanUserCleanup = fn
+}
+
+// cleanupProvisionedUser removes the user row Resolve provisioned when the
+// binding race went to a different user. The row normally has nothing
+// attached, but a concurrent sign-in by another subject presenting the same
+// email can bind to it and act through it before this runs
+// (ptone/scion#2143), so the delete is guarded: with orphanUserCleanup set,
+// that transaction locks the row, keeps it if it gained an external
+// identity binding, a role binding, an agent or a delegation, and
+// otherwise deactivates the edges it delegated and deletes it. Without it
+// (resolvers built directly, as in tests), the row is kept when it gained
+// an external identity binding and deleted otherwise. Failures are logged;
+// the startup sweeps are the backstop for anything left behind.
+func (r *GoogleIdentityResolver) cleanupProvisionedUser(ctx context.Context, userID string) {
+	if r.orphanUserCleanup != nil {
+		deleted, err := r.orphanUserCleanup(ctx, userID)
+		switch {
+		case err != nil:
+			r.log.Warn("google identity resolver: failed to clean up orphaned user after conflict",
+				"user_id", userID, "error", err)
+		case !deleted:
+			r.log.Warn("google identity resolver: kept a provisioned user that lost the binding race, because something depends on it",
+				"user_id", userID)
+		}
+		return
+	}
+	bindings, err := r.extIDs.GetExternalIdentitiesByUserID(ctx, userID)
+	if err != nil {
+		r.log.Warn("google identity resolver: failed to check orphaned user bindings; keeping it",
+			"user_id", userID, "error", err)
+		return
+	}
+	if len(bindings) > 0 {
+		r.log.Warn("google identity resolver: kept a provisioned user that lost the binding race, because it is bound",
+			"user_id", userID)
+		return
+	}
+	// No group-membership cleanup is needed: the user was provisioned just
+	// before and has no memberships; the startup orphan sweep is the
+	// backstop (ptone/scion#2769).
+	if err := r.users.DeleteUser(ctx, userID); err != nil {
+		r.log.Warn("google identity resolver: failed to clean up orphaned user after conflict",
+			"user_id", userID, "error", err)
+	}
 }
 
 // NewGoogleIdentityResolver creates a GoogleIdentityResolver.
@@ -449,13 +507,7 @@ func (r *GoogleIdentityResolver) Resolve(ctx context.Context, identity *Validate
 		// converge on the same user (via email-collision resolution), the
 		// user is NOT an orphan even if we lose the binding race.
 		if provisioned && resolveErr == nil && winner != nil && winner.ID != user.ID {
-			// No group-membership cleanup is needed: the user was provisioned
-			// just above and has no memberships yet; the startup orphan sweep
-			// is the backstop (ptone/scion#2769).
-			if delErr := r.users.DeleteUser(ctx, user.ID); delErr != nil {
-				r.log.Warn("google identity resolver: failed to clean up orphaned user after conflict",
-					"user_id", user.ID, "error", delErr)
-			}
+			r.cleanupProvisionedUser(ctx, user.ID)
 		}
 		return winner, resolveErr
 	}

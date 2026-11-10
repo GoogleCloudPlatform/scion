@@ -70,9 +70,10 @@ const (
 
 	// gcsLinksExperiment is the registered experiment (pkg/experiments) that
 	// gates both the web linkifier (LayerWeb) and this endpoint (LayerServer;
-	// ptone/scion#2545). The hub decides hub behaviour (AGENTS.md "Experimental
-	// features"): this constant is what handleGCSObject's step 1 actually
-	// checks, and the web gate only mirrors it.
+	// ptone/scion#2545). The hub decides hub behaviour
+	// (docs-site/src/content/docs/reference/experiments.md): this constant
+	// is what handleGCSObject's step 1 actually checks, and the web gate
+	// only mirrors it.
 	gcsLinksExperiment = "web.gcs_links"
 )
 
@@ -375,7 +376,9 @@ func (s *Server) resolveSenderAgent(ctx context.Context, msg *store.Message) *st
 // an account whose email no longer matches the assignment answer
 // GCSLinkReasonNoSA; an unverified account or a hub-scoped account without
 // the enforce check mode answer GCSLinkReasonSANotAdmissible; a store error
-// answers GCSLinkReasonSALookupFailed. The caller answers every one of them
+// answers GCSLinkReasonSALookupFailed. A natively assigned Cloud Run agent
+// (agentCloudRunNativelyAssigned) answers GCSLinkReasonNativeIdentity: the
+// hub mints nothing with its account. The caller answers every one of them
 // with the same not-found response.
 func (s *Server) resolveCurrentSA(ctx context.Context, agent *store.Agent) (*store.GCPServiceAccount, GCSLinkFetchReason) {
 	if agent.AppliedConfig == nil || agent.AppliedConfig.GCPIdentity == nil {
@@ -385,7 +388,16 @@ func (s *Server) resolveCurrentSA(ctx context.Context, agent *store.Agent) (*sto
 	if gcpID.MetadataMode != store.GCPMetadataModeAssign || gcpID.ServiceAccountID == "" || gcpID.ServiceAccountEmail == "" {
 		return nil, GCSLinkReasonNoSA
 	}
-	sa, err := s.admissibleGCPServiceAccount(ctx, gcpID, agent.ProjectID)
+	native, err := s.agentCloudRunNativelyAssigned(ctx, agent)
+	if err != nil {
+		slog.WarnContext(ctx, "gcs link: checking the agent's Cloud Run identity failed",
+			"agent_id", agent.ID, "error", err)
+		return nil, GCSLinkReasonSALookupFailed
+	}
+	if native {
+		return nil, GCSLinkReasonNativeIdentity
+	}
+	sa, err := s.admissibleGCPServiceAccount(ctx, gcpID, agent.ProjectID, agent.RuntimeBrokerID)
 	switch {
 	case err == nil:
 		return sa, ""
@@ -528,8 +540,8 @@ func gcsContentType(contentEncoding string, sniffedPrefix []byte, truncated bool
 
 // gcsWriteDeny writes the fixed body for a deny status. The 404 branch is
 // the enumeration-resistant one: every 404 deny path (missing message,
-// unreadable message, URI not in body, non-agent sender, no SA, GCS
-// 404/403/401) calls this exact function with this exact literal, so the
+// unreadable message, URI not in body, non-agent sender, no SA, SA use not
+// authorized, GCS 404/403/401) calls this exact function with this exact literal, so the
 // bytes on the wire never vary by reason.
 func gcsWriteDeny(w http.ResponseWriter, status int) {
 	switch status {
@@ -670,6 +682,17 @@ func (s *Server) handleGCSObject(w http.ResponseWriter, r *http.Request) {
 		deny(saReason, http.StatusNotFound)
 		return
 	}
+
+	// Step 9b: the sender's authority to use that account, decided as the
+	// GCP token mint decides it: the sender's standing (a held agent, a
+	// held chain or an inactive root refuses), then the use decision with
+	// the account's parent ceiling for the stored sender, then actAs on the
+	// recorded source in enforce mode (authorizeGCSLinkServiceAccountUse).
+	// A refusal answers the same not-found response.
+	if !s.authorizeGCSLinkServiceAccountUse(ctx, sender, sa) {
+		deny(GCSLinkReasonSAUseNotAuthorized, http.StatusNotFound)
+		return
+	}
 	event.SAEmail = sa.Email
 
 	// Step 10: mint / client for sa. This is the first point that talks to
@@ -739,7 +762,7 @@ func (s *Server) handleGCSObject(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Length", strconv.FormatInt(attrs.Size, 10))
 	w.Header().Set("Content-Disposition", gcsContentDisposition(gcsObjectBasename(object)))
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Content-Security-Policy", untrustedContentSandboxCSP)
+	setUntrustedContentHeaders(w.Header(), untrustedContentSandboxCSP)
 	w.Header().Set("Cache-Control", "private, no-store")
 	w.Header().Set("X-Scion-Gcs-Generation", strconv.FormatInt(attrs.Generation, 10))
 

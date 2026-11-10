@@ -271,7 +271,7 @@ func (b *Bridge) SendStreamingMessage(ctx context.Context, projectSlug, agentSlu
 	if caller := callerIdentityFromContext(ctx); caller != nil && caller.IsFederatedUser() {
 		return "", nil, nil, fmt.Errorf("%w: %q", ErrAgentNotFound, agentSlug)
 	}
-	agentCtx, err := b.resolveContext(ctx, projectSlug, agentSlug, contextID)
+	agentCtx, launching, err := b.resolveContextLaunch(ctx, projectSlug, agentSlug, contextID)
 	if err != nil {
 		return "", nil, nil, fmt.Errorf("resolve context: %w", err)
 	}
@@ -343,9 +343,27 @@ func (b *Bridge) SendStreamingMessage(ctx context.Context, projectSlug, agentSlu
 		b.subscribeAdminUserTopics(agentCtx.ProjectID)
 	}
 
+	firstSent := b.beginFirstSend(taskID, launching)
 	b.wg.Add(1)
 	go func() {
 		defer b.wg.Done()
+		defer firstSent()
+
+		// An agent still launching is waited for before the send, with a
+		// working event per launch step; the send's own timeout starts
+		// after the wait. A failed launch fails the task with its reason
+		// and nothing is sent.
+		if waitErr := b.waitTaskLaunch(b.shutdownCtx, taskID, launching, func(text string) {
+			b.appendStreamStatus(b.shutdownCtx, taskID, TaskStateWorking, text, false, taskID+":provisioning:"+text)
+		}); waitErr != nil {
+			b.log.Warn("streaming send: agent did not start", "error", waitErr, "task_id", taskID)
+			if !errors.Is(waitErr, errTaskEndedDuringLaunch) {
+				b.appendStreamStatus(b.shutdownCtx, taskID, TaskStateFailed, waitErr.Error(), true, "")
+			}
+			b.unregisterActiveTask(taskID, aKey)
+			return
+		}
+
 		sendCtx, cancel := context.WithTimeout(b.shutdownCtx, 30*time.Second)
 		defer cancel()
 
@@ -437,4 +455,27 @@ func (b *Bridge) SubscribeToTaskFromCursor(ctx context.Context, taskID string, c
 	}
 
 	return events, cleanup, nil
+}
+
+// appendStreamStatus appends a status event carrying text to the task's
+// event log, for streaming clients. dedupKey may be "".
+func (b *Bridge) appendStreamStatus(ctx context.Context, taskID, taskState, text string, final bool, dedupKey string) {
+	status := TaskStatus{State: taskState}
+	if text != "" {
+		status.Message = &Message{
+			MessageID: uuid.New().String(),
+			Role:      RoleAgent,
+			Parts:     []Part{{Text: text}},
+		}
+	}
+	payload, _ := json.Marshal(TaskStatusUpdate{TaskID: taskID, Status: status, Final: final})
+	if _, err := b.store.AppendTaskEvent(ctx, &state.TaskEvent{
+		TaskID:   taskID,
+		Kind:     "status",
+		Payload:  payload,
+		Final:    final,
+		DedupKey: dedupKey,
+	}); err != nil {
+		b.log.Error("failed to append task event", "task_id", taskID, "kind", "status", "error", err)
+	}
 }

@@ -21,7 +21,6 @@ import (
 	"testing"
 	"time"
 
-	entsql "entgo.io/ent/dialect/sql"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 
@@ -33,7 +32,7 @@ import (
 // this test and name, so a test can hold a source and a destination.
 func newNamedTestClient(t *testing.T, name string) *ent.Client {
 	t.Helper()
-	client, err := OpenSQLite("file:"+t.Name()+"-"+name+"?mode=memory&cache=shared", PoolConfig{})
+	client, err := OpenSQLite("file:"+t.Name()+"-"+name+"?mode=memory&cache=shared", PoolConfig{MaxOpenConns: 1})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = client.Close() })
 	require.NoError(t, AutoMigrate(context.Background(), client))
@@ -126,7 +125,7 @@ func TestMigrateData_SessionMetricsCollisionsKeepEarliest(t *testing.T) {
 	dst := newNamedTestClient(t, "dst")
 
 	// Recreate a source from before the unique index existed.
-	drv, ok := src.Driver().(*entsql.Driver)
+	drv, ok := SQLDriver(src.Driver())
 	require.True(t, ok)
 	_, err := drv.DB().ExecContext(ctx, "DROP INDEX agentsessionmetrics_agent_id_session_id_started_at")
 	require.NoError(t, err)

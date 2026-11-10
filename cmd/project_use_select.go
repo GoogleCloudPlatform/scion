@@ -158,6 +158,11 @@ type useLookup struct {
 	failed []useHubFailure
 	// searched are hubs that answered the lookup.
 	searched []useHub
+	// searchedUAT is true when a hub in searched was searched with a user
+	// access token: an empty result there most likely means the token
+	// lacks project:list, so notFoundError adds that hint
+	// (ptone/scion#5294).
+	searchedUAT bool
 }
 
 // useCandidateHubs returns the hubs to search: only the hub given with
@@ -247,8 +252,9 @@ const (
 // verify checks the known project m on its hub with one call by ID. It
 // fills in the hub's current slug and name.
 func (l *useLookup) verify(m *useMatch) (useVerdict, string) {
-	notLoggedIn := fmt.Sprintf("Not logged in to hub '%s'. Run: scion hub auth login --hub %s", m.Hub.label(), m.Hub.label())
-	refused := fmt.Sprintf("Hub '%s' refused the login. Run: scion hub auth login --hub %s", m.Hub.label(), m.Hub.label())
+	login := "scion hub auth login --hub " + config.RedactURL(m.Hub.Endpoint)
+	notLoggedIn := fmt.Sprintf("Not logged in to hub '%s', so the project is unverified. Run: %s", m.Hub.label(), login)
+	refused := fmt.Sprintf("Hub '%s' refused the login, so the project is unverified. Run: %s", m.Hub.label(), login)
 	// The hub comes from the known list, not from the user: the full
 	// credential chain only for the chosen or effective hub.
 	fanOut := l.fanOut(m.Hub)
@@ -287,32 +293,42 @@ func (l *useLookup) verify(m *useMatch) (useVerdict, string) {
 // lookupOn looks the reference up on one hub. A reference that matches
 // nothing is no error; several projects with the name are all returned. In
 // a fan-out the hub gets only a credential bound to it (see hubClientFor).
-func (l *useLookup) lookupOn(hub useHub, fanOut bool) ([]hubclient.Project, error) {
-	client, err := hubClientFor(l.settings, hub.Endpoint, fanOut)
+// uat reports that the lookup was made with a user access token, which only
+// the credential hubClientForEndpoint chooses can be: a fan-out sends the
+// hub-bound credential.
+func (l *useLookup) lookupOn(hub useHub, fanOut bool) (projects []hubclient.Project, uat bool, err error) {
+	var client hubclient.Client
+	if fanOut {
+		client, err = hubClientFor(l.settings, hub.Endpoint, true)
+	} else {
+		var source string
+		client, source, err = hubClientAndAuthSourceForEndpoint(l.settings, hub.Endpoint)
+		uat = authSourceIsUserAccessToken(source)
+	}
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	ctx, cancel := context.WithTimeout(l.ctx, useHubTimeout)
 	defer cancel()
 	if util.IsGitURL(l.ref) {
 		resp, err := client.Projects().List(ctx, &hubclient.ListProjectsOptions{GitRemote: util.NormalizeGitRemote(l.ref)})
 		if err != nil {
-			return nil, err
+			return nil, uat, err
 		}
-		return resp.Projects, nil
+		return resp.Projects, uat, nil
 	}
 	p, err := hubsync.ResolveProjectOnHub(ctx, client, l.ref)
 	var notFound *hubsync.ProjectNotFoundError
 	var ambiguous *hubsync.AmbiguousProjectError
 	switch {
 	case errors.As(err, &notFound):
-		return nil, nil
+		return nil, uat, nil
 	case errors.As(err, &ambiguous):
-		return ambiguous.Projects, nil
+		return ambiguous.Projects, uat, nil
 	case err != nil:
-		return nil, err
+		return nil, uat, err
 	}
-	return []hubclient.Project{*p}, nil
+	return []hubclient.Project{*p}, uat, nil
 }
 
 // search looks the reference up on hubs in parallel, each within
@@ -324,6 +340,7 @@ func (l *useLookup) lookupOn(hub useHub, fanOut bool) ([]hubclient.Project, erro
 func (l *useLookup) search(hubs []useHub) []useMatch {
 	type result struct {
 		projects []hubclient.Project
+		uat      bool
 		err      error
 		skipped  bool
 	}
@@ -338,8 +355,8 @@ func (l *useLookup) search(hubs []useHub) []useMatch {
 		wg.Add(1)
 		go func(i int, h useHub, fanOut bool) {
 			defer wg.Done()
-			projects, err := l.lookupOn(h, fanOut)
-			results[i].projects, results[i].err = withoutHubGlobalProjects(projects), err
+			projects, uat, err := l.lookupOn(h, fanOut)
+			results[i].projects, results[i].uat, results[i].err = withoutHubGlobalProjects(projects), uat, err
 		}(i, h, fanOut)
 	}
 	wg.Wait()
@@ -360,6 +377,7 @@ func (l *useLookup) search(hubs []useHub) []useMatch {
 			l.failed = append(l.failed, useHubFailure{Hub: h, Reason: fmt.Sprintf("unreachable: %v", hubclient.HintProxyError(r.err))})
 		default:
 			l.searched = append(l.searched, h)
+			l.searchedUAT = l.searchedUAT || r.uat
 			l.remember(h, r.projects...)
 			for _, p := range r.projects {
 				matches = append(matches, useMatch{Hub: h, ID: p.ID, Slug: p.Slug, Name: p.Name})
@@ -390,7 +408,10 @@ func (l *useLookup) skipped() string {
 // notFoundError is the error when no searched hub has the project. It
 // names the hubs that were searched and those that could not be: the
 // project may be on one of those. It ends with the login command for each
-// hub that was skipped for want of a login or refused it.
+// hub that was skipped for want of a login or refused it. When a hub was
+// searched with a user access token it adds the scoped-token hint
+// (hubsync.ScopedTokenProjectLookupEmptyError), which reads the same whether
+// or not the project exists.
 func (l *useLookup) notFoundError() error {
 	var names []string
 	for _, h := range l.searched {
@@ -415,6 +436,9 @@ func (l *useLookup) notFoundError() error {
 			b.WriteString("\n")
 		}
 		fmt.Fprintf(&b, "\nLog in with: scion hub auth login --hub %s", h.label())
+	}
+	if l.searchedUAT {
+		return fmt.Errorf("%s\n\n%w", b.String(), hubsync.ScopedTokenProjectLookupEmptyError(l.ref))
 	}
 	return errors.New(b.String())
 }
@@ -489,6 +513,8 @@ func runUseSelect(cmd *cobra.Command, ref string) error {
 	var chosen *useMatch
 	var candidates []useMatch
 	var checkNote string
+	// unverified: the chosen known project could not be checked on its hub.
+	var unverified bool
 	if !useRefresh {
 		named := map[string]bool{}
 		for _, h := range hubs {
@@ -504,6 +530,7 @@ func runUseSelect(cmd *cobra.Command, ref string) error {
 			verdict, note := l.verify(&m)
 			if verdict != useGone {
 				chosen, checkNote = &m, note
+				unverified = verdict == useUnchecked
 			}
 		case len(known) > 1:
 			for _, k := range known {
@@ -554,7 +581,7 @@ func runUseSelect(cmd *cobra.Command, ref string) error {
 			chosen = m
 		}
 	}
-	return saveUseSelection(out, stderr, l, *chosen, checkNote)
+	return saveUseSelection(out, stderr, l, *chosen, checkNote, unverified)
 }
 
 // sortUseCandidates puts candidates in the order every listing of them
@@ -642,7 +669,7 @@ func useAmbiguousError(ref string, candidates []useMatch) error {
 // saveUseSelection saves m as the current project of its hub, which
 // becomes the current hub, together with what the lookup learned, and
 // reports the selection.
-func saveUseSelection(out, stderr io.Writer, l *useLookup, m useMatch, checkNote string) error {
+func saveUseSelection(out, stderr io.Writer, l *useLookup, m useMatch, checkNote string, unverified bool) error {
 	endpoint := m.Hub.Endpoint
 	var hubName string
 	var registered bool
@@ -652,7 +679,11 @@ func saveUseSelection(out, stderr io.Writer, l *useLookup, m useMatch, checkNote
 		if hubName == "" || c.Hubs[hubName] == nil {
 			hubName, registered = c.EnsureHub(endpoint, useHubBaseName(endpoint))
 		}
-		return c.SelectProject(hubName, config.KnownProject{ID: m.ID, Slug: m.Slug, Name: m.Name}, time.Now())
+		if err := c.SelectProject(hubName, config.KnownProject{ID: m.ID, Slug: m.Slug, Name: m.Name}, time.Now()); err != nil {
+			return err
+		}
+		c.Hubs[hubName].CurrentProject.Unverified = unverified
+		return nil
 	})
 	if err != nil {
 		return err
@@ -661,7 +692,7 @@ func saveUseSelection(out, stderr io.Writer, l *useLookup, m useMatch, checkNote
 	if isJSONOutput() {
 		return outputJSON(useSelectJSON{
 			Hub:     useHubJSON{Name: hubName, Endpoint: config.RedactURL(endpoint), Source: useSourceContext},
-			Project: useProjectJSON{ID: m.ID, Slug: m.Slug, Name: m.Name, Source: useSourceContext},
+			Project: useProjectJSON{ID: m.ID, Slug: m.Slug, Name: m.Name, Source: useSourceContext, Unverified: unverified},
 		})
 	}
 	// Announce a new entry only for a URL given with --hub. An endpoint
@@ -671,7 +702,11 @@ func saveUseSelection(out, stderr io.Writer, l *useLookup, m useMatch, checkNote
 		printRegisteredHub(out, hubName, endpoint)
 	}
 	shown := m.shown()
-	_, _ = fmt.Fprintf(out, "Now using project '%s' on hub '%s' (%s).\n", shown, hubName, config.RedactURL(endpoint))
+	mark := ""
+	if unverified {
+		mark = " (unverified)"
+	}
+	_, _ = fmt.Fprintf(out, "Now using project '%s' on hub '%s' (%s)%s.\n", shown, hubName, config.RedactURL(endpoint), mark)
 	switch {
 	case strings.HasPrefix(checkNote, "Warning: "):
 		_, _ = fmt.Fprintln(stderr, checkNote)

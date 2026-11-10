@@ -47,7 +47,13 @@ import { apiFetch, parseApiError } from '../../client/api.js';
 import { navigateTo, pushRoute, replaceRoute, stateManager } from '../../client/main.js';
 import { browserPath, stripBasePath } from '../../client/navigation.js';
 import { agentIndexOf, agentStore } from '../../client/agent-store.js';
-import { dmPeerFromKey } from '../../client/chat-routes.js';
+import {
+  dmPeerFromKey,
+  isChatConversationPath,
+  messageFilterFromSearch,
+  searchWithMessageFilter,
+  type ChatMessageFilter,
+} from '../../client/chat-routes.js';
 import type { AgentListSnapshot } from '../../client/agent-store.js';
 import type { SeedEpochToken } from '../../client/state.js';
 import { dispatchPageTitle, PAGE_TITLE_EVENT } from '../../client/page-title.js';
@@ -56,7 +62,7 @@ import { chatNotifications } from '../../client/chat-notifications.js';
 import { chatUnread, type UnreadCountAnswer } from '../../client/chat-unread.js';
 import { badgeCountFromLists, type ChatDMListEntry } from '../../client/chat-unread-dms.js';
 // Type-only: the rail module itself is loaded lazily (loadSpaceRail).
-import type { DMSelectDetail } from '../shared/chat/chat-space-rail.js';
+import type { DMSelectDetail, RailFilterChangeDetail } from '../shared/chat/chat-space-rail.js';
 import {
   CHAT_STARTUP_REUSE_MS,
   chatDMsLoad,
@@ -69,15 +75,24 @@ import { coalescedRefresh, type CoalescedRefresh } from '../../client/coalesced-
 import { visibleInterval } from '../../client/visible-interval.js';
 import type { RailRefreshDetail } from '../shared/chat/chat-space-rail.js';
 import { TouchPrimaryController } from '../../utils/input-modality.js';
+import { isMacPlatform } from '../../utils/platform.js';
 import { isMacTextFieldCtrlKey } from '../shared/text-field-keys.js';
 import { CHAT_PALETTE_OPEN_REQUEST_EVENT } from '../../client/chat-palette-events.js';
 import { blurElement, focusElement } from '../shared/focus-moved.js';
-import type { GroupState, PaletteGroup, PaletteTarget } from '../../client/palette-types.js';
+import type {
+  GroupState,
+  PaletteCandidate,
+  PaletteGroup,
+  PaletteQueryDetail,
+  PaletteTarget,
+} from '../../client/palette-types.js';
 import {
   AGENTS_IDLE_TIMEOUT_MS,
   ChatPaletteDataController,
+  PEOPLE_SEARCH_MIN_CHARS,
   PaletteLoadError,
   buildDocumentCandidates,
+  normalizePeopleQuery,
 } from '../../client/chat-palette-data.js';
 import { chatRecentFiles } from '../../client/chat-recent-files.js';
 import type { RecentFile, RecentFilesSnapshot } from '../../client/chat-recent-files.js';
@@ -98,9 +113,22 @@ import {
 import { openTerminal, terminalHref, agentGraphHref } from '../../client/open-terminal.js';
 import { hasOpenModalDescendant, isOpenModalElement } from '../shared/open-modal.js';
 import { deepActiveElement } from '../shared/deep-active-element.js';
-import { PaletteTypeahead } from '../shared/palette/palette-typeahead.js';
+import { PaletteTypeahead, primaryPointerIsTouch } from '../shared/palette/palette-typeahead.js';
+import type { ScionQuickPalette } from '../shared/palette/quick-palette.js';
 import '../shared/chat/chat-thread.js';
-import type { PeerAgentResolvedDetail } from '../shared/chat/chat-thread.js';
+import '../shared/chat/chat-starred-list.js';
+import type { StarredMessageOpenDetail } from '../shared/chat/chat-starred-list.js';
+import {
+  conversationSupportsStars,
+  fetchStarDetail,
+  starredMessagesEnabled,
+} from '../../client/chat-stars.js';
+import { showToast } from '../../utils/toast.js';
+import type {
+  MessageFilterChangeDetail,
+  PeerAgentResolvedDetail,
+  StarOpenDetail,
+} from '../shared/chat/chat-thread.js';
 import { ChatPanelHistory, type ChatPanel } from './chat-panel-history.js';
 import '../shared/chat/chat-action-sheet.js';
 import type { ActionSheetItem, ActionSheetSelectDetail } from '../shared/chat/chat-action-sheet.js';
@@ -155,6 +183,10 @@ const MEMBERS_WIDTH_KEY = 'scion.chat.membersWidth';
 const loadChatSearch = () => import('../shared/chat/chat-search.js');
 // Lazy-load the quick switcher component on first Cmd+K press
 const loadQuickPalette = () => import('../shared/palette/quick-palette.js');
+/** Longest wait for an idle moment before the quick switcher preloads on a touch device. */
+const PALETTE_PRELOAD_IDLE_TIMEOUT_MS = 5000;
+/** When the quick switcher preloads on a touch device without requestIdleCallback. */
+const PALETTE_PRELOAD_FALLBACK_DELAY_MS = 2500;
 
 /**
  * How long a successfully-loaded People or Threads group stays fresh across
@@ -164,6 +196,8 @@ const loadQuickPalette = () => import('../shared/palette/quick-palette.js');
 const PALETTE_GROUP_CACHE_MS = 30_000;
 /** Debounce window for refreshing dirty palette groups while the palette is open. */
 const PALETTE_REFRESH_DEBOUNCE_MS = 500;
+/** Quiet period after the last query edit before the People group searches the hub. */
+export const PALETTE_PEOPLE_SEARCH_DEBOUNCE_MS = 250;
 
 /**
  * Convert a recent-files record into the shape `<scion-chat-file-preview>`
@@ -448,6 +482,15 @@ function dmListSignature(dms: readonly ChatDMListEntry[]): string {
     .join('\u0001');
 }
 
+/**
+ * Whether a `pointerType` is a finger or a pen: a press that should hold the
+ * on-screen keyboard. A pen counts because stylus phones are among those that
+ * report hover support.
+ */
+function isTapPointer(type: string | undefined): boolean {
+  return type === 'touch' || type === 'pen';
+}
+
 @customElement('scion-page-chat')
 export class ScionPageChat extends LitElement {
   @property({ type: Object })
@@ -713,7 +756,7 @@ export class ScionPageChat extends LitElement {
   private _onDMPromoted = this.handleDMPromoted.bind(this);
   /** Bound keydown handler for Cmd/Ctrl+K quick switcher. */
   private _onKeydown = this._handleGlobalKeydown.bind(this);
-  /** Bound handler for the header palette button's open-request event. */
+  /** Bound handler for the palette footer buttons' open-request event. */
   private _onPaletteOpenRequest = this._handlePaletteOpenRequest.bind(this);
   /** Whether the device's primary pointer is touch -- see `_selectionHandsFocusToComposer`. */
   private touchPrimary = new TouchPrimaryController(this);
@@ -773,7 +816,29 @@ export class ScionPageChat extends LitElement {
    * {@link PaletteTypeahead}). Started in `_openPalette`, before the
    * first open's lazy import, or when a press queues a reopen.
    */
-  private readonly _paletteTypeahead = new PaletteTypeahead();
+  private readonly _paletteTypeahead = new PaletteTypeahead({
+    holdsKeyboard: () => this._paletteOpenByTouch || primaryPointerIsTouch(),
+  });
+  /**
+   * True only while a quick-switcher button tapped with a finger or a pen sends its
+   * open request (see `_handlePaletteFooterClick`), so the type-ahead holds
+   * the on-screen keyboard for that tap even on a phone that does not match
+   * the touch-primary query: several Android phones report hover support or
+   * a fine pointer. Without the hidden field taking focus inside the tap,
+   * the query input takes focus only after the palette shows, too late for
+   * the browser to open the keyboard.
+   */
+  private _paletteOpenByTouch = false;
+  /** Imports the quick switcher module (a field, so a test can make it fail). */
+  private _loadQuickPalette: () => Promise<unknown> = loadQuickPalette;
+  /** Cancels the idle-time preload of the quick switcher, while one is scheduled. */
+  private _cancelPalettePreload: (() => void) | null = null;
+  /**
+   * The `pointerType` of the latest `pointerdown` on a quick-switcher button,
+   * cleared by its click or a `pointercancel`. Read only for a click that
+   * carries no `pointerType` of its own.
+   */
+  private _paletteFooterPointerType = '';
   /**
    * Bumped synchronously at the start of every `_openPalette` call (fresh or
    * dequeued). `_retargetPaletteInvokerToNewComposer` captures this value
@@ -891,6 +956,8 @@ export class ScionPageChat extends LitElement {
   private _selfUserAbortController: AbortController | null = null;
   /** Debounce timer coalescing SSE-driven dirty-group refreshes while the palette is open. */
   private _paletteRefreshDebounce: ReturnType<typeof setTimeout> | null = null;
+  /** Debounce timer for the People group's hub search (see {@link _handlePaletteQuery}). */
+  private _palettePeopleSearchTimer: ReturnType<typeof setTimeout> | null = null;
   /** The deep-active element (and, for a textarea or text input, its selection) captured just before the palette opened. */
   private _paletteInvoker: HTMLElement | null = null;
   private _paletteInvokerSelection: {
@@ -1022,12 +1089,25 @@ export class ScionPageChat extends LitElement {
   @state() private mobilePanel: ChatPanel = 'left';
   /** Browser history entries for mobile panel changes (see chat-panel-history). */
   private _panelHistory = new ChatPanelHistory();
+
+  /**
+   * The open conversation's center message filter, from the URL
+   * (`?messages=starred` on a conversation route, while the experiment is
+   * on): 'starred' shows only the caller's starred messages.
+   */
+  @state() private centerMessageFilter: ChatMessageFilter = '';
   /**
    * The panel the history entry this page was created on records (a reload,
    * or Back/Forward to it), until the conversation its URL names opens. Read
    * at connect, before this page writes to the entry.
    */
   private _restoredPanel: ChatPanel | null = null;
+  /**
+   * True until the conversation the URL names first opens, or the user moves
+   * to another panel or conversation. While it holds, a switch into the
+   * mobile layout hands the pending open the panel the entry records.
+   */
+  private _routeOpenPending = true;
   /** The space whose mobile rail view this page last opened from the URL. */
   private _spaceOpenedSlug: string | null = null;
   private _touchStartX = 0;
@@ -1233,9 +1313,101 @@ export class ScionPageChat extends LitElement {
       overflow: hidden;
     }
 
-    .v2-rail scion-chat-space-rail {
+    .v2-rail scion-chat-space-rail,
+    .v2-rail .loading-rail,
+    .v2-members scion-chat-members {
       flex: 1;
       min-height: 0;
+    }
+
+    /* The palette footer below the list carries the bottom safe-area
+       inset, so the list's own last-row inset is dropped (see
+       chat-space-rail's .rail-body and chat-members' .members-body). The
+       members column has the footer on phones only; see the mobile rules. */
+    .v2-rail {
+      --chat-list-inset-bottom: 0px;
+    }
+
+    /* Pinned below the list: only the list above it scrolls. Mirrors the
+       terminal view's "Jump to agent" footer (terminal-workspace-root.ts,
+       .terminal-rail-footer). */
+    .palette-footer {
+      flex: 0 0 auto;
+      padding: 0.375rem;
+      /* Clears the home indicator (the page uses viewport-fit=cover); the
+         inset is 0 elsewhere. */
+      padding-bottom: max(0.375rem, env(safe-area-inset-bottom, 0px));
+      border-top: 1px solid var(--scion-border, #e2e8f0);
+      background: var(--scion-surface, #ffffff);
+    }
+
+    .palette-footer-btn {
+      box-sizing: border-box;
+      width: 100%;
+      min-height: 2.5rem;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0 0.625rem;
+      border: 0;
+      border-radius: 6px;
+      background: transparent;
+      color: var(--scion-text, #1e293b);
+      font: inherit;
+      font-size: var(--chat-fs-base, 0.875rem);
+      font-weight: 550;
+      text-align: left;
+      cursor: pointer;
+    }
+
+    .palette-footer-btn sl-icon {
+      flex: 0 0 auto;
+      font-size: 1.25rem;
+      color: var(--scion-text-muted, #64748b);
+    }
+
+    .palette-footer-label {
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .palette-footer-shortcut {
+      flex: 0 0 auto;
+      font-family: inherit;
+      font-size: var(--chat-fs-xs, 0.75rem);
+      color: var(--scion-text-muted, #64748b);
+    }
+
+    .palette-footer-btn:focus-visible {
+      background: var(--scion-bg-subtle, #f1f5f9);
+      outline: 2px solid var(--scion-primary, #3b82f6);
+      outline-offset: -2px;
+    }
+
+    /* Hover only where it does not stick after a tap: on touch, :hover
+       stays until the next tap lands elsewhere, so it would still show
+       when the palette closes and focus returns to this button. */
+    @media (hover: hover) {
+      .palette-footer-btn:hover {
+        background: var(--scion-bg-subtle, #f1f5f9);
+      }
+    }
+
+    /* Phones and touch-primary devices: a tap target of at least 44px. */
+    @media (max-width: 768px), (hover: none) and (pointer: coarse) {
+      .palette-footer-btn {
+        min-height: 44px;
+      }
+    }
+
+    /* Touch-primary: no keyboard, so no shortcut hint. */
+    @media (hover: none) and (pointer: coarse) {
+      .palette-footer-shortcut {
+        display: none;
+      }
     }
 
     .v2-members {
@@ -1603,6 +1775,12 @@ export class ScionPageChat extends LitElement {
       .v2-members-resizer {
         display: none;
       }
+
+      /* The members column has its own palette footer here, which takes
+         the bottom safe-area inset from the list (see .v2-rail above). */
+      .v2-panels .v2-members {
+        --chat-list-inset-bottom: 0px;
+      }
     }
 
     @media (prefers-reduced-motion: reduce) {
@@ -1704,6 +1882,7 @@ export class ScionPageChat extends LitElement {
     // Created wide on top of entries made in the mobile layout: drop back to
     // the first of them (see ChatPanelHistory.toBase).
     if (!this.isMobileLayout && this._isOnChatRoute()) this._panelHistory.toBase();
+    this._schedulePalettePreload();
     this.restoreMembersWidth();
     // Restore persisted layout density preference.
     try {
@@ -1714,9 +1893,8 @@ export class ScionPageChat extends LitElement {
     }
     // Global Cmd/Ctrl+K listener for the quick switcher.
     document.addEventListener('keydown', this._onKeydown);
-    // Header palette button: a composed custom event rather than a direct
-    // reference, since the header renders as a sibling (slotted into
-    // scion-chat-shell), not an ancestor.
+    // Palette footer buttons (renderPaletteFooter): a composed custom event,
+    // so every open request goes through one listener and its guards.
     document.addEventListener(CHAT_PALETTE_OPEN_REQUEST_EVENT, this._onPaletteOpenRequest);
     // Reactive half of the modal/route interaction: if another modal opens
     // or route hides chat while the palette is open, close it without
@@ -1763,6 +1941,8 @@ export class ScionPageChat extends LitElement {
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
+    this._cancelPalettePreload?.();
+    this._cancelPalettePreload = null;
     chatUnread.setSource(null);
     ++this._unreadDMRequestId;
     ++this._userNavSeq;
@@ -1803,6 +1983,7 @@ export class ScionPageChat extends LitElement {
     this._selfUserAbortController = null;
     this._stopPaletteVisibilityWatchdog();
     this._stopPaletteDebouncedRefresh();
+    this._stopPalettePeopleSearch();
     // Without this, a disconnect landing while a first-open lazy import is
     // still in flight would leave `_palettePendingOpen` stuck true on the
     // detached page — the suspended togglePalette call would resume anyway
@@ -1899,6 +2080,10 @@ export class ScionPageChat extends LitElement {
         ?.conversationKey !== this.v2Conversation?.conversationKey
     ) {
       this.dismissPromotedThreadLinkToast();
+      // Another conversation opened in place (the rail, a DM, a search
+      // result): its URL decides the filter, so none is carried over.
+      const filter = this.urlMessageFilter();
+      if (this.centerMessageFilter !== filter) this.centerMessageFilter = filter;
     }
     const pending = this._pendingScrollRestore;
     if (
@@ -2220,6 +2405,7 @@ export class ScionPageChat extends LitElement {
     // browser URL without updating pageData, so pageData.path can be
     // stale when this is called from handleRailLoaded after a reload.
     const path = window.location.pathname;
+    this.syncMessageFilterFromUrl();
 
     // Match legacy /chat/space/{projectId}/thread/{topicId} (backward compat)
     const legacyThreadMatch = path.match(/\/chat\/space\/([^/]+)\/thread\/([^/]+)/);
@@ -3105,9 +3291,33 @@ export class ScionPageChat extends LitElement {
         projectSlug?: string;
         threadName: string;
         defaultAgent?: string;
+        messageFilter?: 'starred';
       }
     );
   }
+
+  /** The center filter a rail selection asks for (only while the experiment is on). */
+  private railSelectionFilter(requested: 'starred' | undefined): ChatMessageFilter {
+    return requested === 'starred' && starredMessagesEnabled() ? 'starred' : '';
+  }
+
+  /**
+   * The user picked a rail filter. With a conversation open, Starred shows
+   * it as the starred-only center at once (its empty state when it has no
+   * stars), and All or Unread return a starred-only center to full
+   * context; each is a new history entry, as other filter changes are.
+   */
+  private handleRailFilterChange = (e: CustomEvent<RailFilterChangeDetail>): void => {
+    const conv = this.v2Conversation;
+    if (!conv) return;
+    const path = stripBasePath(window.location.pathname);
+    if (!isChatConversationPath(path)) return;
+    const filter = this.railSelectionFilter(e.detail?.filter === 'starred' ? 'starred' : undefined);
+    if (filter === this.centerMessageFilter) return;
+    ++this._userNavSeq;
+    this.pushChatPath(`${path}${searchWithMessageFilter(window.location.search, filter)}`);
+    this.centerMessageFilter = filter;
+  };
 
   /**
    * In-page thread navigation shared by the space rail's `thread-select`
@@ -3126,6 +3336,7 @@ export class ScionPageChat extends LitElement {
     projectSlug?: string;
     threadName: string;
     defaultAgent?: string;
+    messageFilter?: 'starred';
   }): void {
     ++this._userNavSeq;
     // Determine the slug for the readable URL
@@ -3161,7 +3372,11 @@ export class ScionPageChat extends LitElement {
     } else {
       threadPath = `/chat/space/${encodeURIComponent(detail.projectId)}/thread/${encodeURIComponent(detail.conversationKey)}`;
     }
-    this.pushChatPath(threadPath);
+    // A Starred rail row opens the starred-only center (the filter is part of
+    // the URL); any other selection opens full context.
+    const filter = this.railSelectionFilter(detail.messageFilter);
+    this.pushChatPath(threadPath + searchWithMessageFilter('', filter));
+    this.centerMessageFilter = filter;
 
     dispatchPageTitle(this, `#${detail.threadName}`, 'Chat');
     void this.loadV2Members(detail.projectId);
@@ -3610,7 +3825,9 @@ export class ScionPageChat extends LitElement {
         seenUserIds.add(u.id);
         return true;
       })
-      .filter((u) => u.status !== 'disabled')
+      // A deactivated user's hub status is 'suspended' (pkg/store/models.go
+      // UserStatus*); the hub has no 'disabled' user status.
+      .filter((u) => u.status !== 'suspended')
       .map((u) => ({
         id: u.id,
         kind: 'user' as const,
@@ -4131,7 +4348,37 @@ export class ScionPageChat extends LitElement {
   private handleRailDMSelect(e: CustomEvent<DMSelectDetail>): void {
     const detail = e.detail;
     if (!detail?.peerId) return;
+    const filter = this.railSelectionFilter(detail.messageFilter);
+    if (filter && detail.conversationKey) {
+      this.openStarredDM(detail, filter);
+      return;
+    }
     this.openDM(detail.peerId, detail.peerKind, detail.displayName);
+  }
+
+  /**
+   * Open a DM chosen in the Starred rail as its starred-only center. The
+   * row carries the DM's key, so nothing needs resolving.
+   */
+  private openStarredDM(detail: DMSelectDetail, filter: ChatMessageFilter): void {
+    ++this._userNavSeq;
+    this.v2Conversation = {
+      conversationKey: detail.conversationKey,
+      projectId: this.inheritedProjectId(),
+      projectSlug: '',
+      threadName: '',
+      defaultAgent: '',
+      isDM: true,
+      peerName: detail.displayName,
+      peerId: detail.peerId,
+      peerKind: detail.peerKind,
+    };
+    this.mobilePanel = 'center';
+    this.pushChatPath(
+      `/chat/dm/${encodeURIComponent(detail.conversationKey)}${searchWithMessageFilter('', filter)}`
+    );
+    this.centerMessageFilter = filter;
+    dispatchPageTitle(this, detail.displayName, 'Chat');
   }
 
   /** Handle member click from the members sidebar to open a DM. */
@@ -4323,7 +4570,12 @@ export class ScionPageChat extends LitElement {
     // panel it records, so it and the entries around it hold again.
     if (e.matches && this.ownsPanelHistory()) {
       const entry = this._panelHistory.current();
-      if (entry) this.mobilePanel = entry.panel;
+      if (entry) {
+        this.mobilePanel = entry.panel;
+        // A conversation the URL names may still be opening (a slug lookup in
+        // flight): it should land on this panel too, not on its fallback.
+        if (this._routeOpenPending) this._restoredPanel = entry.panel;
+      }
       this._panelHistory.observe();
     }
   }
@@ -4337,6 +4589,7 @@ export class ScionPageChat extends LitElement {
    */
   private goToPanel(target: ChatPanel): void {
     this._restoredPanel = null;
+    this._routeOpenPending = false;
     if (target === this.mobilePanel) return;
     const move =
       this.isMobileViewport() && this.ownsPanelHistory()
@@ -4352,6 +4605,7 @@ export class ScionPageChat extends LitElement {
   private takeRouteOpenPanel(fallback: ChatPanel): ChatPanel {
     const panel = this._restoredPanel ?? fallback;
     this._restoredPanel = null;
+    this._routeOpenPending = false;
     return panel;
   }
 
@@ -4391,6 +4645,7 @@ export class ScionPageChat extends LitElement {
     const panel = this._panelHistory.popped(e.state, !this.isMobileLayout);
     if (!panel) return;
     this._restoredPanel = null;
+    this._routeOpenPending = false;
     if (panel === this.mobilePanel) return;
     if (this.mobilePanel === 'center') this.dismissKeyboard();
     this.mobilePanel = panel;
@@ -4459,11 +4714,14 @@ export class ScionPageChat extends LitElement {
   private pushChatPath(path: string): void {
     const seq = this._userNavSeq;
     this._restoredPanel = null;
+    this._routeOpenPending = false;
     // Reopening what the URL already names (the open thread picked again,
     // the open DM's peer clicked) adds no entry: Back would only land on the
     // same conversation. In the mobile layout the panel change it makes is
     // an ordinary panel move.
-    if (path === stripBasePath(window.location.pathname)) {
+    // The query is part of what the URL names: the starred-only center and
+    // the full conversation are separate entries, so Back returns between them.
+    if (path === stripBasePath(window.location.pathname) + window.location.search) {
       const entry = this.ownsPanelHistory() ? this._panelHistory.current() : null;
       if (entry && entry.panel !== this.mobilePanel) {
         this._panelHistory.move(entry.panel, this.mobilePanel);
@@ -4646,11 +4904,12 @@ export class ScionPageChat extends LitElement {
   }
 
   /**
-   * The header palette button's open-request handler. Shares the same route/
-   * visibility/modal guard as the shortcut, but skips
-   * `_eventFromTerminalSurface`: that guard exists to let Ctrl+K keep
-   * reaching the terminal's PTY, which only makes sense for a keystroke — a
-   * click on the header button is never a keypress the terminal could want.
+   * The palette footer buttons' open-request handler (see
+   * `renderPaletteFooter`). Shares the same route/visibility/modal guard as
+   * the shortcut, but skips `_eventFromTerminalSurface`: that guard exists
+   * to let Ctrl+K keep reaching the terminal's PTY, which only makes sense
+   * for a keystroke — a click on the button is never a keypress the
+   * terminal could want.
    * Opens with `{ mode: 'open' }` rather than toggling: see `togglePalette`'s
    * doc comment for why the button must never close an already-open palette.
    */
@@ -4814,7 +5073,7 @@ export class ScionPageChat extends LitElement {
    * actually finishes.
    *
    * `mode` defaults to `'toggle'` (the shortcut's behaviour, unchanged byte
-   * for byte). `'open'` is the header button's contract: it never closes an
+   * for byte). `'open'` is the footer button's contract: it never closes an
    * already-open palette and never cancels an in-flight open, so a double
    * tap or double click — common on touch, and not reliably distinguishable
    * from two deliberate presses — can only ever leave the palette open,
@@ -4886,6 +5145,37 @@ export class ScionPageChat extends LitElement {
   }
 
   /**
+   * On a touch-primary device, imports and mounts the quick switcher (closed)
+   * once the page is idle, so a tap can open it and focus its query input
+   * inside the tap (see `_openPalette`). Elsewhere it still loads on its
+   * first open, so a desktop first load does not fetch it.
+   */
+  private _schedulePalettePreload(): void {
+    if (this.v2SwitcherLoaded || this._cancelPalettePreload || !primaryPointerIsTouch()) return;
+    const run = (): void => {
+      this._cancelPalettePreload = null;
+      if (!this.isConnected || this.v2SwitcherLoaded) return;
+      this._loadQuickPalette().then(
+        () => {
+          if (this.isConnected) this.v2SwitcherLoaded = true;
+        },
+        // The first open imports it again, and fails loudly if it still can't.
+        (err: unknown) => console.debug('[chat] quick switcher preload failed', err)
+      );
+    };
+    const idle = (window as { requestIdleCallback?: typeof requestIdleCallback })
+      .requestIdleCallback;
+    if (typeof idle === 'function') {
+      const handle = idle(run, { timeout: PALETTE_PRELOAD_IDLE_TIMEOUT_MS });
+      this._cancelPalettePreload = () => window.cancelIdleCallback(handle);
+    } else {
+      // Safari has no requestIdleCallback.
+      const timer = setTimeout(run, PALETTE_PRELOAD_FALLBACK_DELAY_MS);
+      this._cancelPalettePreload = () => clearTimeout(timer);
+    }
+  }
+
+  /**
    * A queued reopen is an open request too: keys typed until it runs become
    * its query. Cancelling the queue stops the capture.
    */
@@ -4910,8 +5200,9 @@ export class ScionPageChat extends LitElement {
       // focus to a hidden field that holds the on-screen keyboard.
       if (!options.skipInvokerCapture) this._capturePaletteInvokerFocus();
       this._paletteTypeahead.start();
+      const mountedAtStart = this.v2SwitcherLoaded;
       if (!this.v2SwitcherLoaded) {
-        await loadQuickPalette();
+        await this._loadQuickPalette();
         this.v2SwitcherLoaded = true;
         // Let <scion-quick-palette> mount and render with open=false first.
         // Shoelace's dialog reacts to `open` transitioning false -> true to
@@ -4926,6 +5217,14 @@ export class ScionPageChat extends LitElement {
         return;
       }
       this.v2PaletteOpen = true;
+      // A tap with the palette already mounted (this call has not awaited
+      // anything): open it and focus its query input now, inside the tap,
+      // which is the only focus a home-screen web app on iOS opens the
+      // on-screen keyboard for. A first tap before the palette loaded keeps
+      // the hidden field that the type-ahead focused above.
+      if (this._paletteOpenByTouch && mountedAtStart) {
+        (this._switcherEl as ScionQuickPalette | undefined)?.openAndFocusNow();
+      }
       this._startPaletteVisibilityWatchdog();
       this._loadPaletteGroupsOnOpen();
     } catch (err) {
@@ -4991,6 +5290,8 @@ export class ScionPageChat extends LitElement {
    * is not fetched here — see `_handleRecentFilesSnapshot`.
    */
   private _loadPaletteGroupsOnOpen(): void {
+    // The query starts empty: drop the last open's search hits.
+    this._publishPalettePeopleSearch(this._paletteDataController.clearPeopleSearch());
     void this._loadPaletteAgents();
     if (!this._shouldUseCachedPaletteGroup('people')) void this._loadPalettePeople();
     if (!this._shouldUseCachedPaletteGroup('threads')) void this._loadPaletteThreads();
@@ -5160,6 +5461,7 @@ export class ScionPageChat extends LitElement {
     this._selfUserAbortController = null;
     this._stopPaletteVisibilityWatchdog();
     this._stopPaletteDebouncedRefresh();
+    this._stopPalettePeopleSearch();
     // A close that must not touch focus (see _paletteSkipFocusRestore) drops
     // a pending open's hidden keyboard field without refocusing anything.
     this._paletteTypeahead.stop({ restoreFocus: !this._paletteSkipFocusRestore });
@@ -5477,6 +5779,61 @@ export class ScionPageChat extends LitElement {
         delete this._paletteGroupLoadToken.threads;
       }
     }
+  }
+
+  /**
+   * Follow the palette's query for the People group, whose rows otherwise
+   * hold only the hub's recently seen users. Every edit aborts an
+   * in-flight search; a query of {@link PEOPLE_SEARCH_MIN_CHARS} or more
+   * characters searches the hub once edits pause for
+   * {@link PALETTE_PEOPLE_SEARCH_DEBOUNCE_MS}, and a shorter one drops the
+   * hits. The palette ranks whatever rows the group holds.
+   */
+  private _handlePaletteQuery(e: CustomEvent<PaletteQueryDetail>): void {
+    if (!this.v2PaletteOpen) return;
+    this._stopPalettePeopleSearch();
+    const query = normalizePeopleQuery(e.detail?.query ?? '');
+    if (query.length < PEOPLE_SEARCH_MIN_CHARS) {
+      this._publishPalettePeopleSearch(this._paletteDataController.clearPeopleSearch());
+      return;
+    }
+    this._palettePeopleSearchTimer = setTimeout(() => {
+      this._palettePeopleSearchTimer = null;
+      void this._searchPalettePeople(query);
+    }, PALETTE_PEOPLE_SEARCH_DEBOUNCE_MS);
+  }
+
+  private async _searchPalettePeople(query: string): Promise<void> {
+    let candidates: PaletteCandidate[] | null;
+    try {
+      candidates = await this._paletteDataController.searchPeople(query);
+    } catch {
+      // Superseded by a later edit or a close (an AbortError), which owns the
+      // group from here; `searchPeople` reports any other failure as no hits.
+      return;
+    }
+    if (!this.v2PaletteOpen) return;
+    this._publishPalettePeopleSearch(candidates);
+  }
+
+  /**
+   * Publish a People group rebuilt around search hits. Only over a `ready`
+   * group: a load in flight includes the hits when it finishes, and an
+   * error stays until retried.
+   */
+  private _publishPalettePeopleSearch(candidates: PaletteCandidate[] | null): void {
+    if (!candidates) return;
+    if (this.v2PaletteGroups.people?.status !== 'ready') return;
+    this.v2PaletteGroups = { ...this.v2PaletteGroups, people: { status: 'ready', candidates } };
+  }
+
+  /** Cancel a pending or in-flight People search, keeping the hits already shown. */
+  private _stopPalettePeopleSearch(): void {
+    if (this._palettePeopleSearchTimer) {
+      clearTimeout(this._palettePeopleSearchTimer);
+      this._palettePeopleSearchTimer = null;
+    }
+    this._paletteDataController.abortPeopleSearch();
   }
 
   /**
@@ -5926,6 +6283,7 @@ export class ScionPageChat extends LitElement {
               .typeahead=${this._paletteTypeahead}
               @palette-select=${this._handlePaletteSelect}
               @palette-retry=${this._handlePaletteRetry}
+              @palette-query=${this._handlePaletteQuery}
               @palette-dismiss=${this._handlePaletteDismiss}
               @sl-after-hide=${this._onPaletteAfterHide}
             ></scion-quick-palette>
@@ -5947,7 +6305,7 @@ export class ScionPageChat extends LitElement {
         @scroll=${this._handleV2PanelsScroll}
       >
         <div class="v2-rail" ?inert=${this.isMobileLayout && this.mobilePanel !== 'left'}>
-          ${this.renderV2Rail()}
+          ${this.renderV2Rail()} ${this.renderPaletteFooter()}
         </div>
 
         <div
@@ -6005,6 +6363,7 @@ export class ScionPageChat extends LitElement {
             @member-marked-unread=${this.handleMemberMarkedUnread}
             @member-search=${this._handleMemberSearch}
           ></scion-chat-members>
+          ${this.isMobileLayout ? this.renderPaletteFooter() : nothing}
         </div>
       </div>
     `;
@@ -6115,11 +6474,83 @@ export class ScionPageChat extends LitElement {
   }
 
   /**
-   * Back chevron shown only on mobile, where the neighbouring panels are
-   * off-screen and otherwise reachable only by an undiscoverable swipe.
-   * The conversation header steps back to the rail; the members header
-   * steps back to the conversation.
+   * The quick switcher's open button, pinned below a column's list: the
+   * spaces rail at every width, and the members column too on phones, where
+   * each column fills the screen on its own. The column is a flex column
+   * whose list alone scrolls, so the footer stays put however long the list
+   * grows; it carries the bottom safe-area inset, which the lists above it
+   * then drop (--chat-list-inset-bottom). The shortcut hint, the title and
+   * aria-keyshortcuts are left out on touch-primary devices, where there is
+   * no keyboard to press the shortcut; the hint is also hidden by CSS there
+   * so it follows the media query without waiting for a render.
    */
+  private renderPaletteFooter(): TemplateResult {
+    const isTouch = this.touchPrimary.isTouch;
+    const isMac = isMacPlatform();
+    const shortcutLabel = isMac ? '⌘K' : 'Ctrl+K';
+    const keyShortcuts = isMac ? 'Meta+K' : 'Control+K';
+    return html`
+      <div class="palette-footer">
+        <button
+          type="button"
+          class="palette-footer-btn"
+          aria-label="Open quick switcher"
+          aria-haspopup="dialog"
+          aria-keyshortcuts=${isTouch ? nothing : keyShortcuts}
+          title=${isTouch ? nothing : `Quick switcher (${shortcutLabel})`}
+          @pointerdown=${this._handlePaletteFooterPointerDown}
+          @pointercancel=${this._handlePaletteFooterPointerCancel}
+          @click=${this._handlePaletteFooterClick}
+        >
+          <sl-icon name="compass" aria-hidden="true"></sl-icon>
+          <span class="palette-footer-label">Quick switcher</span>
+          <kbd class="palette-footer-shortcut" aria-hidden="true">${shortcutLabel}</kbd>
+        </button>
+      </div>
+    `;
+  }
+
+  /**
+   * iOS and macOS Safari do not focus a `<button>` on click, so without
+   * this the deep active element `_openPalette` captures as "what to
+   * restore focus to" would be whatever was focused before the tap, which
+   * could be the composer, popping the on-screen keyboard back open the
+   * instant the palette closes. Focusing the button first makes capture
+   * see this button. The request then goes through the open-request event
+   * and its guards (`_handlePaletteOpenRequest`).
+   */
+  private _handlePaletteFooterClick(e: Event): void {
+    const btn = e.currentTarget as HTMLElement;
+    // A click is a PointerEvent with its own pointerType in current engines
+    // ('' for one raised by Enter or Space). Only a click that is not one
+    // falls back to the latest pointerdown, and only if it came from a
+    // pointer (detail 0 marks a keyboard click).
+    const clickType = (e as Partial<PointerEvent>).pointerType;
+    const byTouch =
+      clickType !== undefined
+        ? isTapPointer(clickType)
+        : (e as MouseEvent).detail > 0 && isTapPointer(this._paletteFooterPointerType);
+    this._paletteFooterPointerType = '';
+    btn.focus({ preventScroll: true });
+    this._paletteOpenByTouch = byTouch;
+    try {
+      btn.dispatchEvent(
+        new CustomEvent(CHAT_PALETTE_OPEN_REQUEST_EVENT, { bubbles: true, composed: true })
+      );
+    } finally {
+      this._paletteOpenByTouch = false;
+    }
+  }
+
+  private _handlePaletteFooterPointerDown(e: PointerEvent): void {
+    this._paletteFooterPointerType = e.pointerType;
+  }
+
+  /** A cancelled press (the page scrolled, the finger slid away) never clicks. */
+  private _handlePaletteFooterPointerCancel(): void {
+    this._paletteFooterPointerType = '';
+  }
+
   /** The left rail: the space rail once loaded, else a spinner or a load error. */
   private renderV2Rail(): TemplateResult {
     if (this.v2SpaceRailLoaded) {
@@ -6131,9 +6562,11 @@ export class ScionPageChat extends LitElement {
             : ''}
           currentUserId=${this.pageData?.user?.id || ''}
           .dms=${this.v2DMList}
+          .centerFilter=${this.v2Conversation ? this.centerMessageFilter : ''}
           @thread-select=${this.handleThreadSelect}
           @dm-select=${this.handleRailDMSelect}
           @reset-view=${this.handleResetView}
+          @rail-filter-change=${this.handleRailFilterChange}
         ></scion-chat-space-rail>
       `;
     }
@@ -6145,6 +6578,12 @@ export class ScionPageChat extends LitElement {
     return html`<div class="loading-rail"><sl-spinner></sl-spinner></div>`;
   }
 
+  /**
+   * Back chevron shown only on mobile, where the neighbouring panels are
+   * off-screen and otherwise reachable only by an undiscoverable swipe.
+   * The conversation header steps back to the rail; the members header
+   * steps back to the conversation.
+   */
   private renderMobileBackButton(target: 'left' | 'center' = 'left') {
     return html`
       <sl-icon-button
@@ -6372,6 +6811,12 @@ export class ScionPageChat extends LitElement {
               </sl-menu>
             </sl-dropdown>
           </span>
+          ${this.headerShowsStars(conv)
+            ? html`<scion-chat-starred-list
+                conversationKey=${conv.conversationKey}
+                @starred-message-open=${this.handleStarredMessageOpen}
+              ></scion-chat-starred-list>`
+            : nothing}
           <sl-tooltip content="Search messages">
             <sl-icon-button
               name="search"
@@ -6410,6 +6855,9 @@ export class ScionPageChat extends LitElement {
               .agentMembers=${this.v2AgentMembers}
               .agents=${this.getAgentsFromMembers()}
               .restoreScrollAnchor=${this.scrollRestoreFor(conv.conversationKey)}
+              .messageFilter=${this.centerMessageFilter}
+              @chat-message-filter-change=${this.handleMessageFilterChange}
+              @chat-star-open=${this.handleStarOpen}
               @scroll-restore-consumed=${this.handleScrollRestoreConsumed}
               @default-agent-changed=${this.handleDefaultAgentChanged}
               @peer-agent-resolved=${this.handlePeerAgentResolved}
@@ -6427,6 +6875,158 @@ export class ScionPageChat extends LitElement {
         }}
       ></scion-action-sheet>
     `;
+  }
+
+  /**
+   * Whether the header shows the starred-messages button: the experiment is
+   * on and the conversation supports stars (threads and both DM kinds). It
+   * sits in the always-visible action area, not the secondary span.
+   */
+  private headerShowsStars(conv: V2ConversationState): boolean {
+    return starredMessagesEnabled() && conversationSupportsStars(conv.conversationKey);
+  }
+
+  /** Bumped by every header star jump; a newer jump supersedes older ones. */
+  private starJumpSeq = 0;
+
+  /**
+   * A header star entry was chosen: resolve the star's current target
+   * first, then jump with the existing around-message navigation. A star
+   * that is no longer available leaves the current conversation as it is.
+   */
+  private handleStarredMessageOpen = (e: CustomEvent<StarredMessageOpenDetail>): void => {
+    const messageId = e.detail?.messageId;
+    if (!messageId) return;
+    void this.openStarredMessage(messageId, this.v2Conversation?.conversationKey ?? '');
+  };
+
+  /**
+   * Open a starred message chosen while `originKey` was open. Newer
+   * navigation wins: if the user opened another conversation, or chose
+   * another entry, while the detail request ran, nothing happens. A Retry
+   * from the error toast keeps the original conversation, so it does
+   * nothing either once the user has moved on.
+   */
+  private async openStarredMessage(messageId: string, originKey: string): Promise<void> {
+    const seq = ++this.starJumpSeq;
+    // A jump inside the open thread (search, reply preview) made while the
+    // detail request runs is newer navigation too.
+    const threadJumps = (): number => this.threadElement()?.jumpSequence ?? 0;
+    const threadJump = threadJumps();
+    const superseded = (): boolean =>
+      seq !== this.starJumpSeq ||
+      (this.v2Conversation?.conversationKey ?? '') !== originKey ||
+      threadJumps() !== threadJump;
+    let item;
+    try {
+      item = await fetchStarDetail(messageId);
+    } catch {
+      if (superseded()) return;
+      this.refocusStarredTrigger();
+      showToast('Could not open the starred message', 'danger', {
+        action: {
+          label: 'Retry',
+          run: (): void => {
+            if ((this.v2Conversation?.conversationKey ?? '') !== originKey) return;
+            void this.openStarredMessage(messageId, originKey);
+          },
+        },
+      });
+      return;
+    }
+    if (superseded()) return;
+    if (!item) {
+      this.refocusStarredTrigger();
+      showToast('This starred message is no longer available', 'warning');
+      return;
+    }
+    this.v2SearchActive = false;
+    if (item.conversationKey === this.v2Conversation?.conversationKey) {
+      await this.updateComplete;
+      // A header entry always opens the message in the full conversation,
+      // also from the starred-only center.
+      const thread = this.threadElement();
+      if (this.centerMessageFilter) thread?.openInFullContext(item.messageId);
+      else void thread?.scrollToMessageById(item.messageId, true, true);
+      return;
+    }
+    navigateTo(item.permalink);
+  }
+
+  /**
+   * A header entry could not be opened: the list closed before the jump,
+   * so give focus back to its star button, unless focus already moved on.
+   */
+  private refocusStarredTrigger(): void {
+    const focused = deepActiveElement();
+    if (focused && focused !== document.body) return;
+    this.shadowRoot?.querySelector('scion-chat-starred-list')?.focusTrigger();
+  }
+
+  /**
+   * The center message filter the current URL asks for, if it may apply:
+   * only on a conversation route and only while the experiment is on.
+   */
+  private urlMessageFilter(): ChatMessageFilter {
+    const requested = messageFilterFromSearch(window.location.search);
+    if (!requested) return '';
+    const path = stripBasePath(window.location.pathname);
+    return isChatConversationPath(path) && starredMessagesEnabled() ? requested : '';
+  }
+
+  /**
+   * Take the center message filter from the URL. A filter on a route that
+   * is not one conversation, or while the experiment is off, is dropped
+   * from the URL in place, so it is never carried on to another route;
+   * while the experiment is off a notice says the full history is shown.
+   */
+  private syncMessageFilterFromUrl(): void {
+    const filter = this.urlMessageFilter();
+    if (this.centerMessageFilter !== filter) this.centerMessageFilter = filter;
+    if (filter || !messageFilterFromSearch(window.location.search)) return;
+    const path = stripBasePath(window.location.pathname);
+    // On a conversation route the filter was dropped because the
+    // experiment is off: say so, so the full history is not taken for the
+    // starred messages, before the URL changes.
+    if (isChatConversationPath(path)) {
+      showToast('Starred messages are not available. Showing all messages.', 'warning');
+    }
+    const search = searchWithMessageFilter(window.location.search, '');
+    window.history.replaceState(
+      window.history.state,
+      '',
+      browserPath(path) + search + window.location.hash
+    );
+    void replaceRoute(path);
+  }
+
+  /**
+   * The thread asks to show the conversation under another filter (a jump
+   * to a message, Show all, Reply or Edit from the starred-only center).
+   * The change is a new history entry, so Back returns to the filtered
+   * view; a jump also names the message in the fragment, like a permalink.
+   */
+  private handleMessageFilterChange = (e: Event): void => {
+    const detail = (e as CustomEvent<MessageFilterChangeDetail>).detail;
+    const path = stripBasePath(window.location.pathname);
+    if (!detail || !isChatConversationPath(path)) return;
+    const filter = detail.filter === 'starred' && starredMessagesEnabled() ? 'starred' : '';
+    const search = searchWithMessageFilter(window.location.search, filter);
+    const hash = detail.messageId ? `#msg-${encodeURIComponent(detail.messageId)}` : '';
+    ++this._userNavSeq;
+    this.pushChatPath(`${path}${search}${hash}`);
+    this.centerMessageFilter = filter;
+  };
+
+  /** A starred message from the filtered center now lives elsewhere: open it there. */
+  private handleStarOpen = (e: Event): void => {
+    const item = (e as CustomEvent<StarOpenDetail>).detail?.item;
+    if (item?.permalink) navigateTo(item.permalink);
+  };
+
+  /** The open conversation's thread element, if rendered. */
+  private threadElement(): import('../shared/chat/chat-thread.js').ScionChatThread | null {
+    return this.shadowRoot?.querySelector('scion-chat-thread') ?? null;
   }
 
   /** Whether the conversation header folds its secondary actions into the More menu. */
@@ -6450,6 +7050,7 @@ export class ScionPageChat extends LitElement {
           ? this.resolveDefaultAgentId(conv.defaultAgent)
           : '';
     let count = 3; // export, search, members
+    if (this.headerShowsStars(conv)) count += 1; // starred messages
     if (agentId) count += this.getAgentProjectId(agentId) ? 2 : 1; // terminal, graph
     if (!this.isMobileLayout) count += 1; // density
     if (conv.isDM && conv.peerKind === 'agent') count += 1; // promote

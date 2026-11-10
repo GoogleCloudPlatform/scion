@@ -1474,6 +1474,7 @@ func TestK8sRun_NoRunID_NFSHome_RemovesPreviousRunObjectsAfterStop(t *testing.T)
 		cancel() // stop Run once it reaches the pod create
 		return true, nil, errors.New("stop at pod create")
 	})
+	seedConfigClaims(t, cs, "default", cfg)
 	_, _ = rt.Run(ctx, cfg)
 	if presentAtPodDelete != 2 {
 		t.Errorf("per-run Secrets present at the previous pod's delete = %d, want 2", presentAtPodDelete)

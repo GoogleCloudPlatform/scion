@@ -1,0 +1,156 @@
+# Secret rotation consumer map (ptone/scion#1530 Phase 6, task T1)
+
+Status: inventory at `4c60666` (ptone/scion main). It is pinned by
+`TestRingModeLegacyEntryCensus` in `pkg/secret/callsite_audit_test.go`. Task
+T10 re-runs it at its own head (acceptance criterion 1).
+
+This document re-runs the consumer map of the base design ("Existing consumer
+map") and its addendum §1 against the integration tip. It covers:
+
+- every `ensureSigningKey` caller;
+- every direct reader of `SharedSigningSecret`, `resolveSessionSecret`,
+  `sessionSecretValue`, `keyringLegacySecret` and `LegacySecret`;
+- session derivation;
+- every encryption call site;
+- the startup and secret-backend wiring.
+
+Line numbers are at `4c60666`.
+
+## Classes
+
+Each consumer is in exactly one class. The census uses the same names.
+
+| Class | Meaning |
+|---|---|
+| on-ring | In managed ring mode (a keyring file), every key the consumer uses comes from the signing or encryption ring. |
+| independently keyed | The key material is generated independently and is never derived from the server secret. The reason is given. |
+| legacy-only | Reached only in legacy mode (no keyring file), or the value is unused in ring mode, or the site is a test fixture or tool. |
+| **ring-mode legacy-entry reader** | Reads the keyring `legacy` signing entry in ring mode, directly or through `SharedSigningSecret`/`resolveSessionSecret`/`sessionSecretValue`, which return that entry when a keyring file is loaded. **This list is task T7's exact scope.** |
+| release gate | The release refusal that requires the `legacy` entry until task T10 lifts it. |
+
+## Ring-mode legacy-entry readers (T7 scope)
+
+These are census keys (`<name>@<file>:<function>`). Methods are keyed `(*T).Name`. `TestRingModeLegacyEntryReadersInConsumerMap` requires this section and the release-gate section to list exactly the census keys of their class, no more and no fewer.
+
+ring-mode legacy-entry readers: none
+
+No consumer reads the keyring `legacy` entry, or `SharedSigningSecret` as that entry, in managed ring mode. What changed, by former item:
+
+- The three root resolvers: the keyring-entry helper is gone, and resolveSessionSecret and sessionSecretValue return "" with a keyring file, so every cmd caller below gets "" in ring mode (legacy-only now).
+- Startup: buildHubServerConfig sets an empty SharedSigningSecret in ring mode. validateKeyringConfig refuses a non-empty one (a ring-mode guard: an emptiness check, no secret compared). The release check (releaseKeyringCheck) no longer compares it; only the `legacy`-entry requirement stays behind the seam.
+- Hosted: validateHostedBasic and initHubServer return before the session secret in ring mode. validateHostedHAPreflight keeps a present-key assertion: with a keyring file it requires a usable active signing generation and never reads the session secret; in legacy mode it requires the secret (hostedHALegacySessionSecret).
+- Relay-peer auth: the HMAC keys come from the ring, and the PeerSecret inequality check compares, in constant time, against every signing generation. The session-secret arguments are "" in ring mode.
+- Test admin tier G7: keyring mode refuses first (keyring_signing), in cmd (KeyringSigning) and in the hub re-check (managedSigning); the shared-secret reads run only in legacy mode (sharedSigningSecretSet).
+- Key status check: `scion server keys check` shares validateKeyringFile with startup.
+
+### Release gate (T10 scope, not T7)
+
+- `LegacySecret@pkg/keyring/load.go:(*Keyring).CheckSessionPilot` (:495)
+- `DeriveLegacyEncryptionKey@pkg/keyring/load.go:(*Keyring).CheckSessionPilot` (:499): the active encryption key must equal the key derived from the `legacy` entry.
+
+### Corrections to the plan's T7 file list
+
+p6-plan-r3 lists the following as known T7 files. At `4c60666` they are **legacy-only**, and T7 does not need to change them:
+
+- `pkg/hub/conduit_admission.go:169`: `conduitAdmissionRing` returns the keyring's signing ring first (:166) and reads `SharedSigningSecret` only without a keyring file.
+- `pkg/hub/server.go:3715`: `ensureSigningKeyWithSource` is reached only through `ensureSigningKey`. Every `ensureSigningKey` caller sits behind `keyringManaged()` or `managedSigning` (see below).
+- `cmd/server_foreground.go:3837` (`initWebServer`): `WebServerConfig.SessionSecret` is unused when `SigningRing` is set (`pkg/hub/web.go:733-745`).
+
+The remaining items on the plan's list (`validateKeyringConfig`, :1608, :1644, :1738, :2899, `cmd/server_conduit.go:453,483,743` and `conduit_peerauth.go:149`) are confirmed above. The list also gains items the plan did not name: :3109, the G7 sites, and the three root resolvers.
+
+## Signing consumers
+
+| Consumer | Ring-mode source | Legacy-mode source | Class |
+|---|---|---|---|
+| Browser session cookies (OAuth state, Hub tokens) | `keyring.CookieCodecs` over `WebServerConfig.SigningRing` (`pkg/hub/web.go:733,778`; `cmd/server_foreground.go:3895`) | `keyring.Legacy(SessionSecret)` (`web.go:745`), or a random key | on-ring |
+| Agent HS256 JWTs | `initRingTokenServices` (`pkg/hub/server.go:3641`), `agentJWTPurpose` (`jwt_keys.go:33`) | `ensureSigningKey` in `initLegacyTokenServices` (`server.go:3591`) | on-ring |
+| User HS256 JWTs | `initRingTokenServices`, `userJWTPurpose` (`jwt_keys.go:36`) | `ensureSigningKey` (`server.go:3616`) | on-ring |
+| Skill-file download URLs | `managedCapabilityKeys` (`download_signing.go:112`) | `ensureSigningKey` (`:120`) | on-ring |
+| Artifact view capabilities | `managedCapabilityKeys` (`artifacts_store.go:268`) | `ensureSigningKey` (`:278`); `artifacts.LegacyViewKeys` | on-ring |
+| Port view capabilities | `managedCapabilityKeys` (`port_view.go:78`) | `ensureSigningKey` (`:88`) | on-ring |
+| Authorized-list sealed cursors | `managedCapabilityKeys` (`authorized_list.go:817`) | `ensureSigningKey` (`:825`) | on-ring |
+| **Attachment delivery capabilities** | `managedCapabilityKeys` (`attachment_delivery.go:93`), versioned `ad2` tokens | `ensureSigningKey` (`:103`) | **on-ring (integrated)** |
+| Conduit admission tokens | `conduitAdmissionRing` returns the keyring signing ring (`conduit_admission.go:165-167`) | `keyring.Legacy(SharedSigningSecret)` (`:169-173`) | on-ring |
+| Relay-peer HMAC (no dedicated PeerSecret) | `NewHMACPeerAuthFromRing` (`conduit_peerauth.go:156`; `cmd/server_conduit.go:461`) | `NewHMACPeerAuthFromSecret` (`:161`) | on-ring; the PeerSecret check is a ring-mode legacy-entry reader (items 10-12) |
+| Relay-peer HMAC with a dedicated PeerSecret | the PeerSecret | the PeerSecret | independently keyed: an operator-supplied separate secret with its own derivation |
+
+Attachment delivery is covered by the P4 tests in `pkg/hub/capability_keyring_test.go`:
+
+- `TestCapabilityKeyring_DeliveryCrossReplica`
+- `TestCapabilityKeyring_DeliveryLegacyReplicaUpgrade`
+- `TestCapabilityKeyring_DeliveryNonceSharedAcrossFormats`
+- `TestCapabilityKeyring_DeliveryStrictFormatDoesNotConsumeNonce`
+- `TestCapabilityKeyring_DeliveryRetirementBoundary`
+- `TestCapabilityKeyring_DeliveryBindingAndLivenessRingMode`
+- `TestCapabilityKeyring_DeliveryCrossReplicaBrokerHMAC`
+- `TestCapabilityKeyring_DeliveryIssuanceClosed`
+
+### `ensureSigningKey` callers (all legacy-only)
+
+| Caller | Ring-mode branch |
+|---|---|
+| `pkg/hub/server.go:initLegacyTokenServices` (2 calls) | `managedSigning(cfg)` selects `initRingTokenServices` (`server.go:2832`) |
+| `pkg/hub/download_signing.go:initDownloadSigningKey` | `keyringManaged()` |
+| `pkg/hub/artifacts_store.go:initArtifactViewKey` | `keyringManaged()` |
+| `pkg/hub/port_view.go:initPortViewKey` | `keyringManaged()` |
+| `pkg/hub/authorized_list.go:initListCursorSealer` | `keyringManaged()` |
+| `pkg/hub/attachment_delivery.go:initAttachmentDeliveryKey` | `keyringManaged()` |
+
+`deriveSharedSigningKey` appears in three places:
+
+- `capability_keys.go:sharedSecretPurpose` and `jwt_keys.go`: the ring purposes (on-ring);
+- `server.go:ensureSigningKeyWithSource`: legacy-only;
+- a copy in `perf/bench/seed`: a tool.
+
+### Independently keyed (not derived from the server secret)
+
+Each of these is classified in `tiaKeyMaterialSites` (`pkg/hub/test_admin_gate_test.go`).
+
+| Consumer | Reason |
+|---|---|
+| OIDC RSA signing keys (`oidckeys.go`) | Generated RSA keys. Only their backups are encrypted (see Encryption). |
+| Conduit Ed25519 grant ring (`conduit_grants.go:bootstrap,rotate`) | A random ring. Only its stored form is encrypted. |
+| Broker join and per-broker HMAC (`brokerauth.go:computeHMAC`) | Random per broker. |
+| Opaque user access keys (`useraccesstoken.go`) | Random and hash-backed. |
+| Test-identity web session marker key (`handlers_test_identity_web.go`) | Generated at test-infra mark time. Hub-local. |
+| Access-constraint preview tokens (`access_constraint_preview.go`) | Random per process, held in memory only. |
+| GitHub App key and webhook secret (`githubapp/`) | External credentials. |
+
+## Encryption consumers (all on-ring)
+
+In ring mode, every stored Hub ciphertext goes through the one shared `secret.ValueCipher`, built from the keyring file's encryption ring. Pinned elsewhere:
+
+- `TestNoDirectScalarCipherCallers`: no scalar helper callers;
+- `TestDecryptForMigrationCallers`: empty allow-list.
+
+| Call site | Purpose |
+|---|---|
+| `pkg/secret/localbackend.go:134` (Encrypt), `:476` (Decrypt) | Local-backend secret values (all scopes) |
+| `pkg/hub/server.go:3807,3864` (Decrypt), `:4053` (Encrypt) | Hub signing-key backups (legacy-mode resolution and the backup re-save) |
+| `pkg/hub/oidckeys.go:481,690,770` (Decrypt), `:577,644,735` (Encrypt) | OIDC key and keyset backups |
+| `pkg/hub/conduit_grants.go:179` (Decrypt), `:198` (Encrypt) | Conduit grant ring |
+| `pkg/hub/encryption_scan.go:94` (DecryptAuthenticated), `pkg/hub/internal/keymaterial/keymaterial.go:73` (Decrypt, via `guardOverwrite`) | Authenticating payload scan (startup audit, key status, `keys verify`) and the backup-readability check |
+
+There is one plaintext path, `pkg/hub/hub_secrets.go:41` (`setHubSecret` with no secret backend, Obl 8). It writes no ciphertext and uses no key. It is T12's scope, not a legacy-entry reader.
+
+### Cipher wiring
+
+| Site | Ring mode | Class |
+|---|---|---|
+| `cmd/server_keyring.go:buildServerValueCipher` (:48) | `secret.NewValueCipher(keyring file)`. `NewLegacyValueCipher(resolveSessionSecret())` (:58) runs only without a file. | on-ring; the legacy branch is legacy-only |
+| `cmd/server_foreground.go:503-512` | `buildServerValueCipher` runs before `secret.NewBackend(..., serverValueCipher)`, so the backend and the Hub share one object | on-ring |
+| `cmd/server_foreground.go:2907` | `hub.ServerConfig.ValueCipher = serverValueCipher` | on-ring |
+| `pkg/hub/keyring.go:serverValueCipher` (:142) | `cfg.ValueCipher` (which must wrap the file's ring), else the file. `NewLegacyValueCipher(SharedSigningSecret)` (:156) runs only without a file. | on-ring; the legacy branch is legacy-only |
+| `pkg/secret/localbackend.go:NewLocalBackend` | A scalar-secret constructor. Production uses `NewBackend` with the shared cipher. | legacy-only |
+| `cmd/server_keys.go:keysValueCipher` | `scion server keys status`: `secret.NewValueCipher(keyring file)`. `NewLegacyValueCipher` runs only without a file. | on-ring; the legacy branch is legacy-only |
+
+## Census
+
+`TestRingModeLegacyEntryCensus` scans every non-test Go file in the module, excluding `extras`, `web`, `docs-site` and `.scion`. It counts the references to the tracked names: `SharedSigningSecret`, `resolveSessionSecret`, `sessionSecretValue`, `keyringLegacySecret`, `LegacySecret`, `ensureSigningKey`, `deriveSharedSigningKey`, `NewLegacyValueCipher` and `DeriveLegacyEncryptionKey`.
+
+Every `<name>@<file>:<function>` must be classified with its exact reference count. A reference is a selector, a call or a bare identifier used as a value (an alias or a callback); declared names and composite-literal keys are not references. A new reader, a new read inside a classified function, or a stale entry fails the test. `TestRingModeLegacyEntryCensusRefusesPlantedReader` is the negative case.
+
+Not tracked by name:
+
+- `SessionSecret` and `SharedSecret`. These generic field names are reached only through the tracked resolvers above.
+- The `keyring.Legacy` adapter. Its callers are listed in the tables.

@@ -29,11 +29,30 @@ type AgentWithCapabilities struct {
 	ResolvedHarness     string                           `json:"resolvedHarness,omitempty"`
 	HarnessCapabilities *api.HarnessAdvancedCapabilities `json:"harnessCapabilities,omitempty"`
 	CloudLogging        bool                             `json:"cloudLogging,omitempty"`
+	// HarnessVendor is the vendor of the agent's harness (harness.Vendor):
+	// the model vendor for a single-vendor harness, the harness name for a
+	// multi-vendor one, and omitted for a custom or unresolved harness.
+	HarnessVendor string `json:"harnessVendor,omitempty"`
+	// ModelSize is the model size alias the agent was created with
+	// (AppliedConfig.ModelSize), omitted when it has none.
+	ModelSize string `json:"modelSize,omitempty"`
 	// Editability is set on the single-agent GET only.
 	Editability *AgentEditability `json:"editability,omitempty"`
+	// EffectiveNextRun is the agent's applied config with its pending
+	// config applied (AppliedConfig ⊕ pendingConfig), set on the
+	// single-agent GET with ?view=edit only.
+	EffectiveNextRun *store.AgentAppliedConfig `json:"effectiveNextRun,omitempty"`
 	// SSHHostKey is the authorized_keys line of the agent's SSH host key,
 	// set on the single-agent GET only (agentSSHHostKey).
 	SSHHostKey string `json:"sshHostKey,omitempty"`
+	// ResolvedTimezone and TimezoneSource are the container TZ the agent's
+	// next start gets and the rung that supplies it, as on the PATCH
+	// response ("" with source "none" when no TZ is sent). Set on the
+	// single-agent GET only, and only for a caller who may view the agent's
+	// env, since the zone can come from a TZ env var (ptone/scion#2767).
+	// Pointers, so "" still reaches the wire while unset means omitted.
+	ResolvedTimezone *string `json:"resolvedTimezone,omitempty"`
+	TimezoneSource   *string `json:"timezoneSource,omitempty"`
 }
 
 // MarshalJSON implements custom marshaling to avoid shadowing of fields by the embedded store.Agent.
@@ -46,8 +65,13 @@ func (a AgentWithCapabilities) MarshalJSON() ([]byte, error) {
 		ResolvedHarness     string                           `json:"resolvedHarness,omitempty"`
 		HarnessCapabilities *api.HarnessAdvancedCapabilities `json:"harnessCapabilities,omitempty"`
 		CloudLogging        bool                             `json:"cloudLogging,omitempty"`
+		HarnessVendor       string                           `json:"harnessVendor,omitempty"`
+		ModelSize           string                           `json:"modelSize,omitempty"`
 		Editability         *AgentEditability                `json:"editability,omitempty"`
+		EffectiveNextRun    *store.AgentAppliedConfig        `json:"effectiveNextRun,omitempty"`
 		SSHHostKey          string                           `json:"sshHostKey,omitempty"`
+		ResolvedTimezone    *string                          `json:"resolvedTimezone,omitempty"`
+		TimezoneSource      *string                          `json:"timezoneSource,omitempty"`
 	}{
 		AgentAlias:          AgentAlias(a.Agent),
 		Cap:                 a.Cap,
@@ -55,8 +79,13 @@ func (a AgentWithCapabilities) MarshalJSON() ([]byte, error) {
 		ResolvedHarness:     a.ResolvedHarness,
 		HarnessCapabilities: a.HarnessCapabilities,
 		CloudLogging:        a.CloudLogging,
+		HarnessVendor:       a.HarnessVendor,
+		ModelSize:           a.ModelSize,
 		Editability:         a.Editability,
+		EffectiveNextRun:    a.EffectiveNextRun,
 		SSHHostKey:          a.SSHHostKey,
+		ResolvedTimezone:    a.ResolvedTimezone,
+		TimezoneSource:      a.TimezoneSource,
 	})
 }
 
@@ -71,8 +100,13 @@ func (a *AgentWithCapabilities) UnmarshalJSON(data []byte) error {
 		ResolvedHarness     string                           `json:"resolvedHarness,omitempty"`
 		HarnessCapabilities *api.HarnessAdvancedCapabilities `json:"harnessCapabilities,omitempty"`
 		CloudLogging        bool                             `json:"cloudLogging,omitempty"`
+		HarnessVendor       string                           `json:"harnessVendor,omitempty"`
+		ModelSize           string                           `json:"modelSize,omitempty"`
 		Editability         *AgentEditability                `json:"editability,omitempty"`
+		EffectiveNextRun    *store.AgentAppliedConfig        `json:"effectiveNextRun,omitempty"`
 		SSHHostKey          string                           `json:"sshHostKey,omitempty"`
+		ResolvedTimezone    *string                          `json:"resolvedTimezone,omitempty"`
+		TimezoneSource      *string                          `json:"timezoneSource,omitempty"`
 	}
 	var wrapper WrapperFields
 	if err := json.Unmarshal(data, &wrapper); err != nil {
@@ -83,8 +117,13 @@ func (a *AgentWithCapabilities) UnmarshalJSON(data []byte) error {
 	a.ResolvedHarness = wrapper.ResolvedHarness
 	a.HarnessCapabilities = wrapper.HarnessCapabilities
 	a.CloudLogging = wrapper.CloudLogging
+	a.HarnessVendor = wrapper.HarnessVendor
+	a.ModelSize = wrapper.ModelSize
 	a.Editability = wrapper.Editability
+	a.EffectiveNextRun = wrapper.EffectiveNextRun
 	a.SSHHostKey = wrapper.SSHHostKey
+	a.ResolvedTimezone = wrapper.ResolvedTimezone
+	a.TimezoneSource = wrapper.TimezoneSource
 	return nil
 }
 
@@ -293,6 +332,10 @@ type RuntimeBrokerWithCapabilities struct {
 	// load balancer with several hub replicas it describes the replica
 	// that answered. Read-only and display-only; omitted when false.
 	HostedByThisServer bool `json:"hostedByThisServer,omitempty"`
+	// VersionStatus compares the broker's version with the fleet hub
+	// version: match, mismatch or unknown (see brokerVersionStatus).
+	// Omitted for a plugin record.
+	VersionStatus string `json:"versionStatus,omitempty"`
 }
 
 // MarshalJSON implements custom marshaling to avoid shadowing of fields by the embedded store.RuntimeBroker.
@@ -305,6 +348,7 @@ func (b RuntimeBrokerWithCapabilities) MarshalJSON() ([]byte, error) {
 		AgentCount         *int64        `json:"agentCount,omitempty"`
 		AgentLimitSource   string        `json:"agentLimitSource,omitempty"`
 		HostedByThisServer bool          `json:"hostedByThisServer,omitempty"`
+		VersionStatus      string        `json:"versionStatus,omitempty"`
 	}{
 		BrokerAlias:        BrokerAlias(b.RuntimeBroker),
 		Cap:                b.Cap,
@@ -312,6 +356,7 @@ func (b RuntimeBrokerWithCapabilities) MarshalJSON() ([]byte, error) {
 		AgentCount:         b.AgentCount,
 		AgentLimitSource:   b.AgentLimitSource,
 		HostedByThisServer: b.HostedByThisServer,
+		VersionStatus:      b.VersionStatus,
 	})
 }
 
@@ -325,6 +370,7 @@ func (b *RuntimeBrokerWithCapabilities) UnmarshalJSON(data []byte) error {
 		AgentCount         *int64        `json:"agentCount,omitempty"`
 		AgentLimitSource   string        `json:"agentLimitSource,omitempty"`
 		HostedByThisServer bool          `json:"hostedByThisServer,omitempty"`
+		VersionStatus      string        `json:"versionStatus,omitempty"`
 	}{
 		BrokerAlias: (*BrokerAlias)(&b.RuntimeBroker),
 	}
@@ -336,5 +382,6 @@ func (b *RuntimeBrokerWithCapabilities) UnmarshalJSON(data []byte) error {
 	b.AgentCount = aux.AgentCount
 	b.AgentLimitSource = aux.AgentLimitSource
 	b.HostedByThisServer = aux.HostedByThisServer
+	b.VersionStatus = aux.VersionStatus
 	return nil
 }

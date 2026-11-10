@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"entgo.io/ent/dialect/sql"
 	"entgo.io/ent/dialect/sql/sqlgraph"
@@ -189,6 +190,96 @@ func (_u *NotificationUpdate) SetNillableDispatchOutcome(v *string) *Notificatio
 	return _u
 }
 
+// SetDispatchReason sets the "dispatch_reason" field.
+func (_u *NotificationUpdate) SetDispatchReason(v string) *NotificationUpdate {
+	_u.mutation.SetDispatchReason(v)
+	return _u
+}
+
+// SetNillableDispatchReason sets the "dispatch_reason" field if the given value is not nil.
+func (_u *NotificationUpdate) SetNillableDispatchReason(v *string) *NotificationUpdate {
+	if v != nil {
+		_u.SetDispatchReason(*v)
+	}
+	return _u
+}
+
+// SetNextAttemptAt sets the "next_attempt_at" field.
+func (_u *NotificationUpdate) SetNextAttemptAt(v time.Time) *NotificationUpdate {
+	_u.mutation.SetNextAttemptAt(v)
+	return _u
+}
+
+// SetNillableNextAttemptAt sets the "next_attempt_at" field if the given value is not nil.
+func (_u *NotificationUpdate) SetNillableNextAttemptAt(v *time.Time) *NotificationUpdate {
+	if v != nil {
+		_u.SetNextAttemptAt(*v)
+	}
+	return _u
+}
+
+// ClearNextAttemptAt clears the value of the "next_attempt_at" field.
+func (_u *NotificationUpdate) ClearNextAttemptAt() *NotificationUpdate {
+	_u.mutation.ClearNextAttemptAt()
+	return _u
+}
+
+// SetKind sets the "kind" field.
+func (_u *NotificationUpdate) SetKind(v string) *NotificationUpdate {
+	_u.mutation.SetKind(v)
+	return _u
+}
+
+// SetNillableKind sets the "kind" field if the given value is not nil.
+func (_u *NotificationUpdate) SetNillableKind(v *string) *NotificationUpdate {
+	if v != nil {
+		_u.SetKind(*v)
+	}
+	return _u
+}
+
+// SetResourceType sets the "resource_type" field.
+func (_u *NotificationUpdate) SetResourceType(v string) *NotificationUpdate {
+	_u.mutation.SetResourceType(v)
+	return _u
+}
+
+// SetNillableResourceType sets the "resource_type" field if the given value is not nil.
+func (_u *NotificationUpdate) SetNillableResourceType(v *string) *NotificationUpdate {
+	if v != nil {
+		_u.SetResourceType(*v)
+	}
+	return _u
+}
+
+// SetResourceID sets the "resource_id" field.
+func (_u *NotificationUpdate) SetResourceID(v string) *NotificationUpdate {
+	_u.mutation.SetResourceID(v)
+	return _u
+}
+
+// SetNillableResourceID sets the "resource_id" field if the given value is not nil.
+func (_u *NotificationUpdate) SetNillableResourceID(v *string) *NotificationUpdate {
+	if v != nil {
+		_u.SetResourceID(*v)
+	}
+	return _u
+}
+
+// SetExcerpt sets the "excerpt" field.
+func (_u *NotificationUpdate) SetExcerpt(v string) *NotificationUpdate {
+	_u.mutation.SetExcerpt(v)
+	return _u
+}
+
+// SetNillableExcerpt sets the "excerpt" field if the given value is not nil.
+func (_u *NotificationUpdate) SetNillableExcerpt(v *string) *NotificationUpdate {
+	if v != nil {
+		_u.SetExcerpt(*v)
+	}
+	return _u
+}
+
 // Mutation returns the NotificationMutation object of the builder.
 func (_u *NotificationUpdate) Mutation() *NotificationMutation {
 	return _u.mutation
@@ -298,6 +389,27 @@ func (_u *NotificationUpdate) sqlSave(ctx context.Context) (_node int, err error
 	}
 	if value, ok := _u.mutation.DispatchOutcome(); ok {
 		_spec.SetField(notification.FieldDispatchOutcome, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.DispatchReason(); ok {
+		_spec.SetField(notification.FieldDispatchReason, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.NextAttemptAt(); ok {
+		_spec.SetField(notification.FieldNextAttemptAt, field.TypeTime, value)
+	}
+	if _u.mutation.NextAttemptAtCleared() {
+		_spec.ClearField(notification.FieldNextAttemptAt, field.TypeTime)
+	}
+	if value, ok := _u.mutation.Kind(); ok {
+		_spec.SetField(notification.FieldKind, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.ResourceType(); ok {
+		_spec.SetField(notification.FieldResourceType, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.ResourceID(); ok {
+		_spec.SetField(notification.FieldResourceID, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.Excerpt(); ok {
+		_spec.SetField(notification.FieldExcerpt, field.TypeString, value)
 	}
 	if _node, err = sqlgraph.UpdateNodes(ctx, _u.driver, _spec); err != nil {
 		if _, ok := err.(*sqlgraph.NotFoundError); ok {
@@ -480,6 +592,96 @@ func (_u *NotificationUpdateOne) SetNillableDispatchOutcome(v *string) *Notifica
 	return _u
 }
 
+// SetDispatchReason sets the "dispatch_reason" field.
+func (_u *NotificationUpdateOne) SetDispatchReason(v string) *NotificationUpdateOne {
+	_u.mutation.SetDispatchReason(v)
+	return _u
+}
+
+// SetNillableDispatchReason sets the "dispatch_reason" field if the given value is not nil.
+func (_u *NotificationUpdateOne) SetNillableDispatchReason(v *string) *NotificationUpdateOne {
+	if v != nil {
+		_u.SetDispatchReason(*v)
+	}
+	return _u
+}
+
+// SetNextAttemptAt sets the "next_attempt_at" field.
+func (_u *NotificationUpdateOne) SetNextAttemptAt(v time.Time) *NotificationUpdateOne {
+	_u.mutation.SetNextAttemptAt(v)
+	return _u
+}
+
+// SetNillableNextAttemptAt sets the "next_attempt_at" field if the given value is not nil.
+func (_u *NotificationUpdateOne) SetNillableNextAttemptAt(v *time.Time) *NotificationUpdateOne {
+	if v != nil {
+		_u.SetNextAttemptAt(*v)
+	}
+	return _u
+}
+
+// ClearNextAttemptAt clears the value of the "next_attempt_at" field.
+func (_u *NotificationUpdateOne) ClearNextAttemptAt() *NotificationUpdateOne {
+	_u.mutation.ClearNextAttemptAt()
+	return _u
+}
+
+// SetKind sets the "kind" field.
+func (_u *NotificationUpdateOne) SetKind(v string) *NotificationUpdateOne {
+	_u.mutation.SetKind(v)
+	return _u
+}
+
+// SetNillableKind sets the "kind" field if the given value is not nil.
+func (_u *NotificationUpdateOne) SetNillableKind(v *string) *NotificationUpdateOne {
+	if v != nil {
+		_u.SetKind(*v)
+	}
+	return _u
+}
+
+// SetResourceType sets the "resource_type" field.
+func (_u *NotificationUpdateOne) SetResourceType(v string) *NotificationUpdateOne {
+	_u.mutation.SetResourceType(v)
+	return _u
+}
+
+// SetNillableResourceType sets the "resource_type" field if the given value is not nil.
+func (_u *NotificationUpdateOne) SetNillableResourceType(v *string) *NotificationUpdateOne {
+	if v != nil {
+		_u.SetResourceType(*v)
+	}
+	return _u
+}
+
+// SetResourceID sets the "resource_id" field.
+func (_u *NotificationUpdateOne) SetResourceID(v string) *NotificationUpdateOne {
+	_u.mutation.SetResourceID(v)
+	return _u
+}
+
+// SetNillableResourceID sets the "resource_id" field if the given value is not nil.
+func (_u *NotificationUpdateOne) SetNillableResourceID(v *string) *NotificationUpdateOne {
+	if v != nil {
+		_u.SetResourceID(*v)
+	}
+	return _u
+}
+
+// SetExcerpt sets the "excerpt" field.
+func (_u *NotificationUpdateOne) SetExcerpt(v string) *NotificationUpdateOne {
+	_u.mutation.SetExcerpt(v)
+	return _u
+}
+
+// SetNillableExcerpt sets the "excerpt" field if the given value is not nil.
+func (_u *NotificationUpdateOne) SetNillableExcerpt(v *string) *NotificationUpdateOne {
+	if v != nil {
+		_u.SetExcerpt(*v)
+	}
+	return _u
+}
+
 // Mutation returns the NotificationMutation object of the builder.
 func (_u *NotificationUpdateOne) Mutation() *NotificationMutation {
 	return _u.mutation
@@ -619,6 +821,27 @@ func (_u *NotificationUpdateOne) sqlSave(ctx context.Context) (_node *Notificati
 	}
 	if value, ok := _u.mutation.DispatchOutcome(); ok {
 		_spec.SetField(notification.FieldDispatchOutcome, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.DispatchReason(); ok {
+		_spec.SetField(notification.FieldDispatchReason, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.NextAttemptAt(); ok {
+		_spec.SetField(notification.FieldNextAttemptAt, field.TypeTime, value)
+	}
+	if _u.mutation.NextAttemptAtCleared() {
+		_spec.ClearField(notification.FieldNextAttemptAt, field.TypeTime)
+	}
+	if value, ok := _u.mutation.Kind(); ok {
+		_spec.SetField(notification.FieldKind, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.ResourceType(); ok {
+		_spec.SetField(notification.FieldResourceType, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.ResourceID(); ok {
+		_spec.SetField(notification.FieldResourceID, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.Excerpt(); ok {
+		_spec.SetField(notification.FieldExcerpt, field.TypeString, value)
 	}
 	_node = &Notification{config: _u.config}
 	_spec.Assign = _node.assignValues

@@ -83,6 +83,7 @@ func TestWrapHubError_StatusTable(t *testing.T) {
 		{name: "422 unprocessable", err: apiErr(422, "no_runtime_broker", "no broker"), wantContain: "no broker"},
 		{name: "500 internal", err: apiErr(500, "internal_error", "boom"), wantHint: true, wantContain: "boom"},
 		{name: "503 unavailable", err: apiErr(503, "unavailable", "down"), wantHint: true, wantContain: "down"},
+		{name: "502 reload_unconfirmed omits hint", err: apiErr(502, "reload_unconfirmed", "the running agent did not confirm the reload"), wantContain: "did not confirm the reload"},
 		{name: "transport failure", err: transportErr(), wantHint: true, wantContain: "connection refused"},
 		{name: "wrapped 404 keeps no hint", err: fmt.Errorf("failed to send message to agent 'x' via Hub: %w", apiErr(404, "agent_not_found", "gone")), wantContain: "failed to send message to agent 'x'"},
 		{name: "401 standalone gets login hint", err: apiErr(401, "unauthorized", "token expired"), wantLogin: true},

@@ -20,8 +20,6 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -34,19 +32,11 @@ import (
 
 // ptone/scion#3890: the other synchronous paths that wait on a broker
 // dispatch (lifecycle start and restart, env submit, workspace-bootstrap
-// finalize, a start or resume through create) and the create-time workspace
-// upload extend the write deadline as create does (ptone/scion#3850). A wait
+// finalize, a start or resume through create) extend the write deadline as
+// create does (ptone/scion#3850). A wait
 // that ends after the listener's WriteTimeout, but within the path's own
 // budget, must get its real response, not a dropped connection. Timeouts are
 // scaled down: WriteTimeout 200ms, each broker call 400ms, dispatch wait 3s.
-
-// setHubWorkspaceUploadTimeout sets hubWorkspaceUploadTimeout for one test.
-func setHubWorkspaceUploadTimeout(t *testing.T, d time.Duration) {
-	t.Helper()
-	prev := hubWorkspaceUploadTimeout
-	hubWorkspaceUploadTimeout = d
-	t.Cleanup(func() { hubWorkspaceUploadTimeout = prev })
-}
 
 func requireAgentRunning(t *testing.T, s store.Store, id string) {
 	t.Helper()
@@ -74,9 +64,7 @@ func TestSlowLifecycleRestart_AfterWriteTimeout_GetsResponse(t *testing.T) {
 	srv, s, project := setupSlowLaunchServerWithDelay(t, legDelay)
 	shortenSyncDispatchTimeout(t, 400*time.Millisecond)
 	setSyncDispatchWriteSlack(t, 50*time.Millisecond)
-	setHubWorkspaceUploadTimeout(t, 10*time.Millisecond)
 	require.Less(t, syncDispatchWriteBudget(), 2*legDelay, "fixture check: the one-dispatch budget must not cover both legs")
-	require.Less(t, hubWorkspaceUploadWriteBudget(), 2*legDelay, "fixture check: the upload budget must not cover both legs")
 	require.Greater(t, restartWriteBudget(), 2*legDelay+time.Second, "fixture check: the restart budget must cover both legs")
 	setAgentQuotaLimits(t, s)
 	agent := createSiteAgent(t, s, project, "slow-restart", state.PhaseRunning, store.RunIntentRunning)
@@ -135,48 +123,6 @@ func TestSlowCreateExistingAgent_AfterWriteTimeout_GetsResponse(t *testing.T) {
 	}
 }
 
-// A create-time workspace upload that runs out of its own budget, after the
-// WriteTimeout, is answered with its failure instead of a dropped
-// connection. The timeouts are set so the upload outlasts every other
-// path's budget but not its own: the upload site must pass
-// hubWorkspaceUploadWriteBudget.
-func TestSlowHubWorkspaceUpload_BudgetExpiredAfterWriteTimeout_GetsResponse(t *testing.T) {
-	const uploadTimeout = 600 * time.Millisecond
-	t.Setenv("HOME", t.TempDir())
-
-	srv, s, project := setupSlowLaunchServer(t) // hub-managed: no GitRemote.
-	setHubWorkspaceUploadTimeout(t, uploadTimeout)
-	shortenSyncDispatchTimeout(t, 50*time.Millisecond)
-	setWorkspaceCheckTimeout(t, 10*time.Millisecond)
-	setSyncDispatchWriteSlack(t, 300*time.Millisecond)
-	require.Less(t, syncDispatchWriteBudget(), uploadTimeout, "fixture check: the one-dispatch budget must not cover the upload")
-	require.Less(t, restartWriteBudget(), uploadTimeout, "fixture check: the restart budget must not cover the upload")
-	srv.SetStorage(newGCSContentMockStorage("test-bucket"))
-	setAgentQuotaLimits(t, s)
-	t.Cleanup(func() {
-		if p, err := hubManagedProjectPath(project.Slug); err == nil {
-			_ = os.RemoveAll(p)
-		}
-	})
-	var uploadCalled atomic.Bool
-	prev := syncToGCSForWorkspaceUpload
-	syncToGCSForWorkspaceUpload = func(uctx context.Context, _, _, _ string) error {
-		uploadCalled.Store(true)
-		<-uctx.Done()
-		return uctx.Err()
-	}
-	t.Cleanup(func() { syncToGCSForWorkspaceUpload = prev })
-
-	code, body := serveThroughSlowListener(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-		Name: "slow-upload", ProjectID: project.ID, Task: "work",
-	}, uploadTimeout)
-	require.True(t, uploadCalled.Load(), "fixture check: the upload branch must be reached")
-	// The hub's own answer (RuntimeError, 502 with a JSON body), not an
-	// empty response from a dropped connection.
-	assert.Equal(t, http.StatusBadGateway, code, string(body))
-	assert.Contains(t, string(body), "Timed out uploading the project workspace")
-}
-
 // The per-path budgets cover each path's own wait plus the slack, and all
 // outlast the default WriteTimeout. extendWriteDeadline applies the budget
 // it is given under the same rule as extendWriteDeadlineForSyncDispatch.
@@ -184,8 +130,7 @@ func TestSyncDispatchWriteBudgets(t *testing.T) {
 	def := DefaultServerConfig().WriteTimeout
 	assert.Equal(t, workspaceCheckTimeout+2*syncDispatchTimeout+syncDispatchWriteSlack, restartWriteBudget())
 	assert.Greater(t, restartWriteBudget(), syncDispatchWriteBudget(), "a restart waits on two legs")
-	assert.Equal(t, hubWorkspaceUploadTimeout+syncDispatchWriteSlack, hubWorkspaceUploadWriteBudget())
-	for _, b := range []time.Duration{syncDispatchWriteBudget(), restartWriteBudget(), hubWorkspaceUploadWriteBudget()} {
+	for _, b := range []time.Duration{syncDispatchWriteBudget(), restartWriteBudget()} {
 		assert.Greater(t, b, def)
 	}
 

@@ -161,6 +161,8 @@ This resolution should be applied during agent provisioning. The appropriate loc
 
 For limits, this means: if `ScionConfig.MaxTurns` is 0 after template merge, check grove defaults, then hub defaults, and populate the value before injecting `SCION_MAX_TURNS` env var.
 
+> Superseded for the count limits (ptone/scion#5605): `MaxTurns` and `MaxModelCalls` are `*int`. A nil value is filled from the defaults; an explicit 0 means "no limit" and is never filled. See `pkg/api/limits.go`.
+
 For resources, the same pattern applies: if `ScionConfig.Resources` is nil or has empty fields after template merge, fill from grove defaults, then hub defaults.
 
 ### 6. Web Frontend — Grove Settings Page (`web/src/components/pages/grove-settings.ts`)

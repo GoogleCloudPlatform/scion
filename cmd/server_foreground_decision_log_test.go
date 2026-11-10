@@ -54,7 +54,7 @@ func TestAwaitServerExit_ClosesAuditAfterServersDrain(t *testing.T) {
 		done <- awaitServerExit(ctx, make(chan error), cancel, wait, func(context.Context) error {
 			closed <- waited
 			return nil
-		})
+		}, nil, nil, nil)
 	}()
 	cancel()
 	<-waitEntered
@@ -81,7 +81,7 @@ func TestAwaitServerExit_ErrorPathCancelsThenClosesAudit(t *testing.T) {
 		require.Error(t, ctx.Err(), "cancel runs before the audit close")
 		closed = true
 		return nil
-	})
+	}, nil, nil, nil)
 	require.ErrorIs(t, err, boom)
 	require.True(t, closed)
 }
@@ -90,7 +90,7 @@ func TestAwaitServerExit_NoHub(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	waited := false
-	require.NoError(t, awaitServerExit(ctx, make(chan error), cancel, func() { waited = true }, nil))
+	require.NoError(t, awaitServerExit(ctx, make(chan error), cancel, func() { waited = true }, nil, nil, nil, nil))
 	require.True(t, waited)
 }
 

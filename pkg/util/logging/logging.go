@@ -16,8 +16,8 @@ package logging
 
 import (
 	"context"
+	"io"
 	"log/slog"
-	"os"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging/loglevel"
 )
@@ -125,18 +125,12 @@ func EffectiveLevel(component string) slog.Level {
 // passes every record; callers wrap it with newLevelFilter so the shared
 // level state decides what is emitted.
 func createBaseHandler(component string, useGCP bool, hubName string) slog.Handler {
-	opts := &slog.HandlerOptions{
-		Level: passAllLevel,
-	}
+	return createBaseHandlerTo(stdoutWriter(), component, useGCP, hubName)
+}
 
-	if useGCP {
-		return NewGCPHandler(os.Stdout, opts, component, hubName)
-	}
-
-	// Default to JSON handler for structured logging
-	return slog.NewJSONHandler(os.Stdout, opts).WithAttrs([]slog.Attr{
-		slog.String(AttrComponent, component),
-	})
+// createBaseHandlerTo is createBaseHandler writing to w (newStdoutHandler).
+func createBaseHandlerTo(w io.Writer, component string, useGCP bool, hubName string) slog.Handler {
+	return newStdoutHandler(w, &slog.HandlerOptions{Level: passAllLevel}, component, hubName, useGCP, true)
 }
 
 // WithMetadata returns a context with the provided metadata attached as slog attributes.

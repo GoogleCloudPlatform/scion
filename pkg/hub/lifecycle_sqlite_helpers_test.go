@@ -30,6 +30,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/telemetryemit"
 	"github.com/stretchr/testify/require"
 )
 
@@ -47,11 +48,27 @@ func newCapturingAuditLogger() *capturingAuditLogger {
 	}
 }
 
+// allowAllHookFireAuthorizer allows every fire-time mint. Tests of the
+// executor's HTTP behaviour use it; the fire-time authority check itself is
+// tested with the server's authorizer (lifecycle_hook_fire_authority_test.go).
+type allowAllHookFireAuthorizer struct{}
+
+func (allowAllHookFireAuthorizer) AuthorizeHookFire(context.Context, *store.LifecycleHook, *store.GCPServiceAccount) error {
+	return nil
+}
+
 // newTestExecutor creates an HTTPExecutor with a test-friendly HTTP client
 // that allows loopback connections (httptest servers bind to 127.0.0.1).
 // The client still blocks ALL redirects, matching production behavior.
+// It allows every fire-time mint (allowAllHookFireAuthorizer).
 func newTestExecutor(s store.Store, tokenGen GCPTokenGenerator, auditLog AuditLogger, log *slog.Logger) *HTTPExecutor {
-	executor := NewHTTPExecutor(s, tokenGen, auditLog, log)
+	return newTestExecutorWithAuthorizer(s, tokenGen, auditLog, log, allowAllHookFireAuthorizer{})
+}
+
+// newTestExecutorWithAuthorizer is newTestExecutor with the given fire-time
+// authorizer.
+func newTestExecutorWithAuthorizer(s store.Store, tokenGen GCPTokenGenerator, auditLog AuditLogger, log *slog.Logger, auth HookFireAuthorizer) *HTTPExecutor {
+	executor := NewHTTPExecutor(s, tokenGen, auditLog, log, auth)
 	executor.newHTTPClient = func() *http.Client {
 		return &http.Client{
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
@@ -208,4 +225,33 @@ func (l *capturingAuditLogger) getEvents() []*LifecycleHookExecutionEvent {
 	out := make([]*LifecycleHookExecutionEvent, len(l.events))
 	copy(out, l.events)
 	return out
+}
+
+// Test-only lifecycle hooks (ptone/scion#5878): called only from pkg/hub
+// tests, so they live in a _test.go file.
+
+// errLifecycleUnsupported reports a store without lifecycle support.
+var errLifecycleUnsupported = errors.New("lifecycle events: the store does not support the lifecycle observer")
+
+// installLifecycleObserver is the test hook that installs the observer
+// whatever the experiment says (the slice 1 hook). The experiment reconcile
+// leaves an observer installed this way alone. It returns the resulting
+// state.
+func (s *Server) installLifecycleObserver() (string, error) {
+	ls, ok := s.store.(lifecycleEventStore)
+	if !ok {
+		return "", errLifecycleUnsupported
+	}
+	rt := &s.lifecycleEvents
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	state, err := s.installObserverLocked(ls)
+	if err != nil {
+		return "", err
+	}
+	rt.testInstalled = state == telemetryemit.ObserverStateEnabled
+	if rt.started {
+		s.ensureDrainerLocked(s.lifecycleContext(context.Background()), ls)
+	}
+	return state, nil
 }

@@ -146,6 +146,33 @@ func TestConduitProxyHeaderTimeout(t *testing.T) {
 	f.requireStreamsReleased(t)
 }
 
+// TestConduitProxyErrorKeepsOnePolicy: behind the web server's security
+// headers, the proxy's own timeout answer carries exactly one policy, the
+// sandbox one, and one nosniff header.
+func TestConduitProxyErrorKeepsOnePolicy(t *testing.T) {
+	closed := make(chan struct{}, 4)
+	f := newConduitProxyFixture(t, silentApp(closed))
+	f.withHeaderTimeout(t, headerTimeoutTestBound)
+	f.startAgent(t)
+	web := httptest.NewServer((&WebServer{}).securityHeadersMiddleware(f.srv.Handler()))
+	t.Cleanup(web.Close)
+	f.base = web.URL
+
+	resp := f.getWithin(t, "/slow", nil, headerTimeoutTestBound+2*time.Second)
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusGatewayTimeout, resp.StatusCode, string(body))
+	assert.Equal(t, []string{untrustedContentSandboxCSP}, resp.Header.Values("Content-Security-Policy"), "conduit error policies")
+	assert.Equal(t, []string{untrustedContentPermissionsPolicy}, resp.Header.Values("Permissions-Policy"), "conduit error Permissions-Policy headers")
+	assert.Equal(t, []string{"nosniff"}, resp.Header.Values("X-Content-Type-Options"), "conduit error nosniff headers")
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the agent-side connection was not closed")
+	}
+	f.requireStreamsReleased(t)
+}
+
 // TestConduitProxyHeadersUnderBound: response headers that arrive just
 // under the bound are proxied normally.
 func TestConduitProxyHeadersUnderBound(t *testing.T) {
@@ -337,7 +364,7 @@ func TestConduitProxyTimeoutClassification(t *testing.T) {
 			done := make(chan struct{})
 			go func() {
 				defer close(done)
-				s.serveConduitProxy(rec, req, agent, 3000, "/x", conn)
+				s.serveConduitProxy(rec, req, agent, 3000, "/x", conn, portProxyPolicy{surface: portProxySurfacePath, caller: identityStringFromContext(req.Context())})
 			}()
 			select {
 			case <-done:

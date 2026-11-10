@@ -63,7 +63,7 @@ export function principalName(kind: string, ref: string): Promise<string> {
 }
 
 /** A short form of an id, for when no name is known. */
-function shortId(ref: string): string {
+export function shortId(ref: string): string {
   return ref.length > 12 ? `${ref.slice(0, 8)}…` : ref;
 }
 

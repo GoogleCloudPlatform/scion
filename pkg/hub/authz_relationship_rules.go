@@ -61,9 +61,10 @@ const (
 	RelationshipRuleProgeny           RelationshipRuleID = "progeny"
 	RelationshipRuleHubMemberSAAssign RelationshipRuleID = "hub_member_sa_assign"
 
-	// Association relationships are typed so delivery rules can name them.
-	// They have no policy rows until their permissions are registered, so
-	// they currently admit nothing.
+	// Association relationships admit launch delivery of a project-, hub-
+	// or broker-scope secret or env var to the delivery credential's agent
+	// (authz_material_association.go). Their policy rows name only
+	// secret.deliver and env_var.deliver.
 	RelationshipRuleProjectAssociation RelationshipRuleID = "project_association"
 	RelationshipRuleHubAssociation     RelationshipRuleID = "hub_association"
 	RelationshipRuleBrokerAssociation  RelationshipRuleID = "broker_association"
@@ -180,7 +181,7 @@ func isHubScopedServiceAccount(resource Resource) bool {
 }
 
 // relationshipCandidates lists, in a stable order (ancestor, launcher,
-// owner, hub-member assign, creator skill, progeny), the relationships that
+// owner, hub-member assign, creator skill, progeny, association), the relationships that
 // structurally hold for this principal and resource.
 func (a *AuthzService) relationshipCandidates(principal PrincipalContext, resource Resource, action Action, permissionID string) []relationshipCandidate {
 	var out []relationshipCandidate
@@ -301,6 +302,14 @@ func (a *AuthzService) relationshipCandidates(principal PrincipalContext, resour
 		}
 	}
 
+	// Association: launch delivery of a project-, hub- or broker-scope
+	// item to the delivery credential's agent (authz_material_association.go).
+	// Built only for a hub_delivery principal requesting a deliver
+	// permission on a named delivery item.
+	if c, ok := a.materialAssociationCandidate(principal, resource, action, permissionID); ok {
+		out = append(out, c)
+	}
+
 	return out
 }
 
@@ -348,7 +357,7 @@ func (a *AuthzService) evaluateRelationshipCandidates(
 			}
 		}
 
-		src, ok := a.runRelationshipStages(ctx, principal, policyKind, resource, permissionID, restrictions, c, projectAccess, reject)
+		src, ok := a.runRelationshipStages(ctx, principal, policyKind, resource, action, permissionID, restrictions, c, projectAccess, reject)
 		if src != nil {
 			res.Source = &RelationshipSource{Kind: src.Kind}
 		}
@@ -381,6 +390,7 @@ func (a *AuthzService) runRelationshipStages(
 	principal PrincipalContext,
 	policyKind string,
 	resource Resource,
+	action Action,
 	permissionID string,
 	restrictions []Restriction,
 	c relationshipCandidate,
@@ -439,15 +449,9 @@ func (a *AuthzService) runRelationshipStages(
 		}
 	}
 
-	// Stage 4: sharing-source owner is active.
+	// Stage 4: sharing-source owner is active and holds the permission.
 	if src != nil {
-		if active, detail := a.relationshipSourceActive(ctx, src.OwnerID); !active {
-			reject(RelationshipRejectSourceInactive, detail)
-			return src, false
-		}
-		// An agent-owned source must hold the permission through
-		// its delegation chain.
-		if holds, detail := a.relationshipSourceDelegationHolds(ctx, src.OwnerID, resource, permissionID); !holds {
+		if holds, detail := a.relationshipSourceStage(ctx, principal, src, resource, action, permissionID); !holds {
 			reject(RelationshipRejectSourceInactive, detail)
 			return src, false
 		}
@@ -536,6 +540,31 @@ func (a *AuthzService) relationshipProjectAccessStage(
 		return RelationshipRejectProjectAccess, "principal lacks active access to the target project"
 	}
 	return "", ""
+}
+
+// relationshipSourceStage is runRelationshipStages' stage 4 for a resolved
+// sharing source. It returns the candidate detail of the first failing
+// check.
+//
+// A hubDeliveryIdentity principal (ptone/scion#2228 part 2b) always takes
+// hubDeliverySourceHolds (authz_delivery_credential.go), a typed nil
+// included, and never reaches the two checks below. Every other principal
+// gets them unchanged: the owner must be active (relationshipSourceActive),
+// and an agent-owned source must hold the permission through its
+// delegation chain (relationshipSourceDelegationHolds).
+func (a *AuthzService) relationshipSourceStage(ctx context.Context, principal PrincipalContext, src *SharingSource, resource Resource, action Action, permissionID string) (bool, string) {
+	if h, ok := principal.Identity.(*hubDeliveryIdentity); ok {
+		return a.hubDeliverySourceHolds(ctx, h, src, resource, action, permissionID)
+	}
+	if active, detail := a.relationshipSourceActive(ctx, src.OwnerID); !active {
+		return false, detail
+	}
+	// An agent-owned source must hold the permission through its
+	// delegation chain.
+	if holds, detail := a.relationshipSourceDelegationHolds(ctx, src.OwnerID, resource, permissionID); !holds {
+		return false, detail
+	}
+	return true, ""
 }
 
 // relationshipSourceActive reports whether a sharing-source owner is

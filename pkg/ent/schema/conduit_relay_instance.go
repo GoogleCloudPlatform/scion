@@ -63,6 +63,10 @@ func (RelayInstance) Fields() []ent.Field {
 			Comment("Refreshed every 15s by the owning relay; stale after 60s"),
 		field.Bool("draining").
 			Default(false),
+		field.Text("features").
+			Optional().
+			Nillable().
+			Comment("JSON array of relay feature strings, set at registration and fixed per generation; NULL = none (design v2.21.54)"),
 	}
 }
 

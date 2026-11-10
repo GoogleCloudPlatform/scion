@@ -46,6 +46,8 @@ var targetSymbols = map[string]bool{
 	"DispatchAgentCreate":           true,
 	"DispatchAgentStart":            true,
 	"DispatchAgentCreateWithGather": true,
+	// The start-options entry point (ptone/scion#4669) sends the same start.
+	"DispatchAgentStartWithOptions": true,
 }
 
 func TestExternalEffectCallSiteClassification(t *testing.T) {
@@ -133,12 +135,8 @@ func discoverEffectCallSites(t *testing.T) []effectCallSite {
 	var sites []effectCallSite
 
 	// Walk pkg/hub and all subdirectories to avoid the subpackage blind spot.
-	// pkgmove:scan-covers pkg/hub/apierr
-	// recursive walk already includes pkg/hub/apierr.
-	// pkgmove:scan-covers pkg/hub/internal/principal
-	// recursive walk already includes pkg/hub/internal/principal.
-	// pkgmove:scan-covers pkg/hub/maintenance
-	// recursive walk already includes pkg/hub/maintenance (skips only testdata and vendor).
+	// pkgmove:scan-covers pkg/hub/...
+	// recursive walk of pkg/hub: SkipDir only for testdata and vendor, so it covers every package directory below it.
 	err := filepath.Walk(hubDir, func(path string, info os.FileInfo, walkErr error) error {
 		if walkErr != nil {
 			return walkErr

@@ -17,6 +17,7 @@ package secret
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -207,9 +208,15 @@ func (b *GCPBackend) fetchValue(ctx context.Context, meta SecretMeta) FetchResul
 		return FetchResult{Err: store.ErrNotFound}
 	}
 
-	var value string
+	// ref is the Secret Manager resource path the value was read from, in
+	// the form Resolve reports as SecretRef: the stored ref without its
+	// "gcpsm:" prefix, or projects/<project>/secrets/<name> for the name a
+	// record with no gcpsm ref resolved by. Brokers mount it by that path
+	// (the GKE Secrets Store CSI resourceName).
+	var value, ref string
 	if smPath, ok := extractGCPSMPath(s.SecretRef); ok {
 		value, err = b.AccessSecretValueByRef(ctx, smPath)
+		ref = smPath
 	} else {
 		// No stored ref: mirror Get's DB-less recovery path (tries the
 		// hub-prefixed name, then falls back to the legacy pre-prefix name
@@ -217,16 +224,20 @@ func (b *GCPBackend) fetchValue(ctx context.Context, meta SecretMeta) FetchResul
 		// so a record that predates ref-tracking and hasn't yet been
 		// touched by `migrate-names` or hub-boot copy-forward still
 		// resolves (ptone/scion#2152 / GoogleCloudPlatform/scion#2085 interaction).
-		value, _, err = b.accessSecretByComputedName(ctx, s.Key, s.Scope, s.ScopeID)
+		var smName string
+		value, smName, err = b.accessSecretByComputedName(ctx, s.Key, s.Scope, s.ScopeID)
+		ref = b.smSecretPath(smName)
 	}
 	if err != nil {
 		if status.Code(err) == codes.NotFound {
 			return FetchResult{Err: store.ErrNotFound}
 		}
+		// A Secret Manager access error matches ErrValueAccess, the
+		// failure Resolve skips for this backend.
 		if permErr := b.wrapGCPError(err, "access secret"); permErr != nil {
-			return FetchResult{Err: permErr}
+			return FetchResult{Err: fmt.Errorf("%w: %w", ErrValueAccess, permErr)}
 		}
-		return FetchResult{Err: err}
+		return FetchResult{Err: fmt.Errorf("%w: %w", ErrValueAccess, err)}
 	}
 
 	// Re-read the DB record and repeat the comparison. A metadata update,
@@ -245,7 +256,13 @@ func (b *GCPBackend) fetchValue(ctx context.Context, meta SecretMeta) FetchResul
 	if recordGenerationChanged(after, meta) {
 		return FetchResult{Err: store.ErrNotFound}
 	}
-	return FetchResult{Value: value}
+	return FetchResult{Value: value, Ref: ref}
+}
+
+// smSecretPath is the full Secret Manager resource path of the secret named
+// smName in the backend's project.
+func (b *GCPBackend) smSecretPath(smName string) string {
+	return fmt.Sprintf("projects/%s/secrets/%s", b.projectID, smName)
 }
 
 // extractGCPSMPath extracts the full GCP SM resource path from a stored SecretRef.
@@ -302,11 +319,61 @@ func (b *GCPBackend) Set(ctx context.Context, input *SetSecretInput) (bool, *Sec
 	if err := b.ensureSecretAndAddVersion(ctx, smName, []byte(input.Value), buildLabels(input, target, b.resolveHubName())); err != nil {
 		return false, nil, err
 	}
+	return b.storeRefMetadata(ctx, input, fullName)
+}
 
-	// Store metadata in Hub DB (with a reference instead of the value)
+// ErrSecretVerify reports that a value written to Secret Manager could not
+// be confirmed by reading it back: the read-back failed or returned a
+// different value. Errors wrapping it name the secret key and scope only.
+var ErrSecretVerify = errors.New("secret manager read-back did not confirm the written value")
+
+// SetVerified is Set for a value whose only other copy is the Hub
+// database's local payload (the secret-backend migration). It adds the
+// Secret Manager version, reads the latest version back and compares it
+// with input.Value in constant time. Only on a match does it write the Hub
+// metadata row (the Secret Manager reference, with the local payload
+// cleared exactly as Set does). On a mismatch or a failed read-back it
+// returns an error wrapping ErrSecretVerify and leaves the Hub row as it
+// was, so the local payload stays readable under the local key and a later
+// run can retry. No error it returns carries a value.
+func (b *GCPBackend) SetVerified(ctx context.Context, input *SetSecretInput) (bool, *SecretMeta, error) {
+	smName := b.gcpSecretName(input.Name, input.Scope, input.ScopeID)
+	fullName := fmt.Sprintf("projects/%s/secrets/%s", b.projectID, smName)
+
+	target := input.Target
+	if target == "" {
+		target = input.Name
+	}
+
+	if err := b.ensureSecretAndAddVersion(ctx, smName, []byte(input.Value), buildLabels(input, target, b.resolveHubName())); err != nil {
+		return false, nil, err
+	}
+	got, err := b.accessLatestVersion(ctx, smName)
+	if err != nil {
+		return false, nil, fmt.Errorf("secret %q (scope %s): reading back from Secret Manager failed (%s): %w",
+			input.Name, input.Scope, status.Code(err), ErrSecretVerify)
+	}
+	if subtle.ConstantTimeCompare([]byte(got), []byte(input.Value)) != 1 {
+		return false, nil, fmt.Errorf("secret %q (scope %s): %w", input.Name, input.Scope, ErrSecretVerify)
+	}
+	return b.storeRefMetadata(ctx, input, fullName)
+}
+
+// storeRefMetadata writes the Hub metadata row for a value just stored in
+// Secret Manager under fullName: a reference instead of the value.
+func (b *GCPBackend) storeRefMetadata(ctx context.Context, input *SetSecretInput, fullName string) (bool, *SecretMeta, error) {
 	secret := toStoreSecret(input)
 	secret.EncryptedValue = "" // Don't store value in DB
 	secret.SecretRef = "gcpsm:" + fullName
+	// A reference-only update of a Hub-internal record keeps its existing
+	// local backup ciphertext (ptone/scion#1530 §6): the Hub maintains that
+	// backup itself, and erasing it here would leave the key with no local
+	// copy until the Hub rewrites it. User secrets stay reference-only.
+	if secret.SecretType == store.SecretTypeInternal {
+		if existing, err := b.store.GetSecret(ctx, input.Name, input.Scope, input.ScopeID); err == nil && existing.EncryptedValue != "" {
+			secret.EncryptedValue = existing.EncryptedValue
+		}
+	}
 
 	created, err := b.store.UpsertSecret(ctx, secret)
 	if err != nil {
@@ -525,6 +592,19 @@ func (b *GCPBackend) Resolve(ctx context.Context, userID, projectID, brokerID st
 			if s.SecretType == store.SecretTypeInternal {
 				continue
 			}
+			// Hub-scope rows are held to HubSecretDeliverable before their
+			// value is read, so an excluded row never shadows a broker-scope
+			// row of the same key.
+			if sc.scope == store.ScopeHub && !hubRowDeliverable(&s) {
+				continue
+			}
+			// The owner path: a user-scope row of userID is held to the
+			// caller's UserScopeCheck before its value is read. A rejected
+			// row is skipped, so a lower-scope row with the same key stays
+			// in effect.
+			if sc.scope == store.ScopeUser && opts != nil && opts.UserScopeCheck != nil && !opts.UserScopeCheck(*fromStoreSecretMeta(&s)) {
+				continue
+			}
 
 			var value string
 			var secretRef string
@@ -534,7 +614,7 @@ func (b *GCPBackend) Resolve(ctx context.Context, userID, projectID, brokerID st
 			} else {
 				var smName string
 				value, smName, err = b.accessSecretByComputedName(ctx, s.Key, sc.scope, sc.scopeID)
-				secretRef = fmt.Sprintf("projects/%s/secrets/%s", b.projectID, smName)
+				secretRef = b.smSecretPath(smName)
 			}
 			if err != nil {
 				continue
@@ -607,7 +687,7 @@ func (b *GCPBackend) Resolve(ctx context.Context, userID, projectID, brokerID st
 			} else {
 				var smName string
 				value, smName, err = b.accessSecretByComputedName(ctx, s.Key, s.Scope, s.ScopeID)
-				secretRef = fmt.Sprintf("projects/%s/secrets/%s", b.projectID, smName)
+				secretRef = b.smSecretPath(smName)
 			}
 			if err != nil {
 				continue

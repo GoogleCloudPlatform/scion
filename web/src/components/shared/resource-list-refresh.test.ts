@@ -41,12 +41,12 @@ async function createList(
   items: Array<Record<string, unknown>>
 ): Promise<{ el: ScionResourceList; fetchMock: ReturnType<typeof vi.fn> }> {
   const key = kind === 'template' ? 'templates' : 'harnessConfigs';
-  const fetchMock = vi.fn((url: string, init?: RequestInit) => {
+  const fetchMock = vi.fn((_url: string, init?: RequestInit) => {
     if (init?.method === 'POST') return Promise.resolve(jsonResponse({ count: 1 }));
     return Promise.resolve(jsonResponse({ [key]: items }));
   });
   vi.stubGlobal('fetch', fetchMock);
-  const el = document.createElement('scion-resource-list') as ScionResourceList;
+  const el = document.createElement('scion-resource-list');
   el.kind = kind;
   el.scope = 'global';
   document.body.appendChild(el);
@@ -57,7 +57,7 @@ async function createList(
 function refreshAllButton(el: HTMLElement): HTMLElement | undefined {
   return Array.from(el.shadowRoot?.querySelectorAll('sl-button') ?? []).find((b) =>
     (b.textContent ?? '').includes('Refresh All from Source')
-  ) as HTMLElement | undefined;
+  );
 }
 
 describe('resource list: Refresh All from Source', () => {
@@ -103,7 +103,7 @@ describe('resource list: Refresh All from Source', () => {
     await flush(el);
     const posts = fetchMock.mock.calls
       .filter(([, init]) => (init as RequestInit | undefined)?.method === 'POST')
-      .map(([url]) => url);
+      .map(([url]) => String(url));
     expect(posts).toEqual([expect.stringContaining('/api/v1/templates/a/reimport')]);
     const { showToast } = await import('../../utils/toast.js');
     expect(showToast).toHaveBeenCalledWith('Refreshed 1 template successfully', 'success');
@@ -133,7 +133,7 @@ describe('resource list: Refresh All from Source', () => {
         );
       })
     );
-    const el = document.createElement('scion-resource-list') as ScionResourceList;
+    const el = document.createElement('scion-resource-list');
     el.kind = 'template';
     el.scope = 'global';
     document.body.appendChild(el);

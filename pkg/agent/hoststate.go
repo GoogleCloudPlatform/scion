@@ -211,8 +211,9 @@ func resolveHostStateLayout(trustedRoot, agentName string) (hostStateLayout, err
 // ReadHostState reads HostStateFile for agentName below trustedRoot (see
 // HostStateFile for the layout and what the root must be). On unix every
 // component below the resolved root is opened without following a symlink,
-// and so is the file; on other platforms the same is checked with Lstat,
-// which is not atomic. Only a missing file, or a missing directory below
+// and so is the file; on Windows it returns an error wrapping
+// errors.ErrUnsupported (agent lifecycle runs on a Runtime Broker); on
+// other platforms the same is checked with Lstat, which is not atomic. Only a missing file, or a missing directory below
 // the root, gives the zero HostState and a nil error. A bad agent name, a
 // missing root, a symlink below the root, or a symlinked, non-regular,
 // unreadable, corrupt or too large (over 64 KiB) file returns an error.
@@ -289,7 +290,8 @@ func readHostStateBytes(d *hostStateDir) ([]byte, error) {
 // symlink below the root is refused and nothing is written. When mutate
 // returns an error, nothing is written and the error is returned. A
 // symlinked, unreadable, corrupt or too large file is refused and left as
-// it is.
+// it is. On Windows it writes nothing and returns an error wrapping
+// errors.ErrUnsupported.
 //
 // agentDir is opened before the lock is taken, so a refused path (a
 // symlink below the root, a missing agentDir) returns at once and never

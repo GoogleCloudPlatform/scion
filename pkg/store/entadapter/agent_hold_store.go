@@ -342,7 +342,7 @@ func (s *AgentHoldStore) ListActiveAgentHoldsByProject(ctx context.Context, proj
 	if opts.Cursor != "" {
 		after, err := uuid.Parse(opts.Cursor)
 		if err != nil {
-			return nil, fmt.Errorf("%w: invalid cursor", store.ErrInvalidInput)
+			return nil, store.ErrInvalidCursor
 		}
 		q = q.Where(agenthold.IDGT(after))
 	}

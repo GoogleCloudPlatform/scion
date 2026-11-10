@@ -112,7 +112,7 @@ func TestInstallOneSkill_CacheHit(t *testing.T) {
 
 	content := []byte("# My Skill\nversion: 1.0.0\n")
 	fileHash := fmt.Sprintf("sha256:%x", sha256.Sum256(content))
-	bundleHash := transfer.ComputeContentHash([]transfer.FileInfo{
+	bundleHash := transfer.ComputeContentHashV1([]transfer.FileInfo{
 		{Path: "SKILL.md", Hash: fileHash},
 	})
 
@@ -161,7 +161,7 @@ func TestInstallOneSkill_CacheMissPopulatesCache(t *testing.T) {
 
 	content := []byte("# Skill Content\n")
 	fileHash := fmt.Sprintf("sha256:%x", sha256.Sum256(content))
-	bundleHash := transfer.ComputeContentHash([]transfer.FileInfo{
+	bundleHash := transfer.ComputeContentHashV1([]transfer.FileInfo{
 		{Path: "SKILL.md", Hash: fileHash},
 	})
 
@@ -206,7 +206,7 @@ func TestInstallOneSkill_CacheMissPopulatesCache(t *testing.T) {
 func TestInstallOneSkill_NoCacheStillWorks(t *testing.T) {
 	content := []byte("# No Cache Skill\n")
 	fileHash := fmt.Sprintf("sha256:%x", sha256.Sum256(content))
-	bundleHash := transfer.ComputeContentHash([]transfer.FileInfo{
+	bundleHash := transfer.ComputeContentHashV1([]transfer.FileInfo{
 		{Path: "SKILL.md", Hash: fileHash},
 	})
 
@@ -252,7 +252,7 @@ func TestInstallOneSkill_SecondInstallUsesCacheFromFirstInstall(t *testing.T) {
 
 	content := []byte("# Repeated Skill\n")
 	fileHash := fmt.Sprintf("sha256:%x", sha256.Sum256(content))
-	bundleHash := transfer.ComputeContentHash([]transfer.FileInfo{
+	bundleHash := transfer.ComputeContentHashV1([]transfer.FileInfo{
 		{Path: "SKILL.md", Hash: fileHash},
 	})
 

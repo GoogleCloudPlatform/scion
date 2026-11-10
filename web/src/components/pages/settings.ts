@@ -26,6 +26,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import type { PageData } from '../../shared/types.js';
+import { apiFetch } from '../../client/api.js';
 import {
   type AdminStatus,
   canEditHubEnvVars,
@@ -181,7 +182,7 @@ export class ScionPageSettings extends LitElement {
    */
   private async fetchAdminStatus(): Promise<void> {
     try {
-      const res = await fetch('/api/v1/auth/admin-status', { credentials: 'include' });
+      const res = await apiFetch('/api/v1/auth/admin-status', { authErrors: 'caller' });
       if (res.ok) {
         const data = (await res.json()) as Partial<AdminStatus>;
         this.adminStatus = {

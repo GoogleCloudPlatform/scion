@@ -21,7 +21,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"syscall"
 )
 
 // chownFunc performs the ownership change on one filesystem entry. Tests
@@ -38,11 +37,7 @@ func osLchown(path string, uid, gid int) error {
 }
 
 func statDeviceOf(_ string, info fs.FileInfo) (uint64, bool) {
-	sys, ok := info.Sys().(*syscall.Stat_t)
-	if !ok {
-		return 0, false
-	}
-	return uint64(sys.Dev), true
+	return fileDevice(info)
 }
 
 // ChownTree recursively changes ownership of every entry under root
@@ -105,8 +100,8 @@ func ChownTreeOwnedByUID(ctx context.Context, root string, ownerUID, uid, gid in
 // use with chownTree's filter parameter.
 func ownedByUID(uid int) func(fs.FileInfo) bool {
 	return func(info fs.FileInfo) bool {
-		sys, ok := info.Sys().(*syscall.Stat_t)
-		return ok && int(sys.Uid) == uid
+		owner, ok := fileOwnerUID(info)
+		return ok && int(owner) == uid
 	}
 }
 

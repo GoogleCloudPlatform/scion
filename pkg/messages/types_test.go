@@ -33,6 +33,8 @@ func TestValidateType(t *testing.T) {
 		{TypeSystem, false},
 		{TypeChat, false},
 		{TypeReply, false},
+		{TypeChoicePrompt, false},
+		{TypeChoiceResponse, false},
 		{"unknown", true},
 		{"", true},
 	}

@@ -335,7 +335,12 @@ func skillAccessScopePredicate(scope *store.SkillAccessScope) predicate.Skill {
 			entskill.ScopeIDEQ(scope.CallerID),
 		))
 	}
-	if len(scope.ProjectIDs) > 0 {
+	switch {
+	case scope.AllProjects:
+		// Every project-scoped skill, in any project: the caller decides
+		// project admission per row (store.SkillAccessScope.AllProjects).
+		terms = append(terms, entskill.ScopeEQ(store.SkillScopeProject))
+	case len(scope.ProjectIDs) > 0:
 		terms = append(terms, entskill.And(
 			entskill.ScopeEQ(store.SkillScopeProject),
 			entskill.ScopeIDIn(scope.ProjectIDs...),
@@ -408,9 +413,20 @@ func (s *SkillStore) GetSkillVersionByNumber(ctx context.Context, skillID, versi
 	return entSkillVersionToStore(e), nil
 }
 
-func (s *SkillStore) ListSkillVersions(ctx context.Context, skillID string, opts store.ListOptions) (*store.ListResult[store.SkillVersion], error) {
+func (s *SkillStore) ListSkillVersions(ctx context.Context, skillID string, filter store.SkillVersionFilter, opts store.ListOptions) (*store.ListResult[store.SkillVersion], error) {
 	query := s.client.SkillVersion.Query().
 		Where(entskillversion.SkillIDEQ(skillID))
+	if len(filter.Statuses) > 0 {
+		statuses := make([]entskillversion.Status, 0, len(filter.Statuses))
+		for _, st := range filter.Statuses {
+			status := entskillversion.Status(st)
+			if err := entskillversion.StatusValidator(status); err != nil {
+				return nil, fmt.Errorf("%w: unknown skill version status %q", store.ErrInvalidInput, st)
+			}
+			statuses = append(statuses, status)
+		}
+		query = query.Where(entskillversion.StatusIn(statuses...))
+	}
 
 	totalCount, err := query.Clone().Count(ctx)
 	if err != nil {
@@ -486,7 +502,18 @@ func (s *SkillStore) DeleteSkillVersion(ctx context.Context, id string) error {
 	return nil
 }
 
-// ResolveSkillVersion resolves a version constraint to a specific published version.
+// ResolveSkillVersion resolves a version constraint to a specific published or
+// deprecated version.
+//
+// Every constraint form considers only published and deprecated versions;
+// draft and archived versions never resolve.
+//
+// A content-addressed constraint ("sha256:...") matches a version's stored
+// (v1) content hash. When several versions share that hash (the same files
+// republished under a new version number), the oldest wins: created
+// ascending, then ID ascending. The status set and the order are the same as
+// the hub's v2 content-hash lookup, so v1 and v2 lookups pick the same
+// version (ptone/scion#6248).
 func (s *SkillStore) ResolveSkillVersion(ctx context.Context, skillID, constraint string) (*store.SkillVersion, error) {
 	// Content-addressed lookup
 	if len(constraint) > 7 && constraint[:7] == "sha256:" {
@@ -494,7 +521,9 @@ func (s *SkillStore) ResolveSkillVersion(ctx context.Context, skillID, constrain
 			Where(
 				entskillversion.SkillIDEQ(skillID),
 				entskillversion.ContentHashEQ(constraint),
+				entskillversion.StatusIn(entskillversion.StatusPublished, entskillversion.StatusDeprecated),
 			).
+			Order(entskillversion.ByCreated(entsql.OrderAsc()), entskillversion.ByID(entsql.OrderAsc())).
 			First(ctx)
 		if err != nil {
 			return nil, mapError(err)
@@ -554,7 +583,8 @@ func (s *SkillStore) ResolveSkillVersion(ctx context.Context, skillID, constrain
 		return nil, store.ErrNotFound
 	}
 
-	// Exact match — return regardless of status (pinned consumers get what they asked for)
+	// Exact match among published and deprecated versions; a deprecated version
+	// is returned too (pinned consumers get what they asked for).
 	exactVer, err := semver.NewVersion(constraint)
 	if err == nil {
 		for _, v := range versions {

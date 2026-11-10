@@ -22,8 +22,7 @@
 
 import { apiFetch, extractApiError } from './api.js';
 
-/** Feature flag that gates every artifact surface in the web UI. */
-export const ARTIFACTS_FLAG = 'hub.artifacts';
+export { ARTIFACTS_FLAG } from './artifacts-flag.js';
 
 export interface ArtifactFile {
   path: string;
@@ -67,6 +66,11 @@ export interface Artifact {
   expiresAt?: string;
   createdAt: string;
   updatedAt: string;
+  /**
+   * The hub found the artifact's owner gone (a deleted agent or user;
+   * ptone/scion#4529). The artifact is otherwise unchanged.
+   */
+  ownerDeleted?: boolean;
 }
 
 export interface ArtifactResponse {
@@ -90,10 +94,40 @@ export interface ArtifactResponse {
    */
   canGrantReview?: boolean;
   /**
+   * On a GET: the caller may share the artifact: canManage, or a steward of
+   * an artifact owned by an agent (design D25, ptone/scion#5144), who may
+   * change its expiry, revoke its links, remove grants and delete it, but
+   * not give admin access or move it.
+   */
+  canShare?: boolean;
+  /**
+   * On a GET, for a steward without canManage: the steward clause,
+   * "project_owner" or "delegator".
+   */
+  shareAuthority?: string;
+  /**
+   * On a GET: the caller may delete the artifact: the decision DELETE makes
+   * for the same request (the owner, an admin grantee, a steward, or an
+   * owner or admin of its home project).
+   */
+  canRetire?: boolean;
+  /**
    * On a GET: the artifact's home project was deleted. Advisory: absent when
    * the hub cannot tell.
    */
   scopeDeleted?: boolean;
+  /**
+   * On a GET, only while the hub's zip download is on (ptone/scion#7106):
+   * whether the version's files can be downloaded as one zip.
+   */
+  archive?: ArtifactArchive;
+}
+
+/** ArtifactResponse.archive: the hub's answer for the version's zip download. */
+export interface ArtifactArchive {
+  available: boolean;
+  /** Why the zip is not available: "too_large" or "unsupported_name". */
+  reason?: string;
 }
 
 /** GET /api/v1/artifacts/{id}/versions: ready versions, newest first, without files. */
@@ -157,6 +191,8 @@ export interface CreateVersionRequest {
   entry: string;
   note?: string;
   files: ManifestFile[];
+  /** Publish even when reviews of the current version are open. */
+  force?: boolean;
 }
 
 /** Answer to a request that created a pending version. */
@@ -164,6 +200,8 @@ export interface PendingVersionResponse {
   artifact: Artifact;
   version: ArtifactVersion;
   upload: { required: string[] };
+  /** Notes about the create that did not fail it (a forced publish). */
+  warnings?: string[];
 }
 
 /** Remote image rows the hub adds to a version; not part of what was published. */
@@ -246,6 +284,11 @@ export function artifactFileUrl(id: string, seq: number, path: string, stream = 
   return `/api/v1/artifacts/${encodeURIComponent(id)}${version}/files/${encodedPath}${query}`;
 }
 
+/** The zip of every file of version seq (ptone/scion#7106). */
+export function artifactArchiveUrl(id: string, seq: number): string {
+  return `/api/v1/artifacts/${encodeURIComponent(id)}/versions/${seq}/archive`;
+}
+
 /**
  * Media types the hub serves with Content-Disposition: inline (mirrors
  * inlineSafe in pkg/artifacts/media.go). The browser displays these rather
@@ -324,6 +367,176 @@ export async function listProjectArtifacts(
   );
 }
 
+// ---------------------------------------------------------------------------
+// Where the caller may publish (the hub Artifacts page's New artifact,
+// ptone/scion#5477)
+// ---------------------------------------------------------------------------
+
+/** The hub's global project's slug (pkg/hub globalProjectSlug). */
+export const GLOBAL_PROJECT_SLUG = 'global';
+
+/** A project offered as the home of a new artifact. */
+export interface ProjectChoice {
+  id: string;
+  name: string;
+  slug: string;
+}
+
+/** Projects requested per page when listing the projects the caller can see. */
+const READABLE_PROJECTS_PAGE = 200;
+/** Pages followed at most: the list stops at this many projects. */
+const READABLE_PROJECTS_MAX_PAGES = 10;
+/** The most projects listReadableProjects returns. */
+export const READABLE_PROJECTS_CAP = READABLE_PROJECTS_PAGE * READABLE_PROJECTS_MAX_PAGES;
+/** canCreate checks in flight at once. */
+export const PUBLISH_CHECK_CONCURRENCY = 6;
+
+/** The projects the caller can see, and whether the list stopped at the cap. */
+export interface ReadableProjects {
+  projects: ProjectChoice[];
+  truncated: boolean;
+}
+
+interface ProjectsPage {
+  projects?: Array<{ id: string; name?: string; slug?: string }>;
+  nextCursor?: string;
+}
+
+function toChoices(page: ProjectsPage): ProjectChoice[] {
+  return (page.projects ?? [])
+    .filter((p) => !!p.id)
+    .map((p) => ({ id: p.id, name: p.name || p.slug || p.id, slug: p.slug ?? '' }));
+}
+
+/**
+ * The hub's global project, when it exists and the caller can see it: one
+ * exact lookup by slug (GET /api/v1/projects?slug=global), so it never
+ * depends on paging. The project list is newest first, and global, made
+ * when the hub starts, is among the oldest.
+ */
+export async function findGlobalProject(signal?: AbortSignal): Promise<ProjectChoice | null> {
+  const params = new URLSearchParams({ slug: GLOBAL_PROJECT_SLUG, limit: '1' });
+  const page = await okJSON<ProjectsPage>(
+    await apiFetch(`/api/v1/projects?${params.toString()}`, { signal: signal ?? null })
+  );
+  return toChoices(page).find((p) => p.slug === GLOBAL_PROJECT_SLUG) ?? null;
+}
+
+/**
+ * The projects the caller can see (GET /api/v1/projects, paged), by name,
+ * leaving out the project with id skip. Not mine=true: on the hub that
+ * means projects the caller owns, and a member may publish too
+ * (agent-create.ts has the same note). canCreate decides; over-listing only
+ * costs checks. The list stops at READABLE_PROJECTS_CAP projects and says
+ * so (truncated).
+ */
+export async function listReadableProjects(
+  opts: { skip?: string | undefined; signal?: AbortSignal | undefined } = {}
+): Promise<ReadableProjects> {
+  const out: ProjectChoice[] = [];
+  let cursor = '';
+  for (let page = 0; page < READABLE_PROJECTS_MAX_PAGES; page++) {
+    const params = new URLSearchParams({ limit: String(READABLE_PROJECTS_PAGE) });
+    if (cursor) params.set('cursor', cursor);
+    const body = await okJSON<ProjectsPage>(
+      await apiFetch(`/api/v1/projects?${params.toString()}`, { signal: opts.signal ?? null })
+    );
+    out.push(...toChoices(body).filter((p) => p.id !== opts.skip));
+    cursor = body.nextCursor ?? '';
+    if (!cursor) break;
+  }
+  return { projects: sortProjectChoices(out), truncated: cursor !== '' };
+}
+
+/** Orders choices global first, then by name. */
+export function sortProjectChoices(projects: ProjectChoice[]): ProjectChoice[] {
+  return [...projects].sort((a, b) => {
+    const ga = a.slug === GLOBAL_PROJECT_SLUG;
+    const gb = b.slug === GLOBAL_PROJECT_SLUG;
+    if (ga !== gb) return ga ? -1 : 1;
+    return a.name.localeCompare(b.name);
+  });
+}
+
+/**
+ * Whether the caller may publish artifacts in project: the list's
+ * canCreate, which is the decision publish makes (pkg/artifacts canCreateIn).
+ * A list the caller may not read (403, 404) answers false; other failures
+ * throw. (A hub with no artifact routes at all also answers 404, but the
+ * callers only run with hub.artifacts on.)
+ */
+export async function canPublishIn(projectId: string, signal?: AbortSignal): Promise<boolean> {
+  const params = new URLSearchParams({ mine: '1', scope: projectId, limit: '1' });
+  const res = await apiFetch(`/api/v1/artifacts?${params.toString()}`, {
+    suppressAccessDeniedToast: true,
+    signal: signal ?? null,
+  });
+  if (res.status === 403 || res.status === 404) return false;
+  const body = await okJSON<ArtifactListResponse>(res);
+  return body.canCreate === true;
+}
+
+/**
+ * Checks projects in order, PUBLISH_CHECK_CONCURRENCY at a time, and
+ * returns the publishable ones in the order given. onUpdate gets that list
+ * so far (in order, only checked projects) each time a check passes, so a
+ * caller can render it progressively. With firstOnly no new check starts
+ * after the first pass, and the result holds that one project. Any failed
+ * check fails the whole call, so a hub error never looks like "nowhere to
+ * publish"; after a failure, or once signal aborts, no check starts and no
+ * update is reported. signal also cancels the checks in flight.
+ */
+export async function filterPublishable(
+  projects: ProjectChoice[],
+  opts: {
+    firstOnly?: boolean;
+    check?: (id: string, signal?: AbortSignal) => Promise<boolean>;
+    onUpdate?: (publishable: ProjectChoice[]) => void;
+    signal?: AbortSignal;
+  } = {}
+): Promise<ProjectChoice[]> {
+  const check = opts.check ?? canPublishIn;
+  const signal = opts.signal;
+  const allowed: boolean[] = projects.map(() => false);
+  const passed = (): ProjectChoice[] => projects.filter((_, i) => allowed[i]);
+  let next = 0;
+  let stop = false;
+  const halted = (): boolean => stop || signal?.aborted === true;
+  const worker = async (): Promise<void> => {
+    while (!halted() && next < projects.length) {
+      const i = next++;
+      let ok: boolean;
+      try {
+        ok = await check(projects[i].id, signal);
+      } catch (err) {
+        stop = true;
+        throw err;
+      }
+      if (!ok || halted()) continue;
+      allowed[i] = true;
+      if (opts.firstOnly) stop = true;
+      opts.onUpdate?.(passed());
+    }
+  };
+  const workers = Math.min(PUBLISH_CHECK_CONCURRENCY, projects.length);
+  await Promise.all(Array.from({ length: workers }, () => worker()));
+  if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+  const out = passed();
+  return opts.firstOnly ? out.slice(0, 1) : out;
+}
+
+/**
+ * The project preselected for a new artifact: the global project when it
+ * is publishable (canCreate: owner, member with publish rights, or a role
+ * that grants artifact.create), or the only
+ * choice when there is exactly one; otherwise none.
+ */
+export function defaultProjectChoice(publishable: ProjectChoice[]): string {
+  const global = publishable.find((p) => p.slug === GLOBAL_PROJECT_SLUG);
+  if (global) return global.id;
+  return publishable.length === 1 ? publishable[0].id : '';
+}
+
 /** One page of an artifact's ready versions, newest first. */
 export async function listVersions(id: string, before = 0): Promise<VersionListResponse> {
   const query = before > 0 ? `?before=${before}` : '';
@@ -369,6 +582,11 @@ export interface PublishRequest {
    * created.
    */
   resume?: PendingPublish | null | undefined;
+  /**
+   * Publish even when someone is reviewing the current version. Without
+   * it the hub may refuse the publish (ReviewOpenError).
+   */
+  force?: boolean | undefined;
 }
 
 /** A pending version that a failed publish left behind. */
@@ -400,6 +618,64 @@ export class PublishError extends Error {
   }
 }
 
+/** One open review named in a review_open refusal. */
+export interface ReviewOpenEntry {
+  /** Display name, or "a reviewer"; never an id. */
+  reviewer: string;
+  /** Last activity, to the minute. */
+  lastActivityAt: string;
+  unsavedChanges: boolean;
+}
+
+/**
+ * The hub refused a publish because reviews of the current version are
+ * open (409 review_open). Nothing was created: publishing again with
+ * force skips this check.
+ */
+export class ReviewOpenError extends PublishError {
+  constructor(
+    message: string,
+    readonly reviews: ReviewOpenEntry[],
+    readonly truncated: boolean,
+    readonly base: number
+  ) {
+    super(message, null, 'review_open');
+    this.name = 'ReviewOpenError';
+  }
+}
+
+/** Reads a 409 review_open answer, or returns null for any other answer. */
+async function reviewOpenError(res: Response): Promise<ReviewOpenError | null> {
+  if (res.status !== 409) return null;
+  let body: {
+    error?: {
+      code?: string;
+      message?: string;
+      details?: { reviews?: unknown; truncated?: unknown; base?: unknown };
+    };
+  } = {};
+  try {
+    body = (await res.clone().json()) as typeof body;
+  } catch {
+    return null;
+  }
+  if (body.error?.code !== 'review_open') return null;
+  const details = body.error.details ?? {};
+  const reviews = (Array.isArray(details.reviews) ? details.reviews : [])
+    .filter((r): r is Record<string, unknown> => typeof r === 'object' && r !== null)
+    .map((r) => ({
+      reviewer: typeof r.reviewer === 'string' && r.reviewer ? r.reviewer : 'a reviewer',
+      lastActivityAt: typeof r.lastActivityAt === 'string' ? r.lastActivityAt : '',
+      unsavedChanges: r.unsavedChanges === true,
+    }));
+  return new ReviewOpenError(
+    body.error.message || 'Someone is reviewing this version.',
+    reviews,
+    details.truncated === true,
+    typeof details.base === 'number' ? details.base : 0
+  );
+}
+
 /** How long the hub keeps a version that was never finalized. */
 export const PENDING_VERSION_LIFETIME = '24 hours';
 
@@ -425,22 +701,28 @@ export async function publishFiles(req: PublishRequest): Promise<ArtifactRespons
   if (req.note) body.note = req.note;
   if (req.kind === 'review') body.kind = 'review';
   if (!req.artifactId && req.scope) body.scope = req.scope;
+  // force decides only whether the create may go ahead; it is not part of
+  // what is published, so a resumed version matches either way.
   const fingerprint = JSON.stringify([req.artifactId ?? '', body]);
+  if (req.force) body.force = true;
 
   let pending: PendingPublish;
+  let createWarnings: string[] = [];
   if (req.resume && req.resume.fingerprint === fingerprint) {
     pending = req.resume;
   } else {
     const createPath = req.artifactId
       ? `${artifactPath(req.artifactId)}/versions`
       : '/api/v1/artifacts';
-    const created = await okJSON<PendingVersionResponse>(
-      await apiFetch(createPath, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      })
-    );
+    const createRes = await apiFetch(createPath, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const refused = await reviewOpenError(createRes);
+    if (refused) throw refused;
+    const created = await okJSON<PendingVersionResponse>(createRes);
+    createWarnings = created.warnings ?? [];
     const asked = created.upload.required ?? [];
     pending = {
       artifactId: created.artifact.id,
@@ -535,7 +817,80 @@ export async function publishFiles(req: PublishRequest): Promise<ArtifactRespons
     throw new PublishError(err instanceof Error ? err.message : 'finalize failed', left());
   }
   if (!res.ok) await fail(res, '');
-  return (await res.json()) as ArtifactResponse;
+  const finalized = (await res.json()) as ArtifactResponse;
+  // The create's warnings (a publish forced over open reviews) come first.
+  if (createWarnings.length > 0) {
+    finalized.warnings = [...createWarnings, ...(finalized.warnings ?? [])];
+  }
+  return finalized;
+}
+
+/** The answer to a review heartbeat. */
+export interface ReviewBeatResponse {
+  /** The artifact's current version. */
+  currentSeq: number;
+}
+
+/** What a review heartbeat reports. */
+export interface ReviewBeat {
+  /** The version under review. */
+  base: number;
+  /** The review text changed since the last beat. */
+  edited: boolean;
+  /** The review text differs from the text the review started from. */
+  dirty: boolean;
+}
+
+/**
+ * A new review session id: 128 random bits, base64url, 22 characters of
+ * [A-Za-z0-9_-] (the hub accepts 22 to 64 such characters).
+ */
+export function newReviewSessionId(): string {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  let bin = '';
+  for (const b of bytes) bin += String.fromCharCode(b);
+  return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+function reviewSessionPath(artifactId: string, sessionId: string): string {
+  return `${artifactPath(artifactId)}/review-sessions/${encodeURIComponent(sessionId)}`;
+}
+
+/** Sends one heartbeat of the caller's open review of an artifact. */
+export async function putReviewSession(
+  artifactId: string,
+  sessionId: string,
+  beat: ReviewBeat
+): Promise<ReviewBeatResponse> {
+  return okJSON<ReviewBeatResponse>(
+    await apiFetch(reviewSessionPath(artifactId, sessionId), {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(beat),
+    })
+  );
+}
+
+/**
+ * Tells the hub the caller's review ended: the review was closed (Save,
+ * Cancel) or its page left. With keepalive the request outlives the page,
+ * for pagehide. Failures are ignored: the hub stops counting a session at
+ * most five minutes after its last beat anyway.
+ */
+export async function endReviewSession(
+  artifactId: string,
+  sessionId: string,
+  opts: { keepalive?: boolean } = {}
+): Promise<void> {
+  try {
+    await apiFetch(reviewSessionPath(artifactId, sessionId), {
+      method: 'DELETE',
+      keepalive: opts.keepalive === true,
+    });
+  } catch {
+    // Best effort.
+  }
 }
 
 /** A file of a review the hub refused (code unmarked_changes). */
@@ -643,9 +998,37 @@ export function artifactListUrl(filters: ArtifactListFilters, cursor?: string): 
  * Path of an artifact's page in the web UI; seq above 0 names one of its
  * versions, 0 the current one.
  */
-export function artifactPagePath(a: Pick<Artifact, 'id' | 'scopeRef'>, seq = 0): string {
+export function artifactPagePath(
+  a: Pick<Artifact, 'id' | 'scopeRef'>,
+  seq = 0,
+  origin: ArtifactOrigin = 'project'
+): string {
   const base = `/projects/${encodeURIComponent(a.scopeRef)}/artifacts/${encodeURIComponent(a.id)}`;
-  return seq > 0 ? `${base}/v/${seq}` : base;
+  const path = seq > 0 ? `${base}/v/${seq}` : base;
+  return origin === 'artifacts' ? `${path}?${ARTIFACT_ORIGIN_PARAM}=artifacts` : path;
+}
+
+/**
+ * Where an artifact's page was opened from (ptone/scion#6847): the
+ * hub-wide Artifacts list, or (by default) the artifact's project. Its
+ * page goes back there, after a delete too.
+ */
+export type ArtifactOrigin = 'artifacts' | 'project';
+
+/**
+ * The query parameter that records an Artifacts-list origin on the page's
+ * URL, so a reload or a link opened in a new tab keeps it.
+ */
+export const ARTIFACT_ORIGIN_PARAM = 'from';
+
+/** The origin an artifact page path records; a path without one is the project's. */
+export function artifactOriginOf(path: string): ArtifactOrigin {
+  const q = path.indexOf('?');
+  if (q < 0) return 'project';
+  const query = path.slice(q + 1).split('#')[0];
+  return new URLSearchParams(query).get(ARTIFACT_ORIGIN_PARAM) === 'artifacts'
+    ? 'artifacts'
+    : 'project';
 }
 
 // ---------------------------------------------------------------------------
@@ -667,6 +1050,12 @@ export interface CreateLinkResponse {
   link: ShareLink;
   /** Hub-relative path of the link; shown once, never retrievable later. */
   url: string;
+  /**
+   * The absolute link on the hub's content host
+   * (server.hub.content_url), present only when the hub has one; built by the
+   * hub from its configuration, never from the request.
+   */
+  shareUrl?: string;
   /** The link ends earlier than asked because the artifact expires then. */
   clampedToArtifactExpiry?: boolean;
 }
@@ -803,6 +1192,29 @@ export async function revokeLink(id: string, linkId: string): Promise<void> {
   if (!res.ok) throw new Error(await extractApiError(res, `HTTP ${res.status}`));
 }
 
+/**
+ * Deletes an artifact (DELETE /api/v1/artifacts/{id}, ptone/scion#4529). The
+ * hub answers 204; a 403 (the caller may read but not delete it) or a 404
+ * (gone, or moved meanwhile) throws with the hub's message.
+ */
+export async function deleteArtifact(id: string): Promise<void> {
+  const res = await apiFetch(artifactPath(id), { method: 'DELETE' });
+  if (!res.ok) {
+    throw new ArtifactDeleteError(await extractApiError(res, `HTTP ${res.status}`), res.status);
+  }
+}
+
+/** A refused or failed delete, with the hub's HTTP status. */
+export class ArtifactDeleteError extends Error {
+  constructor(
+    message: string,
+    readonly status: number
+  ) {
+    super(message);
+    this.name = 'ArtifactDeleteError';
+  }
+}
+
 /** Lists an artifact's grants, the home project's first. */
 export async function listGrants(id: string): Promise<GrantListResponse> {
   const body = await okJSON<GrantListResponse>(await apiFetch(`${artifactPath(id)}/grants`));
@@ -854,6 +1266,18 @@ export async function patchArtifact(
 /** The absolute URL of a share link from the hub-relative path it was created with. */
 export function shareLinkUrl(path: string, origin: string): string {
   return new URL(path, origin).toString();
+}
+
+/**
+ * The link to show and copy for a created share link: the hub's shareUrl on
+ * its content host when it sent one, otherwise the hub-relative url
+ * made absolute on origin.
+ */
+export function createdLinkUrl(
+  created: Pick<CreateLinkResponse, 'url' | 'shareUrl'>,
+  origin: string
+): string {
+  return created.shareUrl || shareLinkUrl(created.url, origin);
 }
 
 /**

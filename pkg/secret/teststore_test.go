@@ -52,7 +52,7 @@ func newTestStore(url string) (store.Store, error) {
 		dsn = "file:" + url + "?cache=shared"
 	}
 
-	client, err := entc.OpenSQLite(dsn, entc.PoolConfig{})
+	client, err := entc.OpenSQLite(dsn, entc.PoolConfig{MaxOpenConns: 1})
 	if err != nil {
 		return nil, err
 	}

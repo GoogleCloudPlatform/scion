@@ -16,7 +16,6 @@ package config
 
 import (
 	"fmt"
-	"sort"
 )
 
 // Home storage backends and leaf modes.
@@ -39,8 +38,8 @@ const (
 	DefaultHomeStorageSkeletonMaxBytes       = 256 << 20
 )
 
-// Source keys ResolveHomeStorage returns when no profile or runtime entry
-// overrides a value.
+// Source keys ResolveHomeStorage returns for a value set in
+// server.home_storage.
 const (
 	HomeStorageBackendGlobalSource = "server.home_storage.backend"
 	HomeStorageLeafGlobalSource    = "server.home_storage.leaf"
@@ -49,9 +48,8 @@ const (
 // V1HomeStorageConfig is server.home_storage. It selects where the home of
 // a Kubernetes agent lives. With the nfs backend the home is a per-agent
 // directory on the NFS export of the same dispatch's shared_dir_storage,
-// kept across stops and restarts. The backend and leaf mode can be
-// overridden per profile and runtime entry (home_storage_backend,
-// home_storage_leaf); the other fields are global only. Like
+// kept across stops and restarts. Every field is global only (the former
+// per-profile and per-runtime overrides are rejected by validation). Like
 // server.shared_dir_storage, it is read from global settings only.
 type V1HomeStorageConfig struct {
 	// Backend is "", "local" or "nfs". "" and "local" keep the home in the
@@ -78,23 +76,29 @@ type V1HomeStorageConfig struct {
 // and negative numbers are errors; values are matched exactly, so a typo
 // never falls back to the local home.
 func (h *V1HomeStorageConfig) Validate() error {
+	return h.validate("server.home_storage", "backend")
+}
+
+// validate implements Validate, naming key (the block's settings key) and
+// backendKey (the backend field under it) in its errors.
+func (h *V1HomeStorageConfig) validate(key, backendKey string) error {
 	if h == nil {
 		return nil
 	}
 	if err := checkHomeStorageBackend(h.Backend); err != nil {
-		return fmt.Errorf("server.home_storage.backend %w", err)
+		return fmt.Errorf("%s.%s %w", key, backendKey, err)
 	}
 	if err := checkHomeStorageLeaf(h.Leaf); err != nil {
-		return fmt.Errorf("server.home_storage.leaf %w", err)
+		return fmt.Errorf("%s.leaf %w", key, err)
 	}
 	if h.StopGraceSeconds < 0 {
-		return fmt.Errorf("server.home_storage.stop_grace_seconds must not be negative (got %d)", h.StopGraceSeconds)
+		return fmt.Errorf("%s.stop_grace_seconds must not be negative (got %d)", key, h.StopGraceSeconds)
 	}
 	if h.TerminationWaitSeconds < 0 {
-		return fmt.Errorf("server.home_storage.termination_wait_seconds must not be negative (got %d)", h.TerminationWaitSeconds)
+		return fmt.Errorf("%s.termination_wait_seconds must not be negative (got %d)", key, h.TerminationWaitSeconds)
 	}
 	if h.SkeletonMaxBytes < 0 {
-		return fmt.Errorf("server.home_storage.skeleton_max_bytes must not be negative (got %d)", h.SkeletonMaxBytes)
+		return fmt.Errorf("%s.skeleton_max_bytes must not be negative (got %d)", key, h.SkeletonMaxBytes)
 	}
 	return nil
 }
@@ -139,10 +143,10 @@ func checkHomeStorageLeaf(v string) error {
 	return fmt.Errorf("must be \"pod\" or \"broker\" (got %q)", v)
 }
 
-// ResolvedHomeStorage is the home storage setting that applies to one
-// profile. Backend is "local" or "nfs" and Leaf is "pod" or "broker"; the
-// sources name the settings key each value came from, or are empty for a
-// built-in default.
+// ResolvedHomeStorage is the home storage setting a broker applies.
+// Backend is "local" or "nfs" and Leaf is "pod" or "broker"; the sources
+// name the settings key each value came from, or are empty for a built-in
+// default.
 type ResolvedHomeStorage struct {
 	Backend       string
 	BackendSource string
@@ -150,104 +154,32 @@ type ResolvedHomeStorage struct {
 	LeafSource    string
 }
 
-// ResolveHomeStorage returns the home storage backend and leaf mode for
-// agents using profileName. Each value comes from the profile, else its
-// runtime entry, else server.home_storage, else the default (local, pod),
-// through ResolveProfileValue. It reads settings only: whether the value
-// applies to a dispatch (the runtime type, the shared-dir share, an agent's
-// record) is decided by the caller. Call it only on global settings. On a
-// flat instance view (ForFlatInstance) the instance's runtime_target
-// home_storage_backend and home_storage_leaf take the place of the profile
-// and runtime entry, and no profile is consulted.
-func (vs *VersionedSettings) ResolveHomeStorage(profileName string) ResolvedHomeStorage {
+// ResolveHomeStorage returns the home storage backend and leaf mode from
+// the global block (EffectiveHomeStorage), else the defaults (local, pod).
+// There is no per-profile, per-runtime or per-instance rung: those
+// overrides are removed (design OQ2-A). It reads settings only: whether
+// the value applies to a dispatch (the runtime type, the share, an agent's
+// record) is decided by the caller. Call it only on global settings.
+func (vs *VersionedSettings) ResolveHomeStorage() ResolvedHomeStorage {
 	out := ResolvedHomeStorage{Backend: HomeStorageBackendLocal, Leaf: HomeStorageLeafPod}
 	var global *V1HomeStorageConfig
 	if vs != nil && vs.Server != nil {
-		global = vs.Server.HomeStorage
+		global = vs.Server.EffectiveHomeStorage()
 	}
-	var backend, src, leaf, lsrc string
-	if vs != nil && vs.flat != nil {
-		// Flat instance: the instance's runtime_target takes the profile
-		// and runtime-entry rung; unset falls through to server.home_storage.
-		t := vs.flat.Target
-		if t.HomeStorageBackend != "" {
-			backend, src = t.HomeStorageBackend, vs.flat.path("runtime_target.home_storage_backend")
-		}
-		if t.HomeStorageLeaf != "" {
-			leaf, lsrc = t.HomeStorageLeaf, vs.flat.path("runtime_target.home_storage_leaf")
-		}
-	} else {
-		backend, src = ResolveProfileValue(vs, profileName, "home_storage_backend",
-			func(p V1ProfileConfig) string { return p.HomeStorageBackend },
-			func(r V1RuntimeConfig) string { return r.HomeStorageBackend })
-		leaf, lsrc = ResolveProfileValue(vs, profileName, "home_storage_leaf",
-			func(p V1ProfileConfig) string { return p.HomeStorageLeaf },
-			func(r V1RuntimeConfig) string { return r.HomeStorageLeaf })
+	if global == nil {
+		return out
 	}
-	if backend == "" && global != nil && global.Backend != "" {
-		backend, src = global.Backend, HomeStorageBackendGlobalSource
+	if global.Backend != "" {
+		out.Backend, out.BackendSource = global.Backend, HomeStorageBackendGlobalSource
 	}
-	if backend != "" {
-		out.Backend, out.BackendSource = backend, src
-	}
-	if leaf == "" && global != nil && global.Leaf != "" {
-		leaf, lsrc = global.Leaf, HomeStorageLeafGlobalSource
-	}
-	if leaf != "" {
-		out.Leaf, out.LeafSource = leaf, lsrc
+	if global.Leaf != "" {
+		out.Leaf, out.LeafSource = global.Leaf, HomeStorageLeafGlobalSource
 	}
 	return out
 }
 
-// ValidateHomeStorageOverrides checks home_storage_backend and
-// home_storage_leaf on every runtime and profile entry: the backend must be
-// empty, "local" or "nfs" and the leaf empty, "pod" or "broker". It checks
-// values only. Results are sorted by path.
-func ValidateHomeStorageOverrides(runtimes map[string]V1RuntimeConfig, profiles map[string]V1ProfileConfig) []ValidationError {
-	var errs []ValidationError
-	add := func(path string, err error) {
-		if err != nil {
-			errs = append(errs, ValidationError{Path: path, Message: err.Error()})
-		}
-	}
-	for name, rt := range runtimes {
-		add("runtimes."+name+".home_storage_backend", checkHomeStorageBackend(rt.HomeStorageBackend))
-		add("runtimes."+name+".home_storage_leaf", checkHomeStorageLeaf(rt.HomeStorageLeaf))
-	}
-	for name, p := range profiles {
-		add("profiles."+name+".home_storage_backend", checkHomeStorageBackend(p.HomeStorageBackend))
-		add("profiles."+name+".home_storage_leaf", checkHomeStorageLeaf(p.HomeStorageLeaf))
-	}
-	sort.Slice(errs, func(i, j int) bool { return errs[i].Path < errs[j].Path })
-	return errs
-}
-
-// HomeStorageIgnoredWarnings returns one warning per runtime or profile
-// entry that sets home_storage_backend "nfs" but does not target
-// Kubernetes. Agents on other runtimes always keep a local home, so the
-// value has no effect there. It never makes the settings invalid.
-func HomeStorageIgnoredWarnings(runtimes map[string]V1RuntimeConfig, profiles map[string]V1ProfileConfig) []string {
-	var warnings []string
-	for name, rt := range runtimes {
-		if rt.HomeStorageBackend == HomeStorageBackendNFS && !isKubernetesRuntimeEntry(name, rt) {
-			warnings = append(warnings, fmt.Sprintf("runtimes.%s.home_storage_backend is \"nfs\" but runtime %q is not a Kubernetes runtime; agents on it keep a local home", name, name))
-		}
-	}
-	for name, p := range profiles {
-		if p.HomeStorageBackend != HomeStorageBackendNFS {
-			continue
-		}
-		rt, ok := runtimes[p.Runtime]
-		if ok && !isKubernetesRuntimeEntry(p.Runtime, rt) {
-			warnings = append(warnings, fmt.Sprintf("profiles.%s.home_storage_backend is \"nfs\" but its runtime %q is not a Kubernetes runtime; agents on it keep a local home", name, p.Runtime))
-		}
-	}
-	sort.Strings(warnings)
-	return warnings
-}
-
 // IsKubernetesRuntimeEntry reports whether the runtime entry name targets
-// Kubernetes (see HomeStorageIgnoredWarnings).
+// Kubernetes.
 func IsKubernetesRuntimeEntry(name string, rt V1RuntimeConfig) bool {
 	return isKubernetesRuntimeEntry(name, rt)
 }

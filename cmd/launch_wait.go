@@ -314,12 +314,12 @@ func launchOutcome(name string, a *hubclient.Agent, priorLaunchID string) (bool,
 }
 
 // failedLaunchEndReason reports whether an ended launch's end reason means
-// it did not bring the agent up, even without an error code. It follows
-// pkg/hubclient's rule except for not_launched: the Hub also ends a launch
-// not_launched when a broker without async launch answered the start
-// synchronously (pkg/hub/launch_dispatch.go, endLaunchNotLaunched after a
-// synchronous answer), and that start goes on, so it must not end the wait.
-// pkg/hubclient's rule has the same exposure (ptone/scion#5283).
+// it did not bring the agent up, even without an error code. It is
+// pkg/hubclient's rule: not_launched is not one of them, because the Hub
+// also ends a launch not_launched when a broker without async launch
+// answered the start synchronously (pkg/hub/launch_dispatch.go), and that
+// start goes on, so it must not end the wait. The Hub's not_launched
+// failures carry the code dispatch_failed, which ends the wait.
 func failedLaunchEndReason(reason string) bool {
 	switch reason {
 	case "failed", "timed_out", "lost":

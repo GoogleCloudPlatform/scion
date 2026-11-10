@@ -57,10 +57,11 @@ const (
 	// 5 absorbs stragglers; do not raise it to hide a leak.
 	//
 	// Sensitivity: one leaked *server* adds about 9 matching goroutines and
-	// is always caught. One leaked *store* adds a single connectionOpener
-	// (about 3 MiB), so up to 5 leaked stores pass this guard; the memory
-	// guard still bounds them. This is a deliberate trade-off against
-	// flaking on stragglers, not per-store sensitivity.
+	// is always caught. One leaked *store* adds 2: its connectionOpener
+	// (about 3 MiB) and the emitter of its transaction diagnostics Monitor,
+	// so up to 2 leaked stores pass this guard; the memory guard still
+	// bounds them. This is a deliberate trade-off against flaking on
+	// stragglers, not per-store sensitivity.
 	leakGuardMaxGoroutines = 5
 
 	// leakGuardSettle is how long the guard waits for goroutines that are
@@ -82,18 +83,30 @@ const (
 var LeakGuardSignatures = []string{
 	// One per open *sql.DB: an unclosed test store.
 	"database/sql.(*DB).connectionOpener",
+	// One per store opened with transaction diagnostics (the shared test
+	// openers): the Monitor's emitter, stopped when the store's DB closes.
+	LeakGuardStoreDiagSignature,
 	// Background loops started by New() and stopped by Server.Shutdown.
-	"hub.(*chatLinkService).cleanupLoop",
-	"hub.(*PreviewService).cleanupNonces",
-	"hub.(*NonceCache).cleanup",
+	// These entries carry no package qualifier on purpose: the leading "."
+	// marks where the receiver type name starts, and an entry keeps matching
+	// when its type moves out of package hub into a subpackage.
+	".(*chatLinkService).cleanupLoop",
+	".(*PreviewService).cleanupNonces",
+	".(*NonceCache).cleanup",
 	// OIDC key cleanup/refresh loops, which run on the server-lifetime
-	// context and stop on Shutdown (ptone/scion#3641).
-	"hub.(*OIDCKeyManager).Start",
+	// context and stop on Shutdown (ptone/scion#3641). The key manager
+	// lives in pkg/hub/oidckeys; the entry is unqualified like the ones
+	// above, so it also keeps matching if that package is renamed or moved.
+	".(*OIDCKeyManager).Start",
 }
 
-// LeakGuardStoreSignature is the LeakGuardSignatures entry for an unclosed
-// store; every other entry is a server background loop.
-const LeakGuardStoreSignature = "database/sql.(*DB).connectionOpener"
+// LeakGuardStoreSignature and LeakGuardStoreDiagSignature are the
+// LeakGuardSignatures entries for an unclosed store; every other entry is a
+// server background loop.
+const (
+	LeakGuardStoreSignature     = "database/sql.(*DB).connectionOpener"
+	LeakGuardStoreDiagSignature = "txdiag.(*Monitor).emit"
+)
 
 // LeakGuardResult is what checkPackageLeaks found.
 type LeakGuardResult struct {

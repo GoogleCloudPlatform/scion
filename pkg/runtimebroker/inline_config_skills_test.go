@@ -42,6 +42,8 @@ func writeAgentConfig(t *testing.T, projectDir, agentName string, cfg api.ScionC
 	if err := os.WriteFile(cfgPath, data, 0644); err != nil {
 		t.Fatalf("failed to write scion-agent.json: %v", err)
 	}
+	// Provisioning records the agent's (here: no) profile broker-side too.
+	writeProvisionedProfile(t, projectDir, agentName, "")
 	return cfgPath
 }
 
@@ -454,7 +456,7 @@ func TestApplyInlineConfigUpdate_NoSkillsLeavesSkillsUnchanged(t *testing.T) {
 	}
 	cfgPath := writeAgentConfig(t, projectDir, agentName, api.ScionConfig{Skills: skills})
 
-	srv.applyInlineConfigUpdate(context.Background(), agentName, projectDir, &api.ScionConfig{MaxTurns: 5}, false)
+	srv.applyInlineConfigUpdate(context.Background(), agentName, projectDir, &api.ScionConfig{MaxTurns: api.IntPtr(5)}, false)
 
 	if got := readAgentSkills(t, cfgPath); !reflect.DeepEqual(got, skills) {
 		t.Fatalf("skills changed\n got: %+v\nwant: %+v", got, skills)

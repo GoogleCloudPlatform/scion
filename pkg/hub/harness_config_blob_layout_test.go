@@ -78,7 +78,7 @@ func resetHCToLegacy(t *testing.T, srv *Server, s store.Store, hc *store.Harness
 	legacy.StoragePath = storage.HarnessConfigStoragePath(srv.HubID(), hc.Scope, hc.ScopeID, hc.Slug)
 	legacy.StorageURI = ""
 	legacy.Files = commitManifest(manifest)
-	legacy.ContentHash = computeContentHash(legacy.Files)
+	legacy.ContentHash = defaultContentHash(legacy.Files)
 	putObjects(t, srv.GetStorage(), legacy.StoragePath, stored)
 	require.NoError(t, setHarnessConfigContentForTest(ctx, s, &legacy))
 	got, err := s.GetHarnessConfig(ctx, hc.ID)
@@ -97,7 +97,7 @@ func seedLegacyHC(t *testing.T, srv *Server, s store.Store, name string, files m
 		StoragePath: storage.HarnessConfigStoragePath(srv.HubID(), store.HarnessConfigScopeGlobal, "", slug),
 		Files:       commitManifest(files),
 	}
-	hc.ContentHash = computeContentHash(hc.Files)
+	hc.ContentHash = defaultContentHash(hc.Files)
 	putObjects(t, srv.GetStorage(), hc.StoragePath, files)
 	require.NoError(t, s.CreateHarnessConfig(context.Background(), hc))
 	return hc
@@ -713,7 +713,7 @@ func TestHarnessConfigBlob_NestedLegacyCloneSurvivesParentMigration(t *testing.T
 		Files: commitManifest(cloneFiles),
 	}
 	clone.StoragePath = parent.StoragePath + "/" + clone.ID
-	clone.ContentHash = computeContentHash(clone.Files)
+	clone.ContentHash = defaultContentHash(clone.Files)
 	putObjects(t, stor, clone.StoragePath, cloneFiles)
 	require.NoError(t, s.CreateHarnessConfig(ctx, clone))
 
@@ -799,7 +799,7 @@ func TestStorageMigration_HarnessConfigLayouts(t *testing.T) {
 			Scope: store.HarnessConfigScopeGlobal, Status: store.HarnessConfigStatusActive,
 			StoragePath: path, Layout: layout, Files: commitManifest(files),
 		}
-		row.ContentHash = computeContentHash(row.Files)
+		row.ContentHash = defaultContentHash(row.Files)
 		if layout == store.HarnessConfigLayoutBlobs {
 			putHCBlobs(t, srv, row, files)
 		} else {
@@ -894,7 +894,7 @@ func TestHarnessConfigBlob_DeleteKeepsSharedOrNestedLegacyTree(t *testing.T) {
 		Files: commitManifest(cloneFiles),
 	}
 	clone.StoragePath = parent.StoragePath + "/" + clone.ID
-	clone.ContentHash = computeContentHash(clone.Files)
+	clone.ContentHash = defaultContentHash(clone.Files)
 	putObjects(t, stor, clone.StoragePath, cloneFiles)
 	require.NoError(t, s.CreateHarnessConfig(ctx, clone))
 

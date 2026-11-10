@@ -16,6 +16,7 @@ package messaging
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -68,6 +69,8 @@ type DivergenceCounter struct {
 	// input fields and cannot disagree under normal conditions.
 	consistencyChecks     atomic.Int64 // total invocations that reached comparison
 	consistencyMismatches atomic.Int64 // invocations where prior messages disagree
+	consistencySkipped    atomic.Int64 // not run: every slot busy, or the same lookup already running
+	consistencyTimeouts   atomic.Int64 // ran but hit ConsistencyCheckTimeout and failed open
 }
 
 // Inc increments the appropriate counter.
@@ -129,6 +132,21 @@ func (c *DivergenceCounter) ConsistencyChecks() int64 { return c.consistencyChec
 
 // ConsistencyMismatches returns the total consistency check mismatches.
 func (c *DivergenceCounter) ConsistencyMismatches() int64 { return c.consistencyMismatches.Load() }
+
+// IncConsistencySkipped counts a consistency check that was not run because
+// the runner had no free slot or the same lookup was already in flight.
+func (c *DivergenceCounter) IncConsistencySkipped() { c.consistencySkipped.Add(1) }
+
+// ConsistencySkipped returns the number of consistency checks not run.
+func (c *DivergenceCounter) ConsistencySkipped() int64 { return c.consistencySkipped.Load() }
+
+// IncConsistencyTimeout counts a consistency check whose lookup hit its
+// deadline; the check failed open.
+func (c *DivergenceCounter) IncConsistencyTimeout() { c.consistencyTimeouts.Add(1) }
+
+// ConsistencyTimeouts returns the number of consistency checks that hit
+// their deadline and failed open.
+func (c *DivergenceCounter) ConsistencyTimeouts() int64 { return c.consistencyTimeouts.Load() }
 
 // DivergenceMetrics is the package-level counter for divergence events.
 // Exported so that metrics collectors can read it.
@@ -455,7 +473,9 @@ type MessageQueryStore interface {
 // messages have a conversation_id that differs from resolvedConvID.
 //
 // Returns true if all prior messages agree (or no prior messages exist),
-// false if a mismatch is detected.
+// false if a mismatch is detected. It fails open (returns true) when a lookup
+// errors or the lookups together exceed ConsistencyCheckTimeout. The message
+// path runs it through GoConsistencyCheck, off the request.
 func CheckConversationConsistency(
 	ctx context.Context,
 	msgStore MessageQueryStore,
@@ -470,6 +490,20 @@ func CheckConversationConsistency(
 		return true // nothing to compare against
 	}
 
+	// A hard deadline for all lookups together, whatever the caller's
+	// context allows. A lookup that hits it fails open like any other
+	// query error, and is counted as a timeout. The count keys on the
+	// context, not on the error: a driver cut short by the deadline does not
+	// always return an error wrapping context.DeadlineExceeded.
+	ctx, cancel := context.WithTimeout(ctx, ConsistencyCheckTimeout)
+	defer cancel()
+	failOpen := func() bool {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			DivergenceMetrics.IncConsistencyTimeout()
+		}
+		return true
+	}
+
 	var messages []store.Message
 
 	// Every lookup below reads only Items, so each one passes SkipTotalCount:
@@ -482,7 +516,7 @@ func CheckConversationConsistency(
 		if err != nil {
 			log.Warn("conversation consistency check: failed to query by thread_id",
 				"thread_id", threadID, "error", err)
-			return true // fail open on query errors
+			return failOpen() // fail open on query errors
 		}
 		if result != nil {
 			messages = result.Items
@@ -498,7 +532,7 @@ func CheckConversationConsistency(
 		if err != nil {
 			log.Warn("conversation consistency check: failed to query by sender/recipient",
 				"sender_id", senderID, "recipient_id", recipientID, "error", err)
-			return true
+			return failOpen()
 		}
 		result2, err := msgStore.ListMessages(ctx, store.MessageFilter{
 			SenderID:    recipientID,
@@ -507,7 +541,7 @@ func CheckConversationConsistency(
 		if err != nil {
 			log.Warn("conversation consistency check: failed to query reverse direction",
 				"sender_id", recipientID, "recipient_id", senderID, "error", err)
-			return true
+			return failOpen()
 		}
 		if result1 != nil {
 			messages = append(messages, result1.Items...)
