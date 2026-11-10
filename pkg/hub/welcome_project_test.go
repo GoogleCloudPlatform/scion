@@ -1045,6 +1045,16 @@ func TestWelcome_PreviewMapIsBounded(t *testing.T) {
 	assert.Len(t, f.stagingDirs(), 1)
 }
 
+func TestWelcome_PreviewWithoutStagedTreeIsRefused(t *testing.T) {
+	f := newWelcomeFixture(t)
+	f.srv.welcome.mu.Lock()
+	defer f.srv.welcome.mu.Unlock()
+	p, err := f.srv.addWelcomePreview(DevUserID, "p", nil)
+	require.Error(t, err)
+	assert.Nil(t, p)
+	assert.Empty(t, f.srv.welcome.previews, "a refused preview is not stored")
+}
+
 // --- 8: staging dir mode and no local path ---------------------------------------
 
 // assertNoLocalPathOrMember asserts text holds no local path and none of the

@@ -152,8 +152,12 @@ func welcomePreviewKey(id string) string {
 // addWelcomePreview records a new preview and returns its id. Expired
 // previews are evicted first; if the map is still full the oldest preview is
 // evicted, so repeated previews cannot grow it without limit. Evicted
-// previews' staging dirs are removed. Callers hold s.welcome.mu.
+// previews' staging dirs are removed. A nil staged tree is refused, so every
+// stored preview carries one. Callers hold s.welcome.mu.
 func (s *Server) addWelcomePreview(userID, projectID string, staged *welcomeStaged) (*welcomePreview, error) {
+	if staged == nil {
+		return nil, errors.New("welcome preview has no staged tree")
+	}
 	rt := &s.welcome
 	if rt.previews == nil {
 		rt.previews = map[string]*welcomePreview{}
