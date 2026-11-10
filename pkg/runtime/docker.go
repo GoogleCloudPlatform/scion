@@ -144,7 +144,12 @@ func stopTimeoutArgs(ref RunRef) []string {
 	if d <= 0 {
 		d = defaultContainerStopTimeout
 	}
-	secs := int64((d + time.Second - 1) / time.Second)
+	// Divide first, then round up: d + time.Second - 1 overflows for a d
+	// within a second of the largest Duration.
+	secs := int64(d / time.Second)
+	if d%time.Second > 0 {
+		secs++
+	}
 	return []string{"-t", strconv.FormatInt(secs, 10)}
 }
 

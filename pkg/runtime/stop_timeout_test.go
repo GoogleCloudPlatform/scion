@@ -16,6 +16,7 @@ package runtime
 
 import (
 	"context"
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
@@ -44,6 +45,7 @@ func TestStop_PassesStopTimeout(t *testing.T) {
 		{name: "default", want: "30"},
 		{name: "set", timeout: 10 * time.Second, want: "10"},
 		{name: "rounded up", timeout: 1500 * time.Millisecond, want: "2"},
+		{name: "largest duration", timeout: time.Duration(math.MaxInt64), want: "9223372037"},
 	}
 	for name, newRT := range runtimes {
 		for _, tc := range cases {
