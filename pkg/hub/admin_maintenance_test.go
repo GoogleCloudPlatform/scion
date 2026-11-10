@@ -808,3 +808,50 @@ func TestListMaintenanceOperations_ShowsContainerBinariesWhenEnvSet(t *testing.T
 		t.Error("rebuild-container-binaries should be visible when SCION_DEV_BINARIES is set")
 	}
 }
+
+// An invalid branch parameter on rebuild-server or rebuild-web is refused
+// with 400 and the allowed form, before any run is created. That includes a
+// key the parameter parser would trim to "branch", and a second such key. A
+// padded key with a valid value passes the branch check and is refused by
+// the raw-key allow-list as an unknown parameter.
+func TestExecuteOperation_InvalidBranchRejected(t *testing.T) {
+	cases := []struct {
+		name, body string
+		wants      []string
+	}{
+		{"invalid", `{"params":{"branch":"--upload-pack=x"}}`, []string{"invalid branch name", "start with a letter or digit"}},
+		{"padded key", `{"params":{" branch":"x+y"}}`, []string{"invalid branch name", "start with a letter or digit"}},
+		{"repeated key", `{"params":{"branch":"main","branch ":"x+y"}}`, []string{"branch is given more than once", "start with a letter or digit"}},
+		{"padded key, valid value", `{"params":{" branch ":"main"}}`, []string{"unknown_param", "unknown parameter(s):  branch  (allowed: branch)"}},
+	}
+	for _, key := range []string{"rebuild-server", "rebuild-web"} {
+		for _, tc := range cases {
+			t.Run(key+" "+tc.name, func(t *testing.T) {
+				srv, s := newTestServerWithStore(t)
+				admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+				req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/maintenance/operations/"+key+"/run",
+					strings.NewReader(tc.body))
+				req.Header.Set("Content-Type", "application/json")
+				req = req.WithContext(contextWithIdentity(req.Context(), admin))
+				rr := httptest.NewRecorder()
+				srv.handleAdminMaintenanceOps(rr, req)
+
+				if rr.Code != http.StatusBadRequest {
+					t.Fatalf("expected 400, got %d: %s", rr.Code, rr.Body.String())
+				}
+				for _, want := range tc.wants {
+					if !strings.Contains(rr.Body.String(), want) {
+						t.Errorf("expected %q in the body, got %s", want, rr.Body.String())
+					}
+				}
+				runs, err := s.ListMaintenanceRuns(context.Background(), key, 10)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(runs) != 0 {
+					t.Errorf("a rejected request must not create a run, got %d", len(runs))
+				}
+			})
+		}
+	}
+}

@@ -56,7 +56,9 @@ func dlCmdSetup(t *testing.T, mark bool) (*config.GlobalConfig, *ent.Client) {
 		testInfraDelegateHubID, testInfraDelegateWorkloadSub, testInfraDelegateLabel, testInfraDelegateOperator = "", "", "", ""
 		testInfraDelegateTTL, testInfraDelegateMemberCap = store.TestInfraOfflineDelegationDefaultTTL, store.TestInfraOfflineDelegationMaxMemberCap
 		testInfraDelegateRevokeHubID, testInfraDelegateRevokeID, testInfraDelegateRevokeOperator = "", "", ""
+		testInfraDelegateScope, testInfraDelegateAdminCap, testInfraDelegateAcknowledge = testInfraDelegateScopeMember, 0, false
 	})
+	testInfraDelegateScope, testInfraDelegateAdminCap, testInfraDelegateAcknowledge = testInfraDelegateScopeMember, 0, false
 	testInfraDelegateHubID, testInfraDelegateWorkloadSub, testInfraDelegateOperator = tiaCmdHubID, dlCmdSub, "operator@example.invalid"
 	testInfraDelegateTTL, testInfraDelegateMemberCap = store.TestInfraOfflineDelegationDefaultTTL, store.TestInfraOfflineDelegationMaxMemberCap
 	return cfg, client
@@ -127,8 +129,8 @@ func TestTestInfraDelegate_Refusals(t *testing.T) {
 	})
 }
 
-// The flag checks run before anything is opened. There is no flag that
-// selects a scope: the command can only create a member-tier delegation.
+// The flag checks run before anything is opened. --scope selects member or
+// hub-admin only; there is no flag for any other tier.
 func TestTestInfraDelegateArgs(t *testing.T) {
 	dlCmdSetup(t, false)
 	require.NoError(t, testInfraDelegateArgs(nil, nil))
@@ -149,9 +151,11 @@ func TestTestInfraDelegateArgs(t *testing.T) {
 	testInfraDelegateHubID = " " + tiaCmdHubID
 	assert.ErrorContains(t, testInfraDelegateArgs(nil, nil), "whitespace")
 
-	for _, name := range []string{"scope", "scopes", "admin", "admin-role", "tier"} {
+	for _, name := range []string{"scopes", "admin", "admin-role", "tier", "super-admin"} {
 		assert.Nil(t, serverTestInfraDelegateCmd.Flags().Lookup(name), "no --%s flag", name)
 	}
+	require.NotNil(t, serverTestInfraDelegateCmd.Flags().Lookup("scope"))
+	assert.Equal(t, testInfraDelegateScopeMember, serverTestInfraDelegateCmd.Flags().Lookup("scope").DefValue)
 }
 
 func TestTestInfraDelegateRevoke(t *testing.T) {
@@ -221,4 +225,125 @@ func TestTestInfraDelegate_HumanCLIOnly(t *testing.T) {
 	require.NotNil(t, found)
 	require.Len(t, found.Commands(), 1)
 	assert.Equal(t, "revoke", found.Commands()[0].Name())
+}
+
+// Offline hub-admin delegations (--scope hub-admin).
+
+const dlCmdAdminSub = "100000000000000000082"
+
+// dlCmdAdminSetup is dlCmdSetup with an admin-tier subject, the offline
+// admin delegation setting bound to tiaCmdHubID, and the hub-admin flags.
+func dlCmdAdminSetup(t *testing.T) (*config.GlobalConfig, *ent.Client) {
+	t.Helper()
+	cfg, client := dlCmdSetup(t, true)
+	cfg.Hub.TestIdentities = &config.TestIdentitiesConfig{
+		WorkloadIssuers: []config.TestIdentityWorkloadIssuer{
+			{Sub: dlCmdSub, MaxTier: config.WorkloadIssuerTierMember},
+			{Sub: dlCmdAdminSub, MaxTier: config.WorkloadIssuerTierAdmin},
+		},
+		OfflineAdminDelegations: tiaCmdHubID,
+	}
+	testInfraDelegateWorkloadSub = dlCmdAdminSub
+	testInfraDelegateScope, testInfraDelegateAcknowledge = testInfraDelegateScopeHubAdmin, true
+	testInfraDelegateTTL, testInfraDelegateMemberCap, testInfraDelegateAdminCap = 0, 0, 0
+	return cfg, client
+}
+
+func TestTestInfraDelegate_HubAdminCreates(t *testing.T) {
+	cfg, client := dlCmdAdminSetup(t)
+	testInfraDelegateAdminCap = 2
+	require.NoError(t, testInfraDelegateArgs(nil, nil))
+	var out bytes.Buffer
+	require.NoError(t, delegateTestInfra(context.Background(), client, cfg, &out))
+	rows, err := client.TestIdentityDelegation.Query().All(context.Background())
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	assert.Equal(t, store.TestInfraOfflineAdminDelegationScope, rows[0].Scope)
+	assert.Equal(t, 2, rows[0].MemberCap)
+	assert.Equal(t, store.TestInfraOfflineAdminDelegationDefaultTTL, rows[0].ExpiresAt.Sub(rows[0].CreatedAt))
+	s := out.String()
+	assert.Contains(t, s, "scope="+store.TestInfraOfflineAdminDelegationScope)
+	assert.Contains(t, s, "admin_cap=2")
+	assert.NotContains(t, s, "Bearer")
+}
+
+// The configuration must carry the offline admin delegation setting for
+// --hub-id: refused with the command's own named error (before the
+// database writer is reached), nothing written.
+func TestTestInfraDelegate_HubAdminRefusedWithoutOptIn(t *testing.T) {
+	for name, value := range map[string]string{"unset": "", "another hub": "another-hub", "padded": tiaCmdHubID + " "} {
+		t.Run(name, func(t *testing.T) {
+			cfg, client := dlCmdAdminSetup(t)
+			cfg.Hub.TestIdentities.OfflineAdminDelegations = value
+			var out bytes.Buffer
+			err := delegateTestInfra(context.Background(), client, cfg, &out)
+			require.ErrorIs(t, err, ErrTestInfraDelegateAdminOptIn)
+			assert.Contains(t, err.Error(), "nothing was written")
+			rows, audits := dlCmdCounts(t, client)
+			assert.Zero(t, rows)
+			assert.Zero(t, audits)
+		})
+	}
+	// A member delegation needs no opt-in.
+	cfg, client := dlCmdSetup(t, true)
+	var out bytes.Buffer
+	require.NoError(t, delegateTestInfra(context.Background(), client, cfg, &out))
+}
+
+func TestTestInfraDelegateArgs_Scopes(t *testing.T) {
+	dlCmdAdminSetup(t)
+	require.NoError(t, testInfraDelegateArgs(nil, nil))
+
+	for _, v := range []string{"super-admin", "superadmin", "SUPER-ADMIN", "super_admin", "test_identity:issue_super_admin"} {
+		testInfraDelegateScope = v
+		assert.ErrorContains(t, testInfraDelegateArgs(nil, nil), "never delegable offline", v)
+	}
+	for _, v := range []string{"admin", "owner", "", "Hub-Admin"} {
+		testInfraDelegateScope = v
+		assert.ErrorContains(t, testInfraDelegateArgs(nil, nil), "--scope must be", v)
+	}
+	testInfraDelegateScope = testInfraDelegateScopeHubAdmin
+
+	testInfraDelegateAcknowledge = false
+	assert.ErrorContains(t, testInfraDelegateArgs(nil, nil), "--"+testInfraMarkAcknowledgeFlag)
+	testInfraDelegateAcknowledge = true
+
+	testInfraDelegateTTL = store.TestInfraOfflineAdminDelegationMaxTTL + time.Minute
+	assert.ErrorContains(t, testInfraDelegateArgs(nil, nil), "--ttl")
+	testInfraDelegateTTL = store.TestInfraOfflineAdminDelegationMaxTTL
+	require.NoError(t, testInfraDelegateArgs(nil, nil))
+	testInfraDelegateTTL = 0
+
+	testInfraDelegateAdminCap = store.TestInfraOfflineAdminDelegationMaxAdminCap + 1
+	assert.ErrorContains(t, testInfraDelegateArgs(nil, nil), "--admin-cap")
+	testInfraDelegateAdminCap = 0
+
+	testInfraDelegateMemberCap = 1
+	assert.ErrorContains(t, testInfraDelegateArgs(nil, nil), "--member-cap")
+	testInfraDelegateMemberCap = 0
+
+	// --admin-cap belongs to hub-admin; the acknowledgement is not needed
+	// for member.
+	testInfraDelegateScope, testInfraDelegateAcknowledge = testInfraDelegateScopeMember, false
+	require.NoError(t, testInfraDelegateArgs(nil, nil))
+	testInfraDelegateAdminCap = 1
+	assert.ErrorContains(t, testInfraDelegateArgs(nil, nil), "--admin-cap")
+}
+
+// The existing revoke command revokes an offline hub-admin delegation.
+func TestTestInfraDelegateRevoke_HubAdmin(t *testing.T) {
+	cfg, client := dlCmdAdminSetup(t)
+	ctx := context.Background()
+	var out bytes.Buffer
+	require.NoError(t, delegateTestInfra(ctx, client, cfg, &out))
+	rows, err := client.TestIdentityDelegation.Query().All(ctx)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	testInfraDelegateRevokeHubID, testInfraDelegateRevokeID, testInfraDelegateRevokeOperator = tiaCmdHubID, rows[0].ID.String(), "op"
+	out.Reset()
+	require.NoError(t, revokeTestInfraDelegation(ctx, client, &out))
+	assert.Contains(t, out.String(), "Offline issuer delegation revoked")
+	row, err := client.TestIdentityDelegation.Get(ctx, rows[0].ID)
+	require.NoError(t, err)
+	assert.NotNil(t, row.RevokedAt)
 }

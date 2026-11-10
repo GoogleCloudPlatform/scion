@@ -17,8 +17,9 @@
 // Package hub — the runtime user-scope secret read (check 8) and the agent
 // secret list under the agent's delegation chain: a chain with recorded
 // provenance is bounded by its recorded effect ceilings and the
-// user-scope secret parent ceiling; a chain without recorded provenance is
-// authorized by the progeny relationship alone. The by-key read and the
+// user-scope secret parent ceiling; a chain without recorded provenance
+// cannot be fully evaluated and reads no user-scope secret
+// (chain_unrecorded; the remedy is re-delegation). The by-key read and the
 // list agree on every shape.
 package hub
 
@@ -29,6 +30,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -237,10 +239,82 @@ func TestAgentSecretRead_UserScopeCeilingApplied(t *testing.T) {
 	require.Equal(t, http.StatusOK, code, "a bounded ceiling holding secret.use admits: %s", body)
 }
 
-// TestAgentSecretRead_UnrecordedChainKeepsProgenyRule pins that a chain
-// without recorded provenance is authorized by the progeny relationship
-// alone: each of these shapes reads and lists the shared secret.
-func TestAgentSecretRead_UnrecordedChainKeepsProgenyRule(t *testing.T) {
+// itemFacts is the identity (full-scope token, stored ancestry) and the
+// target facts the runtime precheck builds for the agent.
+func (f *userScopeCeilingFixture) itemFacts(t *testing.T, agentID string) (AgentIdentity, *TargetFacts) {
+	t.Helper()
+	ctx := context.Background()
+	agent, err := f.Store.GetAgent(ctx, agentID)
+	require.NoError(t, err)
+	require.NotEmpty(t, agent.Ancestry)
+	project, err := f.Store.GetProject(ctx, agent.ProjectID)
+	require.NoError(t, err)
+	ident := newFullAgentIdentity(agentID, agent.ProjectID, agent.Ancestry, []AgentTokenScope{ScopeProjectSecretRead})
+	return ident, &TargetFacts{
+		Agent: agent, ProjectID: agent.ProjectID, Ancestry: agent.Ancestry,
+		Root: ProvenanceRoot{Kind: "user", ID: agent.Ancestry[0]}, Project: project,
+	}
+}
+
+// ceilingFor is the user-scope secret parent ceiling verdict for the agent
+// (stored ancestry) on the root user's row of key.
+func (f *userScopeCeilingFixture) ceilingFor(t *testing.T, agentID, key string) ParentCeilingDecision {
+	t.Helper()
+	ident, facts := f.itemFacts(t, agentID)
+	meta, err := f.Server.secretBackend.GetMeta(context.Background(), key, store.ScopeUser, facts.Root.ID)
+	require.NoError(t, err)
+	require.NotNil(t, meta)
+	return f.Server.authzService.EvaluateUserSecretParentCeiling(context.Background(), ident, userSecretResource(meta.ID, meta.ScopeID))
+}
+
+// userItem is check 8 (authorizeRuntimeUserItem) for the agent on key.
+func (f *userScopeCeilingFixture) userItem(t *testing.T, agentID, key string) ItemResult {
+	t.Helper()
+	ident, facts := f.itemFacts(t, agentID)
+	return f.Server.authorizeRuntimeUserItem(context.Background(), ident, facts, key)
+}
+
+// listUserReasons is the user part of the agent secret list for the agent:
+// the listed keys and the reasons of its audit items.
+func (f *userScopeCeilingFixture) listUserReasons(t *testing.T, agentID string) ([]string, []string) {
+	t.Helper()
+	ident, facts := f.itemFacts(t, agentID)
+	secrets, items, ok := f.Server.agentListUserSecrets(context.Background(), agentID, ident, facts, nil, nil)
+	require.True(t, ok)
+	keys := make([]string, 0, len(secrets))
+	for _, sm := range secrets {
+		keys = append(keys, sm.Key)
+	}
+	reasons := make([]string, 0, len(items))
+	for _, it := range items {
+		reasons = append(reasons, it.Reason)
+	}
+	return keys, reasons
+}
+
+// uscEdgesStore returns edges for agentID's delegate lookup (the store's
+// partial unique index forbids two active edges for one delegate and
+// scope); every other lookup is the store's.
+type uscEdgesStore struct {
+	store.Store
+	agentID string
+	edges   []*store.DelegationEdge
+}
+
+func (u uscEdgesStore) GetDelegationEdgesForDelegate(ctx context.Context, delegateType, delegateID string) ([]*store.DelegationEdge, error) {
+	if delegateID == u.agentID {
+		return u.edges, nil
+	}
+	return u.Store.GetDelegationEdgesForDelegate(ctx, delegateType, delegateID)
+}
+
+// TestAgentSecretRead_UnrecordedChainRefused pins that a chain without
+// recorded provenance cannot be fully evaluated and reads no user-scope
+// secret: a legacy chain loses user-secret reads until the agent is
+// re-delegated. For each legacy shape the by-key read is refused with
+// chain_unrecorded, the list agrees (no user key, one chain_unrecorded
+// item), and one rate-limited Warn per agent names the agent.
+func TestAgentSecretRead_UnrecordedChainRefused(t *testing.T) {
 	cases := []struct {
 		name     string
 		backfill bool
@@ -248,14 +322,14 @@ func TestAgentSecretRead_UnrecordedChainKeepsProgenyRule(t *testing.T) {
 	}{
 		{"no edge before the backfill", false, func(t *testing.T, f *userScopeCeilingFixture) {}},
 		{"no edge after the backfill", true, func(t *testing.T, f *userScopeCeilingFixture) {}},
-		{"edge without provenance", true, func(t *testing.T, f *userScopeCeilingFixture) {
+		{"edge without provenance (unrecorded hop)", true, func(t *testing.T, f *userScopeCeilingFixture) {
 			createDCEdge(t, f.Store, store.DelegationPrincipalUser, f.UserID, store.DelegationPrincipalAgent, f.AgentID,
 				store.RoleScopeProject, f.ProjectID, string(AgentRoleFull))
 		}},
 		{"unrecorded ceiling, known version", true, func(t *testing.T, f *userScopeCeilingFixture) {
 			f.recordEdge(t, store.DelegationPrincipalUser, f.UserID, f.AgentID, store.EffectCeiling{Kind: store.EffectCeilingUnrecorded}, nil)
 		}},
-		{"unknown provenance version", true, func(t *testing.T, f *userScopeCeilingFixture) {
+		{"unknown provenance version (unreadable hop)", true, func(t *testing.T, f *userScopeCeilingFixture) {
 			f.recordEdge(t, store.DelegationPrincipalUser, f.UserID, f.AgentID, store.EffectCeiling{Kind: store.EffectCeilingPrincipal}, func(e *store.DelegationEdge) {
 				e.ProvenanceVersion = 2
 			})
@@ -270,7 +344,23 @@ func TestAgentSecretRead_UnrecordedChainKeepsProgenyRule(t *testing.T) {
 				e.SourcePrincipalKind = store.DelegationPrincipalAgent
 			})
 		}},
+		{"more than one active edge", true, func(t *testing.T, f *userScopeCeilingFixture) {
+			edge := func(id string) *store.DelegationEdge {
+				return &store.DelegationEdge{
+					ID: id, DelegatorType: store.DelegationPrincipalUser, DelegatorID: f.UserID,
+					DelegateType: store.DelegationPrincipalAgent, DelegateID: f.AgentID,
+					ScopeType: store.RoleScopeProject, ScopeID: f.ProjectID, Role: string(AgentRoleFull), Active: true,
+					AuthorityProvenance: store.AuthorityProvenance{ProvenanceVersion: store.ProvenanceVersionV1, SourcePrincipalKind: store.DelegationPrincipalUser, SourcePrincipalID: f.UserID, SourceCredentialKind: store.SourceCredentialSession},
+					EffectCeiling:       store.EffectCeiling{Kind: store.EffectCeilingPrincipal},
+				}
+			}
+			f.Server.authzService.store = uscEdgesStore{Store: f.Server.authzService.store, agentID: f.AgentID,
+				edges: []*store.DelegationEdge{edge(tid("usc-dup-1")), edge(tid("usc-dup-2"))}}
+		}},
 	}
+	// The edge override stands in for the authorization store only, so that
+	// case is checked at check 8 and the list directly, not over HTTP.
+	directOnly := map[string]bool{"more than one active edge": true}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			f := &userScopeCeilingFixture{materialFixture: newMaterialFixture(t, "uscl-"+strings.ReplaceAll(tc.name, " ", "-"))}
@@ -279,21 +369,37 @@ func TestAgentSecretRead_UnrecordedChainKeepsProgenyRule(t *testing.T) {
 			}
 			f.shareUserSecret(t, f.UserID, userScopeCeilingKey, f.UserID)
 			tc.setup(t, f)
+			log := usaCaptureDefaultLog(t)
 
 			chain := f.Server.authzService.userSecretChainVerdict(context.Background(),
 				newFullAgentIdentity(f.AgentID, f.ProjectID, []string{f.UserID}, []AgentTokenScope{ScopeProjectSecretRead}), nil)
 			require.False(t, chain.decision.Allowed)
 			require.True(t, chain.unrecorded, "the chain has no recorded provenance: %q", chain.decision.Reason)
 
-			f.assertReadAndListAgree(t, f.AgentID, f.Token, userScopeCeilingKey, true)
+			item := f.userItem(t, f.AgentID, userScopeCeilingKey)
+			assert.False(t, item.Allowed)
+			assert.Equal(t, ReasonChainUnrecorded, item.Reason)
+			keys, reasons := f.listUserReasons(t, f.AgentID)
+			assert.Empty(t, keys, "the list returns no user key")
+			assert.Equal(t, []string{ReasonChainUnrecorded}, reasons, "one request-level item")
+			if !directOnly[tc.name] {
+				f.assertReadAndListAgree(t, f.AgentID, f.Token, userScopeCeilingKey, false)
+			}
+
+			out := log.String()
+			assert.Contains(t, out, "the agent's delegation chain is not recorded")
+			assert.Contains(t, out, "agent_id="+f.AgentID)
+			assert.Equal(t, 1, strings.Count(out, "the agent's delegation chain is not recorded"),
+				"one Warn per agent across the reads and lists: %s", out)
+			assert.NotContains(t, out, "secret="+userScopeCeilingKey, "the refusal Warn names no key")
 		})
 	}
 
 	// A recorded hop below a hop without recorded provenance: the recorded
-	// hop passes, the walk then reaches the unrecorded hop, so the chain is
-	// not recorded and the progeny rule applies. A failing recorded hop in
-	// the same position is refused instead
-	// (TestAgentSecretRead_MixedChainEnforcesRecordedHops).
+	// hop passes, the walk then reaches the unrecorded hop, so the chain
+	// cannot be fully evaluated and is refused whatever the recorded hops
+	// allow. A failing recorded hop in the same position denies with its
+	// own cause (TestAgentSecretRead_MixedChainEnforcesRecordedHops).
 	t.Run("recorded hop below an unrecorded hop", func(t *testing.T) {
 		f := newUserScopeChainFixture(t, "uscl-mixed")
 		child, token := f.mixedChain(t, "mixed", store.EffectCeiling{Kind: store.EffectCeilingPrincipal})
@@ -302,11 +408,11 @@ func TestAgentSecretRead_UnrecordedChainKeepsProgenyRule(t *testing.T) {
 		require.False(t, chain.decision.Allowed)
 		assert.True(t, chain.unrecorded, "the deny is the unrecorded upper hop: %q", chain.decision.Reason)
 		assert.Equal(t, DenyCauseCeilingUnrecorded, chain.decision.DenyCause, "reason %q", chain.decision.Reason)
-		f.assertReadAndListAgree(t, child, token, userScopeCeilingKey, true)
+		assert.Equal(t, ReasonChainUnrecorded, f.userItem(t, child, userScopeCeilingKey).Reason)
+		f.assertReadAndListAgree(t, child, token, userScopeCeilingKey, false)
 	})
 
-	// The progeny rule still applies to these chains: an unshared secret is
-	// not returned.
+	// An unshared secret keeps its own, earlier refusal.
 	t.Run("unshared secret", func(t *testing.T) {
 		f := &userScopeCeilingFixture{materialFixture: newMaterialFixture(t, "uscl-unshared")}
 		setBackfillCompleted(t, f.Store)
@@ -315,8 +421,59 @@ func TestAgentSecretRead_UnrecordedChainKeepsProgenyRule(t *testing.T) {
 			Scope: store.ScopeUser, ScopeID: f.UserID, AllowProgeny: false, CreatedBy: f.UserID, UpdatedBy: f.UserID,
 		})
 		require.NoError(t, err)
+		assert.Equal(t, ReasonSharingDisabled, f.userItem(t, f.AgentID, userScopeCeilingKey).Reason)
 		f.assertReadAndListAgree(t, f.AgentID, f.Token, userScopeCeilingKey, false)
 	})
+
+	// An agent with no stored ancestry (a scheduler child, a legacy row) is
+	// refused before any per-item check, as before: the read has no
+	// provenance root.
+	t.Run("empty ancestry", func(t *testing.T) {
+		f := newUserScopeChainFixture(t, "uscl-noanc")
+		id := tid("uscl-noanc-agent")
+		require.NoError(t, f.Store.CreateAgent(context.Background(), &store.Agent{
+			ID: id, Slug: "uscl-noanc", Name: "uscl-noanc", ProjectID: f.ProjectID, Phase: "running",
+			CreatedBy: f.UserID, StateVersion: 1, AppliedConfig: &store.AgentAppliedConfig{AgentRole: string(AgentRoleFull)},
+		}))
+		token := mintRecordedMaterialToken(t, f.Server, f.Store, id, f.ProjectID, []AgentTokenScope{ScopeProjectSecretRead}, nil)
+		code, body := f.readAs(t, id, token, userScopeCeilingKey)
+		assert.NotEqual(t, http.StatusOK, code, "refused before check 8: %s", body)
+		_, keys := f.listKeys(t, id, token, store.ScopeUser)
+		assert.Empty(t, keys)
+	})
+
+	// Re-delegation records the chain, and the read is admitted again.
+	t.Run("recorded edge restores the read", func(t *testing.T) {
+		f := newUserScopeChainFixture(t, "uscl-restored")
+		assert.Equal(t, ReasonChainUnrecorded, f.userItem(t, f.AgentID, userScopeCeilingKey).Reason)
+		f.recordEdge(t, store.DelegationPrincipalUser, f.UserID, f.AgentID, store.EffectCeiling{Kind: store.EffectCeilingPrincipal}, nil)
+		f.assertReadAndListAgree(t, f.AgentID, f.Token, userScopeCeilingKey, true)
+	})
+}
+
+// TestAgentSecretRead_ProjectScopeUnaffectedByUnrecordedChain: a
+// project-scope read never takes check 8, so a chain without recorded
+// provenance is decided there exactly as before (check 7), never with
+// chain_unrecorded; only the user scope is refused. A fully recorded chain
+// still reads the user-scope secret.
+func TestAgentSecretRead_ProjectScopeUnaffectedByUnrecordedChain(t *testing.T) {
+	f := newUserScopeChainFixture(t, "uscl-project")
+	const key = "USCL_PROJECT_KEY"
+	_, _, err := f.Server.secretBackend.Set(context.Background(), &secret.SetSecretInput{
+		Name: key, Value: "v", SecretType: store.SecretTypeEnvironment, Target: key,
+		Scope: store.ScopeProject, ScopeID: f.ProjectID, InjectionMode: store.InjectionModeAlways,
+	})
+	require.NoError(t, err)
+	ident, facts := f.itemFacts(t, f.AgentID)
+	var cache projectDecisionCache
+	item, _, permission, _ := f.Server.selectRuntimeMaterial(context.Background(), ident, facts, store.ScopeProject, key, &cache)
+	assert.Equal(t, store.ScopeProject, item.Scope)
+	assert.Equal(t, "project.secret_read", permission, "check 7 decides the project item")
+	assert.NotEqual(t, ReasonChainUnrecorded, item.Reason)
+	assert.Equal(t, ReasonChainUnrecorded, f.userItem(t, f.AgentID, userScopeCeilingKey).Reason, "the user scope is refused")
+
+	g := newUserScopeCeilingFixture(t, "uscl-project-rec", store.EffectCeiling{Kind: store.EffectCeilingPrincipal})
+	assert.True(t, g.userItem(t, g.AgentID, userScopeCeilingKey).Allowed, "a fully recorded chain is unchanged")
 }
 
 // TestAgentSecretRead_MixedChainEnforcesRecordedHops pins the boundary for
@@ -324,9 +481,9 @@ func TestAgentSecretRead_UnrecordedChainKeepsProgenyRule(t *testing.T) {
 // at its first failing clause, so a recorded hop below the first unrecorded
 // hop is enforced: S3b, S3c and S3d run on it before the walk reaches the
 // unrecorded hop. When that recorded hop fails, the read and the list
-// refuse the secret and the chain is not classed unrecorded. An unrecorded
-// hop by itself never refuses (the passing case is "recorded hop below an
-// unrecorded hop" in TestAgentSecretRead_UnrecordedChainKeepsProgenyRule).
+// refuse the secret with that hop's cause and the chain is not classed
+// unrecorded; when it passes, the unrecorded hop refuses the read
+// (chain_unrecorded, TestAgentSecretRead_UnrecordedChainRefused).
 func TestAgentSecretRead_MixedChainEnforcesRecordedHops(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -522,10 +679,10 @@ func TestAgentSecretList_AgreesWithReadForRecordedChains(t *testing.T) {
 			createDCEdge(t, f.Store, store.DelegationPrincipalUser, f.UserID, store.DelegationPrincipalAgent, f.AgentID,
 				store.RoleScopeProject, f.ProjectID, string(AgentRoleFull))
 			return f.AgentID, f.Token, userScopeCeilingKey
-		}, true},
+		}, false},
 		{"no edge after the backfill", func(t *testing.T, f *userScopeCeilingFixture) (string, string, string) {
 			return f.AgentID, f.Token, userScopeCeilingKey
-		}, true},
+		}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -602,4 +759,164 @@ func TestAgentSecretList_RecordedChainLoads(t *testing.T) {
 		counter.mu.Unlock()
 		assert.Positive(t, faults, "the closure fault was injected")
 	})
+}
+
+// TestAgentSecretRead_ChainVerdictComputedOnce: check 8 computes the chain
+// verdict once per item and Decide's step 10 reuses it, on an allowed and a
+// denied recorded chain. Step 10's decision with the reused verdict equals
+// the decision it reaches computing the verdict itself, and a verdict
+// recorded for another agent, or for the same agent in another project, is
+// not used, and an explain trace computes its own verdict.
+func TestAgentSecretRead_ChainVerdictComputedOnce(t *testing.T) {
+	counts := map[string]int{}
+	var mu sync.Mutex
+	observe := func(agentID string) {
+		mu.Lock()
+		counts[agentID]++
+		mu.Unlock()
+	}
+	userSecretChainVerdictObserver.Store(&observe)
+	t.Cleanup(func() { userSecretChainVerdictObserver.Store(nil) })
+	count := func(id string) int {
+		mu.Lock()
+		defer mu.Unlock()
+		return counts[id]
+	}
+
+	for _, tc := range []struct {
+		name    string
+		ceiling store.EffectCeiling
+		allowed bool
+	}{
+		{"allowed", store.EffectCeiling{Kind: store.EffectCeilingPrincipal}, true},
+		{"denied", boundedCeiling("project.read", "project.secret_read"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newUserScopeCeilingFixture(t, "usc-once-"+tc.name, tc.ceiling)
+			before := count(f.AgentID)
+			item := f.userItem(t, f.AgentID, userScopeCeilingKey)
+			assert.Equal(t, tc.allowed, item.Allowed, "reason %q", item.Reason)
+			assert.Equal(t, 1, count(f.AgentID)-before, "one chain verdict per item")
+
+			// The reused verdict decides as a fresh one does.
+			ctx := context.Background()
+			ident, _ := f.itemFacts(t, f.AgentID)
+			meta, err := f.Server.secretBackend.GetMeta(ctx, userScopeCeilingKey, store.ScopeUser, f.UserID)
+			require.NoError(t, err)
+			req := AuthzRequest{
+				Principal:  principalContextForIdentity(ident),
+				Credential: credentialContextForIdentity(ident),
+				Resource:   userSecretResource(meta.ID, meta.ScopeID),
+				Action:     ActionUse,
+				Permission: secretUsePermission,
+			}
+			fresh := f.Server.authzService.Decide(ctx, req)
+			chain := f.Server.authzService.userSecretChainVerdict(ctx, ident, nil)
+			reused := req
+			reused.userSecretChain = newPrecomputedUserSecretChain(ident, chain)
+			before = count(f.AgentID)
+			got := f.Server.authzService.Decide(ctx, reused)
+			assert.Zero(t, count(f.AgentID)-before, "step 10 reuses the recorded verdict")
+			assert.Equal(t, fresh.Allowed, got.Allowed)
+			assert.Equal(t, fresh.DenyCause, got.DenyCause)
+			assert.Equal(t, fresh.Reason, got.Reason)
+
+			// A verdict recorded for another agent is ignored.
+			other := newFullAgentIdentity(tid("usc-once-other-"+tc.name), f.ProjectID, []string{f.UserID}, []AgentTokenScope{ScopeProjectSecretRead})
+			mismatched := req
+			mismatched.userSecretChain = newPrecomputedUserSecretChain(other, chain)
+			before = count(f.AgentID)
+			got = f.Server.authzService.Decide(ctx, mismatched)
+			assert.Equal(t, 1, count(f.AgentID)-before, "a verdict for another agent is recomputed")
+			assert.Equal(t, fresh.Allowed, got.Allowed)
+
+			// The same agent ID in another project is not the principal.
+			otherProject := newFullAgentIdentity(f.AgentID, tid("usc-once-other-project-"+tc.name), []string{f.UserID}, []AgentTokenScope{ScopeProjectSecretRead})
+			projectMismatch := req
+			projectMismatch.userSecretChain = newPrecomputedUserSecretChain(otherProject, chain)
+			before = count(f.AgentID)
+			got = f.Server.authzService.Decide(ctx, projectMismatch)
+			assert.Equal(t, 1, count(f.AgentID)-before, "a verdict for another project is recomputed")
+			assert.Equal(t, fresh.Allowed, got.Allowed)
+			_, ok := newPrecomputedUserSecretChain(otherProject, chain).verdictFor(ident, nil)
+			assert.False(t, ok)
+
+			// An explain trace computes its own verdict, with its steps.
+			var explain []DecisionStep
+			before = count(f.AgentID)
+			d, _ := f.Server.authzService.evaluateUserSecretParentCeilingWithChain(ctx, ident, req.Resource, &explain, newPrecomputedUserSecretChain(ident, chain))
+			assert.Equal(t, 1, count(f.AgentID)-before, "an explain trace recomputes the verdict")
+			assert.Equal(t, tc.allowed, d.Allowed, "the explain path reaches the same outcome")
+			assert.NotEmpty(t, explain, "the trace carries the verdict's own steps")
+			_, ok = newPrecomputedUserSecretChain(ident, chain).verdictFor(ident, &explain)
+			assert.False(t, ok)
+		})
+	}
+}
+
+// TestAgentSecretRead_ReusedVerdictRecordsUATIntrinsicOnce: a chain whose
+// own hop is recorded from a user access token admits an owner's
+// progeny-shared secret at S3c only through the intrinsic rule. Step 10 with
+// the verdict computed once and reused records scion.hub.authz.uat_intrinsic
+// once and computes no second verdict. The use is counted from the
+// decision, not from computing the verdict: computing the verdict alone
+// counts nothing, and a step 10 that computes its own verdict counts once too.
+func TestAgentSecretRead_ReusedVerdictRecordsUATIntrinsicOnce(t *testing.T) {
+	counts := map[string]int{}
+	var mu sync.Mutex
+	observe := func(agentID string) {
+		mu.Lock()
+		counts[agentID]++
+		mu.Unlock()
+	}
+	userSecretChainVerdictObserver.Store(&observe)
+	t.Cleanup(func() { userSecretChainVerdictObserver.Store(nil) })
+	count := func(id string) int {
+		mu.Lock()
+		defer mu.Unlock()
+		return counts[id]
+	}
+
+	f := newSDFixture(t, "ui-reuse")
+	id, _ := f.uiDirect(t, "reuse", nil)
+	ctx := context.Background()
+	agent, err := f.Store.GetAgent(ctx, id)
+	require.NoError(t, err)
+	ident := &storedAgentIdentity{agent: agent}
+	meta, err := f.Server.secretBackend.GetMeta(ctx, sdAlwaysKey, store.ScopeUser, f.UserID)
+	require.NoError(t, err)
+	require.True(t, meta.AllowProgeny, "fixture: the secret is shared with progeny")
+	a := f.Server.authzService
+
+	uses0, verdicts0 := a.UATIntrinsicUses(), count(id)
+	chain := a.userSecretChainVerdict(ctx, ident, nil)
+	require.True(t, chain.decision.Allowed, "fixture: the chain admits the secret: %s", chain.decision.Reason)
+	require.True(t, chain.uatIntrinsic, "fixture: S3c passes only through the intrinsic rule")
+	assert.Equal(t, 1, count(id)-verdicts0, "one verdict computed")
+	assert.Equal(t, uses0, a.UATIntrinsicUses(), "computing the verdict counts no use")
+
+	req := AuthzRequest{
+		Principal:       principalContextForIdentity(ident),
+		Credential:      credentialContextForIdentity(ident),
+		Resource:        userSecretResource(meta.ID, meta.ScopeID),
+		Action:          ActionUse,
+		Permission:      secretUsePermission,
+		userSecretChain: newPrecomputedUserSecretChain(ident, chain),
+	}
+	uses1, verdicts1 := a.UATIntrinsicUses(), count(id)
+	ok, reason, err := a.checkUserSecretParentCeiling(ctx, req, id, nil, nil)
+	require.NoError(t, err)
+	require.True(t, ok, "step 10 with the reused verdict allows: %s", reason)
+	assert.Equal(t, int64(1), a.UATIntrinsicUses()-uses1, "the reused verdict records uat_intrinsic once")
+	assert.Zero(t, count(id)-verdicts1, "step 10 reuses the verdict")
+
+	// Control: step 10 computing its own verdict also counts exactly once.
+	fresh := req
+	fresh.userSecretChain = nil
+	uses2, verdicts2 := a.UATIntrinsicUses(), count(id)
+	ok, reason, err = a.checkUserSecretParentCeiling(ctx, fresh, id, nil, nil)
+	require.NoError(t, err)
+	require.True(t, ok, "step 10 with a fresh verdict allows: %s", reason)
+	assert.Equal(t, int64(1), a.UATIntrinsicUses()-uses2, "a fresh verdict also records once")
+	assert.Equal(t, 1, count(id)-verdicts2, "a fresh step 10 computes its own verdict")
 }

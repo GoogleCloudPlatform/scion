@@ -144,7 +144,7 @@ An artifact whose entry file is HTML, such as a single page or a small site publ
 - **Scripts run, isolated.** The page's scripts run in an isolated origin with no access to the Hub page around it, your session or the Hub API. They cannot make network requests, open windows, submit forms or navigate away.
 - **Keep every asset in the bundle.** Images, styles, scripts and fonts load only from the bundle's own files. Images referenced by absolute `http(s)` URL do not load; the publish prints a warning, and the viewer shows one above the frame.
 - **The view expires.** A view lasts 30 minutes. After that the page says so and offers **Reload view**. **Full screen** and **Open in new tab** are on the bar above the frame.
-- **The view URL works without signing in.** Anyone holding the URL behind **Open in new tab** can open that version until the view expires, and it cannot be revoked. Treat it as a temporary access URL: do not paste it into chat or tickets; share the `scion://artifact/` reference instead.
+- **The view URL works without signing in.** Anyone holding the URL behind **Open in new tab** can open that version until the view expires, and it cannot be revoked. Treat it as a temporary access URL: do not paste it into chat or tickets; share the `scion://artifact/` reference instead. When a Hub administrator configures a separate content host (`server.hub.content_url`; see [`server.hub.content_url`: the content host](/scion/reference/admin-settings/#serverhubcontent_url-the-content-host) and [Content Host](/scion/reference/security/#6-content-host)), share links and the HTML artifact views opened from them are served on that content host with ambient credentials stripped.
 
 Markdown artifacts are different. Their preview runs no scripts: HTML written in the Markdown is shown as plain text, and links open in a new tab. When you publish a Markdown artifact, the Hub fetches the remote images it references and serves copies from then on. Images that could not be fetched show a placeholder instead.
 
@@ -158,7 +158,7 @@ A review is a version that carries suggestion and comment marks (in [CriticMarku
 
 ### Review in the web UI
 
-On the current version of a Markdown artifact, choose **Review**. An editor opens beside a live preview.
+On the current version of a Markdown artifact, choose **Review**. An editor opens beside a live preview (on touch screens with a coarse pointer, the review editor, note dialog, and source editor enforce a `16px` minimum font size so mobile browsers do not zoom on focus and push the pinned review toolbar off-screen).
 
 1. Select text and choose **Comment**, **Suggest**, **Insert** or **Delete** to add a mark. Marks cannot be nested, and the toolbar refuses a selection that falls inside code; a short hint says why.
 2. **Save review** publishes your marked-up copy as a version of kind *review*, with an optional note. It stays disabled until there is at least one mark, and while text outside your marks differs from the version you started from.
@@ -211,7 +211,7 @@ On the artifact's page, **Share** opens a dialog with three parts: **Share links
 
 A share link lets anyone who holds it open the artifact's **current** version in a browser **without signing in**. Use one for readers who do not have an account on the Hub.
 
-- Choose a lifetime (1, 7 or 30 days) and **Create link**. The link is shown **once**, with **Copy**; copy it then.
+- Choose a lifetime (1, 7 or 30 days) and **Create link**. The link is shown **once**, with **Copy**; copy it then. When the Hub has `server.hub.content_url` configured, the dialog and `scion artifact share` return the link on that content host (`shareUrl`).
 - Treat the link like a password: anyone holding it can open the artifact until it expires or you **Revoke** it. Every link expires, at the latest when the artifact itself expires.
 - An HTML entry renders in its sandbox; a Markdown entry opens as plain text.
 - A link gives no other access: it does not add the artifact to anyone's list.
@@ -235,6 +235,8 @@ Search for a user, or for a project when the Hub's cross-project sharing setting
 | *Can manage* | Also share it, change its lifetime, move it and delete it |
 
 A grant to a project covers its members and its agents. The home project is listed first: it always has at least *Can view*, can be raised to *Can edit*, and cannot be removed. Grants stay until they are removed or the artifact is deleted.
+
+When adding or raising a grant for a user (`user:`), the owner, an admin grantee, or a [steward](#share-an-agents-artifact) can pass `--notify` on `scion artifact grants` (or set `notify` to `true` on `POST /api/v1/artifacts/{id}/grants`) to send that user an in-app notification (`artifact_grant`, with status `ARTIFACT_REVIEW_REQUESTED` for `review` or `ARTIFACT_SHARED` for `read`, `write`, or `admin`). See [Grants](/scion/reference/artifacts/#grants) for eligibility, rate limits, and `notifySkipped` reasons.
 
 ### Share an agent's artifact
 

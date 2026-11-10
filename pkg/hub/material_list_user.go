@@ -37,7 +37,10 @@ import (
 //     check (S4b, S5-S8 of EvaluateUserSecretParentCeiling) and the agent's
 //     own access constraints for secret.use on that secret (Decide step 7c),
 //     evaluated per item against inputs loaded once per request;
-//   - a chain without recorded provenance: the progeny filters alone.
+//   - a chain without recorded provenance: the user part is empty and one
+//     request-level chain_unrecorded item is recorded, as check 8 refuses
+//     every user-scope read for that chain (one rate-limited Warn per
+//     agent, shared with the read).
 func (s *Server) agentListUserSecrets(
 	ctx context.Context,
 	agentID string,
@@ -54,7 +57,12 @@ func (s *Server) agentListUserSecrets(
 	case chain.decision.DenyCause == DenyCauseCeilingError:
 		return secrets, items, false
 	case !chain.decision.Allowed && chain.unrecorded:
-		return s.agentListUserSecretsProgeny(ctx, agentID, facts, secrets, items)
+		s.warnUnrecordedChainRefusal(ctx, "list", agentID, chain)
+		items = append(items, materialSelectionItem(ItemResult{
+			Candidate: Candidate{Kind: MaterialKindSecret, Scope: store.ScopeUser, ScopeID: facts.Root.ID, Grant: GrantProgeny},
+			Reason:    ReasonChainUnrecorded,
+		}, "", chain.decision.Reason))
+		return secrets, items, true
 	case !chain.decision.Allowed:
 		items = append(items, materialSelectionItem(ItemResult{
 			Candidate: Candidate{Kind: MaterialKindSecret, Scope: store.ScopeUser, ScopeID: facts.Root.ID, Grant: GrantProgeny},
@@ -159,64 +167,4 @@ func restrictionsAllow(restrictions []Restriction, permissionID string) bool {
 		}
 	}
 	return true
-}
-
-// agentListUserSecretsProgeny is the user part of the agent secret list for a
-// chain without recorded provenance: the progeny eligible set
-// (progenyEligibleSecretIDs), AllowProgeny and source liveness.
-func (s *Server) agentListUserSecretsProgeny(
-	ctx context.Context,
-	agentID string,
-	facts *TargetFacts,
-	secrets []AgentSecretMeta,
-	items []MaterialSelectionEventItem,
-) ([]AgentSecretMeta, []MaterialSelectionEventItem, bool) {
-	eligible, err := s.progenyEligibleSecretIDs(ctx, facts.Agent)
-	if err != nil {
-		return secrets, items, false
-	}
-	metas, err := s.secretBackend.List(ctx, secret.Filter{
-		Scope:   store.ScopeUser,
-		ScopeID: facts.Root.ID,
-	})
-	if err != nil {
-		return secrets, items, false
-	}
-	for _, m := range metas {
-		if m.SecretType == store.SecretTypeInternal {
-			continue
-		}
-		if !m.AllowProgeny || !eligible[m.ID] {
-			continue
-		}
-		live, kind, _, lerr := s.progenySourceLive(ctx, m)
-		if lerr != nil {
-			// A liveness-check error is not the same as "not shared":
-			// logged distinctly so an operator is not left to guess
-			// which one occurred, and recorded as a per-row item so the
-			// audit event shows the row was skipped rather than simply
-			// absent.
-			slog.Error("agent list secrets: progeny source liveness check failed",
-				"agent_id", agentID, "key", m.Name, "err", lerr)
-			items = append(items, materialSelectionItem(ItemResult{
-				Candidate: Candidate{Kind: MaterialKindSecret, Key: m.Name, Scope: store.ScopeUser, ScopeID: facts.Root.ID, Grant: GrantProgeny, Meta: m},
-				Reason:    ReasonBackendError,
-			}, "", ""))
-			continue
-		}
-		if !live {
-			continue
-		}
-		var src *SourceRef
-		if kind != "" {
-			src = &SourceRef{Kind: kind, ID: m.CreatedBy}
-		}
-		secrets = append(secrets, AgentSecretMeta{Key: m.Name, Type: m.SecretType, Target: m.Target})
-		items = append(items, materialSelectionItem(ItemResult{
-			Candidate: Candidate{Kind: MaterialKindSecret, Key: m.Name, Scope: store.ScopeUser, ScopeID: facts.Root.ID, Grant: GrantProgeny, SharingSource: src, Meta: m},
-			Allowed:   true,
-			Reason:    ReasonAllowed,
-		}, "", ""))
-	}
-	return secrets, items, true
 }

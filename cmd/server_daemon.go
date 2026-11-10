@@ -190,6 +190,11 @@ func resolveDaemonServerMode(cmd *cobra.Command) error {
 // runServerStartOrDaemon handles the server start command. By default it launches
 // the server as a background daemon. When --foreground is set, it runs directly.
 func runServerStartOrDaemon(cmd *cobra.Command, args []string) error {
+	// Resolve a relative --config against the launch directory, for this
+	// process's own reads and for the daemon child's args alike.
+	if err := absolutizeServerConfigPath(); err != nil {
+		return err
+	}
 	if serverStartForeground {
 		return runServerStart(cmd, args)
 	}
@@ -230,6 +235,17 @@ func runServerStartOrDaemon(cmd *cobra.Command, args []string) error {
 	// Check if at least one component is enabled
 	if !enableHub && !enableRuntimeBroker && !enableWeb {
 		return fmt.Errorf("no server components enabled; use --enable-hub, --enable-runtime-broker, or --enable-web")
+	}
+
+	// The convert host lock check (convert-apply design section 4.7), run
+	// here too so a refusal is reported directly instead of as a failed
+	// daemon start. The foreground server process takes the lock itself.
+	if enableRuntimeBroker {
+		lock, err := acquireConvertStartLock(globalDir)
+		if err != nil {
+			return err
+		}
+		lock.Release()
 	}
 
 	// Find the scion executable

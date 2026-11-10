@@ -105,7 +105,6 @@ export default defineConfig({
 							items: [
 								{ label: 'Overview', slug: 'release-notes' },
 								{ label: 'v0.3.0', slug: 'release-notes/v0-3-0' },
-								{ label: 'v0.3.0-preview.8', slug: 'release-notes/v0-3-0-preview-8' },
 								{ label: 'v0.3.0-preview.7', slug: 'release-notes/v0-3-0-preview-7' },
 								{ label: 'v0.3.0-preview.6', slug: 'release-notes/v0-3-0-preview-6' },
 								{ label: 'Oct 26 -- Nov 1', slug: 'release-notes/2026-10-26' },

@@ -2090,8 +2090,9 @@ type TestIdentityDelegation struct {
 	RevokedBy *string
 	// GrantorKind is DelegationGrantorHuman (the API path) or
 	// DelegationGrantorTestInfraOffline (phase DL: written only by the
-	// offline host command, member scope only). An empty value reads as
-	// human (the column default).
+	// offline host command; the member scope, or the hub-admin scope
+	// behind the offline admin delegation setting). An empty value reads
+	// as human (the column default).
 	GrantorKind string
 	// HubID is the hub id an offline delegation is bound to; empty for a
 	// human grantor.
@@ -2139,6 +2140,45 @@ const (
 	// delegations one hub may hold at once (4 x 5 = the hub-wide cap of 20).
 	TestInfraOfflineMaxLiveDelegations = 4
 )
+
+// Bounds of an offline delegation of the hub-admin scope. The offline
+// writer creates one only when the hub's configuration carries
+// server.hub.test_identities.offline_admin_delegations for its hub id, and
+// the hub honours it only while the running hub has that setting on at
+// --test-mode=admin or above. The test super-admin scope is never
+// delegable offline.
+const (
+	// TestInfraOfflineAdminDelegationScope is the hub-admin scope an
+	// offline delegation may hold: test hub-admin issuance only.
+	TestInfraOfflineAdminDelegationScope = "test_identity:issue_admin"
+	// TestInfraOfflineAdminDelegationMaxTTL is the longest lifetime of an
+	// offline hub-admin delegation (the hub-admin delegation maximum age).
+	TestInfraOfflineAdminDelegationMaxTTL = 8 * time.Hour
+	// TestInfraOfflineAdminDelegationDefaultTTL is the default lifetime.
+	TestInfraOfflineAdminDelegationDefaultTTL = 4 * time.Hour
+	// TestInfraOfflineAdminDelegationMaxAdminCap is the largest number of
+	// live test hub-admins one offline hub-admin delegation may hold (the
+	// hub-admin delegation maximum; the hub-wide admin cap applies on top).
+	TestInfraOfflineAdminDelegationMaxAdminCap = 2
+	// TestInfraOfflineAdminDelegationDefaultAdminCap is the default cap.
+	TestInfraOfflineAdminDelegationDefaultAdminCap = 1
+	// TestInfraOfflineMaxLiveAdminDelegations is the most live offline
+	// hub-admin delegations one hub may hold at once. They count toward
+	// TestInfraOfflineMaxLiveDelegations too.
+	TestInfraOfflineMaxLiveAdminDelegations = 1
+)
+
+// IsSuperAdminIssueVariant reports whether s names test super-admin
+// issuance in any spelling: the permission or the scope form (either
+// separator), any letter case, surrounding whitespace, or "super-admin" /
+// "superadmin". Every offline delegation check (the offline writer and the
+// hub) refuses such a value before any other comparison; this is the one
+// shared normaliser.
+func IsSuperAdminIssueVariant(s string) bool {
+	n := strings.ToLower(strings.TrimSpace(s))
+	n = strings.NewReplacer("-", "", "_", "", ".", "", ":", "").Replace(n)
+	return strings.Contains(n, "superadmin")
+}
 
 // testInfraOfflineGrantorNamespace is the UUID namespace of the reserved
 // grantor id of an offline delegation (a fixed, random v4 UUID).
@@ -4918,6 +4958,9 @@ const (
 	// (ptone/scion#4240) passed its expiry, so it is no longer admitted
 	// anywhere and its agents are held until the expiry reaper purges them.
 	MembershipLossTriggerTestIdentityExpiry MembershipLossTrigger = "test_identity_expiry"
+	// MembershipLossTriggerMemberLeave: the user left the project
+	// (POST /api/v1/projects/{id}/leave, ptone/scion#7494).
+	MembershipLossTriggerMemberLeave MembershipLossTrigger = "member_leave"
 )
 
 // ValidMembershipLossTrigger reports whether t is a recognised trigger.
@@ -4933,7 +4976,8 @@ func ValidMembershipLossTrigger(t MembershipLossTrigger) bool {
 		MembershipLossTriggerSystemScopeChange,
 		MembershipLossTriggerRestoreCheck,
 		MembershipLossTriggerReconcile,
-		MembershipLossTriggerTestIdentityExpiry:
+		MembershipLossTriggerTestIdentityExpiry,
+		MembershipLossTriggerMemberLeave:
 		return true
 	}
 	return false

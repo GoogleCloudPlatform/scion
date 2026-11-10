@@ -314,7 +314,7 @@ func runBrokerJoin(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("broker %s joined the hub, but saving its credentials failed: %w", joined.BrokerID, joined.SaveErr)
 	}
 
-	persistBrokerHubSettings(os.Stderr, globalDir, endpoint, joined.BrokerID, hubName)
+	persistBrokerHubSettings(os.Stderr, globalDir, endpoint, joined.BrokerID)
 
 	fmt.Printf("Broker %s joined hub %s; credentials saved to %s\n", joined.BrokerID, config.RedactURL(endpoint), multiStore.Dir())
 	return nil
@@ -399,18 +399,19 @@ func completeJoinAndPersist(ctx context.Context, client hubclient.Client, p brok
 	}, nil
 }
 
-// persistBrokerHubSettings records the broker ID, the broker's reporting
-// hub and the hub connection entry in global settings. The hub goes to the
-// server-scoped server.broker.hub_endpoint, and only when that is unset, so
-// the first registration names the hub the broker reports to and later ones
-// (extra hubs, kept in hub_connections and the credential store) do not move
-// it. It is not written on a host that runs a co-located workstation hub
-// (one with a dev token): there the key would take precedence over the
+// persistBrokerHubSettings records the broker ID and the broker's reporting
+// hub in global settings. The hub goes to the server-scoped
+// server.broker.hub_endpoint, and only when that is unset, so the first
+// registration names the hub the broker reports to and later ones (extra
+// hubs, kept in the broker credential store) do not move it. Hub
+// connections live in the broker credential store (ptone/scion#3493). The
+// hub endpoint is not written on a host that runs a co-located workstation
+// hub (one with a dev token): there the key would take precedence over the
 // co-located localhost and move the local broker onto the registered hub.
 // The CLI's hub.endpoint is never written. Failures are reported to w as
 // warnings, as 'register' has always done. A broker ID that is not a single
 // path element is not saved, and neither is anything else (warned to w).
-func persistBrokerHubSettings(w io.Writer, globalDir, endpoint, brokerID, hubName string) {
+func persistBrokerHubSettings(w io.Writer, globalDir, endpoint, brokerID string) {
 	if err := brokercredentials.ValidateBrokerIDPathElement(brokerID); err != nil {
 		_, _ = fmt.Fprintf(w, "Warning: not saving the broker ID or hub settings: %v\n", err)
 		return
@@ -426,10 +427,6 @@ func persistBrokerHubSettings(w io.Writer, globalDir, endpoint, brokerID, hubNam
 		if err := saveBrokerHubEndpointIfUnset(globalDir, endpoint); err != nil {
 			_, _ = fmt.Fprintf(w, "Warning: failed to save hub endpoint to global settings: %v\n", err)
 		}
-	}
-	// Write hub_connections entry for this registration
-	if err := config.UpdateSetting(globalDir, "hub_connections."+hubName+".endpoint", endpoint, true); err != nil {
-		_, _ = fmt.Fprintf(w, "Warning: failed to save hub connection to settings: %v\n", err)
 	}
 }
 

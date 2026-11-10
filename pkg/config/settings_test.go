@@ -15,6 +15,7 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -538,45 +539,39 @@ func TestHubSettingsLoadFromGlobal(t *testing.T) {
 	}
 }
 
-func TestUpdateSettingHubConnections(t *testing.T) {
+// hub_connections is read but not written (ptone/scion#3493): UpdateSetting
+// refuses it and every key under it before any I/O, whatever its shape, and
+// the settings directory is left as it was.
+func TestUpdateSettingHubConnectionsRefused(t *testing.T) {
 	tmpDir := t.TempDir()
 	originalHome := os.Getenv("HOME")
 	defer func() { _ = os.Setenv("HOME", originalHome) }()
 	_ = os.Setenv("HOME", tmpDir)
 
-	projectDir := filepath.Join(tmpDir, "my-project")
-	projectScionDir := filepath.Join(projectDir, ".scion")
+	projectScionDir := filepath.Join(tmpDir, "my-project", ".scion")
 	if err := os.MkdirAll(projectScionDir, 0755); err != nil {
 		t.Fatal(err)
 	}
 
-	// hub_connections.* keys are silently skipped in v1 format (not supported)
-	err := UpdateSetting(projectScionDir, "hub_connections.hub-prod.endpoint", "https://hub.prod.example.com", false)
-	if err != nil {
-		t.Fatalf("UpdateSetting hub_connections should not error (silently skipped in v1): %v", err)
+	for _, key := range []string{
+		"hub_connections",
+		"hub_connections.hub-prod.endpoint",
+		"hub_connections.hub-prod",
+		"hub_connections.hub-prod.unknown_field",
+	} {
+		for _, global := range []bool{false, true} {
+			err := UpdateSetting(projectScionDir, key, "https://hub.prod.example.com", global)
+			if !errors.Is(err, ErrSettingNotWritable) {
+				t.Errorf("UpdateSetting(%q, global=%v) = %v, want ErrSettingNotWritable", key, global, err)
+			}
+		}
 	}
-}
-
-func TestUpdateSettingHubConnectionsInvalidKey(t *testing.T) {
-	tmpDir := t.TempDir()
-	originalHome := os.Getenv("HOME")
-	defer func() { _ = os.Setenv("HOME", originalHome) }()
-	_ = os.Setenv("HOME", tmpDir)
-
-	projectScionDir := filepath.Join(tmpDir, ".scion")
-	if err := os.MkdirAll(projectScionDir, 0755); err != nil {
+	entries, err := os.ReadDir(projectScionDir)
+	if err != nil {
 		t.Fatal(err)
 	}
-
-	// In v1 format, hub_connections.* keys are silently skipped regardless of structure
-	err := UpdateSetting(projectScionDir, "hub_connections.hub-prod", "value", false)
-	if err != nil {
-		t.Errorf("hub_connections keys should be silently skipped in v1: %v", err)
-	}
-
-	err = UpdateSetting(projectScionDir, "hub_connections.hub-prod.unknown_field", "value", false)
-	if err != nil {
-		t.Errorf("hub_connections keys should be silently skipped in v1: %v", err)
+	if len(entries) != 0 {
+		t.Errorf("a refused write created %d entries in the settings directory", len(entries))
 	}
 }
 

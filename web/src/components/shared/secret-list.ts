@@ -31,6 +31,7 @@ import type { Secret, SecretType, ResourceScope, InjectionMode } from '../../sha
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { resourceStyles } from './resource-styles.js';
 import { showToast } from '../../utils/toast.js';
+import { copyToClipboard, showCopyFailedToast } from '../../utils/clipboard.js';
 import { showConfirm } from './confirm-dialog.js';
 import { formatRelative } from '../../utils/time.js';
 
@@ -264,15 +265,14 @@ export class ScionSecretList extends LitElement {
 
   private async copySecretRef(secret: Secret): Promise<void> {
     if (!secret.secretRef) return;
-    try {
-      await navigator.clipboard.writeText(secret.secretRef);
-      this.copiedSecretKey = secret.key;
-      setTimeout(() => {
-        this.copiedSecretKey = null;
-      }, 1500);
-    } catch {
-      // Silently fail if clipboard is unavailable
+    if (!(await copyToClipboard(secret.secretRef))) {
+      showCopyFailedToast();
+      return;
     }
+    this.copiedSecretKey = secret.key;
+    setTimeout(() => {
+      this.copiedSecretKey = null;
+    }, 1500);
   }
 
   // ── Rendering ────────────────────────────────────────────────────────

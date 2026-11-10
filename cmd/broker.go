@@ -118,7 +118,7 @@ Commands:
   hubs         List hub connections
   provide      Add this broker as a provider for a project
   withdraw     Remove this broker as a provider from a project
-  convert      Plan a move to flat Runtime Brokers (read-only, experimental)`,
+  convert      Plan, apply or roll back a move to flat Runtime Brokers (experimental)`,
 }
 
 // brokerRegisterCmd registers this broker with the Hub
@@ -194,7 +194,7 @@ This command will:
 
 Use --broker-only to only remove the broker record without affecting project providers.
 
-Local state: deregister removes this hub's credentials file, its
+Local state: deregister removes this hub's credentials file, any legacy
 hub_connections entry and (when no connections remain) the empty
 hub-credentials/ directory. Broker-local state stays: the broker daemon log
 (broker.log), the broker's state directory and the broker template cache
@@ -647,7 +647,7 @@ func runBrokerRegister(cmd *cobra.Command, args []string) error {
 	if globalDirErr != nil {
 		fmt.Printf("Warning: failed to get global directory: %v\n", globalDirErr)
 	} else {
-		persistBrokerHubSettings(os.Stdout, globalDir, endpoint, brokerID, hubName)
+		persistBrokerHubSettings(os.Stdout, globalDir, endpoint, brokerID)
 		if brokerNameSet {
 			persistBrokerName(os.Stdout, brokerName)
 		}
@@ -2285,12 +2285,22 @@ func resolveProjectByNameOrID(ctx context.Context, client hubclient.Client, name
 		if uat {
 			return nil, hubsync.ScopedTokenProjectLookupEmptyError(nameOrID)
 		}
-		return nil, fmt.Errorf("project '%s' not found", nameOrID)
+		return nil, &projectNotFoundError{ref: nameOrID}
 	case 1:
 		return &resp.Projects[0], nil
 	default:
 		return nil, fmt.Errorf("multiple projects found with name '%s' - please use the project ID instead", nameOrID)
 	}
+}
+
+// projectNotFoundError is resolveProjectByNameOrID's answer when no
+// project matches the reference (by ID, slug or name). Its message is the
+// resolver's plain not-found text; callers that must tell a missing
+// project from other failures check for it with errors.As.
+type projectNotFoundError struct{ ref string }
+
+func (e *projectNotFoundError) Error() string {
+	return fmt.Sprintf("project '%s' not found", e.ref)
 }
 
 // resolveBrokerByNameOrID resolves a broker identifier (name or ID) to a broker.

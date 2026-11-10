@@ -11,6 +11,7 @@ import (
 	logging "cloud.google.com/go/logging/apiv2"
 	"cloud.google.com/go/logging/apiv2/loggingpb"
 	"google.golang.org/api/iterator"
+	"google.golang.org/api/option"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -79,8 +80,11 @@ func (c *googleLogEntryClient) Close() error {
 	return c.client.Close()
 }
 
-func NewLogClient(ctx context.Context, projectID string) (*LogClient, error) {
-	client, err := logging.NewClient(ctx)
+// NewLogClient returns a Cloud Logging client for projectID. opts are the
+// client options (a flat instance's own credentials); without any the
+// client uses Application Default Credentials.
+func NewLogClient(ctx context.Context, projectID string, opts ...option.ClientOption) (*LogClient, error) {
+	client, err := logging.NewClient(ctx, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("creating logging client: %w", err)
 	}

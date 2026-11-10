@@ -119,6 +119,47 @@ var projectOperations = []OperationSpec{
 		Bearer:      membershipTokenBearer("TestMembershipToken_GovernanceMatrixApplies"),
 	},
 	{
+		ID:          "project.membership.leave",
+		Domain:      "project.membership",
+		Description: "Leave a project: remove the caller's own direct project roles (ptone/scion#7494)",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/leave", Method: "POST"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "project-from-url",
+		// Any member holds project.read; the service then requires a
+		// direct binding. A caller who cannot read the project gets the
+		// same 404 as for a missing project.
+		BasePermission: "project.read",
+		// revoke-authority covers the removed bindings and the caller's
+		// project-boundary access tokens, revoked in the same transaction
+		// when the caller keeps no access to the project (R1).
+		Effects:        []SecurityEffect{EffectRevokeAuthority},
+		DelegationKind: DelegationNone,
+		Governance: &GovernancePolicy{
+			Kind:        GovernancePeerSuperior,
+			Description: "self only: removes the caller's own direct user bindings on the project, classified removable by leaveBindingClass (allow-list, fails closed); never another principal, never group, agent or visitor bindings. The governance matrix and the hub-level role-binding override do not apply. Enforced by ProjectMembershipService.LeaveProject.",
+		},
+		AuthorityEval: AuthorityEvalProposedPost,
+		Invariants: []Invariant{
+			{ID: "last-owner-guard", Description: "The last usable direct owner cannot leave", Kind: InvariantSecurity, FailClosed: true},
+			{ID: "constraint-admin-lockout", Description: "A leave cannot leave a scope without a constraint admin", Kind: InvariantSecurity, FailClosed: true},
+		},
+		AuditObligation: &AuditObligation{
+			EventType:     "project_member_leave",
+			ContextFields: []string{"actor_id", "project_id"},
+			BeforeFields:  []string{"target_principal_id", "target_roles"},
+			Atomic:        true,
+		},
+		DenialCodes: []DenialCode{DenialForbidden, DenialResourceNotFound, DenialLastOwner, DenialMembershipGroupDerived, DenialConstraintAdminLockout, DenialCredentialInsufficient, DenialLeaveBindingUnclassified, DenialConflict},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestProjectLeave_TokenRefusedSessionOnly"},
+		},
+		Bearer: SessionOnly(ReasonGovernancePending),
+	},
+	{
 		ID:          "project.membership.list",
 		Domain:      "project.membership",
 		Description: "List project members and their roles",
@@ -1365,6 +1406,38 @@ var projectOperations = []OperationSpec{
 		TestRefs: []TestRef{
 			{Package: "pkg/hub", Function: "TestArtifactsTwoStepBundleOnRoutes"},
 			{Package: "pkg/artifacts", Function: "TestTwoStepWriteAuthorization"},
+		},
+		Bearer: artifactVersionBearer,
+	},
+	{
+		ID:          "artifact.review.session.write",
+		Domain:      "artifact",
+		Description: "Record or end the caller's own review session of an artifact (the heartbeat of a review tab, ptone/scion#6849); 404 while the hub.artifacts_open_review_check experiment is off; any caller who may start a review version passes (the write check of artifact.version.create); rate limited per principal after authorization; the row is always the caller's own; a DELETE that deletes the caller's session row writes a review_session_ended decision-log entry; the Hub keeps the row until the reaper deletes it, at least an hour after its last beat, so this includes a session that no longer counts as open; a DELETE when no such row exists writes none (both answer 204)",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts/{id}/review-sessions/{sid}", Method: "PUT"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts/{id}/review-sessions/{sid}", Method: "DELETE"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
+		ResourceResolver: "artifact-home-project",
+		BasePermission:   "artifact.create",
+		Effects:          []SecurityEffect{EffectCreateResource, EffectDeleteResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		AuditObligation: &AuditObligation{
+			EventType:     "artifact decision log (review_session_ended)",
+			ContextFields: []string{"route", "principal_kind", "principal_id", "project_id"},
+			BeforeFields:  []string{"artifact_id"},
+			Atomic:        false,
+			NonAtomicJustification: "The entry is written after the store deletes the session row, outside its transaction, as for every artifact decision-log entry. " +
+				"The row is the caller's own presence signal: it stops counting as open at most five minutes after its last beat (sooner for an idle or outdated review) and is kept until the reaper deletes it, at least an hour after its last beat, so a lost entry loses no authority or data. " +
+				"The decision log rather than a durable artifact_event record is a deliberate choice for this ephemeral row only; it is not a precedent for an operation that deletes a durable resource",
+		},
+		DenialCodes: []DenialCode{DenialResourceNotFound, DenialForbidden, "rate_limited", "too_many_review_sessions"},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestArtifactsOpenReviewOnRoutes"},
+			{Package: "pkg/artifacts", Function: "TestReviewSessionAuthorization"},
+			{Package: "pkg/artifacts", Function: "TestReviewSessionEndLogged"},
 		},
 		Bearer: artifactVersionBearer,
 	},

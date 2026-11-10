@@ -16,6 +16,7 @@ package storetest
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -433,5 +434,66 @@ func UserDeletionConformance(t *testing.T, factory Factory) {
 		n, err = s.RevokeUserAccessTokensForUser(ctx, u.ID)
 		require.NoError(t, err)
 		assert.Zero(t, n)
+	})
+
+	// RevokeUserAccessTokensForUserProject (ptone/scion#7494): only the
+	// user's unrevoked project-boundary tokens for that project are
+	// revoked, and their IDs are returned.
+	t.Run("RevokeUserAccessTokensForUserProject", func(t *testing.T) {
+		s := factory(t)
+		u := seedUser(t, s)
+		other := seedUser(t, s)
+		mkProject := func() string {
+			p := uuid.NewString()
+			require.NoError(t, s.CreateProject(ctx, &store.Project{ID: p, Name: "leave-" + p[:8], Slug: "leave-" + p[:8]}))
+			return p
+		}
+		project, otherProject := mkProject(), mkProject()
+		mk := func(userID, boundary, projectID string, revoked bool) string {
+			id := uuid.NewString()
+			require.NoError(t, s.CreateUserAccessToken(ctx, &store.UserAccessToken{
+				ID: id, UserID: userID, Name: "t", Prefix: id[:8], KeyHash: "hash-" + id,
+				BoundaryKind: boundary, ProjectID: projectID, Scopes: []string{"agent:read"}, Revoked: revoked,
+			}))
+			return id
+		}
+		want1 := mk(u.ID, "project", project, false)
+		want2 := mk(u.ID, "project", project, false)
+		alreadyRevoked := mk(u.ID, "project", project, true)
+		otherProjectTok := mk(u.ID, "project", otherProject, false)
+		hubTok := mk(u.ID, "hub", "", false)
+		otherUserTok := mk(other.ID, "project", project, false)
+
+		ids, err := s.RevokeUserAccessTokensForUserProject(ctx, u.ID, project)
+		require.NoError(t, err)
+		assert.ElementsMatch(t, []string{want1, want2}, ids, "only the user's unrevoked tokens for the project")
+		for _, id := range []string{want1, want2, alreadyRevoked} {
+			tok, err := s.GetUserAccessToken(ctx, id)
+			require.NoError(t, err)
+			assert.True(t, tok.Revoked, id)
+		}
+		for _, id := range []string{otherProjectTok, hubTok, otherUserTok} {
+			tok, err := s.GetUserAccessToken(ctx, id)
+			require.NoError(t, err)
+			assert.False(t, tok.Revoked, "token %s must be untouched", id)
+		}
+
+		ids, err = s.RevokeUserAccessTokensForUserProject(ctx, u.ID, project)
+		require.NoError(t, err)
+		assert.Empty(t, ids, "a second call revokes nothing")
+
+		// Revocation inside a transaction rolls back with it.
+		again := mk(u.ID, "project", project, false)
+		errRollback := errors.New("rollback")
+		err = s.WithTx(ctx, func(tx store.Store) error {
+			got, err := tx.RevokeUserAccessTokensForUserProject(ctx, u.ID, project)
+			require.NoError(t, err)
+			assert.Equal(t, []string{again}, got)
+			return errRollback
+		})
+		require.ErrorIs(t, err, errRollback)
+		tok, err := s.GetUserAccessToken(ctx, again)
+		require.NoError(t, err)
+		assert.False(t, tok.Revoked, "a rolled-back revocation leaves the token usable")
 	})
 }

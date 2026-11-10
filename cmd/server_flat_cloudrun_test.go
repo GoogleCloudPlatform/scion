@@ -128,7 +128,8 @@ func flatCRTarget(region string) *config.V1RuntimeTargetConfig {
 // whose labels are stored under GCP-sanitized keys, this instance's own
 // instance reconstructs its record with the launch's handle, another
 // instance's object is ignored, and an object without an owner label
-// refuses the instance, named by its project and slug.
+// refuses the instance with the drain step, named by its Cloud Run instance
+// name only (amendment P5-CR, CR6: the drain step).
 func TestFlatOwnershipPreflight_CloudRunSanitizedLabels(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	ctx := context.Background()
@@ -167,7 +168,9 @@ func TestFlatOwnershipPreflight_CloudRunSanitizedLabels(t *testing.T) {
 	legacy := flatCRInstance("us-central1", "legacy-0123456789", "", "aa2b3c4d-5e6f-4071-8293-a4b5c6d7e8f9", "legacy", "31436587-a9cb-4fed-8102-132435465768")
 	err = flatOwnershipPreflight(ctx, candidate(&flatCRInstances{instances: []*runpb.Instance{owned, legacy}}))
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), flatCRScionPr+"/legacy", "the unlabeled object is named by its project and slug")
+	assert.Equal(t, "1 Cloud Run agent instance(s) in this project and region carry no owner label "+
+		"(for example, created by a legacy Cloud Run Runtime Broker); drain them through the Runtime Broker that created them, then restart (instances: legacy-0123456789)",
+		err.Error(), "the refusal names the drain step and the instance name only")
 }
 
 // TestFlatOwnershipPreflight_LegacyCloudRunAgentRefusesScope: an agent
@@ -218,7 +221,12 @@ func TestFlatOwnershipPreflight_LegacyCloudRunAgentRefusesScope(t *testing.T) {
 		assert.Equal(t, "ownership_unresolved", st[k].Reason, k)
 	}
 	for _, k := range []string{"cr-a", "cr-b"} {
-		assert.Contains(t, st[k].Error, flatCRScionPr+"/legacy", k)
+		assert.Equal(t, `flat Runtime Broker instance "`+k+`" not activated: 1 Cloud Run agent instance(s) in this project and region carry no owner label `+
+			"(for example, created by a legacy Cloud Run Runtime Broker); drain them through the Runtime Broker that created them, then restart (instances: legacy-0123456789)",
+			st[k].Error, k)
+		assert.NotContains(t, st[k].Error, "123456789012", "never the project number")
+		assert.NotContains(t, st[k].Error, "/etc/scion", "never a credentials path")
+		assert.NotContains(t, st[k].Error, flatCRScionPr, "instance names only")
 	}
 	assert.NotEqual(t, "ownership_unresolved", st["cr-c"].Reason, "another region is a different scope")
 	assert.Contains(t, act.activated, "cr-c")
@@ -226,15 +234,15 @@ func TestFlatOwnershipPreflight_LegacyCloudRunAgentRefusesScope(t *testing.T) {
 	assert.NotContains(t, act.activated, "cr-b")
 }
 
-// TestNewFlatInstanceRuntime_CloudRunNotBuilt: the per-instance runtime
-// factory does not build a cloudrun runtime in this release, so a valid
-// cloudrun instance is refused before any credential is read or any scope
-// is probed.
+// TestNewFlatInstanceRuntime_CloudRunNotBuilt: the plain per-instance
+// factory never builds a cloudrun runtime: only flatInstanceActivation does,
+// after the precondition, so this path reads no credential and probes no
+// scope.
 func TestNewFlatInstanceRuntime_CloudRunNotBuilt(t *testing.T) {
 	rt, err := newFlatInstanceRuntime(context.Background(), config.V1RuntimeBrokerInstanceConfig{Key: "cr-a", Name: "a", RuntimeTarget: flatCRTarget("us-central1")})
 	require.Error(t, err)
 	assert.Nil(t, rt)
-	assert.Contains(t, err.Error(), `runtime target type "cloudrun" is not supported in this release`)
+	assert.Contains(t, err.Error(), "a cloudrun runtime is built only through the flat activation checks")
 	assert.NotContains(t, err.Error(), "/etc/scion", "the refusal names no credentials path")
 }
 

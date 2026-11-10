@@ -64,13 +64,16 @@ import (
 //
 // Offline delegations (phase DL). A delegation whose grantor kind is
 // store.DelegationGrantorTestInfraOffline was written by the offline host
-// command `scion server test-infra delegate`, not by a human. It holds only
-// the member scope. Its grantor id is a reserved id that names no user, so
-// it has no bindings: the live-human-grantor check is replaced, for this
-// kind only, by offlineGrantorGate (marker, hub id binding, test-mode, not
-// revoked or expired, all read live), and its authority is a request-local
-// synthetic grant of exactly test_identity.issue that Decide adds only for a
-// request whose gate passed (offlineDelegationBinding, Decide Step 5b4).
+// command `scion server test-infra delegate`, not by a human. It holds the
+// member scope, or the hub-admin scope while the offline hub-admin
+// delegation setting is on (test_identity_offline_admin_delegation.go);
+// never the super-admin scope. Its grantor id is a reserved id that names
+// no user, so it has no bindings: the live-human-grantor check is
+// replaced, for this kind only, by offlineGrantorGate (marker, hub id
+// binding, test-mode, not revoked or expired, all read live), and its
+// authority is a request-local synthetic grant of exactly its scope's one
+// permission that Decide adds only for a request whose gate passed
+// (offlineDelegationBinding, Decide Step 5b4).
 
 const (
 	// testIssuerDelegationHeader names the delegation a workload request
@@ -263,6 +266,13 @@ type workloadIssuerAuthenticator struct {
 	// writeAudit writes the per-redeem audit row of an offline delegation
 	// (the test identity audit hook). Nil denies every offline delegation.
 	writeAudit func(ctx context.Context, st store.Store, record *store.MutationAuditRecord) error
+	// offlineAdmin is the offline hub-admin delegation setting, fixed at
+	// New. False refuses every offline delegation of the hub-admin scope.
+	offlineAdmin bool
+	// liveCheckForTest, when set, replaces checkDelegationLive inside
+	// offlineGrantorGate. Tests only: it is nil in production, and a
+	// source test pins that no non-test file sets it.
+	liveCheckForTest func(d *store.TestIdentityDelegation, now time.Time) *workloadDelegationRefusal
 }
 
 // newWorkloadIssuerAuthenticator builds the arm's state from validated
@@ -670,7 +680,8 @@ func (a *workloadIssuerAuthenticator) authenticate(ctx context.Context, r *http.
 // hard maximum age from its creation time; for an offline delegation also
 // the offline maximum age), exactly one known scope that is available on
 // this hub (an admin scope only at the matching --test-mode level, with
-// A2; an offline delegation only the member scope), and a pinned subject
+// A2; an offline delegation only the member scope, or the hub-admin scope
+// with the offline hub-admin delegation setting on), and a pinned subject
 // the startup allowlist still covers for that scope. It does not check the
 // grantor; see liveHumanGrantor and offlineGrantorGate.
 func (a *workloadIssuerAuthenticator) checkDelegationLive(d *store.TestIdentityDelegation, now time.Time) *workloadDelegationRefusal {
@@ -684,10 +695,13 @@ func (a *workloadIssuerAuthenticator) checkDelegationLive(d *store.TestIdentityD
 		return refuse403("delegation scope not accepted")
 	case !now.Before(d.Created.Add(spec.maxAge)):
 		return refuse403("delegation past its maximum age")
-	case d.EffectiveGrantorKind() == store.DelegationGrantorTestInfraOffline && d.Scope != store.TestInfraOfflineDelegationScope:
-		// Structural (phase DL): an offline delegation never holds an
-		// admin scope, whatever its row says.
-		return refuse403("offline delegation holds a scope other than the member scope")
+	case d.EffectiveGrantorKind() == store.DelegationGrantorTestInfraOffline && d.Scope != store.TestInfraOfflineDelegationScope &&
+		(!offlineAdminScopeAdmitted(d.Scope) || !a.offlineAdmin):
+		// Structural: an offline delegation holds the member scope, or the
+		// hub-admin scope only while the offline hub-admin delegation
+		// setting is on; never the super-admin scope, whatever its row
+		// says.
+		return refuse403("offline delegation holds a scope other than the member scope or an enabled hub-admin scope")
 	case d.EffectiveGrantorKind() == store.DelegationGrantorTestInfraOffline && !now.Before(d.Created.Add(store.TestInfraOfflineDelegationMaxTTL)):
 		return refuse403("offline delegation past its maximum age")
 	case !a.scopeAvailable(d.Scope):

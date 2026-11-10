@@ -276,6 +276,12 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 			Message: fmt.Sprintf("buildStartContext: Operation not set or unrecognized: %q", in.Operation),
 		}
 	}
+	// A flat cloudrun instance refuses a per-agent GCP identity request
+	// here, ahead of every side effect below: the ownership record, the
+	// project files and the identity resolution (E-10).
+	if sce := s.flatCloudRunGCPIdentityRefusal(in); sce != nil {
+		return nil, sce
+	}
 
 	ctx, span := tracer.Start(ctx, "broker.agent.provision")
 	defer span.End()
@@ -738,6 +744,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		ColocatedRuntimeHubEndpoints: s.config.ColocatedRuntimeHubEndpoints,
 		RuntimeName:                  runtimeName,
 		HubListenPort:                s.config.HubListenPort,
+		FlatCloudRun:                 s.flatCloudRunTarget(),
 	})
 	if err != nil {
 		return nil, &startContextError{

@@ -853,7 +853,8 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// Opt-in egress firewall. It runs before the metadata server start
 	// because the script resets the nat and filter tables, which would
 	// remove the interception rules installed below.
-	if err := setupInitFirewall(); err != nil {
+	firewallInstalled, err := setupInitFirewall()
+	if err != nil {
 		reportInitFailure(agentHome, err)
 		return 1
 	}
@@ -931,9 +932,12 @@ func RunInit(args []string, opts InitRunOptions) int {
 
 	// Network setup is complete: drop CAP_NET_ADMIN before anything else
 	// starts (clone, pre-start hooks, services, the harness). Passthrough
-	// never runs a metadata server and is unchanged.
-	if metadataServer != nil {
-		if err := dropNetAdminForMetadata(metadataInterceptionInstalled(metadataServer)); err != nil {
+	// runs no metadata server, so it drops only when the firewall was
+	// installed. The drop is required (fatal on failure) whenever init
+	// installed network controls.
+	required := firewallInstalled || (metadataServer != nil && metadataInterceptionInstalled(metadataServer))
+	if metadataServer != nil || firewallInstalled {
+		if err := dropNetAdmin(required); err != nil {
 			reportInitFailure(agentHome, err)
 			return 1
 		}
@@ -991,7 +995,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 				if pathErr != nil {
 					log.Error("Cannot locate previous env overlay: %v", pathErr)
 				} else if _, statErr := os.Stat(existingOverlay); statErr == nil {
-					log.Info("WARNING: Pre-start provisioning failed but previous env overlay exists at %s, using fallback", existingOverlay)
+					log.Warn("Pre-start provisioning failed but previous env overlay exists at %s, using fallback", existingOverlay)
 					fallbackExists = true
 				}
 			}
@@ -3329,7 +3333,7 @@ func gitCloneWorkspace(uid, gid int, agentHome string, requirePrivilegeDrop bool
 	}
 	depth, err := strconv.Atoi(depthStr)
 	if err != nil {
-		log.Info("WARNING: SCION_GIT_DEPTH is not a valid integer (%q), defaulting to 1", depthStr)
+		log.Warn("SCION_GIT_DEPTH is not a valid integer (%q), defaulting to 1", depthStr)
 		depth = 1
 		depthStr = "1"
 	}
@@ -3371,7 +3375,7 @@ func gitCloneWorkspace(uid, gid int, agentHome string, requirePrivilegeDrop bool
 	// helper, on the fetch or in the agent's .gitconfig.
 	offerToken := provision.CloneTokenAllowed(os.Getenv(api.EnvGitTokenRemote), cloneURLNoCredential)
 	if !offerToken {
-		log.Info("WARNING: the clone URL does not name the project's recorded git remote; cloning without a git credential")
+		log.Warn("the clone URL does not name the project's recorded git remote; cloning without a git credential")
 	}
 
 	// Determine the agent feature branch name early so we can try cloning it.
@@ -4338,9 +4342,9 @@ func isWorkspaceEmpty(path string) bool {
 	}
 	// Filter out known marker entries that don't indicate a real workspace
 	// (provisioning markers and shared-dir mount points; see
-	// api.IsWorkspaceMarker).
+	// api.IsWorkspaceMarkerEntry).
 	for _, e := range entries {
-		if api.IsWorkspaceMarker(e.Name()) {
+		if api.IsWorkspaceMarkerEntry(path, e.Name()) {
 			continue
 		}
 		log.Debug("Workspace not empty: found %q in %s", e.Name(), path)

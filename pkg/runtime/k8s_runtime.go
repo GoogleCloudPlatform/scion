@@ -2185,24 +2185,30 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	gateCmd := `while [ ! -f /tmp/.scion-home-ready ]; do sleep 0.2; done; exec sciontool init -- sh -c "$SCION_START_CMD"`
 	cmd = []string{"sh", "-c", gateCmd}
 
-	// Env Resolution — match local runtimes by including harness env + telemetry env.
-	envVars := []corev1.EnvVar{
-		// The real startup command, consumed by the gate script above.
-		{Name: "SCION_START_CMD", Value: tmuxCmd},
+	// Env Resolution follows the Docker order (buildCommonRunArgs).
+	// Kubernetes keeps the last entry for a duplicated name (dedupeEnvVars
+	// below), so for a name set by more than one source the later source
+	// in this list wins: resolved auth, the harness env, config.Env, then
+	// the env-type secrets. The runtime keys set further down win over all
+	// of them, and the template fallback fills only names none of them set.
+	var envVars []corev1.EnvVar
+
+	// Resolved auth env is the lowest source (resolvedAuthEnvEntries: sorted,
+	// an empty value skipped).
+	for _, e := range resolvedAuthEnvEntries(config.ResolvedAuth, nil) {
+		k, v, _ := strings.Cut(e, "=")
+		envVars = append(envVars, corev1.EnvVar{Name: k, Value: v})
 	}
 
-	// Harness env (system prompt, agent name, etc.) — parity with buildCommonRunArgs.
-	if config.Harness != nil {
-		for k, v := range config.Harness.GetEnv(config.Name, config.HomeDir, config.UnixUsername) {
-			if v != "" {
-				envVars = append(envVars, corev1.EnvVar{Name: k, Value: v})
-			}
-		}
-		if config.TelemetryEnabled {
-			for k, v := range config.Harness.GetTelemetryEnv() {
-				envVars = append(envVars, corev1.EnvVar{Name: k, Value: v})
-			}
-		}
+	// The real startup command, consumed by the gate script above.
+	envVars = append(envVars, corev1.EnvVar{Name: "SCION_START_CMD", Value: tmuxCmd})
+
+	// Harness env (system prompt, agent name, etc.) with the Docker rules
+	// (harnessEnvEntries): GetTelemetryEnv wins over GetEnv when telemetry
+	// is enabled, and an empty value is skipped.
+	for _, e := range harnessEnvEntries(config, config.HomeDir) {
+		k, v, _ := strings.Cut(e, "=")
+		envVars = append(envVars, corev1.EnvVar{Name: k, Value: v})
 	}
 
 	for _, e := range config.Env {
@@ -2213,13 +2219,15 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		}
 	}
 
-	// System env set above always wins: track the names already present so
-	// the secret-injection loops below can skip any secret whose target
-	// collides with one. Symmetric with the docker/podman/apple_container
-	// runtime's equivalent check in buildCommonRunArgs.
-	envVarNames := make(map[string]struct{}, len(envVars))
-	for _, ev := range envVars {
-		envVarNames[ev.Name] = struct{}{}
+	// An env-type secret is skipped for a name config.Env sets, as in
+	// buildCommonRunArgs, and for SCION_START_CMD, so a secret never
+	// replaces the pod's start command. It wins over resolved auth and the
+	// harness env, which are therefore not in this set.
+	envVarNames := map[string]struct{}{"SCION_START_CMD": {}}
+	for _, e := range config.Env {
+		if name, _, ok := strings.Cut(e, "="); ok {
+			envVarNames[name] = struct{}{}
+		}
 	}
 
 	// Secret and auth-file mounting. Every file these volumes deliver comes
@@ -2370,12 +2378,10 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		}
 	}
 
-	// ResolvedAuth is always applied when present (composes with ResolvedSecrets).
-	// Auth files are injected via a K8s Secret rather than hostPath for portability.
+	// ResolvedAuth files are applied when present (they compose with
+	// ResolvedSecrets; its env entries are emitted first, above). Auth files
+	// are injected via a K8s Secret rather than hostPath for portability.
 	if config.ResolvedAuth != nil {
-		for k, v := range config.ResolvedAuth.EnvVars {
-			envVars = append(envVars, corev1.EnvVar{Name: k, Value: v})
-		}
 		if len(config.ResolvedAuth.Files) > 0 {
 			extraVolumes = append(extraVolumes, corev1.Volume{
 				Name: k8sAuthFilesVolume,

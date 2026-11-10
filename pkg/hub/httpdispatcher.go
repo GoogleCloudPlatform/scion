@@ -235,6 +235,10 @@ type HTTPAgentDispatcher struct {
 	// withheld by authorization, per (agent, secret, cause). Set by the
 	// constructors; nil logs every occurrence.
 	withheldWarn *hookRefusalLimiter
+	// ownerChainWarn rate limits the Warn of the owner material chain
+	// rule (start_owner_material_chain.go), per (agent, site, reason). Set
+	// by the constructors; nil logs every line.
+	ownerChainWarn *hookRefusalLimiter
 	// storageLayout is the hub's projectfs Layout source for
 	// storageLayoutPrecheck (SetStorageLayout); nil disables the check.
 	storageLayout func() (projectfs.Layout, error)
@@ -350,11 +354,12 @@ func NewHTTPAgentDispatcher(s store.Store, debug bool, log *slog.Logger) *HTTPAg
 		log = slog.Default()
 	}
 	return &HTTPAgentDispatcher{
-		store:        s,
-		client:       NewHTTPRuntimeBrokerClientWithDebug(debug),
-		debug:        debug,
-		log:          log,
-		withheldWarn: newUserSecretWithheldLimiter(),
+		store:          s,
+		client:         NewHTTPRuntimeBrokerClientWithDebug(debug),
+		debug:          debug,
+		log:            log,
+		withheldWarn:   newUserSecretWithheldLimiter(),
+		ownerChainWarn: newOwnerMaterialChainLimiter(),
 	}
 }
 
@@ -364,11 +369,12 @@ func NewHTTPAgentDispatcherWithClient(s store.Store, client RuntimeBrokerClient,
 		log = slog.Default()
 	}
 	return &HTTPAgentDispatcher{
-		store:        s,
-		client:       client,
-		debug:        debug,
-		log:          log,
-		withheldWarn: newUserSecretWithheldLimiter(),
+		store:          s,
+		client:         client,
+		debug:          debug,
+		log:            log,
+		withheldWarn:   newUserSecretWithheldLimiter(),
+		ownerChainWarn: newOwnerMaterialChainLimiter(),
 	}
 }
 
@@ -1190,10 +1196,10 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 			// mirroring the cascade in resolveCloneToken. Users who store
 			// GITHUB_TOKEN at user/profile scope only (no project-scoped token)
 			// would otherwise still hit the NoAuth suppression bug (#1165).
-			// This by-name read of the owner's user-scope row does not go
-			// through the start-time user-scope checks in
-			// startSecretResolveOpts; it is tracked separately.
-			if (ghSecret == nil || ghSecret.Value == "") && agent.OwnerID != "" {
+			// The owner's row is held to the same start-time user-scope
+			// checks as Resolve (startSecretResolveOpts) before its value
+			// is read; a refused row is not used.
+			if (ghSecret == nil || ghSecret.Value == "") && agent.OwnerID != "" && d.ownerCloneTokenAllowed(ctx, agent) {
 				ghSecret, err = d.secretBackend.Get(ctx, "GITHUB_TOKEN", secret.ScopeUser, agent.OwnerID)
 				if err != nil {
 					if d.debug {
@@ -1959,6 +1965,8 @@ func (d *HTTPAgentDispatcher) swapRunID(ctx context.Context, agent *store.Agent,
 
 // DispatchAgentCreate creates and starts an agent on the runtime broker.
 func (d *HTTPAgentDispatcher) DispatchAgentCreate(ctx context.Context, agent *store.Agent) (_ *CreateDispatchResult, err error) {
+	// One owner material chain verdict per dispatch (start_owner_material_chain.go).
+	ctx = withOwnerChainMemo(ctx)
 	ctx, span := tracer.Start(ctx, "hub.dispatch.create")
 	defer span.End()
 	span.SetAttributes(
@@ -2054,6 +2062,8 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreate(ctx context.Context, agent *st
 // agent is provisioned without injected secrets. The broker's provision does
 // not read them, and a later start resolves them again and fails there.
 func (d *HTTPAgentDispatcher) DispatchAgentProvision(ctx context.Context, agent *store.Agent) error {
+	// One owner material chain verdict per dispatch (start_owner_material_chain.go).
+	ctx = withOwnerChainMemo(ctx)
 	return d.dispatchProvision(ctx, agent, "DispatchAgentProvision", false, "", "")
 }
 
@@ -2077,6 +2087,8 @@ func (d *HTTPAgentDispatcher) DispatchAgentProvision(ctx context.Context, agent 
 // does that separately via DispatchAgentStart. Precondition: the agent's
 // container is already stopped.
 func (d *HTTPAgentDispatcher) DispatchAgentReprovision(ctx context.Context, agent *store.Agent) error {
+	// One owner material chain verdict per dispatch (start_owner_material_chain.go).
+	ctx = withOwnerChainMemo(ctx)
 	return d.dispatchProvision(ctx, agent, "DispatchAgentReprovision", true, "", "")
 }
 
@@ -2310,6 +2322,8 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 // If the broker returns 202 with env requirements, it returns the requirements
 // as the first value instead of an error.
 func (d *HTTPAgentDispatcher) DispatchAgentCreateWithGather(ctx context.Context, agent *store.Agent) (_ *CreateDispatchResult, err error) {
+	// One owner material chain verdict per dispatch (start_owner_material_chain.go).
+	ctx = withOwnerChainMemo(ctx)
 	dispatchStart := time.Now()
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		return nil, err
@@ -2474,6 +2488,8 @@ func (e *ErrEnvStillMissing) Error() string {
 // action. This makes the finalize HA-safe: the replay can land on any broker
 // replica because it carries the complete request state.
 func (d *HTTPAgentDispatcher) DispatchFinalizeEnv(ctx context.Context, agent *store.Agent, env map[string]string) (*CreateDispatchResult, error) {
+	// One owner material chain verdict per dispatch (start_owner_material_chain.go).
+	ctx = withOwnerChainMemo(ctx)
 	// Flat placement backstop: the first pass pinned the agent, so this
 	// refuses only a pin corrupted between the two passes.
 	if err := d.placementBackstop(ctx, agent); err != nil {
@@ -2980,6 +2996,11 @@ func (d *HTTPAgentDispatcher) WarnOutrankedBrokerEnvKeys(ctx context.Context) er
 // Absence is not an error: zero rows, a scope that does not apply or has an
 // empty scope ID (envScopesInPrecedenceOrder leaves it out), or an agent
 // without ancestry resolves to empty maps.
+//
+// The owner's user-scope rows not shared with progeny, plain or flagged
+// secret, are held to the owner material chain rule
+// (start_owner_material_chain.go): they are skipped when the agent's
+// recorded chain does not end at their owner.
 func (d *HTTPAgentDispatcher) resolveEnvFromStorage(ctx context.Context, agent *store.Agent) (map[string]string, map[string]bool, error) {
 	result := make(map[string]string)
 	plain := make(map[string]bool)
@@ -2987,6 +3008,10 @@ func (d *HTTPAgentDispatcher) resolveEnvFromStorage(ctx context.Context, agent *
 		return result, plain, nil
 	}
 
+	// The owner material chain rule for the owner's rows not shared with
+	// progeny (start_owner_material_chain.go).
+	gate := d.newOwnerMaterialGate(agent)
+	defer gate.flush(ctx, ownerMaterialSiteEnvStorage)
 	for _, filter := range d.envScopesForDispatch(ctx, agent) {
 		vars, err := d.store.ListEnvVars(ctx, filter)
 		if err != nil {
@@ -3008,6 +3033,9 @@ func (d *HTTPAgentDispatcher) resolveEnvFromStorage(ctx context.Context, agent *
 			// other path: never let a stored env var decide a scion
 			// control-plane env var's value.
 			if secret.IsReservedEnvTarget(v.Key) {
+				continue
+			}
+			if !gate.allowEnvRow(ctx, filter, v) {
 				continue
 			}
 			result[v.Key] = v.Value
@@ -3083,6 +3111,14 @@ func (d *HTTPAgentDispatcher) resolveAsNeededForKeys(
 	// TZ is never an as_needed key: only the agent TZ resolver supplies it.
 	delete(keySet, agentTZEnvKey)
 
+	// The start-time user-scope checks: both passes below apply them to the
+	// owner's rows (startSecretResolveOpts).
+	// One evaluation of the test-admin scope restriction, for both the
+	// start-time checks' keep decision and the restriction itself.
+	ta := d.testAdminScopesFor(ctx, agent)
+	resolveOpts, gate := d.startSecretResolveOpts(ctx, agent, &ta)
+	defer gate.flush(ctx, ownerMaterialSiteAsNeeded)
+
 	// 1. Check env_vars table (all scopes, in precedence order so last-wins).
 	for _, filter := range d.envScopesForDispatch(ctx, agent) {
 		vars, err := d.store.ListEnvVars(ctx, filter)
@@ -3104,6 +3140,9 @@ func (d *HTTPAgentDispatcher) resolveAsNeededForKeys(
 				continue
 			}
 			if _, needed := keySet[v.Key]; needed {
+				if !gate.allowEnvRow(ctx, filter, v) {
+					continue
+				}
 				canonical, isAlt := altToCanonical[v.Key]
 				resultKey := v.Key
 				if isAlt {
@@ -3135,12 +3174,10 @@ func (d *HTTPAgentDispatcher) resolveAsNeededForKeys(
 	// 2. Check secrets (all scopes via backend.Resolve).
 	// Only environment-type secrets can be mapped to env key=value pairs.
 	if d.secretBackend != nil {
-		resolveOpts := d.startSecretResolveOpts(ctx, agent)
-
 		resolved, err := d.secretBackend.Resolve(
 			ctx, agent.OwnerID, agent.ProjectID, agent.RuntimeBrokerID, resolveOpts)
 		if err == nil {
-			resolved = d.restrictTestAdminRootedSecrets(ctx, agent, resolved)
+			resolved = d.applyTestAdminSecretScopes(ctx, agent, resolved, ta.restricted, ta.allowed, ta.root)
 		}
 		if errors.Is(err, secret.ErrResolveDecrypt) {
 			// A stored secret could not be decrypted: never answer the
@@ -3639,6 +3676,8 @@ func (d *HTTPAgentDispatcher) reportSkippedSecrets(ctx context.Context, agent *s
 // (always synchronous); both call dispatchAgentStart directly, so neither is
 // a guarded call site of the other.
 func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *store.Agent, task string, resume bool) error {
+	// One owner material chain verdict per dispatch (start_owner_material_chain.go).
+	ctx = withOwnerChainMemo(ctx)
 	_, err := d.dispatchAgentStart(ctx, agent, task, resume, StartDispatchOptions{})
 	return err
 }
@@ -3650,6 +3689,8 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 // and the launch's end settles the start. Otherwise the start is
 // synchronous and the result is nil.
 func (d *HTTPAgentDispatcher) DispatchAgentStartWithOptions(ctx context.Context, agent *store.Agent, task string, resume bool, opts StartDispatchOptions) (*StartDispatchResult, error) {
+	// One owner material chain verdict per dispatch (start_owner_material_chain.go).
+	ctx = withOwnerChainMemo(ctx)
 	return d.dispatchAgentStart(ctx, agent, task, resume, opts)
 }
 
@@ -4071,6 +4112,8 @@ func (d *HTTPAgentDispatcher) DispatchAgentStop(ctx context.Context, agent *stor
 // It generates a fresh auth token so the restarted container has valid
 // Hub credentials, preventing auth loss across container restarts.
 func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *store.Agent) error {
+	// One owner material chain verdict per dispatch (start_owner_material_chain.go).
+	ctx = withOwnerChainMemo(ctx)
 	// Flat placement backstop (see DispatchAgentStart).
 	if _, err := checkAgentPinnedPlacement(ctx, d.store, agent); err != nil {
 		return err
@@ -4972,28 +5015,51 @@ func (d *HTTPAgentDispatcher) deferredLifecycleResult(
 // agent's role. For the same reason the agent's own access constraints
 // (Decide steps 7b and 7c) are not applied here, while the runtime read
 // applies them. The boundary of this check:
-//   - a row not shared with progeny is unchanged. The runtime read never
-//     returns such a row (sharing_disabled), so there is no read to agree
-//     with, and injecting a user's own secrets into that user's agents is
-//     how they reach an agent;
+//   - a row not shared with progeny is not held to it. The runtime read
+//     never returns such a row (sharing_disabled), so there is no read to
+//     agree with, and injecting a user's own secrets into that user's
+//     agents is how they reach an agent (see the chain rule below);
 //   - a chain without recorded provenance is unchanged (the read applies the
 //     progeny rule to it, not the ceiling);
 //   - an agent with no stored ancestry is unchanged;
 //   - a chain lookup error rejects the row (fail closed).
 //
-// So an agent created by a user and re-delegated by another user still
-// receives the owner's rows not shared with progeny at start; that is
-// tracked separately from this check. So is the NoAuth GITHUB_TOKEN
-// fallback in buildCreateRequestFor: it reads the owner's row by name
-// (secretBackend.Get), outside Resolve, and this check does not cover it.
+// A row not shared with progeny is held to the owner material chain rule
+// instead (ownerMaterialGate, start_owner_material_chain.go): it is
+// delivered only when the agent's recorded chain ends at the row's owner
+// and its ancestry starts there, so an agent whose authority was
+// re-recorded to another user no longer receives the owner's own rows.
+// The returned gate counts what that rule withheld or let through as
+// legacy; the caller reports it with gate.flush once the site is done.
+// The NoAuth GITHUB_TOKEN fallback in buildCreateRequestFor, which reads
+// the owner's row by name outside Resolve, applies the same UserScopeCheck.
+//
+// The agent's own access constraints are not applied on the owner path:
+// an access constraint that denies the agent secret.use does not stop
+// start-time injection of its owner's user-scope rows (the runtime read
+// does apply it).
 //
 // A row that is rejected is skipped inside the resolver, so a lower-scope
 // row with the same key stays in effect. Neither check widens anything: a
 // row is delivered only when every decision applied to it allows.
-func (d *HTTPAgentDispatcher) startSecretResolveOpts(ctx context.Context, agent *store.Agent) *secret.ResolveOpts {
+//
+// ta is the test-admin scope restriction the caller applies, afterwards,
+// to what this check keeps: the single evaluation (testAdminScopesFor) the
+// caller also passes to applyTestAdminSecretScopes or uses for its own
+// withholding (resolveSecrets, resolveAsNeededForKeys and the launch
+// selection). When that restriction withholds the user scope, an unshared
+// owner row is kept for the restriction to drop: its withheld row still
+// masks a lower-scope row of the same name, exactly as without the owner
+// material chain rule, and nothing of the owner's is delivered either way.
+// A row kept this way is not counted by the owner material chain Warn or
+// metric: the restriction drops it and reports the withheld scope itself.
+// A nil ta (the by-name clone-token read, which applies no restriction
+// afterwards) never keeps a row for it.
+func (d *HTTPAgentDispatcher) startSecretResolveOpts(ctx context.Context, agent *store.Agent, ta *testAdminScopes) (*secret.ResolveOpts, *ownerMaterialGate) {
 	if agent == nil || d.authzService == nil {
-		return nil
+		return nil, nil
 	}
+	gate := d.newOwnerMaterialGate(agent)
 	agentID := agent.ID
 	ancestry := agent.Ancestry
 	// The synthetic identity must carry the agent's real scopes.
@@ -5087,23 +5153,42 @@ func (d *HTTPAgentDispatcher) startSecretResolveOpts(ctx context.Context, agent 
 			return decision.Allowed
 		}
 	}
-	if agent.OwnerID != "" && len(ancestry) > 0 {
+	if agent.OwnerID != "" {
 		// The chain verdict is the same for every row, so it is computed
-		// once, on the first shared row.
+		// once, on the first shared row, and shared by the dispatch's other
+		// sites (userSecretChainVerdictFor).
 		var (
 			chainDone       bool
 			chainUnrecorded bool
 			chainErr        bool
+			chain           userSecretChain
 		)
 		opts.UserScopeCheck = func(s secret.SecretMeta) bool {
 			if !s.AllowProgeny {
-				return true
+				// Start-time owner-path injection: an agent-subject access
+				// constraint that denies secret.use does not stop it.
+				if ta.withholdsUser() {
+					// The test-admin restriction drops the row and keeps its
+					// masking (see startSecretResolveOpts).
+					return true
+				}
+				return gate.allow(ctx, ownerMaterialKindSecret, s.ScopeID)
+			}
+			if len(ancestry) == 0 {
+				// No stored ancestry: the parent ceiling has nothing to
+				// hold the shared row to, so the row follows the owner
+				// material chain verdict (erratum 2b section 3a makes no
+				// ancestry exception). Only a recorded chain that ends at
+				// the row's owner keeps it; anything else, including a
+				// lookup error, withholds it.
+				return gate.allowSharedNoAncestry(ctx, ownerMaterialKindSecret, s.ScopeID)
 			}
 			ident := identity()
 			if !chainDone {
-				chain := d.authzService.userSecretChainVerdict(ctx, ident, nil)
-				chainErr = chain.decision.DenyCause == DenyCauseCeilingError
-				chainUnrecorded = !chain.decision.Allowed && chain.unrecorded
+				chain = d.authzService.userSecretChainVerdictFor(ctx, ident)
+				// The views and the census decide shared rows on the
+				// same test (ownerChainCheck.allowsSharedSecret).
+				chainErr, chainUnrecorded = sharedChainWithholds(chain)
 				chainDone = true
 			}
 			switch {
@@ -5111,9 +5196,14 @@ func (d *HTTPAgentDispatcher) startSecretResolveOpts(ctx context.Context, agent 
 				withheld("owner", s, Decision{DenyCause: DenyCauseCeilingError, Reason: "delegation chain could not be evaluated"})
 				return false
 			case chainUnrecorded:
-				return true
+				// Start follows the runtime read, which refuses every
+				// shared owner row to an agent whose chain is not
+				// recorded (chain_unrecorded).
+				return gate.withholdShared(ownerMaterialKindSecret)
 			}
-			ceiling := d.authzService.EvaluateUserSecretParentCeiling(ctx, ident, userSecretResource(s.ID, s.ScopeID))
+			// The row's ceiling reuses the dispatch's chain verdict rather
+			// than walking the chain again.
+			ceiling, _ := d.authzService.evaluateUserSecretParentCeilingWithChain(ctx, ident, userSecretResource(s.ID, s.ScopeID), nil, newPrecomputedUserSecretChain(ident, chain))
 			if ceiling.Allowed && ceiling.legacyFallback != nil {
 				d.authzService.recordLegacyAdoptedFallback(ctx, legacyFallbackPathStart, ceiling.legacyFallback, agentID, s.ScopeID, s.ID, s.Name)
 			}
@@ -5126,7 +5216,7 @@ func (d *HTTPAgentDispatcher) startSecretResolveOpts(ctx context.Context, agent 
 			return ceiling.Allowed
 		}
 	}
-	return opts
+	return opts, gate
 }
 
 // resolveSecrets queries secrets from all applicable scopes and merges them
@@ -5152,13 +5242,17 @@ func (d *HTTPAgentDispatcher) resolveSecrets(ctx context.Context, agent *store.A
 	}
 	// The start-time checks on the progeny and owner user-scope paths
 	// (startSecretResolveOpts).
-	resolveOpts := d.startSecretResolveOpts(ctx, agent)
+	// One evaluation of the test-admin scope restriction, for both the
+	// start-time checks' keep decision and the restriction itself.
+	ta := d.testAdminScopesFor(ctx, agent)
+	resolveOpts, gate := d.startSecretResolveOpts(ctx, agent, &ta)
 
 	resolved, err := d.secretBackend.Resolve(ctx, agent.OwnerID, agent.ProjectID, agent.RuntimeBrokerID, resolveOpts)
+	gate.flush(ctx, ownerMaterialSiteResolveSecrets)
 	if err != nil {
 		return nil, nil, err
 	}
-	resolved = d.restrictTestAdminRootedSecrets(ctx, agent, resolved)
+	resolved = d.applyTestAdminSecretScopes(ctx, agent, resolved, ta.restricted, ta.allowed, ta.root)
 	result := make([]ResolvedSecret, 0, len(resolved))
 	var asNeededKeys []string
 	for _, sv := range resolved {

@@ -38,6 +38,11 @@ func warnRemovedMode(source string) {
 // Uses dot-separated command paths: "notifications.ack", "schedule.list", etc.
 // Every entry — including parent commands — must be listed explicitly;
 // parents are NOT implicitly allowed when a child is listed.
+//
+// Deliberately absent: "runtime-broker.convert" in every mode (--plan,
+// --apply, --status, --rollback). It is human mode only: it acts on this
+// host's Runtime Broker identity, settings and Hub rows, which an agent in
+// a container must not change. cmd/platform_gate.go keeps it off Windows.
 var agentAllowed = map[string]bool{
 	"create":                      true,
 	"delete":                      true,

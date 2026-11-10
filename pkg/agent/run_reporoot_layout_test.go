@@ -104,8 +104,12 @@ func TestDetectRepoRoot_SharedWorkspaceRefusesCommonDirOfOtherProject(t *testing
 	if got != "" {
 		t.Fatalf("repo root = %q on refusal, want \"\"", got)
 	}
-	if !strings.Contains(err.Error(), "outside the project") {
-		t.Fatalf("error should say the common dir is outside the project: %v", err)
+	// The door refuses a root-level .git/commondir before git runs; a redirect
+	// through a .git file still reaches the "outside the project" check
+	// (TestStart_RepoRootFollowsOnlyTheProjectRepository).
+	var refused *util.RepoConfigRefusedError
+	if !errors.As(err, &refused) || refused.Key != ".git/commondir" {
+		t.Fatalf("error should be the door's refusal of .git/commondir: %v", err)
 	}
 }
 
@@ -367,7 +371,10 @@ func TestStart_SharedWorkspaceLayoutFromBrokerPaths(t *testing.T) {
 			if err == nil {
 				t.Fatal("Start succeeded with a redirected git common dir; want a refusal")
 			}
-			if !strings.Contains(err.Error(), "outside the project") {
+			// The door refuses a root-level .git/commondir before git runs; a
+			// redirect through a .git file still reaches the "outside the
+			// project" check (TestStart_RepoRootFollowsOnlyTheProjectRepository).
+			if !strings.Contains(err.Error(), ".git/commondir") {
 				t.Fatalf("Start error should name the refused common dir: %v", err)
 			}
 			if calls != 0 {
@@ -548,13 +555,15 @@ func TestStart_SharedWorkspaceWithoutGitNeverMountsAncestorRepo(t *testing.T) {
 	}
 }
 
-// A shared workspace whose .git directory git does not accept (empty, or
-// with a commondir naming a missing directory) inside an enclosing
-// repository: a plain mount, never the enclosing repository.
+// A shared workspace whose .git directory git does not accept, inside an
+// enclosing repository: an empty .git dir gives a plain mount; a root-level
+// commondir is refused by the host-side git door, which refuses the start.
+// Neither case ever gives the enclosing repository.
 func TestDetectRepoRoot_SharedWorkspaceWithUnusableGitDirIsPlain(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
-		setup func(t *testing.T, ws string)
+		name           string
+		setup          func(t *testing.T, ws string)
+		wantRefusedKey string
 	}{
 		{name: "empty .git dir", setup: func(t *testing.T, ws string) {
 			if err := os.RemoveAll(filepath.Join(ws, ".git")); err != nil {
@@ -568,7 +577,7 @@ func TestDetectRepoRoot_SharedWorkspaceWithUnusableGitDirIsPlain(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(ws, ".git", "commondir"), []byte("/nonexistent-common-dir\n"), 0o644); err != nil {
 				t.Fatal(err)
 			}
-		}},
+		}, wantRefusedKey: ".git/commondir"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ancestor := mkGitRepo(t, filepath.Join(t.TempDir(), "home"))
@@ -578,8 +587,22 @@ func TestDetectRepoRoot_SharedWorkspaceWithUnusableGitDirIsPlain(t *testing.T) {
 				t.Fatal(err)
 			}
 			tc.setup(t, ws)
-			if got := mustDetectRepoRoot(t, false, ws, projectDir); got != "" {
-				t.Fatalf("repo root = %q, want \"\" (plain mount), never %q", got, ancestor)
+			if tc.wantRefusedKey == "" {
+				if got := mustDetectRepoRoot(t, false, ws, projectDir); got != "" {
+					t.Fatalf("repo root = %q, want \"\" (plain mount), never %q", got, ancestor)
+				}
+				return
+			}
+			// The door refuses a root-level .git/commondir before git runs; a
+			// redirect through a .git file still reaches the "outside the
+			// project" check (TestStart_RepoRootFollowsOnlyTheProjectRepository).
+			got, err := detectRepoRoot(false, ws, projectDir, nil)
+			if got != "" {
+				t.Fatalf("repo root = %q, want \"\" (a refusal), never %q", got, ancestor)
+			}
+			var refused *util.RepoConfigRefusedError
+			if !errors.As(err, &refused) || refused.Key != tc.wantRefusedKey {
+				t.Fatalf("error = %v, want the door's refusal of %s", err, tc.wantRefusedKey)
 			}
 		})
 	}
@@ -676,7 +699,10 @@ func TestStartNFSWorkspace_RefusesRedirectedCommonDir(t *testing.T) {
 		},
 		GitClone: &api.GitCloneConfig{URL: "https://example.com/repo.git", Branch: "main"},
 	})
-	if err == nil || !strings.Contains(err.Error(), "outside the project") {
+	// The door refuses a root-level .git/commondir before git runs; a redirect
+	// through a .git file still reaches the "outside the project" check
+	// (TestStart_RepoRootFollowsOnlyTheProjectRepository).
+	if err == nil || !strings.Contains(err.Error(), ".git/commondir") {
 		t.Fatalf("Start error = %v, want a refusal naming the common dir", err)
 	}
 	if calls != 0 {

@@ -73,6 +73,8 @@ var dbFileOnlyRequestPaths = [][]string{
 	{"server", "hub", "missing_agent_grace"},
 	{"server", "hub", "conduit"},
 	{"server", "hub", "port_proxy"},
+	{"server", "hub", "sse"},
+	{"server", "hub", "platform_request_timeout"},
 	// Web chat search limits (ptone/scion#7586): Layer 0, read at startup.
 	{"server", "hub", "chat"},
 	{"server", "hub", "disable_legacy_storage_fallback"},

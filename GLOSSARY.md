@@ -6,6 +6,10 @@ Scion is a container-based orchestration platform for running multiple LLM "deep
 
 ## Orchestration
 
+**Lead**:
+An agent that carries continuity for a project or workstream from its initial request through closure, including non-code and non-repository work. The first agent, an agent coordinating that workstream, or a human-designated lead is protected regardless of its starting template. Only a human may authorize deletion of that lead. A bounded delegated supervisor is not automatically a lead; workflow-specific role mappings belong to that workflow.
+_Avoid_: initiator (for the agent role; unrelated to the `initiatorPrincipal` provenance concept).
+
 **Agent**:
 An isolated worker: one LLM-plus-harness loop in its own container with its own identity, credentials, and workspace. The fundamental unit of execution in Scion.
 _Avoid_: worker, bot, instance, process

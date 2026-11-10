@@ -18,16 +18,20 @@ package cmd
 
 import (
 	"context"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -658,4 +662,245 @@ func TestFlatHostHealth_NoRefusalText(t *testing.T) {
 	assert.NotContains(t, string(data), `"error"`)
 	assert.Contains(t, string(data), `"reason":"runtime_build_failed"`)
 	assert.Contains(t, statusOf(h, "k8s-a").Error, "missing.kubeconfig", "in-process callers keep the full text")
+}
+
+// colocatedCredentials returns the Runtime Broker ID and in-memory secret of
+// the single instance h activated.
+func colocatedCredentials(t *testing.T, h *brokerhost.Host) (string, string) {
+	t.Helper()
+	active := h.Active()
+	require.Len(t, active, 1, "the co-located instance is active")
+	creds := active[0].Context.Activation.InMemoryCredentials
+	require.NotNil(t, creds, "a co-located activation carries in-memory credentials")
+	return active[0].Context.Identity.RuntimeBrokerID, creds.SecretKey
+}
+
+// hubSelfReadStatus sends the broker self-read GET /api/v1/runtime-brokers/{id}
+// to the Hub at hubURL, signed with the base64 secret, and returns the HTTP
+// status. The secret is never printed.
+func hubSelfReadStatus(t *testing.T, hubURL, id, secretB64 string) int {
+	t.Helper()
+	key, err := base64.StdEncoding.DecodeString(secretB64)
+	require.NoError(t, err)
+	req, err := http.NewRequest(http.MethodGet, hubURL+"/api/v1/runtime-brokers/"+id, nil)
+	require.NoError(t, err)
+	require.NoError(t, (&apiclient.HMACAuth{BrokerID: id, SecretKey: key}).ApplyAuth(req))
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+	return resp.StatusCode
+}
+
+// plantSecret replaces id's stored secret with key, as an earlier
+// registration (for example an HTTP pre-registration) would have saved
+// it, and returns it base64-encoded.
+func plantSecret(t *testing.T, s store.Store, id string, key []byte) string {
+	t.Helper()
+	ctx := context.Background()
+	require.NoError(t, s.DeleteBrokerSecret(ctx, id))
+	require.NoError(t, s.CreateBrokerSecret(ctx, &store.BrokerSecret{BrokerID: id, SecretKey: key,
+		Algorithm: store.BrokerSecretAlgorithmHMACSHA256, CreatedAt: time.Now(), Status: store.BrokerSecretStatusActive}))
+	return base64.StdEncoding.EncodeToString(key)
+}
+
+// secretWriteFailStore fails every CreateBrokerSecret, inside or outside a
+// transaction, while fail is set.
+type secretWriteFailStore struct {
+	store.Store
+	fail *atomic.Bool
+}
+
+// DB exposes the wrapped store's database: hub.New installs its indexes
+// through it and refuses a store that hides it.
+func (f *secretWriteFailStore) DB() *sql.DB {
+	if dbp, ok := f.Store.(interface{ DB() *sql.DB }); ok {
+		return dbp.DB()
+	}
+	return nil
+}
+
+func (f *secretWriteFailStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	return f.Store.WithTx(ctx, func(tx store.Store) error {
+		return fn(&secretWriteFailStore{Store: tx, fail: f.fail})
+	})
+}
+
+func (f *secretWriteFailStore) CreateBrokerSecret(ctx context.Context, secret *store.BrokerSecret) error {
+	if f.fail.Load() {
+		return errors.New("injected broker secret write failure")
+	}
+	return f.Store.CreateBrokerSecret(ctx, secret)
+}
+
+// syncBuffer is a goroutine-safe log sink.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (w *syncBuffer) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.b.Write(p)
+}
+
+func (w *syncBuffer) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.b.String()
+}
+
+// captureProcessLogs sends the standard logger and the default slog logger
+// to one buffer until the test ends.
+func captureProcessLogs(t *testing.T) *syncBuffer {
+	t.Helper()
+	buf := &syncBuffer{}
+	prevOut, prevFlags, prevSlog := log.Writer(), log.Flags(), slog.Default()
+	log.SetOutput(buf)
+	slog.SetDefault(slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() {
+		log.SetOutput(prevOut)
+		log.SetFlags(prevFlags)
+		slog.SetDefault(prevSlog)
+	})
+	return buf
+}
+
+// assertNoSecretIn fails when text contains any of the base64 secrets, or
+// their raw bytes. It names only the secret's index, never its value.
+func assertNoSecretIn(t *testing.T, text string, secretsB64 ...string) {
+	t.Helper()
+	for i, sec := range secretsB64 {
+		raw, err := base64.StdEncoding.DecodeString(sec)
+		require.NoError(t, err)
+		assert.False(t, strings.Contains(text, sec), "secret %d (base64) appears in the text", i)
+		assert.False(t, strings.Contains(text, string(raw)), "secret %d (raw) appears in the text", i)
+	}
+}
+
+var colocatedTestInst = config.V1RuntimeBrokerInstanceConfig{Key: "docker-a", Name: "a", RuntimeTarget: &config.V1RuntimeTargetConfig{Type: "docker"}}
+
+// TestColocatedFlatActivation_ReplacesPreSavedSecret: a secret saved before
+// a co-located start is refused by the Hub from that start on, and the
+// instance's new in-memory secret is accepted.
+func TestColocatedFlatActivation_ReplacesPreSavedSecret(t *testing.T) {
+	s := newTestStore(t)
+	srv := flatAuthTestHub(t, s)
+	hubTS := httptest.NewServer(srv.Handler())
+	t.Cleanup(hubTS.Close)
+	globalDir := t.TempDir()
+
+	// The first start creates the instance's row; then an earlier
+	// registration's secret is put in place.
+	id, _ := colocatedCredentials(t, colocatedTestHost(t, srv, globalDir, colocatedTestInst))
+	saved := plantSecret(t, s, id, []byte("planted-earlier-secret-32-bytes!"))
+	require.Equal(t, http.StatusOK, hubSelfReadStatus(t, hubTS.URL, id, saved), "control: the saved secret is accepted before the start")
+
+	sameID, fresh := colocatedCredentials(t, colocatedTestHost(t, srv, globalDir, colocatedTestInst))
+	require.Equal(t, id, sameID)
+	assert.False(t, fresh == saved, "the start must not reuse the saved secret")
+	assert.Equal(t, http.StatusUnauthorized, hubSelfReadStatus(t, hubTS.URL, id, saved), "the saved secret is refused after the co-located start")
+	assert.Equal(t, http.StatusOK, hubSelfReadStatus(t, hubTS.URL, id, fresh), "the new in-memory secret is accepted")
+}
+
+// TestColocatedFlatActivation_EachStartFreshSecret: two co-located starts
+// give two secrets, and the first stops verifying after the second.
+func TestColocatedFlatActivation_EachStartFreshSecret(t *testing.T) {
+	s := newTestStore(t)
+	srv := flatAuthTestHub(t, s)
+	hubTS := httptest.NewServer(srv.Handler())
+	t.Cleanup(hubTS.Close)
+	globalDir := t.TempDir()
+
+	id, first := colocatedCredentials(t, colocatedTestHost(t, srv, globalDir, colocatedTestInst))
+	require.Equal(t, http.StatusOK, hubSelfReadStatus(t, hubTS.URL, id, first), "control: the first start's secret is accepted")
+	_, second := colocatedCredentials(t, colocatedTestHost(t, srv, globalDir, colocatedTestInst))
+	assert.False(t, first == second, "each start must get a fresh secret")
+	assert.Equal(t, http.StatusUnauthorized, hubSelfReadStatus(t, hubTS.URL, id, first), "the first secret is refused after the second start")
+	assert.Equal(t, http.StatusOK, hubSelfReadStatus(t, hubTS.URL, id, second), "the second secret is accepted")
+}
+
+// TestColocatedFlatActivation_ReplaceFailureFailsClosed: when the secret
+// cannot be replaced the start is refused, with no credentials and no
+// fallback to the stored secret, which stays unchanged and valid.
+func TestColocatedFlatActivation_ReplaceFailureFailsClosed(t *testing.T) {
+	inner := newTestStore(t)
+	fail := &atomic.Bool{}
+	s := &secretWriteFailStore{Store: inner, fail: fail}
+	srv := flatAuthTestHub(t, s)
+	hubTS := httptest.NewServer(srv.Handler())
+	t.Cleanup(hubTS.Close)
+	globalDir := t.TempDir()
+
+	id, prior := colocatedCredentials(t, colocatedTestHost(t, srv, globalDir, colocatedTestInst))
+	fail.Store(true)
+	h := colocatedTestHost(t, srv, globalDir, colocatedTestInst)
+	fail.Store(false)
+
+	assert.Empty(t, h.Active(), "the instance must not be activated")
+	st := h.Status()
+	require.Len(t, st, 1)
+	assert.Equal(t, brokerhost.StateRefused, st[0].State)
+	assert.Equal(t, "credentials_failed", st[0].Reason)
+	assertNoSecretIn(t, st[0].Error, prior)
+
+	stored, err := inner.GetBrokerSecret(context.Background(), id)
+	require.NoError(t, err)
+	assert.True(t, base64.StdEncoding.EncodeToString(stored.SecretKey) == prior, "the stored secret must be unchanged")
+	assert.Equal(t, http.StatusOK, hubSelfReadStatus(t, hubTS.URL, id, prior), "the prior secret still verifies")
+}
+
+// TestColocatedFlatActivation_SecretNotLogged: no secret (the planted
+// earlier one, or a replaced one) appears in the process logs of a
+// successful start, the Hub's refusal of the old secret, or a failed start.
+func TestColocatedFlatActivation_SecretNotLogged(t *testing.T) {
+	logs := captureProcessLogs(t)
+	inner := newTestStore(t)
+	fail := &atomic.Bool{}
+	s := &secretWriteFailStore{Store: inner, fail: fail}
+	srv := flatAuthTestHub(t, s)
+	hubTS := httptest.NewServer(srv.Handler())
+	t.Cleanup(hubTS.Close)
+	globalDir := t.TempDir()
+
+	id, first := colocatedCredentials(t, colocatedTestHost(t, srv, globalDir, colocatedTestInst))
+	planted := plantSecret(t, inner, id, []byte("planted-fake-secret-for-logs-32!"))
+	_, fresh := colocatedCredentials(t, colocatedTestHost(t, srv, globalDir, colocatedTestInst))
+	require.Equal(t, http.StatusUnauthorized, hubSelfReadStatus(t, hubTS.URL, id, planted), "control: the Hub refuses the planted secret")
+	fail.Store(true)
+	failed := colocatedTestHost(t, srv, globalDir, colocatedTestInst)
+	fail.Store(false)
+	require.Empty(t, failed.Active(), "control: the failing start is refused")
+
+	captured := logs.String()
+	require.NotEmpty(t, captured, "control: the logs were captured")
+	require.Contains(t, captured, "not activated", "control: the refused start was logged")
+	assertNoSecretIn(t, captured, first, planted, fresh)
+	assertNoSecretIn(t, failed.Status()[0].Error, first, planted, fresh)
+}
+
+// TestColocatedFlatActivation_NoAuthServiceRefused: a Hub without broker
+// authentication cannot give the instance a secret, so the co-located start
+// is refused rather than activated without credentials.
+func TestColocatedFlatActivation_NoAuthServiceRefused(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	_, err := s.UpsertHubSetting(ctx, "experiments",
+		json.RawMessage(fmt.Sprintf(`{"overrides":{%q:true}}`, experiments.FlatRuntimeBrokers)), "test", -1, "managed")
+	require.NoError(t, err)
+	srv, err := hub.New(hub.ServerConfig{}, s) // broker authentication off
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
+	require.Nil(t, srv.GetBrokerAuthService(), "control: no broker authentication service")
+	ops := hub.NewOperationalSettings(s, koanf.New("."), koanf.New("."))
+	_, err = ops.Refresh(ctx)
+	require.NoError(t, err)
+	srv.SetOperationalSettings(ops)
+
+	h := colocatedTestHost(t, srv, t.TempDir(), colocatedTestInst)
+	assert.Empty(t, h.Active(), "the instance must not be activated")
+	st := h.Status()
+	require.Len(t, st, 1)
+	assert.Equal(t, brokerhost.StateRefused, st[0].State)
+	assert.Equal(t, "credentials_unavailable", st[0].Reason)
 }

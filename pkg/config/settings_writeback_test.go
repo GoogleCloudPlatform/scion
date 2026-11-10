@@ -192,8 +192,7 @@ func TestUpdateVersionedSetting_NoOpLeavesFileUntouched(t *testing.T) {
 	for _, kv := range [][2]string{
 		{"active_profile", "local"},
 		{"hub.brokerId", "old-id"},
-		{"image_registry", ""},                         // deleting an absent key
-		{"hub_connections.foo.endpoint", "left-as-is"}, // accepted and left unchanged
+		{"image_registry", ""}, // deleting an absent key
 	} {
 		require.NoError(t, UpdateVersionedSetting(dir, kv[0], kv[1]), kv[0])
 	}
@@ -400,15 +399,14 @@ var updateVersionedSettingKeys = []string{
 	"server.auth.display_name", "server.auth.email", "server.auth.username",
 	"use_host_credentials",
 	"project_id", "hub.project_id",
-	"hub_connections.foo.endpoint",
 }
 
 func TestVersionedSettingKeys_MatchStructSwitch(t *testing.T) {
 	var want []string
 	for _, k := range updateVersionedSettingKeys {
-		edit, err := versionedSettingEditFor(k, "v")
+		_, err := versionedSettingEditFor(k, "v")
 		require.NoError(t, err, k)
-		if edit.noop || k == "project_id" || k == "hub.project_id" {
+		if k == "project_id" || k == "hub.project_id" {
 			continue
 		}
 		want = append(want, k)

@@ -30,7 +30,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
-	"github.com/GoogleCloudPlatform/scion/pkg/hub/eventstreams"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	scionruntime "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -1877,6 +1876,22 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 				}
 			}
 
+			// A heartbeat whose phase change is held (the agent is in a
+			// terminal phase or suspended) must not store a container
+			// status that reports a live container either: the list would
+			// show phase stopped next to containerStatus running
+			// (ptone/scion#3607). A heartbeat confirming the held phase, or
+			// reporting an exited container, still updates it. With run
+			// intent running a start is under way, so the live container
+			// is the intended one and its status applies (it also replaces
+			// a stale stop_queued). Only the stored status is held: the
+			// heartbeat's observation (report.observed above) still records
+			// a live container, so an agent whose stop did not take effect
+			// is stopped again by stopAgentsRunningWithIntentStopped.
+			if heartbeatContainerStatusHeld(heartbeatAgentHeld(agent), agentHB.Phase, agentHB.ContainerStatus) {
+				statusUpdate.ContainerStatus = ""
+			}
+
 			// If the broker didn't send a ContainerStatus but we have structured
 			// fields, render a display string for backward-compatible clients.
 			if statusUpdate.ContainerStatus == "" && agentHB.ContainerStatus == "" {
@@ -1992,10 +2007,35 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 				// Publish SSE event so the frontend receives activity updates.
 				// A row soft-deleted between the slug lookup and this re-read
 				// (a delete finishing concurrently) publishes nothing.
-				// Counted as trigger=heartbeat (ptone/scion#5228); the
-				// publish itself is unchanged.
+				// Only a write that changed a field subscribers see publishes
+				// (ptone/scion#5233): a heartbeat that only bumped last_seen
+				// is silent, and one that carries a real change (a phase,
+				// activity, exit or message) publishes as trigger=change.
+				//
+				// The comparison is against agent, the row read before this
+				// write, not against what clients last received. Two limits
+				// follow. (1) Lost update window: if another writer changed
+				// the row (and published) between that read and this write,
+				// and this write puts the visible fields back to the values
+				// read, the comparison sees no change and clients keep the
+				// other writer's value until the next real change, a resync
+				// or the agent list's own refresh. (2) agent was mutated in
+				// place above by three writers: the AppliedConfig backfill of
+				// HarnessAuth and Profile; store.ApplyBrokerAgentConfig
+				// (Template, Runtime, and AppliedConfig HarnessConfig,
+				// HarnessAuth, HarnessConfigSource, Image and Profile); and
+				// recordHeartbeatRuntimeTarget (AppliedConfig RuntimeTarget and
+				// RuntimeTargetCandidate; it may also create a nil
+				// AppliedConfig). None of those fields is in the status event
+				// or feeds its badges (agentEventBadges reads AppliedConfig
+				// Harness, InlineConfig and ModelSize), so the mutation does
+				// not affect the comparison.
+				// TestAgentStatusEventIgnoresHeartbeatConfigWrites fails if
+				// that stops being true.
 				if updated, err := s.store.GetAgent(ctx, agent.ID); err == nil && updated.DeletedAt.IsZero() {
-					s.events.PublishAgentStatus(eventstreams.WithHeartbeatTrigger(ctx), updated)
+					if agentStatusVisiblyChanged(agent, updated) {
+						s.events.PublishAgentStatus(ctx, updated)
+					}
 					if statusResult.Halted {
 						s.onAgentHalted(ctx, updated, statusResult.HaltedFrom)
 					}
@@ -2198,6 +2238,32 @@ func (s *Server) getBrokerProjects(w http.ResponseWriter, r *http.Request, broke
 // isValidExitReason reports whether reason is a valid ExitReason value.
 func isValidExitReason(reason string) bool {
 	return state.ExitReason(reason).IsValid()
+}
+
+// heartbeatAgentHeld reports whether a heartbeat may not store a live
+// container status for agent: its phase is at rest (store.PhaseAtRest) and
+// no start is under way (run intent is not running).
+func heartbeatAgentHeld(agent *store.Agent) bool {
+	return store.PhaseAtRest(agent.Phase) && agent.RunIntent != store.RunIntentRunning
+}
+
+// heartbeatContainerStatusHeld reports whether a heartbeat's container
+// status must not be stored. agentHeld is heartbeatAgentHeld. The status is
+// held when the heartbeat reports a live container: a structured phase that
+// is not at rest (store.PhaseAtRest) or, from an older broker without a
+// structured phase, a running container status.
+func heartbeatContainerStatusHeld(agentHeld bool, hbPhase, hbContainerStatus string) bool {
+	if !agentHeld {
+		return false
+	}
+	if hbPhase != "" {
+		return !store.PhaseAtRest(hbPhase)
+	}
+	// Only a confirmed live container is held: "Up ..." or "running". A
+	// "Restarting (...)" status is deliberately not held: the container is
+	// cycling rather than confirmed live, and the status records that.
+	cs := strings.ToLower(hbContainerStatus)
+	return strings.HasPrefix(cs, "up") || cs == "running"
 }
 
 // isGenericStopMessage reports whether msg is one of the stored agent.Message
