@@ -127,3 +127,34 @@ A second review approved the head above. Two points were left as they are, with 
 
 - The PostgreSQL CI job runs only `./integration`, so the `./internal/bridge` database tests, including `TestReplyPoller_StandaloneAppendFence`, do not run in CI. This gap predates item 10 and covers every database test in the package. Adding the package to that job is a follow-up, kept out of this change.
 - The fence test's skip guard does not read `TEST_REQUIRE_DATABASE`. That matches its package: no test under `internal/` reads that variable, and `testPostgresTaskStore` skips the same way. The fail-closed rule in `integration/README.md` covers the `integration` suite only. If the package adopts the rule, this guard should change with it.
+
+## Review comments on upstream PR 4746
+
+Five inline comments on upstream PR 4746, each triaged against item 10's head `79c2d15783af`. Line numbers are those of the fixed head.
+
+- **C1, `executor.go` reply poll switch reads `e.bridge.config` without a nil check:** declined. `New` dereferences `cfg` when it builds the Bridge (`bridge.go:200`, `bridge.go:208`), and `Execute` already reads `e.bridge.config.Hub.User` on the same path before the switch (`executor.go:146`), so a nil config never reaches it.
+- **C2, `reply_poller.go` `pollOnce` uses the anchor from `GetMessage` without a nil check:** fixed. `replyReader` accepts any `hubclient.ConversationService`, so the hub client's non-nil answer cannot be relied on. An answer with neither a message nor an error is now a failed read (`errNoReadResult`, outcome `pollError`), which is retried until the deadline. Covered by `TestReplyPoll_NilReadResultIsRetried/anchor`.
+- **C3, `reply_poller.go` `findDirectConversation` uses the list from `List` without a nil check:** fixed the same way: the list read returns `errNoReadResult`. The poll reports `pollError` (retried) rather than "not listed", which would end the call after the send. The preflight takes it as a non-refusal and goes on to the send, as for any other failed read. Covered by `TestReplyPoll_NilReadResultIsRetried/conversation_list` and `/preflight_conversation_list`.
+- **C4, `reply_poller.go` `pollOnce` uses the page from `ListMessages` without a nil check:** fixed the same way: a page read with no result is `pollError` (retried), never "anchor not seen". The preflight's own page read discards its result, so it needs no guard. Covered by `TestReplyPoll_NilReadResultIsRetried/message_page`.
+- **C5, `bridge.go` `lastTaskEventID` loops forever if a page's last event ID does not pass the cursor:** declined. Both `state.Store` implementations read `id > afterID ORDER BY id ASC` (`internal/state/postgres.go:448-449`, `internal/state/state.go:514-515`), so each non-empty page ends past the cursor. The test wrappers that embed `state.Store` (`async_create_test.go:781`, `reply_poller_bounds_test.go:378`) do not override `ReadTaskEvents`, and the package is internal, so nothing outside the module implements it.
+
+### Review comments gate
+
+Run on `ea39617a753c` (the fixes and the section above; the commit adding this gate changes no code). Every go command ran with a private `GOCACHE` and `GOMODCACHE`, `GOFLAGS=-buildvcs=false`. PostgreSQL 17 from the distro repositories ran as a private trust-auth cluster on a unix socket, with no password.
+
+| Check | Command | Result |
+|---|---|---|
+| A2A bridge module with PostgreSQL | `TEST_DATABASE_URL=... TEST_REQUIRE_DATABASE=1 go test -count=1 -p 1 -v -timeout 40m ./...` in `extras/scion-a2a-bridge` | pass: 955 pass, 0 fail, 1 skip (`TestPostgresMigrationHelperProcess`, the subprocess helper entry point). cmd, integration, internal/bridge and internal/state ok. The 4 `TestReplyPoller_StandaloneAppendFence` subtests ran and passed, and so did the 4 `TestReplyPoll_NilReadResultIsRetried` subtests |
+| go vet | `go vet ./internal/bridge/ ./integration/` | clean |
+| gofmt | `gofmt -l ./internal ./integration` | no files |
+| golangci-lint | `GOGC=40 golangci-lint run --new-from-rev=origin/main --concurrency=1 ./internal/bridge/... ./integration/...` | 0 issues |
+
+Mutants: each removes one new guard, runs `go test -count=1 -run '^TestReplyPoll_NilReadResultIsRetried$'`, and is reverted. None was committed.
+
+| # | Guard removed | Result |
+|---|---|---|
+| G1 | `findDirectConversation` nil list (C3) | caught: `conversation_list` subtest, nil dereference |
+| G2 | `pollOnce` nil anchor (C2) | caught: `anchor` subtest, nil dereference |
+| G3 | `pollOnce` nil page (C4) | caught: `message_page` subtest, nil dereference |
+
+Leftover-process check: the module run ran as `setsid --wait` on a script that records its session ID and execs `go test`. A checker that reads only `/proc/[0-9]*/stat` sampled the session every 5 s: 54 samples, at most 7 members during the run, 0 after `setsid --wait` returned. No sample reported "could not check". The limit stands: a child that calls `setsid` itself leaves the session unseen. No test or helper in the module calls `Setsid`, `nohup` or `disown`, and none starts a process in the background with `&`. `integration/runner_script_test.go` sets `Setpgid`, which stays in the session.

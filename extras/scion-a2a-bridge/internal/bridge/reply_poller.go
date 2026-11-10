@@ -146,6 +146,13 @@ func readOutcome(err error) pollOutcome {
 	return pollError
 }
 
+// errNoReadResult is a conversation read that returned neither a result nor
+// an error. It is taken as a failed read (pollError): the poll retries it
+// until the deadline, and the preflight goes on to the send. It is never
+// taken as an empty answer, because "not listed" and "anchor not seen" end
+// or keep a call on what the hub answered, and here it answered nothing.
+var errNoReadResult = errors.New("conversation read returned no result")
+
 // replyPollEnded is the cause with which the reply poller ends the call's
 // wait on a terminal outcome.
 type replyPollEnded struct {
@@ -253,6 +260,9 @@ func findDirectConversation(ctx context.Context, reader replyReader, agentID str
 	list, err := reader.List(ctx, &hubclient.ListConversationsOptions{Kind: "direct"})
 	if err != nil {
 		return "", err
+	}
+	if list == nil {
+		return "", errNoReadResult
 	}
 	for _, c := range list.Conversations {
 		if c.DMPeer != nil && c.DMPeer.Kind == "agent" && c.DMPeer.ID == agentID {
@@ -452,6 +462,9 @@ func (p *replyPoller) pollOnce(ctx context.Context) (pollOutcome, *hubstore.Mess
 		if err != nil {
 			return readOutcome(err), nil
 		}
+		if anchor == nil {
+			return readOutcome(errNoReadResult), nil
+		}
 		// The handler parses whole-second RFC3339; one second before the
 		// anchor, truncated, only widens the window.
 		p.afterBound = anchor.CreatedAt.Add(-time.Second).UTC().Format(time.RFC3339)
@@ -464,6 +477,9 @@ func (p *replyPoller) pollOnce(ctx context.Context) (pollOutcome, *hubstore.Mess
 		})
 		if err != nil {
 			return nil, "", err
+		}
+		if res == nil {
+			return nil, "", errNoReadResult
 		}
 		return res.Items, res.NextCursor, nil
 	})
