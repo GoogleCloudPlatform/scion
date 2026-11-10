@@ -122,6 +122,7 @@ func (f *choicesFixture) topicPrompt(t *testing.T, raw string, update bool) (*st
 	require.NoError(t, err)
 	msg := &store.Message{
 		ID: api.NewUUID(), ProjectID: f.project.ID, Sender: "agent:" + f.agent.Slug, SenderID: f.agent.ID,
+		Recipient: "user:" + f.alice.Email, RecipientID: f.alice.ID,
 		AgentID: f.agent.ID, Channel: "web", ThreadID: f.topicID, CreatedAt: time.Now().UTC(),
 		DispatchState: store.MessageDispatchDispatched,
 	}
