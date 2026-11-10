@@ -260,10 +260,22 @@ A short-lived, single-use token the Hub issues when a user creates or re-registe
 _Avoid_: registration token, bootstrap secret
 _See also_: Runtime Broker, User Access Token (UAT) (a different credential)
 
+**Deliverable**:
+A general work product, such as a code change, design, report or document. Use **File / Document** for concrete content and **Artifact** for a resource published through Scion's artifact system. Not every deliverable needs artifact-system publication.
+_See also_: File / Document, Artifact, Durability
+
+**File / Document**:
+Concrete content, including a file in a scratchpad. A file remains a file whether or not it is published as a Scion artifact. Its existence alone does not make it durable.
+_See also_: Deliverable, Artifact, Durability
+
+**Durability**:
+The property of a deliverable being reachable by someone else after its producing agent's container has been deleted. A verified shared-volume document or pushed remote ref can be durable without artifact-system publication. Publication alone does not guarantee retention: published content may expire or be deleted.
+_See also_: Deliverable, Artifact
+
 **Artifact**:
 A published file or folder (a bundle) stored by the Hub, with numbered immutable versions and a stable reference `scion://artifact/<id>[@<seq>]` that works from any Runtime Broker and in the web UI. Owned by the publishing agent or user and homed in a project. Gated by the `hub.artifacts` experiment. Not a build output or a chat attachment.
 _Avoid_: attachment, upload, build artifact
-_See also_: Project
+_See also_: Project, Deliverable, File / Document, Durability
 
 **Quota System**:
 An advisory-lock-based enforcement system that governs resource consumption at agent and project creation. It uses fail-closed semantics and prevents reservation leaks, operating on schemas including LimitDefinition, EntitlementBinding, and UsageReservation.
