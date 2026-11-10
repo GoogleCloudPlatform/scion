@@ -55,7 +55,9 @@ type MigrationReport struct {
 	DecodeFailedIDs []string `json:"decodeFailedIds,omitempty"`
 	// Unverified counts rows whose Secret Manager value could not be read
 	// back, did not match what was written, or (for a row that already
-	// referenced Secret Manager) has no readable Secret Manager reference.
+	// referenced Secret Manager) has no readable Secret Manager reference
+	// or holds a value that looks like a local at-rest envelope but does
+	// not open under the local key.
 	Unverified int `json:"unverified"`
 	// Failed counts rows whose stored value could not be read or whose
 	// Secret Manager write failed.
@@ -79,8 +81,10 @@ func (r MigrationReport) incomplete() int { return r.DecodeFailed + r.Unverified
 // Manager value is read back, and when it opens as a local at-rest
 // envelope under c (authenticated decryption, so a real value that merely
 // looks like an envelope is never taken for one), the decoded value is
-// written back with SetVerified and counted as repaired. Any other
-// readable value is counted as verified. This repair needs the local key
+// written back with SetVerified and counted as repaired. A value that
+// parses as an envelope but does not open under c is counted as
+// unverified, so the run stays incomplete. Any other readable value is
+// counted as verified. This repair needs the local key
 // that sealed the envelope; once that key is gone, it cannot be done.
 //
 // A row that fails to decode is skipped and reported by row ID only. A row
@@ -169,7 +173,7 @@ func migrateRow(ctx context.Context, st store.SecretStore, c *ValueCipher, gcp *
 		return
 	}
 
-	if writeVerified(ctx, gcp, s, value, logger, report) {
+	if writeVerified(ctx, gcp, s, value, "the row is left as it was", logger, report) {
 		logf(logger, "  MIGRATED  %s (scope: %s/%s, type: %s) - verified\n", s.Key, s.Scope, s.ScopeID, s.SecretType)
 		report.Migrated++
 	}
@@ -191,10 +195,20 @@ func checkRefRow(ctx context.Context, c *ValueCipher, gcp *GCPBackend, s store.S
 		return
 	}
 
-	// Only an authenticated decryption counts: a plaintext value (which a
-	// legacy-mode cipher passes through) or one that only looks like an
-	// envelope is a real value and is left alone.
+	// Only an authenticated decryption counts as an envelope to repair: a
+	// plaintext value (which a legacy-mode cipher passes through, and a
+	// managed cipher refuses as unadmitted plaintext) and a value that does
+	// not parse as an envelope are real values and are left alone. A value
+	// that parses as an enc:v1: or enc:v2: envelope but does not open (for
+	// example after its key left the ring) is not a usable value, so it
+	// keeps the run incomplete rather than letting it complete and the
+	// local key be dropped.
 	decoded, auth, err := c.DecryptAuthenticated(current)
+	if err != nil && parsesAsEnvelope(current) {
+		logf(logger, "  UNVERIFIED  %s (scope: %s/%s) - the Secret Manager value looks like a local envelope but does not open under the local key\n", s.Key, s.Scope, s.ScopeID)
+		report.Unverified++
+		return
+	}
 	if err != nil || auth.Format == secretenvelope.FormatPlaintext {
 		logf(logger, "  VERIFIED  %s (scope: %s/%s) - the Secret Manager value is readable\n", s.Key, s.Scope, s.ScopeID)
 		report.Verified++
@@ -206,16 +220,24 @@ func checkRefRow(ctx context.Context, c *ValueCipher, gcp *GCPBackend, s store.S
 		report.Repaired++
 		return
 	}
-	if writeVerified(ctx, gcp, s, decoded, logger, report) {
+	if writeVerified(ctx, gcp, s, decoded, "the row is left as it was and the previous Secret Manager version is kept one version back", logger, report) {
 		logf(logger, "  REPAIRED  %s (scope: %s/%s, type: %s) - the decoded value replaced a local at-rest envelope; verified\n", s.Key, s.Scope, s.ScopeID, s.SecretType)
 		report.Repaired++
 	}
 }
 
+// parsesAsEnvelope reports whether stored is a well-formed enc:v1: or
+// enc:v2: envelope.
+func parsesAsEnvelope(stored string) bool {
+	env, err := secretenvelope.Parse(stored)
+	return err == nil && env.Format != secretenvelope.FormatPlaintext
+}
+
 // writeVerified writes value for row s with GCPBackend.SetVerified. On
-// failure it logs the row (never the value or the error text), counts it
-// as unverified or failed, and returns false; the row is left as it was.
-func writeVerified(ctx context.Context, gcp *GCPBackend, s store.Secret, value string, logger io.Writer, report *MigrationReport) bool {
+// failure it logs the row with kept (a fixed text saying what was kept,
+// never the value or the error text), counts it as unverified or failed,
+// and returns false; the row is left as it was.
+func writeVerified(ctx context.Context, gcp *GCPBackend, s store.Secret, value, kept string, logger io.Writer, report *MigrationReport) bool {
 	input := &SetSecretInput{
 		Name:        s.Key,
 		Value:       value,
@@ -229,11 +251,11 @@ func writeVerified(ctx context.Context, gcp *GCPBackend, s store.Secret, value s
 	}
 	if _, _, err := gcp.SetVerified(ctx, input); err != nil {
 		if errors.Is(err, ErrSecretVerify) {
-			logf(logger, "  UNVERIFIED  %s (scope: %s/%s) - the Secret Manager read-back did not confirm the value; the row is left as it was\n", s.Key, s.Scope, s.ScopeID)
+			logf(logger, "  UNVERIFIED  %s (scope: %s/%s) - the Secret Manager read-back did not confirm the value; %s\n", s.Key, s.Scope, s.ScopeID, kept)
 			report.Unverified++
 			return false
 		}
-		logf(logger, "  ERROR  %s (scope: %s/%s) - writing to Secret Manager failed (%s); the row is left as it was\n", s.Key, s.Scope, s.ScopeID, status.Code(err))
+		logf(logger, "  ERROR  %s (scope: %s/%s) - writing to Secret Manager failed (%s); %s\n", s.Key, s.Scope, s.ScopeID, status.Code(err), kept)
 		report.Failed++
 		return false
 	}

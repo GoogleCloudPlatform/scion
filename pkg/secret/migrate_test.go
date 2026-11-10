@@ -565,12 +565,13 @@ func TestMigrateLocalToGCP_RepairDryRunWritesNothing(t *testing.T) {
 // TestMigrateLocalToGCP_LeavesRealValuesAlone covers values that must not
 // be taken for a local envelope: a plaintext value (which a legacy-mode
 // cipher reads back unchanged, and a managed cipher refuses as unadmitted
-// plaintext) and a value that is shaped like an envelope but opens under
-// no local key.
+// plaintext), a value that mentions the envelope prefix, and one that
+// starts with it but does not parse as an envelope.
 func TestMigrateLocalToGCP_LeavesRealValuesAlone(t *testing.T) {
 	values := map[string]string{
-		"plaintext":       "a-real-plaintext-secret-value",
-		"envelope-shaped": undecodable(),
+		"plaintext":         "a-real-plaintext-secret-value",
+		"mentions-envelope": "value-with-enc:v1:-inside",
+		"does-not-parse":    "enc:v1:not-base64!",
 	}
 	for cname, c := range map[string]*ValueCipher{
 		"legacy":  NewLegacyValueCipher("migration-test-shared-secret"),
@@ -618,4 +619,108 @@ func TestMigrateLocalToGCP_UnreadableRefIsIncomplete(t *testing.T) {
 		t.Error("log carries the Secret Manager error text")
 	}
 	assertNoLeak(t, report, err, log, plain)
+}
+
+// TestMigrateLocalToGCP_UnopenableEnvelopeIsIncomplete covers a Secret
+// Manager value that parses as a local envelope but does not open under
+// the local key (one sealed under a key absent from the cipher, and one
+// that authenticates under no key): it is not a usable value, so the run
+// must stay incomplete, and the value is not rewritten.
+func TestMigrateLocalToGCP_UnopenableEnvelopeIsIncomplete(t *testing.T) {
+	sealed, err := NewLegacyValueCipher("a-different-shared-secret").Encrypt("plain-under-absent-key")
+	if err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
+	for cname, c := range map[string]*ValueCipher{
+		"legacy":  NewLegacyValueCipher("migration-test-shared-secret"),
+		"managed": ciphertestRing(t, "k1"),
+	} {
+		for vname, value := range map[string]string{
+			"absent-key":   sealed,
+			"no-key-opens": undecodable(),
+		} {
+			t.Run(cname+"/"+vname, func(t *testing.T) {
+				f := newMigrationFixtureWith(t, c)
+				f.seedRef(t, "GONE_KEY", value)
+				before := f.addCount()
+
+				report, log, err := f.run(t, false)
+				if !errors.Is(err, ErrMigrationIncomplete) {
+					t.Fatalf("err = %v, want ErrMigrationIncomplete", err)
+				}
+				if report.Unverified != 1 || report.Verified != 0 || report.Repaired != 0 {
+					t.Fatalf("report = %+v, want 1 unverified", report)
+				}
+				if f.addCount() != before {
+					t.Fatal("an unopenable envelope was rewritten")
+				}
+				if !strings.Contains(log, "UNVERIFIED  GONE_KEY") {
+					t.Error("log does not report the row as unverified")
+				}
+				assertNoLeak(t, report, err, log, value, "plain-under-absent-key")
+			})
+		}
+	}
+}
+
+func TestMigrateLocalToGCP_RepairReadBackMismatchKeepsPreviousVersion(t *testing.T) {
+	f := newMigrationFixture(t)
+	const plain, substituted = "plain-value-repair-mismatch", "substituted-repair-readback"
+	raw := f.seedOldRawCopy(t, "OLD_MISMATCH", plain)
+
+	// The first read (the check) must see the envelope; only the read-back
+	// after the write is substituted.
+	hook := &readBackSubstitute{faultSMClient: f.sm, path: f.path("OLD_MISMATCH", store.ScopeUser, migScopeID), value: []byte(substituted)}
+	f.gcp = NewGCPBackendWithClient(f.st, hook, "test-project", "test-hub-id")
+
+	report, log, err := f.run(t, false)
+	if !errors.Is(err, ErrMigrationIncomplete) {
+		t.Fatalf("err = %v, want ErrMigrationIncomplete", err)
+	}
+	if report.Unverified != 1 || report.Repaired != 0 {
+		t.Fatalf("report = %+v, want 1 unverified", report)
+	}
+	if !strings.Contains(log, "previous Secret Manager version is kept one version back") {
+		t.Error("the unverified repair line does not say the previous version is kept")
+	}
+	assertNoLeak(t, report, err, log, plain, raw, substituted)
+}
+
+// readBackSubstitute returns value for path on every read after the first.
+type readBackSubstitute struct {
+	*faultSMClient
+	path  string
+	value []byte
+	reads int
+}
+
+func (r *readBackSubstitute) AccessSecretVersion(ctx context.Context, req *smpb.AccessSecretVersionRequest) (*smpb.AccessSecretVersionResponse, error) {
+	if trimVersion(req.Name) == r.path {
+		r.reads++
+		if r.reads > 1 {
+			return &smpb.AccessSecretVersionResponse{Name: req.Name, Payload: &smpb.SecretPayload{Data: r.value}}, nil
+		}
+	}
+	return r.faultSMClient.AccessSecretVersion(ctx, req)
+}
+
+func TestMigrateLocalToGCP_NonSecretManagerRefIsUnverified(t *testing.T) {
+	f := newMigrationFixture(t)
+	if _, err := f.st.UpsertSecret(context.Background(), &store.Secret{
+		ID: tid("other-ref-row"), Key: "OTHER_REF", SecretRef: "other:backend/path", SecretType: store.SecretTypeEnvironment,
+		Scope: store.ScopeUser, ScopeID: migScopeID,
+	}); err != nil {
+		t.Fatalf("UpsertSecret: %v", err)
+	}
+
+	report, log, err := f.run(t, false)
+	if !errors.Is(err, ErrMigrationIncomplete) {
+		t.Fatalf("err = %v, want ErrMigrationIncomplete", err)
+	}
+	if report.Unverified != 1 || report.Verified != 0 {
+		t.Fatalf("report = %+v, want 1 unverified", report)
+	}
+	if !strings.Contains(log, "UNVERIFIED  OTHER_REF") {
+		t.Error("log does not report the row as unverified")
+	}
 }
