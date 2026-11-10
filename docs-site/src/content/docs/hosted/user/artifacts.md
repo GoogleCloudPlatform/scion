@@ -100,7 +100,7 @@ With `--version-of`, a single file replaces the current version's entry file, wh
 
 ### Add a version (web)
 
-On the artifact's page, **Edit** opens a Markdown or text entry file in an editor, and **Publish new version** saves your change as the next version. **Upload new version**, on the **History** tab, publishes a file or a folder as the next version. These buttons appear only when you may publish versions of that artifact.
+On the artifact's page, **Edit** opens a Markdown or text entry file in an editor, and **Publish new version** saves your change as the next version. **Upload new version**, on the **History** tab, publishes a file or a folder as the next version. These buttons appear only when you may publish versions of that artifact. While the `hub.artifacts_open_review_check` [experiment](/scion/reference/experiments/) is on (off by default), publishing a new non-review version while someone else has an open review in the web editor warns with `409` (`review_open`, listing up to 5 open reviews with the reviewer's display name, last activity to the minute, and whether there are unsaved changes); sending `"force": true` in the publish manifest publishes anyway, returns the open reviews in `warnings`, and records `version_forced` in the decision log (see [Open reviews](/scion/reference/artifacts/#open-reviews)).
 
 ### List versions and get an artifact (CLI)
 
@@ -162,7 +162,7 @@ On the current version of a Markdown artifact, choose **Review**. An editor open
 
 1. Select text and choose **Comment**, **Suggest**, **Insert** or **Delete** to add a mark. Marks cannot be nested, and the toolbar refuses a selection that falls inside code; a short hint says why.
 2. **Save review** publishes your marked-up copy as a version of kind *review*, with an optional note. It stays disabled until there is at least one mark, and while text outside your marks differs from the version you started from.
-3. If someone publishes a newer version while you review, your review is not saved. The editor restarts from the current version, and your text is shown read-only with **Copy** so you can redo your marks.
+3. If someone publishes a newer version while you review, your review is not saved. The editor restarts from the current version, and your text is shown read-only with **Copy** so you can redo your marks. While `hub.artifacts_open_review_check` is on, the review editor reports your open review session (`POST /api/v1/artifacts/{id}/review-sessions`, heartbeating every 60 seconds and closing on save or tab unload) so publishers are warned before overwriting an open review (see [Open reviews](/scion/reference/artifacts/#open-reviews)).
 
 :::note[Graphical review editor (experimental)]
 When the `web.artifact_review_editor` [experiment](/scion/reference/experiments/) is on (in addition to `hub.artifacts`), **Review** opens a graphical review editor with a **Graphical** and **Source** view toggle:

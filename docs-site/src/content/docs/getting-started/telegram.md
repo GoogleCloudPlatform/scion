@@ -236,7 +236,7 @@ with `scion start`, and confirm with `/agents`). Then, in the linked group:
 | *(reply to a bot message)* | Continues the conversation with the **same** agent. |
 
 The bot strips its own mention and the `@agentslug` prefix before forwarding your text to the
-agent.
+agent. Photos, documents, audio, and video sent in the linked group (up to about 2 MiB per message) are uploaded through the Hub and delivered to each addressed agent's inbox at `~/.scion/inbox/<message-id>/` when attachment artifacts are enabled on the Hub, or placed in the project's shared scratchpad when off (the former `downloads_path` setting is retired and ignored with a startup warning; see [Telegram — Attachments](/scion/hosted/user/external-channels/#attachments)).
 
 ### Body Mentions & Routing Behavior
 

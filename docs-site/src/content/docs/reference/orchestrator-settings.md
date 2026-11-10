@@ -81,6 +81,7 @@ hub:
 Legacy fields like `token`, `apiKey`, and broker identity fields (`brokerId`) have been removed. 
 - **Dev Auth** is now handled via `server.auth.dev_token` (or `SCION_DEV_TOKEN`).
 - **Broker Identity** is now configured in the `server.broker` section (see [Server Configuration](/scion/reference/server-config/)).
+- **Runtime Broker Hub Connections** live in `~/.scion/hub-credentials/<name>.json` (managed by `scion runtime-broker register`, `join`, and `deregister`), not in settings files; `scion config set` refuses `hub_connections` and `hub_connections.<name>.<field>` as not writable.
 :::
 
 ## Runtimes (`runtimes`)
