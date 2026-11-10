@@ -771,6 +771,8 @@ var MutationClassifications = []MutationClassification{
 	{File: "pkg/hub/brokerauth.go", Function: "GenerateAndStoreSecret", Symbol: "CreateBrokerSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Broker secret generation, broker-HMAC auth infrastructure", Scope: "pkg/hub/brokerauth.go"}},
 	{File: "pkg/hub/brokerauth.go", Function: "MintSecretIfAbsent", Symbol: "CreateBrokerSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "First broker secret on the deprecated embedded registration path, broker-HMAC auth infrastructure", Scope: "pkg/hub/brokerauth.go"}},
 	{File: "pkg/hub/brokerauth.go", Function: "RotateBrokerSecret", Symbol: "UpdateBrokerSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Broker secret rotation, broker-HMAC auth infrastructure", Scope: "pkg/hub/brokerauth.go"}},
+	{File: "pkg/hub/brokerauth.go", Function: "ReplaceBrokerSecret", Symbol: "DeleteBrokerSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Co-located flat activation secret replacement, broker-HMAC auth infrastructure", Scope: "pkg/hub/brokerauth.go"}},
+	{File: "pkg/hub/brokerauth.go", Function: "ReplaceBrokerSecret", Symbol: "CreateBrokerSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Co-located flat activation secret replacement, broker-HMAC auth infrastructure", Scope: "pkg/hub/brokerauth.go"}},
 
 	// -----------------------------------------------------------------------
 	// pkg/hub/brokerclient.go / controlchannel_client.go / httpdispatcher.go

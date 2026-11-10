@@ -237,25 +237,28 @@ func (a *colocatedFlatActivator) Activate(ctx context.Context, c brokerhost.Cand
 		}
 		return nil, brokerhost.WithReason("registration_failed", err)
 	}
-	act := &brokerhost.Activation{}
+	// Every co-located start replaces the instance's secret, so a secret
+	// saved earlier (for example by an HTTP pre-registration) stops
+	// verifying. Without a fresh secret the instance is not activated:
+	// it could not sign its Hub requests, and nothing falls back to a
+	// stored secret.
 	authSvc := a.hubSrv.GetBrokerAuthService()
 	if authSvc == nil {
-		log.Printf("Warning: BrokerAuthService not available, skipping credentials for flat Runtime Broker instance %q", c.Instance.Key)
-		return act, nil
+		return nil, brokerhost.WithReason("credentials_unavailable",
+			fmt.Errorf("flat Runtime Broker instance %q: the Hub's broker authentication service is not available", c.Instance.Key))
 	}
-	secretKeyB64, err := authSvc.GenerateAndStoreSecret(ctx, row.ID)
+	secretKeyB64, err := authSvc.ReplaceBrokerSecret(ctx, row.ID)
 	if err != nil {
-		log.Printf("Warning: failed to generate/retrieve secret for flat Runtime Broker instance %q: %v", c.Instance.Key, err)
-		return act, nil
+		return nil, brokerhost.WithReason("credentials_failed",
+			fmt.Errorf("flat Runtime Broker instance %q: %w", c.Instance.Key, err))
 	}
-	act.InMemoryCredentials = &brokercredentials.BrokerCredentials{
+	return &brokerhost.Activation{InMemoryCredentials: &brokercredentials.BrokerCredentials{
 		Name:         "local",
 		BrokerID:     row.ID,
 		SecretKey:    secretKeyB64,
 		HubEndpoint:  a.hubEndpoint,
 		RegisteredAt: time.Now(),
-	}
-	return act, nil
+	}}, nil
 }
 
 func (a *colocatedFlatActivator) Refused(inst config.V1RuntimeBrokerInstanceConfig, err error) {
