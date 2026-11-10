@@ -613,7 +613,9 @@ func (m *ControlChannelManager) handleStreamClose(hc *BrokerConnection, data []b
 
 	code := wsprotocol.MapBrokerStreamCloseCode(close.Code)
 	if stream != nil {
-		stream.CloseWith(code, close.Reason)
+		// The broker's reason reaches the client's close frame: only a
+		// fixed protocol token is passed on.
+		stream.CloseWith(code, relayableStreamCloseReason("runtime_broker", code, close.Reason))
 	}
 
 	if m.config.Debug {

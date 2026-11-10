@@ -454,6 +454,10 @@ func writePortNotExposed(w http.ResponseWriter, r *http.Request) {
 	NotFound(w, "Port")
 }
 
+// portTunnelFailedMessage is the client-facing text for a failed legacy
+// port-forward tunnel request.
+const portTunnelFailedMessage = "Port-forward tunnel failed"
+
 // proxyToAgentPort proxies r to the agent's exposed port as identity, the
 // caller's access already decided: over the agent's conduit session when
 // this node can route it and the port is loopback, else over the
@@ -571,12 +575,21 @@ func (s *Server) proxyToAgentPort(w http.ResponseWriter, r *http.Request, identi
 			writeError(w, http.StatusServiceUnavailable, ErrCodeRuntimeError, err.Error(), nil)
 			return
 		}
-		writeError(w, http.StatusBadGateway, ErrCodeRuntimeError, "Port-forward tunnel failed: "+err.Error(), nil)
+		// The tunnel's error text stays in the hub log; the client gets
+		// the fixed message.
+		errText := err.Error()
+		slog.Warn("port-forward tunnel request failed", "agent_id", agent.ID,
+			"error_len", len(errText), "error", brokerBodyForLog(errText))
+		writeError(w, http.StatusBadGateway, ErrCodeRuntimeError, portTunnelFailedMessage, nil)
 		return
 	}
 	if resp.Error != "" {
 		outcome = portViewRequestOffline
-		writeError(w, http.StatusBadGateway, ErrCodeRuntimeError, resp.Error, nil)
+		// resp.Error is the far end's free text: hub log only, capped and
+		// rendered.
+		slog.Warn("port-forward tunnel returned an error", "agent_id", agent.ID,
+			"error_len", len(resp.Error), "error", brokerBodyForLog(resp.Error))
+		writeError(w, http.StatusBadGateway, ErrCodeRuntimeError, portTunnelFailedMessage, nil)
 		return
 	}
 	// The app's headers, minus hop-by-hop and the ones the hub controls,

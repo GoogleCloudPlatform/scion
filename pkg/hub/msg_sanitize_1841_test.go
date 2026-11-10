@@ -48,7 +48,8 @@ func hostileBrokerError() error {
 }
 
 // assertSanitized checks that text carries no control characters other than
-// plain spaces and is bounded.
+// plain spaces, is bounded, and carries none of the broker's body: the
+// broker's status survives, its body text does not.
 func assertSanitized(t *testing.T, text string, maxLen int) {
 	t.Helper()
 	for _, r := range text {
@@ -58,7 +59,9 @@ func assertSanitized(t *testing.T, text string, maxLen int) {
 	}
 	assert.NotContains(t, text, "\x1b")
 	assert.LessOrEqual(t, len(text), maxLen, "text must be truncated")
-	assert.Contains(t, text, "boom", "the readable part of the reason should survive")
+	assert.Contains(t, text, "runtime broker returned error 500", "the broker's status should survive")
+	assert.NotContains(t, text, "boom", "the broker's body must not reach the reason")
+	assert.NotContains(t, text, "pwned", "the broker's body must not reach the reason")
 }
 
 func TestDeliverToAgent_HostileBrokerErrorSanitized(t *testing.T) {
@@ -132,6 +135,8 @@ func TestHandleAgentMessage_HostileBrokerErrorSanitizedInPersistedReason(t *test
 		},
 	})
 	require.GreaterOrEqual(t, rec.Code, 400)
+	assert.NotContains(t, rec.Body.String(), "boom", "the broker's body must not reach the response")
+	assert.NotContains(t, rec.Body.String(), "pwned", "the broker's body must not reach the response")
 
 	row := requireSingleRowState(t, s, agentID, store.MessageDispatchFailed)
 	require.NotNil(t, row.DispatchFailureReason)
@@ -145,7 +150,7 @@ func TestBrokerHTTPError_BoundsBodyRead(t *testing.T) {
 		Body:       io.NopCloser(strings.NewReader(body)),
 		Header:     http.Header{},
 	}
-	err := brokerHTTPError(resp)
+	err := brokerHTTPError("broker-1", resp)
 	var se *brokerStatusError
 	require.True(t, errors.As(err, &se))
 	assert.Equal(t, http.StatusBadGateway, se.StatusCode)
