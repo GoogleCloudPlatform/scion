@@ -313,6 +313,8 @@ The Hub exposes a RESTful API under `/api/v1/`:
 | **Env Vars / Secrets** | CRUD for scoped environment variables and encrypted secrets |
 | **Groups / Policies** | RBAC: groups with nested membership, policies with conditional bindings |
 
+Every settings route (the Hub's server configuration, project defaults, experiments, messaging, profiling, chat retention and admin mode, a project's settings and messaging policy, a runtime broker's settings, and injected skills) needs a `scion` command or an explicit web-only exemption: `TestSettingsAPICoverage` (`cmd/settings_api_coverage_test.go`) selects these route families from the authorization operation catalogue and fails until a new route in them is listed there with one or the other.
+
 ### Authentication
 
 The Hub supports multiple authentication methods:
