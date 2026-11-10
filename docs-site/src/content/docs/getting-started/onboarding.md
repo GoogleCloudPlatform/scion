@@ -73,7 +73,7 @@ To avoid re-running it, install it as a LaunchDaemon; see [Apple Container DNS](
 
 ### 4. Image registry
 
-Enter the container image registry that hosts the Scion harness images (for example `us-central1-docker.pkg.dev/my-project/scion`). Images such as `<registry>/scion-claude:latest` are pulled from here in the next step. If you are not ready, choose **Skip for now** and set it later.
+Enter the container image registry that hosts the Scion harness images (for example `us-central1-docker.pkg.dev/my-project/scion`). On a release build (`vX.Y.Z`, `vX.Y.Z-preview.N`, or `vX.Y.Z-rc.N`), bundled `scion-*` images such as `<registry>/scion-claude:<version>` are pulled at the binary's version tag in the next step when `image_tag` is unset and `hub.image_tag_version_default` is on (development builds, or `image_tag: latest`, pull `:latest`; see [Image tag](/scion/reference/settings-precedence/#image-tag-experimental)). If you are not ready, choose **Skip for now** and set it later.
 
 ### 5. AI harnesses
 
