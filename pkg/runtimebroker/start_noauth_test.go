@@ -269,3 +269,67 @@ func naEnableADCAutoInject(t *testing.T, home string) {
 		t.Fatal(err)
 	}
 }
+
+// TestRestartAgent_NoAuthReprovision (B2): a restart of an agent with no
+// container, which the broker starts again from the request's inputs (as
+// after its pod or directory is gone), carries the intent and leaves out
+// secret material the same way.
+func TestRestartAgent_NoAuthReprovision(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	srv := newTestServer(t)
+	mgr := srv.manager.(*mockManager)
+
+	projectDir := filepath.Join(t.TempDir(), ".scion")
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := map[string]any{
+		"resolvedEnv": map[string]string{
+			"SCION_AGENT_ID": "agent-uuid-na-reprovision",
+			"NA_SECRET_ENV":  naSecretEnv,
+			"GITHUB_TOKEN":   naGitToken,
+		},
+		"envClassifications": map[string]api.EnvKind{
+			"SCION_AGENT_ID": api.EnvKindPlain,
+			"NA_SECRET_ENV":  api.EnvKindSecretFetchable,
+			"GITHUB_TOKEN":   api.EnvKindSecretFetchable,
+		},
+		"resolvedSecrets": []api.ResolvedSecret{
+			{Name: "NA_SECRET_FILE", Type: "file", Target: "/home/scion/na-secret-file", Value: naSecretFile, Source: "project"},
+		},
+		"projectPath":   projectDir,
+		"harnessConfig": "claude",
+		"noAuth":        true,
+	}
+	data, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/gone-na-agent/restart", strings.NewReader(string(data)))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("status %d: %s", w.Code, w.Body.String())
+	}
+	if mgr.StartCalls() != 1 {
+		t.Fatalf("Manager.Start calls = %d, want 1", mgr.StartCalls())
+	}
+	opts := mgr.LastStartOpts()
+	if opts.ProjectPath != projectDir {
+		t.Fatalf("precondition: the restart started the agent from the request's project (got %q)", opts.ProjectPath)
+	}
+	if !opts.NoAuth {
+		t.Error("the restart without a container carries the intent")
+	}
+	if len(opts.ResolvedSecrets) != 0 {
+		t.Errorf("resolved secrets reached the agent manager: %d", len(opts.ResolvedSecrets))
+	}
+	if _, ok := opts.Env["NA_SECRET_ENV"]; ok {
+		t.Error("a secret-fetchable env value reached the agent env")
+	}
+	if opts.Env["GITHUB_TOKEN"] != naGitToken {
+		t.Error("the git token is kept")
+	}
+}

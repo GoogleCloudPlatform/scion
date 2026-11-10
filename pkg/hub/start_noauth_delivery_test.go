@@ -686,3 +686,32 @@ func TestRestartNoAuth_CrossNode(t *testing.T) {
 		})
 	}
 }
+
+// TestStartNoAuth_UserTokenStillChecked (T7): the owner's git token, shared
+// with progeny, is still held to the start-time owner-path check for an
+// agent without credentials: refused, it is not delivered (start stays as
+// strict as for any agent).
+func TestStartNoAuth_UserTokenStillChecked(t *testing.T) {
+	ctx := context.Background()
+	f := newSDFixture(t, "na-usc")
+	direct, _ := f.direct(t, "na-usc-direct", true)
+	_, _, err := f.Server.secretBackend.Set(ctx, &secret.SetSecretInput{
+		Name: noAuthGitTokenKey, Value: naGitUser, SecretType: store.SecretTypeEnvironment, Target: noAuthGitTokenKey,
+		Scope: store.ScopeUser, ScopeID: f.UserID, InjectionMode: store.InjectionModeAlways,
+		AllowProgeny: true, CreatedBy: f.UserID, UpdatedBy: f.UserID,
+	})
+	require.NoError(t, err)
+	agent, err := f.Store.GetAgent(ctx, direct)
+	require.NoError(t, err)
+	agent.AppliedConfig.NoAuth = true
+
+	pick := func() noAuthGitToken {
+		selected, _, err := f.disp.selectDeliverySecrets(ctx, newDeliverySelector(f.disp.authzService, agent, PurposeRestart), agent)
+		require.NoError(t, err)
+		return pickNoAuthGitTokenFrom(selected)
+	}
+	require.Equal(t, naGitUser, pick().value, "precondition: the check allows the owner's token on a clean chain")
+
+	constrainAllBut(t, f.Store, "user", f.UserID, secretUsePermission)
+	assert.Empty(t, pick().value, "the owner's token refused by the owner-path check is not delivered")
+}
