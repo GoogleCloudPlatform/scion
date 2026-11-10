@@ -55,3 +55,11 @@ func (c HubChatSearchConfig) TimeoutDuration() (time.Duration, error) {
 	}
 	return d, nil
 }
+
+// Validate reports an invalid Timeout. The hub stays lenient at startup (it
+// logs the error and uses the default); the workstation admin settings PUT
+// refuses the value with 422 instead of writing it (round-4 item R4-02).
+func (c HubChatSearchConfig) Validate() error {
+	_, err := c.TimeoutDuration()
+	return err
+}

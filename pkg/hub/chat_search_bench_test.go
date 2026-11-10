@@ -311,7 +311,12 @@ func (f *benchFixture) mainHandleLoad(t *testing.T, d time.Duration) (ins, reads
 // rareSearch runs one all-scope search for a term that matches nothing,
 // under the hub's time limit, and returns its duration and error.
 func (f *benchFixture) rareSearch(parent context.Context, term string) (time.Duration, error) {
-	ctx, cancel := context.WithTimeout(parent, benchTimeout)
+	return f.rareSearchWithin(parent, term, benchTimeout)
+}
+
+// rareSearchWithin is rareSearch under the time limit limit.
+func (f *benchFixture) rareSearchWithin(parent context.Context, term string, limit time.Duration) (time.Duration, error) {
+	ctx, cancel := context.WithTimeout(parent, limit)
 	defer cancel()
 	start := time.Now()
 	_, _, err := f.wcs.SearchChatMessages(ctx, ChatSearchFilter{Query: term, ProjectIDs: f.projects, Limit: 20, DMParticipantUserID: "u001"})
@@ -322,25 +327,42 @@ func within10(got, base time.Duration) bool {
 	return got <= base+base/10+benchP99Floor
 }
 
-// TestChatSearchBench_L1WriterIsolation: two concurrent rare-term all-scope
-// searches, looping, do not raise insert or other-read p99 on the main
-// handle by more than 10%, and no main-handle operation fails.
-func TestChatSearchBench_L1WriterIsolation(t *testing.T) {
-	f := openBenchFixture(t)
-	const d = 20 * time.Second
-	baseIns, baseReads, baseFail := f.mainHandleLoad(t, d)
+// p99Ratio is got/base, logged next to within10: with the absolute floor the
+// check is looser than 10% on a small baseline, so the ratio shows the real
+// margin (round-4 item R4-04).
+func p99Ratio(got, base time.Duration) float64 {
+	if base <= 0 {
+		return 0
+	}
+	return float64(got) / float64(base)
+}
 
-	// Planted control: a transaction held about 1.5 s on the main handle must
-	// show as a hold of at least 1 s, so a quiet result cannot mean a blind probe.
+// shortLimit is a time limit at half of one measured full rare-term scan, so
+// a search under it always runs into the limit (round-4 item R4-01). It fails
+// the test when a full scan is too short to halve meaningfully.
+func (f *benchFixture) shortLimit(t *testing.T) time.Duration {
+	t.Helper()
+	full, err := f.rareSearch(context.Background(), benchRareTerm)
+	if err != nil {
+		require.True(t, isChatSearchTimeout(err), "full scan: %v", err)
+		return benchTimeout / 2
+	}
+	require.GreaterOrEqual(t, full, 20*time.Millisecond, "the fixture must make a full scan long enough to cut in half")
+	return full / 2
+}
+
+// searchPhase is one L1 phase: two looping rare-term all-scope searches, each
+// under limit, while mainHandleLoad runs for d.
+type searchPhase struct {
+	ins, reads                   *latencies
+	fail                         int64
+	searches, timeouts, otherErr int64
+	longestHold                  time.Duration
+}
+
+func (f *benchFixture) runSearchPhase(t *testing.T, d, limit time.Duration) searchPhase {
+	t.Helper()
 	f.holds.takeMax()
-	tx, err := f.main.Begin()
-	require.NoError(t, err)
-	time.Sleep(1500 * time.Millisecond)
-	require.NoError(t, tx.Commit())
-	planted := f.holds.takeMax()
-	t.Logf("BENCH L1 n=%d planted_hold=%v (control; want >= 1s)", f.n, planted)
-	require.GreaterOrEqual(t, planted, time.Second, "the planted 1.5 s hold must register")
-
 	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
 	var searches, timeouts, otherErr atomic.Int64
@@ -349,7 +371,7 @@ func TestChatSearchBench_L1WriterIsolation(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for ctx.Err() == nil {
-				_, err := f.rareSearch(ctx, benchRareTerm)
+				_, err := f.rareSearchWithin(ctx, benchRareTerm, limit)
 				searches.Add(1)
 				switch {
 				case err == nil:
@@ -365,27 +387,66 @@ func TestChatSearchBench_L1WriterIsolation(t *testing.T) {
 	ins, reads, fail := f.mainHandleLoad(t, d)
 	cancel()
 	wg.Wait()
-	longestHold := f.holds.takeMax()
+	return searchPhase{ins: ins, reads: reads, fail: fail, searches: searches.Load(), timeouts: timeouts.Load(),
+		otherErr: otherErr.Load(), longestHold: f.holds.takeMax()}
+}
 
-	t.Logf("BENCH L1 n=%d baseline insert_p99=%v read_p99=%v (ops %d/%d, failed %d)",
-		f.n, baseIns.quantile(0.99), baseReads.quantile(0.99), baseIns.count(), baseReads.count(), baseFail)
-	t.Logf("BENCH L1 n=%d with_search insert_p99=%v read_p99=%v (ops %d/%d, failed %d) searches=%d timeouts=%d other_errors=%d",
-		f.n, ins.quantile(0.99), reads.quantile(0.99), ins.count(), reads.count(), fail, searches.Load(), timeouts.Load(), otherErr.Load())
-	require.Zero(t, baseFail+fail, "no main-handle operation may fail")
-	require.Zero(t, otherErr.Load(), "searches end in success or a timeout only")
-	require.True(t, within10(ins.quantile(0.99), baseIns.quantile(0.99)), "insert p99 within 10%% of baseline")
-	require.True(t, within10(reads.quantile(0.99), baseReads.quantile(0.99)), "read p99 within 10%% of baseline")
+// checkSearchPhase logs one L1 phase and asserts its criteria against the
+// baseline.
+func (f *benchFixture) checkSearchPhase(t *testing.T, name string, limit time.Duration, baseIns, baseReads *latencies, p searchPhase) {
+	t.Helper()
+	insP99, readP99 := p.ins.quantile(0.99), p.reads.quantile(0.99)
+	t.Logf("BENCH L1 n=%d %s limit=%v insert_p99=%v (%.2fx baseline) read_p99=%v (%.2fx baseline) (ops %d/%d, failed %d) searches=%d timeouts=%d other_errors=%d",
+		f.n, name, limit, insP99, p99Ratio(insP99, baseIns.quantile(0.99)), readP99, p99Ratio(readP99, baseReads.quantile(0.99)),
+		p.ins.count(), p.reads.count(), p.fail, p.searches, p.timeouts, p.otherErr)
+	require.Zero(t, p.fail, "%s: no main-handle operation may fail", name)
+	require.Zero(t, p.otherErr, "%s: searches end in success or a timeout only", name)
+	require.True(t, within10(insP99, baseIns.quantile(0.99)), "%s: insert p99 within 10%% of baseline", name)
+	require.True(t, within10(readP99, baseReads.quantile(0.99)), "%s: read p99 within 10%% of baseline", name)
 	// Second line for "no db_tx_long_hold over 1 s on the main handle" (design 11 L1), next to the txdiag
-	// measure above: the slowest single main-handle operation during the searches, timed from before the
+	// measure: the slowest single main-handle operation during the searches, timed from before the
 	// connection is acquired, so a queue behind one holder shows here too.
-	slowest := ins.max()
-	if r := reads.max(); r > slowest {
+	slowest := p.ins.max()
+	if r := p.reads.max(); r > slowest {
 		slowest = r
 	}
-	t.Logf("BENCH L1 n=%d db_tx_long_hold_max=%v (txdiag, main handle, during searches; limit 1s)", f.n, longestHold)
-	t.Logf("BENCH L1 n=%d main_handle_slowest_op=%v (second line: timed from before connection acquisition; limit 1s)", f.n, slowest)
-	require.Less(t, longestHold, time.Second, "no main-handle transaction or connection held over 1 s while searches ran")
-	require.Less(t, slowest, time.Second, "no main-handle operation took over 1 s while searches ran")
+	t.Logf("BENCH L1 n=%d %s db_tx_long_hold_max=%v (txdiag, main handle, during searches; limit 1s)", f.n, name, p.longestHold)
+	t.Logf("BENCH L1 n=%d %s main_handle_slowest_op=%v (second line: timed from before connection acquisition; limit 1s)", f.n, name, slowest)
+	require.Less(t, p.longestHold, time.Second, "%s: no main-handle transaction or connection held over 1 s while searches ran", name)
+	require.Less(t, slowest, time.Second, "%s: no main-handle operation took over 1 s while searches ran", name)
+}
+
+// TestChatSearchBench_L1WriterIsolation: two concurrent rare-term all-scope
+// searches, looping, do not raise insert or other-read p99 on the main
+// handle by more than 10%, and no main-handle operation fails. It runs the
+// searches twice: under the hub's limit, and under a limit at half of one
+// full scan, so they run into the time limit while the writes run (design
+// 15.1; round-4 item R4-01).
+func TestChatSearchBench_L1WriterIsolation(t *testing.T) {
+	f := openBenchFixture(t)
+	const d = 20 * time.Second
+	baseIns, baseReads, baseFail := f.mainHandleLoad(t, d)
+	t.Logf("BENCH L1 n=%d baseline insert_p99=%v read_p99=%v (ops %d/%d, failed %d)",
+		f.n, baseIns.quantile(0.99), baseReads.quantile(0.99), baseIns.count(), baseReads.count(), baseFail)
+	require.Zero(t, baseFail, "no main-handle operation may fail")
+
+	// Planted control: a transaction held about 1.5 s on the main handle must
+	// show as a hold of at least 1 s, so a quiet result cannot mean a blind probe.
+	f.holds.takeMax()
+	tx, err := f.main.Begin()
+	require.NoError(t, err)
+	time.Sleep(1500 * time.Millisecond)
+	require.NoError(t, tx.Commit())
+	planted := f.holds.takeMax()
+	t.Logf("BENCH L1 n=%d planted_hold=%v (control; want >= 1s)", f.n, planted)
+	require.GreaterOrEqual(t, planted, time.Second, "the planted 1.5 s hold must register")
+
+	f.checkSearchPhase(t, "with_search", benchTimeout, baseIns, baseReads, f.runSearchPhase(t, d, benchTimeout))
+
+	short := f.shortLimit(t)
+	p := f.runSearchPhase(t, d, short)
+	f.checkSearchPhase(t, "with_search_timing_out", short, baseIns, baseReads, p)
+	require.Positive(t, p.timeouts, "under a limit at half the full scan, the searches must run into the limit")
 }
 
 // TestChatSearchBench_L2Cancellation: a search stopped by its deadline, or
@@ -402,6 +463,19 @@ func TestChatSearchBench_L2Cancellation(t *testing.T) {
 	} else {
 		require.NoError(t, err, "a search under the limit succeeds")
 	}
+
+	// The deadline case runs at every size (round-4 item R4-01): a limit at
+	// half of the full scan just measured, which the search must run into.
+	forced := benchTimeout / 2
+	if !timedOut {
+		forced = full / 2
+		require.GreaterOrEqual(t, full, 20*time.Millisecond, "the fixture must make a full scan long enough to cut in half")
+	}
+	cut, err := f.rareSearchWithin(context.Background(), benchRareTerm, forced)
+	cutTimedOut := err != nil && isChatSearchTimeout(err)
+	t.Logf("BENCH L2 n=%d forced deadline=%v: elapsed=%v timed_out=%t", f.n, forced, cut, cutTimedOut)
+	require.True(t, cutTimedOut, "a search under a limit at half the full scan must time out: %v", err)
+	require.Less(t, cut, forced+100*time.Millisecond, "the statement stops within 100 ms of the deadline")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	time.AfterFunc(500*time.Millisecond, cancel)
@@ -462,7 +536,8 @@ func TestChatSearchBench_L3IncidentReplay(t *testing.T) {
 			}
 		}
 	}
-	t.Logf("BENCH L3 n=%d main read_p99 baseline=%v during_replay=%v failed=%d", f.n, baseReads.quantile(0.99), reads.quantile(0.99), fail)
+	t.Logf("BENCH L3 n=%d main read_p99 baseline=%v during_replay=%v (%.2fx baseline) failed=%d", f.n, baseReads.quantile(0.99), reads.quantile(0.99),
+		p99Ratio(reads.quantile(0.99), baseReads.quantile(0.99)), fail)
 	require.Zero(t, fail)
 	require.True(t, within10(reads.quantile(0.99), baseReads.quantile(0.99)), "no queueing on the main handle")
 }

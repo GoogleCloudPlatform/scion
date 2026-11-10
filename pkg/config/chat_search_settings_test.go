@@ -69,3 +69,19 @@ func TestChatSearchSettings_RoundTripAndEnv(t *testing.T) {
 	assert.Equal(t, "2s", cfg.Hub.Chat.Search.Timeout)
 	assert.Equal(t, 3, cfg.Hub.Chat.Search.MaxConcurrent)
 }
+
+// TestHubChatSearchConfigValidate checks round-4 item R4-02: Validate refuses
+// a timeout that does not parse or is not positive, and accepts "" (the
+// default) and a positive duration.
+func TestHubChatSearchConfigValidate(t *testing.T) {
+	for _, ok := range []string{"", "3s", "250ms"} {
+		if err := (HubChatSearchConfig{Timeout: ok}).Validate(); err != nil {
+			t.Errorf("Validate(%q) = %v, want nil", ok, err)
+		}
+	}
+	for _, bad := range []string{"soon", "-1s", "0s"} {
+		if err := (HubChatSearchConfig{Timeout: bad}).Validate(); err == nil {
+			t.Errorf("Validate(%q) = nil, want an error", bad)
+		}
+	}
+}

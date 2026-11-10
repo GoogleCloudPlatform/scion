@@ -83,6 +83,8 @@ func TestWorkstation_PutServerConfig_StartupBlockValidSaved(t *testing.T) {
 			[]string{"server", "hub", "port_proxy", "view_ttl"}, "4h"},
 		{"conduit lifetime_cap", `{"server":{"hub":{"conduit":{"lifetime_cap":"3h"}}}}`,
 			[]string{"server", "hub", "conduit", "lifetime_cap"}, "3h"},
+		{"chat search timeout", `{"server":{"hub":{"chat":{"search":{"timeout":"5s"}}}}}`,
+			[]string{"server", "hub", "chat", "search", "timeout"}, "5s"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -122,6 +124,15 @@ func TestWorkstation_PutServerConfig_StartupBlockInvalidRejected(t *testing.T) {
 			`"conduit":{"stream_authz_max":{"user":"10s"}}`,
 			"server.hub.conduit.stream_authz_max.user",
 			config.HubConduitConfig{StreamAuthzMax: config.HubConduitStreamAuthzMax{User: "10s"}}.Validate().Error()},
+		// Round-4 item R4-02: startup would log this and use 3s; the PUT refuses it.
+		{"chat search timeout not a duration",
+			`"chat":{"search":{"timeout":"soon"}}`,
+			"server.hub.chat.search.timeout",
+			config.HubChatSearchConfig{Timeout: "soon"}.Validate().Error()},
+		{"chat search timeout negative",
+			`"chat":{"search":{"timeout":"-1s"}}`,
+			"server.hub.chat.search.timeout",
+			config.HubChatSearchConfig{Timeout: "-1s"}.Validate().Error()},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
