@@ -21,7 +21,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/fs"
 	"net/http"
 	"os"
 	"os/exec"
@@ -1014,49 +1013,83 @@ func TestCreateSharedWorkspaceProject_SharedBackend_NoCredentialRunsUnbound(t *t
 	assert.Equal(t, "github.com/team/tok", in.CloneTokenRemote, "with a project credential the binding is kept")
 }
 
-// TestCreateSharedWorkspaceProject_SharedBackend_SSHWithoutProjectSecretRefused:
-// the hub's shared-workspace clone of an ssh or scp repository URL with no
-// project git credential is refused (422, fixed text) before provisioning;
-// with a credential it goes ahead.
-func TestCreateSharedWorkspaceProject_SharedBackend_SSHWithoutProjectSecretRefused(t *testing.T) {
+// TestCreateSharedWorkspaceProject_SharedBackend_SSHRefused: the hub's
+// shared-workspace clone of an ssh or scp repository URL is refused (422,
+// fixed text) before provisioning, at project create and project clone,
+// with or without a project git credential; the refusal leaves no project
+// root or provisioning state directory behind. An https clone with a
+// credential goes ahead.
+func TestCreateSharedWorkspaceProject_SharedBackend_SSHRefused(t *testing.T) {
 	f := newWorkspaceLayoutFixture(t)
 	f.useNFS()
+	record := fakeSSH(t)
 	seen := cloneLocalFixture(t, newSourceRepo(t))
-	create := func(name, remote, label string) (int, string) {
+	projectsDir := filepath.Join(f.shareBase, "projects")
+	projectRoots := func() []string {
 		t.Helper()
-		labels := map[string]string{}
-		if label != "" {
-			labels[store.LabelCloneURL] = label
+		entries, err := os.ReadDir(projectsDir)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
 		}
-		rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/projects", CreateProjectRequest{
-			Name: name, GitRemote: remote, WorkspaceMode: store.WorkspaceModeShared, Labels: labels,
-		})
-		return rec.Code, rec.Body.String()
+		require.NoError(t, err)
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		return names
 	}
-	for _, tc := range []struct{ name, label string }{
-		{"SSH Label No Secret", "ssh://git@git.example.invalid/team/s.git"},
-		{"SCP Label No Secret", "git@git.example.invalid:team/s.git"},
-	} {
-		before := len(*seen)
-		code, body := create(tc.name, "git.example.invalid/team/s", tc.label)
-		assert.Equal(t, http.StatusUnprocessableEntity, code, "%s: %s", tc.name, body)
-		assert.Contains(t, body, errSSHCloneURLNeedsProjectSecret.Error(), tc.name)
-		assert.Len(t, *seen, before, "%s: nothing is provisioned", tc.name)
-		// The refusal comes before any filesystem work: no project tree
-		// (<subpath_root>/<project-id>) was created on the share. The refused
-		// create returns no project ID, so the whole subpath root is checked.
-		entries, err := os.ReadDir(filepath.Join(f.shareBase, "projects"))
-		if !errors.Is(err, fs.ErrNotExist) {
-			require.NoError(t, err, tc.name)
-			assert.Empty(t, entries, "%s: no project tree is created on the share", tc.name)
+	create := func(name, remote, label string) (int, []byte) {
+		t.Helper()
+		rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/projects", CreateProjectRequest{
+			Name: name, GitRemote: remote, WorkspaceMode: store.WorkspaceModeShared,
+			Labels: map[string]string{store.LabelCloneURL: label},
+		})
+		return rec.Code, rec.Body.Bytes()
+	}
+	labels := []struct{ name, label string }{
+		{"SSH", "ssh://git@github.com/team/s.git"},
+		{"SCP", "git@github.com:team/s.git"},
+	}
+	refused := func(withSecret bool, want string) {
+		t.Helper()
+		for _, lc := range labels {
+			name := fmt.Sprintf("%s Label Secret %t", lc.name, withSecret)
+			before := len(*seen)
+			code, body := create(name, "github.com/team/s", lc.label)
+			require.Equal(t, http.StatusUnprocessableEntity, code, "%s: %s", name, body)
+			assert.Equal(t, want, decodeErrorMessage(t, body), name)
+			assert.Len(t, *seen, before, "%s: nothing is provisioned", name)
+			assert.Empty(t, projectRoots(), "%s: no project root or state directory is left", name)
 		}
 	}
 
+	refused(false, sshUnsupportedText)
 	f.srv.SetSecretBackend(&userTokenSecretBackend{value: "test-creator-token"})
+	refused(true, sshSecretHTTPSOnlyText)
+
+	// https with a credential goes ahead and makes the project root.
 	before := len(*seen)
-	code, body := create("SCP Label With Credential", "github.com/team/s", "git@github.com:team/s.git")
-	require.Equal(t, http.StatusCreated, code, body)
-	require.Len(t, *seen, before+1, "with a credential the clone goes ahead")
+	code, body := create("HTTPS Label With Credential", "github.com/team/s", "https://github.com/team/s.git")
+	require.Equal(t, http.StatusCreated, code, string(body))
+	require.Len(t, *seen, before+1, "with a credential an https clone goes ahead")
+	assert.Equal(t, "test-creator-token", (*seen)[before].CloneToken)
+	var src store.Project
+	require.NoError(t, json.Unmarshal(body, &src))
+	require.Equal(t, []string{src.ID}, projectRoots(), "the https create made its project root")
+
+	// Project clone of a source whose clone URL is ssh: refused the same way.
+	stored, err := f.s.GetProject(context.Background(), src.ID)
+	require.NoError(t, err)
+	stored.Labels[store.LabelCloneURL] = "git@github.com:team/s.git"
+	require.NoError(t, f.s.UpdateProject(context.Background(), stored))
+	before = len(*seen)
+	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/projects/"+src.ID+"/clone",
+		map[string]string{"name": "SCP Clone With Credential"})
+	require.Equal(t, http.StatusUnprocessableEntity, rec.Code, rec.Body.String())
+	assert.Equal(t, sshSecretHTTPSOnlyText, decodeErrorMessage(t, rec.Body.Bytes()))
+	assert.Len(t, *seen, before, "the clone provisions nothing")
+	assert.Equal(t, []string{src.ID}, projectRoots(), "the refused clone leaves no project root")
+	assert.False(t, sshRan(t, record), "git must not reach ssh")
 }
 
 // TestCreateSharedWorkspaceProject_SharedBackend_CloneFailureKeepsExistingRoot:
