@@ -17,12 +17,16 @@ package entadapter
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	entpendingsecret "github.com/GoogleCloudPlatform/scion/pkg/ent/pendingsecret"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
+	entsecret "github.com/GoogleCloudPlatform/scion/pkg/ent/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -35,6 +39,32 @@ const pendingSecretWriteAttempts = 3
 type PendingSecretStore struct {
 	client *ent.Client
 	inTx   bool // true when client wraps an ambient WithTx transaction
+	// txFencedWrite is the ambient transaction's fenced-write mark, shared
+	// with its SecretStore (newTxCompositeStore): a pending value write is
+	// a fenced write, so a later policy transition in that transaction is
+	// refused. Nil outside WithTx.
+	txFencedWrite *atomic.Bool
+}
+
+// markFencedWrite records a fenced write in the ambient transaction.
+func (s *PendingSecretStore) markFencedWrite() {
+	if s.inTx && s.txFencedWrite != nil {
+		s.txFencedWrite.Store(true)
+	}
+}
+
+// fencePendingValue applies the encryption policy fence to a pending
+// value ref on c (a transaction client): the policy is read share-locked
+// on PostgreSQL, so a policy transition waits for the write to commit.
+func fencePendingValue(ctx context.Context, c *ent.Client, valueRef string) error {
+	policy, err := loadEncryptionPolicyForWrite(ctx, c)
+	if err != nil {
+		return err
+	}
+	if !policy.AllowsWrite(store.PendingValuePayload(valueRef)) {
+		return store.ErrEncryptionPolicyMismatch
+	}
+	return nil
 }
 
 // NewPendingSecretStore creates a new Ent-backed PendingSecretStore.
@@ -86,6 +116,7 @@ func (s *PendingSecretStore) CreateOrReplacePendingSecret(ctx context.Context, p
 		res *store.PendingSecretWriteResult
 		err error
 	)
+	s.markFencedWrite()
 	for attempt := 0; attempt < pendingSecretWriteAttempts; attempt++ {
 		err = runInEntTx(ctx, s.client, s.inTx, func(c *ent.Client) error {
 			var txErr error
@@ -106,6 +137,10 @@ func (s *PendingSecretStore) CreateOrReplacePendingSecret(ctx context.Context, p
 }
 
 func createOrReplacePendingSecret(ctx context.Context, c *ent.Client, p *store.PendingSecret, now time.Time) (*store.PendingSecretWriteResult, error) {
+	// Lock order: the policy, then the pending row.
+	if err := fencePendingValue(ctx, c, p.ValueRef); err != nil {
+		return nil, err
+	}
 	q := c.PendingSecret.Query().Where(
 		entpendingsecret.KeyEQ(p.Key),
 		entpendingsecret.ScopeEQ(p.Scope),
@@ -238,4 +273,213 @@ func (s *PendingSecretStore) DeletePendingSecret(ctx context.Context, id string)
 		return store.ErrNotFound
 	}
 	return nil
+}
+
+// ClaimPendingSecret implements store.PendingSecretStore.
+func (s *PendingSecretStore) ClaimPendingSecret(ctx context.Context, id, scope, scopeID string, now time.Time) (*store.PendingSecret, error) {
+	return s.claimPendingSecret(ctx, id, scope, scopeID, now, false)
+}
+
+// ClaimPendingSecretForApproval implements store.PendingSecretStore.
+func (s *PendingSecretStore) ClaimPendingSecretForApproval(ctx context.Context, id, scope, scopeID string, now time.Time) (*store.PendingSecret, error) {
+	return s.claimPendingSecret(ctx, id, scope, scopeID, now, true)
+}
+
+// claimPendingSecret reads the row, then deletes it in a transaction whose
+// first statement is the delete, conditioned on the owner and expiry. The
+// delete's row count decides between concurrent claims: the delete takes
+// the write lock (SQLite) or the row lock (PostgreSQL) before anything else
+// in the transaction, and a second claimant then deletes no row. The row
+// is immutable, so the data read before the delete is the data deleted.
+// When checkExisting is set, the approved secret the row replaces is
+// checked after the delete, in the same transaction; a mismatch rolls the
+// delete back.
+func (s *PendingSecretStore) claimPendingSecret(ctx context.Context, id, scope, scopeID string, now time.Time, checkExisting bool) (*store.PendingSecret, error) {
+	uid, err := uuid.Parse(id)
+	if err != nil {
+		return nil, store.ErrNotFound
+	}
+	row, err := s.client.PendingSecret.Get(ctx, uid)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	err = runInEntTx(ctx, s.client, s.inTx, func(c *ent.Client) error {
+		n, err := c.PendingSecret.Delete().Where(
+			entpendingsecret.IDEQ(uid),
+			entpendingsecret.ScopeEQ(scope),
+			entpendingsecret.ScopeIDEQ(scopeID),
+			entpendingsecret.ExpiresAtGT(now),
+		).Exec(ctx)
+		if err != nil {
+			return mapError(err)
+		}
+		if n == 0 {
+			return store.ErrNotFound
+		}
+		if checkExisting {
+			return checkPendingSecretExisting(ctx, c, row)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	p := entPendingSecretToStore(row, true)
+	return &p, nil
+}
+
+// checkPendingSecretExisting compares the approved secret of row's key and
+// owner with the one row recorded at write time.
+func checkPendingSecretExisting(ctx context.Context, c *ent.Client, row *ent.PendingSecret) error {
+	current, err := c.Secret.Query().Where(
+		entsecret.KeyEQ(row.Key),
+		entsecret.ScopeEQ(row.Scope),
+		entsecret.ScopeIDEQ(row.ScopeID),
+	).Only(ctx)
+	switch {
+	case ent.IsNotFound(err):
+		if row.ReplacesSecretID != "" {
+			return store.ErrPendingSecretExistingChanged
+		}
+		return nil
+	case err != nil:
+		return mapError(err)
+	}
+	if current.ID.String() != row.ReplacesSecretID || current.Version != row.ReplacesVersion {
+		return store.ErrPendingSecretExistingChanged
+	}
+	return nil
+}
+
+// RestorePendingSecret implements store.PendingSecretStore.
+func (s *PendingSecretStore) RestorePendingSecret(ctx context.Context, p *store.PendingSecret) error {
+	if p == nil {
+		return store.ErrInvalidInput
+	}
+	uid, err := parseUUID(p.ID)
+	if err != nil {
+		return err
+	}
+	s.markFencedWrite()
+	return runInEntTx(ctx, s.client, s.inTx, func(c *ent.Client) error {
+		if err := fencePendingValue(ctx, c, p.ValueRef); err != nil {
+			return err
+		}
+		create := c.PendingSecret.Create().
+			SetID(uid).
+			SetKey(p.Key).
+			SetSecretType(entpendingsecret.SecretType(p.SecretType)).
+			SetTarget(p.Target).
+			SetScope(p.Scope).
+			SetScopeID(p.ScopeID).
+			SetAllowProgeny(p.AllowProgeny).
+			SetInjectionMode(entpendingsecret.InjectionMode(p.InjectionMode)).
+			SetDescription(p.Description).
+			SetValueRef(p.ValueRef).
+			SetValueLen(p.ValueLen).
+			SetAgentID(p.AgentID).
+			SetAgentSlug(p.AgentSlug).
+			SetProjectID(p.ProjectID).
+			SetProjectName(p.ProjectName).
+			SetCreated(p.Created).
+			SetUpdated(p.Updated).
+			SetExpiresAt(p.ExpiresAt)
+		if p.ReplacesSecretID != "" {
+			create = create.SetReplacesSecretID(p.ReplacesSecretID).SetReplacesVersion(p.ReplacesVersion)
+		}
+		if _, err := create.Save(ctx); err != nil {
+			return mapError(err)
+		}
+		return nil
+	})
+}
+
+// DeletePendingSecretsByScope implements store.PendingSecretStore.
+func (s *PendingSecretStore) DeletePendingSecretsByScope(ctx context.Context, scope, scopeID string) ([]string, error) {
+	return s.deletePendingSecretsWhere(ctx,
+		entpendingsecret.ScopeEQ(scope),
+		entpendingsecret.ScopeIDEQ(scopeID),
+	)
+}
+
+// DeletePendingSecretsByProject implements store.PendingSecretStore.
+func (s *PendingSecretStore) DeletePendingSecretsByProject(ctx context.Context, projectID string) ([]string, error) {
+	return s.deletePendingSecretsWhere(ctx, entpendingsecret.ProjectIDEQ(projectID))
+}
+
+// deletePendingSecretsWhere deletes the rows matching preds in one
+// transaction and returns the value refs of the rows it deleted.
+func (s *PendingSecretStore) deletePendingSecretsWhere(ctx context.Context, preds ...predicate.PendingSecret) ([]string, error) {
+	var refs []string
+	err := runInEntTx(ctx, s.client, s.inTx, func(c *ent.Client) error {
+		q := c.PendingSecret.Query().Where(preds...)
+		if isPostgres(c) {
+			q = q.ForUpdate()
+		}
+		rows, err := q.All(ctx)
+		if err != nil {
+			return mapError(err)
+		}
+		if len(rows) == 0 {
+			return nil
+		}
+		ids := make([]uuid.UUID, 0, len(rows))
+		for _, row := range rows {
+			ids = append(ids, row.ID)
+			refs = append(refs, row.ValueRef)
+		}
+		if _, err := c.PendingSecret.Delete().Where(entpendingsecret.IDIn(ids...)).Exec(ctx); err != nil {
+			return mapError(err)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return refs, nil
+}
+
+// ScanPendingSecretPayloads implements store.PendingSecretStore.
+func (s *PendingSecretStore) ScanPendingSecretPayloads(ctx context.Context, afterID string, limit int) ([]store.SecretPayload, error) {
+	if limit < 1 || limit > store.MaxSecretPayloadScan {
+		return nil, fmt.Errorf("%w: scan limit must be between 1 and %d", store.ErrInvalidInput, store.MaxSecretPayloadScan)
+	}
+	q := s.client.PendingSecret.Query()
+	if afterID != "" {
+		uid, err := parseUUID(afterID)
+		if err != nil {
+			return nil, err
+		}
+		q = q.Where(entpendingsecret.IDGT(uid))
+	}
+	rows, err := q.Order(ent.Asc(entpendingsecret.FieldID)).Limit(limit).All(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	out := make([]store.SecretPayload, 0, len(rows))
+	for _, r := range rows {
+		value, ref := store.PendingValuePayload(r.ValueRef)
+		out = append(out, store.SecretPayload{
+			ID:             r.ID.String(),
+			Key:            r.Key,
+			Scope:          r.Scope,
+			ScopeID:        r.ScopeID,
+			EncryptedValue: value,
+			SecretRef:      ref,
+		})
+	}
+	return out, nil
+}
+
+// ListPendingSecretScopeIDs implements store.PendingSecretStore.
+func (s *PendingSecretStore) ListPendingSecretScopeIDs(ctx context.Context, scope string) ([]string, error) {
+	ids, err := s.client.PendingSecret.Query().
+		Where(entpendingsecret.ScopeEQ(scope)).
+		Unique(true).
+		Select(entpendingsecret.FieldScopeID).
+		Strings(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return ids, nil
 }

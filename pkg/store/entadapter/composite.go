@@ -269,6 +269,7 @@ func newTxCompositeStore(tx *ent.Tx) *CompositeStore {
 	txStore.ThreadGroupStore.inTx = true
 	txStore.SecretStore.inTx = true
 	txStore.PendingSecretStore.inTx = true
+	txStore.PendingSecretStore.txFencedWrite = &txStore.SecretStore.txFencedWrite
 	return txStore
 }
 

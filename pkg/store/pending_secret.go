@@ -17,6 +17,7 @@ package store
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 )
 
@@ -29,6 +30,14 @@ const PendingSecretTTL = 7 * 24 * time.Hour
 // when a live pending secret with the same key and owner was written by a
 // different agent. Nothing is changed.
 var ErrPendingSecretHeldByOtherAgent = errors.New("a pending secret with this name was written by another agent")
+
+// ErrPendingSecretExistingChanged is returned by
+// ClaimPendingSecretForApproval when the approved secret of the same key
+// and owner is not the one the pending secret recorded at write time
+// (ReplacesSecretID and ReplacesVersion): one exists although none was
+// recorded, the recorded one is gone, or it has another ID or version.
+// Nothing is changed.
+var ErrPendingSecretExistingChanged = errors.New("the existing secret with this name changed after the pending secret was written")
 
 // PendingSecret is a user-scope secret written by an agent that waits for
 // the owning user's approval. It lives in its own table and is never read by
@@ -73,6 +82,18 @@ func (p *PendingSecret) Expired(now time.Time) bool {
 	return !now.Before(p.ExpiresAt)
 }
 
+// PendingValuePayload splits a pending secret's value ref into the payload
+// fields of a stored secret: a Secret Manager reference ("gcpsm:...") is a
+// reference with no local value, and any other ref is the local value
+// itself (the ValueCipher envelope). The encryption policy fence and the
+// payload scan treat a pending row like a secret row with these fields.
+func PendingValuePayload(valueRef string) (encryptedValue, secretRef string) {
+	if strings.HasPrefix(valueRef, "gcpsm:") {
+		return "", valueRef
+	}
+	return valueRef, ""
+}
+
 // PendingSecretWriteResult is the outcome of CreateOrReplacePendingSecret.
 type PendingSecretWriteResult struct {
 	// Secret is the row as stored.
@@ -89,7 +110,10 @@ type PendingSecretWriteResult struct {
 // PendingSecretStore defines persistence for pending secrets.
 type PendingSecretStore interface {
 	// CreateOrReplacePendingSecret stores p in one transaction, keyed by
-	// (Key, Scope, ScopeID):
+	// (Key, Scope, ScopeID). The value ref passes the encryption policy
+	// fence (SecretEncryptionStore) like a secret value write, split by
+	// PendingValuePayload; a refused write returns
+	// ErrEncryptionPolicyMismatch and changes nothing.
 	//   - no row: p is inserted with Created = Updated = now and
 	//     ExpiresAt = now + PendingSecretTTL;
 	//   - an expired row (any writer): it is deleted and p is inserted as a
@@ -114,4 +138,45 @@ type PendingSecretStore interface {
 	// DeletePendingSecret deletes the pending secret with the given ID.
 	// Returns ErrNotFound when there is none.
 	DeletePendingSecret(ctx context.Context, id string) error
+
+	// ClaimPendingSecret deletes the live pending secret id of (scope,
+	// scopeID) and returns it with its ValueRef, in one transaction. Of
+	// concurrent claims of one row exactly one succeeds. Returns
+	// ErrNotFound when there is no such row, it belongs to another owner,
+	// or it has expired at now; nothing is changed then.
+	ClaimPendingSecret(ctx context.Context, id, scope, scopeID string, now time.Time) (*PendingSecret, error)
+
+	// ClaimPendingSecretForApproval is ClaimPendingSecret that, in the same
+	// transaction, compares the approved secret of the row's key and owner
+	// with the row's ReplacesSecretID and ReplacesVersion. On a mismatch it
+	// returns ErrPendingSecretExistingChanged and the row is kept.
+	ClaimPendingSecretForApproval(ctx context.Context, id, scope, scopeID string, now time.Time) (*PendingSecret, error)
+
+	// RestorePendingSecret inserts p exactly as given (ID, ValueRef and
+	// times included): it puts back a row a claim removed when the
+	// decision could not be completed. Returns ErrAlreadyExists when a row
+	// with the same ID, or the same key and owner, exists. The value ref
+	// passes the encryption policy fence as in CreateOrReplacePendingSecret.
+	RestorePendingSecret(ctx context.Context, p *PendingSecret) error
+
+	// DeletePendingSecretsByScope deletes every pending secret of (scope,
+	// scopeID) and returns their value refs, for the caller to release
+	// with the secret backend after the deletion has committed.
+	DeletePendingSecretsByScope(ctx context.Context, scope, scopeID string) ([]string, error)
+
+	// DeletePendingSecretsByProject deletes every pending secret written
+	// from projectID and returns their value refs, for the caller to
+	// release after the deletion has committed.
+	DeletePendingSecretsByProject(ctx context.Context, projectID string) ([]string, error)
+
+	// ScanPendingSecretPayloads is ScanSecretPayloads over the pending
+	// secrets: up to limit rows (1..MaxSecretPayloadScan, otherwise
+	// ErrInvalidInput) with ID > afterID in ascending ID order, each with
+	// its value ref split by PendingValuePayload. Version is 0. Rows carry
+	// EncryptedValue: callers must never log or return it.
+	ScanPendingSecretPayloads(ctx context.Context, afterID string, limit int) ([]SecretPayload, error)
+
+	// ListPendingSecretScopeIDs returns the distinct scope IDs that have
+	// pending secrets in scope.
+	ListPendingSecretScopeIDs(ctx context.Context, scope string) ([]string, error)
 }
