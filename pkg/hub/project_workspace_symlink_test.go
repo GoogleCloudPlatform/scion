@@ -123,10 +123,11 @@ func TestSymlink_Download(t *testing.T) {
 		}{
 			{"escaping leaf", "esc_leaf", http.StatusBadRequest, ""},
 			{"escaping intermediate dir", "esc_dir/secret.txt", http.StatusBadRequest, ""},
-			{"inside link is followed", "in_link", http.StatusOK, "inside content"},
+			// A symlink as the target is refused, even inside.
+			{"inside leaf link", "in_link", http.StatusBadRequest, ""},
 			{"inside dir link is followed", "in_dir/inside.txt", http.StatusOK, "inside content"},
 			{"dangling absolute", "dangling", http.StatusBadRequest, ""},
-			{"dangling relative", "dangling_rel", http.StatusNotFound, ""},
+			{"dangling relative", "dangling_rel", http.StatusBadRequest, ""},
 		}
 
 		for _, tc := range cases {
@@ -274,9 +275,12 @@ func TestSymlink_Upload(t *testing.T) {
 			{"escaping dir, implicit mkdir", "esc_dir/landing/new/deep.txt", http.StatusBadRequest},
 			// A dangling absolute link would otherwise be created on write.
 			{"dangling absolute", "dangling", http.StatusBadRequest},
-			// These stay inside and must keep working.
+			// The API never creates a symlink, so a link as the target is
+			// refused even when it stays inside.
+			{"inside leaf link", "in_link", http.StatusBadRequest},
+			{"dangling relative", "dangling_rel", http.StatusBadRequest},
+			// A directory link that stays inside must keep working.
 			{"inside dir link", "in_dir/uploaded.txt", http.StatusOK},
-			{"dangling relative", "dangling_rel", http.StatusOK},
 		}
 
 		for _, tc := range cases {
@@ -291,14 +295,12 @@ func TestSymlink_Upload(t *testing.T) {
 			})
 		}
 
-		// The two permitted writes landed inside the base, where they belong.
+		// The permitted write landed inside the base, where it belongs.
 		got, err := os.ReadFile(filepath.Join(baseDir, "real", "uploaded.txt"))
 		require.NoError(t, err, "a write through an in-base directory link should have landed in the real directory")
 		assert.Equal(t, "written by the test", string(got))
 
-		got, err = os.ReadFile(filepath.Join(baseDir, "no-such-file"))
-		require.NoError(t, err, "a write through an in-base dangling link should have created the target inside the base")
-		assert.Equal(t, "written by the test", string(got))
+		assertSymlinkTargetsUntouched(t, baseDir)
 	})
 }
 
@@ -318,8 +320,8 @@ func TestSymlink_Write(t *testing.T) {
 			{"escaping dir, implicit mkdir", "esc_dir/landing/new/deep.txt", http.StatusBadRequest},
 			{"dangling absolute", "dangling", http.StatusBadRequest},
 			{"inside dir link", "in_dir/written.txt", http.StatusOK},
-			{"inside link is followed", "in_link", http.StatusOK},
-			{"dangling relative", "dangling_rel", http.StatusOK},
+			{"inside leaf link", "in_link", http.StatusBadRequest},
+			{"dangling relative", "dangling_rel", http.StatusBadRequest},
 		}
 
 		for _, tc := range cases {
@@ -334,14 +336,13 @@ func TestSymlink_Write(t *testing.T) {
 			})
 		}
 
-		// Writing through the in-base link followed it to the real file,
-		// rather than replacing the link with a regular file.
-		fi, err := os.Lstat(filepath.Join(baseDir, "in_link"))
-		require.NoError(t, err)
-		assert.NotZero(t, fi.Mode()&os.ModeSymlink, "in_link should still be a symlink")
-		got, err := os.ReadFile(filepath.Join(baseDir, "real", "inside.txt"))
+		// The write through the in-base directory link landed in the real
+		// directory.
+		got, err := os.ReadFile(filepath.Join(baseDir, "real", "written.txt"))
 		require.NoError(t, err)
 		assert.Equal(t, "written by the test", string(got))
+
+		assertSymlinkTargetsUntouched(t, baseDir)
 	})
 }
 
@@ -558,4 +559,20 @@ func TestSymlink_ReadDoesNotCreateWorkspace(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, rec.Code, "body: %s", rec.Body.String())
 	_, err = os.Lstat(workspacePath)
 	assert.True(t, os.IsNotExist(err), "a delete created the workspace")
+}
+
+// assertSymlinkTargetsUntouched checks that the refused writes to the inside
+// leaf links changed neither the links nor what they point to.
+func assertSymlinkTargetsUntouched(t *testing.T, baseDir string) {
+	t.Helper()
+	for _, link := range []string{"in_link", "dangling_rel"} {
+		fi, err := os.Lstat(filepath.Join(baseDir, link))
+		require.NoError(t, err)
+		assert.NotZero(t, fi.Mode()&os.ModeSymlink, "%s should still be a symlink", link)
+	}
+	got, err := os.ReadFile(filepath.Join(baseDir, "real", "inside.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, "inside content", string(got), "the in_link target was changed")
+	_, err = os.Lstat(filepath.Join(baseDir, "no-such-file"))
+	assert.True(t, os.IsNotExist(err), "the dangling_rel target was created (err %v)", err)
 }

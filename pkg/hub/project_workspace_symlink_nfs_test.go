@@ -86,10 +86,11 @@ func TestSymlinkNFS_Download(t *testing.T) {
 	}{
 		{"escaping leaf", "esc_leaf", http.StatusBadRequest, ""},
 		{"escaping intermediate dir", "esc_dir/secret.txt", http.StatusBadRequest, ""},
-		{"inside link is followed", "in_link", http.StatusOK, "inside content"},
+		// A symlink as the target is refused, even inside.
+		{"inside leaf link", "in_link", http.StatusBadRequest, ""},
 		{"inside dir link is followed", "in_dir/inside.txt", http.StatusOK, "inside content"},
 		{"dangling absolute", "dangling", http.StatusBadRequest, ""},
-		{"dangling relative", "dangling_rel", http.StatusNotFound, ""},
+		{"dangling relative", "dangling_rel", http.StatusBadRequest, ""},
 	}
 
 	for _, tc := range cases {
@@ -181,8 +182,11 @@ func TestSymlinkNFS_Upload(t *testing.T) {
 		{"escaping intermediate dir", "esc_dir/landing/pwned.txt", http.StatusBadRequest},
 		{"escaping dir, implicit mkdir", "esc_dir/landing/new/deep.txt", http.StatusBadRequest},
 		{"dangling absolute", "dangling", http.StatusBadRequest},
+		// The API never creates a symlink, so a link as the target is refused even when it stays inside.
+		{"inside leaf link", "in_link", http.StatusBadRequest},
+		{"dangling relative", "dangling_rel", http.StatusBadRequest},
+		// A directory link that stays inside must keep working.
 		{"inside dir link", "in_dir/uploaded.txt", http.StatusOK},
-		{"dangling relative", "dangling_rel", http.StatusOK},
 	}
 
 	for _, tc := range cases {
@@ -201,9 +205,7 @@ func TestSymlinkNFS_Upload(t *testing.T) {
 	require.NoError(t, err, "a write through an in-base directory link should have landed in the real directory")
 	assert.Equal(t, "written by the test", string(got))
 
-	got, err = os.ReadFile(filepath.Join(leaf, "no-such-file"))
-	require.NoError(t, err, "a write through an in-base dangling link should have created the target inside the base")
-	assert.Equal(t, "written by the test", string(got))
+	assertSymlinkTargetsUntouched(t, leaf)
 }
 
 func TestSymlinkNFS_Write(t *testing.T) {
@@ -219,8 +221,8 @@ func TestSymlinkNFS_Write(t *testing.T) {
 		{"escaping dir, implicit mkdir", "esc_dir/landing/new/deep.txt", http.StatusBadRequest},
 		{"dangling absolute", "dangling", http.StatusBadRequest},
 		{"inside dir link", "in_dir/written.txt", http.StatusOK},
-		{"inside link is followed", "in_link", http.StatusOK},
-		{"dangling relative", "dangling_rel", http.StatusOK},
+		{"inside leaf link", "in_link", http.StatusBadRequest},
+		{"dangling relative", "dangling_rel", http.StatusBadRequest},
 	}
 
 	for _, tc := range cases {
@@ -235,12 +237,12 @@ func TestSymlinkNFS_Write(t *testing.T) {
 		})
 	}
 
-	fi, err := os.Lstat(filepath.Join(leaf, "in_link"))
-	require.NoError(t, err)
-	assert.NotZero(t, fi.Mode()&os.ModeSymlink, "in_link should still be a symlink")
-	got, err := os.ReadFile(filepath.Join(leaf, "real", "inside.txt"))
+	// The write through the in-base directory link landed in the real directory.
+	got, err := os.ReadFile(filepath.Join(leaf, "real", "written.txt"))
 	require.NoError(t, err)
 	assert.Equal(t, "written by the test", string(got))
+
+	assertSymlinkTargetsUntouched(t, leaf)
 }
 
 // TestSymlinkNFS_Delete: NFS DELETE removes an escaping symlink itself --
