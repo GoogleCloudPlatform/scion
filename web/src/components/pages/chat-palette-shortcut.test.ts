@@ -460,6 +460,16 @@ describe('_isPageVisible', () => {
     expect(page._isPageVisible()).toBe(true);
   });
 
+  it('passes the visibility options to checkVisibility() and returns its answer', () => {
+    const page = createUnattachedPage();
+    const checkVisibility = vi.fn().mockReturnValue(false);
+    page.checkVisibility = checkVisibility;
+    expect(page._isPageVisible()).toBe(false);
+    expect(checkVisibility).toHaveBeenCalledWith({ checkOpacity: false, checkVisibilityCSS: true });
+    checkVisibility.mockReturnValue(true);
+    expect(page._isPageVisible()).toBe(true);
+  });
+
   it('native checkVisibility() reports a connected page under a display:none ancestor as hidden', () => {
     // Inline display:none, not the hidden attribute: happy-dom's computed
     // style has no UA `[hidden] { display: none }` rule (browsers do).
@@ -1541,9 +1551,8 @@ describe('palette focus capture/restore: textarea selection', () => {
   // but has no layout engine (its `getClientRects()` always returns one stub
   // rect regardless of CSS), so layout-dependent visibility can't be
   // checked here — that scenario is covered by the Chromium e2e fixture
-  // instead. `_isInvokerVisible`'s own branching is
-  // still unit-tested below by stubbing `checkVisibility`/`getClientRects`
-  // directly on the element.
+  // instead. `_isInvokerVisible`'s own branching is still unit-tested below
+  // by stubbing `checkVisibility`/`getClientRects` directly on the element.
 
   it('restores focus to a visible position:fixed invoker instead of falling back', () => {
     // `offsetParent` is null both for a genuinely hidden element and for a
