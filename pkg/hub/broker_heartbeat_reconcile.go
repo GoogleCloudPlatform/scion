@@ -51,14 +51,25 @@ import (
 //     listing succeeded, so a forbidden or failed listing (for example a
 //     Kubernetes namespace the broker may not read) never leads to a
 //     conclusion about its agents, while other targets are still reconciled.
-//   - An agent with no recorded target, or whose target is absent from the
-//     heartbeat, is never concluded. The recorded target (and any candidate)
-//     is cleared, with a state_version bump, whenever a create, start or
-//     restart is accepted, so an agent started anew is only considered after
-//     two consecutive heartbeats have listed it on the same target again, and
-//     a writer holding a read from before the clear cannot write the old
-//     target back. An older broker sends no targets, and a filtered
-//     (multi-hub) heartbeat claims none.
+//   - An agent whose target is absent from the heartbeat is never
+//     concluded. The recorded target (and any candidate) is cleared, with a
+//     state_version bump, whenever a create, start or restart is accepted, so
+//     the target is recorded again only after two consecutive heartbeats
+//     have listed the agent on the same target, and a writer holding a read
+//     from before the clear cannot write the old target back. An older
+//     broker sends no targets, and a filtered (multi-hub) heartbeat claims
+//     none.
+//   - On a flat Runtime Broker only, until a target is recorded again, the
+//     agent is checked against its pending target (see reconcileTarget), so
+//     a container gone before any heartbeat listed it is still reconciled
+//     (ptone/scion#7251). A flat broker serves exactly one runtime target
+//     and lists only that one, so when its heartbeat lists exactly one
+//     target, completely, a live container of the agent would have been
+//     reported. Any other broker may place an agent on a target its
+//     heartbeat does not list (an auxiliary runtime registers lazily, and a
+//     target without an ID is not listed), so a complete inventory says
+//     nothing about such an agent: without a recorded target it is never
+//     concluded.
 //   - The broker must be online and its previous heartbeat must be recent; a
 //     broker returning from an offline or stale period restarts every clock.
 //   - Only phases running and stopping are considered (stopping: the agent's
@@ -160,6 +171,50 @@ func agentRuntimeTarget(a *store.Agent) string {
 	return a.AppliedConfig.RuntimeTarget
 }
 
+// soleCompleteTarget returns the ID of the only target the heartbeat lists,
+// if it lists exactly one target and that one has an ID and is complete;
+// otherwise "".
+func (hb *brokerHeartbeatRequest) soleCompleteTarget() string {
+	if hb.Inventory == nil || len(hb.Inventory.Targets) != 1 {
+		return ""
+	}
+	if t := hb.Inventory.Targets[0]; t.ID != "" && t.Complete {
+		return t.ID
+	}
+	return ""
+}
+
+// reconcileTarget returns the runtime target the missing-container reconcile
+// checks a against: the recorded target, else, on a flat Runtime Broker, the
+// pending target (ptone/scion#7251), else "" (never concluded).
+//
+// The pending target is kept by ClearAgentRuntimeTarget when a create, start
+// or restart is accepted on a flat broker, so an agent whose container
+// disappears before two heartbeats have listed it can still be reconciled.
+// It is used only when the heartbeat lists exactly one target, completely:
+// a flat broker serves and lists exactly one runtime target, so the agent can
+// only be on that target, and a live container would be in the report.
+// RuntimeTargetPendingDefault stands for that target; a concrete pending
+// target must equal it. On any other broker, the heartbeat lists only the
+// targets the broker has registered, so the agent may run on a target that
+// is not listed at all, and the pending target is not used.
+func reconcileTarget(a *store.Agent, hb *brokerHeartbeatRequest, flat bool) string {
+	if target := agentRuntimeTarget(a); target != "" {
+		return target
+	}
+	if !flat || a.AppliedConfig == nil || a.AppliedConfig.RuntimeTargetPending == "" {
+		return ""
+	}
+	sole := hb.soleCompleteTarget()
+	if sole == "" {
+		return ""
+	}
+	if pending := a.AppliedConfig.RuntimeTargetPending; pending != store.RuntimeTargetPendingDefault && pending != sole {
+		return ""
+	}
+	return sole
+}
+
 // nextRuntimeTarget applies one heartbeat's runtime target report to the
 // recorded target and candidate in cfg (which may be nil) and returns the new
 // pair and whether it differs.
@@ -197,11 +252,12 @@ func nextRuntimeTarget(cfg *store.AgentAppliedConfig, reported string) (target, 
 // only after two consecutive heartbeats report it (see nextRuntimeTarget).
 //
 // The write is the targeted SetAgentRuntimeTarget, not a full-row update: it
-// changes only the two target keys, so it can never undo a concurrent status
-// write (for example a start setting phase running), and it is conditional on
-// the state_version this heartbeat read, so a report read before a clear
-// (which bumps state_version) is dropped. Nothing is written when the pair is
-// unchanged, so a steady heartbeat adds no store write.
+// changes only the target keys (a recorded target also drops the pending
+// target), so it can never undo a concurrent status write (for example a
+// start setting phase running), and it is conditional on the state_version
+// this heartbeat read, so a report read before a clear (which bumps
+// state_version) is dropped. Nothing is written when the pair is unchanged,
+// so a steady heartbeat adds no store write.
 func (s *Server) recordHeartbeatRuntimeTarget(ctx context.Context, a *store.Agent, reported string) {
 	target, candidate, changed := nextRuntimeTarget(a.AppliedConfig, reported)
 	if !changed {
@@ -222,6 +278,9 @@ func (s *Server) recordHeartbeatRuntimeTarget(ctx context.Context, a *store.Agen
 		a.AppliedConfig = &store.AgentAppliedConfig{}
 	}
 	a.AppliedConfig.RuntimeTarget, a.AppliedConfig.RuntimeTargetCandidate = target, candidate
+	if target != "" {
+		a.AppliedConfig.RuntimeTargetPending = ""
+	}
 }
 
 // missingAgentTracker records, per broker, when this Hub process first saw
@@ -497,6 +556,7 @@ func (s *Server) reconcileMissingAgents(ctx context.Context, brokerID string, pr
 
 	complete := hb.completeTargets()
 	runtimes := hb.targetRuntimes()
+	flat := prev.IsFlat()
 	agents, err := report.brokerAgents(ctx, s, brokerID)
 	if err != nil {
 		s.agentLifecycleLog.Warn("heartbeat reconcile: failed to list broker agents",
@@ -505,6 +565,7 @@ func (s *Server) reconcileMissingAgents(ctx context.Context, brokerID string, pr
 	}
 
 	var missing []store.Agent
+	targets := make(map[string]string) // agent ID -> target checked against
 	for i := range agents {
 		a := &agents[i]
 		if !missingReconcilePhase(a.Phase) {
@@ -516,9 +577,11 @@ func (s *Server) reconcileMissingAgents(ctx context.Context, brokerID string, pr
 		if reincarnationInFlight(a) || s.lifecycleOps.active(a.ID) {
 			continue
 		}
-		if target := agentRuntimeTarget(a); target == "" || !complete[target] {
+		target := reconcileTarget(a, hb, flat)
+		if target == "" || !complete[target] {
 			continue
 		}
+		targets[a.ID] = target
 		missing = append(missing, *a)
 	}
 	if len(missing) == 0 {
@@ -554,7 +617,7 @@ func (s *Server) reconcileMissingAgents(ctx context.Context, brokerID string, pr
 		}
 		// The inventory target's runtime decides whether the agent may be
 		// halted (not the runtime recorded on the agent).
-		haltRuntime := runtimes[agentRuntimeTarget(&a)]
+		haltRuntime := runtimes[targets[a.ID]]
 		updated, err := s.store.MarkAgentContainerMissing(ctx, a.ID, brokerID, cutoff, haltRuntime, missingAgentMessage)
 		if err != nil {
 			s.agentLifecycleLog.Warn("heartbeat reconcile: failed to mark agent container missing",

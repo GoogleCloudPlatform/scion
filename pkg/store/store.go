@@ -874,29 +874,36 @@ type AgentStore interface {
 
 	// ClearAgentRuntimeTarget removes the runtime target and any runtime
 	// target candidate recorded in an agent's applied config
-	// (AgentAppliedConfig.RuntimeTarget, RuntimeTargetCandidate) and changes
-	// no other applied-config key. When it removes something it bumps
-	// state_version by exactly one, so a writer holding a read from before
-	// the clear gets ErrVersionConflict from UpdateAgent instead of writing
-	// the old target back; it returns cleared=true and the new state_version.
-	// The write is conditional on the stored applied config and state_version
-	// being unchanged since they were read (and the row is locked for the
-	// read where supported); when a concurrent write wins, the row is re-read
-	// and the clear retried a bounded number of times, after which an error
-	// is returned. It is a no-op (cleared=false) when neither key is recorded
-	// or the agent does not exist.
-	ClearAgentRuntimeTarget(ctx context.Context, id string) (cleared bool, newVersion int64, err error)
+	// (AgentAppliedConfig.RuntimeTarget, RuntimeTargetCandidate). With
+	// recordPending it also records the pending target
+	// (AgentAppliedConfig.RuntimeTargetPending): the target it removes, else
+	// the pending target already recorded, else RuntimeTargetPendingDefault.
+	// It changes no other applied-config key. When it removes a target or
+	// candidate it bumps state_version by exactly one, so a writer holding a
+	// read from before the clear gets ErrVersionConflict from UpdateAgent
+	// instead of writing the old target back; it returns cleared=true and the
+	// new state_version. Recording only the pending target does not bump
+	// state_version (cleared=false). The write is conditional on the stored
+	// applied config and state_version being unchanged since they were read
+	// (and the row is locked for the read where supported); when a concurrent
+	// write wins, the row is re-read and the clear retried a bounded number
+	// of times, after which an error is returned. It writes nothing
+	// (cleared=false) when there is nothing to change, when the applied
+	// config is empty, NULL or the JSON literal null, or when the agent does
+	// not exist.
+	ClearAgentRuntimeTarget(ctx context.Context, id string, recordPending bool) (cleared bool, newVersion int64, err error)
 
 	// SetAgentRuntimeTarget sets the runtime target and runtime target
 	// candidate in an agent's applied config (AgentAppliedConfig.RuntimeTarget,
-	// RuntimeTargetCandidate; an empty value removes the key) and changes
-	// nothing else: no other applied-config key, no other column, and not
-	// state_version. The write is conditional on state_version still being
-	// expectedVersion (the version the caller read), so a report based on a
-	// read from before ClearAgentRuntimeTarget, which bumps state_version,
-	// is rejected. It returns written=false, with no error, when the version
-	// no longer matches, the applied config changed concurrently, or the
-	// agent does not exist.
+	// RuntimeTargetCandidate; an empty value removes the key) and, when the
+	// target is not empty, removes the pending target
+	// (RuntimeTargetPending). It changes nothing else: no other applied-config
+	// key, no other column, and not state_version. The write is conditional
+	// on state_version still being expectedVersion (the version the caller
+	// read), so a report based on a read from before ClearAgentRuntimeTarget,
+	// which bumps state_version, is rejected. It returns written=false, with
+	// no error, when the version no longer matches, the applied config
+	// changed concurrently, or the agent does not exist.
 	SetAgentRuntimeTarget(ctx context.Context, id string, expectedVersion int64, target, candidate string) (written bool, err error)
 
 	// SetAgentNativeCloudRun sets (native true) or removes (native false)
