@@ -29,6 +29,8 @@ import (
 	"testing"
 
 	"golang.org/x/crypto/ssh"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
 )
 
 // echoServer accepts connections on l and echoes them (test fixture).
@@ -386,4 +388,45 @@ func TestChannelCap(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestDirectTCPIPDenyPorts(t *testing.T) {
+	allowed, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	echoServer(t, allowed)
+	d := &recordingDialer{}
+	cfg := testConfig(t)
+	cfg.Policy = conduit.Policy{DenyPorts: []int{9999}}
+	cfg.DialTCP = d.dial
+	client := serve(t, cfg, "scion")
+
+	c, err := client.Dial("tcp", allowed.Addr().String())
+	if err != nil {
+		t.Fatalf("direct-tcpip to an allowed port refused: %v", err)
+	}
+	roundTrip(t, c, "allowed")
+	_ = c.Close()
+	for _, host := range []string{"127.0.0.1", "localhost", "::1"} {
+		_, err := client.Dial("tcp", net.JoinHostPort(host, "9999"))
+		wantOpenRefused(t, err, ssh.Prohibited)
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if len(d.addrs) != 1 {
+		t.Fatalf("dialed %v, want only the allowed port", d.addrs)
+	}
+}
+
+func TestStreamlocalDisabledByPolicy(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.Policy = conduit.Policy{DisableSSHSocketForwarding: true}
+	cfg.DialUnix = func(context.Context, string) (net.Conn, error) {
+		t.Error("DialUnix called with socket forwarding disabled")
+		return nil, errors.New("unexpected dial")
+	}
+	client := serve(t, cfg, "scion")
+	_, err := client.Dial("unix", "/run/x.sock")
+	wantOpenRefused(t, err, ssh.Prohibited)
 }

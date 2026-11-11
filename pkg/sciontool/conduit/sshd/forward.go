@@ -115,6 +115,9 @@ func (c *Config) handleDirectTCPIP(ctx context.Context, nc ssh.NewChannel) {
 		return
 	}
 	dests, err := TCPDestination(m.Host, m.Port)
+	if err == nil && c.Policy.PortDenied(int(m.Port)) {
+		err = fmt.Errorf("port %d is denied by the operator policy", m.Port)
+	}
 	if err != nil {
 		log.Debug("Conduit SSH: refused direct-tcpip to %s: %v", net.JoinHostPort(m.Host, strconv.Itoa(int(m.Port))), err)
 		_ = nc.Reject(ssh.Prohibited, err.Error())
@@ -193,7 +196,11 @@ func (c *Config) handleStreamlocal(ctx context.Context, nc ssh.NewChannel) {
 		_ = nc.Reject(ssh.ConnectionFailed, "malformed direct-streamlocal request")
 		return
 	}
-	if err := SocketPathAllowed(m.SocketPath); err != nil {
+	err := SocketPathAllowed(m.SocketPath)
+	if err == nil && c.Policy.DisableSSHSocketForwarding {
+		err = errors.New("socket forwarding is disabled by the operator policy")
+	}
+	if err != nil {
 		log.Debug("Conduit SSH: refused direct-streamlocal: %v", err)
 		_ = nc.Reject(ssh.Prohibited, err.Error())
 		return

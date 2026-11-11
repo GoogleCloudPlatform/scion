@@ -2469,6 +2469,7 @@ var commaSplitKoanfKeys = []string{
 	"server.auth.authorized_domains",
 	"server.hub.conduit.peer_service_accounts",
 	"server.hub.conduit.tcp_allowed_ports",
+	"server.hub.conduit.deny_ports",
 	"server.federation.algorithms",
 }
 
@@ -2478,6 +2479,7 @@ var commaSplitKoanfKeys = []string{
 var envListConfigKeys = []string{
 	"hub.conduit.peerServiceAccounts",
 	"hub.conduit.tcpAllowedPorts",
+	"hub.conduit.denyPorts",
 }
 
 // splitCommaSeparatedKoanfKeys splits comma-separated string values into slices

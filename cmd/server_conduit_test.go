@@ -28,6 +28,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub"
 	"github.com/knadh/koanf/v2"
@@ -639,6 +640,17 @@ func TestBuildHubServerConfig_ConduitTCPAllowedPorts(t *testing.T) {
 			assert.Equal(t, ports, sc.ConduitTCPAllowedPorts)
 		})
 	}
+}
+
+func TestBuildHubServerConfig_ConduitPolicy(t *testing.T) {
+	cfg := config.DefaultGlobalConfig()
+	assert.Zero(t, buildHubServerConfig(&cfg, "", "", nil, false, "", nil).ConduitPolicy)
+
+	cfg.Hub.Conduit.DisableSSH = true
+	cfg.Hub.Conduit.DenyPorts = []int{9999}
+	cfg.Hub.Conduit.DisableSSHSocketForwarding = true
+	want := conduit.Policy{DisableSSH: true, DenyPorts: []int{9999}, DisableSSHSocketForwarding: true}
+	assert.Equal(t, want, buildHubServerConfig(&cfg, "", "", nil, false, "", nil).ConduitPolicy)
 }
 
 // TestBuildHubServerConfig_ConduitUserStreamAuthzMax: the hub receives the

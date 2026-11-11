@@ -14,7 +14,9 @@
 
 package localpolicy
 
-import "testing"
+import (
+	"testing"
+)
 
 // TestReservedPortsList pins the deny-list contents (design §3.8).
 func TestReservedPortsList(t *testing.T) {
