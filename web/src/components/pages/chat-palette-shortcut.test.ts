@@ -112,6 +112,11 @@ function makeKeydownEvent(
 function createUnattachedPage(): any {
   const el = document.createElement('scion-page-chat') as any;
   el.pageData = { user: { id: 'user-me' } };
+  // Native checkVisibility() (happy-dom 21+, real browsers) is false for a
+  // disconnected element, so hide it: these tests exercise the manual
+  // ancestor walk in `_isPageVisible()`. The native branch is covered by
+  // its own test below.
+  el.checkVisibility = undefined;
   return el;
 }
 
@@ -443,6 +448,15 @@ describe('_isPageVisible', () => {
 
   it('is true for a connected, unhidden page', () => {
     const page = createUnattachedPage();
+    expect(page._isPageVisible()).toBe(true);
+  });
+
+  it('prefers native checkVisibility() where implemented', () => {
+    const page = createUnattachedPage();
+    delete page.checkVisibility;
+    // Disconnected: native checkVisibility() is false.
+    expect(page._isPageVisible()).toBe(false);
+    document.body.appendChild(page);
     expect(page._isPageVisible()).toBe(true);
   });
 });
@@ -1600,7 +1614,7 @@ describe('palette focus capture/restore: textarea selection', () => {
     const input = document.createElement('input');
     document.body.appendChild(input);
     input.focus();
-    expect((input as unknown as { checkVisibility?: unknown }).checkVisibility).toBeUndefined();
+    (input as unknown as { checkVisibility?: unknown }).checkVisibility = undefined;
     vi.spyOn(input, 'getClientRects').mockReturnValue([] as unknown as DOMRectList);
 
     page._capturePaletteInvokerFocus();
