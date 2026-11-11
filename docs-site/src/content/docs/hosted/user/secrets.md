@@ -134,7 +134,7 @@ You can enable progeny propagation in two ways:
 
 To explicitly enable propagation on a specific secret, use the `--allow-progeny` flag:
 
-* **User-Scoped Secrets**: Can be marked for progeny propagation at any time.
+* **User-Scoped Secrets**: Can be marked for progeny propagation at any time. When an agent saves a user-scoped secret on your behalf, it waits for your approval first, and you can turn progeny access off when approving (`scion hub secret pending approve <ID> --no-progeny` or by unticking **Also deliver to agents your agents create** in **Profile > Secrets**; see [Approving user secrets saved by your agents](#approving-user-secrets-saved-by-your-agents)).
   ```bash
   scion hub secret set --allow-progeny MY_PERSONAL_TOKEN token-value
   ```
@@ -390,17 +390,32 @@ decide on them.
     `pending`; a name with an approved secret and a pending replacement appears twice. The Hub
     API offers the same list as `GET /api/v1/secrets?scope=user&includePending=true` (field
     `items`, each with a `state`), for your own login only.
+*   **Web UI (`Profile > Secrets`)**: On your **Profile > Secrets** page (`/profile/secrets`), the
+    table adds a **State** column (**Approved**, **Pending** with `expires <time>`, or
+    **Approved, replacement pending** when an approved secret has a pending replacement) and lists
+    pending secrets alongside your approved user secrets, while the **Secrets** item in the Profile
+    sidebar shows a badge with your pending secret count. Each pending row shows the writing agent,
+    its project, the save time, the byte length, whether it would replace your existing secret, and
+    any project secrets of the same name (`overridesProjectSecrets`) it would shadow, together with
+    **Approve**, **Reject**, and **Reveal** actions:
+    *   **Approve** opens a confirmation dialog showing the secret's effect (`Will be delivered to your agents in all projects`) and, when the agent requested progeny access (`allowProgeny: true`), an **Also deliver to agents your agents create** checkbox (checked by default; unticking it sends `{"allowProgeny": false}` to `POST /api/v1/pending-secrets/{id}/approve`).
+    *   **Reject** calls `POST /api/v1/pending-secrets/{id}/reject` and removes the pending secret.
+    *   **Reveal** opens a dialog that fetches the held value from `POST /api/v1/pending-secrets/{id}/reveal` on demand (noted as recorded in the Hub audit log), decodes it in the browser (showing UTF-8 text or a `<N> bytes (binary)` notice with **Copy value**), and clears the decoded value from memory as soon as the dialog closes.
 *   **Notifications**: when an agent saves a secret for your account, you get a notification
-    naming the agent, its project, the secret's name and type, and the time, never the value.
-    An agent's saves within one hour share one notification: each later save updates it with
-    the latest secret and how many of that agent's secrets await your approval (and how many of
-    those would replace an existing secret), and shows it again. A save that would replace one
-    of your approved secrets is always announced on its own, as a replacement, at most once per
-    agent and secret name per hour; your approved value stays in effect until you approve the
-    replacement.
+    (`SECRET_PENDING` / kind `secret_pending`) naming the agent, its project, the secret's name and
+    type, and the time, never the value. In the web UI notification tray, pending-secret
+    notifications include a **Review secrets** link to `/profile/secrets`. An agent's saves within
+    one hour share one notification: each later save updates it with the latest secret and how many
+    of that agent's secrets await your approval (and how many of those would replace an existing
+    secret), and shows it again. A save that would replace one of your approved secrets is always
+    announced on its own, as a replacement, at most once per agent and secret name per hour; your
+    approved value stays in effect until you approve the replacement.
 *   **Start hint**: when you start an agent with `scion start` and secrets await your approval,
-    the CLI prints `N secrets await approval`. It is printed on your terminal only, never inside
-    an agent.
+    the CLI prints `1 secret awaits approval (scion hub secret pending list)` or
+    `N secrets await approval (scion hub secret pending list)` on your terminal only, never inside
+    an agent. In the web UI, starting or creating an agent while you have pending secrets appends
+    `1 secret awaits approval in Profile > Secrets.` or `N secrets await approval in Profile > Secrets.`
+    to the toast notice.
 *   **Audit**: every save, replacement, refused save, approval, rejection, reveal and expiry of a
     pending secret is written to the Hub's structured audit log (`secret_pending_create`,
     `_replace`, `_refused`, `_approve`, `_reject`, `_reveal`, `_expire`) with the secret's name,

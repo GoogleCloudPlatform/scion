@@ -85,7 +85,15 @@ Select the [harnesses](/scion/supported-harnesses/) you want available (Claude C
 
 Use **Pull selected** to fetch any images that are not local yet (progress streams live), then **Re-check** to confirm. You can add or reconfigure harnesses later from Hub settings, or **Skip for now**.
 
-### 6. First workspace
+### 6. Welcome project (optional, experimental)
+
+When the `hub.welcome_project` [experiment](/scion/reference/experiments/) is enabled (off by default), the wizard offers an opt-in **Welcome project** step (`step: "welcome"`) before **First workspace**:
+
+- **Preview (`POST /api/v1/system/welcome/preview`)**: When the step opens, the Hub resolves `scion-frontiers/agent-team` (folder `templates`) and the allow-listed skill repositories its templates reference (`scion-frontiers/agent-team`, `addyosmani/agent-skills`, and `microsoft/playwright-cli`) to commit SHAs, downloads their tarballs from `github.com` / `codeload.github.com`, verifies each archive's PAX global header commit ID against the resolved commit SHA (`archive commit id does not match the requested commit` on mismatch), vendors each template's referenced skills into `skills/<name>/` with local paths, and returns a single-use `preview_id` (valid for 30 minutes), `expires_at`, `source` (`repo`, `path`, `sha`), `manifest` (`agent_team_repo`, `agent_team_sha`, `skills`, `templates`, `files_sha256`, `skipped_entries`), and `file_count` (recording `state: "previewed"` in the `welcome_project` `hub_settings` ledger, or `422 welcome_project_failed` on failure).
+- **Continue (`POST /api/v1/system/welcome/install`)**: Sending `{"preview_id": "<id>"}` re-hashes the staged files against `manifest.files_sha256`, creates a Hub-managed `welcome` project (or `welcome-1` when `welcome` is taken, recording `scion.welcome/manifest` on the project), imports the staged templates at project scope, starts the `coordinator` agent from the `coordinator` template when a Runtime Broker and harness credentials are ready (transitioning `state` to `started`, or leaving `state` at `pending_credentials` or `pending_broker` without creating an unauthenticated agent), and returns `state`, `project_id`, `project_slug`, `project_name`, `agent_id`, and `manifest`.
+- **Skip (`POST /api/v1/system/welcome/skip`)**: Records `state: "skipped"` in the `welcome_project` ledger without creating the project. Once the ledger reaches a final state (`created`, `pending_credentials`, `pending_broker`, `started`, `skipped`, or `failed`), the step does not run again (`409 welcome_project_done`).
+
+### 7. First workspace
 
 Create your first **project**. The wizard offers three ways to start:
 
