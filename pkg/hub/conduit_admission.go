@@ -132,6 +132,11 @@ type conduitAdmissionClaims struct {
 	ScopeProject string   `json:"sp,omitempty"`
 	Scopes       []string `json:"sc,omitempty"`
 
+	// SessionGen is the user's session generation the admitting hub user
+	// token was authenticated with (AuthType AuthTypeJWT; 0 otherwise). A
+	// token without it reads 0 (conduit_session_generation.go).
+	SessionGen int64 `json:"sg,omitempty"`
+
 	// CredentialExpiry is when the admitting credential expires (unix
 	// seconds; 0: no expiry).
 	CredentialExpiry int64 `json:"cexp,omitempty"`

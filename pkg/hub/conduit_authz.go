@@ -534,6 +534,11 @@ type conduitRenewalRequest struct {
 	// inconsistency: unavailable, logged at error level (design v2.21.40
 	// §3.9, Session binding).
 	RelayHeld bool
+	// SessionGen is the session generation the stream's user session was
+	// authenticated with, when SessionGenSet: the re-check then also
+	// requires it to be the user row's current one (conduitUserStatus).
+	SessionGen    int64
+	SessionGenSet bool
 }
 
 // conduitRenewal is a minted renewal grant and the deadline it carries.
@@ -616,10 +621,20 @@ func (s *Server) renewConduitStream(ctx context.Context, req conduitRenewalReque
 		}
 	}
 
+	// The rebuilt identity carries the session generation the stream's
+	// session was authenticated with, which the user-status check compares
+	// with the user row (conduit_session_generation.go).
+	renewalIdentity := func() (Identity, error) {
+		ident, err := s.conduitRenewalIdentity(ctx, c, userID)
+		if err != nil || !req.SessionGenSet {
+			return ident, err
+		}
+		return conduitIdentityWithSessionGeneration(ident, req.SessionGen), nil
+	}
 	if verdict, _, err := s.evaluateConduitStream(ctx, conduitStreamEval{
 		AgentID:     target.ID,
 		ProjectID:   c.ProjectID,
-		Identity:    func() (Identity, error) { return s.conduitRenewalIdentity(ctx, c, userID) },
+		Identity:    renewalIdentity,
 		Kind:        c.Stream.Kind,
 		ViaTunnel:   c.Via == grant.ViaTunnel,
 		Port:        port,
