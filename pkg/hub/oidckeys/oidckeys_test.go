@@ -21,6 +21,7 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -100,6 +101,18 @@ func (m *oidcMockSecretBackend) Resolve(_ context.Context, _, _, _ string, _ *se
 }
 
 func (m *oidcMockSecretBackend) HubID() string { return "test-hub" }
+
+// HoldPending, ReadPending and DropPending satisfy secret.PendingHolder; the
+// fake holds no pending values.
+func (m *oidcMockSecretBackend) HoldPending(context.Context, string, []byte) (string, error) {
+	return "", errors.New("pending secrets are not supported by this test backend")
+}
+
+func (m *oidcMockSecretBackend) ReadPending(context.Context, string) ([]byte, error) {
+	return nil, errors.New("pending secrets are not supported by this test backend")
+}
+
+func (m *oidcMockSecretBackend) DropPending(context.Context, string) error { return nil }
 
 // FetchValues is not exercised by the OIDC key tests in this file; this stub
 // only satisfies secret.SecretBackend and reports every item not found, the

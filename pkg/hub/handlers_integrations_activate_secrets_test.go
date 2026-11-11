@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -78,6 +79,18 @@ func (m *migrationSecretBackend) Resolve(context.Context, string, string, string
 }
 
 func (m *migrationSecretBackend) HubID() string { return "test-hub" }
+
+// HoldPending, ReadPending and DropPending satisfy secret.PendingHolder; the
+// fake holds no pending values.
+func (m *migrationSecretBackend) HoldPending(context.Context, string, []byte) (string, error) {
+	return "", errors.New("pending secrets are not supported by this test backend")
+}
+
+func (m *migrationSecretBackend) ReadPending(context.Context, string) ([]byte, error) {
+	return nil, errors.New("pending secrets are not supported by this test backend")
+}
+
+func (m *migrationSecretBackend) DropPending(context.Context, string) error { return nil }
 
 // FetchValues is not exercised by the activation tests in this file; this
 // stub only satisfies secret.SecretBackend and reports every item not found,

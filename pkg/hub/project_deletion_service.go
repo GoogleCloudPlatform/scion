@@ -99,6 +99,10 @@ type ProjectDeleteDecision struct {
 type ProjectDeleteResult struct {
 	Project        *store.Project // The project record before deletion.
 	CascadeSummary CascadeSummary // Summary of cascade-deleted state.
+	// PendingSecretValueRefs are the held values of the deleted pending
+	// secrets, for the caller to release with the secret backend after
+	// the commit.
+	PendingSecretValueRefs []string
 }
 
 // CascadeSummary records what was cascade-deleted in the transaction.
@@ -129,6 +133,13 @@ type CascadeSummary struct {
 	// the project's agents revoked by the delete; their credentials are
 	// revoked with them.
 	AgentDelegationGrants int `json:"agent_delegation_grants_revoked"`
+	// PendingSecrets is the number of pending secrets written from the
+	// project that were deleted.
+	PendingSecrets int `json:"pending_secrets_deleted"`
+
+	// pendingSecretValueRefs are the value refs of the deleted pending
+	// secrets (never serialized).
+	pendingSecretValueRefs []string
 }
 
 // ---------------------------------------------------------------------------
@@ -342,8 +353,9 @@ func (svc *ProjectDeletionService) Delete(ctx context.Context, req ProjectDelete
 		}
 
 		result = &ProjectDeleteResult{
-			Project:        project,
-			CascadeSummary: cascadeSummary,
+			Project:                project,
+			CascadeSummary:         cascadeSummary,
+			PendingSecretValueRefs: cascadeSummary.pendingSecretValueRefs,
 		}
 		return nil
 	})
@@ -564,6 +576,18 @@ func (svc *ProjectDeletionService) cascadeSecurityState(ctx context.Context, tx 
 		cs.Secrets = n
 	}
 
+	// 3b. Pending secrets written by the project's agents. They are
+	// user-scope secrets awaiting their owners' decision; the project is
+	// their provenance, and a pending secret from a deleted project is
+	// not offered for approval. Their held values are released by the
+	// caller after the commit (ProjectDeleteResult.PendingSecretValueRefs).
+	if refs, err := tx.DeletePendingSecretsByProject(ctx, projectID); err != nil {
+		return cs, fmt.Errorf("cascade pending secrets: %w", err)
+	} else {
+		cs.PendingSecrets = len(refs)
+		cs.pendingSecretValueRefs = refs
+	}
+
 	// 4. Env vars — project-scoped environment variables.
 	if n, err := tx.DeleteEnvVarsByScope(ctx, store.ScopeProject, projectID); err != nil {
 		return cs, fmt.Errorf("cascade env vars: %w", err)
@@ -704,6 +728,7 @@ func (svc *ProjectDeletionService) cascadeSecurityState(ctx context.Context, tx 
 	// |   (+ project_visitor_exclusions and the rules' role_bindings)                       |          |
 	// | groups                 | Transactional: ListGroups + DeleteGroup (step 2)         | Auth     |
 	// | secrets                | Transactional: DeleteSecretsByScope (step 3)             | Cred     |
+	// | pending_secrets        | Transactional: DeletePendingSecretsByProject (step 3b)   | Cred     |
 	// | env_vars               | Transactional: DeleteEnvVarsByScope (step 4)             | Config   |
 	// | skill_injections       | Transactional: DeleteSkillInjectionsByScope (step 5)     | Config   |
 	// | gcp_service_accounts   | Transactional: List + DeleteGCPServiceAccount (step 6)   | Cred     |

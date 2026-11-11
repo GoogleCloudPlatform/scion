@@ -306,12 +306,64 @@ From inside an agent container, read secrets with `scion secret`. The calls are 
     telling you to retry with `--scope user`. This does not affect writes you make yourself through
     the web UI or `scion hub secret set --project`.*
 
+#### Approving user secrets saved by your agents
+
+A user-scoped secret that an agent saves (with `sciontool secret set --scope user`, or through
+harness credential capture) is not delivered to any agent until you approve it. A user secret
+reaches your agents in every project, so you decide on each one an agent saves:
+
+*   The save is held as a **pending secret**. `sciontool` reports
+    `saved, pending approval in Scion`, and capture-auth reports `captured (pending approval in Scion)`.
+    `--force` has no effect at user scope.
+*   If you already have a user secret with the same name, it stays in effect until you approve
+    the replacement.
+*   A pending secret expires 7 days after the agent first saved it. The agent that saved it can
+    replace it with a new value; the expiry stays the same.
+*   While a secret is pending, another agent cannot save a user secret with the same name. Its
+    save is refused with `409` (`secret_pending_held_by_other_agent`), and capture-auth exits
+    with code `3`. Approve or reject the pending secret first.
+
+Review and decide with the `scion` CLI. Values are never shown:
+
+```bash
+# List your pending secrets: name, type, target, the agent and project that saved it,
+# when it was saved and when it expires
+scion hub secret pending list
+
+# Approve one: it becomes your user secret, delivered from your agents' next start
+scion hub secret pending approve <ID>
+
+# Approve without sharing it with agents that your agents create
+scion hub secret pending approve <ID> --no-progeny
+
+# Reject one: the pending secret is deleted
+scion hub secret pending reject <ID>
+```
+
+Only you can list, approve or reject your pending secrets, from an interactive login
+(`scion hub auth login`). Agents, access tokens, other users and hub admins cannot see or
+decide on them.
+
+*   An approval writes the secret only while your existing user secret of that name is the one
+    the agent saw when it saved the pending secret. If you created, changed or deleted that
+    secret since, the approval is refused with `409` (`secret_pending_existing_changed`) and
+    nothing changes. Reject the pending secret and have the agent save it again.
+*   An approval and a rejection of the same pending secret never both succeed: the second one
+    answers `404`.
+*   Deleting a project deletes the pending secrets its agents saved. Deleting the agent that
+    saved a pending secret does not; you can still approve or reject it.
+*   Approve and reject are refused (`403`) when a browser sends them from another site. Behind
+    a front proxy, the proxy must pass the public `Host` header through to the Hub unchanged;
+    otherwise approvals and rejections from the web UI are refused with `403`.
+
+Project-scoped secrets that an agent saves are stored directly.
+
 #### Using the Hub API Directly
 Under the hood, `scion secret` and `sciontool` interact with the Hub's agent-specific secrets API:
 
 *   **`GET /api/v1/agents/{agentID}/secrets`**: Lists available secret metadata in the agent's project.
 *   **`GET /api/v1/agents/{agentID}/secrets/{key}`**: Retrieves a single secret's metadata and its base64-encoded value.
-*   **`PUT /api/v1/agents/{agentID}/secrets/{key}`**: Stores or updates a secret.
+*   **`PUT /api/v1/agents/{agentID}/secrets/{key}`**: Stores or updates a project-scoped secret (`201` created, `204` updated). A user-scoped write (`"scope": "user"`) is held for your approval and answers `202` with `{"key", "scope", "state": "pending", "pendingId", "expiresAt", "replacesExisting", "message"}`, or `409` with code `secret_pending_held_by_other_agent` when another agent's pending secret holds the name.
 *   **`POST /api/v1/agent/secrets`**: Fetches several secret values in one call. There is no agent ID in the URL: the Hub identifies the agent from its token. The request body is `{"keys": ["KEY_A", "KEY_B"]}` (at most 100 keys). Each entry in the response has a `status` of `ok`, `not_found`, or `entitled_but_unavailable`. `sciontool init` calls this endpoint at startup to fetch the keys listed in `SCION_SECRET_KEYS`.
 
 #### Security & Audit Logging

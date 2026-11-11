@@ -17,6 +17,7 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log"
 	"os"
 	"path/filepath"
@@ -39,6 +40,18 @@ func newFakeSecretBackend() *fakeSecretBackend {
 }
 
 func (f *fakeSecretBackend) HubID() string { return f.hubID }
+
+// HoldPending, ReadPending and DropPending satisfy secret.PendingHolder; the
+// fake holds no pending values.
+func (f *fakeSecretBackend) HoldPending(context.Context, string, []byte) (string, error) {
+	return "", errors.New("pending secrets are not supported by this test backend")
+}
+
+func (f *fakeSecretBackend) ReadPending(context.Context, string) ([]byte, error) {
+	return nil, errors.New("pending secrets are not supported by this test backend")
+}
+
+func (f *fakeSecretBackend) DropPending(context.Context, string) error { return nil }
 
 func (f *fakeSecretBackend) Get(_ context.Context, name, _, _ string) (*secret.SecretWithValue, error) {
 	v, ok := f.values[name]

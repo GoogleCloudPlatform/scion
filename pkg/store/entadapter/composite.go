@@ -89,6 +89,7 @@ type CompositeStore struct {
 	*ProjectStore
 	*UserStore
 	*SecretStore
+	*PendingSecretStore
 	*TemplateStore
 	*NotificationStore
 	*ScheduleStore
@@ -267,6 +268,8 @@ func newTxCompositeStore(tx *ent.Tx) *CompositeStore {
 	txStore.ConversationStore.inTx = true
 	txStore.ThreadGroupStore.inTx = true
 	txStore.SecretStore.inTx = true
+	txStore.PendingSecretStore.inTx = true
+	txStore.PendingSecretStore.txFencedWrite = &txStore.SecretStore.txFencedWrite
 	return txStore
 }
 
@@ -280,6 +283,7 @@ func NewCompositeStore(client *ent.Client) *CompositeStore {
 		ProjectStore:                NewProjectStore(client),
 		UserStore:                   NewUserStore(client),
 		SecretStore:                 NewSecretStore(client),
+		PendingSecretStore:          NewPendingSecretStore(client),
 		TemplateStore:               NewTemplateStore(client),
 		NotificationStore:           NewNotificationStore(client),
 		ScheduleStore:               NewScheduleStore(client),

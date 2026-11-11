@@ -94,6 +94,18 @@ func (f *fakeBackend) Resolve(context.Context, string, string, string, *secret.R
 
 func (f *fakeBackend) HubID() string { return "test-hub" }
 
+// HoldPending, ReadPending and DropPending satisfy secret.PendingHolder; the
+// fake holds no pending values.
+func (f *fakeBackend) HoldPending(context.Context, string, []byte) (string, error) {
+	return "", errors.New("pending secrets are not supported by this test backend")
+}
+
+func (f *fakeBackend) ReadPending(context.Context, string) ([]byte, error) {
+	return nil, errors.New("pending secrets are not supported by this test backend")
+}
+
+func (f *fakeBackend) DropPending(context.Context, string) error { return nil }
+
 // FetchValues is not exercised by the secretmigration tests in this file;
 // this stub only satisfies secret.SecretBackend and reports every item not
 // found, the same as the other minimal fakes in this codebase.

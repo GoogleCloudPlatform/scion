@@ -446,6 +446,9 @@ type Store interface {
 	// Secret operations
 	SecretStore
 
+	// Pending (agent-written, awaiting owner approval) user secrets
+	PendingSecretStore
+
 	// Secret encryption policy and migration records
 	SecretEncryptionStore
 
