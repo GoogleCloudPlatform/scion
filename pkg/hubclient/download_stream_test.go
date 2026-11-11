@@ -131,11 +131,24 @@ func TestDownloadStream_ResponseContract(t *testing.T) {
 						if status < 300 && !strings.Contains(err.Error(), strconv.Itoa(status)) {
 							t.Errorf("error %q does not identify status %d", err, status)
 						}
-						if endpoint == "delivery" && status == http.StatusNotFound {
-							if !errors.Is(err, errDeliveryRefused) {
-								t.Errorf("error = %v; want delivery refusal", err)
+						if endpoint == "delivery" {
+							if status == http.StatusNotFound {
+								if !errors.Is(err, errDeliveryRefused) {
+									t.Errorf("error = %v; want delivery refusal", err)
+								}
+								if errors.Is(err, errDeliveryUnexpectedStatus) {
+									t.Errorf("error = %v; unexpectedly matched unexpected status", err)
+								}
+							} else if status < 300 {
+								if !errors.Is(err, errDeliveryUnexpectedStatus) {
+									t.Errorf("error = %v; want unexpected status error", err)
+								}
+								if errors.Is(err, errDeliveryRefused) {
+									t.Errorf("error = %v; unexpectedly matched delivery refusal", err)
+								}
 							}
-						} else if status >= 400 {
+						}
+						if status >= 400 && !(endpoint == "delivery" && status == http.StatusNotFound) {
 							var apiErr *apiclient.APIError
 							if !errors.As(err, &apiErr) || apiErr.StatusCode != status || apiErr.Code != "refused" || apiErr.RequestID != "trace-fixture" || apiErr.RetryAfterSeconds != 7 {
 								t.Errorf("error = %#v; want original API error metadata", err)
