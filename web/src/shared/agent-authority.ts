@@ -41,11 +41,12 @@ function principalText(p: AgentAuthorityPrincipal | undefined, fallback: string)
 /** One sentence naming the cause. */
 export function authorityCauseText(a: AgentAuthority): string {
   const who = principalText(a.principal, 'a principal');
+  const relativePronoun = a.principal?.kind === 'user' ? 'who' : 'which';
   switch (a.cause) {
     case 'delegator_deleted':
-      return `Its delegation comes from ${who}, which was deleted.`;
+      return `Its delegation comes from ${who}, ${relativePronoun} was deleted.`;
     case 'delegator_inactive':
-      return `Its delegation comes from ${who}, which is not active.`;
+      return `Its delegation comes from ${who}, ${relativePronoun} is not active.`;
     case 'delegator_revoked':
       return `Its delegation comes from ${who}, whose own delegation was revoked.`;
     case 'chain_invalid':

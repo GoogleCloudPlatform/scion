@@ -48,7 +48,14 @@ describe('agent authority display', () => {
         cause: 'delegator_inactive',
         principal: { kind: 'user', deleted: false },
       })
-    ).toBe('Its delegation comes from a user, which is not active.');
+    ).toBe('Its delegation comes from a user, who is not active.');
+    expect(
+      authorityCauseText({
+        state: 'orphaned',
+        cause: 'delegator_inactive',
+        principal: { kind: 'agent', deleted: false },
+      })
+    ).toBe('Its delegation comes from an agent, which is not active.');
     expect(
       authorityCauseText({
         state: 'revoked',

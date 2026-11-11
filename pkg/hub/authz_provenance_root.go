@@ -257,7 +257,11 @@ func (a *AuthzService) walkProvenanceChain(ctx context.Context, agent *store.Age
 			return RecordedProvenanceRoot{}, fmt.Errorf("%w: agent %s repeats in the chain", ErrProvenanceChain, delegateID)
 		}
 		visited[delegateID] = true
-		*trace = provenanceChainTrace{depth: depth, delegateID: delegateID, unrecorded: trace.unrecorded}
+		// Reset the per-hop fields; unrecorded accumulates across hops.
+		trace.depth = depth
+		trace.delegateID = delegateID
+		trace.principal = ProvenancePrincipal{}
+		trace.sentinel = false
 
 		active, err := lookups.activeProjectEdges(ctx, delegateID, agent.ProjectID)
 		if err != nil {
