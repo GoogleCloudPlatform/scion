@@ -4,7 +4,7 @@
 **Stacked on:** the federated user reply reading item (the bridge's
 visitor reply poller), which builds on the A2A bridge item for federated
 users
-**Tracked in:** upstream issue 4603
+**Tracked in:** fork issue ptone/scion#4603
 
 ## What changed
 

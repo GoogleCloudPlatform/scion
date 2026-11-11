@@ -49,7 +49,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 )
 
-// The phase 1 project visitor slice end to end, in one process (upstream issue 4603):
+// The phase 1 project visitor slice end to end, in one process (fork issue ptone/scion#4603):
 //
 //   - hub A issues a user access credential for its signed-in user, signed
 //     with its own OIDC key and verified by hub B through hub A's published
