@@ -1,9 +1,9 @@
 {
   "channels": {
     "stable": {
-      "version": "",
-      "date": "",
-      "url": ""
+      "version": "v0.3.0",
+      "date": "2026-11-11T14:45:53Z",
+      "url": "https://github.com/GoogleCloudPlatform/scion/releases/tag/v0.3.0"
     },
     "preview": {
       "version": "v0.3.0-preview.7",
