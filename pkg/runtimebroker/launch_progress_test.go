@@ -657,6 +657,7 @@ func TestClassifyStartError_LaunchFailure(t *testing.T) {
 		{api.LaunchCodeCrashLoop, api.LaunchStepContainerStart, "CrashLoopBackOff", "the agent container keeps crashing on start (CrashLoopBackOff)"},
 		{api.LaunchCodeInitContainerFailed, api.LaunchStepInitContainers, "Error", "an init container of the agent pod failed (Error)"},
 		{api.LaunchCodeVolumeMountFailed, api.LaunchStepContainerCreate, "FailedMount", "an agent volume could not be mounted (FailedMount)"},
+		{api.LaunchCodeVolumeUnhealthy, api.LaunchStepContainerStart, "ShareNotWritable", "an agent volume is mounted but not usable (ShareNotWritable)"},
 		{api.LaunchCodeUnschedulable, api.LaunchStepScheduling, "Unschedulable", "the agent pod cannot be scheduled (Unschedulable)"},
 		{api.LaunchCodePodDisrupted, api.LaunchStepScheduling, "PreemptionByScheduler", "the agent pod was preempted, evicted or deleted while starting: it was preempted (PreemptionByScheduler)"},
 		{api.LaunchCodePodDisrupted, api.LaunchStepContainerCreate, "Evicted", "the agent pod was preempted, evicted or deleted while starting: it was evicted (Evicted)"},

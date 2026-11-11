@@ -78,6 +78,7 @@ export const LAUNCH_CODE_LABELS: Readonly<Record<string, string>> = {
   crash_loop: 'the agent container keeps crashing on start',
   init_container_failed: 'an init container of the agent pod failed',
   volume_mount_failed: 'an agent volume could not be mounted',
+  volume_unhealthy: 'an agent volume is mounted but not usable',
   unschedulable: 'the agent pod cannot be scheduled',
   pod_disrupted: 'the agent pod was preempted, evicted or deleted while starting',
   broker_restarted: 'the runtime broker restarted during the launch',

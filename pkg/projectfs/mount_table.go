@@ -1,0 +1,103 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package projectfs
+
+import (
+	"bufio"
+	"fmt"
+	"io"
+	"path/filepath"
+	"strconv"
+	"strings"
+)
+
+// maxMountTableLine bounds a single /proc/mounts line (long option strings
+// can exceed bufio.Scanner's 64 KiB default).
+const maxMountTableLine = 1 << 20
+
+// MountEntry is one mount table entry: the source mounted at a path
+// (server:export for NFS), its filesystem type ("nfs", "nfs4", ...) and
+// the mount options the kernel reports for it
+// ("rw,nosuid,nodev,relatime,vers=3,...").
+type MountEntry struct {
+	Source  string
+	FSType  string
+	Options string
+}
+
+// MountTable is a parsed mount table: cleaned, unescaped mountpoint to the
+// entry mounted there. When a path is mounted more than once, the last
+// (topmost, visible) entry wins.
+type MountTable map[string]MountEntry
+
+// Lookup returns the source mounted at path and whether path is a
+// mountpoint. path is compared after filepath.Clean.
+func (t MountTable) Lookup(path string) (source string, mounted bool) {
+	e, mounted := t.LookupEntry(path)
+	return e.Source, mounted
+}
+
+// LookupEntry returns the entry mounted at path and whether path is a
+// mountpoint. path is compared after filepath.Clean.
+func (t MountTable) LookupEntry(path string) (MountEntry, bool) {
+	e, mounted := t[filepath.Clean(path)]
+	return e, mounted
+}
+
+// ParseMountTable parses a /proc/mounts-format table, decoding the
+// kernel's octal escapes in the source and mountpoint fields.
+func ParseMountTable(r io.Reader) (MountTable, error) {
+	t := MountTable{}
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 0, 64*1024), maxMountTableLine)
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) < 2 {
+			continue
+		}
+		e := MountEntry{Source: unescapeMountField(fields[0])}
+		if len(fields) >= 3 {
+			e.FSType = fields[2]
+		}
+		if len(fields) >= 4 {
+			e.Options = unescapeMountField(fields[3])
+		}
+		t[filepath.Clean(unescapeMountField(fields[1]))] = e
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("reading mount table: %w", err)
+	}
+	return t, nil
+}
+
+// unescapeMountField decodes the octal escapes (\040 for space, etc.) the
+// kernel uses in /proc/mounts fields.
+func unescapeMountField(s string) string {
+	if !strings.Contains(s, `\`) {
+		return s
+	}
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\\' && i+3 < len(s) {
+			if v, err := strconv.ParseUint(s[i+1:i+4], 8, 8); err == nil {
+				b.WriteByte(byte(v))
+				i += 3
+				continue
+			}
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
+}
