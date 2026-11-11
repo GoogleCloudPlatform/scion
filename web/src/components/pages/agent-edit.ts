@@ -36,6 +36,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
+import { showPendingSecretsStartHint } from '../../client/pending-secrets.js';
 import { navigateTo } from '../../client/navigation.js';
 import { lifecycleActionErrorMessage } from '../../client/agent-delete.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
@@ -429,6 +430,7 @@ export class ScionPageAgentEdit extends LitElement {
         await this.load();
         return;
       }
+      void showPendingSecretsStartHint();
       navigateTo(`/agents/${encodeURIComponent(this.agentId)}`);
     } catch (err) {
       this.error = err instanceof Error ? err.message : 'Failed to save and start';

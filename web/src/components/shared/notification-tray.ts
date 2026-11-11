@@ -58,6 +58,23 @@ export const ARTIFACT_REVIEW_SUMMARY_KIND = 'artifact_review_summary';
 export const ARTIFACT_REVIEW_SUBMITTED_STATUS = 'ARTIFACT_REVIEW_SUBMITTED';
 
 /**
+ * An agent saved a user secret for the user; it waits for the user's
+ * approval in Profile > Secrets. The row carries text only, never a value.
+ */
+export const SECRET_PENDING_KIND = 'secret_pending';
+export const SECRET_PENDING_STATUS = 'SECRET_PENDING';
+
+/** The path where the user decides on pending secrets. */
+const PROFILE_SECRETS_PATH = '/profile/secrets';
+
+/** The Profile > Secrets path for a pending secret row, or null for any other row. */
+export function pendingSecretLink(n: Notification): string | null {
+  return n.kind === SECRET_PENDING_KIND || n.status === SECRET_PENDING_STATUS
+    ? PROFILE_SECRETS_PATH
+    : null;
+}
+
+/**
  * Statuses of the chat rows the hub used to write into the bell (mentions
  * and DMs). It writes none now, but rows made before that can remain.
  */
@@ -500,6 +517,8 @@ export class ScionNotificationTray extends LitElement {
         return 'Schedule Blocked';
       case ARTIFACT_REVIEW_SUBMITTED_STATUS:
         return 'Review Submitted';
+      case SECRET_PENDING_STATUS:
+        return 'Secret Awaiting Approval';
       default:
         return 'Scion Notification';
     }
@@ -569,6 +588,8 @@ export class ScionNotificationTray extends LitElement {
         return 'x-circle-fill';
       case SCHEDULE_BLOCKED_STATUS:
         return 'calendar-x';
+      case SECRET_PENDING_STATUS:
+        return 'shield-lock';
       default:
         return 'info-circle-fill';
     }
@@ -579,6 +600,7 @@ export class ScionNotificationTray extends LitElement {
       case 'COMPLETED':
         return 'status-success';
       case 'WAITING_FOR_INPUT':
+      case SECRET_PENDING_STATUS:
         return 'status-warning';
       case 'LIMITS_EXCEEDED':
       case SCHEDULE_BLOCKED_STATUS:
@@ -1053,6 +1075,7 @@ export class ScionNotificationTray extends LitElement {
     // markup, and the link beside it comes from the resource fields.
     const excerpt = reviewSummaryExcerpt(n);
     const artifactLink = reviewSummaryLink(n);
+    const secretsLink = pendingSecretLink(n);
     return html`
       <div class="notif-item">
         <div class="notif-icon ${this.statusClass(n.status)}">
@@ -1072,6 +1095,14 @@ export class ScionNotificationTray extends LitElement {
                   @click=${(e: Event): void => this.navigateToPath(e, artifactLink)}
                 >
                   View artifact
+                </a>`
+              : nothing}
+            ${secretsLink
+              ? html`<a
+                  href=${secretsLink}
+                  @click=${(e: Event): void => this.navigateToPath(e, secretsLink)}
+                >
+                  Review secrets
                 </a>`
               : nothing}
             ${!hasAgentLink(n.agentId)
