@@ -107,9 +107,12 @@ agents start pre-authenticated.
    harness's native login command (e.g. `claude setup-token`, `codex login --device-auth`,
    `copilot login`, `agy`). Each bundle's no-auth message tells you exactly which command to run.
 3. **Capture** — You run the bundle's `capture_auth.py`, which locates the credential files the
-   harness just wrote and stores them as project secrets. On the next start, the host stages those
-   secrets back into the agent and provisioning selects them automatically. See
-   [Capturing Credentials](#capturing-credentials-from-a-running-agent).
+   harness just wrote and stores them in the Hub secret store (`--scope user` by default, or
+   `--scope project`). A user-scoped capture is held as a **pending secret** (`captured (pending approval in Scion)`)
+   until you approve it in **Profile > Secrets** or with `scion hub secret pending approve <ID>`
+   (a project-scoped capture is stored directly). Once approved (or stored at project scope), on the
+   next start the host stages those secrets back into the agent and provisioning selects them
+   automatically. See [Capturing Credentials](#capturing-credentials-from-a-running-agent).
 
 If you already have a plain API key (or a credential file) you can skip stages 1–3 entirely by
 providing it up front — see [Credential Sources & Setup](#credential-sources--setup).
@@ -394,11 +397,16 @@ harness just wrote, and stores it as a secret by shelling out to
 
 By default, all capture paths use **user scope** with **progeny enabled** (`--allow-progeny`), meaning the credentials are kept private to your user identity but safely passed down to any child agents (progeny) your agent creates.
 
+**Owner approval for user-scoped captures.** A user-scoped secret saved by an agent (`--scope user`, the default for `capture_auth.py`) is held on the Hub as a **pending secret** (`202 Accepted`, `state: "pending"`, expiring after 7 days; capped at 10 pending secrets per agent and 50 per owner) and is not delivered to any agent until you approve it:
+- `capture_auth.py` prints `captured (pending approval in Scion)` and exits `0`. Because a user-scoped save does not overwrite an existing approved secret directly, re-authentication at user scope completes in one run without `--force`, and your existing approved secret stays in effect until you approve the replacement (`--force` has no effect at user scope).
+- Approve, reject, or inspect the held value from **Profile > Secrets** in the Web UI (where you can also untick **Also deliver to agents your agents create** to turn progeny off at approval) or with `scion hub secret pending` (`list`, `show <ID>`, `reveal <ID>`, `approve <ID> [--no-progeny]`, `reject <ID>`). See [Approving user secrets saved by your agents](/scion/hosted/user/secrets/#approving-user-secrets-saved-by-your-agents).
+- Project-scoped captures (`--scope project`) are stored immediately without a pending approval step.
+
 - **What is captured** — the harness's credential file(s). For example, Codex captures
   `~/.codex/auth.json` as the `CODEX_AUTH` file secret; Gemini captures
   `~/.gemini/oauth_creds.json` as `GEMINI_OAUTH_CREDS`. See the table in
   [The Three-Stage Auth Workflow](#the-three-stage-auth-workflow).
-- **Where it goes** — into the **secret store** (the Hub's secret store), scoped either to the project or the originating user. This is why captured credentials survive container restarts: the file lives in the store, not in the ephemeral container, and the host re-stages it on every subsequent start.
+- **Where it goes** — into the **secret store** (the Hub's secret store), scoped either to the originating user (held as a pending secret until you approve it) or to the project. This is why captured credentials survive container restarts: the file lives in the store, not in the ephemeral container, and the host re-stages it on every subsequent start.
 - **Harness-specific extras** — some bundles override the generic flow:
   - **Claude** additionally scans the terminal scrollback for the `sk-ant-oat…` token printed by
     `claude setup-token` and stores it as the `CLAUDE_CODE_OAUTH_TOKEN` environment secret.
@@ -413,14 +421,14 @@ The script's exit code distinguishes outcomes:
 
 | Code | Meaning |
 | :--- | :--- |
-| `0` | One or more credentials captured successfully. |
+| `0` | One or more credentials captured (at user scope, held pending your approval in Scion; at project scope, stored immediately). |
 | `2` | No credentials found to capture (nothing logged in yet, or the harness has no capturable files). |
-| `3` | A conflict — a secret with that key already exists. Re-run with `--force` to overwrite it. |
-| `1` | An error occurred while capturing. |
+| `3` | A conflict — at project scope, a secret with that key already exists (re-run with `--force` to overwrite it); at user scope, another agent already holds a pending secret with that name (`409 secret_pending_held_by_other_agent` — approve or reject that pending secret first). |
+| `1` | An error occurred while capturing (for example, a pending-secret cap of 10 per agent or 50 per owner was reached, `429 secret_pending_cap`). |
 
 ```bash
-# Overwrite an existing captured secret
-python3 ~/.scion/harness/capture_auth.py --force
+# Overwrite an existing project-scoped captured secret
+python3 ~/.scion/harness/capture_auth.py --scope project --force
 ```
 
 :::note
@@ -430,8 +438,8 @@ There is currently no `scion auth capture` CLI wrapper; capture is performed by 
 
 ## Persistence Across Restarts
 
-Once captured, credentials live in the project secret store rather than in the ephemeral agent
-container. On each subsequent start:
+Once captured (and, for user-scoped captures, approved by you), credentials live in the Hub secret
+store rather than in the ephemeral agent container. On each subsequent start:
 
 1. The host-side gather stages the stored secret back into the agent (as a candidate or file
    secret).
@@ -509,7 +517,7 @@ For user-scoped (personal) secrets, you can explicitly configure them to propaga
 scion hub secret set --allow-progeny MY_PERSONAL_TOKEN my-secret-value
 ```
 
-When a child agent is created, started, or reads secrets at runtime, Scion walks the ancestry and delegation chain of the agent (from child to ancestors) to resolve secrets. If the secret's creator is in the agent's ancestry chain AND `allow-progeny` is enabled — and, when the agent's delegation chain has recorded provenance, every hop on the chain allows `secret.use`, every agent delegator on the chain is live and holds `project:secret:read`, and the root user is active, admitted to the project, not restricted from `secret.use`, and the recorded author of the secret — the secret is safely inherited and projected into the descendant agent (at start, restart, and resume, progeny-shared owner secrets are decided once per request on the owner-material chain, and a legacy chain with no recorded ancestry is withheld; see [Propagation to Descendant Agents](/scion/hosted/user/secrets/#propagation-to-descendant-agents-progeny)). Under the hood, this dynamically manages implicit **progeny policies** (`progeny-secret-access:<id>`) on the Scion Hub.
+When a child agent is created, started, or reads secrets at runtime, Scion walks the ancestry and delegation chain of the agent (from child to ancestors) to resolve secrets. If the secret's creator is in the agent's ancestry chain AND `allow-progeny` is enabled — and, when the agent's delegation chain has recorded provenance, every hop on the chain allows `secret.use`, every agent delegator on the chain is live and holds `project:secret:read`, and the root user is active, admitted to the project, not restricted from `secret.use`, and the recorded author of the secret — the secret is safely inherited and projected into the descendant agent (at start, restart, and resume, progeny-shared owner secrets are decided once per request on the owner-material chain, and a legacy chain with no recorded ancestry is withheld; see [Propagation to Descendant Agents](/scion/hosted/user/secrets/#propagation-to-descendant-agents-progeny)). When an agent saves a user-scoped secret on your behalf, it waits for your approval first, and approving it records you as `created_by` (and `agent:<id>` as `updated_by`) so progeny inheritance works across your agent trees unless you turn progeny off at approval (`--no-progeny`). Under the hood, this dynamically manages implicit **progeny policies** (`progeny-secret-access:<id>`) on the Scion Hub.
 
 ---
 

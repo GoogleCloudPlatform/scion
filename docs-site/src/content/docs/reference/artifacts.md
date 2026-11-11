@@ -261,7 +261,7 @@ A grant gives someone else access to one artifact. The subject is a person or an
 
 A user (`user:<id>`), and only a user, can also be given **review**. The grant levels form a ladder, read, review, write and admin, and each level includes the ones before it.
 
-- **Review reads.** A review grant lets its holder read the artifact, as a read grant does, and publish reviews of it.
+- **Review reads.** A review grant lets its holder read the artifact, as a read grant does, and publish reviews of it. Existing `review` grants (except automatic `system:sponsor_review` grants, which still require a role in the home project) also grant read access on their own; inspect them with `scion artifact grants <ref>` and remove any unwanted grant with `scion artifact grants <ref> --remove <grant-id>`.
 - **What it allows.** A review grantee can publish versions of kind review only, through the usual upload and finalize steps, so the marks-only rule and the stale-review check apply. An ordinary version is refused with `403` and code `review_only` when it is started, when a file is uploaded to it and when it is finalized.
 - **What it does not allow.** No title or key edits, grants, share links, expiry changes, moves or deletion.
 

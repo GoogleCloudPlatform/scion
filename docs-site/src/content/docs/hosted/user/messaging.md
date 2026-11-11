@@ -249,6 +249,30 @@ A successful send to an agent prints `Message accepted for agent '<name>' (conve
 
 See [`scion message`](/scion/reference/cli/#scion-message-or-msg) for what each status means.
 
+### Multiple-Choice Decisions (Experimental)
+
+When the `web.chat_choices` [experiment](/scion/reference/experiments/) is enabled (off by default; refused with `400 experiment_disabled` on sends and `404` on decision routes while off), an agent can send a `choice-prompt` message to a user (`user:<id>` or `@email`) or a conversation (`conv:<id>` or `#<thread>`) using `--choices <json>` or `--choices-file <path|->` (with optional `--update` to replace an earlier version of a decision key):
+
+```bash
+scion message @alice@example.com "Pick a target:" --choices '[{
+  "id": "D1",
+  "question": "Which environment should we deploy to?",
+  "default": "staging",
+  "choices": [
+    {"id": "staging", "label": "Staging", "description": "Verify on staging first"},
+    {"id": "prod", "label": "Production", "description": "Deploy directly to production"}
+  ]
+}]'
+```
+
+- **Agent-only sender**: Only an agent running in agent mode (`SCION_AGENT_NAME` set) can send `--choices`; human CLI callers and sends targeting an agent (`@agent-slug`), broadcast (`all`), or a group (`group[...]`) are refused (`400` `validation_error`), and client sends that set `type: "choice-prompt"` or `"choice-response"` directly are refused with `400 hub_minted_type`.
+- **Limits and keys**: A prompt carries **1 to 10 decisions** (`MaxDecisionsPerMessage = 10`, serialized JSON up to `MaxChoicesPayloadBytes = 32768`), each with a markdown `question` (up to `MaxDecisionQuestionLen = 2000` runes), optional `default` (matching a choice by `id` or `label`), and **2 to 10 choices** (`MinChoicesPerDecision = 2`, `MaxChoicesPerDecision = 10`; each choice is a string label or `{"id", "label", "description"}` with `label` up to `MaxChoiceLabelLen = 100` runes and `description` up to `MaxChoiceDescriptionLen = 300` runes). A decision `id` (`key` in stored views) is either chosen by the agent (`[A-Za-z0-9_-]{1,32}` containing at least one non-digit, such as `D234`) or omitted so the Hub assigns the agent's next positive integer (`1`, `2`, …; an unissued all-digit key is refused with `400 decision_key_not_issued`). Each agent may have at most 50 pending decisions (`409 too_many_pending_decisions`).
+- **Updating an earlier decision (`--update`)**: Re-using a decision key the agent already posted requires `--update` (`choices_update: true` on `OutboundMessageRequest`); without it the Hub refuses the send with `409 choice_key_exists` (`details.existing` listing each existing key's `key`, `version`, `status`, and `answer`). With `--update`, the previous active version is marked `replaced` and the new row is created at `version: n + 1`.
+- **Markdown fallback and `ask_user` status**: The Hub appends a markdown rendering of the decisions (`RenderChoiceFallback`) to `msg` so notifications, bridged channels, and clients with `web.chat_choices` off still display the questions and options, and serves the intro and decision rows separately (`ChoicePromptView`: `intro`, `decisions`, `answerMode`) in chat history (`messageDecisions`, `messageChoiceIntros`, `messageChoiceResponses`) and SSE (`choice.updated`). After the send succeeds, `scion message` calls `agentstatus.RunAskUser` to mark the agent `waiting_for_input`.
+- **Answering in Web Chat and via the API**:
+  - **Single-decision prompts (`answerMode: "single"`)**: Clicking a choice button calls `POST /api/v1/decisions/{rowId}/answer` with `{"choice_id": "<id>", "idempotency_key"?: "<key>"}` (interactive web session required; `409 already_answered` if already answered directly, `409 replaced` if replaced by `--update`, or `403 not_recorded_answerer` over an interpreted answer of another user), records the answer (`DecisionAnswerResponse`: `decision`, `responseMessageId`, `replayed`), and dispatches a `choice-response` message (carrying `choice_key`, `choice_version`, `choice_id`, and `choice_provenance` metadata) to the asking agent.
+  - **Multi-decision prompts (`answerMode: "set"`, 2 to 10 decisions)**: Clicking choices stages a local selection for each decision (`N of M selected`). Once every actionable decision in the prompt has a selected choice, clicking **Submit answers** calls `POST /api/v1/choice-prompts/{messageId}/answers` with `{"answers": [{"decision_row_id": "<uuid>", "choice_id": "<id>"}, ...], "idempotency_key"?: "<key>"}`, records all answers in one transaction (`ChoiceSetAnswerResponse`: `response_message_id`, `batch_id`, `decisions`, `replayed`), and dispatches one combined `choice-response` (`ChoiceResponseSetView`: `promptMessageId`, `batchId`, `answers`) to the agent. Calling `POST /api/v1/decisions/{rowId}/answer` on a multi-decision prompt is refused with `409 batch_required`, and if the actionable set changed (for example a decision was replaced by `--update` or already answered), the set submit is refused with `409 answer_set_changed` (`details.decisions` and `details.reasons`; `422 idempotency_mismatch` if an `idempotency_key` is reused with different answers).
+
 ### Message Formatting
 
 The `scion message` CLI delivers the body argument **verbatim** — it performs no escape expansion, no markdown rendering, and no character substitution. Whatever bytes you pass are exactly what the recipient sees.
