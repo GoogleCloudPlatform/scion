@@ -509,7 +509,7 @@ func TestRuntimeTargetCandidate_DoesNotTouchPin(t *testing.T) {
 	written, err := fs.agents.SetAgentRuntimeTarget(ctx, a.ID, a.StateVersion, "docker", "")
 	require.NoError(t, err)
 	require.True(t, written)
-	_, _, err = fs.agents.ClearAgentRuntimeTarget(ctx, a.ID)
+	_, _, err = fs.agents.ClearAgentRuntimeTarget(ctx, a.ID, false)
 	require.NoError(t, err)
 
 	got, err := fs.agents.GetAgent(ctx, a.ID)

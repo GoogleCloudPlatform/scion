@@ -601,7 +601,9 @@ The runtimes differ in their own keys and in when they apply resolved-auth env:
 - Kubernetes sets `SCION_HOST_UID`, `SCION_HOST_GID`, `HOME`, `USER`, `LOGNAME`,
   `SCION_OTEL_GCP_CREDENTIALS` (when a telemetry credential is configured), the NFS-home directory
   keys and, for NFS worktree agents, `SCION_WORKSPACE_PATH` after the merged environment, so it
-  keeps the runtime's value for those names. Only the runtime sets `SCION_SUPPLEMENTAL_GIDS`.
+  keeps the runtime's value for those names. It also keeps the runtime's `SCION_START_CMD`, the
+  agent's start command, over the merged environment and environment-type secrets: a value for it
+  from either source is dropped, as on Docker. Only the runtime sets `SCION_SUPPLEMENTAL_GIDS`.
   Kubernetes applies resolved-auth env with or without a harness.
 
 ### `Changed in this release` — template env is a fallback below every other source

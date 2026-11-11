@@ -231,8 +231,11 @@ Search for a user, or for a project when the Hub's cross-project sharing setting
 | Permission | Allows |
 | :--- | :--- |
 | *Can view* | Open the artifact and its versions |
+| *Can review* | Open the artifact and its versions, and publish versions of kind `review` (user principals only) |
 | *Can edit* | Also publish new versions, and review |
 | *Can manage* | Also share it, change its lifetime, move it and delete it |
+
+The four grant levels form a ladder (`read`, `review`, `write`, `admin`), where each level includes the ones below it. Because `review` includes `read`, any existing `review` grant (other than an automatic `system:sponsor_review` grant, which still requires a role in the home project) also lets its holder read the artifact on its own; list grants with `scion artifact grants <ref>` and remove any you do not want with `scion artifact grants <ref> --remove <grant-id>`.
 
 A grant to a project covers its members and its agents. The home project is listed first: it always has at least *Can view*, can be raised to *Can edit*, and cannot be removed. Grants stay until they are removed or the artifact is deleted.
 

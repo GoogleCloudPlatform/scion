@@ -198,6 +198,12 @@ func TestWaitForAgentLaunch_FailureNamesCodeAndStepLabels(t *testing.T) {
 			want:   "agent 'a1' did not start (volume_mount_failed) while preparing the container (image pull, volume mounts): container_create: an agent volume could not be mounted (FailedMount)",
 		},
 		{
+			name:   "unusable NFS volume: the message already carries the label",
+			launch: hubclient.AgentLaunch{Kind: "start", Error: "volume_unhealthy", Step: "container_start"},
+			msg:    "container_start: an agent volume is mounted but not usable (ShareNotWritable)",
+			want:   "agent 'a1' did not start (volume_unhealthy) while starting the container: container_start: an agent volume is mounted but not usable (ShareNotWritable)",
+		},
+		{
 			name:   "preempted pod: the label stays a prefix of the message, printed once",
 			launch: hubclient.AgentLaunch{Kind: "start", Error: "pod_disrupted", Step: "container_create"},
 			msg:    "container_create: the agent pod was preempted, evicted or deleted while starting: it was preempted (PreemptionByScheduler)",
@@ -263,6 +269,7 @@ func launchCodeText(code string) string {
 		"launch_timeout":      "the launch timed out",
 		"pod_disrupted":       "the agent pod was preempted, evicted or deleted while starting",
 		"volume_mount_failed": "an agent volume could not be mounted",
+		"volume_unhealthy":    "an agent volume is mounted but not usable",
 	}[code]
 }
 

@@ -259,7 +259,7 @@ func TestAgentStore_ClearAgentRuntimeTarget(t *testing.T) {
 		before, err := s.GetAgent(ctx, a.ID)
 		require.NoError(t, err)
 
-		cleared, newVersion, err := s.ClearAgentRuntimeTarget(ctx, a.ID)
+		cleared, newVersion, err := s.ClearAgentRuntimeTarget(ctx, a.ID, false)
 		require.NoError(t, err)
 		assert.True(t, cleared)
 		assert.Equal(t, before.StateVersion+1, newVersion)
@@ -269,6 +269,7 @@ func TestAgentStore_ClearAgentRuntimeTarget(t *testing.T) {
 		require.NotNil(t, got.AppliedConfig)
 		assert.Empty(t, got.AppliedConfig.RuntimeTarget)
 		assert.Empty(t, got.AppliedConfig.RuntimeTargetCandidate)
+		assert.Empty(t, got.AppliedConfig.RuntimeTargetPending, "without recordPending no pending target is recorded")
 		assert.Equal(t, "example/image:1", got.AppliedConfig.Image)
 		assert.Equal(t, "remote", got.AppliedConfig.Profile)
 		assert.Equal(t, map[string]string{"A": "1"}, got.AppliedConfig.Env)
@@ -290,7 +291,7 @@ func TestAgentStore_ClearAgentRuntimeTarget(t *testing.T) {
 		a := makeAgent(projectID, "candidate-only")
 		a.AppliedConfig = &store.AgentAppliedConfig{RuntimeTargetCandidate: "docker"}
 		require.NoError(t, s.CreateAgent(ctx, a))
-		cleared, _, err := s.ClearAgentRuntimeTarget(ctx, a.ID)
+		cleared, _, err := s.ClearAgentRuntimeTarget(ctx, a.ID, false)
 		require.NoError(t, err)
 		assert.True(t, cleared)
 		got, err := s.GetAgent(ctx, a.ID)
@@ -304,26 +305,116 @@ func TestAgentStore_ClearAgentRuntimeTarget(t *testing.T) {
 		require.NoError(t, s.CreateAgent(ctx, a))
 		before, err := s.GetAgent(ctx, a.ID)
 		require.NoError(t, err)
-		cleared, _, err := s.ClearAgentRuntimeTarget(ctx, a.ID)
+		cleared, _, err := s.ClearAgentRuntimeTarget(ctx, a.ID, false)
 		require.NoError(t, err)
 		assert.False(t, cleared)
 		got, err := s.GetAgent(ctx, a.ID)
 		require.NoError(t, err)
 		assert.Equal(t, "example/image:1", got.AppliedConfig.Image)
+		assert.Empty(t, got.AppliedConfig.RuntimeTargetPending)
 		assert.Equal(t, before.StateVersion, got.StateVersion, "a no-op does not bump state_version")
 	})
 
-	t.Run("no applied config is a no-op", func(t *testing.T) {
-		a := makeAgent(projectID, "no-config")
-		a.AppliedConfig = nil
+	t.Run("recordPending keeps the removed target as the pending target", func(t *testing.T) {
+		a := makeAgent(projectID, "pending-removed")
+		a.AppliedConfig = &store.AgentAppliedConfig{Image: "example/image:1", RuntimeTarget: "docker", RuntimeTargetCandidate: "other"}
 		require.NoError(t, s.CreateAgent(ctx, a))
-		cleared, _, err := s.ClearAgentRuntimeTarget(ctx, a.ID)
+		before, err := s.GetAgent(ctx, a.ID)
 		require.NoError(t, err)
-		assert.False(t, cleared)
+		cleared, newVersion, err := s.ClearAgentRuntimeTarget(ctx, a.ID, true)
+		require.NoError(t, err)
+		assert.True(t, cleared)
+		assert.Equal(t, before.StateVersion+1, newVersion)
+		got, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		assert.Empty(t, got.AppliedConfig.RuntimeTarget)
+		assert.Empty(t, got.AppliedConfig.RuntimeTargetCandidate)
+		assert.Equal(t, "docker", got.AppliedConfig.RuntimeTargetPending)
+		assert.Equal(t, "example/image:1", got.AppliedConfig.Image)
 	})
 
+	t.Run("recordPending with no target records the default without a version bump", func(t *testing.T) {
+		a := makeAgent(projectID, "pending-default")
+		a.AppliedConfig = &store.AgentAppliedConfig{Image: "example/image:1"}
+		require.NoError(t, s.CreateAgent(ctx, a))
+		before, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		cleared, _, err := s.ClearAgentRuntimeTarget(ctx, a.ID, true)
+		require.NoError(t, err)
+		assert.False(t, cleared)
+		got, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		assert.Equal(t, "example/image:1", got.AppliedConfig.Image)
+		assert.Equal(t, store.RuntimeTargetPendingDefault, got.AppliedConfig.RuntimeTargetPending)
+		assert.Equal(t, before.StateVersion, got.StateVersion, "recording only the pending target does not bump state_version")
+	})
+
+	t.Run("recordPending keeps an earlier pending target without a write", func(t *testing.T) {
+		a := makeAgent(projectID, "pending-kept")
+		a.AppliedConfig = &store.AgentAppliedConfig{Image: "example/image:1", RuntimeTargetPending: "docker"}
+		require.NoError(t, s.CreateAgent(ctx, a))
+		uid := uuid.MustParse(a.ID)
+		before, err := s.client.Agent.Get(ctx, uid)
+		require.NoError(t, err)
+		cleared, _, err := s.ClearAgentRuntimeTarget(ctx, a.ID, true)
+		require.NoError(t, err)
+		assert.False(t, cleared)
+		after, err := s.client.Agent.Get(ctx, uid)
+		require.NoError(t, err)
+		assert.Equal(t, before.AppliedConfig, after.AppliedConfig, "nothing to change, nothing written")
+		assert.Equal(t, before.StateVersion, after.StateVersion)
+	})
+
+	t.Run("recordPending replaces an earlier pending target with the removed target", func(t *testing.T) {
+		a := makeAgent(projectID, "pending-replaced")
+		a.AppliedConfig = &store.AgentAppliedConfig{RuntimeTarget: "kubernetes|context=c|namespace=n", RuntimeTargetPending: "docker"}
+		require.NoError(t, s.CreateAgent(ctx, a))
+		cleared, _, err := s.ClearAgentRuntimeTarget(ctx, a.ID, true)
+		require.NoError(t, err)
+		assert.True(t, cleared)
+		got, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		assert.Empty(t, got.AppliedConfig.RuntimeTarget)
+		assert.Equal(t, "kubernetes|context=c|namespace=n", got.AppliedConfig.RuntimeTargetPending)
+	})
+
+	// An empty, NULL or JSON-null applied config is left as it is, with or
+	// without recordPending, so a row without an applied config does not gain
+	// one.
+	for name, setRaw := range map[string]func(uid uuid.UUID){
+		"nil applied config": func(uuid.UUID) {},
+		"NULL applied config": func(uid uuid.UUID) {
+			_, err := s.client.Agent.UpdateOneID(uid).ClearAppliedConfig().Save(ctx)
+			require.NoError(t, err)
+		},
+		"JSON null applied config": func(uid uuid.UUID) {
+			_, err := s.client.Agent.UpdateOneID(uid).SetAppliedConfig("null").Save(ctx)
+			require.NoError(t, err)
+		},
+	} {
+		for _, recordPending := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s is left unchanged (recordPending=%v)", name, recordPending), func(t *testing.T) {
+				a := makeAgent(projectID, fmt.Sprintf("cfg-%s-%v", strings.ReplaceAll(name, " ", "-"), recordPending))
+				a.AppliedConfig = nil
+				require.NoError(t, s.CreateAgent(ctx, a))
+				uid := uuid.MustParse(a.ID)
+				setRaw(uid)
+				before, err := s.client.Agent.Get(ctx, uid)
+				require.NoError(t, err)
+
+				cleared, _, err := s.ClearAgentRuntimeTarget(ctx, a.ID, recordPending)
+				require.NoError(t, err)
+				assert.False(t, cleared)
+				after, err := s.client.Agent.Get(ctx, uid)
+				require.NoError(t, err)
+				assert.Equal(t, before.AppliedConfig, after.AppliedConfig, "applied_config unchanged")
+				assert.Equal(t, before.StateVersion, after.StateVersion)
+			})
+		}
+	}
+
 	t.Run("unknown agent is a no-op", func(t *testing.T) {
-		cleared, _, err := s.ClearAgentRuntimeTarget(ctx, "00000000-0000-0000-0000-00000000abcd")
+		cleared, _, err := s.ClearAgentRuntimeTarget(ctx, "00000000-0000-0000-0000-00000000abcd", false)
 		require.NoError(t, err)
 		assert.False(t, cleared)
 	})
@@ -338,7 +429,7 @@ func TestAgentStore_ClearAgentRuntimeTarget(t *testing.T) {
 		before, err := s.client.Agent.Get(ctx, uid)
 		require.NoError(t, err)
 
-		cleared, _, err := s.ClearAgentRuntimeTarget(ctx, a.ID)
+		cleared, _, err := s.ClearAgentRuntimeTarget(ctx, a.ID, false)
 		require.NoError(t, err)
 		assert.False(t, cleared)
 		after, err := s.client.Agent.Get(ctx, uid)
@@ -401,9 +492,31 @@ func TestAgentStore_SetAgentRuntimeTarget(t *testing.T) {
 		assert.NotContains(t, raw.AppliedConfig, "runtimeTargetCandidate")
 	})
 
+	t.Run("a recorded target drops the pending target", func(t *testing.T) {
+		a := create(t, "set-drops-pending", &store.AgentAppliedConfig{Image: "example/image:1", RuntimeTargetPending: "docker"})
+		written, err := s.SetAgentRuntimeTarget(ctx, a.ID, a.StateVersion, "", "docker")
+		require.NoError(t, err)
+		require.True(t, written)
+		got, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		assert.Equal(t, "docker", got.AppliedConfig.RuntimeTargetPending, "a candidate alone keeps the pending target")
+
+		written, err = s.SetAgentRuntimeTarget(ctx, a.ID, a.StateVersion, "docker", "")
+		require.NoError(t, err)
+		require.True(t, written)
+		got, err = s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		assert.Equal(t, "docker", got.AppliedConfig.RuntimeTarget)
+		assert.Empty(t, got.AppliedConfig.RuntimeTargetPending)
+		assert.Equal(t, "example/image:1", got.AppliedConfig.Image)
+		raw, err := s.client.Agent.Get(ctx, uuid.MustParse(a.ID))
+		require.NoError(t, err)
+		assert.NotContains(t, raw.AppliedConfig, "runtimeTargetPending")
+	})
+
 	t.Run("version mismatch writes nothing", func(t *testing.T) {
 		a := create(t, "set-stale", &store.AgentAppliedConfig{RuntimeTarget: "docker"})
-		cleared, _, err := s.ClearAgentRuntimeTarget(ctx, a.ID)
+		cleared, _, err := s.ClearAgentRuntimeTarget(ctx, a.ID, false)
 		require.NoError(t, err)
 		require.True(t, cleared)
 
@@ -522,7 +635,7 @@ func TestAgentStore_ClearAgentRuntimeTarget_WriteMiss(t *testing.T) {
 			}
 			t.Cleanup(func() { clearRuntimeTargetHook = nil })
 
-			cleared, _, err := s.ClearAgentRuntimeTarget(ctx, a.ID)
+			cleared, _, err := s.ClearAgentRuntimeTarget(ctx, a.ID, false)
 			require.NoError(t, err)
 			assert.True(t, cleared)
 			assert.Equal(t, 2, calls, "the clear re-read and retried once")
@@ -542,7 +655,7 @@ func TestAgentStore_ClearAgentRuntimeTarget_WriteMiss(t *testing.T) {
 			}
 			t.Cleanup(func() { clearRuntimeTargetHook = nil })
 
-			cleared, _, err := s.ClearAgentRuntimeTarget(ctx, a.ID)
+			cleared, _, err := s.ClearAgentRuntimeTarget(ctx, a.ID, false)
 			require.Error(t, err)
 			assert.False(t, cleared)
 			assert.Contains(t, err.Error(), "changed concurrently")
@@ -700,7 +813,7 @@ func TestAgentStore_RuntimeTarget_RowLock(t *testing.T) {
 	const id = "00000000-0000-0000-0000-00000000abcd"
 	calls := map[string]func(s *AgentStore) error{
 		"clear": func(s *AgentStore) error {
-			_, _, err := s.ClearAgentRuntimeTarget(context.Background(), id)
+			_, _, err := s.ClearAgentRuntimeTarget(context.Background(), id, false)
 			return err
 		},
 		"set": func(s *AgentStore) error {

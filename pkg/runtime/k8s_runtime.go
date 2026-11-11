@@ -134,6 +134,13 @@ type KubernetesRuntime struct {
 	// waitForPodReady log only once per runtime that it cannot read
 	// events, and so waits as it would without the check.
 	mountEventsFallbackLogged atomic.Bool
+
+	// volumeHealthInterval and volumeHealthProbeTimeout, when non-zero,
+	// replace the NFS volume health check's 5s interval between checks and
+	// its 10s bound on each exec (see k8s_volume_health.go). Tests shorten
+	// them.
+	volumeHealthInterval     time.Duration
+	volumeHealthProbeTimeout time.Duration
 }
 
 // agentContainerName is the name of the primary scion agent container in
@@ -912,6 +919,15 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 	runtimeLog().Info("Waiting for pod exec tunnel", "agent", config.Name, "namespace", namespace, "phase", "wait-exec")
 	if err := r.waitForExecReady(ctx, namespace, createdPod.Name, config.Name); err != nil {
 		return createdPod.Name, fmt.Errorf("pod exec tunnel not ready: %w", err)
+	}
+
+	// NFS volume health: every NFS volume the agent container mounts must
+	// be usable before anything is copied into the pod or the harness
+	// starts. Like the exec wait above, this runs for every pod this
+	// function creates, so a restart, resume or wake checks again (see
+	// k8s_volume_health.go).
+	if err := r.checkPodVolumeHealth(ctx, namespace, createdPod.Name, config.Name, volumeHealthTargets(pod, newPodMountWatch(pod, config))); err != nil {
+		return createdPod.Name, err
 	}
 
 	// NFS-home pods: home-prepare chose how this start fills the home.
@@ -2128,6 +2144,11 @@ func applyKubernetesBlockIdentity(pod *corev1.Pod) {
 	pod.Spec.NodeSelector = selector
 }
 
+// k8sStartCmdEnv is the env var that carries the pod's start command to the
+// gate script in buildPod. buildPod skips the name in config.Env and in the
+// env-type secrets, so neither replaces the runtime's entry.
+const k8sStartCmdEnv = "SCION_START_CMD"
+
 func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev1.Pod, error) {
 	// The pod's annotations start from a copy, so the annotations added
 	// below do not modify the caller's config.Annotations.
@@ -2201,7 +2222,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	}
 
 	// The real startup command, consumed by the gate script above.
-	envVars = append(envVars, corev1.EnvVar{Name: "SCION_START_CMD", Value: tmuxCmd})
+	envVars = append(envVars, corev1.EnvVar{Name: k8sStartCmdEnv, Value: tmuxCmd})
 
 	// Harness env (system prompt, agent name, etc.) with the Docker rules
 	// (harnessEnvEntries): GetTelemetryEnv wins over GetEnv when telemetry
@@ -2215,15 +2236,21 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		// Parse "KEY=VALUE"
 		parts := strings.SplitN(e, "=", 2)
 		if len(parts) == 2 {
+			// The start command stays the runtime's, as on Docker, where
+			// the merged environment never replaces it.
+			if parts[0] == k8sStartCmdEnv {
+				continue
+			}
 			envVars = append(envVars, corev1.EnvVar{Name: parts[0], Value: parts[1]})
 		}
 	}
 
 	// An env-type secret is skipped for a name config.Env sets, as in
-	// buildCommonRunArgs, and for SCION_START_CMD, so a secret never
-	// replaces the pod's start command. It wins over resolved auth and the
-	// harness env, which are therefore not in this set.
-	envVarNames := map[string]struct{}{"SCION_START_CMD": {}}
+	// buildCommonRunArgs, and for SCION_START_CMD. With the config.Env skip
+	// above, neither the merged environment nor a secret replaces the pod's
+	// start command. A secret wins over resolved auth and the harness env,
+	// which are therefore not in this set.
+	envVarNames := map[string]struct{}{k8sStartCmdEnv: {}}
 	for _, e := range config.Env {
 		if name, _, ok := strings.Cut(e, "="); ok {
 			envVarNames[name] = struct{}{}

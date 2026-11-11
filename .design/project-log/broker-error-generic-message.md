@@ -22,7 +22,7 @@ Broker error answers carry the HTTP status and a safe code; the broker's own tex
   rune boundary. It backs both the log rendering and `brokerErrorMessage()`.
 - `brokerErrorMessage()` returns the JSON error message rendered at most 512
   bytes, or the fixed text "the runtime broker returned an error". The
-  512-byte cap keeps the project storage refusal texts the hub allowlists
+  512-byte cap keeps the project storage refusal texts on the hub's allowlist
   whole; other relayed broker messages (for example git_config_refused,
   validation and conflict answers) are cut at 512 bytes.
 - The decode-failure path of `decodeResponseWithSnippet` and the

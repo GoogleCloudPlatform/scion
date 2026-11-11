@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package runtimebroker
+package projectfs
 
 import (
 	"strings"
@@ -72,5 +72,50 @@ func TestParseMountTable_LongLine(t *testing.T) {
 	}
 	if src, ok := mt.Lookup("/mnt/nfs/ws1"); !ok || src != "10.0.0.2:/e" {
 		t.Errorf("Lookup = %q, %v", src, ok)
+	}
+}
+
+// TestUnescapeMountField_SpaceAndNewline pins the kernel's octal escapes
+// for a space (\040) and a newline (\012) in a mount path, in a field and
+// through ParseMountTable.
+func TestUnescapeMountField_SpaceAndNewline(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{`/mnt/my\040share`, "/mnt/my share"},
+		{`/mnt/line\012break`, "/mnt/line\nbreak"},
+		{`\040lead\040`, " lead "},
+	} {
+		if got := unescapeMountField(tc.in); got != tc.want {
+			t.Errorf("unescapeMountField(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+	table := `10.0.0.4:/a\040b /mnt/nfs/sp\040ace nfs rw 0 0` + "\n" +
+		`10.0.0.5:/c\012d /mnt/nfs/new\012line nfs ro 0 0` + "\n"
+	mt, err := ParseMountTable(strings.NewReader(table))
+	if err != nil {
+		t.Fatalf("ParseMountTable: %v", err)
+	}
+	if e, ok := mt.LookupEntry("/mnt/nfs/sp ace"); !ok || e.Source != "10.0.0.4:/a b" || e.Options != "rw" {
+		t.Errorf("escaped space entry = %+v, %v", e, ok)
+	}
+	if e, ok := mt.LookupEntry("/mnt/nfs/new\nline"); !ok || e.Source != "10.0.0.5:/c\nd" || e.Options != "ro" {
+		t.Errorf("escaped newline entry = %+v, %v", e, ok)
+	}
+}
+
+// TestParseMountTable_FSType checks that the filesystem type field is kept,
+// and that a line without one leaves it empty.
+func TestParseMountTable_FSType(t *testing.T) {
+	table := "10.0.0.2:/e /workspace nfs4 rw,relatime 0 0\n" +
+		"10.0.0.3:/f /mnt/v3 nfs ro 0 0\n" +
+		"overlay / overlay rw 0 0\n" +
+		"src /nofstype\n"
+	mt, err := ParseMountTable(strings.NewReader(table))
+	if err != nil {
+		t.Fatalf("ParseMountTable: %v", err)
+	}
+	for path, want := range map[string]string{"/workspace": "nfs4", "/mnt/v3": "nfs", "/": "overlay", "/nofstype": ""} {
+		if e, ok := mt.LookupEntry(path); !ok || e.FSType != want {
+			t.Errorf("LookupEntry(%q).FSType = %q, %v; want %q", path, e.FSType, ok, want)
+		}
 	}
 }
